@@ -12,6 +12,12 @@ import (
 )
 
 func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
+	// 0. Configure interface IP and bring it up
+	mask := net.IP(net.CIDRMask(prefixLen, 32)).String()
+	if out, err := exec.Command("ifconfig", r.devName, "inet", tunIP, tunIP, "netmask", mask, "up").CombinedOutput(); err != nil {
+		return fmt.Errorf("ifconfig %s: %v, %s", r.devName, err, out)
+	}
+
 	// 1. Detect original default gateway and interface
 	gw, ifaceName, err := getDefaultGatewayDarwin()
 	if err != nil {
@@ -55,6 +61,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 func (r *RouteManager) platformTeardown() {
 	exec.Command("route", "-n", "delete", "-net", "0.0.0.0/1").Run()
 	exec.Command("route", "-n", "delete", "-net", "128.0.0.0/1").Run()
+	exec.Command("ifconfig", r.devName, "down").Run()
 }
 
 // addExclusionRoute adds a host or CIDR route via the original gateway.

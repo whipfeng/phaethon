@@ -70,4 +70,6 @@ func CleanupResidual() {
 	if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name=phaethontun", "dhcp").CombinedOutput(); err != nil {
 		util.LogWarn("tun: dns reset fail: %v, %s", err, out)
 	}
+
+	util.LogInfo("tun: residual cleanup completed")
 }

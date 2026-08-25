@@ -32,6 +32,11 @@
 - [x] Windows/Linux/Darwin 的 `platformSetup` 同时处理纯 IP 与 CIDR
 - [x] `deleteExclusionRoute` 根据字符串是否含 `/` 区分主机路由与网络路由
 
+### Task 3.3: 级联代理只排除第一跳
+- [x] 新增 `firstProxyHop()` 沿 `proxy.Next` 找到真正要从本机连出去的那个代理
+- [x] `resolveProxyIPs()` 只解析并排除第一跳的服务器，中间/末端代理通过隧道可达，不需要排除
+- [x] 增加 `TestFirstProxyHop` 单元测试覆盖链式、DIRECT next、环状配置
+
 ## 阶段 4: UDP 报文转发
 
 ### Task 4.1: 使用 PacketConn  preserves datagram semantics
@@ -55,4 +60,4 @@
 ### Task 6.1: 正常提交
 - [x] `git add` 相关文件
 - [x] `git commit` 新提交（不 amend）
-- [ ] 推送（网络不通，GitHub 443 连接失败，待网络恢复后重试）
+- [ ] 推送（用户指示不着急 push，待后续网络恢复再推）

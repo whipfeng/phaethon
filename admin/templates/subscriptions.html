@@ -1,0 +1,193 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="sub.title">Subscriptions</span> ({{len .Subscriptions}})</h3>
+            <button onclick="showAddSub()" class="btn btn-primary btn-sm" data-i18n="sub.add">+ Add Subscription</button>
+        </div>
+
+        {{if .Subscriptions}}
+        <div class="table-responsive">
+            <table class="data-table" id="sub-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="sub.name">Name</th>
+                        <th data-i18n="sub.url">URL</th>
+                        <th data-i18n="sub.interval">Interval</th>
+                        <th data-i18n="sub.nodes">Nodes</th>
+                        <th data-i18n="common.enabled">Enabled</th>
+                        <th data-i18n="sub.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Subscriptions}}
+                    {{$runtime := index $.SubData .Name}}
+                    <tr data-name="{{.Name}}" data-url="{{.URL}}" data-interval="{{if .Interval}}{{.Interval}}{{else}}3600{{end}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
+                        <td><strong>{{.Name}}</strong></td>
+                        <td class="text-muted text-small" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{.URL}}</td>
+                        <td>{{if .Interval}}{{.Interval}}{{else}}3600{{end}}s</td>
+                        <td>{{if $runtime}}{{len $runtime.nodes}}{{else}}0{{end}}</td>
+                        <td>
+                            <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleSubscription('{{.Name}}', this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <button onclick="refreshSub('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="sub.refresh">🔄 Refresh</button>
+                            <button onclick="editSub('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="sub.btnEdit">Edit</button>
+                            <button onclick="deleteSub('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="sub.btnDelete">Delete</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <p class="text-muted" data-i18n="sub.noSubs">No subscriptions defined.</p>
+        {{end}}
+    </div>
+</div>
+
+<!-- Add/Edit Subscription Modal -->
+<div id="sub-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3 id="sub-modal-title" data-i18n="sub.modalAdd">Add Subscription</h3>
+            <button onclick="closeSubModal()" class="close-btn">×</button>
+        </div>
+        <form id="sub-form" onsubmit="saveSub(event)">
+            <input type="hidden" id="sub-edit-name" value="">
+            <div class="form-group">
+                <label><span data-i18n="sub.name">Name</span> *</label>
+                <input type="text" id="sub-name" required placeholder="my-sub">
+            </div>
+            <div class="form-group">
+                <label><span data-i18n="sub.url">URL</span> *</label>
+                <input type="text" id="sub-url" required placeholder="https://example.com/subscribe">
+            </div>
+            <div class="form-group">
+                <label><span data-i18n="sub.interval">Interval</span> (s)</label>
+                <input type="number" id="sub-interval" value="3600" min="60" placeholder="3600">
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="closeSubModal()" class="btn btn-outline" data-i18n="sub.cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" data-i18n="sub.btnSave">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function showAddSub() {
+    document.getElementById('sub-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('sub.modalAdd') : 'Add Subscription');
+    document.getElementById('sub-edit-name').value = '';
+    document.getElementById('sub-form').reset();
+    document.getElementById('sub-interval').value = '3600';
+    document.getElementById('sub-modal').classList.remove('hidden');
+}
+
+function editSub(name) {
+    const row = document.querySelector(`#sub-table tr[data-name="${name}"]`);
+    if (!row) return;
+    document.getElementById('sub-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('sub.modalEdit') : 'Edit Subscription');
+    document.getElementById('sub-edit-name').value = name;
+    document.getElementById('sub-name').value = name;
+    document.getElementById('sub-url').value = row.dataset.url || '';
+    document.getElementById('sub-interval').value = row.dataset.interval || '3600';
+    document.getElementById('sub-modal').classList.remove('hidden');
+}
+
+async function saveSub(e) {
+    e.preventDefault();
+    const payload = {
+        name: document.getElementById('sub-name').value,
+        url: document.getElementById('sub-url').value,
+        interval: parseInt(document.getElementById('sub-interval').value) || 3600,
+    };
+    try {
+        const res = await fetch('./api/subscriptions', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        closeSubModal();
+        location.reload();
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+async function deleteSub(name) {
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('sub.confirmDelete') : 'Delete subscription';
+    showConfirm(confirmLabel + ' "' + name + '"?', async () => {
+        try {
+            const res = await fetch(`./api/subscriptions/${name}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+            location.reload();
+        } catch (err) {
+            const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+            showToast(errLabel + ': ' + err.message, 'error');
+        }
+    });
+}
+
+async function toggleSubscription(name, enabled) {
+    try {
+        const res = await fetch(`./api/subscriptions/${encodeURIComponent(name)}/toggle`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const row = document.querySelector(`#sub-table tr[data-name="${CSS.escape(name)}"]`);
+        if (row) row.classList.toggle('row-disabled', !enabled);
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+        location.reload();
+    }
+}
+
+async function refreshSub(name, btn) {
+    if (!btn) btn = event && event.target;
+    if (!btn) return;
+    const originalHTML = btn.innerHTML;
+    const refreshingText = typeof i18n !== 'undefined' ? i18n.t('sub.refreshing') : 'Refreshing...';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>' + refreshingText;
+    showToast(refreshingText + ': ' + name, 'info');
+    try {
+        const res = await fetch(`./api/subscriptions/${name}/refresh`, {method: 'POST'});
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const okLabel = typeof i18n !== 'undefined' ? i18n.t('sub.refreshed') : 'Refreshed';
+        const nodesLabel = typeof i18n !== 'undefined' ? i18n.t('sub.nodes') : 'nodes';
+        showToast(`${okLabel} ${name}: ${data.nodeCount} ${nodesLabel}`, 'success');
+        const row = document.querySelector(`#sub-table tr[data-name="${CSS.escape(name)}"]`);
+        if (row) {
+            const countCell = row.querySelector('td:nth-child(4)');
+            if (countCell) countCell.textContent = data.nodeCount;
+        }
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+    }
+}
+
+function closeSubModal() {
+    document.getElementById('sub-modal').classList.add('hidden');
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+</script>
+{{end}}

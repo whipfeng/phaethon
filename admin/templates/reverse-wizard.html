@@ -1,0 +1,643 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <!-- Instance ReverseID badge -->
+    <div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem; display: flex; align-items: center; gap: 0.75rem;">
+        <span data-i18n="rv.instanceReverseId" style="color: var(--text-secondary); font-size: 0.9rem;">实例 Reverse ID</span>
+        <code id="instance-reverse-id" style="word-break: break-all; font-size: 0.85rem;">-</code>
+        <span class="text-muted text-small" data-i18n="rv.instanceReverseIdHint" style="font-size: 0.8rem;">此实例所有反向配置共享同一 ID</span>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="rv.title">反向连接配置</span> ({{len .ReverseConfigs}})</h3>
+            <button onclick="showAddReverse()" class="btn btn-primary btn-sm" data-i18n="rv.add">+ 新增反向连接</button>
+        </div>
+        <p style="color: var(--text-secondary); margin-bottom: 1rem;" data-i18n="rv.desc">
+            配置反向连接，让外部用户通过注册端访问你的本地服务。出站代理需为支持 BIND 的 SOCKS5 / Trojan / h_tunnel 代理。
+        </p>
+
+        <div class="table-responsive" id="rv-list-table-wrap">
+            <table class="data-table" id="rv-list-table" style="{{if not .ReverseConfigs}}display:none{{end}}">
+                <thead>
+                    <tr>
+                        <th data-i18n="rv.configName">名称</th>
+                        <th data-i18n="rv.seq">Seq</th>
+                        <th data-i18n="rv.reverseId">Reverse ID</th>
+                        <th data-i18n="rv.outboundProxy">出站代理</th>
+                        <th data-i18n="rv.summaryListenProto">监听协议</th>
+                        <th data-i18n="rv.endpoint">访问地址</th>
+                        <th data-i18n="rv.summaryTarget">目标服务</th>
+                        <th data-i18n="common.enabled">启用</th>
+                        <th data-i18n="rv.statusEnabled">状态</th>
+                        <th data-i18n="rv.summaryOther">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="rv-list-body">
+                    {{range .ReverseConfigs}}
+                    <tr data-rv-name="{{.Name}}" data-rv-reverse-id="{{.ReverseID}}" data-rv-seq="{{.Seq}}" class="{{if not .Enabled}}row-disabled{{end}}">
+                        <td class="rv-name"><strong>{{.Name}}</strong></td>
+                        <td class="rv-seq"><code>{{.Seq}}</code></td>
+                        <td class="rv-reverse-id">
+                            {{if .ReverseID}}
+                            <code class="reverse-id-short" title="{{.ReverseID}}" style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle;">{{.ReverseID}}</code>
+                            {{else}}
+                            <span class="text-muted">-</span>
+                            {{end}}
+                        </td>
+                        <td class="rv-registry">{{.OutboundProxy}}</td>
+                        <td class="rv-listener-proto"><code class="type-badge type-{{.ListenerProto | lower}}">{{.ListenerProto | upper}}</code></td>
+                        <td class="rv-endpoint-cell">
+                            <code class="endpoint-code rv-endpoint">
+                                {{if and .AssignedPort (gt .AssignedPort 0)}}
+                                {{.ListenerProto | upper}}://{{.RegistryAddr | host}}:{{.AssignedPort}}
+                                {{else if .LastError}}
+                                <span data-i18n="rv.registrationFailed">注册失败</span>
+                                {{else}}
+                                <span class="waiting" data-i18n="rv.waitingForPort">等待分配端口</span>
+                                {{end}}
+                            </code>
+                            <button class="btn btn-sm btn-outline rv-copy-btn" onclick="copyEndpointRow(this)" data-i18n="rv.copyEndpoint" style="{{if not (and .AssignedPort (gt .AssignedPort 0))}}display:none{{end}}">复制</button>
+                            <div class="rv-last-error" style="{{if not .LastError}}display:none{{end}}; background: var(--danger-bg, #fff0f0); color: var(--danger, #c00); border: 1px solid var(--danger, #c00); border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.5rem; font-size: 0.9rem;">
+                                <strong>错误：</strong> <span class="rv-last-error-text">{{.LastError}}</span>
+                            </div>
+                        </td>
+                        <td class="rv-target">
+                            {{if eq .ListenerProto "direct"}}
+                            {{.TargetAddress}}
+                            {{else}}
+                            <span data-i18n="rv.targetDynamic">动态</span>
+                            {{end}}
+                        </td>
+                        <td>
+                            <label class="switch" title="{{if .Enabled}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if .Enabled}}checked{{end}} onchange="toggleReverse('{{.Name}}', this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td class="rv-status">
+                            {{if not .Enabled}}
+                            <span class="badge badge-secondary" data-i18n="rv.statusDisabled">已禁用</span>
+                            {{else if .LastError}}
+                            <span class="badge badge-danger" data-i18n="rv.statusError">错误</span>
+                            {{else if and .AssignedPort (gt .AssignedPort 0)}}
+                            <span class="badge badge-success" data-i18n="rv.statusEnabled">已启用</span>
+                            {{else}}
+                            <span class="badge badge-secondary" data-i18n="rv.statusInactive">未启用</span>
+                            {{end}}
+                        </td>
+                        <td>
+                            <button class="btn btn-sm btn-outline" onclick="showEditReverse('{{.Name}}')" data-i18n="rv.editConfig">编辑</button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteReverseConfig('{{.Name}}')" data-i18n="rv.deleteConfig">删除</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        <div id="rv-empty-state" class="empty-state" style="text-align: center; padding: 2rem; {{if .ReverseConfigs}}display:none{{end}}">
+            <p data-i18n="rv.noConfigs">暂无反向连接配置</p>
+            <button onclick="showAddReverse()" class="btn btn-primary btn-sm" data-i18n="rv.add">+ 新增反向连接</button>
+        </div>
+    </div>
+
+    <!-- Dynamic reverse registrations (registry-side bindings) -->
+    <div class="card">
+        <div class="card-header">
+            <h3 data-i18n="rv.dynamicRegistrations">动态注册客户端</h3>
+            <button onclick="pollReverseBindings(true)" class="btn btn-sm btn-outline" data-i18n="btn.refresh">刷新</button>
+        </div>
+        <p style="color: var(--text-secondary); margin-bottom: 0.5rem;" data-i18n="rv.dynamicDesc">
+            此处展示通过动态控制通道注册到本实例的反向客户端（仅注册端可见）。
+        </p>
+        <p style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.85rem;" data-i18n="rv.pairingHint">
+            注册端与反向端通过 Reverse ID 和“名称（反向端）”配对识别。
+        </p>
+        <div class="table-responsive">
+            <table class="data-table" id="rv-bindings-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="rv.seq">Seq</th>
+                        <th data-i18n="rv.bindingIdentity">名称（反向端）</th>
+                        <th data-i18n="rv.bindingSourceAddress">来源地址</th>
+                        <th data-i18n="rv.bindingRegistryAddr">注册地址</th>
+                        <th data-i18n="rv.bindingTarget">固定目标</th>
+                        <th data-i18n="rv.bindingEndpoint">访问地址</th>
+                        <th data-i18n="rv.bindingUpdated">更新时间</th>
+                        <th data-i18n="rv.bindingStatus">状态</th>
+                        <th data-i18n="rv.summaryOther">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="rv-bindings-body">
+                    <tr id="rv-bindings-loading">
+                        <td colspan="9" style="text-align:center; color:var(--text-secondary);">
+                            <span class="spinner"></span> <span data-i18n="rv.loadingBindings">加载中...</span>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div id="rv-bindings-empty" class="empty-state hidden" style="text-align: center; padding: 1.5rem;">
+            <p data-i18n="rv.noDynamicBindings">暂无动态注册客户端</p>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Reverse Connection Modal -->
+<div id="rv-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3 id="rv-modal-title" data-i18n="rv.modalAdd">新增反向连接</h3>
+            <button onclick="closeReverseModal()" class="close-btn">×</button>
+        </div>
+        <form id="rv-form" onsubmit="saveReverseConfig(event)">
+            <input type="hidden" id="edit-name" value="">
+            <input type="hidden" id="edit-reverse-id" value="">
+            <input type="hidden" id="edit-seq" value="">
+
+            <div class="form-group">
+                <label data-i18n="rv.configName">配置名称</label>
+                <input type="text" id="config-name" placeholder="reverse-1">
+            </div>
+
+            <div class="form-group" id="reverse-id-display-group" style="display: none;">
+                <label data-i18n="rv.reverseId">Reverse ID</label>
+                <code id="edit-reverse-id-display" style="word-break: break-all;"></code>
+                <p class="form-hint" data-i18n="rv.reverseIdHint">与注册端动态绑定配对时使用。</p>
+            </div>
+
+            <div class="form-group">
+                <label class="form-check-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="enabled" checked style="width: auto;">
+                    <span data-i18n="rv.enableSwitch">保存后立即启用</span>
+                </label>
+                <p class="form-hint" data-i18n="rv.enableSwitchHint">未勾选时仅保存配置，不会向注册端注册并分配端口。</p>
+            </div>
+
+            <div class="form-group">
+                <label data-i18n="rv.outboundProxy">出站代理</label>
+                <select id="preset-proxy" class="form-select">
+                    <option value="" data-i18n="rv.selectPlaceholder">-- 请选择 --</option>
+                    {{range .Proxies}}
+                    {{if .SupportsReverse}}
+                    <option value="{{.Name}}" data-type="{{.Type}}" data-server="{{.Server}}" data-port="{{.Port}}" data-user="{{.Username}}" data-pass="{{.Password}}" data-sni="{{.Sni}}" data-skip="{{.SkipCertVerify}}">
+                        {{.Name}} ({{.Type}} — {{.Server}}:{{.Port}})
+                    </option>
+                    {{end}}
+                    {{end}}
+                </select>
+                <p class="form-hint"><span data-i18n="rv.proxyHint">需要自定义出站代理？</span> <a href="proxies" data-i18n="rv.goAddProxy">去代理页面添加</a></p>
+            </div>
+
+            <div class="form-group">
+                <label data-i18n="rv.listenProto">监听协议</label>
+                <select id="listen-proto" class="form-select" onchange="toggleListenFields()">
+                    <option value="socks5" data-i18n="rv.optSocks5">SOCKS5 — 通用代理协议，支持动态目标</option>
+                    <option value="trojan" data-i18n="rv.optTrojan">Trojan — 基于 TLS 的隐蔽协议，支持动态目标</option>
+                    <option value="h_tunnel" data-i18n="rv.optHTunnel">h_tunnel — 专用隧道协议，轻量高效</option>
+                    <option value="direct" data-i18n="rv.optDirect">Direct — 直接 TCP 转发到固定目标</option>
+                    <option value="http" data-i18n="rv.optHttp">HTTP — HTTP 代理协议，支持动态目标</option>
+                    <option value="https" data-i18n="rv.optHttps">HTTPS — HTTPS 代理协议（基于 TLS）</option>
+                </select>
+            </div>
+
+            <div id="listen-auth-section">
+                <div class="form-row" id="listen-user-row">
+                    <div class="form-group">
+                        <label data-i18n="rv.listenUser">监听用户名</label>
+                        <input type="text" id="listen-user" data-i18n-placeholder="rv.user" placeholder="可选">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="rv.listenPass">监听密码</label>
+                        <input type="password" id="listen-pass" data-i18n-placeholder="rv.pass" placeholder="可选">
+                    </div>
+                </div>
+                <div class="form-row" id="listen-sni-row" style="display: none;">
+                    <div class="form-group">
+                        <label data-i18n="rv.listenSni">监听 SNI 域名</label>
+                        <input type="text" id="listen-sni" data-i18n-placeholder="rv.sni" placeholder="可选">
+                    </div>
+                </div>
+            </div>
+
+            <div id="direct-target-section" style="display: none;">
+                <div class="form-group">
+                    <label data-i18n="rv.directTarget">固定目标地址 (host:port)</label>
+                    <input type="text" id="direct-target" placeholder="127.0.0.1:80" value="127.0.0.1:80">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label data-i18n="rv.reconnect">断线重连间隔（秒）</label>
+                <input type="number" id="reconnect-interval" value="10" min="1" max="3600">
+            </div>
+
+            <div class="form-group">
+                <label data-i18n="rv.preferredPort">首选端口</label>
+                <input type="number" id="preferred-port" value="" min="0" max="65535" placeholder="0">
+                <p class="form-hint" data-i18n="rv.preferredPortHint">留空或填 0 表示由注册端自动分配</p>
+            </div>
+
+            <div class="form-actions">
+                <button type="button" onclick="closeReverseModal()" class="btn btn-outline" data-i18n="rv.cancel">取消</button>
+                <button type="submit" class="btn btn-primary" data-i18n="rv.btnSave">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+// Existing configs rendered by the server for client-side editing.
+const existingReverseConfigs = {{json .ReverseConfigs}} || [];
+
+function updateInstanceReverseID() {
+    const el = document.getElementById('instance-reverse-id');
+    // InstanceReverseID is injected from the server-side template data.
+    if (el) {
+        const id = {{json .InstanceReverseID}} || '';
+        el.textContent = id || '-';
+    }
+}
+
+function showAddReverse() {
+    document.getElementById('rv-modal-title').textContent = i18n.t('rv.modalAdd') || '新增反向连接';
+    resetForm();
+    document.getElementById('rv-modal').classList.remove('hidden');
+}
+
+function showEditReverse(name) {
+    const cfg = existingReverseConfigs.find(c => c && c.name === name);
+    if (!cfg) return;
+    document.getElementById('rv-modal-title').textContent = (i18n.t('rv.modalEdit') || '编辑') + ' — ' + name;
+    document.getElementById('edit-name').value = cfg.name || '';
+    document.getElementById('edit-reverse-id').value = cfg['reverse-id'] || '';
+    document.getElementById('edit-seq').value = cfg.seq || '';
+
+    document.getElementById('config-name').value = cfg.name || '';
+    document.getElementById('enabled').checked = cfg.enabled !== false;
+    document.getElementById('preset-proxy').value = cfg['outbound-proxy'] || '';
+    document.getElementById('listen-proto').value = cfg['listener-proto'] || 'socks5';
+    document.getElementById('listen-user').value = cfg['listener-user'] || '';
+    document.getElementById('listen-pass').value = cfg['listener-password'] || '';
+    document.getElementById('listen-sni').value = cfg['listener-sni'] || '';
+    document.getElementById('direct-target').value = cfg['target-address'] || '127.0.0.1:80';
+    document.getElementById('reconnect-interval').value = cfg['reconnect-interval'] || 10;
+    document.getElementById('preferred-port').value = cfg['preferred-port'] || '';
+    document.getElementById('edit-seq').value = cfg.seq || '';
+
+    const reverseId = cfg['reverse-id'] || '';
+    const reverseIdGroup = document.getElementById('reverse-id-display-group');
+    const reverseIdDisplay = document.getElementById('edit-reverse-id-display');
+    if (reverseIdGroup && reverseIdDisplay) {
+        if (reverseId) {
+            reverseIdDisplay.textContent = reverseId;
+            reverseIdGroup.style.display = '';
+        } else {
+            reverseIdGroup.style.display = 'none';
+        }
+    }
+
+    toggleListenFields();
+    document.getElementById('rv-modal').classList.remove('hidden');
+}
+
+function closeReverseModal() {
+    document.getElementById('rv-modal').classList.add('hidden');
+}
+
+function resetForm() {
+    document.getElementById('rv-modal-title').textContent = i18n.t('rv.modalAdd') || '新增反向连接';
+    document.getElementById('edit-name').value = '';
+    document.getElementById('edit-reverse-id').value = '';
+    document.getElementById('edit-seq').value = '';
+    document.getElementById('config-name').value = '';
+    document.getElementById('enabled').checked = true;
+    document.getElementById('preset-proxy').value = '';
+    document.getElementById('listen-proto').value = 'socks5';
+    document.getElementById('listen-user').value = '';
+    document.getElementById('listen-pass').value = '';
+    document.getElementById('listen-sni').value = '';
+    document.getElementById('direct-target').value = '127.0.0.1:80';
+    document.getElementById('reconnect-interval').value = '10';
+    document.getElementById('preferred-port').value = '';
+    const reverseIdGroup = document.getElementById('reverse-id-display-group');
+    if (reverseIdGroup) reverseIdGroup.style.display = 'none';
+    toggleListenFields();
+}
+
+function toggleListenFields() {
+    const proto = document.getElementById('listen-proto').value;
+    const isDirect = proto === 'direct';
+    const isTrojan = proto === 'trojan';
+    const isHttps = proto === 'https';
+    const isHTunnel = proto === 'h_tunnel';
+
+    document.getElementById('listen-auth-section').style.display = isDirect ? 'none' : 'block';
+
+    const userRow = document.getElementById('listen-user-row');
+    if (isTrojan || isHTunnel) {
+        userRow.style.display = 'none';
+    } else {
+        userRow.style.display = 'flex';
+    }
+
+    document.getElementById('listen-sni-row').style.display = (isTrojan || isHttps) ? 'flex' : 'none';
+    document.getElementById('direct-target-section').style.display = isDirect ? 'block' : 'none';
+}
+
+function collectFormState() {
+    const name = document.getElementById('config-name').value.trim();
+    if (!name) {
+        showToast(i18n.t('rv.configName') + ' ' + (i18n.t('toast.enterAddr') || 'required'), 'error');
+        return null;
+    }
+
+    const select = document.getElementById('preset-proxy');
+    if (!select.value) {
+        showToast(i18n.t('toast.selectProxy'), 'error');
+        return null;
+    }
+    const opt = select.options[select.selectedIndex];
+    const listenerProto = document.getElementById('listen-proto').value;
+
+    return {
+        enabled: document.getElementById('enabled').checked,
+        name: name,
+        'reverse-id': document.getElementById('edit-reverse-id').value,
+        seq: parseInt(document.getElementById('edit-seq').value) || 0,
+        'registry-addr': opt.dataset.server + ':' + opt.dataset.port,
+        'outbound-proxy': opt.value,
+        'register-proto': opt.dataset.type,
+        'listener-proto': listenerProto,
+        'target-address': listenerProto === 'direct' ? document.getElementById('direct-target').value : '',
+        'reconnect-interval': parseInt(document.getElementById('reconnect-interval').value) || 10,
+        'registry-user': opt.dataset.user || '',
+        'registry-password': opt.dataset.pass || '',
+        'registry-sni': opt.dataset.sni || '',
+        'listener-user': document.getElementById('listen-user').value,
+        'listener-password': document.getElementById('listen-pass').value,
+        'listener-sni': document.getElementById('listen-sni').value,
+        'preferred-port': parseInt(document.getElementById('preferred-port').value) || 0,
+        'skip-cert-verify': opt.dataset.skip === 'true'
+    };
+}
+
+async function saveReverseConfig(e) {
+    e.preventDefault();
+    const config = collectFormState();
+    if (!config) return;
+
+    const editName = document.getElementById('edit-name').value;
+    const url = editName ? './api/reverse/' + encodeURIComponent(editName) : './api/reverse';
+    const method = editName ? 'PUT' : 'POST';
+
+    try {
+        showToast(i18n.t('toast.saving'), 'info');
+        const res = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        const data = await res.json();
+        if (res.ok) {
+            // Keep the client-side cache in sync so the edit modal can be opened
+            // immediately after adding or renaming a config without a full reload.
+            if (data && data.name && typeof existingReverseConfigs !== 'undefined' && Array.isArray(existingReverseConfigs)) {
+                const idx = existingReverseConfigs.findIndex(c => c && c.name === data.name);
+                if (idx >= 0) {
+                    existingReverseConfigs[idx] = data;
+                } else {
+                    existingReverseConfigs.push(data);
+                }
+            }
+            showToast('✅ ' + i18n.t('toast.saved'), 'success');
+            closeReverseModal();
+            resetForm();
+            // The server publishes a version event after reload; SSE will refresh.
+        } else {
+            showToast('❌ ' + (data.error || i18n.t('toast.saveFailed')), 'error');
+        }
+    } catch (err) {
+        showToast('❌ ' + i18n.t('toast.networkError') + ': ' + err.message, 'error');
+    }
+}
+
+async function toggleReverse(name, enabled) {
+    try {
+        const res = await fetch('./api/reverse/' + encodeURIComponent(name) + '/toggle', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const row = document.querySelector('#rv-list-table tr[data-rv-name="' + CSS.escape(name) + '"], #rv-list-table tbody tr[data-rv-name="' + CSS.escape(name) + '"]');
+        if (row) row.classList.toggle('row-disabled', !enabled);
+        showToast('✅ ' + i18n.t('toast.saved'), 'success');
+        // SSE will refresh the full list once the server reloads the config.
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+        location.reload();
+    }
+}
+
+async function deleteReverseConfig(name) {
+    showConfirm((i18n.t('rv.confirmDelete') || '确定删除反向连接 {name} 吗？').replace('{name}', name), async () => {
+        try {
+            const res = await fetch('./api/reverse/' + encodeURIComponent(name), { method: 'DELETE' });
+            const data = await res.json();
+            if (res.ok) {
+                showToast('✅ ' + i18n.t('toast.saved'), 'success');
+                if (typeof existingReverseConfigs !== 'undefined' && Array.isArray(existingReverseConfigs)) {
+                    const idx = existingReverseConfigs.findIndex(c => c && c.name === name);
+                    if (idx >= 0) existingReverseConfigs.splice(idx, 1);
+                }
+                // SSE will refresh the list after the config reload.
+            } else {
+                showToast('❌ ' + (data.error || i18n.t('toast.saveFailed')), 'error');
+            }
+        } catch (err) {
+            showToast('❌ ' + i18n.t('toast.networkError') + ': ' + err.message, 'error');
+        }
+    });
+}
+
+function copyEndpointRow(btn) {
+    const row = btn.closest('tr');
+    if (!row) return;
+    const el = row.querySelector('.rv-endpoint');
+    if (!el) return;
+    const text = el.textContent.trim();
+    navigator.clipboard.writeText(text).then(() => {
+        showToast(i18n.t('raw.copied'), 'success');
+    }).catch(() => {
+        showToast(i18n.t('raw.copyFailed') || 'Copy failed', 'error');
+    });
+}
+
+// Fetch dynamic bindings.  expectedVersion lets the SSE scheduler discard a
+// response that arrived after a newer version event.
+async function pollReverseBindings(force, expectedVersion) {
+    let res;
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        res = await fetch('./api/reverse/bindings', { signal: ctrl.signal });
+        clearTimeout(timer);
+    } catch (e) {
+        const msg = e.name === 'AbortError' ? '请求超时（8s）' : (e.message || '网络错误');
+        renderReverseBindings(null, msg);
+        throw e;
+    }
+    if (!res.ok) {
+        const msg = (res.status === 404)
+            ? '非注册端实例（无绑定数据）'
+            : '加载失败 (' + res.status + ')';
+        renderReverseBindings(null, msg);
+        if (res.status === 404) return; // expected for non-registry instances
+        throw new Error(msg);
+    }
+    const data = await res.json();
+    if (expectedVersion !== undefined && targetVersions.bindings !== expectedVersion) return;
+    renderReverseBindings(Array.isArray(data) ? data : []);
+}
+
+// Dirty-check cache: skip full DOM rebuild when bindings data hasn't changed.
+let _lastBindingsHash = '';
+function _hashBindings(bindings) {
+    if (!bindings || !bindings.length) return '\x00'; // sentinel for empty/null
+    let s = '';
+    for (let i = 0; i < bindings.length; i++) {
+        const b = bindings[i];
+        s += (b.reverse_id || b.ReverseID || '') + '|';
+        s += (b.seq || b.Seq || 0) + '|';
+        s += (b.port || b.Port || 0) + '|';
+        s += (b.disconnected_at || b.DisconnectedAt || '') + ';';
+    }
+    return s;
+}
+
+function renderReverseBindings(bindings, errorMsg) {
+    const tbody = document.getElementById('rv-bindings-body');
+    const table = document.getElementById('rv-bindings-table');
+    const empty = document.getElementById('rv-bindings-empty');
+    if (!tbody) return;
+
+    // Dirty check: skip rebuild only when data is identical AND no new error.
+    const hash = _hashBindings(bindings);
+    if (hash === _lastBindingsHash && !errorMsg) return;
+    _lastBindingsHash = hash;
+
+    if (!bindings || !bindings.length) {
+        tbody.innerHTML = '';
+        if (table) table.style.display = 'none';
+        if (empty) {
+            empty.classList.remove('hidden');
+            if (errorMsg) {
+                empty.innerHTML = '<p style="color: var(--danger, #f85149);">' + escapeHtml(errorMsg) + '</p>';
+            } else {
+                empty.innerHTML = '<p data-i18n="rv.noDynamicBindings">暂无动态注册客户端</p>';
+            }
+        }
+        return;
+    }
+    if (table) table.style.display = '';
+    if (empty) empty.classList.add('hidden');
+
+    // Group by reverse_id
+    const groups = {};
+    bindings.forEach(b => {
+        const rid = b.reverse_id || b.ReverseID || '';
+        if (!groups[rid]) groups[rid] = [];
+        groups[rid].push(b);
+    });
+
+    let html = '';
+    Object.keys(groups).sort().forEach(rid => {
+        const list = groups[rid];
+        const shortId = rid || '-';
+        // Group header row
+        html += `<tr class="rv-binding-group-header">
+            <td colspan="9">
+                <div class="rv-group-header-inner">
+                    <div class="rv-group-title">
+                        <span data-i18n="rv.reverseId">Reverse ID</span>
+                        <code class="rv-group-id">${escapeHtml(shortId)}</code>
+                    </div>
+                    <span class="badge badge-info">${list.length} <span data-i18n="rv.bindingsCount">个绑定</span></span>
+                </div>
+            </td>
+        </tr>`;
+        list.forEach(b => {
+            const seq = b.seq || b.Seq || 0;
+            const port = b.port || b.Port || 0;
+            const proto = (b.listener_proto || b.ListenerProto || '-').toUpperCase();
+            const identity = b.identity || b.Identity || '';
+            const controlAddr = b.control_addr || b.ControlAddr || '';
+            const registryAddr = b.registry_addr || b.RegistryAddr || '';
+            const directHost = b.direct_dst_host || b.DirectDstHost || '';
+            const directPort = b.direct_dst_port || b.DirectDstPort || 0;
+            const updated = b.updated_at || b.UpdatedAt || '';
+            const disconnected = b.disconnected_at || b.DisconnectedAt || '';
+            // Go time.Time zero value serializes as "0001-01-01T00:00:00Z", which is truthy.
+            const isConnected = !disconnected || disconnected === '0001-01-01T00:00:00Z';
+            const statusClass = isConnected ? 'badge-success' : 'badge-secondary';
+            const statusText = isConnected
+                ? (typeof i18n !== 'undefined' ? i18n.t('rv.statusConnected') : '在线')
+                : (typeof i18n !== 'undefined' ? i18n.t('rv.statusDisconnected') : '已断开');
+            const endpoint = `${proto.toLowerCase()}://${window.location.hostname}:${port}`;
+            const identityHtml = identity
+                ? `<strong class="text-primary">${escapeHtml(identity)}</strong>`
+                : `<span class="text-muted">-</span>`;
+            const targetHtml = (proto.toLowerCase() === 'direct' && directHost)
+                ? `<code>${escapeHtml(directHost)}:${directPort}</code>`
+                : `<span class="text-muted">-</span>`;
+            const registryHtml = registryAddr
+                ? `<code>${escapeHtml(registryAddr)}</code>`
+                : `<span class="text-muted">-</span>`;
+            const sourceHtml = controlAddr
+                ? `<code>${escapeHtml(controlAddr)}</code>`
+                : `<span class="text-muted">-</span>`;
+            html += `<tr>
+                <td><code>${seq}</code></td>
+                <td>${identityHtml}</td>
+                <td>${sourceHtml}</td>
+                <td>${registryHtml}</td>
+                <td>${targetHtml}</td>
+                <td><code>${escapeHtml(endpoint)}</code></td>
+                <td class="text-muted text-small">${updated ? new Date(updated).toLocaleString() : '-'}</td>
+                <td><span class="badge ${statusClass}">${statusText}</span></td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="forceDeleteBinding('${escapeHtml(rid)}', ${seq})" data-i18n="rv.forceDelete">强制删除</button>
+                </td>
+            </tr>`;
+        });
+    });
+    tbody.innerHTML = html;
+}
+
+async function forceDeleteBinding(reverseID, seq) {
+    const msg = (typeof i18n !== 'undefined' ? i18n.t('rv.confirmForceDelete') : '确定强制删除绑定 {reverseID}#{seq} 吗？下次注册将分配新端口。')
+        .replace('{reverseID}', reverseID).replace('{seq}', seq);
+    showConfirm(msg, async () => {
+        try {
+            const res = await fetch('./api/reverse/bindings/' + encodeURIComponent(reverseID) + '/' + encodeURIComponent(seq), { method: 'DELETE' });
+            const data = await res.json();
+            if (res.ok) {
+                showToast((typeof i18n !== 'undefined' ? i18n.t('toast.saved') : '已保存'), 'success');
+                // SSE will refresh the bindings table after the delete.
+            } else {
+                showToast('❌ ' + (data.error || (typeof i18n !== 'undefined' ? i18n.t('toast.saveFailed') : '保存失败')), 'error');
+            }
+        } catch (err) {
+            showToast('❌ ' + (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : '网络错误') + ': ' + err.message, 'error');
+        }
+    });
+}
+
+window.addEventListener('DOMContentLoaded', function() {
+    updateInstanceReverseID();
+    // Bindings table is populated exclusively via SSE version events.
+});
+</script>
+{{end}}

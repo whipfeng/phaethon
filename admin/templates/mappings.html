@@ -1,0 +1,358 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="map.title">Mappings</span> ({{len .Mappings}})</h3>
+            <button onclick="showAddMapping()" class="btn btn-primary btn-sm" data-i18n="map.add">+ Add Mapping</button>
+        </div>
+
+        <!-- Mappings Table -->
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="map.name">Name</th>
+                        <th data-i18n="map.type">Type</th>
+                        <th data-i18n="map.port">Port</th>
+                        <th data-i18n="proxy.sni">SNI</th>
+                        <th data-i18n="map.reverseAddr">Reverse Addr</th>
+                        <th data-i18n="map.dstHost">Dst Host</th>
+                        <th data-i18n="map.status">Status</th>
+                        <th data-i18n="common.enabled">Enabled</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Mappings}}
+                    <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
+                        <td><strong>{{.Name}}</strong></td>
+                        <td><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
+                        <td><code>:{{.Port}}</code></td>
+                        <td>{{.Sni}}</td>
+                        <td>{{if .ReverseAddress}}<span class="badge badge-info">{{.ReverseAddress}}{{else}}—{{end}}</span></td>
+                        <td>{{if .DstHost}}{{.DstHost}}:{{.DstPort}}{{else}}—{{end}}</td>
+                        <td><span class="status-dot {{if .Enabled | enabled}}status-active{{else}}status-inactive{{end}}"></span></td>
+                        <td>
+                            <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleMapping('{{.Name}}', this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <button onclick="editMapping('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                            <button onclick="deleteMapping('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Port Summary -->
+    <div class="card">
+        <h3>📡 <span data-i18n="map.portSummary">Port Summary</span></h3>
+        <div class="port-grid">
+            {{range .Mappings}}
+            <div class="port-card type-{{.Type | lower}}">
+                <div class="port-number">:{{.Port}}</div>
+                <div class="port-name">{{.Name}}</div>
+                <div class="port-type">{{.Type}}</div>
+            </div>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Add/Edit Modal -->
+    <div id="mapping-modal" class="modal hidden">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3 id="map-modal-title" data-i18n="map.modalAdd">Add Mapping</h3>
+                <button onclick="closeMapModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="mapping-form" onsubmit="saveMapping(event)">
+                <input type="hidden" id="map-edit-name" value="">
+                <div class="form-group">
+                    <label><span data-i18n="map.name">Name</span> *</label>
+                    <input type="text" id="m-name" required placeholder="MY_ENTRY">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label><span data-i18n="map.type">Type</span> *</label>
+                        <select id="m-type" required onchange="toggleMappingFields()">
+                            <option value="" data-i18n="rule.select">Select...</option>
+                            <option value="socks5">SOCKS5</option>
+                            <option value="trojan">Trojan</option>
+                            <option value="direct">Direct</option>
+                            <option value="http">HTTP</option>
+                            <option value="https">HTTPS</option>
+                            <option value="h_tunnel">H_Tunnel</option>
+                        </select>
+                        <small id="m-type-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);"></small>
+                    </div>
+                    <div class="form-group" id="m-port-group">
+                        <label><span data-i18n="map.port">Port</span> *</label>
+                        <input type="number" id="m-port" required min="1" max="65535" placeholder="1080">
+                    </div>
+                </div>
+                <div class="form-row" id="m-sni-bind-row">
+                    <div class="form-group">
+                        <label data-i18n="proxy.sni">SNI</label>
+                        <input type="text" id="m-sni" placeholder="(for TLS types)">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="map.bind">Bind Address</label>
+                        <input type="text" id="m-bind" placeholder="127.0.0.1 (optional)">
+                    </div>
+                </div>
+                <details id="m-advanced">
+                    <summary data-i18n="map.advanced">Advanced Options</summary>
+                    <div style="margin-top: 1rem;">
+                        <!-- Reverse-specific fields -->
+                        <div class="form-row" id="m-reverse-row">
+                            <div class="form-group">
+                                <label data-i18n="map.reverseAddr">Reverse Address</label>
+                                <input type="text" id="m-reverse-addr" placeholder="(for reverse mode)">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="map.reverseProxy">Reverse Proxy</label>
+                                <input type="text" id="m-reverse-proxy" placeholder="(proxy name)">
+                            </div>
+                        </div>
+                        <div class="form-row" id="m-reverse-opts-row">
+                            <div class="form-group">
+                                <label data-i18n="map.reverseMaxConn">Max Connections</label>
+                                <input type="number" id="m-reverse-max-conn" placeholder="10" min="1">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="map.reverseRetry">Retry Interval (ms)</label>
+                                <input type="number" id="m-reverse-retry" placeholder="5000" min="0">
+                            </div>
+                        </div>
+                        <!-- Authentication (protocol-specific) -->
+                        <div class="form-row" id="m-auth-row">
+                            <div class="form-group">
+                                <label data-i18n="map.password">Password (optional)</label>
+                                <input type="password" id="m-password" placeholder="(advanced, optional)">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="map.username">Username</label>
+                                <input type="text" id="m-username" placeholder="(optional)">
+                            </div>
+                        </div>
+                        <!-- Direct destination -->
+                        <div class="form-row" id="m-dst-row">
+                            <div class="form-group">
+                                <label data-i18n="map.dstHost">Destination Host</label>
+                                <input type="text" id="m-dst-host" placeholder="target host">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="map.dstPort">Destination Port</label>
+                                <input type="number" id="m-dst-port" placeholder="80">
+                            </div>
+                        </div>
+                    </div>
+                </details>
+                <div class="form-actions">
+                    <button type="button" onclick="closeMapModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+const mappings = {{json .Mappings}};
+
+function setMapVisible(id, show) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !show);
+}
+function setMapRequired(id, req) {
+    const el = document.getElementById(id);
+    if (el) el.required = req;
+}
+
+const mapTypeHelps = {
+    'socks5': 'SOCKS5 proxy entry. Listen on Port and forward via proxy chain.',
+    'trojan': 'Trojan proxy entry. TLS encrypted Trojan inbound.',
+    'direct': 'Direct TCP forward: incoming Port → Destination Host:Port.',
+    'http': 'HTTP proxy entry.',
+    'https': 'HTTPS proxy entry with TLS.',
+    'h_tunnel': 'H_Tunnel entry.'
+};
+
+function toggleMappingFields() {
+    const t = document.getElementById('m-type').value;
+    const isDirect = t === 'direct';
+    const needsAuth = ['socks5','trojan','http','https','h_tunnel'].includes(t);
+
+    setMapRequired('m-port', true);
+
+    // SNI/Bind only for proxy/TLS types
+    const needSniBind = ['socks5','trojan','http','https','h_tunnel'].includes(t);
+    setMapVisible('m-sni-bind-row', needSniBind);
+
+    // Auth fields only for protocols that support inbound auth/encryption
+    setMapVisible('m-auth-row', needsAuth);
+
+    // Direct destination
+    setMapVisible('m-dst-row', isDirect);
+
+    const helpEl = document.getElementById('m-type-help');
+    if (helpEl) {
+        if (typeof i18n !== 'undefined') {
+            const key = `map.typeHelp.${t}`;
+            const tr = i18n.t(key);
+            helpEl.textContent = (tr !== key) ? tr : (mapTypeHelps[t] || '');
+        } else {
+            helpEl.textContent = mapTypeHelps[t] || '';
+        }
+    }
+}
+
+function showAddMapping() {
+    document.getElementById('map-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('map.modalAdd') : 'Add Mapping');
+    document.getElementById('map-edit-name').value = '';
+    document.getElementById('mapping-form').reset();
+    toggleMappingFields();
+    document.getElementById('mapping-modal').classList.remove('hidden');
+}
+
+function editMapping(name) {
+    const m = mappings.find(x => x.name === name);
+    if (!m) return;
+    document.getElementById('map-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('map.modalEdit') : 'Edit Mapping');
+    document.getElementById('map-edit-name').value = name;
+    document.getElementById('m-name').value = m.name;
+    document.getElementById('m-type').value = m.type;
+    document.getElementById('m-port').value = m.port || '';
+    document.getElementById('m-sni').value = m.sni || '';
+    document.getElementById('m-bind').value = m.bind || '';
+    document.getElementById('m-password').value = m.password || '';
+    document.getElementById('m-username').value = m.username || '';
+    document.getElementById('m-reverse-addr').value = m['reverse-address'] || '';
+    document.getElementById('m-reverse-proxy').value = m['reverse-proxy'] || '';
+    document.getElementById('m-reverse-max-conn').value = m['reverse-max-connections'] || '';
+    document.getElementById('m-reverse-retry').value = m['reverse-retry-interval'] || '';
+    document.getElementById('m-dst-host').value = m['dst-host'] || '';
+    document.getElementById('m-dst-port').value = m['dst-port'] || '';
+    toggleMappingFields();
+    document.getElementById('mapping-modal').classList.remove('hidden');
+}
+
+async function saveMapping(e) {
+    e.preventDefault();
+    const editName = document.getElementById('map-edit-name').value;
+    const t = document.getElementById('m-type').value;
+    const isDirect = t === 'direct';
+    const needsAuth = ['socks5','trojan','http','https','h_tunnel'].includes(t);
+    const payload = {
+        name: document.getElementById('m-name').value,
+        type: t,
+        port: parseInt(document.getElementById('m-port').value) || 0,
+        sni: document.getElementById('m-sni').value || '',
+        bind: document.getElementById('m-bind').value || '',
+        password: needsAuth ? document.getElementById('m-password').value : '',
+        username: needsAuth ? document.getElementById('m-username').value : '',
+        'reverse-address': document.getElementById('m-reverse-addr').value || '',
+        'reverse-proxy': document.getElementById('m-reverse-proxy').value || '',
+        'reverse-max-connections': parseInt(document.getElementById('m-reverse-max-conn').value) || 0,
+        'reverse-retry-interval': parseInt(document.getElementById('m-reverse-retry').value) || 0,
+        'dst-host': isDirect ? document.getElementById('m-dst-host').value : '',
+        'dst-port': isDirect ? (parseInt(document.getElementById('m-dst-port').value) || 0) : 0,
+    };
+    // Remove irrelevant fields so the YAML stays clean
+    if (isDirect) {
+        delete payload.sni;
+        delete payload.bind;
+        delete payload.password;
+        delete payload.username;
+    } else {
+        delete payload['dst-host'];
+        delete payload['dst-port'];
+        if (!needsAuth) {
+            delete payload.password;
+            delete payload.username;
+        }
+    }
+    // Drop empty optional fields
+    ['sni','bind','password','username','reverse-address','reverse-proxy'].forEach(k => {
+        if (payload[k] === '') delete payload[k];
+    });
+    ['reverse-max-connections','reverse-retry-interval','dst-port'].forEach(k => {
+        if (payload[k] === 0) delete payload[k];
+    });
+
+    try {
+        let res;
+        if (editName) {
+            // Edit: delete old + add new (or PUT if backend supports)
+            if (editName !== payload.name) {
+                await fetch(`./api/mappings/${editName}`, {method: 'DELETE'});
+            }
+            res = await fetch('./api/mappings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+        } else {
+            res = await fetch('./api/mappings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+        }
+        if (!res.ok) throw new Error(await res.text());
+        closeMapModal();
+        location.reload();
+    } catch (err) {
+        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+async function deleteMapping(name) {
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('map.confirmDelete') : 'Delete mapping';
+    showConfirm(confirmLabel + ' "' + name + '"?', async () => {
+        try {
+            const res = await fetch(`./api/mappings/${name}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+            location.reload();
+        } catch (err) {
+            const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+            showToast(errLabel + ': ' + err.message, 'error');
+        }
+    });
+}
+
+async function toggleMapping(name, enabled) {
+    try {
+        const res = await fetch(`./api/mappings/${encodeURIComponent(name)}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const row = document.querySelector(`tr[data-name="${CSS.escape(name)}"]`);
+        if (row) {
+            row.classList.toggle('row-disabled', !enabled);
+            const dot = row.querySelector('.status-dot');
+            if (dot) dot.classList.toggle('status-active', enabled);
+            if (dot) dot.classList.toggle('status-inactive', !enabled);
+        }
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+        location.reload();
+    }
+}
+
+function closeMapModal() {
+    document.getElementById('mapping-modal').classList.add('hidden');
+}
+
+document.addEventListener('DOMContentLoaded', toggleMappingFields);
+</script>
+{{end}}

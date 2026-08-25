@@ -1,0 +1,161 @@
+﻿{{define "layout"}}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - Phaethon Manager</title>
+    <link rel="stylesheet" href="./static/style.css?v={{.Version}}">
+    <script src="./static/i18n.js?v={{.Version}}"></script>
+</head>
+<body>
+    <div class="app-layout">
+        <nav class="sidebar">
+            <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
+            <div class="sidebar-header">
+                <h1>⚡ Phaethon</h1>
+                <span class="version">v{{.Version}}</span>
+            </div>
+            <ul class="nav-menu">
+                <li><a href="./" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
+                <li class="nav-section"><span data-i18n="nav.config">Configuration</span></li>
+                <li><a href="./subscriptions" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
+                <li><a href="./proxies" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔗 Proxies</a></li>
+                <li><a href="./rules" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📋 Rules</a></li>
+                <li><a href="./mappings" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🔌 Mappings</a></li>
+                <li class="nav-divider"></li>
+                <li class="nav-section"><span data-i18n="nav.tools">Tools</span></li>
+                <li><a href="./reverse" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
+            </ul>
+            <div class="sidebar-footer">
+                <div class="config-target" onclick="switchSaveTarget()" title="Click to switch">
+                    <span class="config-target-label">CONFIG</span>
+                    <span class="config-target-value {{.SaveTarget}}">{{.SaveTarget | upper}}</span>
+                    {{if .CanSwitch}}<span class="config-target-hint">⇄</span>{{end}}
+                </div>
+                <div class="sidebar-footer-actions">
+                    <a href="./config" class="btn btn-sm btn-outline" data-i18n="nav.rawConfig">📝 Raw Config</a>
+                    <button onclick="reloadConfig()" class="btn btn-sm btn-outline" data-i18n="btn.reload">🔄 Reload Config</button>
+                </div>
+            </div>
+        </nav>
+        <main class="main-content">
+            <header class="top-bar">
+                <h2>{{.Title}}</h2>
+                <div class="actions">
+                    <span id="sse-status" class="badge badge-error hidden" data-i18n-title="sse.syncError" title="同步失败"></span>
+                    <span id="uptime" class="badge"></span>
+                    <span id="conn-count" class="badge badge-info"></span>
+                    <span class="actions-divider"></span>
+                    <div id="user-menu" class="user-menu hidden">
+                        <button class="user-menu-toggle" onclick="toggleUserMenu()" title="">
+                            <span class="user-avatar">👤</span>
+                            <span id="user-name" class="user-name"></span>
+                            <span class="user-caret">▾</span>
+                        </button>
+                        <div class="user-menu-dropdown" id="user-menu-dropdown">
+                            <button onclick="logout()" class="user-menu-item" data-i18n="security.logout">Logout</button>
+                        </div>
+                    </div>
+                </div>
+            </header>
+            {{block "content" .}}{{end}}
+        </main>
+    </div>
+
+    <!-- Unified node viewer / health-check modal (used by subscriptions and proxy groups) -->
+    <div id="node-viewer-modal" class="modal hidden">
+        <div class="modal-content modal-xl sub-nodes-scroll">
+            <div class="modal-header">
+                <h3 id="node-viewer-title" data-i18n="nodeViewer.title">Nodes</h3>
+                <button onclick="NodeViewer.close()" class="close-btn">×</button>
+            </div>
+            <div class="modal-body" id="node-viewer-body">
+                <div id="node-viewer-notice" class="form-help hidden" style="margin-bottom:0.75rem; padding:0.5rem 0.75rem; background:var(--bg-tertiary); border-radius:6px; color:var(--text-secondary);"></div>
+                <div class="sub-nodes-controls" id="node-viewer-controls">
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 3;">
+                            <label data-i18n="nodeViewer.filter">Filter (regex)</label>
+                            <input type="text" id="node-viewer-filter" placeholder="HK|TW|JP" oninput="NodeViewer.render()">
+                        </div>
+                        <div class="form-group" style="flex: 2;" id="node-viewer-url-wrap">
+                            <label data-i18n="nodeViewer.healthUrl">Health Check URL</label>
+                            <input type="text" id="node-viewer-health-url" value="http://www.gstatic.com/generate_204">
+                        </div>
+                        <div class="form-group" style="flex: 0 0 70px;">
+                            <label data-i18n="nodeViewer.concurrency">Concurrency</label>
+                            <input type="number" id="node-viewer-concurrency" value="6" min="1" max="50" style="width: 100%;">
+                        </div>
+                        <div class="form-group" style="flex: 0 0 auto; display: flex; align-items: flex-end; gap: 0.5rem;">
+                            <button type="button" id="node-viewer-test-all" onclick="NodeViewer.testAll()" class="btn btn-sm btn-outline" data-i18n="nodeViewer.testAll">Test All</button>
+                            <button type="button" id="node-viewer-select-all" onclick="NodeViewer.selectAll()" class="btn btn-sm btn-outline" data-i18n="nodeViewer.selectAll">Select All</button>
+                            <button type="button" id="node-viewer-clear" onclick="NodeViewer.clearSelection()" class="btn btn-sm btn-outline" data-i18n="nodeViewer.clear">Clear</button>
+                            <button type="button" id="node-viewer-select-alive" onclick="NodeViewer.selectAlive()" class="btn btn-sm btn-outline" data-i18n="nodeViewer.selectAlive">Select Alive</button>
+                        </div>
+                    </div>
+                    <div class="form-row" style="justify-content: space-between; align-items: center; margin-top: 4px;">
+                        <span id="node-viewer-count" class="text-muted text-small"></span>
+                        <span id="node-viewer-progress" class="text-muted text-small"></span>
+                    </div>
+                </div>
+                <div id="node-viewer-table-wrap">
+                    <div class="table-responsive sub-nodes-table-wrap">
+                        <table class="data-table sub-nodes-table">
+                            <thead>
+                                <tr>
+                                    <th id="node-viewer-select-header" class="hidden" style="width: 36px;"><input type="checkbox" id="node-viewer-head-checkbox" onclick="NodeViewer.toggleSelectAll()"></th>
+                                    <th data-i18n="nodeViewer.name">Name</th>
+                                    <th data-i18n="nodeViewer.type">Type</th>
+                                    <th data-i18n="nodeViewer.server">Server</th>
+                                    <th data-i18n="nodeViewer.port">Port</th>
+                                    <th data-i18n="nodeViewer.status">Status</th>
+                                    <th data-i18n="nodeViewer.latency">Latency</th>
+                                    <th data-i18n="nodeViewer.actions">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="node-viewer-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="node-viewer-picker-wrap" class="group-picker-layout hidden">
+                    <div class="picker-pane">
+                        <h4><span data-i18n="nodeViewer.available">Available</span> <span id="node-viewer-available-count" class="count">0</span></h4>
+                        <div id="node-viewer-available-list" class="picker-list"></div>
+                    </div>
+                    <div class="picker-pane">
+                        <h4><span data-i18n="nodeViewer.selected">Selected Order</span> <span id="node-viewer-selected-count" class="count">0</span></h4>
+                        <div class="picker-controls">
+                            <button type="button" onclick="NodeViewer.clearSelection()" class="btn btn-sm btn-outline" data-i18n="nodeViewer.clear">Clear</button>
+                        </div>
+                        <div id="node-viewer-selected-list" class="picker-list"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="NodeViewer.close()" class="btn btn-outline" data-i18n="nodeViewer.cancel">Cancel</button>
+                <button type="button" id="node-viewer-save" onclick="NodeViewer.save()" class="btn btn-primary" data-i18n="nodeViewer.save">Save Selection</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unified confirmation modal (replaces native confirm()) -->
+    <div id="confirm-modal" class="modal hidden" onclick="if (event.target === this) closeConfirmModal();">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 data-i18n="common.confirm">确认</h3>
+                <button onclick="closeConfirmModal()" class="close-btn">×</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-modal-message"></p>
+            </div>
+            <div class="form-actions">
+                <button onclick="closeConfirmModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                <button id="confirm-modal-ok" class="btn btn-primary" data-i18n="common.confirm">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="./static/app.js?v={{.Version}}"></script>
+</body>
+</html>
+{{end}}

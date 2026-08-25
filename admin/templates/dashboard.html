@@ -1,0 +1,358 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="dashboard">
+    <!-- Stats Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-icon">🔗</div>
+            <div class="stat-info">
+                <span class="stat-value" id="active-conn">{{index .Stats "activeConnections"}}</span>
+                <span class="stat-label" data-i18n="dash.activeConn">Active Connections</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">📈</div>
+            <div class="stat-info">
+                <span class="stat-value" id="total-conn">{{index .Stats "totalConnections"}}</span>
+                <span class="stat-label" data-i18n="dash.totalConn">Total Connections</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">⚡</div>
+            <div class="stat-info">
+                <span class="stat-value">{{.ProxyCount}}</span>
+                <span class="stat-label" data-i18n="dash.proxies">Proxies</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">🔌</div>
+            <div class="stat-info">
+                <span class="stat-value">{{.MappingCount}}</span>
+                <span class="stat-label" data-i18n="dash.mappings">Mappings</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">📋</div>
+            <div class="stat-info">
+                <span class="stat-value">{{.RuleCount}}</span>
+                <span class="stat-label" data-i18n="dash.rules">Rules</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">👥</div>
+            <div class="stat-info">
+                <span class="stat-value">{{.GroupCount}}</span>
+                <span class="stat-label" data-i18n="dash.groups">Groups</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">📡</div>
+            <div class="stat-info">
+                <span class="stat-value">{{.SubscriptionCount}}</span>
+                <span class="stat-label" data-i18n="dash.subscriptions">Subscriptions</span>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 data-i18n="dash.sysInfo">System Info</h3>
+        <table class="info-table">
+            <tr><td data-i18n="dash.uptime">Uptime</td><td>{{formatUptime .UptimeSeconds}}</td></tr>
+            <tr><td data-i18n="dash.started">Started</td><td>{{index .Stats "startTime"}}</td></tr>
+            {{if .EnvInfo.HasOverlay}}
+            <tr><td data-i18n="dash.env">Env</td><td><span class="badge badge-warn">{{.EnvInfo.Name}}</span> <small>(overlay active)</small></td></tr>
+            {{else if .EnvInfo.Name}}
+            <tr><td data-i18n="dash.env">Env</td><td><span class="badge">{{.EnvInfo.Name}}</span></td></tr>
+            {{end}}
+            <tr><td data-i18n="dash.saveTarget">Save Target</td><td><span class="badge badge-{{if eq .SaveTarget "env"}}warn{{else}}info{{end}}">{{.SaveTarget}}</span></td></tr>
+        </table>
+        {{if .EnvInfo.HasOverlay}}
+        <div class="env-hint">
+            runtime = base + <code>{{.EnvInfo.Name}}</code> | editing <strong>{{.SaveTarget}}</strong>
+        </div>
+        {{end}}
+    </div>
+
+    <!-- TUN Status -->
+    {{if .TUNAvailable}}
+    <div class="card tun-card" id="tun-card">
+        <div class="tun-header">
+            <h3 data-i18n="tun.title">🌐 TUN</h3>
+            <label class="switch" title="Toggle TUN">
+                <input type="checkbox" id="tun-toggle" onchange="toggleTUN(this)">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div id="tun-status">
+            <p data-i18n="tun.loading">Loading...</p>
+        </div>
+        <div class="tun-section" id="tun-routes-section" style="display:none;">
+            <h4 data-i18n="tun.routes">Routes</h4>
+            <table class="info-table tun-route-table">
+                <tr><td data-i18n="tun.status">Status</td><td id="tun-running"></td></tr>
+                <tr><td data-i18n="tun.tunIP">TUN IP</td><td id="tun-ip">-</td></tr>
+                <tr><td data-i18n="tun.gateway">Gateway</td><td id="tun-gateway">-</td></tr>
+                <tr><td data-i18n="tun.iface">Interface</td><td id="tun-iface">-</td></tr>
+                <tr><td data-i18n="tun.exclusions">Exclusions</td><td id="tun-exclusions">-</td></tr>
+                <tr><td data-i18n="tun.splitTunnels">Split Tunnels</td><td id="tun-splittunnels">-</td></tr>
+            </table>
+        </div>
+        <div class="tun-section" id="tun-logs-section" style="display:none;">
+            <h4 data-i18n="tun.logs">Event Log</h4>
+            <pre class="tun-log" id="tun-logs"></pre>
+        </div>
+    </div>
+    {{end}}
+
+    <!-- Listener Status -->
+    {{if index .Stats "listenerStatus"}}
+    <div class="card">
+        <h3 data-i18n="dash.listeners">Listeners</h3>
+        <table class="data-table">
+            <thead>
+                <tr><th>Name</th><th>Type</th><th>Port</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {{range $name, $ls := index .Stats "listenerStatus"}}
+                <tr>
+                    <td>{{$ls.Name}}</td>
+                    <td><code>{{$ls.Type}}</code></td>
+                    <td>{{$ls.Port}}</td>
+                    <td><span class="status-dot" style="background: {{statusColor $ls.Status}}"></span> {{$ls.Status}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{end}}
+
+    <!-- Health Status -->
+    {{if index .Stats "healthData"}}
+    <div class="card">
+        <h3 data-i18n="dash.health">Health Checks</h3>
+        {{range $group, $health := index .Stats "healthData"}}
+        <div class="health-group">
+            <h4>{{$group}}</h4>
+            <div class="health-list">
+                {{range $health}}
+                <div class="health-item">
+                    <span class="alive-icon">{{aliveIcon .Alive}}</span>
+                    <span class="proxy-name">{{.Name}}</span>
+                    {{if .Alive}}
+                    <span class="latency">{{.Latency.Milliseconds}}ms</span>
+                    {{else}}
+                    <span class="fail-count">fail: {{.FailCount}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+            </div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+
+    <!-- Security Settings -->
+    <div class="card">
+        <h3 data-i18n="security.title">🔐 Security</h3>
+        <div id="security-status">
+            <p data-i18n="security.loading">Loading...</p>
+        </div>
+        <div class="action-buttons" style="margin-top: 1rem;">
+            <button id="btn-security-action" class="btn btn-primary" data-i18n="security.enable">Enable Login Protection</button>
+            <button onclick="logout()" class="btn btn-outline" id="btn-logout" style="display:none;" data-i18n="security.logout">Logout</button>
+        </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="card actions-card">
+        <h3 data-i18n="dash.quickActions">Quick Actions</h3>
+        <div class="action-buttons">
+            <button onclick="location.href='proxies'" class="btn" data-i18n="dash.manageProxies">Manage Proxies</button>
+            <button onclick="location.href='rules'" class="btn" data-i18n="dash.editRules">Edit Rules</button>
+            <button onclick="location.href='mappings'" class="btn" data-i18n="dash.viewMappings">View Mappings</button>
+            <button onclick="reloadConfig()" class="btn btn-primary" data-i18n="dash.reloadConfig">Reload Config</button>
+        </div>
+    </div>
+
+    <!-- Security Modal -->
+    <div id="security-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="security-modal-title" data-i18n="security.modalTitle">Configure Authentication</h3>
+                <button onclick="closeSecurityModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="security-form" onsubmit="saveSecurity(event)">
+                <div class="form-group">
+                    <label data-i18n="login.username">Username</label>
+                    <input type="text" id="sec-username" required>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="login.password">Password</label>
+                    <input type="password" id="sec-password" required>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="security.confirmPassword">Confirm Password</label>
+                    <input type="password" id="sec-password-confirm" required>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeSecurityModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        // Check auth status on load
+        fetch('./api/config')
+            .then(r => r.json())
+            .then(data => {
+                const admin = data.admin || {};
+                const statusEl = document.getElementById('security-status');
+                const actionBtn = document.getElementById('btn-security-action');
+                const logoutBtn = document.getElementById('btn-logout');
+                if (admin['auth-enabled']) {
+                    const t1 = typeof i18n !== 'undefined' ? i18n.t('security.enabled') : 'Authentication enabled';
+                    statusEl.innerHTML = '<p>🔐 ' + t1 + ' (user: <strong>' + (admin.username || '') + '</strong>)</p>';
+                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.change') : 'Change Credentials';
+                    actionBtn.onclick = () => openSecurityModal(true);
+                    logoutBtn.style.display = '';
+                } else {
+                    const t2 = typeof i18n !== 'undefined' ? i18n.t('security.disabled') : 'Authentication disabled — anyone can access this panel';
+                    statusEl.innerHTML = '<p>🔓 ' + t2 + '</p>';
+                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.enable') : 'Enable Login Protection';
+                    actionBtn.onclick = () => openSecurityModal(false);
+                    logoutBtn.style.display = 'none';
+                }
+            })
+            .catch(() => {});
+    })();
+
+    function openSecurityModal(isChange) {
+        const title = typeof i18n !== 'undefined' ? i18n.t(isChange ? 'security.changeTitle' : 'security.enableTitle') : (isChange ? 'Change Credentials' : 'Enable Login Protection');
+        document.getElementById('security-modal-title').textContent = title;
+        document.getElementById('security-form').reset();
+        document.getElementById('security-modal').classList.remove('hidden');
+    }
+
+    function closeSecurityModal() {
+        document.getElementById('security-modal').classList.add('hidden');
+    }
+
+    function saveSecurity(e) {
+        e.preventDefault();
+        const username = document.getElementById('sec-username').value.trim();
+        const password = document.getElementById('sec-password').value;
+        const confirm = document.getElementById('sec-password-confirm').value;
+        if (password !== confirm) {
+            showToast(typeof i18n !== 'undefined' ? i18n.t('setup.passwordMismatch') : 'Passwords do not match', 'error');
+            return;
+        }
+        fetch('./api/admin/auth', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({'auth-enabled': true, username, password})
+        })
+        .then(res => {
+            if (res.ok) {
+                closeSecurityModal();
+                location.reload();
+            } else {
+                showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saveFailed') : 'Save failed', 'error');
+            }
+        })
+        .catch(err => {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        });
+    }
+
+    function logout() {
+        fetch('./api/logout', {method: 'POST'})
+            .then(() => location.href = 'login')
+            .catch(() => location.href = 'login');
+    }
+
+    (function initTUN() {
+        const card = document.getElementById('tun-card');
+        if (!card) return;
+        // TUN updates come exclusively through SSE version events.
+    })();
+
+    function refreshTUN() {
+        fetch('./api/tun')
+            .then(r => r.json())
+            .then(data => renderTUN(data))
+            .catch(() => {});
+    }
+
+    function renderTUN(data) {
+        const card = document.getElementById('tun-card');
+        if (!card) return;
+
+        const toggle = document.getElementById('tun-toggle');
+        const statusEl = document.getElementById('tun-status');
+        const routesSection = document.getElementById('tun-routes-section');
+        const logsSection = document.getElementById('tun-logs-section');
+        const runningEl = document.getElementById('tun-running');
+
+        if (toggle) toggle.checked = data.enabled;
+
+        const running = data.running;
+        const tRunning = typeof i18n !== 'undefined' ? i18n.t(running ? 'tun.running' : 'tun.stopped') : (running ? 'Running' : 'Stopped');
+        const color = running ? 'var(--success)' : 'var(--text-muted)';
+        if (runningEl) {
+            runningEl.innerHTML = '<span class="status-dot" style="background:' + color + '"></span> ' + tRunning;
+        }
+
+        if (statusEl) {
+            if (!data.available) {
+                statusEl.innerHTML = '<p>' + (typeof i18n !== 'undefined' ? i18n.t('tun.notAvailable') : 'TUN extension not available') + '</p>';
+            } else {
+                statusEl.innerHTML = '';
+            }
+        }
+
+        if (routesSection) routesSection.style.display = running ? 'block' : 'none';
+        if (logsSection) logsSection.style.display = (running || (data.logs && data.logs.length)) ? 'block' : 'none';
+
+        const routes = data.routes || {};
+        const ipEl = document.getElementById('tun-ip');
+        if (ipEl) ipEl.textContent = routes.tunIP || '-';
+        const gwEl = document.getElementById('tun-gateway');
+        if (gwEl) gwEl.textContent = routes.originalGateway || '-';
+        const ifaceEl = document.getElementById('tun-iface');
+        if (ifaceEl) ifaceEl.textContent = routes.defaultIface || '-';
+        const exclEl = document.getElementById('tun-exclusions');
+        if (exclEl) exclEl.textContent = (routes.exclusions && routes.exclusions.length) ? routes.exclusions.join(', ') : '-';
+        const splitEl = document.getElementById('tun-splittunnels');
+        if (splitEl) splitEl.textContent = (routes.splitTunnels && routes.splitTunnels.length) ? routes.splitTunnels.join(', ') : '-';
+
+        const logsEl = document.getElementById('tun-logs');
+        if (logsEl && data.logs) {
+            logsEl.textContent = data.logs.join('\n');
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+    }
+
+    function toggleTUN(checkbox) {
+        const enabled = checkbox.checked;
+        fetch('./api/tun', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enabled})
+        })
+        .then(res => {
+            if (!res.ok) {
+                checkbox.checked = !enabled;
+                return res.text().then(text => { throw new Error(text); });
+            }
+            // SSE will refresh the TUN card once the toggle is applied.
+        })
+        .catch(err => {
+            checkbox.checked = !enabled;
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.toggleFailed') : 'TUN toggle failed') + ': ' + err.message, 'error');
+        });
+    }
+    </script>
+</div>
+{{end}}

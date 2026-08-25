@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="setup.title">Setup Wizard - Phaethon Manager</title>
+    <link rel="stylesheet" href="./static/style.css">
+    <style>
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+            padding: 2rem 1rem;
+        }
+        .setup-container {
+            width: 100%;
+            max-width: 600px;
+        }
+        .setup-box {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .setup-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .setup-header h1 {
+            font-size: 1.5rem;
+            margin: 0.5rem 0;
+        }
+        .setup-header p {
+            color: var(--text-secondary);
+            margin: 0;
+        }
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        .step {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+        .step.active {
+            color: var(--primary);
+        }
+        .step-num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        .step.active .step-num {
+            border-color: var(--primary);
+            background: var(--primary);
+            color: #fff;
+        }
+        .setup-step {
+            display: none;
+        }
+        .setup-step.active {
+            display: block;
+        }
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary);
+        }
+        .setup-actions {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 2rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+        }
+        .setup-skip {
+            color: var(--text-secondary);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        .setup-skip:hover {
+            color: var(--text);
+        }
+        .setup-error {
+            display: none;
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+            color: #f85149;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+        .setup-error.show {
+            display: block;
+        }
+        .summary-box {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .summary-box h4 {
+            margin: 0 0 0.75rem 0;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+        .summary-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.375rem 0;
+            font-size: 0.875rem;
+        }
+        .summary-item span:first-child {
+            color: var(--text-secondary);
+        }
+        .lang-switcher-setup {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="lang-switcher-setup" id="lang-switcher-container"></div>
+    <div class="setup-container">
+        <div class="setup-box">
+            <div class="setup-header">
+                <div style="font-size: 2.5rem;">⚡</div>
+                <h1 data-i18n="setup.title">Phaethon Setup</h1>
+                <p data-i18n="setup.subtitle">Complete the initial configuration</p>
+            </div>
+
+            <div class="step-indicator">
+                <div class="step active" id="step-ind-1">
+                    <div class="step-num">1</div>
+                    <span data-i18n="setup.step1">Security</span>
+                </div>
+                <div class="step" id="step-ind-2">
+                    <div class="step-num">2</div>
+                    <span data-i18n="setup.step2">Reverse</span>
+                </div>
+                <div class="step" id="step-ind-3">
+                    <div class="step-num">3</div>
+                    <span data-i18n="setup.step3">Confirm</span>
+                </div>
+            </div>
+
+            <div id="setup-error" class="setup-error"></div>
+
+            <!-- Step 1: Security -->
+            <div class="setup-step active" id="setup-step-1">
+                <h3 data-i18n="setup.securityTitle">🔐 Security Settings</h3>
+                <p style="color: var(--text-secondary); margin-bottom: 1.5rem;" data-i18n="setup.securityDesc">
+                    Optionally enable login protection for the admin panel. You can skip this and configure it later.
+                </p>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="setup-enable-auth" onchange="toggleAuthFields()">
+                    <label for="setup-enable-auth" data-i18n="setup.enableAuth">Enable login protection</label>
+                </div>
+                <div id="auth-fields" style="display: none;">
+                    <div class="form-group">
+                        <label data-i18n="login.username">Username</label>
+                        <input type="text" id="setup-username" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="login.password">Password</label>
+                        <input type="password" id="setup-password" placeholder="••••••">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="setup.confirmPassword">Confirm Password</label>
+                        <input type="password" id="setup-password-confirm" placeholder="••••••">
+                    </div>
+                </div>
+                <div class="setup-actions">
+                    <button class="setup-skip" onclick="skipAuth()" data-i18n="setup.skip">Skip</button>
+                    <button class="btn btn-primary" onclick="nextStep(2)" data-i18n="rv.btnNext">Next →</button>
+                </div>
+            </div>
+
+            <!-- Step 2: Reverse Connection -->
+            <div class="setup-step" id="setup-step-2">
+                <h3 data-i18n="setup.reverseTitle">🔄 Reverse Connection</h3>
+                <p style="color: var(--text-secondary); margin-bottom: 1.5rem;" data-i18n="setup.reverseDesc">
+                    Optionally configure reverse connection to let external users access your local services. You can skip this and configure it later.
+                </p>
+                <div class="form-group">
+                    <label data-i18n="rv.outboundProxy">Outbound Proxy</label>
+                    <select id="setup-proxy">
+                        <option value="" data-i18n="rule.select">Select...</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label data-i18n="rv.listenProto">Listen Protocol</label>
+                        <select id="setup-listen-proto">
+                            <option value="socks5">SOCKS5</option>
+                            <option value="trojan">Trojan</option>
+                            <option value="direct">Direct</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="rv.reconnect">Reconnect Interval (seconds)</label>
+                        <input type="number" id="setup-reconnect" value="10" min="1" max="3600">
+                    </div>
+                </div>
+                <div class="setup-actions">
+                    <button class="btn btn-outline" onclick="prevStep(1)" data-i18n="rv.btnBack">← Back</button>
+                    <div style="display: flex; gap: 0.75rem;">
+                        <button class="setup-skip" onclick="skipReverse()" data-i18n="setup.skipReverse">Skip</button>
+                        <button class="btn btn-primary" onclick="nextStep(3)" data-i18n="rv.btnNext">Next →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 3: Confirm -->
+            <div class="setup-step" id="setup-step-3">
+                <h3 data-i18n="setup.confirmTitle">✅ Confirm & Save</h3>
+                <div id="setup-summary"></div>
+                <div class="setup-actions">
+                    <button class="btn btn-outline" onclick="prevStep(2)" data-i18n="rv.btnBack">← Back</button>
+                    <button class="btn btn-primary" onclick="saveSetup()" data-i18n="rv.btnSave">Save & Enable</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="./static/i18n.js"></script>
+    <script>
+        let setupData = {
+            authEnabled: false,
+            username: '',
+            password: '',
+            proxy: '',
+            listenProto: 'socks5',
+            reconnect: 10
+        };
+
+        function toggleAuthFields() {
+            const enabled = document.getElementById('setup-enable-auth').checked;
+            document.getElementById('auth-fields').style.display = enabled ? 'block' : 'none';
+        }
+
+        function skipAuth() {
+            setupData.authEnabled = false;
+            nextStep(2);
+        }
+
+        function skipReverse() {
+            setupData.proxy = '';
+            setupData.listenProto = 'socks5';
+            setupData.reconnect = 10;
+            nextStep(3);
+        }
+
+        function nextStep(step) {
+            if (step === 2) {
+                const enableAuth = document.getElementById('setup-enable-auth').checked;
+                if (enableAuth) {
+                    const u = document.getElementById('setup-username').value.trim();
+                    const p = document.getElementById('setup-password').value;
+                    const cp = document.getElementById('setup-password-confirm').value;
+                    if (!u || !p) {
+                        showError(typeof i18n !== 'undefined' ? i18n.t('toast.enterCredentials') : 'Please enter username and password');
+                        return;
+                    }
+                    if (p !== cp) {
+                        showError(typeof i18n !== 'undefined' ? i18n.t('setup.passwordMismatch') : 'Passwords do not match');
+                        return;
+                    }
+                    setupData.authEnabled = true;
+                    setupData.username = u;
+                    setupData.password = p;
+                } else {
+                    setupData.authEnabled = false;
+                }
+            }
+            if (step === 3) {
+                setupData.proxy = document.getElementById('setup-proxy').value;
+                setupData.listenProto = document.getElementById('setup-listen-proto').value;
+                setupData.reconnect = parseInt(document.getElementById('setup-reconnect').value) || 10;
+                renderSummary();
+            }
+
+            document.querySelectorAll('.setup-step').forEach(el => el.classList.remove('active'));
+            document.getElementById('setup-step-' + step).classList.add('active');
+            document.querySelectorAll('.step').forEach((el, i) => {
+                el.classList.toggle('active', i + 1 === step);
+            });
+            hideError();
+        }
+
+        function prevStep(step) {
+            nextStep(step);
+        }
+
+        function renderSummary() {
+            const authHtml = setupData.authEnabled
+                ? `<div class="summary-item"><span>${i18n.t('login.username')}</span><span>${setupData.username}</span></div>`
+                : `<div class="summary-item"><span>${i18n.t('setup.authStatus')}</span><span>${i18n.t('setup.authDisabled')}</span></div>`;
+            const reverseHtml = setupData.proxy
+                ? `<div class="summary-item"><span>${i18n.t('rv.outboundProxy')}</span><span>${setupData.proxy}</span></div>
+                   <div class="summary-item"><span>${i18n.t('rv.listenProto')}</span><span>${setupData.listenProto.toUpperCase()}</span></div>
+                   <div class="summary-item"><span>${i18n.t('rv.reconnect')}</span><span>${setupData.reconnect}s</span></div>`
+                : `<div class="summary-item"><span>${i18n.t('setup.reverseStatus')}</span><span>${i18n.t('setup.reverseDisabled')}</span></div>`;
+            const html = `
+                <div class="summary-box">
+                    <h4>${i18n.t('setup.securityTitle')}</h4>
+                    ${authHtml}
+                </div>
+                <div class="summary-box">
+                    <h4>${i18n.t('setup.reverseTitle')}</h4>
+                    ${reverseHtml}
+                </div>
+            `;
+            document.getElementById('setup-summary').innerHTML = html;
+        }
+
+        function saveSetup() {
+            const payload = {
+                'auth-enabled': setupData.authEnabled,
+                'username': setupData.username,
+                'password': setupData.password,
+                'reverse-configs': setupData.proxy ? [{
+                    name: 'reverse-1',
+                    enabled: true,
+                    'outbound-proxy': setupData.proxy,
+                    'listener-proto': setupData.listenProto,
+                    'reconnect-interval': setupData.reconnect
+                }] : []
+            };
+
+            fetch('./api/setup', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(async res => {
+                if (res.ok) {
+                    window.location.href = './';
+                } else {
+                    const text = await res.text();
+                    showError(text || (typeof i18n !== 'undefined' ? i18n.t('toast.saveFailed') : 'Save failed'));
+                }
+            })
+            .catch(err => {
+                showError(typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Network error');
+            });
+        }
+
+        function showError(msg) {
+            const el = document.getElementById('setup-error');
+            el.textContent = msg;
+            el.classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('setup-error').classList.remove('show');
+        }
+
+        // Load proxies for select
+        fetch('./api/proxies')
+            .then(r => r.json())
+            .then(data => {
+                const select = document.getElementById('setup-proxy');
+                data.proxies.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.name;
+                    opt.textContent = `${p.name} (${p.type})`;
+                    select.appendChild(opt);
+                });
+            })
+            .catch(() => {});
+    </script>
+</body>
+</html>

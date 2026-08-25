@@ -1,0 +1,32 @@
+# Safe built-in defaults for phaethon.
+# No credentials or infrastructure addresses are embedded here.
+# On first run, phaethon copies this file to config.yaml in the working directory.
+
+proxies: []
+proxy-groups: []
+subscriptions: []
+
+mappings:
+  - name: local-socks5
+    type: socks5
+    port: 7890
+
+rules:
+  - MATCH,DIRECT
+
+resolvers: []
+
+interactive: false
+udp-port-range: ""
+tcp-port-range: ""
+
+admin:
+  enabled: true
+  addr: 127.0.0.1:9090
+  token: ""
+  auth-enabled: false
+  username: ""
+  password: ""
+
+tun:
+  enabled: false

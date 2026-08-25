@@ -1,0 +1,1358 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="proxy.title">Proxies</span> ({{len .Proxies}})</h3>
+            <button onclick="showAddProxy()" class="btn btn-primary btn-sm" data-i18n="proxy.add">+ Add Proxy</button>
+        </div>
+
+        <!-- Proxy Table -->
+        <div class="table-responsive">
+            <table class="data-table" id="proxy-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="proxy.name">Name</th>
+                        <th data-i18n="proxy.type">Type</th>
+                        <th data-i18n="proxy.server">Server</th>
+                        <th data-i18n="proxy.port">Port</th>
+                        <th data-i18n="proxy.sni">SNI</th>
+                        <th data-i18n="proxy.udp">UDP</th>
+                        <th data-i18n="proxy.next">Next</th>
+                        <th data-i18n="common.enabled">Enabled</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Proxies}}
+                    <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
+                        <td><strong>{{.Name}}</strong></td>
+                        <td><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
+                        <td>{{.Server}}</td>
+                        <td>{{.Port}}</td>
+                        <td>{{.Sni}}</td>
+                        <td>{{if .UDP}}✅{{else}}❌{{end}}</td>
+                        <td>{{.ProxyName}}</td>
+                        <td>
+                            <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleProxy('{{.Name}}', this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <button onclick="editProxy('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                            <button onclick="testProxy('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
+                            <button onclick="deleteProxy('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Groups -->
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="proxy.groupTitle">Proxy Groups</span> ({{len .Groups}})</h3>
+            <button onclick="showAddGroup()" class="btn btn-primary btn-sm" data-i18n="proxy.addGroup">+ Add Group</button>
+        </div>
+        {{if .Groups}}
+        {{range .Groups}}
+        {{$stats := index $.GroupStats .Name}}
+        <div class="group-card {{if not (.Enabled | enabled)}}row-disabled{{end}}" data-group="{{.Name}}">
+            <div class="group-header">
+                <h4>{{.Name}} <span class="type-badge">{{.Type}}</span></h4>
+                <div>
+                    <button onclick="testGroup('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
+                    <label class="switch" style="margin-right:0.5rem;" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                        <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleGroup('{{.Name}}', this.checked)">
+                        <span class="slider"></span>
+                    </label>
+                    <button onclick="editGroup('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                    <button onclick="deleteGroup('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
+                    <button onclick="toggleGroupMembers('{{.Name}}')" class="btn btn-sm btn-outline expand-btn" title="Show members">▶</button>
+                </div>
+            </div>
+            <p class="text-muted">
+                <span data-i18n="proxy.totalMembers">Total</span>: {{$stats.total}}
+                {{if $stats.active}} · <span data-i18n="proxy.activeMember">Active</span>: {{$stats.active}}{{end}}
+                {{if .Subscription}} · <span data-i18n="proxy.groupSub">Subscription</span>: {{.Subscription}}{{end}}
+            </p>
+            <div class="group-members hidden" data-group-members="{{.Name}}">
+                <div class="members-loading text-muted" data-i18n="common.loading">Loading...</div>
+                <table class="data-table group-members-table hidden">
+                    <thead>
+                        <tr>
+                            <th data-i18n="proxy.active">Active</th>
+                            <th data-i18n="proxy.name">Name</th>
+                            <th data-i18n="proxy.source">Source</th>
+                            <th data-i18n="proxy.type">Type</th>
+                            <th data-i18n="proxy.server">Server</th>
+                            <th data-i18n="proxy.port">Port</th>
+                            <th data-i18n="proxy.status">Status</th>
+                            <th data-i18n="proxy.latency">Latency</th>
+                        </tr>
+                    </thead>
+                    <tbody class="members-tbody"></tbody>
+                </table>
+                <button type="button" onclick="toggleShowAllGroupMembers('{{.Name}}')" class="btn btn-sm btn-outline show-all-btn hidden" style="margin-top:0.5rem;">Show all</button>
+            </div>
+        </div>
+        {{end}}
+        {{else}}
+        <p class="text-muted" data-i18n="proxy.noGroups">No groups defined.</p>
+        {{end}}
+    </div>
+</div>
+
+<!-- Add/Edit Proxy Modal -->
+<div id="proxy-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3 id="modal-title" data-i18n="proxy.modalAdd">Add Proxy</h3>
+            <button onclick="closeModal()" class="close-btn">×</button>
+        </div>
+        <form id="proxy-form" onsubmit="saveProxy(event)">
+            <input type="hidden" id="edit-name" value="">
+            <div class="form-group">
+                <label><span data-i18n="proxy.name">Name</span> *</label>
+                <input type="text" id="f-name" required placeholder="MY_PROXY">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label><span data-i18n="proxy.type">Type</span> *</label>
+                    <select id="f-type" required onchange="toggleFields()">
+                        <option value="" data-i18n="rule.select">Select...</option>
+                        <option value="SOCKS5">SOCKS5</option>
+                        <option value="HTTP">HTTP</option>
+                        <option value="HTTPS">HTTPS</option>
+                        <option value="TROJAN">Trojan</option>
+                        <option value="VLESS">VLESS</option>
+                        <option value="H_TUNNEL">H_Tunnel</option>
+                        <option value="HYSTERIA2">Hysteria2</option>
+                        <option value="SERVER" data-i18n="proxy.serverInbound">Server (inbound)</option>
+                        <option value="ssh" data-i18n="proxy.serverSSH">SSH</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="proxy.nextProxy">Next Proxy</label>
+                    <select id="f-proxy">
+                        <option value="" data-i18n="proxy.noNext">(none)</option>
+                        <option value="DIRECT">DIRECT</option>
+                        <option value="REJECT">REJECT</option>
+                    </select>
+                </div>
+            </div>
+            <!-- Server/Port (for outbound types) -->
+            <div id="row-server" class="form-row">
+                <div class="form-group">
+                    <label><span data-i18n="proxy.server">Server</span> *</label>
+                    <input type="text" id="f-server" placeholder="1.2.3.4 or domain.com">
+                </div>
+                <div class="form-group">
+                    <label><span data-i18n="proxy.port">Port</span> *</label>
+                    <input type="number" id="f-port" placeholder="443">
+                </div>
+            </div>
+            <!-- SNI (TLS types) -->
+            <div id="row-sni" class="form-row">
+                <div class="form-group">
+                    <label data-i18n="proxy.sni">SNI / Servername</label>
+                    <input type="text" id="f-sni" placeholder="www.example.com">
+                </div>
+            </div>
+            <!-- Auth fields -->
+            <div id="row-password" class="form-row">
+                <div class="form-group">
+                    <label id="lbl-password" data-i18n="proxy.password">Password / UUID</label>
+                    <input type="password" id="f-password" placeholder="••••••••">
+                </div>
+                <div class="form-group" id="col-username">
+                    <label data-i18n="proxy.username">Username</label>
+                    <input type="text" id="f-username" placeholder="(optional)">
+                </div>
+            </div>
+            <!-- H_TUNNEL URL -->
+            <div id="row-url" class="form-row hidden">
+                <div class="form-group">
+                    <label data-i18n="proxy.url">URL *</label>
+                    <input type="text" id="f-url" placeholder="http://host:port/path">
+                </div>
+            </div>
+            <!-- VLESS Flow -->
+            <div id="row-flow" class="form-row hidden">
+                <div class="form-group">
+                    <label data-i18n="proxy.flow">Flow</label>
+                    <input type="text" id="f-flow" placeholder="xtls-rprx-vision">
+                </div>
+            </div>
+            <!-- Reverse Address (for SOCKS5/TROJAN/H_TUNNEL reverse binding) -->
+            <div id="row-reverse-addr" class="form-row hidden">
+                <div class="form-group">
+                    <label data-i18n="proxy.reverseAddr">Reverse Address</label>
+                    <input type="text" id="f-reverse-addr" placeholder="host:port">
+                </div>
+            </div>
+            <!-- SSH Key (ssh type) -->
+            <div id="row-ssh-key" class="form-row hidden">
+                <div class="form-group">
+                    <label data-i18n="proxy.privateKey">Private Key</label>
+                    <textarea id="f-private-key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="proxy.privateKeyPassphrase">Key Passphrase</label>
+                    <input type="password" id="f-private-key-passphrase" placeholder="(optional)">
+                </div>
+            </div>
+            <!-- Options -->
+            <div class="form-row">
+                <div class="form-group checkbox-group" id="col-udp">
+                    <label><input type="checkbox" id="f-udp"> <span data-i18n="proxy.udpSupport">UDP Support</span></label>
+                </div>
+                <div class="form-group checkbox-group" id="col-skip">
+                    <label><input type="checkbox" id="f-skip-cert"> <span data-i18n="proxy.skipCert">Skip Cert Verify</span></label>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="closeModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Group Modal -->
+<div id="group-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3 id="group-modal-title" data-i18n="proxy.addGroup">Add Proxy Group</h3>
+            <button onclick="closeModal()" class="close-btn">×</button>
+        </div>
+        <form id="group-form" onsubmit="saveGroup(event)">
+            <input type="hidden" id="group-edit-name" value="">
+            <div class="form-group">
+                <label><span data-i18n="proxy.groupName">Name</span> *</label>
+                <input type="text" id="g-name" required placeholder="MY_GROUP">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label><span data-i18n="proxy.groupType">Type</span> *</label>
+                    <input type="hidden" id="g-type" value="">
+                    <div class="segmented-control" id="g-type-seg">
+                        <button type="button" class="mode-btn" data-type="select" onclick="setGroupType('select')">select</button>
+                        <button type="button" class="mode-btn" data-type="best" onclick="setGroupType('best')">best</button>
+                        <button type="button" class="mode-btn" data-type="load-balance" onclick="setGroupType('load-balance')">load-balance</button>
+                    </div>
+                    <small id="g-type-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);"></small>
+                </div>
+            </div>
+            <div class="form-row" id="g-sub-row">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.groupSub">Subscription Source</label>
+                    <select id="g-sub" onchange="setGroupSub(this.value)">
+                        <option value="" data-i18n="proxy.groupSubNone">(none)</option>
+                        {{range .Subscriptions}}
+                        <option value="{{.Name}}">{{.Name}}</option>
+                        {{end}}
+                    </select>
+                    <small id="g-sub-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="proxy.groupSubHelpNew">Optional; subscription nodes are tried before manual members.</small>
+                </div>
+            </div>
+            <div class="form-row" id="g-sub-filter-row">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.subFilter">Filter (regex)</label>
+                    <input type="text" id="g-sub-filter" placeholder=".*">
+                    <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="proxy.subFilterHelp">Filter subscription nodes by name regex. Leave empty to include all.</small>
+                </div>
+            </div>
+            <div class="form-row" id="g-health-row">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.healthCheckURL">Health Check URL</label>
+                    <input type="text" id="g-health-url" placeholder="http://www.google.com/generate_204">
+                </div>
+                <div class="form-group" style="flex: 0 0 160px;">
+                    <label data-i18n="proxy.groupInterval">Interval (s)</label>
+                    <input type="number" id="g-health-interval" placeholder="300" min="0">
+                </div>
+            </div>
+            <div class="form-row" id="g-manual-row">
+                <div class="form-group" style="flex: 1;">
+                    <label id="g-manual-label" data-i18n="proxy.groupMembers">Manual Member Proxies</label>
+                    <div class="manual-picker-layout" id="manual-picker">
+                        <div class="picker-pane">
+                            <h4><span data-i18n="proxy.availableProxies">Available Proxies</span> <span id="manual-available-count" class="count">0</span></h4>
+                            <div class="picker-controls">
+                                <input type="text" id="manual-filter" class="picker-filter" placeholder="Filter..." oninput="renderManualPicker()" style="flex:1;">
+                                <button type="button" id="manual-test-all-btn" onclick="testAllManualNodes()" class="btn btn-sm btn-outline" data-i18n="sub.testAll">Test All</button>
+                            </div>
+                            <div id="manual-available-list" class="picker-list"></div>
+                        </div>
+                        <div class="picker-pane">
+                            <h4><span id="manual-selected-title" data-i18n="proxy.selectedOrder">Selected Order</span> <span id="manual-selected-count" class="count">0</span></h4>
+                            <div class="picker-controls">
+                                <button type="button" onclick="clearManualSelection()" class="btn btn-sm btn-outline" data-i18n="proxy.clear">Clear</button>
+                            </div>
+                            <div id="manual-selected-list" class="picker-list"></div>
+                        </div>
+                    </div>
+                    <small id="g-manual-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="proxy.groupMembersHelp">Manual members are used as fallback after subscription nodes.</small>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="closeModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Blocked Delete Modal -->
+<div id="blocked-delete-modal" class="modal hidden">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 data-i18n="proxy.confirmDelete">Delete Proxy</h3>
+            <button class="close-btn" onclick="closeBlockedDeleteModal()">×</button>
+        </div>
+        <p id="blocked-delete-msg" data-i18n="proxy.deleteBlocked">This proxy is still referenced and cannot be deleted:</p>
+        <ul id="blocked-delete-refs" class="blocked-refs-list"></ul>
+        <div class="form-actions">
+            <button type="button" onclick="closeBlockedDeleteModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+            <a href="config" class="btn btn-primary" data-i18n="proxy.referenceOpenConfig">Open Raw Config</a>
+        </div>
+    </div>
+</div>
+
+<script>
+const proxies = {{json .Proxies}};
+let groups = {{json .Groups}};
+const subscriptions = {{json .Subscriptions}};
+let manualSelected = new Set();
+let manualSelectedOrder = [];
+let manualHealthData = {}; // current group's health snapshot: name -> ProxyHealth
+let currentManualGroupName = '';
+let manualTesting = false;
+
+function populateNextProxySelect(selected) {
+    const sel = document.getElementById('f-proxy');
+    sel.innerHTML = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = typeof i18n !== 'undefined' ? i18n.t('proxy.noNext') : '(none)';
+    sel.appendChild(noneOpt);
+    const directOpt = document.createElement('option');
+    directOpt.value = 'DIRECT';
+    directOpt.textContent = 'DIRECT';
+    sel.appendChild(directOpt);
+    const rejectOpt = document.createElement('option');
+    rejectOpt.value = 'REJECT';
+    rejectOpt.textContent = 'REJECT';
+    sel.appendChild(rejectOpt);
+    proxies.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = `${p.name} (${p.type})`;
+        sel.appendChild(opt);
+    });
+    groups.forEach(g => {
+        const opt = document.createElement('option');
+        opt.value = g.name;
+        opt.textContent = `${g.name} [GROUP]`;
+        sel.appendChild(opt);
+    });
+    if (selected) sel.value = selected;
+}
+
+function showAddProxy() {
+    document.getElementById('modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.modalAdd') : 'Add Proxy');
+    document.getElementById('edit-name').value = '';
+    document.getElementById('proxy-form').reset();
+    populateNextProxySelect('');
+    document.getElementById('proxy-modal').classList.remove('hidden');
+}
+
+function editProxy(name) {
+    const p = proxies.find(x => x.name === name);
+    if (!p) return;
+    document.getElementById('modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.modalEdit') : 'Edit Proxy');
+    document.getElementById('edit-name').value = name;
+    document.getElementById('f-name').value = p.name;
+    document.getElementById('f-type').value = (p.type || '').toUpperCase();
+    document.getElementById('f-server').value = p.server || '';
+    document.getElementById('f-port').value = p.port || '';
+    document.getElementById('f-sni').value = p.sni || '';
+    document.getElementById('f-password').value = p.password || '';
+    document.getElementById('f-username').value = p.username || '';
+    document.getElementById('f-url').value = p.url || '';
+    document.getElementById('f-udp').checked = p.udp;
+    document.getElementById('f-skip-cert').checked = p['skip-cert-verify'];
+    document.getElementById('f-flow').value = p.flow || '';
+    document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
+    document.getElementById('f-private-key').value = p['private-key'] || '';
+    document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
+    populateNextProxySelect(p['proxy'] || '');
+    toggleFields();
+    document.getElementById('proxy-modal').classList.remove('hidden');
+}
+
+async function saveProxy(e) {
+    e.preventDefault();
+    const name = document.getElementById('edit-name').value;
+    const t = document.getElementById('f-type').value;
+    const isDirectReject = ['DIRECT','REJECT'].includes(t);
+    const isHTunnel = t === 'H_TUNNEL';
+    const isSSH = t === 'ssh';
+    const payload = {
+        name: document.getElementById('f-name').value,
+        type: t,
+        server: document.getElementById('f-server').value || '',
+        port: parseInt(document.getElementById('f-port').value) || 0,
+        sni: document.getElementById('f-sni').value || '',
+        password: document.getElementById('f-password').value || '',
+        username: document.getElementById('f-username').value || '',
+        url: document.getElementById('f-url').value || '',
+        'proxy': document.getElementById('f-proxy').value || '',
+        udp: document.getElementById('f-udp').checked,
+        'skip-cert-verify': document.getElementById('f-skip-cert').checked,
+        flow: document.getElementById('f-flow').value || '',
+        'reverse-address': document.getElementById('f-reverse-addr').value || '',
+        'private-key': document.getElementById('f-private-key').value || '',
+        'private-key-passphrase': document.getElementById('f-private-key-passphrase').value || '',
+    };
+
+    // Drop empty/irrelevant fields to keep YAML clean
+    ['server','port','sni','password','username','url','flow','proxy','reverse-address','private-key','private-key-passphrase'].forEach(k => {
+        if (payload[k] === '' || payload[k] === 0 || payload[k] === false) {
+            if (k !== 'server' && k !== 'port') delete payload[k];
+        }
+    });
+
+    // Protocol-specific cleanup
+    if (isDirectReject) {
+        delete payload.server;
+        delete payload.port;
+        delete payload.sni;
+        delete payload.password;
+        delete payload.username;
+        delete payload.url;
+        delete payload.flow;
+        delete payload['reverse-address'];
+        delete payload['private-key'];
+        delete payload['private-key-passphrase'];
+        delete payload.udp;
+        delete payload['skip-cert-verify'];
+    } else if (isHTunnel) {
+        delete payload.server;
+        delete payload.port;
+        delete payload.sni;
+        delete payload.username;
+        delete payload.flow;
+        delete payload.udp;
+        delete payload['skip-cert-verify'];
+        delete payload['private-key'];
+        delete payload['private-key-passphrase'];
+    } else if (isSSH) {
+        delete payload.url;
+        delete payload.flow;
+        delete payload.sni;
+        delete payload.udp;
+        delete payload['skip-cert-verify'];
+        delete payload['reverse-address'];
+    } else {
+        // Outbound proxy types (SOCKS5, HTTP, HTTPS, TROJAN, VLESS, HYSTERIA2, SERVER)
+        delete payload['private-key'];
+        delete payload['private-key-passphrase'];
+        if (t === 'SERVER') {
+            delete payload.password;
+            delete payload.username;
+            delete payload.url;
+            delete payload.flow;
+            delete payload.sni;
+            delete payload.udp;
+            delete payload['skip-cert-verify'];
+            delete payload['reverse-address'];
+        }
+        if (t === 'SOCKS5' || t === 'HTTP' || t === 'HTTPS') {
+            delete payload.flow;
+        }
+        if (t === 'HTTP' || t === 'HTTPS') {
+            delete payload.udp;
+            delete payload['skip-cert-verify'];
+        }
+        if (!['SOCKS5','TROJAN','H_TUNNEL'].includes(t)) {
+            delete payload['reverse-address'];
+        }
+    }
+
+    try {
+        const res = await fetch('./api/proxies', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        closeModal();
+        location.reload();
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+async function deleteProxy(name) {
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('proxy.confirmDelete') : 'Delete proxy';
+    showConfirm(confirmLabel + ' "' + name + '"?', async () => {
+        try {
+            const res = await fetch(`./api/proxies/${name}`, {method: 'DELETE'});
+            if (res.status === 409) {
+                const data = await res.json().catch(() => ({references: []}));
+                showBlockedDeleteModal(name, data.references || []);
+                return;
+            }
+            if (!res.ok) throw new Error(await res.text());
+            location.reload();
+        } catch (err) {
+            const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+            showToast(errLabel + ': ' + err.message, 'error');
+        }
+    });
+}
+
+async function testProxy(name, btn) {
+    if (!btn) return;
+    const originalHTML = btn.innerHTML;
+    const testingText = typeof i18n !== 'undefined' ? i18n.t('sub.testing') : 'Testing...';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>' + testingText;
+    try {
+        const res = await fetch(`./api/proxies/health-check/${encodeURIComponent(name)}`, {method: 'POST'});
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const alive = data.alive;
+        const ms = data.latencyMs !== undefined ? data.latencyMs : (data.latency !== undefined ? Math.round(data.latency / 1e6) : undefined);
+        const latencyText = ms !== undefined ? `${ms} ms` : '-';
+        const label = alive
+            ? (typeof i18n !== 'undefined' ? i18n.t('proxy.alive') : 'alive')
+            : (typeof i18n !== 'undefined' ? i18n.t('proxy.dead') : 'dead');
+        showToast(`${name}: ${label} · ${latencyText}`, alive ? 'success' : 'error');
+    } catch (err) {
+        const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
+        showToast(errLabel + ': ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+    }
+}
+
+function showBlockedDeleteModal(name, refs, opts) {
+    opts = opts || {};
+    const modal = document.getElementById('blocked-delete-modal');
+    const list = document.getElementById('blocked-delete-refs');
+    const titleEl = modal.querySelector('.modal-header h3');
+    const msgEl = document.getElementById('blocked-delete-msg');
+    const kindLabels = {
+        rule: typeof i18n !== 'undefined' ? i18n.t('proxy.referenceRule') : 'Rule',
+        group: typeof i18n !== 'undefined' ? i18n.t('proxy.referenceGroup') : 'Group',
+        proxy: typeof i18n !== 'undefined' ? i18n.t('proxy.referenceProxy') : 'Proxy',
+        mapping: typeof i18n !== 'undefined' ? i18n.t('proxy.referenceMapping') : 'Mapping',
+        reverse: typeof i18n !== 'undefined' ? i18n.t('proxy.referenceReverse') : 'Reverse'
+    };
+    list.innerHTML = '';
+    refs.forEach(ref => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="ref-kind" data-kind="${escapeHtml(ref.kind)}">${escapeHtml(kindLabels[ref.kind] || ref.kind)}</span>
+                        <span class="ref-name">${escapeHtml(ref.name)}</span>`;
+        list.appendChild(li);
+    });
+    if (titleEl) titleEl.textContent = opts.title || (typeof i18n !== 'undefined' ? i18n.t('proxy.confirmDelete') : 'Delete Proxy');
+    if (msgEl) msgEl.textContent = opts.message || (typeof i18n !== 'undefined' ? i18n.t('proxy.deleteBlocked') : 'This proxy is still referenced and cannot be deleted:');
+    modal.classList.remove('hidden');
+}
+
+function closeBlockedDeleteModal() {
+    document.getElementById('blocked-delete-modal').classList.add('hidden');
+}
+
+function closeModal() {
+    document.getElementById('proxy-modal').classList.add('hidden');
+    document.getElementById('group-modal').classList.add('hidden');
+}
+
+function setGroupType(type) {
+    const input = document.getElementById('g-type');
+    if (input) input.value = type;
+    document.querySelectorAll('#g-type-seg .mode-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === type);
+    });
+    updateGroupTypeHelp();
+}
+
+function updateGroupTypeHelp() {
+    const type = document.getElementById('g-type').value;
+    const helpEl = document.getElementById('g-type-help');
+    updateGroupSubHelp();
+    updateGroupModeUI();
+    const helps = {
+        'select': 'Use the active member if set; otherwise the first available member. Subscription nodes are tried before manual members.',
+        'best': 'Returns the alive member with the lowest latency across subscription and manual members.',
+        'load-balance': 'Round-robins across alive subscription and manual members.'
+    };
+    if (typeof i18n !== 'undefined') {
+        const key = `proxy.groupTypeHelp.${type}`;
+        const t = i18n.t(key);
+        helpEl.textContent = (t !== key) ? t : (helps[type] || '');
+    } else {
+        helpEl.textContent = helps[type] || '';
+    }
+}
+
+function updateGroupSubHelp() {
+    const sub = document.getElementById('g-sub').value;
+    const helpEl = document.getElementById('g-sub-help');
+    if (!helpEl) return;
+    if (sub) {
+        helpEl.textContent = typeof i18n !== 'undefined'
+            ? i18n.t('proxy.groupSubHelpSelected')
+            : 'Subscription source selected; matching nodes are included before manual members.';
+    } else {
+        helpEl.textContent = typeof i18n !== 'undefined'
+            ? i18n.t('proxy.groupSubOptional')
+            : 'Optional subscription source; manual members will always be used.';
+    }
+}
+
+function showAddGroup() {
+    document.getElementById('group-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.addGroup') : 'Add Proxy Group');
+    document.getElementById('group-edit-name').value = '';
+    document.getElementById('group-form').reset();
+    setGroupType('select');
+    setGroupSub('');
+    document.getElementById('g-health-url').value = 'http://www.google.com/generate_204';
+    setManualSelection([]);
+    loadManualHealth('');
+    document.getElementById('group-modal').classList.remove('hidden');
+}
+
+function editGroup(name) {
+    const g = groups.find(x => x.name === name);
+    if (!g) return;
+    document.getElementById('group-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.editGroup') : 'Edit Proxy Group');
+    document.getElementById('group-edit-name').value = name;
+    document.getElementById('g-name').value = g.name;
+    setGroupType(g.type || 'select');
+    setGroupSub(g.subscription || '');
+    document.getElementById('g-sub-filter').value = g['subscription-filter'] || '';
+    document.getElementById('g-health-url').value = g['health-check-url'] || '';
+    document.getElementById('g-health-interval').value = g['health-check-interval'] || '';
+    const members = g.manualProxies || g.proxies || [];
+    setManualSelection(members);
+    loadManualHealth(name);
+    updateGroupTypeHelp();
+    document.getElementById('group-modal').classList.remove('hidden');
+}
+
+async function saveGroup(e) {
+    e.preventDefault();
+    await doSaveGroup();
+}
+
+async function refreshGroups() {
+    const res = await fetch('./api/groups');
+    if (res.ok) {
+        groups = await res.json();
+    }
+}
+
+async function doSaveGroup() {
+    const editName = document.getElementById('group-edit-name').value;
+    const type = document.getElementById('g-type').value;
+    const selected = getManualSelection();
+    const subscription = document.getElementById('g-sub').value;
+
+    if (!type) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.groupTypeRequired') : 'Please select a group type';
+        showToast(msg, 'error');
+        return;
+    }
+
+    if (!subscription && selected.length === 0) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.groupMembersOrSubRequired') : 'Please select a subscription source or at least one manual member';
+        showToast(msg, 'error');
+        return;
+    }
+
+    const payload = {
+        name: document.getElementById('g-name').value,
+        type: type,
+        proxies: selected,
+        subscription: subscription,
+        'subscription-filter': document.getElementById('g-sub-filter').value || '',
+        'health-check-url': document.getElementById('g-health-url').value || '',
+        'health-check-interval': parseInt(document.getElementById('g-health-interval').value, 10) || 0,
+    };
+    try {
+        // Only delete the old group when renaming. Editing a group that is
+        // referenced by rules/other groups should not be blocked, and the POST
+        // handler already handles replacement for an existing name.
+        if (editName && editName !== payload.name) {
+            const delRes = await fetch(`./api/groups/${editName}`, {method: 'DELETE'});
+            if (!delRes.ok && delRes.status !== 404) throw new Error('Failed to delete old group: ' + await delRes.text());
+        }
+        const res = await fetch('./api/groups', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        await refreshGroups();
+        closeModal();
+        location.reload();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function deleteGroup(name) {
+    try {
+        const res = await fetch(`./api/groups/${name}`, {method: 'DELETE'});
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function toggleProxy(name, enabled) {
+    const row = document.querySelector(`#proxy-table tr[data-name="${CSS.escape(name)}"]`);
+    const checkbox = row ? row.querySelector('input[type="checkbox"]') : null;
+    try {
+        const res = await fetch(`./api/proxies/${encodeURIComponent(name)}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (res.status === 409) {
+            const data = await res.json().catch(() => ({references: []}));
+            if (checkbox) checkbox.checked = !enabled;
+            showBlockedDeleteModal(name, data.references || [], {
+                title: typeof i18n !== 'undefined' ? i18n.t('proxy.confirmDisable') : 'Disable Proxy',
+                message: typeof i18n !== 'undefined' ? i18n.t('proxy.disableBlocked') : 'This proxy is still referenced and cannot be disabled:'
+            });
+            return;
+        }
+        if (!res.ok) throw new Error(await res.text());
+        if (row) row.classList.toggle('row-disabled', !enabled);
+    } catch (err) {
+        if (checkbox) checkbox.checked = !enabled;
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function toggleGroup(name, enabled) {
+    const card = document.querySelector(`.group-card[data-group="${CSS.escape(name)}"]`);
+    const checkbox = card ? card.querySelector('input[type="checkbox"]') : null;
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(name)}/toggle`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (res.status === 409) {
+            const data = await res.json().catch(() => ({references: []}));
+            if (checkbox) checkbox.checked = !enabled;
+            showBlockedDeleteModal(name, data.references || [], {
+                title: typeof i18n !== 'undefined' ? i18n.t('proxy.confirmDisableGroup') : 'Disable Proxy Group',
+                message: typeof i18n !== 'undefined' ? i18n.t('proxy.disableBlockedGroup') : 'This proxy group is still referenced and cannot be disabled:'
+            });
+            return;
+        }
+        if (!res.ok) throw new Error(await res.text());
+        if (card) card.classList.toggle('row-disabled', !enabled);
+    } catch (err) {
+        if (checkbox) checkbox.checked = !enabled;
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+const GROUP_PREVIEW_LIMIT = 5;
+const groupMembersState = {};
+
+function getGroupCard(name) {
+    return document.querySelector(`.group-card[data-group="${CSS.escape(name)}"]`);
+}
+
+function getGroupMembersContainer(name) {
+    return document.querySelector(`.group-members[data-group-members="${CSS.escape(name)}"]`);
+}
+
+async function toggleGroupMembers(name) {
+    const container = getGroupMembersContainer(name);
+    if (!container) return;
+    const expanded = container.classList.toggle('hidden') === false;
+    const btn = getGroupCard(name)?.querySelector('.expand-btn');
+    if (btn) btn.textContent = expanded ? '▼' : '▶';
+    if (expanded) {
+        if (!groupMembersState[name]) {
+            await loadGroupMembers(name);
+        } else {
+            renderGroupMembers(name);
+        }
+    }
+}
+
+async function loadGroupMembers(name) {
+    const container = getGroupMembersContainer(name);
+    if (!container) return;
+    const loading = container.querySelector('.members-loading');
+    const table = container.querySelector('.group-members-table');
+    if (loading) loading.classList.remove('hidden');
+    if (table) table.classList.add('hidden');
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(name)}/members`);
+        if (!res.ok) throw new Error(await res.text());
+        groupMembersState[name] = { members: await res.json(), showAll: false };
+        renderGroupMembers(name);
+    } catch (err) {
+        if (loading) {
+            loading.textContent = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message;
+        }
+    }
+}
+
+function formatMemberStatus(m) {
+    const checked = m.lastCheck && !String(m.lastCheck).startsWith('0001-01-01');
+    if (m.isGroup) {
+        const alive = !!m.alive;
+        return alive
+            ? { html: '<span class="status-dot status-active"></span> alive', alive: true }
+            : { html: '<span class="status-dot status-error"></span> dead', alive: false };
+    }
+    if (!checked) {
+        return { html: '<span class="status-dot status-inactive"></span> <span class="text-muted">-</span>', alive: false };
+    }
+    if (m.alive) {
+        return { html: '<span class="status-dot status-active"></span> alive', alive: true };
+    }
+    return { html: '<span class="status-dot status-error"></span> dead', alive: false };
+}
+
+function formatMemberLatency(ms) {
+    if (ms === undefined || ms === null || ms === 0) return '-';
+    return `${ms} ms`;
+}
+
+function renderGroupMembers(name) {
+    const state = groupMembersState[name];
+    const container = getGroupMembersContainer(name);
+    if (!state || !container) return;
+    const { members, showAll } = state;
+    const loading = container.querySelector('.members-loading');
+    const table = container.querySelector('.group-members-table');
+    const tbody = container.querySelector('.members-tbody');
+    const showAllBtn = container.querySelector('.show-all-btn');
+    if (loading) loading.classList.add('hidden');
+    if (!members || members.length === 0) {
+        if (table) table.classList.add('hidden');
+        if (showAllBtn) showAllBtn.classList.add('hidden');
+        if (loading) {
+            loading.textContent = typeof i18n !== 'undefined' ? i18n.t('proxy.noMembers') : 'No members.';
+            loading.classList.remove('hidden');
+        }
+        return;
+    }
+    if (table) table.classList.remove('hidden');
+    const g = groups.find(x => x.name === name);
+    const isSelect = g && g.type === 'select';
+    const visible = showAll ? members : members.slice(0, GROUP_PREVIEW_LIMIT);
+    tbody.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    visible.forEach(m => {
+        const status = formatMemberStatus(m);
+        const tr = document.createElement('tr');
+        tr.dataset.name = m.name;
+        tr.dataset.source = m.source || 'manual';
+        if (m.active) tr.classList.add('row-active');
+        if (isSelect && !m.isGroup) {
+            tr.style.cursor = 'pointer';
+            tr.title = typeof i18n !== 'undefined' ? i18n.t('proxy.clickToActivate') : 'Click to set as active member';
+            tr.addEventListener('click', (e) => {
+                if (e.target.closest('a, button, input')) return;
+                setActiveMember(name, m);
+            });
+        }
+        const activeCell = document.createElement('td');
+        activeCell.innerHTML = m.active ? '<span class="status-dot status-active" title="active">●</span>' : '';
+        const nameCell = document.createElement('td');
+        nameCell.innerHTML = `<strong>${escapeHtml(m.name)}</strong>`;
+        const sourceCell = document.createElement('td');
+        sourceCell.innerHTML = `<span class="type-badge type-${escapeHtml((m.source || 'manual'))}">${escapeHtml(m.source || 'manual')}</span>`;
+        const typeCell = document.createElement('td');
+        typeCell.innerHTML = `<code class="type-badge type-${escapeHtml((m.type || '').toLowerCase())}">${escapeHtml(m.type || '-')}</code>`;
+        const serverCell = document.createElement('td');
+        serverCell.textContent = m.server || '';
+        const portCell = document.createElement('td');
+        portCell.textContent = m.port || '-';
+        const statusCell = document.createElement('td');
+        statusCell.innerHTML = status.html;
+        const latencyCell = document.createElement('td');
+        latencyCell.textContent = formatMemberLatency(m.latencyMs);
+        [activeCell, nameCell, sourceCell, typeCell, serverCell, portCell, statusCell, latencyCell].forEach(td => tr.appendChild(td));
+        frag.appendChild(tr);
+    });
+    tbody.appendChild(frag);
+    if (members.length > GROUP_PREVIEW_LIMIT) {
+        showAllBtn.classList.remove('hidden');
+        const label = showAll
+            ? (typeof i18n !== 'undefined' ? i18n.t('common.showLess') : 'Show less')
+            : `${typeof i18n !== 'undefined' ? i18n.t('common.showAll') : 'Show all'} (${members.length})`;
+        showAllBtn.textContent = label;
+    } else {
+        showAllBtn.classList.add('hidden');
+    }
+}
+
+function toggleShowAllGroupMembers(name) {
+    const state = groupMembersState[name];
+    if (!state) return;
+    state.showAll = !state.showAll;
+    renderGroupMembers(name);
+}
+
+async function setActiveMember(groupName, member) {
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(groupName)}/active-member`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: member.name, source: member.source || 'manual'})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        await loadGroupMembers(groupName);
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function testGroup(name, btn) {
+    if (!btn) return;
+    const originalHTML = btn.innerHTML;
+    const testingText = typeof i18n !== 'undefined' ? i18n.t('sub.testing') : 'Testing...';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>' + testingText;
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(name)}/test`, {method: 'POST'});
+        if (!res.ok) throw new Error(await res.text());
+        await loadGroupMembers(name);
+        const container = getGroupMembersContainer(name);
+        if (container && container.classList.contains('hidden')) {
+            await toggleGroupMembers(name);
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+    }
+}
+
+function setVisible(id, show) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !show);
+}
+function setRequired(id, req) {
+    const el = document.getElementById(id);
+    if (el) el.required = req;
+}
+function setLabel(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+}
+
+function hasGroupSub() {
+    return document.getElementById('g-sub').value !== '';
+}
+
+function setGroupSub(name) {
+    const sel = document.getElementById('g-sub');
+    if (sel) sel.value = name;
+    updateGroupModeUI();
+    updateGroupSubHelp();
+}
+
+function needsHealthCheck() {
+    const type = document.getElementById('g-type').value;
+    if (!type) return true;
+    // best / load-balance rely on latency / alive data.
+    return type === 'best' || type === 'load-balance';
+}
+
+function updateGroupModeUI() {
+    const hasSub = hasGroupSub();
+    setVisible('g-sub-filter-row', hasSub);
+    setVisible('g-health-row', needsHealthCheck());
+    const subSel = document.getElementById('g-sub');
+    if (subSel) subSel.required = false;
+    updateGroupSubHelp();
+    renderManualPicker();
+}
+
+function getManualItems() {
+    const currentEditName = document.getElementById('group-edit-name').value || '';
+    const items = [
+        { name: 'DIRECT', type: 'DIRECT', server: '', port: 0 },
+        { name: 'REJECT', type: 'REJECT', server: '', port: 0 }
+    ];
+    proxies.forEach(p => {
+        items.push({ name: p.name, type: p.type || '', server: p.server || '', port: p.port || 0 });
+    });
+    groups.forEach(g => {
+        if (g.name !== currentEditName) {
+            items.push({ name: g.name, type: 'GROUP', server: '', port: 0 });
+        }
+    });
+    return items;
+}
+
+function getManualFilteredItems() {
+    const filter = (document.getElementById('manual-filter').value || '').toLowerCase();
+    return getManualItems().filter(n => !filter || n.name.toLowerCase().includes(filter) || n.type.toLowerCase().includes(filter));
+}
+
+function getManualSelection() {
+    return manualSelectedOrder.filter(n => manualSelected.has(n));
+}
+
+function setManualSelection(names) {
+    manualSelected = new Set(names);
+    manualSelectedOrder = names.filter(n => manualSelected.has(n));
+    renderManualPicker();
+}
+
+async function loadManualHealth(groupName) {
+    currentManualGroupName = groupName || '';
+    if (!groupName) {
+        manualHealthData = {};
+        renderManualPicker();
+        return;
+    }
+    try {
+        const res = await fetch('./api/health');
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const arr = data[groupName];
+        manualHealthData = Array.isArray(arr)
+            ? Object.fromEntries(arr.map(h => [h.name, h]))
+            : {};
+    } catch (err) {
+        manualHealthData = {};
+    }
+    renderManualPicker();
+}
+
+function getManualHealth(name) {
+    return manualHealthData[name] || null;
+}
+
+function formatManualHealth(h, name) {
+    if (name === 'DIRECT' || name === 'REJECT') {
+        const label = typeof i18n !== 'undefined' ? i18n.t('proxy.healthAlways') : 'Always available';
+        return {
+            text: label,
+            statusHtml: `<span class="status-dot status-active"></span> ${label}`,
+            latencyText: '0 ms',
+            checked: true,
+            alive: true,
+            always: true
+        };
+    }
+    if (!h || !h.lastCheck || String(h.lastCheck).startsWith('0001-01-01')) {
+        const label = typeof i18n !== 'undefined' ? i18n.t('proxy.healthUntested') : 'Not tested';
+        return {
+            text: label,
+            statusHtml: `<span class="status-dot status-inactive"></span> ${label}`,
+            latencyText: '-',
+            checked: false,
+            alive: false,
+            always: false
+        };
+    }
+    const alive = !!h.alive;
+    const aliveLabel = alive
+        ? (typeof i18n !== 'undefined' ? i18n.t('proxy.alive') : 'alive')
+        : (typeof i18n !== 'undefined' ? i18n.t('proxy.dead') : 'dead');
+    const statusHtml = alive
+        ? `<span class="status-dot status-active"></span> ${aliveLabel}`
+        : `<span class="status-dot status-error"></span> ${aliveLabel}`;
+    const ms = h.latencyMs !== undefined ? h.latencyMs : (h.latency !== undefined ? Math.round(h.latency / 1e6) : undefined);
+    const latencyText = ms !== undefined ? `${ms} ms` : '-';
+    return { text: `${aliveLabel} · ${latencyText}`, statusHtml, latencyText, checked: true, alive, always: false };
+}
+
+async function testManualNode(name, btn) {
+    if (!currentManualGroupName || !btn) return;
+    const originalHTML = btn.innerHTML;
+    const testingText = typeof i18n !== 'undefined' ? i18n.t('sub.testing') : 'Testing...';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>' + testingText;
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(currentManualGroupName)}/health-check/${encodeURIComponent(name)}`, {method: 'POST'});
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        manualHealthData[name] = data;
+    } catch (err) {
+        manualHealthData[name] = {alive: false, latencyMs: 0, lastCheck: new Date().toISOString()};
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+        renderManualPicker();
+    }
+}
+
+async function testAllManualNodes() {
+    if (!currentManualGroupName || manualTesting) return;
+    const items = getManualItems().filter(n => n.name !== 'DIRECT' && n.name !== 'REJECT');
+    if (items.length === 0) return;
+    manualTesting = true;
+    const btn = document.getElementById('manual-test-all-btn');
+    const originalHTML = btn ? btn.innerHTML : '';
+    const testingText = typeof i18n !== 'undefined' ? i18n.t('sub.testing') : 'Testing...';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>' + testingText;
+    }
+    try {
+        await Promise.all(items.map(async n => {
+            try {
+                const res = await fetch(`./api/groups/${encodeURIComponent(currentManualGroupName)}/health-check/${encodeURIComponent(n.name)}`, {method: 'POST'});
+                if (!res.ok) throw new Error(await res.text());
+                manualHealthData[n.name] = await res.json();
+            } catch (err) {
+                manualHealthData[n.name] = {alive: false, latencyMs: 0, lastCheck: new Date().toISOString()};
+            }
+        }));
+    } finally {
+        manualTesting = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = originalHTML;
+        }
+        renderManualPicker();
+    }
+}
+
+function renderManualPicker() {
+    const filtered = getManualFilteredItems();
+    const availList = document.getElementById('manual-available-list');
+    const selList = document.getElementById('manual-selected-list');
+    if (!availList || !selList) return;
+
+    document.getElementById('manual-available-count').textContent = filtered.length;
+    availList.innerHTML = '';
+    if (filtered.length === 0) {
+        const noMatch = typeof i18n !== 'undefined' ? i18n.t('proxy.subNoMatch') : 'No proxies match the filter.';
+        availList.innerHTML = `<div class="picker-empty text-muted">${noMatch}</div>`;
+    } else {
+        const frag = document.createDocumentFragment();
+        filtered.forEach(n => {
+            const selected = manualSelected.has(n.name);
+            const item = document.createElement('div');
+            item.className = 'picker-item' + (selected ? ' selected' : '');
+            item.dataset.name = n.name;
+            const meta = n.name === 'DIRECT'
+                ? (typeof i18n !== 'undefined' ? i18n.t('proxy.directConn') : 'Direct connection')
+                : (n.name === 'REJECT'
+                    ? (typeof i18n !== 'undefined' ? i18n.t('proxy.rejectConn') : 'Reject connection')
+                    : (n.type === 'GROUP'
+                        ? (typeof i18n !== 'undefined' ? i18n.t('proxy.groupRef') : 'Proxy group')
+                        : `${escapeHtml(n.server)}:${n.port}`));
+            const health = formatManualHealth(getManualHealth(n.name), n.name);
+            const healthSuffix = ` · ${health.statusHtml} ${health.latencyText}`;
+            const showTest = (currentManualGroupName && n.name !== 'DIRECT' && n.name !== 'REJECT');
+            const testBtn = showTest
+                ? `<button type="button" class="btn btn-sm btn-outline" data-action="test" title="Test">${typeof i18n !== 'undefined' ? i18n.t('sub.test') : 'Test'}</button>`
+                : '';
+            item.innerHTML = `
+                <input type="checkbox" ${selected ? 'checked' : ''}>
+                <div class="picker-item-info" title="${escapeHtml(n.name)} · ${escapeHtml(meta)}${health.always ? '' : ' · ' + health.text}">
+                    <div class="picker-item-name">${escapeHtml(n.name)} <code class="type-badge type-${(n.type || '').toLowerCase()}">${n.type}</code></div>
+                    <div class="picker-item-meta">${meta}${healthSuffix}</div>
+                </div>
+                <div class="picker-item-actions">${testBtn}</div>`;
+            const checkbox = item.querySelector('input');
+            checkbox.addEventListener('change', (e) => {
+                e.stopPropagation();
+                toggleManualProxy(n.name);
+            });
+            item.addEventListener('click', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.closest('button')) return;
+                checkbox.checked = !checkbox.checked;
+                toggleManualProxy(n.name);
+            });
+            const testButton = item.querySelector('button[data-action="test"]');
+            if (testButton) {
+                testButton.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    testManualNode(n.name, testButton);
+                });
+            }
+            frag.appendChild(item);
+        });
+        availList.appendChild(frag);
+    }
+
+    document.getElementById('manual-selected-count').textContent = manualSelectedOrder.length;
+    selList.innerHTML = '';
+    if (manualSelectedOrder.length === 0) {
+        const empty = typeof i18n !== 'undefined' ? i18n.t('proxy.noSelected') : 'No proxies selected.';
+        selList.innerHTML = `<div class="picker-empty text-muted">${empty}</div>`;
+    } else {
+        const frag = document.createDocumentFragment();
+        manualSelectedOrder.forEach((name, idx) => {
+            const n = getManualItems().find(x => x.name === name);
+            if (!n) return;
+            const meta = n.name === 'DIRECT'
+                ? (typeof i18n !== 'undefined' ? i18n.t('proxy.directConn') : 'Direct connection')
+                : (n.name === 'REJECT'
+                    ? (typeof i18n !== 'undefined' ? i18n.t('proxy.rejectConn') : 'Reject connection')
+                    : (n.type === 'GROUP'
+                        ? (typeof i18n !== 'undefined' ? i18n.t('proxy.groupRef') : 'Proxy group')
+                        : `${escapeHtml(n.server)}:${n.port}`));
+            const health = formatManualHealth(getManualHealth(n.name), n.name);
+            const healthSuffix = ` · ${health.statusHtml} ${health.latencyText}`;
+            const item = document.createElement('div');
+            item.className = 'picker-selected-item';
+            item.dataset.name = name;
+            item.innerHTML = `
+                <span class="picker-selected-order">#${idx + 1}</span>
+                <div class="picker-selected-info" title="${escapeHtml(n.name)}${health.always ? '' : ' · ' + health.text}">
+                    <div class="picker-selected-name">${escapeHtml(n.name)} <code class="type-badge type-${(n.type || '').toLowerCase()}">${n.type}</code></div>
+                    <div class="picker-selected-meta">${meta}${healthSuffix}</div>
+                </div>
+                <div class="picker-item-actions">
+                    <button type="button" class="btn btn-sm btn-outline" data-action="up" title="Move up">↑</button>
+                    <button type="button" class="btn btn-sm btn-outline" data-action="down" title="Move down">↓</button>
+                    <button type="button" class="btn btn-sm btn-danger" data-action="remove" title="Remove">×</button>
+                </div>`;
+            item.querySelector('[data-action="up"]').addEventListener('click', () => moveManualProxyUp(name));
+            item.querySelector('[data-action="down"]').addEventListener('click', () => moveManualProxyDown(name));
+            item.querySelector('[data-action="remove"]').addEventListener('click', () => toggleManualProxy(name));
+            frag.appendChild(item);
+        });
+        selList.appendChild(frag);
+    }
+}
+
+function toggleManualProxy(name) {
+    if (manualSelected.has(name)) {
+        manualSelected.delete(name);
+        manualSelectedOrder = manualSelectedOrder.filter(n => n !== name);
+    } else {
+        manualSelected.add(name);
+        manualSelectedOrder.push(name);
+    }
+    renderManualPicker();
+}
+
+function moveManualProxyUp(name) {
+    const idx = manualSelectedOrder.indexOf(name);
+    if (idx > 0) {
+        [manualSelectedOrder[idx - 1], manualSelectedOrder[idx]] = [manualSelectedOrder[idx], manualSelectedOrder[idx - 1]];
+        renderManualPicker();
+    }
+}
+
+function moveManualProxyDown(name) {
+    const idx = manualSelectedOrder.indexOf(name);
+    if (idx >= 0 && idx < manualSelectedOrder.length - 1) {
+        [manualSelectedOrder[idx], manualSelectedOrder[idx + 1]] = [manualSelectedOrder[idx + 1], manualSelectedOrder[idx]];
+        renderManualPicker();
+    }
+}
+
+function clearManualSelection() {
+    manualSelected.clear();
+    manualSelectedOrder = [];
+    renderManualPicker();
+}
+
+function toggleFields() {
+    const t = document.getElementById('f-type').value;
+
+    const isDirectReject = ['DIRECT','REJECT'].includes(t);
+    const isServer = t === 'SERVER';
+    const isHTunnel = t === 'H_TUNNEL';
+    const isSSH = t === 'ssh';
+
+    const needServer = ['SOCKS5','HTTP','HTTPS','TROJAN','VLESS','HYSTERIA2','SERVER','ssh'].includes(t);
+    const needSni     = ['TROJAN','VLESS','HYSTERIA2','HTTPS'].includes(t);
+    const needPwd     = ['TROJAN','H_TUNNEL','HYSTERIA2'].includes(t);
+    const needUuid    = ['VLESS'].includes(t);
+    const needUrl     = isHTunnel;
+    const needFlow    = ['VLESS'].includes(t);
+    const needReverseAddr = ['SOCKS5','TROJAN','H_TUNNEL'].includes(t);
+    const needSSHKey  = isSSH;
+    const needUser    = ['SOCKS5','HTTP','HTTPS','ssh'].includes(t);
+    const needUdp     = ['SOCKS5','TROJAN','VLESS','HYSTERIA2'].includes(t);
+    const needSkip    = ['TROJAN','VLESS','HYSTERIA2','HTTPS'].includes(t);
+
+    setVisible('row-server', needServer);
+    setRequired('f-server', needServer);
+    setRequired('f-port', needServer);
+
+    setVisible('row-sni', needSni);
+
+    setVisible('row-password', needPwd || needUuid || needUser);
+    setLabel('lbl-password', needUuid ? 'UUID *' : (needPwd ? 'Password *' : 'Password'));
+    setRequired('f-password', needPwd || needUuid);
+    setVisible('col-username', needUser);
+
+    setVisible('row-url', needUrl);
+    setRequired('f-url', needUrl);
+
+    setVisible('row-flow', needFlow);
+
+    setVisible('row-reverse-addr', needReverseAddr);
+    setRequired('f-reverse-addr', needReverseAddr);
+
+    setVisible('row-ssh-key', needSSHKey);
+
+    setVisible('col-udp', needUdp);
+    setVisible('col-skip', needSkip);
+}
+
+// ===== Group subscription node preview =====
+async function selectGroupNodes(name) {
+    const titleBase = typeof i18n !== 'undefined' ? i18n.t('proxy.subModalTitle') : 'Subscription Nodes';
+    try {
+        const res = await fetch(`./api/groups/${encodeURIComponent(name)}/subscription`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const filter = data.filter || '';
+        const active = data['active-member'] || '';
+        const notice = (filter
+            ? (typeof i18n !== 'undefined' ? i18n.t('proxy.filterNotice') : `Filter: /${filter}/`) + ' · '
+            : '') + (active
+            ? `${typeof i18n !== 'undefined' ? i18n.t('proxy.activeNotice') : 'Active'}: ${active}`
+            : (typeof i18n !== 'undefined' ? i18n.t('proxy.noActiveNotice') : 'No active member set'));
+        NodeViewer.open({
+            context: 'group',
+            name: name,
+            title: `${titleBase}: ${name}`,
+            nodes: data.nodes || [],
+            healthEndpoint: (nodeName) => `./api/groups/${encodeURIComponent(name)}/health-check/${encodeURIComponent(nodeName)}`,
+            showHealthUrl: false,
+            selectable: false,
+            mode: 'table',
+            selected: [],
+            notice: notice,
+        });
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+</script>
+{{end}}

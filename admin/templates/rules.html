@@ -1,0 +1,432 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="rule.title">Rules</span> ({{len .Rules}})</h3>
+            <button onclick="showAddRule()" class="btn btn-primary btn-sm" data-i18n="rule.add">+ Add Rule</button>
+        </div>
+
+        <!-- Rules Table -->
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th data-i18n="rule.match">Match</th>
+                        <th data-i18n="rule.target">Target</th>
+                        <th data-i18n="rule.mappingSource">Mapping Source</th>
+                        <th data-i18n="common.enabled">Enabled</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="rules-tbody">
+                    {{range $idx, $rule := .Rules}}
+                    {{$parsed := parseRule $rule}}
+                    <tr data-idx="{{$idx}}" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
+                        <td>{{$idx}}</td>
+                        <td><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
+                        <td><strong>{{index $parsed 2}}</strong></td>
+                        <td>{{if index $parsed 3}}<span class="badge badge-info">{{index $parsed 3}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
+                        <td>
+                            <label class="switch" title="{{if ruleEnabled $rule}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if ruleEnabled $rule}}checked{{end}} onchange="toggleRule({{$idx}}, this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <button onclick="moveRule({{$idx}}, -1)" class="btn btn-sm btn-outline" {{if eq $idx 0}}disabled{{end}}>↑</button>
+                            <button onclick="moveRule({{$idx}}, 1)" class="btn btn-sm btn-outline" {{if eq $idx (sub (len $.Rules) 1)}}disabled{{end}}>↓</button>
+                            <button onclick="editRule({{$idx}})" class="btn btn-sm btn-outline">Edit</button>
+                            <button onclick="deleteRule({{$idx}})" class="btn btn-sm btn-danger">Delete</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Rule Test Tool -->
+        <div class="card" style="margin-top: 1.5rem;">
+            <h3>🔍 <span data-i18n="rule.testerTitle">Rule Tester</span></h3>
+            <p class="text-muted" data-i18n="rule.testerDesc">Enter a domain or IP to see which rule matches</p>
+            <div class="form-row">
+                <div class="form-group" style="flex: 1;">
+                    <input type="text" id="test-input" data-i18n-placeholder="rule.testerPlaceholder" placeholder="example.com or 1.2.3.4"
+                           onkeypress="if(event.key==='Enter') testRule()">
+                </div>
+                <button onclick="testRule()" class="btn" data-i18n="rule.btnTest">Test</button>
+            </div>
+            <div id="rule-test-result" class="hidden"></div>
+        </div>
+    </div>
+
+    <!-- Add/Edit Modal -->
+    <div id="rule-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="rule-modal-title" data-i18n="rule.modalAdd">Add Rule</h3>
+                <button onclick="closeRuleModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="rule-form" onsubmit="saveRule(event)">
+                <input type="hidden" id="rule-edit-idx" value="-1">
+                <div class="form-group">
+                    <label><span data-i18n="rule.pattern">Match Pattern</span> *</label>
+                    <select id="f-rule-keyword" required onchange="toggleRuleFields()">
+                        <option value="" data-i18n="rule.select">Select...</option>
+                        <option value="DOMAIN-SUFFIX" data-i18n="rule.domainSuffix">DOMAIN-SUFFIX</option>
+                        <option value="IP-CIDR" data-i18n="rule.ipCidr">IP-CIDR</option>
+                        <option value="MATCH" data-i18n="rule.matchAll">MATCH (catch-all)</option>
+                    </select>
+                    <small id="rule-keyword-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);"></small>
+                </div>
+                <div class="form-group" id="rule-value-group">
+                    <label data-i18n="rule.value">Value</label>
+                    <input type="text" id="f-rule-value" data-i18n-placeholder="rule.valuePlaceholder" placeholder="example.com, 192.168.1.0/24, 443, CN, DIRECT...">
+                    <small id="rule-value-help" class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);"></small>
+                </div>
+                <div class="form-row">
+                    <div class="form-group" style="flex: 1;">
+                        <label><span data-i18n="rule.targetProxy">Target Proxy/Group</span> *</label>
+                        <select id="f-rule-target" required>
+                            <option value="" data-i18n="rule.targetPlaceholder">Select target...</option>
+                            {{range .Proxies}}
+                            <option value="{{.Name}}">{{.Name}} ({{.Type}})</option>
+                            {{end}}
+                            {{range .Groups}}
+                            <option value="{{.Name}}">{{.Name}} [GROUP]</option>
+                            {{end}}
+                            <option value="DIRECT" data-i18n="rule.direct">DIRECT</option>
+                            <option value="REJECT" data-i18n="rule.reject">REJECT</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label data-i18n="rule.mappingSource">Mapping Source (optional)</label>
+                        <select id="f-rule-mapping">
+                            <option value="" data-i18n="rule.anyMapping">Any mapping</option>
+                            {{range .Mappings}}
+                            <option value="{{.Name}}">{{.Name}} ({{.Type}})</option>
+                            {{end}}
+                        </select>
+                        <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="rule.mappingSourceHelp">Route only when request comes from this mapping</small>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeRuleModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+const rules = {{json .Rules}};
+const mappings = {{json .Mappings}};
+
+function isRuleEnabled(rule) {
+    return !rule.trim().startsWith('//');
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function parseRule(rule) {
+    const r = rule.trim().replace(/^\/\//, '');
+    const parts = r.split(',');
+    if (parts.length === 1) {
+        const [target, mapping] = splitTargetMapping(parts[0].trim());
+        return [parts[0].trim(), '', target, mapping];
+    }
+    if (parts.length === 2) {
+        const [target, mapping] = splitTargetMapping(parts[1].trim());
+        return [parts[0].trim(), '', target, mapping];
+    }
+    // e.g. DOMAIN-SUFFIX,example.com,DIRECT → [DOMAIN-SUFFIX, example.com, DIRECT, '']
+    const keyword = parts[0].trim();
+    const rawTarget = parts[parts.length - 1].trim();
+    const value = parts.slice(1, parts.length - 1).join(',').trim();
+    const [target, mapping] = splitTargetMapping(rawTarget);
+    return [keyword, value, target, mapping];
+}
+
+function splitTargetMapping(target) {
+    if (!target) return ['', ''];
+    const idx = target.indexOf('#');
+    if (idx < 0) return [target, ''];
+    return [target.slice(0, idx), target.slice(idx + 1)];
+}
+
+function showAddRule() {
+    document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
+    document.getElementById('rule-edit-idx').value = '-1';
+    document.getElementById('rule-form').reset();
+    toggleRuleFields();
+    document.getElementById('rule-modal').classList.remove('hidden');
+}
+
+function editRule(idx) {
+    const [keyword, value, target, mappingName] = parseRule(rules[idx]);
+    document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalEdit') : 'Edit Rule');
+    document.getElementById('rule-edit-idx').value = idx;
+
+    document.getElementById('f-rule-keyword').value = keyword;
+    document.getElementById('f-rule-value').value = value;
+    const targetSel = document.getElementById('f-rule-target');
+    targetSel.value = target;
+    // If target not in options (e.g. custom proxy name), add a temp option
+    if (targetSel.value !== target && target) {
+        const opt = document.createElement('option');
+        opt.value = target;
+        opt.textContent = target + ' (custom)';
+        targetSel.appendChild(opt);
+        targetSel.value = target;
+    }
+    document.getElementById('f-rule-mapping').value = mappingName || '';
+    toggleRuleFields();
+    document.getElementById('rule-modal').classList.remove('hidden');
+}
+
+async function saveRule(e) {
+    e.preventDefault();
+    const editIdx = parseInt(document.getElementById('rule-edit-idx').value);
+    const keyword = document.getElementById('f-rule-keyword').value;
+    const value = document.getElementById('f-rule-value').value.trim();
+    let target = document.getElementById('f-rule-target').value;
+    const mappingSrc = document.getElementById('f-rule-mapping').value;
+    if (mappingSrc) target = target + '#' + mappingSrc;
+
+    let ruleStr;
+    if (keyword === 'MATCH') {
+        ruleStr = `MATCH,${target}`;
+    } else if (value) {
+        ruleStr = `${keyword},${value},${target}`;
+    } else {
+        const valReq = typeof i18n !== 'undefined' ? i18n.t('rule.valueRequired') : 'Value is required for this keyword';
+        showToast(valReq, 'error');
+        return;
+    }
+
+    const newRules = [...rules];
+    if (editIdx >= 0) {
+        newRules[editIdx] = ruleStr;
+    } else {
+        newRules.push(ruleStr);
+    }
+
+    try {
+        const res = await fetch('./api/rules', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(newRules)
+        });
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || `HTTP ${res.status}`);
+        }
+        closeRuleModal();
+        location.reload();
+    } catch (err) {
+        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+async function deleteRule(idx) {
+    try {
+        const res = await fetch(`./api/rules/${idx}`, {method: 'DELETE'});
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+    } catch (err) {
+        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+async function toggleRule(idx, enabled) {
+    try {
+        const res = await fetch(`./api/rules/${idx}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const row = document.querySelector(`#rules-tbody tr[data-idx="${idx}"]`);
+        if (row) row.classList.toggle('row-disabled', !enabled);
+    } catch (err) {
+        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+        showToast(errLabel + ': ' + err.message, 'error');
+        location.reload();
+    }
+}
+
+async function moveRule(idx, delta) {
+    const newIdx = idx + delta;
+    if (newIdx < 0 || newIdx >= rules.length) return;
+    const newRules = [...rules];
+    const [moved] = newRules.splice(idx, 1);
+    newRules.splice(newIdx, 0, moved);
+    try {
+        const res = await fetch('./api/rules', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(newRules)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+    } catch (err) {
+        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+        showToast(errLabel + ': ' + err.message, 'error');
+    }
+}
+
+function closeRuleModal() {
+    document.getElementById('rule-modal').classList.add('hidden');
+}
+
+function toggleRuleFields() {
+    const kw = document.getElementById('f-rule-keyword').value;
+    const vg = document.getElementById('rule-value-group');
+    const valInput = document.getElementById('f-rule-value');
+    vg.style.display = (kw === 'MATCH') ? 'none' : '';
+
+    const keywordHelps = {
+        'DOMAIN-SUFFIX': 'Match domain and all its subdomains. Example: google.com matches google.com, www.google.com, mail.google.com.',
+        'IP-CIDR': 'Match IPv4 addresses inside a CIDR block. Example: 192.168.1.0/24.',
+        'MATCH': 'Catch-all rule that matches every request. Use it as the final fallback.'
+    };
+    const valueHelps = {
+        'DOMAIN-SUFFIX': 'Enter a domain like example.com (without leading *).',
+        'IP-CIDR': 'Enter an IPv4 CIDR like 10.0.0.0/8.',
+        '': 'Select a match pattern first.'
+    };
+
+    const kwHelpEl = document.getElementById('rule-keyword-help');
+    const valHelpEl = document.getElementById('rule-value-help');
+    if (kwHelpEl) {
+        if (typeof i18n !== 'undefined') {
+            const k = `rule.keywordHelp.${kw || 'empty'}`;
+            const tr = i18n.t(k);
+            kwHelpEl.textContent = (tr !== k) ? tr : (keywordHelps[kw] || '');
+        } else {
+            kwHelpEl.textContent = keywordHelps[kw] || '';
+        }
+    }
+    if (valHelpEl) {
+        if (typeof i18n !== 'undefined') {
+            const k = `rule.valueHelp.${kw || 'empty'}`;
+            const tr = i18n.t(k);
+            valHelpEl.textContent = (tr !== k) ? tr : (valueHelps[kw] || '');
+        } else {
+            valHelpEl.textContent = valueHelps[kw] || '';
+        }
+    }
+
+    // Update placeholder for clarity
+    if (kw === 'DOMAIN-SUFFIX') valInput.placeholder = 'example.com';
+    else if (kw === 'IP-CIDR') valInput.placeholder = '192.168.1.0/24';
+    else valInput.placeholder = 'example.com, 192.168.1.0/24, 443, CN, DIRECT...';
+}
+
+async function testRule() {
+    const input = document.getElementById('test-input').value.trim();
+    if (!input) return;
+    const resultDiv = document.getElementById('rule-test-result');
+    resultDiv.classList.remove('hidden');
+    resultDiv.innerHTML = '<p>Testing: <code>' + escapeHtml(input) + '</code></p>';
+
+    let matchedIdx = -1;
+    let matchedRule = '';
+    for (let i = 0; i < rules.length; i++) {
+        if (!isRuleEnabled(rules[i])) continue;
+        if (ruleMatches(input, rules[i])) {
+            matchedIdx = i;
+            matchedRule = rules[i];
+            break;
+        }
+    }
+    if (matchedIdx >= 0) {
+        resultDiv.innerHTML += `<p class="text-success">→ Rule #${matchedIdx}: ${escapeHtml(matchedRule)}</p>`;
+    } else {
+        const noMatch = typeof i18n !== 'undefined' ? i18n.t('rule.noMatch') : 'No explicit match found';
+        resultDiv.innerHTML += '<p class="text-muted">' + noMatch + '</p>';
+    }
+}
+
+function ruleMatches(input, rule) {
+    const [keyword, value] = parseRule(rule);
+    const lowerInput = input.toLowerCase();
+    const lowerValue = value.toLowerCase().replace(/^\./, '');
+    const kw = keyword.toUpperCase();
+
+    // A single-part rule like "DIRECT" is treated as a final MATCH rule.
+    if (rule.trim().split(',').length === 1) return true;
+
+    switch (kw) {
+        case 'MATCH': return true;
+        case 'DOMAIN': return lowerInput === lowerValue;
+        case 'DOMAIN-SUFFIX':
+            return lowerInput === lowerValue || lowerInput.endsWith('.' + lowerValue);
+        case 'DOMAIN-KEYWORD':
+            return lowerInput.includes(lowerValue);
+        case 'IP-CIDR':
+            return isIPv4(input) && ipv4InCidr(input, value);
+        case 'IP-CIDR6':
+            return isIPv6(input) && ipv6InCidr(input, value);
+        case 'GEOIP':
+            return false; // no GeoIP database in the browser
+        case 'DST-PORT':
+            return input === value;
+        case 'SRC-PORT':
+        case 'SRC-IP-CIDR':
+        case 'PROCESS-NAME':
+            return false;
+        default:
+            return false;
+    }
+}
+
+function isIPv4(s) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
+}
+
+function ipv4ToInt(s) {
+    return s.split('.').reduce((acc, n) => ((acc << 8) + parseInt(n, 10)) >>> 0, 0);
+}
+
+function ipv4InCidr(ip, cidr) {
+    const [net, bitsStr] = cidr.split('/');
+    const bits = parseInt(bitsStr, 10);
+    if (isNaN(bits) || bits < 0 || bits > 32) return false;
+    const mask = (-1 << (32 - bits)) >>> 0;
+    return (ipv4ToInt(ip) & mask) === (ipv4ToInt(net) & mask);
+}
+
+function isIPv6(s) {
+    return /^[0-9a-fA-F:]+$/.test(s) && s.includes(':');
+}
+
+function expandIPv6(ip) {
+    let groups = ip.split(':');
+    const emptyIdx = groups.findIndex(g => g === '');
+    if (emptyIdx >= 0) {
+        const nonEmpty = groups.filter(g => g !== '');
+        const zeros = Array(8 - nonEmpty.length).fill('0');
+        groups = [...nonEmpty.slice(0, emptyIdx), ...zeros, ...nonEmpty.slice(emptyIdx)];
+    }
+    return groups.map(g => (parseInt(g || '0', 16) || 0).toString(16).padStart(4, '0')).join('');
+}
+
+function ipv6InCidr(ip, cidr) {
+    const [net, bitsStr] = cidr.split('/');
+    const bits = parseInt(bitsStr, 10);
+    if (isNaN(bits) || bits < 0 || bits > 128) return false;
+    const ipInt = BigInt('0x' + expandIPv6(ip));
+    const netInt = BigInt('0x' + expandIPv6(net));
+    const lowerMask = (BigInt(1) << BigInt(128 - bits)) - BigInt(1);
+    const networkMask = (BigInt(1) << BigInt(128)) - BigInt(1) - lowerMask;
+    return (ipInt & networkMask) === (netInt & networkMask);
+}
+</script>
+{{end}}

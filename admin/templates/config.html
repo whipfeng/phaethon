@@ -1,0 +1,106 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3 data-i18n="raw.title">Raw Config</h3>
+            <div>
+                <button onclick="copyRawConfig()" class="btn btn-outline btn-sm" data-i18n="raw.copy">📋 Copy</button>
+                <button onclick="saveRawConfig()" class="btn btn-primary btn-sm" data-i18n="raw.save">💾 Save</button>
+                <button onclick="reloadConfig()" class="btn btn-outline btn-sm" data-i18n="btn.reload">🔄 Reload Config</button>
+                <button onclick="resetConfig()" class="btn btn-danger btn-sm" data-i18n="raw.reset">🗑 Reset to Defaults</button>
+            </div>
+        </div>
+        <p class="text-muted" data-i18n="raw.help">Edit the raw YAML directly. Invalid configs will be rejected. Use this to fix dangling references reported when deleting a proxy.</p>
+        <div class="form-group">
+            <textarea id="raw-config-text" class="form-control raw-config-text" spellcheck="false" data-i18n-placeholder="raw.placeholder" placeholder="Loading configuration..."></textarea>
+        </div>
+        <div id="raw-status" class="raw-status hidden"></div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const textarea = document.getElementById('raw-config-text');
+    const statusEl = document.getElementById('raw-status');
+
+    function showStatus(msg, type) {
+        statusEl.textContent = msg;
+        statusEl.className = 'raw-status ' + (type || 'info');
+        statusEl.classList.remove('hidden');
+    }
+
+    async function loadRawConfig() {
+        try {
+            const res = await fetch('./api/config/raw');
+            if (!res.ok) throw new Error(await res.text());
+            textarea.value = await res.text();
+            statusEl.classList.add('hidden');
+        } catch (err) {
+            const label = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+            showStatus(label + ': ' + err.message, 'error');
+        }
+    }
+
+    window.copyRawConfig = async function() {
+        try {
+            await navigator.clipboard.writeText(textarea.value);
+            const msg = typeof i18n !== 'undefined' ? i18n.t('raw.copied') : 'Copied to clipboard';
+            showStatus(msg, 'success');
+        } catch (err) {
+            textarea.select();
+            document.execCommand('copy');
+            const msg = typeof i18n !== 'undefined' ? i18n.t('raw.copied') : 'Copied to clipboard';
+            showStatus(msg, 'success');
+        }
+    };
+
+    window.saveRawConfig = async function() {
+        const body = textarea.value;
+        showStatus(typeof i18n !== 'undefined' ? i18n.t('raw.saving') : 'Saving...', 'info');
+        try {
+            const res = await fetch('./api/config/raw', {
+                method: 'PUT',
+                headers: {'Content-Type': 'text/plain; charset=utf-8'},
+                body: body
+            });
+            const text = await res.text();
+            let data = {};
+            try { data = JSON.parse(text); } catch {}
+            if (!res.ok) {
+                throw new Error(data.error || text || ('HTTP ' + res.status));
+            }
+            const msg = typeof i18n !== 'undefined' ? i18n.t('raw.saved') : 'Configuration saved';
+            showStatus(msg, 'success');
+        } catch (err) {
+            const label = typeof i18n !== 'undefined' ? i18n.t('raw.saveFailed') : 'Save failed';
+            showStatus(label + ': ' + err.message, 'error');
+        }
+    };
+
+    window.resetConfig = async function() {
+        const label = typeof i18n !== 'undefined' ? i18n.t('raw.resetConfirm') : 'Reset to built-in defaults? This will overwrite the current config.';
+        showConfirm(label, async () => {
+            showStatus(typeof i18n !== 'undefined' ? i18n.t('raw.resetting') : 'Resetting...', 'info');
+            try {
+                const res = await fetch('./api/config/reset', {method: 'POST'});
+                const text = await res.text();
+                let data = {};
+                try { data = JSON.parse(text); } catch {}
+                if (!res.ok) {
+                    throw new Error(data.error || text || ('HTTP ' + res.status));
+                }
+                const msg = typeof i18n !== 'undefined' ? i18n.t('raw.resetDone') : 'Configuration reset to defaults';
+                showStatus(msg, 'success');
+                await loadRawConfig();
+            } catch (err) {
+                const label = typeof i18n !== 'undefined' ? i18n.t('raw.resetFailed') : 'Reset failed';
+                showStatus(label + ': ' + err.message, 'error');
+            }
+        });
+    };
+
+    loadRawConfig();
+})();
+</script>
+{{end}}

@@ -1,0 +1,38 @@
+# Binaries
+/phaethon
+/phaethon.exe
+*.exe
+*.dll
+
+# Build output
+/build/
+/dist/
+
+# Runtime data (local-only)
+/.phaethon/
+/.env
+/.env.*
+
+# Logs
+*.log
+*.err.log
+*.out.log
+
+# Test artifacts
+*.test
+*.out
+*.pid
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go vendoring
+/vendor/
+config.yaml

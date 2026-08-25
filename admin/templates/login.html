@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="login.title">Login - Phaethon Manager</title>
+    <link rel="stylesheet" href="./static/style.css">
+    <style>
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+        }
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            padding: 2rem;
+        }
+        .login-box {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .login-logo {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .login-logo h1 {
+            font-size: 1.75rem;
+            margin: 0.5rem 0;
+        }
+        .login-logo p {
+            color: var(--text-secondary);
+            margin: 0;
+        }
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: var(--text);
+        }
+        .form-group input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+        }
+        .password-wrapper {
+            position: relative;
+        }
+        .password-wrapper input {
+            padding-right: 2.75rem;
+        }
+        .password-toggle {
+            position: absolute;
+            right: 0.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem;
+            font-size: 1.1rem;
+            line-height: 1;
+            border-radius: 4px;
+        }
+        .password-toggle:hover {
+            color: var(--text);
+            background: rgba(255,255,255,0.05);
+        }
+        .captcha-group {
+            display: none;
+            align-items: stretch;
+            gap: 0.75rem;
+        }
+        .captcha-group.show {
+            display: flex;
+        }
+        .captcha-group input {
+            flex: 1;
+        }
+        .captcha-img {
+            height: 44px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            background: var(--bg);
+        }
+        .login-btn {
+            width: 100%;
+            padding: 0.875rem;
+            margin-top: 0.5rem;
+            font-size: 1rem;
+        }
+        .login-error {
+            display: none;
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+            color: #f85149;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+        .login-error.show {
+            display: block;
+        }
+        .lang-switcher-login {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="lang-switcher-login" id="lang-switcher-container"></div>
+    <div class="login-container">
+        <div class="login-box">
+            <div class="login-logo">
+                <div style="font-size: 3rem;">⚡</div>
+                <h1>Phaethon Manager</h1>
+                <p data-i18n="login.subtitle">Admin Panel</p>
+            </div>
+            <div id="login-error" class="login-error" data-i18n="login.error">Invalid username or password</div>
+            <form id="login-form" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label data-i18n="login.username">Username</label>
+                    <input type="text" id="login-username" required autocomplete="username" data-i18n-placeholder="login.usernamePlaceholder">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="login.password">Password</label>
+                    <div class="password-wrapper">
+                        <input type="password" id="login-password" required autocomplete="current-password" data-i18n-placeholder="login.passwordPlaceholder">
+                        <button type="button" id="password-toggle" class="password-toggle" onclick="togglePassword()" data-i18n-title="login.showPassword" title="Show password">👁️</button>
+                    </div>
+                </div>
+                <div class="form-group captcha-group" id="captcha-group">
+                    <input type="text" id="login-captcha" autocomplete="off" data-i18n-placeholder="login.captchaPlaceholder" placeholder="Enter CAPTCHA">
+                    <img id="captcha-img" class="captcha-img" src="" alt="CAPTCHA" title="Click to refresh" onclick="refreshCaptcha()">
+                </div>
+                <button type="submit" class="btn btn-primary login-btn" data-i18n="login.submit">Sign In</button>
+            </form>
+        </div>
+    </div>
+    <script src="./static/i18n.js"></script>
+    <script>
+        let passwordVisible = false;
+        let captchaRequired = false;
+
+        function togglePassword() {
+            const input = document.getElementById('login-password');
+            const btn = document.getElementById('password-toggle');
+            passwordVisible = !passwordVisible;
+            input.type = passwordVisible ? 'text' : 'password';
+            btn.textContent = passwordVisible ? '🙈' : '👁️';
+            btn.title = passwordVisible ? i18n.t('login.hidePassword') : i18n.t('login.showPassword');
+            btn.setAttribute('data-i18n-title', passwordVisible ? 'login.hidePassword' : 'login.showPassword');
+        }
+
+        function refreshCaptcha() {
+            const img = document.getElementById('captcha-img');
+            img.src = './api/captcha?t=' + Date.now();
+        }
+
+        function setCaptchaVisible(visible) {
+            const group = document.getElementById('captcha-group');
+            captchaRequired = visible;
+            if (visible) {
+                group.classList.add('show');
+                refreshCaptcha();
+            } else {
+                group.classList.remove('show');
+            }
+        }
+
+        function handleLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const captcha = document.getElementById('login-captcha').value;
+            const errorEl = document.getElementById('login-error');
+
+            const body = { username, password };
+            if (captchaRequired) {
+                body.captcha = captcha;
+            }
+
+            fetch('./api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            })
+            .then(async res => {
+                if (res.ok) {
+                    window.location.href = './';
+                    return;
+                }
+                let data = {};
+                try { data = await res.json(); } catch (_) {}
+                if (data.captchaRequired) {
+                    setCaptchaVisible(true);
+                }
+                if (data.error === 'invalid captcha') {
+                    errorEl.textContent = i18n.t('login.captchaError');
+                } else {
+                    errorEl.textContent = i18n.t('login.error');
+                }
+                errorEl.classList.add('show');
+                if (captchaRequired) {
+                    refreshCaptcha();
+                }
+            })
+            .catch(() => {
+                errorEl.textContent = i18n.t('login.error');
+                errorEl.classList.add('show');
+            });
+        }
+    </script>
+</body>
+</html>

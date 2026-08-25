@@ -126,10 +126,9 @@ func getDefaultGatewayWindows() (net.IP, uint64, uint32, error) {
 
 	numEntries := *(*uint32)(table)
 	rowSize := uint32(unsafe.Sizeof(mibIpForwardRow2{}))
-	base := uintptr(table) + unsafe.Sizeof(uint32(0))
 
 	for i := uint32(0); i < numEntries; i++ {
-		row := (*mibIpForwardRow2)(unsafe.Pointer(base + uintptr(i)*uintptr(rowSize)))
+		row := (*mibIpForwardRow2)(unsafe.Add(table, unsafe.Sizeof(uint32(0))+uintptr(i)*uintptr(rowSize)))
 		if row.isDefaultRoute() {
 			luid := *(*uint64)(unsafe.Pointer(&row[0]))
 			index := *(*uint32)(unsafe.Pointer(&row[8]))

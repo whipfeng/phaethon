@@ -3,6 +3,7 @@
 package tun
 
 import (
+	"fmt"
 	"net"
 	"os/exec"
 	"strings"
@@ -58,12 +59,12 @@ func CleanupResidual() {
 		procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&addrRow[0])))
 	}
 
-	// Check if phaethontun adapter still exists and remove it
+	// Check if phaethontun adapter still exists and disable/remove it.
 	out, _ := exec.Command("netsh", "interface", "show", "interface").Output()
 	if strings.Contains(string(out), "phaethontun") {
-		util.LogInfo("tun: removing orphaned adapter phaethontun")
-		if out2, err := exec.Command("netsh", "interface", "delete", "interface", "name=phaethontun").CombinedOutput(); err != nil {
-			util.LogWarn("tun: failed to remove adapter: %v, %s", err, out2)
+		util.LogInfo("tun: disabling orphaned adapter phaethontun")
+		if out2, err := exec.Command("netsh", "interface", "set", "interface", "phaethontun", "disable").CombinedOutput(); err != nil {
+			util.LogWarn("tun: failed to disable adapter: %v, %s", err, out2)
 		}
 	}
 
@@ -72,5 +73,39 @@ func CleanupResidual() {
 		util.LogWarn("tun: dns reset fail: %v, %s", err, out)
 	}
 
+	// Reset physical interface DNS to DHCP as a crash-recovery best effort.
+	// The original DNS backup is only available during normal Stop(); after a
+	// crash we restore DHCP so the machine does not remain stuck on 198.18.0.1.
+	if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
+		if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+ifaceName, "dhcp").CombinedOutput(); err != nil {
+			util.LogWarn("tun: restore dns for %s fail: %v, %s", ifaceName, err, out)
+		} else {
+			util.LogInfo("tun: restored dns for %s to dhcp", ifaceName)
+		}
+	}
+
 	util.LogInfo("tun: residual cleanup completed")
+}
+
+// defaultGatewayInterfaceName returns the interface name of the IPv4 default
+// route, or an empty string if it cannot be determined.
+func defaultGatewayInterfaceName() string {
+	out, err := exec.Command("netsh", "interface", "ip", "show", "route").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[3] != "0.0.0.0/0" {
+			continue
+		}
+		var idx uint32
+		if _, err := fmt.Sscanf(fields[4], "%d", &idx); err != nil {
+			continue
+		}
+		if iface, err := net.InterfaceByIndex(int(idx)); err == nil {
+			return iface.Name
+		}
+	}
+	return ""
 }

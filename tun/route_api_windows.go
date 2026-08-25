@@ -5,6 +5,8 @@ package tun
 import (
 	"fmt"
 	"net"
+	"os/exec"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -119,28 +121,45 @@ func (r *mibUnicastIpAddressRow) setOnLinkPrefixLength(length uint8) {
 }
 
 func getDefaultGatewayWindows() (net.IP, uint64, uint32, error) {
-	var table unsafe.Pointer
-	ret, _, _ := procGetIpForwardTable2.Call(
-		uintptr(windows.AF_INET),
-		uintptr(unsafe.Pointer(&table)),
-	)
-	if ret != 0 {
-		return nil, 0, 0, fmt.Errorf("GetIpForwardTable2: 0x%x", ret)
+	out, err := exec.Command("netsh", "interface", "ip", "show", "route").Output()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("netsh show route: %w", err)
 	}
-	defer procFreeMibTable.Call(uintptr(table))
 
-	numEntries := *(*uint32)(table)
-	rowSize := uint32(unsafe.Sizeof(mibIpForwardRow2{}))
-
-	for i := uint32(0); i < numEntries; i++ {
-		row := (*mibIpForwardRow2)(unsafe.Add(table, unsafe.Sizeof(uint32(0))+uintptr(i)*uintptr(rowSize)))
-		if row.isDefaultRoute() {
-			luid := *(*uint64)(unsafe.Pointer(&row[0]))
-			index := *(*uint32)(unsafe.Pointer(&row[8]))
-			return row.nextHop(), luid, index, nil
+	var gw net.IP
+	var idx uint32
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
 		}
+		// netsh output columns (Chinese/English): publish, type, metric, prefix, idx, gateway
+		// The prefix field is the 4th field (index 3 in zero-based Fields).
+		if fields[3] != "0.0.0.0/0" {
+			continue
+		}
+		// Interface index is the 5th field.
+		if _, err := fmt.Sscanf(fields[4], "%d", &idx); err != nil {
+			continue
+		}
+		// Gateway is the 6th field.
+		gw = net.ParseIP(fields[5])
+		break
 	}
-	return nil, 0, 0, fmt.Errorf("no default gateway found")
+
+	if gw == nil {
+		return nil, 0, 0, fmt.Errorf("no default gateway found")
+	}
+
+	iface, err := net.InterfaceByIndex(int(idx))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("lookup interface %d: %w", idx, err)
+	}
+	luid, _, err := getInterfaceLUID(iface.Name)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("lookup luid for %s: %w", iface.Name, err)
+	}
+	return gw.To4(), luid, idx, nil
 }
 
 func getInterfaceLUID(name string) (uint64, uint32, error) {

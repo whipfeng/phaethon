@@ -36,6 +36,7 @@ type Engine struct {
 	dnsHijack *DNSHijacker
 	routeMgr  *RouteManager
 	addr      tcpip.Address
+	dnsAddr   tcpip.Address
 	prefixLen int
 
 	mu      sync.Mutex
@@ -130,6 +131,11 @@ func (e *Engine) Start() error {
 	// 2. Pick TUN address (e.g. 198.18.0.1/15 for routing, plus a local addr)
 	tunIP := net.ParseIP("198.18.0.1").To4()
 	e.addr = tcpip.AddrFrom4([4]byte(tunIP))
+	// Use a separate DNS server IP inside the Fake-IP subnet. Packets to the
+	// TUN interface IP itself are consumed by Windows locally and never reach
+	// the Wintun driver, so the DNS hijacker must listen on a different address.
+	dnsIP := net.ParseIP("198.18.0.2").To4()
+	e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
 	e.prefixLen = 15
 
 	// 3. Create netstack
@@ -142,7 +148,7 @@ func (e *Engine) Start() error {
 	e.fakeIP = NewFakeIPPool()
 
 	// 5. Init DNS hijacker
-	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP)
+	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
 	if err := e.dnsHijack.Start(&e.wg); err != nil {
 		e.dnsHijack.Stop()
 		dev.Close()
@@ -172,8 +178,10 @@ func (e *Engine) Start() error {
 
 	// 8. Redirect system DNS to TUN so Fake-IP works for applications.
 	//    Use the original physical interface, not the TUN device itself.
+	//    DNS queries must target an address inside the Fake-IP subnet that is
+	//    NOT the TUN interface IP, otherwise Windows consumes them locally.
 	if e.defaultIfaceName != "" {
-		if err := setSystemDNS(e.defaultIfaceName, tunIP.String()); err != nil {
+		if err := setSystemDNS(e.defaultIfaceName, dnsIP.String()); err != nil {
 			util.LogWarn("tun: failed to set system dns: %v", err)
 		}
 	} else {
@@ -186,8 +194,9 @@ func (e *Engine) Start() error {
 	e.closeCh = make(chan struct{})
 	e.mu.Unlock()
 
-	e.wg.Add(3)
+	e.wg.Add(4)
 	go e.readLoop()
+	go e.writeLoop()
 	go e.acceptTCP()
 	go e.acceptUDP()
 
@@ -281,6 +290,17 @@ func (e *Engine) initStack() error {
 		return fmt.Errorf("add address: %v", err)
 	}
 
+	// Add the DNS server address as a secondary local address so netstack
+	// considers it local and delivers UDP:53 packets to the DNS hijacker.
+	dnsAP := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 32}
+	dnsProtoAddr := tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: dnsAP,
+	}
+	if err := s.AddProtocolAddress(nicID, dnsProtoAddr, stack.AddressProperties{}); err != nil {
+		return fmt.Errorf("add dns address: %v", err)
+	}
+
 	s.SetPromiscuousMode(nicID, true)
 	s.SetSpoofing(nicID, true)
 
@@ -335,6 +355,45 @@ func (e *Engine) readLoop() {
 		copy(pktBuf, readBuf[:n])
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
 		e.linkEP.InjectInbound(proto, pkt)
+		pkt.DecRef()
+	}
+}
+
+// writeLoop reads outbound packets from netstack and writes them to the TUN device.
+func (e *Engine) writeLoop() {
+	defer e.wg.Done()
+	for {
+		select {
+		case <-e.closeCh:
+			return
+		default:
+		}
+
+		pkt := e.linkEP.Read()
+		if pkt == nil {
+			select {
+			case <-e.closeCh:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
+		}
+
+		if e.device == nil {
+			pkt.DecRef()
+			continue
+		}
+
+		buf := pkt.ToBuffer()
+		if _, err := e.device.Write(buf.Flatten()); err != nil {
+			select {
+			case <-e.closeCh:
+				pkt.DecRef()
+				return
+			default:
+				util.LogWarn("tun: write error: %v", err)
+			}
+		}
 		pkt.DecRef()
 	}
 }
@@ -617,6 +676,7 @@ func (e *Engine) resolveProxyIPs() []string {
 
 	// Collect unique hostnames to resolve
 	hostSet := make(map[string]struct{})
+	ipSet := make(map[string]struct{})
 	addHost := func(host string) {
 		if host == "" {
 			return
@@ -624,8 +684,9 @@ func (e *Engine) resolveProxyIPs() []string {
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
-		if net.ParseIP(host) != nil {
-			return // already an IP, skip DNS
+		if ip := net.ParseIP(host); ip != nil {
+			ipSet[ip.String()] = struct{}{}
+			return
 		}
 		hostSet[host] = struct{}{}
 	}
@@ -646,10 +707,6 @@ func (e *Engine) resolveProxyIPs() []string {
 		addHost(m.ReverseAddress)
 	}
 	e.ruleConf.RUnlock()
-
-	if len(hostSet) == 0 {
-		return nil
-	}
 
 	// Concurrent DNS resolution
 	type result struct {
@@ -684,8 +741,7 @@ func (e *Engine) resolveProxyIPs() []string {
 	}
 	wg.Wait()
 
-	// Deduplicate IPs across all resolved hosts
-	ipSet := make(map[string]struct{})
+	// Deduplicate IPs across all resolved hosts and literal IPs
 	for _, r := range results {
 		for _, ip := range r.ips {
 			ipSet[ip] = struct{}{}

@@ -576,8 +576,35 @@ func (e *Engine) resolveDirect(host string) ([]string, error) {
 	return r.LookupHost(ctx, host)
 }
 
-// resolveProxyIPs extracts and resolves proxy server addresses before TUN takes
-// over DNS/routing, so we can add exclusion routes for them.
+// firstProxyHop walks the proxy.Next chain and returns the first proxy whose
+// server the local machine connects to directly. In a chain A -> B -> C
+// (A.Next = B, B.Next = C, C.Next = nil), the local machine first connects to
+// C.Server, so C is the first hop and the only one that needs a TUN exclusion.
+func firstProxyHop(p *config.Proxy) *config.Proxy {
+	visited := make(map[string]bool)
+	for p != nil {
+		if !p.IsEnabled() {
+			return nil
+		}
+		if visited[p.Name] {
+			// Cycle detected; break to avoid infinite loop. The current proxy is
+			// still a valid first hop as far as we can tell.
+			return p
+		}
+		visited[p.Name] = true
+		if p.Next == nil || strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+			return p
+		}
+		p = p.Next
+	}
+	return nil
+}
+
+// resolveProxyIPs extracts and resolves the first-hop proxy server addresses
+// before TUN takes over DNS/routing, so we can add exclusion routes for them.
+// For proxy chains, only the first hop (the proxy whose server the local machine
+// connects to directly) needs to bypass TUN; intermediate proxy servers are
+// reached through tunnels and must not be excluded.
 // Resolution is done concurrently to avoid startup delays from slow/unreachable hosts.
 func (e *Engine) resolveProxyIPs() []string {
 	if e.ruleConf == nil {
@@ -604,9 +631,14 @@ func (e *Engine) resolveProxyIPs() []string {
 		if !p.IsEnabled() {
 			continue
 		}
-		addHost(p.Server)
-		addHost(p.Sni)
-		addHost(p.Servername)
+		// Walk the proxy chain to the first hop. Only that server's IP needs to
+		// bypass TUN; later hops are reached through the tunnel.
+		first := firstProxyHop(p)
+		if first != nil {
+			addHost(first.Server)
+			addHost(first.Sni)
+			addHost(first.Servername)
+		}
 	}
 	for _, m := range e.ruleConf.Mappings {
 		if !m.IsEnabled() {

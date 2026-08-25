@@ -17,12 +17,10 @@
 
 本次修复只针对这 3 个显而易见的问题，**不开启真实 TUN 进行整机测试**（避免把当前工作网络搞挂）。真实 TUN 拦截测试留到后续在独立 VM/测试机上进行。
 
-## 目标
+## 新增目标
 
-1. 让 `readLoop` 正确区分 IPv4/IPv6 并注入对应协议层。
-2. 让 `readLoop` 每包使用独立 buffer，避免共享内存被覆盖。
-3. 修复 `proxyDesc` 对 DIRECT 代理的显示判断。
-4. 保持现有公共 API 不变，所有 tun 单元测试继续通过。
+5. 排除 LAN/私网流量，避免 TUN 启用后本地网络中断。
+6. 修复 UDP 转发语义，使用 `net.PacketConn` 保持数据报边界，避免把 UDP 当 TCP 流 relay。
 
 ## 阶段 1: readLoop 修复
 
@@ -44,13 +42,44 @@
 - `proxyDesc` 中使用 `strings.EqualFold(p.Type, config.ProxyDIRECT)` 替代 `p.Type == config.ProxyDIRECT`。
 - 因为配置初始化时 `proxy.Type = strings.ToLower(proxy.Type)`，直接等于大写常量会永远失败。
 
-## 阶段 3: 验证
+## 阶段 3: LAN/私网排除
 
-### Task 3.1: 单元测试
+### Task 3.1: 默认 LAN CIDR 排除
+- 在 `tun/route.go` 新增 `DefaultLANExclusions`，包含常见 IPv4 私网/本地/组播前缀：
+  - `10.0.0.0/8`
+  - `172.16.0.0/12`
+  - `192.168.0.0/16`
+  - `127.0.0.0/8`
+  - `169.254.0.0/16`
+  - `224.0.0.0/4`
+  - `255.255.255.255/32`
+- `Engine.Start()` 将 LAN CIDR 与代理服务器 IP 合并后传给 `RouteManager.SetExclusions`。
+
+### Task 3.2: RouteManager 支持 CIDR 排除
+- `platformSetup` 遍历 exclusions 时同时处理纯 IP 和 CIDR：
+  - Windows: 通过 `parseExclusionCIDR` 区分 `/32` 与具体前缀长度。
+  - Linux: 通过 `parseExclusionLinux` 生成 `*net.IPNet`。
+  - Darwin: `route -n add -host` / `route -n add -net` 分别处理。
+- `deleteExclusionRoute` 同样根据是否含 `/` 删除主机或网络路由。
+
+## 阶段 4: UDP 报文转发
+
+### Task 4.1: 使用 net.PacketConn 保持数据报语义
+- `handleUDP` 不再调用 `dialer.ChainDialWithID` 把 UDP 伪装成 TCP。
+- 代理流量改用 `dialer.ChainUDPDial(proxy)` 获取 `net.PacketConn`。
+- DIRECT UDP 通过 `directDialPacket()` 创建绑定原物理网卡的 UDP socket，绕过 TUN 路由。
+- 新增 `relayUDP()`：
+  - 一个方向从 `netstackConn.Read` 读取一个 UDP 数据报，通过 `targetConn.WriteTo` 发给目标。
+  - 另一个方向从 `targetConn.ReadFrom` 读取一个数据报，通过 `netstackConn.Write` 写回 netstack。
+  - 这样可以保持 UDP 数据报边界，不混淆多个数据包。
+
+## 阶段 5: 验证
+
+### Task 5.1: 单元测试
 - `go test ./tun -v` 必须全部通过。
 - `go test ./...` 无回归。
 
-### Task 3.2: 代码静态检查
+### Task 5.2: 代码静态检查
 - `go build ./...` 成功。
 - `go vet ./tun` 无新增告警。
 
@@ -59,5 +88,7 @@
 - `readLoop` 正确处理 IPv4/IPv6。
 - `readLoop` 不再复用单 buffer。
 - `proxyDesc` 对 DIRECT 显示为 `"DIRECT"`。
+- LAN/私网流量默认绕过 TUN。
+- UDP 转发保持数据报语义，不再当 TCP 流处理。
 - `go test ./...` 通过，`go build ./...` 成功。
 - 不在当前工作主机上启用真实 TUN。

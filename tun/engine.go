@@ -149,12 +149,14 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("tun: start dns hijacker: %w", err)
 	}
 
-	// 6. Resolve proxy server IPs before TUN takes over DNS/routing
+	// 6. Resolve proxy server IPs before TUN takes over DNS/routing,
+	//    plus LAN/private subnets that should bypass TUN.
 	proxyIPs := e.resolveProxyIPs()
+	exclusions := append(proxyIPs, DefaultLANExclusions...)
 
 	// 7. Configure routes
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
-	e.routeMgr.SetExclusions(proxyIPs)
+	e.routeMgr.SetExclusions(exclusions)
 	if err := e.routeMgr.Setup(tunIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
 		e.dnsHijack.Stop()
@@ -367,7 +369,8 @@ func (e *Engine) acceptUDP() {
 	<-e.closeCh
 }
 
-// handleUDP relays UDP data between netstack and the real network via proxy or direct.
+// handleUDP relays UDP datagrams between netstack and the real network via proxy or direct.
+// It preserves datagram boundaries by reading/writing one datagram at a time.
 func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	// Check if this is a Fake-IP: restore original domain
 	if domain := e.fakeIP.LookupDomain(dstAddr); domain != "" {
@@ -392,17 +395,17 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		return
 	}
 
-	var targetConn net.Conn
+	var targetConn net.PacketConn
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
+		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
 			return
 		}
 	} else {
-		targetConn, err = e.directDial("udp", net.JoinHostPort(resolvedAddr, fmt.Sprintf("%d", resolvedPort)))
+		targetConn, err = e.directDialPacket()
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
 			return
@@ -410,11 +413,55 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	}
 	defer targetConn.Close()
 
+	dstUDPAddr := &net.UDPAddr{IP: net.ParseIP(resolvedAddr), Port: resolvedPort}
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 
-	// Bidirectional relay for UDP
-	go util.Relay(targetConn, netstackConn)
-	util.Relay(netstackConn, targetConn)
+	relayUDP(netstackConn, targetConn, dstUDPAddr)
+}
+
+// directDialPacket creates a UDP socket bound to the original physical interface
+// so DIRECT UDP traffic bypasses the TUN split-tunnel routes.
+func (e *Engine) directDialPacket() (net.PacketConn, error) {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return setDirectSocketOption(c, e.defaultIfaceName, e.defaultIfaceIndex)
+		},
+	}
+	return lc.ListenPacket(context.Background(), "udp", "")
+}
+
+// relayUDP copies datagrams between the netstack UDP connection and the target
+// PacketConn, preserving datagram boundaries.
+func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
+	const bufSize = 65535
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, bufSize)
+		for {
+			n, err := netstackConn.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := targetConn.WriteTo(buf[:n], dstAddr); err != nil {
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, bufSize)
+	for {
+		n, _, err := targetConn.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		if _, err := netstackConn.Write(buf[:n]); err != nil {
+			break
+		}
+	}
+	wg.Wait()
 }
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.

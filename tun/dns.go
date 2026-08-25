@@ -20,16 +20,20 @@ import (
 type DNSHijacker struct {
 	ns      *stack.Stack
 	pool    *FakeIPPool
+	tunAddr tcpip.Address
+	dnsAddr tcpip.Address
 	udpEP   tcpip.Endpoint
 	wq      waiter.Queue
 	started bool
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
-func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool) *DNSHijacker {
+func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Address) *DNSHijacker {
 	return &DNSHijacker{
-		ns:   ns,
-		pool: pool,
+		ns:      ns,
+		pool:    pool,
+		tunAddr: tunAddr,
+		dnsAddr: dnsAddr,
 	}
 }
 
@@ -45,11 +49,11 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 
 	addr := tcpip.FullAddress{
 		NIC:  1,
-		Addr: tcpip.AddrFrom4([4]byte{0, 0, 0, 0}),
+		Addr: h.dnsAddr,
 		Port: 53,
 	}
 	if err := h.udpEP.Bind(addr); err != nil {
-		return fmt.Errorf("bind udp 53: %v", err)
+		return fmt.Errorf("bind udp 53 on %s: %v", h.dnsAddr, err)
 	}
 
 	wg.Add(1)
@@ -68,10 +72,19 @@ func (h *DNSHijacker) Stop() {
 }
 
 func (h *DNSHijacker) serveLoop() {
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	h.wq.EventRegister(&waitEntry)
+	defer h.wq.EventUnregister(&waitEntry)
+
 	for {
 		var buf bytes.Buffer
-		res, err := h.udpEP.Read(&buf, tcpip.ReadOptions{})
+		res, err := h.udpEP.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 		if err != nil {
+			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
+				<-ch
+				continue
+			}
+			util.LogWarn("tun dns: read error: %v", err)
 			return
 		}
 
@@ -83,6 +96,7 @@ func (h *DNSHijacker) serveLoop() {
 		// Minimal DNS parsing: extract the queried domain
 		domain, ok := parseDNSQueryDomain(packet)
 		if !ok || domain == "" {
+			util.LogWarn("tun dns: failed to parse query from %d bytes", len(packet))
 			continue
 		}
 
@@ -91,7 +105,9 @@ func (h *DNSHijacker) serveLoop() {
 
 		resp := buildDNSResponse(packet, fakeIP.To4())
 		if resp != nil {
-			h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+			if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
+				util.LogWarn("tun dns: write response fail: %v", err)
+			}
 		}
 	}
 }

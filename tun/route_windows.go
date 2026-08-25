@@ -31,6 +31,8 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	}
 
 	// 1. Configure interface IP via netsh (more reliable than iphlpapi on Wintun).
+	// Clear any stale static IP first to avoid "object already exists" errors.
+	_ = exec.Command("netsh", "interface", "ip", "set", "address", "name="+r.devName, "dhcp").Run()
 	mask := net.IP(net.CIDRMask(prefixLen, 32)).String()
 	cmd := exec.Command("netsh", "interface", "ip", "set", "address", "name="+r.devName, "static", tunIP, mask, "none")
 	if out, err := cmd.CombinedOutput(); err != nil {

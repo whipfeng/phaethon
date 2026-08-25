@@ -90,6 +90,6 @@
 ## 阶段 7：提交
 
 ### Task 7.1: 正常提交
-- [ ] `git add` 相关文件
-- [ ] `git commit` 新提交（不 amend）
+- [x] `git add` 相关文件
+- [x] `git commit` 新提交（不 amend）
 - [ ] 推送（用户指示不着急 push，待后续网络恢复再推）

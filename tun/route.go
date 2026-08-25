@@ -5,6 +5,18 @@ import (
 	"sync"
 )
 
+// DefaultLANExclusions lists IPv4 private/local subnets that should bypass TUN
+// to avoid breaking local network connectivity and multicast traffic.
+var DefaultLANExclusions = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"224.0.0.0/4",
+	"255.255.255.255/32",
+}
+
 // RouteManager handles OS route table modifications using platform-native APIs.
 // Windows: iphlpapi.dll (CreateIpForwardEntry2, etc.)
 // Linux:    netlink

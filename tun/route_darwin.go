@@ -28,16 +28,15 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	}
 
 	// 2. Add exclusion routes
-	for _, ip := range r.excludeIPs {
-		if ip == "" || ip == tunIP || r.originalGateway == nil {
+	for _, exclude := range r.excludeIPs {
+		if exclude == "" || exclude == tunIP || r.originalGateway == nil {
 			continue
 		}
-		cmd := exec.Command("route", "-n", "add", "-host", ip, r.originalGateway.String())
-		if out, err := cmd.CombinedOutput(); err != nil {
-			util.LogWarn("tun: add exclusion route %s fail: %v, %s", ip, err, out)
+		if err := r.addExclusionRoute(exclude); err != nil {
+			util.LogWarn("tun: add exclusion route %s fail: %v", exclude, err)
 		} else {
-			util.LogInfo("tun: exclusion route %s -> %s", ip, r.originalGateway)
-			r.appliedExcludes = append(r.appliedExcludes, ip)
+			util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+			r.appliedExcludes = append(r.appliedExcludes, exclude)
 		}
 	}
 
@@ -58,11 +57,31 @@ func (r *RouteManager) platformTeardown() {
 	exec.Command("route", "-n", "delete", "-net", "128.0.0.0/1").Run()
 }
 
-func (r *RouteManager) deleteExclusionRoute(ip string) {
-	if ip == "" || r.originalGateway == nil {
+// addExclusionRoute adds a host or CIDR route via the original gateway.
+func (r *RouteManager) addExclusionRoute(exclude string) error {
+	if strings.Contains(exclude, "/") {
+		cmd := exec.Command("route", "-n", "add", "-net", exclude, r.originalGateway.String())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, out)
+		}
+		return nil
+	}
+	cmd := exec.Command("route", "-n", "add", "-host", exclude, r.originalGateway.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, out)
+	}
+	return nil
+}
+
+func (r *RouteManager) deleteExclusionRoute(exclude string) {
+	if exclude == "" || r.originalGateway == nil {
 		return
 	}
-	exec.Command("route", "-n", "delete", "-host", ip, r.originalGateway.String()).Run()
+	if strings.Contains(exclude, "/") {
+		exec.Command("route", "-n", "delete", "-net", exclude, r.originalGateway.String()).Run()
+		return
+	}
+	exec.Command("route", "-n", "delete", "-host", exclude, r.originalGateway.String()).Run()
 }
 
 func getDefaultGatewayDarwin() (net.IP, string, error) {

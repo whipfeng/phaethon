@@ -22,19 +22,37 @@
 ### Task 2.1: DIRECT 判断
 - [x] 使用 `strings.EqualFold` 比较 `proxy.Type` 与 `config.ProxyDIRECT`
 
-## 阶段 3: 验证
+## 阶段 3: LAN/私网排除
 
-### Task 3.1: 单元测试
-- [x] `go test ./tun -v`
-- [x] `go test ./...`
+### Task 3.1: 默认 LAN CIDR 排除
+- [x] 新增 `DefaultLANExclusions`：10/8、172.16/12、192.168/16、127/8、169.254/16、224/4、255.255.255.255/32
+- [x] `Start()` 将 LAN CIDR 与代理服务器 IP 一并传给 `RouteManager.SetExclusions`
 
-### Task 3.2: 构建
-- [x] `go build ./...`
-- [x] `go vet ./tun`
+### Task 3.2: RouteManager 支持 CIDR 排除
+- [x] Windows/Linux/Darwin 的 `platformSetup` 同时处理纯 IP 与 CIDR
+- [x] `deleteExclusionRoute` 根据字符串是否含 `/` 区分主机路由与网络路由
 
-## 阶段 4: 提交
+## 阶段 4: UDP 报文转发
 
-### Task 4.1: 正常提交
-- [x] `git add` 相关文件
-- [x] `git commit` 新提交（不 amend）
-- [x] 推送（已推送到 origin/master）
+### Task 4.1: 使用 PacketConn  preserves datagram semantics
+- [x] `handleUDP` 改为调用 `dialer.ChainUDPDial` 获取 `net.PacketConn`
+- [x] DIRECT UDP 走新接口 `directDialPacket()`，绑定原物理网卡
+- [x] 新增 `relayUDP()` 逐包转发，保持 UDP 数据报边界
+- [x] 移除原先把 UDP 当 TCP 流的 `ChainDialWithID` + `util.Relay` 写法
+
+## 阶段 5: 验证
+
+### Task 5.1: 单元测试
+- [ ] `go test ./tun -v`
+- [ ] `go test ./...`
+
+### Task 5.2: 构建
+- [ ] `go build ./...`
+- [ ] `go vet ./tun`
+
+## 阶段 6: 提交
+
+### Task 6.1: 正常提交
+- [ ] `git add` 相关文件
+- [ ] `git commit` 新提交（不 amend）
+- [ ] 推送（已推送到 origin/master）

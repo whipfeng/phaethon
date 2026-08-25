@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"syscall"
 
 	"github.com/vishvananda/netlink"
@@ -55,24 +56,25 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 	}
 
-	// 4. Add exclusion routes (proxy server IPs bypass TUN via original gateway)
-	for _, ip := range r.excludeIPs {
-		if ip == "" || ip == tunIP || r.originalGateway == nil {
+	// 4. Add exclusion routes (proxy server IPs and LAN/private subnets bypass TUN via original gateway)
+	for _, exclude := range r.excludeIPs {
+		if exclude == "" || exclude == tunIP || r.originalGateway == nil {
 			continue
 		}
-		dst := &net.IPNet{
-			IP:   net.ParseIP(ip),
-			Mask: net.CIDRMask(32, 32),
+		dst, err := parseExclusionLinux(exclude)
+		if err != nil {
+			util.LogWarn("tun: invalid exclusion %s: %v", exclude, err)
+			continue
 		}
 		rt := &netlink.Route{
 			Dst: dst,
 			Gw:  r.originalGateway,
 		}
 		if err := netlink.RouteAdd(rt); err != nil {
-			util.LogWarn("tun: add exclusion route %s fail: %v", ip, err)
+			util.LogWarn("tun: add exclusion route %s fail: %v", exclude, err)
 		} else {
-			util.LogInfo("tun: exclusion route %s/32 -> %s", ip, r.originalGateway)
-			r.appliedExcludes = append(r.appliedExcludes, ip)
+			util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+			r.appliedExcludes = append(r.appliedExcludes, exclude)
 		}
 	}
 
@@ -109,10 +111,27 @@ func (r *RouteManager) platformTeardown() {
 	}
 }
 
-func (r *RouteManager) deleteExclusionRoute(ip string) {
-	dst := &net.IPNet{
-		IP:   net.ParseIP(ip),
-		Mask: net.CIDRMask(32, 32),
+// parseExclusionLinux parses an exclusion entry into a destination IPNet.
+func parseExclusionLinux(exclude string) (*net.IPNet, error) {
+	if strings.Contains(exclude, "/") {
+		_, ipNet, err := net.ParseCIDR(exclude)
+		if err != nil {
+			return nil, err
+		}
+		return ipNet, nil
+	}
+	ip := net.ParseIP(exclude)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP: %s", exclude)
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}, nil
+}
+
+func (r *RouteManager) deleteExclusionRoute(exclude string) {
+	dst, err := parseExclusionLinux(exclude)
+	if err != nil {
+		util.LogWarn("tun: invalid exclusion to delete %s: %v", exclude, err)
+		return
 	}
 	rt := &netlink.Route{
 		Dst: dst,

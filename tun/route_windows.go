@@ -5,6 +5,7 @@ package tun
 import (
 	"fmt"
 	"net"
+	"strings"
 	"unsafe"
 
 	"phaethon/util"
@@ -50,25 +51,13 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 
 	// 3. Add exclusion routes via the ORIGINAL interface (not TUN).
 	// These routes go through the original physical interface so proxy
-	// server traffic bypasses TUN entirely.
-	for _, ipStr := range r.excludeIPs {
-		if ipStr == "" || ipStr == tunIP || r.originalGateway == nil {
+	// server traffic and LAN/private subnets bypass TUN entirely.
+	for _, exclude := range r.excludeIPs {
+		if exclude == "" || exclude == tunIP || r.originalGateway == nil {
 			continue
 		}
-		var fwdRow mibIpForwardRow2
-		fwdRow.init()
-		fwdRow.setInterfaceLuid(gwLuid)
-		fwdRow.setInterfaceIndex(gwIndex)
-		fwdRow.setDestinationPrefix(net.ParseIP(ipStr), 32)
-		fwdRow.setNextHop(r.originalGateway)
-		fwdRow.setMetric(1)
-
-		ret, _, _ = procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		if ret != 0 {
-			util.LogWarn("tun: add exclusion route %s fail: 0x%x", ipStr, ret)
-		} else {
-			util.LogInfo("tun: exclusion route %s -> %s", ipStr, r.originalGateway)
-			r.appliedExcludes = append(r.appliedExcludes, ipStr)
+		if r.addExclusionRoute(gwLuid, gwIndex, exclude) {
+			r.appliedExcludes = append(r.appliedExcludes, exclude)
 		}
 	}
 
@@ -137,16 +126,64 @@ func (r *RouteManager) platformTeardown() {
 	}
 }
 
-// deleteExclusionRoute removes a /32 host route via the original interface.
-func (r *RouteManager) deleteExclusionRoute(ip string) {
+// addExclusionRoute adds a host or CIDR route via the original interface.
+// Returns true on success.
+func (r *RouteManager) addExclusionRoute(gwLuid uint64, gwIndex uint32, exclude string) bool {
+	ip, prefixLen, err := parseExclusionCIDR(exclude)
+	if err != nil {
+		util.LogWarn("tun: invalid exclusion %s: %v", exclude, err)
+		return false
+	}
+
+	var fwdRow mibIpForwardRow2
+	fwdRow.init()
+	fwdRow.setInterfaceLuid(gwLuid)
+	fwdRow.setInterfaceIndex(gwIndex)
+	fwdRow.setDestinationPrefix(ip, prefixLen)
+	fwdRow.setNextHop(r.originalGateway)
+	fwdRow.setMetric(1)
+
+	ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+	if ret != 0 {
+		util.LogWarn("tun: add exclusion route %s fail: 0x%x", exclude, ret)
+		return false
+	}
+	util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+	return true
+}
+
+// parseExclusionCIDR parses an exclusion entry which may be a plain IP or CIDR.
+func parseExclusionCIDR(exclude string) (net.IP, uint8, error) {
+	if strings.Contains(exclude, "/") {
+		_, ipNet, err := net.ParseCIDR(exclude)
+		if err != nil {
+			return nil, 0, err
+		}
+		ones, _ := ipNet.Mask.Size()
+		return ipNet.IP, uint8(ones), nil
+	}
+	ip := net.ParseIP(exclude)
+	if ip == nil {
+		return nil, 0, fmt.Errorf("invalid IP: %s", exclude)
+	}
+	return ip, 32, nil
+}
+
+// deleteExclusionRoute removes a host or CIDR route via the original interface.
+func (r *RouteManager) deleteExclusionRoute(exclude string) {
 	if r.defaultIfaceLUID == 0 || r.originalGateway == nil {
+		return
+	}
+	ip, prefixLen, err := parseExclusionCIDR(exclude)
+	if err != nil {
+		util.LogWarn("tun: invalid exclusion to delete %s: %v", exclude, err)
 		return
 	}
 	var fwdRow mibIpForwardRow2
 	fwdRow.init()
 	fwdRow.setInterfaceLuid(r.defaultIfaceLUID)
 	fwdRow.setInterfaceIndex(uint32(r.DefaultIfaceIndex))
-	fwdRow.setDestinationPrefix(net.ParseIP(ip), 32)
+	fwdRow.setDestinationPrefix(ip, prefixLen)
 	fwdRow.setNextHop(r.originalGateway)
 	fwdRow.setMetric(1)
 	procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))

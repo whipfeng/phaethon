@@ -53,6 +53,6 @@
 ## 阶段 6: 提交
 
 ### Task 6.1: 正常提交
-- [ ] `git add` 相关文件
-- [ ] `git commit` 新提交（不 amend）
-- [ ] 推送（已推送到 origin/master）
+- [x] `git add` 相关文件
+- [x] `git commit` 新提交（不 amend）
+- [ ] 推送（网络不通，GitHub 443 连接失败，待网络恢复后重试）

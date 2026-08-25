@@ -267,7 +267,7 @@ func (e *Engine) initStack() error {
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
 	defer e.wg.Done()
-	buf := make([]byte, 2048)
+	readBuf := make([]byte, 2048)
 	for {
 		select {
 		case <-e.closeCh:
@@ -275,7 +275,9 @@ func (e *Engine) readLoop() {
 		default:
 		}
 
-		n, err := e.device.Read(buf)
+		// Read into a temporary buffer first, then copy to a per-packet buffer
+		// so netstack owns the data and cannot be overwritten by the next read.
+		n, err := e.device.Read(readBuf)
 		if err != nil {
 			select {
 			case <-e.closeCh:
@@ -289,8 +291,22 @@ func (e *Engine) readLoop() {
 			continue
 		}
 
-		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf[:n])})
-		e.linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
+		// Determine network protocol from the IP version field.
+		var proto tcpip.NetworkProtocolNumber
+		switch readBuf[0] >> 4 {
+		case 4:
+			proto = ipv4.ProtocolNumber
+		case 6:
+			proto = ipv6.ProtocolNumber
+		default:
+			util.LogWarn("tun: dropped non-IP packet (version=%d)", readBuf[0]>>4)
+			continue
+		}
+
+		pktBuf := make([]byte, n)
+		copy(pktBuf, readBuf[:n])
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
+		e.linkEP.InjectInbound(proto, pkt)
 		pkt.DecRef()
 	}
 }
@@ -452,7 +468,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 }
 
 func proxyDesc(p *config.Proxy) string {
-	if p == nil || p.Type == config.ProxyDIRECT {
+	if p == nil || strings.EqualFold(p.Type, config.ProxyDIRECT) {
 		return "DIRECT"
 	}
 	return p.Name

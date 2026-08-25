@@ -5,34 +5,36 @@ package tun
 import (
 	"fmt"
 	"net"
+	"os/exec"
 	"strings"
+	"time"
 	"unsafe"
 
 	"phaethon/util"
 )
 
 func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
-	luid, index, err := getInterfaceLUID(r.devName)
+	// The Wintun adapter may take a moment to register with the TCP/IP stack.
+	// Retry LUID lookup briefly before giving up.
+	var luid uint64
+	var index uint32
+	var err error
+	for i := 0; i < 20; i++ {
+		luid, index, err = getInterfaceLUID(r.devName)
+		if err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if err != nil {
 		return err
 	}
 
-	// 1. Configure interface IP
-	ip := net.ParseIP(tunIP).To4()
-	if ip == nil {
-		return fmt.Errorf("invalid tunIP: %s", tunIP)
-	}
-	var addrRow mibUnicastIpAddressRow
-	addrRow.setAddress(ip)
-	addrRow.setInterfaceLuid(luid)
-	addrRow.setInterfaceIndex(index)
-	addrRow.setOnLinkPrefixLength(uint8(prefixLen))
-
-	ret, _, _ := procCreateUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&addrRow[0])))
-	if ret != 0 {
-		if ret != 0x800704b0 {
-			return fmt.Errorf("CreateUnicastIpAddressEntry: 0x%x", ret)
-		}
+	// 1. Configure interface IP via netsh (more reliable than iphlpapi on Wintun).
+	mask := net.IP(net.CIDRMask(prefixLen, 32)).String()
+	cmd := exec.Command("netsh", "interface", "ip", "set", "address", "name="+r.devName, "static", tunIP, mask, "none")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("netsh set address: %v, %s", err, out)
 	}
 
 	// 2. Detect original default gateway and interface
@@ -80,7 +82,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		fwdRow.setNextHop(net.IPv4zero)
 		fwdRow.setMetric(1)
 
-		ret, _, _ = procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 		if ret != 0 {
 			return fmt.Errorf("CreateIpForwardEntry2 %s/%d: 0x%x", prefix.ip, prefix.len, ret)
 		}
@@ -112,18 +114,8 @@ func (r *RouteManager) platformTeardown() {
 		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 	}
 
-	// Delete interface IP
-	if r.tunIP != "" {
-		tunIP := net.ParseIP(r.tunIP).To4()
-		if tunIP != nil {
-			var addrRow mibUnicastIpAddressRow
-			addrRow.setAddress(tunIP)
-			addrRow.setInterfaceLuid(luid)
-			addrRow.setInterfaceIndex(index)
-			addrRow.setOnLinkPrefixLength(15)
-			procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&addrRow[0])))
-		}
-	}
+	// Delete interface IP via netsh.
+	_ = exec.Command("netsh", "interface", "ip", "set", "address", "name="+r.devName, "dhcp").Run()
 }
 
 // addExclusionRoute adds a host or CIDR route via the original interface.

@@ -50,6 +50,7 @@ func CleanupResidual() {
 		// Delete interface address
 		ip := net.ParseIP("198.18.0.1").To4()
 		var addrRow mibUnicastIpAddressRow
+		addrRow.init()
 		addrRow.setAddress(ip)
 		addrRow.setInterfaceLuid(luid)
 		addrRow.setInterfaceIndex(index)

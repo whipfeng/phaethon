@@ -20,11 +20,11 @@ var (
 )
 
 // setSystemDNS redirects the active network service DNS to the given TUN IP.
-func setSystemDNS(devName, tunIP string) error {
+func setSystemDNS(ifaceName, tunIP string) error {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
-	service, err := findActiveNetworkService(devName)
+	service, err := findActiveNetworkService(ifaceName)
 	if err != nil {
 		return fmt.Errorf("find active network service: %w", err)
 	}
@@ -47,7 +47,7 @@ func setSystemDNS(devName, tunIP string) error {
 }
 
 // restoreSystemDNS restores the DNS configuration saved by setSystemDNS.
-func restoreSystemDNS(devName string) {
+func restoreSystemDNS(ifaceName string) {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
@@ -73,8 +73,9 @@ func restoreSystemDNS(devName string) {
 }
 
 // findActiveNetworkService returns the network service to configure.
-// If devName is a utun/tun device, it tries to find the first non-TUN enabled service.
-func findActiveNetworkService(devName string) (string, error) {
+// If ifaceName is provided, it prefers the service whose device matches it;
+// otherwise it returns the first enabled non-TUN service.
+func findActiveNetworkService(ifaceName string) (string, error) {
 	out, err := exec.Command("networksetup", "-listnetworkserviceorder").Output()
 	if err != nil {
 		return "", fmt.Errorf("listnetworkserviceorder: %w", err)
@@ -82,12 +83,12 @@ func findActiveNetworkService(devName string) (string, error) {
 
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	var currentService string
+	var fallback string
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		// Service line: "(1) Wi-Fi" or "(*) Bluetooth PAN" (disabled)
 		if strings.HasPrefix(line, "(") {
 			closeIdx := strings.Index(line, ")")
 			if closeIdx < 0 {
@@ -95,22 +96,30 @@ func findActiveNetworkService(devName string) (string, error) {
 			}
 			marker := line[1:closeIdx]
 			if marker == "*" {
-				currentService = "" // disabled service
+				currentService = ""
 				continue
 			}
 			currentService = strings.TrimSpace(line[closeIdx+1:])
 			continue
 		}
-		// Hardware line: "(Hardware Port: Wi-Fi, Device: en0)"
 		if strings.HasPrefix(line, "(Hardware Port:") && currentService != "" {
 			if idx := strings.Index(line, "Device:"); idx >= 0 {
 				device := strings.TrimSuffix(strings.TrimSpace(line[idx+len("Device:"):]), ")")
 				device = strings.TrimSpace(device)
 				if !strings.HasPrefix(device, "utun") && !strings.HasPrefix(device, "tun") {
-					return currentService, nil
+					if fallback == "" {
+						fallback = currentService
+					}
+					if ifaceName != "" && strings.EqualFold(device, ifaceName) {
+						return currentService, nil
+					}
 				}
 			}
+			currentService = ""
 		}
+	}
+	if fallback != "" {
+		return fallback, nil
 	}
 	return "", fmt.Errorf("no active non-TUN network service found")
 }

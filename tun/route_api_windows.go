@@ -18,6 +18,7 @@ var (
 	procInitializeIpForwardEntry    = modiphlpapi.NewProc("InitializeIpForwardEntry")
 	procCreateUnicastIpAddressEntry = modiphlpapi.NewProc("CreateUnicastIpAddressEntry")
 	procDeleteUnicastIpAddressEntry = modiphlpapi.NewProc("DeleteUnicastIpAddressEntry")
+	procInitializeUnicastIpAddressEntry = modiphlpapi.NewProc("InitializeUnicastIpAddressEntry")
 	procConvertInterfaceAliasToLuid = modiphlpapi.NewProc("ConvertInterfaceAliasToLuid")
 	procConvertInterfaceLuidToIndex = modiphlpapi.NewProc("ConvertInterfaceLuidToIndex")
 	procGetIpForwardTable2          = modiphlpapi.NewProc("GetIpForwardTable2")
@@ -95,6 +96,10 @@ func (r *mibIpForwardRow2) nextHop() net.IP {
 
 // mibUnicastIpAddressRow represents MIB_UNICASTIPADDRESS_ROW (80 bytes on x64).
 type mibUnicastIpAddressRow [80]byte
+
+func (r *mibUnicastIpAddressRow) init() {
+	procInitializeUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&r[0])))
+}
 
 func (r *mibUnicastIpAddressRow) setAddress(ip net.IP) {
 	s := newSockaddrInet(ip)

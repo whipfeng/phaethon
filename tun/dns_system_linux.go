@@ -21,14 +21,14 @@ var (
 )
 
 // setSystemDNS redirects system DNS to the given TUN IP.
-func setSystemDNS(devName, tunIP string) error {
+func setSystemDNS(ifaceName, tunIP string) error {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
 	if _, err := exec.LookPath("resolvectl"); err == nil {
-		if out, err := exec.Command("resolvectl", "dns", devName, tunIP).CombinedOutput(); err == nil {
+		if out, err := exec.Command("resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "resolved"
-			util.LogInfo("tun: systemd-resolved dns for %s set to %s", devName, tunIP)
+			util.LogInfo("tun: systemd-resolved dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
 			util.LogWarn("tun: resolvectl dns failed, trying next method: %v: %s", err, out)
@@ -36,9 +36,9 @@ func setSystemDNS(devName, tunIP string) error {
 	}
 
 	if _, err := exec.LookPath("nmcli"); err == nil {
-		if out, err := exec.Command("nmcli", "device", "modify", devName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
+		if out, err := exec.Command("nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "nm"
-			util.LogInfo("tun: NetworkManager dns for %s set to %s", devName, tunIP)
+			util.LogInfo("tun: NetworkManager dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
 			util.LogWarn("tun: nmcli dns failed, trying next method: %v: %s", err, out)
@@ -67,22 +67,22 @@ func setSystemDNS(devName, tunIP string) error {
 }
 
 // restoreSystemDNS restores the system DNS configuration saved by setSystemDNS.
-func restoreSystemDNS(devName string) {
+func restoreSystemDNS(ifaceName string) {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
 	switch dnsMethod {
 	case "resolved":
-		if out, err := exec.Command("resolvectl", "revert", devName).CombinedOutput(); err != nil {
+		if out, err := exec.Command("resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
 			util.LogWarn("tun: restore resolved dns fail: %v: %s", err, out)
 		} else {
-			util.LogInfo("tun: systemd-resolved dns for %s reverted", devName)
+			util.LogInfo("tun: systemd-resolved dns for %s reverted", ifaceName)
 		}
 	case "nm":
-		if out, err := exec.Command("nmcli", "device", "modify", devName, "ipv4.dns", "").CombinedOutput(); err != nil {
+		if out, err := exec.Command("nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
 			util.LogWarn("tun: restore NetworkManager dns fail: %v: %s", err, out)
 		} else {
-			util.LogInfo("tun: NetworkManager dns for %s restored", devName)
+			util.LogInfo("tun: NetworkManager dns for %s restored", ifaceName)
 		}
 	case "resolvconf":
 		if dnsBackupPath == "" {

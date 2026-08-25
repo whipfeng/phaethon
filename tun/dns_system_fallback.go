@@ -3,10 +3,10 @@
 package tun
 
 // setSystemDNS is a no-op on unsupported platforms.
-func setSystemDNS(devName, tunIP string) error {
+func setSystemDNS(ifaceName, tunIP string) error {
 	return nil
 }
 
 // restoreSystemDNS is a no-op on unsupported platforms.
-func restoreSystemDNS(devName string) {
+func restoreSystemDNS(ifaceName string) {
 }

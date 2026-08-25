@@ -171,8 +171,13 @@ func (e *Engine) Start() error {
 	e.defaultIfaceIndex = e.routeMgr.DefaultIfaceIndex
 
 	// 8. Redirect system DNS to TUN so Fake-IP works for applications.
-	if err := setSystemDNS(dev.Name(), tunIP.String()); err != nil {
-		util.LogWarn("tun: failed to set system dns: %v", err)
+	//    Use the original physical interface, not the TUN device itself.
+	if e.defaultIfaceName != "" {
+		if err := setSystemDNS(e.defaultIfaceName, tunIP.String()); err != nil {
+			util.LogWarn("tun: failed to set system dns: %v", err)
+		}
+	} else {
+		util.LogWarn("tun: no default interface detected, skipping system dns redirection")
 	}
 
 	// 9. Start packet forward loops
@@ -234,8 +239,8 @@ func (e *Engine) Stop() error {
 	}
 
 	// 4. Restore system DNS after routes are back to normal.
-	if e.device != nil {
-		restoreSystemDNS(e.device.Name())
+	if e.defaultIfaceName != "" {
+		restoreSystemDNS(e.defaultIfaceName)
 	}
 
 	// 5. Stop services

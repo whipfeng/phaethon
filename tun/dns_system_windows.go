@@ -9,21 +9,21 @@ import (
 	"phaethon/util"
 )
 
-// setSystemDNS redirects the TUN interface DNS to the given TUN IP.
-func setSystemDNS(devName, tunIP string) error {
-	cmd := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+devName, "static", tunIP)
+// setSystemDNS redirects the physical interface DNS to the given TUN IP.
+func setSystemDNS(ifaceName, tunIP string) error {
+	cmd := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+ifaceName, "static", tunIP)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set dns: %v: %s", err, out)
 	}
-	util.LogInfo("tun: system dns for %s set to %s", devName, tunIP)
+	util.LogInfo("tun: system dns for %s set to %s", ifaceName, tunIP)
 	return nil
 }
 
-// restoreSystemDNS restores the TUN interface DNS to DHCP.
-func restoreSystemDNS(devName string) {
-	if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+devName, "dhcp").CombinedOutput(); err != nil {
-		util.LogWarn("tun: restore dns for %s fail: %v, %s", devName, err, out)
+// restoreSystemDNS restores the physical interface DNS to DHCP.
+func restoreSystemDNS(ifaceName string) {
+	if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+ifaceName, "dhcp").CombinedOutput(); err != nil {
+		util.LogWarn("tun: restore dns for %s fail: %v, %s", ifaceName, err, out)
 	} else {
-		util.LogInfo("tun: system dns for %s restored to dhcp", devName)
+		util.LogInfo("tun: system dns for %s restored to dhcp", ifaceName)
 	}
 }

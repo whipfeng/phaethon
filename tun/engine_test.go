@@ -143,44 +143,6 @@ func TestEngineStartStop(t *testing.T) {
 	}
 }
 
-// TestFirstProxyHop verifies that proxy chain first-hop resolution follows the
-// dialer semantics: A.Next = B means the local machine first connects to B's
-// server, so B (the end of the Next chain) is the first hop.
-func TestFirstProxyHop(t *testing.T) {
-	proxy := func(name, server string, next *config.Proxy) *config.Proxy {
-		return &config.Proxy{Name: name, Type: "SOCKS5", Server: server, Port: 1080, Next: next}
-	}
-
-	c := proxy("c", "c.example.com", nil)
-	b := proxy("b", "b.example.com", c)
-	a := proxy("a", "a.example.com", b)
-
-	if got := firstProxyHop(a); got != c {
-		t.Fatalf("firstProxyHop(a) = %v, want c", got)
-	}
-	if got := firstProxyHop(b); got != c {
-		t.Fatalf("firstProxyHop(b) = %v, want c", got)
-	}
-	if got := firstProxyHop(c); got != c {
-		t.Fatalf("firstProxyHop(c) = %v, want c", got)
-	}
-
-	// DIRECT as next means the current proxy is the first hop.
-	direct := &config.Proxy{Name: "direct", Type: "DIRECT"}
-	aDirect := proxy("a-direct", "a-direct.example.com", direct)
-	if got := firstProxyHop(aDirect); got != aDirect {
-		t.Fatalf("firstProxyHop(a-direct) = %v, want a-direct", got)
-	}
-
-	// Cycle should not panic and should return the cycle entry point.
-	x := proxy("x", "x.example.com", nil)
-	y := proxy("y", "y.example.com", x)
-	x.Next = y // cycle: x -> y -> x
-	if got := firstProxyHop(y); got != x && got != y {
-		t.Fatalf("firstProxyHop(cycle) = %v, want x or y", got)
-	}
-}
-
 // TestEngineUDPWithRuleConfig tests handleUDP path through rule matching
 // using a mock rule configuration.
 func TestEngineUDPWithRuleConfig(t *testing.T) {

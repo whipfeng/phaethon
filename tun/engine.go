@@ -42,6 +42,7 @@ type Engine struct {
 	running bool
 	closeCh chan struct{}
 	wg      sync.WaitGroup
+	watchdog *HealthWatchdog
 
 	defaultIfaceName  string
 	defaultIfaceIndex int
@@ -169,7 +170,12 @@ func (e *Engine) Start() error {
 	e.defaultIfaceName = e.routeMgr.DefaultIfaceName
 	e.defaultIfaceIndex = e.routeMgr.DefaultIfaceIndex
 
-	// 8. Start packet forward loops
+	// 8. Redirect system DNS to TUN so Fake-IP works for applications.
+	if err := setSystemDNS(dev.Name(), tunIP.String()); err != nil {
+		util.LogWarn("tun: failed to set system dns: %v", err)
+	}
+
+	// 9. Start packet forward loops
 	e.mu.Lock()
 	e.running = true
 	e.closeCh = make(chan struct{})
@@ -179,6 +185,10 @@ func (e *Engine) Start() error {
 	go e.readLoop()
 	go e.acceptTCP()
 	go e.acceptUDP()
+
+	// 10. Start engine health watchdog.
+	e.watchdog = NewHealthWatchdog(e)
+	e.watchdog.Start()
 
 	e.logEvent("TUN engine started on %s", dev.Name())
 	util.LogInfo("tun engine started on %s", dev.Name())
@@ -203,6 +213,12 @@ func (e *Engine) Stop() error {
 	close(e.closeCh)
 	e.mu.Unlock()
 
+	// Stop the health watchdog first so it does not fire during shutdown.
+	if e.watchdog != nil {
+		e.watchdog.Stop()
+		e.watchdog = nil
+	}
+
 	// 1. Close device first to unblock readLoop (stuck on ReceivePacket)
 	//    This also ends the Wintun session and deletes the adapter.
 	if e.device != nil {
@@ -217,7 +233,12 @@ func (e *Engine) Stop() error {
 		e.routeMgr.Teardown()
 	}
 
-	// 4. Stop services
+	// 4. Restore system DNS after routes are back to normal.
+	if e.device != nil {
+		restoreSystemDNS(e.device.Name())
+	}
+
+	// 5. Stop services
 	if e.dnsHijack != nil {
 		e.dnsHijack.Stop()
 	}

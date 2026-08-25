@@ -1,9 +1,9 @@
-//go:build !windows
+//go:build !windows && !linux && !darwin
 
 package tun
 
 // Available reports whether TUN can be initialized on this platform.
-// TUN is currently only supported on Windows.
+// Linux and Darwin have their own runtime checks; everything else is unsupported.
 func Available() bool {
 	return false
 }

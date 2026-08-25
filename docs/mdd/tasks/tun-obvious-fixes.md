@@ -43,12 +43,12 @@
 ## 阶段 5: 验证
 
 ### Task 5.1: 单元测试
-- [ ] `go test ./tun -v`
-- [ ] `go test ./...`
+- [x] `go test ./tun -v`
+- [x] `go test ./...`
 
 ### Task 5.2: 构建
-- [ ] `go build ./...`
-- [ ] `go vet ./tun`
+- [x] `go build ./...`
+- [x] `go vet ./tun`
 
 ## 阶段 6: 提交
 

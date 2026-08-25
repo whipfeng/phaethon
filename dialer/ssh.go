@@ -7,16 +7,31 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"phaethon/util"
 )
+
+const (
+	// sshHandshakeTimeout limits the SSH protocol handshake (TCP connect + auth + key exchange).
+	sshHandshakeTimeout = 15 * time.Second
+	// sshClientIdleTimeout is the maximum time an SSH client may sit unused in the cache.
+	sshClientIdleTimeout = 5 * time.Minute
+)
+
+// sshClientEntry holds a cached SSH client plus metadata for lifecycle management.
+type sshClientEntry struct {
+	client   *ssh.Client
+	lastUsed time.Time
+}
 
 // sshClientCache holds established SSH clients keyed by proxy name.
 // An SSH client multiplexes many forwarded channels over one TCP connection,
 // so it is reused across Dial calls for the same proxy configuration.
 var (
-	sshClientCache = make(map[string]*ssh.Client)
+	sshClientCache = make(map[string]*sshClientEntry)
 	sshCacheMu     sync.Mutex
 )
 
@@ -57,8 +72,11 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, error) {
 	sshCacheMu.Lock()
 	defer sshCacheMu.Unlock()
 
-	if client, ok := sshClientCache[key]; ok {
-		return client, nil
+	d.cleanupSSHCacheLocked()
+
+	if e, ok := sshClientCache[key]; ok {
+		e.lastUsed = time.Now()
+		return e.client, nil
 	}
 
 	client, err := d.createSSHClient()
@@ -66,7 +84,10 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, error) {
 		return nil, err
 	}
 
-	sshClientCache[key] = client
+	sshClientCache[key] = &sshClientEntry{
+		client:   client,
+		lastUsed: time.Now(),
+	}
 	return client, nil
 }
 
@@ -76,9 +97,21 @@ func (d *SSHDialer) removeSSHClient() {
 	sshCacheMu.Lock()
 	defer sshCacheMu.Unlock()
 
-	if client, ok := sshClientCache[key]; ok {
-		client.Close()
+	if e, ok := sshClientCache[key]; ok {
+		e.client.Close()
 		delete(sshClientCache, key)
+	}
+}
+
+// cleanupSSHCacheLocked closes SSH clients that have been idle for longer than
+// sshClientIdleTimeout. Caller must hold sshCacheMu.
+func (d *SSHDialer) cleanupSSHCacheLocked() {
+	now := time.Now()
+	for k, e := range sshClientCache {
+		if now.Sub(e.lastUsed) > sshClientIdleTimeout {
+			e.client.Close()
+			delete(sshClientCache, k)
+		}
 	}
 }
 
@@ -90,7 +123,13 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 		return nil, fmt.Errorf("connect to ssh server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 
-	// 2. Build SSH client configuration
+	// 2. Enforce a handshake timeout so a hanging server cannot stall forever.
+	if err := conn.SetDeadline(time.Now().Add(sshHandshakeTimeout)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set handshake deadline fail: %w", err)
+	}
+
+	// 3. Build SSH client configuration
 	sshConf := &ssh.ClientConfig{
 		User: d.Proxy.Username,
 		// In a proxy context the SSH server is typically a known tunnel endpoint,
@@ -116,21 +155,55 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 		sshConf.Auth = append(sshConf.Auth, ssh.Password(d.Proxy.Password))
 	}
 
+	// 4. Fall back to ssh-agent when no explicit credential is configured.
+	var agentConn net.Conn
 	if len(sshConf.Auth) == 0 {
-		conn.Close()
-		return nil, fmt.Errorf("no authentication method configured (need password or private-key)")
+		agentConn, err = d.trySSHAgentAuth(sshConf)
+		if err != nil {
+			util.LogDebug("[SSH-CLI] [%s] ssh-agent unavailable: %v", d.Proxy.Name, err)
+		}
 	}
 
-	// 3. Perform SSH handshake
+	if len(sshConf.Auth) == 0 {
+		conn.Close()
+		if agentConn != nil {
+			agentConn.Close()
+		}
+		return nil, fmt.Errorf("no authentication method configured (need password, private-key or ssh-agent)")
+	}
+
+	// 5. Perform SSH handshake
 	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, sshConf)
+	if agentConn != nil {
+		agentConn.Close()
+	}
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("ssh handshake fail: %w", err)
 	}
 
+	// Handshake succeeded: remove deadline so the long-lived connection can idle.
+	conn.SetDeadline(time.Time{})
+
 	client := ssh.NewClient(c, chans, reqs)
 	return client, nil
+}
+
+// trySSHAgentAuth attempts to add ssh-agent authentication to sshConf.
+// It returns the agent connection so the caller can close it after handshake.
+func (d *SSHDialer) trySSHAgentAuth(sshConf *ssh.ClientConfig) (net.Conn, error) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return nil, fmt.Errorf("SSH_AUTH_SOCK not set")
+	}
+	agentConn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("connect to ssh-agent fail: %w", err)
+	}
+	ag := agent.NewClient(agentConn)
+	sshConf.Auth = append(sshConf.Auth, ssh.PublicKeysCallback(ag.Signers))
+	return agentConn, nil
 }
 
 // loadPrivateKey returns the PEM bytes for the configured private key.

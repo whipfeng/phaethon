@@ -267,7 +267,7 @@ resolvers:        # 地址重写（类似 hosts）
 | VLESS       | dialer/vless.go        | ✓   | ✓   |
 | Hysteria2   | dialer/hysteria2.go    | ✓   | ✓   |
 | Shadowsocks | dialer/shadowsocks.go  | ✓   | ✓   |
-| SSH         | dialer/ssh.go          | ✓   | —   |
+| SSH         | dialer/ssh.go          | ✓   | —   | 通过 SSH `direct-tcpip` 转发 TCP；支持密码/私钥/ssh-agent |
 | HTTP        | dialer/http.go         | ✓   | —   |
 
 ### 代理链

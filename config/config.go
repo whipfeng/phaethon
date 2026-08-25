@@ -30,7 +30,7 @@ const (
 	ProxyHTTP      = "HTTP"
 	ProxyHTTPS     = "HTTPS"
 	ProxyVLESS     = "VLESS"
-	ProxySSH       = "ssh"
+	ProxySSH       = "SSH"
 )
 
 type Proxy struct {

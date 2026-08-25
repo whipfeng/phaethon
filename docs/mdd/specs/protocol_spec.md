@@ -42,7 +42,7 @@ phaethon 的协议层分为入站（Server）和出站（Dialer）。所有 Serv
 | VLESS | `dialer/vless.go` | ✓ | ✓ | VLESS 客户端 |
 | Hysteria2 | `dialer/hysteria2.go` | ✓ | ✓ | Hysteria2 客户端 |
 | Shadowsocks | `dialer/shadowsocks.go` | ✓ | ✓ | Shadowsocks 客户端 |
-| SSH | `dialer/ssh.go` | ✓ | — | SSH 动态端口转发 |
+| SSH | `dialer/ssh.go` | ✓ | — | 通过 SSH `direct-tcpip` 转发 TCP；支持密码、私钥、ssh-agent 认证；UDP 不支持（SSH 协议本身只转发 TCP） |
 | HTTP | `dialer/http.go` | ✓ | — | HTTP 代理客户端 |
 | REVERSE | `dialer/reverse.go` | ✓ | ✓ | 从 Registry 获取反向连接 |
 
@@ -85,6 +85,7 @@ proxies:
 ## 4. UDP 支持说明
 
 - SOCKS5/Trojan/h_tunnel/VLESS/Hysteria2/Shadowsocks/DIRECT 均支持 UDP ASSOCIATE / UDP relay。
+- SSH 出站代理**不支持 UDP**：SSH 协议的 `direct-tcpip` 只转发 TCP，若要让 UDP 走 SSH 隧道需在远端额外部署 SOCKS5 relay，超出“纯 SSH 零部署”转发范围，当前版本不实现。
 - UDP relay 生命周期应跟随控制连接（TCP/TLS/h_tunnel channel），控制连接断开时统一清理。
 - 不应在 Write 路径上额外加超时，依赖 TCP 栈自身的重传超时。
 

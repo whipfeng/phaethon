@@ -12,9 +12,9 @@ import (
 
 // spawnWatchdog starts a child process that monitors this process lifetime.
 func spawnWatchdog() {
-	exe, err := os.Executable()
+	wdExe, err := ensureWatchdogExecutable()
 	if err != nil {
-		util.LogWarn("tun: cannot get executable path for watchdog: %v", err)
+		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
 		return
 	}
 	pid := os.Getpid()
@@ -23,12 +23,18 @@ func spawnWatchdog() {
 		Env:   env,
 		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
 	}
-	p, err := os.StartProcess(exe, []string{exe}, attr)
+	p, err := os.StartProcess(wdExe, []string{wdExe}, attr)
 	if err != nil {
 		util.LogWarn("tun: failed to spawn watchdog: %v", err)
 		return
 	}
-	util.LogDebug("tun: watchdog spawned (pid=%d)", p.Pid)
+	util.LogInfo("tun: watchdog spawned (pid=%d) from %s", p.Pid, wdExe)
+}
+
+// consoleCloseNotify returns a channel that is never closed on non-Windows
+// platforms. Console close events are handled via normal signals there.
+func consoleCloseNotify() <-chan struct{} {
+	return make(chan struct{})
 }
 
 // processExists checks whether a process with the given PID is still running.

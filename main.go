@@ -733,13 +733,19 @@ func openReverseWizardURL(adminServer *admin.AdminServer) {
 // file persistence is for next-start guarantee only.
 func watchAndRun(resources *activeResources) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
 	util.Logger.Printf("Server running. Press Ctrl+C to stop.")
 	for {
 		select {
 		case sig := <-sigCh:
 			util.Logger.Printf("Received signal %v, shutting down...", sig)
+			if resources != nil {
+				resources.closeAll()
+			}
+			return
+		case <-consoleCloseNotify():
+			util.Logger.Printf("Received console close event, shutting down...")
 			if resources != nil {
 				resources.closeAll()
 			}

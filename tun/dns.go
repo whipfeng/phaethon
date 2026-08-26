@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"phaethon/util"
@@ -71,6 +72,25 @@ func (h *DNSHijacker) Stop() {
 	}
 }
 
+// Resolve returns the raw DNS response bytes for a query without sending it
+// through the netstack. It is used by the Windows-side DNS proxy and internal
+// health probes so they do not depend on gVisor loopback delivery semantics.
+func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
+	if len(query) == 0 {
+		return nil, fmt.Errorf("empty query")
+	}
+	domain, ok := parseDNSQueryDomain(query)
+	if !ok || domain == "" {
+		return nil, fmt.Errorf("failed to parse query")
+	}
+	fakeIP := h.pool.Lookup(domain)
+	resp := buildDNSResponse(query, fakeIP.To4())
+	if resp == nil {
+		return nil, fmt.Errorf("failed to build response")
+	}
+	return resp, nil
+}
+
 func (h *DNSHijacker) serveLoop() {
 	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
 	h.wq.EventRegister(&waitEntry)
@@ -101,13 +121,14 @@ func (h *DNSHijacker) serveLoop() {
 		}
 
 		fakeIP := h.pool.Lookup(domain)
-		util.LogInfo("tun dns: %s -> %s", domain, fakeIP.String())
-
 		resp := buildDNSResponse(packet, fakeIP.To4())
-		if resp != nil {
-			if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
-				util.LogWarn("tun dns: write response fail: %v", err)
-			}
+		if resp == nil {
+			continue
+		}
+		if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
+			util.LogWarn("tun dns: write response to %s:%d fail: %v", res.RemoteAddr.Addr, res.RemoteAddr.Port, err)
+		} else {
+			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
 		}
 	}
 }
@@ -208,4 +229,119 @@ func buildDNSResponse(query []byte, ip net.IP) []byte {
 	resp = append(resp, 0x00, 0x04)             // RDLENGTH
 	resp = append(resp, ip...)
 	return resp
+}
+
+// buildDNSQuery builds a minimal DNS A query for domain using txID.
+func buildDNSQuery(domain string, txID uint16) []byte {
+	pkt := make([]byte, 0, 512)
+	pkt = append(pkt, byte(txID>>8), byte(txID))
+	pkt = append(pkt, 0x01, 0x00) // flags: standard query, recursion desired
+	pkt = append(pkt, 0x00, 0x01) // QDCOUNT = 1
+	pkt = append(pkt, 0x00, 0x00) // ANCOUNT
+	pkt = append(pkt, 0x00, 0x00) // NSCOUNT
+	pkt = append(pkt, 0x00, 0x00) // ARCOUNT
+
+	for _, label := range strings.Split(domain, ".") {
+		pkt = append(pkt, byte(len(label)))
+		pkt = append(pkt, []byte(label)...)
+	}
+	pkt = append(pkt, 0x00)       // end of name
+	pkt = append(pkt, 0x00, 0x01) // Type A
+	pkt = append(pkt, 0x00, 0x01) // Class IN
+	return pkt
+}
+
+// parseDNSResponseIP extracts the first A record IPv4 address from a DNS
+// response. It returns nil if the response is invalid or not an A record.
+func parseDNSResponseIP(resp []byte) net.IP {
+	if len(resp) < 12 {
+		return nil
+	}
+	flags := (uint16(resp[2]) << 8) | uint16(resp[3])
+	if flags&0x8000 == 0 { // not a response
+		return nil
+	}
+	if flags&0x000f != 0 { // RCODE != 0
+		return nil
+	}
+	ancount := (uint16(resp[6]) << 8) | uint16(resp[7])
+	if ancount == 0 {
+		return nil
+	}
+
+	// Skip question section.
+	off := 12
+	for {
+		if off >= len(resp) {
+			return nil
+		}
+		llen := int(resp[off])
+		off++
+		if llen == 0 {
+			break
+		}
+		if llen&0xc0 == 0xc0 { // compression pointer
+			off++
+			break
+		}
+		if llen > 63 || off+llen > len(resp) {
+			return nil
+		}
+		off += llen
+	}
+	off += 4 // QTYPE + QCLASS
+
+	// Parse first answer.
+	if off >= len(resp) {
+		return nil
+	}
+	if resp[off]&0xc0 == 0xc0 {
+		off += 2
+	} else {
+		for {
+			if off >= len(resp) {
+				return nil
+			}
+			llen := int(resp[off])
+			off++
+			if llen == 0 {
+				break
+			}
+			if llen&0xc0 == 0xc0 {
+				off++
+				break
+			}
+			if llen > 63 || off+llen > len(resp) {
+				return nil
+			}
+			off += llen
+		}
+	}
+	if off+10 > len(resp) {
+		return nil
+	}
+	rtype := (uint16(resp[off]) << 8) | uint16(resp[off+1])
+	rdlen := (uint16(resp[off+8]) << 8) | uint16(resp[off+9])
+	off += 10
+	if rtype != 0x0001 || rdlen != 4 {
+		return nil
+	}
+	if off+4 > len(resp) {
+		return nil
+	}
+	return net.IP(resp[off : off+4])
+}
+
+// isFakeIP reports whether the given IP string is in the Fake-IP range
+// 198.18.0.0/15.
+func isFakeIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19
 }

@@ -48,3 +48,17 @@ func CleanupResidual() {
 		}
 	}
 }
+
+// InterfaceExists reports whether any utun interface is currently present.
+func InterfaceExists() bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if strings.HasPrefix(iface.Name, "utun") {
+			return true
+		}
+	}
+	return false
+}

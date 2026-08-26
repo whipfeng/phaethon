@@ -40,6 +40,15 @@ type RouteManager struct {
 	// defaultIfaceLUID is the original interface LUID (Windows only).
 	// Used for exclusion route add/delete on the correct interface.
 	defaultIfaceLUID uint64
+
+	// tunLUID is the phaethon TUN interface LUID (Windows only).
+	// Used to exclude the TUN interface from route lookups.
+	tunLUID uint64
+
+	// OriginalDNSServers stores the DNS servers of the original default
+	// interface before TUN redirects DNS, so TUN-internal resolution can use
+	// the real upstream servers.
+	OriginalDNSServers []string
 }
 
 // RouteSnapshot captures the route manager's current applied state.
@@ -63,6 +72,23 @@ func (r *RouteManager) SetExclusions(ips []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.excludeIPs = ips
+}
+
+// TUNLUID returns the TUN interface LUID (Windows only).
+func (r *RouteManager) TUNLUID() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tunLUID
+}
+
+// OriginalGateway returns a copy of the original default gateway IP.
+func (r *RouteManager) OriginalGateway() net.IP {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.originalGateway == nil {
+		return nil
+	}
+	return append(net.IP(nil), r.originalGateway...)
 }
 
 // Setup configures routes to send all traffic through the TUN device.

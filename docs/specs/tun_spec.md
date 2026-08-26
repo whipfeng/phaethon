@@ -3,7 +3,7 @@
 ## 元数据
 
 - 文档类型：Spec
-- 版本：v0.4.0
+- 版本：v0.5.0
 - 所属项目：phaethon
 - 创建日期：2026-07-14
 
@@ -15,10 +15,11 @@
 | v0.2.0 | 2026-08-26 | 补充 DIRECT 路由选择、DNS 缓存与解析路由规则 | Claude |
 | v0.3.0 | 2026-08-26 | 补充主流实现对比与 dialer BindContext 兼容性矩阵；明确 VLESS/Hysteria2 通过库钩子统一接入 | Claude |
 | v0.4.0 | 2026-08-26 | VLESS 接入方式更新为自研 Dialer + DialRouteAware；移除 xray-core / proxyclient 依赖描述 | Claude |
+| v0.5.0 | 2026-08-26 | 取消代理服务器 exclusion route 兜底；保留 LAN/私网 exclusion route；明确不做引擎级内部看门狗 | Claude |
 
 ## 1. 概述
 
-TUN 模式通过系统 TUN 接口 + gvisor 用户态网络栈 + Fake-IP 实现系统级流量拦截，将系统全部流量路由到 phaethon 处理。
+TUN 模式通过系统 TUN 接口 + gvisor 用户态网络栈 + Fake-IP 实现系统级流量拦截，将系统流量路由到 phaethon 处理。
 
 ## 2. 架构
 
@@ -43,12 +44,14 @@ TUN 模式通过系统 TUN 接口 + gvisor 用户态网络栈 + Fake-IP 实现�
 - 创建系统 TUN 设备，需要管理员/root 权限。
 - 配置路由和 DNS，使系统流量进入 TUN。
 - Windows 依赖 `wintun.dll`。
+- Linux 依赖 `/dev/net/tun`。
+- macOS 依赖 `com.apple.net.utun_control`。
 
 ### 3.2 gvisor 网络栈
 
 - 在 `tun/engine.go` 中初始化 netstack。
-- 设置 TCP 传输处理器。
-- UDP 传输处理器（待完善或已实现，视版本而定）。
+- 设置 TCP/UDP 传输处理器。
+- 同时启用 IPv4 与 IPv6 网络协议。
 
 ### 3.3 Fake-IP
 
@@ -91,7 +94,8 @@ TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`128.0.0.0/1`）把�
 
 ### 6.1 路由表优先原则
 
-- 对代理服务器 IP、`IP-CIDR,DIRECT` 规则目标、LAN/私有网段，启动时直接添加更精确的 exclusion route 走原物理接口，使其不进入 TUN。
+- 对 `IP-CIDR,DIRECT` 规则目标、LAN/私有网段，启动时添加更精确的 exclusion route 走原物理接口，使其不进入 TUN。
+- **代理服务器 IP 不再添加 exclusion route**：代理首跳通过 `BindContext`/socket 绑定直接钉在物理网卡，这是唯一防环手段。
 - 对动态 `MATCH,DIRECT` 目标，不能预先加路由，需要在 TUN 内部按目的地址查询系统路由表，选择正确出口接口。
 
 ### 6.2 接口选择机制（BindContext）
@@ -101,7 +105,7 @@ TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`128.0.0.0/1`）把�
 `BindContext` 提供两类绑定语义：
 
 - `BindSocket(c syscall.RawConn, dst net.IP)`：按目的地址查询系统路由表，绑定到查得的出口接口。用于 DIRECT 流量和已知目的地址的代理首跳。
-- `BindDefaultInterface(c syscall.RawConn)`：直接绑定到启动时捕获的默认物理接口。用于无法从调用点获得目的地址的外部库封装 Dialer（如 xray-core UDP）。
+- `BindDefaultInterface(c syscall.RawConn)`：直接绑定到启动时捕获的默认物理接口。用于无法从调用点获得目的地址的外部库封装 Dialer（如 quic-go UDP socket）。
 
 #### 6.2.1 Windows
 
@@ -109,12 +113,12 @@ TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`128.0.0.0/1`）把�
 - 如果最佳路由指向 TUN 接口，回退到启动时捕获的原始默认接口。
 - 使用 `IP_UNICAST_IF`（`IPPROTO_IP` 选项 31）将 socket 绑定到选中的接口索引。
 - IPv6 使用 `IPV6_UNICAST_IF`。
-- 接口索引必须按平台要求处理字节序。
+- 接口索引必须按网络字节序处理。
 
 #### 6.2.2 Linux
 
 - 使用 `SO_BINDTODEVICE` 绑定到出口接口。
-- DIRECT 流量按目的地址查询路由表（netlink `RouteGet` 或 `/proc/net/route`）。
+- DIRECT 流量按目的地址解析 `/proc/net/route` 查询路由表。
 - 代理首跳与无法获得目的地址的 UDP socket 绑定默认物理接口。
 
 #### 6.2.3 macOS
@@ -136,23 +140,23 @@ TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`128.0.0.0/1`）把�
 
 TUN 启动时通过 `resolveProxyIPs()` 解析所有代理服务器 IP，并添加 exclusion route 使其走原物理接口。代理链内部各协议 Dialer 通过 `net.Dial` 等标准接口连接服务器，依赖系统路由。
 
-### 7.2 建议实现
+### 7.2 建议实现（已采纳）
 
-代理服务器首跳连接应当复用 DIRECT 流量的路由感知绑定机制（`BindContext`），原因：
+代理服务器首跳连接复用 DIRECT 流量的路由感知绑定机制（`BindContext`）：
 
 - 静态 exclusion route 无法应对代理服务器域名解析结果变化、网络切换、VPN 多网卡等场景。
 - 代理首跳目标地址已知，完全可以在 socket 创建时按目的地址查询路由表并绑定真实网卡。
-- 对于外部库封装的 Dialer（如 xray-core、quic-go），虽然无法从调用点传入目的地址，但可以通过全局 controller / 自定义 conn factory 统一绑定默认物理接口，同样避免进入 TUN。
-- 复用同一套 `BindContext` 机制后，可减少启动阶段对系统路由表的修改，降低路由残留和环路风险。
+- 对于外部库封装的 Dialer（如 quic-go），虽然无法从调用点传入目的地址，但可以通过自定义 conn factory 统一绑定默认物理接口，同样避免进入 TUN。
+- 复用同一套 `BindContext` 机制后，**不再为代理服务器保留 exclusion route**。LAN/私网 exclusion route 仍保留作为本地网络保护。
 
 ### 7.3 下沉到 dialer 包
 
-路由感知绑定能力应从 `tun` 包下沉到 `dialer` 包：
+路由感知绑定能力从 `tun` 包下沉到 `dialer` 包：
 
 - `dialer` 包维护一个可注入的 `BindContext`（含默认接口名/索引、TUN LUID、默认网关等）。
 - TUN 引擎在启动时调用 `dialer.SetGlobalBindContext(bc)`，停止时清理。
 - `DirectDialer` 和各协议 Dialer 的首跳连接统一通过 `dialer.DialRouteAware()` 或等效绑定函数创建，自动应用绑定。
-- 外部库封装 Dialer（`VLESSDialer`、`Hysteria2Dialer`）通过 xray-core 全局 `RegisterDialerController` / Hysteria2 `ConnFactory` 接入同一 `BindContext`，不再依赖静态 exclusion route。
+- 外部库封装 Dialer（`VLESSDialer`、`Hysteria2Dialer`）直接通过 `DialRouteAware` / 自定义 `ConnFactory` 接入同一 `BindContext`。
 - `tun` 包不再直接处理 socket 绑定细节，只负责提供网络上下文。
 
 ## 7. DNS 解析规则
@@ -198,31 +202,31 @@ DNS 查询 socket 同样应通过 `dialer.DialRouteAware()` 创建，使其复�
 
 ### 8.2 phaethon 各 Dialer 对 BindContext 的支持
 
-`BindContext` / `DialRouteAware` 的目标是把 TUN 内部的路由感知 socket 绑定能力下沉到 `dialer` 包，使所有出站连接复用同一机制。对于外部库封装的 Dialer，通过库暴露的 controller / factory 钩子接入，不再保留 exclusion route 兜底。
+`BindContext` / `DialRouteAware` 的目标是把 TUN 内部的路由感知 socket 绑定能力下沉到 `dialer` 包，使所有出站连接复用同一机制。对于外部库封装的 Dialer，通过库暴露的 controller / factory 钩子接入。**不再保留代理服务器 exclusion route 兜底**。
 
 | Dialer | TCP 首跳 | UDP/Packet | 支持程度 | 接入方式 |
 |---|---|---|---|---|
-| `DirectDialer` | `DialRouteAware` | UDP socket 绑定物理网卡 | ✅ 完全支持 | 所有 `nil`/`DIRECT` next-hop 的归宿，按目的地址绑定 |
-| `HTTPDialer` | `DialRouteAware` | - | ✅ 完全支持 | 替换裸 `net.DialTimeout` |
-| `ShadowsocksDialer` | `DialRouteAware` | `ListenUDP` 绑定 | ✅ 完全支持 | TCP/UDP 均按目的地址绑定 |
-| `HTunnelDialer` | `http.Transport.DialContext` 注入 `DialRouteAware` | - | ✅ 完全支持 | transport 的 dial context 替换 |
-| `Socks5Dialer` | 经 `nextDialer.Dial` | UDP ASSOCIATE 控制面 + relay UDP socket | ⚠️ 部分支持 | TCP 首跳在 `next == nil` 时由 `DirectDialer` 自动改善；UDP 控制面/数据面需改造 |
-| `TrojanDialer` | 经 `nextDialer.Dial` | 同上 | ⚠️ 部分支持 | TCP 间接受益于 `DirectDialer`；UDP 控制面/数据面需改造 |
-| `SSHDialer` | 经 `nextDialer.Dial` | 无独立 UDP | ⚠️ 部分支持 | TCP 间接受益于 `DirectDialer` |
-| `ReverseDialer` | `registry.Match` 拿到已有反向连接 | `targetConn` / `chainConn` 可绑定 | ⚠️ 部分支持 | TCP 是 registry 已有连接，不在 BindContext 范围；UDP 按目的地址绑定 |
-| `ControlClient` | 经 `ChainDial` 走代理链 | - | ⚠️ 部分支持 | 控制面间接受益于链首 Dialer 改造 |
-| `Hysteria2Dialer` | quic-go 复用 `ConnFactory` 创建的 UDP socket | 自定义 `ConnFactory.New` | ✅ 可支持 | `ConnFactory.New(serverAddr)` 中创建 UDP socket 并按目的地址绑定 |
-| `VLESSDialer` | 自研 Dialer 使用 `DialRouteAware` 建立到 VLESS 服务器的 TCP/TLS 首跳 | 同 TCP | ✅ 完全支持 | 不再依赖 xray-core / `cnlangzi/proxyclient`；TLS fingerprint 通过 `refraction-networking/utls` 实现；REALITY 暂时未实现 |
+| `DirectDialer` | `DialRouteAware` | `ListenPacketRouteAware` | 完全支持 | 所有 `nil`/`DIRECT` next-hop 的归宿，按目的地址绑定 |
+| `HTTPDialer` | `DialRouteAware` | - | 完全支持 | 替换裸 `net.DialTimeout` |
+| `ShadowsocksDialer` | `DialRouteAware` | `ListenPacketRouteAware` | 完全支持 | TCP/UDP 均按目的地址绑定 |
+| `HTunnelDialer` | `http.Transport.DialContext` 注入 `DialRouteAware` | - | 完全支持 | transport 的 dial context 替换 |
+| `Socks5Dialer` | 经 `nextDialer.Dial` | 自研 UDP ASSOCIATE 控制面 + relay socket 绑定 | 完全支持 | TCP 间接受益；UDP 必须自研绑定 |
+| `TrojanDialer` | 经 `nextDialer.Dial` | 补齐 UDP 控制面/数据面绑定 | 完全支持 | TCP 间接受益；UDP 补齐绑定 |
+| `SSHDialer` | 经 `nextDialer.Dial` | 无独立 UDP | 部分支持 | TCP 间接受益于 `DirectDialer` |
+| `ReverseDialer` | `registry.Match` 拿到已有反向连接 | `targetConn` / `chainConn` 可绑定 | 部分支持 | TCP 是 registry 已有连接，不在 BindContext 范围；UDP 按目的地址绑定 |
+| `ControlClient` | 经 `ChainDial` 走代理链 | - | 部分支持 | 控制面间接受益于链首 Dialer 改造 |
+| `Hysteria2Dialer` | quic-go 复用 `ConnFactory` 创建的 UDP socket | 自定义 `ConnFactory.New` | 完全支持 | `ConnFactory.New(serverAddr)` 中创建 UDP socket 并调用 `BindSocket(serverAddr)` |
+| `VLESSDialer` | 自研 Dialer 使用 `DialRouteAware` 建立到 VLESS 服务器的 TCP/TLS 首跳 | 同 TCP | 完全支持 | 不再依赖 xray-core / `cnlangzi/proxyclient`；TLS fingerprint 通过 `refraction-networking/utls` 实现；REALITY 暂时未实现 |
 
-### 8.3 实施建议
+### 8.3 实施建议（已采纳）
 
-1. **纯自研 Dialer 直接接入**：`DirectDialer`、`HTTPDialer`、`ShadowsocksDialer`、`HTunnelDialer` 全部使用 `DialRouteAware` / `BindSocket`。
-2. **链式 Dialer 间接受益**：只要 `DirectDialer` 接入，`SOCKS5` / `Trojan` / `SSH` 在 `next == nil` 或 DIRECT 时的 TCP 首跳自动获得路由感知能力。
+1. **纯自研 Dialer 直接接入**：`DirectDialer`、`HTTPDialer`、`ShadowsocksDialer`、`HTunnelDialer` 全部使用 `DialRouteAware` / `ListenPacketRouteAware`。
+2. **链式 Dialer 间接受益**：`DirectDialer` 接入后，`SOCKS5` / `Trojan` / `SSH` 在 `next == nil` 或 DIRECT 时的 TCP 首跳自动获得路由感知能力。
 3. **外部库 Dialer 统一通过全局钩子接入**：
    - `Hysteria2Dialer` 自定义 `ConnFactory`，在创建 UDP socket 时调用 `BindSocket(serverAddr)`。
-   - `VLESSDialer` 自研 VLESS 客户端实现，直接通过 `DialRouteAware` 建立到服务器的 TCP/TLS 首跳，不再依赖 xray-core 的 `RegisterDialerController`。
-4. **无兜底分支**：所有 Dialer 都接入 `BindContext`，不再为任何代理类型保留静态 `exclusion route`。TUN 启动时只需为 LAN/私有网段和已解析的代理服务器 IP 添加 exclusion route 作为辅助保护，代理首跳自身已具备路由感知绑定。
-5. **UDP 统一改造 `ListenUDP`**：当前 `dialer.ListenUDP()` 不带绑定参数，需要新增路由感知版本供 UDP relay / ASSOCIATE 使用。
+   - `VLESSDialer` 自研 VLESS 客户端实现，直接通过 `DialRouteAware` 建立到服务器的 TCP/TLS 首跳。
+4. **无代理服务器兜底**：所有 Dialer 都接入 `BindContext`，不再为任何代理类型保留静态 exclusion route。LAN/私网 exclusion route 仍保留作为辅助保护。
+5. **UDP 统一改造 `ListenPacketRouteAware`**：Socks5/Trojan UDP ASSOCIATE、Shadowsocks UDP、Hysteria2 `ConnFactory` 统一使用带绑定版本。
 
 ## 9. 限制与注意事项
 
@@ -230,10 +234,11 @@ DNS 查询 socket 同样应通过 `dialer.DialRouteAware()` 创建，使其复�
 - Windows 需要 `wintun.dll`。
 - TUN 启用后会修改系统路由/DNS，请谨慎操作。
 - 当前 UDP 转发能力取决于实现版本。
-- Linux DIRECT 路由感知尚未实现按目的地址动态查询，当前固定绑定默认接口。
+- **不做引擎级内部看门狗**：进程内探测 TUN DNS 路径不可靠，崩溃恢复依赖外部 `LAYER_WATCHDOG_PID` 进程看门狗 + 统一清理逻辑。
 
 ## 10. 相关链接
 
 - [admin_spec.md](admin_spec.md)
 - [protocol_spec.md](protocol_spec.md)
 - [tun_design.md](../plans/tun_design.md)
+- [tun_watchdog_design.md](../plans/tun_watchdog_design.md)

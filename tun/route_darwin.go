@@ -33,7 +33,19 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		util.LogInfo("tun: original gateway: %s (iface=%s idx=%d)", gw, ifaceName, r.DefaultIfaceIndex)
 	}
 
-	// 2. Add exclusion routes
+	// Capture original DNS servers before TUN redirects system DNS.
+	if service, err := findActiveNetworkService(r.DefaultIfaceName); err == nil {
+		if servers, _, err := getDNSServers(service); err == nil {
+			r.OriginalDNSServers = servers
+			util.LogInfo("tun: original DNS servers for %s: %v", service, servers)
+		} else {
+			util.LogWarn("tun: failed to read current dns for %s: %v", service, err)
+		}
+	} else {
+		util.LogWarn("tun: failed to find active network service for DNS capture: %v", err)
+	}
+
+	// 2. Add exclusion routes (LAN/private subnets bypass TUN via original gateway)
 	for _, exclude := range r.excludeIPs {
 		if exclude == "" || exclude == tunIP || r.originalGateway == nil {
 			continue

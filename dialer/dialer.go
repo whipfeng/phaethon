@@ -257,12 +257,12 @@ func NewUDPDialer(proxy *config.Proxy) UDPDialer {
 }
 
 // ChainUDPDial creates a UDP tunnel through a proxy chain.
-// For DIRECT or nil, uses a raw local UDP socket (with port range control).
+// For DIRECT or nil, uses a route-aware local UDP socket.
 // For SOCKS5/Trojan/etc., creates their respective UDP ASSOCIATE,
 // which tunnels TCP control through the next hop in the chain.
 func ChainUDPDial(proxy *config.Proxy) (net.PacketConn, error) {
 	if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyDIRECT {
-		return ListenUDP()
+		return (&DirectDialer{}).DialPacket()
 	}
 	d := NewUDPDialer(proxy)
 	return d.DialPacket()

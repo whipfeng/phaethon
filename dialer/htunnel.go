@@ -52,7 +52,7 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 					return nextDialer.Dial(proxy.Server, proxy.Port)
 				}
 				util.LogDebug("[HTUNNEL-DIAL] [%s] direct to URL addr=%s (server=%s:%d, next=%s)", proxy.Name, addr, proxy.Server, proxy.Port, nextType)
-				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+				return DialRouteAware(network, addr)
 			},
 		},
 	}

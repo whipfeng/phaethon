@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"time"
 
 	"phaethon/util"
 )
@@ -21,7 +20,7 @@ type HTTPDialer struct {
 
 func (d *HTTPDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
-	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	conn, err := DialRouteAware("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("http: connect to proxy fail: %w", err)
 	}

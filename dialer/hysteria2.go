@@ -105,7 +105,11 @@ func (p *hysteria2Pool) releaseClient(name string) {
 type udpConnFactory struct{}
 
 func (f *udpConnFactory) New(addr net.Addr) (net.PacketConn, error) {
-	return ListenUDP()
+	var dst net.IP
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		dst = udpAddr.IP
+	}
+	return ListenPacketBoundTo("udp", "", dst)
 }
 
 type hysteria2Conn struct {

@@ -1,12 +1,11 @@
 package tun
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -43,10 +42,11 @@ type Engine struct {
 	running bool
 	closeCh chan struct{}
 	wg      sync.WaitGroup
-	watchdog *HealthWatchdog
 
-	defaultIfaceName  string
-	defaultIfaceIndex int
+	// packet counters for diagnostics
+	readPackets  atomic.Uint64
+	writePackets atomic.Uint64
+	dnsProxy     *DNSProxy
 
 	logMu sync.Mutex
 	logs  []string
@@ -128,15 +128,19 @@ func (e *Engine) Start() error {
 	}
 	e.device = dev
 
-	// 2. Pick TUN address (e.g. 198.18.0.1/15 for routing, plus a local addr)
-	tunIP := net.ParseIP("198.18.0.1").To4()
-	e.addr = tcpip.AddrFrom4([4]byte(tunIP))
-	// Use a separate DNS server IP inside the Fake-IP subnet. Packets to the
-	// TUN interface IP itself are consumed by Windows locally and never reach
-	// the Wintun driver, so the DNS hijacker must listen on a different address.
-	dnsIP := net.ParseIP("198.18.0.2").To4()
+	// 2. Pick TUN addresses.
+	// hostIP is the address assigned to the Windows Wintun adapter itself;
+	// it must NOT be added as a local netstack address, otherwise replies
+	// destined to it from the DNS hijacker / forwarders would be looped back
+	// inside netstack instead of being written back to the Wintun device.
+	// dnsIP is the internal DNS hijacker address. It is kept off the TUN subnet
+	// so that locally-originated DNS queries are delivered to the hijacker
+	// inside netstack rather than routed out the Wintun device.
+	hostIP := net.ParseIP("192.0.2.2").To4()
+	dnsIP := net.ParseIP("127.0.0.1").To4()
+	e.addr = tcpip.AddrFrom4([4]byte(hostIP))
 	e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
-	e.prefixLen = 15
+	e.prefixLen = 30
 
 	// 3. Create netstack
 	if err := e.initStack(); err != nil {
@@ -145,7 +149,7 @@ func (e *Engine) Start() error {
 	}
 
 	// 4. Init Fake-IP pool
-	e.fakeIP = NewFakeIPPool()
+	e.fakeIP = NewFakeIPPoolWithStack(e.ns, tunNICID)
 
 	// 5. Init DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
@@ -156,15 +160,13 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("tun: start dns hijacker: %w", err)
 	}
 
-	// 6. Resolve proxy server IPs before TUN takes over DNS/routing,
-	//    plus LAN/private subnets that should bypass TUN.
-	proxyIPs := e.resolveProxyIPs()
-	exclusions := append(proxyIPs, DefaultLANExclusions...)
-
-	// 7. Configure routes
+	// 6. LAN/private subnets should bypass TUN to avoid breaking local network
+	//    connectivity. Proxy server exclusion routes are intentionally omitted:
+	//    outbound sockets are bound to the correct physical interface by the
+	//    dialer package, so proxy traffic does not loop back into TUN.
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
-	e.routeMgr.SetExclusions(exclusions)
-	if err := e.routeMgr.Setup(tunIP.String(), e.prefixLen); err != nil {
+	e.routeMgr.SetExclusions(DefaultLANExclusions)
+	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
 		e.dnsHijack.Stop()
 		dev.Close()
@@ -172,20 +174,19 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("tun: setup routes: %w", err)
 	}
 
-	// Save original interface info for DIRECT connection bypass
-	e.defaultIfaceName = e.routeMgr.DefaultIfaceName
-	e.defaultIfaceIndex = e.routeMgr.DefaultIfaceIndex
+	// Inject the captured network context into the dialer package so all
+	// outbound connections bind to the correct physical interface.
+	dialer.SetGlobalBindContext(&dialer.BindContext{
+		DefaultIfaceName:   e.routeMgr.DefaultIfaceName,
+		DefaultIfaceIndex:  e.routeMgr.DefaultIfaceIndex,
+		TUNLUID:            e.routeMgr.TUNLUID(),
+		TUNIfaceName:       dev.Name(),
+		OriginalDNSServers: e.routeMgr.OriginalDNSServers,
+	})
 
-	// 8. Redirect system DNS to TUN so Fake-IP works for applications.
-	//    Set the DNS server on the TUN adapter itself (with a low metric) so
-	//    Windows actually sends queries to the TUN DNS hijacker. Queries to the
-	//    TUN interface IP (198.18.0.1) are consumed locally, so the hijacker
-	//    listens on a separate address inside the Fake-IP subnet (198.18.0.2).
-	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
-		util.LogWarn("tun: failed to set system dns: %v", err)
-	}
-
-	// 9. Start packet forward loops
+	// 7. Start packet forward loops before exposing the TUN DNS path to the
+	//    system, so queries that arrive immediately after the system DNS redirect
+	//    are handled by the netstack and DNS hijacker.
 	e.mu.Lock()
 	e.running = true
 	e.closeCh = make(chan struct{})
@@ -197,9 +198,34 @@ func (e *Engine) Start() error {
 	go e.acceptTCP()
 	go e.acceptUDP()
 
-	// 10. Start engine health watchdog.
-	e.watchdog = NewHealthWatchdog(e)
-	e.watchdog.Start()
+	// Diagnostic goroutine: log packet counts every 5 seconds.
+	e.wg.Add(1)
+	go e.logPacketCounts()
+
+	// 8. Start a Windows-side DNS proxy on the TUN adapter IP. System DNS is set
+	//    to the adapter IP, so Windows delivers queries to this local socket;
+	//    the proxy forwards them into the netstack DNS hijacker.
+	e.dnsProxy = NewDNSProxy(e)
+	if err := e.dnsProxy.Start(); err != nil {
+		util.LogWarn("tun: failed to start DNS proxy: %v", err)
+	}
+
+	// 9. Redirect system DNS to the TUN adapter IP so applications send queries
+	//    to the local DNS proxy.
+	if err := setSystemDNS(dev.Name(), hostIP.String()); err != nil {
+		util.LogWarn("tun: failed to set system dns: %v", err)
+	}
+
+	// Engine health watchdog is intentionally disabled.
+	//
+	// A watchdog running inside the phaethon process cannot reliably probe the
+	// TUN DNS path: packets originated by the service process itself are not
+	// looped back through the wintun adapter to the same process, so both
+	// system-resolver and internal-netstack probes time out. The external
+	// watchdog process (spawned via LAYER_WATCHDOG_PID) still monitors parent
+	// death and cleans up routes/DNS to prevent a stranded broken network.
+	// e.watchdog = NewHealthWatchdog(e)
+	// e.watchdog.Start()
 
 	e.logEvent("TUN engine started on %s", dev.Name())
 	util.LogInfo("tun engine started on %s", dev.Name())
@@ -224,10 +250,14 @@ func (e *Engine) Stop() error {
 	close(e.closeCh)
 	e.mu.Unlock()
 
-	// Stop the health watchdog first so it does not fire during shutdown.
-	if e.watchdog != nil {
-		e.watchdog.Stop()
-		e.watchdog = nil
+	// Clear the global bind context so subsequent dials resume normal behavior.
+	dialer.SetGlobalBindContext(nil)
+
+	// Stop the Windows-side DNS proxy so queries are not answered after system
+	// DNS is restored.
+	if e.dnsProxy != nil {
+		e.dnsProxy.Stop()
+		e.dnsProxy = nil
 	}
 
 	// 1. Restore system DNS first while the TUN adapter still exists.
@@ -263,6 +293,8 @@ func (e *Engine) Stop() error {
 }
 
 // initStack creates the gvisor netstack and attaches the link endpoint.
+const tunNICID = 1
+
 func (e *Engine) initStack() error {
 	linkEP := channel.New(512, 1500, "")
 	e.linkEP = linkEP
@@ -273,40 +305,57 @@ func (e *Engine) initStack() error {
 	})
 	e.ns = s
 
-	const nicID = 1
-	if err := s.CreateNIC(nicID, linkEP); err != nil {
+	if err := s.CreateNIC(tunNICID, linkEP); err != nil {
 		return fmt.Errorf("create nic: %v", err)
 	}
 
-	ap := tcpip.AddressWithPrefix{Address: e.addr, PrefixLen: e.prefixLen}
+	ap := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 8}
 	protoAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
 	}
-	if err := s.AddProtocolAddress(nicID, protoAddr, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("add address: %v", err)
-	}
-
-	// Add the DNS server address as a secondary local address so netstack
-	// considers it local and delivers UDP:53 packets to the DNS hijacker.
-	dnsAP := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 32}
-	dnsProtoAddr := tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: dnsAP,
-	}
-	if err := s.AddProtocolAddress(nicID, dnsProtoAddr, stack.AddressProperties{}); err != nil {
+	if err := s.AddProtocolAddress(tunNICID, protoAddr, stack.AddressProperties{}); err != nil {
 		return fmt.Errorf("add dns address: %v", err)
 	}
 
-	s.SetPromiscuousMode(nicID, true)
-	s.SetSpoofing(nicID, true)
+	// Do NOT add 192.0.2.2/30 as a local netstack address. The TUN adapter IP
+	// is configured on the Windows side so the host uses it as the source
+	// address for packets entering Wintun. If netstack considered it local,
+	// DNS responses (and other replies) destined to 192.0.2.2 would be
+	// looped back inside netstack instead of being written back to the Wintun
+	// device for the host resolver to receive.
+
+	s.SetPromiscuousMode(tunNICID, true)
+	s.SetSpoofing(tunNICID, true)
+
+	// Allow the netstack to forward IPv4/IPv6 packets that are not addressed to
+	// a local NIC address. This is required for the Fake-IP scheme: connections
+	// to 198.18.0.0/15 are routed to the TUN NIC and must be handled by the
+	// TCP/UDP forwarders even though the destination is not assigned locally.
+	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
+	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	s.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: nicID},
-		{Destination: header.IPv6EmptySubnet, NIC: nicID},
+		{Destination: header.IPv4EmptySubnet, NIC: tunNICID},
+		{Destination: header.IPv6EmptySubnet, NIC: tunNICID},
 	})
 
 	return nil
+}
+
+// logPacketCounts periodically logs TUN packet counters for diagnostics.
+func (e *Engine) logPacketCounts() {
+	defer e.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.closeCh:
+			return
+		case <-ticker.C:
+			util.LogInfo("tun counters: read=%d write=%d", e.readPackets.Load(), e.writePackets.Load())
+		}
+	}
 }
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
@@ -335,6 +384,7 @@ func (e *Engine) readLoop() {
 		if n == 0 {
 			continue
 		}
+		e.readPackets.Add(1)
 
 		// Determine network protocol from the IP version field.
 		var proto tcpip.NetworkProtocolNumber
@@ -346,6 +396,19 @@ func (e *Engine) readLoop() {
 		default:
 			util.LogWarn("tun: dropped non-IP packet (version=%d)", readBuf[0]>>4)
 			continue
+		}
+
+		// Log inbound packets for debugging. Cap total noise by only logging the
+		// first 200 packets at info level; Fake-IP packets are always logged.
+		if proto == ipv4.ProtocolNumber && n >= 20 {
+			dstIP := net.IP(readBuf[16:20]).String()
+			srcIP := net.IP(readBuf[12:16]).String()
+			ipProto := readBuf[9]
+			if strings.HasPrefix(dstIP, "198.18.") || strings.HasPrefix(dstIP, "198.19.") {
+				util.LogInfo("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
+			} else if e.readPackets.Load() <= 200 {
+				util.LogInfo("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, n)
+			}
 		}
 
 		pktBuf := make([]byte, n)
@@ -382,7 +445,25 @@ func (e *Engine) writeLoop() {
 		}
 
 		buf := pkt.ToBuffer()
-		if _, err := e.device.Write(buf.Flatten()); err != nil {
+		data := buf.Flatten()
+
+		// Log outbound packets for debugging. Fake-IP replies and packets to the
+		// TUN host IP are always logged; everything else is logged for the first
+		// 200 packets to cap noise.
+		if len(data) >= 20 && (data[0]>>4) == 4 {
+			dstIP := net.IP(data[16:20]).String()
+			srcIP := net.IP(data[12:16]).String()
+			ipProto := data[9]
+			isFake := strings.HasPrefix(dstIP, "198.18.") || strings.HasPrefix(dstIP, "198.19.") ||
+				strings.HasPrefix(srcIP, "198.18.") || strings.HasPrefix(srcIP, "198.19.")
+			if isFake {
+				util.LogInfo("tun write FAKE: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
+			} else if e.writePackets.Load() <= 200 {
+				util.LogInfo("tun write: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
+			}
+		}
+
+		if _, err := e.device.Write(data); err != nil {
 			select {
 			case <-e.closeCh:
 				pkt.DecRef()
@@ -390,6 +471,8 @@ func (e *Engine) writeLoop() {
 			default:
 				util.LogWarn("tun: write error: %v", err)
 			}
+		} else {
+			e.writePackets.Add(1)
 		}
 		pkt.DecRef()
 	}
@@ -403,6 +486,7 @@ func (e *Engine) acceptTCP() {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
+			util.LogWarn("tun: tcp CreateEndpoint fail: %v", err)
 			r.Complete(true)
 			return
 		}
@@ -487,7 +571,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 			return
 		}
 	} else {
-		targetConn, err = e.directDialPacket()
+		targetConn, err = dialer.ListenPacketBoundTo("udp", "", net.ParseIP(resolvedAddr))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
 			return
@@ -499,17 +583,6 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
-}
-
-// directDialPacket creates a UDP socket bound to the original physical interface
-// so DIRECT UDP traffic bypasses the TUN split-tunnel routes.
-func (e *Engine) directDialPacket() (net.PacketConn, error) {
-	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			return setDirectSocketOption(c, e.defaultIfaceName, e.defaultIfaceIndex)
-		},
-	}
-	return lc.ListenPacket(context.Background(), "udp", "")
 }
 
 // relayUDP copies datagrams between the netstack UDP connection and the target
@@ -584,7 +657,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			return
 		}
 	} else {
-		targetConn, err = e.directDial("tcp", net.JoinHostPort(resolvedAddr, fmt.Sprintf("%d", resolvedPort)))
+		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(resolvedAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
 			return
@@ -603,154 +676,42 @@ func proxyDesc(p *config.Proxy) string {
 	return p.Name
 }
 
-// directDial creates a socket bound to the original physical interface to
-// bypass TUN split-tunnel routes (0/1 + 128/1). This avoids routing loops
-// where DIRECT traffic re-enters the TUN device.
-func (e *Engine) directDial(network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
+// queryInternalDNS sends a raw DNS query to the TUN DNS hijacker and returns
+// the raw response bytes. On Windows it bypasses the gVisor netstack because
+// locally-originated UDP packets to loopback/TUN-subnet addresses are not
+// reliably delivered back to the same process; on other platforms it uses the
+// internal gVisor UDP path.
+func (e *Engine) queryInternalDNS(query []byte) ([]byte, error) {
+	if !e.IsEnabled() || e.ns == nil {
+		return nil, fmt.Errorf("engine disabled or no netstack")
+	}
+
+	if e.dnsHijack != nil {
+		if resp, err := e.dnsHijack.Resolve(query); err == nil {
+			return resp, nil
+		}
+		// Fall back to netstack path if direct resolve fails.
+	}
+
+	remoteAddr := tcpip.FullAddress{NIC: tunNICID, Addr: e.dnsAddr, Port: 53}
+	conn, err := gonet.DialUDP(e.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {
-		return nil, fmt.Errorf("direct: parse addr: %w", err)
+		return nil, fmt.Errorf("dial internal dns fail: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return nil, fmt.Errorf("set deadline fail: %v", err)
 	}
 
-	// If already an IP, dial directly with socket option
-	if ip := net.ParseIP(host); ip != nil {
-		d := &net.Dialer{
-			Timeout: 30 * time.Second,
-			Control: func(network, address string, c syscall.RawConn) error {
-				return setDirectSocketOption(c, e.defaultIfaceName, e.defaultIfaceIndex)
-			},
-		}
-		return d.Dial(network, addr)
+	if _, err := conn.Write(query); err != nil {
+		return nil, fmt.Errorf("write fail: %v", err)
 	}
 
-	// Resolve domain via original interface to get real IP (bypasses Fake-IP DNS)
-	ips, err := e.resolveDirect(host)
+	resp := make([]byte, 512)
+	n, err := conn.Read(resp)
 	if err != nil {
-		return nil, fmt.Errorf("direct: resolve %s: %w", host, err)
+		return nil, fmt.Errorf("read fail: %v", err)
 	}
-
-	d := &net.Dialer{
-		Timeout: 30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			return setDirectSocketOption(c, e.defaultIfaceName, e.defaultIfaceIndex)
-		},
-	}
-	return d.Dial(network, net.JoinHostPort(ips[0], port))
-}
-
-// resolveDirect resolves a domain name via the original physical interface,
-// bypassing the TUN Fake-IP DNS hijacker.
-func (e *Engine) resolveDirect(host string) ([]string, error) {
-	r := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Control: func(network, address string, c syscall.RawConn) error {
-					return setDirectSocketOption(c, e.defaultIfaceName, e.defaultIfaceIndex)
-				},
-			}
-			return d.DialContext(ctx, network, address)
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return r.LookupHost(ctx, host)
-}
-
-// resolveProxyIPs extracts and resolves proxy server addresses before TUN takes
-// over DNS/routing, so we can add exclusion routes for them.
-//
-// We exclude all configured proxy servers rather than trying to compute the
-// "first hop" of a proxy chain, because not every dialer honors proxy.Next
-// (e.g. some protocols connect directly to their own server). Over-exclusion
-// is harmless; under-exclusion would let a first-hop connection re-enter TUN.
-// Resolution is done concurrently to avoid startup delays from slow/unreachable hosts.
-func (e *Engine) resolveProxyIPs() []string {
-	if e.ruleConf == nil {
-		return nil
-	}
-
-	// Collect unique hostnames to resolve
-	hostSet := make(map[string]struct{})
-	ipSet := make(map[string]struct{})
-	addHost := func(host string) {
-		if host == "" {
-			return
-		}
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			ipSet[ip.String()] = struct{}{}
-			return
-		}
-		hostSet[host] = struct{}{}
-	}
-
-	e.ruleConf.RLock()
-	for _, p := range e.ruleConf.Proxies {
-		if !p.IsEnabled() {
-			continue
-		}
-		addHost(p.Server)
-		addHost(p.Sni)
-		addHost(p.Servername)
-	}
-	for _, m := range e.ruleConf.Mappings {
-		if !m.IsEnabled() {
-			continue
-		}
-		addHost(m.ReverseAddress)
-	}
-	e.ruleConf.RUnlock()
-
-	// Concurrent DNS resolution
-	type result struct {
-		host string
-		ips  []string
-	}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	results := make([]result, 0, len(hostSet))
-
-	for hostname := range hostSet {
-		wg.Add(1)
-		go func(h string) {
-			defer wg.Done()
-			addrs, err := net.LookupHost(h)
-			if err != nil {
-				util.LogWarn("tun: failed to resolve proxy host %s: %v", h, err)
-				return
-			}
-			var ips []string
-			for _, addr := range addrs {
-				if net.ParseIP(addr) != nil {
-					ips = append(ips, addr)
-				}
-			}
-			if len(ips) > 0 {
-				mu.Lock()
-				results = append(results, result{host: h, ips: ips})
-				mu.Unlock()
-			}
-		}(hostname)
-	}
-	wg.Wait()
-
-	// Deduplicate IPs across all resolved hosts and literal IPs
-	for _, r := range results {
-		for _, ip := range r.ips {
-			ipSet[ip] = struct{}{}
-		}
-	}
-
-	var ips []string
-	for ip := range ipSet {
-		ips = append(ips, ip)
-	}
-	if len(ips) > 0 {
-		util.LogInfo("tun: %d proxy server IPs to exclude from TUN", len(ips))
-	}
-	return ips
+	return resp[:n], nil
 }

@@ -3,9 +3,11 @@
 package tun
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 
@@ -54,9 +56,17 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 				break
 			}
 		}
+
+		// Capture original DNS servers before TUN redirects system DNS.
+		if servers, err := readResolvConfNameservers(); err == nil {
+			r.OriginalDNSServers = servers
+			util.LogInfo("tun: original DNS servers: %v", servers)
+		} else {
+			util.LogWarn("tun: failed to capture original DNS servers: %v", err)
+		}
 	}
 
-	// 4. Add exclusion routes (proxy server IPs and LAN/private subnets bypass TUN via original gateway)
+	// 4. Add exclusion routes (LAN/private subnets bypass TUN via original gateway)
 	for _, exclude := range r.excludeIPs {
 		if exclude == "" || exclude == tunIP || r.originalGateway == nil {
 			continue
@@ -142,4 +152,30 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 
 func isExist(err error) bool {
 	return errors.Is(err, syscall.EEXIST)
+}
+
+// readResolvConfNameservers returns the nameserver entries from /etc/resolv.conf.
+func readResolvConfNameservers() ([]string, error) {
+	f, err := os.Open("/etc/resolv.conf")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var servers []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "nameserver" {
+			servers = append(servers, fields[1])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return servers, nil
 }

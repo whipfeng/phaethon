@@ -77,18 +77,25 @@ func (w *HealthWatchdog) run() {
 	}
 }
 
-// probe resolves a unique domain through the system resolver and verifies that
-// the result is a Fake-IP in the 198.18.0.0/15 range.
+// probe sends a unique DNS query directly to the TUN DNS hijacker (198.18.0.2:53)
+// and verifies that the result is a Fake-IP in the 198.18.0.0/15 range. This avoids
+// relying on the global system DNS configuration, which may not consistently route
+// to the TUN interface on Windows.
 func (w *HealthWatchdog) probe() bool {
-	// Use a unique per-probe domain under a normal TLD so the query goes through
-	// the system unicast resolver (redirected to TUN DNS) rather than mDNS/Bonjour,
-	// which bypasses the Fake-IP hijacker for .local names.
 	domain := fmt.Sprintf("tun-health-%d.example.com", time.Now().UnixNano())
 
 	ctx, cancel := context.WithTimeout(context.Background(), w.probeTimeout)
 	defer cancel()
 
-	r := &net.Resolver{PreferGo: true}
+	// Force the Go resolver to talk directly to the in-netstack DNS hijacker
+	// so the probe actually exercises the TUN path.
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", "198.18.0.2:53")
+		},
+	}
 	ips, err := r.LookupHost(ctx, domain)
 	if err != nil || len(ips) == 0 {
 		return false

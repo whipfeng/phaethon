@@ -177,15 +177,12 @@ func (e *Engine) Start() error {
 	e.defaultIfaceIndex = e.routeMgr.DefaultIfaceIndex
 
 	// 8. Redirect system DNS to TUN so Fake-IP works for applications.
-	//    Use the original physical interface, not the TUN device itself.
-	//    DNS queries must target an address inside the Fake-IP subnet that is
-	//    NOT the TUN interface IP, otherwise Windows consumes them locally.
-	if e.defaultIfaceName != "" {
-		if err := setSystemDNS(e.defaultIfaceName, dnsIP.String()); err != nil {
-			util.LogWarn("tun: failed to set system dns: %v", err)
-		}
-	} else {
-		util.LogWarn("tun: no default interface detected, skipping system dns redirection")
+	//    Set the DNS server on the TUN adapter itself (with a low metric) so
+	//    Windows actually sends queries to the TUN DNS hijacker. Queries to the
+	//    TUN interface IP (198.18.0.1) are consumed locally, so the hijacker
+	//    listens on a separate address inside the Fake-IP subnet (198.18.0.2).
+	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
+		util.LogWarn("tun: failed to set system dns: %v", err)
 	}
 
 	// 9. Start packet forward loops
@@ -233,23 +230,23 @@ func (e *Engine) Stop() error {
 		e.watchdog = nil
 	}
 
-	// 1. Close device first to unblock readLoop (stuck on ReceivePacket)
+	// 1. Restore system DNS first while the TUN adapter still exists.
+	if e.device != nil {
+		restoreSystemDNS(e.device.Name())
+	}
+
+	// 2. Close device to unblock readLoop (stuck on ReceivePacket)
 	//    This also ends the Wintun session and deletes the adapter.
 	if e.device != nil {
 		e.device.Close()
 	}
 
-	// 2. Wait for goroutines to finish
+	// 3. Wait for goroutines to finish
 	e.wg.Wait()
 
-	// 3. Best-effort route teardown (adapter may already be gone)
+	// 4. Best-effort route teardown (adapter may already be gone)
 	if e.routeMgr != nil {
 		e.routeMgr.Teardown()
-	}
-
-	// 4. Restore system DNS after routes are back to normal.
-	if e.defaultIfaceName != "" {
-		restoreSystemDNS(e.defaultIfaceName)
 	}
 
 	// 5. Stop services

@@ -28,10 +28,11 @@ func (r *TUNResource) Stop() {
 //  3. ruleConf.TUN explicitly disabled → return nil
 //  4. Otherwise start TUN engine
 func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
-	// Watchdog mode: monitor parent process, cleanup on crash
+	// Watchdog mode: monitor parent process, cleanup on crash.
+	// os.Exit ensures the child does not continue into normal startup.
 	if wdPid := os.Getenv("LAYER_WATCHDOG_PID"); wdPid != "" {
 		runWatchdog(wdPid)
-		return nil // never returns normally
+		os.Exit(0)
 	}
 
 	if !tun.Available() {

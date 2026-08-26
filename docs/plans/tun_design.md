@@ -1,11 +1,13 @@
-# TUN 显而易见问题修复计划
+# TUN 路由感知重构计划
 
 ## 元数据
 
 - 文档类型：Plan
-- 版本：v0.1.0
+- 版本：v0.2.0
 - 所属项目：phaethon
 - 创建日期：2026-08-25
+- 变更记录：
+  - v0.2.0（2026-08-26）：取消代理服务器 exclusion route 兜底，改为 `BindContext`/socket 绑定作为唯一防环手段；保留 LAN/私网 exclusion route 作为本地网络保护；明确 SOCKS5/Trojan UDP 需自研绑定；不做引擎级内部看门狗。
 
 ## 背景
 
@@ -17,89 +19,31 @@ phaethon 当前采用 **TUN 模式** 实现系统级流量拦截：系统 TUN �
 - Windows 下 WFP 重定向需要处理代理进程自身流量循环；用户态 Hook 需普通代码签名，写 WFP callout driver 才需 EV/WHQL。
 - TUN 模式问题（路由、DNS、网口选择）是已知且可逐步修复的；Proxifier 问题是结构性、难以完全消除的。
 
-详细结论见本文件第 5 节“代码审查结论汇总”与第 6 节“待办改进项”。
+## 已落地内容（阶段 1–4）
 
-## 1. 显而易见问题修复
+当前 `tun/engine.go` 已经实现以下基础修复，无需重复开发：
 
-` tun/engine.go`、`tun/device_windows.go` 等文件已实现基于 gvisor netstack 的 TUN 流量拦截。代码 review 中发现几个不需要大改架构、但容易出问题的明显缺陷：
+1. `readLoop` 按 IP 版本字段（高 4 位）分发 `ipv4` / `ipv6`，非 IP 包丢弃。
+2. `readLoop` 每包复制到独立 `make([]byte, n)` 后再注入 netstack，不再复用 2048 字节 buffer。
+3. `proxyDesc` 使用 `strings.EqualFold` 判断 DIRECT，大小写不再导致失效。
+4. `tun/route.go` 已定义 `DefaultLANExclusions`，覆盖常见 IPv4 私网/本地/组播前缀。
+5. `handleUDP` 已改用 `ChainUDPDial` / `directDialPacket()` + `relayUDP()`，保持 UDP 数据报边界。
 
-1. `readLoop` 把所有包都按 IPv4 注入 netstack，IPv6 包会被错误解析。
-2. `readLoop` 复用同一个 2048 字节 buffer，存在数据被覆盖的风险。
-3. `proxyDesc` 对 DIRECT 的判断因为大小写不一致而失效。
+本次核心工作是 **阶段 5 及以后**。
 
-本次修复只针对这 3 个显而易见的问题，**不开启真实 TUN 进行整机测试**（避免把当前工作网络搞挂）。真实 TUN 拦截测试留到后续在独立 VM/测试机上进行。
+## 新增/变更目标
 
-## 新增目标
+1. **取消代理服务器 exclusion route 兜底**：所有出站连接（DIRECT、代理首跳）必须依赖 `BindContext`/socket 绑定防环，不再为已解析的代理服务器 IP 预加系统路由。
+2. **保留 LAN/私网 exclusion route**：本地多播、广播、局域网直连不应被吸入 TUN，仍通过更精确的系统路由直接走物理网卡。
+3. **路由感知绑定能力下沉到 `dialer` 包**：TUN 只负责注入上下文，各协议 Dialer 统一复用。
+4. **不满足的协议改为自研/补齐**：重点是 SOCKS5 / Trojan UDP ASSOCIATE 控制面与数据面绑定；Hysteria2 通过 `ConnFactory` 绑定；VLESS 已自研，只需接入 `DialRouteAware`。
+5. **系统 DNS 重定向跨平台补齐**：Windows 已用 `netsh`；Linux 兼容 `systemd-resolved` / `NetworkManager` / `/etc/resolv.conf`；macOS 用 `networksetup`。
+6. **统一跨平台清理逻辑**：Linux/macOS 新增 `cleanup_other.go`；Windows 增加 DNS 恢复兜底。
+7. **不做引擎级内部看门狗**：当前进程内探测 TUN DNS 路径不可靠，继续依赖外部 `LAYER_WATCHDOG_PID` 进程看门狗 + 强化清理逻辑做崩溃恢复。
 
-5. 排除 LAN/私网流量，避免 TUN 启用后本地网络中断。
-6. 修复 UDP 转发语义，使用 `net.PacketConn` 保持数据报边界，避免把 UDP 当 TCP 流 relay。
+## 阶段 5: 路由感知绑定下沉到 dialer 包
 
-## 阶段 1: readLoop 修复
-
-### Task 1.1: IPv4/IPv6 协议识别
-- 读取 TUN 包后，根据 IP 头第一个字节的高 4 位判断版本：
-  - `0x40` (4) → IPv4
-  - `0x60` (6) → IPv6
-- 分别调用 `linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)` 或 `linkEP.InjectInbound(ipv6.ProtocolNumber, pkt)`。
-- 非 IPv4/IPv6 包直接丢弃。
-
-### Task 1.2: 每包独立 buffer
-- 在 `readLoop` 里每次读到数据后，复制到新的 `make([]byte, n)` 再交给 `buffer.MakeWithData`。
-- 替代当前复用 `buf := make([]byte, 2048)` 的方案。
-- 为减少 GC 压力，可引入 `sync.Pool`（可选，本次先保证正确性）。
-
-## 阶段 2: proxyDesc 大小写修复
-
-### Task 2.1: 统一大小写比较
-- `proxyDesc` 中使用 `strings.EqualFold(p.Type, config.ProxyDIRECT)` 替代 `p.Type == config.ProxyDIRECT`。
-- 因为配置初始化时 `proxy.Type = strings.ToLower(proxy.Type)`，直接等于大写常量会永远失败。
-
-## 阶段 3: LAN/私网排除
-
-### Task 3.1: 默认 LAN CIDR 排除
-- 在 `tun/route.go` 新增 `DefaultLANExclusions`，包含常见 IPv4 私网/本地/组播前缀：
-  - `10.0.0.0/8`
-  - `172.16.0.0/12`
-  - `192.168.0.0/16`
-  - `127.0.0.0/8`
-  - `169.254.0.0/16`
-  - `224.0.0.0/4`
-  - `255.255.255.255/32`
-- `Engine.Start()` 将 LAN CIDR 与代理服务器 IP 合并后传给 `RouteManager.SetExclusions`。
-
-### Task 3.2: RouteManager 支持 CIDR 排除
-- `platformSetup` 遍历 exclusions 时同时处理纯 IP 和 CIDR：
-  - Windows: 通过 `parseExclusionCIDR` 区分 `/32` 与具体前缀长度。
-  - Linux: 通过 `parseExclusionLinux` 生成 `*net.IPNet`。
-  - Darwin: `route -n add -host` / `route -n add -net` 分别处理。
-- `deleteExclusionRoute` 同样根据是否含 `/` 删除主机或网络路由。
-
-## 阶段 4: UDP 报文转发
-
-### Task 4.1: 使用 net.PacketConn 保持数据报语义
-- `handleUDP` 不再调用 `dialer.ChainDialWithID` 把 UDP 伪装成 TCP。
-- 代理流量改用 `dialer.ChainUDPDial(proxy)` 获取 `net.PacketConn`。
-- DIRECT UDP 通过 `directDialPacket()` 创建绑定原物理网卡的 UDP socket，绕过 TUN 路由。
-- 新增 `relayUDP()`：
-  - 一个方向从 `netstackConn.Read` 读取一个 UDP 数据报，通过 `targetConn.WriteTo` 发给目标。
-  - 另一个方向从 `targetConn.ReadFrom` 读取一个数据报，通过 `netstackConn.Write` 写回 netstack。
-  - 这样可以保持 UDP 数据报边界，不混淆多个数据包。
-
-## 阶段 5: 路由感知 socket 绑定下沉到 dialer 包
-
-当前 `setDirectSocketOption` 位于 `tun` 包，强依赖 `*Engine` 和 `RouteManager` 的内部字段。这导致：
-
-- `dialer/direct.go` 的 `DirectDialer` 无法复用该能力，TUN 内部不得不单独实现 `directDial`/`directDialPacket`。
-- 代理链首跳（SOCKS5/Trojan/HTunnel 等连接自己的服务器）无法做路由感知绑定，只能依赖启动时添加的静态 exclusion route。
-
-本阶段将路由感知绑定能力下沉到 `dialer` 包，让 TUN 只负责提供网络上下文，所有出站连接统一复用。
-
-**兼容性现状**（详见 `tun_spec.md` 第 8 节）：
-- 可完全接入：`DirectDialer`、`HTTPDialer`、`ShadowsocksDialer`、`HTunnelDialer`。
-- 间接受益/部分接入：`Socks5Dialer`、`TrojanDialer`、`SSHDialer`、`ReverseDialer`、`ControlClient`（TCP 首跳随 next-hop 链的 DirectDialer 接入而改善；UDP 控制面/数据面需额外改造）。
-- 外部库封装 Dialer 统一通过库提供的全局钩子接入：`Hysteria2Dialer` 自定义 `ConnFactory`；`VLESSDialer` 已改为自研实现，直接通过 `DialRouteAware` 建立 TCP/TLS 首跳。两类均接入同一 `BindContext`，无需保留 exclusion route 兜底。
-
-### Task 5.1: 新增 dialer.BindContext
+### Task 5.1: 新增 `dialer.BindContext`
 
 在 `dialer/bind.go` 定义：
 
@@ -118,24 +62,25 @@ func (b *BindContext) BindDefaultInterface(c syscall.RawConn) error
 func SetGlobalBindContext(bc *BindContext)
 func GetGlobalBindContext() *BindContext
 func DialRouteAware(network, addr string) (net.Conn, error)
+func ListenPacketRouteAware(network, laddr string) (net.PacketConn, error)
 ```
 
-- `BindSocket`：按目的地址选择真实网卡并绑定 socket。用于 DIRECT 流量和已知目的地址的代理首跳。
-- `BindDefaultInterface`：直接绑定到启动时捕获的默认物理接口。用于无法从调用点获得目的地址的外部库封装 Dialer（如 xray-core UDP）。
-- `SetGlobalBindContext` / `GetGlobalBindContext`：TUN 引擎注入/清理上下文；非 TUN 模式为 nil，行为不变。
+- `BindSocket`：按目的地址查询系统路由表，绑定到查得的出口接口；查询时排除 TUN 接口。
+- `BindDefaultInterface`：直接绑定到启动时捕获的默认物理接口；用于无法从调用点获得目的地址的外部库封装 Dialer。
 - `DialRouteAware`：带路由感知的通用拨号函数，内部解析 addr 中的目的 IP 并调用 `BindSocket`。
+- `ListenPacketRouteAware`：带路由感知的 UDP socket 创建，使用 `net.ListenConfig{Control: ...}`。
 
 ### Task 5.2: 迁移平台相关实现
 
 将 `tun/tun_direct_*.go` 中的平台相关逻辑迁移到 `dialer/bind_*.go`：
 
-- `dialer/bind_windows.go`：`GetBestRoute2` + `IP_UNICAST_IF`。
-- `dialer/bind_linux.go`：`SO_BINDTODEVICE`，先固定绑定默认接口；后续 Task 5.5 补充按目的地址查询。
-- `dialer/bind_darwin.go`：`SO_IP_BOUND_IF`（或 `SO_BINDTODEVICE`），同 Linux 逐步实现。
+- `dialer/bind_windows.go`：`GetBestRoute2` + `IP_UNICAST_IF` / `IPV6_UNICAST_IF`，索引按网络字节序处理。
+- `dialer/bind_linux.go`：`SO_BINDTODEVICE`；按目的地址解析 `/proc/net/route` 选择接口。
+- `dialer/bind_darwin.go`：`SO_IP_BOUND_IF`；按目的地址用 `route -n get` 或回退默认接口。
 
-`RouteManager` / `tun` 包中对应的 Windows API 包装（`getBestRouteInterface` 等）一并迁移，或保留 thin wrapper 供 `dialer` 调用。
+`tun` 包不再直接处理 socket 绑定细节。
 
-### Task 5.3: DirectDialer 接入 BindContext
+### Task 5.3: `DirectDialer` 接入 `BindContext`
 
 修改 `dialer/direct.go`：
 
@@ -146,35 +91,34 @@ func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 }
 
 func (d *DirectDialer) DialPacket() (net.PacketConn, error) {
-    // 如果全局 BindContext 存在，创建 UDP socket 时也绑定真实网卡
+    return ListenPacketRouteAware("udp", "")
 }
 ```
 
-### Task 5.4: TUN 内部复用 DirectDialer
+当全局 `BindContext` 为 nil 时，两个函数回退到标准 `net.DialTimeout` / `ListenUDP`，保证非 TUN 模式行为不变。
 
-`Engine.directDial` 和 `Engine.directDialPacket` 改为直接调用 `dialer.DirectDialer` 或 `dialer.DialRouteAware`，删除 `tun` 包内重复的 socket 绑定代码。
+### Task 5.4: TUN 内部复用 `DirectDialer`
 
-`Engine.resolveDirect` 中的 DNS 查询 socket 也改用 `dialer.DialRouteAware`。
+`Engine.directDial`、`Engine.directDialPacket`、`Engine.resolveDirect` 改为直接调用 `dialer.DirectDialer` 或 `dialer.DialRouteAware` / `ListenPacketRouteAware`，删除 `tun` 包内重复的 socket 绑定代码。
 
-### Task 5.5: 代理链首跳接入 BindContext
+### Task 5.5: 各协议 Dialer 接入 `BindContext`
 
-修改各协议 Dialer 连接自身服务器的首跳逻辑：
+| Dialer | 接入方式 |
+|---|---|
+| `HTTPDialer` | 首跳直接调用 `DialRouteAware` |
+| `ShadowsocksDialer` | TCP 首跳 `DialRouteAware`；UDP `ListenPacketRouteAware` |
+| `HTunnelDialer` | `http.Transport.DialContext` 注入 `DialRouteAware` |
+| `Socks5Dialer` | TCP 首跳经 `nextDialer` 自动改善；**自研/补齐 UDP ASSOCIATE 控制面 + relay socket 绑定** |
+| `TrojanDialer` | TCP 首跳经 `nextDialer` 自动改善；**补齐 UDP 控制面/数据面绑定** |
+| `SSHDialer` | 只有 TCP，间接受益 |
+| `ReverseDialer` | TCP 是 registry 已有连接，不在 BindContext 范围；UDP 数据面 socket 绑定 |
+| `ControlClient` | 控制面经 `ChainDial` 间接受益 |
+| `Hysteria2Dialer` | `ConnFactory.New` 中创建 UDP socket 并调用 `BindSocket(serverAddr)` |
+| `VLESSDialer` | 已自研，把连接 VLESS server 的 `nextDialer.Dial` 路径改为 `DialRouteAware` |
 
-- `dialer/socks5.go`：建立到 SOCKS5 服务器控制连接时调用 `DialRouteAware`。
-- `dialer/trojan.go`：建立到 Trojan 服务器 TCP 连接时调用 `DialRouteAware`。
-- `dialer/htunnel.go`：建立到 h_tunnel 服务器连接时调用 `DialRouteAware`。
-- `dialer/ssh.go`：建立 SSH 服务器连接时调用 `DialRouteAware`。
-- UDP 控制面（SOCKS5/Trojan UDP ASSOCIATE）同样调用带绑定的拨号。
+**无兜底分支**：所有 Dialer 均接入 `BindContext`；不再为任何代理类型保留静态 exclusion route。
 
-实现方式：在 `NewDialer` 或各 Dialer 内部统一使用 `DialRouteAware` 替代裸 `net.DialTimeout`。
-
-**外部库 Dialer 接入**：
-- `Hysteria2Dialer`：自定义 `ConnFactory`，在 `New(addr)` 中创建 UDP socket 后调用 `BindContext.BindSocket(addr)`。quic-go 复用该 socket 建立 QUIC 连接，因此 TCP/UDP 统一绑定。
-- `VLESSDialer`：已改为自研 VLESS 客户端实现，通过 `DialRouteAware` 建立到 VLESS 服务器的 TCP/TLS 首跳，不再使用 xray-core `RegisterDialerController`。
-
-**无兜底分支**：上述改造完成后，所有 Dialer 均接入同一 `BindContext`，不再为任何代理类型保留静态 `exclusion route`。
-
-### Task 5.6: TUN 引擎注入 BindContext
+### Task 5.6: TUN 引擎注入 `BindContext`
 
 在 `tun/engine.go` 的 `Start()` 中，路由配置完成后：
 
@@ -198,46 +142,116 @@ dialer.SetGlobalBindContext(nil)
 
 在 `dialer/bind_linux.go` 中实现按目的地址查询路由表：
 
-- 候选方案：netlink `RouteGet(dst)` 或解析 `/proc/net/route`。
-- 根据查询结果使用 `SO_BINDTODEVICE` 绑定到正确接口，而非固定默认接口。
+- 解析 `/proc/net/route`，找到目的地址最长匹配的非 TUN 路由条目。
+- 根据条目使用 `SO_BINDTODEVICE` 绑定到正确接口。
+- 避免引入 netlink 外部依赖。
 
 ### Task 5.8: DIRECT DNS 路由感知（Linux）
 
-`Engine.resolveDirect` 中 DNS 查询 socket 在 Linux 上根据 DNS 服务器地址选择接口。依赖 Task 5.7 的路由查询函数。
+`Engine.resolveDirect` 中 DNS 查询 socket 改用 `dialer.DialRouteAware()` 创建，复用路由感知绑定。
 
 ### Task 5.9: 路由查询缓存
 
 在 `dialer` 包中对 `(目的 IP, 协议) → 出口接口索引` 做短期缓存（TTL 30s）。缓存失效或 miss 时回退到路由表查询。
 
-优先保证正确性，再考虑性能优化。
-
 ### Task 5.10: IPv6 DIRECT 支持
 
 - Windows：补充 `IPV6_UNICAST_IF` 绑定。
-- Linux/macOS：补充 IPv6 目的地址路由查询，`SO_BINDTODEVICE` 对 IPv6 socket 同样适用。
+- Linux/macOS：IPv6 socket 同样适用 `SO_BINDTODEVICE` / `SO_IP_BOUND_IF`。
 
-## 阶段 6: 验证
+## 阶段 6: 系统 DNS 重定向
 
-### Task 6.1: 单元测试
-- `go test ./tun -v` 必须全部通过。
-- `go test ./dialer -v` 必须全部通过。
-- `go test ./...` 无回归。
+### Task 6.1: Windows
 
-### Task 6.2: 代码静态检查
-- `go build ./...` 成功。
+沿用现有 `netsh interface ip set dns name=devName static <tun-ip>`，停止时恢复 DHCP 或原 DNS。
+
+### Task 6.2: Linux
+
+新增 `tun/dns_system_linux.go`：
+
+- 检测 `systemd-resolved`：`resolvectl dns devName <tun-ip>`。
+- 检测 `NetworkManager`：`nmcli connection modify ... ipv4.dns ...`。
+- 回退：备份 `/etc/resolv.conf`，写入 `nameserver <tun-ip>`；停止时恢复备份。
+
+### Task 6.3: macOS
+
+新增 `tun/dns_system_darwin.go`：
+
+- `networksetup -listnetworkserviceorder` 找活跃服务。
+- `networksetup -setdnsservers <service> <tun-ip>`；恢复时用 `Empty` 表示 DHCP。
+
+## 阶段 7: 跨平台清理与可用性
+
+### Task 7.1: 启用 Linux/macOS TUN
+
+修改 `tun/avail_other.go`：
+
+- Linux 运行时检查 `/dev/net/tun` 是否可打开。
+- Darwin 运行时检查 `com.apple.net.utun_control` 是否可连接。
+- 失败时记录 warn 并返回 `false`，不再编译期硬编码不可用。
+
+### Task 7.2: macOS 接口配置
+
+在 `tun/route_darwin.go` 的 `platformSetup` 中：
+
+1. `ifconfig <dev> inet <tun-ip> <tun-ip> netmask <mask> up`
+2. 保存 `DefaultIfaceName` / `DefaultIfaceIndex`。
+
+`platformTeardown` 中 `ifconfig <dev> down`。
+
+### Task 7.3: 统一清理逻辑
+
+- 新建 `tun/cleanup_other.go`：
+  - Linux：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；`ip link set devName down`。
+  - Darwin：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；`ifconfig devName down`。
+- 更新 `tun/cleanup_windows.go`：增加删除系统 DNS 静态配置（恢复 DHCP）作为兜底。
+
+### Task 7.4: 看门狗策略
+
+- **不做引擎级内部看门狗**：进程内探测 TUN DNS 路径不可靠，容易误触发。
+- 保留/强化外部 `LAYER_WATCHDOG_PID` 进程看门狗：父进程退出后自动清理路由/DNS。
+- 依靠 `CleanupResidual` 在各平台启动时兜底，确保崩溃/强制杀进程后能恢复网络。
+
+## 阶段 8: 验证
+
+### Task 8.1: 单元测试
+
+- `go test ./tun -v`
+- `go test ./dialer -v`
+- `go test ./...` 无回归
+
+### Task 8.2: 静态检查
+
+- `go build ./...` 成功（Windows/Linux/macOS 交叉编译）。
 - `go vet ./tun ./dialer` 无新增告警。
+
+### Task 8.3: 不开启真实 TUN
+
+不在当前工作主机运行会调用 `CreateDevice` / `Setup` 的集成测试；真实 TUN 功能到独立 VM/测试机验证。
 
 ## 验收标准
 
-- `readLoop` 正确处理 IPv4/IPv6。
-- `readLoop` 不再复用单 buffer。
+- `readLoop` 正确处理 IPv4/IPv6；不再复用单 buffer。
 - `proxyDesc` 对 DIRECT 显示为 `"DIRECT"`。
 - LAN/私网流量默认绕过 TUN。
-- UDP 转发保持数据报语义，不再当 TCP 流处理。
-- `dialer` 包存在可注入的 `BindContext`，TUN 启动时正确注入。
-- `DirectDialer` 和各协议 Dialer 首跳复用路由感知绑定；`VLESSDialer` 已改为自研实现并通过 `DialRouteAware` 接入，`Hysteria2Dialer` 通过 `ConnFactory` 接入同一 `BindContext`，不再保留 exclusion route 兜底。
-- TUN 内部 `directDial`/`directDialPacket`/`resolveDirect` 不再重复实现 socket 绑定。
+- UDP 转发保持数据报语义。
+- `dialer` 包存在可注入的 `BindContext`，TUN 启动时正确注入、停止时清理。
+- `DirectDialer` 和各协议 Dialer 首跳复用路由感知绑定；Socks5/Trojan UDP 已完成绑定改造；Hysteria2 通过 `ConnFactory` 接入；VLESS 已自研并接入。
+- TUN 内部 `directDial` / `directDialPacket` / `resolveDirect` 不再重复实现 socket 绑定。
 - Linux DIRECT 能根据目的地址选择正确接口。
 - IPv6 DIRECT 在至少一个平台可用。
+- Windows/Linux/macOS 均能在支持环境下 `Available() == true`。
+- Linux/macOS 系统 DNS 可重定向到 TUN IP 并恢复。
+- 崩溃/异常退出后 `CleanupResidual` 能恢复网络。
 - `go test ./...` 通过，`go build ./...` 成功。
-- 不在当前工作主机上启用真实 TUN。
+- 不在当前工作主机启用真实 TUN。
+
+## 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| 取消代理服务器 exclusion route 后某 Dialer 漏绑导致环路 | 每个 Dialer 改造后必须编译通过 + 代码审查；LAN exclusion 保留保护本地网络 |
+| 改系统 DNS 后网络断掉 | 外部 watchdog 进程监控父进程退出并清理；`CleanupResidual` 启动兜底 |
+| Linux 发行版 DNS 管理方式不同 | 按 `systemd-resolved` > `NetworkManager` > `/etc/resolv.conf` 优先级检测 |
+| macOS `ifconfig` / Linux `resolv.conf` 需要 root | `Engine.Start` 已调用 `EnsureAdminPrivileges` |
+| 路由查询频繁影响性能 | 30s TTL 路由查询缓存 |

@@ -4,31 +4,50 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 
 	"phaethon/util"
 )
 
-// spawnWatchdog starts a child process that monitors this process lifetime.
+// spawnWatchdog starts a detached child process that monitors this process
+// lifetime. It logs to its own file and is not attached to the parent console,
+// so it can clean up even if the parent console is closed or the parent hangs.
 func spawnWatchdog() {
 	wdExe, err := ensureWatchdogExecutable()
 	if err != nil {
 		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
 		return
 	}
+
+	logPath := filepath.Join(filepath.Dir(wdExe), "phaethon-watchdog.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		util.LogWarn("tun: cannot open watchdog log %s: %v", logPath, err)
+		return
+	}
+
 	pid := os.Getpid()
 	env := append(os.Environ(), "LAYER_WATCHDOG_PID="+strconv.Itoa(pid))
 	attr := &os.ProcAttr{
 		Env:   env,
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-		Sys:   &syscall.SysProcAttr{CreationFlags: 0x08000000},
+		Files: []*os.File{nil, logFile, logFile},
+		Sys: &syscall.SysProcAttr{
+			// DETACHED_PROCESS: no console, so closing the parent console will
+			// not kill the watchdog before it has a chance to clean up.
+			CreationFlags: 0x00000008,
+		},
 	}
 	p, err := os.StartProcess(wdExe, []string{wdExe}, attr)
 	if err != nil {
+		_ = logFile.Close()
 		util.LogWarn("tun: failed to spawn watchdog: %v", err)
 		return
 	}
+	_ = logFile.Close()
 	util.LogInfo("tun: watchdog spawned (pid=%d) from %s", p.Pid, wdExe)
 }
 
@@ -58,11 +77,15 @@ func consoleCloseNotify() <-chan struct{} {
 
 // processExists checks whether a process with the given PID is still running.
 // OpenProcess alone can succeed for a terminated zombie, so we also check the
-// exit code via GetExitCodeProcess.
+// exit code via GetExitCodeProcess. Falls back to PROCESS_QUERY_LIMITED_INFORMATION
+// if the full query handle is denied.
 func processExists(pid int) bool {
 	handle, err := syscall.OpenProcess(syscall.PROCESS_QUERY_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return false
+		handle, err = syscall.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+		if err != nil {
+			return false
+		}
 	}
 	defer syscall.CloseHandle(handle)
 	var exitCode uint32

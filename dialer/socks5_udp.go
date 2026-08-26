@@ -386,7 +386,7 @@ func Socks5UDPAssociate(proxy *config.Proxy) (*Socks5UDPConn, error) {
 	// If udpConn is still nil (no recursion happened, or next-hop was DIRECT),
 	// create a local UDP socket.
 	if udpConn == nil {
-		udpConn, err = ListenUDP()
+		udpConn, err = ListenPacketRouteAware("udp", "")
 		if err != nil {
 			ctrlConn.Close()
 			return nil, fmt.Errorf("socks5-udp: create udp socket fail: %w", err)

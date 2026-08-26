@@ -57,3 +57,17 @@ func CleanupResidual() {
 		}
 	}
 }
+
+// InterfaceExists reports whether any TUN interface is currently present.
+func InterfaceExists() bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if strings.HasPrefix(iface.Name, "tun") {
+			return true
+		}
+	}
+	return false
+}

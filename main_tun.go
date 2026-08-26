@@ -55,21 +55,94 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 	return &TUNResource{engine: engine}
 }
 
-// runWatchdog blocks until the monitored parent process exits, then runs cleanup.
+// runWatchdog monitors the parent process and the TUN DNS path. It cleans up
+// when the parent dies, and kills the parent plus cleans up when the TUN DNS
+// hijacker becomes unreachable from this separate process or when the TUN
+// interface disappears.
 func runWatchdog(parentPID string) {
 	pid := parsePID(parentPID)
 	if pid <= 0 {
+		util.LogWarn("tun-watchdog: invalid parent pid %q, exiting", parentPID)
 		return
 	}
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		if !processExists(pid) {
-			util.LogInfo("tun-watchdog: parent process %d gone, cleaning up...", pid)
-			tun.CleanupResidual()
-			return
+
+	util.LogInfo("tun-watchdog: started, monitoring parent %d", pid)
+
+	const (
+		procInterval    = 3 * time.Second
+		dnsInterval     = 5 * time.Second
+		ifaceInterval   = 5 * time.Second
+		dnsGrace        = 30 * time.Second
+		dnsFailLimit    = 5
+		dnsProbeTimeout = 3 * time.Second
+	)
+
+	// During development/debugging the DNS-kill behavior can be disabled so the
+	// process stays alive for manual inspection. Parent-death cleanup is always
+	// kept so a crash does not strand the machine.
+	noDNSKill := os.Getenv("LAYER_WATCHDOG_NO_DNS_KILL") == "1"
+
+	procTicker := time.NewTicker(procInterval)
+	defer procTicker.Stop()
+	dnsTicker := time.NewTicker(dnsInterval)
+	defer dnsTicker.Stop()
+	ifaceTicker := time.NewTicker(ifaceInterval)
+	defer ifaceTicker.Stop()
+
+	// Give the parent a grace period to finish TUN setup before probing DNS.
+	enableDNSProbe := time.After(dnsGrace)
+	dnsFailCount := 0
+
+	for {
+		select {
+		case <-enableDNSProbe:
+			enableDNSProbe = nil
+
+		case <-procTicker.C:
+			if !processExists(pid) {
+				util.LogInfo("tun-watchdog: parent process %d gone, cleaning up...", pid)
+				tun.CleanupResidual()
+				return
+			}
+
+		case <-ifaceTicker.C:
+			if !tun.InterfaceExists() {
+				util.LogError("tun-watchdog: TUN interface missing, killing parent %d and cleaning up", pid)
+				killParentAndCleanup(pid)
+				return
+			}
+
+		case <-dnsTicker.C:
+			if enableDNSProbe != nil {
+				continue
+			}
+			if tun.ProbeTUNDNS(dnsProbeTimeout) {
+				dnsFailCount = 0
+				continue
+			}
+			dnsFailCount++
+			util.LogWarn("tun-watchdog: DNS probe failed (%d/%d)", dnsFailCount, dnsFailLimit)
+			if dnsFailCount >= dnsFailLimit {
+				if noDNSKill {
+					util.LogWarn("tun-watchdog: DNS probe failed %d times, but LAYER_WATCHDOG_NO_DNS_KILL=1 keeps parent alive", dnsFailCount)
+					dnsFailCount = 0
+					continue
+				}
+				util.LogError("tun-watchdog: TUN DNS unreachable, killing parent %d and cleaning up", pid)
+				killParentAndCleanup(pid)
+				return
+			}
 		}
 	}
+}
+
+func killParentAndCleanup(pid int) {
+	if p, err := os.FindProcess(pid); err == nil {
+		_ = p.Kill()
+	}
+	// Wait briefly for the parent to exit so its own cleanup can run first.
+	time.Sleep(2 * time.Second)
+	tun.CleanupResidual()
 }
 
 func parsePID(s string) int {

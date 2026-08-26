@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"time"
 
 	"phaethon/util"
 
@@ -29,7 +28,7 @@ func (d *ShadowsocksDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) 
 	}
 
 	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
-	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	conn, err := DialRouteAware("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("ss: connect to server fail: %w", err)
 	}
@@ -58,13 +57,15 @@ func (d *ShadowsocksDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("ss: create cipher fail: %w", err)
 	}
 
-	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
-	srvAddr, err := net.ResolveUDPAddr("udp", addr)
+	host := d.Proxy.Server
+	serverIP, err := resolveSSServerIP(host)
 	if err != nil {
-		return nil, fmt.Errorf("ss: resolve server addr fail: %w", err)
+		return nil, fmt.Errorf("ss: resolve server %s fail: %w", host, err)
 	}
+	addr := net.JoinHostPort(serverIP.String(), strconv.Itoa(d.Proxy.Port))
+	srvAddr := &net.UDPAddr{IP: serverIP, Port: d.Proxy.Port}
 
-	pc, err := ListenUDP()
+	pc, err := ListenPacketBoundTo("udp", "", serverIP)
 	if err != nil {
 		return nil, fmt.Errorf("ss: create udp socket fail: %w", err)
 	}
@@ -223,4 +224,30 @@ func buildSSAddr(dstAddr string, dstPort int) []byte {
 	copy(addr[2:], dstAddr)
 	binary.BigEndian.PutUint16(addr[2+len(dstAddr):], uint16(dstPort))
 	return addr
+}
+
+// resolveSSServerIP resolves the Shadowsocks server address, preferring IPv4.
+// When the host is a domain, it uses ResolveRouteAware to bypass the TUN DNS
+// hijacker and avoid routing loops.
+func resolveSSServerIP(host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, nil
+	}
+	ips, err := ResolveRouteAware(host)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range ips {
+		if ip := net.ParseIP(s); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				return ip4, nil
+			}
+		}
+	}
+	for _, s := range ips {
+		if ip := net.ParseIP(s); ip != nil {
+			return ip, nil
+		}
+	}
+	return nil, fmt.Errorf("no usable IP for %s", host)
 }

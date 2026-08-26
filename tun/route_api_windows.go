@@ -25,6 +25,7 @@ var (
 	procConvertInterfaceLuidToIndex = modiphlpapi.NewProc("ConvertInterfaceLuidToIndex")
 	procGetIpForwardTable2          = modiphlpapi.NewProc("GetIpForwardTable2")
 	procFreeMibTable                = modiphlpapi.NewProc("FreeMibTable")
+	procGetBestRoute2               = modiphlpapi.NewProc("GetBestRoute2")
 )
 
 // sockaddrInet represents the SOCKADDR_INET union (28 bytes).
@@ -184,4 +185,72 @@ func getInterfaceLUID(name string) (uint64, uint32, error) {
 		return 0, 0, fmt.Errorf("ConvertInterfaceLuidToIndex: 0x%x", ret)
 	}
 	return luid, index, nil
+}
+
+// getBestRouteInterface returns the interface index for the best route to dst,
+// excluding the interface identified by excludeLuid (the phaethon TUN
+// interface). If the best route points back to TUN, it falls back to the
+// original default gateway interface.
+func getBestRouteInterface(dst net.IP, excludeLuid uint64, fallbackIdx uint32) (uint32, error) {
+	dstAddr := newSockaddrInet(dst)
+	var bestRoute mibIpForwardRow2
+	var bestSrc sockaddrInet
+
+	ret, _, _ := procGetBestRoute2.Call(
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&dstAddr)),
+		0,
+		uintptr(unsafe.Pointer(&bestRoute[0])),
+		uintptr(unsafe.Pointer(&bestSrc)),
+	)
+	if ret != 0 {
+		return 0, fmt.Errorf("GetBestRoute2: 0x%x", ret)
+	}
+
+	luid := *(*uint64)(unsafe.Pointer(&bestRoute[0]))
+	index := *(*uint32)(unsafe.Pointer(&bestRoute[8]))
+	if luid == excludeLuid {
+		if fallbackIdx == 0 {
+			return 0, fmt.Errorf("best route leads to TUN and no fallback interface")
+		}
+		return fallbackIdx, nil
+	}
+	return index, nil
+}
+
+// getAdapterDNS returns the IPv4 DNS server addresses for the network adapter
+// with the given interface name, using GetAdaptersAddresses.
+func getAdapterDNS(ifaceName string) ([]string, error) {
+	var size uint32
+	const flags = windows.GAA_FLAG_INCLUDE_PREFIX | windows.GAA_FLAG_SKIP_FRIENDLY_NAME | windows.GAA_FLAG_SKIP_MULTICAST
+	windows.GetAdaptersAddresses(windows.AF_INET, flags, 0, nil, &size)
+	if size == 0 {
+		return nil, fmt.Errorf("GetAdaptersAddresses returned zero size")
+	}
+
+	buf := make([]byte, size)
+	addr := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0]))
+	if err := windows.GetAdaptersAddresses(windows.AF_INET, flags, 0, addr, &size); err != nil {
+		return nil, fmt.Errorf("GetAdaptersAddresses: %w", err)
+	}
+
+	var servers []string
+	for ; addr != nil; addr = addr.Next {
+		name := windows.UTF16PtrToString(addr.FriendlyName)
+		if name != ifaceName {
+			continue
+		}
+		for dns := addr.FirstDnsServerAddress; dns != nil; dns = dns.Next {
+			if ip := dns.Address.IP(); ip != nil {
+				servers = append(servers, ip.String())
+			}
+		}
+	}
+
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no DNS servers found for interface %s", ifaceName)
+	}
+	return servers, nil
 }

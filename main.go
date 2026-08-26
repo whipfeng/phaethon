@@ -574,6 +574,13 @@ func normalizeReverseConfigs(ruleConf *config.RuleConfiguration, profile *config
 }
 
 func main() {
+	// Watchdog mode must be handled before any normal initialization so the
+	// child process only monitors the parent and does not start services.
+	if wdPid := os.Getenv("LAYER_WATCHDOG_PID"); wdPid != "" {
+		runWatchdog(wdPid)
+		os.Exit(0)
+	}
+
 	// Extract Java-style -Dkey=value arguments up front so they do not confuse
 	// the standard flag parser, while remaining available via util.JavaProp().
 	os.Args = util.SetJavaProps(os.Args)

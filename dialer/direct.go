@@ -3,7 +3,6 @@ package dialer
 import (
 	"net"
 	"strconv"
-	"time"
 
 	"phaethon/util"
 )
@@ -13,7 +12,7 @@ type DirectDialer struct{}
 
 func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	conn, err := DialRouteAware("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -22,7 +21,7 @@ func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 }
 
 func (d *DirectDialer) DialPacket() (net.PacketConn, error) {
-	pc, err := ListenUDP()
+	pc, err := ListenPacketRouteAware("udp", "")
 	if err != nil {
 		return nil, err
 	}

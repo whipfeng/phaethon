@@ -156,9 +156,11 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			status["deviceName"] = "PhaethonTUN"
 		}
 	}
-	if res.ruleConf != nil && res.ruleConf.TUN != nil {
-		status["probeURLs"] = res.ruleConf.TUN.ProbeURLList()
+	probeURLs := tun.DefaultProbeURLs
+	if res.ruleConf != nil && res.ruleConf.TUN != nil && len(res.ruleConf.TUN.ProbeURLList()) > 0 {
+		probeURLs = res.ruleConf.TUN.ProbeURLList()
 	}
+	status["probeURLs"] = probeURLs
 	return status
 }
 

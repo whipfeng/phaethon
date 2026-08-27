@@ -5,6 +5,7 @@
 *.dll
 
 # Build output
+/bin/
 /build/
 /dist/
 
@@ -14,6 +15,7 @@
 /.env.*
 
 # Logs
+/logs/
 *.log
 *.err.log
 *.out.log
@@ -22,6 +24,9 @@
 *.test
 *.out
 *.pid
+/tests/e2e/tun/
+/tests/e2e/*/runs/
+/tests/e2e/*/temp/
 
 # IDE
 .idea/

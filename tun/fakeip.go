@@ -102,7 +102,6 @@ func (p *FakeIPPool) registerIPLocked(ip net.IP) {
 		p.regMu.Unlock()
 		return
 	}
-	p.registered[ipStr] = true
 	p.regMu.Unlock()
 
 	addr := tcpip.AddrFrom4([4]byte(ip))
@@ -115,9 +114,13 @@ func (p *FakeIPPool) registerIPLocked(ip net.IP) {
 	}
 	if err := p.ns.AddProtocolAddress(p.nicID, protoAddr, stack.AddressProperties{}); err != nil {
 		util.LogWarn("tun fakeip: add address %s fail: %v", ipStr, err)
-	} else {
-		util.LogInfo("tun fakeip: registered local address %s", ipStr)
+		return
 	}
+	util.LogInfo("tun fakeip: registered local address %s", ipStr)
+
+	p.regMu.Lock()
+	p.registered[ipStr] = true
+	p.regMu.Unlock()
 }
 
 // LookupDomain returns the original domain for a Fake-IP, or empty if not found.
@@ -145,8 +148,8 @@ func (p *FakeIPPool) Release(domain string) {
 					util.LogWarn("tun fakeip: remove address %s fail: %v", ipStr, err)
 				} else {
 					util.LogInfo("tun fakeip: unregistered local address %s", ipStr)
+					delete(p.registered, ipStr)
 				}
-				delete(p.registered, ipStr)
 			}
 			p.regMu.Unlock()
 		}

@@ -47,12 +47,13 @@
 - [x] `go test ./tun -v -run TestProbeTUNHTTP` 通过
 
 ### Task 3.2: 功能验证
-- [ ] 正常启动 TUN，日志出现 HTTP probe ok
-- [ ] 模拟代理断开，约 6 秒内触发清理
-- [ ] 自定义 `probe-urls` 后使用指定地址
+- [x] 正常启动 TUN，日志出现 HTTP probe ok（debug 级别日志在 watchdog log 中）
+- [x] `/api/tun` 正确返回 `probeURLs` 默认地址列表
+- [x] 配置不可达 `probe-urls` 后，约 6 秒内 watchdog kill 父进程并清理 TUN
+- [x] 清理后路由恢复、PhaethonTUN 适配器被删除
 
 ### Task 3.3: 更新索引并提交
 - [x] 更新 `docs/index.md`
 - [x] 标记所有 task 为 [x]
-- [ ] `git add` 相关文件
-- [ ] `git commit` 新提交
+- [x] `git add` 相关文件
+- [x] `git commit` 新提交

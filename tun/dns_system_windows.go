@@ -15,7 +15,7 @@ func setSystemDNS(tunName, tunIP string) error {
 	if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+tunName, "static", tunIP).CombinedOutput(); err != nil {
 		return fmt.Errorf("set dns: %v: %s", err, out)
 	}
-	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+tunName, "metric=5").CombinedOutput(); err != nil {
+	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "interface", "interface="+tunName, "metric=5").CombinedOutput(); err != nil {
 		util.LogWarn("tun: set interface metric for %s fail: %v, %s", tunName, err, out)
 	}
 	util.LogInfo("tun: system dns for %s set to %s", tunName, tunIP)
@@ -29,7 +29,7 @@ func restoreSystemDNS(tunName string) {
 	} else {
 		util.LogInfo("tun: system dns for %s restored to dhcp", tunName)
 	}
-	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+tunName, "metric=automatic").CombinedOutput(); err != nil {
+	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "interface", "interface="+tunName, "metric=automatic").CombinedOutput(); err != nil {
 		util.LogWarn("tun: restore interface metric for %s fail: %v, %s", tunName, err, out)
 	}
 }

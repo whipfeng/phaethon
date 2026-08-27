@@ -49,6 +49,11 @@ type RouteManager struct {
 	// interface before TUN redirects DNS, so TUN-internal resolution can use
 	// the real upstream servers.
 	OriginalDNSServers []string
+
+	// originalPhysicalWeakHostReceive records whether weak-host receive was
+	// enabled on the physical default interface before TUN setup (Windows only).
+	// Used to restore the original setting during teardown.
+	originalPhysicalWeakHostReceive bool
 }
 
 // RouteSnapshot captures the route manager's current applied state.

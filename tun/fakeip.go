@@ -127,13 +127,29 @@ func (p *FakeIPPool) LookupDomain(ip string) string {
 	return p.ipToDomain[ip]
 }
 
-// Release removes a mapping.
+// Release removes a mapping and unregisters the Fake-IP from netstack.
 func (p *FakeIPPool) Release(domain string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if ip, ok := p.domainToIP[domain]; ok {
-		delete(p.ipToDomain, ip.String())
+		ipStr := ip.String()
+		delete(p.ipToDomain, ipStr)
 		delete(p.domainToIP, domain)
+
+		// Unregister the Fake-IP from netstack so it doesn't accumulate as a local address.
+		if p.ns != nil {
+			p.regMu.Lock()
+			if p.registered[ipStr] {
+				addr := tcpip.AddrFrom4([4]byte(ip.To4()))
+				if err := p.ns.RemoveAddress(p.nicID, addr); err != nil {
+					util.LogWarn("tun fakeip: remove address %s fail: %v", ipStr, err)
+				} else {
+					util.LogInfo("tun fakeip: unregistered local address %s", ipStr)
+				}
+				delete(p.registered, ipStr)
+			}
+			p.regMu.Unlock()
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ package tun
 
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -38,7 +39,7 @@ func CreateDevice() (Device, error) {
 
 	tun := &linuxTUN{
 		fd:   fd,
-		name: string(ifr.name[:]),
+		name: strings.TrimRight(string(ifr.name[:]), "\x00"),
 		mtu:  1500,
 	}
 

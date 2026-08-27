@@ -30,3 +30,4 @@ admin:
 
 tun:
   enabled: false
+  probe-urls: []

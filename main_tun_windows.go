@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -16,7 +17,7 @@ import (
 // spawnWatchdog starts a detached child process that monitors this process
 // lifetime. It logs to its own file and is not attached to the parent console,
 // so it can clean up even if the parent console is closed or the parent hangs.
-func spawnWatchdog() {
+func spawnWatchdog(probeURLs []string) {
 	wdExe, err := ensureWatchdogExecutable()
 	if err != nil {
 		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
@@ -32,6 +33,13 @@ func spawnWatchdog() {
 
 	pid := os.Getpid()
 	env := append(os.Environ(), "LAYER_WATCHDOG_PID="+strconv.Itoa(pid))
+	if probeURLs != nil {
+		if len(probeURLs) == 0 {
+			env = append(env, "LAYER_WATCHDOG_PROBE_URLS=dns-only")
+		} else {
+			env = append(env, "LAYER_WATCHDOG_PROBE_URLS="+strings.Join(probeURLs, ";"))
+		}
+	}
 	attr := &os.ProcAttr{
 		Env:   env,
 		Files: []*os.File{nil, logFile, logFile},

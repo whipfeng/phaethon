@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"phaethon/config"
@@ -51,14 +52,33 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 		return nil
 	}
 
-	spawnWatchdog()
+	probeURLs := []string(nil)
+	if ruleConf != nil && ruleConf.TUN != nil {
+		probeURLs = ruleConf.TUN.ProbeURLList()
+	}
+	spawnWatchdog(probeURLs)
 	return &TUNResource{engine: engine}
 }
 
-// runWatchdog monitors the parent process and the TUN DNS path. It cleans up
-// when the parent dies, and kills the parent plus cleans up when the TUN DNS
-// hijacker becomes unreachable from this separate process or when the TUN
-// interface disappears.
+// probeURLsFromEnv parses the LAYER_WATCHDOG_PROBE_URLS environment variable.
+// Semicolon-separated URLs are treated as explicit probe targets. The literal
+// value "dns-only" disables HTTP probing and falls back to the legacy DNS probe.
+// An empty/unset variable means the watchdog should use tun.DefaultProbeURLs.
+func probeURLsFromEnv() []string {
+	raw := os.Getenv("LAYER_WATCHDOG_PROBE_URLS")
+	if raw == "" {
+		return nil
+	}
+	if raw == "dns-only" {
+		return []string{}
+	}
+	return strings.Split(raw, ";")
+}
+
+// runWatchdog monitors the parent process and the TUN outbound path. It cleans up
+// when the parent dies, and kills the parent plus cleans up when the TUN HTTP
+// probe becomes unreachable from this separate process or when the TUN interface
+// disappears.
 func runWatchdog(parentPID string) {
 	pid := parsePID(parentPID)
 	if pid <= 0 {
@@ -70,34 +90,33 @@ func runWatchdog(parentPID string) {
 
 	const (
 		procInterval    = 3 * time.Second
-		dnsInterval     = 5 * time.Second
+		httpInterval    = 3 * time.Second
 		ifaceInterval   = 5 * time.Second
-		dnsGrace        = 30 * time.Second
-		dnsFailLimit    = 5
-		dnsProbeTimeout = 3 * time.Second
+		httpFailLimit   = 2
+		httpProbeTimeout = 3 * time.Second
 	)
 
-	// During development/debugging the DNS-kill behavior can be disabled so the
-	// process stays alive for manual inspection. Parent-death cleanup is always
-	// kept so a crash does not strand the machine.
-	noDNSKill := os.Getenv("LAYER_WATCHDOG_NO_DNS_KILL") == "1"
+	probeURLs := probeURLsFromEnv()
+	httpProbe := func() bool { return tun.ProbeTUNHTTP(httpProbeTimeout, probeURLs) }
+	if probeURLs != nil && len(probeURLs) == 0 {
+		// Explicit dns-only mode: fall back to legacy DNS probe.
+		httpProbe = func() bool { return tun.ProbeTUNDNS(httpProbeTimeout) }
+		util.LogInfo("tun-watchdog: using legacy DNS probe")
+	} else {
+		util.LogInfo("tun-watchdog: using HTTP probe")
+	}
 
 	procTicker := time.NewTicker(procInterval)
 	defer procTicker.Stop()
-	dnsTicker := time.NewTicker(dnsInterval)
-	defer dnsTicker.Stop()
+	httpTicker := time.NewTicker(httpInterval)
+	defer httpTicker.Stop()
 	ifaceTicker := time.NewTicker(ifaceInterval)
 	defer ifaceTicker.Stop()
 
-	// Give the parent a grace period to finish TUN setup before probing DNS.
-	enableDNSProbe := time.After(dnsGrace)
-	dnsFailCount := 0
+	httpFailCount := 0
 
 	for {
 		select {
-		case <-enableDNSProbe:
-			enableDNSProbe = nil
-
 		case <-procTicker.C:
 			if !processExists(pid) {
 				util.LogInfo("tun-watchdog: parent process %d gone, cleaning up...", pid)
@@ -112,23 +131,15 @@ func runWatchdog(parentPID string) {
 				return
 			}
 
-		case <-dnsTicker.C:
-			if enableDNSProbe != nil {
+		case <-httpTicker.C:
+			if httpProbe() {
+				httpFailCount = 0
 				continue
 			}
-			if tun.ProbeTUNDNS(dnsProbeTimeout) {
-				dnsFailCount = 0
-				continue
-			}
-			dnsFailCount++
-			util.LogWarn("tun-watchdog: DNS probe failed (%d/%d)", dnsFailCount, dnsFailLimit)
-			if dnsFailCount >= dnsFailLimit {
-				if noDNSKill {
-					util.LogWarn("tun-watchdog: DNS probe failed %d times, but LAYER_WATCHDOG_NO_DNS_KILL=1 keeps parent alive", dnsFailCount)
-					dnsFailCount = 0
-					continue
-				}
-				util.LogError("tun-watchdog: TUN DNS unreachable, killing parent %d and cleaning up", pid)
+			httpFailCount++
+			util.LogWarn("tun-watchdog: probe failed (%d/%d)", httpFailCount, httpFailLimit)
+			if httpFailCount >= httpFailLimit {
+				util.LogError("tun-watchdog: probe unreachable, killing parent %d and cleaning up", pid)
 				killParentAndCleanup(pid)
 				return
 			}

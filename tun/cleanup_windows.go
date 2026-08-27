@@ -124,6 +124,8 @@ func CleanupResidual() {
 
 		// Delete any static neighbor entries we added for the virtual peer gateway.
 		_ = exec.Command("netsh", "interface", "ipv4", "delete", "neighbors", "name=phaethontun").Run()
+		_ = deleteStaleNeighbors("192.0.2.1")
+		_ = deleteStaleNeighbors("192.0.2.2")
 	}
 
 	// Check if phaethontun adapter still exists and disable/remove it.

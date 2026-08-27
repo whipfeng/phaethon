@@ -109,10 +109,10 @@ func (e *Engine) Start() error {
 		e.mu.Unlock()
 		return fmt.Errorf("tun engine already running")
 	}
-	e.mu.Unlock()
 
 	// 0. Ensure admin privileges (Windows UAC auto-elevation)
 	if err := EnsureAdminPrivileges(); err != nil {
+		e.mu.Unlock()
 		e.logEvent("TUN ensure admin privileges failed: %v", err)
 		return err
 	}
@@ -123,6 +123,7 @@ func (e *Engine) Start() error {
 	// 1. Create TUN device
 	dev, err := CreateDevice()
 	if err != nil {
+		e.mu.Unlock()
 		e.logEvent("TUN create device failed: %v", err)
 		return fmt.Errorf("tun: create device: %w", err)
 	}
@@ -145,6 +146,7 @@ func (e *Engine) Start() error {
 	// 3. Create netstack
 	if err := e.initStack(); err != nil {
 		dev.Close()
+		e.mu.Unlock()
 		return fmt.Errorf("tun: init netstack: %w", err)
 	}
 
@@ -157,6 +159,7 @@ func (e *Engine) Start() error {
 		e.dnsHijack.Stop()
 		dev.Close()
 		e.ns.Close()
+		e.mu.Unlock()
 		return fmt.Errorf("tun: start dns hijacker: %w", err)
 	}
 
@@ -171,6 +174,7 @@ func (e *Engine) Start() error {
 		e.dnsHijack.Stop()
 		dev.Close()
 		e.ns.Close()
+		e.mu.Unlock()
 		return fmt.Errorf("tun: setup routes: %w", err)
 	}
 
@@ -187,7 +191,6 @@ func (e *Engine) Start() error {
 	// 7. Start packet forward loops before exposing the TUN DNS path to the
 	//    system, so queries that arrive immediately after the system DNS redirect
 	//    are handled by the netstack and DNS hijacker.
-	e.mu.Lock()
 	e.running = true
 	e.closeCh = make(chan struct{})
 	e.mu.Unlock()
@@ -586,9 +589,11 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 }
 
 // relayUDP copies datagrams between the netstack UDP connection and the target
-// PacketConn, preserving datagram boundaries.
+// PacketConn, preserving datagram boundaries. Both sides use a 30-second idle
+// timeout to prevent goroutine leaks when the remote stops responding.
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
+	const idleTimeout = 30 * time.Second
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -596,6 +601,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		defer wg.Done()
 		buf := make([]byte, bufSize)
 		for {
+			_ = netstackConn.SetReadDeadline(time.Now().Add(idleTimeout))
 			n, err := netstackConn.Read(buf)
 			if err != nil {
 				return
@@ -608,6 +614,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 
 	buf := make([]byte, bufSize)
 	for {
+		_ = targetConn.SetReadDeadline(time.Now().Add(idleTimeout))
 		n, _, err := targetConn.ReadFrom(buf)
 		if err != nil {
 			break

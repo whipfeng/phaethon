@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	"phaethon/util"
@@ -108,14 +106,4 @@ func restoreSystemDNS(ifaceName string) {
 	dnsMethod = ""
 	dnsBackup = nil
 	dnsBackupPath = ""
-}
-
-// isSystemdResolvedActive reports whether systemd-resolved appears to manage DNS.
-func isSystemdResolvedActive() bool {
-	target, err := filepath.EvalSymlinks("/etc/resolv.conf")
-	if err == nil {
-		return strings.Contains(target, "systemd")
-	}
-	_, err = exec.LookPath("resolvectl")
-	return err == nil
 }

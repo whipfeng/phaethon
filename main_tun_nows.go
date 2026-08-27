@@ -5,13 +5,14 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"phaethon/util"
 )
 
 // spawnWatchdog starts a child process that monitors this process lifetime.
-func spawnWatchdog() {
+func spawnWatchdog(probeURLs []string) {
 	wdExe, err := ensureWatchdogExecutable()
 	if err != nil {
 		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
@@ -19,6 +20,13 @@ func spawnWatchdog() {
 	}
 	pid := os.Getpid()
 	env := append(os.Environ(), "LAYER_WATCHDOG_PID="+strconv.Itoa(pid))
+	if probeURLs != nil {
+		if len(probeURLs) == 0 {
+			env = append(env, "LAYER_WATCHDOG_PROBE_URLS=dns-only")
+		} else {
+			env = append(env, "LAYER_WATCHDOG_PROBE_URLS="+strings.Join(probeURLs, ";"))
+		}
+	}
 	attr := &os.ProcAttr{
 		Env:   env,
 		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},

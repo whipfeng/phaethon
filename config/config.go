@@ -1156,7 +1156,8 @@ type ReverseConfig struct {
 
 // TUNConfig holds TUN traffic interception settings.
 type TUNConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Enabled   *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	ProbeURLs []string `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
 }
 
 // IsEnabled reports whether TUN is enabled. Omitted or nil means enabled
@@ -1166,6 +1167,15 @@ func (t *TUNConfig) IsEnabled() bool {
 		return true
 	}
 	return *t.Enabled
+}
+
+// ProbeURLList returns the configured TUN watchdog probe URLs, or nil if none
+// are configured. Callers should fall back to tun.DefaultProbeURLs when nil/empty.
+func (t *TUNConfig) ProbeURLList() []string {
+	if t == nil {
+		return nil
+	}
+	return t.ProbeURLs
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

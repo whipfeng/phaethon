@@ -43,6 +43,7 @@
 | [reverse_udp_design.md](plans/reverse_udp_design.md) | 反向 UDP 通道设计 | - | DRAFT |
 | [unified_frame_protocol_design.md](plans/unified_frame_protocol_design.md) | 统一反向连接帧协议设计 | - | DRAFT |
 | [tun_stability_design.md](plans/tun_stability_design.md) | TUN 稳定性修复：竞态、goroutine 泄漏、Fake-IP 清理 | v0.1.0 | DRAFT |
+| [tun_route_and_fakeip_fixes.md](plans/tun_route_and_fakeip_fixes.md) | TUN 路由清理顺序与 Fake-IP 注册/释放一致性修复 | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 
@@ -55,6 +56,7 @@
 | [tun-watchdog-tasks.md](tasks/tun-watchdog-tasks.md) | 跨平台 TUN + 引擎看门狗 | master |
 | [ssh-tasks.md](tasks/ssh-tasks.md) | SSH 代理改进 | master |
 | [tun-stability-tasks.md](tasks/tun-stability-tasks.md) | TUN 稳定性修复 | master |
+| [tun-route-fakeip-fixes.md](tasks/tun-route-fakeip-fixes.md) | TUN 路由与 Fake-IP 修复 | master |
 
 ### inputs/ (原始需求与历史分析)
 

@@ -157,6 +157,7 @@ func (e *Engine) Start() error {
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
 	if err := e.dnsHijack.Start(&e.wg); err != nil {
 		e.dnsHijack.Stop()
+		e.wg.Wait()
 		dev.Close()
 		e.ns.Close()
 		e.mu.Unlock()
@@ -172,6 +173,7 @@ func (e *Engine) Start() error {
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
 		e.dnsHijack.Stop()
+		e.wg.Wait()
 		dev.Close()
 		e.ns.Close()
 		e.mu.Unlock()
@@ -268,19 +270,19 @@ func (e *Engine) Stop() error {
 		restoreSystemDNS(e.device.Name())
 	}
 
-	// 2. Close device to unblock readLoop (stuck on ReceivePacket)
+	// 2. Teardown routes while the adapter still has a valid LUID/index.
+	if e.routeMgr != nil {
+		e.routeMgr.Teardown()
+	}
+
+	// 3. Close device to unblock readLoop (stuck on ReceivePacket)
 	//    This also ends the Wintun session and deletes the adapter.
 	if e.device != nil {
 		e.device.Close()
 	}
 
-	// 3. Wait for goroutines to finish
+	// 4. Wait for goroutines to finish
 	e.wg.Wait()
-
-	// 4. Best-effort route teardown (adapter may already be gone)
-	if e.routeMgr != nil {
-		e.routeMgr.Teardown()
-	}
 
 	// 5. Stop services
 	if e.dnsHijack != nil {

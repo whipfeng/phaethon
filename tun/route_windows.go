@@ -268,14 +268,16 @@ func ensureWeakHostEnabled(name string) error {
 		}
 		send, recv, err := getWeakHostState(name)
 		if err != nil {
-			return err
+			util.LogWarn("tun: unable to verify weak-host state on %s: %v", name, err)
+			return nil
 		}
 		if send && recv {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("weak-host send/receive not enabled on %s after retries", name)
+	util.LogWarn("tun: weak-host send/receive could not be verified on %s after retries", name)
+	return nil
 }
 
 // addExclusionRoute adds a host or CIDR route via the original interface.

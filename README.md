@@ -438,3 +438,29 @@ TUN 模式需要管理员/root 权限运行，用于拦截系统全部流量并�
 ```
 
 分别进入对应目录运行 `./phaethon` 即可。
+
+---
+
+## License
+
+Copyright (C) 2026 phaethon authors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the **GNU Affero General Public License** as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+### 商业授权
+
+AGPL v3 要求：即使仅通过网络提供服务，也必须向用户公开完整源代码（包括修改部分）。
+
+如果你需要在**不开源修改**的前提下将 phaethon 用于商业产品或服务，请通过 [GitHub Issues](https://github.com/whipfeng/phaethon/issues) 联系作者获取**商业许可**。
+

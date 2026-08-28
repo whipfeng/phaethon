@@ -87,63 +87,75 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 
 为避免 Windows 源地址选择、DNS 缓存或路由表被其他软件改动后看门狗探测绕过 TUN，watchdog 的 HTTP socket **必须绑定到 TUN 接口**。同样，dialer 的出站 socket 必须绑定到正确的物理接口以防止路由环。
 
-#### 3.4.1 Windows `IP_UNICAST_IF` 调研结论
+#### 3.4.1 Windows 接口绑定方案实测结论
 
-原方案在 Windows 上使用 `IP_UNICAST_IF`（setsockopt, IPPROTO_IP, optname=31）绑定接口索引。经实测和调研发现：
+经多轮实测验证，各方案在 Windows 上的表现如下：
 
-**实测结果**（`cmd/test_bind/main.go`）：
+**测试环境**：物理网卡（以太网, idx=7）、VMware 虚拟网卡（VMnet1/8）、Wintun 虚拟网卡（phaethontun, idx=21）。
 
-- 绑定物理网卡（ifIndex=7）：setsockopt 成功，connect 成功 ✅
-- 绑定 Wintun 适配器（ifIndex=3/21）：setsockopt 可能成功，connect() 失败 ❌，错误为 "invalid argument" 或 "connection aborted"
+**方案一：`syscall.Bind` 在 Control 回调中**
 
-**外部项目验证**：
+| 接口类型 | 结果 |
+|----------|------|
+| 物理网卡 | ❌ FAIL: "bind: An invalid argument was supplied" |
+| VMware 虚拟网卡 | ❌ FAIL: 同上 |
+| Wintun 虚拟网卡 | ❌ FAIL: 同上 |
 
-- **shadowsocks-rust [#1266](https://github.com/shadowsocks/shadowsocks-rust/issues/1266)**：用户在 Windows 10 上使用 `outbound_bind_interface` 绑定物理 WiFi 网卡，系统同时运行 WireGuard（Wintun）。`IP_UNICAST_IF` 设置失败，错误码 **10049**（`WSAEADDRNOTAVAIL`，地址在其上下文中无效）。用户最终用静态路由 `route -p add <server_ip> MASK 255.255.255.255 <gateway>` 绕过。此案例表明 Wintun 的存在甚至可能影响物理网卡的绑定。
-- **WireGuard-go**（[bind_windows.go](https://git.zx2c4.com/wireguard-go/tree/conn/bind_windows.go)）：使用 `IP_UNICAST_IF`（常量 31）绑定 UDP transport socket 到物理网卡，接口索引转为网络字节序后设置。仅绑物理网卡，不绑 Wintun 隧道接口。
-- **微软文档**（[IPPROTO_IP socket options](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options)）：`IP_UNICAST_IF` 描述为"Gets or sets the outgoing interface for sending IPv4 traffic"，输入值为"interface index in network byte order"。从 Vista 到 Windows 10 均支持。**文档未提及虚拟适配器限制。**
+**根因**：Go 的 `net.Dialer` 在 Windows 上的实现会在 Control 回调之后再次调用 `bind()`（如果设置了 `LocalAddr`），导致 double-bind 失败。即使不设置 `LocalAddr`，实测仍然失败——`syscall.Bind` 在 Control 回调中对**所有接口类型**都无效。
 
-**根因**：
+**方案二：`net.Dialer.LocalAddr` 绑定源 IP**
 
-微软未公开 `IP_UNICAST_IF` 的内部实现，失败的具体原因不明。已确认的事实：
+| 接口类型 | 结果 |
+|----------|------|
+| 物理网卡 | ✅ connect 成功 |
+| VMware 虚拟网卡 | ❌ FAIL: "unreachable network"（无路由，预期行为） |
+| Wintun 虚拟网卡 | ❌ FAIL: "connection aborted by software" |
 
-- 对物理网卡有效，对 Wintun 无效——这是实测结果，不是推测。
-- 错误码 10049（`WSAEADDRNOTAVAIL`）——`connect()` 阶段失败，`setsockopt` 本身可能成功。
-- shadowsocks-rust [#1266](https://github.com/shadowsocks/shadowsocks-rust/issues/1266) 报告了相同错误码，且 Wintun 的存在甚至可能影响物理网卡的绑定。
-- 微软文档未说明此限制，也未列出适用的适配器类型。
+**根因**：Windows 使用**弱主机模型**（weak host model），路由选择仅基于目标 IP 最长前缀匹配，**源 IP 不约束路由决策**。设置 `LocalAddr` 为物理网卡 IP，但目标路由指向 TUN 时，连接会失败或路由环。
 
-**为什么 Wintun 会失败、是否所有 L3 虚拟适配器都会失败、是否有办法让 `IP_UNICAST_IF` 对 Wintun 生效——均无定论。**
+**方案三：`IP_UNICAST_IF`（setsockopt, IPPROTO_IP, optname=31）**
 
-#### 3.4.2 新方案：Windows 改用 `bind()` 到接口本地 IP
+| 接口类型 | setsockopt | connect | 结论 |
+|----------|------------|---------|------|
+| 物理网卡 | ✅ 成功 | ✅ 成功 | **可用** |
+| VMware 虚拟网卡 | ✅ 成功 | ❌ unreachable（无路由） | **可用**（连接失败是因为无路由，非绑定问题） |
+| Wintun 虚拟网卡 | ✅ 成功 | ❌ timeout（无路由） | **可用**（同上） |
 
-**方案**：获取目标接口的本地 IP 地址，通过 `bind()` 将 socket 源地址绑定到该 IP。Windows 路由栈在出站路由查找时，会以绑定的源 IP 为约束，只考虑拥有该 IP 的接口的路由。
+**关键发现**：`IP_UNICAST_IF` 的 `setsockopt` 调用对**所有接口类型都成功**，包括 Wintun。之前认为"对虚拟网卡报 10049"是误判——实际测试中 setsockopt 从未失败，连接失败是因为虚拟网卡没有到目标的路由，这是正确的行为。
 
-**优势**：
-- 工作在 IP 层，不依赖链路层，对**所有接口类型有效**（物理网卡、Wintun、TAP-Windows、WireGuard NDIS 等）。
-- 只要 IP 唯一属于该接口，出站路径就是确定性的。
-- 无需 fallback 机制——单一方案覆盖所有场景。
+**结论**：**统一使用 `IP_UNICAST_IF`**。该方案：
+- 对所有接口类型有效（物理、VMware、Wintun、TAP 等）
+- 在 Control 回调中通过 `setsockopt` 设置，不涉及 `bind()` 调用
+- 接口索引需转为网络字节序（`htonl`）
+- WireGuard-go 也采用相同方案（仅绑物理网卡）
 
-**注意**：此方案仅影响 Windows。Linux 的 `SO_BINDTODEVICE` 和 macOS 的 `IP_BOUND_IF` 均按接口名/索引绑定，不依赖链路层，对所有适配器类型有效，无需修改。
+#### 3.4.2 ~~已否决方案~~：Windows 改用 `bind()` 到接口本地 IP
 
-#### 3.4.3 多 IP 选取规则（与系统源地址选择一致）
+> **⚠️ 此方案已否决**。实测发现 Windows 弱主机模型下，`bind()` 到源 IP **不能约束路由决策**。设置 `LocalAddr` 为物理网卡 IP，但目标路由指向 TUN 时，连接仍会失败或路由环。详见 3.4.1 方案二的实测结果。
 
-一个接口可能配置了多个 IP 地址（如 IPv4 + IPv6、多个 IPv4 等）。选取逻辑必须与 Windows 系统的源地址选择行为保持一致，避免绑定后路由决策冲突。
+~~**方案**：获取目标接口的本地 IP 地址，通过 `bind()` 将 socket 源地址绑定到该 IP。Windows 路由栈在出站路由查找时，会以绑定的源 IP 为约束，只考虑拥有该 IP 的路由。~~
 
-Windows 遵循 **RFC 6724**（Default Address Selection for IPv6，IPv4 同理参考）的源地址选择算法。具体规则按优先级排列：
+~~**优势**：~~
+- ~~工作在 IP 层，不依赖链路层，对所有接口类型有效。~~
+- ~~只要 IP 唯一属于该接口，出站路径就是确定性的。~~
 
-1. **地址族匹配**：IPv4 目标 → 选 IPv4 地址；IPv6 目标 → 选 IPv6 地址；目标未知（dst=nil）→ 优先 IPv4。
-2. **排除不可用地址**：跳过 link-local（`169.254.0.0/16`、`fe80::/10`）、loopback（`127.0.0.0/8`）、tentative、deprecated 地址。
-3. **同子网优先**：如果接口上有多个同族 IP，优先选与目标 IP 在同一子网（最长前缀匹配）的地址。这与系统路由表的行为一致——同子网流量不经过网关，路径最短。
-4. **公共前缀最长优先**：如果都不在同一子网，选与目标 IP 公共前缀最长的地址（RFC 6724 Rule 9）。前缀越长，网络拓扑距离越近。
-5. **都不同则取第一个**：公共前缀长度相同时，取第一个匹配的地址。同一接口上多个同族地址在路由层面等价（都绑定到同一接口），选哪个不影响结果。
-6. **无匹配地址时放弃绑定**：如果接口没有任何合适的 IP，记录 warn 日志，不绑定（退化为纯路由表决策）。
+**正确方案**：使用 `IP_UNICAST_IF`（详见 3.4.1 结论）。
 
-**实现方式**：通过 `net.Interface.Addrs()` 获取接口地址列表，按上述规则排序选取。不使用 `IP_UNICAST_IF`，而是将选中的 IP 设为 `net.Dialer.LocalAddr`，由系统在 socket 创建时完成 `bind()`。
+#### 3.4.3 接口索引选取规则
+
+`IP_UNICAST_IF` 接受接口索引（网络字节序）作为参数。接口索引由 `bestRouteIndex()`（dialer）或父进程传入的环境变量（watchdog）提供。
+
+**dialer 出站绑定**：通过 `GetBestRoute2` 查询到目标 IP 的最佳路由，排除 TUN LUID，返回物理接口索引。若最佳路由指向 TUN，回退到默认物理接口。
+
+**watchdog 探测绑定**：使用父进程通过 `LAYER_WATCHDOG_TUN_IFINDEX` 环境变量传入的 TUN 接口索引。
+
+**多 IP 接口**：一个接口可能有多个 IP，但 `IP_UNICAST_IF` 绑定的是接口索引而非 IP，因此无需 IP 选取逻辑。系统会自动在该接口上选择合适的源 IP。
 
 #### 3.4.4 各平台绑定策略汇总
 
 | 平台 | 机制 | 绑定目标 | 适用范围 |
 |------|------|----------|----------|
-| Windows | `bind()` 到接口本地 IP | 目标接口的 IP 地址 | 所有接口类型 |
+| Windows | `IP_UNICAST_IF` (setsockopt) | 接口索引（网络字节序） | 所有接口类型 |
 | Linux | `SO_BINDTODEVICE` | 接口名（如 `eth0`） | 所有接口类型 |
 | macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | 接口索引 | 所有接口类型 |
 
@@ -151,8 +163,8 @@ Windows 遵循 **RFC 6724**（Default Address Selection for IPv6，IPv4 同理�
 
 此方案影响两处绑定逻辑：
 
-1. **dialer 出站绑定**（`dialer/bind_windows.go`）：`bindSocket()` 从 `IP_UNICAST_IF` 改为 `bind()` 到接口本地 IP。防止代理出站流量路由环回 TUN。
-2. **watchdog 探测绑定**（`tun/bind_windows.go` + `tun/watchdog_probe.go`）：`watchdogControl()` 从 `IP_UNICAST_IF` 改为 `bind()` 到 TUN 适配器本地 IP。强制探测流量走 TUN。
+1. **dialer 出站绑定**（`dialer/bind_windows.go`）：`bindSocket()` 使用 `IP_UNICAST_IF` 绑定到物理接口索引。防止代理出站流量路由环回 TUN。
+2. **watchdog 探测绑定**（`tun/bind_windows.go` + `tun/watchdog_probe.go`）：`watchdogControl()` 使用 `IP_UNICAST_IF` 绑定到 TUN 适配器接口索引。强制探测流量走 TUN。
 
 索引由父进程在创建 TUN 后从 `RouteManager` 获取，通过环境变量 `LAYER_WATCHDOG_TUN_IFINDEX` 传给 watchdog 子进程，避免子进程按名字查询时拿到错误的索引。
 
@@ -364,7 +376,7 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 |------|------|------|
 | 默认探测地址在特定网络下不可达 | 误杀 | 多地址 fallback + 用户可配置 |
 | HTTP 探测频率过高 | 低 | 间隔 3 秒，请求量极小 |
-| 看门狗探测绕过 TUN（DNS/路由缓存、源地址选择） | 漏杀 | bind() 到接口本地 IP，强制流量走对应接口 |
+| 看门狗探测绕过 TUN（DNS/路由缓存、源地址选择） | 漏杀 | IP_UNICAST_IF 绑定到接口索引，强制流量走对应接口 |
 | TUN 适配器被异常删除 | 漏杀/残留 | 接口本地 IP 失效导致绑定失败，探测直接失败 + 接口消失监控兜底 |
 | Windows HTTP probe 受 TUN 实现 bug 影响失败 | 误杀 | 按用户要求，HTTP 不通即视为 TUN 故障，触发清理 |
 

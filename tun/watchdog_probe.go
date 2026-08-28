@@ -48,14 +48,19 @@ func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string
 		probeURLs = DefaultProbeURLs
 	}
 
-	// No explicit interface binding needed: system DNS is redirected to the TUN
-	// DNS hijacker, and split-tunnel routes ensure all traffic goes through TUN.
+	// Bind to the TUN adapter's local IP to force probe traffic through TUN.
+	// This uses bind() to the interface's source address, which works for all
+	// adapter types including Wintun (unlike IP_UNICAST_IF which fails on L3
+	// virtual adapters).
 	dialer := &net.Dialer{Timeout: timeout}
+	if ifIndex > 0 {
+		dialer.Control = watchdogControl(ifIndex)
+	}
 
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Force IPv4 so interface-index binding (IP_UNICAST_IF, etc.) is
+				// Force IPv4 so interface binding (bind to local IP) is
 				// unambiguous and does not depend on dual-stack socket behavior.
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},

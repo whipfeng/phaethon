@@ -9,43 +9,32 @@ import (
 	"phaethon/util"
 )
 
-// bindToInterface returns a net.Dialer Control function that binds sockets to
-// the local IP address of the given interface. This forces outbound traffic to
-// use that interface's address as the source, which deterministically selects
-// the interface for egress (works for all adapter types including Wintun).
+// bindToInterface returns a no-op Control function on Windows. Windows cannot
+// use syscall.Bind inside Control callbacks (fails with "invalid argument").
+// Callers should use watchdogLocalAddr with net.Dialer.LocalAddr instead.
 func bindToInterface(ifIndex int) func(network, address string, c syscall.RawConn) error {
-	localIP := selectTUNLocalIP(ifIndex)
-	if localIP == nil {
-		util.LogWarn("tun/bind: no suitable IP on interface %d, binding skipped", ifIndex)
-		return func(network, address string, c syscall.RawConn) error {
-			return nil
-		}
-	}
-
 	return func(network, address string, c syscall.RawConn) error {
-		var bindErr error
-		fn := func(fd uintptr) {
-			if ip4 := localIP.To4(); ip4 != nil {
-				sa := &syscall.SockaddrInet4{}
-				copy(sa.Addr[:], ip4)
-				bindErr = syscall.Bind(syscall.Handle(fd), sa)
-			} else if ip16 := localIP.To16(); ip16 != nil {
-				sa := &syscall.SockaddrInet6{}
-				copy(sa.Addr[:], ip16)
-				bindErr = syscall.Bind(syscall.Handle(fd), sa)
-			}
-		}
-		if err := c.Control(fn); err != nil {
-			return err
-		}
-		return bindErr
+		return nil
 	}
 }
 
-// watchdogControl returns a control function that binds sockets to the TUN
-// adapter's local IP. This forces watchdog probe traffic to egress through TUN.
+// watchdogControl returns nil on Windows. The watchdog probe uses
+// watchdogLocalAddr with net.Dialer.LocalAddr instead.
 func watchdogControl(ifIndex int) func(network, address string, c syscall.RawConn) error {
-	return bindToInterface(ifIndex)
+	return nil
+}
+
+// watchdogLocalAddr returns the local address of the TUN adapter to bind to.
+// On Windows, this is the correct way to force traffic through TUN: set the
+// source IP in the dialer, and the routing stack deterministically selects the
+// TUN interface that owns that IP.
+func watchdogLocalAddr(ifIndex int) net.Addr {
+	localIP := selectTUNLocalIP(ifIndex)
+	if localIP == nil {
+		util.LogWarn("tun/bind: no suitable IP on interface %d, binding skipped", ifIndex)
+		return nil
+	}
+	return &net.TCPAddr{IP: localIP}
 }
 
 // selectTUNLocalIP picks the first non-link-local, non-loopback IP from the

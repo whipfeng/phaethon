@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,23 +57,35 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 	if ruleConf != nil && ruleConf.TUN != nil {
 		probeURLs = ruleConf.TUN.ProbeURLList()
 	}
-	spawnWatchdog(probeURLs)
+	spawnWatchdog(probeURLs, engine.TUNInterfaceIndex())
 	return &TUNResource{engine: engine}
 }
 
 // probeURLsFromEnv parses the LAYER_WATCHDOG_PROBE_URLS environment variable.
-// Semicolon-separated URLs are treated as explicit probe targets. The literal
-// value "dns-only" disables HTTP probing and falls back to the legacy DNS probe.
-// An empty/unset variable means the watchdog should use tun.DefaultProbeURLs.
+// Semicolon-separated URLs are treated as explicit probe targets. An empty or
+// unset variable means the watchdog should use tun.DefaultProbeURLs.
 func probeURLsFromEnv() []string {
 	raw := os.Getenv("LAYER_WATCHDOG_PROBE_URLS")
 	if raw == "" {
 		return nil
 	}
-	if raw == "dns-only" {
-		return []string{}
-	}
 	return strings.Split(raw, ";")
+}
+
+// tunIfIndexFromEnv parses the LAYER_WATCHDOG_TUN_IFINDEX environment variable.
+// A value <= 0 or an unset variable means the watchdog should not bind to a
+// specific interface.
+func tunIfIndexFromEnv() int {
+	raw := os.Getenv("LAYER_WATCHDOG_TUN_IFINDEX")
+	if raw == "" {
+		return 0
+	}
+	idx, err := strconv.Atoi(raw)
+	if err != nil {
+		util.LogWarn("tun-watchdog: invalid TUN ifindex %q, ignoring", raw)
+		return 0
+	}
+	return idx
 }
 
 // runWatchdog monitors the parent process and the TUN outbound path. It cleans up
@@ -89,31 +102,38 @@ func runWatchdog(parentPID string) {
 	util.LogInfo("tun-watchdog: started, monitoring parent %d", pid)
 
 	const (
-		procInterval    = 3 * time.Second
-		httpInterval    = 3 * time.Second
-		ifaceInterval   = 5 * time.Second
-		httpFailLimit   = 2
-		httpProbeTimeout = 3 * time.Second
+		procInterval     = 3 * time.Second
+		probeInterval    = 3 * time.Second
+		ifaceInterval    = 5 * time.Second
+		probeFailLimit   = 2
+		probeTimeout     = 3 * time.Second
 	)
 
 	probeURLs := probeURLsFromEnv()
-	httpProbe := func() bool { return tun.ProbeTUNHTTP(httpProbeTimeout, probeURLs) }
-	if probeURLs != nil && len(probeURLs) == 0 {
-		// Explicit dns-only mode: fall back to legacy DNS probe.
-		httpProbe = func() bool { return tun.ProbeTUNDNS(httpProbeTimeout) }
-		util.LogInfo("tun-watchdog: using legacy DNS probe")
-	} else {
-		util.LogInfo("tun-watchdog: using HTTP probe")
+	tunIfIndex := tunIfIndexFromEnv()
+	if tunIfIndex <= 0 {
+		util.LogError("tun-watchdog: missing or invalid TUN interface index, cannot reliably bind probes; exiting")
+		return
 	}
+
+	// The watchdog verifies real outbound connectivity by sending HTTP probes
+	// through the TUN adapter. DNS resolution goes through the TUN DNS hijacker
+	// which synchronously resolves the real IP, so the engine can dial directly.
+	probe := func() bool {
+		return tun.ProbeTUNHTTPWithBind(probeTimeout, tunIfIndex, probeURLs)
+	}
+	util.LogInfo("tun-watchdog: using HTTP probe bound to TUN iface %d", tunIfIndex)
 
 	procTicker := time.NewTicker(procInterval)
 	defer procTicker.Stop()
-	httpTicker := time.NewTicker(httpInterval)
-	defer httpTicker.Stop()
+	probeTicker := time.NewTicker(probeInterval)
+	defer probeTicker.Stop()
 	ifaceTicker := time.NewTicker(ifaceInterval)
 	defer ifaceTicker.Stop()
 
-	httpFailCount := 0
+	util.LogInfo("tun-watchdog: entering main loop")
+
+	probeFailCount := 0
 
 	for {
 		select {
@@ -131,14 +151,14 @@ func runWatchdog(parentPID string) {
 				return
 			}
 
-		case <-httpTicker.C:
-			if httpProbe() {
-				httpFailCount = 0
+		case <-probeTicker.C:
+			if probe() {
+				probeFailCount = 0
 				continue
 			}
-			httpFailCount++
-			util.LogWarn("tun-watchdog: probe failed (%d/%d)", httpFailCount, httpFailLimit)
-			if httpFailCount >= httpFailLimit {
+			probeFailCount++
+			util.LogWarn("tun-watchdog: probe failed (%d/%d)", probeFailCount, probeFailLimit)
+			if probeFailCount >= probeFailLimit {
 				util.LogError("tun-watchdog: probe unreachable, killing parent %d and cleaning up", pid)
 				killParentAndCleanup(pid)
 				return

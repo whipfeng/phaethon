@@ -20,6 +20,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	if err != nil {
 		return fmt.Errorf("link by name %s: %w", r.devName, err)
 	}
+	r.tunIndex = link.Attrs().Index
 
 	// 1. Set TUN interface IP
 	ipNet := &net.IPNet{

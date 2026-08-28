@@ -11,11 +11,15 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
+// FakeIPPoolCIDR is the CIDR used for Fake-IP allocations.
+const FakeIPPoolCIDR = "198.18.0.0/15"
+
 // FakeIPPool manages the 198.18.0.0/15 fake IP allocation.
 type FakeIPPool struct {
 	mu         sync.RWMutex
 	domainToIP map[string]net.IP
 	ipToDomain map[string]string
+	ipToRealIP map[string]net.IP // Fake-IP -> real IP cache
 	reserved   map[uint32]bool
 	nextIP     uint32
 
@@ -38,6 +42,7 @@ func NewFakeIPPool() *FakeIPPool {
 	return &FakeIPPool{
 		domainToIP: make(map[string]net.IP),
 		ipToDomain: make(map[string]string),
+		ipToRealIP: make(map[string]net.IP),
 		reserved:   reserved,
 		nextIP:     ipToUint32(net.ParseIP("198.18.0.0").To4()),
 		registered: make(map[string]bool),
@@ -130,6 +135,21 @@ func (p *FakeIPPool) LookupDomain(ip string) string {
 	return p.ipToDomain[ip]
 }
 
+// SetRealIP caches the real IP address for a Fake-IP. This is called by the DNS
+// hijacker after synchronously resolving the domain through the physical interface.
+func (p *FakeIPPool) SetRealIP(fakeIP net.IP, realIP net.IP) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ipToRealIP[fakeIP.String()] = realIP
+}
+
+// LookupRealIP returns the cached real IP for a Fake-IP, or nil if not found.
+func (p *FakeIPPool) LookupRealIP(fakeIP net.IP) net.IP {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.ipToRealIP[fakeIP.String()]
+}
+
 // Release removes a mapping and unregisters the Fake-IP from netstack.
 func (p *FakeIPPool) Release(domain string) {
 	p.mu.Lock()
@@ -138,6 +158,7 @@ func (p *FakeIPPool) Release(domain string) {
 		ipStr := ip.String()
 		delete(p.ipToDomain, ipStr)
 		delete(p.domainToIP, domain)
+		delete(p.ipToRealIP, ipStr)
 
 		// Unregister the Fake-IP from netstack so it doesn't accumulate as a local address.
 		if p.ns != nil {

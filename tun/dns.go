@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"phaethon/dialer"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -75,6 +76,9 @@ func (h *DNSHijacker) Stop() {
 // Resolve returns the raw DNS response bytes for a query without sending it
 // through the netstack. It is used by the Windows-side DNS proxy and internal
 // health probes so they do not depend on gVisor loopback delivery semantics.
+// Before returning the Fake-IP, it synchronously resolves the real IP through
+// the physical interface and caches it in the FakeIPPool, so the engine does
+// not need to re-resolve the domain when handling the connection.
 func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 	if len(query) == 0 {
 		return nil, fmt.Errorf("empty query")
@@ -84,6 +88,13 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse query")
 	}
 	fakeIP := h.pool.Lookup(domain)
+
+	// Synchronously resolve the real IP through the physical interface.
+	if realIP := h.resolveRealIP(domain); realIP != nil {
+		h.pool.SetRealIP(fakeIP, realIP)
+		util.LogDebug("tun dns: %s -> fake=%s real=%s", domain, fakeIP, realIP)
+	}
+
 	resp := buildDNSResponse(query, fakeIP.To4())
 	if resp == nil {
 		return nil, fmt.Errorf("failed to build response")
@@ -121,6 +132,13 @@ func (h *DNSHijacker) serveLoop() {
 		}
 
 		fakeIP := h.pool.Lookup(domain)
+
+		// Synchronously resolve the real IP through the physical interface.
+		if realIP := h.resolveRealIP(domain); realIP != nil {
+			h.pool.SetRealIP(fakeIP, realIP)
+			util.LogDebug("tun dns: %s -> fake=%s real=%s", domain, fakeIP, realIP)
+		}
+
 		resp := buildDNSResponse(packet, fakeIP.To4())
 		if resp == nil {
 			continue
@@ -131,6 +149,33 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
 		}
 	}
+}
+
+// resolveRealIP resolves the real IP for a domain through the physical interface,
+// bypassing TUN split-tunnel routes. Returns nil if resolution fails.
+func (h *DNSHijacker) resolveRealIP(domain string) net.IP {
+	bc := dialer.GetGlobalBindContext()
+	if bc == nil {
+		// No BindContext yet (TUN still starting up); fall back to system DNS.
+		ips, err := net.LookupIP(domain)
+		if err != nil || len(ips) == 0 {
+			return nil
+		}
+		for _, ip := range ips {
+			if ip4 := ip.To4(); ip4 != nil {
+				return ip4
+			}
+		}
+		return nil
+	}
+
+	// Resolve through the original DNS servers via the physical interface.
+	ips, err := dialer.ResolveRouteAware(domain)
+	if err != nil || len(ips) == 0 {
+		util.LogDebug("tun dns: real IP resolution failed for %s: %v", domain, err)
+		return nil
+	}
+	return net.ParseIP(ips[0])
 }
 
 type slicePayload struct {

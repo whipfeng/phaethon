@@ -12,7 +12,7 @@ import (
 )
 
 // spawnWatchdog starts a child process that monitors this process lifetime.
-func spawnWatchdog(probeURLs []string) {
+func spawnWatchdog(probeURLs []string, tunIfIndex int) {
 	wdExe, err := ensureWatchdogExecutable()
 	if err != nil {
 		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
@@ -21,11 +21,10 @@ func spawnWatchdog(probeURLs []string) {
 	pid := os.Getpid()
 	env := append(os.Environ(), "LAYER_WATCHDOG_PID="+strconv.Itoa(pid))
 	if probeURLs != nil {
-		if len(probeURLs) == 0 {
-			env = append(env, "LAYER_WATCHDOG_PROBE_URLS=dns-only")
-		} else {
-			env = append(env, "LAYER_WATCHDOG_PROBE_URLS="+strings.Join(probeURLs, ";"))
-		}
+		env = append(env, "LAYER_WATCHDOG_PROBE_URLS="+strings.Join(probeURLs, ";"))
+	}
+	if tunIfIndex > 0 {
+		env = append(env, "LAYER_WATCHDOG_TUN_IFINDEX="+strconv.Itoa(tunIfIndex))
 	}
 	attr := &os.ProcAttr{
 		Env:   env,

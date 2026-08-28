@@ -176,15 +176,24 @@ func getInterfaceLUID(name string) (uint64, uint32, error) {
 	if ret != 0 {
 		return 0, 0, fmt.Errorf("ConvertInterfaceAliasToLuid: 0x%x", ret)
 	}
+	index, err := luidToIndex(luid)
+	if err != nil {
+		return 0, 0, err
+	}
+	return luid, index, nil
+}
+
+// luidToIndex converts an interface LUID to its index.
+func luidToIndex(luid uint64) (uint32, error) {
 	var index uint32
-	ret, _, _ = procConvertInterfaceLuidToIndex.Call(
+	ret, _, _ := procConvertInterfaceLuidToIndex.Call(
 		uintptr(unsafe.Pointer(&luid)),
 		uintptr(unsafe.Pointer(&index)),
 	)
 	if ret != 0 {
-		return 0, 0, fmt.Errorf("ConvertInterfaceLuidToIndex: 0x%x", ret)
+		return 0, fmt.Errorf("ConvertInterfaceLuidToIndex: 0x%x", ret)
 	}
-	return luid, index, nil
+	return index, nil
 }
 
 // getBestRouteInterface returns the interface index for the best route to dst,

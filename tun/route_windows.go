@@ -19,23 +19,28 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	var luid uint64
 	var index uint32
 	var err error
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 80; i++ {
 		luid, index, err = getInterfaceLUID(r.devName)
 		if err == nil {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	if err != nil {
 		return err
 	}
 	r.tunLUID = luid
+	r.tunIndex = int(index)
 
 	// 1. Configure interface IP via netsh (more reliable than iphlpapi on Wintun).
-	// Use a /32 address on the adapter so that the split-tunnel route next hop
-	// (192.0.2.1) is off-link. With a /30 mask Windows normalizes the route to
-	// on-link (next hop 0.0.0.0) and then tries to resolve a MAC for each Fake-IP
-	// destination, which Wintun cannot do, causing unicast SYNs to be dropped.
+	// Use a /32 address on the adapter. The split-tunnel routes use the virtual
+	// peer gateway 192.0.2.1 as next hop.
+	// NOTE: System-wide TUN mode on Windows requires the Wintun adapter to
+	// participate in the IP routing stack, but Wintun does not support ARP/NDP
+	// (no link-layer address). This means Windows cannot resolve the gateway's
+	// MAC address, and packets routed to the TUN interface are silently dropped.
+	// A proper fix requires either using a TAP-Windows adapter (which has a MAC
+	// address) or a WFP-based packet capture mechanism (e.g. WinDivert).
 	// The DNS hijacker lives on 127.0.0.1 inside the gVisor netstack and is reached
 	// through the Windows-side DNS proxy listening on 192.0.2.2:53. We do not set a
 	// default gateway via netsh; split-tunnel routes are added manually below.
@@ -66,6 +71,10 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// forwarding. Instead the split-tunnel routes below use 192.0.2.1 as an
 	// off-link gateway on a /32 adapter, so Windows sends matching packets to
 	// the Wintun interface without ARP/NUD.
+	//
+	// Do this synchronously before adding routes: a background goroutine that
+	// deletes neighbor entries can race with route creation and invalidate the
+	// off-link next hop before traffic starts.
 	deleteStaticNeighbors(r.devName, index)
 	_ = deleteStaleNeighbors("192.0.2.1")
 	_ = deleteStaleNeighbors("192.0.2.2")
@@ -121,62 +130,10 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 
 	// 4. Add split-tunnel routes (0.0.0.0/1 and 128.0.0.0/1) via TUN.
 	// These are more specific than the original default route (0.0.0.0/0),
-	// so they take priority. Use the virtual peer gateway 192.0.2.1 as next hop;
-	// because the adapter is /32, this gateway is off-link and Windows sends
-	// matching packets straight to the Wintun interface without ARP/NUD.
-	tunGatewayIP := net.ParseIP("192.0.2.1").To4()
-	for _, prefix := range []struct {
-		ip  net.IP
-		len uint8
-	}{
-		{net.ParseIP("0.0.0.0").To4(), 1},
-		{net.ParseIP("128.0.0.0").To4(), 1},
-	} {
-		var fwdRow mibIpForwardRow2
-		fwdRow.init()
-		fwdRow.setInterfaceLuid(luid)
-		fwdRow.setInterfaceIndex(index)
-		fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
-		fwdRow.setNextHop(tunGatewayIP)
-		fwdRow.setMetric(1)
-
-		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		if ret != 0 {
-			return fmt.Errorf("CreateIpForwardEntry2 %s/%d: 0x%x", prefix.ip, prefix.len, ret)
-		}
-		util.LogInfo("tun: split-tunnel route %s/%d -> %s (luid=%x idx=%d)", prefix.ip, prefix.len, tunGatewayIP, luid, index)
-	}
-
-	return nil
-}
-
-func (r *RouteManager) platformTeardown() {
-	luid, index, err := getInterfaceLUID(r.devName)
-	if err != nil {
-		return
-	}
-
-	// The routes were created with the virtual peer gateway 192.0.2.1 as next hop.
-	tunGatewayIP := net.ParseIP("192.0.2.1").To4()
-
-	for _, prefix := range []struct {
-		ip  net.IP
-		len uint8
-	}{
-		{net.ParseIP("0.0.0.0").To4(), 1},
-		{net.ParseIP("128.0.0.0").To4(), 1},
-	} {
-		var fwdRow mibIpForwardRow2
-		fwdRow.init()
-		fwdRow.setInterfaceLuid(luid)
-		fwdRow.setInterfaceIndex(index)
-		fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
-		fwdRow.setNextHop(tunGatewayIP)
-		fwdRow.setMetric(1)
-		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-	}
-
-	// Also delete the on-link variant left by older builds (next hop 0.0.0.0).
+	// so they take priority. Use 0.0.0.0 (on-link) as next hop so that
+	// Windows delivers packets directly to the Wintun driver without any
+	// gateway/ARP resolution. Wintun is a layer 3 TUN adapter; it does not
+	// have a link-layer address and cannot participate in ARP/NDP.
 	for _, prefix := range []struct {
 		ip  net.IP
 		len uint8
@@ -191,7 +148,161 @@ func (r *RouteManager) platformTeardown() {
 		fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
 		fwdRow.setNextHop(net.IPv4zero)
 		fwdRow.setMetric(1)
-		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+
+		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+		if ret != 0 {
+			return fmt.Errorf("CreateIpForwardEntry2 %s/%d: 0x%x", prefix.ip, prefix.len, ret)
+		}
+		util.LogInfo("tun: split-tunnel route %s/%d -> on-link (luid=%x idx=%d)", prefix.ip, prefix.len, luid, index)
+	}
+
+	// 5. Add an on-link route for the Fake-IP pool (198.18.0.0/15) via TUN.
+	// The split-tunnel routes above already send 198.18.x.x to the TUN
+	// interface, but this more-specific /15 route guarantees that bound
+	// sockets (e.g. watchdog probes using IP_UNICAST_IF) see the destination as
+	// directly attached on the TUN interface.
+	_, fakeIPNet, err := net.ParseCIDR(FakeIPPoolCIDR)
+	if err == nil {
+		var fwdRow mibIpForwardRow2
+		fwdRow.init()
+		fwdRow.setInterfaceLuid(luid)
+		fwdRow.setInterfaceIndex(index)
+		fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
+		fwdRow.setNextHop(net.IPv4zero)
+		fwdRow.setMetric(1)
+
+		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+		if ret != 0 {
+			util.LogWarn("tun: add Fake-IP pool route %s fail: 0x%x", FakeIPPoolCIDR, ret)
+		} else {
+			util.LogInfo("tun: Fake-IP pool route %s -> on-link (luid=%x idx=%d)", FakeIPPoolCIDR, luid, index)
+		}
+	}
+
+	// 6. Wait until the adapter has the configured IPv4 address and the best route
+	// to a public destination is via the TUN interface. This guarantees that when
+	// Engine.Start() returns and the watchdog is spawned, probe traffic can
+	// actually flow through TUN instead of failing because routes are not yet
+	// propagated.
+	if tunIPAddr := net.ParseIP(tunIP).To4(); tunIPAddr != nil {
+		if err := waitForTUNReadiness(luid, index, tunIPAddr); err != nil {
+			return fmt.Errorf("wait for TUN readiness: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// prefixLenFromMask returns the prefix length of an IPv4 mask.
+func prefixLenFromMask(mask net.IPMask) int {
+	ones, _ := mask.Size()
+	return ones
+}
+
+// waitForTUNReadiness polls until the TUN adapter owns tunIP and the best route
+// to a public destination (1.1.1.1) is via the TUN interface. This avoids the
+// watchdog being spawned while Windows is still propagating the new routes.
+func waitForTUNReadiness(luid uint64, index uint32, tunIP net.IP) error {
+	const maxWait = 10 * time.Second
+	const interval = 100 * time.Millisecond
+	checkDst := net.ParseIP("1.1.1.1").To4()
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if interfaceHasIPv4(int(index), tunIP) {
+			rluid, ridx := bestRouteInterface(checkDst)
+			if rluid == luid && ridx == index {
+				util.LogInfo("tun: interface %d ready, best route to %s uses TUN", index, checkDst)
+				return nil
+			}
+		}
+		time.Sleep(interval)
+	}
+	return fmt.Errorf("TUN interface %d not ready after %v", index, maxWait)
+}
+
+// interfaceHasIPv4 reports whether the given interface has target as an IPv4
+// unicast address.
+func interfaceHasIPv4(index int, target net.IP) bool {
+	iface, err := net.InterfaceByIndex(index)
+	if err != nil {
+		return false
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok {
+			if ip := ipNet.IP.To4(); ip != nil && ip.Equal(target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bestRouteInterface returns the interface LUID and index of the best route to
+// dst, or zero values if the lookup fails.
+func bestRouteInterface(dst net.IP) (uint64, uint32) {
+	dstAddr := newSockaddrInet(dst)
+	var bestRoute mibIpForwardRow2
+	var bestSrc sockaddrInet
+	ret, _, _ := procGetBestRoute2.Call(
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&dstAddr)),
+		0,
+		uintptr(unsafe.Pointer(&bestRoute[0])),
+		uintptr(unsafe.Pointer(&bestSrc)),
+	)
+	if ret != 0 {
+		return 0, 0
+	}
+	return *(*uint64)(unsafe.Pointer(&bestRoute[0])), *(*uint32)(unsafe.Pointer(&bestRoute[8]))
+}
+
+
+func (r *RouteManager) platformTeardown() {
+	luid, index, err := getInterfaceLUID(r.devName)
+	if err != nil {
+		return
+	}
+
+	// The routes were created with on-link next hop (0.0.0.0). Also clean up the
+	// legacy off-link gateway variant (192.0.2.1) left by older builds.
+	for _, tunGatewayIP := range []net.IP{net.IPv4zero, net.ParseIP("192.0.2.1").To4()} {
+		for _, prefix := range []struct {
+			ip  net.IP
+			len uint8
+		}{
+			{net.ParseIP("0.0.0.0").To4(), 1},
+			{net.ParseIP("128.0.0.0").To4(), 1},
+		} {
+			var fwdRow mibIpForwardRow2
+			fwdRow.init()
+			fwdRow.setInterfaceLuid(luid)
+			fwdRow.setInterfaceIndex(index)
+			fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
+			fwdRow.setNextHop(tunGatewayIP)
+			fwdRow.setMetric(1)
+			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+		}
+	}
+
+	// Delete the Fake-IP pool route for both the current off-link gateway
+	// variant (192.0.2.1) and the legacy on-link variant (0.0.0.0).
+	if _, fakeIPNet, err := net.ParseCIDR(FakeIPPoolCIDR); err == nil {
+		for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
+			var fwdRow mibIpForwardRow2
+			fwdRow.init()
+			fwdRow.setInterfaceLuid(luid)
+			fwdRow.setInterfaceIndex(index)
+			fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
+			fwdRow.setNextHop(nh)
+			fwdRow.setMetric(1)
+			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+		}
 	}
 
 	// Delete interface IP via netsh.

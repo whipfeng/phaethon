@@ -44,6 +44,9 @@ type RouteManager struct {
 	// tunLUID is the phaethon TUN interface LUID (Windows only).
 	// Used to exclude the TUN interface from route lookups.
 	tunLUID uint64
+	// tunIndex is the phaethon TUN interface index. The watchdog uses this to
+	// bind its probe sockets directly to the TUN interface.
+	tunIndex int
 
 	// OriginalDNSServers stores the DNS servers of the original default
 	// interface before TUN redirects DNS, so TUN-internal resolution can use
@@ -60,6 +63,7 @@ type RouteManager struct {
 type RouteSnapshot struct {
 	Applied           bool     `json:"applied"`
 	TUNIP             string   `json:"tunIP"`
+	TUNInterfaceIndex int      `json:"tunInterfaceIndex"`
 	DefaultIface      string   `json:"defaultIface"`
 	DefaultIfaceIndex int      `json:"defaultIfaceIndex"`
 	OriginalGateway   string   `json:"originalGateway"`
@@ -84,6 +88,35 @@ func (r *RouteManager) TUNLUID() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.tunLUID
+}
+
+// SetTUNLUID sets the TUN interface LUID when it is already known (e.g. from
+// Wintun on Windows). A zero value means the platform setup should discover it.
+func (r *RouteManager) SetTUNLUID(luid uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tunLUID = luid
+}
+
+// TUNInterfaceIndex returns the TUN interface index used by the watchdog to bind
+// its probe sockets directly to the TUN adapter. It returns 0 if the index has
+// not been set.
+func (r *RouteManager) TUNInterfaceIndex() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tunIndex
+}
+
+// TUNInterfaceIP returns the IPv4 address assigned to the TUN adapter during
+// Setup. It returns nil if Setup has not been called.
+func (r *RouteManager) TUNInterfaceIP() net.IP {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ip := net.ParseIP(r.tunIP)
+	if ip == nil {
+		return nil
+	}
+	return ip.To4()
 }
 
 // OriginalGateway returns a copy of the original default gateway IP.
@@ -154,6 +187,7 @@ func (r *RouteManager) Snapshot() RouteSnapshot {
 	return RouteSnapshot{
 		Applied:           r.applied,
 		TUNIP:             r.tunIP,
+		TUNInterfaceIndex: r.tunIndex,
 		DefaultIface:      r.DefaultIfaceName,
 		DefaultIfaceIndex: r.DefaultIfaceIndex,
 		OriginalGateway:   gw,

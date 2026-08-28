@@ -34,7 +34,7 @@ tcp-port-range: ""
 
 admin:
   enabled: true
-  addr: 127.0.0.1:9090
+  addr: ":39999"
   token: ""
   auth-enabled: true
   username: ""

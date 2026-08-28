@@ -177,6 +177,31 @@ func (p *FakeIPPool) Release(domain string) {
 	}
 }
 
+// FakeIPStats contains snapshot statistics of the Fake-IP pool.
+type FakeIPStats struct {
+	DomainCount     int `json:"domainCount"`
+	RegisteredCount int `json:"registeredCount"`
+	RealIPCacheCount int `json:"realIPCacheCount"`
+}
+
+// Stats returns a snapshot of the Fake-IP pool statistics.
+func (p *FakeIPPool) Stats() FakeIPStats {
+	p.mu.RLock()
+	domainCount := len(p.domainToIP)
+	realIPCacheCount := len(p.ipToRealIP)
+	p.mu.RUnlock()
+
+	p.regMu.Lock()
+	registeredCount := len(p.registered)
+	p.regMu.Unlock()
+
+	return FakeIPStats{
+		DomainCount:     domainCount,
+		RegisteredCount: registeredCount,
+		RealIPCacheCount: realIPCacheCount,
+	}
+}
+
 func ipToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])

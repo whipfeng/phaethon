@@ -102,11 +102,12 @@ func runWatchdog(parentPID string) {
 	util.LogInfo("tun-watchdog: started, monitoring parent %d", pid)
 
 	const (
-		procInterval     = 3 * time.Second
-		probeInterval    = 3 * time.Second
-		ifaceInterval    = 5 * time.Second
-		probeFailLimit   = 2
-		probeTimeout     = 10 * time.Second
+		procInterval   = 3 * time.Second
+		probeInterval  = 3 * time.Second
+		ifaceInterval  = 5 * time.Second
+		probeFailLimit = 2
+		dnsTimeout     = 5 * time.Second
+		httpTimeout    = 8 * time.Second
 	)
 
 	probeURLs := probeURLsFromEnv()
@@ -117,10 +118,10 @@ func runWatchdog(parentPID string) {
 	}
 
 	// The watchdog verifies real outbound connectivity by sending HTTP probes
-	// through the TUN adapter. DNS resolution goes through the TUN DNS hijacker
-	// which synchronously resolves the real IP, so the engine can dial directly.
+	// through the TUN adapter. DNS resolution uses a pure Go resolver to avoid
+	// OS thread blocking on Windows.
 	probe := func() bool {
-		return tun.ProbeTUNHTTPWithBind(probeTimeout, tunIfIndex, probeURLs)
+		return tun.ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, tunIfIndex, probeURLs)
 	}
 	util.LogInfo("tun-watchdog: using HTTP probe bound to TUN iface %d", tunIfIndex)
 

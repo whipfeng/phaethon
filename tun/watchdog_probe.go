@@ -26,8 +26,8 @@ var DefaultProbeURLs = []string{
 // any of them succeeds. A unique query parameter is appended to each request to
 // bypass caches. The request goes through the system network stack, so when TUN
 // is active it exercises the full TUN → netstack → proxy chain.
-func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
-	return ProbeTUNHTTPWithBind(timeout, 0, probeURLs)
+func ProbeTUNHTTP(dnsTimeout, httpTimeout time.Duration, probeURLs []string) bool {
+	return ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, 0, probeURLs)
 }
 
 // ProbeTUNHTTPWithBind is like ProbeTUNHTTP but forces the HTTP client to bind
@@ -36,22 +36,32 @@ func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
 // routed around TUN by source-address selection or stale DNS state. An ifIndex
 // <= 0 means no binding.
 //
-// DNS resolution uses the system resolver, which goes through the TUN DNS
-// hijacker. The hijacker synchronously resolves the real IP and caches it in
-// the FakeIPPool, so the engine can dial the real IP directly without
-// re-resolving the domain.
-func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string) bool {
-	if timeout <= 0 {
-		timeout = 3 * time.Second
+// DNS resolution uses a pure Go resolver (PreferGo: true) to avoid OS thread
+// blocking on Windows. The resolver sends UDP queries to the system-configured
+// DNS server, which in TUN mode is the TUN DNS hijacker.
+func ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout time.Duration, ifIndex int, probeURLs []string) bool {
+	if dnsTimeout <= 0 {
+		dnsTimeout = 5 * time.Second
+	}
+	if httpTimeout <= 0 {
+		httpTimeout = 8 * time.Second
 	}
 	if len(probeURLs) == 0 {
 		probeURLs = DefaultProbeURLs
 	}
 
+	// Pure Go DNS resolver to avoid OS thread blocking on Windows.
+	// The system DNS is configured to point to the TUN DNS hijacker (192.0.2.2),
+	// so queries will be intercepted by the hijacker.
+	resolver := &net.Resolver{
+		PreferGo:     true,
+		StrictErrors: false,
+	}
+
 	// Bind to the TUN adapter using IP_UNICAST_IF (Windows) or
 	// SO_BINDTODEVICE/IP_BOUND_IF (Linux/Darwin) to force probe traffic
 	// through TUN.
-	dialer := &net.Dialer{Timeout: timeout}
+	dialer := &net.Dialer{Timeout: httpTimeout}
 	if ifIndex > 0 {
 		if ctrl := watchdogControl(ifIndex); ctrl != nil {
 			dialer.Control = ctrl
@@ -66,7 +76,7 @@ func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},
 		},
-		Timeout: timeout,
+		Timeout: httpTimeout,
 		// Avoid following redirects; we only care about reachability.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -84,11 +94,11 @@ func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string
 			continue
 		}
 
-		// Resolve the hostname through the system DNS, which goes through the
-		// TUN DNS hijacker. The hijacker synchronously resolves the real IP and
-		// caches it, so the engine can dial directly without re-resolution.
-		resolveCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip4", u.Hostname())
+		// Resolve the hostname using the pure Go DNS resolver. The query goes to
+		// the system-configured DNS server (TUN DNS hijacker at 192.0.2.2), which
+		// returns a Fake-IP. The engine will handle the Fake-IP connection.
+		resolveCtx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+		ips, err := resolver.LookupIP(resolveCtx, "ip4", u.Hostname())
 		cancel()
 		if err != nil || len(ips) == 0 {
 			util.LogWarn("tun-watchdog: IPv4 resolution failed for %s: %v", u.Hostname(), err)

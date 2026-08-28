@@ -3,10 +3,7 @@
 package tun
 
 import (
-	"fmt"
 	"net"
-	"os/exec"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -108,26 +105,21 @@ func CleanupResidual() {
 			}
 		}
 
-		// Fallback: netsh/route delete catches persistent default routes that
-		// may not be attached to the adapter LUID after the adapter is gone.
-		_ = exec.Command("route", "delete", "198.18.0.0", "mask", "255.254.0.0", "0.0.0.0").Run()
-		_ = exec.Command("route", "delete", "198.18.0.0", "mask", "255.254.0.0", "192.0.2.1").Run()
-		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.1").Run()
-		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.2").Run()
-		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.3").Run()
-		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "198.18.0.1").Run()
-		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "198.18.0.2").Run()
+		// Sweep the full route table for residual TUN routes that may not match
+		// the specific combinations above (e.g. persistent routes detached from
+		// the adapter LUID).
+		deleteResidualRoutesAPI()
 
 		// Remove residual exclusion routes left by a previous abnormal exit.
-	// These routes point at the original physical gateway with metric 1 and
-	// would otherwise make the next Setup() fail with ERROR_OBJECT_ALREADY_EXISTS.
-	if gw, gwLuid, gwIdx, err := getDefaultGatewayWindows(); err == nil {
-		for _, exclude := range DefaultLANExclusions {
-			deleteResidualExclusionRoute(gwLuid, gwIdx, gw, exclude)
+		// These routes point at the original physical gateway with metric 1 and
+		// would otherwise make the next Setup() fail with ERROR_OBJECT_ALREADY_EXISTS.
+		if gw, gwLuid, gwIdx, err := getDefaultGatewayWindows(); err == nil {
+			for _, exclude := range DefaultLANExclusions {
+				deleteResidualExclusionRoute(gwLuid, gwIdx, gw, exclude)
+			}
 		}
-	}
 
-	// Delete interface addresses for current /30 scheme and legacy prefixes.
+		// Delete interface addresses for current /30 scheme and legacy prefixes.
 		for _, ip := range []net.IP{net.ParseIP("192.0.2.2").To4(), net.ParseIP("192.0.2.1").To4(), net.ParseIP("198.18.0.1").To4()} {
 			for _, prefixLen := range []uint8{31, 32, 30, 24, 15} {
 				var addrRow mibUnicastIpAddressRow
@@ -141,40 +133,26 @@ func CleanupResidual() {
 		}
 
 		// Delete any static neighbor entries we added for the virtual peer gateway.
-		_ = exec.Command("netsh", "interface", "ipv4", "delete", "neighbors", "name=phaethontun").Run()
-		_ = deleteStaleNeighbors("192.0.2.1")
-		_ = deleteStaleNeighbors("192.0.2.2")
+		_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.1").To4())
+		_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.2").To4())
 	}
 
 	// Check if phaethontun adapter still exists and remove it. Disabling the
 	// adapter leaves a dead Wintun interface in the system that prevents
 	// subsequent CreateAdapter calls from creating a fresh adapter, so we
 	// explicitly delete it.
-	out, _ := exec.Command("netsh", "interface", "show", "interface").Output()
-	if strings.Contains(string(out), "phaethontun") {
+	if InterfaceExists() {
 		// Release any static IP/DNS first so the removal is clean.
-		_ = exec.Command("netsh", "interface", "ip", "set", "address", "name=phaethontun", "dhcp").Run()
-		_ = exec.Command("netsh", "interface", "ip", "set", "dns", "name=phaethontun", "dhcp").Run()
+		if luid, index, err := getInterfaceLUID("phaethontun"); err == nil {
+			_ = clearInterfaceIPAPI(luid, index)
+			_ = clearInterfaceDNSAPI(luid, index)
+		}
 
 		util.LogInfo("tun: removing orphaned adapter phaethontun")
-		// Try the standard PowerShell cmdlet first. Some systems (e.g. certain
-		// Windows Server / PowerShell 5.1 installs) do not export Remove-NetAdapter,
-		// so we fall back to pnputil /remove-device using the adapter instance ID.
-		psCmd := "Import-Module NetAdapter -ErrorAction SilentlyContinue; " +
-			"if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { " +
-			"Remove-NetAdapter -Name 'phaethontun' -Confirm:$false -ErrorAction Stop " +
-			"} else { throw 'Remove-NetAdapter not available' }"
-		if out2, err := exec.Command("powershell", "-NoProfile", "-Command", psCmd).CombinedOutput(); err != nil {
-			util.LogWarn("tun: Remove-NetAdapter unavailable or failed: %v, %s", err, out2)
-			// Fallback: remove the PnP device by instance ID.
-			if out3, err2 := exec.Command("powershell", "-NoProfile", "-Command",
-				"$d = Get-PnpDevice -Class Net | Where-Object { $_.FriendlyName -like '*Wintun*' }; "+
-				"if ($d) { foreach ($dev in $d) { pnputil /remove-device $dev.InstanceId } }").CombinedOutput(); err2 != nil {
-				util.LogWarn("tun: pnputil remove-device fallback failed: %v, %s", err2, out3)
-				// Last resort: disable the adapter so it does not intercept traffic.
-				if out4, err3 := exec.Command("netsh", "interface", "set", "interface", "phaethontun", "disable").CombinedOutput(); err3 != nil {
-					util.LogWarn("tun: failed to disable adapter fallback: %v, %s", err3, out4)
-				}
+		if err := removeAdapterAPI("phaethontun"); err != nil {
+			util.LogWarn("tun: remove adapter failed: %v", err)
+			if err2 := disableInterfaceAPI("phaethontun"); err2 != nil {
+				util.LogWarn("tun: disable adapter fallback failed: %v", err2)
 			}
 		}
 
@@ -192,10 +170,14 @@ func CleanupResidual() {
 	// The original DNS backup is only available during normal Stop(); after a
 	// crash we restore DHCP so the machine does not remain stuck on 198.18.0.1.
 	if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
-		if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name="+ifaceName, "dhcp").CombinedOutput(); err != nil {
-			util.LogWarn("tun: restore dns for %s fail: %v, %s", ifaceName, err, out)
-		} else {
-			util.LogInfo("tun: restored dns for %s to dhcp", ifaceName)
+		if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
+			if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {
+				if err3 := clearInterfaceDNSAPI(gwLuid, gwIdx); err3 != nil {
+					util.LogWarn("tun: restore dns for %s fail: %v", ifaceName, err3)
+				} else {
+					util.LogInfo("tun: restored dns for %s to dhcp", ifaceName)
+				}
+			}
 		}
 	}
 
@@ -205,24 +187,15 @@ func CleanupResidual() {
 // defaultGatewayInterfaceName returns the interface name of the IPv4 default
 // route, or an empty string if it cannot be determined.
 func defaultGatewayInterfaceName() string {
-	out, err := exec.Command("netsh", "interface", "ip", "show", "route").Output()
+	_, _, idx, err := getDefaultGatewayAPI()
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 || fields[3] != "0.0.0.0/0" {
-			continue
-		}
-		var idx uint32
-		if _, err := fmt.Sscanf(fields[4], "%d", &idx); err != nil {
-			continue
-		}
-		if iface, err := net.InterfaceByIndex(int(idx)); err == nil {
-			return iface.Name
-		}
+	iface, err := net.InterfaceByIndex(int(idx))
+	if err != nil {
+		return ""
 	}
-	return ""
+	return iface.Name
 }
 
 // InterfaceExists reports whether the phaethontun network adapter is currently

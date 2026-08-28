@@ -61,3 +61,23 @@
 - [x] 标记所有 task 为 [x]
 - [x] `git add` 相关文件
 - [x] `git commit` 新提交
+
+## 阶段 4: 纯 Go DNS 解析器与 API 扩展
+
+### Task 4.1: Watchdog DNS 改用纯 Go 实现
+- [x] `tun/watchdog_probe.go` 使用 `net.Resolver{PreferGo: true}` 替代 `net.DefaultResolver`
+- [x] 分离 DNS 和 HTTP 超时参数：`ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, ifIndex, probeURLs)`
+- [x] `main_tun.go` 定义 `dnsTimeout=5s`、`httpTimeout=8s`
+- [x] 更新 `watchdog_probe_test.go` 适配新签名
+- [x] 设计文档新增 3.8 节记录方案
+
+### Task 4.2: Admin API 新增 stats 字段
+- [x] `tun/fakeip.go` 新增 `FakeIPStats` 结构体和 `Stats()` 方法
+- [x] `tun/engine.go` 新增 `TUNStats` 结构体和 `Stats()` 方法（包计数器 + FakeIP 统计）
+- [x] `main.go:buildTUNStatus()` 返回中增加 `stats` 字段
+- [x] 更新设计文档 4.3 节和验收标准
+
+### Task 4.3: 验证
+- [x] `go build ./...` 成功
+- [x] `go vet ./tun` 无警告
+- [x] `go test ./tun` 通过

@@ -48,13 +48,6 @@ func (b *BindContext) BindSocket(c syscall.RawConn, dst net.IP) error {
 	return b.bindSocket(c, dst)
 }
 
-// BindDefaultInterface binds the raw socket to the original default physical
-// interface. It is used for sockets where the destination is not known at
-// creation time (e.g., generic UDP listeners).
-func (b *BindContext) BindDefaultInterface(c syscall.RawConn) error {
-	return b.BindSocket(c, nil)
-}
-
 // DialRouteAware dials addr using a socket bound to the correct physical
 // interface. If no BindContext is active, it falls back to net.DialTimeout.
 func DialRouteAware(network, addr string) (net.Conn, error) {
@@ -122,11 +115,15 @@ func ResolveRouteAware(host string) ([]string, error) {
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: 3 * time.Second,
-				Control: func(network, address string, c syscall.RawConn) error {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			if localAddr := bc.localAddr(network, serverIP); localAddr != nil {
+				// Windows: bind via LocalAddr
+				d.LocalAddr = localAddr
+			} else {
+				// Linux/Darwin: bind via Control
+				d.Control = func(network, address string, c syscall.RawConn) error {
 					return bc.BindSocket(c, serverIP)
-				},
+				}
 			}
 			return d.DialContext(ctx, network, serverAddr)
 		},
@@ -140,15 +137,20 @@ func ResolveRouteAware(host string) ([]string, error) {
 // dialBound dials addr with a socket bound to the interface chosen for dst.
 func dialBound(network, addr string, dst net.IP) (net.Conn, error) {
 	bc := GetGlobalBindContext()
-	d := net.Dialer{
-		Timeout: 30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			if bc == nil {
-				return nil
+	d := net.Dialer{Timeout: 30 * time.Second}
+
+	if bc != nil {
+		if localAddr := bc.localAddr(network, dst); localAddr != nil {
+			// Windows: bind via LocalAddr (syscall.Bind in Control doesn't work)
+			d.LocalAddr = localAddr
+		} else {
+			// Linux/Darwin: bind via Control (SO_BINDTODEVICE/IP_BOUND_IF)
+			d.Control = func(network, address string, c syscall.RawConn) error {
+				return bc.BindSocket(c, dst)
 			}
-			return bc.BindSocket(c, dst)
-		},
+		}
 	}
+
 	return d.Dial(network, addr)
 }
 
@@ -178,22 +180,65 @@ func listenPacketBound(network, laddr string, dst net.IP, bc *BindContext) (net.
 	if network == "" {
 		network = "udp"
 	}
-	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			return bc.BindSocket(c, dst)
-		},
+
+	lc := net.ListenConfig{}
+	var localIP net.IP
+
+	// On Windows, bind via listen address (Control+Bind doesn't work).
+	if bc != nil {
+		if localAddr := bc.localAddr(network, dst); localAddr != nil {
+			// Extract the local IP from the returned address.
+			if udpAddr, ok := localAddr.(*net.UDPAddr); ok {
+				localIP = udpAddr.IP
+			}
+		} else {
+			// Linux/Darwin: bind via Control (SO_BINDTODEVICE/IP_BOUND_IF)
+			lc.Control = func(network, address string, c syscall.RawConn) error {
+				return bc.BindSocket(c, dst)
+			}
+		}
 	}
 
 	// Respect the global UDP port range if configured.
 	if globalUDPPortMin > 0 && globalUDPPortMax >= globalUDPPortMin {
+		// listenPacketWithPortRange expects laddr to be just an IP or empty.
+		if localIP != nil {
+			laddr = localIP.String()
+		}
 		return listenPacketWithPortRange(lc, network, laddr, dst, bc)
 	}
 
+	// For the non-port-range case, handle the address.
 	addr := laddr
-	if addr == "" {
+	if localIP != nil {
+		// Windows: override the IP part with localIP.
+		addr = overrideListenIP(addr, localIP)
+	} else if addr == "" {
 		addr = ":0"
 	}
 	return lc.ListenPacket(context.Background(), network, addr)
+}
+
+// overrideListenIP replaces the IP in laddr with localIP, preserving the port.
+func overrideListenIP(laddr string, localIP net.IP) string {
+	if laddr == "" {
+		return net.JoinHostPort(localIP.String(), "0")
+	}
+
+	host, port, err := net.SplitHostPort(laddr)
+	if err != nil {
+		// laddr might be just an IP or just a port.
+		if net.ParseIP(laddr) != nil {
+			return net.JoinHostPort(localIP.String(), "0")
+		}
+		if _, err := net.LookupPort("udp", laddr); err == nil {
+			return net.JoinHostPort(localIP.String(), laddr)
+		}
+		return laddr
+	}
+
+	_ = host
+	return net.JoinHostPort(localIP.String(), port)
 }
 
 // listenPacketWithPortRange mirrors ListenUDPWithAddr logic but with a custom

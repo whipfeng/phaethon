@@ -54,6 +54,12 @@ func setBoundIf(c syscall.RawConn, idx int, dst net.IP) error {
 	return sockErr
 }
 
+// localAddr returns nil on Darwin. Darwin uses Control-based binding
+// (IP_BOUND_IF), not LocalAddr.
+func (b *BindContext) localAddr(network string, dst net.IP) net.Addr {
+	return nil
+}
+
 // darwinRouteIfaceIndex returns the interface index for the best route to dst,
 // excluding the TUN interface. It shells out to `route -n get`.
 func darwinRouteIfaceIndex(dst net.IP, tunIface string, fallbackIdx int) (int, error) {

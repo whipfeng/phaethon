@@ -4,6 +4,7 @@ package tun
 
 import (
 	"errors"
+	"net"
 	"syscall"
 )
 
@@ -19,5 +20,10 @@ func bindToInterface(ifIndex int) func(network, address string, c syscall.RawCon
 // bind its source address to the TUN host IP if an interface index is provided,
 // but there is no OS-level socket binding available.
 func watchdogControl(ifIndex int) func(network, address string, c syscall.RawConn) error {
+	return nil
+}
+
+// watchdogLocalAddr returns nil on unsupported platforms.
+func watchdogLocalAddr(ifIndex int) net.Addr {
 	return nil
 }

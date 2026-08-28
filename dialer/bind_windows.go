@@ -35,7 +35,18 @@ func newSockaddrInet(ip net.IP) sockaddrInet {
 // mibIpForwardRow2Minimal is just large enough for GetBestRoute2 output.
 type mibIpForwardRow2Minimal [104]byte
 
+// bindSocket is a no-op on Windows. Windows uses localAddr() with
+// net.Dialer.LocalAddr instead of Control+Bind, because syscall.Bind inside
+// Control callbacks fails with "invalid argument" on all interfaces.
 func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
+	return nil
+}
+
+// localAddr returns the local address to bind to for traffic to dst. On
+// Windows, this is the correct way to bind sockets to a specific interface:
+// set the source IP in the dialer/listener, and the routing stack
+// deterministically selects the interface that owns that IP.
+func (b *BindContext) localAddr(network string, dst net.IP) net.Addr {
 	idx := currentDefaultIndex(b)
 
 	if dst != nil {
@@ -55,25 +66,11 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 		return nil
 	}
 
-	var bindErr error
-	err := c.Control(func(fd uintptr) {
-		if ip4 := localIP.To4(); ip4 != nil {
-			sa := &syscall.SockaddrInet4{}
-			copy(sa.Addr[:], ip4)
-			bindErr = syscall.Bind(syscall.Handle(fd), sa)
-		} else if ip16 := localIP.To16(); ip16 != nil {
-			sa := &syscall.SockaddrInet6{}
-			copy(sa.Addr[:], ip16)
-			bindErr = syscall.Bind(syscall.Handle(fd), sa)
-		}
-	})
-	if err != nil {
-		return err
+	// Return the appropriate address type based on network.
+	if network == "udp" || network == "udp4" || network == "udp6" {
+		return &net.UDPAddr{IP: localIP}
 	}
-	if bindErr != nil {
-		util.LogWarn("dialer/bind: bind to %s (iface %d) failed: %v", localIP, idx, bindErr)
-	}
-	return bindErr
+	return &net.TCPAddr{IP: localIP}
 }
 
 // bestRouteIndex returns the interface index for the best route to dst,

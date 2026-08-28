@@ -102,9 +102,16 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 - **WireGuard-go**（[bind_windows.go](https://git.zx2c4.com/wireguard-go/tree/conn/bind_windows.go)）：使用 `IP_UNICAST_IF`（常量 31）绑定 UDP transport socket 到物理网卡，接口索引转为网络字节序后设置。仅绑物理网卡，不绑 Wintun 隧道接口。
 - **微软文档**（[IPPROTO_IP socket options](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options)）：`IP_UNICAST_IF` 描述为"Gets or sets the outgoing interface for sending IPv4 traffic"，输入值为"interface index in network byte order"。从 Vista 到 Windows 10 均支持。**文档未提及虚拟适配器限制。**
 
-**根因推测**（微软未公开内部实现，以下为基于错误码的推测）：
+**根因**：
 
-`connect()` 返回 10049（`WSAEADDRNOTAVAIL`），表明栈在强制指定接口后，无法为该接口构造有效的发送上下文。可能原因：Wintun 作为最小化 L3 NDIS 驱动，缺少某些隐含的 NDIS 能力或路由上下文验证条件。物理网卡和 L2 虚拟适配器（如 TAP-Windows）实现了完整的 NDIS 协议栈，因此不受影响。
+微软未公开 `IP_UNICAST_IF` 的内部实现，失败的具体原因不明。已确认的事实：
+
+- 对物理网卡有效，对 Wintun 无效——这是实测结果，不是推测。
+- 错误码 10049（`WSAEADDRNOTAVAIL`）——`connect()` 阶段失败，`setsockopt` 本身可能成功。
+- shadowsocks-rust [#1266](https://github.com/shadowsocks/shadowsocks-rust/issues/1266) 报告了相同错误码，且 Wintun 的存在甚至可能影响物理网卡的绑定。
+- 微软文档未说明此限制，也未列出适用的适配器类型。
+
+**为什么 Wintun 会失败、是否所有 L3 虚拟适配器都会失败、是否有办法让 `IP_UNICAST_IF` 对 Wintun 生效——均无定论。**
 
 #### 3.4.2 新方案：Windows 改用 `bind()` 到接口本地 IP
 

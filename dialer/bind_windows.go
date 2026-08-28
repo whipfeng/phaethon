@@ -5,7 +5,6 @@ package dialer
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -40,15 +39,10 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 	idx := currentDefaultIndex(b)
 
 	if dst != nil {
-		if cached, ok := cachedRoute(dst, ""); ok {
-			idx = indexFromCache(cached)
+		if bestIdx, err := bestRouteIndex(dst, b.TUNLUID, uint32(idx)); err == nil {
+			idx = int(bestIdx)
 		} else {
-			if bestIdx, err := bestRouteIndex(dst, b.TUNLUID, uint32(idx)); err == nil {
-				idx = int(bestIdx)
-				setCachedRoute(dst, "", strconv.Itoa(idx))
-			} else {
-				util.LogDebug("dialer/bind: route lookup for %s failed: %v", dst, err)
-			}
+			util.LogDebug("dialer/bind: route lookup for %s failed: %v", dst, err)
 		}
 	}
 
@@ -56,31 +50,30 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 		return nil
 	}
 
-	// IP_UNICAST_IF / IPV6_UNICAST_IF expect the interface index in network
-	// byte order (host-to-network-long).
-	idxNet := int(htonl(uint32(idx)))
+	localIP := selectLocalIP(idx, dst)
+	if localIP == nil {
+		return nil
+	}
 
-	var sockErr error
+	var bindErr error
 	err := c.Control(func(fd uintptr) {
-		// For IPv4 destinations or unknown, set IPv4 binding.
-		if dst == nil || dst.To4() != nil {
-			sockErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, 31, idxNet)
-			if sockErr != nil {
-				return
-			}
-		}
-		// For IPv6 destinations or unknown, also set IPv6 binding.
-		if dst == nil || dst.To4() == nil {
-			_ = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IPV6, 31, idxNet)
+		if ip4 := localIP.To4(); ip4 != nil {
+			sa := &syscall.SockaddrInet4{}
+			copy(sa.Addr[:], ip4)
+			bindErr = syscall.Bind(syscall.Handle(fd), sa)
+		} else if ip16 := localIP.To16(); ip16 != nil {
+			sa := &syscall.SockaddrInet6{}
+			copy(sa.Addr[:], ip16)
+			bindErr = syscall.Bind(syscall.Handle(fd), sa)
 		}
 	})
 	if err != nil {
 		return err
 	}
-	if sockErr != nil {
-		util.LogWarn("dialer/bind: IP_UNICAST_IF idx=%d(idxNet=%d) failed: %v", idx, idxNet, sockErr)
+	if bindErr != nil {
+		util.LogWarn("dialer/bind: bind to %s (iface %d) failed: %v", localIP, idx, bindErr)
 	}
-	return sockErr
+	return bindErr
 }
 
 // bestRouteIndex returns the interface index for the best route to dst,

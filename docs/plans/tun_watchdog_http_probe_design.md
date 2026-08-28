@@ -10,17 +10,20 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-08-27 | 初始版本 | Phaethon Dev |
+| v0.2.0 | 2026-08-27 | 统一全平台使用 HTTP probe；移除 DNS probe fallback；仅使用接口索引绑定 | Phaethon Dev |
+| v0.3.0 | 2026-08-28 | Windows 接口绑定方案改为 bind() 到接口本地 IP；新增多 IP 选取规则 | Phaethon Dev |
+| v0.4.0 | 2026-08-28 | 记录已否决的 netstack 出站方案；记录 shell 命令替换 API 的调研结论 | Phaethon Dev |
 
 ## 1. 背景与目标
 
 ### 1.1 当前问题
 
-当前 TUN watchdog（`main_tun.go:runWatchdog()`）通过 `tun.ProbeTUNDNS()` 每 5 秒探测一次 `192.0.2.2:53`，使用随机 `.local` 域名验证本地 DNS hijacker 是否返回 Fake-IP。这种探测只能证明：
+TUN watchdog 需要验证 TUN 是否真正可用，而不仅仅是本地 DNS hijacker 还活着。此前曾考虑保留 DNS probe 作为 Windows 降级方案，但 DNS probe 只能证明：
 
 - 系统 DNS 已指向 TUN adapter
 - netstack 内部 DNS hijacker 还在运行
 
-但它**无法证明** TUN 真的能帮用户连上外网。实际中可能出现：
+它**无法证明** TUN 真的能帮用户连上外网。实际中可能出现：
 
 - 路由表被其他软件覆盖，流量不再走 TUN
 - 代理上游断开，TUN 收了包但发不出去
@@ -33,6 +36,7 @@
 3. TUN 启动后 watchdog 立即开始探测，无需 grace period。
 4. 一旦连续探测失败达到阈值，立即 kill 父进程并清理 TUN 残留。
 5. 保持现有“父进程死亡/接口消失”监控不变。
+6. **统一全平台使用 HTTP probe，不再保留 DNS probe fallback。**
 
 ## 2. 架构调整
 
@@ -79,9 +83,153 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 - 连续失败 2 次即 kill + cleanup
 - 最坏情况下 6 秒内触发清理
 
-### 3.4 保留 DNS probe 作为辅助
+### 3.4 强制探测流量走 TUN（接口绑定方案）
 
-原有 `ProbeTUNDNS()` 不删除，仅作为内部诊断手段；watchdog 的 kill 决策不再依赖它。
+为避免 Windows 源地址选择、DNS 缓存或路由表被其他软件改动后看门狗探测绕过 TUN，watchdog 的 HTTP socket **必须绑定到 TUN 接口**。同样，dialer 的出站 socket 必须绑定到正确的物理接口以防止路由环。
+
+#### 3.4.1 Windows `IP_UNICAST_IF` 调研结论
+
+原方案在 Windows 上使用 `IP_UNICAST_IF`（setsockopt, IPPROTO_IP, optname=31）绑定接口索引。经实测和调研发现：
+
+**实测结果**（`cmd/test_bind/main.go`）：
+
+- 绑定物理网卡（ifIndex=7）：setsockopt 成功，connect 成功 ✅
+- 绑定 Wintun 适配器（ifIndex=3/21）：setsockopt 可能成功，connect() 失败 ❌，错误为 "invalid argument" 或 "connection aborted"
+
+**外部项目验证**：
+
+- **shadowsocks-rust [#1266](https://github.com/shadowsocks/shadowsocks-rust/issues/1266)**：用户在 Windows 10 上使用 `outbound_bind_interface` 绑定物理 WiFi 网卡，系统同时运行 WireGuard（Wintun）。`IP_UNICAST_IF` 设置失败，错误码 **10049**（`WSAEADDRNOTAVAIL`，地址在其上下文中无效）。用户最终用静态路由 `route -p add <server_ip> MASK 255.255.255.255 <gateway>` 绕过。此案例表明 Wintun 的存在甚至可能影响物理网卡的绑定。
+- **WireGuard-go**（[bind_windows.go](https://git.zx2c4.com/wireguard-go/tree/conn/bind_windows.go)）：使用 `IP_UNICAST_IF`（常量 31）绑定 UDP transport socket 到物理网卡，接口索引转为网络字节序后设置。仅绑物理网卡，不绑 Wintun 隧道接口。
+- **微软文档**（[IPPROTO_IP socket options](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options)）：`IP_UNICAST_IF` 描述为"Gets or sets the outgoing interface for sending IPv4 traffic"，输入值为"interface index in network byte order"。从 Vista 到 Windows 10 均支持。**文档未提及虚拟适配器限制。**
+
+**根因推测**（微软未公开内部实现，以下为基于错误码的推测）：
+
+`connect()` 返回 10049（`WSAEADDRNOTAVAIL`），表明栈在强制指定接口后，无法为该接口构造有效的发送上下文。可能原因：Wintun 作为最小化 L3 NDIS 驱动，缺少某些隐含的 NDIS 能力或路由上下文验证条件。物理网卡和 L2 虚拟适配器（如 TAP-Windows）实现了完整的 NDIS 协议栈，因此不受影响。
+
+#### 3.4.2 新方案：Windows 改用 `bind()` 到接口本地 IP
+
+**方案**：获取目标接口的本地 IP 地址，通过 `bind()` 将 socket 源地址绑定到该 IP。Windows 路由栈在出站路由查找时，会以绑定的源 IP 为约束，只考虑拥有该 IP 的接口的路由。
+
+**优势**：
+- 工作在 IP 层，不依赖链路层，对**所有接口类型有效**（物理网卡、Wintun、TAP-Windows、WireGuard NDIS 等）。
+- 只要 IP 唯一属于该接口，出站路径就是确定性的。
+- 无需 fallback 机制——单一方案覆盖所有场景。
+
+**注意**：此方案仅影响 Windows。Linux 的 `SO_BINDTODEVICE` 和 macOS 的 `IP_BOUND_IF` 均按接口名/索引绑定，不依赖链路层，对所有适配器类型有效，无需修改。
+
+#### 3.4.3 多 IP 选取规则（与系统源地址选择一致）
+
+一个接口可能配置了多个 IP 地址（如 IPv4 + IPv6、多个 IPv4 等）。选取逻辑必须与 Windows 系统的源地址选择行为保持一致，避免绑定后路由决策冲突。
+
+Windows 遵循 **RFC 6724**（Default Address Selection for IPv6，IPv4 同理参考）的源地址选择算法。具体规则按优先级排列：
+
+1. **地址族匹配**：IPv4 目标 → 选 IPv4 地址；IPv6 目标 → 选 IPv6 地址；目标未知（dst=nil）→ 优先 IPv4。
+2. **排除不可用地址**：跳过 link-local（`169.254.0.0/16`、`fe80::/10`）、loopback（`127.0.0.0/8`）、tentative、deprecated 地址。
+3. **同子网优先**：如果接口上有多个同族 IP，优先选与目标 IP 在同一子网（最长前缀匹配）的地址。这与系统路由表的行为一致——同子网流量不经过网关，路径最短。
+4. **公共前缀最长优先**：如果都不在同一子网，选与目标 IP 公共前缀最长的地址（RFC 6724 Rule 9）。前缀越长，网络拓扑距离越近。
+5. **都不同则取第一个**：公共前缀长度相同时，取第一个匹配的地址。同一接口上多个同族地址在路由层面等价（都绑定到同一接口），选哪个不影响结果。
+6. **无匹配地址时放弃绑定**：如果接口没有任何合适的 IP，记录 warn 日志，不绑定（退化为纯路由表决策）。
+
+**实现方式**：通过 `net.Interface.Addrs()` 获取接口地址列表，按上述规则排序选取。不使用 `IP_UNICAST_IF`，而是将选中的 IP 设为 `net.Dialer.LocalAddr`，由系统在 socket 创建时完成 `bind()`。
+
+#### 3.4.4 各平台绑定策略汇总
+
+| 平台 | 机制 | 绑定目标 | 适用范围 |
+|------|------|----------|----------|
+| Windows | `bind()` 到接口本地 IP | 目标接口的 IP 地址 | 所有接口类型 |
+| Linux | `SO_BINDTODEVICE` | 接口名（如 `eth0`） | 所有接口类型 |
+| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | 接口索引 | 所有接口类型 |
+
+#### 3.4.5 影响范围
+
+此方案影响两处绑定逻辑：
+
+1. **dialer 出站绑定**（`dialer/bind_windows.go`）：`bindSocket()` 从 `IP_UNICAST_IF` 改为 `bind()` 到接口本地 IP。防止代理出站流量路由环回 TUN。
+2. **watchdog 探测绑定**（`tun/bind_windows.go` + `tun/watchdog_probe.go`）：`watchdogControl()` 从 `IP_UNICAST_IF` 改为 `bind()` 到 TUN 适配器本地 IP。强制探测流量走 TUN。
+
+索引由父进程在创建 TUN 后从 `RouteManager` 获取，通过环境变量 `LAYER_WATCHDOG_TUN_IFINDEX` 传给 watchdog 子进程，避免子进程按名字查询时拿到错误的索引。
+
+### 3.5 废弃 DNS probe
+
+`ProbeTUNDNS()` 已从 watchdog 路径移除。原因：
+
+1. DNS probe 不能验证真实出网能力。
+2. 用户明确要求统一使用 HTTP probe；若 HTTP 探测不通，即说明 TUN 路径存在问题，应当 kill。
+3. 保留 DNS probe 会造成两套探测逻辑，增加维护成本和误杀/漏杀风险。
+
+DNS 相关辅助函数（`buildDNSQuery`、`parseDNSResponseIP` 等）仍保留在 `tun/dns.go` 中，供 DNS hijacker 和测试使用。
+
+### 3.6 已否决方案：netstack 做出站连接
+
+#### 3.6.1 思路
+
+既然已经使用了 gVisor netstack 做入站包处理，能否让 netstack 也负责出站连接？这样 `DialRouteAware` 里的手动路由查询（GetBestRoute2）和接口绑定（IP_UNICAST_IF / bind 到本地 IP）就全部不需要了。
+
+设想的数据流：
+
+```
+netstack 发起出站 TCP 连接
+  → 路由表选 NIC → TUN NIC (channel EP)
+  → WintunSendPacket 注入 IP 包
+  → Windows 在 TUN 适配器上收到包
+  → Windows 系统路由表：目标=真实 IP → 物理网卡出口
+  → 包从物理网卡发出
+  → 响应沿原路返回 → Wintun → netstack 收到
+```
+
+netstack 本身确实具备这些能力：
+- `stack.New()` 创建完整 TCP/IP 栈
+- `SetRouteTable()` 配置路由表
+- `CreateNIC()` 添加网络接口
+- `tcp.NewEndpoint()` + `Connect()` 发起出站连接
+
+#### 3.6.2 否决原因
+
+**路由环风险**：netstack 注入的包从 Wintun 进入系统网络栈，Windows 查路由表时，split-tunnel 路由（`0.0.0.0/1` via TUN）会把包再次送回 TUN 适配器——因为目标地址和应用发的包完全一样，路由结果也一样。
+
+**同接口转发问题**：包从 TUN 进来，路由表又指向 TUN 出去。这属于"同接口转发"，需要：
+1. 开启系统 IP forwarding（`IPEnableRouter`）——系统级设置，影响所有网络行为
+2. Windows 是否有"不从同一接口转发回去"的防环约束——微软未文档化，无法确认
+
+**结论**：该方案依赖未验证的假设（Windows 路由行为 + IP forwarding 副作用），风险不可控。当前架构（netstack 处理入站 → proxy 用系统 socket 出站）是正确的分层，出站路由和接口绑定在 OS 层解决。
+
+#### 3.6.3 延伸讨论：netstack 的路由能力定位
+
+gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"选哪个 NIC"的问题。对于物理网卡的 NIC，其 link endpoint 最终还是要通过 OS socket 发包——绑接口的问题在 OS 层绕不开。netstack 的路由能力适用于纯用户态网络（如容器网络模拟），不适合与 OS 网络栈混合使用的场景。
+
+### 3.7 Windows shell 命令替换为 API 的调研
+
+当前代码中大量使用 `exec.Command` 调用 `netsh`、`route`、`powershell` 等 shell 命令进行路由和接口管理。Windows 的 `iphlpapi.dll` 提供了完整的等价 API，应当逐步替换。
+
+#### 3.7.1 当前 shell 调用清单（Windows）
+
+| 文件 | 操作 | 当前命令 | 可替代的 API |
+|------|------|----------|-------------|
+| `tun/route_windows.go` | 设置 IP 地址 | `netsh interface ip set address` | `SetIfEntry` / Wintun API |
+| `tun/route_windows.go` | 设置接口 metric | `netsh interface ipv4 set interface` | `SetIpInterfaceEntry` |
+| `tun/route_windows.go` | 查询接口信息 | `netsh interface ipv4 show interfaces` | `GetIfEntry2` |
+| `tun/route_windows.go` | 删除 ARP 邻居 | `netsh interface ipv4 delete neighbors` | `DeleteIpNetEntry2` |
+| `tun/route_windows.go` | 禁用接口 | `powershell Disable-NetAdapter` | `SetIfEntry` (admin status down) |
+| `tun/route_api_windows.go` | 查询路由表 | `netsh interface ip show route` | `GetIpForwardTable2` |
+| `tun/cleanup_windows.go` | 删除路由 | `route delete` | `DeleteIpForwardEntry2` |
+| `tun/cleanup_windows.go` | 重置 DNS | `netsh interface ip set dns dhcp` | `SetInterfaceDnsSettings` |
+| `tun/cleanup_windows.go` | 禁用接口 | `powershell` + `netsh` | `SetIfEntry` |
+| `tun/dns_system_windows.go` | 设置 DNS | `netsh interface ip set dns` | `SetInterfaceDnsSettings`（Win10 1809+） |
+| `tun/dns_system_windows.go` | 设置 metric | `netsh interface ipv4 set interface` | `SetIpInterfaceEntry` |
+
+#### 3.7.2 优先级
+
+1. **高优先级**：路由增删（`CreateIpForwardEntry2` / `DeleteIpForwardEntry2`）——TUN 启动/清理的核心路径，当前用 `route` 命令
+2. **高优先级**：接口 metric 设置（`SetIpInterfaceEntry`）——影响路由优先级，当前用 `netsh`
+3. **中优先级**：DNS 设置（`SetInterfaceDnsSettings`）——需要 Win10 1809+，低版本需 fallback
+4. **低优先级**：接口查询/禁用——频率低，影响小
+
+#### 3.7.3 其他平台
+
+- **macOS**：`route`、`ifconfig`、`networksetup`——Unix 系没有等价用户态 API，shell 调用是标准做法，不改
+- **Linux**：`ip link`、`resolvectl`、`nmcli`——同上，不改
+- **`dialer/bind_darwin.go`**：`route -n get` 查路由——macOS 无等价 API，不改
+- **`util/browser.go`**：`rundll32`/`open`/`xdg-open`——打开浏览器，标准做法，不改
 
 ## 4. 接口/交互调整
 
@@ -101,7 +249,17 @@ tun:
   probe-urls: []
 ```
 
-### 4.2 Admin API 状态字段
+### 4.2 Watchdog 环境变量
+
+父进程启动 watchdog 子进程时传递：
+
+| 环境变量 | 说明 |
+|----------|------|
+| `LAYER_WATCHDOG_PID` | 父进程 PID |
+| `LAYER_WATCHDOG_PROBE_URLS` | 分号分隔的探测 URL 列表 |
+| `LAYER_WATCHDOG_TUN_IFINDEX` | 当前 TUN 适配器接口索引，用于 socket 绑定 |
+
+### 4.3 Admin API 状态字段
 
 `GET /api/tun` 返回中增加：
 
@@ -116,21 +274,97 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 ## 5. 迁移与兼容性
 
 - 未配置 `probe-urls` 时使用默认候选列表，行为不变。
-- 显式配置 `probe-urls: []` 时，回退到原有 DNS probe 模式（保持兼容）。
 - 现有 watchdog 的时间参数和 kill 逻辑调整，但清理动作不变。
 
-## 6. 风险与回退
+## 6. 验证结果与已知问题
+
+### 6.1 当前验证结果
+
+- `go build ./...`、`go vet ./tun`、`go test ./tun` 全部通过。
+- Windows 环境下关闭 Proxifier 后，HTTP probe 因 TUN 适配器未能正确创建而失败，watchdog 在连续 2 次失败后正确 kill 父进程并清理残留。
+- 这表明 watchdog 逻辑符合预期：HTTP 探测不通 → 认为 TUN 不可用 → 触发清理。
+
+### 6.2 看门狗探测失败根因分析（已修复）
+
+**问题现象**：TUN 启动后，看门狗 HTTP 探测持续失败，导致看门狗杀掉 phaethon 进程。
+
+**根因分析**：
+
+1. 看门狗通过系统 DNS 解析探测域名（如 www.msftconnecttest.com）
+2. 系统 DNS 已被重定向到 TUN DNS 劫持器（192.0.2.2）
+3. TUN DNS 返回 Fake-IP（如 198.18.0.5）
+4. 看门狗连接到 Fake-IP，数据包进入 TUN
+5. 引擎 `handleConn()` 收到连接，从 Fake-IP 还原出原始域名
+6. 引擎调用 `DialRouteAware()` → `ResolveRouteAware()` **再次解析域名**
+7. 二次解析通过原始 DNS 服务器，超时时间为 5 秒
+8. 看门狗探测超时时间为 3 秒
+9. **5 秒 DNS 超时 > 3 秒探测超时**，导致探测失败
+
+**修复方案**（已实现）：
+
+看门狗直接通过物理接口解析 DNS，绕过 TUN DNS 劫持器：
+
+1. 看门狗使用 `resolveDirect()` 通过物理接口解析 DNS（使用 8.8.8.8、114.114.114.114 等公共 DNS）
+2. 得到真实 IP 后，构建 URL 时直接使用 IP（而非域名）
+3. 设置 HTTP Host 头为原始域名（保持虚拟主机功能）
+4. HTTP 连接到真实 IP，通过 TUN 转发
+5. 引擎收到真实 IP 连接，`LookupDomain()` 返回空，直接转发
+
+**修改的文件**：
+
+- `tun/watchdog_probe.go`：新增 `resolveDirect()` 函数，修改 `ProbeTUNHTTPWithBind()` 接受物理接口索引
+- `tun/engine.go`：新增 `PhysicalInterfaceIndex()` 方法
+- `main_tun.go`：新增 `physicalIfIndexFromEnv()`，传递物理接口索引给看门狗
+- `main_tun_windows.go` / `main_tun_nows.go`：`spawnWatchdog()` 传递物理接口索引
+
+**环境变量**：
+
+| 环境变量 | 说明 |
+|----------|------|
+| `LAYER_WATCHDOG_PHYSICAL_IFINDEX` | 物理接口索引，用于 DNS 查询绑定，绕过 TUN 分流路由 |
+
+### 6.3 待修复的 TUN 问题
+
+当前观察到一个独立的 TUN 启动问题：Wintun 适配器在禁用/清理后，再次启动时未能重新出现在系统接口列表中（`netsh interface show interface` 中无 `phaethontun`），导致 TUN 实际上未生效。该问题需要在 TUN 适配器创建/恢复逻辑中单独修复；watchdog 的逻辑本身已经完成。
+
+### 6.4 后续优化方向：TUN DNS 同步解析真实 IP
+
+**当前问题**：
+
+看门狗的修复方案只测试了 TUN 的**包转发能力**，没有测试 TUN 的 **DNS 劫持能力**。对于正常应用，引擎收到 Fake-IP 连接后仍需二次解析域名，存在延迟。
+
+**优化方案**：
+
+在 TUN DNS 劫持器中同步解析真实 IP，避免引擎二次解析：
+
+1. TUN DNS 劫持器收到查询（如 www.example.com）
+2. **同步**通过物理接口解析真实 IP（阻塞，和正常 DNS 一样）
+3. 存储映射：Fake-IP → 域名 → 真实 IP
+4. 返回 Fake-IP 给应用
+5. 应用连接到 Fake-IP → 进入 TUN
+6. 引擎收到连接，直接用缓存的真实 IP 连接，无需再次解析
+
+**好处**：
+
+- DNS 解析只发生一次（在 TUN DNS 劫持器中）
+- 引擎不需要再次解析，消除二次解析延迟
+- 流程和正常 DNS 一样，只是多了一层 Fake-IP 映射
+- 看门狗可以同时测试 TUN DNS 劫持和包转发能力
+
+## 7. 风险与回退
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 默认探测地址在特定网络下不可达 | 误杀 | 多地址 fallback + 用户可配置 |
 | HTTP 探测频率过高 | 低 | 间隔 3 秒，请求量极小 |
-| 用户未配置且所有默认地址失效 | 高 | 提供显式关闭 HTTP probe 的兼容模式 |
+| 看门狗探测绕过 TUN（DNS/路由缓存、源地址选择） | 漏杀 | bind() 到接口本地 IP，强制流量走对应接口 |
+| TUN 适配器被异常删除 | 漏杀/残留 | 接口本地 IP 失效导致绑定失败，探测直接失败 + 接口消失监控兜底 |
+| Windows HTTP probe 受 TUN 实现 bug 影响失败 | 误杀 | 按用户要求，HTTP 不通即视为 TUN 故障，触发清理 |
 
-## 7. 验收标准
+## 8. 验收标准
 
-- [ ] `go build ./...`、`go vet ./tun`、`go test ./tun` 全部通过
-- [ ] 正常 TUN 启动后，watchdog 立即开始 HTTP 探测
-- [ ] 模拟代理上游断开：连续 2 次失败后 watchdog kill 父进程并清理 TUN
+- [x] `go build ./...`、`go vet ./tun`、`go test ./tun` 全部通过
+- [x] 正常 TUN 启动后，watchdog 立即开始 HTTP 探测
+- [x] TUN 不可用时，连续 2 次失败后 watchdog kill 父进程并清理 TUN
 - [ ] 用户自定义 `probe-urls` 后，watchdog 使用自定义地址
 - [ ] Admin API `/api/tun` 正确返回 `probeURLs` 和 `probeFailures`

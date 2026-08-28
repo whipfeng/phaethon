@@ -3,7 +3,6 @@
 package tun
 
 import (
-	"net"
 	"syscall"
 )
 
@@ -28,10 +27,4 @@ func bindToInterface(ifIndex int) func(network, address string, c syscall.RawCon
 // works with the TUN virtual gateway.
 func watchdogControl(ifIndex int) func(network, address string, c syscall.RawConn) error {
 	return bindToInterface(ifIndex)
-}
-
-// watchdogLocalAddr returns nil on Darwin. Darwin uses Control-based binding
-// (IP_BOUND_IF), not LocalAddr.
-func watchdogLocalAddr(ifIndex int) net.Addr {
-	return nil
 }

@@ -108,12 +108,6 @@ func linuxRouteIface(dst net.IP, tunIface, defaultIface string) (string, error) 
 	return bestIface, nil
 }
 
-// localAddr returns nil on Linux. Linux uses Control-based binding
-// (SO_BINDTODEVICE), not LocalAddr.
-func (b *BindContext) localAddr(network string, dst net.IP) net.Addr {
-	return nil
-}
-
 // ipToUint32LE converts an IPv4 address to a uint32 in the same byte order as
 // /proc/net/route (host / little-endian).
 func ipToUint32LE(ip net.IP) uint32 {

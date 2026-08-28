@@ -48,17 +48,14 @@ func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string
 		probeURLs = DefaultProbeURLs
 	}
 
-	// Bind to the TUN adapter's local IP to force probe traffic through TUN.
-	// On Windows, this uses net.Dialer.LocalAddr (syscall.Bind in Control
-	// doesn't work). On Linux/Darwin, it uses Control-based binding
-	// (SO_BINDTODEVICE/IP_BOUND_IF).
+	// Bind to the TUN adapter using IP_UNICAST_IF (Windows) or
+	// SO_BINDTODEVICE/IP_BOUND_IF (Linux/Darwin) to force probe traffic
+	// through TUN.
 	dialer := &net.Dialer{Timeout: timeout}
 	if ifIndex > 0 {
 		if ctrl := watchdogControl(ifIndex); ctrl != nil {
-			// Linux/Darwin: bind via Control
 			dialer.Control = ctrl
 		}
-		// Windows: temporarily skip binding to test split-tunnel routes
 	}
 
 	client := &http.Client{

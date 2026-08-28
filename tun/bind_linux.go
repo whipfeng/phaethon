@@ -33,9 +33,3 @@ func bindToInterface(ifIndex int) func(network, address string, c syscall.RawCon
 func watchdogControl(ifIndex int) func(network, address string, c syscall.RawConn) error {
 	return bindToInterface(ifIndex)
 }
-
-// watchdogLocalAddr returns nil on Linux. Linux uses Control-based binding
-// (SO_BINDTODEVICE), not LocalAddr.
-func watchdogLocalAddr(ifIndex int) net.Addr {
-	return nil
-}

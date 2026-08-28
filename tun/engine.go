@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -102,6 +103,45 @@ func (e *Engine) RouteSnapshot() RouteSnapshot {
 	return rm.Snapshot()
 }
 
+// TUNInterfaceIndex returns the OS interface index of the phaethon TUN adapter.
+// The watchdog uses this to bind its HTTP probe sockets directly to the TUN
+// interface so probe traffic cannot bypass TUN.
+func (e *Engine) TUNInterfaceIndex() int {
+	e.mu.Lock()
+	rm := e.routeMgr
+	e.mu.Unlock()
+	if rm == nil {
+		return 0
+	}
+	return rm.TUNInterfaceIndex()
+}
+
+// PhysicalInterfaceIndex returns the OS interface index of the original default
+// physical interface (before TUN was activated). The watchdog uses this to bind
+// DNS queries to the physical interface, bypassing TUN split-tunnel routes.
+func (e *Engine) PhysicalInterfaceIndex() int {
+	e.mu.Lock()
+	rm := e.routeMgr
+	e.mu.Unlock()
+	if rm == nil {
+		return 0
+	}
+	return rm.DefaultIfaceIndex
+}
+
+// TUNInterfaceIP returns the IPv4 address assigned to the phaethon TUN adapter.
+// The watchdog uses this as the source address for its HTTP probes so Windows
+// routes the packets into the Wintun ring.
+func (e *Engine) TUNInterfaceIP() net.IP {
+	e.mu.Lock()
+	rm := e.routeMgr
+	e.mu.Unlock()
+	if rm == nil {
+		return nil
+	}
+	return rm.TUNInterfaceIP()
+}
+
 // Start brings up the TUN device, configures routes, and starts netstack.
 func (e *Engine) Start() error {
 	e.mu.Lock()
@@ -169,6 +209,11 @@ func (e *Engine) Start() error {
 	//    outbound sockets are bound to the correct physical interface by the
 	//    dialer package, so proxy traffic does not loop back into TUN.
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
+	// On Windows the Wintun adapter LUID is available immediately; passing it in
+	// avoids waiting for the TCP/IP stack to register the adapter by name.
+	if luidGetter, ok := dev.(interface{ LUID() uint64 }); ok {
+		e.routeMgr.SetTUNLUID(luidGetter.LUID())
+	}
 	e.routeMgr.SetExclusions(DefaultLANExclusions)
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
@@ -382,6 +427,10 @@ func (e *Engine) readLoop() {
 			case <-e.closeCh:
 				return
 			default:
+				if errors.Is(err, ErrSessionClosed) {
+					util.LogError("tun: session closed, stopping read loop: %v", err)
+					return
+				}
 				util.LogWarn("tun: read error: %v", err)
 				continue
 			}
@@ -543,15 +592,24 @@ func (e *Engine) acceptUDP() {
 // handleUDP relays UDP datagrams between netstack and the real network via proxy or direct.
 // It preserves datagram boundaries by reading/writing one datagram at a time.
 func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
-	// Check if this is a Fake-IP: restore original domain
-	if domain := e.fakeIP.LookupDomain(dstAddr); domain != "" {
-		util.LogInfo("tun: udp fake-ip %s -> %s", dstAddr, domain)
-		dstAddr = domain
+	// Check if this is a Fake-IP: restore original domain and cached real IP.
+	var domain string
+	var realIP net.IP
+	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
+		domain = d
+		realIP = e.fakeIP.LookupRealIP(net.ParseIP(dstAddr))
+		util.LogInfo("tun: udp fake-ip %s -> %s (real=%v)", dstAddr, domain, realIP)
 	}
 
 	connID := util.NextConnID()
 
-	req := config.NewConnectRequest(dstAddr, dstPort)
+	// Use domain for rule matching (so domain-based rules work).
+	matchAddr := dstAddr
+	if domain != "" {
+		matchAddr = domain
+	}
+
+	req := config.NewConnectRequest(matchAddr, dstPort)
 	var proxy *config.Proxy
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
@@ -576,7 +634,12 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 			return
 		}
 	} else {
-		targetConn, err = dialer.ListenPacketBoundTo("udp", "", net.ParseIP(resolvedAddr))
+		// Direct dial: prefer cached real IP to avoid re-resolution.
+		dialIP := net.ParseIP(resolvedAddr)
+		if realIP != nil {
+			dialIP = realIP
+		}
+		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
 			return
@@ -584,7 +647,12 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	}
 	defer targetConn.Close()
 
-	dstUDPAddr := &net.UDPAddr{IP: net.ParseIP(resolvedAddr), Port: resolvedPort}
+	// Use real IP for the destination address if available.
+	finalIP := net.ParseIP(resolvedAddr)
+	if realIP != nil {
+		finalIP = realIP
+	}
+	dstUDPAddr := &net.UDPAddr{IP: finalIP, Port: resolvedPort}
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
@@ -632,15 +700,24 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	defer conn.Close()
 
-	// Check if this is a Fake-IP: restore original domain
-	if domain := e.fakeIP.LookupDomain(dstAddr); domain != "" {
-		util.LogInfo("tun: fake-ip %s -> %s", dstAddr, domain)
-		dstAddr = domain
+	// Check if this is a Fake-IP: restore original domain and cached real IP.
+	var domain string
+	var realIP net.IP
+	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
+		domain = d
+		realIP = e.fakeIP.LookupRealIP(net.ParseIP(dstAddr))
+		util.LogInfo("tun: fake-ip %s -> %s (real=%v)", dstAddr, domain, realIP)
 	}
 
 	connID := util.NextConnID()
 
-	req := config.NewConnectRequest(dstAddr, dstPort)
+	// Use domain for rule matching (so domain-based rules work).
+	matchAddr := dstAddr
+	if domain != "" {
+		matchAddr = domain
+	}
+
+	req := config.NewConnectRequest(matchAddr, dstPort)
 	var proxy *config.Proxy
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
@@ -666,9 +743,14 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			return
 		}
 	} else {
-		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(resolvedAddr, fmt.Sprintf("%d", resolvedPort)))
+		// Direct dial: prefer cached real IP to avoid re-resolution.
+		dialAddr := resolvedAddr
+		if realIP != nil {
+			dialAddr = realIP.String()
+		}
+		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
-			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
+			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
 			return
 		}
 	}

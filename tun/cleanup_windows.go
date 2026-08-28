@@ -7,6 +7,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"time"
 	"unsafe"
 
 	"phaethon/util"
@@ -92,8 +93,25 @@ func CleanupResidual() {
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 		}
 
+		// Delete Fake-IP pool route for both the current off-link gateway
+		// variant (192.0.2.1) and the legacy on-link variant (0.0.0.0).
+		if _, fakeIPNet, err := net.ParseCIDR(FakeIPPoolCIDR); err == nil {
+			for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
+				var fwdRow mibIpForwardRow2
+				fwdRow.init()
+				fwdRow.setInterfaceLuid(luid)
+				fwdRow.setInterfaceIndex(index)
+				fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
+				fwdRow.setNextHop(nh)
+				fwdRow.setMetric(1)
+				procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+			}
+		}
+
 		// Fallback: netsh/route delete catches persistent default routes that
 		// may not be attached to the adapter LUID after the adapter is gone.
+		_ = exec.Command("route", "delete", "198.18.0.0", "mask", "255.254.0.0", "0.0.0.0").Run()
+		_ = exec.Command("route", "delete", "198.18.0.0", "mask", "255.254.0.0", "192.0.2.1").Run()
 		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.1").Run()
 		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.2").Run()
 		_ = exec.Command("route", "delete", "0.0.0.0", "mask", "0.0.0.0", "192.0.2.3").Run()
@@ -128,18 +146,46 @@ func CleanupResidual() {
 		_ = deleteStaleNeighbors("192.0.2.2")
 	}
 
-	// Check if phaethontun adapter still exists and disable/remove it.
+	// Check if phaethontun adapter still exists and remove it. Disabling the
+	// adapter leaves a dead Wintun interface in the system that prevents
+	// subsequent CreateAdapter calls from creating a fresh adapter, so we
+	// explicitly delete it.
 	out, _ := exec.Command("netsh", "interface", "show", "interface").Output()
 	if strings.Contains(string(out), "phaethontun") {
-		util.LogInfo("tun: disabling orphaned adapter phaethontun")
-		if out2, err := exec.Command("netsh", "interface", "set", "interface", "phaethontun", "disable").CombinedOutput(); err != nil {
-			util.LogWarn("tun: failed to disable adapter: %v, %s", err, out2)
-		}
-	}
+		// Release any static IP/DNS first so the removal is clean.
+		_ = exec.Command("netsh", "interface", "ip", "set", "address", "name=phaethontun", "dhcp").Run()
+		_ = exec.Command("netsh", "interface", "ip", "set", "dns", "name=phaethontun", "dhcp").Run()
 
-	// Reset TUN interface DNS to DHCP
-	if out, err := exec.Command("netsh", "interface", "ip", "set", "dns", "name=phaethontun", "dhcp").CombinedOutput(); err != nil {
-		util.LogWarn("tun: dns reset fail: %v, %s", err, out)
+		util.LogInfo("tun: removing orphaned adapter phaethontun")
+		// Try the standard PowerShell cmdlet first. Some systems (e.g. certain
+		// Windows Server / PowerShell 5.1 installs) do not export Remove-NetAdapter,
+		// so we fall back to pnputil /remove-device using the adapter instance ID.
+		psCmd := "Import-Module NetAdapter -ErrorAction SilentlyContinue; " +
+			"if (Get-Command Remove-NetAdapter -ErrorAction SilentlyContinue) { " +
+			"Remove-NetAdapter -Name 'phaethontun' -Confirm:$false -ErrorAction Stop " +
+			"} else { throw 'Remove-NetAdapter not available' }"
+		if out2, err := exec.Command("powershell", "-NoProfile", "-Command", psCmd).CombinedOutput(); err != nil {
+			util.LogWarn("tun: Remove-NetAdapter unavailable or failed: %v, %s", err, out2)
+			// Fallback: remove the PnP device by instance ID.
+			if out3, err2 := exec.Command("powershell", "-NoProfile", "-Command",
+				"$d = Get-PnpDevice -Class Net | Where-Object { $_.FriendlyName -like '*Wintun*' }; "+
+				"if ($d) { foreach ($dev in $d) { pnputil /remove-device $dev.InstanceId } }").CombinedOutput(); err2 != nil {
+				util.LogWarn("tun: pnputil remove-device fallback failed: %v, %s", err2, out3)
+				// Last resort: disable the adapter so it does not intercept traffic.
+				if out4, err3 := exec.Command("netsh", "interface", "set", "interface", "phaethontun", "disable").CombinedOutput(); err3 != nil {
+					util.LogWarn("tun: failed to disable adapter fallback: %v, %s", err3, out4)
+				}
+			}
+		}
+
+		// Wait until the adapter is actually gone; CreateAdapter can fail or
+		// attach to a stale adapter if we proceed too quickly.
+		for i := 0; i < 150; i++ {
+			if _, _, err := getInterfaceLUID("phaethontun"); err != nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
 	// Reset physical interface DNS to DHCP as a crash-recovery best effort.

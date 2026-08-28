@@ -1,12 +1,13 @@
 package tun
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
 	"phaethon/util"
@@ -26,6 +27,20 @@ var DefaultProbeURLs = []string{
 // bypass caches. The request goes through the system network stack, so when TUN
 // is active it exercises the full TUN → netstack → proxy chain.
 func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
+	return ProbeTUNHTTPWithBind(timeout, 0, probeURLs)
+}
+
+// ProbeTUNHTTPWithBind is like ProbeTUNHTTP but forces the HTTP client to bind
+// its outgoing TCP sockets to the given TUN network interface index. This
+// ensures probe traffic egresses through the TUN adapter and cannot be silently
+// routed around TUN by source-address selection or stale DNS state. An ifIndex
+// <= 0 means no binding.
+//
+// DNS resolution uses the system resolver, which goes through the TUN DNS
+// hijacker. The hijacker synchronously resolves the real IP and caches it in
+// the FakeIPPool, so the engine can dial the real IP directly without
+// re-resolving the domain.
+func ProbeTUNHTTPWithBind(timeout time.Duration, ifIndex int, probeURLs []string) bool {
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
@@ -33,7 +48,18 @@ func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
 		probeURLs = DefaultProbeURLs
 	}
 
+	// No explicit interface binding needed: system DNS is redirected to the TUN
+	// DNS hijacker, and split-tunnel routes ensure all traffic goes through TUN.
+	dialer := &net.Dialer{Timeout: timeout}
+
 	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Force IPv4 so interface-index binding (IP_UNICAST_IF, etc.) is
+				// unambiguous and does not depend on dual-stack socket behavior.
+				return dialer.DialContext(ctx, "tcp4", addr)
+			},
+		},
 		Timeout: timeout,
 		// Avoid following redirects; we only care about reachability.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -45,16 +71,52 @@ func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
 		if rawURL == "" {
 			continue
 		}
-		probeURL := rawURL
-		if strings.Contains(probeURL, "?") {
-			probeURL = fmt.Sprintf("%s&tun_probe=%d", probeURL, rand.Int63())
-		} else {
-			probeURL = fmt.Sprintf("%s?tun_probe=%d", probeURL, rand.Int63())
+
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			util.LogWarn("tun-watchdog: invalid probe URL %q: %v", rawURL, err)
+			continue
 		}
 
-		resp, err := client.Get(probeURL)
+		// Resolve the hostname through the system DNS, which goes through the
+		// TUN DNS hijacker. The hijacker synchronously resolves the real IP and
+		// caches it, so the engine can dial directly without re-resolution.
+		resolveCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip4", u.Hostname())
+		cancel()
+		if err != nil || len(ips) == 0 {
+			util.LogWarn("tun-watchdog: IPv4 resolution failed for %s: %v", u.Hostname(), err)
+			continue
+		}
+		ip := ips[0].To4()
+		if ip == nil {
+			util.LogWarn("tun-watchdog: no IPv4 address for %s", u.Hostname())
+			continue
+		}
+
+		// Preserve the original Host header for virtual hosting; replace the
+		// URL host with the resolved Fake-IP so the dialer does not do DNS.
+		originalHost := u.Host
+		port := u.Port()
+		if port == "" {
+			port = "80"
+		}
+		u.Host = net.JoinHostPort(ip.String(), port)
+
+		q := u.Query()
+		q.Set("tun_probe", fmt.Sprintf("%d", rand.Int63()))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 		if err != nil {
-			util.LogDebug("tun-watchdog: HTTP probe failed for %s: %v", rawURL, err)
+			util.LogWarn("tun-watchdog: failed to build request for %s: %v", rawURL, err)
+			continue
+		}
+		req.Host = originalHost
+
+		resp, err := client.Do(req)
+		if err != nil {
+			util.LogWarn("tun-watchdog: HTTP probe failed for %s: %v", rawURL, err)
 			continue
 		}
 
@@ -76,53 +138,3 @@ func ProbeTUNHTTP(timeout time.Duration, probeURLs []string) bool {
 	return false
 }
 
-// ProbeTUNDNS sends a DNS A query to the TUN adapter DNS proxy (192.0.2.2:53)
-// from the calling process and returns true when a valid Fake-IP response is
-// received. It is intended for use as an auxiliary diagnostic; the watchdog now
-// prefers ProbeTUNHTTP for kill decisions because a local DNS response does not
-// prove real outbound connectivity.
-func ProbeTUNDNS(timeout time.Duration) bool {
-	if timeout <= 0 {
-		timeout = 3 * time.Second
-	}
-
-	// Use a unique domain per probe so the system DNS cache cannot satisfy the
-	// query and each probe genuinely exercises the TUN DNS proxy.
-	domain := fmt.Sprintf("tun-health-%d.local", rand.Int63())
-	txID := uint16(rand.Intn(65536))
-	query := buildDNSQuery(domain, txID)
-
-	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 53}
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		util.LogWarn("tun-watchdog: dial DNS probe failed: %v", err)
-		return false
-	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		util.LogWarn("tun-watchdog: set deadline failed: %v", err)
-		return false
-	}
-
-	if _, err := conn.Write(query); err != nil {
-		util.LogWarn("tun-watchdog: DNS probe write failed: %v", err)
-		return false
-	}
-
-	resp := make([]byte, 512)
-	n, err := conn.Read(resp)
-	if err != nil {
-		util.LogWarn("tun-watchdog: DNS probe read failed: %v", err)
-		return false
-	}
-
-	ip := parseDNSResponseIP(resp[:n])
-	if ip == nil {
-		util.LogWarn("tun-watchdog: DNS probe response invalid")
-		return false
-	}
-
-	util.LogDebug("tun-watchdog: DNS probe ok, %s -> %s", domain, ip)
-	return true
-}

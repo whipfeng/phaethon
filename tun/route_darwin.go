@@ -17,6 +17,11 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	if out, err := exec.Command("ifconfig", r.devName, "inet", tunIP, tunIP, "netmask", mask, "up").CombinedOutput(); err != nil {
 		return fmt.Errorf("ifconfig %s: %v, %s", r.devName, err, out)
 	}
+	if iface, err := net.InterfaceByName(r.devName); err == nil {
+		r.tunIndex = iface.Index
+	} else {
+		util.LogWarn("tun: failed to get index for %s: %v", r.devName, err)
+	}
 
 	// 1. Detect original default gateway and interface
 	gw, ifaceName, err := getDefaultGatewayDarwin()

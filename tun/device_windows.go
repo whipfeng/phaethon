@@ -3,8 +3,10 @@
 package tun
 
 import (
+	"errors"
 	"fmt"
 
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
 
@@ -41,6 +43,13 @@ func (t *windowsTUN) Name() string { return t.name }
 func (t *windowsTUN) GUID() string { return "" }
 func (t *windowsTUN) MTU() int     { return t.mtu }
 
+// LUID returns the Wintun adapter's interface LUID. It is available immediately
+// after CreateAdapter and avoids the retry loop otherwise needed for the TCP/IP
+// stack to register the adapter name.
+func (t *windowsTUN) LUID() uint64 {
+	return t.adapter.LUID()
+}
+
 func (t *windowsTUN) Close() error {
 	t.session.End()
 	return t.adapter.Close()
@@ -52,6 +61,12 @@ func (t *windowsTUN) Read(buf []byte) (int, error) {
 		// No more data is a normal condition for non-blocking read.
 		if err.Error() == "No more data is available." {
 			return 0, nil
+		}
+		// ERROR_HANDLE_EOF ("Reached the end of the file.") means the Wintun
+		// session has ended, usually because the adapter was removed. Use a
+		// portable sentinel so the read loop exits cleanly.
+		if errors.Is(err, windows.ERROR_HANDLE_EOF) {
+			return 0, ErrSessionClosed
 		}
 		return 0, err
 	}

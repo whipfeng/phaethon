@@ -190,6 +190,48 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 	}
 
+	// 7. Verify routes are actually in the routing table. If not, the interface
+	// might have been recreated with a different index, making our routes invalid.
+	if err := verifyRoutes(index); err != nil {
+		return fmt.Errorf("route verification failed: %w", err)
+	}
+
+	return nil
+}
+
+// verifyRoutes checks that the split-tunnel routes are actually present in the
+// routing table pointing to the expected interface index.
+func verifyRoutes(expectedIndex uint32) error {
+	// Check if the interface still exists with the expected index
+	iface, err := net.InterfaceByIndex(int(expectedIndex))
+	if err != nil {
+		return fmt.Errorf("interface %d not found: %w", expectedIndex, err)
+	}
+
+	// Verify by checking the best route to a public IP
+	dstAddr := newSockaddrInet(net.ParseIP("1.1.1.1"))
+	var bestRoute mibIpForwardRow2
+	var bestSrc sockaddrInet
+
+	ret, _, _ := procGetBestRoute2.Call(
+		0, 0, 0,
+		uintptr(unsafe.Pointer(&dstAddr)),
+		0,
+		uintptr(unsafe.Pointer(&bestRoute[0])),
+		uintptr(unsafe.Pointer(&bestSrc)),
+	)
+	if ret != 0 {
+		return fmt.Errorf("GetBestRoute2 failed: 0x%x", ret)
+	}
+
+	routeIndex := *(*uint32)(unsafe.Pointer(&bestRoute[8]))
+	if routeIndex != expectedIndex {
+		return fmt.Errorf("best route to 1.1.1.1 uses interface %d (%s), expected %d",
+			routeIndex, iface.Name, expectedIndex)
+	}
+
+	util.LogInfo("tun: route verification passed, best route to 1.1.1.1 uses interface %d (%s)",
+		expectedIndex, iface.Name)
 	return nil
 }
 

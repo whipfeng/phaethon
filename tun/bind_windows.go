@@ -3,66 +3,44 @@
 package tun
 
 import (
-	"net"
 	"syscall"
 
 	"phaethon/util"
 )
 
-// bindToInterface returns a no-op Control function on Windows. Windows cannot
-// use syscall.Bind inside Control callbacks (fails with "invalid argument").
-// Callers should use watchdogLocalAddr with net.Dialer.LocalAddr instead.
+// bindToInterface returns a Control function that uses IP_UNICAST_IF to bind
+// the socket to the specified interface. IP_UNICAST_IF works on all Windows
+// adapter types (physical, Wintun, VMware, etc.).
 func bindToInterface(ifIndex int) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {
-		return nil
+		var sockErr error
+		err := c.Control(func(fd uintptr) {
+			// IP_UNICAST_IF requires interface index in network byte order
+			ifIdx := htonl(uint32(ifIndex))
+			sockErr = syscall.SetsockoptInt(
+				syscall.Handle(fd),
+				syscall.IPPROTO_IP,
+				31, // IP_UNICAST_IF
+				int(ifIdx),
+			)
+		})
+		if err != nil {
+			return err
+		}
+		if sockErr != nil {
+			util.LogWarn("tun/bind: IP_UNICAST_IF for iface %d failed: %v", ifIndex, sockErr)
+		}
+		return sockErr
 	}
 }
 
-// watchdogControl returns nil on Windows. The watchdog probe uses
-// watchdogLocalAddr with net.Dialer.LocalAddr instead.
+// watchdogControl returns a Control function that binds the watchdog probe
+// socket to the TUN interface using IP_UNICAST_IF.
 func watchdogControl(ifIndex int) func(network, address string, c syscall.RawConn) error {
-	return nil
+	return bindToInterface(ifIndex)
 }
 
-// watchdogLocalAddr returns the local address of the TUN adapter to bind to.
-// On Windows, this is the correct way to force traffic through TUN: set the
-// source IP in the dialer, and the routing stack deterministically selects the
-// TUN interface that owns that IP.
-func watchdogLocalAddr(ifIndex int) net.Addr {
-	localIP := selectTUNLocalIP(ifIndex)
-	if localIP == nil {
-		util.LogWarn("tun/bind: no suitable IP on interface %d, binding skipped", ifIndex)
-		return nil
-	}
-	return &net.TCPAddr{IP: localIP}
-}
-
-// selectTUNLocalIP picks the first non-link-local, non-loopback IP from the
-// interface. For TUN adapters there is typically exactly one IP.
-func selectTUNLocalIP(ifIndex int) net.IP {
-	iface, err := net.InterfaceByIndex(ifIndex)
-	if err != nil {
-		util.LogWarn("tun/bind: interface %d not found: %v", ifIndex, err)
-		return nil
-	}
-
-	addrs, err := iface.Addrs()
-	if err != nil {
-		util.LogWarn("tun/bind: failed to get addresses for interface %d: %v", ifIndex, err)
-		return nil
-	}
-
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip := ipNet.IP
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsLoopback() {
-			continue
-		}
-		return ip
-	}
-
-	return nil
+// htonl converts a uint32 from host to network byte order.
+func htonl(val uint32) uint32 {
+	return (val&0xFF)<<24 | (val&0xFF00)<<8 | (val&0xFF0000)>>8 | (val&0xFF000000)>>24
 }

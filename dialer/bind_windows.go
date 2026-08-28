@@ -35,18 +35,12 @@ func newSockaddrInet(ip net.IP) sockaddrInet {
 // mibIpForwardRow2Minimal is just large enough for GetBestRoute2 output.
 type mibIpForwardRow2Minimal [104]byte
 
-// bindSocket is a no-op on Windows. Windows uses localAddr() with
-// net.Dialer.LocalAddr instead of Control+Bind, because syscall.Bind inside
-// Control callbacks fails with "invalid argument" on all interfaces.
+// bindSocket uses IP_UNICAST_IF to bind the socket to the interface that should
+// carry traffic to dst. IP_UNICAST_IF works on all Windows adapter types
+// (physical, VMware, Wintun, etc.) unlike syscall.Bind which fails in Control
+// callbacks, and unlike LocalAddr which doesn't constrain routing on Windows
+// (weak host model).
 func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
-	return nil
-}
-
-// localAddr returns the local address to bind to for traffic to dst. On
-// Windows, this is the correct way to bind sockets to a specific interface:
-// set the source IP in the dialer/listener, and the routing stack
-// deterministically selects the interface that owns that IP.
-func (b *BindContext) localAddr(network string, dst net.IP) net.Addr {
 	idx := currentDefaultIndex(b)
 
 	if dst != nil {
@@ -61,16 +55,29 @@ func (b *BindContext) localAddr(network string, dst net.IP) net.Addr {
 		return nil
 	}
 
-	localIP := selectLocalIP(idx, dst)
-	if localIP == nil {
-		return nil
+	var sockErr error
+	err := c.Control(func(fd uintptr) {
+		// IP_UNICAST_IF requires interface index in network byte order
+		ifIndex := htonl(uint32(idx))
+		sockErr = syscall.SetsockoptInt(
+			syscall.Handle(fd),
+			syscall.IPPROTO_IP,
+			31, // IP_UNICAST_IF
+			int(ifIndex),
+		)
+	})
+	if err != nil {
+		return err
 	}
+	if sockErr != nil {
+		util.LogWarn("dialer/bind: IP_UNICAST_IF for iface %d failed: %v", idx, sockErr)
+	}
+	return sockErr
+}
 
-	// Return the appropriate address type based on network.
-	if network == "udp" || network == "udp4" || network == "udp6" {
-		return &net.UDPAddr{IP: localIP}
-	}
-	return &net.TCPAddr{IP: localIP}
+// htonl converts a uint32 from host to network byte order.
+func htonl(val uint32) uint32 {
+	return (val&0xFF)<<24 | (val&0xFF00)<<8 | (val&0xFF0000)>>8 | (val&0xFF000000)>>24
 }
 
 // bestRouteIndex returns the interface index for the best route to dst,

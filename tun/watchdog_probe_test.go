@@ -14,7 +14,7 @@ func TestProbeTUNHTTP_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if !ProbeTUNHTTP(2*time.Second, []string{ts.URL}) {
+	if !ProbeTUNHTTP(2*time.Second, 2*time.Second, []string{ts.URL}) {
 		t.Fatal("expected HTTP probe to succeed")
 	}
 }
@@ -25,13 +25,13 @@ func TestProbeTUNHTTP_Fallback(t *testing.T) {
 	}))
 	defer good.Close()
 
-	if !ProbeTUNHTTP(2*time.Second, []string{"http://127.0.0.1:1", good.URL}) {
+	if !ProbeTUNHTTP(2*time.Second, 2*time.Second, []string{"http://127.0.0.1:1", good.URL}) {
 		t.Fatal("expected HTTP probe to succeed via fallback")
 	}
 }
 
 func TestProbeTUNHTTP_AllFail(t *testing.T) {
-	if ProbeTUNHTTP(1*time.Second, []string{"http://127.0.0.1:1"}) {
+	if ProbeTUNHTTP(1*time.Second, 1*time.Second, []string{"http://127.0.0.1:1"}) {
 		t.Fatal("expected HTTP probe to fail")
 	}
 }

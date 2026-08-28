@@ -142,6 +142,28 @@ func (e *Engine) TUNInterfaceIP() net.IP {
 	return rm.TUNInterfaceIP()
 }
 
+// TUNStats contains diagnostic statistics from the TUN engine.
+type TUNStats struct {
+	ReadPackets  uint64      `json:"readPackets"`
+	WritePackets uint64      `json:"writePackets"`
+	FakeIP       FakeIPStats `json:"fakeIP"`
+}
+
+// Stats returns a snapshot of the TUN engine diagnostic statistics.
+func (e *Engine) Stats() TUNStats {
+	s := TUNStats{
+		ReadPackets:  e.readPackets.Load(),
+		WritePackets: e.writePackets.Load(),
+	}
+	e.mu.Lock()
+	fakeIP := e.fakeIP
+	e.mu.Unlock()
+	if fakeIP != nil {
+		s.FakeIP = fakeIP.Stats()
+	}
+	return s
+}
+
 // Start brings up the TUN device, configures routes, and starts netstack.
 func (e *Engine) Start() error {
 	e.mu.Lock()

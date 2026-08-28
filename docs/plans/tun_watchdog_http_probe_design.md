@@ -13,6 +13,8 @@
 | v0.2.0 | 2026-08-27 | 统一全平台使用 HTTP probe；移除 DNS probe fallback；仅使用接口索引绑定 | Phaethon Dev |
 | v0.3.0 | 2026-08-28 | Windows 接口绑定方案改为 bind() 到接口本地 IP；新增多 IP 选取规则 | Phaethon Dev |
 | v0.4.0 | 2026-08-28 | 记录已否决的 netstack 出站方案；记录 shell 命令替换 API 的调研结论 | Phaethon Dev |
+| v0.5.0 | 2026-08-28 | 新增 3.8 节：watchdog DNS 解析改用纯 Go 实现以避免系统调用线程阻塞 | Phaethon Dev |
+| v0.6.0 | 2026-08-28 | 实现纯 Go DNS 解析器；分离 DNS/HTTP 超时参数；Admin API 新增 `stats` 字段（包计数器 + FakeIP 池统计） | Phaethon Dev |
 
 ## 1. 背景与目标
 
@@ -250,6 +252,104 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 - **`dialer/bind_darwin.go`**：`route -n get` 查路由——macOS 无等价 API，不改
 - **`util/browser.go`**：`rundll32`/`open`/`xdg-open`——打开浏览器，标准做法，不改
 
+### 3.8 Watchdog DNS 解析改用纯 Go 实现
+
+#### 3.8.1 问题
+
+Watchdog 探测使用 `net.DefaultResolver.LookupIP(ctx, ...)` 解析域名。在 TUN 模式下，系统 DNS 被重定向到 TUN DNS hijacker（192.0.2.2），DNS 查询会走完整的 TUN 链路。
+
+**核心问题**：`net.DefaultResolver` 在 Windows 上使用系统 DNS API（`DnsQuery`），这是一个**阻塞的系统调用**，不支持超时控制。
+
+```
+goroutine 调用 net.DefaultResolver.LookupIP(ctx, "ip4", hostname)
+  ↓
+Go runtime 启动 OS 线程执行 DnsQuery()
+  ↓
+DnsQuery() 阻塞等待 DNS 响应（可能几十秒）
+  ↓
+context 超时取消
+  ↓
+goroutine 返回 "context deadline exceeded"
+  ↓
+但 OS 线程仍在阻塞！直到 DnsQuery 自己返回
+```
+
+**后果**：
+1. **线程泄漏**：context 取消后，OS 线程仍在阻塞，无法被回收
+2. **资源耗尽**：长期运行可能耗尽 OS 线程资源
+3. **超时不可控**：实际超时时间取决于系统 DNS 的行为，不受 context 控制
+
+#### 3.8.2 解决方案：纯 Go DNS 解析器
+
+使用纯 Go 实现的 DNS 解析器替代系统 DNS 调用。纯 Go 实现使用 UDP socket 发送 DNS 查询，可以正确设置 socket 超时。
+
+**实现方式**：
+
+```go
+// 使用纯 Go DNS 解析器
+resolver := &net.Resolver{
+    PreferGo: true,      // 强制使用 Go 实现
+    StrictErrors: false,  // 允许部分错误
+}
+
+ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+defer cancel()
+ips, err := resolver.LookupIP(ctx, "ip4", hostname)
+```
+
+**关键配置**：
+- `PreferGo: true`：强制使用 Go 的纯 Go DNS 实现，而非系统调用
+- 超时通过 context 控制，底层 UDP socket 会正确尊重超时
+
+#### 3.8.3 纯 Go DNS 与 TUN 拦截的兼容性
+
+**问题**：纯 Go DNS 解析器是否仍会被 TUN DNS hijacker 拦截？
+
+**答案**：**是的**，仍然会被拦截。
+
+**原因**：
+1. 纯 Go DNS 解析器读取系统配置的 DNS 服务器地址（Windows 注册表 / `/etc/resolv.conf`）
+2. 在 TUN 模式下，系统 DNS 已被配置为 192.0.2.2（TUN adapter IP）
+3. 纯 Go DNS 解析器向 192.0.2.2:53 发送 UDP 查询
+4. Windows 路由表将发往 192.0.2.2 的流量路由到 TUN 接口
+5. TUN DNS hijacker 拦截并处理查询
+
+**两种解析器的区别**：
+
+| | 系统 DNS (cgo) | 纯 Go DNS (netgo) |
+|---|---|---|
+| 实现 | DnsQuery 系统调用 | UDP socket |
+| 查询目标 | 系统配置的 DNS | 系统配置的 DNS |
+| 能否被 TUN 拦截 | ✅ 能 | ✅ 能 |
+| 超时可控制 | ❌ 不能 | ✅ 能 |
+| 线程泄漏风险 | 有 | 无 |
+
+#### 3.8.4 超时参数调整
+
+使用纯 Go DNS 后，DNS 和 HTTP 的超时可以独立控制：
+
+```go
+const (
+    dnsTimeout  = 5 * time.Second   // DNS 解析超时
+    httpTimeout = 8 * time.Second   // HTTP 连接+响应超时
+)
+```
+
+单个 URL 最坏情况：DNS 5秒 + HTTP 8秒 = 13秒（原为 20秒）。
+3 个 URL 全失败最坏：39秒（原为 60秒）。
+
+#### 3.8.5 影响范围
+
+- `tun/watchdog_probe.go`：`ProbeTUNHTTPWithBind()` 中的 DNS 解析改用纯 Go 实现
+- 不影响其他使用 `net.DefaultResolver` 的代码（如引擎的 DNS hijacker）
+
+#### 3.8.6 验证计划
+
+1. 编译时添加 `-tags netgo` 或运行时设置 `GODEBUG=netdns=go`
+2. 验证 DNS 查询仍被 TUN hijacker 拦截（返回 Fake-IP）
+3. 验证超时控制生效（context 取消后线程立即返回）
+4. 监控 OS 线程数，确认无线程泄漏
+
 ## 4. 接口/交互调整
 
 ### 4.1 配置字段
@@ -284,9 +384,25 @@ tun:
 
 ```json
 {
-  "probeURLs": ["..."]
+  "probeURLs": ["..."],
+  "stats": {
+    "readPackets": 12345,
+    "writePackets": 6789,
+    "fakeIP": {
+      "domainCount": 42,
+      "registeredCount": 42,
+      "realIPCacheCount": 40
+    }
+  }
 }
 ```
+
+- `probeURLs`：当前使用的探测 URL 列表
+- `stats.readPackets`：从 TUN 设备读入 netstack 的包数
+- `stats.writePackets`：从 netstack 写入 TUN 设备的包数
+- `stats.fakeIP.domainCount`：已分配的 Fake-IP 域名映射数
+- `stats.fakeIP.registeredCount`：已注册到 netstack 的 Fake-IP 数
+- `stats.fakeIP.realIPCacheCount`：Fake-IP → 真实 IP 缓存数
 
 probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.log`），用于事后排查。
 
@@ -385,5 +501,8 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 - [x] `go build ./...`、`go vet ./tun`、`go test ./tun` 全部通过
 - [x] 正常 TUN 启动后，watchdog 立即开始 HTTP 探测
 - [x] TUN 不可用时，连续 2 次失败后 watchdog kill 父进程并清理 TUN
-- [ ] 用户自定义 `probe-urls` 后，watchdog 使用自定义地址
-- [ ] Admin API `/api/tun` 正确返回 `probeURLs` 和 `probeFailures`
+- [x] 用户自定义 `probe-urls` 后，watchdog 使用自定义地址
+- [x] Admin API `/api/tun` 正确返回 `probeURLs` 和 `stats`
+- [x] DNS 解析改用纯 Go 实现（`PreferGo: true`），避免 Windows 线程泄漏
+- [x] DNS 和 HTTP 超时可独立控制（`dnsTimeout=5s`，`httpTimeout=8s`）
+- [x] `stats` 包含包计数器（`readPackets`/`writePackets`）和 FakeIP 池统计

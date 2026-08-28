@@ -106,7 +106,7 @@ func runWatchdog(parentPID string) {
 		probeInterval    = 3 * time.Second
 		ifaceInterval    = 5 * time.Second
 		probeFailLimit   = 2
-		probeTimeout     = 3 * time.Second
+		probeTimeout     = 10 * time.Second
 	)
 
 	probeURLs := probeURLsFromEnv()

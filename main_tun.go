@@ -107,7 +107,7 @@ func runWatchdog(parentPID string) {
 		ifaceInterval  = 5 * time.Second
 		probeFailLimit = 2
 		dnsTimeout     = 5 * time.Second
-		httpTimeout    = 8 * time.Second
+		httpTimeout    = 15 * time.Second // Increased to accommodate DNS resolution at connection time
 	)
 
 	probeURLs := probeURLsFromEnv()

@@ -76,9 +76,8 @@ func (h *DNSHijacker) Stop() {
 // Resolve returns the raw DNS response bytes for a query without sending it
 // through the netstack. It is used by the Windows-side DNS proxy and internal
 // health probes so they do not depend on gVisor loopback delivery semantics.
-// Before returning the Fake-IP, it synchronously resolves the real IP through
-// the physical interface and caches it in the FakeIPPool, so the engine does
-// not need to re-resolve the domain when handling the connection.
+// It returns a Fake-IP without resolving the real IP. The real IP will be
+// resolved at connection time when the rule matches DIRECT.
 func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 	if len(query) == 0 {
 		return nil, fmt.Errorf("empty query")
@@ -88,12 +87,7 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse query")
 	}
 	fakeIP := h.pool.Lookup(domain)
-
-	// Synchronously resolve the real IP through the physical interface.
-	if realIP := h.resolveRealIP(domain); realIP != nil {
-		h.pool.SetRealIP(fakeIP, realIP)
-		util.LogDebug("tun dns: %s -> fake=%s real=%s", domain, fakeIP, realIP)
-	}
+	util.LogDebug("tun dns: %s -> fake=%s", domain, fakeIP)
 
 	resp := buildDNSResponse(query, fakeIP.To4())
 	if resp == nil {
@@ -132,12 +126,7 @@ func (h *DNSHijacker) serveLoop() {
 		}
 
 		fakeIP := h.pool.Lookup(domain)
-
-		// Synchronously resolve the real IP through the physical interface.
-		if realIP := h.resolveRealIP(domain); realIP != nil {
-			h.pool.SetRealIP(fakeIP, realIP)
-			util.LogDebug("tun dns: %s -> fake=%s real=%s", domain, fakeIP, realIP)
-		}
+		util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
 
 		resp := buildDNSResponse(packet, fakeIP.To4())
 		if resp == nil {

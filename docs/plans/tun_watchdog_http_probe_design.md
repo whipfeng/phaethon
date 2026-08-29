@@ -1,5 +1,5 @@
-> 版本: v0.1.0
-> 日期: 2026-08-27
+> 版本: v0.8.0
+> 日期: 2026-08-29
 > 状态: ACTIVE
 > 负责人: Phaethon Dev
 
@@ -15,6 +15,8 @@
 | v0.4.0 | 2026-08-28 | 记录已否决的 netstack 出站方案；记录 shell 命令替换 API 的调研结论 | Phaethon Dev |
 | v0.5.0 | 2026-08-28 | 新增 3.8 节：watchdog DNS 解析改用纯 Go 实现以避免系统调用线程阻塞 | Phaethon Dev |
 | v0.6.0 | 2026-08-28 | 实现纯 Go DNS 解析器；分离 DNS/HTTP 超时参数；Admin API 新增 `stats` 字段（包计数器 + FakeIP 池统计） | Phaethon Dev |
+| v0.7.0 | 2026-08-29 | watchdog 接口索引改为动态查询（按适配器名称），移除 `LAYER_WATCHDOG_TUN_IFINDEX` 环境变量 | Phaethon Dev |
+| v0.8.0 | 2026-08-29 | 修正 3.8 节 DNS 解析方案：`PreferGo: true` 会绕过 TUN DNS hijacker，改为 `PreferGo: false`；调整超时参数（probeInterval 3s→10s，httpTimeout 15s→30s，probeFailLimit 2→3） | Phaethon Dev |
 
 ## 1. 背景与目标
 
@@ -56,13 +58,13 @@ flowchart LR
 
 ### 2.2 候选探测地址
 
-经本地 curl 验证可达：
+默认候选列表（`DefaultProbeURLs`）：
 
 | URL | 响应 | 状态 |
 |-----|------|------|
-| `http://www.msftconnecttest.com/connecttest.txt` | `Microsoft Connect Test` | ✅ 默认首选 |
-| `http://connectivitycheck.platform.hicloud.com/generate_204` | 204 No Content | ✅ fallback |
-| `http://wifi.vivo.com.cn/generate_204` | 204 No Content | ✅ fallback |
+| `http://cp.cloudflare.com/generate_204` | 204 No Content | ✅ 默认首选 |
+| `http://detectportal.firefox.com/success.txt` | `success` | ✅ fallback |
+| `http://www.msftconnecttest.com/connecttest.txt` | `Microsoft Connect Test` | ✅ fallback |
 
 探测时遍历候选列表，任一成功即视为网络正常；全部失败才计入一次探测失败。
 
@@ -76,14 +78,16 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 
 单一公共地址可能在特定网络环境下被限制。使用多个 captive portal 地址作为 fallback，显著降低误杀概率。
 
-### 3.3 激进失败策略
+### 3.3 失败策略
 
-用户明确要求“不怕误杀，就怕不杀”。因此：
+初始设计采用激进策略（3 秒间隔、2 次失败即 kill），但实测发现 TUN 链路（DNS hijacker → netstack → proxy → 出站）在代理场景下需要较长时间完成连接。调整为：
 
 - 无 grace period
-- 探测间隔 3 秒
-- 连续失败 2 次即 kill + cleanup
-- 最坏情况下 6 秒内触发清理
+- 探测间隔 10 秒
+- 连续失败 3 次即 kill + cleanup
+- 最坏情况下 30 秒内触发清理
+- HTTP 超时 30 秒（覆盖代理连接 + 目标响应）
+- DNS 超时 5 秒
 
 ### 3.4 强制探测流量走 TUN（接口绑定方案）
 
@@ -145,11 +149,11 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 
 #### 3.4.3 接口索引选取规则
 
-`IP_UNICAST_IF` 接受接口索引（网络字节序）作为参数。接口索引由 `bestRouteIndex()`（dialer）或父进程传入的环境变量（watchdog）提供。
+`IP_UNICAST_IF` 接受接口索引（网络字节序）作为参数。接口索引由 `bestRouteIndex()`（dialer）或动态查询（watchdog）提供。
 
 **dialer 出站绑定**：通过 `GetBestRoute2` 查询到目标 IP 的最佳路由，排除 TUN LUID，返回物理接口索引。若最佳路由指向 TUN，回退到默认物理接口。
 
-**watchdog 探测绑定**：使用父进程通过 `LAYER_WATCHDOG_TUN_IFINDEX` 环境变量传入的 TUN 接口索引。
+**watchdog 探测绑定**：watchdog 子进程通过适配器名称 `"phaethontun"` 动态查询当前接口索引（`net.InterfaceByName`）。不再使用父进程传入的静态环境变量，避免 TUN 适配器重建后绑定到残余接口索引导致探测失败和误杀。
 
 **多 IP 接口**：一个接口可能有多个 IP，但 `IP_UNICAST_IF` 绑定的是接口索引而非 IP，因此无需 IP 选取逻辑。系统会自动在该接口上选择合适的源 IP。
 
@@ -168,7 +172,7 @@ DNS probe 只能验证本地 hijacker 还活着，不能验证真实出网能力
 1. **dialer 出站绑定**（`dialer/bind_windows.go`）：`bindSocket()` 使用 `IP_UNICAST_IF` 绑定到物理接口索引。防止代理出站流量路由环回 TUN。
 2. **watchdog 探测绑定**（`tun/bind_windows.go` + `tun/watchdog_probe.go`）：`watchdogControl()` 使用 `IP_UNICAST_IF` 绑定到 TUN 适配器接口索引。强制探测流量走 TUN。
 
-索引由父进程在创建 TUN 后从 `RouteManager` 获取，通过环境变量 `LAYER_WATCHDOG_TUN_IFINDEX` 传给 watchdog 子进程，避免子进程按名字查询时拿到错误的索引。
+watchdog 子进程通过适配器名称 `"phaethontun"` 动态查询当前接口索引，不再依赖父进程传入的环境变量。
 
 ### 3.5 废弃 DNS probe
 
@@ -252,103 +256,105 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 - **`dialer/bind_darwin.go`**：`route -n get` 查路由——macOS 无等价 API，不改
 - **`util/browser.go`**：`rundll32`/`open`/`xdg-open`——打开浏览器，标准做法，不改
 
-### 3.8 Watchdog DNS 解析改用纯 Go 实现
+### 3.8 Watchdog DNS 解析方案：从纯 Go 回归系统 DNS
 
-#### 3.8.1 问题
+#### 3.8.1 初始方案：纯 Go DNS（已否决）
 
-Watchdog 探测使用 `net.DefaultResolver.LookupIP(ctx, ...)` 解析域名。在 TUN 模式下，系统 DNS 被重定向到 TUN DNS hijacker（192.0.2.2），DNS 查询会走完整的 TUN 链路。
+最初设计使用 `PreferGo: true` 的纯 Go DNS 解析器，理由是避免 Windows 上 `net.DefaultResolver` 使用系统 DNS API（`DnsQuery`）时 OS 线程阻塞和超时不可控的问题。
 
-**核心问题**：`net.DefaultResolver` 在 Windows 上使用系统 DNS API（`DnsQuery`），这是一个**阻塞的系统调用**，不支持超时控制。
+**实测发现严重缺陷**：Go 的纯 Go DNS 实现（`PreferGo: true`）在 Windows 上会**枚举所有网络接口的 DNS 服务器**，并向它们**并行发送查询**。在 TUN 模式下，系统存在两组 DNS 服务器：
 
-```
-goroutine 调用 net.DefaultResolver.LookupIP(ctx, "ip4", hostname)
-  ↓
-Go runtime 启动 OS 线程执行 DnsQuery()
-  ↓
-DnsQuery() 阻塞等待 DNS 响应（可能几十秒）
-  ↓
-context 超时取消
-  ↓
-goroutine 返回 "context deadline exceeded"
-  ↓
-但 OS 线程仍在阻塞！直到 DnsQuery 自己返回
-```
+- TUN 适配器（phaethontun）：192.0.2.2（TUN DNS hijacker，返回 Fake-IP）
+- 物理网卡（以太网）：172.30.0.1（本地网关 DNS，返回真实 IP）
+
+纯 Go 解析器同时向两者发送查询，物理 DNS（局域网，延迟低，且通常有 DNS 缓存命中）总是比 TUN DNS hijacker 更快返回结果。最终拿到的是**真实 IP**而非 Fake-IP。
+
+**速度对比分析（实测数据）**：
+
+| | 物理 DNS（172.30.0.1） | TUN DNS hijacker（192.0.2.2） |
+|---|---|---|
+| 路径 | Go socket → 物理网卡 → 网关（缓存命中）→ 返回 | Go socket → Wintun → gVisor netstack → hijacker handler → Fake-IP pool → netstack 回写 → Wintun 注入 → 返回 |
+| 开销 | 局域网 UDP 往返 + 网关缓存命中 | 用户态包处理（Wintun 收包/注入 + gVisor 解析/构建） |
+
+此外，`PreferGo: false`（系统 DNS）还能命中 **Windows DNS Client 本地缓存**（`dnscache` 服务），而 `PreferGo: true`（纯 Go DNS）直接发 UDP 包，完全绕过该缓存。
+
+**实测对比**（同一域名连续查询 3 次）：
+
+| 解析方式 | 第 1 次 | 第 2 次 | 第 3 次 | 结果 |
+|----------|---------|---------|---------|------|
+| `PreferGo: false` | 18ms | **683µs** | **683µs** | Fake-IP（198.18.0.5） |
+| `PreferGo: true` | 3.5ms | 1.3ms | 1.2ms | 真实 IP（104.16.132.x） |
+
+- `PreferGo: false` 首次查询走 TUN hijacker（18ms），后续命中 Windows DNS 缓存（683µs），快 30 倍
+- `PreferGo: true` 每次都绕过 Windows 缓存，走真实 UDP 往返；物理 DNS 网关缓存命中（~1ms）仍快于 TUN hijacker 的 gVisor 用户态包处理
+- 综合结果：`PreferGo: true` 总是拿到真实 IP，`PreferGo: false` 总是拿到 Fake-IP
 
 **后果**：
-1. **线程泄漏**：context 取消后，OS 线程仍在阻塞，无法被回收
-2. **资源耗尽**：长期运行可能耗尽 OS 线程资源
-3. **超时不可控**：实际超时时间取决于系统 DNS 的行为，不受 context 控制
+1. watchdog 拿到真实 IP 后直接连接，流量绕过 TUN DNS hijacker
+2. 虽然 `IP_UNICAST_IF` 绑定到 TUN 接口，但连接目标是真实 IP 而非 Fake-IP
+3. TUN 引擎 `handleConn()` 中 `LookupDomain()` 找不到域名映射，无法还原原始域名
+4. 代理规则（`DOMAIN-SUFFIX` 等）失效，所有流量走 DIRECT
+5. 在特定网络环境下（代理场景），DIRECT 连接可能超时或失败，导致 watchdog 误杀
 
-#### 3.8.2 解决方案：纯 Go DNS 解析器
+**实测对比**：
 
-使用纯 Go 实现的 DNS 解析器替代系统 DNS 调用。纯 Go 实现使用 UDP socket 发送 DNS 查询，可以正确设置 socket 超时。
+| 解析方式 | 结果 | 是否走 TUN DNS hijacker |
+|----------|------|------------------------|
+| `PreferGo: true` | 真实 IP（104.16.132.229） | ❌ 绕过 |
+| `PreferGo: false` | Fake-IP（198.18.0.8） | ✅ 正确 |
+| 显式查询 192.0.2.2 | Fake-IP（198.18.0.8） | ✅ 正确 |
 
-**实现方式**：
+#### 3.8.2 修正方案：系统 DNS（`PreferGo: false`）
+
+使用系统 DNS 解析器（`PreferGo: false`）。Windows 系统 DNS 遵循接口 metric 优先级：phaethontun 的 metric=5 远低于以太网，因此 DNS 查询**只会**发送到 TUN DNS hijacker（192.0.2.2），返回 Fake-IP。
 
 ```go
-// 使用纯 Go DNS 解析器
+// 使用系统 DNS 解析器，确保查询走 TUN DNS hijacker 返回 Fake-IP
 resolver := &net.Resolver{
-    PreferGo: true,      // 强制使用 Go 实现
-    StrictErrors: false,  // 允许部分错误
+    PreferGo:     false,
+    StrictErrors: false,
 }
-
-ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
-defer cancel()
-ips, err := resolver.LookupIP(ctx, "ip4", hostname)
 ```
 
-**关键配置**：
-- `PreferGo: true`：强制使用 Go 的纯 Go DNS 实现，而非系统调用
-- 超时通过 context 控制，底层 UDP socket 会正确尊重超时
+**关于线程阻塞问题**：`PreferGo: false` 在 Windows 上确实使用 `DnsQuery` 系统调用，存在 OS 线程阻塞风险。但 watchdog 探测频率低（10 秒一次），且 context 超时（5 秒）可以控制 goroutine 层面的超时。线程泄漏风险在低频调用下可接受。
 
-#### 3.8.3 纯 Go DNS 与 TUN 拦截的兼容性
+**两种解析器的行为对比**：
 
-**问题**：纯 Go DNS 解析器是否仍会被 TUN DNS hijacker 拦截？
-
-**答案**：**是的**，仍然会被拦截。
-
-**原因**：
-1. 纯 Go DNS 解析器读取系统配置的 DNS 服务器地址（Windows 注册表 / `/etc/resolv.conf`）
-2. 在 TUN 模式下，系统 DNS 已被配置为 192.0.2.2（TUN adapter IP）
-3. 纯 Go DNS 解析器向 192.0.2.2:53 发送 UDP 查询
-4. Windows 路由表将发往 192.0.2.2 的流量路由到 TUN 接口
-5. TUN DNS hijacker 拦截并处理查询
-
-**两种解析器的区别**：
-
-| | 系统 DNS (cgo) | 纯 Go DNS (netgo) |
+| | 系统 DNS (`PreferGo: false`) | 纯 Go DNS (`PreferGo: true`) |
 |---|---|---|
-| 实现 | DnsQuery 系统调用 | UDP socket |
-| 查询目标 | 系统配置的 DNS | 系统配置的 DNS |
-| 能否被 TUN 拦截 | ✅ 能 | ✅ 能 |
-| 超时可控制 | ❌ 不能 | ✅ 能 |
-| 线程泄漏风险 | 有 | 无 |
+| 实现 | Windows `DnsQuery` 系统调用 | Go UDP socket |
+| DNS 服务器选择 | 按接口 metric 优先级选一个 | 枚举所有接口 DNS 并行查询 |
+| TUN 模式下结果 | Fake-IP（metric=5 的 TUN 优先） | 真实 IP（物理 DNS 更快） |
+| 能否被 TUN hijacker 拦截 | ✅ 能 | ❌ 不能（绕过 hijacker） |
+| 超时可控制 | 部分（goroutine 层面） | ✅ 能（socket 层面） |
+| 线程泄漏风险 | 有（低频可接受） | 无 |
 
-#### 3.8.4 超时参数调整
-
-使用纯 Go DNS 后，DNS 和 HTTP 的超时可以独立控制：
+#### 3.8.3 超时参数
 
 ```go
 const (
-    dnsTimeout  = 5 * time.Second   // DNS 解析超时
-    httpTimeout = 8 * time.Second   // HTTP 连接+响应超时
+    dnsTimeout     = 5 * time.Second   // DNS 解析超时
+    httpTimeout    = 30 * time.Second  // HTTP 连接+响应超时（覆盖代理场景）
+    probeInterval  = 10 * time.Second  // 探测间隔
+    probeFailLimit = 3                  // 连续失败次数阈值
 )
 ```
 
-单个 URL 最坏情况：DNS 5秒 + HTTP 8秒 = 13秒（原为 20秒）。
-3 个 URL 全失败最坏：39秒（原为 60秒）。
+单个 URL 最坏情况：DNS 5秒 + HTTP 30秒 = 35秒。
+3 个 URL 全失败最坏：105秒。
+触发 kill 的最短时间：probeInterval × probeFailLimit = 30秒。
 
-#### 3.8.5 影响范围
+#### 3.8.4 影响范围
 
-- `tun/watchdog_probe.go`：`ProbeTUNHTTPWithBind()` 中的 DNS 解析改用纯 Go 实现
+- `tun/watchdog_probe.go`：`ProbeTUNHTTPWithBind()` 中的 DNS 解析使用 `PreferGo: false`
 - 不影响其他使用 `net.DefaultResolver` 的代码（如引擎的 DNS hijacker）
 
-#### 3.8.6 验证计划
+#### 3.8.5 经验教训
 
-1. 编译时添加 `-tags netgo` 或运行时设置 `GODEBUG=netdns=go`
-2. 验证 DNS 查询仍被 TUN hijacker 拦截（返回 Fake-IP）
-3. 验证超时控制生效（context 取消后线程立即返回）
-4. 监控 OS 线程数，确认无线程泄漏
+1. **Go 的 `PreferGo: true` 不等于"查询系统配置的 DNS"**：它会枚举所有接口的 DNS 服务器并行查询，结果取决于谁先响应，而非接口优先级。
+2. **TUN 场景下 DNS 必须走 hijacker**：只有 Fake-IP 才能让引擎还原域名、匹配代理规则。任何绕过 hijacker 的 DNS 解析都会导致代理规则失效。
+3. **超时参数需要留足余量**：代理场景下连接建立时间远大于直连（DNS 解析 + 代理握手 + 目标连接），3 秒间隔和 15 秒 HTTP 超时在代理场景下过于激进。
+4. **验证 DNS 行为比验证连通性更重要**：probe 的核心是验证 TUN 全链路可用，DNS 返回 Fake-IP 是前提条件，应在开发阶段就验证。
 
 ## 4. 接口/交互调整
 
@@ -376,7 +382,8 @@ tun:
 |----------|------|
 | `LAYER_WATCHDOG_PID` | 父进程 PID |
 | `LAYER_WATCHDOG_PROBE_URLS` | 分号分隔的探测 URL 列表 |
-| `LAYER_WATCHDOG_TUN_IFINDEX` | 当前 TUN 适配器接口索引，用于 socket 绑定 |
+
+> **注**：TUN 接口索引不再通过环境变量传递。watchdog 子进程通过适配器名称 `"phaethontun"` 动态查询当前接口索引（`net.InterfaceByName`），避免适配器重建后绑定到残余索引。
 
 ### 4.3 Admin API 状态字段
 
@@ -421,42 +428,38 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 
 ### 6.2 看门狗探测失败根因分析（已修复）
 
-**问题现象**：TUN 启动后，看门狗 HTTP 探测持续失败，导致看门狗杀掉 phaethon 进程。
+**问题现象**：TUN 启动后，看门狗 HTTP 探测持续失败（3 个 URL 全部超时），连续 2 次失败后看门狗杀掉 phaethon 进程。
 
 **根因分析**：
 
-1. 看门狗通过系统 DNS 解析探测域名（如 www.msftconnecttest.com）
-2. 系统 DNS 已被重定向到 TUN DNS 劫持器（192.0.2.2）
-3. TUN DNS 返回 Fake-IP（如 198.18.0.5）
-4. 看门狗连接到 Fake-IP，数据包进入 TUN
-5. 引擎 `handleConn()` 收到连接，从 Fake-IP 还原出原始域名
-6. 引擎调用 `DialRouteAware()` → `ResolveRouteAware()` **再次解析域名**
-7. 二次解析通过原始 DNS 服务器，超时时间为 5 秒
-8. 看门狗探测超时时间为 3 秒
-9. **5 秒 DNS 超时 > 3 秒探测超时**，导致探测失败
+1. 看门狗使用 `PreferGo: true` 的纯 Go DNS 解析器解析探测域名
+2. Go 纯 Go DNS 实现枚举所有接口的 DNS 服务器并**并行查询**
+3. 物理网卡 DNS（172.30.0.1，局域网延迟低）比 TUN DNS hijacker（192.0.2.2，需 gVisor netstack 处理）更快返回
+4. 看门狗拿到**真实 IP**（而非 Fake-IP），直接连接真实 IP
+5. 虽然 `IP_UNICAST_IF` 绑定到 TUN 接口，流量确实经过 TUN
+6. 但 TUN 引擎 `handleConn()` 中 `LookupDomain()` 找不到 Fake-IP 对应的域名映射
+7. 引擎无法还原原始域名，代理规则（`DOMAIN-SUFFIX` 等）失效，所有流量走 DIRECT
+8. 在代理场景下（如 SOCKS5），DIRECT 连接可能因网络环境原因超时
+9. 加上初始超时参数过于激进（httpTimeout=15s，probeInterval=3s，probeFailLimit=2）
+10. **最终结果**：探测超时 → 连续失败 → 看门狗误杀
 
 **修复方案**（已实现）：
 
-看门狗直接通过物理接口解析 DNS，绕过 TUN DNS 劫持器：
-
-1. 看门狗使用 `resolveDirect()` 通过物理接口解析 DNS（使用 8.8.8.8、114.114.114.114 等公共 DNS）
-2. 得到真实 IP 后，构建 URL 时直接使用 IP（而非域名）
-3. 设置 HTTP Host 头为原始域名（保持虚拟主机功能）
-4. HTTP 连接到真实 IP，通过 TUN 转发
-5. 引擎收到真实 IP 连接，`LookupDomain()` 返回空，直接转发
+1. DNS 解析改用 `PreferGo: false`（系统 DNS），确保查询走 TUN DNS hijacker 返回 Fake-IP
+2. Fake-IP 进入 TUN 后，引擎通过 `LookupDomain()` 还原原始域名，正确匹配代理规则
+3. 调整超时参数：httpTimeout 15s→30s，probeInterval 3s→10s，probeFailLimit 2→3
 
 **修改的文件**：
 
-- `tun/watchdog_probe.go`：新增 `resolveDirect()` 函数，修改 `ProbeTUNHTTPWithBind()` 接受物理接口索引
-- `tun/engine.go`：新增 `PhysicalInterfaceIndex()` 方法
-- `main_tun.go`：新增 `physicalIfIndexFromEnv()`，传递物理接口索引给看门狗
-- `main_tun_windows.go` / `main_tun_nows.go`：`spawnWatchdog()` 传递物理接口索引
+- `tun/watchdog_probe.go`：DNS 解析器从 `PreferGo: true` 改为 `PreferGo: false`
+- `main_tun.go`：调整超时参数（probeInterval、httpTimeout、probeFailLimit）
 
-**环境变量**：
+**验证结果**：
 
-| 环境变量 | 说明 |
-|----------|------|
-| `LAYER_WATCHDOG_PHYSICAL_IFINDEX` | 物理接口索引，用于 DNS 查询绑定，绕过 TUN 分流路由 |
+- DNS 解析返回 Fake-IP（198.18.0.x），确认走 TUN DNS hijacker
+- TUN 引擎日志显示 `fake-ip 198.18.0.5 -> cp.cloudflare.com`，域名正确还原
+- 看门狗连续运行 2+ 分钟，零失败
+- 代理场景测试：github.com 走 SOCKS5 代理（HTTP 200，~2-3s），baidu.com 走 DIRECT（HTTP 200，~0.2s）
 
 ### 6.3 待修复的 TUN 问题
 
@@ -491,18 +494,22 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 默认探测地址在特定网络下不可达 | 误杀 | 多地址 fallback + 用户可配置 |
-| HTTP 探测频率过高 | 低 | 间隔 3 秒，请求量极小 |
+| HTTP 探测频率过高 | 低 | 间隔 10 秒，请求量极小 |
 | 看门狗探测绕过 TUN（DNS/路由缓存、源地址选择） | 漏杀 | IP_UNICAST_IF 绑定到接口索引，强制流量走对应接口 |
+| DNS 解析器绕过 TUN DNS hijacker | 误杀 | `PreferGo: false` 使用系统 DNS，按接口 metric 优先级确保查询走 TUN hijacker |
 | TUN 适配器被异常删除 | 漏杀/残留 | 接口本地 IP 失效导致绑定失败，探测直接失败 + 接口消失监控兜底 |
 | Windows HTTP probe 受 TUN 实现 bug 影响失败 | 误杀 | 按用户要求，HTTP 不通即视为 TUN 故障，触发清理 |
+| `PreferGo: false` 线程阻塞（Windows DnsQuery） | 低 | watchdog 低频调用（10s/次），goroutine 层面 context 超时 5s 可控 |
 
 ## 8. 验收标准
 
 - [x] `go build ./...`、`go vet ./tun`、`go test ./tun` 全部通过
 - [x] 正常 TUN 启动后，watchdog 立即开始 HTTP 探测
-- [x] TUN 不可用时，连续 2 次失败后 watchdog kill 父进程并清理 TUN
+- [x] TUN 不可用时，连续 3 次失败后 watchdog kill 父进程并清理 TUN
 - [x] 用户自定义 `probe-urls` 后，watchdog 使用自定义地址
 - [x] Admin API `/api/tun` 正确返回 `probeURLs` 和 `stats`
-- [x] DNS 解析改用纯 Go 实现（`PreferGo: true`），避免 Windows 线程泄漏
-- [x] DNS 和 HTTP 超时可独立控制（`dnsTimeout=5s`，`httpTimeout=8s`）
+- [x] DNS 解析使用系统 DNS（`PreferGo: false`），确保查询走 TUN DNS hijacker 返回 Fake-IP
+- [x] DNS 和 HTTP 超时可独立控制（`dnsTimeout=5s`，`httpTimeout=30s`）
 - [x] `stats` 包含包计数器（`readPackets`/`writePackets`）和 FakeIP 池统计
+- [x] 代理场景下 watchdog 不误杀（SOCKS5/DIRECT 均正常通过探测）
+- [x] 探测流量确认走 TUN 全链路（DNS 返回 Fake-IP → 引擎还原域名 → 代理/直连出站）

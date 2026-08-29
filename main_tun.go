@@ -1,8 +1,8 @@
 package main
 
 import (
+	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -57,7 +57,7 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 	if ruleConf != nil && ruleConf.TUN != nil {
 		probeURLs = ruleConf.TUN.ProbeURLList()
 	}
-	spawnWatchdog(probeURLs, engine.TUNInterfaceIndex())
+	spawnWatchdog(probeURLs)
 	return &TUNResource{engine: engine}
 }
 
@@ -72,20 +72,15 @@ func probeURLsFromEnv() []string {
 	return strings.Split(raw, ";")
 }
 
-// tunIfIndexFromEnv parses the LAYER_WATCHDOG_TUN_IFINDEX environment variable.
-// A value <= 0 or an unset variable means the watchdog should not bind to a
-// specific interface.
-func tunIfIndexFromEnv() int {
-	raw := os.Getenv("LAYER_WATCHDOG_TUN_IFINDEX")
-	if raw == "" {
-		return 0
-	}
-	idx, err := strconv.Atoi(raw)
+// getCurrentTUNInterfaceIndex returns the current interface index of the
+// phaethontun adapter. This is used by the watchdog to dynamically bind to
+// the correct interface, avoiding stale indices when the adapter is recreated.
+func getCurrentTUNInterfaceIndex() int {
+	iface, err := net.InterfaceByName("phaethontun")
 	if err != nil {
-		util.LogWarn("tun-watchdog: invalid TUN ifindex %q, ignoring", raw)
 		return 0
 	}
-	return idx
+	return iface.Index
 }
 
 // runWatchdog monitors the parent process and the TUN outbound path. It cleans up
@@ -103,27 +98,28 @@ func runWatchdog(parentPID string) {
 
 	const (
 		procInterval   = 3 * time.Second
-		probeInterval  = 3 * time.Second
+		probeInterval  = 10 * time.Second
 		ifaceInterval  = 5 * time.Second
-		probeFailLimit = 2
+		probeFailLimit = 3
 		dnsTimeout     = 5 * time.Second
-		httpTimeout    = 15 * time.Second // Increased to accommodate DNS resolution at connection time
+		httpTimeout    = 30 * time.Second
 	)
 
 	probeURLs := probeURLsFromEnv()
-	tunIfIndex := tunIfIndexFromEnv()
-	if tunIfIndex <= 0 {
-		util.LogError("tun-watchdog: missing or invalid TUN interface index, cannot reliably bind probes; exiting")
-		return
-	}
 
 	// The watchdog verifies real outbound connectivity by sending HTTP probes
 	// through the TUN adapter. DNS resolution uses a pure Go resolver to avoid
 	// OS thread blocking on Windows.
 	probe := func() bool {
-		return tun.ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, tunIfIndex, probeURLs)
+		// Dynamically get current TUN interface index to avoid binding to stale interfaces
+		currentIfIndex := getCurrentTUNInterfaceIndex()
+		if currentIfIndex <= 0 {
+			util.LogWarn("tun-watchdog: cannot determine current TUN interface index")
+			return false
+		}
+		return tun.ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, currentIfIndex, probeURLs)
 	}
-	util.LogInfo("tun-watchdog: using HTTP probe bound to TUN iface %d", tunIfIndex)
+	util.LogInfo("tun-watchdog: using HTTP probe with dynamic interface binding")
 
 	procTicker := time.NewTicker(procInterval)
 	defer procTicker.Stop()

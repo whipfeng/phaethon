@@ -98,9 +98,8 @@ func (r *RouteManager) SetTUNLUID(luid uint64) {
 	r.tunLUID = luid
 }
 
-// TUNInterfaceIndex returns the TUN interface index used by the watchdog to bind
-// its probe sockets directly to the TUN adapter. It returns 0 if the index has
-// not been set.
+// TUNInterfaceIndex returns the TUN interface index for status reporting.
+// It returns 0 if the index has not been set.
 func (r *RouteManager) TUNInterfaceIndex() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

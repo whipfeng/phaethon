@@ -549,9 +549,8 @@ func getDefaultGatewayAPI() (net.IP, uint64, uint32, error) {
 }
 
 // setInterfaceDNSAPI sets DNS servers for the interface using the Windows registry.
-// SetInterfaceDnsSettings API doesn't support Wintun virtual adapters (returns ERROR_INVALID_PARAMETER),
-// so we use the registry directly. This is still a native Windows API approach (RegOpenKeyEx/RegSetValueEx),
-// not a shell command, and is the standard method used by VPN/TUN implementations.
+// Note: SetInterfaceDnsSettings API returns success but doesn't actually configure DNS on Wintun
+// virtual adapters. The registry approach is the working native API method for Wintun.
 func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 	row, err := getIfEntry2API(luid)
 	if err != nil {
@@ -597,14 +596,14 @@ func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 		return err
 	}
 
-	// Use RegSetValueExW via syscall
+	// Use RegSetValueExW
 	ret, _, err := procRegSetValueEx.Call(
 		uintptr(key),
 		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("NameServer"))),
 		0,
 		uintptr(windows.REG_SZ),
 		uintptr(unsafe.Pointer(serverUTF16)),
-		uintptr((len(serverStr)+1))*2, // UTF-16, including null terminator
+		uintptr((len(serverStr)+1))*2,
 	)
 	if ret != 0 {
 		return fmt.Errorf("set NameServer: %w", err)

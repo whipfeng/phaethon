@@ -14,6 +14,7 @@ import (
 var (
 	modiphlpapi = windows.NewLazySystemDLL("iphlpapi.dll")
 	modsetupapi = windows.NewLazySystemDLL("setupapi.dll")
+	modadvapi32 = windows.NewLazySystemDLL("advapi32.dll")
 
 	procCreateIpForwardEntry2             = modiphlpapi.NewProc("CreateIpForwardEntry2")
 	procDeleteIpForwardEntry2             = modiphlpapi.NewProc("DeleteIpForwardEntry2")
@@ -42,6 +43,8 @@ var (
 	procSetupDiGetDeviceInstanceIdW       = modsetupapi.NewProc("SetupDiGetDeviceInstanceIdW")
 	procSetupDiGetDeviceRegistryPropertyW = modsetupapi.NewProc("SetupDiGetDeviceRegistryPropertyW")
 	procSetupDiDestroyDeviceInfoList      = modsetupapi.NewProc("SetupDiDestroyDeviceInfoList")
+
+	procRegSetValueEx = modadvapi32.NewProc("RegSetValueExW")
 )
 
 // interfaceDnsSettings represents the INTERFACE_DNS_SETTINGS structure for SetInterfaceDnsSettings.
@@ -545,13 +548,15 @@ func getDefaultGatewayAPI() (net.IP, uint64, uint32, error) {
 	return bestGW, bestLuid, bestIdx, nil
 }
 
-// setInterfaceDNSAPI sets DNS servers for the interface using SetInterfaceDnsSettings.
+// setInterfaceDNSAPI sets DNS servers for the interface using the Windows registry.
+// This approach works reliably on Wintun and other virtual adapters where SetInterfaceDnsSettings may fail.
 func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 	row, err := getIfEntry2API(luid)
 	if err != nil {
 		return err
 	}
 
+	// Build comma-separated DNS server string
 	serverStr := ""
 	for i, s := range servers {
 		if i > 0 {
@@ -560,24 +565,49 @@ func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 		serverStr += s.String()
 	}
 
+	// Convert GUID to string format: {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+	guid := row.InterfaceGuid
+	guidStr := fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+		guid.Data1, guid.Data2, guid.Data3,
+		guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+		guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7])
+
+	// Registry path: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}
+	regPath := `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\` + guidStr
+
+	// Open the registry key
+	var key windows.Handle
+	err = windows.RegOpenKeyEx(
+		windows.HKEY_LOCAL_MACHINE,
+		windows.StringToUTF16Ptr(regPath),
+		0,
+		windows.KEY_SET_VALUE,
+		&key,
+	)
+	if err != nil {
+		return fmt.Errorf("open registry key: %w", err)
+	}
+	defer windows.RegCloseKey(key)
+
+	// Set the NameServer value
 	serverUTF16, err := windows.UTF16PtrFromString(serverStr)
 	if err != nil {
 		return err
 	}
 
-	settings := interfaceDnsSettings{
-		Version:   1,
-		Flags:     1, // DnsSettingsIpV4Enabled
-		DnsServer: serverUTF16,
-	}
-
-	ret, _, _ := procSetInterfaceDnsSettings.Call(
-		uintptr(unsafe.Pointer(&row.InterfaceGuid)),
-		uintptr(unsafe.Pointer(&settings)),
+	// Use RegSetValueExW via syscall
+	ret, _, err := procRegSetValueEx.Call(
+		uintptr(key),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("NameServer"))),
+		0,
+		uintptr(windows.REG_SZ),
+		uintptr(unsafe.Pointer(serverUTF16)),
+		uintptr((len(serverStr)+1))*2, // UTF-16, including null terminator
 	)
 	if ret != 0 {
-		return fmt.Errorf("SetInterfaceDnsSettings: 0x%x", ret)
+		return fmt.Errorf("set NameServer: %w", err)
 	}
+
 	return nil
 }
 

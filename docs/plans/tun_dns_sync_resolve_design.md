@@ -165,15 +165,47 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 
 ## 6. SetInterfaceDnsSettings 调研结论
 
-在实现过程中调研了 `SetInterfaceDnsSettings` API 用于设置 TUN 接口 DNS：
+在实现过程中调研了 `SetInterfaceDnsSettings` API 用于设置 TUN 接口 DNS。
 
-**发现的问题**：
-- 使用 `DnsServer` 字段（offset 8）：返回 `ERROR_INVALID_PARAMETER (0x57)`
-- 使用 `NameServer` 字段（offset 40）：返回成功（0x0）但不实际配置 DNS
+**初期遇到的问题**：
+- API 返回成功但不生效
+- 尝试了不同的结构体布局、Flags 值、网卡类型，都不工作
+
+**根本原因**：
+1. **结构体布局错误** - `Flags` 字段是 `ULONG64` (64位)，不是 32 位
+2. **Flags 未设置** - 必须设置 `DNS_SETTING_NAMESERVER (0x0002)` 标志位，告诉 API 我们要配置 `NameServer` 字段
+
+**正确的结构体定义**：
+```go
+type interfaceDnsSettingsEx struct {
+    Version             uint32
+    _                   uint32 // padding to align Flags to 64-bit
+    Flags               uint64 // ULONG64, not ULONG!
+    Domain              *uint16
+    NameServer          *uint16
+    SearchList          *uint16
+    RegistrationEnabled uint32
+    RegisterAdapterName uint32
+    EnableLLMNR         uint32
+    QueryAdapterName    uint32
+    ProfileNameServer   *uint16
+}
+```
+
+**正确的调用方式**：
+```go
+settings := interfaceDnsSettingsEx{
+    Version:    1,
+    Flags:      DNS_SETTING_NAMESERVER, // 0x0002 - 必须设置！
+    NameServer: serverUTF16,
+}
+```
 
 **结论**：
-- `SetInterfaceDnsSettings` 对 Wintun 虚拟适配器有兼容性问题
-- 注册表 API（`RegOpenKeyEx`/`RegSetValueExW`）是原生 Windows API，对 Wintun 有效
-- 当前实现使用注册表方式设置 DNS，功能正常
+- `SetInterfaceDnsSettings` API 工作正常，适用于所有网卡（包括 Wintun）
+- 关键是使用正确的结构体布局和设置正确的 Flags
+- 这是设置 DNS 的标准 Windows API，推荐使用
 
-**注意**：注册表 API 不是 shell 命令，是正经的原生 Windows API 调用。
+**参考文档**：
+- https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-dns_interface_settings
+- https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-setinterfacednssettings

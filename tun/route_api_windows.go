@@ -14,7 +14,6 @@ import (
 var (
 	modiphlpapi = windows.NewLazySystemDLL("iphlpapi.dll")
 	modsetupapi = windows.NewLazySystemDLL("setupapi.dll")
-	modadvapi32 = windows.NewLazySystemDLL("advapi32.dll")
 
 	procCreateIpForwardEntry2             = modiphlpapi.NewProc("CreateIpForwardEntry2")
 	procDeleteIpForwardEntry2             = modiphlpapi.NewProc("DeleteIpForwardEntry2")
@@ -43,8 +42,6 @@ var (
 	procSetupDiGetDeviceInstanceIdW       = modsetupapi.NewProc("SetupDiGetDeviceInstanceIdW")
 	procSetupDiGetDeviceRegistryPropertyW = modsetupapi.NewProc("SetupDiGetDeviceRegistryPropertyW")
 	procSetupDiDestroyDeviceInfoList      = modsetupapi.NewProc("SetupDiDestroyDeviceInfoList")
-
-	procRegSetValueEx = modadvapi32.NewProc("RegSetValueExW")
 )
 
 // interfaceDnsSettings represents the INTERFACE_DNS_SETTINGS structure for SetInterfaceDnsSettings.
@@ -548,70 +545,60 @@ func getDefaultGatewayAPI() (net.IP, uint64, uint32, error) {
 	return bestGW, bestLuid, bestIdx, nil
 }
 
-// setInterfaceDNSAPI sets DNS servers for the interface using the Windows registry.
-// Note: SetInterfaceDnsSettings API investigation showed:
-// - Using DnsServer field (offset 8): returns ERROR_INVALID_PARAMETER (0x57)
-// - Using NameServer field (offset 40): returns success (0x0) but doesn't configure DNS
-// Conclusion: SetInterfaceDnsSettings has compatibility issues with Wintun virtual adapters.
-// Registry API (RegOpenKeyEx/RegSetValueExW) is the working native Windows API solution.
+// DNS_SETTING_NAMESERVER flag indicates we're configuring the NameServer field
+const DNS_SETTING_NAMESERVER = 0x0002
+
+// interfaceDnsSettingsEx represents the correct DNS_INTERFACE_SETTINGS structure
+// See: https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-dns_interface_settings
+type interfaceDnsSettingsEx struct {
+	Version             uint32
+	_                   uint32 // padding to align Flags to 64-bit
+	Flags               uint64 // ULONG64, not ULONG!
+	Domain              *uint16
+	NameServer          *uint16
+	SearchList          *uint16
+	RegistrationEnabled uint32
+	RegisterAdapterName uint32
+	EnableLLMNR         uint32
+	QueryAdapterName    uint32
+	ProfileNameServer   *uint16
+}
+
+// setInterfaceDNSAPI sets DNS servers for the interface using SetInterfaceDnsSettings.
 func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 	row, err := getIfEntry2API(luid)
 	if err != nil {
 		return err
 	}
 
-	// Build comma-separated DNS server string
+	// Build space-separated DNS server string (API accepts space or comma separated)
 	serverStr := ""
 	for i, s := range servers {
 		if i > 0 {
-			serverStr += ","
+			serverStr += " "
 		}
 		serverStr += s.String()
 	}
 
-	// Convert GUID to string format: {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
-	guid := row.InterfaceGuid
-	guidStr := fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-		guid.Data1, guid.Data2, guid.Data3,
-		guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
-		guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7])
-
-	// Registry path: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}
-	regPath := `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\` + guidStr
-
-	// Open the registry key
-	var key windows.Handle
-	err = windows.RegOpenKeyEx(
-		windows.HKEY_LOCAL_MACHINE,
-		windows.StringToUTF16Ptr(regPath),
-		0,
-		windows.KEY_SET_VALUE,
-		&key,
-	)
-	if err != nil {
-		return fmt.Errorf("open registry key: %w", err)
-	}
-	defer windows.RegCloseKey(key)
-
-	// Set the NameServer value
 	serverUTF16, err := windows.UTF16PtrFromString(serverStr)
 	if err != nil {
 		return err
 	}
 
-	// Use RegSetValueExW
-	ret, _, err := procRegSetValueEx.Call(
-		uintptr(key),
-		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("NameServer"))),
-		0,
-		uintptr(windows.REG_SZ),
-		uintptr(unsafe.Pointer(serverUTF16)),
-		uintptr((len(serverStr)+1))*2,
-	)
-	if ret != 0 {
-		return fmt.Errorf("set NameServer: %w", err)
+	// Use correct structure with Flags set
+	settings := interfaceDnsSettingsEx{
+		Version:    1,
+		Flags:      DNS_SETTING_NAMESERVER, // Must set this flag!
+		NameServer: serverUTF16,
 	}
 
+	ret, _, _ := procSetInterfaceDnsSettings.Call(
+		uintptr(unsafe.Pointer(&row.InterfaceGuid)),
+		uintptr(unsafe.Pointer(&settings)),
+	)
+	if ret != 0 {
+		return fmt.Errorf("SetInterfaceDnsSettings: 0x%x", ret)
+	}
 	return nil
 }
 

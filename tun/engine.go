@@ -90,7 +90,7 @@ func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
 
 // resolveWithServers resolves a domain using the specified DNS servers.
 // It queries all servers concurrently and returns the first successful result.
-// Sockets are bound to the original default interface (captured at TUN startup)
+// Sockets are bound to the interface determined by routing (excluding TUN)
 // to avoid routing loops.
 func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 	type result struct {

@@ -15,11 +15,11 @@ import (
 
 // DefaultProbeURLs is the default list of HTTP endpoints used by the TUN
 // watchdog to verify real outbound connectivity. They are public captive-portal
-// style URLs chosen because they are lightweight and widely reachable.
+// style URLs chosen because they are lightweight, fast, and widely reachable.
 var DefaultProbeURLs = []string{
-	"http://www.msftconnecttest.com/connecttest.txt",
-	"http://connectivitycheck.platform.hicloud.com/generate_204",
-	"http://wifi.vivo.com.cn/generate_204",
+	"http://cp.cloudflare.com/generate_204",           // Cloudflare, very fast
+	"http://detectportal.firefox.com/success.txt",     // Firefox
+	"http://www.msftconnecttest.com/connecttest.txt",  // Microsoft
 }
 
 // ProbeTUNHTTP sends HTTP GET requests to the given URLs and returns true if

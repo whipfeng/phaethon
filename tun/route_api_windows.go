@@ -553,9 +553,14 @@ func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 		return err
 	}
 
+	// INTERFACE_DNS_SETTINGS structure:
+	// offset 0: Version (uint32) = 1
+	// offset 4: Flags (uint32) = 1 (bit 0 = DnsSettingsIpV4Enabled)
+	// offset 8: DnsServer (pointer on 64-bit, 8 bytes)
 	var settings [40]byte
-	*(*uint32)(unsafe.Pointer(&settings[0])) = 1
-	*(*uintptr)(unsafe.Pointer(&settings[16])) = uintptr(unsafe.Pointer(serverUTF16))
+	*(*uint32)(unsafe.Pointer(&settings[0])) = 1  // Version
+	*(*uint32)(unsafe.Pointer(&settings[4])) = 1  // Flags: enable IPv4 DNS
+	*(*uintptr)(unsafe.Pointer(&settings[8])) = uintptr(unsafe.Pointer(serverUTF16))  // DnsServer
 
 	ret, _, _ := procSetInterfaceDnsSettings.Call(
 		uintptr(unsafe.Pointer(&row.InterfaceGuid)),

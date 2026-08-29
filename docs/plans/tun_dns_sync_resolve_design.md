@@ -209,3 +209,88 @@ settings := interfaceDnsSettingsEx{
 **参考文档**：
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-dns_interface_settings
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-setinterfacednssettings
+
+## 7. 经验教训
+
+### 7.1 调试过程回顾
+
+**阶段 1：初步失败**
+- 使用字节数组 `[48]byte` 模拟结构体
+- 设置 `Flags=0`，`NameServer` 或 `DnsServer` 字段
+- 结果：API 返回成功但不生效
+
+**阶段 2：错误归因**
+- 误认为是 Wintun 虚拟网卡的兼容性问题
+- 尝试注册表 API 作为替代方案
+- 注册表方案工作正常，但这不是根本解决方案
+
+**阶段 3：深入调研**
+- 用户质疑：Windows 不会提供不能用的 API
+- 重新查阅 Microsoft 官方文档
+- 发现关键信息：Flags 字段必须设置对应的标志位
+
+**阶段 4：找到根因**
+- 结构体布局错误：Flags 是 ULONG64 (64位)，不是 32 位
+- Flags 未设置：必须设置 `DNS_SETTING_NAMESERVER (0x0002)`
+- 修正后 API 工作正常
+
+### 7.2 关键教训
+
+**1. 仔细阅读 API 文档**
+- 特别注意结构体字段的类型和大小
+- 注意 Flags 字段的标志位定义
+- 不要假设字段类型，必须查证
+
+**2. 不要轻易归因于外部因素**
+- 遇到问题时，先检查自己的实现
+- "API 有 bug" 应该是最后的可能性，不是第一反应
+- 用户质疑是正确的：Windows 不会提供不能用的 API
+
+**3. 使用正确的工具调试**
+- 用测试程序验证 API 调用
+- 在不同环境下测试（不同网卡、不同 Windows 版本）
+- 查阅官方文档和示例代码
+
+**4. 结构体布局的重要性**
+- Windows API 对结构体布局要求严格
+- 字段类型、大小、对齐都必须正确
+- 使用字节数组模拟结构体容易出错，应该使用正确的类型定义
+
+**5. Flags 字段的常见陷阱**
+- Flags=0 通常表示"不启用任何选项"
+- 必须查阅文档了解每个标志位的含义
+- 忘记设置 Flags 是常见的错误
+
+### 7.3 最佳实践
+
+**调用 Windows API 时的检查清单**：
+- [ ] 结构体字段类型是否正确（特别是 ULONG vs ULONG64）
+- [ ] 结构体字段顺序是否正确
+- [ ] 是否需要 padding 对齐
+- [ ] Flags 字段是否需要设置特定的标志位
+- [ ] 版本字段是否需要设置特定的版本号
+- [ ] 指针字段是否正确初始化
+- [ ] 字符串是否为 NULL 终止的宽字符串
+
+**调试策略**：
+1. 先检查自己的实现，不要假设 API 有问题
+2. 查阅官方文档，特别是 Remarks 和 Requirements 部分
+3. 查找官方示例代码或第三方成功使用的案例
+4. 用最小化测试程序验证 API 调用
+5. 检查返回值和错误码的真实含义
+
+### 7.4 技术细节
+
+**DNS_INTERFACE_SETTINGS 结构体关键点**：
+- `Version`: 必须设置为 `DNS_INTERFACE_SETTINGS_VERSION1` (1)
+- `Flags`: ULONG64 类型，必须设置对应的标志位
+  - `DNS_SETTING_NAMESERVER (0x0002)`: 配置 NameServer 字段
+  - `DNS_SETTING_IPV6 (0x0001)`: 配置 IPv6 地址
+  - 其他标志位参见文档
+- `NameServer`: 空格或逗号分隔的 DNS 服务器地址列表
+
+**常见错误**：
+1. 使用 32 位 Flags 而不是 64 位
+2. 忘记设置 Flags 标志位
+3. 结构体字段顺序错误
+4. 缺少必要的 padding 对齐

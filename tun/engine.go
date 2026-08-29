@@ -566,12 +566,13 @@ func (e *Engine) acceptTCP() {
 			r.Complete(true)
 			return
 		}
+		id := r.ID()
+		r.Complete(false)
 		defer ep.Close()
 
 		conn := gonet.NewTCPConn(&wq, ep)
 		defer conn.Close()
 
-		id := r.ID()
 		dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
 		dstPort := int(id.LocalPort)
 

@@ -327,3 +327,39 @@ settings := interfaceDnsSettingsEx{
 - 承认错误，勇于纠正
 - 保持好奇心，追根溯源
 - 把每次错误都当作学习机会
+
+## 8. 其他平台 Shell 命令 API 化（待办）
+
+Windows 平台已完成全部 shell 命令替换（~33 处 exec.Command → 原生 Windows API），
+Darwin 和 Linux 平台仍有残留，待后续处理。
+
+### 8.1 Darwin (macOS)
+
+| 文件 | 调用数 | 命令 | 说明 |
+|------|--------|------|------|
+| `route_darwin.go` | 10 | ifconfig, route, netstat | 接口配置、路由增删、网关查询 |
+| `dns_system_darwin.go` | 4 | networksetup | DNS 设置/恢复/查询 |
+| `cleanup_darwin.go` | 3 | route, ifconfig | 残留路由清理、接口禁用 |
+
+**可参考的 macOS 原生 API**：
+- 路由/接口：`sysctl` net.route / net.interface（通过 `syscall.Sysctl` 或 CGo 调用 `route(4)`）
+- DNS：`SCDynamicStore` / `SCNetworkConfiguration` framework（SystemConfiguration.framework）
+- 接口管理：`if_nametoindex` + `ioctl` (SIOCAIFADDR / SIOCDIFADDR)
+
+### 8.2 Linux
+
+| 文件 | 调用数 | 命令 | 说明 |
+|------|--------|------|------|
+| `dns_system_linux.go` | 4 | resolvectl, nmcli | DNS 设置/恢复 |
+| `cleanup_linux.go` | 1 | ip link | 接口禁用 |
+
+**可参考的 Linux 原生 API**：
+- DNS：直接写 `/etc/resolv.conf`（最简单）或 `systemd-resolved` D-Bus API
+- 路由/接口：`netlink` 协议（通过 `vishvananda/netlink` 库或 `syscall` 直接调用）
+- 接口管理：`ioctl` (SIOCSIFADDR / SIOCSIFFLAGS)
+
+### 8.3 优先级
+
+1. **低优先级**：Darwin/Linux 的 shell 调用不像 Windows netsh 那样受系统语言影响
+2. **可选改进**：如果后续遇到性能或可靠性问题，再逐步 API 化
+3. **保持一致性**：如果要做，三个平台统一完成，避免维护负担

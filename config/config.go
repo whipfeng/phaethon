@@ -1156,8 +1156,9 @@ type ReverseConfig struct {
 
 // TUNConfig holds TUN traffic interception settings.
 type TUNConfig struct {
-	Enabled   *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	ProbeURLs []string `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
+	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	ProbeURLs        []string `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
+	DirectNameserver []string `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
 }
 
 // IsEnabled reports whether TUN is enabled. Omitted or nil means enabled
@@ -1176,6 +1177,15 @@ func (t *TUNConfig) ProbeURLList() []string {
 		return nil
 	}
 	return t.ProbeURLs
+}
+
+// DirectNameserverList returns the configured DNS servers for DIRECT connection
+// resolution, or nil if none are configured.
+func (t *TUNConfig) DirectNameserverList() []string {
+	if t == nil {
+		return nil
+	}
+	return t.DirectNameserver
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

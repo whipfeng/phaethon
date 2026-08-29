@@ -1,12 +1,14 @@
 package tun
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"phaethon/config"
@@ -59,6 +61,80 @@ func NewEngine(ruleConf *config.RuleConfiguration) *Engine {
 		ruleConf: ruleConf,
 		closeCh:  make(chan struct{}),
 	}
+}
+
+// resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
+// It uses configured direct-nameserver if available, otherwise falls back to
+// ResolveRouteAware which uses the original DNS servers captured at TUN startup.
+func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
+	servers := e.ruleConf.TUN.DirectNameserverList()
+	if len(servers) > 0 {
+		return resolveWithServers(domain, servers)
+	}
+	// Fallback: use captured original DNS servers
+	ipStrs, err := dialer.ResolveRouteAware(domain)
+	if err != nil {
+		return nil, err
+	}
+	var ips []net.IP
+	for _, ipStr := range ipStrs {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses resolved for %s", domain)
+	}
+	return ips, nil
+}
+
+// resolveWithServers resolves a domain using the specified DNS servers.
+// It queries all servers concurrently and returns the first successful result.
+// Sockets are bound to the physical interface to avoid TUN routing loops.
+func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
+	type result struct {
+		ips []net.IP
+		err error
+	}
+	ch := make(chan result, len(servers))
+
+	bc := dialer.GetGlobalBindContext()
+
+	for _, server := range servers {
+		go func(s string) {
+			serverIP := net.ParseIP(s)
+			r := &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					d := net.Dialer{Timeout: 3 * time.Second}
+					if bc != nil {
+						d.Control = func(network, address string, c syscall.RawConn) error {
+							return bc.BindSocket(c, serverIP)
+						}
+					}
+					return d.DialContext(ctx, "udp", net.JoinHostPort(s, "53"))
+				},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ips, err := r.LookupIP(ctx, "ip4", domain)
+			ch <- result{ips, err}
+		}(server)
+	}
+
+	// Wait for first successful result or all failures
+	var lastErr error
+	for range servers {
+		res := <-ch
+		if res.err == nil && len(res.ips) > 0 {
+			return res.ips, nil
+		}
+		lastErr = res.err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("all DNS servers failed for %s", domain)
 }
 
 // IsEnabled reports whether the TUN engine is active.
@@ -660,19 +736,17 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialIP = net.ParseIP(resolvedAddr)
 		if domain != "" {
-			// Resolve the real IP for DIRECT connections via physical interface.
-			ipStrs, err := dialer.ResolveRouteAware(domain)
-			if err != nil || len(ipStrs) == 0 {
+			// Resolve the real IP for DIRECT connections.
+			ips, err := e.resolveForDirect(domain)
+			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
 				return
 			}
 			// Prefer IPv4
-			for _, ipStr := range ipStrs {
-				if ip := net.ParseIP(ipStr); ip != nil {
-					if ip4 := ip.To4(); ip4 != nil {
-						dialIP = ip4
-						break
-					}
+			for _, ip := range ips {
+				if ip4 := ip.To4(); ip4 != nil {
+					dialIP = ip4
+					break
 				}
 			}
 			util.LogInfo("[TUN] [%s] udp resolved %s -> %s for DIRECT", connID, domain, dialIP)
@@ -778,19 +852,17 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
 		if domain != "" {
-			// Resolve the real IP for DIRECT connections via physical interface.
-			ipStrs, err := dialer.ResolveRouteAware(domain)
-			if err != nil || len(ipStrs) == 0 {
+			// Resolve the real IP for DIRECT connections.
+			ips, err := e.resolveForDirect(domain)
+			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
 				return
 			}
 			// Prefer IPv4
-			for _, ipStr := range ipStrs {
-				if ip := net.ParseIP(ipStr); ip != nil {
-					if ip4 := ip.To4(); ip4 != nil {
-						dialAddr = ip4.String()
-						break
-					}
+			for _, ip := range ips {
+				if ip4 := ip.To4(); ip4 != nil {
+					dialAddr = ip4.String()
+					break
 				}
 			}
 			util.LogInfo("[TUN] [%s] resolved %s -> %s for DIRECT", connID, domain, dialAddr)

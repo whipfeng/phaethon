@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"phaethon/dialer"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -138,33 +137,6 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
 		}
 	}
-}
-
-// resolveRealIP resolves the real IP for a domain through the physical interface,
-// bypassing TUN split-tunnel routes. Returns nil if resolution fails.
-func (h *DNSHijacker) resolveRealIP(domain string) net.IP {
-	bc := dialer.GetGlobalBindContext()
-	if bc == nil {
-		// No BindContext yet (TUN still starting up); fall back to system DNS.
-		ips, err := net.LookupIP(domain)
-		if err != nil || len(ips) == 0 {
-			return nil
-		}
-		for _, ip := range ips {
-			if ip4 := ip.To4(); ip4 != nil {
-				return ip4
-			}
-		}
-		return nil
-	}
-
-	// Resolve through the original DNS servers via the physical interface.
-	ips, err := dialer.ResolveRouteAware(domain)
-	if err != nil || len(ips) == 0 {
-		util.LogDebug("tun dns: real IP resolution failed for %s: %v", domain, err)
-		return nil
-	}
-	return net.ParseIP(ips[0])
 }
 
 type slicePayload struct {

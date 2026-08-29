@@ -549,7 +549,9 @@ func getDefaultGatewayAPI() (net.IP, uint64, uint32, error) {
 }
 
 // setInterfaceDNSAPI sets DNS servers for the interface using the Windows registry.
-// This approach works reliably on Wintun and other virtual adapters where SetInterfaceDnsSettings may fail.
+// SetInterfaceDnsSettings API doesn't support Wintun virtual adapters (returns ERROR_INVALID_PARAMETER),
+// so we use the registry directly. This is still a native Windows API approach (RegOpenKeyEx/RegSetValueEx),
+// not a shell command, and is the standard method used by VPN/TUN implementations.
 func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 	row, err := getIfEntry2API(luid)
 	if err != nil {

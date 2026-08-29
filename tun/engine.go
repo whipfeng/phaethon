@@ -90,7 +90,8 @@ func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
 
 // resolveWithServers resolves a domain using the specified DNS servers.
 // It queries all servers concurrently and returns the first successful result.
-// Sockets are bound to a non-TUN interface to avoid routing loops.
+// Sockets are bound to the original default interface (captured at TUN startup)
+// to avoid routing loops.
 func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 	type result struct {
 		ips []net.IP
@@ -193,8 +194,8 @@ func (e *Engine) TUNInterfaceIndex() int {
 }
 
 // PhysicalInterfaceIndex returns the OS interface index of the original default
-// non-TUN interface (before TUN was activated). The watchdog uses this to bind
-// DNS queries to a non-TUN interface, bypassing TUN split-tunnel routes.
+// interface (before TUN was activated). The watchdog uses this to bind
+// DNS queries to the original default interface, bypassing TUN split-tunnel routes.
 func (e *Engine) PhysicalInterfaceIndex() int {
 	e.mu.Lock()
 	rm := e.routeMgr

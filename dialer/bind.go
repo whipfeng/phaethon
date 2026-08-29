@@ -94,8 +94,8 @@ func DialRouteAware(network, addr string) (net.Conn, error) {
 }
 
 // ResolveRouteAware resolves host using the original upstream DNS servers with
-// sockets bound to a non-TUN interface. If no BindContext is active, it
-// falls back to net.LookupHost.
+// sockets bound to the original default interface (captured at TUN startup).
+// If no BindContext is active, it falls back to net.LookupHost.
 func ResolveRouteAware(host string) ([]string, error) {
 	bc := GetGlobalBindContext()
 	if bc == nil {

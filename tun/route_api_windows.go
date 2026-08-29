@@ -44,6 +44,18 @@ var (
 	procSetupDiDestroyDeviceInfoList      = modsetupapi.NewProc("SetupDiDestroyDeviceInfoList")
 )
 
+// interfaceDnsSettings represents the INTERFACE_DNS_SETTINGS structure for SetInterfaceDnsSettings.
+// See: https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-interface_dns_settings
+type interfaceDnsSettings struct {
+	Version        uint32
+	Flags          uint32
+	DnsServer      *uint16
+	PrivateProfile *uint16
+	Domain         *uint16
+	Nickname       *uint16
+	NameServer     *uint16
+}
+
 // sockaddrInet represents the SOCKADDR_INET union (28 bytes).
 type sockaddrInet [28]byte
 
@@ -553,18 +565,15 @@ func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 		return err
 	}
 
-	// INTERFACE_DNS_SETTINGS structure:
-	// offset 0: Version (uint32) = 1
-	// offset 4: Flags (uint32) = 1 (bit 0 = DnsSettingsIpV4Enabled)
-	// offset 8: DnsServer (pointer on 64-bit, 8 bytes)
-	var settings [40]byte
-	*(*uint32)(unsafe.Pointer(&settings[0])) = 1  // Version
-	*(*uint32)(unsafe.Pointer(&settings[4])) = 1  // Flags: enable IPv4 DNS
-	*(*uintptr)(unsafe.Pointer(&settings[8])) = uintptr(unsafe.Pointer(serverUTF16))  // DnsServer
+	settings := interfaceDnsSettings{
+		Version:   1,
+		Flags:     1, // DnsSettingsIpV4Enabled
+		DnsServer: serverUTF16,
+	}
 
 	ret, _, _ := procSetInterfaceDnsSettings.Call(
 		uintptr(unsafe.Pointer(&row.InterfaceGuid)),
-		uintptr(unsafe.Pointer(&settings[0])),
+		uintptr(unsafe.Pointer(&settings)),
 	)
 	if ret != 0 {
 		return fmt.Errorf("SetInterfaceDnsSettings: 0x%x", ret)

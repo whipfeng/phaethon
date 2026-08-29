@@ -50,11 +50,12 @@ func ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout time.Duration, ifIndex int, pr
 		probeURLs = DefaultProbeURLs
 	}
 
-	// Pure Go DNS resolver to avoid OS thread blocking on Windows.
-	// The system DNS is configured to point to the TUN DNS hijacker (192.0.2.2),
-	// so queries will be intercepted by the hijacker.
+	// Use system DNS resolver (PreferGo: false) so that queries go through the
+	// TUN DNS hijacker and return Fake-IP addresses. The pure Go resolver
+	// (PreferGo: true) bypasses the hijacker by querying physical interface
+	// DNS servers directly.
 	resolver := &net.Resolver{
-		PreferGo:     true,
+		PreferGo:     false,
 		StrictErrors: false,
 	}
 

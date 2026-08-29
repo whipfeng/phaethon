@@ -59,7 +59,7 @@ sequenceDiagram
     Engine->>Engine: LookupDomain() 还原域名
     
     alt 规则匹配到 DIRECT
-        Engine->>RealDNS: 解析真实 IP (根据路由选择接口，若指向 TUN 则用默认接口)
+        Engine->>RealDNS: 解析真实 IP (根据路由选择接口，排除 TUN)
         RealDNS-->>Engine: 返回真实 IP (1.2.3.4)
         Engine->>Server: 直接连接到真实 IP
     else 规则匹配到代理
@@ -392,7 +392,7 @@ Darwin 和 Linux 平台仍有残留，待后续处理。
 
 使用 `dialer.ResolveRouteAware(domain)` 替代 `net.LookupIP(domain)`。
 
-`ResolveRouteAware()` 通过 `BindContext` 根据目标地址查询路由表选择接口，若最佳路由指向当前 TUN 则回退到启动时捕获的默认接口，使用原始上游 DNS 服务器解析，
+`ResolveRouteAware()` 通过 `BindContext` 根据目标地址查询路由表选择接口（排除当前 TUN 接口），使用原始上游 DNS 服务器解析，
 绕过 TUN DNS 劫持。
 
 **修改位置**：
@@ -534,7 +534,7 @@ if proxy.Type == config.ProxyDIRECT && domain != "" {
 
 - [x] 添加 `direct-nameserver` 配置项
 - [x] 实现 `resolveForDirect()` 函数
-- [x] 实现 `resolveWithServers()` 并发查询（根据路由选择接口，若指向 TUN 则用默认接口）
+- [x] 实现 `resolveWithServers()` 并发查询（根据路由选择接口，排除 TUN）
 - [x] 修改引擎 `handleConn()` 和 `handleUDP()` 使用新函数
 - [x] 删除 DNS 劫持器的死代码 `resolveRealIP()`
 - [x] 测试：配置指定 DNS / 不配置（降级）两种场景
@@ -563,7 +563,7 @@ if proxy.Type == config.ProxyDIRECT && domain != "" {
 **性能验收**：
 - [x] DNS 解析延迟 < 1 秒（使用配置的 DNS）
 - [x] 并发查询多个 DNS 服务器，取最快返回
-- [x] 无 DNS 查询死循环（根据路由选择接口，若指向 TUN 则用默认接口）
+- [x] 无 DNS 查询死循环（根据路由选择接口，排除 TUN）
 
 **稳定性验收**：
 - [x] 持续运行 30+ 分钟无崩溃

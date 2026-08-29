@@ -363,3 +363,82 @@ Darwin 和 Linux 平台仍有残留，待后续处理。
 1. **低优先级**：Darwin/Linux 的 shell 调用不像 Windows netsh 那样受系统语言影响
 2. **可选改进**：如果后续遇到性能或可靠性问题，再逐步 API 化
 3. **保持一致性**：如果要做，三个平台统一完成，避免维护负担
+
+## 9. DNS 解析死循环问题修复
+
+### 9.1 问题发现
+
+在测试直连访问时发现所有连接都卡在 SYN_SENT 状态，无法建立连接。
+
+**症状**：
+- `curl http://www.baidu.com` 超时或连接重置
+- `netstat` 显示大量到 Fake-IP（198.18.x.x）的 SYN_SENT 连接
+- 日志中没有 "resolved ... for DIRECT" 的记录
+
+### 9.2 根本原因
+
+引擎在 `handleConn()` 和 `handleUDP()` 中使用 `net.LookupIP(domain)` 解析真实 IP，
+但此时系统 DNS 已被设置为 TUN DNS（192.0.2.2），导致：
+
+1. 引擎调用 `net.LookupIP("www.baidu.com")`
+2. 系统 DNS 查询发送到 192.0.2.2（TUN DNS）
+3. TUN DNS 返回 Fake-IP（如 198.18.0.5）
+4. 引擎尝试连接到 Fake-IP
+5. Fake-IP 连接进入 TUN → 死循环或失败
+
+**关键错误**：`net.LookupIP()` 使用系统 DNS，而系统 DNS 已被劫持到 TUN。
+
+### 9.3 解决方案
+
+使用 `dialer.ResolveRouteAware(domain)` 替代 `net.LookupIP(domain)`。
+
+`ResolveRouteAware()` 通过 `BindContext` 绑定到物理接口，使用原始上游 DNS 服务器解析，
+绕过 TUN DNS 劫持。
+
+**修改位置**：
+- `tun/engine.go:664` - UDP 连接的 DNS 解析
+- `tun/engine.go:780` - TCP 连接的 DNS 解析
+
+**修改前**：
+```go
+ips, err := net.LookupIP(domain)
+```
+
+**修改后**：
+```go
+ipStrs, err := dialer.ResolveRouteAware(domain)
+// 转换 string 到 net.IP
+for _, ipStr := range ipStrs {
+    if ip := net.ParseIP(ipStr); ip != nil {
+        // 使用 ip
+    }
+}
+```
+
+### 9.4 验证结果
+
+修复后的日志：
+```
+[TUN] [conn-34] resolved console.enterprise.trae.cn -> 101.126.55.244 for DIRECT
+[TUN] [conn-34] console.enterprise.trae.cn:443 -> DIRECT
+```
+
+测试结果：
+- `curl http://www.baidu.com` → HTTP 200, 0.13s
+- `curl https://www.cloudflare.com` → HTTP 200, 4.7s
+- `curl https://www.taobao.com` → HTTP 200, 0.38s
+
+### 9.5 经验教训
+
+**问题模式**：当修改系统级配置（如 DNS）时，必须考虑所有依赖该配置的代码路径。
+
+**检查清单**：
+- [ ] 修改系统 DNS 后，所有使用 `net.LookupIP()` 的地方是否受影响？
+- [ ] 是否需要绑定到特定接口以避免路由循环？
+- [ ] 是否有类似的"自引用"问题（A 依赖 B，B 又依赖 A）？
+
+**调试方法**：
+1. 观察网络连接状态（SYN_SENT 卡住）
+2. 检查日志中的 DNS 解析记录
+3. 追踪 DNS 查询的实际路径（通过哪个接口、哪个 DNS 服务器）
+4. 识别循环依赖

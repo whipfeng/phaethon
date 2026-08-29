@@ -660,17 +660,19 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialIP = net.ParseIP(resolvedAddr)
 		if domain != "" {
-			// Resolve the real IP for DIRECT connections.
-			ips, err := net.LookupIP(domain)
-			if err != nil || len(ips) == 0 {
+			// Resolve the real IP for DIRECT connections via physical interface.
+			ipStrs, err := dialer.ResolveRouteAware(domain)
+			if err != nil || len(ipStrs) == 0 {
 				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
 				return
 			}
 			// Prefer IPv4
-			for _, ip := range ips {
-				if ip4 := ip.To4(); ip4 != nil {
-					dialIP = ip4
-					break
+			for _, ipStr := range ipStrs {
+				if ip := net.ParseIP(ipStr); ip != nil {
+					if ip4 := ip.To4(); ip4 != nil {
+						dialIP = ip4
+						break
+					}
 				}
 			}
 			util.LogInfo("[TUN] [%s] udp resolved %s -> %s for DIRECT", connID, domain, dialIP)
@@ -776,17 +778,19 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
 		if domain != "" {
-			// Resolve the real IP for DIRECT connections.
-			ips, err := net.LookupIP(domain)
-			if err != nil || len(ips) == 0 {
+			// Resolve the real IP for DIRECT connections via physical interface.
+			ipStrs, err := dialer.ResolveRouteAware(domain)
+			if err != nil || len(ipStrs) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
 				return
 			}
 			// Prefer IPv4
-			for _, ip := range ips {
-				if ip4 := ip.To4(); ip4 != nil {
-					dialAddr = ip4.String()
-					break
+			for _, ipStr := range ipStrs {
+				if ip := net.ParseIP(ipStr); ip != nil {
+					if ip4 := ip.To4(); ip4 != nil {
+						dialAddr = ip4.String()
+						break
+					}
 				}
 			}
 			util.LogInfo("[TUN] [%s] resolved %s -> %s for DIRECT", connID, domain, dialAddr)

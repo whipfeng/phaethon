@@ -509,6 +509,7 @@ func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
 // resolveWithServers 使用指定的 DNS 服务器解析
 func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
     // 实现：并发查询所有服务器，返回最快结果
+    // Socket 绑定到非 TUN 接口，避免路由循环
     // 参考 dialer.ResolveRouteAware 的实现
 }
 ```
@@ -562,7 +563,7 @@ if proxy.Type == config.ProxyDIRECT && domain != "" {
 **性能验收**：
 - [x] DNS 解析延迟 < 1 秒（使用配置的 DNS）
 - [x] 并发查询多个 DNS 服务器，取最快返回
-- [x] 无 DNS 查询死循环（绑定物理接口）
+- [x] 无 DNS 查询死循环（Socket 绑定到非 TUN 接口）
 
 **稳定性验收**：
 - [x] 持续运行 30+ 分钟无崩溃

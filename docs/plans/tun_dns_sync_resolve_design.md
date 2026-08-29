@@ -442,3 +442,98 @@ for _, ipStr := range ipStrs {
 2. 检查日志中的 DNS 解析记录
 3. 追踪 DNS 查询的实际路径（通过哪个接口、哪个 DNS 服务器）
 4. 识别循环依赖
+
+## 10. DIRECT 连接 DNS 解析策略
+
+### 10.1 问题背景
+
+TUN 启动后，系统 DNS 被设置为 TUN DNS（192.0.2.2）。当引擎需要解析 DIRECT 连接的真实 IP 时，
+不能使用系统 DNS（会返回 Fake-IP），需要使用其他 DNS 服务器。
+
+### 10.2 主流实现调研
+
+| 工具 | DNS 策略 |
+|------|----------|
+| Clash/mihomo | 配置文件显式指定 DNS 服务器（nameserver, fallback） |
+| Surge | 自己实现 DNS，用配置的 upstream，可选 fallback 到系统 DNS |
+| V2Ray | 配置文件指定 DNS 服务器 |
+
+**共同点**：不依赖动态查询系统 DNS，要么配置指定，要么启动时捕获。
+
+### 10.3 设计方案
+
+**优先级**：
+1. **配置指定**（首选）：使用 `config.yaml` 中配置的 DNS 服务器
+2. **启动捕获**（降级）：使用 TUN 启动时捕获的 `OriginalDNSServers`
+
+**配置格式**（在 `tun` 部分添加）：
+```yaml
+tun:
+  enabled: true
+  # DIRECT 连接解析用的 DNS 服务器（可选）
+  # 如果不配置，使用 TUN 启动时捕获的系统 DNS
+  direct-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+```
+
+### 10.4 实现计划
+
+**Step 1：配置结构**
+```go
+// config/config.go
+type TunConfig struct {
+    // ... 现有字段
+    DirectNameserver []string `yaml:"direct-nameserver"`
+}
+```
+
+**Step 2：解析函数**
+```go
+// tun/engine.go
+func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
+    // 1. 优先使用配置的 DNS
+    if len(e.config.DirectNameserver) > 0 {
+        return resolveWithServers(domain, e.config.DirectNameserver)
+    }
+    
+    // 2. 降级使用捕获的 DNS
+    ips, err := dialer.ResolveRouteAware(domain)
+    if err != nil {
+        return nil, err
+    }
+    // 转换 string 到 net.IP
+    // ...
+}
+
+// resolveWithServers 使用指定的 DNS 服务器解析
+func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
+    // 实现：并发查询所有服务器，返回最快结果
+    // 参考 dialer.ResolveRouteAware 的实现
+}
+```
+
+**Step 3：引擎调用**
+```go
+// tun/engine.go handleConn() 和 handleUDP()
+if proxy.Type == config.ProxyDIRECT && domain != "" {
+    ips, err := e.resolveForDirect(domain)
+    // 使用 ips 连接
+}
+```
+
+### 10.5 优势
+
+1. **灵活性**：用户可以指定 preferred DNS（如阿里 DNS、腾讯 DNS）
+2. **可靠性**：不配置时自动降级到捕获的 DNS
+3. **性能**：可以配置多个 DNS，并发查询取最快
+4. **符合主流**：与 Clash/Surge 的设计一致
+
+### 10.6 待办
+
+- [ ] 添加 `direct-nameserver` 配置项
+- [ ] 实现 `resolveForDirect()` 函数
+- [ ] 实现 `resolveWithServers()` 并发查询
+- [ ] 修改引擎 `handleConn()` 和 `handleUDP()` 使用新函数
+- [ ] 删除 DNS 劫持器的死代码 `resolveRealIP()`
+- [ ] 测试：配置指定 DNS / 不配置（降级）两种场景

@@ -193,8 +193,8 @@ func (e *Engine) TUNInterfaceIndex() int {
 }
 
 // PhysicalInterfaceIndex returns the OS interface index of the original default
-// physical interface (before TUN was activated). The watchdog uses this to bind
-// DNS queries to the physical interface, bypassing TUN split-tunnel routes.
+// non-TUN interface (before TUN was activated). The watchdog uses this to bind
+// DNS queries to a non-TUN interface, bypassing TUN split-tunnel routes.
 func (e *Engine) PhysicalInterfaceIndex() int {
 	e.mu.Lock()
 	rm := e.routeMgr

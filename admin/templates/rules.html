@@ -12,6 +12,7 @@
             <table class="data-table">
                 <thead>
                     <tr>
+                        <th class="col-drag"></th>
                         <th>#</th>
                         <th data-i18n="rule.match">Match</th>
                         <th data-i18n="rule.target">Target</th>
@@ -23,7 +24,8 @@
                 <tbody id="rules-tbody">
                     {{range $idx, $rule := .Rules}}
                     {{$parsed := parseRule $rule}}
-                    <tr data-idx="{{$idx}}" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
+                    <tr data-idx="{{$idx}}" draggable="true" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
+                        <td class="col-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
                         <td>{{$idx}}</td>
                         <td><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
                         <td><strong>{{index $parsed 2}}</strong></td>
@@ -428,5 +430,101 @@ function ipv6InCidr(ip, cidr) {
     const networkMask = (BigInt(1) << BigInt(128)) - BigInt(1) - lowerMask;
     return (ipInt & networkMask) === (netInt & networkMask);
 }
+
+// ========== Drag-and-Drop Rule Reordering ==========
+(function initRuleDragDrop() {
+    const tbody = document.getElementById('rules-tbody');
+    if (!tbody) return;
+
+    let dragIdx = null;
+    let dropIndicator = null;
+
+    function createDropIndicator() {
+        if (dropIndicator) return dropIndicator;
+        dropIndicator = document.createElement('tr');
+        dropIndicator.className = 'drop-indicator';
+        const td = document.createElement('td');
+        td.colSpan = 7;
+        const line = document.createElement('div');
+        line.className = 'drop-line';
+        td.appendChild(line);
+        dropIndicator.appendChild(td);
+        return dropIndicator;
+    }
+
+    function getRowMidY(tr) {
+        const rect = tr.getBoundingClientRect();
+        return rect.top + rect.height / 2;
+    }
+
+    tbody.addEventListener('dragstart', (e) => {
+        const tr = e.target.closest('tr[data-idx]');
+        if (!tr) return;
+        dragIdx = parseInt(tr.dataset.idx);
+        tr.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', dragIdx);
+    });
+
+    tbody.addEventListener('dragend', (e) => {
+        const tr = e.target.closest('tr[data-idx]');
+        if (tr) tr.classList.remove('dragging');
+        if (dropIndicator && dropIndicator.parentNode) {
+            dropIndicator.parentNode.removeChild(dropIndicator);
+        }
+        dragIdx = null;
+    });
+
+    tbody.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+
+        const tr = e.target.closest('tr[data-idx]');
+        if (!tr || dragIdx === null) return;
+
+        const indicator = createDropIndicator();
+        const midY = getRowMidY(tr);
+        const insertBefore = e.clientY < midY;
+
+        if (insertBefore) {
+            tbody.insertBefore(indicator, tr);
+        } else {
+            const next = tr.nextElementSibling;
+            if (next && next !== indicator) {
+                tbody.insertBefore(indicator, next);
+            } else if (!next) {
+                tbody.appendChild(indicator);
+            }
+        }
+    });
+
+    tbody.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (dragIdx === null) return;
+
+        const tr = e.target.closest('tr[data-idx]');
+        if (!tr) return;
+
+        const midY = getRowMidY(tr);
+        const insertBefore = e.clientY < midY;
+        const targetIdx = parseInt(tr.dataset.idx);
+
+        let newIdx;
+        if (insertBefore) {
+            newIdx = targetIdx > dragIdx ? targetIdx - 1 : targetIdx;
+        } else {
+            newIdx = targetIdx > dragIdx ? targetIdx : targetIdx + 1;
+        }
+
+        if (newIdx !== dragIdx && newIdx >= 0 && newIdx < rules.length) {
+            moveRule(dragIdx, newIdx - dragIdx);
+        }
+
+        if (dropIndicator && dropIndicator.parentNode) {
+            dropIndicator.parentNode.removeChild(dropIndicator);
+        }
+        dragIdx = null;
+    });
+})();
 </script>
 {{end}}

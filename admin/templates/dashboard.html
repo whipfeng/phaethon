@@ -58,18 +58,7 @@
         <table class="info-table">
             <tr><td data-i18n="dash.uptime">Uptime</td><td>{{formatUptime .UptimeSeconds}}</td></tr>
             <tr><td data-i18n="dash.started">Started</td><td>{{index .Stats "startTime"}}</td></tr>
-            {{if .EnvInfo.HasOverlay}}
-            <tr><td data-i18n="dash.env">Env</td><td><span class="badge badge-warn">{{.EnvInfo.Name}}</span> <small>(overlay active)</small></td></tr>
-            {{else if .EnvInfo.Name}}
-            <tr><td data-i18n="dash.env">Env</td><td><span class="badge">{{.EnvInfo.Name}}</span></td></tr>
-            {{end}}
-            <tr><td data-i18n="dash.saveTarget">Save Target</td><td><span class="badge badge-{{if eq .SaveTarget "env"}}warn{{else}}info{{end}}">{{.SaveTarget}}</span></td></tr>
         </table>
-        {{if .EnvInfo.HasOverlay}}
-        <div class="env-hint">
-            runtime = base + <code>{{.EnvInfo.Name}}</code> | editing <strong>{{.SaveTarget}}</strong>
-        </div>
-        {{end}}
     </div>
 
     <!-- TUN Status -->
@@ -92,9 +81,24 @@
                 <tr><td data-i18n="tun.tunIP">TUN IP</td><td id="tun-ip">-</td></tr>
                 <tr><td data-i18n="tun.gateway">Gateway</td><td id="tun-gateway">-</td></tr>
                 <tr><td data-i18n="tun.iface">Interface</td><td id="tun-iface">-</td></tr>
+                <tr><td data-i18n="tun.device">Device</td><td id="tun-device">-</td></tr>
                 <tr><td data-i18n="tun.exclusions">Exclusions</td><td id="tun-exclusions">-</td></tr>
                 <tr><td data-i18n="tun.splitTunnels">Split Tunnels</td><td id="tun-splittunnels">-</td></tr>
             </table>
+        </div>
+        <div class="tun-section" id="tun-stats-section" style="display:none;">
+            <h4 data-i18n="tun.stats">Counters</h4>
+            <table class="info-table">
+                <tr><td data-i18n="tun.readPackets">Read Packets</td><td id="tun-read-pkts">-</td></tr>
+                <tr><td data-i18n="tun.writePackets">Write Packets</td><td id="tun-write-pkts">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPDomains">Fake-IP Domains</td><td id="tun-fakeip-domains">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPRegistered">Fake-IP Registered</td><td id="tun-fakeip-registered">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPCache">Fake-IP Real-IP Cache</td><td id="tun-fakeip-cache">-</td></tr>
+            </table>
+        </div>
+        <div class="tun-section" id="tun-probe-section" style="display:none;">
+            <h4 data-i18n="tun.probes">Probe URLs</h4>
+            <div id="tun-probes" class="tun-probe-list"></div>
         </div>
         <div class="tun-section" id="tun-logs-section" style="display:none;">
             <h4 data-i18n="tun.logs">Event Log</h4>
@@ -285,6 +289,11 @@
             .catch(() => {});
     }
 
+    function escapeHtml(s) {
+        if (!s) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
     function renderTUN(data) {
         const card = document.getElementById('tun-card');
         if (!card) return;
@@ -295,9 +304,14 @@
         const logsSection = document.getElementById('tun-logs-section');
         const runningEl = document.getElementById('tun-running');
 
-        if (toggle) toggle.checked = data.enabled;
+        // Toggle reflects actual running state, not just config
+        if (toggle) {
+            toggle.checked = data.running;
+            toggle.disabled = false;
+        }
 
         const running = data.running;
+        const enabled = data.enabled;
         const tRunning = typeof i18n !== 'undefined' ? i18n.t(running ? 'tun.running' : 'tun.stopped') : (running ? 'Running' : 'Stopped');
         const color = running ? 'var(--success)' : 'var(--text-muted)';
         if (runningEl) {
@@ -307,6 +321,8 @@
         if (statusEl) {
             if (!data.available) {
                 statusEl.innerHTML = '<p>' + (typeof i18n !== 'undefined' ? i18n.t('tun.notAvailable') : 'TUN extension not available') + '</p>';
+            } else if (enabled && !running) {
+                statusEl.innerHTML = '<p class="text-warning">⚠ ' + (typeof i18n !== 'undefined' ? i18n.t('tun.enabledButStopped') : 'Enabled but not running') + '</p>';
             } else {
                 statusEl.innerHTML = '';
             }
@@ -322,10 +338,35 @@
         if (gwEl) gwEl.textContent = routes.originalGateway || '-';
         const ifaceEl = document.getElementById('tun-iface');
         if (ifaceEl) ifaceEl.textContent = routes.defaultIface || '-';
+        const deviceEl = document.getElementById('tun-device');
+        if (deviceEl) deviceEl.textContent = data.deviceName || '-';
         const exclEl = document.getElementById('tun-exclusions');
         if (exclEl) exclEl.textContent = (routes.exclusions && routes.exclusions.length) ? routes.exclusions.join(', ') : '-';
         const splitEl = document.getElementById('tun-splittunnels');
         if (splitEl) splitEl.textContent = (routes.splitTunnels && routes.splitTunnels.length) ? routes.splitTunnels.join(', ') : '-';
+
+        // Stats section
+        const statsSection = document.getElementById('tun-stats-section');
+        if (statsSection) statsSection.style.display = (running && data.stats) ? 'block' : 'none';
+        if (data.stats) {
+            const s = data.stats;
+            const setT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v != null ? v : '-'; };
+            setT('tun-read-pkts', s.readPackets);
+            setT('tun-write-pkts', s.writePackets);
+            if (s.fakeIP) {
+                setT('tun-fakeip-domains', s.fakeIP.domainCount);
+                setT('tun-fakeip-registered', s.fakeIP.registeredCount);
+                setT('tun-fakeip-cache', s.fakeIP.realIPCacheCount);
+            }
+        }
+
+        // Probe URLs section
+        const probeSection = document.getElementById('tun-probe-section');
+        if (probeSection) probeSection.style.display = (data.probeURLs && data.probeURLs.length) ? 'block' : 'none';
+        const probesEl = document.getElementById('tun-probes');
+        if (probesEl && data.probeURLs) {
+            probesEl.innerHTML = data.probeURLs.map(u => '<span class="badge badge-info">' + escapeHtml(u) + '</span>').join(' ');
+        }
 
         const logsEl = document.getElementById('tun-logs');
         if (logsEl && data.logs) {
@@ -336,6 +377,7 @@
 
     function toggleTUN(checkbox) {
         const enabled = checkbox.checked;
+        checkbox.disabled = true;
         fetch('./api/tun', {
             method: 'PATCH',
             headers: {'Content-Type': 'application/json'},
@@ -343,14 +385,16 @@
         })
         .then(res => {
             if (!res.ok) {
-                checkbox.checked = !enabled;
                 return res.text().then(text => { throw new Error(text); });
             }
-            // SSE will refresh the TUN card once the toggle is applied.
+            // SSE will refresh the TUN card once the toggle is applied
         })
         .catch(err => {
             checkbox.checked = !enabled;
             showToast((typeof i18n !== 'undefined' ? i18n.t('tun.toggleFailed') : 'TUN toggle failed') + ': ' + err.message, 'error');
+        })
+        .finally(() => {
+            checkbox.disabled = false;
         });
     }
     </script>

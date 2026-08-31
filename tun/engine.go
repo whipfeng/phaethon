@@ -806,6 +806,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
+		e.logEvent("✗ UDP %s:%d REJECTED", resolvedAddr, resolvedPort)
 		return
 	}
 
@@ -817,6 +818,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			e.logEvent("✗ UDP %s:%d via %s fail: %v", resolvedAddr, resolvedPort, proxy.Name, err)
 			return
 		}
 		dialIP = net.ParseIP(resolvedAddr)
@@ -828,6 +830,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
+				e.logEvent("✗ UDP resolve %s fail: %v", domain, err)
 				return
 			}
 			// Prefer IPv4
@@ -842,6 +845,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
+			e.logEvent("✗ UDP %s:%d direct fail: %v", resolvedAddr, resolvedPort, err)
 			return
 		}
 	}
@@ -850,6 +854,12 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	desc := proxyDesc(proxy)
+	if domain != "" {
+		e.logEvent("✓ UDP %s(%s):%d → %s", domain, resolvedAddr, resolvedPort, desc)
+	} else {
+		e.logEvent("✓ UDP %s:%d → %s", resolvedAddr, resolvedPort, desc)
+	}
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
 }
@@ -927,6 +937,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
+		e.logEvent("✗ TCP %s:%d REJECTED", resolvedAddr, resolvedPort)
 		return
 	}
 
@@ -934,6 +945,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			e.logEvent("✗ TCP %s:%d via %s fail: %v", resolvedAddr, resolvedPort, proxy.Name, err)
 			return
 		}
 	} else {
@@ -944,6 +956,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
+				e.logEvent("✗ TCP resolve %s fail: %v", domain, err)
 				return
 			}
 			// Prefer IPv4
@@ -958,12 +971,19 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
+			e.logEvent("✗ TCP %s:%d direct fail: %v", dialAddr, resolvedPort, err)
 			return
 		}
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	desc := proxyDesc(proxy)
+	if domain != "" {
+		e.logEvent("✓ TCP %s(%s):%d → %s", domain, resolvedAddr, resolvedPort, desc)
+	} else {
+		e.logEvent("✓ TCP %s:%d → %s", resolvedAddr, resolvedPort, desc)
+	}
 	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
 }
 

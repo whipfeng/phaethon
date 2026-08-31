@@ -58,16 +58,21 @@ func ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout time.Duration, ifIndex int, pr
 		StrictErrors: false,
 	}
 
-	// Rely on the routing table to send probe traffic through TUN.
-	// The 198.18.0.0/15 route directs Fake-IP traffic to the TUN interface.
-	// Explicit socket binding (IP_UNICAST_IF) is not needed and can interfere
-	// with response delivery from the TUN device.
+	// Bind to the TUN adapter using IP_UNICAST_IF (Windows) or
+	// SO_BINDTODEVICE/IP_BOUND_IF (Linux/Darwin) to force probe traffic
+	// through TUN.
 	dialer := &net.Dialer{Timeout: httpTimeout}
+	if ifIndex > 0 {
+		if ctrl := watchdogControl(ifIndex); ctrl != nil {
+			dialer.Control = ctrl
+		}
+	}
 
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Force IPv4 for Fake-IP compatibility.
+				// Force IPv4 so interface binding (bind to local IP) is
+				// unambiguous and does not depend on dual-stack socket behavior.
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},
 		},

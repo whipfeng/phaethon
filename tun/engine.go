@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -376,6 +377,10 @@ func (e *Engine) Start() error {
 	// e.watchdog = NewHealthWatchdog(e)
 	// e.watchdog.Start()
 
+	if e.ruleConf != nil {
+		go dialer.PreWarmSSHProxies(e.ruleConf.Proxies)
+	}
+
 	e.logEvent("TUN engine started on %s", dev.Name())
 	util.LogInfo("tun engine started on %s", dev.Name())
 	return nil
@@ -509,6 +514,8 @@ func (e *Engine) logPacketCounts() {
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	defer e.wg.Done()
 	readBuf := make([]byte, 2048)
 	for {
@@ -574,6 +581,8 @@ func (e *Engine) readLoop() {
 
 // writeLoop reads outbound packets from netstack and writes them to the TUN device.
 func (e *Engine) writeLoop() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	defer e.wg.Done()
 	for {
 		select {

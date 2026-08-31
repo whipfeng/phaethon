@@ -8,6 +8,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/reverse"
+	"phaethon/util"
 )
 
 // Global UDP ephemeral port range.
@@ -200,6 +201,22 @@ func ChainDial(proxy *config.Proxy, dstAddr string, dstPort int) (net.Conn, erro
 // outbound dial logs can be correlated with the inbound accept logs.
 func ChainDialWithID(proxy *config.Proxy, dstAddr string, dstPort int, connID string) (net.Conn, error) {
 	return chainDial(proxy, dstAddr, dstPort, connID, 0)
+}
+
+// PreWarmSSHProxies establishes SSH connections eagerly for all SSH-type proxies
+// in the list so that the first user request does not pay the handshake latency.
+func PreWarmSSHProxies(proxies []*config.Proxy) {
+	for _, p := range proxies {
+		if p == nil || !p.IsEnabled() {
+			continue
+		}
+		if strings.EqualFold(p.Type, config.ProxySSH) {
+			d := &SSHDialer{BaseDialer: BaseDialer{Proxy: p}}
+			if err := d.PreWarm(); err != nil {
+				util.LogWarn("[SSH-CLI] [%s] pre-warm failed: %v", p.Name, err)
+			}
+		}
+	}
 }
 
 func chainDial(proxy *config.Proxy, dstAddr string, dstPort int, connID string, depth int) (net.Conn, error) {

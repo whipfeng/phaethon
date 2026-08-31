@@ -5,16 +5,23 @@ package tun
 import (
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
 
 type windowsTUN struct {
-	adapter *wintun.Adapter
-	session wintun.Session
-	name    string
-	mtu     int
+	adapter  *wintun.Adapter
+	session  wintun.Session
+	readWait windows.Handle
+	name     string
+	mtu      int
+
+	close   atomic.Bool
+	running sync.WaitGroup
+	closeMu sync.Once
 }
 
 // CreateDevice creates a Windows Wintun device.
@@ -31,11 +38,14 @@ func CreateDevice() (Device, error) {
 		return nil, fmt.Errorf("start wintun session: %w", err)
 	}
 
+	readWait := session.ReadWaitEvent()
+
 	return &windowsTUN{
-		adapter: adapter,
-		session: session,
-		name:    tunName,
-		mtu:     1500,
+		adapter:  adapter,
+		session:  session,
+		readWait: readWait,
+		name:     tunName,
+		mtu:      1500,
 	}, nil
 }
 
@@ -51,33 +61,61 @@ func (t *windowsTUN) LUID() uint64 {
 }
 
 func (t *windowsTUN) Close() error {
-	t.session.End()
-	return t.adapter.Close()
+	t.closeMu.Do(func() {
+		t.close.Store(true)
+		windows.SetEvent(t.readWait)
+		t.running.Wait()
+		t.session.End()
+		t.adapter.Close()
+	})
+	return nil
 }
 
 func (t *windowsTUN) Read(buf []byte) (int, error) {
-	packet, err := t.session.ReceivePacket()
-	if err != nil {
-		// No more data is a normal condition for non-blocking read.
-		if err.Error() == "No more data is available." {
-			return 0, nil
-		}
-		// ERROR_HANDLE_EOF ("Reached the end of the file.") means the Wintun
-		// session has ended, usually because the adapter was removed. Use a
-		// portable sentinel so the read loop exits cleanly.
-		if errors.Is(err, windows.ERROR_HANDLE_EOF) {
+	t.running.Add(1)
+	defer t.running.Done()
+
+	for {
+		if t.close.Load() {
 			return 0, ErrSessionClosed
 		}
-		return 0, err
+
+		packet, err := t.session.ReceivePacket()
+		switch {
+		case err == nil:
+			n := copy(buf, packet)
+			t.session.ReleaseReceivePacket(packet)
+			return n, nil
+		case errors.Is(err, windows.ERROR_NO_MORE_ITEMS):
+			waitResult, waitErr := windows.WaitForSingleObject(t.readWait, windows.INFINITE)
+			if waitErr != nil {
+				return 0, fmt.Errorf("wait for read event: %w", waitErr)
+			}
+			if waitResult == windows.WAIT_FAILED {
+				return 0, fmt.Errorf("wait for read event failed")
+			}
+			continue
+		case errors.Is(err, windows.ERROR_HANDLE_EOF):
+			return 0, ErrSessionClosed
+		default:
+			return 0, err
+		}
 	}
-	n := copy(buf, packet)
-	t.session.ReleaseReceivePacket(packet)
-	return n, nil
 }
 
 func (t *windowsTUN) Write(buf []byte) (int, error) {
+	t.running.Add(1)
+	defer t.running.Done()
+
+	if t.close.Load() {
+		return 0, ErrSessionClosed
+	}
+
 	packet, err := t.session.AllocateSendPacket(len(buf))
 	if err != nil {
+		if errors.Is(err, windows.ERROR_BUFFER_OVERFLOW) {
+			return len(buf), nil
+		}
 		return 0, err
 	}
 	copy(packet, buf)

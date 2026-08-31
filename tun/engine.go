@@ -288,8 +288,9 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("tun: init netstack: %w", err)
 	}
 
-	// 4. Init Fake-IP pool
-	e.fakeIP = NewFakeIPPoolWithStack(e.ns, tunNICID)
+	// 4. Init Fake-IP pool (no netstack registration needed; promiscuous mode
+	// ensures the TCP/UDP forwarders receive packets for all Fake-IP destinations)
+	e.fakeIP = NewFakeIPPool()
 
 	// 5. Init DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
@@ -660,6 +661,82 @@ func (e *Engine) acceptTCP() {
 	<-e.closeCh
 }
 
+// relayWithIdleTimeout bidirectionally copies data between conn and target.
+// A watchdog goroutine monitors activity via atomic timestamps and calls Close()
+// when no data flows for idleTimeout. This avoids gVisor's SetReadDeadline lock
+// contention that previously caused CreateEndpoint timeouts.
+func relayWithIdleTimeout(conn, target net.Conn, idleTimeout time.Duration) {
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, lastActivity.Load())) > idleTimeout {
+					conn.Close()
+					target.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			lastActivity.Store(time.Now().UnixNano())
+			n, err := conn.Read(buf)
+			if n > 0 {
+				lastActivity.Store(time.Now().UnixNano())
+				if _, werr := target.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				if cw, ok := target.(interface{ CloseWrite() error }); ok {
+					cw.CloseWrite()
+				}
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			lastActivity.Store(time.Now().UnixNano())
+			n, err := target.Read(buf)
+			if n > 0 {
+				lastActivity.Store(time.Now().UnixNano())
+				if _, werr := conn.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+					cw.CloseWrite()
+				}
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
 // acceptUDP accepts UDP datagrams from netstack and proxies them through
 // the proxy chain or direct dial, mirroring the TCP acceptTCP pattern.
 func (e *Engine) acceptUDP() {
@@ -876,7 +953,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	defer targetConn.Close()
 
 	util.LogInfo("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	util.Relay(conn, targetConn)
+	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
 }
 
 func proxyDesc(p *config.Proxy) string {

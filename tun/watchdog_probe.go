@@ -51,29 +51,23 @@ func ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout time.Duration, ifIndex int, pr
 	}
 
 	// Use system DNS resolver (PreferGo: false) so that queries go through the
-	// TUN DNS hijacker and return Fake-IP addresses. The pure Go resolver
-	// (PreferGo: true) bypasses the hijacker by querying physical interface
-	// DNS servers directly.
+	// TUN DNS hijacker and return Fake-IP addresses. This tests the full TUN
+	// path: DNS hijack → Fake-IP → netstack → engine → proxy → real internet.
 	resolver := &net.Resolver{
 		PreferGo:     false,
 		StrictErrors: false,
 	}
 
-	// Bind to the TUN adapter using IP_UNICAST_IF (Windows) or
-	// SO_BINDTODEVICE/IP_BOUND_IF (Linux/Darwin) to force probe traffic
-	// through TUN.
+	// Rely on the routing table to send probe traffic through TUN.
+	// The 198.18.0.0/15 route directs Fake-IP traffic to the TUN interface.
+	// Explicit socket binding (IP_UNICAST_IF) is not needed and can interfere
+	// with response delivery from the TUN device.
 	dialer := &net.Dialer{Timeout: httpTimeout}
-	if ifIndex > 0 {
-		if ctrl := watchdogControl(ifIndex); ctrl != nil {
-			dialer.Control = ctrl
-		}
-	}
 
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Force IPv4 so interface binding (bind to local IP) is
-				// unambiguous and does not depend on dual-stack socket behavior.
+				// Force IPv4 for Fake-IP compatibility.
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},
 		},
@@ -95,9 +89,9 @@ func ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout time.Duration, ifIndex int, pr
 			continue
 		}
 
-		// Resolve the hostname using the pure Go DNS resolver. The query goes to
-		// the system-configured DNS server (TUN DNS hijacker at 192.0.2.2), which
-		// returns a Fake-IP. The engine will handle the Fake-IP connection.
+		// Resolve the hostname using the system DNS resolver. The query goes to
+		// the TUN DNS hijacker at 192.0.2.2, which returns a Fake-IP. The engine
+		// will handle the Fake-IP connection.
 		resolveCtx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
 		ips, err := resolver.LookupIP(resolveCtx, "ip4", u.Hostname())
 		cancel()

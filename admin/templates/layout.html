@@ -28,11 +28,6 @@
                 <li><a href="./reverse" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
             </ul>
             <div class="sidebar-footer">
-                <div class="config-target" onclick="switchSaveTarget()" title="Click to switch">
-                    <span class="config-target-label">CONFIG</span>
-                    <span class="config-target-value {{.SaveTarget}}">{{.SaveTarget | upper}}</span>
-                    {{if .CanSwitch}}<span class="config-target-hint">⇄</span>{{end}}
-                </div>
                 <div class="sidebar-footer-actions">
                     <a href="./config" class="btn btn-sm btn-outline" data-i18n="nav.rawConfig">📝 Raw Config</a>
                     <button onclick="reloadConfig()" class="btn btn-sm btn-outline" data-i18n="btn.reload">🔄 Reload Config</button>

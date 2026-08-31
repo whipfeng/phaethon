@@ -789,41 +789,6 @@ async function reloadConfig() {
     }
 }
 
-// ========== Switch Save Target ==========
-async function switchSaveTarget() {
-    try {
-        // Get current target
-        const getRes = await fetch('./api/config/target');
-        const getData = await getRes.json();
-        const current = getData.saveTarget || 'base';
-        const next = current === 'base' ? 'env' : 'base';
-
-        if (!getData.canSwitch) {
-            const noOverlay = typeof i18n !== 'undefined' ? i18n.t('toast.noOverlay') : 'No env overlay file detected';
-            showToast('❌ ' + noOverlay, 'error');
-            return;
-        }
-
-        const res = await fetch('./api/config/target', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target: next })
-        });
-        const data = await res.json();
-        if (res.ok) {
-            const switched = typeof i18n !== 'undefined' ? i18n.t('toast.targetSwitched') : 'Save target switched to';
-            showToast('✅ ' + switched + ' ' + next, 'success');
-            setTimeout(() => location.reload(), 800);
-        } else {
-            const failMsg = typeof i18n !== 'undefined' ? i18n.t('toast.switchFailed') : 'Switch failed';
-            showToast('❌ ' + (data.error || failMsg), 'error');
-        }
-    } catch (err) {
-        const netErr = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Network error';
-        showToast('❌ ' + netErr + ': ' + err.message, 'error');
-    }
-}
-
 // ========== Toast Notifications ==========
 function showToast(message, type = 'success') {
     let container = document.querySelector('.toast-container');

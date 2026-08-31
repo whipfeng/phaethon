@@ -1370,6 +1370,52 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 .data-table tbody tr.row-disabled {
     background: var(--bg-primary);
 }
+
+/* ========== Drag-and-drop reorder ========== */
+.col-drag {
+    width: 32px;
+    text-align: center;
+    cursor: default;
+    user-select: none;
+}
+.drag-handle {
+    display: inline-block;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--text-muted);
+    cursor: grab;
+    padding: 0.2rem 0.3rem;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+}
+.drag-handle:hover {
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+}
+.data-table tbody tr.dragging {
+    opacity: 0.4;
+}
+tr.drop-indicator td {
+    padding: 0;
+    border: none;
+    height: 0;
+}
+.drop-line {
+    height: 3px;
+    background: var(--accent);
+    border-radius: 2px;
+    margin: 0 0.5rem;
+    box-shadow: 0 0 6px rgba(88, 166, 255, 0.5);
+}
+
+/* ========== TUN probe list ========== */
+.tun-probe-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.5rem 0;
+}
+
 .status-dot.status-inactive {
     background: var(--text-muted);
     box-shadow: none;

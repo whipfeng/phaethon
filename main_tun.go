@@ -98,9 +98,9 @@ func runWatchdog(parentPID string) {
 
 	const (
 		procInterval   = 3 * time.Second
-		probeInterval  = 10 * time.Second
+		probeInterval  = 30 * time.Second
 		ifaceInterval  = 5 * time.Second
-		probeFailLimit = 3
+		probeFailLimit = 10
 		dnsTimeout     = 5 * time.Second
 		httpTimeout    = 30 * time.Second
 	)

@@ -513,3 +513,34 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 - [x] `stats` 包含包计数器（`readPackets`/`writePackets`）和 FakeIP 池统计
 - [x] 代理场景下 watchdog 不误杀（SOCKS5/DIRECT 均正常通过探测）
 - [x] 探测流量确认走 TUN 全链路（DNS 返回 Fake-IP → 引擎还原域名 → 代理/直连出站）
+
+### 8.1 Admin UI 待修复问题
+
+**Dashboard TUN 卡片 — API 返回但 UI 未展示：**
+
+| 字段 | 说明 | 状态 |
+|------|------|------|
+| `deviceName` | 设备名称（PhaethonTUN） | 有 i18n key `tun.device`，无 HTML 行 |
+| `probeURLs` | 探测 URL 列表 | 无 i18n，无 HTML |
+| `stats.readPackets` | 读包数 | 无 i18n，无 HTML |
+| `stats.writePackets` | 写包数 | 无 i18n，无 HTML |
+| `stats.fakeIP.domainCount` | Fake-IP 域名数 | 无 i18n，无 HTML |
+| `stats.fakeIP.registeredCount` | 已注册 Fake-IP 数 | 无 i18n，无 HTML |
+| `stats.fakeIP.realIPCacheCount` | 真实 IP 缓存数 | 无 i18n，无 HTML |
+| `routes.tunInterfaceIndex` | TUN 接口索引 | 无 i18n，无 HTML |
+| `routes.defaultIfaceIndex` | 默认接口索引 | 无 i18n，无 HTML |
+
+**已废弃的 base/env 配置切换功能（应移除）：**
+
+- 侧边栏 `CONFIG BASE/ENV` 切换按钮（`switchSaveTarget()`）
+- Dashboard `Save Target` 行和 `Env` 行
+- `runtime = base + <env>` 提示
+- 后端 `saveTarget`、`envPath`、`envConf` 逻辑
+- `/api/config/target` API 端点
+
+**TUN 配置 — 配置文件支持但 Admin UI 无法编辑：**
+
+| 配置项 | 说明 |
+|--------|------|
+| `tun.probe-urls` | 自定义探测 URL 列表 |
+| `tun.direct-nameserver` | 直连 DNS 服务器 |

@@ -2,7 +2,7 @@
 
 > 创建日期: 2026-09-01
 > 关联输入: docs/inputs/20260901_admin_ui_issues.md
-> 状态: IN PROGRESS
+> 状态: FRONTEND DONE, BACKEND CLEANUP PENDING
 
 ## Task 1: Dashboard TUN 卡片展示完整信息
 
@@ -22,10 +22,10 @@
 
 ## Task 3: TUN 开关状态和动作对齐
 
-- [ ] 开关 `checked` 状态改为基于 `data.running`（实际运行状态）
-- [ ] 开关动作添加 loading 状态（禁用开关 + spinner）
-- [ ] 开关失败时恢复原始状态并显示错误提示
-- [ ] 如果 `enabled=true` 但 `running=false`，显示警告标识
+- [x] 开关 `checked` 状态改为基于 `data.running`（实际运行状态）
+- [x] 开关动作添加 loading 状态（禁用开关 + finally 恢复）
+- [x] 开关失败时恢复原始状态并显示错误提示
+- [x] 如果 `enabled=true` 但 `running=false`，显示警告标识
 
 ## Task 4: Rules 页面拖动排序
 

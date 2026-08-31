@@ -743,21 +743,23 @@ func (e *Engine) acceptUDP() {
 	defer e.wg.Done()
 
 	fwd := udp.NewForwarder(e.ns, func(r *udp.ForwarderRequest) {
-		var wq waiter.Queue
-		ep, err := r.CreateEndpoint(&wq)
-		if err != nil {
-			return
-		}
-		defer ep.Close()
+		go func() {
+			var wq waiter.Queue
+			ep, err := r.CreateEndpoint(&wq)
+			if err != nil {
+				return
+			}
+			defer ep.Close()
 
-		id := r.ID()
-		dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
-		dstPort := int(id.LocalPort)
+			id := r.ID()
+			dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
+			dstPort := int(id.LocalPort)
 
-		conn := gonet.NewUDPConn(&wq, ep)
-		defer conn.Close()
+			conn := gonet.NewUDPConn(&wq, ep)
+			defer conn.Close()
 
-		e.handleUDP(conn, dstAddr, dstPort)
+			e.handleUDP(conn, dstAddr, dstPort)
+		}()
 	})
 
 	e.ns.SetTransportProtocolHandler(udp.ProtocolNumber, fwd.HandlePacket)

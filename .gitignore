@@ -41,3 +41,6 @@ Thumbs.db
 # Go vendoring
 /vendor/
 config.yaml
+
+# AI agent local memory
+agents.md

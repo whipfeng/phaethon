@@ -14,6 +14,7 @@ import (
 var (
 	modiphlpapi = windows.NewLazySystemDLL("iphlpapi.dll")
 	modsetupapi = windows.NewLazySystemDLL("setupapi.dll")
+	moddnsapi   = windows.NewLazySystemDLL("dnsapi.dll")
 
 	procCreateIpForwardEntry2             = modiphlpapi.NewProc("CreateIpForwardEntry2")
 	procDeleteIpForwardEntry2             = modiphlpapi.NewProc("DeleteIpForwardEntry2")
@@ -42,6 +43,8 @@ var (
 	procSetupDiGetDeviceInstanceIdW       = modsetupapi.NewProc("SetupDiGetDeviceInstanceIdW")
 	procSetupDiGetDeviceRegistryPropertyW = modsetupapi.NewProc("SetupDiGetDeviceRegistryPropertyW")
 	procSetupDiDestroyDeviceInfoList      = modsetupapi.NewProc("SetupDiDestroyDeviceInfoList")
+
+	procDnsFlushResolverCache             = moddnsapi.NewProc("DnsFlushResolverCache")
 )
 
 // interfaceDnsSettings represents the INTERFACE_DNS_SETTINGS structure for SetInterfaceDnsSettings.
@@ -605,6 +608,17 @@ func setInterfaceDNSAPI(luid uint64, index uint32, servers []net.IP) error {
 // clearInterfaceDNSAPI clears DNS servers for the interface (sets to empty/DHCP).
 func clearInterfaceDNSAPI(luid uint64, index uint32) error {
 	return setInterfaceDNSAPI(luid, index, nil)
+}
+
+// flushDNSResolverCacheAPI clears the Windows DNS resolver cache using DnsFlushResolverCache.
+// This ensures that DNS entries cached before TUN started (real IPs) are discarded,
+// so fresh queries go through the TUN DNS hijacker and return Fake-IPs.
+func flushDNSResolverCacheAPI() error {
+	ret, _, _ := procDnsFlushResolverCache.Call()
+	if ret == 0 {
+		return fmt.Errorf("DnsFlushResolverCache failed")
+	}
+	return nil
 }
 
 // getIfEntry2API calls GetIfEntry2 and returns the populated row.

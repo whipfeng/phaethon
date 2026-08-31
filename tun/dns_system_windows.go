@@ -10,6 +10,9 @@ import (
 
 // setSystemDNS redirects the TUN interface DNS to the TUN DNS hijacker address
 // and lowers the interface metric so Windows actually prefers it for resolution.
+// It also flushes the Windows DNS resolver cache so that entries cached before
+// TUN started (real IPs) are discarded and fresh queries go through the TUN
+// DNS hijacker (returning Fake-IPs for domain-based rule matching).
 func setSystemDNS(tunName, tunIP string) error {
 	luid, index, err := getInterfaceLUID(tunName)
 	if err != nil {
@@ -22,6 +25,12 @@ func setSystemDNS(tunName, tunIP string) error {
 		util.LogWarn("tun: set interface metric for %s fail: %v", tunName, err)
 	}
 	util.LogInfo("tun: system dns for %s set to %s", tunName, tunIP)
+
+	if err := flushDNSResolverCacheAPI(); err != nil {
+		util.LogWarn("tun: flush dns cache fail: %v", err)
+	} else {
+		util.LogInfo("tun: dns cache flushed")
+	}
 	return nil
 }
 

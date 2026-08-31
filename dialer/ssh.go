@@ -187,7 +187,36 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 	conn.SetDeadline(time.Time{})
 
 	client := ssh.NewClient(c, chans, reqs)
+
+	go d.keepAlive(client)
+
 	return client, nil
+}
+
+// keepAlive sends periodic global requests on the SSH connection to prevent
+// firewalls or NATs from silently dropping idle connections.
+func (d *SSHDialer) keepAlive(client *ssh.Client) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		_, _, err := client.SendRequest("keepalive@phaethon", true, nil)
+		if err != nil {
+			util.LogDebug("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
+			d.removeSSHClient()
+			return
+		}
+	}
+}
+
+// PreWarm establishes the SSH connection eagerly so the first Dial does not
+// pay the handshake latency.
+func (d *SSHDialer) PreWarm() error {
+	_, err := d.getSSHClient()
+	if err != nil {
+		return err
+	}
+	util.LogInfo("[SSH-CLI] [%s] pre-warmed SSH connection to %s:%d", d.Proxy.Name, d.Proxy.Server, d.Proxy.Port)
+	return nil
 }
 
 // trySSHAgentAuth attempts to add ssh-agent authentication to sshConf.

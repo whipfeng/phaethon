@@ -744,8 +744,8 @@ async function openLogsPopup() {
     if ('documentPictureInPicture' in window) {
         try {
             const pipWindow = await window.documentPictureInPicture.requestWindow({
-                width: Math.min(1200, Math.floor(screen.width * 0.8)),
-                height: Math.floor(screen.height * 0.7),
+                width: Math.min(1600, Math.floor(screen.width * 0.9)),
+                height: Math.floor(screen.height * 0.85),
             });
 
             // Copy styles
@@ -770,51 +770,61 @@ async function openLogsPopup() {
                 .pip-header {
                     background: #161b22;
                     border-bottom: 1px solid #30363d;
-                    padding: 8px 16px;
+                    padding: 12px 20px;
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
                     flex-shrink: 0;
                 }
-                .pip-header h1 { font-size: 14px; margin: 0; color: #f0f6fc; }
-                .pip-actions { display: flex; gap: 6px; }
+                .pip-header h1 { font-size: 16px; margin: 0; color: #f0f6fc; }
+                .pip-actions { display: flex; gap: 10px; }
                 .pip-btn {
-                    padding: 4px 10px;
-                    border-radius: 4px;
+                    padding: 8px 16px;
+                    border-radius: 6px;
                     border: 1px solid #30363d;
                     background: #21262d;
-                    color: #c9d1d9;
+                    color: #e6edf3;
                     cursor: pointer;
-                    font-size: 12px;
+                    font-size: 14px;
+                    font-weight: 500;
                 }
                 .pip-btn:hover { background: #30363d; }
                 .pip-btn-danger { border-color: #f85149; color: #f85149; }
+                .pip-btn-danger:hover { background: #f8514920; }
                 #pip-logs {
                     flex: 1;
                     overflow-y: auto;
-                    padding: 12px 16px;
+                    padding: 16px 20px;
                     font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-                    font-size: 11px;
-                    line-height: 1.5;
+                    font-size: 13px;
+                    line-height: 1.6;
                     white-space: pre-wrap;
                     word-break: break-all;
                     margin: 0;
                 }
-                .log-line { padding: 1px 0; }
+                .log-line { padding: 2px 0; }
                 .log-line.ok { color: #3fb950; }
                 .log-line.fail, .log-line.reject { color: #f85149; }
-                .log-time { color: #8b949e; margin-right: 6px; }
-                .log-icon { margin-right: 3px; }
+                .log-time { color: #8b949e; margin-right: 8px; }
+                .log-icon { margin-right: 4px; }
                 .pip-status {
                     background: #161b22;
                     border-top: 1px solid #30363d;
-                    padding: 6px 16px;
-                    font-size: 11px;
+                    padding: 10px 20px;
+                    font-size: 13px;
                     color: #8b949e;
                     display: flex;
                     justify-content: space-between;
+                    align-items: center;
                     flex-shrink: 0;
                 }
+                .pip-status label {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    cursor: pointer;
+                }
+                .pip-status input { cursor: pointer; }
             `;
             pipWindow.document.head.appendChild(pipStyle);
 
@@ -866,6 +876,9 @@ async function openLogsPopup() {
                 logsEl.appendChild(div);
                 logCount++;
                 countEl.textContent = lang === 'zh' ? `${logCount} 条日志` : `${logCount} logs`;
+            }
+
+            function scrollToBottom() {
                 if (autoScrollEl.checked) {
                     logsEl.scrollTop = logsEl.scrollHeight;
                 }
@@ -894,9 +907,8 @@ async function openLogsPopup() {
                         appendLog(e);
                         lastSeq = e.seq;
                     });
-                    if (full && autoScrollEl.checked) {
-                        logsEl.scrollTop = logsEl.scrollHeight;
-                    }
+                    // Use requestAnimationFrame to ensure DOM is updated before scrolling
+                    pipWindow.requestAnimationFrame(() => scrollToBottom());
                 } catch (err) {
                     if (full) logsEl.textContent = 'Failed: ' + err.message;
                 }

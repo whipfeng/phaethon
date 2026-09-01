@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"strings"
 
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/dialer"
 	"phaethon/util"
 )
@@ -30,10 +32,12 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	proxy := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, dstHost, dstPort)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, "", "fail", fmt.Errorf("all proxies dead"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, dstHost, dstPort)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, "", "reject", nil)
 		return
 	}
 
@@ -41,11 +45,13 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, proxy.Name, "fail", err)
 		return
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
+	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, proxy.Name, "ok", nil)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
 }
 

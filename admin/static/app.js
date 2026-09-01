@@ -367,7 +367,7 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
-    onBusinessVersion('logs', () => fetchConnections(), 'logs');
+    onBusinessVersion('logs', () => fetchConnections(true), 'logs');
 }
 
 function startSSEUpdates() {
@@ -702,15 +702,20 @@ async function fetchTUNStatus(expectedVersion) {
     if (typeof renderTUN === 'function') renderTUN(data);
 }
 
-async function fetchConnections() {
+let connLogLastSeq = 0;
+async function fetchConnections(incremental) {
     const el = document.getElementById('conn-logs');
     if (!el) return;
     try {
-        const res = await fetch('./api/connections');
+        let url = './api/connections';
+        if (incremental && connLogLastSeq > 0) {
+            url += '?after=' + connLogLastSeq;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();
         if (!data.logs || data.logs.length === 0) {
-            el.textContent = 'No logs yet';
+            if (!incremental) el.textContent = 'No logs yet';
             return;
         }
         const lines = data.logs.map(e => {
@@ -722,10 +727,15 @@ async function fetchConnections() {
             if (e.error) line += ` (${e.error})`;
             return `[${time}] ${line}`;
         });
-        el.textContent = lines.join('\n');
+        if (incremental && el.textContent !== 'No logs yet' && el.textContent !== '') {
+            el.textContent += '\n' + lines.join('\n');
+        } else {
+            el.textContent = lines.join('\n');
+        }
+        connLogLastSeq = data.logs[data.logs.length - 1].seq;
         el.scrollTop = el.scrollHeight;
     } catch (err) {
-        el.textContent = 'Failed to load: ' + err.message;
+        if (!incremental) el.textContent = 'Failed to load: ' + err.message;
     }
 }
 

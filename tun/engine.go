@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/dialer"
 	"phaethon/util"
 
@@ -51,6 +52,10 @@ type Engine struct {
 	readPackets  atomic.Uint64
 	writePackets atomic.Uint64
 	dnsProxy     *DNSProxy
+
+	// stats notification with debounce
+	statsNotifyMu    sync.Mutex
+	statsNotifyTimer *time.Timer
 
 	logMu sync.Mutex
 	logs  []string
@@ -166,6 +171,25 @@ func (e *Engine) Logs() []string {
 	return out
 }
 
+// notifyStatsChanged schedules a "tun" version bump with debounce.
+// Called when packet counters or fakeIP stats change.
+func (e *Engine) notifyStatsChanged() {
+	e.statsNotifyMu.Lock()
+	defer e.statsNotifyMu.Unlock()
+
+	if e.statsNotifyTimer != nil {
+		return // already scheduled
+	}
+
+	e.statsNotifyTimer = time.AfterFunc(100*time.Millisecond, func() {
+		e.statsNotifyMu.Lock()
+		e.statsNotifyTimer = nil
+		e.statsNotifyMu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("tun")
+	})
+}
+
 // RouteSnapshot returns the current route manager state.
 func (e *Engine) RouteSnapshot() RouteSnapshot {
 	e.mu.Lock()
@@ -253,6 +277,7 @@ func (e *Engine) Start() error {
 	if err := EnsureAdminPrivileges(); err != nil {
 		e.mu.Unlock()
 		e.logEvent("TUN ensure admin privileges failed: %v", err)
+		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("admin privileges: %w", err))
 		return err
 	}
 
@@ -264,6 +289,7 @@ func (e *Engine) Start() error {
 	if err != nil {
 		e.mu.Unlock()
 		e.logEvent("TUN create device failed: %v", err)
+		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("create device: %w", err))
 		return fmt.Errorf("tun: create device: %w", err)
 	}
 	e.device = dev
@@ -292,6 +318,7 @@ func (e *Engine) Start() error {
 	// 4. Init Fake-IP pool (no netstack registration needed; promiscuous mode
 	// ensures the TCP/UDP forwarders receive packets for all Fake-IP destinations)
 	e.fakeIP = NewFakeIPPool()
+	e.fakeIP.SetOnChange(e.notifyStatsChanged)
 
 	// 5. Init DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
@@ -317,6 +344,7 @@ func (e *Engine) Start() error {
 	e.routeMgr.SetExclusions(DefaultLANExclusions)
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
+		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("setup routes: %w", err))
 		e.dnsHijack.Stop()
 		e.wg.Wait()
 		dev.Close()
@@ -382,6 +410,7 @@ func (e *Engine) Start() error {
 	}
 
 	e.logEvent("TUN engine started on %s", dev.Name())
+	connlog.Log("TUN", "SYSTEM", "", dev.Name(), 0, "", "ok", nil)
 	util.LogInfo("tun engine started on %s", dev.Name())
 	return nil
 }
@@ -442,6 +471,7 @@ func (e *Engine) Stop() error {
 	}
 
 	e.logEvent("TUN engine stopped")
+	connlog.Log("TUN", "SYSTEM", "", "", 0, "", "stopped", nil)
 	util.LogInfo("tun engine stopped")
 	return nil
 }
@@ -545,6 +575,7 @@ func (e *Engine) readLoop() {
 			continue
 		}
 		e.readPackets.Add(1)
+		e.notifyStatsChanged()
 
 		// Determine network protocol from the IP version field.
 		var proto tcpip.NetworkProtocolNumber
@@ -635,6 +666,7 @@ func (e *Engine) writeLoop() {
 			}
 		} else {
 			e.writePackets.Add(1)
+			e.notifyStatsChanged()
 		}
 		pkt.DecRef()
 	}
@@ -806,7 +838,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		e.logEvent("✗ UDP %s:%d REJECTED", resolvedAddr, resolvedPort)
+		connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, "", "reject", nil)
 		return
 	}
 
@@ -818,7 +850,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			e.logEvent("✗ UDP %s:%d via %s fail: %v", resolvedAddr, resolvedPort, proxy.Name, err)
+			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, proxy.Name, "fail", err)
 			return
 		}
 		dialIP = net.ParseIP(resolvedAddr)
@@ -830,7 +862,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
-				e.logEvent("✗ UDP resolve %s fail: %v", domain, err)
+				connlog.Log("TUN", "UDP", "", domain, resolvedPort, "DIRECT", "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -845,7 +877,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
-			e.logEvent("✗ UDP %s:%d direct fail: %v", resolvedAddr, resolvedPort, err)
+			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, "DIRECT", "fail", err)
 			return
 		}
 	}
@@ -854,12 +886,17 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	desc := proxyDesc(proxy)
-	if domain != "" {
-		e.logEvent("✓ UDP %s(%s):%d → %s", domain, resolvedAddr, resolvedPort, desc)
+	proxyName := ""
+	if proxy != nil && !strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
+		proxyName = proxy.Name
 	} else {
-		e.logEvent("✓ UDP %s:%d → %s", resolvedAddr, resolvedPort, desc)
+		proxyName = "DIRECT"
 	}
+	dstForLog := resolvedAddr
+	if domain != "" {
+		dstForLog = domain
+	}
+	connlog.Log("TUN", "UDP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
 }
@@ -937,7 +974,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		e.logEvent("✗ TCP %s:%d REJECTED", resolvedAddr, resolvedPort)
+		connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, "", "reject", nil)
 		return
 	}
 
@@ -945,7 +982,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			e.logEvent("✗ TCP %s:%d via %s fail: %v", resolvedAddr, resolvedPort, proxy.Name, err)
+			connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, proxy.Name, "fail", err)
 			return
 		}
 	} else {
@@ -956,7 +993,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
-				e.logEvent("✗ TCP resolve %s fail: %v", domain, err)
+				connlog.Log("TUN", "TCP", "", domain, resolvedPort, "DIRECT", "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -971,19 +1008,24 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
-			e.logEvent("✗ TCP %s:%d direct fail: %v", dialAddr, resolvedPort, err)
+			connlog.Log("TUN", "TCP", "", dialAddr, resolvedPort, "DIRECT", "fail", err)
 			return
 		}
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	desc := proxyDesc(proxy)
-	if domain != "" {
-		e.logEvent("✓ TCP %s(%s):%d → %s", domain, resolvedAddr, resolvedPort, desc)
+	proxyName := ""
+	if proxy != nil && !strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
+		proxyName = proxy.Name
 	} else {
-		e.logEvent("✓ TCP %s:%d → %s", resolvedAddr, resolvedPort, desc)
+		proxyName = "DIRECT"
 	}
+	dstForLog := resolvedAddr
+	if domain != "" {
+		dstForLog = domain
+	}
+	connlog.Log("TUN", "TCP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
 	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
 }
 

@@ -16,6 +16,7 @@ type FakeIPPool struct {
 	ipToRealIP map[string]net.IP // Fake-IP -> real IP cache
 	reserved   map[uint32]bool
 	nextIP     uint32
+	onChange   func() // callback when pool stats change
 }
 
 // NewFakeIPPool creates a Fake-IP pool starting at 198.18.0.0.
@@ -32,6 +33,13 @@ func NewFakeIPPool() *FakeIPPool {
 		reserved:   reserved,
 		nextIP:     ipToUint32(net.ParseIP("198.18.0.0").To4()),
 	}
+}
+
+// SetOnChange sets a callback that is invoked when the pool stats change.
+func (p *FakeIPPool) SetOnChange(fn func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onChange = fn
 }
 
 // Lookup returns a Fake-IP for the given domain, allocating if necessary.
@@ -61,6 +69,9 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		}
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain
+		if p.onChange != nil {
+			p.onChange()
+		}
 		return ip
 	}
 }
@@ -78,6 +89,9 @@ func (p *FakeIPPool) SetRealIP(fakeIP net.IP, realIP net.IP) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ipToRealIP[fakeIP.String()] = realIP
+	if p.onChange != nil {
+		p.onChange()
+	}
 }
 
 // LookupRealIP returns the cached real IP for a Fake-IP, or nil if not found.
@@ -96,6 +110,9 @@ func (p *FakeIPPool) Release(domain string) {
 		delete(p.ipToDomain, ipStr)
 		delete(p.domainToIP, domain)
 		delete(p.ipToRealIP, ipStr)
+		if p.onChange != nil {
+			p.onChange()
+		}
 	}
 }
 

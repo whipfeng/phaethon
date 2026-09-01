@@ -703,11 +703,9 @@ async function fetchTUNStatus(expectedVersion) {
 }
 
 let connLogLastSeq = 0;
-let logsModalOpen = false;
 async function fetchConnections(incremental) {
     const el = document.getElementById('conn-logs');
-    const modalEl = document.getElementById('conn-logs-modal');
-    if (!el && !modalEl) return;
+    if (!el) return;
     try {
         let url = './api/connections';
         if (incremental && connLogLastSeq > 0) {
@@ -717,10 +715,7 @@ async function fetchConnections(incremental) {
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();
         if (!data.logs || data.logs.length === 0) {
-            if (!incremental) {
-                if (el) el.textContent = 'No logs yet';
-                if (modalEl && logsModalOpen) modalEl.textContent = 'No logs yet';
-            }
+            if (!incremental) el.textContent = 'No logs yet';
             return;
         }
         const lines = data.logs.map(e => {
@@ -732,60 +727,24 @@ async function fetchConnections(incremental) {
             if (e.error) line += ` (${e.error})`;
             return `[${time}] ${line}`;
         });
-        const newText = lines.join('\n');
-        if (el) {
-            if (incremental && el.textContent !== 'No logs yet' && el.textContent !== '') {
-                el.textContent += '\n' + newText;
-            } else {
-                el.textContent = newText;
-            }
-            el.scrollTop = el.scrollHeight;
-        }
-        if (modalEl && logsModalOpen) {
-            if (incremental && modalEl.textContent !== 'No logs yet' && modalEl.textContent !== '') {
-                modalEl.textContent += '\n' + newText;
-            } else {
-                modalEl.textContent = newText;
-            }
-            modalEl.scrollTop = modalEl.scrollHeight;
+        if (incremental && el.textContent !== 'No logs yet' && el.textContent !== '') {
+            el.textContent += '\n' + lines.join('\n');
+        } else {
+            el.textContent = lines.join('\n');
         }
         connLogLastSeq = data.logs[data.logs.length - 1].seq;
+        el.scrollTop = el.scrollHeight;
     } catch (err) {
-        if (!incremental) {
-            if (el) el.textContent = 'Failed to load: ' + err.message;
-            if (modalEl && logsModalOpen) modalEl.textContent = 'Failed to load: ' + err.message;
-        }
+        if (!incremental) el.textContent = 'Failed to load: ' + err.message;
     }
 }
 
-function openLogsModal() {
-    const modal = document.getElementById('logs-modal');
-    if (modal) {
-        modal.style.display = 'flex';
-        logsModalOpen = true;
-        const modalEl = document.getElementById('conn-logs-modal');
-        const dashboardEl = document.getElementById('conn-logs');
-        if (modalEl && dashboardEl) {
-            modalEl.textContent = dashboardEl.textContent;
-            modalEl.scrollTop = modalEl.scrollHeight;
-        }
-    }
-}
-
-function closeLogsModal() {
-    const modal = document.getElementById('logs-modal');
-    if (modal) {
-        modal.style.display = 'none';
-        logsModalOpen = false;
-    }
-}
-
-function clearLogsModal() {
-    const modalEl = document.getElementById('conn-logs-modal');
-    const dashboardEl = document.getElementById('conn-logs');
-    if (modalEl) modalEl.textContent = 'No logs yet';
-    if (dashboardEl) dashboardEl.textContent = 'No logs yet';
-    connLogLastSeq = 0;
+function openLogsPopup() {
+    const width = 1000;
+    const height = 700;
+    const left = (screen.width - width) / 2;
+    const top = (screen.height - height) / 2;
+    window.open('./logs', 'PhaethonLogs', `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`);
 }
 
 function updateUptime() {

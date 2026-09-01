@@ -33,13 +33,14 @@
             gap: 8px;
         }
         .btn {
-            padding: 6px 12px;
+            padding: 8px 16px;
             border-radius: 6px;
             border: 1px solid #30363d;
             background: #21262d;
-            color: #c9d1d9;
+            color: #e6edf3;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 14px;
+            font-weight: 500;
             transition: background 0.15s;
         }
         .btn:hover { background: #30363d; }
@@ -51,16 +52,19 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
+            min-height: 0;
         }
         #logs {
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             padding: 16px 20px;
             font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', 'Source Code Pro', monospace;
-            font-size: 12px;
+            font-size: 13px;
             line-height: 1.6;
             white-space: pre-wrap;
             word-break: break-all;
+            margin: 0;
         }
         .log-line { padding: 2px 0; }
         .log-line.ok { color: #3fb950; }
@@ -135,6 +139,9 @@
             logsEl.appendChild(div);
             logCount++;
             updateCount();
+        }
+
+        function scrollToBottom() {
             if (autoScrollEl.checked) {
                 logsEl.scrollTop = logsEl.scrollHeight;
             }
@@ -171,10 +178,7 @@
                     appendLog(formatLog(e));
                     lastSeq = e.seq;
                 });
-                // Ensure auto-scroll after initial load
-                if (full && autoScrollEl.checked) {
-                    logsEl.scrollTop = logsEl.scrollHeight;
-                }
+                requestAnimationFrame(() => scrollToBottom());
             } catch (err) {
                 if (full) {
                     logsEl.textContent = 'Failed to load: ' + err.message;

@@ -53,6 +53,14 @@
             'dash.expandLogs': '展开',
             'dash.clearLogs': '清空',
 
+            // ===== LOGS POPUP =====
+            'logs.title': '📋 运行日志',
+            'logs.refresh': '🔄 刷新',
+            'logs.clear': '🗑 清空',
+            'logs.count': '{count} 条日志',
+            'logs.autoScroll': '自动滚动',
+            'logs.noLogs': '暂无日志',
+
             // ===== TUN =====
             'tun.title': '🌐 TUN',
             'tun.loading': '加载中...',
@@ -580,6 +588,14 @@
             'dash.reloadConfig': 'Reload Config',
             'dash.expandLogs': 'Expand',
             'dash.clearLogs': 'Clear',
+
+            // ===== LOGS POPUP =====
+            'logs.title': '📋 Runtime Logs',
+            'logs.refresh': '🔄 Refresh',
+            'logs.clear': '🗑 Clear',
+            'logs.count': '{count} logs',
+            'logs.autoScroll': 'Auto-scroll',
+            'logs.noLogs': 'No logs yet',
 
             // ===== TUN =====
             'tun.title': '🌐 TUN',

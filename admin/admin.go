@@ -845,6 +845,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/rules", s.handleRulesPage)
 	mux.HandleFunc("/mappings", s.handleMappingsPage)
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
+	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
@@ -1101,6 +1102,16 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 		"CanSwitch":      envPath != "",
 	}
 	s.render(w, r, "reverse-wizard.html", data)
+}
+
+func (s *AdminServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
+	data, err := templates.ReadFile("templates/logs-standalone.html")
+	if err != nil {
+		http.Error(w, "template not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
 }
 
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {

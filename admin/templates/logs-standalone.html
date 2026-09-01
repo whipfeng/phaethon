@@ -171,6 +171,10 @@
                     appendLog(formatLog(e));
                     lastSeq = e.seq;
                 });
+                // Ensure auto-scroll after initial load
+                if (full && autoScrollEl.checked) {
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
             } catch (err) {
                 if (full) {
                     logsEl.textContent = 'Failed to load: ' + err.message;

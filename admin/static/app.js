@@ -367,7 +367,13 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
-    onBusinessVersion('logs', () => fetchConnections(true), 'logs');
+    onBusinessVersion('logs', () => {
+        fetchConnections(true);
+        // Forward to PiP window if open
+        if (window._pipLogsWindow && !window._pipLogsWindow.closed) {
+            try { window._pipLogsWindow._fetchLogs?.(false); } catch {}
+        }
+    }, 'logs');
 }
 
 function startSSEUpdates() {
@@ -858,6 +864,7 @@ async function openLogsPopup() {
             const logsEl = pipWindow.document.getElementById('pip-logs');
             const countEl = pipWindow.document.getElementById('pip-count');
             const autoScrollEl = pipWindow.document.getElementById('pip-autoscroll');
+            const baseUrl = window.location.origin;
             let lastSeq = 0;
             let logCount = 0;
 
@@ -892,7 +899,7 @@ async function openLogsPopup() {
 
             async function fetchLogs(full) {
                 try {
-                    let url = './api/connections';
+                    let url = baseUrl + '/api/connections';
                     if (!full && lastSeq > 0) url += '?after=' + lastSeq;
                     const res = await fetch(url);
                     if (!res.ok) throw new Error('status ' + res.status);
@@ -916,6 +923,7 @@ async function openLogsPopup() {
                     // Use setTimeout to ensure DOM is fully updated before scrolling
                     setTimeout(() => scrollToBottom(), 50);
                 } catch (err) {
+                    console.error('PiP fetch error:', err);
                     if (full) logsEl.textContent = 'Failed: ' + err.message;
                 }
             }
@@ -931,22 +939,14 @@ async function openLogsPopup() {
             // Initial load
             fetchLogs(true);
 
-            // SSE for real-time updates
-            const sse = new EventSource('./api/events');
-            let lastVersion = 0;
-            sse.onmessage = (e) => {
-                try {
-                    const data = JSON.parse(e.data);
-                    if (data.versions && data.versions.logs > lastVersion) {
-                        lastVersion = data.versions.logs;
-                        fetchLogs(false);
-                    }
-                } catch {}
-            };
+            // Register PiP log fetcher so parent SSE can trigger updates
+            pipWindow._fetchLogs = fetchLogs;
+            window._pipLogsWindow = pipWindow;
 
             // Cleanup when PiP window closes
             pipWindow.addEventListener('pagehide', () => {
-                sse.close();
+                pipWindow._fetchLogs = null;
+                window._pipLogsWindow = null;
             });
 
             return;

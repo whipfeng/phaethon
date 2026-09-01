@@ -719,7 +719,12 @@ async function fetchConnections(incremental) {
             return;
         }
         const lines = data.logs.map(e => {
-            const time = new Date(e.time).toLocaleTimeString();
+            const date = new Date(e.time);
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            const ms = String(date.getMilliseconds()).padStart(3, '0');
+            const time = `${hours}:${minutes}:${seconds}.${ms}`;
             const icon = e.status === 'ok' ? '✓' : '✗';
             const proxy = e.proxy || 'DIRECT';
             const inbound = e.inbound || '';

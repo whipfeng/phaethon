@@ -42,6 +42,16 @@ document.addEventListener('DOMContentLoaded', () => {
     registerDefaultVersionHandlers();
     updateUptime();
 
+    // Initial load for connection logs if on dashboard
+    if (document.getElementById('conn-logs')) {
+        fetchConnections();
+    }
+
+    // Initial load for TUN status if on dashboard
+    if (document.getElementById('tun-status')) {
+        fetchTUNStatus();
+    }
+
     // Intercept nav-link clicks to tear down SSE/polling BEFORE navigating.
     // Browsers limit concurrent connections per host (~6 for HTTP/1.1).  If the
     // old page leaves an EventSource (/api/events) or pending fetch() alive,
@@ -357,6 +367,7 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
+    onBusinessVersion('logs', () => fetchConnections(), 'logs');
 }
 
 function startSSEUpdates() {
@@ -691,6 +702,33 @@ async function fetchTUNStatus(expectedVersion) {
     if (typeof renderTUN === 'function') renderTUN(data);
 }
 
+async function fetchConnections() {
+    const el = document.getElementById('conn-logs');
+    if (!el) return;
+    try {
+        const res = await fetch('./api/connections');
+        if (!res.ok) throw new Error('status ' + res.status);
+        const data = await res.json();
+        if (!data.logs || data.logs.length === 0) {
+            el.textContent = 'No logs yet';
+            return;
+        }
+        const lines = data.logs.map(e => {
+            const time = new Date(e.time).toLocaleTimeString();
+            const icon = e.status === 'ok' ? '✓' : '✗';
+            const proxy = e.proxy || 'DIRECT';
+            const inbound = e.inbound || '';
+            let line = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${proxy}`;
+            if (e.error) line += ` (${e.error})`;
+            return `[${time}] ${line}`;
+        });
+        el.textContent = lines.join('\n');
+        el.scrollTop = el.scrollHeight;
+    } catch (err) {
+        el.textContent = 'Failed to load: ' + err.message;
+    }
+}
+
 function updateUptime() {
     const el = document.getElementById('uptime');
     if (!el) return;
@@ -790,7 +828,7 @@ async function reloadConfig() {
 }
 
 // ========== Toast Notifications ==========
-function showToast(message, type = 'success') {
+function showToast(message, type = 'success', duration = 3500) {
     let container = document.querySelector('.toast-container');
     if (!container) {
         container = document.createElement('div');
@@ -803,11 +841,15 @@ function showToast(message, type = 'success') {
     toast.textContent = message;
     container.appendChild(toast);
 
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.3s';
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
+    if (duration > 0) {
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.3s';
+            setTimeout(() => toast.remove(), 300);
+        }, duration);
+    }
+    
+    return toast;
 }
 
 // ========== Confirm Modal ==========

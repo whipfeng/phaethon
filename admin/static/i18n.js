@@ -15,6 +15,7 @@
             'nav.mappings': '映射',
             'nav.tools': '工具',
             'nav.reverse': '反向连接向导',
+            'nav.logs': '运行日志',
             'nav.rawConfig': '原始配置',
             'btn.reload': '重载配置',
             'lang.switch': '语言',
@@ -22,6 +23,11 @@
             'lang.en': 'English',
             'server.restartDetected': '服务器已重启，请刷新页面以获取最新状态。',
             'server.refreshNow': '立即刷新',
+
+            // ===== Logs =====
+            'logs.title': '运行日志',
+            'logs.clear': '清空',
+            'logs.refresh': '刷新',
 
             // ===== Dashboard =====
             'dash.activeConn': '活跃连接',
@@ -438,8 +444,11 @@
             'raw.title': '原始配置',
             'raw.copy': '📋 复制',
             'raw.save': '💾 保存',
+            'raw.saveAndReload': '💾 保存并重载',
+            'raw.saveOnly': '💾 仅保存',
             'raw.saving': '正在保存…',
             'raw.saved': '配置已保存',
+            'raw.savedAndReloading': '已保存，正在重载...',
             'raw.saveFailed': '保存失败',
             'raw.copyFailed': '复制失败',
             'raw.placeholder': '正在加载配置…',
@@ -454,6 +463,7 @@
             'toast.reloading': '正在重载配置...',
             'toast.reloadOk': '配置已重载',
             'toast.reloadFailed': '重载失败',
+            'toast.configChanged': '配置已修改，点击重载生效',
             'toast.noOverlay': '未检测到环境覆盖文件',
             'toast.targetSwitched': '保存目标已切换',
             'toast.switchFailed': '切换失败',
@@ -531,6 +541,7 @@
             'nav.mappings': 'Mappings',
             'nav.tools': 'Tools',
             'nav.reverse': 'Reverse Wizard',
+            'nav.logs': 'Logs',
             'nav.rawConfig': 'Raw Config',
             'btn.reload': 'Reload Config',
             'lang.switch': 'Language',
@@ -538,6 +549,11 @@
             'lang.en': 'English',
             'server.restartDetected': 'Server restarted. Please refresh the page to get the latest state.',
             'server.refreshNow': 'Refresh Now',
+
+            // ===== Logs =====
+            'logs.title': 'Runtime Logs',
+            'logs.clear': 'Clear',
+            'logs.refresh': 'Refresh',
 
             // ===== Dashboard =====
             'dash.activeConn': 'Active Connections',
@@ -954,8 +970,11 @@
             'raw.title': 'Raw Config',
             'raw.copy': '📋 Copy',
             'raw.save': '💾 Save',
+            'raw.saveAndReload': '💾 Save and Reload',
+            'raw.saveOnly': '💾 Save Only',
             'raw.saving': 'Saving...',
             'raw.saved': 'Configuration saved',
+            'raw.savedAndReloading': 'Saved, reloading...',
             'raw.saveFailed': 'Save failed',
             'raw.copyFailed': 'Copy failed',
             'raw.placeholder': 'Loading configuration...',
@@ -970,6 +989,7 @@
             'toast.reloading': 'Reloading configuration...',
             'toast.reloadOk': 'Config reload triggered',
             'toast.reloadFailed': 'Reload failed',
+            'toast.configChanged': 'Configuration changed. Click to reload.',
             'toast.noOverlay': 'No env overlay file detected',
             'toast.targetSwitched': 'Save target switched to',
             'toast.switchFailed': 'Switch failed',

@@ -30,6 +30,7 @@ import (
 
 	"phaethon/cmd/setup"
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/reverse"
 	"phaethon/server"
 	"phaethon/tun"
@@ -327,6 +328,16 @@ type AdminServer struct {
 	// and sequence number. Set by the main package on the registry instance.
 	ForceRemoveBinding func(reverseID string, seq int) error
 
+	// OnIncrementalUpdate is called when data-level config changes are made
+	// (proxies, rules, groups, subscriptions). It updates the atomic pointer
+	// without restarting listeners. Set by the main package.
+	OnIncrementalUpdate func() error
+
+	// OnMappingUpdate is called when a mapping is added/modified/deleted.
+	// It receives the old mapping (nil for new) and new mapping (nil for delete).
+	// The callback handles listener restart precisely - no full reload needed.
+	OnMappingUpdate func(old, newMapping *config.Mapping) error
+
 	// templates
 	pages *pageTemplates
 
@@ -424,74 +435,83 @@ func (s *AdminServer) displayConf() *config.RuleConfiguration {
 // mergeAndInitLocked rebuilds the runtime merged config from base + env and calls Init().
 // Caller MUST already hold s.mu (write lock).
 func (s *AdminServer) mergeAndInitLocked() error {
-	// Deep-copy the base config via YAML so that runtime mutations (selected
-	// subscription nodes, health maps, etc.) never leak back into the editable
-	// base/env config that gets saved back to disk.
+	if s.conf == nil {
+		return fmt.Errorf("config not initialized")
+	}
+
+	// Deep-copy the base config via YAML to get fresh data
 	raw, err := yaml.Marshal(s.baseConf)
 	if err != nil {
 		return fmt.Errorf("marshal base config: %w", err)
 	}
-	merged := &config.RuleConfiguration{}
-	if err := yaml.Unmarshal(raw, merged); err != nil {
+	fresh := &config.RuleConfiguration{}
+	if err := yaml.Unmarshal(raw, fresh); err != nil {
 		return fmt.Errorf("unmarshal base config: %w", err)
 	}
 	if s.envConf != nil {
-		if err := merged.Merge(s.envConf); err != nil {
+		if err := fresh.Merge(s.envConf); err != nil {
 			return fmt.Errorf("merge fail: %w", err)
 		}
 	} else {
-		if err := merged.Init(); err != nil {
+		if err := fresh.Init(); err != nil {
 			return fmt.Errorf("init fail: %w", err)
 		}
 	}
 
-	// Preserve runtime subscription state across admin edits so the UI and
-	// refresh API continue to see the loaded node pool.
-	if s.conf != nil {
-		// Preserve subscription node pools.
-		oldSubByName := make(map[string]*config.Subscription)
-		for _, sub := range s.conf.Subscriptions {
-			oldSubByName[sub.Name] = sub
-		}
-		for _, sub := range merged.Subscriptions {
-			old, ok := oldSubByName[sub.Name]
-			if !ok {
-				continue
-			}
-			old.SubMu.RLock()
-			subCopy := make(map[string]*config.Proxy, len(old.SubProxies))
-			for n, p := range old.SubProxies {
-				subCopy[n] = p
-			}
-			old.SubMu.RUnlock()
-			sub.SubMu.Lock()
-			sub.SubProxies = subCopy
-			sub.SubMu.Unlock()
-		}
-
-		// Preserve per-group active member and filter across admin edits when the
-		// new config did not explicitly supply them.
-		oldGroupByName := make(map[string]*config.ProxyGroup)
-		for _, g := range s.conf.ProxyGroups {
-			oldGroupByName[g.Name] = g
-		}
-		for _, g := range merged.ProxyGroups {
-			old, ok := oldGroupByName[g.Name]
-			if !ok {
-				continue
-			}
-			if g.Subscription == old.Subscription {
-				if g.ActiveMember == "" {
-					g.ActiveMember = old.ActiveMember
-				}
-				if g.SubscriptionFilter == "" {
-					g.SubscriptionFilter = old.SubscriptionFilter
-				}
-			}
-			g.RebuildProxies()
-		}
+	// Preserve runtime subscription state across admin edits
+	oldSubByName := make(map[string]*config.Subscription)
+	for _, sub := range s.conf.Subscriptions {
+		oldSubByName[sub.Name] = sub
 	}
-	s.conf = merged
+	for _, sub := range fresh.Subscriptions {
+		old, ok := oldSubByName[sub.Name]
+		if !ok {
+			continue
+		}
+		old.SubMu.RLock()
+		subCopy := make(map[string]*config.Proxy, len(old.SubProxies))
+		for n, p := range old.SubProxies {
+			subCopy[n] = p
+		}
+		old.SubMu.RUnlock()
+		sub.SubMu.Lock()
+		sub.SubProxies = subCopy
+		sub.SubMu.Unlock()
+	}
+
+	// Preserve per-group active member and filter
+	oldGroupByName := make(map[string]*config.ProxyGroup)
+	for _, g := range s.conf.ProxyGroups {
+		oldGroupByName[g.Name] = g
+	}
+	for _, g := range fresh.ProxyGroups {
+		old, ok := oldGroupByName[g.Name]
+		if !ok {
+			continue
+		}
+		if g.Subscription == old.Subscription {
+			if g.ActiveMember == "" {
+				g.ActiveMember = old.ActiveMember
+			}
+			if g.SubscriptionFilter == "" {
+				g.SubscriptionFilter = old.SubscriptionFilter
+			}
+		}
+		g.RebuildProxies()
+	}
+
+	// Update s.conf fields in place so all references see the changes
+	s.conf.Proxies = fresh.Proxies
+	s.conf.ProxyGroups = fresh.ProxyGroups
+	s.conf.Subscriptions = fresh.Subscriptions
+	s.conf.Rules = fresh.Rules
+	s.conf.Mappings = fresh.Mappings
+	s.conf.ReverseConfigs = fresh.ReverseConfigs
+	s.conf.Matchers = fresh.Matchers
+	s.conf.ProxyNames = fresh.ProxyNames
+	s.conf.GroupNames = fresh.GroupNames
+	s.conf.SubscriptionNames = fresh.SubscriptionNames
+
 	return nil
 }
 
@@ -504,6 +524,7 @@ type pageTemplates struct {
 	rules         *template.Template
 	mappings      *template.Template
 	reverseWizard *template.Template
+	logs          *template.Template
 	login         *template.Template
 	setup         *template.Template
 	config        *template.Template
@@ -625,6 +646,7 @@ func (s *AdminServer) parseTemplates() {
 		rules:         parsePage("rules.html"),
 		mappings:      parsePage("mappings.html"),
 		reverseWizard: parsePage("reverse-wizard.html"),
+		logs:          parsePage("logs.html"),
 		login:         parseStandalone("login.html"),
 		setup:         parseStandalone("setup.html"),
 		config:        parsePage("config.html"),
@@ -825,6 +847,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/rules", s.handleRulesPage)
 	mux.HandleFunc("/mappings", s.handleMappingsPage)
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
+	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
@@ -848,6 +871,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/groups", s.apiGroups)
 	mux.HandleFunc("/api/groups/", s.apiGroupActions)
 	mux.HandleFunc("/api/health", s.apiHealth)
+	mux.HandleFunc("/api/connections", s.apiConnections)
 	mux.HandleFunc("/api/reverse", s.apiReverse)
 	mux.HandleFunc("/api/reverse/bindings", s.apiReverseBindings)
 	mux.HandleFunc("/api/reverse/bindings/", s.apiReverseBindings)
@@ -1082,6 +1106,13 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 	s.render(w, r, "reverse-wizard.html", data)
 }
 
+func (s *AdminServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title": "Logs",
+	}
+	s.render(w, r, "logs.html", data)
+}
+
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.pages.login.Execute(w, map[string]interface{}{
@@ -1126,6 +1157,15 @@ func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
 
 	s.stats.CollectFromConfig(conf)
 	jsonResponse(w, s.stats.GetSnapshot())
+}
+
+func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
+	logs := connlog.GetLogs()
+	version := connlog.GetVersion()
+	jsonResponse(w, map[string]interface{}{
+		"version": version,
+		"logs":    logs,
+	})
 }
 
 // apiEvents streams server-sent events for real-time status updates.
@@ -1193,7 +1233,7 @@ func reverseEventPayload(configs []*config.ReverseConfig) interface{} {
 }
 
 // sseBroadcaster periodically snapshots stats and bumps the stats version when
-// they change.  Connected browsers fetch the full snapshot via REST.
+// they change. Connected browsers fetch the full snapshot via REST.
 func (s *AdminServer) sseBroadcaster() {
 	defer s.sseWG.Done()
 
@@ -1335,6 +1375,15 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		util.LogInfo("[ADMIN] raw config written to %s (target=%s)", target, s.saveTarget)
+
+		// Check if full reload was requested
+		if r.URL.Query().Get("reload") == "true" {
+			if s.OnReload != nil {
+				go s.OnReload()
+				jsonResponse(w, map[string]string{"status": "saved and reloading"})
+				return
+			}
+		}
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -1773,7 +1822,11 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after proxy toggle failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after proxy toggle failed: %v", err)
+			}
+		}
 		jsonResponse(w, proxySummary(p))
 		return
 	}
@@ -1944,7 +1997,11 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 	if err := s.mergeAndInitLocked(); err != nil {
 		util.LogWarn("[ADMIN] merge after rule toggle failed: %v", err)
 	}
-	s.triggerReload()
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogWarn("[ADMIN] incremental update after rule toggle failed: %v", err)
+		}
+	}
 	jsonResponse(w, map[string]interface{}{
 		"index":   idx,
 		"enabled": body.Enabled,
@@ -1980,8 +2037,10 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		// Update in place if name already exists, otherwise append
 		replaced := false
+		var oldMapping *config.Mapping
 		for i, existing := range dc.Mappings {
 			if existing.Name == m.Name {
+				oldMapping = existing
 				dc.Mappings[i] = &m
 				replaced = true
 				break
@@ -2007,6 +2066,12 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after mapping add failed: %v", err)
 		}
 		s.mu.Unlock()
+		// Notify runtime about mapping change
+		if s.OnMappingUpdate != nil {
+			if err := s.OnMappingUpdate(oldMapping, &m); err != nil {
+				util.LogWarn("[ADMIN] mapping update callback failed: %v", err)
+			}
+		}
 		if replaced {
 			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", s.saveTarget, m.Name, m.Type, m.Port)
 			jsonResponse(w, mappingSummary(&m))
@@ -2043,6 +2108,12 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after mapping delete failed: %v", err)
 				}
 				s.mu.Unlock()
+				// Notify runtime about mapping deletion
+				if s.OnMappingUpdate != nil {
+					if err := s.OnMappingUpdate(m, nil); err != nil {
+						util.LogWarn("[ADMIN] mapping delete callback failed: %v", err)
+					}
+				}
 				util.LogInfo("[ADMIN] mapping deleted from %s: %s", s.saveTarget, name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
@@ -2086,7 +2157,11 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after mapping toggle failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after mapping toggle failed: %v", err)
+			}
+		}
 		jsonResponse(w, mappingSummary(m))
 		return
 	}
@@ -2173,7 +2248,11 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after group toggle failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after group toggle failed: %v", err)
+			}
+		}
 		jsonResponse(w, map[string]interface{}{
 			"name":    g.Name,
 			"enabled": g.IsEnabled(),
@@ -2320,7 +2399,11 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after subscription filter update failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after subscription filter update failed: %v", err)
+			}
+		}
 		s.mu.Unlock()
 		jsonResponse(w, map[string]interface{}{
 			"filter":        body.Filter,
@@ -2582,7 +2665,11 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 	if err := s.mergeAndInitLocked(); err != nil {
 		util.LogWarn("[ADMIN] merge after active-member failed: %v", err)
 	}
-	s.triggerReload()
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogWarn("[ADMIN] incremental update after active-member failed: %v", err)
+		}
+	}
 	s.mu.Unlock()
 	jsonResponse(w, map[string]interface{}{
 		"name":          body.Name,
@@ -2772,7 +2859,11 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after group add failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after group add failed: %v", err)
+			}
+		}
 		s.mu.Unlock()
 		if replaced {
 			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", s.saveTarget, g.Name, g.Type)
@@ -3190,7 +3281,11 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after subscription toggle failed: %v", err)
 		}
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after subscription toggle failed: %v", err)
+			}
+		}
 		interval := 0
 		if sub.Interval != nil {
 			interval = *sub.Interval
@@ -3396,7 +3491,11 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
 
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after reverse config create failed: %v", err)
+			}
+		}
 		util.LogInfo("[ADMIN] reverse config created: %s", rc.Name)
 		jsonResponse(w, &rc)
 
@@ -3482,7 +3581,11 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after reverse config update failed: %v", err)
+			}
+		}
 		util.LogInfo("[ADMIN] reverse config updated: %s", rc.Name)
 		jsonResponse(w, found)
 
@@ -3525,7 +3628,11 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		s.triggerReload()
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after reverse config delete failed: %v", err)
+			}
+		}
 		util.LogInfo("[ADMIN] reverse config deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
@@ -3582,7 +3689,11 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 	}
 	s.mu.Unlock()
 
-	s.triggerReload()
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogWarn("[ADMIN] incremental update after reverse config toggle failed: %v", err)
+		}
+	}
 	util.LogInfo("[ADMIN] reverse config %s toggled: enabled=%v", name, req.Enabled)
 	jsonResponse(w, found)
 }
@@ -4025,6 +4136,8 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.mappings
 	case "reverse-wizard.html":
 		t = s.pages.reverseWizard
+	case "logs.html":
+		t = s.pages.logs
 	case "config.html":
 		t = s.pages.config
 	case "login.html":
@@ -4082,6 +4195,7 @@ func (s *AdminServer) saveConfigLocked() error {
 		return err
 	}
 	util.LogInfo("[ADMIN] config saved to %s (target=%s)", target, s.saveTarget)
+	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }
 

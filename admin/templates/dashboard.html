@@ -107,6 +107,12 @@
     </div>
     {{end}}
 
+    <!-- 运行日志 -->
+    <div class="card">
+        <h3 data-i18n="dash.logs">📋 运行日志</h3>
+        <pre class="tun-log" id="conn-logs" style="max-height:200px; overflow-y:auto;">Loading...</pre>
+    </div>
+
     <!-- Listener Status -->
     {{if index .Stats "listenerStatus"}}
     <div class="card">

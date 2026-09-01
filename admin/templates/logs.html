@@ -1,0 +1,47 @@
+{{template "layout" .}}
+{{define "content"}}
+<style>
+    .logs-page {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 160px);
+    }
+    .logs-page .card {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 0;
+        overflow: hidden;
+        min-height: 0;
+    }
+    .logs-page .card > div:first-child {
+        flex-shrink: 0;
+    }
+    .logs-page #conn-logs {
+        flex: 1;
+        overflow-y: auto;
+        margin: 0;
+        min-height: 0;
+        max-height: none;
+    }
+</style>
+<div class="logs-page">
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h3 style="margin:0;" data-i18n="logs.title">运行日志</h3>
+            <div style="display:flex; gap:0.5rem;">
+                <button onclick="clearLogs()" class="btn btn-sm btn-outline" data-i18n="logs.clear">清空</button>
+                <button onclick="fetchConnections()" class="btn btn-sm btn-outline" data-i18n="logs.refresh">刷新</button>
+            </div>
+        </div>
+        <pre class="tun-log" id="conn-logs">Loading...</pre>
+    </div>
+</div>
+
+<script>
+function clearLogs() {
+    const el = document.getElementById('conn-logs');
+    if (el) el.textContent = 'No logs yet';
+}
+</script>
+{{end}}

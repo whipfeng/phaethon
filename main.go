@@ -50,6 +50,8 @@ type activeResources struct {
 	ruleConf          *config.RuleConfiguration
 	listeners         []net.Listener
 	reverseServers    []*server.ReverseServer
+	mappingListeners  map[string]net.Listener       // mapping name -> listener
+	mappingReverse    map[string]*server.ReverseServer // mapping name -> reverse server
 	healthStop        chan struct{}
 	subscriptionStop  chan struct{}
 	reverseClientStop chan struct{}
@@ -211,7 +213,11 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	server.GlobalControlManager = server.NewControlManager(ruleConf, dataDir)
 	util.Logger.Printf("ControlManager initialized")
 
-	res := &activeResources{ruleConf: ruleConf}
+	res := &activeResources{
+		ruleConf:         ruleConf,
+		mappingListeners: make(map[string]net.Listener),
+		mappingReverse:   make(map[string]*server.ReverseServer),
+	}
 
 	// Start TUN engine if enabled (intercepts system-level traffic)
 	res.tunRes = startTUNIfEnabled(ruleConf)
@@ -269,6 +275,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 				continue
 			}
 			res.reverseServers = append(res.reverseServers, rs)
+			res.mappingReverse[m.Name] = rs
 			continue
 		}
 
@@ -297,6 +304,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			continue
 		}
 		res.listeners = append(res.listeners, ln)
+		res.mappingListeners[m.Name] = ln
 	}
 
 	runCnt++
@@ -1284,6 +1292,121 @@ func wireAdminCallbacks(resources *activeResources) {
 			return fmt.Errorf("control manager not available")
 		}
 		return server.GlobalControlManager.ForceRemoveBinding(reverseID, seq)
+	}
+	admin.OnIncrementalUpdate = func() error {
+		// mergeAndInitLocked already updated s.conf in place, which is the same
+		// object as resources.ruleConf. All servers see the changes immediately.
+		activeRuleConf.Store(resources.ruleConf)
+		return nil
+	}
+	admin.OnMappingUpdate = func(old, newMapping *config.Mapping) error {
+		// Mapping deleted
+		if newMapping == nil && old != nil {
+			if ln, ok := resources.mappingListeners[old.Name]; ok {
+				ln.Close()
+				delete(resources.mappingListeners, old.Name)
+			}
+			if rs, ok := resources.mappingReverse[old.Name]; ok {
+				rs.Close()
+				delete(resources.mappingReverse, old.Name)
+			}
+			// Remove from ruleConf
+			resources.ruleConf.Lock()
+			for i, m := range resources.ruleConf.Mappings {
+				if m.Name == old.Name {
+					resources.ruleConf.Mappings = append(resources.ruleConf.Mappings[:i], resources.ruleConf.Mappings[i+1:]...)
+					break
+				}
+			}
+			resources.ruleConf.Unlock()
+			activeRuleConf.Store(resources.ruleConf)
+			return nil
+		}
+
+		// Only credentials changed (no structural change), update in place
+		if old != nil && old.Port == newMapping.Port && old.Type == newMapping.Type &&
+			old.ReverseAddress == newMapping.ReverseAddress {
+			resources.ruleConf.Lock()
+			for i, m := range resources.ruleConf.Mappings {
+				if m.Name == newMapping.Name {
+					resources.ruleConf.Mappings[i] = newMapping
+					break
+				}
+			}
+			resources.ruleConf.Unlock()
+			activeRuleConf.Store(resources.ruleConf)
+			return nil
+		}
+
+		// Structural change or new mapping: need to restart listener
+		// Close old listener if exists
+		if old != nil {
+			if ln, ok := resources.mappingListeners[old.Name]; ok {
+				ln.Close()
+				delete(resources.mappingListeners, old.Name)
+			}
+			if rs, ok := resources.mappingReverse[old.Name]; ok {
+				rs.Close()
+				delete(resources.mappingReverse, old.Name)
+			}
+		}
+
+		// Update ruleConf with new mapping
+		resources.ruleConf.Lock()
+		found := false
+		for i, m := range resources.ruleConf.Mappings {
+			if m.Name == newMapping.Name {
+				resources.ruleConf.Mappings[i] = newMapping
+				found = true
+				break
+			}
+		}
+		if !found && old == nil {
+			// New mapping
+			resources.ruleConf.Mappings = append(resources.ruleConf.Mappings, newMapping)
+		}
+		resources.ruleConf.Unlock()
+
+		// Start new listener if mapping is enabled
+		if newMapping.IsEnabled() {
+			if newMapping.ReverseAddress != "" {
+				rs, err := startReverseBinding(resources.ruleConf, newMapping)
+				if err != nil {
+					util.Logger.Printf("ERROR: bind reverse fail for %s: %v", newMapping.Name, err)
+				} else {
+					resources.reverseServers = append(resources.reverseServers, rs)
+					resources.mappingReverse[newMapping.Name] = rs
+				}
+			} else {
+				var ln net.Listener
+				var err error
+				switch newMapping.Type {
+				case "socks5":
+					ln, err = server.StartSocks5(resources.ruleConf, newMapping)
+				case "direct", "DIRECT":
+					ln, err = server.StartDirect(resources.ruleConf, newMapping)
+				case "trojan":
+					ln, err = server.StartTrojan(resources.ruleConf, newMapping)
+				case "h_tunnel":
+					ln, err = server.StartHTunnel(resources.ruleConf, newMapping)
+				case "http":
+					ln, err = server.StartHTTP(resources.ruleConf, newMapping)
+				case "https":
+					ln, err = server.StartHTTPS(resources.ruleConf, newMapping)
+				default:
+					err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
+				}
+				if err != nil {
+					util.Logger.Printf("ERROR: bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
+				} else {
+					resources.listeners = append(resources.listeners, ln)
+					resources.mappingListeners[newMapping.Name] = ln
+				}
+			}
+		}
+
+		activeRuleConf.Store(resources.ruleConf)
+		return nil
 	}
 }
 

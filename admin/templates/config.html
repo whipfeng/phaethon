@@ -6,8 +6,8 @@
             <h3 data-i18n="raw.title">Raw Config</h3>
             <div>
                 <button onclick="copyRawConfig()" class="btn btn-outline btn-sm" data-i18n="raw.copy">📋 Copy</button>
-                <button onclick="saveRawConfig()" class="btn btn-primary btn-sm" data-i18n="raw.save">💾 Save</button>
-                <button onclick="reloadConfig()" class="btn btn-outline btn-sm" data-i18n="btn.reload">🔄 Reload Config</button>
+                <button onclick="saveRawConfig(true)" class="btn btn-primary btn-sm" data-i18n="raw.saveAndReload">💾 Save and Reload</button>
+                <button onclick="saveRawConfig(false)" class="btn btn-outline btn-sm" data-i18n="raw.saveOnly">💾 Save Only</button>
                 <button onclick="resetConfig()" class="btn btn-danger btn-sm" data-i18n="raw.reset">🗑 Reset to Defaults</button>
             </div>
         </div>
@@ -55,11 +55,12 @@
         }
     };
 
-    window.saveRawConfig = async function() {
+    window.saveRawConfig = async function(reload) {
         const body = textarea.value;
         showStatus(typeof i18n !== 'undefined' ? i18n.t('raw.saving') : 'Saving...', 'info');
         try {
-            const res = await fetch('./api/config/raw', {
+            const url = reload ? './api/config/raw?reload=true' : './api/config/raw';
+            const res = await fetch(url, {
                 method: 'PUT',
                 headers: {'Content-Type': 'text/plain; charset=utf-8'},
                 body: body
@@ -70,8 +71,13 @@
             if (!res.ok) {
                 throw new Error(data.error || text || ('HTTP ' + res.status));
             }
-            const msg = typeof i18n !== 'undefined' ? i18n.t('raw.saved') : 'Configuration saved';
-            showStatus(msg, 'success');
+            if (reload) {
+                const msg = typeof i18n !== 'undefined' ? i18n.t('raw.savedAndReloading') : 'Saved, reloading...';
+                showStatus(msg, 'success');
+            } else {
+                const msg = typeof i18n !== 'undefined' ? i18n.t('raw.saved') : 'Configuration saved';
+                showStatus(msg, 'success');
+            }
         } catch (err) {
             const label = typeof i18n !== 'undefined' ? i18n.t('raw.saveFailed') : 'Save failed';
             showStatus(label + ': ' + err.message, 'error');

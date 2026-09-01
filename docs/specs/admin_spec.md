@@ -3,7 +3,7 @@
 ## 元数据
 
 - 文档类型：Spec
-- 版本：v0.1.0
+- 版本：v0.2.0
 - 所属项目：phaethon
 - 创建日期：2026-07-14
 
@@ -12,6 +12,7 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-07-14 | 初始版本：Admin 面板页面与 API 总览 | Claude |
+| v0.2.0 | 2026-09-01 | 新增 SPA 导航规格：HTMX 片段加载、HX-Request 头约定 | Qoder |
 
 ## 1. 概述
 
@@ -130,7 +131,30 @@ Admin 是 phaethon 内置的 Web 管理面板与 HTTP API，默认监听 `:39999
 
 `/api/events` 返回 `text/event-stream`，用于前端同步配置保存、健康状态变更、反向连接事件等。
 
-## 7. 相关链接
+## 7. SPA 导航
+
+Admin 采用 HTMX 实现单页应用（SPA）导航，菜单切换不刷新整个页面。
+
+### 7.1 工作原理
+
+- 首次加载：浏览器请求页面，Go 返回完整 HTML（layout + content）。
+- 后续导航：HTMX 拦截侧边栏链接点击，发送 `GET` 请求并携带 `HX-Request: true` 头。
+- Go 检测 `HX-Request` 头，仅渲染 `{{define "content"}}` 块（不含 layout）。
+- HTMX 将返回的 HTML 片段替换 `#main-content` 容器的内容。
+- URL 通过 `hx-push-url="true"` 更新，支持浏览器前进/后退。
+
+### 7.2 持久化组件
+
+以下组件在 layout 中，不随导航刷新：
+- SSE 连接（`VersionNotificationService`）
+- Document Picture-in-Picture 日志窗口
+- 侧边栏、顶栏、共享模态框
+
+### 7.3 SSR 兜底
+
+每个 URL 仍可独立访问（如直接访问 `/proxies`）。Go 返回完整页面，HTMX 未介入时行为与 MPA 一致。
+
+## 8. 相关链接
 
 - [core_spec.md](core_spec.md)
 - [reverse_spec.md](reverse_spec.md)

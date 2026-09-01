@@ -7,6 +7,7 @@
     <title>{{.Title}} - Phaethon Manager</title>
     <link rel="stylesheet" href="./static/style.css?v={{.Version}}">
     <script src="./static/i18n.js?v={{.Version}}"></script>
+    <script src="./static/htmx.min.js?v={{.Version}}"></script>
 </head>
 <body>
     <div class="app-layout">
@@ -17,25 +18,25 @@
                 <span class="version">v{{.Version}}</span>
             </div>
             <ul class="nav-menu">
-                <li><a href="./" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
+                <li><a href="./" hx-get="./" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
                 <li class="nav-section"><span data-i18n="nav.config">Configuration</span></li>
-                <li><a href="./subscriptions" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
-                <li><a href="./proxies" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔗 Proxies</a></li>
-                <li><a href="./rules" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📋 Rules</a></li>
-                <li><a href="./mappings" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🔌 Mappings</a></li>
+                <li><a href="./subscriptions" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
+                <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔗 Proxies</a></li>
+                <li><a href="./rules" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📋 Rules</a></li>
+                <li><a href="./mappings" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🔌 Mappings</a></li>
                 <li class="nav-divider"></li>
                 <li class="nav-section"><span data-i18n="nav.tools">Tools</span></li>
-                <li><a href="./reverse" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
+                <li><a href="./reverse" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
             </ul>
             <div class="sidebar-footer">
                 <div class="sidebar-footer-actions">
-                    <a href="./config" class="btn btn-sm btn-outline" data-i18n="nav.rawConfig">📝 Raw Config</a>
+                    <a href="./config" hx-get="./config" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" class="btn btn-sm btn-outline" data-i18n="nav.rawConfig">📝 Raw Config</a>
                 </div>
             </div>
         </nav>
         <main class="main-content">
             <header class="top-bar">
-                <h2>{{.Title}}</h2>
+                <h2 id="page-title">{{.Title}}</h2>
                 <div class="actions">
                     <span id="sse-status" class="badge badge-error hidden" data-i18n-title="sse.syncError" title="同步失败"></span>
                     <span id="uptime" class="badge"></span>
@@ -53,7 +54,9 @@
                     </div>
                 </div>
             </header>
-            {{block "content" .}}{{end}}
+            <div id="main-content">
+                {{block "content" .}}{{end}}
+            </div>
         </main>
     </div>
 

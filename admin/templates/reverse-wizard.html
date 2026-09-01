@@ -437,7 +437,7 @@ async function toggleReverse(name, enabled) {
     } catch (err) {
         const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
         showToast(errLabel + ': ' + err.message, 'error');
-        location.reload();
+        reloadPage();
     }
 }
 
@@ -635,9 +635,7 @@ async function forceDeleteBinding(reverseID, seq) {
     });
 }
 
-window.addEventListener('DOMContentLoaded', function() {
-    updateInstanceReverseID();
-    // Bindings table is populated exclusively via SSE version events.
-});
+updateInstanceReverseID();
+// Bindings table is populated exclusively via SSE version events.
 </script>
 {{end}}

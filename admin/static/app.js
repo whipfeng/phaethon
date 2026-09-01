@@ -52,26 +52,38 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchTUNStatus();
     }
 
-    // Intercept nav-link clicks to tear down SSE/polling BEFORE navigating.
-    // Browsers limit concurrent connections per host (~6 for HTTP/1.1).  If the
-    // old page leaves an EventSource (/api/events) or pending fetch() alive,
-    // those sockets occupy slots and force the new page's requests to queue —
-    // which manifests as a multi-second "stall" on every menu switch.
+    // Tear down SSE on full page unload (browser close/refresh).
+    // HTMX navigation does NOT cause full page loads, so no teardown on nav clicks.
     function teardown() {
         VersionNotificationService.stop();
     }
-    document.querySelectorAll('.nav-menu a[href]').forEach(a => {
-        a.addEventListener('click', function(e) {
-            teardown();
-            // Let the browser process the close before following the link.
-            // A single microtask tick is enough for EventSource.close() to hit
-            // the wire and free the connection slot.
-        });
-    });
-
-    // Belt-and-suspenders: also clean up on unload/pagehide (handles back/forward).
     window.addEventListener('beforeunload', teardown);
     window.addEventListener('pagehide', teardown);
+
+    // HTMX SPA: after content swap, re-execute inline scripts, apply i18n, update nav
+    document.body.addEventListener('htmx:afterSettle', function(event) {
+        if (event.detail.target.id !== 'main-content') return;
+
+        // Re-execute <script> tags in swapped content (browsers don't execute innerHTML scripts)
+        const scripts = event.detail.target.querySelectorAll('script');
+        scripts.forEach(function(oldScript) {
+            const newScript = document.createElement('script');
+            Array.from(oldScript.attributes).forEach(attr => {
+                newScript.setAttribute(attr.name, attr.value);
+            });
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
+
+        // Re-apply i18n to new content
+        if (typeof applyI18n === 'function') applyI18n();
+
+        // Update sidebar active state
+        updateActiveNav();
+
+        // Update page title in top bar
+        updatePageTitle();
+    });
 
    // Close any modal when clicking its overlay background.
     document.querySelectorAll('.modal').forEach(m => {
@@ -83,6 +95,43 @@ document.addEventListener('DOMContentLoaded', () => {
     setupModalResizers();
     setupUserMenu();
 });
+
+// ========== HTMX SPA Helpers ==========
+const PAGE_TITLES = {
+    '/': 'Dashboard',
+    '/subscriptions': 'Subscriptions',
+    '/proxies': 'Proxies',
+    '/rules': 'Rules',
+    '/mappings': 'Mappings',
+    '/reverse': 'Reverse',
+    '/config': 'Raw Config',
+};
+
+function updateActiveNav() {
+    const path = window.location.pathname;
+    document.querySelectorAll('.nav-menu a[href]').forEach(a => {
+        const href = a.getAttribute('href');
+        const isActive = href === path || (path === '/' && href === './') ||
+                         (href === './' && path === '/') ||
+                         (href.startsWith('./') && path === href.substring(1));
+        a.classList.toggle('active', isActive);
+    });
+}
+
+function updatePageTitle() {
+    const path = window.location.pathname;
+    const title = PAGE_TITLES[path] || 'Phaethon';
+    const titleEl = document.getElementById('page-title');
+    if (titleEl) titleEl.textContent = title;
+}
+
+function reloadPage() {
+    if (typeof htmx !== 'undefined') {
+        htmx.ajax('GET', window.location.pathname, {target: '#main-content', swap: 'innerHTML'});
+    } else {
+        location.reload();
+    }
+}
 
 // ========== User Menu ==========
 function setupUserMenu() {

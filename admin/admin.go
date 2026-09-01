@@ -4159,6 +4159,14 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		return
 	}
 
+	if r.Header.Get("HX-Request") == "true" {
+		if err := t.ExecuteTemplate(w, "content", data); err != nil {
+			util.LogError("[ADMIN] fragment template error (%s): %v", pageName, err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+		return
+	}
+
 	if err := t.Execute(w, data); err != nil {
 		util.LogError("[ADMIN] template error (%s): %v", pageName, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)

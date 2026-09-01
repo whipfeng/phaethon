@@ -228,7 +228,7 @@ async function saveRule(e) {
             throw new Error(txt || `HTTP ${res.status}`);
         }
         closeRuleModal();
-        location.reload();
+        reloadPage();
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');
@@ -239,7 +239,7 @@ async function deleteRule(idx) {
     try {
         const res = await fetch(`./api/rules/${idx}`, {method: 'DELETE'});
         if (!res.ok) throw new Error(await res.text());
-        location.reload();
+        reloadPage();
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');
@@ -259,7 +259,7 @@ async function toggleRule(idx, enabled) {
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');
-        location.reload();
+        reloadPage();
     }
 }
 
@@ -276,7 +276,7 @@ async function moveRule(idx, delta) {
             body: JSON.stringify(newRules)
         });
         if (!res.ok) throw new Error(await res.text());
-        location.reload();
+        reloadPage();
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');

@@ -142,6 +142,9 @@
             div.className = `log-line ${log.status}`;
             div.innerHTML = `<span class="log-time">[${log.time}]</span><span class="log-icon">${log.text.charAt(0)}</span>${log.text.substring(2)}`;
             logsEl.appendChild(div);
+            while (logsEl.children.length > 1000) {
+                logsEl.removeChild(logsEl.firstChild);
+            }
             logCount++;
             updateCount();
         }

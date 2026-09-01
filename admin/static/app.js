@@ -792,6 +792,12 @@ async function fetchConnections(incremental) {
         } else {
             el.textContent = lines.join('\n');
         }
+        // Trim oldest logs to prevent unbounded memory growth
+        const MAX_DASHBOARD_LOG_LINES = 500;
+        const allLines = el.textContent.split('\n');
+        if (allLines.length > MAX_DASHBOARD_LOG_LINES) {
+            el.textContent = allLines.slice(allLines.length - MAX_DASHBOARD_LOG_LINES).join('\n');
+        }
         connLogLastSeq = data.logs[data.logs.length - 1].seq;
         el.scrollTop = el.scrollHeight;
     } catch (err) {
@@ -935,6 +941,11 @@ async function openLogsPopup() {
                 div.innerHTML = `<span class="log-time">[${time}]</span><span class="log-icon">${text.charAt(0)}</span>${text.substring(2)}`;
                 logsEl.appendChild(div);
                 logCount++;
+                // Trim oldest logs to prevent unbounded DOM growth
+                const MAX_PIP_LOGS = 1000;
+                while (logsEl.children.length > MAX_PIP_LOGS) {
+                    logsEl.removeChild(logsEl.firstChild);
+                }
                 countEl.textContent = lang === 'zh' ? `${logCount} 条日志` : `${logCount} logs`;
                 // Scroll to bottom after each log for real-time updates
                 scrollToBottom();

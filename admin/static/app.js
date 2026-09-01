@@ -880,6 +880,8 @@ async function openLogsPopup() {
                 logsEl.appendChild(div);
                 logCount++;
                 countEl.textContent = lang === 'zh' ? `${logCount} 条日志` : `${logCount} logs`;
+                // Scroll to bottom after each log for real-time updates
+                scrollToBottom();
             }
 
             function scrollToBottom() {
@@ -911,7 +913,8 @@ async function openLogsPopup() {
                         appendLog(e);
                         lastSeq = e.seq;
                     });
-                    requestAnimationFrame(() => scrollToBottom());
+                    // Use setTimeout to ensure DOM is fully updated before scrolling
+                    setTimeout(() => scrollToBottom(), 50);
                 } catch (err) {
                     if (full) logsEl.textContent = 'Failed: ' + err.message;
                 }

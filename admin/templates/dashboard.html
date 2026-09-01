@@ -111,9 +111,24 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
             <h3 style="margin:0;" data-i18n="dash.logs">📋 运行日志</h3>
-            <a href="./logs" target="_blank" class="btn btn-sm btn-outline" data-i18n="dash.expandLogs" title="新窗口打开">⤢</a>
+            <button onclick="openLogsModal()" class="btn btn-sm btn-outline" data-i18n="dash.expandLogs" title="展开">⤢</button>
         </div>
         <pre class="tun-log" id="conn-logs" style="max-height:200px; overflow-y:auto;">Loading...</pre>
+    </div>
+
+    <!-- 日志弹窗 -->
+    <div id="logs-modal" class="logs-modal" style="display:none;">
+        <div class="logs-modal-overlay" onclick="closeLogsModal()"></div>
+        <div class="logs-modal-content">
+            <div class="logs-modal-header">
+                <h3 data-i18n="dash.logs">📋 运行日志</h3>
+                <div style="display:flex; gap:8px;">
+                    <button onclick="clearLogsModal()" class="btn btn-sm btn-outline" data-i18n="dash.clearLogs">清空</button>
+                    <button onclick="closeLogsModal()" class="btn btn-sm btn-outline">✕</button>
+                </div>
+            </div>
+            <pre class="tun-log" id="conn-logs-modal" style="flex:1; margin:0; border-radius:0; border-left:0; border-right:0;"></pre>
+        </div>
     </div>
 
     <!-- Listener Status -->

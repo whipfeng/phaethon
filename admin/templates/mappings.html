@@ -306,7 +306,7 @@ async function saveMapping(e) {
         }
         if (!res.ok) throw new Error(await res.text());
         closeMapModal();
-        location.reload();
+        reloadPage();
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');
@@ -319,7 +319,7 @@ async function deleteMapping(name) {
         try {
             const res = await fetch(`./api/mappings/${name}`, {method: 'DELETE'});
             if (!res.ok) throw new Error(await res.text());
-            location.reload();
+            reloadPage();
         } catch (err) {
             const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
             showToast(errLabel + ': ' + err.message, 'error');
@@ -345,7 +345,7 @@ async function toggleMapping(name, enabled) {
     } catch (err) {
         const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
         showToast(errLabel + ': ' + err.message, 'error');
-        location.reload();
+        reloadPage();
     }
 }
 
@@ -353,6 +353,6 @@ function closeMapModal() {
     document.getElementById('mapping-modal').classList.add('hidden');
 }
 
-document.addEventListener('DOMContentLoaded', toggleMappingFields);
+toggleMappingFields();
 </script>
 {{end}}

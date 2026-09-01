@@ -269,7 +269,7 @@
         .then(res => {
             if (res.ok) {
                 closeSecurityModal();
-                location.reload();
+                reloadPage();
             } else {
                 showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saveFailed') : 'Save failed', 'error');
             }

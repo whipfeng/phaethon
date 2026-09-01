@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/dialer"
 	"phaethon/util"
 )
@@ -57,11 +58,13 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	proxy := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "reject", nil)
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
@@ -70,12 +73,14 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "fail", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer targetConn.Close()
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
 
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
@@ -90,11 +95,13 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	proxy := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
 		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "reject", nil)
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
@@ -103,6 +110,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "fail", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -123,6 +131,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	}
 
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
 
 	// Read response and forward back
 	resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)

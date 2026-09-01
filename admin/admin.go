@@ -524,7 +524,6 @@ type pageTemplates struct {
 	rules         *template.Template
 	mappings      *template.Template
 	reverseWizard *template.Template
-	logs          *template.Template
 	login         *template.Template
 	setup         *template.Template
 	config        *template.Template
@@ -646,7 +645,6 @@ func (s *AdminServer) parseTemplates() {
 		rules:         parsePage("rules.html"),
 		mappings:      parsePage("mappings.html"),
 		reverseWizard: parsePage("reverse-wizard.html"),
-		logs:          parsePage("logs.html"),
 		login:         parseStandalone("login.html"),
 		setup:         parseStandalone("setup.html"),
 		config:        parsePage("config.html"),
@@ -1107,10 +1105,14 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 }
 
 func (s *AdminServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
-	data := map[string]interface{}{
-		"Title": "Logs",
+	// Render standalone logs page (no layout)
+	data, err := templates.ReadFile("templates/logs-standalone.html")
+	if err != nil {
+		http.Error(w, "template not found", http.StatusInternalServerError)
+		return
 	}
-	s.render(w, r, "logs.html", data)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
 }
 
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -1160,7 +1162,17 @@ func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
-	logs := connlog.GetLogs()
+	var logs []connlog.Event
+	afterStr := r.URL.Query().Get("after")
+	if afterStr != "" {
+		if after, err := strconv.ParseUint(afterStr, 10, 64); err == nil {
+			logs = connlog.GetLogsAfterSeq(after)
+		} else {
+			logs = connlog.GetLogs()
+		}
+	} else {
+		logs = connlog.GetLogs()
+	}
 	version := connlog.GetVersion()
 	jsonResponse(w, map[string]interface{}{
 		"version": version,
@@ -4136,8 +4148,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.mappings
 	case "reverse-wizard.html":
 		t = s.pages.reverseWizard
-	case "logs.html":
-		t = s.pages.logs
 	case "config.html":
 		t = s.pages.config
 	case "login.html":

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/dialer"
 	"phaethon/reverse"
 	"phaethon/util"
@@ -190,11 +191,13 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	proxy := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
 		sendSocks5Response(clientConn, 0x04) // Host unreachable
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "reject", nil)
 		sendSocks5Response(clientConn, 0x04) // Host unreachable
 		return
 	}
@@ -208,6 +211,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "fail", err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
@@ -215,6 +219,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
+	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "ok", nil)
 
 	// Handshake complete — clear the deadline so the relay idle timeout
 	// (enforced inside RelayWithRateLimit) takes over.

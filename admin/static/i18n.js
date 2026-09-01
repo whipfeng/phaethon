@@ -50,6 +50,7 @@
             'dash.editRules': '编辑规则',
             'dash.viewMappings': '查看映射',
             'dash.reloadConfig': '重载配置',
+            'dash.expandLogs': '新窗口打开',
 
             // ===== TUN =====
             'tun.title': '🌐 TUN',
@@ -576,6 +577,7 @@
             'dash.editRules': 'Edit Rules',
             'dash.viewMappings': 'View Mappings',
             'dash.reloadConfig': 'Reload Config',
+            'dash.expandLogs': 'Open in new window',
 
             // ===== TUN =====
             'tun.title': '🌐 TUN',

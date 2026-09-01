@@ -739,7 +739,205 @@ async function fetchConnections(incremental) {
     }
 }
 
-function openLogsPopup() {
+async function openLogsPopup() {
+    // Try Document Picture-in-Picture API first (Chrome 116+)
+    if ('documentPictureInPicture' in window) {
+        try {
+            const pipWindow = await window.documentPictureInPicture.requestWindow({
+                width: Math.min(1200, Math.floor(screen.width * 0.8)),
+                height: Math.floor(screen.height * 0.7),
+            });
+
+            // Copy styles
+            const styles = document.querySelectorAll('link[rel="stylesheet"], style');
+            styles.forEach(style => {
+                pipWindow.document.head.appendChild(style.cloneNode(true));
+            });
+
+            // Add custom styles for the PiP window
+            const pipStyle = pipWindow.document.createElement('style');
+            pipStyle.textContent = `
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    background: #0d1117;
+                    color: #c9d1d9;
+                    margin: 0;
+                    padding: 0;
+                    height: 100vh;
+                    display: flex;
+                    flex-direction: column;
+                }
+                .pip-header {
+                    background: #161b22;
+                    border-bottom: 1px solid #30363d;
+                    padding: 8px 16px;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    flex-shrink: 0;
+                }
+                .pip-header h1 { font-size: 14px; margin: 0; color: #f0f6fc; }
+                .pip-actions { display: flex; gap: 6px; }
+                .pip-btn {
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    border: 1px solid #30363d;
+                    background: #21262d;
+                    color: #c9d1d9;
+                    cursor: pointer;
+                    font-size: 12px;
+                }
+                .pip-btn:hover { background: #30363d; }
+                .pip-btn-danger { border-color: #f85149; color: #f85149; }
+                #pip-logs {
+                    flex: 1;
+                    overflow-y: auto;
+                    padding: 12px 16px;
+                    font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+                    font-size: 11px;
+                    line-height: 1.5;
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                    margin: 0;
+                }
+                .log-line { padding: 1px 0; }
+                .log-line.ok { color: #3fb950; }
+                .log-line.fail, .log-line.reject { color: #f85149; }
+                .log-time { color: #8b949e; margin-right: 6px; }
+                .log-icon { margin-right: 3px; }
+                .pip-status {
+                    background: #161b22;
+                    border-top: 1px solid #30363d;
+                    padding: 6px 16px;
+                    font-size: 11px;
+                    color: #8b949e;
+                    display: flex;
+                    justify-content: space-between;
+                    flex-shrink: 0;
+                }
+            `;
+            pipWindow.document.head.appendChild(pipStyle);
+
+            // Build the UI
+            pipWindow.document.body.innerHTML = `
+                <div class="pip-header">
+                    <h1>📋 Logs</h1>
+                    <div class="pip-actions">
+                        <button class="pip-btn" id="pip-refresh">🔄</button>
+                        <button class="pip-btn pip-btn-danger" id="pip-clear">🗑</button>
+                    </div>
+                </div>
+                <pre id="pip-logs">Loading...</pre>
+                <div class="pip-status">
+                    <span id="pip-count">0 logs</span>
+                    <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                        <input type="checkbox" id="pip-autoscroll" checked style="cursor:pointer;">
+                        <span>Auto-scroll</span>
+                    </label>
+                </div>
+            `;
+
+            // Apply i18n
+            const lang = localStorage.getItem('phaethon_lang') || 'zh';
+            if (lang === 'zh') {
+                pipWindow.document.querySelector('.pip-header h1').textContent = '📋 运行日志';
+                pipWindow.document.querySelector('#pip-refresh').textContent = '🔄';
+                pipWindow.document.querySelector('#pip-clear').textContent = '🗑';
+                pipWindow.document.querySelector('#pip-autoscroll').nextSibling.textContent = '自动滚动';
+            }
+
+            const logsEl = pipWindow.document.getElementById('pip-logs');
+            const countEl = pipWindow.document.getElementById('pip-count');
+            const autoScrollEl = pipWindow.document.getElementById('pip-autoscroll');
+            let lastSeq = 0;
+            let logCount = 0;
+
+            function appendLog(e) {
+                const time = new Date(e.time).toLocaleTimeString('en-US', {hour12: false, fractionalSecondDigits: 3});
+                const icon = e.status === 'ok' ? '✓' : '✗';
+                const proxy = e.proxy || 'DIRECT';
+                const inbound = e.inbound || '';
+                let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${proxy}`;
+                if (e.error) text += ` (${e.error})`;
+
+                const div = pipWindow.document.createElement('div');
+                div.className = `log-line ${e.status}`;
+                div.innerHTML = `<span class="log-time">[${time}]</span><span class="log-icon">${text.charAt(0)}</span>${text.substring(2)}`;
+                logsEl.appendChild(div);
+                logCount++;
+                countEl.textContent = lang === 'zh' ? `${logCount} 条日志` : `${logCount} logs`;
+                if (autoScrollEl.checked) {
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
+            }
+
+            async function fetchLogs(full) {
+                try {
+                    let url = './api/connections';
+                    if (!full && lastSeq > 0) url += '?after=' + lastSeq;
+                    const res = await fetch(url);
+                    if (!res.ok) throw new Error('status ' + res.status);
+                    const data = await res.json();
+                    if (!data.logs || data.logs.length === 0) {
+                        if (full) {
+                            logsEl.textContent = lang === 'zh' ? '暂无日志' : 'No logs yet';
+                            logCount = 0;
+                            countEl.textContent = lang === 'zh' ? '0 条日志' : '0 logs';
+                        }
+                        return;
+                    }
+                    if (full) {
+                        logsEl.textContent = '';
+                        logCount = 0;
+                    }
+                    data.logs.forEach(e => {
+                        appendLog(e);
+                        lastSeq = e.seq;
+                    });
+                    if (full && autoScrollEl.checked) {
+                        logsEl.scrollTop = logsEl.scrollHeight;
+                    }
+                } catch (err) {
+                    if (full) logsEl.textContent = 'Failed: ' + err.message;
+                }
+            }
+
+            pipWindow.document.getElementById('pip-refresh').onclick = () => fetchLogs(true);
+            pipWindow.document.getElementById('pip-clear').onclick = () => {
+                logsEl.textContent = lang === 'zh' ? '暂无日志' : 'No logs yet';
+                logCount = 0;
+                lastSeq = 0;
+                countEl.textContent = lang === 'zh' ? '0 条日志' : '0 logs';
+            };
+
+            // Initial load
+            fetchLogs(true);
+
+            // SSE for real-time updates
+            const sse = new EventSource('./api/events');
+            let lastVersion = 0;
+            sse.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.versions && data.versions.logs > lastVersion) {
+                        lastVersion = data.versions.logs;
+                        fetchLogs(false);
+                    }
+                } catch {}
+            };
+
+            // Cleanup when PiP window closes
+            pipWindow.addEventListener('pagehide', () => {
+                sse.close();
+            });
+
+            return;
+        } catch (err) {
+            console.warn('PiP failed, falling back to popup:', err);
+        }
+    }
+
+    // Fallback: regular popup
     const width = Math.min(1600, Math.floor(screen.width * 0.9));
     const height = Math.floor(screen.height * 0.85);
     const left = (screen.width - width) / 2;

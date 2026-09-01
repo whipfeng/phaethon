@@ -740,8 +740,8 @@ async function fetchConnections(incremental) {
 }
 
 function openLogsPopup() {
-    const width = 1000;
-    const height = 700;
+    const width = Math.min(1600, Math.floor(screen.width * 0.9));
+    const height = Math.floor(screen.height * 0.85);
     const left = (screen.width - width) / 2;
     const top = (screen.height - height) / 2;
     window.open('./logs', 'PhaethonLogs', `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`);

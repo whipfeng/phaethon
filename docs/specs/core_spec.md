@@ -116,22 +116,6 @@
 
 ### 4.2 订阅 API
 
-#### GET /api/subscriptions
-
-返回订阅源列表（不含节点详情）。
-
-```json
-[
-  {
-    "name": "my-sub",
-    "enabled": true,
-    "url": "https://example.com/sub",
-    "interval": 3600,
-    "nodeCount": 12
-  }
-]
-```
-
 #### POST /api/subscriptions
 
 创建/更新订阅源。

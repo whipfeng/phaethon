@@ -89,8 +89,8 @@ Admin 是 phaethon 内置的 Web 管理面板与 HTTP API，默认监听 `:39999
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/api/subscriptions` | 订阅源列表/创建/更新 |
-| GET/DELETE | `/api/subscriptions/{name}` | 获取/删除订阅源 |
+| POST | `/api/subscriptions` | 创建/更新订阅源 |
+| DELETE | `/api/subscriptions/{name}` | 删除订阅源 |
 | POST | `/api/subscriptions/{name}/refresh` | 刷新订阅节点池 |
 | PATCH | `/api/subscriptions/{name}/toggle` | 启用/禁用 |
 

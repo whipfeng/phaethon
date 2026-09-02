@@ -806,13 +806,16 @@ async function fetchConnections(incremental) {
 }
 
 async function openLogsPopup() {
+    console.log('[PiP] openLogsPopup called');
     // Try Document Picture-in-Picture API first (Chrome 116+)
     if ('documentPictureInPicture' in window) {
+        console.log('[PiP] API available, requesting window...');
         try {
             const pipWindow = await window.documentPictureInPicture.requestWindow({
                 width: Math.min(1600, Math.floor(screen.width * 0.9)),
                 height: Math.floor(screen.height * 0.85),
             });
+            console.log('[PiP] Window created successfully');
 
             // Add styles for the PiP window
             const pipStyle = pipWindow.document.createElement('style');
@@ -1011,11 +1014,14 @@ async function openLogsPopup() {
 
             return;
         } catch (err) {
-            console.warn('PiP failed, falling back to popup:', err);
+            console.warn('[PiP] failed, falling back to popup:', err);
         }
+    } else {
+        console.log('[PiP] API not available in this browser');
     }
 
     // Fallback: regular popup
+    console.log('[PiP] Opening regular popup');
     const width = Math.min(1600, Math.floor(screen.width * 0.9));
     const height = Math.floor(screen.height * 0.85);
     const left = (screen.width - width) / 2;

@@ -3900,6 +3900,11 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// If auth is disabled, return a default username
+	if !s.config.AuthEnabled {
+		jsonResponse(w, map[string]string{"username": "admin"})
+		return
+	}
 	username := s.verifySession(r)
 	if username == "" {
 		httpError(w, "unauthorized", http.StatusUnauthorized)

@@ -44,3 +44,4 @@ config.yaml
 
 # AI agent local memory
 agents.md
+subscription_cache/

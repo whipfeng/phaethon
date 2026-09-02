@@ -2939,11 +2939,12 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 
 // apiSubscriptions handles CRUD for top-level subscriptions.
 func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	switch r.Method {
 	case http.MethodGet:
-		list := make([]map[string]interface{}, len(dc.Subscriptions))
-		for i, sub := range dc.Subscriptions {
+		// Use runtime config (s.conf) to get actual node counts from loaded subscriptions
+		runtimeConf := s.GetConfig()
+		list := make([]map[string]interface{}, len(runtimeConf.Subscriptions))
+		for i, sub := range runtimeConf.Subscriptions {
 			nodeCount := 0
 			if sub != nil {
 				sub.SubMu.RLock()
@@ -2965,6 +2966,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, list)
 
 	case http.MethodPost:
+		dc := s.displayConf()
 		var req struct {
 			Name     string `json:"name"`
 			URL      string `json:"url"`
@@ -3058,6 +3060,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
+		dc := s.displayConf()
 		name := strings.TrimPrefix(r.URL.Path, "/api/subscriptions/")
 		if name == "" {
 			httpError(w, "subscription name required", http.StatusBadRequest)

@@ -324,14 +324,14 @@
 </div>
 
 <script>
-const proxies = {{json .Proxies}};
-let groups = {{json .Groups}};
-const subscriptions = {{json .Subscriptions}};
-let manualSelected = new Set();
-let manualSelectedOrder = [];
-let manualHealthData = {}; // current group's health snapshot: name -> ProxyHealth
-let currentManualGroupName = '';
-let manualTesting = false;
+var proxies = {{json .Proxies}};
+var groups = {{json .Groups}};
+var subscriptions = {{json .Subscriptions}};
+var manualSelected = new Set();
+var manualSelectedOrder = [];
+var manualHealthData = {}; // current group's health snapshot: name -> ProxyHealth
+var currentManualGroupName = '';
+var manualTesting = false;
 
 function populateNextProxySelect(selected) {
     const sel = document.getElementById('f-proxy');

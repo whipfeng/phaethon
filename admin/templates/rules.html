@@ -122,8 +122,8 @@
     </div>
 </div>
 <script>
-const rules = {{json .Rules}};
-const mappings = {{json .Mappings}};
+var rules = {{json .Rules}};
+var mappings = {{json .Mappings}};
 
 function isRuleEnabled(rule) {
     return !rule.trim().startsWith('//');

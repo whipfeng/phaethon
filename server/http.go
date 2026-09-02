@@ -81,6 +81,8 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name)
+	defer connlog.RemoveActive(connID)
 
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
@@ -132,6 +134,8 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
 	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name)
+	defer connlog.RemoveActive(connID)
 
 	// Read response and forward back
 	resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)

@@ -47,6 +47,12 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchConnections();
     }
 
+    // Initial load for active connections if on dashboard
+    if (document.getElementById('active-conns-list')) {
+        fetchActiveConns();
+        startActiveConnsTimer();
+    }
+
     // Initial load for TUN status if on dashboard
     if (document.getElementById('tun-status')) {
         fetchTUNStatus();
@@ -418,9 +424,13 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
-        // Forward to PiP window if open
+        fetchActiveConns(true);
+        // Forward to PiP windows if open
         if (window._pipLogsWindow && !window._pipLogsWindow.closed) {
             try { window._pipLogsWindow._fetchLogs?.(false); } catch {}
+        }
+        if (window._pipConnsWindow && !window._pipConnsWindow.closed) {
+            try { window._pipConnsWindow._fetchPipConns?.(); } catch {}
         }
     }, 'logs');
 }
@@ -758,6 +768,238 @@ async function fetchTUNStatus(expectedVersion) {
 }
 
 let connLogLastSeq = 0;
+
+// ===== Active Connections =====
+var activeConnsMap = new Map();
+var activeConnsLastSeq = 0;
+var activeConnsTimer = null;
+
+function formatDuration(ms) {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return m + 'm ' + rs + 's';
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return h + 'h ' + rm + 'm';
+}
+
+async function fetchActiveConns(incremental) {
+    const el = document.getElementById('active-conns-list');
+    if (!el) return;
+    try {
+        let url = './api/activeconns';
+        if (incremental && activeConnsLastSeq > 0) {
+            url += '?after=' + activeConnsLastSeq;
+        }
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('status ' + res.status);
+        const data = await res.json();
+
+        if (data.stale) {
+            activeConnsMap.clear();
+            if (data.connections) {
+                data.connections.forEach(c => activeConnsMap.set(c.id, c));
+            }
+        } else if (data.journal) {
+            data.journal.forEach(e => {
+                if (e.action === 'add' && e.conn) {
+                    activeConnsMap.set(e.conn.id, e.conn);
+                } else if (e.action === 'remove') {
+                    activeConnsMap.delete(e.id);
+                }
+            });
+        }
+        activeConnsLastSeq = data.version;
+        renderActiveConns();
+    } catch (err) {
+        console.error('fetchActiveConns error:', err);
+    }
+}
+
+function renderActiveConns() {
+    const el = document.getElementById('active-conns-list');
+    const countEl = document.getElementById('active-conn-count');
+    if (!el) return;
+
+    const conns = Array.from(activeConnsMap.values());
+    conns.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+    if (conns.length === 0) {
+        el.innerHTML = '<p class="text-muted" data-i18n="dash.noActiveConns">' + i18n.t('dash.noActiveConns') + '</p>';
+    } else {
+        let html = '<table class="data-table" style="font-size:0.85rem;"><thead><tr>';
+        html += '<th data-i18n="dash.connProtocol">' + i18n.t('dash.connProtocol') + '</th>';
+        html += '<th data-i18n="dash.connDst">' + i18n.t('dash.connDst') + '</th>';
+        html += '<th data-i18n="dash.connProxy">' + i18n.t('dash.connProxy') + '</th>';
+        html += '<th data-i18n="dash.connDuration">' + i18n.t('dash.connDuration') + '</th>';
+        html += '</tr></thead><tbody>';
+        conns.forEach(c => {
+            const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
+            const dst = c.dstAddr + ':' + c.dstPort;
+            const proxy = c.proxy || 'DIRECT';
+            html += '<tr><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    }
+
+    if (countEl) {
+        countEl.textContent = i18n.t('dash.activeConnCount').replace('{}', conns.length);
+    }
+}
+
+function startActiveConnsTimer() {
+    if (activeConnsTimer) return;
+    activeConnsTimer = setInterval(() => {
+        document.querySelectorAll('#active-conns-list td[data-start]').forEach(td => {
+            td.textContent = formatDuration(Date.now() - new Date(td.dataset.start).getTime());
+        });
+    }, 1000);
+}
+
+function stopActiveConnsTimer() {
+    if (activeConnsTimer) {
+        clearInterval(activeConnsTimer);
+        activeConnsTimer = null;
+    }
+}
+
+async function openConnsPopup() {
+    const width = 700, height = 500;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+
+    if (!window.documentPictureInPicture) {
+        window.open('./logs', 'PhaethonConns', `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+        return;
+    }
+
+    try {
+        const pipWindow = await window.documentPictureInPicture.requestWindow({ width, height });
+        pipWindow.document.head.innerHTML = '';
+        const pipStyle = pipWindow.document.createElement('style');
+        pipStyle.textContent = `
+            * { box-sizing: border-box; }
+            body { margin:0; font-family:system-ui,sans-serif; background:#1a1a2e; color:#e0e0e0; }
+            .pip-header { display:flex; justify-content:space-between; align-items:center; padding:0.75rem 1rem; background:#16213e; border-bottom:1px solid #333; }
+            .pip-header h1 { margin:0; font-size:1.1rem; }
+            .pip-actions { display:flex; gap:0.5rem; }
+            .pip-btn { background:#333; border:1px solid #555; color:#e0e0e0; padding:0.25rem 0.5rem; border-radius:4px; cursor:pointer; font-size:1rem; }
+            .pip-btn:hover { background:#444; }
+            .pip-content { padding:0.75rem 1rem; overflow-y:auto; max-height:calc(100vh - 100px); }
+            table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+            th, td { padding:0.4rem 0.5rem; text-align:left; border-bottom:1px solid #333; }
+            th { background:#16213e; position:sticky; top:0; }
+            .pip-status { padding:0.5rem 1rem; background:#16213e; border-top:1px solid #333; display:flex; justify-content:space-between; align-items:center; }
+            .pip-status label { display:flex; align-items:center; gap:0.4rem; font-size:0.85rem; }
+            .pip-status input { cursor:pointer; }
+        `;
+        pipWindow.document.head.appendChild(pipStyle);
+
+        pipWindow.document.body.innerHTML = `
+            <div class="pip-header">
+                <h1 data-i18n="connpip.title">🔗 Active Connections</h1>
+                <div class="pip-actions">
+                    <button class="pip-btn" id="connpip-refresh">🔄</button>
+                </div>
+            </div>
+            <div class="pip-content" id="connpip-content">
+                <p data-i18n="connpip.noConns">No active connections</p>
+            </div>
+            <div class="pip-status">
+                <span id="connpip-count" data-i18n="connpip.connCount">0 connections</span>
+                <label>
+                    <input type="checkbox" id="connpip-autorefresh" checked>
+                    <span data-i18n="connpip.autoRefresh">Auto-refresh</span>
+                </label>
+            </div>
+        `;
+
+        pipWindow.document.querySelectorAll('[data-i18n]').forEach(el => {
+            const key = el.dataset.i18n;
+            const text = i18n.t(key);
+            if (el.children.length === 0) {
+                const icon = el.textContent.match(/^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡]+\s*/);
+                el.textContent = icon ? icon[0] + text : text;
+            }
+        });
+
+        const contentEl = pipWindow.document.getElementById('connpip-content');
+        const countEl = pipWindow.document.getElementById('connpip-count');
+        const autoRefreshEl = pipWindow.document.getElementById('connpip-autorefresh');
+        let pipConnsMap = new Map();
+        let pipLastSeq = 0;
+
+        function renderPipConns() {
+            const conns = Array.from(pipConnsMap.values());
+            conns.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+            if (conns.length === 0) {
+                contentEl.innerHTML = '<p>' + i18n.t('connpip.noConns') + '</p>';
+            } else {
+                let html = '<table><thead><tr>';
+                html += '<th>' + i18n.t('dash.connProtocol') + '</th>';
+                html += '<th>' + i18n.t('dash.connDst') + '</th>';
+                html += '<th>' + i18n.t('dash.connProxy') + '</th>';
+                html += '<th>' + i18n.t('dash.connDuration') + '</th>';
+                html += '</tr></thead><tbody>';
+                conns.forEach(c => {
+                    const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
+                    const dst = c.dstAddr + ':' + c.dstPort;
+                    const proxy = c.proxy || 'DIRECT';
+                    html += '<tr><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+                });
+                html += '</tbody></table>';
+                contentEl.innerHTML = html;
+            }
+            countEl.textContent = i18n.t('connpip.connCount').replace('{}', conns.length);
+        }
+
+        const baseUrl = window.location.origin;
+
+        async function fetchPipConns() {
+            try {
+                let url = baseUrl + '/api/activeconns';
+                if (pipLastSeq > 0) url += '?after=' + pipLastSeq;
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('status ' + res.status);
+                const data = await res.json();
+                if (data.stale) {
+                    pipConnsMap.clear();
+                    if (data.connections) data.connections.forEach(c => pipConnsMap.set(c.id, c));
+                } else if (data.journal) {
+                    data.journal.forEach(e => {
+                        if (e.action === 'add' && e.conn) pipConnsMap.set(e.conn.id, e.conn);
+                        else if (e.action === 'remove') pipConnsMap.delete(e.id);
+                    });
+                }
+                pipLastSeq = data.version;
+                renderPipConns();
+            } catch (err) {
+                console.error('PiP conns fetch error:', err);
+            }
+        }
+
+        pipWindow.document.getElementById('connpip-refresh').onclick = () => { pipLastSeq = 0; fetchPipConns(); };
+
+        let pipTimer = setInterval(() => {
+            if (!autoRefreshEl.checked) return;
+            contentEl.querySelectorAll('td[data-start]').forEach(td => {
+                td.textContent = formatDuration(Date.now() - new Date(td.dataset.start).getTime());
+            });
+        }, 1000);
+
+        pipWindow.addEventListener('pagehide', () => { clearInterval(pipTimer); });
+
+        pipWindow._fetchPipConns = fetchPipConns;
+        window._pipConnsWindow = pipWindow;
+        fetchPipConns();
+    } catch (err) {
+        console.error('[PiP] openConnsPopup error:', err);
+    }
+}
+
 async function fetchConnections(incremental) {
     const el = document.getElementById('conn-logs');
     if (!el) return;

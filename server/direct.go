@@ -52,6 +52,8 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
 	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, proxy.Name, "ok", nil)
+	connlog.TrackActive(connID, "Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, proxy.Name)
+	defer connlog.RemoveActive(connID)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
 }
 

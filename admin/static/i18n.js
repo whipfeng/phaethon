@@ -35,6 +35,12 @@
             'pip.logCount': '{} 条日志',
             'pip.noLogs': '暂无日志',
 
+            // ===== PiP Active Connections =====
+            'connpip.title': '活跃连接',
+            'connpip.noConns': '暂无活跃连接',
+            'connpip.connCount': '{} 个连接',
+            'connpip.autoRefresh': '自动刷新',
+
             // ===== Dashboard =====
             'dash.activeConn': '活跃连接',
             'dash.totalConn': '总连接数',
@@ -59,6 +65,17 @@
             'dash.expandLogs': '展开',
             'dash.logs': '运行日志',
             'dash.clearLogs': '清空',
+
+            // ===== Active Connections =====
+            'dash.activeConnsTitle': '活跃连接',
+            'dash.expandConns': '展开',
+            'dash.noActiveConns': '暂无活跃连接',
+            'dash.activeConnCount': '{} 个连接',
+            'dash.connSrc': '源地址',
+            'dash.connDst': '目标地址',
+            'dash.connProxy': '代理',
+            'dash.connProtocol': '协议',
+            'dash.connDuration': '时长',
 
             // ===== LOGS POPUP =====
             'logs.title': '📋 运行日志',
@@ -578,6 +595,12 @@
             'pip.logCount': '{} logs',
             'pip.noLogs': 'No logs yet',
 
+            // ===== PiP Active Connections =====
+            'connpip.title': 'Active Connections',
+            'connpip.noConns': 'No active connections',
+            'connpip.connCount': '{} connections',
+            'connpip.autoRefresh': 'Auto-refresh',
+
             // ===== Dashboard =====
             'dash.activeConn': 'Active Connections',
             'dash.totalConn': 'Total Connections',
@@ -602,6 +625,17 @@
             'dash.expandLogs': 'Expand',
             'dash.logs': 'Runtime Logs',
             'dash.clearLogs': 'Clear',
+
+            // ===== Active Connections =====
+            'dash.activeConnsTitle': 'Active Connections',
+            'dash.expandConns': 'Expand',
+            'dash.noActiveConns': 'No active connections',
+            'dash.activeConnCount': '{} connections',
+            'dash.connSrc': 'Source',
+            'dash.connDst': 'Destination',
+            'dash.connProxy': 'Proxy',
+            'dash.connProtocol': 'Protocol',
+            'dash.connDuration': 'Duration',
 
             // ===== LOGS POPUP =====
             'logs.title': '📋 Runtime Logs',

@@ -418,13 +418,13 @@ function onBusinessVersion(topic, handler, label) {
 // additional listeners via onBusinessVersion(); the service deduplicates by
 // handler-local version and only advances the local version after success.
 function registerDefaultVersionHandlers() {
-    onBusinessVersion('stats', () => scheduleTopicFetch('stats'), 'stats');
     onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
         fetchActiveConns(true);
+        fetchStats();
         // Forward to PiP windows if open
         if (window._pipLogsWindow && !window._pipLogsWindow.closed) {
             try { window._pipLogsWindow._fetchLogs?.(false); } catch {}
@@ -867,7 +867,8 @@ function stopActiveConnsTimer() {
 }
 
 async function openConnsPopup() {
-    const width = 700, height = 500;
+    const width = Math.min(1600, Math.floor(screen.width * 0.9));
+    const height = Math.floor(screen.height * 0.85);
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 

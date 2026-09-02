@@ -28,10 +28,9 @@ type JournalEntry struct {
 }
 
 var (
-	activeMu   sync.RWMutex
-	activeMap  = make(map[string]*ActiveConn)
-	journal    []JournalEntry
-	nextJSeq   uint64 = 1
+	activeMu  sync.RWMutex
+	activeMap = make(map[string]*ActiveConn)
+	journal   []JournalEntry
 )
 
 func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy string) {
@@ -53,19 +52,17 @@ func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, pr
 	}
 	activeMap[id] = conn
 
+	mu.Lock()
+	version++
 	entry := JournalEntry{
-		Seq:    nextJSeq,
+		Seq:    version,
 		Action: "add",
 		Conn:   conn,
 	}
-	nextJSeq++
 	journal = append(journal, entry)
 	if len(journal) > maxJournal {
 		journal = journal[len(journal)-maxJournal:]
 	}
-
-	mu.Lock()
-	version++
 	mu.Unlock()
 	activeMu.Unlock()
 
@@ -80,19 +77,17 @@ func RemoveActive(id string) {
 	}
 	delete(activeMap, id)
 
+	mu.Lock()
+	version++
 	entry := JournalEntry{
-		Seq:    nextJSeq,
+		Seq:    version,
 		Action: "remove",
 		ID:     id,
 	}
-	nextJSeq++
 	journal = append(journal, entry)
 	if len(journal) > maxJournal {
 		journal = journal[len(journal)-maxJournal:]
 	}
-
-	mu.Lock()
-	version++
 	mu.Unlock()
 	activeMu.Unlock()
 

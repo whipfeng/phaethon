@@ -3,12 +3,10 @@ package admin
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"phaethon/config"
 	"phaethon/connlog"
-	"phaethon/util"
 )
 
 // StatsCollector collects runtime statistics for the admin dashboard.
@@ -16,13 +14,7 @@ type StatsCollector struct {
 	mu sync.RWMutex
 
 	// Counters
-	startTime         time.Time
-	totalConnections  atomic.Int64
-	activeConnections atomic.Int64
-
-	// Traffic by proxy name (bytes)
-	trafficMu      sync.Mutex
-	trafficByProxy map[string]*TrafficStats
+	startTime time.Time
 
 	// Listener status
 	listenerMu     sync.RWMutex
@@ -31,17 +23,6 @@ type StatsCollector struct {
 	// Health check status (from ProxyGroup)
 	healthMu   sync.RWMutex
 	healthData map[string][]*ProxyHealth
-
-	// Debounce for version bumping
-	bumpMu    sync.Mutex
-	bumpTimer *time.Timer
-}
-
-type TrafficStats struct {
-	BytesUp    int64     `json:"bytesUp"`
-	BytesDown  int64     `json:"bytesDown"`
-	ConnCount  int64     `json:"connCount"`
-	LastActive time.Time `json:"lastActive"`
 }
 
 type ListenerStatus struct {
@@ -63,7 +44,6 @@ type ProxyHealth struct {
 func NewStatsCollector() *StatsCollector {
 	s := &StatsCollector{
 		startTime:      time.Now(),
-		trafficByProxy: make(map[string]*TrafficStats),
 		listenerStatus: make(map[string]*ListenerStatus),
 		healthData:     make(map[string][]*ProxyHealth),
 	}
@@ -73,42 +53,6 @@ func NewStatsCollector() *StatsCollector {
 // StartTime returns the process start time.
 func (s *StatsCollector) StartTime() time.Time {
 	return s.startTime
-}
-
-// OnConnect records a new connection.
-func (s *StatsCollector) OnConnect(proxyName string) {
-	s.totalConnections.Add(1)
-	s.activeConnections.Add(1)
-
-	s.trafficMu.Lock()
-	if _, ok := s.trafficByProxy[proxyName]; !ok {
-		s.trafficByProxy[proxyName] = &TrafficStats{}
-	}
-	ts := s.trafficByProxy[proxyName]
-	ts.ConnCount++
-	ts.LastActive = time.Now()
-	s.trafficMu.Unlock()
-
-	util.DefaultVersionNotifier.BumpVersion("stats")
-}
-
-// OnDisconnect records a connection close.
-func (s *StatsCollector) OnDisconnect() {
-	s.activeConnections.Add(-1)
-	util.DefaultVersionNotifier.BumpVersion("stats")
-}
-
-// RecordTraffic records bytes transferred for a proxy.
-func (s *StatsCollector) RecordTraffic(proxyName string, up, down int64) {
-	s.trafficMu.Lock()
-	if _, ok := s.trafficByProxy[proxyName]; !ok {
-		s.trafficByProxy[proxyName] = &TrafficStats{}
-	}
-	ts := s.trafficByProxy[proxyName]
-	ts.BytesUp += up
-	ts.BytesDown += down
-	ts.LastActive = time.Now()
-	s.trafficMu.Unlock()
 }
 
 // RegisterListener registers a listener's status.
@@ -142,18 +86,6 @@ func (s *StatsCollector) UpdateHealth(groupName string, health []*ProxyHealth) {
 
 // GetSnapshot returns a snapshot of all statistics.
 func (s *StatsCollector) GetSnapshot() map[string]interface{} {
-	s.trafficMu.Lock()
-	trafficCopy := make(map[string]interface{})
-	for name, ts := range s.trafficByProxy {
-		trafficCopy[name] = map[string]interface{}{
-			"bytesUp":    ts.BytesUp,
-			"bytesDown":  ts.BytesDown,
-			"connCount":  ts.ConnCount,
-			"lastActive": ts.LastActive.Format(time.RFC3339),
-		}
-	}
-	s.trafficMu.Unlock()
-
 	s.listenerMu.RLock()
 	listenerCopy := make(map[string]interface{})
 	for name, ls := range s.listenerStatus {
@@ -170,9 +102,8 @@ func (s *StatsCollector) GetSnapshot() map[string]interface{} {
 
 	return map[string]interface{}{
 		"startTime":         s.startTime.Format(time.RFC3339),
-		"totalConnections":  s.totalConnections.Load(),
+		"totalConnections":  connlog.GetTotalConnections(),
 		"activeConnections": connlog.GetActiveCount(),
-		"trafficByProxy":    trafficCopy,
 		"listenerStatus":    listenerCopy,
 		"healthData":        healthCopy,
 	}

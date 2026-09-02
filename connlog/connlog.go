@@ -9,7 +9,7 @@ import (
 )
 
 const maxLogs = 100
-const notifyDebounce = 100 * time.Millisecond
+const notifyDebounce = 3 * time.Second
 
 type Event struct {
 	Seq       uint64    `json:"seq"`
@@ -25,12 +25,13 @@ type Event struct {
 }
 
 var (
-	mu           sync.RWMutex
-	logs         []Event
-	nextSeq      uint64 = 1
-	version      uint64
-	notifyTimer  *time.Timer
-	notifyMu     sync.Mutex
+	mu              sync.RWMutex
+	logs            []Event
+	nextSeq         uint64 = 1
+	version         uint64
+	totalConnections uint64
+	notifyTimer     *time.Timer
+	notifyMu        sync.Mutex
 )
 
 func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy, status string, err error) {
@@ -56,9 +57,16 @@ func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy, status 
 		logs = logs[len(logs)-maxLogs:]
 	}
 	version++
+	totalConnections++
 	mu.Unlock()
 
 	scheduleNotify()
+}
+
+func GetTotalConnections() uint64 {
+	mu.RLock()
+	defer mu.RUnlock()
+	return totalConnections
 }
 
 func scheduleNotify() {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/util"
 )
 
 // StatsCollector collects runtime statistics for the admin dashboard.
@@ -82,11 +83,14 @@ func (s *StatsCollector) OnConnect(proxyName string) {
 	ts.ConnCount++
 	ts.LastActive = time.Now()
 	s.trafficMu.Unlock()
+
+	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // OnDisconnect records a connection close.
 func (s *StatsCollector) OnDisconnect() {
 	s.activeConnections.Add(-1)
+	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // RecordTraffic records bytes transferred for a proxy.
@@ -129,6 +133,8 @@ func (s *StatsCollector) UpdateHealth(groupName string, health []*ProxyHealth) {
 	s.healthMu.Lock()
 	s.healthData[groupName] = health
 	s.healthMu.Unlock()
+
+	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // GetSnapshot returns a snapshot of all statistics.

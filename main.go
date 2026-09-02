@@ -1538,6 +1538,7 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 	wg.Wait()
 
 	saveHealthState(ruleConf)
+	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // checkManualProxyHealth performs a simple TCP connectivity check for a manual

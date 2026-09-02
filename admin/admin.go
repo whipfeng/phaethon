@@ -1243,8 +1243,8 @@ func reverseEventPayload(configs []*config.ReverseConfig) interface{} {
 	return items
 }
 
-// sseBroadcaster periodically snapshots stats and bumps the stats version when
-// they change. Connected browsers fetch the full snapshot via REST.
+// sseBroadcaster periodically snapshots stats for SSE broadcasting.
+// Version bumping is event-driven (OnConnect, OnDisconnect, UpdateHealth).
 func (s *AdminServer) sseBroadcaster() {
 	defer s.sseWG.Done()
 
@@ -1259,16 +1259,6 @@ func (s *AdminServer) sseBroadcaster() {
 			s.mu.RUnlock()
 
 			s.stats.CollectFromConfig(conf)
-			snapshot := s.stats.GetSnapshot()
-			data, err := json.Marshal(snapshot)
-			if err != nil {
-				continue
-			}
-			if len(s.sseLast) > 0 && bytes.Equal(s.sseLast, data) {
-				continue
-			}
-			s.sseLast = data
-			util.DefaultVersionNotifier.BumpVersion("stats")
 		case <-s.sseStopCh:
 			return
 		}

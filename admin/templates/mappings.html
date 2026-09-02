@@ -174,7 +174,7 @@ function setMapRequired(id, req) {
     if (el) el.required = req;
 }
 
-const mapTypeHelps = {
+var mapTypeHelps = {
     'socks5': 'SOCKS5 proxy entry. Listen on Port and forward via proxy chain.',
     'trojan': 'Trojan proxy entry. TLS encrypted Trojan inbound.',
     'direct': 'Direct TCP forward: incoming Port → Destination Host:Port.',

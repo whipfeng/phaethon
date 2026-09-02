@@ -503,7 +503,7 @@ async function pollReverseBindings(force, expectedVersion) {
 }
 
 // Dirty-check cache: skip full DOM rebuild when bindings data hasn't changed.
-let _lastBindingsHash = '';
+var _lastBindingsHash = '';
 function _hashBindings(bindings) {
     if (!bindings || !bindings.length) return '\x00'; // sentinel for empty/null
     let s = '';

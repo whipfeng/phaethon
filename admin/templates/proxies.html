@@ -774,8 +774,8 @@ async function toggleGroup(name, enabled) {
     }
 }
 
-const GROUP_PREVIEW_LIMIT = 5;
-const groupMembersState = {};
+var GROUP_PREVIEW_LIMIT = 5;
+var groupMembersState = {};
 
 function getGroupCard(name) {
     return document.querySelector(`.group-card[data-group="${CSS.escape(name)}"]`);

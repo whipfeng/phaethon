@@ -773,6 +773,7 @@ let connLogLastSeq = 0;
 var activeConnsMap = new Map();
 var activeConnsLastSeq = 0;
 var activeConnsTimer = null;
+var selectedConnId = null;
 
 function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -839,7 +840,8 @@ function renderActiveConns() {
             const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
             const dst = c.dstAddr + ':' + c.dstPort;
             const proxy = c.proxy || 'DIRECT';
-            html += '<tr><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+            const selected = c.id === selectedConnId ? ' class="selected"' : '';
+            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
         });
         html += '</tbody></table>';
         el.innerHTML = html;
@@ -848,6 +850,17 @@ function renderActiveConns() {
     if (countEl) {
         countEl.textContent = i18n.t('dash.activeConnCount').replace('{}', conns.length);
     }
+}
+
+function selectConn(id) {
+    selectedConnId = selectedConnId === id ? null : id;
+    document.querySelectorAll('#active-conns-list tbody tr').forEach(tr => {
+        if (tr.dataset.connId === selectedConnId) {
+            tr.classList.add('selected');
+        } else {
+            tr.classList.remove('selected');
+        }
+    });
 }
 
 function startActiveConnsTimer() {
@@ -893,6 +906,10 @@ async function openConnsPopup() {
             table { width:100%; border-collapse:collapse; font-size:0.85rem; }
             th, td { padding:0.4rem 0.5rem; text-align:left; border-bottom:1px solid #333; }
             th { background:#16213e; position:sticky; top:0; }
+            tbody tr { cursor:pointer; }
+            tbody tr:hover { background:#2a2a4e; }
+            tbody tr.selected { background:#4a9eff; color:#fff; }
+            tbody tr.selected:hover { background:#3a8eef; }
             .pip-status { padding:0.5rem 1rem; background:#16213e; border-top:1px solid #333; display:flex; justify-content:space-between; align-items:center; }
             .pip-status label { display:flex; align-items:center; gap:0.4rem; font-size:0.85rem; }
             .pip-status input { cursor:pointer; }
@@ -932,6 +949,7 @@ async function openConnsPopup() {
         const autoRefreshEl = pipWindow.document.getElementById('connpip-autorefresh');
         let pipConnsMap = new Map();
         let pipLastSeq = 0;
+        let pipSelectedConnId = null;
 
         function renderPipConns() {
             const conns = Array.from(pipConnsMap.values());
@@ -949,10 +967,23 @@ async function openConnsPopup() {
                     const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
                     const dst = c.dstAddr + ':' + c.dstPort;
                     const proxy = c.proxy || 'DIRECT';
-                    html += '<tr><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+                    const selected = c.id === pipSelectedConnId ? ' class="selected"' : '';
+                    html += '<tr' + selected + ' data-conn-id="' + c.id + '"><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
                 });
                 html += '</tbody></table>';
                 contentEl.innerHTML = html;
+                contentEl.querySelectorAll('tbody tr').forEach(tr => {
+                    tr.onclick = () => {
+                        pipSelectedConnId = pipSelectedConnId === tr.dataset.connId ? null : tr.dataset.connId;
+                        contentEl.querySelectorAll('tbody tr').forEach(r => {
+                            if (r.dataset.connId === pipSelectedConnId) {
+                                r.classList.add('selected');
+                            } else {
+                                r.classList.remove('selected');
+                            }
+                        });
+                    };
+                });
             }
             countEl.textContent = i18n.t('connpip.connCount').replace('{}', conns.length);
         }

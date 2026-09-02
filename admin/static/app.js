@@ -896,7 +896,7 @@ async function openLogsPopup() {
             // Build the UI
             pipWindow.document.body.innerHTML = `
                 <div class="pip-header">
-                    <h1>📋 Logs</h1>
+                    <h1 data-i18n="pip.title">📋 Logs</h1>
                     <div class="pip-actions">
                         <button class="pip-btn" id="pip-refresh">🔄</button>
                         <button class="pip-btn pip-btn-danger" id="pip-clear">🗑</button>
@@ -904,20 +904,22 @@ async function openLogsPopup() {
                 </div>
                 <div id="pip-logs"></div>
                 <div class="pip-status">
-                    <span id="pip-count">0 logs</span>
+                    <span id="pip-count" data-i18n="pip.logCount">0 logs</span>
                     <label>
                         <input type="checkbox" id="pip-autoscroll" checked>
-                        <span>Auto-scroll</span>
+                        <span data-i18n="pip.autoscroll">Auto-scroll</span>
                     </label>
                 </div>
             `;
 
             // Apply i18n
-            const lang = localStorage.getItem('phaethon_lang') || 'zh';
-            if (lang === 'zh') {
-                pipWindow.document.querySelector('.pip-header h1').textContent = '📋 运行日志';
-                pipWindow.document.querySelector('#pip-autoscroll').nextSibling.textContent = '自动滚动';
-            }
+            pipWindow.document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.dataset.i18n;
+                const text = i18n.t(key);
+                if (el.children.length === 0) {
+                    el.textContent = text;
+                }
+            });
 
             const logsEl = pipWindow.document.getElementById('pip-logs');
             const countEl = pipWindow.document.getElementById('pip-count');
@@ -949,7 +951,7 @@ async function openLogsPopup() {
                 while (logsEl.children.length > MAX_PIP_LOGS) {
                     logsEl.removeChild(logsEl.firstChild);
                 }
-                countEl.textContent = lang === 'zh' ? `${logCount} 条日志` : `${logCount} logs`;
+                countEl.textContent = i18n.t('pip.logCount').replace('{}', logCount);
                 // Scroll to bottom after each log for real-time updates
                 scrollToBottom();
             }
@@ -969,9 +971,9 @@ async function openLogsPopup() {
                     const data = await res.json();
                     if (!data.logs || data.logs.length === 0) {
                         if (full) {
-                            logsEl.textContent = lang === 'zh' ? '暂无日志' : 'No logs yet';
+                            logsEl.textContent = i18n.t('pip.noLogs');
                             logCount = 0;
-                            countEl.textContent = lang === 'zh' ? '0 条日志' : '0 logs';
+                            countEl.textContent = i18n.t('pip.logCount').replace('{}', 0);
                         }
                         return;
                     }
@@ -993,10 +995,10 @@ async function openLogsPopup() {
 
             pipWindow.document.getElementById('pip-refresh').onclick = () => fetchLogs(true);
             pipWindow.document.getElementById('pip-clear').onclick = () => {
-                logsEl.textContent = lang === 'zh' ? '暂无日志' : 'No logs yet';
+                logsEl.textContent = i18n.t('pip.noLogs');
                 logCount = 0;
                 lastSeq = 0;
-                countEl.textContent = lang === 'zh' ? '0 条日志' : '0 logs';
+                countEl.textContent = i18n.t('pip.logCount').replace('{}', 0);
             };
 
             // Initial load

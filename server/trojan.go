@@ -163,11 +163,14 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
 	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "ok", nil)
+	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name)
+	defer connlog.RemoveActive(connID)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
 }
 
 // handleUDPAssociate handles Trojan UDP ASSOCIATE requests.
 func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
+	connID := util.NextConnID()
 	udpLn, err := dialer.ListenUDP()
 	if err != nil {
 		util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP listen fail: %v", s.Mapping.Name, tlsConn.RemoteAddr(), err)
@@ -184,6 +187,8 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 	udpPort := udpLn.LocalAddr().(*net.UDPAddr).Port
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP ASSOCIATE started (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
+	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "", 0, "")
+	defer connlog.RemoveActive(connID)
 
 	closeAll := func() {
 		closeOnce.Do(func() {

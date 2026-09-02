@@ -220,6 +220,8 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
 	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "ok", nil)
+	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name)
+	defer connlog.RemoveActive(connID)
 
 	// Handshake complete — clear the deadline so the relay idle timeout
 	// (enforced inside RelayWithRateLimit) takes over.
@@ -238,6 +240,7 @@ func sendSocks5Response(conn net.Conn, status byte) {
 }
 
 func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool) {
+	connID := util.NextConnID()
 	// clientLn: receives UDP packets from the client (independent port)
 	clientLn, err := dialer.ListenUDP()
 	if err != nil {
@@ -303,6 +306,9 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 	}()
 
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] UDP ASSOCIATE started on port %d", s.Mapping.Name, clientConn.RemoteAddr(), udpAddr.Port)
+
+	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), "", 0, "")
+	defer connlog.RemoveActive(connID)
 
 	relay.run()
 }

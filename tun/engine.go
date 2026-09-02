@@ -897,6 +897,8 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		dstForLog = domain
 	}
 	connlog.Log("TUN", "UDP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
+	connlog.TrackActive(connID, "TUN", "UDP", "", dstForLog, resolvedPort, proxyName)
+	defer connlog.RemoveActive(connID)
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
 }
@@ -1026,6 +1028,8 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		dstForLog = domain
 	}
 	connlog.Log("TUN", "TCP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
+	connlog.TrackActive(connID, "TUN", "TCP", "", dstForLog, resolvedPort, proxyName)
+	defer connlog.RemoveActive(connID)
 	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
 }
 

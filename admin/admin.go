@@ -880,6 +880,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/groups/", s.apiGroupActions)
 	mux.HandleFunc("/api/health", s.apiHealth)
 	mux.HandleFunc("/api/connections", s.apiConnections)
+	mux.HandleFunc("/api/activeconns", s.apiActiveConns)
 	mux.HandleFunc("/api/reverse", s.apiReverse)
 	mux.HandleFunc("/api/reverse/bindings", s.apiReverseBindings)
 	mux.HandleFunc("/api/reverse/bindings/", s.apiReverseBindings)
@@ -1186,6 +1187,39 @@ func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"version": version,
 		"logs":    logs,
+	})
+}
+
+func (s *AdminServer) apiActiveConns(w http.ResponseWriter, r *http.Request) {
+	afterStr := r.URL.Query().Get("after")
+	version := connlog.GetVersion()
+
+	if afterStr != "" {
+		after, err := strconv.ParseUint(afterStr, 10, 64)
+		if err == nil {
+			entries, conns, stale := connlog.GetActiveConnsAfterSeq(after)
+			if stale {
+				jsonResponse(w, map[string]interface{}{
+					"version":     version,
+					"stale":       true,
+					"connections": conns,
+				})
+				return
+			}
+			jsonResponse(w, map[string]interface{}{
+				"version": version,
+				"stale":   false,
+				"journal": entries,
+			})
+			return
+		}
+	}
+
+	conns := connlog.GetActiveConns()
+	jsonResponse(w, map[string]interface{}{
+		"version":     version,
+		"stale":       true,
+		"connections": conns,
 	})
 }
 

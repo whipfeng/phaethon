@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/connlog"
 	"phaethon/util"
 )
 
@@ -170,7 +171,7 @@ func (s *StatsCollector) GetSnapshot() map[string]interface{} {
 	return map[string]interface{}{
 		"startTime":         s.startTime.Format(time.RFC3339),
 		"totalConnections":  s.totalConnections.Load(),
-		"activeConnections": s.activeConnections.Load(),
+		"activeConnections": connlog.GetActiveCount(),
 		"trafficByProxy":    trafficCopy,
 		"listenerStatus":    listenerCopy,
 		"healthData":        healthCopy,

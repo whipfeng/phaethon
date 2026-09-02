@@ -29,6 +29,12 @@
             'logs.clear': '清空',
             'logs.refresh': '刷新',
 
+            // ===== PiP (Picture-in-Picture) Logs =====
+            'pip.title': '运行日志',
+            'pip.autoscroll': '自动滚动',
+            'pip.logCount': '{} 条日志',
+            'pip.noLogs': '暂无日志',
+
             // ===== Dashboard =====
             'dash.activeConn': '活跃连接',
             'dash.totalConn': '总连接数',
@@ -564,6 +570,12 @@
             'logs.title': 'Runtime Logs',
             'logs.clear': 'Clear',
             'logs.refresh': 'Refresh',
+
+            // ===== PiP (Picture-in-Picture) Logs =====
+            'pip.title': 'Runtime Logs',
+            'pip.autoscroll': 'Auto-scroll',
+            'pip.logCount': '{} logs',
+            'pip.noLogs': 'No logs yet',
 
             // ===== Dashboard =====
             'dash.activeConn': 'Active Connections',

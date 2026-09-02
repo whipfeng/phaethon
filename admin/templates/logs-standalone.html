@@ -207,15 +207,15 @@
         // SSE for real-time updates
         const sse = new EventSource('./api/events');
         let lastVersion = 0;
-        sse.onmessage = (e) => {
+        sse.addEventListener('heartbeat', (e) => {
             try {
                 const data = JSON.parse(e.data);
-                if (data.versions && data.versions.logs > lastVersion) {
-                    lastVersion = data.versions.logs;
+                if (data.logs && data.logs > lastVersion) {
+                    lastVersion = data.logs;
                     fetchLogs(false);
                 }
             } catch {}
-        };
+        });
         sse.onerror = () => {
             sse.close();
             setInterval(() => fetchLogs(false), 2000);

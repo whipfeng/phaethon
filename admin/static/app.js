@@ -917,7 +917,8 @@ async function openLogsPopup() {
                 const key = el.dataset.i18n;
                 const text = i18n.t(key);
                 if (el.children.length === 0) {
-                    el.textContent = text;
+                    const icon = el.textContent.match(/^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡]+\s*/);
+                    el.textContent = icon ? icon[0] + text : text;
                 }
             });
 

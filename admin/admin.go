@@ -675,12 +675,22 @@ func (s *AdminServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	util.LogInfo("[ADMIN] starting on http://%s", addr)
-	go func() {
-		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-			util.LogError("[ADMIN] serve error: %v", err)
-		}
-	}()
+	// Use TLS if certificate and key are configured
+	if s.config.TLSCert != "" && s.config.TLSKey != "" {
+		util.LogInfo("[ADMIN] starting on https://%s", addr)
+		go func() {
+			if err := s.server.ServeTLS(ln, s.config.TLSCert, s.config.TLSKey); err != nil && err != http.ErrServerClosed {
+				util.LogError("[ADMIN] serve error: %v", err)
+			}
+		}()
+	} else {
+		util.LogInfo("[ADMIN] starting on http://%s", addr)
+		go func() {
+			if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
+				util.LogError("[ADMIN] serve error: %v", err)
+			}
+		}()
+	}
 
 	// Start the global version heartbeat. It is idempotent; multiple admin
 	// server instances are not expected in this process.

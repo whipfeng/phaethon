@@ -1121,6 +1121,8 @@ type AdminConfig struct {
 	AuthEnabled bool   `yaml:"auth-enabled"`
 	Username    string `yaml:"username"`
 	Password    string `yaml:"password"`
+	TLSCert     string `yaml:"tls-cert,omitempty"`
+	TLSKey      string `yaml:"tls-key,omitempty"`
 }
 
 // ReverseConfig holds configuration for running as a reverse client.

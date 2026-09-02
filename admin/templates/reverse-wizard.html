@@ -248,7 +248,7 @@
 
 <script>
 // Existing configs rendered by the server for client-side editing.
-const existingReverseConfigs = {{json .ReverseConfigs}} || [];
+var existingReverseConfigs = {{json .ReverseConfigs}} || [];
 
 function updateInstanceReverseID() {
     const el = document.getElementById('instance-reverse-id');

@@ -1311,7 +1311,8 @@ function toggleFields() {
     setVisible('row-flow', needFlow);
 
     setVisible('row-reverse-addr', needReverseAddr);
-    setRequired('f-reverse-addr', needReverseAddr);
+    // Reverse address is optional - only needed for reverse proxy mode
+    setRequired('f-reverse-addr', false);
 
     setVisible('row-ssh-key', needSSHKey);
 

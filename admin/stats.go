@@ -30,6 +30,10 @@ type StatsCollector struct {
 	// Health check status (from ProxyGroup)
 	healthMu   sync.RWMutex
 	healthData map[string][]*ProxyHealth
+
+	// Debounce for version bumping
+	bumpMu    sync.Mutex
+	bumpTimer *time.Timer
 }
 
 type TrafficStats struct {
@@ -133,8 +137,6 @@ func (s *StatsCollector) UpdateHealth(groupName string, health []*ProxyHealth) {
 	s.healthMu.Lock()
 	s.healthData[groupName] = health
 	s.healthMu.Unlock()
-
-	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // GetSnapshot returns a snapshot of all statistics.

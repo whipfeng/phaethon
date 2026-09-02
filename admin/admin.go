@@ -2940,31 +2940,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 // apiSubscriptions handles CRUD for top-level subscriptions.
 func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case http.MethodGet:
-		// Use runtime config (s.conf) to get actual node counts from loaded subscriptions
-		runtimeConf := s.GetConfig()
-		list := make([]map[string]interface{}, len(runtimeConf.Subscriptions))
-		for i, sub := range runtimeConf.Subscriptions {
-			nodeCount := 0
-			if sub != nil {
-				sub.SubMu.RLock()
-				nodeCount = len(sub.SubProxies)
-				sub.SubMu.RUnlock()
-			}
-			interval := 0
-			if sub.Interval != nil {
-				interval = *sub.Interval
-			}
-			list[i] = map[string]interface{}{
-				"name":      sub.Name,
-				"enabled":   sub.IsEnabled(),
-				"url":       sub.URL,
-				"interval":  interval,
-				"nodeCount": nodeCount,
-			}
-		}
-		jsonResponse(w, list)
-
 	case http.MethodPost:
 		dc := s.displayConf()
 		var req struct {

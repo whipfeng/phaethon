@@ -294,8 +294,11 @@ body {
 }
 .data-table tr {
     contain: layout paint;
+    cursor: pointer;
 }
 .data-table tr:hover { background: var(--bg-hover); }
+.data-table tr.selected { background: var(--accent); color: #fff; }
+.data-table tr.selected:hover { background: var(--accent-hover); }
 .data-table code { background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.82em; }
 
 /* Reverse bindings grouped by Reverse ID */

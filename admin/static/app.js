@@ -76,7 +76,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         // Re-apply i18n to new content
-        if (typeof applyI18n === 'function') applyI18n();
+        if (typeof i18n !== 'undefined' && i18n.applyTranslations) i18n.applyTranslations();
 
         // Update sidebar active state
         updateActiveNav();

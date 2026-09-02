@@ -57,6 +57,7 @@
             'dash.viewMappings': '查看映射',
             'dash.reloadConfig': '重载配置',
             'dash.expandLogs': '展开',
+            'dash.logs': '运行日志',
             'dash.clearLogs': '清空',
 
             // ===== LOGS POPUP =====
@@ -599,6 +600,7 @@
             'dash.viewMappings': 'View Mappings',
             'dash.reloadConfig': 'Reload Config',
             'dash.expandLogs': 'Expand',
+            'dash.logs': 'Runtime Logs',
             'dash.clearLogs': 'Clear',
 
             // ===== LOGS POPUP =====
@@ -1197,7 +1199,8 @@
         t,
         setLanguage,
         toggleLang,
-        getLanguage: () => currentLang
+        getLanguage: () => currentLang,
+        applyTranslations
     };
 
     // Auto-init on DOM ready

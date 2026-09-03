@@ -4201,6 +4201,19 @@ func (s *AdminServer) saveConfig() error {
 		path = filepath.Join(path, "rule.yaml")
 	}
 
+	// Preserve reverse configs and reverse-id from runtime config.
+	// This prevents losing reverse configs when the runtime config is saved.
+	if conf != nil {
+		s.mu.RLock()
+		if len(conf.ReverseConfigs) == 0 && s.conf != nil && len(s.conf.ReverseConfigs) > 0 {
+			conf.ReverseConfigs = s.conf.ReverseConfigs
+		}
+		if conf.ReverseID == "" && s.conf != nil && s.conf.ReverseID != "" {
+			conf.ReverseID = s.conf.ReverseID
+		}
+		s.mu.RUnlock()
+	}
+
 	if err := config.SaveRaw(path, conf); err != nil {
 		return err
 	}
@@ -4221,6 +4234,18 @@ func (s *AdminServer) saveConfigLocked() error {
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		target = filepath.Join(target, "rule.yaml")
 	}
+	
+	// Preserve reverse configs and reverse-id from runtime config if not present in base config.
+	// This prevents losing reverse configs when editing other config sections.
+	if s.conf != nil && conf != nil {
+		if len(conf.ReverseConfigs) == 0 && len(s.conf.ReverseConfigs) > 0 {
+			conf.ReverseConfigs = s.conf.ReverseConfigs
+		}
+		if conf.ReverseID == "" && s.conf.ReverseID != "" {
+			conf.ReverseID = s.conf.ReverseID
+		}
+	}
+	
 	if err := config.SaveRaw(target, conf); err != nil {
 		return err
 	}

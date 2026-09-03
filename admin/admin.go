@@ -1537,7 +1537,7 @@ func (s *AdminServer) findProxyReferences(name string, c *config.RuleConfigurati
 	}
 
 	for _, p := range c.Proxies {
-		if p != nil && p.ProxyName == name {
+		if p != nil && p.ViaProxy == name {
 			refs = append(refs, proxyReference{Kind: "proxy", Name: p.Name})
 		}
 	}
@@ -1592,7 +1592,7 @@ func (s *AdminServer) findGroupReferences(name string, c *config.RuleConfigurati
 	}
 
 	for _, p := range c.Proxies {
-		if p != nil && p.ProxyName == name {
+		if p != nil && p.ViaProxy == name {
 			refs = append(refs, proxyReference{Kind: "proxy", Name: p.Name})
 		}
 	}
@@ -1664,6 +1664,11 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after proxy add failed: %v", err)
+		}
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after proxy add failed: %v", err)
+			}
 		}
 		s.mu.Unlock()
 		if replaced {
@@ -4079,7 +4084,7 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 			"port":      p.Port,
 			"sni":       p.Sni,
 			"udp":       p.UDP,
-			"proxyName": p.ProxyName,
+			"via":       p.ViaProxy,
 		}
 	}
 
@@ -4125,7 +4130,7 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		"port":           p.Port,
 		"sni":            p.Sni,
 		"udp":            p.UDP,
-		"proxyName":      p.ProxyName,
+		"via":            p.ViaProxy,
 		"skipCertVerify": p.SkipCertVerify,
 	}
 }

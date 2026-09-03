@@ -18,7 +18,7 @@
                         <th data-i18n="proxy.port">Port</th>
                         <th data-i18n="proxy.sni">SNI</th>
                         <th data-i18n="proxy.udp">UDP</th>
-                        <th data-i18n="proxy.next">Next</th>
+                        <th data-i18n="proxy.via">Via</th>
                         <th data-i18n="common.enabled">Enabled</th>
                         <th data-i18n="proxy.actions">Actions</th>
                     </tr>
@@ -32,7 +32,7 @@
                         <td>{{.Port}}</td>
                         <td>{{.Sni}}</td>
                         <td>{{if .UDP}}✅{{else}}❌{{end}}</td>
-                        <td>{{.ProxyName}}</td>
+                        <td>{{.ViaProxy}}</td>
                         <td>
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleProxy('{{.Name}}', this.checked)">
@@ -125,7 +125,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label data-i18n="proxy.nextProxy">Next Proxy</label>
+                    <label data-i18n="proxy.viaProxy">Via Proxy</label>
                     <select id="f-proxy">
                         <option value="" data-i18n="proxy.noNext">(none)</option>
                         <option value="DIRECT">DIRECT</option>
@@ -396,7 +396,7 @@ async function pasteProxy() {
         document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
         document.getElementById('f-private-key').value = p['private-key'] || '';
         document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
-        const proxyVal = p.proxy || '';
+        const proxyVal = p.via || '';
         populateNextProxySelect(proxyVal);
         const proxySelect = document.getElementById('f-proxy');
         let proxyFound = false;
@@ -530,7 +530,7 @@ function editProxy(name) {
     document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
     document.getElementById('f-private-key').value = p['private-key'] || '';
     document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
-    populateNextProxySelect(p['proxy'] || '');
+    populateNextProxySelect(p.via || '');
     toggleFields();
     document.getElementById('proxy-modal').classList.remove('hidden');
 }
@@ -551,7 +551,7 @@ async function saveProxy(e) {
         password: document.getElementById('f-password').value || '',
         username: document.getElementById('f-username').value || '',
         url: document.getElementById('f-url').value || '',
-        'proxy': document.getElementById('f-proxy').value || '',
+        'via': document.getElementById('f-proxy').value || '',
         udp: document.getElementById('f-udp').checked,
         'skip-cert-verify': document.getElementById('f-skip-cert').checked,
         flow: document.getElementById('f-flow').value || '',
@@ -561,7 +561,7 @@ async function saveProxy(e) {
     };
 
     // Drop empty/irrelevant fields to keep YAML clean
-    ['server','port','sni','password','username','url','flow','proxy','reverse-address','private-key','private-key-passphrase'].forEach(k => {
+    ['server','port','sni','password','username','url','flow','via','reverse-address','private-key','private-key-passphrase'].forEach(k => {
         if (payload[k] === '' || payload[k] === 0 || payload[k] === false) {
             if (k !== 'server' && k !== 'port') delete payload[k];
         }

@@ -86,31 +86,27 @@
             <button onclick="expandGroupMembers('{{.Name}}', this)" class="btn btn-sm btn-outline expand-members-btn" style="width:100%;margin-top:0.5rem;">
                 <span class="expand-label" data-i18n="proxy.showMembers">Show members</span> ▶
             </button>
+            <div class="group-members hidden" data-group-members="{{.Name}}">
+                <div class="members-loading text-muted" data-i18n="common.loading">Loading...</div>
+                <table class="data-table group-members-table hidden">
+                    <thead>
+                        <tr>
+                            <th data-i18n="proxy.active">Active</th>
+                            <th data-i18n="proxy.name">Name</th>
+                            <th data-i18n="proxy.source">Source</th>
+                            <th data-i18n="proxy.type">Type</th>
+                            <th data-i18n="proxy.server">Server</th>
+                            <th data-i18n="proxy.port">Port</th>
+                            <th data-i18n="proxy.status">Status</th>
+                            <th data-i18n="proxy.latency">Latency</th>
+                        </tr>
+                    </thead>
+                    <tbody class="members-tbody"></tbody>
+                </table>
+                <button type="button" onclick="toggleShowAllGroupMembers('{{.Name}}')" class="btn btn-sm btn-outline show-all-btn hidden" style="margin-top:0.5rem;">Show all</button>
+            </div>
         </div>
         {{end}}
-        </div>
-        <div id="group-members-panel" class="group-members-panel hidden">
-            <div class="members-panel-header">
-                <h4 id="members-panel-title"></h4>
-                <button onclick="closeMembersPanel()" class="btn btn-sm btn-outline">×</button>
-            </div>
-            <div class="members-loading text-muted" data-i18n="common.loading">Loading...</div>
-            <table class="data-table group-members-table hidden">
-                <thead>
-                    <tr>
-                        <th data-i18n="proxy.active">Active</th>
-                        <th data-i18n="proxy.name">Name</th>
-                        <th data-i18n="proxy.source">Source</th>
-                        <th data-i18n="proxy.type">Type</th>
-                        <th data-i18n="proxy.server">Server</th>
-                        <th data-i18n="proxy.port">Port</th>
-                        <th data-i18n="proxy.status">Status</th>
-                        <th data-i18n="proxy.latency">Latency</th>
-                    </tr>
-                </thead>
-                <tbody class="members-tbody"></tbody>
-            </table>
-            <button type="button" onclick="toggleShowAllGroupMembers(currentExpandedGroup)" class="btn btn-sm btn-outline show-all-btn hidden" style="margin-top:0.5rem;">Show all</button>
         </div>
         {{else}}
         <p class="text-muted" data-i18n="proxy.noGroups">No groups defined.</p>
@@ -950,55 +946,46 @@ function getGroupCard(name) {
     return document.querySelector(`.group-card[data-group="${CSS.escape(name)}"]`);
 }
 
-function getMembersPanel() {
-    return document.getElementById('group-members-panel');
+function getGroupMembersContainer(name) {
+    return document.querySelector(`.group-card[data-group="${CSS.escape(name)}"] .group-members[data-group-members="${CSS.escape(name)}"]`);
 }
 
 async function expandGroupMembers(name, btn) {
-    const panel = getMembersPanel();
-    if (!panel) return;
-    // If same group is already expanded, collapse it
-    if (currentExpandedGroup === name && !panel.classList.contains('hidden')) {
-        closeMembersPanel();
-        return;
-    }
-    // Collapse previous expand button
-    if (currentExpandedGroup) {
-        const prevBtn = getGroupCard(currentExpandedGroup)?.querySelector('.expand-members-btn');
-        if (prevBtn) prevBtn.classList.remove('expanded');
-    }
-    // Expand new
-    currentExpandedGroup = name;
-    if (btn) btn.classList.add('expanded');
-    document.getElementById('members-panel-title').textContent = name;
-    panel.classList.remove('hidden');
-    const loading = panel.querySelector('.members-loading');
-    const table = panel.querySelector('.group-members-table');
-    if (loading) { loading.textContent = typeof i18n !== 'undefined' ? i18n.t('common.loading') : 'Loading...'; loading.classList.remove('hidden'); }
-    if (table) table.classList.add('hidden');
-    if (!groupMembersState[name]) {
-        await loadGroupMembers(name);
+    const container = getGroupMembersContainer(name);
+    if (!container) return;
+    const isExpanding = container.classList.contains('hidden');
+    // Collapse all other expanded groups first
+    document.querySelectorAll('.group-card .group-members:not(.hidden)').forEach(el => {
+        el.classList.add('hidden');
+        const gName = el.dataset.groupMembers;
+        const otherCard = getGroupCard(gName);
+        if (otherCard) otherCard.classList.remove('expanded-card');
+        const otherBtn = otherCard?.querySelector('.expand-members-btn');
+        if (otherBtn) otherBtn.classList.remove('expanded');
+    });
+    // Toggle this one
+    if (isExpanding) {
+        container.classList.remove('hidden');
+        if (btn) btn.classList.add('expanded');
+        getGroupCard(name)?.classList.add('expanded-card');
+        currentExpandedGroup = name;
+        if (!groupMembersState[name]) {
+            await loadGroupMembers(name);
+        } else {
+            renderGroupMembers(name);
+        }
     } else {
-        renderGroupMembers(name);
+        getGroupCard(name)?.classList.remove('expanded-card');
+        currentExpandedGroup = '';
     }
-}
-
-function closeMembersPanel() {
-    const panel = getMembersPanel();
-    if (panel) panel.classList.add('hidden');
-    if (currentExpandedGroup) {
-        const prevBtn = getGroupCard(currentExpandedGroup)?.querySelector('.expand-members-btn');
-        if (prevBtn) prevBtn.classList.remove('expanded');
-    }
-    currentExpandedGroup = '';
 }
 
 async function loadGroupMembers(name) {
-    const panel = getMembersPanel();
-    if (!panel) return;
-    const loading = panel.querySelector('.members-loading');
-    const table = panel.querySelector('.group-members-table');
-    if (loading) loading.classList.remove('hidden');
+    const container = getGroupMembersContainer(name);
+    if (!container) return;
+    const loading = container.querySelector('.members-loading');
+    const table = container.querySelector('.group-members-table');
+    if (loading) { loading.textContent = typeof i18n !== 'undefined' ? i18n.t('common.loading') : 'Loading...'; loading.classList.remove('hidden'); }
     if (table) table.classList.add('hidden');
     try {
         const res = await fetch(`./api/groups/${encodeURIComponent(name)}/members`);
@@ -1036,13 +1023,13 @@ function formatMemberLatency(ms) {
 
 function renderGroupMembers(name) {
     const state = groupMembersState[name];
-    const panel = getMembersPanel();
-    if (!state || !panel) return;
+    const container = getGroupMembersContainer(name);
+    if (!state || !container) return;
     const { members, showAll } = state;
-    const loading = panel.querySelector('.members-loading');
-    const table = panel.querySelector('.group-members-table');
-    const tbody = panel.querySelector('.members-tbody');
-    const showAllBtn = panel.querySelector('.show-all-btn');
+    const loading = container.querySelector('.members-loading');
+    const table = container.querySelector('.group-members-table');
+    const tbody = container.querySelector('.members-tbody');
+    const showAllBtn = container.querySelector('.show-all-btn');
     if (loading) loading.classList.add('hidden');
     if (!members || members.length === 0) {
         if (table) table.classList.add('hidden');
@@ -1145,7 +1132,6 @@ async function testGroup(name, btn) {
         btn.innerHTML = originalHTML;
     }
 }
-
 function setVisible(id, show) {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', !show);

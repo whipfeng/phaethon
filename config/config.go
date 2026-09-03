@@ -1130,10 +1130,7 @@ type ReverseConfig struct {
 	Enabled           bool   `yaml:"enabled" json:"enabled"`
 	Name              string `yaml:"name,omitempty" json:"name,omitempty"`
 	Seq               int    `yaml:"seq,omitempty" json:"seq,omitempty"`
-	ReverseID         string `yaml:"reverse-id,omitempty" json:"reverse-id,omitempty"`
-	RegistryAddr      string `yaml:"registry-addr" json:"registry-addr"`
 	OutboundProxy     string `yaml:"outbound-proxy" json:"outbound-proxy"`
-	RegisterProto     string `yaml:"register-proto" json:"register-proto"`
 	PreferredPort     int    `yaml:"preferred-port" json:"preferred-port"`
 	TargetAddress     string `yaml:"target-address" json:"target-address"`
 	ReconnectInterval int    `yaml:"reconnect-interval" json:"reconnect-interval"`
@@ -1149,11 +1146,11 @@ type ReverseConfig struct {
 	SkipCertVerify    bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
 	// LastError holds the most recent reverse client registration error so the
 	// admin UI can surface it instead of showing "waiting for port" forever.
-	LastError string `yaml:"last-error,omitempty" json:"last-error,omitempty"`
+	LastError string `yaml:"-" json:"last-error,omitempty"`
 	// AssignedPort is the actual port allocated by the registry after a
 	// successful reverse registration. It is informational only and is updated
 	// by the reverse client at runtime.
-	AssignedPort int `yaml:"assigned-port,omitempty" json:"assigned-port,omitempty"`
+	AssignedPort int `yaml:"-" json:"assigned-port,omitempty"`
 }
 
 // TUNConfig holds TUN traffic interception settings.

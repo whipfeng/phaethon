@@ -158,6 +158,12 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	return conn, nil
 }
 
+// DialControl establishes a control connection to the registry through this HTunnel proxy.
+// The proxy server IS the registry: it delegates to Dial with the proxy's own server and PORT=1.
+func (d *HTunnelDialer) DialControl() (net.Conn, error) {
+	return d.Dial(d.Proxy.Server, 1)
+}
+
 // htunnelConn implements net.Conn over HTTP tunnel
 type htunnelConn struct {
 	proxy        *config.Proxy

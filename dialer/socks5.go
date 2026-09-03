@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"phaethon/config"
+	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -59,6 +60,22 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, err
 	}
 
+	return conn, nil
+}
+
+// DialControl establishes a control connection to the registry through this SOCKS5 proxy.
+// The proxy server IS the registry: it connects to proxy.Server:proxy.Port via the next hop,
+// then performs a SOCKS5 BIND with PORT=1 to mark it as a control channel.
+func (d *Socks5Dialer) DialControl() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("socks5: control connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortControl, 0x02, d.ConnIDStr()); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	return conn, nil
 }
 

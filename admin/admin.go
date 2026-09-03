@@ -1035,6 +1035,10 @@ func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request)
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
+	instanceReverseID := ""
+	if s.conf != nil {
+		instanceReverseID = s.conf.ReverseID
+	}
 	s.mu.RUnlock()
 
 	// Build proxy list with reverse-support flag
@@ -1053,11 +1057,12 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 	}
 
 	data := map[string]interface{}{
-		"Title":          "Reverse",
-		"Proxies":        proxies,
-		"ReverseConfigs": s.currentReverseConfigs(),
-		"SaveTarget":     "base",
-		"CanSwitch":      false,
+		"Title":            "Reverse",
+		"Proxies":          proxies,
+		"ReverseConfigs":   s.currentReverseConfigs(),
+		"InstanceReverseID": instanceReverseID,
+		"SaveTarget":       "base",
+		"CanSwitch":        false,
 	}
 	s.render(w, r, "reverse-wizard.html", data)
 }
@@ -1209,7 +1214,7 @@ func (s *AdminServer) apiVersions(w http.ResponseWriter, r *http.Request) {
 // reverseEventPayload builds the data payload for a "reverse" SSE event from
 // the current runtime reverse configurations. It returns an array so the UI can
 // display multiple reverse connections in a single process.
-func reverseEventPayload(configs []*config.ReverseConfig) interface{} {
+func (s *AdminServer) reverseEventPayload(configs []*config.ReverseConfig) interface{} {
 	items := make([]map[string]interface{}, 0, len(configs))
 	for _, rc := range configs {
 		if rc == nil {
@@ -1217,12 +1222,9 @@ func reverseEventPayload(configs []*config.ReverseConfig) interface{} {
 		}
 		items = append(items, map[string]interface{}{
 			"name":          rc.Name,
-			"reverseId":     rc.ReverseID,
 			"seq":           rc.Seq,
 			"enabled":       rc.Enabled,
-			"registryAddr":  rc.RegistryAddr,
 			"outboundProxy": rc.OutboundProxy,
-			"registerProto": rc.RegisterProto,
 			"listenerProto": rc.ListenerProto,
 			"assignedPort":  rc.AssignedPort,
 			"lastError":     rc.LastError,
@@ -3290,54 +3292,14 @@ func hasReverseName(configs []*config.ReverseConfig, name string) bool {
 	return false
 }
 
-// assignReverseID ensures rc.ReverseID is set and does not collide with any
-// existing config. skipName allows updating an existing config without treating
-// its old ReverseID as a collision.
-func assignReverseID(rc *config.ReverseConfig, configs []*config.ReverseConfig, skipName string) {
-	if rc.ReverseID == "" {
-		if id, err := reverse.GenerateReverseID(); err == nil {
-			rc.ReverseID = id
-		}
-	}
-	for {
-		if rc.ReverseID == "" {
-			if id, err := reverse.GenerateReverseID(); err == nil {
-				rc.ReverseID = id
-			}
-		}
-		conflict := false
-		for _, c := range configs {
-			if c == nil || c.Name == skipName {
-				continue
-			}
-			if c.ReverseID == rc.ReverseID {
-				conflict = true
-				break
-			}
-		}
-		if !conflict {
-			break
-		}
-		if id, err := reverse.GenerateReverseID(); err == nil {
-			rc.ReverseID = id
-		}
-	}
-}
-
 // validateReverseConfig normalizes and validates a reverse config from the UI.
 func (s *AdminServer) validateReverseConfig(rc *config.ReverseConfig) error {
 	rc.Name = cleanReverseName(rc.Name)
 	if rc.Name == "" {
 		return fmt.Errorf("config name is required")
 	}
-	if rc.RegistryAddr == "" {
-		return fmt.Errorf("registry address is required")
-	}
 	if rc.OutboundProxy == "" {
 		return fmt.Errorf("outbound proxy is required")
-	}
-	if rc.RegisterProto == "" {
-		rc.RegisterProto = "socks5"
 	}
 	if rc.ListenerProto == "" {
 		rc.ListenerProto = "socks5"
@@ -3369,7 +3331,7 @@ func (s *AdminServer) validateReverseConfig(rc *config.ReverseConfig) error {
 func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		jsonResponse(w, reverseEventPayload(s.currentReverseConfigs()))
+		jsonResponse(w, s.reverseEventPayload(s.currentReverseConfigs()))
 
 	case http.MethodPost:
 		body, err := io.ReadAll(r.Body)
@@ -3390,11 +3352,15 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 
 		configs := s.currentReverseConfigs()
 		rc.Name = uniqueReverseName(rc.Name, configs)
-		assignReverseID(&rc, configs, "")
 
 		s.mu.Lock()
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
+		}
+		if s.conf.ReverseID == "" {
+			if id, err := reverse.GenerateReverseID(); err == nil {
+				s.conf.ReverseID = id
+			}
 		}
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
@@ -3470,12 +3436,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			if existing != nil && existing.Name == name {
 				oldCopy := *existing
 				oldRc = &oldCopy
-				// Preserve the existing ReverseID unless the request explicitly changed it.
-				// This keeps the registry binding stable across edits.
-				if rc.ReverseID == "" {
-					rc.ReverseID = existing.ReverseID
-				}
-				assignReverseID(&rc, s.conf.ReverseConfigs, name)
 				s.conf.ReverseConfigs[i] = &rc
 				updatedRc = s.conf.ReverseConfigs[i]
 				found = true
@@ -3972,13 +3932,17 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			}
 			rc.Name = candidate
 			newNames[candidate] = true
-			assignReverseID(rc, append(existing, req.ReverseConfigs...), rc.Name)
 		}
 
-		// Update runtime
+		// Update runtime and ensure instance ReverseID exists.
 		s.mu.Lock()
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
+		}
+		if s.conf.ReverseID == "" {
+			if id, err := reverse.GenerateReverseID(); err == nil {
+				s.conf.ReverseID = id
+			}
 		}
 		s.conf.ReverseConfigs = req.ReverseConfigs
 		s.mu.Unlock()

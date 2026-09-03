@@ -51,7 +51,7 @@ type Proxy struct {
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
-	ProxyName            string `yaml:"proxy,omitempty" json:"proxy,omitempty"` // 下级代理名
+	ViaProxy             string `yaml:"via,omitempty" json:"via,omitempty"` // 通过哪个代理建立连接
 	ReverseAddress       string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
 	UpBps                int64  `yaml:"up-bps,omitempty" json:"up-bps,omitempty"`
 	DownBps              int64  `yaml:"down-bps,omitempty" json:"down-bps,omitempty"`
@@ -1336,12 +1336,12 @@ func mergeByName[T any](baseList *[]T, overrideList []T, nameExtractor func(T) s
 }
 
 func (c *RuleConfiguration) setNext(proxy *Proxy, visited map[*Proxy]bool) error {
-	next, ok := c.ProxyNames[proxy.ProxyName]
+	next, ok := c.ProxyNames[proxy.ViaProxy]
 	if !ok || next == nil {
 		// If the name matches a proxy group, resolve it directly.
 		// The group returns a *Proxy from its internal subscription pool,
 		// nested groups, or the global proxy namespace.
-		if group, gok := c.GroupNames[proxy.ProxyName]; gok && group != nil {
+		if group, gok := c.GroupNames[proxy.ViaProxy]; gok && group != nil {
 			next = group.NextWithVisited(make(map[string]bool))
 			if next != nil {
 				ok = true
@@ -1353,7 +1353,7 @@ func (c *RuleConfiguration) setNext(proxy *Proxy, visited map[*Proxy]bool) error
 		return nil
 	}
 	if visited[next] {
-		return fmt.Errorf("recycle proxy: %s", proxy.ProxyName)
+		return fmt.Errorf("recycle proxy: %s", proxy.ViaProxy)
 	}
 	visited[next] = true
 	proxy.Next = next

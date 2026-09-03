@@ -1181,8 +1181,18 @@ func wireAdminCallbacks(resources *activeResources) {
 			return config.HealthInfo{Alive: true, LastCheck: time.Now()}, nil
 		}
 		start := time.Now()
-		addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		// Dial through the proxy chain (Next hop) to reach this proxy's server
+		var conn net.Conn
+		var err error
+		if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+			// Use the proxy chain to connect to this proxy's server
+			nextDialer := dialer.NewDialer(p.Next)
+			conn, err = nextDialer.Dial(p.Server, p.Port)
+		} else {
+			// No next hop or next hop is DIRECT: connect directly
+			addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
+			conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		}
 		if err != nil {
 			return config.HealthInfo{Alive: false, LastCheck: time.Now()}, nil
 		}

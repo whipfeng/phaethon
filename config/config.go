@@ -1079,10 +1079,6 @@ type RuleConfiguration struct {
 	// single process.
 	ReverseConfigs []*ReverseConfig `yaml:"reverse-configs,omitempty"`
 
-	// ReverseID is the instance-level identity for the reverse side.
-	// All ReverseConfigs within this instance share the same ReverseID.
-	ReverseID string `yaml:"reverse-id,omitempty" json:"reverse-id,omitempty"`
-
 	// Enable interactive console setup when no config file is found.
 	// Default: true in default.yaml, false in user configs.
 	Interactive bool `yaml:"interactive"`
@@ -1130,7 +1126,7 @@ type ReverseConfig struct {
 	Enabled           bool   `yaml:"enabled" json:"enabled"`
 	Name              string `yaml:"name,omitempty" json:"name,omitempty"`
 	Seq               int    `yaml:"seq,omitempty" json:"seq,omitempty"`
-	OutboundProxy     string `yaml:"outbound-proxy" json:"outbound-proxy"`
+	RegistryProxy     string `yaml:"registry-proxy" json:"registry-proxy"`
 	PreferredPort     int    `yaml:"preferred-port" json:"preferred-port"`
 	TargetAddress     string `yaml:"target-address" json:"target-address"`
 	ReconnectInterval int    `yaml:"reconnect-interval" json:"reconnect-interval"`

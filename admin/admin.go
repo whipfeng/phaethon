@@ -3519,6 +3519,7 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after reverse config create failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogInfo("[ADMIN] reverse config created: %s", rc.Name)
 		jsonResponse(w, &rc)
 
@@ -3609,6 +3610,7 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after reverse config update failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogInfo("[ADMIN] reverse config updated: %s", rc.Name)
 		jsonResponse(w, found)
 
@@ -3656,6 +3658,7 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after reverse config delete failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogInfo("[ADMIN] reverse config deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
@@ -3717,6 +3720,7 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 			util.LogWarn("[ADMIN] incremental update after reverse config toggle failed: %v", err)
 		}
 	}
+	util.DefaultVersionNotifier.BumpVersion("reverse")
 	util.LogInfo("[ADMIN] reverse config %s toggled: enabled=%v", name, req.Enabled)
 	jsonResponse(w, found)
 }

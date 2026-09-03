@@ -54,7 +54,8 @@ type activeResources struct {
 	mappingReverse    map[string]*server.ReverseServer // mapping name -> reverse server
 	healthStop        chan struct{}
 	subscriptionStop  chan struct{}
-	reverseClientStop chan struct{}
+	reverseClientStop chan struct{}                    // global stop for all reverse clients
+	reverseClientStops map[string]chan struct{}        // per-config stop channels
 	reverseClientWG   sync.WaitGroup
 	tunRes            *TUNResource
 	adminServer       *admin.AdminServer
@@ -214,9 +215,10 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	util.Logger.Printf("ControlManager initialized")
 
 	res := &activeResources{
-		ruleConf:         ruleConf,
-		mappingListeners: make(map[string]net.Listener),
-		mappingReverse:   make(map[string]*server.ReverseServer),
+		ruleConf:           ruleConf,
+		mappingListeners:   make(map[string]net.Listener),
+		mappingReverse:     make(map[string]*server.ReverseServer),
+		reverseClientStops: make(map[string]chan struct{}),
 	}
 
 	// Start TUN engine if enabled (intercepts system-level traffic)
@@ -337,10 +339,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if rc == nil || !rc.Enabled {
 			continue
 		}
+		configStop := make(chan struct{})
+		res.reverseClientStops[rc.Name] = configStop
 		res.reverseClientWG.Add(1)
 		go func(rc *config.ReverseConfig) {
 			defer res.reverseClientWG.Done()
-			startReverseClient(rc, ruleConf, res.reverseClientStop)
+			startReverseClient(rc, ruleConf, configStop, res.reverseClientStop)
 		}(rc)
 	}
 
@@ -802,7 +806,7 @@ func writeStartupError(err error) error {
 // startReverseClient starts a reverse client goroutine.
 // Reuses server.ReverseServer for the data connection pool — no custom relay logic.
 // The goroutine exits when stop is closed.
-func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, stop <-chan struct{}) {
+func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) {
 	interval := time.Duration(rc.ReconnectInterval) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Second
@@ -810,21 +814,27 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 
 	for {
 		select {
-		case <-stop:
+		case <-configStop:
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			return
+		case <-globalStop:
 			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
 			return
 		default:
 		}
 
-		err := runReverseSession(rc, ruleConf, stop)
+		err := runReverseSession(rc, ruleConf, configStop, globalStop)
 		if err != nil {
 			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryAddr, err, interval)
 		} else {
-			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s), reconnecting in %v...", rc.Name, rc.RegistryAddr, interval)
+			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s), reconnecting in %v...", rc.Name, rc.RegistryAddr, err, interval)
 		}
 
 		select {
-		case <-stop:
+		case <-configStop:
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			return
+		case <-globalStop:
 			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
 			return
 		case <-time.After(interval):
@@ -863,7 +873,7 @@ func publishReverseEvent(rc *config.ReverseConfig) {
 	util.DefaultVersionNotifier.BumpVersion("reverse")
 }
 
-func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, stop <-chan struct{}) (err error) {
+func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) (err error) {
 	// Persist state (assigned port or last error) to the profile whenever this
 	// session function returns, so the admin UI can show real status/errors.
 	defer func() {
@@ -897,7 +907,9 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	defer close(stopDone)
 	go func() {
 		select {
-		case <-stop:
+		case <-configStop:
+			cc.Close()
+		case <-globalStop:
 			cc.Close()
 		case <-stopDone:
 		}
@@ -1377,7 +1389,12 @@ func wireAdminCallbacks(resources *activeResources) {
 	admin.OnReverseConfigUpdate = func(old, newConfig *config.ReverseConfig) error {
 		// Reverse config deleted
 		if newConfig == nil && old != nil {
-			// Stop the reverse client goroutine by sending to stop channel
+			// Close the per-config stop channel to stop the goroutine
+			if stopCh, ok := resources.reverseClientStops[old.Name]; ok {
+				close(stopCh)
+				delete(resources.reverseClientStops, old.Name)
+			}
+			// Remove from ruleConf
 			resources.ruleConf.Lock()
 			for i, rc := range resources.ruleConf.ReverseConfigs {
 				if rc.Name == old.Name {
@@ -1386,13 +1403,23 @@ func wireAdminCallbacks(resources *activeResources) {
 				}
 			}
 			resources.ruleConf.Unlock()
-			// Note: The goroutine will stop on next reconnect check via stop channel
 			return nil
 		}
 		// Reverse config added or updated
-		if newConfig != nil && newConfig.Enabled {
-			// Start the reverse client goroutine
-			go startReverseClient(newConfig, resources.ruleConf, resources.reverseClientStop)
+		if newConfig != nil {
+			// Stop old goroutine if exists
+			if old != nil {
+				if stopCh, ok := resources.reverseClientStops[old.Name]; ok {
+					close(stopCh)
+					delete(resources.reverseClientStops, old.Name)
+				}
+			}
+			// Start new goroutine if enabled
+			if newConfig.Enabled {
+				stopCh := make(chan struct{})
+				resources.reverseClientStops[newConfig.Name] = stopCh
+				go startReverseClient(newConfig, resources.ruleConf, stopCh, resources.reverseClientStop)
+			}
 		}
 		return nil
 	}

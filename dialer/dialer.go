@@ -84,6 +84,14 @@ type UDPDialer interface {
 	DialPacket() (net.PacketConn, error)
 }
 
+// ControlDialer establishes a control connection to the registry.
+// Each proxy type that supports BIND implements this: the connection targets
+// the proxy's own server (which IS the registry), using protocol-specific
+// handshake with PORT=1 to mark it as a control channel.
+type ControlDialer interface {
+	DialControl() (net.Conn, error)
+}
+
 // BaseDialer holds fields and logic common to all proxy dialers.
 type BaseDialer struct {
 	Proxy     *config.Proxy

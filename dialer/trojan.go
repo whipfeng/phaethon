@@ -59,6 +59,27 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	return tlsConn, nil
 }
 
+// DialControl establishes a control connection to the registry through this Trojan proxy.
+// The proxy server IS the registry: it connects to proxy.Server:proxy.Port via the next hop,
+// performs TLS handshake, then sends a Trojan BIND with PORT=1 to mark it as a control channel.
+func (d *TrojanDialer) DialControl() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("trojan: control connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	tlsConn, err := d.TLSHandshake(rawConn)
+	if err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, 1); err != nil {
+		tlsConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
 // DialPacket establishes a UDP tunnel through the Trojan proxy.
 func (d *TrojanDialer) DialPacket() (net.PacketConn, error) {
 	// Connect to the next hop

@@ -4,7 +4,7 @@
     <!-- Instance ReverseID badge -->
     <div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem; display: flex; align-items: center; gap: 0.75rem;">
         <span data-i18n="rv.instanceReverseId" style="color: var(--text-secondary); font-size: 0.9rem;">实例 Reverse ID</span>
-        <code id="instance-reverse-id" style="word-break: break-all; font-size: 0.85rem;">-</code>
+        <code id="instance-reverse-id" style="word-break: break-all; font-size: 0.85rem;">{{.InstanceReverseID}}</code>
         <span class="text-muted text-small" data-i18n="rv.instanceReverseIdHint" style="font-size: 0.8rem;">此实例所有反向配置共享同一 ID</span>
     </div>
 
@@ -23,10 +23,9 @@
                     <tr>
                         <th data-i18n="rv.configName">名称</th>
                         <th data-i18n="rv.seq">Seq</th>
-                        <th data-i18n="rv.reverseId">Reverse ID</th>
                         <th data-i18n="rv.outboundProxy">出站代理</th>
                         <th data-i18n="rv.summaryListenProto">监听协议</th>
-                        <th data-i18n="rv.endpoint">访问地址</th>
+                        <th data-i18n="rv.listenerPort">监听端口</th>
                         <th data-i18n="rv.summaryTarget">目标服务</th>
                         <th data-i18n="common.enabled">启用</th>
                         <th data-i18n="rv.statusEnabled">状态</th>
@@ -35,29 +34,19 @@
                 </thead>
                 <tbody id="rv-list-body">
                     {{range .ReverseConfigs}}
-                    <tr data-rv-name="{{.Name}}" data-rv-reverse-id="{{.ReverseID}}" data-rv-seq="{{.Seq}}" class="{{if not .Enabled}}row-disabled{{end}}">
+                    <tr data-rv-name="{{.Name}}" data-rv-seq="{{.Seq}}" data-listener-proto="{{.ListenerProto | upper}}" data-outbound-proxy="{{.OutboundProxy}}" data-assigned-port="{{.AssignedPort}}" class="{{if not .Enabled}}row-disabled{{end}}">
                         <td class="rv-name"><strong>{{.Name}}</strong></td>
                         <td class="rv-seq"><code>{{.Seq}}</code></td>
-                        <td class="rv-reverse-id">
-                            {{if .ReverseID}}
-                            <code class="reverse-id-short" title="{{.ReverseID}}" style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle;">{{.ReverseID}}</code>
-                            {{else}}
-                            <span class="text-muted">-</span>
-                            {{end}}
-                        </td>
                         <td class="rv-registry">{{.OutboundProxy}}</td>
                         <td class="rv-listener-proto"><code class="type-badge type-{{.ListenerProto | lower}}">{{.ListenerProto | upper}}</code></td>
-                        <td class="rv-endpoint-cell">
-                            <code class="endpoint-code rv-endpoint">
-                                {{if and .AssignedPort (gt .AssignedPort 0)}}
-                                {{.ListenerProto | upper}}://{{.RegistryAddr | host}}:{{.AssignedPort}}
-                                {{else if .LastError}}
-                                <span data-i18n="rv.registrationFailed">注册失败</span>
-                                {{else}}
-                                <span class="waiting" data-i18n="rv.waitingForPort">等待分配端口</span>
-                                {{end}}
-                            </code>
-                            <button class="btn btn-sm btn-outline rv-copy-btn" onclick="copyEndpointRow(this)" data-i18n="rv.copyEndpoint" style="{{if not (and .AssignedPort (gt .AssignedPort 0))}}display:none{{end}}">复制</button>
+                        <td class="rv-port-cell">
+                            {{if and .AssignedPort (gt .AssignedPort 0)}}
+                            <code>{{.AssignedPort}}</code>
+                            {{else if .LastError}}
+                            <span class="text-muted" data-i18n="rv.registrationFailed">注册失败</span>
+                            {{else}}
+                            <span class="waiting" data-i18n="rv.waitingForPort">等待分配端口</span>
+                            {{end}}
                             <div class="rv-last-error" style="{{if not .LastError}}display:none{{end}}; background: var(--danger-bg, #fff0f0); color: var(--danger, #c00); border: 1px solid var(--danger, #c00); border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.5rem; font-size: 0.9rem;">
                                 <strong>错误：</strong> <span class="rv-last-error-text">{{.LastError}}</span>
                             </div>
@@ -87,6 +76,7 @@
                             {{end}}
                         </td>
                         <td>
+                            <button class="btn btn-sm btn-outline rv-copy-endpoint-btn" onclick="copyEndpointRow(this)" title="复制访问地址" data-i18n-title="rv.copyEndpoint" style="{{if not (and .AssignedPort (gt .AssignedPort 0))}}display:none{{end}}">🔗</button>
                             <button class="btn btn-sm btn-outline" onclick="copyReverse('{{.Name}}')" title="复制" data-i18n-title="proxy.copy">📋</button>
                             <button class="btn btn-sm btn-outline" onclick="showEditReverse('{{.Name}}')" data-i18n="rv.editConfig">编辑</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteReverseConfig('{{.Name}}')" data-i18n="rv.deleteConfig">删除</button>
@@ -153,18 +143,11 @@
         </div>
         <form id="rv-form" onsubmit="saveReverseConfig(event)">
             <input type="hidden" id="edit-name" value="">
-            <input type="hidden" id="edit-reverse-id" value="">
             <input type="hidden" id="edit-seq" value="">
 
             <div class="form-group">
                 <label data-i18n="rv.configName">配置名称</label>
                 <input type="text" id="config-name" placeholder="reverse-1">
-            </div>
-
-            <div class="form-group" id="reverse-id-display-group" style="display: none;">
-                <label data-i18n="rv.reverseId">Reverse ID</label>
-                <code id="edit-reverse-id-display" style="word-break: break-all;"></code>
-                <p class="form-hint" data-i18n="rv.reverseIdHint">与注册端动态绑定配对时使用。</p>
             </div>
 
             <div class="form-group">
@@ -272,7 +255,6 @@ function showEditReverse(name) {
     if (!cfg) return;
     document.getElementById('rv-modal-title').textContent = (i18n.t('rv.modalEdit') || '编辑') + ' — ' + name;
     document.getElementById('edit-name').value = cfg.name || '';
-    document.getElementById('edit-reverse-id').value = cfg['reverse-id'] || '';
     document.getElementById('edit-seq').value = cfg.seq || '';
 
     document.getElementById('config-name').value = cfg.name || '';
@@ -286,18 +268,6 @@ function showEditReverse(name) {
     document.getElementById('reconnect-interval').value = cfg['reconnect-interval'] || 10;
     document.getElementById('preferred-port').value = cfg['preferred-port'] || '';
     document.getElementById('edit-seq').value = cfg.seq || '';
-
-    const reverseId = cfg['reverse-id'] || '';
-    const reverseIdGroup = document.getElementById('reverse-id-display-group');
-    const reverseIdDisplay = document.getElementById('edit-reverse-id-display');
-    if (reverseIdGroup && reverseIdDisplay) {
-        if (reverseId) {
-            reverseIdDisplay.textContent = reverseId;
-            reverseIdGroup.style.display = '';
-        } else {
-            reverseIdGroup.style.display = 'none';
-        }
-    }
 
     toggleListenFields();
     document.getElementById('rv-modal').classList.remove('hidden');
@@ -371,7 +341,6 @@ async function pasteReverse() {
 function resetForm() {
     document.getElementById('rv-modal-title').textContent = i18n.t('rv.modalAdd') || '新增反向连接';
     document.getElementById('edit-name').value = '';
-    document.getElementById('edit-reverse-id').value = '';
     document.getElementById('edit-seq').value = '';
     document.getElementById('config-name').value = '';
     document.getElementById('enabled').checked = true;
@@ -383,8 +352,6 @@ function resetForm() {
     document.getElementById('direct-target').value = '127.0.0.1:80';
     document.getElementById('reconnect-interval').value = '10';
     document.getElementById('preferred-port').value = '';
-    const reverseIdGroup = document.getElementById('reverse-id-display-group');
-    if (reverseIdGroup) reverseIdGroup.style.display = 'none';
     toggleListenFields();
 }
 
@@ -426,11 +393,8 @@ function collectFormState() {
     return {
         enabled: document.getElementById('enabled').checked,
         name: name,
-        'reverse-id': document.getElementById('edit-reverse-id').value,
         seq: parseInt(document.getElementById('edit-seq').value) || 0,
-        'registry-addr': opt.dataset.server + ':' + opt.dataset.port,
         'outbound-proxy': opt.value,
-        'register-proto': opt.dataset.type,
         'listener-proto': listenerProto,
         'target-address': listenerProto === 'direct' ? document.getElementById('direct-target').value : '',
         'reconnect-interval': parseInt(document.getElementById('reconnect-interval').value) || 10,
@@ -528,9 +492,11 @@ async function deleteReverseConfig(name) {
 function copyEndpointRow(btn) {
     const row = btn.closest('tr');
     if (!row) return;
-    const el = row.querySelector('.rv-endpoint');
-    if (!el) return;
-    const text = el.textContent.trim();
+    const proto = row.dataset.listenerProto || '';
+    const proxy = row.dataset.outboundProxy || '';
+    const port = row.dataset.assignedPort || '';
+    if (!port) return;
+    const text = `${proto}://${proxy}:${port}`;
     navigator.clipboard.writeText(text).then(() => {
         showToast(i18n.t('raw.copied'), 'success');
     }).catch(() => {

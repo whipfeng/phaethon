@@ -534,8 +534,7 @@ function _hashReverseStatus(data) {
         s += it.name + '|';
         s += (it.assignedPort || it['assigned-port'] || 0) + '|';
         s += (it.lastError || it['last-error'] || '') + '|';
-        s += (it.enabled ? '1' : '0') + '|';
-        s += (it.reverseId || it['reverse-id'] || '') + ';';
+        s += (it.enabled ? '1' : '0') + ';';
     }
     return s;
 }
@@ -562,18 +561,6 @@ function updateReverseStatus(data) {
             statusEl.innerHTML = `<span data-i18n="${key}">${i18n.t(key)}</span>`;
         }
 
-        // Keep the instance-level ReverseID badge in sync with SSE/REST updates.
-        const instanceBadge = document.getElementById('instance-reverse-id');
-        if (instanceBadge) {
-            for (let i = 0; i < data.length; i++) {
-                const item = data[i];
-                if (item && (item.reverseId || item['reverse-id'])) {
-                    instanceBadge.textContent = item.reverseId || item['reverse-id'];
-                    break;
-                }
-            }
-        }
-
         const listBody = document.getElementById('rv-list-body');
         const listTable = document.getElementById('rv-list-table');
         const emptyState = document.getElementById('rv-empty-state');
@@ -587,20 +574,17 @@ function updateReverseStatus(data) {
                 if (emptyState) emptyState.style.display = 'none';
                 listBody.innerHTML = data.map(item => {
                     if (!item || !item.name) return '';
-                    const proto = (item.registerProto || item['register-proto'] || 'socks5').toUpperCase();
                     const listenerProto = (item.listenerProto || item['listener-proto'] || 'socks5').toUpperCase();
-                    const registryAddr = item.registryAddr || item['registry-addr'] || '';
                     const outboundProxy = item.outboundProxy || item['outbound-proxy'] || '';
                     const target = item.targetAddress || item['target-address'] || '';
                     const assignedPort = item.assignedPort || item['assigned-port'] || 0;
                     const lastError = item.lastError || item['last-error'] || '';
-                    const reverseId = item.reverseId || item['reverse-id'] || '';
                     const seq = item.seq || 0;
                     const enabled = item.enabled === true;
-                    const endpoint = assignedPort
-                        ? `${listenerProto}://${(registryAddr.split(':')[0] || '')}:${assignedPort}`
-                        : lastError ? (i18n.t('rv.registrationFailed') || '注册失败')
-                        : `<span class="spinner"></span> <span class="waiting">${i18n.t('rv.waitingForPort') || '等待分配端口'}</span>`;
+                    const portDisplay = assignedPort
+                        ? `<code>${assignedPort}</code>`
+                        : lastError ? `<span class="text-muted">${i18n.t('rv.registrationFailed') || '注册失败'}</span>`
+                        : `<span class="waiting">${i18n.t('rv.waitingForPort') || '等待分配端口'}</span>`;
                     const targetDisplay = listenerProto === 'DIRECT'
                         ? escapeHtml(target)
                         : `<span data-i18n="rv.targetDynamic">${i18n.t('rv.targetDynamic') || '动态'}</span>`;
@@ -616,17 +600,13 @@ function updateReverseStatus(data) {
                         statusClass = 'badge-success';
                         statusText = i18n.t('rv.statusEnabled') || '已启用';
                     }
-                    return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-reverse-id="${escapeHtml(reverseId)}" data-rv-seq="${seq}" class="${enabled ? '' : 'row-disabled'}">
+                    return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-seq="${seq}" data-listener-proto="${listenerProto}" data-outbound-proxy="${escapeHtml(outboundProxy)}" data-assigned-port="${assignedPort}" class="${enabled ? '' : 'row-disabled'}">
                         <td class="rv-name"><strong>${escapeHtml(item.name)}</strong></td>
                         <td class="rv-seq"><code>${seq}</code></td>
-                        <td class="rv-reverse-id">
-                            ${reverseId ? `<code class="reverse-id-short" title="${escapeHtml(reverseId)}" style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle;">${escapeHtml(reverseId)}</code>` : '<span class="text-muted">-</span>'}
-                        </td>
                         <td class="rv-registry">${escapeHtml(outboundProxy)}</td>
                         <td class="rv-listener-proto"><code class="type-badge type-${listenerProto.toLowerCase()}">${listenerProto}</code></td>
-                        <td class="rv-endpoint-cell">
-                            <code class="endpoint-code rv-endpoint">${endpoint}</code>
-                            <button class="btn btn-sm btn-outline rv-copy-btn" onclick="copyEndpointRow(this)" data-i18n="rv.copyEndpoint" style="display: ${assignedPort ? 'inline-flex' : 'none'}">${i18n.t('rv.copyEndpoint') || '复制'}</button>
+                        <td class="rv-port-cell">
+                            ${portDisplay}
                             <div class="rv-last-error" style="display: ${lastError ? 'block' : 'none'}; background: var(--danger-bg, #fff0f0); color: var(--danger, #c00); border: 1px solid var(--danger, #c00); border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.5rem; font-size: 0.9rem;">
                                 <strong>${i18n.t('rv.errorLabel') || '错误'}：</strong> <span class="rv-last-error-text">${escapeHtml(lastError)}</span>
                             </div>
@@ -640,6 +620,7 @@ function updateReverseStatus(data) {
                         </td>
                         <td class="rv-status"><span class="badge ${statusClass}">${statusText}</span></td>
                         <td>
+                            <button class="btn btn-sm btn-outline rv-copy-endpoint-btn" onclick="copyEndpointRow(this)" title="${i18n.t('rv.copyEndpoint') || '复制访问地址'}" style="display: ${assignedPort ? 'inline-flex' : 'none'}">🔗</button>
                             <button class="btn btn-sm btn-outline" onclick="copyReverse('${escapeHtml(item.name)}')" title="${i18n.t('proxy.copy') || '复制'}">📋</button>
                             <button class="btn btn-sm btn-outline" onclick="showEditReverse('${escapeHtml(item.name)}')" data-i18n="rv.editConfig">${i18n.t('rv.editConfig') || '编辑'}</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteReverseConfig('${escapeHtml(item.name)}')" data-i18n="rv.deleteConfig">${i18n.t('rv.deleteConfig') || '删除'}</button>
@@ -664,13 +645,11 @@ function updateReverseStatus(data) {
                 }
                 existing.name = item.name;
                 existing.enabled = item.enabled;
-                existing['reverse-id'] = item.reverseId || item['reverse-id'] || existing['reverse-id'] || '';
                 existing.seq = item.seq || existing.seq || 0;
                 existing['assigned-port'] = item.assignedPort || item['assigned-port'] || existing['assigned-port'] || 0;
                 existing['last-error'] = item.lastError || item['last-error'] || existing['last-error'] || '';
                 existing['outbound-proxy'] = item.outboundProxy || item['outbound-proxy'] || existing['outbound-proxy'] || '';
                 existing['listener-proto'] = item.listenerProto || item['listener-proto'] || existing['listener-proto'] || 'socks5';
-                existing['registry-addr'] = item.registryAddr || item['registry-addr'] || existing['registry-addr'] || '';
                 existing['target-address'] = item.targetAddress || item['target-address'] || existing['target-address'] || '';
             });
             for (let i = existingReverseConfigs.length - 1; i >= 0; i--) {
@@ -699,8 +678,8 @@ function updateReverseStatus(data) {
     if (endpointEl) {
         if (data.assignedPort) {
             const proto = (data.listenerProto || 'socks5').toUpperCase();
-            const host = (data.registryAddr || '').split(':')[0] || '';
-            endpointEl.textContent = `${proto}://${host}:${data.assignedPort}`;
+            const proxyName = data.outboundProxy || data['outbound-proxy'] || '';
+            endpointEl.textContent = `${proto}://${proxyName}:${data.assignedPort}`;
         } else if (data.lastError) {
             endpointEl.textContent = i18n.t('rv.registrationFailed');
         } else if (data.enabled) {

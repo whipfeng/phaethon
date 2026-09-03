@@ -520,8 +520,7 @@ func assignSeqToReverseConfigs(configs []*config.ReverseConfig, start int) {
 	}
 }
 
-// normalizeReverseConfigs sets every rc.ReverseID to the instance ReverseID,
-// assigns Seq to any rc that lacks one.
+// normalizeReverseConfigs assigns Seq to any rc that lacks one.
 func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
 	if ruleConf == nil {
 		return
@@ -537,13 +536,6 @@ func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
 
 	// Assign Seq to configs that lack one.
 	assignSeqToReverseConfigs(ruleConf.ReverseConfigs, maxSeq)
-
-	// Sync ReverseID to all configs.
-	for _, rc := range ruleConf.ReverseConfigs {
-		if rc != nil && rc.ReverseID != ruleConf.ReverseID {
-			rc.ReverseID = ruleConf.ReverseID
-		}
-	}
 }
 
 func main() {
@@ -756,27 +748,27 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 	for {
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
 			return
 		default:
 		}
 
 		err := runReverseSession(rc, ruleConf, configStop, globalStop)
 		if err != nil {
-			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryAddr, err, interval)
+			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.OutboundProxy, err, interval)
 		} else {
-			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s), reconnecting in %v...", rc.Name, rc.RegistryAddr, err, interval)
+			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.OutboundProxy, err, interval)
 		}
 
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryAddr)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
 			return
 		case <-time.After(interval):
 		}
@@ -809,7 +801,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		return fmt.Errorf("outbound proxy not found: %s", rc.OutboundProxy)
 	}
 
-	cc := dialer.NewControlClient(outboundProxy, rc.RegistryAddr, rc.RegisterProto)
+	cc := dialer.NewControlClient(outboundProxy)
 	if err := cc.Connect(); err != nil {
 		return fmt.Errorf("control connect fail: %w", err)
 	}
@@ -830,18 +822,10 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		}
 	}()
 
-	// Load or generate reverse identity for stable port allocation.
-	// Each reverse config has its own ReverseID so multiple reverse connections
-	// from the same process do not conflict on the registry.
-	if rc.ReverseID == "" {
-		clientID, err := reverse.GenerateReverseID()
-		if err != nil {
-			util.Logger.Printf("[REVERSE-CLIENT] warn (name=%s addr=%s): generate reverse id fail: %v", rc.Name, rc.RegistryAddr, err)
-			clientID = ""
-		}
-		rc.ReverseID = clientID
-	}
-	clientID := rc.ReverseID
+	// Use the instance-level ReverseID for stable port allocation.
+	// All reverse configs from this instance share the same identity;
+	// the Seq field differentiates them on the registry.
+	clientID := ruleConf.ReverseID
 
 	// For direct listeners configured through the admin wizard, the target may
 	// be stored as a single "target-address" string. Split it into host/port so
@@ -860,7 +844,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		Cmd:              "register",
 		Name:             rc.Name,
 		Seq:              rc.Seq,
-		Proto:            rc.RegisterProto,
+		Proto:            outboundProxy.Type,
 		PreferredPort:    rc.PreferredPort,
 		ListenerProto:    rc.ListenerProto,
 		ListenerUser:     rc.ListenerUser,
@@ -894,9 +878,9 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	}
 
 	// Highlight the actual listening address in the log.
-	host, _, _ := net.SplitHostPort(rc.RegistryAddr)
+	host := outboundProxy.Server
 	if host == "" {
-		host = rc.RegistryAddr
+		host = rc.OutboundProxy
 	}
 	util.Logger.Printf("══════════════════════════════════════════")
 	util.Logger.Printf("  ✓ 反向客户端注册成功 [%s]", rc.Name)

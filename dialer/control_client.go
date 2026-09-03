@@ -1,12 +1,9 @@
 package dialer
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,76 +13,52 @@ import (
 )
 
 // ControlClient manages the control connection from the reverse side.
-// It connects to the registry using the specified protocol's BIND capability,
+// It connects to the registry using the outbound proxy's DialControl method,
 // registers for resources, and manages data connections.
 type ControlClient struct {
-	proxy         *config.Proxy
-	registerAddr  string
-	registerProto string
-	ctrlConn      net.Conn
-	address       string
-	mu            sync.Mutex
-	closeCh       chan struct{}
+	proxy    *config.Proxy
+	ctrlConn net.Conn
+	address  string
+	mu       sync.Mutex
+	closeCh  chan struct{}
 }
 
-func NewControlClient(proxy *config.Proxy, registerAddr, registerProto string) *ControlClient {
+func NewControlClient(proxy *config.Proxy) *ControlClient {
 	return &ControlClient{
-		proxy:         proxy,
-		registerAddr:  registerAddr,
-		registerProto: registerProto,
-		closeCh:       make(chan struct{}),
+		proxy:   proxy,
+		closeCh: make(chan struct{}),
 	}
 }
 
+// registryAddr returns the registry address derived from the outbound proxy.
+func (c *ControlClient) registryAddr() string {
+	return fmt.Sprintf("%s:%d", c.proxy.Server, c.proxy.Port)
+}
+
 // Connect establishes the control connection to the registry.
-// Requires a non-nil outbound proxy — reverse clients must always go through a proxy chain.
+// The outbound proxy IS the registry: it delegates to the proxy type's DialControl
+// method, which handles protocol-specific handshake with PORT=1 (control channel).
 func (c *ControlClient) Connect() error {
 	if c.proxy == nil {
 		return fmt.Errorf("control client: outbound proxy is required (reverse must connect through proxy)")
 	}
 
-	var conn net.Conn
-	var err error
-
-	switch c.registerProto {
-	case "socks5":
-		conn, err = c.connectSOCKS5()
-	case "trojan":
-		d := &TrojanDialer{BaseDialer: BaseDialer{Proxy: c.proxy}}
-		nextDialer := NewDialer(c.proxy.Next)
-		rawConn, err := nextDialer.Dial(c.proxy.Server, c.proxy.Port)
-		if err != nil {
-			return fmt.Errorf("trojan: connect fail: %w", err)
-		}
-		tlsConn, err := d.TLSHandshake(rawConn)
-		if err != nil {
-			rawConn.Close()
-			return fmt.Errorf("trojan: tls fail: %w", err)
-		}
-		if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, c.registerAddr, 1); err != nil {
-			tlsConn.Close()
-			return fmt.Errorf("trojan: bind fail: %w", err)
-		}
-		conn = tlsConn
-	case "h_tunnel":
-		d := &HTunnelDialer{BaseDialer: BaseDialer{Proxy: c.proxy}}
-		conn, err = d.Dial(c.registerAddr, 1)
-		if err != nil {
-			return fmt.Errorf("htunnel: dial fail: %w", err)
-		}
-	default:
-		return fmt.Errorf("control client: unsupported register protocol: %s (only socks5/trojan/h_tunnel support BIND)", c.registerProto)
+	d := NewDialer(c.proxy)
+	cd, ok := d.(ControlDialer)
+	if !ok {
+		return fmt.Errorf("control client: proxy type %s does not support control connections (only socks5/trojan/h_tunnel)", c.proxy.Type)
 	}
 
+	conn, err := cd.DialControl()
 	if err != nil {
-		return fmt.Errorf("control client: connect fail (%s): %w", c.registerProto, err)
+		return fmt.Errorf("control client: connect fail (%s): %w", c.proxy.Type, err)
 	}
 
 	c.mu.Lock()
 	c.ctrlConn = conn
 	c.mu.Unlock()
 
-	util.LogInfo("[CONTROL-CLIENT] connected to %s via %s as control channel", c.registerAddr, c.registerProto)
+	util.LogInfo("[CONTROL-CLIENT] connected to %s via %s as control channel", c.registryAddr(), c.proxy.Type)
 	return nil
 }
 
@@ -158,7 +131,7 @@ func (c *ControlClient) Keepalive() {
 				return
 			}
 			if err := reverse.WriteFrame(conn, reverse.FrameHeartbeat, nil); err != nil {
-				util.LogInfo("[CONTROL-CLIENT] heartbeat send fail to %s: %v", c.registerAddr, err)
+				util.LogInfo("[CONTROL-CLIENT] heartbeat send fail to %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
 			}
@@ -183,7 +156,7 @@ func (c *ControlClient) StartMonitor() {
 			conn.SetReadDeadline(time.Now().Add(70 * time.Second))
 			_, _, err := reverse.ReadFrame(conn)
 			if err != nil {
-				util.LogInfo("[CONTROL-CLIENT] monitor detected disconnect from %s: %v", c.registerAddr, err)
+				util.LogInfo("[CONTROL-CLIENT] monitor detected disconnect from %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
 			}
@@ -214,64 +187,4 @@ func (c *ControlClient) Close() {
 		c.ctrlConn = nil
 	}
 	c.mu.Unlock()
-}
-
-// connectSOCKS5 dials to the registry through the proxy chain (using actual port, not 0),
-// then sends SOCKS5 BIND(PORT=1) to declare this as a control channel.
-func (c *ControlClient) connectSOCKS5() (net.Conn, error) {
-	regHost, regPortStr, _ := net.SplitHostPort(c.registerAddr)
-	regPort, _ := strconv.Atoi(regPortStr)
-	if regPort <= 0 {
-		regPort = 19901
-	}
-	conn, err := ChainDial(c.proxy, regHost, regPort)
-	if err != nil {
-		return nil, err
-	}
-	if err := sendSocks5BindControl(conn); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return conn, nil
-}
-
-// sendSocks5BindControl performs a minimal SOCKS5 handshake followed by
-// BIND(PORT=1) to declare a control connection.
-func sendSocks5BindControl(conn net.Conn) error {
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	defer conn.SetWriteDeadline(time.Time{})
-
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		return err
-	}
-
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		return err
-	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		return fmt.Errorf("socks5 auth rejected: %v", resp)
-	}
-
-	addr := "control"
-	addrLen := byte(len(addr))
-	bindReq := []byte{0x05, 0x02, 0x00, 0x03, addrLen}
-	bindReq = append(bindReq, []byte(addr)...)
-	portBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBuf, 1)
-	bindReq = append(bindReq, portBuf...)
-
-	if _, err := conn.Write(bindReq); err != nil {
-		return err
-	}
-
-	bindResp := make([]byte, 10)
-	if _, err := io.ReadFull(conn, bindResp); err != nil {
-		return err
-	}
-	if bindResp[1] != 0x00 {
-		return fmt.Errorf("socks5 bind rejected: status=%d", bindResp[1])
-	}
-
-	return nil
 }

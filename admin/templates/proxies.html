@@ -384,7 +384,17 @@ async function pasteProxy() {
         }
         document.getElementById('edit-name').value = p.name || '';
         document.getElementById('f-name').value = p.name || '';
-        document.getElementById('f-type').value = p.type || '';
+        const typeSelect = document.getElementById('f-type');
+        const typeLower = (p.type || '').toLowerCase();
+        let typeMatched = false;
+        for (const opt of typeSelect.options) {
+            if (opt.value.toLowerCase() === typeLower) {
+                typeSelect.value = opt.value;
+                typeMatched = true;
+                break;
+            }
+        }
+        if (!typeMatched) typeSelect.value = p.type || '';
         document.getElementById('f-server').value = p.server || '';
         document.getElementById('f-port').value = p.port || '';
         document.getElementById('f-sni').value = p.sni || '';
@@ -397,7 +407,20 @@ async function pasteProxy() {
         document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
         document.getElementById('f-private-key').value = p['private-key'] || '';
         document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
-        populateNextProxySelect(p.proxy || '');
+        const proxyVal = p.proxy || '';
+        populateNextProxySelect(proxyVal);
+        const proxySelect = document.getElementById('f-proxy');
+        let proxyFound = false;
+        for (const opt of proxySelect.options) {
+            if (opt.value === proxyVal) { proxyFound = true; break; }
+        }
+        if (proxyVal && !proxyFound) {
+            const opt = document.createElement('option');
+            opt.value = proxyVal;
+            opt.textContent = proxyVal + ' (missing)';
+            proxySelect.appendChild(opt);
+            proxySelect.value = proxyVal;
+        }
         toggleFields();
         const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard';
         showToast(msg, 'success');
@@ -451,7 +474,17 @@ function editProxy(name) {
     document.getElementById('modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.modalEdit') : 'Edit Proxy');
     document.getElementById('edit-name').value = name;
     document.getElementById('f-name').value = p.name;
-    document.getElementById('f-type').value = p.type || '';
+    const typeSelect = document.getElementById('f-type');
+    const typeLower = (p.type || '').toLowerCase();
+    let typeMatched = false;
+    for (const opt of typeSelect.options) {
+        if (opt.value.toLowerCase() === typeLower) {
+            typeSelect.value = opt.value;
+            typeMatched = true;
+            break;
+        }
+    }
+    if (!typeMatched) typeSelect.value = p.type || '';
     document.getElementById('f-server').value = p.server || '';
     document.getElementById('f-port').value = p.port || '';
     document.getElementById('f-sni').value = p.sni || '';

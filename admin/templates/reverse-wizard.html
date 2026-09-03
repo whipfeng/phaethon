@@ -34,10 +34,10 @@
                 </thead>
                 <tbody id="rv-list-body">
                     {{range .ReverseConfigs}}
-                    <tr data-rv-name="{{.Name}}" data-rv-seq="{{.Seq}}" data-listener-proto="{{.ListenerProto | upper}}" data-outbound-proxy="{{.OutboundProxy}}" data-assigned-port="{{.AssignedPort}}" class="{{if not .Enabled}}row-disabled{{end}}">
+                    <tr data-rv-name="{{.Name}}" data-rv-seq="{{.Seq}}" data-listener-proto="{{.ListenerProto | upper}}" data-registry-proxy="{{.RegistryProxy}}" data-assigned-port="{{.AssignedPort}}" class="{{if not .Enabled}}row-disabled{{end}}">
                         <td class="rv-name"><strong>{{.Name}}</strong></td>
                         <td class="rv-seq"><code>{{.Seq}}</code></td>
-                        <td class="rv-registry">{{.OutboundProxy}}</td>
+                        <td class="rv-registry">{{.RegistryProxy}}</td>
                         <td class="rv-listener-proto"><code class="type-badge type-{{.ListenerProto | lower}}">{{.ListenerProto | upper}}</code></td>
                         <td class="rv-port-cell">
                             {{if and .AssignedPort (gt .AssignedPort 0)}}
@@ -259,7 +259,7 @@ function showEditReverse(name) {
 
     document.getElementById('config-name').value = cfg.name || '';
     document.getElementById('enabled').checked = cfg.enabled !== false;
-    document.getElementById('preset-proxy').value = cfg['outbound-proxy'] || '';
+    document.getElementById('preset-proxy').value = cfg['registry-proxy'] || '';
     document.getElementById('listen-proto').value = cfg['listener-proto'] || 'socks5';
     document.getElementById('listen-user').value = cfg['listener-user'] || '';
     document.getElementById('listen-pass').value = cfg['listener-password'] || '';
@@ -286,7 +286,7 @@ async function copyReverse(name) {
         data: {
             name: cfg.name,
             enabled: cfg.enabled !== false,
-            'outbound-proxy': cfg['outbound-proxy'] || '',
+            'registry-proxy': cfg['registry-proxy'] || '',
             'listener-proto': cfg['listener-proto'] || 'socks5',
             'listener-user': cfg['listener-user'] || '',
             'listener-password': cfg['listener-password'] || '',
@@ -315,13 +315,13 @@ async function pasteReverse() {
         document.getElementById('config-name').value = d.name || '';
         document.getElementById('enabled').checked = d.enabled !== false;
         const proxySelect = document.getElementById('preset-proxy');
-        proxySelect.value = d['outbound-proxy'] || '';
-        if (proxySelect.value !== (d['outbound-proxy'] || '') && d['outbound-proxy']) {
+        proxySelect.value = d['registry-proxy'] || '';
+        if (proxySelect.value !== (d['registry-proxy'] || '') && d['registry-proxy']) {
             const opt = document.createElement('option');
-            opt.value = d['outbound-proxy'];
-            opt.textContent = d['outbound-proxy'] + ' (missing)';
+            opt.value = d['registry-proxy'];
+            opt.textContent = d['registry-proxy'] + ' (missing)';
             proxySelect.appendChild(opt);
-            proxySelect.value = d['outbound-proxy'];
+            proxySelect.value = d['registry-proxy'];
         }
         document.getElementById('listen-proto').value = d['listener-proto'] || 'socks5';
         document.getElementById('listen-user').value = d['listener-user'] || '';
@@ -394,7 +394,7 @@ function collectFormState() {
         enabled: document.getElementById('enabled').checked,
         name: name,
         seq: parseInt(document.getElementById('edit-seq').value) || 0,
-        'outbound-proxy': opt.value,
+        'registry-proxy': opt.value,
         'listener-proto': listenerProto,
         'target-address': listenerProto === 'direct' ? document.getElementById('direct-target').value : '',
         'reconnect-interval': parseInt(document.getElementById('reconnect-interval').value) || 10,

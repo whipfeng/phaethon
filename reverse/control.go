@@ -16,7 +16,7 @@ type ControlRequest struct {
 	ListenerSNI      string `json:"listener_sni"`
 	DirectDstHost    string `json:"direct_dst_host"` // direct type: target host
 	DirectDstPort    int    `json:"direct_dst_port"` // direct type: target port
-	OutboundProxy    string `json:"outbound_proxy"`  // reverse-side outbound proxy used to reach the registry
+	RegistryProxy    string `json:"registry_proxy"`  // proxy used to reach the registry
 	// ReverseID is a globally unique identifier generated and persisted by the
 	// reverse client. The registry uses it to maintain stable port allocations.
 	ReverseID string `json:"reverse_id"`

@@ -575,7 +575,7 @@ function updateReverseStatus(data) {
                 listBody.innerHTML = data.map(item => {
                     if (!item || !item.name) return '';
                     const listenerProto = (item.listenerProto || item['listener-proto'] || 'socks5').toUpperCase();
-                    const outboundProxy = item.outboundProxy || item['outbound-proxy'] || '';
+                    const registryProxy = item.registryProxy || item['registry-proxy'] || '';
                     const target = item.targetAddress || item['target-address'] || '';
                     const assignedPort = item.assignedPort || item['assigned-port'] || 0;
                     const lastError = item.lastError || item['last-error'] || '';
@@ -600,10 +600,10 @@ function updateReverseStatus(data) {
                         statusClass = 'badge-success';
                         statusText = i18n.t('rv.statusEnabled') || '已启用';
                     }
-                    return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-seq="${seq}" data-listener-proto="${listenerProto}" data-outbound-proxy="${escapeHtml(outboundProxy)}" data-assigned-port="${assignedPort}" class="${enabled ? '' : 'row-disabled'}">
+                    return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-seq="${seq}" data-listener-proto="${listenerProto}" data-registry-proxy="${escapeHtml(registryProxy)}" data-assigned-port="${assignedPort}" class="${enabled ? '' : 'row-disabled'}">
                         <td class="rv-name"><strong>${escapeHtml(item.name)}</strong></td>
                         <td class="rv-seq"><code>${seq}</code></td>
-                        <td class="rv-registry">${escapeHtml(outboundProxy)}</td>
+                        <td class="rv-registry">${escapeHtml(registryProxy)}</td>
                         <td class="rv-listener-proto"><code class="type-badge type-${listenerProto.toLowerCase()}">${listenerProto}</code></td>
                         <td class="rv-port-cell">
                             ${portDisplay}
@@ -648,7 +648,7 @@ function updateReverseStatus(data) {
                 existing.seq = item.seq || existing.seq || 0;
                 existing['assigned-port'] = item.assignedPort || item['assigned-port'] || existing['assigned-port'] || 0;
                 existing['last-error'] = item.lastError || item['last-error'] || existing['last-error'] || '';
-                existing['outbound-proxy'] = item.outboundProxy || item['outbound-proxy'] || existing['outbound-proxy'] || '';
+                existing['registry-proxy'] = item.registryProxy || item['registry-proxy'] || existing['registry-proxy'] || '';
                 existing['listener-proto'] = item.listenerProto || item['listener-proto'] || existing['listener-proto'] || 'socks5';
                 existing['target-address'] = item.targetAddress || item['target-address'] || existing['target-address'] || '';
             });
@@ -678,7 +678,7 @@ function updateReverseStatus(data) {
     if (endpointEl) {
         if (data.assignedPort) {
             const proto = (data.listenerProto || 'socks5').toUpperCase();
-            const proxyName = data.outboundProxy || data['outbound-proxy'] || '';
+            const proxyName = data.registryProxy || data['registry-proxy'] || '';
             endpointEl.textContent = `${proto}://${proxyName}:${data.assignedPort}`;
         } else if (data.lastError) {
             endpointEl.textContent = i18n.t('rv.registrationFailed');

@@ -23,7 +23,7 @@ type PortBinding struct {
 	Identity       string    `json:"identity"` // fallback: proto|listener|user
 	DirectDstHost  string    `json:"direct_dst_host,omitempty"`
 	DirectDstPort  int       `json:"direct_dst_port,omitempty"`
-	OutboundProxy  string    `json:"outbound_proxy,omitempty"` // reverse-side outbound proxy used to reach the registry
+	RegistryProxy  string    `json:"registry_proxy,omitempty"` // proxy used to reach the registry
 	ControlAddr    string    `json:"control_addr"`             // registry-known source address of the control connection
 	RegistryAddr   string    `json:"registry_addr"`            // registry-side local address the control connection arrived on
 	CreatedAt      time.Time `json:"created_at"`
@@ -76,7 +76,7 @@ func (s *BindingStore) Get(reverseID string, seq int) *PortBinding {
 }
 
 // Set records or updates a binding for a client.
-func (s *BindingStore) Set(reverseID string, seq int, port int, listenerProto, identity, directDstHost string, directDstPort int, outboundProxy string, controlAddr string, registryAddr string) {
+func (s *BindingStore) Set(reverseID string, seq int, port int, listenerProto, identity, directDstHost string, directDstPort int, registryProxy string, controlAddr string, registryAddr string) {
 	s.mu.Lock()
 	key := makeKey(reverseID, seq)
 	now := time.Now()
@@ -86,7 +86,7 @@ func (s *BindingStore) Set(reverseID string, seq int, port int, listenerProto, i
 		b.Identity = identity
 		b.DirectDstHost = directDstHost
 		b.DirectDstPort = directDstPort
-		b.OutboundProxy = outboundProxy
+		b.RegistryProxy = registryProxy
 		b.ControlAddr = controlAddr
 		b.RegistryAddr = registryAddr
 		b.UpdatedAt = now
@@ -100,7 +100,7 @@ func (s *BindingStore) Set(reverseID string, seq int, port int, listenerProto, i
 			Identity:      identity,
 			DirectDstHost: directDstHost,
 			DirectDstPort: directDstPort,
-			OutboundProxy: outboundProxy,
+			RegistryProxy: registryProxy,
 			ControlAddr:   controlAddr,
 			RegistryAddr:  registryAddr,
 			CreatedAt:     now,

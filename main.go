@@ -425,10 +425,7 @@ func getRuleConf() *config.RuleConfiguration {
 	// 4. Ensure every instance has a stable ReverseID (even pure registry instances
 	//    with no reverse configs need one for identification in the admin UI).
 	//    ReverseID is stored in .phaethon/setup/reverse-id file.
-	instanceID := loadOrGenerateInstanceReverseID(ruleConf)
-	if instanceID != "" && ruleConf != nil {
-		ruleConf.ReverseID = instanceID
-	}
+	_ = loadOrGenerateInstanceReverseID(ruleConf)
 
 	// 5. Normalize reverse configs: assign Seq numbers to any config lacking one.
 	normalizeReverseConfigs(ruleConf)
@@ -481,12 +478,9 @@ func getRuleConf() *config.RuleConfiguration {
 }
 
 // loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
-// Priority: ruleConf.ReverseID > .phaethon/setup/reverse-id file > generate new.
+// Priority: .phaethon/setup/reverse-id file > generate new.
 // If a new one is generated, it is saved to the reverse-id file.
 func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration) string {
-	if ruleConf != nil && ruleConf.ReverseID != "" {
-		return ruleConf.ReverseID
-	}
 	// Load from .phaethon/setup/reverse-id file
 	dataDir := filepath.Join(".phaethon", "setup")
 	id, err := reverse.GetReverseID(dataDir)
@@ -748,27 +742,27 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 	for {
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		default:
 		}
 
 		err := runReverseSession(rc, ruleConf, configStop, globalStop)
 		if err != nil {
-			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.OutboundProxy, err, interval)
+			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
 		} else {
-			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.OutboundProxy, err, interval)
+			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
 		}
 
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.OutboundProxy)
+			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-time.After(interval):
 		}
@@ -793,15 +787,15 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		publishReverseEvent(rc)
 	}()
 
-	if rc.OutboundProxy == "" {
-		return fmt.Errorf("reverse client requires outbound-proxy (must connect to registry through proxy chain)")
+	if rc.RegistryProxy == "" {
+		return fmt.Errorf("reverse client requires registry-proxy (must connect to registry through proxy chain)")
 	}
-	outboundProxy := ruleConf.ProxyNames[rc.OutboundProxy]
-	if outboundProxy == nil {
-		return fmt.Errorf("outbound proxy not found: %s", rc.OutboundProxy)
+	registryProxy := ruleConf.ProxyNames[rc.RegistryProxy]
+	if registryProxy == nil {
+		return fmt.Errorf("registry proxy not found: %s", rc.RegistryProxy)
 	}
 
-	cc := dialer.NewControlClient(outboundProxy)
+	cc := dialer.NewControlClient(registryProxy)
 	if err := cc.Connect(); err != nil {
 		return fmt.Errorf("control connect fail: %w", err)
 	}
@@ -825,7 +819,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	// Use the instance-level ReverseID for stable port allocation.
 	// All reverse configs from this instance share the same identity;
 	// the Seq field differentiates them on the registry.
-	clientID := ruleConf.ReverseID
+	clientID := loadOrGenerateInstanceReverseID(ruleConf)
 
 	// For direct listeners configured through the admin wizard, the target may
 	// be stored as a single "target-address" string. Split it into host/port so
@@ -844,7 +838,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		Cmd:              "register",
 		Name:             rc.Name,
 		Seq:              rc.Seq,
-		Proto:            outboundProxy.Type,
+		Proto:            registryProxy.Type,
 		PreferredPort:    rc.PreferredPort,
 		ListenerProto:    rc.ListenerProto,
 		ListenerUser:     rc.ListenerUser,
@@ -852,7 +846,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		ListenerSNI:      rc.ListenerSNI,
 		DirectDstHost:    rc.DirectDstHost,
 		DirectDstPort:    rc.DirectDstPort,
-		OutboundProxy:    rc.OutboundProxy,
+		RegistryProxy:    rc.RegistryProxy,
 		ReverseID:        clientID,
 	}
 	reply, err := cc.Register(req)
@@ -878,9 +872,9 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	}
 
 	// Highlight the actual listening address in the log.
-	host := outboundProxy.Server
+	host := registryProxy.Server
 	if host == "" {
-		host = rc.OutboundProxy
+		host = rc.RegistryProxy
 	}
 	util.Logger.Printf("══════════════════════════════════════════")
 	util.Logger.Printf("  ✓ 反向客户端注册成功 [%s]", rc.Name)
@@ -923,7 +917,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		Name:                  "rev-map-" + dynAddr[:8],
 		Type:                  reverseProto,
 		ReverseAddress:        dynAddr,
-		ReverseProxy:          rc.OutboundProxy,
+		ReverseProxy:          rc.RegistryProxy,
 		ReverseMaxConnections: 3,
 		ReverseRetryInterval:  5000,
 		Username:              req.ListenerUser,

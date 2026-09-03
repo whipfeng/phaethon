@@ -374,7 +374,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 	if identity == "#0" {
 		identity = fmt.Sprintf("%s|%s", listenerProto, dynAddr)
 	}
-	m.bindingStore.Set(bindID, bindSeq, port, listenerProto, identity, req.DirectDstHost, req.DirectDstPort, req.OutboundProxy, controlAddr, registryAddr)
+	m.bindingStore.Set(bindID, bindSeq, port, listenerProto, identity, req.DirectDstHost, req.DirectDstPort, req.RegistryProxy, controlAddr, registryAddr)
 
 	hexID := dynAddr[4:12] // strip "dyn-" prefix, keep 8 hex chars
 	// The dynamic proxy routes external connections back through the reverse

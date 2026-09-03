@@ -1034,12 +1034,9 @@ func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request)
 
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
-	s.mu.RLock()
-	instanceReverseID := ""
-	if s.conf != nil {
-		instanceReverseID = s.conf.ReverseID
-	}
-	s.mu.RUnlock()
+	// Load instance ReverseID from file
+	dataDir := filepath.Join(".phaethon", "setup")
+	instanceReverseID, _ := reverse.GetReverseID(dataDir)
 
 	// Build proxy list with reverse-support flag
 	type proxyInfo struct {
@@ -1224,7 +1221,7 @@ func (s *AdminServer) reverseEventPayload(configs []*config.ReverseConfig) inter
 			"name":          rc.Name,
 			"seq":           rc.Seq,
 			"enabled":       rc.Enabled,
-			"outboundProxy": rc.OutboundProxy,
+			"registryProxy": rc.RegistryProxy,
 			"listenerProto": rc.ListenerProto,
 			"assignedPort":  rc.AssignedPort,
 			"lastError":     rc.LastError,
@@ -1354,7 +1351,6 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		// Reload from disk into s.conf
 		if loaded, err := config.LoadRaw(target); err == nil {
 			_ = loaded.Init()
-			loaded.ReverseID = s.conf.ReverseID
 			s.conf = loaded
 		}
 
@@ -1549,7 +1545,7 @@ func (s *AdminServer) findProxyReferences(name string, c *config.RuleConfigurati
 	}
 
 	for _, rc := range c.ReverseConfigs {
-		if rc != nil && rc.OutboundProxy == name {
+		if rc != nil && rc.RegistryProxy == name {
 			refs = append(refs, proxyReference{Kind: "reverse", Name: rc.Name})
 		}
 	}
@@ -1604,7 +1600,7 @@ func (s *AdminServer) findGroupReferences(name string, c *config.RuleConfigurati
 	}
 
 	for _, rc := range c.ReverseConfigs {
-		if rc != nil && rc.OutboundProxy == name {
+		if rc != nil && rc.RegistryProxy == name {
 			refs = append(refs, proxyReference{Kind: "reverse", Name: rc.Name})
 		}
 	}
@@ -3303,8 +3299,8 @@ func (s *AdminServer) validateReverseConfig(rc *config.ReverseConfig) error {
 	if rc.Name == "" {
 		return fmt.Errorf("config name is required")
 	}
-	if rc.OutboundProxy == "" {
-		return fmt.Errorf("outbound proxy is required")
+	if rc.RegistryProxy == "" {
+		return fmt.Errorf("registry proxy is required")
 	}
 	if rc.ListenerProto == "" {
 		rc.ListenerProto = "socks5"
@@ -3362,11 +3358,9 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
 		}
-		if s.conf.ReverseID == "" {
-			if id, err := reverse.GenerateReverseID(); err == nil {
-				s.conf.ReverseID = id
-			}
-		}
+		// Ensure instance ReverseID exists in file
+		dataDir := filepath.Join(".phaethon", "setup")
+		_, _ = reverse.GetReverseID(dataDir)
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
 
@@ -3944,11 +3938,9 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
 		}
-		if s.conf.ReverseID == "" {
-			if id, err := reverse.GenerateReverseID(); err == nil {
-				s.conf.ReverseID = id
-			}
-		}
+		// Ensure instance ReverseID exists in file
+		dataDir := filepath.Join(".phaethon", "setup")
+		_, _ = reverse.GetReverseID(dataDir)
 		s.conf.ReverseConfigs = req.ReverseConfigs
 		s.mu.Unlock()
 	}

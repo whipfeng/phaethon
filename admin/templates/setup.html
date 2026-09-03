@@ -237,7 +237,7 @@
                     Optionally configure reverse connection to let external users access your local services. You can skip this and configure it later.
                 </p>
                 <div class="form-group">
-                    <label data-i18n="rv.outboundProxy">Outbound Proxy</label>
+                    <label data-i18n="rv.registryProxy">Registry Proxy</label>
                     <select id="setup-proxy">
                         <option value="" data-i18n="rule.select">Select...</option>
                     </select>
@@ -350,7 +350,7 @@
                 ? `<div class="summary-item"><span>${i18n.t('login.username')}</span><span>${setupData.username}</span></div>`
                 : `<div class="summary-item"><span>${i18n.t('setup.authStatus')}</span><span>${i18n.t('setup.authDisabled')}</span></div>`;
             const reverseHtml = setupData.proxy
-                ? `<div class="summary-item"><span>${i18n.t('rv.outboundProxy')}</span><span>${setupData.proxy}</span></div>
+                ? `<div class="summary-item"><span>${i18n.t('rv.registryProxy')}</span><span>${setupData.proxy}</span></div>
                    <div class="summary-item"><span>${i18n.t('rv.listenProto')}</span><span>${setupData.listenProto.toUpperCase()}</span></div>
                    <div class="summary-item"><span>${i18n.t('rv.reconnect')}</span><span>${setupData.reconnect}s</span></div>`
                 : `<div class="summary-item"><span>${i18n.t('setup.reverseStatus')}</span><span>${i18n.t('setup.reverseDisabled')}</span></div>`;
@@ -375,7 +375,7 @@
                 'reverse-configs': setupData.proxy ? [{
                     name: 'reverse-1',
                     enabled: true,
-                    'outbound-proxy': setupData.proxy,
+                    'registry-proxy': setupData.proxy,
                     'listener-proto': setupData.listenProto,
                     'reconnect-interval': setupData.reconnect
                 }] : []

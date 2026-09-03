@@ -3609,18 +3609,20 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			s.conf = &config.RuleConfiguration{}
 		}
 		var oldRc *config.ReverseConfig
+		var updatedRc *config.ReverseConfig
 		for i, existing := range s.conf.ReverseConfigs {
 			if existing != nil && existing.Name == name {
 				oldCopy := *existing
 				oldRc = &oldCopy
 				s.conf.ReverseConfigs[i] = found
+				updatedRc = s.conf.ReverseConfigs[i]
 				break
 			}
 		}
 		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
-			if err := s.OnReverseConfigUpdate(oldRc, found); err != nil {
+			if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
 				util.LogWarn("[ADMIN] reverse config update callback failed: %v", err)
 			}
 		}
@@ -3736,18 +3738,20 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 		s.conf = &config.RuleConfiguration{}
 	}
 	var oldRc *config.ReverseConfig
+	var updatedRc *config.ReverseConfig
 	for _, existing := range s.conf.ReverseConfigs {
 		if existing != nil && existing.Name == name {
 			oldCopy := *existing
 			oldRc = &oldCopy
 			existing.Enabled = req.Enabled
+			updatedRc = existing
 			break
 		}
 	}
 	s.mu.Unlock()
 
 	if s.OnReverseConfigUpdate != nil {
-		if err := s.OnReverseConfigUpdate(oldRc, found); err != nil {
+		if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
 			util.LogWarn("[ADMIN] reverse config toggle callback failed: %v", err)
 		}
 	}

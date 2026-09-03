@@ -844,9 +844,9 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 
 // saveReverseProfile persists the runtime-derived reverse state (assigned port
 // and any last error) to the setup profile. It only updates an existing entry
-// that matches rc.ReverseID; it never creates a new profile entry, so that
-// deleting a config from the admin UI does not get re-added by a stopping
-// reverse-client goroutine.
+// that matches both rc.ReverseID and rc.Seq; it never creates a new profile
+// entry, so that deleting a config from the admin UI does not get re-added by
+// a stopping reverse-client goroutine.
 func saveReverseProfile(rc *config.ReverseConfig) {
 	profile, err := setup.LoadProfile()
 	if err != nil {
@@ -854,7 +854,7 @@ func saveReverseProfile(rc *config.ReverseConfig) {
 	}
 
 	for _, existing := range profile.ReverseConfigs {
-		if existing != nil && existing.ReverseID != "" && existing.ReverseID == rc.ReverseID {
+		if existing != nil && existing.ReverseID == rc.ReverseID && existing.Seq == rc.Seq {
 			// Preserve user-editable fields (enabled, name, addresses, protocols,
 			// credentials, etc.) and only overwrite runtime-derived state.
 			existing.AssignedPort = rc.AssignedPort

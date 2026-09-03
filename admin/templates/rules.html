@@ -40,6 +40,7 @@
                             <button onclick="moveRule({{$idx}}, -1)" class="btn btn-sm btn-outline" {{if eq $idx 0}}disabled{{end}}>↑</button>
                             <button onclick="moveRule({{$idx}}, 1)" class="btn btn-sm btn-outline" {{if eq $idx (sub (len $.Rules) 1)}}disabled{{end}}>↓</button>
                             <button onclick="editRule({{$idx}})" class="btn btn-sm btn-outline">Edit</button>
+                            <button onclick="copyRule({{$idx}})" class="btn btn-sm btn-outline" title="Copy">📋</button>
                             <button onclick="deleteRule({{$idx}})" class="btn btn-sm btn-danger">Delete</button>
                         </td>
                     </tr>
@@ -115,6 +116,7 @@
                 </div>
                 <div class="form-actions">
                     <button type="button" onclick="closeRuleModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="button" onclick="pasteRule()" class="btn btn-outline" data-i18n="proxy.paste">📋 Paste</button>
                     <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
                 </div>
             </form>
@@ -124,6 +126,50 @@
 <script>
 var rules = {{json .Rules}};
 var mappings = {{json .Mappings}};
+
+function copyRule(idx) {
+    const rule = rules[idx];
+    if (rule === undefined) return;
+    navigator.clipboard.writeText(JSON.stringify({version: 1, type: 'rule', data: {raw: rule}}, null, 2)).then(() => {
+        showToast(typeof i18n !== 'undefined' ? i18n.t('rule.copied') : 'Rule copied', 'success');
+    }).catch(err => {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : 'Copy failed') + ': ' + err.message, 'error');
+    });
+}
+
+async function pasteRule() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const parsed = JSON.parse(text);
+        const d = (parsed.version === 1 && parsed.type === 'rule') ? parsed.data : null;
+        let raw;
+        if (d && d.raw) {
+            raw = d.raw;
+        } else if (typeof parsed === 'string') {
+            raw = parsed;
+        } else {
+            throw new Error('Invalid rule format');
+        }
+        const [keyword, value, target, mappingName] = parseRule(raw);
+        document.getElementById('rule-edit-idx').value = '-1';
+        document.getElementById('f-rule-keyword').value = keyword;
+        document.getElementById('f-rule-value').value = value;
+        const targetSel = document.getElementById('f-rule-target');
+        targetSel.value = target;
+        if (targetSel.value !== target && target) {
+            const opt = document.createElement('option');
+            opt.value = target;
+            opt.textContent = target + ' (custom)';
+            targetSel.appendChild(opt);
+            targetSel.value = target;
+        }
+        document.getElementById('f-rule-mapping').value = mappingName || '';
+        toggleRuleFields();
+        showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard', 'success');
+    } catch (err) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Paste failed') + ': ' + err.message, 'error');
+    }
+}
 
 function isRuleEnabled(rule) {
     return !rule.trim().startsWith('//');

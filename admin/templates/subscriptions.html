@@ -37,6 +37,7 @@
                         <td>
                             <button onclick="refreshSub('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="sub.refresh">🔄 Refresh</button>
                             <button onclick="editSub('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="sub.btnEdit">Edit</button>
+                            <button onclick="copySub('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
                             <button onclick="deleteSub('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="sub.btnDelete">Delete</button>
                         </td>
                     </tr>
@@ -73,6 +74,7 @@
             </div>
             <div class="form-actions">
                 <button type="button" onclick="closeSubModal()" class="btn btn-outline" data-i18n="sub.cancel">Cancel</button>
+                <button type="button" onclick="pasteSub()" class="btn btn-outline" data-i18n="sub.paste">📋 Paste</button>
                 <button type="submit" class="btn btn-primary" data-i18n="sub.btnSave">Save</button>
             </div>
         </form>
@@ -80,6 +82,41 @@
 </div>
 
 <script>
+function copySub(name) {
+    const row = document.querySelector(`#sub-table tr[data-name="${CSS.escape(name)}"]`);
+    if (!row) return;
+    const data = {
+        version: 1,
+        type: 'subscription',
+        data: {
+            name: name,
+            url: row.dataset.url || '',
+            interval: parseInt(row.dataset.interval) || 3600
+        }
+    };
+    navigator.clipboard.writeText(JSON.stringify(data, null, 2)).then(() => {
+        showToast(typeof i18n !== 'undefined' ? i18n.t('sub.copied') : 'Subscription copied', 'success');
+    }).catch(err => {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : 'Copy failed') + ': ' + err.message, 'error');
+    });
+}
+
+async function pasteSub() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const parsed = JSON.parse(text);
+        const d = (parsed.version === 1 && parsed.type === 'subscription') ? parsed.data : parsed;
+        if (!d.name || !d.url) throw new Error('Missing required fields');
+        document.getElementById('sub-edit-name').value = '';
+        document.getElementById('sub-name').value = d.name || '';
+        document.getElementById('sub-url').value = d.url || '';
+        document.getElementById('sub-interval').value = d.interval || 3600;
+        showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard', 'success');
+    } catch (err) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Paste failed') + ': ' + err.message, 'error');
+    }
+}
+
 function showAddSub() {
     document.getElementById('sub-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('sub.modalAdd') : 'Add Subscription');
     document.getElementById('sub-edit-name').value = '';

@@ -338,6 +338,11 @@ type AdminServer struct {
 	// The callback handles listener restart precisely - no full reload needed.
 	OnMappingUpdate func(old, newMapping *config.Mapping) error
 
+	// OnReverseConfigUpdate is called when a reverse config is added/updated/deleted.
+	// It receives the old config (nil for new) and new config (nil for delete).
+	// The callback handles starting/stopping reverse client goroutines.
+	OnReverseConfigUpdate func(old, newConfig *config.ReverseConfig) error
+
 	// templates
 	pages *pageTemplates
 
@@ -3514,6 +3519,12 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
 
+		if s.OnReverseConfigUpdate != nil {
+			if err := s.OnReverseConfigUpdate(nil, &rc); err != nil {
+				util.LogWarn("[ADMIN] reverse config start after create failed: %v", err)
+			}
+		}
+
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
 				util.LogWarn("[ADMIN] incremental update after reverse config create failed: %v", err)
@@ -3597,13 +3608,22 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
 		}
+		var oldRc *config.ReverseConfig
 		for i, existing := range s.conf.ReverseConfigs {
 			if existing != nil && existing.Name == name {
+				oldCopy := *existing
+				oldRc = &oldCopy
 				s.conf.ReverseConfigs[i] = found
 				break
 			}
 		}
 		s.mu.Unlock()
+
+		if s.OnReverseConfigUpdate != nil {
+			if err := s.OnReverseConfigUpdate(oldRc, found); err != nil {
+				util.LogWarn("[ADMIN] reverse config update callback failed: %v", err)
+			}
+		}
 
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -3621,11 +3641,13 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		var removedConfig *config.ReverseConfig
 		var filtered []*config.ReverseConfig
 		var removed bool
 		for _, existing := range profile.ReverseConfigs {
 			if existing != nil && existing.Name == name {
 				removed = true
+				removedConfig = existing
 				continue
 			}
 			filtered = append(filtered, existing)
@@ -3652,6 +3674,12 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			s.conf.ReverseConfigs = filteredRuntime
 		}
 		s.mu.Unlock()
+
+		if s.OnReverseConfigUpdate != nil {
+			if err := s.OnReverseConfigUpdate(removedConfig, nil); err != nil {
+				util.LogWarn("[ADMIN] reverse config delete callback failed: %v", err)
+			}
+		}
 
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -3707,13 +3735,22 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 	if s.conf == nil {
 		s.conf = &config.RuleConfiguration{}
 	}
+	var oldRc *config.ReverseConfig
 	for _, existing := range s.conf.ReverseConfigs {
 		if existing != nil && existing.Name == name {
+			oldCopy := *existing
+			oldRc = &oldCopy
 			existing.Enabled = req.Enabled
 			break
 		}
 	}
 	s.mu.Unlock()
+
+	if s.OnReverseConfigUpdate != nil {
+		if err := s.OnReverseConfigUpdate(oldRc, found); err != nil {
+			util.LogWarn("[ADMIN] reverse config toggle callback failed: %v", err)
+		}
+	}
 
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {

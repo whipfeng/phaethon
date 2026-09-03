@@ -381,10 +381,79 @@ dialer 层自动根据调用方法选择路径，注册端无需区分。
 | 控制通道 SOCKS5 建立 | 提取 host/port 后 `ChainDial(proxy, host, port)` | 直接传 `host:port` 给 ChainDial 会导致 DIRECT 代理下拼接成 `host:port:port` |
 | UDP 反向通道 | `ReverseServer` 自动处理 | `StartReverseMapping` 的 handler 已支持 `FrameUDPChannel` → `handleReverseUDPChannel`，无需反向端额外代码 |
 | 动态监听端口范围 | `tcp_port_range` 字段，格式 `"min-max"` | 与现有 `udp-port-range` 保持一致；`preferred_port` 不在范围内时自动回退到范围内分配 |
+| 出站代理与注册中心的关系 | **出站代理就是注册中心** | `proxy.Server:proxy.Port` 即为注册中心地址，`proxy.Type` 即为注册协议。反向端通过出站代理连接到注册端，出站代理的服务器本身就是注册端的 listener |
+| `registry-addr` 字段 | **冗余，应删除** | 注册中心地址 = `outbound-proxy` 的 `Server:Port`，无需单独存储。UI 向导已自动从代理推导，但独立字段会导致手动配置时不一致 |
+| `register-proto` 字段 | **冗余，应删除** | 注册协议 = `outbound-proxy` 的 `Type`（socks5/trojan/h_tunnel）。UI 向导已自动推导（`opt.dataset.type`），独立字段多余 |
+| 控制连接建立方式 | **代理多态，非 switch 分发** | `ControlClient.Connect()` 不应 switch `registerProto`。应在 `Dialer` 接口上新增 `DialControl()` 方法，各代理类型自己实现：SOCKS5 → ChainDial + BIND(PORT=1)；Trojan → nextDialer.Dial(server,port) + TLS + Trojan BIND(cmd=0x02)；HTunnel → Dial(server,1)。调用方只认一个方法 |
+| BIND PORT=1 含义 | 控制连接标识 | SOCKS5/Trojan/HTunnel 的 BIND 命令中 DST.PORT=1 表示控制连接，PORT=0 表示数据连接。注册端根据此值决定走 `handleControlConn()` 还是 `HandleReverseConnection()`。复用原本被忽略的 PORT 字段，零成本 |
 
 ---
 
-## 10. 文件变更清单
+## 10. 出站代理内化设计（待实施）
+
+### 10.1 核心原则
+
+出站代理（`outbound-proxy`）就是注册中心。反向端通过出站代理连接到注册端，出站代理的服务器本身就是注册端的 listener。
+
+```
+反向端 ──通过出站代理──→ 注册端 listener（就是出站代理的 Server:Port）
+```
+
+因此：
+- **注册中心地址** = `proxy.Server:proxy.Port`
+- **注册协议** = `proxy.Type`（必须是支持 BIND 的类型：socks5 / trojan / h_tunnel）
+
+`ReverseConfig` 中的 `registry-addr` 和 `register-proto` 字段冗余，应从配置中删除，改为运行时从出站代理推导。
+
+### 10.2 多态控制连接
+
+当前 `ControlClient.Connect()` 通过 `switch registerProto` 分发到不同协议逻辑。应改为代理多态：
+
+```go
+// Dialer 接口扩展
+type ControlDialer interface {
+    DialControl() (net.Conn, error)
+}
+```
+
+各代理类型实现：
+
+| 代理类型 | DialControl 实现 |
+|---------|-----------------|
+| SOCKS5 | `ChainDial(proxy, server, port)` → SOCKS5 BIND(PORT=1) |
+| Trojan | `nextDialer.Dial(server, port)` → TLS 握手 → Trojan BIND(cmd=0x02, PORT=1) |
+| HTunnel | `Dial(server, 1)` |
+
+`ControlClient.Connect()` 简化为：
+
+```go
+d := NewDialer(c.proxy)
+conn, err := d.(ControlDialer).DialControl()
+```
+
+调用方不再关心协议细节，各代理类型内化自己的控制连接逻辑。
+
+### 10.3 配置简化
+
+**删除前（ReverseConfig）：**
+```yaml
+reverse:
+  - name: nicai3
+    outbound-proxy: SOCKS5_7890    # 出站代理（就是注册中心）
+    registry-addr: 106.13.183.103:39999  # 冗余，= proxy.Server:proxy.Port
+    register-proto: trojan               # 冗余，= proxy.Type
+```
+
+**删除后：**
+```yaml
+reverse:
+  - name: nicai3
+    outbound-proxy: SOCKS5_7890    # 唯一需要的字段，其余自动推导
+```
+
+---
+
+## 11. 文件变更清单
 
 | 文件 | 操作 | 内容 |
 |------|------|------|

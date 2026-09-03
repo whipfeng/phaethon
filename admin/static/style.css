@@ -767,6 +767,22 @@ body {
 .port-name { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
 .port-type { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 
+/* Reverse Connection Cards */
+.reverse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; }
+.reverse-card {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid #f0883e;
+    border-radius: 8px;
+    padding: 1rem;
+    transition: transform 0.15s, border-color 0.15s;
+}
+.reverse-card:hover { transform: translateY(-2px); border-color: var(--accent); border-left-color: #f0883e; }
+.reverse-addr { font-size: 0.95rem; font-weight: 600; font-family: 'SF Mono', monospace; color: #f0883e; word-break: break-all; }
+.reverse-name { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
+.reverse-meta { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.35rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
+.reverse-proxy, .reverse-maxconn { background: var(--bg-secondary); padding: 0.15rem 0.4rem; border-radius: 3px; }
+
 /* Actions Card */
 .action-buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; }
 
@@ -784,6 +800,7 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .form-row { flex-direction: column; gap: 0; }
     .port-grid { grid-template-columns: repeat(3, 1fr); }
+    .reverse-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Animations */

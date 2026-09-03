@@ -51,19 +51,48 @@
         </div>
     </div>
 
-    <!-- Port Summary -->
+    <!-- Listening Ports Summary -->
+    {{$hasPorts := false}}
+    {{range .Mappings}}{{if and (not .ReverseAddress) .IsEnabled}}{{$hasPorts = true}}{{end}}{{end}}
+    {{if $hasPorts}}
     <div class="card">
-        <h3>📡 <span data-i18n="map.portSummary">Port Summary</span></h3>
+        <h3>📡 <span data-i18n="map.portSummary">监听端口</span></h3>
         <div class="port-grid">
             {{range .Mappings}}
+            {{if and (not .ReverseAddress) .IsEnabled}}
             <div class="port-card type-{{.Type | lower}}">
                 <div class="port-number">:{{.Port}}</div>
                 <div class="port-name">{{.Name}}</div>
                 <div class="port-type">{{.Type}}</div>
             </div>
             {{end}}
+            {{end}}
         </div>
     </div>
+    {{end}}
+
+    <!-- Reverse Connections Summary -->
+    {{$hasReverse := false}}
+    {{range .Mappings}}{{if and .ReverseAddress .IsEnabled}}{{$hasReverse = true}}{{end}}{{end}}
+    {{if $hasReverse}}
+    <div class="card">
+        <h3>🔄 <span data-i18n="map.reverseSummary">反向连接</span></h3>
+        <div class="reverse-grid">
+            {{range .Mappings}}
+            {{if and .ReverseAddress .IsEnabled}}
+            <div class="reverse-card">
+                <div class="reverse-addr">{{.ReverseAddress}}</div>
+                <div class="reverse-name">{{.Name}}</div>
+                <div class="reverse-meta">
+                    {{if .ReverseProxy}}<span class="reverse-proxy">via {{.ReverseProxy}}</span>{{end}}
+                    {{if .ReverseMaxConnections}}<span class="reverse-maxconn">max {{.ReverseMaxConnections}}</span>{{end}}
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+        </div>
+    </div>
+    {{end}}
 
     <!-- Add/Edit Modal -->
     <div id="mapping-modal" class="modal hidden">

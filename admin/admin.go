@@ -4142,6 +4142,9 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 
 func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName string, data interface{}) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 
 	// Ensure every page has a non-empty Version for static-file cache busting.
 	if m, ok := data.(map[string]interface{}); ok {

@@ -640,6 +640,7 @@ function updateReverseStatus(data) {
                         </td>
                         <td class="rv-status"><span class="badge ${statusClass}">${statusText}</span></td>
                         <td>
+                            <button class="btn btn-sm btn-outline" onclick="copyReverse('${escapeHtml(item.name)}')" title="${i18n.t('proxy.copy') || '复制'}">📋</button>
                             <button class="btn btn-sm btn-outline" onclick="showEditReverse('${escapeHtml(item.name)}')" data-i18n="rv.editConfig">${i18n.t('rv.editConfig') || '编辑'}</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteReverseConfig('${escapeHtml(item.name)}')" data-i18n="rv.deleteConfig">${i18n.t('rv.deleteConfig') || '删除'}</button>
                         </td>

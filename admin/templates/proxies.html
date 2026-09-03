@@ -43,7 +43,6 @@
                             <button onclick="editProxy('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
                             <button onclick="testProxy('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
                             <button onclick="copyProxy('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
-                            <button onclick="importProxy()" class="btn btn-sm btn-outline" title="Paste">📥</button>
                             <button onclick="deleteProxy('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
                         </td>
                     </tr>
@@ -228,6 +227,7 @@
             </div>
             <div class="form-actions">
                 <button type="button" onclick="closeModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                <button type="button" onclick="pasteProxy()" class="btn btn-outline" data-i18n="proxy.paste">📋 Paste</button>
                 <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
             </div>
         </form>
@@ -374,45 +374,35 @@ function copyProxy(name) {
     });
 }
 
-async function importProxy() {
+async function pasteProxy() {
     try {
         const text = await navigator.clipboard.readText();
         const parsed = JSON.parse(text);
-        if (parsed.version !== 1 || parsed.type !== 'proxy' || !parsed.data) {
-            throw new Error('Invalid format');
-        }
-        const p = parsed.data;
+        const p = (parsed.version === 1 && parsed.type === 'proxy') ? parsed.data : parsed;
         if (!p.name || !p.type) {
             throw new Error('Missing required fields');
         }
-        const payload = {
-            name: p.name,
-            type: p.type,
-            server: p.server || '',
-            port: parseInt(p.port) || 0,
-            sni: p.sni || '',
-            password: p.password || '',
-            username: p.username || '',
-            url: p.url || '',
-            'proxy': p.proxy || '',
-            udp: !!p.udp,
-            'skip-cert-verify': !!p['skip-cert-verify'],
-            flow: p.flow || '',
-            'reverse-address': p['reverse-address'] || '',
-            'private-key': p['private-key'] || '',
-            'private-key-passphrase': p['private-key-passphrase'] || '',
-        };
-        const res = await fetch('./api/proxies', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.imported') : 'Proxy imported successfully';
+        document.getElementById('edit-name').value = p.name || '';
+        document.getElementById('f-name').value = p.name || '';
+        document.getElementById('f-type').value = p.type || '';
+        document.getElementById('f-server').value = p.server || '';
+        document.getElementById('f-port').value = p.port || '';
+        document.getElementById('f-sni').value = p.sni || '';
+        document.getElementById('f-password').value = p.password || '';
+        document.getElementById('f-username').value = p.username || '';
+        document.getElementById('f-url').value = p.url || '';
+        document.getElementById('f-udp').checked = !!p.udp;
+        document.getElementById('f-skip-cert').checked = !!p['skip-cert-verify'];
+        document.getElementById('f-flow').value = p.flow || '';
+        document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
+        document.getElementById('f-private-key').value = p['private-key'] || '';
+        document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
+        populateNextProxySelect(p.proxy || '');
+        toggleFields();
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard';
         showToast(msg, 'success');
-        reloadPage();
     } catch (err) {
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Failed to import';
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Failed to paste';
         showToast(msg + ': ' + err.message, 'error');
     }
 }

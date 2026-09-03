@@ -1319,93 +1319,81 @@ func wireAdminCallbacks(resources *activeResources) {
 				}
 			}
 			resources.ruleConf.Unlock()
-			activeRuleConf.Store(resources.ruleConf)
 			return nil
 		}
-
-		// Only credentials changed (no structural change), update in place
-		if old != nil && old.Port == newMapping.Port && old.Type == newMapping.Type &&
-			old.ReverseAddress == newMapping.ReverseAddress {
+		// Mapping added or updated
+		if newMapping != nil {
+			// Close old listener if exists
+			if old != nil {
+				if ln, ok := resources.mappingListeners[old.Name]; ok {
+					ln.Close()
+					delete(resources.mappingListeners, old.Name)
+				}
+				if rs, ok := resources.mappingReverse[old.Name]; ok {
+					rs.Close()
+					delete(resources.mappingReverse, old.Name)
+				}
+			}
+			// Start new listener
+			if newMapping.IsEnabled() {
+				if newMapping.ReverseAddress != "" {
+					rs, err := startReverseBinding(resources.ruleConf, newMapping)
+					if err != nil {
+						util.Logger.Printf("ERROR: bind reverse fail for %s: %v", newMapping.Name, err)
+					} else {
+						resources.reverseServers = append(resources.reverseServers, rs)
+						resources.mappingReverse[newMapping.Name] = rs
+					}
+				} else {
+					var ln net.Listener
+					var err error
+					switch newMapping.Type {
+					case "socks5":
+						ln, err = server.StartSocks5(resources.ruleConf, newMapping)
+					case "direct", "DIRECT":
+						ln, err = server.StartDirect(resources.ruleConf, newMapping)
+					case "trojan":
+						ln, err = server.StartTrojan(resources.ruleConf, newMapping)
+					case "h_tunnel":
+						ln, err = server.StartHTunnel(resources.ruleConf, newMapping)
+					case "http":
+						ln, err = server.StartHTTP(resources.ruleConf, newMapping)
+					case "https":
+						ln, err = server.StartHTTPS(resources.ruleConf, newMapping)
+					default:
+						err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
+					}
+					if err != nil {
+						util.Logger.Printf("ERROR: bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
+					} else {
+						resources.listeners = append(resources.listeners, ln)
+						resources.mappingListeners[newMapping.Name] = ln
+					}
+				}
+			}
+		}
+		return nil
+	}
+	admin.OnReverseConfigUpdate = func(old, newConfig *config.ReverseConfig) error {
+		// Reverse config deleted
+		if newConfig == nil && old != nil {
+			// Stop the reverse client goroutine by sending to stop channel
 			resources.ruleConf.Lock()
-			for i, m := range resources.ruleConf.Mappings {
-				if m.Name == newMapping.Name {
-					resources.ruleConf.Mappings[i] = newMapping
+			for i, rc := range resources.ruleConf.ReverseConfigs {
+				if rc.Name == old.Name {
+					resources.ruleConf.ReverseConfigs = append(resources.ruleConf.ReverseConfigs[:i], resources.ruleConf.ReverseConfigs[i+1:]...)
 					break
 				}
 			}
 			resources.ruleConf.Unlock()
-			activeRuleConf.Store(resources.ruleConf)
+			// Note: The goroutine will stop on next reconnect check via stop channel
 			return nil
 		}
-
-		// Structural change or new mapping: need to restart listener
-		// Close old listener if exists
-		if old != nil {
-			if ln, ok := resources.mappingListeners[old.Name]; ok {
-				ln.Close()
-				delete(resources.mappingListeners, old.Name)
-			}
-			if rs, ok := resources.mappingReverse[old.Name]; ok {
-				rs.Close()
-				delete(resources.mappingReverse, old.Name)
-			}
+		// Reverse config added or updated
+		if newConfig != nil && newConfig.Enabled {
+			// Start the reverse client goroutine
+			go startReverseClient(newConfig, resources.ruleConf, resources.reverseClientStop)
 		}
-
-		// Update ruleConf with new mapping
-		resources.ruleConf.Lock()
-		found := false
-		for i, m := range resources.ruleConf.Mappings {
-			if m.Name == newMapping.Name {
-				resources.ruleConf.Mappings[i] = newMapping
-				found = true
-				break
-			}
-		}
-		if !found && old == nil {
-			// New mapping
-			resources.ruleConf.Mappings = append(resources.ruleConf.Mappings, newMapping)
-		}
-		resources.ruleConf.Unlock()
-
-		// Start new listener if mapping is enabled
-		if newMapping.IsEnabled() {
-			if newMapping.ReverseAddress != "" {
-				rs, err := startReverseBinding(resources.ruleConf, newMapping)
-				if err != nil {
-					util.Logger.Printf("ERROR: bind reverse fail for %s: %v", newMapping.Name, err)
-				} else {
-					resources.reverseServers = append(resources.reverseServers, rs)
-					resources.mappingReverse[newMapping.Name] = rs
-				}
-			} else {
-				var ln net.Listener
-				var err error
-				switch newMapping.Type {
-				case "socks5":
-					ln, err = server.StartSocks5(resources.ruleConf, newMapping)
-				case "direct", "DIRECT":
-					ln, err = server.StartDirect(resources.ruleConf, newMapping)
-				case "trojan":
-					ln, err = server.StartTrojan(resources.ruleConf, newMapping)
-				case "h_tunnel":
-					ln, err = server.StartHTunnel(resources.ruleConf, newMapping)
-				case "http":
-					ln, err = server.StartHTTP(resources.ruleConf, newMapping)
-				case "https":
-					ln, err = server.StartHTTPS(resources.ruleConf, newMapping)
-				default:
-					err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
-				}
-				if err != nil {
-					util.Logger.Printf("ERROR: bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
-				} else {
-					resources.listeners = append(resources.listeners, ln)
-					resources.mappingListeners[newMapping.Name] = ln
-				}
-			}
-		}
-
-		activeRuleConf.Store(resources.ruleConf)
 		return nil
 	}
 }

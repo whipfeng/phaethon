@@ -199,7 +199,9 @@ func (d *SSHDialer) keepAlive(client *ssh.Client) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		_, _, err := client.SendRequest("keepalive@phaethon", true, nil)
+		// Use the standard keepalive request type recognized by OpenSSH.
+		// wantReply=false avoids errors from servers that don't support this request.
+		_, _, err := client.SendRequest("keepalive@golang.org", false, nil)
 		if err != nil {
 			util.LogDebug("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
 			d.removeSSHClient()

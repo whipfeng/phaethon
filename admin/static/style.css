@@ -708,7 +708,12 @@ body {
     padding: 0.85rem;
     border: 1px solid var(--border-color);
     transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
+.group-card:hover { background: var(--bg-hover); }
 .group-card.selected {
     border-color: var(--accent);
     background: rgba(88,166,255,0.05);
@@ -717,8 +722,14 @@ body {
 .group-card .type-badge { margin-left: 0.5rem; }
 .expand-chevron { font-size: 0.7rem; color: var(--text-muted); transition: transform 0.2s; display: inline-block; }
 .group-card.selected .expand-chevron { transform: rotate(90deg); color: var(--accent); }
-.group-card .group-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
-.group-card .group-actions { display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.group-card .group-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+    margin-top: auto;
+    padding-top: 0.5rem;
+}
 .group-card .group-summary { font-size: 0.8rem; margin: 0.35rem 0 0; }
 .group-preview-tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.5rem; }
 .group-preview-tags .tag { background: var(--bg-secondary); padding: 0.2rem 0.55rem; border-radius: 4px; font-size: 0.78rem; color: var(--text-secondary); }
@@ -1432,9 +1443,10 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 
 /* ========== Disabled rows ========== */
 .data-table tbody tr.row-disabled td,
-.group-card.row-disabled .group-header,
+.group-card.row-disabled h4,
 .group-card.row-disabled .text-muted,
-.group-card.row-disabled .group-preview-tags {
+.group-card.row-disabled .group-preview-tags,
+.group-card.row-disabled .group-actions {
     opacity: 0.5;
 }
 .data-table tbody tr.row-disabled {

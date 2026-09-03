@@ -64,20 +64,8 @@
         <div class="groups-grid">
         {{range .Groups}}
         {{$stats := index $.GroupStats .Name}}
-        <div class="group-card {{if not (.Enabled | enabled)}}row-disabled{{end}}" data-group="{{.Name}}">
-            <div class="group-header" onclick="toggleGroupExpand('{{.Name}}')" style="cursor:pointer;">
-                <h4><span class="expand-chevron">▶</span> {{.Name}} <span class="type-badge">{{.Type}}</span></h4>
-                <div class="group-actions" onclick="event.stopPropagation()">
-                    <button onclick="testGroup('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
-                    <label class="switch" style="margin-right:0.25rem;" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
-                        <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleGroup('{{.Name}}', this.checked)">
-                        <span class="slider"></span>
-                    </label>
-                    <button onclick="editGroup('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
-                    <button onclick="copyGroup('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
-                    <button onclick="deleteGroup('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
-                </div>
-            </div>
+        <div class="group-card {{if not (.Enabled | enabled)}}row-disabled{{end}}" data-group="{{.Name}}" onclick="toggleGroupExpand('{{.Name}}')">
+            <h4><span class="expand-chevron">▶</span> {{.Name}} <span class="type-badge">{{.Type}}</span></h4>
             <p class="text-muted group-summary">
                 <span data-i18n="proxy.totalMembers">Total</span>: {{$stats.total}}
                 {{if $stats.active}} · <span data-i18n="proxy.activeMember">Active</span>: {{$stats.active}}{{end}}
@@ -87,6 +75,16 @@
                 {{range $i, $m := .GetMembers}}
                 {{if lt $i 5}}<span class="tag">{{$m.Name}}</span>{{end}}
                 {{end}}
+            </div>
+            <div class="group-actions" onclick="event.stopPropagation()">
+                <button onclick="testGroup('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
+                <label class="switch" style="margin-right:0.25rem;" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                    <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleGroup('{{.Name}}', this.checked)">
+                    <span class="slider"></span>
+                </label>
+                <button onclick="editGroup('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                <button onclick="copyGroup('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteGroup('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
             </div>
         </div>
         {{end}}

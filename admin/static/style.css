@@ -506,6 +506,29 @@ body {
 }
 .form-row { display: flex; gap: 1rem; }
 .form-row .form-group { flex: 1; }
+.input-with-toggle {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.input-with-toggle input {
+    flex: 1;
+    padding-right: 2.5rem;
+}
+.toggle-visibility-btn {
+    position: absolute;
+    right: 0.5rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem;
+    font-size: 1rem;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+.toggle-visibility-btn:hover {
+    opacity: 1;
+}
 .segmented-control { display: flex; flex-wrap: wrap; gap: 0.25rem; padding: 0.25rem; background: var(--bg-tertiary); border-radius: 0.5rem; border: 1px solid var(--border-color); }
 .segmented-control .mode-btn { flex: 1 1 auto; min-width: 70px; padding: 0.5rem 0.75rem; border: none; background: transparent; color: var(--text-secondary); border-radius: 0.35rem; cursor: pointer; font-size: 0.9rem; }
 .segmented-control .mode-btn:hover { color: var(--text-primary); }

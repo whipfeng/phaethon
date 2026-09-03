@@ -42,6 +42,8 @@
                         <td>
                             <button onclick="editProxy('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
                             <button onclick="testProxy('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
+                            <button onclick="copyProxy('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                            <button onclick="importProxy()" class="btn btn-sm btn-outline" title="Paste">📥</button>
                             <button onclick="deleteProxy('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
                         </td>
                     </tr>
@@ -166,7 +168,12 @@
             <div id="row-password" class="form-row">
                 <div class="form-group">
                     <label id="lbl-password" data-i18n="proxy.password">Password / UUID</label>
-                    <input type="password" id="f-password" placeholder="••••••••">
+                    <div class="input-with-toggle">
+                        <input type="password" id="f-password" placeholder="••••••••">
+                        <button type="button" class="toggle-visibility-btn" onclick="toggleFieldVisibility('f-password', this)" title="Show/Hide">
+                            <span class="eye-icon">👁</span>
+                        </button>
+                    </div>
                 </div>
                 <div class="form-group" id="col-username">
                     <label data-i18n="proxy.username">Username</label>
@@ -202,7 +209,12 @@
                 </div>
                 <div class="form-group">
                     <label data-i18n="proxy.privateKeyPassphrase">Key Passphrase</label>
-                    <input type="password" id="f-private-key-passphrase" placeholder="(optional)">
+                    <div class="input-with-toggle">
+                        <input type="password" id="f-private-key-passphrase" placeholder="(optional)">
+                        <button type="button" class="toggle-visibility-btn" onclick="toggleFieldVisibility('f-private-key-passphrase', this)" title="Show/Hide">
+                            <span class="eye-icon">👁</span>
+                        </button>
+                    </div>
                 </div>
             </div>
             <!-- Options -->
@@ -333,6 +345,78 @@ var manualHealthData = {}; // current group's health snapshot: name -> ProxyHeal
 var currentManualGroupName = '';
 var manualTesting = false;
 
+function toggleFieldVisibility(fieldId, btn) {
+    const input = document.getElementById(fieldId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.classList.add('active');
+    } else {
+        input.type = 'password';
+        btn.classList.remove('active');
+    }
+}
+
+function copyProxy(name) {
+    const p = proxies.find(x => x.name === name);
+    if (!p) return;
+    const exportData = {
+        version: 1,
+        type: 'proxy',
+        data: p
+    };
+    const json = JSON.stringify(exportData, null, 2);
+    navigator.clipboard.writeText(json).then(() => {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.copied') : 'Proxy copied to clipboard';
+        showToast(msg, 'success');
+    }).catch(err => {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : 'Failed to copy';
+        showToast(msg + ': ' + err.message, 'error');
+    });
+}
+
+async function importProxy() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const parsed = JSON.parse(text);
+        if (parsed.version !== 1 || parsed.type !== 'proxy' || !parsed.data) {
+            throw new Error('Invalid format');
+        }
+        const p = parsed.data;
+        if (!p.name || !p.type) {
+            throw new Error('Missing required fields');
+        }
+        const payload = {
+            name: p.name,
+            type: p.type,
+            server: p.server || '',
+            port: parseInt(p.port) || 0,
+            sni: p.sni || '',
+            password: p.password || '',
+            username: p.username || '',
+            url: p.url || '',
+            'proxy': p.proxy || '',
+            udp: !!p.udp,
+            'skip-cert-verify': !!p['skip-cert-verify'],
+            flow: p.flow || '',
+            'reverse-address': p['reverse-address'] || '',
+            'private-key': p['private-key'] || '',
+            'private-key-passphrase': p['private-key-passphrase'] || '',
+        };
+        const res = await fetch('./api/proxies', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.imported') : 'Proxy imported successfully';
+        showToast(msg, 'success');
+        reloadPage();
+    } catch (err) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Failed to import';
+        showToast(msg + ': ' + err.message, 'error');
+    }
+}
+
 function populateNextProxySelect(selected) {
     const sel = document.getElementById('f-proxy');
     sel.innerHTML = '';
@@ -377,7 +461,7 @@ function editProxy(name) {
     document.getElementById('modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.modalEdit') : 'Edit Proxy');
     document.getElementById('edit-name').value = name;
     document.getElementById('f-name').value = p.name;
-    document.getElementById('f-type').value = (p.type || '').toUpperCase();
+    document.getElementById('f-type').value = p.type || '';
     document.getElementById('f-server').value = p.server || '';
     document.getElementById('f-port').value = p.port || '';
     document.getElementById('f-sni').value = p.sni || '';
@@ -485,6 +569,11 @@ async function saveProxy(e) {
     }
 
     try {
+        const editName = document.getElementById('edit-name').value;
+        if (editName && editName !== payload.name) {
+            const delRes = await fetch(`./api/proxies/${encodeURIComponent(editName)}`, {method: 'DELETE'});
+            if (!delRes.ok && delRes.status !== 404) throw new Error('Failed to delete old proxy: ' + await delRes.text());
+        }
         const res = await fetch('./api/proxies', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},

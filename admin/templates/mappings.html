@@ -41,6 +41,7 @@
                         </td>
                         <td>
                             <button onclick="editMapping('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                            <button onclick="copyMapping('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
                             <button onclick="deleteMapping('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
                         </td>
                     </tr>
@@ -156,6 +157,7 @@
                 </details>
                 <div class="form-actions">
                     <button type="button" onclick="closeMapModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="button" onclick="pasteMapping()" class="btn btn-outline" data-i18n="proxy.paste">📋 Paste</button>
                     <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
                 </div>
             </form>
@@ -164,6 +166,43 @@
 </div>
 <script>
 var mappings = {{json .Mappings}};
+
+function copyMapping(name) {
+    const m = mappings.find(x => x.name === name);
+    if (!m) return;
+    navigator.clipboard.writeText(JSON.stringify({version: 1, type: 'mapping', data: m}, null, 2)).then(() => {
+        showToast(typeof i18n !== 'undefined' ? i18n.t('map.copied') : 'Mapping copied', 'success');
+    }).catch(err => {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : 'Copy failed') + ': ' + err.message, 'error');
+    });
+}
+
+async function pasteMapping() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const parsed = JSON.parse(text);
+        const m = (parsed.version === 1 && parsed.type === 'mapping') ? parsed.data : parsed;
+        if (!m.name || !m.type) throw new Error('Missing required fields');
+        document.getElementById('map-edit-name').value = '';
+        document.getElementById('m-name').value = m.name || '';
+        document.getElementById('m-type').value = m.type || '';
+        document.getElementById('m-port').value = m.port || '';
+        document.getElementById('m-sni').value = m.sni || '';
+        document.getElementById('m-bind').value = m.bind || '';
+        document.getElementById('m-password').value = m.password || '';
+        document.getElementById('m-username').value = m.username || '';
+        document.getElementById('m-reverse-addr').value = m['reverse-address'] || '';
+        document.getElementById('m-reverse-proxy').value = m['reverse-proxy'] || '';
+        document.getElementById('m-reverse-max-conn').value = m['reverse-max-connections'] || '';
+        document.getElementById('m-reverse-retry').value = m['reverse-retry-interval'] || '';
+        document.getElementById('m-dst-host').value = m['dst-host'] || '';
+        document.getElementById('m-dst-port').value = m['dst-port'] || '';
+        toggleMappingFields();
+        showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard', 'success');
+    } catch (err) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Paste failed') + ': ' + err.message, 'error');
+    }
+}
 
 function setMapVisible(id, show) {
     const el = document.getElementById(id);

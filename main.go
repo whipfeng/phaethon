@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"phaethon/admin"
-	"phaethon/cmd/setup"
 	"phaethon/config"
 	"phaethon/dialer"
 	"phaethon/reverse"
@@ -423,29 +422,16 @@ func getRuleConf() *config.RuleConfiguration {
 		return nil
 	}
 
-	// 4. Load setup profile (reverse config from web/cli wizard) and merge into runtime config.
-	// Profile is stored separately from config.yaml to keep the main config clean.
-	// config.yaml values take precedence; the profile only provides the whole list
-	// when config.yaml has no reverse configs.
-	profile, _ := setup.LoadProfile()
-	if profile != nil {
-		if len(ruleConf.ReverseConfigs) == 0 && len(profile.ReverseConfigs) > 0 {
-			ruleConf.ReverseConfigs = profile.ReverseConfigs
-			util.Logger.Printf("[PROFILE] loaded %d reverse config(s) from profile", len(profile.ReverseConfigs))
-		} else if len(ruleConf.ReverseConfigs) > 0 && len(profile.ReverseConfigs) > 0 {
-			util.Logger.Printf("[PROFILE] config.yaml has reverse configs, ignoring profile (config.yaml takes precedence)")
-		}
-	}
-
-	// 5. Ensure every instance has a stable ReverseID (even pure registry instances
+	// 4. Ensure every instance has a stable ReverseID (even pure registry instances
 	//    with no reverse configs need one for identification in the admin UI).
-	instanceID := loadOrGenerateInstanceReverseID(ruleConf, profile)
+	//    ReverseID is stored in .phaethon/setup/reverse-id file.
+	instanceID := loadOrGenerateInstanceReverseID(ruleConf)
 	if instanceID != "" && ruleConf != nil {
 		ruleConf.ReverseID = instanceID
 	}
 
-	// 6. Normalize reverse configs: assign Seq numbers to any config lacking one.
-	normalizeReverseConfigs(ruleConf, profile)
+	// 5. Normalize reverse configs: assign Seq numbers to any config lacking one.
+	normalizeReverseConfigs(ruleConf)
 
 	// 7. Load subscription node pools from the on-disk cache so groups have nodes
 	// immediately without blocking startup on network I/O. Missing or stale caches
@@ -495,25 +481,18 @@ func getRuleConf() *config.RuleConfiguration {
 }
 
 // loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
-// Priority: ruleConf.ReverseID > profile.ReverseID > generate new.
-// If a new one is generated, it is saved to the profile.
-func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration, profile *config.RuleConfiguration) string {
+// Priority: ruleConf.ReverseID > .phaethon/setup/reverse-id file > generate new.
+// If a new one is generated, it is saved to the reverse-id file.
+func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration) string {
 	if ruleConf != nil && ruleConf.ReverseID != "" {
 		return ruleConf.ReverseID
 	}
-	if profile != nil && profile.ReverseID != "" {
-		return profile.ReverseID
-	}
-	id, err := reverse.GenerateReverseID()
+	// Load from .phaethon/setup/reverse-id file
+	dataDir := filepath.Join(".phaethon", "setup")
+	id, err := reverse.GetReverseID(dataDir)
 	if err != nil {
-		util.Logger.Printf("[REVERSE] generate instance reverse-id fail: %v", err)
+		util.Logger.Printf("[REVERSE] load/generate instance reverse-id fail: %v", err)
 		return ""
-	}
-	if profile != nil {
-		profile.ReverseID = id
-		if err := setup.SaveProfile(profile); err != nil {
-			util.Logger.Printf("[REVERSE] save profile with reverse-id fail: %v", err)
-		}
 	}
 	return id
 }
@@ -542,65 +521,27 @@ func assignSeqToReverseConfigs(configs []*config.ReverseConfig, start int) {
 }
 
 // normalizeReverseConfigs sets every rc.ReverseID to the instance ReverseID,
-// assigns Seq to any rc that lacks one, and persists the profile if changed.
-func normalizeReverseConfigs(ruleConf *config.RuleConfiguration, profile *config.RuleConfiguration) {
+// assigns Seq to any rc that lacks one.
+func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
 	if ruleConf == nil {
 		return
-	}
-	// Collect all configs from both ruleConf and profile to avoid Seq collisions.
-	profileLen := 0
-	if profile != nil {
-		profileLen = len(profile.ReverseConfigs)
-	}
-	allConfigs := make([]*config.ReverseConfig, 0, len(ruleConf.ReverseConfigs)+profileLen)
-	for _, rc := range ruleConf.ReverseConfigs {
-		if rc != nil {
-			allConfigs = append(allConfigs, rc)
-		}
-	}
-	if profile != nil {
-		for _, rc := range profile.ReverseConfigs {
-			if rc != nil {
-				allConfigs = append(allConfigs, rc)
-			}
-		}
 	}
 
 	// Find max existing Seq to start from.
 	maxSeq := 0
-	for _, rc := range allConfigs {
-		if rc.Seq > maxSeq {
+	for _, rc := range ruleConf.ReverseConfigs {
+		if rc != nil && rc.Seq > maxSeq {
 			maxSeq = rc.Seq
 		}
 	}
 
-	// Assign Seq to ruleConf configs.
+	// Assign Seq to configs that lack one.
 	assignSeqToReverseConfigs(ruleConf.ReverseConfigs, maxSeq)
 
 	// Sync ReverseID to all configs.
-	changed := false
 	for _, rc := range ruleConf.ReverseConfigs {
 		if rc != nil && rc.ReverseID != ruleConf.ReverseID {
 			rc.ReverseID = ruleConf.ReverseID
-			changed = true
-		}
-	}
-	if profile != nil {
-		for _, rc := range profile.ReverseConfigs {
-			if rc != nil && rc.ReverseID != ruleConf.ReverseID {
-				rc.ReverseID = ruleConf.ReverseID
-				changed = true
-			}
-		}
-		if profile.ReverseID != ruleConf.ReverseID {
-			profile.ReverseID = ruleConf.ReverseID
-			changed = true
-		}
-	}
-
-	if changed && profile != nil {
-		if err := setup.SaveProfile(profile); err != nil {
-			util.Logger.Printf("[REVERSE] save profile after normalize fail: %v", err)
 		}
 	}
 }
@@ -842,31 +783,6 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 	}
 }
 
-// saveReverseProfile persists the runtime-derived reverse state (assigned port
-// and any last error) to the setup profile. It only updates an existing entry
-// that matches both rc.ReverseID and rc.Seq; it never creates a new profile
-// entry, so that deleting a config from the admin UI does not get re-added by
-// a stopping reverse-client goroutine.
-func saveReverseProfile(rc *config.ReverseConfig) {
-	profile, err := setup.LoadProfile()
-	if err != nil {
-		return
-	}
-
-	for _, existing := range profile.ReverseConfigs {
-		if existing != nil && existing.ReverseID == rc.ReverseID && existing.Seq == rc.Seq {
-			// Preserve user-editable fields (enabled, name, addresses, protocols,
-			// credentials, etc.) and only overwrite runtime-derived state.
-			existing.AssignedPort = rc.AssignedPort
-			existing.LastError = rc.LastError
-			if err := setup.SaveProfile(profile); err != nil {
-				util.Logger.Printf("[REVERSE-CLIENT] warn: save reverse profile fail: %v", err)
-			}
-			return
-		}
-	}
-}
-
 // publishReverseEvent bumps the reverse topic version so the admin UI knows to
 // fetch the latest reverse-connection list via REST.
 func publishReverseEvent(rc *config.ReverseConfig) {
@@ -874,15 +790,14 @@ func publishReverseEvent(rc *config.ReverseConfig) {
 }
 
 func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) (err error) {
-	// Persist state (assigned port or last error) to the profile whenever this
-	// session function returns, so the admin UI can show real status/errors.
+	// Update runtime state (last error) and notify admin UI whenever this
+	// session function returns.
 	defer func() {
 		if err != nil {
 			rc.LastError = err.Error()
 		} else {
 			rc.LastError = ""
 		}
-		saveReverseProfile(rc)
 		publishReverseEvent(rc)
 	}()
 
@@ -925,8 +840,6 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 			clientID = ""
 		}
 		rc.ReverseID = clientID
-		// Persist immediately so restarts keep the same registry binding.
-		saveReverseProfile(rc)
 	}
 	clientID := rc.ReverseID
 
@@ -969,11 +882,10 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	dynAddr := reply.Address
 	actualPort := reply.Port
 
-	// Persist the actual port allocated by the registry so the admin UI can
-	// display the real listening endpoint.
+	// Store the actual port allocated by the registry in runtime state
+	// so the admin UI can display the real listening endpoint.
 	rc.AssignedPort = actualPort
 	rc.LastError = ""
-	saveReverseProfile(rc)
 	publishReverseEvent(rc)
 
 	listenerProto := req.ListenerProto

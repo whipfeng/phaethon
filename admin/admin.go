@@ -28,7 +28,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"phaethon/cmd/setup"
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/reverse"
@@ -3342,20 +3341,13 @@ func (s *AdminServer) apiHealth(w http.ResponseWriter, r *http.Request) {
 
 // reverseConfigHelpers (used by apiReverse and apiReverseItem)
 
-// currentReverseConfigs returns the active reverse config list, preferring the
-// runtime config and falling back to the setup profile.
+// currentReverseConfigs returns the active reverse config list from the runtime config.
 func (s *AdminServer) currentReverseConfigs() []*config.ReverseConfig {
 	s.mu.RLock()
 	conf := s.conf
 	s.mu.RUnlock()
 	if conf != nil && len(conf.ReverseConfigs) > 0 {
 		return conf.ReverseConfigs
-	}
-	if profile, err := setup.LoadProfile(); err == nil && profile != nil {
-		if profile.ReverseConfigs == nil {
-			return []*config.ReverseConfig{}
-		}
-		return profile.ReverseConfigs
 	}
 	return []*config.ReverseConfig{}
 }
@@ -3502,22 +3494,17 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		rc.Name = uniqueReverseName(rc.Name, configs)
 		assignReverseID(&rc, configs, "")
 
-		profile, _ := setup.LoadProfile()
-		if profile == nil {
-			profile = &config.RuleConfiguration{}
-		}
-		profile.ReverseConfigs = append(profile.ReverseConfigs, &rc)
-		if err := setup.SaveProfile(profile); err != nil {
-			httpError(w, "save profile fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
 		s.mu.Lock()
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
 		}
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
+
+		if err := s.saveConfig(); err != nil {
+			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(nil, &rc); err != nil {
@@ -3574,52 +3561,40 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		profile, _ := setup.LoadProfile()
-		if profile == nil {
-			profile = &config.RuleConfiguration{}
-		}
-
-		var found *config.ReverseConfig
-		for _, existing := range profile.ReverseConfigs {
-			if existing != nil && existing.Name == name {
-				found = existing
-				break
-			}
-		}
-		if found == nil {
-			httpError(w, "reverse config not found", http.StatusNotFound)
-			return
-		}
-
-		// Preserve the existing ReverseID unless the request explicitly changed it.
-		// This keeps the registry binding stable across edits.
-		if rc.ReverseID == "" {
-			rc.ReverseID = found.ReverseID
-		}
-		assignReverseID(&rc, profile.ReverseConfigs, name)
-
-		*found = rc
-		if err := setup.SaveProfile(profile); err != nil {
-			httpError(w, "save profile fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
 		s.mu.Lock()
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}
 		}
 		var oldRc *config.ReverseConfig
 		var updatedRc *config.ReverseConfig
+		var found bool
 		for i, existing := range s.conf.ReverseConfigs {
 			if existing != nil && existing.Name == name {
 				oldCopy := *existing
 				oldRc = &oldCopy
-				s.conf.ReverseConfigs[i] = found
+				// Preserve the existing ReverseID unless the request explicitly changed it.
+				// This keeps the registry binding stable across edits.
+				if rc.ReverseID == "" {
+					rc.ReverseID = existing.ReverseID
+				}
+				assignReverseID(&rc, s.conf.ReverseConfigs, name)
+				s.conf.ReverseConfigs[i] = &rc
 				updatedRc = s.conf.ReverseConfigs[i]
+				found = true
 				break
 			}
 		}
 		s.mu.Unlock()
+
+		if !found {
+			httpError(w, "reverse config not found", http.StatusNotFound)
+			return
+		}
+
+		if err := s.saveConfig(); err != nil {
+			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
@@ -3637,45 +3612,34 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, found)
 
 	case http.MethodDelete:
-		profile, _ := setup.LoadProfile()
-		if profile == nil {
-			httpError(w, "reverse config not found", http.StatusNotFound)
-			return
-		}
-
+		s.mu.Lock()
 		var removedConfig *config.ReverseConfig
 		var filtered []*config.ReverseConfig
 		var removed bool
-		for _, existing := range profile.ReverseConfigs {
-			if existing != nil && existing.Name == name {
-				removed = true
-				removedConfig = existing
-				continue
+		if s.conf != nil {
+			for _, existing := range s.conf.ReverseConfigs {
+				if existing != nil && existing.Name == name {
+					removed = true
+					removedConfig = existing
+					continue
+				}
+				filtered = append(filtered, existing)
 			}
-			filtered = append(filtered, existing)
+			if removed {
+				s.conf.ReverseConfigs = filtered
+			}
 		}
+		s.mu.Unlock()
+
 		if !removed {
 			httpError(w, "reverse config not found", http.StatusNotFound)
 			return
 		}
-		profile.ReverseConfigs = filtered
-		if err := setup.SaveProfile(profile); err != nil {
-			httpError(w, "save profile fail: "+err.Error(), http.StatusInternalServerError)
+
+		if err := s.saveConfig(); err != nil {
+			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		s.mu.Lock()
-		if s.conf != nil {
-			var filteredRuntime []*config.ReverseConfig
-			for _, existing := range s.conf.ReverseConfigs {
-				if existing != nil && existing.Name == name {
-					continue
-				}
-				filteredRuntime = append(filteredRuntime, existing)
-			}
-			s.conf.ReverseConfigs = filteredRuntime
-		}
-		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(removedConfig, nil); err != nil {
@@ -3710,45 +3674,34 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 		return
 	}
 
-	profile, _ := setup.LoadProfile()
-	if profile == nil {
-		profile = &config.RuleConfiguration{}
-	}
-
-	var found *config.ReverseConfig
-	for _, existing := range profile.ReverseConfigs {
-		if existing != nil && existing.Name == name {
-			found = existing
-			break
-		}
-	}
-	if found == nil {
-		httpError(w, "reverse config not found", http.StatusNotFound)
-		return
-	}
-
-	found.Enabled = req.Enabled
-	if err := setup.SaveProfile(profile); err != nil {
-		httpError(w, "save profile fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	s.mu.Lock()
 	if s.conf == nil {
 		s.conf = &config.RuleConfiguration{}
 	}
 	var oldRc *config.ReverseConfig
 	var updatedRc *config.ReverseConfig
+	var found bool
 	for _, existing := range s.conf.ReverseConfigs {
 		if existing != nil && existing.Name == name {
 			oldCopy := *existing
 			oldRc = &oldCopy
 			existing.Enabled = req.Enabled
 			updatedRc = existing
+			found = true
 			break
 		}
 	}
 	s.mu.Unlock()
+
+	if !found {
+		httpError(w, "reverse config not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.saveConfig(); err != nil {
+		httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	if s.OnReverseConfigUpdate != nil {
 		if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
@@ -4114,7 +4067,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	// Save reverse configs to profile and runtime (setup wizard always replaces the list)
+	// Save reverse configs to runtime config (setup wizard always replaces the list)
 	if len(req.ReverseConfigs) > 0 {
 		existing := s.currentReverseConfigs()
 		newNames := make(map[string]bool)
@@ -4140,11 +4093,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			assignReverseID(rc, append(existing, req.ReverseConfigs...), rc.Name)
 		}
 
-		profile := &config.RuleConfiguration{ReverseConfigs: req.ReverseConfigs}
-		if err := setup.SaveProfile(profile); err != nil {
-			httpError(w, "save profile fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
 		// Update runtime
 		s.mu.Lock()
 		if s.conf == nil {

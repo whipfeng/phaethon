@@ -707,25 +707,15 @@ body {
     border-radius: 6px;
     padding: 0.85rem;
 }
+.group-card.expanded-card {
+    grid-column: 1 / -1;
+}
 .group-card h4 { font-size: 0.95rem; margin-bottom: 0.35rem; }
 .group-card .type-badge { margin-left: 0.5rem; }
 .group-card .group-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
 .group-card .group-actions { display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .group-card .group-summary { font-size: 0.8rem; margin: 0.35rem 0 0; }
-.group-members-panel {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 1rem;
-    margin-top: 0.75rem;
-}
-.members-panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.75rem;
-}
-.members-panel-header h4 { margin: 0; }
+.group-card .group-members { margin-top: 0.75rem; }
 .expand-members-btn { font-size: 0.8rem; }
 .expand-members-btn.expanded { background: var(--accent); color: #fff; border-color: var(--accent); }
 .text-muted { color: var(--text-muted); font-size: 0.83rem; }

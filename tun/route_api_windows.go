@@ -468,10 +468,14 @@ func flushNeighborsByIPAPI(ip net.IP) error {
 	}
 
 	count := *(*uint32)(unsafe.Pointer(table))
+	// Sanity check: if count is unreasonably large, the table is likely corrupt
+	if count > 10000 {
+		return fmt.Errorf("GetIpNetTable2: invalid count %d", count)
+	}
 	// MIB_IPNET_ROW2 has uint64 alignment (InterfaceLuid), so the Table
 	// array starts at offset 8 (4 bytes NumEntries + 4 bytes padding).
 	base := table + 8
-	rowSize := uintptr(104)
+	rowSize := uintptr(80) // MIB_IPNET_ROW2 size on Windows 10+
 
 	for i := uint32(0); i < count; i++ {
 		rowPtr := base + uintptr(i)*rowSize

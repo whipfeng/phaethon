@@ -56,51 +56,62 @@
     <div class="card">
         <div class="card-header">
             <h3><span data-i18n="proxy.groupTitle">Proxy Groups</span> ({{len .Groups}})</h3>
-            <button onclick="showAddGroup()" class="btn btn-primary btn-sm" data-i18n="proxy.addGroup">+ Add Group</button>
+            <div style="display:flex;gap:0.5rem;">
+                <button onclick="showAddGroup()" class="btn btn-primary btn-sm" data-i18n="proxy.addGroup">+ Add Group</button>
+            </div>
         </div>
         {{if .Groups}}
+        <div class="groups-grid">
         {{range .Groups}}
         {{$stats := index $.GroupStats .Name}}
         <div class="group-card {{if not (.Enabled | enabled)}}row-disabled{{end}}" data-group="{{.Name}}">
             <div class="group-header">
                 <h4>{{.Name}} <span class="type-badge">{{.Type}}</span></h4>
-                <div>
+                <div class="group-actions">
                     <button onclick="testGroup('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
-                    <label class="switch" style="margin-right:0.5rem;" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                    <label class="switch" style="margin-right:0.25rem;" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                         <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleGroup('{{.Name}}', this.checked)">
                         <span class="slider"></span>
                     </label>
                     <button onclick="editGroup('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                    <button onclick="copyGroup('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
                     <button onclick="deleteGroup('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
-                    <button onclick="toggleGroupMembers('{{.Name}}')" class="btn btn-sm btn-outline expand-btn" title="Show members">▶</button>
                 </div>
             </div>
-            <p class="text-muted">
+            <p class="text-muted group-summary">
                 <span data-i18n="proxy.totalMembers">Total</span>: {{$stats.total}}
                 {{if $stats.active}} · <span data-i18n="proxy.activeMember">Active</span>: {{$stats.active}}{{end}}
                 {{if .Subscription}} · <span data-i18n="proxy.groupSub">Subscription</span>: {{.Subscription}}{{end}}
             </p>
-            <div class="group-members hidden" data-group-members="{{.Name}}">
-                <div class="members-loading text-muted" data-i18n="common.loading">Loading...</div>
-                <table class="data-table group-members-table hidden">
-                    <thead>
-                        <tr>
-                            <th data-i18n="proxy.active">Active</th>
-                            <th data-i18n="proxy.name">Name</th>
-                            <th data-i18n="proxy.source">Source</th>
-                            <th data-i18n="proxy.type">Type</th>
-                            <th data-i18n="proxy.server">Server</th>
-                            <th data-i18n="proxy.port">Port</th>
-                            <th data-i18n="proxy.status">Status</th>
-                            <th data-i18n="proxy.latency">Latency</th>
-                        </tr>
-                    </thead>
-                    <tbody class="members-tbody"></tbody>
-                </table>
-                <button type="button" onclick="toggleShowAllGroupMembers('{{.Name}}')" class="btn btn-sm btn-outline show-all-btn hidden" style="margin-top:0.5rem;">Show all</button>
-            </div>
+            <button onclick="expandGroupMembers('{{.Name}}', this)" class="btn btn-sm btn-outline expand-members-btn" style="width:100%;margin-top:0.5rem;">
+                <span class="expand-label" data-i18n="proxy.showMembers">Show members</span> ▶
+            </button>
         </div>
         {{end}}
+        </div>
+        <div id="group-members-panel" class="group-members-panel hidden">
+            <div class="members-panel-header">
+                <h4 id="members-panel-title"></h4>
+                <button onclick="closeMembersPanel()" class="btn btn-sm btn-outline">×</button>
+            </div>
+            <div class="members-loading text-muted" data-i18n="common.loading">Loading...</div>
+            <table class="data-table group-members-table hidden">
+                <thead>
+                    <tr>
+                        <th data-i18n="proxy.active">Active</th>
+                        <th data-i18n="proxy.name">Name</th>
+                        <th data-i18n="proxy.source">Source</th>
+                        <th data-i18n="proxy.type">Type</th>
+                        <th data-i18n="proxy.server">Server</th>
+                        <th data-i18n="proxy.port">Port</th>
+                        <th data-i18n="proxy.status">Status</th>
+                        <th data-i18n="proxy.latency">Latency</th>
+                    </tr>
+                </thead>
+                <tbody class="members-tbody"></tbody>
+            </table>
+            <button type="button" onclick="toggleShowAllGroupMembers(currentExpandedGroup)" class="btn btn-sm btn-outline show-all-btn hidden" style="margin-top:0.5rem;">Show all</button>
+        </div>
         {{else}}
         <p class="text-muted" data-i18n="proxy.noGroups">No groups defined.</p>
         {{end}}
@@ -313,6 +324,7 @@
             </div>
             <div class="form-actions">
                 <button type="button" onclick="closeModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                <button type="button" onclick="pasteGroup()" class="btn btn-outline" data-i18n="proxy.paste">📋 Paste</button>
                 <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
             </div>
         </form>
@@ -422,6 +434,50 @@ async function pasteProxy() {
             proxySelect.value = proxyVal;
         }
         toggleFields();
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard';
+        showToast(msg, 'success');
+    } catch (err) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Failed to paste';
+        showToast(msg + ': ' + err.message, 'error');
+    }
+}
+
+function copyGroup(name) {
+    const g = groups.find(x => x.name === name);
+    if (!g) return;
+    const exportData = {
+        version: 1,
+        type: 'group',
+        data: g
+    };
+    const json = JSON.stringify(exportData, null, 2);
+    navigator.clipboard.writeText(json).then(() => {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.groupCopied') : 'Group copied to clipboard';
+        showToast(msg, 'success');
+    }).catch(err => {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : 'Failed to copy';
+        showToast(msg + ': ' + err.message, 'error');
+    });
+}
+
+async function pasteGroup() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const parsed = JSON.parse(text);
+        const g = (parsed.version === 1 && parsed.type === 'group') ? parsed.data : parsed;
+        if (!g.name || !g.type) {
+            throw new Error('Missing required fields');
+        }
+        document.getElementById('group-edit-name').value = '';
+        document.getElementById('g-name').value = g.name || '';
+        setGroupType(g.type || 'select');
+        setGroupSub(g.subscription || '');
+        document.getElementById('g-sub-filter').value = g['subscription-filter'] || '';
+        document.getElementById('g-health-url').value = g['health-check-url'] || 'http://www.google.com/generate_204';
+        document.getElementById('g-health-interval').value = g['health-check-interval'] || '';
+        const members = g.manualProxies || g.proxies || [];
+        setManualSelection(members);
+        updateGroupTypeHelp();
         const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard';
         showToast(msg, 'success');
     } catch (err) {
@@ -888,35 +944,60 @@ async function toggleGroup(name, enabled) {
 
 var GROUP_PREVIEW_LIMIT = 5;
 var groupMembersState = {};
+var currentExpandedGroup = '';
 
 function getGroupCard(name) {
     return document.querySelector(`.group-card[data-group="${CSS.escape(name)}"]`);
 }
 
-function getGroupMembersContainer(name) {
-    return document.querySelector(`.group-members[data-group-members="${CSS.escape(name)}"]`);
+function getMembersPanel() {
+    return document.getElementById('group-members-panel');
 }
 
-async function toggleGroupMembers(name) {
-    const container = getGroupMembersContainer(name);
-    if (!container) return;
-    const expanded = container.classList.toggle('hidden') === false;
-    const btn = getGroupCard(name)?.querySelector('.expand-btn');
-    if (btn) btn.textContent = expanded ? '▼' : '▶';
-    if (expanded) {
-        if (!groupMembersState[name]) {
-            await loadGroupMembers(name);
-        } else {
-            renderGroupMembers(name);
-        }
+async function expandGroupMembers(name, btn) {
+    const panel = getMembersPanel();
+    if (!panel) return;
+    // If same group is already expanded, collapse it
+    if (currentExpandedGroup === name && !panel.classList.contains('hidden')) {
+        closeMembersPanel();
+        return;
+    }
+    // Collapse previous expand button
+    if (currentExpandedGroup) {
+        const prevBtn = getGroupCard(currentExpandedGroup)?.querySelector('.expand-members-btn');
+        if (prevBtn) prevBtn.classList.remove('expanded');
+    }
+    // Expand new
+    currentExpandedGroup = name;
+    if (btn) btn.classList.add('expanded');
+    document.getElementById('members-panel-title').textContent = name;
+    panel.classList.remove('hidden');
+    const loading = panel.querySelector('.members-loading');
+    const table = panel.querySelector('.group-members-table');
+    if (loading) { loading.textContent = typeof i18n !== 'undefined' ? i18n.t('common.loading') : 'Loading...'; loading.classList.remove('hidden'); }
+    if (table) table.classList.add('hidden');
+    if (!groupMembersState[name]) {
+        await loadGroupMembers(name);
+    } else {
+        renderGroupMembers(name);
     }
 }
 
+function closeMembersPanel() {
+    const panel = getMembersPanel();
+    if (panel) panel.classList.add('hidden');
+    if (currentExpandedGroup) {
+        const prevBtn = getGroupCard(currentExpandedGroup)?.querySelector('.expand-members-btn');
+        if (prevBtn) prevBtn.classList.remove('expanded');
+    }
+    currentExpandedGroup = '';
+}
+
 async function loadGroupMembers(name) {
-    const container = getGroupMembersContainer(name);
-    if (!container) return;
-    const loading = container.querySelector('.members-loading');
-    const table = container.querySelector('.group-members-table');
+    const panel = getMembersPanel();
+    if (!panel) return;
+    const loading = panel.querySelector('.members-loading');
+    const table = panel.querySelector('.group-members-table');
     if (loading) loading.classList.remove('hidden');
     if (table) table.classList.add('hidden');
     try {
@@ -955,13 +1036,13 @@ function formatMemberLatency(ms) {
 
 function renderGroupMembers(name) {
     const state = groupMembersState[name];
-    const container = getGroupMembersContainer(name);
-    if (!state || !container) return;
+    const panel = getMembersPanel();
+    if (!state || !panel) return;
     const { members, showAll } = state;
-    const loading = container.querySelector('.members-loading');
-    const table = container.querySelector('.group-members-table');
-    const tbody = container.querySelector('.members-tbody');
-    const showAllBtn = container.querySelector('.show-all-btn');
+    const loading = panel.querySelector('.members-loading');
+    const table = panel.querySelector('.group-members-table');
+    const tbody = panel.querySelector('.members-tbody');
+    const showAllBtn = panel.querySelector('.show-all-btn');
     if (loading) loading.classList.add('hidden');
     if (!members || members.length === 0) {
         if (table) table.classList.add('hidden');
@@ -1053,10 +1134,9 @@ async function testGroup(name, btn) {
     try {
         const res = await fetch(`./api/groups/${encodeURIComponent(name)}/test`, {method: 'POST'});
         if (!res.ok) throw new Error(await res.text());
-        await loadGroupMembers(name);
-        const container = getGroupMembersContainer(name);
-        if (container && container.classList.contains('hidden')) {
-            await toggleGroupMembers(name);
+        delete groupMembersState[name];
+        if (currentExpandedGroup === name) {
+            await loadGroupMembers(name);
         }
     } catch (err) {
         showToast('Error: ' + err.message, 'error');

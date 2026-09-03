@@ -26,8 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/reverse"
@@ -263,16 +261,12 @@ func drawDigit(img *image.RGBA, x, y int, d byte, c color.Color) {
 // AdminServer provides a web management interface.
 type AdminServer struct {
 	config     *config.AdminConfig
-	conf       *config.RuleConfiguration // merged runtime config (for stats/health)
-	baseConf   *config.RuleConfiguration // base config loaded from confPath
-	envConf    *config.RuleConfiguration // env config loaded from envPath (nil if none)
+	conf       *config.RuleConfiguration // single source of truth: loaded from config.yaml, edited in-place, saved directly
 	stats      *StatsCollector
 	server     *http.Server
 	ln         net.Listener
 	mu         sync.RWMutex
-	confPath   string // path to the rule.yaml file for saving
-	envPath    string // path to rule-{env}.yaml overlay (empty if none)
-	saveTarget string // "base" or "env" — where edits are persisted
+	confPath   string // path to the config.yaml file for saving
 
 	// SSE broadcaster lifecycle
 	sseStopCh chan struct{}
@@ -377,7 +371,6 @@ func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defa
 		conf:       conf,
 		stats:      NewStatsCollector(),
 		confPath:   "./config.yaml",
-		saveTarget: "base",
 		defaultRaw: defaultRaw,
 	}
 
@@ -387,21 +380,6 @@ func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defa
 	if _, err := io.ReadFull(rand.Reader, s.sessionSecret); err != nil {
 		util.LogError("[ADMIN] failed to generate session secret: %v", err)
 		s.sessionSecret = nil
-	}
-
-	// Load base config (fall back to embedded default if no config.yaml exists)
-	if base, err := config.LoadRaw(s.confPath); err == nil {
-		_ = base.Init()
-		s.baseConf = base
-	} else if len(defaultRaw) > 0 {
-		if base, err := config.LoadRawBytes(defaultRaw); err == nil {
-			_ = base.Init()
-			s.baseConf = base
-		} else {
-			s.baseConf = &config.RuleConfiguration{}
-		}
-	} else {
-		s.baseConf = &config.RuleConfiguration{}
 	}
 
 	s.parseTemplates()
@@ -426,48 +404,40 @@ func (s *AdminServer) ListenAddr() string {
 	return ""
 }
 
-// displayConf returns the config currently being edited (base or env).
+// displayConf returns the config being edited (always s.conf in the unified model).
 func (s *AdminServer) displayConf() *config.RuleConfiguration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.saveTarget == "env" && s.envConf != nil {
-		return s.envConf
-	}
-	return s.baseConf
+	return s.conf
 }
 
-// mergeAndInitLocked rebuilds the runtime merged config from base + env and calls Init().
+// mergeAndInitLocked re-initializes the runtime config after edits.
+// It preserves runtime state (subscription nodes, group active member/filter)
+// that is not persisted in the config file.
 // Caller MUST already hold s.mu (write lock).
 func (s *AdminServer) mergeAndInitLocked() error {
 	if s.conf == nil {
 		return fmt.Errorf("config not initialized")
 	}
 
-	// Deep-copy the base config via YAML to get fresh data
-	raw, err := yaml.Marshal(s.baseConf)
-	if err != nil {
-		return fmt.Errorf("marshal base config: %w", err)
-	}
-	fresh := &config.RuleConfiguration{}
-	if err := yaml.Unmarshal(raw, fresh); err != nil {
-		return fmt.Errorf("unmarshal base config: %w", err)
-	}
-	if s.envConf != nil {
-		if err := fresh.Merge(s.envConf); err != nil {
-			return fmt.Errorf("merge fail: %w", err)
-		}
-	} else {
-		if err := fresh.Init(); err != nil {
-			return fmt.Errorf("init fail: %w", err)
-		}
-	}
-
-	// Preserve runtime subscription state across admin edits
+	// Preserve per-subscription node pool across admin edits
 	oldSubByName := make(map[string]*config.Subscription)
 	for _, sub := range s.conf.Subscriptions {
 		oldSubByName[sub.Name] = sub
 	}
-	for _, sub := range fresh.Subscriptions {
+
+	// Preserve per-group active member and filter
+	oldGroupByName := make(map[string]*config.ProxyGroup)
+	for _, g := range s.conf.ProxyGroups {
+		oldGroupByName[g.Name] = g
+	}
+
+	if err := s.conf.Init(); err != nil {
+		return fmt.Errorf("init fail: %w", err)
+	}
+
+	// Restore subscription SubProxies from old objects to new ones
+	for _, sub := range s.conf.Subscriptions {
 		old, ok := oldSubByName[sub.Name]
 		if !ok {
 			continue
@@ -483,14 +453,11 @@ func (s *AdminServer) mergeAndInitLocked() error {
 		sub.SubMu.Unlock()
 	}
 
-	// Preserve per-group active member and filter
-	oldGroupByName := make(map[string]*config.ProxyGroup)
+	// Restore per-group active member and filter, then rebuild
 	for _, g := range s.conf.ProxyGroups {
-		oldGroupByName[g.Name] = g
-	}
-	for _, g := range fresh.ProxyGroups {
 		old, ok := oldGroupByName[g.Name]
 		if !ok {
+			g.RebuildProxies()
 			continue
 		}
 		if g.Subscription == old.Subscription {
@@ -503,18 +470,6 @@ func (s *AdminServer) mergeAndInitLocked() error {
 		}
 		g.RebuildProxies()
 	}
-
-	// Update s.conf fields in place so all references see the changes
-	s.conf.Proxies = fresh.Proxies
-	s.conf.ProxyGroups = fresh.ProxyGroups
-	s.conf.Subscriptions = fresh.Subscriptions
-	s.conf.Rules = fresh.Rules
-	s.conf.Mappings = fresh.Mappings
-	s.conf.ReverseConfigs = fresh.ReverseConfigs
-	s.conf.Matchers = fresh.Matchers
-	s.conf.ProxyNames = fresh.ProxyNames
-	s.conf.GroupNames = fresh.GroupNames
-	s.conf.SubscriptionNames = fresh.SubscriptionNames
 
 	return nil
 }
@@ -906,8 +861,6 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// Runtime stats from merged config
 	s.mu.RLock()
 	runtimeConf := s.conf
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	s.mu.RUnlock()
 
 	s.stats.CollectFromConfig(runtimeConf)
@@ -926,8 +879,8 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"GroupCount":        len(dc.ProxyGroups),
 		"SubscriptionCount": len(dc.Subscriptions),
 		"EnvInfo":           s.envInfo(),
-		"SaveTarget":        saveTarget,
-		"CanSwitch":         envPath != "",
+		"SaveTarget": "base",
+		"CanSwitch":  false,
 		"TUNAvailable":      tun.Available(),
 	}
 	s.render(w, r, "dashboard.html", data)
@@ -957,8 +910,6 @@ func (s *AdminServer) envInfo() map[string]interface{} {
 func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	runtimeConf := s.conf
 	s.mu.RUnlock()
 
@@ -1007,8 +958,8 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		"Groups":        displayGroups,
 		"GroupStats":    groupStats,
 		"Subscriptions": dc.Subscriptions,
-		"SaveTarget":    saveTarget,
-		"CanSwitch":     envPath != "",
+		"SaveTarget":    "base",
+		"CanSwitch":     false,
 	}
 	s.render(w, r, "proxies.html", data)
 }
@@ -1016,8 +967,6 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	runtimeConf := s.conf
 	s.mu.RUnlock()
 
@@ -1048,8 +997,8 @@ func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Req
 		"Title":         "Subscriptions",
 		"Subscriptions": dc.Subscriptions,
 		"SubData":       subData,
-		"SaveTarget":    saveTarget,
-		"CanSwitch":     envPath != "",
+		"SaveTarget":    "base",
+		"CanSwitch":     false,
 	}
 	s.render(w, r, "subscriptions.html", data)
 }
@@ -1057,8 +1006,6 @@ func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Req
 func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	s.mu.RUnlock()
 	data := map[string]interface{}{
 		"Title":      "Rules",
@@ -1066,8 +1013,8 @@ func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
 		"Proxies":    dc.Proxies,
 		"Groups":     dc.ProxyGroups,
 		"Mappings":   dc.Mappings,
-		"SaveTarget": saveTarget,
-		"CanSwitch":  envPath != "",
+		"SaveTarget": "base",
+		"CanSwitch":  false,
 	}
 	s.render(w, r, "rules.html", data)
 }
@@ -1075,14 +1022,12 @@ func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	s.mu.RUnlock()
 	data := map[string]interface{}{
 		"Title":      "Mappings",
 		"Mappings":   dc.Mappings,
-		"SaveTarget": saveTarget,
-		"CanSwitch":  envPath != "",
+		"SaveTarget": "base",
+		"CanSwitch":  false,
 	}
 	s.render(w, r, "mappings.html", data)
 }
@@ -1090,8 +1035,6 @@ func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request)
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	s.mu.RUnlock()
 
 	// Build proxy list with reverse-support flag
@@ -1113,8 +1056,8 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 		"Title":          "Reverse",
 		"Proxies":        proxies,
 		"ReverseConfigs": s.currentReverseConfigs(),
-		"SaveTarget":     saveTarget,
-		"CanSwitch":      envPath != "",
+		"SaveTarget":     "base",
+		"CanSwitch":      false,
 	}
 	s.render(w, r, "reverse-wizard.html", data)
 }
@@ -1152,14 +1095,12 @@ func (s *AdminServer) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *AdminServer) handleConfigPage(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	saveTarget := s.saveTarget
-	envPath := s.envPath
 	s.mu.RUnlock()
 
 	data := map[string]interface{}{
 		"Title":      "Raw Config",
-		"SaveTarget": saveTarget,
-		"CanSwitch":  envPath != "",
+		"SaveTarget": "base",
+		"CanSwitch":  false,
 	}
 	s.render(w, r, "config.html", data)
 }
@@ -1355,8 +1296,11 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
-		target := s.currentConfigTargetLocked()
+		target := s.confPath
 		s.mu.RUnlock()
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			target = filepath.Join(target, "rule.yaml")
+		}
 
 		data, err := os.ReadFile(target)
 		if err != nil {
@@ -1395,24 +1339,21 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		_ = newConf
 
 		s.mu.Lock()
-		target := s.currentConfigTargetLocked()
+		target := s.confPath
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			target = filepath.Join(target, "rule.yaml")
+		}
 		if err := writeFileAtomic(target, body); err != nil {
 			s.mu.Unlock()
 			httpError(w, "write config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Reload the edited layer from disk so in-memory state matches the file.
-		if s.saveTarget == "env" && s.envPath != "" {
-			if ec, err := config.LoadRaw(target); err == nil {
-				_ = ec.Init()
-				s.envConf = ec
-			}
-		} else {
-			if base, err := config.LoadRaw(target); err == nil {
-				_ = base.Init()
-				s.baseConf = base
-			}
+		// Reload from disk into s.conf
+		if loaded, err := config.LoadRaw(target); err == nil {
+			_ = loaded.Init()
+			loaded.ReverseID = s.conf.ReverseID
+			s.conf = loaded
 		}
 
 		if err := s.mergeAndInitLocked(); err != nil {
@@ -1423,7 +1364,7 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		util.LogInfo("[ADMIN] raw config written to %s (target=%s)", target, s.saveTarget)
+		util.LogInfo("[ADMIN] raw config written to %s", target)
 
 		// Check if full reload was requested
 		if r.URL.Query().Get("reload") == "true" {
@@ -1440,9 +1381,8 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiConfigReset restores the editable config to the embedded default.
-// It deletes any env overlay and overwrites the base rule.yaml with defaultRaw,
-// then triggers a full runtime reload.
+// apiConfigReset restores the config to the embedded default
+// and triggers a full runtime reload.
 func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1456,22 +1396,18 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	target := s.currentConfigTargetLocked()
+	target := s.confPath
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		target = filepath.Join(target, "rule.yaml")
+	}
 	if err := writeFileAtomic(target, s.defaultRaw); err != nil {
 		httpError(w, "write default config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Remove env overlay if it exists.
-	if s.envPath != "" {
-		_ = os.Remove(s.envPath)
-		s.envConf = nil
-	}
-	s.saveTarget = "base"
-
-	if base, err := config.LoadRaw(target); err == nil {
-		_ = base.Init()
-		s.baseConf = base
+	if loaded, err := config.LoadRaw(target); err == nil {
+		_ = loaded.Init()
+		s.conf = loaded
 	}
 
 	if err := s.mergeAndInitLocked(); err != nil {
@@ -1532,19 +1468,6 @@ func (s *AdminServer) apiReload(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "reload triggered"})
 }
 
-// currentConfigTargetLocked returns the on-disk path currently being edited.
-// Caller must hold s.mu (read or write lock).
-func (s *AdminServer) currentConfigTargetLocked() string {
-	target := s.confPath
-	if s.saveTarget == "env" && s.envPath != "" {
-		target = s.envPath
-	}
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
-		target = filepath.Join(target, "rule.yaml")
-	}
-	return target
-}
-
 // writeFileAtomic writes data to path using a temporary file and rename.
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
@@ -1559,40 +1482,15 @@ func (s *AdminServer) apiTarget(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.mu.RLock()
 		info := map[string]interface{}{
-			"saveTarget": s.saveTarget,
+			"saveTarget": "base",
 			"basePath":   s.confPath,
-			"envPath":    s.envPath,
-			"canSwitch":  s.envPath != "",
+			"canSwitch":  false,
 		}
 		s.mu.RUnlock()
 		jsonResponse(w, info)
 
-	case http.MethodPost:
-		var body struct {
-			Target string `json:"target"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			httpError(w, "decode fail", http.StatusBadRequest)
-			return
-		}
-		if body.Target != "base" && body.Target != "env" {
-			httpError(w, "target must be 'base' or 'env'", http.StatusBadRequest)
-			return
-		}
-		if body.Target == "env" && s.envPath == "" {
-			httpError(w, "no env overlay file detected", http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		s.saveTarget = body.Target
-		s.mu.Unlock()
-
-		util.LogInfo("[ADMIN] save target switched to %s", body.Target)
-		jsonResponse(w, map[string]interface{}{
-			"status":     "ok",
-			"saveTarget": body.Target,
-		})
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -1767,10 +1665,10 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", s.saveTarget, p.Name, p.Type)
+			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", s.confPath, p.Name, p.Type)
 			jsonResponse(w, proxySummary(&p))
 		} else {
-			util.LogInfo("[ADMIN] proxy added to %s: %s (%s)", s.saveTarget, p.Name, p.Type)
+			util.LogInfo("[ADMIN] proxy added to %s: %s (%s)", s.confPath, p.Name, p.Type)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, proxySummary(&p))
 		}
@@ -1814,7 +1712,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after proxy delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] proxy deleted from %s: %s", s.saveTarget, name)
+				util.LogInfo("[ADMIN] proxy deleted from %s: %s", s.confPath, name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -1945,7 +1843,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rule insert failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, s.saveTarget, body.Rule)
+		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, s.confPath, body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
 
 	case http.MethodPut:
@@ -1974,7 +1872,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rules update failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", s.saveTarget, len(rules))
+		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", s.confPath, len(rules))
 		jsonResponse(w, map[string]interface{}{"status": "ok", "count": len(rules)})
 
 	case http.MethodDelete:
@@ -2005,7 +1903,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rule delete failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, s.saveTarget, deleted)
+		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, s.confPath, deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
@@ -2122,10 +2020,10 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", s.saveTarget, m.Name, m.Type, m.Port)
+			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", s.confPath, m.Name, m.Type, m.Port)
 			jsonResponse(w, mappingSummary(&m))
 		} else {
-			util.LogInfo("[ADMIN] mapping added to %s: %s (%s:%d)", s.saveTarget, m.Name, m.Type, m.Port)
+			util.LogInfo("[ADMIN] mapping added to %s: %s (%s:%d)", s.confPath, m.Name, m.Type, m.Port)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, mappingSummary(&m))
 		}
@@ -2163,7 +2061,7 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 						util.LogWarn("[ADMIN] mapping delete callback failed: %v", err)
 					}
 				}
-				util.LogInfo("[ADMIN] mapping deleted from %s: %s", s.saveTarget, name)
+				util.LogInfo("[ADMIN] mapping deleted from %s: %s", s.confPath, name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2915,9 +2813,9 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", s.saveTarget, g.Name, g.Type)
+			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", s.confPath, g.Name, g.Type)
 		} else {
-			util.LogInfo("[ADMIN] group added to %s: %s (%s)", s.saveTarget, g.Name, g.Type)
+			util.LogInfo("[ADMIN] group added to %s: %s (%s)", s.confPath, g.Name, g.Type)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -2965,7 +2863,7 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after group delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] group deleted from %s: %s", s.saveTarget, name)
+				util.LogInfo("[ADMIN] group deleted from %s: %s", s.confPath, name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3060,9 +2958,9 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			interval = *sub.Interval
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] subscription updated in %s: %s", s.saveTarget, sub.Name)
+			util.LogInfo("[ADMIN] subscription updated in %s: %s", s.confPath, sub.Name)
 		} else {
-			util.LogInfo("[ADMIN] subscription added to %s: %s", s.saveTarget, sub.Name)
+			util.LogInfo("[ADMIN] subscription added to %s: %s", s.confPath, sub.Name)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3108,7 +3006,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after subscription delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] subscription deleted from %s: %s", s.saveTarget, name)
+				util.LogInfo("[ADMIN] subscription deleted from %s: %s", s.confPath, name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3991,14 +3889,6 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 		s.conf.Admin.Username = s.config.Username
 		s.conf.Admin.Password = s.config.Password
 	}
-	if s.baseConf != nil {
-		if s.baseConf.Admin == nil {
-			s.baseConf.Admin = &config.AdminConfig{}
-		}
-		s.baseConf.Admin.AuthEnabled = s.config.AuthEnabled
-		s.baseConf.Admin.Username = s.config.Username
-		s.baseConf.Admin.Password = s.config.Password
-	}
 	s.mu.Unlock()
 
 	// Save to config file
@@ -4056,14 +3946,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 		s.conf.Admin.AuthEnabled = s.config.AuthEnabled
 		s.conf.Admin.Username = s.config.Username
 		s.conf.Admin.Password = s.config.Password
-	}
-	if s.baseConf != nil {
-		if s.baseConf.Admin == nil {
-			s.baseConf.Admin = &config.AdminConfig{}
-		}
-		s.baseConf.Admin.AuthEnabled = s.config.AuthEnabled
-		s.baseConf.Admin.Username = s.config.Username
-		s.baseConf.Admin.Password = s.config.Password
 	}
 	s.mu.Unlock()
 
@@ -4186,7 +4068,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	}
 }
 
-// saveConfig persists the current configuration to disk and triggers a reload.
 // saveConfig persists the current configuration to disk.
 // It acquires its own read lock and is safe to call from handlers
 // that do not already hold the lock.
@@ -4201,19 +4082,6 @@ func (s *AdminServer) saveConfig() error {
 		path = filepath.Join(path, "rule.yaml")
 	}
 
-	// Preserve reverse configs and reverse-id from runtime config.
-	// This prevents losing reverse configs when the runtime config is saved.
-	if conf != nil {
-		s.mu.RLock()
-		if len(conf.ReverseConfigs) == 0 && s.conf != nil && len(s.conf.ReverseConfigs) > 0 {
-			conf.ReverseConfigs = s.conf.ReverseConfigs
-		}
-		if conf.ReverseID == "" && s.conf != nil && s.conf.ReverseID != "" {
-			conf.ReverseID = s.conf.ReverseID
-		}
-		s.mu.RUnlock()
-	}
-
 	if err := config.SaveRaw(path, conf); err != nil {
 		return err
 	}
@@ -4221,35 +4089,18 @@ func (s *AdminServer) saveConfig() error {
 	return nil
 }
 
-// saveConfigLocked persists the currently-edited config (baseConf or envConf) to disk.
+// saveConfigLocked persists s.conf to disk.
 // Caller must hold s.mu (write lock).
 func (s *AdminServer) saveConfigLocked() error {
 	target := s.confPath
-	conf := s.baseConf
-	if s.saveTarget == "env" && s.envPath != "" && s.envConf != nil {
-		target = s.envPath
-		conf = s.envConf
-	}
 	// If target is a directory, append rule.yaml
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		target = filepath.Join(target, "rule.yaml")
 	}
-	
-	// Preserve reverse configs and reverse-id from runtime config if not present in base config.
-	// This prevents losing reverse configs when editing other config sections.
-	if s.conf != nil && conf != nil {
-		if len(conf.ReverseConfigs) == 0 && len(s.conf.ReverseConfigs) > 0 {
-			conf.ReverseConfigs = s.conf.ReverseConfigs
-		}
-		if conf.ReverseID == "" && s.conf.ReverseID != "" {
-			conf.ReverseID = s.conf.ReverseID
-		}
-	}
-	
-	if err := config.SaveRaw(target, conf); err != nil {
+	if err := config.SaveRaw(target, s.conf); err != nil {
 		return err
 	}
-	util.LogInfo("[ADMIN] config saved to %s (target=%s)", target, s.saveTarget)
+	util.LogInfo("[ADMIN] config saved to %s", target)
 	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }

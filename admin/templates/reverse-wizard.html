@@ -87,6 +87,7 @@
                             {{end}}
                         </td>
                         <td>
+                            <button class="btn btn-sm btn-outline" onclick="copyReverse('{{.Name}}')" title="复制" data-i18n-title="proxy.copy">📋</button>
                             <button class="btn btn-sm btn-outline" onclick="showEditReverse('{{.Name}}')" data-i18n="rv.editConfig">编辑</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteReverseConfig('{{.Name}}')" data-i18n="rv.deleteConfig">删除</button>
                         </td>
@@ -239,6 +240,7 @@
             </div>
 
             <div class="form-actions">
+                <button type="button" onclick="pasteReverse()" class="btn btn-outline" data-i18n="proxy.paste">📋 粘贴</button>
                 <button type="button" onclick="closeReverseModal()" class="btn btn-outline" data-i18n="rv.cancel">取消</button>
                 <button type="submit" class="btn btn-primary" data-i18n="rv.btnSave">保存</button>
             </div>
@@ -303,6 +305,67 @@ function showEditReverse(name) {
 
 function closeReverseModal() {
     document.getElementById('rv-modal').classList.add('hidden');
+}
+
+async function copyReverse(name) {
+    const cfg = existingReverseConfigs.find(c => c && c.name === name);
+    if (!cfg) return;
+    const payload = {
+        version: 1,
+        type: 'reverse',
+        data: {
+            name: cfg.name,
+            enabled: cfg.enabled !== false,
+            'outbound-proxy': cfg['outbound-proxy'] || '',
+            'listener-proto': cfg['listener-proto'] || 'socks5',
+            'listener-user': cfg['listener-user'] || '',
+            'listener-password': cfg['listener-password'] || '',
+            'listener-sni': cfg['listener-sni'] || '',
+            'target-address': cfg['target-address'] || '',
+            'reconnect-interval': cfg['reconnect-interval'] || 10,
+            'preferred-port': cfg['preferred-port'] || ''
+        }
+    };
+    try {
+        await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+        showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.copied') : '已复制', 'success');
+    } catch (e) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('proxy.copyFailed') : '复制失败') + ': ' + e.message, 'error');
+    }
+}
+
+async function pasteReverse() {
+    try {
+        const text = await navigator.clipboard.readText();
+        const payload = JSON.parse(text);
+        if (payload.type !== 'reverse' || !payload.data) {
+            throw new Error('Invalid format');
+        }
+        const d = payload.data;
+        document.getElementById('config-name').value = d.name || '';
+        document.getElementById('enabled').checked = d.enabled !== false;
+        const proxySelect = document.getElementById('preset-proxy');
+        proxySelect.value = d['outbound-proxy'] || '';
+        if (proxySelect.value !== (d['outbound-proxy'] || '') && d['outbound-proxy']) {
+            const opt = document.createElement('option');
+            opt.value = d['outbound-proxy'];
+            opt.textContent = d['outbound-proxy'] + ' (missing)';
+            proxySelect.appendChild(opt);
+            proxySelect.value = d['outbound-proxy'];
+        }
+        document.getElementById('listen-proto').value = d['listener-proto'] || 'socks5';
+        document.getElementById('listen-user').value = d['listener-user'] || '';
+        document.getElementById('listen-pass').value = d['listener-password'] || '';
+        document.getElementById('listen-sni').value = d['listener-sni'] || '';
+        document.getElementById('direct-target').value = d['target-address'] || '127.0.0.1:80';
+        document.getElementById('reconnect-interval').value = d['reconnect-interval'] || 10;
+        document.getElementById('preferred-port').value = d['preferred-port'] || '';
+        toggleListenFields();
+        showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : '已粘贴', 'success');
+    } catch (e) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.importFailed') : 'Failed to paste';
+        showToast(msg + ': ' + e.message, 'error');
+    }
 }
 
 function resetForm() {
@@ -636,6 +699,8 @@ async function forceDeleteBinding(reverseID, seq) {
 }
 
 updateInstanceReverseID();
-// Bindings table is populated exclusively via SSE version events.
+// Initial load to clear the loading spinner and populate bindings
+pollReverseBindings(false).catch(() => {});
+// Bindings table is also refreshed via SSE version events.
 </script>
 {{end}}

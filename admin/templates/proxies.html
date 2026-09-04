@@ -106,7 +106,8 @@
             <input type="hidden" id="edit-name" value="">
             <div class="form-group">
                 <label><span data-i18n="proxy.name">Name</span> *</label>
-                <input type="text" id="f-name" required placeholder="MY_PROXY">
+                <input type="text" id="f-name" required placeholder="MY_PROXY" oninput="validateProxyName()">
+                <span id="f-name-error" class="form-error text-small" style="color: var(--danger, #c00); display: none;"></span>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -233,7 +234,8 @@
             <input type="hidden" id="group-edit-name" value="">
             <div class="form-group">
                 <label><span data-i18n="proxy.groupName">Name</span> *</label>
-                <input type="text" id="g-name" required placeholder="MY_GROUP">
+                <input type="text" id="g-name" required placeholder="MY_GROUP" oninput="validateGroupName()">
+                <span id="g-name-error" class="form-error text-small" style="color: var(--danger, #c00); display: none;"></span>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -497,11 +499,98 @@ function populateNextProxySelect(selected) {
     if (selected) sel.value = selected;
 }
 
+function validateProxyName() {
+    const nameInput = document.getElementById('f-name');
+    const errorSpan = document.getElementById('f-name-error');
+    const name = nameInput.value;
+    const editName = document.getElementById('edit-name').value;
+
+    // Clear error first
+    errorSpan.style.display = 'none';
+    errorSpan.textContent = '';
+    nameInput.setCustomValidity('');
+
+    if (!name) return true;
+
+    // Check for leading/trailing spaces
+    if (name !== name.trim()) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    // Check for any whitespace
+    if (/\s/.test(name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    // Check for duplicate name (only when creating new, not editing the same one)
+    if (!editName && proxies.some(p => p.name === name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameAlreadyExists') : 'This name already exists';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    return true;
+}
+
+function validateGroupName() {
+    const nameInput = document.getElementById('g-name');
+    const errorSpan = document.getElementById('g-name-error');
+    const name = nameInput.value;
+    const editName = document.getElementById('group-edit-name').value;
+
+    // Clear error first
+    errorSpan.style.display = 'none';
+    errorSpan.textContent = '';
+    nameInput.setCustomValidity('');
+
+    if (!name) return true;
+
+    // Check for leading/trailing spaces
+    if (name !== name.trim()) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    // Check for any whitespace
+    if (/\s/.test(name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    // Check for duplicate name (only when creating new, not editing the same one)
+    if (!editName && groups.some(g => g.name === name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameAlreadyExists') : 'This name already exists';
+        errorSpan.textContent = msg;
+        errorSpan.style.display = 'inline';
+        nameInput.setCustomValidity(msg);
+        return false;
+    }
+
+    return true;
+}
+
 function showAddProxy() {
     document.getElementById('modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.modalAdd') : 'Add Proxy');
     document.getElementById('edit-name').value = '';
     document.getElementById('proxy-form').reset();
     populateNextProxySelect('');
+    validateProxyName();
     document.getElementById('proxy-modal').classList.remove('hidden');
 }
 
@@ -563,18 +652,6 @@ async function saveProxy(e) {
         'private-key': document.getElementById('f-private-key').value || '',
         'private-key-passphrase': document.getElementById('f-private-key-passphrase').value || '',
     };
-
-    // Validate name format
-    if (payload.name !== payload.name.trim()) {
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
-        showToast(msg, 'error');
-        return;
-    }
-    if (/\s/.test(payload.name)) {
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
-        showToast(msg, 'error');
-        return;
-    }
 
     // Drop empty/irrelevant fields to keep YAML clean
     ['server','port','sni','password','username','url','flow','via','reverse-address','private-key','private-key-passphrase'].forEach(k => {
@@ -642,13 +719,6 @@ async function saveProxy(e) {
 
     try {
         const editName = document.getElementById('edit-name').value;
-        if (!editName && proxies.some(p => p.name === payload.name)) {
-            const confirmed = await new Promise(resolve => {
-                const msg = (typeof i18n !== 'undefined' ? i18n.t('proxy.alreadyExists') : 'Proxy') + ' "' + payload.name + '" ' + (typeof i18n !== 'undefined' ? i18n.t('proxy.alreadyExistsMsg') : 'already exists. Overwrite?');
-                showConfirm(msg, () => resolve(true), () => resolve(false));
-            });
-            if (!confirmed) return;
-        }
         if (editName && editName !== payload.name) {
             const delRes = await fetch(`./api/proxies/${encodeURIComponent(editName)}`, {method: 'DELETE'});
             if (!delRes.ok && delRes.status !== 404) throw new Error('Failed to delete old proxy: ' + await delRes.text());
@@ -798,6 +868,7 @@ function showAddGroup() {
     document.getElementById('g-health-url').value = 'http://www.google.com/generate_204';
     setManualSelection([]);
     loadManualHealth('');
+    validateGroupName();
     document.getElementById('group-modal').classList.remove('hidden');
 }
 
@@ -858,18 +929,6 @@ async function doSaveGroup() {
         'health-check-url': document.getElementById('g-health-url').value || '',
         'health-check-interval': parseInt(document.getElementById('g-health-interval').value, 10) || 0,
     };
-
-    // Validate name format
-    if (payload.name !== payload.name.trim()) {
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
-        showToast(msg, 'error');
-        return;
-    }
-    if (/\s/.test(payload.name)) {
-        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
-        showToast(msg, 'error');
-        return;
-    }
 
     try {
         // Only delete the old group when renaming. Editing a group that is

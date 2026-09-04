@@ -1094,20 +1094,18 @@ func wireAdminCallbacks(resources *activeResources) {
 				saveHealthState(conf)
 				return g.GetHealthInfo(key), nil
 			}
-			if !m.FromSubscription {
-				// Manual proxy: run a real TCP connectivity check.
-				info := checkManualProxyHealth(p)
-				g.SetHealthImmediate(key, info.Alive, info.Latency)
-				saveHealthState(conf)
-				return g.GetHealthInfo(key), nil
-			}
 			testURL := g.HealthCheckURL
+			var alive bool
+			var latency time.Duration
 			if testURL == "" {
-				testURL = "http://www.google.com/generate_204"
+				// TCP-only check: dial to proxy's own server:port
+				alive, latency = checkProxyHealth(p, p.Server, p.Port, false, "")
+			} else {
+				// Deep check: dial through proxy to test URL
+				host, port, useHTTP := parseTestURL(testURL)
+				path := getTestPath(testURL)
+				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
 			}
-			host, port, useHTTP := parseTestURL(testURL)
-			path := getTestPath(testURL)
-			alive, latency := checkProxyHealth(p, host, port, useHTTP, path)
 			g.SetHealthImmediate(key, alive, latency)
 			saveHealthState(conf)
 			return g.GetHealthInfo(key), nil
@@ -1445,11 +1443,6 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 			g.SetHealth(key, true, 0)
 			continue
 		}
-		// Manual proxies are assumed alive; only subscription nodes are checked.
-		if !m.FromSubscription {
-			g.SetHealth(key, true, 0)
-			continue
-		}
 
 		items = append(items, item{key: key, p: p})
 	}
@@ -1480,25 +1473,9 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
-// checkManualProxyHealth performs a simple TCP connectivity check for a manual
-// proxy. DIRECT and REJECT are always reported as alive without dialing.
-func checkManualProxyHealth(p *config.Proxy) config.HealthInfo {
-	if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
-		return config.HealthInfo{Alive: true, LastCheck: time.Now()}
-	}
-	start := time.Now()
-	addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		return config.HealthInfo{Alive: false, LastCheck: time.Now()}
-	}
-	conn.Close()
-	return config.HealthInfo{Alive: true, Latency: time.Since(start), LastCheck: time.Now()}
-}
-
 // checkGroupTest runs an immediate one-off test for every member of a group.
-// Unlike the periodic checkGroupHealth, this tests manual proxies too and uses
-// SetHealthImmediate so the result is visible right away.
+// Unlike the periodic checkGroupHealth, this uses SetHealthImmediate so the
+// result is visible right away.
 func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
 	var host string
@@ -1534,17 +1511,6 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 		}
 		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
 			g.SetHealthImmediate(key, true, 0)
-			continue
-		}
-		if !m.FromSubscription {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(key string, p *config.Proxy) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				info := checkManualProxyHealth(p)
-				g.SetHealthImmediate(key, info.Alive, info.Latency)
-			}(key, p)
 			continue
 		}
 

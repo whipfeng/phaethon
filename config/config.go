@@ -855,6 +855,25 @@ func (g *ProxyGroup) RemoveHealth(keys []string) {
 	}
 }
 
+// CopyHealthFrom copies health data from another ProxyGroup.
+func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
+	if other == nil {
+		return
+	}
+	other.healthMu.RLock()
+	defer other.healthMu.RUnlock()
+	
+	g.healthMu.Lock()
+	defer g.healthMu.Unlock()
+	
+	if g.healthMap == nil {
+		g.healthMap = make(map[string]*healthStatus)
+	}
+	for k, v := range other.healthMap {
+		g.healthMap[k] = v
+	}
+}
+
 // ========== Resolver ==========
 
 type Resolver struct {

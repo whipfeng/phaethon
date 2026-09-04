@@ -386,12 +386,64 @@ dialer 层自动根据调用方法选择路径，注册端无需区分。
 | `register-proto` 字段 | **冗余，应删除** | 注册协议 = `outbound-proxy` 的 `Type`（socks5/trojan/h_tunnel）。UI 向导已自动推导（`opt.dataset.type`），独立字段多余 |
 | 控制连接建立方式 | **代理多态，非 switch 分发** | `ControlClient.Connect()` 不应 switch `registerProto`。应在 `Dialer` 接口上新增 `DialControl()` 方法，各代理类型自己实现：SOCKS5 → ChainDial + BIND(PORT=1)；Trojan → nextDialer.Dial(server,port) + TLS + Trojan BIND(cmd=0x02)；HTunnel → Dial(server,1)。调用方只认一个方法 |
 | BIND PORT=1 含义 | 控制连接标识 | SOCKS5/Trojan/HTunnel 的 BIND 命令中 DST.PORT=1 表示控制连接，PORT=0 表示数据连接。注册端根据此值决定走 `handleControlConn()` 还是 `HandleReverseConnection()`。复用原本被忽略的 PORT 字段，零成本 |
+| `seq` 字段分配时机 | **创建反向配置时分配** | 通过 Admin UI 创建反向配置时，自动分配 `seq` 并持久化到配置文件。避免重启后 seq 变化导致注册端拒绝（注册端用 `reverseID + seq` 标识客户端） |
+| `seq` 分配策略 | **找第一个空位（gap-filling）** | 不使用 `max+1`，而是找第一个未被使用的 seq 数字。删除中间配置后，新建配置会复用该空位，保持 seq 紧凑 |
 
 ---
 
-## 10. 出站代理内化设计（待实施）
+## 10. `seq` 字段设计
 
-### 10.1 核心原则
+### 10.1 背景
+
+注册端使用 `reverseID + seq` 作为客户端标识。反向端重启后，如果 `seq` 变化，注册端会认为是不同客户端，拒绝重新注册已分配的端口。
+
+**问题场景：**
+1. 反向配置创建时未分配 `seq`（`seq=0` 因 `omitempty` 未持久化）
+2. 每次重启，`normalizeReverseConfigs()` 分配新 `seq`
+3. 注册端拒绝：`preferred port X unavailable: already bound to reverse identity <id>#<old_seq>`
+
+### 10.2 解决方案
+
+**创建时分配：** 通过 Admin UI 创建反向配置时，自动分配 `seq` 并保存到配置文件。
+
+```go
+// admin/admin.go - 创建反向配置时
+if rc.Seq <= 0 {
+    used := make(map[int]bool)
+    for _, existing := range configs {
+        if existing.Seq > 0 {
+            used[existing.Seq] = true
+        }
+    }
+    next := 1
+    for used[next] {
+        next++
+    }
+    rc.Seq = next
+}
+```
+
+**Gap-filling 策略：** 不使用 `max+1`，而是找第一个空位。
+
+| 场景 | 现有 seq | 新建分配 |
+|------|----------|----------|
+| 初始 | [] | 1 |
+| 新增 | [1] | 2 |
+| 新增 | [1, 2] | 3 |
+| 删除 seq=2 | [1, 3] | 2（复用空位） |
+| 新增 | [1, 2, 3] | 4 |
+
+### 10.3 为什么不用 `max+1`
+
+- `max+1` 会在删除中间配置后留下永久空位
+- 长期使用后 seq 数字会无限增长
+- Gap-filling 保持 seq 紧凑，便于调试和日志阅读
+
+---
+
+## 11. 出站代理内化设计（待实施）
+
+### 11.1 核心原则
 
 出站代理（`outbound-proxy`）就是注册中心。反向端通过出站代理连接到注册端，出站代理的服务器本身就是注册端的 listener。
 
@@ -405,7 +457,7 @@ dialer 层自动根据调用方法选择路径，注册端无需区分。
 
 `ReverseConfig` 中的 `registry-addr` 和 `register-proto` 字段冗余，应从配置中删除，改为运行时从出站代理推导。
 
-### 10.2 多态控制连接
+### 11.2 多态控制连接
 
 当前 `ControlClient.Connect()` 通过 `switch registerProto` 分发到不同协议逻辑。应改为代理多态：
 
@@ -433,7 +485,7 @@ conn, err := d.(ControlDialer).DialControl()
 
 调用方不再关心协议细节，各代理类型内化自己的控制连接逻辑。
 
-### 10.3 配置简化
+### 11.3 配置简化
 
 **删除前（ReverseConfig）：**
 ```yaml
@@ -453,7 +505,7 @@ reverse:
 
 ---
 
-## 11. 文件变更清单
+## 12. 文件变更清单
 
 | 文件 | 操作 | 内容 |
 |------|------|------|

@@ -25,6 +25,7 @@ const (
 type sshClientEntry struct {
 	client   *ssh.Client
 	lastUsed time.Time
+	reconnMu sync.Mutex // serialises reconnect for this key
 }
 
 // sshClientCache holds established SSH clients keyed by proxy name.
@@ -42,31 +43,62 @@ type SSHDialer struct {
 }
 
 func (d *SSHDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
-	client, err := d.getSSHClient()
-	if err != nil {
-		return nil, fmt.Errorf("ssh: connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	conn, err := client.Dial("tcp", addr)
+
+	conn, err := d.dialSSH(addr)
 	if err != nil {
-		// Stale connection — remove from cache and retry once
-		d.removeSSHClient()
-		client, err = d.getSSHClient()
-		if err != nil {
-			return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-		}
-		conn, err = client.Dial("tcp", addr)
-		if err != nil {
-			return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)
-		}
+		return nil, err
 	}
 
 	util.LogDebug("[SSH-CLI] [%s] [%s] Forwarding %s:%d via SSH %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
 	return conn, nil
 }
 
-func (d *SSHDialer) getSSHClient() (*ssh.Client, error) {
+// dialSSH dials through the cached SSH client. On failure it acquires the
+// per-entry reconnect lock, rechecks staleness, rebuilds the client, and
+// retries — so concurrent callers serialise behind a single reconnect.
+func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
+	client, entry, err := d.getSSHClient()
+	if err != nil {
+		return nil, fmt.Errorf("ssh: connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+
+	conn, err := client.Dial("tcp", addr)
+	if err == nil {
+		return conn, nil
+	}
+
+	// Dial failed — the SSH connection is likely stale.
+	// Acquire the per-entry lock so only one goroutine reconnects.
+	entry.reconnMu.Lock()
+	defer entry.reconnMu.Unlock()
+
+	// Re-fetch: another goroutine may have already reconnected under us.
+	client, entry, err = d.getSSHClient()
+	if err != nil {
+		return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+
+	// If the cached client is the same one that just failed, force-recreate.
+	conn, err2 := client.Dial("tcp", addr)
+	if err2 == nil {
+		return conn, nil
+	}
+
+	// Still failing — this is the same stale client; rebuild.
+	d.removeSSHClientLocked(entry)
+	client, entry, err = d.getSSHClient()
+	if err != nil {
+		return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	conn, err = client.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)
+	}
+	return conn, nil
+}
+
+func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	key := d.Proxy.Name
 
 	sshCacheMu.Lock()
@@ -76,19 +108,20 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, error) {
 
 	if e, ok := sshClientCache[key]; ok {
 		e.lastUsed = time.Now()
-		return e.client, nil
+		return e.client, e, nil
 	}
 
 	client, err := d.createSSHClient()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	sshClientCache[key] = &sshClientEntry{
+	e := &sshClientEntry{
 		client:   client,
 		lastUsed: time.Now(),
 	}
-	return client, nil
+	sshClientCache[key] = e
+	return client, e, nil
 }
 
 func (d *SSHDialer) removeSSHClient() {
@@ -98,6 +131,20 @@ func (d *SSHDialer) removeSSHClient() {
 	defer sshCacheMu.Unlock()
 
 	if e, ok := sshClientCache[key]; ok {
+		e.client.Close()
+		delete(sshClientCache, key)
+	}
+}
+
+// removeSSHClientLocked removes a specific entry from the cache.
+// Caller must hold entry.reconnMu.
+func (d *SSHDialer) removeSSHClientLocked(target *sshClientEntry) {
+	key := d.Proxy.Name
+
+	sshCacheMu.Lock()
+	defer sshCacheMu.Unlock()
+
+	if e, ok := sshClientCache[key]; ok && e == target {
 		e.client.Close()
 		delete(sshClientCache, key)
 	}
@@ -214,7 +261,7 @@ func (d *SSHDialer) keepAlive(client *ssh.Client) {
 // PreWarm establishes the SSH connection eagerly so the first Dial does not
 // pay the handshake latency.
 func (d *SSHDialer) PreWarm() error {
-	_, err := d.getSSHClient()
+	_, _, err := d.getSSHClient()
 	if err != nil {
 		return err
 	}

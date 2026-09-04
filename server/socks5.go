@@ -349,15 +349,6 @@ const maxEarlyReplies = 128
 
 func (r *socks5UDPRelay) run() {
 	defer r.Close()
-	defer func() {
-		r.proxyMu.Lock()
-		for _, upc := range r.proxyConns {
-			upc.cancel()
-			upc.pc.Close()
-		}
-		r.proxyConns = nil
-		r.proxyMu.Unlock()
-	}()
 
 	buf := make([]byte, 65535)
 
@@ -501,6 +492,13 @@ func (r *socks5UDPRelay) run() {
 func (r *socks5UDPRelay) getProxyConn(proxy *config.Proxy) (*udpProxyConn, func(), error) {
 	r.proxyMu.Lock()
 	defer r.proxyMu.Unlock()
+
+	// Check if relay is closing
+	select {
+	case <-r.closed:
+		return nil, nil, net.ErrClosed
+	default:
+	}
 
 	if upc, ok := r.proxyConns[proxy.Name]; ok {
 		if atomic.LoadInt32(&upc.dead) == 0 {
@@ -704,7 +702,6 @@ func (r *socks5UDPRelay) Close() {
 			upc.cancel()
 			upc.pc.Close()
 		}
-		r.proxyConns = nil
 		r.proxyMu.Unlock()
 		r.clientLn.Close()
 		r.clientConn.Close()

@@ -3354,6 +3354,17 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		configs := s.currentReverseConfigs()
 		rc.Name = uniqueReverseName(rc.Name, configs)
 
+		// Assign a seq number if not provided, so it's persisted to the config file.
+		if rc.Seq <= 0 {
+			maxSeq := 0
+			for _, existing := range configs {
+				if existing.Seq > maxSeq {
+					maxSeq = existing.Seq
+				}
+			}
+			rc.Seq = maxSeq + 1
+		}
+
 		s.mu.Lock()
 		if s.conf == nil {
 			s.conf = &config.RuleConfiguration{}

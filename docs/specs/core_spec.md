@@ -14,6 +14,7 @@
 | v0.1.0 | 2026-07-14 | 初始版本：定义 ProxyGroup / GroupMember / Subscription 数据模型与 Admin API 规格 | Claude |
 | v0.1.1 | 2026-07-14 | 调整 Members 顺序为订阅节点在前、手动成员在后，使手动代理成为真正的兜底 | Claude |
 | v0.2.0 | 2026-07-14 | 重构订阅组概念：移除 subscription-mode，membership 由 filter 决定，active 单独持久化 | Claude |
+| v0.3.0 | 2026-09-04 | 新增 Proxy 数据模型，添加 health-check-url 字段支持单代理深度健康检查 | Qoder |
 
 ## 1. 概述
 
@@ -81,6 +82,43 @@
 |------|------|------|
 | SubProxies | map[string]*Proxy | 解析后的节点池 |
 
+### 2.4 Proxy
+
+单个代理配置。
+
+| 字段 | YAML Key | JSON Key | 类型 | 必填 | 说明 |
+|------|----------|----------|------|------|------|
+| Name | `name` | `name` | string | 是 | 代理名，全局唯一 |
+| Enabled | `enabled` | `enabled` | *bool | 否 | 省略时默认为 true |
+| Type | `type` | `type` | string | 是 | 代理类型：`direct` / `reject` / `socks5` / `http` / `trojan` / `ss` / `ssh` / `h_tunnel` / `vless` 等 |
+| Server | `server` | `server` | string | 条件 | 服务器地址（direct/reject 可省略） |
+| Port | `port` | `port` | int | 条件 | 服务器端口（direct/reject 可省略） |
+| Username | `username` | `username` | string | 否 | 认证用户名 |
+| Password | `password` | `password` | string | 否 | 认证密码 |
+| PrivateKey | `private-key` | `private-key` | string | 否 | SSH 私钥文件路径 |
+| SkipCertVerify | `skip-cert-verify` | `skip-cert-verify` | bool | 否 | 跳过 TLS 证书验证 |
+| UDP | `udp` | `udp` | bool | 否 | 启用 UDP 支持 |
+| ViaProxy | `via` | `via` | string | 否 | 通过哪个代理建立连接（代理链） |
+| HealthCheckURL | `health-check-url` | `health-check-url` | string | 否 | 健康检查目标 URL。配置后单代理测试会通过该代理发送实际请求验证功能，而非仅测试 TCP 端口连通性 |
+
+**健康检查行为：**
+
+| 场景 | 检查方式 |
+|------|----------|
+| `health-check-url` 未配置 | TCP 连接到 `server:port`，仅验证端口可达 |
+| `health-check-url` 已配置 | 通过代理连接到该 URL，验证代理功能正常。支持 `http://` 和 `https://` 前缀 |
+
+**示例配置：**
+
+```yaml
+proxies:
+  - name: INTERNAL_PROXY
+    type: socks5
+    server: 10.0.0.1
+    port: 1080
+    health-check-url: http://10.0.0.1:8080/health  # 内网地址
+```
+
 ## 3. 业务规则
 
 ### 3.1 组成员构成
@@ -102,9 +140,18 @@
 ### 3.3 健康检查
 
 - 自动周期检查只对订阅节点执行；手动代理默认标记为存活。
-- 手动触发“组测速”时，所有成员（含手动代理、嵌套组、订阅节点）都参与一次性检查。
+- 手动触发”组测速”时，所有成员（含手动代理、嵌套组、订阅节点）都参与一次性检查。
 - `SetHealthImmediate` 用于手动/单点测试，立即覆盖阈值。
 - `SetHealth` 用于周期检查，使用连续成功/失败阈值。
+
+**单代理健康检查（`/api/proxies/health-check/{name}`）：**
+
+| 场景 | 检查方式 |
+|------|----------|
+| 代理未配置 `health-check-url` | TCP 连接到 `server:port`，仅验证端口可达 |
+| 代理配置了 `health-check-url` | 通过代理连接到该 URL，验证代理功能正常 |
+
+这种设计允许内网代理配置内网测试地址，公网代理配置公网测试地址。
 
 ## 4. Admin API 规格
 
@@ -334,7 +381,14 @@ POST /api/groups/{name}/health-check/{nodeName}
 
 #### POST /api/proxies/health-check/{name}
 
-对全局代理列表中的单个代理执行 TCP 连通性检查。
+对全局代理列表中的单个代理执行健康检查。
+
+**检查逻辑：**
+
+| 场景 | 检查方式 |
+|------|----------|
+| 代理未配置 `health-check-url` | TCP 连接到 `server:port`，仅验证端口可达 |
+| 代理配置了 `health-check-url` | 通过代理（`dialer.ChainDial`）连接到该 URL，验证代理功能正常 |
 
 响应：
 

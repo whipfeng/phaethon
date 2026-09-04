@@ -145,6 +145,14 @@
                     <input type="number" id="f-port" placeholder="443">
                 </div>
             </div>
+            <!-- Health Check URL (optional, for deep health check through proxy) -->
+            <div id="row-health-check" class="form-row">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.healthCheckURL">Health Check URL</label>
+                    <input type="text" id="f-health-check-url" placeholder="http://internal-host:8080/health">
+                    <small style="color: var(--text-muted); font-size: 0.8em;" data-i18n="proxy.healthCheckURLHint">Leave empty for TCP port check only</small>
+                </div>
+            </div>
             <!-- SNI (TLS types) -->
             <div id="row-sni" class="form-row">
                 <div class="form-group">
@@ -402,6 +410,7 @@ async function pasteProxy() {
         document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
         document.getElementById('f-private-key').value = p['private-key'] || '';
         document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
+        document.getElementById('f-health-check-url').value = p['health-check-url'] || '';
         const proxyVal = p.via || '';
         populateNextProxySelect(proxyVal);
         const proxySelect = document.getElementById('f-proxy');
@@ -623,6 +632,7 @@ function editProxy(name) {
     document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
     document.getElementById('f-private-key').value = p['private-key'] || '';
     document.getElementById('f-private-key-passphrase').value = p['private-key-passphrase'] || '';
+    document.getElementById('f-health-check-url').value = p['health-check-url'] || '';
     populateNextProxySelect(p.via || '');
     toggleFields();
     document.getElementById('proxy-modal').classList.remove('hidden');
@@ -651,10 +661,11 @@ async function saveProxy(e) {
         'reverse-address': document.getElementById('f-reverse-addr').value || '',
         'private-key': document.getElementById('f-private-key').value || '',
         'private-key-passphrase': document.getElementById('f-private-key-passphrase').value || '',
+        'health-check-url': document.getElementById('f-health-check-url').value || '',
     };
 
     // Drop empty/irrelevant fields to keep YAML clean
-    ['server','port','sni','password','username','url','flow','via','reverse-address','private-key','private-key-passphrase'].forEach(k => {
+    ['server','port','sni','password','username','url','flow','via','reverse-address','private-key','private-key-passphrase','health-check-url'].forEach(k => {
         if (payload[k] === '' || payload[k] === 0 || payload[k] === false) {
             if (k !== 'server' && k !== 'port') delete payload[k];
         }
@@ -672,6 +683,7 @@ async function saveProxy(e) {
         delete payload['reverse-address'];
         delete payload['private-key'];
         delete payload['private-key-passphrase'];
+        delete payload['health-check-url'];
         delete payload.udp;
         delete payload['skip-cert-verify'];
     } else if (isHTunnel) {

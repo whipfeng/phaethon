@@ -371,8 +371,12 @@ async function pasteProxy() {
         if (!p.name || !p.type) {
             throw new Error('Missing required fields');
         }
-        document.getElementById('edit-name').value = p.name || '';
-        document.getElementById('f-name').value = p.name || '';
+        const editName = document.getElementById('edit-name').value;
+        if (!editName) {
+            document.getElementById('f-name').value = (p.name || '') + ' (copy)';
+        } else {
+            document.getElementById('f-name').value = p.name || '';
+        }
         const typeSelect = document.getElementById('f-type');
         const typeLower = (p.type || '').toLowerCase();
         let typeMatched = false;
@@ -446,7 +450,7 @@ async function pasteGroup() {
             throw new Error('Missing required fields');
         }
         document.getElementById('group-edit-name').value = '';
-        document.getElementById('g-name').value = g.name || '';
+        document.getElementById('g-name').value = (g.name || '') + ' (copy)';
         setGroupType(g.type || 'select');
         setGroupSub(g.subscription || '');
         document.getElementById('g-sub-filter').value = g['subscription-filter'] || '';

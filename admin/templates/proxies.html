@@ -630,6 +630,13 @@ async function saveProxy(e) {
 
     try {
         const editName = document.getElementById('edit-name').value;
+        if (!editName && proxies.some(p => p.name === payload.name)) {
+            const confirmed = await new Promise(resolve => {
+                const msg = (typeof i18n !== 'undefined' ? i18n.t('proxy.alreadyExists') : 'Proxy') + ' "' + payload.name + '" ' + (typeof i18n !== 'undefined' ? i18n.t('proxy.alreadyExistsMsg') : 'already exists. Overwrite?');
+                showConfirm(msg, () => resolve(true), () => resolve(false));
+            });
+            if (!confirmed) return;
+        }
         if (editName && editName !== payload.name) {
             const delRes = await fetch(`./api/proxies/${encodeURIComponent(editName)}`, {method: 'DELETE'});
             if (!delRes.ok && delRes.status !== 404) throw new Error('Failed to delete old proxy: ' + await delRes.text());

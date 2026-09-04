@@ -2707,16 +2707,18 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 				filter = rg.SubscriptionFilter
 			}
 			summaries[i] = map[string]interface{}{
-				"name":                  g.Name,
-				"enabled":               g.IsEnabled(),
-				"type":                  g.Type,
-				"proxies":               proxies,
-				"manualProxies":         manualProxies,
-				"health-check-url":      g.HealthCheckURL,
-				"health-check-interval": g.HealthCheckInterval,
-				"subscription":          g.Subscription,
-				"active-member":         activeMember,
-				"subscription-filter":   filter,
+				"name":                   g.Name,
+				"enabled":                g.IsEnabled(),
+				"type":                   g.Type,
+				"proxies":                proxies,
+				"manualProxies":          manualProxies,
+				"health-check-url":       g.HealthCheckURL,
+				"health-check-interval":  g.HealthCheckInterval,
+				"health-check-tolerance": g.HealthCheckTolerance,
+				"lb-strategy":            g.LBStrategy,
+				"subscription":           g.Subscription,
+				"active-member":          activeMember,
+				"subscription-filter":    filter,
 			}
 		}
 		jsonResponse(w, summaries)
@@ -2778,6 +2780,12 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			}
 			if g.HealthCheckInterval == nil {
 				g.HealthCheckInterval = existing.HealthCheckInterval
+			}
+			if g.HealthCheckTolerance == nil {
+				g.HealthCheckTolerance = existing.HealthCheckTolerance
+			}
+			if g.LBStrategy == "" {
+				g.LBStrategy = existing.LBStrategy
 			}
 			if g.SubscriptionFilter == "" {
 				g.SubscriptionFilter = existing.SubscriptionFilter

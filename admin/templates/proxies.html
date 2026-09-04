@@ -280,10 +280,28 @@
                 <div class="form-group" style="flex: 1;">
                     <label data-i18n="proxy.healthCheckURL">Health Check URL</label>
                     <input type="text" id="g-health-url" placeholder="http://www.google.com/generate_204">
+                    <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-muted);" data-i18n="proxy.healthCheckURLHint">Leave empty for TCP port check only</small>
                 </div>
                 <div class="form-group" style="flex: 0 0 160px;">
                     <label data-i18n="proxy.groupInterval">Interval (s)</label>
                     <input type="number" id="g-health-interval" placeholder="300" min="0">
+                </div>
+            </div>
+            <div class="form-row" id="g-tolerance-row" style="display: none;">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.healthCheckTolerance">Tolerance (ms)</label>
+                    <input type="number" id="g-health-tolerance" placeholder="150" min="0">
+                    <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-muted);" data-i18n="proxy.healthCheckToleranceHelp">Switch to a new node only if it's faster by at least this much</small>
+                </div>
+            </div>
+            <div class="form-row" id="g-lb-strategy-row" style="display: none;">
+                <div class="form-group" style="flex: 1;">
+                    <label data-i18n="proxy.lbStrategy">Load Balance Strategy</label>
+                    <select id="g-lb-strategy">
+                        <option value="round-robin" data-i18n="proxy.lbRoundRobin">Round Robin</option>
+                        <option value="consistent-hashing" data-i18n="proxy.lbConsistentHashing">Consistent Hashing</option>
+                    </select>
+                    <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-muted);" data-i18n="proxy.lbStrategyHelp">Round-robin distributes evenly; consistent-hashing keeps same source to same node</small>
                 </div>
             </div>
             <div class="form-row" id="g-manual-row">
@@ -895,6 +913,8 @@ function editGroup(name) {
     document.getElementById('g-sub-filter').value = g['subscription-filter'] || '';
     document.getElementById('g-health-url').value = g['health-check-url'] || '';
     document.getElementById('g-health-interval').value = g['health-check-interval'] || '';
+    document.getElementById('g-health-tolerance').value = g['health-check-tolerance'] || '';
+    document.getElementById('g-lb-strategy').value = g['lb-strategy'] || 'round-robin';
     const members = g.manualProxies || g.proxies || [];
     setManualSelection(members);
     loadManualHealth(name);
@@ -940,6 +960,8 @@ async function doSaveGroup() {
         'subscription-filter': document.getElementById('g-sub-filter').value || '',
         'health-check-url': document.getElementById('g-health-url').value || '',
         'health-check-interval': parseInt(document.getElementById('g-health-interval').value, 10) || 0,
+        'health-check-tolerance': parseInt(document.getElementById('g-health-tolerance').value, 10) || null,
+        'lb-strategy': document.getElementById('g-lb-strategy').value || '',
     };
 
     try {
@@ -1244,8 +1266,11 @@ function needsHealthCheck() {
 
 function updateGroupModeUI() {
     const hasSub = hasGroupSub();
+    const type = document.getElementById('g-type').value;
     setVisible('g-sub-filter-row', hasSub);
     setVisible('g-health-row', needsHealthCheck());
+    setVisible('g-tolerance-row', type === 'best');
+    setVisible('g-lb-strategy-row', type === 'load-balance');
     const subSel = document.getElementById('g-sub');
     if (subSel) subSel.required = false;
     updateGroupSubHelp();

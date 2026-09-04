@@ -198,6 +198,8 @@ type ProxyGroup struct {
 	ManualProxies       []string `yaml:"-" json:"manualProxies,omitempty"` // manual proxy names copied from YAML
 	HealthCheckURL      string   `yaml:"health-check-url" json:"health-check-url,omitempty"`
 	HealthCheckInterval *int     `yaml:"health-check-interval" json:"health-check-interval,omitempty"`
+	HealthCheckTolerance *int    `yaml:"health-check-tolerance,omitempty" json:"health-check-tolerance,omitempty"` // best type: switch if latency difference exceeds this (ms)
+	LBStrategy          string   `yaml:"lb-strategy,omitempty" json:"lb-strategy,omitempty"`                     // load-balance: round-robin (default) or consistent-hashing
 
 	// Subscription names the subscription provider this group draws nodes from.
 	// Selection and filter are per-group, so multiple groups can reference the

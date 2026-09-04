@@ -3,6 +3,7 @@ package dialer
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -209,6 +210,20 @@ func ChainDial(proxy *config.Proxy, dstAddr string, dstPort int) (net.Conn, erro
 // outbound dial logs can be correlated with the inbound accept logs.
 func ChainDialWithID(proxy *config.Proxy, dstAddr string, dstPort int, connID string) (net.Conn, error) {
 	return chainDial(proxy, dstAddr, dstPort, connID, 0)
+}
+
+// DialToProxy dials through the proxy's via-chain to reach the proxy's own server.
+// Used for TCP connectivity health checks.
+func DialToProxy(p *config.Proxy) (net.Conn, error) {
+	if p == nil {
+		return nil, fmt.Errorf("nil proxy")
+	}
+	if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+		nextDialer := NewDialer(p.Next)
+		return nextDialer.Dial(p.Server, p.Port)
+	}
+	addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
+	return net.DialTimeout("tcp", addr, 5*time.Second)
 }
 
 // PreWarmSSHProxies establishes SSH connections eagerly for all SSH-type proxies

@@ -1058,7 +1058,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return fmt.Errorf("group not found: %s", groupName)
 	}
-	admin.CheckProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
+	admin.CheckGroupProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
 		conf := admin.GetConfig()
 		if conf == nil {
 			return config.HealthInfo{}, fmt.Errorf("config not ready")
@@ -1160,7 +1160,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			LastCheck: time.Now(),
 		}, nil
 	}
-	admin.CheckManualProxyHealth = func(proxyName string) (config.HealthInfo, error) {
+	admin.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
 		conf := admin.GetConfig()
 		if conf == nil {
 			return config.HealthInfo{}, fmt.Errorf("config not ready")
@@ -1623,7 +1623,6 @@ func saveHealthState(ruleConf *config.RuleConfiguration) {
 }
 
 // checkProxyTCPHealth tests TCP connectivity to the proxy's own server.
-// It dials through p.Next (the proxy chain) to reach p.Server:p.Port.
 func checkProxyTCPHealth(p *config.Proxy) (bool, time.Duration) {
 	type result struct {
 		alive   bool
@@ -1632,17 +1631,7 @@ func checkProxyTCPHealth(p *config.Proxy) (bool, time.Duration) {
 	done := make(chan result, 1)
 	go func() {
 		start := time.Now()
-		var conn net.Conn
-		var err error
-		if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
-			// Dial through the proxy chain to reach this proxy's server
-			nextDialer := dialer.NewDialer(p.Next)
-			conn, err = nextDialer.Dial(p.Server, p.Port)
-		} else {
-			// No next hop or next hop is DIRECT: connect directly
-			addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-			conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
-		}
+		conn, err := dialer.DialToProxy(p)
 		if err != nil {
 			done <- result{false, 0}
 			return

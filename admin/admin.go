@@ -300,17 +300,17 @@ type AdminServer struct {
 	// Set by the main package.
 	CheckGroupTest func(groupName string) error
 
-	// CheckProxyHealth runs a one-off health check for a single proxy/node in a group.
+	// CheckGroupProxyHealth runs a one-off health check for a single proxy/node in a group.
 	// Set by the main package.
-	CheckProxyHealth func(groupName, proxyName string) (config.HealthInfo, error)
+	CheckGroupProxyHealth func(groupName, proxyName string) (config.HealthInfo, error)
 
 	// CheckSubscriptionHealth runs a one-off health check for a single node
 	// inside a subscription. Set by the main package.
 	CheckSubscriptionHealth func(subName, nodeName, url string) (config.HealthInfo, error)
 
-	// CheckManualProxyHealth runs a one-off connectivity check for a top-level proxy.
+	// CheckProxyHealth runs a one-off connectivity check for a top-level proxy.
 	// Set by the main package.
-	CheckManualProxyHealth func(proxyName string) (config.HealthInfo, error)
+	CheckProxyHealth func(proxyName string) (config.HealthInfo, error)
 
 	// GetReverseBindings returns the current dynamic reverse client bindings
 	// from the registry-side ControlManager. Set by the main package on the
@@ -1447,11 +1447,11 @@ func (s *AdminServer) apiProxyHealthCheck(w http.ResponseWriter, r *http.Request
 		httpError(w, "proxy name required", http.StatusBadRequest)
 		return
 	}
-	if s.CheckManualProxyHealth == nil {
-		httpError(w, "manual proxy health check not configured", http.StatusServiceUnavailable)
+	if s.CheckProxyHealth == nil {
+		httpError(w, "proxy health check not configured", http.StatusServiceUnavailable)
 		return
 	}
-	info, err := s.CheckManualProxyHealth(name)
+	info, err := s.CheckProxyHealth(name)
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2398,11 +2398,11 @@ func (s *AdminServer) apiGroupHealthCheck(w http.ResponseWriter, r *http.Request
 	}
 
 	if nodeName != "" {
-		if s.CheckProxyHealth == nil {
+		if s.CheckGroupProxyHealth == nil {
 			httpError(w, "proxy health check not configured", http.StatusServiceUnavailable)
 			return
 		}
-		info, err := s.CheckProxyHealth(groupName, nodeName)
+		info, err := s.CheckGroupProxyHealth(groupName, nodeName)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return

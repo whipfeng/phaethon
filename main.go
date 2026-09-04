@@ -1174,6 +1174,20 @@ func wireAdminCallbacks(resources *activeResources) {
 		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
 			return config.HealthInfo{Alive: true, LastCheck: time.Now()}, nil
 		}
+
+		// If health-check-url is configured, do a deep health check through the proxy
+		if p.HealthCheckURL != "" {
+			host, port, useHTTP := parseTestURL(p.HealthCheckURL)
+			path := getTestPath(p.HealthCheckURL)
+			alive, latency := checkProxyHealth(p, host, port, useHTTP, path)
+			return config.HealthInfo{
+				Alive:     alive,
+				Latency:   latency,
+				LastCheck: time.Now(),
+			}, nil
+		}
+
+		// Otherwise, just test TCP connectivity to the proxy server
 		start := time.Now()
 		// Dial through the proxy chain (Next hop) to reach this proxy's server
 		var conn net.Conn

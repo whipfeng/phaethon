@@ -52,6 +52,7 @@ type Proxy struct {
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
 	ViaProxy             string `yaml:"via,omitempty" json:"via,omitempty"` // 通过哪个代理建立连接
+	HealthCheckURL       string `yaml:"health-check-url,omitempty" json:"health-check-url,omitempty"` // 健康检查 URL，配置后会通过代理发送实际请求验证
 	ReverseAddress       string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
 	UpBps                int64  `yaml:"up-bps,omitempty" json:"up-bps,omitempty"`
 	DownBps              int64  `yaml:"down-bps,omitempty" json:"down-bps,omitempty"`

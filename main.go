@@ -1098,8 +1098,8 @@ func wireAdminCallbacks(resources *activeResources) {
 			var alive bool
 			var latency time.Duration
 			if testURL == "" {
-				// TCP-only check: dial to proxy's own server:port
-				alive, latency = checkProxyHealth(p, p.Server, p.Port, false, "")
+				// TCP-only check: dial through p.Next to reach p's server
+				alive, latency = checkProxyTCPHealth(p)
 			} else {
 				// Deep check: dial through proxy to test URL
 				host, port, useHTTP := parseTestURL(testURL)
@@ -1186,24 +1186,12 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 
 		// Otherwise, just test TCP connectivity to the proxy server
-		start := time.Now()
-		// Dial through the proxy chain (Next hop) to reach this proxy's server
-		var conn net.Conn
-		var err error
-		if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
-			// Use the proxy chain to connect to this proxy's server
-			nextDialer := dialer.NewDialer(p.Next)
-			conn, err = nextDialer.Dial(p.Server, p.Port)
-		} else {
-			// No next hop or next hop is DIRECT: connect directly
-			addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-			conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
-		}
-		if err != nil {
-			return config.HealthInfo{Alive: false, LastCheck: time.Now()}, nil
-		}
-		conn.Close()
-		return config.HealthInfo{Alive: true, Latency: time.Since(start), LastCheck: time.Now()}, nil
+		alive, latency := checkProxyTCPHealth(p)
+		return config.HealthInfo{
+			Alive:     alive,
+			Latency:   latency,
+			LastCheck: time.Now(),
+		}, nil
 	}
 	admin.GetReverseBindings = func() []server.PortBinding {
 		if server.GlobalControlManager == nil {
@@ -1458,8 +1446,8 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 			var alive bool
 			var latency time.Duration
 			if testURL == "" {
-				// TCP-only check: dial to proxy's own server:port
-				alive, latency = checkProxyHealth(it.p, it.p.Server, it.p.Port, false, "")
+				// TCP-only check: dial through p.Next to reach p's server
+				alive, latency = checkProxyTCPHealth(it.p)
 			} else {
 				// Deep check: dial through proxy to test URL
 				alive, latency = checkProxyHealth(it.p, host, port, useHTTP, path)
@@ -1522,8 +1510,8 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 			var alive bool
 			var latency time.Duration
 			if testURL == "" {
-				// TCP-only check: dial to proxy's own server:port
-				alive, latency = checkProxyHealth(p, p.Server, p.Port, false, "")
+				// TCP-only check: dial through p.Next to reach p's server
+				alive, latency = checkProxyTCPHealth(p)
 			} else {
 				// Deep check: dial through proxy to test URL
 				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
@@ -1631,6 +1619,43 @@ func saveHealthState(ruleConf *config.RuleConfiguration) {
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		util.LogWarn("[HEALTH] rename state fail: %v", err)
+	}
+}
+
+// checkProxyTCPHealth tests TCP connectivity to the proxy's own server.
+// It dials through p.Next (the proxy chain) to reach p.Server:p.Port.
+func checkProxyTCPHealth(p *config.Proxy) (bool, time.Duration) {
+	type result struct {
+		alive   bool
+		latency time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		var conn net.Conn
+		var err error
+		if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+			// Dial through the proxy chain to reach this proxy's server
+			nextDialer := dialer.NewDialer(p.Next)
+			conn, err = nextDialer.Dial(p.Server, p.Port)
+		} else {
+			// No next hop or next hop is DIRECT: connect directly
+			addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
+			conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		}
+		if err != nil {
+			done <- result{false, 0}
+			return
+		}
+		conn.Close()
+		done <- result{true, time.Since(start)}
+	}()
+
+	select {
+	case r := <-done:
+		return r.alive, r.latency
+	case <-time.After(healthCheckTimeout):
+		return false, 0
 	}
 }
 

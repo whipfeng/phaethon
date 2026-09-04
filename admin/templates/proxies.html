@@ -287,14 +287,14 @@
                     <input type="number" id="g-health-interval" placeholder="300" min="0">
                 </div>
             </div>
-            <div class="form-row" id="g-tolerance-row" style="display: none;">
+            <div class="form-row hidden" id="g-tolerance-row">
                 <div class="form-group" style="flex: 1;">
                     <label data-i18n="proxy.healthCheckTolerance">Tolerance (ms)</label>
                     <input type="number" id="g-health-tolerance" placeholder="150" min="0">
                     <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-muted);" data-i18n="proxy.healthCheckToleranceHelp">Switch to a new node only if it's faster by at least this much</small>
                 </div>
             </div>
-            <div class="form-row" id="g-lb-strategy-row" style="display: none;">
+            <div class="form-row hidden" id="g-lb-strategy-row">
                 <div class="form-group" style="flex: 1;">
                     <label data-i18n="proxy.lbStrategy">Load Balance Strategy</label>
                     <select id="g-lb-strategy">

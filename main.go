@@ -1402,12 +1402,14 @@ const (
 
 func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
-	if testURL == "" {
-		testURL = "http://www.google.com/generate_204"
+	var host string
+	var port int
+	var useHTTP bool
+	var path string
+	if testURL != "" {
+		host, port, useHTTP = parseTestURL(testURL)
+		path = getTestPath(testURL)
 	}
-
-	host, port, useHTTP := parseTestURL(testURL)
-	path := getTestPath(testURL)
 
 	var members []config.GroupMember
 	members = g.GetMembers()
@@ -1460,7 +1462,15 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 		go func(it item) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			alive, latency := checkProxyHealth(it.p, host, port, useHTTP, path)
+			var alive bool
+			var latency time.Duration
+			if testURL == "" {
+				// TCP-only check: dial to proxy's own server:port
+				alive, latency = checkProxyHealth(it.p, it.p.Server, it.p.Port, false, "")
+			} else {
+				// Deep check: dial through proxy to test URL
+				alive, latency = checkProxyHealth(it.p, host, port, useHTTP, path)
+			}
 			g.SetHealth(it.key, alive, latency)
 		}(it)
 	}
@@ -1491,11 +1501,14 @@ func checkManualProxyHealth(p *config.Proxy) config.HealthInfo {
 // SetHealthImmediate so the result is visible right away.
 func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
-	if testURL == "" {
-		testURL = "http://www.google.com/generate_204"
+	var host string
+	var port int
+	var useHTTP bool
+	var path string
+	if testURL != "" {
+		host, port, useHTTP = parseTestURL(testURL)
+		path = getTestPath(testURL)
 	}
-	host, port, useHTTP := parseTestURL(testURL)
-	path := getTestPath(testURL)
 
 	members := g.GetMembers()
 	var wg sync.WaitGroup
@@ -1540,7 +1553,15 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 		go func(key string, p *config.Proxy) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			alive, latency := checkProxyHealth(p, host, port, useHTTP, path)
+			var alive bool
+			var latency time.Duration
+			if testURL == "" {
+				// TCP-only check: dial to proxy's own server:port
+				alive, latency = checkProxyHealth(p, p.Server, p.Port, false, "")
+			} else {
+				// Deep check: dial through proxy to test URL
+				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
+			}
 			g.SetHealthImmediate(key, alive, latency)
 		}(key, p)
 	}

@@ -3355,14 +3355,19 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		rc.Name = uniqueReverseName(rc.Name, configs)
 
 		// Assign a seq number if not provided, so it's persisted to the config file.
+		// Find the first available gap to reuse seq numbers from deleted configs.
 		if rc.Seq <= 0 {
-			maxSeq := 0
+			used := make(map[int]bool)
 			for _, existing := range configs {
-				if existing.Seq > maxSeq {
-					maxSeq = existing.Seq
+				if existing.Seq > 0 {
+					used[existing.Seq] = true
 				}
 			}
-			rc.Seq = maxSeq + 1
+			next := 1
+			for used[next] {
+				next++
+			}
+			rc.Seq = next
 		}
 
 		s.mu.Lock()

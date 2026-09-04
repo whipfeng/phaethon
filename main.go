@@ -1413,12 +1413,22 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 			ruleConf.RLock()
 			innerGroup, ok := ruleConf.GroupNames[m.Name]
 			ruleConf.RUnlock()
-			if ok {
-				selected := innerGroup.NextWithVisited(make(map[string]bool))
-				g.SetHealth(key, selected != nil, 0)
-			} else {
+			if !ok {
 				g.SetHealth(key, false, 0)
+				continue
 			}
+			// Select a member from the nested group to test
+			selected := innerGroup.NextWithVisited(make(map[string]bool))
+			if selected == nil {
+				g.SetHealth(key, false, 0)
+				continue
+			}
+			if strings.EqualFold(selected.Type, config.ProxyDIRECT) || strings.EqualFold(selected.Type, config.ProxyREJECT) {
+				g.SetHealth(key, true, 0)
+				continue
+			}
+			// Add the selected proxy to items for actual health check
+			items = append(items, item{key: key, p: selected})
 			continue
 		}
 
@@ -1480,19 +1490,25 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 	sem := make(chan struct{}, healthCheckConcurrency)
 	for _, m := range members {
 		key := m.HealthKey()
+		var p *config.Proxy
 		if m.IsGroup {
 			ruleConf.RLock()
 			innerGroup, ok := ruleConf.GroupNames[m.Name]
 			ruleConf.RUnlock()
-			alive := false
-			if ok {
-				alive = innerGroup.NextWithVisited(make(map[string]bool)) != nil
+			if !ok {
+				g.SetHealthImmediate(key, false, 0)
+				continue
 			}
-			g.SetHealthImmediate(key, alive, 0)
-			continue
+			// Select a member from the nested group to test
+			p = innerGroup.NextWithVisited(make(map[string]bool))
+			if p == nil {
+				g.SetHealthImmediate(key, false, 0)
+				continue
+			}
+		} else {
+			p = g.ResolveMember(m)
 		}
 
-		p := g.ResolveMember(m)
 		if p == nil {
 			g.SetHealthImmediate(key, false, 0)
 			continue

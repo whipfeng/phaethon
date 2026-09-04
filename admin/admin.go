@@ -3354,11 +3354,17 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		configs := s.currentReverseConfigs()
 		rc.Name = uniqueReverseName(rc.Name, configs)
 
+		s.mu.Lock()
+		if s.conf == nil {
+			s.conf = &config.RuleConfiguration{}
+		}
+
 		// Assign a seq number if not provided, so it's persisted to the config file.
 		// Find the first available gap to reuse seq numbers from deleted configs.
+		// Must be inside the lock to prevent race conditions.
 		if rc.Seq <= 0 {
 			used := make(map[int]bool)
-			for _, existing := range configs {
+			for _, existing := range s.conf.ReverseConfigs {
 				if existing.Seq > 0 {
 					used[existing.Seq] = true
 				}
@@ -3370,10 +3376,6 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 			rc.Seq = next
 		}
 
-		s.mu.Lock()
-		if s.conf == nil {
-			s.conf = &config.RuleConfiguration{}
-		}
 		// Ensure instance ReverseID exists in file
 		dataDir := filepath.Join(".phaethon", "setup")
 		_, _ = reverse.GetReverseID(dataDir)

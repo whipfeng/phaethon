@@ -1348,10 +1348,24 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Reload from disk into s.conf
+		// Reload from disk into s.conf, preserving runtime health state
 		if loaded, err := config.LoadRaw(target); err == nil {
 			_ = loaded.Init()
+
+			oldHealthByGroup := make(map[string]*config.ProxyGroup)
+			if s.conf != nil {
+				for _, g := range s.conf.ProxyGroups {
+					oldHealthByGroup[g.Name] = g
+				}
+			}
+
 			s.conf = loaded
+
+			for _, g := range s.conf.ProxyGroups {
+				if old, ok := oldHealthByGroup[g.Name]; ok {
+					g.CopyHealthFrom(old)
+				}
+			}
 		}
 
 		if err := s.mergeAndInitLocked(); err != nil {
@@ -2790,6 +2804,7 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			if g.SubscriptionFilter == "" {
 				g.SubscriptionFilter = existing.SubscriptionFilter
 			}
+			g.CopyHealthFrom(existing)
 			for i, eg := range dc.ProxyGroups {
 				if eg.Name == g.Name {
 					dc.ProxyGroups[i] = &g

@@ -243,6 +243,8 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 // firewalls or NATs from silently dropping idle connections.
 // It only removes the entry if it is still the current one in the cache,
 // avoiding a race where a stale keepalive kills a freshly reconnected client.
+// After detecting a dead connection, it triggers a background reconnect so
+// the next Dial() doesn't have to wait for the handshake.
 func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -256,16 +258,31 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 		case err := <-done:
 			if err != nil {
 				util.LogDebug("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
-				d.removeSSHClientLocked(entry)
+				d.removeAndReconnect(entry)
 				return
 			}
 		case <-time.After(15 * time.Second):
 			util.LogDebug("[SSH-CLI] [%s] keepalive timed out, closing stale connection", d.Proxy.Name)
 			entry.client.Close()
-			d.removeSSHClientLocked(entry)
+			d.removeAndReconnect(entry)
 			return
 		}
 	}
+}
+
+// removeAndReconnect removes a dead SSH connection from the cache and
+// immediately attempts to reconnect in the background, so the next Dial()
+// finds a healthy connection ready to use.
+func (d *SSHDialer) removeAndReconnect(entry *sshClientEntry) {
+	d.removeSSHClientLocked(entry)
+	go func() {
+		util.LogDebug("[SSH-CLI] [%s] background reconnecting...", d.Proxy.Name)
+		if _, _, err := d.getSSHClient(); err != nil {
+			util.LogWarn("[SSH-CLI] [%s] background reconnect failed: %v", d.Proxy.Name, err)
+		} else {
+			util.LogDebug("[SSH-CLI] [%s] background reconnect succeeded", d.Proxy.Name)
+		}
+	}()
 }
 
 // PreWarm establishes the SSH connection eagerly so the first Dial does not

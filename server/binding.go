@@ -126,15 +126,32 @@ func (s *BindingStore) Remove(reverseID string, seq int) {
 	s.publishSnapshot()
 }
 
+// RemoveByReverseID removes all bindings for the given reverseID, regardless of seq.
+// This handles client restart where the seq may have changed.
+func (s *BindingStore) RemoveByReverseID(reverseID string) {
+	if reverseID == "" {
+		return
+	}
+	s.mu.Lock()
+	for key, b := range s.bindings {
+		if b.ReverseID == reverseID {
+			delete(s.bindings, key)
+		}
+	}
+	s.saveLocked()
+	s.mu.Unlock()
+	s.publishSnapshot()
+}
+
 // IsPortBoundByOther checks if the given port is already bound to a different
-// client (not excludeReverseID+excludeSeq). Used by allocatePort to avoid reassigning a
-// port that belongs to another (possibly offline) reverse client.
+// client. A port is considered "bound by other" only if the reverseID differs;
+// the same reverseID can reclaim its ports regardless of seq (handles restart).
 func (s *BindingStore) IsPortBoundByOther(port int, excludeReverseID string, excludeSeq int) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for key, b := range s.bindings {
+	for _, b := range s.bindings {
 		if b.Port == port {
-			if key != makeKey(excludeReverseID, excludeSeq) {
+			if b.ReverseID != excludeReverseID {
 				return true
 			}
 		}

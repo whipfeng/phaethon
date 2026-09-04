@@ -311,6 +311,12 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 		return reverse.ControlReply{Status: "error", Error: "reverse identity already connected from another instance"}
 	}
 
+	// Clean up any stale bindings for this reverseID (from previous sessions with different seq).
+	// This allows a restarted client to reclaim its ports.
+	if req.ReverseID != "" {
+		m.bindingStore.RemoveByReverseID(req.ReverseID)
+	}
+
 	// Generate unique address
 	dynAddr := generateDynAddress()
 

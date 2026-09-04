@@ -121,6 +121,7 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 		lastUsed: time.Now(),
 	}
 	sshClientCache[key] = e
+	go d.keepAlive(e)
 	return client, e, nil
 }
 
@@ -235,24 +236,24 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 
 	client := ssh.NewClient(c, chans, reqs)
 
-	go d.keepAlive(client)
-
 	return client, nil
 }
 
 // keepAlive sends periodic global requests on the SSH connection to prevent
 // firewalls or NATs from silently dropping idle connections.
-func (d *SSHDialer) keepAlive(client *ssh.Client) {
+// It only removes the entry if it is still the current one in the cache,
+// avoiding a race where a stale keepalive kills a freshly reconnected client.
+func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		// Use the standard keepalive request type recognized by OpenSSH.
 		// wantReply=true ensures the server responds, keeping the connection active
 		// and allowing us to detect dead connections faster.
-		_, _, err := client.SendRequest("keepalive@golang.org", true, nil)
+		_, _, err := entry.client.SendRequest("keepalive@golang.org", true, nil)
 		if err != nil {
 			util.LogDebug("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
-			d.removeSSHClient()
+			d.removeSSHClientLocked(entry)
 			return
 		}
 	}

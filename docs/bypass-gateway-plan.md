@@ -57,7 +57,7 @@ tail -f /root/bypass-gateway/logs/phaethon.log
 | 服务 | 主 Phaethon | 旁路网关 |
 |------|-------------|----------|
 | Admin | 39999 | 39998 |
-| DNS | - | 15353 |
+| DNS | - | 53 |
 
 ## 工作原理
 

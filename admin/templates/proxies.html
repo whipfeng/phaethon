@@ -564,6 +564,18 @@ async function saveProxy(e) {
         'private-key-passphrase': document.getElementById('f-private-key-passphrase').value || '',
     };
 
+    // Validate name format
+    if (payload.name !== payload.name.trim()) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
+        showToast(msg, 'error');
+        return;
+    }
+    if (/\s/.test(payload.name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
+        showToast(msg, 'error');
+        return;
+    }
+
     // Drop empty/irrelevant fields to keep YAML clean
     ['server','port','sni','password','username','url','flow','via','reverse-address','private-key','private-key-passphrase'].forEach(k => {
         if (payload[k] === '' || payload[k] === 0 || payload[k] === false) {
@@ -846,6 +858,19 @@ async function doSaveGroup() {
         'health-check-url': document.getElementById('g-health-url').value || '',
         'health-check-interval': parseInt(document.getElementById('g-health-interval').value, 10) || 0,
     };
+
+    // Validate name format
+    if (payload.name !== payload.name.trim()) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoSpaces') : 'Name cannot have leading or trailing spaces';
+        showToast(msg, 'error');
+        return;
+    }
+    if (/\s/.test(payload.name)) {
+        const msg = typeof i18n !== 'undefined' ? i18n.t('proxy.nameNoWhitespace') : 'Name cannot contain spaces';
+        showToast(msg, 'error');
+        return;
+    }
+
     try {
         // Only delete the old group when renaming. Editing a group that is
         // referenced by rules/other groups should not be blocked, and the POST

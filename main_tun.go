@@ -40,6 +40,7 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 
 	util.LogInfo("TUN enabled, initializing engine...")
 	engine := tun.NewEngine(ruleConf)
+	engine.SetDataDir(dataDir)
 	if err := engine.Start(); err != nil {
 		util.LogError("TUN engine start failed: %v", err)
 		return nil

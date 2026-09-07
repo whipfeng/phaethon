@@ -14,7 +14,7 @@ type DHCPServer interface {
 }
 
 // newDHCPServer creates a DHCP server bound to the given interface.
-// Returns (nil, nil) on non-Linux platforms.
-func newDHCPServer(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP) (DHCPServer, error) {
-	return newDHCPServerImpl(ifaceName, cfg, dnsAddr)
+// dataDir is used for persistent lease storage. Returns (nil, nil) on non-Linux platforms.
+func newDHCPServer(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP, dataDir string) (DHCPServer, error) {
+	return newDHCPServerImpl(ifaceName, cfg, dnsAddr, dataDir)
 }

@@ -7,6 +7,6 @@ import (
 	"phaethon/config"
 )
 
-func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP) (DHCPServer, error) {
+func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP, dataDir string) (DHCPServer, error) {
 	return nil, nil
 }

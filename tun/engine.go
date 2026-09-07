@@ -47,6 +47,7 @@ type Engine struct {
 	addr      tcpip.Address
 	dnsAddr   tcpip.Address
 	prefixLen int
+	dataDir   string
 
 	mu      sync.Mutex
 	running bool
@@ -71,6 +72,11 @@ func NewEngine(ruleConf *config.RuleConfiguration) *Engine {
 		ruleConf: ruleConf,
 		closeCh:  make(chan struct{}),
 	}
+}
+
+// SetDataDir sets the runtime data directory for persistent storage (e.g. DHCP leases).
+func (e *Engine) SetDataDir(dir string) {
+	e.dataDir = dir
 }
 
 // resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
@@ -416,7 +422,7 @@ func (e *Engine) Start() error {
 			ifaceName = e.routeMgr.DefaultIfaceName
 		}
 		dnsIP := net.IP(e.dnsAddr.AsSlice())
-		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIP)
+		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIP, e.dataDir)
 		if err != nil {
 			util.LogWarn("dhcp: failed to create server: %v", err)
 		} else if srv != nil {

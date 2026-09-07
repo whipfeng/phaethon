@@ -2,9 +2,11 @@ package tun
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"phaethon/config"
 	"phaethon/util"
 	"sync"
@@ -175,6 +177,8 @@ type dhcpServerImpl struct {
 	ifaceName string
 	cfg       *config.DHCPConfig
 	dnsAddr   net.IP
+	dataDir   string
+	leaseFile string
 
 	conn *net.UDPConn
 
@@ -188,7 +192,7 @@ type dhcpServerImpl struct {
 	wg     sync.WaitGroup
 }
 
-func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP) (DHCPServer, error) {
+func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP, dataDir string) (DHCPServer, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("dhcp: interface name is empty")
 	}
@@ -259,16 +263,24 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP)
 		util.LogInfo("dhcp: auto-generated pool %s-%s from %s/%d", poolStart, poolEnd, networkIP, ones)
 	}
 
-	return &dhcpServerImpl{
+	s := &dhcpServerImpl{
 		ifaceName: ifaceName,
 		cfg:       cfg,
 		dnsAddr:   dnsAddr.To4(),
+		dataDir:   dataDir,
 		leases:    make(map[string]*lease),
 		poolNext:  poolStart,
 		poolEnd:   poolEnd,
 		leaseDur:  cfg.LeaseDuration(),
 		stopCh:    make(chan struct{}),
-	}, nil
+	}
+
+	if dataDir != "" {
+		s.leaseFile = filepath.Join(dataDir, "dhcp-leases.json")
+		s.loadLeases()
+	}
+
+	return s, nil
 }
 
 func (s *dhcpServerImpl) Start() error {
@@ -311,7 +323,75 @@ func (s *dhcpServerImpl) Start() error {
 	return nil
 }
 
+type leaseJSON struct {
+	IP      string    `json:"ip"`
+	MAC     string    `json:"mac"`
+	Expires time.Time `json:"expires"`
+}
+
+func (s *dhcpServerImpl) loadLeases() {
+	data, err := os.ReadFile(s.leaseFile)
+	if err != nil {
+		return // file doesn't exist yet, that's fine
+	}
+	var entries []leaseJSON
+	if err := json.Unmarshal(data, &entries); err != nil {
+		util.LogWarn("dhcp: failed to parse lease file: %v", err)
+		return
+	}
+	now := time.Now()
+	count := 0
+	for _, e := range entries {
+		if e.Expires.Before(now) {
+			continue // expired
+		}
+		ip := net.ParseIP(e.IP).To4()
+		if ip == nil {
+			continue
+		}
+		s.leases[e.MAC] = &lease{
+			ip:      ip,
+			mac:     nil,
+			expires: e.Expires,
+		}
+		count++
+	}
+	if count > 0 {
+		util.LogInfo("dhcp: loaded %d leases from %s", count, s.leaseFile)
+	}
+}
+
+func (s *dhcpServerImpl) saveLeases() {
+	if s.leaseFile == "" {
+		return
+	}
+	s.mu.Lock()
+	entries := make([]leaseJSON, 0, len(s.leases))
+	now := time.Now()
+	for mac, l := range s.leases {
+		if l.expires.After(now) {
+			entries = append(entries, leaseJSON{
+				IP:      l.ip.String(),
+				MAC:     mac,
+				Expires: l.expires,
+			})
+		}
+	}
+	s.mu.Unlock()
+
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		util.LogWarn("dhcp: failed to marshal leases: %v", err)
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(s.leaseFile), 0755)
+	if err := os.WriteFile(s.leaseFile, data, 0644); err != nil {
+		util.LogWarn("dhcp: failed to write leases: %v", err)
+	}
+}
+
 func (s *dhcpServerImpl) Stop() {
+	s.saveLeases()
 	close(s.stopCh)
 	if s.conn != nil {
 		s.conn.Close()
@@ -412,6 +492,7 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 			return
 		}
 		s.sendReply(dhcpOffer, req, offeredIP)
+		s.saveLeases()
 		util.LogInfo("dhcp: OFFER %s -> %s", macStr, offeredIP)
 
 	case dhcpRequest:
@@ -428,6 +509,7 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 			existing.expires = time.Now().Add(s.leaseDur)
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
+			s.saveLeases()
 			util.LogInfo("dhcp: ACK (renew) %s -> %s", macStr, reqIP)
 		} else {
 			s.leases[macStr] = &lease{
@@ -437,6 +519,7 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 			}
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
+			s.saveLeases()
 			util.LogInfo("dhcp: ACK %s -> %s", macStr, reqIP)
 		}
 

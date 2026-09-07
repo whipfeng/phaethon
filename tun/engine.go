@@ -429,7 +429,9 @@ func (e *Engine) Start() error {
 	if e.ruleConf != nil && e.ruleConf.TUN != nil &&
 		e.ruleConf.TUN.IsBypassGateway() && e.ruleConf.TUN.IsDHCPEnabled() {
 		ifaceName := ""
-		if e.routeMgr != nil {
+		if e.ruleConf.TUN.DHCP != nil && e.ruleConf.TUN.DHCP.Interface != "" {
+			ifaceName = e.ruleConf.TUN.DHCP.Interface
+		} else if e.routeMgr != nil {
 			ifaceName = e.routeMgr.DefaultIfaceName
 		}
 		dnsIP := net.IP(e.dnsAddr.AsSlice())

@@ -304,6 +304,15 @@ func (s *dhcpServerImpl) Start() error {
 	s.ifIndex = iface.Index
 	s.ifHWAddr = iface.HardwareAddr
 
+	// Bind AF_PACKET socket to the specific interface (required for sending).
+	var bindAddr syscall.SockaddrLinklayer
+	bindAddr.Protocol = htons(syscall.ETH_P_IP)
+	bindAddr.Ifindex = iface.Index
+	if err := syscall.Bind(fd, &bindAddr); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: bind af_packet to %s: %w", s.ifaceName, err)
+	}
+
 	// Receive socket: regular UDP on 0.0.0.0:67
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -707,40 +716,39 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	cksum := udpChecksum(src4, dstIP, udp)
 	binary.BigEndian.PutUint16(udp[6:8], cksum)
 
-	// Build IP header (20 bytes)
+	// Build IP header (20 bytes) + UDP payload
 	ipLen := 20 + len(udp)
 	ip := make([]byte, ipLen)
 	ip[0] = 0x45                         // version=4, IHL=5
 	ip[1] = 0                            // TOS
 	binary.BigEndian.PutUint16(ip[2:4], uint16(ipLen))
 	binary.BigEndian.PutUint16(ip[4:6], 0)  // identification
-	ip[6] = 0x40                         // flags: DF
+	ip[6] = 0                            // flags: no DF
 	ip[7] = 0
 	ip[8] = 64                           // TTL
 	ip[9] = 17                           // protocol: UDP
 	binary.BigEndian.PutUint16(ip[10:12], 0) // header checksum placeholder
 	copy(ip[12:16], src4)
 	copy(ip[16:20], dstIP)
+	copy(ip[20:], udp)                   // copy UDP into IP payload
 
 	// Compute IP header checksum
 	ipHdrCksum := ipChecksum(ip[:20])
 	binary.BigEndian.PutUint16(ip[10:12], ipHdrCksum)
 
 	// Build full Ethernet frame
-	ethFrame := make([]byte, 14+len(ip)+len(udp))
-	copy(ethFrame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // dst MAC: broadcast
+	ethFrame := make([]byte, 14+len(ip))
+	if hasCI && req.flags[0]&0x80 == 0 {
+		copy(ethFrame[0:6], req.chaddr[:6]) // unicast to client MAC
+	} else {
+		copy(ethFrame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // broadcast
+	}
 	copy(ethFrame[6:12], s.ifHWAddr)                                   // src MAC
 	binary.BigEndian.PutUint16(ethFrame[12:14], 0x0800)               // EtherType: IPv4
 	copy(ethFrame[14:], ip)
-	copy(ethFrame[14+len(ip):], udp)
 
-	var sa syscall.SockaddrLinklayer
-	sa.Protocol = htons(syscall.ETH_P_IP)
-	sa.Ifindex = s.ifIndex
-	sa.Halen = 6
-	copy(sa.Addr[:], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
-	if err := syscall.Sendto(s.fd, ethFrame, 0, &sa); err != nil {
-		util.LogWarn("dhcp: sendto packet: %v", err)
+	if _, err := syscall.Write(s.fd, ethFrame); err != nil {
+		util.LogWarn("dhcp: write packet: %v", err)
 	}
 }
 

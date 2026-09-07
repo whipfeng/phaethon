@@ -1175,6 +1175,7 @@ type ReverseConfig struct {
 // Only effective when bypass-gateway is enabled.
 type DHCPConfig struct {
 	Enabled   *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interface string `yaml:"interface,omitempty" json:"interface,omitempty"` // LAN interface name, e.g. "eth1"
 	PoolStart string `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
 	PoolEnd   string `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
 	LeaseTime string `yaml:"lease-time,omitempty" json:"lease-time,omitempty"` // e.g. "24h", "1h30m"

@@ -842,11 +842,7 @@ func runWatchdogMode() {
 
 	const (
 		monitorInterval = 3 * time.Second
-		probeInterval   = 30 * time.Second
 		ifaceInterval   = 5 * time.Second
-		probeFailLimit  = 10
-		dnsTimeout      = 5 * time.Second
-		httpTimeout     = 30 * time.Second
 		restartCooldown = 10 * time.Second
 	)
 
@@ -856,23 +852,20 @@ func runWatchdogMode() {
 		return
 	}
 
-	probeURLs := loadProbeURLsFromConfig()
-
-	probe := func() bool {
-		currentIfIndex := getCurrentTUNInterfaceIndex()
-		if currentIfIndex <= 0 {
-			return false
-		}
-		return tun.ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, currentIfIndex, probeURLs)
-	}
-
-	probeFailCount := 0
 	lastRestart := time.Time{}
 
 	restartChild := func(cp *childProcess, pid int, reason string) *childProcess {
 		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
 		cp.kill(syscall.SIGTERM)
-		cp.wait()
+		// Wait up to 10 seconds for the child to exit. If it's stuck,
+		// escalate to SIGKILL.
+		select {
+		case <-cp.done:
+		case <-time.After(10 * time.Second):
+			util.LogWarn("watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
+			cp.kill(syscall.SIGKILL)
+			<-cp.done
+		}
 		reapChild(pid)
 		tun.CleanupResidual()
 		if elapsed := time.Since(lastRestart); elapsed < restartCooldown {
@@ -887,7 +880,6 @@ func runWatchdogMode() {
 		}
 		util.LogInfo("watchdog: restarted child (old=%d, new=%d)", pid, newCp.proc.Pid)
 		lastRestart = time.Now()
-		probeFailCount = 0
 		return newCp
 	}
 
@@ -912,8 +904,6 @@ func runWatchdogMode() {
 
 	monitorTicker := time.NewTicker(monitorInterval)
 	defer monitorTicker.Stop()
-	probeTicker := time.NewTicker(probeInterval)
-	defer probeTicker.Stop()
 	ifaceTicker := time.NewTicker(ifaceInterval)
 	defer ifaceTicker.Stop()
 
@@ -982,27 +972,6 @@ func runWatchdogMode() {
 				pid = cp.proc.Pid
 				spawnTime = time.Now()
 			}
-
-		case <-probeTicker.C:
-			// Only probe after the child has signaled ready.
-			if !cp.ready.Load() {
-				continue
-			}
-			if probe() {
-				probeFailCount = 0
-				continue
-			}
-			probeFailCount++
-			util.LogWarn("watchdog: probe failed (%d/%d)", probeFailCount, probeFailLimit)
-			if probeFailCount >= probeFailLimit {
-				cp = restartChild(cp, pid, fmt.Sprintf("probe unreachable (%d failures)", probeFailLimit))
-				if cp == nil {
-					signal.Stop(sigCh)
-					return
-				}
-				pid = cp.proc.Pid
-				spawnTime = time.Now()
-			}
 		}
 	}
 }
@@ -1013,20 +982,6 @@ func buildWorkerEnv() []string {
 	env := os.Environ()
 	env = append(env, "PHAETHON_WORKER=1")
 	return env
-}
-
-// loadProbeURLsFromConfig reads probe URLs from the config file.
-// Falls back to nil (which makes the probe use tun.DefaultProbeURLs).
-func loadProbeURLsFromConfig() []string {
-	configFile := filepath.Join(".", "config.yaml")
-	cfg, err := config.LoadRaw(configFile)
-	if err != nil {
-		return nil
-	}
-	if cfg.TUN == nil {
-		return nil
-	}
-	return cfg.TUN.ProbeURLList()
 }
 
 // writeStartupError persists a fatal startup error to disk so the user can

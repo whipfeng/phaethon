@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -47,28 +46,6 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 	}
 
 	return &TUNResource{engine: engine}
-}
-
-// getCurrentTUNInterfaceIndex returns the current interface index of the
-// phaethontun adapter. This is used by the watchdog to dynamically bind to
-// the correct interface, avoiding stale indices when the adapter is recreated.
-func getCurrentTUNInterfaceIndex() int {
-	iface, err := net.InterfaceByName("phaethontun")
-	if err != nil {
-		return 0
-	}
-	return iface.Index
-}
-
-// waitForExit waits up to timeout for a process to exit.
-func waitForExit(pid int, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !processExists(pid) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 const stoppedMarkerPath = "/var/run/phaethon.stopped"

@@ -68,6 +68,19 @@ func CleanupResidual() {
 			} else {
 				util.LogWarn("tun: cleanup restore ip_forward fail: %v", err)
 			}
+			// Clean up iptables FORWARD rules
+			if state.IfaceName != "" {
+				if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", "tun0", "-j", "ACCEPT").CombinedOutput(); err == nil {
+					util.LogInfo("tun: cleanup removed iptables FORWARD %s->tun0", state.IfaceName)
+				} else {
+					util.LogDebug("tun: cleanup iptables FORWARD %s->tun0: %v: %s", state.IfaceName, err, out)
+				}
+				if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", "tun0", "-o", state.IfaceName, "-j", "ACCEPT").CombinedOutput(); err == nil {
+					util.LogInfo("tun: cleanup removed iptables tun0->%s", state.IfaceName)
+				} else {
+					util.LogDebug("tun: cleanup iptables FORWARD tun0->%s: %v: %s", state.IfaceName, err, out)
+				}
+			}
 		} else {
 			util.LogWarn("tun: cleanup parse state file fail: %v", err)
 		}

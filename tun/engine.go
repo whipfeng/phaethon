@@ -339,6 +339,9 @@ func (e *Engine) Start() error {
 	//    outbound sockets are bound to the correct physical interface by the
 	//    dialer package, so proxy traffic does not loop back into TUN.
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
+	if e.ruleConf != nil && e.ruleConf.TUN != nil {
+		e.routeMgr.bypassGateway = e.ruleConf.TUN.IsBypassGateway()
+	}
 	// On Windows the Wintun adapter LUID is available immediately; passing it in
 	// avoids waiting for the TCP/IP stack to register the adapter by name.
 	if luidGetter, ok := dev.(interface{ LUID() uint64 }); ok {

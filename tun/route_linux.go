@@ -93,7 +93,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		// arriving on the physical interface because the kernel thinks they
 		// should arrive via TUN. Loose mode (2) accepts them as long as any
 		// route can reach the source.
-		if r.DefaultIfaceName != "" {
+		// Also enable IP forwarding and save state — all only needed for bypass
+		// gateway where LAN client traffic arrives on the physical interface.
+		if r.DefaultIfaceName != "" && r.bypassGateway {
 			if orig, err := readRpFilter(r.DefaultIfaceName); err == nil {
 				r.originalRpFilter = orig
 				util.LogInfo("tun: physical %s original rp_filter: %d", r.DefaultIfaceName, orig)
@@ -104,26 +106,24 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			if err := writeRpFilter("all", 2); err != nil {
 				util.LogWarn("tun: set all rp_filter=2 fail: %v", err)
 			}
-		}
 
-		// Enable IP forwarding so the kernel forwards packets between interfaces
-		// (required for bypass gateway where client traffic arrives on the
-		// physical interface and must be routed through TUN).
-		if orig, err := readIPForward(); err == nil {
-			r.originalIPForward = orig
-			util.LogInfo("tun: original ip_forward: %d", orig)
-			if orig == 0 {
-				if err := writeIPForward(1); err != nil {
-					util.LogWarn("tun: enable ip_forward fail: %v", err)
+			// Enable IP forwarding so the kernel forwards packets between interfaces.
+			if orig, err := readIPForward(); err == nil {
+				r.originalIPForward = orig
+				util.LogInfo("tun: original ip_forward: %d", orig)
+				if orig == 0 {
+					if err := writeIPForward(1); err != nil {
+						util.LogWarn("tun: enable ip_forward fail: %v", err)
+					}
 				}
+			} else {
+				util.LogWarn("tun: read ip_forward fail: %v", err)
 			}
-		} else {
-			util.LogWarn("tun: read ip_forward fail: %v", err)
-		}
 
-		// Save original kernel parameter values to a state file so the watchdog
-		// can restore them if the main process crashes (kill -9, panic, etc.).
-		saveTUNState(r.DefaultIfaceName, r.originalRpFilter, r.originalIPForward)
+			// Save original kernel parameter values to a state file so the watchdog
+			// can restore them if the main process crashes (kill -9, panic, etc.).
+			saveTUNState(r.DefaultIfaceName, r.originalRpFilter, r.originalIPForward)
+		}
 	}
 
 	// 4. Add exclusion routes (LAN/private subnets bypass TUN via original gateway)
@@ -167,7 +167,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// TUN interface. This is required for bypass gateway mode where client
 	// traffic arrives on the physical interface and must be forwarded to TUN.
 	// Docker's default FORWARD policy is DROP, so explicit ACCEPT rules are needed.
-	if r.DefaultIfaceName != "" {
+	if r.DefaultIfaceName != "" && r.bypassGateway {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
 		// Allow traffic from physical to TUN (client queries going to netstack)

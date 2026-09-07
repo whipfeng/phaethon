@@ -30,6 +30,7 @@ type RouteManager struct {
 	excludeIPs      []string
 	appliedExcludes []string
 	tunIP           string
+	bypassGateway   bool
 
 	// DefaultIfaceName is the original default interface name (e.g. "eth0", "en0").
 	// Used for DIRECT connection socket binding to bypass TUN routes.

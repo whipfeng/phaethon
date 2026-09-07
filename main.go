@@ -115,10 +115,11 @@ func toggleTUN(enable bool, resPtr **activeResources) error {
 func buildTUNStatus(res *activeResources) map[string]interface{} {
 	if res == nil || res.ruleConf == nil {
 		return map[string]interface{}{
-			"available":  tun.Available(),
-			"enabled":    true,
-			"running":    false,
-			"deviceName": "",
+			"available":     tun.Available(),
+			"enabled":       false,
+			"bypassGateway": false,
+			"running":       false,
+			"deviceName":    "",
 			"routes": map[string]interface{}{
 				"applied":           false,
 				"tunIP":             "",
@@ -133,12 +134,13 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			"probeURLs": []string{},
 		}
 	}
-	enabled := res.ruleConf.TUN == nil || res.ruleConf.TUN.Enabled == nil || *res.ruleConf.TUN.Enabled
+	enabled := res.ruleConf.TUN.IsEnabled()
 	status := map[string]interface{}{
-		"available":  tun.Available(),
-		"enabled":    enabled,
-		"running":    false,
-		"deviceName": "",
+		"available":     tun.Available(),
+		"enabled":       enabled,
+		"bypassGateway": res.ruleConf.TUN.IsBypassGateway(),
+		"running":       false,
+		"deviceName":    "",
 		"routes": map[string]interface{}{
 			"applied":           false,
 			"tunIP":             "",

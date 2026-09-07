@@ -3664,12 +3664,13 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		status := map[string]interface{}{
-			"available":  tun.Available(),
-			"enabled":    true,
-			"running":    false,
-			"deviceName": "",
-			"routes":     tun.RouteSnapshot{},
-			"logs":       []string{},
+			"available":       tun.Available(),
+			"enabled":         true,
+			"bypassGateway":   false,
+			"running":         false,
+			"deviceName":      "",
+			"routes":          tun.RouteSnapshot{},
+			"logs":            []string{},
 		}
 		if s.GetTUNStatus != nil {
 			if runtime := s.GetTUNStatus(); runtime != nil {
@@ -3680,55 +3681,80 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Fallback: derive enabled from the config being edited
 			dc := s.displayConf()
-			if dc.TUN != nil && dc.TUN.Enabled != nil {
-				status["enabled"] = *dc.TUN.Enabled
+			if dc.TUN != nil {
+				if dc.TUN.Enabled != nil {
+					status["enabled"] = *dc.TUN.Enabled
+				}
+				status["bypassGateway"] = dc.TUN.IsBypassGateway()
 			}
 		}
 		jsonResponse(w, status)
 
 	case http.MethodPatch:
 		var req struct {
-			Enabled bool `json:"enabled"`
+			Enabled       *bool `json:"enabled"`
+			BypassGateway *bool `json:"bypassGateway"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "parse fail", http.StatusBadRequest)
 			return
 		}
-		if s.OnTUNToggle == nil {
-			httpError(w, "TUN toggle not available", http.StatusServiceUnavailable)
-			return
-		}
 
-		// Resolve the editable config outside the lock; displayConf uses RLock
-		// and must not be called while holding the write lock.
 		dc := s.displayConf()
 
-		if err := s.OnTUNToggle(req.Enabled); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		s.mu.Lock()
-		if dc.TUN == nil {
-			dc.TUN = &config.TUNConfig{}
-		}
-		dc.TUN.Enabled = &req.Enabled
-		// Keep runtime config in sync so the status API reports the new state immediately.
-		if s.conf != nil {
-			if s.conf.TUN == nil {
-				s.conf.TUN = &config.TUNConfig{}
+		// TUN enabled toggle — requires callback to start/stop the engine.
+		if req.Enabled != nil {
+			if s.OnTUNToggle == nil {
+				httpError(w, "TUN toggle not available", http.StatusServiceUnavailable)
+				return
 			}
-			s.conf.TUN.Enabled = &req.Enabled
-		}
-		if err := s.saveConfigLocked(); err != nil {
+			if err := s.OnTUNToggle(*req.Enabled); err != nil {
+				httpError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.mu.Lock()
+			if dc.TUN == nil {
+				dc.TUN = &config.TUNConfig{}
+			}
+			dc.TUN.Enabled = req.Enabled
+			if s.conf != nil {
+				if s.conf.TUN == nil {
+					s.conf.TUN = &config.TUNConfig{}
+				}
+				s.conf.TUN.Enabled = req.Enabled
+			}
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 			s.mu.Unlock()
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
+			util.LogInfo("[ADMIN] TUN toggle enabled=%v", *req.Enabled)
+			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
-		s.mu.Unlock()
 
-		util.LogInfo("[ADMIN] TUN toggle enabled=%v", req.Enabled)
-		util.DefaultVersionNotifier.BumpVersion("tun")
+		// Bypass gateway toggle — config-only, takes effect on next TUN start.
+		if req.BypassGateway != nil {
+			s.mu.Lock()
+			if dc.TUN == nil {
+				dc.TUN = &config.TUNConfig{}
+			}
+			dc.TUN.BypassGateway = req.BypassGateway
+			if s.conf != nil {
+				if s.conf.TUN == nil {
+					s.conf.TUN = &config.TUNConfig{}
+				}
+				s.conf.TUN.BypassGateway = req.BypassGateway
+			}
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.mu.Unlock()
+			util.LogInfo("[ADMIN] TUN bypass-gateway=%v", *req.BypassGateway)
+		}
+
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:

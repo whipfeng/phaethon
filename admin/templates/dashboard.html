@@ -71,6 +71,13 @@
                 <span class="slider"></span>
             </label>
         </div>
+        <div class="tun-header" id="tun-bypass-row" style="display:none;padding-top:0;">
+            <span style="font-size:0.85rem;color:var(--text-secondary);" data-i18n="tun.bypassGateway">旁路网关</span>
+            <label class="switch" title="Toggle bypass gateway" style="transform:scale(0.8);transform-origin:right center;">
+                <input type="checkbox" id="tun-bypass-toggle" onchange="toggleBypassGateway(this)">
+                <span class="slider"></span>
+            </label>
+        </div>
         <div id="tun-status">
             <p data-i18n="tun.loading">Loading...</p>
         </div>
@@ -333,6 +340,15 @@
             toggle.disabled = false;
         }
 
+        const bypassRow = document.getElementById('tun-bypass-row');
+        const bypassToggle = document.getElementById('tun-bypass-toggle');
+        if (bypassRow) {
+            bypassRow.style.display = data.available ? 'flex' : 'none';
+        }
+        if (bypassToggle) {
+            bypassToggle.checked = !!data.bypassGateway;
+        }
+
         const running = data.running;
         const enabled = data.enabled;
         const tRunning = typeof i18n !== 'undefined' ? i18n.t(running ? 'tun.running' : 'tun.stopped') : (running ? 'Running' : 'Stopped');
@@ -415,6 +431,29 @@
         .catch(err => {
             checkbox.checked = !enabled;
             showToast((typeof i18n !== 'undefined' ? i18n.t('tun.toggleFailed') : 'TUN toggle failed') + ': ' + err.message, 'error');
+        })
+        .finally(() => {
+            checkbox.disabled = false;
+        });
+    }
+
+    function toggleBypassGateway(checkbox) {
+        const enabled = checkbox.checked;
+        checkbox.disabled = true;
+        fetch('./api/tun', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({bypassGateway: enabled})
+        })
+        .then(res => {
+            if (!res.ok) {
+                return res.text().then(text => { throw new Error(text); });
+            }
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bypassSaved') : 'Bypass gateway setting saved', 'success');
+        })
+        .catch(err => {
+            checkbox.checked = !enabled;
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bypassFailed') : 'Bypass gateway toggle failed') + ': ' + err.message, 'error');
         })
         .finally(() => {
             checkbox.disabled = false;

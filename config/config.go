@@ -1174,17 +1174,29 @@ type ReverseConfig struct {
 // TUNConfig holds TUN traffic interception settings.
 type TUNConfig struct {
 	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	BypassGateway    *bool    `yaml:"bypass-gateway,omitempty" json:"bypass-gateway,omitempty"`
 	ProbeURLs        []string `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
 	DirectNameserver []string `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
 }
 
-// IsEnabled reports whether TUN is enabled. Omitted or nil means enabled
-// (auto-enable when the TUN extension is available).
+// IsEnabled reports whether TUN is enabled. Omitted or nil means disabled
+// (TUN must be explicitly enabled in the configuration).
 func (t *TUNConfig) IsEnabled() bool {
 	if t == nil || t.Enabled == nil {
-		return true
+		return false
 	}
 	return *t.Enabled
+}
+
+// IsBypassGateway reports whether bypass gateway mode is enabled.
+// When enabled, TUN setup modifies rp_filter, ip_forward, and adds iptables
+// FORWARD rules to allow LAN clients to route traffic through the TUN interface.
+// Omitted or nil means disabled.
+func (t *TUNConfig) IsBypassGateway() bool {
+	if t == nil || t.BypassGateway == nil {
+		return false
+	}
+	return *t.BypassGateway
 }
 
 // ProbeURLList returns the configured TUN watchdog probe URLs, or nil if none

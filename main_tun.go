@@ -41,7 +41,7 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 		return nil
 	}
 
-	if ruleConf != nil && ruleConf.TUN != nil && !ruleConf.TUN.IsEnabled() {
+	if ruleConf == nil || !ruleConf.TUN.IsEnabled() {
 		util.LogInfo("TUN disabled by configuration")
 		return nil
 	}

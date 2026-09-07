@@ -107,6 +107,7 @@
                         <label data-i18n="rule.mappingSource">Mapping Source (optional)</label>
                         <select id="f-rule-mapping">
                             <option value="" data-i18n="rule.anyMapping">Any mapping</option>
+                            <option value="TUN">TUN (tun)</option>
                             {{range .Mappings}}
                             <option value="{{.Name}}">{{.Name}} ({{.Type}})</option>
                             {{end}}

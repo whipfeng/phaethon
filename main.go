@@ -1098,10 +1098,8 @@ func wireAdminCallbacks(resources *activeResources) {
 			var alive bool
 			var latency time.Duration
 			if testURL == "" {
-				// TCP-only check: dial through p.Next to reach p's server
 				alive, latency = checkProxyTCPHealth(p)
 			} else {
-				// Deep check: dial through proxy to test URL
 				host, port, useHTTP := parseTestURL(testURL)
 				path := getTestPath(testURL)
 				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
@@ -1499,7 +1497,6 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 				g.SetHealthImmediate(key, false, 0)
 				continue
 			}
-			// Select a member from the nested group to test
 			p = innerGroup.NextWithVisited(make(map[string]bool))
 			if p == nil {
 				g.SetHealthImmediate(key, false, 0)
@@ -1526,10 +1523,8 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 			var alive bool
 			var latency time.Duration
 			if testURL == "" {
-				// TCP-only check: dial through p.Next to reach p's server
 				alive, latency = checkProxyTCPHealth(p)
 			} else {
-				// Deep check: dial through proxy to test URL
 				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
 			}
 			g.SetHealthImmediate(key, alive, latency)

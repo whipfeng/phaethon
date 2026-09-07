@@ -45,12 +45,27 @@ func setSystemDNS(ifaceName, tunIP string) error {
 
 	// Fallback: backup /etc/resolv.conf and rewrite
 	const resolvConf = "/etc/resolv.conf"
+	const backupSuffix = ".phaethon.bak"
+	backupPath := resolvConf + backupSuffix
+
+	// If a backup from a previous run still exists, the process likely crashed
+	// before restoring. Restore it first so we don't capture TUN-contaminated
+	// DNS or overwrite a good backup.
+	if _, err := os.Stat(backupPath); err == nil {
+		util.LogWarn("tun: stale DNS backup found (previous crash?), restoring first")
+		origData, err := os.ReadFile(backupPath)
+		if err == nil {
+			_ = os.WriteFile(resolvConf, origData, 0644)
+		}
+		_ = os.Remove(backupPath)
+	}
+
 	data, err := os.ReadFile(resolvConf)
 	if err != nil {
 		return fmt.Errorf("read resolv.conf: %w", err)
 	}
 	dnsBackup = append([]byte(nil), data...)
-	dnsBackupPath = resolvConf + ".phaethon.bak"
+	dnsBackupPath = backupPath
 	if err := os.WriteFile(dnsBackupPath, data, 0644); err != nil {
 		return fmt.Errorf("backup resolv.conf: %w", err)
 	}

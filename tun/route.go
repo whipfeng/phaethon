@@ -62,6 +62,11 @@ type RouteManager struct {
 	// default interface before TUN setup (Linux only). Used to restore the
 	// original setting during teardown.
 	originalRpFilter int
+
+	// originalIPForward stores the original net.ipv4.ip_forward value before
+	// TUN setup (Linux only). Used to restore the original setting during
+	// teardown.
+	originalIPForward int
 }
 
 // RouteSnapshot captures the route manager's current applied state.

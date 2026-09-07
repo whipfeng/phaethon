@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -47,7 +48,13 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		util.LogWarn("tun: failed to list routes: %v", err)
 	} else {
 		for _, route := range routes {
-			if route.Dst == nil && route.Gw != nil {
+			isDefault := route.Dst == nil
+			if !isDefault && route.Dst.IP.Equal(net.IPv4zero) {
+				if ones, _ := route.Dst.Mask.Size(); ones == 0 {
+					isDefault = true
+				}
+			}
+			if isDefault && route.Gw != nil {
 				r.originalGateway = route.Gw
 				if ifaceLink, err := netlink.LinkByIndex(route.LinkIndex); err == nil {
 					r.DefaultIfaceName = ifaceLink.Attrs().Name
@@ -64,6 +71,25 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			util.LogInfo("tun: original DNS servers: %v", servers)
 		} else {
 			util.LogWarn("tun: failed to capture original DNS servers: %v", err)
+		}
+
+		// Save and relax rp_filter on the physical interface. The split-tunnel
+		// routes (0.0.0.0/1, 128.0.0.0/1) via TUN are more specific than the
+		// default route, so strict rp_filter (mode 1) drops return packets
+		// arriving on the physical interface because the kernel thinks they
+		// should arrive via TUN. Loose mode (2) accepts them as long as any
+		// route can reach the source.
+		if r.DefaultIfaceName != "" {
+			if orig, err := readRpFilter(r.DefaultIfaceName); err == nil {
+				r.originalRpFilter = orig
+				util.LogInfo("tun: physical %s original rp_filter: %d", r.DefaultIfaceName, orig)
+			}
+			if err := writeRpFilter(r.DefaultIfaceName, 2); err != nil {
+				util.LogWarn("tun: set %s rp_filter=2 fail: %v", r.DefaultIfaceName, err)
+			}
+			if err := writeRpFilter("all", 2); err != nil {
+				util.LogWarn("tun: set all rp_filter=2 fail: %v", err)
+			}
 		}
 	}
 
@@ -108,6 +134,13 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 }
 
 func (r *RouteManager) platformTeardown() {
+	// Restore rp_filter on the physical interface.
+	if r.DefaultIfaceName != "" {
+		if err := writeRpFilter(r.DefaultIfaceName, r.originalRpFilter); err != nil {
+			util.LogWarn("tun: restore %s rp_filter=%d fail: %v", r.DefaultIfaceName, r.originalRpFilter, err)
+		}
+	}
+
 	link, err := netlink.LinkByName(r.devName)
 	if err != nil {
 		return
@@ -153,6 +186,27 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 
 func isExist(err error) bool {
 	return errors.Is(err, syscall.EEXIST)
+}
+
+// readRpFilter reads the current rp_filter value for the given interface or
+// "all"/"default" pseudo-interface from /proc/sys/net/ipv4/conf/<if>/rp_filter.
+func readRpFilter(iface string) (int, error) {
+	path := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", iface)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// writeRpFilter sets the rp_filter value for the given interface.
+func writeRpFilter(iface string, value int) error {
+	path := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", iface)
+	return os.WriteFile(path, []byte(strconv.Itoa(value)), 0644)
 }
 
 // readResolvConfNameservers returns the nameserver entries from /etc/resolv.conf.

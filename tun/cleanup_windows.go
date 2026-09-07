@@ -24,7 +24,7 @@ func CleanupResidual() {
 			{net.ParseIP("0.0.0.0").To4(), 1},
 			{net.ParseIP("128.0.0.0").To4(), 1},
 		} {
-			// Current /30 P2P scheme: next hop is the virtual peer gateway (192.0.2.1).
+			// Current /29 scheme: next hop is the TUN adapter (192.0.2.2).
 			var fwdRow mibIpForwardRow2
 			fwdRow.init()
 			fwdRow.setInterfaceLuid(luid)
@@ -35,7 +35,7 @@ func CleanupResidual() {
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 
-			// Current /30 P2P scheme: next hop is the virtual peer gateway (192.0.2.1).
+			// Current /29 scheme: next hop is the virtual peer gateway (192.0.2.1).
 			fwdRow.setNextHop(net.ParseIP("192.0.2.1").To4())
 			fwdRow.setMetric(0)
 			fwdRow.setMetric(1)
@@ -59,7 +59,7 @@ func CleanupResidual() {
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 
-			// Metric 1 variant (older /30 P2P builds).
+			// Metric 1 variant (older /29 P2P builds).
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 
@@ -119,9 +119,9 @@ func CleanupResidual() {
 			}
 		}
 
-		// Delete interface addresses for current /30 scheme and legacy prefixes.
-		for _, ip := range []net.IP{net.ParseIP("192.0.2.2").To4(), net.ParseIP("192.0.2.1").To4(), net.ParseIP("198.18.0.1").To4()} {
-			for _, prefixLen := range []uint8{31, 32, 30, 24, 15} {
+		// Delete interface addresses for current /29 scheme, legacy /30, and older prefixes.
+		for _, ip := range []net.IP{net.ParseIP("192.0.2.3").To4(), net.ParseIP("192.0.2.2").To4(), net.ParseIP("192.0.2.1").To4(), net.ParseIP("198.18.0.1").To4()} {
+			for _, prefixLen := range []uint8{31, 32, 30, 29, 24, 15} {
 				var addrRow mibUnicastIpAddressRow
 				addrRow.init()
 				addrRow.setAddress(ip)

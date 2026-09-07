@@ -140,10 +140,10 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	req := config.NewConnectRequest(dstAddr, dstPort)
 	req = s.RuleConf.Resolving(req)
 
-	proxy := s.RuleConf.Match(req, s.Mapping)
+	proxy, ruleName := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, req.DstAddr, req.DstPort)
+		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
@@ -329,7 +329,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 		req := config.NewConnectRequest(dstAddr, dstPort)
 		req = s.RuleConf.Resolving(req)
-		proxy := s.RuleConf.Match(req, s.Mapping)
+		proxy, _ := s.RuleConf.Match(req, s.Mapping)
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}

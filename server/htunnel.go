@@ -792,7 +792,7 @@ func (s *HTunnelServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 				port, _ := strconv.Atoi(portStr)
 				req := config.NewConnectRequest(host, port)
 				req = s.RuleConf.Resolving(req)
-				proxy := s.RuleConf.Match(req, s.Mapping)
+				proxy, _ := s.RuleConf.Match(req, s.Mapping)
 				if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyREJECT {
 					upc, err := s.getProxyConn(ch, proxy)
 					if err == nil {
@@ -1010,7 +1010,7 @@ func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping
 	req := config.NewConnectRequest(dstHost, dstPort)
 	req = ruleConf.Resolving(req)
 
-	proxy := ruleConf.Match(req, mapping)
+	proxy, _ := ruleConf.Match(req, mapping)
 	if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		return nil, fmt.Errorf("[HT-SVR] [%s] [%s] rejected %s:%d", mapping.Name, connID, dstHost, dstPort)
 	}

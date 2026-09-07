@@ -644,7 +644,7 @@ func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Ma
 	req := config.NewConnectRequest(dstHost, dstPort)
 	req = ruleConf.Resolving(req)
 
-	proxy := ruleConf.Match(req, mapping)
+	proxy, _ := ruleConf.Match(req, mapping)
 	if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		return
 	}

@@ -43,9 +43,10 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// MAC address, and packets routed to the TUN interface are silently dropped.
 	// A proper fix requires either using a TAP-Windows adapter (which has a MAC
 	// address) or a WFP-based packet capture mechanism (e.g. WinDivert).
-	// The DNS hijacker lives on 127.0.0.1 inside the gVisor netstack and is reached
-	// through the Windows-side DNS proxy listening on 192.0.2.2:53. We do not set a
-	// default gateway via netsh; split-tunnel routes are added manually below.
+	// The DNS hijacker lives on 192.0.2.3 inside the gVisor netstack and is reached
+	// via routing through the TUN device. System DNS is set to 192.0.2.3 so queries
+	// route through TUN to the hijacker. We do not set a default gateway via netsh;
+	// split-tunnel routes are added manually below.
 	// Clear any stale static IP first to avoid "object already exists" errors.
 	_ = clearInterfaceIPAPI(luid, index)
 	adapterPrefixLen := 32

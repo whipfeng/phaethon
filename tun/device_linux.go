@@ -43,7 +43,6 @@ func CreateDevice() (Device, error) {
 		mtu:  1500,
 	}
 
-	unix.SetNonblock(fd, true)
 	return tun, nil
 }
 

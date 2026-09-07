@@ -136,12 +136,41 @@ func dialBound(network, addr string, dst net.IP) (net.Conn, error) {
 	d := net.Dialer{Timeout: 30 * time.Second}
 
 	if bc != nil {
+		if ifaceName := resolveIfaceForDst(bc, dst); ifaceName != "" {
+			if iface, err := net.InterfaceByName(ifaceName); err == nil {
+				if localIP := selectLocalIP(iface.Index, dst); localIP != nil {
+					d.LocalAddr = &net.TCPAddr{IP: localIP}
+				}
+			}
+		}
 		d.Control = func(network, address string, c syscall.RawConn) error {
 			return bc.BindSocket(c, dst)
 		}
 	}
 
 	return d.Dial(network, addr)
+}
+
+// resolveIfaceForDst returns the interface name that should be used for traffic
+// to dst, simulating the kernel's routing decision while excluding TUN routes.
+func resolveIfaceForDst(bc *BindContext, dst net.IP) string {
+	return bc.ResolveIface(dst)
+}
+
+// ResolveIface returns the interface name for traffic to dst by doing a
+// route lookup that excludes the TUN interface. Results are cached for 30s.
+func (b *BindContext) ResolveIface(dst net.IP) string {
+	if dst == nil {
+		return b.DefaultIfaceName
+	}
+	if cached, ok := cachedRoute(dst, "resolve"); ok {
+		return cached
+	}
+	iface := routeIfaceForDst(b, dst)
+	if iface != "" {
+		setCachedRoute(dst, "resolve", iface)
+	}
+	return iface
 }
 
 // ListenPacketRouteAware creates a UDP socket bound to the default physical

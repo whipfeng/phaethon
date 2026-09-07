@@ -55,10 +55,10 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	addrReq := config.NewConnectRequest(host, port)
 	addrReq = s.RuleConf.Resolving(addrReq)
 
-	proxy := s.RuleConf.Match(addrReq, s.Mapping)
+	proxy, ruleName := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
@@ -94,10 +94,10 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	addrReq := config.NewConnectRequest(host, port)
 	addrReq = s.RuleConf.Resolving(addrReq)
 
-	proxy := s.RuleConf.Match(addrReq, s.Mapping)
+	proxy, ruleName := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}

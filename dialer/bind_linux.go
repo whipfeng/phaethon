@@ -12,28 +12,25 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-	"phaethon/util"
 )
 
 func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
-	iface := b.DefaultIfaceName
-	if dst != nil && dst.To4() != nil {
-		if cached, ok := cachedRoute(dst, ""); ok {
-			iface = cached
-		} else {
-			if bestIface, err := linuxRouteIface(dst.To4(), b.TUNIfaceName, b.DefaultIfaceName); err == nil && bestIface != "" {
-				iface = bestIface
-				setCachedRoute(dst, "", iface)
-			} else if err != nil {
-				util.LogDebug("dialer/bind: route lookup for %s failed: %v", dst, err)
-			}
-		}
-	}
-
+	iface := b.ResolveIface(dst)
 	if iface == "" {
 		return nil
 	}
 	return setBindToDevice(c, iface)
+}
+
+// routeIfaceForDst returns the interface name for traffic to dst by parsing
+// /proc/net/route, excluding the TUN interface.
+func routeIfaceForDst(b *BindContext, dst net.IP) string {
+	if dst != nil && dst.To4() != nil {
+		if bestIface, err := linuxRouteIface(dst.To4(), b.TUNIfaceName, b.DefaultIfaceName); err == nil {
+			return bestIface
+		}
+	}
+	return b.DefaultIfaceName
 }
 
 func setBindToDevice(c syscall.RawConn, iface string) error {

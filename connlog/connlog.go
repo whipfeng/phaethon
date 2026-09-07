@@ -118,7 +118,7 @@ func FormatEvent(e Event) string {
 		icon = "✗"
 	}
 	proxy := e.Proxy
-	if proxy == "" {
+	if proxy == "" && e.Status == "ok" {
 		proxy = "DIRECT"
 	}
 	if e.Error != "" {

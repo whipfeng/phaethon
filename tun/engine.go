@@ -30,6 +30,10 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+// TUNMapping is a special mapping that represents traffic entering through
+// the TUN interface. Rules can use "#TUN" suffix to target TUN traffic.
+var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
+
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
 	ruleConf  *config.RuleConfiguration
@@ -51,7 +55,6 @@ type Engine struct {
 	// packet counters for diagnostics
 	readPackets  atomic.Uint64
 	writePackets atomic.Uint64
-	dnsProxy     *DNSProxy
 
 	// stats notification with debounce
 	statsNotifyMu    sync.Mutex
@@ -299,14 +302,14 @@ func (e *Engine) Start() error {
 	// it must NOT be added as a local netstack address, otherwise replies
 	// destined to it from the DNS hijacker / forwarders would be looped back
 	// inside netstack instead of being written back to the Wintun device.
-	// dnsIP is the internal DNS hijacker address. It is kept off the TUN subnet
-	// so that locally-originated DNS queries are delivered to the hijacker
-	// inside netstack rather than routed out the Wintun device.
+	// dnsIP is a dedicated DNS address within the TUN subnet. DNSHijacker binds
+	// to this address inside netstack. DNS queries are routed through the TUN
+	// device to reach it, eliminating the need for a host-side DNS proxy.
 	hostIP := net.ParseIP("192.0.2.2").To4()
-	dnsIP := net.ParseIP("127.0.0.1").To4()
+	dnsIP := net.ParseIP("192.0.2.3").To4()
 	e.addr = tcpip.AddrFrom4([4]byte(hostIP))
 	e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
-	e.prefixLen = 30
+	e.prefixLen = 29
 
 	// 3. Create netstack
 	if err := e.initStack(); err != nil {
@@ -380,17 +383,9 @@ func (e *Engine) Start() error {
 	e.wg.Add(1)
 	go e.logPacketCounts()
 
-	// 8. Start a Windows-side DNS proxy on the TUN adapter IP. System DNS is set
-	//    to the adapter IP, so Windows delivers queries to this local socket;
-	//    the proxy forwards them into the netstack DNS hijacker.
-	e.dnsProxy = NewDNSProxy(e)
-	if err := e.dnsProxy.Start(); err != nil {
-		util.LogWarn("tun: failed to start DNS proxy: %v", err)
-	}
-
-	// 9. Redirect system DNS to the TUN adapter IP so applications send queries
-	//    to the local DNS proxy.
-	if err := setSystemDNS(dev.Name(), hostIP.String()); err != nil {
+	// 8. Redirect system DNS to the dedicated DNS address in the TUN subnet
+	//    so applications send queries that route through TUN to DNSHijacker.
+	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
 		util.LogWarn("tun: failed to set system dns: %v", err)
 	}
 
@@ -435,13 +430,6 @@ func (e *Engine) Stop() error {
 
 	// Clear the global bind context so subsequent dials resume normal behavior.
 	dialer.SetGlobalBindContext(nil)
-
-	// Stop the Windows-side DNS proxy so queries are not answered after system
-	// DNS is restored.
-	if e.dnsProxy != nil {
-		e.dnsProxy.Stop()
-		e.dnsProxy = nil
-	}
 
 	// 1. Restore system DNS first while the TUN adapter still exists.
 	if e.device != nil {
@@ -493,7 +481,7 @@ func (e *Engine) initStack() error {
 		return fmt.Errorf("create nic: %v", err)
 	}
 
-	ap := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 8}
+	ap := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 32}
 	protoAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
@@ -502,7 +490,7 @@ func (e *Engine) initStack() error {
 		return fmt.Errorf("add dns address: %v", err)
 	}
 
-	// Do NOT add 192.0.2.2/30 as a local netstack address. The TUN adapter IP
+	// Do NOT add 192.0.2.2 as a local netstack address. The TUN adapter IP
 	// is configured on the Windows side so the host uses it as the source
 	// address for packets entering Wintun. If netstack considered it local,
 	// DNS responses (and other replies) destined to 192.0.2.2 would be
@@ -566,6 +554,9 @@ func (e *Engine) readLoop() {
 				if errors.Is(err, ErrSessionClosed) {
 					util.LogError("tun: session closed, stopping read loop: %v", err)
 					return
+				}
+				if errors.Is(err, syscall.EAGAIN) {
+					continue
 				}
 				util.LogWarn("tun: read error: %v", err)
 				continue
@@ -830,7 +821,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	var proxy *config.Proxy
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy = e.ruleConf.Match(req, nil)
+		proxy, _ = e.ruleConf.Match(req, TUNMapping)
 	}
 
 	resolvedAddr := req.DstAddr
@@ -964,7 +955,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	var proxy *config.Proxy
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy = e.ruleConf.Match(req, nil)
+		proxy, _ = e.ruleConf.Match(req, TUNMapping)
 	}
 
 	// Use the (possibly redirected) destination from Resolving

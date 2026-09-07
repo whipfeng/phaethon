@@ -188,10 +188,10 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	req := config.NewConnectRequest(dstAddr, dstPort)
 	req = s.RuleConf.Resolving(req)
 
-	proxy := s.RuleConf.Match(req, s.Mapping)
+	proxy, ruleName := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, req.DstAddr, req.DstPort)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
 		sendSocks5Response(clientConn, 0x04) // Host unreachable
 		return
 	}
@@ -440,7 +440,7 @@ func (r *socks5UDPRelay) run() {
 		req := config.NewConnectRequest(dstAddr, dstPort)
 		req = r.ruleConf.Resolving(req)
 
-		proxy := r.ruleConf.Match(req, r.mapping)
+		proxy, _ := r.ruleConf.Match(req, r.mapping)
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}

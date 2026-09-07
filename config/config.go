@@ -1594,7 +1594,7 @@ func (c *RuleConfiguration) HasReverseAddress(addr string) bool {
 // Match finds the matching proxy for the given request and mapping.
 // It resolves Group names by delegating to group.Next(), which returns a *Proxy
 // from the group's internal subscription pool or the global namespace.
-func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) *Proxy {
+func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) (*Proxy, string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for _, matcher := range c.Matchers {
@@ -1602,9 +1602,9 @@ func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) *Proxy
 		if proxyName == "" {
 			continue
 		}
-		return c.resolveName(proxyName)
+		return c.resolveName(proxyName), proxyName
 	}
-	return nil
+	return nil, ""
 }
 
 func (c *RuleConfiguration) resolveName(name string) *Proxy {

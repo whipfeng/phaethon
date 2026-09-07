@@ -35,6 +35,19 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 	return setBoundIf(c, idx, dst)
 }
 
+// routeIfaceForDst returns the interface name for traffic to dst by shelling
+// out to "route -n get", excluding the TUN interface.
+func routeIfaceForDst(b *BindContext, dst net.IP) string {
+	idx, err := darwinRouteIfaceIndex(dst, b.TUNIfaceName, b.DefaultIfaceIndex)
+	if err != nil {
+		return b.DefaultIfaceName
+	}
+	if iface, err := net.InterfaceByIndex(idx); err == nil {
+		return iface.Name
+	}
+	return b.DefaultIfaceName
+}
+
 func setBoundIf(c syscall.RawConn, idx int, dst net.IP) error {
 	var sockErr error
 	err := c.Control(func(fd uintptr) {

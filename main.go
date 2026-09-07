@@ -1578,6 +1578,9 @@ func loadHealthState(ruleConf *config.RuleConfiguration) {
 		for _, m := range g.Members {
 			key := m.HealthKey()
 			if e, ok := groupState[key]; ok {
+				if !e.Alive {
+					continue
+				}
 				g.SetHealth(key, e.Alive, time.Duration(e.LatencyMs)*time.Millisecond)
 				loaded++
 			}
@@ -1818,7 +1821,7 @@ func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscri
 	// Resolve proxy for subscription URL via rules
 	subHost, subPort, _ := parseTestURL(sub.URL)
 	req := config.NewConnectRequest(subHost, subPort)
-	proxy := ruleConf.Match(req, nil)
+	proxy, _ := ruleConf.Match(req, nil)
 
 	var content string
 	var err error

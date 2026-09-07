@@ -75,6 +75,21 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 	return sockErr
 }
 
+// routeIfaceForDst returns the interface name for traffic to dst using
+// GetBestRoute2, excluding the TUN interface by LUID.
+func routeIfaceForDst(b *BindContext, dst net.IP) string {
+	idx := currentDefaultIndex(b)
+	if dst != nil {
+		if bestIdx, err := bestRouteIndex(dst, b.TUNLUID, uint32(idx)); err == nil {
+			idx = int(bestIdx)
+		}
+	}
+	if iface, err := net.InterfaceByIndex(idx); err == nil {
+		return iface.Name
+	}
+	return b.DefaultIfaceName
+}
+
 // htonl converts a uint32 from host to network byte order.
 func htonl(val uint32) uint32 {
 	return (val&0xFF)<<24 | (val&0xFF00)<<8 | (val&0xFF0000)>>8 | (val&0xFF000000)>>24

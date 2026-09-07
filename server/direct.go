@@ -29,10 +29,10 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	req := config.NewConnectRequest(dstHost, dstPort)
 	req = s.RuleConf.Resolving(req)
 
-	proxy := s.RuleConf.Match(req, s.Mapping)
+	proxy, ruleName := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] all proxies dead, rejecting %s:%d", s.Mapping.Name, dstHost, dstPort)
-		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, "", "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, dstHost, dstPort)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {

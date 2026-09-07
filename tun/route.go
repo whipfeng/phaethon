@@ -57,6 +57,11 @@ type RouteManager struct {
 	// enabled on the physical default interface before TUN setup (Windows only).
 	// Used to restore the original setting during teardown.
 	originalPhysicalWeakHostReceive bool
+
+	// originalRpFilter stores the original rp_filter value of the physical
+	// default interface before TUN setup (Linux only). Used to restore the
+	// original setting during teardown.
+	originalRpFilter int
 }
 
 // RouteSnapshot captures the route manager's current applied state.

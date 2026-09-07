@@ -196,8 +196,7 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP)
 		return nil, fmt.Errorf("dhcp: config is nil")
 	}
 
-	// Validate interface exists and has an IPv4 address at startup.
-	// IP/mask are read dynamically on each DHCP request to handle IP changes.
+	// Get interface info for pool auto-generation
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("dhcp: interface %q: %w", ifaceName, err)
@@ -206,21 +205,58 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP)
 	if err != nil {
 		return nil, fmt.Errorf("dhcp: get interface addrs: %w", err)
 	}
-	hasIPv4 := false
+
+	var ifaceIP net.IP
+	var ifaceMask net.IPMask
 	for _, a := range addrs {
 		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-			hasIPv4 = true
+			ifaceIP = ipNet.IP.To4()
+			ifaceMask = ipNet.Mask
 			break
 		}
 	}
-	if !hasIPv4 {
+	if ifaceIP == nil {
 		return nil, fmt.Errorf("dhcp: no IPv4 address on interface %q", ifaceName)
 	}
 
-	poolStart := net.ParseIP(cfg.PoolStart).To4()
-	poolEnd := net.ParseIP(cfg.PoolEnd).To4()
-	if poolStart == nil || poolEnd == nil {
-		return nil, fmt.Errorf("dhcp: invalid pool-start or pool-end")
+	// Determine pool range: use configured values or auto-generate
+	var poolStart, poolEnd net.IP
+	if cfg.PoolStart != "" && cfg.PoolEnd != "" {
+		poolStart = net.ParseIP(cfg.PoolStart).To4()
+		poolEnd = net.ParseIP(cfg.PoolEnd).To4()
+		if poolStart == nil || poolEnd == nil {
+			return nil, fmt.Errorf("dhcp: invalid pool-start or pool-end")
+		}
+	} else {
+		// Auto-generate pool from interface subnet
+		// Use the upper portion of the subnet: .200 - .250 for /24
+		// For smaller subnets, use the upper half
+		networkIP := ifaceIP.Mask(ifaceMask)
+		ones, bits := ifaceMask.Size()
+		hostBits := bits - ones
+		totalHosts := uint32(1) << uint(hostBits)
+
+		// Calculate pool: use last 50 IPs or half the subnet if smaller
+		poolSize := uint32(50)
+		if totalHosts < 100 {
+			poolSize = totalHosts / 2
+		}
+		if poolSize < 10 {
+			poolSize = 10
+		}
+
+		// Pool ends at broadcast - 1 (last usable IP)
+		broadcastIP := make(net.IP, 4)
+		for i := 0; i < 4; i++ {
+			broadcastIP[i] = networkIP[i] | ^ifaceMask[i]
+		}
+		endUint32 := dhcpIPToUint32(broadcastIP) - 1
+		startUint32 := endUint32 - poolSize + 1
+
+		poolStart = dhcpUint32ToIP(startUint32)
+		poolEnd = dhcpUint32ToIP(endUint32)
+
+		util.LogInfo("dhcp: auto-generated pool %s-%s from %s/%d", poolStart, poolEnd, networkIP, ones)
 	}
 
 	return &dhcpServerImpl{
@@ -542,4 +578,10 @@ func dhcpIPToUint32(ip net.IP) uint32 {
 		return 0
 	}
 	return binary.BigEndian.Uint32(ip4)
+}
+
+func dhcpUint32ToIP(n uint32) net.IP {
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, n)
+	return ip
 }

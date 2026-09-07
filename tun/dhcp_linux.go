@@ -285,6 +285,11 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
+	ifaceIP, _, _, err := s.getIfaceInfo()
+	if err != nil {
+		return fmt.Errorf("dhcp: get iface info: %w", err)
+	}
+
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
@@ -303,9 +308,10 @@ func (s *dhcpServerImpl) Start() error {
 		},
 	}
 
-	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:67")
+	bindAddr := fmt.Sprintf("%s:67", ifaceIP)
+	conn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
 	if err != nil {
-		return fmt.Errorf("dhcp: listen :67: %w", err)
+		return fmt.Errorf("dhcp: listen %s: %w", bindAddr, err)
 	}
 
 	s.conn = conn.(*net.UDPConn)

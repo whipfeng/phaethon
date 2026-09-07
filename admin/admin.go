@@ -3667,6 +3667,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			"available":       tun.Available(),
 			"enabled":         true,
 			"bypassGateway":   false,
+			"dhcpEnabled":     false,
 			"running":         false,
 			"deviceName":      "",
 			"routes":          tun.RouteSnapshot{},
@@ -3686,6 +3687,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 					status["enabled"] = *dc.TUN.Enabled
 				}
 				status["bypassGateway"] = dc.TUN.IsBypassGateway()
+				status["dhcpEnabled"] = dc.TUN.IsDHCPEnabled()
 			}
 		}
 		jsonResponse(w, status)
@@ -3694,6 +3696,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Enabled       *bool `json:"enabled"`
 			BypassGateway *bool `json:"bypassGateway"`
+			DHCPEnabled   *bool `json:"dhcpEnabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "parse fail", http.StatusBadRequest)
@@ -3753,6 +3756,34 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogInfo("[ADMIN] TUN bypass-gateway=%v", *req.BypassGateway)
+		}
+
+		// DHCP toggle — config-only, takes effect on next TUN start.
+		if req.DHCPEnabled != nil {
+			s.mu.Lock()
+			if dc.TUN == nil {
+				dc.TUN = &config.TUNConfig{}
+			}
+			if dc.TUN.DHCP == nil {
+				dc.TUN.DHCP = &config.DHCPConfig{}
+			}
+			dc.TUN.DHCP.Enabled = req.DHCPEnabled
+			if s.conf != nil {
+				if s.conf.TUN == nil {
+					s.conf.TUN = &config.TUNConfig{}
+				}
+				if s.conf.TUN.DHCP == nil {
+					s.conf.TUN.DHCP = &config.DHCPConfig{}
+				}
+				s.conf.TUN.DHCP.Enabled = req.DHCPEnabled
+			}
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.mu.Unlock()
+			util.LogInfo("[ADMIN] TUN dhcp-enabled=%v", *req.DHCPEnabled)
 		}
 
 		jsonResponse(w, map[string]string{"status": "ok"})

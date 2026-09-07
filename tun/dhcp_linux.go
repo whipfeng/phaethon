@@ -185,6 +185,8 @@ type dhcpServerImpl struct {
 
 	conn *net.UDPConn
 	fd   int
+	ifIndex    int
+	ifHWAddr   net.HardwareAddr
 
 	mu       sync.Mutex
 	leases   map[string]*lease // MAC string -> lease
@@ -288,20 +290,21 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	// Send socket: AF_PACKET/SOCK_RAW sends raw Ethernet frames.
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(syscall.ETH_P_IP)))
 	if err != nil {
-		return fmt.Errorf("dhcp: raw socket: %w", err)
+		return fmt.Errorf("dhcp: af_packet socket: %w", err)
 	}
-	if err := syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
+	iface, err := net.InterfaceByName(s.ifaceName)
+	if err != nil {
 		syscall.Close(fd)
-		return fmt.Errorf("dhcp: SO_BINDTODEVICE %q: %w", s.ifaceName, err)
-	}
-	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: IP_HDRINCL: %w", err)
+		return fmt.Errorf("dhcp: interface %q: %w", s.ifaceName, err)
 	}
 	s.fd = fd
+	s.ifIndex = iface.Index
+	s.ifHWAddr = iface.HardwareAddr
 
+	// Receive socket: regular UDP on 0.0.0.0:67
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
@@ -723,12 +726,21 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	ipHdrCksum := ipChecksum(ip[:20])
 	binary.BigEndian.PutUint16(ip[10:12], ipHdrCksum)
 
-	// Send via raw socket
-	packet := append(ip, udp...)
-	var sa syscall.SockaddrInet4
-	copy(sa.Addr[:], dstIP)
-	if err := syscall.Sendto(s.fd, packet, 0, &sa); err != nil {
-		util.LogWarn("dhcp: sendto raw: %v", err)
+	// Build full Ethernet frame
+	ethFrame := make([]byte, 14+len(ip)+len(udp))
+	copy(ethFrame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // dst MAC: broadcast
+	copy(ethFrame[6:12], s.ifHWAddr)                                   // src MAC
+	binary.BigEndian.PutUint16(ethFrame[12:14], 0x0800)               // EtherType: IPv4
+	copy(ethFrame[14:], ip)
+	copy(ethFrame[14+len(ip):], udp)
+
+	var sa syscall.SockaddrLinklayer
+	sa.Protocol = htons(syscall.ETH_P_IP)
+	sa.Ifindex = s.ifIndex
+	sa.Halen = 6
+	copy(sa.Addr[:], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	if err := syscall.Sendto(s.fd, ethFrame, 0, &sa); err != nil {
+		util.LogWarn("dhcp: sendto packet: %v", err)
 	}
 }
 
@@ -744,6 +756,10 @@ func dhcpUint32ToIP(n uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, n)
 	return ip
+}
+
+func htons(v uint16) uint16 {
+	return (v<<8)&0xff00 | (v>>8)&0x00ff
 }
 
 // ipChecksum computes the IP header checksum (RFC 1071).

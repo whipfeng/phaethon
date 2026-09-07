@@ -349,9 +349,10 @@ func (s *dhcpServerImpl) loadLeases() {
 		if ip == nil {
 			continue
 		}
+		mac, _ := net.ParseMAC(e.MAC)
 		s.leases[e.MAC] = &lease{
 			ip:      ip,
-			mac:     nil,
+			mac:     mac,
 			expires: e.Expires,
 		}
 		count++

@@ -1,3 +1,5 @@
+//go:build linux
+
 package tun
 
 import (
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"golang.org/x/sys/unix"
+	"unsafe"
 )
 
 // DHCP message types (option 53)
@@ -182,6 +186,7 @@ type dhcpServerImpl struct {
 	leaseFile string
 
 	conn *net.UDPConn
+	fd   int
 
 	mu       sync.Mutex
 	leases   map[string]*lease // MAC string -> lease
@@ -285,21 +290,18 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
-	ifaceIP, _, _, err := s.getIfaceInfo()
-	if err != nil {
-		return fmt.Errorf("dhcp: get iface info: %w", err)
-	}
-
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
+				s.fd = int(fd)
 				if err := syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
 					opErr = fmt.Errorf("SO_BINDTODEVICE %q: %w", s.ifaceName, err)
 					return
 				}
 				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_PKTINFO, 1)
 			})
 			if err != nil {
 				return err
@@ -308,10 +310,9 @@ func (s *dhcpServerImpl) Start() error {
 		},
 	}
 
-	bindAddr := fmt.Sprintf("%s:67", ifaceIP)
-	conn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:67")
 	if err != nil {
-		return fmt.Errorf("dhcp: listen %s: %w", bindAddr, err)
+		return fmt.Errorf("dhcp: listen :67: %w", err)
 	}
 
 	s.conn = conn.(*net.UDPConn)
@@ -667,12 +668,30 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	ciaddr := net.IP(req.ciaddr[:])
 	hasCI := !ciaddr.Equal(net.IPv4zero)
 
-	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
+	dstIP := net.IPv4bcast
 	if hasCI && req.flags[0]&0x80 == 0 {
-		dst.IP = ciaddr
+		dstIP = ciaddr
 	}
 
-	s.conn.WriteToUDP(data, dst)
+	src4 := gateway.To4()
+	dst4 := dstIP.To4()
+	if src4 == nil || dst4 == nil {
+		return
+	}
+
+	var sa unix.SockaddrInet4
+	sa.Port = 68
+	copy(sa.Addr[:], dst4)
+
+	ifIndex := 0
+	if iface, err := net.InterfaceByName(s.ifaceName); err == nil {
+		ifIndex = iface.Index
+	}
+
+	oob := buildPktInfoCmsg(ifIndex, src4)
+	if err := unix.Sendmsg(s.fd, data, oob, &sa, 0); err != nil {
+		util.LogWarn("dhcp: sendmsg: %v", err)
+	}
 }
 
 func dhcpIPToUint32(ip net.IP) uint32 {
@@ -687,4 +706,22 @@ func dhcpUint32ToIP(n uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, n)
 	return ip
+}
+
+// buildPktInfoCmsg constructs an IP_PKTINFO control message for sendmsg.
+// struct in_pktinfo { int ipi_ifindex; struct in_addr ipi_spec_dst; struct in_addr ipi_addr; }
+func buildPktInfoCmsg(ifIndex int, srcIP net.IP) []byte {
+	const pktInfoLen = 12
+	oob := make([]byte, unix.CmsgSpace(pktInfoLen))
+
+	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+	hdr.Level = unix.IPPROTO_IP
+	hdr.Type = unix.IP_PKTINFO
+	hdr.SetLen(unix.CmsgLen(pktInfoLen))
+
+	data := oob[unix.CmsgLen(0):]
+	binary.LittleEndian.PutUint32(data[0:4], uint32(ifIndex))
+	copy(data[4:8], srcIP.To4())
+	// data[8:12] (ipi_addr) left as zero
+	return oob
 }

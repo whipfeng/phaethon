@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -284,33 +285,27 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				if err := syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
+					opErr = fmt.Errorf("SO_BINDTODEVICE %q: %w", s.ifaceName, err)
+					return
+				}
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:67")
 	if err != nil {
-		return fmt.Errorf("dhcp: socket: %w", err)
-	}
-
-	if err := syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: SO_BINDTODEVICE %q: %w", s.ifaceName, err)
-	}
-
-	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: SO_REUSEADDR: %w", err)
-	}
-
-	addr := &syscall.SockaddrInet4{Port: 67}
-	if err := syscall.Bind(fd, addr); err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: bind :67: %w", err)
-	}
-
-	f := os.NewFile(uintptr(fd), "dhcp")
-	conn, err := net.FilePacketConn(f)
-	f.Close()
-	if err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: file packet conn: %w", err)
+		return fmt.Errorf("dhcp: listen :67: %w", err)
 	}
 
 	s.conn = conn.(*net.UDPConn)

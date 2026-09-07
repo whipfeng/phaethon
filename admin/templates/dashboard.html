@@ -110,10 +110,6 @@
                 <tr><td data-i18n="tun.fakeIPCache">Fake-IP Real-IP Cache</td><td id="tun-fakeip-cache">-</td></tr>
             </table>
         </div>
-        <div class="tun-section" id="tun-probe-section" style="display:none;">
-            <h4 data-i18n="tun.probes">Probe URLs</h4>
-            <div id="tun-probes" class="tun-probe-list"></div>
-        </div>
         <div class="tun-section" id="tun-logs-section" style="display:none;">
             <h4 data-i18n="tun.logs">Event Log</h4>
             <pre class="tun-log" id="tun-logs"></pre>
@@ -413,14 +409,6 @@
                 setT('tun-fakeip-registered', s.fakeIP.registeredCount);
                 setT('tun-fakeip-cache', s.fakeIP.realIPCacheCount);
             }
-        }
-
-        // Probe URLs section
-        const probeSection = document.getElementById('tun-probe-section');
-        if (probeSection) probeSection.style.display = (data.probeURLs && data.probeURLs.length) ? 'block' : 'none';
-        const probesEl = document.getElementById('tun-probes');
-        if (probesEl && data.probeURLs) {
-            probesEl.innerHTML = data.probeURLs.map(u => '<span class="badge badge-info">' + escapeHtml(u) + '</span>').join(' ');
         }
 
         const logsEl = document.getElementById('tun-logs');

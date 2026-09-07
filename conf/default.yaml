@@ -30,4 +30,10 @@ admin:
 
 tun:
   enabled: false
-  probe-urls: []
+  bypass-gateway: false
+  direct-nameserver: []
+  # dhcp:
+  #   enabled: false
+  #   pool-start: ""    # auto-generated from interface subnet if empty
+  #   pool-end: ""
+  #   lease-time: "24h"

@@ -132,7 +132,6 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			},
 			"logs":      []string{},
 			"stats":     tun.TUNStats{},
-			"probeURLs": []string{},
 		}
 	}
 	enabled := res.ruleConf.TUN.IsEnabled()
@@ -153,7 +152,6 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			"splitTunnels":      []string{},
 		},
 		"logs":      []string{},
-		"probeURLs": []string{},
 		"stats":     tun.TUNStats{},
 	}
 	if res.tunRes != nil && res.tunRes.engine != nil {
@@ -168,11 +166,6 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 	} else {
 		status["stats"] = tun.TUNStats{}
 	}
-	probeURLs := tun.DefaultProbeURLs
-	if res.ruleConf != nil && res.ruleConf.TUN != nil && len(res.ruleConf.TUN.ProbeURLList()) > 0 {
-		probeURLs = res.ruleConf.TUN.ProbeURLList()
-	}
-	status["probeURLs"] = probeURLs
 	return status
 }
 

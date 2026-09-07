@@ -1198,7 +1198,6 @@ type TUNConfig struct {
 	Enabled          *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	BypassGateway    *bool       `yaml:"bypass-gateway,omitempty" json:"bypass-gateway,omitempty"`
 	DHCP             *DHCPConfig `yaml:"dhcp,omitempty" json:"dhcp,omitempty"`
-	ProbeURLs        []string    `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
 	DirectNameserver []string    `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
 }
 
@@ -1230,15 +1229,6 @@ func (t *TUNConfig) IsDHCPEnabled() bool {
 		return false
 	}
 	return *t.DHCP.Enabled
-}
-
-// ProbeURLList returns the configured TUN watchdog probe URLs, or nil if none
-// are configured. Callers should fall back to tun.DefaultProbeURLs when nil/empty.
-func (t *TUNConfig) ProbeURLList() []string {
-	if t == nil {
-		return nil
-	}
-	return t.ProbeURLs
 }
 
 // DirectNameserverList returns the configured DNS servers for DIRECT connection

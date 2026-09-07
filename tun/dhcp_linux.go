@@ -1,0 +1,518 @@
+package tun
+
+import (
+	"encoding/binary"
+	"fmt"
+	"net"
+	"os"
+	"phaethon/config"
+	"phaethon/util"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// DHCP message types (option 53)
+const (
+	dhcpDiscover = 1
+	dhcpOffer    = 2
+	dhcpRequest  = 3
+	dhcpDecline  = 4
+	dhcpACK      = 5
+	dhcpNAK      = 6
+	dhcpRelease  = 7
+)
+
+// DHCP option codes
+const (
+	optSubnetMask       = 1
+	optRouter           = 3
+	optDNS              = 6
+	optRequestedIP      = 50
+	optLeaseTime        = 51
+	optMessageType      = 53
+	optServerIdentifier = 54
+	optRenewalTime      = 58
+	optRebindingTime    = 59
+	optEnd              = 255
+)
+
+// DHCP magic cookie
+var dhcpMagic = [4]byte{99, 130, 83, 99}
+
+// dhcpMessage is a raw DHCP message (fixed 236 bytes header + variable options).
+type dhcpMessage struct {
+	op      byte
+	htype   byte
+	hlen    byte
+	hops    byte
+	xid     [4]byte
+	secs    [2]byte
+	flags   [2]byte
+	ciaddr  [4]byte
+	yiaddr  [4]byte
+	siaddr  [4]byte
+	giaddr  [4]byte
+	chaddr  [16]byte
+	sname   [64]byte
+	file    [128]byte
+	options map[byte][]byte
+}
+
+func parseDHCPMessage(data []byte) (*dhcpMessage, error) {
+	if len(data) < 240 {
+		return nil, fmt.Errorf("dhcp: message too short: %d bytes", len(data))
+	}
+	m := &dhcpMessage{
+		op:      data[0],
+		htype:   data[1],
+		hlen:    data[2],
+		hops:    data[3],
+		options: make(map[byte][]byte),
+	}
+	copy(m.xid[:], data[4:8])
+	copy(m.secs[:], data[8:10])
+	copy(m.flags[:], data[10:12])
+	copy(m.ciaddr[:], data[12:16])
+	copy(m.yiaddr[:], data[16:20])
+	copy(m.siaddr[:], data[20:24])
+	copy(m.giaddr[:], data[24:28])
+	copy(m.chaddr[:], data[28:44])
+	copy(m.sname[:], data[44:108])
+	copy(m.file[:], data[108:236])
+
+	// Verify magic cookie
+	if data[236] != 99 || data[237] != 130 || data[238] != 83 || data[239] != 99 {
+		return nil, fmt.Errorf("dhcp: invalid magic cookie")
+	}
+
+	// Parse options
+	i := 240
+	for i < len(data) {
+		opt := data[i]
+		if opt == optEnd {
+			break
+		}
+		if opt == 0 { // padding
+			i++
+			continue
+		}
+		if i+1 >= len(data) {
+			break
+		}
+		length := int(data[i+1])
+		if i+2+length > len(data) {
+			break
+		}
+		optData := make([]byte, length)
+		copy(optData, data[i+2:i+2+length])
+		m.options[opt] = optData
+		i += 2 + length
+	}
+	return m, nil
+}
+
+func (m *dhcpMessage) messageType() byte {
+	if opt, ok := m.options[optMessageType]; ok && len(opt) == 1 {
+		return opt[0]
+	}
+	return 0
+}
+
+func (m *dhcpMessage) clientMAC() net.HardwareAddr {
+	hlen := int(m.hlen)
+	if hlen > 16 {
+		hlen = 16
+	}
+	return net.HardwareAddr(m.chaddr[:hlen])
+}
+
+func (m *dhcpMessage) requestedIP() net.IP {
+	if opt, ok := m.options[optRequestedIP]; ok && len(opt) == 4 {
+		return net.IP(opt)
+	}
+	return nil
+}
+
+func (m *dhcpMessage) serialize() []byte {
+	buf := make([]byte, 240, 512)
+	buf[0] = m.op
+	buf[1] = m.htype
+	buf[2] = m.hlen
+	buf[3] = m.hops
+	copy(buf[4:8], m.xid[:])
+	copy(buf[8:10], m.secs[:])
+	copy(buf[10:12], m.flags[:])
+	copy(buf[12:16], m.ciaddr[:])
+	copy(buf[16:20], m.yiaddr[:])
+	copy(buf[20:24], m.siaddr[:])
+	copy(buf[24:28], m.giaddr[:])
+	copy(buf[28:44], m.chaddr[:])
+	copy(buf[44:108], m.sname[:])
+	copy(buf[108:236], m.file[:])
+
+	// Magic cookie
+	buf = append(buf, 99, 130, 83, 99)
+
+	// Options
+	for code, data := range m.options {
+		buf = append(buf, code, byte(len(data)))
+		buf = append(buf, data...)
+	}
+	buf = append(buf, optEnd)
+	return buf
+}
+
+// lease tracks a single DHCP lease.
+type lease struct {
+	ip      net.IP
+	mac     net.HardwareAddr
+	expires time.Time
+}
+
+// dhcpServerImpl is the Linux DHCP server implementation.
+type dhcpServerImpl struct {
+	ifaceName string
+	cfg       *config.DHCPConfig
+	dnsAddr   net.IP
+
+	conn    *net.UDPConn
+	gateway net.IP
+	mask    net.IPMask
+
+	mu       sync.Mutex
+	leases   map[string]*lease // MAC string -> lease
+	poolNext net.IP
+	poolEnd  net.IP
+	leaseDur time.Duration
+
+	stopCh chan struct{}
+	wg     sync.WaitGroup
+}
+
+func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP) (DHCPServer, error) {
+	if ifaceName == "" {
+		return nil, fmt.Errorf("dhcp: interface name is empty")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("dhcp: config is nil")
+	}
+
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("dhcp: interface %q: %w", ifaceName, err)
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, fmt.Errorf("dhcp: get interface addrs: %w", err)
+	}
+
+	var gwIP net.IP
+	var ipMask net.IPMask
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+			gwIP = ipNet.IP.To4()
+			ipMask = ipNet.Mask
+			break
+		}
+	}
+	if gwIP == nil {
+		return nil, fmt.Errorf("dhcp: no IPv4 address on interface %q", ifaceName)
+	}
+
+	poolStart := net.ParseIP(cfg.PoolStart).To4()
+	poolEnd := net.ParseIP(cfg.PoolEnd).To4()
+	if poolStart == nil || poolEnd == nil {
+		return nil, fmt.Errorf("dhcp: invalid pool-start or pool-end")
+	}
+
+	return &dhcpServerImpl{
+		ifaceName: ifaceName,
+		cfg:       cfg,
+		dnsAddr:   dnsAddr.To4(),
+		gateway:   gwIP,
+		mask:      ipMask,
+		leases:    make(map[string]*lease),
+		poolNext:  poolStart,
+		poolEnd:   poolEnd,
+		leaseDur:  cfg.LeaseDuration(),
+		stopCh:    make(chan struct{}),
+	}, nil
+}
+
+func (s *dhcpServerImpl) Start() error {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	if err != nil {
+		return fmt.Errorf("dhcp: socket: %w", err)
+	}
+
+	if err := syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: SO_BINDTODEVICE %q: %w", s.ifaceName, err)
+	}
+
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: SO_REUSEADDR: %w", err)
+	}
+
+	addr := &syscall.SockaddrInet4{Port: 67}
+	if err := syscall.Bind(fd, addr); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: bind :67: %w", err)
+	}
+
+	f := os.NewFile(uintptr(fd), "dhcp")
+	conn, err := net.FilePacketConn(f)
+	f.Close()
+	if err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: file packet conn: %w", err)
+	}
+
+	s.conn = conn.(*net.UDPConn)
+	util.LogInfo("dhcp: listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
+		s.ifaceName, s.gateway, s.dnsAddr, s.poolNext, s.poolEnd)
+
+	s.wg.Add(1)
+	go s.serve()
+	return nil
+}
+
+func (s *dhcpServerImpl) Stop() {
+	close(s.stopCh)
+	if s.conn != nil {
+		s.conn.Close()
+	}
+	s.wg.Wait()
+	util.LogInfo("dhcp: stopped")
+}
+
+func (s *dhcpServerImpl) ActiveLeases() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	count := 0
+	for _, l := range s.leases {
+		if l.expires.After(now) {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *dhcpServerImpl) serve() {
+	defer s.wg.Done()
+	buf := make([]byte, 1500)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		default:
+		}
+
+		s.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		n, remoteAddr, err := s.conn.ReadFromUDP(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				util.LogWarn("dhcp: read error: %v", err)
+				continue
+			}
+		}
+
+		msg, err := parseDHCPMessage(buf[:n])
+		if err != nil {
+			util.LogWarn("dhcp: parse error: %v", err)
+			continue
+		}
+		if msg.op != 1 { // not a BOOTREQUEST
+			continue
+		}
+
+		s.handleMessage(msg, remoteAddr)
+	}
+}
+
+func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
+	msgType := req.messageType()
+	mac := req.clientMAC()
+	macStr := mac.String()
+
+	switch msgType {
+	case dhcpDiscover:
+		s.mu.Lock()
+		offeredIP := s.allocateIP(macStr)
+		s.mu.Unlock()
+
+		if offeredIP == nil {
+			util.LogWarn("dhcp: pool exhausted for %s", macStr)
+			return
+		}
+		s.sendReply(dhcpOffer, req, offeredIP)
+		util.LogInfo("dhcp: OFFER %s -> %s", macStr, offeredIP)
+
+	case dhcpRequest:
+		reqIP := req.requestedIP()
+		if reqIP == nil {
+			reqIP = net.IP(req.ciaddr[:])
+			if reqIP.Equal(net.IPv4zero) {
+				return
+			}
+		}
+
+		s.mu.Lock()
+		if existing, ok := s.leases[macStr]; ok && existing.ip.Equal(reqIP) && existing.expires.After(time.Now()) {
+			existing.expires = time.Now().Add(s.leaseDur)
+			s.mu.Unlock()
+			s.sendReply(dhcpACK, req, reqIP)
+			util.LogInfo("dhcp: ACK (renew) %s -> %s", macStr, reqIP)
+		} else {
+			s.leases[macStr] = &lease{
+				ip:      reqIP,
+				mac:     mac,
+				expires: time.Now().Add(s.leaseDur),
+			}
+			s.mu.Unlock()
+			s.sendReply(dhcpACK, req, reqIP)
+			util.LogInfo("dhcp: ACK %s -> %s", macStr, reqIP)
+		}
+
+	case dhcpRelease:
+		s.mu.Lock()
+		delete(s.leases, macStr)
+		s.mu.Unlock()
+		util.LogInfo("dhcp: RELEASE %s", macStr)
+
+	case dhcpDecline:
+		s.mu.Lock()
+		delete(s.leases, macStr)
+		s.mu.Unlock()
+		util.LogWarn("dhcp: DECLINE %s", macStr)
+	}
+}
+
+func (s *dhcpServerImpl) allocateIP(macStr string) net.IP {
+	if existing, ok := s.leases[macStr]; ok && existing.expires.After(time.Now()) {
+		return existing.ip
+	}
+
+	now := time.Now()
+	startIP := make(net.IP, len(s.poolNext))
+	copy(startIP, s.poolNext)
+
+	for {
+		candidate := make(net.IP, len(s.poolNext))
+		copy(candidate, s.poolNext)
+
+		inUse := false
+		for _, l := range s.leases {
+			if l.ip.Equal(candidate) && l.expires.After(now) {
+				inUse = true
+				break
+			}
+		}
+
+		s.advancePool()
+
+		if !inUse {
+			s.leases[macStr] = &lease{
+				ip:      candidate,
+				mac:     net.HardwareAddr{},
+				expires: now.Add(s.leaseDur),
+			}
+			return candidate
+		}
+
+		if s.poolNext.Equal(startIP) {
+			return nil
+		}
+	}
+}
+
+func (s *dhcpServerImpl) advancePool() {
+	ip := make(net.IP, len(s.poolNext))
+	copy(ip, s.poolNext)
+	for i := 3; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
+	if dhcpIPToUint32(ip) > dhcpIPToUint32(s.poolEnd) {
+		poolStart := net.ParseIP(s.cfg.PoolStart).To4()
+		copy(s.poolNext, poolStart)
+	} else {
+		copy(s.poolNext, ip)
+	}
+}
+
+func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP net.IP) {
+	reply := &dhcpMessage{
+		op:      2, // BOOTREPLY
+		htype:   req.htype,
+		hlen:    req.hlen,
+		hops:    0,
+		xid:     req.xid,
+		flags:   req.flags,
+		giaddr:  req.giaddr,
+		chaddr:  req.chaddr,
+		options: make(map[byte][]byte),
+	}
+
+	assigned4 := assignedIP.To4()
+	copy(reply.yiaddr[:], assigned4)
+	copy(reply.siaddr[:], s.gateway.To4())
+
+	leaseSecs := uint32(s.leaseDur.Seconds())
+
+	// Message type
+	reply.options[optMessageType] = []byte{msgType}
+	// Server identifier
+	reply.options[optServerIdentifier] = s.gateway.To4()
+	// Lease time
+	lt := make([]byte, 4)
+	binary.BigEndian.PutUint32(lt, leaseSecs)
+	reply.options[optLeaseTime] = lt
+	// Subnet mask
+	reply.options[optSubnetMask] = []byte(s.mask)
+	// Router (gateway)
+	reply.options[optRouter] = s.gateway.To4()
+	// DNS server
+	reply.options[optDNS] = s.dnsAddr.To4()
+	// Renewal time (T1 = lease/2)
+	t1 := make([]byte, 4)
+	binary.BigEndian.PutUint32(t1, leaseSecs/2)
+	reply.options[optRenewalTime] = t1
+	// Rebinding time (T2 = lease*7/8)
+	t2 := make([]byte, 4)
+	binary.BigEndian.PutUint32(t2, leaseSecs*7/8)
+	reply.options[optRebindingTime] = t2
+
+	data := reply.serialize()
+
+	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
+	if msgType == dhcpACK || msgType == dhcpOffer {
+		if req.flags[0]&0x80 != 0 {
+			dst.IP = net.IPv4bcast
+		} else {
+			dst.IP = assignedIP
+		}
+	}
+
+	s.conn.WriteToUDP(data, dst)
+}
+
+func dhcpIPToUint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(ip4)
+}

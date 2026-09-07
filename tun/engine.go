@@ -43,6 +43,7 @@ type Engine struct {
 	fakeIP    *FakeIPPool
 	dnsHijack *DNSHijacker
 	routeMgr  *RouteManager
+	dhcpSrv   DHCPServer
 	addr      tcpip.Address
 	dnsAddr   tcpip.Address
 	prefixLen int
@@ -407,6 +408,27 @@ func (e *Engine) Start() error {
 		go dialer.PreWarmSSHProxies(e.ruleConf.Proxies)
 	}
 
+	// 9. Start DHCP server if bypass-gateway and DHCP are both enabled.
+	if e.ruleConf != nil && e.ruleConf.TUN != nil &&
+		e.ruleConf.TUN.IsBypassGateway() && e.ruleConf.TUN.IsDHCPEnabled() {
+		ifaceName := ""
+		if e.routeMgr != nil {
+			ifaceName = e.routeMgr.DefaultIfaceName
+		}
+		dnsIP := net.IP(e.dnsAddr.AsSlice())
+		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIP)
+		if err != nil {
+			util.LogWarn("dhcp: failed to create server: %v", err)
+		} else if srv != nil {
+			if err := srv.Start(); err != nil {
+				util.LogWarn("dhcp: failed to start: %v", err)
+			} else {
+				e.dhcpSrv = srv
+				util.LogInfo("dhcp: server started on %s", ifaceName)
+			}
+		}
+	}
+
 	e.logEvent("TUN engine started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", dev.Name(), 0, "", "ok", nil)
 	util.LogInfo("tun engine started on %s", dev.Name())
@@ -437,6 +459,12 @@ func (e *Engine) Stop() error {
 	// 1. Restore system DNS first while the TUN adapter still exists.
 	if e.device != nil {
 		restoreSystemDNS(e.device.Name())
+	}
+
+	// 1.5. Stop DHCP server before tearing down routes.
+	if e.dhcpSrv != nil {
+		e.dhcpSrv.Stop()
+		e.dhcpSrv = nil
 	}
 
 	// 2. Teardown routes while the adapter still has a valid LUID/index.

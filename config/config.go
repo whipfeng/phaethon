@@ -1171,12 +1171,35 @@ type ReverseConfig struct {
 	AssignedPort int `yaml:"-" json:"assigned-port,omitempty"`
 }
 
+// DHCPConfig holds DHCP server settings for bypass gateway mode.
+// Only effective when bypass-gateway is enabled.
+type DHCPConfig struct {
+	Enabled   *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	PoolStart string `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
+	PoolEnd   string `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
+	LeaseTime string `yaml:"lease-time,omitempty" json:"lease-time,omitempty"` // e.g. "24h", "1h30m"
+}
+
+// LeaseDuration returns the lease duration, defaulting to 24h if not configured
+// or if the value cannot be parsed.
+func (d *DHCPConfig) LeaseDuration() time.Duration {
+	if d == nil || d.LeaseTime == "" {
+		return 24 * time.Hour
+	}
+	dur, err := time.ParseDuration(d.LeaseTime)
+	if err != nil || dur <= 0 {
+		return 24 * time.Hour
+	}
+	return dur
+}
+
 // TUNConfig holds TUN traffic interception settings.
 type TUNConfig struct {
-	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	BypassGateway    *bool    `yaml:"bypass-gateway,omitempty" json:"bypass-gateway,omitempty"`
-	ProbeURLs        []string `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
-	DirectNameserver []string `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
+	Enabled          *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	BypassGateway    *bool       `yaml:"bypass-gateway,omitempty" json:"bypass-gateway,omitempty"`
+	DHCP             *DHCPConfig `yaml:"dhcp,omitempty" json:"dhcp,omitempty"`
+	ProbeURLs        []string    `yaml:"probe-urls,omitempty" json:"probe-urls,omitempty"`
+	DirectNameserver []string    `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
 }
 
 // IsEnabled reports whether TUN is enabled. Omitted or nil means disabled
@@ -1197,6 +1220,16 @@ func (t *TUNConfig) IsBypassGateway() bool {
 		return false
 	}
 	return *t.BypassGateway
+}
+
+// IsDHCPEnabled reports whether the built-in DHCP server is enabled.
+// Only effective when bypass-gateway is also enabled.
+// Omitted or nil means disabled.
+func (t *TUNConfig) IsDHCPEnabled() bool {
+	if t == nil || t.DHCP == nil || t.DHCP.Enabled == nil {
+		return false
+	}
+	return *t.DHCP.Enabled
 }
 
 // ProbeURLList returns the configured TUN watchdog probe URLs, or nil if none

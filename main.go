@@ -130,8 +130,9 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 				"exclusions":        []string{},
 				"splitTunnels":      []string{},
 			},
-			"logs":      []string{},
-			"stats":     tun.TUNStats{},
+			"logs":       []string{},
+			"stats":      tun.TUNStats{},
+			"dhcpLeases": []tun.DHCPLease{},
 		}
 	}
 	enabled := res.ruleConf.TUN.IsEnabled()
@@ -151,8 +152,9 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			"exclusions":        []string{},
 			"splitTunnels":      []string{},
 		},
-		"logs":      []string{},
-		"stats":     tun.TUNStats{},
+		"logs":       []string{},
+		"stats":      tun.TUNStats{},
+		"dhcpLeases": []tun.DHCPLease{},
 	}
 	if res.tunRes != nil && res.tunRes.engine != nil {
 		engine := res.tunRes.engine
@@ -160,11 +162,13 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		status["routes"] = engine.RouteSnapshot()
 		status["logs"] = engine.Logs()
 		status["stats"] = engine.Stats()
+		status["dhcpLeases"] = engine.DHCPLeaseSnapshot()
 		if engine.IsEnabled() {
 			status["deviceName"] = "PhaethonTUN"
 		}
 	} else {
 		status["stats"] = tun.TUNStats{}
+		status["dhcpLeases"] = []tun.DHCPLease{}
 	}
 	return status
 }

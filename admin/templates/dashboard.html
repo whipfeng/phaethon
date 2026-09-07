@@ -110,6 +110,13 @@
                 <tr><td data-i18n="tun.fakeIPCache">Fake-IP Real-IP Cache</td><td id="tun-fakeip-cache">-</td></tr>
             </table>
         </div>
+        <div class="tun-section" id="tun-dhcp-leases-section" style="display:none;">
+            <h4>DHCP Leases</h4>
+            <table class="info-table">
+                <thead><tr><td>MAC</td><td>IP</td><td>Expires</td></tr></thead>
+                <tbody id="tun-dhcp-leases"></tbody>
+            </table>
+        </div>
         <div class="tun-section" id="tun-logs-section" style="display:none;">
             <h4 data-i18n="tun.logs">Event Log</h4>
             <pre class="tun-log" id="tun-logs"></pre>
@@ -408,6 +415,22 @@
                 setT('tun-fakeip-domains', s.fakeIP.domainCount);
                 setT('tun-fakeip-registered', s.fakeIP.registeredCount);
                 setT('tun-fakeip-cache', s.fakeIP.realIPCacheCount);
+            }
+        }
+
+        const leasesSection = document.getElementById('tun-dhcp-leases-section');
+        const leasesBody = document.getElementById('tun-dhcp-leases');
+        if (leasesSection && leasesBody) {
+            const leases = data.dhcpLeases || [];
+            if (leases.length > 0) {
+                leasesSection.style.display = 'block';
+                leasesBody.innerHTML = leases.map(l => {
+                    const exp = new Date(l.expires);
+                    const expStr = exp.toLocaleString();
+                    return '<tr><td>' + escapeHtml(l.mac) + '</td><td>' + escapeHtml(l.ip) + '</td><td>' + escapeHtml(expStr) + '</td></tr>';
+                }).join('');
+            } else {
+                leasesSection.style.display = 'none';
             }
         }
 

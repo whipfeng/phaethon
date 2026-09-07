@@ -387,6 +387,8 @@ func (s *dhcpServerImpl) saveLeases() {
 	_ = os.MkdirAll(filepath.Dir(s.leaseFile), 0755)
 	if err := os.WriteFile(s.leaseFile, data, 0644); err != nil {
 		util.LogWarn("dhcp: failed to write leases: %v", err)
+	} else {
+		util.DefaultVersionNotifier.BumpVersion("tun")
 	}
 }
 
@@ -411,6 +413,23 @@ func (s *dhcpServerImpl) ActiveLeases() int {
 		}
 	}
 	return count
+}
+
+func (s *dhcpServerImpl) Leases() []DHCPLease {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make([]DHCPLease, 0, len(s.leases))
+	for _, l := range s.leases {
+		if l.expires.After(now) {
+			out = append(out, DHCPLease{
+				IP:      l.ip.String(),
+				MAC:     l.mac.String(),
+				Expires: l.expires,
+			})
+		}
+	}
+	return out
 }
 
 // getIfaceInfo returns the current IPv4 address, mask, and MAC of the bound interface.

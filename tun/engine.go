@@ -275,6 +275,17 @@ func (e *Engine) Stats() TUNStats {
 	return s
 }
 
+// DHCPLeaseSnapshot returns the current DHCP lease list, or nil if DHCP is not running.
+func (e *Engine) DHCPLeaseSnapshot() []DHCPLease {
+	e.mu.Lock()
+	srv := e.dhcpSrv
+	e.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Leases()
+}
+
 // Start brings up the TUN device, configures routes, and starts netstack.
 func (e *Engine) Start() error {
 	e.mu.Lock()

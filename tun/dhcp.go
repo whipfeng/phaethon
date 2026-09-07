@@ -3,7 +3,15 @@ package tun
 import (
 	"net"
 	"phaethon/config"
+	"time"
 )
+
+// DHCPLease represents a single DHCP lease for API/UI display.
+type DHCPLease struct {
+	IP      string    `json:"ip"`
+	MAC     string    `json:"mac"`
+	Expires time.Time `json:"expires"`
+}
 
 // DHCPServer provides DHCP service on the physical LAN interface.
 // Only active when bypass-gateway is enabled.
@@ -11,6 +19,7 @@ type DHCPServer interface {
 	Start() error
 	Stop()
 	ActiveLeases() int
+	Leases() []DHCPLease
 }
 
 // newDHCPServer creates a DHCP server bound to the given interface.

@@ -3,57 +3,10 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 
 	"golang.org/x/sys/windows"
-
-	"phaethon/util"
 )
-
-// spawnWatchdog starts a detached child process that monitors this process
-// lifetime. It logs to its own file and is not attached to the parent console,
-// so it can clean up even if the parent console is closed or the parent hangs.
-func spawnWatchdog(probeURLs []string) {
-	wdExe, err := ensureWatchdogExecutable()
-	if err != nil {
-		util.LogWarn("tun: cannot prepare watchdog executable: %v", err)
-		return
-	}
-
-	logPath := filepath.Join(filepath.Dir(wdExe), "phaethon-watchdog.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		util.LogWarn("tun: cannot open watchdog log %s: %v", logPath, err)
-		return
-	}
-
-	pid := os.Getpid()
-	env := append(os.Environ(), "LAYER_WATCHDOG_PID="+strconv.Itoa(pid))
-	if probeURLs != nil {
-		env = append(env, "LAYER_WATCHDOG_PROBE_URLS="+strings.Join(probeURLs, ";"))
-	}
-	attr := &os.ProcAttr{
-		Env:   env,
-		Files: []*os.File{nil, logFile, logFile},
-		Sys: &syscall.SysProcAttr{
-			// DETACHED_PROCESS: no console, so closing the parent console will
-			// not kill the watchdog before it has a chance to clean up.
-			CreationFlags: 0x00000008,
-		},
-	}
-	p, err := os.StartProcess(wdExe, []string{wdExe}, attr)
-	if err != nil {
-		_ = logFile.Close()
-		util.LogWarn("tun: failed to spawn watchdog: %v", err)
-		return
-	}
-	_ = logFile.Close()
-	util.LogInfo("tun: watchdog spawned (pid=%d) from %s", p.Pid, wdExe)
-}
 
 var consoleCloseCh = make(chan struct{}, 1)
 
@@ -98,3 +51,11 @@ func processExists(pid int) bool {
 	}
 	return exitCode == 259
 }
+
+// reapChild is a no-op on Windows. Process handles are cleaned up by
+// CloseHandle in processExists, and the OS reaps automatically.
+func reapChild(pid int) {}
+
+// setProcessName is a no-op on Windows. The process name is determined by
+// the executable filename.
+func setProcessName(name string) {}

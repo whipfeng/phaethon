@@ -535,10 +535,11 @@ func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
 }
 
 func main() {
-	// Watchdog mode must be handled before any normal initialization so the
-	// child process only monitors the parent and does not start services.
-	if wdPid := os.Getenv("LAYER_WATCHDOG_PID"); wdPid != "" {
-		runWatchdog(wdPid)
+	// If PHAETHON_WORKER is not set, this process is the watchdog.
+	// The watchdog spawns the actual server as a child and monitors it.
+	if os.Getenv("PHAETHON_WORKER") == "" {
+		setProcessName("phaethon-watchdog")
+		runWatchdogMode()
 		os.Exit(0)
 	}
 
@@ -657,6 +658,12 @@ func main() {
 		}
 	}
 
+	// Signal the watchdog that the server is fully initialized.
+	if os.Getenv("PHAETHON_WORKER") != "" {
+		emitProtocolMsg(map[string]bool{"ready": true})
+		startWorkerHeartbeat()
+	}
+
 	watchAndRun(resources)
 }
 
@@ -708,18 +715,318 @@ func watchAndRun(resources *activeResources) {
 		select {
 		case sig := <-sigCh:
 			util.Logger.Printf("Received signal %v, shutting down...", sig)
+			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
 			}
 			return
 		case <-consoleCloseNotify():
 			util.Logger.Printf("Received console close event, shutting down...")
+			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
 			}
 			return
 		}
 	}
+}
+
+// childProtocolMsg is a JSON message sent by the worker child on stdout.
+// Lines that do not match this schema are forwarded to the watchdog's stdout.
+type childProtocolMsg struct {
+	Ready     *bool `json:"ready,omitempty"`
+	Heartbeat *bool `json:"heartbeat,omitempty"`
+}
+
+// childProcess wraps an os.Process with protocol state from the child's stdout.
+type childProcess struct {
+	proc     *os.Process
+	stdout   io.ReadCloser
+	ready    atomic.Bool
+	lastHB   atomic.Int64 // unix nano of last heartbeat
+	done     chan struct{} // closed when stdout reader exits
+}
+
+// childReadyTimeout is how long the watchdog waits for the child to signal
+// ready before treating it as stuck and restarting.
+const childReadyTimeout = 120 * time.Second
+
+// childHeartbeatTimeout is how long the watchdog waits between heartbeats
+// before treating the child as stuck.
+const childHeartbeatTimeout = 30 * time.Second
+
+// spawnChildProcess starts the worker child with a stdout pipe for protocol
+// messages. A goroutine reads lines, parses JSON protocol messages, and
+// forwards non-JSON output to the watchdog's stdout.
+func spawnChildProcess(exe string) (*childProcess, error) {
+	env := buildWorkerEnv()
+
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create stdout pipe: %w", err)
+	}
+
+	attr := &os.ProcAttr{
+		Env: env,
+		Files: []*os.File{os.Stdin, stdoutW, os.Stderr},
+	}
+	proc, err := os.StartProcess(exe, []string{exe}, attr)
+	if err != nil {
+		stdoutR.Close()
+		stdoutW.Close()
+		return nil, fmt.Errorf("start worker: %w", err)
+	}
+	// Close the write end in the parent — only the child writes to it.
+	stdoutW.Close()
+
+	cp := &childProcess{
+		proc:   proc,
+		stdout: stdoutR,
+		done:   make(chan struct{}),
+	}
+
+	go cp.readProtocol()
+	return cp, nil
+}
+
+// readProtocol reads lines from the child's stdout. JSON protocol messages
+// update the ready/heartbeat state; everything else is forwarded to the
+// watchdog's stdout so log output remains visible.
+func (cp *childProcess) readProtocol() {
+	defer close(cp.done)
+	defer cp.stdout.Close()
+
+	scanner := bufio.NewScanner(cp.stdout)
+	// Allow up to 64KB per line — log lines can be long.
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) > 0 && line[0] == '{' {
+			var msg childProtocolMsg
+			if json.Unmarshal(line, &msg) == nil {
+				if msg.Ready != nil && *msg.Ready {
+					cp.ready.Store(true)
+					cp.lastHB.Store(time.Now().UnixNano())
+					util.LogInfo("watchdog: child signaled ready")
+					continue
+				}
+				if msg.Heartbeat != nil && *msg.Heartbeat {
+					cp.lastHB.Store(time.Now().UnixNano())
+					continue
+				}
+			}
+		}
+		// Not a protocol message — forward to stdout.
+		fmt.Fprintln(os.Stdout, string(line))
+	}
+}
+
+// kill sends SIGTERM to the child process.
+func (cp *childProcess) kill(sig os.Signal) {
+	_ = cp.proc.Signal(sig)
+}
+
+// wait blocks until the protocol reader finishes (child closed stdout).
+func (cp *childProcess) wait() {
+	<-cp.done
+}
+
+// runWatchdogMode is the watchdog entry point. It spawns the actual server as
+// a child process (with PHAETHON_WORKER=1), monitors it via a JSON protocol
+// on stdout, and restarts it on crash or stuck detection. On graceful shutdown
+// (child writes the stopped marker), the watchdog cleans up and exits.
+// SIGTERM/SIGINT received by the watchdog are forwarded to the child.
+func runWatchdogMode() {
+	util.LogInfo("watchdog: starting in watchdog mode")
+
+	const (
+		monitorInterval = 3 * time.Second
+		probeInterval   = 30 * time.Second
+		ifaceInterval   = 5 * time.Second
+		probeFailLimit  = 10
+		dnsTimeout      = 5 * time.Second
+		httpTimeout     = 30 * time.Second
+		restartCooldown = 10 * time.Second
+	)
+
+	exe, err := os.Executable()
+	if err != nil {
+		util.LogError("watchdog: cannot determine executable path: %v", err)
+		return
+	}
+
+	probeURLs := loadProbeURLsFromConfig()
+
+	probe := func() bool {
+		currentIfIndex := getCurrentTUNInterfaceIndex()
+		if currentIfIndex <= 0 {
+			return false
+		}
+		return tun.ProbeTUNHTTPWithBind(dnsTimeout, httpTimeout, currentIfIndex, probeURLs)
+	}
+
+	probeFailCount := 0
+	lastRestart := time.Time{}
+
+	restartChild := func(cp *childProcess, pid int, reason string) *childProcess {
+		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
+		cp.kill(syscall.SIGTERM)
+		cp.wait()
+		reapChild(pid)
+		tun.CleanupResidual()
+		if elapsed := time.Since(lastRestart); elapsed < restartCooldown {
+			remain := restartCooldown - elapsed
+			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
+			time.Sleep(remain)
+		}
+		newCp, err := spawnChildProcess(exe)
+		if err != nil {
+			util.LogError("watchdog: restart failed: %v", err)
+			return nil
+		}
+		util.LogInfo("watchdog: restarted child (old=%d, new=%d)", pid, newCp.proc.Pid)
+		lastRestart = time.Now()
+		probeFailCount = 0
+		return newCp
+	}
+
+	cp, err := spawnChildProcess(exe)
+	if err != nil {
+		util.LogError("watchdog: initial spawn failed: %v", err)
+		return
+	}
+	util.LogInfo("watchdog: worker started (pid=%d)", cp.proc.Pid)
+	spawnTime := time.Now()
+
+	// Forward signals to the child for graceful shutdown.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	go func() {
+		for sig := range sigCh {
+			util.LogInfo("watchdog: received %v, forwarding to child %d", sig, cp.proc.Pid)
+			writeStoppedMarker()
+			cp.kill(sig)
+		}
+	}()
+
+	monitorTicker := time.NewTicker(monitorInterval)
+	defer monitorTicker.Stop()
+	probeTicker := time.NewTicker(probeInterval)
+	defer probeTicker.Stop()
+	ifaceTicker := time.NewTicker(ifaceInterval)
+	defer ifaceTicker.Stop()
+
+	pid := cp.proc.Pid
+
+	util.LogInfo("watchdog: entering monitor loop for pid %d", pid)
+
+	for {
+		select {
+		case <-monitorTicker.C:
+			if !processExists(pid) {
+				reapChild(pid)
+				if wasStoppedGracefully() {
+					util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
+					tun.CleanupResidual()
+					removeStoppedMarker()
+					signal.Stop(sigCh)
+					return
+				}
+				// Child crashed — restart immediately.
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid))
+				if cp == nil {
+					signal.Stop(sigCh)
+					return
+				}
+				pid = cp.proc.Pid
+				spawnTime = time.Now()
+				continue
+			}
+			// Check ready timeout: child has not signaled ready within the limit.
+			if !cp.ready.Load() && time.Since(spawnTime) > childReadyTimeout {
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout))
+				if cp == nil {
+					signal.Stop(sigCh)
+					return
+				}
+				pid = cp.proc.Pid
+				spawnTime = time.Now()
+				continue
+			}
+			// Check heartbeat timeout: child was ready but stopped sending heartbeats.
+			if cp.ready.Load() {
+				lastHB := time.Unix(0, cp.lastHB.Load())
+				if time.Since(lastHB) > childHeartbeatTimeout {
+					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout))
+					if cp == nil {
+						signal.Stop(sigCh)
+						return
+					}
+					pid = cp.proc.Pid
+					spawnTime = time.Now()
+				}
+			}
+
+		case <-ifaceTicker.C:
+			// Only check TUN interface after the child has signaled ready.
+			if !cp.ready.Load() {
+				continue
+			}
+			if tun.Available() && !tun.InterfaceExists() {
+				cp = restartChild(cp, pid, "TUN interface missing")
+				if cp == nil {
+					signal.Stop(sigCh)
+					return
+				}
+				pid = cp.proc.Pid
+				spawnTime = time.Now()
+			}
+
+		case <-probeTicker.C:
+			// Only probe after the child has signaled ready.
+			if !cp.ready.Load() {
+				continue
+			}
+			if probe() {
+				probeFailCount = 0
+				continue
+			}
+			probeFailCount++
+			util.LogWarn("watchdog: probe failed (%d/%d)", probeFailCount, probeFailLimit)
+			if probeFailCount >= probeFailLimit {
+				cp = restartChild(cp, pid, fmt.Sprintf("probe unreachable (%d failures)", probeFailLimit))
+				if cp == nil {
+					signal.Stop(sigCh)
+					return
+				}
+				pid = cp.proc.Pid
+				spawnTime = time.Now()
+			}
+		}
+	}
+}
+
+// buildWorkerEnv builds the environment for the server child process.
+// It inherits the current environment and adds PHAETHON_WORKER=1.
+func buildWorkerEnv() []string {
+	env := os.Environ()
+	env = append(env, "PHAETHON_WORKER=1")
+	return env
+}
+
+// loadProbeURLsFromConfig reads probe URLs from the config file.
+// Falls back to nil (which makes the probe use tun.DefaultProbeURLs).
+func loadProbeURLsFromConfig() []string {
+	configFile := filepath.Join(".", "config.yaml")
+	cfg, err := config.LoadRaw(configFile)
+	if err != nil {
+		return nil
+	}
+	if cfg.TUN == nil {
+		return nil
+	}
+	return cfg.TUN.ProbeURLList()
 }
 
 // writeStartupError persists a fatal startup error to disk so the user can

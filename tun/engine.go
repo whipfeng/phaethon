@@ -398,8 +398,8 @@ func (e *Engine) Start() error {
 	// TUN DNS path: packets originated by the service process itself are not
 	// looped back through the wintun adapter to the same process, so both
 	// system-resolver and internal-netstack probes time out. The external
-	// watchdog process (spawned via LAYER_WATCHDOG_PID) still monitors parent
-	// death and cleans up routes/DNS to prevent a stranded broken network.
+	// watchdog process (parent) still monitors child death and cleans up
+	// routes/DNS to prevent a stranded broken network.
 	// e.watchdog = NewHealthWatchdog(e)
 	// e.watchdog.Start()
 

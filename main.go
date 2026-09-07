@@ -118,6 +118,7 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			"available":     tun.Available(),
 			"enabled":       false,
 			"bypassGateway": false,
+			"dhcpEnabled":   false,
 			"running":       false,
 			"deviceName":    "",
 			"routes": map[string]interface{}{
@@ -139,6 +140,7 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		"available":     tun.Available(),
 		"enabled":       enabled,
 		"bypassGateway": res.ruleConf.TUN.IsBypassGateway(),
+		"dhcpEnabled":   res.ruleConf.TUN.IsDHCPEnabled(),
 		"running":       false,
 		"deviceName":    "",
 		"routes": map[string]interface{}{

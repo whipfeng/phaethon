@@ -643,13 +643,12 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 
 	data := reply.serialize()
 
+	ciaddr := net.IP(req.ciaddr[:])
+	hasCI := !ciaddr.Equal(net.IPv4zero)
+
 	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
-	if msgType == dhcpACK || msgType == dhcpOffer {
-		if req.flags[0]&0x80 != 0 {
-			dst.IP = net.IPv4bcast
-		} else {
-			dst.IP = assignedIP
-		}
+	if hasCI && req.flags[0]&0x80 == 0 {
+		dst.IP = ciaddr
 	}
 
 	s.conn.WriteToUDP(data, dst)

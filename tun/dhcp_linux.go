@@ -176,9 +176,7 @@ type dhcpServerImpl struct {
 	cfg       *config.DHCPConfig
 	dnsAddr   net.IP
 
-	conn    *net.UDPConn
-	gateway net.IP
-	mask    net.IPMask
+	conn *net.UDPConn
 
 	mu       sync.Mutex
 	leases   map[string]*lease // MAC string -> lease
@@ -198,26 +196,24 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP)
 		return nil, fmt.Errorf("dhcp: config is nil")
 	}
 
+	// Validate interface exists and has an IPv4 address at startup.
+	// IP/mask are read dynamically on each DHCP request to handle IP changes.
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("dhcp: interface %q: %w", ifaceName, err)
 	}
-
 	addrs, err := iface.Addrs()
 	if err != nil {
 		return nil, fmt.Errorf("dhcp: get interface addrs: %w", err)
 	}
-
-	var gwIP net.IP
-	var ipMask net.IPMask
+	hasIPv4 := false
 	for _, a := range addrs {
 		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-			gwIP = ipNet.IP.To4()
-			ipMask = ipNet.Mask
+			hasIPv4 = true
 			break
 		}
 	}
-	if gwIP == nil {
+	if !hasIPv4 {
 		return nil, fmt.Errorf("dhcp: no IPv4 address on interface %q", ifaceName)
 	}
 
@@ -231,8 +227,6 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP)
 		ifaceName: ifaceName,
 		cfg:       cfg,
 		dnsAddr:   dnsAddr.To4(),
-		gateway:   gwIP,
-		mask:      ipMask,
 		leases:    make(map[string]*lease),
 		poolNext:  poolStart,
 		poolEnd:   poolEnd,
@@ -272,8 +266,9 @@ func (s *dhcpServerImpl) Start() error {
 	}
 
 	s.conn = conn.(*net.UDPConn)
+	gw, _, _, _ := s.getIfaceInfo()
 	util.LogInfo("dhcp: listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
-		s.ifaceName, s.gateway, s.dnsAddr, s.poolNext, s.poolEnd)
+		s.ifaceName, gw, s.dnsAddr, s.poolNext, s.poolEnd)
 
 	s.wg.Add(1)
 	go s.serve()
@@ -300,6 +295,25 @@ func (s *dhcpServerImpl) ActiveLeases() int {
 		}
 	}
 	return count
+}
+
+// getIfaceInfo returns the current IPv4 address, mask, and MAC of the bound interface.
+func (s *dhcpServerImpl) getIfaceInfo() (ip net.IP, mask net.IPMask, mac net.HardwareAddr, err error) {
+	iface, err := net.InterfaceByName(s.ifaceName)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	mac = iface.HardwareAddr
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+			return ipNet.IP.To4(), ipNet.Mask, mac, nil
+		}
+	}
+	return nil, nil, nil, fmt.Errorf("no IPv4 address on %s", s.ifaceName)
 }
 
 func (s *dhcpServerImpl) serve() {
@@ -344,6 +358,12 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 	msgType := req.messageType()
 	mac := req.clientMAC()
 	macStr := mac.String()
+
+	// Ignore our own DHCP requests (if this interface is also a DHCP client).
+	_, _, ifaceMAC, err := s.getIfaceInfo()
+	if err == nil && ifaceMAC != nil && mac.String() == ifaceMAC.String() {
+		return
+	}
 
 	switch msgType {
 	case dhcpDiscover:
@@ -454,6 +474,13 @@ func (s *dhcpServerImpl) advancePool() {
 }
 
 func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP net.IP) {
+	// Get current interface info (IP may change if interface uses DHCP)
+	gateway, mask, _, err := s.getIfaceInfo()
+	if err != nil {
+		util.LogWarn("dhcp: failed to get interface info: %v", err)
+		return
+	}
+
 	reply := &dhcpMessage{
 		op:      2, // BOOTREPLY
 		htype:   req.htype,
@@ -468,22 +495,22 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 
 	assigned4 := assignedIP.To4()
 	copy(reply.yiaddr[:], assigned4)
-	copy(reply.siaddr[:], s.gateway.To4())
+	copy(reply.siaddr[:], gateway)
 
 	leaseSecs := uint32(s.leaseDur.Seconds())
 
 	// Message type
 	reply.options[optMessageType] = []byte{msgType}
 	// Server identifier
-	reply.options[optServerIdentifier] = s.gateway.To4()
+	reply.options[optServerIdentifier] = gateway
 	// Lease time
 	lt := make([]byte, 4)
 	binary.BigEndian.PutUint32(lt, leaseSecs)
 	reply.options[optLeaseTime] = lt
 	// Subnet mask
-	reply.options[optSubnetMask] = []byte(s.mask)
+	reply.options[optSubnetMask] = []byte(mask)
 	// Router (gateway)
-	reply.options[optRouter] = s.gateway.To4()
+	reply.options[optRouter] = gateway
 	// DNS server
 	reply.options[optDNS] = s.dnsAddr.To4()
 	// Renewal time (T1 = lease/2)

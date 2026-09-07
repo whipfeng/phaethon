@@ -15,8 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"golang.org/x/sys/unix"
-	"unsafe"
 )
 
 // DHCP message types (option 53)
@@ -290,18 +288,30 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	if err != nil {
+		return fmt.Errorf("dhcp: raw socket: %w", err)
+	}
+	if err := syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: SO_BINDTODEVICE %q: %w", s.ifaceName, err)
+	}
+	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("dhcp: IP_HDRINCL: %w", err)
+	}
+	s.fd = fd
+
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
-				s.fd = int(fd)
 				if err := syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.ifaceName); err != nil {
 					opErr = fmt.Errorf("SO_BINDTODEVICE %q: %w", s.ifaceName, err)
 					return
 				}
 				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
-				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_PKTINFO, 1)
 			})
 			if err != nil {
 				return err
@@ -312,9 +322,9 @@ func (s *dhcpServerImpl) Start() error {
 
 	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:67")
 	if err != nil {
+		syscall.Close(fd)
 		return fmt.Errorf("dhcp: listen :67: %w", err)
 	}
-
 	s.conn = conn.(*net.UDPConn)
 	gw, _, _, _ := s.getIfaceInfo()
 	util.LogInfo("dhcp: listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
@@ -400,6 +410,9 @@ func (s *dhcpServerImpl) Stop() {
 	close(s.stopCh)
 	if s.conn != nil {
 		s.conn.Close()
+	}
+	if s.fd != 0 {
+		syscall.Close(s.fd)
 	}
 	s.wg.Wait()
 	util.LogInfo("dhcp: stopped")
@@ -663,34 +676,59 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	binary.BigEndian.PutUint32(t2, leaseSecs*7/8)
 	reply.options[optRebindingTime] = t2
 
-	data := reply.serialize()
+	dhcpData := reply.serialize()
 
 	ciaddr := net.IP(req.ciaddr[:])
 	hasCI := !ciaddr.Equal(net.IPv4zero)
 
-	dstIP := net.IPv4bcast
+	dstIP := net.IPv4bcast.To4()
 	if hasCI && req.flags[0]&0x80 == 0 {
-		dstIP = ciaddr
+		dstIP = ciaddr.To4()
 	}
 
 	src4 := gateway.To4()
-	dst4 := dstIP.To4()
-	if src4 == nil || dst4 == nil {
+	if src4 == nil || dstIP == nil {
 		return
 	}
 
-	var sa unix.SockaddrInet4
-	sa.Port = 68
-	copy(sa.Addr[:], dst4)
+	// Build UDP header
+	udpLen := 8 + len(dhcpData)
+	udp := make([]byte, udpLen)
+	binary.BigEndian.PutUint16(udp[0:2], 67)       // src port
+	binary.BigEndian.PutUint16(udp[2:4], 68)       // dst port
+	binary.BigEndian.PutUint16(udp[4:6], uint16(udpLen))
+	binary.BigEndian.PutUint16(udp[6:8], 0)        // checksum placeholder
+	copy(udp[8:], dhcpData)
 
-	ifIndex := 0
-	if iface, err := net.InterfaceByName(s.ifaceName); err == nil {
-		ifIndex = iface.Index
-	}
+	// Compute UDP checksum with pseudo-header
+	cksum := udpChecksum(src4, dstIP, udp)
+	binary.BigEndian.PutUint16(udp[6:8], cksum)
 
-	oob := buildPktInfoCmsg(ifIndex, src4)
-	if err := unix.Sendmsg(s.fd, data, oob, &sa, 0); err != nil {
-		util.LogWarn("dhcp: sendmsg: %v", err)
+	// Build IP header (20 bytes)
+	ipLen := 20 + len(udp)
+	ip := make([]byte, ipLen)
+	ip[0] = 0x45                         // version=4, IHL=5
+	ip[1] = 0                            // TOS
+	binary.BigEndian.PutUint16(ip[2:4], uint16(ipLen))
+	binary.BigEndian.PutUint16(ip[4:6], 0)  // identification
+	ip[6] = 0x40                         // flags: DF
+	ip[7] = 0
+	ip[8] = 64                           // TTL
+	ip[9] = 17                           // protocol: UDP
+	binary.BigEndian.PutUint16(ip[10:12], 0) // header checksum placeholder
+	copy(ip[12:16], src4)
+	copy(ip[16:20], dstIP)
+
+	// Compute IP header checksum
+	ipHdrCksum := ipChecksum(ip[:20])
+	binary.BigEndian.PutUint16(ip[10:12], ipHdrCksum)
+
+	// Send via raw socket
+	packet := append(ip, udp...)
+	var sa syscall.SockaddrInet4
+	copy(sa.Addr[:], dstIP)
+	if err := syscall.Sendto(s.fd, packet, 0, &sa); err != nil {
+		util.LogWarn("dhcp: sendto raw: %v", err)
 	}
 }
 
@@ -708,20 +746,44 @@ func dhcpUint32ToIP(n uint32) net.IP {
 	return ip
 }
 
-// buildPktInfoCmsg constructs an IP_PKTINFO control message for sendmsg.
-// struct in_pktinfo { int ipi_ifindex; struct in_addr ipi_spec_dst; struct in_addr ipi_addr; }
-func buildPktInfoCmsg(ifIndex int, srcIP net.IP) []byte {
-	const pktInfoLen = 12
-	oob := make([]byte, unix.CmsgSpace(pktInfoLen))
+// ipChecksum computes the IP header checksum (RFC 1071).
+func ipChecksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(data); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i:]))
+	}
+	if len(data)%2 != 0 {
+		sum += uint32(data[len(data)-1]) << 8
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
 
-	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
-	hdr.Level = unix.IPPROTO_IP
-	hdr.Type = unix.IP_PKTINFO
-	hdr.SetLen(unix.CmsgLen(pktInfoLen))
-
-	data := oob[unix.CmsgLen(0):]
-	binary.LittleEndian.PutUint32(data[0:4], uint32(ifIndex))
-	copy(data[4:8], srcIP.To4())
-	// data[8:12] (ipi_addr) left as zero
-	return oob
+// udpChecksum computes the UDP checksum including the IPv4 pseudo-header.
+func udpChecksum(src, dst net.IP, udpPacket []byte) uint16 {
+	var sum uint32
+	// Pseudo-header
+	sum += uint32(src[0])<<8 | uint32(src[1])
+	sum += uint32(src[2])<<8 | uint32(src[3])
+	sum += uint32(dst[0])<<8 | uint32(dst[1])
+	sum += uint32(dst[2])<<8 | uint32(dst[3])
+	sum += 17 // UDP protocol
+	sum += uint32(len(udpPacket))
+	// UDP data
+	for i := 0; i+1 < len(udpPacket); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(udpPacket[i:]))
+	}
+	if len(udpPacket)%2 != 0 {
+		sum += uint32(udpPacket[len(udpPacket)-1]) << 8
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	if cksum == 0 {
+		cksum = 0xffff // RFC 768: zero checksum value means "no checksum"
+	}
+	return cksum
 }

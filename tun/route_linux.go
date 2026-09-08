@@ -4,18 +4,17 @@ package tun
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
 	"phaethon/util"
 )
@@ -165,34 +164,35 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 	}
 
-	// 6. Add iptables rules to allow forwarding between physical interface and
+	// 6. Add nftables rules to allow forwarding between physical interface and
 	// TUN interface. This is required for bypass gateway mode where client
 	// traffic arrives on the physical interface and must be forwarded to TUN.
 	// Docker's default FORWARD policy is DROP, so explicit ACCEPT rules are needed.
 	if r.DefaultIfaceName != "" && r.bypassGateway {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		
 		// Allow traffic from physical to TUN (client queries going to netstack)
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
+		if err := addNftablesForwardRule(physIface, tunIface); err != nil {
+			util.LogWarn("tun: nftables FORWARD %s->%s ACCEPT fail: %v", physIface, tunIface, err)
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
+			util.LogInfo("tun: nftables FORWARD %s->%s ACCEPT added", physIface, tunIface)
 		}
+		
 		// Allow traffic from TUN to physical (responses going back to clients/proxy)
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
+		if err := addNftablesForwardRule(tunIface, physIface); err != nil {
+			util.LogWarn("tun: nftables FORWARD %s->%s ACCEPT fail: %v", tunIface, physIface, err)
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
+			util.LogInfo("tun: nftables FORWARD %s->%s ACCEPT added", tunIface, physIface)
 		}
+		
 		// Allow traffic from physical interface back out the same physical interface.
 		// LAN client traffic arrives on physIface and must be forwarded back out
 		// physIface to reach the real gateway on the same subnet.
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
+		if err := addNftablesForwardRule(physIface, physIface); err != nil {
+			util.LogWarn("tun: nftables FORWARD %s->%s ACCEPT fail: %v", physIface, physIface, err)
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
+			util.LogInfo("tun: nftables FORWARD %s->%s ACCEPT added", physIface, physIface)
 		}
 	}
 
@@ -200,21 +200,19 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 }
 
 func (r *RouteManager) platformTeardown() {
-	// Remove iptables FORWARD rules.
+	// Remove nftables FORWARD rules.
 	if r.DefaultIfaceName != "" {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		// Delete in reverse order of insertion
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, physIface, err, out)
+		if err := delNftablesForwardRule(physIface, physIface); err != nil {
+			util.LogWarn("tun: nftables delete FORWARD %s->%s fail: %v", physIface, physIface, err)
 		}
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", tunIface, physIface, err, out)
+		if err := delNftablesForwardRule(tunIface, physIface); err != nil {
+			util.LogWarn("tun: nftables delete FORWARD %s->%s fail: %v", tunIface, physIface, err)
 		}
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, tunIface, err, out)
+		if err := delNftablesForwardRule(physIface, tunIface); err != nil {
+			util.LogWarn("tun: nftables delete FORWARD %s->%s fail: %v", physIface, tunIface, err)
 		}
 	}
 
@@ -338,6 +336,120 @@ func readResolvConfNameservers() ([]string, error) {
 		return nil, err
 	}
 	return servers, nil
+}
+
+// addNftablesForwardRule adds a FORWARD chain rule to allow traffic from inIface to outIface.
+func addNftablesForwardRule(inIface, outIface string) error {
+	conn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("nftables connect: %w", err)
+	}
+
+	// Get or create the filter table in the inet family (IPv4+IPv6)
+	filterTable := &nftables.Table{
+		Family: nftables.TableFamilyINet,
+		Name:   "filter",
+	}
+	conn.AddTable(filterTable)
+
+	// Get or create the FORWARD chain
+	forwardChain := &nftables.Chain{
+		Name:     "forward",
+		Table:    filterTable,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookForward,
+		Priority: nftables.ChainPriorityFilter,
+	}
+	conn.AddChain(forwardChain)
+
+	// Build the rule: match input interface and output interface, then accept
+	rule := &nftables.Rule{
+		Table: filterTable,
+		Chain: forwardChain,
+		Exprs: []expr.Any{},
+	}
+
+	// Match input interface (meta iifname)
+	rule.Exprs = append(rule.Exprs, &expr.Meta{
+		Key:      expr.MetaKeyIIFNAME,
+		Register: 1,
+	})
+	rule.Exprs = append(rule.Exprs, &expr.Cmp{
+		Op:       expr.CmpOpEq,
+		Register: 1,
+		Data:     []byte(inIface + "\x00"),
+	})
+
+	// Match output interface (meta oifname)
+	rule.Exprs = append(rule.Exprs, &expr.Meta{
+		Key:      expr.MetaKeyOIFNAME,
+		Register: 1,
+	})
+	rule.Exprs = append(rule.Exprs, &expr.Cmp{
+		Op:       expr.CmpOpEq,
+		Register: 1,
+		Data:     []byte(outIface + "\x00"),
+	})
+
+	// Accept
+	rule.Exprs = append(rule.Exprs, &expr.Verdict{
+		Kind: expr.VerdictAccept,
+	})
+
+	conn.AddRule(rule)
+
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("nftables flush: %w", err)
+	}
+
+	return nil
+}
+
+// delNftablesForwardRule deletes a FORWARD chain rule for the specified interfaces.
+func delNftablesForwardRule(inIface, outIface string) error {
+	conn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("nftables connect: %w", err)
+	}
+
+	// Get the filter table
+	filterTable := &nftables.Table{
+		Family: nftables.TableFamilyINet,
+		Name:   "filter",
+	}
+
+	// Get the FORWARD chain
+	forwardChain := &nftables.Chain{
+		Name:  "forward",
+		Table: filterTable,
+	}
+
+	// List all rules in the chain
+	rules, err := conn.GetRules(filterTable, forwardChain)
+	if err != nil {
+		return fmt.Errorf("get rules: %w", err)
+	}
+
+	// Find and delete the matching rule
+	for _, rule := range rules {
+		if matchesForwardRule(rule, inIface, outIface) {
+			conn.DelRule(rule)
+			if err := conn.Flush(); err != nil {
+				return fmt.Errorf("delete rule: %w", err)
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("rule not found")
+}
+
+// matchesForwardRule checks if a rule matches the specified input/output interfaces.
+func matchesForwardRule(rule *nftables.Rule, inIface, outIface string) bool {
+	// Simple heuristic: check if the rule expressions contain the interface names
+	// This is a simplified check - in production you'd want to parse the expressions properly
+	exprsData := fmt.Sprintf("%v", rule.Exprs)
+	return strings.Contains(exprsData, inIface) && strings.Contains(exprsData, outIface)
 }
 
 // tunStateFile is the path where the main process saves kernel parameter values

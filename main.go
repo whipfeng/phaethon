@@ -537,7 +537,6 @@ func main() {
 	// If PHAETHON_WORKER is not set, this process is the watchdog.
 	// The watchdog spawns the actual server as a child and monitors it.
 	if os.Getenv("PHAETHON_WORKER") == "" {
-		setProcessName("phaethon-watchdog")
 		runWatchdogMode()
 		os.Exit(0)
 	}

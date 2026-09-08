@@ -59,7 +59,3 @@ func reapChild(pid int) {}
 // killResidualWorkers is a no-op on Windows. The watchdog does not run on
 // Windows, and orphaned worker processes are not expected there.
 func killResidualWorkers() {}
-
-// setProcessName is a no-op on Windows. The process name is determined by
-// the executable filename.
-func setProcessName(name string) {}

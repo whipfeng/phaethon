@@ -252,7 +252,7 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 // After detecting a dead connection, it triggers a background reconnect so
 // the next Dial() doesn't have to wait for the handshake.
 func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -273,7 +273,7 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 				d.removeAndReconnect(entry)
 				return
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(5 * time.Second):
 			util.LogWarn("[SSH-CLI] [%s] keepalive timed out, closing stale connection", d.Proxy.Name)
 			entry.client.Close()
 			d.removeAndReconnect(entry)
@@ -286,16 +286,24 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 
 // removeAndReconnect removes a dead SSH connection from the cache and
 // immediately attempts to reconnect in the background, so the next Dial()
-// finds a healthy connection ready to use.
+// finds a healthy connection ready to use. Retries up to 3 times if the
+// initial reconnect fails.
 func (d *SSHDialer) removeAndReconnect(entry *sshClientEntry) {
 	d.removeSSHClientLocked(entry)
 	go func() {
-		util.LogDebug("[SSH-CLI] [%s] background reconnecting...", d.Proxy.Name)
-		if _, _, err := d.getSSHClient(); err != nil {
-			util.LogWarn("[SSH-CLI] [%s] background reconnect failed: %v", d.Proxy.Name, err)
-		} else {
-			util.LogDebug("[SSH-CLI] [%s] background reconnect succeeded", d.Proxy.Name)
+		for attempt := 1; attempt <= 3; attempt++ {
+			util.LogDebug("[SSH-CLI] [%s] background reconnecting (attempt %d)...", d.Proxy.Name, attempt)
+			if _, _, err := d.getSSHClient(); err != nil {
+				util.LogWarn("[SSH-CLI] [%s] background reconnect attempt %d failed: %v", d.Proxy.Name, attempt, err)
+				if attempt < 3 {
+					time.Sleep(2 * time.Second)
+				}
+			} else {
+				util.LogDebug("[SSH-CLI] [%s] background reconnect succeeded on attempt %d", d.Proxy.Name, attempt)
+				return
+			}
 		}
+		util.LogError("[SSH-CLI] [%s] background reconnect failed after 3 attempts", d.Proxy.Name)
 	}()
 }
 

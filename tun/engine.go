@@ -930,7 +930,11 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
-			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			dstForLog := resolvedAddr
+			if domain != "" {
+				dstForLog = domain
+			}
+			connlog.Log("TUN", "UDP", "", dstForLog, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 	}
@@ -1069,7 +1073,11 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
-			connlog.Log("TUN", "TCP", "", dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			dstForLog := dialAddr
+			if domain != "" {
+				dstForLog = domain
+			}
+			connlog.Log("TUN", "TCP", "", dstForLog, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 	}

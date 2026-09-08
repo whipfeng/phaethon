@@ -4,6 +4,7 @@ package tun
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"phaethon/util"
@@ -170,14 +172,16 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	if r.DefaultIfaceName != "" && r.bypassGateway {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		// Allow traffic from physical to TUN (client queries going to netstack)
-		if out, err := exec.Command("iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
 		} else {
 			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
 		}
 		// Allow traffic from TUN to physical (responses going back to clients/proxy)
-		if out, err := exec.Command("iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
 		} else {
 			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
@@ -185,7 +189,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		// Allow traffic from physical interface back out the same physical interface.
 		// LAN client traffic arrives on physIface and must be forwarded back out
 		// physIface to reach the real gateway on the same subnet.
-		if out, err := exec.Command("iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
 		} else {
 			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
@@ -200,14 +204,16 @@ func (r *RouteManager) platformTeardown() {
 	if r.DefaultIfaceName != "" {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		// Delete in reverse order of insertion
-		if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, physIface, err, out)
 		}
-		if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", tunIface, physIface, err, out)
 		}
-		if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, tunIface, err, out)
 		}
 	}

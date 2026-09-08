@@ -3,10 +3,12 @@
 package tun
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"phaethon/util"
 )
@@ -23,8 +25,11 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	if _, err := exec.LookPath("resolvectl"); err == nil {
-		if out, err := exec.Command("resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
+		if out, err := exec.CommandContext(ctx, "resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "resolved"
 			util.LogInfo("tun: systemd-resolved dns for %s set to %s", ifaceName, tunIP)
 			return nil
@@ -34,7 +39,7 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	}
 
 	if _, err := exec.LookPath("nmcli"); err == nil {
-		if out, err := exec.Command("nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
+		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "nm"
 			util.LogInfo("tun: NetworkManager dns for %s set to %s", ifaceName, tunIP)
 			return nil
@@ -84,15 +89,18 @@ func restoreSystemDNS(ifaceName string) {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	switch dnsMethod {
 	case "resolved":
-		if out, err := exec.Command("resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
 			util.LogWarn("tun: restore resolved dns fail: %v: %s", err, out)
 		} else {
 			util.LogInfo("tun: systemd-resolved dns for %s reverted", ifaceName)
 		}
 	case "nm":
-		if out, err := exec.Command("nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
 			util.LogWarn("tun: restore NetworkManager dns fail: %v: %s", err, out)
 		} else {
 			util.LogInfo("tun: NetworkManager dns for %s restored", ifaceName)

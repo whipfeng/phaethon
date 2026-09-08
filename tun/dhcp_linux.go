@@ -33,12 +33,14 @@ const (
 	optSubnetMask       = 1
 	optRouter           = 3
 	optDNS              = 6
+	optDomainName       = 15
 	optRequestedIP      = 50
 	optLeaseTime        = 51
 	optMessageType      = 53
 	optServerIdentifier = 54
 	optRenewalTime      = 58
 	optRebindingTime    = 59
+	optClientIdentifier = 61
 	optEnd              = 255
 )
 
@@ -140,7 +142,7 @@ func (m *dhcpMessage) requestedIP() net.IP {
 }
 
 func (m *dhcpMessage) serialize() []byte {
-	buf := make([]byte, 240, 512)
+	buf := make([]byte, 236, 512)
 	buf[0] = m.op
 	buf[1] = m.htype
 	buf[2] = m.hlen
@@ -159,8 +161,33 @@ func (m *dhcpMessage) serialize() []byte {
 	// Magic cookie
 	buf = append(buf, 99, 130, 83, 99)
 
-	// Options
-	for code, data := range m.options {
+	// Output options in deterministic order: Message Type first, then numerical order
+	// RFC 2132 requires option 53 (Message Type) to be first
+	if data, ok := m.options[optMessageType]; ok {
+		buf = append(buf, optMessageType, byte(len(data)))
+		buf = append(buf, data...)
+	}
+
+	// Collect and sort remaining option codes
+	codes := make([]byte, 0, len(m.options)-1)
+	for code := range m.options {
+		if code != optMessageType {
+			codes = append(codes, code)
+		}
+	}
+	// Simple insertion sort (small number of options)
+	for i := 1; i < len(codes); i++ {
+		key := codes[i]
+		j := i - 1
+		for j >= 0 && codes[j] > key {
+			codes[j+1] = codes[j]
+			j--
+		}
+		codes[j+1] = key
+	}
+
+	for _, code := range codes {
+		data := m.options[code]
 		buf = append(buf, code, byte(len(data)))
 		buf = append(buf, data...)
 	}
@@ -183,10 +210,11 @@ type dhcpServerImpl struct {
 	dataDir   string
 	leaseFile string
 
-	conn *net.UDPConn
-	fd   int
-	ifIndex    int
-	ifHWAddr   net.HardwareAddr
+	rawFD    int // AF_PACKET socket for sending
+	ifIndex  int
+	ifHWAddr net.HardwareAddr
+
+	conn *net.UDPConn // UDP socket for receiving only
 
 	mu       sync.Mutex
 	leases   map[string]*lease // MAC string -> lease
@@ -290,30 +318,14 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 }
 
 func (s *dhcpServerImpl) Start() error {
-	// Send socket: AF_PACKET/SOCK_RAW sends raw Ethernet frames.
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(syscall.ETH_P_IP)))
-	if err != nil {
-		return fmt.Errorf("dhcp: af_packet socket: %w", err)
-	}
 	iface, err := net.InterfaceByName(s.ifaceName)
 	if err != nil {
-		syscall.Close(fd)
 		return fmt.Errorf("dhcp: interface %q: %w", s.ifaceName, err)
 	}
-	s.fd = fd
 	s.ifIndex = iface.Index
 	s.ifHWAddr = iface.HardwareAddr
 
-	// Bind AF_PACKET socket to the specific interface (required for sending).
-	var bindAddr syscall.SockaddrLinklayer
-	bindAddr.Protocol = htons(syscall.ETH_P_IP)
-	bindAddr.Ifindex = iface.Index
-	if err := syscall.Bind(fd, &bindAddr); err != nil {
-		syscall.Close(fd)
-		return fmt.Errorf("dhcp: bind af_packet to %s: %w", s.ifaceName, err)
-	}
-
-	// Receive socket: regular UDP on 0.0.0.0:67
+	// UDP socket for receiving DHCP requests
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
@@ -334,10 +346,31 @@ func (s *dhcpServerImpl) Start() error {
 
 	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:67")
 	if err != nil {
-		syscall.Close(fd)
 		return fmt.Errorf("dhcp: listen :67: %w", err)
 	}
 	s.conn = conn.(*net.UDPConn)
+
+	// AF_PACKET socket for sending DHCP replies with full control over checksums
+	rawFD, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(syscall.ETH_P_IP)))
+	if err != nil {
+		s.conn.Close()
+		return fmt.Errorf("dhcp: AF_PACKET socket: %w", err)
+	}
+	s.rawFD = rawFD
+
+	// Bind to the interface
+	sll := &syscall.SockaddrLinklayer{
+		Protocol: htons(syscall.ETH_P_IP),
+		Ifindex:  s.ifIndex,
+	}
+	if err := syscall.Bind(rawFD, sll); err != nil {
+		syscall.Close(rawFD)
+		s.conn.Close()
+		return fmt.Errorf("dhcp: AF_PACKET bind: %w", err)
+	}
+
+	util.LogInfo("dhcp: AF_PACKET socket fd=%d ifindex=%d mac=%s", rawFD, s.ifIndex, s.ifHWAddr)
+
 	gw, _, _, _ := s.getIfaceInfo()
 	util.LogInfo("dhcp: listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
 		s.ifaceName, gw, s.dnsAddr, s.poolNext, s.poolEnd)
@@ -423,8 +456,8 @@ func (s *dhcpServerImpl) Stop() {
 	if s.conn != nil {
 		s.conn.Close()
 	}
-	if s.fd != 0 {
-		syscall.Close(s.fd)
+	if s.rawFD != 0 {
+		syscall.Close(s.rawFD)
 	}
 	s.wg.Wait()
 	util.LogInfo("dhcp: stopped")
@@ -640,7 +673,6 @@ func (s *dhcpServerImpl) advancePool() {
 }
 
 func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP net.IP) {
-	// Get current interface info (IP may change if interface uses DHCP)
 	gateway, mask, _, err := s.getIfaceInfo()
 	if err != nil {
 		util.LogWarn("dhcp: failed to get interface info: %v", err)
@@ -665,90 +697,112 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 
 	leaseSecs := uint32(s.leaseDur.Seconds())
 
-	// Message type
 	reply.options[optMessageType] = []byte{msgType}
-	// Server identifier
 	reply.options[optServerIdentifier] = gateway
-	// Lease time
 	lt := make([]byte, 4)
 	binary.BigEndian.PutUint32(lt, leaseSecs)
 	reply.options[optLeaseTime] = lt
-	// Subnet mask
 	reply.options[optSubnetMask] = []byte(mask)
-	// Router (gateway)
 	reply.options[optRouter] = gateway
-	// DNS server
 	reply.options[optDNS] = s.dnsAddr.To4()
-	// Renewal time (T1 = lease/2)
+	reply.options[optDomainName] = []byte("phaethon.local")
 	t1 := make([]byte, 4)
 	binary.BigEndian.PutUint32(t1, leaseSecs/2)
 	reply.options[optRenewalTime] = t1
-	// Rebinding time (T2 = lease*7/8)
 	t2 := make([]byte, 4)
 	binary.BigEndian.PutUint32(t2, leaseSecs*7/8)
 	reply.options[optRebindingTime] = t2
+	if cid, ok := req.options[optClientIdentifier]; ok {
+		reply.options[optClientIdentifier] = cid
+	}
 
 	dhcpData := reply.serialize()
 
-	ciaddr := net.IP(req.ciaddr[:])
-	hasCI := !ciaddr.Equal(net.IPv4zero)
+	// Build UDP packet
+	srcIP := gateway.To4()
 
+	// Always broadcast DHCP replies (OFFER/ACK) to 255.255.255.255
 	dstIP := net.IPv4bcast.To4()
-	if hasCI && req.flags[0]&0x80 == 0 {
-		dstIP = ciaddr.To4()
-	}
 
-	src4 := gateway.To4()
-	if src4 == nil || dstIP == nil {
-		return
-	}
+	// Always use broadcast MAC for DHCP replies
+	dstMAC := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
-	// Build UDP header
 	udpLen := 8 + len(dhcpData)
 	udp := make([]byte, udpLen)
-	binary.BigEndian.PutUint16(udp[0:2], 67)       // src port
-	binary.BigEndian.PutUint16(udp[2:4], 68)       // dst port
-	binary.BigEndian.PutUint16(udp[4:6], uint16(udpLen))
-	binary.BigEndian.PutUint16(udp[6:8], 0)        // checksum placeholder
+	binary.BigEndian.PutUint16(udp[0:], 67)    // src port
+	binary.BigEndian.PutUint16(udp[2:], 68)    // dst port
+	binary.BigEndian.PutUint16(udp[4:], uint16(udpLen))
+	binary.BigEndian.PutUint16(udp[6:], 0)     // checksum placeholder
 	copy(udp[8:], dhcpData)
 
 	// Compute UDP checksum with pseudo-header
-	cksum := udpChecksum(src4, dstIP, udp)
-	binary.BigEndian.PutUint16(udp[6:8], cksum)
+	cksum := udpChecksum(srcIP, dstIP, udp)
+	binary.BigEndian.PutUint16(udp[6:], cksum)
 
-	// Build IP header (20 bytes) + UDP payload
+	// Build IP header (20 bytes, no options)
 	ipLen := 20 + len(udp)
 	ip := make([]byte, ipLen)
-	ip[0] = 0x45                         // version=4, IHL=5
-	ip[1] = 0                            // TOS
-	binary.BigEndian.PutUint16(ip[2:4], uint16(ipLen))
-	binary.BigEndian.PutUint16(ip[4:6], 0)  // identification
-	ip[6] = 0                            // flags: no DF
+	ip[0] = 0x45                      // version=4, IHL=5
+	ip[1] = 0                         // TOS
+	binary.BigEndian.PutUint16(ip[2:], uint16(ipLen))
+	binary.BigEndian.PutUint16(ip[4:], 0) // identification
+	ip[6] = 0                         // flags=0 (no DF), fragment offset=0
 	ip[7] = 0
-	ip[8] = 64                           // TTL
-	ip[9] = 17                           // protocol: UDP
-	binary.BigEndian.PutUint16(ip[10:12], 0) // header checksum placeholder
-	copy(ip[12:16], src4)
+	ip[8] = 255                       // TTL
+	ip[9] = 17                        // protocol = UDP
+	binary.BigEndian.PutUint16(ip[10:], 0) // checksum placeholder
+	copy(ip[12:16], srcIP)
 	copy(ip[16:20], dstIP)
-	copy(ip[20:], udp)                   // copy UDP into IP payload
+	copy(ip[20:], udp) // Copy UDP data into IP payload
 
-	// Compute IP header checksum
-	ipHdrCksum := ipChecksum(ip[:20])
-	binary.BigEndian.PutUint16(ip[10:12], ipHdrCksum)
+	// Compute IP header checksum (only over the 20-byte IP header, not the payload)
+	ipCK := ipChecksum(ip[:20])
+	binary.BigEndian.PutUint16(ip[10:], ipCK)
 
-	// Build full Ethernet frame
-	ethFrame := make([]byte, 14+len(ip))
-	if hasCI && req.flags[0]&0x80 == 0 {
-		copy(ethFrame[0:6], req.chaddr[:6]) // unicast to client MAC
-	} else {
-		copy(ethFrame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // broadcast
+	// Build Ethernet frame: eth(14) + ip(20+len(udp))
+	frame := make([]byte, 14+len(ip))
+	copy(frame[14:], ip)
+
+	// Destination MAC: unicast to client or broadcast based on client's broadcast flag
+	copy(frame[0:6], dstMAC)
+	// Source MAC: our interface MAC
+	copy(frame[6:12], s.ifHWAddr)
+	// EtherType: IPv4
+	binary.BigEndian.PutUint16(frame[12:14], 0x0800)
+
+	// Send via AF_PACKET
+	dst := &syscall.SockaddrLinklayer{
+		Protocol: htons(syscall.ETH_P_IP),
+		Ifindex:  s.ifIndex,
+		Halen:    6,
 	}
-	copy(ethFrame[6:12], s.ifHWAddr)                                   // src MAC
-	binary.BigEndian.PutUint16(ethFrame[12:14], 0x0800)               // EtherType: IPv4
-	copy(ethFrame[14:], ip)
+	copy(dst.Addr[:6], dstMAC)
 
-	if _, err := syscall.Write(s.fd, ethFrame); err != nil {
-		util.LogWarn("dhcp: write packet: %v", err)
+	if err := syscall.Sendto(s.rawFD, frame, 0, dst); err != nil {
+		util.LogWarn("dhcp: send %s to %v: %v", msgTypeName(msgType), dstIP, err)
+	} else {
+		hex := ""
+		for i := 0; i < len(frame) && i < 42; i++ {
+			hex += fmt.Sprintf("%02x", frame[i])
+		}
+		util.LogInfo("dhcp: sent %d bytes via AF_PACKET fd=%d frame_hex=%s", len(frame), s.rawFD, hex)
+	}
+}
+
+func msgTypeName(t byte) string {
+	switch t {
+	case dhcpDiscover:
+		return "DISCOVER"
+	case dhcpOffer:
+		return "OFFER"
+	case dhcpRequest:
+		return "REQUEST"
+	case dhcpACK:
+		return "ACK"
+	case dhcpNAK:
+		return "NAK"
+	default:
+		return fmt.Sprintf("type=%d", t)
 	}
 }
 
@@ -785,7 +839,7 @@ func ipChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// udpChecksum computes the UDP checksum including the IPv4 pseudo-header.
+// udpChecksum computes the UDP checksum including a IPv4 pseudo-header.
 func udpChecksum(src, dst net.IP, udpPacket []byte) uint16 {
 	var sum uint32
 	// Pseudo-header

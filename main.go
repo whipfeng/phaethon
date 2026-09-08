@@ -882,6 +882,7 @@ func runWatchdogMode() {
 		return newCp
 	}
 
+	killResidualWorkers()
 	cp, err := spawnChildProcess(exe)
 	if err != nil {
 		util.LogError("watchdog: initial spawn failed: %v", err)

@@ -182,6 +182,14 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		} else {
 			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
 		}
+		// Allow traffic from physical interface back out the same physical interface.
+		// LAN client traffic arrives on physIface and must be forwarded back out
+		// physIface to reach the real gateway on the same subnet.
+		if out, err := exec.Command("iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
+		} else {
+			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
+		}
 	}
 
 	return nil
@@ -193,6 +201,9 @@ func (r *RouteManager) platformTeardown() {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
 		// Delete in reverse order of insertion
+		if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, physIface, err, out)
+		}
 		if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
 			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", tunIface, physIface, err, out)
 		}

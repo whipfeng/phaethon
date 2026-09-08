@@ -441,6 +441,7 @@ func HandleReverseConnection(conn net.Conn, address string) {
 			select {
 			case <-ticker.C:
 				if err := mc.WriteMsg(FrameHeartbeat); err != nil {
+					mc.Conn.Close() // close to trigger readLoop exit and pool cleanup
 					return
 				}
 			case <-mc.stopPing:

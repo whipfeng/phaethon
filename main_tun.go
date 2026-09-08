@@ -33,6 +33,9 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 		return nil
 	}
 
+	// Clean up any residual TUN state from previous crashes before starting.
+	tun.CleanupResidual()
+
 	if ruleConf == nil || !ruleConf.TUN.IsEnabled() {
 		util.LogInfo("TUN disabled by configuration")
 		return nil

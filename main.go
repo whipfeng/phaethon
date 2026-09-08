@@ -846,7 +846,6 @@ func runWatchdogMode() {
 
 	const (
 		monitorInterval = 3 * time.Second
-		ifaceInterval   = 5 * time.Second
 		restartCooldown = 10 * time.Second
 	)
 
@@ -871,7 +870,6 @@ func runWatchdogMode() {
 			<-cp.done
 		}
 		reapChild(pid)
-		tun.CleanupResidual()
 		if elapsed := time.Since(lastRestart); elapsed < restartCooldown {
 			remain := restartCooldown - elapsed
 			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
@@ -909,8 +907,6 @@ func runWatchdogMode() {
 
 	monitorTicker := time.NewTicker(monitorInterval)
 	defer monitorTicker.Stop()
-	ifaceTicker := time.NewTicker(ifaceInterval)
-	defer ifaceTicker.Stop()
 
 	pid := cp.proc.Pid
 
@@ -923,7 +919,6 @@ func runWatchdogMode() {
 				reapChild(pid)
 				if wasStoppedGracefully() {
 					util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
-					tun.CleanupResidual()
 					removeStoppedMarker()
 					signal.Stop(sigCh)
 					return
@@ -961,21 +956,6 @@ func runWatchdogMode() {
 					pid = cp.proc.Pid
 					spawnTime = time.Now()
 				}
-			}
-
-		case <-ifaceTicker.C:
-			// Only check TUN interface after the child has signaled ready.
-			if !cp.ready.Load() {
-				continue
-			}
-			if tun.Available() && !tun.InterfaceExists() {
-				cp = restartChild(cp, pid, "TUN interface missing")
-				if cp == nil {
-					signal.Stop(sigCh)
-					return
-				}
-				pid = cp.proc.Pid
-				spawnTime = time.Now()
 			}
 		}
 	}

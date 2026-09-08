@@ -190,7 +190,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 	senderWg.Add(1)
 	go func() {
 		defer senderWg.Done()
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {

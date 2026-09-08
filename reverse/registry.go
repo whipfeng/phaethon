@@ -429,13 +429,14 @@ func HandleReverseConnection(conn net.Conn, address string) {
 		return
 	}
 
-	// Start heartbeat sender: write HEARTBEAT every 10s to keep connection alive.
+	// Start heartbeat sender: write HEARTBEAT every 5s to keep connection alive
+	// and detect dead connections quickly.
 	// Continues even after matched — the dialer side tcpKeepalive only sends
 	// without reading, so both sides keep the TCP connection active.
 	mc.senderWg.Add(1)
 	go func() {
 		defer mc.senderWg.Done()
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {

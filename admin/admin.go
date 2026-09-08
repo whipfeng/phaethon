@@ -485,6 +485,7 @@ type pageTemplates struct {
 	subscriptions *template.Template
 	rules         *template.Template
 	mappings      *template.Template
+	resolvers     *template.Template
 	reverseWizard *template.Template
 	login         *template.Template
 	setup         *template.Template
@@ -619,6 +620,7 @@ func (s *AdminServer) parseTemplates() {
 		subscriptions: parsePage("subscriptions.html"),
 		rules:         parsePage("rules.html"),
 		mappings:      parsePage("mappings.html"),
+		resolvers:     parsePage("resolvers.html"),
 		reverseWizard: parsePage("reverse-wizard.html"),
 		login:         parseStandalone("login.html"),
 		setup:         parseStandalone("setup.html"),
@@ -829,6 +831,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/subscriptions", s.handleSubscriptionsPage)
 	mux.HandleFunc("/rules", s.handleRulesPage)
 	mux.HandleFunc("/mappings", s.handleMappingsPage)
+	mux.HandleFunc("/resolvers", s.handleResolversPage)
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
@@ -849,6 +852,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rules/", s.apiRules)
 	mux.HandleFunc("/api/mappings", s.apiMappings)
 	mux.HandleFunc("/api/mappings/", s.apiMappings)
+	mux.HandleFunc("/api/resolvers", s.apiResolvers)
+	mux.HandleFunc("/api/resolvers/", s.apiResolvers)
 	mux.HandleFunc("/api/subscriptions", s.apiSubscriptions)
 	mux.HandleFunc("/api/subscriptions/", s.apiSubscriptionActions)
 	mux.HandleFunc("/api/groups", s.apiGroups)
@@ -1046,6 +1051,15 @@ func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request)
 		"CanSwitch":  false,
 	}
 	s.render(w, r, "mappings.html", data)
+}
+
+func (s *AdminServer) handleResolversPage(w http.ResponseWriter, r *http.Request) {
+	dc := s.displayConf()
+	data := map[string]interface{}{
+		"Title":     "Resolvers",
+		"Resolvers": dc.Resolvers,
+	}
+	s.render(w, r, "resolvers.html", data)
 }
 
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
@@ -2146,6 +2160,157 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpError(w, "mapping not found", http.StatusNotFound)
+}
+
+func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
+	dc := s.displayConf()
+	if r.Method == http.MethodPatch {
+		name := strings.TrimPrefix(r.URL.Path, "/api/resolvers/")
+		if name == "" {
+			httpError(w, "resolver name required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, "decode fail", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, rv := range dc.Resolvers {
+			if rv.Name == name {
+				rv.Enabled = &body.Enabled
+				if err := dc.Init(); err != nil {
+					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := s.saveConfigLocked(); err != nil {
+					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := s.mergeAndInitLocked(); err != nil {
+					util.LogWarn("[ADMIN] merge after resolver toggle failed: %v", err)
+				}
+				if s.OnIncrementalUpdate != nil {
+					if err := s.OnIncrementalUpdate(); err != nil {
+						util.LogWarn("[ADMIN] incremental update after resolver toggle failed: %v", err)
+					}
+				}
+				jsonResponse(w, resolverSummary(rv))
+				return
+			}
+		}
+		httpError(w, "resolver not found", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		summaries := make([]map[string]interface{}, len(dc.Resolvers))
+		for i, rv := range dc.Resolvers {
+			summaries[i] = resolverSummary(rv)
+		}
+		jsonResponse(w, summaries)
+
+	case http.MethodPost:
+		var rv config.Resolver
+		if err := json.NewDecoder(r.Body).Decode(&rv); err != nil {
+			httpError(w, "decode fail", http.StatusBadRequest)
+			return
+		}
+		if rv.Name == "" {
+			httpError(w, "name required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		replaced := false
+		for i, existing := range dc.Resolvers {
+			if existing.Name == rv.Name {
+				dc.Resolvers[i] = &rv
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			dc.Resolvers = append(dc.Resolvers, &rv)
+		}
+		if err := dc.Init(); err != nil {
+			if !replaced {
+				dc.Resolvers = dc.Resolvers[:len(dc.Resolvers)-1]
+			}
+			s.mu.Unlock()
+			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.mergeAndInitLocked(); err != nil {
+			util.LogWarn("[ADMIN] merge after resolver add failed: %v", err)
+		}
+		s.mu.Unlock()
+		if replaced {
+			util.LogInfo("[ADMIN] resolver updated in %s: %s (%s:%d -> %s:%d)", s.confPath, rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			jsonResponse(w, resolverSummary(&rv))
+		} else {
+			util.LogInfo("[ADMIN] resolver added to %s: %s (%s:%d -> %s:%d)", s.confPath, rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			w.WriteHeader(http.StatusCreated)
+			jsonResponse(w, resolverSummary(&rv))
+		}
+
+	case http.MethodDelete:
+		name := strings.TrimPrefix(r.URL.Path, "/api/resolvers/")
+		if name == "" {
+			httpError(w, "resolver name required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		for i, rv := range dc.Resolvers {
+			if rv.Name == name {
+				old := dc.Resolvers
+				dc.Resolvers = append(dc.Resolvers[:i], dc.Resolvers[i+1:]...)
+				if err := dc.Init(); err != nil {
+					dc.Resolvers = old
+					s.mu.Unlock()
+					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := s.saveConfigLocked(); err != nil {
+					s.mu.Unlock()
+					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := s.mergeAndInitLocked(); err != nil {
+					util.LogWarn("[ADMIN] merge after resolver delete failed: %v", err)
+				}
+				s.mu.Unlock()
+				util.LogInfo("[ADMIN] resolver deleted from %s: %s", s.confPath, name)
+				jsonResponse(w, map[string]string{"status": "deleted"})
+				return
+			}
+		}
+		s.mu.Unlock()
+		httpError(w, "resolver not found", http.StatusNotFound)
+	}
+}
+
+func resolverSummary(rv *config.Resolver) map[string]interface{} {
+	if rv == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"name":    rv.Name,
+		"enabled": rv.IsEnabled(),
+		"srcHost": rv.SrcHost,
+		"srcPort": rv.SrcPort,
+		"dstHost": rv.DstHost,
+		"dstPort": rv.DstPort,
+	}
 }
 
 // apiGroupActions dispatches /api/groups/{name}/... sub-paths.
@@ -4170,6 +4335,8 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.rules
 	case "mappings.html":
 		t = s.pages.mappings
+	case "resolvers.html":
+		t = s.pages.resolvers
 	case "reverse-wizard.html":
 		t = s.pages.reverseWizard
 	case "config.html":

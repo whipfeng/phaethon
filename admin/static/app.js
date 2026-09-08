@@ -1157,6 +1157,31 @@ async function openLogsPopup() {
                     cursor: pointer;
                 }
                 .pip-status input { cursor: pointer; }
+                .pip-filter-bar {
+                    background: #161b22;
+                    border-bottom: 1px solid #30363d;
+                    padding: 8px 20px;
+                    display: flex;
+                    gap: 10px;
+                    align-items: center;
+                    flex-shrink: 0;
+                    flex-wrap: wrap;
+                }
+                .pip-filter-bar select, .pip-filter-bar input {
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    border: 1px solid #30363d;
+                    background: #0d1117;
+                    color: #c9d1d9;
+                    font-size: 13px;
+                }
+                .pip-filter-bar select { min-width: 100px; }
+                .pip-filter-bar input { flex: 1; min-width: 150px; }
+                .pip-filter-bar label {
+                    font-size: 12px;
+                    color: #8b949e;
+                    margin-right: 4px;
+                }
             `;
             pipWindow.document.head.appendChild(pipStyle);
 
@@ -1168,6 +1193,22 @@ async function openLogsPopup() {
                         <button class="pip-btn" id="pip-refresh">🔄</button>
                         <button class="pip-btn pip-btn-danger" id="pip-clear">🗑</button>
                     </div>
+                </div>
+                <div class="pip-filter-bar">
+                    <label data-i18n="logs.filterStatus">状态</label>
+                    <select id="pip-filter-status">
+                        <option value="" data-i18n="logs.filterAll">全部</option>
+                        <option value="ok">OK</option>
+                        <option value="fail">Fail</option>
+                        <option value="reject">Reject</option>
+                    </select>
+                    <label data-i18n="logs.filterProtocol">协议</label>
+                    <select id="pip-filter-protocol">
+                        <option value="" data-i18n="logs.filterAll">全部</option>
+                        <option value="TCP">TCP</option>
+                        <option value="UDP">UDP</option>
+                    </select>
+                    <input type="text" id="pip-filter-search" placeholder="🔍" data-i18n-placeholder="logs.filterSearch">
                 </div>
                 <div id="pip-logs"></div>
                 <div class="pip-status">
@@ -1188,6 +1229,10 @@ async function openLogsPopup() {
                     el.textContent = icon ? icon[0] + text : text;
                 }
             });
+            pipWindow.document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const key = el.dataset.i18nPlaceholder;
+                el.placeholder = i18n.t(key);
+            });
 
             const logsEl = pipWindow.document.getElementById('pip-logs');
             const countEl = pipWindow.document.getElementById('pip-count');
@@ -1205,15 +1250,24 @@ async function openLogsPopup() {
                 const time = `${hours}:${minutes}:${seconds}.${ms}`;
                 const icon = e.status === 'ok' ? '✓' : '✗';
                 const inbound = e.inbound || '';
+                let dstDisplay = `${e.dstAddr}:${e.dstPort}`;
+                if (e.originalDstAddr && e.originalDstAddr !== e.dstAddr) {
+                    dstDisplay = `${e.originalDstAddr} → ${e.dstAddr}:${e.dstPort}`;
+                }
                 let target = e.rule || e.proxy || 'DIRECT';
                 if (e.actualProxy && e.actualProxy !== e.proxy) {
                     target += ' → ' + e.actualProxy;
                 }
-                let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${target}`;
+                let text = `${icon} [${inbound}] ${e.protocol} ${dstDisplay} → ${target}`;
                 if (e.error) text += ` (${e.error})`;
+
+                const searchFields = [e.dstAddr, e.originalDstAddr, e.rule, e.proxy, e.actualProxy, e.inbound, e.protocol, e.error, target].filter(Boolean).join(' ');
 
                 const div = pipWindow.document.createElement('div');
                 div.className = `log-line ${e.status}`;
+                div.setAttribute('data-status', e.status);
+                div.setAttribute('data-protocol', e.protocol || '');
+                div.setAttribute('data-search', searchFields.toLowerCase());
                 div.innerHTML = `<span class="log-time">[${time}]</span><span class="log-icon">${text.charAt(0)}</span>${text.substring(2)}`;
                 logsEl.appendChild(div);
                 logCount++;
@@ -1223,8 +1277,23 @@ async function openLogsPopup() {
                     logsEl.removeChild(logsEl.firstChild);
                 }
                 countEl.textContent = i18n.t('pip.logCount').replace('{}', logCount);
+                // Apply current filters to new entry
+                applyFilters();
                 // Scroll to bottom after each log for real-time updates
                 scrollToBottom();
+            }
+
+            function applyFilters() {
+                const statusVal = pipWindow.document.getElementById('pip-filter-status').value;
+                const protoVal = pipWindow.document.getElementById('pip-filter-protocol').value;
+                const searchVal = pipWindow.document.getElementById('pip-filter-search').value.toLowerCase();
+                logsEl.querySelectorAll('.log-line').forEach(div => {
+                    let show = true;
+                    if (statusVal && div.getAttribute('data-status') !== statusVal) show = false;
+                    if (protoVal && div.getAttribute('data-protocol') !== protoVal) show = false;
+                    if (searchVal && !div.getAttribute('data-search').includes(searchVal)) show = false;
+                    div.style.display = show ? '' : 'none';
+                });
             }
 
             function scrollToBottom() {
@@ -1271,6 +1340,12 @@ async function openLogsPopup() {
                 lastSeq = 0;
                 countEl.textContent = i18n.t('pip.logCount').replace('{}', 0);
             };
+
+            // Filter event listeners
+            ['pip-filter-status', 'pip-filter-protocol'].forEach(id => {
+                pipWindow.document.getElementById(id).addEventListener('change', applyFilters);
+            });
+            pipWindow.document.getElementById('pip-filter-search').addEventListener('input', applyFilters);
 
             // Initial load
             fetchLogs(true);

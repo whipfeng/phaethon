@@ -1,0 +1,186 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <h3><span data-i18n="res.title">Resolvers</span> ({{len .Resolvers}})</h3>
+            <button onclick="showAddResolver()" class="btn btn-primary btn-sm" data-i18n="res.add">+ Add Resolver</button>
+        </div>
+        <p style="color:var(--text-secondary);margin-bottom:1rem;font-size:0.85rem;" data-i18n="res.desc">
+            Resolvers rewrite the destination address before rule matching. e.g. redirect git.example.com:80 to 10.0.0.1:9003.
+        </p>
+
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="res.name">Name</th>
+                        <th data-i18n="res.src">Source</th>
+                        <th></th>
+                        <th data-i18n="res.dst">Destination</th>
+                        <th data-i18n="common.enabled">Enabled</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Resolvers}}
+                    <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
+                        <td><strong>{{.Name}}</strong></td>
+                        <td><code>{{.SrcHost}}:{{.SrcPort}}</code></td>
+                        <td style="text-align:center;color:var(--text-secondary);">&rarr;</td>
+                        <td><code>{{.DstHost}}:{{.DstPort}}</code></td>
+                        <td>
+                            <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleResolver('{{.Name}}', this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <button onclick="editResolver('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
+                            <button onclick="deleteResolver('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>
+                        </td>
+                    </tr>
+                    {{end}}
+                    {{if not .Resolvers}}
+                    <tr>
+                        <td colspan="6" style="text-align:center;color:var(--text-secondary);padding:2rem;" data-i18n="res.empty">
+                            No resolvers configured
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Add/Edit Modal -->
+    <div id="resolver-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="res-modal-title" data-i18n="res.modalAdd">Add Resolver</h3>
+                <button onclick="closeResModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="resolver-form" onsubmit="saveResolver(event)">
+                <input type="hidden" id="res-edit-name" value="">
+                <div class="form-group">
+                    <label><span data-i18n="res.name">Name</span> *</label>
+                    <input type="text" id="r-name" required placeholder="MY_RESOLVER">
+                </div>
+                <fieldset style="border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+                    <legend style="font-size:0.85rem;color:var(--text-secondary);padding:0 0.5rem;" data-i18n="res.srcMatch">Source (match)</legend>
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2;">
+                            <label data-i18n="res.srcHost">Host</label>
+                            <input type="text" id="r-src-host" required placeholder="git.example.com">
+                        </div>
+                        <div class="form-group" style="flex:1;">
+                            <label data-i18n="res.srcPort">Port</label>
+                            <input type="number" id="r-src-port" required min="0" max="65535" placeholder="80">
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset style="border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+                    <legend style="font-size:0.85rem;color:var(--text-secondary);padding:0 0.5rem;" data-i18n="res.dstRewrite">Destination (rewrite to)</legend>
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2;">
+                            <label data-i18n="res.dstHost">Host</label>
+                            <input type="text" id="r-dst-host" required placeholder="10.0.0.1">
+                        </div>
+                        <div class="form-group" style="flex:1;">
+                            <label data-i18n="res.dstPort">Port</label>
+                            <input type="number" id="r-dst-port" required min="0" max="65535" placeholder="9003">
+                        </div>
+                    </div>
+                </fieldset>
+                <div class="form-actions">
+                    <button type="button" onclick="closeResModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+var resolvers = {{json .Resolvers}};
+
+function showAddResolver() {
+    document.getElementById('res-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('res.modalAdd') : 'Add Resolver';
+    document.getElementById('res-edit-name').value = '';
+    document.getElementById('resolver-form').reset();
+    document.getElementById('resolver-modal').classList.remove('hidden');
+}
+
+function editResolver(name) {
+    const rv = resolvers.find(x => x.name === name);
+    if (!rv) return;
+    document.getElementById('res-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('res.modalEdit') : 'Edit Resolver';
+    document.getElementById('res-edit-name').value = name;
+    document.getElementById('r-name').value = rv.name;
+    document.getElementById('r-src-host').value = rv.srcHost;
+    document.getElementById('r-src-port').value = rv.srcPort;
+    document.getElementById('r-dst-host').value = rv.dstHost;
+    document.getElementById('r-dst-port').value = rv.dstPort;
+    document.getElementById('resolver-modal').classList.remove('hidden');
+}
+
+async function saveResolver(e) {
+    e.preventDefault();
+    const editName = document.getElementById('res-edit-name').value;
+    const payload = {
+        name: document.getElementById('r-name').value,
+        'src-host': document.getElementById('r-src-host').value,
+        'src-port': parseInt(document.getElementById('r-src-port').value) || 0,
+        'dst-host': document.getElementById('r-dst-host').value,
+        'dst-port': parseInt(document.getElementById('r-dst-port').value) || 0,
+    };
+    try {
+        if (editName && editName !== payload.name) {
+            await fetch(`./api/resolvers/${encodeURIComponent(editName)}`, {method: 'DELETE'});
+        }
+        const res = await fetch('./api/resolvers', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        closeResModal();
+        reloadPage();
+    } catch (err) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+    }
+}
+
+async function deleteResolver(name) {
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('res.confirmDelete') : 'Delete resolver';
+    showConfirm(confirmLabel + ' "' + name + '"?', async () => {
+        try {
+            const res = await fetch(`./api/resolvers/${encodeURIComponent(name)}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+            reloadPage();
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    });
+}
+
+async function toggleResolver(name, enabled) {
+    try {
+        const res = await fetch(`./api/resolvers/${encodeURIComponent(name)}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const row = document.querySelector(`tr[data-name="${CSS.escape(name)}"]`);
+        if (row) row.classList.toggle('row-disabled', !enabled);
+    } catch (err) {
+        showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        reloadPage();
+    }
+}
+
+function closeResModal() {
+    document.getElementById('resolver-modal').classList.add('hidden');
+}
+</script>
+{{end}}

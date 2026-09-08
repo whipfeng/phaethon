@@ -13,6 +13,7 @@
             'nav.subscriptions': '订阅',
             'nav.rules': '规则',
             'nav.mappings': '映射',
+            'nav.resolvers': '地址重定向',
             'nav.tools': '工具',
             'nav.reverse': '反向连接向导',
             'nav.logs': '运行日志',
@@ -92,6 +93,10 @@
             'logs.clear': '🗑 清空',
             'logs.count': '{count} 条日志',
             'logs.autoScroll': '自动滚动',
+            'logs.filterStatus': '状态',
+            'logs.filterProtocol': '协议',
+            'logs.filterSearch': '搜索...',
+            'logs.filterAll': '全部',
             'logs.noLogs': '暂无日志',
 
             // ===== TUN =====
@@ -419,6 +424,24 @@
             'map.typeHelp.h_tunnel': 'H_Tunnel 入口。',
             'map.confirmDelete': '删除映射',
 
+            // ===== Resolvers =====
+            'res.title': '地址重定向',
+            'res.add': '+ 新增重定向',
+            'res.desc': '重定向规则在规则匹配前重写目标地址。例如将 git.example.com:80 重定向到 10.0.0.1:9003。',
+            'res.name': '名称',
+            'res.src': '源地址',
+            'res.dst': '目标地址',
+            'res.empty': '未配置重定向规则',
+            'res.modalAdd': '新增重定向',
+            'res.modalEdit': '编辑重定向',
+            'res.srcMatch': '源地址（匹配）',
+            'res.dstRewrite': '目标地址（重定向到）',
+            'res.srcHost': '主机',
+            'res.srcPort': '端口',
+            'res.dstHost': '主机',
+            'res.dstPort': '端口',
+            'res.confirmDelete': '删除重定向规则',
+
             // ===== Reverse Wizard =====
             'rv.title': '反向连接配置',
             'rv.add': '+ 新增反向连接',
@@ -640,6 +663,7 @@
             'nav.subscriptions': 'Subscriptions',
             'nav.rules': 'Rules',
             'nav.mappings': 'Mappings',
+            'nav.resolvers': 'Resolvers',
             'nav.tools': 'Tools',
             'nav.reverse': 'Reverse Wizard',
             'nav.logs': 'Logs',
@@ -719,6 +743,10 @@
             'logs.clear': '🗑 Clear',
             'logs.count': '{count} logs',
             'logs.autoScroll': 'Auto-scroll',
+            'logs.filterStatus': 'Status',
+            'logs.filterProtocol': 'Protocol',
+            'logs.filterSearch': 'Search...',
+            'logs.filterAll': 'All',
             'logs.noLogs': 'No logs yet',
 
             // ===== TUN =====
@@ -1045,6 +1073,24 @@
             'map.typeHelp.https': 'HTTPS proxy entry with TLS.',
             'map.typeHelp.h_tunnel': 'H_Tunnel entry.',
             'map.confirmDelete': 'Delete mapping',
+
+            // ===== Resolvers =====
+            'res.title': 'Resolvers',
+            'res.add': '+ Add Resolver',
+            'res.desc': 'Resolvers rewrite the destination address before rule matching. e.g. redirect git.example.com:80 to 10.0.0.1:9003.',
+            'res.name': 'Name',
+            'res.src': 'Source',
+            'res.dst': 'Destination',
+            'res.empty': 'No resolvers configured',
+            'res.modalAdd': 'Add Resolver',
+            'res.modalEdit': 'Edit Resolver',
+            'res.srcMatch': 'Source (match)',
+            'res.dstRewrite': 'Destination (rewrite to)',
+            'res.srcHost': 'Host',
+            'res.srcPort': 'Port',
+            'res.dstHost': 'Host',
+            'res.dstPort': 'Port',
+            'res.confirmDelete': 'Delete resolver',
 
             // ===== Reverse Wizard =====
             'rv.title': 'Reverse Connections',

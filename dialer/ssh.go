@@ -26,6 +26,7 @@ type sshClientEntry struct {
 	client   *ssh.Client
 	lastUsed time.Time
 	reconnMu sync.Mutex // serialises reconnect for this key
+	done     chan struct{} // signals keepalive goroutine to stop
 }
 
 // sshClientCache holds established SSH clients keyed by proxy name.
@@ -119,6 +120,7 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	e := &sshClientEntry{
 		client:   client,
 		lastUsed: time.Now(),
+		done:     make(chan struct{}),
 	}
 	sshClientCache[key] = e
 	go d.keepAlive(e)
@@ -133,6 +135,7 @@ func (d *SSHDialer) removeSSHClient() {
 
 	if e, ok := sshClientCache[key]; ok {
 		e.client.Close()
+		close(e.done) // signal keepalive goroutine to stop
 		delete(sshClientCache, key)
 	}
 }
@@ -147,6 +150,7 @@ func (d *SSHDialer) removeSSHClientLocked(target *sshClientEntry) {
 
 	if e, ok := sshClientCache[key]; ok && e == target {
 		e.client.Close()
+		close(e.done) // signal keepalive goroutine to stop
 		delete(sshClientCache, key)
 	}
 }
@@ -158,6 +162,7 @@ func (d *SSHDialer) cleanupSSHCacheLocked() {
 	for k, e := range sshClientCache {
 		if now.Sub(e.lastUsed) > sshClientIdleTimeout {
 			e.client.Close()
+			close(e.done) // signal keepalive goroutine to stop
 			delete(sshClientCache, k)
 		}
 	}
@@ -248,7 +253,13 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-entry.done:
+			return // entry was removed, stop keepalive
+		case <-ticker.C:
+		}
+
 		done := make(chan error, 1)
 		go func() {
 			_, _, err := entry.client.SendRequest("keepalive@golang.org", true, nil)
@@ -257,15 +268,17 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 		select {
 		case err := <-done:
 			if err != nil {
-				util.LogDebug("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
+				util.LogWarn("[SSH-CLI] [%s] keepalive failed: %v", d.Proxy.Name, err)
 				d.removeAndReconnect(entry)
 				return
 			}
 		case <-time.After(15 * time.Second):
-			util.LogDebug("[SSH-CLI] [%s] keepalive timed out, closing stale connection", d.Proxy.Name)
+			util.LogWarn("[SSH-CLI] [%s] keepalive timed out, closing stale connection", d.Proxy.Name)
 			entry.client.Close()
 			d.removeAndReconnect(entry)
 			return
+		case <-entry.done:
+			return // entry was removed during keepalive wait
 		}
 	}
 }

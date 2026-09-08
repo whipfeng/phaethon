@@ -3809,9 +3809,23 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 		// DHCP static bindings — update config and hot-reload running server.
 		if req.DHCPStaticBindings != nil {
 			// Auto-generate ID for bindings without one
+			existingIDs := make(map[int]bool)
+			for _, b := range req.DHCPStaticBindings {
+				if b.ID != "" {
+					if id, err := strconv.Atoi(b.ID); err == nil {
+						existingIDs[id] = true
+					}
+				}
+			}
+			nextID := 1
 			for i := range req.DHCPStaticBindings {
 				if req.DHCPStaticBindings[i].ID == "" {
-					req.DHCPStaticBindings[i].ID = strings.ReplaceAll(req.DHCPStaticBindings[i].MAC, ":", "")
+					for existingIDs[nextID] {
+						nextID++
+					}
+					req.DHCPStaticBindings[i].ID = strconv.Itoa(nextID)
+					existingIDs[nextID] = true
+					nextID++
 				}
 			}
 			s.mu.Lock()

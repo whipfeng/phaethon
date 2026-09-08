@@ -481,7 +481,7 @@
                 _currentBindings = bindings;
                 if (bindings.length > 0) {
                     bindingsBody.innerHTML = bindings.map((b) => {
-                        const bid = escapeHtml(b.id || b.mac.replace(/:/g, ''));
+                        const bid = escapeHtml(b.id || '');
                         return '<tr><td>' + escapeHtml(b.mac) + '</td><td>' + escapeHtml(b.ip) + '</td><td>' + escapeHtml(b.hostname || '-') + '</td><td>' +
                             '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;margin-right:0.3rem;" onclick="editBinding(\'' + bid + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.editBinding') : 'Edit') + '">✎</button>' +
                             '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;color:var(--danger,#e74c3c);border-color:var(--danger,#e74c3c);" onclick="deleteBinding(\'' + bid + '\')">✕</button>' +
@@ -595,11 +595,10 @@
 
     function editBindingFromLease(mac) {
         var bindings = _currentBindings || [];
-        var idx = bindings.findIndex(function(x) { return x.mac.toLowerCase() === mac.toLowerCase(); });
-        if (idx >= 0) {
-            var b = bindings[idx];
-            _editingOriginalId = b.id || b.mac.replace(/:/g, '');
-            openBindingModal(b.mac, b.ip, b.hostname || '');
+        var binding = bindings.find(function(b) { return b.mac.toLowerCase() === mac.toLowerCase(); });
+        if (binding) {
+            _editingOriginalId = binding.id;
+            openBindingModal(binding.mac, binding.ip, binding.hostname || '');
         } else {
             _editingOriginalId = null;
             openBindingModal(mac, '', '');
@@ -608,10 +607,7 @@
 
     function editBinding(id) {
         var bindings = _currentBindings || [];
-        var binding = bindings.find(function(b) {
-            var bid = b.id || b.mac.replace(/:/g, '');
-            return bid === id;
-        });
+        var binding = bindings.find(function(b) { return b.id === id; });
         if (binding) {
             _editingOriginalId = id;
             openBindingModal(binding.mac, binding.ip, binding.hostname || '');
@@ -650,10 +646,7 @@
             var idx = -1;
             if (_editingOriginalId) {
                 // Editing existing binding - find by ID
-                idx = bindings.findIndex(function(b) {
-                    var bid = b.id || b.mac.replace(/:/g, '');
-                    return bid === _editingOriginalId;
-                });
+                idx = bindings.findIndex(function(b) { return b.id === _editingOriginalId; });
                 if (idx >= 0) {
                     entry.id = _editingOriginalId;
                     bindings[idx] = entry;
@@ -694,10 +687,7 @@
         .then(res => res.json())
         .then(data => {
             var bindings = data.dhcpStaticBindings || [];
-            var idx = bindings.findIndex(function(b) {
-                var bid = b.id || b.mac.replace(/:/g, '');
-                return bid === id;
-            });
+            var idx = bindings.findIndex(function(b) { return b.id === id; });
             if (idx >= 0) {
                 bindings.splice(idx, 1);
             }

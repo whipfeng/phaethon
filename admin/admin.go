@@ -3808,6 +3808,12 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 
 		// DHCP static bindings — update config and hot-reload running server.
 		if req.DHCPStaticBindings != nil {
+			// Auto-generate ID for bindings without one
+			for i := range req.DHCPStaticBindings {
+				if req.DHCPStaticBindings[i].ID == "" {
+					req.DHCPStaticBindings[i].ID = strings.ReplaceAll(req.DHCPStaticBindings[i].MAC, ":", "")
+				}
+			}
 			s.mu.Lock()
 			if dc.TUN == nil {
 				dc.TUN = &config.TUNConfig{}

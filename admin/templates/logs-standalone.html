@@ -130,9 +130,12 @@
             const ms = String(date.getMilliseconds()).padStart(3, '0');
             const time = `${hours}:${minutes}:${seconds}.${ms}`;
             const icon = e.status === 'ok' ? '✓' : '✗';
-            const proxy = e.proxy || 'DIRECT';
             const inbound = e.inbound || '';
-            let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${proxy}`;
+            let target = e.rule || e.proxy || 'DIRECT';
+            if (e.actualProxy && e.actualProxy !== e.proxy) {
+                target += ' → ' + e.actualProxy;
+            }
+            let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${target}`;
             if (e.error) text += ` (${e.error})`;
             return { time, text, status: e.status };
         }

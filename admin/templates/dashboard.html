@@ -111,11 +111,38 @@
             </table>
         </div>
         <div class="tun-section" id="tun-dhcp-leases-section" style="display:none;">
-            <h4>DHCP Leases</h4>
-            <table class="info-table">
-                <thead><tr><td>MAC</td><td>IP</td><td>Expires</td></tr></thead>
+            <h4 data-i18n="tun.dhcpLeases">DHCP Leases</h4>
+            <table class="info-table dhcp-lease-table">
+                <thead><tr><td data-i18n="tun.hostname">Hostname</td><td>MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.leasesExpires">Expires</td><td></td></tr></thead>
                 <tbody id="tun-dhcp-leases"></tbody>
             </table>
+        </div>
+        <div class="tun-section" id="tun-dhcp-bindings-section" style="display:none;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h4 data-i18n="tun.staticBindings" style="margin:0;">Static Bindings</h4>
+                <button class="btn btn-sm btn-outline" onclick="openBindingModal()" data-i18n="tun.addBinding">Add Binding</button>
+            </div>
+            <table class="info-table dhcp-lease-table" style="margin-top:0.5rem;">
+                <thead><tr><td data-i18n="tun.id">ID</td><td data-i18n="tun.mac">MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.hostname">Hostname</td><td></td></tr></thead>
+                <tbody id="tun-dhcp-bindings"></tbody>
+            </table>
+        </div>
+        <div id="binding-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
+            <div style="background:var(--card-bg,#1e1e2e);border-radius:8px;padding:1.5rem;width:360px;max-width:90vw;">
+                <h4 data-i18n="tun.bindingModalTitle" style="margin:0 0 1rem;">Add Static Binding</h4>
+                <div style="display:flex;flex-direction:column;gap:0.75rem;">
+                    <input type="text" id="binding-id" class="form-input" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.idPlaceholder" placeholder="ID (optional, auto-generated if empty)">
+                    <input type="text" id="binding-mac" class="form-input" list="binding-mac-list" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.macPlaceholder" placeholder="aa:bb:cc:dd:ee:ff" onchange="onBindingMacChange()">
+                    <datalist id="binding-mac-list"></datalist>
+                    <input type="text" id="binding-ip" class="form-input" list="binding-ip-list" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.ipPlaceholder" placeholder="192.168.1.50">
+                    <datalist id="binding-ip-list"></datalist>
+                    <input type="text" id="binding-hostname" class="form-input" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.hostnamePlaceholder" placeholder="my-server (optional)">
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:1rem;">
+                    <button class="btn btn-sm btn-outline" onclick="closeBindingModal()" data-i18n="proxy.cancel">Cancel</button>
+                    <button class="btn btn-sm btn-primary" onclick="saveBinding()" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </div>
         </div>
         <div class="tun-section" id="tun-logs-section" style="display:none;">
             <h4 data-i18n="tun.logs">Event Log</h4>
@@ -153,7 +180,7 @@
         <h3 data-i18n="dash.listeners">Listeners</h3>
         <table class="data-table">
             <thead>
-                <tr><th>Name</th><th>Type</th><th>Port</th><th>Status</th></tr>
+                <tr><th data-i18n="dash.listenerName">Name</th><th data-i18n="dash.listenerType">Type</th><th data-i18n="dash.listenerPort">Port</th><th data-i18n="dash.listenerStatus">Status</th></tr>
             </thead>
             <tbody>
                 {{range $name, $ls := index .Stats "listenerStatus"}}
@@ -184,7 +211,7 @@
                     {{if .Alive}}
                     <span class="latency">{{.Latency.Milliseconds}}ms</span>
                     {{else}}
-                    <span class="fail-count">fail: {{.FailCount}}</span>
+                    <span class="fail-count"><span data-i18n="dash.healthFail">fail</span>: {{.FailCount}}</span>
                     {{end}}
                 </div>
                 {{end}}
@@ -422,15 +449,48 @@
         const leasesBody = document.getElementById('tun-dhcp-leases');
         if (leasesSection && leasesBody) {
             const leases = data.dhcpLeases || [];
+            window._dhcpLeases = leases;
             if (leases.length > 0) {
                 leasesSection.style.display = 'block';
+                const boundMacs = {};
+                (data.dhcpStaticBindings || []).forEach(b => { boundMacs[b.mac.toLowerCase()] = b; });
                 leasesBody.innerHTML = leases.map(l => {
                     const exp = new Date(l.expires);
                     const expStr = exp.toLocaleString();
-                    return '<tr><td>' + escapeHtml(l.mac) + '</td><td>' + escapeHtml(l.ip) + '</td><td>' + escapeHtml(expStr) + '</td></tr>';
+                    const isBound = !!boundMacs[l.mac.toLowerCase()];
+                    const bindBtn = isBound
+                        ? '<button class="btn btn-sm btn-outline" style="padding:0.1rem 0.4rem;font-size:0.7rem;opacity:0.5;" onclick="editBindingFromLease(\'' + escapeHtml(l.mac) + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.editBinding') : 'Edit binding') + '">📌</button>'
+                        : '<button class="btn btn-sm btn-outline" style="padding:0.1rem 0.4rem;font-size:0.7rem;" onclick="bindFromLease(\'' + escapeHtml(l.mac) + '\',\'' + escapeHtml(l.ip) + '\',\'' + escapeHtml(l.hostname || '') + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.bindFromLease') : 'Bind from lease') + '">📌</button>';
+                    return '<tr><td>' + escapeHtml(l.hostname || '-') + '</td><td>' + escapeHtml(l.mac) + '</td><td>' + escapeHtml(l.ip) + '</td><td>' + escapeHtml(expStr) + '</td><td>' + bindBtn + '</td></tr>';
                 }).join('');
+                var macList = document.getElementById('binding-mac-list');
+                if (macList) macList.innerHTML = leases.map(l => '<option value="' + escapeHtml(l.mac) + '">').join('');
+                var ipList = document.getElementById('binding-ip-list');
+                if (ipList) ipList.innerHTML = leases.map(l => '<option value="' + escapeHtml(l.ip) + '">').join('');
             } else {
                 leasesSection.style.display = 'none';
+            }
+        }
+
+        const bindingsSection = document.getElementById('tun-dhcp-bindings-section');
+        const bindingsBody = document.getElementById('tun-dhcp-bindings');
+        if (bindingsSection && bindingsBody) {
+            const showBindings = data.available && data.bypassGateway;
+            bindingsSection.style.display = showBindings ? 'block' : 'none';
+            if (showBindings) {
+                const bindings = data.dhcpStaticBindings || [];
+                _currentBindings = bindings;
+                if (bindings.length > 0) {
+                    bindingsBody.innerHTML = bindings.map((b) => {
+                        const id = b.id || b.hostname || b.mac.replace(/:/g, '');
+                        return '<tr><td>' + escapeHtml(id) + '</td><td>' + escapeHtml(b.mac) + '</td><td>' + escapeHtml(b.ip) + '</td><td>' + escapeHtml(b.hostname || '-') + '</td><td>' +
+                            '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;margin-right:0.3rem;" onclick="editBinding(\'' + escapeHtml(id) + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.editBinding') : 'Edit') + '">✎</button>' +
+                            '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;color:var(--danger,#e74c3c);border-color:var(--danger,#e74c3c);" onclick="deleteBinding(\'' + escapeHtml(id) + '\')">✕</button>' +
+                            '</td></tr>';
+                    }).join('');
+                } else {
+                    bindingsBody.innerHTML = '<tr><td colspan="5" style="text-align:center;opacity:0.5;">-</td></tr>';
+                }
             }
         }
 
@@ -507,6 +567,142 @@
         })
         .finally(() => {
             checkbox.disabled = false;
+        });
+    }
+
+    var _currentBindings = [];
+    var _editingBindingIndex = -1; // Track which binding is being edited (-1 = new)
+
+    function openBindingModal(mac, ip, hostname, id) {
+        document.getElementById('binding-id').value = id || '';
+        document.getElementById('binding-mac').value = mac || '';
+        document.getElementById('binding-ip').value = ip || '';
+        document.getElementById('binding-hostname').value = hostname || '';
+        var modal = document.getElementById('binding-modal');
+        modal.style.display = 'flex';
+    }
+
+    function openNewBindingModal() {
+        _editingBindingIndex = -1;
+        openBindingModal('', '', '', '');
+    }
+
+    function closeBindingModal() {
+        document.getElementById('binding-modal').style.display = 'none';
+    }
+
+    function bindFromLease(mac, ip, hostname) {
+        openBindingModal(mac, ip, hostname);
+    }
+
+    function editBindingFromLease(mac) {
+        var bindings = _currentBindings || [];
+        var idx = bindings.findIndex(function(x) { return x.mac.toLowerCase() === mac.toLowerCase(); });
+        if (idx >= 0) {
+            _editingBindingIndex = idx;
+            var b = bindings[idx];
+            openBindingModal(b.mac, b.ip, b.hostname || '');
+        } else {
+            _editingBindingIndex = -1;
+            openBindingModal(mac, '', '');
+        }
+    }
+
+    function editBinding(id) {
+        var bindings = _currentBindings || [];
+        var binding = bindings.find(function(b) {
+            var bid = b.id || b.hostname || b.mac.replace(/:/g, '');
+            return bid === id;
+        });
+        if (binding) {
+            _editingBindingIndex = bindings.indexOf(binding);
+            openBindingModal(binding.mac, binding.ip, binding.hostname || '', binding.id || '');
+        }
+    }
+
+    function onBindingMacChange() {
+        var mac = document.getElementById('binding-mac').value.trim().toLowerCase();
+        if (!mac || !window._dhcpLeases) return;
+        var lease = window._dhcpLeases.find(function(l) { return l.mac.toLowerCase() === mac; });
+        if (lease) {
+            document.getElementById('binding-ip').value = lease.ip;
+            document.getElementById('binding-hostname').value = lease.hostname || '';
+        }
+    }
+
+    function saveBinding() {
+        var id = document.getElementById('binding-id').value.trim();
+        var mac = document.getElementById('binding-mac').value.trim().toLowerCase();
+        var ip = document.getElementById('binding-ip').value.trim();
+        var hostname = document.getElementById('binding-hostname').value.trim();
+        if (!mac) {
+            alert(typeof i18n !== 'undefined' ? i18n.t('tun.macRequired') : 'Please enter a MAC address');
+            return;
+        }
+        if (!ip) {
+            alert(typeof i18n !== 'undefined' ? i18n.t('tun.ipRequired') : 'Please enter an IP address');
+            return;
+        }
+        // Auto-generate ID if empty: use hostname or MAC without colons
+        if (!id) {
+            id = hostname || mac.replace(/:/g, '');
+        }
+        fetch('./api/tun', {
+            method: 'GET'
+        })
+        .then(res => res.json())
+        .then(data => {
+            var bindings = data.dhcpStaticBindings || [];
+            var entry = {id: id, mac: mac, ip: ip, hostname: hostname};
+            // Use index for precise update
+            if (_editingBindingIndex >= 0 && _editingBindingIndex < bindings.length) {
+                bindings[_editingBindingIndex] = entry;
+            } else {
+                bindings.push(entry);
+            }
+            return fetch('./api/tun', {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({dhcpStaticBindings: bindings})
+            });
+        })
+        .then(res => {
+            if (!res.ok) return res.text().then(text => { throw new Error(text); });
+            closeBindingModal();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
+        })
+        .catch(err => {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
+        });
+    }
+
+    function deleteBinding(id) {
+        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('tun.bindingConfirmDelete') : 'Delete this binding?')) return;
+        fetch('./api/tun', {
+            method: 'GET'
+        })
+        .then(res => res.json())
+        .then(data => {
+            var bindings = data.dhcpStaticBindings || [];
+            var idx = bindings.findIndex(function(b) {
+                var bid = b.id || b.hostname || b.mac.replace(/:/g, '');
+                return bid === id;
+            });
+            if (idx >= 0) {
+                bindings.splice(idx, 1);
+            }
+            return fetch('./api/tun', {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({dhcpStaticBindings: bindings})
+            });
+        })
+        .then(res => {
+            if (!res.ok) return res.text().then(text => { throw new Error(text); });
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
+        })
+        .catch(err => {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
         });
     }
     </script>

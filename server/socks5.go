@@ -188,16 +188,16 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	req := config.NewConnectRequest(dstAddr, dstPort)
 	req = s.RuleConf.Resolving(req)
 
-	proxy, ruleName := s.RuleConf.Match(req, s.Mapping)
+	proxy, matchResult := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, req.DstAddr, req.DstPort)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, req.DstAddr, req.DstPort)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
 		sendSocks5Response(clientConn, 0x04) // Host unreachable
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "reject", nil)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
 		sendSocks5Response(clientConn, 0x04) // Host unreachable
 		return
 	}
@@ -211,7 +211,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "fail", err)
+		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "fail", err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
@@ -219,8 +219,8 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
-	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "ok", nil)
-	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name)
+	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult)
 	defer connlog.RemoveActive(connID)
 
 	// Handshake complete — clear the deadline so the relay idle timeout
@@ -307,7 +307,7 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] UDP ASSOCIATE started on port %d", s.Mapping.Name, clientConn.RemoteAddr(), udpAddr.Port)
 
-	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), "", 0, "")
+	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), "", 0, nil)
 	defer connlog.RemoveActive(connID)
 
 	relay.run()

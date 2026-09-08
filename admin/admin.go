@@ -286,6 +286,9 @@ type AdminServer struct {
 	// The main package should set this so the admin panel can display it.
 	GetTUNStatus func() map[string]interface{}
 
+	// OnDHCPStaticBindingsUpdate is called when DHCP static bindings are updated via the API.
+	OnDHCPStaticBindingsUpdate func(bindings []config.DHCPStaticBinding)
+
 	// RefreshSubscription fetches the subscription for the named subscription and
 	// updates its internal node pool. Set by the main package to avoid a
 	// circular dependency on the dialer package.
@@ -523,29 +526,42 @@ func templateFuncs() template.FuncMap {
 			return template.JS(b)
 		},
 		"parseRule": func(rule string) []string {
-			splitTarget := func(raw string) (string, string) {
-				idx := strings.Index(raw, "#")
-				if idx < 0 {
-					return raw, ""
+			splitTarget := func(raw string) (string, string, string) {
+				s := raw
+				mapping := ""
+				timeRange := ""
+				for {
+					atIdx := strings.LastIndex(s, "@")
+					hashIdx := strings.LastIndex(s, "#")
+					if atIdx < 0 && hashIdx < 0 {
+						break
+					}
+					if atIdx > hashIdx {
+						timeRange = s[atIdx+1:]
+						s = s[:atIdx]
+					} else {
+						mapping = s[hashIdx+1:]
+						s = s[:hashIdx]
+					}
 				}
-				return raw[:idx], raw[idx+1:]
+				return s, mapping, timeRange
 			}
 			r := strings.TrimSpace(rule)
 			r = strings.TrimPrefix(r, "//")
 			parts := strings.Split(r, ",")
 			if len(parts) == 1 {
-				target, mapping := splitTarget(parts[0])
-				return []string{parts[0], "", target, mapping}
+				target, mapping, tr := splitTarget(parts[0])
+				return []string{parts[0], "", target, mapping, tr}
 			}
 			if len(parts) == 2 {
-				target, mapping := splitTarget(parts[1])
-				return []string{parts[0], "", target, mapping}
+				target, mapping, tr := splitTarget(parts[1])
+				return []string{parts[0], "", target, mapping, tr}
 			}
 			keyword := parts[0]
 			rawTarget := parts[len(parts)-1]
 			value := strings.Join(parts[1:len(parts)-1], ",")
-			target, mapping := splitTarget(rawTarget)
-			return []string{keyword, value, target, mapping}
+			target, mapping, tr := splitTarget(rawTarget)
+			return []string{keyword, value, target, mapping, tr}
 		},
 		"sub": func(a, b int) int { return a - b },
 		"add": func(a, b int) int { return a + b },
@@ -3688,15 +3704,19 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				}
 				status["bypassGateway"] = dc.TUN.IsBypassGateway()
 				status["dhcpEnabled"] = dc.TUN.IsDHCPEnabled()
+				if dc.TUN.DHCP != nil {
+					status["dhcpStaticBindings"] = dc.TUN.DHCP.StaticBindings
+				}
 			}
 		}
 		jsonResponse(w, status)
 
 	case http.MethodPatch:
 		var req struct {
-			Enabled       *bool `json:"enabled"`
-			BypassGateway *bool `json:"bypassGateway"`
-			DHCPEnabled   *bool `json:"dhcpEnabled"`
+			Enabled            *bool                        `json:"enabled"`
+			BypassGateway      *bool                        `json:"bypassGateway"`
+			DHCPEnabled        *bool                        `json:"dhcpEnabled"`
+			DHCPStaticBindings []config.DHCPStaticBinding   `json:"dhcpStaticBindings"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "parse fail", http.StatusBadRequest)
@@ -3784,6 +3804,37 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogInfo("[ADMIN] TUN dhcp-enabled=%v", *req.DHCPEnabled)
+		}
+
+		// DHCP static bindings — update config and hot-reload running server.
+		if req.DHCPStaticBindings != nil {
+			s.mu.Lock()
+			if dc.TUN == nil {
+				dc.TUN = &config.TUNConfig{}
+			}
+			if dc.TUN.DHCP == nil {
+				dc.TUN.DHCP = &config.DHCPConfig{}
+			}
+			dc.TUN.DHCP.StaticBindings = req.DHCPStaticBindings
+			if s.conf != nil {
+				if s.conf.TUN == nil {
+					s.conf.TUN = &config.TUNConfig{}
+				}
+				if s.conf.TUN.DHCP == nil {
+					s.conf.TUN.DHCP = &config.DHCPConfig{}
+				}
+				s.conf.TUN.DHCP.StaticBindings = req.DHCPStaticBindings
+			}
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.mu.Unlock()
+			if s.OnDHCPStaticBindingsUpdate != nil {
+				s.OnDHCPStaticBindingsUpdate(req.DHCPStaticBindings)
+			}
+			util.LogInfo("[ADMIN] DHCP static-bindings updated (%d entries)", len(req.DHCPStaticBindings))
 		}
 
 		jsonResponse(w, map[string]string{"status": "ok"})

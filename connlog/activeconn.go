@@ -4,20 +4,26 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"phaethon/config"
 )
 
 const maxActive = 500
 const maxJournal = 500
 
 type ActiveConn struct {
-	ID        string    `json:"id"`
-	Protocol  string    `json:"protocol"`
-	Inbound   string    `json:"inbound"`
-	SrcAddr   string    `json:"srcAddr,omitempty"`
-	DstAddr   string    `json:"dstAddr"`
-	DstPort   int       `json:"dstPort"`
-	Proxy     string    `json:"proxy"`
-	StartTime time.Time `json:"startTime"`
+	ID          string    `json:"id"`
+	Protocol    string    `json:"protocol"`
+	Inbound     string    `json:"inbound"`
+	SrcAddr     string    `json:"srcAddr,omitempty"`
+	DstAddr     string    `json:"dstAddr"`
+	DstPort     int       `json:"dstPort"`
+	Proxy       string    `json:"proxy"`
+	ActualProxy string    `json:"actualProxy,omitempty"`
+	Mapping     string    `json:"mapping,omitempty"`
+	Rule        string    `json:"rule,omitempty"`
+	TimeRange   string    `json:"timeRange,omitempty"`
+	StartTime   time.Time `json:"startTime"`
 }
 
 type JournalEntry struct {
@@ -33,7 +39,7 @@ var (
 	journal   []JournalEntry
 )
 
-func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy string) {
+func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, matchResult *config.MatchResult) {
 	conn := &ActiveConn{
 		ID:        id,
 		Protocol:  protocol,
@@ -41,8 +47,14 @@ func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, pr
 		SrcAddr:   srcAddr,
 		DstAddr:   dstAddr,
 		DstPort:   dstPort,
-		Proxy:     proxy,
 		StartTime: time.Now(),
+	}
+	if matchResult != nil {
+		conn.Proxy = matchResult.ProxyName
+		conn.ActualProxy = matchResult.ActualProxy
+		conn.Mapping = matchResult.Mapping
+		conn.TimeRange = matchResult.TimeRange
+		conn.Rule = matchResult.Rule
 	}
 
 	activeMu.Lock()

@@ -955,14 +955,91 @@ type Matcher interface {
 	Match(request *AddrRequest, mapping *Mapping) string
 }
 
-// parseProxyName splits "PROXY#MAPPING" into (proxy, mapping).
-// If no "#" is present, mapping is empty.
-func parseProxyName(proxyName string) (name, mapping string) {
-	parts := strings.SplitN(proxyName, "#", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+// TimeRange represents a daily time window. Both startMin and endMin are
+// minutes since midnight. When startMin <= endMin the range is within one day;
+// when startMin > endMin it wraps around midnight (e.g. 22:00-08:00).
+// A zero value means "always match".
+type TimeRange struct {
+	startMin int
+	endMin   int
+}
+
+func (tr TimeRange) matches(nowMin int) bool {
+	if tr.startMin == 0 && tr.endMin == 0 {
+		return true
 	}
-	return proxyName, ""
+	if tr.startMin <= tr.endMin {
+		return nowMin >= tr.startMin && nowMin < tr.endMin
+	}
+	return nowMin >= tr.startMin || nowMin < tr.endMin
+}
+
+func (tr TimeRange) String() string {
+	if tr.startMin == 0 && tr.endMin == 0 {
+		return ""
+	}
+	startH := tr.startMin / 60
+	startM := tr.startMin % 60
+	endH := tr.endMin / 60
+	endM := tr.endMin % 60
+	return fmt.Sprintf("%02d:%02d-%02d:%02d", startH, startM, endH, endM)
+}
+
+func parseHM(s string) int {
+	parts := strings.SplitN(strings.TrimSpace(s), ":", 2)
+	if len(parts) != 2 {
+		return -1
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return -1
+	}
+	return h*60 + m
+}
+
+func parseTimeRange(s string) TimeRange {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return TimeRange{}
+	}
+	start := parseHM(parts[0])
+	end := parseHM(parts[1])
+	if start < 0 || end < 0 {
+		return TimeRange{}
+	}
+	return TimeRange{startMin: start, endMin: end}
+}
+
+// ParseProxyName splits "PROXY[#MAPPING][@HH:MM-HH:MM]" into its components.
+// The # and @ delimiters may appear in any order.
+func ParseProxyName(proxyName string) (name, mapping string, tr TimeRange) {
+	remaining := proxyName
+	for {
+		atIdx := strings.Index(remaining, "@")
+		hashIdx := strings.Index(remaining, "#")
+		if atIdx < 0 && hashIdx < 0 {
+			break
+		}
+		// Process the first delimiter we find (@ or #)
+		if atIdx >= 0 && (hashIdx < 0 || atIdx < hashIdx) {
+			// @ comes first, extract time range
+			tr = parseTimeRange(remaining[atIdx+1:])
+			remaining = remaining[:atIdx]
+		} else {
+			// # comes first, extract mapping
+			mappingPart := remaining[hashIdx+1:]
+			remaining = remaining[:hashIdx]
+			// Check if the mapping part contains @ for time range
+			if atIdxInMapping := strings.Index(mappingPart, "@"); atIdxInMapping >= 0 {
+				tr = parseTimeRange(mappingPart[atIdxInMapping+1:])
+				mapping = mappingPart[:atIdxInMapping]
+			} else {
+				mapping = mappingPart
+			}
+		}
+	}
+	return remaining, mapping, tr
 }
 
 // DomainSuffixMatcher
@@ -972,12 +1049,11 @@ type DomainSuffixMatcher struct {
 	mappingName  string
 }
 
-func NewDomainSuffixMatcher(proxyName, domainSuffix string) *DomainSuffixMatcher {
-	name, mn := parseProxyName(proxyName)
+func NewDomainSuffixMatcher(name, mapping, domainSuffix string) *DomainSuffixMatcher {
 	return &DomainSuffixMatcher{
 		proxyName:    name,
 		domainSuffix: domainSuffix,
-		mappingName:  mn,
+		mappingName:  mapping,
 	}
 }
 
@@ -998,32 +1074,28 @@ type IpCidrMatcher struct {
 	mappingName string
 }
 
-func NewIpCidrMatcher(proxyName, cidr string) *IpCidrMatcher {
-	name, mn := parseProxyName(proxyName)
-
+func NewIpCidMatcher(name, mapping, cidr string) *IpCidrMatcher {
 	cidrParts := strings.SplitN(cidr, "/", 2)
 	if len(cidrParts) != 2 {
-		// Invalid CIDR: match nothing
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mn}
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
 	}
 	ipStr := cidrParts[0]
 	prefixLen, err := strconv.Atoi(cidrParts[1])
 	if err != nil || prefixLen < 0 || prefixLen > 32 {
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mn}
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
 	}
 
 	mask := uint32(0xffffffff) << (32 - prefixLen)
 	network := ip2Uint32(ipStr)
 	if network == 0 && ipStr != "0.0.0.0" {
-		// Invalid IP: match nothing
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mn}
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
 	}
 
 	return &IpCidrMatcher{
 		proxyName:   name,
 		network:     network,
 		mask:        mask,
-		mappingName: mn,
+		mappingName: mapping,
 	}
 }
 
@@ -1063,11 +1135,10 @@ type MatchAllMatcher struct {
 	mappingName string
 }
 
-func NewMatchAllMatcher(proxyName string) *MatchAllMatcher {
-	name, mn := parseProxyName(proxyName)
+func NewMatchAllMatcher(name, mapping string) *MatchAllMatcher {
 	return &MatchAllMatcher{
 		proxyName:   name,
-		mappingName: mn,
+		mappingName: mapping,
 	}
 }
 
@@ -1124,6 +1195,8 @@ type RuleConfiguration struct {
 	GroupNames        map[string]*ProxyGroup   `yaml:"-"`
 	SubscriptionNames map[string]*Subscription `yaml:"-"`
 	Matchers          []Matcher                `yaml:"-"`
+	matcherTimeRanges []TimeRange              `yaml:"-"`
+	matcherRules      []string                 `yaml:"-"`
 	mu                sync.RWMutex             `yaml:"-"`
 
 	// Parsed UDP port range
@@ -1173,12 +1246,20 @@ type ReverseConfig struct {
 
 // DHCPConfig holds DHCP server settings for bypass gateway mode.
 // Only effective when bypass-gateway is enabled.
+type DHCPStaticBinding struct {
+	ID       string `yaml:"id,omitempty" json:"id,omitempty"`
+	MAC      string `yaml:"mac" json:"mac"`
+	IP       string `yaml:"ip" json:"ip"`
+	Hostname string `yaml:"hostname,omitempty" json:"hostname,omitempty"`
+}
+
 type DHCPConfig struct {
-	Enabled   *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Interface string `yaml:"interface,omitempty" json:"interface,omitempty"` // LAN interface name, e.g. "eth1"
-	PoolStart string `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
-	PoolEnd   string `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
-	LeaseTime string `yaml:"lease-time,omitempty" json:"lease-time,omitempty"` // e.g. "24h", "1h30m"
+	Enabled        *bool                `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interface      string               `yaml:"interface,omitempty" json:"interface,omitempty"`
+	PoolStart      string               `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
+	PoolEnd        string               `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
+	LeaseTime      string               `yaml:"lease-time,omitempty" json:"lease-time,omitempty"`
+	StaticBindings []DHCPStaticBinding  `yaml:"static-bindings,omitempty" json:"static-bindings,omitempty"`
 }
 
 // LeaseDuration returns the lease duration, defaulting to 24h if not configured
@@ -1230,6 +1311,14 @@ func (t *TUNConfig) IsDHCPEnabled() bool {
 		return false
 	}
 	return *t.DHCP.Enabled
+}
+
+// DHCPStaticBindings returns the configured DHCP static bindings, or nil.
+func (t *TUNConfig) DHCPStaticBindings() []DHCPStaticBinding {
+	if t == nil || t.DHCP == nil {
+		return nil
+	}
+	return t.DHCP.StaticBindings
 }
 
 // DirectNameserverList returns the configured DNS servers for DIRECT connection
@@ -1547,6 +1636,8 @@ func (c *RuleConfiguration) Init() error {
 
 	// Build matchers
 	c.Matchers = make([]Matcher, 0, len(c.Rules))
+	c.matcherTimeRanges = make([]TimeRange, 0, len(c.Rules))
+	c.matcherRules = make([]string, 0, len(c.Rules))
 	for _, rule := range c.Rules {
 		trimmed := strings.TrimSpace(rule)
 		if strings.HasPrefix(trimmed, "//") {
@@ -1561,14 +1652,23 @@ func (c *RuleConfiguration) Init() error {
 			if len(rs) < 3 {
 				continue
 			}
-			c.Matchers = append(c.Matchers, NewDomainSuffixMatcher(strings.Trim(rs[2], `"'`), strings.Trim(rs[1], `"'`)))
+			name, mapping, tr := ParseProxyName(strings.Trim(rs[2], `"'`))
+			c.Matchers = append(c.Matchers, NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
+			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
+			c.matcherRules = append(c.matcherRules, rule)
 		case "IP-CIDR":
 			if len(rs) < 3 {
 				continue
 			}
-			c.Matchers = append(c.Matchers, NewIpCidrMatcher(strings.Trim(rs[2], `"'`), strings.Trim(rs[1], `"'`)))
+			name, mapping, tr := ParseProxyName(strings.Trim(rs[2], `"'`))
+			c.Matchers = append(c.Matchers, NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
+			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
+			c.matcherRules = append(c.matcherRules, rule)
 		case "MATCH":
-			c.Matchers = append(c.Matchers, NewMatchAllMatcher(strings.Trim(rs[1], `"'`)))
+			name, mapping, tr := ParseProxyName(strings.Trim(rs[1], `"'`))
+			c.Matchers = append(c.Matchers, NewMatchAllMatcher(name, mapping))
+			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
+			c.matcherRules = append(c.matcherRules, rule)
 		default:
 			return fmt.Errorf("unsupported matcher type: %s", rs[0])
 		}
@@ -1627,20 +1727,70 @@ func (c *RuleConfiguration) HasReverseAddress(addr string) bool {
 	return false
 }
 
+// MatchResult holds the result of a rule match
+type MatchResult struct {
+	ProxyName     string
+	ActualProxy   string // Actual proxy used after group resolution
+	Mapping       string
+	TimeRange     string
+	Rule          string
+}
+
 // Match finds the matching proxy for the given request and mapping.
 // It resolves Group names by delegating to group.Next(), which returns a *Proxy
 // from the group's internal subscription pool or the global namespace.
-func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) (*Proxy, string) {
+func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) (*Proxy, *MatchResult) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for _, matcher := range c.Matchers {
+	nowMin := time.Now().Hour()*60 + time.Now().Minute()
+	for i, matcher := range c.Matchers {
+		if i < len(c.matcherTimeRanges) && !c.matcherTimeRanges[i].matches(nowMin) {
+			continue
+		}
 		proxyName := matcher.Match(request, mapping)
 		if proxyName == "" {
 			continue
 		}
-		return c.resolveName(proxyName), proxyName
+		result := &MatchResult{
+			ProxyName: proxyName,
+		}
+		if i < len(c.matcherRules) {
+			result.Rule = c.matcherRules[i]
+		}
+		if mapping != nil {
+			result.Mapping = mapping.Name
+		}
+		if i < len(c.matcherTimeRanges) {
+			tr := c.matcherTimeRanges[i]
+			if tr.startMin >= 0 {
+				result.TimeRange = tr.String()
+			}
+		}
+		return c.resolveName(proxyName), result
 	}
-	return nil, ""
+	return nil, nil
+}
+
+// PrependTimeRange adds a zero (always-match) TimeRange at the front of
+// matcherTimeRanges. Call this when prepending a Matcher externally.
+func (c *RuleConfiguration) PrependTimeRange() {
+	c.matcherTimeRanges = append([]TimeRange{{}}, c.matcherTimeRanges...)
+}
+
+// PrependRule adds a raw rule string at the front of matcherRules.
+// Call this when prepending a Matcher externally.
+func (c *RuleConfiguration) PrependRule(rule string) {
+	c.matcherRules = append([]string{rule}, c.matcherRules...)
+}
+
+// MatcherTimeRanges returns the time ranges parallel to Matchers.
+func (c *RuleConfiguration) MatcherTimeRanges() []TimeRange {
+	return c.matcherTimeRanges
+}
+
+// SetMatcherTimeRanges replaces the matcherTimeRanges slice.
+func (c *RuleConfiguration) SetMatcherTimeRanges(trs []TimeRange) {
+	c.matcherTimeRanges = trs
 }
 
 func (c *RuleConfiguration) resolveName(name string) *Proxy {

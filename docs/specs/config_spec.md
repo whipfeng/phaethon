@@ -1,7 +1,7 @@
 # 配置系统规格 (Config System Specification)
 
-> 版本: 1.0.0
-> 日期: 2026-08-25
+> 版本: 1.1.0
+> 日期: 2026-09-08
 > 状态: ACTIVE
 > 负责人: Phaethon Dev
 
@@ -69,7 +69,47 @@ export KEY4=value
 - 支持 `export KEY=value`
 - 引号内的值保留空格
 
-## 7. 不再支持的特性
+## 7. 路由规则
+
+规则定义在 `config.yaml` 的 `rules` 字段中，格式为逗号分隔的字符串：
+
+```
+TYPE,VALUE,PROXY[#MAPPING][@HH:MM-HH:MM]
+```
+
+### 7.1 规则类型
+
+| 类型 | 格式 | 说明 |
+|------|------|------|
+| `DOMAIN-SUFFIX` | `DOMAIN-SUFFIX,.example.com,PROXY` | 域名后缀匹配 |
+| `IP-CIDR` | `IP-CIDR,10.0.0.0/8,DIRECT` | IP CIDR 匹配 |
+| `MATCH` | `MATCH,PROXY` | 兜底匹配（匹配所有） |
+
+### 7.2 代理名后缀
+
+代理名字段支持两个可选后缀，顺序不限：
+
+- `#MAPPING` — 限定规则仅对指定 mapping 生效
+- `@HH:MM-HH:MM` — 规则生效时间段（每日时间窗口）
+
+示例：
+```yaml
+rules:
+  - DOMAIN-SUFFIX,.tiktok.com,DIRECT@08:00-22:00           # 仅 8:00-22:00 生效
+  - DOMAIN-SUFFIX,.twitter.com,PROXY#MAP_X@22:00-08:00     # mapping + 跨午夜时间段
+  - DOMAIN-SUFFIX,.youtube.com,PROXY@08:00-18:00#MAP_Y     # 时间段 + mapping（顺序不限）
+  - IP-CIDR,10.0.0.0/8,DIRECT                               # 无后缀，始终生效
+  - MATCH,FALLBACK
+```
+
+### 7.3 时间段规则
+
+- 格式：`HH:MM-HH:MM`，24 小时制
+- 支持跨午夜：如 `22:00-08:00` 表示 22:00 到次日 08:00
+- 不指定时间段则规则始终生效
+- 时间段匹配精度为分钟级
+
+## 8. 不再支持的特性
 
 - `CONF_PATH` 环境变量（配置固定在工作目录）
 - `rule.yaml` / `rule-{env}.yaml` 文件命名
@@ -82,3 +122,4 @@ export KEY4=value
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | 1.0.0 | 2026-08-25 | 初始版本 | Phaethon Dev |
+| 1.1.0 | 2026-09-08 | 新增路由规则规格，包括时间段语法 | Qoder |

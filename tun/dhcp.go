@@ -8,9 +8,10 @@ import (
 
 // DHCPLease represents a single DHCP lease for API/UI display.
 type DHCPLease struct {
-	IP      string    `json:"ip"`
-	MAC     string    `json:"mac"`
-	Expires time.Time `json:"expires"`
+	IP       string    `json:"ip"`
+	MAC      string    `json:"mac"`
+	Hostname string    `json:"hostname,omitempty"`
+	Expires  time.Time `json:"expires"`
 }
 
 // DHCPServer provides DHCP service on the physical LAN interface.
@@ -20,6 +21,7 @@ type DHCPServer interface {
 	Stop()
 	ActiveLeases() int
 	Leases() []DHCPLease
+	UpdateStaticBindings(bindings []config.DHCPStaticBinding)
 }
 
 // newDHCPServer creates a DHCP server bound to the given interface.

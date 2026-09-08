@@ -373,6 +373,60 @@ body {
 .info-table td { padding: 0.4rem 0; }
 .info-table td:first-child { color: var(--text-muted); width: 140px; }
 
+.dhcp-lease-table td { padding: 0.4rem 0.75rem; }
+.dhcp-lease-table td:first-child { color: inherit; width: auto; }
+.dhcp-lease-table thead td { font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+
+/* Time Range Picker */
+.time-range-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.time-picker-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+}
+.time-picker-group span {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.time-select {
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: monospace;
+    padding: 0.2rem;
+    cursor: pointer;
+    outline: none;
+    width: 2.5em;
+    text-align: center;
+    -moz-appearance: textfield;
+}
+.time-select:focus {
+    color: var(--accent);
+}
+.time-select option {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.time-separator {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+.time-clear-btn {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.85rem;
+    line-height: 1;
+}
+
 /* Badges & Tags */
 .badge {
     display: inline-block;

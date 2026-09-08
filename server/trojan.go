@@ -140,15 +140,15 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	req := config.NewConnectRequest(dstAddr, dstPort)
 	req = s.RuleConf.Resolving(req)
 
-	proxy, ruleName := s.RuleConf.Match(req, s.Mapping)
+	proxy, matchResult := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, req.DstAddr, req.DstPort)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, req.DstAddr, req.DstPort)
+		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, "", "reject", nil)
+		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
 		return
 	}
 
@@ -156,14 +156,14 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "fail", err)
+		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "fail", err)
 		return
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
-	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name, "ok", nil)
-	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, proxy.Name)
+	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), req.DstAddr, req.DstPort, matchResult)
 	defer connlog.RemoveActive(connID)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
 }
@@ -187,7 +187,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 	udpPort := udpLn.LocalAddr().(*net.UDPAddr).Port
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP ASSOCIATE started (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
-	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "", 0, "")
+	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "", 0, nil)
 	defer connlog.RemoveActive(connID)
 
 	closeAll := func() {

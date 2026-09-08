@@ -16,6 +16,7 @@
 | v0.3.0 | 2026-08-26 | 补充主流实现对比与 dialer BindContext 兼容性矩阵；明确 VLESS/Hysteria2 通过库钩子统一接入 | Claude |
 | v0.4.0 | 2026-08-26 | VLESS 接入方式更新为自研 Dialer + DialRouteAware；移除 xray-core / proxyclient 依赖描述 | Claude |
 | v0.5.0 | 2026-08-26 | 取消代理服务器 exclusion route 兜底；保留 LAN/私网 exclusion route；明确不做引擎级内部看门狗 | Claude |
+| v0.6.0 | 2026-09-08 | 新增旁路网关模式、DHCP 服务器规格 | Qoder |
 
 ## 1. 概述
 
@@ -228,7 +229,60 @@ DNS 查询 socket 同样应通过 `dialer.DialRouteAware()` 创建，使其复�
 4. **无代理服务器兜底**：所有 Dialer 都接入 `BindContext`，不再为任何代理类型保留静态 exclusion route。LAN/私网 exclusion route 仍保留作为辅助保护。
 5. **UDP 统一改造 `ListenPacketRouteAware`**：Socks5/Trojan UDP ASSOCIATE、Shadowsocks UDP、Hysteria2 `ConnFactory` 统一使用带绑定版本。
 
-## 9. 限制与注意事项
+## 9. 旁路网关模式
+
+旁路网关模式（`bypass-gateway: true`）允许 LAN 客户端通过 QG 代理上网。
+
+### 9.1 工作原理
+
+- QG 的物理网卡作为 LAN 客户端的网关
+- TUN 启动后自动配置 `rp_filter`、`ip_forward`、iptables FORWARD 规则
+- iptables FORWARD 规则：`tun0↔eth1` + `eth1→eth1`（同接口转发到真实网关）
+- 仅 Linux 平台支持
+
+### 9.2 配置
+
+```yaml
+tun:
+  enabled: true
+  bypass-gateway: true
+```
+
+## 10. DHCP 服务器
+
+DHCP 服务器在旁路网关模式下为 LAN 客户端自动分配 IP 和配置。
+
+### 10.1 功能
+
+- 绑定物理网卡，仅响应物理网卡上的 DHCP 请求
+- 自动从物理网卡获取子网掩码
+- Gateway = 物理网卡 LAN IP
+- DNS = 192.0.2.3（TUN DNSHijacker 地址，Fake-IP）
+- 地址池顺序分配，内存 + 磁盘持久化租约
+- 支持 DHCP Option 12（Host Name）— 记录客户端主机名
+- Lease 列表按 IP 排序
+
+### 10.2 配置
+
+```yaml
+tun:
+  enabled: true
+  bypass-gateway: true
+  dhcp:
+    enabled: true
+    pool-start: 192.168.1.200
+    pool-end: 192.168.1.250
+    lease-time: "24h"
+```
+
+### 10.3 协议细节
+
+- 使用 AF_PACKET + SOCK_RAW 发送原始以太网帧
+- UDP 监听 0.0.0.0:67，SO_BINDTODEVICE 绑定物理网卡
+- 响应 DISCOVER→OFFER，REQUEST→ACK
+- 所有回复广播发送（flag=0x8000）
+
+## 11. 限制与注意事项
 
 - 需要管理员/root 权限。
 - Windows 需要 `wintun.dll`。
@@ -236,7 +290,7 @@ DNS 查询 socket 同样应通过 `dialer.DialRouteAware()` 创建，使其复�
 - 当前 UDP 转发能力取决于实现版本。
 - **不做引擎级内部看门狗**：进程内探测 TUN DNS 路径不可靠，崩溃恢复依赖外部 `LAYER_WATCHDOG_PID` 进程看门狗 + 统一清理逻辑。
 
-## 10. 相关链接
+## 12. 相关链接
 
 - [admin_spec.md](admin_spec.md)
 - [protocol_spec.md](protocol_spec.md)

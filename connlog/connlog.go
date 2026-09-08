@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/config"
 	"phaethon/util"
 )
 
@@ -12,16 +13,20 @@ const maxLogs = 100
 const notifyDebounce = 3 * time.Second
 
 type Event struct {
-	Seq       uint64    `json:"seq"`
-	Time      time.Time `json:"time"`
-	Inbound   string    `json:"inbound"`
-	Protocol  string    `json:"protocol"`
-	SrcAddr   string    `json:"srcAddr,omitempty"`
-	DstAddr   string    `json:"dstAddr"`
-	DstPort   int       `json:"dstPort"`
-	Proxy     string    `json:"proxy"`
-	Status    string    `json:"status"`
-	Error     string    `json:"error,omitempty"`
+	Seq           uint64    `json:"seq"`
+	Time          time.Time `json:"time"`
+	Inbound       string    `json:"inbound"`
+	Protocol      string    `json:"protocol"`
+	SrcAddr       string    `json:"srcAddr,omitempty"`
+	DstAddr       string    `json:"dstAddr"`
+	DstPort       int       `json:"dstPort"`
+	Proxy         string    `json:"proxy"`
+	ActualProxy   string    `json:"actualProxy,omitempty"` // Actual proxy used (after group resolution)
+	Mapping       string    `json:"mapping,omitempty"`
+	Rule          string    `json:"rule,omitempty"`
+	Status        string    `json:"status"`
+	Error         string    `json:"error,omitempty"`
+	TimeRange     string    `json:"timeRange,omitempty"`
 }
 
 var (
@@ -34,7 +39,7 @@ var (
 	notifyMu        sync.Mutex
 )
 
-func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy, status string, err error) {
+func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, matchResult *config.MatchResult, status string, err error) {
 	e := Event{
 		Time:     time.Now(),
 		Inbound:  inbound,
@@ -42,8 +47,14 @@ func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, proxy, status 
 		SrcAddr:  srcAddr,
 		DstAddr:  dstAddr,
 		DstPort:  dstPort,
-		Proxy:    proxy,
 		Status:   status,
+	}
+	if matchResult != nil {
+		e.Proxy = matchResult.ProxyName
+		e.ActualProxy = matchResult.ActualProxy
+		e.Mapping = matchResult.Mapping
+		e.TimeRange = matchResult.TimeRange
+		e.Rule = matchResult.Rule
 	}
 	if err != nil {
 		e.Error = err.Error()

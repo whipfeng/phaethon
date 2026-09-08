@@ -191,7 +191,8 @@ func (e *Engine) notifyStatsChanged() {
 		return // already scheduled
 	}
 
-	e.statsNotifyTimer = time.AfterFunc(100*time.Millisecond, func() {
+	// Use 2-second debounce to avoid excessive API calls from rapidly changing counters
+	e.statsNotifyTimer = time.AfterFunc(2*time.Second, func() {
 		e.statsNotifyMu.Lock()
 		e.statsNotifyTimer = nil
 		e.statsNotifyMu.Unlock()
@@ -286,6 +287,16 @@ func (e *Engine) DHCPLeaseSnapshot() []DHCPLease {
 	return srv.Leases()
 }
 
+// UpdateDHCPStaticBindings hot-updates the DHCP static bindings if the server is running.
+func (e *Engine) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
+	e.mu.Lock()
+	srv := e.dhcpSrv
+	e.mu.Unlock()
+	if srv != nil {
+		srv.UpdateStaticBindings(bindings)
+	}
+}
+
 // Start brings up the TUN device, configures routes, and starts netstack.
 func (e *Engine) Start() error {
 	e.mu.Lock()
@@ -298,7 +309,7 @@ func (e *Engine) Start() error {
 	if err := EnsureAdminPrivileges(); err != nil {
 		e.mu.Unlock()
 		e.logEvent("TUN ensure admin privileges failed: %v", err)
-		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("admin privileges: %w", err))
+		connlog.Log("TUN", "SYSTEM", "", "", 0, nil, "fail", fmt.Errorf("admin privileges: %w", err))
 		return err
 	}
 
@@ -310,7 +321,7 @@ func (e *Engine) Start() error {
 	if err != nil {
 		e.mu.Unlock()
 		e.logEvent("TUN create device failed: %v", err)
-		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("create device: %w", err))
+		connlog.Log("TUN", "SYSTEM", "", "", 0, nil, "fail", fmt.Errorf("create device: %w", err))
 		return fmt.Errorf("tun: create device: %w", err)
 	}
 	e.device = dev
@@ -368,7 +379,7 @@ func (e *Engine) Start() error {
 	e.routeMgr.SetExclusions(DefaultLANExclusions)
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
-		connlog.Log("TUN", "SYSTEM", "", "", 0, "", "fail", fmt.Errorf("setup routes: %w", err))
+		connlog.Log("TUN", "SYSTEM", "", "", 0, nil, "fail", fmt.Errorf("setup routes: %w", err))
 		e.dnsHijack.Stop()
 		e.wg.Wait()
 		dev.Close()
@@ -449,7 +460,7 @@ func (e *Engine) Start() error {
 	}
 
 	e.logEvent("TUN engine started on %s", dev.Name())
-	connlog.Log("TUN", "SYSTEM", "", dev.Name(), 0, "", "ok", nil)
+	connlog.Log("TUN", "SYSTEM", "", dev.Name(), 0, nil, "ok", nil)
 	util.LogInfo("tun engine started on %s", dev.Name())
 	return nil
 }
@@ -509,7 +520,7 @@ func (e *Engine) Stop() error {
 	}
 
 	e.logEvent("TUN engine stopped")
-	connlog.Log("TUN", "SYSTEM", "", "", 0, "", "stopped", nil)
+	connlog.Log("TUN", "SYSTEM", "", "", 0, nil, "stopped", nil)
 	util.LogInfo("tun engine stopped")
 	return nil
 }
@@ -869,9 +880,10 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 
 	req := config.NewConnectRequest(matchAddr, dstPort)
 	var proxy *config.Proxy
+	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy, _ = e.ruleConf.Match(req, TUNMapping)
+		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
 	}
 
 	resolvedAddr := req.DstAddr
@@ -879,7 +891,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, "", "reject", nil)
+		connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
 
@@ -891,7 +903,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, proxy.Name, "fail", err)
+			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
 		dialIP = net.ParseIP(resolvedAddr)
@@ -903,7 +915,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
-				connlog.Log("TUN", "UDP", "", domain, resolvedPort, "DIRECT", "fail", err)
+				connlog.Log("TUN", "UDP", "", domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -918,7 +930,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
-			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, "DIRECT", "fail", err)
+			connlog.Log("TUN", "UDP", "", resolvedAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 	}
@@ -927,18 +939,23 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
 	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	proxyName := ""
-	if proxy != nil && !strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
-		proxyName = proxy.Name
-	} else {
-		proxyName = "DIRECT"
+	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
+		// Preserve Rule and TimeRange from original matchResult if available
+		if matchResult != nil {
+			matchResult.ProxyName = "DIRECT"
+		} else {
+			matchResult = &config.MatchResult{ProxyName: "DIRECT"}
+		}
+	} else if matchResult != nil && proxy.Name != matchResult.ProxyName {
+		// Set actual proxy name when different from rule (e.g., group resolution)
+		matchResult.ActualProxy = proxy.Name
 	}
 	dstForLog := resolvedAddr
 	if domain != "" {
 		dstForLog = domain
 	}
-	connlog.Log("TUN", "UDP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
-	connlog.TrackActive(connID, "TUN", "UDP", "", dstForLog, resolvedPort, proxyName)
+	connlog.Log("TUN", "UDP", "", dstForLog, resolvedPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "TUN", "UDP", "", dstForLog, resolvedPort, matchResult)
 	defer connlog.RemoveActive(connID)
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
@@ -1003,9 +1020,10 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 
 	req := config.NewConnectRequest(matchAddr, dstPort)
 	var proxy *config.Proxy
+	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy, _ = e.ruleConf.Match(req, TUNMapping)
+		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
 	}
 
 	// Use the (possibly redirected) destination from Resolving
@@ -1017,7 +1035,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, "", "reject", nil)
+		connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
 
@@ -1025,7 +1043,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, proxy.Name, "fail", err)
+			connlog.Log("TUN", "TCP", "", resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
 	} else {
@@ -1036,7 +1054,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
-				connlog.Log("TUN", "TCP", "", domain, resolvedPort, "DIRECT", "fail", err)
+				connlog.Log("TUN", "TCP", "", domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -1051,25 +1069,30 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
-			connlog.Log("TUN", "TCP", "", dialAddr, resolvedPort, "DIRECT", "fail", err)
+			connlog.Log("TUN", "TCP", "", dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	proxyName := ""
-	if proxy != nil && !strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
-		proxyName = proxy.Name
-	} else {
-		proxyName = "DIRECT"
+	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
+		// Preserve Rule and TimeRange from original matchResult if available
+		if matchResult != nil {
+			matchResult.ProxyName = "DIRECT"
+		} else {
+			matchResult = &config.MatchResult{ProxyName: "DIRECT"}
+		}
+	} else if matchResult != nil && proxy.Name != matchResult.ProxyName {
+		// Set actual proxy name when different from rule (e.g., group resolution)
+		matchResult.ActualProxy = proxy.Name
 	}
 	dstForLog := resolvedAddr
 	if domain != "" {
 		dstForLog = domain
 	}
-	connlog.Log("TUN", "TCP", "", dstForLog, resolvedPort, proxyName, "ok", nil)
-	connlog.TrackActive(connID, "TUN", "TCP", "", dstForLog, resolvedPort, proxyName)
+	connlog.Log("TUN", "TCP", "", dstForLog, resolvedPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "TUN", "TCP", "", dstForLog, resolvedPort, matchResult)
 	defer connlog.RemoveActive(connID)
 	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
 }

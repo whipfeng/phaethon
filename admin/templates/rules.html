@@ -17,6 +17,7 @@
                         <th data-i18n="rule.match">Match</th>
                         <th data-i18n="rule.target">Target</th>
                         <th data-i18n="rule.mappingSource">Mapping Source</th>
+                        <th data-i18n="rule.timeRange">Time</th>
                         <th data-i18n="common.enabled">Enabled</th>
                         <th data-i18n="proxy.actions">Actions</th>
                     </tr>
@@ -30,6 +31,7 @@
                         <td><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
                         <td><strong>{{index $parsed 2}}</strong></td>
                         <td>{{if index $parsed 3}}<span class="badge badge-info">{{index $parsed 3}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
+                        <td>{{if index $parsed 4}}<span class="badge badge-warn">{{index $parsed 4}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
                         <td>
                             <label class="switch" title="{{if ruleEnabled $rule}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if ruleEnabled $rule}}checked{{end}} onchange="toggleRule({{$idx}}, this.checked)">
@@ -115,6 +117,24 @@
                         <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="rule.mappingSourceHelp">Route only when request comes from this mapping</small>
                     </div>
                 </div>
+                <div class="form-group">
+                    <label data-i18n="rule.timeRange">Time Range (optional)</label>
+                    <div class="time-range-picker">
+                        <div class="time-picker-group">
+                            <select id="f-rule-time-start-h" class="time-select"></select>
+                            <span>:</span>
+                            <select id="f-rule-time-start-m" class="time-select"></select>
+                        </div>
+                        <span class="time-separator" data-i18n="rule.timeTo">to</span>
+                        <div class="time-picker-group">
+                            <select id="f-rule-time-end-h" class="time-select"></select>
+                            <span>:</span>
+                            <select id="f-rule-time-end-m" class="time-select"></select>
+                        </div>
+                        <button type="button" onclick="clearTimeRange()" class="btn btn-sm btn-outline time-clear-btn" title="Clear">×</button>
+                    </div>
+                    <small class="form-help" style="display:block;margin-top:0.35rem;color:var(--text-secondary);" data-i18n="rule.timeRangeHelp">Rule only applies during this time window. Leave empty for always.</small>
+                </div>
                 <div class="form-actions">
                     <button type="button" onclick="closeRuleModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
                     <button type="button" onclick="pasteRule()" class="btn btn-outline" data-i18n="proxy.paste">📋 Paste</button>
@@ -127,6 +147,62 @@
 <script>
 var rules = {{json .Rules}};
 var mappings = {{json .Mappings}};
+
+// Initialize time picker selects
+(function initTimePicker() {
+    const hStart = document.getElementById('f-rule-time-start-h');
+    const mStart = document.getElementById('f-rule-time-start-m');
+    const hEnd = document.getElementById('f-rule-time-end-h');
+    const mEnd = document.getElementById('f-rule-time-end-m');
+    if (!hStart) return;
+    // Add empty option first
+    [hStart, hEnd].forEach(sel => {
+        sel.innerHTML = '<option value="">--</option>';
+        for (let h = 0; h < 24; h++) {
+            const v = String(h).padStart(2, '0');
+            sel.innerHTML += `<option value="${v}">${v}</option>`;
+        }
+    });
+    [mStart, mEnd].forEach(sel => {
+        sel.innerHTML = '<option value="">--</option>';
+        for (let m = 0; m < 60; m += 5) {
+            const v = String(m).padStart(2, '0');
+            sel.innerHTML += `<option value="${v}">${v}</option>`;
+        }
+    });
+})();
+
+function getTimeRange() {
+    const hStart = document.getElementById('f-rule-time-start-h').value;
+    const mStart = document.getElementById('f-rule-time-start-m').value;
+    const hEnd = document.getElementById('f-rule-time-end-h').value;
+    const mEnd = document.getElementById('f-rule-time-end-m').value;
+    if (hStart && mStart && hEnd && mEnd) {
+        return `${hStart}:${mStart}-${hEnd}:${mEnd}`;
+    }
+    return '';
+}
+
+function setTimeRange(timeRange) {
+    if (timeRange) {
+        const match = timeRange.match(/^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/);
+        if (match) {
+            document.getElementById('f-rule-time-start-h').value = match[1];
+            document.getElementById('f-rule-time-start-m').value = match[2];
+            document.getElementById('f-rule-time-end-h').value = match[3];
+            document.getElementById('f-rule-time-end-m').value = match[4];
+            return;
+        }
+    }
+    document.getElementById('f-rule-time-start-h').value = '';
+    document.getElementById('f-rule-time-start-m').value = '';
+    document.getElementById('f-rule-time-end-h').value = '';
+    document.getElementById('f-rule-time-end-m').value = '';
+}
+
+function clearTimeRange() {
+    setTimeRange('');
+}
 
 function copyRule(idx) {
     const rule = rules[idx];
@@ -151,7 +227,7 @@ async function pasteRule() {
         } else {
             throw new Error('Invalid rule format');
         }
-        const [keyword, value, target, mappingName] = parseRule(raw);
+        const [keyword, value, target, mappingName, timeRange] = parseRule(raw);
         document.getElementById('rule-edit-idx').value = '-1';
         document.getElementById('f-rule-keyword').value = keyword;
         document.getElementById('f-rule-value').value = value;
@@ -165,6 +241,7 @@ async function pasteRule() {
             targetSel.value = target;
         }
         document.getElementById('f-rule-mapping').value = mappingName || '';
+        setTimeRange(timeRange);
         toggleRuleFields();
         showToast(typeof i18n !== 'undefined' ? i18n.t('proxy.pasted') : 'Pasted from clipboard', 'success');
     } catch (err) {
@@ -185,38 +262,52 @@ function parseRule(rule) {
     const r = rule.trim().replace(/^\/\//, '');
     const parts = r.split(',');
     if (parts.length === 1) {
-        const [target, mapping] = splitTargetMapping(parts[0].trim());
-        return [parts[0].trim(), '', target, mapping];
+        const [target, mapping, timeRange] = splitTargetMapping(parts[0].trim());
+        return [parts[0].trim(), '', target, mapping, timeRange];
     }
     if (parts.length === 2) {
-        const [target, mapping] = splitTargetMapping(parts[1].trim());
-        return [parts[0].trim(), '', target, mapping];
+        const [target, mapping, timeRange] = splitTargetMapping(parts[1].trim());
+        return [parts[0].trim(), '', target, mapping, timeRange];
     }
-    // e.g. DOMAIN-SUFFIX,example.com,DIRECT → [DOMAIN-SUFFIX, example.com, DIRECT, '']
+    // e.g. DOMAIN-SUFFIX,example.com,DIRECT → [DOMAIN-SUFFIX, example.com, DIRECT, '', '']
     const keyword = parts[0].trim();
     const rawTarget = parts[parts.length - 1].trim();
     const value = parts.slice(1, parts.length - 1).join(',').trim();
-    const [target, mapping] = splitTargetMapping(rawTarget);
-    return [keyword, value, target, mapping];
+    const [target, mapping, timeRange] = splitTargetMapping(rawTarget);
+    return [keyword, value, target, mapping, timeRange];
 }
 
 function splitTargetMapping(target) {
-    if (!target) return ['', ''];
-    const idx = target.indexOf('#');
-    if (idx < 0) return [target, ''];
-    return [target.slice(0, idx), target.slice(idx + 1)];
+    if (!target) return ['', '', ''];
+    let s = target;
+    let mapping = '';
+    let timeRange = '';
+    for (let i = 0; i < 2; i++) {
+        const atIdx = s.lastIndexOf('@');
+        const hashIdx = s.lastIndexOf('#');
+        if (atIdx < 0 && hashIdx < 0) break;
+        if (atIdx > hashIdx) {
+            timeRange = s.slice(atIdx + 1);
+            s = s.slice(0, atIdx);
+        } else {
+            mapping = s.slice(hashIdx + 1);
+            s = s.slice(0, hashIdx);
+        }
+    }
+    return [s, mapping, timeRange];
 }
 
 function showAddRule() {
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
     document.getElementById('rule-edit-idx').value = '-1';
     document.getElementById('rule-form').reset();
+    setTimeRange('');
     toggleRuleFields();
     document.getElementById('rule-modal').classList.remove('hidden');
 }
 
 function editRule(idx) {
-    const [keyword, value, target, mappingName] = parseRule(rules[idx]);
+    const [keyword, value, target, mappingName, timeRange] = parseRule(rules[idx]);
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalEdit') : 'Edit Rule');
     document.getElementById('rule-edit-idx').value = idx;
 
@@ -233,6 +324,7 @@ function editRule(idx) {
         targetSel.value = target;
     }
     document.getElementById('f-rule-mapping').value = mappingName || '';
+    setTimeRange(timeRange);
     toggleRuleFields();
     document.getElementById('rule-modal').classList.remove('hidden');
 }
@@ -244,7 +336,9 @@ async function saveRule(e) {
     const value = document.getElementById('f-rule-value').value.trim();
     let target = document.getElementById('f-rule-target').value;
     const mappingSrc = document.getElementById('f-rule-mapping').value;
+    const timeRange = getTimeRange();
     if (mappingSrc) target = target + '#' + mappingSrc;
+    if (timeRange) target = target + '@' + timeRange;
 
     let ruleStr;
     if (keyword === 'MATCH') {
@@ -491,7 +585,7 @@ function ipv6InCidr(ip, cidr) {
         dropIndicator = document.createElement('tr');
         dropIndicator.className = 'drop-indicator';
         const td = document.createElement('td');
-        td.colSpan = 7;
+        td.colSpan = 8;
         const line = document.createElement('div');
         line.className = 'drop-line';
         td.appendChild(line);

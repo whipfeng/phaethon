@@ -55,16 +55,16 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	addrReq := config.NewConnectRequest(host, port)
 	addrReq = s.RuleConf.Resolving(addrReq)
 
-	proxy, ruleName := s.RuleConf.Match(addrReq, s.Mapping)
+	proxy, matchResult := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "reject", nil)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
@@ -73,15 +73,15 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "fail", err)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer targetConn.Close()
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name)
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult)
 	defer connlog.RemoveActive(connID)
 
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
@@ -94,16 +94,16 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	addrReq := config.NewConnectRequest(host, port)
 	addrReq = s.RuleConf.Resolving(addrReq)
 
-	proxy, ruleName := s.RuleConf.Match(addrReq, s.Mapping)
+	proxy, matchResult := s.RuleConf.Match(addrReq, s.Mapping)
 	if proxy == nil {
-		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, ruleName, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, ruleName, "fail", fmt.Errorf("all proxies dead"))
+		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, addrReq.DstAddr, addrReq.DstPort)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, "", "reject", nil)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
 		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return
 	}
@@ -112,7 +112,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "fail", err)
+		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -133,8 +133,8 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	}
 
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, proxy.Name)
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), addrReq.DstAddr, addrReq.DstPort, matchResult)
 	defer connlog.RemoveActive(connID)
 
 	// Read response and forward back

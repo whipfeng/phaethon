@@ -3,6 +3,7 @@
 package tun
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"phaethon/config"
 	"phaethon/util"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -33,6 +35,7 @@ const (
 	optSubnetMask       = 1
 	optRouter           = 3
 	optDNS              = 6
+	optHostName         = 12
 	optDomainName       = 15
 	optRequestedIP      = 50
 	optLeaseTime        = 51
@@ -141,6 +144,13 @@ func (m *dhcpMessage) requestedIP() net.IP {
 	return nil
 }
 
+func (m *dhcpMessage) hostName() string {
+	if opt, ok := m.options[optHostName]; ok {
+		return string(opt)
+	}
+	return ""
+}
+
 func (m *dhcpMessage) serialize() []byte {
 	buf := make([]byte, 236, 512)
 	buf[0] = m.op
@@ -197,9 +207,10 @@ func (m *dhcpMessage) serialize() []byte {
 
 // lease tracks a single DHCP lease.
 type lease struct {
-	ip      net.IP
-	mac     net.HardwareAddr
-	expires time.Time
+	ip       net.IP
+	mac      net.HardwareAddr
+	hostname string
+	expires  time.Time
 }
 
 // dhcpServerImpl is the Linux DHCP server implementation.
@@ -221,6 +232,8 @@ type dhcpServerImpl struct {
 	poolNext net.IP
 	poolEnd  net.IP
 	leaseDur time.Duration
+
+	staticBindings map[string]net.IP // MAC string -> static IP
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -298,15 +311,23 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 	}
 
 	s := &dhcpServerImpl{
-		ifaceName: ifaceName,
-		cfg:       cfg,
-		dnsAddr:   dnsAddr.To4(),
-		dataDir:   dataDir,
-		leases:    make(map[string]*lease),
-		poolNext:  poolStart,
-		poolEnd:   poolEnd,
-		leaseDur:  cfg.LeaseDuration(),
-		stopCh:    make(chan struct{}),
+		ifaceName:      ifaceName,
+		cfg:            cfg,
+		dnsAddr:        dnsAddr.To4(),
+		dataDir:        dataDir,
+		leases:         make(map[string]*lease),
+		poolNext:       poolStart,
+		poolEnd:        poolEnd,
+		leaseDur:       cfg.LeaseDuration(),
+		staticBindings: make(map[string]net.IP),
+		stopCh:         make(chan struct{}),
+	}
+
+	for _, b := range cfg.StaticBindings {
+		mac := normalizeMAC(b.MAC)
+		if ip := net.ParseIP(b.IP); ip != nil && mac != "" {
+			s.staticBindings[mac] = ip.To4()
+		}
 	}
 
 	if dataDir != "" {
@@ -381,9 +402,10 @@ func (s *dhcpServerImpl) Start() error {
 }
 
 type leaseJSON struct {
-	IP      string    `json:"ip"`
-	MAC     string    `json:"mac"`
-	Expires time.Time `json:"expires"`
+	IP       string    `json:"ip"`
+	MAC      string    `json:"mac"`
+	Hostname string    `json:"hostname,omitempty"`
+	Expires  time.Time `json:"expires"`
 }
 
 func (s *dhcpServerImpl) loadLeases() {
@@ -408,9 +430,10 @@ func (s *dhcpServerImpl) loadLeases() {
 		}
 		mac, _ := net.ParseMAC(e.MAC)
 		s.leases[e.MAC] = &lease{
-			ip:      ip,
-			mac:     mac,
-			expires: e.Expires,
+			ip:       ip,
+			mac:      mac,
+			hostname: e.Hostname,
+			expires:  e.Expires,
 		}
 		count++
 	}
@@ -429,9 +452,10 @@ func (s *dhcpServerImpl) saveLeases() {
 	for mac, l := range s.leases {
 		if l.expires.After(now) {
 			entries = append(entries, leaseJSON{
-				IP:      l.ip.String(),
-				MAC:     mac,
-				Expires: l.expires,
+				IP:       l.ip.String(),
+				MAC:      mac,
+				Hostname: l.hostname,
+				Expires:  l.expires,
 			})
 		}
 	}
@@ -484,12 +508,18 @@ func (s *dhcpServerImpl) Leases() []DHCPLease {
 	for _, l := range s.leases {
 		if l.expires.After(now) {
 			out = append(out, DHCPLease{
-				IP:      l.ip.String(),
-				MAC:     l.mac.String(),
-				Expires: l.expires,
+				IP:       l.ip.String(),
+				MAC:      l.mac.String(),
+				Hostname: l.hostname,
+				Expires:  l.expires,
 			})
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		a := net.ParseIP(out[i].IP).To4()
+		b := net.ParseIP(out[j].IP).To4()
+		return bytes.Compare(a, b) < 0
+	})
 	return out
 }
 
@@ -554,6 +584,7 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 	msgType := req.messageType()
 	mac := req.clientMAC()
 	macStr := mac.String()
+	hostname := req.hostName()
 
 	// Ignore our own DHCP requests (if this interface is also a DHCP client).
 	_, _, ifaceMAC, err := s.getIfaceInfo()
@@ -565,6 +596,14 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 	case dhcpDiscover:
 		s.mu.Lock()
 		offeredIP := s.allocateIP(macStr)
+		if offeredIP != nil {
+			s.leases[macStr] = &lease{
+				ip:       offeredIP,
+				mac:      mac,
+				hostname: hostname,
+				expires:  time.Now().Add(s.leaseDur),
+			}
+		}
 		s.mu.Unlock()
 
 		if offeredIP == nil {
@@ -585,17 +624,25 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 		}
 
 		s.mu.Lock()
+		// Static binding overrides requested IP
+		if staticIP, ok := s.staticBindings[macStr]; ok {
+			reqIP = staticIP
+		}
 		if existing, ok := s.leases[macStr]; ok && existing.ip.Equal(reqIP) && existing.expires.After(time.Now()) {
 			existing.expires = time.Now().Add(s.leaseDur)
+			if hostname != "" {
+				existing.hostname = hostname
+			}
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
 			s.saveLeases()
 			util.LogInfo("dhcp: ACK (renew) %s -> %s", macStr, reqIP)
 		} else {
 			s.leases[macStr] = &lease{
-				ip:      reqIP,
-				mac:     mac,
-				expires: time.Now().Add(s.leaseDur),
+				ip:       reqIP,
+				mac:      mac,
+				hostname: hostname,
+				expires:  time.Now().Add(s.leaseDur),
 			}
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
@@ -618,11 +665,30 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 }
 
 func (s *dhcpServerImpl) allocateIP(macStr string) net.IP {
-	if existing, ok := s.leases[macStr]; ok && existing.expires.After(time.Now()) {
-		return existing.ip
+	now := time.Now()
+
+	// Static binding takes priority over everything
+	if staticIP, ok := s.staticBindings[macStr]; ok {
+		conflict := false
+		for mac, l := range s.leases {
+			if mac != macStr && l.ip.Equal(staticIP) && l.expires.After(now) {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			s.leases[macStr] = &lease{
+				ip:      staticIP,
+				mac:     net.HardwareAddr{},
+				expires: now.Add(s.leaseDur),
+			}
+			return staticIP
+		}
 	}
 
-	now := time.Now()
+	if existing, ok := s.leases[macStr]; ok && existing.expires.After(now) {
+		return existing.ip
+	}
 	startIP := make(net.IP, len(s.poolNext))
 	copy(startIP, s.poolNext)
 
@@ -635,6 +701,14 @@ func (s *dhcpServerImpl) allocateIP(macStr string) net.IP {
 			if l.ip.Equal(candidate) && l.expires.After(now) {
 				inUse = true
 				break
+			}
+		}
+		if !inUse {
+			for _, sip := range s.staticBindings {
+				if sip.Equal(candidate) {
+					inUse = true
+					break
+				}
 			}
 		}
 
@@ -864,4 +938,25 @@ func udpChecksum(src, dst net.IP, udpPacket []byte) uint16 {
 		cksum = 0xffff // RFC 768: zero checksum value means "no checksum"
 	}
 	return cksum
+}
+
+func (s *dhcpServerImpl) UpdateStaticBindings(bindings []config.DHCPStaticBinding) {
+	newBindings := make(map[string]net.IP)
+	for _, b := range bindings {
+		mac := normalizeMAC(b.MAC)
+		if ip := net.ParseIP(b.IP); ip != nil && mac != "" {
+			newBindings[mac] = ip.To4()
+		}
+	}
+	s.mu.Lock()
+	s.staticBindings = newBindings
+	s.mu.Unlock()
+}
+
+func normalizeMAC(s string) string {
+	hw, err := net.ParseMAC(s)
+	if err != nil {
+		return ""
+	}
+	return hw.String()
 }

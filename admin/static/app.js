@@ -812,16 +812,21 @@ function renderActiveConns() {
     } else {
         let html = '<table class="data-table" style="font-size:0.85rem;"><thead><tr>';
         html += '<th data-i18n="dash.connProtocol">' + i18n.t('dash.connProtocol') + '</th>';
+        html += '<th data-i18n="dash.connInbound">' + i18n.t('dash.connInbound') + '</th>';
         html += '<th data-i18n="dash.connDst">' + i18n.t('dash.connDst') + '</th>';
-        html += '<th data-i18n="dash.connProxy">' + i18n.t('dash.connProxy') + '</th>';
+        html += '<th data-i18n="dash.connRule">' + i18n.t('dash.connRule') + '</th>';
         html += '<th data-i18n="dash.connDuration">' + i18n.t('dash.connDuration') + '</th>';
         html += '</tr></thead><tbody>';
         conns.forEach(c => {
             const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
             const dst = c.dstAddr + ':' + c.dstPort;
-            const proxy = c.proxy || 'DIRECT';
+            let rule = c.rule || c.proxy || 'DIRECT';
+            if (c.actualProxy && c.actualProxy !== c.proxy) {
+                rule += ' → ' + c.actualProxy;
+            }
+            const inbound = c.inbound || '';
             const selected = c.id === selectedConnId ? ' class="selected"' : '';
-            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
         });
         html += '</tbody></table>';
         el.innerHTML = html;
@@ -939,16 +944,21 @@ async function openConnsPopup() {
             } else {
                 let html = '<table><thead><tr>';
                 html += '<th>' + i18n.t('dash.connProtocol') + '</th>';
+                html += '<th>' + i18n.t('dash.connInbound') + '</th>';
                 html += '<th>' + i18n.t('dash.connDst') + '</th>';
-                html += '<th>' + i18n.t('dash.connProxy') + '</th>';
+                html += '<th>' + i18n.t('dash.connRule') + '</th>';
                 html += '<th>' + i18n.t('dash.connDuration') + '</th>';
                 html += '</tr></thead><tbody>';
                 conns.forEach(c => {
                     const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
                     const dst = c.dstAddr + ':' + c.dstPort;
-                    const proxy = c.proxy || 'DIRECT';
+                    let rule = c.rule || c.proxy || 'DIRECT';
+                    if (c.actualProxy && c.actualProxy !== c.proxy) {
+                        rule += ' → ' + c.actualProxy;
+                    }
+                    const inbound = c.inbound || '';
                     const selected = c.id === pipSelectedConnId ? ' class="selected"' : '';
-                    html += '<tr' + selected + ' data-conn-id="' + c.id + '"><td>' + c.protocol + '</td><td>' + dst + '</td><td>' + proxy + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+                    html += '<tr' + selected + ' data-conn-id="' + c.id + '"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
                 });
                 html += '</tbody></table>';
                 contentEl.innerHTML = html;
@@ -1035,9 +1045,12 @@ async function fetchConnections(incremental) {
             const ms = String(date.getMilliseconds()).padStart(3, '0');
             const time = `${hours}:${minutes}:${seconds}.${ms}`;
             const icon = e.status === 'ok' ? '✓' : '✗';
-            const proxy = e.proxy || 'DIRECT';
             const inbound = e.inbound || '';
-            let line = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${proxy}`;
+            let target = e.rule || e.proxy || 'DIRECT';
+            if (e.actualProxy && e.actualProxy !== e.proxy) {
+                target += ' → ' + e.actualProxy;
+            }
+            let line = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${target}`;
             if (e.error) line += ` (${e.error})`;
             return `[${time}] ${line}`;
         });
@@ -1191,9 +1204,12 @@ async function openLogsPopup() {
                 const ms = String(date.getMilliseconds()).padStart(3, '0');
                 const time = `${hours}:${minutes}:${seconds}.${ms}`;
                 const icon = e.status === 'ok' ? '✓' : '✗';
-                const proxy = e.proxy || 'DIRECT';
                 const inbound = e.inbound || '';
-                let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${proxy}`;
+                let target = e.rule || e.proxy || 'DIRECT';
+                if (e.actualProxy && e.actualProxy !== e.proxy) {
+                    target += ' → ' + e.actualProxy;
+                }
+                let text = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${target}`;
                 if (e.error) text += ` (${e.error})`;
 
                 const div = pipWindow.document.createElement('div');

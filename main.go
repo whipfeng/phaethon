@@ -137,12 +137,13 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 	}
 	enabled := res.ruleConf.TUN.IsEnabled()
 	status := map[string]interface{}{
-		"available":     tun.Available(),
-		"enabled":       enabled,
-		"bypassGateway": res.ruleConf.TUN.IsBypassGateway(),
-		"dhcpEnabled":   res.ruleConf.TUN.IsDHCPEnabled(),
-		"running":       false,
-		"deviceName":    "",
+		"available":          tun.Available(),
+		"enabled":            enabled,
+		"bypassGateway":      res.ruleConf.TUN.IsBypassGateway(),
+		"dhcpEnabled":        res.ruleConf.TUN.IsDHCPEnabled(),
+		"dhcpStaticBindings": res.ruleConf.TUN.DHCPStaticBindings(),
+		"running":            false,
+		"deviceName":         "",
 		"routes": map[string]interface{}{
 			"applied":           false,
 			"tunIP":             "",
@@ -644,6 +645,11 @@ func main() {
 		}
 		resources.adminServer.GetTUNStatus = func() map[string]interface{} {
 			return buildTUNStatus(resources)
+		}
+		resources.adminServer.OnDHCPStaticBindingsUpdate = func(bindings []config.DHCPStaticBinding) {
+			if resources.tunRes != nil && resources.tunRes.engine != nil {
+				resources.tunRes.engine.UpdateDHCPStaticBindings(bindings)
+			}
 		}
 	}
 

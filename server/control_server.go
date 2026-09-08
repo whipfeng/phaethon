@@ -660,8 +660,11 @@ func (m *ControlManager) insertRoutingRule(mappingName string, proxy *config.Pro
 	m.ruleConf.Lock()
 	rs := strings.SplitN(ruleStr, ",", 3)
 	if len(rs) >= 2 {
-		matcher := config.NewMatchAllMatcher(strings.Trim(rs[1], "'"))
+		name, mapping, _ := config.ParseProxyName(strings.Trim(rs[1], "'"))
+		matcher := config.NewMatchAllMatcher(name, mapping)
 		m.ruleConf.Matchers = append([]config.Matcher{matcher}, m.ruleConf.Matchers...)
+		m.ruleConf.PrependTimeRange()
+		m.ruleConf.PrependRule(ruleStr)
 	}
 	m.ruleConf.Unlock()
 }
@@ -728,15 +731,20 @@ func (m *ControlManager) HandleClose(address string) {
 			targetProxy := resource.Proxy.Name
 			targetMap := resource.MappingName
 			newMatchers := make([]config.Matcher, 0, len(m.ruleConf.Matchers))
-			for _, matcher := range m.ruleConf.Matchers {
+			newTimeRanges := make([]config.TimeRange, 0, len(m.ruleConf.Matchers))
+			for i, matcher := range m.ruleConf.Matchers {
 				if mam, ok := matcher.(*config.MatchAllMatcher); ok {
 					if mam.ProxyName() == targetProxy && mam.MappingName() == targetMap {
 						continue // skip the dynamic rule we created
 					}
 				}
 				newMatchers = append(newMatchers, matcher)
+				if i < len(m.ruleConf.MatcherTimeRanges()) {
+					newTimeRanges = append(newTimeRanges, m.ruleConf.MatcherTimeRanges()[i])
+				}
 			}
 			m.ruleConf.Matchers = newMatchers
+			m.ruleConf.SetMatcherTimeRanges(newTimeRanges)
 		}
 		m.ruleConf.Unlock()
 
@@ -806,15 +814,20 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 			targetProxy := res.Proxy.Name
 			targetMap := res.MappingName
 			newMatchers := make([]config.Matcher, 0, len(m.ruleConf.Matchers))
-			for _, matcher := range m.ruleConf.Matchers {
+			newTimeRanges := make([]config.TimeRange, 0, len(m.ruleConf.Matchers))
+			for i, matcher := range m.ruleConf.Matchers {
 				if mam, ok := matcher.(*config.MatchAllMatcher); ok {
 					if mam.ProxyName() == targetProxy && mam.MappingName() == targetMap {
 						continue
 					}
 				}
 				newMatchers = append(newMatchers, matcher)
+				if i < len(m.ruleConf.MatcherTimeRanges()) {
+					newTimeRanges = append(newTimeRanges, m.ruleConf.MatcherTimeRanges()[i])
+				}
 			}
 			m.ruleConf.Matchers = newMatchers
+			m.ruleConf.SetMatcherTimeRanges(newTimeRanges)
 		}
 		m.ruleConf.Unlock()
 		reg := reverse.GlobalRegistry()

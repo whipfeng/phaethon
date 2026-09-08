@@ -13,20 +13,21 @@ const maxLogs = 100
 const notifyDebounce = 3 * time.Second
 
 type Event struct {
-	Seq           uint64    `json:"seq"`
-	Time          time.Time `json:"time"`
-	Inbound       string    `json:"inbound"`
-	Protocol      string    `json:"protocol"`
-	SrcAddr       string    `json:"srcAddr,omitempty"`
-	DstAddr       string    `json:"dstAddr"`
-	DstPort       int       `json:"dstPort"`
-	Proxy         string    `json:"proxy"`
-	ActualProxy   string    `json:"actualProxy,omitempty"` // Actual proxy used (after group resolution)
-	Mapping       string    `json:"mapping,omitempty"`
-	Rule          string    `json:"rule,omitempty"`
-	Status        string    `json:"status"`
-	Error         string    `json:"error,omitempty"`
-	TimeRange     string    `json:"timeRange,omitempty"`
+	Seq            uint64    `json:"seq"`
+	Time           time.Time `json:"time"`
+	Inbound        string    `json:"inbound"`
+	Protocol       string    `json:"protocol"`
+	SrcAddr        string    `json:"srcAddr,omitempty"`
+	OriginalDstAddr string   `json:"originalDstAddr,omitempty"` // Original destination before resolver redirection
+	DstAddr        string    `json:"dstAddr"`
+	DstPort        int       `json:"dstPort"`
+	Proxy          string    `json:"proxy"`
+	ActualProxy    string    `json:"actualProxy,omitempty"` // Actual proxy used (after group resolution)
+	Mapping        string    `json:"mapping,omitempty"`
+	Rule           string    `json:"rule,omitempty"`
+	Status         string    `json:"status"`
+	Error          string    `json:"error,omitempty"`
+	TimeRange      string    `json:"timeRange,omitempty"`
 }
 
 var (
@@ -39,15 +40,16 @@ var (
 	notifyMu        sync.Mutex
 )
 
-func Log(inbound, protocol, srcAddr, dstAddr string, dstPort int, matchResult *config.MatchResult, status string, err error) {
+func Log(inbound, protocol, srcAddr, originalDstAddr, dstAddr string, dstPort int, matchResult *config.MatchResult, status string, err error) {
 	e := Event{
-		Time:     time.Now(),
-		Inbound:  inbound,
-		Protocol: protocol,
-		SrcAddr:  srcAddr,
-		DstAddr:  dstAddr,
-		DstPort:  dstPort,
-		Status:   status,
+		Time:            time.Now(),
+		Inbound:         inbound,
+		Protocol:        protocol,
+		SrcAddr:         srcAddr,
+		OriginalDstAddr: originalDstAddr,
+		DstAddr:         dstAddr,
+		DstPort:         dstPort,
+		Status:          status,
 	}
 	if matchResult != nil {
 		e.Proxy = matchResult.ProxyName
@@ -132,8 +134,15 @@ func FormatEvent(e Event) string {
 	if proxy == "" && e.Status == "ok" {
 		proxy = "DIRECT"
 	}
-	if e.Error != "" {
-		return fmt.Sprintf("%s %s %s:%d → %s (%s)", icon, e.Protocol, e.DstAddr, e.DstPort, proxy, e.Error)
+	
+	// Show original -> resolved when they differ
+	dstDisplay := fmt.Sprintf("%s:%d", e.DstAddr, e.DstPort)
+	if e.OriginalDstAddr != "" && e.OriginalDstAddr != e.DstAddr {
+		dstDisplay = fmt.Sprintf("%s → %s:%d", e.OriginalDstAddr, e.DstAddr, e.DstPort)
 	}
-	return fmt.Sprintf("%s %s %s:%d → %s", icon, e.Protocol, e.DstAddr, e.DstPort, proxy)
+	
+	if e.Error != "" {
+		return fmt.Sprintf("%s %s %s → %s (%s)", icon, e.Protocol, dstDisplay, proxy, e.Error)
+	}
+	return fmt.Sprintf("%s %s %s → %s", icon, e.Protocol, dstDisplay, proxy)
 }

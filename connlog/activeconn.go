@@ -12,18 +12,19 @@ const maxActive = 500
 const maxJournal = 500
 
 type ActiveConn struct {
-	ID          string    `json:"id"`
-	Protocol    string    `json:"protocol"`
-	Inbound     string    `json:"inbound"`
-	SrcAddr     string    `json:"srcAddr,omitempty"`
-	DstAddr     string    `json:"dstAddr"`
-	DstPort     int       `json:"dstPort"`
-	Proxy       string    `json:"proxy"`
-	ActualProxy string    `json:"actualProxy,omitempty"`
-	Mapping     string    `json:"mapping,omitempty"`
-	Rule        string    `json:"rule,omitempty"`
-	TimeRange   string    `json:"timeRange,omitempty"`
-	StartTime   time.Time `json:"startTime"`
+	ID              string    `json:"id"`
+	Protocol        string    `json:"protocol"`
+	Inbound         string    `json:"inbound"`
+	SrcAddr         string    `json:"srcAddr,omitempty"`
+	OriginalDstAddr string    `json:"originalDstAddr,omitempty"`
+	DstAddr         string    `json:"dstAddr"`
+	DstPort         int       `json:"dstPort"`
+	Proxy           string    `json:"proxy"`
+	ActualProxy     string    `json:"actualProxy,omitempty"`
+	Mapping         string    `json:"mapping,omitempty"`
+	Rule            string    `json:"rule,omitempty"`
+	TimeRange       string    `json:"timeRange,omitempty"`
+	StartTime       time.Time `json:"startTime"`
 }
 
 type JournalEntry struct {
@@ -39,15 +40,16 @@ var (
 	journal   []JournalEntry
 )
 
-func TrackActive(id, inbound, protocol, srcAddr, dstAddr string, dstPort int, matchResult *config.MatchResult) {
+func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string, dstPort int, matchResult *config.MatchResult) {
 	conn := &ActiveConn{
-		ID:        id,
-		Protocol:  protocol,
-		Inbound:   inbound,
-		SrcAddr:   srcAddr,
-		DstAddr:   dstAddr,
-		DstPort:   dstPort,
-		StartTime: time.Now(),
+		ID:              id,
+		Protocol:        protocol,
+		Inbound:         inbound,
+		SrcAddr:         srcAddr,
+		OriginalDstAddr: originalDstAddr,
+		DstAddr:         dstAddr,
+		DstPort:         dstPort,
+		StartTime:       time.Now(),
 	}
 	if matchResult != nil {
 		conn.Proxy = matchResult.ProxyName

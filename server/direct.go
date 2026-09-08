@@ -32,12 +32,12 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	proxy, matchResult := s.RuleConf.Match(req, s.Mapping)
 	if proxy == nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, dstHost, dstPort)
-		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
 		return
 	}
 	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogInfo("[DIRECT-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, dstHost, dstPort)
-		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
 		return
 	}
 
@@ -45,14 +45,14 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
-		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, matchResult, "fail", err)
+		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, matchResult, "fail", err)
 		return
 	}
 	defer targetConn.Close()
 
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
-	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstPort, matchResult)
+	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, "Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, matchResult)
 	defer connlog.RemoveActive(connID)
 	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
 }

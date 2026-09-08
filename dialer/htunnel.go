@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -47,9 +48,33 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 					nextType = proxy.Next.Type
 				}
 				if proxy.Next != nil && proxy.Next.Type != config.ProxyDIRECT {
-					util.LogDebug("[HTUNNEL-DIAL] [%s] chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, proxy.Server, proxy.Port, addr)
+					// For h_tunnel with URL, extract host/port from URL if server is empty
+					server := proxy.Server
+					port := proxy.Port
+					if server == "" && proxy.URL != "" {
+						if u, err := url.Parse(proxy.URL); err == nil {
+							host := u.Hostname()
+							portStr := u.Port()
+							if host != "" {
+								server = host
+								if portStr != "" {
+									if p, err := strconv.Atoi(portStr); err == nil {
+										port = p
+									}
+								} else {
+									// Default port based on scheme
+									if u.Scheme == "https" {
+										port = 443
+									} else {
+										port = 80
+									}
+								}
+							}
+						}
+					}
+					util.LogDebug("[HTUNNEL-DIAL] [%s] chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, server, port, addr)
 					nextDialer := NewDialer(proxy.Next)
-					return nextDialer.Dial(proxy.Server, proxy.Port)
+					return nextDialer.Dial(server, port)
 				}
 				util.LogDebug("[HTUNNEL-DIAL] [%s] direct to URL addr=%s (server=%s:%d, next=%s)", proxy.Name, addr, proxy.Server, proxy.Port, nextType)
 				return DialRouteAware(network, addr)

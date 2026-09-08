@@ -56,8 +56,10 @@ func (d *SSHDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 }
 
 // dialSSH dials through the cached SSH client. On failure it acquires the
-// per-entry reconnect lock, rechecks staleness, rebuilds the client, and
-// retries — so concurrent callers serialise behind a single reconnect.
+// per-entry reconnect lock, checks whether another goroutine has already
+// replaced the stale client, and if not, removes it and creates a fresh one.
+// Concurrent callers serialise behind reconnMu so only one SSH handshake
+// happens per failure episode.
 func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 	client, entry, err := d.getSSHClient()
 	if err != nil {
@@ -75,24 +77,23 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 	defer entry.reconnMu.Unlock()
 
 	// Re-fetch: another goroutine may have already reconnected under us.
-	client, entry, err = d.getSSHClient()
+	cachedClient, cachedEntry, err := d.getSSHClient()
 	if err != nil {
 		return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 
-	// If the cached client is the same one that just failed, force-recreate.
-	conn, err2 := client.Dial("tcp", addr)
-	if err2 == nil {
-		return conn, nil
+	// If the cached entry is the same one that just failed, no one has
+	// replaced it yet — remove it and build a fresh client.
+	if cachedEntry == entry {
+		d.removeSSHClientLocked(entry)
+		cachedClient, cachedEntry, err = d.getSSHClient()
+		if err != nil {
+			return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+		}
 	}
+	// Otherwise cachedEntry is a freshly reconnected client — use it directly.
 
-	// Still failing — this is the same stale client; rebuild.
-	d.removeSSHClientLocked(entry)
-	client, entry, err = d.getSSHClient()
-	if err != nil {
-		return nil, fmt.Errorf("ssh: reconnect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	conn, err = client.Dial("tcp", addr)
+	conn, err = cachedClient.Dial("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)
 	}

@@ -3,13 +3,12 @@
 package tun
 
 import (
-	"context"
 	"fmt"
+	"net"
 	"os"
-	"os/exec"
 	"sync"
-	"time"
 
+	"github.com/godbus/dbus/v5"
 	"phaethon/util"
 )
 
@@ -25,27 +24,48 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if _, err := exec.LookPath("resolvectl"); err == nil {
-		if out, err := exec.CommandContext(ctx, "resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
-			dnsMethod = "resolved"
-			util.LogInfo("tun: systemd-resolved dns for %s set to %s", ifaceName, tunIP)
-			return nil
-		} else {
-			util.LogWarn("tun: resolvectl dns failed, trying next method: %v: %s", err, out)
+	// Try D-Bus API to systemd-resolved first
+	conn, err := dbus.SystemBus()
+	if err == nil {
+		resolved := conn.Object("org.freedesktop.resolve1", "/org/freedesktop/resolve1")
+		
+		// Get interface index
+		iface, err := net.InterfaceByName(ifaceName)
+		if err == nil {
+			// Parse DNS IP
+			dnsIP := net.ParseIP(tunIP)
+			if dnsIP != nil {
+				// Call SetLinkDNS(int32 index, array of (int32 family, array of byte address))
+				var ipBytes []byte
+				var family int32
+				if dnsIP.To4() != nil {
+					ipBytes = dnsIP.To4()
+					family = 2 // AF_INET
+				} else {
+					ipBytes = dnsIP.To16()
+					family = 10 // AF_INET6
+				}
+				
+				// D-Bus signature: a(ii ay) - array of (family, address)
+				dnsServers := []struct {
+					Family  int32
+					Address []byte
+				}{
+					{Family: family, Address: ipBytes},
+				}
+				
+				call := resolved.Call("org.freedesktop.resolve1.Manager.SetLinkDNS", 0, int32(iface.Index), dnsServers)
+				if call.Err == nil {
+					dnsMethod = "resolved"
+					util.LogInfo("tun: systemd-resolved dns for %s set to %s via D-Bus", ifaceName, tunIP)
+					return nil
+				} else {
+					util.LogWarn("tun: resolved D-Bus SetLinkDNS failed: %v, trying next method", call.Err)
+				}
+			}
 		}
-	}
-
-	if _, err := exec.LookPath("nmcli"); err == nil {
-		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
-			dnsMethod = "nm"
-			util.LogInfo("tun: NetworkManager dns for %s set to %s", ifaceName, tunIP)
-			return nil
-		} else {
-			util.LogWarn("tun: nmcli dns failed, trying next method: %v: %s", err, out)
-		}
+	} else {
+		util.LogWarn("tun: D-Bus system bus connection failed: %v", err)
 	}
 
 	// Fallback: backup /etc/resolv.conf and rewrite
@@ -89,21 +109,28 @@ func restoreSystemDNS(ifaceName string) {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	switch dnsMethod {
 	case "resolved":
-		if out, err := exec.CommandContext(ctx, "resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
-			util.LogWarn("tun: restore resolved dns fail: %v: %s", err, out)
+		// Use D-Bus API to revert DNS
+		conn, err := dbus.SystemBus()
+		if err == nil {
+			resolved := conn.Object("org.freedesktop.resolve1", "/org/freedesktop/resolve1")
+			
+			// Get interface index
+			iface, err := net.InterfaceByName(ifaceName)
+			if err == nil {
+				// Call RevertLink(int32 index)
+				call := resolved.Call("org.freedesktop.resolve1.Manager.RevertLink", 0, int32(iface.Index))
+				if call.Err == nil {
+					util.LogInfo("tun: systemd-resolved dns for %s reverted via D-Bus", ifaceName)
+				} else {
+					util.LogWarn("tun: resolved D-Bus RevertLink fail: %v", call.Err)
+				}
+			} else {
+				util.LogWarn("tun: get interface %s index fail: %v", ifaceName, err)
+			}
 		} else {
-			util.LogInfo("tun: systemd-resolved dns for %s reverted", ifaceName)
-		}
-	case "nm":
-		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
-			util.LogWarn("tun: restore NetworkManager dns fail: %v: %s", err, out)
-		} else {
-			util.LogInfo("tun: NetworkManager dns for %s restored", ifaceName)
+			util.LogWarn("tun: D-Bus system bus connection fail: %v", err)
 		}
 	case "resolvconf":
 		if dnsBackupPath == "" {

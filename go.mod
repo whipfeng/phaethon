@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/apernet/hysteria/core/v2 v2.6.5
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/refraction-networking/utls v1.8.1

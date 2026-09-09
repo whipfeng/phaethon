@@ -16,12 +16,12 @@ import (
 
 var reverseUDPMu sync.Map
 
-// ReverseDialer obtains a connection from the reverse channel registry
-type ReverseDialer struct {
+// reverseRegistryDialer obtains a connection from the reverse channel registry
+type reverseRegistryDialer struct {
 	BaseDialer
 }
 
-func (d *ReverseDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+func (d *reverseRegistryDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	address := d.Proxy.ReverseAddress
 	if address == "" {
 		address = d.Proxy.Server
@@ -52,7 +52,7 @@ func (d *ReverseDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 //	Client -> [SOCKS5] -> Entry -> DialPacket.WriteTo(payload,target) -> encrypt -> chainConn -> ... -> Server
 //	Server -> ... -> chainConn -> decrypt -> ReadFrom returns (payload, target) -> [SOCKS5] -> Client
 //	Target reply -> targetConn.ReadFrom -> build frame -> encrypt -> chainConn -> ... -> Server -> client
-func (d *ReverseDialer) DialPacket() (net.PacketConn, error) {
+func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 	address := d.Proxy.ReverseAddress
 	if address == "" {
 		address = d.Proxy.Server

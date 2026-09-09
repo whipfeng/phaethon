@@ -19,7 +19,7 @@ type Socks5Dialer struct {
 func (d *Socks5Dialer) DialPacket() (net.PacketConn, error) {
 	// If this proxy is a reverse channel, use the reverse UDP tunnel
 	if d.Proxy.ReverseAddress != "" {
-		return (&ReverseDialer{BaseDialer: BaseDialer{Proxy: d.Proxy}}).DialPacket()
+		return (&reverseRegistryDialer{BaseDialer: BaseDialer{Proxy: d.Proxy}}).DialPacket()
 	}
 	return Socks5UDPAssociate(d.Proxy)
 }
@@ -53,9 +53,6 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	}
 
 	cmd := byte(0x01) // CONNECT
-	if dstPort == 0 {
-		cmd = 0x02 // BIND for reverse connections
-	}
 
 	// SOCKS5 handshake
 	if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, cmd, d.ConnIDStr()); err != nil {
@@ -92,6 +89,22 @@ func (d *Socks5Dialer) DialP2P() (net.Conn, error) {
 		return nil, fmt.Errorf("socks5: p2p connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortP2P, 0x02, d.ConnIDStr()); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// DialReverse establishes a reverse data connection through this SOCKS5 proxy.
+// It connects to proxy.Server:proxy.Port via the next hop,
+// then performs a SOCKS5 BIND with PORT=0 to match with a client's BIND.
+func (d *Socks5Dialer) DialReverse() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("socks5: reverse connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortData, 0x02, d.ConnIDStr()); err != nil {
 		conn.Close()
 		return nil, err
 	}

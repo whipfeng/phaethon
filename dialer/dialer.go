@@ -100,6 +100,13 @@ type P2PDialer interface {
 	DialP2P() (net.Conn, error)
 }
 
+// ReverseDialer establishes a reverse data connection.
+// The connection targets the proxy's own server using BIND PORT=0,
+// matching with a client's BIND on the proxy server.
+type ReverseDialer interface {
+	DialReverse() (net.Conn, error)
+}
+
 // BaseDialer holds fields and logic common to all proxy dialers.
 type BaseDialer struct {
 	Proxy     *config.Proxy
@@ -170,8 +177,6 @@ func NewDialer(proxy *config.Proxy) Dialer {
 		return &TrojanDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyH_TUNNEL:
 		return &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
-	case config.ProxyREVERSE:
-		return &ReverseDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyHYSTERIA2:
 		return &Hysteria2Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyVLESS:
@@ -261,7 +266,7 @@ func NewUDPDialer(proxy *config.Proxy) UDPDialer {
 		return &DirectDialer{}
 	}
 	if proxy.ReverseAddress != "" {
-		return &ReverseDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		return &reverseRegistryDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	}
 	switch strings.ToUpper(proxy.Type) {
 	case config.ProxyDIRECT:
@@ -278,8 +283,6 @@ func NewUDPDialer(proxy *config.Proxy) UDPDialer {
 		return &TrojanDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyHYSTERIA2:
 		return &Hysteria2Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
-	case config.ProxyREVERSE:
-		return &ReverseDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	default:
 		return &stubUDPDialer{name: proxy.Type}
 	}

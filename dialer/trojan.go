@@ -102,6 +102,27 @@ func (d *TrojanDialer) DialP2P() (net.Conn, error) {
 	return tlsConn, nil
 }
 
+// DialReverse establishes a reverse data connection through this Trojan proxy.
+// It connects to proxy.Server:proxy.Port via the next hop,
+// performs TLS handshake, then sends a Trojan BIND with PORT=0.
+func (d *TrojanDialer) DialReverse() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("trojan: reverse connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	tlsConn, err := d.TLSHandshake(rawConn)
+	if err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortData); err != nil {
+		tlsConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
 // DialPacket establishes a UDP tunnel through the Trojan proxy.
 func (d *TrojanDialer) DialPacket() (net.PacketConn, error) {
 	// Connect to the next hop
@@ -158,9 +179,6 @@ func (d *TrojanDialer) TLSHandshake(conn net.Conn) (*tls.Conn, error) {
 // Format: SHA224(password) + CRLF + CMD + ATYP + DST.ADDR + DST.PORT + CRLF
 func (d *TrojanDialer) sendTrojanRequest(conn net.Conn, dstAddr string, dstPort int) error {
 	cmd := byte(0x01) // CONNECT
-	if dstPort == 0 {
-		cmd = 0x02 // BIND for reverse connections
-	}
 	return d.SendTrojanRequestWithCmd(conn, cmd, dstAddr, dstPort)
 }
 

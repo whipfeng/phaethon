@@ -26,7 +26,6 @@ const (
 	ProxySOCKS5    = "SOCKS5"
 	ProxyH_TUNNEL  = "H_TUNNEL"
 	ProxyHYSTERIA2 = "HYSTERIA2"
-	ProxyREVERSE   = "REVERSE"
 	ProxyHTTP      = "HTTP"
 	ProxyHTTPS     = "HTTPS"
 	ProxyVLESS     = "VLESS"

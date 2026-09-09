@@ -92,11 +92,7 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return conn, nil
 	}
 
-	cmd := "CONN"
-	if dstPort == 0 {
-		cmd = "BIND" // for reverse connections
-	}
-	return d.dialHTunnel(cmd, dstAddr, dstPort)
+	return d.dialHTunnel("CONN", dstAddr, dstPort)
 }
 
 // dialHTunnel establishes an HTTP tunnel connection with the specified command.
@@ -198,6 +194,12 @@ func (d *HTunnelDialer) DialControl() (net.Conn, error) {
 // It connects to proxy.Server with BIND PORT=2.
 func (d *HTunnelDialer) DialP2P() (net.Conn, error) {
 	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortP2P)
+}
+
+// DialReverse establishes a reverse data connection through this HTunnel proxy.
+// It connects to proxy.Server with BIND PORT=0 to match with a client's BIND.
+func (d *HTunnelDialer) DialReverse() (net.Conn, error) {
+	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortData)
 }
 
 // htunnelConn implements net.Conn over HTTP tunnel

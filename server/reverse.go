@@ -151,7 +151,12 @@ func (s *ReverseServer) notifyNeedConn() {
 }
 
 func (s *ReverseServer) reverseConnect() (net.Conn, error) {
-	conn, err := dialer.ChainDial(s.proxy, s.address, 0)
+	d := dialer.NewDialer(s.proxy)
+	rd, ok := d.(dialer.ReverseDialer)
+	if !ok {
+		return nil, fmt.Errorf("reverse: proxy %s (%s) does not support DialReverse", s.proxy.Name, s.proxy.Type)
+	}
+	conn, err := rd.DialReverse()
 	if err != nil {
 		return nil, err
 	}

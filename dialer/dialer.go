@@ -93,10 +93,16 @@ type ControlDialer interface {
 	DialControl() (net.Conn, error)
 }
 
+// P2PDialer establishes a P2P connection to a peer.
+// Each proxy type that supports BIND implements this: the connection targets
+// the proxy's own server using protocol-specific handshake with PORT=2.
+type P2PDialer interface {
+	DialP2P() (net.Conn, error)
+}
+
 // BaseDialer holds fields and logic common to all proxy dialers.
 type BaseDialer struct {
 	Proxy     *config.Proxy
-	CmdType   byte   // 0=auto, 0x01=CONNECT, 0x02=BIND, 0x03=UDP_ASSOCIATE
 	ConnID    string // correlates inbound and outbound logs for the same connection
 	dialDepth int    // current chain depth for recursion guard
 }
@@ -114,23 +120,6 @@ func (d *BaseDialer) ConnIDStr() string {
 
 type connIDSetter interface {
 	SetConnID(string)
-}
-
-// ResolveCmd returns the command to use. If CmdType is explicitly set, use it;
-// otherwise auto-detect from dstPort (0 -> BIND).
-func (d *BaseDialer) ResolveCmd(dstPort int) byte {
-	if d.CmdType != 0 {
-		return d.CmdType
-	}
-	if dstPort == 0 {
-		return 0x02 // BIND
-	}
-	return 0x01 // CONNECT
-}
-
-// IsBind reports whether the resolved command is BIND (reverse).
-func (d *BaseDialer) IsBind(dstPort int) bool {
-	return d.ResolveCmd(dstPort) == 0x02
 }
 
 // TryReverse obtains a connection from the reverse registry if ReverseAddress is configured.

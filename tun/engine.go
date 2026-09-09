@@ -64,6 +64,11 @@ type Engine struct {
 
 	logMu sync.Mutex
 	logs  []string
+
+	// meshInterceptor diverts mesh-subnet packets before netstack.
+	// Returns true if the packet was handled.
+	meshInterceptor func(dstIP net.IP, data []byte) bool
+	localMeshVIP    net.IP
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -77,6 +82,95 @@ func NewEngine(ruleConf *config.RuleConfiguration) *Engine {
 // SetDataDir sets the runtime data directory for persistent storage (e.g. DHCP leases).
 func (e *Engine) SetDataDir(dir string) {
 	e.dataDir = dir
+}
+
+// SetMeshInterceptor registers a callback to intercept packets destined for the mesh subnet.
+// The callback returns true if it handled the packet (mesh will forward it).
+func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool, localVIP net.IP) {
+	e.meshInterceptor = handler
+	e.localMeshVIP = localVIP
+	util.LogInfo("tun: mesh interceptor set (localVIP=%s)", localVIP)
+}
+
+func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
+	return e.localMeshVIP != nil && e.localMeshVIP.Equal(ip)
+}
+
+// InjectMeshPacket injects a raw IP packet into the netstack as if received from the TUN device.
+// Used by the mesh module to deliver received overlay packets to the local TCP/IP stack.
+func (e *Engine) InjectMeshPacket(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var proto tcpip.NetworkProtocolNumber
+	switch data[0] >> 4 {
+	case 4:
+		proto = ipv4.ProtocolNumber
+	case 6:
+		proto = ipv6.ProtocolNumber
+	default:
+		return fmt.Errorf("non-IP packet version=%d", data[0]>>4)
+	}
+	if len(data) >= 20 {
+		srcIP := net.IP(data[12:16])
+		dstIP := net.IP(data[16:20])
+		util.LogDebug("tun: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
+	}
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(data),
+	})
+	e.linkEP.InjectInbound(proto, pkt)
+	pkt.DecRef()
+	return nil
+}
+
+// WriteMeshPacket writes a raw IP packet directly to the TUN device so the OS
+// kernel receives it as an incoming packet from the adapter.
+func (e *Engine) WriteMeshPacket(data []byte) error {
+	if e.device == nil {
+		return fmt.Errorf("TUN device not initialized")
+	}
+	if len(data) >= 20 {
+		srcIP := net.IP(data[12:16])
+		dstIP := net.IP(data[16:20])
+		util.LogDebug("tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
+	}
+	_, err := e.device.Write(data)
+	return err
+}
+
+// AddMeshRoute adds a route for the mesh subnet through the TUN device.
+// This is called when mesh is enabled to ensure mesh-destined packets reach the TUN.
+func (e *Engine) AddMeshRoute(subnet string) error {
+	return e.addMeshRoute(subnet)
+}
+
+// AddMeshVIP registers a mesh virtual IP with the gVisor netstack so it responds
+// to packets (e.g., ICMP) destined for that IP.
+func (e *Engine) AddMeshVIP(vip net.IP) error {
+	if e.ns == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+	vip4 := vip.To4()
+	if vip4 == nil {
+		return fmt.Errorf("only IPv4 mesh VIP supported")
+	}
+	ap := tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4([4]byte(vip4)), PrefixLen: 32}
+	protoAddr := tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: ap,
+	}
+	if err := e.ns.AddProtocolAddress(tunNICID, protoAddr, stack.AddressProperties{}); err != nil {
+		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
+	}
+	util.LogInfo("tun: registered mesh VIP %s with netstack", vip)
+	return nil
+}
+
+// AddMeshVIPToOS adds the mesh VIP to the OS-level TUN interface so the kernel
+// recognizes it as a local address and generates protocol responses (e.g. ICMP).
+func (e *Engine) AddMeshVIPToOS(vip net.IP) error {
+	return e.addMeshVIPToOS(vip)
 }
 
 // resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
@@ -654,6 +748,21 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// Mesh interception: divert 100.64.0.0/16 packets before netstack.
+		// Outbound packets (to remote mesh VIPs) are sent via mesh by HandleOutboundPacket.
+		// Inbound packets (from remote mesh nodes to local VIP) are also handled by HandleOutboundPacket
+		// which injects them into the netstack.
+		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
+			dstIP := net.IP(readBuf[16:20])
+			if dstIP[0] == 100 && dstIP[1] == 64 {
+				pktBuf := make([]byte, n)
+				copy(pktBuf, readBuf[:n])
+				if e.meshInterceptor(dstIP, pktBuf) {
+					continue
+				}
+			}
+		}
+
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
@@ -705,6 +814,24 @@ func (e *Engine) writeLoop() {
 				util.LogInfo("tun write FAKE: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
 			} else if e.writePackets.Load() <= 200 {
 				util.LogInfo("tun write: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
+			}
+		}
+
+		// Mesh interception: route 100.64.0.0/16 packets destined for REMOTE mesh nodes via mesh.
+		// Skip packets destined for our own mesh VIP — those are replies from netstack
+		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
+		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+			pktDst := net.IP(data[16:20])
+			if pktDst[0] == 100 && pktDst[1] == 64 {
+				isLocal := e.isLocalMeshVIP(pktDst)
+				if !isLocal {
+					pktBuf := make([]byte, len(data))
+					copy(pktBuf, data)
+					if e.meshInterceptor(pktDst, pktBuf) {
+						pkt.DecRef()
+						continue
+					}
+				}
 			}
 		}
 

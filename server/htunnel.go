@@ -452,8 +452,13 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 				connOk = true
 				return
 			}
+			if port == reverse.BindPortP2P {
+				handleP2PConnection(newHTunnelServerConn(ch, s), address)
+				connOk = true
+				return
+			}
 			if port != reverse.BindPortData {
-				util.LogInfo("[HTUNNEL-SVR] [%s] reverse rejected: invalid port %d (only 0 or 1 allowed)", s.Mapping.Name, port)
+				util.LogInfo("[HTUNNEL-SVR] [%s] reverse rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, port)
 				return
 			}
 			if !s.RuleConf.HasReverseAddress(address) {

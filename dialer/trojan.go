@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -73,7 +74,28 @@ func (d *TrojanDialer) DialControl() (net.Conn, error) {
 		rawConn.Close()
 		return nil, err
 	}
-	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, 1); err != nil {
+	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortControl); err != nil {
+		tlsConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+// DialP2P establishes a P2P connection through this Trojan proxy.
+// It connects to proxy.Server:proxy.Port via the next hop,
+// performs TLS handshake, then sends a Trojan BIND with PORT=2.
+func (d *TrojanDialer) DialP2P() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("trojan: p2p connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	tlsConn, err := d.TLSHandshake(rawConn)
+	if err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortP2P); err != nil {
 		tlsConn.Close()
 		return nil, err
 	}
@@ -135,7 +157,7 @@ func (d *TrojanDialer) TLSHandshake(conn net.Conn) (*tls.Conn, error) {
 // sendTrojanRequest writes the Trojan request to the connection.
 // Format: SHA224(password) + CRLF + CMD + ATYP + DST.ADDR + DST.PORT + CRLF
 func (d *TrojanDialer) sendTrojanRequest(conn net.Conn, dstAddr string, dstPort int) error {
-	cmd := d.ResolveCmd(dstPort)
+	cmd := byte(0x01) // CONNECT
 	return d.SendTrojanRequestWithCmd(conn, cmd, dstAddr, dstPort)
 }
 

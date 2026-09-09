@@ -114,8 +114,14 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 			shouldClose = false
 			return
 		}
+		if dstPort == reverse.BindPortP2P {
+			// P2P connection: PORT=2 means this is a P2P channel
+			handleP2PConnection(clientConn, dstAddr)
+			shouldClose = false
+			return
+		}
 		if dstPort != reverse.BindPortData {
-			util.LogInfo("[TROJAN-SVR] [%s] BIND rejected: invalid port %d (only 0 or 1 allowed)", s.Mapping.Name, dstPort)
+			util.LogInfo("[TROJAN-SVR] [%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
 			return
 		}
 		// Data connection: PORT=0 only, goes to Registry

@@ -3,9 +3,11 @@
 package tun
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os/exec"
 	"strings"
 	"time"
 	"unsafe"
@@ -519,3 +521,47 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 }
 
 
+
+// addMeshRoute adds a route for the mesh subnet through the TUN device.
+func (e *Engine) addMeshRoute(subnet string) error {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return fmt.Errorf("invalid mesh subnet %s: %w", subnet, err)
+	}
+
+	luid := e.routeMgr.tunLUID
+	index := uint32(e.routeMgr.tunIndex)
+
+	var fwdRow mibIpForwardRow2
+	fwdRow.init()
+	fwdRow.setInterfaceLuid(luid)
+	fwdRow.setInterfaceIndex(index)
+	fwdRow.setDestinationPrefix(ipNet.IP, uint8(prefixLenFromMask(ipNet.Mask)))
+	fwdRow.setNextHop(net.IPv4zero)
+	fwdRow.setMetric(1)
+
+	ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+	if ret != 0 {
+		return fmt.Errorf("add mesh route %s failed: 0x%x", subnet, ret)
+	}
+	util.LogInfo("tun: mesh route %s -> on-link (luid=%x idx=%d)", subnet, luid, index)
+	return nil
+}
+
+// addMeshVIPToOS adds the mesh VIP to the OS TUN interface on Windows.
+func (e *Engine) addMeshVIPToOS(vip net.IP) error {
+	vip4 := vip.To4()
+	if vip4 == nil {
+		return fmt.Errorf("only IPv4 mesh VIP supported")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "netsh", "interface", "ip", "add", "address",
+		e.routeMgr.devName, vip4.String(), "255.255.255.255").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("netsh add mesh VIP %s: %v, %s", vip, err, out)
+	}
+	util.LogInfo("tun: mesh VIP %s added to %s", vip, e.routeMgr.devName)
+	return nil
+}

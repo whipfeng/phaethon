@@ -52,7 +52,7 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, fmt.Errorf("socks5: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 
-	cmd := d.ResolveCmd(dstPort)
+	cmd := byte(0x01) // CONNECT
 
 	// SOCKS5 handshake
 	if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, cmd, d.ConnIDStr()); err != nil {
@@ -73,6 +73,22 @@ func (d *Socks5Dialer) DialControl() (net.Conn, error) {
 		return nil, fmt.Errorf("socks5: control connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortControl, 0x02, d.ConnIDStr()); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// DialP2P establishes a P2P connection through this SOCKS5 proxy.
+// It connects to proxy.Server:proxy.Port via the next hop,
+// then performs a SOCKS5 BIND with PORT=2 to mark it as a P2P channel.
+func (d *Socks5Dialer) DialP2P() (net.Conn, error) {
+	nextDialer := NewDialer(d.Proxy.Next)
+	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	if err != nil {
+		return nil, fmt.Errorf("socks5: p2p connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
+	}
+	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortP2P, 0x02, d.ConnIDStr()); err != nil {
 		conn.Close()
 		return nil, err
 	}

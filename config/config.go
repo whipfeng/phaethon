@@ -1190,6 +1190,9 @@ type RuleConfiguration struct {
 	// TUN traffic interception configuration.
 	TUN *TUNConfig `yaml:"tun,omitempty"`
 
+	// Mesh overlay network configuration.
+	Mesh *MeshConfig `yaml:"mesh,omitempty"`
+
 	// Initialized fields
 	ProxyNames        map[string]*Proxy        `yaml:"-"`
 	GroupNames        map[string]*ProxyGroup   `yaml:"-"`
@@ -1328,6 +1331,21 @@ func (t *TUNConfig) DirectNameserverList() []string {
 		return nil
 	}
 	return t.DirectNameserver
+}
+
+// MeshConfig holds mesh overlay network settings.
+type MeshConfig struct {
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	VIP     string `yaml:"vip,omitempty" json:"vip,omitempty"`
+	NodeID  string `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+}
+
+// IsEnabled reports whether mesh networking is enabled.
+func (m *MeshConfig) IsEnabled() bool {
+	if m == nil || m.Enabled == nil {
+		return false
+	}
+	return *m.Enabled
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

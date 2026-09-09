@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,8 @@ import (
 	"phaethon/admin"
 	"phaethon/config"
 	"phaethon/dialer"
+	"phaethon/mesh"
+	"phaethon/p2p"
 	"phaethon/reverse"
 	"phaethon/server"
 	"phaethon/tun"
@@ -57,6 +60,7 @@ type activeResources struct {
 	reverseClientStops map[string]chan struct{}        // per-config stop channels
 	reverseClientWG   sync.WaitGroup
 	tunRes            *TUNResource
+	meshMgr           *mesh.MeshManager
 	adminServer       *admin.AdminServer
 	once              sync.Once
 }
@@ -78,6 +82,9 @@ func (r *activeResources) closeAll() {
 		if r.reverseClientStop != nil {
 			close(r.reverseClientStop)
 			r.reverseClientWG.Wait()
+		}
+		if r.meshMgr != nil {
+			r.meshMgr.Stop()
 		}
 		if r.tunRes != nil {
 			r.tunRes.Stop()
@@ -215,6 +222,44 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	server.GlobalControlManager = server.NewControlManager(ruleConf, dataDir)
 	util.Logger.Printf("ControlManager initialized")
 
+	// Initialize P2P manager
+	p2pCache, err := p2p.NewBinaryCache(dataDir)
+	if err != nil {
+		util.Logger.Printf("P2P cache init failed: %v", err)
+	} else {
+		if err := p2pCache.SeedOwnBinary(Version, runtime.GOOS, runtime.GOARCH, p2p.DetectBuildTag()); err != nil {
+			util.Logger.Printf("P2P seed own binary failed: %v", err)
+		}
+		p2p.CleanupBackup()
+	}
+	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
+	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, runtime.GOOS, runtime.GOARCH)
+
+	// Initialize mesh overlay network if enabled
+	var meshMgr *mesh.MeshManager
+	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
+		_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
+		meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
+		if meshVIP != nil && ruleConf.Mesh.NodeID != "" {
+			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, meshVIP, meshSubnet)
+			mesh.GlobalMeshManager = meshMgr
+			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP)
+			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s", ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP)
+		} else {
+			util.Logger.Printf("Mesh config incomplete: need node-id and vip")
+		}
+	}
+
+	// Start P2P peers for supported proxy types
+	for _, proxy := range ruleConf.Proxies {
+		if proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel" {
+			if proxy.Server != "" {
+				go p2p.GlobalP2PManager.StartPeer(proxy)
+			}
+		}
+	}
+
 	res := &activeResources{
 		ruleConf:           ruleConf,
 		mappingListeners:   make(map[string]net.Listener),
@@ -224,6 +269,33 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 	// Start TUN engine if enabled (intercepts system-level traffic)
 	res.tunRes = startTUNIfEnabled(ruleConf)
+
+	// Wire mesh to TUN engine if both are enabled
+	if meshMgr != nil && res.tunRes != nil && res.tunRes.engine != nil {
+		res.tunRes.engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, net.ParseIP(ruleConf.Mesh.VIP))
+		meshMgr.Start(res.tunRes.engine, p2p.GlobalP2PManager)
+		res.meshMgr = meshMgr
+		// NOTE: Do NOT add 100.64.0.0/16 route — split-tunnel routes already cover it,
+		// and adding an explicit route on a P2P TUN device creates a local route for
+		// the entire /16, breaking mesh forwarding.
+		// Register mesh VIP with netstack so it responds to packets (e.g., ICMP)
+		if ruleConf.Mesh != nil && ruleConf.Mesh.VIP != "" {
+			meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
+			if err := res.tunRes.engine.AddMeshVIP(meshVIP); err != nil {
+				util.LogWarn("failed to add mesh VIP: %v", err)
+			}
+			// Add mesh VIP (/32) to OS so kernel recognizes it as local and generates
+			// ICMP replies natively. Do NOT add a 100.64.0.0/16 route — on a P2P TUN
+			// device that causes the kernel to create a local route for the entire /16,
+			// making all mesh traffic appear local instead of going through the mesh.
+			go func() {
+				time.Sleep(5 * time.Second)
+				if err := res.tunRes.engine.AddMeshVIPToOS(meshVIP); err != nil {
+					util.LogWarn("failed to add mesh VIP to OS: %v", err)
+				}
+			}()
+		}
+	}
 
 	// Group trojan mappings by port for SNI routing (non-reverse only)
 	trojanPortGroups := make(map[int][]*config.Mapping)
@@ -545,6 +617,9 @@ func main() {
 	// Extract Java-style -Dkey=value arguments up front so they do not confuse
 	// the standard flag parser, while remaining available via util.JavaProp().
 	os.Args = util.SetJavaProps(os.Args)
+
+	// Handle --cleanup-pid for self-update: wait for old watchdog, clean up .bak
+	handleCleanupPid()
 
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		fmt.Println(Version)
@@ -916,7 +991,14 @@ func runWatchdogMode() {
 		select {
 		case <-monitorTicker.C:
 			if !processExists(pid) {
-				reapChild(pid)
+				exitCode, reaped := reapChild(pid)
+				// Check for self-update request (exit code 42)
+				if reaped && exitCode == 42 {
+					util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
+					spawnNewWatchdogAndExit(os.Getpid())
+					signal.Stop(sigCh)
+					return
+				}
 				if wasStoppedGracefully() {
 					util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
 					removeStoppedMarker()
@@ -959,6 +1041,87 @@ func runWatchdogMode() {
 			}
 		}
 	}
+}
+
+// spawnNewWatchdogAndExit spawns a new watchdog process and exits the current one.
+// The new watchdog receives --cleanup-pid to wait for the old watchdog to exit
+// before cleaning up .bak files.
+func spawnNewWatchdogAndExit(myPid int) {
+	exe, err := os.Executable()
+	if err != nil {
+		util.LogError("watchdog: self-update: get executable path: %v", err)
+		return
+	}
+
+	// Build env without PHAETHON_WORKER — new process is a watchdog, not a worker
+	env := removeEnvVar(os.Environ(), "PHAETHON_WORKER")
+
+	attr := &os.ProcAttr{
+		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+		Env:   env,
+	}
+	args := []string{exe, fmt.Sprintf("--cleanup-pid=%d", myPid)}
+	proc, err := os.StartProcess(exe, args, attr)
+	if err != nil {
+		util.LogError("watchdog: self-update: failed to spawn new watchdog: %v", err)
+		return
+	}
+	util.LogInfo("watchdog: self-update: spawned new watchdog pid=%d, exiting", proc.Pid)
+	proc.Release()
+	os.Exit(0)
+}
+
+// removeEnvVar removes an environment variable from a slice.
+func removeEnvVar(env []string, key string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// handleCleanupPid checks for --cleanup-pid argument and runs cleanup in background.
+func handleCleanupPid() {
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--cleanup-pid=") {
+			pidStr := strings.TrimPrefix(arg, "--cleanup-pid=")
+			cleanupPid, err := strconv.Atoi(pidStr)
+			if err != nil {
+				util.LogDebug("cleanup: invalid --cleanup-pid value: %s", pidStr)
+				return
+			}
+			go cleanupAfterUpdate(cleanupPid)
+			return
+		}
+	}
+}
+
+// cleanupAfterUpdate waits for the old watchdog to exit, then cleans up .bak files.
+func cleanupAfterUpdate(oldWatchdogPid int) {
+	util.LogInfo("cleanup: waiting for old watchdog pid=%d to exit", oldWatchdogPid)
+	if waitForProcessExit(oldWatchdogPid, 30*time.Second) {
+		util.LogInfo("cleanup: old watchdog exited")
+	} else {
+		util.LogWarn("cleanup: old watchdog pid=%d did not exit within 30s", oldWatchdogPid)
+	}
+
+	// Clean up .bak next to the executable
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	bakPath := exe + ".bak"
+	if err := os.Remove(bakPath); err != nil && !os.IsNotExist(err) {
+		util.LogDebug("cleanup: remove %s: %v", bakPath, err)
+	} else if err == nil {
+		util.LogInfo("cleanup: removed %s", bakPath)
+	}
+
+	// Also clean up any .bak from the P2P cache self-update
+	p2p.CleanupBackup()
 }
 
 // buildWorkerEnv builds the environment for the server child process.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -91,6 +92,11 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return conn, nil
 	}
 
+	return d.dialHTunnel("CONN", dstAddr, dstPort)
+}
+
+// dialHTunnel establishes an HTTP tunnel connection with the specified command.
+func (d *HTunnelDialer) dialHTunnel(cmd string, dstAddr string, dstPort int) (net.Conn, error) {
 	proxy := d.Proxy
 	crypto := util.NewHTunnelCrypto(proxy.Password)
 
@@ -98,11 +104,6 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	encPort := crypto.SealHeader(strconv.Itoa(dstPort))
 
 	connSeq := 0
-
-	cmd := "CONN"
-	if d.IsBind(dstPort) {
-		cmd = "BIND"
-	}
 
 	// Step 1: Request connection ID (URL format matches Java: url + "//" + connSeq)
 	req, _ := http.NewRequest("HEAD", fmt.Sprintf("%s//%d", proxy.URL, connSeq), nil)
@@ -166,7 +167,7 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, fmt.Errorf("htunnel: ack connect status: %d", resp.StatusCode)
 	}
 
-	util.LogDebug("[HTUNNEL-CLI] [%s] [%s] Connecting %s:%d via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), dstAddr, dstPort, proxy.URL, connectionID)
+	util.LogDebug("[HTUNNEL-CLI] [%s] [%s] Connecting %s:%d via %s (connectionID=%s, cmd=%s)", proxy.Name, d.ConnIDStr(), dstAddr, dstPort, proxy.URL, connectionID, cmd)
 
 	conn := &htunnelConn{
 		proxy:        proxy,
@@ -184,9 +185,15 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 }
 
 // DialControl establishes a control connection to the registry through this HTunnel proxy.
-// The proxy server IS the registry: it delegates to Dial with the proxy's own server and PORT=1.
+// The proxy server IS the registry: it connects to proxy.Server with BIND PORT=1.
 func (d *HTunnelDialer) DialControl() (net.Conn, error) {
-	return d.Dial(d.Proxy.Server, 1)
+	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortControl)
+}
+
+// DialP2P establishes a P2P connection through this HTunnel proxy.
+// It connects to proxy.Server with BIND PORT=2.
+func (d *HTunnelDialer) DialP2P() (net.Conn, error) {
+	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortP2P)
 }
 
 // htunnelConn implements net.Conn over HTTP tunnel

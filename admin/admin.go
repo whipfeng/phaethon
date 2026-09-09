@@ -28,6 +28,8 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/mesh"
+	"phaethon/p2p"
 	"phaethon/reverse"
 	"phaethon/server"
 	"phaethon/tun"
@@ -865,6 +867,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reverse/bindings", s.apiReverseBindings)
 	mux.HandleFunc("/api/reverse/bindings/", s.apiReverseBindings)
 	mux.HandleFunc("/api/reverse/", s.apiReverseItem)
+	mux.HandleFunc("/api/p2p", s.apiP2P)
+	mux.HandleFunc("/api/mesh", s.apiMesh)
 	mux.HandleFunc("/api/tun", s.apiTUN)
 	mux.HandleFunc("/api/events", s.apiEvents)
 	mux.HandleFunc("/api/versions", s.apiVersions)
@@ -3839,6 +3843,34 @@ func (s *AdminServer) apiReverseBindings(w http.ResponseWriter, r *http.Request)
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p2p.GlobalP2PManager == nil {
+		jsonResponse(w, map[string]interface{}{"peers": []interface{}{}})
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"peers": p2p.GlobalP2PManager.GetPeers()})
+}
+
+func (s *AdminServer) apiMesh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if mesh.GlobalMeshManager == nil {
+		jsonResponse(w, map[string]interface{}{"enabled": false})
+		return
+	}
+	result := mesh.GlobalMeshManager.GetStatus()
+	result["topology"] = mesh.GlobalMeshManager.GetTopology()
+	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
+	result["peers"] = mesh.GlobalMeshManager.GetPeers()
+	jsonResponse(w, result)
 }
 
 func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {

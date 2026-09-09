@@ -68,19 +68,15 @@ func TestHTunnelDialer_Dial_ConnectTimeout(t *testing.T) {
 	}
 }
 
-// TestHTunnelDialer_ExplicitBind verifies CmdType 0x02 produces BIND command.
-func TestHTunnelDialer_ExplicitBind(t *testing.T) {
+// TestHTunnelDialer_DialUsesConn verifies Dial() always uses CONN command.
+func TestHTunnelDialer_DialUsesConn(t *testing.T) {
 	var capturedCmd string
-	var capturedHost string
-	var capturedPort string
 
 	headCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "HEAD" {
 			if headCount == 0 {
 				capturedCmd = r.Header.Get(headerCommand)
-				capturedHost = r.Header.Get(headerTargetHost)
-				capturedPort = r.Header.Get(headerTargetPort)
 				w.Header().Set(headerConnectionID, "test-id")
 			}
 			w.WriteHeader(200)
@@ -91,14 +87,12 @@ func TestHTunnelDialer_ExplicitBind(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Test BIND
 	d := HTunnelDialer{
 		BaseDialer: BaseDialer{
 			Proxy: &config.Proxy{
 				URL:      srv.URL + "/",
 				Password: "testpass",
 			},
-			CmdType: 0x02, // BIND
 		},
 	}
 
@@ -108,59 +102,8 @@ func TestHTunnelDialer_ExplicitBind(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if capturedCmd != "BIND" {
-		t.Errorf("expected BIND command, got: %s", capturedCmd)
-	}
-	// AEAD uses random nonces, so decrypt and compare plaintext
-	crypto := util.NewHTunnelCrypto("testpass")
-	host, err := crypto.OpenHeader(capturedHost)
-	if err != nil {
-		t.Fatalf("open header host: %v", err)
-	}
-	if host != "example.com" {
-		t.Errorf("host mismatch: expected example.com, got %s", host)
-	}
-	port, err := crypto.OpenHeader(capturedPort)
-	if err != nil {
-		t.Fatalf("open header port: %v", err)
-	}
-	if port != "8080" {
-		t.Errorf("port mismatch: expected 8080, got %s", port)
-	}
-
-	// Test CONN (new mock server to reset headCount)
-	headCount2 := 0
-	var capturedCmd2 string
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "HEAD" {
-			if headCount2 == 0 {
-				capturedCmd2 = r.Header.Get(headerCommand)
-				w.Header().Set(headerConnectionID, "test-id-2")
-			}
-			w.WriteHeader(200)
-			headCount2++
-			return
-		}
-		w.WriteHeader(200)
-	}))
-	defer srv2.Close()
-
-	d2 := HTunnelDialer{
-		BaseDialer: BaseDialer{
-			Proxy: &config.Proxy{
-				URL:      srv2.URL + "/",
-				Password: "testpass",
-			},
-			CmdType: 0x01, // CONN
-		},
-	}
-	conn2, err := d2.Dial("example.com", 8080)
-	if err != nil {
-		t.Fatalf("dial error for CONN: %v", err)
-	}
-	defer conn2.Close()
-	if capturedCmd2 != "CONN" {
-		t.Errorf("expected CONN command, got: %s", capturedCmd2)
+	if capturedCmd != "CONN" {
+		t.Errorf("expected CONN command, got: %s", capturedCmd)
 	}
 }
 

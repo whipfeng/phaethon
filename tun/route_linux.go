@@ -371,3 +371,56 @@ func saveTUNState(ifaceName string, rpFilter, ipForward int) {
 		util.LogInfo("tun: saved state to %s: iface=%s rp_filter=%d ip_forward=%d", tunStateFile, ifaceName, rpFilter, ipForward)
 	}
 }
+
+// addMeshRoute adds a route for the mesh subnet through the TUN device.
+func (e *Engine) addMeshRoute(subnet string) error {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return fmt.Errorf("invalid mesh subnet %s: %w", subnet, err)
+	}
+
+	link, err := netlink.LinkByName(e.routeMgr.devName)
+	if err != nil {
+		return fmt.Errorf("link by name %s: %w", e.routeMgr.devName, err)
+	}
+
+	rt := &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       ipNet,
+		Scope:     syscall.RT_SCOPE_UNIVERSE,
+		Type:      syscall.RTN_UNICAST,
+		Flags:     syscall.RTNH_F_ONLINK,
+	}
+	if err := netlink.RouteAdd(rt); err != nil {
+		return fmt.Errorf("add mesh route %s: %w", subnet, err)
+	}
+	util.LogInfo("tun: mesh route %s -> %s (idx=%d)", subnet, e.routeMgr.devName, link.Attrs().Index)
+	return nil
+}
+
+// addMeshVIPToOS adds the mesh VIP to the OS TUN interface on Linux.
+func (e *Engine) addMeshVIPToOS(vip net.IP) error {
+	vip4 := vip.To4()
+	if vip4 == nil {
+		return fmt.Errorf("only IPv4 mesh VIP supported")
+	}
+
+	link, err := netlink.LinkByName(e.routeMgr.devName)
+	if err != nil {
+		return fmt.Errorf("link by name %s: %w", e.routeMgr.devName, err)
+	}
+
+	addr := &netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   vip4,
+			Mask: net.CIDRMask(32, 32),
+		},
+	}
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		if !isExist(err) {
+			return fmt.Errorf("add mesh VIP %s to %s: %w", vip, e.routeMgr.devName, err)
+		}
+	}
+	util.LogInfo("tun: mesh VIP %s added to %s", vip, e.routeMgr.devName)
+	return nil
+}

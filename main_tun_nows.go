@@ -31,11 +31,31 @@ func processExists(pid int) bool {
 	return err == nil
 }
 
-// reapChild reaps a zombie child process. The watchdog becomes the parent of
-// the server process, so it must wait on it to avoid zombies.
-func reapChild(pid int) {
+// reapChild reaps a zombie child process and returns its exit code.
+// The watchdog becomes the parent of the server process, so it must
+// wait on it to avoid zombies.
+func reapChild(pid int) (exitCode int, ok bool) {
 	var ws syscall.WaitStatus
-	_, _ = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+	_, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+	if err != nil {
+		return 0, false
+	}
+	if ws.Exited() {
+		return ws.ExitStatus(), true
+	}
+	return 0, false
+}
+
+// waitForProcessExit waits for a process to exit by polling.
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !processExists(pid) {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return !processExists(pid)
 }
 
 // reexecAsWatchdog copies the current binary to a "-watchdog" suffixed name

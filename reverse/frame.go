@@ -18,6 +18,7 @@ const (
 	FramePeng       byte = 0x03 // PENG: registration confirmed (empty payload)
 	FrameUDPChannel byte = 0x04 // UDP_CHANNEL: UDP tunnel command (variable payload)
 	FrameData       byte = 0x05 // DATA: raw application-layer data
+	FrameMeshPacket byte = 0x06 // MESH_PACKET: mesh overlay IP packet
 )
 
 // MaxPayload is the maximum frame payload size (16-bit length field).

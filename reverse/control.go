@@ -37,4 +37,8 @@ const (
 
 	// BindPortData is the default DST.PORT value (0) indicating a data connection.
 	BindPortData = 0
+
+	// BindPortP2P is the DST.PORT value used in SOCKS5/Trojan BIND
+	// to indicate this connection is a P2P channel.
+	BindPortP2P = 2
 )

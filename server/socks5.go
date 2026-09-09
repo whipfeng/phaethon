@@ -155,8 +155,15 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 			shouldClose = false
 			return
 		}
+		if dstPort == reverse.BindPortP2P {
+			// P2P connection: PORT=2 means this is a P2P channel
+			sendSocks5Response(clientConn, 0x00) // success
+			handleP2PConnection(clientConn, dstAddr)
+			shouldClose = false
+			return
+		}
 		if dstPort != reverse.BindPortData {
-			util.LogInfo("[SOCKS5-SVR] [%s] BIND rejected: invalid port %d (only 0 or 1 allowed)", s.Mapping.Name, dstPort)
+			util.LogInfo("[SOCKS5-SVR] [%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
 			sendSocks5Response(clientConn, 0x05) // connection refused
 			return
 		}

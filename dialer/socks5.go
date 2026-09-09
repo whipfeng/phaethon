@@ -53,6 +53,9 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	}
 
 	cmd := byte(0x01) // CONNECT
+	if dstPort == 0 {
+		cmd = 0x02 // BIND for reverse connections
+	}
 
 	// SOCKS5 handshake
 	if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, cmd, d.ConnIDStr()); err != nil {

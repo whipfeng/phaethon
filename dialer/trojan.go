@@ -158,6 +158,9 @@ func (d *TrojanDialer) TLSHandshake(conn net.Conn) (*tls.Conn, error) {
 // Format: SHA224(password) + CRLF + CMD + ATYP + DST.ADDR + DST.PORT + CRLF
 func (d *TrojanDialer) sendTrojanRequest(conn net.Conn, dstAddr string, dstPort int) error {
 	cmd := byte(0x01) // CONNECT
+	if dstPort == 0 {
+		cmd = 0x02 // BIND for reverse connections
+	}
 	return d.SendTrojanRequestWithCmd(conn, cmd, dstAddr, dstPort)
 }
 

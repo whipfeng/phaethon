@@ -92,7 +92,11 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return conn, nil
 	}
 
-	return d.dialHTunnel("CONN", dstAddr, dstPort)
+	cmd := "CONN"
+	if dstPort == 0 {
+		cmd = "BIND" // for reverse connections
+	}
+	return d.dialHTunnel(cmd, dstAddr, dstPort)
 }
 
 // dialHTunnel establishes an HTTP tunnel connection with the specified command.

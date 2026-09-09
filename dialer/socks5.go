@@ -98,13 +98,14 @@ func (d *Socks5Dialer) DialP2P() (net.Conn, error) {
 // DialReverse establishes a reverse data connection through this SOCKS5 proxy.
 // It connects to proxy.Server:proxy.Port via the next hop,
 // then performs a SOCKS5 BIND with PORT=0 to match with a client's BIND.
-func (d *Socks5Dialer) DialReverse() (net.Conn, error) {
+// dstAddr is the reverse address sent in the BIND request for server validation.
+func (d *Socks5Dialer) DialReverse(dstAddr string) (net.Conn, error) {
 	nextDialer := NewDialer(d.Proxy.Next)
 	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("socks5: reverse connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
-	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortData, 0x02, d.ConnIDStr()); err != nil {
+	if err := socks5Handshake(conn, d.Proxy, dstAddr, reverse.BindPortData, 0x02, d.ConnIDStr()); err != nil {
 		conn.Close()
 		return nil, err
 	}

@@ -105,7 +105,8 @@ func (d *TrojanDialer) DialP2P() (net.Conn, error) {
 // DialReverse establishes a reverse data connection through this Trojan proxy.
 // It connects to proxy.Server:proxy.Port via the next hop,
 // performs TLS handshake, then sends a Trojan BIND with PORT=0.
-func (d *TrojanDialer) DialReverse() (net.Conn, error) {
+// dstAddr is the reverse address sent in the BIND request for server validation.
+func (d *TrojanDialer) DialReverse(dstAddr string) (net.Conn, error) {
 	nextDialer := NewDialer(d.Proxy.Next)
 	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
@@ -116,7 +117,7 @@ func (d *TrojanDialer) DialReverse() (net.Conn, error) {
 		rawConn.Close()
 		return nil, err
 	}
-	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortData); err != nil {
+	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, dstAddr, reverse.BindPortData); err != nil {
 		tlsConn.Close()
 		return nil, err
 	}

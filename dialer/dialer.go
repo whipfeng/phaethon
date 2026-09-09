@@ -103,8 +103,10 @@ type P2PDialer interface {
 // ReverseDialer establishes a reverse data connection.
 // The connection targets the proxy's own server using BIND PORT=0,
 // matching with a client's BIND on the proxy server.
+// dstAddr is the reverse address (e.g. dynamic address) sent in the BIND
+// request — the server validates it against known reverse/dynamic addresses.
 type ReverseDialer interface {
-	DialReverse() (net.Conn, error)
+	DialReverse(dstAddr string) (net.Conn, error)
 }
 
 // BaseDialer holds fields and logic common to all proxy dialers.

@@ -156,7 +156,7 @@ func (s *ReverseServer) reverseConnect() (net.Conn, error) {
 	if !ok {
 		return nil, fmt.Errorf("reverse: proxy %s (%s) does not support DialReverse", s.proxy.Name, s.proxy.Type)
 	}
-	conn, err := rd.DialReverse()
+	conn, err := rd.DialReverse(s.address)
 	if err != nil {
 		return nil, err
 	}

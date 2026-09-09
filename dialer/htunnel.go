@@ -198,8 +198,9 @@ func (d *HTunnelDialer) DialP2P() (net.Conn, error) {
 
 // DialReverse establishes a reverse data connection through this HTunnel proxy.
 // It connects to proxy.Server with BIND PORT=0 to match with a client's BIND.
-func (d *HTunnelDialer) DialReverse() (net.Conn, error) {
-	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortData)
+// dstAddr is the reverse address sent in the BIND request for server validation.
+func (d *HTunnelDialer) DialReverse(dstAddr string) (net.Conn, error) {
+	return d.dialHTunnel("BIND", dstAddr, reverse.BindPortData)
 }
 
 // htunnelConn implements net.Conn over HTTP tunnel

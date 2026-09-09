@@ -18,6 +18,7 @@ type TopoNode struct {
 	NodeID   string
 	VIP      net.IP
 	Links    map[string]*TopoLink // peerNodeID → link
+	Routes   []RouteInfo          // advertised prefix routes
 	LastSeen time.Time
 }
 
@@ -30,15 +31,23 @@ type TopoLink struct {
 
 // TopologyInfo is the gossip payload exchanged between nodes.
 type TopologyInfo struct {
-	NodeID string     `json:"nodeId"`
-	VIP    string     `json:"vip"`
-	Links  []LinkInfo `json:"links"`
+	NodeID string      `json:"nodeId"`
+	VIP    string      `json:"vip"`
+	Links  []LinkInfo  `json:"links"`
+	Routes []RouteInfo `json:"routes,omitempty"`
 }
 
 // LinkInfo is a serializable link entry.
 type LinkInfo struct {
 	PeerNodeID string `json:"peerNodeId"`
+	PeerVIP    string `json:"peerVip,omitempty"`
 	Cost       int    `json:"cost"`
+}
+
+// RouteInfo advertises a prefix that this node can reach.
+type RouteInfo struct {
+	Prefix string `json:"prefix"` // CIDR like "0.0.0.0/0" or "192.168.1.0/24"
+	Cost   int    `json:"cost"`   // additional cost (default 0)
 }
 
 // NewTopology creates an empty topology graph.
@@ -70,6 +79,15 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 	node.LastSeen = time.Now()
 
 	changed := false
+
+	// Update advertised routes
+	if len(info.Routes) > 0 || len(node.Routes) > 0 {
+		if len(info.Routes) != len(node.Routes) {
+			changed = true
+		}
+		node.Routes = info.Routes
+	}
+
 	newLinks := make(map[string]bool)
 	for _, li := range info.Links {
 		newLinks[li.PeerNodeID] = true
@@ -86,6 +104,24 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 		if !newLinks[peerID] {
 			changed = true
 			delete(node.Links, peerID)
+		}
+	}
+
+	// Learn neighbor VIPs from the gossip
+	for _, li := range info.Links {
+		if li.PeerVIP != "" {
+			if peerNode, exists := t.nodes[li.PeerNodeID]; !exists {
+				t.nodes[li.PeerNodeID] = &TopoNode{
+					NodeID:   li.PeerNodeID,
+					VIP:      net.ParseIP(li.PeerVIP),
+					Links:    make(map[string]*TopoLink),
+					LastSeen: time.Now(),
+				}
+				changed = true
+			} else if peerNode.VIP == nil {
+				peerNode.VIP = net.ParseIP(li.PeerVIP)
+				changed = true
+			}
 		}
 	}
 
@@ -162,7 +198,7 @@ func (t *Topology) RemoveNode(nodeID string) {
 }
 
 // GetLocalInfo returns this node's topology info for gossip.
-func (t *Topology) GetLocalInfo(nodeID string) TopologyInfo {
+func (t *Topology) GetLocalInfo(nodeID string, advertise []string) TopologyInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -175,9 +211,21 @@ func (t *Topology) GetLocalInfo(nodeID string) TopologyInfo {
 		info.VIP = node.VIP.String()
 	}
 	for _, link := range node.Links {
+		peerVIP := ""
+		if peerNode, ok := t.nodes[link.PeerNodeID]; ok && peerNode.VIP != nil {
+			peerVIP = peerNode.VIP.String()
+		}
 		info.Links = append(info.Links, LinkInfo{
 			PeerNodeID: link.PeerNodeID,
+			PeerVIP:    peerVIP,
 			Cost:       link.Cost,
+		})
+	}
+	// Advertise configured prefixes
+	for _, prefix := range advertise {
+		info.Routes = append(info.Routes, RouteInfo{
+			Prefix: prefix,
+			Cost:   0,
 		})
 	}
 	return info
@@ -247,6 +295,47 @@ func (t *Topology) ComputeRoutes(myNodeID string) map[string]string {
 		}
 		if prev[next] == myNodeID || next == dstID {
 			routes[dstID] = next
+		}
+	}
+	return routes
+}
+
+// GetNodeVIP returns the VIP of a node by its nodeID.
+func (t *Topology) GetNodeVIP(nodeID string) net.IP {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if node, ok := t.nodes[nodeID]; ok && node.VIP != nil {
+		return node.VIP
+	}
+	return nil
+}
+
+// GatewayRoute represents a prefix advertised by a gateway node.
+type GatewayRoute struct {
+	NodeID string // Gateway node ID
+	Prefix string // Advertised prefix (e.g., "0.0.0.0/0")
+	Cost   int    // Advertised cost
+}
+
+// GetAllGatewayRoutes collects all prefix advertisements from all nodes.
+func (t *Topology) GetAllGatewayRoutes() []GatewayRoute {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	var routes []GatewayRoute
+	for _, node := range t.nodes {
+		// Check if this node has advertised routes
+		// We need to store this information when processing gossip
+		// For now, we'll check if the node has any routes stored
+		if node.Routes != nil {
+			for _, r := range node.Routes {
+				routes = append(routes, GatewayRoute{
+					NodeID: node.NodeID,
+					Prefix: r.Prefix,
+					Cost:   r.Cost,
+				})
+			}
 		}
 	}
 	return routes

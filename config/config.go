@@ -1334,9 +1334,10 @@ func (t *TUNConfig) DirectNameserverList() []string {
 
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
-	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	VIP     string `yaml:"vip,omitempty" json:"vip,omitempty"`
-	NodeID  string `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Enabled   *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	VIP       string   `yaml:"vip,omitempty" json:"vip,omitempty"`
+	NodeID    string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Advertise []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
 }
 
 // IsEnabled reports whether mesh networking is enabled.
@@ -1345,6 +1346,14 @@ func (m *MeshConfig) IsEnabled() bool {
 		return false
 	}
 	return *m.Enabled
+}
+
+// GetAdvertise returns the list of prefixes this node advertises.
+func (m *MeshConfig) GetAdvertise() []string {
+	if m == nil {
+		return nil
+	}
+	return m.Advertise
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

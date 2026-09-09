@@ -241,11 +241,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
 		meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
 		if meshVIP != nil && ruleConf.Mesh.NodeID != "" {
-			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, meshVIP, meshSubnet)
+			advertise := ruleConf.Mesh.GetAdvertise()
+			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, meshVIP, meshSubnet, advertise)
 			mesh.GlobalMeshManager = meshMgr
 			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP)
 			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s", ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s advertise=%v", ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP, advertise)
 		} else {
 			util.Logger.Printf("Mesh config incomplete: need node-id and vip")
 		}

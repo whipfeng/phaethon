@@ -465,6 +465,32 @@ func (m *P2PManager) SendMeshPacket(peerNodeID string, data []byte) error {
 	return reverse.WriteFrame(bestConn, reverse.FrameMeshPacket, data)
 }
 
+// SendMeshPacketByVIP sends a mesh packet to a peer identified by VIP.
+func (m *P2PManager) SendMeshPacketByVIP(peerVIP net.IP, data []byte) error {
+	m.mu.Lock()
+	var bestConn net.Conn
+	var bestPeerID string
+	var bestLastSeen time.Time
+	for _, p := range m.peers {
+		if p.MeshVIP != "" {
+			peerIP := net.ParseIP(p.MeshVIP)
+			if peerIP != nil && peerIP.Equal(peerVIP) && p.LastSeen.After(bestLastSeen) {
+				bestConn = p.conn
+				bestPeerID = p.ID
+				bestLastSeen = p.LastSeen
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	if bestConn == nil {
+		util.LogWarn("[P2P] SendMeshPacketByVIP: no connection to mesh peer %s", peerVIP)
+		return fmt.Errorf("mesh: no connection to peer %s", peerVIP)
+	}
+	util.LogDebug("[P2P] SendMeshPacketByVIP: sending %d bytes to %s (peer=%s)", len(data), peerVIP, bestPeerID)
+	return reverse.WriteFrame(bestConn, reverse.FrameMeshPacket, data)
+}
+
 // BroadcastMeshGossip sends a mesh_gossip JSON command to all mesh-enabled peers.
 func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	gossip := make([]byte, len(data))

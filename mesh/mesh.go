@@ -3,6 +3,7 @@ package mesh
 import (
 	"encoding/json"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type TunInterface interface {
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
 type P2PTransport interface {
 	SendMeshPacket(peerNodeID string, data []byte) error
+	SendMeshPacketByVIP(peerVIP net.IP, data []byte) error
 	BroadcastMeshGossip(data []byte) error
 	ListMeshPeerIDs() []string
 }
@@ -30,31 +32,40 @@ type MeshPeerInfo struct {
 	LastSeen time.Time `json:"lastSeen"`
 }
 
+// PrefixRoute represents a route to a network prefix.
+type PrefixRoute struct {
+	Prefix  *net.IPNet // Network prefix (e.g., 100.64.1.3/32 or 0.0.0.0/0)
+	NextHop net.IP     // Next hop VIP
+	Cost    int        // Total cost (link cost + route cost)
+}
+
 // MeshManager coordinates mesh overlay networking.
 type MeshManager struct {
-	mu       sync.RWMutex
-	nodeID   string
-	vip      net.IP
-	subnet   *net.IPNet
-	topology *Topology
-	tun      TunInterface
-	p2p      P2PTransport
+	mu        sync.RWMutex
+	nodeID    string
+	vip       net.IP
+	subnet    *net.IPNet
+	advertise []string // prefixes this node advertises (e.g., ["0.0.0.0/0", "192.168.1.0/24"])
+	topology  *Topology
+	tun       TunInterface
+	p2p       P2PTransport
 
-	routesMu sync.RWMutex
-	routes   map[string]string // dstNodeID → nextHopNodeID
+	prefixRoutesMu sync.RWMutex
+	prefixRoutes   []PrefixRoute // Sorted by prefix length (longest first)
 
 	closeCh chan struct{}
 }
 
 // NewMeshManager creates a new mesh manager.
-func NewMeshManager(nodeID string, vip net.IP, subnet *net.IPNet) *MeshManager {
+func NewMeshManager(nodeID string, vip net.IP, subnet *net.IPNet, advertise []string) *MeshManager {
 	return &MeshManager{
-		nodeID:   nodeID,
-		vip:      vip.To4(),
-		subnet:   subnet,
-		topology: NewTopology(),
-		routes:   make(map[string]string),
-		closeCh:  make(chan struct{}),
+		nodeID:       nodeID,
+		vip:          vip.To4(),
+		subnet:       subnet,
+		advertise:    advertise,
+		topology:     NewTopology(),
+		prefixRoutes: make([]PrefixRoute, 0),
+		closeCh:      make(chan struct{}),
 	}
 }
 
@@ -109,23 +120,18 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		return true
 	}
 
-	dstNodeID := m.topology.VIPToNodeID(dstIP)
-	if dstNodeID == "" {
-		util.LogWarn("[MESH] no route to VIP %s", dstIP)
-		return true
-	}
-
-	nextHop := m.getNextHop(dstNodeID)
-	if nextHop == "" {
-		util.LogWarn("[MESH] no next hop for node %s (dst %s)", dstNodeID, dstIP)
-		return true
+	// 2. Longest prefix match to find next hop
+	nextHop := m.findNextHop(dstIP)
+	if nextHop == nil {
+		util.LogDebug("[MESH] no route to %s", dstIP)
+		return false
 	}
 
 	util.LogDebug("[MESH] forwarding packet to %s via %s", dstIP, nextHop)
 	srcVIP := m.vip
-	frame := encodeMeshFrame(dstIP, srcVIP, defaultTTL, data)
-	if err := m.p2p.SendMeshPacket(nextHop, frame); err != nil {
-		util.LogWarn("[MESH] send to %s via %s failed: %v", dstNodeID, nextHop, err)
+	frame := encodeMeshFrame(nextHop, srcVIP, defaultTTL, data)
+	if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
+		util.LogWarn("[MESH] send to %s failed: %v", nextHop, err)
 	}
 	return true
 }
@@ -159,21 +165,15 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	dstNodeID := m.topology.VIPToNodeID(dstVIP)
-	if dstNodeID == "" {
+	nextHop := m.findNextHop(dstVIP)
+	if nextHop == nil {
 		util.LogDebug("[MESH] forward: no route to %s", dstVIP)
-		return
-	}
-
-	nextHop := m.getNextHop(dstNodeID)
-	if nextHop == "" {
-		util.LogDebug("[MESH] forward: no next hop for %s", dstNodeID)
 		return
 	}
 
 	util.LogDebug("[MESH] forwarding frame %s → %s via %s", dstVIP, srcVIP, nextHop)
 	decrementTTL(frame)
-	if err := m.p2p.SendMeshPacket(nextHop, frame); err != nil {
+	if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
 		util.LogWarn("[MESH] forward to %s failed: %v", nextHop, err)
 	}
 }
@@ -195,14 +195,15 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 
 // GetStatus returns mesh status for admin API.
 func (m *MeshManager) GetStatus() map[string]interface{} {
-	m.routesMu.RLock()
-	routeCount := len(m.routes)
-	m.routesMu.RUnlock()
+	m.prefixRoutesMu.RLock()
+	routeCount := len(m.prefixRoutes)
+	m.prefixRoutesMu.RUnlock()
 
 	return map[string]interface{}{
 		"enabled":    true,
 		"nodeId":     m.nodeID,
 		"vip":        m.vip.String(),
+		"advertise":  m.advertise,
 		"routeCount": routeCount,
 	}
 }
@@ -231,12 +232,16 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 
 // GetRoutes returns the current routing table for admin API.
 func (m *MeshManager) GetRoutes() map[string]interface{} {
-	m.routesMu.RLock()
-	defer m.routesMu.RUnlock()
+	m.prefixRoutesMu.RLock()
+	defer m.prefixRoutesMu.RUnlock()
 
-	routes := make(map[string]string, len(m.routes))
-	for k, v := range m.routes {
-		routes[k] = v
+	routes := make([]map[string]interface{}, 0, len(m.prefixRoutes))
+	for _, r := range m.prefixRoutes {
+		routes = append(routes, map[string]interface{}{
+			"prefix":  r.Prefix.String(),
+			"nextHop": r.NextHop.String(),
+			"cost":    r.Cost,
+		})
 	}
 	return map[string]interface{}{"routes": routes}
 }
@@ -267,18 +272,76 @@ func (m *MeshManager) isMeshDestined(ip net.IP) bool {
 	return m.subnet.Contains(ip)
 }
 
-func (m *MeshManager) getNextHop(dstNodeID string) string {
-	m.routesMu.RLock()
-	defer m.routesMu.RUnlock()
-	return m.routes[dstNodeID]
+func (m *MeshManager) recomputeRoutes() {
+	// 1. Compute node-level routes using Dijkstra
+	nodeRoutes := m.topology.ComputeRoutes(m.nodeID)
+
+	// 2. Build prefix routes
+	var prefixRoutes []PrefixRoute
+
+	// Add mesh internal routes (VIP/32 → nextHop VIP)
+	for dstNodeID, nextHopNodeID := range nodeRoutes {
+		dstVIP := m.topology.GetNodeVIP(dstNodeID)
+		nextHopVIP := m.topology.GetNodeVIP(nextHopNodeID)
+		if dstVIP != nil && nextHopVIP != nil {
+			prefixRoutes = append(prefixRoutes, PrefixRoute{
+				Prefix:  &net.IPNet{IP: dstVIP, Mask: net.CIDRMask(32, 32)},
+				NextHop: nextHopVIP,
+				Cost:    0,
+			})
+		}
+	}
+
+	// Add gateway-advertised prefix routes
+	gatewayRoutes := m.topology.GetAllGatewayRoutes()
+	for _, gr := range gatewayRoutes {
+		if gr.NodeID == m.nodeID {
+			continue // Skip own routes
+		}
+		_, ipNet, err := net.ParseCIDR(gr.Prefix)
+		if err != nil {
+			continue
+		}
+		// Find next hop to the gateway node
+		nextHopNodeID, ok := nodeRoutes[gr.NodeID]
+		if !ok {
+			// Gateway is a direct peer
+			nextHopNodeID = gr.NodeID
+		}
+		nextHopVIP := m.topology.GetNodeVIP(nextHopNodeID)
+		if nextHopVIP != nil {
+			prefixRoutes = append(prefixRoutes, PrefixRoute{
+				Prefix:  ipNet,
+				NextHop: nextHopVIP,
+				Cost:    gr.Cost,
+			})
+		}
+	}
+
+	// 3. Sort by prefix length (longest first for longest prefix match)
+	sort.Slice(prefixRoutes, func(i, j int) bool {
+		lenI, _ := prefixRoutes[i].Prefix.Mask.Size()
+		lenJ, _ := prefixRoutes[j].Prefix.Mask.Size()
+		return lenI > lenJ
+	})
+
+	m.prefixRoutesMu.Lock()
+	m.prefixRoutes = prefixRoutes
+	m.prefixRoutesMu.Unlock()
+	util.LogDebug("[MESH] routes recomputed: %d prefix routes", len(prefixRoutes))
 }
 
-func (m *MeshManager) recomputeRoutes() {
-	routes := m.topology.ComputeRoutes(m.nodeID)
-	m.routesMu.Lock()
-	m.routes = routes
-	m.routesMu.Unlock()
-	util.LogDebug("[MESH] routes recomputed: %d destinations", len(routes))
+// findNextHop finds the next hop VIP for a destination IP using longest prefix match.
+func (m *MeshManager) findNextHop(dstIP net.IP) net.IP {
+	m.prefixRoutesMu.RLock()
+	defer m.prefixRoutesMu.RUnlock()
+
+	for _, route := range m.prefixRoutes {
+		if route.Prefix.Contains(dstIP) {
+			return route.NextHop
+		}
+	}
+	return nil
 }
 
 func (m *MeshManager) gossipLoop() {
@@ -289,7 +352,7 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			info := m.topology.GetLocalInfo(m.nodeID)
+			info := m.topology.GetLocalInfo(m.nodeID, m.advertise)
 			data, err := json.Marshal(info)
 			if err != nil {
 				continue

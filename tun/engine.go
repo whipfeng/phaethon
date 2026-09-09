@@ -748,18 +748,15 @@ func (e *Engine) readLoop() {
 			}
 		}
 
-		// Mesh interception: divert 100.64.0.0/16 packets before netstack.
-		// Outbound packets (to remote mesh VIPs) are sent via mesh by HandleOutboundPacket.
-		// Inbound packets (from remote mesh nodes to local VIP) are also handled by HandleOutboundPacket
-		// which injects them into the netstack.
+		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
+		// The mesh interceptor checks its routing table (including gateway routes) to determine
+		// if the packet should be sent via mesh or handled normally.
 		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(readBuf[16:20])
-			if dstIP[0] == 100 && dstIP[1] == 64 {
-				pktBuf := make([]byte, n)
-				copy(pktBuf, readBuf[:n])
-				if e.meshInterceptor(dstIP, pktBuf) {
-					continue
-				}
+			pktBuf := make([]byte, n)
+			copy(pktBuf, readBuf[:n])
+			if e.meshInterceptor(dstIP, pktBuf) {
+				continue
 			}
 		}
 
@@ -820,17 +817,17 @@ func (e *Engine) writeLoop() {
 		// Mesh interception: route 100.64.0.0/16 packets destined for REMOTE mesh nodes via mesh.
 		// Skip packets destined for our own mesh VIP — those are replies from netstack
 		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
+		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
+		// Skip local VIP packets — those are replies from netstack that should go to OS.
 		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
 			pktDst := net.IP(data[16:20])
-			if pktDst[0] == 100 && pktDst[1] == 64 {
-				isLocal := e.isLocalMeshVIP(pktDst)
-				if !isLocal {
-					pktBuf := make([]byte, len(data))
-					copy(pktBuf, data)
-					if e.meshInterceptor(pktDst, pktBuf) {
-						pkt.DecRef()
-						continue
-					}
+			isLocal := e.isLocalMeshVIP(pktDst)
+			if !isLocal {
+				pktBuf := make([]byte, len(data))
+				copy(pktBuf, data)
+				if e.meshInterceptor(pktDst, pktBuf) {
+					pkt.DecRef()
+					continue
 				}
 			}
 		}

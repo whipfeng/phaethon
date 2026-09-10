@@ -287,7 +287,171 @@ SOCKS5/HTTP 代理 → 用户态 socket → netstack → WritePackets 回调 →
 | 路由不更新 | `UpdateFromGossip` 不检测 VIP 变化 | 添加 VIP 变化检测，设置 `changed = true` |
 | 额外 VIP 无路由 | `recomputeRoutes` 只处理主 VIP | 遍历 `GetNodeAllVIPs` 为所有 VIP 创建路由 |
 
-## 7. 验收标准
+## 7. Mesh v2 架构：基于能力通告的路由
+
+### 7.1 核心变化
+
+**从"基于 VIP 的 overlay 网络"到"基于能力通告的任意拓扑路由"**
+
+| 维度 | Mesh v1（当前） | Mesh v2（目标） |
+|------|----------------|----------------|
+| 节点标识 | VIP (100.64.x.x) | NodeID |
+| TUN 依赖 | 必须 | 可选 |
+| 路由依据 | VIP 前缀 | 能力通告（IP/域名） |
+| 访问方式 | TUN only | TUN + 普通代理 |
+
+### 7.2 能力通告
+
+每个节点通告自己**能访问什么**：
+
+```go
+type CapabilityInfo struct {
+    NodeID   string   `json:"nodeId"`
+    IPs      []string `json:"ips,omitempty"`      // IP 或 CIDR，如 "8.8.8.8", "192.168.0.0/16"
+    Domains  []string `json:"domains,omitempty"`  // 域名模式，如 "*.google.com", "api.github.com"
+    Cost     int      `json:"cost"`               // 访问代价（可选）
+}
+```
+
+**示例配置：**
+
+```yaml
+mesh:
+  node-id: "gateway-cn"
+  capabilities:
+    ips:
+      - "0.0.0.0/0"           # 能访问所有 IP（互联网出口）
+      - "10.0.0.0/8"          # 能访问内网
+    domains:
+      - "*.google.com"
+      - "*.github.com"
+```
+
+### 7.3 邻居学习与路径计算
+
+**Gossip 传播能力通告：**
+
+```
+节点 A 通告: {nodeId: "A", ips: ["0.0.0.0/0"], domains: ["*.google.com"]}
+节点 B 通告: {nodeId: "B", ips: ["10.0.0.0/8"], domains: ["*.internal.com"]}
+```
+
+**每个节点维护能力路由表：**
+
+```go
+type CapabilityRoute struct {
+    Pattern  string   // IP CIDR 或域名模式
+    NextHop  string   // 下一跳 NodeID
+    Cost     int      // 总代价
+}
+
+// 路由表按优先级排序
+// 1. 精确 IP 匹配（如 8.8.8.8/32）
+// 2. 最长前缀匹配（如 10.0.0.0/8）
+// 3. 域名精确匹配（如 api.github.com）
+// 4. 域名通配符匹配（如 *.github.com）
+// 5. 默认路由（0.0.0.0/0）
+```
+
+### 7.4 两种访问模式
+
+#### 7.4.1 TUN 模式
+
+```
+OS 应用 → TUN 设备 → readLoop 读取 IP 包
+    ↓
+检查目标 IP/域名是否匹配能力路由表
+    ↓
+匹配：封装 mesh 包（外层=目标 NodeID，内层=原始 IP 包）
+    ↓
+通过 P2P 链路发送到下一跳
+    ↓
+目标节点收到 → 解封装 → 注入 netstack 或 OS → 访问目标
+```
+
+#### 7.4.2 普通代理模式（无 TUN）
+
+```
+SOCKS5/HTTP 代理收到请求（访问 api.github.com:443）
+    ↓
+检查目标是否匹配能力路由表
+    ↓
+匹配：创建 gVisor 虚拟 socket
+    ↓
+stack.NewEndpoint() → ep.Connect() → ep.Write()
+    ↓
+gVisor 产生出站 IP 包 → WritePackets 回调
+    ↓
+封装 mesh 包（外层=目标 NodeID，内层=IP 包）
+    ↓
+通过 P2P 链路发送到下一跳
+    ↓
+目标节点收到 → 解封装 → 注入 netstack → 访问目标
+    ↓
+响应包反向传回 → 虚拟 socket 收到数据 → 代理返回给客户端
+```
+
+### 7.5 Mesh 链路包结构（待细化）
+
+**基本结构：**
+
+```
++------------------+------------------------+
+| 外层 Header      | 内层 Payload           |
+| - 目标 NodeID    | - IP 包                |
+| - 源 NodeID      | - 或 域名 + 数据       |
+| - 包类型         |                        |
++------------------+------------------------+
+```
+
+**问题：域名传输效率**
+
+每个包都带完整域名太浪费（如 `api.github.com` 16 字节 × 每个包）。
+
+**候选方案：**
+
+1. **Session ID 映射**
+   - 首包：`{session: 0x1234, domain: "api.github.com", data: ...}`
+   - 后续包：`{session: 0x1234, data: ...}`
+   - 接收方维护 session → domain 映射表
+
+2. **域名压缩**
+   - 常见域名预定义短 ID（如 `google.com` = 0x01）
+   - 或使用字典压缩
+
+3. **混合模式**
+   - IP 目标：直接传 IP 包（固定 20 字节头）
+   - 域名目标：首包传域名，后续用 session ID
+
+**待讨论确定具体方案。**
+
+### 7.6 实现阶段
+
+1. **Phase 1**: 能力通告基础设施
+   - 定义 `CapabilityInfo` 结构
+   - 修改 gossip 传播能力信息
+   - 实现能力路由表
+
+2. **Phase 2**: 去 VIP 化
+   - NodeID 作为主要标识
+   - 移除 VIP 相关逻辑（或作为可选兼容）
+
+3. **Phase 3**: 普通代理模式
+   - 集成 gVisor 用户态网络栈
+   - 实现虚拟 socket → mesh 链路
+
+4. **Phase 4**: 包结构优化
+   - 确定域名传输方案
+   - 实现 session 管理
+
+### 7.7 与 v1 的兼容性
+
+考虑渐进式迁移：
+- v2 节点可以识别 v1 的 VIP 包
+- v1 节点不识别 v2 的能力通告（忽略）
+- 混合部署期间，v2 节点可以同时支持两种模式
+
+## 8. 验收标准
 
 - [x] 配置多个 VIP 后，所有 VIP 注册到 OS TUN 接口
 - [x] Gossip 传播所有 VIP（通过日志确认）

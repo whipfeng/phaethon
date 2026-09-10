@@ -399,7 +399,7 @@ func (m *MeshManager) isMeshDestined(ip net.IP) bool {
 
 func (m *MeshManager) recomputeRoutes() {
 	nodes := m.topology.GetAllNodes()
-	util.LogDebug("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
+	util.LogInfo("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
 	for _, node := range nodes {
 		vips := "nil"
 		if len(node.VIPs) > 0 {
@@ -409,12 +409,12 @@ func (m *MeshManager) recomputeRoutes() {
 			}
 			vips = strings.Join(vipStrs, ",")
 		}
-		util.LogDebug("[MESH]   node %s vips=%s links=%d", node.NodeID, vips, len(node.Links))
+		util.LogInfo("[MESH]   node %s vips=%s links=%d", node.NodeID, vips, len(node.Links))
 	}
 
 	// 1. Compute node-level routes using Dijkstra
 	nodeRoutes := m.topology.ComputeRoutes(m.nodeID)
-	util.LogDebug("[MESH] recomputeRoutes: nodeRoutes=%v", nodeRoutes)
+	util.LogInfo("[MESH] recomputeRoutes: nodeRoutes=%v", nodeRoutes)
 
 	// 2. Build prefix routes
 	var prefixRoutes []PrefixRoute

@@ -382,7 +382,19 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 		util.LogInfo("[P2P] update_ack from %s: status=%s", peer.ID, msg["status"])
 	case "mesh_gossip":
 		if m.meshHandler != nil {
-			m.meshHandler.HandleTopologyGossip(peer.MeshNodeID, payload)
+			// Extract payload - it could be json.RawMessage, []byte, or map[string]interface{}
+			var payloadData []byte
+			if p, ok := msg["payload"].(json.RawMessage); ok {
+				payloadData = []byte(p)
+			} else if p, ok := msg["payload"].([]byte); ok {
+				payloadData = p
+			} else if p, ok := msg["payload"].(map[string]interface{}); ok {
+				// Re-marshal the map back to JSON
+				payloadData, _ = json.Marshal(p)
+			}
+			if payloadData != nil {
+				m.meshHandler.HandleTopologyGossip(peer.MeshNodeID, payloadData)
+			}
 		}
 	default:
 		util.LogDebug("[P2P] unknown command %q from %s", cmd, peer.ID)
@@ -532,8 +544,15 @@ func (m *P2PManager) SendMeshPacketByVIP(peerVIP net.IP, data []byte) error {
 
 // BroadcastMeshGossip sends a mesh_gossip JSON command to all mesh-enabled peers.
 func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
-	gossip := make([]byte, len(data))
-	copy(gossip, data)
+	// Wrap the topology data in a JSON command
+	cmd := map[string]interface{}{
+		"cmd":     "mesh_gossip",
+		"payload": json.RawMessage(data),
+	}
+	gossip, err := json.Marshal(cmd)
+	if err != nil {
+		return err
+	}
 
 	m.mu.Lock()
 	peers := make([]*Peer, 0, len(m.peers))

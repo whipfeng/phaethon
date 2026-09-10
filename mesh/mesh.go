@@ -189,6 +189,9 @@ func (m *MeshManager) Stop() {
 // RegisterPeer is called when a P2P peer with mesh capability connects.
 func (m *MeshManager) RegisterPeer(peerNodeID, peerVIP string) {
 	m.topology.AddDirectLink(m.nodeID, m.vip.String(), peerNodeID, peerVIP)
+	// Update local node's VIPs in topology to include all VIPs
+	allVIPs := m.GetAllVIPs()
+	m.topology.SetNodeVIPs(m.nodeID, allVIPs)
 	m.recomputeRoutes()
 	util.LogInfo("[MESH] peer registered: %s vip=%s", peerNodeID, peerVIP)
 }
@@ -287,6 +290,7 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 	if info.NodeID == m.nodeID {
 		return
 	}
+	util.LogInfo("[MESH] gossip: received from %s with VIPs=%v", fromNodeID, info.VIPs)
 	if m.topology.UpdateFromGossip(info) {
 		m.recomputeRoutes()
 	}
@@ -504,6 +508,7 @@ func (m *MeshManager) gossipLoop() {
 			if err != nil {
 				continue
 			}
+			util.LogInfo("[MESH] gossip: sending with VIPs=%v", info.VIPs)
 			if m.p2p != nil {
 				m.p2p.BroadcastMeshGossip(data)
 			}

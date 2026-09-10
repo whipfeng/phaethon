@@ -192,6 +192,23 @@ func (t *Topology) AddDirectLink(thisNodeID, thisVIP string, peerNodeID, peerVIP
 	}
 }
 
+// SetNodeVIPs updates all VIPs for a node in the topology.
+func (t *Topology) SetNodeVIPs(nodeID string, vips []net.IP) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	node, exists := t.nodes[nodeID]
+	if !exists {
+		node = &TopoNode{
+			NodeID: nodeID,
+			Links:  make(map[string]*TopoLink),
+		}
+		t.nodes[nodeID] = node
+	}
+	node.VIPs = vips
+	node.LastSeen = time.Now()
+}
+
 // RemoveNode removes a node and all links to it.
 func (t *Topology) RemoveNode(nodeID string) {
 	t.mu.Lock()

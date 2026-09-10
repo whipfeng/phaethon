@@ -421,6 +421,21 @@ func (e *Engine) addMeshVIPToOS(vip net.IP) error {
 			return fmt.Errorf("add mesh VIP %s to %s: %w", vip, e.routeMgr.devName, err)
 		}
 	}
+
+	_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
+	rt := &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       meshSubnet,
+		Src:       vip4,
+		Scope:     syscall.RT_SCOPE_LINK,
+		Type:      syscall.RTN_UNICAST,
+	}
+	if err := netlink.RouteAdd(rt); err != nil {
+		if !isExist(err) {
+			util.LogWarn("tun: add mesh source route %s src %s: %v", meshSubnet, vip4, err)
+		}
+	}
+
 	util.LogInfo("tun: mesh VIP %s added to %s", vip, e.routeMgr.devName)
 	return nil
 }

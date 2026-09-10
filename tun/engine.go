@@ -144,6 +144,9 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 		util.LogDebug("tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
 	}
 	_, err := e.device.Write(data)
+	if err != nil {
+		util.LogWarn("tun: WriteMeshPacket device.Write failed: %v", err)
+	}
 	return err
 }
 
@@ -761,6 +764,11 @@ func (e *Engine) readLoop() {
 		// if the packet should be sent via mesh or handled normally.
 		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(readBuf[16:20])
+			srcIP := net.IP(readBuf[12:16])
+			// Debug: log packets to mesh subnet
+			if dstIP[0] == 100 && dstIP[1] == 64 {
+				util.LogDebug("[DEBUG] mesh check: %s -> %s", srcIP, dstIP)
+			}
 			pktBuf := make([]byte, n)
 			copy(pktBuf, readBuf[:n])
 			if e.meshInterceptor(dstIP, pktBuf) {

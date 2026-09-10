@@ -125,9 +125,7 @@ func sendChunk(peer *Peer, filePath string, chunkIndex int) error {
 		TotalFrames: totalFrames,
 	}
 	headerData, _ := json.Marshal(header)
-	if err := reverse.WriteFrame(peer.conn, reverse.FrameData, headerData); err != nil {
-		return fmt.Errorf("send chunk header: %w", err)
-	}
+	enqueueWrite(peer, reverse.FrameData, headerData)
 
 	for i := 0; i < totalFrames; i++ {
 		start := i * reverse.MaxPayload
@@ -135,9 +133,7 @@ func sendChunk(peer *Peer, filePath string, chunkIndex int) error {
 		if end > len(chunkData) {
 			end = len(chunkData)
 		}
-		if err := reverse.WriteFrame(peer.conn, reverse.FrameData, chunkData[start:end]); err != nil {
-			return fmt.Errorf("send chunk frame %d: %w", i, err)
-		}
+		enqueueWrite(peer, reverse.FrameData, chunkData[start:end])
 	}
 
 	util.LogDebug("[P2P] sent chunk %d (%d bytes, %d frames) to %s", chunkIndex, len(chunkData), totalFrames, peer.ID)
@@ -160,7 +156,7 @@ func (m *P2PManager) handleUpdateRequest(peer *Peer, payload []byte) {
 		util.LogInfo("[P2P] don't have %s/%s/%s/%s in cache", peer.ID, req.Platform, req.Arch, req.BuildTag, req.Version)
 		ack := UpdateAck{Cmd: "update_ack", Status: "error", Error: "not in cache"}
 		data, _ := json.Marshal(ack)
-		reverse.WriteFrame(peer.conn, reverse.FrameData, data)
+		enqueueWrite(peer, reverse.FrameData, data)
 		return
 	}
 
@@ -171,7 +167,7 @@ func (m *P2PManager) handleUpdateRequest(peer *Peer, payload []byte) {
 		util.LogError("[P2P] failed to generate manifest: %v", err)
 		ack := UpdateAck{Cmd: "update_ack", Status: "error", Error: err.Error()}
 		data, _ := json.Marshal(ack)
-		reverse.WriteFrame(peer.conn, reverse.FrameData, data)
+		enqueueWrite(peer, reverse.FrameData, data)
 		return
 	}
 
@@ -179,10 +175,7 @@ func (m *P2PManager) handleUpdateRequest(peer *Peer, payload []byte) {
 	peer.serveFilePath = cachePath
 
 	manifestData, _ := json.Marshal(manifest)
-	if err := reverse.WriteFrame(peer.conn, reverse.FrameData, manifestData); err != nil {
-		util.LogError("[P2P] failed to send manifest to %s: %v", peer.ID, err)
-		return
-	}
+	enqueueWrite(peer, reverse.FrameData, manifestData)
 
 	util.LogInfo("[P2P] sent manifest to %s: %d chunks, %d bytes", peer.ID, manifest.TotalChunks, manifest.TotalSize)
 }
@@ -226,11 +219,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 	for i := 0; i < manifest.TotalChunks; i++ {
 		req := ChunkReq{Cmd: "chunk_req", ChunkIndex: i}
 		reqData, _ := json.Marshal(req)
-		if err := reverse.WriteFrame(peer.conn, reverse.FrameData, reqData); err != nil {
-			util.LogError("[P2P] failed to request chunk %d: %v", i, err)
-			peer.Status = "failed"
-			return
-		}
+		enqueueWrite(peer, reverse.FrameData, reqData)
 
 		chunkData, err := m.receiveChunk(peer, i)
 		if err != nil {
@@ -247,7 +236,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 			util.LogError("[P2P] chunk %d hash mismatch: expected %s, got %s", i, expectedHash, actualHash)
 			ack := UpdateAck{Cmd: "update_ack", Status: "chunk_mismatch"}
 			data, _ := json.Marshal(ack)
-			reverse.WriteFrame(peer.conn, reverse.FrameData, data)
+			enqueueWrite(peer, reverse.FrameData, data)
 			peer.Status = "failed"
 			return
 		}
@@ -264,7 +253,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 		util.LogError("[P2P] file hash mismatch: expected %s, got %s", manifest.FileHash, fileHash)
 		ack := UpdateAck{Cmd: "update_ack", Status: "error", Error: "file hash mismatch"}
 		data, _ := json.Marshal(ack)
-		reverse.WriteFrame(peer.conn, reverse.FrameData, data)
+		enqueueWrite(peer, reverse.FrameData, data)
 		peer.Status = "failed"
 		return
 	}
@@ -280,7 +269,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 	// Send success ack
 	ack := UpdateAck{Cmd: "update_ack", Status: "ok", FileHash: fileHash}
 	ackData, _ := json.Marshal(ack)
-	reverse.WriteFrame(peer.conn, reverse.FrameData, ackData)
+	enqueueWrite(peer, reverse.FrameData, ackData)
 
 	util.LogInfo("[P2P] sync complete from %s: stored %s", peer.ID, cachePath)
 	peer.Status = "upToDate"
@@ -370,7 +359,7 @@ func (m *P2PManager) requestUpdate(peer *Peer, entry CacheEntry) {
 		Version:  entry.Version,
 	}
 	data, _ := json.Marshal(req)
-	reverse.WriteFrame(peer.conn, reverse.FrameData, data)
+	enqueueWrite(peer, reverse.FrameData, data)
 	util.LogInfo("[P2P] sent update request to %s for %s/%s/%s/%s",
 		peer.ID, entry.Platform, entry.Arch, entry.BuildTag, entry.Version)
 }

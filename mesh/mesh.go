@@ -178,65 +178,64 @@ func (m *MeshManager) UnregisterPeer(peerNodeID string) {
 
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled (destined for mesh).
+// The actual send is async to avoid blocking the readLoop on TCP writes.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	if !m.isMeshDestined(dstIP) {
 		return false
 	}
-	util.LogInfo("[MESH] outbound packet to %s", dstIP)
+
 	if dstIP.Equal(m.vip) {
-		// Packet for local VIP: deliver to OS via TUN device.
-		if m.tun != nil {
-			if err := m.tun.WriteMeshPacket(data); err != nil {
-				util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
+		go func() {
+			if m.tun != nil {
+				if err := m.tun.WriteMeshPacket(data); err != nil {
+					util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
+				}
 			}
-		} else {
-			util.LogWarn("[MESH] TUN engine not set, cannot deliver packet")
-		}
+		}()
 		return true
 	}
 
-	// 2. Longest prefix match to find next hop
 	nextHop := m.findNextHop(dstIP)
 	if nextHop == nil {
-		util.LogInfo("[MESH] no route to %s", dstIP)
-		return false
+		util.LogDebug("[MESH] no route to %s, dropping", dstIP)
+		return true
 	}
 
-	util.LogInfo("[MESH] forwarding packet to %s via %s", dstIP, nextHop)
 	srcVIP := m.vip
 	frame := encodeMeshFrame(nextHop, srcVIP, defaultTTL, data)
-	if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
-		util.LogWarn("[MESH] send to %s failed: %v", nextHop, err)
-	}
+	go func() {
+		if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
+			util.LogWarn("[MESH] send to %s failed: %v", nextHop, err)
+		}
+	}()
 	return true
 }
 
 // HandleMeshFrame processes a FrameMeshPacket received from a peer.
+// Decode is synchronous (fast), but actual I/O is async to avoid blocking the P2P read loop.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
-	util.LogInfo("[MESH] received frame from %s (%d bytes)", fromNodeID, len(frame))
 	dstVIP, srcVIP, ttl, ipPacket, err := decodeMeshFrame(frame)
 	if err != nil {
 		util.LogWarn("[MESH] bad frame from %s: %v", fromNodeID, err)
 		return
 	}
 
-	util.LogInfo("[MESH] frame: %s → %s ttl=%d len=%d (local=%s)", srcVIP, dstVIP, ttl, len(ipPacket), m.vip)
-
 	if dstVIP.Equal(m.vip) {
-		// Packet destined to local VIP: deliver to OS via TUN device.
-		// OS will handle ICMP replies and other protocol processing.
-		if m.tun != nil {
-			if err := m.tun.WriteMeshPacket(ipPacket); err != nil {
-				util.LogWarn("[MESH] write to TUN failed: %v", err)
+		// Local delivery: inject IP packet into OS via TUN device (async).
+		pkt := make([]byte, len(ipPacket))
+		copy(pkt, ipPacket)
+		go func() {
+			if m.tun != nil {
+				if err := m.tun.WriteMeshPacket(pkt); err != nil {
+					util.LogWarn("[MESH] write to TUN failed: %v", err)
+				}
 			}
-		} else {
-			util.LogWarn("[MESH] TUN engine not set, cannot deliver packet")
-		}
+		}()
 		return
 	}
 
 	if ttl <= 1 {
-		util.LogInfo("[MESH] TTL expired for %s → %s", srcVIP, dstVIP)
+		util.LogDebug("[MESH] TTL expired for %s → %s", srcVIP, dstVIP)
 		return
 	}
 
@@ -246,11 +245,12 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	util.LogDebug("[MESH] forwarding frame %s → %s via %s", dstVIP, srcVIP, nextHop)
 	decrementTTL(frame)
-	if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
-		util.LogWarn("[MESH] forward to %s failed: %v", nextHop, err)
-	}
+	go func() {
+		if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
+			util.LogWarn("[MESH] forward to %s failed: %v", nextHop, err)
+		}
+	}()
 }
 
 // HandleTopologyGossip processes a topology announcement from a peer.
@@ -362,8 +362,19 @@ func (m *MeshManager) isMeshDestined(ip net.IP) bool {
 }
 
 func (m *MeshManager) recomputeRoutes() {
+	nodes := m.topology.GetAllNodes()
+	util.LogDebug("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
+	for _, node := range nodes {
+		vip := "nil"
+		if node.VIP != nil {
+			vip = node.VIP.String()
+		}
+		util.LogDebug("[MESH]   node %s vip=%s links=%d", node.NodeID, vip, len(node.Links))
+	}
+
 	// 1. Compute node-level routes using Dijkstra
 	nodeRoutes := m.topology.ComputeRoutes(m.nodeID)
+	util.LogDebug("[MESH] recomputeRoutes: nodeRoutes=%v", nodeRoutes)
 
 	// 2. Build prefix routes
 	var prefixRoutes []PrefixRoute
@@ -372,6 +383,7 @@ func (m *MeshManager) recomputeRoutes() {
 	for dstNodeID, nextHopNodeID := range nodeRoutes {
 		dstVIP := m.topology.GetNodeVIP(dstNodeID)
 		nextHopVIP := m.topology.GetNodeVIP(nextHopNodeID)
+		util.LogDebug("[MESH] route: %s(%v) -> %s(%v)", dstNodeID, dstVIP, nextHopNodeID, nextHopVIP)
 		if dstVIP != nil && nextHopVIP != nil {
 			prefixRoutes = append(prefixRoutes, PrefixRoute{
 				Prefix:  &net.IPNet{IP: dstVIP, Mask: net.CIDRMask(32, 32)},
@@ -417,7 +429,7 @@ func (m *MeshManager) recomputeRoutes() {
 	m.prefixRoutesMu.Lock()
 	m.prefixRoutes = prefixRoutes
 	m.prefixRoutesMu.Unlock()
-	util.LogDebug("[MESH] routes recomputed: %d prefix routes", len(prefixRoutes))
+	util.LogInfo("[MESH] routes recomputed: %d prefix routes", len(prefixRoutes))
 }
 
 // findNextHop finds the next hop VIP for a destination IP using longest prefix match.

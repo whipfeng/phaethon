@@ -105,7 +105,7 @@ func toggleTUN(enable bool, resPtr **activeResources) error {
 		if res.tunRes != nil && res.tunRes.engine != nil && res.tunRes.engine.IsEnabled() {
 			return nil
 		}
-		res.tunRes = startTUNIfEnabled(res.ruleConf)
+		res.tunRes = startTUNIfEnabled(res.ruleConf, res.meshMgr)
 		if res.tunRes == nil || res.tunRes.engine == nil || !res.tunRes.engine.IsEnabled() {
 			return fmt.Errorf("TUN start failed")
 		}
@@ -261,50 +261,28 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		}
 	}
 
-	// Start P2P peers for supported proxy types
-	for _, proxy := range ruleConf.Proxies {
-		if proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel" {
-			if proxy.Server != "" {
-				go p2p.GlobalP2PManager.StartPeer(proxy)
-			}
-		}
-	}
-
+	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference
+	// ready when P2P receives the first mesh frames.
 	res := &activeResources{
 		ruleConf:           ruleConf,
 		mappingListeners:   make(map[string]net.Listener),
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-
-	// Start TUN engine if enabled (intercepts system-level traffic)
-	res.tunRes = startTUNIfEnabled(ruleConf)
-
-	// Wire mesh to TUN engine if both are enabled
-	if meshMgr != nil && res.tunRes != nil && res.tunRes.engine != nil {
-		meshVIP := meshMgr.GetVIP()
-		res.tunRes.engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, meshVIP)
-		res.tunRes.engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
-		meshMgr.Start(res.tunRes.engine, p2p.GlobalP2PManager)
+	res.tunRes = startTUNIfEnabled(ruleConf, meshMgr)
+	if meshMgr != nil && res.tunRes != nil {
 		res.meshMgr = meshMgr
-		// NOTE: Do NOT add 100.64.0.0/16 route — split-tunnel routes already cover it,
-		// and adding an explicit route on a P2P TUN device creates a local route for
-		// the entire /16, breaking mesh forwarding.
-		// Register mesh VIP with netstack so it responds to packets (e.g., ICMP)
-		if meshVIP != nil {
-			if err := res.tunRes.engine.AddMeshVIP(meshVIP); err != nil {
-				util.LogWarn("failed to add mesh VIP: %v", err)
+	}
+
+	// Start P2P peers for proxies that opt in with p2p: true
+	for _, proxy := range ruleConf.Proxies {
+		if !proxy.P2P {
+			continue
+		}
+		if proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel" {
+			if proxy.Server != "" {
+				go p2p.GlobalP2PManager.StartPeer(proxy)
 			}
-			// Add mesh VIP (/32) to OS so kernel recognizes it as local and generates
-			// ICMP replies natively. Do NOT add a 100.64.0.0/16 route — on a P2P TUN
-			// device that causes the kernel to create a local route for the entire /16,
-			// making all mesh traffic appear local instead of going through the mesh.
-			go func() {
-				time.Sleep(5 * time.Second)
-				if err := res.tunRes.engine.AddMeshVIPToOS(meshVIP); err != nil {
-					util.LogWarn("failed to add mesh VIP to OS: %v", err)
-				}
-			}()
 		}
 	}
 

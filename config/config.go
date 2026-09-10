@@ -47,6 +47,7 @@ type Proxy struct {
 	Servername           string `yaml:"servername,omitempty" json:"servername,omitempty"` // VLESS REALITY uses servername instead of sni
 	SkipCertVerify       bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
 	UDP                  bool   `yaml:"udp,omitempty" json:"udp,omitempty"`
+	P2P                  bool   `yaml:"p2p,omitempty" json:"p2p,omitempty"`
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`

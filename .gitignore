@@ -51,3 +51,4 @@ subscription_cache/
 
 # Screenshots archive (local only)
 /screenshots/
+scripts/.env

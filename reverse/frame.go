@@ -145,6 +145,10 @@ func (c *ReverseFramedConn) Close() error {
 	return c.conn.Close()
 }
 
+// Unwrap returns the underlying raw connection, bypassing the frame layer.
+// Used by P2P which runs its own framing (ReadFrame/WriteFrame) on top.
+func (c *ReverseFramedConn) Unwrap() net.Conn { return c.conn }
+
 func (c *ReverseFramedConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
 func (c *ReverseFramedConn) RemoteAddr() net.Addr               { return c.conn.RemoteAddr() }
 func (c *ReverseFramedConn) SetDeadline(t time.Time) error      { return c.conn.SetDeadline(t) }

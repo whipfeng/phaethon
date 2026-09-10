@@ -381,6 +381,7 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 	case "update_ack":
 		util.LogInfo("[P2P] update_ack from %s: status=%s", peer.ID, msg["status"])
 	case "mesh_gossip":
+		util.LogInfo("[P2P] received mesh_gossip from %s", peer.MeshNodeID)
 		if m.meshHandler != nil {
 			// Extract payload - it could be json.RawMessage, []byte, or map[string]interface{}
 			var payloadData []byte
@@ -394,6 +395,8 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 			}
 			if payloadData != nil {
 				m.meshHandler.HandleTopologyGossip(peer.MeshNodeID, payloadData)
+			} else {
+				util.LogWarn("[P2P] mesh_gossip: failed to extract payload")
 			}
 		}
 	default:
@@ -421,8 +424,8 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
 
-	util.LogInfo("[P2P] hello from %s: node=%s version=%s platform=%s/%s buildTag=%s inventory=%d entries",
-		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag, len(hello.Inventory))
+	util.LogInfo("[P2P] hello from %s: node=%s version=%s platform=%s/%s buildTag=%s inventory=%d entries meshNodeId=%s meshVip=%s",
+		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag, len(hello.Inventory), hello.MeshNodeID, hello.MeshVIP)
 
 	if hello.MeshNodeID != "" {
 		m.mu.Lock()
@@ -563,6 +566,7 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	}
 	m.mu.Unlock()
 
+	util.LogInfo("[P2P] BroadcastMeshGossip: sending to %d peers (%d bytes)", len(peers), len(gossip))
 	for _, p := range peers {
 		enqueueWrite(p, reverse.FrameData, gossip)
 	}

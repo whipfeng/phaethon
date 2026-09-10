@@ -291,25 +291,49 @@ SOCKS5/HTTP 代理 → 用户态 socket → netstack → WritePackets 回调 →
 
 ### 7.1 核心变化
 
-**从"基于 VIP 的 overlay 网络"到"基于能力通告的任意拓扑路由"**
+**从"基于内外层封装的 overlay"到"基于能力通告的纯 IP 路由"**
 
 | 维度 | Mesh v1（当前） | Mesh v2（目标） |
 |------|----------------|----------------|
-| 节点标识 | VIP (100.64.x.x) | NodeID |
+| 节点标识 | VIP（注册到 OS） | VIP（不注册 OS，纯 mesh 标识） |
+| NodeID | 无 | 展示用（字符串，方便人识别） |
 | TUN 依赖 | 必须 | 可选 |
-| 路由依据 | VIP 前缀 | 能力通告（IP/域名） |
+| 路由依据 | VIP 前缀 | 能力通告（IP/域名 + fakeIP） |
 | 访问方式 | TUN only | TUN + 普通代理 |
+| 包结构 | 内外层封装 | **纯 IP 包，无封装** |
 
-### 7.2 能力通告
+### 7.2 节点标识
+
+**VIP（4 字节）**：
+- 节点在 mesh 中的标识
+- **不注册到 OS**，纯 mesh 内部使用
+- 保留未来划分子网能力（如 100.64.1.0/24 是一组节点）
+
+**NodeID（字符串）**：
+- 配置文件、日志、Admin API 中展示
+- 方便人识别，如 "gateway-cn"、"node-a"
+
+```yaml
+mesh:
+  node-id: "gateway-cn"      # 展示用
+  vip: "100.64.1.1"          # 节点标识，不注册到 OS
+```
+
+### 7.3 能力通告
 
 每个节点通告自己**能访问什么**：
 
 ```go
 type CapabilityInfo struct {
-    NodeID   string   `json:"nodeId"`
-    IPs      []string `json:"ips,omitempty"`      // IP 或 CIDR，如 "8.8.8.8", "192.168.0.0/16"
-    Domains  []string `json:"domains,omitempty"`  // 域名模式，如 "*.google.com", "api.github.com"
-    Cost     int      `json:"cost"`               // 访问代价（可选）
+    NodeID  string         `json:"nodeId"`
+    VIP     string         `json:"vip"`
+    IPs     []string       `json:"ips,omitempty"`      // IP 或 CIDR
+    Domains []DomainEntry  `json:"domains,omitempty"`  // 域名 + fakeIP
+}
+
+type DomainEntry struct {
+    Domain string `json:"domain"`  // 精确域名，如 "api.github.com"
+    FakeIP string `json:"fakeIP"`  // 预绑定的 fake IP
 }
 ```
 
@@ -318,138 +342,178 @@ type CapabilityInfo struct {
 ```yaml
 mesh:
   node-id: "gateway-cn"
+  vip: "100.64.1.1"
   capabilities:
     ips:
       - "0.0.0.0/0"           # 能访问所有 IP（互联网出口）
       - "10.0.0.0/8"          # 能访问内网
     domains:
-      - "*.google.com"
-      - "*.github.com"
+      - domain: "api.github.com"
+        fakeIP: "198.19.1.5"
+      - domain: "cdn.github.com"
+        fakeIP: "198.19.1.6"
 ```
 
-### 7.3 邻居学习与路径计算
+**注意**：域名使用精确通告 + 预绑定 fakeIP，不支持通配符。
 
-**Gossip 传播能力通告：**
+### 7.4 能力路由表
 
-```
-节点 A 通告: {nodeId: "A", ips: ["0.0.0.0/0"], domains: ["*.google.com"]}
-节点 B 通告: {nodeId: "B", ips: ["10.0.0.0/8"], domains: ["*.internal.com"]}
-```
-
-**每个节点维护能力路由表：**
+每个节点维护能力路由表，根据 **dstIP** 决定下一跳：
 
 ```go
 type CapabilityRoute struct {
-    Pattern  string   // IP CIDR 或域名模式
-    NextHop  string   // 下一跳 NodeID
-    Cost     int      // 总代价
+    Pattern  string  // IP CIDR 或 fakeIP
+    NextHop  string  // 下一跳节点的 VIP
+    Cost     int     // 总代价
 }
 
-// 路由表按优先级排序
+// 路由优先级：
 // 1. 精确 IP 匹配（如 8.8.8.8/32）
 // 2. 最长前缀匹配（如 10.0.0.0/8）
-// 3. 域名精确匹配（如 api.github.com）
-// 4. 域名通配符匹配（如 *.github.com）
-// 5. 默认路由（0.0.0.0/0）
+// 3. fakeIP 匹配（如 198.19.1.5 → api.github.com）
+// 4. 默认路由（0.0.0.0/0）
 ```
 
-### 7.4 两种访问模式
+### 7.5 Mesh 包结构：纯 IP 包
 
-#### 7.4.1 TUN 模式
+**关键结论：不需要内外层封装，mesh 链路传输的就是普通 IP 包。**
 
 ```
-OS 应用 → TUN 设备 → readLoop 读取 IP 包
-    ↓
-检查目标 IP/域名是否匹配能力路由表
-    ↓
-匹配：封装 mesh 包（外层=目标 NodeID，内层=原始 IP 包）
-    ↓
-通过 P2P 链路发送到下一跳
-    ↓
-目标节点收到 → 解封装 → 注入 netstack 或 OS → 访问目标
++------------------------------------------+
+| IP Header                                |
+| srcIP = 源节点 VIP（NAT 后）              |
+| dstIP = 目标地址（真实 IP 或 fakeIP）     |
++------------------------------------------+
+| Payload (TCP/UDP data)                   |
++------------------------------------------+
 ```
 
-#### 7.4.2 普通代理模式（无 TUN）
+**路由方式**：
+- 中间节点根据 dstIP 查能力路由表，决定下一跳
+- 到达目标节点后，该节点处理并转发到真实目标
+
+### 7.6 NAT 机制
+
+**问题**：源节点可能来自 LAN（如 192.168.1.100），这个 IP 在 mesh 中不可路由。
+
+**解决**：源节点做 NAT，将真实源 IP 替换为自己的 VIP。
+
+```
+旁路网关场景：
+
+LAN Host (192.168.1.100) 访问 8.8.8.8:8080
+    ↓
+Node A (旁路网关, VIP=100.64.1.5) 拦截
+    ↓
+NAT: src=192.168.1.100 → src=100.64.1.5
+    ↓
+Mesh 包: src=100.64.1.5, dst=8.8.8.8
+    ↓
+能力路由: 8.8.8.8 → Node B (VIP=100.64.1.1)
+    ↓
+Node B 收到，转发到真实 8.8.8.8
+    ↓
+响应: src=8.8.8.8, dst=100.64.1.5
+    ↓
+路由回 Node A
+    ↓
+Node A 反向 NAT: dst=100.64.1.5 → dst=192.168.1.100
+    ↓
+发给 LAN Host
+```
+
+**NAT 表维护**：
+- 旁路网关/代理节点需要维护 NAT 表
+- 类似 Linux iptables MASQUERADE
+
+### 7.7 两种访问模式
+
+#### 7.7.1 TUN 模式（旁路网关）
+
+```
+LAN Host → Node A (TUN + bypass-gateway)
+    ↓
+TUN readLoop 拦截 IP 包
+    ↓
+NAT: 真实源 IP → Node A 的 VIP
+    ↓
+查能力路由表，确定下一跳
+    ↓
+通过 P2P 链路发送 IP 包
+    ↓
+目标节点收到 → 转发到真实目标
+```
+
+#### 7.7.2 普通代理模式（无 TUN）
 
 ```
 SOCKS5/HTTP 代理收到请求（访问 api.github.com:443）
     ↓
-检查目标是否匹配能力路由表
+查能力路由表：api.github.com → fakeIP 198.19.1.5 → Node B
     ↓
-匹配：创建 gVisor 虚拟 socket
+创建 gVisor 虚拟 socket
     ↓
-stack.NewEndpoint() → ep.Connect() → ep.Write()
+配置 netstack 本地 IP = Node 的 VIP
     ↓
-gVisor 产生出站 IP 包 → WritePackets 回调
+stack.NewEndpoint() → ep.Connect(198.19.1.5:443)
     ↓
-封装 mesh 包（外层=目标 NodeID，内层=IP 包）
+netstack 产生出站 IP 包: src=Node VIP, dst=198.19.1.5
     ↓
-通过 P2P 链路发送到下一跳
+WritePackets 回调 → 通过 P2P 链路发送
     ↓
-目标节点收到 → 解封装 → 注入 netstack → 访问目标
+Node B 收到 dst=198.19.1.5 → 查表 → api.github.com
     ↓
-响应包反向传回 → 虚拟 socket 收到数据 → 代理返回给客户端
+Node B 解析域名，连接真实目标
+    ↓
+响应反向传回 → netstack 收到 → 虚拟 socket → 代理返回客户端
 ```
 
-### 7.5 Mesh 链路包结构（待细化）
+### 7.8 Gateway 侧处理
 
-**基本结构：**
+Gateway 节点收到 mesh 包后：
 
-```
-+------------------+------------------------+
-| 外层 Header      | 内层 Payload           |
-| - 目标 NodeID    | - IP 包                |
-| - 源 NodeID      | - 或 域名 + 数据       |
-| - 包类型         |                        |
-+------------------+------------------------+
-```
+1. **dstIP 是真实 IP**（如 8.8.8.8）：
+   - 用 netstack Forwarder 处理
+   - 创建出站连接到真实目标
+   - 响应通过 netstack 回来，转发回 mesh
 
-**问题：域名传输效率**
+2. **dstIP 是 fakeIP**（如 198.19.1.5）：
+   - 查表：198.19.1.5 → api.github.com
+   - 解析域名获取真实 IP
+   - 创建出站连接
+   - 响应转发回 mesh
 
-每个包都带完整域名太浪费（如 `api.github.com` 16 字节 × 每个包）。
+**回程路由**：
+- Gateway 的 netstack 需要配置路由，让 mesh VIP 段走 mesh link endpoint
+- 或动态添加已知节点 VIP 的 /32 路由到 mesh link
 
-**候选方案：**
-
-1. **Session ID 映射**
-   - 首包：`{session: 0x1234, domain: "api.github.com", data: ...}`
-   - 后续包：`{session: 0x1234, data: ...}`
-   - 接收方维护 session → domain 映射表
-
-2. **域名压缩**
-   - 常见域名预定义短 ID（如 `google.com` = 0x01）
-   - 或使用字典压缩
-
-3. **混合模式**
-   - IP 目标：直接传 IP 包（固定 20 字节头）
-   - 域名目标：首包传域名，后续用 session ID
-
-**待讨论确定具体方案。**
-
-### 7.6 实现阶段
+### 7.9 实现阶段
 
 1. **Phase 1**: 能力通告基础设施
-   - 定义 `CapabilityInfo` 结构
+   - 定义 `CapabilityInfo` 结构（含 fakeIP）
    - 修改 gossip 传播能力信息
-   - 实现能力路由表
+   - 实现能力路由表（按 dstIP 查下一跳）
 
-2. **Phase 2**: 去 VIP 化
-   - NodeID 作为主要标识
-   - 移除 VIP 相关逻辑（或作为可选兼容）
+2. **Phase 2**: 去内外层封装
+   - Mesh 链路直接传 IP 包
+   - 移除 encodeMeshFrame/decodeMeshFrame
+   - 实现基于 dstIP 的能力路由转发
 
-3. **Phase 3**: 普通代理模式
+3. **Phase 3**: NAT 机制
+   - 旁路网关实现 NAT 表
+   - 源节点做 NAT（真实 IP ↔ VIP）
+
+4. **Phase 4**: 普通代理模式
    - 集成 gVisor 用户态网络栈
    - 实现虚拟 socket → mesh 链路
+   - Gateway 侧 fakeIP → 域名解析
 
-4. **Phase 4**: 包结构优化
-   - 确定域名传输方案
-   - 实现 session 管理
-
-### 7.7 与 v1 的兼容性
+### 7.10 与 v1 的兼容性
 
 考虑渐进式迁移：
-- v2 节点可以识别 v1 的 VIP 包
-- v1 节点不识别 v2 的能力通告（忽略）
-- 混合部署期间，v2 节点可以同时支持两种模式
+- v2 节点可以识别 v1 的封装包（兼容期）
+- v1 节点不识别 v2 的纯 IP 包
+- 混合部署期间，建议统一升级
 
 ## 8. 验收标准
 

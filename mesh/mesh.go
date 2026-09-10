@@ -290,10 +290,8 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 	if info.NodeID == m.nodeID {
 		return
 	}
-	util.LogInfo("[MESH] gossip: received from %s with VIPs=%v", fromNodeID, info.VIPs)
-	changed := m.topology.UpdateFromGossip(info)
-	util.LogInfo("[MESH] gossip: topology changed=%v", changed)
-	if changed {
+	util.LogDebug("[MESH] gossip: received from %s with VIPs=%v", fromNodeID, info.VIPs)
+	if m.topology.UpdateFromGossip(info) {
 		m.recomputeRoutes()
 	}
 }
@@ -401,7 +399,7 @@ func (m *MeshManager) isMeshDestined(ip net.IP) bool {
 
 func (m *MeshManager) recomputeRoutes() {
 	nodes := m.topology.GetAllNodes()
-	util.LogInfo("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
+	util.LogDebug("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
 	for _, node := range nodes {
 		vips := "nil"
 		if len(node.VIPs) > 0 {
@@ -411,12 +409,12 @@ func (m *MeshManager) recomputeRoutes() {
 			}
 			vips = strings.Join(vipStrs, ",")
 		}
-		util.LogInfo("[MESH]   node %s vips=%s links=%d", node.NodeID, vips, len(node.Links))
+		util.LogDebug("[MESH]   node %s vips=%s links=%d", node.NodeID, vips, len(node.Links))
 	}
 
 	// 1. Compute node-level routes using Dijkstra
 	nodeRoutes := m.topology.ComputeRoutes(m.nodeID)
-	util.LogInfo("[MESH] recomputeRoutes: nodeRoutes=%v", nodeRoutes)
+	util.LogDebug("[MESH] recomputeRoutes: nodeRoutes=%v", nodeRoutes)
 
 	// 2. Build prefix routes
 	var prefixRoutes []PrefixRoute
@@ -429,9 +427,7 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		// Add routes for all VIPs of the destination node
 		dstVIPs := m.topology.GetNodeAllVIPs(dstNodeID)
-		util.LogInfo("[MESH] adding routes for node %s: %d VIPs, nextHop=%s, vips=%v", dstNodeID, len(dstVIPs), nextHopVIP, dstVIPs)
-		for i, vip := range dstVIPs {
-			util.LogInfo("[MESH] processing VIP[%d]: %v (is nil: %v)", i, vip, vip == nil)
+		for _, vip := range dstVIPs {
 			if vip == nil {
 				continue
 			}
@@ -440,7 +436,6 @@ func (m *MeshManager) recomputeRoutes() {
 				NextHop: nextHopVIP,
 				Cost:    0,
 			})
-			util.LogInfo("[MESH] route: %s/32 -> %s", vip, nextHopVIP)
 		}
 	}
 
@@ -516,7 +511,6 @@ func (m *MeshManager) gossipLoop() {
 			if err != nil {
 				continue
 			}
-			util.LogInfo("[MESH] gossip: sending with VIPs=%v", info.VIPs)
 			if m.p2p != nil {
 				m.p2p.BroadcastMeshGossip(data)
 			}

@@ -268,7 +268,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 			}
 		case reverse.FrameMeshPacket:
 			if m.meshHandler != nil && len(payload) > 0 {
-				util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
+				util.LogInfo("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
 				m.meshHandler.HandleMeshFrame(peer.MeshNodeID, payload)
 			}
 		default:
@@ -487,7 +487,7 @@ func (m *P2PManager) SendMeshPacketByVIP(peerVIP net.IP, data []byte) error {
 		util.LogWarn("[P2P] SendMeshPacketByVIP: no connection to mesh peer %s", peerVIP)
 		return fmt.Errorf("mesh: no connection to peer %s", peerVIP)
 	}
-	util.LogDebug("[P2P] SendMeshPacketByVIP: sending %d bytes to %s (peer=%s)", len(data), peerVIP, bestPeerID)
+	util.LogInfo("[P2P] SendMeshPacketByVIP: sending %d bytes to %s (peer=%s)", len(data), peerVIP, bestPeerID)
 	return reverse.WriteFrame(bestConn, reverse.FrameMeshPacket, data)
 }
 

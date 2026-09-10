@@ -240,15 +240,24 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
 		_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
 		meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
+		
+		// If VIP not configured, derive from nodeID hash
+		if meshVIP == nil && ruleConf.Mesh.NodeID != "" {
+			meshVIP = mesh.DeriveVIPFromNodeID(ruleConf.Mesh.NodeID, meshSubnet)
+			if meshVIP != nil {
+				util.Logger.Printf("Mesh VIP derived from nodeID: %s -> %s", ruleConf.Mesh.NodeID, meshVIP)
+			}
+		}
+		
 		if meshVIP != nil && ruleConf.Mesh.NodeID != "" {
 			advertise := ruleConf.Mesh.GetAdvertise()
 			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, meshVIP, meshSubnet, advertise)
 			mesh.GlobalMeshManager = meshMgr
-			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP)
+			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, meshVIP.String())
 			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s advertise=%v", ruleConf.Mesh.NodeID, ruleConf.Mesh.VIP, advertise)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s advertise=%v", ruleConf.Mesh.NodeID, meshVIP, advertise)
 		} else {
-			util.Logger.Printf("Mesh config incomplete: need node-id and vip")
+			util.Logger.Printf("Mesh config incomplete: need node-id")
 		}
 	}
 
@@ -273,15 +282,16 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 	// Wire mesh to TUN engine if both are enabled
 	if meshMgr != nil && res.tunRes != nil && res.tunRes.engine != nil {
-		res.tunRes.engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, net.ParseIP(ruleConf.Mesh.VIP))
+		meshVIP := meshMgr.GetVIP()
+		res.tunRes.engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, meshVIP)
+		res.tunRes.engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		meshMgr.Start(res.tunRes.engine, p2p.GlobalP2PManager)
 		res.meshMgr = meshMgr
 		// NOTE: Do NOT add 100.64.0.0/16 route — split-tunnel routes already cover it,
 		// and adding an explicit route on a P2P TUN device creates a local route for
 		// the entire /16, breaking mesh forwarding.
 		// Register mesh VIP with netstack so it responds to packets (e.g., ICMP)
-		if ruleConf.Mesh != nil && ruleConf.Mesh.VIP != "" {
-			meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
+		if meshVIP != nil {
 			if err := res.tunRes.engine.AddMeshVIP(meshVIP); err != nil {
 				util.LogWarn("failed to add mesh VIP: %v", err)
 			}

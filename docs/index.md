@@ -69,7 +69,9 @@
 
 ### runbooks/ (运维经验)
 
-暂无。问题解决后请归档至此。
+| 文档 | 描述 |
+|------|------|
+| [deployment-environments.md](runbooks/deployment-environments.md) | 部署环境运维手册：启动方式、进程架构、部署注意事项 |
 
 ### templates/ (文档模板)
 

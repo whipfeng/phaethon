@@ -92,6 +92,14 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 	util.LogInfo("tun: mesh interceptor set (localVIP=%s)", localVIP)
 }
 
+// SetMeshDNSResolver registers a callback to resolve mesh domain names (e.g., node.phn) to VIPs.
+func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
+	if e.dnsHijack != nil {
+		e.dnsHijack.MeshResolver = resolver
+		util.LogInfo("tun: mesh DNS resolver set")
+	}
+}
+
 func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
 	return e.localMeshVIP != nil && e.localMeshVIP.Equal(ip)
 }

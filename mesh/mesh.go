@@ -1,14 +1,76 @@
 package mesh
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"phaethon/util"
 )
+
+const (
+	// MeshDomainSuffix is the special domain suffix for mesh nodes
+	MeshDomainSuffix = ".phn"
+)
+
+// NodeDomain returns the domain name for a node: <nodeid>.mesh.local
+func NodeDomain(nodeID string) string {
+	return nodeID + MeshDomainSuffix
+}
+
+// ParseNodeDomain extracts nodeID from a mesh domain, returns empty if not a mesh domain
+func ParseNodeDomain(domain string) string {
+	domain = strings.ToLower(domain)
+	if !strings.HasSuffix(domain, MeshDomainSuffix) {
+		return ""
+	}
+	return strings.TrimSuffix(domain, MeshDomainSuffix)
+}
+
+// DeriveVIPFromNodeID generates a deterministic VIP from nodeID using hash
+// The VIP is within the 100.64.0.0/16 subnet
+func DeriveVIPFromNodeID(nodeID string, subnet *net.IPNet) net.IP {
+	if subnet == nil {
+		return nil
+	}
+	
+	// Hash the nodeID
+	hash := sha256.Sum256([]byte(nodeID))
+	
+	// Extract first 4 bytes as uint32
+	hashVal := binary.BigEndian.Uint32(hash[:4])
+	
+	// Get subnet base and mask
+	baseIP := subnet.IP.To4()
+	if baseIP == nil {
+		return nil
+	}
+	mask := subnet.Mask
+	
+	// Calculate the number of host bits
+	ones, bits := mask.Size()
+	hostBits := bits - ones
+	if hostBits < 32 {
+		// Mask the hash to fit within the subnet
+		hostMask := uint32((1 << hostBits) - 1)
+		hostPart := hashVal & hostMask
+		
+		// Combine base IP with host part
+		baseVal := binary.BigEndian.Uint32(baseIP)
+		vipVal := baseVal | hostPart
+		
+		vip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(vip, vipVal)
+		return vip
+	}
+	
+	return nil
+}
 
 // TunInterface abstracts the TUN engine for mesh packet injection.
 type TunInterface interface {
@@ -69,6 +131,11 @@ func NewMeshManager(nodeID string, vip net.IP, subnet *net.IPNet, advertise []st
 	}
 }
 
+// GetVIP returns this node's VIP.
+func (m *MeshManager) GetVIP() net.IP {
+	return m.vip
+}
+
 // GlobalMeshManager is the package-level mesh manager, set from main().
 var GlobalMeshManager *MeshManager
 
@@ -109,9 +176,9 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	if !m.isMeshDestined(dstIP) {
 		return false
 	}
-	util.LogDebug("[MESH] outbound packet to %s", dstIP)
+	util.LogInfo("[MESH] outbound packet to %s", dstIP)
 	if dstIP.Equal(m.vip) {
-		util.LogDebug("[MESH] packet for local VIP %s, injecting", dstIP)
+		util.LogInfo("[MESH] packet for local VIP %s, injecting", dstIP)
 		if m.tun != nil {
 			if err := m.tun.InjectMeshPacket(data); err != nil {
 				util.LogWarn("[MESH] inject local packet failed: %v", err)
@@ -123,11 +190,11 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// 2. Longest prefix match to find next hop
 	nextHop := m.findNextHop(dstIP)
 	if nextHop == nil {
-		util.LogDebug("[MESH] no route to %s", dstIP)
+		util.LogInfo("[MESH] no route to %s", dstIP)
 		return false
 	}
 
-	util.LogDebug("[MESH] forwarding packet to %s via %s", dstIP, nextHop)
+	util.LogInfo("[MESH] forwarding packet to %s via %s", dstIP, nextHop)
 	srcVIP := m.vip
 	frame := encodeMeshFrame(nextHop, srcVIP, defaultTTL, data)
 	if err := m.p2p.SendMeshPacketByVIP(nextHop, frame); err != nil {
@@ -138,21 +205,21 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 // HandleMeshFrame processes a FrameMeshPacket received from a peer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
-	util.LogDebug("[MESH] received frame from %s (%d bytes)", fromNodeID, len(frame))
+	util.LogInfo("[MESH] received frame from %s (%d bytes)", fromNodeID, len(frame))
 	dstVIP, srcVIP, ttl, ipPacket, err := decodeMeshFrame(frame)
 	if err != nil {
 		util.LogWarn("[MESH] bad frame from %s: %v", fromNodeID, err)
 		return
 	}
 
-	util.LogDebug("[MESH] frame: %s → %s ttl=%d len=%d (local=%s)", srcVIP, dstVIP, ttl, len(ipPacket), m.vip)
+	util.LogInfo("[MESH] frame: %s → %s ttl=%d len=%d (local=%s)", srcVIP, dstVIP, ttl, len(ipPacket), m.vip)
 
 	if dstVIP.Equal(m.vip) {
 		if m.tun != nil {
 			if err := m.tun.WriteMeshPacket(ipPacket); err != nil {
 				util.LogWarn("[MESH] write to TUN failed: %v", err)
 			} else {
-				util.LogDebug("[MESH] delivered %s → %s (%d bytes) to OS via TUN", srcVIP, dstVIP, len(ipPacket))
+				util.LogInfo("[MESH] delivered %s → %s (%d bytes) to OS via TUN", srcVIP, dstVIP, len(ipPacket))
 			}
 		} else {
 			util.LogWarn("[MESH] TUN engine not set, cannot deliver packet")
@@ -161,7 +228,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if ttl <= 1 {
-		util.LogDebug("[MESH] TTL expired for %s → %s", srcVIP, dstVIP)
+		util.LogInfo("[MESH] TTL expired for %s → %s", srcVIP, dstVIP)
 		return
 	}
 
@@ -266,6 +333,20 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 		result = append(result, info)
 	}
 	return result
+}
+
+// ResolveMeshDomain resolves a mesh domain (e.g., "node.phn") to its VIP.
+// Returns nil if the domain is not a mesh domain or the node is unknown.
+func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
+	nodeID := ParseNodeDomain(domain)
+	if nodeID == "" {
+		return nil
+	}
+	vip := m.topology.GetNodeVIP(nodeID)
+	if vip != nil {
+		util.LogInfo("[MESH] DNS resolve: %s -> %s", domain, vip)
+	}
+	return vip
 }
 
 func (m *MeshManager) isMeshDestined(ip net.IP) bool {

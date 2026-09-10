@@ -45,3 +45,9 @@ config.yaml
 # AI agent local memory
 agents.md
 subscription_cache/
+
+# Playwright MCP snapshots
+.playwright-mcp/
+
+# Screenshots archive (local only)
+/screenshots/

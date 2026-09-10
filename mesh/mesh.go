@@ -420,6 +420,15 @@ func (m *MeshManager) recomputeRoutes() {
 				NextHop: nextHopVIP,
 				Cost:    0,
 			})
+			// Add routes for additional VIPs of the destination node
+			for _, addVIP := range m.topology.GetNodeAdditionalVIPs(dstNodeID) {
+				prefixRoutes = append(prefixRoutes, PrefixRoute{
+					Prefix:  &net.IPNet{IP: addVIP, Mask: net.CIDRMask(32, 32)},
+					NextHop: nextHopVIP,
+					Cost:    0,
+				})
+				util.LogDebug("[MESH] route: additional VIP %s -> %s", addVIP, nextHopVIP)
+			}
 		}
 	}
 
@@ -483,7 +492,14 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			info := m.topology.GetLocalInfo(m.nodeID, m.advertise)
+			// Collect additional VIPs (all except primary)
+			var additionalVIPs []net.IP
+			for s := range m.localVIPs {
+				if ip := net.ParseIP(s); ip != nil && !ip.Equal(m.vip) {
+					additionalVIPs = append(additionalVIPs, ip)
+				}
+			}
+			info := m.topology.GetLocalInfo(m.nodeID, m.advertise, additionalVIPs)
 			data, err := json.Marshal(info)
 			if err != nil {
 				continue

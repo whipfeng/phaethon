@@ -291,7 +291,9 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 		return
 	}
 	util.LogInfo("[MESH] gossip: received from %s with VIPs=%v", fromNodeID, info.VIPs)
-	if m.topology.UpdateFromGossip(info) {
+	changed := m.topology.UpdateFromGossip(info)
+	util.LogInfo("[MESH] gossip: topology changed=%v", changed)
+	if changed {
 		m.recomputeRoutes()
 	}
 }
@@ -426,13 +428,15 @@ func (m *MeshManager) recomputeRoutes() {
 			continue
 		}
 		// Add routes for all VIPs of the destination node
-		for _, vip := range m.topology.GetNodeAllVIPs(dstNodeID) {
+		dstVIPs := m.topology.GetNodeAllVIPs(dstNodeID)
+		util.LogInfo("[MESH] adding routes for node %s: %d VIPs, nextHop=%s", dstNodeID, len(dstVIPs), nextHopVIP)
+		for _, vip := range dstVIPs {
 			prefixRoutes = append(prefixRoutes, PrefixRoute{
 				Prefix:  &net.IPNet{IP: vip, Mask: net.CIDRMask(32, 32)},
 				NextHop: nextHopVIP,
 				Cost:    0,
 			})
-			util.LogDebug("[MESH] route: VIP %s -> %s", vip, nextHopVIP)
+			util.LogInfo("[MESH] route: %s/32 -> %s", vip, nextHopVIP)
 		}
 	}
 

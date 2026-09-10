@@ -239,23 +239,33 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	var meshMgr *mesh.MeshManager
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
 		_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
-		meshVIP := net.ParseIP(ruleConf.Mesh.VIP)
+		vips := ruleConf.Mesh.GetVIPs()
 		
-		// If VIP not configured, derive from nodeID hash
-		if meshVIP == nil && ruleConf.Mesh.NodeID != "" {
-			meshVIP = mesh.DeriveVIPFromNodeID(ruleConf.Mesh.NodeID, meshSubnet)
-			if meshVIP != nil {
-				util.Logger.Printf("Mesh VIP derived from nodeID: %s -> %s", ruleConf.Mesh.NodeID, meshVIP)
+		// Parse VIPs from config
+		var parsedVIPs []net.IP
+		for _, vipStr := range vips {
+			if v := net.ParseIP(vipStr); v != nil {
+				parsedVIPs = append(parsedVIPs, v)
 			}
 		}
 		
-		if meshVIP != nil && ruleConf.Mesh.NodeID != "" {
+		// If no VIPs configured, derive from nodeID hash
+		if len(parsedVIPs) == 0 && ruleConf.Mesh.NodeID != "" {
+			if v := mesh.DeriveVIPFromNodeID(ruleConf.Mesh.NodeID, meshSubnet); v != nil {
+				parsedVIPs = append(parsedVIPs, v)
+				util.Logger.Printf("Mesh VIP derived from nodeID: %s -> %s", ruleConf.Mesh.NodeID, v)
+			}
+		}
+		
+		if len(parsedVIPs) > 0 && ruleConf.Mesh.NodeID != "" {
+			primaryVIP := parsedVIPs[0]
+			additionalVIPs := parsedVIPs[1:]
 			advertise := ruleConf.Mesh.GetAdvertise()
-			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, meshVIP, meshSubnet, advertise)
+			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, additionalVIPs, meshSubnet, advertise)
 			mesh.GlobalMeshManager = meshMgr
-			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, meshVIP.String())
+			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, primaryVIP.String())
 			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s advertise=%v", ruleConf.Mesh.NodeID, meshVIP, advertise)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vips=%v advertise=%v", ruleConf.Mesh.NodeID, parsedVIPs, advertise)
 		} else {
 			util.Logger.Printf("Mesh config incomplete: need node-id")
 		}

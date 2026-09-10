@@ -106,6 +106,7 @@ type MeshManager struct {
 	mu        sync.RWMutex
 	nodeID    string
 	vip       net.IP
+	localVIPs map[string]bool // all local VIPs (primary + additional) as string keys
 	subnet    *net.IPNet
 	advertise []string // prefixes this node advertises (e.g., ["0.0.0.0/0", "192.168.1.0/24"])
 	topology  *Topology
@@ -119,10 +120,19 @@ type MeshManager struct {
 }
 
 // NewMeshManager creates a new mesh manager.
-func NewMeshManager(nodeID string, vip net.IP, subnet *net.IPNet, advertise []string) *MeshManager {
+func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, advertise []string) *MeshManager {
+	localVIPs := map[string]bool{
+		vip.To4().String(): true,
+	}
+	for _, v := range additionalVIPs {
+		if v4 := v.To4(); v4 != nil {
+			localVIPs[v4.String()] = true
+		}
+	}
 	return &MeshManager{
 		nodeID:       nodeID,
 		vip:          vip.To4(),
+		localVIPs:    localVIPs,
 		subnet:       subnet,
 		advertise:    advertise,
 		topology:     NewTopology(),
@@ -134,6 +144,20 @@ func NewMeshManager(nodeID string, vip net.IP, subnet *net.IPNet, advertise []st
 // GetVIP returns this node's VIP.
 func (m *MeshManager) GetVIP() net.IP {
 	return m.vip
+}
+
+// GetAllVIPs returns all local VIPs (primary + additional).
+func (m *MeshManager) GetAllVIPs() []net.IP {
+	result := make([]net.IP, 0, len(m.localVIPs))
+	for s := range m.localVIPs {
+		result = append(result, net.ParseIP(s))
+	}
+	return result
+}
+
+// isLocalVIP checks if the given IP is any of this node's local VIPs.
+func (m *MeshManager) isLocalVIP(ip net.IP) bool {
+	return m.localVIPs[ip.To4().String()]
 }
 
 // SetTun sets the TUN interface reference early, before Start() is called.
@@ -184,7 +208,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		return false
 	}
 
-	if dstIP.Equal(m.vip) {
+	if m.isLocalVIP(dstIP) {
 		go func() {
 			if m.tun != nil {
 				if err := m.tun.WriteMeshPacket(data); err != nil {
@@ -220,7 +244,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	if dstVIP.Equal(m.vip) {
+	if m.isLocalVIP(dstVIP) {
 		// Local delivery: inject IP packet into OS via TUN device (async).
 		pkt := make([]byte, len(ipPacket))
 		copy(pkt, ipPacket)
@@ -274,10 +298,16 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 	routeCount := len(m.prefixRoutes)
 	m.prefixRoutesMu.RUnlock()
 
+	allVIPs := make([]string, 0, len(m.localVIPs))
+	for s := range m.localVIPs {
+		allVIPs = append(allVIPs, s)
+	}
+
 	return map[string]interface{}{
 		"enabled":    true,
 		"nodeId":     m.nodeID,
 		"vip":        m.vip.String(),
+		"vips":       allVIPs,
 		"advertise":  m.advertise,
 		"routeCount": routeCount,
 	}

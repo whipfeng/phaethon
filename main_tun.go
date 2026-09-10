@@ -62,22 +62,20 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshMan
 		meshMgr.SetTun(engine)
 
 		meshVIP := meshMgr.GetVIP()
-		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, meshVIP)
+		allVIPs := meshMgr.GetAllVIPs()
+		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
-		if meshVIP != nil {
-			if err := engine.AddMeshVIP(meshVIP); err != nil {
-				util.LogWarn("failed to add mesh VIP: %v", err)
-			}
-			// Add mesh VIP to OS interface so OS recognizes it as local
-			go func() {
-				time.Sleep(5 * time.Second)
-				if err := engine.AddMeshVIPToOS(meshVIP); err != nil {
-					util.LogWarn("failed to add mesh VIP to OS: %v", err)
+		// Add all VIPs to OS interface so OS recognizes them as local (for source IP selection)
+		go func() {
+			time.Sleep(5 * time.Second)
+			for _, vip := range allVIPs {
+				if err := engine.AddMeshVIPToOS(vip); err != nil {
+					util.LogWarn("failed to add mesh VIP %s to OS: %v", vip, err)
 				}
-			}()
-		}
-		util.LogInfo("Mesh wired to TUN engine (vip=%s)", meshVIP)
+			}
+		}()
+		util.LogInfo("Mesh wired to TUN engine (vip=%s allVIPs=%v)", meshVIP, allVIPs)
 	}
 
 	return &TUNResource{engine: engine}

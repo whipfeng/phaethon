@@ -68,7 +68,7 @@ type Engine struct {
 	// meshInterceptor diverts mesh-subnet packets before netstack.
 	// Returns true if the packet was handled.
 	meshInterceptor func(dstIP net.IP, data []byte) bool
-	localMeshVIP    net.IP
+	localMeshVIPs     map[string]bool // all local mesh VIPs as string keys
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -86,10 +86,15 @@ func (e *Engine) SetDataDir(dir string) {
 
 // SetMeshInterceptor registers a callback to intercept packets destined for the mesh subnet.
 // The callback returns true if it handled the packet (mesh will forward it).
-func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool, localVIP net.IP) {
+func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool, localVIPs []net.IP) {
 	e.meshInterceptor = handler
-	e.localMeshVIP = localVIP
-	util.LogInfo("tun: mesh interceptor set (localVIP=%s)", localVIP)
+	e.localMeshVIPs = make(map[string]bool, len(localVIPs))
+	for _, vip := range localVIPs {
+		if v4 := vip.To4(); v4 != nil {
+			e.localMeshVIPs[v4.String()] = true
+		}
+	}
+	util.LogInfo("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
 }
 
 // SetMeshDNSResolver registers a callback to resolve mesh domain names (e.g., node.phn) to VIPs.
@@ -101,7 +106,10 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 }
 
 func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
-	return e.localMeshVIP != nil && e.localMeshVIP.Equal(ip)
+	if e.localMeshVIPs == nil {
+		return false
+	}
+	return e.localMeshVIPs[ip.To4().String()]
 }
 
 // InjectMeshPacket injects a raw IP packet into the netstack as if received from the TUN device.

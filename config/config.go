@@ -1336,7 +1336,7 @@ func (t *TUNConfig) DirectNameserverList() []string {
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
 	Enabled   *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	VIP       string   `yaml:"vip,omitempty" json:"vip,omitempty"`
+	VIPs      []string `yaml:"vips,omitempty" json:"vips,omitempty"`
 	NodeID    string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
 	Advertise []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
 }
@@ -1355,6 +1355,14 @@ func (m *MeshConfig) GetAdvertise() []string {
 		return nil
 	}
 	return m.Advertise
+}
+
+// GetVIPs returns the additional mesh VIPs.
+func (m *MeshConfig) GetVIPs() []string {
+	if m == nil {
+		return nil
+	}
+	return m.VIPs
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

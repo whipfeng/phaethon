@@ -72,6 +72,8 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 		t.nodes[info.NodeID] = node
 	}
 
+	changed := false
+
 	// Update VIPs
 	if len(info.VIPs) > 0 {
 		newVIPs := make([]net.IP, 0, len(info.VIPs))
@@ -80,11 +82,20 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 				newVIPs = append(newVIPs, ip)
 			}
 		}
+		// Check if VIPs actually changed
+		if len(newVIPs) != len(node.VIPs) {
+			changed = true
+		} else {
+			for i := range newVIPs {
+				if !newVIPs[i].Equal(node.VIPs[i]) {
+					changed = true
+					break
+				}
+			}
+		}
 		node.VIPs = newVIPs
 	}
 	node.LastSeen = time.Now()
-
-	changed := false
 
 	// Update advertised routes
 	if len(info.Routes) > 0 || len(node.Routes) > 0 {

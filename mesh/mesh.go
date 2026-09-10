@@ -429,8 +429,12 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		// Add routes for all VIPs of the destination node
 		dstVIPs := m.topology.GetNodeAllVIPs(dstNodeID)
-		util.LogInfo("[MESH] adding routes for node %s: %d VIPs, nextHop=%s", dstNodeID, len(dstVIPs), nextHopVIP)
-		for _, vip := range dstVIPs {
+		util.LogInfo("[MESH] adding routes for node %s: %d VIPs, nextHop=%s, vips=%v", dstNodeID, len(dstVIPs), nextHopVIP, dstVIPs)
+		for i, vip := range dstVIPs {
+			util.LogInfo("[MESH] processing VIP[%d]: %v (is nil: %v)", i, vip, vip == nil)
+			if vip == nil {
+				continue
+			}
 			prefixRoutes = append(prefixRoutes, PrefixRoute{
 				Prefix:  &net.IPNet{IP: vip, Mask: net.CIDRMask(32, 32)},
 				NextHop: nextHopVIP,

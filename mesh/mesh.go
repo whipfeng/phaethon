@@ -327,8 +327,12 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 			"lastSeen": n.LastSeen,
 			"links":    links,
 		}
-		if n.VIP != nil {
-			entry["vip"] = n.VIP.String()
+		if len(n.VIPs) > 0 {
+			vips := make([]string, 0, len(n.VIPs))
+			for _, v := range n.VIPs {
+				vips = append(vips, v.String())
+			}
+			entry["vips"] = vips
 		}
 		nodeList = append(nodeList, entry)
 	}
@@ -361,10 +365,8 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 	for _, id := range ids {
 		info := MeshPeerInfo{NodeID: id, Direct: true}
 		m.topology.mu.RLock()
-		if node, ok := m.topology.nodes[id]; ok {
-			if node.VIP != nil {
-				info.VIP = node.VIP.String()
-			}
+		if node, ok := m.topology.nodes[id]; ok && len(node.VIPs) > 0 {
+			info.VIP = node.VIPs[0].String()
 			info.LastSeen = node.LastSeen
 		}
 		m.topology.mu.RUnlock()
@@ -395,11 +397,15 @@ func (m *MeshManager) recomputeRoutes() {
 	nodes := m.topology.GetAllNodes()
 	util.LogDebug("[MESH] recomputeRoutes: topology has %d nodes", len(nodes))
 	for _, node := range nodes {
-		vip := "nil"
-		if node.VIP != nil {
-			vip = node.VIP.String()
+		vips := "nil"
+		if len(node.VIPs) > 0 {
+			vipStrs := make([]string, len(node.VIPs))
+			for i, v := range node.VIPs {
+				vipStrs[i] = v.String()
+			}
+			vips = strings.Join(vipStrs, ",")
 		}
-		util.LogDebug("[MESH]   node %s vip=%s links=%d", node.NodeID, vip, len(node.Links))
+		util.LogDebug("[MESH]   node %s vips=%s links=%d", node.NodeID, vips, len(node.Links))
 	}
 
 	// 1. Compute node-level routes using Dijkstra
@@ -411,24 +417,18 @@ func (m *MeshManager) recomputeRoutes() {
 
 	// Add mesh internal routes (VIP/32 → nextHop VIP)
 	for dstNodeID, nextHopNodeID := range nodeRoutes {
-		dstVIP := m.topology.GetNodeVIP(dstNodeID)
 		nextHopVIP := m.topology.GetNodeVIP(nextHopNodeID)
-		util.LogDebug("[MESH] route: %s(%v) -> %s(%v)", dstNodeID, dstVIP, nextHopNodeID, nextHopVIP)
-		if dstVIP != nil && nextHopVIP != nil {
+		if nextHopVIP == nil {
+			continue
+		}
+		// Add routes for all VIPs of the destination node
+		for _, vip := range m.topology.GetNodeAllVIPs(dstNodeID) {
 			prefixRoutes = append(prefixRoutes, PrefixRoute{
-				Prefix:  &net.IPNet{IP: dstVIP, Mask: net.CIDRMask(32, 32)},
+				Prefix:  &net.IPNet{IP: vip, Mask: net.CIDRMask(32, 32)},
 				NextHop: nextHopVIP,
 				Cost:    0,
 			})
-			// Add routes for additional VIPs of the destination node
-			for _, addVIP := range m.topology.GetNodeAdditionalVIPs(dstNodeID) {
-				prefixRoutes = append(prefixRoutes, PrefixRoute{
-					Prefix:  &net.IPNet{IP: addVIP, Mask: net.CIDRMask(32, 32)},
-					NextHop: nextHopVIP,
-					Cost:    0,
-				})
-				util.LogDebug("[MESH] route: additional VIP %s -> %s", addVIP, nextHopVIP)
-			}
+			util.LogDebug("[MESH] route: VIP %s -> %s", vip, nextHopVIP)
 		}
 	}
 
@@ -492,14 +492,14 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			// Collect additional VIPs (all except primary)
-			var additionalVIPs []net.IP
+			// Collect all VIPs
+			allVIPs := make([]net.IP, 0, len(m.localVIPs))
 			for s := range m.localVIPs {
-				if ip := net.ParseIP(s); ip != nil && !ip.Equal(m.vip) {
-					additionalVIPs = append(additionalVIPs, ip)
+				if ip := net.ParseIP(s); ip != nil {
+					allVIPs = append(allVIPs, ip)
 				}
 			}
-			info := m.topology.GetLocalInfo(m.nodeID, m.advertise, additionalVIPs)
+			info := m.topology.GetLocalInfo(m.nodeID, m.advertise, allVIPs)
 			data, err := json.Marshal(info)
 			if err != nil {
 				continue

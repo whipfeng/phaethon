@@ -15,12 +15,11 @@ type Topology struct {
 
 // TopoNode represents a node in the mesh topology.
 type TopoNode struct {
-	NodeID         string
-	VIP            net.IP
-	AdditionalVIPs []net.IP           // extra VIPs this node owns
-	Links          map[string]*TopoLink // peerNodeID → link
-	Routes         []RouteInfo        // advertised prefix routes
-	LastSeen       time.Time
+	NodeID   string
+	VIPs     []net.IP           // all VIPs this node owns (first is primary)
+	Links    map[string]*TopoLink // peerNodeID → link
+	Routes   []RouteInfo        // advertised prefix routes
+	LastSeen time.Time
 }
 
 // TopoLink represents a direct link between two nodes.
@@ -32,11 +31,10 @@ type TopoLink struct {
 
 // TopologyInfo is the gossip payload exchanged between nodes.
 type TopologyInfo struct {
-	NodeID        string      `json:"nodeId"`
-	VIP           string      `json:"vip"`
-	AdditionalVIPs []string   `json:"additionalVips,omitempty"`
-	Links         []LinkInfo  `json:"links"`
-	Routes        []RouteInfo `json:"routes,omitempty"`
+	NodeID string      `json:"nodeId"`
+	VIPs   []string    `json:"vips"`
+	Links  []LinkInfo  `json:"links"`
+	Routes []RouteInfo `json:"routes,omitempty"`
 }
 
 // LinkInfo is a serializable link entry.
@@ -74,19 +72,15 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 		t.nodes[info.NodeID] = node
 	}
 
-	vip := net.ParseIP(info.VIP)
-	if vip != nil {
-		node.VIP = vip
-	}
-	// Update additional VIPs
-	if len(info.AdditionalVIPs) > 0 {
-		newAddVIPs := make([]net.IP, 0, len(info.AdditionalVIPs))
-		for _, v := range info.AdditionalVIPs {
+	// Update VIPs
+	if len(info.VIPs) > 0 {
+		newVIPs := make([]net.IP, 0, len(info.VIPs))
+		for _, v := range info.VIPs {
 			if ip := net.ParseIP(v); ip != nil {
-				newAddVIPs = append(newAddVIPs, ip)
+				newVIPs = append(newVIPs, ip)
 			}
 		}
-		node.AdditionalVIPs = newAddVIPs
+		node.VIPs = newVIPs
 	}
 	node.LastSeen = time.Now()
 
@@ -125,13 +119,13 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 			if peerNode, exists := t.nodes[li.PeerNodeID]; !exists {
 				t.nodes[li.PeerNodeID] = &TopoNode{
 					NodeID:   li.PeerNodeID,
-					VIP:      net.ParseIP(li.PeerVIP),
+					VIPs:     []net.IP{net.ParseIP(li.PeerVIP)},
 					Links:    make(map[string]*TopoLink),
 					LastSeen: time.Now(),
 				}
 				changed = true
-			} else if peerNode.VIP == nil {
-				peerNode.VIP = net.ParseIP(li.PeerVIP)
+			} else if len(peerNode.VIPs) == 0 {
+				peerNode.VIPs = []net.IP{net.ParseIP(li.PeerVIP)}
 				changed = true
 			}
 		}
@@ -147,9 +141,9 @@ func (t *Topology) EnsureNode(nodeID, vip string) {
 
 	if _, exists := t.nodes[nodeID]; !exists {
 		t.nodes[nodeID] = &TopoNode{
-			NodeID:  nodeID,
-			VIP:     net.ParseIP(vip),
-			Links:   make(map[string]*TopoLink),
+			NodeID:   nodeID,
+			VIPs:     []net.IP{net.ParseIP(vip)},
+			Links:    make(map[string]*TopoLink),
 			LastSeen: time.Now(),
 		}
 	}
@@ -164,7 +158,7 @@ func (t *Topology) AddDirectLink(thisNodeID, thisVIP string, peerNodeID, peerVIP
 	if !exists {
 		node = &TopoNode{
 			NodeID: thisNodeID,
-			VIP:    net.ParseIP(thisVIP),
+			VIPs:   []net.IP{net.ParseIP(thisVIP)},
 			Links:  make(map[string]*TopoLink),
 		}
 		t.nodes[thisNodeID] = node
@@ -185,11 +179,11 @@ func (t *Topology) AddDirectLink(thisNodeID, thisVIP string, peerNodeID, peerVIP
 			LastSeen: time.Now(),
 		}
 		if peerVIP != "" {
-			peer.VIP = net.ParseIP(peerVIP)
+			peer.VIPs = []net.IP{net.ParseIP(peerVIP)}
 		}
 		t.nodes[peerNodeID] = peer
-	} else if peer.VIP == nil && peerVIP != "" {
-		peer.VIP = net.ParseIP(peerVIP)
+	} else if len(peer.VIPs) == 0 && peerVIP != "" {
+		peer.VIPs = []net.IP{net.ParseIP(peerVIP)}
 	}
 	peer.Links[thisNodeID] = &TopoLink{
 		PeerNodeID: thisNodeID,
@@ -210,7 +204,7 @@ func (t *Topology) RemoveNode(nodeID string) {
 }
 
 // GetLocalInfo returns this node's topology info for gossip.
-func (t *Topology) GetLocalInfo(nodeID string, advertise []string, additionalVIPs []net.IP) TopologyInfo {
+func (t *Topology) GetLocalInfo(nodeID string, advertise []string, allVIPs []net.IP) TopologyInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -219,17 +213,14 @@ func (t *Topology) GetLocalInfo(nodeID string, advertise []string, additionalVIP
 	if !ok {
 		return info
 	}
-	if node.VIP != nil {
-		info.VIP = node.VIP.String()
-	}
-	// Include additional VIPs
-	for _, v := range additionalVIPs {
-		info.AdditionalVIPs = append(info.AdditionalVIPs, v.String())
+	// Include all VIPs
+	for _, v := range allVIPs {
+		info.VIPs = append(info.VIPs, v.String())
 	}
 	for _, link := range node.Links {
 		peerVIP := ""
-		if peerNode, ok := t.nodes[link.PeerNodeID]; ok && peerNode.VIP != nil {
-			peerVIP = peerNode.VIP.String()
+		if peerNode, ok := t.nodes[link.PeerNodeID]; ok && len(peerNode.VIPs) > 0 {
+			peerVIP = peerNode.VIPs[0].String()
 		}
 		info.Links = append(info.Links, LinkInfo{
 			PeerNodeID: link.PeerNodeID,
@@ -316,24 +307,24 @@ func (t *Topology) ComputeRoutes(myNodeID string) map[string]string {
 	return routes
 }
 
-// GetNodeVIP returns the VIP of a node by its nodeID.
+// GetNodeVIP returns the primary VIP of a node by its nodeID.
 func (t *Topology) GetNodeVIP(nodeID string) net.IP {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	if node, ok := t.nodes[nodeID]; ok && node.VIP != nil {
-		return node.VIP
+	if node, ok := t.nodes[nodeID]; ok && len(node.VIPs) > 0 {
+		return node.VIPs[0]
 	}
 	return nil
 }
 
-// GetNodeAdditionalVIPs returns the additional VIPs of a node by its nodeID.
-func (t *Topology) GetNodeAdditionalVIPs(nodeID string) []net.IP {
+// GetNodeAllVIPs returns all VIPs of a node by its nodeID.
+func (t *Topology) GetNodeAllVIPs(nodeID string) []net.IP {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	if node, ok := t.nodes[nodeID]; ok {
-		return node.AdditionalVIPs
+		return node.VIPs
 	}
 	return nil
 }
@@ -374,8 +365,10 @@ func (t *Topology) VIPToNodeID(vip net.IP) string {
 	defer t.mu.RUnlock()
 
 	for _, node := range t.nodes {
-		if node.VIP != nil && node.VIP.Equal(vip) {
-			return node.NodeID
+		for _, v := range node.VIPs {
+			if v != nil && v.Equal(vip) {
+				return node.NodeID
+			}
 		}
 	}
 	return ""
@@ -394,7 +387,7 @@ func (t *Topology) GetAllNodes() []TopoNode {
 		}
 		result = append(result, TopoNode{
 			NodeID:   n.NodeID,
-			VIP:      n.VIP,
+			VIPs:     n.VIPs,
 			LastSeen: n.LastSeen,
 			Links:    make(map[string]*TopoLink),
 		})

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/mesh"
+	"phaethon/p2p"
 	"phaethon/tun"
 	"phaethon/util"
 )
@@ -25,7 +27,9 @@ func (r *TUNResource) Stop() {
 
 // startTUNIfEnabled creates and starts the TUN engine when available and enabled.
 // The watchdog is no longer spawned here — it runs as the parent process.
-func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
+// If meshMgr is non-nil, it is wired to the TUN engine immediately after start
+// so that mesh can intercept packets even if later code in run() blocks.
+func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) *TUNResource {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
@@ -47,6 +51,33 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration) *TUNResource {
 	if err := engine.Start(); err != nil {
 		util.LogError("TUN engine start failed: %v", err)
 		return nil
+	}
+
+	// Wire mesh to TUN engine immediately after start.
+	// This must happen here (not in run()) because engine.Start() may block
+	// on Windows in later steps, preventing run() from reaching the wiring code.
+	if meshMgr != nil {
+		// Set TUN reference FIRST to close the race where P2P receives mesh
+		// frames before meshMgr.Start() is called below.
+		meshMgr.SetTun(engine)
+
+		meshVIP := meshMgr.GetVIP()
+		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, meshVIP)
+		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
+		meshMgr.Start(engine, p2p.GlobalP2PManager)
+		if meshVIP != nil {
+			if err := engine.AddMeshVIP(meshVIP); err != nil {
+				util.LogWarn("failed to add mesh VIP: %v", err)
+			}
+			// Add mesh VIP to OS interface so OS recognizes it as local
+			go func() {
+				time.Sleep(5 * time.Second)
+				if err := engine.AddMeshVIPToOS(meshVIP); err != nil {
+					util.LogWarn("failed to add mesh VIP to OS: %v", err)
+				}
+			}()
+		}
+		util.LogInfo("Mesh wired to TUN engine (vip=%s)", meshVIP)
 	}
 
 	return &TUNResource{engine: engine}

@@ -136,6 +136,12 @@ func (m *MeshManager) GetVIP() net.IP {
 	return m.vip
 }
 
+// SetTun sets the TUN interface reference early, before Start() is called.
+// This prevents a race where P2P receives mesh frames before Start() runs.
+func (m *MeshManager) SetTun(tun TunInterface) {
+	m.tun = tun
+}
+
 // GlobalMeshManager is the package-level mesh manager, set from main().
 var GlobalMeshManager *MeshManager
 
@@ -178,11 +184,13 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	}
 	util.LogInfo("[MESH] outbound packet to %s", dstIP)
 	if dstIP.Equal(m.vip) {
-		util.LogInfo("[MESH] packet for local VIP %s, injecting", dstIP)
+		// Packet for local VIP: deliver to OS via TUN device.
 		if m.tun != nil {
-			if err := m.tun.InjectMeshPacket(data); err != nil {
-				util.LogWarn("[MESH] inject local packet failed: %v", err)
+			if err := m.tun.WriteMeshPacket(data); err != nil {
+				util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
 			}
+		} else {
+			util.LogWarn("[MESH] TUN engine not set, cannot deliver packet")
 		}
 		return true
 	}
@@ -215,11 +223,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	util.LogInfo("[MESH] frame: %s → %s ttl=%d len=%d (local=%s)", srcVIP, dstVIP, ttl, len(ipPacket), m.vip)
 
 	if dstVIP.Equal(m.vip) {
+		// Packet destined to local VIP: deliver to OS via TUN device.
+		// OS will handle ICMP replies and other protocol processing.
 		if m.tun != nil {
 			if err := m.tun.WriteMeshPacket(ipPacket); err != nil {
 				util.LogWarn("[MESH] write to TUN failed: %v", err)
-			} else {
-				util.LogInfo("[MESH] delivered %s → %s (%d bytes) to OS via TUN", srcVIP, dstVIP, len(ipPacket))
 			}
 		} else {
 			util.LogWarn("[MESH] TUN engine not set, cannot deliver packet")

@@ -45,6 +45,7 @@
 | [tun_stability_design.md](plans/tun_stability_design.md) | TUN 稳定性修复：竞态、goroutine 泄漏、Fake-IP 清理 | v0.1.0 | DRAFT |
 | [tun_route_and_fakeip_fixes.md](plans/tun_route_and_fakeip_fixes.md) | TUN 路由清理顺序与 Fake-IP 注册/释放一致性修复 | v0.1.0 | DRAFT |
 | [tun_watchdog_http_probe_design.md](plans/tun_watchdog_http_probe_design.md) | TUN watchdog HTTP 真实连通性探测改造 | v0.1.0 | ACTIVE |
+| [mesh_multi_vip_design.md](plans/mesh_multi_vip_design.md) | Mesh 多 VIP 支持与源 IP 选择机制 | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 

@@ -191,7 +191,94 @@ P2P 传输到目标节点
 - 目标节点能看到真实的源 VIP
 - 响应包能正确路由回源
 
-## 5. 已修复的 Bug
+## 5. gVisor Netstack 用户态网络能力
+
+### 5.1 结论
+
+**gVisor netstack 支持纯用户态网络操作，无需 TUN 设备：**
+
+- 创建出站 TCP/UDP socket
+- 产生出站 IP 包（通过回调）
+- 注入入站 IP 包
+- 完整的用户态 TCP/IP 协议栈
+
+### 5.2 API 验证
+
+**创建出站连接：**
+
+```go
+// 创建 TCP endpoint
+ep, err := stack.NewEndpoint(tcpip.TCPProtocolNumber, tcpip.IPv4ProtocolNumber, &wq)
+
+// 连接到目标
+err = ep.Connect(tcpip.FullAddress{Addr: tcpip.Address(dstIP), Port: 80})
+
+// 发送数据
+ep.Write(...)
+```
+
+**出站 IP 包回调：**
+
+```go
+// 实现自定义 LinkEndpoint
+type MyLinkEndpoint struct {
+    onOutbound func(pkt []byte)  // 出站包回调
+}
+
+// netstack 产生出站包时调用
+func (e *MyLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
+    for _, pkt := range pkts.AsSlice() {
+        e.onOutbound(pkt.AsSlice())  // 回调给用户
+    }
+    return len(pkts), nil
+}
+```
+
+**入站 IP 包注入：**
+
+```go
+// 从自定义链路收到 IP 包，注入 netstack
+pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
+stack.InjectInbound(ipv4.ProtocolNumber, pkt)
+```
+
+### 5.3 完整流程
+
+```
+应用场景：SOCKS5 代理 → 用户态网络栈 → 自定义链路
+
+1. SOCKS5 收到请求（访问 8.8.8.8:53）
+2. stack.NewEndpoint(TCP, IPv4, &wq) → 创建虚拟 socket
+3. ep.Connect(8.8.8.8:53) → 发起连接
+4. ep.Write(dnsQuery) → 发送数据
+5. netstack 产生出站 IP 包 → WritePackets 回调 → 发送到自定义链路
+6. 对端处理，响应 IP 包回来
+7. 收到响应 IP 包 → InjectInbound → 注入 netstack
+8. netstack 处理响应 → socket 收到数据
+9. 数据传回 SOCKS5 客户端
+```
+
+### 5.4 用途
+
+- **无需 TUN 权限**：在没有 TUN 设备或权限的环境运行
+- **灵活的网络拓扑**：IP 包可以通过任意链路传输（mesh、WebSocket、gRPC 等）
+- **纯应用层虚拟网络**：完全在用户态实现网络栈
+
+### 5.5 与当前架构的关系
+
+当前 TUN 模式：
+```
+OS 应用 → TUN 设备 → readLoop → InjectInbound → netstack → Forwarder → proxy
+```
+
+用户态模式（未来可能）：
+```
+SOCKS5/HTTP 代理 → 用户态 socket → netstack → WritePackets 回调 → 自定义链路
+```
+
+两者可以共存，根据部署环境选择。
+
+## 6. 已修复的 Bug
 
 | Bug | 原因 | 修复 |
 |-----|------|------|
@@ -200,7 +287,7 @@ P2P 传输到目标节点
 | 路由不更新 | `UpdateFromGossip` 不检测 VIP 变化 | 添加 VIP 变化检测，设置 `changed = true` |
 | 额外 VIP 无路由 | `recomputeRoutes` 只处理主 VIP | 遍历 `GetNodeAllVIPs` 为所有 VIP 创建路由 |
 
-## 6. 验收标准
+## 7. 验收标准
 
 - [x] 配置多个 VIP 后，所有 VIP 注册到 OS TUN 接口
 - [x] Gossip 传播所有 VIP（通过日志确认）

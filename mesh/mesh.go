@@ -204,13 +204,9 @@ func (m *MeshManager) UnregisterPeer(peerNodeID string) {
 }
 
 // HandleOutboundPacket is the TUN readLoop interceptor.
-// Returns true if the packet was handled (destined for mesh).
+// Returns true if the packet was handled (destined for mesh or matches a gateway route).
 // The actual send is async to avoid blocking the readLoop on TCP writes.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
-	if !m.isMeshDestined(dstIP) {
-		return false
-	}
-
 	if m.isLocalVIP(dstIP) {
 		go func() {
 			if m.tun != nil {
@@ -224,8 +220,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 	nextHop := m.findNextHop(dstIP)
 	if nextHop == nil {
-		util.LogDebug("[MESH] no route to %s, dropping", dstIP)
-		return true
+		return false
 	}
 
 	srcVIP := m.vip
@@ -248,16 +243,27 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if m.isLocalVIP(dstVIP) {
-		// Local delivery: inject IP packet into OS via TUN device (async).
 		pkt := make([]byte, len(ipPacket))
 		copy(pkt, ipPacket)
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(pkt); err != nil {
-					util.LogWarn("[MESH] write to TUN failed: %v", err)
+
+		innerDstIP := extractDstIP(ipPacket)
+		if innerDstIP != nil && m.isLocalVIP(innerDstIP) {
+			go func() {
+				if m.tun != nil {
+					if err := m.tun.WriteMeshPacket(pkt); err != nil {
+						util.LogWarn("[MESH] write to TUN failed: %v", err)
+					}
 				}
-			}
-		}()
+			}()
+		} else {
+			go func() {
+				if m.tun != nil {
+					if err := m.tun.InjectMeshPacket(pkt); err != nil {
+						util.LogWarn("[MESH] inject to netstack failed: %v", err)
+					}
+				}
+			}()
+		}
 		return
 	}
 
@@ -391,10 +397,6 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 		util.LogInfo("[MESH] DNS resolve: %s -> %s", domain, vip)
 	}
 	return vip
-}
-
-func (m *MeshManager) isMeshDestined(ip net.IP) bool {
-	return m.subnet.Contains(ip)
 }
 
 func (m *MeshManager) recomputeRoutes() {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -48,6 +49,16 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshMan
 	util.LogInfo("TUN enabled, initializing engine...")
 	engine := tun.NewEngine(ruleConf)
 	engine.SetDataDir(dataDir)
+
+	// Configure mesh addresses before Start() if mesh is enabled with a subnet
+	if meshMgr != nil && meshMgr.GetSubnet() != "" {
+		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {
+			if err := engine.ConfigureMeshAddresses(subnet); err != nil {
+				util.LogWarn("failed to configure mesh addresses: %v", err)
+			}
+		}
+	}
+
 	if err := engine.Start(); err != nil {
 		util.LogError("TUN engine start failed: %v", err)
 		return nil
@@ -65,6 +76,18 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshMan
 		allVIPs := meshMgr.GetAllVIPs()
 		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
+		engine.SetMeshDNSForwarder(meshMgr.MeshDNSForwarder)
+
+		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
+		if pool := engine.GetFakeIPPool(); pool != nil {
+			meshMgr.DNSAllocator = func(domain string) (net.IP, error) {
+				return pool.Lookup(domain), nil
+			}
+		}
+
+		// Set up P2P DNS response handler
+		p2p.GlobalP2PManager.SetMeshDNSResponseHandler(meshMgr.HandleDNSResponse)
+
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
 		// Add all VIPs to OS interface so OS recognizes them as local (for source IP selection)
 		go func() {

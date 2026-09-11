@@ -1335,10 +1335,12 @@ func (t *TUNConfig) DirectNameserverList() []string {
 
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
-	Enabled   *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	VIPs      []string `yaml:"vips,omitempty" json:"vips,omitempty"`
-	NodeID    string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
-	Advertise []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
+	Enabled        *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	VIPs           []string `yaml:"vips,omitempty" json:"vips,omitempty"`
+	NodeID         string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`
+	DomainSuffixes []string `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`
+	Advertise      []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
 }
 
 // IsEnabled reports whether mesh networking is enabled.
@@ -1363,6 +1365,22 @@ func (m *MeshConfig) GetVIPs() []string {
 		return nil
 	}
 	return m.VIPs
+}
+
+// GetSubnet returns the mesh subnet for this node (e.g., "100.64.0.0/20").
+func (m *MeshConfig) GetSubnet() string {
+	if m == nil {
+		return ""
+	}
+	return m.Subnet
+}
+
+// GetDomainSuffixes returns the domain suffixes this node can resolve.
+func (m *MeshConfig) GetDomainSuffixes() []string {
+	if m == nil {
+		return nil
+	}
+	return m.DomainSuffixes
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

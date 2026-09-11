@@ -1,39 +1,24 @@
 package mesh
 
 import (
-	"fmt"
 	"net"
 )
 
-const (
-	meshHeaderLen = 9 // 4 (dst) + 4 (src) + 1 (ttl)
-	defaultTTL    = 64
-)
+// Mesh v2: raw IP packets are sent directly over P2P, no mesh frame header.
+// The IP packet's own TTL field is used for loop prevention.
 
-// encodeMeshFrame builds a FrameMeshPacket payload:
-//
-//	DST(4) + SRC(4) + TTL(1) + IP_PACKET
-func encodeMeshFrame(dstVIP, srcVIP net.IP, ttl byte, ipPacket []byte) []byte {
-	frame := make([]byte, meshHeaderLen+len(ipPacket))
-	copy(frame[0:4], dstVIP.To4())
-	copy(frame[4:8], srcVIP.To4())
-	frame[8] = ttl
-	copy(frame[meshHeaderLen:], ipPacket)
-	return frame
+const defaultTTL = 64
+
+// meshCIDR is the 100.64.0.0/10 CGNAT range used for mesh addressing.
+var meshCIDR *net.IPNet
+
+func init() {
+	_, meshCIDR, _ = net.ParseCIDR("100.64.0.0/10")
 }
 
-// decodeMeshFrame parses a FrameMeshPacket payload.
-func decodeMeshFrame(data []byte) (dstVIP, srcVIP net.IP, ttl byte, ipPacket []byte, err error) {
-	if len(data) < meshHeaderLen {
-		return nil, nil, 0, nil, fmt.Errorf("mesh frame too short: %d", len(data))
-	}
-	dstVIP = net.IP(make([]byte, 4))
-	copy(dstVIP, data[0:4])
-	srcVIP = net.IP(make([]byte, 4))
-	copy(srcVIP, data[4:8])
-	ttl = data[8]
-	ipPacket = data[meshHeaderLen:]
-	return
+// isMeshAddress reports whether the IP is in the mesh address range (100.64.0.0/10).
+func isMeshAddress(ip net.IP) bool {
+	return meshCIDR.Contains(ip)
 }
 
 // extractDstIP extracts the destination IP from a raw IPv4 packet.
@@ -52,11 +37,32 @@ func extractSrcIP(ipPacket []byte) net.IP {
 	return net.IP(ipPacket[12:16])
 }
 
-// reencodeMeshFrame updates TTL in an existing mesh frame for forwarding.
-func decrementTTL(data []byte) byte {
-	if len(data) < meshHeaderLen {
+// decrementIPTTL decrements the TTL in a raw IPv4 packet in-place.
+// Returns the new TTL value, or 0 if the packet is invalid.
+func decrementIPTTL(ipPacket []byte) byte {
+	if len(ipPacket) < 9 || ipPacket[0]>>4 != 4 {
 		return 0
 	}
-	data[8]--
-	return data[8]
+	if ipPacket[8] <= 1 {
+		return 0
+	}
+	ipPacket[8]--
+	// Recompute header checksum
+	ipPacket[10] = 0
+	ipPacket[11] = 0
+	var sum uint32
+	headerLen := int(ipPacket[0]&0x0f) * 4
+	if headerLen < 20 || headerLen > len(ipPacket) {
+		headerLen = 20
+	}
+	for i := 0; i < headerLen-1; i += 2 {
+		sum += uint32(ipPacket[i])<<8 | uint32(ipPacket[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	ipPacket[10] = byte(cksum >> 8)
+	ipPacket[11] = byte(cksum)
+	return ipPacket[8]
 }

@@ -8,7 +8,7 @@ import (
 // FakeIPPoolCIDR is the CIDR used for Fake-IP allocations.
 const FakeIPPoolCIDR = "198.18.0.0/15"
 
-// FakeIPPool manages the 198.18.0.0/15 fake IP allocation.
+// FakeIPPool manages fake IP allocation.
 type FakeIPPool struct {
 	mu         sync.RWMutex
 	domainToIP map[string]net.IP
@@ -16,22 +16,60 @@ type FakeIPPool struct {
 	ipToRealIP map[string]net.IP // Fake-IP -> real IP cache
 	reserved   map[uint32]bool
 	nextIP     uint32
+	poolStart  uint32 // first IP in pool range
+	poolEnd    uint32 // last IP in pool range
 	onChange   func() // callback when pool stats change
 }
 
 // NewFakeIPPool creates a Fake-IP pool starting at 198.18.0.0.
 // It reserves the network and broadcast addresses of 198.18.0.0/15.
 func NewFakeIPPool() *FakeIPPool {
+	poolStart := ipToUint32(net.ParseIP("198.18.0.0").To4())
+	poolEnd := ipToUint32(net.ParseIP("198.19.255.255").To4())
 	reserved := map[uint32]bool{
-		ipToUint32(net.ParseIP("198.18.0.0").To4()):     true, // network address
-		ipToUint32(net.ParseIP("198.19.255.255").To4()): true, // broadcast address
+		poolStart: true, // network address
+		poolEnd:   true, // broadcast address
 	}
 	return &FakeIPPool{
 		domainToIP: make(map[string]net.IP),
 		ipToDomain: make(map[string]string),
 		ipToRealIP: make(map[string]net.IP),
 		reserved:   reserved,
-		nextIP:     ipToUint32(net.ParseIP("198.18.0.0").To4()),
+		nextIP:     poolStart,
+		poolStart:  poolStart,
+		poolEnd:    poolEnd,
+	}
+}
+
+// NewFakeIPPoolWithSubnet creates a Fake-IP pool from a custom subnet.
+// The first `skip` addresses in the subnet are reserved (e.g., VIP, hostIP, GIP).
+// Used in mesh mode where each node allocates fakeIPs from its /20 subnet.
+func NewFakeIPPoolWithSubnet(subnet *net.IPNet, skip int) *FakeIPPool {
+	ip4 := subnet.IP.To4()
+	start := ipToUint32(ip4)
+	ones, bits := subnet.Mask.Size()
+	hostBits := bits - ones
+	total := uint32(1) << uint(hostBits)
+	end := start + total - 1
+
+	reserved := map[uint32]bool{
+		start: true, // network address
+		end:   true, // broadcast address
+	}
+	for i := uint32(0); i <= uint32(skip); i++ {
+		reserved[start+i] = true
+	}
+
+	firstAlloc := start + uint32(skip) + 1
+
+	return &FakeIPPool{
+		domainToIP: make(map[string]net.IP),
+		ipToDomain: make(map[string]string),
+		ipToRealIP: make(map[string]net.IP),
+		reserved:   reserved,
+		nextIP:     firstAlloc,
+		poolStart:  start,
+		poolEnd:    end,
 	}
 }
 
@@ -54,8 +92,8 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 	for {
 		ip := uint32ToIP(p.nextIP)
 		p.nextIP++
-		if p.nextIP > ipToUint32(net.ParseIP("198.19.255.255").To4()) {
-			p.nextIP = ipToUint32(net.ParseIP("198.18.0.0").To4())
+		if p.nextIP > p.poolEnd {
+			p.nextIP = p.poolStart
 		}
 		if p.reserved[ipToUint32(ip)] {
 			continue
@@ -133,6 +171,12 @@ func (p *FakeIPPool) Stats() FakeIPStats {
 		DomainCount:    domainCount,
 		RealIPCacheCount: realIPCacheCount,
 	}
+}
+
+// Contains reports whether the given IP is within this pool's range.
+func (p *FakeIPPool) Contains(ip net.IP) bool {
+	n := ipToUint32(ip.To4())
+	return n >= p.poolStart && n <= p.poolEnd
 }
 
 func ipToUint32(ip net.IP) uint32 {

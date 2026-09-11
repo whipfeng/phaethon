@@ -30,6 +30,11 @@ type DNSHijacker struct {
 	// MeshResolver resolves mesh domain names (e.g., node.phn) to VIPs.
 	// Returns nil if the domain is not a mesh domain or node is unknown.
 	MeshResolver func(domain string) net.IP
+
+	// MeshDNSForwarder forwards DNS queries to a remote gateway through mesh.
+	// Takes a domain name and returns the fakeIP allocated by the gateway.
+	// Returns (nil, nil) if the domain doesn't match any remote gateway.
+	MeshDNSForwarder func(domain string) (net.IP, error)
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -101,6 +106,21 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		}
 	}
 
+	// Check mesh DNS forwarding (domain suffix → remote gateway)
+	if h.MeshDNSForwarder != nil {
+		fakeIP, err := h.MeshDNSForwarder(domain)
+		if err != nil {
+			util.LogWarn("tun dns mesh forward error: %s -> %v", domain, err)
+		}
+		if fakeIP != nil {
+			util.LogInfo("tun dns mesh forward: %s -> %s", domain, fakeIP)
+			resp := buildDNSResponse(query, fakeIP.To4())
+			if resp != nil {
+				return resp, nil
+			}
+		}
+	}
+
 	fakeIP := h.pool.Lookup(domain)
 	util.LogDebug("tun dns: %s -> fake=%s", domain, fakeIP)
 
@@ -140,17 +160,33 @@ func (h *DNSHijacker) serveLoop() {
 			continue
 		}
 
-		fakeIP := h.pool.Lookup(domain)
-		util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
+		// Try mesh DNS forwarding first (domain suffix → remote gateway)
+		var resp []byte
+		if h.MeshDNSForwarder != nil {
+			meshFakeIP, err := h.MeshDNSForwarder(domain)
+			if err != nil {
+				util.LogWarn("tun dns mesh forward error: %s -> %v", domain, err)
+			}
+			if meshFakeIP != nil {
+				util.LogInfo("tun dns mesh forward: %s -> %s", domain, meshFakeIP)
+				resp = buildDNSResponse(packet, meshFakeIP.To4())
+			}
+		}
 
-		resp := buildDNSResponse(packet, fakeIP.To4())
+		// Fall back to local pool
+		if resp == nil {
+			fakeIP := h.pool.Lookup(domain)
+			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
+			resp = buildDNSResponse(packet, fakeIP.To4())
+		}
+
 		if resp == nil {
 			continue
 		}
 		if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
 			util.LogWarn("tun dns: write response to %s:%d fail: %v", res.RemoteAddr.Addr, res.RemoteAddr.Port, err)
 		} else {
-			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
+			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 		}
 	}
 }

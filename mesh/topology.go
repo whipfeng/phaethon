@@ -3,6 +3,7 @@ package mesh
 import (
 	"container/heap"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,11 +16,13 @@ type Topology struct {
 
 // TopoNode represents a node in the mesh topology.
 type TopoNode struct {
-	NodeID   string
-	VIPs     []net.IP           // all VIPs this node owns (first is primary)
-	Links    map[string]*TopoLink // peerNodeID → link
-	Routes   []RouteInfo        // advertised prefix routes
-	LastSeen time.Time
+	NodeID         string
+	VIPs           []net.IP           // all VIPs this node owns (first is primary)
+	Subnet         string             // node's /20 subnet (e.g., "100.64.0.0/20")
+	DomainSuffixes []string           // domain suffixes this node can resolve
+	Links          map[string]*TopoLink // peerNodeID → link
+	Routes         []RouteInfo        // advertised prefix routes
+	LastSeen       time.Time
 }
 
 // TopoLink represents a direct link between two nodes.
@@ -31,10 +34,12 @@ type TopoLink struct {
 
 // TopologyInfo is the gossip payload exchanged between nodes.
 type TopologyInfo struct {
-	NodeID string      `json:"nodeId"`
-	VIPs   []string    `json:"vips"`
-	Links  []LinkInfo  `json:"links"`
-	Routes []RouteInfo `json:"routes,omitempty"`
+	NodeID         string      `json:"nodeId"`
+	VIPs           []string    `json:"vips"`
+	Subnet         string      `json:"subnet,omitempty"`
+	DomainSuffixes []string    `json:"domainSuffixes,omitempty"`
+	Links          []LinkInfo  `json:"links"`
+	Routes         []RouteInfo `json:"routes,omitempty"`
 }
 
 // LinkInfo is a serializable link entry.
@@ -96,6 +101,27 @@ func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
 		node.VIPs = newVIPs
 	}
 	node.LastSeen = time.Now()
+
+	// Update subnet
+	if info.Subnet != "" && info.Subnet != node.Subnet {
+		node.Subnet = info.Subnet
+		changed = true
+	}
+
+	// Update domain suffixes
+	if len(info.DomainSuffixes) > 0 || len(node.DomainSuffixes) > 0 {
+		if len(info.DomainSuffixes) != len(node.DomainSuffixes) {
+			changed = true
+		} else {
+			for i := range info.DomainSuffixes {
+				if info.DomainSuffixes[i] != node.DomainSuffixes[i] {
+					changed = true
+					break
+				}
+			}
+		}
+		node.DomainSuffixes = info.DomainSuffixes
+	}
 
 	// Update advertised routes
 	if len(info.Routes) > 0 || len(node.Routes) > 0 {
@@ -232,7 +258,7 @@ func (t *Topology) RemoveNode(nodeID string) {
 }
 
 // GetLocalInfo returns this node's topology info for gossip.
-func (t *Topology) GetLocalInfo(nodeID string, advertise []string, allVIPs []net.IP) TopologyInfo {
+func (t *Topology) GetLocalInfo(nodeID string, subnet string, domainSuffixes []string, advertise []string, allVIPs []net.IP) TopologyInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -245,6 +271,9 @@ func (t *Topology) GetLocalInfo(nodeID string, advertise []string, allVIPs []net
 	for _, v := range allVIPs {
 		info.VIPs = append(info.VIPs, v.String())
 	}
+	// Include subnet and domain suffixes
+	info.Subnet = subnet
+	info.DomainSuffixes = domainSuffixes
 	for _, link := range node.Links {
 		peerVIP := ""
 		if peerNode, ok := t.nodes[link.PeerNodeID]; ok && len(peerNode.VIPs) > 0 {
@@ -371,9 +400,6 @@ func (t *Topology) GetAllGatewayRoutes() []GatewayRoute {
 
 	var routes []GatewayRoute
 	for _, node := range t.nodes {
-		// Check if this node has advertised routes
-		// We need to store this information when processing gossip
-		// For now, we'll check if the node has any routes stored
 		if node.Routes != nil {
 			for _, r := range node.Routes {
 				routes = append(routes, GatewayRoute{
@@ -385,6 +411,74 @@ func (t *Topology) GetAllGatewayRoutes() []GatewayRoute {
 		}
 	}
 	return routes
+}
+
+// GetNodeSubnet returns the subnet string for a given node.
+func (t *Topology) GetNodeSubnet(nodeID string) string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if node, ok := t.nodes[nodeID]; ok {
+		return node.Subnet
+	}
+	return ""
+}
+
+// GetNodeDomainSuffixes returns the domain suffixes for a given node.
+func (t *Topology) GetNodeDomainSuffixes(nodeID string) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if node, ok := t.nodes[nodeID]; ok {
+		return node.DomainSuffixes
+	}
+	return nil
+}
+
+// FindGatewayByDomainSuffix finds the best gateway for a domain using longest suffix match.
+// Returns the gateway nodeID and the matched suffix length, or ("", 0) if no match.
+// Both the domain and configured suffixes should be bare domains like "google.com" (no leading dot).
+// "google.com" matches "google.com" and all subdomains like "api.google.com".
+func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	domain = strings.TrimPrefix(strings.ToLower(domain), ".")
+	bestNodeID := ""
+	bestLen := 0
+
+	for _, node := range t.nodes {
+		for _, suffix := range node.DomainSuffixes {
+			suffix = strings.TrimPrefix(strings.ToLower(suffix), ".")
+			// Match: domain ends with "." + suffix, or domain equals suffix
+			if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
+				if len(suffix) > bestLen {
+					bestLen = len(suffix)
+					bestNodeID = node.NodeID
+				}
+			}
+		}
+	}
+	return bestNodeID, bestLen
+}
+
+// FindGatewayBySubnet finds which gateway's subnet contains the given IP.
+// Returns the gateway nodeID or "" if no match.
+func (t *Topology) FindGatewayBySubnet(ip net.IP) string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, node := range t.nodes {
+		if node.Subnet == "" {
+			continue
+		}
+		_, subnet, err := net.ParseCIDR(node.Subnet)
+		if err != nil {
+			continue
+		}
+		if subnet.Contains(ip) {
+			return node.NodeID
+		}
+	}
+	return ""
 }
 
 // VIPToNodeID maps a VIP address to a node ID.
@@ -414,10 +508,13 @@ func (t *Topology) GetAllNodes() []TopoNode {
 			links = append(links, LinkInfo{PeerNodeID: l.PeerNodeID, Cost: l.Cost})
 		}
 		result = append(result, TopoNode{
-			NodeID:   n.NodeID,
-			VIPs:     n.VIPs,
-			LastSeen: n.LastSeen,
-			Links:    make(map[string]*TopoLink),
+			NodeID:         n.NodeID,
+			VIPs:           n.VIPs,
+			Subnet:         n.Subnet,
+			DomainSuffixes: n.DomainSuffixes,
+			Routes:         n.Routes,
+			LastSeen:       n.LastSeen,
+			Links:          make(map[string]*TopoLink),
 		})
 		for id, l := range n.Links {
 			result[len(result)-1].Links[id] = &TopoLink{

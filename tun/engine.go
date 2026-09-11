@@ -105,6 +105,51 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 	}
 }
 
+// SetMeshDNSForwarder registers a callback to forward DNS queries to remote mesh gateways.
+func (e *Engine) SetMeshDNSForwarder(forwarder func(domain string) (net.IP, error)) {
+	if e.dnsHijack != nil {
+		e.dnsHijack.MeshDNSForwarder = forwarder
+		util.LogInfo("tun: mesh DNS forwarder set")
+	}
+}
+
+// GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
+func (e *Engine) GetFakeIPPool() *FakeIPPool {
+	return e.fakeIP
+}
+
+// ConfigureMeshAddresses reconfigures the TUN engine to use mesh subnet addresses.
+// VIP (.1) = mesh routing + NAT source, hostIP (.2) = TUN adapter, GIP (.3) = netstack/DNS.
+// Must be called before Start() or after a full restart.
+func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
+	if subnet == nil {
+		return nil
+	}
+	ip4 := subnet.IP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("mesh subnet must be IPv4")
+	}
+
+	// .1 = VIP (used for NAT source, registered in mesh module)
+	// .2 = hostIP (TUN adapter OS side)
+	// .3 = GIP (netstack internal, DNS, proxy socket source)
+	hostIP := net.IP{ip4[0], ip4[1], ip4[2], ip4[3] + 2}
+	gip := net.IP{ip4[0], ip4[1], ip4[2], ip4[3] + 3}
+
+	e.addr = tcpip.AddrFrom4Slice(hostIP)
+	e.dnsAddr = tcpip.AddrFrom4Slice(gip)
+
+	ones, _ := subnet.Mask.Size()
+	if ones > 28 {
+		e.prefixLen = 24 // ensure enough room
+	} else {
+		e.prefixLen = 29
+	}
+
+	util.LogInfo("tun: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
+	return nil
+}
+
 func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
 	if e.localMeshVIPs == nil {
 		return false

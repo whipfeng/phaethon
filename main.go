@@ -238,7 +238,14 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// Initialize mesh overlay network if enabled
 	var meshMgr *mesh.MeshManager
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
-		_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/16")
+		meshSubnetStr := ruleConf.Mesh.GetSubnet()
+		var meshSubnet *net.IPNet
+		if meshSubnetStr != "" {
+			_, meshSubnet, _ = net.ParseCIDR(meshSubnetStr)
+		}
+		if meshSubnet == nil {
+			_, meshSubnet, _ = net.ParseCIDR("100.64.0.0/16")
+		}
 		vips := ruleConf.Mesh.GetVIPs()
 		
 		// Parse VIPs from config
@@ -260,12 +267,13 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if len(parsedVIPs) > 0 && ruleConf.Mesh.NodeID != "" {
 			primaryVIP := parsedVIPs[0]
 			additionalVIPs := parsedVIPs[1:]
+			domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 			advertise := ruleConf.Mesh.GetAdvertise()
-			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, additionalVIPs, meshSubnet, advertise)
+			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, additionalVIPs, meshSubnet, meshSubnetStr, domainSuffixes, advertise)
 			mesh.GlobalMeshManager = meshMgr
 			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, primaryVIP.String())
 			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vips=%v advertise=%v", ruleConf.Mesh.NodeID, parsedVIPs, advertise)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vips=%v subnet=%s domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, parsedVIPs, meshSubnetStr, domainSuffixes, advertise)
 		} else {
 			util.Logger.Printf("Mesh config incomplete: need node-id")
 		}

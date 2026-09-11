@@ -302,12 +302,58 @@ SOCKS5/HTTP 代理 → 用户态 socket → netstack → WritePackets 回调 →
 | 访问方式 | TUN only | TUN + 普通代理 |
 | 包结构 | 内外层封装 | **纯 IP 包，无封装** |
 
-### 7.2 节点标识
+### 7.2 节点标识与子网分配
+
+**地址空间**：使用 100.64.0.0/10（CGNAT 段，RFC 6598）。此网段统一用于 mesh 和非 mesh 模式。
+
+**子网分配**：人工指定，每个节点配置一个 /20 子网（4096 个地址，4093 个可用 fakeIP）。因为 node-id 本身也是人工指定的，如果 node-id 重复则无解，所以子网也采用人工指定，简单可靠。
+
+```
+100.64.0.0/10 (100.64.0.0 ~ 100.127.255.255)
+
+示例:
+Node A: 100.64.0.0/20
+  ├── .0.1       → VIP（mesh 路由 + TUN NAT 源）
+  ├── .0.2       → hostIP（TUN 适配器，注册 OS）
+  ├── .0.3       → GIP（DNSHijacker，注册 netstack）
+  └── .0.4~.15.254 → fakeIP 池（4093 个）
+
+Node B: 100.64.16.0/20
+  ├── .16.1   → VIP
+  ├── .16.2   → hostIP
+  ├── .16.3   → GIP
+  └── .16.4~.31.254 → fakeIP 池
+```
+
+**三个地址的职责**：
+
+| 地址 | 角色 | 注册 OS | 注册 netstack | 用途 |
+|------|------|---------|--------------|------|
+| .1 VIP | mesh 节点标识 | 否 | 否 | mesh 路由、TUN 流量 NAT 源 |
+| .2 hostIP | TUN 适配器 | 是 | 否 | OS 侧适配器地址，不能注册 netstack（否则响应回环） |
+| .3 GIP | netstack 内部 | 否 | 是 | DNSHijacker 绑定、代理模式 socket 源地址 |
+| .4~末尾 | fakeIP 池 | 否 | 否 | DNS 解析分配，流量在子网内天然路由到该节点 |
+
+**两种流量模式的源地址**：
+
+```
+TUN 流量:   NAT 后 src=VIP (.1)    → mesh → gateway
+代理流量:   netstack socket src=GIP (.3) → mesh → gateway
+```
+
+gateway 回程时根据 dst 自动分流：
+
+```
+响应 dst=VIP (.1)  → 反向 NAT → TUN → LAN Host
+响应 dst=GIP (.3)  → InjectInbound → netstack → 虚拟 socket → Client
+```
 
 **VIP（4 字节）**：
+- 子网 .1 地址
 - 节点在 mesh 中的标识
-- **不注册到 OS**，纯 mesh 内部使用
-- 保留未来划分子网能力（如 100.64.1.0/24 是一组节点）
+- 不注册到 OS 和 netstack，纯 mesh 内部使用
+- TUN 旁路网关模式下作为 NAT 源地址
+- 也是 DNS 查询的目标（能力通告中域名对应的 gateway VIP）
 
 **NodeID（字符串）**：
 - 配置文件、日志、Admin API 中展示
@@ -316,7 +362,12 @@ SOCKS5/HTTP 代理 → 用户态 socket → netstack → WritePackets 回调 →
 ```yaml
 mesh:
   node-id: "gateway-cn"      # 展示用
-  vip: "100.64.1.1"          # 节点标识，不注册到 OS
+  vip: "100.64.0.1"          # 子网 .1，节点标识（人工指定）
+  # 自动推导:
+  #   子网 = 100.64.0.0/20
+  #   hostIP = 100.64.0.2
+  #   GIP = 100.64.0.3
+  #   fakeIP 池 = 100.64.0.4 ~ 100.64.15.254
 ```
 
 ### 7.3 能力通告
@@ -325,36 +376,64 @@ mesh:
 
 ```go
 type CapabilityInfo struct {
-    NodeID  string         `json:"nodeId"`
-    VIP     string         `json:"vip"`
-    IPs     []string       `json:"ips,omitempty"`      // IP 或 CIDR
-    Domains []DomainEntry  `json:"domains,omitempty"`  // 域名 + fakeIP
-}
-
-type DomainEntry struct {
-    Domain string `json:"domain"`  // 精确域名，如 "api.github.com"
-    FakeIP string `json:"fakeIP"`  // 预绑定的 fake IP
+    NodeID  string   `json:"nodeId"`
+    VIP     string   `json:"vip"`       // 子网第一个 IP
+    Subnet  string   `json:"subnet"`    // 子网 CIDR，如 "100.64.0.0/20"
+    IPs     []string `json:"ips,omitempty"`      // IP 或 CIDR
+    Domains []string `json:"domains,omitempty"`  // 域名后缀
 }
 ```
+
+**域名后缀通告**：只通告域名后缀，不使用通配符，不使用前导点，按**最长后缀匹配**原则查找。
+
+**域名匹配规则**（与 Clash、dnsmasq 等一致）：
+- 配置 `github.com`，匹配 `github.com` 和所有子域名（如 `api.github.com`）
+- 不需要写 `.github.com` 或 `*.github.com`
+- 配置 `com.github` 不会匹配 `github.com`（必须完整后缀）
 
 **示例配置：**
 
 ```yaml
 mesh:
   node-id: "gateway-cn"
-  vip: "100.64.1.1"
-  capabilities:
-    ips:
-      - "0.0.0.0/0"           # 能访问所有 IP（互联网出口）
-      - "10.0.0.0/8"          # 能访问内网
-    domains:
-      - domain: "api.github.com"
-        fakeIP: "198.19.1.5"
-      - domain: "cdn.github.com"
-        fakeIP: "198.19.1.6"
+  subnet: "100.64.0.0/20"
+  advertise:
+    - "0.0.0.0/0"           # 能访问所有 IP（互联网出口）
+  domain-suffixes:
+    - "github.com"          # 能解析 github.com 及其所有子域名
+    - "google.com"
 ```
 
-**注意**：域名使用精确通告 + 预绑定 fakeIP，不支持通配符。
+**最长后缀匹配示例：**
+
+```
+Gateway A 通告: "github.com"
+Gateway B 通告: "api.github.com"
+
+查询 "cdn.api.github.com"
+  → 最长后缀匹配: "api.github.com" → Gateway B
+
+查询 "raw.github.com"
+  → 最长后缀匹配: "github.com" → Gateway A
+```
+
+**查找结构**：使用 trie，按域名标签倒序建树：
+
+```
+com
+ └── github
+      ├── (Gateway A)
+      └── api
+           └── (Gateway B)
+```
+
+查找时从根往下遍历，最深匹配节点即为结果。O(k) 复杂度，k 为域名标签数。
+
+**好处：**
+- 不用写通配符，通告就是纯后缀
+- 层级自然形成，不同 gateway 可以负责不同层级
+- 查找快，trie 遍历即可
+- 可以精细控制：某些子域名走不同 gateway
 
 ### 7.4 能力路由表
 
@@ -362,7 +441,7 @@ mesh:
 
 ```go
 type CapabilityRoute struct {
-    Pattern  string  // IP CIDR 或 fakeIP
+    Pattern  string  // IP CIDR 或子网 CIDR
     NextHop  string  // 下一跳节点的 VIP
     Cost     int     // 总代价
 }
@@ -370,11 +449,73 @@ type CapabilityRoute struct {
 // 路由优先级：
 // 1. 精确 IP 匹配（如 8.8.8.8/32）
 // 2. 最长前缀匹配（如 10.0.0.0/8）
-// 3. fakeIP 匹配（如 198.19.1.5 → api.github.com）
+// 3. 子网匹配（如 100.64.16.0/20 → Gateway B，用于 fakeIP 路由）
 // 4. 默认路由（0.0.0.0/0）
 ```
 
-### 7.5 Mesh 包结构：纯 IP 包
+### 7.5 DNS 解析流程
+
+**机制**：系统 DNS 指向 TUN IP，DNSHijacker 在 netstack 内部监听 UDP 53（内嵌 DNS 服务器），不是从 TUN readLoop 拦截端口。
+
+**完整流程：**
+
+```
+① 应用调用 getaddrinfo("api.github.com")
+② OS 向系统 DNS 发送查询 → 系统 DNS 指向 GIP → 包进入 netstack
+③ DNSHijacker（netstack 内 UDP 53，绑定 GIP）收到查询
+④ 解析域名: api.github.com
+⑤ 查能力路由表（trie 最长后缀匹配）:
+   "api.github.com" → Gateway B (VIP=100.64.16.1)
+⑥ 封装 DNS 查询包，通过 mesh 发给 Gateway B
+   src=100.64.0.1, dst=100.64.16.1, payload=DNS query
+⑦ Gateway B 收到 mesh 包，dst=VIP 是本地的
+   → InjectInbound 注入 netstack
+   → netstack 投递给 DNSHijacker（绑定 GIP，监听 UDP 53）
+⑧ Gateway B 从自己子网分配 fakeIP: 100.64.0.5
+   记录映射: 100.64.0.5 ↔ api.github.com
+   （此时不解析真实 IP）
+⑨ DNS 响应通过 mesh 返回: api.github.com = 100.64.0.5
+⑩ 客户端 DNSHijacker 返回响应给应用
+⑪ 应用连接 100.64.0.5:443
+⑫ TUN readLoop 拦截 IP 包，查能力路由表:
+   100.64.0.5 匹配 100.64.0.0/20 → Gateway B
+⑬ 通过 mesh 发给 Gateway B
+⑭ Gateway B 收到 dst=100.64.0.5
+   查映射: 100.64.0.5 → api.github.com
+   此时才解析真实 IP，创建出站连接
+```
+
+**关键设计点：**
+
+1. **DNS 查询路由**：谁通告了域名后缀能力，DNS 查询就发给谁的 VIP
+2. **Gateway 接收 DNS**：mesh 包到达后 InjectInbound 注入 netstack，由 DNSHijacker 处理（和普通 DNS 查询走同一路径）
+3. **fakeIP 分配**：gateway 从自己 /20 子网分配，不需要预绑定
+4. **延迟解析**：DNS 阶段只分配 fakeIP，不解析真实 IP；真实 IP 在流量到达 gateway 时才解析
+5. **fakeIP 路由**：fakeIP 在 gateway 子网内（如 100.64.0.5 在 100.64.0.0/20），天然路由到该 gateway
+
+**DNS 查询转发实现：**
+
+```go
+// DNSHijacker.serveLoop 中
+domain := parseDNSQueryDomain(packet)
+
+// 查能力路由表（trie 最长后缀匹配）
+gateway := capabilityTrie.LongestMatch(domain)
+if gateway != nil && gateway != self {
+    // 通过 mesh 转发 DNS 查询给 gateway
+    meshForwardDNSQuery(gateway.VIP, packet)
+    // 等待 gateway 返回 fakeIP
+    fakeIP := <-dnsResponseCh
+    // 返回 DNS 响应给应用
+    return buildDNSResponse(packet, fakeIP)
+}
+
+// 本地处理（自己就是 gateway 或无匹配）
+fakeIP := allocateFromOwnSubnet(domain)
+return buildDNSResponse(packet, fakeIP)
+```
+
+### 7.6 Mesh 包结构：纯 IP 包
 
 **关键结论：不需要内外层封装，mesh 链路传输的就是普通 IP 包。**
 
@@ -392,7 +533,7 @@ type CapabilityRoute struct {
 - 中间节点根据 dstIP 查能力路由表，决定下一跳
 - 到达目标节点后，该节点处理并转发到真实目标
 
-### 7.6 NAT 机制
+### 7.7 NAT 机制
 
 **问题**：源节点可能来自 LAN（如 192.168.1.100），这个 IP 在 mesh 中不可路由。
 
@@ -403,21 +544,21 @@ type CapabilityRoute struct {
 
 LAN Host (192.168.1.100) 访问 8.8.8.8:8080
     ↓
-Node A (旁路网关, VIP=100.64.1.5) 拦截
+Node A (旁路网关, VIP=100.64.0.1) 拦截
     ↓
-NAT: src=192.168.1.100 → src=100.64.1.5
+NAT: src=192.168.1.100 → src=100.64.0.1 (VIP)
     ↓
-Mesh 包: src=100.64.1.5, dst=8.8.8.8
+Mesh 包: src=100.64.0.1, dst=8.8.8.8
     ↓
-能力路由: 8.8.8.8 → Node B (VIP=100.64.1.1)
+能力路由: 8.8.8.8 → Node B (VIP=100.64.16.1)
     ↓
 Node B 收到，转发到真实 8.8.8.8
     ↓
-响应: src=8.8.8.8, dst=100.64.1.5
+响应: src=8.8.8.8, dst=100.64.0.1
     ↓
 路由回 Node A
     ↓
-Node A 反向 NAT: dst=100.64.1.5 → dst=192.168.1.100
+Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
     ↓
 发给 LAN Host
 ```
@@ -426,49 +567,100 @@ Node A 反向 NAT: dst=100.64.1.5 → dst=192.168.1.100
 - 旁路网关/代理节点需要维护 NAT 表
 - 类似 Linux iptables MASQUERADE
 
-### 7.7 两种访问模式
+### 7.8 两种访问模式（统一流量图）
 
-#### 7.7.1 TUN 模式（旁路网关）
-
-```
-LAN Host → Node A (TUN + bypass-gateway)
-    ↓
-TUN readLoop 拦截 IP 包
-    ↓
-NAT: 真实源 IP → Node A 的 VIP
-    ↓
-查能力路由表，确定下一跳
-    ↓
-通过 P2P 链路发送 IP 包
-    ↓
-目标节点收到 → 转发到真实目标
-```
-
-#### 7.7.2 普通代理模式（无 TUN）
+同一节点可同时支持 TUN 旁路网关和普通代理两种模式，两种流量在能力路由表处汇合，走同一条 mesh 链路。
 
 ```
-SOCKS5/HTTP 代理收到请求（访问 api.github.com:443）
-    ↓
-查能力路由表：api.github.com → fakeIP 198.19.1.5 → Node B
-    ↓
-创建 gVisor 虚拟 socket
-    ↓
-配置 netstack 本地 IP = Node 的 VIP
-    ↓
-stack.NewEndpoint() → ep.Connect(198.19.1.5:443)
-    ↓
-netstack 产生出站 IP 包: src=Node VIP, dst=198.19.1.5
-    ↓
-WritePackets 回调 → 通过 P2P 链路发送
-    ↓
-Node B 收到 dst=198.19.1.5 → 查表 → api.github.com
-    ↓
-Node B 解析域名，连接真实目标
-    ↓
-响应反向传回 → netstack 收到 → 虚拟 socket → 代理返回客户端
+  LAN Host / Client                  Node A (VIP=100.64.0.1)                Node B (VIP=100.64.16.1)             Internet
+       │                                     │                                     │                                │
+  ┌────┴──────┐                              │                                     │                                │
+  │ LAN Host  │                              │                                     │                                │
+  │192.168.   │                              │                                     │                                │
+  │ 1.100     │                              │                                     │                                │
+  │ 或 Client │                              │                                     │                                │
+  │ (SOCKS5)  │                              │                                     │                                │
+  └────┬──────┘                              │                                     │                                │
+       │ ① IP包 / SOCKS5请求                  │                                     │                                │
+       ├────────────────────────────────────►│                                     │                                │
+       │                                     │                                     │                                │
+       │                              ┌──────┴──────────────────────┐              │                                │
+       │                              │ 入口处理                     │              │                                │
+       │                              │                              │              │                                │
+       │                              │ 模式A (TUN旁路网关):          │              │                                │
+       │                              │  ② TUN readLoop 拦截         │              │                                │
+       │                              │  ③ NAT: src→100.64.0.1(VIP) │              │                                │
+       │                              │                              │              │                                │
+       │                              │ 模式B (SOCKS5代理):           │              │                                │
+       │                              │  ② gVisor 虚拟socket         │              │                                │
+       │                              │  ③ netstack产生IP包           │              │                                │
+       │                              │     src=100.64.0.3(GIP)      │              │                                │
+       │                              │                              │              │                                │
+       │                              │ 两种模式汇合:                  │              │                                │
+       │                              │  ④ 查能力路由表                │              │                                │
+       │                              │    dst→nextHop 100.64.16.1   │              │                                │
+       │                              └──────┬──────────────────────┘              │                                │
+       │                                     │                                     │                                │
+       │                                     │ ⑤ IP包: src=VIP或GIP, dst=8.8.8.8   │                                │
+       │                                     ├────────────────────────────────────►│                                │
+       │                                     │         P2P Mesh (纯IP包)           │                                │
+       │                                     │                                     │                                │
+       │                                     │                              ┌──────┴──────────────────────┐        │
+       │                                     │                              │ ⑥ 收到 mesh IP包             │        │
+       │                                     │                              │    dst=8.8.8.8               │        │
+       │                                     │                              │ ⑦ netstack 处理              │        │
+       │                                     │                              │    Forwarder 创建出站连接     │        │
+       │                                     │                              │ ⑧ 转发到真实目标             │        │
+       │                                     │                              └──────┬──────────────────────┘        │
+       │                                     │                                     │                                │
+       │                                     │                                     │ ⑨ TCP/UDP 到真实目标          │
+       │                                     │                                     ├───────────────────────────────►│
+       │                                     │                                     │                                │
+       │                                     │                                     │          ┌──────────┐        │
+       │                                     │                                     │          │ Internet │        │
+       │                                     │                                     │          │ 8.8.8.8  │        │
+       │                                     │                                     │          └────┬─────┘        │
+       │                                     │                                     │               │              │
+       │                                     │                                     │ ⑩ 响应         │              │
+       │                                     │                                     │◄──────────────┘              │
+       │                                     │                              ┌──────┴──────────────────────┐        │
+       │                                     │                              │ ⑪ netstack 收到响应          │        │
+       │                                     │                              │ ⑫ 封装回程 IP包              │        │
+       │                                     │                              │    src=8.8.8.8, dst=源地址    │        │
+       │                                     │                              └──────┬──────────────────────┘        │
+       │                                     │                                     │                                │
+       │                                     │ ⑬ 回程 IP包                         │                                │
+       │                                     │◄────────────────────────────────────┤                                │
+       │                                     │         P2P Mesh (纯IP包)           │                                │
+       │                                     │                                     │                                │
+       │                              ┌──────┴──────────────────────┐              │                                │
+       │                              │ 回程处理（按 dst 分流）       │              │                                │
+       │                              │                              │              │                                │
+       │                              │ dst=VIP (.1):                │              │                                │
+       │                              │  ⑭ 反向NAT: dst→192.168.1.100│              │                                │
+       │                              │  ⑮ 写回 TUN → OS → LAN Host │              │                                │
+       │                              │                              │              │                                │
+       │                              │ dst=GIP (.3):                │              │                                │
+       │                              │  ⑭ InjectInbound → netstack │              │                                │
+       │                              │  ⑮ 虚拟socket→代理→Client   │              │                                │
+       │                              └──────┬──────────────────────┘              │                                │
+       │◄────────────────────────────────────┤                                     │                                │
+       │ ⑮ 响应到达 LAN Host / Client        │                                     │                                │
 ```
 
-### 7.8 Gateway 侧处理
+**两种模式对比**：
+
+| 维度 | 模式 A：TUN 旁路网关 | 模式 B：普通代理 |
+|------|---------------------|-----------------|
+| 入口 | LAN Host 的 IP 包（OS 内核） | SOCKS5/HTTP 代理请求（应用层） |
+| 源 IP 处理 | NAT：真实 LAN IP → VIP (.1) | gVisor 虚拟 socket，源 IP = GIP (.3)，无需 NAT |
+| 目标地址 | 真实 IP（如 8.8.8.8） | fakeIP（如 100.64.16.5 → api.github.com） |
+| 需要 TUN | 是 | 否 |
+| 需要 NAT | 是（LAN IP 不可路由） | 否（GIP 已是 mesh 可路由地址） |
+| Gateway 处理 | netstack Forwarder 直接转发到真实 IP | netstack 先查 fakeIP → 域名，再连接真实目标 |
+| 回程分流 | dst=VIP → 反向 NAT → TUN → OS → LAN Host | dst=GIP → InjectInbound → netstack → 虚拟 socket → Client |
+
+### 7.9 Gateway 侧处理
 
 Gateway 节点收到 mesh 包后：
 
@@ -477,8 +669,8 @@ Gateway 节点收到 mesh 包后：
    - 创建出站连接到真实目标
    - 响应通过 netstack 回来，转发回 mesh
 
-2. **dstIP 是 fakeIP**（如 198.19.1.5）：
-   - 查表：198.19.1.5 → api.github.com
+2. **dstIP 是 fakeIP**（如 100.64.16.5，属于 Node A 的 /20 子网）：
+   - 查表：100.64.16.5 → api.github.com
    - 解析域名获取真实 IP
    - 创建出站连接
    - 响应转发回 mesh
@@ -487,28 +679,38 @@ Gateway 节点收到 mesh 包后：
 - Gateway 的 netstack 需要配置路由，让 mesh VIP 段走 mesh link endpoint
 - 或动态添加已知节点 VIP 的 /32 路由到 mesh link
 
-### 7.9 实现阶段
+### 7.10 实现阶段
 
-1. **Phase 1**: 能力通告基础设施
-   - 定义 `CapabilityInfo` 结构（含 fakeIP）
-   - 修改 gossip 传播能力信息
-   - 实现能力路由表（按 dstIP 查下一跳）
+1. **Phase 1**: 子网分配与能力通告
+   - 每个节点分配 /20 子网（第一个 IP = VIP，第二个 = hostIP，第三个 = GIP，其余 = fakeIP 池）
+   - 定义 `CapabilityInfo` 结构（含 Subnet、域名后缀列表）
+   - 修改 gossip 传播能力信息（含子网和域名后缀）
 
-2. **Phase 2**: 去内外层封装
+2. **Phase 2**: 能力路由表 + 域名 trie
+   - 实现 IP 能力路由表（按 dstIP 最长前缀匹配）
+   - 实现域名 trie（按后缀倒序建树，最长后缀匹配）
+   - 子网路由：fakeIP 在 gateway 子网内，天然路由到该 gateway
+
+3. **Phase 3**: DNS 解析流程改造
+   - DNSHijacker 增加 mesh DNS 转发能力
+   - 查域名 trie 找到对应 gateway，通过 mesh 转发 DNS 查询
+   - Gateway 从自己子网分配 fakeIP，记录 fakeIP ↔ 域名映射
+   - 延迟解析：DNS 阶段不解析真实 IP，流量到达时才解析
+
+4. **Phase 4**: 去内外层封装
    - Mesh 链路直接传 IP 包
    - 移除 encodeMeshFrame/decodeMeshFrame
    - 实现基于 dstIP 的能力路由转发
 
-3. **Phase 3**: NAT 机制
+5. **Phase 5**: NAT 机制
    - 旁路网关实现 NAT 表
    - 源节点做 NAT（真实 IP ↔ VIP）
 
-4. **Phase 4**: 普通代理模式
-   - 集成 gVisor 用户态网络栈
-   - 实现虚拟 socket → mesh 链路
-   - Gateway 侧 fakeIP → 域名解析
+6. **Phase 6**: 普通代理模式
+   - 集成 gVisor 用户态网络栈（虚拟 socket，src=VIP 无需 NAT）
+   - Gateway 侧 fakeIP → 域名映射 → 解析真实 IP → 出站连接
 
-### 7.10 与 v1 的兼容性
+### 7.11 与 v1 的兼容性
 
 考虑渐进式迁移：
 - v2 节点可以识别 v1 的封装包（兼容期）

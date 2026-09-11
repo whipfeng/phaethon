@@ -148,6 +148,27 @@ func (m *MeshManager) isLocalVIP(ip net.IP) bool {
 	return m.subnet.Contains(ip)
 }
 
+// isLocalNetstackAddr checks if the IP is a local netstack address (GIP .3 or hostIP .2).
+// These addresses are handled by the netstack internally via InjectInbound, not by mesh routing.
+func (m *MeshManager) isLocalNetstackAddr(ip net.IP) bool {
+	if m.subnet == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	baseIP := m.subnet.IP.To4()
+	if baseIP == nil {
+		return false
+	}
+	// .2 = hostIP (TUN adapter OS side)
+	// .3 = GIP (netstack internal, DNS)
+	hostIP := net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 2}
+	gip := net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 3}
+	return ip4.Equal(hostIP) || ip4.Equal(gip)
+}
+
 func (m *MeshManager) SetTun(tun TunInterface) {
 	m.tun = tun
 }
@@ -248,6 +269,12 @@ func (m *MeshManager) UnregisterPeer(peerNodeID string) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
+	// Exclude local netstack addresses (GIP .3, hostIP .2) from mesh interception.
+	// These packets must reach InjectInbound so the netstack's DNS hijacker can process them.
+	if m.isLocalNetstackAddr(dstIP) {
+		return false
+	}
+
 	if m.isLocalVIP(dstIP) {
 		go func() {
 			if m.tun != nil {

@@ -1336,7 +1336,6 @@ func (t *TUNConfig) DirectNameserverList() []string {
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
 	Enabled        *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	VIPs           []string `yaml:"vips,omitempty" json:"vips,omitempty"`
 	NodeID         string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
 	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`
 	DomainSuffixes []string `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`
@@ -1357,14 +1356,6 @@ func (m *MeshConfig) GetAdvertise() []string {
 		return nil
 	}
 	return m.Advertise
-}
-
-// GetVIPs returns the additional mesh VIPs.
-func (m *MeshConfig) GetVIPs() []string {
-	if m == nil {
-		return nil
-	}
-	return m.VIPs
 }
 
 // GetSubnet returns the mesh subnet for this node (e.g., "100.64.0.0/20").

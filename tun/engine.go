@@ -188,15 +188,20 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 // WriteMeshPacket writes a raw IP packet directly to the TUN device so the OS
 // kernel receives it as an incoming packet from the adapter.
 func (e *Engine) WriteMeshPacket(data []byte) error {
-	if e.device == nil {
-		return fmt.Errorf("TUN device not initialized")
+	e.mu.Lock()
+	dev := e.device
+	running := e.running
+	e.mu.Unlock()
+
+	if !running || dev == nil {
+		return fmt.Errorf("TUN not ready (running=%v, device=%v)", running, dev != nil)
 	}
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
 		util.LogDebug("tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
 	}
-	_, err := e.device.Write(data)
+	_, err := dev.Write(data)
 	if err != nil {
 		util.LogWarn("tun: WriteMeshPacket device.Write failed: %v", err)
 	}
@@ -485,18 +490,31 @@ func (e *Engine) Start() error {
 	e.device = dev
 
 	// 2. Pick TUN addresses.
-	// hostIP is the address assigned to the Windows Wintun adapter itself;
+	// If ConfigureMeshAddresses was called before Start(), use those addresses.
+	// Otherwise fall back to hardcoded defaults for non-mesh mode.
+	// hostIP is the address assigned to the TUN adapter (OS side);
 	// it must NOT be added as a local netstack address, otherwise replies
 	// destined to it from the DNS hijacker / forwarders would be looped back
-	// inside netstack instead of being written back to the Wintun device.
+	// inside netstack instead of being written back to the TUN device.
 	// dnsIP is a dedicated DNS address within the TUN subnet. DNSHijacker binds
 	// to this address inside netstack. DNS queries are routed through the TUN
 	// device to reach it, eliminating the need for a host-side DNS proxy.
-	hostIP := net.ParseIP("192.0.2.2").To4()
-	dnsIP := net.ParseIP("192.0.2.3").To4()
-	e.addr = tcpip.AddrFrom4([4]byte(hostIP))
-	e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
-	e.prefixLen = 29
+	var hostIP, dnsIP net.IP
+	if e.addr == (tcpip.Address{}) {
+		hostIP = net.ParseIP("192.0.2.2").To4()
+		e.addr = tcpip.AddrFrom4([4]byte(hostIP))
+	} else {
+		hostIP = e.addr.AsSlice()
+	}
+	if e.dnsAddr == (tcpip.Address{}) {
+		dnsIP = net.ParseIP("192.0.2.3").To4()
+		e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
+	} else {
+		dnsIP = e.dnsAddr.AsSlice()
+	}
+	if e.prefixLen == 0 {
+		e.prefixLen = 29
+	}
 
 	// 3. Create netstack
 	if err := e.initStack(); err != nil {

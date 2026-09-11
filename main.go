@@ -239,43 +239,30 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	var meshMgr *mesh.MeshManager
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
 		meshSubnetStr := ruleConf.Mesh.GetSubnet()
-		var meshSubnet *net.IPNet
-		if meshSubnetStr != "" {
-			_, meshSubnet, _ = net.ParseCIDR(meshSubnetStr)
+		if meshSubnetStr == "" {
+			return nil, fmt.Errorf("mesh enabled but subnet not configured (required)")
 		}
-		if meshSubnet == nil {
-			_, meshSubnet, _ = net.ParseCIDR("100.64.0.0/16")
+		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
+		if err != nil {
+			return nil, fmt.Errorf("mesh subnet invalid: %w", err)
 		}
-		vips := ruleConf.Mesh.GetVIPs()
+		// Derive VIP from subnet (.1 address)
+		vip := make(net.IP, len(meshSubnet.IP))
+		copy(vip, meshSubnet.IP)
+		vip[len(vip)-1] |= 1 // Set last byte to .1
+		parsedVIPs := []net.IP{vip}
 		
-		// Parse VIPs from config
-		var parsedVIPs []net.IP
-		for _, vipStr := range vips {
-			if v := net.ParseIP(vipStr); v != nil {
-				parsedVIPs = append(parsedVIPs, v)
-			}
-		}
-		
-		// If no VIPs configured, derive from nodeID hash
-		if len(parsedVIPs) == 0 && ruleConf.Mesh.NodeID != "" {
-			if v := mesh.DeriveVIPFromNodeID(ruleConf.Mesh.NodeID, meshSubnet); v != nil {
-				parsedVIPs = append(parsedVIPs, v)
-				util.Logger.Printf("Mesh VIP derived from nodeID: %s -> %s", ruleConf.Mesh.NodeID, v)
-			}
-		}
-		
-		if len(parsedVIPs) > 0 && ruleConf.Mesh.NodeID != "" {
+		if ruleConf.Mesh.NodeID != "" {
 			primaryVIP := parsedVIPs[0]
-			additionalVIPs := parsedVIPs[1:]
 			domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 			advertise := ruleConf.Mesh.GetAdvertise()
-			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, additionalVIPs, meshSubnet, meshSubnetStr, domainSuffixes, advertise)
+			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise)
 			mesh.GlobalMeshManager = meshMgr
 			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, primaryVIP.String())
 			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vips=%v subnet=%s domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, parsedVIPs, meshSubnetStr, domainSuffixes, advertise)
+			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, primaryVIP, meshSubnetStr, domainSuffixes, advertise)
 		} else {
-			util.Logger.Printf("Mesh config incomplete: need node-id")
+			return nil, fmt.Errorf("mesh enabled but node-id not configured (required)")
 		}
 	}
 

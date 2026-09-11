@@ -344,6 +344,7 @@ func (m *MeshManager) UnregisterPeer(peerNodeID string) {
 // Sends raw IP packets directly over P2P (no mesh frame header).
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	if m.isLocalVIP(dstIP) {
+		util.LogDebug("[MESH] outbound: local VIP %s, writing to TUN (%d bytes)", dstIP, len(data))
 		go func() {
 			if m.tun != nil {
 				if err := m.tun.WriteMeshPacket(data); err != nil {
@@ -356,8 +357,11 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 	nextHop := m.findNextHop(dstIP)
 	if nextHop == nil {
+		util.LogDebug("[MESH] outbound: no route to %s", dstIP)
 		return false
 	}
+
+	util.LogDebug("[MESH] outbound: %s -> %s via nextHop %s (%d bytes)", extractSrcIP(data), dstIP, nextHop, len(data))
 
 	// Apply NAT if enabled and source is not a mesh address
 	pkt := make([]byte, len(data))
@@ -375,6 +379,8 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	go func() {
 		if err := m.p2p.SendMeshPacketByVIP(nextHop, pkt); err != nil {
 			util.LogWarn("[MESH] send to %s failed: %v", nextHop, err)
+		} else {
+			util.LogDebug("[MESH] sent %d bytes to %s via %s", len(pkt), dstIP, nextHop)
 		}
 	}()
 	return true
@@ -394,6 +400,8 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
+	util.LogDebug("[MESH] received %d bytes from %s, dst=%s", len(frame), fromNodeID, dstIP)
+
 	// Check if this packet is for us (dstIP is local VIP or in our subnet)
 	if m.isLocalVIP(dstIP) || m.isLocalSubnet(dstIP) {
 		pkt := make([]byte, len(frame))
@@ -409,6 +417,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 		// Determine delivery: WriteMeshPacket for VIP, InjectMeshPacket for others
 		if m.isLocalVIP(dstIP) {
+			util.LogDebug("[MESH] delivering to local VIP %s via TUN write", dstIP)
 			go func() {
 				if m.tun != nil {
 					if err := m.tun.WriteMeshPacket(pkt); err != nil {
@@ -417,6 +426,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 				}
 			}()
 		} else {
+			util.LogDebug("[MESH] injecting to netstack for %s", dstIP)
 			go func() {
 				if m.tun != nil {
 					if err := m.tun.InjectMeshPacket(pkt); err != nil {

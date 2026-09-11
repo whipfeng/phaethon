@@ -337,11 +337,11 @@ func (c *htunnelConn) Write(b []byte) (int, error) {
 }
 
 func (c *htunnelConn) heartbeatLoop() {
-	// Initial delay before first heartbeat
+	// Initial delay before first heartbeat - must be shorter than server's 30s timeout
 	select {
 	case <-c.closed:
 		return
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 	}
 
 	for {
@@ -653,11 +653,11 @@ func (c *htunnelPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 func (c *htunnelPacketConn) heartbeatLoop() {
-	// Initial delay before first heartbeat
+	// Initial delay before first heartbeat - must be shorter than server's 30s timeout
 	select {
 	case <-c.closed:
 		return
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 	}
 
 	for {

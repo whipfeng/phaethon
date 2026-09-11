@@ -44,6 +44,7 @@ type PeerSender interface {
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
 type P2PTransport interface {
 	BroadcastMeshGossip(data []byte) error
+	SendMeshGossipTo(peerNodeID string, data []byte) error
 	ListMeshPeerIDs() []string
 	SendMeshDNSQuery(peerNodeID string, domain string, queryID uint16) error
 }
@@ -391,7 +392,15 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 	if info.NodeID == m.nodeID {
 		return
 	}
-	util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%v", fromNodeID, info.Subnet, info.Routes)
+	// Filter out routes where source is ourselves (prevent echo)
+	filtered := info.Routes[:0]
+	for _, r := range info.Routes {
+		if r.SourceNodeID != m.nodeID {
+			filtered = append(filtered, r)
+		}
+	}
+	info.Routes = filtered
+	util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d", fromNodeID, info.Subnet, len(info.Routes))
 	if m.topology.UpdateFromGossip(info) {
 		m.recomputeRoutes()
 	}
@@ -426,11 +435,14 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 			entry["domainSuffixes"] = p.DomainSuffixes
 		}
 		if len(p.Routes) > 0 {
-			routeStrs := make([]string, 0, len(p.Routes))
+			routeEntries := make([]map[string]string, 0, len(p.Routes))
 			for _, r := range p.Routes {
-				routeStrs = append(routeStrs, r.String())
+				routeEntries = append(routeEntries, map[string]string{
+					"prefix":       r.PrefixStr,
+					"sourceNodeId": r.SourceNodeID,
+				})
 			}
-			entry["routes"] = routeStrs
+			entry["routes"] = routeEntries
 		}
 		peerList = append(peerList, entry)
 	}
@@ -489,32 +501,39 @@ func (m *MeshManager) recomputeRoutes() {
 	peers := m.topology.GetAllPeers()
 	util.LogDebug("[MESH] recomputeRoutes: %d peers", len(peers))
 
-	var routes []MeshRoute
+	type candidate struct {
+		sender PeerSender
+		prefix *net.IPNet
+		bits   int
+	}
+	best := make(map[string]candidate)
 
 	for _, peer := range peers {
-		if peer.NodeID == m.nodeID {
+		if peer.NodeID == m.nodeID || peer.Sender == nil {
 			continue
 		}
-		if peer.Sender == nil {
-			continue
-		}
-		// Add subnet as a route
+		// Peer's own subnet
 		if peer.Subnet != nil {
-			routes = append(routes, MeshRoute{
-				Prefix: peer.Subnet,
-				Peer:   peer.Sender,
-			})
+			bits, _ := peer.Subnet.Mask.Size()
+			key := peer.Subnet.String()
+			if existing, ok := best[key]; !ok || bits > existing.bits {
+				best[key] = candidate{peer.Sender, peer.Subnet, bits}
+			}
 		}
-		// Add advertised routes
+		// Routes synced from this peer
 		for _, r := range peer.Routes {
-			routes = append(routes, MeshRoute{
-				Prefix: r,
-				Peer:   peer.Sender,
-			})
+			bits, _ := r.Prefix.Mask.Size()
+			if existing, ok := best[r.PrefixStr]; !ok || bits > existing.bits {
+				best[r.PrefixStr] = candidate{peer.Sender, r.Prefix, bits}
+			}
 		}
 	}
 
-	// Sort by prefix length (longest first for longest prefix match)
+	routes := make([]MeshRoute, 0, len(best))
+	for _, c := range best {
+		routes = append(routes, MeshRoute{Prefix: c.prefix, Peer: c.sender})
+	}
+
 	sort.Slice(routes, func(i, j int) bool {
 		lenI, _ := routes[i].Prefix.Mask.Size()
 		lenJ, _ := routes[j].Prefix.Mask.Size()
@@ -569,19 +588,44 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			info := GossipInfo{
-				NodeID:         m.nodeID,
-				Subnet:         m.subnetStr,
-				DomainSuffixes: m.domainSuffixes,
-				Routes:         m.advertise,
-			}
-			data, err := json.Marshal(info)
-			if err != nil {
-				continue
-			}
-			if m.p2p != nil {
-				m.p2p.BroadcastMeshGossip(data)
-			}
+			m.broadcastGossip()
 		}
+	}
+}
+
+func (m *MeshManager) broadcastGossip() {
+	if m.p2p == nil {
+		return
+	}
+	peerIDs := m.p2p.ListMeshPeerIDs()
+	if len(peerIDs) == 0 {
+		return
+	}
+
+	// Own routes: subnet + configured advertise, all with src=self
+	ownRoutes := []GossipRoute{{SourceNodeID: m.nodeID, Prefix: m.subnetStr}}
+	for _, r := range m.advertise {
+		ownRoutes = append(ownRoutes, GossipRoute{SourceNodeID: m.nodeID, Prefix: r})
+	}
+
+	for _, peerID := range peerIDs {
+		// Split horizon: exclude routes from this recipient
+		learnedRoutes := m.topology.CollectRoutesForGossip(peerID)
+
+		allRoutes := make([]GossipRoute, 0, len(ownRoutes)+len(learnedRoutes))
+		allRoutes = append(allRoutes, ownRoutes...)
+		allRoutes = append(allRoutes, learnedRoutes...)
+
+		info := GossipInfo{
+			NodeID:         m.nodeID,
+			Subnet:         m.subnetStr,
+			DomainSuffixes: m.domainSuffixes,
+			Routes:         allRoutes,
+		}
+		data, err := json.Marshal(info)
+		if err != nil {
+			continue
+		}
+		m.p2p.SendMeshGossipTo(peerID, data)
 	}
 }

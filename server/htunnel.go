@@ -444,16 +444,23 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	hasTarget := ch.targetConn != nil
 	hasRev := ch.revConn != nil
 	ch.mu.Unlock()
-
 	if contentSeq == 1 {
 		if isReverse {
 			if port == reverse.BindPortControl {
-				handleControlConnection(newHTunnelServerConn(ch, s), address)
+				ctrlConn := newHTunnelServerConn(ch, s)
+				ch.mu.Lock()
+				ch.revConn = ctrlConn
+				ch.mu.Unlock()
+				go handleControlConnection(ctrlConn, address)
 				connOk = true
 				return
 			}
 			if port == reverse.BindPortP2P {
-				handleP2PConnection(newHTunnelServerConn(ch, s), address)
+				p2pConn := newHTunnelServerConn(ch, s)
+				ch.mu.Lock()
+				ch.revConn = p2pConn
+				ch.mu.Unlock()
+				go handleP2PConnection(p2pConn, address)
 				connOk = true
 				return
 			}

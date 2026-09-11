@@ -197,7 +197,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
 	if !ok {
-		util.LogDebug("[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
+		util.LogInfo("[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
 		return
 	}
 
@@ -228,7 +228,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	for {
 		conn, err := p2pDialer.DialP2P()
 		if err != nil {
-			util.LogDebug("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
+			util.LogInfo("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
 			peer.Status = "failed"
 			select {
 			case <-time.After(backoff):
@@ -611,6 +611,34 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	for _, p := range peers {
 		enqueueWrite(p, reverse.FrameData, gossip)
 	}
+	return nil
+}
+
+// SendMeshGossipTo sends a mesh_gossip JSON command to a specific mesh peer.
+func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
+	cmd := map[string]interface{}{
+		"cmd":     "mesh_gossip",
+		"payload": json.RawMessage(data),
+	}
+	gossip, err := json.Marshal(cmd)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	var target *Peer
+	for _, p := range m.peers {
+		if p.MeshNodeID == peerNodeID {
+			target = p
+			break
+		}
+	}
+	m.mu.Unlock()
+
+	if target == nil {
+		return nil
+	}
+	enqueueWrite(target, reverse.FrameData, gossip)
 	return nil
 }
 

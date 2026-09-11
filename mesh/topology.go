@@ -7,23 +7,36 @@ import (
 	"time"
 )
 
+// PeerRouteEntry represents a route with its original source node.
+type PeerRouteEntry struct {
+	SourceNodeID string
+	Prefix       *net.IPNet
+	PrefixStr    string
+}
+
 // PeerInfo holds the information received from a peer via gossip.
 type PeerInfo struct {
 	NodeID         string
-	Sender         PeerSender // direct reference to peer connection
-	Subnet         *net.IPNet // peer's mesh subnet (also a route)
-	SubnetStr      string     // subnet CIDR string
-	DomainSuffixes []string   // domain suffixes this peer can resolve
-	Routes         []*net.IPNet // additional routes this peer can reach
+	Sender         PeerSender        // direct reference to peer connection
+	Subnet         *net.IPNet        // peer's mesh subnet (also a route)
+	SubnetStr      string            // subnet CIDR string
+	DomainSuffixes []string          // domain suffixes this peer can resolve
+	Routes         []PeerRouteEntry  // routes synced from this peer (with source tracking)
 	LastSeen       time.Time
+}
+
+// GossipRoute is a serializable route entry with source tracking.
+type GossipRoute struct {
+	SourceNodeID string `json:"sourceNodeId"`
+	Prefix       string `json:"prefix"`
 }
 
 // GossipInfo is the gossip payload exchanged between nodes.
 type GossipInfo struct {
-	NodeID         string   `json:"nodeId"`
-	Subnet         string   `json:"subnet"`
-	DomainSuffixes []string `json:"domainSuffixes,omitempty"`
-	Routes         []string `json:"routes,omitempty"`
+	NodeID         string        `json:"nodeId"`
+	Subnet         string        `json:"subnet"`
+	DomainSuffixes []string      `json:"domainSuffixes,omitempty"`
+	Routes         []GossipRoute `json:"routes,omitempty"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.
@@ -58,13 +71,17 @@ func (t *Topology) UpdateFromGossip(info GossipInfo) bool {
 	}
 
 	// Parse routes
-	var routes []*net.IPNet
+	var routes []PeerRouteEntry
 	for _, r := range info.Routes {
-		_, ipNet, err := net.ParseCIDR(r)
+		_, ipNet, err := net.ParseCIDR(r.Prefix)
 		if err != nil {
 			continue
 		}
-		routes = append(routes, ipNet)
+		routes = append(routes, PeerRouteEntry{
+			SourceNodeID: r.SourceNodeID,
+			Prefix:       ipNet,
+			PrefixStr:    r.Prefix,
+		})
 	}
 
 	// Check if anything changed
@@ -83,7 +100,7 @@ func (t *Topology) UpdateFromGossip(info GossipInfo) bool {
 				}
 			}
 		}
-		if len(existing.Routes) != len(routes) {
+		if !routesEqual(existing.Routes, routes) {
 			changed = true
 		}
 	}
@@ -201,4 +218,54 @@ func DeriveGIPFromSubnet(subnet *net.IPNet) net.IP {
 	copy(gip, baseIP)
 	gip[3] |= 3
 	return gip
+}
+
+// routesEqual compares two route slices for equality.
+func routesEqual(a, b []PeerRouteEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].SourceNodeID != b[i].SourceNodeID || a[i].PrefixStr != b[i].PrefixStr {
+			return false
+		}
+	}
+	return true
+}
+
+// CollectRoutesForGossip builds the list of routes to advertise to a specific peer.
+// Excludes routes where SourceNodeID == excludeNodeID (split horizon).
+// For duplicate prefixes, keeps the longest prefix match.
+func (t *Topology) CollectRoutesForGossip(excludeNodeID string) []GossipRoute {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	type candidate struct {
+		source string
+		prefix string
+		bits   int
+	}
+	best := make(map[string]candidate)
+
+	for _, peer := range t.peers {
+		for _, r := range peer.Routes {
+			if r.SourceNodeID == excludeNodeID {
+				continue
+			}
+			bits, _ := r.Prefix.Mask.Size()
+			if existing, ok := best[r.PrefixStr]; ok {
+				if bits > existing.bits {
+					best[r.PrefixStr] = candidate{r.SourceNodeID, r.PrefixStr, bits}
+				}
+			} else {
+				best[r.PrefixStr] = candidate{r.SourceNodeID, r.PrefixStr, bits}
+			}
+		}
+	}
+
+	result := make([]GossipRoute, 0, len(best))
+	for _, c := range best {
+		result = append(result, GossipRoute{SourceNodeID: c.source, Prefix: c.prefix})
+	}
+	return result
 }

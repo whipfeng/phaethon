@@ -176,7 +176,7 @@ func (h *DNSHijacker) serveLoop() {
 		// Fall back to local pool
 		if resp == nil {
 			fakeIP := h.pool.Lookup(domain)
-			util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
+			util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
 			resp = buildDNSResponse(packet, fakeIP.To4())
 		}
 

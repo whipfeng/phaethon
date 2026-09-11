@@ -1,442 +1,156 @@
 package mesh
 
 import (
-	"container/heap"
 	"net"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Topology tracks the mesh network graph and computes routing tables.
-type Topology struct {
-	mu    sync.RWMutex
-	nodes map[string]*TopoNode
-}
-
-// TopoNode represents a node in the mesh topology.
-type TopoNode struct {
+// PeerInfo holds the information received from a peer via gossip.
+type PeerInfo struct {
 	NodeID         string
-	VIPs           []net.IP           // all VIPs this node owns (first is primary)
-	Subnet         string             // node's /20 subnet (e.g., "100.64.0.0/20")
-	DomainSuffixes []string           // domain suffixes this node can resolve
-	Links          map[string]*TopoLink // peerNodeID → link
-	Routes         []RouteInfo        // advertised prefix routes
+	Sender         PeerSender // direct reference to peer connection
+	Subnet         *net.IPNet // peer's mesh subnet (also a route)
+	SubnetStr      string     // subnet CIDR string
+	DomainSuffixes []string   // domain suffixes this peer can resolve
+	Routes         []*net.IPNet // additional routes this peer can reach
 	LastSeen       time.Time
 }
 
-// TopoLink represents a direct link between two nodes.
-type TopoLink struct {
-	PeerNodeID string
-	Cost       int
-	LastSeen   time.Time
+// GossipInfo is the gossip payload exchanged between nodes.
+type GossipInfo struct {
+	NodeID         string   `json:"nodeId"`
+	Subnet         string   `json:"subnet"`
+	DomainSuffixes []string `json:"domainSuffixes,omitempty"`
+	Routes         []string `json:"routes,omitempty"`
 }
 
-// TopologyInfo is the gossip payload exchanged between nodes.
-type TopologyInfo struct {
-	NodeID         string      `json:"nodeId"`
-	VIPs           []string    `json:"vips"`
-	Subnet         string      `json:"subnet,omitempty"`
-	DomainSuffixes []string    `json:"domainSuffixes,omitempty"`
-	Links          []LinkInfo  `json:"links"`
-	Routes         []RouteInfo `json:"routes,omitempty"`
+// Topology tracks mesh peers and their advertised capabilities.
+type Topology struct {
+	mu    sync.RWMutex
+	peers map[string]*PeerInfo // nodeID → peer info
 }
 
-// LinkInfo is a serializable link entry.
-type LinkInfo struct {
-	PeerNodeID string `json:"peerNodeId"`
-	PeerVIP    string `json:"peerVip,omitempty"`
-	Cost       int    `json:"cost"`
-}
-
-// RouteInfo advertises a prefix that this node can reach.
-type RouteInfo struct {
-	Prefix string `json:"prefix"` // CIDR like "0.0.0.0/0" or "192.168.1.0/24"
-	Cost   int    `json:"cost"`   // additional cost (default 0)
-}
-
-// NewTopology creates an empty topology graph.
+// NewTopology creates an empty topology.
 func NewTopology() *Topology {
 	return &Topology{
-		nodes: make(map[string]*TopoNode),
+		peers: make(map[string]*PeerInfo),
 	}
 }
 
-// UpdateFromGossip merges a topology announcement from a peer.
+// UpdateFromGossip processes a gossip message from a peer.
 // Returns true if the topology changed (routes may need recomputation).
-func (t *Topology) UpdateFromGossip(info TopologyInfo) bool {
+func (t *Topology) UpdateFromGossip(info GossipInfo) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	node, exists := t.nodes[info.NodeID]
-	if !exists {
-		node = &TopoNode{
-			NodeID: info.NodeID,
-			Links:  make(map[string]*TopoLink),
+	existing, exists := t.peers[info.NodeID]
+
+	// Parse subnet
+	var subnet *net.IPNet
+	if info.Subnet != "" {
+		_, ipNet, err := net.ParseCIDR(info.Subnet)
+		if err != nil {
+			return false
 		}
-		t.nodes[info.NodeID] = node
+		subnet = ipNet
 	}
 
-	changed := false
-
-	// Update VIPs
-	if len(info.VIPs) > 0 {
-		newVIPs := make([]net.IP, 0, len(info.VIPs))
-		for _, v := range info.VIPs {
-			if ip := net.ParseIP(v); ip != nil {
-				newVIPs = append(newVIPs, ip)
-			}
+	// Parse routes
+	var routes []*net.IPNet
+	for _, r := range info.Routes {
+		_, ipNet, err := net.ParseCIDR(r)
+		if err != nil {
+			continue
 		}
-		// Check if VIPs actually changed
-		if len(newVIPs) != len(node.VIPs) {
+		routes = append(routes, ipNet)
+	}
+
+	// Check if anything changed
+	changed := !exists
+	if exists {
+		if existing.SubnetStr != info.Subnet {
+			changed = true
+		}
+		if len(existing.DomainSuffixes) != len(info.DomainSuffixes) {
 			changed = true
 		} else {
-			for i := range newVIPs {
-				if !newVIPs[i].Equal(node.VIPs[i]) {
+			for i := range existing.DomainSuffixes {
+				if existing.DomainSuffixes[i] != info.DomainSuffixes[i] {
 					changed = true
 					break
 				}
 			}
 		}
-		node.VIPs = newVIPs
-	}
-	node.LastSeen = time.Now()
-
-	// Update subnet
-	if info.Subnet != "" && info.Subnet != node.Subnet {
-		node.Subnet = info.Subnet
-		changed = true
-	}
-
-	// Update domain suffixes
-	if len(info.DomainSuffixes) > 0 || len(node.DomainSuffixes) > 0 {
-		if len(info.DomainSuffixes) != len(node.DomainSuffixes) {
-			changed = true
-		} else {
-			for i := range info.DomainSuffixes {
-				if info.DomainSuffixes[i] != node.DomainSuffixes[i] {
-					changed = true
-					break
-				}
-			}
-		}
-		node.DomainSuffixes = info.DomainSuffixes
-	}
-
-	// Update advertised routes
-	if len(info.Routes) > 0 || len(node.Routes) > 0 {
-		if len(info.Routes) != len(node.Routes) {
+		if len(existing.Routes) != len(routes) {
 			changed = true
 		}
-		node.Routes = info.Routes
 	}
 
-	newLinks := make(map[string]bool)
-	for _, li := range info.Links {
-		newLinks[li.PeerNodeID] = true
-		if _, ok := node.Links[li.PeerNodeID]; !ok {
-			changed = true
-		}
-		node.Links[li.PeerNodeID] = &TopoLink{
-			PeerNodeID: li.PeerNodeID,
-			Cost:       li.Cost,
-			LastSeen:   time.Now(),
-		}
+	// Update peer info, preserving Sender if it was already set
+	var sender PeerSender
+	if exists && existing != nil {
+		sender = existing.Sender
 	}
-	for peerID := range node.Links {
-		if !newLinks[peerID] {
-			changed = true
-			delete(node.Links, peerID)
-		}
-	}
-
-	// Learn neighbor VIPs from the gossip
-	for _, li := range info.Links {
-		if li.PeerVIP != "" {
-			if peerNode, exists := t.nodes[li.PeerNodeID]; !exists {
-				t.nodes[li.PeerNodeID] = &TopoNode{
-					NodeID:   li.PeerNodeID,
-					VIPs:     []net.IP{net.ParseIP(li.PeerVIP)},
-					Links:    make(map[string]*TopoLink),
-					LastSeen: time.Now(),
-				}
-				changed = true
-			} else if len(peerNode.VIPs) == 0 {
-				peerNode.VIPs = []net.IP{net.ParseIP(li.PeerVIP)}
-				changed = true
-			}
-		}
+	t.peers[info.NodeID] = &PeerInfo{
+		NodeID:         info.NodeID,
+		Sender:         sender,
+		Subnet:         subnet,
+		SubnetStr:      info.Subnet,
+		DomainSuffixes: info.DomainSuffixes,
+		Routes:         routes,
+		LastSeen:       time.Now(),
 	}
 
 	return changed
 }
 
-// EnsureNode creates a node in the topology if it doesn't exist.
-func (t *Topology) EnsureNode(nodeID, vip string) {
+// RemovePeer removes a peer from the topology.
+func (t *Topology) RemovePeer(nodeID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	delete(t.peers, nodeID)
+}
 
-	if _, exists := t.nodes[nodeID]; !exists {
-		t.nodes[nodeID] = &TopoNode{
+// RegisterSender stores a PeerSender for a peer, creating the entry if needed.
+func (t *Topology) RegisterSender(sender PeerSender) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	nodeID := sender.GetNodeID()
+	if peer, ok := t.peers[nodeID]; ok {
+		peer.Sender = sender
+	} else {
+		t.peers[nodeID] = &PeerInfo{
 			NodeID:   nodeID,
-			VIPs:     []net.IP{net.ParseIP(vip)},
-			Links:    make(map[string]*TopoLink),
+			Sender:   sender,
 			LastSeen: time.Now(),
 		}
 	}
 }
 
-// AddDirectLink records a direct link from thisNode to peerNode.
-func (t *Topology) AddDirectLink(thisNodeID, thisVIP string, peerNodeID, peerVIP string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	node, exists := t.nodes[thisNodeID]
-	if !exists {
-		node = &TopoNode{
-			NodeID: thisNodeID,
-			VIPs:   []net.IP{net.ParseIP(thisVIP)},
-			Links:  make(map[string]*TopoLink),
-		}
-		t.nodes[thisNodeID] = node
-	}
-
-	node.Links[peerNodeID] = &TopoLink{
-		PeerNodeID: peerNodeID,
-		Cost:       1,
-		LastSeen:   time.Now(),
-	}
-	node.LastSeen = time.Now()
-
-	peer, exists := t.nodes[peerNodeID]
-	if !exists {
-		peer = &TopoNode{
-			NodeID:   peerNodeID,
-			Links:    make(map[string]*TopoLink),
-			LastSeen: time.Now(),
-		}
-		if peerVIP != "" {
-			peer.VIPs = []net.IP{net.ParseIP(peerVIP)}
-		}
-		t.nodes[peerNodeID] = peer
-	} else if len(peer.VIPs) == 0 && peerVIP != "" {
-		peer.VIPs = []net.IP{net.ParseIP(peerVIP)}
-	}
-	peer.Links[thisNodeID] = &TopoLink{
-		PeerNodeID: thisNodeID,
-		Cost:       1,
-		LastSeen:   time.Now(),
-	}
-}
-
-// SetNodeVIPs updates all VIPs for a node in the topology.
-func (t *Topology) SetNodeVIPs(nodeID string, vips []net.IP) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	node, exists := t.nodes[nodeID]
-	if !exists {
-		node = &TopoNode{
-			NodeID: nodeID,
-			Links:  make(map[string]*TopoLink),
-		}
-		t.nodes[nodeID] = node
-	}
-	node.VIPs = vips
-	node.LastSeen = time.Now()
-}
-
-// RemoveNode removes a node and all links to it.
-func (t *Topology) RemoveNode(nodeID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	delete(t.nodes, nodeID)
-	for _, n := range t.nodes {
-		delete(n.Links, nodeID)
-	}
-}
-
-// GetLocalInfo returns this node's topology info for gossip.
-func (t *Topology) GetLocalInfo(nodeID string, subnet string, domainSuffixes []string, advertise []string, allVIPs []net.IP) TopologyInfo {
+// GetAllPeers returns a snapshot of all peers.
+func (t *Topology) GetAllPeers() []*PeerInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	info := TopologyInfo{NodeID: nodeID}
-	node, ok := t.nodes[nodeID]
-	if !ok {
-		return info
+	result := make([]*PeerInfo, 0, len(t.peers))
+	for _, p := range t.peers {
+		result = append(result, p)
 	}
-	// Include all VIPs
-	for _, v := range allVIPs {
-		info.VIPs = append(info.VIPs, v.String())
-	}
-	// Include subnet and domain suffixes
-	info.Subnet = subnet
-	info.DomainSuffixes = domainSuffixes
-	for _, link := range node.Links {
-		peerVIP := ""
-		if peerNode, ok := t.nodes[link.PeerNodeID]; ok && len(peerNode.VIPs) > 0 {
-			peerVIP = peerNode.VIPs[0].String()
-		}
-		info.Links = append(info.Links, LinkInfo{
-			PeerNodeID: link.PeerNodeID,
-			PeerVIP:    peerVIP,
-			Cost:       link.Cost,
-		})
-	}
-	// Advertise configured prefixes
-	for _, prefix := range advertise {
-		info.Routes = append(info.Routes, RouteInfo{
-			Prefix: prefix,
-			Cost:   0,
-		})
-	}
-	return info
+	return result
 }
 
-// ComputeRoutes runs Dijkstra from myNodeID and returns
-// a map of dstNodeID → nextHopNodeID.
-func (t *Topology) ComputeRoutes(myNodeID string) map[string]string {
+// GetPeer returns a specific peer by nodeID.
+func (t *Topology) GetPeer(nodeID string) *PeerInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-
-	if _, ok := t.nodes[myNodeID]; !ok {
-		return nil
-	}
-
-	dist := make(map[string]int)
-	prev := make(map[string]string)
-	visited := make(map[string]bool)
-
-	for id := range t.nodes {
-		dist[id] = int(^uint(0) >> 1)
-	}
-	dist[myNodeID] = 0
-
-	pq := &priorityQueue{}
-	heap.Init(pq)
-	heap.Push(pq, &pqItem{nodeID: myNodeID, dist: 0})
-
-	for pq.Len() > 0 {
-		cur := heap.Pop(pq).(*pqItem)
-		if visited[cur.nodeID] {
-			continue
-		}
-		visited[cur.nodeID] = true
-
-		node := t.nodes[cur.nodeID]
-		if node == nil {
-			continue
-		}
-		for peerID, link := range node.Links {
-			if visited[peerID] {
-				continue
-			}
-			alt := dist[cur.nodeID] + link.Cost
-			if alt < dist[peerID] {
-				dist[peerID] = alt
-				prev[peerID] = cur.nodeID
-				heap.Push(pq, &pqItem{nodeID: peerID, dist: alt})
-			}
-		}
-	}
-
-	routes := make(map[string]string)
-	for dstID := range t.nodes {
-		if dstID == myNodeID {
-			continue
-		}
-		if _, reachable := dist[dstID]; !reachable {
-			continue
-		}
-		if dist[dstID] == int(^uint(0)>>1) {
-			continue
-		}
-		next := dstID
-		for prev[next] != myNodeID && prev[next] != "" {
-			next = prev[next]
-		}
-		if prev[next] == myNodeID || next == dstID {
-			routes[dstID] = next
-		}
-	}
-	return routes
-}
-
-// GetNodeVIP returns the primary VIP of a node by its nodeID.
-func (t *Topology) GetNodeVIP(nodeID string) net.IP {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	if node, ok := t.nodes[nodeID]; ok && len(node.VIPs) > 0 {
-		return node.VIPs[0]
-	}
-	return nil
-}
-
-// GetNodeAllVIPs returns all VIPs of a node by its nodeID.
-func (t *Topology) GetNodeAllVIPs(nodeID string) []net.IP {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	if node, ok := t.nodes[nodeID]; ok {
-		return node.VIPs
-	}
-	return nil
-}
-
-// GatewayRoute represents a prefix advertised by a gateway node.
-type GatewayRoute struct {
-	NodeID string // Gateway node ID
-	Prefix string // Advertised prefix (e.g., "0.0.0.0/0")
-	Cost   int    // Advertised cost
-}
-
-// GetAllGatewayRoutes collects all prefix advertisements from all nodes.
-func (t *Topology) GetAllGatewayRoutes() []GatewayRoute {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	var routes []GatewayRoute
-	for _, node := range t.nodes {
-		if node.Routes != nil {
-			for _, r := range node.Routes {
-				routes = append(routes, GatewayRoute{
-					NodeID: node.NodeID,
-					Prefix: r.Prefix,
-					Cost:   r.Cost,
-				})
-			}
-		}
-	}
-	return routes
-}
-
-// GetNodeSubnet returns the subnet string for a given node.
-func (t *Topology) GetNodeSubnet(nodeID string) string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if node, ok := t.nodes[nodeID]; ok {
-		return node.Subnet
-	}
-	return ""
-}
-
-// GetNodeDomainSuffixes returns the domain suffixes for a given node.
-func (t *Topology) GetNodeDomainSuffixes(nodeID string) []string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if node, ok := t.nodes[nodeID]; ok {
-		return node.DomainSuffixes
-	}
-	return nil
+	return t.peers[nodeID]
 }
 
 // FindGatewayByDomainSuffix finds the best gateway for a domain using longest suffix match.
-// Returns the gateway nodeID and the matched suffix length, or ("", 0) if no match.
-// Both the domain and configured suffixes should be bare domains like "google.com" (no leading dot).
-// "google.com" matches "google.com" and all subdomains like "api.google.com".
+// Returns the peer's nodeID and the matched suffix length, or ("", 0) if no match.
+// Domain suffixes should be bare domains like "github.com" (no leading dot).
 func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -445,14 +159,13 @@ func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
 	bestNodeID := ""
 	bestLen := 0
 
-	for _, node := range t.nodes {
-		for _, suffix := range node.DomainSuffixes {
+	for _, peer := range t.peers {
+		for _, suffix := range peer.DomainSuffixes {
 			suffix = strings.TrimPrefix(strings.ToLower(suffix), ".")
-			// Match: domain ends with "." + suffix, or domain equals suffix
 			if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
 				if len(suffix) > bestLen {
 					bestLen = len(suffix)
-					bestNodeID = node.NodeID
+					bestNodeID = peer.NodeID
 				}
 			}
 		}
@@ -460,92 +173,32 @@ func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
 	return bestNodeID, bestLen
 }
 
-// FindGatewayBySubnet finds which gateway's subnet contains the given IP.
-// Returns the gateway nodeID or "" if no match.
-func (t *Topology) FindGatewayBySubnet(ip net.IP) string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	for _, node := range t.nodes {
-		if node.Subnet == "" {
-			continue
-		}
-		_, subnet, err := net.ParseCIDR(node.Subnet)
-		if err != nil {
-			continue
-		}
-		if subnet.Contains(ip) {
-			return node.NodeID
-		}
+// DeriveVIPFromSubnet computes the .1 VIP address from a subnet.
+func DeriveVIPFromSubnet(subnet *net.IPNet) net.IP {
+	if subnet == nil {
+		return nil
 	}
-	return ""
-}
-
-// VIPToNodeID maps a VIP address to a node ID.
-func (t *Topology) VIPToNodeID(vip net.IP) string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	for _, node := range t.nodes {
-		for _, v := range node.VIPs {
-			if v != nil && v.Equal(vip) {
-				return node.NodeID
-			}
-		}
+	baseIP := subnet.IP.To4()
+	if baseIP == nil {
+		return nil
 	}
-	return ""
+	vip := make(net.IP, 4)
+	copy(vip, baseIP)
+	vip[3] |= 1
+	return vip
 }
 
-// GetAllNodes returns a snapshot of all nodes for admin API.
-func (t *Topology) GetAllNodes() []TopoNode {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	result := make([]TopoNode, 0, len(t.nodes))
-	for _, n := range t.nodes {
-		links := make([]LinkInfo, 0, len(n.Links))
-		for _, l := range n.Links {
-			links = append(links, LinkInfo{PeerNodeID: l.PeerNodeID, Cost: l.Cost})
-		}
-		result = append(result, TopoNode{
-			NodeID:         n.NodeID,
-			VIPs:           n.VIPs,
-			Subnet:         n.Subnet,
-			DomainSuffixes: n.DomainSuffixes,
-			Routes:         n.Routes,
-			LastSeen:       n.LastSeen,
-			Links:          make(map[string]*TopoLink),
-		})
-		for id, l := range n.Links {
-			result[len(result)-1].Links[id] = &TopoLink{
-				PeerNodeID: l.PeerNodeID,
-				Cost:       l.Cost,
-				LastSeen:   l.LastSeen,
-			}
-		}
+// DeriveGIPFromSubnet computes the .3 GIP address from a subnet.
+func DeriveGIPFromSubnet(subnet *net.IPNet) net.IP {
+	if subnet == nil {
+		return nil
 	}
-	return result
-}
-
-// priority queue for Dijkstra
-type pqItem struct {
-	nodeID string
-	dist   int
-	index  int
-}
-
-type priorityQueue []*pqItem
-
-func (pq priorityQueue) Len() int            { return len(pq) }
-func (pq priorityQueue) Less(i, j int) bool  { return pq[i].dist < pq[j].dist }
-func (pq priorityQueue) Swap(i, j int)       { pq[i], pq[j] = pq[j], pq[i]; pq[i].index = i; pq[j].index = j }
-func (pq *priorityQueue) Push(x interface{}) { item := x.(*pqItem); item.index = len(*pq); *pq = append(*pq, item) }
-func (pq *priorityQueue) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil
-	item.index = -1
-	*pq = old[:n-1]
-	return item
+	baseIP := subnet.IP.To4()
+	if baseIP == nil {
+		return nil
+	}
+	gip := make(net.IP, 4)
+	copy(gip, baseIP)
+	gip[3] |= 3
+	return gip
 }

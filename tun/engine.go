@@ -50,9 +50,14 @@ type Engine struct {
 	dataDir   string
 
 	mu      sync.Mutex
-	running bool
-	closeCh chan struct{}
-	wg      sync.WaitGroup
+	running bool      // gVisor stack is running
+	closeCh chan struct{} // gVisor stack close signal
+	wg      sync.WaitGroup // gVisor stack goroutines
+
+	// TUN device state (optional, independent of stack)
+	tunRunning bool           // TUN device is active
+	tunCloseCh chan struct{}  // TUN goroutine exit signal
+	tunWG      sync.WaitGroup // TUN goroutines (readLoop/writeLoop)
 
 	// packet counters for diagnostics
 	readPackets  atomic.Uint64
@@ -68,7 +73,8 @@ type Engine struct {
 	// meshInterceptor diverts mesh-subnet packets before netstack.
 	// Returns true if the packet was handled.
 	meshInterceptor func(dstIP net.IP, data []byte) bool
-	localMeshVIPs     map[string]bool // all local mesh VIPs as string keys
+	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
+	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -138,6 +144,7 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 
 	e.addr = tcpip.AddrFrom4Slice(hostIP)
 	e.dnsAddr = tcpip.AddrFrom4Slice(gip)
+	e.meshSubnet = subnet
 
 	ones, _ := subnet.Mask.Size()
 	if ones > 28 {
@@ -323,6 +330,13 @@ func (e *Engine) IsEnabled() bool {
 	return e.running
 }
 
+// IsTUNRunning reports whether the TUN device is active.
+func (e *Engine) IsTUNRunning() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tunRunning
+}
+
 const maxTUNLogs = 32
 
 func (e *Engine) logEvent(format string, args ...interface{}) {
@@ -460,36 +474,16 @@ func (e *Engine) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
 	}
 }
 
-// Start brings up the TUN device, configures routes, and starts netstack.
-func (e *Engine) Start() error {
+// StartStack starts the gVisor netstack (FakeIP, DNS hijacker, TCP/UDP forwarders).
+// This is the core networking layer and should always be running.
+func (e *Engine) StartStack() error {
 	e.mu.Lock()
 	if e.running {
 		e.mu.Unlock()
-		return fmt.Errorf("tun engine already running")
+		return fmt.Errorf("stack already running")
 	}
 
-	// 0. Ensure admin privileges (Windows UAC auto-elevation)
-	if err := EnsureAdminPrivileges(); err != nil {
-		e.mu.Unlock()
-		e.logEvent("TUN ensure admin privileges failed: %v", err)
-		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("admin privileges: %w", err))
-		return err
-	}
-
-	// 0.5. Clean up residual resources from previous abnormal exit
-	CleanupResidual()
-
-	// 1. Create TUN device
-	dev, err := CreateDevice()
-	if err != nil {
-		e.mu.Unlock()
-		e.logEvent("TUN create device failed: %v", err)
-		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("create device: %w", err))
-		return fmt.Errorf("tun: create device: %w", err)
-	}
-	e.device = dev
-
-	// 2. Pick TUN addresses.
+	// Address determination (always needed for netstack)
 	// If ConfigureMeshAddresses was called before Start(), use those addresses.
 	// Otherwise fall back to hardcoded defaults for non-mesh mode.
 	// hostIP is the address assigned to the TUN adapter (OS side);
@@ -499,50 +493,98 @@ func (e *Engine) Start() error {
 	// dnsIP is a dedicated DNS address within the TUN subnet. DNSHijacker binds
 	// to this address inside netstack. DNS queries are routed through the TUN
 	// device to reach it, eliminating the need for a host-side DNS proxy.
-	var hostIP, dnsIP net.IP
 	if e.addr == (tcpip.Address{}) {
-		hostIP = net.ParseIP("192.0.2.2").To4()
+		hostIP := net.ParseIP("192.0.2.2").To4()
 		e.addr = tcpip.AddrFrom4([4]byte(hostIP))
-	} else {
-		hostIP = e.addr.AsSlice()
 	}
 	if e.dnsAddr == (tcpip.Address{}) {
-		dnsIP = net.ParseIP("192.0.2.3").To4()
+		dnsIP := net.ParseIP("192.0.2.3").To4()
 		e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
-	} else {
-		dnsIP = e.dnsAddr.AsSlice()
 	}
 	if e.prefixLen == 0 {
 		e.prefixLen = 29
 	}
 
-	// 3. Create netstack
+	// gVisor netstack
 	if err := e.initStack(); err != nil {
-		dev.Close()
 		e.mu.Unlock()
 		return fmt.Errorf("tun: init netstack: %w", err)
 	}
 
-	// 4. Init Fake-IP pool (no netstack registration needed; promiscuous mode
-	// ensures the TCP/UDP forwarders receive packets for all Fake-IP destinations)
-	e.fakeIP = NewFakeIPPool()
+	// Fake-IP pool from mesh subnet
+	if e.meshSubnet == nil {
+		e.mu.Unlock()
+		return fmt.Errorf("mesh subnet not configured")
+	}
+	e.fakeIP = NewFakeIPPoolWithSubnet(e.meshSubnet, 3) // skip .1/.2/.3
 	e.fakeIP.SetOnChange(e.notifyStatsChanged)
 
-	// 5. Init DNS hijacker
+	// DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
 	if err := e.dnsHijack.Start(&e.wg); err != nil {
 		e.dnsHijack.Stop()
 		e.wg.Wait()
-		dev.Close()
 		e.ns.Close()
 		e.mu.Unlock()
 		return fmt.Errorf("tun: start dns hijacker: %w", err)
 	}
 
-	// 6. LAN/private subnets should bypass TUN to avoid breaking local network
-	//    connectivity. Proxy server exclusion routes are intentionally omitted:
-	//    outbound sockets are bound to the correct physical interface by the
-	//    dialer package, so proxy traffic does not loop back into TUN.
+	// Start stack-level goroutines
+	e.running = true
+	e.closeCh = make(chan struct{})
+	e.mu.Unlock()
+
+	e.wg.Add(2)
+	go e.acceptTCP()
+	go e.acceptUDP()
+
+	// Diagnostic goroutine: log packet counts every 5 seconds.
+	e.wg.Add(1)
+	go e.logPacketCounts()
+
+	e.logEvent("gVisor netstack started")
+	util.LogInfo("gVisor netstack started")
+	return nil
+}
+
+// StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
+// Requires StartStack() to be called first.
+func (e *Engine) StartTUN() error {
+	e.mu.Lock()
+	if !e.running {
+		e.mu.Unlock()
+		return fmt.Errorf("stack not running, call StartStack() first")
+	}
+	if e.tunRunning {
+		e.mu.Unlock()
+		return fmt.Errorf("TUN already running")
+	}
+
+	// Ensure admin privileges (Windows UAC auto-elevation)
+	if err := EnsureAdminPrivileges(); err != nil {
+		e.mu.Unlock()
+		e.logEvent("TUN ensure admin privileges failed: %v", err)
+		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("admin privileges: %w", err))
+		return err
+	}
+
+	// Clean up residual resources from previous abnormal exit
+	CleanupResidual()
+
+	// Create TUN device
+	dev, err := CreateDevice()
+	if err != nil {
+		e.mu.Unlock()
+		e.logEvent("TUN create device failed: %v", err)
+		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("create device: %w", err))
+		return fmt.Errorf("tun: create device: %w", err)
+	}
+	e.device = dev
+
+	// LAN/private subnets should bypass TUN to avoid breaking local network
+	// connectivity. Proxy server exclusion routes are intentionally omitted:
+	// outbound sockets are bound to the correct physical interface by the
+	// dialer package, so proxy traffic does not loop back into TUN.
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
 	if e.ruleConf != nil && e.ruleConf.TUN != nil {
 		e.routeMgr.bypassGateway = e.ruleConf.TUN.IsBypassGateway()
@@ -553,13 +595,13 @@ func (e *Engine) Start() error {
 		e.routeMgr.SetTUNLUID(luidGetter.LUID())
 	}
 	e.routeMgr.SetExclusions(DefaultLANExclusions)
+
+	hostIP := net.IP(e.addr.AsSlice())
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
 		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("setup routes: %w", err))
-		e.dnsHijack.Stop()
-		e.wg.Wait()
 		dev.Close()
-		e.ns.Close()
+		e.device = nil
 		e.mu.Unlock()
 		return fmt.Errorf("tun: setup routes: %w", err)
 	}
@@ -574,45 +616,27 @@ func (e *Engine) Start() error {
 		OriginalDNSServers: e.routeMgr.OriginalDNSServers,
 	})
 
-	// 7. Start packet forward loops before exposing the TUN DNS path to the
-	//    system, so queries that arrive immediately after the system DNS redirect
-	//    are handled by the netstack and DNS hijacker.
-	e.running = true
-	e.closeCh = make(chan struct{})
+	// Start TUN-level goroutines
+	e.tunRunning = true
+	e.tunCloseCh = make(chan struct{})
 	e.mu.Unlock()
 
-	e.wg.Add(4)
+	e.tunWG.Add(2)
 	go e.readLoop()
 	go e.writeLoop()
-	go e.acceptTCP()
-	go e.acceptUDP()
 
-	// Diagnostic goroutine: log packet counts every 5 seconds.
-	e.wg.Add(1)
-	go e.logPacketCounts()
-
-	// 8. Redirect system DNS to the dedicated DNS address in the TUN subnet
-	//    so applications send queries that route through TUN to DNSHijacker.
+	// Redirect system DNS to the dedicated DNS address in the TUN subnet
+	// so applications send queries that route through TUN to DNSHijacker.
+	dnsIP := net.IP(e.dnsAddr.AsSlice())
 	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
 		util.LogWarn("tun: failed to set system dns: %v", err)
 	}
-
-	// Engine health watchdog is intentionally disabled.
-	//
-	// A watchdog running inside the phaethon process cannot reliably probe the
-	// TUN DNS path: packets originated by the service process itself are not
-	// looped back through the wintun adapter to the same process, so both
-	// system-resolver and internal-netstack probes time out. The external
-	// watchdog process (parent) still monitors child death and cleans up
-	// routes/DNS to prevent a stranded broken network.
-	// e.watchdog = NewHealthWatchdog(e)
-	// e.watchdog.Start()
 
 	if e.ruleConf != nil {
 		go dialer.PreWarmSSHProxies(e.ruleConf.Proxies)
 	}
 
-	// 9. Start DHCP server if bypass-gateway and DHCP are both enabled.
+	// Start DHCP server if bypass-gateway and DHCP are both enabled.
 	if e.ruleConf != nil && e.ruleConf.TUN != nil &&
 		e.ruleConf.TUN.IsBypassGateway() && e.ruleConf.TUN.IsDHCPEnabled() {
 		ifaceName := ""
@@ -621,8 +645,8 @@ func (e *Engine) Start() error {
 		} else if e.routeMgr != nil {
 			ifaceName = e.routeMgr.DefaultIfaceName
 		}
-		dnsIP := net.IP(e.dnsAddr.AsSlice())
-		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIP, e.dataDir)
+		dnsIPIP := net.IP(e.dnsAddr.AsSlice())
+		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIPIP, e.dataDir)
 		if err != nil {
 			util.LogWarn("dhcp: failed to create server: %v", err)
 		} else if srv != nil {
@@ -635,21 +659,78 @@ func (e *Engine) Start() error {
 		}
 	}
 
-	e.logEvent("TUN engine started on %s", dev.Name())
+	e.logEvent("TUN device started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", "", dev.Name(), 0, nil, "ok", nil)
-	util.LogInfo("tun engine started on %s", dev.Name())
+	util.LogInfo("TUN device started on %s", dev.Name())
 	return nil
 }
 
-// Stop tears down the TUN engine and restores routes.
-//
-// Order rationale:
-//  1. Close closeCh — signal goroutines to exit
-//  2. Close device — ends Wintun session (unblocks Read), deletes adapter
-//  3. Wait goroutines — they drain after device closes
-//  4. Teardown routes — best-effort; may partially fail after adapter removal
-//     but CleanupResidual at next Start() catches stragglers
-func (e *Engine) Stop() error {
+// Start starts the gVisor netstack and optionally the TUN device.
+// Convenience method equivalent to StartStack() + StartTUN() (if TUN is enabled).
+func (e *Engine) Start() error {
+	if err := e.StartStack(); err != nil {
+		return err
+	}
+	tunEnabled := e.ruleConf != nil && e.ruleConf.TUN != nil && e.ruleConf.TUN.IsEnabled()
+	if tunEnabled {
+		if err := e.StartTUN(); err != nil {
+			e.StopStack()
+			return err
+		}
+	}
+	return nil
+}
+
+// StopTUN stops the TUN device, restores routes and system DNS.
+// The gVisor netstack continues running.
+func (e *Engine) StopTUN() error {
+	e.mu.Lock()
+	if !e.tunRunning {
+		e.mu.Unlock()
+		return nil
+	}
+	e.tunRunning = false
+	close(e.tunCloseCh)
+	e.mu.Unlock()
+
+	// Clear the global bind context so subsequent dials resume normal behavior.
+	dialer.SetGlobalBindContext(nil)
+
+	// Restore system DNS first while the TUN adapter still exists.
+	if e.device != nil {
+		restoreSystemDNS(e.device.Name())
+	}
+
+	// Stop DHCP server before tearing down routes.
+	if e.dhcpSrv != nil {
+		e.dhcpSrv.Stop()
+		e.dhcpSrv = nil
+	}
+
+	// Teardown routes while the adapter still has a valid LUID/index.
+	if e.routeMgr != nil {
+		e.routeMgr.Teardown()
+		e.routeMgr = nil
+	}
+
+	// Close device to unblock readLoop (stuck on ReceivePacket)
+	// This also ends the Wintun session and deletes the adapter.
+	if e.device != nil {
+		e.device.Close()
+		e.device = nil
+	}
+
+	// Wait for TUN goroutines to finish
+	e.tunWG.Wait()
+
+	e.logEvent("TUN device stopped")
+	util.LogInfo("TUN device stopped (netstack still running)")
+	return nil
+}
+
+// StopStack stops the gVisor netstack (DNS hijacker, forwarders, etc.).
+// Should be called after StopTUN() if TUN was running.
+func (e *Engine) StopStack() error {
 	e.mu.Lock()
 	if !e.running {
 		e.mu.Unlock()
@@ -659,35 +740,10 @@ func (e *Engine) Stop() error {
 	close(e.closeCh)
 	e.mu.Unlock()
 
-	// Clear the global bind context so subsequent dials resume normal behavior.
-	dialer.SetGlobalBindContext(nil)
-
-	// 1. Restore system DNS first while the TUN adapter still exists.
-	if e.device != nil {
-		restoreSystemDNS(e.device.Name())
-	}
-
-	// 1.5. Stop DHCP server before tearing down routes.
-	if e.dhcpSrv != nil {
-		e.dhcpSrv.Stop()
-		e.dhcpSrv = nil
-	}
-
-	// 2. Teardown routes while the adapter still has a valid LUID/index.
-	if e.routeMgr != nil {
-		e.routeMgr.Teardown()
-	}
-
-	// 3. Close device to unblock readLoop (stuck on ReceivePacket)
-	//    This also ends the Wintun session and deletes the adapter.
-	if e.device != nil {
-		e.device.Close()
-	}
-
-	// 4. Wait for goroutines to finish
+	// Wait for stack goroutines to finish
 	e.wg.Wait()
 
-	// 5. Stop services
+	// Stop services
 	if e.dnsHijack != nil {
 		e.dnsHijack.Stop()
 	}
@@ -695,9 +751,17 @@ func (e *Engine) Stop() error {
 		e.ns.Close()
 	}
 
-	e.logEvent("TUN engine stopped")
+	e.logEvent("gVisor netstack stopped")
+	util.LogInfo("gVisor netstack stopped")
+	return nil
+}
+
+// Stop tears down everything: TUN device and gVisor netstack.
+// Convenience method equivalent to StopTUN() + StopStack().
+func (e *Engine) Stop() error {
+	e.StopTUN()
+	e.StopStack()
 	connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "stopped", nil)
-	util.LogInfo("tun engine stopped")
 	return nil
 }
 
@@ -771,11 +835,11 @@ func (e *Engine) logPacketCounts() {
 func (e *Engine) readLoop() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer e.wg.Done()
+	defer e.tunWG.Done()
 	readBuf := make([]byte, 2048)
 	for {
 		select {
-		case <-e.closeCh:
+		case <-e.tunCloseCh:
 			return
 		default:
 		}
@@ -785,7 +849,7 @@ func (e *Engine) readLoop() {
 		n, err := e.device.Read(readBuf)
 		if err != nil {
 			select {
-			case <-e.closeCh:
+			case <-e.tunCloseCh:
 				return
 			default:
 				if errors.Is(err, ErrSessionClosed) {
@@ -820,13 +884,13 @@ func (e *Engine) readLoop() {
 		// Log inbound packets for debugging. Cap total noise by only logging the
 		// first 200 packets at info level; Fake-IP packets are always logged.
 		if proto == ipv4.ProtocolNumber && n >= 20 {
-			dstIP := net.IP(readBuf[16:20]).String()
+			dstIP := net.IP(readBuf[16:20])
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
-			if strings.HasPrefix(dstIP, "198.18.") || strings.HasPrefix(dstIP, "198.19.") {
+			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
 				util.LogInfo("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if e.readPackets.Load() <= 200 {
-				util.LogInfo("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, n)
+				util.LogInfo("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
 			}
 		}
 
@@ -859,10 +923,10 @@ func (e *Engine) readLoop() {
 func (e *Engine) writeLoop() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer e.wg.Done()
+	defer e.tunWG.Done()
 	for {
 		select {
-		case <-e.closeCh:
+		case <-e.tunCloseCh:
 			return
 		default:
 		}
@@ -870,7 +934,7 @@ func (e *Engine) writeLoop() {
 		pkt := e.linkEP.Read()
 		if pkt == nil {
 			select {
-			case <-e.closeCh:
+			case <-e.tunCloseCh:
 				return
 			case <-time.After(10 * time.Millisecond):
 			}
@@ -889,11 +953,10 @@ func (e *Engine) writeLoop() {
 		// TUN host IP are always logged; everything else is logged for the first
 		// 200 packets to cap noise.
 		if len(data) >= 20 && (data[0]>>4) == 4 {
-			dstIP := net.IP(data[16:20]).String()
-			srcIP := net.IP(data[12:16]).String()
+			dstIP := net.IP(data[16:20])
+			srcIP := net.IP(data[12:16])
 			ipProto := data[9]
-			isFake := strings.HasPrefix(dstIP, "198.18.") || strings.HasPrefix(dstIP, "198.19.") ||
-				strings.HasPrefix(srcIP, "198.18.") || strings.HasPrefix(srcIP, "198.19.")
+			isFake := (e.meshSubnet != nil) && (e.meshSubnet.Contains(dstIP) || e.meshSubnet.Contains(srcIP))
 			if isFake {
 				util.LogInfo("tun write FAKE: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
 			} else if e.writePackets.Load() <= 200 {
@@ -921,7 +984,7 @@ func (e *Engine) writeLoop() {
 
 		if _, err := e.device.Write(data); err != nil {
 			select {
-			case <-e.closeCh:
+			case <-e.tunCloseCh:
 				pkt.DecRef()
 				return
 			default:

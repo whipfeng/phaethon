@@ -26,32 +26,43 @@ func (r *TUNResource) Stop() {
 	}
 }
 
-// startTUNIfEnabled creates and starts the TUN engine when available and enabled.
-// The watchdog is no longer spawned here — it runs as the parent process.
-// If meshMgr is non-nil, it is wired to the TUN engine immediately after start
-// so that mesh can intercept packets even if later code in run() blocks.
-func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) *TUNResource {
+// startEngine creates and starts the engine.
+// When TUN is enabled, it starts both the TUN device and gVisor netstack.
+// When TUN is disabled but mesh is enabled, it starts only the gVisor netstack
+// (no TUN device, no OS routes), allowing mesh gateway forwarding via InjectMeshPacket.
+// If meshMgr is non-nil, it is wired to the engine immediately after start.
+func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) *TUNResource {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
-	if !tun.Available() {
+	tunEnabled := ruleConf != nil && ruleConf.TUN != nil && ruleConf.TUN.IsEnabled()
+	meshEnabled := meshMgr != nil
+
+	if !tunEnabled && !meshEnabled {
 		return nil
 	}
 
-	// Clean up any residual TUN state from previous crashes before starting.
-	tun.CleanupResidual()
-
-	if ruleConf == nil || !ruleConf.TUN.IsEnabled() {
-		util.LogInfo("TUN disabled by configuration")
-		return nil
+	// TUN device availability check (only needed when TUN is enabled)
+	if tunEnabled {
+		if !tun.Available() {
+			util.LogWarn("TUN enabled but not available on this platform")
+			return nil
+		}
+		// Clean up any residual TUN state from previous crashes before starting.
+		tun.CleanupResidual()
 	}
 
-	util.LogInfo("TUN enabled, initializing engine...")
+	if tunEnabled {
+		util.LogInfo("TUN enabled, initializing engine...")
+	} else {
+		util.LogInfo("TUN disabled, starting gVisor netstack for mesh...")
+	}
+
 	engine := tun.NewEngine(ruleConf)
 	engine.SetDataDir(dataDir)
 
 	// Configure mesh addresses before Start() if mesh is enabled with a subnet
-	if meshMgr != nil && meshMgr.GetSubnet() != "" {
+	if meshEnabled && meshMgr.GetSubnet() != "" {
 		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {
 			if err := engine.ConfigureMeshAddresses(subnet); err != nil {
 				util.LogWarn("failed to configure mesh addresses: %v", err)
@@ -60,21 +71,26 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshMan
 	}
 
 	if err := engine.Start(); err != nil {
-		util.LogError("TUN engine start failed: %v", err)
+		util.LogError("Engine start failed: %v", err)
 		return nil
 	}
 
-	// Wire mesh to TUN engine immediately after start.
+	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
-	if meshMgr != nil {
+	if meshEnabled {
 		// Set TUN reference FIRST to close the race where P2P receives mesh
 		// frames before meshMgr.Start() is called below.
 		meshMgr.SetTun(engine)
 
 		meshVIP := meshMgr.GetVIP()
 		allVIPs := meshMgr.GetAllVIPs()
-		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
+
+		// Mesh interceptor only works when TUN is enabled (intercepts outbound from readLoop)
+		if tunEnabled {
+			engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
+		}
+
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		engine.SetMeshDNSForwarder(meshMgr.MeshDNSForwarder)
 
@@ -89,16 +105,20 @@ func startTUNIfEnabled(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshMan
 		p2p.GlobalP2PManager.SetMeshDNSResponseHandler(meshMgr.HandleDNSResponse)
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
+
 		// Add all VIPs to OS interface so OS recognizes them as local (for source IP selection)
-		go func() {
-			time.Sleep(5 * time.Second)
-			for _, vip := range allVIPs {
-				if err := engine.AddMeshVIPToOS(vip); err != nil {
-					util.LogWarn("failed to add mesh VIP %s to OS: %v", vip, err)
+		// Only needed when TUN is enabled (VIPs are added to the TUN adapter)
+		if tunEnabled {
+			go func() {
+				time.Sleep(5 * time.Second)
+				for _, vip := range allVIPs {
+					if err := engine.AddMeshVIPToOS(vip); err != nil {
+						util.LogWarn("failed to add mesh VIP %s to OS: %v", vip, err)
+					}
 				}
-			}
-		}()
-		util.LogInfo("Mesh wired to TUN engine (vip=%s allVIPs=%v)", meshVIP, allVIPs)
+			}()
+		}
+		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
 	return &TUNResource{engine: engine}

@@ -72,15 +72,15 @@ func (t *DomainTrie) Lookup(domain string) (string, int) {
 	return bestNodeID, bestLen
 }
 
-// BuildFromTopology constructs a domain trie from all nodes' domain suffixes.
+// BuildFromTopology constructs a domain trie from all peers' domain suffixes.
 func BuildFromTopology(topo *Topology) *DomainTrie {
 	trie := NewDomainTrie()
 	topo.mu.RLock()
 	defer topo.mu.RUnlock()
 
-	for _, node := range topo.nodes {
-		for _, suffix := range node.DomainSuffixes {
-			trie.Insert(suffix, node.NodeID)
+	for _, peer := range topo.peers {
+		for _, suffix := range peer.DomainSuffixes {
+			trie.Insert(suffix, peer.NodeID)
 		}
 	}
 	return trie

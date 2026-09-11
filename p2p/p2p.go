@@ -12,6 +12,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/dialer"
+	"phaethon/mesh"
 	"phaethon/reverse"
 	"phaethon/util"
 )
@@ -39,8 +40,22 @@ type MeshHandler interface {
 	HandleMeshFrame(fromNodeID string, frame []byte)
 	HandleTopologyGossip(fromNodeID string, data []byte)
 	HandleMeshDNSQuery(fromNodeID string, domain string, queryID uint16) (net.IP, error)
-	RegisterPeer(nodeID, vip string)
+	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(nodeID string)
+}
+
+// peerSender wraps a P2P peer connection to implement mesh.PeerSender.
+type peerSender struct {
+	peer *Peer
+}
+
+func (s *peerSender) Send(data []byte) error {
+	enqueueWrite(s.peer, reverse.FrameMeshPacket, data)
+	return nil
+}
+
+func (s *peerSender) GetNodeID() string {
+	return s.peer.MeshNodeID
 }
 
 // writeReq is a frame queued for async write on the peer connection.
@@ -474,7 +489,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		}
 		m.mu.Unlock()
 		if m.meshHandler != nil {
-			m.meshHandler.RegisterPeer(hello.MeshNodeID, hello.MeshVIP)
+			m.meshHandler.RegisterPeer(&peerSender{peer: peer})
 		}
 	}
 
@@ -569,51 +584,6 @@ func (m *P2PManager) SendMeshDNSQuery(peerNodeID string, domain string, queryID 
 	}
 
 	enqueueWrite(bestPeer, reverse.FrameData, data)
-	return nil
-}
-
-// SendMeshPacket sends a FrameMeshPacket to a peer identified by mesh nodeID.
-func (m *P2PManager) SendMeshPacket(peerNodeID string, data []byte) error {
-	m.mu.Lock()
-	var bestPeer *Peer
-	var bestLastSeen time.Time
-	for _, p := range m.peers {
-		if p.MeshNodeID == peerNodeID && p.LastSeen.After(bestLastSeen) {
-			bestPeer = p
-			bestLastSeen = p.LastSeen
-		}
-	}
-	m.mu.Unlock()
-
-	if bestPeer == nil {
-		util.LogWarn("[P2P] SendMeshPacket: no connection to mesh peer %s", peerNodeID)
-		return fmt.Errorf("mesh: no connection to peer %s", peerNodeID)
-	}
-	enqueueWrite(bestPeer, reverse.FrameMeshPacket, data)
-	return nil
-}
-
-// SendMeshPacketByVIP sends a mesh packet to a peer identified by VIP.
-func (m *P2PManager) SendMeshPacketByVIP(peerVIP net.IP, data []byte) error {
-	m.mu.Lock()
-	var bestPeer *Peer
-	var bestLastSeen time.Time
-	for _, p := range m.peers {
-		if p.MeshVIP != "" {
-			peerIP := net.ParseIP(p.MeshVIP)
-			if peerIP != nil && peerIP.Equal(peerVIP) && p.LastSeen.After(bestLastSeen) {
-				bestPeer = p
-				bestLastSeen = p.LastSeen
-			}
-		}
-	}
-	m.mu.Unlock()
-
-	if bestPeer == nil {
-		util.LogWarn("[P2P] SendMeshPacketByVIP: no connection to mesh peer %s", peerVIP)
-		return fmt.Errorf("mesh: no connection to peer %s", peerVIP)
-	}
-	enqueueWrite(bestPeer, reverse.FrameMeshPacket, data)
 	return nil
 }
 

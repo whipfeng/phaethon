@@ -158,28 +158,8 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		util.LogInfo("tun: split-tunnel route %s/%d -> on-link (luid=%x idx=%d)", prefix.ip, prefix.len, luid, index)
 	}
 
-	// 5. Add an on-link route for the Fake-IP pool (198.18.0.0/15) via TUN.
-	// The split-tunnel routes above already send 198.18.x.x to the TUN
-	// interface, but this more-specific /15 route guarantees that bound
-	// sockets (e.g. watchdog probes using IP_UNICAST_IF) see the destination as
-	// directly attached on the TUN interface.
-	_, fakeIPNet, err := net.ParseCIDR(FakeIPPoolCIDR)
-	if err == nil {
-		var fwdRow mibIpForwardRow2
-		fwdRow.init()
-		fwdRow.setInterfaceLuid(luid)
-		fwdRow.setInterfaceIndex(index)
-		fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
-		fwdRow.setNextHop(net.IPv4zero)
-		fwdRow.setMetric(1)
-
-		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		if ret != 0 {
-			util.LogWarn("tun: add Fake-IP pool route %s fail: 0x%x", FakeIPPoolCIDR, ret)
-		} else {
-			util.LogInfo("tun: Fake-IP pool route %s -> on-link (luid=%x idx=%d)", FakeIPPoolCIDR, luid, index)
-		}
-	}
+	// Fake-IP pool route removed: Fake-IPs are now allocated from the mesh subnet,
+	// which is already routed through the TUN interface via the default route.
 
 	// 6. Wait until the adapter has the configured IPv4 address and the best route
 	// to a public destination is via the TUN interface. This guarantees that when

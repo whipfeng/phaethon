@@ -12,6 +12,7 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-09-10 | 初始版本：多 VIP 支持、源 IP 选择机制 | Qoder |
+| v0.2.0 | 2026-09-11 | 路由简化（PeerSender、prefix 路由）、gateway 转发、无 TUN 模式设计 | Qoder |
 
 ## 1. 背景与目标
 
@@ -724,3 +725,208 @@ Gateway 节点收到 mesh 包后：
 - [x] 路由表包含所有远端 VIP 的条目（通过 admin API 确认）
 - [x] Ping 不同 VIP 使用对应的源 IP（tcpdump 验证）
 - [x] Mesh 内部互通正常（回归测试）
+
+## 9. Mesh 路由简化方案（最终结论）
+
+### 9.1 核心原则
+
+1. **Gossip 只通告必要信息**，其余全部本地计算
+2. **路由表直接指向直连 peer/link**，不经过 nodeID 中转
+3. **nodeID 只是给人看的标识**，不参与路由决策
+4. **VIP 从子网推导**（.1 地址），不需要通告
+
+### 9.2 Gossip 内容
+
+每个节点通告 4 个字段：
+
+```json
+{
+  "nodeId": "QG",
+  "subnet": "100.64.0.0/24",
+  "domainSuffixes": ["phn"],
+  "routes": ["0.0.0.0/0"]
+}
+```
+
+| 字段 | 含义 | 示例 |
+|------|------|------|
+| nodeId | 人可读标识（不参与路由） | "QG" |
+| subnet | 节点自己的 mesh 子网，用于推导 .1/.2/.3 地址 | "100.64.0.0/24" |
+| domainSuffixes | 能解析的域名后缀（不带前导点） | ["phn", "github.com"] |
+| routes | 能到达的**额外**路由网段（不含 subnet 本身） | ["0.0.0.0/0", "192.168.1.0/24"] |
+
+**subnet 不合并到 routes 的原因**：收到 gossip 的节点需要从 subnet 计算 gateway 的 .3 地址（GIP），用于 DNS 查询发送目标。
+
+**地址推导规则**（所有节点算法一致）：
+- .1 = VIP（mesh 标识、NAT 源）
+- .2 = hostIP（TUN 适配器，注册 OS）
+- .3 = GIP（DNSHijacker 绑定，netstack 内部）
+
+**路由构建**：subnet 和 routes 都作为路由条目，subnet 本身也是一条路由。
+
+### 9.3 路由表
+
+路由表直接指向直连 peer/link 对象：
+
+```go
+type MeshRoute struct {
+    Prefix *net.IPNet  // 匹配前缀
+    Peer   *Peer       // 直连 peer 对象（不是 nodeID）
+}
+```
+
+**构建规则**：
+
+```
+收到 peer 的 gossip:
+  subnet "100.64.0.0/24"  → 添加路由 100.64.0.0/24 → 该 peer
+  routes ["0.0.0.0/0"]    → 添加路由 0.0.0.0/0    → 该 peer
+```
+
+subnet 本身也是一条路由，和 routes 字段中的条目同等对待。
+
+**查找规则**：Longest prefix match，找到对应的 peer，直接发送。
+
+### 9.4 路由示例
+
+**两节点直连**：
+
+```
+QG: subnet=100.64.0.0/24, routes=["0.0.0.0/0"]
+VM: subnet=100.64.1.0/24, routes=[]
+
+VM 的路由表:
+  100.64.0.0/24 → peer QG 的链路   (来自 QG 的 subnet)
+  0.0.0.0/0     → peer QG 的链路   (来自 QG 的 routes)
+
+QG 的路由表:
+  100.64.1.0/24 → peer VM 的链路   (来自 VM 的 subnet)
+```
+
+**三节点多跳**：
+
+```
+A: subnet=100.64.0.0/24, 直连 B
+B: subnet=100.64.1.0/24, 直连 A 和 C
+C: subnet=100.64.2.0/24, routes=["0.0.0.0/0"]
+
+A 的路由表:
+  100.64.1.0/24 → peer B 的链路   (B 的 subnet)
+  100.64.2.0/24 → peer B 的链路   (C 的 subnet，经 B 转发)
+  0.0.0.0/0     → peer B 的链路   (C 的 routes，经 B 转发)
+```
+
+不管几跳，路由表始终指向**自己的直连链路**。
+
+### 9.5 发包流程
+
+```
+ping 100.64.0.5
+  → longest prefix match: 100.64.0.5 匹配 100.64.0.0/24
+  → 找到 peer QG 的链路
+  → peer.Send(data)  // 直接用 peer 连接发送，不经过 nodeID
+```
+
+### 9.6 域名路由
+
+域名路由独立于 IP 路由，用 trie 最长后缀匹配：
+
+```
+查询 "test.phn"
+  → trie 匹配 "phn" → 找到对应 peer
+  → 通过该 peer 的链路发送 DNS 查询
+```
+
+域名后缀不带前导点：配置 "phn" 匹配 "phn" 和 "*.phn"。
+
+### 9.7 与现有代码的差异
+
+| 维度 | 现有实现 | 简化方案 |
+|------|---------|---------|
+| Gossip 字段 | nodeId, VIPs, subnet, domainSuffixes, links, routes | nodeId, subnet, domainSuffixes, routes |
+| 路由表 | prefix → nextHop VIP (net.IP) | prefix → peer 对象 |
+| 路由计算 | Dijkstra + VIP 查找 + prefix 排序 | 直接从 gossip 构建（subnet + routes），longest prefix match |
+| 发包 | SendMeshPacketByVIP(nextHopVIP, data) | peer.Send(data) |
+| nodeID 用途 | 路由中转 | 仅展示 |
+| VIP 传播 | gossip 通告 | 从 subnet 本地计算 (.1) |
+| subnet 用途 | 仅配置 | 配置 + gossip 通告（接收方用于推导 .1/.3 和路由） |
+
+### 9.8 实现步骤
+
+1. **简化 TopologyInfo**：移除 VIPs、Links 字段，保留 nodeId、subnet、domainSuffixes、routes
+2. **简化路由表**：`PrefixRoute` 从 `NextHop net.IP` 改为 `Peer *Peer`（或 peer 引用）
+3. **简化 recomputeRoutes**：直接从 gossip 的 subnet + routes 构建路由表，不需要 Dijkstra
+4. **简化发包**：用 peer 直接发送，不需要先查 nodeID 再查连接
+5. **清理冗余代码**：移除 VIP 传播、邻居学习、Dijkstra 等不再需要的逻辑
+
+## 10. Gateway 无 TUN 模式
+
+### 10.1 动机
+
+某些节点充当 mesh gateway，通告外部路由（如 `0.0.0.0/0`、`10.0.0.0/8`），但不需要本地 TUN 拦截。典型场景：机房服务器做互联网出口、企业内网节点通告内部网段。
+
+这些节点需要 gVisor netstack 处理 mesh 收到的包（Forwarder/proxy 转发），但不需要 TUN 设备。
+
+### 10.2 核心结论
+
+**gVisor netstack 不依赖 TUN**。gVisor 是用户态 TCP/IP 协议栈，TUN 只是给它喂包的一种方式。当前代码把 TUN 和 gVisor 绑在 `Engine.Start()` 里一起启停，这是代码耦合，不是架构限制。
+
+### 10.3 改动
+
+把 `Engine.Start()` 里的两步拆开：
+
+1. **gVisor netstack 初始化**（始终执行）：创建 stack、注册协议、创建 LinkEndpoint、启动 Forwarder
+2. **TUN 设备初始化**（可选）：打开 Wintun/libtun、启动 readLoop/writeLoop、设置系统 DNS、添加 OS 路由
+
+```go
+func (e *Engine) Start() error {
+    // 1. 始终初始化 gVisor netstack
+    e.initNetstack()
+
+    // 2. 仅在 tun.enabled=true 时打开 TUN 设备
+    if e.tunEnabled {
+        e.initTunDevice()
+        e.setupSystemDNS()
+        e.setupOSRoutes()
+    }
+
+    return nil
+}
+```
+
+TUN 关闭时，gVisor 照常运行。mesh 收到的包通过 `InjectInbound` 进入 gVisor，gVisor 通过 Forwarder/proxy 处理后走正常出站路径。
+
+### 10.4 配置
+
+```yaml
+mesh:
+  enabled: true
+  node-id: "gateway-cn"
+  subnet: "100.64.0.0/24"
+  advertise:
+    - "0.0.0.0/0"
+
+tun:
+  enabled: false    # TUN 关闭，gVisor 仍然启动
+```
+
+### 10.5 与现有架构的关系
+
+```
+                        ┌─────────────────────────────────┐
+                        │         gVisor netstack          │
+                        │  (TCP/IP 协议栈、Forwarder)      │
+                        └──────────┬──────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    │                             │
+              ┌─────┴─────┐               ┌──────┴──────┐
+              │ TUN 模式   │               │ mesh 收包    │
+              │            │               │             │
+              │ readLoop   │               │ InjectInbound│
+              │ writeLoop  │               │             │
+              │ DNS 拦截   │               │             │
+              └────────────┘               └─────────────┘
+```
+
+两种入口共享同一个 gVisor netstack，出站路径统一。TUN 只是其中一种入口，不是必须的。

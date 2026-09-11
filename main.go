@@ -95,25 +95,23 @@ func (r *activeResources) closeAll() {
 	})
 }
 
-// toggleTUN starts or stops the TUN engine on the current active resources.
-func toggleTUN(enable bool, resPtr **activeResources) error {
-	res := *resPtr
+// toggleTUN starts or stops the TUN device on the running stack.
+// The gVisor netstack is always running; this only controls the TUN input source.
+func toggleTUN(enable bool, res *activeResources) error {
 	if res == nil || res.ruleConf == nil {
 		return fmt.Errorf("runtime not ready")
 	}
 	if enable {
-		if res.tunRes != nil && res.tunRes.engine != nil && res.tunRes.engine.IsEnabled() {
+		if res.tunRes == nil || res.tunRes.engine == nil {
+			return fmt.Errorf("stack not running")
+		}
+		if res.tunRes.engine.IsTUNRunning() {
 			return nil
 		}
-		res.tunRes = startTUNIfEnabled(res.ruleConf, res.meshMgr)
-		if res.tunRes == nil || res.tunRes.engine == nil || !res.tunRes.engine.IsEnabled() {
-			return fmt.Errorf("TUN start failed")
-		}
-		return nil
+		return res.tunRes.engine.StartTUN()
 	}
-	if res.tunRes != nil {
-		res.tunRes.Stop()
-		res.tunRes = nil
+	if res.tunRes != nil && res.tunRes.engine != nil {
+		return res.tunRes.engine.StopTUN()
 	}
 	return nil
 }
@@ -166,12 +164,12 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 	}
 	if res.tunRes != nil && res.tunRes.engine != nil {
 		engine := res.tunRes.engine
-		status["running"] = engine.IsEnabled()
+		status["running"] = engine.IsTUNRunning()
 		status["routes"] = engine.RouteSnapshot()
 		status["logs"] = engine.Logs()
 		status["stats"] = engine.Stats()
 		status["dhcpLeases"] = engine.DHCPLeaseSnapshot()
-		if engine.IsEnabled() {
+		if engine.IsTUNRunning() {
 			status["deviceName"] = "PhaethonTUN"
 		}
 	} else {
@@ -274,7 +272,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-	res.tunRes = startTUNIfEnabled(ruleConf, meshMgr)
+	res.tunRes = startEngine(ruleConf, meshMgr)
 	if meshMgr != nil && res.tunRes != nil {
 		res.meshMgr = meshMgr
 	}
@@ -710,7 +708,7 @@ func main() {
 			}
 		}
 		resources.adminServer.OnTUNToggle = func(enable bool) error {
-			return toggleTUN(enable, &resources)
+			return toggleTUN(enable, resources)
 		}
 		resources.adminServer.GetTUNStatus = func() map[string]interface{} {
 			return buildTUNStatus(resources)

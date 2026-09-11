@@ -142,10 +142,10 @@ func (m *MeshManager) TopologyRef() *Topology {
 }
 
 func (m *MeshManager) isLocalVIP(ip net.IP) bool {
-	if m.subnet == nil {
+	if m.vip == nil {
 		return false
 	}
-	return m.subnet.Contains(ip)
+	return ip.Equal(m.vip)
 }
 
 // isLocalNetstackAddr checks if the IP is a local netstack address (GIP .3 or hostIP .2).
@@ -284,6 +284,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}()
 		return true
+	}
+
+	// Exclude mesh subnet (Fake-IPs) from mesh interception.
+	// Fake-IPs are allocated from the mesh subnet but are not actual VIPs.
+	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
+	// and look up the original domain via fakeIP.LookupDomain.
+	if m.subnet != nil && m.subnet.Contains(dstIP) {
+		return false
 	}
 
 	peer := m.findPeer(dstIP)

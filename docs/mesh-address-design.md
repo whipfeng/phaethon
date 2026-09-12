@@ -176,18 +176,32 @@ initStack() 中：
 ```
 Mode B 收到请求 (domain:port)
   ↓
-1. DNS 解析（netstack UDP socket → GIP:53）
-   netstack 路由：dst=GIP 是本地地址 → loopback → hijacker 收到
-   hijacker 处理：
-   ├─ mesh 域名 → 转发给远端 gateway → 返回远端 fakeIP
-   └─ 普通域名 → 本地 pool 分配 fakeIP
+1. DirectDialer.Dial(domain, port)
+   - 域名 → ResolveDomain → fakeIP
+   - IP → 直接用
+   - 都走 NetDial(ip:port) → netstack
   ↓
-2. 建立连接（netstack TCP socket → fakeIP:port）
-   netstack 路由：
-   ├─ fakeIP 是本地地址 → loopback → forwarder 兜底
-   │   └─ forwarder: 查回域名 → OS DNS 解析真实 IP → OS 连接（BindContext 排除 TUN）
-   └─ fakeIP 是远端 mesh → 不走 loopback → channel → writeLoop → meshInterceptor → mesh 网络
+2. netstack 路由表决定去向：
+   - fakeIP/mesh 段 → loNIC (loopback)
+   - 其他 → tunNIC (channel)
+  ↓
+3. writeLoop 从 tunNIC 读出包，做最终路由：
+   ├─ dst 是 remote mesh VIP → meshInterceptor → mesh 链路
+   ├─ dst 是 hostIP (.2) → TUN → OS（终止于 OS）
+   └─ dst 是其他（外部 IP）→ TUN → OS → 物理出口
+      注：外部 IP 从 tunNIC 出去后，OS 路由决定走物理接口还是 mesh
+  ↓
+4. loopback 路径（fakeIP）：
+   - loopback 环回 → forwarder/hijacker 拦截
+   - forwarder: 查回域名 → 规则匹配 → DialRouteAware (OS socket) → 真实目标
+   - 注：forwarder 用 OS socket dial，不再走 netstack，避免死循环
 ```
+
+**关键设计：**
+- DirectDialer 总是用 NetDial，不区分域名/IP
+- writeLoop 是统一的路由决策点（mesh / hostIP / 其他）
+- forwarder dial 用 OS socket（DialRouteAware），绕过 netstack，避免死循环
+- TUN 的 exclusion routes 确保 OS socket 能到达物理出口
 
 TUN 入口数据流不变（inbound 包从 TUN 进入，经 readLoop 注入 netstack，forwarder 兜底）。
 
@@ -225,9 +239,11 @@ Hijacker 始终存在。Stack 在以下情况启动：
 - [x] loopback NIC 创建 + 路由配置（已实现于 engine.go initStack）
 - [x] 验证 TCP/UDP loopback 投递
 - [x] 验证非本地地址走 channel
-- [ ] 回退不必要的代码（ResolveDomain, NetDial, GlobalNetstackDialFunc, GlobalDNSResolverFunc, DirectDialer netstack path）
-- [ ] Mode B (SOCKS5) 通过 netstack socket 进行 DNS 解析和连接建立
-- [ ] forwarder 排除 TUN 接口的逻辑（BindContext 是否足够）
+- [x] DNS hijacker 绑定 NIC 0（任意网卡），接收来自 TUN 和 loopback 的 DNS 查询
+- [x] Mode B (SOCKS5) 通过 netstack socket 进行 DNS 解析和连接建立
+- [x] forwarder 排除 TUN 接口（BindContext + DialRouteAware）
+- [ ] DirectDialer 总是用 NetDial（域名和 IP 都走 netstack），移除"只有域名走 netstack"的特殊逻辑
+- [ ] 验证 writeLoop 路由逻辑：remote mesh VIP → mesh，hostIP → TUN，其他 → TUN → OS
 
 ## 已完成的待实现
 

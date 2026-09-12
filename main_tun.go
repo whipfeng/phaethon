@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/tun"
@@ -74,6 +75,12 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		util.LogError("Engine start failed: %v", err)
 		return nil
 	}
+
+	// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
+	// dialing go through the netstack, which routes via loopback to the
+	// hijacker/forwarder.
+	dialer.GlobalNetstackDialFunc = engine.NetDial
+	dialer.GlobalDNSResolverFunc = engine.ResolveDomain
 
 	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block

@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -130,15 +131,57 @@ func (e *Engine) GetDNSHijacker() *DNSHijacker {
 	return e.dnsHijack
 }
 
-// ResolveDomain resolves a domain name through the DNS hijacker, returning a fakeIP.
-// The hijacker handles mesh domains, remote gateway forwarding, and local pool allocation.
+// ResolveDomain resolves a domain name by sending a DNS query through the
+// netstack UDP socket to the local hijacker (dnsAddr:53). The packet goes
+// through the loopback NIC and is handled by the hijacker, which allocates
+// a fakeIP from the local pool or forwards to a remote mesh gateway.
 func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
-	if e.dnsHijack == nil {
-		return nil, fmt.Errorf("DNS hijacker not available")
+	e.mu.Lock()
+	ns := e.ns
+	dnsAddr := e.dnsAddr
+	e.mu.Unlock()
+	if ns == nil {
+		return nil, fmt.Errorf("netstack not running")
 	}
-	fakeIP := e.fakeIP.Lookup(domain)
+
+	var wq waiter.Queue
+	ep, err := ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: new endpoint: %v", domain, err)
+	}
+	defer ep.Close()
+
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		return nil, fmt.Errorf("resolve %s: bind: %v", domain, err)
+	}
+	if err := ep.Connect(tcpip.FullAddress{Addr: dnsAddr, Port: 53}); err != nil {
+		return nil, fmt.Errorf("resolve %s: connect: %v", domain, err)
+	}
+
+	// Register waiter BEFORE write — loopback delivery is synchronous.
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	txID := uint16(time.Now().UnixNano())
+	query := buildDNSQuery(domain, txID)
+	if _, err := ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{}); err != nil {
+		return nil, fmt.Errorf("resolve %s: write: %v", domain, err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("resolve %s: timeout", domain)
+	}
+
+	var buf bytes.Buffer
+	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
+		return nil, fmt.Errorf("resolve %s: read: %v", domain, err)
+	}
+	fakeIP := parseDNSResponseIP(buf.Bytes())
 	if fakeIP == nil {
-		return nil, fmt.Errorf("failed to allocate fakeIP for %s", domain)
+		return nil, fmt.Errorf("resolve %s: bad response", domain)
 	}
 	return fakeIP, nil
 }

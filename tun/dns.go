@@ -60,7 +60,6 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 	h.started = true
 
 	addr := tcpip.FullAddress{
-		NIC:  1,
 		Addr: h.dnsAddr,
 		Port: 53,
 	}

@@ -3,11 +3,9 @@
 package tun
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
 	"time"
 	"unsafe"

@@ -136,6 +136,7 @@ func (e *Engine) GetDNSHijacker() *DNSHijacker {
 // through the loopback NIC and is handled by the hijacker, which allocates
 // a fakeIP from the local pool or forwards to a remote mesh gateway.
 func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
+	util.LogInfo("netstack: ResolveDomain called for domain=%s", domain)
 	e.mu.Lock()
 	ns := e.ns
 	dnsAddr := e.dnsAddr
@@ -186,9 +187,11 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 	return fakeIP, nil
 }
 
-// NetDial dials through the gVisor netstack. The connection is handled by netstack's
+// NetDial dials a connection through the netstack. For addresses in the fakeIP
+// or mesh subnet, the connection goes through the loopback NIC and is caught by
 // TCP/UDP forwarders, which route to local or remote destinations transparently.
 func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
+	util.LogInfo("netstack: NetDial called with network=%s addr=%s", network, addr)
 	e.mu.Lock()
 	running := e.running
 	ns := e.ns
@@ -219,7 +222,6 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 	var arr [4]byte
 	copy(arr[:], ip4)
 	remoteAddr := tcpip.FullAddress{
-		NIC:  tunNICID,
 		Addr: tcpip.AddrFrom4(arr),
 		Port: uint16(portNum),
 	}
@@ -229,7 +231,14 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 
 	switch network {
 	case "tcp", "tcp4":
-		return gonet.DialContextTCP(ctx, ns, remoteAddr, ipv4.ProtocolNumber)
+		util.LogInfo("netstack: DialContextTCP to %s:%d", host, portNum)
+		conn, err := gonet.DialContextTCP(ctx, ns, remoteAddr, ipv4.ProtocolNumber)
+		if err != nil {
+			util.LogWarn("netstack: DialContextTCP failed: %v", err)
+			return nil, err
+		}
+		util.LogInfo("netstack: DialContextTCP succeeded to %s:%d", host, portNum)
+		return conn, nil
 	case "udp", "udp4":
 		return gonet.DialUDP(ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	default:

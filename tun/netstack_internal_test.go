@@ -53,13 +53,9 @@ func TestNetstackLoopback(t *testing.T) {
 	s.SetSpoofing(loNICID, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 
-	// Route: dnsAddr + fakeIP range → loopback, default → tunNIC
-	fakeIPSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{198, 18, 0, 0}), tcpip.MaskFromBytes([]byte{255, 254, 0, 0}))
-	dnsSubnet, _ := tcpip.NewSubnet(dnsAddr, tcpip.MaskFromBytes([]byte{255, 255, 255, 255}))
+	// Route: default → loopback (all outbound goes to forwarder/hijacker)
 	s.SetRouteTable([]tcpip.Route{
-		{Destination: dnsSubnet, NIC: loNICID},
-		{Destination: fakeIPSubnet, NIC: loNICID},
-		{Destination: header.IPv4EmptySubnet, NIC: outNICID},
+		{Destination: header.IPv4EmptySubnet, NIC: loNICID},
 	})
 
 	// TCP forwarder (catch-all)
@@ -157,8 +153,8 @@ func TestNetstackLoopback(t *testing.T) {
 		t.Logf("[RESULT] FAIL: hijacker did NOT receive UDP")
 	}
 
-	// --- Test 3: UDP to NON-local address (should go to tunNIC channel) ---
-	t.Log("=== Test 3: UDP to non-local 8.8.8.8:53 (should go to tunNIC) ===")
+	// --- Test 3: UDP to NON-local address (should also go to loopback with default→loNIC) ---
+	t.Log("=== Test 3: UDP to non-local 8.8.8.8:53 (should go to loopback) ===")
 
 	// Drain any leftover packets from channel
 	for linkEP.Read() != nil {
@@ -183,12 +179,12 @@ func TestNetstackLoopback(t *testing.T) {
 		buf2 := pkt2.ToBuffer()
 		data := buf2.Flatten()
 		if len(data) >= 20 {
-			t.Logf("[CHANNEL] SUCCESS: non-local packet went to tunNIC: src=%s dst=%s proto=%d",
+			t.Logf("[CHANNEL] UNEXPECTED packet in outNIC channel: src=%s dst=%s proto=%d",
 				net.IP(data[12:16]), net.IP(data[16:20]), data[9])
 		}
 		pkt2.DecRef()
 	} else {
-		t.Logf("[CHANNEL] FAIL: no packet in tunNIC channel")
+		t.Logf("[CHANNEL] SUCCESS: outNIC channel empty (packet went to loopback)")
 	}
 
 	s.Close()

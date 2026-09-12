@@ -3,6 +3,7 @@ package tun
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -77,6 +78,7 @@ type Engine struct {
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
+	loopbackRouting bool            // use loopback NIC for outbound (set when mesh/Mode B is active)
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -277,6 +279,13 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 
 	util.LogInfo("tun: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
 	return nil
+}
+
+// SetLoopbackRouting enables loopback NIC for outbound routing.
+// Must be called before Start(). Required when mesh/Mode B is active so that
+// netstack socket connections route via loopback to the forwarder/hijacker.
+func (e *Engine) SetLoopbackRouting(enabled bool) {
+	e.loopbackRouting = enabled
 }
 
 func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
@@ -936,25 +945,34 @@ func (e *Engine) initStack() error {
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
-	// Route table: fakeIP/mesh range → loopback, everything else → TUN NIC.
-	// The subnet route covers dnsAddr (which is within the range), so no
-	// separate /32 route is needed. Outbound packets to any address in the
-	// range are re-injected as inbound via loopback and caught by the
-	// forwarder or hijacker.
+	// Route table:
+	// With loopback routing (mesh/Mode B active):
+	//   1. VIP (.1) → outNIC   — TUN return traffic (NAT src=VIP, return dst=VIP)
+	//   2. meshSubnet → outNIC — writeLoop intercepts → meshInterceptor → mesh link
+	//   3. default → loNIC     — all other outbound → loopback → forwarder/hijacker
+	// Without loopback routing (basic TUN mode):
+	//   1. default → outNIC   — all outbound → writeLoop → TUN → OS
 	routes := []tcpip.Route{
-		{Destination: header.IPv6EmptySubnet, NIC: outNICID},
+		{Destination: header.IPv6EmptySubnet, NIC: loNICID},
 	}
 
-	if e.meshSubnet != nil {
-		ip4 := e.meshSubnet.IP.To4()
-		meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
-		routes = append([]tcpip.Route{
-			{Destination: meshSubnet, NIC: loNICID},
-		}, routes...)
+	if e.loopbackRouting {
+		// Mesh/Mode B active: use loopback for outbound
+		if e.meshSubnet != nil {
+			ip4 := e.meshSubnet.IP.To4()
+			meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
+			// VIP (.1) — more specific /32 route, must come before meshSubnet
+			vipAddr, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3] + 1}), tcpip.MaskFromBytes([]byte{255, 255, 255, 255}))
+			routes = append([]tcpip.Route{
+				{Destination: vipAddr, NIC: outNICID},
+				{Destination: meshSubnet, NIC: outNICID},
+			}, routes...)
+		}
+		// default → loNIC is already in routes
 	} else {
-		fakeIPSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{198, 18, 0, 0}), tcpip.MaskFromBytes([]byte{255, 254, 0, 0}))
+		// Non-mesh TUN mode: default → outNIC (old behavior)
 		routes = append([]tcpip.Route{
-			{Destination: fakeIPSubnet, NIC: loNICID},
+			{Destination: header.IPv4EmptySubnet, NIC: outNICID},
 		}, routes...)
 	}
 
@@ -1055,6 +1073,72 @@ func (e *Engine) readLoop() {
 
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
+
+		// NAT: replace src IP with VIP for non-mesh IPv4 packets.
+		// This marks TUN-originated traffic so return traffic (dst=VIP) can be
+		// routed back through outNIC → TUN instead of loopback.
+		if e.meshSubnet != nil && n >= 20 && pktBuf[0]>>4 == 4 {
+			srcIP := net.IP(pktBuf[12:16])
+			if !e.meshSubnet.Contains(srcIP) {
+				vip := e.meshSubnet.IP.To4()
+				vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
+				oldSrc := make([]byte, 4)
+				copy(oldSrc, pktBuf[12:16])
+				newSrc := vipAddr.To4()
+
+				// Update IP header checksum
+				var oldCsum uint32
+				oldCsum += uint32(oldSrc[0])<<8 | uint32(oldSrc[1])
+				oldCsum += uint32(oldSrc[2])<<8 | uint32(oldSrc[3])
+				var newCsum uint32
+				newCsum += uint32(newSrc[0])<<8 | uint32(newSrc[1])
+				newCsum += uint32(newSrc[2])<<8 | uint32(newSrc[3])
+
+				ipHdr := binary.BigEndian.Uint16(pktBuf[10:12])
+				diff := newCsum - oldCsum
+				csum := uint32(^ipHdr)
+				csum += diff
+				for csum > 0xffff {
+					csum = (csum >> 16) + (csum & 0xffff)
+				}
+				binary.BigEndian.PutUint16(pktBuf[10:12], ^uint16(csum))
+
+				// Update TCP/UDP checksum using pseudo-header diff
+				headerLen := int(pktBuf[0]&0x0f) * 4
+				proto := pktBuf[9]
+				if (proto == 6 || proto == 17) && n >= headerLen+4 {
+					var transportCsum uint32
+					transportCsum += uint32(oldSrc[0])<<8 | uint32(oldSrc[1])
+					transportCsum += uint32(oldSrc[2])<<8 | uint32(oldSrc[3])
+					var transportNewCsum uint32
+					transportNewCsum += uint32(newSrc[0])<<8 | uint32(newSrc[1])
+					transportNewCsum += uint32(newSrc[2])<<8 | uint32(newSrc[3])
+					transportDiff := transportNewCsum - transportCsum
+
+					var csumOffset int
+					if proto == 6 {
+						csumOffset = headerLen + 16
+					} else {
+						csumOffset = headerLen + 6
+					}
+					if n >= csumOffset+2 {
+						oldTransport := binary.BigEndian.Uint16(pktBuf[csumOffset : csumOffset+2])
+						if oldTransport != 0 {
+							tc := uint32(^oldTransport)
+							tc += transportDiff
+							for tc > 0xffff {
+								tc = (tc >> 16) + (tc & 0xffff)
+							}
+							binary.BigEndian.PutUint16(pktBuf[csumOffset:csumOffset+2], ^uint16(tc))
+						}
+					}
+				}
+
+				// Replace src IP
+				copy(pktBuf[12:16], newSrc)
+			}
+		}
+
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
 		e.linkEP.InjectInbound(proto, pkt)
 		pkt.DecRef()
@@ -1106,6 +1190,76 @@ func (e *Engine) writeLoop() {
 		if e.device == nil {
 			pkt.DecRef()
 			continue
+		}
+
+		// Reverse NAT: if dst = VIP, replace with hostIP so the OS can match
+		// the return packet to the original connection.
+		if e.meshSubnet != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+			vip := e.meshSubnet.IP.To4()
+			vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
+			dstIP := net.IP(data[16:20])
+			if dstIP.Equal(vipAddr) {
+				hostIP := net.IP(e.addr.AsSlice()).To4()
+				oldDst := make([]byte, 4)
+				copy(oldDst, data[16:20])
+				newDst := hostIP
+
+				// Make a mutable copy for modification
+				natData := make([]byte, len(data))
+				copy(natData, data)
+
+				// Update IP header checksum
+				var oldCsum uint32
+				oldCsum += uint32(oldDst[0])<<8 | uint32(oldDst[1])
+				oldCsum += uint32(oldDst[2])<<8 | uint32(oldDst[3])
+				var newCsum uint32
+				newCsum += uint32(newDst[0])<<8 | uint32(newDst[1])
+				newCsum += uint32(newDst[2])<<8 | uint32(newDst[3])
+
+				ipHdr := binary.BigEndian.Uint16(natData[10:12])
+				diff := newCsum - oldCsum
+				csum := uint32(^ipHdr)
+				csum += diff
+				for csum > 0xffff {
+					csum = (csum >> 16) + (csum & 0xffff)
+				}
+				binary.BigEndian.PutUint16(natData[10:12], ^uint16(csum))
+
+				// Update TCP/UDP checksum using pseudo-header diff
+				headerLen := int(natData[0]&0x0f) * 4
+				proto := natData[9]
+				if (proto == 6 || proto == 17) && len(natData) >= headerLen+4 {
+					var transportCsum uint32
+					transportCsum += uint32(oldDst[0])<<8 | uint32(oldDst[1])
+					transportCsum += uint32(oldDst[2])<<8 | uint32(oldDst[3])
+					var transportNewCsum uint32
+					transportNewCsum += uint32(newDst[0])<<8 | uint32(newDst[1])
+					transportNewCsum += uint32(newDst[2])<<8 | uint32(newDst[3])
+					transportDiff := transportNewCsum - transportCsum
+
+					var csumOffset int
+					if proto == 6 {
+						csumOffset = headerLen + 16
+					} else {
+						csumOffset = headerLen + 6
+					}
+					if len(natData) >= csumOffset+2 {
+						oldTransport := binary.BigEndian.Uint16(natData[csumOffset : csumOffset+2])
+						if oldTransport != 0 {
+							tc := uint32(^oldTransport)
+							tc += transportDiff
+							for tc > 0xffff {
+								tc = (tc >> 16) + (tc & 0xffff)
+							}
+							binary.BigEndian.PutUint16(natData[csumOffset:csumOffset+2], ^uint16(tc))
+						}
+					}
+				}
+
+				// Replace dst IP
+				copy(natData[16:20], newDst)
+				data = natData
+			}
 		}
 
 		// Log outbound packets for debugging. Fake-IP replies and packets to the

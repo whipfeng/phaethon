@@ -71,21 +71,26 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		}
 	}
 
+	// Enable loopback routing when mesh is active (Mode B uses netstack sockets)
+	if meshEnabled {
+		engine.SetLoopbackRouting(true)
+	}
+
 	if err := engine.Start(); err != nil {
 		util.LogError("Engine start failed: %v", err)
 		return nil
 	}
 
-	// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
-	// dialing go through the netstack, which routes via loopback to the
-	// hijacker/forwarder.
-	dialer.GlobalNetstackDialFunc = engine.NetDial
-	dialer.GlobalDNSResolverFunc = engine.ResolveDomain
-
 	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
 	if meshEnabled {
+		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
+		// dialing go through the netstack, which routes via loopback to the
+		// hijacker/forwarder. Only needed when mesh is active (loopback routing).
+		dialer.GlobalNetstackDialFunc = engine.NetDial
+		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
+
 		// Set TUN reference FIRST to close the race where P2P receives mesh
 		// frames before meshMgr.Start() is called below.
 		meshMgr.SetTun(engine)

@@ -248,9 +248,15 @@ Hijacker 始终存在。Stack 在以下情况启动：
 - [x] Mode B (SOCKS5) 通过 gVisor netstack socket 进行 DNS 解析和连接建立
 - [x] forwarder 排除 TUN 接口（BindContext + DialRouteAware）
 - [x] tunNICID 重命名为 outNICID（不与 TUN 绑定）
-- [ ] TUN 入口 NAT 标记（src → VIP）
-- [ ] 路由表更新（VIP → outNIC, meshSubnet → outNIC, 默认 → loNIC）
-- [ ] DirectDialer 总是用 NetDial（域名和 IP 都走 netstack）
+- [x] TUN 入口 NAT 标记（src → VIP，readLoop 中实现）
+- [x] TUN 出口反向 NAT（dst=VIP → hostIP，writeLoop 中实现）
+- [x] 路由表更新（VIP → outNIC, meshSubnet → outNIC, 默认 → loNIC）
+- [x] DirectDialer 域名走 netstack（解析为 fakeIP → loopback → forwarder）
+- [x] loopbackRouting 标志（mesh 启用时设置，非 mesh TUN 模式用默认路由）
+
+> **DirectDialer 说明**：域名走 netstack（resolve → fakeIP → loopback → forwarder），直接 IP 走 OS socket（DialRouteAware）。直接 IP 不能走 netstack，否则会死循环（directIP → netstack → loopback → forwarder → DirectDialer → netstack → ...）。
+
+> **非 mesh TUN 模式**：当 mesh 未启用时，`loopbackRouting=false`，路由表为 `默认 → outNIC`（旧行为）。此时 DirectDialer 的 netstack 回调不会被设置，所有连接走 OS socket。
 
 ## 已完成的待实现
 

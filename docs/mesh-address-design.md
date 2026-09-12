@@ -242,8 +242,36 @@ Hijacker 始终存在。Stack 在以下情况启动：
 - [x] DNS hijacker 绑定 NIC 0（任意网卡），接收来自 TUN 和 loopback 的 DNS 查询
 - [x] Mode B (SOCKS5) 通过 netstack socket 进行 DNS 解析和连接建立
 - [x] forwarder 排除 TUN 接口（BindContext + DialRouteAware）
-- [ ] DirectDialer 总是用 NetDial（域名和 IP 都走 netstack），移除"只有域名走 netstack"的特殊逻辑
-- [ ] 验证 writeLoop 路由逻辑：remote mesh VIP → mesh，hostIP → TUN，其他 → TUN → OS
+- [ ] DirectDialer 总是用 NetDial（域名和 IP 都走 netstack）
+- [ ] **待解决**：netstack 出站包区分新请求 vs 回程流量
+
+### 待解决问题：出站包路由歧义
+
+**问题：**
+Netstack 出站包（从 tunNIC 出来）包括：
+1. **新请求**（Mode B 发起的连接）→ 应该环回到 forwarder
+2. **回程包**（forwarder dial 出去后，OS 返回的回复）→ 应该去 TUN → OS
+
+如果统一环回，回程包也会被环回到 forwarder，破坏连接。
+
+**示例：**
+```
+Forwarder dial 8.8.8.8 (OS socket) → OS → 物理出口
+8.8.8.8 回复 → OS → TUN → readLoop → netstack
+Netstack 处理回复 → writeLoop (outbound from netstack perspective)
+  → 如果环回 → forwarder (错误！应该去 TUN → OS)
+```
+
+**可能的解决方案（待讨论）：**
+1. 只环回 SYN / 首次 UDP（需要检查包内容）
+2. 用不同地址段区分（fakeIP 环回，real IP 去 TUN）
+3. 在 forwarder dial 时标记连接，writeLoop 根据标记决定
+4. 其他？
+
+**当前实现：**
+- fakeIP/mesh → loNIC (loopback)
+- 其他 → tunNIC (writeLoop → TUN)
+- DirectDialer 对域名用 NetDial，对 IP 用 OS socket（避免回程问题）
 
 ## 已完成的待实现
 

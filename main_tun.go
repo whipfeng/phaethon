@@ -106,12 +106,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
 
-		// Start mesh write loop for mesh-only mode (no TUN device)
-		// This reads outbound packets from netstack and sends them back through mesh
-		if !tunEnabled {
-			engine.StartMeshWriteLoop()
-		}
-
 		// Add all VIPs to OS interface so OS recognizes them as local (for source IP selection)
 		// Only needed when TUN is enabled (VIPs are added to the TUN adapter)
 		if tunEnabled {

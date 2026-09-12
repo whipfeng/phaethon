@@ -534,9 +534,10 @@ func (e *Engine) StartStack() error {
 	e.closeCh = make(chan struct{})
 	e.mu.Unlock()
 
-	e.wg.Add(2)
+	e.wg.Add(3)
 	go e.acceptTCP()
 	go e.acceptUDP()
+	go e.writeLoop()
 
 	// Diagnostic goroutine: log packet counts every 5 seconds.
 	e.wg.Add(1)
@@ -545,53 +546,6 @@ func (e *Engine) StartStack() error {
 	e.logEvent("gVisor netstack started")
 	util.LogInfo("gVisor netstack started")
 	return nil
-}
-
-// StartMeshWriteLoop starts a write loop for mesh-only mode (no TUN device).
-// This reads outbound packets from the netstack and sends them through the mesh.
-// Called when mesh is enabled but TUN is disabled.
-func (e *Engine) StartMeshWriteLoop() {
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
-		for {
-			select {
-			case <-e.closeCh:
-				return
-			default:
-			}
-
-			pkt := e.linkEP.Read()
-			if pkt == nil {
-				select {
-				case <-e.closeCh:
-					return
-				case <-time.After(10 * time.Millisecond):
-				}
-				continue
-			}
-
-			buf := pkt.ToBuffer()
-			data := buf.Flatten()
-
-			// Send through mesh if destined for remote nodes
-			if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
-				pktDst := net.IP(data[16:20])
-				isLocal := e.isLocalMeshVIP(pktDst)
-				if !isLocal {
-					pktBuf := make([]byte, len(data))
-					copy(pktBuf, data)
-					if e.meshInterceptor(pktDst, pktBuf) {
-						pkt.DecRef()
-						continue
-					}
-				}
-			}
-
-			// No TUN device, drop the packet
-			pkt.DecRef()
-		}
-	}()
 }
 
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
@@ -668,9 +622,8 @@ func (e *Engine) StartTUN() error {
 	e.tunCloseCh = make(chan struct{})
 	e.mu.Unlock()
 
-	e.tunWG.Add(2)
+	e.tunWG.Add(1)
 	go e.readLoop()
-	go e.writeLoop()
 
 	// Redirect system DNS to the dedicated DNS address in the TUN subnet
 	// so applications send queries that route through TUN to DNSHijacker.
@@ -961,14 +914,14 @@ func (e *Engine) readLoop() {
 	}
 }
 
-// writeLoop reads outbound packets from netstack and writes them to the TUN device.
+// writeLoop reads outbound packets from netstack and dispatches them.
+// With TUN: writes to the TUN device for OS delivery.
+// Without TUN: mesh-intercepted packets go via mesh, others are dropped.
 func (e *Engine) writeLoop() {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	defer e.tunWG.Done()
+	defer e.wg.Done()
 	for {
 		select {
-		case <-e.tunCloseCh:
+		case <-e.closeCh:
 			return
 		default:
 		}
@@ -976,20 +929,37 @@ func (e *Engine) writeLoop() {
 		pkt := e.linkEP.Read()
 		if pkt == nil {
 			select {
-			case <-e.tunCloseCh:
+			case <-e.closeCh:
 				return
 			case <-time.After(10 * time.Millisecond):
 			}
 			continue
 		}
 
+		buf := pkt.ToBuffer()
+		data := buf.Flatten()
+
+		// Mesh interception: route packets destined for remote mesh nodes via mesh.
+		// Skip packets destined for our own mesh VIP — those are replies from netstack
+		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
+		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+			pktDst := net.IP(data[16:20])
+			isLocal := e.isLocalMeshVIP(pktDst)
+			if !isLocal {
+				pktBuf := make([]byte, len(data))
+				copy(pktBuf, data)
+				if e.meshInterceptor(pktDst, pktBuf) {
+					pkt.DecRef()
+					continue
+				}
+			}
+		}
+
+		// No TUN device — drop non-mesh packets
 		if e.device == nil {
 			pkt.DecRef()
 			continue
 		}
-
-		buf := pkt.ToBuffer()
-		data := buf.Flatten()
 
 		// Log outbound packets for debugging. Fake-IP replies and packets to the
 		// TUN host IP are always logged; everything else is logged for the first
@@ -1006,27 +976,9 @@ func (e *Engine) writeLoop() {
 			}
 		}
 
-		// Mesh interception: route 100.64.0.0/16 packets destined for REMOTE mesh nodes via mesh.
-		// Skip packets destined for our own mesh VIP — those are replies from netstack
-		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
-		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
-		// Skip local VIP packets — those are replies from netstack that should go to OS.
-		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
-			pktDst := net.IP(data[16:20])
-			isLocal := e.isLocalMeshVIP(pktDst)
-			if !isLocal {
-				pktBuf := make([]byte, len(data))
-				copy(pktBuf, data)
-				if e.meshInterceptor(pktDst, pktBuf) {
-					pkt.DecRef()
-					continue
-				}
-			}
-		}
-
 		if _, err := e.device.Write(data); err != nil {
 			select {
-			case <-e.tunCloseCh:
+			case <-e.closeCh:
 				pkt.DecRef()
 				return
 			default:

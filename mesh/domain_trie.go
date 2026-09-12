@@ -79,8 +79,8 @@ func BuildFromTopology(topo *Topology) *DomainTrie {
 	defer topo.mu.RUnlock()
 
 	for _, peer := range topo.peers {
-		for _, suffix := range peer.DomainSuffixes {
-			trie.Insert(suffix, peer.NodeID)
+		for _, entry := range peer.DomainSuffixes {
+			trie.Insert(entry.Suffix, entry.SourceNodeID)
 		}
 	}
 	return trie

@@ -137,9 +137,12 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				return
 			}
 			_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if req.frameType == reverse.FrameMeshPacket {
+				util.LogInfo("[P2P] writing FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(req.data))
+			}
 			if err := reverse.WriteFrame(peer.conn, req.frameType, req.data); err != nil {
 				_ = peer.conn.SetWriteDeadline(time.Time{})
-				util.LogDebug("[P2P] write error for %s: %v", peer.ID, err)
+				util.LogInfo("[P2P] write error for %s: %v", peer.ID, err)
 				peer.conn.Close()
 				return
 			}
@@ -150,6 +153,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 
 // enqueueWrite queues a frame for async write. Non-blocking: drops if channel is full.
 func enqueueWrite(peer *Peer, frameType byte, data []byte) {
+	if frameType == reverse.FrameMeshPacket {
+		util.LogInfo("[P2P] enqueue FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(data))
+	}
 	select {
 	case peer.writeCh <- writeReq{frameType: frameType, data: data}:
 	default:
@@ -325,7 +331,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				m.handleCommand(peer, payload)
 			}
 		case reverse.FrameMeshPacket:
-			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
+			util.LogInfo("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
 				m.meshHandler.HandleMeshFrame(peer.MeshNodeID, payload)
 			} else {

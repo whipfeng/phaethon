@@ -292,14 +292,23 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
 	// and look up the original domain via fakeIP.LookupDomain.
 	if m.subnet != nil && m.subnet.Contains(dstIP) {
+		if dstIP[0] == 100 && dstIP[1] == 64 {
+			util.LogInfo("[MESH] outbound %s: local subnet, passing through", dstIP)
+		}
 		return false
 	}
 
 	peer := m.findPeer(dstIP)
 	if peer == nil {
+		if dstIP[0] == 100 && dstIP[1] == 64 {
+			util.LogInfo("[MESH] outbound %s: no peer found, passing through", dstIP)
+		}
 		return false
 	}
 
+	if dstIP[0] == 100 && dstIP[1] == 64 {
+		util.LogInfo("[MESH] outbound %s: sending via peer %s", dstIP, peer.GetNodeID())
+	}
 	pkt := make([]byte, len(data))
 	copy(pkt, data)
 	if m.natTable != nil {
@@ -333,6 +342,10 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
+	if dstIP[0] == 100 && dstIP[1] == 64 {
+		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
+	}
+
 	if m.isLocalVIP(dstIP) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
@@ -353,6 +366,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if frame[8] <= 1 {
+		if dstIP[0] == 100 && dstIP[1] == 64 {
+			util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d dropped (TTL<=1)", fromNodeID, dstIP, frame[8])
+		}
 		return
 	}
 
@@ -360,6 +376,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if peer == nil {
 		// No mesh route — we're the gateway for this destination.
 		// Inject into local netstack so it goes out via proxy/direct.
+		if dstIP[0] == 100 && dstIP[1] == 64 {
+			util.LogInfo("[MESH] recv frame from %s: dst=%s injecting to local netstack", fromNodeID, dstIP)
+		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		go func() {
@@ -372,6 +391,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
+	if dstIP[0] == 100 && dstIP[1] == 64 {
+		util.LogInfo("[MESH] recv frame from %s: dst=%s forwarding to %s", fromNodeID, dstIP, peer.GetNodeID())
+	}
 	pkt := make([]byte, len(frame))
 	copy(pkt, frame)
 	decrementIPTTL(pkt)
@@ -400,7 +422,15 @@ func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
 		}
 	}
 	info.Routes = filtered
-	util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d", fromNodeID, info.Subnet, len(info.Routes))
+	// Filter out domain suffixes where source is ourselves
+	filteredDS := info.DomainSuffixes[:0]
+	for _, ds := range info.DomainSuffixes {
+		if ds.SourceNodeID != m.nodeID {
+			filteredDS = append(filteredDS, ds)
+		}
+	}
+	info.DomainSuffixes = filteredDS
+	util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d", fromNodeID, info.Subnet, len(info.Routes), len(info.DomainSuffixes))
 	if m.topology.UpdateFromGossip(info) {
 		m.recomputeRoutes()
 	}
@@ -608,18 +638,30 @@ func (m *MeshManager) broadcastGossip() {
 		ownRoutes = append(ownRoutes, GossipRoute{SourceNodeID: m.nodeID, Prefix: r})
 	}
 
+	// Own domain suffixes with src=self
+	ownDS := make([]GossipDomainSuffix, 0, len(m.domainSuffixes))
+	for _, s := range m.domainSuffixes {
+		ownDS = append(ownDS, GossipDomainSuffix{SourceNodeID: m.nodeID, Suffix: s})
+	}
+
 	for _, peerID := range peerIDs {
 		// Split horizon: exclude routes from this recipient
 		learnedRoutes := m.topology.CollectRoutesForGossip(peerID)
+		// Split horizon: exclude domain suffixes from this recipient
+		learnedDS := m.topology.CollectDomainSuffixesForGossip(peerID)
 
 		allRoutes := make([]GossipRoute, 0, len(ownRoutes)+len(learnedRoutes))
 		allRoutes = append(allRoutes, ownRoutes...)
 		allRoutes = append(allRoutes, learnedRoutes...)
 
+		allDS := make([]GossipDomainSuffix, 0, len(ownDS)+len(learnedDS))
+		allDS = append(allDS, ownDS...)
+		allDS = append(allDS, learnedDS...)
+
 		info := GossipInfo{
 			NodeID:         m.nodeID,
 			Subnet:         m.subnetStr,
-			DomainSuffixes: m.domainSuffixes,
+			DomainSuffixes: allDS,
 			Routes:         allRoutes,
 		}
 		data, err := json.Marshal(info)

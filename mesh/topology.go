@@ -14,13 +14,19 @@ type PeerRouteEntry struct {
 	PrefixStr    string
 }
 
+// PeerDomainSuffixEntry represents a domain suffix with its original source node.
+type PeerDomainSuffixEntry struct {
+	SourceNodeID string
+	Suffix       string
+}
+
 // PeerInfo holds the information received from a peer via gossip.
 type PeerInfo struct {
 	NodeID         string
 	Sender         PeerSender        // direct reference to peer connection
 	Subnet         *net.IPNet        // peer's mesh subnet (also a route)
 	SubnetStr      string            // subnet CIDR string
-	DomainSuffixes []string          // domain suffixes this peer can resolve
+	DomainSuffixes []PeerDomainSuffixEntry // domain suffixes with source tracking
 	Routes         []PeerRouteEntry  // routes synced from this peer (with source tracking)
 	LastSeen       time.Time
 }
@@ -31,12 +37,18 @@ type GossipRoute struct {
 	Prefix       string `json:"prefix"`
 }
 
+// GossipDomainSuffix is a serializable domain suffix entry with source tracking.
+type GossipDomainSuffix struct {
+	SourceNodeID string `json:"sourceNodeId"`
+	Suffix       string `json:"suffix"`
+}
+
 // GossipInfo is the gossip payload exchanged between nodes.
 type GossipInfo struct {
-	NodeID         string        `json:"nodeId"`
-	Subnet         string        `json:"subnet"`
-	DomainSuffixes []string      `json:"domainSuffixes,omitempty"`
-	Routes         []GossipRoute `json:"routes,omitempty"`
+	NodeID         string               `json:"nodeId"`
+	Subnet         string               `json:"subnet"`
+	DomainSuffixes []GossipDomainSuffix `json:"domainSuffixes,omitempty"`
+	Routes         []GossipRoute        `json:"routes,omitempty"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.
@@ -84,21 +96,23 @@ func (t *Topology) UpdateFromGossip(info GossipInfo) bool {
 		})
 	}
 
+	// Parse domain suffixes with source tracking
+	var domainSuffixes []PeerDomainSuffixEntry
+	for _, ds := range info.DomainSuffixes {
+		domainSuffixes = append(domainSuffixes, PeerDomainSuffixEntry{
+			SourceNodeID: ds.SourceNodeID,
+			Suffix:       ds.Suffix,
+		})
+	}
+
 	// Check if anything changed
 	changed := !exists
 	if exists {
 		if existing.SubnetStr != info.Subnet {
 			changed = true
 		}
-		if len(existing.DomainSuffixes) != len(info.DomainSuffixes) {
+		if !domainSuffixesEqual(existing.DomainSuffixes, domainSuffixes) {
 			changed = true
-		} else {
-			for i := range existing.DomainSuffixes {
-				if existing.DomainSuffixes[i] != info.DomainSuffixes[i] {
-					changed = true
-					break
-				}
-			}
 		}
 		if !routesEqual(existing.Routes, routes) {
 			changed = true
@@ -115,7 +129,7 @@ func (t *Topology) UpdateFromGossip(info GossipInfo) bool {
 		Sender:         sender,
 		Subnet:         subnet,
 		SubnetStr:      info.Subnet,
-		DomainSuffixes: info.DomainSuffixes,
+		DomainSuffixes: domainSuffixes,
 		Routes:         routes,
 		LastSeen:       time.Now(),
 	}
@@ -166,7 +180,7 @@ func (t *Topology) GetPeer(nodeID string) *PeerInfo {
 }
 
 // FindGatewayByDomainSuffix finds the best gateway for a domain using longest suffix match.
-// Returns the peer's nodeID and the matched suffix length, or ("", 0) if no match.
+// Returns the source nodeID (original advertiser) and the matched suffix length, or ("", 0) if no match.
 // Domain suffixes should be bare domains like "github.com" (no leading dot).
 func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
 	t.mu.RLock()
@@ -177,12 +191,12 @@ func (t *Topology) FindGatewayByDomainSuffix(domain string) (string, int) {
 	bestLen := 0
 
 	for _, peer := range t.peers {
-		for _, suffix := range peer.DomainSuffixes {
-			suffix = strings.TrimPrefix(strings.ToLower(suffix), ".")
+		for _, entry := range peer.DomainSuffixes {
+			suffix := strings.TrimPrefix(strings.ToLower(entry.Suffix), ".")
 			if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
 				if len(suffix) > bestLen {
 					bestLen = len(suffix)
-					bestNodeID = peer.NodeID
+					bestNodeID = entry.SourceNodeID
 				}
 			}
 		}
@@ -233,6 +247,19 @@ func routesEqual(a, b []PeerRouteEntry) bool {
 	return true
 }
 
+// domainSuffixesEqual compares two domain suffix entry slices for equality.
+func domainSuffixesEqual(a, b []PeerDomainSuffixEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].SourceNodeID != b[i].SourceNodeID || a[i].Suffix != b[i].Suffix {
+			return false
+		}
+	}
+	return true
+}
+
 // CollectRoutesForGossip builds the list of routes to advertise to a specific peer.
 // Excludes routes where SourceNodeID == excludeNodeID (split horizon).
 // For duplicate prefixes, keeps the longest prefix match.
@@ -248,6 +275,13 @@ func (t *Topology) CollectRoutesForGossip(excludeNodeID string) []GossipRoute {
 	best := make(map[string]candidate)
 
 	for _, peer := range t.peers {
+		// Include peer's own subnet as a route from that peer
+		if peer.Subnet != nil && peer.NodeID != excludeNodeID {
+			bits, _ := peer.Subnet.Mask.Size()
+			key := peer.Subnet.String()
+			best[key] = candidate{peer.NodeID, key, bits}
+		}
+		// Include learned routes
 		for _, r := range peer.Routes {
 			if r.SourceNodeID == excludeNodeID {
 				continue
@@ -266,6 +300,32 @@ func (t *Topology) CollectRoutesForGossip(excludeNodeID string) []GossipRoute {
 	result := make([]GossipRoute, 0, len(best))
 	for _, c := range best {
 		result = append(result, GossipRoute{SourceNodeID: c.source, Prefix: c.prefix})
+	}
+	return result
+}
+
+// CollectDomainSuffixesForGossip builds the list of domain suffixes to advertise to a specific peer.
+// Excludes suffixes where SourceNodeID == excludeNodeID (split horizon).
+// Deduplicates by suffix string.
+func (t *Topology) CollectDomainSuffixesForGossip(excludeNodeID string) []GossipDomainSuffix {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	seen := make(map[string]string) // suffix -> sourceNodeID
+	for _, peer := range t.peers {
+		for _, entry := range peer.DomainSuffixes {
+			if entry.SourceNodeID == excludeNodeID {
+				continue
+			}
+			if _, exists := seen[entry.Suffix]; !exists {
+				seen[entry.Suffix] = entry.SourceNodeID
+			}
+		}
+	}
+
+	result := make([]GossipDomainSuffix, 0, len(seen))
+	for suffix, source := range seen {
+		result = append(result, GossipDomainSuffix{SourceNodeID: source, Suffix: suffix})
 	}
 	return result
 }

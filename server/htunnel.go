@@ -69,6 +69,7 @@ type htChannel struct {
 
 	// Pending ops for shared execution (broadcast semantics)
 	connPend  pendingOp
+	connReady chan struct{} // closed when step 1 completes
 	readPend  pendingOp
 	writePend pendingOp
 	hbPend    pendingOp
@@ -359,6 +360,7 @@ func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.R
 		id:        id,
 		connID:    connID,
 		closed:    make(chan struct{}),
+		connReady: make(chan struct{}),
 		address:   dstHost,
 		port:      dstPortInt,
 		isReverse: isReverse,
@@ -392,15 +394,18 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	id := s.getConnectionID(r)
 	chI, ok := s.channels.Load(id)
 	if !ok {
+		util.LogInfo("[HTUNNEL-SVR] push channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
 		w.WriteHeader(410)
 		return
 	}
 	ch := chI.(*htChannel)
 	ch.resetReqTimeout(s, id)
+	util.LogInfo("[HTUNNEL-SVR] push channelID=%d contentSeq=%d connSeq=%d", id, contentSeq, ch.connSeq)
 
 	for {
 		ch.mu.Lock()
 		step := contentSeq - ch.connSeq
+		util.LogInfo("[HTUNNEL-SVR] channelID=%d loop: step=%d connPend.active=%v", id, step, ch.connPend.active)
 		if step == 0 {
 			if ch.connPend.active {
 				ch.leaderOrWait(&ch.connPend)
@@ -424,9 +429,26 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		if step != 1 {
+			if ch.connPend.active {
+				ch.leaderOrWait(&ch.connPend)
+				ch.mu.Unlock()
+				continue // recheck step after wait
+			}
+			// step > 1 but connPend not active yet: step 1 hasn't started.
+			// Wait for connReady (closed when step 1 completes).
+			ready := ch.connReady
+			util.LogInfo("[HTUNNEL-SVR] step %d waiting connReady for channelID=%d", step, id)
 			ch.mu.Unlock()
-			w.WriteHeader(410)
-			return
+			select {
+			case <-ready:
+			case <-ch.closed:
+				w.WriteHeader(410)
+				return
+			case <-time.After(10 * time.Second):
+				w.WriteHeader(410)
+				return
+			}
+			continue // recheck step after connReady
 		}
 		if ch.leaderOrWait(&ch.connPend) {
 			break
@@ -436,6 +458,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 
 	var connOk, failed bool
 
+	util.LogInfo("[HTUNNEL-SVR] channelID=%d contentSeq=%d: past loop, starting setup", id, contentSeq)
 	ch.mu.Lock()
 	isReverse := ch.isReverse
 	isUDP := ch.isUDP
@@ -446,36 +469,25 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	ch.mu.Unlock()
 	if contentSeq == 1 {
 		if isReverse {
-			if port == reverse.BindPortControl {
-				ctrlConn := newHTunnelServerConn(ch, s)
-				ch.mu.Lock()
-				ch.revConn = ctrlConn
-				ch.mu.Unlock()
-				go handleControlConnection(ctrlConn, address)
-				connOk = true
-				return
-			}
-			if port == reverse.BindPortP2P {
-				p2pConn := newHTunnelServerConn(ch, s)
-				ch.mu.Lock()
-				ch.revConn = p2pConn
-				ch.mu.Unlock()
-				go handleP2PConnection(p2pConn, address)
-				connOk = true
-				return
-			}
-			if port != reverse.BindPortData {
+			if port > reverse.BindPortP2P {
 				util.LogInfo("[HTUNNEL-SVR] [%s] reverse rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, port)
 				return
 			}
-			if !s.RuleConf.HasReverseAddress(address) {
+			if port == reverse.BindPortData && !s.RuleConf.HasReverseAddress(address) {
 				return // address not supported, close connection
 			}
 			ch.mu.Lock()
 			if ch.revConn == nil {
 				revConn := newHTunnelServerConn(ch, s)
 				ch.revConn = revConn
-				go reverse.HandleReverseConnection(revConn, ch.address)
+				switch port {
+				case reverse.BindPortControl:
+					go handleControlConnection(revConn, address)
+				case reverse.BindPortP2P:
+					go handleP2PConnection(revConn, address)
+				default:
+					go reverse.HandleReverseConnection(revConn, ch.address)
+				}
 			}
 			ch.mu.Unlock()
 			connOk = true
@@ -507,6 +519,10 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 		ch.connSeq++
 	}
 	ch.broadcast(&ch.connPend)
+	if contentSeq == 1 {
+		util.LogInfo("[HTUNNEL-SVR] closing connReady for channelID=%d, connSeq=%d, connOk=%v", id, ch.connSeq, connOk)
+		close(ch.connReady)
+	}
 	ch.mu.Unlock()
 
 	if connOk {
@@ -522,6 +538,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 func (s *HTunnelServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := s.getConnectionID(r)
 	contentSeq := s.getContentSeq(r)
+	util.LogInfo("[HTUNNEL-SVR] heartbeat received: channelID=%d, contentSeq=%d", id, contentSeq)
 	chI, ok := s.channels.Load(id)
 	if !ok {
 		w.WriteHeader(410)
@@ -848,6 +865,7 @@ func (s *HTunnelServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 // closeChannel closes a channel and cleans up its resources. Safe to call multiple times.
 func (s *HTunnelServer) closeChannel(id int64) {
+	util.LogInfo("[HTUNNEL-SVR] closeChannel: channelID=%d", id)
 	chI, ok := s.channels.Load(id)
 	if !ok {
 		return

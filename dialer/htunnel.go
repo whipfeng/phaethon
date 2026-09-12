@@ -338,6 +338,7 @@ func (c *htunnelConn) Write(b []byte) (int, error) {
 
 func (c *htunnelConn) heartbeatLoop() {
 	// Initial delay before first heartbeat - must be shorter than server's 30s timeout
+	util.LogInfo("[HTUNNEL-CLI] [%s] heartbeat loop started (connectionID=%s, connSeq=%d)", c.proxy.Name, c.connectionID, c.connSeq)
 	select {
 	case <-c.closed:
 		return
@@ -361,6 +362,7 @@ func (c *htunnelConn) heartbeatLoop() {
 		req.Header.Set(headerConnectionID, c.connectionID)
 		req.Header.Set(headerContentSeq, strconv.Itoa(connSeq))
 
+		util.LogInfo("[HTUNNEL-CLI] [%s] heartbeat PUT sending (seq=%d, url=%s)", c.proxy.Name, connSeq, url)
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		resp, err := c.client.Do(req.WithContext(ctx))
 		if err != nil {

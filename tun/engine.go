@@ -547,6 +547,53 @@ func (e *Engine) StartStack() error {
 	return nil
 }
 
+// StartMeshWriteLoop starts a write loop for mesh-only mode (no TUN device).
+// This reads outbound packets from the netstack and sends them through the mesh.
+// Called when mesh is enabled but TUN is disabled.
+func (e *Engine) StartMeshWriteLoop() {
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		for {
+			select {
+			case <-e.closeCh:
+				return
+			default:
+			}
+
+			pkt := e.linkEP.Read()
+			if pkt == nil {
+				select {
+				case <-e.closeCh:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				continue
+			}
+
+			buf := pkt.ToBuffer()
+			data := buf.Flatten()
+
+			// Send through mesh if destined for remote nodes
+			if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+				pktDst := net.IP(data[16:20])
+				isLocal := e.isLocalMeshVIP(pktDst)
+				if !isLocal {
+					pktBuf := make([]byte, len(data))
+					copy(pktBuf, data)
+					if e.meshInterceptor(pktDst, pktBuf) {
+						pkt.DecRef()
+						continue
+					}
+				}
+			}
+
+			// No TUN device, drop the packet
+			pkt.DecRef()
+		}
+	}()
+}
+
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
 // Requires StartStack() to be called first.
 func (e *Engine) StartTUN() error {
@@ -899,11 +946,6 @@ func (e *Engine) readLoop() {
 		// if the packet should be sent via mesh or handled normally.
 		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(readBuf[16:20])
-			srcIP := net.IP(readBuf[12:16])
-			// Debug: log packets to mesh subnet
-			if dstIP[0] == 100 && dstIP[1] == 64 {
-				util.LogDebug("[DEBUG] mesh check: %s -> %s", srcIP, dstIP)
-			}
 			pktBuf := make([]byte, n)
 			copy(pktBuf, readBuf[:n])
 			if e.meshInterceptor(dstIP, pktBuf) {

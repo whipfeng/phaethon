@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"phaethon/util"
 
@@ -31,10 +32,11 @@ type DNSHijacker struct {
 	// Returns nil if the domain is not a mesh domain or node is unknown.
 	MeshResolver func(domain string) net.IP
 
-	// MeshDNSForwarder forwards DNS queries to a remote gateway through mesh.
-	// Takes a domain name and returns the fakeIP allocated by the gateway.
+	// MeshDNSNetstackForwarder forwards DNS queries via netstack socket to gateway GIP.
+	// Takes the domain name and returns the fakeIP allocated by the gateway.
 	// Returns (nil, nil) if the domain doesn't match any remote gateway.
-	MeshDNSForwarder func(domain string) (net.IP, error)
+	// This uses netstack's UDP socket to send DNS query to gateway's GIP:53.
+	MeshDNSNetstackForwarder func(domain string) (net.IP, error)
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -81,6 +83,83 @@ func (h *DNSHijacker) Stop() {
 	}
 }
 
+// ForwardViaNetstack forwards a DNS query to a remote gateway's GIP:53 via netstack socket.
+// Returns the fakeIP from the gateway's response, or nil if no gateway is found.
+func (h *DNSHijacker) ForwardViaNetstack(domain string, gatewayGIP net.IP) (net.IP, error) {
+	if gatewayGIP == nil {
+		return nil, nil
+	}
+
+	// Build DNS query
+	txID := uint16(0x1234) // TODO: use random txID
+	query := buildDNSQuery(domain, txID)
+
+	// Create a new UDP endpoint
+	var wq waiter.Queue
+	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("new endpoint: %v", err)
+	}
+	defer ep.Close()
+
+	// Bind to any available port
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		return nil, fmt.Errorf("bind: %v", err)
+	}
+
+	// Connect to gateway GIP:53
+	gip4 := gatewayGIP.To4()
+	if gip4 == nil {
+		return nil, fmt.Errorf("invalid gateway GIP")
+	}
+	var gipArr [4]byte
+	copy(gipArr[:], gip4)
+	if err := ep.Connect(tcpip.FullAddress{
+		NIC:  1,
+		Addr: tcpip.AddrFrom4(gipArr),
+		Port: 53,
+	}); err != nil {
+		return nil, fmt.Errorf("connect: %v", err)
+	}
+
+	// Set up wait queue for response
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	// Send query
+	if _, err := ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{}); err != nil {
+		return nil, fmt.Errorf("write: %v", err)
+	}
+
+	// Wait for response with timeout
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		var buf bytes.Buffer
+		_, err := ep.Read(&buf, tcpip.ReadOptions{})
+		if err != nil {
+			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
+				// Wait for data or timeout
+				select {
+				case <-ch:
+					continue
+				case <-timeout.C:
+					return nil, fmt.Errorf("timeout waiting for DNS response")
+				}
+			}
+			return nil, fmt.Errorf("read: %v", err)
+		}
+
+		// Parse response
+		resp := buf.Bytes()
+		if ip := parseDNSResponseIP(resp); ip != nil {
+			return ip, nil
+		}
+	}
+}
+
 // Resolve returns the raw DNS response bytes for a query without sending it
 // through the netstack. It is used by the Windows-side DNS proxy and internal
 // health probes so they do not depend on gVisor loopback delivery semantics.
@@ -106,14 +185,14 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		}
 	}
 
-	// Check mesh DNS forwarding (domain suffix → remote gateway)
-	if h.MeshDNSForwarder != nil {
-		fakeIP, err := h.MeshDNSForwarder(domain)
+	// Try mesh DNS forwarding via netstack socket (to remote gateway's GIP:53)
+	if h.MeshDNSNetstackForwarder != nil {
+		fakeIP, err := h.MeshDNSNetstackForwarder(domain)
 		if err != nil {
-			util.LogWarn("tun dns mesh forward error: %s -> %v", domain, err)
+			util.LogWarn("tun dns mesh netstack forward error: %s -> %v", domain, err)
 		}
 		if fakeIP != nil {
-			util.LogInfo("tun dns mesh forward: %s -> %s", domain, fakeIP)
+			util.LogInfo("tun dns mesh netstack forward: %s -> %s", domain, fakeIP)
 			resp := buildDNSResponse(query, fakeIP.To4())
 			if resp != nil {
 				return resp, nil
@@ -160,16 +239,23 @@ func (h *DNSHijacker) serveLoop() {
 			continue
 		}
 
-		// Try mesh DNS forwarding first (domain suffix → remote gateway)
+		// Extract source IP and port from remote address
+		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
+		srcPort := res.RemoteAddr.Port
+		_ = srcIP
+		_ = srcPort
+
 		var resp []byte
-		if h.MeshDNSForwarder != nil {
-			meshFakeIP, err := h.MeshDNSForwarder(domain)
+
+		// Try mesh DNS forwarding via netstack socket (to remote gateway's GIP:53)
+		if h.MeshDNSNetstackForwarder != nil {
+			fakeIP, err := h.MeshDNSNetstackForwarder(domain)
 			if err != nil {
-				util.LogWarn("tun dns mesh forward error: %s -> %v", domain, err)
+				util.LogWarn("tun dns mesh netstack forward error: %s -> %v", domain, err)
 			}
-			if meshFakeIP != nil {
-				util.LogInfo("tun dns mesh forward: %s -> %s", domain, meshFakeIP)
-				resp = buildDNSResponse(packet, meshFakeIP.To4())
+			if fakeIP != nil {
+				util.LogInfo("tun dns mesh netstack forward: %s -> %s", domain, fakeIP)
+				resp = buildDNSResponse(packet, fakeIP.To4())
 			}
 		}
 

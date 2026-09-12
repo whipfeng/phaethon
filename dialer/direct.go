@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 
@@ -11,6 +12,26 @@ import (
 type DirectDialer struct{}
 
 func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	if GlobalNetstackDialFunc != nil {
+		dialAddr := dstAddr
+		if ip := net.ParseIP(dstAddr); ip == nil {
+			if GlobalDNSResolverFunc != nil {
+				fakeIP, err := GlobalDNSResolverFunc(dstAddr)
+				if err != nil {
+					return nil, fmt.Errorf("netstack dns resolve %s: %w", dstAddr, err)
+				}
+				dialAddr = fakeIP.String()
+			}
+		}
+		addr := net.JoinHostPort(dialAddr, strconv.Itoa(dstPort))
+		conn, err := GlobalNetstackDialFunc("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		util.SetTCPNoDelay(conn)
+		return conn, nil
+	}
+
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	conn, err := DialRouteAware("tcp", addr)
 	if err != nil {

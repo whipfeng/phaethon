@@ -22,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -111,17 +112,86 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 	}
 }
 
-// SetMeshDNSForwarder registers a callback to forward DNS queries to remote mesh gateways.
-func (e *Engine) SetMeshDNSForwarder(forwarder func(domain string) (net.IP, error)) {
+// SetMeshDNSNetstackForwarder registers a callback to forward DNS queries via netstack socket to gateway GIP.
+func (e *Engine) SetMeshDNSNetstackForwarder(forwarder func(domain string) (net.IP, error)) {
 	if e.dnsHijack != nil {
-		e.dnsHijack.MeshDNSForwarder = forwarder
-		util.LogInfo("tun: mesh DNS forwarder set")
+		e.dnsHijack.MeshDNSNetstackForwarder = forwarder
+		util.LogInfo("tun: mesh DNS netstack forwarder set")
 	}
 }
 
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
 func (e *Engine) GetFakeIPPool() *FakeIPPool {
 	return e.fakeIP
+}
+
+// GetDNSHijacker returns the DNS hijacker for external use (e.g., mesh DNS forwarding).
+func (e *Engine) GetDNSHijacker() *DNSHijacker {
+	return e.dnsHijack
+}
+
+// ResolveDomain resolves a domain name through the DNS hijacker, returning a fakeIP.
+// The hijacker handles mesh domains, remote gateway forwarding, and local pool allocation.
+func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
+	if e.dnsHijack == nil {
+		return nil, fmt.Errorf("DNS hijacker not available")
+	}
+	fakeIP := e.fakeIP.Lookup(domain)
+	if fakeIP == nil {
+		return nil, fmt.Errorf("failed to allocate fakeIP for %s", domain)
+	}
+	return fakeIP, nil
+}
+
+// NetDial dials through the gVisor netstack. The connection is handled by netstack's
+// TCP/UDP forwarders, which route to local or remote destinations transparently.
+func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
+	e.mu.Lock()
+	running := e.running
+	ns := e.ns
+	e.mu.Unlock()
+
+	if !running || ns == nil {
+		return nil, fmt.Errorf("netstack not running")
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial: parse addr: %w", err)
+	}
+	portNum, err := net.LookupPort(network, port)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial: parse port: %w", err)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("netstack dial: not an IP: %s", host)
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("netstack dial: IPv6 not supported: %s", host)
+	}
+
+	var arr [4]byte
+	copy(arr[:], ip4)
+	remoteAddr := tcpip.FullAddress{
+		NIC:  tunNICID,
+		Addr: tcpip.AddrFrom4(arr),
+		Port: uint16(portNum),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	switch network {
+	case "tcp", "tcp4":
+		return gonet.DialContextTCP(ctx, ns, remoteAddr, ipv4.ProtocolNumber)
+	case "udp", "udp4":
+		return gonet.DialUDP(ns, nil, &remoteAddr, ipv4.ProtocolNumber)
+	default:
+		return nil, fmt.Errorf("netstack dial: unsupported network: %s", network)
+	}
 }
 
 // ConfigureMeshAddresses reconfigures the TUN engine to use mesh subnet addresses.
@@ -241,12 +311,6 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 	}
 	util.LogInfo("tun: registered mesh VIP %s with netstack", vip)
 	return nil
-}
-
-// AddMeshVIPToOS adds the mesh VIP to the OS-level TUN interface so the kernel
-// recognizes it as a local address and generates protocol responses (e.g. ICMP).
-func (e *Engine) AddMeshVIPToOS(vip net.IP) error {
-	return e.addMeshVIPToOS(vip)
 }
 
 // resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
@@ -511,12 +575,12 @@ func (e *Engine) StartStack() error {
 		return fmt.Errorf("tun: init netstack: %w", err)
 	}
 
-	// Fake-IP pool from mesh subnet
-	if e.meshSubnet == nil {
-		e.mu.Unlock()
-		return fmt.Errorf("mesh subnet not configured")
+	// Fake-IP pool: use mesh subnet if configured, otherwise default 198.18.0.0/15.
+	if e.meshSubnet != nil {
+		e.fakeIP = NewFakeIPPoolWithSubnet(e.meshSubnet, 3) // skip .1/.2/.3
+	} else {
+		e.fakeIP = NewFakeIPPool()
 	}
-	e.fakeIP = NewFakeIPPoolWithSubnet(e.meshSubnet, 3) // skip .1/.2/.3
 	e.fakeIP.SetOnChange(e.notifyStatsChanged)
 
 	// DNS hijacker
@@ -765,8 +829,9 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
-// initStack creates the gvisor netstack and attaches the link endpoint.
+// initStack creates the gvisor netstack and attaches the link endpoints.
 const tunNICID = 1
+const loNICID = 2
 
 func (e *Engine) initStack() error {
 	linkEP := channel.New(512, 1500, "")
@@ -778,17 +843,26 @@ func (e *Engine) initStack() error {
 	})
 	e.ns = s
 
+	// TUN NIC: handles TUN device I/O and mesh outbound.
 	if err := s.CreateNIC(tunNICID, linkEP); err != nil {
-		return fmt.Errorf("create nic: %v", err)
+		return fmt.Errorf("create tun nic: %v", err)
 	}
 
+	// Loopback NIC: handles outbound packets to local addresses (dnsAddr, fakeIP).
+	// WritePackets re-injects packets as inbound, so forwarder/hijacker can catch them.
+	loEP := loopback.New()
+	if err := s.CreateNIC(loNICID, loEP); err != nil {
+		return fmt.Errorf("create loopback nic: %v", err)
+	}
+
+	// Register dnsAddr on loopback NIC so the stack recognizes it as local.
 	ap := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 32}
 	protoAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
 	}
-	if err := s.AddProtocolAddress(tunNICID, protoAddr, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("add dns address: %v", err)
+	if err := s.AddProtocolAddress(loNICID, protoAddr, stack.AddressProperties{}); err != nil {
+		return fmt.Errorf("add dns address to loopback: %v", err)
 	}
 
 	// Do NOT add 192.0.2.2 as a local netstack address. The TUN adapter IP
@@ -800,6 +874,8 @@ func (e *Engine) initStack() error {
 
 	s.SetPromiscuousMode(tunNICID, true)
 	s.SetSpoofing(tunNICID, true)
+	s.SetPromiscuousMode(loNICID, true)
+	s.SetSpoofing(loNICID, true)
 
 	// Allow the netstack to forward IPv4/IPv6 packets that are not addressed to
 	// a local NIC address. This is required for the Fake-IP scheme: connections
@@ -808,10 +884,29 @@ func (e *Engine) initStack() error {
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
-	s.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: tunNICID},
+	// Route table: fakeIP/mesh range → loopback, everything else → TUN NIC.
+	// The subnet route covers dnsAddr (which is within the range), so no
+	// separate /32 route is needed. Outbound packets to any address in the
+	// range are re-injected as inbound via loopback and caught by the
+	// forwarder or hijacker.
+	routes := []tcpip.Route{
 		{Destination: header.IPv6EmptySubnet, NIC: tunNICID},
-	})
+	}
+
+	if e.meshSubnet != nil {
+		ip4 := e.meshSubnet.IP.To4()
+		meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
+		routes = append([]tcpip.Route{
+			{Destination: meshSubnet, NIC: loNICID},
+		}, routes...)
+	} else {
+		fakeIPSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{198, 18, 0, 0}), tcpip.MaskFromBytes([]byte{255, 254, 0, 0}))
+		routes = append([]tcpip.Route{
+			{Destination: fakeIPSubnet, NIC: loNICID},
+		}, routes...)
+	}
+
+	s.SetRouteTable(routes)
 
 	return nil
 }

@@ -31,15 +31,13 @@ type P2PManager struct {
 	meshEnabled bool
 	meshNodeID  string
 	meshVIP     string
-	meshHandler           MeshHandler
-	meshDNSResponseHandler func(queryID uint16, domain string, fakeIP net.IP, err error)
+	meshHandler MeshHandler
 }
 
 // MeshHandler handles mesh packets and gossip from P2P peers.
 type MeshHandler interface {
 	HandleMeshFrame(fromNodeID string, frame []byte)
 	HandleTopologyGossip(fromNodeID string, data []byte)
-	HandleMeshDNSQuery(fromNodeID string, domain string, queryID uint16) (net.IP, error)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(nodeID string)
 }
@@ -419,43 +417,6 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 				m.meshHandler.HandleTopologyGossip(peer.MeshNodeID, payloadData)
 			}
 		}
-	case "mesh_dns_query":
-		if m.meshHandler != nil {
-			domain, _ := msg["domain"].(string)
-			queryIDFloat, _ := msg["queryId"].(float64)
-			queryID := uint16(queryIDFloat)
-			fakeIP, err := m.meshHandler.HandleMeshDNSQuery(peer.MeshNodeID, domain, queryID)
-			// Send response
-			respCmd := map[string]interface{}{
-				"cmd":     "mesh_dns_response",
-				"queryId": queryID,
-				"domain":  domain,
-			}
-			if err != nil {
-				respCmd["error"] = err.Error()
-			} else if fakeIP != nil {
-				respCmd["fakeIp"] = fakeIP.String()
-			}
-			respData, _ := json.Marshal(respCmd)
-			enqueueWrite(peer, reverse.FrameData, respData)
-		}
-	case "mesh_dns_response":
-		if m.meshDNSResponseHandler != nil {
-			queryIDFloat, _ := msg["queryId"].(float64)
-			queryID := uint16(queryIDFloat)
-			domain, _ := msg["domain"].(string)
-			fakeIPStr, _ := msg["fakeIp"].(string)
-			errStr, _ := msg["error"].(string)
-			var fakeIP net.IP
-			if fakeIPStr != "" {
-				fakeIP = net.ParseIP(fakeIPStr)
-			}
-			var err error
-			if errStr != "" {
-				err = fmt.Errorf("%s", errStr)
-			}
-			m.meshDNSResponseHandler(queryID, domain, fakeIP, err)
-		}
 	default:
 		util.LogDebug("[P2P] unknown command %q from %s", cmd, peer.ID)
 	}
@@ -555,42 +516,6 @@ func (m *P2PManager) SetMeshInfo(nodeID, vip string) {
 // SetMeshHandler sets the mesh handler for processing mesh frames and gossip.
 func (m *P2PManager) SetMeshHandler(h MeshHandler) {
 	m.meshHandler = h
-}
-
-// SetMeshDNSResponseHandler sets the callback for mesh DNS query responses.
-func (m *P2PManager) SetMeshDNSResponseHandler(handler func(queryID uint16, domain string, fakeIP net.IP, err error)) {
-	m.meshDNSResponseHandler = handler
-}
-
-// SendMeshDNSQuery sends a DNS query to a specific mesh peer.
-func (m *P2PManager) SendMeshDNSQuery(peerNodeID string, domain string, queryID uint16) error {
-	m.mu.Lock()
-	var bestPeer *Peer
-	var bestLastSeen time.Time
-	for _, p := range m.peers {
-		if p.MeshNodeID == peerNodeID && p.LastSeen.After(bestLastSeen) {
-			bestPeer = p
-			bestLastSeen = p.LastSeen
-		}
-	}
-	m.mu.Unlock()
-
-	if bestPeer == nil {
-		return fmt.Errorf("mesh DNS: no connection to peer %s", peerNodeID)
-	}
-
-	cmd := map[string]interface{}{
-		"cmd":     "mesh_dns_query",
-		"domain":  domain,
-		"queryId": queryID,
-	}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
-
-	enqueueWrite(bestPeer, reverse.FrameData, data)
-	return nil
 }
 
 // BroadcastMeshGossip sends a mesh_gossip JSON command to all mesh-enabled peers.

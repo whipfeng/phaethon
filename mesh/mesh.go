@@ -46,7 +46,6 @@ type P2PTransport interface {
 	BroadcastMeshGossip(data []byte) error
 	SendMeshGossipTo(peerNodeID string, data []byte) error
 	ListMeshPeerIDs() []string
-	SendMeshDNSQuery(peerNodeID string, domain string, queryID uint16) error
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -80,19 +79,10 @@ type MeshManager struct {
 	routes   []MeshRoute // sorted by prefix length (longest first)
 	domainTrie *DomainTrie
 
-	dnsPendingMu sync.Mutex
-	dnsPending   map[uint16]chan dnsResult
-	dnsQueryID   uint16
-
 	DNSAllocator func(domain string) (net.IP, error)
 
 	natTable *NATTable
 	closeCh  chan struct{}
-}
-
-type dnsResult struct {
-	fakeIP net.IP
-	err    error
 }
 
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string) *MeshManager {
@@ -105,7 +95,6 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		advertise:      advertise,
 		topology:       NewTopology(),
 		routes:         make([]MeshRoute, 0),
-		dnsPending:     make(map[uint16]chan dnsResult),
 		closeCh:        make(chan struct{}),
 	}
 }
@@ -149,25 +138,48 @@ func (m *MeshManager) isLocalVIP(ip net.IP) bool {
 	return ip.Equal(m.vip)
 }
 
-// isLocalNetstackAddr checks if the IP is a local netstack address (GIP .3 or hostIP .2).
-// These addresses are handled by the netstack internally via InjectInbound, not by mesh routing.
-func (m *MeshManager) isLocalNetstackAddr(ip net.IP) bool {
+// getHostIP returns the hostIP (.2) address for this node's subnet.
+// hostIP is the TUN interface address on the OS side.
+func (m *MeshManager) getHostIP() net.IP {
 	if m.subnet == nil {
-		return false
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return false
+		return nil
 	}
 	baseIP := m.subnet.IP.To4()
 	if baseIP == nil {
-		return false
+		return nil
 	}
-	// .2 = hostIP (TUN adapter OS side)
-	// .3 = GIP (netstack internal, DNS)
-	hostIP := net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 2}
-	gip := net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 3}
-	return ip4.Equal(hostIP) || ip4.Equal(gip)
+	return net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 2}
+}
+
+// getGIP returns the GIP (.3) address for this node's subnet.
+// GIP is the DNS service address, delivered to gVisor netstack.
+func (m *MeshManager) getGIP() net.IP {
+	if m.subnet == nil {
+		return nil
+	}
+	baseIP := m.subnet.IP.To4()
+	if baseIP == nil {
+		return nil
+	}
+	return net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 3}
+}
+
+// isLocalHostIP checks if the IP is the local hostIP (.2) address.
+func (m *MeshManager) isLocalHostIP(ip net.IP) bool {
+	hostIP := m.getHostIP()
+	return hostIP != nil && ip.Equal(hostIP)
+}
+
+// isLocalGIP checks if the IP is the local GIP (.3) address.
+func (m *MeshManager) isLocalGIP(ip net.IP) bool {
+	gip := m.getGIP()
+	return gip != nil && ip.Equal(gip)
+}
+
+// isLocalNetstackAddr checks if the IP is a local netstack address (GIP .3 or hostIP .2).
+// These addresses are handled by the netstack internally via InjectInbound, not by mesh routing.
+func (m *MeshManager) isLocalNetstackAddr(ip net.IP) bool {
+	return m.isLocalHostIP(ip) || m.isLocalGIP(ip)
 }
 
 func (m *MeshManager) SetTun(tun TunInterface) {
@@ -188,70 +200,44 @@ func (m *MeshManager) Stop() {
 	close(m.closeCh)
 }
 
-func (m *MeshManager) HandleMeshDNSQuery(fromNodeID string, domain string, queryID uint16) (net.IP, error) {
-	util.LogInfo("[MESH] DNS query from %s: %s (queryID=%d)", fromNodeID, domain, queryID)
-	if m.DNSAllocator == nil {
-		return nil, fmt.Errorf("mesh DNS: no allocator configured")
-	}
-	fakeIP, err := m.DNSAllocator(domain)
-	if err != nil {
-		return nil, fmt.Errorf("mesh DNS: %w", err)
-	}
-	util.LogInfo("[MESH] DNS allocated: %s -> %s for %s", domain, fakeIP, fromNodeID)
-	return fakeIP, nil
-}
-
-func (m *MeshManager) ForwardDNSQuery(domain string, gatewayNodeID string) (net.IP, error) {
-	if m.p2p == nil {
-		return nil, fmt.Errorf("mesh DNS: P2P not available")
-	}
-
-	m.dnsPendingMu.Lock()
-	m.dnsQueryID++
-	queryID := m.dnsQueryID
-	ch := make(chan dnsResult, 1)
-	m.dnsPending[queryID] = ch
-	m.dnsPendingMu.Unlock()
-
-	defer func() {
-		m.dnsPendingMu.Lock()
-		delete(m.dnsPending, queryID)
-		m.dnsPendingMu.Unlock()
-	}()
-
-	if err := m.p2p.SendMeshDNSQuery(gatewayNodeID, domain, queryID); err != nil {
-		return nil, err
-	}
-
-	select {
-	case result := <-ch:
-		return result.fakeIP, result.err
-	case <-time.After(5 * time.Second):
-		return nil, fmt.Errorf("mesh DNS: timeout waiting for response from %s", gatewayNodeID)
-	case <-m.closeCh:
-		return nil, fmt.Errorf("mesh DNS: stopped")
-	}
-}
-
-func (m *MeshManager) HandleDNSResponse(queryID uint16, domain string, fakeIP net.IP, err error) {
-	m.dnsPendingMu.Lock()
-	ch, ok := m.dnsPending[queryID]
-	m.dnsPendingMu.Unlock()
-
-	if ok {
-		ch <- dnsResult{fakeIP: fakeIP, err: err}
-	} else {
-		util.LogWarn("[MESH] DNS response for unknown queryID=%d domain=%s", queryID, domain)
-	}
-}
-
-func (m *MeshManager) MeshDNSForwarder(domain string) (net.IP, error) {
+// GetGatewayGIPForDomain returns the GIP (.3) address of the gateway for a domain.
+// Returns nil if no gateway is found or the gateway is ourselves.
+func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
 	gatewayNodeID, _, _ := m.FindGatewayForDomain(domain)
 	if gatewayNodeID == "" || gatewayNodeID == m.nodeID {
+		return nil
+	}
+	peer := m.topology.GetPeer(gatewayNodeID)
+	if peer == nil || peer.Subnet == nil {
+		return nil
+	}
+	return DeriveGIPFromSubnet(peer.Subnet)
+}
+
+// DNSNetstackForwarder is a callback that forwards DNS queries via netstack socket.
+// It takes the domain and gateway GIP, and returns the fakeIP from the response.
+type DNSNetstackForwarder func(domain string, gatewayGIP net.IP) (net.IP, error)
+
+// dnsNetstackForwarder is the callback for forwarding DNS via netstack.
+var dnsNetstackForwarder DNSNetstackForwarder
+
+// SetDNSNetstackForwarder sets the callback for forwarding DNS via netstack socket.
+func SetDNSNetstackForwarder(f DNSNetstackForwarder) {
+	dnsNetstackForwarder = f
+}
+
+// ForwardDNSViaNetstack forwards a DNS query to the gateway's GIP:53 via netstack socket.
+// Returns the fakeIP from the gateway's response, or (nil, nil) if no gateway is found.
+func (m *MeshManager) ForwardDNSViaNetstack(domain string) (net.IP, error) {
+	gatewayGIP := m.GetGatewayGIPForDomain(domain)
+	if gatewayGIP == nil {
 		return nil, nil
 	}
-	util.LogInfo("[MESH] DNS forward: %s -> gateway %s", domain, gatewayNodeID)
-	return m.ForwardDNSQuery(domain, gatewayNodeID)
+	if dnsNetstackForwarder == nil {
+		return nil, fmt.Errorf("DNS netstack forwarder not set")
+	}
+	util.LogInfo("[MESH] DNS netstack forward: %s -> gateway GIP %s", domain, gatewayGIP)
+	return dnsNetstackForwarder(domain, gatewayGIP)
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
@@ -346,6 +332,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
 	}
 
+	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
 	if m.isLocalVIP(dstIP) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
@@ -358,7 +345,35 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		go func() {
 			if m.tun != nil {
 				if err := m.tun.WriteMeshPacket(pkt); err != nil {
-					util.LogWarn("[MESH] write to TUN failed: %v", err)
+					util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
+				}
+			}
+		}()
+		return
+	}
+
+	// .2 (hostIP): WriteMeshPacket to OS (deliver to application)
+	if m.isLocalHostIP(dstIP) {
+		pkt := make([]byte, len(frame))
+		copy(pkt, frame)
+		go func() {
+			if m.tun != nil {
+				if err := m.tun.WriteMeshPacket(pkt); err != nil {
+					util.LogWarn("[MESH] write hostIP packet to TUN failed: %v", err)
+				}
+			}
+		}()
+		return
+	}
+
+	// .3 (GIP): InjectMeshPacket to netstack (DNS hijacker)
+	if m.isLocalGIP(dstIP) {
+		pkt := make([]byte, len(frame))
+		copy(pkt, frame)
+		go func() {
+			if m.tun != nil {
+				if err := m.tun.InjectMeshPacket(pkt); err != nil {
+					util.LogWarn("[MESH] inject GIP packet to netstack failed: %v", err)
 				}
 			}
 		}()

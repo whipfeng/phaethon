@@ -131,16 +131,3 @@ func (e *Engine) addMeshRoute(subnet string) error {
 	util.LogInfo("tun: mesh route %s (darwin not implemented yet)", subnet)
 	return nil
 }
-
-// addMeshVIPToOS adds the mesh VIP to the OS TUN interface on Darwin.
-func (e *Engine) addMeshVIPToOS(vip net.IP) error {
-	vip4 := vip.To4()
-	if vip4 == nil {
-		return fmt.Errorf("only IPv4 mesh VIP supported")
-	}
-	if out, err := exec.Command("ifconfig", e.routeMgr.devName, "inet", "add", vip4.String(), "netmask", "255.255.255.255").CombinedOutput(); err != nil {
-		return fmt.Errorf("ifconfig add mesh VIP %s: %v, %s", vip, err, out)
-	}
-	util.LogInfo("tun: mesh VIP %s added to %s", vip, e.routeMgr.devName)
-	return nil
-}

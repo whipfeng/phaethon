@@ -26,6 +26,14 @@ type BindContext struct {
 
 var globalBindContext atomic.Pointer[BindContext]
 
+// GlobalNetstackDialFunc dials through the gVisor netstack instead of the OS network stack.
+// When set, DirectDialer uses this for outbound connections, enabling mesh routing.
+var GlobalNetstackDialFunc func(network, addr string) (net.Conn, error)
+
+// GlobalDNSResolverFunc resolves a domain name through the DNS hijacker, returning a fakeIP.
+// When set, DirectDialer uses this for domain resolution before netstack dialing.
+var GlobalDNSResolverFunc func(domain string) (net.IP, error)
+
 // SetGlobalBindContext injects the context captured by the TUN engine. Passing
 // nil clears the context and restores standard dial behavior.
 func SetGlobalBindContext(bc *BindContext) {

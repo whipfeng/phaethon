@@ -527,21 +527,3 @@ func (e *Engine) addMeshRoute(subnet string) error {
 	util.LogInfo("tun: mesh route %s -> on-link (luid=%x idx=%d)", subnet, luid, index)
 	return nil
 }
-
-// addMeshVIPToOS adds the mesh VIP to the OS TUN interface on Windows.
-func (e *Engine) addMeshVIPToOS(vip net.IP) error {
-	vip4 := vip.To4()
-	if vip4 == nil {
-		return fmt.Errorf("only IPv4 mesh VIP supported")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "netsh", "interface", "ip", "add", "address",
-		e.routeMgr.devName, vip4.String(), "255.255.255.255").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("netsh add mesh VIP %s: %v, %s", vip, err, out)
-	}
-	util.LogInfo("tun: mesh VIP %s added to %s", vip, e.routeMgr.devName)
-	return nil
-}

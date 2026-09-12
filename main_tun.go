@@ -27,20 +27,20 @@ func (r *TUNResource) Stop() {
 }
 
 // startEngine creates and starts the engine.
-// When TUN is enabled, it starts both the TUN device and gVisor netstack.
-// When TUN is disabled but mesh is enabled, it starts only the gVisor netstack
-// (no TUN device, no OS routes), allowing mesh gateway forwarding via InjectMeshPacket.
+// The gVisor netstack (with DNS hijacker) is always started when there is a config,
+// so that proxy servers (Mode B) can use netstack sockets for DNS and connections.
+// When TUN is enabled, the TUN device and OS routes are also set up.
 // If meshMgr is non-nil, it is wired to the engine immediately after start.
 func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) *TUNResource {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
-	tunEnabled := ruleConf != nil && ruleConf.TUN != nil && ruleConf.TUN.IsEnabled()
-	meshEnabled := meshMgr != nil
-
-	if !tunEnabled && !meshEnabled {
+	if ruleConf == nil {
 		return nil
 	}
+
+	tunEnabled := ruleConf.TUN != nil && ruleConf.TUN.IsEnabled()
+	meshEnabled := meshMgr != nil
 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled {
@@ -92,7 +92,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
 
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
-		engine.SetMeshDNSForwarder(meshMgr.MeshDNSForwarder)
+		engine.SetMeshDNSNetstackForwarder(meshMgr.ForwardDNSViaNetstack)
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		if pool := engine.GetFakeIPPool(); pool != nil {
@@ -101,23 +101,15 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 			}
 		}
 
-		// Set up P2P DNS response handler
-		p2p.GlobalP2PManager.SetMeshDNSResponseHandler(meshMgr.HandleDNSResponse)
+		// Set up DNS netstack forwarder callback (mesh -> engine's DNS hijacker)
+		if hijacker := engine.GetDNSHijacker(); hijacker != nil {
+			mesh.SetDNSNetstackForwarder(func(domain string, gatewayGIP net.IP) (net.IP, error) {
+				return hijacker.ForwardViaNetstack(domain, gatewayGIP)
+			})
+		}
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
 
-		// Add all VIPs to OS interface so OS recognizes them as local (for source IP selection)
-		// Only needed when TUN is enabled (VIPs are added to the TUN adapter)
-		if tunEnabled {
-			go func() {
-				time.Sleep(5 * time.Second)
-				for _, vip := range allVIPs {
-					if err := engine.AddMeshVIPToOS(vip); err != nil {
-						util.LogWarn("failed to add mesh VIP %s to OS: %v", vip, err)
-					}
-				}
-			}()
-		}
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 

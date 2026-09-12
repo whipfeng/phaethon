@@ -358,7 +358,7 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
 	}
-	if err := e.ns.AddProtocolAddress(tunNICID, protoAddr, stack.AddressProperties{}); err != nil {
+	if err := e.ns.AddProtocolAddress(outNICID, protoAddr, stack.AddressProperties{}); err != nil {
 		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
 	}
 	util.LogInfo("tun: registered mesh VIP %s with netstack", vip)
@@ -882,7 +882,7 @@ func (e *Engine) Stop() error {
 }
 
 // initStack creates the gvisor netstack and attaches the link endpoints.
-const tunNICID = 1
+const outNICID = 1
 const loNICID = 2
 
 func (e *Engine) initStack() error {
@@ -895,9 +895,9 @@ func (e *Engine) initStack() error {
 	})
 	e.ns = s
 
-	// TUN NIC: handles TUN device I/O and mesh outbound.
-	if err := s.CreateNIC(tunNICID, linkEP); err != nil {
-		return fmt.Errorf("create tun nic: %v", err)
+	// Outbound NIC: handles outbound dispatch (mesh interception, TUN write, VIP return).
+	if err := s.CreateNIC(outNICID, linkEP); err != nil {
+		return fmt.Errorf("create out nic: %v", err)
 	}
 
 	// Loopback NIC: handles outbound packets to local addresses (dnsAddr, fakeIP).
@@ -924,8 +924,8 @@ func (e *Engine) initStack() error {
 	// looped back inside netstack instead of being written back to the Wintun
 	// device for the host resolver to receive.
 
-	s.SetPromiscuousMode(tunNICID, true)
-	s.SetSpoofing(tunNICID, true)
+	s.SetPromiscuousMode(outNICID, true)
+	s.SetSpoofing(outNICID, true)
 	s.SetPromiscuousMode(loNICID, true)
 	s.SetSpoofing(loNICID, true)
 
@@ -942,7 +942,7 @@ func (e *Engine) initStack() error {
 	// range are re-injected as inbound via loopback and caught by the
 	// forwarder or hijacker.
 	routes := []tcpip.Route{
-		{Destination: header.IPv6EmptySubnet, NIC: tunNICID},
+		{Destination: header.IPv6EmptySubnet, NIC: outNICID},
 	}
 
 	if e.meshSubnet != nil {
@@ -1528,7 +1528,7 @@ func (e *Engine) queryInternalDNS(query []byte) ([]byte, error) {
 		// Fall back to netstack path if direct resolve fails.
 	}
 
-	remoteAddr := tcpip.FullAddress{NIC: tunNICID, Addr: e.dnsAddr, Port: 53}
+	remoteAddr := tcpip.FullAddress{NIC: outNICID, Addr: e.dnsAddr, Port: 53}
 	conn, err := gonet.DialUDP(e.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {
 		return nil, fmt.Errorf("dial internal dns fail: %v", err)

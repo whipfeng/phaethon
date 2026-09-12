@@ -152,58 +152,61 @@ default:                        // 非本地 - 转发或本地处理
 
 ### 解决方案：为 netstack 添加 loopback NIC
 
-在 gVisor netstack 上添加一个 loopback NIC，将本地地址的出站包路由到 loopback 而非 channel.Endpoint。包经过 loopback 回到传输层，forwarder/hijacker 自然兜底。
+在 gVisor netstack 上添加一个 loopback NIC，将出站包路由到 loopback 而非 channel.Endpoint。包经过 loopback 回到传输层，forwarder/hijacker 自然兜底。
 
 gVisor 自带 `loopback.New()` 实现：`WritePackets` 将出站包重新注入为入站包（`DeliverNetworkPacket`），无需自行实现。
 
+### 两个 NIC 的职责
+
+| NIC | 常量 | 链路层 | 职责 |
+|---|---|---|---|
+| 出站 NIC | `outNICID = 1` | channel.Endpoint | 出站统一分发点：writeLoop 从此读取，分发到 mesh 链路或 TUN 设备 |
+| 环回 NIC | `loNICID = 2` | loopback.New() | 出站包环回为入站，forwarder/hijacker 兜底 |
+
+> `outNICID` 不与 TUN 绑定。TUN 未启用时，outNIC 仍用于 mesh 拦截和 VIP 回程分发。
+
+### 路由表（目标设计）
+
 ```
-initStack() 中：
-  1. 创建 channel.Endpoint（现有，用于 TUN/mesh 出站）
-  2. 创建 loopback endpoint（新增，gVisor 内置 loopback.New()）
-  3. 创建两个 NIC：
-     - NIC 1 (tunNICID): channel.Endpoint
-     - NIC 2 (loNICID): loopback endpoint
-  4. dnsAddr 注册在 loNICID 上（让 netstack 认为 dnsAddr 是本地地址）
-  5. 路由表：
-     - 整个 fakeIP/mesh 段 → NIC 2 (loopback)   ← 覆盖整个网段，含 dnsAddr
-     - 默认路由 → NIC 1 (channel)
+路由表：
+  1. VIP（mesh 本机 VIP）→ outNIC    ← TUN 回程流量（NAT 后 src=VIP，回程 dst=VIP）
+  2. meshSubnet → outNIC             ← writeLoop 拦截 → meshInterceptor → mesh 链路
+  3. 默认 → loNIC (loopback)         ← 所有新请求出站 → forwarder/hijacker
 ```
 
-> 注：dnsAddr 本身在 fakeIP/mesh 段内，无需单独 /32 路由。整个网段一条路由即可。
+### 回程处理
+
+两种入口的 forwarder 都通过 gonet.Conn.Write() 写回数据。回程包的目标地址就是出站时的源地址：
+
+- **TUN 入口**：NAT 把 src 替换为 VIP → 回程 dst=VIP → outNIC → TUN → OS → 客户端
+- **Mode B 入口**：gVisor netstack socket 源地址为 GIP → 回程 dst=GIP → 精确匹配客户端 socket → 直接投递
+
+```
+TUN 入口:
+  客户端真实IP → NAT src=VIP → forwarder dial (OS socket)
+  回程: dst=VIP → outNIC → TUN → OS → 客户端
+
+Mode B 入口:
+  DirectDialer → gVisor netstack socket (src=GIP) → loopback → forwarder dial (OS socket)
+  回程: dst=GIP → 精确匹配客户端 gVisor netstack socket → 直接投递
+```
+
+NAT 的作用（TUN 入口）：将客户端真实 IP 替换为 VIP，使回程目标 = VIP，路由表走 outNIC → TUN。
+Mode B 不需要额外 NAT：gVisor netstack socket 源地址本身就是 GIP，回程通过精确匹配投递。
 
 ### 数据流（统一后）
 
 ```
-Mode B 收到请求 (domain:port)
-  ↓
-1. DirectDialer.Dial(domain, port)
-   - 域名 → ResolveDomain → fakeIP
-   - IP → 直接用
-   - 都走 NetDial(ip:port) → netstack
-  ↓
-2. netstack 路由表决定去向：
-   - fakeIP/mesh 段 → loNIC (loopback)
-   - 其他 → tunNIC (channel)
-  ↓
-3. writeLoop 从 tunNIC 读出包，做最终路由：
-   ├─ dst 是 remote mesh VIP → meshInterceptor → mesh 链路
-   ├─ dst 是 hostIP (.2) → TUN → OS（终止于 OS）
-   └─ dst 是其他（外部 IP）→ TUN → OS → 物理出口
-      注：外部 IP 从 tunNIC 出去后，OS 路由决定走物理接口还是 mesh
-  ↓
-4. loopback 路径（fakeIP）：
-   - loopback 环回 → forwarder/hijacker 拦截
-   - forwarder: 查回域名 → 规则匹配 → DialRouteAware (OS socket) → 真实目标
-   - 注：forwarder 用 OS socket dial，不再走 netstack，避免死循环
+出站包路由决策（路由表）：
+  ├─ dst = VIP → outNIC → writeLoop → TUN → OS（TUN 回程）
+  ├─ dst = mesh 远端 VIP → outNIC → writeLoop → meshInterceptor → mesh 链路
+  └─ dst = 其他 → loNIC → loopback → forwarder/hijacker
+
+writeLoop 逻辑不变：
+  1. 从 outNIC 的 channel.Endpoint 读包
+  2. mesh 拦截（dst 是远端 mesh VIP → meshInterceptor）
+  3. 写 TUN 设备（VIP 回程 + 其他）
 ```
-
-**关键设计：**
-- DirectDialer 总是用 NetDial，不区分域名/IP
-- writeLoop 是统一的路由决策点（mesh / hostIP / 其他）
-- forwarder dial 用 OS socket（DialRouteAware），绕过 netstack，避免死循环
-- TUN 的 exclusion routes 确保 OS socket 能到达物理出口
-
-TUN 入口数据流不变（inbound 包从 TUN 进入，经 readLoop 注入 netstack，forwarder 兜底）。
 
 ### 两个入口完全统一
 
@@ -211,7 +214,9 @@ TUN 入口数据流不变（inbound 包从 TUN 进入，经 readLoop 注入 nets
 |---|---|---|
 | 包进入方式 | readLoop → InjectInbound | gonet.DialTCP/UDP（outbound → loopback） |
 | forwarder 拦截 | inbound 包直接命中 | outbound 包经 loopback 变为 inbound |
-| DNS 解析 | OS 系统 DNS → TUN 劫持 → hijacker | netstack socket → loopback → hijacker |
+| 出站源地址 | VIP（NAT 替换） | GIP（gVisor netstack socket 天然使用） |
+| 回程路径 | dst=VIP → outNIC → TUN → OS | dst=GIP → 精确匹配客户端 socket → 直接投递 |
+| DNS 解析 | OS 系统 DNS → TUN 劫持 → hijacker | gVisor netstack socket → loopback → hijacker |
 | 规则匹配 | **共享** handleConn | **共享** handleConn |
 | 连接建立 | **共享** handleConn | **共享** handleConn |
 
@@ -230,7 +235,7 @@ Hijacker 始终存在。Stack 在以下情况启动：
 |---|---|
 | TCP 出站 → loopback → forwarder 拦截 | ✅ |
 | UDP 出站 → loopback → hijacker endpoint 收到 | ✅ |
-| UDP 出站非本地地址 → channel → tunNIC | ✅ |
+| UDP 出站非本地地址 → channel → outNIC | ✅ |
 
 > 注：UDP loopback 投递是同步的，waiter 必须在 Write 之前注册。
 
@@ -240,38 +245,12 @@ Hijacker 始终存在。Stack 在以下情况启动：
 - [x] 验证 TCP/UDP loopback 投递
 - [x] 验证非本地地址走 channel
 - [x] DNS hijacker 绑定 NIC 0（任意网卡），接收来自 TUN 和 loopback 的 DNS 查询
-- [x] Mode B (SOCKS5) 通过 netstack socket 进行 DNS 解析和连接建立
+- [x] Mode B (SOCKS5) 通过 gVisor netstack socket 进行 DNS 解析和连接建立
 - [x] forwarder 排除 TUN 接口（BindContext + DialRouteAware）
+- [x] tunNICID 重命名为 outNICID（不与 TUN 绑定）
+- [ ] TUN 入口 NAT 标记（src → VIP）
+- [ ] 路由表更新（VIP → outNIC, meshSubnet → outNIC, 默认 → loNIC）
 - [ ] DirectDialer 总是用 NetDial（域名和 IP 都走 netstack）
-- [ ] **待解决**：netstack 出站包区分新请求 vs 回程流量
-
-### 待解决问题：出站包路由歧义
-
-**问题：**
-Netstack 出站包（从 tunNIC 出来）包括：
-1. **新请求**（Mode B 发起的连接）→ 应该环回到 forwarder
-2. **回程包**（forwarder dial 出去后，OS 返回的回复）→ 应该去 TUN → OS
-
-如果统一环回，回程包也会被环回到 forwarder，破坏连接。
-
-**示例：**
-```
-Forwarder dial 8.8.8.8 (OS socket) → OS → 物理出口
-8.8.8.8 回复 → OS → TUN → readLoop → netstack
-Netstack 处理回复 → writeLoop (outbound from netstack perspective)
-  → 如果环回 → forwarder (错误！应该去 TUN → OS)
-```
-
-**可能的解决方案（待讨论）：**
-1. 只环回 SYN / 首次 UDP（需要检查包内容）
-2. 用不同地址段区分（fakeIP 环回，real IP 去 TUN）
-3. 在 forwarder dial 时标记连接，writeLoop 根据标记决定
-4. 其他？
-
-**当前实现：**
-- fakeIP/mesh → loNIC (loopback)
-- 其他 → tunNIC (writeLoop → TUN)
-- DirectDialer 对域名用 NetDial，对 IP 用 OS socket（避免回程问题）
 
 ## 已完成的待实现
 

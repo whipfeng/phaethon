@@ -19,7 +19,7 @@ import (
 )
 
 func TestNetstackLoopback(t *testing.T) {
-	const tunNICID = 1
+	const outNICID = 1
 	const loNICID = 2
 
 	s := stack.New(stack.Options{
@@ -29,7 +29,7 @@ func TestNetstackLoopback(t *testing.T) {
 
 	// TUN NIC (channel endpoint)
 	linkEP := channel.New(512, 1500, "")
-	if err := s.CreateNIC(tunNICID, linkEP); err != nil {
+	if err := s.CreateNIC(outNICID, linkEP); err != nil {
 		t.Fatalf("CreateNIC tun: %v", err)
 	}
 
@@ -47,8 +47,8 @@ func TestNetstackLoopback(t *testing.T) {
 		t.Fatalf("AddProtocolAddress dns: %v", err)
 	}
 
-	s.SetPromiscuousMode(tunNICID, true)
-	s.SetSpoofing(tunNICID, true)
+	s.SetPromiscuousMode(outNICID, true)
+	s.SetSpoofing(outNICID, true)
 	s.SetPromiscuousMode(loNICID, true)
 	s.SetSpoofing(loNICID, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
@@ -59,7 +59,7 @@ func TestNetstackLoopback(t *testing.T) {
 	s.SetRouteTable([]tcpip.Route{
 		{Destination: dnsSubnet, NIC: loNICID},
 		{Destination: fakeIPSubnet, NIC: loNICID},
-		{Destination: header.IPv4EmptySubnet, NIC: tunNICID},
+		{Destination: header.IPv4EmptySubnet, NIC: outNICID},
 	})
 
 	// TCP forwarder (catch-all)

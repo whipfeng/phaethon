@@ -211,11 +211,26 @@ func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
 	if gatewayNodeID == "" || gatewayNodeID == m.nodeID {
 		return nil
 	}
-	peer := m.topology.GetPeer(gatewayNodeID)
-	if peer == nil || peer.Subnet == nil {
-		return nil
+	
+	// Search through all peers to find the gateway's subnet.
+	// The gateway might not have a direct peer object if its gossip was forwarded by another node.
+	m.topology.mu.RLock()
+	defer m.topology.mu.RUnlock()
+	
+	for _, peer := range m.topology.peers {
+		// Check if this peer has routes from the gateway node
+		for _, route := range peer.Routes {
+			if route.SourceNodeID == gatewayNodeID {
+				// Found a route from the gateway, derive GIP from the route's subnet
+				if route.Prefix == nil {
+					continue
+				}
+				return DeriveGIPFromSubnet(route.Prefix)
+			}
+		}
 	}
-	return DeriveGIPFromSubnet(peer.Subnet)
+	
+	return nil
 }
 
 // ResolveGatewayGIP returns the GIP of the remote gateway that serves the given domain.

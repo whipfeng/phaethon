@@ -103,7 +103,7 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 			e.localMeshVIPs[v4.String()] = true
 		}
 	}
-	util.LogInfo("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
+	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
 }
 
 // SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
@@ -115,14 +115,14 @@ func (e *Engine) SetNATTable(nat *NATTable) {
 func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 	if e.dnsHijack != nil {
 		e.dnsHijack.MeshResolver = resolver
-		util.LogInfo("tun: mesh DNS resolver set")
+		util.LogDebug("tun: mesh DNS resolver set")
 	}
 }
 
 // SetMeshGatewayResolver registers a callback to resolve a domain to the remote gateway's GIP.
 func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
 	e.meshGatewayResolver = resolver
-	util.LogInfo("tun: mesh gateway resolver set")
+	util.LogDebug("tun: mesh gateway resolver set")
 }
 
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
@@ -140,7 +140,7 @@ func (e *Engine) GetDNSHijacker() *DNSHijacker {
 // through the loopback NIC and is handled by the hijacker, which allocates
 // a fakeIP from the local pool or forwards to a remote mesh gateway.
 func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
-	util.LogInfo("netstack: ResolveDomain called for domain=%s", domain)
+	util.LogDebug("netstack: ResolveDomain called for domain=%s", domain)
 	e.mu.Lock()
 	ns := e.ns
 	dnsAddr := e.dnsAddr
@@ -195,7 +195,7 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 // or mesh subnet, the connection goes through the loopback NIC and is caught by
 // TCP/UDP forwarders, which route to local or remote destinations transparently.
 func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
-	util.LogInfo("netstack: NetDial called with network=%s addr=%s", network, addr)
+	util.LogDebug("netstack: NetDial called with network=%s addr=%s", network, addr)
 	e.mu.Lock()
 	running := e.running
 	ns := e.ns
@@ -235,13 +235,13 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 
 	switch network {
 	case "tcp", "tcp4":
-		util.LogInfo("netstack: DialContextTCP to %s:%d", host, portNum)
+		util.LogDebug("netstack: DialContextTCP to %s:%d", host, portNum)
 		conn, err := gonet.DialContextTCP(ctx, ns, remoteAddr, ipv4.ProtocolNumber)
 		if err != nil {
 			util.LogWarn("netstack: DialContextTCP failed: %v", err)
 			return nil, err
 		}
-		util.LogInfo("netstack: DialContextTCP succeeded to %s:%d", host, portNum)
+		util.LogDebug("netstack: DialContextTCP succeeded to %s:%d", host, portNum)
 		return conn, nil
 	case "udp", "udp4":
 		return gonet.DialUDP(ns, nil, &remoteAddr, ipv4.ProtocolNumber)
@@ -279,7 +279,7 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 		e.prefixLen = 29
 	}
 
-	util.LogInfo("tun: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
+	util.LogDebug("tun: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
 	return nil
 }
 
@@ -365,7 +365,7 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 	if err := e.ns.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); err != nil {
 		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
 	}
-	util.LogInfo("tun: registered mesh VIP %s with netstack", vip)
+	util.LogDebug("tun: registered mesh VIP %s with netstack", vip)
 	return nil
 }
 
@@ -664,7 +664,7 @@ func (e *Engine) StartStack() error {
 	go e.logPacketCounts()
 
 	e.logEvent("gVisor netstack started")
-	util.LogInfo("gVisor netstack started")
+	util.LogDebug("gVisor netstack started")
 	return nil
 }
 
@@ -774,14 +774,14 @@ func (e *Engine) StartTUN() error {
 				util.LogWarn("dhcp: failed to start: %v", err)
 			} else {
 				e.dhcpSrv = srv
-				util.LogInfo("dhcp: server started on %s", ifaceName)
+				util.LogDebug("dhcp: server started on %s", ifaceName)
 			}
 		}
 	}
 
 	e.logEvent("TUN device started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", "", dev.Name(), 0, nil, "ok", nil)
-	util.LogInfo("TUN device started on %s", dev.Name())
+	util.LogDebug("TUN device started on %s", dev.Name())
 	return nil
 }
 
@@ -844,7 +844,7 @@ func (e *Engine) StopTUN() error {
 	e.tunWG.Wait()
 
 	e.logEvent("TUN device stopped")
-	util.LogInfo("TUN device stopped (netstack still running)")
+	util.LogDebug("TUN device stopped (netstack still running)")
 	return nil
 }
 
@@ -874,7 +874,7 @@ func (e *Engine) StopStack() error {
 	}
 
 	e.logEvent("gVisor netstack stopped")
-	util.LogInfo("gVisor netstack stopped")
+	util.LogDebug("gVisor netstack stopped")
 	return nil
 }
 
@@ -936,7 +936,7 @@ func (e *Engine) logPacketCounts() {
 		case <-e.closeCh:
 			return
 		case <-ticker.C:
-			util.LogInfo("tun counters: read=%d write=%d", e.readPackets.Load(), e.writePackets.Load())
+			util.LogDebug("tun counters: read=%d write=%d", e.readPackets.Load(), e.writePackets.Load())
 		}
 	}
 }
@@ -998,9 +998,9 @@ func (e *Engine) readLoop() {
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
 			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
-				util.LogInfo("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
+				util.LogDebug("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if e.readPackets.Load() <= 200 {
-				util.LogInfo("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
+				util.LogDebug("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
 			}
 		}
 
@@ -1081,7 +1081,7 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 		return false
 	}
 
-	util.LogInfo("tun dns redirect: %s -> GIP %s (readLoop)", domain, remoteGIP)
+	util.LogDebug("tun dns redirect: %s -> GIP %s (readLoop)", domain, remoteGIP)
 
 	// Rewrite dst IP to remote GIP
 	result := make([]byte, len(pkt))
@@ -1143,7 +1143,7 @@ func (e *Engine) writeLoop() {
 		dstIP := net.IP(data[16:20])
 
 		if e.writePackets.Load() < 10 {
-			util.LogInfo("tun writeLoop pkt#%d: %s -> %s (proto=%d len=%d)",
+			util.LogDebug("tun writeLoop pkt#%d: %s -> %s (proto=%d len=%d)",
 				e.writePackets.Load(),
 				net.IP(data[12:16]), dstIP,
 				data[9], len(data))
@@ -1166,13 +1166,13 @@ func (e *Engine) writeLoop() {
 				hl := int(data[0]&0x0f) * 4
 				if natPkt := e.natTable.TranslateInbound(data); natPkt != nil {
 					nhl := int(natPkt[0]&0x0f) * 4
-					util.LogInfo("tun writeLoop reverseNAT: %s:%d -> %s:%d (proto=%d)",
+					util.LogDebug("tun writeLoop reverseNAT: %s:%d -> %s:%d (proto=%d)",
 						net.IP(natPkt[12:16]), uint16(natPkt[nhl])<<8|uint16(natPkt[nhl+1]),
 						net.IP(natPkt[16:20]), uint16(natPkt[nhl+2])<<8|uint16(natPkt[nhl+3]),
 						natPkt[9])
 					data = natPkt
 				} else {
-					util.LogInfo("tun writeLoop reverseNAT DROP: %s -> %s (proto=%d len=%d)",
+					util.LogDebug("tun writeLoop reverseNAT DROP: %s -> %s (proto=%d len=%d)",
 						net.IP(data[12:16]), dstIP, data[9], len(data))
 					pkt.DecRef()
 					continue
@@ -1239,7 +1239,7 @@ func (e *Engine) acceptTCP() {
 
 	fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
-		util.LogInfo("tun: tcp forwarder called local=%s:%d remote=%s:%d",
+		util.LogDebug("tun: tcp forwarder called local=%s:%d remote=%s:%d",
 			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		var wq waiter.Queue
@@ -1379,7 +1379,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	var domain string
 	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 		domain = d
-		util.LogInfo("tun: udp fake-ip %s -> %s", dstAddr, domain)
+		util.LogDebug("tun: udp fake-ip %s -> %s", dstAddr, domain)
 	}
 
 	connID := util.NextConnID()
@@ -1402,7 +1402,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	resolvedPort := req.DstPort
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
+		util.LogDebug("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
 		connlog.Log("TUN", "UDP", "", matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
@@ -1437,7 +1437,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 					break
 				}
 			}
-			util.LogInfo("[TUN] [%s] udp resolved %s -> %s for DIRECT", connID, domain, dialIP)
+			util.LogDebug("[TUN] [%s] udp resolved %s -> %s for DIRECT", connID, domain, dialIP)
 		}
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
@@ -1450,7 +1450,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
-	util.LogInfo("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogDebug("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
 		// Preserve Rule and TimeRange from original matchResult if available
 		if matchResult != nil {
@@ -1515,7 +1515,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	var domain string
 	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 		domain = d
-		util.LogInfo("tun: fake-ip %s -> %s", dstAddr, domain)
+		util.LogDebug("tun: fake-ip %s -> %s", dstAddr, domain)
 	}
 
 	connID := util.NextConnID()
@@ -1542,7 +1542,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
+		util.LogDebug("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
 		connlog.Log("TUN", "TCP", "", matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
@@ -1572,7 +1572,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 					break
 				}
 			}
-			util.LogInfo("[TUN] [%s] resolved %s -> %s for DIRECT", connID, domain, dialAddr)
+			util.LogDebug("[TUN] [%s] resolved %s -> %s for DIRECT", connID, domain, dialAddr)
 		}
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
@@ -1583,7 +1583,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	}
 	defer targetConn.Close()
 
-	util.LogInfo("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogDebug("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
 		// Preserve Rule and TimeRange from original matchResult if available
 		if matchResult != nil {

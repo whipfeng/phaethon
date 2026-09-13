@@ -77,6 +77,7 @@ type Engine struct {
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 	natTable        *NATTable       // shared NAT table for TUN and mesh NAT
+	meshGatewayResolver func(domain string) net.IP // resolves domain to remote gateway GIP for DNS redirect
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -120,10 +121,8 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 
 // SetMeshGatewayResolver registers a callback to resolve a domain to the remote gateway's GIP.
 func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
-	if e.dnsHijack != nil {
-		e.dnsHijack.MeshGatewayResolver = resolver
-		util.LogInfo("tun: mesh gateway resolver set")
-	}
+	e.meshGatewayResolver = resolver
+	util.LogInfo("tun: mesh gateway resolver set")
 }
 
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
@@ -642,10 +641,6 @@ func (e *Engine) StartStack() error {
 
 	// DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
-	if e.meshSubnet != nil {
-		meshIP := e.meshSubnet.IP.To4()
-		e.dnsHijack.vipAddr = tcpip.AddrFrom4([4]byte{meshIP[0], meshIP[1], meshIP[2], meshIP[3] + 1})
-	}
 	if err := e.dnsHijack.Start(&e.wg); err != nil {
 		e.dnsHijack.Stop()
 		e.wg.Wait()
@@ -1023,6 +1018,14 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// Cross-node DNS redirect: intercept DNS queries to local GIP before netstack.
+		// Rewrite dst to remote gateway GIP and forward via mesh directly.
+		if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
+			if redirected := e.tryDNSRedirect(pktBuf); redirected {
+				continue
+			}
+		}
+
 		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
 		// The mesh interceptor checks its routing table (including gateway routes) to determine
 		// if the packet should be sent via mesh or handled normally.
@@ -1038,6 +1041,72 @@ func (e *Engine) readLoop() {
 		e.linkEP.InjectInbound(proto, pkt)
 		pkt.DecRef()
 	}
+}
+
+// tryDNSRedirect checks if the packet is a DNS query to the local GIP and redirects it
+// to the remote gateway that serves the queried domain. Returns true if redirected.
+func (e *Engine) tryDNSRedirect(pkt []byte) bool {
+	if len(pkt) < 28 { // min IP(20) + UDP(8)
+		return false
+	}
+	if pkt[0]>>4 != 4 || pkt[9] != 17 { // IPv4 + UDP only
+		return false
+	}
+
+	headerLen := int(pkt[0]&0x0f) * 4
+	if headerLen < 20 || headerLen+8 > len(pkt) {
+		return false
+	}
+
+	dstIP := net.IP(pkt[16:20])
+	dstPort := uint16(pkt[headerLen+2])<<8 | uint16(pkt[headerLen+3])
+
+	// Check if dst is local GIP (.3)
+	gip := make(net.IP, 4)
+	copy(gip, e.meshSubnet.IP.To4())
+	gip[3] |= 3
+	if !dstIP.Equal(gip) || dstPort != 53 {
+		return false
+	}
+
+	// Parse DNS domain from UDP payload
+	dnsPayload := pkt[headerLen+8:]
+	domain, ok := parseDNSQueryDomain(dnsPayload)
+	if !ok || domain == "" {
+		return false
+	}
+
+	remoteGIP := e.meshGatewayResolver(domain)
+	if remoteGIP == nil {
+		return false
+	}
+
+	util.LogInfo("tun dns redirect: %s -> GIP %s (readLoop)", domain, remoteGIP)
+
+	// Rewrite dst IP to remote GIP
+	result := make([]byte, len(pkt))
+	copy(result, pkt)
+	copy(result[16:20], remoteGIP.To4())
+
+	// Recompute IP header checksum
+	result[10] = 0
+	result[11] = 0
+	var sum uint32
+	for i := 0; i < headerLen-1; i += 2 {
+		sum += uint32(result[i])<<8 | uint32(result[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	result[10] = byte(cksum >> 8)
+	result[11] = byte(cksum)
+
+	// Recompute UDP checksum
+	recomputeTCPUDPChecksum(result, headerLen, 17, net.IP(result[12:16]), net.IP(result[16:20]))
+
+	// Forward via mesh interceptor
+	return e.meshInterceptor(remoteGIP, result)
 }
 
 // writeLoop reads outbound packets from the single NIC and decides their fate:

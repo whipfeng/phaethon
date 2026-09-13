@@ -30,13 +30,6 @@ type DNSHijacker struct {
 	// MeshResolver resolves mesh domain names (e.g., node.phn) to VIPs.
 	// Returns nil if the domain is not a mesh domain or node is unknown.
 	MeshResolver func(domain string) net.IP
-
-	// vipAddr is the VIP address used as source when redirecting DNS to remote gateways.
-	vipAddr tcpip.Address
-
-	// MeshGatewayResolver resolves a domain to the remote gateway's GIP.
-	// Returns nil if the domain doesn't match any remote gateway.
-	MeshGatewayResolver func(domain string) net.IP
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -154,25 +147,10 @@ func (h *DNSHijacker) serveLoop() {
 
 		var resp []byte
 
-		// Try cross-node DNS redirect: if domain belongs to a remote gateway,
-		// fire-and-forget the query via VIP:mappedPort socket. Return path
-		// goes through mesh interceptor → reverse NAT → TUN directly.
-		if h.MeshGatewayResolver != nil {
-			remoteGIP := h.MeshGatewayResolver(domain)
-			if remoteGIP != nil {
-				mappedPort := res.RemoteAddr.Port
-				util.LogInfo("tun dns mesh redirect: %s -> GIP %s (VIP:%d)", domain, remoteGIP, mappedPort)
-				h.redirectToRemote(packet, remoteGIP, mappedPort)
-				continue
-			}
-		}
-
-		// Fall back to local pool
-		if resp == nil {
-			fakeIP := h.pool.Lookup(domain)
-			util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
-			resp = buildDNSResponse(packet, fakeIP.To4())
-		}
+		// Local pool resolution
+		fakeIP := h.pool.Lookup(domain)
+		util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
+		resp = buildDNSResponse(packet, fakeIP.To4())
 
 		if resp == nil {
 			continue
@@ -183,41 +161,6 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 		}
 	}
-}
-
-// redirectToRemote sends a DNS query to a remote gateway via a fire-and-forget socket.
-// The socket is bound to VIP:mappedPort so the response can be reverse-NAT'd by the mesh interceptor.
-func (h *DNSHijacker) redirectToRemote(dnsPayload []byte, remoteGIP net.IP, mappedPort uint16) {
-	var wq waiter.Queue
-	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
-	if err != nil {
-		util.LogWarn("[DNS] redirect: new endpoint: %v", err)
-		return
-	}
-	defer ep.Close()
-
-	if err := ep.Bind(tcpip.FullAddress{Addr: h.vipAddr, Port: mappedPort}); err != nil {
-		util.LogWarn("[DNS] redirect: bind %s:%d: %v", h.vipAddr, mappedPort, err)
-		return
-	}
-
-	gip4 := remoteGIP.To4()
-	if gip4 == nil {
-		util.LogWarn("[DNS] redirect: invalid GIP %s", remoteGIP)
-		return
-	}
-	var gipArr [4]byte
-	copy(gipArr[:], gip4)
-	if err := ep.Connect(tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(gipArr), Port: 53}); err != nil {
-		util.LogWarn("[DNS] redirect: connect %s:53: %v", remoteGIP, err)
-		return
-	}
-
-	if _, err := ep.Write(&slicePayload{data: dnsPayload}, tcpip.WriteOptions{}); err != nil {
-		util.LogWarn("[DNS] redirect: write: %v", err)
-		return
-	}
-	util.LogInfo("[DNS] redirect: sent %d bytes to %s:53 via %s:%d", len(dnsPayload), remoteGIP, h.vipAddr, mappedPort)
 }
 
 type slicePayload struct {

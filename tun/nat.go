@@ -200,6 +200,38 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 	return result
 }
 
+// TranslateInboundWithSrc performs reverse NAT and also rewrites the source IP.
+// Used by the mesh return path so responses appear to come from the local GIP.
+func (t *NATTable) TranslateInboundWithSrc(packet []byte, newSrcIP net.IP) []byte {
+	result := t.TranslateInbound(packet)
+	if result == nil {
+		return nil
+	}
+
+	headerLen := int(result[0]&0x0f) * 4
+	proto := result[9]
+
+	copy(result[12:16], newSrcIP.To4())
+
+	// Recompute IP header checksum
+	result[10] = 0
+	result[11] = 0
+	var sum uint32
+	for i := 0; i < headerLen-1; i += 2 {
+		sum += uint32(result[i])<<8 | uint32(result[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	result[10] = byte(cksum >> 8)
+	result[11] = byte(cksum)
+
+	recomputeTCPUDPChecksum(result, headerLen, proto, newSrcIP.To4(), net.IP(result[16:20]))
+
+	return result
+}
+
 // Stats returns the number of active NAT entries.
 func (t *NATTable) Stats() int {
 	t.mu.RLock()

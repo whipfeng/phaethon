@@ -307,14 +307,22 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
 	}
 
-	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
+	// .1 (VIP): NAT reverse + src rewrite to local GIP + WriteMeshPacket to OS
 	if m.isLocalVIP(dstIP) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		if m.natTable != nil {
-			natPkt := m.natTable.TranslateInbound(pkt)
-			if natPkt != nil {
-				pkt = natPkt
+			localGIP := m.getGIP()
+			if localGIP != nil {
+				natPkt := m.natTable.TranslateInboundWithSrc(pkt, localGIP)
+				if natPkt != nil {
+					pkt = natPkt
+				}
+			} else {
+				natPkt := m.natTable.TranslateInbound(pkt)
+				if natPkt != nil {
+					pkt = natPkt
+				}
 			}
 		}
 		go func() {

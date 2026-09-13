@@ -71,11 +71,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		}
 	}
 
-	// Enable loopback routing when mesh is active (Mode B uses netstack sockets)
-	if meshEnabled {
-		engine.SetLoopbackRouting(true)
-	}
-
 	if err := engine.Start(); err != nil {
 		util.LogError("Engine start failed: %v", err)
 		return nil
@@ -87,7 +82,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 	if meshEnabled {
 		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
 		// dialing go through the netstack, which routes via loopback to the
-		// hijacker/forwarder. Only needed when mesh is active (loopback routing).
+		// hijacker/forwarder.
 		dialer.GlobalNetstackDialFunc = engine.NetDial
 		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
 

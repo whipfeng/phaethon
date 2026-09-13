@@ -78,7 +78,6 @@ type Engine struct {
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
-	loopbackRouting bool            // use loopback NIC for outbound (set when mesh/Mode B is active)
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -279,13 +278,6 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 
 	util.LogInfo("tun: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
 	return nil
-}
-
-// SetLoopbackRouting enables loopback NIC for outbound routing.
-// Must be called before Start(). Required when mesh/Mode B is active so that
-// netstack socket connections route via loopback to the forwarder/hijacker.
-func (e *Engine) SetLoopbackRouting(enabled bool) {
-	e.loopbackRouting = enabled
 }
 
 func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
@@ -946,35 +938,24 @@ func (e *Engine) initStack() error {
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	// Route table:
-	// With loopback routing (mesh/Mode B active):
 	//   1. VIP (.1) → outNIC   — TUN return traffic (NAT src=VIP, return dst=VIP)
 	//   2. meshSubnet → outNIC — writeLoop intercepts → meshInterceptor → mesh link
 	//   3. default → loNIC     — all other outbound → loopback → forwarder/hijacker
-	// Without loopback routing (basic TUN mode):
-	//   1. default → outNIC   — all outbound → writeLoop → TUN → OS
 	routes := []tcpip.Route{
 		{Destination: header.IPv6EmptySubnet, NIC: loNICID},
 	}
 
-	if e.loopbackRouting {
-		// Mesh/Mode B active: use loopback for outbound
-		if e.meshSubnet != nil {
-			ip4 := e.meshSubnet.IP.To4()
-			meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
-			// VIP (.1) — more specific /32 route, must come before meshSubnet
-			vipAddr, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3] + 1}), tcpip.MaskFromBytes([]byte{255, 255, 255, 255}))
-			routes = append([]tcpip.Route{
-				{Destination: vipAddr, NIC: outNICID},
-				{Destination: meshSubnet, NIC: outNICID},
-			}, routes...)
-		}
-		// default → loNIC is already in routes
-	} else {
-		// Non-mesh TUN mode: default → outNIC (old behavior)
+	if e.meshSubnet != nil {
+		ip4 := e.meshSubnet.IP.To4()
+		meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
+		// VIP (.1) — more specific /32 route, must come before meshSubnet
+		vipAddr, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3] + 1}), tcpip.MaskFromBytes([]byte{255, 255, 255, 255}))
 		routes = append([]tcpip.Route{
-			{Destination: header.IPv4EmptySubnet, NIC: outNICID},
+			{Destination: vipAddr, NIC: outNICID},
+			{Destination: meshSubnet, NIC: outNICID},
 		}, routes...)
 	}
+	// default → loNIC is already in routes
 
 	s.SetRouteTable(routes)
 

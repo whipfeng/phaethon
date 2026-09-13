@@ -52,8 +52,10 @@ HandleMeshFrame 必须根据 dst 地址精确区分处理路径，不能用 `isL
   │
   ├─ dst == .1 (VIP)
   │   │
-  │   │  NAT 反转：查找 reverse mapping，还原原始 dst
-  │   │  例：dst=100.64.1.1 → 还原为 100.64.1.2（原始源地址）
+  │   │  NAT 反转：查 conntrack 表还原原始源地址
+  │   │  key = (proto, 回程srcPort, 回程srcIP, 回程dstPort)
+  │   │  value = 原始源地址（如 LAN 客户端 192.168.1.88）
+  │   │  查不到则丢包
   │   │
   │   └─ WriteMeshPacket → TUN → OS 投递
   │
@@ -178,13 +180,13 @@ gVisor 自带 `loopback.New()` 实现：`WritePackets` 将出站包重新注入�
 
 两种入口的 forwarder 都通过 gonet.Conn.Write() 写回数据。回程包的目标地址就是出站时的源地址：
 
-- **TUN 入口**：NAT 把 src 替换为 VIP → 回程 dst=VIP → outNIC → TUN → OS → 客户端
+- **TUN 入口**：NAT 把 src 替换为 VIP → 回程 dst=VIP → outNIC → writeLoop 查 conntrack 还原原始 srcIP → TUN → OS → 客户端
 - **Mode B 入口**：gVisor netstack socket 源地址为 GIP → 回程 dst=GIP → 精确匹配客户端 socket → 直接投递
 
 ```
 TUN 入口:
-  客户端真实IP → NAT src=VIP → forwarder dial (OS socket)
-  回程: dst=VIP → outNIC → TUN → OS → 客户端
+  客户端真实IP → readLoop NAT src=VIP（记录 conntrack）→ forwarder dial (OS socket)
+  回程: dst=VIP → outNIC → writeLoop 查 conntrack 还原原始 srcIP → TUN → OS → 客户端
 
 Mode B 入口:
   DirectDialer → gVisor netstack socket (src=GIP) → loopback → forwarder dial (OS socket)
@@ -194,9 +196,30 @@ Mode B 入口:
 NAT 的作用（TUN 入口）：将客户端真实 IP 替换为 VIP，使回程目标 = VIP，路由表走 outNIC → TUN。
 Mode B 不需要额外 NAT：gVisor netstack socket 源地址本身就是 GIP，回程通过精确匹配投递。
 
+### NAT 表（NATTable）
+
+readLoop 和 mesh 出站共享同一个 `tun.NATTable`（从 `mesh/nat.go` 迁移到 `tun/nat.go`）。
+
+**出站 NAT（TranslateOutbound）**：
+- readLoop：非 mesh 源 IP 的 IPv4 包 → srcIP → VIP，srcPort → mappedPort
+- mesh 出站：非 mesh 源 IP → 同上（但 readLoop 已处理，mesh 不再重复）
+
+**入站反向 NAT（TranslateInbound）**：
+- writeLoop：dst=VIP 的包 → 按 mappedPort 查反向表 → 还原 dstIP 为原始 srcIP，还原 dstPort 为原始 srcPort
+- mesh 入站：dst=VIP 的帧 → 同上
+
+**端口映射**：每个连接分配唯一 mappedPort（从 32768 起），避免多源地址端口冲突。
+
+**清理**：cleanupLoop 每 60 秒扫描，5 分钟未活动的表项自动删除。
+
 ### 数据流（统一后）
 
 ```
+readLoop 处理顺序：
+  1. NAT: src→VIP（确保进入 mesh 或 netstack 前，源一定是 mesh 网段 IP）
+  2. mesh 拦截（src 已是 VIP → mesh 层 isMeshAddress=true → 跳过 mesh NAT）
+  3. InjectInbound → netstack
+
 出站包路由决策（路由表）：
   ├─ dst = VIP → outNIC → writeLoop → TUN → OS（TUN 回程）
   ├─ dst = mesh 远端 VIP → outNIC → writeLoop → meshInterceptor → mesh 链路
@@ -248,8 +271,8 @@ Hijacker 始终存在。Stack 在以下情况启动：
 - [x] Mode B (SOCKS5) 通过 gVisor netstack socket 进行 DNS 解析和连接建立
 - [x] forwarder 排除 TUN 接口（BindContext + DialRouteAware）
 - [x] tunNICID 重命名为 outNICID（不与 TUN 绑定）
-- [x] TUN 入口 NAT 标记（src → VIP，readLoop 中实现）
-- [x] TUN 出口反向 NAT（dst=VIP → hostIP，writeLoop 中实现）
+- [x] TUN 入口 NAT 标记（src → VIP + srcPort → mappedPort，readLoop 中调用 NATTable.TranslateOutbound）
+- [x] TUN 出口反向 NAT（dst=VIP → 查 NATTable 还原原始 srcIP/srcPort，writeLoop 中调用 NATTable.TranslateInbound）
 - [x] 路由表更新（VIP → outNIC, meshSubnet → outNIC, 默认 → loNIC）
 - [x] DirectDialer 域名走 netstack（解析为 fakeIP → loopback → forwarder）
 

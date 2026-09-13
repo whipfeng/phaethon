@@ -3,7 +3,6 @@ package tun
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -78,6 +77,7 @@ type Engine struct {
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
+	natTable        *NATTable       // shared NAT table for TUN and mesh NAT
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -104,6 +104,11 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 		}
 	}
 	util.LogInfo("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
+}
+
+// SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
+func (e *Engine) SetNATTable(nat *NATTable) {
+	e.natTable = nat
 }
 
 // SetMeshDNSResolver registers a callback to resolve mesh domain names (e.g., node.phn) to VIPs.
@@ -1040,83 +1045,28 @@ func (e *Engine) readLoop() {
 			}
 		}
 
-		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
-		// The mesh interceptor checks its routing table (including gateway routes) to determine
-		// if the packet should be sent via mesh or handled normally.
-		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
-			dstIP := net.IP(readBuf[16:20])
-			pktBuf := make([]byte, n)
-			copy(pktBuf, readBuf[:n])
-			if e.meshInterceptor(dstIP, pktBuf) {
-				continue
-			}
-		}
-
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
 
 		// NAT: replace src IP with VIP for non-mesh IPv4 packets.
-		// This marks TUN-originated traffic so return traffic (dst=VIP) can be
-		// routed back through outNIC → TUN instead of loopback.
-		if e.meshSubnet != nil && n >= 20 && pktBuf[0]>>4 == 4 {
+		// Must run BEFORE mesh interception so mesh always sees mesh source IPs.
+		if e.natTable != nil && n >= 20 && pktBuf[0]>>4 == 4 {
 			srcIP := net.IP(pktBuf[12:16])
-			if !e.meshSubnet.Contains(srcIP) {
-				vip := e.meshSubnet.IP.To4()
-				vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
-				oldSrc := make([]byte, 4)
-				copy(oldSrc, pktBuf[12:16])
-				newSrc := vipAddr.To4()
-
-				// Update IP header checksum
-				var oldCsum uint32
-				oldCsum += uint32(oldSrc[0])<<8 | uint32(oldSrc[1])
-				oldCsum += uint32(oldSrc[2])<<8 | uint32(oldSrc[3])
-				var newCsum uint32
-				newCsum += uint32(newSrc[0])<<8 | uint32(newSrc[1])
-				newCsum += uint32(newSrc[2])<<8 | uint32(newSrc[3])
-
-				ipHdr := binary.BigEndian.Uint16(pktBuf[10:12])
-				diff := newCsum - oldCsum
-				csum := uint32(^ipHdr)
-				csum += diff
-				for csum > 0xffff {
-					csum = (csum >> 16) + (csum & 0xffff)
+			if e.meshSubnet == nil || !e.meshSubnet.Contains(srcIP) {
+				if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
+					pktBuf = natPkt
 				}
-				binary.BigEndian.PutUint16(pktBuf[10:12], ^uint16(csum))
+			}
+		}
 
-				// Update TCP/UDP checksum using pseudo-header diff
-				headerLen := int(pktBuf[0]&0x0f) * 4
-				proto := pktBuf[9]
-				if (proto == 6 || proto == 17) && n >= headerLen+4 {
-					var transportCsum uint32
-					transportCsum += uint32(oldSrc[0])<<8 | uint32(oldSrc[1])
-					transportCsum += uint32(oldSrc[2])<<8 | uint32(oldSrc[3])
-					var transportNewCsum uint32
-					transportNewCsum += uint32(newSrc[0])<<8 | uint32(newSrc[1])
-					transportNewCsum += uint32(newSrc[2])<<8 | uint32(newSrc[3])
-					transportDiff := transportNewCsum - transportCsum
-
-					var csumOffset int
-					if proto == 6 {
-						csumOffset = headerLen + 16
-					} else {
-						csumOffset = headerLen + 6
-					}
-					if n >= csumOffset+2 {
-						oldTransport := binary.BigEndian.Uint16(pktBuf[csumOffset : csumOffset+2])
-						if oldTransport != 0 {
-							tc := uint32(^oldTransport)
-							tc += transportDiff
-							for tc > 0xffff {
-								tc = (tc >> 16) + (tc & 0xffff)
-							}
-							binary.BigEndian.PutUint16(pktBuf[csumOffset:csumOffset+2], ^uint16(tc))
-						}
-					}
-				}
-
-				// Replace src IP
-				copy(pktBuf[12:16], newSrc)
+		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
+		// The mesh interceptor checks its routing table (including gateway routes) to determine
+		// if the packet should be sent via mesh or handled normally.
+		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
+		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
+			dstIP := net.IP(pktBuf[16:20])
+			if e.meshInterceptor(dstIP, pktBuf) {
+				continue
 			}
 		}
 
@@ -1151,73 +1101,19 @@ func (e *Engine) writeLoop() {
 		buf := pkt.ToBuffer()
 		data := buf.Flatten()
 
-		// Reverse NAT: if dst = VIP, replace with hostIP so the OS can match
-		// the return packet to the original connection.
+		// Reverse NAT: if dst = VIP, lookup NATTable to restore original src IP/port.
 		// Must run BEFORE mesh interception — the mesh interceptor catches VIP
 		// packets and writes them to TUN directly, so reverse NAT would never run.
-		if e.meshSubnet != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+		if e.natTable != nil && e.meshSubnet != nil && len(data) >= 20 && (data[0]>>4) == 4 {
 			vip := e.meshSubnet.IP.To4()
 			vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
 			dstIP := net.IP(data[16:20])
 			if dstIP.Equal(vipAddr) {
-				hostIP := net.IP(e.addr.AsSlice()).To4()
-				oldDst := make([]byte, 4)
-				copy(oldDst, data[16:20])
-				newDst := hostIP
-
-				natData := make([]byte, len(data))
-				copy(natData, data)
-
-				// Update IP header checksum
-				var oldCsum uint32
-				oldCsum += uint32(oldDst[0])<<8 | uint32(oldDst[1])
-				oldCsum += uint32(oldDst[2])<<8 | uint32(oldDst[3])
-				var newCsum uint32
-				newCsum += uint32(newDst[0])<<8 | uint32(newDst[1])
-				newCsum += uint32(newDst[2])<<8 | uint32(newDst[3])
-
-				ipHdr := binary.BigEndian.Uint16(natData[10:12])
-				diff := newCsum - oldCsum
-				csum := uint32(^ipHdr)
-				csum += diff
-				for csum > 0xffff {
-					csum = (csum >> 16) + (csum & 0xffff)
+				if natPkt := e.natTable.TranslateInbound(data); natPkt != nil {
+					data = natPkt
+				} else {
+					continue
 				}
-				binary.BigEndian.PutUint16(natData[10:12], ^uint16(csum))
-
-				// Update TCP/UDP checksum using pseudo-header diff
-				headerLen := int(natData[0]&0x0f) * 4
-				proto := natData[9]
-				if (proto == 6 || proto == 17) && len(natData) >= headerLen+4 {
-					var transportCsum uint32
-					transportCsum += uint32(oldDst[0])<<8 | uint32(oldDst[1])
-					transportCsum += uint32(oldDst[2])<<8 | uint32(oldDst[3])
-					var transportNewCsum uint32
-					transportNewCsum += uint32(newDst[0])<<8 | uint32(newDst[1])
-					transportNewCsum += uint32(newDst[2])<<8 | uint32(newDst[3])
-					transportDiff := transportNewCsum - transportCsum
-
-					var csumOffset int
-					if proto == 6 {
-						csumOffset = headerLen + 16
-					} else {
-						csumOffset = headerLen + 6
-					}
-					if len(natData) >= csumOffset+2 {
-						oldTransport := binary.BigEndian.Uint16(natData[csumOffset : csumOffset+2])
-						if oldTransport != 0 {
-							tc := uint32(^oldTransport)
-							tc += transportDiff
-							for tc > 0xffff {
-								tc = (tc >> 16) + (tc & 0xffff)
-							}
-							binary.BigEndian.PutUint16(natData[csumOffset:csumOffset+2], ^uint16(tc))
-						}
-					}
-				}
-
-				copy(natData[16:20], newDst)
-				data = natData
 			}
 		}
 

@@ -98,6 +98,10 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		// - Without TUN: used by meshWriteLoop to send responses back through mesh
 		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
 
+		// Enable NAT and share the NATTable with the engine for TUN source/reverse NAT.
+		meshMgr.EnableNAT()
+		engine.SetNATTable(meshMgr.GetNATTable())
+
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		engine.SetMeshDNSNetstackForwarder(meshMgr.ForwardDNSViaNetstack)
 

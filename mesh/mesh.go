@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/tun"
 	"phaethon/util"
 )
 
@@ -81,7 +82,7 @@ type MeshManager struct {
 
 	DNSAllocator func(domain string) (net.IP, error)
 
-	natTable *NATTable
+	natTable *tun.NATTable
 	closeCh  chan struct{}
 }
 
@@ -112,7 +113,7 @@ func (m *MeshManager) GetSubnet() string {
 }
 
 func (m *MeshManager) EnableNAT() {
-	m.natTable = NewNATTable(m.vip)
+	m.natTable = tun.NewNATTable(m.vip)
 	util.LogInfo("[MESH] NAT enabled (vip=%s)", m.vip)
 }
 
@@ -121,6 +122,10 @@ func (m *MeshManager) GetNATStats() int {
 		return 0
 	}
 	return m.natTable.Stats()
+}
+
+func (m *MeshManager) GetNATTable() *tun.NATTable {
+	return m.natTable
 }
 
 func (m *MeshManager) GetDomainSuffixes() []string {
@@ -297,15 +302,6 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	}
 	pkt := make([]byte, len(data))
 	copy(pkt, data)
-	if m.natTable != nil {
-		srcIP := extractSrcIP(pkt)
-		if srcIP != nil && !isMeshAddress(srcIP) {
-			natPkt := m.natTable.TranslateOutbound(pkt)
-			if natPkt != nil {
-				pkt = natPkt
-			}
-		}
-	}
 
 	go func() {
 		if err := peer.Send(pkt); err != nil {

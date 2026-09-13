@@ -127,8 +127,8 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 	result[10] = byte(cksum >> 8)
 	result[11] = byte(cksum)
 
-	// Note: TCP/UDP checksum recomputation is skipped for simplicity.
-	// Most implementations tolerate this for IPv4.
+	// Recompute TCP/UDP checksum for srcIP and srcPort changes
+	recomputeTCPUDPChecksum(result, headerLen, proto, net.IP(result[12:16]), net.IP(result[16:20]))
 
 	return result
 }
@@ -203,6 +203,9 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 	result[10] = byte(cksum >> 8)
 	result[11] = byte(cksum)
 
+	// Recompute TCP/UDP checksum for dstIP and dstPort changes
+	recomputeTCPUDPChecksum(result, headerLen, proto, net.IP(result[12:16]), net.IP(result[16:20]))
+
 	return result
 }
 
@@ -260,4 +263,60 @@ func itoa(n uint16) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// recomputeTCPUDPChecksum recomputes the TCP or UDP checksum from scratch
+// after NAT rewrites IP addresses and/or ports.
+func recomputeTCPUDPChecksum(pkt []byte, ipHeaderLen int, proto byte, srcIP, dstIP net.IP) {
+	if proto != 6 && proto != 17 {
+		return
+	}
+	tcpStart := ipHeaderLen
+	segLen := len(pkt) - tcpStart
+	if segLen < 8 {
+		return
+	}
+
+	if proto == 6 {
+		if segLen < 18 {
+			return
+		}
+		pkt[tcpStart+16] = 0
+		pkt[tcpStart+17] = 0
+	} else {
+		if segLen < 8 {
+			return
+		}
+		pkt[tcpStart+6] = 0
+		pkt[tcpStart+7] = 0
+	}
+
+	var sum uint32
+
+	sum += uint32(srcIP[0])<<8 | uint32(srcIP[1])
+	sum += uint32(srcIP[2])<<8 | uint32(srcIP[3])
+	sum += uint32(dstIP[0])<<8 | uint32(dstIP[1])
+	sum += uint32(dstIP[2])<<8 | uint32(dstIP[3])
+	sum += uint32(proto)
+	sum += uint32(segLen)
+
+	for i := 0; i < segLen-1; i += 2 {
+		sum += uint32(pkt[tcpStart+i])<<8 | uint32(pkt[tcpStart+i+1])
+	}
+	if segLen%2 != 0 {
+		sum += uint32(pkt[tcpStart+segLen-1]) << 8
+	}
+
+	for sum>>16 > 0 {
+		sum = (sum&0xffff + sum>>16)
+	}
+	cksum := ^uint16(sum)
+
+	if proto == 6 {
+		pkt[tcpStart+16] = byte(cksum >> 8)
+		pkt[tcpStart+17] = byte(cksum)
+	} else {
+		pkt[tcpStart+6] = byte(cksum >> 8)
+		pkt[tcpStart+7] = byte(cksum)
+	}
 }

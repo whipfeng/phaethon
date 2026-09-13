@@ -23,7 +23,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
-	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -38,10 +37,10 @@ var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
-	ruleConf  *config.RuleConfiguration
-	device    Device
-	linkEP    *channel.Endpoint
-	ns        *stack.Stack
+	ruleConf   *config.RuleConfiguration
+	device     Device
+	linkEP     *channel.Endpoint
+	ns         *stack.Stack
 	fakeIP    *FakeIPPool
 	dnsHijack *DNSHijacker
 	routeMgr  *RouteManager
@@ -364,7 +363,7 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
 	}
-	if err := e.ns.AddProtocolAddress(outNICID, protoAddr, stack.AddressProperties{}); err != nil {
+	if err := e.ns.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); err != nil {
 		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
 	}
 	util.LogInfo("tun: registered mesh VIP %s with netstack", vip)
@@ -860,15 +859,17 @@ func (e *Engine) StopStack() error {
 	}
 	e.running = false
 	close(e.closeCh)
+
+	// Stop services before waiting for goroutines, since service goroutines
+	// (e.g. DNS hijacker) are part of wg and need their endpoints closed to exit.
+	if e.dnsHijack != nil {
+		e.dnsHijack.Stop()
+	}
 	e.mu.Unlock()
 
 	// Wait for stack goroutines to finish
 	e.wg.Wait()
 
-	// Stop services
-	if e.dnsHijack != nil {
-		e.dnsHijack.Stop()
-	}
 	if e.ns != nil {
 		e.ns.Close()
 	}
@@ -887,10 +888,9 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
-// initStack creates the gvisor netstack and attaches the link endpoints.
-const outNICID = 1
-const loNICID = 2
-
+// initStack creates the gvisor netstack with a single NIC.
+// All traffic (TUN, DNS hijacker, TCP forwarder, Mode B sockets) shares one NIC.
+// writeLoop handles all routing decisions: VIP/hostIP → TUN, mesh → mesh link, other → re-inject.
 func (e *Engine) initStack() error {
 	linkEP := channel.New(512, 1500, "")
 	e.linkEP = linkEP
@@ -901,67 +901,27 @@ func (e *Engine) initStack() error {
 	})
 	e.ns = s
 
-	// Outbound NIC: handles outbound dispatch (mesh interception, TUN write, VIP return).
-	if err := s.CreateNIC(outNICID, linkEP); err != nil {
-		return fmt.Errorf("create out nic: %v", err)
+	if err := s.CreateNIC(1, linkEP); err != nil {
+		return fmt.Errorf("create nic: %v", err)
 	}
 
-	// Loopback NIC: handles outbound packets to local addresses (dnsAddr, fakeIP).
-	// WritePackets re-injects packets as inbound, so forwarder/hijacker can catch them.
-	loEP := loopback.New()
-	if err := s.CreateNIC(loNICID, loEP); err != nil {
-		return fmt.Errorf("create loopback nic: %v", err)
-	}
-
-	// Register dnsAddr on loopback NIC so the stack recognizes it as local.
 	ap := tcpip.AddressWithPrefix{Address: e.dnsAddr, PrefixLen: 32}
-	protoAddr := tcpip.ProtocolAddress{
+	if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ap,
+	}, stack.AddressProperties{}); err != nil {
+		return fmt.Errorf("add dns address: %v", err)
 	}
-	if err := s.AddProtocolAddress(loNICID, protoAddr, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("add dns address to loopback: %v", err)
-	}
 
-	// Do NOT add 192.0.2.2 as a local netstack address. The TUN adapter IP
-	// is configured on the Windows side so the host uses it as the source
-	// address for packets entering Wintun. If netstack considered it local,
-	// DNS responses (and other replies) destined to 192.0.2.2 would be
-	// looped back inside netstack instead of being written back to the Wintun
-	// device for the host resolver to receive.
-
-	s.SetPromiscuousMode(outNICID, true)
-	s.SetSpoofing(outNICID, true)
-	s.SetPromiscuousMode(loNICID, true)
-	s.SetSpoofing(loNICID, true)
-
-	// Allow the netstack to forward IPv4/IPv6 packets that are not addressed to
-	// a local NIC address. This is required for the Fake-IP scheme: connections
-	// to 198.18.0.0/15 are routed to the TUN NIC and must be handled by the
-	// TCP/UDP forwarders even though the destination is not assigned locally.
+	s.SetPromiscuousMode(1, true)
+	s.SetSpoofing(1, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
-	// Route table:
-	//   1. VIP (.1) → outNIC   — TUN return traffic (NAT src=VIP, return dst=VIP)
-	//   2. meshSubnet → outNIC — writeLoop intercepts → meshInterceptor → mesh link
-	//   3. default → loNIC     — all other outbound → loopback → forwarder/hijacker
 	routes := []tcpip.Route{
-		{Destination: header.IPv6EmptySubnet, NIC: loNICID},
+		{Destination: header.IPv4EmptySubnet, NIC: 1},
+		{Destination: header.IPv6EmptySubnet, NIC: 1},
 	}
-
-	if e.meshSubnet != nil {
-		ip4 := e.meshSubnet.IP.To4()
-		meshSubnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4Slice(ip4), tcpip.MaskFromBytes(e.meshSubnet.Mask))
-		// VIP (.1) — more specific /32 route, must come before meshSubnet
-		vipAddr, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3] + 1}), tcpip.MaskFromBytes([]byte{255, 255, 255, 255}))
-		routes = append([]tcpip.Route{
-			{Destination: vipAddr, NIC: outNICID},
-			{Destination: meshSubnet, NIC: outNICID},
-		}, routes...)
-	}
-	// default → loNIC is already in routes
-
 	s.SetRouteTable(routes)
 
 	return nil
@@ -1076,9 +1036,10 @@ func (e *Engine) readLoop() {
 	}
 }
 
-// writeLoop reads outbound packets from netstack and dispatches them.
-// With TUN: writes to the TUN device for OS delivery.
-// Without TUN: mesh-intercepted packets go via mesh, others are dropped.
+// writeLoop reads outbound packets from the single NIC and decides their fate:
+//   - VIP/hostIP → reverse NAT + write to TUN (bypass gateway return path)
+//   - mesh (non-local) → mesh interceptor (mesh link)
+//   - other → re-inject for local delivery (forwarder/hijacker receive via promiscuous mode)
 func (e *Engine) writeLoop() {
 	defer e.wg.Done()
 	for {
@@ -1101,71 +1062,100 @@ func (e *Engine) writeLoop() {
 		buf := pkt.ToBuffer()
 		data := buf.Flatten()
 
-		// Reverse NAT: if dst = VIP, lookup NATTable to restore original src IP/port.
-		// Must run BEFORE mesh interception — the mesh interceptor catches VIP
-		// packets and writes them to TUN directly, so reverse NAT would never run.
-		if e.natTable != nil && e.meshSubnet != nil && len(data) >= 20 && (data[0]>>4) == 4 {
-			vip := e.meshSubnet.IP.To4()
-			vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
-			dstIP := net.IP(data[16:20])
-			if dstIP.Equal(vipAddr) {
-				if natPkt := e.natTable.TranslateInbound(data); natPkt != nil {
-					data = natPkt
-				} else {
-					continue
-				}
-			}
-		}
-
-		// Mesh interception: route packets destined for remote mesh nodes via mesh.
-		// Skip packets destined for our own mesh VIP — those are replies from netstack
-		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
-		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
-			pktDst := net.IP(data[16:20])
-			isLocal := e.isLocalMeshVIP(pktDst)
-			if !isLocal {
-				pktBuf := make([]byte, len(data))
-				copy(pktBuf, data)
-				if e.meshInterceptor(pktDst, pktBuf) {
-					pkt.DecRef()
-					continue
-				}
-			}
-		}
-
-		// No TUN device — drop non-mesh packets
-		if e.device == nil {
+		if len(data) < 20 || (data[0]>>4) != 4 {
 			pkt.DecRef()
 			continue
 		}
 
-		// Log outbound packets for debugging. Fake-IP replies and packets to the
-		// TUN host IP are always logged; everything else is logged for the first
-		// 200 packets to cap noise.
-		if len(data) >= 20 && (data[0]>>4) == 4 {
-			dstIP := net.IP(data[16:20])
-			srcIP := net.IP(data[12:16])
-			ipProto := data[9]
-			isFake := (e.meshSubnet != nil) && (e.meshSubnet.Contains(dstIP) || e.meshSubnet.Contains(srcIP))
-			if isFake {
-				util.LogInfo("tun write FAKE: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
-			} else if e.writePackets.Load() <= 200 {
-				util.LogInfo("tun write: %s -> %s (proto=%d len=%d)", srcIP, dstIP, ipProto, len(data))
-			}
+		dstIP := net.IP(data[16:20])
+
+		if e.writePackets.Load() < 10 {
+			util.LogInfo("tun writeLoop pkt#%d: %s -> %s (proto=%d len=%d)",
+				e.writePackets.Load(),
+				net.IP(data[12:16]), dstIP,
+				data[9], len(data))
 		}
 
-		if _, err := e.device.Write(data); err != nil {
+		// Classify destination
+		isVIP := false
+		isHostIP := false
+		if e.meshSubnet != nil {
+			meshIP := e.meshSubnet.IP.To4()
+			vip := net.IP{meshIP[0], meshIP[1], meshIP[2], meshIP[3] + 1}
+			hostIP := net.IP{meshIP[0], meshIP[1], meshIP[2], meshIP[3] + 2}
+			isVIP = dstIP.Equal(vip)
+			isHostIP = dstIP.Equal(hostIP)
+		}
+
+		if isVIP || isHostIP {
+			// Bypass gateway return path: write to TUN
+			if isVIP && e.natTable != nil {
+				hl := int(data[0]&0x0f) * 4
+				if natPkt := e.natTable.TranslateInbound(data); natPkt != nil {
+					nhl := int(natPkt[0]&0x0f) * 4
+					util.LogInfo("tun writeLoop reverseNAT: %s:%d -> %s:%d (proto=%d)",
+						net.IP(natPkt[12:16]), uint16(natPkt[nhl])<<8|uint16(natPkt[nhl+1]),
+						net.IP(natPkt[16:20]), uint16(natPkt[nhl+2])<<8|uint16(natPkt[nhl+3]),
+						natPkt[9])
+					data = natPkt
+				} else {
+					util.LogInfo("tun writeLoop reverseNAT DROP: %s -> %s (proto=%d len=%d)",
+						net.IP(data[12:16]), dstIP, data[9], len(data))
+					pkt.DecRef()
+					continue
+				}
+				_ = hl
+			}
+
+			if e.device != nil {
+				if _, err := e.device.Write(data); err != nil {
+					select {
+					case <-e.closeCh:
+						pkt.DecRef()
+						return
+					default:
+						util.LogWarn("tun: write error: %v", err)
+					}
+				} else {
+					e.writePackets.Add(1)
+					e.notifyStatsChanged()
+				}
+			}
+
+		} else if e.meshInterceptor != nil && !e.isLocalMeshVIP(dstIP) {
+			// Mesh interception: route packets destined for remote mesh nodes via mesh.
+			pktBuf := make([]byte, len(data))
+			copy(pktBuf, data)
+			if !e.meshInterceptor(dstIP, pktBuf) {
+				// Not handled by mesh — re-inject for local delivery
+				select {
+				case <-e.closeCh:
+					pkt.DecRef()
+					return
+				default:
+				}
+				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Payload: buffer.MakeWithData(data),
+				})
+				e.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
+				newPkt.DecRef()
+			}
+
+		} else {
+			// Re-inject for local delivery (forwarder/hijacker receive via promiscuous mode)
 			select {
 			case <-e.closeCh:
 				pkt.DecRef()
 				return
 			default:
-				util.LogWarn("tun: write error: %v", err)
 			}
-		} else {
-			e.writePackets.Add(1)
-			e.notifyStatsChanged()
+			newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+				Payload: buffer.MakeWithData(data),
+			})
+			e.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
+			newPkt.DecRef()
 		}
+
 		pkt.DecRef()
 	}
 }
@@ -1175,6 +1165,10 @@ func (e *Engine) acceptTCP() {
 	defer e.wg.Done()
 
 	fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
+		id := r.ID()
+		util.LogInfo("tun: tcp forwarder called local=%s:%d remote=%s:%d",
+			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
@@ -1182,7 +1176,6 @@ func (e *Engine) acceptTCP() {
 			r.Complete(true)
 			return
 		}
-		id := r.ID()
 		r.Complete(false)
 		defer ep.Close()
 
@@ -1559,7 +1552,7 @@ func (e *Engine) queryInternalDNS(query []byte) ([]byte, error) {
 		// Fall back to netstack path if direct resolve fails.
 	}
 
-	remoteAddr := tcpip.FullAddress{NIC: outNICID, Addr: e.dnsAddr, Port: 53}
+	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: e.dnsAddr, Port: 53}
 	conn, err := gonet.DialUDP(e.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {
 		return nil, fmt.Errorf("dial internal dns fail: %v", err)

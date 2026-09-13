@@ -1151,30 +1151,10 @@ func (e *Engine) writeLoop() {
 		buf := pkt.ToBuffer()
 		data := buf.Flatten()
 
-		// Mesh interception: route packets destined for remote mesh nodes via mesh.
-		// Skip packets destined for our own mesh VIP — those are replies from netstack
-		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
-		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
-			pktDst := net.IP(data[16:20])
-			isLocal := e.isLocalMeshVIP(pktDst)
-			if !isLocal {
-				pktBuf := make([]byte, len(data))
-				copy(pktBuf, data)
-				if e.meshInterceptor(pktDst, pktBuf) {
-					pkt.DecRef()
-					continue
-				}
-			}
-		}
-
-		// No TUN device — drop non-mesh packets
-		if e.device == nil {
-			pkt.DecRef()
-			continue
-		}
-
 		// Reverse NAT: if dst = VIP, replace with hostIP so the OS can match
 		// the return packet to the original connection.
+		// Must run BEFORE mesh interception — the mesh interceptor catches VIP
+		// packets and writes them to TUN directly, so reverse NAT would never run.
 		if e.meshSubnet != nil && len(data) >= 20 && (data[0]>>4) == 4 {
 			vip := e.meshSubnet.IP.To4()
 			vipAddr := net.IP{vip[0], vip[1], vip[2], vip[3] + 1}
@@ -1185,7 +1165,6 @@ func (e *Engine) writeLoop() {
 				copy(oldDst, data[16:20])
 				newDst := hostIP
 
-				// Make a mutable copy for modification
 				natData := make([]byte, len(data))
 				copy(natData, data)
 
@@ -1237,10 +1216,31 @@ func (e *Engine) writeLoop() {
 					}
 				}
 
-				// Replace dst IP
 				copy(natData[16:20], newDst)
 				data = natData
 			}
+		}
+
+		// Mesh interception: route packets destined for remote mesh nodes via mesh.
+		// Skip packets destined for our own mesh VIP — those are replies from netstack
+		// (e.g. ICMP echo replies) that should be delivered to the OS via the TUN device.
+		if e.meshInterceptor != nil && len(data) >= 20 && (data[0]>>4) == 4 {
+			pktDst := net.IP(data[16:20])
+			isLocal := e.isLocalMeshVIP(pktDst)
+			if !isLocal {
+				pktBuf := make([]byte, len(data))
+				copy(pktBuf, data)
+				if e.meshInterceptor(pktDst, pktBuf) {
+					pkt.DecRef()
+					continue
+				}
+			}
+		}
+
+		// No TUN device — drop non-mesh packets
+		if e.device == nil {
+			pkt.DecRef()
+			continue
 		}
 
 		// Log outbound packets for debugging. Fake-IP replies and packets to the

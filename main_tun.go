@@ -103,20 +103,13 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		engine.SetNATTable(meshMgr.GetNATTable())
 
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
-		engine.SetMeshDNSNetstackForwarder(meshMgr.ForwardDNSViaNetstack)
+		engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		if pool := engine.GetFakeIPPool(); pool != nil {
 			meshMgr.DNSAllocator = func(domain string) (net.IP, error) {
 				return pool.Lookup(domain), nil
 			}
-		}
-
-		// Set up DNS netstack forwarder callback (mesh -> engine's DNS hijacker)
-		if hijacker := engine.GetDNSHijacker(); hijacker != nil {
-			mesh.SetDNSNetstackForwarder(func(domain string, gatewayGIP net.IP) (net.IP, error) {
-				return hijacker.ForwardViaNetstack(domain, gatewayGIP)
-			})
 		}
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)

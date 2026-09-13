@@ -2,7 +2,6 @@ package mesh
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -219,30 +218,10 @@ func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
 	return DeriveGIPFromSubnet(peer.Subnet)
 }
 
-// DNSNetstackForwarder is a callback that forwards DNS queries via netstack socket.
-// It takes the domain and gateway GIP, and returns the fakeIP from the response.
-type DNSNetstackForwarder func(domain string, gatewayGIP net.IP) (net.IP, error)
-
-// dnsNetstackForwarder is the callback for forwarding DNS via netstack.
-var dnsNetstackForwarder DNSNetstackForwarder
-
-// SetDNSNetstackForwarder sets the callback for forwarding DNS via netstack socket.
-func SetDNSNetstackForwarder(f DNSNetstackForwarder) {
-	dnsNetstackForwarder = f
-}
-
-// ForwardDNSViaNetstack forwards a DNS query to the gateway's GIP:53 via netstack socket.
-// Returns the fakeIP from the gateway's response, or (nil, nil) if no gateway is found.
-func (m *MeshManager) ForwardDNSViaNetstack(domain string) (net.IP, error) {
-	gatewayGIP := m.GetGatewayGIPForDomain(domain)
-	if gatewayGIP == nil {
-		return nil, nil
-	}
-	if dnsNetstackForwarder == nil {
-		return nil, fmt.Errorf("DNS netstack forwarder not set")
-	}
-	util.LogInfo("[MESH] DNS netstack forward: %s -> gateway GIP %s", domain, gatewayGIP)
-	return dnsNetstackForwarder(domain, gatewayGIP)
+// ResolveGatewayGIP returns the GIP of the remote gateway that serves the given domain.
+// Returns nil if no gateway is found or the gateway is ourselves.
+func (m *MeshManager) ResolveGatewayGIP(domain string) net.IP {
+	return m.GetGatewayGIPForDomain(domain)
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.

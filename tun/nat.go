@@ -7,12 +7,13 @@ import (
 )
 
 // NATTable implements source NAT for bypass gateway mode.
-// Maps (srcIP, srcPort, dstIP, dstPort, protocol) to (VIP, mappedPort, dstIP, dstPort, protocol).
+// Forward key: (proto, srcIP, srcPort) → entry with allocated mappedPort.
+// Reverse key: (proto, mappedPort) → entry with original srcIP and srcPort.
 type NATTable struct {
 	mu       sync.RWMutex
 	vip      net.IP
-	forward  map[string]*NATEntry // key: "proto:srcIP:srcPort:dstIP:dstPort"
-	reverse  map[string]*NATEntry // key: "proto:mappedPort:dstIP:dstPort"
+	forward  map[string]*NATEntry // key: "proto:srcIP:srcPort"
+	reverse  map[string]*NATEntry // key: "proto:mappedPort"
 	nextPort uint16
 	stopCh   chan struct{}
 }
@@ -21,8 +22,6 @@ type NATTable struct {
 type NATEntry struct {
 	OrigSrcIP   net.IP
 	OrigSrcPort uint16
-	DstIP       net.IP
-	DstPort     uint16
 	Protocol    byte // 6=TCP, 17=UDP
 	MappedPort  uint16
 	LastSeen    time.Time
@@ -59,24 +58,21 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 
 	proto := packet[9]
 	srcIP := net.IP(packet[12:16])
-	dstIP := net.IP(packet[16:20])
 	headerLen := int(packet[0]&0x0f) * 4
 	if headerLen < 20 || headerLen > len(packet) {
 		return nil
 	}
 
-	var srcPort, dstPort uint16
+	var srcPort uint16
 	if proto == 6 && len(packet) >= headerLen+4 { // TCP
 		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
-		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else if proto == 17 && len(packet) >= headerLen+4 { // UDP
 		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
-		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else {
 		return nil // unsupported protocol
 	}
 
-	key := natForwardKey(proto, srcIP, srcPort, dstIP, dstPort)
+	key := natForwardKey(proto, srcIP, srcPort)
 
 	t.mu.Lock()
 	entry, exists := t.forward[key]
@@ -84,8 +80,6 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 		entry = &NATEntry{
 			OrigSrcIP:   srcIP,
 			OrigSrcPort: srcPort,
-			DstIP:       dstIP,
-			DstPort:     dstPort,
 			Protocol:    proto,
 			MappedPort:  t.nextPort,
 		}
@@ -94,7 +88,7 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 			t.nextPort = 32768
 		}
 		t.forward[key] = entry
-		t.reverse[natReverseKey(proto, entry.MappedPort, dstIP, dstPort)] = entry
+		t.reverse[natReverseKey(proto, entry.MappedPort)] = entry
 	}
 	entry.LastSeen = time.Now()
 	mappedPort := entry.MappedPort
@@ -145,25 +139,22 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 	}
 
 	proto := packet[9]
-	srcIP := net.IP(packet[12:16]) // remote server IP in response
 	headerLen := int(packet[0]&0x0f) * 4
 	if headerLen < 20 || headerLen > len(packet) {
 		return nil
 	}
 
-	var srcPort, dstPort uint16
+	var dstPort uint16
 	if proto == 6 && len(packet) >= headerLen+4 { // TCP
-		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else if proto == 17 && len(packet) >= headerLen+4 { // UDP
-		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else {
 		return nil
 	}
 
 	// Look up by the mapped port (which is now the dst port in the response)
-	key := natReverseKey(proto, dstPort, srcIP, srcPort)
+	key := natReverseKey(proto, dstPort)
 
 	t.mu.Lock()
 	entry, exists := t.reverse[key]
@@ -237,18 +228,18 @@ func (t *NATTable) cleanup() {
 	for key, entry := range t.forward {
 		if entry.LastSeen.Before(cutoff) {
 			delete(t.forward, key)
-			revKey := natReverseKey(entry.Protocol, entry.MappedPort, entry.DstIP, entry.DstPort)
+			revKey := natReverseKey(entry.Protocol, entry.MappedPort)
 			delete(t.reverse, revKey)
 		}
 	}
 }
 
-func natForwardKey(proto byte, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16) string {
-	return string(rune(proto)) + ":" + srcIP.String() + ":" + itoa(srcPort) + ":" + dstIP.String() + ":" + itoa(dstPort)
+func natForwardKey(proto byte, srcIP net.IP, srcPort uint16) string {
+	return string(rune(proto)) + ":" + srcIP.String() + ":" + itoa(srcPort)
 }
 
-func natReverseKey(proto byte, mappedPort uint16, dstIP net.IP, dstPort uint16) string {
-	return string(rune(proto)) + ":" + itoa(mappedPort) + ":" + dstIP.String() + ":" + itoa(dstPort)
+func natReverseKey(proto byte, mappedPort uint16) string {
+	return string(rune(proto)) + ":" + itoa(mappedPort)
 }
 
 func itoa(n uint16) string {

@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"phaethon/util"
 
@@ -32,11 +31,12 @@ type DNSHijacker struct {
 	// Returns nil if the domain is not a mesh domain or node is unknown.
 	MeshResolver func(domain string) net.IP
 
-	// MeshDNSNetstackForwarder forwards DNS queries via netstack socket to gateway GIP.
-	// Takes the domain name and returns the fakeIP allocated by the gateway.
-	// Returns (nil, nil) if the domain doesn't match any remote gateway.
-	// This uses netstack's UDP socket to send DNS query to gateway's GIP:53.
-	MeshDNSNetstackForwarder func(domain string) (net.IP, error)
+	// vipAddr is the VIP address used as source when redirecting DNS to remote gateways.
+	vipAddr tcpip.Address
+
+	// MeshGatewayResolver resolves a domain to the remote gateway's GIP.
+	// Returns nil if the domain doesn't match any remote gateway.
+	MeshGatewayResolver func(domain string) net.IP
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -82,83 +82,6 @@ func (h *DNSHijacker) Stop() {
 	}
 }
 
-// ForwardViaNetstack forwards a DNS query to a remote gateway's GIP:53 via netstack socket.
-// Returns the fakeIP from the gateway's response, or nil if no gateway is found.
-func (h *DNSHijacker) ForwardViaNetstack(domain string, gatewayGIP net.IP) (net.IP, error) {
-	if gatewayGIP == nil {
-		return nil, nil
-	}
-
-	// Build DNS query
-	txID := uint16(0x1234) // TODO: use random txID
-	query := buildDNSQuery(domain, txID)
-
-	// Create a new UDP endpoint
-	var wq waiter.Queue
-	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
-	if err != nil {
-		return nil, fmt.Errorf("new endpoint: %v", err)
-	}
-	defer ep.Close()
-
-	// Bind to any available port
-	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
-		return nil, fmt.Errorf("bind: %v", err)
-	}
-
-	// Connect to gateway GIP:53
-	gip4 := gatewayGIP.To4()
-	if gip4 == nil {
-		return nil, fmt.Errorf("invalid gateway GIP")
-	}
-	var gipArr [4]byte
-	copy(gipArr[:], gip4)
-	if err := ep.Connect(tcpip.FullAddress{
-		NIC:  1,
-		Addr: tcpip.AddrFrom4(gipArr),
-		Port: 53,
-	}); err != nil {
-		return nil, fmt.Errorf("connect: %v", err)
-	}
-
-	// Set up wait queue for response
-	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
-	wq.EventRegister(&waitEntry)
-	defer wq.EventUnregister(&waitEntry)
-
-	// Send query
-	if _, err := ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{}); err != nil {
-		return nil, fmt.Errorf("write: %v", err)
-	}
-
-	// Wait for response with timeout
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	for {
-		var buf bytes.Buffer
-		_, err := ep.Read(&buf, tcpip.ReadOptions{})
-		if err != nil {
-			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
-				// Wait for data or timeout
-				select {
-				case <-ch:
-					continue
-				case <-timeout.C:
-					return nil, fmt.Errorf("timeout waiting for DNS response")
-				}
-			}
-			return nil, fmt.Errorf("read: %v", err)
-		}
-
-		// Parse response
-		resp := buf.Bytes()
-		if ip := parseDNSResponseIP(resp); ip != nil {
-			return ip, nil
-		}
-	}
-}
-
 // Resolve returns the raw DNS response bytes for a query without sending it
 // through the netstack. It is used by the Windows-side DNS proxy and internal
 // health probes so they do not depend on gVisor loopback delivery semantics.
@@ -178,21 +101,6 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		if vip := h.MeshResolver(domain); vip != nil {
 			util.LogInfo("tun dns mesh: %s -> %s", domain, vip)
 			resp := buildDNSResponse(query, vip.To4())
-			if resp != nil {
-				return resp, nil
-			}
-		}
-	}
-
-	// Try mesh DNS forwarding via netstack socket (to remote gateway's GIP:53)
-	if h.MeshDNSNetstackForwarder != nil {
-		fakeIP, err := h.MeshDNSNetstackForwarder(domain)
-		if err != nil {
-			util.LogWarn("tun dns mesh netstack forward error: %s -> %v", domain, err)
-		}
-		if fakeIP != nil {
-			util.LogInfo("tun dns mesh netstack forward: %s -> %s", domain, fakeIP)
-			resp := buildDNSResponse(query, fakeIP.To4())
 			if resp != nil {
 				return resp, nil
 			}
@@ -246,15 +154,16 @@ func (h *DNSHijacker) serveLoop() {
 
 		var resp []byte
 
-		// Try mesh DNS forwarding via netstack socket (to remote gateway's GIP:53)
-		if h.MeshDNSNetstackForwarder != nil {
-			fakeIP, err := h.MeshDNSNetstackForwarder(domain)
-			if err != nil {
-				util.LogWarn("tun dns mesh netstack forward error: %s -> %v", domain, err)
-			}
-			if fakeIP != nil {
-				util.LogInfo("tun dns mesh netstack forward: %s -> %s", domain, fakeIP)
-				resp = buildDNSResponse(packet, fakeIP.To4())
+		// Try cross-node DNS redirect: if domain belongs to a remote gateway,
+		// fire-and-forget the query via VIP:mappedPort socket. Return path
+		// goes through mesh interceptor → reverse NAT → TUN directly.
+		if h.MeshGatewayResolver != nil {
+			remoteGIP := h.MeshGatewayResolver(domain)
+			if remoteGIP != nil {
+				mappedPort := res.RemoteAddr.Port
+				util.LogInfo("tun dns mesh redirect: %s -> GIP %s (VIP:%d)", domain, remoteGIP, mappedPort)
+				h.redirectToRemote(packet, remoteGIP, mappedPort)
+				continue
 			}
 		}
 
@@ -274,6 +183,41 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 		}
 	}
+}
+
+// redirectToRemote sends a DNS query to a remote gateway via a fire-and-forget socket.
+// The socket is bound to VIP:mappedPort so the response can be reverse-NAT'd by the mesh interceptor.
+func (h *DNSHijacker) redirectToRemote(dnsPayload []byte, remoteGIP net.IP, mappedPort uint16) {
+	var wq waiter.Queue
+	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		util.LogWarn("[DNS] redirect: new endpoint: %v", err)
+		return
+	}
+	defer ep.Close()
+
+	if err := ep.Bind(tcpip.FullAddress{Addr: h.vipAddr, Port: mappedPort}); err != nil {
+		util.LogWarn("[DNS] redirect: bind %s:%d: %v", h.vipAddr, mappedPort, err)
+		return
+	}
+
+	gip4 := remoteGIP.To4()
+	if gip4 == nil {
+		util.LogWarn("[DNS] redirect: invalid GIP %s", remoteGIP)
+		return
+	}
+	var gipArr [4]byte
+	copy(gipArr[:], gip4)
+	if err := ep.Connect(tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(gipArr), Port: 53}); err != nil {
+		util.LogWarn("[DNS] redirect: connect %s:53: %v", remoteGIP, err)
+		return
+	}
+
+	if _, err := ep.Write(&slicePayload{data: dnsPayload}, tcpip.WriteOptions{}); err != nil {
+		util.LogWarn("[DNS] redirect: write: %v", err)
+		return
+	}
+	util.LogInfo("[DNS] redirect: sent %d bytes to %s:53 via %s:%d", len(dnsPayload), remoteGIP, h.vipAddr, mappedPort)
 }
 
 type slicePayload struct {

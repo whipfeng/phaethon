@@ -118,11 +118,11 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 	}
 }
 
-// SetMeshDNSNetstackForwarder registers a callback to forward DNS queries via netstack socket to gateway GIP.
-func (e *Engine) SetMeshDNSNetstackForwarder(forwarder func(domain string) (net.IP, error)) {
+// SetMeshGatewayResolver registers a callback to resolve a domain to the remote gateway's GIP.
+func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
 	if e.dnsHijack != nil {
-		e.dnsHijack.MeshDNSNetstackForwarder = forwarder
-		util.LogInfo("tun: mesh DNS netstack forwarder set")
+		e.dnsHijack.MeshGatewayResolver = resolver
+		util.LogInfo("tun: mesh gateway resolver set")
 	}
 }
 
@@ -642,6 +642,10 @@ func (e *Engine) StartStack() error {
 
 	// DNS hijacker
 	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
+	if e.meshSubnet != nil {
+		meshIP := e.meshSubnet.IP.To4()
+		e.dnsHijack.vipAddr = tcpip.AddrFrom4([4]byte{meshIP[0], meshIP[1], meshIP[2], meshIP[3] + 1})
+	}
 	if err := e.dnsHijack.Start(&e.wg); err != nil {
 		e.dnsHijack.Stop()
 		e.wg.Wait()

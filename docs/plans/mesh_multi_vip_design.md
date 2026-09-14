@@ -1402,7 +1402,7 @@ type GossipInfo struct {
 | 水平分割 | 向 peer A 通告时，排除 NextHop=A 的条目 |
 | 同 subnet 去重 | 多条记录取 hop 最小的；hop 相同取 nodeId 数值最小的 |
 
-**路由表防环**：`recomputeRoutes` 先将自身 subnet 以 hop=0 写入全局表，peer 传回的条目 hop≥2 自然竞争不过，无需额外过滤。水平分割减少冗余传播，但防环依赖 hop 比较。
+**路由表防环**：`recomputeRoutes` 在遍历 peer 之前先将自身 subnet 以 hop=0 写入全局表，peer 传回的条目（无论 routes 还是 claimedSubnets）hop≥2 自然竞争不过。水平分割减少冗余传播，但防环依赖 hop 比较。
 
 ### 14.6 路由查表顺序
 

@@ -112,14 +112,6 @@ func (e *Engine) SetNATTable(nat *NATTable) {
 	e.natTable = nat
 }
 
-// SetMeshDNSResolver registers a callback to resolve mesh domain names (e.g., node.phn) to VIPs.
-func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
-	if e.dnsHijack != nil {
-		e.dnsHijack.MeshResolver = resolver
-		util.LogDebug("tun: mesh DNS resolver set")
-	}
-}
-
 // SetMeshGatewayResolver registers a callback to resolve a domain to the remote gateway's GIP.
 func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
 	e.meshGatewayResolver = resolver

@@ -102,7 +102,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		meshMgr.EnableNAT()
 		engine.SetNATTable(meshMgr.GetNATTable())
 
-		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 

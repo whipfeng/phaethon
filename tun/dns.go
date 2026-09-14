@@ -26,10 +26,6 @@ type DNSHijacker struct {
 	udpEP   tcpip.Endpoint
 	wq      waiter.Queue
 	started bool
-
-	// MeshResolver resolves mesh domain names (e.g., node.phn) to VIPs.
-	// Returns nil if the domain is not a mesh domain or node is unknown.
-	MeshResolver func(domain string) net.IP
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -87,17 +83,6 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 	domain, ok := parseDNSQueryDomain(query)
 	if !ok || domain == "" {
 		return nil, fmt.Errorf("failed to parse query")
-	}
-
-	// Check mesh domain first (e.g., node.phn -> VIP)
-	if h.MeshResolver != nil {
-		if vip := h.MeshResolver(domain); vip != nil {
-			util.LogInfo("tun dns mesh: %s -> %s", domain, vip)
-			resp := buildDNSResponse(query, vip.To4())
-			if resp != nil {
-				return resp, nil
-			}
-		}
 	}
 
 	fakeIP := h.pool.Lookup(domain)

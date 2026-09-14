@@ -691,6 +691,13 @@ func (m *MeshManager) recomputeRoutes() {
 	}
 	best := make(map[string]globalEntry)
 
+	// Own subnet (Hop=0, NextHop=nil) — occupies the slot first so no peer
+	// advertisement (routes or claimedSubnets) can overwrite it.
+	_, ownSubnet, _ := net.ParseCIDR(m.subnetStr)
+	if ownSubnet != nil {
+		best[m.subnetStr] = globalEntry{0, nil, ownSubnet}
+	}
+
 	// Own advertise routes (Hop=0, NextHop=nil) — non-mesh routes
 	for _, r := range advertise {
 		_, ipNet, err := net.ParseCIDR(r)
@@ -712,12 +719,6 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
-	// Build mesh subnet routes from claimedSubnets
-	// Own subnet (Hop=0, NextHop=nil) — occupies the slot so peer claims can't overwrite
-	_, ownSubnet, _ := net.ParseCIDR(m.subnetStr)
-	if ownSubnet != nil {
-		best[m.subnetStr] = globalEntry{0, nil, ownSubnet}
-	}
 	// Peer claimed subnets (mesh routing)
 	for _, peer := range peers {
 		if peer.Sender == nil {

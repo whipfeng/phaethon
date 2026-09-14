@@ -19,6 +19,14 @@ type PeerDomainSuffixEntry struct {
 	Hop    int // hop count (already incremented on receive)
 }
 
+// PeerClaimedSubnetEntry represents a subnet claim learned via gossip, with hop count.
+type PeerClaimedSubnetEntry struct {
+	Subnet    *net.IPNet
+	SubnetStr string
+	NodeID    string
+	Hop       int // hop count (already incremented on receive)
+}
+
 // PeerInfo holds the information received from a peer via gossip.
 // Created by RegisterPeer, destroyed by UnregisterPeer.
 // Data follows the connection lifecycle.
@@ -28,6 +36,7 @@ type PeerInfo struct {
 	SubnetStr      string
 	DomainSuffixes []PeerDomainSuffixEntry
 	Routes         []PeerRouteEntry
+	ClaimedSubnets []PeerClaimedSubnetEntry
 	LastSeen       time.Time
 }
 
@@ -51,12 +60,20 @@ type GossipDomainSuffix struct {
 	Hop    int    `json:"hop"`
 }
 
+// GossipClaimedSubnet is a serializable subnet claim with nodeId and hop count.
+type GossipClaimedSubnet struct {
+	Subnet string `json:"subnet"`
+	NodeID string `json:"nodeId"`
+	Hop    int    `json:"hop"`
+}
+
 // GossipInfo is the gossip payload exchanged between nodes.
 type GossipInfo struct {
-	NodeID         string               `json:"nodeId"`
-	Subnet         string               `json:"subnet"`
-	DomainSuffixes []GossipDomainSuffix `json:"domainSuffixes,omitempty"`
-	Routes         []GossipRoute        `json:"routes,omitempty"`
+	NodeID         string                `json:"nodeId"`
+	Subnet         string                `json:"subnet"`
+	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
+	Routes         []GossipRoute         `json:"routes,omitempty"`
+	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.
@@ -142,6 +159,21 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		})
 	}
 
+	// Parse claimed subnets (increment hop count for each entry)
+	var claimedSubnets []PeerClaimedSubnetEntry
+	for _, cs := range info.ClaimedSubnets {
+		_, ipNet, err := net.ParseCIDR(cs.Subnet)
+		if err != nil {
+			continue
+		}
+		claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
+			Subnet:    ipNet,
+			SubnetStr: cs.Subnet,
+			NodeID:    cs.NodeID,
+			Hop:       cs.Hop + 1,
+		})
+	}
+
 	// Check if anything changed
 	changed := false
 	if peer.SubnetStr != info.Subnet {
@@ -153,12 +185,16 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	if !routesEqual(peer.Routes, routes) {
 		changed = true
 	}
+	if !claimedSubnetsEqual(peer.ClaimedSubnets, claimedSubnets) {
+		changed = true
+	}
 
 	// Update in-place
 	peer.Subnet = subnet
 	peer.SubnetStr = info.Subnet
 	peer.DomainSuffixes = domainSuffixes
 	peer.Routes = routes
+	peer.ClaimedSubnets = claimedSubnets
 	peer.LastSeen = time.Now()
 
 	return changed
@@ -224,6 +260,19 @@ func domainSuffixesEqual(a, b []PeerDomainSuffixEntry) bool {
 	}
 	for i := range a {
 		if a[i].Suffix != b[i].Suffix || a[i].Hop != b[i].Hop {
+			return false
+		}
+	}
+	return true
+}
+
+// claimedSubnetsEqual compares two claimed subnet entry slices for equality.
+func claimedSubnetsEqual(a, b []PeerClaimedSubnetEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].SubnetStr != b[i].SubnetStr || a[i].NodeID != b[i].NodeID || a[i].Hop != b[i].Hop {
 			return false
 		}
 	}

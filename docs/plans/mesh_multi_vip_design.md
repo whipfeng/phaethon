@@ -14,6 +14,7 @@
 | v0.1.0 | 2026-09-10 | 初始版本：多 VIP 支持、源 IP 选择机制 | Qoder |
 | v0.2.0 | 2026-09-11 | 路由简化（PeerSender、prefix 路由）、gateway 转发、无 TUN 模式设计 | Qoder |
 | v0.3.0 | 2026-09-14 | Gossip 距离矢量路由协议：跳数、全局路由表、水平分割 | Qoder |
+| v0.4.0 | 2026-09-14 | Subnet 自动分配（claimedSubnets）、NodeID=Nonce 统一、NodeID DNS 解析 | Qoder |
 
 ## 1. 背景与目标
 
@@ -1237,3 +1238,264 @@ QG 上应用查询 "vmtest.local":
 4. **通告改造**：`gossipLoop` 向每个 peer 发送 gossip 时，从全局表过滤 NextHop == 该 peer 的条目
 5. **DNS redirect 改造**：`tryDNSRedirect` 中查全局域名 trie 获取 NextHop peer，从 peer 的 Subnet 推导 GIP
 6. **移除临时方案**：删除 `GetGatewayGIPForDomain` 中遍历所有 peer routes 搜索 SourceNodeID 的 workaround
+
+## 12. Mesh 管理控制台（热加载）
+
+### 12.1 背景
+
+之前修改 mesh 配置（domainSuffixes、advertise）需要重启整个进程，导致 P2P 连接断开、拓扑状态丢失。
+
+### 12.2 实现
+
+**API 端点**：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| GET | `/api/mesh` | 获取状态、拓扑、路由、peers |
+| PATCH | `/api/mesh/config` | 热更新 domainSuffixes 和 advertise |
+| POST | `/api/mesh/gossip` | 立即触发 gossip 广播 |
+
+**MeshManager 改动**：
+
+```go
+// 新增方法
+func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
+    m.mu.Lock()
+    m.domainSuffixes = domainSuffixes
+    m.advertise = advertise
+    m.mu.Unlock()
+    m.eventCh <- meshEvent{kind: meshEventConfigUpdate}
+}
+
+func (m *MeshManager) TriggerGossip() {
+    m.eventCh <- meshEvent{kind: meshEventTick}
+}
+```
+
+**线程安全**：激活 `mu` 锁保护 `domainSuffixes` 和 `advertise` 的读写：
+- `recomputeRoutes()` 和 `broadcastGossip()` 在方法开头 snapshot 两个字段
+- `GetStatus()` 和 `GetDomainSuffixes()` 加 RLock 保护
+
+**Dashboard UI**：新增 mesh-card 显示状态、拓扑、路由表，支持编辑配置。
+
+### 12.3 配置持久化
+
+PATCH `/api/mesh/config` 同时更新内存和 config.yaml：
+
+```go
+mesh.GlobalMeshManager.UpdateConfig(req.DomainSuffixes, req.Advertise)
+
+s.mu.Lock()
+s.conf.Mesh.DomainSuffixes = req.DomainSuffixes
+s.conf.Mesh.Advertise = req.Advertise
+s.saveConfigLocked()
+s.mu.Unlock()
+```
+
+### 12.4 已实现
+
+- [x] PATCH /api/mesh/config 热更新
+- [x] POST /api/mesh/gossip 手动触发
+- [x] Dashboard mesh-card
+- [x] SSE 版本通知集成
+
+## 13. NodeID = Nonce（待实现）
+
+### 13.1 设计
+
+**NodeID 就是 nonce**：随机生成的 64 位整数，作为节点的唯一标识。一个 `nodeId` 走天下：拓扑显示、gossip 标识、冲突解决、DNS 解析，全用它。
+
+- 删除 `mesh.node-id` 配置项
+- 首次启动生成 nodeID，持久化到 state 文件
+- nodeID 用于拓扑显示、gossip 标识、subnet 冲突解决
+
+**state 文件**（`mesh-state.json`，与 config.yaml 同目录）：
+
+```json
+{
+  "nodeId": "8472639485736",
+  "subnet": "100.64.5.0/24"
+}
+```
+
+- 节点重启 → 从 state 文件恢复
+- state 文件丢失 → 当新节点处理，重新生成 nodeID 和 subnet
+
+### 13.2 配置兼容
+
+- `mesh.node-id` 有值 → 迁移到 state 文件（一次性），之后从 state 读取
+- `mesh.node-id` 为空 → 从 state 文件读取或生成新的
+- `mesh.subnet` 有值 → 用配置值（不自动分配）
+- `mesh.subnet` 为空 → 自动分配 + 持久化
+
+## 14. Subnet 自动分配与 claimedSubnets（待实现）
+
+### 14.1 问题
+
+当前 subnet 是手动配置的。如果节点数量增加或动态加入，手动分配容易冲突。
+
+### 14.2 Gossip 报文格式
+
+新增 `claimedSubnets` 字段，替代在 `routes` 中传播 mesh 网段：
+
+```json
+{
+  "nodeId": "8472639485736",
+  "subnet": "100.64.2.0/24",
+  "routes": [
+    {"prefix": "0.0.0.0/0", "hop": 0}
+  ],
+  "domainSuffixes": [
+    {"suffix": "phn", "hop": 0}
+  ],
+  "claimedSubnets": [
+    {"subnet": "100.64.2.0/24", "nodeId": "8472639485736", "hop": 0},
+    {"subnet": "100.64.1.0/24", "nodeId": "5738291046", "hop": 1},
+    {"subnet": "100.64.0.0/24", "nodeId": "6660001112223", "hop": 2}
+  ]
+}
+```
+
+**新增结构体**：
+
+```go
+type GossipClaimedSubnet struct {
+    Subnet string `json:"subnet"`
+    NodeID string `json:"nodeId"`
+    Hop    int    `json:"hop"`
+}
+
+type GossipInfo struct {
+    NodeID         string                `json:"nodeId"`
+    Subnet         string                `json:"subnet"`
+    DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
+    Routes         []GossipRoute         `json:"routes,omitempty"`
+    ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
+}
+```
+
+### 14.3 claimedSubnets 一举三得
+
+| 用途 | 说明 |
+|------|------|
+| **Subnet 冲突检测** | 同 subnet 不同 nodeId → 比较 nodeId 数值大小，小的重选 |
+| **Mesh 网段路由** | 替代 routes 中的 mesh 路由，dst 匹配 claimedSubnets 走 mesh 转发 |
+| **NodeID DNS 解析** | 自动推导 `nodeId.phn` 的路由，无需在 domainSuffixes 中声明 |
+
+**routes 职责变化**：只管非 mesh 路由（`0.0.0.0/0` 出口网关、`10.0.0.0/8` 内网等）。
+
+### 14.4 自动分配流程
+
+1. 节点启动时，如果 `mesh.subnet` 为空，从 `100.64.0.0/16` 池随机选一个 `/24`
+2. 检查本地 knownSubnets 表，如果冲突则重选
+3. 通过 gossip 广播 `claimedSubnets`（含自己的 subnet + nodeId）
+4. 收到 gossip 后检测冲突：同 subnet 不同 nodeId → nodeId 数值小的重选
+5. 分配的 subnet 和 nodeId 持久化到 state 文件，重启不变
+
+### 14.5 传播规则
+
+| 规则 | 说明 |
+|------|------|
+| hop=0 | 自己的 subnet，每次通告都带 |
+| hop+1 | 从 peer 学来的，收到时 +1 |
+| 水平分割 | 向 peer A 通告时，排除 NextHop=A 的条目 |
+| 同 subnet 去重 | 多条记录取 hop 最小的；hop 相同取 nodeId 数值最小的 |
+
+### 14.6 路由查表顺序
+
+```
+dst = 100.64.1.50
+  → 查 claimedSubnets: 匹配 100.64.1.0/24, hop=1, nodeId=5738291046
+  → mesh 转发
+
+dst = 8.8.8.8
+  → 查 claimedSubnets: 无匹配
+  → 查 routes: 匹配 0.0.0.0/0, hop=0
+  → 本地出口
+```
+
+### 14.7 冲突检测模拟
+
+**场景：新节点 NEW（nodeId=1111222233334）选到与 VM（nodeId=5738291046）相同的 subnet**：
+
+```
+NEW 收到 JF 的 gossip:
+  claimedSubnets: [
+    {subnet: "100.64.1.0/24", nodeId: "5738291046", hop: 1},  ← VM 的
+    ...
+  ]
+
+NEW 检测冲突:
+  自己的 subnet = 100.64.1.0/24
+  已知: 100.64.1.0/24 → nodeId=5738291046
+
+  比较: 1111222233334 < 5738291046
+  → 自己的 nodeId 更小 → 自己让，重选 subnet
+
+NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
+```
+
+**反向情况**：如果 NEW 的 nodeId 更大（9999888877776 > 5738291046），则 NEW 不变，VM 收到后会自行重选。
+
+### 14.8 边界情况
+
+| 场景 | 处理 |
+|------|------|
+| 两节点同时启动选到相同 subnet | gossip 连通后 nodeId 比较，小的重选 |
+| 节点重启 | 从 state 文件恢复 |
+| state 文件丢失 | 当新节点处理，重新生成 nodeID 和 subnet |
+| 网络分区合并 | 分区内各自分配，合并后 gossip 检测冲突 |
+
+## 15. NodeID DNS 解析到 127.0.0.1（待实现）
+
+### 15.1 设计
+
+**目标**：通过 `nodeId.phn` 访问节点上的本地服务。
+
+**DNS 解析无需额外声明**：`claimedSubnets` 已带所有 nodeId，自动推导路由：
+
+```
+收到 claimedSubnets:
+  {subnet: "100.64.1.0/24", nodeId: "5738291046", hop: 1}
+
+自动推导:
+  5738291046.phn → 路由到 100.64.1.0/24, hop=1
+```
+
+`domainSuffixes` 只管用户自定义后缀（如 `phn`、`vmtest.local`），不需要声明 nodeId。
+
+### 15.2 数据流
+
+```
+1. 源节点：应用查询 5738291046.phn
+2. 源节点：DNS hijacker 分配 fakeIP（如 198.18.0.5）
+3. 源节点：forwarder 识别 .phn 后缀 → 查 claimedSubnets
+   → 找到 nodeId=5738291046 → subnet=100.64.1.0/24, hop=1
+4. 源节点：走 mesh 路由到目标节点
+5. 目标节点：流量从 mesh 进入 forwarder
+6. 目标节点：forwarder 还原 fakeIP → 5738291046.phn
+7. 目标节点：识别是自己的 nodeId → 替换为 127.0.0.1
+8. 目标节点：走 Direct 路径，连接 127.0.0.1:port
+9. 本地服务响应
+```
+
+### 15.3 关键改动
+
+目标节点 forwarder 还原域名时，检查是否匹配本地 nodeID：
+
+```go
+// forwarder 还原域名后
+if domain == localNodeID + ".phn" {
+    dst = "127.0.0.1"  // 替换为本地
+}
+```
+
+### 15.4 使用场景
+
+```bash
+# 从任意节点 SSH 到 nodeId=8472639485736 的节点
+ssh 8472639485736.phn
+
+# 访问节点上的 HTTP 服务
+curl http://8472639485736.phn:8080
+```

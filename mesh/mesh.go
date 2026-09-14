@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type P2PTransport interface {
 	BroadcastMeshGossip(data []byte) error
 	SendMeshGossipTo(peerNodeID string, data []byte) error
 	ListMeshPeerIDs() []string
+	SetMeshInfo(nodeID, vip string)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -74,6 +76,7 @@ type MeshManager struct {
 	topology       *Topology
 	tun            TunInterface
 	p2p            P2PTransport
+	dataDir        string // for state file persistence
 
 	routesMu sync.RWMutex
 	routes   []MeshRoute // sorted by prefix length (longest first)
@@ -101,8 +104,125 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	}
 }
 
+// SetDataDir sets the data directory for state file persistence.
+func (m *MeshManager) SetDataDir(dataDir string) {
+	m.dataDir = dataDir
+}
+
+// checkSubnetConflict checks if our subnet conflicts with any claimed subnet.
+// If our nodeId is numerically smaller, we need to re-select.
+// Returns true if we re-selected.
+func (m *MeshManager) checkSubnetConflict() bool {
+	// Collect all claimed subnets from topology
+	usedSubnets := make(map[string]bool)
+	for _, peer := range m.topology.GetAllPeers() {
+		// Peer's own subnet
+		if peer.SubnetStr != "" && peer.SubnetStr != m.subnetStr {
+			usedSubnets[peer.SubnetStr] = true
+		}
+		// Peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if cs.SubnetStr != m.subnetStr {
+				usedSubnets[cs.SubnetStr] = true
+			}
+		}
+	}
+
+	// Check if our subnet is claimed by someone else
+	for _, peer := range m.topology.GetAllPeers() {
+		// Check peer's own subnet
+		if peer.SubnetStr == m.subnetStr && peer.NodeID() != m.nodeID {
+			// Conflict! Compare nodeIds numerically
+			if compareNodeIDs(m.nodeID, peer.NodeID()) < 0 {
+				// Our nodeId is smaller, we need to re-select
+				return m.reselectSubnet(usedSubnets)
+			}
+			// Otherwise, they will re-select
+		}
+		// Check peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if cs.SubnetStr == m.subnetStr && cs.NodeID != m.nodeID {
+				if compareNodeIDs(m.nodeID, cs.NodeID) < 0 {
+					return m.reselectSubnet(usedSubnets)
+				}
+			}
+		}
+	}
+	return false
+}
+
+// reselectSubnet picks a new subnet that doesn't conflict.
+func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
+	// Mark our current subnet as used so we don't pick it again
+	usedSubnets[m.subnetStr] = true
+
+	newSubnetStr, err := AllocateSubnet(usedSubnets)
+	if err != nil {
+		util.LogError("[MESH] subnet conflict: failed to allocate new subnet: %v", err)
+		return false
+	}
+
+	_, newSubnet, err := net.ParseCIDR(newSubnetStr)
+	if err != nil {
+		util.LogError("[MESH] subnet conflict: invalid new subnet %s: %v", newSubnetStr, err)
+		return false
+	}
+
+	m.mu.Lock()
+	m.subnet = newSubnet
+	m.subnetStr = newSubnetStr
+	m.vip = DeriveVIPFromSubnet(newSubnet)
+	m.mu.Unlock()
+
+	util.LogInfo("[MESH] subnet conflict: re-selected subnet to %s (vip=%s)", newSubnetStr, m.vip)
+
+	// Update P2P layer with new VIP
+	if m.p2p != nil {
+		m.p2p.SetMeshInfo(m.nodeID, m.vip.String())
+	}
+
+	// Save state
+	if m.dataDir != "" {
+		state := &MeshState{
+			NodeID: m.nodeID,
+			Subnet: newSubnetStr,
+		}
+		if err := SaveState(m.dataDir, state); err != nil {
+			util.LogError("[MESH] failed to save state after subnet re-selection: %v", err)
+		}
+	}
+
+	return true
+}
+
+// compareNodeIDs compares two nodeID strings numerically.
+// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+func compareNodeIDs(a, b string) int {
+	aNum, aErr := strconv.ParseUint(a, 10, 64)
+	bNum, bErr := strconv.ParseUint(b, 10, 64)
+	if aErr != nil || bErr != nil {
+		// Fall back to string comparison if not numeric
+		if a < b {
+			return -1
+		} else if a > b {
+			return 1
+		}
+		return 0
+	}
+	if aNum < bNum {
+		return -1
+	} else if aNum > bNum {
+		return 1
+	}
+	return 0
+}
+
 func (m *MeshManager) GetVIP() net.IP {
 	return m.vip
+}
+
+func (m *MeshManager) GetNodeID() string {
+	return m.nodeID
 }
 
 func (m *MeshManager) GetAllVIPs() []net.IP {
@@ -482,6 +602,17 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 			}
 			entry["routes"] = routeEntries
 		}
+		if len(p.ClaimedSubnets) > 0 {
+			claimEntries := make([]map[string]interface{}, 0, len(p.ClaimedSubnets))
+			for _, cs := range p.ClaimedSubnets {
+				claimEntries = append(claimEntries, map[string]interface{}{
+					"subnet": cs.SubnetStr,
+					"nodeId": cs.NodeID,
+					"hop":    cs.Hop,
+				})
+			}
+			entry["claimedSubnets"] = claimEntries
+		}
 		peerList = append(peerList, entry)
 	}
 	return map[string]interface{}{"peers": peerList}
@@ -557,10 +688,7 @@ func (m *MeshManager) recomputeRoutes() {
 	}
 	best := make(map[string]globalEntry)
 
-	// Own routes (Hop=0, NextHop=nil)
-	if m.subnet != nil {
-		best[m.subnetStr] = globalEntry{0, nil, m.subnet}
-	}
+	// Own advertise routes (Hop=0, NextHop=nil) — non-mesh routes
 	for _, r := range advertise {
 		_, ipNet, err := net.ParseCIDR(r)
 		if err != nil {
@@ -569,25 +697,36 @@ func (m *MeshManager) recomputeRoutes() {
 		best[r] = globalEntry{0, nil, ipNet}
 	}
 
-	// Peer routes (with hop counts)
-	// Only use connected peers (Sender != nil) as nextHop.
-	// A disconnected peer can't forward, but other peers may advertise
-	// routes through themselves for the same prefix — those are valid.
+	// Peer routes (non-mesh, with hop counts)
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
 		}
-		// Peer's subnet is also a route (Hop=1 from direct peer)
+		for _, r := range peer.Routes {
+			if existing, ok := best[r.PrefixStr]; !ok || r.Hop < existing.hop {
+				best[r.PrefixStr] = globalEntry{r.Hop, peer, r.Prefix}
+			}
+		}
+	}
+
+	// Build mesh subnet routes from claimedSubnets
+	// Own subnet (Hop=0, NextHop=nil) — not added to routes (own, no forwarding needed)
+	// Peer claimed subnets (mesh routing)
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Peer's own subnet claim
 		if peer.Subnet != nil {
 			key := peer.Subnet.String()
 			if existing, ok := best[key]; !ok || 1 < existing.hop {
 				best[key] = globalEntry{1, peer, peer.Subnet}
 			}
 		}
-		// Peer's advertised/learned routes
-		for _, r := range peer.Routes {
-			if existing, ok := best[r.PrefixStr]; !ok || r.Hop < existing.hop {
-				best[r.PrefixStr] = globalEntry{r.Hop, peer, r.Prefix}
+		// Peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if existing, ok := best[cs.SubnetStr]; !ok || cs.Hop < existing.hop {
+				best[cs.SubnetStr] = globalEntry{cs.Hop, peer, cs.Subnet}
 			}
 		}
 	}
@@ -672,9 +811,14 @@ func (m *MeshManager) gossipLoop() {
 					util.LogDebug("[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
 					break
 				}
-				util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d", ev.sender.GetNodeID(), info.Subnet, len(info.Routes), len(info.DomainSuffixes))
+				util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), info.Subnet, len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.recomputeRoutes()
+				}
+				// Check for subnet conflicts and re-select if needed
+				if m.checkSubnetConflict() {
+					m.recomputeRoutes()
+					m.broadcastGossip()
 				}
 			case meshEventTick:
 				m.broadcastGossip()
@@ -728,7 +872,7 @@ func (m *MeshManager) broadcastGossip() {
 		peerByNodeID[p.NodeID()] = p
 	}
 
-	// Build global route table (same logic as recomputeRoutes)
+	// Build global route table (non-mesh routes only)
 	type globalRouteEntry struct {
 		hop     int
 		nextHop *PeerInfo // nil = own route
@@ -737,26 +881,50 @@ func (m *MeshManager) broadcastGossip() {
 	}
 	bestRoutes := make(map[string]globalRouteEntry)
 
-	// Own routes (Hop=0)
-	bestRoutes[m.subnetStr] = globalRouteEntry{0, nil, m.subnetStr, m.subnet}
+	// Own advertise routes (Hop=0) — not mesh subnets
 	for _, r := range advertise {
 		_, ipNet, _ := net.ParseCIDR(r)
 		bestRoutes[r] = globalRouteEntry{0, nil, r, ipNet}
 	}
-	// Peer routes
+	// Peer routes (non-mesh, learned from peers)
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
-			continue // disconnected peer can't be a nextHop
-		}
-		if peer.Subnet != nil {
-			key := peer.Subnet.String()
-			if existing, ok := bestRoutes[key]; !ok || 1 < existing.hop {
-				bestRoutes[key] = globalRouteEntry{1, peer, key, peer.Subnet}
-			}
+			continue
 		}
 		for _, r := range peer.Routes {
 			if existing, ok := bestRoutes[r.PrefixStr]; !ok || r.Hop < existing.hop {
 				bestRoutes[r.PrefixStr] = globalRouteEntry{r.Hop, peer, r.PrefixStr, r.Prefix}
+			}
+		}
+	}
+
+	// Build global claimed subnets table (mesh subnets)
+	type globalClaimEntry struct {
+		hop     int
+		nextHop *PeerInfo // nil = own claim
+		nodeID  string
+		subnet  string
+	}
+	bestClaims := make(map[string]globalClaimEntry)
+
+	// Own claim (Hop=0)
+	bestClaims[m.subnetStr] = globalClaimEntry{0, nil, m.nodeID, m.subnetStr}
+	// Peer claims
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Peer's own subnet
+		if peer.SubnetStr != "" {
+			key := peer.SubnetStr
+			if existing, ok := bestClaims[key]; !ok || 1 < existing.hop {
+				bestClaims[key] = globalClaimEntry{1, peer, peer.NodeID(), peer.SubnetStr}
+			}
+		}
+		// Peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if existing, ok := bestClaims[cs.SubnetStr]; !ok || cs.Hop < existing.hop {
+				bestClaims[cs.SubnetStr] = globalClaimEntry{cs.Hop, peer, cs.NodeID, cs.SubnetStr}
 			}
 		}
 	}
@@ -807,11 +975,25 @@ func (m *MeshManager) broadcastGossip() {
 			ds = append(ds, GossipDomainSuffix{Suffix: suffix, Hop: e.hop})
 		}
 
+		// Filter claimed subnets: exclude entries where nextHop == this peer
+		var claims []GossipClaimedSubnet
+		for _, e := range bestClaims {
+			if e.nextHop == peer {
+				continue // split horizon
+			}
+			claims = append(claims, GossipClaimedSubnet{
+				Subnet: e.subnet,
+				NodeID: e.nodeID,
+				Hop:    e.hop,
+			})
+		}
+
 		info := GossipInfo{
 			NodeID:         m.nodeID,
 			Subnet:         m.subnetStr,
 			DomainSuffixes: ds,
 			Routes:         routes,
+			ClaimedSubnets: claims,
 		}
 		data, err := json.Marshal(info)
 		if err != nil {

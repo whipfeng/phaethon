@@ -236,32 +236,64 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// Initialize mesh overlay network if enabled
 	var meshMgr *mesh.MeshManager
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
-		meshSubnetStr := ruleConf.Mesh.GetSubnet()
-		if meshSubnetStr == "" {
-			return nil, fmt.Errorf("mesh enabled but subnet not configured (required)")
+		// Load or create mesh state (nodeID, subnet)
+		state, err := mesh.LoadState(dataDir)
+		if err != nil {
+			util.Logger.Printf("WARNING: load mesh state fail: %v, will create new", err)
+			state = nil
 		}
-		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
+		if state == nil {
+			state = &mesh.MeshState{}
+		}
+
+		// NodeID: config migration → state → generate
+		if ruleConf.Mesh.NodeID != "" {
+			// Migrate from config to state (one-time)
+			state.NodeID = ruleConf.Mesh.NodeID
+			util.Logger.Printf("Mesh: migrated node-id from config to state: %s", state.NodeID)
+		} else if state.NodeID == "" {
+			// Generate new nodeID
+			state.NodeID, err = mesh.GenerateNodeID()
+			if err != nil {
+				return nil, fmt.Errorf("mesh generate node id fail: %w", err)
+			}
+			util.Logger.Printf("Mesh: generated new nodeID: %s", state.NodeID)
+		}
+
+		// Subnet: config → state → auto-allocate
+		meshSubnetStr := ruleConf.Mesh.GetSubnet()
+		if meshSubnetStr != "" {
+			// Config has subnet, use it
+			state.Subnet = meshSubnetStr
+		} else if state.Subnet == "" {
+			// Auto-allocate (will be refined later with conflict detection)
+			state.Subnet, err = mesh.AllocateSubnet(nil)
+			if err != nil {
+				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
+			}
+			util.Logger.Printf("Mesh: auto-allocated subnet: %s", state.Subnet)
+		}
+
+		// Save state
+		if err := mesh.SaveState(dataDir, state); err != nil {
+			return nil, fmt.Errorf("mesh save state fail: %w", err)
+		}
+
+		// Parse subnet and derive VIP
+		_, meshSubnet, err := net.ParseCIDR(state.Subnet)
 		if err != nil {
 			return nil, fmt.Errorf("mesh subnet invalid: %w", err)
 		}
-		// Derive VIP from subnet (.1 address)
-		vip := make(net.IP, len(meshSubnet.IP))
-		copy(vip, meshSubnet.IP)
-		vip[len(vip)-1] |= 1 // Set last byte to .1
-		parsedVIPs := []net.IP{vip}
-		
-		if ruleConf.Mesh.NodeID != "" {
-			primaryVIP := parsedVIPs[0]
-			domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
-			advertise := ruleConf.Mesh.GetAdvertise()
-			meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, primaryVIP, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise)
-			mesh.GlobalMeshManager = meshMgr
-			p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, primaryVIP.String())
-			p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-			util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, primaryVIP, meshSubnetStr, domainSuffixes, advertise)
-		} else {
-			return nil, fmt.Errorf("mesh enabled but node-id not configured (required)")
-		}
+		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
+
+		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
+		advertise := ruleConf.Mesh.GetAdvertise()
+		meshMgr = mesh.NewMeshManager(state.NodeID, vip, nil, meshSubnet, state.Subnet, domainSuffixes, advertise)
+		meshMgr.SetDataDir(dataDir)
+		mesh.GlobalMeshManager = meshMgr
+		p2p.GlobalP2PManager.SetMeshInfo(state.NodeID, vip.String())
+		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
+		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s domainSuffixes=%v advertise=%v", state.NodeID, vip, state.Subnet, domainSuffixes, advertise)
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference

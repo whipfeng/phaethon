@@ -78,6 +78,7 @@ type Engine struct {
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 	natTable        *NATTable       // shared NAT table for TUN and mesh NAT
 	meshGatewayResolver func(domain string) net.IP // resolves domain to remote gateway GIP for DNS redirect
+	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -123,6 +124,12 @@ func (e *Engine) SetMeshDNSResolver(resolver func(domain string) net.IP) {
 func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
 	e.meshGatewayResolver = resolver
 	util.LogDebug("tun: mesh gateway resolver set")
+}
+
+// SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
+func (e *Engine) SetLocalMeshNodeID(nodeID string) {
+	e.localMeshNodeID = nodeID
+	util.LogDebug("tun: local mesh nodeID set: %s", nodeID)
 }
 
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
@@ -1391,6 +1398,16 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 		util.LogDebug("tun: udp fake-ip %s -> %s", dstAddr, domain)
 	}
 
+	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
+	var localNodeDomain bool
+	if domain != "" && e.localMeshNodeID != "" {
+		expectedDomain := e.localMeshNodeID + ".phn"
+		if domain == expectedDomain {
+			localNodeDomain = true
+			util.LogDebug("tun: local mesh nodeID domain detected (udp): %s -> 127.0.0.1", domain)
+		}
+	}
+
 	connID := util.NextConnID()
 
 	// Use domain for rule matching (so domain-based rules work).
@@ -1431,7 +1448,11 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 	} else {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialIP = net.ParseIP(resolvedAddr)
-		if domain != "" {
+		if localNodeDomain {
+			// Local mesh nodeID domain: connect to localhost
+			dialIP = net.ParseIP("127.0.0.1")
+			util.LogDebug("[TUN] [%s] udp local mesh nodeID domain: %s -> %s", connID, domain, dialIP)
+		} else if domain != "" {
 			// Resolve the real IP for DIRECT connections.
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
@@ -1527,6 +1548,16 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		util.LogDebug("tun: fake-ip %s -> %s", dstAddr, domain)
 	}
 
+	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
+	var localNodeDomain bool
+	if domain != "" && e.localMeshNodeID != "" {
+		expectedDomain := e.localMeshNodeID + ".phn"
+		if domain == expectedDomain {
+			localNodeDomain = true
+			util.LogDebug("tun: local mesh nodeID domain detected: %s -> 127.0.0.1", domain)
+		}
+	}
+
 	connID := util.NextConnID()
 
 	// Use domain for rule matching (so domain-based rules work).
@@ -1566,7 +1597,11 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	} else {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
-		if domain != "" {
+		if localNodeDomain {
+			// Local mesh nodeID domain: connect to localhost
+			dialAddr = "127.0.0.1"
+			util.LogDebug("[TUN] [%s] local mesh nodeID domain: %s -> %s", connID, domain, dialAddr)
+		} else if domain != "" {
 			// Resolve the real IP for DIRECT connections.
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {

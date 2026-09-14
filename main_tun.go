@@ -104,6 +104,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 
 		engine.SetMeshDNSResolver(meshMgr.ResolveMeshDomain)
 		engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)
+		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		if pool := engine.GetFakeIPPool(); pool != nil {

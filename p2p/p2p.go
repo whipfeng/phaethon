@@ -468,15 +468,6 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag, len(hello.Inventory))
 
 	if hello.MeshNodeID != "" {
-		m.mu.Lock()
-		for id, p := range m.peers {
-			if id != peer.ID && p.MeshNodeID == hello.MeshNodeID {
-				util.LogInfo("[P2P] evicting stale peer %s (same meshNodeId=%s, replaced by %s)", id, hello.MeshNodeID, peer.ID)
-				p.conn.Close()
-				delete(m.peers, id)
-			}
-		}
-		m.mu.Unlock()
 		if m.meshHandler != nil {
 			ps := &peerSender{peer: peer}
 			peer.meshSender = ps
@@ -596,6 +587,31 @@ func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 	}
 	enqueueWrite(target, reverse.FrameData, gossip)
 	return nil
+}
+
+// SendMeshGossipToAll sends a mesh_gossip JSON command to all mesh-enabled peers.
+func (m *P2PManager) SendMeshGossipToAll(data []byte) {
+	cmd := map[string]interface{}{
+		"cmd":     "mesh_gossip",
+		"payload": json.RawMessage(data),
+	}
+	gossip, err := json.Marshal(cmd)
+	if err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	peers := make([]*Peer, 0, len(m.peers))
+	for _, p := range m.peers {
+		if p.MeshNodeID != "" {
+			peers = append(peers, p)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, p := range peers {
+		enqueueWrite(p, reverse.FrameData, gossip)
+	}
 }
 
 // ListMeshPeerIDs returns node IDs of all mesh-enabled peers.

@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"encoding/json"
+	"math/rand"
 	"net"
 	"sort"
 	"strconv"
@@ -80,6 +81,7 @@ type PeerSender interface {
 type P2PTransport interface {
 	BroadcastMeshGossip(data []byte) error
 	SendMeshGossipTo(peerNodeID string, data []byte) error
+	SendMeshGossipToAll(data []byte)
 	ListMeshPeerIDs() []string
 	SetMeshInfo(nodeID, vip string)
 }
@@ -442,29 +444,33 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
 	// and look up the original domain via fakeIP.LookupDomain.
 	//
-	// IMPORTANT: Check findPeer FIRST before local subnet check.
+	// IMPORTANT: Check findPeers FIRST before local subnet check.
 	// Remote Fake-IPs (e.g., 100.64.0.x on VM with subnet 100.64.1.0/24) should be
 	// routed via the peer that owns that subnet, not passed to local netstack.
-	peer := m.findPeer(dstIP)
-	if peer != nil {
+	// Load balance across multiple P2P connections to the same node.
+	peers := m.findPeers(dstIP)
+	if len(peers) > 0 {
+		// Select a peer randomly for load balancing
+		selectedPeer := peers[rand.Intn(len(peers))]
+
 		// Remote peer owns this IP — send via mesh
 		pkt := make([]byte, len(data))
 		copy(pkt, data)
 
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] outbound %s: sending %d bytes via peer %s", dstIP, len(pkt), peer.GetNodeID())
+			util.LogInfo("[MESH] outbound %s: sending %d bytes via peer %s (of %d available)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
 			if len(pkt) >= 20 && pkt[9] == 6 {
 				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
 			}
 		}
 
 		go func() {
-			if err := peer.Send(pkt); err != nil {
-				util.LogWarn("[MESH] send to %s failed: %v", peer.GetNodeID(), err)
+			if err := selectedPeer.Send(pkt); err != nil {
+				util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
 			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 				dst := net.IP(pkt[16:20])
 				if dst[0] == 100 && dst[1] == 64 {
-					util.LogInfo("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, peer.GetNodeID())
+					util.LogInfo("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
 				}
 			}
 		}()
@@ -714,19 +720,26 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 	if m.p2p == nil {
 		return nil
 	}
-	ids := m.p2p.ListMeshPeerIDs()
 	allPeers := m.topology.GetAllPeers()
-	result := make([]MeshPeerInfo, 0, len(ids))
-	for _, id := range ids {
-		info := MeshPeerInfo{NodeID: id, Direct: true}
-		for _, p := range allPeers {
-			if p.NodeID() == id {
-				info.Subnet = p.SubnetStr
-				info.LastSeen = p.LastSeen
-				break
-			}
+
+	// Deduplicate by nodeID (multiple connections to same node)
+	seen := make(map[string]bool)
+	result := make([]MeshPeerInfo, 0)
+	for _, p := range allPeers {
+		if p.Sender == nil {
+			continue
 		}
-		result = append(result, info)
+		nodeID := p.NodeID()
+		if nodeID == "" || seen[nodeID] {
+			continue
+		}
+		seen[nodeID] = true
+		result = append(result, MeshPeerInfo{
+			NodeID:   nodeID,
+			Direct:   true,
+			Subnet:   p.SubnetStr,
+			LastSeen: p.LastSeen,
+		})
 	}
 	return result
 }
@@ -882,6 +895,36 @@ func (m *MeshManager) findPeer(dstIP net.IP) PeerSender {
 	return nil
 }
 
+// findPeers returns all peers that can reach the destination IP.
+// Used for load balancing when multiple P2P connections exist to the same node.
+func (m *MeshManager) findPeers(dstIP net.IP) []PeerSender {
+	m.routesMu.RLock()
+	defer m.routesMu.RUnlock()
+
+	// Find the primary peer for this destination
+	var primaryPeer PeerSender
+	for _, route := range m.routes {
+		if route.Prefix.Contains(dstIP) {
+			primaryPeer = route.Peer
+			break
+		}
+	}
+	if primaryPeer == nil {
+		return nil
+	}
+
+	// Collect all peers with the same nodeID (multiple P2P connections to same node)
+	targetNodeID := primaryPeer.GetNodeID()
+	var result []PeerSender
+	peers := m.topology.GetAllPeers()
+	for _, peer := range peers {
+		if peer.Sender != nil && peer.Sender.GetNodeID() == targetNodeID {
+			result = append(result, peer.Sender)
+		}
+	}
+	return result
+}
+
 func (m *MeshManager) gossipLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -950,8 +993,8 @@ func (m *MeshManager) broadcastGossip() {
 	if m.p2p == nil {
 		return
 	}
-	peerIDs := m.p2p.ListMeshPeerIDs()
-	if len(peerIDs) == 0 {
+	allPeers := m.topology.GetAllPeers()
+	if len(allPeers) == 0 {
 		return
 	}
 
@@ -961,13 +1004,6 @@ func (m *MeshManager) broadcastGossip() {
 	domainSuffixes := make([]string, len(m.domainSuffixes))
 	copy(domainSuffixes, m.domainSuffixes)
 	m.mu.RUnlock()
-
-	// Capture a single peer snapshot for consistent split-horizon filtering.
-	allPeers := m.topology.GetAllPeers()
-	peerByNodeID := make(map[string]*PeerInfo, len(allPeers))
-	for _, p := range allPeers {
-		peerByNodeID[p.NodeID()] = p
-	}
 
 	// Build global route table (non-mesh routes only)
 	type globalRouteEntry struct {
@@ -1047,10 +1083,9 @@ func (m *MeshManager) broadcastGossip() {
 	}
 
 	// Per-peer: filter by split horizon and send
-	for _, peerID := range peerIDs {
-		peer := peerByNodeID[peerID]
-		if peer == nil {
-			util.LogWarn("[MESH] peer %s not found in topology, skipping gossip", peerID)
+	// Iterate over all peers (including multiple connections to same node)
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
 			continue
 		}
 
@@ -1096,7 +1131,8 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
-		m.p2p.SendMeshGossipTo(peerID, data)
+		// Send directly to this peer's sender
+		peer.Sender.Send(data)
 	}
 }
 

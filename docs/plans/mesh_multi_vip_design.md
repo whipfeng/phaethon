@@ -15,6 +15,7 @@
 | v0.2.0 | 2026-09-11 | 路由简化（PeerSender、prefix 路由）、gateway 转发、无 TUN 模式设计 | Qoder |
 | v0.3.0 | 2026-09-14 | Gossip 距离矢量路由协议：跳数、全局路由表、水平分割 | Qoder |
 | v0.4.0 | 2026-09-14 | Subnet 自动分配（claimedSubnets）、NodeID=Nonce 统一、NodeID DNS 解析 | Qoder |
+| v0.4.1 | 2026-09-14 | 冲突优先级明确为"大的赢"（字母 > 数字）、recomputeRoutes 加 hop=0 占位防环路 | Qoder |
 
 ## 1. 背景与目标
 
@@ -1299,7 +1300,7 @@ s.mu.Unlock()
 - [x] Dashboard mesh-card
 - [x] SSE 版本通知集成
 
-## 13. NodeID = Nonce（待实现）
+## 13. NodeID = Nonce
 
 ### 13.1 设计
 
@@ -1328,7 +1329,7 @@ s.mu.Unlock()
 - `mesh.subnet` 有值 → 用配置值（不自动分配）
 - `mesh.subnet` 为空 → 自动分配 + 持久化
 
-## 14. Subnet 自动分配与 claimedSubnets（待实现）
+## 14. Subnet 自动分配与 claimedSubnets
 
 ### 14.1 问题
 
@@ -1378,7 +1379,7 @@ type GossipInfo struct {
 
 | 用途 | 说明 |
 |------|------|
-| **Subnet 冲突检测** | 同 subnet 不同 nodeId → 比较 nodeId 数值大小，小的重选 |
+| **Subnet 冲突检测** | 同 subnet 不同 nodeId → 比较 nodeId，大的赢、小的重选。字母 nodeID（如 "vm"）ASCII 值大于数字，优先于自动生成的随机 nodeID |
 | **Mesh 网段路由** | 替代 routes 中的 mesh 路由，dst 匹配 claimedSubnets 走 mesh 转发 |
 | **NodeID DNS 解析** | 自动推导 `nodeId.phn` 的路由，无需在 domainSuffixes 中声明 |
 
@@ -1389,7 +1390,7 @@ type GossipInfo struct {
 1. 节点启动时，如果 `mesh.subnet` 为空，从 `100.64.0.0/16` 池随机选一个 `/24`
 2. 检查本地 knownSubnets 表，如果冲突则重选
 3. 通过 gossip 广播 `claimedSubnets`（含自己的 subnet + nodeId）
-4. 收到 gossip 后检测冲突：同 subnet 不同 nodeId → nodeId 数值小的重选
+4. 收到 gossip 后检测冲突：同 subnet 不同 nodeId → nodeId 大的赢，小的自行重选
 5. 分配的 subnet 和 nodeId 持久化到 state 文件，重启不变
 
 ### 14.5 传播规则
@@ -1400,6 +1401,8 @@ type GossipInfo struct {
 | hop+1 | 从 peer 学来的，收到时 +1 |
 | 水平分割 | 向 peer A 通告时，排除 NextHop=A 的条目 |
 | 同 subnet 去重 | 多条记录取 hop 最小的；hop 相同取 nodeId 数值最小的 |
+
+**路由表防环**：`recomputeRoutes` 先将自身 subnet 以 hop=0 写入全局表，peer 传回的条目 hop≥2 自然竞争不过，无需额外过滤。水平分割减少冗余传播，但防环依赖 hop 比较。
 
 ### 14.6 路由查表顺序
 
@@ -1441,12 +1444,12 @@ NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
 
 | 场景 | 处理 |
 |------|------|
-| 两节点同时启动选到相同 subnet | gossip 连通后 nodeId 比较，小的重选 |
+| 两节点同时启动选到相同 subnet | gossip 连通后 nodeId 比较，大的赢，小的重选 |
 | 节点重启 | 从 state 文件恢复 |
 | state 文件丢失 | 当新节点处理，重新生成 nodeID 和 subnet |
 | 网络分区合并 | 分区内各自分配，合并后 gossip 检测冲突 |
 
-## 15. NodeID DNS 解析到 127.0.0.1（待实现）
+## 15. NodeID DNS 解析到 127.0.0.1
 
 ### 15.1 设计
 

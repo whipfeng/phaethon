@@ -132,9 +132,9 @@ func (m *MeshManager) checkSubnetConflict() bool {
 	for _, peer := range m.topology.GetAllPeers() {
 		// Check peer's own subnet
 		if peer.SubnetStr == m.subnetStr && peer.NodeID() != m.nodeID {
-			// Conflict! Compare nodeIds numerically
+			// Conflict! Compare nodeIds — larger wins
 			if compareNodeIDs(m.nodeID, peer.NodeID()) < 0 {
-				// Our nodeId is smaller, we need to re-select
+				// Our nodeId is smaller, we lose — re-select
 				return m.reselectSubnet(usedSubnets)
 			}
 			// Otherwise, they will re-select
@@ -195,8 +195,11 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 	return true
 }
 
-// compareNodeIDs compares two nodeID strings numerically.
+// compareNodeIDs compares two nodeID strings.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
+// Conflict resolution: larger nodeID wins. Non-numeric strings (e.g. "vm")
+// are compared lexicographically and naturally beat numeric strings in ASCII order,
+// giving manually named nodes priority over auto-generated ones.
 func compareNodeIDs(a, b string) int {
 	aNum, aErr := strconv.ParseUint(a, 10, 64)
 	bNum, bErr := strconv.ParseUint(b, 10, 64)
@@ -710,7 +713,11 @@ func (m *MeshManager) recomputeRoutes() {
 	}
 
 	// Build mesh subnet routes from claimedSubnets
-	// Own subnet (Hop=0, NextHop=nil) — not added to routes (own, no forwarding needed)
+	// Own subnet (Hop=0, NextHop=nil) — occupies the slot so peer claims can't overwrite
+	_, ownSubnet, _ := net.ParseCIDR(m.subnetStr)
+	if ownSubnet != nil {
+		best[m.subnetStr] = globalEntry{0, nil, ownSubnet}
+	}
 	// Peer claimed subnets (mesh routing)
 	for _, peer := range peers {
 		if peer.Sender == nil {

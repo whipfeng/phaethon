@@ -546,13 +546,12 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		
-		// Check if this is a DNS response (UDP port 53)
+		// Check if this is a DNS response (UDP with src port 53)
 		headerLen := int(pkt[0]&0x0f) * 4
 		isDNS := pkt[9] == 17 && len(pkt) >= headerLen+4
-		var dstPort uint16
 		if isDNS {
-			dstPort = uint16(pkt[headerLen+2])<<8 | uint16(pkt[headerLen+3])
-			isDNS = dstPort == 53
+			srcPort := uint16(pkt[headerLen])<<8 | uint16(pkt[headerLen+1])
+			isDNS = srcPort == 53
 		}
 		
 		var natPkt []byte

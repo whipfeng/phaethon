@@ -310,6 +310,15 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 		dstIP := net.IP(data[16:20])
 		util.LogDebug("tun: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
 	}
+
+	// DNS redirect: if this is a DNS query to local GIP and domain has a remote gateway,
+	// rewrite dst to next-hop GIP and forward via mesh (don't enter netstack).
+	if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
+		if redirected := e.tryDNSRedirect(data); redirected {
+			return nil
+		}
+	}
+
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})

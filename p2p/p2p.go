@@ -37,9 +37,9 @@ type P2PManager struct {
 // MeshHandler handles mesh packets and gossip from P2P peers.
 type MeshHandler interface {
 	HandleMeshFrame(fromNodeID string, frame []byte)
-	HandleTopologyGossip(fromNodeID string, data []byte)
+	HandleTopologyGossip(sender mesh.PeerSender, data []byte)
 	RegisterPeer(sender mesh.PeerSender)
-	UnregisterPeer(nodeID string)
+	UnregisterPeer(sender mesh.PeerSender)
 }
 
 // peerSender wraps a P2P peer connection to implement mesh.PeerSender.
@@ -82,6 +82,8 @@ type Peer struct {
 	writeCh       chan writeReq
 	stopCh        chan struct{}
 	serveFilePath string // file path to serve chunks from (set during update_request handling)
+
+	meshSender *peerSender // mesh peer sender, created once on hello
 
 	// Chunk transfer state - prevents deadlock when both sides transfer simultaneously
 	transferMu      sync.Mutex
@@ -182,8 +184,8 @@ func (m *P2PManager) HandleP2PConn(conn net.Conn, address string) {
 		close(peer.stopCh)
 		conn.Close()
 		m.mu.Lock()
-		if peer.MeshNodeID != "" && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(peer.MeshNodeID)
+		if peer.meshSender != nil && m.meshHandler != nil {
+			m.meshHandler.UnregisterPeer(peer.meshSender)
 		}
 		delete(m.peers, peer.ID)
 		m.mu.Unlock()
@@ -219,8 +221,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	defer func() {
 		close(peer.stopCh)
 		m.mu.Lock()
-		if peer.MeshNodeID != "" && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(peer.MeshNodeID)
+		if peer.meshSender != nil && m.meshHandler != nil {
+			m.meshHandler.UnregisterPeer(peer.meshSender)
 		}
 		delete(m.peers, peer.ID)
 		m.mu.Unlock()
@@ -413,8 +415,8 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 				// Re-marshal the map back to JSON
 				payloadData, _ = json.Marshal(p)
 			}
-			if payloadData != nil {
-				m.meshHandler.HandleTopologyGossip(peer.MeshNodeID, payloadData)
+			if payloadData != nil && peer.meshSender != nil {
+				m.meshHandler.HandleTopologyGossip(peer.meshSender, payloadData)
 			}
 		}
 	default:
@@ -456,7 +458,9 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		}
 		m.mu.Unlock()
 		if m.meshHandler != nil {
-			m.meshHandler.RegisterPeer(&peerSender{peer: peer})
+			ps := &peerSender{peer: peer}
+			peer.meshSender = ps
+			m.meshHandler.RegisterPeer(ps)
 		}
 	}
 

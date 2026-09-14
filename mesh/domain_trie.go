@@ -14,7 +14,9 @@ type DomainTrie struct {
 
 type trieNode struct {
 	children map[string]*trieNode
-	nodeID   string // non-empty at terminal nodes
+	hasEntry bool      // true if this node has a domain entry
+	nextHop  *PeerInfo // next-hop peer (nil = own entry)
+	hop      int       // hop count
 }
 
 // NewDomainTrie creates an empty domain trie.
@@ -24,10 +26,10 @@ func NewDomainTrie() *DomainTrie {
 	}
 }
 
-// Insert adds a domain suffix associated with a nodeID.
-// The suffix should be a bare domain like "google.com" (no leading dot).
-// It matches the domain itself and all subdomains (e.g., "api.google.com").
-func (t *DomainTrie) Insert(suffix string, nodeID string) {
+// Insert adds a domain suffix associated with a next-hop peer and hop count.
+// If the suffix already exists, keeps the entry with the lower hop count.
+// Pass nextHop=nil for own entries (hop should be 0).
+func (t *DomainTrie) Insert(suffix string, nextHop *PeerInfo, hop int) {
 	suffix = strings.TrimPrefix(strings.ToLower(suffix), ".")
 	labels := splitLabels(suffix)
 
@@ -40,20 +42,26 @@ func (t *DomainTrie) Insert(suffix string, nodeID string) {
 		}
 		node = child
 	}
-	node.nodeID = nodeID
+	if !node.hasEntry || hop < node.hop {
+		node.hasEntry = true
+		node.nextHop = nextHop
+		node.hop = hop
+	}
 }
 
 // Lookup finds the longest matching suffix for the given domain.
-// Returns the nodeID and the matched suffix length (in characters), or ("", 0) if no match.
-// The domain should be a bare domain like "api.google.com" (no leading dot).
-func (t *DomainTrie) Lookup(domain string) (string, int) {
+// Returns the next-hop peer and the matched suffix length (in characters).
+// Returns (nil, suffixLen) if the match is an own entry (this node is the gateway).
+// Returns (nil, 0) if no match at all.
+func (t *DomainTrie) Lookup(domain string) (*PeerInfo, int) {
 	domain = strings.TrimPrefix(strings.ToLower(domain), ".")
 	labels := splitLabels(domain)
 
 	node := t.root
-	bestNodeID := ""
+	var bestNextHop *PeerInfo
 	bestLen := 0
 	accumulated := 0
+	foundOwn := false
 
 	for i, label := range labels {
 		child, ok := node.children[label]
@@ -64,26 +72,22 @@ func (t *DomainTrie) Lookup(domain string) (string, int) {
 		if i > 0 {
 			accumulated += 1 + len(labels[i-1])
 		}
-		if node.nodeID != "" {
-			bestNodeID = node.nodeID
-			bestLen = accumulated + len(label)
+		if node.hasEntry {
+			suffixLen := accumulated + len(label)
+			if node.nextHop == nil {
+				// Own entry — always prefer (lowest possible hop = 0)
+				foundOwn = true
+				bestLen = suffixLen
+			} else if !foundOwn {
+				bestNextHop = node.nextHop
+				bestLen = suffixLen
+			}
 		}
 	}
-	return bestNodeID, bestLen
-}
-
-// BuildFromTopology constructs a domain trie from all peers' domain suffixes.
-func BuildFromTopology(topo *Topology) *DomainTrie {
-	trie := NewDomainTrie()
-	topo.mu.RLock()
-	defer topo.mu.RUnlock()
-
-	for _, peer := range topo.peers {
-		for _, entry := range peer.DomainSuffixes {
-			trie.Insert(entry.Suffix, entry.SourceNodeID)
-		}
+	if !foundOwn && bestNextHop == nil {
+		return nil, 0
 	}
-	return trie
+	return bestNextHop, bestLen
 }
 
 // splitLabels splits a domain into labels in reverse order (TLD first).

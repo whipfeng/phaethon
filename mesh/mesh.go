@@ -83,6 +83,7 @@ type MeshManager struct {
 
 	natTable *tun.NATTable
 	closeCh  chan struct{}
+	eventCh  chan meshEvent
 }
 
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string) *MeshManager {
@@ -96,6 +97,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		topology:       NewTopology(),
 		routes:         make([]MeshRoute, 0),
 		closeCh:        make(chan struct{}),
+		eventCh:        make(chan meshEvent, 64),
 	}
 }
 
@@ -207,30 +209,20 @@ func (m *MeshManager) Stop() {
 // GetGatewayGIPForDomain returns the GIP (.3) address of the gateway for a domain.
 // Returns nil if no gateway is found or the gateway is ourselves.
 func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
-	gatewayNodeID, _, _ := m.FindGatewayForDomain(domain)
-	if gatewayNodeID == "" || gatewayNodeID == m.nodeID {
+	m.routesMu.RLock()
+	trie := m.domainTrie
+	m.routesMu.RUnlock()
+	if trie == nil {
 		return nil
 	}
-	
-	// Search through all peers to find the gateway's subnet.
-	// The gateway might not have a direct peer object if its gossip was forwarded by another node.
-	m.topology.mu.RLock()
-	defer m.topology.mu.RUnlock()
-	
-	for _, peer := range m.topology.peers {
-		// Check if this peer has routes from the gateway node
-		for _, route := range peer.Routes {
-			if route.SourceNodeID == gatewayNodeID {
-				// Found a route from the gateway, derive GIP from the route's subnet
-				if route.Prefix == nil {
-					continue
-				}
-				return DeriveGIPFromSubnet(route.Prefix)
-			}
-		}
+
+	nextHop, _ := trie.Lookup(domain)
+	if nextHop == nil {
+		return nil // own entry or no match
 	}
-	
-	return nil
+
+	// Derive GIP from next-hop peer's subnet
+	return DeriveGIPFromSubnet(nextHop.Subnet)
 }
 
 // ResolveGatewayGIP returns the GIP of the remote gateway that serves the given domain.
@@ -241,15 +233,12 @@ func (m *MeshManager) ResolveGatewayGIP(domain string) net.IP {
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
-	m.topology.RegisterSender(sender)
-	util.LogInfo("[MESH] peer registered: %s", sender.GetNodeID())
+	m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}
 }
 
 // UnregisterPeer is called when a P2P peer disconnects.
-func (m *MeshManager) UnregisterPeer(peerNodeID string) {
-	m.topology.RemovePeer(peerNodeID)
-	m.recomputeRoutes()
-	util.LogInfo("[MESH] peer unregistered: %s", peerNodeID)
+func (m *MeshManager) UnregisterPeer(sender PeerSender) {
+	m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}
 }
 
 // HandleOutboundPacket is the TUN readLoop interceptor.
@@ -418,35 +407,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 }
 
 // HandleTopologyGossip processes a gossip announcement from a peer.
-func (m *MeshManager) HandleTopologyGossip(fromNodeID string, data []byte) {
+func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	var info GossipInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		util.LogDebug("[MESH] bad gossip from %s: %v", fromNodeID, err)
+		util.LogDebug("[MESH] bad gossip from %s: %v", sender.GetNodeID(), err)
 		return
 	}
 	if info.NodeID == m.nodeID {
 		return
 	}
-	// Filter out routes where source is ourselves (prevent echo)
-	filtered := info.Routes[:0]
-	for _, r := range info.Routes {
-		if r.SourceNodeID != m.nodeID {
-			filtered = append(filtered, r)
-		}
-	}
-	info.Routes = filtered
-	// Filter out domain suffixes where source is ourselves
-	filteredDS := info.DomainSuffixes[:0]
-	for _, ds := range info.DomainSuffixes {
-		if ds.SourceNodeID != m.nodeID {
-			filteredDS = append(filteredDS, ds)
-		}
-	}
-	info.DomainSuffixes = filteredDS
-	util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d", fromNodeID, info.Subnet, len(info.Routes), len(info.DomainSuffixes))
-	if m.topology.UpdateFromGossip(info) {
-		m.recomputeRoutes()
-	}
+	m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {
@@ -470,7 +440,7 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 	peerList := make([]map[string]interface{}, 0, len(peers))
 	for _, p := range peers {
 		entry := map[string]interface{}{
-			"nodeId":   p.NodeID,
+			"nodeId":   p.NodeID(),
 			"subnet":   p.SubnetStr,
 			"lastSeen": p.LastSeen,
 		}
@@ -478,11 +448,11 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 			entry["domainSuffixes"] = p.DomainSuffixes
 		}
 		if len(p.Routes) > 0 {
-			routeEntries := make([]map[string]string, 0, len(p.Routes))
+			routeEntries := make([]map[string]interface{}, 0, len(p.Routes))
 			for _, r := range p.Routes {
-				routeEntries = append(routeEntries, map[string]string{
-					"prefix":       r.PrefixStr,
-					"sourceNodeId": r.SourceNodeID,
+				routeEntries = append(routeEntries, map[string]interface{}{
+					"prefix": r.PrefixStr,
+					"hop":    r.Hop,
 				})
 			}
 			entry["routes"] = routeEntries
@@ -511,13 +481,16 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 		return nil
 	}
 	ids := m.p2p.ListMeshPeerIDs()
+	allPeers := m.topology.GetAllPeers()
 	result := make([]MeshPeerInfo, 0, len(ids))
 	for _, id := range ids {
 		info := MeshPeerInfo{NodeID: id, Direct: true}
-		p := m.topology.GetPeer(id)
-		if p != nil {
-			info.Subnet = p.SubnetStr
-			info.LastSeen = p.LastSeen
+		for _, p := range allPeers {
+			if p.NodeID() == id {
+				info.Subnet = p.SubnetStr
+				info.LastSeen = p.LastSeen
+				break
+			}
 		}
 		result = append(result, info)
 	}
@@ -529,52 +502,71 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 	if nodeID == "" {
 		return nil
 	}
-	peer := m.topology.GetPeer(nodeID)
-	if peer == nil || peer.Subnet == nil {
-		return nil
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == nodeID && peer.Subnet != nil {
+			vip := DeriveVIPFromSubnet(peer.Subnet)
+			if vip != nil {
+				util.LogInfo("[MESH] DNS resolve: %s -> %s", domain, vip)
+			}
+			return vip
+		}
 	}
-	vip := DeriveVIPFromSubnet(peer.Subnet)
-	if vip != nil {
-		util.LogInfo("[MESH] DNS resolve: %s -> %s", domain, vip)
-	}
-	return vip
+	return nil
 }
 
 func (m *MeshManager) recomputeRoutes() {
 	peers := m.topology.GetAllPeers()
-	util.LogDebug("[MESH] recomputeRoutes: %d peers", len(peers))
 
-	type candidate struct {
-		sender PeerSender
-		prefix *net.IPNet
-		bits   int
+	// Build global route table: prefix → {hop, nextHop peer}
+	type globalEntry struct {
+		hop     int
+		nextHop *PeerInfo // nil = own route
+		prefix  *net.IPNet
 	}
-	best := make(map[string]candidate)
+	best := make(map[string]globalEntry)
 
-	for _, peer := range peers {
-		if peer.NodeID == m.nodeID || peer.Sender == nil {
+	// Own routes (Hop=0, NextHop=nil)
+	if m.subnet != nil {
+		best[m.subnetStr] = globalEntry{0, nil, m.subnet}
+	}
+	for _, r := range m.advertise {
+		_, ipNet, err := net.ParseCIDR(r)
+		if err != nil {
 			continue
 		}
-		// Peer's own subnet
+		best[r] = globalEntry{0, nil, ipNet}
+	}
+
+	// Peer routes (with hop counts)
+	// Only use connected peers (Sender != nil) as nextHop.
+	// A disconnected peer can't forward, but other peers may advertise
+	// routes through themselves for the same prefix — those are valid.
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Peer's subnet is also a route (Hop=1 from direct peer)
 		if peer.Subnet != nil {
-			bits, _ := peer.Subnet.Mask.Size()
 			key := peer.Subnet.String()
-			if existing, ok := best[key]; !ok || bits > existing.bits {
-				best[key] = candidate{peer.Sender, peer.Subnet, bits}
+			if existing, ok := best[key]; !ok || 1 < existing.hop {
+				best[key] = globalEntry{1, peer, peer.Subnet}
 			}
 		}
-		// Routes synced from this peer
+		// Peer's advertised/learned routes
 		for _, r := range peer.Routes {
-			bits, _ := r.Prefix.Mask.Size()
-			if existing, ok := best[r.PrefixStr]; !ok || bits > existing.bits {
-				best[r.PrefixStr] = candidate{peer.Sender, r.Prefix, bits}
+			if existing, ok := best[r.PrefixStr]; !ok || r.Hop < existing.hop {
+				best[r.PrefixStr] = globalEntry{r.Hop, peer, r.Prefix}
 			}
 		}
 	}
 
+	// Build MeshRoute slice (exclude own routes where nextHop=nil)
 	routes := make([]MeshRoute, 0, len(best))
-	for _, c := range best {
-		routes = append(routes, MeshRoute{Prefix: c.prefix, Peer: c.sender})
+	for _, e := range best {
+		if e.nextHop == nil {
+			continue // own route, no forwarding needed
+		}
+		routes = append(routes, MeshRoute{Prefix: e.prefix, Peer: e.nextHop.Sender})
 	}
 
 	sort.Slice(routes, func(i, j int) bool {
@@ -583,11 +575,25 @@ func (m *MeshManager) recomputeRoutes() {
 		return lenI > lenJ
 	})
 
-	domainTrie := BuildFromTopology(m.topology)
+	// Build global domain trie
+	trie := NewDomainTrie()
+	// Own domain suffixes (Hop=0, NextHop=nil)
+	for _, s := range m.domainSuffixes {
+		trie.Insert(s, nil, 0)
+	}
+	// Peer domain suffixes
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, entry := range peer.DomainSuffixes {
+			trie.Insert(entry.Suffix, peer, entry.Hop)
+		}
+	}
 
 	m.routesMu.Lock()
 	m.routes = routes
-	m.domainTrie = domainTrie
+	m.domainTrie = trie
 	m.routesMu.Unlock()
 	util.LogInfo("[MESH] routes recomputed: %d routes", len(routes))
 	for _, r := range routes {
@@ -608,21 +614,6 @@ func (m *MeshManager) findPeer(dstIP net.IP) PeerSender {
 	return nil
 }
 
-func (m *MeshManager) FindGatewayForDomain(domain string) (string, string, int) {
-	m.routesMu.RLock()
-	trie := m.domainTrie
-	m.routesMu.RUnlock()
-
-	if trie == nil {
-		return "", "", 0
-	}
-	nodeID, suffixLen := trie.Lookup(domain)
-	if nodeID == "" {
-		return "", "", 0
-	}
-	return nodeID, nodeID, suffixLen
-}
-
 func (m *MeshManager) gossipLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -631,9 +622,48 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			m.broadcastGossip()
+			m.eventCh <- meshEvent{kind: meshEventTick}
+		case ev := <-m.eventCh:
+			switch ev.kind {
+			case meshEventRegister:
+				m.topology.RegisterPeer(ev.sender)
+				m.recomputeRoutes()
+				util.LogInfo("[MESH] peer registered: %s", ev.sender.GetNodeID())
+			case meshEventUnregister:
+				nodeID := ev.sender.GetNodeID()
+				m.topology.UnregisterPeer(ev.sender)
+				m.recomputeRoutes()
+				util.LogInfo("[MESH] peer unregistered: %s", nodeID)
+			case meshEventGossip:
+				var info GossipInfo
+				if err := json.Unmarshal(ev.data, &info); err != nil {
+					util.LogDebug("[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
+					break
+				}
+				util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d", ev.sender.GetNodeID(), info.Subnet, len(info.Routes), len(info.DomainSuffixes))
+				if m.topology.UpdateGossip(ev.sender, info) {
+					m.recomputeRoutes()
+				}
+			case meshEventTick:
+				m.broadcastGossip()
+			}
 		}
 	}
+}
+
+type meshEventKind int
+
+const (
+	meshEventRegister meshEventKind = iota
+	meshEventUnregister
+	meshEventGossip
+	meshEventTick
+)
+
+type meshEvent struct {
+	kind   meshEventKind
+	sender PeerSender
+	data   []byte
 }
 
 func (m *MeshManager) broadcastGossip() {
@@ -645,37 +675,97 @@ func (m *MeshManager) broadcastGossip() {
 		return
 	}
 
-	// Own routes: subnet + configured advertise, all with src=self
-	ownRoutes := []GossipRoute{{SourceNodeID: m.nodeID, Prefix: m.subnetStr}}
+	// Capture a single peer snapshot for consistent split-horizon filtering.
+	allPeers := m.topology.GetAllPeers()
+	peerByNodeID := make(map[string]*PeerInfo, len(allPeers))
+	for _, p := range allPeers {
+		peerByNodeID[p.NodeID()] = p
+	}
+
+	// Build global route table (same logic as recomputeRoutes)
+	type globalRouteEntry struct {
+		hop     int
+		nextHop *PeerInfo // nil = own route
+		prefix  string
+		ipNet   *net.IPNet
+	}
+	bestRoutes := make(map[string]globalRouteEntry)
+
+	// Own routes (Hop=0)
+	bestRoutes[m.subnetStr] = globalRouteEntry{0, nil, m.subnetStr, m.subnet}
 	for _, r := range m.advertise {
-		ownRoutes = append(ownRoutes, GossipRoute{SourceNodeID: m.nodeID, Prefix: r})
+		_, ipNet, _ := net.ParseCIDR(r)
+		bestRoutes[r] = globalRouteEntry{0, nil, r, ipNet}
+	}
+	// Peer routes
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue // disconnected peer can't be a nextHop
+		}
+		if peer.Subnet != nil {
+			key := peer.Subnet.String()
+			if existing, ok := bestRoutes[key]; !ok || 1 < existing.hop {
+				bestRoutes[key] = globalRouteEntry{1, peer, key, peer.Subnet}
+			}
+		}
+		for _, r := range peer.Routes {
+			if existing, ok := bestRoutes[r.PrefixStr]; !ok || r.Hop < existing.hop {
+				bestRoutes[r.PrefixStr] = globalRouteEntry{r.Hop, peer, r.PrefixStr, r.Prefix}
+			}
+		}
 	}
 
-	// Own domain suffixes with src=self
-	ownDS := make([]GossipDomainSuffix, 0, len(m.domainSuffixes))
+	// Build global domain suffix map
+	type globalDSEntry struct {
+		hop     int
+		nextHop *PeerInfo // nil = own entry
+	}
+	bestDS := make(map[string]globalDSEntry)
 	for _, s := range m.domainSuffixes {
-		ownDS = append(ownDS, GossipDomainSuffix{SourceNodeID: m.nodeID, Suffix: s})
+		bestDS[s] = globalDSEntry{0, nil}
+	}
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, entry := range peer.DomainSuffixes {
+			if existing, ok := bestDS[entry.Suffix]; !ok || entry.Hop < existing.hop {
+				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer}
+			}
+		}
 	}
 
+	// Per-peer: filter by split horizon and send
 	for _, peerID := range peerIDs {
-		// Split horizon: exclude routes from this recipient
-		learnedRoutes := m.topology.CollectRoutesForGossip(peerID)
-		// Split horizon: exclude domain suffixes from this recipient
-		learnedDS := m.topology.CollectDomainSuffixesForGossip(peerID)
+		peer := peerByNodeID[peerID]
+		if peer == nil {
+			util.LogWarn("[MESH] peer %s not found in topology, skipping gossip", peerID)
+			continue
+		}
 
-		allRoutes := make([]GossipRoute, 0, len(ownRoutes)+len(learnedRoutes))
-		allRoutes = append(allRoutes, ownRoutes...)
-		allRoutes = append(allRoutes, learnedRoutes...)
+		// Filter routes: exclude entries where nextHop == this peer
+		var routes []GossipRoute
+		for _, e := range bestRoutes {
+			if e.nextHop == peer {
+				continue // split horizon
+			}
+			routes = append(routes, GossipRoute{Prefix: e.prefix, Hop: e.hop})
+		}
 
-		allDS := make([]GossipDomainSuffix, 0, len(ownDS)+len(learnedDS))
-		allDS = append(allDS, ownDS...)
-		allDS = append(allDS, learnedDS...)
+		// Filter domain suffixes: exclude entries where nextHop == this peer
+		var ds []GossipDomainSuffix
+		for suffix, e := range bestDS {
+			if e.nextHop == peer {
+				continue // split horizon
+			}
+			ds = append(ds, GossipDomainSuffix{Suffix: suffix, Hop: e.hop})
+		}
 
 		info := GossipInfo{
 			NodeID:         m.nodeID,
 			Subnet:         m.subnetStr,
-			DomainSuffixes: allDS,
-			Routes:         allRoutes,
+			DomainSuffixes: ds,
+			Routes:         routes,
 		}
 		data, err := json.Marshal(info)
 		if err != nil {

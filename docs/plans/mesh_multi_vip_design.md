@@ -13,6 +13,7 @@
 |------|------|----------|------|
 | v0.1.0 | 2026-09-10 | 初始版本：多 VIP 支持、源 IP 选择机制 | Qoder |
 | v0.2.0 | 2026-09-11 | 路由简化（PeerSender、prefix 路由）、gateway 转发、无 TUN 模式设计 | Qoder |
+| v0.3.0 | 2026-09-14 | Gossip 距离矢量路由协议：跳数、全局路由表、水平分割 | Qoder |
 
 ## 1. 背景与目标
 
@@ -930,3 +931,309 @@ tun:
 ```
 
 两种入口共享同一个 gVisor netstack，出站路径统一。TUN 只是其中一种入口，不是必须的。
+
+## 11. Gossip 距离矢量路由协议
+
+### 11.1 问题背景
+
+Section 9 的路由简化方案中，gossip 只包含节点自身信息（subnet、routes、domainSuffixes），没有跳数。当 gossip 经过中间节点转发时，存在根本性设计缺陷：
+
+**问题**：JF 转发 VM 的 gossip 给 QG 时，使用 `NodeID: "jf"`（发送者的 ID），导致 VM 的信息被存储在 `peers["jf"]` 而不是 `peers["vm"]`，无法区分直连节点和远端节点。
+
+```
+VM 广播: {nodeId:"vm", subnet:"100.64.1.0/24", routes:[], domainSuffixes:["vmtest.local"]}
+  ↓
+JF 收到，转发给 QG: {nodeId:"jf", subnet:"100.64.1.0/24", ...}  ← 错误！VM 信息丢失
+  ↓
+QG 存储: peers["jf"] = {subnet:"100.64.1.0/24"}  ← 应该是 peers["vm"]
+```
+
+**根因**：没有跳数信息，无法区分直连和远端；没有 peer 级别的下一跳记录，无法正确构建多跳路由。
+
+### 11.2 解决方案：距离矢量路由
+
+采用经典距离矢量路由协议思路：
+
+1. 每个 **peer 连接对象** 存储该 peer 通告的完整信息（包括路由和域名后缀），每条带跳数
+2. 收到 peer 通告后，所有跳数 **+1**
+3. 构建 **全局路由表**：包含自己的路由（Hop=0）+ 所有 peer 学到的路由，同前缀取最低跳数，记录 NextHop peer
+4. 构建 **全局域名 trie**：包含自己的域名后缀（Hop=0）+ 所有 peer 学到的域名后缀，同后缀取最低跳数，记录 NextHop peer
+5. 向 peer 通告时，从全局表中 **过滤** NextHop == 该 peer 的条目（水平分割）
+
+### 11.3 数据结构
+
+#### Peer 连接对象存储的通告信息
+
+```go
+// PeerRouteEntry 是 peer 通告中的一条路由条目
+type PeerRouteEntry struct {
+    Prefix *net.IPNet  // 路由前缀
+    Hop    int         // 跳数（收到时 +1）
+}
+
+// PeerDomainSuffixEntry 是 peer 通告中的一条域名后缀条目
+type PeerDomainSuffixEntry struct {
+    Suffix string      // 域名后缀
+    Hop    int         // 跳数（收到时 +1）
+}
+
+// PeerInfo 是 peer 连接对象，存储该 peer 通告的完整信息
+type PeerInfo struct {
+    NodeID         string
+    Sender         PeerSender        // 直连发送能力
+    Subnet         *net.IPNet        // peer 的子网
+    SubnetStr      string
+    Routes         []PeerRouteEntry          // peer 通告的路由（已 +1）
+    DomainSuffixes []PeerDomainSuffixEntry   // peer 通告的域名后缀（已 +1）
+    LastSeen       time.Time
+}
+```
+
+**注意**：不再有 `SourceNodeID` 字段。路由条目的来源由它所属的 PeerInfo 对象隐含确定。
+
+#### Gossip 通告格式
+
+```go
+type GossipInfo struct {
+    NodeID         string                `json:"nodeId"`
+    Subnet         string                `json:"subnet"`
+    DomainSuffixes []DomainSuffixEntry   `json:"domainSuffixes,omitempty"`
+    Routes         []RouteEntry          `json:"routes,omitempty"`
+}
+
+type RouteEntry struct {
+    Prefix string `json:"prefix"`  // CIDR 格式
+    Hop    int    `json:"hop"`
+}
+
+type DomainSuffixEntry struct {
+    Suffix string `json:"suffix"`
+    Hop    int    `json:"hop"`
+}
+```
+
+通告内容 = 自己的信息（Hop=0）+ 从全局表学到的其他信息（过滤水平分割）。
+
+#### 全局路由表
+
+```go
+// GlobalRoute 是全局路由表中的一条
+type GlobalRoute struct {
+    Prefix  *net.IPNet  // 匹配前缀
+    Hop     int         // 跳数
+    NextHop *PeerInfo   // 下一跳 peer 连接对象
+}
+
+// GlobalDomainEntry 是全局域名 trie 中的一条
+type GlobalDomainEntry struct {
+    Suffix  string      // 域名后缀
+    Hop     int         // 跳数
+    NextHop *PeerInfo   // 下一跳 peer 连接对象
+}
+```
+
+### 11.4 全局表构建
+
+```
+收到 peer A 的通告:
+  1. 存储到 peers[A]:
+     - Subnet: A 的子网
+     - Routes: A 通告的所有路由条目（每条 Hop 已 +1）
+     - DomainSuffixes: A 通告的所有域名后缀条目（每条 Hop 已 +1）
+  2. 重建全局路由表:
+     globalRoutes = []
+     // 加入自己的路由（Hop=0, NextHop=nil）
+     for prefix in (self.subnet + self.advertise):
+         globalRoutes.append({prefix, Hop=0, NextHop=nil})
+     // 加入所有 peer 的路由
+     for peer in peers:
+         for entry in peer.Routes:
+             existing = globalRoutes.find(entry.Prefix)
+             if existing == nil || entry.Hop < existing.Hop:
+                 globalRoutes.upsert({entry.Prefix, entry.Hop, NextHop=peer})
+  3. 重建全局域名 trie（同理）:
+     globalTrie = []
+     for suffix in self.domainSuffixes:
+         globalTrie.append({suffix, Hop=0, NextHop=nil})
+     for peer in peers:
+         for entry in peer.DomainSuffixes:
+             existing = globalTrie.find(entry.Suffix)
+             if existing == nil || entry.Hop < existing.Hop:
+                 globalTrie.upsert({entry.Suffix, entry.Hop, NextHop=peer})
+```
+
+### 11.5 通告（水平分割）
+
+向 peer A 发送 gossip 时，从全局表中过滤掉 NextHop == A 的条目：
+
+```
+向 peer A 通告:
+  routes = []
+  for entry in globalRoutes:
+      if entry.NextHop == A:
+          continue    // 水平分割：不回馈
+      routes.append({entry.Prefix, entry.Hop})
+  
+  domainSuffixes = []
+  for entry in globalTrie:
+      if entry.NextHop == A:
+          continue    // 水平分割
+      domainSuffixes.append({entry.Suffix, entry.Hop})
+  
+  发送 GossipInfo{nodeId:self, subnet:self.subnet, routes, domainSuffixes}
+```
+
+**不需要额外组合**：全局表已经包含了所有信息（自己的 + 学到的），通告时只需过滤。
+
+### 11.6 完整示例
+
+**拓扑**：VM ↔ JF ↔ QG（VM 和 QG 不直连）
+
+**各节点配置**：
+```
+VM: subnet=100.64.1.0/24, domainSuffixes=["vmtest.local"], routes=[]
+JF: subnet=100.64.2.0/24, domainSuffixes=[], routes=["0.0.0.0/0"]
+QG: subnet=100.64.0.0/24, domainSuffixes=["phn"], routes=["0.0.0.0/0"]
+```
+
+**JF 的 peer 存储**：
+
+```
+JF 收到 VM 的通告: {nodeId:"vm", subnet:"100.64.1.0/24", routes:[], domainSuffixes:[{suffix:"vmtest.local", hop:0}]}
+  → peers["vm"] = {
+      Subnet: 100.64.1.0/24,
+      Routes: [],
+      DomainSuffixes: [{suffix:"vmtest.local", hop:1}]   ← +1
+    }
+
+JF 收到 QG 的通告: {nodeId:"qg", subnet:"100.64.0.0/24", routes:[{prefix:"0.0.0.0/0", hop:0}], domainSuffixes:[{suffix:"phn", hop:0}]}
+  → peers["qg"] = {
+      Subnet: 100.64.0.0/24,
+      Routes: [{prefix:"0.0.0.0/0", hop:1}],              ← +1
+      DomainSuffixes: [{suffix:"phn", hop:1}]             ← +1
+    }
+```
+
+**JF 的全局路由表**：
+
+```
+100.64.2.0/24  → Hop=0, NextHop=nil     (自己的 subnet)
+0.0.0.0/0      → Hop=0, NextHop=nil     (自己的 routes)
+100.64.1.0/24  → Hop=1, NextHop=VM      (来自 peers["vm"].subnet)
+100.64.0.0/24  → Hop=1, NextHop=QG      (来自 peers["qg"].subnet)
+```
+
+**JF 的全局域名 trie**：
+
+```
+"vmtest.local" → Hop=1, NextHop=VM      (来自 peers["vm"])
+"phn"          → Hop=1, NextHop=QG      (来自 peers["qg"])
+```
+
+**JF 向 QG 通告**（过滤 NextHop==QG 的条目）：
+
+```
+routes:
+  100.64.2.0/24  → Hop=0    (自己的，NextHop=nil ≠ QG ✓)
+  0.0.0.0/0      → Hop=0    (自己的，NextHop=nil ≠ QG ✓)
+  100.64.1.0/24  → Hop=1    (NextHop=VM ≠ QG ✓)
+  100.64.0.0/24  → 跳过     (NextHop=QG == QG ✗ 水平分割)
+
+domainSuffixes:
+  "vmtest.local" → Hop=1    (NextHop=VM ≠ QG ✓)
+  "phn"          → 跳过     (NextHop=QG == QG ✗ 水平分割)
+```
+
+**QG 收到 JF 的通告后**：
+
+```
+peers["jf"] = {
+  Subnet: 100.64.2.0/24,
+  Routes: [
+    {prefix:"100.64.2.0/24", hop:1},
+    {prefix:"0.0.0.0/0", hop:1},
+    {prefix:"100.64.1.0/24", hop:2},    ← VM 的子网，经 JF 转发，Hop=1+1=2
+  ],
+  DomainSuffixes: [
+    {suffix:"vmtest.local", hop:2},     ← 经 JF 转发，Hop=1+1=2
+  ]
+}
+
+QG 的全局路由表:
+  100.64.0.0/24  → Hop=0, NextHop=nil     (自己的 subnet)
+  0.0.0.0/0      → Hop=0, NextHop=nil     (自己的 routes)
+  100.64.2.0/24  → Hop=1, NextHop=JF      (来自 peers["jf"])
+  100.64.1.0/24  → Hop=2, NextHop=JF      (来自 peers["jf"]，VM 的子网)
+
+QG 的全局域名 trie:
+  "phn"          → Hop=0, NextHop=nil     (自己的)
+  "vmtest.local" → Hop=2, NextHop=JF      (来自 peers["jf"])
+```
+
+### 11.7 DNS 查询多跳转发流程
+
+**核心规则**：DNS 转发判断在**链路层**完成，不进入 netstack/hijacker。每一跳将 dst IP 从**自己的 GIP** 替换为**下一跳的 GIP**，重算 checksum，直接通过 mesh 转发。只有最终 gateway（NextHop=nil）才进入 netstack 由 hijacker 分配 fakeIP。
+
+```
+QG 上应用查询 "vmtest.local":
+
+  首跳 — readLoop（TUN 链路层）:
+  ① readLoop 拦截 DNS 查询
+     包状态: src=100.64.0.2, dst=100.64.0.3 (QG 自己的 GIP)
+  ② 查全局域名 trie: "vmtest.local" → NextHop=JF
+  ③ 替换 dst: 100.64.0.3 → 100.64.2.3 (JF 的 GIP)，重算 checksum
+     包状态: src=100.64.0.2, dst=100.64.2.3
+  ④ mesh interceptor → P2P 转发
+     （包未进入 netstack）
+  ↓
+  中间跳 — HandleMeshFrame（mesh 链路层）:
+  ⑤ JF 收到 mesh 包（dst=100.64.2.3，JF 自己的 GIP）
+  ⑥ HandleMeshFrame 检测到 dst=本地 GIP, UDP 53 → 解析 DNS 域名
+  ⑦ 查全局域名 trie: "vmtest.local" → NextHop=VM
+     NextHop ≠ nil 且 ≠ self → 继续转发
+  ⑧ 替换 dst: 100.64.2.3 → 100.64.1.3 (VM 的 GIP)，重算 checksum
+     包状态: src=100.64.0.2, dst=100.64.1.3
+  ⑨ 直接通过 mesh 转发
+     （包未进入 netstack）
+  ↓
+  终点 — HandleMeshFrame（mesh 链路层 → hijacker）:
+  ⑩ VM 收到 mesh 包（dst=100.64.1.3，VM 自己的 GIP）
+  ⑪ HandleMeshFrame 检测到 dst=本地 GIP, UDP 53 → 解析 DNS 域名
+  ⑫ 查全局域名 trie: "vmtest.local" → NextHop=nil（自己就是 gateway）
+  ⑬ InjectInbound → netstack → hijacker 分配 fakeIP: 100.64.1.51
+  ⑭ 构造 DNS 响应: src=100.64.1.3, dst=100.64.0.2, answer=100.64.1.51
+  ⑮ DNS 响应沿原路返回（VM → JF → QG → TUN → 应用）
+```
+
+**统一链路层拦截**：readLoop 和 HandleMeshFrame 使用相同的 DNS redirect 逻辑：
+
+```
+收到 IP 包（readLoop 或 HandleMeshFrame）:
+  dst = 本地 GIP 且 proto = UDP 且 dstPort = 53？
+  ├─ 是 → 解析 DNS 域名
+  │       查全局域名 trie → NextHop
+  │       ├─ NextHop ≠ nil 且 ≠ self → 替换 dst 为下一跳 GIP，重算 checksum，mesh 转发
+  │       └─ NextHop = nil 或 = self → InjectInbound → netstack → hijacker 本地处理
+  └─ 否 → 正常处理流程
+```
+
+### 11.8 与 Section 9 的对比
+
+| 维度 | Section 9（原始简化） | Section 11（距离矢量） |
+|------|----------------------|----------------------|
+| 路由中转 | nodeID（给人看） | peer 连接对象 |
+| 跳数 | 无 | 有，每跳 +1 |
+| 全局表 | 无（直接从 gossip 构建） | 有，统一包含自己 + 学到的 |
+| 通告内容 | 节点自身信息 | 全局表过滤水平分割 |
+| 多跳路由 | 无跳数，无法选最优路径 | 最低跳数优先 |
+| 水平分割 | 无 | 有（NextHop != 目标 peer） |
+| SourceNodeID | 无 | 无（由 PeerInfo 对象隐含） |
+
+### 11.9 实现步骤
+
+1. **PeerInfo 增加跳数**：`PeerRouteEntry` 和 `PeerDomainSuffixEntry` 增加 `Hop int` 字段；移除 `SourceNodeID`
+2. **全局路由表**：新增 `recomputeGlobalRoutes()` 方法，遍历自己 + 所有 peer 构建全局表，同前缀取最低跳数
+3. **全局域名 trie**：新增 `recomputeGlobalTrie()` 方法，同理构建
+4. **通告改造**：`gossipLoop` 向每个 peer 发送 gossip 时，从全局表过滤 NextHop == 该 peer 的条目
+5. **DNS redirect 改造**：`tryDNSRedirect` 中查全局域名 trie 获取 NextHop peer，从 peer 的 Subnet 推导 GIP
+6. **移除临时方案**：删除 `GetGatewayGIPForDomain` 中遍历所有 peer routes 搜索 SourceNodeID 的 workaround

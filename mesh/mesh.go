@@ -74,6 +74,7 @@ type TunInterface interface {
 // PeerSender sends data directly to a connected peer.
 type PeerSender interface {
 	Send(data []byte) error
+	SendGossip(data []byte)
 	GetNodeID() string
 }
 
@@ -402,7 +403,19 @@ func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
 	}
 
 	// Derive GIP from next-hop peer's subnet
-	return DeriveGIPFromSubnet(nextHop.Subnet)
+	if nextHop.Subnet != nil {
+		return DeriveGIPFromSubnet(nextHop.Subnet)
+	}
+
+	// Fallback: peer has no subnet (stale connection), find another peer with same nodeID
+	targetNodeID := nextHop.NodeID()
+	peers := m.topology.GetAllPeers()
+	for _, peer := range peers {
+		if peer.Sender != nil && peer.Sender.GetNodeID() == targetNodeID && peer.Subnet != nil {
+			return DeriveGIPFromSubnet(peer.Subnet)
+		}
+	}
+	return nil
 }
 
 // ResolveGatewayGIP returns the GIP of the remote gateway that serves the given domain.
@@ -525,17 +538,35 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		natPkt := m.natTable.TranslateInbound(pkt)
-		if natPkt == nil {
-			util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed", fromNodeID)
+		if natPkt != nil {
+			go func() {
+				if m.tun != nil {
+					if err := m.tun.WriteMeshPacket(natPkt); err != nil {
+						util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
+					}
+				}
+			}()
 			return
 		}
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(natPkt); err != nil {
-					util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
-				}
+		// NAT reverse failed — rewrite src to local GIP and inject into netstack.
+		// This handles DNS responses from remote gateways where src is the remote GIP.
+		pkt2 := make([]byte, len(frame))
+		copy(pkt2, frame)
+		localGIP := m.getGIP()
+		if localGIP != nil {
+			srcPkt := rewriteSrcIPInPacket(pkt2, localGIP)
+			if srcPkt != nil {
+				go func() {
+					if m.tun != nil {
+						if err := m.tun.InjectMeshPacket(srcPkt); err != nil {
+							util.LogWarn("[MESH] inject VIP fallback packet to netstack failed: %v", err)
+						}
+					}
+				}()
+				return
 			}
-		}()
+		}
+		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed and src rewrite failed", fromNodeID)
 		return
 	}
 
@@ -1133,8 +1164,7 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
-		// Send directly to this peer's sender
-		peer.Sender.Send(data)
+		peer.Sender.SendGossip(data)
 	}
 }
 

@@ -56,6 +56,18 @@ func (s *peerSender) Send(data []byte) error {
 	return nil
 }
 
+func (s *peerSender) SendGossip(data []byte) {
+	cmd := map[string]interface{}{
+		"cmd":     "mesh_gossip",
+		"payload": json.RawMessage(data),
+	}
+	wrapped, err := json.Marshal(cmd)
+	if err != nil {
+		return
+	}
+	enqueueWrite(s.peer, reverse.FrameData, wrapped)
+}
+
 func (s *peerSender) GetNodeID() string {
 	return s.peer.MeshNodeID
 }

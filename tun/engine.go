@@ -1055,14 +1055,11 @@ func (e *Engine) readLoop() {
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
 
-		// NAT: replace src IP with VIP for non-mesh IPv4 packets.
-		// Must run BEFORE mesh interception so mesh always sees mesh source IPs.
+		// NAT: replace src IP with VIP for all IPv4 packets.
+		// Must run BEFORE mesh interception so mesh always sees VIP source IPs.
 		if e.natTable != nil && n >= 20 && pktBuf[0]>>4 == 4 {
-			srcIP := net.IP(pktBuf[12:16])
-			if e.meshSubnet == nil || !e.meshSubnet.Contains(srcIP) {
-				if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
-					pktBuf = natPkt
-				}
+			if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
+				pktBuf = natPkt
 			}
 		}
 

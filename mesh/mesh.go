@@ -509,16 +509,20 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 // HandleMeshFrame processes a raw IP packet received from a peer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
+	util.LogInfo("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
 		return
 	}
 
 	dstIP := extractDstIP(frame)
+	srcIP := net.IP(frame[12:16])
 	if dstIP == nil {
 		util.LogWarn("[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
 	}
+	util.LogInfo("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
+		fromNodeID, srcIP, dstIP, frame[9], len(frame))
 
 	if dstIP[0] == 100 && dstIP[1] == 64 {
 		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
@@ -527,20 +531,49 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 	}
 
+	isVIP := m.isLocalVIP(dstIP)
+	util.LogInfo("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
+
 	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
 	// VIP is only for locally-originated connections (via NAT).
 	// If NAT reverse fails, drop the packet - it's not a valid response.
-	if m.isLocalVIP(dstIP) {
+	if isVIP {
+		util.LogInfo("[MESH] VIP path entered for packet from %s", fromNodeID)
 		if m.natTable == nil {
 			util.LogWarn("[MESH] VIP packet from %s dropped: natTable is nil", fromNodeID)
 			return
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		natPkt := m.natTable.TranslateInbound(pkt)
+		
+		// Check if this is a DNS response (UDP port 53)
+		headerLen := int(pkt[0]&0x0f) * 4
+		isDNS := pkt[9] == 17 && len(pkt) >= headerLen+4
+		var dstPort uint16
+		if isDNS {
+			dstPort = uint16(pkt[headerLen+2])<<8 | uint16(pkt[headerLen+3])
+			isDNS = dstPort == 53
+		}
+		
+		var natPkt []byte
+		if isDNS {
+			// DNS response: rewrite src to local GIP so the app accepts it
+			localGIP := m.getGIP()
+			if localGIP != nil {
+				natPkt = m.natTable.TranslateInboundWithSrc(pkt, localGIP)
+			} else {
+				natPkt = m.natTable.TranslateInbound(pkt)
+			}
+		} else {
+			// TCP or other: keep original src IP (Fake-IP for TCP connections)
+			natPkt = m.natTable.TranslateInbound(pkt)
+		}
+		util.LogInfo("[MESH] VIP NAT reverse: isDNS=%v natPkt=%v", isDNS, natPkt != nil)
 		if natPkt != nil {
 			go func() {
 				if m.tun != nil {
+					util.LogInfo("[MESH] VIP NAT reverse success: writing packet to TUN src=%s dst=%s len=%d",
+						net.IP(natPkt[12:16]), net.IP(natPkt[16:20]), len(natPkt))
 					if err := m.tun.WriteMeshPacket(natPkt); err != nil {
 						util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
 					}
@@ -548,25 +581,51 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			}()
 			return
 		}
-		// NAT reverse failed — rewrite src to local GIP and inject into netstack.
-		// This handles DNS responses from remote gateways where src is the remote GIP.
+		// NAT reverse failed — likely a DNS response from a remote gateway.
+		// The original query was redirected by tryDNSRedirect: src was rewritten
+		// from hostIP to VIP, then dst was changed from local GIP to remote GIP.
+		// The response comes back: src=remoteGIP, dst=VIP.
+		// We need: src=localGIP (what the app queried), dst=hostIP (original app).
+		util.LogInfo("[MESH] VIP NAT reverse failed for packet from %s: src=%s dst=%s proto=%d len=%d",
+			fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], len(frame))
 		pkt2 := make([]byte, len(frame))
 		copy(pkt2, frame)
 		localGIP := m.getGIP()
-		if localGIP != nil {
-			srcPkt := rewriteSrcIPInPacket(pkt2, localGIP)
-			if srcPkt != nil {
-				go func() {
-					if m.tun != nil {
-						if err := m.tun.InjectMeshPacket(srcPkt); err != nil {
-							util.LogWarn("[MESH] inject VIP fallback packet to netstack failed: %v", err)
-						}
-					}
-				}()
-				return
+		hostIP := m.getHostIP()
+		if localGIP != nil && hostIP != nil {
+			util.LogInfo("[MESH] VIP fallback: rewriting src=%s→%s dst=%s→%s",
+				net.IP(pkt2[12:16]), localGIP, net.IP(pkt2[16:20]), hostIP)
+			copy(pkt2[12:16], localGIP.To4())
+			copy(pkt2[16:20], hostIP.To4())
+			pkt2[10] = 0
+			pkt2[11] = 0
+			var sum uint32
+			hl := int(pkt2[0]&0x0f) * 4
+			for i := 0; i < hl-1; i += 2 {
+				sum += uint32(pkt2[i])<<8 | uint32(pkt2[i+1])
 			}
+			for sum>>16 > 0 {
+				sum = (sum & 0xffff) + (sum >> 16)
+			}
+			cksum := ^uint16(sum)
+			pkt2[10] = byte(cksum >> 8)
+			pkt2[11] = byte(cksum)
+			if pkt2[9] == 17 {
+				pkt2[hl+6] = 0
+				pkt2[hl+7] = 0
+			}
+			go func() {
+				if m.tun != nil {
+					util.LogInfo("[MESH] VIP fallback: writing packet to TUN src=%s dst=%s len=%d",
+						net.IP(pkt2[12:16]), net.IP(pkt2[16:20]), len(pkt2))
+					if err := m.tun.WriteMeshPacket(pkt2); err != nil {
+						util.LogWarn("[MESH] write VIP fallback packet to TUN failed: %v", err)
+					}
+				}
+			}()
+			return
 		}
-		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed and src rewrite failed", fromNodeID)
+		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed and fallback failed", fromNodeID)
 		return
 	}
 

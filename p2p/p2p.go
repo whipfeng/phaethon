@@ -305,6 +305,8 @@ func (m *P2PManager) runSession(peer *Peer) {
 	// Send hello immediately
 	m.sendHello(peer)
 
+	util.LogInfo("[P2P] runSession started for %s (meshNodeId=%s)", peer.ID, peer.MeshNodeID)
+
 	for {
 		peer.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		frameType, payload, err := reverse.ReadFrame(peer.conn)
@@ -313,6 +315,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 			util.LogInfo("[P2P] read error for %s: %v", peer.ID, err)
 			return
 		}
+		util.LogInfo("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
 		// During chunk transfer, route chunk data and heartbeats to channel but still dispatch commands
 		peer.transferMu.Lock()
@@ -350,6 +353,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 		case reverse.FrameMeshPacket:
 			util.LogInfo("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
+				util.LogInfo("[P2P] calling HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
 				m.meshHandler.HandleMeshFrame(peer.MeshNodeID, payload)
 			} else {
 				util.LogWarn("[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))

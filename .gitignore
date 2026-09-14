@@ -52,3 +52,6 @@ subscription_cache/
 # Screenshots archive (local only)
 /screenshots/
 scripts/.env
+
+# Qoder CLI local state
+.qoder/

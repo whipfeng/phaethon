@@ -17,6 +17,10 @@ import (
 	"phaethon/util"
 )
 
+// P2PProtocolVersion is the current P2P protocol version.
+// Bump when making incompatible changes to the P2P frame protocol or hello semantics.
+const P2PProtocolVersion = 1
+
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
 	mu        sync.Mutex
@@ -99,10 +103,11 @@ type chunkFrame struct {
 
 // HelloMsg is exchanged after P2P connection is established.
 type HelloMsg struct {
-	Cmd       string       `json:"cmd"`
-	NodeID    string       `json:"nodeId"`
-	Version   string       `json:"version"`
-	BuildTag  string       `json:"buildTag,omitempty"`
+	Cmd             string       `json:"cmd"`
+	NodeID          string       `json:"nodeId"`
+	Version         string       `json:"version"`
+	ProtocolVersion int          `json:"protocolVersion"`
+	BuildTag        string       `json:"buildTag,omitempty"`
 	Platform  string       `json:"platform"`
 	Arch      string       `json:"arch"`
 	Checksum  string       `json:"checksum"`
@@ -346,12 +351,13 @@ func (m *P2PManager) runSession(peer *Peer) {
 // sendHello sends a hello message to the peer.
 func (m *P2PManager) sendHello(peer *Peer) {
 	hello := HelloMsg{
-		Cmd:      "hello",
-		NodeID:   m.nodeId,
-		Version:  m.version,
-		BuildTag: m.buildTag,
-		Platform: m.platform,
-		Arch:     m.arch,
+		Cmd:             "hello",
+		NodeID:          m.nodeId,
+		Version:         m.version,
+		ProtocolVersion: P2PProtocolVersion,
+		BuildTag:        m.buildTag,
+		Platform:        m.platform,
+		Arch:            m.arch,
 	}
 	if m.cache != nil {
 		hello.Inventory = m.cache.ListInventory()
@@ -429,6 +435,13 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	var hello HelloMsg
 	if err := json.Unmarshal(payload, &hello); err != nil {
 		util.LogDebug("[P2P] invalid hello from %s: %v", peer.ID, err)
+		return
+	}
+
+	if hello.ProtocolVersion != P2PProtocolVersion {
+		util.LogWarn("[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
+			peer.ID, hello.ProtocolVersion, P2PProtocolVersion)
+		peer.conn.Close()
 		return
 	}
 

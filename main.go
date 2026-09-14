@@ -309,16 +309,22 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		res.meshMgr = meshMgr
 	}
 
-	// Start P2P peers for proxies that opt in with p2p: true
+	// Start P2P peers:
+	// - When mesh is enabled: ALL compatible proxies (SOCKS5/Trojan/HTunnel) get P2P automatically
+	// - When mesh is disabled: only proxies with explicit p2p: true
+	meshEnabled := ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled()
 	for _, proxy := range ruleConf.Proxies {
-		if !proxy.P2P {
+		if !proxy.IsEnabled() {
 			continue
 		}
-		if proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel" {
-			if proxy.Server != "" {
-				go p2p.GlobalP2PManager.StartPeer(proxy)
-			}
+		isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
+		if !isCompatible || proxy.Server == "" {
+			continue
 		}
+		if !meshEnabled && !proxy.P2P {
+			continue
+		}
+		go p2p.GlobalP2PManager.StartPeer(proxy)
 	}
 
 	// Group trojan mappings by port for SNI routing (non-reverse only)

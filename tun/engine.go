@@ -1034,6 +1034,25 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// DNS debug: log queries destined for the local GIP (:53)
+		if e.meshSubnet != nil && n >= 28 && pktBuf[0]>>4 == 4 && pktBuf[9] == 17 {
+			dstIP := net.IP(pktBuf[16:20])
+			gip := make(net.IP, 4)
+			copy(gip, e.meshSubnet.IP.To4())
+			gip[3] |= 3
+			if dstIP.Equal(gip) {
+				headerLen := int(pktBuf[0]&0x0f) * 4
+				if headerLen >= 20 && headerLen+8 <= n {
+					dstPort := uint16(pktBuf[headerLen+2])<<8 | uint16(pktBuf[headerLen+3])
+					if dstPort == 53 {
+						domain, _ := parseDNSQueryDomain(pktBuf[headerLen+8:])
+						util.LogInfo("[DNS-DEBUG] readLoop: DNS query to GIP %s domain=%s src=%s",
+							gip, domain, net.IP(pktBuf[12:16]))
+					}
+				}
+			}
+		}
+
 		// Cross-node DNS redirect: intercept DNS queries to local GIP before netstack.
 		// Rewrite dst to remote gateway GIP and forward via mesh directly.
 		if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
@@ -1093,6 +1112,7 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 	}
 
 	remoteGIP := e.meshGatewayResolver(domain)
+	util.LogInfo("[DNS-DEBUG] tryDNSRedirect: domain=%s remoteGIP=%v", domain, remoteGIP)
 	if remoteGIP == nil {
 		return false
 	}

@@ -130,7 +130,25 @@ func (m *MeshManager) GetNATTable() *tun.NATTable {
 }
 
 func (m *MeshManager) GetDomainSuffixes() []string {
-	return m.domainSuffixes
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]string, len(m.domainSuffixes))
+	copy(result, m.domainSuffixes)
+	return result
+}
+
+// UpdateConfig hot-swaps domainSuffixes and advertise without restarting.
+func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
+	m.mu.Lock()
+	m.domainSuffixes = domainSuffixes
+	m.advertise = advertise
+	m.mu.Unlock()
+	m.eventCh <- meshEvent{kind: meshEventConfigUpdate}
+}
+
+// TriggerGossip sends an immediate gossip broadcast.
+func (m *MeshManager) TriggerGossip() {
+	m.eventCh <- meshEvent{kind: meshEventTick}
 }
 
 func (m *MeshManager) TopologyRef() *Topology {
@@ -424,13 +442,20 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 	routeCount := len(m.routes)
 	m.routesMu.RUnlock()
 
+	m.mu.RLock()
+	domainSuffixes := make([]string, len(m.domainSuffixes))
+	copy(domainSuffixes, m.domainSuffixes)
+	advertise := make([]string, len(m.advertise))
+	copy(advertise, m.advertise)
+	m.mu.RUnlock()
+
 	return map[string]interface{}{
 		"enabled":        true,
 		"nodeId":         m.nodeID,
 		"vip":            m.vip.String(),
 		"subnet":         m.subnetStr,
-		"domainSuffixes": m.domainSuffixes,
-		"advertise":      m.advertise,
+		"domainSuffixes": domainSuffixes,
+		"advertise":      advertise,
 		"routeCount":     routeCount,
 	}
 }
@@ -515,6 +540,13 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 }
 
 func (m *MeshManager) recomputeRoutes() {
+	m.mu.RLock()
+	advertise := make([]string, len(m.advertise))
+	copy(advertise, m.advertise)
+	domainSuffixes := make([]string, len(m.domainSuffixes))
+	copy(domainSuffixes, m.domainSuffixes)
+	m.mu.RUnlock()
+
 	peers := m.topology.GetAllPeers()
 
 	// Build global route table: prefix → {hop, nextHop peer}
@@ -529,7 +561,7 @@ func (m *MeshManager) recomputeRoutes() {
 	if m.subnet != nil {
 		best[m.subnetStr] = globalEntry{0, nil, m.subnet}
 	}
-	for _, r := range m.advertise {
+	for _, r := range advertise {
 		_, ipNet, err := net.ParseCIDR(r)
 		if err != nil {
 			continue
@@ -578,7 +610,7 @@ func (m *MeshManager) recomputeRoutes() {
 	// Build global domain trie
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
-	for _, s := range m.domainSuffixes {
+	for _, s := range domainSuffixes {
 		trie.Insert(s, nil, 0)
 	}
 	// Peer domain suffixes
@@ -646,6 +678,12 @@ func (m *MeshManager) gossipLoop() {
 				}
 			case meshEventTick:
 				m.broadcastGossip()
+			case meshEventConfigUpdate:
+				m.recomputeRoutes()
+				m.broadcastGossip()
+				m.mu.RLock()
+				util.LogInfo("[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
+				m.mu.RUnlock()
 			}
 		}
 	}
@@ -658,6 +696,7 @@ const (
 	meshEventUnregister
 	meshEventGossip
 	meshEventTick
+	meshEventConfigUpdate
 )
 
 type meshEvent struct {
@@ -674,6 +713,13 @@ func (m *MeshManager) broadcastGossip() {
 	if len(peerIDs) == 0 {
 		return
 	}
+
+	m.mu.RLock()
+	advertise := make([]string, len(m.advertise))
+	copy(advertise, m.advertise)
+	domainSuffixes := make([]string, len(m.domainSuffixes))
+	copy(domainSuffixes, m.domainSuffixes)
+	m.mu.RUnlock()
 
 	// Capture a single peer snapshot for consistent split-horizon filtering.
 	allPeers := m.topology.GetAllPeers()
@@ -693,7 +739,7 @@ func (m *MeshManager) broadcastGossip() {
 
 	// Own routes (Hop=0)
 	bestRoutes[m.subnetStr] = globalRouteEntry{0, nil, m.subnetStr, m.subnet}
-	for _, r := range m.advertise {
+	for _, r := range advertise {
 		_, ipNet, _ := net.ParseCIDR(r)
 		bestRoutes[r] = globalRouteEntry{0, nil, r, ipNet}
 	}
@@ -721,7 +767,7 @@ func (m *MeshManager) broadcastGossip() {
 		nextHop *PeerInfo // nil = own entry
 	}
 	bestDS := make(map[string]globalDSEntry)
-	for _, s := range m.domainSuffixes {
+	for _, s := range domainSuffixes {
 		bestDS[s] = globalDSEntry{0, nil}
 	}
 	for _, peer := range allPeers {

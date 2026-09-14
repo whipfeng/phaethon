@@ -58,6 +58,11 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchTUNStatus();
     }
 
+    // Initial load for Mesh status if on dashboard
+    if (document.getElementById('mesh-card')) {
+        fetchMeshStatus();
+    }
+
     // Tear down SSE on full page unload (browser close/refresh).
     // HTMX navigation does NOT cause full page loads, so no teardown on nav clicks.
     function teardown() {
@@ -421,6 +426,7 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
+    onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
         fetchActiveConns(true);
@@ -745,6 +751,76 @@ async function fetchTUNStatus(expectedVersion) {
     const data = await res.json();
     if (expectedVersion !== undefined && targetVersions.tun !== expectedVersion) return;
     if (typeof renderTUN === 'function') renderTUN(data);
+}
+
+async function fetchMeshStatus() {
+    const card = document.getElementById('mesh-card');
+    if (!card) return;
+    try {
+        const res = await fetch('./api/mesh');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.enabled) return;
+        document.getElementById('mesh-nodeid').textContent = data.nodeId || '-';
+        document.getElementById('mesh-vip').textContent = data.vip || '-';
+        document.getElementById('mesh-subnet').textContent = data.subnet || '-';
+        document.getElementById('mesh-routecount').textContent = data.routeCount || 0;
+        document.getElementById('mesh-domain-suffixes').value = (data.domainSuffixes || []).join(', ');
+        document.getElementById('mesh-advertise').value = (data.advertise || []).join(', ');
+        if (data.topology && data.topology.peers) {
+            const tbody = document.getElementById('mesh-topology');
+            if (tbody) {
+                let html = '';
+                data.topology.peers.forEach(p => {
+                    const routes = (p.routes || []).map(r => r.prefix + ' hop=' + r.hop).join(', ');
+                    const suffixes = (p.domainSuffixes || []).map(d => d.suffix || d).join(', ');
+                    html += '<tr><td>' + p.nodeId + '</td><td>' + (p.subnet || '-') + '</td><td>' + (routes || '-') + '</td><td>' + (suffixes || '-') + '</td></tr>';
+                });
+                tbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No peers</td></tr>';
+            }
+        }
+        if (data.routes && data.routes.routes) {
+            const tbody = document.getElementById('mesh-routes');
+            if (tbody) {
+                let html = '';
+                data.routes.routes.forEach(r => {
+                    html += '<tr><td>' + r.prefix + '</td><td>' + r.via + '</td></tr>';
+                });
+                tbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">No routes</td></tr>';
+            }
+        }
+    } catch (err) {
+        console.error('fetchMeshStatus error:', err);
+    }
+}
+
+async function saveMeshConfig() {
+    const domainSuffixes = document.getElementById('mesh-domain-suffixes').value.split(',').map(s => s.trim()).filter(Boolean);
+    const advertise = document.getElementById('mesh-advertise').value.split(',').map(s => s.trim()).filter(Boolean);
+    try {
+        const resp = await fetch('./api/mesh/config', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({domainSuffixes, advertise})
+        });
+        if (resp.ok) {
+            alert('Saved');
+            fetchMeshStatus();
+        } else {
+            const err = await resp.json();
+            alert('Error: ' + (err.error || 'unknown'));
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+async function triggerMeshGossip() {
+    try {
+        await fetch('./api/mesh/gossip', {method: 'POST'});
+    } catch (err) {
+        console.error('triggerMeshGossip error:', err);
+    }
 }
 
 let connLogLastSeq = 0;

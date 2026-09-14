@@ -150,6 +150,42 @@
     </div>
     {{end}}
 
+    {{if .MeshEnabled}}
+    <div class="card" id="mesh-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            <h3 style="margin:0;">Mesh</h3>
+            <span class="badge badge-ok" data-i18n="common.enabled">Enabled</span>
+        </div>
+        <table class="status-table">
+            <tr><td>Node ID</td><td id="mesh-nodeid">-</td></tr>
+            <tr><td>VIP</td><td id="mesh-vip">-</td></tr>
+            <tr><td>Subnet</td><td id="mesh-subnet">-</td></tr>
+            <tr><td data-i18n="mesh.routeCount">Routes</td><td id="mesh-routecount">-</td></tr>
+        </table>
+        <div class="tun-section" id="mesh-config-section">
+            <h4 data-i18n="mesh.config">Config</h4>
+            <label>Domain Suffixes</label>
+            <input type="text" id="mesh-domain-suffixes" placeholder="comma-separated">
+            <label>Advertise (CIDR)</label>
+            <input type="text" id="mesh-advertise" placeholder="comma-separated CIDRs">
+            <div style="margin-top:0.5rem;">
+                <button onclick="saveMeshConfig()" class="btn btn-sm btn-primary" data-i18n="mesh.save">Save</button>
+                <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>
+            </div>
+        </div>
+        <div class="tun-section" id="mesh-topology-section">
+            <h4 data-i18n="mesh.topology">Topology</h4>
+            <table><thead><tr><th>Node</th><th>Subnet</th><th>Routes</th><th>Suffixes</th></tr></thead>
+            <tbody id="mesh-topology"></tbody></table>
+        </div>
+        <div class="tun-section" id="mesh-routes-section">
+            <h4 data-i18n="mesh.routes">Routes</h4>
+            <table><thead><tr><th>Prefix</th><th>Via</th></tr></thead>
+            <tbody id="mesh-routes"></tbody></table>
+        </div>
+    </div>
+    {{end}}
+
     <!-- 活跃连接 -->
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">

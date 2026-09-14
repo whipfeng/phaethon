@@ -147,6 +147,14 @@
             'tun.bindFromLease': '从 Lease 绑定',
             'tun.editBinding': '编辑绑定',
 
+            // ===== Mesh =====
+            'mesh.config': '配置',
+            'mesh.save': '保存',
+            'mesh.forceGossip': '立即广播',
+            'mesh.topology': '拓扑',
+            'mesh.routes': '路由表',
+            'mesh.routeCount': '路由数',
+
             // ===== Proxies =====
             'proxy.title': '代理',
             'proxy.add': '添加代理',
@@ -797,6 +805,14 @@
             'tun.ipRequired': 'Please enter an IP address',
             'tun.bindFromLease': 'Bind from lease',
             'tun.editBinding': 'Edit binding',
+
+            // ===== Mesh =====
+            'mesh.config': 'Config',
+            'mesh.save': 'Save',
+            'mesh.forceGossip': 'Force Gossip',
+            'mesh.topology': 'Topology',
+            'mesh.routes': 'Routes',
+            'mesh.routeCount': 'Route Count',
 
             // ===== Proxies =====
             'proxy.title': 'Proxies',

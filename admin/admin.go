@@ -869,6 +869,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reverse/", s.apiReverseItem)
 	mux.HandleFunc("/api/p2p", s.apiP2P)
 	mux.HandleFunc("/api/mesh", s.apiMesh)
+	mux.HandleFunc("/api/mesh/config", s.apiMesh)
+	mux.HandleFunc("/api/mesh/gossip", s.apiMesh)
 	mux.HandleFunc("/api/tun", s.apiTUN)
 	mux.HandleFunc("/api/events", s.apiEvents)
 	mux.HandleFunc("/api/versions", s.apiVersions)
@@ -906,7 +908,8 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"EnvInfo":           s.envInfo(),
 		"SaveTarget": "base",
 		"CanSwitch":  false,
-		"TUNAvailable":      tun.Available(),
+		"TUNAvailable":  tun.Available(),
+		"MeshEnabled":   mesh.GlobalMeshManager != nil,
 	}
 	s.render(w, r, "dashboard.html", data)
 }
@@ -3858,6 +3861,20 @@ func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiMesh(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/mesh")
+	switch {
+	case path == "" || path == "/":
+		s.apiMeshGet(w, r)
+	case path == "/config":
+		s.apiMeshConfigPatch(w, r)
+	case path == "/gossip":
+		s.apiMeshGossipPost(w, r)
+	default:
+		httpError(w, "not found", http.StatusNotFound)
+	}
+}
+
+func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -3871,6 +3888,62 @@ func (s *AdminServer) apiMesh(w http.ResponseWriter, r *http.Request) {
 	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
 	result["peers"] = mesh.GlobalMeshManager.GetPeers()
 	jsonResponse(w, result)
+}
+
+func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if mesh.GlobalMeshManager == nil {
+		httpError(w, "mesh not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		DomainSuffixes []string `json:"domainSuffixes"`
+		Advertise      []string `json:"advertise"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, cidr := range req.Advertise {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			httpError(w, "invalid CIDR: "+cidr, http.StatusBadRequest)
+			return
+		}
+	}
+
+	mesh.GlobalMeshManager.UpdateConfig(req.DomainSuffixes, req.Advertise)
+
+	s.mu.Lock()
+	if s.conf.Mesh != nil {
+		s.conf.Mesh.DomainSuffixes = req.DomainSuffixes
+		s.conf.Mesh.Advertise = req.Advertise
+	}
+	if err := s.saveConfigLocked(); err != nil {
+		s.mu.Unlock()
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.mu.Unlock()
+
+	util.DefaultVersionNotifier.BumpVersion("mesh")
+	util.LogInfo("[ADMIN] mesh config updated: domainSuffixes=%v advertise=%v", req.DomainSuffixes, req.Advertise)
+	jsonResponse(w, map[string]interface{}{"ok": true})
+}
+
+func (s *AdminServer) apiMeshGossipPost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if mesh.GlobalMeshManager == nil {
+		httpError(w, "mesh not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	mesh.GlobalMeshManager.TriggerGossip()
+	jsonResponse(w, map[string]interface{}{"ok": true})
 }
 
 func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {

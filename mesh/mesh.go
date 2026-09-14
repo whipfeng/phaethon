@@ -282,7 +282,11 @@ func (m *MeshManager) isLocalVIP(ip net.IP) bool {
 	if m.vip == nil {
 		return false
 	}
-	return ip.Equal(m.vip)
+	result := ip.Equal(m.vip)
+	if !result {
+		util.LogInfo("[MESH] isLocalVIP: ip=%s vip=%s equal=%v", ip, m.vip, result)
+	}
+	return result
 }
 
 // getHostIP returns the hostIP (.2) address for this node's subnet.
@@ -314,7 +318,11 @@ func (m *MeshManager) getGIP() net.IP {
 // isLocalHostIP checks if the IP is the local hostIP (.2) address.
 func (m *MeshManager) isLocalHostIP(ip net.IP) bool {
 	hostIP := m.getHostIP()
-	return hostIP != nil && ip.Equal(hostIP)
+	if hostIP != nil && ip.Equal(hostIP) {
+		return true
+	}
+	util.LogInfo("[MESH] isLocalHostIP: ip=%s hostIP=%v equal=%v", ip, hostIP, hostIP != nil && ip.Equal(hostIP))
+	return false
 }
 
 // isLocalGIP checks if the IP is the local GIP (.3) address.
@@ -482,6 +490,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 	// .2 (hostIP): WriteMeshPacket to OS (deliver to application)
 	if m.isLocalHostIP(dstIP) {
+		util.LogInfo("[MESH] recv frame from %s: dst=%s is hostIP, delivering to OS", fromNodeID, dstIP)
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		go func() {

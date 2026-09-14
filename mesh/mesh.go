@@ -374,6 +374,8 @@ var GlobalMeshManager *MeshManager
 func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	m.tun = tun
 	m.p2p = p2p
+	// Set mesh info on P2P layer so hello messages include correct meshNodeId
+	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)

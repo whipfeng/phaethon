@@ -1143,11 +1143,20 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 
 	dstIP := net.IP(pkt[16:20])
 	dstPort := uint16(pkt[headerLen+2])<<8 | uint16(pkt[headerLen+3])
+	srcIP := net.IP(pkt[12:16])
 
 	// Check if dst is local GIP (.3)
 	gip := make(net.IP, 4)
 	copy(gip, e.meshSubnet.IP.To4())
 	gip[3] |= 3
+
+	// Debug: log all DNS queries to GIP
+	if dstPort == 53 && dstIP.Equal(gip) {
+		dnsPayload := pkt[headerLen+8:]
+		domain, _ := parseDNSQueryDomain(dnsPayload)
+		util.LogInfo("[DNS-DEBUG] tryDNSRedirect: src=%s dst=%s:%d domain=%s gip=%s", srcIP, dstIP, dstPort, domain, gip)
+	}
+
 	if !dstIP.Equal(gip) || dstPort != 53 {
 		return false
 	}

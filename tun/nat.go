@@ -232,6 +232,46 @@ func (t *NATTable) TranslateInboundWithSrc(packet []byte, newSrcIP net.IP) []byt
 	return result
 }
 
+// RewriteSrcIP rewrites only the source IP address of a packet,
+// recomputing IP header and TCP/UDP checksums. Unlike TranslateInboundWithSrc,
+// it does not perform any NAT port translation and always succeeds.
+func (t *NATTable) RewriteSrcIP(packet []byte, newSrcIP net.IP) []byte {
+	if len(packet) < 20 || packet[0]>>4 != 4 {
+		return nil
+	}
+
+	result := make([]byte, len(packet))
+	copy(result, packet)
+
+	newSrc := newSrcIP.To4()
+	copy(result[12:16], newSrc)
+
+	headerLen := int(result[0]&0x0f) * 4
+	if headerLen < 20 || headerLen > len(result) {
+		return nil
+	}
+
+	// Recompute IP header checksum
+	result[10] = 0
+	result[11] = 0
+	var sum uint32
+	for i := 0; i < headerLen-1; i += 2 {
+		sum += uint32(result[i])<<8 | uint32(result[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	result[10] = byte(cksum >> 8)
+	result[11] = byte(cksum)
+
+	// Recompute TCP/UDP checksum for srcIP change
+	proto := result[9]
+	recomputeTCPUDPChecksum(result, headerLen, proto, newSrc, net.IP(result[16:20]))
+
+	return result
+}
+
 // Stats returns the number of active NAT entries.
 func (t *NATTable) Stats() int {
 	t.mu.RLock()

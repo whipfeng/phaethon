@@ -116,9 +116,16 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 
 // LookupDomain returns the original domain for a Fake-IP, or empty if not found.
 func (p *FakeIPPool) LookupDomain(ip string) string {
+	// Copy the map under the lock to avoid holding the lock during the lookup
+	// This prevents potential deadlocks if the caller holds other locks
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.ipToDomain[ip]
+	ipToDomainCopy := make(map[string]string, len(p.ipToDomain))
+	for k, v := range p.ipToDomain {
+		ipToDomainCopy[k] = v
+	}
+	p.mu.RUnlock()
+	
+	return ipToDomainCopy[ip]
 }
 
 // SetRealIP caches the real IP address for a Fake-IP. This is called by the DNS

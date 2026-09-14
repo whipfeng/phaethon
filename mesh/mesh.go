@@ -17,6 +17,40 @@ const (
 	MeshDomainSuffix = "phn"
 )
 
+// logTCPPacketMesh logs TCP packet details for debugging
+func logTCPPacketMesh(prefix string, data []byte) {
+	if len(data) < 20 {
+		return
+	}
+	srcIP := net.IP(data[12:16])
+	dstIP := net.IP(data[16:20])
+	headerLen := int(data[0]&0x0f) * 4
+	if len(data) < headerLen+20 {
+		util.LogInfo("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
+		return
+	}
+	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
+	dstPort := uint16(data[headerLen+2])<<8 | uint16(data[headerLen+3])
+	seq := uint32(data[headerLen+4])<<24 | uint32(data[headerLen+5])<<16 | uint32(data[headerLen+6])<<8 | uint32(data[headerLen+7])
+	ack := uint32(data[headerLen+8])<<24 | uint32(data[headerLen+9])<<16 | uint32(data[headerLen+10])<<8 | uint32(data[headerLen+11])
+	flags := data[headerLen+13]
+	flagStr := ""
+	if flags&0x02 != 0 {
+		flagStr += "SYN "
+	}
+	if flags&0x10 != 0 {
+		flagStr += "ACK "
+	}
+	if flags&0x01 != 0 {
+		flagStr += "FIN "
+	}
+	if flags&0x04 != 0 {
+		flagStr += "RST "
+	}
+	util.LogInfo("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
+		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
+}
+
 func NodeDomain(nodeID string) string {
 	return nodeID + "." + MeshDomainSuffix
 }
@@ -340,7 +374,8 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	m.p2p = p2p
 	m.recomputeRoutes()
 	go m.gossipLoop()
-	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s", m.nodeID, m.vip, m.subnetStr)
+	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
+	util.LogInfo("[MESH-DEBUG] binary version with subnet logging")
 }
 
 func (m *MeshManager) Stop() {
@@ -406,33 +441,49 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// Fake-IPs are allocated from the mesh subnet but are not actual VIPs.
 	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
 	// and look up the original domain via fakeIP.LookupDomain.
+	//
+	// IMPORTANT: Check findPeer FIRST before local subnet check.
+	// Remote Fake-IPs (e.g., 100.64.0.x on VM with subnet 100.64.1.0/24) should be
+	// routed via the peer that owns that subnet, not passed to local netstack.
+	peer := m.findPeer(dstIP)
+	if peer != nil {
+		// Remote peer owns this IP — send via mesh
+		pkt := make([]byte, len(data))
+		copy(pkt, data)
+
+		if dstIP[0] == 100 && dstIP[1] == 64 {
+			util.LogInfo("[MESH] outbound %s: sending %d bytes via peer %s", dstIP, len(pkt), peer.GetNodeID())
+			if len(pkt) >= 20 && pkt[9] == 6 {
+				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
+			}
+		}
+
+		go func() {
+			if err := peer.Send(pkt); err != nil {
+				util.LogWarn("[MESH] send to %s failed: %v", peer.GetNodeID(), err)
+			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
+				dst := net.IP(pkt[16:20])
+				if dst[0] == 100 && dst[1] == 64 {
+					util.LogInfo("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, peer.GetNodeID())
+				}
+			}
+		}()
+		return true
+	}
+
+	// No peer owns this IP — check if it's in our local subnet
 	if m.subnet != nil && m.subnet.Contains(dstIP) {
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] outbound %s: local subnet, passing through", dstIP)
+			util.LogInfo("[MESH] outbound %s: local subnet %s, passing through", dstIP, m.subnetStr)
 		}
 		return false
 	}
 
-	peer := m.findPeer(dstIP)
-	if peer == nil {
-		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] outbound %s: no peer found, passing through", dstIP)
-		}
-		return false
-	}
-
+	// Not in local subnet and no peer found — pass through
 	if dstIP[0] == 100 && dstIP[1] == 64 {
-		util.LogInfo("[MESH] outbound %s: sending via peer %s", dstIP, peer.GetNodeID())
+		util.LogInfo("[MESH] outbound %s: no peer found, passing through", dstIP)
 	}
-	pkt := make([]byte, len(data))
-	copy(pkt, data)
-
-	go func() {
-		if err := peer.Send(pkt); err != nil {
-			util.LogWarn("[MESH] send to %s failed: %v", peer.GetNodeID(), err)
-		}
-	}()
-	return true
+	return false
 }
 
 // HandleMeshFrame processes a raw IP packet received from a peer.
@@ -450,29 +501,29 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 	if dstIP[0] == 100 && dstIP[1] == 64 {
 		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
+		if len(frame) >= 20 && frame[9] == 6 {
+			logTCPPacketMesh("[TCP-DEBUG] recv:", frame)
+		}
 	}
 
-	// .1 (VIP): NAT reverse + src rewrite to local GIP + WriteMeshPacket to OS
+	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
+	// VIP is only for locally-originated connections (via NAT).
+	// If NAT reverse fails, drop the packet - it's not a valid response.
 	if m.isLocalVIP(dstIP) {
+		if m.natTable == nil {
+			util.LogWarn("[MESH] VIP packet from %s dropped: natTable is nil", fromNodeID)
+			return
+		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		if m.natTable != nil {
-			localGIP := m.getGIP()
-			if localGIP != nil {
-				natPkt := m.natTable.TranslateInboundWithSrc(pkt, localGIP)
-				if natPkt != nil {
-					pkt = natPkt
-				}
-			} else {
-				natPkt := m.natTable.TranslateInbound(pkt)
-				if natPkt != nil {
-					pkt = natPkt
-				}
-			}
+		natPkt := m.natTable.TranslateInbound(pkt)
+		if natPkt == nil {
+			util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed", fromNodeID)
+			return
 		}
 		go func() {
 			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(pkt); err != nil {
+				if err := m.tun.WriteMeshPacket(natPkt); err != nil {
 					util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
 				}
 			}
@@ -480,11 +531,25 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	// .2 (hostIP): WriteMeshPacket to OS (deliver to application)
+	// .2 (hostIP): src rewrite to local GIP + WriteMeshPacket to OS
+	// hostIP traffic never went through NAT, so only src rewrite is needed.
 	if m.isLocalHostIP(dstIP) {
-		util.LogInfo("[MESH] recv frame from %s: dst=%s is hostIP, delivering to OS", fromNodeID, dstIP)
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
+		localGIP := m.getGIP()
+		if localGIP != nil {
+			if m.natTable != nil {
+				srcPkt := m.natTable.RewriteSrcIP(pkt, localGIP)
+				if srcPkt != nil {
+					pkt = srcPkt
+				}
+			} else {
+				rewritePkt := rewriteSrcIPInPacket(pkt, localGIP)
+				if rewritePkt != nil {
+					pkt = rewritePkt
+				}
+			}
+		}
 		go func() {
 			if m.tun != nil {
 				if err := m.tun.WriteMeshPacket(pkt); err != nil {
@@ -521,7 +586,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		// No mesh route — we're the gateway for this destination.
 		// Inject into local netstack so it goes out via proxy/direct.
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] recv frame from %s: dst=%s injecting to local netstack", fromNodeID, dstIP)
+			proto := "unknown"
+			if len(frame) >= 20 {
+				switch frame[9] {
+				case 6:
+					proto = "TCP"
+				case 17:
+					proto = "UDP"
+				}
+			}
+			util.LogInfo("[MESH] recv frame from %s: dst=%s proto=%s injecting to local netstack", fromNodeID, dstIP, proto)
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
@@ -779,6 +853,20 @@ func (m *MeshManager) recomputeRoutes() {
 	for _, r := range routes {
 		util.LogInfo("[MESH]   %s -> %s", r.Prefix, r.Peer.GetNodeID())
 	}
+	// Log domain suffixes for debugging
+	util.LogInfo("[MESH] domain trie: own suffixes=%v", domainSuffixes)
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		var suffixes []string
+		for _, entry := range peer.DomainSuffixes {
+			suffixes = append(suffixes, entry.Suffix)
+		}
+		if len(suffixes) > 0 {
+			util.LogInfo("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
+		}
+	}
 }
 
 // findPeer finds the peer for a destination IP using longest prefix match.
@@ -1010,4 +1098,29 @@ func (m *MeshManager) broadcastGossip() {
 		}
 		m.p2p.SendMeshGossipTo(peerID, data)
 	}
+}
+
+// rewriteSrcIPInPacket rewrites the source IP in a raw IPv4 packet
+// and recomputes the IP header checksum. Used as a fallback when natTable is nil.
+func rewriteSrcIPInPacket(pkt []byte, newSrc net.IP) []byte {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return nil
+	}
+	result := make([]byte, len(pkt))
+	copy(result, pkt)
+	copy(result[12:16], newSrc.To4())
+	result[10] = 0
+	result[11] = 0
+	var sum uint32
+	headerLen := int(result[0]&0x0f) * 4
+	for i := 0; i < headerLen-1; i += 2 {
+		sum += uint32(result[i])<<8 | uint32(result[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	result[10] = byte(cksum >> 8)
+	result[11] = byte(cksum)
+	return result
 }

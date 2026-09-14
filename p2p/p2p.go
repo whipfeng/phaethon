@@ -75,7 +75,7 @@ type Peer struct {
 	Arch      string         `json:"arch"`
 	BuildTag  string         `json:"buildTag,omitempty"`
 	Checksum  string         `json:"checksum"`
-	Status    string         `json:"status"` // "connecting", "helloed", "updating", "upToDate", "failed"
+	Status    string         `json:"status"` // "connecting", "helloed", "updating", "upToDate", "update_failed", "failed"
 	LastSeen  time.Time      `json:"lastSeen"`
 	Inventory []CacheEntry   `json:"inventory,omitempty"`
 
@@ -383,32 +383,37 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 	case "hello":
 		m.handleHello(peer, payload)
 	case "update_request":
-		m.handleUpdateRequest(peer, payload)
+		// Binary distribution disabled
+		util.LogDebug("[P2P] ignoring update_request from %s (binary distribution disabled)", peer.ID)
 	case "chunk_req":
-		m.handleChunkReq(peer, payload)
+		// Binary distribution disabled
+		util.LogDebug("[P2P] ignoring chunk_req from %s (binary distribution disabled)", peer.ID)
 	case "manifest":
-		// Set up chunk channel before spawning goroutine to prevent race
-		peer.transferMu.Lock()
-		if peer.receivingChunks {
-			peer.transferMu.Unlock()
-			util.LogWarn("[P2P] already receiving chunks from %s, ignoring manifest", peer.ID)
-			return
-		}
-		peer.receivingChunks = true
-		peer.chunkCh = make(chan chunkFrame, 16)
-		peer.transferMu.Unlock()
-
-		go func() {
-			defer func() {
-				peer.transferMu.Lock()
-				peer.receivingChunks = false
-				peer.chunkCh = nil
-				peer.transferMu.Unlock()
-			}()
-			m.handleManifest(peer, payload)
-		}()
+		// Binary distribution disabled - ignore manifests
+		util.LogDebug("[P2P] ignoring manifest from %s (binary distribution disabled)", peer.ID)
+		// // Set up chunk channel before spawning goroutine to prevent race
+		// peer.transferMu.Lock()
+		// if peer.receivingChunks {
+		// 	peer.transferMu.Unlock()
+		// 	util.LogWarn("[P2P] already receiving chunks from %s, ignoring manifest", peer.ID)
+		// 	return
+		// }
+		// peer.receivingChunks = true
+		// peer.chunkCh = make(chan chunkFrame, 16)
+		// peer.transferMu.Unlock()
+		//
+		// go func() {
+		// 	defer func() {
+		// 		peer.transferMu.Lock()
+		// 		peer.receivingChunks = false
+		// 		peer.chunkCh = nil
+		// 		peer.transferMu.Unlock()
+		// 	}()
+		// 	m.handleManifest(peer, payload)
+		// }()
 	case "update_ack":
-		util.LogInfo("[P2P] update_ack from %s: status=%s", peer.ID, msg["status"])
+		// Binary distribution disabled
+		util.LogDebug("[P2P] ignoring update_ack from %s (binary distribution disabled)", peer.ID)
 	case "mesh_gossip":
 		if m.meshHandler != nil {
 			// Extract payload - it could be json.RawMessage, []byte, or map[string]interface{}
@@ -423,6 +428,8 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 			}
 			if payloadData != nil && peer.meshSender != nil {
 				m.meshHandler.HandleTopologyGossip(peer.meshSender, payloadData)
+			} else {
+				util.LogInfo("[P2P] mesh_gossip from %s dropped: payloadData=%v meshSender=%v", peer.ID, payloadData != nil, peer.meshSender != nil)
 			}
 		}
 	default:
@@ -508,19 +515,20 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		}
 	}
 
-	if len(toRequest) > 0 {
-		peer.Status = "updating"
-		go func() {
-			for _, entry := range toRequest {
-				m.requestUpdate(peer, entry)
-				// Small delay between requests to avoid overwhelming the peer
-				time.Sleep(100 * time.Millisecond)
-			}
-		}()
-	} else {
-		util.LogInfo("[P2P] inventories in sync with %s", peer.ID)
-		peer.Status = "upToDate"
-	}
+	// Binary distribution disabled - just mark as upToDate
+	// if len(toRequest) > 0 {
+	// 	peer.Status = "updating"
+	// 	go func() {
+	// 		for _, entry := range toRequest {
+	// 			m.requestUpdate(peer, entry)
+	// 			// Small delay between requests to avoid overwhelming the peer
+	// 			time.Sleep(100 * time.Millisecond)
+	// 		}
+	// 	}()
+	// } else {
+	util.LogInfo("[P2P] inventories sync skipped (binary distribution disabled) with %s", peer.ID)
+	peer.Status = "upToDate"
+	// }
 }
 
 // SetMeshInfo configures mesh networking parameters.

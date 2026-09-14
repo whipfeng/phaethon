@@ -35,6 +35,40 @@ import (
 // the TUN interface. Rules can use "#TUN" suffix to target TUN traffic.
 var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
+// logTCPPacket logs TCP packet details for debugging
+func logTCPPacket(prefix string, data []byte) {
+	if len(data) < 20 {
+		return
+	}
+	srcIP := net.IP(data[12:16])
+	dstIP := net.IP(data[16:20])
+	headerLen := int(data[0]&0x0f) * 4
+	if len(data) < headerLen+20 {
+		util.LogInfo("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
+		return
+	}
+	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
+	dstPort := uint16(data[headerLen+2])<<8 | uint16(data[headerLen+3])
+	seq := uint32(data[headerLen+4])<<24 | uint32(data[headerLen+5])<<16 | uint32(data[headerLen+6])<<8 | uint32(data[headerLen+7])
+	ack := uint32(data[headerLen+8])<<24 | uint32(data[headerLen+9])<<16 | uint32(data[headerLen+10])<<8 | uint32(data[headerLen+11])
+	flags := data[headerLen+13]
+	flagStr := ""
+	if flags&0x02 != 0 {
+		flagStr += "SYN "
+	}
+	if flags&0x10 != 0 {
+		flagStr += "ACK "
+	}
+	if flags&0x01 != 0 {
+		flagStr += "FIN "
+	}
+	if flags&0x04 != 0 {
+		flagStr += "RST "
+	}
+	util.LogInfo("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
+		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
+}
+
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
 	ruleConf   *config.RuleConfiguration
@@ -308,6 +342,9 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
 		util.LogDebug("tun: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
+		if len(data) >= 20 && data[9] == 6 {
+			logTCPPacket("[TCP-DEBUG] InjectMeshPacket:", data)
+		}
 	}
 
 	// DNS redirect: if this is a DNS query to local GIP and domain has a remote gateway,
@@ -341,6 +378,9 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
 		util.LogDebug("tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
+		if data[9] == 6 {
+			logTCPPacket("[TCP-DEBUG] WriteMeshPacket:", data)
+		}
 	}
 	_, err := dev.Write(data)
 	if err != nil {
@@ -1026,6 +1066,15 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// Debug: log ALL TCP packets to 100.64.x.x
+		if n >= 40 && pktBuf[0]>>4 == 4 && pktBuf[9] == 6 { // TCP
+			dstIP := net.IP(pktBuf[16:20])
+			if dstIP[0] == 100 && dstIP[1] == 64 {
+				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
+				util.LogInfo("[TCP-DEBUG] readLoop entry: TCP dst=%s:%d src=%s", dstIP, dstPort, net.IP(pktBuf[12:16]))
+			}
+		}
+
 		// DNS debug: log queries destined for the local GIP (:53)
 		if e.meshSubnet != nil && n >= 28 && pktBuf[0]>>4 == 4 && pktBuf[9] == 17 {
 			dstIP := net.IP(pktBuf[16:20])
@@ -1059,6 +1108,13 @@ func (e *Engine) readLoop() {
 		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
 		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(pktBuf[16:20])
+			// Debug: log TCP packets to mesh subnet
+			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
+				srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
+				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
+				util.LogInfo("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
+					dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
+			}
 			if e.meshInterceptor(dstIP, pktBuf) {
 				continue
 			}
@@ -1267,16 +1323,19 @@ func (e *Engine) acceptTCP() {
 
 	fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
-		util.LogDebug("tun: tcp forwarder called local=%s:%d remote=%s:%d",
+		util.LogInfo("[TCP-DEBUG] tcp forwarder called local=%s:%d remote=%s:%d",
 			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		var wq waiter.Queue
+		util.LogInfo("[TCP-DEBUG] calling CreateEndpoint...")
 		ep, err := r.CreateEndpoint(&wq)
+		util.LogInfo("[TCP-DEBUG] CreateEndpoint returned, err=%v", err)
 		if err != nil {
-			util.LogWarn("tun: tcp CreateEndpoint fail: %v", err)
+			util.LogWarn("[TCP-DEBUG] tcp CreateEndpoint fail: %v", err)
 			r.Complete(true)
 			return
 		}
+		util.LogInfo("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn")
 		r.Complete(false)
 		defer ep.Close()
 
@@ -1551,13 +1610,16 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.
 func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
+	util.LogInfo("[TCP-DEBUG] handleConn called dst=%s:%d", dstAddr, dstPort)
 	defer conn.Close()
 
 	// Check if this is a Fake-IP: restore original domain.
 	var domain string
-	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
-		domain = d
-		util.LogDebug("tun: fake-ip %s -> %s", dstAddr, domain)
+	if e.fakeIP != nil {
+		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
+			domain = d
+			util.LogDebug("tun: fake-ip %s -> %s", dstAddr, domain)
+		}
 	}
 
 	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)

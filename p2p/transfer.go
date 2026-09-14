@@ -224,7 +224,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 		chunkData, err := m.receiveChunk(peer, i)
 		if err != nil {
 			util.LogError("[P2P] failed to receive chunk %d: %v", i, err)
-			peer.Status = "failed"
+			peer.Status = "update_failed"
 			return
 		}
 
@@ -237,7 +237,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 			ack := UpdateAck{Cmd: "update_ack", Status: "chunk_mismatch"}
 			data, _ := json.Marshal(ack)
 			enqueueWrite(peer, reverse.FrameData, data)
-			peer.Status = "failed"
+			peer.Status = "update_failed"
 			return
 		}
 
@@ -254,7 +254,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 		ack := UpdateAck{Cmd: "update_ack", Status: "error", Error: "file hash mismatch"}
 		data, _ := json.Marshal(ack)
 		enqueueWrite(peer, reverse.FrameData, data)
-		peer.Status = "failed"
+		peer.Status = "update_failed"
 		return
 	}
 
@@ -262,7 +262,7 @@ func (m *P2PManager) handleManifest(peer *Peer, payload []byte) {
 	cachePath, err := m.cache.StoreFromReader(manifest.Platform, manifest.Arch, manifest.BuildTag, manifest.Version, &buf)
 	if err != nil {
 		util.LogError("[P2P] failed to store in cache: %v", err)
-		peer.Status = "failed"
+		peer.Status = "update_failed"
 		return
 	}
 

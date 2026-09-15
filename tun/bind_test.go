@@ -13,14 +13,15 @@ import (
 )
 
 func TestBindToInterface(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		// On Windows interface-index binding uses IP_UNICAST_IF, which forces
 		// packets out the specified interface but bypasses the route-table
 		// next-hop. When a TUN session is active its split-tunnel routes grab
 		// most traffic, so binding to the physical interface cannot reliably
 		// reach external hosts. Skip this test unless explicitly enabled.
+		// Same issue on macOS with TUN active.
 		if os.Getenv("PHAETHON_TEST_BIND") == "" {
-			t.Skip("interface binding test skipped on Windows; set PHAETHON_TEST_BIND=1 to enable")
+			t.Skipf("interface binding test skipped on %s; set PHAETHON_TEST_BIND=1 to enable", runtime.GOOS)
 		}
 	}
 

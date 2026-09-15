@@ -26,6 +26,7 @@ type DNSHijacker struct {
 	udpEP   tcpip.Endpoint
 	wq      waiter.Queue
 	started bool
+	closeCh chan struct{}
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -35,6 +36,7 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 		pool:    pool,
 		tunAddr: tunAddr,
 		dnsAddr: dnsAddr,
+		closeCh: make(chan struct{}),
 	}
 }
 
@@ -64,10 +66,13 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 	return nil
 }
 
-// Stop closes the UDP endpoint.
+// Stop closes the UDP endpoint and signals serveLoop to exit.
 func (h *DNSHijacker) Stop() {
-	if h.started && h.udpEP != nil {
-		h.udpEP.Close()
+	if h.started {
+		close(h.closeCh)
+		if h.udpEP != nil {
+			h.udpEP.Close()
+		}
 	}
 }
 
@@ -105,7 +110,11 @@ func (h *DNSHijacker) serveLoop() {
 		res, err := h.udpEP.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 		if err != nil {
 			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
-				<-ch
+				select {
+				case <-ch:
+				case <-h.closeCh:
+					return
+				}
 				continue
 			}
 			util.LogWarn("tun dns: read error: %v", err)

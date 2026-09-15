@@ -308,12 +308,20 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	m.domainSuffixes = domainSuffixes
 	m.advertise = advertise
 	m.mu.Unlock()
-	m.eventCh <- meshEvent{kind: meshEventConfigUpdate}
+	select {
+	case m.eventCh <- meshEvent{kind: meshEventConfigUpdate}:
+	default:
+		util.LogDebug("[MESH] eventCh full, dropping config update event")
+	}
 }
 
 // TriggerGossip sends an immediate gossip broadcast.
 func (m *MeshManager) TriggerGossip() {
-	m.eventCh <- meshEvent{kind: meshEventTick}
+	select {
+	case m.eventCh <- meshEvent{kind: meshEventTick}:
+	default:
+		util.LogDebug("[MESH] eventCh full, dropping trigger gossip event")
+	}
 }
 
 func (m *MeshManager) TopologyRef() *Topology {
@@ -431,12 +439,20 @@ func (m *MeshManager) ResolveGatewayGIP(domain string) net.IP {
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
-	m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}
+	select {
+	case m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}:
+	default:
+		util.LogDebug("[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
+	}
 }
 
 // UnregisterPeer is called when a P2P peer disconnects.
 func (m *MeshManager) UnregisterPeer(sender PeerSender) {
-	m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}
+	select {
+	case m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}:
+	default:
+		util.LogDebug("[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
+	}
 }
 
 // HandleOutboundPacket is the TUN readLoop interceptor.
@@ -755,7 +771,11 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	if info.NodeID == m.nodeID {
 		return
 	}
-	m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}
+	select {
+	case m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}:
+	default:
+		util.LogDebug("[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
+	}
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {
@@ -1058,7 +1078,7 @@ func (m *MeshManager) gossipLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			m.eventCh <- meshEvent{kind: meshEventTick}
+			m.broadcastGossip()
 		case ev := <-m.eventCh:
 			switch ev.kind {
 			case meshEventRegister:
@@ -1085,8 +1105,6 @@ func (m *MeshManager) gossipLoop() {
 					m.recomputeRoutes()
 					m.broadcastGossip()
 				}
-			case meshEventTick:
-				m.broadcastGossip()
 			case meshEventConfigUpdate:
 				m.recomputeRoutes()
 				m.broadcastGossip()

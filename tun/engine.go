@@ -1206,21 +1206,18 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 //   - other → re-inject for local delivery (forwarder/hijacker receive via promiscuous mode)
 func (e *Engine) writeLoop() {
 	defer e.wg.Done()
-	for {
-		select {
-		case <-e.closeCh:
-			return
-		default:
-		}
 
-		pkt := e.linkEP.Read()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-e.closeCh
+		cancel()
+	}()
+
+	for {
+		pkt := e.linkEP.ReadContext(ctx)
 		if pkt == nil {
-			select {
-			case <-e.closeCh:
-				return
-			case <-time.After(10 * time.Millisecond):
-			}
-			continue
+			return
 		}
 
 		buf := pkt.ToBuffer()

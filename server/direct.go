@@ -42,7 +42,15 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	}
 
 	connID := util.NextConnID()
-	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
+	var targetConn net.Conn
+	var err error
+	if dialer.IsMeshEnabled() {
+		// Mode B: mesh enabled, route through netstack for mesh routing
+		util.LogInfo("[DIRECT-SVR] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, req.DstAddr, req.DstPort)
+		targetConn, err = dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
+	} else {
+		targetConn, err = dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
+	}
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
 		connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, req.DstAddr, req.DstPort, matchResult, "fail", err)

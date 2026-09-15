@@ -1776,13 +1776,8 @@ func (e *Engine) queryInternalDNS(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("engine disabled or no netstack")
 	}
 
-	if e.dnsHijack != nil {
-		if resp, err := e.dnsHijack.Resolve(query); err == nil {
-			return resp, nil
-		}
-		// Fall back to netstack path if direct resolve fails.
-	}
-
+	// Always use netstack packet path so writeLoop's tryDNSRedirect can
+	// intercept DNS queries for remote mesh nodes (Mode B mesh routing).
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: e.dnsAddr, Port: 53}
 	conn, err := gonet.DialUDP(e.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {

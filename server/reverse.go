@@ -655,7 +655,15 @@ func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Ma
 	}
 
 	connID := util.NextConnID()
-	targetConn, err := dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
+	var targetConn net.Conn
+	var err error
+	if dialer.IsMeshEnabled() {
+		// Mode B: mesh enabled, route through netstack for mesh routing
+		util.LogInfo("[REVERSE-GENERIC] [%s] [%s] Mode B: mesh routing for %s:%d", mapping.Name, connID, req.DstAddr, req.DstPort)
+		targetConn, err = dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
+	} else {
+		targetConn, err = dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
+	}
 	if err != nil {
 		util.LogError("[REVERSE-GENERIC] [%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, req.DstAddr, req.DstPort, err)
 		return

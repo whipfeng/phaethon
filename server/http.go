@@ -70,7 +70,15 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	}
 
 	connID := util.NextConnID()
-	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
+	var targetConn net.Conn
+	var err error
+	if dialer.IsMeshEnabled() {
+		// Mode B: mesh enabled, route through netstack for mesh routing
+		util.LogInfo("[HTTP-CONNECT] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort)
+		targetConn, err = dialer.ModeBMeshDial(addrReq.DstAddr, addrReq.DstPort)
+	} else {
+		targetConn, err = dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
+	}
 	if err != nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
 		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)
@@ -109,7 +117,15 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	}
 
 	connID := util.NextConnID()
-	targetConn, err := dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
+	var targetConn net.Conn
+	var err error
+	if dialer.IsMeshEnabled() {
+		// Mode B: mesh enabled, route through netstack for mesh routing
+		util.LogInfo("[HTTP-FWD] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort)
+		targetConn, err = dialer.ModeBMeshDial(addrReq.DstAddr, addrReq.DstPort)
+	} else {
+		targetConn, err = dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
+	}
 	if err != nil {
 		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
 		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)

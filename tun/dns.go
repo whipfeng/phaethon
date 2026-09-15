@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"phaethon/util"
 
@@ -26,6 +27,15 @@ type DNSHijacker struct {
 	udpEP   tcpip.Endpoint
 	wq      waiter.Queue
 	started bool
+
+	// meshGatewayResolver returns the GIP of the mesh gateway for a domain.
+	// Returns nil if the domain should be resolved locally.
+	meshGatewayResolver func(domain string) net.IP
+}
+
+// SetMeshGatewayResolver sets the callback for resolving mesh gateway GIPs.
+func (h *DNSHijacker) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
+	h.meshGatewayResolver = resolver
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -131,6 +141,25 @@ func (h *DNSHijacker) serveLoop() {
 
 		var resp []byte
 
+		// Check if domain belongs to another mesh node
+		if h.meshGatewayResolver != nil {
+			util.LogDebug("[DNS-DEBUG] DNSHijacker: checking mesh gateway for domain=%s", domain)
+			if remoteGIP := h.meshGatewayResolver(domain); remoteGIP != nil {
+				util.LogInfo("[DNS-DEBUG] DNSHijacker: forwarding %s to mesh gateway %s", domain, remoteGIP)
+				// Forward DNS query to remote mesh gateway
+				resp = h.forwardDNSQuery(packet, remoteGIP)
+				if resp != nil {
+					if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
+						util.LogWarn("tun dns: write response to %s:%d fail: %v", res.RemoteAddr.Addr, res.RemoteAddr.Port, err)
+					} else {
+						util.LogDebug("tun dns: %s -> response from mesh (%d bytes)", domain, len(resp))
+					}
+					continue
+				}
+				// If forward failed, fall through to local resolution
+			}
+		}
+
 		// Local pool resolution
 		fakeIP := h.pool.Lookup(domain)
 		util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
@@ -144,6 +173,60 @@ func (h *DNSHijacker) serveLoop() {
 		} else {
 			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 		}
+	}
+}
+
+// forwardDNSQuery sends a DNS query to a remote mesh gateway and returns the response.
+// Returns nil if the query fails or times out.
+func (h *DNSHijacker) forwardDNSQuery(query []byte, remoteGIP net.IP) []byte {
+	var wq waiter.Queue
+	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		util.LogWarn("tun dns: forward: new endpoint: %v", err)
+		return nil
+	}
+	defer ep.Close()
+
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		util.LogWarn("tun dns: forward: bind: %v", err)
+		return nil
+	}
+
+	remoteAddr := tcpip.FullAddress{
+		Addr: tcpip.AddrFromSlice(remoteGIP.To4()),
+		Port: 53,
+	}
+	if err := ep.Connect(remoteAddr); err != nil {
+		util.LogWarn("tun dns: forward: connect: %v", err)
+		return nil
+	}
+
+	// Register waiter before write
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	// Send query
+	if _, err := ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{}); err != nil {
+		util.LogWarn("tun dns: forward: write: %v", err)
+		return nil
+	}
+
+	// Wait for response with timeout
+	select {
+	case <-ch:
+		// Read response
+		var buf bytes.Buffer
+		buf.Grow(512)
+		res, err := ep.Read(&buf, tcpip.ReadOptions{})
+		if err != nil {
+			util.LogWarn("tun dns: forward: read: %v", err)
+			return nil
+		}
+		return buf.Bytes()[:res.Total]
+	case <-time.After(5 * time.Second):
+		util.LogWarn("tun dns: forward: timeout waiting for response from %s", remoteGIP)
+		return nil
 	}
 }
 

@@ -1045,5 +1045,10 @@ func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping
 		return nil, fmt.Errorf("[HT-SVR] [%s] [%s] rejected %s:%d", mapping.Name, connID, dstHost, dstPort)
 	}
 
+	if dialer.IsMeshEnabled() {
+		// Mode B: mesh enabled, route through netstack for mesh routing
+		util.LogInfo("[HT-SVR] [%s] [%s] Mode B: mesh routing for %s:%d", mapping.Name, connID, req.DstAddr, req.DstPort)
+		return dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
+	}
 	return dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
 }

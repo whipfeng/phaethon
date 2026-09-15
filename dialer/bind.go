@@ -34,6 +34,22 @@ var GlobalNetstackDialFunc func(network, addr string) (net.Conn, error)
 // When set, DirectDialer uses this for domain resolution before netstack dialing.
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 
+// IsMeshEnabled returns true if mesh networking is active (netstack dial is available).
+func IsMeshEnabled() bool {
+	return GlobalNetstackDialFunc != nil
+}
+
+// ModeBMeshDial dials through the gVisor netstack for Mode B (proxy server) mesh routing.
+// Returns error if mesh is not enabled. Used by server handlers (SOCKS5, trojan, HTTP, etc.)
+// to route traffic through mesh when enabled.
+func ModeBMeshDial(dstAddr string, dstPort int) (net.Conn, error) {
+	if GlobalNetstackDialFunc == nil {
+		return nil, fmt.Errorf("mesh not enabled")
+	}
+	directDialer := &DirectDialer{}
+	return directDialer.Dial(dstAddr, dstPort)
+}
+
 // SetGlobalBindContext injects the context captured by the TUN engine. Passing
 // nil clears the context and restores standard dial behavior.
 func SetGlobalBindContext(bc *BindContext) {

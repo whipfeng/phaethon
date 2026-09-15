@@ -339,7 +339,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			continue
 		}
 		isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
-		if !isCompatible || proxy.Server == "" {
+		if !isCompatible {
 			continue
 		}
 		if !meshEnabled && !proxy.P2P {

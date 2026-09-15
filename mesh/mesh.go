@@ -477,7 +477,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		pkt := make([]byte, len(data))
 		copy(pkt, data)
 
-		if dstIP[0] == 100 && dstIP[1] == 64 {
+		if isMeshAddress(dstIP) {
 			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (of %d available)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
 			if len(pkt) >= 20 && pkt[9] == 6 {
 				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
@@ -489,7 +489,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
 			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 				dst := net.IP(pkt[16:20])
-				if dst[0] == 100 && dst[1] == 64 {
+				if isMeshAddress(dst) {
 					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
 				}
 			}
@@ -499,14 +499,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 	// No peer owns this IP — check if it's in our local subnet
 	if m.subnet != nil && m.subnet.Contains(dstIP) {
-		if dstIP[0] == 100 && dstIP[1] == 64 {
+		if isMeshAddress(dstIP) {
 			util.LogDebug("[MESH] outbound %s: local subnet %s, passing through", dstIP, m.subnetStr)
 		}
 		return false
 	}
 
 	// Not in local subnet and no peer found — pass through
-	if dstIP[0] == 100 && dstIP[1] == 64 {
+	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] outbound %s: no peer found, passing through", dstIP)
 	}
 	return false
@@ -529,7 +529,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], len(frame))
 
-	if dstIP[0] == 100 && dstIP[1] == 64 {
+	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
 		if len(frame) >= 20 && frame[9] == 6 {
 			logTCPPacketMesh("[TCP-DEBUG] recv:", frame)
@@ -677,7 +677,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if frame[8] <= 1 {
-		if dstIP[0] == 100 && dstIP[1] == 64 {
+		if isMeshAddress(dstIP) {
 			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d dropped (TTL<=1)", fromNodeID, dstIP, frame[8])
 		}
 		return
@@ -687,7 +687,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if peer == nil {
 		// No mesh route — we're the gateway for this destination.
 		// Inject into local netstack so it goes out via proxy/direct.
-		if dstIP[0] == 100 && dstIP[1] == 64 {
+		if isMeshAddress(dstIP) {
 			proto := "unknown"
 			if len(frame) >= 20 {
 				switch frame[9] {
@@ -711,7 +711,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	if dstIP[0] == 100 && dstIP[1] == 64 {
+	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] recv frame from %s: dst=%s forwarding to %s", fromNodeID, dstIP, peer.GetNodeID())
 	}
 	pkt := make([]byte, len(frame))

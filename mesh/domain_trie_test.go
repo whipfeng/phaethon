@@ -26,9 +26,9 @@ func peerID(p *PeerInfo) string {
 func TestDomainTrie_InsertAndLookup(t *testing.T) {
 	trie := NewDomainTrie()
 
-	trie.Insert("google.com", makePeer("node-a"), 1)
-	trie.Insert("api.github.com", makePeer("node-b"), 1)
-	trie.Insert("github.com", makePeer("node-c"), 1)
+	trie.Insert("google.com", makePeer("node-a"), nil, 1)
+	trie.Insert("api.github.com", makePeer("node-b"), nil, 1)
+	trie.Insert("github.com", makePeer("node-c"), nil, 1)
 
 	tests := []struct {
 		domain       string
@@ -47,7 +47,7 @@ func TestDomainTrie_InsertAndLookup(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		nextHop, length := trie.Lookup(tt.domain)
+		nextHop, _, length := trie.Lookup(tt.domain)
 		if peerID(nextHop) != tt.expectedNode {
 			t.Errorf("Lookup(%q) nodeID = %q, want %q", tt.domain, peerID(nextHop), tt.expectedNode)
 		}
@@ -60,21 +60,21 @@ func TestDomainTrie_InsertAndLookup(t *testing.T) {
 func TestDomainTrie_LongestMatch(t *testing.T) {
 	trie := NewDomainTrie()
 
-	trie.Insert("com", makePeer("root"), 1)
-	trie.Insert("google.com", makePeer("google"), 1)
-	trie.Insert("api.google.com", makePeer("api"), 1)
+	trie.Insert("com", makePeer("root"), nil, 1)
+	trie.Insert("google.com", makePeer("google"), nil, 1)
+	trie.Insert("api.google.com", makePeer("api"), nil, 1)
 
-	nextHop, _ := trie.Lookup("api.google.com")
+	nextHop, _, _ := trie.Lookup("api.google.com")
 	if peerID(nextHop) != "api" {
 		t.Errorf("expected 'api', got %q", peerID(nextHop))
 	}
 
-	nextHop, _ = trie.Lookup("www.google.com")
+	nextHop, _, _ = trie.Lookup("www.google.com")
 	if peerID(nextHop) != "google" {
 		t.Errorf("expected 'google', got %q", peerID(nextHop))
 	}
 
-	nextHop, _ = trie.Lookup("example.com")
+	nextHop, _, _ = trie.Lookup("example.com")
 	if peerID(nextHop) != "root" {
 		t.Errorf("expected 'root', got %q", peerID(nextHop))
 	}
@@ -82,14 +82,14 @@ func TestDomainTrie_LongestMatch(t *testing.T) {
 
 func TestDomainTrie_CaseInsensitive(t *testing.T) {
 	trie := NewDomainTrie()
-	trie.Insert("Google.COM", makePeer("node-a"), 1)
+	trie.Insert("Google.COM", makePeer("node-a"), nil, 1)
 
-	nextHop, _ := trie.Lookup("API.google.com")
+	nextHop, _, _ := trie.Lookup("API.google.com")
 	if peerID(nextHop) != "node-a" {
 		t.Errorf("case insensitive match failed, got %q", peerID(nextHop))
 	}
 
-	nextHop, _ = trie.Lookup("api.GOOGLE.COM")
+	nextHop, _, _ = trie.Lookup("api.GOOGLE.COM")
 	if peerID(nextHop) != "node-a" {
 		t.Errorf("case insensitive match failed, got %q", peerID(nextHop))
 	}
@@ -98,14 +98,14 @@ func TestDomainTrie_CaseInsensitive(t *testing.T) {
 func TestDomainTrie_LeadingDot(t *testing.T) {
 	trie := NewDomainTrie()
 
-	trie.Insert(".google.com", makePeer("node-a"), 1)
+	trie.Insert(".google.com", makePeer("node-a"), nil, 1)
 
-	nextHop, _ := trie.Lookup("google.com")
+	nextHop, _, _ := trie.Lookup("google.com")
 	if peerID(nextHop) != "node-a" {
 		t.Errorf("leading dot insert failed, got %q", peerID(nextHop))
 	}
 
-	nextHop, _ = trie.Lookup("api.google.com")
+	nextHop, _, _ = trie.Lookup("api.google.com")
 	if peerID(nextHop) != "node-a" {
 		t.Errorf("leading dot insert subdomain failed, got %q", peerID(nextHop))
 	}
@@ -114,10 +114,10 @@ func TestDomainTrie_LeadingDot(t *testing.T) {
 func TestDomainTrie_HopPreference(t *testing.T) {
 	trie := NewDomainTrie()
 
-	trie.Insert("google.com", makePeer("far"), 5)
-	trie.Insert("google.com", makePeer("near"), 1)
+	trie.Insert("google.com", makePeer("far"), nil, 5)
+	trie.Insert("google.com", makePeer("near"), nil, 1)
 
-	nextHop, _ := trie.Lookup("google.com")
+	nextHop, _, _ := trie.Lookup("google.com")
 	if peerID(nextHop) != "near" {
 		t.Errorf("expected lower hop 'near', got %q", peerID(nextHop))
 	}

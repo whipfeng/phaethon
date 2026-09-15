@@ -7,10 +7,12 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -27,6 +29,49 @@ type DNSHijacker struct {
 	wq      waiter.Queue
 	started bool
 	closeCh chan struct{}
+
+	// Cross-node DNS forwarding
+	resolveDomainSubnet func(domain string) *net.IPNet // nil = local or no match
+	cache               *DNSCache
+}
+
+// DNSCache caches domain → Fake-IP mappings from remote DNS hijackers.
+type DNSCache struct {
+	mu      sync.RWMutex
+	entries map[string]*dnsCacheEntry
+}
+
+type dnsCacheEntry struct {
+	fakeIP net.IP
+	expiry time.Time
+}
+
+// NewDNSCache creates an empty DNS cache.
+func NewDNSCache() *DNSCache {
+	return &DNSCache{
+		entries: make(map[string]*dnsCacheEntry),
+	}
+}
+
+// Get returns the cached Fake-IP for a domain, or nil if not cached or expired.
+func (c *DNSCache) Get(domain string) net.IP {
+	c.mu.RLock()
+	e, ok := c.entries[domain]
+	c.mu.RUnlock()
+	if !ok || time.Now().After(e.expiry) {
+		return nil
+	}
+	return e.fakeIP
+}
+
+// Set stores a domain → Fake-IP mapping with a TTL.
+func (c *DNSCache) Set(domain string, fakeIP net.IP, ttl time.Duration) {
+	c.mu.Lock()
+	c.entries[domain] = &dnsCacheEntry{
+		fakeIP: fakeIP,
+		expiry: time.Now().Add(ttl),
+	}
+	c.mu.Unlock()
 }
 
 // NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
@@ -37,7 +82,14 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 		tunAddr: tunAddr,
 		dnsAddr: dnsAddr,
 		closeCh: make(chan struct{}),
+		cache:   NewDNSCache(),
 	}
+}
+
+// SetDomainResolver registers a callback that returns the remote Fake-IP subnet
+// for a domain. Returns nil for local domains or no match.
+func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) *net.IPNet) {
+	h.resolveDomainSubnet = resolver
 }
 
 // Start binds a UDP socket on port 53 inside netstack and starts the serve loop.
@@ -133,13 +185,51 @@ func (h *DNSHijacker) serveLoop() {
 			continue
 		}
 
-		// Extract source IP and port from remote address
 		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
 		srcPort := res.RemoteAddr.Port
 		util.LogDebug("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 
-		// Local pool resolution
-		fakeIP := h.pool.Lookup(domain)
+		// Check cache first
+		if cachedIP := h.cache.Get(domain); cachedIP != nil {
+			util.LogInfo("tun dns: %s -> %s (cached)", domain, cachedIP)
+			resp := buildDNSResponse(packet, cachedIP.To4())
+			if resp != nil {
+				h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+			}
+			continue
+		}
+
+		// Check if domain belongs to a remote node
+		var fakeIP net.IP
+		if h.resolveDomainSubnet != nil {
+			if remoteSubnet := h.resolveDomainSubnet(domain); remoteSubnet != nil {
+				// Forward to remote DNS hijacker
+				remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
+				if err != nil {
+					util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
+					// Fallback to local pool
+					fakeIP = h.pool.Lookup(domain)
+				} else {
+					fakeIP = remoteIP
+					if ttl < 30*time.Second {
+						ttl = 30 * time.Second
+					}
+					if ttl > 10*time.Minute {
+						ttl = 10 * time.Minute
+					}
+					h.cache.Set(domain, fakeIP, ttl)
+					util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, fakeIP, ttl)
+				}
+				resp := buildDNSResponse(packet, fakeIP.To4())
+				if resp != nil {
+					h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+				}
+				continue
+			}
+		}
+
+		// Local pool resolution (default)
+		fakeIP = h.pool.Lookup(domain)
 		util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
 		resp := buildDNSResponse(packet, fakeIP.To4())
 
@@ -152,6 +242,51 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 		}
 	}
+}
+
+// forwardToRemote sends a DNS query to the remote node's DNS hijacker via a
+// gvisor netstack UDP socket. The packet flows: netstack → writeLoop → mesh
+// routing → remote HandleMeshFrame → GIP path → InjectMeshPacket → remote DNS
+// hijacker. The response follows the reverse path.
+func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (net.IP, time.Duration, error) {
+	// Derive remote GIP (.3) from subnet
+	baseIP := remoteSubnet.IP.To4()
+	if baseIP == nil {
+		return nil, 0, fmt.Errorf("invalid remote subnet")
+	}
+	remoteGIP := make(net.IP, 4)
+	copy(remoteGIP, baseIP)
+	remoteGIP[3] |= 3
+
+	util.LogDebug("[DNS-DEBUG] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
+
+	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
+	conn, err := gonet.DialUDP(h.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return nil, 0, fmt.Errorf("set deadline: %v", err)
+	}
+
+	if _, err := conn.Write(query); err != nil {
+		return nil, 0, fmt.Errorf("write query: %v", err)
+	}
+
+	resp := make([]byte, 512)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read response: %v", err)
+	}
+
+	respIP, ttl := parseDNSResponseIP(resp[:n])
+	if respIP == nil {
+		return nil, 0, fmt.Errorf("no A record in response")
+	}
+	util.LogDebug("[DNS-DEBUG] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
+	return respIP, ttl, nil
 }
 
 type slicePayload struct {
@@ -272,29 +407,29 @@ func buildDNSQuery(domain string, txID uint16) []byte {
 	return pkt
 }
 
-// parseDNSResponseIP extracts the first A record IPv4 address from a DNS
-// response. It returns nil if the response is invalid or not an A record.
-func parseDNSResponseIP(resp []byte) net.IP {
+// parseDNSResponseIP extracts the first A record IPv4 address and TTL from a
+// DNS response. Returns (nil, 0) if the response is invalid or not an A record.
+func parseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
 	if len(resp) < 12 {
-		return nil
+		return nil, 0
 	}
 	flags := (uint16(resp[2]) << 8) | uint16(resp[3])
 	if flags&0x8000 == 0 { // not a response
-		return nil
+		return nil, 0
 	}
 	if flags&0x000f != 0 { // RCODE != 0
-		return nil
+		return nil, 0
 	}
 	ancount := (uint16(resp[6]) << 8) | uint16(resp[7])
 	if ancount == 0 {
-		return nil
+		return nil, 0
 	}
 
 	// Skip question section.
 	off := 12
 	for {
 		if off >= len(resp) {
-			return nil
+			return nil, 0
 		}
 		llen := int(resp[off])
 		off++
@@ -306,7 +441,7 @@ func parseDNSResponseIP(resp []byte) net.IP {
 			break
 		}
 		if llen > 63 || off+llen > len(resp) {
-			return nil
+			return nil, 0
 		}
 		off += llen
 	}
@@ -314,14 +449,14 @@ func parseDNSResponseIP(resp []byte) net.IP {
 
 	// Parse first answer.
 	if off >= len(resp) {
-		return nil
+		return nil, 0
 	}
 	if resp[off]&0xc0 == 0xc0 {
 		off += 2
 	} else {
 		for {
 			if off >= len(resp) {
-				return nil
+				return nil, 0
 			}
 			llen := int(resp[off])
 			off++
@@ -333,24 +468,25 @@ func parseDNSResponseIP(resp []byte) net.IP {
 				break
 			}
 			if llen > 63 || off+llen > len(resp) {
-				return nil
+				return nil, 0
 			}
 			off += llen
 		}
 	}
 	if off+10 > len(resp) {
-		return nil
+		return nil, 0
 	}
 	rtype := (uint16(resp[off]) << 8) | uint16(resp[off+1])
+	ttl := time.Duration((uint32(resp[off+4])<<24)|(uint32(resp[off+5])<<16)|(uint32(resp[off+6])<<8)|uint32(resp[off+7])) * time.Second
 	rdlen := (uint16(resp[off+8]) << 8) | uint16(resp[off+9])
 	off += 10
 	if rtype != 0x0001 || rdlen != 4 {
-		return nil
+		return nil, 0
 	}
 	if off+4 > len(resp) {
-		return nil
+		return nil, 0
 	}
-	return net.IP(resp[off : off+4])
+	return net.IP(resp[off : off+4]), ttl
 }
 
 // isFakeIP reports whether the given IP string is in the Fake-IP range

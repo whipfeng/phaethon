@@ -400,41 +400,21 @@ func (m *MeshManager) Stop() {
 	close(m.closeCh)
 }
 
-// GetGatewayGIPForDomain returns the GIP (.3) address of the gateway for a domain.
-// Returns nil if no gateway is found or the gateway is ourselves.
-func (m *MeshManager) GetGatewayGIPForDomain(domain string) net.IP {
+// ResolveDomainSubnet looks up a domain in the domain trie and returns the
+// Fake-IP subnet of the remote node that owns the matching suffix.
+// Returns nil if the domain is local (this node owns the suffix) or no match.
+func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	m.routesMu.RLock()
 	trie := m.domainTrie
 	m.routesMu.RUnlock()
 	if trie == nil {
 		return nil
 	}
-
-	nextHop, _ := trie.Lookup(domain)
-	if nextHop == nil {
+	_, subnet, suffixLen := trie.Lookup(domain)
+	if suffixLen == 0 || subnet == nil {
 		return nil // own entry or no match
 	}
-
-	// Derive GIP from next-hop peer's subnet
-	if nextHop.Subnet != nil {
-		return DeriveGIPFromSubnet(nextHop.Subnet)
-	}
-
-	// Fallback: peer has no subnet (stale connection), find another peer with same nodeID
-	targetNodeID := nextHop.NodeID()
-	peers := m.topology.GetAllPeers()
-	for _, peer := range peers {
-		if peer.Sender != nil && peer.Sender.GetNodeID() == targetNodeID && peer.Subnet != nil {
-			return DeriveGIPFromSubnet(peer.Subnet)
-		}
-	}
-	return nil
-}
-
-// ResolveGatewayGIP returns the GIP of the remote gateway that serves the given domain.
-// Returns nil if no gateway is found or the gateway is ourselves.
-func (m *MeshManager) ResolveGatewayGIP(domain string) net.IP {
-	return m.GetGatewayGIPForDomain(domain)
+	return subnet
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
@@ -583,34 +563,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		
-		// Check if this is a DNS response (UDP with src port 53)
-		headerLen := int(pkt[0]&0x0f) * 4
-		isDNS := pkt[9] == 17 && len(pkt) >= headerLen+4
-		if isDNS {
-			srcPort := uint16(pkt[headerLen])<<8 | uint16(pkt[headerLen+1])
-			isDNS = srcPort == 53
-		}
-		
-		var natPkt []byte
-		if isDNS {
-			// DNS response: rewrite src to local GIP so the app accepts it
-			localGIP := m.getGIP()
-			if localGIP != nil {
-				natPkt = m.natTable.TranslateInboundWithSrc(pkt, localGIP)
-			} else {
-				natPkt = m.natTable.TranslateInbound(pkt)
-			}
-		} else {
-			// TCP or other: keep original src IP (Fake-IP for TCP connections)
-			natPkt = m.natTable.TranslateInbound(pkt)
-		}
-		util.LogDebug("[MESH] VIP NAT reverse: isDNS=%v natPkt=%v", isDNS, natPkt != nil)
+
+		natPkt := m.natTable.TranslateInbound(pkt)
 		if natPkt != nil {
 			go func() {
 				if m.tun != nil {
-					util.LogDebug("[MESH] VIP NAT reverse success: writing packet to TUN src=%s dst=%s len=%d",
-						net.IP(natPkt[12:16]), net.IP(natPkt[16:20]), len(natPkt))
 					if err := m.tun.WriteMeshPacket(natPkt); err != nil {
 						util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
 					}
@@ -618,51 +575,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			}()
 			return
 		}
-		// NAT reverse failed — likely a DNS response from a remote gateway.
-		// The original query was redirected by tryDNSRedirect: src was rewritten
-		// from hostIP to VIP, then dst was changed from local GIP to remote GIP.
-		// The response comes back: src=remoteGIP, dst=VIP.
-		// We need: src=localGIP (what the app queried), dst=hostIP (original app).
-		util.LogDebug("[MESH] VIP NAT reverse failed for packet from %s: src=%s dst=%s proto=%d len=%d",
-			fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], len(frame))
-		pkt2 := make([]byte, len(frame))
-		copy(pkt2, frame)
-		localGIP := m.getGIP()
-		hostIP := m.getHostIP()
-		if localGIP != nil && hostIP != nil {
-			util.LogDebug("[MESH] VIP fallback: rewriting src=%s→%s dst=%s→%s",
-				net.IP(pkt2[12:16]), localGIP, net.IP(pkt2[16:20]), hostIP)
-			copy(pkt2[12:16], localGIP.To4())
-			copy(pkt2[16:20], hostIP.To4())
-			pkt2[10] = 0
-			pkt2[11] = 0
-			var sum uint32
-			hl := int(pkt2[0]&0x0f) * 4
-			for i := 0; i < hl-1; i += 2 {
-				sum += uint32(pkt2[i])<<8 | uint32(pkt2[i+1])
-			}
-			for sum>>16 > 0 {
-				sum = (sum & 0xffff) + (sum >> 16)
-			}
-			cksum := ^uint16(sum)
-			pkt2[10] = byte(cksum >> 8)
-			pkt2[11] = byte(cksum)
-			if pkt2[9] == 17 {
-				pkt2[hl+6] = 0
-				pkt2[hl+7] = 0
-			}
-			go func() {
-				if m.tun != nil {
-					util.LogDebug("[MESH] VIP fallback: writing packet to TUN src=%s dst=%s len=%d",
-						net.IP(pkt2[12:16]), net.IP(pkt2[16:20]), len(pkt2))
-					if err := m.tun.WriteMeshPacket(pkt2); err != nil {
-						util.LogWarn("[MESH] write VIP fallback packet to TUN failed: %v", err)
-					}
-				}
-			}()
-			return
-		}
-		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed and fallback failed", fromNodeID)
+		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed", fromNodeID)
 		return
 	}
 
@@ -988,7 +901,7 @@ func (m *MeshManager) recomputeRoutes() {
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
 	for _, s := range domainSuffixes {
-		trie.Insert(s, nil, 0)
+		trie.Insert(s, nil, nil, 0)
 	}
 	// Peer domain suffixes
 	for _, peer := range peers {
@@ -996,7 +909,7 @@ func (m *MeshManager) recomputeRoutes() {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			trie.Insert(entry.Suffix, peer, entry.Hop)
+			trie.Insert(entry.Suffix, peer, entry.Subnet, entry.Hop)
 		}
 	}
 
@@ -1212,10 +1125,11 @@ func (m *MeshManager) broadcastGossip() {
 	type globalDSEntry struct {
 		hop     int
 		nextHop *PeerInfo // nil = own entry
+		subnet  string    // Fake-IP subnet of the owning node
 	}
 	bestDS := make(map[string]globalDSEntry)
 	for _, s := range domainSuffixes {
-		bestDS[s] = globalDSEntry{0, nil}
+		bestDS[s] = globalDSEntry{0, nil, m.subnetStr}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
@@ -1223,7 +1137,7 @@ func (m *MeshManager) broadcastGossip() {
 		}
 		for _, entry := range peer.DomainSuffixes {
 			if existing, ok := bestDS[entry.Suffix]; !ok || entry.Hop < existing.hop {
-				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer}
+				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer, entry.SubnetStr}
 			}
 		}
 	}
@@ -1250,7 +1164,7 @@ func (m *MeshManager) broadcastGossip() {
 			if e.nextHop == peer {
 				continue // split horizon
 			}
-			ds = append(ds, GossipDomainSuffix{Suffix: suffix, Hop: e.hop})
+			ds = append(ds, GossipDomainSuffix{Suffix: suffix, Subnet: e.subnet, Hop: e.hop})
 		}
 
 		// Filter claimed subnets: exclude entries where nextHop == this peer

@@ -15,8 +15,10 @@ type PeerRouteEntry struct {
 
 // PeerDomainSuffixEntry represents a domain suffix learned from a peer, with hop count.
 type PeerDomainSuffixEntry struct {
-	Suffix string
-	Hop    int // hop count (already incremented on receive)
+	Suffix    string
+	Subnet    *net.IPNet // Fake-IP subnet of the node that owns this suffix
+	SubnetStr string
+	Hop       int // hop count (already incremented on receive)
 }
 
 // PeerClaimedSubnetEntry represents a subnet claim learned via gossip, with hop count.
@@ -57,6 +59,7 @@ type GossipRoute struct {
 // GossipDomainSuffix is a serializable domain suffix entry with hop count.
 type GossipDomainSuffix struct {
 	Suffix string `json:"suffix"`
+	Subnet string `json:"subnet,omitempty"` // Fake-IP subnet of the owning node, e.g. "100.0.0.0/16"
 	Hop    int    `json:"hop"`
 }
 
@@ -153,10 +156,18 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	// Parse domain suffixes (increment hop count for each entry)
 	var domainSuffixes []PeerDomainSuffixEntry
 	for _, ds := range info.DomainSuffixes {
-		domainSuffixes = append(domainSuffixes, PeerDomainSuffixEntry{
-			Suffix: ds.Suffix,
-			Hop:    ds.Hop + 1,
-		})
+		entry := PeerDomainSuffixEntry{
+			Suffix:    ds.Suffix,
+			SubnetStr: ds.Subnet,
+			Hop:       ds.Hop + 1,
+		}
+		if ds.Subnet != "" {
+			_, ipNet, err := net.ParseCIDR(ds.Subnet)
+			if err == nil {
+				entry.Subnet = ipNet
+			}
+		}
+		domainSuffixes = append(domainSuffixes, entry)
 	}
 
 	// Parse claimed subnets (increment hop count for each entry)
@@ -259,7 +270,7 @@ func domainSuffixesEqual(a, b []PeerDomainSuffixEntry) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Suffix != b[i].Suffix || a[i].Hop != b[i].Hop {
+		if a[i].Suffix != b[i].Suffix || a[i].SubnetStr != b[i].SubnetStr || a[i].Hop != b[i].Hop {
 			return false
 		}
 	}

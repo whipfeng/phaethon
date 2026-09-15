@@ -269,7 +269,7 @@ func TestQueryInternalDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queryInternalDNS failed: %v", err)
 	}
-	ip := parseDNSResponseIP(resp)
+	ip, _ := parseDNSResponseIP(resp)
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}
@@ -290,7 +290,7 @@ func TestDNSHijackerResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
-	ip := parseDNSResponseIP(resp)
+	ip, _ := parseDNSResponseIP(resp)
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}

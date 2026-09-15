@@ -174,7 +174,7 @@ func TestSingleNICDesign(t *testing.T) {
 			if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
 				t.Fatalf("socket read: %v", err)
 			}
-			fakeIPResp := parseDNSResponseIP(buf.Bytes())
+			fakeIPResp, _ := parseDNSResponseIP(buf.Bytes())
 			if fakeIPResp == nil {
 				t.Fatalf("failed to parse DNS response")
 			}

@@ -112,7 +112,6 @@ type Engine struct {
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 	natTable        *NATTable       // shared NAT table for TUN and mesh NAT
-	meshGatewayResolver func(domain string) net.IP // resolves domain to remote gateway GIP for DNS redirect
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 }
 
@@ -147,16 +146,19 @@ func (e *Engine) SetNATTable(nat *NATTable) {
 	e.natTable = nat
 }
 
-// SetMeshGatewayResolver registers a callback to resolve a domain to the remote gateway's GIP.
-func (e *Engine) SetMeshGatewayResolver(resolver func(domain string) net.IP) {
-	e.meshGatewayResolver = resolver
-	util.LogDebug("tun: mesh gateway resolver set")
-}
-
 // SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
 func (e *Engine) SetLocalMeshNodeID(nodeID string) {
 	e.localMeshNodeID = nodeID
 	util.LogDebug("tun: local mesh nodeID set: %s", nodeID)
+}
+
+// SetDNSDomainResolver registers a callback on the DNS hijacker that returns
+// the remote Fake-IP subnet for a domain (nil = local or no match).
+func (e *Engine) SetDNSDomainResolver(resolver func(domain string) *net.IPNet) {
+	if e.dnsHijack != nil {
+		e.dnsHijack.SetDomainResolver(resolver)
+		util.LogDebug("tun: DNS domain resolver set")
+	}
 }
 
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
@@ -218,7 +220,7 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
 		return nil, fmt.Errorf("resolve %s: read: %v", domain, err)
 	}
-	fakeIP := parseDNSResponseIP(buf.Bytes())
+	fakeIP, _ := parseDNSResponseIP(buf.Bytes())
 	if fakeIP == nil {
 		return nil, fmt.Errorf("resolve %s: bad response", domain)
 	}
@@ -345,14 +347,6 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 		util.LogDebug("tun: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
 		if len(data) >= 20 && data[9] == 6 {
 			logTCPPacket("[TCP-DEBUG] InjectMeshPacket:", data)
-		}
-	}
-
-	// DNS redirect: if this is a DNS query to local GIP and domain has a remote gateway,
-	// rewrite dst to next-hop GIP and forward via mesh (don't enter netstack).
-	if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
-		if redirected := e.tryDNSRedirect(data); redirected {
-			return nil
 		}
 	}
 
@@ -1073,33 +1067,6 @@ func (e *Engine) readLoop() {
 			}
 		}
 
-		// DNS debug: log queries destined for the local GIP (:53)
-		if e.meshSubnet != nil && n >= 28 && pktBuf[0]>>4 == 4 && pktBuf[9] == 17 {
-			dstIP := net.IP(pktBuf[16:20])
-			gip := make(net.IP, 4)
-			copy(gip, e.meshSubnet.IP.To4())
-			gip[3] |= 3
-			if dstIP.Equal(gip) {
-				headerLen := int(pktBuf[0]&0x0f) * 4
-				if headerLen >= 20 && headerLen+8 <= n {
-					dstPort := uint16(pktBuf[headerLen+2])<<8 | uint16(pktBuf[headerLen+3])
-					if dstPort == 53 {
-						domain, _ := parseDNSQueryDomain(pktBuf[headerLen+8:])
-						util.LogDebug("[DNS-DEBUG] readLoop: DNS query to GIP %s domain=%s src=%s",
-							gip, domain, net.IP(pktBuf[12:16]))
-					}
-				}
-			}
-		}
-
-		// Cross-node DNS redirect: intercept DNS queries to local GIP before netstack.
-		// Rewrite dst to remote gateway GIP and forward via mesh directly.
-		if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
-			if redirected := e.tryDNSRedirect(pktBuf); redirected {
-				continue
-			}
-		}
-
 		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
 		// The mesh interceptor checks its routing table (including gateway routes) to determine
 		// if the packet should be sent via mesh or handled normally.
@@ -1122,82 +1089,6 @@ func (e *Engine) readLoop() {
 		e.linkEP.InjectInbound(proto, pkt)
 		pkt.DecRef()
 	}
-}
-
-// tryDNSRedirect checks if the packet is a DNS query to the local GIP and redirects it
-// to the remote gateway that serves the queried domain. Returns true if redirected.
-func (e *Engine) tryDNSRedirect(pkt []byte) bool {
-	if len(pkt) < 28 { // min IP(20) + UDP(8)
-		return false
-	}
-	if pkt[0]>>4 != 4 || pkt[9] != 17 { // IPv4 + UDP only
-		return false
-	}
-
-	headerLen := int(pkt[0]&0x0f) * 4
-	if headerLen < 20 || headerLen+8 > len(pkt) {
-		return false
-	}
-
-	dstIP := net.IP(pkt[16:20])
-	dstPort := uint16(pkt[headerLen+2])<<8 | uint16(pkt[headerLen+3])
-	srcIP := net.IP(pkt[12:16])
-
-	// Check if dst is local GIP (.3)
-	gip := make(net.IP, 4)
-	copy(gip, e.meshSubnet.IP.To4())
-	gip[3] |= 3
-
-	// Debug: log all DNS queries to GIP
-	if dstPort == 53 && dstIP.Equal(gip) {
-		dnsPayload := pkt[headerLen+8:]
-		domain, _ := parseDNSQueryDomain(dnsPayload)
-		util.LogDebug("[DNS-DEBUG] tryDNSRedirect: src=%s dst=%s:%d domain=%s gip=%s", srcIP, dstIP, dstPort, domain, gip)
-	}
-
-	if !dstIP.Equal(gip) || dstPort != 53 {
-		return false
-	}
-
-	// Parse DNS domain from UDP payload
-	dnsPayload := pkt[headerLen+8:]
-	domain, ok := parseDNSQueryDomain(dnsPayload)
-	if !ok || domain == "" {
-		return false
-	}
-
-	remoteGIP := e.meshGatewayResolver(domain)
-	util.LogDebug("[DNS-DEBUG] tryDNSRedirect: domain=%s remoteGIP=%v", domain, remoteGIP)
-	if remoteGIP == nil {
-		return false
-	}
-
-	util.LogDebug("tun dns redirect: %s -> GIP %s (readLoop)", domain, remoteGIP)
-
-	// Rewrite dst IP to remote GIP
-	result := make([]byte, len(pkt))
-	copy(result, pkt)
-	copy(result[16:20], remoteGIP.To4())
-
-	// Recompute IP header checksum
-	result[10] = 0
-	result[11] = 0
-	var sum uint32
-	for i := 0; i < headerLen-1; i += 2 {
-		sum += uint32(result[i])<<8 | uint32(result[i+1])
-	}
-	for sum>>16 > 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	cksum := ^uint16(sum)
-	result[10] = byte(cksum >> 8)
-	result[11] = byte(cksum)
-
-	// Recompute UDP checksum
-	recomputeTCPUDPChecksum(result, headerLen, 17, net.IP(result[12:16]), net.IP(result[16:20]))
-
-	// Forward via mesh interceptor
-	return e.meshInterceptor(remoteGIP, result)
 }
 
 // writeLoop reads outbound packets from the single NIC and decides their fate:
@@ -1303,15 +1194,6 @@ func (e *Engine) writeLoop() {
 			}
 
 		} else {
-			// DNS redirect: intercept DNS queries to local GIP before re-injecting.
-			// This handles Mode B (netstack socket) DNS that goes through writeLoop.
-			if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
-				if redirected := e.tryDNSRedirect(data); redirected {
-					pkt.DecRef()
-					continue
-				}
-			}
-
 			// Re-inject for local delivery (forwarder/hijacker receive via promiscuous mode)
 			select {
 			case <-e.closeCh:
@@ -1773,8 +1655,9 @@ func (e *Engine) queryInternalDNS(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("engine disabled or no netstack")
 	}
 
-	// Always use netstack packet path so writeLoop's tryDNSRedirect can
-	// intercept DNS queries for remote mesh nodes (Mode B mesh routing).
+	// Use netstack UDP path to the DNS hijacker, which handles cross-node
+	// forwarding internally (local domains allocate Fake-IP, remote domains
+	// are forwarded to the remote node's DNS hijacker via mesh).
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: e.dnsAddr, Port: 53}
 	conn, err := gonet.DialUDP(e.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {

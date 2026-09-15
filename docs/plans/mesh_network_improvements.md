@@ -1,6 +1,6 @@
 # Mesh 网络改进设计
 
-> 版本: v0.5.0
+> 版本: v0.8.0
 > 日期: 2026-09-15
 > 状态: IMPLEMENTED
 > 负责人: Phaethon Dev
@@ -15,6 +15,9 @@
 | v0.3.0 | 2026-09-15 | MeshDial 不使用 DirectDialer，直接调用全局 netstack 函数；新增 ADR-4 | Qoder |
 | v0.4.0 | 2026-09-15 | 清理 DirectDialer 中的 netstack 路径（已无引用，避免误导） | Qoder |
 | v0.5.0 | 2026-09-15 | Mode B mesh 路由实现完成：MeshDial、server handler 统一、DNS hijacker 清理 | Qoder |
+| v0.6.0 | 2026-09-15 | ~~writeLoop 分支结构修复~~ → 废弃，改用统一 DNS hijacker 方案 | Qoder |
+| v0.7.0 | 2026-09-15 | ~~GIP 路径 src IP 重写~~ → 废弃，改用统一 DNS hijacker 方案 | Qoder |
+| v0.8.0 | 2026-09-15 | 统一 DNS hijacker 方案：删除 tryDNSRedirect 拦截，DNS hijacker 统一处理 Mode A/B DNS，支持跨节点转发和缓存 | Qoder |
 
 ## 1. 背景与目标
 
@@ -327,9 +330,192 @@ targetConn, err := dialer.MeshDial(dstAddr, dstPort)
    - 删除规则匹配和 proxy chain 逻辑
    - 统一调用 `dialer.MeshDial()`
 
-5. **验证 tryDNSRedirect 覆盖 Mode B**
-   - writeLoop 已有 `tryDNSRedirect` 调用
-   - 确认 Mode B 的 DNS 查询经过 writeLoop 时被正确拦截
+### 3.8 统一 DNS hijacker 方案（替代 tryDNSRedirect 拦截）
+
+**背景**：之前尝试在 writeLoop 中用 `tryDNSRedirect` 拦截 DNS 查询实现跨节点转发（v0.6.0/v0.7.0），但遇到以下问题：
+- Mode B 的 writeLoop 分支结构导致 `tryDNSRedirect` 被跳过
+- 修复分支结构后，DNS 响应回程需要 GIP 路径 src IP 重写 + checksum 重算
+- 链路太长：writeLoop 拦截 → mesh 转发 → 远端 hijacker → 响应 → mesh 回程 → GIP 路径重写 → netstack
+- Mode A/B 需要不同的处理路径，难以统一
+
+**新方案**：DNS hijacker 统一处理所有 DNS 查询（Mode A/B 不再区分），删除 writeLoop 拦截机制。
+
+#### 3.8.1 设计原则
+
+1. **DNS hijacker 是唯一的 DNS 处理入口** — 所有 DNS 查询（无论来自 Mode A 的 TUN 还是 Mode B 的 netstack socket）都到达 DNS hijacker
+2. **删除 tryDNSRedirect** — 不再在 writeLoop 或 InjectMeshPacket 中拦截 DNS 查询
+3. **删除 GIP 路径 src IP 重写** — 不再需要，因为 DNS 响应由 hijacker 直接返回
+4. **DNS hijacker 支持跨节点转发** — 本地域名直接分配 Fake-IP，远端域名转发到对应节点的 DNS hijacker
+5. **DNS 缓存** — hijacker 缓存远端返回的域名→Fake-IP 映射
+
+#### 3.8.2 数据流
+
+**本地域名查询**（域名后缀匹配本节点）：
+```
+查询方 → DNS hijacker（本地 GIP:53）
+  → 匹配本地域名后缀
+  → 从本地 Fake-IP 池分配地址
+  → 返回响应（src=localGIP, dst=查询方）
+```
+
+**远端域名查询**（域名后缀匹配远端节点）：
+```
+查询方 → 本地 DNS hijacker（localGIP:53）
+  → 匹配远端域名后缀
+  → 检查缓存：有则直接返回
+  → 无缓存：转发到远端 DNS hijacker（通过 mesh）
+  → 远端 hijacker 分配 Fake-IP，返回
+  → 本地 hijacker 缓存映射，返回给查询方
+```
+
+**Mode A（TUN 入口）流程**：
+```
+Windows 应用 → TUN → readLoop → NAT(src→VIP) → netstack → DNS hijacker
+  → hijacker 判断域名归属
+  → 本地：分配 Fake-IP，返回
+  → 远端：转发到远端 hijacker，等待响应，返回
+  → 响应 src=localGIP, dst=VIP → NAT reverse → TUN → 应用
+```
+
+**Mode B（代理入口）流程**：
+```
+SOCKS5 handler → MeshDial → ResolveDomain → netstack DNS endpoint → DNS hijacker
+  → hijacker 判断域名归属
+  → 本地：分配 Fake-IP，返回
+  → 远端：转发到远端 hijacker，等待响应，返回
+  → 响应 src=localGIP, dst=GIP → netstack endpoint → ResolveDomain 返回 Fake-IP
+  → MeshDial 用 Fake-IP 建立 TCP 连接 → mesh 路由到目标
+```
+
+#### 3.8.3 域名后缀通告增加网段字段
+
+当前 gossip 通告格式：
+```go
+type GossipDomainSuffix struct {
+    Suffix string `json:"suffix"`
+    Hop    int    `json:"hop"`
+}
+```
+
+新格式（增加网段字段）：
+```go
+type GossipDomainSuffix struct {
+    Suffix string `json:"suffix"`
+    Subnet string `json:"subnet"` // 该节点的 Fake-IP 网段，如 "100.2.0.0/16"
+    Hop    int    `json:"hop"`
+}
+```
+
+DNS hijacker 转发时，根据网段字段知道远端节点的 Fake-IP 范围，用于：
+1. 构造转发查询的目标地址（远端 GIP:53）
+2. 缓存时记录 Fake-IP 属于哪个网段
+
+#### 3.8.4 P2P 协议版本升级
+
+由于 gossip 格式变化（`GossipDomainSuffix` 增加 `subnet` 字段），需要升级 P2P 协议版本：
+- 当前：`P2PProtocolVersion = 1`
+- 升级：`P2PProtocolVersion = 2`
+- 旧版本（version=0 或 1）会被拒绝连接
+
+#### 3.8.5 DNS hijacker 转发实现
+
+DNS hijacker 新增以下能力：
+
+1. **域名后缀匹配**：根据 gossip 学到的 `suffix → subnet` 映射，判断域名归属
+2. **跨节点转发**：远端域名通过 gvisor netstack UDP socket 转发到远端节点的 DNS hijacker
+3. **缓存**：缓存远端返回的 `domain → Fake-IP` 映射，带 TTL
+
+**转发方式**：DNS hijacker 创建 gvisor UDP socket，Connect 到远端 GIP:53，发送原始 DNS 查询。数据包经过 netstack → writeLoop → meshInterceptor → mesh 路由到远端节点 → 远端 HandleMeshFrame → GIP 路径 → InjectMeshPacket → 远端 DNS hijacker。响应沿原路返回。
+
+```go
+// DNSHijacker 新增字段
+type DNSHijacker struct {
+    // ... 现有字段 ...
+    
+    // 跨节点 DNS 转发
+    domainSuffixes  *DomainTrie       // suffix → subnet 映射（从 gossip 学习）
+    cache           *DNSCache         // DNS 缓存
+    
+    // 本节点信息
+    localSubnet     *net.IPNet        // 本节点 Fake-IP 网段
+}
+
+// 转发示例（在 serveLoop 中）
+func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, error) {
+    // 从 subnet 推导远端 GIP
+    remoteGIP := DeriveGIPFromSubnet(subnet)
+    
+    // 创建 gvisor UDP socket，发送到远端 GIP:53
+    var wq waiter.Queue
+    ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+    // ... bind, connect to remoteGIP:53 ...
+    
+    // 发送 DNS 查询
+    ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{})
+    
+    // 等待响应
+    // ... read response, parse Fake-IP ...
+}
+```
+
+**优势**：
+- 不需要额外的 mesh DNS 转发接口
+- 复用现有的 netstack → writeLoop → mesh 路径
+- 远端 DNS hijacker 收到的查询和普通 DNS 查询一样处理
+
+#### 3.8.7 需要回退的拦截点（完整清单）
+
+**tun/engine.go**（8 处）：
+1. Line 115: `meshGatewayResolver` 字段声明
+2. Lines 150-153: `SetMeshGatewayResolver()` 方法
+3. Lines 351-357: `InjectMeshPacket` 中的 `tryDNSRedirect` 调用
+4. Lines 1076-1093: readLoop 中的 DNS debug 日志
+5. Lines 1095-1101: readLoop 中的 `tryDNSRedirect` 调用
+6. Lines 1127-1197: `tryDNSRedirect` 函数本身
+7. Lines 1306-1313: writeLoop 中的 `tryDNSRedirect` 调用
+8. Line 1776-1777: `queryInternalDNS` 注释引用 tryDNSRedirect
+
+**tun/dns.go**（1 处）：
+9. Line 139: `[DNS-DEBUG]` 日志
+
+**mesh/mesh.go**（5 处）：
+10. Lines 403-432: `GetGatewayGIPForDomain` 方法
+11. Lines 434-438: `ResolveGatewayGIP` 方法
+12. Lines 587-607: VIP 路径中 DNS 响应特殊处理（isDNS 检测 + `TranslateInboundWithSrc`）— 统一 DNS hijacker 后 DNS 响应走 GIP 路径，VIP 路径不再需要 DNS 分支
+13. Lines 621-659: VIP NAT reverse 失败时的 fallback 代码（注释引用 tryDNSRedirect）— 同上，不再需要
+14. Lines 620-627（原 #12）: VIP 路径中引用 tryDNSRedirect 的注释
+
+**main_tun.go**（1 处）：
+15. Line 105: `engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)` 调用
+
+#### 3.8.8 实现步骤
+
+1. **回退所有拦截代码**（15 处，见 3.8.7 清单）
+   - tun/engine.go：删除 tryDNSRedirect 函数、meshGatewayResolver 字段、所有调用点
+   - mesh/mesh.go：删除 GetGatewayGIPForDomain、ResolveGatewayGIP、VIP 路径 DNS 特殊处理及 fallback
+   - main_tun.go：删除 SetMeshGatewayResolver 调用
+
+2. **升级 P2P 协议版本**
+   - p2p/p2p.go：`P2PProtocolVersion = 2`
+
+3. **扩展 gossip 格式**
+   - mesh/topology.go：`GossipDomainSuffix` 增加 `Subnet` 字段
+   - `PeerDomainSuffixEntry` 增加 `Subnet` 字段
+   - 更新 gossip 序列化/反序列化
+
+4. **DNS hijacker 增加跨节点转发能力**
+   - tun/dns.go：新增 domainSuffixes trie、cache
+   - serveLoop 中判断域名归属：本地直接分配，远端用 gvisor socket 转发
+   - 从 gossip 更新 domainSuffixes
+
+5. **DNS 缓存**
+   - tun/dns.go：实现简单的 DNS 缓存（domain → Fake-IP + TTL）
+   - 缓存命中时直接返回，不转发
+
+6. **部署验证**（需同时部署所有节点）
+   - 验证 Mode A DNS（TUN 入口）
+   - 验证 Mode B DNS（SOCKS5 入口）
+   - 验证 DNS 缓存生效
 
 ## 4. 关键设计决策
 
@@ -342,14 +528,16 @@ targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 - 规则匹配用于决定流量是否走代理，但 Mode B 本身就是代理入口
 - 简化实现，避免不必要的复杂性
 
-### 4.2 ADR-2: DNS 转发在 writeLoop 而非 DNS hijacker
+### 4.2 ADR-2: DNS 转发在 DNS hijacker 而非 writeLoop
 
-**决策**：跨节点 DNS 转发在 writeLoop 的 `tryDNSRedirect` 中实现，不在 DNS hijacker 中。
+**决策**：跨节点 DNS 转发在 DNS hijacker 中实现，不在 writeLoop 中拦截。
 
 **理由**：
-- writeLoop 是所有 netstack 出站包的统一拦截点
-- `tryDNSRedirect` 已经实现了域名解析 + GIP 重写 + mesh 转发的完整流程
-- 在 DNS hijacker 中转发需要额外的 endpoint 创建和超时管理，复杂且容易出错
+- DNS hijacker 是所有 DNS 查询的统一入口（Mode A/B 不再区分）
+- writeLoop 拦截需要复杂的地址重写（src IP + checksum），且 Mode A/B 路径不同
+- DNS hijacker 可以直接判断域名归属、做缓存、转发到远端 hijacker
+- 简化数据流：查询 → hijacker → （本地分配 | 远端转发） → 响应
+- ~~v0.6.0/v0.7.0 的 tryDNSRedirect 方案已废弃~~
 
 ### 4.3 ADR-3: MeshDial 统一抽象
 
@@ -386,7 +574,7 @@ targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 | `config/config.go` | Mesh.Network 字段 + GetNetwork() | ✓ 已完成 |
 | `main.go` | mesh 初始化 + Auto P2P | ✓ 已完成 |
 | `dialer/bind.go` | 删除 IsMeshEnabled/ModeBMeshDial，新增 MeshDial | ✓ 已完成 |
-| `dialer/direct.go` | 删除 netstack 路径（GlobalNetstackDialFunc/GlobalDNSResolverFunc 分支），只保留 OS socket | ✓ 已完成 |
+| `dialer/direct.go` | 删除 netstack 路径，只保留 OS socket | ✓ 已完成 |
 | `tun/dns.go` | 删除 meshGatewayResolver 相关代码 | ✓ 已完成 |
 | `main_tun.go` | 删除 DNS hijacker SetMeshGatewayResolver 调用 | ✓ 已完成 |
 | `server/socks5.go` | 删除规则匹配，改用 MeshDial | ✓ 已完成 |
@@ -395,13 +583,19 @@ targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 | `server/htunnel.go` | 同上 | ✓ 已完成 |
 | `server/direct.go` | 同上 | ✓ 已完成 |
 | `server/reverse.go` | 同上 | ✓ 已完成 |
+| `tun/engine.go` | 删除 tryDNSRedirect、恢复 writeLoop 原始分支、删除 InjectMeshPacket 中的调用 | 待实现 |
+| `mesh/mesh.go` | 删除 GetGatewayGIPForDomain、ResolveGatewayGIP、VIP 路径 DNS 特殊处理及 fallback | 待实现 |
+| `p2p/p2p.go` | P2PProtocolVersion 升级到 2 | 待实现 |
+| `mesh/topology.go` | GossipDomainSuffix 增加 Subnet 字段 | 待实现 |
+| `tun/dns.go` | DNS hijacker 增加跨节点转发（gvisor socket）+ 缓存 | 待实现 |
 
 ## 6. 风险与回退
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| Mode B 删除规则匹配后无法回退 | 高 | Git 保留历史，可随时 revert |
-| DNS 转发依赖 writeLoop tryDNSRedirect | 中 | 已有 Mode A 验证，逻辑相同 |
+| P2P 版本升级导致不兼容 | 高 | 需同时部署所有节点（QG、VM、JF） |
+| DNS hijacker 转发增加延迟 | 中 | DNS 缓存减少跨节点查询 |
+| DNS hijacker 转发失败 | 中 | 缓存 + 超时回退到本地解析 |
 | 多 P2P 连接增加资源消耗 | 低 | 负载均衡提升可靠性，可接受 |
 
 ## 7. 验收标准
@@ -415,9 +609,19 @@ targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 - [x] 多 P2P 连接共存无驱逐循环
 - [x] 地址空间可配置（/8 网络，/16 子网）
 
+### 待实现项（统一 DNS hijacker 方案）
+
+- [ ] 删除 tryDNSRedirect 及相关代码
+- [ ] 删除 GIP 路径 DNS src 重写
+- [ ] P2P 协议版本升级到 2
+- [ ] GossipDomainSuffix 增加 Subnet 字段
+- [ ] DNS hijacker 支持跨节点转发（gvisor socket）
+- [ ] DNS hijacker 支持缓存
+
 ### 待验证项
 
-- [ ] Mode B 流量通过 mesh 路由（需部署后验证）
+- [ ] Mode A DNS（TUN 入口）跨节点解析正常
+- [ ] Mode B DNS（SOCKS5 入口）跨节点解析正常
+- [ ] DNS 缓存命中时不转发
+- [ ] P2P 版本不匹配时拒绝连接
 - [ ] 从 QG SOCKS5 代理访问 VM 服务正常
-- [ ] DNS 查询通过 writeLoop tryDNSRedirect 转发
-- [x] 无 IsMeshEnabled/ModeBMeshDial 残留代码

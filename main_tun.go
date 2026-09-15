@@ -102,7 +102,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		meshMgr.EnableNAT()
 		engine.SetNATTable(meshMgr.GetNATTable())
 
-		engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
@@ -113,6 +112,11 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		}
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
+
+		// Wire DNS hijacker's domain resolver for cross-node forwarding.
+		// The DNS hijacker uses this to determine if a domain belongs to a remote
+		// node and forwards the query via gvisor socket to the remote DNS hijacker.
+		engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
 
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}

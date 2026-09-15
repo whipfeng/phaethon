@@ -1134,12 +1134,15 @@ type meshEvent struct {
 
 func (m *MeshManager) broadcastGossip() {
 	if m.p2p == nil {
+		util.LogInfo("[MESH] broadcastGossip: p2p is nil")
 		return
 	}
 	allPeers := m.topology.GetAllPeers()
 	if len(allPeers) == 0 {
+		util.LogInfo("[MESH] broadcastGossip: no peers")
 		return
 	}
+	util.LogInfo("[MESH] broadcastGossip: sending to %d peers", len(allPeers))
 
 	m.mu.RLock()
 	advertise := make([]string, len(m.advertise))

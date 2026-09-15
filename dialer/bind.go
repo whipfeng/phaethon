@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"phaethon/util"
 )
 
 // BindContext holds the network context captured at TUN startup. It is used by
@@ -27,27 +29,41 @@ type BindContext struct {
 var globalBindContext atomic.Pointer[BindContext]
 
 // GlobalNetstackDialFunc dials through the gVisor netstack instead of the OS network stack.
-// When set, DirectDialer uses this for outbound connections, enabling mesh routing.
+// Used by MeshDial for outbound connections, enabling mesh routing.
 var GlobalNetstackDialFunc func(network, addr string) (net.Conn, error)
 
 // GlobalDNSResolverFunc resolves a domain name through the DNS hijacker, returning a fakeIP.
-// When set, DirectDialer uses this for domain resolution before netstack dialing.
+// Used by MeshDial for domain resolution before netstack dialing.
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 
-// IsMeshEnabled returns true if mesh networking is active (netstack dial is available).
-func IsMeshEnabled() bool {
-	return GlobalNetstackDialFunc != nil
-}
-
-// ModeBMeshDial dials through the gVisor netstack for Mode B (proxy server) mesh routing.
-// Returns error if mesh is not enabled. Used by server handlers (SOCKS5, trojan, HTTP, etc.)
-// to route traffic through mesh when enabled.
-func ModeBMeshDial(dstAddr string, dstPort int) (net.Conn, error) {
-	if GlobalNetstackDialFunc == nil {
-		return nil, fmt.Errorf("mesh not enabled")
+// MeshDial dials destination through mesh network.
+// Always uses netstack path: DNS resolution → Fake-IP → mesh routing.
+// Used by Mode B (proxy server) handlers for mesh routing.
+func MeshDial(dstAddr string, dstPort int) (net.Conn, error) {
+	if GlobalNetstackDialFunc == nil || GlobalDNSResolverFunc == nil {
+		return nil, fmt.Errorf("mesh not initialized")
 	}
-	directDialer := &DirectDialer{}
-	return directDialer.Dial(dstAddr, dstPort)
+
+	var targetAddr string
+	if ip := net.ParseIP(dstAddr); ip == nil {
+		// Domain: resolve through netstack DNS to get Fake-IP
+		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
+		if err != nil {
+			return nil, fmt.Errorf("mesh dns resolve %s: %w", dstAddr, err)
+		}
+		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
+	} else {
+		// IP: use directly
+		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+	}
+
+	// Dial through netstack, goes through writeLoop → mesh routing
+	conn, err := GlobalNetstackDialFunc("tcp", targetAddr)
+	if err != nil {
+		return nil, err
+	}
+	util.SetTCPNoDelay(conn)
+	return conn, nil
 }
 
 // SetGlobalBindContext injects the context captured by the TUN engine. Passing

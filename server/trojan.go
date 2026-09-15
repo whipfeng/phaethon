@@ -142,44 +142,21 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 		return
 	}
 
-	// Resolve and match
-	req := config.NewConnectRequest(dstAddr, dstPort)
-	req = s.RuleConf.Resolving(req)
-
-	proxy, matchResult := s.RuleConf.Match(req, s.Mapping)
-	if proxy == nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, req.DstAddr, req.DstPort)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
-		return
-	}
-	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[TROJAN-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
-		return
-	}
-
 	connID := util.NextConnID()
-	var targetConn net.Conn
-	var err error
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[TROJAN-SVR] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, req.DstAddr, req.DstPort)
-		targetConn, err = dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
-	} else {
-		targetConn, err = dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
-	}
+	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+
+	targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 	if err != nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
-		connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "fail", err)
+		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
-	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult)
+	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
+	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
 	defer connlog.RemoveActive(connID)
-	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
+	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
 // handleUDPAssociate handles Trojan UDP ASSOCIATE requests.

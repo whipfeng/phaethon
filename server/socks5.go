@@ -191,42 +191,12 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 		return
 	}
 
-	// Resolve and match
-	req := config.NewConnectRequest(dstAddr, dstPort)
-	req = s.RuleConf.Resolving(req)
-
-	proxy, matchResult := s.RuleConf.Match(req, s.Mapping)
-	if proxy == nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, req.DstAddr, req.DstPort)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
-		sendSocks5Response(clientConn, 0x04) // Host unreachable
-		return
-	}
-	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[SOCKS5-SVR] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, req.DstAddr, req.DstPort)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
-		sendSocks5Response(clientConn, 0x04) // Host unreachable
-		return
-	}
-
 	connID := util.NextConnID()
-	// Log as soon as the client request is known, before the outbound proxy
-	// connection is established. A separate "connect fail" or "-> ... via" line
-	// will follow once the dial result is known.
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via %s(%s) connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	var targetConn net.Conn
-	var err error
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[SOCKS5-SVR] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, req.DstAddr, req.DstPort)
-		targetConn, err = dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
-	} else {
-		targetConn, err = dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
-	}
+	targetConn, err := dialer.MeshDial(dstAddr, dstPort)
 	if err != nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, req.DstAddr, req.DstPort, err)
-		connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "fail", err)
+		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
@@ -234,18 +204,17 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
-	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, req.DstAddr, req.DstPort, matchResult)
+	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
+	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
 	defer connlog.RemoveActive(connID)
 
-	// Handshake complete — clear the deadline so the relay idle timeout
-	// (enforced inside RelayWithRateLimit) takes over.
+	// Handshake complete — clear the deadline so the relay idle timeout takes over.
 	if ds, ok := clientConn.(interface{ SetReadDeadline(time.Time) error }); ok {
 		ds.SetReadDeadline(time.Time{})
 	}
 
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
-	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
 func sendSocks5Response(conn net.Conn, status byte) {

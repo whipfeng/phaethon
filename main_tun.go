@@ -105,12 +105,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		engine.SetMeshGatewayResolver(meshMgr.ResolveGatewayGIP)
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
-		// Wire mesh gateway resolver to DNS hijacker for cross-node DNS resolution
-		if hijacker := engine.GetDNSHijacker(); hijacker != nil {
-			hijacker.SetMeshGatewayResolver(meshMgr.GetGatewayGIPForDomain)
-			util.LogInfo("DNS hijacker wired with mesh gateway resolver")
-		}
-
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		if pool := engine.GetFakeIPPool(); pool != nil {
 			meshMgr.DNSAllocator = func(domain string) (net.IP, error) {

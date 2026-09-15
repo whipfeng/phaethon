@@ -1035,20 +1035,8 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 	}
 }
 
-// Simplified H_Tunnel mapping handler - connects to target based on address from HTChannel
+// Simplified H_Tunnel mapping handler - connects to target through mesh network.
 func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, error) {
-	req := config.NewConnectRequest(dstHost, dstPort)
-	req = ruleConf.Resolving(req)
-
-	proxy, _ := ruleConf.Match(req, mapping)
-	if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		return nil, fmt.Errorf("[HT-SVR] [%s] [%s] rejected %s:%d", mapping.Name, connID, dstHost, dstPort)
-	}
-
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[HT-SVR] [%s] [%s] Mode B: mesh routing for %s:%d", mapping.Name, connID, req.DstAddr, req.DstPort)
-		return dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
-	}
-	return dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
+	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
+	return dialer.MeshDial(dstHost, dstPort)
 }

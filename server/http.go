@@ -52,83 +52,35 @@ func (s *HttpProxyServer) HandleConn(clientConn net.Conn) {
 func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) {
 	host, port := parseHostPort(req.Host, 443)
 
-	addrReq := config.NewConnectRequest(host, port)
-	addrReq = s.RuleConf.Resolving(addrReq)
-
-	proxy, matchResult := s.RuleConf.Match(addrReq, s.Mapping)
-	if proxy == nil {
-		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
-		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-		return
-	}
-	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[HTTP-CONNECT] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
-		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-		return
-	}
-
 	connID := util.NextConnID()
-	var targetConn net.Conn
-	var err error
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[HTTP-CONNECT] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort)
-		targetConn, err = dialer.ModeBMeshDial(addrReq.DstAddr, addrReq.DstPort)
-	} else {
-		targetConn, err = dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
-	}
+	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+
+	targetConn, err := dialer.MeshDial(host, port)
 	if err != nil {
-		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)
+		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer targetConn.Close()
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult)
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"})
 	defer connlog.RemoveActive(connID)
 
-	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
-	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
+	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
 func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req *http.Request) {
 	host, port := parseHostPort(req.Host, 80)
 
-	addrReq := config.NewConnectRequest(host, port)
-	addrReq = s.RuleConf.Resolving(addrReq)
-
-	proxy, matchResult := s.RuleConf.Match(addrReq, s.Mapping)
-	if proxy == nil {
-		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] all proxies dead (%s), rejecting %s:%d", s.Mapping.Name, matchResult.ProxyName, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", fmt.Errorf("all proxies dead"))
-		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-		return
-	}
-	if strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogInfo("[HTTP-FWD] [%s] [conn-N/A] rejected %s:%d", s.Mapping.Name, addrReq.DstAddr, addrReq.DstPort)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, &config.MatchResult{ProxyName: "REJECT"}, "reject", nil)
-		clientConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-		return
-	}
-
 	connID := util.NextConnID()
-	var targetConn net.Conn
-	var err error
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[HTTP-FWD] [%s] [%s] Mode B: mesh routing for %s:%d", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort)
-		targetConn, err = dialer.ModeBMeshDial(addrReq.DstAddr, addrReq.DstPort)
-	} else {
-		targetConn, err = dialer.ChainDialWithID(proxy, addrReq.DstAddr, addrReq.DstPort, connID)
-	}
+	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+
+	targetConn, err := dialer.MeshDial(host, port)
 	if err != nil {
-		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, addrReq.DstAddr, addrReq.DstPort, err)
-		connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "fail", err)
+		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -148,9 +100,9 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 		return
 	}
 
-	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via %s(%s)", s.Mapping.Name, connID, clientConn.RemoteAddr(), addrReq.DstAddr, addrReq.DstPort, proxy.Name, proxy.Type)
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, addrReq.DstAddr, addrReq.DstPort, matchResult)
+	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
+	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"})
 	defer connlog.RemoveActive(connID)
 
 	// Read response and forward back

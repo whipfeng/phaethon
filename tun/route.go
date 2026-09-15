@@ -5,12 +5,11 @@ import (
 	"sync"
 )
 
-// DefaultLANExclusions lists IPv4 private/local subnets that should bypass TUN
+// DefaultLANExclusions lists IPv4 local subnets that should bypass TUN
 // to avoid breaking local network connectivity and multicast traffic.
+// Note: Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are NOT
+// excluded, so they go through TUN and can be routed via proxy rules.
 var DefaultLANExclusions = []string{
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
 	"127.0.0.0/8",
 	"169.254.0.0/16",
 	"224.0.0.0/4",

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -646,30 +645,16 @@ func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Ma
 		return
 	}
 
-	req := config.NewConnectRequest(dstHost, dstPort)
-	req = ruleConf.Resolving(req)
-
-	proxy, _ := ruleConf.Match(req, mapping)
-	if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		return
-	}
-
 	connID := util.NextConnID()
-	var targetConn net.Conn
-	var err error
-	if dialer.IsMeshEnabled() {
-		// Mode B: mesh enabled, route through netstack for mesh routing
-		util.LogInfo("[REVERSE-GENERIC] [%s] [%s] Mode B: mesh routing for %s:%d", mapping.Name, connID, req.DstAddr, req.DstPort)
-		targetConn, err = dialer.ModeBMeshDial(req.DstAddr, req.DstPort)
-	} else {
-		targetConn, err = dialer.ChainDialWithID(proxy, req.DstAddr, req.DstPort, connID)
-	}
+	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d mesh dial connecting", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
+
+	targetConn, err := dialer.MeshDial(dstHost, dstPort)
 	if err != nil {
-		util.LogError("[REVERSE-GENERIC] [%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, req.DstAddr, req.DstPort, err)
+		util.LogError("[REVERSE-GENERIC] [%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d via %s(%s)", mapping.Name, connID, clientConn.RemoteAddr(), req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
-	util.RelayWithRateLimit(clientConn, targetConn, proxy.UpRateLimiter, proxy.DownRateLimiter)
+	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d via MESH", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
+	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }

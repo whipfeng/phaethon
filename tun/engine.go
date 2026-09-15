@@ -1306,6 +1306,15 @@ func (e *Engine) writeLoop() {
 			}
 
 		} else {
+			// DNS redirect: intercept DNS queries to local GIP before re-injecting.
+			// This handles Mode B (netstack socket) DNS that goes through writeLoop.
+			if e.meshGatewayResolver != nil && e.meshInterceptor != nil && e.meshSubnet != nil {
+				if redirected := e.tryDNSRedirect(data); redirected {
+					pkt.DecRef()
+					continue
+				}
+			}
+
 			// Re-inject for local delivery (forwarder/hijacker receive via promiscuous mode)
 			select {
 			case <-e.closeCh:

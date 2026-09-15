@@ -442,6 +442,19 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
+	// Debug: log all packets to mesh network
+	if isMeshAddress(dstIP) {
+		proto := "unknown"
+		if len(data) >= 20 && data[0]>>4 == 4 {
+			if data[9] == 6 {
+				proto = "TCP"
+			} else if data[9] == 17 {
+				proto = "UDP"
+			}
+		}
+		util.LogInfo("[MESH-DEBUG] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
+	}
+
 	// Exclude local netstack addresses (GIP .3, hostIP .2) from mesh interception.
 	// These packets must reach InjectInbound so the netstack's DNS hijacker can process them.
 	if m.isLocalNetstackAddr(dstIP) {
@@ -478,7 +491,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		copy(pkt, data)
 
 		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (of %d available)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
+			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (of %d)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
 			if len(pkt) >= 20 && pkt[9] == 6 {
 				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
 			}
@@ -525,6 +538,10 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if dstIP == nil {
 		util.LogWarn("[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
+	}
+	if isMeshAddress(dstIP) && len(frame) >= 20 && frame[9] == 6 {
+		dstPort := uint16(frame[22])<<8 | uint16(frame[23])
+		util.LogDebug("[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
 	}
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], len(frame))
@@ -683,6 +700,10 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
+	if isMeshAddress(dstIP) && len(frame) >= 20 && frame[9] == 6 {
+		util.LogDebug("[MESH] pre-findPeer: from=%s dst=%s TTL=%d", fromNodeID, dstIP, frame[8])
+	}
+
 	peer := m.findPeer(dstIP)
 	if peer == nil {
 		// No mesh route — we're the gateway for this destination.
@@ -712,7 +733,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if isMeshAddress(dstIP) {
-		util.LogDebug("[MESH] recv frame from %s: dst=%s forwarding to %s", fromNodeID, dstIP, peer.GetNodeID())
+		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s", fromNodeID, dstIP, peer.GetNodeID())
 	}
 	pkt := make([]byte, len(frame))
 	copy(pkt, frame)
@@ -938,6 +959,11 @@ func (m *MeshManager) recomputeRoutes() {
 		return lenI > lenJ
 	})
 
+	util.LogDebug("[MESH] routes recomputed: %d routes", len(routes))
+	for _, r := range routes {
+		util.LogDebug("[MESH]   %s -> %s", r.Prefix, r.Peer.GetNodeID())
+	}
+
 	// Build global domain trie
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
@@ -985,6 +1011,9 @@ func (m *MeshManager) findPeer(dstIP net.IP) PeerSender {
 
 	for _, route := range m.routes {
 		if route.Prefix.Contains(dstIP) {
+			if isMeshAddress(dstIP) {
+				util.LogDebug("[MESH] findPeer: dst=%s matched route prefix=%s via=%s", dstIP, route.Prefix, route.Peer.GetNodeID())
+			}
 			return route.Peer
 		}
 	}

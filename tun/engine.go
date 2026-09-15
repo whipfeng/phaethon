@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1678,7 +1679,17 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		return
 	}
 
-	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
+	if localNodeDomain {
+		localIP := dialer.GetLocalIPForDial(nil)
+		dialAddr := localIP.String()
+		util.LogInfo("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)
+		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
+		if err != nil {
+			util.LogWarn("[TUN] [%s] local dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
+			connlog.Log("TUN", "TCP", "", matchAddr, dialAddr, resolvedPort, matchResult, "fail", err)
+			return
+		}
+	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
 		util.LogInfo("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
@@ -1690,12 +1701,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	} else {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
-		if localNodeDomain {
-			// Local mesh nodeID domain: dial the local IP that DialRouteAware would bind to
-			localIP := dialer.GetLocalIPForDial(nil)
-			dialAddr = localIP.String()
-			util.LogInfo("[TCP-DEBUG] [%s] localNodeDomain=true, dialing %s:%d", connID, dialAddr, resolvedPort)
-		} else if domain != "" {
+		if domain != "" {
 			// Resolve the real IP for DIRECT connections.
 			util.LogInfo("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
 			ips, err := e.resolveForDirect(domain)

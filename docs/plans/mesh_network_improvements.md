@@ -18,6 +18,7 @@
 | v0.6.0 | 2026-09-15 | ~~writeLoop 分支结构修复~~ → 废弃，改用统一 DNS hijacker 方案 | Qoder |
 | v0.7.0 | 2026-09-15 | ~~GIP 路径 src IP 重写~~ → 废弃，改用统一 DNS hijacker 方案 | Qoder |
 | v0.8.0 | 2026-09-15 | 统一 DNS hijacker 方案：删除 tryDNSRedirect 拦截，DNS hijacker 统一处理 Mode A/B DNS，支持跨节点转发和缓存 | Qoder |
+| v0.9.0 | 2026-09-16 | 多链路路由优化：路由表存所有 peer，按跳数排序，同跳数轮询负载均衡 | Qoder |
 
 ## 1. 背景与目标
 
@@ -125,6 +126,129 @@ mesh:
 - `tun/engine.go`：readLoop 中检测 GIP:53 的 DNS 查询
 - `tun/engine.go`：tryDNSRedirect 中记录域名和 remoteGIP
 - `tun/dns.go`：DNSHijacker 中记录查询域名和来源
+
+### 2.8 多链路路由优化（设计中）
+
+**问题**：当前路由表只存一个 peer（最优路径），但多连接场景下需要二次查找所有同 nodeID 的连接，效率低且选路策略简单（纯随机）。
+
+**现状**：
+```go
+// 路由计算：只存一个 peer
+best[prefix] = globalEntry{hop, peer, subnet}
+
+// 包发送：二次查找
+peers := m.findPeers(dstIP)  // 先查路由表，再遍历所有 peer 找同 nodeID
+selectedPeer := peers[rand.Intn(len(peers))]  // 纯随机
+```
+
+**问题**：
+1. 路由表只存一个 peer，但发送时要重新查找所有同 nodeID 的连接 → O(n) 每次发包
+2. 纯随机选路 → 不考虑链路质量，可能频繁切换
+3. 路由重算后没有状态保持
+
+**新设计**：
+
+#### 2.8.1 路由表结构
+
+路由表直接存储所有可用 peer，按跳数排序：
+
+```go
+type MeshRoute struct {
+    Prefix  *net.IPNet
+    Peers   []PeerWithHop  // 按跳数排序
+    lastIdx int            // 轮询索引，路由重算时重置为 0
+}
+
+type PeerWithHop struct {
+    Peer PeerSender
+    Hop  int
+}
+```
+
+#### 2.8.2 路由计算（recomputeRoutes）
+
+收集所有 peer，按跳数排序：
+
+```go
+// 收集所有 peer 到每个前缀
+peerMap := make(map[string][]PeerWithHop)
+for _, peer := range peers {
+    for _, r := range peer.Routes {
+        peerMap[r.PrefixStr] = append(peerMap[r.PrefixStr], PeerWithHop{peer.Sender, r.Hop})
+    }
+}
+
+// 排序：跳数低的在前
+for prefix, peers := range peerMap {
+    sort.Slice(peers, func(i, j int) bool {
+        return peers[i].Hop < peers[j].Hop
+    })
+    routes = append(routes, MeshRoute{Prefix: prefix, Peers: peers, lastIdx: 0})
+}
+```
+
+#### 2.8.3 选路策略（HandleOutboundPacket）
+
+跳数低的优先，同跳数轮询：
+
+```go
+route := m.findRoute(dstIP)
+if route == nil || len(route.Peers) == 0 {
+    return false
+}
+
+// 找最低跳数
+minHop := route.Peers[0].Hop
+
+// 统计同跳数的 peer 数量
+count := 0
+for _, p := range route.Peers {
+    if p.Hop == minHop {
+        count++
+    } else {
+        break  // 已排序，遇到不同跳数就停止
+    }
+}
+
+// 轮询选择
+idx := route.lastIdx % count
+selectedPeer := route.Peers[idx].Peer
+route.lastIdx++
+
+// 发送
+selectedPeer.Send(pkt)
+```
+
+#### 2.8.4 路由重算时的状态重置
+
+路由重算时，`lastIdx` 重置为 0：
+
+```go
+func (m *MeshManager) recomputeRoutes() {
+    // ... 重新计算路由 ...
+    // 新路由的 lastIdx 默认为 0
+}
+```
+
+#### 2.8.5 优势
+
+| 维度 | 旧设计 | 新设计 |
+|------|--------|--------|
+| **路由表** | 存 1 个 peer | 存所有 peer（按跳数排序） |
+| **选路复杂度** | O(n) 每次发包 | O(1) 查路由表 + O(1) 轮询 |
+| **负载均衡** | 纯随机 | 同跳数轮询（round-robin） |
+| **状态保持** | 无 | lastIdx 记录上次选择 |
+| **跳数优先** | 隐式（路由表只存最优） | 显式（排序后选最低跳数组） |
+
+#### 2.8.6 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `mesh/mesh.go` | `MeshRoute` 结构改为存所有 peer + lastIdx |
+| `mesh/mesh.go` | `recomputeRoutes` 收集所有 peer 并排序 |
+| `mesh/mesh.go` | `findPeer` → `findRoute` 返回完整路由 |
+| `mesh/mesh.go` | `HandleOutboundPacket` 选路逻辑改为轮询 |
+| `mesh/mesh.go` | 删除 `findPeers` 方法（不再需要） |
 
 ## 3. Mode B Mesh 路由设计（待实现）
 
@@ -564,30 +688,26 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 | 文件 | 变更 | 状态 |
 |------|------|------|
-| `mesh/mesh.go` | VIP 路径 DNS/TCP 区分 + src IP 重写 + 可配置 network + findPeers | ✓ 已完成 |
+| `mesh/mesh.go` | VIP 路径简化 + 可配置 network + 多链路路由优化（路由表存所有 peer、按跳数排序、同跳数轮询） | ✓ v0.8 已完成 / v0.9 待实现 |
 | `mesh/forward.go` | meshCIDR 可配置（SetMeshCIDR/GetMeshCIDR） | ✓ 已完成 |
 | `mesh/state.go` | AllocateSubnet 支持可配置网络范围和子网前缀 | ✓ 已完成 |
+| `mesh/topology.go` | GossipDomainSuffix 增加 Subnet 字段 | ✓ 已完成 |
+| `mesh/domain_trie.go` | Insert/Lookup 增加 subnet 参数 | ✓ 已完成 |
 | `tun/nat.go` | TranslateInboundWithSrc、RewriteSrcIP 方法 | ✓ 已完成 |
-| `p2p/p2p.go` | P2P 协议版本校验 + 多连接共存 | ✓ 已完成 |
-| `dialer/bind.go` | GetLocalIPForDial + Auto P2P 支持 | ✓ 已完成 |
-| `tun/engine.go` | localNodeDomain 提前到代理匹配之前 | ✓ 已完成 |
+| `tun/dns.go` | DNS hijacker 跨节点转发（gvisor socket）+ 缓存 + TTL | ✓ 已完成 |
+| `tun/engine.go` | 删除 tryDNSRedirect、localNodeDomain 提前、SetDNSDomainResolver | ✓ 已完成 |
+| `p2p/p2p.go` | P2P 协议版本升级到 2 + 多连接共存 | ✓ 已完成 |
+| `dialer/bind.go` | GetLocalIPForDial + Auto P2P 支持 + MeshDial | ✓ 已完成 |
+| `dialer/direct.go` | 删除 netstack 路径，只保留 OS socket | ✓ 已完成 |
 | `config/config.go` | Mesh.Network 字段 + GetNetwork() | ✓ 已完成 |
 | `main.go` | mesh 初始化 + Auto P2P | ✓ 已完成 |
-| `dialer/bind.go` | 删除 IsMeshEnabled/ModeBMeshDial，新增 MeshDial | ✓ 已完成 |
-| `dialer/direct.go` | 删除 netstack 路径，只保留 OS socket | ✓ 已完成 |
-| `tun/dns.go` | 删除 meshGatewayResolver 相关代码 | ✓ 已完成 |
-| `main_tun.go` | 删除 DNS hijacker SetMeshGatewayResolver 调用 | ✓ 已完成 |
+| `main_tun.go` | 删除 SetMeshGatewayResolver，新增 SetDNSDomainResolver | ✓ 已完成 |
 | `server/socks5.go` | 删除规则匹配，改用 MeshDial | ✓ 已完成 |
 | `server/trojan.go` | 同上 | ✓ 已完成 |
 | `server/http.go` | 同上 | ✓ 已完成 |
 | `server/htunnel.go` | 同上 | ✓ 已完成 |
 | `server/direct.go` | 同上 | ✓ 已完成 |
 | `server/reverse.go` | 同上 | ✓ 已完成 |
-| `tun/engine.go` | 删除 tryDNSRedirect、恢复 writeLoop 原始分支、删除 InjectMeshPacket 中的调用 | 待实现 |
-| `mesh/mesh.go` | 删除 GetGatewayGIPForDomain、ResolveGatewayGIP、VIP 路径 DNS 特殊处理及 fallback | 待实现 |
-| `p2p/p2p.go` | P2PProtocolVersion 升级到 2 | 待实现 |
-| `mesh/topology.go` | GossipDomainSuffix 增加 Subnet 字段 | 待实现 |
-| `tun/dns.go` | DNS hijacker 增加跨节点转发（gvisor socket）+ 缓存 | 待实现 |
 
 ## 6. 风险与回退
 
@@ -609,19 +729,32 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - [x] 多 P2P 连接共存无驱逐循环
 - [x] 地址空间可配置（/8 网络，/16 子网）
 
-### 待实现项（统一 DNS hijacker 方案）
+### 已完成项（统一 DNS hijacker 方案）
 
-- [ ] 删除 tryDNSRedirect 及相关代码
-- [ ] 删除 GIP 路径 DNS src 重写
-- [ ] P2P 协议版本升级到 2
-- [ ] GossipDomainSuffix 增加 Subnet 字段
-- [ ] DNS hijacker 支持跨节点转发（gvisor socket）
-- [ ] DNS hijacker 支持缓存
+- [x] 删除 tryDNSRedirect 及相关代码
+- [x] 删除 GIP 路径 DNS src 重写
+- [x] P2P 协议版本升级到 2
+- [x] GossipDomainSuffix 增加 Subnet 字段
+- [x] DNS hijacker 支持跨节点转发（gvisor socket）
+- [x] DNS hijacker 支持缓存（TTL 从响应中提取）
+- [x] 跨节点 DNS 解析验证（VM→QG、VM→JF、QG→JF）
+- [x] 跨节点 TCP 连接验证
+
+### 待实现项（多链路路由优化）
+
+- [ ] MeshRoute 改为存所有 peer + lastIdx
+- [ ] recomputeRoutes 收集所有 peer 并按跳数排序
+- [ ] findPeer → findRoute 返回完整路由
+- [ ] HandleOutboundPacket 选路改为同跳数轮询
+- [ ] 删除 findPeers 方法
+- [ ] 路由重算时 lastIdx 重置为 0
 
 ### 待验证项
 
-- [ ] Mode A DNS（TUN 入口）跨节点解析正常
-- [ ] Mode B DNS（SOCKS5 入口）跨节点解析正常
-- [ ] DNS 缓存命中时不转发
-- [ ] P2P 版本不匹配时拒绝连接
-- [ ] 从 QG SOCKS5 代理访问 VM 服务正常
+- [x] Mode A DNS（TUN 入口）跨节点解析正常（VM→QG: qg.phn→100.0.0.7 ✓）
+- [x] Mode B DNS（SOCKS5 入口）跨节点解析正常（QG SOCKS5 → www.google.com→100.0.0.6 ✓）
+- [x] DNS 缓存命中时不转发（QG 日志显示 cached ✓）
+- [x] P2P 版本不匹配时拒绝连接（WIN7_VPN peer=1 local=2 被拒绝 ✓）
+- [x] VM→JF 跨节点 DNS（test.jf.local→100.2.0.4 ✓）
+- [x] 多跳 mesh 路由（VM→QG→JF ✓）
+- [ ] 多链路轮询负载均衡（待 v0.9 实现后验证）

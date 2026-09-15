@@ -69,6 +69,7 @@ func ParseNodeDomain(domain string) string {
 type TunInterface interface {
 	InjectMeshPacket(data []byte) error
 	WriteMeshPacket(data []byte) error
+	AddMeshRoute(subnet string) error
 }
 
 // PeerSender sends data directly to a connected peer.
@@ -392,7 +393,17 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	m.recomputeRoutes()
 	go m.gossipLoop()
-	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
+
+	// Add route to entire mesh network so packets to all mesh subnets go through TUN
+	if m.network != nil && tun != nil {
+		if err := tun.AddMeshRoute(m.network.String()); err != nil {
+			util.LogWarn("[MESH] add mesh network route %s failed: %v", m.network.String(), err)
+		} else {
+			util.LogInfo("[MESH] added mesh network route: %s", m.network.String())
+		}
+	}
+
+	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s network=%s", m.nodeID, m.vip, m.subnet, m.subnetStr, m.network)
 	util.LogInfo("[MESH-DEBUG] binary version with subnet logging")
 }
 

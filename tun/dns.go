@@ -127,7 +127,7 @@ func (h *DNSHijacker) serveLoop() {
 		// Extract source IP and port from remote address
 		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
 		srcPort := res.RemoteAddr.Port
-		util.LogInfo("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
+		util.LogDebug("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 
 		var resp []byte
 

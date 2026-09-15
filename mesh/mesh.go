@@ -27,7 +27,7 @@ func logTCPPacketMesh(prefix string, data []byte) {
 	dstIP := net.IP(data[16:20])
 	headerLen := int(data[0]&0x0f) * 4
 	if len(data) < headerLen+20 {
-		util.LogInfo("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
+		util.LogDebug("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
 		return
 	}
 	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
@@ -48,7 +48,7 @@ func logTCPPacketMesh(prefix string, data []byte) {
 	if flags&0x04 != 0 {
 		flagStr += "RST "
 	}
-	util.LogInfo("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
+	util.LogDebug("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
 		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
 }
 
@@ -115,6 +115,9 @@ type MeshManager struct {
 	p2p            P2PTransport
 	dataDir        string // for state file persistence
 
+	network         *net.IPNet // overall mesh network (e.g., 100.0.0.0/8)
+	subnetPrefixLen int        // per-node subnet prefix length (e.g., 16 for /16)
+
 	routesMu sync.RWMutex
 	routes   []MeshRoute // sorted by prefix length (longest first)
 	domainTrie *DomainTrie
@@ -126,18 +129,20 @@ type MeshManager struct {
 	eventCh  chan meshEvent
 }
 
-func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string) *MeshManager {
+func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string, network *net.IPNet, subnetPrefixLen int) *MeshManager {
 	return &MeshManager{
-		nodeID:         nodeID,
-		vip:            vip.To4(),
-		subnet:         subnet,
-		subnetStr:      subnetStr,
-		domainSuffixes: domainSuffixes,
-		advertise:      advertise,
-		topology:       NewTopology(),
-		routes:         make([]MeshRoute, 0),
-		closeCh:        make(chan struct{}),
-		eventCh:        make(chan meshEvent, 64),
+		nodeID:          nodeID,
+		vip:             vip.To4(),
+		subnet:          subnet,
+		subnetStr:       subnetStr,
+		domainSuffixes:  domainSuffixes,
+		advertise:       advertise,
+		topology:        NewTopology(),
+		network:         network,
+		subnetPrefixLen: subnetPrefixLen,
+		routes:          make([]MeshRoute, 0),
+		closeCh:         make(chan struct{}),
+		eventCh:         make(chan meshEvent, 64),
 	}
 }
 
@@ -193,7 +198,7 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 	// Mark our current subnet as used so we don't pick it again
 	usedSubnets[m.subnetStr] = true
 
-	newSubnetStr, err := AllocateSubnet(usedSubnets)
+	newSubnetStr, err := AllocateSubnet(m.network, m.subnetPrefixLen, usedSubnets)
 	if err != nil {
 		util.LogError("[MESH] subnet conflict: failed to allocate new subnet: %v", err)
 		return false
@@ -473,7 +478,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		copy(pkt, data)
 
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] outbound %s: sending %d bytes via peer %s (of %d available)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
+			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (of %d available)", dstIP, len(pkt), selectedPeer.GetNodeID(), len(peers))
 			if len(pkt) >= 20 && pkt[9] == 6 {
 				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
 			}
@@ -485,7 +490,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 				dst := net.IP(pkt[16:20])
 				if dst[0] == 100 && dst[1] == 64 {
-					util.LogInfo("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
+					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
 				}
 			}
 		}()
@@ -495,21 +500,21 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// No peer owns this IP — check if it's in our local subnet
 	if m.subnet != nil && m.subnet.Contains(dstIP) {
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] outbound %s: local subnet %s, passing through", dstIP, m.subnetStr)
+			util.LogDebug("[MESH] outbound %s: local subnet %s, passing through", dstIP, m.subnetStr)
 		}
 		return false
 	}
 
 	// Not in local subnet and no peer found — pass through
 	if dstIP[0] == 100 && dstIP[1] == 64 {
-		util.LogInfo("[MESH] outbound %s: no peer found, passing through", dstIP)
+		util.LogDebug("[MESH] outbound %s: no peer found, passing through", dstIP)
 	}
 	return false
 }
 
 // HandleMeshFrame processes a raw IP packet received from a peer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
-	util.LogInfo("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
+	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
 		return
@@ -521,24 +526,24 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		util.LogWarn("[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
 	}
-	util.LogInfo("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
+	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], len(frame))
 
 	if dstIP[0] == 100 && dstIP[1] == 64 {
-		util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
+		util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
 		if len(frame) >= 20 && frame[9] == 6 {
 			logTCPPacketMesh("[TCP-DEBUG] recv:", frame)
 		}
 	}
 
 	isVIP := m.isLocalVIP(dstIP)
-	util.LogInfo("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
+	util.LogDebug("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
 
 	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
 	// VIP is only for locally-originated connections (via NAT).
 	// If NAT reverse fails, drop the packet - it's not a valid response.
 	if isVIP {
-		util.LogInfo("[MESH] VIP path entered for packet from %s", fromNodeID)
+		util.LogDebug("[MESH] VIP path entered for packet from %s", fromNodeID)
 		if m.natTable == nil {
 			util.LogWarn("[MESH] VIP packet from %s dropped: natTable is nil", fromNodeID)
 			return
@@ -567,11 +572,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			// TCP or other: keep original src IP (Fake-IP for TCP connections)
 			natPkt = m.natTable.TranslateInbound(pkt)
 		}
-		util.LogInfo("[MESH] VIP NAT reverse: isDNS=%v natPkt=%v", isDNS, natPkt != nil)
+		util.LogDebug("[MESH] VIP NAT reverse: isDNS=%v natPkt=%v", isDNS, natPkt != nil)
 		if natPkt != nil {
 			go func() {
 				if m.tun != nil {
-					util.LogInfo("[MESH] VIP NAT reverse success: writing packet to TUN src=%s dst=%s len=%d",
+					util.LogDebug("[MESH] VIP NAT reverse success: writing packet to TUN src=%s dst=%s len=%d",
 						net.IP(natPkt[12:16]), net.IP(natPkt[16:20]), len(natPkt))
 					if err := m.tun.WriteMeshPacket(natPkt); err != nil {
 						util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
@@ -585,14 +590,14 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		// from hostIP to VIP, then dst was changed from local GIP to remote GIP.
 		// The response comes back: src=remoteGIP, dst=VIP.
 		// We need: src=localGIP (what the app queried), dst=hostIP (original app).
-		util.LogInfo("[MESH] VIP NAT reverse failed for packet from %s: src=%s dst=%s proto=%d len=%d",
+		util.LogDebug("[MESH] VIP NAT reverse failed for packet from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], len(frame))
 		pkt2 := make([]byte, len(frame))
 		copy(pkt2, frame)
 		localGIP := m.getGIP()
 		hostIP := m.getHostIP()
 		if localGIP != nil && hostIP != nil {
-			util.LogInfo("[MESH] VIP fallback: rewriting src=%s→%s dst=%s→%s",
+			util.LogDebug("[MESH] VIP fallback: rewriting src=%s→%s dst=%s→%s",
 				net.IP(pkt2[12:16]), localGIP, net.IP(pkt2[16:20]), hostIP)
 			copy(pkt2[12:16], localGIP.To4())
 			copy(pkt2[16:20], hostIP.To4())
@@ -615,7 +620,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			}
 			go func() {
 				if m.tun != nil {
-					util.LogInfo("[MESH] VIP fallback: writing packet to TUN src=%s dst=%s len=%d",
+					util.LogDebug("[MESH] VIP fallback: writing packet to TUN src=%s dst=%s len=%d",
 						net.IP(pkt2[12:16]), net.IP(pkt2[16:20]), len(pkt2))
 					if err := m.tun.WriteMeshPacket(pkt2); err != nil {
 						util.LogWarn("[MESH] write VIP fallback packet to TUN failed: %v", err)
@@ -673,7 +678,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 	if frame[8] <= 1 {
 		if dstIP[0] == 100 && dstIP[1] == 64 {
-			util.LogInfo("[MESH] recv frame from %s: dst=%s TTL=%d dropped (TTL<=1)", fromNodeID, dstIP, frame[8])
+			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d dropped (TTL<=1)", fromNodeID, dstIP, frame[8])
 		}
 		return
 	}
@@ -692,7 +697,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 					proto = "UDP"
 				}
 			}
-			util.LogInfo("[MESH] recv frame from %s: dst=%s proto=%s injecting to local netstack", fromNodeID, dstIP, proto)
+			util.LogDebug("[MESH] recv frame from %s: dst=%s proto=%s injecting to local netstack", fromNodeID, dstIP, proto)
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
@@ -707,7 +712,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	if dstIP[0] == 100 && dstIP[1] == 64 {
-		util.LogInfo("[MESH] recv frame from %s: dst=%s forwarding to %s", fromNodeID, dstIP, peer.GetNodeID())
+		util.LogDebug("[MESH] recv frame from %s: dst=%s forwarding to %s", fromNodeID, dstIP, peer.GetNodeID())
 	}
 	pkt := make([]byte, len(frame))
 	copy(pkt, frame)
@@ -844,7 +849,7 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 		if peer.NodeID() == nodeID && peer.Subnet != nil {
 			vip := DeriveVIPFromSubnet(peer.Subnet)
 			if vip != nil {
-				util.LogInfo("[MESH] DNS resolve: %s -> %s", domain, vip)
+				util.LogDebug("[MESH] DNS resolve: %s -> %s", domain, vip)
 			}
 			return vip
 		}
@@ -953,12 +958,12 @@ func (m *MeshManager) recomputeRoutes() {
 	m.routes = routes
 	m.domainTrie = trie
 	m.routesMu.Unlock()
-	util.LogInfo("[MESH] routes recomputed: %d routes", len(routes))
+	util.LogDebug("[MESH] routes recomputed: %d routes", len(routes))
 	for _, r := range routes {
-		util.LogInfo("[MESH]   %s -> %s", r.Prefix, r.Peer.GetNodeID())
+		util.LogDebug("[MESH]   %s -> %s", r.Prefix, r.Peer.GetNodeID())
 	}
 	// Log domain suffixes for debugging
-	util.LogInfo("[MESH] domain trie: own suffixes=%v", domainSuffixes)
+	util.LogDebug("[MESH] domain trie: own suffixes=%v", domainSuffixes)
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -968,7 +973,7 @@ func (m *MeshManager) recomputeRoutes() {
 			suffixes = append(suffixes, entry.Suffix)
 		}
 		if len(suffixes) > 0 {
-			util.LogInfo("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
+			util.LogDebug("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
 		}
 	}
 }

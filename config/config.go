@@ -1337,7 +1337,8 @@ func (t *TUNConfig) DirectNameserverList() []string {
 type MeshConfig struct {
 	Enabled        *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	NodeID         string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
-	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`
+	Network        string   `yaml:"network,omitempty" json:"network,omitempty"`     // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
+	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`       // This node's subnet (e.g., "100.0.0.0/16")
 	DomainSuffixes []string `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`
 	Advertise      []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
 }
@@ -1364,6 +1365,15 @@ func (m *MeshConfig) GetSubnet() string {
 		return ""
 	}
 	return m.Subnet
+}
+
+// GetNetwork returns the overall mesh network range (e.g., "100.0.0.0/8").
+// Defaults to "100.64.0.0/10" (CGNAT range, RFC 6598) for backward compatibility.
+func (m *MeshConfig) GetNetwork() string {
+	if m == nil || m.Network == "" {
+		return "100.64.0.0/10"
+	}
+	return m.Network
 }
 
 // GetDomainSuffixes returns the domain suffixes this node can resolve.

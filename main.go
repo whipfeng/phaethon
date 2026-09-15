@@ -236,6 +236,27 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// Initialize mesh overlay network if enabled
 	var meshMgr *mesh.MeshManager
 	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
+		// Set the overall mesh network range (e.g., 100.0.0.0/8)
+		meshNetworkStr := ruleConf.Mesh.GetNetwork()
+		_, meshNetwork, err := net.ParseCIDR(meshNetworkStr)
+		if err != nil {
+			return nil, fmt.Errorf("mesh network invalid: %w", err)
+		}
+		if err := mesh.SetMeshCIDR(meshNetworkStr); err != nil {
+			return nil, fmt.Errorf("mesh set network fail: %w", err)
+		}
+
+		// Determine subnet prefix length:
+		// - If config has an explicit subnet, use its prefix length
+		// - Otherwise, default to network_prefix + 8 (256 possible subnets)
+		networkPrefixLen, _ := meshNetwork.Mask.Size()
+		subnetPrefixLen := networkPrefixLen + 8
+		if cfgSubnet := ruleConf.Mesh.GetSubnet(); cfgSubnet != "" {
+			if _, cfgNet, err := net.ParseCIDR(cfgSubnet); err == nil {
+				subnetPrefixLen, _ = cfgNet.Mask.Size()
+			}
+		}
+
 		// Load or create mesh state (nodeID, subnet)
 		state, err := mesh.LoadState(dataDir)
 		if err != nil {
@@ -267,7 +288,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			state.Subnet = meshSubnetStr
 		} else if state.Subnet == "" {
 			// Auto-allocate (will be refined later with conflict detection)
-			state.Subnet, err = mesh.AllocateSubnet(nil)
+			state.Subnet, err = mesh.AllocateSubnet(meshNetwork, subnetPrefixLen, nil)
 			if err != nil {
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
@@ -288,12 +309,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 		advertise := ruleConf.Mesh.GetAdvertise()
-		meshMgr = mesh.NewMeshManager(state.NodeID, vip, nil, meshSubnet, state.Subnet, domainSuffixes, advertise)
+		meshMgr = mesh.NewMeshManager(state.NodeID, vip, nil, meshSubnet, state.Subnet, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
 		meshMgr.SetDataDir(dataDir)
 		mesh.GlobalMeshManager = meshMgr
 		p2p.GlobalP2PManager.SetMeshInfo(state.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s domainSuffixes=%v advertise=%v", state.NodeID, vip, state.Subnet, domainSuffixes, advertise)
+		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", state.NodeID, vip, state.Subnet, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference

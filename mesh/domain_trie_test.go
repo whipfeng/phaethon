@@ -8,8 +8,9 @@ type mockSender struct {
 	nodeID string
 }
 
-func (s *mockSender) Send(data []byte) error { return nil }
-func (s *mockSender) GetNodeID() string      { return s.nodeID }
+func (s *mockSender) Send(data []byte) error      { return nil }
+func (s *mockSender) SendGossip(data []byte)       {}
+func (s *mockSender) GetNodeID() string            { return s.nodeID }
 
 func makePeer(id string) *PeerInfo {
 	return &PeerInfo{Sender: &mockSender{nodeID: id}}

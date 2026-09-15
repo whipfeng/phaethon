@@ -155,11 +155,11 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if req.frameType == reverse.FrameMeshPacket {
-				util.LogInfo("[P2P] writing FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(req.data))
+				util.LogDebug("[P2P] writing FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(req.data))
 			}
 			if err := reverse.WriteFrame(peer.conn, req.frameType, req.data); err != nil {
 				_ = peer.conn.SetWriteDeadline(time.Time{})
-				util.LogInfo("[P2P] write error for %s: %v", peer.ID, err)
+				util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
 				peer.conn.Close()
 				return
 			}
@@ -171,12 +171,12 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 // enqueueWrite queues a frame for async write. Non-blocking: drops if channel is full.
 func enqueueWrite(peer *Peer, frameType byte, data []byte) {
 	if frameType == reverse.FrameMeshPacket {
-		util.LogInfo("[P2P] enqueue FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(data))
+		util.LogDebug("[P2P] enqueue FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(data))
 	}
 	select {
 	case peer.writeCh <- writeReq{frameType: frameType, data: data}:
 	default:
-		util.LogWarn("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, frameType)
+		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, frameType)
 	}
 }
 
@@ -188,7 +188,7 @@ func (m *P2PManager) HandleP2PConn(conn net.Conn, address string) {
 		Status:   "connecting",
 		LastSeen: time.Now(),
 		conn:     conn,
-		writeCh:  make(chan writeReq, 256),
+		writeCh:  make(chan writeReq, 1024),
 		stopCh:   make(chan struct{}),
 	}
 
@@ -264,7 +264,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 
 		peer.conn = conn
-		peer.writeCh = make(chan writeReq, 256)
+		peer.writeCh = make(chan writeReq, 1024)
 		peer.Status = "connecting"
 		util.LogInfo("[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
@@ -315,7 +315,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 			util.LogInfo("[P2P] read error for %s: %v", peer.ID, err)
 			return
 		}
-		util.LogInfo("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
+		util.LogDebug("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
 		// During chunk transfer, route chunk data and heartbeats to channel but still dispatch commands
 		peer.transferMu.Lock()
@@ -351,9 +351,9 @@ func (m *P2PManager) runSession(peer *Peer) {
 				m.handleCommand(peer, payload)
 			}
 		case reverse.FrameMeshPacket:
-			util.LogInfo("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
+			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
-				util.LogInfo("[P2P] calling HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
+				util.LogDebug("[P2P] calling HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
 				m.meshHandler.HandleMeshFrame(peer.MeshNodeID, payload)
 			} else {
 				util.LogWarn("[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
@@ -445,7 +445,7 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 			if payloadData != nil && peer.meshSender != nil {
 				m.meshHandler.HandleTopologyGossip(peer.meshSender, payloadData)
 			} else {
-				util.LogInfo("[P2P] mesh_gossip from %s dropped: payloadData=%v meshSender=%v", peer.ID, payloadData != nil, peer.meshSender != nil)
+				util.LogDebug("[P2P] mesh_gossip from %s dropped: payloadData=%v meshSender=%v", peer.ID, payloadData != nil, peer.meshSender != nil)
 			}
 		}
 	default:

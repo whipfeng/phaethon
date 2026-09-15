@@ -1068,7 +1068,7 @@ func (e *Engine) readLoop() {
 			dstIP := net.IP(pktBuf[16:20])
 			if dstIP[0] == 100 && dstIP[1] == 64 {
 				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-				util.LogInfo("[TCP-DEBUG] readLoop entry: TCP dst=%s:%d src=%s", dstIP, dstPort, net.IP(pktBuf[12:16]))
+				util.LogDebug("[TCP-DEBUG] readLoop entry: TCP dst=%s:%d src=%s", dstIP, dstPort, net.IP(pktBuf[12:16]))
 			}
 		}
 
@@ -1084,7 +1084,7 @@ func (e *Engine) readLoop() {
 					dstPort := uint16(pktBuf[headerLen+2])<<8 | uint16(pktBuf[headerLen+3])
 					if dstPort == 53 {
 						domain, _ := parseDNSQueryDomain(pktBuf[headerLen+8:])
-						util.LogInfo("[DNS-DEBUG] readLoop: DNS query to GIP %s domain=%s src=%s",
+						util.LogDebug("[DNS-DEBUG] readLoop: DNS query to GIP %s domain=%s src=%s",
 							gip, domain, net.IP(pktBuf[12:16]))
 					}
 				}
@@ -1109,7 +1109,7 @@ func (e *Engine) readLoop() {
 			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
 				srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
 				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-				util.LogInfo("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
+				util.LogDebug("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
 					dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
 			}
 			if e.meshInterceptor(dstIP, pktBuf) {
@@ -1151,7 +1151,7 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 	if dstPort == 53 && dstIP.Equal(gip) {
 		dnsPayload := pkt[headerLen+8:]
 		domain, _ := parseDNSQueryDomain(dnsPayload)
-		util.LogInfo("[DNS-DEBUG] tryDNSRedirect: src=%s dst=%s:%d domain=%s gip=%s", srcIP, dstIP, dstPort, domain, gip)
+		util.LogDebug("[DNS-DEBUG] tryDNSRedirect: src=%s dst=%s:%d domain=%s gip=%s", srcIP, dstIP, dstPort, domain, gip)
 	}
 
 	if !dstIP.Equal(gip) || dstPort != 53 {
@@ -1166,7 +1166,7 @@ func (e *Engine) tryDNSRedirect(pkt []byte) bool {
 	}
 
 	remoteGIP := e.meshGatewayResolver(domain)
-	util.LogInfo("[DNS-DEBUG] tryDNSRedirect: domain=%s remoteGIP=%v", domain, remoteGIP)
+	util.LogDebug("[DNS-DEBUG] tryDNSRedirect: domain=%s remoteGIP=%v", domain, remoteGIP)
 	if remoteGIP == nil {
 		return false
 	}
@@ -1624,7 +1624,9 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	if e.fakeIP != nil {
 		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 			domain = d
-			util.LogDebug("tun: fake-ip %s -> %s", dstAddr, domain)
+			util.LogInfo("[TCP-DEBUG] fake-ip lookup: %s -> %s", dstAddr, domain)
+		} else {
+			util.LogInfo("[TCP-DEBUG] fake-ip lookup: %s -> (no domain)", dstAddr)
 		}
 	}
 
@@ -1634,8 +1636,12 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		expectedDomain := e.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogDebug("tun: local mesh nodeID domain detected: %s -> 127.0.0.1", domain)
+			util.LogInfo("[TCP-DEBUG] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", domain, expectedDomain)
+		} else {
+			util.LogInfo("[TCP-DEBUG] domain %s != expected %s", domain, expectedDomain)
 		}
+	} else {
+		util.LogInfo("[TCP-DEBUG] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", domain, e.localMeshNodeID)
 	}
 
 	connID := util.NextConnID()
@@ -1652,6 +1658,11 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
 		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
+		if proxy != nil {
+			util.LogInfo("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
+		} else {
+			util.LogInfo("[TCP-DEBUG] rule match: %s:%d -> DIRECT (no proxy matched)", matchAddr, dstPort)
+		}
 	}
 
 	// Use the (possibly redirected) destination from Resolving
@@ -1668,21 +1679,25 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	}
 
 	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
+		util.LogInfo("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
 			connlog.Log("TUN", "TCP", "", matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
+		util.LogInfo("[TCP-DEBUG] [%s] proxy dial success", connID)
 	} else {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
 		if localNodeDomain {
-			// Local mesh nodeID domain: connect to localhost
-			dialAddr = "127.0.0.1"
-			util.LogDebug("[TUN] [%s] local mesh nodeID domain: %s -> %s", connID, domain, dialAddr)
+			// Local mesh nodeID domain: dial the local IP that DialRouteAware would bind to
+			localIP := dialer.GetLocalIPForDial(nil)
+			dialAddr = localIP.String()
+			util.LogInfo("[TCP-DEBUG] [%s] localNodeDomain=true, dialing %s:%d", connID, dialAddr, resolvedPort)
 		} else if domain != "" {
 			// Resolve the real IP for DIRECT connections.
+			util.LogInfo("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
@@ -1696,18 +1711,22 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 					break
 				}
 			}
-			util.LogDebug("[TUN] [%s] resolved %s -> %s for DIRECT", connID, domain, dialAddr)
+			util.LogInfo("[TCP-DEBUG] [%s] resolved %s -> %s", connID, domain, dialAddr)
+		} else {
+			util.LogInfo("[TCP-DEBUG] [%s] direct dial with no domain, addr=%s", connID, dialAddr)
 		}
+		util.LogInfo("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
 			connlog.Log("TUN", "TCP", "", matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
+		util.LogInfo("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
 	}
 	defer targetConn.Close()
 
-	util.LogDebug("[TUN] [%s] %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogInfo("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
 		// Preserve Rule and TimeRange from original matchResult if available
 		if matchResult != nil {

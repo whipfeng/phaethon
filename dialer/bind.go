@@ -165,6 +165,32 @@ func resolveIfaceForDst(bc *BindContext, dst net.IP) string {
 	return bc.ResolveIface(dst)
 }
 
+// GetLocalIPForDial returns the local IP that DialRouteAware would bind to for traffic to dst.
+// Used for local mesh connections where we need to dial the same IP we'd bind to.
+func GetLocalIPForDial(dst net.IP) net.IP {
+	bc := GetGlobalBindContext()
+	if bc == nil {
+		// No bind context, use loopback
+		return net.ParseIP("127.0.0.1")
+	}
+
+	ifaceName := resolveIfaceForDst(bc, dst)
+	if ifaceName == "" {
+		return net.ParseIP("127.0.0.1")
+	}
+
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return net.ParseIP("127.0.0.1")
+	}
+
+	localIP := selectLocalIP(iface.Index, dst)
+	if localIP == nil {
+		return net.ParseIP("127.0.0.1")
+	}
+	return localIP
+}
+
 // ResolveIface returns the interface name for traffic to dst by doing a
 // route lookup that excludes the TUN interface. Results are cached for 30s.
 func (b *BindContext) ResolveIface(dst net.IP) string {

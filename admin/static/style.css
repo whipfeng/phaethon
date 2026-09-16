@@ -868,6 +868,170 @@ code { font-family: 'SF Mono', Consolas, monospace; }
 details { cursor: pointer; }
 details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 
+/* Mesh Card Styles */
+.mesh-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+.mesh-metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+.mesh-metric-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+.mesh-metric-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.mesh-metric-mono {
+    font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+    font-size: 0.85rem;
+}
+.mesh-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color);
+}
+.mesh-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+}
+.mesh-section-header h4 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.mesh-topology-view {
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+.mesh-topology-view canvas {
+    max-width: 100%;
+    height: auto;
+}
+.mesh-peer-table,
+.mesh-route-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.mesh-peer-table th,
+.mesh-route-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border-color);
+}
+.mesh-peer-table td,
+.mesh-route-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+.mesh-peer-table tr:last-child td,
+.mesh-route-table tr:last-child td {
+    border-bottom: none;
+}
+.mesh-peer-table td:first-child {
+    font-weight: 600;
+    color: var(--accent);
+}
+.mesh-config-section {
+    border-top: 1px solid var(--border-color);
+}
+.mesh-config-section summary {
+    list-style: none;
+}
+.mesh-config-section summary::-webkit-details-marker {
+    display: none;
+}
+.mesh-config-section summary::before {
+    content: '▶';
+    display: inline-block;
+    margin-right: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    transition: transform 0.2s;
+}
+.mesh-config-section[open] summary::before {
+    transform: rotate(90deg);
+}
+.mesh-config-form {
+    margin-top: 0.75rem;
+}
+.mesh-config-form label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+    margin-top: 0.75rem;
+}
+.mesh-config-form label:first-child {
+    margin-top: 0;
+}
+.mesh-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+}
+.mesh-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.mesh-hop-badge {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+.mesh-hop-badge.direct {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--success);
+}
+.mesh-status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+}
+.mesh-status-dot.online { background: var(--success); }
+.mesh-status-dot.offline { background: var(--danger); }
+
 /* Responsive */
 @media (max-width: 768px) {
     .sidebar { width: 60px; }

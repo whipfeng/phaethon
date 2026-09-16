@@ -761,37 +761,183 @@ async function fetchMeshStatus() {
         if (!res.ok) return;
         const data = await res.json();
         if (!data.enabled) return;
+
+        // Key metrics
         document.getElementById('mesh-nodeid').textContent = data.nodeId || '-';
         document.getElementById('mesh-vip').textContent = data.vip || '-';
         document.getElementById('mesh-subnet').textContent = data.subnet || '-';
         document.getElementById('mesh-routecount').textContent = data.routeCount || 0;
-        document.getElementById('mesh-domain-suffixes').value = (data.domainSuffixes || []).join(', ');
-        document.getElementById('mesh-advertise').value = (data.advertise || []).join(', ');
-        if (data.topology && data.topology.peers) {
-            const tbody = document.getElementById('mesh-topology');
-            if (tbody) {
-                let html = '';
-                data.topology.peers.forEach(p => {
-                    const routes = (p.routes || []).map(r => r.prefix + ' hop=' + r.hop).join(', ');
-                    const suffixes = (p.domainSuffixes || []).map(d => d.suffix || d).join(', ');
-                    html += '<tr><td>' + p.nodeId + '</td><td>' + (p.subnet || '-') + '</td><td>' + (routes || '-') + '</td><td>' + (suffixes || '-') + '</td></tr>';
-                });
-                tbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No peers</td></tr>';
-            }
+
+        // Config
+        const suffixInput = document.getElementById('mesh-domain-suffixes');
+        const advertiseInput = document.getElementById('mesh-advertise');
+        if (suffixInput) suffixInput.value = (data.domainSuffixes || []).join(', ');
+        if (advertiseInput) advertiseInput.value = (data.advertise || []).join(', ');
+
+        // Build a lookup for direct status from data.peers
+        const directPeers = {};
+        (data.peers || []).forEach(p => { directPeers[p.nodeId] = p.direct; });
+
+        // Topology peers
+        const peers = (data.topology && data.topology.peers) || [];
+        const peerCountEl = document.getElementById('mesh-peercount');
+        if (peerCountEl) peerCountEl.textContent = peers.length;
+
+        const tbody = document.getElementById('mesh-topology');
+        if (tbody) {
+            let html = '';
+            peers.forEach(p => {
+                const lastSeen = p.lastSeen ? timeAgo(new Date(p.lastSeen)) : '-';
+                const isDirect = directPeers[p.nodeId] === true;
+                const statusClass = isDirect ? 'online' : 'offline';
+                const statusText = isDirect ? 'Direct' : 'Relay';
+                html += '<tr>';
+                html += '<td>' + escapeHtml(p.nodeId) + '</td>';
+                html += '<td><code>' + escapeHtml(p.subnet || '-') + '</code></td>';
+                html += '<td>-</td>';
+                html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                html += '<td>' + lastSeen + '</td>';
+                html += '</tr>';
+            });
+            tbody.innerHTML = html || '<tr><td colspan="5" class="text-muted">No peers</td></tr>';
         }
+
+        // Draw topology visualization
+        drawMeshTopology(data.nodeId, peers, directPeers);
+
+        // Routes
         if (data.routes && data.routes.routes) {
-            const tbody = document.getElementById('mesh-routes');
-            if (tbody) {
+            const routeTbody = document.getElementById('mesh-routes');
+            if (routeTbody) {
                 let html = '';
                 data.routes.routes.forEach(r => {
-                    html += '<tr><td>' + r.prefix + '</td><td>' + r.via + '</td></tr>';
+                    const viaList = r.via || [];
+                    if (viaList.length === 0) {
+                        html += '<tr><td><code>' + r.prefix + '</code></td><td class="text-muted">Local</td><td>-</td></tr>';
+                    } else {
+                        const minHop = Math.min(...viaList.map(v => v.hop));
+                        const viaNames = [...new Set(viaList.filter(v => v.hop === minHop).map(v => v.nodeID))].join(', ');
+                        const hopClass = minHop === 1 ? 'direct' : '';
+                        html += '<tr>';
+                        html += '<td><code>' + escapeHtml(r.prefix) + '</code></td>';
+                        html += '<td>' + escapeHtml(viaNames) + '</td>';
+                        html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + minHop + '</span></td>';
+                        html += '</tr>';
+                    }
                 });
-                tbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">No routes</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No routes</td></tr>';
             }
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);
     }
+}
+
+function drawMeshTopology(localNodeId, peers, directPeers) {
+    const canvas = document.getElementById('mesh-topology-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas size based on container
+    const container = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.min(container.clientWidth - 32, 400);
+    const height = 180;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    ctx.scale(dpr, dpr);
+
+    // Clear
+    ctx.clearRect(0, 0, width, height);
+
+    // Node positions
+    const allNodes = [{ id: localNodeId, isLocal: true }];
+    peers.forEach(p => allNodes.push({ id: p.nodeId, isLocal: false, direct: directPeers[p.nodeId] === true }));
+
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = Math.min(width, height) * 0.32;
+    const nodeRadius = 18;
+
+    const positions = {};
+    allNodes.forEach((node, i) => {
+        if (node.isLocal) {
+            positions[node.id] = { x: centerX, y: centerY };
+        } else {
+            const angle = (i - 1) * (2 * Math.PI / (allNodes.length - 1)) - Math.PI / 2;
+            positions[node.id] = {
+                x: centerX + radius * Math.cos(angle),
+                y: centerY + radius * Math.sin(angle)
+            };
+        }
+    });
+
+    // Draw connections
+    allNodes.forEach(node => {
+        if (node.isLocal) return;
+        const from = positions[localNodeId];
+        const to = positions[node.id];
+
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.strokeStyle = node.direct ? '#3fb950' : '#30363d';
+        ctx.lineWidth = node.direct ? 2 : 1;
+        if (!node.direct) {
+            ctx.setLineDash([4, 4]);
+        } else {
+            ctx.setLineDash([]);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+    });
+
+    // Draw nodes
+    allNodes.forEach(node => {
+        const pos = positions[node.id];
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, nodeRadius, 0, 2 * Math.PI);
+        if (node.isLocal) {
+            ctx.fillStyle = '#58a6ff';
+        } else if (node.direct) {
+            ctx.fillStyle = '#238636';
+        } else {
+            ctx.fillStyle = '#30363d';
+        }
+        ctx.fill();
+        ctx.strokeStyle = node.isLocal ? '#79c0ff' : '#484f58';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Node label
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = 'bold 11px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.id, pos.x, pos.y);
+    });
+}
+
+function timeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds < 10) return 'just now';
+    if (seconds < 60) return seconds + 's ago';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + 'm ago';
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + 'h ago';
+    const days = Math.floor(hours / 24);
+    return days + 'd ago';
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 async function saveMeshConfig() {

@@ -1365,10 +1365,10 @@ func (m *MeshConfig) GetSubnet() string {
 }
 
 // GetNetwork returns the overall mesh network range (e.g., "100.0.0.0/8").
-// Defaults to "100.64.0.0/10" (CGNAT range, RFC 6598) for backward compatibility.
+// Defaults to "100.0.0.0/8" for large-scale mesh deployments.
 func (m *MeshConfig) GetNetwork() string {
 	if m == nil || m.Network == "" {
-		return "100.64.0.0/10"
+		return "100.0.0.0/8"
 	}
 	return m.Network
 }

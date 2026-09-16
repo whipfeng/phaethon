@@ -219,7 +219,7 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 		return nextDialer.Dial(p.Server, p.Port)
 	}
 	addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-	return net.DialTimeout("tcp", addr, 5*time.Second)
+	return DialRouteAware("tcp", addr)
 }
 
 // PreWarmSSHProxies establishes SSH connections eagerly for all SSH-type proxies

@@ -1,7 +1,7 @@
 # Mesh 网络改进设计
 
-> 版本: v0.8.0
-> 日期: 2026-09-15
+> 版本: v0.10.0
+> 日期: 2026-09-16
 > 状态: IMPLEMENTED
 > 负责人: Phaethon Dev
 > 依赖: [mesh_multi_vip_design.md](mesh_multi_vip_design.md) v0.4.1
@@ -19,6 +19,7 @@
 | v0.7.0 | 2026-09-15 | ~~GIP 路径 src IP 重写~~ → 废弃，改用统一 DNS hijacker 方案 | Qoder |
 | v0.8.0 | 2026-09-15 | 统一 DNS hijacker 方案：删除 tryDNSRedirect 拦截，DNS hijacker 统一处理 Mode A/B DNS，支持跨节点转发和缓存 | Qoder |
 | v0.9.0 | 2026-09-16 | 多链路路由优化：路由表存所有 peer，按跳数排序，同跳数轮询负载均衡 | Qoder |
+| v0.10.0 | 2026-09-16 | 自动生成 nodeID.phn DNS 路由条目：内置 .phn 后缀 + claimedSubnets 组合，修复跨节点 nodeID 域名路由 | Qoder |
 
 ## 1. 背景与目标
 
@@ -249,6 +250,89 @@ func (m *MeshManager) recomputeRoutes() {
 | `mesh/mesh.go` | `findPeer` → `findRoute` 返回完整路由 |
 | `mesh/mesh.go` | `HandleOutboundPacket` 选路逻辑改为轮询 |
 | `mesh/mesh.go` | 删除 `findPeers` 方法（不再需要） |
+
+### 2.9 自动生成 nodeID.phn DNS 路由条目（v0.10.0）
+
+**问题**：跨节点 DNS 路由中，`nodeID.phn` 格式的域名无法正确路由到目标节点。
+
+**根因分析**：
+
+当前 domain trie 只存储用户配置的后缀（如 `phn`），不区分同一后缀下不同 nodeID 的归属。
+
+以 "vm.phn" 从 JF 查询为例：
+```
+JF: ResolveDomainSubnet("vm.phn")
+  → trie 匹配 "phn" → nextHop=QG → 转发到 QG
+QG: 收到 "vm.phn"
+  → trie 匹配 "phn" → nextHop=nil（自己的后缀）→ 从本地池分配 Fake-IP
+  → 流量到达 QG，但 QG 的 localNodeDomain 检查 "vm.phn" ≠ "qg.phn" → 不匹配
+  → 走普通代理链 → 失败
+```
+
+QG 不知道 "vm" 是另一个 mesh node，把 "vm.phn" 当成普通域名处理。
+
+**设计**：
+
+两个独立的 DNS 路由机制共存：
+
+1. **自动生成**（内置）：`.phn` 是软件内置的默认后缀。每个节点从 claimedSubnets 中已知的 nodeID 自动生成 `nodeID.phn` 条目，插入 domain trie。
+2. **用户配置**：`domain-suffixes` 中的自定义后缀（如 `test.jf.local`、`httpbin.org`）照常通告、照常插入 trie。
+
+#### 2.9.1 自动生成逻辑
+
+在 `recomputeRoutes` 构建 domain trie 时，除了插入用户配置的后缀和 peer 通告的后缀，还自动为每个已知节点生成 `nodeID.phn` 条目：
+
+```go
+const defaultMeshSuffix = "phn"
+
+// 自动生成 nodeID.phn 条目
+for _, cs := range allClaimedSubnets {
+    domain := cs.NodeID + "." + defaultMeshSuffix  // e.g. "vm.phn"
+    if cs.NodeID == m.nodeID {
+        // 自己的节点 → 本地
+        trie.Insert(domain, nil, nil, 0)
+    } else {
+        // 其他节点 → 找到对应的 peer 作为 nextHop
+        peer, hop := findNextHopForNode(cs.NodeID, peers)
+        if peer != nil {
+            trie.Insert(domain, peer, cs.Subnet, hop)
+        }
+    }
+}
+```
+
+#### 2.9.2 效果
+
+以 QG 的 domain trie 为例（已知节点：qg、vm、jf）：
+
+```
+自动生成：
+  qg.phn → nextHop=nil (本地), subnet=nil
+  vm.phn → nextHop=VM peer, subnet=100.1.0.0/16, hop=1
+  jf.phn → nextHop=JF peer, subnet=100.2.0.0/16, hop=1
+
+用户配置（如有）：
+  test.jf.local → nextHop=JF peer, subnet=100.2.0.0/16
+  httpbin.org → nextHop=JF peer, subnet=100.2.0.0/16
+```
+
+查询 "vm.phn" 时：
+- JF: trie 匹配 "vm.phn" → nextHop=VM, subnet=100.1.0.0/16 → 转发到 VM
+- VM: trie 匹配 "vm.phn" → nextHop=nil → 本地解析 → localNodeDomain 匹配 → 拨号本地 ✓
+
+#### 2.9.3 Gossip 变化
+
+自动生成的 `nodeID.phn` 条目**不需要通过 gossip 通告**。每个节点都从 claimedSubnets（已通过 gossip 同步）本地生成相同的条目。
+
+用户配置的 `domain-suffixes` 仍通过 gossip 正常通告。
+
+#### 2.9.4 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `mesh/mesh.go` | `recomputeRoutes` 中自动生成 `nodeID.phn` 条目插入 domain trie |
+| `mesh/mesh.go` | 新增 `defaultMeshSuffix` 常量 |
+| `mesh/mesh.go` | 新增辅助函数：根据 nodeID 查找 nextHop peer |
 
 ## 3. Mode B Mesh 路由设计（待实现）
 
@@ -758,3 +842,16 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - [x] VM→JF 跨节点 DNS（test.jf.local→100.2.0.4 ✓）
 - [x] 多跳 mesh 路由（VM→QG→JF ✓）
 - [ ] 多链路轮询负载均衡（待 v0.9 实现后验证）
+
+### 待实现项（自动生成 nodeID.phn）
+
+- [ ] 新增 defaultMeshSuffix 常量
+- [ ] recomputeRoutes 中从 claimedSubnets 自动生成 nodeID.phn 条目
+- [ ] 辅助函数：根据 nodeID 查找 nextHop peer 和 hop
+
+### 待验证项（自动生成 nodeID.phn）
+
+- [ ] JF 查询 vm.phn → 转发到 VM（不经过 QG 本地解析）
+- [ ] JF 查询 qg.phn → 转发到 QG → QG 本地解析
+- [ ] JF SOCKS5 通过 vm.phn 访问 VM 服务
+- [ ] 用户自定义后缀（test.jf.local、httpbin.org）仍正常工作

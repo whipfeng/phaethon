@@ -944,7 +944,11 @@ func (m *MeshManager) recomputeRoutes() {
 	// Build global domain trie
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
+	// Skip the bare mesh suffix — nodeID.phn entries are auto-generated below.
 	for _, s := range domainSuffixes {
+		if s == MeshDomainSuffix {
+			continue
+		}
 		trie.Insert(s, nil, nil, 0)
 	}
 	// Peer domain suffixes
@@ -953,8 +957,47 @@ func (m *MeshManager) recomputeRoutes() {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
+			if entry.Suffix == MeshDomainSuffix {
+				continue
+			}
 			trie.Insert(entry.Suffix, peer, entry.Subnet, entry.Hop)
 		}
+	}
+
+	// Auto-generate nodeID.phn entries from claimed subnets.
+	// Each known node gets a "nodeID.phn" entry in the trie.
+	type nodeClaim struct {
+		nextHop *PeerInfo
+		subnet  *net.IPNet
+		hop     int
+	}
+	bestNodes := make(map[string]nodeClaim)
+	bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		nid := peer.NodeID()
+		if nid == "" || nid == m.nodeID {
+			continue
+		}
+		if peer.Subnet != nil {
+			if existing, ok := bestNodes[nid]; !ok || 1 < existing.hop {
+				bestNodes[nid] = nodeClaim{peer, peer.Subnet, 1}
+			}
+		}
+		for _, cs := range peer.ClaimedSubnets {
+			if cs.NodeID == m.nodeID || cs.NodeID == "" {
+				continue
+			}
+			if existing, ok := bestNodes[cs.NodeID]; !ok || cs.Hop < existing.hop {
+				bestNodes[cs.NodeID] = nodeClaim{peer, cs.Subnet, cs.Hop}
+			}
+		}
+	}
+	for nid, entry := range bestNodes {
+		domain := NodeDomain(nid)
+		trie.Insert(domain, entry.nextHop, entry.subnet, entry.hop)
 	}
 
 	m.routesMu.Lock()
@@ -983,6 +1026,16 @@ func (m *MeshManager) recomputeRoutes() {
 			util.LogDebug("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
 		}
 	}
+	// Log auto-generated nodeID.phn entries
+	var autoDomains []string
+	for nid, entry := range bestNodes {
+		if entry.nextHop == nil {
+			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(self)", nid))
+		} else {
+			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(→%s,hop=%d)", nid, entry.nextHop.NodeID(), entry.hop))
+		}
+	}
+	util.LogDebug("[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
@@ -1149,6 +1202,9 @@ func (m *MeshManager) broadcastGossip() {
 	}
 	bestDS := make(map[string]globalDSEntry)
 	for _, s := range domainSuffixes {
+		if s == MeshDomainSuffix {
+			continue
+		}
 		bestDS[s] = globalDSEntry{0, nil, m.subnetStr}
 	}
 	for _, peer := range allPeers {
@@ -1156,6 +1212,9 @@ func (m *MeshManager) broadcastGossip() {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
+			if entry.Suffix == MeshDomainSuffix {
+				continue
+			}
 			if existing, ok := bestDS[entry.Suffix]; !ok || entry.Hop < existing.hop {
 				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer, entry.SubnetStr}
 			}

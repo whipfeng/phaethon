@@ -20,6 +20,7 @@
             'nav.tools': '工具',
             'nav.reverse': '反向连接向导',
             'nav.logs': '运行日志',
+            'nav.connections': '活跃连接',
             'nav.rawConfig': '原始配置',
             'btn.reload': '重载配置',
             'lang.switch': '语言',
@@ -32,6 +33,17 @@
             'logs.title': '运行日志',
             'logs.clear': '清空',
             'logs.refresh': '刷新',
+
+            // ===== Connections =====
+            'connections.title': '活跃连接',
+            'connections.count': '个连接',
+            'connections.countSuffix': '个连接',
+            'connections.noActive': '暂无活跃连接',
+            'connections.type': '类型',
+            'connections.source': '源',
+            'connections.destination': '目标',
+            'connections.proxy': '代理',
+            'connections.duration': '时长',
 
             // ===== PiP (Picture-in-Picture) Logs =====
             'pip.title': '运行日志',
@@ -688,6 +700,7 @@
             'nav.tools': 'Tools',
             'nav.reverse': 'Reverse Wizard',
             'nav.logs': 'Logs',
+            'nav.connections': 'Connections',
             'nav.rawConfig': 'Raw Config',
             'btn.reload': 'Reload Config',
             'lang.switch': 'Language',
@@ -700,6 +713,17 @@
             'logs.title': 'Runtime Logs',
             'logs.clear': 'Clear',
             'logs.refresh': 'Refresh',
+
+            // ===== Connections =====
+            'connections.title': 'Active Connections',
+            'connections.count': 'connections',
+            'connections.countSuffix': 'connections',
+            'connections.noActive': 'No active connections',
+            'connections.type': 'Type',
+            'connections.source': 'Source',
+            'connections.destination': 'Destination',
+            'connections.proxy': 'Proxy',
+            'connections.duration': 'Duration',
 
             // ===== PiP (Picture-in-Picture) Logs =====
             'pip.title': 'Runtime Logs',

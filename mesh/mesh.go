@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/config"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -141,6 +142,11 @@ type MeshManager struct {
 	// DNS hijacker and Fake-IP pool (mesh DNS service)
 	dnsHijacker *DNSHijacker
 	fakeIPPool  *FakeIPPool
+
+	// IPIP tunnel for static policy routing
+	ipipTunnel         *IPIPTunnel
+	staticRoutes       []config.MeshStaticRoute
+	staticDomainSuffixes []config.MeshStaticDomainSuffix
 }
 
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string, network *net.IPNet, subnetPrefixLen int) *MeshManager {
@@ -167,6 +173,13 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, tcpip.Address{}, tcpip.Address{})
 	m.dnsHijacker.SetDomainResolver(m.ResolveDomainSubnet)
 
+	// Create IPIP tunnel and allocate EIP from subnet
+	m.ipipTunnel = NewIPIPTunnel()
+	if eip := AllocateEIP(subnet); eip != nil {
+		m.ipipTunnel.SetLocalEIP(eip)
+		util.LogInfo("[MESH] Allocated EIP %s from subnet %s", eip, subnet)
+	}
+
 	return m
 }
 
@@ -178,6 +191,42 @@ func (m *MeshManager) GetDNSHijacker() *DNSHijacker {
 // GetFakeIPPool returns the Fake-IP pool for external use.
 func (m *MeshManager) GetFakeIPPool() *FakeIPPool {
 	return m.fakeIPPool
+}
+
+// GetIPIPTunnel returns the IPIP tunnel handler for static policy routing.
+func (m *MeshManager) GetIPIPTunnel() *IPIPTunnel {
+	return m.ipipTunnel
+}
+
+// SetStaticRoutes updates the static IPIP routes from config.
+func (m *MeshManager) SetStaticRoutes(staticRoutes []config.MeshStaticRoute, staticDomainSuffixes []config.MeshStaticDomainSuffix) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.staticRoutes = staticRoutes
+	m.staticDomainSuffixes = staticDomainSuffixes
+	util.LogInfo("[MESH] Updated static routes: %d IP routes, %d domain suffixes", len(staticRoutes), len(staticDomainSuffixes))
+}
+
+// CheckStaticRoute checks if a destination IP matches any static IPIP route.
+// Returns (egressNodeID, true) if matched, ("", false) otherwise.
+func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.ipipTunnel == nil {
+		return "", false
+	}
+	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
+}
+
+// CheckStaticDomainSuffix checks if a domain matches any static domain suffix route.
+// Returns (egressNodeID, true) if matched, ("", false) otherwise.
+func (m *MeshManager) CheckStaticDomainSuffix(domain string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.ipipTunnel == nil {
+		return "", false
+	}
+	return m.ipipTunnel.MatchStaticDomainSuffix(domain, m.staticDomainSuffixes)
 }
 
 // SetDataDir sets the data directory for state file persistence.
@@ -369,6 +418,25 @@ func (m *MeshManager) isLocalVIP(ip net.IP) bool {
 	return ip.Equal(m.vip)
 }
 
+// getVIPForNode returns the VIP for a given node ID from the topology.
+func (m *MeshManager) getVIPForNode(nodeID string) net.IP {
+	// Check if it's our own node
+	if nodeID == m.nodeID {
+		return m.vip
+	}
+	// Look up in topology
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == nodeID && peer.Subnet != nil {
+			// VIP is subnet + 1 (first usable IP)
+			baseIP := peer.Subnet.IP.To4()
+			if baseIP != nil {
+				return net.IP{baseIP[0], baseIP[1], baseIP[2], baseIP[3] + 1}
+			}
+		}
+	}
+	return nil
+}
+
 // getHostIP returns the hostIP (.2) address for this node's subnet.
 // hostIP is the TUN interface address on the OS side.
 func (m *MeshManager) getHostIP() net.IP {
@@ -438,6 +506,33 @@ func (m *MeshManager) Stop() {
 // Fake-IP subnet of the remote node that owns the matching suffix.
 // Returns nil if the domain is local (this node owns the suffix) or no match.
 func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
+	// Check static domain suffixes first
+	m.mu.RLock()
+	staticSuffixes := m.staticDomainSuffixes
+	m.mu.RUnlock()
+	
+	for _, suffix := range staticSuffixes {
+		s := strings.ToLower(suffix.Suffix)
+		d := strings.ToLower(domain)
+		if d == s || strings.HasSuffix(d, "."+s) {
+			// Matched static domain suffix, get target node's subnet
+			targetNodeID := suffix.Via
+			util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
+			
+			// Get target node's subnet from topology
+			for _, peer := range m.topology.GetAllPeers() {
+				if peer.NodeID() == targetNodeID && peer.Subnet != nil {
+					util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
+					return peer.Subnet
+				}
+			}
+			// Node not found in topology yet, return nil
+			util.LogWarn("[MESH-DEBUG] ResolveDomainSubnet(%s): node %s not found in topology", domain, targetNodeID)
+			return nil
+		}
+	}
+	
+	// Fall back to advertised domain trie
 	m.routesMu.RLock()
 	trie := m.domainTrie
 	m.routesMu.RUnlock()
@@ -511,6 +606,58 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		return true
 	}
 
+	// Check static IPIP routes before normal mesh routing
+	if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
+		util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
+		
+		// Get egress node's EIP
+		egressEIP := m.ipipTunnel.GetNodeEIP(egressNodeID)
+		if egressEIP == nil {
+			util.LogWarn("[IPIP] No EIP for egress node %s, dropping packet", egressNodeID)
+			return true
+		}
+		
+		// Get local EIP
+		localEIP := m.ipipTunnel.GetLocalEIP()
+		if localEIP == nil {
+			util.LogWarn("[IPIP] No local EIP, dropping packet")
+			return true
+		}
+		
+		// Encapsulate the packet
+		encapsulated, err := m.ipipTunnel.Encapsulate(localEIP, egressEIP, data)
+		if err != nil {
+			util.LogWarn("[IPIP] Encapsulation failed: %v", err)
+			return true
+		}
+		
+		util.LogDebug("[IPIP] Encapsulated packet: outer src=%s dst=%s inner len=%d total len=%d",
+			localEIP, egressEIP, len(data), len(encapsulated))
+		
+		// Find route to egress node's VIP and send encapsulated packet
+		egressVIP := m.getVIPForNode(egressNodeID)
+		if egressVIP == nil {
+			util.LogWarn("[IPIP] No VIP for egress node %s", egressNodeID)
+			return true
+		}
+		
+		// Use normal mesh routing to send encapsulated packet to egress node
+		route := m.findRoute(egressVIP)
+		if route != nil && len(route.Peers) > 0 {
+			selectedPeer := route.Peers[0].Peer
+			go func() {
+				if err := selectedPeer.Send(encapsulated); err != nil {
+					util.LogWarn("[IPIP] Send to %s failed: %v", egressNodeID, err)
+				} else {
+					util.LogDebug("[IPIP] Sent encapsulated packet to %s OK", egressNodeID)
+				}
+			}()
+		} else {
+			util.LogWarn("[IPIP] No route to egress node %s (VIP=%s)", egressNodeID, egressVIP)
+		}
+		return true
+	}
+
 	// Exclude mesh subnet (Fake-IPs) from mesh interception.
 	// Fake-IPs are allocated from the mesh subnet but are not actual VIPs.
 	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
@@ -579,6 +726,20 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
+		return
+	}
+
+	// Check if this is an IPIP packet (protocol 4)
+	if frame[9] == 4 {
+		util.LogInfo("[IPIP] Received IPIP packet from %s, decapsulating", fromNodeID)
+		innerPacket, err := Decapsulate(frame)
+		if err != nil {
+			util.LogWarn("[IPIP] Decapsulation failed: %v", err)
+			return
+		}
+		util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
+		// Recursively process the inner packet
+		m.HandleMeshFrame(fromNodeID, innerPacket)
 		return
 	}
 

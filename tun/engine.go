@@ -478,6 +478,10 @@ func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 
 	bc := dialer.GetGlobalBindContext()
 
+	// Shared context to cancel outstanding queries when first success arrives
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	for _, server := range servers {
 		go func(s string) {
 			serverIP := net.ParseIP(s)
@@ -493,9 +497,9 @@ func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 					return d.DialContext(ctx, "udp", net.JoinHostPort(s, "53"))
 				},
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			ips, err := r.LookupIP(ctx, "ip4", domain)
+			queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer queryCancel()
+			ips, err := r.LookupIP(queryCtx, "ip4", domain)
 			ch <- result{ips, err}
 		}(server)
 	}
@@ -505,6 +509,7 @@ func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 	for range servers {
 		res := <-ch
 		if res.err == nil && len(res.ips) > 0 {
+			cancel() // Cancel remaining queries
 			return res.ips, nil
 		}
 		lastErr = res.err
@@ -1472,11 +1477,36 @@ func (e *Engine) handleUDP(netstackConn net.Conn, dstAddr string, dstPort int) {
 }
 
 // relayUDP copies datagrams between the netstack UDP connection and the target
-// PacketConn, preserving datagram boundaries. Both sides use a 30-second idle
-// timeout to prevent goroutine leaks when the remote stops responding.
+// PacketConn, preserving datagram boundaries. Uses a watchdog goroutine to
+// enforce a 30-second idle timeout, preventing goroutine leaks when the remote
+// stops responding.
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
 	const idleTimeout = 30 * time.Second
+
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
+	done := make(chan struct{})
+	defer close(done)
+
+	// Watchdog: force-close when idle
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, lastActivity.Load())) > idleTimeout {
+					netstackConn.Close()
+					targetConn.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1484,11 +1514,11 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		defer wg.Done()
 		buf := make([]byte, bufSize)
 		for {
-			_ = netstackConn.SetReadDeadline(time.Now().Add(idleTimeout))
 			n, err := netstackConn.Read(buf)
 			if err != nil {
 				return
 			}
+			lastActivity.Store(time.Now().UnixNano())
 			if _, err := targetConn.WriteTo(buf[:n], dstAddr); err != nil {
 				return
 			}
@@ -1497,11 +1527,11 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 
 	buf := make([]byte, bufSize)
 	for {
-		_ = targetConn.SetReadDeadline(time.Now().Add(idleTimeout))
 		n, _, err := targetConn.ReadFrom(buf)
 		if err != nil {
 			break
 		}
+		lastActivity.Store(time.Now().UnixNano())
 		if _, err := netstackConn.Write(buf[:n]); err != nil {
 			break
 		}
@@ -1641,7 +1671,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	connlog.Log("TUN", "TCP", "", matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
 	connlog.TrackActive(connID, "TUN", "TCP", "", matchAddr, resolvedAddr, resolvedPort, matchResult)
 	defer connlog.RemoveActive(connID)
-	relayWithIdleTimeout(conn, targetConn, 5*time.Minute)
+	relayWithIdleTimeout(conn, targetConn, 90*time.Second)
 }
 
 func proxyDesc(p *config.Proxy) string {

@@ -268,11 +268,23 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.Status = "connecting"
 		util.LogInfo("[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
-		go m.peerWriteLoop(peer)
-		go m.sendHeartbeats(peer)
-		m.runSession(peer)
+		// Run session in a closure so we can use defer for cleanup
+		func() {
+			defer func() {
+				conn.Close()
+				// Clean up mesh peer registration
+				m.mu.Lock()
+				if peer.meshSender != nil && m.meshHandler != nil {
+					m.meshHandler.UnregisterPeer(peer.meshSender)
+				}
+				peer.meshSender = nil
+				m.mu.Unlock()
+			}()
 
-		conn.Close()
+			go m.peerWriteLoop(peer)
+			go m.sendHeartbeats(peer)
+			m.runSession(peer)
+		}()
 
 		util.LogInfo("[P2P] disconnected from %s, reconnecting in %v", peer.ID, backoff)
 		peer.Status = "connecting"

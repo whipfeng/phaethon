@@ -1335,11 +1335,25 @@ func (t *TUNConfig) DirectNameserverList() []string {
 
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
-	NodeID         string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
-	Network        string   `yaml:"network,omitempty" json:"network,omitempty"`     // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
-	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`       // This node's subnet (e.g., "100.0.0.0/16")
-	DomainSuffixes []string `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`
-	Advertise      []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
+	NodeID               string                `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Network              string                `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
+	Subnet               string                `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
+	DomainSuffixes       []string              `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
+	Advertise            []string              `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
+	StaticRoutes         []MeshStaticRoute     `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
+	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
+}
+
+// MeshStaticRoute defines a static IPIP route through a specific mesh node
+type MeshStaticRoute struct {
+	Dst string `yaml:"dst" json:"dst"`   // Destination CIDR (e.g., "10.0.0.0/8")
+	Via string `yaml:"via" json:"via"`   // Egress node ID (e.g., "jf")
+}
+
+// MeshStaticDomainSuffix defines a static IPIP route for domain suffixes
+type MeshStaticDomainSuffix struct {
+	Suffix string `yaml:"suffix" json:"suffix"` // Domain suffix (e.g., "internal.company.com")
+	Via    string `yaml:"via" json:"via"`       // Egress node ID (e.g., "vm")
 }
 
 // IsEnabled reports whether mesh networking is configured.
@@ -1379,6 +1393,14 @@ func (m *MeshConfig) GetDomainSuffixes() []string {
 		return nil
 	}
 	return m.DomainSuffixes
+}
+
+// GetStaticDomainSuffixes returns the static domain suffix routes for IPIP tunneling.
+func (m *MeshConfig) GetStaticDomainSuffixes() []MeshStaticDomainSuffix {
+	if m == nil {
+		return nil
+	}
+	return m.StaticDomainSuffixes
 }
 
 func LoadRaw(filePath string) (*RuleConfiguration, error) {

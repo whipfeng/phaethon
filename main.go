@@ -317,6 +317,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		advertise := ruleConf.Mesh.GetAdvertise()
 		meshMgr = mesh.NewMeshManager(state.NodeID, vip, nil, meshSubnet, state.Subnet, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
 		meshMgr.SetDataDir(dataDir)
+		
+		// Set static IPIP routes
+		staticRoutes := ruleConf.Mesh.StaticRoutes
+		staticDomainSuffixes := ruleConf.Mesh.GetStaticDomainSuffixes()
+		meshMgr.SetStaticRoutes(staticRoutes, staticDomainSuffixes)
+		
 		mesh.GlobalMeshManager = meshMgr
 		p2p.GlobalP2PManager.SetMeshInfo(state.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)

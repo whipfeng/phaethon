@@ -882,6 +882,16 @@ function updateMeshSummary(data) {
     el.innerHTML = html;
 }
 
+// Global state for topology drag & Drop
+var _topologyState = {
+    positions: {},
+    dragging: null,
+    dragOffset: { x: 0, y: 0 },
+    canvas: null,
+    width: 0,
+    height: 0
+};
+
 function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const canvas = document.getElementById('mesh-topology-canvas');
     if (!canvas) return;
@@ -891,13 +901,17 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     // Set canvas size based on container
     const container = canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.min(container.clientWidth - 32, 400);
-    const height = 180;
+    const width = Math.min(container.clientWidth - 32, 500);
+    const height = 280;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + 'px';
     canvas.style.height = height + 'px';
     ctx.scale(dpr, dpr);
+
+    _topologyState.canvas = canvas;
+    _topologyState.width = width;
+    _topologyState.height = height;
 
     // Clear
     ctx.clearRect(0, 0, width, height);
@@ -907,7 +921,6 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const nodeSet = new Set();
 
     if (fullTopology && fullTopology.nodes && fullTopology.nodes.length > 0) {
-        // Use full topology nodes
         fullTopology.nodes.forEach(n => {
             if (!nodeSet.has(n.nodeId)) {
                 nodeSet.add(n.nodeId);
@@ -919,7 +932,6 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             }
         });
     } else {
-        // Fallback: local node + peers
         allNodes.push({ id: localNodeId, isLocal: true, direct: false });
         peers.forEach(p => {
             if (!nodeSet.has(p.nodeId)) {
@@ -931,19 +943,22 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
 
     const centerX = width / 2;
     const centerY = height / 2;
-    const radius = Math.min(width, height) * 0.32;
-    const nodeRadius = 18;
+    const radius = Math.min(width, height) * 0.35;
+    const nodeRadius = 20;
 
-    // Calculate positions (local node in center, others in circle)
+    // Calculate positions - use circular layout as starting point
+    // Nodes will be positioned based on their connections
     const positions = {};
-    const localIndex = allNodes.findIndex(n => n.isLocal);
+    const nodeCount = allNodes.length;
+    
+    // Initial circular layout
     allNodes.forEach((node, i) => {
-        if (node.isLocal) {
-            positions[node.id] = { x: centerX, y: centerY };
+        if (_topologyState.positions[node.id]) {
+            // Use saved position from drag
+            positions[node.id] = _topologyState.positions[node.id];
         } else {
-            const nonLocalIndex = i < localIndex ? i : i - 1;
-            const nonLocalCount = allNodes.length - 1;
-            const angle = nonLocalIndex * (2 * Math.PI / nonLocalCount) - Math.PI / 2;
+            // Arrange in circle as initial layout
+            const angle = i * (2 * Math.PI / nodeCount) - Math.PI / 2;
             positions[node.id] = {
                 x: centerX + radius * Math.cos(angle),
                 y: centerY + radius * Math.sin(angle)
@@ -951,79 +966,127 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         }
     });
 
-    // Draw edges from full topology or fallback to local connections
+    // Save positions for next redraw
+    _topologyState.positions = positions;
+
+    // Draw edges from full topology
     const edges = (fullTopology && fullTopology.edges) || [];
     if (edges.length > 0) {
-        // Draw all edges from full topology
+        // Draw all edges from full topology as solid lines (they're real announced connections)
         edges.forEach(edge => {
             const from = positions[edge.from];
             const to = positions[edge.to];
             if (!from || !to) return;
 
-            // Check if this edge involves the local node (direct connection)
-            const isDirect = (edge.from === localNodeId || edge.to === localNodeId);
-
             ctx.beginPath();
             ctx.moveTo(from.x, from.y);
             ctx.lineTo(to.x, to.y);
-            ctx.strokeStyle = isDirect ? '#3fb950' : '#30363d';
-            ctx.lineWidth = isDirect ? 2 : 1;
-            if (!isDirect) {
-                ctx.setLineDash([4, 4]);
-            } else {
-                ctx.setLineDash([]);
-            }
+            ctx.strokeStyle = '#3fb950';  // All edges are real connections
+            ctx.lineWidth = 2;
             ctx.stroke();
-            ctx.setLineDash([]);
-        });
-    } else {
-        // Fallback: draw connections from local to all peers
-        allNodes.forEach(node => {
-            if (node.isLocal) return;
-            const from = positions[localNodeId];
-            const to = positions[node.id];
-
-            ctx.beginPath();
-            ctx.moveTo(from.x, from.y);
-            ctx.lineTo(to.x, to.y);
-            ctx.strokeStyle = node.direct ? '#3fb950' : '#30363d';
-            ctx.lineWidth = node.direct ? 2 : 1;
-            if (!node.direct) {
-                ctx.setLineDash([4, 4]);
-            } else {
-                ctx.setLineDash([]);
-            }
-            ctx.stroke();
-            ctx.setLineDash([]);
         });
     }
+    // If no edges, don't draw any connections
 
     // Draw nodes
     allNodes.forEach(node => {
         const pos = positions[node.id];
 
-        // Node circle
+        // Node circle with gradient
+        const gradient = ctx.createRadialGradient(pos.x - 5, pos.y - 5, 5, pos.x, pos.y, nodeRadius);
+        if (node.isLocal) {
+            gradient.addColorStop(0, '#79c0ff');
+            gradient.addColorStop(1, '#58a6ff');
+        } else if (node.direct) {
+            gradient.addColorStop(0, '#3fb950');
+            gradient.addColorStop(1, '#238636');
+        } else {
+            gradient.addColorStop(0, '#484f58');
+            gradient.addColorStop(1, '#30363d');
+        }
+
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, nodeRadius, 0, 2 * Math.PI);
-        if (node.isLocal) {
-            ctx.fillStyle = '#58a6ff';
-        } else if (node.direct) {
-            ctx.fillStyle = '#238636';
-        } else {
-            ctx.fillStyle = '#30363d';
-        }
+        ctx.fillStyle = gradient;
         ctx.fill();
         ctx.strokeStyle = node.isLocal ? '#79c0ff' : '#484f58';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
         ctx.stroke();
 
         // Node label
-        ctx.fillStyle = '#e6edf3';
-        ctx.font = 'bold 11px -apple-system, sans-serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 12px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(node.id, pos.x, pos.y);
     });
+
+    // Setup drag handlers if not already done
+    if (!canvas._dragHandlersAttached) {
+        canvas._dragHandlersAttached = true;
+        
+        canvas.addEventListener('mousedown', function(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            // Find node under cursor
+            for (const nodeId in _topologyState.positions) {
+                const pos = _topologyState.positions[nodeId];
+                const dx = x - pos.x;
+                const dy = y - pos.y;
+                if (dx * dx + dy * dy <= nodeRadius * nodeRadius) {
+                    _topologyState.dragging = nodeId;
+                    _topologyState.dragOffset = { x: dx, y: dy };
+                    canvas.style.cursor = 'grabbing';
+                    break;
+                }
+            }
+        });
+
+        canvas.addEventListener('mousemove', function(e) {
+            if (_topologyState.dragging) {
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                _topologyState.positions[_topologyState.dragging] = {
+                    x: x - _topologyState.dragOffset.x,
+                    y: y - _topologyState.dragOffset.y
+                };
+                // Redraw
+                const localNode = allNodes.find(n => n.isLocal);
+                if (localNode) {
+                    drawMeshTopology(localNode.id, peers, directPeers, fullTopology);
+                }
+            } else {
+                // Change cursor on hover
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                let overNode = false;
+                for (const nodeId in _topologyState.positions) {
+                    const pos = _topologyState.positions[nodeId];
+                    const dx = x - pos.x;
+                    const dy = y - pos.y;
+                    if (dx * dx + dy * dy <= nodeRadius * nodeRadius) {
+                        overNode = true;
+                        break;
+                    }
+                }
+                canvas.style.cursor = overNode ? 'grab' : 'default';
+            }
+        });
+
+        canvas.addEventListener('mouseup', function() {
+            _topologyState.dragging = null;
+            canvas.style.cursor = 'default';
+        });
+
+        canvas.addEventListener('mouseleave', function() {
+            _topologyState.dragging = null;
+            canvas.style.cursor = 'default';
+        });
+    }
 }
 
 function timeAgo(date) {

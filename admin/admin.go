@@ -485,6 +485,8 @@ type pageTemplates struct {
 	dashboard     *template.Template
 	tun           *template.Template
 	mesh          *template.Template
+	logs          *template.Template
+	connections   *template.Template
 	proxies       *template.Template
 	subscriptions *template.Template
 	rules         *template.Template
@@ -622,6 +624,8 @@ func (s *AdminServer) parseTemplates() {
 		dashboard:     parsePage("dashboard.html"),
 		tun:           parsePage("tun.html"),
 		mesh:          parsePage("mesh.html"),
+		logs:          parsePage("logs.html"),
+		connections:   parsePage("connections.html"),
 		proxies:       parsePage("proxies.html"),
 		subscriptions: parsePage("subscriptions.html"),
 		rules:         parsePage("rules.html"),
@@ -842,6 +846,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/resolvers", s.handleResolversPage)
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
 	mux.HandleFunc("/logs", s.handleLogsPage)
+	mux.HandleFunc("/connections", s.handleConnectionsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
@@ -1127,13 +1132,19 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 }
 
 func (s *AdminServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
-	data, err := templates.ReadFile("templates/logs-standalone.html")
-	if err != nil {
-		http.Error(w, "template not found", http.StatusInternalServerError)
-		return
+	data := map[string]interface{}{
+		"Title":   "Logs",
+		"Version": os.Getenv("PHAETHON_VERSION"),
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
+	s.render(w, r, "logs.html", data)
+}
+
+func (s *AdminServer) handleConnectionsPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title":   "Connections",
+		"Version": os.Getenv("PHAETHON_VERSION"),
+	}
+	s.render(w, r, "connections.html", data)
 }
 
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -4477,6 +4488,10 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.tun
 	case "mesh.html":
 		t = s.pages.mesh
+	case "logs.html":
+		t = s.pages.logs
+	case "connections.html":
+		t = s.pages.connections
 	case "proxies.html":
 		t = s.pages.proxies
 	case "subscriptions.html":

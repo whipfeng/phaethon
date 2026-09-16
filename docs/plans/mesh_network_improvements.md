@@ -469,6 +469,20 @@ bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
 | `mesh/mesh.go` | `HandleOutboundPacket` 统一走 `findRoute`，去掉 `m.subnet.Contains` 检查 |
 | `mesh/mesh.go` | 自动生成 nodeID.phn 条目带 ownSubnet |
 
+#### 2.10.9 验证结果
+
+**状态**：✓ 已验证（2026-09-16）
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| `jf.phn` DNS 解析（QG→JF） | ✓ | `jf.phn → 100.2.0.4 (remote, ttl=1m0s, cached)` |
+| `httpbin.org` DNS 解析（QG→JF） | ✓ | `httpbin.org → 100.2.0.5 (remote, ttl=1m0s, cached)` |
+| `qg.phn` DNS 解析（本地） | ✓ | `qg.phn → 100.0.x.x`（本地 Fake-IP） |
+| HTTP 跨节点访问（QG→JF→httpbin.org） | ✓ | `curl http://100.2.0.5/get` 返回 200 |
+| IP 路由跨节点转发 | ✓ | `HandleOutboundPacket: dst=100.2.0.x` 日志确认 mesh 转发 |
+| `vm.phn` DNS 解析（QG→VM） | ✗ | VM 不可达（非代码问题） |
+| 单元测试 | ✓ | 7/7 测试通过（含多 peer、最长匹配覆盖等） |
+
 ## 3. Mode B Mesh 路由设计（待实现）
 
 ### 3.1 问题

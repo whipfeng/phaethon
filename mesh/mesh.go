@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"phaethon/tun"
 	"phaethon/util"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 const (
@@ -133,13 +134,17 @@ type MeshManager struct {
 
 	DNSAllocator func(domain string) (net.IP, error)
 
-	natTable *tun.NATTable
+	natTable *NATTable
 	closeCh  chan struct{}
 	eventCh  chan meshEvent
+
+	// DNS hijacker and Fake-IP pool (mesh DNS service)
+	dnsHijacker *DNSHijacker
+	fakeIPPool  *FakeIPPool
 }
 
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string, network *net.IPNet, subnetPrefixLen int) *MeshManager {
-	return &MeshManager{
+	m := &MeshManager{
 		nodeID:          nodeID,
 		vip:             vip.To4(),
 		subnet:          subnet,
@@ -153,6 +158,26 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		closeCh:         make(chan struct{}),
 		eventCh:         make(chan meshEvent, 64),
 	}
+
+	// Create Fake-IP pool from node subnet (skip first 4: network, VIP, hostIP, GIP)
+	m.fakeIPPool = NewFakeIPPoolWithSubnet(subnet, 4)
+
+	// Create DNS hijacker (netstack binding deferred to BindNetstack)
+	// tunAddr and dnsAddr will be set when binding to netstack
+	m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, tcpip.Address{}, tcpip.Address{})
+	m.dnsHijacker.SetDomainResolver(m.ResolveDomainSubnet)
+
+	return m
+}
+
+// GetDNSHijacker returns the DNS hijacker for TUN engine binding.
+func (m *MeshManager) GetDNSHijacker() *DNSHijacker {
+	return m.dnsHijacker
+}
+
+// GetFakeIPPool returns the Fake-IP pool for external use.
+func (m *MeshManager) GetFakeIPPool() *FakeIPPool {
+	return m.fakeIPPool
 }
 
 // SetDataDir sets the data directory for state file persistence.
@@ -288,7 +313,7 @@ func (m *MeshManager) GetSubnet() string {
 }
 
 func (m *MeshManager) EnableNAT() {
-	m.natTable = tun.NewNATTable(m.vip)
+	m.natTable = NewNATTable(m.vip)
 	util.LogInfo("[MESH] NAT enabled (vip=%s)", m.vip)
 }
 
@@ -299,7 +324,7 @@ func (m *MeshManager) GetNATStats() int {
 	return m.natTable.Stats()
 }
 
-func (m *MeshManager) GetNATTable() *tun.NATTable {
+func (m *MeshManager) GetNATTable() *NATTable {
 	return m.natTable
 }
 

@@ -21,6 +21,7 @@
 | v0.9.0 | 2026-09-16 | 多链路路由优化：路由表存所有 peer，按跳数排序，同跳数轮询负载均衡 | Qoder |
 | v0.10.0 | 2026-09-16 | 自动生成 nodeID.phn DNS 路由条目：内置 .phn 后缀 + claimedSubnets 组合，修复跨节点 nodeID 域名路由 | Qoder |
 | v0.11.0 | 2026-09-16 | 统一 domain trie 和路由表结构：trie 改为 peers 数组、本地判断统一用 len(peers)==0、own subnet 加入路由表 | Qoder |
+| v0.12.0 | 2026-09-16 | DNSHijacker 重构：从 tun 包迁移到 mesh 包，hijacker 与 mesh 绑定，TUN 禁用时 mesh DNS 仍可用 | Qoder |
 
 ## 1. 背景与目标
 
@@ -482,6 +483,204 @@ bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
 | IP 路由跨节点转发 | ✓ | `HandleOutboundPacket: dst=100.2.0.x` 日志确认 mesh 转发 |
 | `vm.phn` DNS 解析（QG→VM） | ✗ | VM 不可达（非代码问题） |
 | 单元测试 | ✓ | 7/7 测试通过（含多 peer、最长匹配覆盖等） |
+
+### 2.11 DNSHijacker 重构：从 tun 迁移到 mesh（v0.12.0）
+
+**问题**：DNSHijacker 当前在 `tun/` 包中，由 TUN Engine 创建和管理。这导致：
+
+1. **TUN 禁用时 mesh DNS 不可用**：如 JF 环境，mesh 启用但 TUN 禁用，DNSHijacker 不运行，跨节点 DNS 解析失败
+2. **概念不清晰**：DNSHijacker 的核心功能是为 mesh 网络提供 DNS 服务（Fake-IP 分配、跨节点转发），与 TUN 设备无本质关联
+3. **耦合错误**：TUN 只是 DNSHijacker 的一个使用场景（Mode A 入口），不是其所有者
+
+**设计原则**：DNSHijacker 与 MeshManager 是一体，mesh 启用就必须运行 hijacker。
+
+#### 2.11.1 架构变化
+
+**旧架构**：
+```
+tun/
+  ├── engine.go      → 创建 DNSHijacker
+  ├── dns.go         → DNSHijacker 实现
+  └── ...
+mesh/
+  ├── mesh.go        → MeshManager
+  └── ...
+
+依赖关系：mesh → tun（通过 SetDNSDomainResolver 回调）
+```
+
+**新架构**：
+```
+mesh/
+  ├── mesh.go        → MeshManager
+  ├── dns.go         → DNSHijacker 实现（从 tun/ 迁移）
+  └── ...
+tun/
+  ├── engine.go      → 从 mesh 获取 DNSHijacker
+  └── ...
+
+依赖关系：tun → mesh（获取 hijacker）
+```
+
+#### 2.11.2 代码迁移
+
+**移动文件**：
+- `tun/dns.go` → `mesh/dns.go`
+- `tun/dns_test.go` → `mesh/dns_test.go`（如有）
+
+**包名变更**：
+```go
+// tun/dns.go
+package tun
+
+// ↓ 改为
+
+// mesh/dns.go
+package mesh
+```
+
+**类型导出**：
+- `DNSHijacker` 保持导出（mesh 包内其他组件需要访问）
+- `DNSCache`、`FakeIPPool` 等相关类型一并迁移
+
+#### 2.11.3 MeshManager 集成
+
+MeshManager 创建和管理 DNSHijacker：
+
+```go
+type MeshManager struct {
+    // ... 现有字段 ...
+    
+    dnsHijacker *DNSHijacker  // 新增
+    fakeIPPool  *FakeIPPool   // 新增（从 subnet 创建）
+}
+
+func NewMeshManager(...) *MeshManager {
+    m := &MeshManager{...}
+    
+    // 创建 Fake-IP 池（从节点 subnet）
+    m.fakeIPPool = NewFakeIPPool(subnet)
+    
+    // 创建 DNS hijacker
+    m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, ...)  // netstack 后续绑定
+    
+    // 设置域名解析回调（指向自己的 ResolveDomainSubnet）
+    m.dnsHijacker.SetDomainResolver(m.ResolveDomainSubnet)
+    
+    return m
+}
+
+// GetDNSHijacker 供 TUN Engine 使用
+func (m *MeshManager) GetDNSHijacker() *DNSHijacker {
+    return m.dnsHijacker
+}
+
+// GetFakeIPPool 供外部使用
+func (m *MeshManager) GetFakeIPPool() *FakeIPPool {
+    return m.fakeIPPool
+}
+```
+
+#### 2.11.4 TUN Engine 适配
+
+TUN Engine 不再创建 DNSHijacker，改为从 MeshManager 获取：
+
+```go
+// tun/engine.go
+
+func (e *Engine) initStack() error {
+    // ... 创建 netstack ...
+    
+    // 不再创建 DNSHijacker
+    // e.dnsHijack = NewDNSHijacker(...)  // 删除
+    
+    return nil
+}
+
+// BindDNSHijacker 绑定 hijacker 到 netstack（mesh 启用时调用）
+func (e *Engine) BindDNSHijacker(hijacker *mesh.DNSHijacker) {
+    e.dnsHijack = hijacker
+    // 绑定到 netstack 的 UDP endpoint
+    hijacker.BindToNetstack(e.ns)
+}
+```
+
+#### 2.11.5 main.go 启动流程
+
+```go
+// 1. 初始化 mesh（创建 hijacker）
+var meshMgr *mesh.MeshManager
+if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
+    meshMgr = mesh.NewMeshManager(...)
+    // meshMgr 内部已创建 DNSHijacker 和 FakeIPPool
+}
+
+// 2. 初始化 TUN（可选）
+if ruleConf.TUN != nil && ruleConf.TUN.Enabled {
+    engine := tun.NewEngine(...)
+    
+    // 绑定 mesh 的 hijacker 到 TUN netstack
+    if meshMgr != nil {
+        engine.BindDNSHijacker(meshMgr.GetDNSHijacker())
+    }
+    
+    engine.Start()
+}
+
+// 3. mesh 独立运行（即使 TUN 禁用）
+if meshMgr != nil {
+    meshMgr.Start()  // hijacker 开始监听 DNS
+}
+```
+
+#### 2.11.6 DNSHijacker 接口调整
+
+DNSHijacker 需要支持延迟绑定 netstack：
+
+```go
+type DNSHijacker struct {
+    ns *stack.Stack  // 可能为 nil（创建时）
+    // ...
+}
+
+// BindToNetstack 绑定到 netstack（可延迟调用）
+func (h *DNSHijacker) BindToNetstack(ns *stack.Stack) {
+    h.ns = ns
+    // 注册 UDP handler 到 netstack
+}
+
+// Start 启动 serveLoop（需要 ns 已绑定）
+func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
+    if h.ns == nil {
+        return fmt.Errorf("netstack not bound")
+    }
+    // ...
+}
+```
+
+#### 2.11.7 改动文件清单
+
+| 文件 | 改动 |
+|------|------|
+| `tun/dns.go` | **删除**（迁移到 mesh/） |
+| `mesh/dns.go` | **新增**（从 tun/dns.go 迁移，改包名） |
+| `mesh/mesh.go` | 新增 `dnsHijacker`、`fakeIPPool` 字段；`NewMeshManager` 创建 hijacker；新增 `GetDNSHijacker()`、`GetFakeIPPool()` |
+| `tun/engine.go` | 删除 `dnsHijack` 创建逻辑；新增 `BindDNSHijacker()` 方法；删除 `SetDNSDomainResolver()`（hijacker 自己设置） |
+| `main.go` | 调整启动流程：先创建 mesh（含 hijacker），再创建 TUN 并绑定 hijacker |
+| `tun/engine_test.go` | 更新测试适配新架构 |
+
+#### 2.11.8 验证计划
+
+| 测试项 | 预期结果 |
+|--------|----------|
+| QG（TUN + mesh）DNS 解析 | `qg.phn` → 本地 Fake-IP ✓ |
+| QG → VM 跨节点 DNS | `vm.phn` → 远端 Fake-IP（forwarded to VM）✓ |
+| JF（无 TUN，有 mesh）DNS 解析 | `qg.phn` → 远端 Fake-IP（forwarded to QG）✓ |
+| JF（无 TUN，有 mesh）本地域名 | `test.jf.local` → 本地 Fake-IP ✓ |
+| TUN 禁用时 mesh DNS 可用 | JF 环境验证 ✓ |
+| Mode B（SOCKS5 入口）DNS | 通过 mesh hijacker 解析 ✓ |
+
+**状态**：待实现
 
 ## 3. Mode B Mesh 路由设计（✓ 已完成）
 

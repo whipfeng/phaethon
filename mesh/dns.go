@@ -1,4 +1,4 @@
-package tun
+package mesh
 
 import (
 	"bytes"
@@ -74,7 +74,7 @@ func (c *DNSCache) Set(domain string, fakeIP net.IP, ttl time.Duration) {
 	c.mu.Unlock()
 }
 
-// NewDNSHijacker creates a DNS hijacker bound to the netstack UDP stack.
+// NewDNSHijacker creates a DNS hijacker. Netstack binding is deferred to BindNetstack.
 func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Address) *DNSHijacker {
 	return &DNSHijacker{
 		ns:      ns,
@@ -84,6 +84,19 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 		closeCh: make(chan struct{}),
 		cache:   NewDNSCache(),
 	}
+}
+
+// BindNetstack sets the netstack and addresses for the DNS hijacker.
+// Called when TUN engine is initialized and can provide the netstack.
+func (h *DNSHijacker) BindNetstack(ns *stack.Stack, tunAddr, dnsAddr tcpip.Address) {
+	h.ns = ns
+	h.tunAddr = tunAddr
+	h.dnsAddr = dnsAddr
+}
+
+// IsBound returns true if the netstack has been bound.
+func (h *DNSHijacker) IsBound() bool {
+	return h.ns != nil
 }
 
 // SetDomainResolver registers a callback that returns the remote Fake-IP subnet
@@ -194,7 +207,7 @@ func (h *DNSHijacker) serveLoop() {
 			util.LogInfo("tun dns: %s -> %s (cached)", domain, cachedIP)
 			resp := buildDNSResponse(packet, cachedIP.To4())
 			if resp != nil {
-				h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
 			}
 			continue
 		}
@@ -211,18 +224,12 @@ func (h *DNSHijacker) serveLoop() {
 					fakeIP = h.pool.Lookup(domain)
 				} else {
 					fakeIP = remoteIP
-					if ttl < 30*time.Second {
-						ttl = 30 * time.Second
-					}
-					if ttl > 10*time.Minute {
-						ttl = 10 * time.Minute
-					}
 					h.cache.Set(domain, fakeIP, ttl)
 					util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, fakeIP, ttl)
 				}
 				resp := buildDNSResponse(packet, fakeIP.To4())
 				if resp != nil {
-					h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
 				}
 				continue
 			}
@@ -236,7 +243,7 @@ func (h *DNSHijacker) serveLoop() {
 		if resp == nil {
 			continue
 		}
-		if _, err := h.udpEP.Write(&slicePayload{data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
+		if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
 			util.LogWarn("tun dns: write response to %s:%d fail: %v", res.RemoteAddr.Addr, res.RemoteAddr.Port, err)
 		} else {
 			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
@@ -281,7 +288,7 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 		return nil, 0, fmt.Errorf("read response: %v", err)
 	}
 
-	respIP, ttl := parseDNSResponseIP(resp[:n])
+	respIP, ttl := ParseDNSResponseIP(resp[:n])
 	if respIP == nil {
 		return nil, 0, fmt.Errorf("no A record in response")
 	}
@@ -289,15 +296,16 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	return respIP, ttl, nil
 }
 
-type slicePayload struct {
-	data []byte
+// SlicePayload implements tcpip.Payload for byte slices.
+type SlicePayload struct {
+	Data []byte
 }
 
-func (p *slicePayload) Len() int { return len(p.data) }
-func (p *slicePayload) Read(dst []byte) (int, error) {
-	n := copy(dst, p.data)
-	p.data = p.data[n:]
-	if len(p.data) == 0 {
+func (p *SlicePayload) Len() int { return len(p.Data) }
+func (p *SlicePayload) Read(dst []byte) (int, error) {
+	n := copy(dst, p.Data)
+	p.Data = p.Data[n:]
+	if len(p.Data) == 0 {
 		return n, io.EOF
 	}
 	return n, nil
@@ -381,14 +389,14 @@ func buildDNSResponse(query []byte, ip net.IP) []byte {
 	resp = append(resp, 0xc0, 0x0c)             // pointer to offset 12
 	resp = append(resp, 0x00, 0x01)             // Type A
 	resp = append(resp, 0x00, 0x01)             // Class IN
-	resp = append(resp, 0x00, 0x00, 0x00, 0x3c) // TTL 60
+	resp = append(resp, 0x00, 0x00, 0x00, 0x05) // TTL 5
 	resp = append(resp, 0x00, 0x04)             // RDLENGTH
 	resp = append(resp, ip...)
 	return resp
 }
 
-// buildDNSQuery builds a minimal DNS A query for domain using txID.
-func buildDNSQuery(domain string, txID uint16) []byte {
+// BuildDNSQuery builds a minimal DNS A query for domain using txID.
+func BuildDNSQuery(domain string, txID uint16) []byte {
 	pkt := make([]byte, 0, 512)
 	pkt = append(pkt, byte(txID>>8), byte(txID))
 	pkt = append(pkt, 0x01, 0x00) // flags: standard query, recursion desired
@@ -407,9 +415,9 @@ func buildDNSQuery(domain string, txID uint16) []byte {
 	return pkt
 }
 
-// parseDNSResponseIP extracts the first A record IPv4 address and TTL from a
+// ParseDNSResponseIP extracts the first A record IPv4 address and TTL from a
 // DNS response. Returns (nil, 0) if the response is invalid or not an A record.
-func parseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
+func ParseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
 	if len(resp) < 12 {
 		return nil, 0
 	}
@@ -489,9 +497,9 @@ func parseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
 	return net.IP(resp[off : off+4]), ttl
 }
 
-// isFakeIP reports whether the given IP string is in the Fake-IP range
+// IsFakeIP reports whether the given IP string is in the Fake-IP range
 // 198.18.0.0/15.
-func isFakeIP(ipStr string) bool {
+func IsFakeIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false

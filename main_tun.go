@@ -80,6 +80,14 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
 	if meshEnabled {
+		// Bind mesh's DNS hijacker to the engine's netstack.
+		// This must happen after engine.Start() (netstack is ready) and before
+		// any DNS queries are made.
+		if err := engine.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool()); err != nil {
+			util.LogError("Failed to bind DNS hijacker: %v", err)
+			return nil
+		}
+
 		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
 		// dialing go through the netstack, which routes via loopback to the
 		// hijacker/forwarder.
@@ -105,18 +113,11 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
-		if pool := engine.GetFakeIPPool(); pool != nil {
-			meshMgr.DNSAllocator = func(domain string) (net.IP, error) {
-				return pool.Lookup(domain), nil
-			}
+		meshMgr.DNSAllocator = func(domain string) (net.IP, error) {
+			return meshMgr.GetFakeIPPool().Lookup(domain), nil
 		}
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
-
-		// Wire DNS hijacker's domain resolver for cross-node forwarding.
-		// The DNS hijacker uses this to determine if a domain belongs to a remote
-		// node and forwards the query via gvisor socket to the remote DNS hijacker.
-		engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
 
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}

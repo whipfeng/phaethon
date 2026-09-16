@@ -7,6 +7,7 @@ import (
 	"time"
 	"unsafe"
 
+	"phaethon/mesh"
 	"phaethon/util"
 )
 
@@ -92,7 +93,7 @@ func CleanupResidual() {
 
 		// Delete Fake-IP pool route for both the current off-link gateway
 		// variant (192.0.2.1) and the legacy on-link variant (0.0.0.0).
-		if _, fakeIPNet, err := net.ParseCIDR(FakeIPPoolCIDR); err == nil {
+		if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
 			for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
 				var fwdRow mibIpForwardRow2
 				fwdRow.init()

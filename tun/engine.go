@@ -17,6 +17,7 @@ import (
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/dialer"
+	"phaethon/mesh"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -76,8 +77,8 @@ type Engine struct {
 	device     Device
 	linkEP     *channel.Endpoint
 	ns         *stack.Stack
-	fakeIP    *FakeIPPool
-	dnsHijack *DNSHijacker
+	fakeIP    *mesh.FakeIPPool
+	dnsHijack *mesh.DNSHijacker
 	routeMgr  *RouteManager
 	dhcpSrv   DHCPServer
 	addr      tcpip.Address
@@ -111,7 +112,7 @@ type Engine struct {
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
-	natTable        *NATTable       // shared NAT table for TUN and mesh NAT
+	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 }
 
@@ -142,7 +143,7 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 }
 
 // SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
-func (e *Engine) SetNATTable(nat *NATTable) {
+func (e *Engine) SetNATTable(nat *mesh.NATTable) {
 	e.natTable = nat
 }
 
@@ -161,13 +162,41 @@ func (e *Engine) SetDNSDomainResolver(resolver func(domain string) *net.IPNet) {
 	}
 }
 
+// SetDNSHijacker binds the mesh's DNS hijacker to this engine's netstack.
+// Called when mesh is enabled and TUN engine is started.
+func (e *Engine) SetDNSHijacker(h *mesh.DNSHijacker, fakeIP *mesh.FakeIPPool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.running {
+		return fmt.Errorf("tun: engine not running")
+	}
+
+	// Bind netstack to the hijacker
+	h.BindNetstack(e.ns, e.addr, e.dnsAddr)
+
+	// Start the hijacker
+	if err := h.Start(&e.wg); err != nil {
+		return fmt.Errorf("tun: start dns hijacker: %w", err)
+	}
+
+	e.dnsHijack = h
+	e.fakeIP = fakeIP
+	if fakeIP != nil {
+		fakeIP.SetOnChange(e.notifyStatsChanged)
+	}
+
+	util.LogInfo("tun: DNS hijacker bound from mesh")
+	return nil
+}
+
 // GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
-func (e *Engine) GetFakeIPPool() *FakeIPPool {
+func (e *Engine) GetFakeIPPool() *mesh.FakeIPPool {
 	return e.fakeIP
 }
 
 // GetDNSHijacker returns the DNS hijacker for external use (e.g., mesh DNS forwarding).
-func (e *Engine) GetDNSHijacker() *DNSHijacker {
+func (e *Engine) GetDNSHijacker() *mesh.DNSHijacker {
 	return e.dnsHijack
 }
 
@@ -205,8 +234,8 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 	defer wq.EventUnregister(&waitEntry)
 
 	txID := uint16(time.Now().UnixNano())
-	query := buildDNSQuery(domain, txID)
-	if _, err := ep.Write(&slicePayload{data: query}, tcpip.WriteOptions{}); err != nil {
+	query := mesh.BuildDNSQuery(domain, txID)
+	if _, err := ep.Write(&mesh.SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
 		return nil, fmt.Errorf("resolve %s: write: %v", domain, err)
 	}
 
@@ -220,7 +249,7 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
 		return nil, fmt.Errorf("resolve %s: read: %v", domain, err)
 	}
-	fakeIP, _ := parseDNSResponseIP(buf.Bytes())
+	fakeIP, _ := mesh.ParseDNSResponseIP(buf.Bytes())
 	if fakeIP == nil {
 		return nil, fmt.Errorf("resolve %s: bad response", domain)
 	}
@@ -596,9 +625,9 @@ func (e *Engine) TUNInterfaceIP() net.IP {
 
 // TUNStats contains diagnostic statistics from the TUN engine.
 type TUNStats struct {
-	ReadPackets  uint64      `json:"readPackets"`
-	WritePackets uint64      `json:"writePackets"`
-	FakeIP       FakeIPStats `json:"fakeIP"`
+	ReadPackets  uint64          `json:"readPackets"`
+	WritePackets uint64          `json:"writePackets"`
+	FakeIP       mesh.FakeIPStats `json:"fakeIP"`
 }
 
 // Stats returns a snapshot of the TUN engine diagnostic statistics.
@@ -674,23 +703,8 @@ func (e *Engine) StartStack() error {
 		return fmt.Errorf("tun: init netstack: %w", err)
 	}
 
-	// Fake-IP pool: use mesh subnet if configured, otherwise default 198.18.0.0/15.
-	if e.meshSubnet != nil {
-		e.fakeIP = NewFakeIPPoolWithSubnet(e.meshSubnet, 3) // skip .1/.2/.3
-	} else {
-		e.fakeIP = NewFakeIPPool()
-	}
-	e.fakeIP.SetOnChange(e.notifyStatsChanged)
-
-	// DNS hijacker
-	e.dnsHijack = NewDNSHijacker(e.ns, e.fakeIP, e.addr, e.dnsAddr)
-	if err := e.dnsHijack.Start(&e.wg); err != nil {
-		e.dnsHijack.Stop()
-		e.wg.Wait()
-		e.ns.Close()
-		e.mu.Unlock()
-		return fmt.Errorf("tun: start dns hijacker: %w", err)
-	}
+	// FakeIPPool and DNSHijacker are now managed by mesh.
+	// They will be bound via SetDNSHijacker() if mesh is enabled.
 
 	// Start stack-level goroutines
 	e.running = true

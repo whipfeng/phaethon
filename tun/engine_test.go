@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/mesh"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -242,8 +243,8 @@ func TestQueryInternalDNS(t *testing.T) {
 		loopWg.Wait()
 	}()
 
-	pool := NewFakeIPPool()
-	hijack := NewDNSHijacker(s, pool, tunAddr, dnsAddr)
+	pool := mesh.NewFakeIPPool()
+	hijack := mesh.NewDNSHijacker(s, pool, tunAddr, dnsAddr)
 	var wg sync.WaitGroup
 	if err := hijack.Start(&wg); err != nil {
 		t.Fatalf("start dns hijacker: %v", err)
@@ -264,16 +265,16 @@ func TestQueryInternalDNS(t *testing.T) {
 	}
 
 	domain := fmt.Sprintf("tun-health-%d.example.com", time.Now().UnixNano())
-	query := buildDNSQuery(domain, uint16(time.Now().UnixNano()))
+	query := mesh.BuildDNSQuery(domain, uint16(time.Now().UnixNano()))
 	resp, err := engine.queryInternalDNS(query)
 	if err != nil {
 		t.Fatalf("queryInternalDNS failed: %v", err)
 	}
-	ip, _ := parseDNSResponseIP(resp)
+	ip, _ := mesh.ParseDNSResponseIP(resp)
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}
-	if !isFakeIP(ip.String()) {
+	if !mesh.IsFakeIP(ip.String()) {
 		t.Fatalf("expected Fake-IP, got %s", ip)
 	}
 }
@@ -281,20 +282,20 @@ func TestQueryInternalDNS(t *testing.T) {
 // TestDNSHijackerResolve verifies the direct Resolve path used by the
 // Windows-side DNS proxy when gVisor loopback delivery is unavailable.
 func TestDNSHijackerResolve(t *testing.T) {
-	pool := NewFakeIPPool()
-	hijack := NewDNSHijacker(nil, pool, tcpip.AddrFrom4([4]byte{198, 18, 0, 1}), tcpip.AddrFrom4([4]byte{198, 18, 0, 2}))
+	pool := mesh.NewFakeIPPool()
+	hijack := mesh.NewDNSHijacker(nil, pool, tcpip.AddrFrom4([4]byte{198, 18, 0, 1}), tcpip.AddrFrom4([4]byte{198, 18, 0, 2}))
 
 	domain := "direct-resolve.example.com"
-	query := buildDNSQuery(domain, 0x1234)
+	query := mesh.BuildDNSQuery(domain, 0x1234)
 	resp, err := hijack.Resolve(query)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
-	ip, _ := parseDNSResponseIP(resp)
+	ip, _ := mesh.ParseDNSResponseIP(resp)
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}
-	if !isFakeIP(ip.String()) {
+	if !mesh.IsFakeIP(ip.String()) {
 		t.Fatalf("expected Fake-IP, got %s", ip)
 	}
 }

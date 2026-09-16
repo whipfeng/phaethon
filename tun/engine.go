@@ -163,7 +163,7 @@ func (e *Engine) SetDNSDomainResolver(resolver func(domain string) *net.IPNet) {
 }
 
 // SetDNSHijacker binds the mesh's DNS hijacker to this engine's netstack.
-// Called when mesh is enabled and TUN engine is started.
+// Called when mesh is configured and TUN engine is started.
 func (e *Engine) SetDNSHijacker(h *mesh.DNSHijacker, fakeIP *mesh.FakeIPPool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -414,7 +414,7 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 }
 
 // AddMeshRoute adds a route for the mesh subnet through the TUN device.
-// This is called when mesh is enabled to ensure mesh-destined packets reach the TUN.
+// This is called when mesh is configured to ensure mesh-destined packets reach the TUN.
 func (e *Engine) AddMeshRoute(subnet string) error {
 	return e.addMeshRoute(subnet)
 }
@@ -704,7 +704,7 @@ func (e *Engine) StartStack() error {
 	}
 
 	// FakeIPPool and DNSHijacker are now managed by mesh.
-	// They will be bound via SetDNSHijacker() if mesh is enabled.
+	// They will be bound via SetDNSHijacker() if mesh is configured.
 
 	// Start stack-level goroutines
 	e.running = true

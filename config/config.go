@@ -1335,7 +1335,6 @@ func (t *TUNConfig) DirectNameserverList() []string {
 
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
-	Enabled        *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	NodeID         string   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
 	Network        string   `yaml:"network,omitempty" json:"network,omitempty"`     // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
 	Subnet         string   `yaml:"subnet,omitempty" json:"subnet,omitempty"`       // This node's subnet (e.g., "100.0.0.0/16")
@@ -1343,12 +1342,10 @@ type MeshConfig struct {
 	Advertise      []string `yaml:"advertise,omitempty" json:"advertise,omitempty"`
 }
 
-// IsEnabled reports whether mesh networking is enabled.
+// IsEnabled reports whether mesh networking is configured.
+// Mesh is always enabled when MeshConfig exists (no enabled switch).
 func (m *MeshConfig) IsEnabled() bool {
-	if m == nil || m.Enabled == nil {
-		return false
-	}
-	return *m.Enabled
+	return m != nil
 }
 
 // GetAdvertise returns the list of prefixes this node advertises.

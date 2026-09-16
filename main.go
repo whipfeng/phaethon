@@ -233,9 +233,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
 	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, runtime.GOOS, runtime.GOARCH)
 
-	// Initialize mesh overlay network if enabled
+	// Initialize mesh overlay network (always enabled when configured)
 	var meshMgr *mesh.MeshManager
-	if ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled() {
+	if ruleConf.Mesh != nil {
 		// Set the overall mesh network range (e.g., 100.0.0.0/8)
 		meshNetworkStr := ruleConf.Mesh.GetNetwork()
 		_, meshNetwork, err := net.ParseCIDR(meshNetworkStr)
@@ -331,9 +331,8 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	}
 
 	// Start P2P peers:
-	// - When mesh is enabled: ALL compatible proxies (SOCKS5/Trojan/HTunnel) get P2P automatically
-	// - When mesh is disabled: only proxies with explicit p2p: true
-	meshEnabled := ruleConf.Mesh != nil && ruleConf.Mesh.IsEnabled()
+	// When mesh is configured, ALL compatible proxies (SOCKS5/Trojan/HTunnel) get P2P automatically
+	meshConfigured := ruleConf.Mesh != nil
 	for _, proxy := range ruleConf.Proxies {
 		if !proxy.IsEnabled() {
 			continue
@@ -342,7 +341,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if !isCompatible {
 			continue
 		}
-		if !meshEnabled && !proxy.P2P {
+		if !meshConfigured && !proxy.P2P {
 			continue
 		}
 		go p2p.GlobalP2PManager.StartPeer(proxy)

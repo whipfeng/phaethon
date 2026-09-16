@@ -3896,7 +3896,7 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if mesh.GlobalMeshManager == nil {
-		httpError(w, "mesh not enabled", http.StatusServiceUnavailable)
+		httpError(w, "mesh not configured", http.StatusServiceUnavailable)
 		return
 	}
 	var req struct {
@@ -3939,7 +3939,7 @@ func (s *AdminServer) apiMeshGossipPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if mesh.GlobalMeshManager == nil {
-		httpError(w, "mesh not enabled", http.StatusServiceUnavailable)
+		httpError(w, "mesh not configured", http.StatusServiceUnavailable)
 		return
 	}
 	mesh.GlobalMeshManager.TriggerGossip()

@@ -877,6 +877,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mesh", s.apiMesh)
 	mux.HandleFunc("/api/mesh/config", s.apiMesh)
 	mux.HandleFunc("/api/mesh/gossip", s.apiMesh)
+	mux.HandleFunc("/api/mesh/topology", s.apiMesh)
 	mux.HandleFunc("/api/tun", s.apiTUN)
 	mux.HandleFunc("/api/events", s.apiEvents)
 	mux.HandleFunc("/api/versions", s.apiVersions)

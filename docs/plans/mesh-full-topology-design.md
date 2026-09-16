@@ -142,9 +142,13 @@ for _, peer := range allPeers {
 
 ### Admin API
 
-新增 `/api/mesh/topology` 端点：
+新增 `/api/mesh/topology` 端点（需在 mux 中注册路由）：
 
 ```go
+// 路由注册
+mux.HandleFunc("/api/mesh/topology", s.apiMesh)
+
+// 响应结构
 type FullTopology struct {
     Nodes []TopologyNode `json:"nodes"`
     Edges []TopologyEdge `json:"edges"`

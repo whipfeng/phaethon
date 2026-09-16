@@ -3893,6 +3893,8 @@ func (s *AdminServer) apiMesh(w http.ResponseWriter, r *http.Request) {
 		s.apiMeshConfigPatch(w, r)
 	case path == "/gossip":
 		s.apiMeshGossipPost(w, r)
+	case path == "/topology":
+		s.apiMeshTopologyGet(w, r)
 	default:
 		httpError(w, "not found", http.StatusNotFound)
 	}
@@ -3968,6 +3970,20 @@ func (s *AdminServer) apiMeshGossipPost(w http.ResponseWriter, r *http.Request) 
 	}
 	mesh.GlobalMeshManager.TriggerGossip()
 	jsonResponse(w, map[string]interface{}{"ok": true})
+}
+
+func (s *AdminServer) apiMeshTopologyGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if mesh.GlobalMeshManager == nil {
+		jsonResponse(w, map[string]interface{}{"enabled": false, "nodes": []interface{}{}, "edges": []interface{}{}})
+		return
+	}
+	result := mesh.GlobalMeshManager.GetFullTopology()
+	result["enabled"] = true
+	jsonResponse(w, result)
 }
 
 func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {

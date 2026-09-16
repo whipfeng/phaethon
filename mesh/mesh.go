@@ -819,6 +819,94 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 	return map[string]interface{}{"peers": peerList}
 }
 
+// FullTopologyNode represents a node in the full topology.
+type FullTopologyNode struct {
+	NodeID string `json:"nodeId"`
+	VIP    string `json:"vip"`
+	Subnet string `json:"subnet"`
+}
+
+// FullTopologyEdge represents an edge in the full topology.
+type FullTopologyEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// GetFullTopology returns the complete network topology including all known nodes and edges.
+func (m *MeshManager) GetFullTopology() map[string]interface{} {
+	peers := m.topology.GetAllPeers()
+
+	// Build node list: local node + all peers
+	nodes := make([]FullTopologyNode, 0, len(peers)+1)
+
+	// Add local node
+	localVIP := ""
+	if m.subnet != nil {
+		vip := DeriveVIPFromSubnet(m.subnet)
+		if vip != nil {
+			localVIP = vip.String()
+		}
+	}
+	nodes = append(nodes, FullTopologyNode{
+		NodeID: m.nodeID,
+		VIP:    localVIP,
+		Subnet: m.subnetStr,
+	})
+
+	// Add peer nodes
+	nodeSet := make(map[string]bool)
+	nodeSet[m.nodeID] = true
+	for _, p := range peers {
+		peerID := p.NodeID()
+		if nodeSet[peerID] {
+			continue
+		}
+		nodeSet[peerID] = true
+		peerVIP := ""
+		if p.Subnet != nil {
+			vip := DeriveVIPFromSubnet(p.Subnet)
+			if vip != nil {
+				peerVIP = vip.String()
+			}
+		}
+		nodes = append(nodes, FullTopologyNode{
+			NodeID: peerID,
+			VIP:    peerVIP,
+			Subnet: p.SubnetStr,
+		})
+	}
+
+	// Build edge list: local peer connections + learned edges
+	edgeSet := make(map[string]FullTopologyEdge)
+
+	// Local direct peer connections
+	for _, p := range peers {
+		peerID := p.NodeID()
+		key := edgeKey(m.nodeID, peerID)
+		edgeSet[key] = FullTopologyEdge{From: m.nodeID, To: peerID}
+	}
+
+	// Learned edges from gossip
+	for _, p := range peers {
+		for _, e := range p.TopologyEdges {
+			key := edgeKey(e.NodeID, e.Neighbor)
+			if _, exists := edgeSet[key]; !exists {
+				edgeSet[key] = FullTopologyEdge{From: e.NodeID, To: e.Neighbor}
+			}
+		}
+	}
+
+	edges := make([]FullTopologyEdge, 0, len(edgeSet))
+	for _, e := range edgeSet {
+		edges = append(edges, e)
+	}
+
+	return map[string]interface{}{
+		"nodes": nodes,
+		"edges": edges,
+	}
+}
+
 func (m *MeshManager) GetRoutes() map[string]interface{} {
 	m.routesMu.RLock()
 	defer m.routesMu.RUnlock()
@@ -1277,6 +1365,38 @@ func (m *MeshManager) broadcastGossip() {
 		}
 	}
 
+	// Build global topology edge set (deduplicated)
+	type globalEdgeEntry struct {
+		nextHop  *PeerInfo // nil = own observation
+		nodeID   string
+		neighbor string
+	}
+	bestEdges := make(map[string]globalEdgeEntry) // key: "nodeA|nodeB" (sorted)
+
+	// Own direct edges (to all peers)
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		key := edgeKey(m.nodeID, peer.NodeID())
+		if _, exists := bestEdges[key]; !exists {
+			bestEdges[key] = globalEdgeEntry{nil, m.nodeID, peer.NodeID()}
+		}
+	}
+
+	// Edges learned from peers
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, e := range peer.TopologyEdges {
+			key := edgeKey(e.NodeID, e.Neighbor)
+			if _, exists := bestEdges[key]; !exists {
+				bestEdges[key] = globalEdgeEntry{peer, e.NodeID, e.Neighbor}
+			}
+		}
+	}
+
 	// Per-peer: filter by split horizon and send
 	// Iterate over all peers (including multiple connections to same node)
 	for _, peer := range allPeers {
@@ -1315,12 +1435,29 @@ func (m *MeshManager) broadcastGossip() {
 			})
 		}
 
+		// Filter topology edges: exclude entries learned from this peer,
+		// and entries involving this peer (they already know)
+		var edges []GossipTopologyEdge
+		for _, e := range bestEdges {
+			if e.nextHop == peer {
+				continue // split horizon
+			}
+			if e.nodeID == peer.NodeID() || e.neighbor == peer.NodeID() {
+				continue // peer already knows about its own edges
+			}
+			edges = append(edges, GossipTopologyEdge{
+				NodeID:   e.nodeID,
+				Neighbor: e.neighbor,
+			})
+		}
+
 		info := GossipInfo{
 			NodeID:         m.nodeID,
 			Subnet:         m.subnetStr,
 			DomainSuffixes: ds,
 			Routes:         routes,
 			ClaimedSubnets: claims,
+			TopologyEdges:  edges,
 		}
 		data, err := json.Marshal(info)
 		if err != nil {
@@ -1328,6 +1465,14 @@ func (m *MeshManager) broadcastGossip() {
 		}
 		peer.Sender.SendGossip(data)
 	}
+}
+
+// edgeKey returns a canonical key for an edge between two nodes (sorted order).
+func edgeKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + "|" + b
 }
 
 // rewriteSrcIPInPacket rewrites the source IP in a raw IPv4 packet

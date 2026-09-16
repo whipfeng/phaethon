@@ -29,6 +29,12 @@ type PeerClaimedSubnetEntry struct {
 	Hop       int // hop count (already incremented on receive)
 }
 
+// PeerTopologyEdgeEntry represents a topology edge learned from a peer.
+type PeerTopologyEdgeEntry struct {
+	NodeID   string
+	Neighbor string
+}
+
 // PeerInfo holds the information received from a peer via gossip.
 // Created by RegisterPeer, destroyed by UnregisterPeer.
 // Data follows the connection lifecycle.
@@ -39,6 +45,7 @@ type PeerInfo struct {
 	DomainSuffixes []PeerDomainSuffixEntry
 	Routes         []PeerRouteEntry
 	ClaimedSubnets []PeerClaimedSubnetEntry
+	TopologyEdges  []PeerTopologyEdgeEntry
 	LastSeen       time.Time
 }
 
@@ -70,6 +77,12 @@ type GossipClaimedSubnet struct {
 	Hop    int    `json:"hop"`
 }
 
+// GossipTopologyEdge represents a topology edge in gossip messages.
+type GossipTopologyEdge struct {
+	NodeID   string `json:"nodeId"`   // edge source
+	Neighbor string `json:"neighbor"` // edge target
+}
+
 // GossipInfo is the gossip payload exchanged between nodes.
 type GossipInfo struct {
 	NodeID         string                `json:"nodeId"`
@@ -77,6 +90,7 @@ type GossipInfo struct {
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
 	Routes         []GossipRoute         `json:"routes,omitempty"`
 	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
+	TopologyEdges  []GossipTopologyEdge  `json:"topologyEdges,omitempty"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.
@@ -185,6 +199,15 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		})
 	}
 
+	// Parse topology edges
+	var topologyEdges []PeerTopologyEdgeEntry
+	for _, te := range info.TopologyEdges {
+		topologyEdges = append(topologyEdges, PeerTopologyEdgeEntry{
+			NodeID:   te.NodeID,
+			Neighbor: te.Neighbor,
+		})
+	}
+
 	// Check if anything changed
 	changed := false
 	if peer.SubnetStr != info.Subnet {
@@ -199,6 +222,9 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	if !claimedSubnetsEqual(peer.ClaimedSubnets, claimedSubnets) {
 		changed = true
 	}
+	if !topologyEdgesEqual(peer.TopologyEdges, topologyEdges) {
+		changed = true
+	}
 
 	// Update in-place
 	peer.Subnet = subnet
@@ -206,6 +232,7 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	peer.DomainSuffixes = domainSuffixes
 	peer.Routes = routes
 	peer.ClaimedSubnets = claimedSubnets
+	peer.TopologyEdges = topologyEdges
 	peer.LastSeen = time.Now()
 
 	return changed
@@ -284,6 +311,19 @@ func claimedSubnetsEqual(a, b []PeerClaimedSubnetEntry) bool {
 	}
 	for i := range a {
 		if a[i].SubnetStr != b[i].SubnetStr || a[i].NodeID != b[i].NodeID || a[i].Hop != b[i].Hop {
+			return false
+		}
+	}
+	return true
+}
+
+// topologyEdgesEqual compares two topology edge entry slices for equality.
+func topologyEdgesEqual(a, b []PeerTopologyEdgeEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].NodeID != b[i].NodeID || a[i].Neighbor != b[i].Neighbor {
 			return false
 		}
 	}

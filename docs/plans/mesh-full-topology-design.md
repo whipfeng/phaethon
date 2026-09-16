@@ -9,113 +9,138 @@
 - 每个节点能够展示完整的 Mesh 网络拓扑
 - 显示所有节点及其连接关系
 - 支持故障排查（查看路由路径）
-- 保持协议简单，避免过度复杂
+- 复用现有 gossip 机制，不引入新的消息类型
 
-## 设计思路
+## 设计
 
-### 方案：链路状态泛洪（Link-State Flooding）
+### 方案：扩展 Gossip 携带拓扑边
 
-类似 OSPF 的简化版本，每个节点广播自己的邻居列表，其他节点收集并泛洪，最终每个节点都有全网拓扑信息。
+在现有 `GossipInfo` 中新增 `TopologyEdges` 字段，每个节点通告自己的直连边，通过 gossip 聚合机制自动传播到全网。
 
-### 核心数据结构
+### 数据结构
 
 ```go
-// 拓扑通告 - 每个节点定期广播
-type TopologyAnnouncement struct {
-    NodeID    string   `json:"nodeId"`    // 通告来源节点
-    Neighbors []string `json:"neighbors"` // 该节点的直接邻居
-    SeqNum    uint64   `json:"seqNum"`    // 序列号，用于去重
-    Timestamp int64    `json:"timestamp"` // 时间戳，用于过期清理
+// GossipTopologyEdge 表示一条拓扑边
+type GossipTopologyEdge struct {
+    NodeID   string `json:"nodeId"`   // 边的起点
+    Neighbor string `json:"neighbor"` // 边的终点
+    Hop      int    `json:"hop"`      // 0=自己的直连观察, >1=间接学习
 }
 
-// 全网拓扑表 - 每个节点维护
-type TopologyTable struct {
-    mu       sync.RWMutex
-    entries  map[string]*TopologyEntry  // nodeId -> entry
-}
-
-type TopologyEntry struct {
-    NodeID    string
-    Neighbors []string
-    SeqNum    uint64
-    LastSeen  time.Time
+// GossipInfo 新增字段
+type GossipInfo struct {
+    NodeID          string                  `json:"nodeId"`
+    Subnet          string                  `json:"subnet"`
+    DomainSuffixes  []GossipDomainSuffix    `json:"domainSuffixes,omitempty"`
+    Routes          []GossipRoute           `json:"routes,omitempty"`
+    ClaimedSubnets  []GossipClaimedSubnet   `json:"claimedSubnets,omitempty"`
+    TopologyEdges   []GossipTopologyEdge    `json:"topologyEdges,omitempty"` // 新增
 }
 ```
 
-### 协议扩展
+### 传播机制
 
-#### 1. Gossip 消息类型扩展
+复用现有 gossip 聚合逻辑（类似 ClaimedSubnets）：
 
-当前 gossip 消息：
+1. 每个节点观察自己的直连 peer，生成自己的边（hop=0）
+2. `broadcastGossip()` 聚合所有已知边，按 split-horizon 过滤后发给每个 peer
+3. 接收方存储到拓扑表，hop+1
+4. 下一轮 gossip 时转发出去
+
+**示例**（A — B — C 链式拓扑）：
+
+第 1 轮报文：
+```
+A → B: { topologyEdges: [] }                    ← (A,B)涉及B，split-horizon过滤
+B → A: { topologyEdges: [{B, C, hop=0}] }       ← (A,B)涉及A，过滤
+B → C: { topologyEdges: [{A, B, hop=0}] }       ← (B,C)涉及C，过滤
+C → B: { topologyEdges: [] }                    ← (B,C)涉及B，过滤
+```
+
+第 2 轮报文：
+```
+A → B: { topologyEdges: [{B, C, hop=1}] }       ← 转发从B学来的
+B → A: { topologyEdges: [{B, C, hop=0}] }
+B → C: { topologyEdges: [{A, B, hop=0}] }
+C → B: { topologyEdges: [{A, B, hop=1}] }       ← 转发从B学来的
+```
+
+第 2 轮后所有节点收敛：
+```
+A: [(A,B), (B,C)]  ✓
+B: [(A,B), (B,C)]  ✓
+C: [(A,B), (B,C)]  ✓
+```
+
+**收敛时间** = 网络直径 × gossip 周期（15s）。链式 4 节点约 30-45s 收敛。
+
+### 拓扑表存储
+
 ```go
-type GossipMessage struct {
-    NodeID     string
-    VIP        string
-    Subnet     string
-    // ... 其他字段
+// PeerInfo 新增字段
+type PeerInfo struct {
+    // ... 现有字段
+    TopologyEdges []PeerTopologyEdgeEntry  // 从该 peer 学到的拓扑边
+}
+
+type PeerTopologyEdgeEntry struct {
+    NodeID   string
+    Neighbor string
+    Hop      int
+}
+
+// Topology 新增全局拓扑边表
+type Topology struct {
+    mu           sync.RWMutex
+    peers        []*PeerInfo
+    topologyEdges map[string]map[string]int  // "nodeA|nodeB" -> min hop
 }
 ```
 
-扩展后：
-```go
-type GossipMessage struct {
-    NodeID     string
-    VIP        string
-    Subnet     string
-    // 新增：拓扑通告
-    Topology   *TopologyAnnouncement `json:"topology,omitempty"`
-}
-```
-
-#### 2. 拓扑泛洪逻辑
+### broadcastGossip 聚合逻辑
 
 ```go
-func (m *MeshManager) handleTopologyAnnouncement(ann *TopologyAnnouncement, fromNode string) {
-    // 1. 检查序列号，如果已收到更新的，忽略
-    entry := m.topologyTable.Get(ann.NodeID)
-    if entry != nil && entry.SeqNum >= ann.SeqNum {
-        return
-    }
-    
-    // 2. 更新本地拓扑表
-    m.topologyTable.Update(ann)
-    
-    // 3. 泛洪给其他邻居（除了来源）
-    m.broadcastTopology(ann, fromNode)
+// 聚合全局拓扑边表
+type globalEdgeEntry struct {
+    hop     int
+    nextHop *PeerInfo  // nil = 自己的直连观察
+    nodeID  string
+    neighbor string
+}
+bestEdges := make(map[string]globalEdgeEntry)  // key: "nodeA|nodeB" (排序后)
+
+// 自己的直连边 (hop=0)
+for _, peer := range allPeers {
+    key := edgeKey(m.nodeID, peer.NodeID())
+    bestEdges[key] = globalEdgeEntry{0, nil, m.nodeID, peer.NodeID()}
 }
 
-func (m *MeshManager) broadcastTopology(ann *TopologyAnnouncement, excludeNode string) {
-    for _, peer := range m.peers {
-        if peer.NodeID == excludeNode {
-            continue
+// 从 peer 学到的边
+for _, peer := range allPeers {
+    for _, e := range peer.TopologyEdges {
+        key := edgeKey(e.NodeID, e.Neighbor)
+        if existing, ok := bestEdges[key]; !ok || e.Hop < existing.hop {
+            bestEdges[key] = globalEdgeEntry{e.Hop, peer, e.NodeID, e.Neighbor}
         }
-        m.sendGossip(peer, &GossipMessage{Topology: ann})
     }
+}
+
+// 发给每个 peer 时 split-horizon 过滤
+for _, peer := range allPeers {
+    var edges []GossipTopologyEdge
+    for _, e := range bestEdges {
+        if e.nextHop == peer { continue }  // split horizon
+        // 也过滤涉及该 peer 的边
+        if e.nodeID == peer.NodeID() || e.neighbor == peer.NodeID() { continue }
+        edges = append(edges, GossipTopologyEdge{
+            NodeID: e.nodeID, Neighbor: e.neighbor, Hop: e.hop,
+        })
+    }
+    // ... 构建 GossipInfo 发送
 }
 ```
 
-#### 3. 本地拓扑通告生成
-
-```go
-func (m *MeshManager) generateTopologyAnnouncement() *TopologyAnnouncement {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
-    
-    neighbors := make([]string, 0, len(m.peers))
-    for _, peer := range m.peers {
-        neighbors = append(neighbors, peer.NodeID)
-    }
-    
-    return &TopologyAnnouncement{
-        NodeID:    m.localNodeID,
-        Neighbors: neighbors,
-        SeqNum:    m.topologySeqNum,
-        Timestamp: time.Now().Unix(),
-    }
-}
-```
-
-### Admin API 扩展
+### Admin API
 
 新增 `/api/mesh/topology` 端点：
 
@@ -132,9 +157,8 @@ type TopologyNode struct {
 }
 
 type TopologyEdge struct {
-    From   string `json:"from"`
-    To     string `json:"to"`
-    Direct bool   `json:"direct"` // 是否是直连（vs 通过路由表推断）
+    From string `json:"from"`
+    To   string `json:"to"`
 }
 ```
 
@@ -142,69 +166,19 @@ type TopologyEdge struct {
 
 拓扑图渲染逻辑：
 1. 从 `/api/mesh/topology` 获取全网数据
-2. 使用 Canvas 或 SVG 绘制节点和边
+2. 使用 Canvas 绘制节点和边
 3. 本地节点高亮显示
-4. 直连边用实线，推断边用虚线
-
-### 时序与清理
-
-- 每个节点每 30 秒广播一次拓扑通告
-- 序列号每次广播递增
-- 拓扑表条目 90 秒未更新则删除（节点离线）
 
 ## 实现步骤
 
-1. **协议层**
-   - 定义 `TopologyAnnouncement` 结构
-   - 扩展 `GossipMessage` 添加拓扑字段
-   - 实现拓扑表 `TopologyTable`
-   - 实现泛洪逻辑
+1. **协议层**：定义 `GossipTopologyEdge`，扩展 `GossipInfo`
+2. **拓扑表**：`PeerInfo` 新增 `TopologyEdges`，`Topology` 新增全局边表
+3. **聚合逻辑**：`broadcastGossip()` 中聚合拓扑边，split-horizon 过滤
+4. **接收处理**：`UpdateGossip()` 存储拓扑边
+5. **API**：新增 `/api/mesh/topology` 端点
+6. **前端**：修改拓扑图渲染逻辑
 
-2. **本地通告**
-   - 定期生成并广播本地拓扑通告
-   - 处理收到的拓扑通告
+## 状态
 
-3. **API 层**
-   - 新增 `/api/mesh/topology` 端点
-   - 从拓扑表生成全网视图
-
-4. **前端**
-   - 修改拓扑图渲染逻辑
-   - 支持显示全网节点和边
-
-## 复杂度评估
-
-| 模块 | 工作量 | 风险 |
-|------|--------|------|
-| 协议扩展 | 中 | 低 |
-| 泛洪逻辑 | 中 | 中（需防止泛洪风暴） |
-| 拓扑表维护 | 低 | 低 |
-| API | 低 | 低 |
-| 前端渲染 | 中 | 低 |
-
-**总计**：约 2-3 天开发时间
-
-## 待讨论
-
-1. **泛洪频率**：30 秒是否合适？太频繁增加带宽，太慢收敛慢
-2. **过期时间**：90 秒是否合适？需要考虑网络抖动
-3. **大规模网络**：100+ 节点时，拓扑表可能很大，是否需要优化
-4. **安全性**：是否需要签名防止伪造拓扑通告
-
-## 替代方案
-
-### 方案 B：中心化拓扑收集
-
-指定一个节点作为拓扑收集器，所有节点向它报告邻居，由它计算全网拓扑。
-
-优点：简单，无泛洪风暴
-缺点：单点故障，需要选举机制
-
-### 方案 C：按需查询
-
-不维护全网拓扑，admin 页面请求时实时查询所有节点。
-
-优点：数据实时
-缺点：延迟高，需要多跳查询
-
-**推荐方案 A（链路状态泛洪）**，去中心化，收敛快，适合中小规模网络。
+- [x] 设计完成
+- [ ] 实现

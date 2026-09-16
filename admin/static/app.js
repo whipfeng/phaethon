@@ -787,6 +787,17 @@ async function fetchMeshStatus() {
         if (!data.enabled) return;
         if (!card) return;
 
+        // Fetch full topology
+        let fullTopology = { nodes: [], edges: [] };
+        try {
+            const topoRes = await fetch('./api/mesh/topology');
+            if (topoRes.ok) {
+                fullTopology = await topoRes.json();
+            }
+        } catch (e) {
+            console.warn('fetch topology failed:', e);
+        }
+
         // Key metrics
         document.getElementById('mesh-nodeid').textContent = data.nodeId || '-';
         document.getElementById('mesh-vip').textContent = data.vip || '-';
@@ -828,7 +839,7 @@ async function fetchMeshStatus() {
         }
 
         // Draw topology visualization
-        drawMeshTopology(data.nodeId, peers, directPeers);
+        drawMeshTopology(data.nodeId, peers, directPeers, fullTopology);
 
         // Routes
         if (data.routes && data.routes.routes) {
@@ -871,7 +882,7 @@ function updateMeshSummary(data) {
     el.innerHTML = html;
 }
 
-function drawMeshTopology(localNodeId, peers, directPeers) {
+function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const canvas = document.getElementById('mesh-topology-canvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -891,21 +902,48 @@ function drawMeshTopology(localNodeId, peers, directPeers) {
     // Clear
     ctx.clearRect(0, 0, width, height);
 
-    // Node positions
-    const allNodes = [{ id: localNodeId, isLocal: true }];
-    peers.forEach(p => allNodes.push({ id: p.nodeId, isLocal: false, direct: directPeers[p.nodeId] === true }));
+    // Build node list from full topology or fallback to peers
+    const allNodes = [];
+    const nodeSet = new Set();
+
+    if (fullTopology && fullTopology.nodes && fullTopology.nodes.length > 0) {
+        // Use full topology nodes
+        fullTopology.nodes.forEach(n => {
+            if (!nodeSet.has(n.nodeId)) {
+                nodeSet.add(n.nodeId);
+                allNodes.push({
+                    id: n.nodeId,
+                    isLocal: n.nodeId === localNodeId,
+                    direct: directPeers[n.nodeId] === true
+                });
+            }
+        });
+    } else {
+        // Fallback: local node + peers
+        allNodes.push({ id: localNodeId, isLocal: true, direct: false });
+        peers.forEach(p => {
+            if (!nodeSet.has(p.nodeId)) {
+                nodeSet.add(p.nodeId);
+                allNodes.push({ id: p.nodeId, isLocal: false, direct: directPeers[p.nodeId] === true });
+            }
+        });
+    }
 
     const centerX = width / 2;
     const centerY = height / 2;
     const radius = Math.min(width, height) * 0.32;
     const nodeRadius = 18;
 
+    // Calculate positions (local node in center, others in circle)
     const positions = {};
+    const localIndex = allNodes.findIndex(n => n.isLocal);
     allNodes.forEach((node, i) => {
         if (node.isLocal) {
             positions[node.id] = { x: centerX, y: centerY };
         } else {
-            const angle = (i - 1) * (2 * Math.PI / (allNodes.length - 1)) - Math.PI / 2;
+            const nonLocalIndex = i < localIndex ? i : i - 1;
+            const nonLocalCount = allNodes.length - 1;
+            const angle = nonLocalIndex * (2 * Math.PI / nonLocalCount) - Math.PI / 2;
             positions[node.id] = {
                 x: centerX + radius * Math.cos(angle),
                 y: centerY + radius * Math.sin(angle)
@@ -913,25 +951,52 @@ function drawMeshTopology(localNodeId, peers, directPeers) {
         }
     });
 
-    // Draw connections
-    allNodes.forEach(node => {
-        if (node.isLocal) return;
-        const from = positions[localNodeId];
-        const to = positions[node.id];
+    // Draw edges from full topology or fallback to local connections
+    const edges = (fullTopology && fullTopology.edges) || [];
+    if (edges.length > 0) {
+        // Draw all edges from full topology
+        edges.forEach(edge => {
+            const from = positions[edge.from];
+            const to = positions[edge.to];
+            if (!from || !to) return;
 
-        ctx.beginPath();
-        ctx.moveTo(from.x, from.y);
-        ctx.lineTo(to.x, to.y);
-        ctx.strokeStyle = node.direct ? '#3fb950' : '#30363d';
-        ctx.lineWidth = node.direct ? 2 : 1;
-        if (!node.direct) {
-            ctx.setLineDash([4, 4]);
-        } else {
+            // Check if this edge involves the local node (direct connection)
+            const isDirect = (edge.from === localNodeId || edge.to === localNodeId);
+
+            ctx.beginPath();
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(to.x, to.y);
+            ctx.strokeStyle = isDirect ? '#3fb950' : '#30363d';
+            ctx.lineWidth = isDirect ? 2 : 1;
+            if (!isDirect) {
+                ctx.setLineDash([4, 4]);
+            } else {
+                ctx.setLineDash([]);
+            }
+            ctx.stroke();
             ctx.setLineDash([]);
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-    });
+        });
+    } else {
+        // Fallback: draw connections from local to all peers
+        allNodes.forEach(node => {
+            if (node.isLocal) return;
+            const from = positions[localNodeId];
+            const to = positions[node.id];
+
+            ctx.beginPath();
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(to.x, to.y);
+            ctx.strokeStyle = node.direct ? '#3fb950' : '#30363d';
+            ctx.lineWidth = node.direct ? 2 : 1;
+            if (!node.direct) {
+                ctx.setLineDash([4, 4]);
+            } else {
+                ctx.setLineDash([]);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        });
+    }
 
     // Draw nodes
     allNodes.forEach(node => {

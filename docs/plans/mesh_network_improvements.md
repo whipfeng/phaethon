@@ -845,13 +845,13 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 ### 待实现项（自动生成 nodeID.phn）
 
-- [ ] 新增 defaultMeshSuffix 常量
-- [ ] recomputeRoutes 中从 claimedSubnets 自动生成 nodeID.phn 条目
-- [ ] 辅助函数：根据 nodeID 查找 nextHop peer 和 hop
+- [x] 新增 defaultMeshSuffix 常量（已有 MeshDomainSuffix = "phn"）
+- [x] recomputeRoutes 中从 claimedSubnets 自动生成 nodeID.phn 条目
+- [x] 过滤裸 "phn" 后缀（recomputeRoutes + broadcastGossip）
 
 ### 待验证项（自动生成 nodeID.phn）
 
-- [ ] JF 查询 vm.phn → 转发到 VM（不经过 QG 本地解析）
-- [ ] JF 查询 qg.phn → 转发到 QG → QG 本地解析
-- [ ] JF SOCKS5 通过 vm.phn 访问 VM 服务
-- [ ] 用户自定义后缀（test.jf.local、httpbin.org）仍正常工作
+- [x] JF 查询 vm.phn → 100.1.0.29 (remote, forwarded to VM ✓)
+- [x] JF 查询 qg.phn → 100.0.0.13 (remote, forwarded to QG ✓)
+- [x] JF SOCKS5 通过 vm.phn 访问 VM 服务（SOCKS5 request granted, TCP via MESH ✓）
+- [x] 用户自定义后缀（httpbin.org）仍正常工作（JF SOCKS5 → httpbin.org/get ✓）

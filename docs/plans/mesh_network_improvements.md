@@ -82,9 +82,9 @@ Mesh 网络在多 VIP 设计（v0.4.1）基础上，存在以下问题需要解�
 **问题**：同一服务器的多个代理各自启动 P2P，导致驱逐循环。
 
 **修复**：
-- 移除 `handleHello` 中相同 MeshNodeID 的驱逐逻辑
-- `mesh/mesh.go` 新增 `findPeers()` 方法，返回同一节点的所有 peer
-- 发送时随机选择 peer，实现负载均衡
+- 移除 `handleHello` 中相同 MeshNodeID 的驱逐逻辑，允许多连接共存
+- `MeshRoute.Peers []PeerWithHop` 存储同一前缀的所有 peer，按跳数排序
+- `HandleOutboundPacket` / `HandleMeshFrame` 在最低跳数 peer 组内轮询（`lastIdx % count`），实现负载均衡
 
 ### 2.5 TCP 跨节点连接修复
 
@@ -483,7 +483,7 @@ bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
 | `vm.phn` DNS 解析（QG→VM） | ✗ | VM 不可达（非代码问题） |
 | 单元测试 | ✓ | 7/7 测试通过（含多 peer、最长匹配覆盖等） |
 
-## 3. Mode B Mesh 路由设计（待实现）
+## 3. Mode B Mesh 路由设计（✓ 已完成）
 
 ### 3.1 问题
 
@@ -921,7 +921,7 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 | 文件 | 变更 | 状态 |
 |------|------|------|
-| `mesh/mesh.go` | VIP 路径简化 + 可配置 network + 多链路路由优化（路由表存所有 peer、按跳数排序、同跳数轮询） | ✓ v0.8 已完成 / v0.9 待实现 |
+| `mesh/mesh.go` | VIP 路径简化 + 可配置 network + 多链路路由优化（路由表存所有 peer、按跳数排序、同跳数轮询）+ 统一结构 | ✓ 已完成 |
 | `mesh/forward.go` | meshCIDR 可配置（SetMeshCIDR/GetMeshCIDR） | ✓ 已完成 |
 | `mesh/state.go` | AllocateSubnet 支持可配置网络范围和子网前缀 | ✓ 已完成 |
 | `mesh/topology.go` | GossipDomainSuffix 增加 Subnet 字段 | ✓ 已完成 |
@@ -973,14 +973,14 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - [x] 跨节点 DNS 解析验证（VM→QG、VM→JF、QG→JF）
 - [x] 跨节点 TCP 连接验证
 
-### 待实现项（多链路路由优化）
+### 已完成项（多链路路由优化）
 
-- [ ] MeshRoute 改为存所有 peer + lastIdx
-- [ ] recomputeRoutes 收集所有 peer 并按跳数排序
-- [ ] findPeer → findRoute 返回完整路由
-- [ ] HandleOutboundPacket 选路改为同跳数轮询
-- [ ] 删除 findPeers 方法
-- [ ] 路由重算时 lastIdx 重置为 0
+- [x] MeshRoute 改为存所有 peer + lastIdx
+- [x] recomputeRoutes 收集所有 peer 并按跳数排序
+- [x] findPeer → findRoute 返回完整路由
+- [x] HandleOutboundPacket 选路改为同跳数轮询
+- [x] 删除 findPeers 方法（路由表设计取代）
+- [x] 路由重算时 lastIdx 重置为 0
 
 ### 待验证项
 
@@ -990,15 +990,15 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - [x] P2P 版本不匹配时拒绝连接（WIN7_VPN peer=1 local=2 被拒绝 ✓）
 - [x] VM→JF 跨节点 DNS（test.jf.local→100.2.0.4 ✓）
 - [x] 多跳 mesh 路由（VM→QG→JF ✓）
-- [ ] 多链路轮询负载均衡（待 v0.9 实现后验证）
+- [x] 多链路轮询负载均衡（最低跳数 peer 组内轮询 ✓）
 
-### 待实现项（自动生成 nodeID.phn）
+### 已完成项（自动生成 nodeID.phn）
 
 - [x] 新增 defaultMeshSuffix 常量（已有 MeshDomainSuffix = "phn"）
 - [x] recomputeRoutes 中从 claimedSubnets 自动生成 nodeID.phn 条目
 - [x] 过滤裸 "phn" 后缀（recomputeRoutes + broadcastGossip）
 
-### 待验证项（自动生成 nodeID.phn）
+### 已完成项（自动生成 nodeID.phn 验证）
 
 - [x] JF 查询 vm.phn → 100.1.0.29 (remote, forwarded to VM ✓)
 - [x] JF 查询 qg.phn → 100.0.0.13 (remote, forwarded to QG ✓)

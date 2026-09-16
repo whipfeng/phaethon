@@ -420,6 +420,15 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 		return nil
 	}
 	peers, subnet, suffixLen := trie.Lookup(domain)
+	var peerIDs []string
+	for _, p := range peers {
+		peerIDs = append(peerIDs, p.Peer.GetNodeID())
+	}
+	var subnetStr string
+	if subnet != nil {
+		subnetStr = subnet.String()
+	}
+	util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
 	if suffixLen == 0 || len(peers) == 0 {
 		return nil // no match or local entry
 	}
@@ -962,15 +971,21 @@ func (m *MeshManager) recomputeRoutes() {
 	// Build global domain trie
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
+	ownSuffixSet := make(map[string]bool, len(domainSuffixes))
 	for _, s := range domainSuffixes {
 		trie.Insert(s, nil, nil, 0)
+		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
-	// Peer domain suffixes
+	// Peer domain suffixes — skip if we own the same suffix
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
+			normalized := strings.ToLower(strings.TrimPrefix(entry.Suffix, "."))
+			if ownSuffixSet[normalized] {
+				continue
+			}
 			trie.Insert(entry.Suffix, peer.Sender, entry.Subnet, entry.Hop)
 		}
 	}
@@ -1008,6 +1023,17 @@ func (m *MeshManager) recomputeRoutes() {
 	}
 	for nid, entry := range bestNodes {
 		domain := NodeDomain(nid)
+		var senderStr string
+		if entry.sender == nil {
+			senderStr = "self"
+		} else {
+			senderStr = entry.sender.GetNodeID()
+		}
+		var subnetStr string
+		if entry.subnet != nil {
+			subnetStr = entry.subnet.String()
+		}
+		util.LogInfo("[MESH-DEBUG] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
 		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
 	}
 
@@ -1015,7 +1041,7 @@ func (m *MeshManager) recomputeRoutes() {
 	m.routes = routes
 	m.domainTrie = trie
 	m.routesMu.Unlock()
-	util.LogDebug("[MESH] routes installed: %d routes", len(routes))
+	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {
 		var peerIDs []string
 		for _, p := range r.Peers {
@@ -1024,7 +1050,7 @@ func (m *MeshManager) recomputeRoutes() {
 		util.LogDebug("[MESH]   %s -> %s", r.Prefix, strings.Join(peerIDs, ", "))
 	}
 	// Log domain suffixes for debugging
-	util.LogDebug("[MESH] domain trie: own suffixes=%v", domainSuffixes)
+	util.LogInfo("[MESH] domain trie: own suffixes=%v", domainSuffixes)
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -1034,7 +1060,7 @@ func (m *MeshManager) recomputeRoutes() {
 			suffixes = append(suffixes, entry.Suffix)
 		}
 		if len(suffixes) > 0 {
-			util.LogDebug("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
+			util.LogInfo("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
 		}
 	}
 	// Log auto-generated nodeID.phn entries
@@ -1046,7 +1072,7 @@ func (m *MeshManager) recomputeRoutes() {
 			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(→%s,hop=%d)", nid, entry.sender.GetNodeID(), entry.hop))
 		}
 	}
-	util.LogDebug("[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
+	util.LogInfo("[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.

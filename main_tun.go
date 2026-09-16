@@ -41,7 +41,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 	}
 
 	tunEnabled := ruleConf.TUN != nil && ruleConf.TUN.IsEnabled()
-	meshConfigured := meshMgr != nil
 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled {
@@ -62,8 +61,8 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 	engine := tun.NewEngine(ruleConf)
 	engine.SetDataDir(dataDir)
 
-	// Configure mesh addresses before Start() if mesh is configured with a subnet
-	if meshConfigured && meshMgr.GetSubnet() != "" {
+	// Configure mesh addresses before Start()
+	if meshMgr.GetSubnet() != "" {
 		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {
 			if err := engine.ConfigureMeshAddresses(subnet); err != nil {
 				util.LogWarn("failed to configure mesh addresses: %v", err)
@@ -79,7 +78,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
-	if meshConfigured {
+	{
 		// Bind mesh's DNS hijacker to the engine's netstack.
 		// This must happen after engine.Start() (netstack is ready) and before
 		// any DNS queries are made.

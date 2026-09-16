@@ -37,6 +37,33 @@ type HTunnelDialer struct {
 	BaseDialer
 }
 
+// ServerAddr returns the effective host:port for the h_tunnel server.
+// If Server is empty, extracts from URL field.
+func (d *HTunnelDialer) ServerAddr() (string, int) {
+	if d.Proxy.Server != "" {
+		return d.Proxy.Server, d.Proxy.Port
+	}
+	if d.Proxy.URL != "" {
+		if u, err := url.Parse(d.Proxy.URL); err == nil {
+			host := u.Hostname()
+			if host != "" {
+				port := d.Proxy.Port
+				if portStr := u.Port(); portStr != "" {
+					if p, err := strconv.Atoi(portStr); err == nil {
+						port = p
+					}
+				} else if u.Scheme == "https" {
+					port = 443
+				} else {
+					port = 80
+				}
+				return host, port
+			}
+		}
+	}
+	return d.Proxy.Server, d.Proxy.Port
+}
+
 // NewHTunnelHTTPClient creates an http.Client that dials through proxy.Next
 // when a proxy chain is configured.
 func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
@@ -49,30 +76,8 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 					nextType = proxy.Next.Type
 				}
 				if proxy.Next != nil && proxy.Next.Type != config.ProxyDIRECT {
-					// For h_tunnel with URL, extract host/port from URL if server is empty
-					server := proxy.Server
-					port := proxy.Port
-					if server == "" && proxy.URL != "" {
-						if u, err := url.Parse(proxy.URL); err == nil {
-							host := u.Hostname()
-							portStr := u.Port()
-							if host != "" {
-								server = host
-								if portStr != "" {
-									if p, err := strconv.Atoi(portStr); err == nil {
-										port = p
-									}
-								} else {
-									// Default port based on scheme
-									if u.Scheme == "https" {
-										port = 443
-									} else {
-										port = 80
-									}
-								}
-							}
-						}
-					}
+					d := &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+					server, port := d.ServerAddr()
 					util.LogDebug("[HTUNNEL-DIAL] [%s] chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, server, port, addr)
 					nextDialer := NewDialer(proxy.Next)
 					return nextDialer.Dial(server, port)

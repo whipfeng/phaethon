@@ -21,6 +21,11 @@ func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	return conn, nil
 }
 
+// ServerAddr returns empty values since DirectDialer has no proxy server.
+func (d *DirectDialer) ServerAddr() (string, int) {
+	return "", 0
+}
+
 func (d *DirectDialer) DialPacket() (net.PacketConn, error) {
 	pc, err := ListenPacketRouteAware("udp", "")
 	if err != nil {

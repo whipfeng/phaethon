@@ -75,6 +75,7 @@ func ListenUDPWithAddr(network string) (net.PacketConn, error) {
 // Dialer establishes a connection to the destination through a proxy chain
 type Dialer interface {
 	Dial(dstAddr string, dstPort int) (net.Conn, error)
+	ServerAddr() (string, int)
 }
 
 // UDPDialer establishes a UDP packet relay through a proxy.
@@ -118,6 +119,13 @@ type BaseDialer struct {
 
 func (d *BaseDialer) SetConnID(id string) { d.ConnID = id }
 func (d *BaseDialer) setDepth(depth int)  { d.dialDepth = depth }
+
+// ServerAddr returns the effective host:port for connecting to this proxy server.
+// Used for health checks and control connections. Subtypes may override to
+// extract address from protocol-specific fields (e.g. h_tunnel URL).
+func (d *BaseDialer) ServerAddr() (string, int) {
+	return d.Proxy.Server, d.Proxy.Port
+}
 
 // ConnIDStr returns the connection ID for logging, or "N/A" if unset.
 func (d *BaseDialer) ConnIDStr() string {
@@ -163,6 +171,10 @@ type stubDialer struct {
 
 func (s *stubDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	return nil, fmt.Errorf("proxy type '%s' is not yet implemented", s.name)
+}
+
+func (s *stubDialer) ServerAddr() (string, int) {
+	return "", 0
 }
 
 // NewDialer creates a Dialer from a Proxy config (follows the proxy chain)
@@ -214,12 +226,29 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 	if p == nil {
 		return nil, fmt.Errorf("nil proxy")
 	}
+	d := NewDialer(p)
+	server, port := d.ServerAddr()
+	util.LogDebug("[HEALTH] %s: ServerAddr() = %s:%d", p.Name, server, port)
 	if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+		util.LogDebug("[HEALTH] %s: dialing via %s (%s:%d)", p.Name, p.Next.Name, server, port)
 		nextDialer := NewDialer(p.Next)
-		return nextDialer.Dial(p.Server, p.Port)
+		conn, err := nextDialer.Dial(server, port)
+		if err != nil {
+			util.LogDebug("[HEALTH] %s: via dial failed: %v", p.Name, err)
+			return nil, err
+		}
+		util.LogDebug("[HEALTH] %s: via dial success", p.Name)
+		return conn, nil
 	}
-	addr := net.JoinHostPort(p.Server, strconv.Itoa(p.Port))
-	return DialRouteAware("tcp", addr)
+	addr := net.JoinHostPort(server, strconv.Itoa(port))
+	util.LogDebug("[HEALTH] %s: direct dial to %s", p.Name, addr)
+	conn, err := DialRouteAware("tcp", addr)
+	if err != nil {
+		util.LogDebug("[HEALTH] %s: direct dial failed: %v", p.Name, err)
+		return nil, err
+	}
+	util.LogDebug("[HEALTH] %s: direct dial success", p.Name)
+	return conn, nil
 }
 
 // PreWarmSSHProxies establishes SSH connections eagerly for all SSH-type proxies

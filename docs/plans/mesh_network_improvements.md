@@ -22,6 +22,7 @@
 | v0.10.0 | 2026-09-16 | 自动生成 nodeID.phn DNS 路由条目：内置 .phn 后缀 + claimedSubnets 组合，修复跨节点 nodeID 域名路由 | Qoder |
 | v0.11.0 | 2026-09-16 | 统一 domain trie 和路由表结构：trie 改为 peers 数组、本地判断统一用 len(peers)==0、own subnet 加入路由表 | Qoder |
 | v0.12.0 | 2026-09-16 | DNSHijacker 重构：从 tun 包迁移到 mesh 包，hijacker 与 mesh 绑定，TUN 禁用时 mesh DNS 仍可用 | Qoder |
+| v0.13.0 | 2026-09-16 | 多态健康检查：Dialer 接口新增 ServerAddr()，HTunnelDialer 从 URL 提取地址 | Qoder |
 
 ## 1. 背景与目标
 
@@ -682,6 +683,113 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 
 **状态**：待实现
 
+### 2.13 多态健康检查地址解析（v0.13.0）
+
+**问题**：h_tunnel 类型代理的 `server` 字段可能为空，地址从 `url` 字段提取。健康检查 `DialToProxy` 直接使用 `Proxy.Server` 和 `Proxy.Port`，导致拨号失败。
+
+**根因**：不同代理类型的服务器地址解析逻辑不同，但健康检查没有利用各协议的专业知识。
+
+**设计**：多态方法，每个 Dialer 类型内部化自己的地址解析逻辑。
+
+#### 2.13.1 Dialer 接口扩展
+
+```go
+type Dialer interface {
+    Dial(dstAddr string, dstPort int) (net.Conn, error)
+    ServerAddr() (string, int)  // 新增：返回代理服务器地址
+}
+```
+
+#### 2.13.2 BaseDialer 默认实现
+
+```go
+func (d *BaseDialer) ServerAddr() (string, int) {
+    return d.Proxy.Server, d.Proxy.Port
+}
+```
+
+大多数代理类型（socks5、trojan、ssh 等）直接使用 `Server` 和 `Port` 字段。
+
+#### 2.13.3 HTunnelDialer 重写
+
+```go
+func (d *HTunnelDialer) ServerAddr() (string, int) {
+    // 优先使用 Server 字段
+    if d.Proxy.Server != "" {
+        return d.Proxy.Server, d.Proxy.Port
+    }
+    // Server 为空时，从 URL 提取
+    if d.Proxy.URL != "" {
+        if u, err := url.Parse(d.Proxy.URL); err == nil {
+            host := u.Hostname()
+            if host != "" {
+                port := d.Proxy.Port
+                if portStr := u.Port(); portStr != "" {
+                    if p, err := strconv.Atoi(portStr); err == nil {
+                        port = p
+                    }
+                } else if u.Scheme == "https" {
+                    port = 443
+                } else {
+                    port = 80
+                }
+                return host, port
+            }
+        }
+    }
+    return d.Proxy.Server, d.Proxy.Port
+}
+```
+
+#### 2.13.4 DialToProxy 使用多态
+
+```go
+func DialToProxy(p *config.Proxy) (net.Conn, error) {
+    d := NewDialer(p)
+    server, port := d.ServerAddr()  // 多态调用
+    if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
+        nextDialer := NewDialer(p.Next)
+        return nextDialer.Dial(server, port)
+    }
+    addr := net.JoinHostPort(server, strconv.Itoa(port))
+    return DialRouteAware("tcp", addr)
+}
+```
+
+#### 2.13.5 健康检查流程
+
+```
+管理面板点击"测试"
+  ↓
+POST /api/proxies/health-check/{name}
+  ↓
+CheckProxyHealth(name)
+  ↓
+checkProxyTCPHealth(proxy)
+  ↓
+DialToProxy(proxy)
+  ↓
+d := NewDialer(proxy)  // 创建对应类型的 Dialer
+server, port := d.ServerAddr()  // 多态获取地址
+  ↓
+如果有 via：nextDialer.Dial(server, port)
+如果无 via：DialRouteAware("tcp", server:port)
+```
+
+#### 2.13.6 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `dialer/dialer.go` | `Dialer` 接口新增 `ServerAddr()`；`DialToProxy` 改用多态调用 |
+| `dialer/htunnel.go` | `HTunnelDialer` 重写 `ServerAddr()`，从 URL 提取地址 |
+| `dialer/direct.go` | `DirectDialer` 的 `ServerAddr()` 返回空值 |
+
+**状态**：✓ 已完成（2026-09-16）
+
+**验证**：
+- VM 测试 MGMS_HT（via SOCKS5_7890 → JF）：alive=true, 132ms ✓
+- h_tunnel URL 地址提取正确 ✓
+
 ## 3. Mode B Mesh 路由设计（✓ 已完成）
 
 ### 3.1 问题
@@ -1130,14 +1238,15 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 | `tun/engine.go` | 删除 tryDNSRedirect、localNodeDomain 提前、SetDNSDomainResolver | ✓ 已完成 |
 | `p2p/p2p.go` | P2P 协议版本升级到 2 + 多连接共存 | ✓ 已完成 |
 | `dialer/bind.go` | GetLocalIPForDial + Auto P2P 支持 + MeshDial | ✓ 已完成 |
-| `dialer/direct.go` | 删除 netstack 路径，只保留 OS socket | ✓ 已完成 |
+| `dialer/dialer.go` | Dialer 接口新增 ServerAddr()；DialToProxy 改用多态调用 | ✓ 已完成 |
+| `dialer/direct.go` | 删除 netstack 路径，只保留 OS socket；新增 ServerAddr() 空实现 | ✓ 已完成 |
+| `dialer/htunnel.go` | 删除规则匹配，改用 MeshDial；新增 ServerAddr() 从 URL 提取地址 | ✓ 已完成 |
 | `config/config.go` | Mesh.Network 字段 + GetNetwork() | ✓ 已完成 |
 | `main.go` | mesh 初始化 + Auto P2P | ✓ 已完成 |
 | `main_tun.go` | 删除 SetMeshGatewayResolver，新增 SetDNSDomainResolver | ✓ 已完成 |
 | `server/socks5.go` | 删除规则匹配，改用 MeshDial | ✓ 已完成 |
 | `server/trojan.go` | 同上 | ✓ 已完成 |
 | `server/http.go` | 同上 | ✓ 已完成 |
-| `server/htunnel.go` | 同上 | ✓ 已完成 |
 | `server/direct.go` | 同上 | ✓ 已完成 |
 | `server/reverse.go` | 同上 | ✓ 已完成 |
 

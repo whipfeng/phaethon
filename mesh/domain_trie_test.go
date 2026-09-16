@@ -12,15 +12,23 @@ func (s *mockSender) Send(data []byte) error      { return nil }
 func (s *mockSender) SendGossip(data []byte)       {}
 func (s *mockSender) GetNodeID() string            { return s.nodeID }
 
-func makePeer(id string) *PeerInfo {
-	return &PeerInfo{Sender: &mockSender{nodeID: id}}
+func makePeer(id string) PeerSender {
+	return &mockSender{nodeID: id}
 }
 
-func peerID(p *PeerInfo) string {
+func peerID(p PeerSender) string {
 	if p == nil {
 		return ""
 	}
-	return p.NodeID()
+	return p.GetNodeID()
+}
+
+func peersIDs(peers []PeerWithHop) []string {
+	var ids []string
+	for _, p := range peers {
+		ids = append(ids, p.Peer.GetNodeID())
+	}
+	return ids
 }
 
 func TestDomainTrie_InsertAndLookup(t *testing.T) {
@@ -47,9 +55,13 @@ func TestDomainTrie_InsertAndLookup(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		nextHop, _, length := trie.Lookup(tt.domain)
-		if peerID(nextHop) != tt.expectedNode {
-			t.Errorf("Lookup(%q) nodeID = %q, want %q", tt.domain, peerID(nextHop), tt.expectedNode)
+		peers, _, length := trie.Lookup(tt.domain)
+		gotNode := ""
+		if len(peers) > 0 {
+			gotNode = peerID(peers[0].Peer)
+		}
+		if gotNode != tt.expectedNode {
+			t.Errorf("Lookup(%q) nodeID = %q, want %q", tt.domain, gotNode, tt.expectedNode)
 		}
 		if length != tt.expectedLen {
 			t.Errorf("Lookup(%q) length = %d, want %d", tt.domain, length, tt.expectedLen)
@@ -64,19 +76,19 @@ func TestDomainTrie_LongestMatch(t *testing.T) {
 	trie.Insert("google.com", makePeer("google"), nil, 1)
 	trie.Insert("api.google.com", makePeer("api"), nil, 1)
 
-	nextHop, _, _ := trie.Lookup("api.google.com")
-	if peerID(nextHop) != "api" {
-		t.Errorf("expected 'api', got %q", peerID(nextHop))
+	peers, _, _ := trie.Lookup("api.google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "api" {
+		t.Errorf("expected 'api', got %v", peersIDs(peers))
 	}
 
-	nextHop, _, _ = trie.Lookup("www.google.com")
-	if peerID(nextHop) != "google" {
-		t.Errorf("expected 'google', got %q", peerID(nextHop))
+	peers, _, _ = trie.Lookup("www.google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "google" {
+		t.Errorf("expected 'google', got %v", peersIDs(peers))
 	}
 
-	nextHop, _, _ = trie.Lookup("example.com")
-	if peerID(nextHop) != "root" {
-		t.Errorf("expected 'root', got %q", peerID(nextHop))
+	peers, _, _ = trie.Lookup("example.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "root" {
+		t.Errorf("expected 'root', got %v", peersIDs(peers))
 	}
 }
 
@@ -84,14 +96,14 @@ func TestDomainTrie_CaseInsensitive(t *testing.T) {
 	trie := NewDomainTrie()
 	trie.Insert("Google.COM", makePeer("node-a"), nil, 1)
 
-	nextHop, _, _ := trie.Lookup("API.google.com")
-	if peerID(nextHop) != "node-a" {
-		t.Errorf("case insensitive match failed, got %q", peerID(nextHop))
+	peers, _, _ := trie.Lookup("API.google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "node-a" {
+		t.Errorf("case insensitive match failed, got %v", peersIDs(peers))
 	}
 
-	nextHop, _, _ = trie.Lookup("api.GOOGLE.COM")
-	if peerID(nextHop) != "node-a" {
-		t.Errorf("case insensitive match failed, got %q", peerID(nextHop))
+	peers, _, _ = trie.Lookup("api.GOOGLE.COM")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "node-a" {
+		t.Errorf("case insensitive match failed, got %v", peersIDs(peers))
 	}
 }
 
@@ -100,14 +112,14 @@ func TestDomainTrie_LeadingDot(t *testing.T) {
 
 	trie.Insert(".google.com", makePeer("node-a"), nil, 1)
 
-	nextHop, _, _ := trie.Lookup("google.com")
-	if peerID(nextHop) != "node-a" {
-		t.Errorf("leading dot insert failed, got %q", peerID(nextHop))
+	peers, _, _ := trie.Lookup("google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "node-a" {
+		t.Errorf("leading dot insert failed, got %v", peersIDs(peers))
 	}
 
-	nextHop, _, _ = trie.Lookup("api.google.com")
-	if peerID(nextHop) != "node-a" {
-		t.Errorf("leading dot insert subdomain failed, got %q", peerID(nextHop))
+	peers, _, _ = trie.Lookup("api.google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "node-a" {
+		t.Errorf("leading dot insert subdomain failed, got %v", peersIDs(peers))
 	}
 }
 
@@ -117,8 +129,55 @@ func TestDomainTrie_HopPreference(t *testing.T) {
 	trie.Insert("google.com", makePeer("far"), nil, 5)
 	trie.Insert("google.com", makePeer("near"), nil, 1)
 
-	nextHop, _, _ := trie.Lookup("google.com")
-	if peerID(nextHop) != "near" {
-		t.Errorf("expected lower hop 'near', got %q", peerID(nextHop))
+	peers, _, _ := trie.Lookup("google.com")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "near" {
+		t.Errorf("expected lower hop 'near' first, got %v", peersIDs(peers))
+	}
+	if len(peers) != 2 {
+		t.Errorf("expected 2 peers, got %d", len(peers))
+	}
+}
+
+func TestDomainTrie_LongestMatchOverridesOwn(t *testing.T) {
+	trie := NewDomainTrie()
+
+	// Own entry at "phn" (short suffix, no peers = local)
+	trie.Insert("phn", nil, nil, 0)
+	// Remote entry at "vm.phn" (longer suffix, has peer)
+	trie.Insert("vm.phn", makePeer("vm-node"), nil, 1)
+
+	// "vm.phn" should match the longer remote entry, not the shorter own entry
+	peers, _, length := trie.Lookup("vm.phn")
+	if len(peers) == 0 || peerID(peers[0].Peer) != "vm-node" {
+		t.Errorf("Lookup(\"vm.phn\") = %v, want [vm-node] (longest match should win over own)", peersIDs(peers))
+	}
+	if length != 6 {
+		t.Errorf("Lookup(\"vm.phn\") length = %d, want 6", length)
+	}
+
+	// "qg.phn" should match the shorter own entry (no "qg.phn" entry exists)
+	peers, _, length = trie.Lookup("qg.phn")
+	if len(peers) != 0 {
+		t.Errorf("Lookup(\"qg.phn\") should be local (empty peers), got %v", peersIDs(peers))
+	}
+	if length != 3 {
+		t.Errorf("Lookup(\"qg.phn\") length = %d, want 3", length)
+	}
+}
+
+func TestDomainTrie_MultiPeer(t *testing.T) {
+	trie := NewDomainTrie()
+
+	trie.Insert("vm.phn", makePeer("peer-a"), nil, 2)
+	trie.Insert("vm.phn", makePeer("peer-b"), nil, 1)
+	trie.Insert("vm.phn", makePeer("peer-c"), nil, 1)
+
+	peers, _, _ := trie.Lookup("vm.phn")
+	if len(peers) != 3 {
+		t.Fatalf("expected 3 peers, got %d", len(peers))
+	}
+	// Should be sorted by hop: peer-b(1), peer-c(1), peer-a(2)
+	if peers[0].Hop != 1 || peers[1].Hop != 1 || peers[2].Hop != 2 {
+		t.Errorf("peers not sorted by hop: %v", peers)
 	}
 }

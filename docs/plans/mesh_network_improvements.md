@@ -1,6 +1,6 @@
 # Mesh 网络改进设计
 
-> 版本: v0.10.0
+> 版本: v0.11.0
 > 日期: 2026-09-16
 > 状态: IMPLEMENTED
 > 负责人: Phaethon Dev
@@ -20,6 +20,7 @@
 | v0.8.0 | 2026-09-15 | 统一 DNS hijacker 方案：删除 tryDNSRedirect 拦截，DNS hijacker 统一处理 Mode A/B DNS，支持跨节点转发和缓存 | Qoder |
 | v0.9.0 | 2026-09-16 | 多链路路由优化：路由表存所有 peer，按跳数排序，同跳数轮询负载均衡 | Qoder |
 | v0.10.0 | 2026-09-16 | 自动生成 nodeID.phn DNS 路由条目：内置 .phn 后缀 + claimedSubnets 组合，修复跨节点 nodeID 域名路由 | Qoder |
+| v0.11.0 | 2026-09-16 | 统一 domain trie 和路由表结构：trie 改为 peers 数组、本地判断统一用 len(peers)==0、own subnet 加入路由表 | Qoder |
 
 ## 1. 背景与目标
 
@@ -333,6 +334,140 @@ for _, cs := range allClaimedSubnets {
 | `mesh/mesh.go` | `recomputeRoutes` 中自动生成 `nodeID.phn` 条目插入 domain trie |
 | `mesh/mesh.go` | 新增 `defaultMeshSuffix` 常量 |
 | `mesh/mesh.go` | 新增辅助函数：根据 nodeID 查找 nextHop peer |
+
+### 2.10 统一 domain trie 和路由表结构（v0.11.0）
+
+**问题**：domain trie 和路由表结构不一致，本地/远端判断逻辑不统一。
+
+1. **domain trie** 存单个 `nextHop *PeerInfo`，路由表存 `Peers []PeerWithHop`
+2. domain trie 用 `subnet == nil` 判断本地（隐含约定，容易出错）
+3. 路由表把 own subnet 排除在外，`HandleOutboundPacket` 单独用 `m.subnet.Contains()` 判断本地
+4. DNS 转发无法利用多链路负载均衡
+
+**设计**：统一为同一套数据结构，同一个判断逻辑。
+
+#### 2.10.1 统一数据结构
+
+Domain trie 和路由表都使用 `[]PeerWithHop` 数组：
+
+```go
+// domain trie 节点
+type trieNode struct {
+    children map[string]*trieNode
+    hasEntry bool
+    peers    []PeerWithHop   // 改为 peer 数组，和路由表一致
+    subnet   *net.IPNet
+}
+```
+
+**本地判断**：`len(peers) == 0` → 本地，`len(peers) > 0` → 远端。
+
+不再依赖 `subnet == nil` 或 `nextHop == nil` 等隐含约定。
+
+#### 2.10.2 Domain Trie 改动
+
+**Insert**：接受 `[]PeerWithHop`，按 hop 排序存储。同一 suffix 多次 Insert 时合并 peers（去重，保留最低 hop）。
+
+**Lookup**：返回 `([]PeerWithHop, *net.IPNet, int)` 而不是 `(*PeerInfo, *net.IPNet, int)`。
+
+**纯最长匹配**：去掉 `foundOwn` 特殊逻辑。遍历标签时，任何 `hasEntry` 节点只要 `suffixLen > bestLen` 就更新。不再区分 own/remote。
+
+```go
+func (t *DomainTrie) Lookup(domain string) ([]PeerWithHop, *net.IPNet, int) {
+    // ...
+    if node.hasEntry {
+        suffixLen := accumulated + len(label)
+        if suffixLen > bestLen {
+            bestLen = suffixLen
+            bestPeers = node.peers
+            bestSubnet = node.subnet
+        }
+    }
+    // ...
+}
+```
+
+#### 2.10.3 ResolveDomainSubnet 改动
+
+```go
+func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
+    peers, subnet, suffixLen := trie.Lookup(domain)
+    if suffixLen == 0 || len(peers) == 0 {
+        return nil  // 无匹配 或 本地 → 不转发
+    }
+    return subnet
+}
+```
+
+用 `len(peers) == 0` 判断本地，不再依赖 `subnet == nil`。
+
+#### 2.10.4 路由表改动
+
+Own subnet 加入路由表，peers 为空：
+
+```go
+// recomputeRoutes 中
+// 不再排除 ownPrefixes，改为加入路由表
+routes = append(routes, MeshRoute{
+    Prefix:  ownSubnet,
+    Peers:   nil,  // 空 → 本地
+    lastIdx: 0,
+})
+```
+
+#### 2.10.5 HandleOutboundPacket 改动
+
+统一走 `findRoute`，去掉单独的 `m.subnet.Contains()` 检查：
+
+```go
+func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, pkt []byte) bool {
+    route := m.findRoute(dstIP)
+    if route == nil {
+        return false  // 无路由
+    }
+    if len(route.Peers) == 0 {
+        // 本地路由 → 投递给 netstack
+        return m.deliverLocal(dstIP, pkt)
+    }
+    // 远端路由 → mesh 转发（轮询选 peer）
+    // ...
+}
+```
+
+#### 2.10.6 DNS 转发多链路
+
+DNS 转发时，从 trie 返回的 peers 数组中轮询选择，和 IP 路由一样：
+
+```go
+peers, subnet, _ := trie.Lookup(domain)
+if len(peers) > 0 {
+    // 轮询选 peer
+    idx := lastIdx % len(peers)
+    peer := peers[idx]
+    lastIdx++
+    // 通过 peer 转发 DNS 查询
+}
+```
+
+#### 2.10.7 自动生成 nodeID.phn 条目
+
+自动生成的 own 条目带 subnet 值（用于环路排除），peers 为空：
+
+```go
+bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
+// Insert 时：peers=nil（空），subnet=ownSubnet
+```
+
+#### 2.10.8 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `mesh/domain_trie.go` | trieNode 改为 `peers []PeerWithHop`；Insert/Lookup 签名改为 peers 数组；Lookup 改为纯最长匹配 |
+| `mesh/domain_trie_test.go` | 更新测试适配新签名 |
+| `mesh/mesh.go` | `ResolveDomainSubnet` 改用 `len(peers)==0` 判断本地 |
+| `mesh/mesh.go` | `recomputeRoutes` 中 own subnet 加入路由表（peers 为空） |
+| `mesh/mesh.go` | `HandleOutboundPacket` 统一走 `findRoute`，去掉 `m.subnet.Contains` 检查 |
+| `mesh/mesh.go` | 自动生成 nodeID.phn 条目带 ownSubnet |
 
 ## 3. Mode B Mesh 路由设计（待实现）
 

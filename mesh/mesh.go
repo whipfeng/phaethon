@@ -419,9 +419,9 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	if trie == nil {
 		return nil
 	}
-	_, subnet, suffixLen := trie.Lookup(domain)
-	if suffixLen == 0 || subnet == nil {
-		return nil // own entry or no match
+	peers, subnet, suffixLen := trie.Lookup(domain)
+	if suffixLen == 0 || len(peers) == 0 {
+		return nil // no match or local entry
 	}
 	return subnet
 }
@@ -529,17 +529,13 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		return true
 	}
 
-	// No peer owns this IP — check if it's in our local subnet
-	if m.subnet != nil && m.subnet.Contains(dstIP) {
-		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] outbound %s: local subnet %s, passing through", dstIP, m.subnetStr)
-		}
-		return false
-	}
-
-	// Not in local subnet and no peer found — pass through
+	// Local route (peers empty) or no route — pass through to netstack
 	if isMeshAddress(dstIP) {
-		util.LogDebug("[MESH] outbound %s: no peer found, passing through", dstIP)
+		if route != nil {
+			util.LogDebug("[MESH] outbound %s: local route %s, passing through", dstIP, route.Prefix)
+		} else {
+			util.LogDebug("[MESH] outbound %s: no route, passing through", dstIP)
+		}
 	}
 	return false
 }
@@ -914,8 +910,8 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
-	// Build MeshRoute slice: exclude own prefixes, sort peers by hop.
-	routes := make([]MeshRoute, 0, len(allEntries))
+	// Build MeshRoute slice: exclude own prefixes from peer routes, sort peers by hop.
+	routes := make([]MeshRoute, 0, len(allEntries)+1+len(advertise))
 	for prefixStr, entries := range allEntries {
 		if ownPrefixes[prefixStr] {
 			continue
@@ -934,6 +930,28 @@ func (m *MeshManager) recomputeRoutes() {
 		})
 	}
 
+	// Add own subnet as local route (peers empty = local).
+	if ownSubnet != nil {
+		routes = append(routes, MeshRoute{
+			Prefix:  ownSubnet,
+			Peers:   nil,
+			lastIdx: 0,
+		})
+	}
+
+	// Add advertise routes as local routes.
+	for _, r := range advertise {
+		_, ipNet, err := net.ParseCIDR(r)
+		if err != nil {
+			continue
+		}
+		routes = append(routes, MeshRoute{
+			Prefix:  ipNet,
+			Peers:   nil,
+			lastIdx: 0,
+		})
+	}
+
 	// Sort routes by prefix length (longest first) for longest-match lookup.
 	sort.Slice(routes, func(i, j int) bool {
 		lenI, _ := routes[i].Prefix.Mask.Size()
@@ -944,11 +962,7 @@ func (m *MeshManager) recomputeRoutes() {
 	// Build global domain trie
 	trie := NewDomainTrie()
 	// Own domain suffixes (Hop=0, NextHop=nil)
-	// Skip the bare mesh suffix — nodeID.phn entries are auto-generated below.
 	for _, s := range domainSuffixes {
-		if s == MeshDomainSuffix {
-			continue
-		}
 		trie.Insert(s, nil, nil, 0)
 	}
 	// Peer domain suffixes
@@ -957,19 +971,16 @@ func (m *MeshManager) recomputeRoutes() {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			if entry.Suffix == MeshDomainSuffix {
-				continue
-			}
-			trie.Insert(entry.Suffix, peer, entry.Subnet, entry.Hop)
+			trie.Insert(entry.Suffix, peer.Sender, entry.Subnet, entry.Hop)
 		}
 	}
 
 	// Auto-generate nodeID.phn entries from claimed subnets.
 	// Each known node gets a "nodeID.phn" entry in the trie.
 	type nodeClaim struct {
-		nextHop *PeerInfo
-		subnet  *net.IPNet
-		hop     int
+		sender PeerSender
+		subnet *net.IPNet
+		hop    int
 	}
 	bestNodes := make(map[string]nodeClaim)
 	bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
@@ -983,7 +994,7 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		if peer.Subnet != nil {
 			if existing, ok := bestNodes[nid]; !ok || 1 < existing.hop {
-				bestNodes[nid] = nodeClaim{peer, peer.Subnet, 1}
+				bestNodes[nid] = nodeClaim{peer.Sender, peer.Subnet, 1}
 			}
 		}
 		for _, cs := range peer.ClaimedSubnets {
@@ -991,13 +1002,13 @@ func (m *MeshManager) recomputeRoutes() {
 				continue
 			}
 			if existing, ok := bestNodes[cs.NodeID]; !ok || cs.Hop < existing.hop {
-				bestNodes[cs.NodeID] = nodeClaim{peer, cs.Subnet, cs.Hop}
+				bestNodes[cs.NodeID] = nodeClaim{peer.Sender, cs.Subnet, cs.Hop}
 			}
 		}
 	}
 	for nid, entry := range bestNodes {
 		domain := NodeDomain(nid)
-		trie.Insert(domain, entry.nextHop, entry.subnet, entry.hop)
+		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
 	}
 
 	m.routesMu.Lock()
@@ -1029,10 +1040,10 @@ func (m *MeshManager) recomputeRoutes() {
 	// Log auto-generated nodeID.phn entries
 	var autoDomains []string
 	for nid, entry := range bestNodes {
-		if entry.nextHop == nil {
+		if entry.sender == nil {
 			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(self)", nid))
 		} else {
-			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(→%s,hop=%d)", nid, entry.nextHop.NodeID(), entry.hop))
+			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(→%s,hop=%d)", nid, entry.sender.GetNodeID(), entry.hop))
 		}
 	}
 	util.LogDebug("[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
@@ -1202,9 +1213,6 @@ func (m *MeshManager) broadcastGossip() {
 	}
 	bestDS := make(map[string]globalDSEntry)
 	for _, s := range domainSuffixes {
-		if s == MeshDomainSuffix {
-			continue
-		}
 		bestDS[s] = globalDSEntry{0, nil, m.subnetStr}
 	}
 	for _, peer := range allPeers {
@@ -1212,9 +1220,6 @@ func (m *MeshManager) broadcastGossip() {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			if entry.Suffix == MeshDomainSuffix {
-				continue
-			}
 			if existing, ok := bestDS[entry.Suffix]; !ok || entry.Hop < existing.hop {
 				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer, entry.SubnetStr}
 			}

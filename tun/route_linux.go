@@ -175,47 +175,71 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		// Allow traffic from physical to TUN (client queries going to netstack)
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
+		if !iptablesRuleExists(ctx, physIface, tunIface) {
+			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
+			} else {
+				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
+			}
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
+			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", physIface, tunIface)
 		}
 		// Allow traffic from TUN to physical (responses going back to clients/proxy)
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
+		if !iptablesRuleExists(ctx, tunIface, physIface) {
+			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
+			} else {
+				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
+			}
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
+			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", tunIface, physIface)
 		}
 		// Allow traffic from physical interface back out the same physical interface.
 		// LAN client traffic arrives on physIface and must be forwarded back out
 		// physIface to reach the real gateway on the same subnet.
-		if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
+		if !iptablesRuleExists(ctx, physIface, physIface) {
+			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
+				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
+			} else {
+				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
+			}
 		} else {
-			util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
+			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", physIface, physIface)
 		}
 	}
 
 	return nil
 }
 
+// iptablesRuleExists checks if a FORWARD ACCEPT rule already exists for the given interfaces.
+func iptablesRuleExists(ctx context.Context, inIface, outIface string) bool {
+	err := exec.CommandContext(ctx, "iptables", "-C", "FORWARD", "-i", inIface, "-o", outIface, "-j", "ACCEPT").Run()
+	return err == nil
+}
+
+// iptablesDeleteAll removes ALL matching FORWARD ACCEPT rules (not just the first one).
+// This prevents rule accumulation from repeated start/stop cycles.
+func iptablesDeleteAll(ctx context.Context, inIface, outIface string) {
+	for {
+		err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", inIface, "-o", outIface, "-j", "ACCEPT").Run()
+		if err != nil {
+			break
+		}
+		util.LogDebug("tun: iptables deleted FORWARD %s->%s", inIface, outIface)
+	}
+}
+
 func (r *RouteManager) platformTeardown() {
-	// Remove iptables FORWARD rules.
+	// Remove ALL iptables FORWARD rules (loop to clean up any accumulated duplicates).
 	if r.DefaultIfaceName != "" {
 		tunIface := r.devName
 		physIface := r.DefaultIfaceName
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		// Delete in reverse order of insertion
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, physIface, err, out)
-		}
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", tunIface, physIface, err, out)
-		}
-		if out, err := exec.CommandContext(ctx, "iptables", "-D", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-			util.LogWarn("tun: iptables delete FORWARD %s->%s fail: %v: %s", physIface, tunIface, err, out)
-		}
+		// Delete in reverse order of insertion, removing ALL duplicates
+		iptablesDeleteAll(ctx, physIface, physIface)
+		iptablesDeleteAll(ctx, tunIface, physIface)
+		iptablesDeleteAll(ctx, physIface, tunIface)
 	}
 
 	// Restore rp_filter on the physical interface.

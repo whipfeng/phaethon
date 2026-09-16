@@ -676,8 +676,7 @@ func (e *Engine) StartStack() error {
 	}
 
 	// Address determination (always needed for netstack)
-	// If ConfigureMeshAddresses was called before Start(), use those addresses.
-	// Otherwise fall back to hardcoded defaults for non-mesh mode.
+	// ConfigureMeshAddresses MUST be called before Start() to set mesh-derived addresses.
 	// hostIP is the address assigned to the TUN adapter (OS side);
 	// it must NOT be added as a local netstack address, otherwise replies
 	// destined to it from the DNS hijacker / forwarders would be looped back
@@ -685,16 +684,9 @@ func (e *Engine) StartStack() error {
 	// dnsIP is a dedicated DNS address within the TUN subnet. DNSHijacker binds
 	// to this address inside netstack. DNS queries are routed through the TUN
 	// device to reach it, eliminating the need for a host-side DNS proxy.
-	if e.addr == (tcpip.Address{}) {
-		hostIP := net.ParseIP("192.0.2.2").To4()
-		e.addr = tcpip.AddrFrom4([4]byte(hostIP))
-	}
-	if e.dnsAddr == (tcpip.Address{}) {
-		dnsIP := net.ParseIP("192.0.2.3").To4()
-		e.dnsAddr = tcpip.AddrFrom4([4]byte(dnsIP))
-	}
-	if e.prefixLen == 0 {
-		e.prefixLen = 29
+	if e.addr == (tcpip.Address{}) || e.dnsAddr == (tcpip.Address{}) {
+		e.mu.Unlock()
+		return fmt.Errorf("tun: mesh addresses not configured (ConfigureMeshAddresses must be called before Start)")
 	}
 
 	// gVisor netstack

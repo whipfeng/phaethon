@@ -30,7 +30,8 @@ func CleanupResidual() {
 	}
 
 	// 2. Restore resolv.conf from backup if it exists.
-	// When TUN is active, resolv.conf points to 192.0.2.3 (DNSHijacker).
+	// When TUN is active, resolv.conf points to the mesh-derived DNS address
+	// (e.g., 100.0.0.3 for subnet 100.0.0.0/16, which is the DNSHijacker).
 	// If the main process crashes, DNS becomes unreachable.
 	const resolvConf = "/etc/resolv.conf"
 	const backupPath = resolvConf + ".phaethon.bak"
@@ -68,17 +69,28 @@ func CleanupResidual() {
 			} else {
 				util.LogWarn("tun: cleanup restore ip_forward fail: %v", err)
 			}
-			// Clean up iptables FORWARD rules
+			// Clean up iptables FORWARD rules - loop to remove ALL duplicates
 			if state.IfaceName != "" {
-				if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", "tun0", "-j", "ACCEPT").CombinedOutput(); err == nil {
+				// Remove all eth1->tun0 rules
+				for {
+					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", "tun0", "-j", "ACCEPT").Run(); err != nil {
+						break
+					}
 					util.LogInfo("tun: cleanup removed iptables FORWARD %s->tun0", state.IfaceName)
-				} else {
-					util.LogDebug("tun: cleanup iptables FORWARD %s->tun0: %v: %s", state.IfaceName, err, out)
 				}
-				if out, err := exec.Command("iptables", "-D", "FORWARD", "-i", "tun0", "-o", state.IfaceName, "-j", "ACCEPT").CombinedOutput(); err == nil {
-					util.LogInfo("tun: cleanup removed iptables tun0->%s", state.IfaceName)
-				} else {
-					util.LogDebug("tun: cleanup iptables FORWARD tun0->%s: %v: %s", state.IfaceName, err, out)
+				// Remove all tun0->eth1 rules
+				for {
+					if err := exec.Command("iptables", "-D", "FORWARD", "-i", "tun0", "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
+						break
+					}
+					util.LogInfo("tun: cleanup removed iptables FORWARD tun0->%s", state.IfaceName)
+				}
+				// Remove all eth1->eth1 rules
+				for {
+					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
+						break
+					}
+					util.LogInfo("tun: cleanup removed iptables FORWARD %s->%s", state.IfaceName, state.IfaceName)
 				}
 			}
 		} else {

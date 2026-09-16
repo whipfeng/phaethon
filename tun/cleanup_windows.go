@@ -15,8 +15,8 @@ import (
 func CleanupResidual() {
 	luid, index, err := getInterfaceLUID("phaethontun")
 	if err == nil {
-		// Delete DNS host route (192.0.2.1/32) and split-tunnel routes for all
-		// next-hop schemes we have used.
+		// Delete DNS host route and split-tunnel routes for all next-hop schemes
+		// we have used (current mesh-derived and legacy hardcoded 192.0.2.x).
 		for _, prefix := range []struct {
 			ip  net.IP
 			len uint8
@@ -25,7 +25,7 @@ func CleanupResidual() {
 			{net.ParseIP("0.0.0.0").To4(), 1},
 			{net.ParseIP("128.0.0.0").To4(), 1},
 		} {
-			// Current /29 scheme: next hop is the TUN adapter (192.0.2.2).
+			// Legacy /29 scheme: next hop was the TUN adapter (192.0.2.2).
 			var fwdRow mibIpForwardRow2
 			fwdRow.init()
 			fwdRow.setInterfaceLuid(luid)
@@ -36,13 +36,13 @@ func CleanupResidual() {
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 
-			// Current /29 scheme: next hop is the virtual peer gateway (192.0.2.1).
+			// Legacy /29 scheme: next hop was the virtual peer gateway (192.0.2.1).
 			fwdRow.setNextHop(net.ParseIP("192.0.2.1").To4())
 			fwdRow.setMetric(0)
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 
-			// /31 peer gateway default route.
+			// Legacy /31 peer gateway default route.
 			fwdRow.setNextHop(net.ParseIP("192.0.2.3").To4())
 			fwdRow.setMetric(0)
 			fwdRow.setMetric(1)
@@ -91,8 +91,8 @@ func CleanupResidual() {
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 		}
 
-		// Delete Fake-IP pool route for both the current off-link gateway
-		// variant (192.0.2.1) and the legacy on-link variant (0.0.0.0).
+		// Delete Fake-IP pool route for legacy off-link gateway variant
+		// (192.0.2.1 from older builds) and the legacy on-link variant (0.0.0.0).
 		if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
 			for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
 				var fwdRow mibIpForwardRow2

@@ -37,17 +37,17 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 
 	// 1. Configure interface IP via netsh (more reliable than iphlpapi on Wintun).
 	// Use a /32 address on the adapter. The split-tunnel routes use the virtual
-	// peer gateway 192.0.2.1 as next hop.
+	// peer gateway as next hop (mesh-derived, e.g., 100.0.0.1 for subnet 100.0.0.0/16).
 	// NOTE: System-wide TUN mode on Windows requires the Wintun adapter to
 	// participate in the IP routing stack, but Wintun does not support ARP/NDP
 	// (no link-layer address). This means Windows cannot resolve the gateway's
 	// MAC address, and packets routed to the TUN interface are silently dropped.
 	// A proper fix requires either using a TAP-Windows adapter (which has a MAC
 	// address) or a WFP-based packet capture mechanism (e.g. WinDivert).
-	// The DNS hijacker lives on 192.0.2.3 inside the gVisor netstack and is reached
-	// via routing through the TUN device. System DNS is set to 192.0.2.3 so queries
-	// route through TUN to the hijacker. We do not set a default gateway via netsh;
-	// split-tunnel routes are added manually below.
+	// The DNS hijacker lives on the mesh-derived GIP address (e.g., 100.0.0.3)
+	// inside the gVisor netstack and is reached via routing through the TUN device.
+	// System DNS is set to that address so queries route through TUN to the hijacker.
+	// We do not set a default gateway via netsh; split-tunnel routes are added manually below.
 	// Clear any stale static IP first to avoid "object already exists" errors.
 	_ = clearInterfaceIPAPI(luid, index)
 	adapterPrefixLen := 32
@@ -59,19 +59,20 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// 1a. Enable weak-host send/receive on the Wintun adapter. Wintun is a L3
 	// tunnel; Windows' strong-host model drops packets whose source/destination
 	// IPs are not assigned to the adapter. Weak-host allows the Fake-IP scheme to
-	// work: outgoing SYNs have source 192.0.2.2 (local) but destination 198.18.x.x
-	// (not local), and incoming replies have destination 192.0.2.2 (local) but
-	// source 198.18.x.x (not local).
+	// work: outgoing SYNs have source = mesh-derived hostIP (local) but destination
+	// in 198.18.x.x (not local), and incoming replies have destination = hostIP
+	// (local) but source 198.18.x.x (not local).
 	if err := ensureWeakHostEnabled(r.devName); err != nil {
 		util.LogWarn("tun: enable weak-host on %s fail: %v", r.devName, err)
 	}
 
-	// 1b. Clean up stale neighbors for the TUN-side IPs. We used to add a static
+	// 1b. Clean up stale neighbors for legacy TUN-side IPs (192.0.2.x from older
+	// builds). Current code uses mesh-derived addresses. We used to add a static
 	// neighbor for 192.0.2.1, but Wintun adapters do not accept a link-layer
 	// address for neighbor entries, which makes the entry useless for unicast
-	// forwarding. Instead the split-tunnel routes below use 192.0.2.1 as an
-	// off-link gateway on a /32 adapter, so Windows sends matching packets to
-	// the Wintun interface without ARP/NUD.
+	// forwarding. Instead the split-tunnel routes below use the mesh-derived
+	// gateway as an off-link gateway on a /32 adapter, so Windows sends matching
+	// packets to the Wintun interface without ARP/NUD.
 	//
 	// Do this synchronously before adding routes: a background goroutine that
 	// deletes neighbor entries can race with route creation and invalidate the
@@ -102,9 +103,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 
 		// Enable weak-host receive on the physical default interface. Replies
-		// from the real Internet have destination 192.0.2.2 (the TUN adapter IP)
-		// but arrive on the physical NIC, so the strong-host model drops them
-		// unless weak-host receive is enabled there.
+		// from the real Internet have destination = mesh-derived hostIP (the TUN
+		// adapter IP) but arrive on the physical NIC, so the strong-host model
+		// drops them unless weak-host receive is enabled there.
 		if r.DefaultIfaceName != "" {
 			_, recv, err := getWeakHostStateAPI(r.DefaultIfaceName)
 			if err == nil {
@@ -353,7 +354,8 @@ func (r *RouteManager) platformTeardown() {
 	// Delete interface IP.
 	_ = clearInterfaceIPAPI(luid, index)
 
-	// Delete any default route via 192.0.2.2 that netsh may have created.
+	// Delete any default route via legacy 192.0.2.2 that netsh may have created
+	// in older builds. Current code uses mesh-derived addresses.
 	{
 		var fwdRow mibIpForwardRow2
 		fwdRow.init()
@@ -364,8 +366,9 @@ func (r *RouteManager) platformTeardown() {
 		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 	}
 
-	// Delete the static neighbor for the virtual peer gateway so it does not
-	// linger on the physical interface after the TUN adapter is gone.
+	// Delete the static neighbors for legacy virtual peer gateway addresses
+	// (192.0.2.x from older builds) so they do not linger on the physical
+	// interface after the TUN adapter is gone.
 	_ = deleteNeighborAPI(net.ParseIP("192.0.2.1").To4(), index, luid)
 	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.1").To4())
 	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.2").To4())

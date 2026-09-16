@@ -15,95 +15,34 @@ import (
 func CleanupResidual() {
 	luid, index, err := getInterfaceLUID("phaethontun")
 	if err == nil {
-		// Delete DNS host route and split-tunnel routes for all next-hop schemes
-		// we have used (current mesh-derived and legacy hardcoded 192.0.2.x).
+		// Delete split-tunnel routes (0.0.0.0/1 and 128.0.0.0/1) with on-link next hop.
 		for _, prefix := range []struct {
 			ip  net.IP
 			len uint8
 		}{
-			{net.ParseIP("192.0.2.1").To4(), 32},
 			{net.ParseIP("0.0.0.0").To4(), 1},
 			{net.ParseIP("128.0.0.0").To4(), 1},
 		} {
-			// Legacy /29 scheme: next hop was the TUN adapter (192.0.2.2).
 			var fwdRow mibIpForwardRow2
 			fwdRow.init()
 			fwdRow.setInterfaceLuid(luid)
 			fwdRow.setInterfaceIndex(index)
 			fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
-			fwdRow.setNextHop(net.ParseIP("192.0.2.2").To4())
-			fwdRow.setMetric(0)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Legacy /29 scheme: next hop was the virtual peer gateway (192.0.2.1).
-			fwdRow.setNextHop(net.ParseIP("192.0.2.1").To4())
-			fwdRow.setMetric(0)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Legacy /31 peer gateway default route.
-			fwdRow.setNextHop(net.ParseIP("192.0.2.3").To4())
-			fwdRow.setMetric(0)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Previous scheme: next hop was the TUN interface IP (198.18.0.1).
-			fwdRow.setNextHop(net.ParseIP("198.18.0.1").To4())
-			fwdRow.setMetric(0)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Previous scheme: next hop was the DNS hijacker IP (198.18.0.2).
-			fwdRow.setNextHop(net.ParseIP("198.18.0.2").To4())
-			fwdRow.setMetric(0)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Metric 1 variant (older /29 P2P builds).
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-
-			// Old scheme (gateway 0.0.0.0) for backward compatibility.
 			fwdRow.setNextHop(net.IPv4zero)
 			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 		}
 
-		// Delete default routes via either TUN gateway or adapter IP for all
-		// metric variants that netsh/route may create.
-		for _, metric := range []uint32{0, 1, 5, 6, 10, 50, 100} {
+		// Delete Fake-IP pool route (198.18.0.0/15) with on-link next hop.
+		if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
 			var fwdRow mibIpForwardRow2
 			fwdRow.init()
 			fwdRow.setInterfaceLuid(luid)
 			fwdRow.setInterfaceIndex(index)
-			fwdRow.setDestinationPrefix(net.IPv4zero, 0)
-			fwdRow.setNextHop(net.ParseIP("192.0.2.1").To4())
-			fwdRow.setMetric(metric)
+			fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
+			fwdRow.setNextHop(net.IPv4zero)
+			fwdRow.setMetric(1)
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-			fwdRow.setNextHop(net.ParseIP("192.0.2.2").To4())
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-			fwdRow.setNextHop(net.ParseIP("192.0.2.3").To4())
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-			fwdRow.setNextHop(net.ParseIP("198.18.0.1").To4())
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-			fwdRow.setNextHop(net.ParseIP("198.18.0.2").To4())
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		}
-
-		// Delete Fake-IP pool route for legacy off-link gateway variant
-		// (192.0.2.1 from older builds) and the legacy on-link variant (0.0.0.0).
-		if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
-			for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
-				var fwdRow mibIpForwardRow2
-				fwdRow.init()
-				fwdRow.setInterfaceLuid(luid)
-				fwdRow.setInterfaceIndex(index)
-				fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
-				fwdRow.setNextHop(nh)
-				fwdRow.setMetric(1)
-				procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-			}
 		}
 
 		// Sweep the full route table for residual TUN routes that may not match
@@ -120,22 +59,9 @@ func CleanupResidual() {
 			}
 		}
 
-		// Delete interface addresses for current /29 scheme, legacy /30, and older prefixes.
-		for _, ip := range []net.IP{net.ParseIP("192.0.2.3").To4(), net.ParseIP("192.0.2.2").To4(), net.ParseIP("192.0.2.1").To4(), net.ParseIP("198.18.0.1").To4()} {
-			for _, prefixLen := range []uint8{31, 32, 30, 29, 24, 15} {
-				var addrRow mibUnicastIpAddressRow
-				addrRow.init()
-				addrRow.setAddress(ip)
-				addrRow.setInterfaceLuid(luid)
-				addrRow.setInterfaceIndex(index)
-				addrRow.setOnLinkPrefixLength(prefixLen)
-				procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&addrRow[0])))
-			}
-		}
-
-		// Delete any static neighbor entries we added for the virtual peer gateway.
-		_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.1").To4())
-		_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.2").To4())
+		// Delete interface addresses (mesh-derived addresses).
+		// The actual TUN IP is set dynamically, so we clear all IPs from the interface.
+		_ = clearInterfaceIPAPI(luid, index)
 	}
 
 	// Check if phaethontun adapter still exists and remove it. Disabling the

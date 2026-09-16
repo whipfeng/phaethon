@@ -66,21 +66,6 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		util.LogWarn("tun: enable weak-host on %s fail: %v", r.devName, err)
 	}
 
-	// 1b. Clean up stale neighbors for legacy TUN-side IPs (192.0.2.x from older
-	// builds). Current code uses mesh-derived addresses. We used to add a static
-	// neighbor for 192.0.2.1, but Wintun adapters do not accept a link-layer
-	// address for neighbor entries, which makes the entry useless for unicast
-	// forwarding. Instead the split-tunnel routes below use the mesh-derived
-	// gateway as an off-link gateway on a /32 adapter, so Windows sends matching
-	// packets to the Wintun interface without ARP/NUD.
-	//
-	// Do this synchronously before adding routes: a background goroutine that
-	// deletes neighbor entries can race with route creation and invalidate the
-	// off-link next hop before traffic starts.
-	_ = deleteNeighborAPI(net.ParseIP("192.0.2.1").To4(), index, luid)
-	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.1").To4())
-	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.2").To4())
-
 	// 2. Detect original default gateway and interface
 	gw, gwLuid, gwIndex, err := getDefaultGatewayWindows()
 	if err != nil {
@@ -315,63 +300,38 @@ func (r *RouteManager) platformTeardown() {
 		return
 	}
 
-	// The routes were created with on-link next hop (0.0.0.0). Also clean up the
-	// legacy off-link gateway variant (192.0.2.1) left by older builds.
-	for _, tunGatewayIP := range []net.IP{net.IPv4zero, net.ParseIP("192.0.2.1").To4()} {
-		for _, prefix := range []struct {
-			ip  net.IP
-			len uint8
-		}{
-			{net.ParseIP("0.0.0.0").To4(), 1},
-			{net.ParseIP("128.0.0.0").To4(), 1},
-		} {
-			var fwdRow mibIpForwardRow2
-			fwdRow.init()
-			fwdRow.setInterfaceLuid(luid)
-			fwdRow.setInterfaceIndex(index)
-			fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
-			fwdRow.setNextHop(tunGatewayIP)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		}
-	}
-
-	// Delete the Fake-IP pool route for both the current off-link gateway
-	// variant (192.0.2.1) and the legacy on-link variant (0.0.0.0).
-	if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
-		for _, nh := range []net.IP{net.ParseIP("192.0.2.1").To4(), net.IPv4zero} {
-			var fwdRow mibIpForwardRow2
-			fwdRow.init()
-			fwdRow.setInterfaceLuid(luid)
-			fwdRow.setInterfaceIndex(index)
-			fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
-			fwdRow.setNextHop(nh)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		}
-	}
-
-	// Delete interface IP.
-	_ = clearInterfaceIPAPI(luid, index)
-
-	// Delete any default route via legacy 192.0.2.2 that netsh may have created
-	// in older builds. Current code uses mesh-derived addresses.
-	{
+	// The routes were created with on-link next hop (0.0.0.0).
+	for _, prefix := range []struct {
+		ip  net.IP
+		len uint8
+	}{
+		{net.ParseIP("0.0.0.0").To4(), 1},
+		{net.ParseIP("128.0.0.0").To4(), 1},
+	} {
 		var fwdRow mibIpForwardRow2
 		fwdRow.init()
 		fwdRow.setInterfaceLuid(luid)
 		fwdRow.setInterfaceIndex(index)
-		fwdRow.setDestinationPrefix(net.IPv4zero, 0)
-		fwdRow.setNextHop(net.ParseIP("192.0.2.2").To4())
+		fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
+		fwdRow.setNextHop(net.IPv4zero)
+		fwdRow.setMetric(1)
 		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 	}
 
-	// Delete the static neighbors for legacy virtual peer gateway addresses
-	// (192.0.2.x from older builds) so they do not linger on the physical
-	// interface after the TUN adapter is gone.
-	_ = deleteNeighborAPI(net.ParseIP("192.0.2.1").To4(), index, luid)
-	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.1").To4())
-	_ = flushNeighborsByIPAPI(net.ParseIP("192.0.2.2").To4())
+	// Delete the Fake-IP pool route (on-link variant).
+	if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
+		var fwdRow mibIpForwardRow2
+		fwdRow.init()
+		fwdRow.setInterfaceLuid(luid)
+		fwdRow.setInterfaceIndex(index)
+		fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
+		fwdRow.setNextHop(net.IPv4zero)
+		fwdRow.setMetric(1)
+		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
+	}
+
+	// Delete interface IP.
+	_ = clearInterfaceIPAPI(luid, index)
 
 	// Restore physical interface weak-host receive to its original state.
 	if r.DefaultIfaceName != "" {

@@ -725,11 +725,6 @@ func deleteResidualRoutesAPI() {
 	}
 	targetGateways := []net.IP{
 		net.IPv4zero,
-		net.ParseIP("192.0.2.1").To4(),
-		net.ParseIP("192.0.2.2").To4(),
-		net.ParseIP("192.0.2.3").To4(),
-		net.ParseIP("198.18.0.1").To4(),
-		net.ParseIP("198.18.0.2").To4(),
 	}
 
 	var table uintptr

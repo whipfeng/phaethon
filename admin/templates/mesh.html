@@ -1,0 +1,101 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    {{if not .MeshEnabled}}
+    <div class="card">
+        <h3>Mesh</h3>
+        <p class="text-muted" data-i18n="common.notAvailable">Not available</p>
+    </div>
+    {{else}}
+    <div class="card" id="mesh-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="2"></circle>
+                    <circle cx="6" cy="6" r="2"></circle>
+                    <circle cx="18" cy="6" r="2"></circle>
+                    <circle cx="6" cy="18" r="2"></circle>
+                    <circle cx="18" cy="18" r="2"></circle>
+                    <line x1="12" y1="10" x2="8" y2="8"></line>
+                    <line x1="12" y1="10" x2="16" y2="8"></line>
+                    <line x1="12" y1="14" x2="8" y2="16"></line>
+                    <line x1="12" y1="14" x2="16" y2="16"></line>
+                </svg>
+                <h3 style="margin:0;">Mesh</h3>
+            </div>
+            <span class="badge badge-ok" data-i18n="common.enabled">Enabled</span>
+        </div>
+
+        <!-- Key Metrics -->
+        <div class="mesh-metrics">
+            <div class="mesh-metric">
+                <span class="mesh-metric-label">Node ID</span>
+                <span class="mesh-metric-value" id="mesh-nodeid">-</span>
+            </div>
+            <div class="mesh-metric">
+                <span class="mesh-metric-label">VIP</span>
+                <span class="mesh-metric-value mesh-metric-mono" id="mesh-vip">-</span>
+            </div>
+            <div class="mesh-metric">
+                <span class="mesh-metric-label">Subnet</span>
+                <span class="mesh-metric-value mesh-metric-mono" id="mesh-subnet">-</span>
+            </div>
+            <div class="mesh-metric">
+                <span class="mesh-metric-label">Peers</span>
+                <span class="mesh-metric-value" id="mesh-peercount">-</span>
+            </div>
+            <div class="mesh-metric">
+                <span class="mesh-metric-label">Routes</span>
+                <span class="mesh-metric-value" id="mesh-routecount">-</span>
+            </div>
+        </div>
+
+        <!-- Topology Visualization -->
+        <div class="mesh-section" id="mesh-topology-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.topology">Topology</h4>
+            </div>
+            <div class="mesh-topology-view" id="mesh-topology-view">
+                <canvas id="mesh-topology-canvas" width="400" height="200"></canvas>
+            </div>
+            <table class="mesh-peer-table">
+                <thead><tr><th>Node</th><th>Subnet</th><th>VIP</th><th>Status</th><th>Last Seen</th></tr></thead>
+                <tbody id="mesh-topology"></tbody>
+            </table>
+        </div>
+
+        <!-- Routes -->
+        <div class="mesh-section" id="mesh-routes-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.routes">Routes</h4>
+            </div>
+            <table class="mesh-route-table">
+                <thead><tr><th>Prefix</th><th>Via</th><th>Hop</th></tr></thead>
+                <tbody id="mesh-routes"></tbody>
+            </table>
+        </div>
+
+        <!-- Config (collapsible) -->
+        <details class="mesh-section mesh-config-section">
+            <summary class="mesh-section-header" style="cursor:pointer;">
+                <h4 style="margin:0;" data-i18n="mesh.config">Config</h4>
+            </summary>
+            <div class="mesh-config-form">
+                <label>Domain Suffixes</label>
+                <input type="text" id="mesh-domain-suffixes" placeholder="comma-separated" class="mesh-input">
+                <label>Advertise (CIDR)</label>
+                <input type="text" id="mesh-advertise" placeholder="comma-separated CIDRs" class="mesh-input">
+                <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+                    <button onclick="saveMeshConfig()" class="btn btn-sm btn-primary" data-i18n="mesh.save">Save</button>
+                    <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>
+                </div>
+            </div>
+        </details>
+    </div>
+
+    <script>
+    fetchMeshStatus();
+    </script>
+    {{end}}
+</div>
+{{end}}

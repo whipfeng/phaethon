@@ -110,6 +110,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // ========== HTMX SPA Helpers ==========
 const PAGE_TITLES = {
     '/': 'Dashboard',
+    '/tun': 'TUN',
+    '/mesh': 'Mesh',
     '/subscriptions': 'Subscriptions',
     '/proxies': 'Proxies',
     '/rules': 'Rules',
@@ -751,16 +753,39 @@ async function fetchTUNStatus(expectedVersion) {
     const data = await res.json();
     if (expectedVersion !== undefined && targetVersions.tun !== expectedVersion) return;
     if (typeof renderTUN === 'function') renderTUN(data);
+    updateTUNSummary(data);
+}
+
+function updateTUNSummary(data) {
+    const el = document.getElementById('tun-summary');
+    if (!el) return;
+    const running = data.running;
+    const tRunning = typeof i18n !== 'undefined' ? i18n.t(running ? 'tun.running' : 'tun.stopped') : (running ? 'Running' : 'Stopped');
+    const color = running ? 'var(--success)' : 'var(--text-muted)';
+    let html = '<table class="info-table">';
+    html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('tun.status') : 'Status') + '</td><td><span class="status-dot" style="background:' + color + '"></span> ' + tRunning + '</td></tr>';
+    if (running && data.routes) {
+        html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('tun.tunIP') : 'TUN IP') + '</td><td>' + (data.routes.tunIP || '-') + '</td></tr>';
+        html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('tun.iface') : 'Interface') + '</td><td>' + (data.routes.defaultIface || '-') + '</td></tr>';
+    }
+    if (data.bypassGateway) {
+        html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('tun.bypassGateway') : 'Bypass Gateway') + '</td><td>' + (typeof i18n !== 'undefined' ? i18n.t('common.enabled') : 'Enabled') + '</td></tr>';
+    }
+    html += '</table>';
+    el.innerHTML = html;
 }
 
 async function fetchMeshStatus() {
+    const summaryEl = document.getElementById('mesh-summary');
     const card = document.getElementById('mesh-card');
-    if (!card) return;
+    if (!card && !summaryEl) return;
     try {
         const res = await fetch('./api/mesh');
         if (!res.ok) return;
         const data = await res.json();
+        updateMeshSummary(data);
         if (!data.enabled) return;
+        if (!card) return;
 
         // Key metrics
         document.getElementById('mesh-nodeid').textContent = data.nodeId || '-';
@@ -831,6 +856,19 @@ async function fetchMeshStatus() {
     } catch (err) {
         console.error('fetchMeshStatus error:', err);
     }
+}
+
+function updateMeshSummary(data) {
+    const el = document.getElementById('mesh-summary');
+    if (!el) return;
+    if (!data.enabled) { el.innerHTML = '<p class="text-muted">-</p>'; return; }
+    const peers = (data.topology && data.topology.peers) || [];
+    let html = '<table class="info-table">';
+    html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.nodeId') : 'Node ID') + '</td><td><code>' + (data.nodeId || '-') + '</code></td></tr>';
+    html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.peers') : 'Peers') + '</td><td>' + peers.length + '</td></tr>';
+    html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.routeCount') : 'Routes') + '</td><td>' + (data.routeCount || 0) + '</td></tr>';
+    html += '</table>';
+    el.innerHTML = html;
 }
 
 function drawMeshTopology(localNodeId, peers, directPeers) {

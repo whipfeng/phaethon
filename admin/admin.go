@@ -483,6 +483,8 @@ func (s *AdminServer) mergeAndInitLocked() error {
 // Each entry is isolated so {{define "content"}} blocks don't conflict.
 type pageTemplates struct {
 	dashboard     *template.Template
+	tun           *template.Template
+	mesh          *template.Template
 	proxies       *template.Template
 	subscriptions *template.Template
 	rules         *template.Template
@@ -618,6 +620,8 @@ func (s *AdminServer) parseTemplates() {
 
 	s.pages = &pageTemplates{
 		dashboard:     parsePage("dashboard.html"),
+		tun:           parsePage("tun.html"),
+		mesh:          parsePage("mesh.html"),
 		proxies:       parsePage("proxies.html"),
 		subscriptions: parsePage("subscriptions.html"),
 		rules:         parsePage("rules.html"),
@@ -829,6 +833,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 
 	// Pages
 	mux.HandleFunc("/", s.handleDashboard)
+	mux.HandleFunc("/tun", s.handleTUNPage)
+	mux.HandleFunc("/mesh", s.handleMeshPage)
 	mux.HandleFunc("/proxies", s.handleProxiesPage)
 	mux.HandleFunc("/subscriptions", s.handleSubscriptionsPage)
 	mux.HandleFunc("/rules", s.handleRulesPage)
@@ -912,6 +918,24 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"MeshEnabled":   mesh.GlobalMeshManager != nil,
 	}
 	s.render(w, r, "dashboard.html", data)
+}
+
+func (s *AdminServer) handleTUNPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title":         "TUN",
+		"Version":       os.Getenv("PHAETHON_VERSION"),
+		"TUNAvailable":  tun.Available(),
+	}
+	s.render(w, r, "tun.html", data)
+}
+
+func (s *AdminServer) handleMeshPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title":       "Mesh",
+		"Version":     os.Getenv("PHAETHON_VERSION"),
+		"MeshEnabled": mesh.GlobalMeshManager != nil,
+	}
+	s.render(w, r, "mesh.html", data)
 }
 
 // envInfo detects whether an environment-specific config override file exists.
@@ -4432,6 +4456,10 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	switch pageName {
 	case "dashboard.html":
 		t = s.pages.dashboard
+	case "tun.html":
+		t = s.pages.tun
+	case "mesh.html":
+		t = s.pages.mesh
 	case "proxies.html":
 		t = s.pages.proxies
 	case "subscriptions.html":

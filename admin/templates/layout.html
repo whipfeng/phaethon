@@ -19,6 +19,9 @@
             </div>
             <ul class="nav-menu">
                 <li><a href="./" hx-get="./" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
+                <li class="nav-section"><span data-i18n="nav.runtime">Runtime</span></li>
+                <li><a href="./tun" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "TUN"}}class="active"{{end}} data-i18n="nav.tun">🌐 TUN</a></li>
+                <li><a href="./mesh" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mesh"}}class="active"{{end}} data-i18n="nav.mesh">🔷 Mesh</a></li>
                 <li class="nav-section"><span data-i18n="nav.config">Configuration</span></li>
                 <li><a href="./subscriptions" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
                 <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔗 Proxies</a></li>

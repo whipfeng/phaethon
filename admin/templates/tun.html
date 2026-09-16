@@ -1,0 +1,458 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    {{if not .TUNAvailable}}
+    <div class="card">
+        <h3 data-i18n="tun.title">🌐 TUN</h3>
+        <p class="text-muted" data-i18n="common.notAvailable">Not available</p>
+    </div>
+    {{else}}
+    <div class="card tun-card" id="tun-card">
+        <div class="tun-header">
+            <h3 data-i18n="tun.title">🌐 TUN</h3>
+            <label class="switch" title="Toggle TUN">
+                <input type="checkbox" id="tun-toggle" onchange="toggleTUN(this)">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="tun-header" id="tun-bypass-row" style="display:none;padding-top:0;">
+            <span style="font-size:0.85rem;color:var(--text-secondary);" data-i18n="tun.bypassGateway">旁路网关</span>
+            <label class="switch" title="Toggle bypass gateway" style="transform:scale(0.8);transform-origin:right center;">
+                <input type="checkbox" id="tun-bypass-toggle" onchange="toggleBypassGateway(this)">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="tun-header" id="tun-dhcp-row" style="display:none;padding-top:0;">
+            <span style="font-size:0.85rem;color:var(--text-secondary);" data-i18n="tun.dhcp">DHCP 服务器</span>
+            <label class="switch" title="Toggle DHCP server" style="transform:scale(0.8);transform-origin:right center;">
+                <input type="checkbox" id="tun-dhcp-toggle" onchange="toggleDHCPServer(this)">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div id="tun-status">
+            <p data-i18n="tun.loading">Loading...</p>
+        </div>
+        <div class="tun-section" id="tun-routes-section" style="display:none;">
+            <h4 data-i18n="tun.routes">Routes</h4>
+            <table class="info-table tun-route-table">
+                <tr><td data-i18n="tun.status">Status</td><td id="tun-running"></td></tr>
+                <tr><td data-i18n="tun.tunIP">TUN IP</td><td id="tun-ip">-</td></tr>
+                <tr><td data-i18n="tun.gateway">Gateway</td><td id="tun-gateway">-</td></tr>
+                <tr><td data-i18n="tun.iface">Interface</td><td id="tun-iface">-</td></tr>
+                <tr><td data-i18n="tun.device">Device</td><td id="tun-device">-</td></tr>
+                <tr><td data-i18n="tun.exclusions">Exclusions</td><td id="tun-exclusions">-</td></tr>
+                <tr><td data-i18n="tun.splitTunnels">Split Tunnels</td><td id="tun-splittunnels">-</td></tr>
+            </table>
+        </div>
+        <div class="tun-section" id="tun-stats-section" style="display:none;">
+            <h4 data-i18n="tun.stats">Counters</h4>
+            <table class="info-table">
+                <tr><td data-i18n="tun.readPackets">Read Packets</td><td id="tun-read-pkts">-</td></tr>
+                <tr><td data-i18n="tun.writePackets">Write Packets</td><td id="tun-write-pkts">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPDomains">Fake-IP Domains</td><td id="tun-fakeip-domains">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPRegistered">Fake-IP Registered</td><td id="tun-fakeip-registered">-</td></tr>
+                <tr><td data-i18n="tun.fakeIPCache">Fake-IP Real-IP Cache</td><td id="tun-fakeip-cache">-</td></tr>
+            </table>
+        </div>
+        <div class="tun-section" id="tun-dhcp-leases-section" style="display:none;">
+            <h4 data-i18n="tun.dhcpLeases">DHCP Leases</h4>
+            <table class="info-table dhcp-lease-table">
+                <thead><tr><td data-i18n="tun.hostname">Hostname</td><td>MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.leasesExpires">Expires</td><td></td></tr></thead>
+                <tbody id="tun-dhcp-leases"></tbody>
+            </table>
+        </div>
+        <div class="tun-section" id="tun-dhcp-bindings-section" style="display:none;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h4 data-i18n="tun.staticBindings" style="margin:0;">Static Bindings</h4>
+                <button class="btn btn-sm btn-outline" onclick="openBindingModal()" data-i18n="tun.addBinding">Add Binding</button>
+            </div>
+            <table class="info-table dhcp-lease-table" style="margin-top:0.5rem;">
+                <thead><tr><td data-i18n="tun.mac">MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.hostname">Hostname</td><td></td></tr></thead>
+                <tbody id="tun-dhcp-bindings"></tbody>
+            </table>
+        </div>
+        <div id="binding-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
+            <div style="background:var(--card-bg,#1e1e2e);border-radius:8px;padding:1.5rem;width:360px;max-width:90vw;">
+                <h4 data-i18n="tun.bindingModalTitle" style="margin:0 0 1rem;">Add Static Binding</h4>
+                <div style="display:flex;flex-direction:column;gap:0.75rem;">
+                    <input type="text" id="binding-mac" class="form-input" list="binding-mac-list" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.macPlaceholder" placeholder="aa:bb:cc:dd:ee:ff" onchange="onBindingMacChange()">
+                    <datalist id="binding-mac-list"></datalist>
+                    <input type="text" id="binding-ip" class="form-input" list="binding-ip-list" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.ipPlaceholder" placeholder="192.168.1.50">
+                    <datalist id="binding-ip-list"></datalist>
+                    <input type="text" id="binding-hostname" class="form-input" style="width:100%;padding:0.5rem;border:1px solid var(--border,#333);border-radius:4px;background:var(--bg,#111);color:var(--text,#eee);" data-i18n-placeholder="tun.hostnamePlaceholder" placeholder="my-server (optional)">
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:1rem;">
+                    <button class="btn btn-sm btn-outline" onclick="closeBindingModal()" data-i18n="proxy.cancel">Cancel</button>
+                    <button class="btn btn-sm btn-primary" onclick="saveBinding()" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </div>
+        </div>
+        <div class="tun-section" id="tun-logs-section" style="display:none;">
+            <h4 data-i18n="tun.logs">Event Log</h4>
+            <pre class="tun-log" id="tun-logs"></pre>
+        </div>
+    </div>
+
+    <script>
+    (function initTUN() {
+        var card = document.getElementById('tun-card');
+        if (!card) return;
+        refreshTUN();
+    })();
+
+    function refreshTUN() {
+        fetch('./api/tun')
+            .then(function(r) { return r.json(); })
+            .then(function(data) { renderTUN(data); })
+            .catch(function() {});
+    }
+
+    function escapeHtml(s) {
+        if (!s) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderTUN(data) {
+        var card = document.getElementById('tun-card');
+        if (!card) return;
+
+        var toggle = document.getElementById('tun-toggle');
+        var statusEl = document.getElementById('tun-status');
+        var routesSection = document.getElementById('tun-routes-section');
+        var logsSection = document.getElementById('tun-logs-section');
+        var runningEl = document.getElementById('tun-running');
+
+        if (toggle) {
+            toggle.checked = data.running;
+            toggle.disabled = false;
+        }
+
+        var bypassRow = document.getElementById('tun-bypass-row');
+        var bypassToggle = document.getElementById('tun-bypass-toggle');
+        if (bypassRow) {
+            bypassRow.style.display = data.available ? 'flex' : 'none';
+        }
+        if (bypassToggle) {
+            bypassToggle.checked = !!data.bypassGateway;
+        }
+
+        var dhcpRow = document.getElementById('tun-dhcp-row');
+        var dhcpToggle = document.getElementById('tun-dhcp-toggle');
+        if (dhcpRow) {
+            dhcpRow.style.display = (data.available && data.bypassGateway) ? 'flex' : 'none';
+        }
+        if (dhcpToggle) {
+            dhcpToggle.checked = !!data.dhcpEnabled;
+        }
+
+        var running = data.running;
+        var enabled = data.enabled;
+        var tRunning = typeof i18n !== 'undefined' ? i18n.t(running ? 'tun.running' : 'tun.stopped') : (running ? 'Running' : 'Stopped');
+        var color = running ? 'var(--success)' : 'var(--text-muted)';
+        if (runningEl) {
+            runningEl.innerHTML = '<span class="status-dot" style="background:' + color + '"></span> ' + tRunning;
+        }
+
+        if (statusEl) {
+            if (!data.available) {
+                statusEl.innerHTML = '<p>' + (typeof i18n !== 'undefined' ? i18n.t('tun.notAvailable') : 'TUN extension not available') + '</p>';
+            } else if (enabled && !running) {
+                statusEl.innerHTML = '<p class="text-warning">⚠ ' + (typeof i18n !== 'undefined' ? i18n.t('tun.enabledButStopped') : 'Enabled but not running') + '</p>';
+            } else {
+                statusEl.innerHTML = '';
+            }
+        }
+
+        if (routesSection) routesSection.style.display = running ? 'block' : 'none';
+        if (logsSection) logsSection.style.display = (running || (data.logs && data.logs.length)) ? 'block' : 'none';
+
+        var routes = data.routes || {};
+        var ipEl = document.getElementById('tun-ip');
+        if (ipEl) ipEl.textContent = routes.tunIP || '-';
+        var gwEl = document.getElementById('tun-gateway');
+        if (gwEl) gwEl.textContent = routes.originalGateway || '-';
+        var ifaceEl = document.getElementById('tun-iface');
+        if (ifaceEl) ifaceEl.textContent = routes.defaultIface || '-';
+        var deviceEl = document.getElementById('tun-device');
+        if (deviceEl) deviceEl.textContent = data.deviceName || '-';
+        var exclEl = document.getElementById('tun-exclusions');
+        if (exclEl) exclEl.textContent = (routes.exclusions && routes.exclusions.length) ? routes.exclusions.join(', ') : '-';
+        var splitEl = document.getElementById('tun-splittunnels');
+        if (splitEl) splitEl.textContent = (routes.splitTunnels && routes.splitTunnels.length) ? routes.splitTunnels.join(', ') : '-';
+
+        var statsSection = document.getElementById('tun-stats-section');
+        if (statsSection) statsSection.style.display = (running && data.stats) ? 'block' : 'none';
+        if (data.stats) {
+            var s = data.stats;
+            var setT = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v != null ? v : '-'; };
+            setT('tun-read-pkts', s.readPackets);
+            setT('tun-write-pkts', s.writePackets);
+            if (s.fakeIP) {
+                setT('tun-fakeip-domains', s.fakeIP.domainCount);
+                setT('tun-fakeip-registered', s.fakeIP.registeredCount);
+                setT('tun-fakeip-cache', s.fakeIP.realIPCacheCount);
+            }
+        }
+
+        var leasesSection = document.getElementById('tun-dhcp-leases-section');
+        var leasesBody = document.getElementById('tun-dhcp-leases');
+        if (leasesSection && leasesBody) {
+            var leases = data.dhcpLeases || [];
+            window._dhcpLeases = leases;
+            if (leases.length > 0) {
+                leasesSection.style.display = 'block';
+                var boundMacs = {};
+                (data.dhcpStaticBindings || []).forEach(function(b) { boundMacs[b.mac.toLowerCase()] = b; });
+                leasesBody.innerHTML = leases.map(function(l) {
+                    var exp = new Date(l.expires);
+                    var expStr = exp.toLocaleString();
+                    var isBound = !!boundMacs[l.mac.toLowerCase()];
+                    var bindBtn = isBound
+                        ? '<button class="btn btn-sm btn-outline" style="padding:0.1rem 0.4rem;font-size:0.7rem;opacity:0.5;" onclick="editBindingFromLease(\'' + escapeHtml(l.mac) + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.editBinding') : 'Edit binding') + '">📌</button>'
+                        : '<button class="btn btn-sm btn-outline" style="padding:0.1rem 0.4rem;font-size:0.7rem;" onclick="bindFromLease(\'' + escapeHtml(l.mac) + '\',\'' + escapeHtml(l.ip) + '\',\'' + escapeHtml(l.hostname || '') + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.bindFromLease') : 'Bind from lease') + '">📌</button>';
+                    return '<tr><td>' + escapeHtml(l.hostname || '-') + '</td><td>' + escapeHtml(l.mac) + '</td><td>' + escapeHtml(l.ip) + '</td><td>' + escapeHtml(expStr) + '</td><td>' + bindBtn + '</td></tr>';
+                }).join('');
+                var macList = document.getElementById('binding-mac-list');
+                if (macList) macList.innerHTML = leases.map(function(l) { return '<option value="' + escapeHtml(l.mac) + '">'; }).join('');
+                var ipList = document.getElementById('binding-ip-list');
+                if (ipList) ipList.innerHTML = leases.map(function(l) { return '<option value="' + escapeHtml(l.ip) + '">'; }).join('');
+            } else {
+                leasesSection.style.display = 'none';
+            }
+        }
+
+        var bindingsSection = document.getElementById('tun-dhcp-bindings-section');
+        var bindingsBody = document.getElementById('tun-dhcp-bindings');
+        if (bindingsSection && bindingsBody) {
+            var showBindings = data.available && data.bypassGateway;
+            bindingsSection.style.display = showBindings ? 'block' : 'none';
+            if (showBindings) {
+                var bindings = data.dhcpStaticBindings || [];
+                _currentBindings = bindings;
+                if (bindings.length > 0) {
+                    bindingsBody.innerHTML = bindings.map(function(b) {
+                        var bid = escapeHtml(b.id || '');
+                        return '<tr><td>' + escapeHtml(b.mac) + '</td><td>' + escapeHtml(b.ip) + '</td><td>' + escapeHtml(b.hostname || '-') + '</td><td>' +
+                            '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;margin-right:0.3rem;" onclick="editBinding(\'' + bid + '\')" title="' + (typeof i18n !== 'undefined' ? i18n.t('tun.editBinding') : 'Edit') + '">✎</button>' +
+                            '<button class="btn btn-sm btn-outline" style="padding:0.15rem 0.5rem;font-size:0.75rem;color:var(--danger,#e74c3c);border-color:var(--danger,#e74c3c);" onclick="deleteBinding(\'' + bid + '\')">✕</button>' +
+                            '</td></tr>';
+                    }).join('');
+                } else {
+                    bindingsBody.innerHTML = '<tr><td colspan="4" style="text-align:center;opacity:0.5;">-</td></tr>';
+                }
+            }
+        }
+
+        var logsEl = document.getElementById('tun-logs');
+        if (logsEl && data.logs) {
+            logsEl.textContent = data.logs.join('\n');
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+    }
+
+    function toggleTUN(checkbox) {
+        var enabled = checkbox.checked;
+        checkbox.disabled = true;
+        fetch('./api/tun', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enabled})
+        })
+        .then(function(res) {
+            if (!res.ok) {
+                return res.text().then(function(text) { throw new Error(text); });
+            }
+        })
+        .catch(function(err) {
+            checkbox.checked = !enabled;
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.toggleFailed') : 'TUN toggle failed') + ': ' + err.message, 'error');
+        })
+        .finally(function() {
+            checkbox.disabled = false;
+        });
+    }
+
+    function toggleBypassGateway(checkbox) {
+        var enabled = checkbox.checked;
+        checkbox.disabled = true;
+        fetch('./api/tun', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({bypassGateway: enabled})
+        })
+        .then(function(res) {
+            if (!res.ok) {
+                return res.text().then(function(text) { throw new Error(text); });
+            }
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bypassSaved') : 'Bypass gateway setting saved', 'success');
+        })
+        .catch(function(err) {
+            checkbox.checked = !enabled;
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bypassFailed') : 'Bypass gateway toggle failed') + ': ' + err.message, 'error');
+        })
+        .finally(function() {
+            checkbox.disabled = false;
+        });
+    }
+
+    function toggleDHCPServer(checkbox) {
+        var enabled = checkbox.checked;
+        checkbox.disabled = true;
+        fetch('./api/tun', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dhcpEnabled: enabled})
+        })
+        .then(function(res) {
+            if (!res.ok) {
+                return res.text().then(function(text) { throw new Error(text); });
+            }
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.dhcpSaved') : 'DHCP setting saved', 'success');
+        })
+        .catch(function(err) {
+            checkbox.checked = !enabled;
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.dhcpFailed') : 'DHCP toggle failed') + ': ' + err.message, 'error');
+        })
+        .finally(function() {
+            checkbox.disabled = false;
+        });
+    }
+
+    var _currentBindings = [];
+    var _editingOriginalId = null;
+
+    function openBindingModal(mac, ip, hostname) {
+        document.getElementById('binding-mac').value = mac || '';
+        document.getElementById('binding-ip').value = ip || '';
+        document.getElementById('binding-hostname').value = hostname || '';
+        var modal = document.getElementById('binding-modal');
+        modal.style.display = 'flex';
+    }
+
+    function openNewBindingModal() {
+        _editingOriginalId = null;
+        openBindingModal('', '', '');
+    }
+
+    function closeBindingModal() {
+        document.getElementById('binding-modal').style.display = 'none';
+    }
+
+    function bindFromLease(mac, ip, hostname) {
+        openBindingModal(mac, ip, hostname);
+    }
+
+    function editBindingFromLease(mac) {
+        var bindings = _currentBindings || [];
+        var binding = bindings.find(function(b) { return b.mac.toLowerCase() === mac.toLowerCase(); });
+        if (binding) {
+            _editingOriginalId = binding.id;
+            openBindingModal(binding.mac, binding.ip, binding.hostname || '');
+        } else {
+            _editingOriginalId = null;
+            openBindingModal(mac, '', '');
+        }
+    }
+
+    function editBinding(id) {
+        var bindings = _currentBindings || [];
+        var binding = bindings.find(function(b) { return b.id === id; });
+        if (binding) {
+            _editingOriginalId = id;
+            openBindingModal(binding.mac, binding.ip, binding.hostname || '');
+        }
+    }
+
+    function onBindingMacChange() {
+        var mac = document.getElementById('binding-mac').value.trim().toLowerCase();
+        if (!mac || !window._dhcpLeases) return;
+        var lease = window._dhcpLeases.find(function(l) { return l.mac.toLowerCase() === mac; });
+        if (lease) {
+            document.getElementById('binding-ip').value = lease.ip;
+            document.getElementById('binding-hostname').value = lease.hostname || '';
+        }
+    }
+
+    function saveBinding() {
+        var mac = document.getElementById('binding-mac').value.trim().toLowerCase();
+        var ip = document.getElementById('binding-ip').value.trim();
+        var hostname = document.getElementById('binding-hostname').value.trim();
+        if (!mac) {
+            alert(typeof i18n !== 'undefined' ? i18n.t('tun.macRequired') : 'Please enter a MAC address');
+            return;
+        }
+        if (!ip) {
+            alert(typeof i18n !== 'undefined' ? i18n.t('tun.ipRequired') : 'Please enter an IP address');
+            return;
+        }
+        fetch('./api/tun', {
+            method: 'GET'
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            var bindings = data.dhcpStaticBindings || [];
+            var entry = {mac: mac, ip: ip, hostname: hostname};
+            var idx = -1;
+            if (_editingOriginalId) {
+                idx = bindings.findIndex(function(b) { return b.id === _editingOriginalId; });
+                if (idx >= 0) {
+                    entry.id = _editingOriginalId;
+                    bindings[idx] = entry;
+                }
+            } else {
+                idx = bindings.findIndex(function(b) { return b.mac.toLowerCase() === mac.toLowerCase(); });
+                if (idx >= 0) {
+                    entry.id = bindings[idx].id;
+                    bindings[idx] = entry;
+                }
+            }
+            if (idx < 0) {
+                bindings.push(entry);
+            }
+            _editingOriginalId = null;
+            return fetch('./api/tun', {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({dhcpStaticBindings: bindings})
+            });
+        })
+        .then(function(res) {
+            if (!res.ok) return res.text().then(function(text) { throw new Error(text); });
+            closeBindingModal();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
+        })
+        .catch(function(err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
+        });
+    }
+
+    function deleteBinding(id) {
+        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('tun.bindingConfirmDelete') : 'Delete this binding?')) return;
+        fetch('./api/tun', {
+            method: 'GET'
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            var bindings = data.dhcpStaticBindings || [];
+            var idx = bindings.findIndex(function(b) { return b.id === id; });
+            if (idx >= 0) {
+                bindings.splice(idx, 1);
+            }
+            return fetch('./api/tun', {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({dhcpStaticBindings: bindings})
+            });
+        })
+        .then(function(res) {
+            if (!res.ok) return res.text().then(function(text) { throw new Error(text); });
+            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
+        })
+        .catch(function(err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
+        });
+    }
+    </script>
+    {{end}}
+</div>
+{{end}}

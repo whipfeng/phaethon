@@ -8,12 +8,15 @@
         zh: {
             // ===== Layout / Navigation =====
             'nav.dashboard': '仪表盘',
+            'nav.runtime': '运行状态',
+            'nav.tun': '🌐 TUN',
+            'nav.mesh': '🔷 Mesh',
             'nav.config': '配置',
             'nav.proxies': '代理',
             'nav.subscriptions': '订阅',
             'nav.rules': '规则',
             'nav.mappings': '映射',
-            'nav.resolvers': '地址重定向',
+            'nav.resolvers': '重定向',
             'nav.tools': '工具',
             'nav.reverse': '反向连接向导',
             'nav.logs': '运行日志',
@@ -154,6 +157,8 @@
             'mesh.topology': '拓扑',
             'mesh.routes': '路由表',
             'mesh.routeCount': '路由数',
+            'mesh.nodeId': '节点 ID',
+            'mesh.peers': '对等节点',
 
             // ===== Proxies =====
             'proxy.title': '代理',
@@ -401,6 +406,8 @@
             'rule.confirmDelete': '删除规则',
             'rule.valueRequired': '此模式需要值',
             'rule.noMatch': '未找到匹配规则',
+            'rule.insertAbove': '⬆ 上方插入',
+            'rule.insertBelow': '⬇ 下方插入',
 
             // ===== Mappings =====
             'map.title': '映射',
@@ -434,7 +441,7 @@
             'map.confirmDelete': '删除映射',
 
             // ===== Resolvers =====
-            'res.title': '地址重定向',
+            'res.title': '重定向',
             'res.add': '+ 新增重定向',
             'res.desc': '重定向规则在规则匹配前重写目标地址。例如将 git.example.com:80 重定向到 10.0.0.1:9003。',
             'res.name': '名称',
@@ -613,6 +620,8 @@
             'common.loading': '加载中…',
             'common.showAll': '显示全部',
             'common.showLess': '收起',
+            'common.details': '详情 →',
+            'common.notAvailable': '不可用',
 
             // ===== Login =====
             'login.title': '登录',
@@ -667,6 +676,9 @@
         en: {
             // ===== Layout / Navigation =====
             'nav.dashboard': 'Dashboard',
+            'nav.runtime': 'Runtime',
+            'nav.tun': '🌐 TUN',
+            'nav.mesh': '🔷 Mesh',
             'nav.config': 'Configuration',
             'nav.proxies': 'Proxies',
             'nav.subscriptions': 'Subscriptions',
@@ -813,6 +825,8 @@
             'mesh.topology': 'Topology',
             'mesh.routes': 'Routes',
             'mesh.routeCount': 'Route Count',
+            'mesh.nodeId': 'Node ID',
+            'mesh.peers': 'Peers',
 
             // ===== Proxies =====
             'proxy.title': 'Proxies',
@@ -1060,6 +1074,8 @@
             'rule.confirmDelete': 'Delete rule',
             'rule.valueRequired': 'Value is required for this keyword',
             'rule.noMatch': 'No explicit match found',
+            'rule.insertAbove': '⬆ Insert above',
+            'rule.insertBelow': '⬇ Insert below',
 
             // ===== Mappings =====
             'map.title': 'Mappings',
@@ -1272,6 +1288,8 @@
             'common.loading': 'Loading...',
             'common.showAll': 'Show all',
             'common.showLess': 'Show less',
+            'common.details': 'Details →',
+            'common.notAvailable': 'Not available',
 
             // ===== Login =====
             'login.title': 'Login',

@@ -12,7 +12,6 @@
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th class="col-drag"></th>
                         <th>#</th>
                         <th data-i18n="rule.match">Match</th>
                         <th data-i18n="rule.target">Target</th>
@@ -25,8 +24,7 @@
                 <tbody id="rules-tbody">
                     {{range $idx, $rule := .Rules}}
                     {{$parsed := parseRule $rule}}
-                    <tr data-idx="{{$idx}}" draggable="true" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
-                        <td class="col-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
+                    <tr data-idx="{{$idx}}" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
                         <td>{{$idx}}</td>
                         <td><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
                         <td><strong>{{index $parsed 2}}</strong></td>
@@ -39,8 +37,8 @@
                             </label>
                         </td>
                         <td>
-                            <button onclick="moveRule({{$idx}}, -1)" class="btn btn-sm btn-outline" {{if eq $idx 0}}disabled{{end}}>↑</button>
-                            <button onclick="moveRule({{$idx}}, 1)" class="btn btn-sm btn-outline" {{if eq $idx (sub (len $.Rules) 1)}}disabled{{end}}>↓</button>
+                            <button onclick="insertRuleAt({{$idx}}, 'above')" class="btn btn-sm btn-outline" data-i18n="rule.insertAbove">⬆ 上方插入</button>
+                            <button onclick="insertRuleAt({{$idx}}, 'below')" class="btn btn-sm btn-outline" data-i18n="rule.insertBelow">⬇ 下方插入</button>
                             <button onclick="editRule({{$idx}})" class="btn btn-sm btn-outline">Edit</button>
                             <button onclick="copyRule({{$idx}})" class="btn btn-sm btn-outline" title="Copy">📋</button>
                             <button onclick="deleteRule({{$idx}})" class="btn btn-sm btn-danger">Delete</button>
@@ -300,6 +298,17 @@ function splitTargetMapping(target) {
 function showAddRule() {
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
     document.getElementById('rule-edit-idx').value = '-1';
+    document.getElementById('rule-form').dataset.insertAt = '';
+    document.getElementById('rule-form').reset();
+    setTimeRange('');
+    toggleRuleFields();
+    document.getElementById('rule-modal').classList.remove('hidden');
+}
+
+function insertRuleAt(idx, position) {
+    document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
+    document.getElementById('rule-edit-idx').value = '-1';
+    document.getElementById('rule-form').dataset.insertAt = position === 'above' ? String(idx) : String(idx + 1);
     document.getElementById('rule-form').reset();
     setTimeRange('');
     toggleRuleFields();
@@ -351,19 +360,33 @@ async function saveRule(e) {
         return;
     }
 
-    const newRules = [...rules];
-    if (editIdx >= 0) {
-        newRules[editIdx] = ruleStr;
-    } else {
-        newRules.push(ruleStr);
-    }
+    const insertAt = document.getElementById('rule-form').dataset.insertAt;
 
     try {
-        const res = await fetch('./api/rules', {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(newRules)
-        });
+        let res;
+        if (editIdx >= 0) {
+            const newRules = [...rules];
+            newRules[editIdx] = ruleStr;
+            res = await fetch('./api/rules', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(newRules)
+            });
+        } else if (insertAt !== '' && insertAt !== undefined) {
+            res = await fetch('./api/rules', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rule: ruleStr, index: parseInt(insertAt)})
+            });
+        } else {
+            const newRules = [...rules];
+            newRules.push(ruleStr);
+            res = await fetch('./api/rules', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(newRules)
+            });
+        }
         if (!res.ok) {
             const txt = await res.text();
             throw new Error(txt || `HTTP ${res.status}`);
@@ -401,26 +424,6 @@ async function toggleRule(idx, enabled) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
         showToast(errLabel + ': ' + err.message, 'error');
         reloadPage();
-    }
-}
-
-async function moveRule(idx, delta) {
-    const newIdx = idx + delta;
-    if (newIdx < 0 || newIdx >= rules.length) return;
-    const newRules = [...rules];
-    const [moved] = newRules.splice(idx, 1);
-    newRules.splice(newIdx, 0, moved);
-    try {
-        const res = await fetch('./api/rules', {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(newRules)
-        });
-        if (!res.ok) throw new Error(await res.text());
-        reloadPage();
-    } catch (err) {
-        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
-        showToast(errLabel + ': ' + err.message, 'error');
     }
 }
 
@@ -572,100 +575,5 @@ function ipv6InCidr(ip, cidr) {
     return (ipInt & networkMask) === (netInt & networkMask);
 }
 
-// ========== Drag-and-Drop Rule Reordering ==========
-(function initRuleDragDrop() {
-    const tbody = document.getElementById('rules-tbody');
-    if (!tbody) return;
-
-    let dragIdx = null;
-    let dropIndicator = null;
-
-    function createDropIndicator() {
-        if (dropIndicator) return dropIndicator;
-        dropIndicator = document.createElement('tr');
-        dropIndicator.className = 'drop-indicator';
-        const td = document.createElement('td');
-        td.colSpan = 8;
-        const line = document.createElement('div');
-        line.className = 'drop-line';
-        td.appendChild(line);
-        dropIndicator.appendChild(td);
-        return dropIndicator;
-    }
-
-    function getRowMidY(tr) {
-        const rect = tr.getBoundingClientRect();
-        return rect.top + rect.height / 2;
-    }
-
-    tbody.addEventListener('dragstart', (e) => {
-        const tr = e.target.closest('tr[data-idx]');
-        if (!tr) return;
-        dragIdx = parseInt(tr.dataset.idx);
-        tr.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', dragIdx);
-    });
-
-    tbody.addEventListener('dragend', (e) => {
-        const tr = e.target.closest('tr[data-idx]');
-        if (tr) tr.classList.remove('dragging');
-        if (dropIndicator && dropIndicator.parentNode) {
-            dropIndicator.parentNode.removeChild(dropIndicator);
-        }
-        dragIdx = null;
-    });
-
-    tbody.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-
-        const tr = e.target.closest('tr[data-idx]');
-        if (!tr || dragIdx === null) return;
-
-        const indicator = createDropIndicator();
-        const midY = getRowMidY(tr);
-        const insertBefore = e.clientY < midY;
-
-        if (insertBefore) {
-            tbody.insertBefore(indicator, tr);
-        } else {
-            const next = tr.nextElementSibling;
-            if (next && next !== indicator) {
-                tbody.insertBefore(indicator, next);
-            } else if (!next) {
-                tbody.appendChild(indicator);
-            }
-        }
-    });
-
-    tbody.addEventListener('drop', (e) => {
-        e.preventDefault();
-        if (dragIdx === null) return;
-
-        const tr = e.target.closest('tr[data-idx]');
-        if (!tr) return;
-
-        const midY = getRowMidY(tr);
-        const insertBefore = e.clientY < midY;
-        const targetIdx = parseInt(tr.dataset.idx);
-
-        let newIdx;
-        if (insertBefore) {
-            newIdx = targetIdx > dragIdx ? targetIdx - 1 : targetIdx;
-        } else {
-            newIdx = targetIdx > dragIdx ? targetIdx : targetIdx + 1;
-        }
-
-        if (newIdx !== dragIdx && newIdx >= 0 && newIdx < rules.length) {
-            moveRule(dragIdx, newIdx - dragIdx);
-        }
-
-        if (dropIndicator && dropIndicator.parentNode) {
-            dropIndicator.parentNode.removeChild(dropIndicator);
-        }
-        dragIdx = null;
-    });
-})();
 </script>
 {{end}}

@@ -1,82 +1,21 @@
 {{template "layout" .}}
 {{define "content"}}
-<div class="page-content">
-    <div class="card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+<div class="page-content" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+    <div class="card" style="flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0;">
             <h3 style="margin:0;" data-i18n="connections.title">🔗 活跃连接</h3>
-            <span id="active-conn-count" class="text-muted" data-i18n="connections.count">0 个连接</span>
+            <span id="active-conn-count" class="text-muted" data-i18n="dash.activeConnCount">0 个连接</span>
         </div>
-        <div id="active-conns-list" style="height:calc(100vh - 200px); overflow-y:auto;">
-            <p class="text-muted" data-i18n="connections.noActive">暂无活跃连接</p>
+        <div id="active-conns-list" style="flex:1; overflow-y:auto;">
+            <p class="text-muted" data-i18n="dash.noActiveConns">暂无活跃连接</p>
         </div>
     </div>
 </div>
 
 <script>
 (function() {
-    // Fetch connections initially
-    fetchActiveConns(true);
-    
-    // Set up periodic refresh
-    setInterval(() => fetchActiveConns(false), 5000);
+    fetchActiveConns();
+    startActiveConnsTimer();
 })();
-
-function fetchActiveConns(initial) {
-    fetch('./api/connections')
-        .then(r => r.json())
-        .then(data => {
-            const listEl = document.getElementById('active-conns-list');
-            const countEl = document.getElementById('active-conn-count');
-            if (!listEl) return;
-            
-            const conns = data.activeConnectionsTracking || [];
-            if (conns.length === 0) {
-                listEl.innerHTML = '<p class="text-muted" data-i18n="connections.noActive">暂无活跃连接</p>';
-                if (countEl) countEl.textContent = '0 ' + (typeof i18n !== 'undefined' ? i18n.t('connections.countSuffix') : '个连接');
-                return;
-            }
-            
-            if (countEl) countEl.textContent = conns.length + ' ' + (typeof i18n !== 'undefined' ? i18n.t('connections.countSuffix') : '个连接');
-            
-            let html = '<table class="data-table"><thead><tr>';
-            html += '<th data-i18n="connections.type">类型</th>';
-            html += '<th data-i18n="connections.source">源</th>';
-            html += '<th data-i18n="connections.destination">目标</th>';
-            html += '<th data-i18n="connections.proxy">代理</th>';
-            html += '<th data-i18n="connections.duration">时长</th>';
-            html += '</tr></thead><tbody>';
-            
-            conns.forEach(conn => {
-                const duration = formatDuration(conn.startTime);
-                html += '<tr>';
-                html += '<td><span class="badge badge-' + (conn.type === 'TUN' ? 'info' : 'secondary') + '">' + (conn.type || '-') + '</span></td>';
-                html += '<td>' + escapeHtml(conn.source || '-') + '</td>';
-                html += '<td>' + escapeHtml(conn.destination || '-') + '</td>';
-                html += '<td>' + escapeHtml(conn.proxy || 'DIRECT') + '</td>';
-                html += '<td>' + duration + '</td>';
-                html += '</tr>';
-            });
-            
-            html += '</tbody></table>';
-            listEl.innerHTML = html;
-        })
-        .catch(() => {});
-}
-
-function formatDuration(startTime) {
-    const start = new Date(startTime);
-    const now = new Date();
-    const seconds = Math.floor((now - start) / 1000);
-    if (seconds < 60) return seconds + 's';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return minutes + 'm ' + (seconds % 60) + 's';
-    const hours = Math.floor(minutes / 60);
-    return hours + 'h ' + (minutes % 60) + 'm';
-}
-
-function escapeHtml(s) {
-    if (!s) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 </script>
 {{end}}

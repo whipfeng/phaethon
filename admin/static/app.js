@@ -42,17 +42,6 @@ document.addEventListener('DOMContentLoaded', () => {
     registerDefaultVersionHandlers();
     updateUptime();
 
-    // Initial load for connection logs if on dashboard
-    if (document.getElementById('conn-logs')) {
-        fetchConnections();
-    }
-
-    // Initial load for active connections if on dashboard
-    if (document.getElementById('active-conns-list')) {
-        fetchActiveConns();
-        startActiveConnsTimer();
-    }
-
     // Initial load for TUN status if on dashboard
     if (document.getElementById('tun-status')) {
         fetchTUNStatus();
@@ -74,6 +63,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // HTMX SPA: after content swap, re-execute inline scripts, apply i18n, update nav
     document.body.addEventListener('htmx:afterSettle', function(event) {
         if (event.detail.target.id !== 'main-content') return;
+
+        // Clean up timers from previous page
+        stopActiveConnsTimer();
 
         // Re-execute <script> tags in swapped content (browsers don't execute innerHTML scripts)
         const scripts = event.detail.target.querySelectorAll('script');
@@ -112,6 +104,8 @@ const PAGE_TITLES = {
     '/': 'Dashboard',
     '/tun': 'TUN',
     '/mesh': 'Mesh',
+    '/logs': 'Logs',
+    '/connections': 'Connections',
     '/subscriptions': 'Subscriptions',
     '/proxies': 'Proxies',
     '/rules': 'Rules',

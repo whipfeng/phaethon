@@ -140,6 +140,16 @@ body {
     min-width: 0;
     max-width: none;
     overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    box-sizing: border-box;
+}
+#main-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
 }
 .top-bar {
     display: flex;

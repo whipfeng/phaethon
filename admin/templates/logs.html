@@ -1,43 +1,19 @@
 {{template "layout" .}}
 {{define "content"}}
-<div class="page-content">
-    <div class="card">
-        <h3 data-i18n="logs.title">📋 运行日志</h3>
-        <pre class="tun-log" id="conn-logs" style="height:calc(100vh - 200px); overflow-y:auto;" data-i18n="common.loading">Loading...</pre>
+<div class="page-content" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+    <div class="card" style="flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0;">
+        <h3 style="flex-shrink:0;" data-i18n="logs.title">📋 运行日志</h3>
+        <pre class="tun-log" id="conn-logs" style="flex:1; max-height:none; margin-bottom:0; overflow-y:auto;" data-i18n="common.loading">Loading...</pre>
     </div>
 </div>
 
 <script>
 (function() {
-    // Fetch logs initially
-    fetchConnectionsLogs();
-    
-    // Set up SSE for real-time updates
+    fetchConnections();
+
     if (typeof startSSE === 'function') {
         startSSE();
     }
 })();
-
-function fetchConnectionsLogs() {
-    fetch('./api/connections')
-        .then(r => r.json())
-        .then(data => {
-            const logsEl = document.getElementById('conn-logs');
-            if (logsEl && data.logs) {
-                logsEl.textContent = data.logs.join('\n');
-                logsEl.scrollTop = logsEl.scrollHeight;
-            }
-        })
-        .catch(() => {});
-}
-
-// Update logs on SSE events
-document.addEventListener('sse-logs', function(e) {
-    const logsEl = document.getElementById('conn-logs');
-    if (logsEl && e.detail && e.detail.logs) {
-        logsEl.textContent = e.detail.logs.join('\n');
-        logsEl.scrollTop = logsEl.scrollHeight;
-    }
-});
 </script>
 {{end}}

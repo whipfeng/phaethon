@@ -46,7 +46,7 @@ func logTCPPacket(prefix string, data []byte) {
 	dstIP := net.IP(data[16:20])
 	headerLen := int(data[0]&0x0f) * 4
 	if len(data) < headerLen+20 {
-		util.LogInfo("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
+		util.LogDebug("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
 		return
 	}
 	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
@@ -67,7 +67,7 @@ func logTCPPacket(prefix string, data []byte) {
 	if flags&0x04 != 0 {
 		flagStr += "RST "
 	}
-	util.LogInfo("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
+	util.LogDebug("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
 		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
 }
 
@@ -1235,19 +1235,19 @@ func (e *Engine) acceptTCP() {
 
 	fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
-		util.LogInfo("[TCP-DEBUG] tcp forwarder called local=%s:%d remote=%s:%d",
+		util.LogDebug("[TCP-DEBUG] tcp forwarder called local=%s:%d remote=%s:%d",
 			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		var wq waiter.Queue
-		util.LogInfo("[TCP-DEBUG] calling CreateEndpoint...")
+		util.LogDebug("[TCP-DEBUG] calling CreateEndpoint...")
 		ep, err := r.CreateEndpoint(&wq)
-		util.LogInfo("[TCP-DEBUG] CreateEndpoint returned, err=%v", err)
+		util.LogDebug("[TCP-DEBUG] CreateEndpoint returned, err=%v", err)
 		if err != nil {
 			util.LogWarn("[TCP-DEBUG] tcp CreateEndpoint fail: %v", err)
 			r.Complete(true)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
+		util.LogDebug("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
 		r.Complete(false)
 
 		conn := gonet.NewTCPConn(&wq, ep)
@@ -1548,7 +1548,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.
 func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
-	util.LogInfo("[TCP-DEBUG] handleConn called dst=%s:%d", dstAddr, dstPort)
+	util.LogDebug("[TCP-DEBUG] handleConn called dst=%s:%d", dstAddr, dstPort)
 	defer conn.Close()
 
 	// Check if this is a Fake-IP: restore original domain.
@@ -1556,9 +1556,9 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	if e.fakeIP != nil {
 		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 			domain = d
-			util.LogInfo("[TCP-DEBUG] fake-ip lookup: %s -> %s", dstAddr, domain)
+			util.LogDebug("[TCP-DEBUG] fake-ip lookup: %s -> %s", dstAddr, domain)
 		} else {
-			util.LogInfo("[TCP-DEBUG] fake-ip lookup: %s -> (no domain)", dstAddr)
+			util.LogDebug("[TCP-DEBUG] fake-ip lookup: %s -> (no domain)", dstAddr)
 		}
 	}
 
@@ -1568,12 +1568,12 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		expectedDomain := e.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogInfo("[TCP-DEBUG] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", domain, expectedDomain)
+			util.LogDebug("[TCP-DEBUG] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", domain, expectedDomain)
 		} else {
-			util.LogInfo("[TCP-DEBUG] domain %s != expected %s", domain, expectedDomain)
+			util.LogDebug("[TCP-DEBUG] domain %s != expected %s", domain, expectedDomain)
 		}
 	} else {
-		util.LogInfo("[TCP-DEBUG] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", domain, e.localMeshNodeID)
+		util.LogDebug("[TCP-DEBUG] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", domain, e.localMeshNodeID)
 	}
 
 	connID := util.NextConnID()
@@ -1591,9 +1591,9 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 		req = e.ruleConf.Resolving(req)
 		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
 		if proxy != nil {
-			util.LogInfo("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
+			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
 		} else {
-			util.LogInfo("[TCP-DEBUG] rule match: %s:%d -> DIRECT (no proxy matched)", matchAddr, dstPort)
+			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> DIRECT (no proxy matched)", matchAddr, dstPort)
 		}
 	}
 
@@ -1613,7 +1613,7 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 	if localNodeDomain {
 		localIP := dialer.GetLocalIPForDial(nil)
 		dialAddr := localIP.String()
-		util.LogInfo("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)
+		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] local dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
@@ -1621,20 +1621,20 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 			return
 		}
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		util.LogInfo("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
+		util.LogDebug("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
 			connlog.Log("TUN", "TCP", "", matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] [%s] proxy dial success", connID)
+		util.LogDebug("[TCP-DEBUG] [%s] proxy dial success", connID)
 	} else {
 		// Direct dial: resolve real IP now if we have a domain.
 		dialAddr := resolvedAddr
 		if domain != "" {
 			// Resolve the real IP for DIRECT connections.
-			util.LogInfo("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
+			util.LogDebug("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
@@ -1648,22 +1648,22 @@ func (e *Engine) handleConn(conn net.Conn, dstAddr string, dstPort int) {
 					break
 				}
 			}
-			util.LogInfo("[TCP-DEBUG] [%s] resolved %s -> %s", connID, domain, dialAddr)
+			util.LogDebug("[TCP-DEBUG] [%s] resolved %s -> %s", connID, domain, dialAddr)
 		} else {
-			util.LogInfo("[TCP-DEBUG] [%s] direct dial with no domain, addr=%s", connID, dialAddr)
+			util.LogDebug("[TCP-DEBUG] [%s] direct dial with no domain, addr=%s", connID, dialAddr)
 		}
-		util.LogInfo("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
+		util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
 			connlog.Log("TUN", "TCP", "", matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
+		util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
 	}
 	defer targetConn.Close()
 
-	util.LogInfo("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogDebug("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
 		// Preserve Rule and TimeRange from original matchResult if available
 		if matchResult != nil {

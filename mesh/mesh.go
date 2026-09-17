@@ -540,7 +540,7 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
-	util.LogInfo("[MESH-DEBUG] binary version with subnet logging")
+	util.LogDebug("[MESH-DEBUG] binary version with subnet logging")
 }
 
 func (m *MeshManager) Stop() {
@@ -562,12 +562,12 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 		if d == s || strings.HasSuffix(d, "."+s) {
 			// Matched static domain suffix, get target node's subnet
 			targetNodeID := suffix.Via
-			util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
+			util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
 			
 			// Get target node's subnet from topology
 			for _, peer := range m.topology.GetAllPeers() {
 				if peer.NodeID() == targetNodeID && peer.Subnet != nil {
-					util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
+					util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
 					return peer.Subnet
 				}
 			}
@@ -592,7 +592,7 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	if subnet != nil {
 		subnetStr = subnet.String()
 	}
-	util.LogInfo("[MESH-DEBUG] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
+	util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
 	if suffixLen == 0 || len(peers) == 0 {
 		return nil // no match or local entry
 	}
@@ -635,7 +635,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				proto = "UDP"
 			}
 		}
-		util.LogInfo("[MESH-DEBUG] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
+		util.LogDebug("[MESH-DEBUG] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
 	} else if len(data) >= 20 && data[0]>>4 == 4 {
 		// Log non-mesh IPv4 packets for debugging static routes
 		util.LogDebug("[MESH-DEBUG] HandleOutboundPacket non-mesh: dst=%s len=%d", dstIP, len(data))
@@ -1358,7 +1358,7 @@ func (m *MeshManager) recomputeRoutes() {
 		if entry.subnet != nil {
 			subnetStr = entry.subnet.String()
 		}
-		util.LogInfo("[MESH-DEBUG] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
+		util.LogDebug("[MESH-DEBUG] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
 		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
 	}
 

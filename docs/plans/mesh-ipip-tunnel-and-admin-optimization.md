@@ -534,6 +534,11 @@ ping 8.8.8.8
 - `mesh/mesh.go` HandleOutboundPacket：对 8.8.8.x 包记录 INFO 级别日志，确认拦截器是否被调用
 - 用于定位卡顿修复后 IPIP 静态路由未触发的根因
 
+**调试日志洪泛修复**（任务四修复后三环境卡顿）：
+- 问题：`[MESH-DEBUG]`、`[TCP-DEBUG]`、`[DNS-DEBUG]`、`logTCPPacket` 使用 `LogInfo` 级别，每个包都打日志
+- 影响：日志洪泛导致 CPU 占用高、响应延迟，三个环境都出现严重卡顿
+- 修复：将所有高频调试日志降级为 `LogDebug` 级别，仅在需要调试时启用
+
 ### 管理面板
 
 1. 仪表盘只显示摘要卡片

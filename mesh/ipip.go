@@ -57,9 +57,10 @@ func (t *IPIPTunnel) GetNodeEIP(nodeID string) net.IP {
 	return t.nodeEIPs[nodeID]
 }
 
-// AllocateEIP allocates an EIP from the given subnet
+// CalculateEIP calculates the EIP for a given subnet
 // EIP is the last usable IP in the subnet (e.g., 100.0.0.254 for 100.0.0.0/24)
-func AllocateEIP(subnet *net.IPNet) net.IP {
+// This is deterministic, so any node can calculate another node's EIP from its subnet.
+func CalculateEIP(subnet *net.IPNet) net.IP {
 	if subnet == nil {
 		return nil
 	}
@@ -88,6 +89,13 @@ func AllocateEIP(subnet *net.IPNet) net.IP {
 	eip[3]--
 	
 	return eip
+}
+
+// AllocateEIP allocates an EIP from the given subnet
+// EIP is the last usable IP in the subnet (e.g., 100.0.0.254 for 100.0.0.0/24)
+// Deprecated: Use CalculateEIP instead
+func AllocateEIP(subnet *net.IPNet) net.IP {
+	return CalculateEIP(subnet)
 }
 
 // Encapsulate wraps a packet with an IPIP header

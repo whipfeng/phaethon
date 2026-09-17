@@ -81,16 +81,29 @@ Mesh P2P 收到 IPIP 包（protocol=4）
 
 #### 1. EIP 分配
 
-**文件**：`mesh/mesh.go`
+**文件**：`mesh/ipip.go`
+
+EIP 是从节点子网**确定性计算**的（子网最后一个可用 IP），不需要通过 gossip 通告。任何节点都可以从拓扑中已通告的子网计算出其他节点的 EIP。
 
 ```go
-// 每个节点从自己的子网中分配 EIP
-// 例如：子网 100.0.0.0/16，VIP=100.0.0.1，EIP=100.0.0.254
-func (m *MeshManager) AllocateEIP() net.IP {
-    // 从本地子网的最后一个可用 IP 作为 EIP
-    // 具体实现待确定
+// CalculateEIP 从子网计算 EIP
+// EIP 是子网中最后一个可用 IP（例如：100.0.0.0/24 → 100.0.0.254）
+// 这是确定性的，所以任何节点都可以从其子网计算出另一个节点的 EIP
+func CalculateEIP(subnet *net.IPNet) net.IP {
+    // 计算广播地址 - 1
+}
+
+// MeshManager.getEIPForNode 从拓扑中获取节点子网并计算 EIP
+func (m *MeshManager) getEIPForNode(nodeID string) net.IP {
+    subnet := m.getSubnetForNode(nodeID)
+    return CalculateEIP(subnet)
 }
 ```
+
+**优势**：
+- 不需要额外的 gossip 消息
+- 子网通告已存在，EIP 自动可用
+- 确定性计算，无状态同步问题
 
 #### 2. 封装逻辑（入口节点）
 

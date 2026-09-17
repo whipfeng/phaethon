@@ -215,6 +215,10 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
 	if m.ipipTunnel == nil {
 		return "", false
 	}
+	util.LogDebug("[IPIP] Checking static route for dst=%s, routes=%d", dstIP, len(m.staticRoutes))
+	for _, route := range m.staticRoutes {
+		util.LogDebug("[IPIP] Checking route: dst=%s via=%s", route.Dst, route.Via)
+	}
 	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
 }
 
@@ -437,6 +441,31 @@ func (m *MeshManager) getVIPForNode(nodeID string) net.IP {
 	return nil
 }
 
+// getSubnetForNode returns the subnet for a given node ID from the topology.
+func (m *MeshManager) getSubnetForNode(nodeID string) *net.IPNet {
+	// Check if it's our own node
+	if nodeID == m.nodeID {
+		return m.subnet
+	}
+	// Look up in topology
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == nodeID && peer.Subnet != nil {
+			return peer.Subnet
+		}
+	}
+	return nil
+}
+
+// getEIPForNode calculates and returns the EIP for a given node ID.
+// EIP is deterministically calculated from the node's subnet (last usable IP).
+func (m *MeshManager) getEIPForNode(nodeID string) net.IP {
+	subnet := m.getSubnetForNode(nodeID)
+	if subnet == nil {
+		return nil
+	}
+	return CalculateEIP(subnet)
+}
+
 // getHostIP returns the hostIP (.2) address for this node's subnet.
 // hostIP is the TUN interface address on the OS side.
 func (m *MeshManager) getHostIP() net.IP {
@@ -587,6 +616,9 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}
 		util.LogInfo("[MESH-DEBUG] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
+	} else if len(data) >= 20 && data[0]>>4 == 4 {
+		// Log non-mesh IPv4 packets for debugging static routes
+		util.LogDebug("[MESH-DEBUG] HandleOutboundPacket non-mesh: dst=%s len=%d", dstIP, len(data))
 	}
 
 	// Exclude local netstack addresses (GIP .3, hostIP .2) from mesh interception.
@@ -610,10 +642,10 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
 		util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
 		
-		// Get egress node's EIP
-		egressEIP := m.ipipTunnel.GetNodeEIP(egressNodeID)
+		// Get egress node's EIP (calculated from its advertised subnet)
+		egressEIP := m.getEIPForNode(egressNodeID)
 		if egressEIP == nil {
-			util.LogWarn("[IPIP] No EIP for egress node %s, dropping packet", egressNodeID)
+			util.LogWarn("[IPIP] No EIP for egress node %s (subnet not in topology), dropping packet", egressNodeID)
 			return true
 		}
 		

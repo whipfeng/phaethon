@@ -313,6 +313,41 @@ Tools
 4. 抓包确认 IPIP 封装（外层 protocol=4）
 5. 回程流量正常返回
 
+**测试验证（已实现）**：
+
+配置示例（VM 节点）：
+```yaml
+mesh:
+    node-id: vm
+    subnet: 100.1.0.0/16
+    static-routes:
+        - dst: 8.8.8.0/24
+          via: jf
+```
+
+测试命令：
+```bash
+ping 8.8.8.8
+```
+
+预期结果：
+- 回复来自 8.8.8.8（不是 100.1.0.3 gVisor）
+- TTL 值合理（如 103，表示经过多跳）
+- 日志显示 `[IPIP] Static route matched: dst=8.8.8.8 via=jf`
+
+数据流：
+1. VM ping 8.8.8.8 → TUN
+2. HandleOutboundPacket 匹配静态路由 8.8.8.0/24 via jf
+3. 计算 JF 的 EIP：100.2.255.254（从 JF 子网 100.2.0.0/16 计算）
+4. IPIP 封装：外层 src=100.1.255.254 (VM EIP), dst=100.2.255.254 (JF EIP)
+5. 通过 mesh 路由发送到 JF
+6. JF 解封装，发送原始包到 8.8.8.8
+7. 8.8.8.8 直接回复（不对称回程，无需 IPIP）
+
+**调试日志**：
+- `CheckStaticRoute` 对 8.8.8.0/24 范围的包记录 INFO 级别日志
+- 便于验证静态路由匹配是否触发
+
 ### 管理面板
 
 1. 仪表盘只显示摘要卡片

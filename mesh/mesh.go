@@ -215,9 +215,9 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
 	if m.ipipTunnel == nil {
 		return "", false
 	}
-	util.LogDebug("[IPIP] Checking static route for dst=%s, routes=%d", dstIP, len(m.staticRoutes))
-	for _, route := range m.staticRoutes {
-		util.LogDebug("[IPIP] Checking route: dst=%s via=%s", route.Dst, route.Via)
+	// Special logging for 8.8.8.0/24 range (our test destination)
+	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
+		util.LogInfo("[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
 	}
 	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
 }

@@ -447,6 +447,115 @@ func (h *DNSHijacker) receiveResponses() {
 4. DNS 查询压力测试
 5. 监控延迟和丢包率
 
+### 异步设计原则（后续优化方向）
+
+**核心原则**：DNS 解析、TCP 连接、IP 包传输都不能因为自己的阻塞而阻塞别人。如果有阻塞，考虑用队列代替锁或无节制创建协程。
+
+#### 待优化项
+
+| # | 位置 | 问题 | 方案 | 优先级 |
+|---|------|------|------|--------|
+| 1 | `mesh/nat.go:77,159`<br>NAT 表写锁 | 每个包获取写锁更新 `LastSeen`，高包量时锁竞争 | **`LastSeen` 用 `atomic.Int64`**：存储 Unix 时间戳，更新时无锁；主表锁只保护 entry 增删 | 高 |
+| 2 | `mesh/mesh.go:651,836,868`<br>WriteMeshPacket | 直接写 TUN 设备，可能阻塞调用者 | **队列化写入**：添加 `meshWriteCh chan []byte` + `meshWriteLoop` 消费写入；`WriteMeshPacket` 改为入 channel（非阻塞） | 中 |
+| 3 | `mesh/mesh.go:651,701,753`<br>peer.Send() goroutine 包装 | `Send()` 已是非阻塞（入 channel），goroutine 包装多余 | **去掉 goroutine 包装**：直接调用 `Send()`，无需 `go func() { ... }()` | 低 |
+| 4 | `connlog/activeconn.go:62-81`<br>嵌套锁 | `activeMu` + `mu` 嵌套获取，锁顺序不一致可能死锁 | **无锁化**：`version` 用 `atomic.Int64`；`activeMap` 用 `sync.Map`；`mu` 只保护 `journal` | 低 |
+
+#### WriteMeshPacket 队列化设计
+
+**当前设计**（可能阻塞）：
+```
+HandleMeshFrame → WriteMeshPacket → dev.Write()  // 直接写 TUN
+```
+
+**优化设计**（队列化）：
+```
+HandleMeshFrame → meshWriteCh ← meshWriteLoop → dev.Write()
+     ↓                    ↓
+  入 channel          消费并写入 TUN
+```
+
+**实现要点**：
+1. Engine 添加 `meshWriteCh chan []byte`（缓冲 2048）
+2. 启动 `meshWriteLoop()` goroutine 从 channel 消费，调用 `dev.Write()`
+3. `WriteMeshPacket` 改为非阻塞入 channel：
+   ```go
+   select {
+   case e.meshWriteCh <- data:
+   default:
+       return fmt.Errorf("mesh write queue full")
+   }
+   ```
+4. channel 满时丢包或返回错误（可配置）
+
+**好处**：
+- 解耦 mesh 包处理和 TUN I/O
+- 自然背压（channel 缓冲）
+- 单写者避免竞争
+- 类似 P2P 的 `writeCh` + `peerWriteLoop` 模式
+
+#### 完整阻塞分析
+
+**核心原则**：DNS 解析、TCP 连接、IP 包传输都不能因为自己的阻塞而阻塞别人。
+
+**高优先级问题**（违反核心原则）：
+
+| # | 位置 | 问题 | 影响 | 方案 |
+|---|------|------|------|------|
+| 1 | `tun/engine.go:1099`<br>readLoop 中 `meshInterceptor` | 同步调用，如果 mesh 处理阻塞，所有 TUN 包处理停止 | **关键路径阻塞** | **队列化**：readLoop 将包入 `meshOutboundCh`，独立 `meshOutboundLoop` 处理 |
+| 2 | `p2p/p2p.go:369`<br>P2P 接收循环中 `HandleMeshFrame` | 同步调用，如果 HandleMeshFrame 阻塞，该 peer 的所有包接收停止 | **P2P 接收阻塞** | **队列化**：P2P 接收循环将 frame 入 `meshInboundCh`，独立 `meshInboundLoop` 处理 |
+| 3 | `mesh/dns.go:168-261`<br>`serveLoop` 顺序处理 | 单 goroutine 顺序处理 DNS 查询，一个慢查询阻塞其他 | **DNS 查询阻塞** | **并行处理**：每个查询入 channel，worker 池并行处理；或每个查询启动 goroutine（已有部分实现） |
+| 4 | `mesh/fakeip.go:85-115`<br>池锁 + `onChange` 回调 | 锁持有期间调用 `onChange`，后者获取另一个锁 | **嵌套锁延迟** | **异步回调**：`onChange` 放入 channel 异步执行，或改用 `atomic` 操作 |
+
+**中优先级问题**（资源耗尽风险）：
+
+| # | 位置 | 问题 | 方案 |
+|---|------|------|------|
+| 5 | `mesh/dns.go:224-242`<br>远程 DNS 转发 | 每个查询启动 goroutine，高并发时可能耗尽资源 | **有界 worker 池**：固定数量 goroutine 处理远程 DNS 查询 |
+| 6 | `tun/engine.go:1243`<br>TCP forwarder 回调 | `CreateEndpoint` 在 gVisor 回调中执行，可能阻塞 gVisor | **快速路径**：确保 `CreateEndpoint` 不获取长时间锁 |
+
+**已正确缓解**：
+
+| 位置 | 机制 |
+|------|------|
+| `p2p/p2p.go:172-181` | `enqueueWrite` 非阻塞，channel 满时丢包 |
+| `tun/engine.go:1257` | TCP 连接各自独立 goroutine，互不影响 |
+| `mesh/mesh.go` 多处 | 包发送用 goroutine 包装，异步执行 |
+
+**队列化设计示例**（readLoop meshInterceptor）：
+
+**当前**（阻塞）：
+```go
+// readLoop
+if e.meshInterceptor(dstIP, pktBuf) {
+    continue
+}
+```
+
+**优化**（队列化）：
+```go
+// Engine 添加
+meshOutboundCh chan meshPacket  // 缓冲 4096
+
+type meshPacket struct {
+    dstIP net.IP
+    data  []byte
+}
+
+// readLoop 改为
+select {
+case e.meshOutboundCh <- meshPacket{dstIP: dstIP, data: pktBuf}:
+default:
+    util.LogWarn("mesh outbound queue full, dropping packet")
+}
+
+// 独立 goroutine
+func (e *Engine) meshOutboundLoop() {
+    for pkt := range e.meshOutboundCh {
+        e.meshInterceptor(pkt.dstIP, pkt.data)
+    }
+}
+```
+
 ---
 
 ## 实施顺序

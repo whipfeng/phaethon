@@ -58,35 +58,23 @@ func (t *IPIPTunnel) GetNodeEIP(nodeID string) net.IP {
 }
 
 // CalculateEIP calculates the EIP for a given subnet
-// EIP is the last usable IP in the subnet (e.g., 100.0.0.254 for 100.0.0.0/24)
-// This is deterministic, so any node can calculate another node's EIP from its subnet.
+// EIP is subnet + 4 (e.g., 100.0.0.4 for 100.0.0.0/16)
+// Reserved IPs: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.10=future
+// This avoids conflicts with Fake-IP allocation which starts after the reserved range.
 func CalculateEIP(subnet *net.IPNet) net.IP {
 	if subnet == nil {
 		return nil
 	}
 	
-	// Get the network address and mask
 	ip := subnet.IP.To4()
 	if ip == nil {
 		return nil // IPv6 not supported yet
 	}
 	
-	mask := subnet.Mask
-	networkIP := make(net.IP, 4)
-	for i := 0; i < 4; i++ {
-		networkIP[i] = ip[i] & mask[i]
-	}
-	
-	// Calculate broadcast address
-	broadcast := make(net.IP, 4)
-	for i := 0; i < 4; i++ {
-		broadcast[i] = networkIP[i] | ^mask[i]
-	}
-	
-	// EIP is broadcast - 1 (last usable IP)
+	// EIP is subnet + 4
 	eip := make(net.IP, 4)
-	copy(eip, broadcast)
-	eip[3]--
+	copy(eip, ip)
+	eip[3] = ip[3] + 4
 	
 	return eip
 }

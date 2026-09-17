@@ -165,8 +165,8 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		eventCh:         make(chan meshEvent, 64),
 	}
 
-	// Create Fake-IP pool from node subnet (skip first 4: network, VIP, hostIP, GIP)
-	m.fakeIPPool = NewFakeIPPoolWithSubnet(subnet, 4)
+	// Create Fake-IP pool from node subnet (skip first 10: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.9=future)
+	m.fakeIPPool = NewFakeIPPoolWithSubnet(subnet, 9)
 
 	// Create DNS hijacker (netstack binding deferred to BindNetstack)
 	// tunAddr and dnsAddr will be set when binding to netstack
@@ -641,6 +641,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// Check static IPIP routes before normal mesh routing
 	if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
 		util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
+		util.LogInfo("[IPIP] Attempting encapsulation via %s", egressNodeID)
 		
 		// Get egress node's EIP (calculated from its advertised subnet)
 		egressEIP := m.getEIPForNode(egressNodeID)

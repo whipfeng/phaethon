@@ -83,14 +83,32 @@ Mesh P2P 收到 IPIP 包（protocol=4）
 
 **文件**：`mesh/ipip.go`
 
-EIP 是从节点子网**确定性计算**的（子网最后一个可用 IP），不需要通过 gossip 通告。任何节点都可以从拓扑中已通告的子网计算出其他节点的 EIP。
+EIP 是子网的第 5 个 IP（subnet + 4），例如 100.1.0.0/16 → 100.1.0.4。
+
+**IP 保留方案**（前 10 个 IP）：
+- .0 = 网络地址
+- .1 = VIP（mesh 节点标识）
+- .2 = hostIP（TUN 接口地址）
+- .3 = GIP（DNS hijacker）
+- .4 = EIP（IPIP 封装用）
+- .5-.9 = 预留
+- .10+ = Fake-IP 分配
+
+**优势**：
+- 避免与 Fake-IP 冲突（Fake-IP 从 .10 开始分配）
+- 确定性计算，任何节点都可以从拓扑中已通告的子网计算出其他节点的 EIP
+- 不需要额外的 gossip 消息
+- 简单易记
 
 ```go
-// CalculateEIP 从子网计算 EIP
-// EIP 是子网中最后一个可用 IP（例如：100.0.0.0/24 → 100.0.0.254）
-// 这是确定性的，所以任何节点都可以从其子网计算出另一个节点的 EIP
+// CalculateEIP 计算 EIP
+// EIP = subnet + 4 (例如：100.0.0.0/16 → 100.0.0.4)
 func CalculateEIP(subnet *net.IPNet) net.IP {
-    // 计算广播地址 - 1
+    ip := subnet.IP.To4()
+    eip := make(net.IP, 4)
+    copy(eip, ip)
+    eip[3] = ip[3] + 4
+    return eip
 }
 
 // MeshManager.getEIPForNode 从拓扑中获取节点子网并计算 EIP
@@ -99,11 +117,6 @@ func (m *MeshManager) getEIPForNode(nodeID string) net.IP {
     return CalculateEIP(subnet)
 }
 ```
-
-**优势**：
-- 不需要额外的 gossip 消息
-- 子网通告已存在，EIP 自动可用
-- 确定性计算，无状态同步问题
 
 #### 2. 封装逻辑（入口节点）
 

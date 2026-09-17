@@ -34,6 +34,12 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	}
 	defer targetConn.Close()
 
+	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	if dialer.GlobalModeBTable != nil {
+		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
+
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
 	connlog.TrackActive(connID, "Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})

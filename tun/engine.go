@@ -113,6 +113,7 @@ type Engine struct {
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
+	modeBTable      *mesh.ModeBTable  // Mode B (proxy entry) connection tracking
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 
 	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
@@ -156,6 +157,16 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 // SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
 func (e *Engine) SetNATTable(nat *mesh.NATTable) {
 	e.natTable = nat
+}
+
+// SetModeBTable sets the Mode B connection tracking table.
+func (e *Engine) SetModeBTable(t *mesh.ModeBTable) {
+	e.modeBTable = t
+}
+
+// GetModeBTable returns the Mode B connection tracking table.
+func (e *Engine) GetModeBTable() *mesh.ModeBTable {
+	return e.modeBTable
 }
 
 // SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
@@ -1316,12 +1327,30 @@ func (e *Engine) acceptTCP() {
 		conn := gonet.NewTCPConn(&wq, ep)
 		dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
 		dstPort := int(id.LocalPort)
-		srcAddr := net.IP(id.RemoteAddress.AsSlice()).String()
+		srcIP := net.IP(id.RemoteAddress.AsSlice())
+		if e.natTable != nil {
+			srcIP, _ = e.natTable.ResolveOriginalSrc(6, srcIP, id.RemotePort)
+		}
+		srcAddr := srcIP.String()
+		inbound := ""
+		// If source is still a local GIP (Mode B), look up the real client and inbound type
+		if e.modeBTable != nil && e.localMeshVIPs != nil {
+			var localGIPs []net.IP
+			for ip := range e.localMeshVIPs {
+				if parsed := net.ParseIP(ip); parsed != nil {
+					localGIPs = append(localGIPs, parsed)
+				}
+			}
+			if clientAddr, modeBInbound := e.modeBTable.Lookup(6, srcIP, id.RemotePort, localGIPs); clientAddr != "" {
+				srcAddr = clientAddr
+				inbound = modeBInbound
+			}
+		}
 
 		go func() {
 			defer ep.Close()
 			defer conn.Close()
-			e.handleConn(conn, srcAddr, dstAddr, dstPort)
+			e.handleConn(conn, srcAddr, dstAddr, dstPort, inbound)
 		}()
 	})
 
@@ -1423,12 +1452,30 @@ func (e *Engine) acceptUDP() {
 			id := r.ID()
 			dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
 			dstPort := int(id.LocalPort)
-			srcAddr := net.IP(id.RemoteAddress.AsSlice()).String()
+			srcIP := net.IP(id.RemoteAddress.AsSlice())
+			if e.natTable != nil {
+				srcIP, _ = e.natTable.ResolveOriginalSrc(17, srcIP, id.RemotePort)
+			}
+			srcAddr := srcIP.String()
+			inbound := ""
+			// If source is still a local GIP (Mode B), look up the real client and inbound type
+			if e.modeBTable != nil && e.localMeshVIPs != nil {
+				var localGIPs []net.IP
+				for ip := range e.localMeshVIPs {
+					if parsed := net.ParseIP(ip); parsed != nil {
+						localGIPs = append(localGIPs, parsed)
+					}
+				}
+				if clientAddr, modeBInbound := e.modeBTable.Lookup(17, srcIP, id.RemotePort, localGIPs); clientAddr != "" {
+					srcAddr = clientAddr
+					inbound = modeBInbound
+				}
+			}
 
 			conn := gonet.NewUDPConn(&wq, ep)
 			defer conn.Close()
 
-			e.handleUDP(conn, srcAddr, dstAddr, dstPort)
+			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound)
 		}()
 	})
 
@@ -1439,7 +1486,10 @@ func (e *Engine) acceptUDP() {
 
 // handleUDP relays UDP datagrams between netstack and the real network via proxy or direct.
 // It preserves datagram boundaries by reading/writing one datagram at a time.
-func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string, dstPort int) {
+func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string) {
+	if inbound == "" {
+		inbound = "TUN"
+	}
 	// Check if this is a Fake-IP: restore original domain.
 	var domain string
 	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
@@ -1477,8 +1527,8 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	resolvedPort := req.DstPort
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogDebug("[TUN] [%s] udp %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		connlog.Log("TUN", "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
+		util.LogDebug("[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
+		connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
 
@@ -1489,8 +1539,8 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
-			util.LogWarn("[TUN] [%s] udp dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log("TUN", "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
+			util.LogWarn("[%s] [%s] udp dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
 		dialIP = net.ParseIP(resolvedAddr)
@@ -1500,13 +1550,13 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		if localNodeDomain {
 			// Local mesh nodeID domain: connect to localhost
 			dialIP = net.ParseIP("127.0.0.1")
-			util.LogDebug("[TUN] [%s] udp local mesh nodeID domain: %s -> %s", connID, domain, dialIP)
+			util.LogDebug("[%s] [%s] udp local mesh nodeID domain: %s -> %s", inbound, connID, domain, dialIP)
 		} else if domain != "" {
 			// Resolve the real IP for DIRECT connections.
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[TUN] [%s] udp resolve %s fail: %v", connID, domain, err)
-				connlog.Log("TUN", "UDP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				util.LogWarn("[%s] [%s] udp resolve %s fail: %v", inbound, connID, domain, err)
+				connlog.Log(inbound, "UDP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -1516,12 +1566,12 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 					break
 				}
 			}
-			util.LogDebug("[TUN] [%s] udp resolved %s -> %s for DIRECT", connID, domain, dialIP)
+			util.LogDebug("[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, domain, dialIP)
 		}
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
-			util.LogWarn("[TUN] [%s] udp direct dial %s:%d fail: %v", connID, resolvedAddr, resolvedPort, err)
-			connlog.Log("TUN", "UDP", srcAddr, matchAddr, dialIP.String(), resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			util.LogWarn("[%s] [%s] udp direct dial %s:%d fail: %v", inbound, connID, resolvedAddr, resolvedPort, err)
+			connlog.Log(inbound, "UDP", srcAddr, matchAddr, dialIP.String(), resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 	}
@@ -1529,7 +1579,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
-	util.LogDebug("[TUN] [%s] udp %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogDebug("[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
 		// Preserve Rule and TimeRange from original matchResult if available
 		if matchResult != nil {
@@ -1541,8 +1591,8 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		// Set actual proxy name when different from rule (e.g., group resolution)
 		matchResult.ActualProxy = proxy.Name
 	}
-	connlog.Log("TUN", "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "TUN", "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
+	connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
 	defer connlog.RemoveActive(connID)
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
@@ -1612,7 +1662,10 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 }
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.
-func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int) {
+func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string) {
+	if inbound == "" {
+		inbound = "TUN"
+	}
 	util.LogDebug("[TCP-DEBUG] handleConn called dst=%s:%d", dstAddr, dstPort)
 	defer conn.Close()
 
@@ -1670,8 +1723,8 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogDebug("[TUN] [%s] %s:%d -> REJECTED", connID, resolvedAddr, resolvedPort)
-		connlog.Log("TUN", "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
+		util.LogDebug("[%s] [%s] %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
+		connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
 		return
 	}
 
@@ -1681,16 +1734,16 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
-			util.LogWarn("[TUN] [%s] local dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
-			connlog.Log("TUN", "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, matchResult, "fail", err)
+			util.LogWarn("[%s] [%s] local dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+			connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
 		util.LogDebug("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
-			util.LogWarn("[TUN] [%s] dial %s:%d via %s fail: %v", connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log("TUN", "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
+			util.LogWarn("[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
 			return
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] proxy dial success", connID)
@@ -1702,8 +1755,8 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 			util.LogDebug("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
 			ips, err := e.resolveForDirect(domain)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[TUN] [%s] resolve %s fail: %v", connID, domain, err)
-				connlog.Log("TUN", "TCP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				util.LogWarn("[%s] [%s] resolve %s fail: %v", inbound, connID, domain, err)
+				connlog.Log(inbound, "TCP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -1720,8 +1773,8 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
-			util.LogWarn("[TUN] [%s] direct dial %s:%d fail: %v", connID, dialAddr, resolvedPort, err)
-			connlog.Log("TUN", "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			util.LogWarn("[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+			connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 			return
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
@@ -1740,8 +1793,8 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		// Set actual proxy name when different from rule (e.g., group resolution)
 		matchResult.ActualProxy = proxy.Name
 	}
-	connlog.Log("TUN", "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, "TUN", "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
+	connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
+	connlog.TrackActive(connID, inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
 	defer connlog.RemoveActive(connID)
 	relayWithIdleTimeout(conn, targetConn, 90*time.Second)
 }

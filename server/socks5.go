@@ -202,6 +202,12 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	}
 	defer targetConn.Close()
 
+	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	if dialer.GlobalModeBTable != nil {
+		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
+
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
 	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)

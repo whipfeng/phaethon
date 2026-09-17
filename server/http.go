@@ -63,6 +63,12 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	}
 	defer targetConn.Close()
 
+	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	if dialer.GlobalModeBTable != nil {
+		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
+
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
 	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"})
@@ -85,6 +91,12 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 		return
 	}
 	defer targetConn.Close()
+
+	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	if dialer.GlobalModeBTable != nil {
+		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
 
 	// Clean hop-by-hop headers
 	cleanHopByHop(req.Header)

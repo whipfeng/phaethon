@@ -36,6 +36,13 @@ var GlobalNetstackDialFunc func(network, addr string) (net.Conn, error)
 // Used by MeshDial for domain resolution before netstack dialing.
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 
+// GlobalModeBTable tracks Mode B (proxy entry) connections for source address resolution.
+// Set by main_tun.go when mesh is initialized.
+var GlobalModeBTable interface {
+	Register(proto byte, localAddr net.Addr, clientAddr string, inbound string)
+	Unregister(proto byte, localAddr net.Addr)
+}
+
 // MeshDial dials destination through mesh network.
 // Always uses netstack path: DNS resolution → Fake-IP → mesh routing.
 // Used by Mode B (proxy server) handlers for mesh routing.

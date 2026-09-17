@@ -109,6 +109,11 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		meshMgr.EnableNAT()
 		engine.SetNATTable(meshMgr.GetNATTable())
 
+		// Create and share Mode B connection tracking table.
+		modeBTable := mesh.NewModeBTable()
+		engine.SetModeBTable(modeBTable)
+		dialer.GlobalModeBTable = modeBTable
+
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)

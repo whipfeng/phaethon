@@ -283,6 +283,23 @@ func (t *NATTable) RewriteSrcIP(packet []byte, newSrcIP net.IP) []byte {
 	return result
 }
 
+// ResolveOriginalSrc reverse-looks up the original source address.
+// If srcIP is the VIP, looks up the NAT reverse table by (proto, srcPort as mappedPort)
+// and returns the original (srcIP, srcPort). Otherwise returns the input unchanged.
+func (t *NATTable) ResolveOriginalSrc(proto byte, srcIP net.IP, srcPort uint16) (net.IP, uint16) {
+	if !srcIP.Equal(t.vip) {
+		return srcIP, srcPort
+	}
+	key := natReverseKey(proto, srcPort)
+	t.mu.RLock()
+	entry, exists := t.reverse[key]
+	t.mu.RUnlock()
+	if !exists {
+		return srcIP, srcPort
+	}
+	return entry.OrigSrcIP, entry.OrigSrcPort
+}
+
 // Stats returns the number of active NAT entries.
 func (t *NATTable) Stats() int {
 	t.mu.RLock()

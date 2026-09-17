@@ -152,6 +152,12 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	}
 	defer targetConn.Close()
 
+	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	if dialer.GlobalModeBTable != nil {
+		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
+
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
 	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})

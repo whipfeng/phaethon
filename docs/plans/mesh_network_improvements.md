@@ -23,6 +23,7 @@
 | v0.11.0 | 2026-09-16 | 统一 domain trie 和路由表结构：trie 改为 peers 数组、本地判断统一用 len(peers)==0、own subnet 加入路由表 | Qoder |
 | v0.12.0 | 2026-09-16 | DNSHijacker 重构：从 tun 包迁移到 mesh 包，hijacker 与 mesh 绑定，TUN 禁用时 mesh DNS 仍可用 | Qoder |
 | v0.13.0 | 2026-09-16 | 多态健康检查：Dialer 接口新增 ServerAddr()，HTunnelDialer 从 URL 提取地址 | Qoder |
+| v0.14.0 | 2026-09-17 | 连接日志源地址还原：TUN 旁路网关 NAT 反查、Mode B 入口追踪 | Qoder |
 
 ## 1. 背景与目标
 
@@ -789,6 +790,60 @@ server, port := d.ServerAddr()  // 多态获取地址
 **验证**：
 - VM 测试 MGMS_HT（via SOCKS5_7890 → JF）：alive=true, 132ms ✓
 - h_tunnel URL 地址提取正确 ✓
+
+### 2.14 连接日志源地址还原
+
+#### 2.14.1 问题
+
+1. **TUN 旁路网关**：LAN 客户端经旁路网关进入 TUN 时，`readLoop` 中 `TranslateOutbound` 将源 IP 替换为 VIP（如 `100.0.0.1`）。forwarder 看到的源地址是 VIP，无法识别真实客户端。
+2. **Mode B 入口**：代理入口（SOCKS5/Trojan/HTTP/Direct）流量经 netstack socket → loopback → forwarder，forwarder 看到的源地址是 GIP，且 inbound 显示为 "TUN" 而非实际入口协议。
+
+#### 2.14.2 设计
+
+**TUN 旁路网关源地址还原**：
+
+利用已有的 `NATTable.reverse` map（`proto:mappedPort → OrigSrcIP:OrigSrcPort`）：
+- 新增 `NATTable.ResolveOriginalSrc(proto, srcIP, srcPort)` 方法
+- 当 `srcIP == VIP` 时，查 reverse map 还原原始源地址
+- 当 `srcIP != VIP` 时，原样返回（非旁路网关流量）
+
+**Mode B 入口追踪**：
+
+新增 `ModeBTable` 记录 `(GIP:port) → (clientAddr, inbound)`：
+- handler 层在 `MeshDial` 返回后，用 `targetConn.LocalAddr()` 和 `clientConn.RemoteAddr()` 注册
+- forwarder 看到源是本地 GIP 时，查表还原真实客户端和入口类型
+- 连接结束时 `defer Unregister` 清理
+
+#### 2.14.3 数据流
+
+```
+TUN 旁路网关入口:
+  LAN 客户端 (192.168.1.x) → TUN → readLoop NAT (src=VIP:mappedPort) → forwarder
+  forwarder: src=VIP → NATTable.ResolveOriginalSrc() → src=192.168.1.x ✓
+
+Mode B 入口:
+  SOCKS5 handler (clientAddr=192.168.1.100:12345)
+    → MeshDial → NetDial → netstack socket (localAddr=GIP:54321)
+    → ModeBTable.Register(GIP:54321, clientAddr, "SOCKS5:proxy1")
+    → loopback → forwarder
+  forwarder: src=GIP → ModeBTable.Lookup() → src=192.168.1.100:12345, inbound="SOCKS5:proxy1" ✓
+```
+
+#### 2.14.4 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `mesh/nat.go` | 新增 `ResolveOriginalSrc()` 方法 |
+| `mesh/modeb.go` | 新增 `ModeBTable` 及 Register/Unregister/Lookup |
+| `tun/engine.go` | forwarder 回调中查 NAT/ModeB 表还原源地址；handleConn/handleUDP 新增 inbound 参数 |
+| `dialer/bind.go` | 新增 `GlobalModeBTable` 全局变量 |
+| `main_tun.go` | 创建 ModeBTable 并设置到 engine 和 dialer |
+| `server/socks5.go` | MeshDial 后注册 ModeB，defer 清理 |
+| `server/trojan.go` | 同上 |
+| `server/http.go` | 同上（两处：CONNECT 和 HTTP forward） |
+| `server/direct.go` | 同上 |
+
+**状态**：✓ 已完成（2026-09-17）
 
 ## 3. Mode B Mesh 路由设计（✓ 已完成）
 

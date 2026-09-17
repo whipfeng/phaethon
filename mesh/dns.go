@@ -33,6 +33,14 @@ type DNSHijacker struct {
 	// Cross-node DNS forwarding
 	resolveDomainSubnet func(domain string) *net.IPNet // nil = local or no match
 	cache               *DNSCache
+
+	// Async query processing
+	dnsQueryCh chan dnsQuery // buffered channel for worker pool
+}
+
+type dnsQuery struct {
+	packet     []byte
+	remoteAddr tcpip.FullAddress
 }
 
 // DNSCache caches domain → Fake-IP mappings from remote DNS hijackers.
@@ -77,12 +85,13 @@ func (c *DNSCache) Set(domain string, fakeIP net.IP, ttl time.Duration) {
 // NewDNSHijacker creates a DNS hijacker. Netstack binding is deferred to BindNetstack.
 func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Address) *DNSHijacker {
 	return &DNSHijacker{
-		ns:      ns,
-		pool:    pool,
-		tunAddr: tunAddr,
-		dnsAddr: dnsAddr,
-		closeCh: make(chan struct{}),
-		cache:   NewDNSCache(),
+		ns:         ns,
+		pool:       pool,
+		tunAddr:    tunAddr,
+		dnsAddr:    dnsAddr,
+		closeCh:    make(chan struct{}),
+		cache:      NewDNSCache(),
+		dnsQueryCh: make(chan dnsQuery, 1024),
 	}
 }
 
@@ -121,6 +130,15 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 	}
 	if err := h.udpEP.Bind(addr); err != nil {
 		return fmt.Errorf("bind udp 53 on %s: %v", h.dnsAddr, err)
+	}
+
+	// Start worker pool for DNS query processing
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.dnsWorkerLoop()
+		}()
 	}
 
 	wg.Add(1)
@@ -165,6 +183,19 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 	return resp, nil
 }
 
+// dnsWorkerLoop processes DNS queries from dnsQueryCh.
+// Part of the worker pool for bounded concurrent DNS processing.
+func (h *DNSHijacker) dnsWorkerLoop() {
+	for {
+		select {
+		case <-h.closeCh:
+			return
+		case q := <-h.dnsQueryCh:
+			h.processQuery(q.packet, q.remoteAddr)
+		}
+	}
+}
+
 func (h *DNSHijacker) serveLoop() {
 	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
 	h.wq.EventRegister(&waitEntry)
@@ -191,72 +222,80 @@ func (h *DNSHijacker) serveLoop() {
 			continue
 		}
 
-		// Minimal DNS parsing: extract the queried domain
+		// Minimal DNS parsing: extract the queried domain for logging
 		domain, ok := parseDNSQueryDomain(packet)
-		if !ok || domain == "" {
-			util.LogWarn("tun dns: failed to parse query from %d bytes", len(packet))
-			continue
+		if ok && domain != "" {
+			srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
+			srcPort := res.RemoteAddr.Port
+			util.LogDebug("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 		}
 
-		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
-		srcPort := res.RemoteAddr.Port
-		util.LogDebug("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
+		// Queue for async processing by worker pool
+		packetCopy := make([]byte, len(packet))
+		copy(packetCopy, packet)
+		select {
+		case h.dnsQueryCh <- dnsQuery{packet: packetCopy, remoteAddr: res.RemoteAddr}:
+			// Queued successfully
+		default:
+			util.LogDebug("[DNS] dnsQueryCh full, dropping query")
+		}
+	}
+}
 
-		// Check cache first
-		if cachedIP := h.cache.Get(domain); cachedIP != nil {
-			util.LogInfo("tun dns: %s -> %s (cached)", domain, cachedIP)
-			resp := buildDNSResponse(packet, cachedIP.To4())
+// processQuery handles a single DNS query: cache check, local pool, or remote forward.
+func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) {
+	domain, ok := parseDNSQueryDomain(packet)
+	if !ok || domain == "" {
+		util.LogWarn("tun dns: failed to parse query from %d bytes", len(packet))
+		return
+	}
+
+	// Check cache first
+	if cachedIP := h.cache.Get(domain); cachedIP != nil {
+		util.LogInfo("tun dns: %s -> %s (cached)", domain, cachedIP)
+		resp := buildDNSResponse(packet, cachedIP.To4())
+		if resp != nil {
+			h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+		}
+		return
+	}
+
+	// Check if domain belongs to a remote node
+	if h.resolveDomainSubnet != nil {
+		if remoteSubnet := h.resolveDomainSubnet(domain); remoteSubnet != nil {
+			remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
+			if err != nil {
+				util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
+				// Fallback to local pool
+				fakeIP := h.pool.Lookup(domain)
+				resp := buildDNSResponse(packet, fakeIP.To4())
+				if resp != nil {
+					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+				}
+				return
+			}
+			h.cache.Set(domain, remoteIP, ttl)
+			util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
+			resp := buildDNSResponse(packet, remoteIP.To4())
 			if resp != nil {
-				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
+				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
 			}
-			continue
+			return
 		}
+	}
 
-		// Check if domain belongs to a remote node
-		if h.resolveDomainSubnet != nil {
-			if remoteSubnet := h.resolveDomainSubnet(domain); remoteSubnet != nil {
-				// Forward to remote DNS hijacker asynchronously
-				// Capture variables for the goroutine
-				queryPacket := make([]byte, len(packet))
-				copy(queryPacket, packet)
-				remoteAddr := res.RemoteAddr
-				
-				go func() {
-					remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, queryPacket)
-					if err != nil {
-						util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
-						// Fallback to local pool
-						fakeIP := h.pool.Lookup(domain)
-						resp := buildDNSResponse(queryPacket, fakeIP.To4())
-						if resp != nil {
-							h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
-						}
-						return
-					}
-					h.cache.Set(domain, remoteIP, ttl)
-					util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
-					resp := buildDNSResponse(queryPacket, remoteIP.To4())
-					if resp != nil {
-						h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
-					}
-				}()
-				continue
-			}
-		}
+	// Local pool resolution (default)
+	fakeIP := h.pool.Lookup(domain)
+	util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
+	resp := buildDNSResponse(packet, fakeIP.To4())
 
-		// Local pool resolution (default)
-		fakeIP := h.pool.Lookup(domain)
-		util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
-		resp := buildDNSResponse(packet, fakeIP.To4())
-
-		if resp == nil {
-			continue
-		}
-		if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr}); err != nil {
-			util.LogWarn("tun dns: write response to %s:%d fail: %v", res.RemoteAddr.Addr, res.RemoteAddr.Port, err)
-		} else {
-			util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
-		}
+	if resp == nil {
+		return
+	}
+	if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+		util.LogWarn("tun dns: write response to %s:%d fail: %v", remoteAddr.Addr, remoteAddr.Port, err)
+	} else {
+		util.LogDebug("tun dns: %s -> response sent (%d bytes)", domain, len(resp))
 	}
 }
 

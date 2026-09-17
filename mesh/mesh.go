@@ -648,13 +648,11 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	}
 
 	if m.isLocalVIP(dstIP) {
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(data); err != nil {
-					util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
-				}
+		if m.tun != nil {
+			if err := m.tun.WriteMeshPacket(data); err != nil {
+				util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
 			}
-		}()
+		}
 		return true
 	}
 
@@ -698,13 +696,11 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		route := m.findRoute(egressVIP)
 		if route != nil && len(route.Peers) > 0 {
 			selectedPeer := route.Peers[0].Peer
-			go func() {
-				if err := selectedPeer.Send(encapsulated); err != nil {
-					util.LogWarn("[IPIP] Send to %s failed: %v", egressNodeID, err)
-				} else {
-					util.LogDebug("[IPIP] Sent encapsulated packet to %s OK", egressNodeID)
-				}
-			}()
+			if err := selectedPeer.Send(encapsulated); err != nil {
+				util.LogWarn("[IPIP] Send to %s failed: %v", egressNodeID, err)
+			} else {
+				util.LogDebug("[IPIP] Sent encapsulated packet to %s OK", egressNodeID)
+			}
 		} else {
 			util.LogWarn("[IPIP] No route to egress node %s (VIP=%s)", egressNodeID, egressVIP)
 		}
@@ -750,16 +746,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}
 
-		go func() {
-			if err := selectedPeer.Send(pkt); err != nil {
-				util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
-			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
-				dst := net.IP(pkt[16:20])
-				if isMeshAddress(dst) {
-					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
-				}
+		if err := selectedPeer.Send(pkt); err != nil {
+			util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
+		} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
+			dst := net.IP(pkt[16:20])
+			if isMeshAddress(dst) {
+				util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
 			}
-		}()
+		}
 		return true
 	}
 
@@ -833,13 +827,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 		natPkt := m.natTable.TranslateInbound(pkt)
 		if natPkt != nil {
-			go func() {
-				if m.tun != nil {
-					if err := m.tun.WriteMeshPacket(natPkt); err != nil {
-						util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
-					}
+			if m.tun != nil {
+				if err := m.tun.WriteMeshPacket(natPkt); err != nil {
+					util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
 				}
-			}()
+			}
 			return
 		}
 		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed", fromNodeID)
@@ -865,13 +857,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 				}
 			}
 		}
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(pkt); err != nil {
-					util.LogWarn("[MESH] write hostIP packet to TUN failed: %v", err)
-				}
+		if m.tun != nil {
+			if err := m.tun.WriteMeshPacket(pkt); err != nil {
+				util.LogWarn("[MESH] write hostIP packet to TUN failed: %v", err)
 			}
-		}()
+		}
 		return
 	}
 
@@ -879,13 +869,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if m.isLocalGIP(dstIP) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.InjectMeshPacket(pkt); err != nil {
-					util.LogWarn("[MESH] inject GIP packet to netstack failed: %v", err)
-				}
+		if m.tun != nil {
+			if err := m.tun.InjectMeshPacket(pkt); err != nil {
+				util.LogWarn("[MESH] inject GIP packet to netstack failed: %v", err)
 			}
-		}()
+		}
 		return
 	}
 
@@ -918,13 +906,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		go func() {
-			if m.tun != nil {
-				if err := m.tun.InjectMeshPacket(pkt); err != nil {
-					util.LogWarn("[MESH] inject to local netstack failed: %v", err)
-				}
+		if m.tun != nil {
+			if err := m.tun.InjectMeshPacket(pkt); err != nil {
+				util.LogWarn("[MESH] inject to local netstack failed: %v", err)
 			}
-		}()
+		}
 		return
 	}
 
@@ -948,11 +934,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	pkt := make([]byte, len(frame))
 	copy(pkt, frame)
 	decrementIPTTL(pkt)
-	go func() {
-		if err := selectedPeer.Send(pkt); err != nil {
-			util.LogWarn("[MESH] forward to %s failed: %v", selectedPeer.GetNodeID(), err)
-		}
-	}()
+	if err := selectedPeer.Send(pkt); err != nil {
+		util.LogWarn("[MESH] forward to %s failed: %v", selectedPeer.GetNodeID(), err)
+	}
 }
 
 // HandleTopologyGossip processes a gossip announcement from a peer.

@@ -114,6 +114,14 @@ type Engine struct {
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
 	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
+
+	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
+	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
+}
+
+type meshOutboundPacket struct {
+	dstIP net.IP
+	data  []byte
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -139,6 +147,9 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 			e.localMeshVIPs[v4.String()] = true
 		}
 	}
+	e.meshOutboundCh = make(chan meshOutboundPacket, 4096)
+	e.tunWG.Add(1)
+	go e.meshOutboundLoop()
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
 }
 
@@ -241,7 +252,7 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 
 	select {
 	case <-ch:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		return nil, fmt.Errorf("resolve %s: timeout", domain)
 	}
 
@@ -295,7 +306,7 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 		Port: uint16(portNum),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	switch network {
@@ -387,16 +398,38 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 	return nil
 }
 
+// meshWriteLoop consumes packets from meshWriteCh and writes them to the TUN device.
+// Decouples mesh writes from callers to prevent blocking.
+func (e *Engine) meshWriteLoop() {
+	defer e.tunWG.Done()
+	for {
+		select {
+		case <-e.tunCloseCh:
+			return
+		case data := <-e.meshWriteCh:
+			e.mu.Lock()
+			dev := e.device
+			running := e.running
+			e.mu.Unlock()
+			if !running || dev == nil {
+				continue
+			}
+			if _, err := dev.Write(data); err != nil {
+				util.LogWarn("tun: meshWriteLoop device.Write failed: %v", err)
+			}
+		}
+	}
+}
+
 // WriteMeshPacket writes a raw IP packet directly to the TUN device so the OS
 // kernel receives it as an incoming packet from the adapter.
 func (e *Engine) WriteMeshPacket(data []byte) error {
 	e.mu.Lock()
-	dev := e.device
 	running := e.running
 	e.mu.Unlock()
 
-	if !running || dev == nil {
-		return fmt.Errorf("TUN not ready (running=%v, device=%v)", running, dev != nil)
+	if !running {
+		return fmt.Errorf("TUN not ready (running=%v)", running)
 	}
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16])
@@ -406,11 +439,16 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 			logTCPPacket("[TCP-DEBUG] WriteMeshPacket:", data)
 		}
 	}
-	_, err := dev.Write(data)
-	if err != nil {
-		util.LogWarn("tun: WriteMeshPacket device.Write failed: %v", err)
+
+	// Queue for async write to TUN device
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	select {
+	case e.meshWriteCh <- dataCopy:
+		return nil
+	default:
+		return fmt.Errorf("meshWriteCh full, dropping packet")
 	}
-	return err
 }
 
 // AddMeshRoute adds a route for the mesh subnet through the TUN device.
@@ -497,7 +535,7 @@ func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 					return d.DialContext(ctx, "udp", net.JoinHostPort(s, "53"))
 				},
 			}
-			queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
+			queryCtx, queryCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer queryCancel()
 			ips, err := r.LookupIP(queryCtx, "ip4", domain)
 			ch <- result{ips, err}
@@ -794,7 +832,11 @@ func (e *Engine) StartTUN() error {
 	// Start TUN-level goroutines
 	e.tunRunning = true
 	e.tunCloseCh = make(chan struct{})
+	e.meshWriteCh = make(chan []byte, 2048)
 	e.mu.Unlock()
+
+	e.tunWG.Add(1)
+	go e.meshWriteLoop()
 
 	e.tunWG.Add(1)
 	go e.readLoop()
@@ -995,6 +1037,26 @@ func (e *Engine) logPacketCounts() {
 	}
 }
 
+// meshOutboundLoop consumes packets from meshOutboundCh and calls meshInterceptor.
+// If the interceptor returns false (packet not handled by mesh), re-inject into netstack.
+func (e *Engine) meshOutboundLoop() {
+	defer e.tunWG.Done()
+	for {
+		select {
+		case <-e.tunCloseCh:
+			return
+		case pkt := <-e.meshOutboundCh:
+			if e.meshInterceptor != nil && !e.meshInterceptor(pkt.dstIP, pkt.data) {
+				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Payload: buffer.MakeWithData(pkt.data),
+				})
+				e.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
+				newPkt.DecRef()
+			}
+		}
+	}
+}
+
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
 	runtime.LockOSThread()
@@ -1096,8 +1158,11 @@ func (e *Engine) readLoop() {
 					util.LogDebug("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
 						dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
 				}
-				if e.meshInterceptor(dstIP, pktBuf) {
+				select {
+				case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
 					continue
+				default:
+					util.LogDebug("[MESH] meshOutboundCh full, falling through to netstack")
 				}
 			}
 		}
@@ -1195,14 +1260,12 @@ func (e *Engine) writeLoop() {
 			// Mesh interception: route packets destined for remote mesh nodes via mesh.
 			pktBuf := make([]byte, len(data))
 			copy(pktBuf, data)
-			if !e.meshInterceptor(dstIP, pktBuf) {
-				// Not handled by mesh — re-inject for local delivery
-				select {
-				case <-e.closeCh:
-					pkt.DecRef()
-					return
-				default:
-				}
+			select {
+			case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
+				// Queued for async mesh processing
+			default:
+				// Queue full — re-inject for local delivery as fallback
+				util.LogDebug("[MESH] meshOutboundCh full in writeLoop, re-injecting")
 				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buffer.MakeWithData(data),
 				})

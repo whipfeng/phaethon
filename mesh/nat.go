@@ -3,6 +3,7 @@ package mesh
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,7 +25,7 @@ type NATEntry struct {
 	OrigSrcPort uint16
 	Protocol    byte // 6=TCP, 17=UDP
 	MappedPort  uint16
-	LastSeen    time.Time
+	LastSeen    atomic.Int64 // Unix nano
 }
 
 // NewNATTable creates a NAT table with the given VIP as the source address.
@@ -74,25 +75,36 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 
 	key := natForwardKey(proto, srcIP, srcPort)
 
-	t.mu.Lock()
+	var mappedPort uint16
+
+	t.mu.RLock()
 	entry, exists := t.forward[key]
-	if !exists {
-		entry = &NATEntry{
-			OrigSrcIP:   srcIP,
-			OrigSrcPort: srcPort,
-			Protocol:    proto,
-			MappedPort:  t.nextPort,
+	t.mu.RUnlock()
+
+	if exists {
+		mappedPort = entry.MappedPort
+	} else {
+		t.mu.Lock()
+		entry, exists = t.forward[key]
+		if !exists {
+			entry = &NATEntry{
+				OrigSrcIP:   srcIP,
+				OrigSrcPort: srcPort,
+				Protocol:    proto,
+				MappedPort:  t.nextPort,
+			}
+			t.nextPort++
+			if t.nextPort < 32768 {
+				t.nextPort = 32768
+			}
+			t.forward[key] = entry
+			t.reverse[natReverseKey(proto, entry.MappedPort)] = entry
 		}
-		t.nextPort++
-		if t.nextPort < 32768 {
-			t.nextPort = 32768
-		}
-		t.forward[key] = entry
-		t.reverse[natReverseKey(proto, entry.MappedPort)] = entry
+		mappedPort = entry.MappedPort
+		t.mu.Unlock()
 	}
-	entry.LastSeen = time.Now()
-	mappedPort := entry.MappedPort
-	t.mu.Unlock()
+
+	entry.LastSeen.Store(time.Now().UnixNano())
 
 	// Build translated packet
 	result := make([]byte, len(packet))
@@ -156,16 +168,15 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 	// Look up by the mapped port (which is now the dst port in the response)
 	key := natReverseKey(proto, dstPort)
 
-	t.mu.Lock()
+	t.mu.RLock()
 	entry, exists := t.reverse[key]
-	if exists {
-		entry.LastSeen = time.Now()
-	}
-	t.mu.Unlock()
+	t.mu.RUnlock()
 
 	if !exists {
 		return nil
 	}
+
+	entry.LastSeen.Store(time.Now().UnixNano())
 
 	// Build translated packet
 	result := make([]byte, len(packet))
@@ -296,9 +307,9 @@ func (t *NATTable) cleanup() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	cutoff := time.Now().Add(-5 * time.Minute)
+	cutoff := time.Now().Add(-5 * time.Minute).UnixNano()
 	for key, entry := range t.forward {
-		if entry.LastSeen.Before(cutoff) {
+		if entry.LastSeen.Load() < cutoff {
 			delete(t.forward, key)
 			revKey := natReverseKey(entry.Protocol, entry.MappedPort)
 			delete(t.reverse, revKey)

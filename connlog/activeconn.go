@@ -35,8 +35,7 @@ type JournalEntry struct {
 }
 
 var (
-	activeMu  sync.RWMutex
-	activeMap = make(map[string]*ActiveConn)
+	activeMap sync.Map // map[string]*ActiveConn
 	journal   []JournalEntry
 )
 
@@ -59,17 +58,22 @@ func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string
 		conn.Rule = matchResult.Rule
 	}
 
-	activeMu.Lock()
-	if len(activeMap) >= maxActive {
-		activeMu.Unlock()
+	// Check capacity before storing
+	count := 0
+	activeMap.Range(func(_, _ any) bool {
+		count++
+		return count < maxActive
+	})
+	if count >= maxActive {
 		return
 	}
-	activeMap[id] = conn
+
+	activeMap.Store(id, conn)
 
 	mu.Lock()
-	version++
+	seq := version.Add(1)
 	entry := JournalEntry{
-		Seq:    version,
+		Seq:    seq,
 		Action: "add",
 		Conn:   conn,
 	}
@@ -78,23 +82,20 @@ func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string
 		journal = journal[len(journal)-maxJournal:]
 	}
 	mu.Unlock()
-	activeMu.Unlock()
 
 	scheduleNotify()
 }
 
 func RemoveActive(id string) {
-	activeMu.Lock()
-	if _, ok := activeMap[id]; !ok {
-		activeMu.Unlock()
+	if _, ok := activeMap.Load(id); !ok {
 		return
 	}
-	delete(activeMap, id)
+	activeMap.Delete(id)
 
 	mu.Lock()
-	version++
+	seq := version.Add(1)
 	entry := JournalEntry{
-		Seq:    version,
+		Seq:    seq,
 		Action: "remove",
 		ID:     id,
 	}
@@ -103,18 +104,17 @@ func RemoveActive(id string) {
 		journal = journal[len(journal)-maxJournal:]
 	}
 	mu.Unlock()
-	activeMu.Unlock()
 
 	scheduleNotify()
 }
 
 func GetActiveConns() []ActiveConn {
-	activeMu.RLock()
-	defer activeMu.RUnlock()
-	result := make([]ActiveConn, 0, len(activeMap))
-	for _, c := range activeMap {
-		result = append(result, *c)
-	}
+	var result []ActiveConn
+	activeMap.Range(func(_, value any) bool {
+		conn := value.(*ActiveConn)
+		result = append(result, *conn)
+		return true
+	})
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].StartTime.Before(result[j].StartTime)
 	})
@@ -122,30 +122,41 @@ func GetActiveConns() []ActiveConn {
 }
 
 func GetActiveConnsAfterSeq(seq uint64) (entries []JournalEntry, conns []ActiveConn, stale bool) {
-	activeMu.RLock()
-	defer activeMu.RUnlock()
+	mu.RLock()
+	journalLen := len(journal)
+	firstSeq := uint64(0)
+	if journalLen > 0 {
+		firstSeq = journal[0].Seq
+	}
+	mu.RUnlock()
 
-	if len(journal) == 0 || seq < journal[0].Seq {
-		conns = make([]ActiveConn, 0, len(activeMap))
-		for _, c := range activeMap {
-			conns = append(conns, *c)
-		}
+	if journalLen == 0 || seq < firstSeq {
+		activeMap.Range(func(_, value any) bool {
+			conn := value.(*ActiveConn)
+			conns = append(conns, *conn)
+			return true
+		})
 		sort.Slice(conns, func(i, j int) bool {
 			return conns[i].StartTime.Before(conns[j].StartTime)
 		})
 		return nil, conns, true
 	}
 
+	mu.RLock()
 	for _, e := range journal {
 		if e.Seq > seq {
 			entries = append(entries, e)
 		}
 	}
+	mu.RUnlock()
 	return entries, nil, false
 }
 
 func GetActiveCount() int {
-	activeMu.RLock()
-	defer activeMu.RUnlock()
-	return len(activeMap)
+	count := 0
+	activeMap.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }

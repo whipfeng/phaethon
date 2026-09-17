@@ -3,6 +3,7 @@ package connlog
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -34,7 +35,7 @@ var (
 	mu              sync.RWMutex
 	logs            []Event
 	nextSeq         uint64 = 1
-	version         uint64
+	version         atomic.Uint64
 	totalConnections uint64
 	notifyTimer     *time.Timer
 	notifyMu        sync.Mutex
@@ -69,7 +70,7 @@ func Log(inbound, protocol, srcAddr, originalDstAddr, dstAddr string, dstPort in
 	if len(logs) > maxLogs {
 		logs = logs[len(logs)-maxLogs:]
 	}
-	version++
+	version.Add(1)
 	totalConnections++
 	mu.Unlock()
 
@@ -120,9 +121,7 @@ func GetLogsAfterSeq(seq uint64) []Event {
 }
 
 func GetVersion() uint64 {
-	mu.RLock()
-	defer mu.RUnlock()
-	return version
+	return version.Load()
 }
 
 func FormatEvent(e Event) string {

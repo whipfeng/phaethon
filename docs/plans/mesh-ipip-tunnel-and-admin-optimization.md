@@ -486,21 +486,20 @@ func (h *DNSHijacker) receiveResponses() {
 | `tun/engine.go:1656` `DialRouteAware` | 30 秒 | **120 秒** |
 | `tun/engine.go:207` `ResolveDomain` | 5 秒 | **30 秒** |
 
-#### 待优化项总表
+#### 优化项总表（已全部实现）
 
-| # | 位置 | 问题 | 方案 | 优先级 |
-|---|------|------|------|--------|
-| A1 | `tun/engine.go:1099`<br>readLoop 中 `meshInterceptor` | 同步调用，阻塞所有 TUN 包处理 | **队列化**：入 `meshOutboundCh`，独立 `meshOutboundLoop` 处理 | 高 |
-| A2 | `p2p/p2p.go:369`<br>P2P 接收循环中 `HandleMeshFrame` | 同步调用，阻塞该 peer 的所有包接收 | **队列化**：入 `meshInboundCh`，独立 `meshInboundLoop` 处理 | 高 |
-| A3 | `mesh/dns.go:168-261`<br>`serveLoop` 顺序处理 | 单 goroutine 顺序处理，一个慢查询阻塞其他 | **并行处理**：每个查询启动 goroutine 或 worker 池 | 高 |
-| A4 | `mesh/fakeip.go:85-115`<br>池锁 + `onChange` 回调 | 锁持有期间调用 `onChange`，嵌套锁延迟 | **待讨论** | 中 |
-| A5 | `mesh/dns.go:224-242`<br>远程 DNS 转发 | 每个查询启动 goroutine，高并发时资源耗尽 | **待讨论** | 中 |
-| A6 | `tun/engine.go:1243`<br>TCP forwarder 回调 | `CreateEndpoint` 可能阻塞 gVisor | **快速路径**：确保不获取长时间锁 | 低 |
-| B1 | `mesh/nat.go:77,159`<br>NAT 表写锁 | 每个包获取写锁更新 `LastSeen` | **`LastSeen` 用 `atomic.Int64`**：无锁更新 | 高 |
-| B2 | `mesh/mesh.go:651,836,868`<br>WriteMeshPacket | 直接写 TUN，可能阻塞调用者 | **队列化写入**：`meshWriteCh` + `meshWriteLoop` | 中 |
-| B3 | `mesh/mesh.go:651,701,753`<br>peer.Send() goroutine 包装 | `Send()` 已非阻塞，goroutine 多余 | **去掉 goroutine 包装** | 低 |
-| B4 | `connlog/activeconn.go:62-81`<br>嵌套锁 | `activeMu` + `mu` 嵌套获取 | **无锁化**：`atomic.Int64` + `sync.Map` | 低 |
-| C1 | `tun/engine.go:447,1656`<br>DNS/TCP 超时 | 代理强加 5s/30s 超时 | **调整为国际惯例**：DNS 30s，TCP 120s | 中 |
+| # | 位置 | 问题 | 方案 | 状态 |
+|---|------|------|------|------|
+| A1 | `tun/engine.go`<br>readLoop 中 `meshInterceptor` | 同步调用，阻塞所有 TUN 包处理 | **已实现**：`meshOutboundCh`（4096 缓冲）+ `meshOutboundLoop` | ✅ |
+| A2 | `p2p/p2p.go`<br>P2P 接收循环中 `HandleMeshFrame` | 同步调用，阻塞该 peer 的所有包接收 | **已实现**：`meshInboundCh`（4096 缓冲）+ `meshInboundLoop` | ✅ |
+| A3+A5 | `mesh/dns.go`<br>`serveLoop` 顺序处理 + 远程转发 | 单 goroutine 顺序处理，远程转发每查询一个 goroutine | **已实现**：`dnsQueryCh`（1024 缓冲）+ 4 worker 池 | ✅ |
+| A4 | `mesh/fakeip.go:85-115`<br>池锁 + `onChange` 回调 | 锁持有期间调用 `onChange`，嵌套锁延迟 | 待讨论（低优先级） | ⏳ |
+| A6 | `tun/engine.go:1243`<br>TCP forwarder 回调 | `CreateEndpoint` 可能阻塞 gVisor | 低优先级，暂未处理 | ⏳ |
+| B1 | `mesh/nat.go`<br>NAT 表写锁 | 每个包获取写锁更新 `LastSeen` | **已实现**：`LastSeen` 改为 `atomic.Int64`，热路径用 RLock | ✅ |
+| B2 | `mesh/mesh.go` + `tun/engine.go`<br>WriteMeshPacket | 直接写 TUN，可能阻塞调用者 | **已实现**：`meshWriteCh`（2048 缓冲）+ `meshWriteLoop` | ✅ |
+| B3 | `mesh/mesh.go` 多处<br>peer.Send() goroutine 包装 | `Send()` 已非阻塞，goroutine 多余 | **已实现**：移除 8 处 goroutine 包装 | ✅ |
+| B4 | `connlog/activeconn.go`<br>嵌套锁 | `activeMu` + `mu` 嵌套获取 | **已实现**：`activeMap` 改为 `sync.Map`，`version` 改为 `atomic.Uint64` | ✅ |
+| C1 | `tun/engine.go`<br>DNS/TCP 超时 | 代理强加 5s/30s 超时 | **已实现**：DNS 30s，TCP 120s（国际惯例） | ✅ |
 
 #### WriteMeshPacket 队列化设计
 

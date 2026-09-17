@@ -36,6 +36,14 @@ type P2PManager struct {
 	meshNodeID  string
 	meshVIP     string
 	meshHandler MeshHandler
+
+	meshInboundCh    chan meshInboundPacket // queue for async mesh frame processing
+	meshInboundStopCh chan struct{}         // stop signal for meshInboundLoop
+}
+
+type meshInboundPacket struct {
+	fromNodeID string
+	frame      []byte
 }
 
 // MeshHandler handles mesh packets and gossip from P2P peers.
@@ -131,7 +139,7 @@ type HelloMsg struct {
 // NewP2PManager creates a new P2P manager.
 // buildTag is auto-detected at runtime (e.g., "win7" on Windows 7/8).
 func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
-	return &P2PManager{
+	m := &P2PManager{
 		peers:    make(map[string]*Peer),
 		nodeId:   nodeId,
 		version:  version,
@@ -139,7 +147,11 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		platform: runtime.GOOS,
 		arch:     runtime.GOARCH,
 		cache:    cache,
+		meshInboundCh:     make(chan meshInboundPacket, 4096),
+		meshInboundStopCh: make(chan struct{}),
 	}
+	go m.meshInboundLoop()
+	return m
 }
 
 // peerWriteLoop drains the peer's writeCh and writes frames to the TCP connection.
@@ -164,6 +176,21 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				return
 			}
 			_ = peer.conn.SetWriteDeadline(time.Time{})
+		}
+	}
+}
+
+// meshInboundLoop consumes mesh frames from meshInboundCh and calls HandleMeshFrame.
+// Decouples mesh processing from P2P read loop to prevent blocking.
+func (m *P2PManager) meshInboundLoop() {
+	for {
+		select {
+		case <-m.meshInboundStopCh:
+			return
+		case pkt := <-m.meshInboundCh:
+			if m.meshHandler != nil {
+				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.frame)
+			}
 		}
 	}
 }
@@ -365,8 +392,15 @@ func (m *P2PManager) runSession(peer *Peer) {
 		case reverse.FrameMeshPacket:
 			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
-				util.LogDebug("[P2P] calling HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
-				m.meshHandler.HandleMeshFrame(peer.MeshNodeID, payload)
+				util.LogDebug("[P2P] queuing HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
+				frameCopy := make([]byte, len(payload))
+				copy(frameCopy, payload)
+				select {
+				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.MeshNodeID, frame: frameCopy}:
+					// Queued for async processing
+				default:
+					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.MeshNodeID)
+				}
 			} else {
 				util.LogWarn("[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
 			}

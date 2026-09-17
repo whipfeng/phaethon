@@ -560,6 +560,79 @@ func (e *Engine) meshOutboundLoop() {
 }
 ```
 
+#### 全链路异步 DNS 设计（A3 + A4 + A5 统一解决）
+
+**当前设计**（同步阻塞）：
+```
+serveLoop: UDP 收查询 → 处理（可能阻塞 5s）→ UDP 发响应 → 收下一个
+```
+
+**问题**：一个慢查询卡住整个循环，后续查询全部等待。
+
+**优化设计**（全链路异步）：
+```
+receiveLoop:  UDP 收查询 → 入 queryCh → 继续收（不阻塞）
+                    ↓
+processLoop:  从 queryCh 取查询
+                    ↓
+              缓存命中？→ 直接拿 FakeIP → 入 responseCh
+              本地域名？→ 分配 FakeIP（纯内存）→ 入 responseCh
+              远端域名？→ 入 forwardCh（不阻塞等返回）
+                    ↓
+forwardLoop:  从 forwardCh 取 → 发送到远端 → 等响应 → 入 responseCh
+                    ↓
+respondLoop:  从 responseCh 取 → UDP 发回响应
+```
+
+**核心思路**：每一步都不阻塞等返回，全部通过 channel 解耦。
+
+**实现要点**：
+
+1. **queryCh**（缓冲 1024）：接收 UDP 查询
+   ```go
+   type dnsQuery struct {
+       packet []byte
+       domain string
+       src    tcpip.FullAddress
+   }
+   ```
+
+2. **responseCh**（缓冲 1024）：待发送的响应
+   ```go
+   type dnsResponse struct {
+       packet []byte
+       dst    tcpip.FullAddress
+   }
+   ```
+
+3. **forwardCh**（缓冲 256）：远端转发请求
+   ```go
+   type dnsForward struct {
+       query    dnsQuery
+       subnet   *net.IPNet
+       resultCh chan dnsResponse  // 响应回此 channel
+   }
+   ```
+
+4. **FakeIP 分配无锁化**：
+   - `onChange` 改为异步通知（channel 或 goroutine）
+   - 锁只保护 map 操作，不保护回调
+
+5. **远端转发有界化**：
+   - 固定数量 forwardLoop worker（如 4 个）
+   - forwardCh 满时返回 SERVFAIL
+
+**好处**：
+- 收查询不阻塞：receiveLoop 只做读取和入队
+- 处理不阻塞：processLoop 纯内存操作或入队
+- 远端转发不阻塞：入 forwardCh 就返回，响应异步回来
+- 发响应不阻塞：respondLoop 只做发送
+
+**统一解决 A3 + A4 + A5**：
+- A3（serveLoop 顺序处理）→ 拆分为多个 loop，并行处理
+- A4（FakeIP 池锁 + onChange）→ onChange 异步化
+- A5（远端转发 goroutine 无界）→ 有界 worker 池
+
 ---
 
 ## 实施顺序

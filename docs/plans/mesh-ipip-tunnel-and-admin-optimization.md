@@ -455,18 +455,36 @@ func (h *DNSHijacker) receiveResponses() {
 - DNS 解析、TCP 连接、IP 包传输都应该独立执行
 - 如果有阻塞，考虑用队列代替锁或无节制创建协程
 
-**原则二：超时由外部程序控制**
-- forwarder 和 mode B 接收端的 DNS 解析、TCP 连接超时应该是"无限"的
-- 实际超时由使用代理的外部程序控制：外部程序保持连接，代理就保持；外部程序断开，代理才 cancel
-- 代理不应该强加自己的超时限制（如 DNS 5 秒、TCP 拨号 30 秒）
-- 实现方式：用 context 传递外部程序的取消信号
+**原则二：超时设计**
 
-**当前超时问题**：
-| 位置 | 当前超时 | 应该改为 |
-|------|----------|----------|
-| `tun/engine.go:447` `resolveForDirect` | 5 秒 | 跟随外部程序 context |
-| `tun/engine.go:1656` `DialRouteAware` | 30 秒 | 跟随外部程序 context |
-| `tun/engine.go:207` `ResolveDomain` | 5 秒 | 跟随外部程序 context |
+**讨论历程**：
+
+1. **初始想法**：超时由外部程序控制
+   - forwarder 和 mode B 接收端的 DNS/TCP 超时应该是"无限"的
+   - 用 context 传递外部程序的取消信号
+   - 外部程序断开 → cancel context → DNS/拨号取消
+
+2. **反思**：纯代理转发逻辑也没有这种机制
+   - relay 循环自然处理断开：一边关，另一边也关
+   - 不需要复杂的 context 传递或监控 goroutine
+
+3. **问题**：DNS/拨号阻塞期间客户端断开怎么办？
+   - 会浪费内部资源（DNS 解析器、拨号 goroutine）
+   - 但这是优化，不是必须
+   - 过度设计（监控 goroutine、poll/epoll）得不偿失
+
+4. **最终方案**：调整为国际惯例超时
+   - DNS 解析：30 秒（RFC 建议 5 秒重试，总共约 30 秒）
+   - TCP 拨号：120 秒（常见 HTTP 客户端默认值）
+   - 即使外部愿意等，也不能让其无节制占用资源
+   - 简单合理，不过度设计
+
+**当前超时调整**：
+| 位置 | 当前超时 | 调整为 |
+|------|----------|--------|
+| `tun/engine.go:447` `resolveForDirect` | 5 秒 | **30 秒** |
+| `tun/engine.go:1656` `DialRouteAware` | 30 秒 | **120 秒** |
+| `tun/engine.go:207` `ResolveDomain` | 5 秒 | **30 秒** |
 
 #### 待优化项总表
 
@@ -482,7 +500,7 @@ func (h *DNSHijacker) receiveResponses() {
 | B2 | `mesh/mesh.go:651,836,868`<br>WriteMeshPacket | 直接写 TUN，可能阻塞调用者 | **队列化写入**：`meshWriteCh` + `meshWriteLoop` | 中 |
 | B3 | `mesh/mesh.go:651,701,753`<br>peer.Send() goroutine 包装 | `Send()` 已非阻塞，goroutine 多余 | **去掉 goroutine 包装** | 低 |
 | B4 | `connlog/activeconn.go:62-81`<br>嵌套锁 | `activeMu` + `mu` 嵌套获取 | **无锁化**：`atomic.Int64` + `sync.Map` | 低 |
-| C1 | `tun/engine.go:447,1656`<br>DNS/TCP 超时 | 代理强加 5s/30s 超时 | **跟随外部程序 context** | 中 |
+| C1 | `tun/engine.go:447,1656`<br>DNS/TCP 超时 | 代理强加 5s/30s 超时 | **调整为国际惯例**：DNS 30s，TCP 120s | 中 |
 
 #### WriteMeshPacket 队列化设计
 

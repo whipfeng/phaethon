@@ -213,30 +213,39 @@ func (h *DNSHijacker) serveLoop() {
 		}
 
 		// Check if domain belongs to a remote node
-		var fakeIP net.IP
 		if h.resolveDomainSubnet != nil {
 			if remoteSubnet := h.resolveDomainSubnet(domain); remoteSubnet != nil {
-				// Forward to remote DNS hijacker
-				remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
-				if err != nil {
-					util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
-					// Fallback to local pool
-					fakeIP = h.pool.Lookup(domain)
-				} else {
-					fakeIP = remoteIP
-					h.cache.Set(domain, fakeIP, ttl)
-					util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, fakeIP, ttl)
-				}
-				resp := buildDNSResponse(packet, fakeIP.To4())
-				if resp != nil {
-					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &res.RemoteAddr})
-				}
+				// Forward to remote DNS hijacker asynchronously
+				// Capture variables for the goroutine
+				queryPacket := make([]byte, len(packet))
+				copy(queryPacket, packet)
+				remoteAddr := res.RemoteAddr
+				
+				go func() {
+					remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, queryPacket)
+					if err != nil {
+						util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
+						// Fallback to local pool
+						fakeIP := h.pool.Lookup(domain)
+						resp := buildDNSResponse(queryPacket, fakeIP.To4())
+						if resp != nil {
+							h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+						}
+						return
+					}
+					h.cache.Set(domain, remoteIP, ttl)
+					util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
+					resp := buildDNSResponse(queryPacket, remoteIP.To4())
+					if resp != nil {
+						h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+					}
+				}()
 				continue
 			}
 		}
 
 		// Local pool resolution (default)
-		fakeIP = h.pool.Lookup(domain)
+		fakeIP := h.pool.Lookup(domain)
 		util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
 		resp := buildDNSResponse(packet, fakeIP.To4())
 

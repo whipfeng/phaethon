@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -129,9 +130,9 @@ type MeshManager struct {
 	network         *net.IPNet // overall mesh network (e.g., 100.0.0.0/8)
 	subnetPrefixLen int        // per-node subnet prefix length (e.g., 16 for /16)
 
-	routesMu sync.RWMutex
-	routes   []MeshRoute // sorted by prefix length (longest first)
-	domainTrie *DomainTrie
+	// routeTable holds routes and domainTrie, accessed atomically for lock-free reads.
+	// Writes create a new routeTable and Store() it atomically.
+	routeTable atomic.Value // stores *routeTable
 
 	DNSAllocator func(domain string) (net.IP, error)
 
@@ -149,6 +150,17 @@ type MeshManager struct {
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
 }
 
+// routeTable is an immutable snapshot of routing state, swapped atomically.
+type routeTable struct {
+	routes     []MeshRoute // sorted by prefix length (longest first)
+	domainTrie *DomainTrie
+}
+
+// getRouteTable returns the current route table (lock-free).
+func (m *MeshManager) getRouteTable() *routeTable {
+	return m.routeTable.Load().(*routeTable)
+}
+
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string, network *net.IPNet, subnetPrefixLen int) *MeshManager {
 	m := &MeshManager{
 		nodeID:          nodeID,
@@ -160,10 +172,14 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		topology:        NewTopology(),
 		network:         network,
 		subnetPrefixLen: subnetPrefixLen,
-		routes:          make([]MeshRoute, 0),
 		closeCh:         make(chan struct{}),
 		eventCh:         make(chan meshEvent, 64),
 	}
+	// Initialize routeTable with empty routes
+	m.routeTable.Store(&routeTable{
+		routes:     make([]MeshRoute, 0),
+		domainTrie: NewDomainTrie(),
+	})
 
 	// Create Fake-IP pool from node subnet (skip first 10: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.9=future)
 	m.fakeIPPool = NewFakeIPPoolWithSubnet(subnet, 9)
@@ -562,9 +578,8 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	}
 	
 	// Fall back to advertised domain trie
-	m.routesMu.RLock()
-	trie := m.domainTrie
-	m.routesMu.RUnlock()
+	rt := m.getRouteTable()
+	trie := rt.domainTrie
 	if trie == nil {
 		return nil
 	}
@@ -953,9 +968,8 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {
-	m.routesMu.RLock()
-	routeCount := len(m.routes)
-	m.routesMu.RUnlock()
+	rt := m.getRouteTable()
+	routeCount := len(rt.routes)
 
 	m.mu.RLock()
 	domainSuffixes := make([]string, len(m.domainSuffixes))
@@ -1102,11 +1116,10 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 }
 
 func (m *MeshManager) GetRoutes() map[string]interface{} {
-	m.routesMu.RLock()
-	defer m.routesMu.RUnlock()
+	rt := m.getRouteTable()
 
-	routeList := make([]map[string]interface{}, 0, len(m.routes))
-	for _, r := range m.routes {
+	routeList := make([]map[string]interface{}, 0, len(rt.routes))
+	for _, r := range rt.routes {
 		var peerInfos []map[string]interface{}
 		for _, p := range r.Peers {
 			peerInfos = append(peerInfos, map[string]interface{}{
@@ -1344,10 +1357,11 @@ func (m *MeshManager) recomputeRoutes() {
 		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
 	}
 
-	m.routesMu.Lock()
-	m.routes = routes
-	m.domainTrie = trie
-	m.routesMu.Unlock()
+	// Atomically swap in the new route table (lock-free for readers)
+	m.routeTable.Store(&routeTable{
+		routes:     routes,
+		domainTrie: trie,
+	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {
 		var peerIDs []string
@@ -1385,16 +1399,15 @@ func (m *MeshManager) recomputeRoutes() {
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
 // The returned pointer allows updating lastIdx for round-robin selection.
 func (m *MeshManager) findRoute(dstIP net.IP) *MeshRoute {
-	m.routesMu.RLock()
-	defer m.routesMu.RUnlock()
+	rt := m.getRouteTable()
 
-	for i := range m.routes {
-		if m.routes[i].Prefix.Contains(dstIP) {
+	for i := range rt.routes {
+		if rt.routes[i].Prefix.Contains(dstIP) {
 			if isMeshAddress(dstIP) {
 				util.LogDebug("[MESH] findRoute: dst=%s matched route prefix=%s peers=%d",
-					dstIP, m.routes[i].Prefix, len(m.routes[i].Peers))
+					dstIP, rt.routes[i].Prefix, len(rt.routes[i].Peers))
 			}
-			return &m.routes[i]
+			return &rt.routes[i]
 		}
 	}
 	return nil

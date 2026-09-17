@@ -945,7 +945,7 @@ func (e *Engine) Stop() error {
 // All traffic (TUN, DNS hijacker, TCP forwarder, Mode B sockets) shares one NIC.
 // writeLoop handles all routing decisions: VIP/hostIP → TUN, mesh → mesh link, other → re-inject.
 func (e *Engine) initStack() error {
-	linkEP := channel.New(512, 1500, "")
+	linkEP := channel.New(2048, 1500, "")
 	e.linkEP = linkEP
 
 	s := stack.New(stack.Options{
@@ -1241,17 +1241,18 @@ func (e *Engine) acceptTCP() {
 			r.Complete(true)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn")
+		util.LogInfo("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
 		r.Complete(false)
-		defer ep.Close()
 
 		conn := gonet.NewTCPConn(&wq, ep)
-		defer conn.Close()
-
 		dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
 		dstPort := int(id.LocalPort)
 
-		e.handleConn(conn, dstAddr, dstPort)
+		go func() {
+			defer ep.Close()
+			defer conn.Close()
+			e.handleConn(conn, dstAddr, dstPort)
+		}()
 	})
 
 	e.ns.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)

@@ -281,6 +281,174 @@ Tools
 
 ---
 
+## 任务四：网络间歇性卡顿问题修复
+
+### 背景
+
+网络出现间歇性卡顿，表现为所有连接短暂挂起。分析发现多个潜在阻塞点。
+
+### 问题分析与修复方案
+
+| # | 位置 | 问题 | 修复方案 | 状态 |
+|---|------|------|---------|------|
+| 1 | `tun/engine.go:1000`<br>readLoop + LockOSThread | `device.Read()` 阻塞时 OS 线程挂起 | 已知 TUN Read Stall bug，需超时检测+设备重建 | 暂不修复（已有文档） |
+| 2 | `tun/engine.go:1120`<br>单 writeLoop | `device.Write()` 阻塞时全部出站停滞 | 正常阻塞行为，除非 Write 长时间阻塞 | 暂不修复 |
+| 3+7 | `mesh/mesh.go:1347,1388`<br>路由表读写锁 | `recomputeRoutes` 写锁与 `findRoute` 读锁竞争，peer 变动时阻塞 readLoop | **路由表 atomic.Value 无锁化**：读操作直接读指针，写操作在副本计算后 atomic swap | ✅ 待实现 |
+| 4 | `tun/engine.go:1230`<br>TCP forwarder 回调 | 回调中同步执行 `handleConn`（DNS+拨号+relay），阻塞 gVisor worker | **handleConn 异步化**：回调只做 `CreateEndpoint` + `r.Complete()`，然后 `go handleConn()` | ✅ 待实现 |
+| 5 | `dialer/ssh.go:76`<br>SSH reconnMu | SSH 重连 15s 阻塞同代理并发连接 | 设计选择，保持现状 | 不修复 |
+| 6 | `mesh/dns.go:168,220`<br>DNS serveLoop | 单 goroutine 循环，`forwardToRemote` 同步阻塞 5s | **事件驱动异步化**：共享 UDP 连接 + pending queries map + 独立接收 goroutine | ✅ 待实现 |
+| 8 | `tun/engine.go:1099`<br>InjectInbound | channel.Endpoint 容量 512，高负载丢包 | **扩容到 2048** | ✅ 待实现 |
+| 9 | `reverse/registry.go:243`<br>Registry.Match 60s | 反向连接匹配超时 60s | 设计正确，保持现状 | 不修复 |
+| 10 | `mesh/fakeip.go:85`<br>FakeIPPool 写锁 | 每次 DNS 查询获取写锁 | 纯本地计算，锁持有时间短，影响小 | 不修复 |
+
+### 修复详细设计
+
+#### 1. 路由表无锁化（#3+#7）
+
+**当前问题**：
+```go
+// recomputeRoutes 持有写锁
+m.routesMu.Lock()
+m.routes = newRoutes
+m.routesMu.Unlock()
+
+// findRoute 持有读锁
+m.routesMu.RLock()
+route := m.routes
+m.routesMu.RUnlock()
+```
+
+**修复方案**：
+```go
+// 使用 atomic.Value 存储路由表
+type MeshManager struct {
+    routes atomic.Value // 存储 *[]MeshRoute
+}
+
+// 读操作无锁
+func (m *MeshManager) findRoute(dst net.IP) *MeshRoute {
+    routes := m.routes.Load().(*[]MeshRoute)
+    // 直接遍历，无锁
+}
+
+// 写操作在副本上计算，完成后 atomic swap
+func (m *MeshManager) recomputeRoutes() {
+    newRoutes := computeRoutes() // 在副本上计算
+    m.routes.Store(&newRoutes)   // atomic swap
+}
+```
+
+#### 2. TCP forwarder 异步化（#4）
+
+**当前问题**：
+```go
+fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
+    ep, err := r.CreateEndpoint(&wq)  // 同步
+    r.Complete(false)
+    e.handleConn(conn, dstAddr, dstPort)  // 同步阻塞（DNS+拨号+relay）
+})
+```
+
+**修复方案**：
+```go
+fwd := tcp.NewForwarder(e.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
+    ep, err := r.CreateEndpoint(&wq)  // 保持同步（通常很快）
+    r.Complete(false)
+    go e.handleConn(conn, dstAddr, dstPort)  // 异步，立即释放 worker
+})
+```
+
+#### 3. DNS 事件驱动异步化（#6）
+
+**当前问题**：
+```go
+func (h *DNSHijacker) serveLoop() {
+    for {
+        query := h.udpEP.Read()
+        remoteIP, ttl, err := h.forwardToRemote(...)  // 阻塞 5s
+        resp := buildDNSResponse(remoteIP)
+        h.udpEP.Write(resp)
+    }
+}
+```
+
+**修复方案**：
+```go
+type DNSHijacker struct {
+    remoteConn     *gonet.UDPConn
+    pendingQueries map[uint16]pendingQuery  // txID → callback
+    pendingMu      sync.Mutex
+}
+
+type pendingQuery struct {
+    srcAddr tcpip.FullAddress
+    callback func(net.IP, time.Duration)
+}
+
+func (h *DNSHijacker) init() {
+    go h.receiveResponses()  // 独立接收 goroutine
+}
+
+func (h *DNSHijacker) serveLoop() {
+    for {
+        query := h.udpEP.Read()
+        txID := extractTxID(query)
+        
+        // 注册 pending
+        h.pendingMu.Lock()
+        h.pendingQueries[txID] = pendingQuery{
+            srcAddr: srcAddr,
+            callback: func(ip net.IP, ttl time.Duration) {
+                resp := buildDNSResponse(query, ip)
+                h.udpEP.Write(resp, srcAddr)
+            },
+        }
+        h.pendingMu.Unlock()
+        
+        // 发送查询后立即返回，不阻塞
+        h.remoteConn.Write(query)
+    }
+}
+
+func (h *DNSHijacker) receiveResponses() {
+    for {
+        resp := h.remoteConn.Read()
+        txID := extractTxID(resp)
+        
+        h.pendingMu.Lock()
+        if pending, ok := h.pendingQueries[txID]; ok {
+            ip, ttl := parseDNSResponse(resp)
+            go pending.callback(ip, ttl)  // 异步回调
+            delete(h.pendingQueries, txID)
+        }
+        h.pendingMu.Unlock()
+    }
+}
+```
+
+#### 4. InjectInbound 扩容（#8）
+
+**当前**：`channel.NewEndpoint(512, ...)`
+
+**修复**：`channel.NewEndpoint(2048, ...)`
+
+### 实施顺序
+
+1. 路由表无锁化（#3+#7）
+2. TCP forwarder 异步化（#4）
+3. DNS 事件驱动异步化（#6）
+4. InjectInbound 扩容（#8）
+
+### 验证
+
+1. 部署到 VM 环境
+2. 高并发测试（100+ 并发连接）
+3. 模拟 peer 变动（注册/注销）时观察是否卡顿
+4. DNS 查询压力测试
+5. 监控延迟和丢包率
+
+---
+
 ## 实施顺序
 
 ### 阶段一：调研与准备

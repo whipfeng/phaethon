@@ -27,16 +27,15 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstHost, dstPort)
+	targetConn, err := dialer.MeshDial(dstHost, dstPort, clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	// Unregister Mode B mapping when connection closes
 	if dialer.GlobalModeBTable != nil {
-		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
 		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
 	}
 

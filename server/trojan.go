@@ -145,16 +145,15 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstAddr, dstPort)
+	targetConn, err := dialer.MeshDial(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	// Unregister Mode B mapping when connection closes
 	if dialer.GlobalModeBTable != nil {
-		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
 		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
 	}
 

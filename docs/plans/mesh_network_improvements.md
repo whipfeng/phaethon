@@ -24,6 +24,7 @@
 | v0.12.0 | 2026-09-16 | DNSHijacker 重构：从 tun 包迁移到 mesh 包，hijacker 与 mesh 绑定，TUN 禁用时 mesh DNS 仍可用 | Qoder |
 | v0.13.0 | 2026-09-16 | 多态健康检查：Dialer 接口新增 ServerAddr()，HTunnelDialer 从 URL 提取地址 | Qoder |
 | v0.14.0 | 2026-09-17 | 连接日志源地址还原：TUN 旁路网关 NAT 反查、Mode B 入口追踪 | Qoder |
+| v0.14.1 | 2026-09-17 | Mode B 注册时序修复：MeshDial 内部完成注册，避免 forwarder 竞态 | Qoder |
 
 ## 1. 背景与目标
 

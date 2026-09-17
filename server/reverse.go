@@ -648,12 +648,17 @@ func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Ma
 	connID := util.NextConnID()
 	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d mesh dial connecting", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstHost, dstPort)
+	targetConn, err := dialer.MeshDial(dstHost, dstPort, clientConn.RemoteAddr().String(), "Reverse:"+mapping.Name)
 	if err != nil {
 		util.LogError("[REVERSE-GENERIC] [%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
+
+	// Unregister Mode B mapping when connection closes
+	if dialer.GlobalModeBTable != nil {
+		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
+	}
 
 	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d via MESH", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)

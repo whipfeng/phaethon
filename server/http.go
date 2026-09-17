@@ -55,7 +55,7 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	connID := util.NextConnID()
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
-	targetConn, err := dialer.MeshDial(host, port)
+	targetConn, err := dialer.MeshDial(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
@@ -63,9 +63,8 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	}
 	defer targetConn.Close()
 
-	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	// Unregister Mode B mapping when connection closes
 	if dialer.GlobalModeBTable != nil {
-		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
 	}
 
@@ -84,7 +83,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	connID := util.NextConnID()
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
-	targetConn, err := dialer.MeshDial(host, port)
+	targetConn, err := dialer.MeshDial(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
@@ -92,9 +91,8 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	}
 	defer targetConn.Close()
 
-	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	// Unregister Mode B mapping when connection closes
 	if dialer.GlobalModeBTable != nil {
-		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
 	}
 

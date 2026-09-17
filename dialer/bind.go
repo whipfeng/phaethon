@@ -46,7 +46,9 @@ var GlobalModeBTable interface {
 // MeshDial dials destination through mesh network.
 // Always uses netstack path: DNS resolution → Fake-IP → mesh routing.
 // Used by Mode B (proxy server) handlers for mesh routing.
-func MeshDial(dstAddr string, dstPort int) (net.Conn, error) {
+// clientAddr and inbound are registered in ModeBTable before returning,
+// so the forwarder can resolve the real client when processing packets.
+func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
 	if GlobalNetstackDialFunc == nil || GlobalDNSResolverFunc == nil {
 		return nil, fmt.Errorf("mesh not initialized")
 	}
@@ -70,6 +72,13 @@ func MeshDial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, err
 	}
 	util.SetTCPNoDelay(conn)
+
+	// Register Mode B mapping BEFORE returning, so forwarder can resolve
+	// the real client address when processing packets from this connection.
+	if GlobalModeBTable != nil {
+		GlobalModeBTable.Register(6, conn.LocalAddr(), clientAddr, inbound)
+	}
+
 	return conn, nil
 }
 

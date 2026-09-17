@@ -194,7 +194,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstAddr, dstPort)
+	targetConn, err := dialer.MeshDial(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
@@ -202,9 +202,8 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	}
 	defer targetConn.Close()
 
-	// Register Mode B mapping: netstack local addr (GIP:port) → real client
+	// Unregister Mode B mapping when connection closes
 	if dialer.GlobalModeBTable != nil {
-		dialer.GlobalModeBTable.Register(6, targetConn.LocalAddr(), clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
 		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
 	}
 

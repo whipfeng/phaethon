@@ -1038,5 +1038,5 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 // Simplified H_Tunnel mapping handler - connects to target through mesh network.
 func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, error) {
 	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
-	return dialer.MeshDial(dstHost, dstPort)
+	return dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name)
 }

@@ -1082,17 +1082,23 @@ func (e *Engine) readLoop() {
 		// The mesh interceptor checks its routing table (including gateway routes) to determine
 		// if the packet should be sent via mesh or handled normally.
 		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
-		if e.meshInterceptor != nil && proto == ipv4.ProtocolNumber && n >= 20 {
+		if proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(pktBuf[16:20])
-			// Debug: log TCP packets to mesh subnet
-			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
-				srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
-				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-				util.LogDebug("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
-					dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
+			// Log for 8.8.8.x debugging
+			if dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
+				util.LogInfo("[TUN-DEBUG] readLoop: 8.8.8.x packet reached mesh check, dst=%s meshInterceptor=%v", dstIP, e.meshInterceptor != nil)
 			}
-			if e.meshInterceptor(dstIP, pktBuf) {
-				continue
+			if e.meshInterceptor != nil {
+				// Debug: log TCP packets to mesh subnet
+				if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
+					srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
+					dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
+					util.LogDebug("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
+						dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
+				}
+				if e.meshInterceptor(dstIP, pktBuf) {
+					continue
+				}
 			}
 		}
 

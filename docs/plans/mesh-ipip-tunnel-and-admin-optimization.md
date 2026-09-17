@@ -529,6 +529,11 @@ ping 8.8.8.8
 - `CheckStaticRoute` 对 8.8.8.0/24 范围的包记录 INFO 级别日志
 - 便于验证静态路由匹配是否触发
 
+**IPIP 回归排查日志**（任务四修复后 IPIP 失效）：
+- `tun/engine.go` readLoop：对 8.8.8.x 包记录 INFO 级别日志，确认包是否到达 mesh 拦截点
+- `mesh/mesh.go` HandleOutboundPacket：对 8.8.8.x 包记录 INFO 级别日志，确认拦截器是否被调用
+- 用于定位卡顿修复后 IPIP 静态路由未触发的根因
+
 ### 管理面板
 
 1. 仪表盘只显示摘要卡片

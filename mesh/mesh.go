@@ -620,6 +620,11 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
+	// Very visible log for 8.8.8.x to debug IPIP
+	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
+		util.LogInfo("[IPIP-DEBUG] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
+	}
+
 	// Debug: log all packets to mesh network
 	if isMeshAddress(dstIP) {
 		proto := "unknown"

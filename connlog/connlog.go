@@ -141,7 +141,7 @@ func FormatEvent(e Event) string {
 	}
 	
 	if e.Error != "" {
-		return fmt.Sprintf("%s %s %s → %s (%s)", icon, e.Protocol, dstDisplay, proxy, e.Error)
+		return fmt.Sprintf("%s %s %s → %s → %s (%s)", icon, e.Protocol, e.SrcAddr, dstDisplay, proxy, e.Error)
 	}
-	return fmt.Sprintf("%s %s %s → %s", icon, e.Protocol, dstDisplay, proxy)
+	return fmt.Sprintf("%s %s %s → %s → %s", icon, e.Protocol, e.SrcAddr, dstDisplay, proxy)
 }

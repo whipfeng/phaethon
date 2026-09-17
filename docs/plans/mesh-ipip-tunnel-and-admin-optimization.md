@@ -807,3 +807,21 @@ ping 8.8.8.8
 - IPIP 协议：RFC 2003
 - gVisor netstack：https://gvisor.dev/
 - Phaethon mesh 设计：`docs/plans/mesh-full-topology-design.md`
+
+## 连接日志源地址追踪
+
+### 问题
+
+连接日志和活跃连接视图中缺少源地址信息，无法定位连接发起方。
+
+### 方案
+
+从 gVisor netstack 的 `ForwarderRequest.ID().RemoteAddress` 提取源地址，贯穿到 connlog：
+
+1. TCP/UDP forwarder 回调中提取 `srcAddr = net.IP(id.RemoteAddress.AsSlice()).String()`
+2. 传入 `handleConn(conn, srcAddr, dstAddr, dstPort)` 和 `handleUDP(conn, srcAddr, dstAddr, dstPort)`
+3. 所有 `connlog.Log()` 和 `connlog.TrackActive()` 调用传入 `srcAddr`
+4. 前端日志格式：`src → dst:port → rule`
+5. 活跃连接表格增加"源地址"列
+
+### 状态：已完成

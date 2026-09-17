@@ -1195,12 +1195,14 @@ function renderActiveConns() {
         let html = '<table class="data-table" style="font-size:0.85rem;"><thead><tr>';
         html += '<th data-i18n="dash.connProtocol">' + i18n.t('dash.connProtocol') + '</th>';
         html += '<th data-i18n="dash.connInbound">' + i18n.t('dash.connInbound') + '</th>';
+        html += '<th data-i18n="dash.connSrc">' + i18n.t('dash.connSrc') + '</th>';
         html += '<th data-i18n="dash.connDst">' + i18n.t('dash.connDst') + '</th>';
         html += '<th data-i18n="dash.connRule">' + i18n.t('dash.connRule') + '</th>';
         html += '<th data-i18n="dash.connDuration">' + i18n.t('dash.connDuration') + '</th>';
         html += '</tr></thead><tbody>';
         conns.forEach(c => {
             const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
+            const src = c.srcAddr || '';
             const dst = c.dstAddr + ':' + c.dstPort;
             let rule = c.rule || c.proxy || 'DIRECT';
             if (c.actualProxy && c.actualProxy !== c.proxy) {
@@ -1208,7 +1210,7 @@ function renderActiveConns() {
             }
             const inbound = c.inbound || '';
             const selected = c.id === selectedConnId ? ' class="selected"' : '';
-            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + src + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
         });
         html += '</tbody></table>';
         el.innerHTML = html;
@@ -1428,11 +1430,12 @@ async function fetchConnections(incremental) {
             const time = `${hours}:${minutes}:${seconds}.${ms}`;
             const icon = e.status === 'ok' ? '✓' : '✗';
             const inbound = e.inbound || '';
+            const src = e.srcAddr || '';
             let target = e.rule || e.proxy || 'DIRECT';
             if (e.actualProxy && e.actualProxy !== e.proxy) {
                 target += ' → ' + e.actualProxy;
             }
-            let line = `${icon} [${inbound}] ${e.protocol} ${e.dstAddr}:${e.dstPort} → ${target}`;
+            let line = `${icon} [${inbound}] ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
             if (e.error) line += ` (${e.error})`;
             return `[${time}] ${line}`;
         });

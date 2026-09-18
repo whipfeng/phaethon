@@ -734,6 +734,12 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		selectedPeer := route.Peers[idx].Peer
 		route.lastIdx++
 
+		// Debug log for VIP-like destinations
+		if len(dstIP) >= 4 && dstIP[3] == 1 {
+			util.LogInfo("[MESH-DEBUG] Sending to %s: selected peer=%s (hop=%d, idx=%d/%d)",
+				dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
+		}
+
 		// Remote peer owns this IP — send via mesh
 		pkt := make([]byte, len(data))
 		copy(pkt, data)
@@ -748,10 +754,16 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 		if err := selectedPeer.Send(pkt); err != nil {
 			util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
-		} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
-			dst := net.IP(pkt[16:20])
-			if isMeshAddress(dst) {
-				util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
+		} else {
+			// Debug log for successful sends to VIP-like destinations
+			if len(dstIP) >= 4 && dstIP[3] == 1 {
+				util.LogInfo("[MESH-DEBUG] Successfully sent %d bytes to %s via %s",
+					len(pkt), dstIP, selectedPeer.GetNodeID())
+			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
+				dst := net.IP(pkt[16:20])
+				if isMeshAddress(dst) {
+					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
+				}
 			}
 		}
 		return true

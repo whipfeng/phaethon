@@ -12,6 +12,7 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-09-17 | 初始版本：直接访问控制台、状态持久化优化 | Qoder |
+| v0.1.1 | 2026-09-18 | 明确DNS解析保持Fake-IP方案，不改为VIP | Qoder |
 
 ## 1. 背景与目标
 
@@ -78,6 +79,16 @@ Remote app → Fake-IP → NAT → VIP → mesh → HandleMeshFrame
 - 不再 dial 127.0.0.1:39999（不走 OS 网络栈）
 - 直接在进程内调用 Admin Server 的 handler
 - 减少一次网络往返，降低延迟
+
+**DNS 解析方案**：
+
+nodeID.phn 域名保持使用 Fake-IP 解析，不改为 VIP。流程：
+1. DNS 查询 nodeID.phn → 返回 Fake-IP（从本地或远程节点的 Fake-IP 池分配）
+2. 应用连接到 Fake-IP
+3. TUN engine 接收连接，通过 Fake-IP 反查原始域名
+4. 检测到 localNodeDomain=true → 调用 admin handler
+
+这样保持与现有 Fake-IP 系统的一致性，不需要特殊处理 nodeID.phn 的 DNS 解析。
 
 ### 2.3 代码设计
 

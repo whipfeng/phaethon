@@ -697,7 +697,7 @@ func (s *AdminServer) Start() error {
 	} else if s.config.MeshOnly || s.config.Enabled {
 		// Auto-generate TLS certificate if not configured
 		// This ensures HTTPS always works for mesh access
-		cert, key, err := generateSelfSignedCert()
+		cert, key, err := s.loadOrGenerateTLSCert()
 		if err != nil {
 			util.LogWarn("[ADMIN] failed to auto-generate TLS cert: %v, falling back to HTTP", err)
 		} else {
@@ -4859,6 +4859,40 @@ func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
 	// Encode to PEM
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+
+	return certPEM, keyPEM, nil
+}
+
+// loadOrGenerateTLSCert loads TLS cert/key from files or generates and saves them.
+func (s *AdminServer) loadOrGenerateTLSCert() (certPEM, keyPEM []byte, err error) {
+	certFile := "admin-tls-cert.pem"
+	keyFile := "admin-tls-key.pem"
+
+	// Try to load existing cert and key
+	certData, certErr := os.ReadFile(certFile)
+	keyData, keyErr := os.ReadFile(keyFile)
+	if certErr == nil && keyErr == nil && len(certData) > 0 && len(keyData) > 0 {
+		util.LogInfo("[ADMIN] loaded TLS cert from %s and %s", certFile, keyFile)
+		return certData, keyData, nil
+	}
+
+	// Generate new cert and key
+	certPEM, keyPEM, err = generateSelfSignedCert()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Save to files
+	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+		util.LogWarn("[ADMIN] failed to save TLS cert to %s: %v", certFile, err)
+	} else {
+		util.LogInfo("[ADMIN] saved TLS cert to %s", certFile)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		util.LogWarn("[ADMIN] failed to save TLS key to %s: %v", keyFile, err)
+	} else {
+		util.LogInfo("[ADMIN] saved TLS key to %s", keyFile)
+	}
 
 	return certPEM, keyPEM, nil
 }

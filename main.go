@@ -745,6 +745,15 @@ func main() {
 	// Load config first
 	ruleConf := getRuleConf()
 
+	// Setup rotating log file (10MB max)
+	logPath := filepath.Join(dataDir, "phaethon.log")
+	_ = os.MkdirAll(dataDir, 0755)
+	if err := util.SetupLogFile(logPath, 10); err != nil {
+		util.Logger.Printf("WARNING: setup log file failed: %v", err)
+	} else {
+		util.Logger.Printf("Log file: %s (max 10MB, rotates to .old)", logPath)
+	}
+
 	// Apply -admin-port / ADMIN_PORT override if provided
 	if adminPort != "" && ruleConf != nil {
 		if ruleConf.Admin == nil {

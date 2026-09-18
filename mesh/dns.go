@@ -252,7 +252,7 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 
 	// Check cache first
 	if cachedIP := h.cache.Get(domain); cachedIP != nil {
-		util.LogInfo("tun dns: %s -> %s (cached)", domain, cachedIP)
+		util.LogDebug("tun dns: %s -> %s (cached)", domain, cachedIP)
 		resp := buildDNSResponse(packet, cachedIP.To4())
 		if resp != nil {
 			h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
@@ -275,7 +275,7 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 				return
 			}
 			h.cache.Set(domain, remoteIP, ttl)
-			util.LogInfo("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
+			util.LogDebug("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
 			resp := buildDNSResponse(packet, remoteIP.To4())
 			if resp != nil {
 				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
@@ -286,7 +286,7 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 
 	// Local pool resolution (default)
 	fakeIP := h.pool.Lookup(domain)
-	util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
+	util.LogDebug("tun dns: %s -> %s", domain, fakeIP)
 	resp := buildDNSResponse(packet, fakeIP.To4())
 
 	if resp == nil {

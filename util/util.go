@@ -11,16 +11,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"phaethon/config"
-
-	"log"
-	"time"
 )
 
 // Sha224Hex computes SHA-224 hex string (56 chars)
@@ -193,7 +193,92 @@ func init() {
 	currentLogLevel.Store(int32(LogLevelInfo))
 }
 
+// RotatingFileWriter implements io.Writer with size-based log rotation.
+// When the file exceeds maxSize, it renames to .old and starts fresh.
+type RotatingFileWriter struct {
+	mu       sync.Mutex
+	file     *os.File
+	path     string
+	maxSize  int64
+	curSize  int64
+}
+
+// NewRotatingFileWriter creates a rotating file writer.
+// maxSize is in bytes (e.g., 10*1024*1024 for 10MB).
+func NewRotatingFileWriter(path string, maxSize int64) (*RotatingFileWriter, error) {
+	w := &RotatingFileWriter{
+		path:    path,
+		maxSize: maxSize,
+	}
+	if err := w.openFile(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *RotatingFileWriter) openFile() error {
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	w.file = f
+	w.curSize = info.Size()
+	return nil
+}
+
+func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Check if rotation needed
+	if w.curSize+int64(len(p)) > w.maxSize {
+		w.rotate()
+	}
+
+	n, err = w.file.Write(p)
+	w.curSize += int64(n)
+	return n, err
+}
+
+func (w *RotatingFileWriter) rotate() {
+	if w.file != nil {
+		w.file.Close()
+	}
+	// Remove old backup and rename current to .old
+	oldPath := w.path + ".old"
+	os.Remove(oldPath)
+	os.Rename(w.path, oldPath)
+	// Open new file
+	w.openFile()
+}
+
+func (w *RotatingFileWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
+}
+
 var Logger = log.New(log.Writer(), "[phaethon] ", log.LstdFlags)
+
+// SetupLogFile configures logging to a rotating file.
+// Call this early in main() if file logging is desired.
+func SetupLogFile(path string, maxSizeMB int64) error {
+	maxSize := maxSizeMB * 1024 * 1024
+	w, err := NewRotatingFileWriter(path, maxSize)
+	if err != nil {
+		return err
+	}
+	Logger.SetOutput(w)
+	return nil
+}
 
 func SetLogLevel(level LogLevel) {
 	currentLogLevel.Store(int32(level))

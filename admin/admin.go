@@ -4398,7 +4398,7 @@ func (s *AdminServer) apiLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    session,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(sessionDuration),
 	})
 	jsonResponse(w, map[string]string{"status": "ok"})
@@ -4414,7 +4414,7 @@ func (s *AdminServer) apiLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 	jsonResponse(w, map[string]string{"status": "ok"})
@@ -4501,7 +4501,7 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 			Value:    session,
 			Path:     "/",
 			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
+			SameSite: http.SameSiteLaxMode,
 			Expires:  time.Now().Add(sessionDuration),
 		})
 	}
@@ -4596,7 +4596,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			Value:    session,
 			Path:     "/",
 			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
+			SameSite: http.SameSiteLaxMode,
 			Expires:  time.Now().Add(sessionDuration),
 		})
 	}

@@ -32,7 +32,8 @@ func (r *TUNResource) Stop() {
 // so that proxy servers (Mode B) can use netstack sockets for DNS and connections.
 // When TUN is enabled, the TUN device and OS routes are also set up.
 // If meshMgr is non-nil, it is wired to the engine immediately after start.
-func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) *TUNResource {
+// If adminHandler is non-nil, it is set for direct connection handling (bypasses OS network stack).
+func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNResource {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
@@ -115,6 +116,12 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager) 
 		dialer.GlobalModeBTable = modeBTable
 
 		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
+
+		// Set admin handler for direct connection handling (bypasses OS network stack)
+		if adminHandler != nil {
+			engine.SetAdminHandler(adminHandler)
+			util.LogInfo("Admin handler set for direct connection handling")
+		}
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		meshMgr.DNSAllocator = func(domain string) (net.IP, error) {

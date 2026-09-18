@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -704,6 +705,46 @@ func (s *AdminServer) Close() error {
 	}
 	util.DefaultVersionNotifier.StopHeartbeat()
 	return nil
+}
+
+// ServeConn serves a single connection using the admin server's handler.
+// This allows bypassing the OS network stack for local connections (e.g., from mesh).
+func (s *AdminServer) ServeConn(conn net.Conn) {
+	if s.server == nil {
+		util.LogWarn("[ADMIN] ServeConn called but server is nil")
+		conn.Close()
+		return
+	}
+	ln := &singleConnListener{conn: conn}
+	// Serve blocks until the connection is closed
+	if err := s.server.Serve(ln); err != nil && err != io.EOF {
+		util.LogDebug("[ADMIN] ServeConn ended: %v", err)
+	}
+}
+
+// singleConnListener is a net.Listener that yields a single connection then returns EOF.
+type singleConnListener struct {
+	conn net.Conn
+	done atomic.Bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.done.Swap(true) {
+		return nil, io.EOF
+	}
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error {
+	l.done.Store(true)
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr {
+	if l.conn != nil {
+		return l.conn.LocalAddr()
+	}
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 39999}
 }
 
 // session constants

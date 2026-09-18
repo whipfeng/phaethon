@@ -4,8 +4,6 @@ import (
 	"net"
 
 	"phaethon/config"
-	"phaethon/connlog"
-	"phaethon/dialer"
 	"phaethon/util"
 )
 
@@ -27,22 +25,15 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstHost, dstPort, clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
+	targetConn, err := s.MeshDialWithModeB(dstHost, dstPort, clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	// Unregister Mode B mapping when connection closes
-	if dialer.GlobalModeBTable != nil {
-		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
-	}
-
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
-	connlog.Log("Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, "Direct:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstHost, dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})
-	defer connlog.RemoveActive(connID)
+	defer s.LogMeshConnection(connID, "Direct", clientConn.RemoteAddr().String(), dstHost, dstPort)()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 

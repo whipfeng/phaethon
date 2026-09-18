@@ -39,14 +39,23 @@ var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 // GlobalModeBTable tracks Mode B (proxy entry) connections for source address resolution.
 // Set by main_tun.go when mesh is initialized.
 var GlobalModeBTable interface {
-	Register(proto byte, localAddr net.Addr, clientAddr string, inbound string)
-	Unregister(proto byte, localAddr net.Addr)
+	Register(proto byte, dstAddr string, clientAddr string, inbound string)
+	Unregister(proto byte, dstAddr string)
+}
+
+// UnregisterModeB is a helper to unregister a Mode B connection by destination.
+func UnregisterModeB(proto byte, dstAddr string, dstPort int) {
+	if GlobalModeBTable == nil {
+		return
+	}
+	dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+	GlobalModeBTable.Unregister(proto, dstKey)
 }
 
 // MeshDial dials destination through mesh network.
 // Always uses netstack path: DNS resolution → Fake-IP → mesh routing.
 // Used by Mode B (proxy server) handlers for mesh routing.
-// clientAddr and inbound are registered in ModeBTable before returning,
+// Registers clientAddr and inbound in ModeBTable by destination BEFORE dialing,
 // so the forwarder can resolve the real client when processing packets.
 func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
 	if GlobalNetstackDialFunc == nil || GlobalDNSResolverFunc == nil {
@@ -66,18 +75,23 @@ func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string) (n
 		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	}
 
+	// Register Mode B mapping by destination BEFORE dialing, so forwarder can
+	// look up the real client address when processing packets from this connection.
+	dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+	if GlobalModeBTable != nil {
+		GlobalModeBTable.Register(6, dstKey, clientAddr, inbound)
+	}
+
 	// Dial through netstack, goes through writeLoop → mesh routing
 	conn, err := GlobalNetstackDialFunc("tcp", targetAddr)
 	if err != nil {
+		// Unregister on dial failure
+		if GlobalModeBTable != nil {
+			GlobalModeBTable.Unregister(6, dstKey)
+		}
 		return nil, err
 	}
 	util.SetTCPNoDelay(conn)
-
-	// Register Mode B mapping BEFORE returning, so forwarder can resolve
-	// the real client address when processing packets from this connection.
-	if GlobalModeBTable != nil {
-		GlobalModeBTable.Register(6, conn.LocalAddr(), clientAddr, inbound)
-	}
 
 	return conn, nil
 }

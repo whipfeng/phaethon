@@ -118,6 +118,14 @@ type Engine struct {
 
 	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
 	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
+
+	adminHandler AdminHandler // direct admin server connection handler (bypasses OS network stack)
+}
+
+// AdminHandler can serve a single network connection directly.
+// Implemented by admin.AdminServer to allow bypassing the OS network stack.
+type AdminHandler interface {
+	ServeConn(conn net.Conn)
 }
 
 type meshOutboundPacket struct {
@@ -173,6 +181,13 @@ func (e *Engine) GetModeBTable() *mesh.ModeBTable {
 func (e *Engine) SetLocalMeshNodeID(nodeID string) {
 	e.localMeshNodeID = nodeID
 	util.LogDebug("tun: local mesh nodeID set: %s", nodeID)
+}
+
+// SetAdminHandler sets the admin server for direct connection handling.
+// When set, connections to nodeid.phn will be served directly without going through OS network stack.
+func (e *Engine) SetAdminHandler(h AdminHandler) {
+	e.adminHandler = h
+	util.LogDebug("tun: admin handler set for direct connection handling")
 }
 
 // SetDNSDomainResolver registers a callback on the DNS hijacker that returns
@@ -1157,10 +1172,6 @@ func (e *Engine) readLoop() {
 		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
 		if proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(pktBuf[16:20])
-			// Log for 8.8.8.x debugging
-			if dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-				util.LogInfo("[TUN-DEBUG] readLoop: 8.8.8.x packet reached mesh check, dst=%s meshInterceptor=%v", dstIP, e.meshInterceptor != nil)
-			}
 			if e.meshInterceptor != nil {
 				// Debug: log TCP packets to mesh subnet
 				if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
@@ -1325,7 +1336,8 @@ func (e *Engine) acceptTCP() {
 		r.Complete(false)
 
 		conn := gonet.NewTCPConn(&wq, ep)
-		dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
+		dstIP := net.IP(id.LocalAddress.AsSlice())
+		dstAddr := dstIP.String()
 		dstPort := int(id.LocalPort)
 		srcIP := net.IP(id.RemoteAddress.AsSlice())
 		if e.natTable != nil {
@@ -1333,15 +1345,9 @@ func (e *Engine) acceptTCP() {
 		}
 		srcAddr := srcIP.String()
 		inbound := ""
-		// If source is still a local GIP (Mode B), look up the real client and inbound type
-		if e.modeBTable != nil && e.localMeshVIPs != nil {
-			var localGIPs []net.IP
-			for ip := range e.localMeshVIPs {
-				if parsed := net.ParseIP(ip); parsed != nil {
-					localGIPs = append(localGIPs, parsed)
-				}
-			}
-			if clientAddr, modeBInbound := e.modeBTable.Lookup(6, srcIP, id.RemotePort, localGIPs); clientAddr != "" {
+		// If destination matches a Mode B registration, look up the real client and inbound type
+		if e.modeBTable != nil {
+			if clientAddr, modeBInbound := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort); clientAddr != "" {
 				srcAddr = clientAddr
 				inbound = modeBInbound
 			}
@@ -1450,7 +1456,8 @@ func (e *Engine) acceptUDP() {
 			defer ep.Close()
 
 			id := r.ID()
-			dstAddr := net.IP(id.LocalAddress.AsSlice()).String()
+			dstIP := net.IP(id.LocalAddress.AsSlice())
+			dstAddr := dstIP.String()
 			dstPort := int(id.LocalPort)
 			srcIP := net.IP(id.RemoteAddress.AsSlice())
 			if e.natTable != nil {
@@ -1458,15 +1465,9 @@ func (e *Engine) acceptUDP() {
 			}
 			srcAddr := srcIP.String()
 			inbound := ""
-			// If source is still a local GIP (Mode B), look up the real client and inbound type
-			if e.modeBTable != nil && e.localMeshVIPs != nil {
-				var localGIPs []net.IP
-				for ip := range e.localMeshVIPs {
-					if parsed := net.ParseIP(ip); parsed != nil {
-						localGIPs = append(localGIPs, parsed)
-					}
-				}
-				if clientAddr, modeBInbound := e.modeBTable.Lookup(17, srcIP, id.RemotePort, localGIPs); clientAddr != "" {
+			// If destination matches a Mode B registration, look up the real client and inbound type
+			if e.modeBTable != nil {
+				if clientAddr, modeBInbound := e.modeBTable.LookupByDst(17, dstIP, id.LocalPort); clientAddr != "" {
 					srcAddr = clientAddr
 					inbound = modeBInbound
 				}
@@ -1490,6 +1491,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	if inbound == "" {
 		inbound = "TUN"
 	}
+
 	// Check if this is a Fake-IP: restore original domain.
 	var domain string
 	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
@@ -1729,6 +1731,16 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	}
 
 	if localNodeDomain {
+		// Direct admin handler: bypass OS network stack entirely
+		if e.adminHandler != nil {
+			util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", connID)
+			connlog.Log(inbound, "TCP", srcAddr, matchAddr, "localhost", resolvedPort, matchResult, "ok", nil)
+			connlog.TrackActive(connID, inbound, "TCP", srcAddr, matchAddr, "localhost", resolvedPort, matchResult)
+			defer connlog.RemoveActive(connID)
+			e.adminHandler.ServeConn(conn)
+			return
+		}
+		// Fallback: dial localhost via OS network stack
 		localIP := dialer.GetLocalIPForDial(nil)
 		dialAddr := localIP.String()
 		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)

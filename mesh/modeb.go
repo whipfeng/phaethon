@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-// ModeBTable tracks Mode B (proxy entry) connections mapping netstack socket
-// local address (GIP:port) to the real client address.
-// This allows the TUN forwarder to log the real client IP instead of GIP.
+// ModeBTable tracks Mode B (proxy entry) connections mapping destination address
+// to the real client address. This allows the TUN forwarder to log the real
+// client IP by looking up the destination.
 type ModeBTable struct {
 	mu      sync.RWMutex
-	entries map[string]*ModeBEntry // key: "proto:GIP:port"
+	entries map[string]*ModeBEntry // key: "proto:dstIP:dstPort"
 }
 
 // ModeBEntry represents a single Mode B connection mapping.
@@ -28,15 +28,16 @@ func NewModeBTable() *ModeBTable {
 	}
 }
 
-// Register records a Mode B connection mapping.
-// localAddr is the netstack socket's local address (GIP:port).
+// Register records a Mode B connection mapping by destination address.
+// This should be called BEFORE dialing so the forwarder can look up the client.
+// dstAddr is the destination being dialed (e.g., "10.161.88.10:30300").
 // clientAddr is the real client's address.
 // inbound is the entry protocol type (e.g., "SOCKS5:proxy1").
-func (t *ModeBTable) Register(proto byte, localAddr net.Addr, clientAddr string, inbound string) {
-	if t == nil || localAddr == nil {
+func (t *ModeBTable) Register(proto byte, dstAddr string, clientAddr string, inbound string) {
+	if t == nil || dstAddr == "" {
 		return
 	}
-	key := modeBKey(proto, localAddr)
+	key := modeBDstKey(proto, dstAddr)
 	t.mu.Lock()
 	t.entries[key] = &ModeBEntry{
 		ClientAddr: clientAddr,
@@ -46,39 +47,26 @@ func (t *ModeBTable) Register(proto byte, localAddr net.Addr, clientAddr string,
 	t.mu.Unlock()
 }
 
-// Unregister removes a Mode B connection mapping.
-func (t *ModeBTable) Unregister(proto byte, localAddr net.Addr) {
-	if t == nil || localAddr == nil {
+// Unregister removes a Mode B connection mapping by destination address.
+func (t *ModeBTable) Unregister(proto byte, dstAddr string) {
+	if t == nil || dstAddr == "" {
 		return
 	}
-	key := modeBKey(proto, localAddr)
+	key := modeBDstKey(proto, dstAddr)
 	t.mu.Lock()
 	delete(t.entries, key)
 	t.mu.Unlock()
 }
 
-// Lookup returns the real client address and inbound type for a given source address.
-// If srcIP is not a local GIP or no mapping exists, returns empty strings.
-func (t *ModeBTable) Lookup(proto byte, srcIP net.IP, srcPort uint16, localGIPs []net.IP) (clientAddr string, inbound string) {
+// LookupByDst returns the real client address and inbound type for a given destination.
+// If no mapping exists, returns empty strings.
+func (t *ModeBTable) LookupByDst(proto byte, dstIP net.IP, dstPort uint16) (clientAddr string, inbound string) {
 	if t == nil {
 		return "", ""
 	}
 
-	// Check if srcIP is a local GIP
-	isLocalGIP := false
-	for _, gip := range localGIPs {
-		if srcIP.Equal(gip) {
-			isLocalGIP = true
-			break
-		}
-	}
-	if !isLocalGIP {
-		return "", ""
-	}
-
-	// Build key and lookup
-	tcpAddr := &net.TCPAddr{IP: srcIP, Port: int(srcPort)}
-	key := modeBKey(proto, tcpAddr)
+	dstAddr := net.JoinHostPort(dstIP.String(), itoa(dstPort))
+	key := modeBDstKey(proto, dstAddr)
 
 	t.mu.RLock()
 	entry, exists := t.entries[key]
@@ -90,13 +78,6 @@ func (t *ModeBTable) Lookup(proto byte, srcIP net.IP, srcPort uint16, localGIPs 
 	return entry.ClientAddr, entry.Inbound
 }
 
-func modeBKey(proto byte, addr net.Addr) string {
-	switch a := addr.(type) {
-	case *net.TCPAddr:
-		return string(rune(proto)) + ":tcp:" + a.IP.String() + ":" + itoa(uint16(a.Port))
-	case *net.UDPAddr:
-		return string(rune(proto)) + ":udp:" + a.IP.String() + ":" + itoa(uint16(a.Port))
-	default:
-		return string(rune(proto)) + ":" + addr.String()
-	}
+func modeBDstKey(proto byte, dstAddr string) string {
+	return string(rune(proto)) + ":dst:" + dstAddr
 }

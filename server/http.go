@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"phaethon/config"
-	"phaethon/connlog"
-	"phaethon/dialer"
 	"phaethon/util"
 )
 
@@ -55,7 +53,7 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	connID := util.NextConnID()
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
-	targetConn, err := dialer.MeshDial(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
+	targetConn, err := s.MeshDialWithModeB(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
@@ -63,15 +61,8 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	}
 	defer targetConn.Close()
 
-	// Unregister Mode B mapping when connection closes
-	if dialer.GlobalModeBTable != nil {
-		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
-	}
-
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"})
-	defer connlog.RemoveActive(connID)
+	defer s.LogMeshConnection(connID, "HTTP", clientConn.RemoteAddr().String(), host, port)()
 
 	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
@@ -83,18 +74,13 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	connID := util.NextConnID()
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
-	targetConn, err := dialer.MeshDial(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
+	targetConn, err := s.MeshDialWithModeB(host, port, clientConn.RemoteAddr().String(), "HTTP:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer targetConn.Close()
-
-	// Unregister Mode B mapping when connection closes
-	if dialer.GlobalModeBTable != nil {
-		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
-	}
 
 	// Clean hop-by-hop headers
 	cleanHopByHop(req.Header)
@@ -111,9 +97,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	}
 
 	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
-	connlog.Log("HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, "HTTP:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), host, host, port, &config.MatchResult{ProxyName: "MESH"})
-	defer connlog.RemoveActive(connID)
+	defer s.LogMeshConnection(connID, "HTTP", clientConn.RemoteAddr().String(), host, port)()
 
 	// Read response and forward back
 	resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)

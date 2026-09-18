@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/connlog"
+	"phaethon/dialer"
 	"phaethon/util"
 )
 
@@ -14,6 +16,41 @@ import (
 type BaseServer struct {
 	RuleConf *config.RuleConfiguration
 	Mapping  *config.Mapping
+}
+
+// MeshDialWithModeB dials through mesh and handles Mode B registration automatically.
+// The returned conn will unregister from ModeBTable when closed.
+func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
+	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound)
+	if err != nil {
+		return nil, err
+	}
+	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort}, nil
+}
+
+// LogMeshConnection logs a successful mesh connection and tracks it as active.
+// Returns a cleanup function that should be deferred.
+func (b *BaseServer) LogMeshConnection(connID, proto, clientAddr, dstAddr string, dstPort int) (cleanup func()) {
+	inbound := proto + ":" + b.Mapping.Name
+	connlog.Log(inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
+	connlog.TrackActive(connID, inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
+	return func() { connlog.RemoveActive(connID) }
+}
+
+// modeBConn wraps a net.Conn and unregisters from ModeBTable on Close.
+type modeBConn struct {
+	net.Conn
+	dstAddr string
+	dstPort int
+	closed  bool
+}
+
+func (c *modeBConn) Close() error {
+	if !c.closed {
+		c.closed = true
+		dialer.UnregisterModeB(6, c.dstAddr, c.dstPort)
+	}
+	return c.Conn.Close()
 }
 
 // ConnHandler is the interface for protocol-specific connection handlers.

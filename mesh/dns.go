@@ -34,6 +34,9 @@ type DNSHijacker struct {
 	resolveDomainSubnet func(domain string) *net.IPNet // nil = local or no match
 	cache               *DNSCache
 
+	// NodeID.phn domain resolution to VIP
+	resolveNodeIDDomain func(domain string) net.IP // nil = not a nodeID.phn domain
+
 	// Async query processing
 	dnsQueryCh chan dnsQuery // buffered channel for worker pool
 }
@@ -112,6 +115,12 @@ func (h *DNSHijacker) IsBound() bool {
 // for a domain. Returns nil for local domains or no match.
 func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) *net.IPNet) {
 	h.resolveDomainSubnet = resolver
+}
+
+// SetNodeIDDomainResolver registers a callback that resolves nodeID.phn domains to VIPs.
+// Returns nil if the domain is not a nodeID.phn domain.
+func (h *DNSHijacker) SetNodeIDDomainResolver(resolver func(domain string) net.IP) {
+	h.resolveNodeIDDomain = resolver
 }
 
 // Start binds a UDP socket on port 53 inside netstack and starts the serve loop.
@@ -258,6 +267,18 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 			h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
 		}
 		return
+	}
+
+	// Check if this is a nodeID.phn domain → resolve to VIP
+	if h.resolveNodeIDDomain != nil {
+		if vip := h.resolveNodeIDDomain(domain); vip != nil {
+			util.LogInfo("tun dns: %s -> %s (nodeID.phn → VIP)", domain, vip)
+			resp := buildDNSResponse(packet, vip.To4())
+			if resp != nil {
+				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+			}
+			return
+		}
 	}
 
 	// Check if domain belongs to a remote node

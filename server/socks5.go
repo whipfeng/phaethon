@@ -194,7 +194,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
+	targetConn, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
@@ -202,16 +202,9 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	}
 	defer targetConn.Close()
 
-	// Unregister Mode B mapping when connection closes
-	if dialer.GlobalModeBTable != nil {
-		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
-	}
-
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
-	connlog.Log("SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
-	defer connlog.RemoveActive(connID)
+	defer s.LogMeshConnection(connID, "SOCKS5", clientConn.RemoteAddr().String(), dstAddr, dstPort)()
 
 	// Handshake complete — clear the deadline so the relay idle timeout takes over.
 	if ds, ok := clientConn.(interface{ SetReadDeadline(time.Time) error }); ok {

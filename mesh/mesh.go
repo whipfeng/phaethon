@@ -188,6 +188,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	// tunAddr and dnsAddr will be set when binding to netstack
 	m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, tcpip.Address{}, tcpip.Address{})
 	m.dnsHijacker.SetDomainResolver(m.ResolveDomainSubnet)
+	m.dnsHijacker.SetNodeIDDomainResolver(m.ResolveNodeIDDomain)
 
 	// Create IPIP tunnel and allocate EIP from subnet
 	m.ipipTunnel = NewIPIPTunnel()
@@ -230,10 +231,6 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
 	defer m.mu.RUnlock()
 	if m.ipipTunnel == nil {
 		return "", false
-	}
-	// Special logging for 8.8.8.0/24 range (our test destination)
-	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogInfo("[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
 	}
 	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
 }
@@ -599,6 +596,49 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	return subnet
 }
 
+// ResolveNodeIDDomain checks if the domain is a nodeID.phn pattern and returns the VIP.
+// Returns nil if not a nodeID.phn domain.
+func (m *MeshManager) ResolveNodeIDDomain(domain string) net.IP {
+	// Check if domain matches nodeID.phn pattern
+	domain = strings.ToLower(domain)
+	if !strings.HasSuffix(domain, ".phn") {
+		return nil
+	}
+	
+	// Extract nodeID from domain (e.g., "vm.phn" → "vm")
+	nodeID := strings.TrimSuffix(domain, ".phn")
+	if nodeID == "" || strings.Contains(nodeID, ".") {
+		return nil // not a simple nodeID.phn pattern
+	}
+	
+	// Check if it's the local node
+	if nodeID == m.nodeID {
+		util.LogDebug("[MESH-DEBUG] ResolveNodeIDDomain(%s): local node → VIP %s", domain, m.vip)
+		return m.vip
+	}
+	
+	// Check remote nodes in topology
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == nodeID && peer.Subnet != nil {
+			// Derive VIP from subnet (first usable IP: network + 1)
+			vip := make(net.IP, len(peer.Subnet.IP))
+			copy(vip, peer.Subnet.IP)
+			// Increment the last byte to get .1
+			for i := len(vip) - 1; i >= 0; i-- {
+				vip[i]++
+				if vip[i] != 0 {
+					break
+				}
+			}
+			util.LogDebug("[MESH-DEBUG] ResolveNodeIDDomain(%s): remote node %s subnet %s → VIP %s", domain, nodeID, peer.Subnet, vip)
+			return vip
+		}
+	}
+	
+	util.LogDebug("[MESH-DEBUG] ResolveNodeIDDomain(%s): node %s not found", domain, nodeID)
+	return nil
+}
+
 // RegisterPeer is called when a P2P peer with mesh capability connects.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
 	select {
@@ -620,11 +660,6 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
-	// Very visible log for 8.8.8.x to debug IPIP
-	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogInfo("[IPIP-DEBUG] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
-	}
-
 	// Debug: log all packets to mesh network
 	if isMeshAddress(dstIP) {
 		proto := "unknown"
@@ -658,9 +693,6 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 	// Check static IPIP routes before normal mesh routing
 	if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
-		util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
-		util.LogInfo("[IPIP] Attempting encapsulation via %s", egressNodeID)
-		
 		// Get egress node's EIP (calculated from its advertised subnet)
 		egressEIP := m.getEIPForNode(egressNodeID)
 		if egressEIP == nil {
@@ -967,25 +999,41 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 	copy(advertise, m.advertise)
 	m.mu.RUnlock()
 
+	m.mu.RLock()
+	staticRouteCount := len(m.staticRoutes)
+	staticDomainSuffixCount := len(m.staticDomainSuffixes)
+	m.mu.RUnlock()
+
 	return map[string]interface{}{
-		"enabled":        true,
-		"nodeId":         m.nodeID,
-		"vip":            m.vip.String(),
-		"subnet":         m.subnetStr,
-		"domainSuffixes": domainSuffixes,
-		"advertise":      advertise,
-		"routeCount":     routeCount,
+		"enabled":               true,
+		"nodeId":                m.nodeID,
+		"vip":                   m.vip.String(),
+		"subnet":                m.subnetStr,
+		"domainSuffixes":        domainSuffixes,
+		"advertise":             advertise,
+		"routeCount":            routeCount,
+		"staticRoutes":          staticRouteCount,
+		"staticDomainSuffixes":  staticDomainSuffixCount,
 	}
 }
 
 func (m *MeshManager) GetTopology() map[string]interface{} {
 	peers := m.topology.GetAllPeers()
-	peerList := make([]map[string]interface{}, 0, len(peers))
+
+	// Collect all known nodes: direct peers + nodes learned via gossip (claimedSubnets)
+	allNodes := make(map[string]map[string]interface{})
+
+	// Add direct peers
 	for _, p := range peers {
+		nodeId := p.NodeID()
+		if _, exists := allNodes[nodeId]; exists {
+			continue
+		}
 		entry := map[string]interface{}{
-			"nodeId":   p.NodeID(),
+			"nodeId":   nodeId,
 			"subnet":   p.SubnetStr,
 			"lastSeen": p.LastSeen,
+			"direct":   true,
 		}
 		if len(p.DomainSuffixes) > 0 {
 			entry["domainSuffixes"] = p.DomainSuffixes
@@ -1008,11 +1056,28 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 					"nodeId": cs.NodeID,
 					"hop":    cs.Hop,
 				})
+				// Also add claimed subnet nodes to allNodes if not already present
+				if cs.NodeID != nodeId {
+					if _, exists := allNodes[cs.NodeID]; !exists {
+						allNodes[cs.NodeID] = map[string]interface{}{
+							"nodeId": cs.NodeID,
+							"subnet": cs.SubnetStr,
+							"direct": false,
+						}
+					}
+				}
 			}
 			entry["claimedSubnets"] = claimEntries
 		}
+		allNodes[nodeId] = entry
+	}
+
+	// Convert map to list
+	peerList := make([]map[string]interface{}, 0, len(allNodes))
+	for _, entry := range allNodes {
 		peerList = append(peerList, entry)
 	}
+
 	return map[string]interface{}{"peers": peerList}
 }
 
@@ -1096,6 +1161,23 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	edges := make([]FullTopologyEdge, 0, len(edgeSet))
 	for _, e := range edgeSet {
 		edges = append(edges, e)
+		// Add nodes from edges that are not in the nodes list (learned via gossip)
+		if !nodeSet[e.From] {
+			nodeSet[e.From] = true
+			nodes = append(nodes, FullTopologyNode{
+				NodeID: e.From,
+				VIP:    "",
+				Subnet: "",
+			})
+		}
+		if !nodeSet[e.To] {
+			nodeSet[e.To] = true
+			nodes = append(nodes, FullTopologyNode{
+				NodeID: e.To,
+				VIP:    "",
+				Subnet: "",
+			})
+		}
 	}
 
 	return map[string]interface{}{

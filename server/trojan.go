@@ -145,22 +145,15 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := dialer.MeshDial(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
+	targetConn, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
 	if err != nil {
 		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 
-	// Unregister Mode B mapping when connection closes
-	if dialer.GlobalModeBTable != nil {
-		defer dialer.GlobalModeBTable.Unregister(6, targetConn.LocalAddr())
-	}
-
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
-	connlog.Log("Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "TCP", clientConn.RemoteAddr().String(), dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
-	defer connlog.RemoveActive(connID)
+	defer s.LogMeshConnection(connID, "Trojan", clientConn.RemoteAddr().String(), dstAddr, dstPort)()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 

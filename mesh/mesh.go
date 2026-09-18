@@ -188,8 +188,6 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	// tunAddr and dnsAddr will be set when binding to netstack
 	m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, tcpip.Address{}, tcpip.Address{})
 	m.dnsHijacker.SetDomainResolver(m.ResolveDomainSubnet)
-	m.dnsHijacker.SetLocalMeshDomainChecker(m.IsLocalMeshDomain)
-	m.dnsHijacker.SetLocalVIPProvider(m.GetVIP)
 
 	// Create IPIP tunnel and allocate EIP from subnet
 	m.ipipTunnel = NewIPIPTunnel()
@@ -598,34 +596,6 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 		return nil // no match or local entry
 	}
 	return subnet
-}
-
-// IsLocalMeshDomain returns true if the domain belongs to this node.
-// Used by DNS hijacker to return VIP instead of allocating from pool.
-func (m *MeshManager) IsLocalMeshDomain(domain string) bool {
-	// Check static domain suffixes first
-	m.mu.RLock()
-	staticSuffixes := m.staticDomainSuffixes
-	m.mu.RUnlock()
-
-	for _, suffix := range staticSuffixes {
-		s := strings.ToLower(suffix.Suffix)
-		d := strings.ToLower(domain)
-		if d == s || strings.HasSuffix(d, "."+s) {
-			// Matched static domain suffix, check if it's for this node
-			return suffix.Via == m.nodeID
-		}
-	}
-
-	// Fall back to advertised domain trie
-	rt := m.getRouteTable()
-	trie := rt.domainTrie
-	if trie == nil {
-		return false
-	}
-	peers, _, suffixLen := trie.Lookup(domain)
-	// Local entry: suffix matches but no peers (it's this node)
-	return suffixLen > 0 && len(peers) == 0
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.

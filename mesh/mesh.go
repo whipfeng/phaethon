@@ -233,7 +233,7 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
 	}
 	// Special logging for 8.8.8.0/24 range (our test destination)
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogInfo("[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
+		util.LogDebug("[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
 	}
 	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
 }
@@ -540,7 +540,6 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
-	util.LogDebug("[MESH-DEBUG] binary version with subnet logging")
 }
 
 func (m *MeshManager) Stop() {
@@ -562,17 +561,17 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 		if d == s || strings.HasSuffix(d, "."+s) {
 			// Matched static domain suffix, get target node's subnet
 			targetNodeID := suffix.Via
-			util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
+			util.LogDebug("[MESH] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
 			
 			// Get target node's subnet from topology
 			for _, peer := range m.topology.GetAllPeers() {
 				if peer.NodeID() == targetNodeID && peer.Subnet != nil {
-					util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
+					util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
 					return peer.Subnet
 				}
 			}
 			// Node not found in topology yet, return nil
-			util.LogWarn("[MESH-DEBUG] ResolveDomainSubnet(%s): node %s not found in topology", domain, targetNodeID)
+			util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not found in topology", domain, targetNodeID)
 			return nil
 		}
 	}
@@ -592,7 +591,7 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	if subnet != nil {
 		subnetStr = subnet.String()
 	}
-	util.LogDebug("[MESH-DEBUG] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
+	util.LogDebug("[MESH] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
 	if suffixLen == 0 || len(peers) == 0 {
 		return nil // no match or local entry
 	}
@@ -622,7 +621,7 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// Very visible log for 8.8.8.x to debug IPIP
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogInfo("[IPIP-DEBUG] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
+		util.LogDebug("[IPIP] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
 	}
 
 	// Debug: log all packets to mesh network
@@ -635,10 +634,10 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				proto = "UDP"
 			}
 		}
-		util.LogDebug("[MESH-DEBUG] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
+		util.LogDebug("[MESH] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
 	} else if len(data) >= 20 && data[0]>>4 == 4 {
 		// Log non-mesh IPv4 packets for debugging static routes
-		util.LogDebug("[MESH-DEBUG] HandleOutboundPacket non-mesh: dst=%s len=%d", dstIP, len(data))
+		util.LogDebug("[MESH] HandleOutboundPacket non-mesh: dst=%s len=%d", dstIP, len(data))
 	}
 
 	// Exclude local netstack addresses (GIP .3, hostIP .2) from mesh interception.
@@ -736,7 +735,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 		// Debug log for VIP-like destinations
 		if len(dstIP) >= 4 && dstIP[3] == 1 {
-			util.LogInfo("[MESH-DEBUG] Sending to %s: selected peer=%s (hop=%d, idx=%d/%d)",
+			util.LogDebug("[MESH] Sending to %s: selected peer=%s (hop=%d, idx=%d/%d)",
 				dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
 		}
 
@@ -748,7 +747,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (hop=%d, idx=%d/%d)",
 				dstIP, len(pkt), selectedPeer.GetNodeID(), minHop, idx, count)
 			if len(pkt) >= 20 && pkt[9] == 6 {
-				logTCPPacketMesh("[TCP-DEBUG] outbound:", pkt)
+				logTCPPacketMesh("[TCP] outbound:", pkt)
 			}
 		}
 
@@ -757,7 +756,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		} else {
 			// Debug log for successful sends to VIP-like destinations
 			if len(dstIP) >= 4 && dstIP[3] == 1 {
-				util.LogInfo("[MESH-DEBUG] Successfully sent %d bytes to %s via %s",
+				util.LogDebug("[MESH] Successfully sent %d bytes to %s via %s",
 					len(pkt), dstIP, selectedPeer.GetNodeID())
 			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 				dst := net.IP(pkt[16:20])
@@ -818,7 +817,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
 		if len(frame) >= 20 && frame[9] == 6 {
-			logTCPPacketMesh("[TCP-DEBUG] recv:", frame)
+			logTCPPacketMesh("[TCP] recv:", frame)
 		}
 	}
 
@@ -1387,7 +1386,7 @@ func (m *MeshManager) recomputeRoutes() {
 		if entry.subnet != nil {
 			subnetStr = entry.subnet.String()
 		}
-		util.LogDebug("[MESH-DEBUG] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
+		util.LogDebug("[MESH] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
 		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
 	}
 
@@ -1515,15 +1514,15 @@ type meshEvent struct {
 
 func (m *MeshManager) broadcastGossip() {
 	if m.p2p == nil {
-		util.LogInfo("[MESH] broadcastGossip: p2p is nil")
+		util.LogDebug("[MESH] broadcastGossip: p2p is nil")
 		return
 	}
 	allPeers := m.topology.GetAllPeers()
 	if len(allPeers) == 0 {
-		util.LogInfo("[MESH] broadcastGossip: no peers")
+		util.LogDebug("[MESH] broadcastGossip: no peers")
 		return
 	}
-	util.LogInfo("[MESH] broadcastGossip: sending to %d peers", len(allPeers))
+	util.LogDebug("[MESH] broadcastGossip: sending to %d peers", len(allPeers))
 
 	m.mu.RLock()
 	advertise := make([]string, len(m.advertise))

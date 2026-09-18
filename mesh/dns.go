@@ -227,7 +227,7 @@ func (h *DNSHijacker) serveLoop() {
 		if ok && domain != "" {
 			srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
 			srcPort := res.RemoteAddr.Port
-			util.LogDebug("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
+			util.LogDebug("[DNS] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 		}
 
 		// Queue for async processing by worker pool
@@ -313,7 +313,7 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	copy(remoteGIP, baseIP)
 	remoteGIP[3] |= 3
 
-	util.LogDebug("[DNS-DEBUG] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
+	util.LogDebug("[DNS] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
 
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
 	conn, err := gonet.DialUDP(h.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
@@ -340,7 +340,7 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	if respIP == nil {
 		return nil, 0, fmt.Errorf("no A record in response")
 	}
-	util.LogDebug("[DNS-DEBUG] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
+	util.LogDebug("[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
 	return respIP, ttl, nil
 }
 

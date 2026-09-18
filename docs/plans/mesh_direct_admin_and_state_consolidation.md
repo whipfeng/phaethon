@@ -13,6 +13,7 @@
 |------|------|----------|------|
 | v0.1.0 | 2026-09-17 | 初始版本：直接访问控制台、状态持久化优化 | Qoder |
 | v0.1.1 | 2026-09-18 | 明确DNS解析保持Fake-IP方案，不改为VIP | Qoder |
+| v0.1.2 | 2026-09-18 | 暂停状态持久化优化，优先确保admin handler功能稳定 | Qoder |
 
 ## 1. 背景与目标
 
@@ -52,7 +53,11 @@ Remote app → Fake-IP → NAT → VIP → mesh → HandleMeshFrame
 ### 1.2 目标
 
 1. **直接访问控制台**：mesh 层收到 nodeid.phn 的包后，直接调用 Admin Server 的 handler，不经过 OS 网络栈
-2. **状态持久化统一**：将 mesh 状态（nodeID、subnet）写回 config.yaml，不再使用独立的 mesh-state.json
+2. **状态持久化统一**：将 mesh 状态（nodeID、subnet）写回 config.yaml，不再使用独立的 mesh-state.json（**暂停实施**，优先确保功能稳定）
+
+**实施状态**：
+- ✅ 直接访问控制台功能已实现
+- ⏸️ 状态持久化统一暂停，保持原有 mesh-state.json 方案
 
 ## 2. 直接访问控制台设计
 

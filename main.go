@@ -190,7 +190,6 @@ var subCacheDir string
 // All non-configuration persistent data (reverse-id, bindings, subscription cache)
 // is stored here, separate from the static conf/ directory.
 var dataDir = filepath.Join(".", ".phaethon")
-var configPath = "config.yaml" // default, will be updated in getRuleConf()
 
 func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeResources, error) {
 	if ruleConf == nil {
@@ -264,70 +263,51 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			}
 		}
 
-		// Load mesh state: config.yaml is the source of truth, with migration from mesh-state.json
-		// NodeID priority: config → mesh-state.json (migrate) → generate
-		// Subnet priority: config → mesh-state.json (migrate) → auto-allocate
-
-		// Try to migrate from mesh-state.json if config doesn't have values
-		if ruleConf.Mesh.NodeID == "" || ruleConf.Mesh.GetSubnet() == "" {
-			state, err := mesh.LoadState(dataDir)
-			if err != nil {
-				util.Logger.Printf("WARNING: load mesh-state.json fail: %v", err)
-			}
-			if state != nil {
-				migrated := false
-				if ruleConf.Mesh.NodeID == "" && state.NodeID != "" {
-					ruleConf.Mesh.NodeID = state.NodeID
-					util.Logger.Printf("Mesh: migrated node-id from mesh-state.json to config.yaml: %s", state.NodeID)
-					migrated = true
-				}
-				if ruleConf.Mesh.GetSubnet() == "" && state.Subnet != "" {
-					ruleConf.Mesh.Subnet = state.Subnet
-					util.Logger.Printf("Mesh: migrated subnet from mesh-state.json to config.yaml: %s", state.Subnet)
-					migrated = true
-				}
-				if migrated {
-					// Save updated config
-					if err := config.SaveRaw(configPath, ruleConf); err != nil {
-						util.Logger.Printf("WARNING: save config after mesh migration fail: %v", err)
-					}
-					// Remove old mesh-state.json
-					stateFile := filepath.Join(dataDir, "mesh-state.json")
-					if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
-						util.Logger.Printf("WARNING: remove old mesh-state.json fail: %v", err)
-					} else {
-						util.Logger.Printf("Mesh: removed old mesh-state.json (migrated to config.yaml)")
-					}
-				}
-			}
+		// Load or create mesh state (nodeID, subnet)
+		state, err := mesh.LoadState(dataDir)
+		if err != nil {
+			util.Logger.Printf("WARNING: load mesh state fail: %v, will create new", err)
+			state = nil
+		}
+		if state == nil {
+			state = &mesh.MeshState{}
 		}
 
-		// Generate nodeID if still empty
-		if ruleConf.Mesh.NodeID == "" {
-			ruleConf.Mesh.NodeID, err = mesh.GenerateNodeID()
+		// NodeID: config migration → state → generate
+		if ruleConf.Mesh.NodeID != "" {
+			// Migrate from config to state (one-time)
+			state.NodeID = ruleConf.Mesh.NodeID
+			util.Logger.Printf("Mesh: migrated node-id from config to state: %s", state.NodeID)
+		} else if state.NodeID == "" {
+			// Generate new nodeID
+			state.NodeID, err = mesh.GenerateNodeID()
 			if err != nil {
 				return nil, fmt.Errorf("mesh generate node id fail: %w", err)
 			}
-			util.Logger.Printf("Mesh: generated new nodeID: %s", ruleConf.Mesh.NodeID)
+			util.Logger.Printf("Mesh: generated new nodeID: %s", state.NodeID)
 		}
 
-		// Auto-allocate subnet if still empty
-		if ruleConf.Mesh.GetSubnet() == "" {
-			ruleConf.Mesh.Subnet, err = mesh.AllocateSubnet(meshNetwork, subnetPrefixLen, nil)
+		// Subnet: config → state → auto-allocate
+		meshSubnetStr := ruleConf.Mesh.GetSubnet()
+		if meshSubnetStr != "" {
+			// Config has subnet, use it
+			state.Subnet = meshSubnetStr
+		} else if state.Subnet == "" {
+			// Auto-allocate (will be refined later with conflict detection)
+			state.Subnet, err = mesh.AllocateSubnet(meshNetwork, subnetPrefixLen, nil)
 			if err != nil {
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
-			util.Logger.Printf("Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
-			// Save updated config with auto-allocated subnet
-			if err := config.SaveRaw(configPath, ruleConf); err != nil {
-				util.Logger.Printf("WARNING: save config after subnet allocation fail: %v", err)
-			}
+			util.Logger.Printf("Mesh: auto-allocated subnet: %s", state.Subnet)
 		}
 
-		meshSubnetStr := ruleConf.Mesh.GetSubnet()
+		// Save state
+		if err := mesh.SaveState(dataDir, state); err != nil {
+			return nil, fmt.Errorf("mesh save state fail: %w", err)
+		}
 
 		// Parse subnet and derive VIP
-		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
+		_, meshSubnet, err := net.ParseCIDR(state.Subnet)
 		if err != nil {
 			return nil, fmt.Errorf("mesh subnet invalid: %w", err)
 		}
@@ -335,7 +315,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 		advertise := ruleConf.Mesh.GetAdvertise()
-		meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
+		meshMgr = mesh.NewMeshManager(state.NodeID, vip, nil, meshSubnet, state.Subnet, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
 		meshMgr.SetDataDir(dataDir)
 		
 		// Set static IPIP routes
@@ -344,9 +324,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		meshMgr.SetStaticRoutes(staticRoutes, staticDomainSuffixes)
 		
 		mesh.GlobalMeshManager = meshMgr
-		p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, vip.String())
+		p2p.GlobalP2PManager.SetMeshInfo(state.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
+		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", state.NodeID, vip, state.Subnet, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference
@@ -357,7 +337,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-	res.tunRes = startEngine(ruleConf, meshMgr, nil)
+	res.tunRes = startEngine(ruleConf, meshMgr)
 	if res.tunRes != nil {
 		res.meshMgr = meshMgr
 	}
@@ -531,11 +511,11 @@ func getRuleConf() *config.RuleConfiguration {
 	}
 
 	// 2. Load config.yaml from working directory.
-	configPath = filepath.Join(workDir, "config.yaml")
+	configFile := filepath.Join(workDir, "config.yaml")
 	var ruleConf *config.RuleConfiguration
-	if _, err := os.Stat(configPath); err == nil {
-		util.Logger.Printf("configPath=%s", configPath)
-		conf, err := config.LoadRaw(configPath)
+	if _, err := os.Stat(configFile); err == nil {
+		util.Logger.Printf("configPath=%s", configFile)
+		conf, err := config.LoadRaw(configFile)
 		if err != nil {
 			util.Logger.Printf("ERROR: load config fail: %v", err)
 		} else {
@@ -544,11 +524,11 @@ func getRuleConf() *config.RuleConfiguration {
 	} else if os.IsNotExist(err) {
 		// Write the embedded default config to disk on first run, substituting
 		// a generated admin token so users have a working config immediately.
-		util.Logger.Printf("no config.yaml found, generating initial config at %s", configPath)
-		if genErr := writeDefaultConfig(configPath); genErr != nil {
+		util.Logger.Printf("no config.yaml found, generating initial config at %s", configFile)
+		if genErr := writeDefaultConfig(configFile); genErr != nil {
 			util.Logger.Printf("ERROR: generate initial config fail: %v", genErr)
 		} else {
-			conf, loadErr := config.LoadRaw(configPath)
+			conf, loadErr := config.LoadRaw(configFile)
 			if loadErr != nil {
 				util.Logger.Printf("ERROR: load generated config fail: %v", loadErr)
 			} else {

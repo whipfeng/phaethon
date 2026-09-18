@@ -266,9 +266,9 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 			remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
 			if err != nil {
 				util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
-				// Fallback to local pool
-				fakeIP := h.pool.Lookup(domain)
-				resp := buildDNSResponse(packet, fakeIP.To4())
+				// Return SERVFAIL instead of fallback to local pool
+				// This allows the client to retry and get the correct IP once mesh recovers
+				resp := buildDNSErrorResponse(packet)
 				if resp != nil {
 					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
 				}
@@ -440,6 +440,40 @@ func buildDNSResponse(query []byte, ip net.IP) []byte {
 	resp = append(resp, 0x00, 0x00, 0x00, 0x05) // TTL 5
 	resp = append(resp, 0x00, 0x04)             // RDLENGTH
 	resp = append(resp, ip...)
+	return resp
+}
+
+// buildDNSErrorResponse builds a SERVFAIL DNS response.
+func buildDNSErrorResponse(query []byte) []byte {
+	if len(query) < 12 {
+		return nil
+	}
+	resp := make([]byte, 0, len(query))
+	// Transaction ID
+	resp = append(resp, query[0], query[1])
+	// Flags: response + SERVFAIL (RCODE=2)
+	resp = append(resp, 0x80, 0x02)
+	// QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+	resp = append(resp, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+	// Copy question section
+	qoff := 12
+	for qoff < len(query) {
+		llen := int(query[qoff])
+		if llen == 0 {
+			resp = append(resp, 0x00)
+			qoff++
+			break
+		}
+		if qoff+1+llen > len(query) {
+			return nil
+		}
+		resp = append(resp, query[qoff:qoff+1+llen]...)
+		qoff += 1 + llen
+	}
+	// Copy QTYPE and QCLASS
+	if qoff+4 <= len(query) {
+		resp = append(resp, query[qoff:qoff+4]...)
+	}
 	return resp
 }
 

@@ -1105,6 +1105,39 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		}
 	}
 
+	// Ensure all nodes referenced in edges are included in the node list
+	// This handles non-adjacent nodes learned via gossip
+	for _, e := range edgeSet {
+		for _, nodeID := range []string{e.From, e.To} {
+			if !nodeSet[nodeID] {
+				nodeSet[nodeID] = true
+				// Try to find subnet info from peers' claimed subnets
+				var vip, subnet string
+				for _, p := range peers {
+					for _, cs := range p.ClaimedSubnets {
+						if cs.NodeID == nodeID {
+							subnet = cs.SubnetStr
+							if cs.Subnet != nil {
+								if v := DeriveVIPFromSubnet(cs.Subnet); v != nil {
+									vip = v.String()
+								}
+							}
+							break
+						}
+					}
+					if subnet != "" {
+						break
+					}
+				}
+				nodes = append(nodes, FullTopologyNode{
+					NodeID: nodeID,
+					VIP:    vip,
+					Subnet: subnet,
+				})
+			}
+		}
+	}
+
 	edges := make([]FullTopologyEdge, 0, len(edgeSet))
 	for _, e := range edgeSet {
 		edges = append(edges, e)
@@ -1428,11 +1461,13 @@ func (m *MeshManager) gossipLoop() {
 			case meshEventRegister:
 				m.topology.RegisterPeer(ev.sender)
 				m.recomputeRoutes()
+				util.DefaultVersionNotifier.BumpVersion("mesh")
 				util.LogInfo("[MESH] peer registered: %s", ev.sender.GetNodeID())
 			case meshEventUnregister:
 				nodeID := ev.sender.GetNodeID()
 				m.topology.UnregisterPeer(ev.sender)
 				m.recomputeRoutes()
+				util.DefaultVersionNotifier.BumpVersion("mesh")
 				util.LogInfo("[MESH] peer unregistered: %s", nodeID)
 			case meshEventGossip:
 				var info GossipInfo
@@ -1443,6 +1478,7 @@ func (m *MeshManager) gossipLoop() {
 				util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), info.Subnet, len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.recomputeRoutes()
+					util.DefaultVersionNotifier.BumpVersion("mesh")
 				}
 				// Check for subnet conflicts and re-select if needed
 				if m.checkSubnetConflict() {
@@ -1452,6 +1488,7 @@ func (m *MeshManager) gossipLoop() {
 			case meshEventConfigUpdate:
 				m.recomputeRoutes()
 				m.broadcastGossip()
+				util.DefaultVersionNotifier.BumpVersion("mesh")
 				m.mu.RLock()
 				util.LogInfo("[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
 				m.mu.RUnlock()

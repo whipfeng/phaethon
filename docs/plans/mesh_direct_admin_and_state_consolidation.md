@@ -15,6 +15,7 @@
 | v0.1.1 | 2026-09-18 | 明确DNS解析保持Fake-IP方案，不改为VIP | Qoder |
 | v0.1.2 | 2026-09-18 | 暂停状态持久化优化，优先确保admin handler功能稳定 | Qoder |
 | v0.1.3 | 2026-09-18 | 添加VIP路由调试日志，排查mesh包传输问题 | Qoder |
+| v0.1.4 | 2026-09-18 | 添加mesh-only模式支持，控制台仅通过mesh访问 | Qoder |
 
 ## 1. 背景与目标
 
@@ -58,6 +59,7 @@ Remote app → Fake-IP → NAT → VIP → mesh → HandleMeshFrame
 
 **实施状态**：
 - ✅ 直接访问控制台功能已实现
+- ✅ mesh-only 模式已实现（控制台仅通过 mesh 访问）
 - ⏸️ 状态持久化统一暂停，保持原有 mesh-state.json 方案
 
 ## 2. 直接访问控制台设计
@@ -192,6 +194,94 @@ func (e *Engine) SetAdminHandler(admin *admin.AdminServer) {
 - 如果 `adminHandler` 为 nil，fallback 到原来的 dial localhost 方式
 - 不影响现有的 TUN/netstack 流程
 - Admin Server 仍然可以正常监听端口，接受外部直接访问
+
+### 2.5 Mesh-Only 模式
+
+**配置选项**：
+
+```yaml
+admin:
+  enabled: true
+  addr: ":39999"
+  mesh-only: true  # 仅通过 mesh 网络访问，不监听网络端口
+```
+
+**实现逻辑**：
+
+当 `mesh-only: true` 时：
+1. AdminServer 仍然创建 `http.Server` 和 TLS 配置
+2. **不创建网络 listener**（不调用 `net.Listen`）
+3. 不监听任何网络端口
+4. 只能通过 mesh 网络的 `ServeConn` 访问控制台
+
+**代码修改**：
+
+```go
+// admin/admin.go
+
+func (s *AdminServer) Start() error {
+    if !s.config.Enabled {
+        util.LogInfo("[ADMIN] disabled, skipping")
+        return nil
+    }
+
+    mux := http.NewServeMux()
+    s.registerRoutes(mux)
+
+    // Create http.Server
+    s.server = &http.Server{
+        Handler:      s.securityHeadersMiddleware(s.authMiddleware(mux)),
+        ReadTimeout:  15 * time.Second,
+        WriteTimeout: 120 * time.Second,
+        IdleTimeout:  60 * time.Second,
+    }
+
+    // Setup TLS if configured
+    if s.config.TLSCert != "" && s.config.TLSKey != "" {
+        cert, err := tls.LoadX509KeyPair(s.config.TLSCert, s.config.TLSKey)
+        if err != nil {
+            return fmt.Errorf("admin load TLS cert/key fail: %w", err)
+        }
+        s.tlsConfig = &tls.Config{
+            Certificates: []tls.Certificate{cert},
+        }
+        s.server.TLSConfig = s.tlsConfig
+    }
+
+    // Skip network listener if mesh-only mode
+    if s.config.MeshOnly {
+        util.LogInfo("[ADMIN] mesh-only mode enabled, no network listener")
+        // Start background tasks (heartbeat, SSE broadcaster)
+        util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
+        s.sseStopCh = make(chan struct{})
+        s.sseWG.Add(1)
+        go s.sseBroadcaster()
+        return nil
+    }
+
+    // Create network listener and start serving
+    addr := s.config.Addr
+    ln, err := net.Listen("tcp", addr)
+    // ... rest of existing code
+}
+```
+
+**使用场景**：
+
+1. **安全隔离**：控制台仅通过 mesh 网络访问，不暴露到物理网络
+2. **零信任架构**：即使物理网络被攻破，控制台仍然安全
+3. **简化配置**：不需要配置端口、防火墙规则等
+
+**访问方式**：
+
+- 本地节点：`http://nodeid.phn:39999/` 或 `https://nodeid.phn:39999/`（如果配置了 TLS）
+- 远程节点：通过 mesh 网络访问目标节点的 nodeid.phn
+
+**注意事项**：
+
+- `mesh-only` 模式下，`addr` 配置仍然需要（用于日志和默认值），但不会实际监听
+- TLS 证书仍然有效，用于 mesh 连接的加密
+- 后台任务（版本心跳、SSE 广播）仍然正常运行
 
 ## 3. 状态持久化优化设计
 

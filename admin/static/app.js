@@ -808,7 +808,7 @@ async function fetchMeshStatus() {
         const directPeers = {};
         (data.peers || []).forEach(p => { directPeers[p.nodeId] = p.direct; });
 
-        // Topology peers
+        // Topology peers - show all nodes from fullTopology
         const peers = (data.topology && data.topology.peers) || [];
         const peerCountEl = document.getElementById('mesh-peercount');
         if (peerCountEl) peerCountEl.textContent = peers.length;
@@ -816,20 +816,32 @@ async function fetchMeshStatus() {
         const tbody = document.getElementById('mesh-topology');
         if (tbody) {
             let html = '';
-            peers.forEach(p => {
-                const lastSeen = p.lastSeen ? timeAgo(new Date(p.lastSeen)) : '-';
-                const isDirect = directPeers[p.nodeId] === true;
-                const statusClass = isDirect ? 'online' : 'offline';
-                const statusText = isDirect ? 'Direct' : 'Relay';
+            // Use fullTopology nodes if available, otherwise fallback to peers
+            const allNodes = (fullTopology && fullTopology.nodes && fullTopology.nodes.length > 0) 
+                ? fullTopology.nodes 
+                : peers.map(p => ({ nodeId: p.nodeId, subnet: p.subnet, vip: '' }));
+            
+            allNodes.forEach(n => {
+                const nodeId = n.nodeId;
+                const isDirect = directPeers[nodeId] === true;
+                const isLocal = nodeId === data.nodeId;
+                const statusClass = isLocal ? 'local' : (isDirect ? 'online' : 'relay');
+                const statusText = isLocal ? 'Local' : (isDirect ? 'Direct' : 'Relay');
+                const lastSeen = isLocal ? '-' : (directPeers[nodeId] !== undefined ? timeAgo(new Date()) : '-');
+                const adminUrl = isLocal ? '#' : ('https://' + escapeHtml(nodeId) + '.phn/');
+                const btnClass = isLocal ? 'btn btn-sm btn-secondary' : 'btn btn-sm btn-outline';
+                const btnText = isLocal ? 'Current' : 'Open';
+                const btnDisabled = isLocal ? 'disabled' : '';
                 html += '<tr>';
-                html += '<td>' + escapeHtml(p.nodeId) + '</td>';
-                html += '<td><code>' + escapeHtml(p.subnet || '-') + '</code></td>';
-                html += '<td>-</td>';
+                html += '<td>' + escapeHtml(nodeId) + '</td>';
+                html += '<td><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
+                html += '<td><code>' + escapeHtml(n.vip || '-') + '</code></td>';
                 html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td>' + lastSeen + '</td>';
+                html += '<td><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
                 html += '</tr>';
             });
-            tbody.innerHTML = html || '<tr><td colspan="5" class="text-muted">No peers</td></tr>';
+            tbody.innerHTML = html || '<tr><td colspan="6" class="text-muted">No nodes</td></tr>';
         }
 
         // Draw topology visualization
@@ -892,11 +904,11 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas size based on container
+    // Set canvas size based on container - use full width, fixed height
     const container = canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.min(container.clientWidth - 32, 500);
-    const height = 280;
+    const width = container.clientWidth - 32;
+    const height = 350;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + 'px';

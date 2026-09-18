@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"html/template"
 	"image"
@@ -24,7 +29,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -268,6 +272,7 @@ type AdminServer struct {
 	stats      *StatsCollector
 	server     *http.Server
 	ln         net.Listener
+	tlsConfig  *tls.Config // cached TLS config for ServeConn
 	mu         sync.RWMutex
 	confPath   string // path to the config.yaml file for saving
 
@@ -380,16 +385,39 @@ func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defa
 		defaultRaw: defaultRaw,
 	}
 
-	// Generate a per-process random fallback session secret so deployments
-	// without an explicit admin.token are not protected by a hardcoded default.
-	s.sessionSecret = make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, s.sessionSecret); err != nil {
-		util.LogError("[ADMIN] failed to generate session secret: %v", err)
-		s.sessionSecret = nil
-	}
+	// Load or generate a persistent session secret so sessions survive restarts.
+	// If admin.token is configured, it will be used as the signing key instead.
+	s.sessionSecret = s.loadOrGenerateSessionSecret()
 
 	s.parseTemplates()
 	return s
+}
+
+// loadOrGenerateSessionSecret loads the session secret from a file or generates a new one.
+func (s *AdminServer) loadOrGenerateSessionSecret() []byte {
+	secretFile := "admin-session-secret.key"
+	
+	// Try to load existing secret
+	if data, err := os.ReadFile(secretFile); err == nil && len(data) == 32 {
+		util.LogInfo("[ADMIN] loaded session secret from %s", secretFile)
+		return data
+	}
+	
+	// Generate new secret
+	secret := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+		util.LogError("[ADMIN] failed to generate session secret: %v", err)
+		return nil
+	}
+	
+	// Save to file
+	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
+		util.LogWarn("[ADMIN] failed to save session secret to %s: %v", secretFile, err)
+	} else {
+		util.LogInfo("[ADMIN] generated and saved session secret to %s", secretFile)
+	}
+	
+	return secret
 }
 
 // Stats returns the stats collector for instrumentation.
@@ -649,13 +677,6 @@ func (s *AdminServer) Start() error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
-	addr := s.config.Addr
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("admin listen on %s fail: %w", addr, err)
-	}
-	s.ln = ln
-
 	s.server = &http.Server{
 		Handler:      s.securityHeadersMiddleware(s.authMiddleware(mux)),
 		ReadTimeout:  15 * time.Second,
@@ -663,11 +684,61 @@ func (s *AdminServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Use TLS if certificate and key are configured
+	// Setup TLS if certificate and key are configured, or auto-generate if needed
 	if s.config.TLSCert != "" && s.config.TLSKey != "" {
+		cert, err := tls.LoadX509KeyPair(s.config.TLSCert, s.config.TLSKey)
+		if err != nil {
+			return fmt.Errorf("admin load TLS cert/key fail: %w", err)
+		}
+		s.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		s.server.TLSConfig = s.tlsConfig
+	} else if s.config.MeshOnly || s.config.Enabled {
+		// Auto-generate TLS certificate if not configured
+		// This ensures HTTPS always works for mesh access
+		cert, key, err := generateSelfSignedCert()
+		if err != nil {
+			util.LogWarn("[ADMIN] failed to auto-generate TLS cert: %v, falling back to HTTP", err)
+		} else {
+			tlsCert, err := tls.X509KeyPair(cert, key)
+			if err != nil {
+				util.LogWarn("[ADMIN] failed to parse auto-generated TLS cert: %v, falling back to HTTP", err)
+			} else {
+				s.tlsConfig = &tls.Config{
+					Certificates: []tls.Certificate{tlsCert},
+				}
+				s.server.TLSConfig = s.tlsConfig
+				util.LogInfo("[ADMIN] auto-generated self-signed TLS certificate")
+			}
+		}
+	}
+
+	// Skip network listener if mesh-only mode
+	if s.config.MeshOnly {
+		util.LogInfo("[ADMIN] mesh-only mode enabled, no network listener")
+		// Start the global version heartbeat
+		util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
+		s.sseStopCh = make(chan struct{})
+		s.sseWG.Add(1)
+		go s.sseBroadcaster()
+		return nil
+	}
+
+	addr := s.config.Addr
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("admin listen on %s fail: %w", addr, err)
+	}
+	s.ln = ln
+
+	// Use TLS if certificate and key are configured
+	if s.tlsConfig != nil {
 		util.LogInfo("[ADMIN] starting on https://%s", addr)
 		go func() {
-			if err := s.server.ServeTLS(ln, s.config.TLSCert, s.config.TLSKey); err != nil && err != http.ErrServerClosed {
+			// Wrap listener with TLS and use Serve (not ServeTLS)
+			tlsLn := tls.NewListener(ln, s.tlsConfig)
+			if err := s.server.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
 				util.LogError("[ADMIN] serve error: %v", err)
 			}
 		}()
@@ -715,28 +786,61 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	ln := &singleConnListener{conn: conn}
-	// Serve blocks until the connection is closed
-	if err := s.server.Serve(ln); err != nil && err != io.EOF {
-		util.LogDebug("[ADMIN] ServeConn ended: %v", err)
+	
+	util.LogInfo("[ADMIN] ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
+	
+	// Wrap connection with TLS if configured (same as Start() does)
+	var handledConn net.Conn
+	if s.tlsConfig != nil {
+		util.LogInfo("[ADMIN] Wrapping connection with TLS")
+		handledConn = tls.Server(conn, s.tlsConfig)
+	} else {
+		handledConn = conn
 	}
+	
+	ln := newSingleConnListener(handledConn)
+	// Serve blocks until the connection is closed
+	util.LogInfo("[ADMIN] Calling server.Serve")
+	if err := s.server.Serve(ln); err != nil && err != io.EOF {
+		util.LogInfo("[ADMIN] ServeConn ended: %v", err)
+	}
+	util.LogInfo("[ADMIN] ServeConn finished")
 }
 
-// singleConnListener is a net.Listener that yields a single connection then returns EOF.
+// singleConnListener is a net.Listener that yields a single connection then blocks until it's closed.
 type singleConnListener struct {
-	conn net.Conn
-	done atomic.Bool
+	conn   net.Conn
+	once   sync.Once
+	doneCh chan struct{}
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	return &singleConnListener{
+		conn:   conn,
+		doneCh: make(chan struct{}),
+	}
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
-	if l.done.Swap(true) {
-		return nil, io.EOF
+	var conn net.Conn
+	l.once.Do(func() {
+		conn = l.conn
+	})
+	if conn != nil {
+		return conn, nil
 	}
-	return l.conn, nil
+	// Block until the connection is closed
+	<-l.doneCh
+	return nil, io.EOF
 }
 
 func (l *singleConnListener) Close() error {
-	l.done.Store(true)
+	select {
+	case <-l.doneCh:
+		// Already closed
+	default:
+		close(l.doneCh)
+	}
 	return nil
 }
 
@@ -4719,4 +4823,42 @@ func (s *AdminServer) GetConfig() *config.RuleConfiguration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.conf
+}
+
+// generateSelfSignedCert generates a self-signed TLS certificate and key.
+// Returns PEM-encoded certificate and key.
+func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
+	// Generate private key
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate key fail: %w", err)
+	}
+
+	// Create certificate template
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Phaethon"},
+			CommonName:   "Phaethon Admin",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost", "*.phn"},
+	}
+
+	// Create certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create certificate fail: %w", err)
+	}
+
+	// Encode to PEM
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+
+	return certPEM, keyPEM, nil
 }

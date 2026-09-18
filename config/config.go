@@ -1217,6 +1217,7 @@ type AdminConfig struct {
 	Password    string `yaml:"password"`
 	TLSCert     string `yaml:"tls-cert,omitempty"`
 	TLSKey      string `yaml:"tls-key,omitempty"`
+	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener
 }
 
 // ReverseConfig holds configuration for running as a reverse client.

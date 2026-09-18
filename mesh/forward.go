@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"net"
+	"phaethon/util"
 )
 
 // Mesh v2: raw IP packets are sent directly over P2P, no mesh frame header.
@@ -25,6 +26,7 @@ func SetMeshCIDR(cidr string) error {
 		return err
 	}
 	meshCIDR = network
+	util.LogInfo("[MESH] meshCIDR set to %s", cidr)
 	return nil
 }
 

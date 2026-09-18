@@ -4070,6 +4070,9 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	result["topology"] = mesh.GlobalMeshManager.GetTopology()
 	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
 	result["peers"] = mesh.GlobalMeshManager.GetPeers()
+	if cidr := mesh.GetMeshCIDR(); cidr != nil {
+		result["meshCIDR"] = cidr.String()
+	}
 	jsonResponse(w, result)
 }
 

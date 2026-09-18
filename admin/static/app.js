@@ -870,6 +870,63 @@ async function fetchMeshStatus() {
                 routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No routes</td></tr>';
             }
         }
+
+        // Domain suffix routes - collect from topology peers
+        const domainRouteTbody = document.getElementById('mesh-domain-routes');
+        if (domainRouteTbody) {
+            let html = '';
+            const domainRoutes = [];
+            const topoPeers = (data.topology && data.topology.peers) || [];
+            
+            // Collect domain suffixes from all peers
+            topoPeers.forEach(peer => {
+                const suffixes = peer.domainSuffixes || [];
+                suffixes.forEach(s => {
+                    domainRoutes.push({
+                        domain: s.Suffix,
+                        subnet: s.SubnetStr,
+                        via: peer.nodeId,
+                        hop: s.Hop
+                    });
+                });
+            });
+            
+            // Also add auto-generated nodeID.phn entries
+            topoPeers.forEach(peer => {
+                if (peer.nodeId && peer.subnet) {
+                    domainRoutes.push({
+                        domain: peer.nodeId + '.phn',
+                        subnet: peer.subnet,
+                        via: peer.nodeId,
+                        hop: 1
+                    });
+                }
+            });
+            
+            // Add self
+            if (data.nodeId && data.subnet) {
+                domainRoutes.push({
+                    domain: data.nodeId + '.phn',
+                    subnet: data.subnet,
+                    via: 'local',
+                    hop: 0
+                });
+            }
+            
+            // Sort by domain name
+            domainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
+            
+            domainRoutes.forEach(r => {
+                const hopClass = r.hop <= 1 ? 'direct' : '';
+                html += '<tr>';
+                html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
+                html += '<td><code>' + escapeHtml(r.subnet) + '</code></td>';
+                html += '<td>' + escapeHtml(r.via) + '</td>';
+                html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + r.hop + '</span></td>';
+                html += '</tr>';
+            });
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No domain routes</td></tr>';
+        }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);
     }

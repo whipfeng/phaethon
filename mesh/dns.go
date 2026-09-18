@@ -32,6 +32,8 @@ type DNSHijacker struct {
 
 	// Cross-node DNS forwarding
 	resolveDomainSubnet func(domain string) *net.IPNet // nil = local or no match
+	isLocalMeshDomain   func(domain string) bool       // true = local mesh domain
+	getLocalVIP         func() net.IP                  // returns this node's VIP
 	cache               *DNSCache
 
 	// Async query processing
@@ -112,6 +114,17 @@ func (h *DNSHijacker) IsBound() bool {
 // for a domain. Returns nil for local domains or no match.
 func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) *net.IPNet) {
 	h.resolveDomainSubnet = resolver
+}
+
+// SetLocalMeshDomainChecker registers a callback that returns true if the domain
+// belongs to this node's mesh domain suffixes.
+func (h *DNSHijacker) SetLocalMeshDomainChecker(checker func(domain string) bool) {
+	h.isLocalMeshDomain = checker
+}
+
+// SetLocalVIPProvider registers a callback that returns this node's VIP.
+func (h *DNSHijacker) SetLocalVIPProvider(provider func() net.IP) {
+	h.getLocalVIP = provider
 }
 
 // Start binds a UDP socket on port 53 inside netstack and starts the serve loop.
@@ -284,7 +297,22 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		}
 	}
 
-	// Local pool resolution (default)
+	// Check if domain belongs to this node (local mesh domain)
+	if h.isLocalMeshDomain != nil && h.getLocalVIP != nil {
+		if h.isLocalMeshDomain(domain) {
+			vip := h.getLocalVIP()
+			if vip != nil {
+				util.LogInfo("tun dns: %s -> %s (local mesh)", domain, vip)
+				resp := buildDNSResponse(packet, vip.To4())
+				if resp != nil {
+					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+				}
+				return
+			}
+		}
+	}
+
+	// Local pool resolution (default for external domains)
 	fakeIP := h.pool.Lookup(domain)
 	util.LogInfo("tun dns: %s -> %s", domain, fakeIP)
 	resp := buildDNSResponse(packet, fakeIP.To4())

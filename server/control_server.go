@@ -311,10 +311,12 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 		return reverse.ControlReply{Status: "error", Error: "reverse identity already connected from another instance"}
 	}
 
-	// Clean up any stale bindings for this reverseID (from previous sessions with different seq).
-	// This allows a restarted client to reclaim its ports.
+	// Clean up stale binding for this exact (reverseID, seq) so the port can be
+	// reclaimed. We must NOT remove bindings for other seq values — a single
+	// instance can register multiple reverse configs that share the same reverseID
+	// but differ in seq.
 	if req.ReverseID != "" {
-		m.bindingStore.RemoveByReverseID(req.ReverseID)
+		m.bindingStore.Remove(req.ReverseID, req.Seq)
 	}
 
 	// Generate unique address
@@ -352,7 +354,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 		}
 	}
 
-	// Create dynamic listener with full credentials
+	// Create dynamic listener with full credentials.
 	listener, mapping, err := m.createListener(listenerProto, port, dynAddr,
 		req.ListenerUser, req.ListenerPassword, req.ListenerSNI,
 		req.DirectDstHost, req.DirectDstPort)
@@ -616,32 +618,22 @@ func (m *ControlManager) createListener(proto string, port int, dynAddr string,
 
 	switch proto {
 	case "socks5":
-		srv := &Socks5Server{BaseServer: BaseServer{RuleConf: m.ruleConf, Mapping: mapping}}
 		ln, err = StartSocks5(m.ruleConf, mapping)
 		if err != nil {
 			return nil, nil, err
 		}
-		go srv.Serve(ln)
 
 	case "trojan":
-		pw := util.Sha224Hex(password)
-		srv := &TrojanServer{
-			BaseServer: BaseServer{RuleConf: m.ruleConf, Mapping: mapping},
-			Password:   pw,
-		}
 		ln, err = StartTrojan(m.ruleConf, mapping)
 		if err != nil {
 			return nil, nil, err
 		}
-		go srv.Serve(ln)
 
 	case "direct":
 		ln, err = StartDirect(m.ruleConf, mapping)
 		if err != nil {
 			return nil, nil, err
 		}
-		srv := &DirectServer{BaseServer: BaseServer{RuleConf: m.ruleConf, Mapping: mapping}}
-		go srv.Serve(ln)
 
 	default:
 		return nil, nil, fmt.Errorf("unsupported listener protocol: %s", proto)

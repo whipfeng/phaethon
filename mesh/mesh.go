@@ -381,6 +381,10 @@ func (m *MeshManager) GetSubnet() string {
 	return m.subnetStr
 }
 
+func (m *MeshManager) GetNetwork() *net.IPNet {
+	return m.network
+}
+
 func (m *MeshManager) EnableNAT() {
 	m.natTable = NewNATTable(m.vip)
 	util.LogInfo("[MESH] NAT enabled (vip=%s)", m.vip)
@@ -749,6 +753,24 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			if len(pkt) >= 20 && pkt[9] == 6 {
 				logTCPPacketMesh("[TCP] outbound:", pkt)
 			}
+		} else if len(data) >= 20 && data[0]>>4 == 4 {
+			// Log non-mesh IPv4 packets sent via mesh (advertised route traffic)
+			isSYN := false
+			if data[9] == 6 {
+				hl := int(data[0]&0x0f) * 4
+				if len(data) >= hl+14 {
+					flags := data[hl+13]
+					isSYN = (flags&0x02) != 0 && (flags&0x10) == 0
+				}
+			}
+			if isSYN {
+				util.LogInfo("[MESH-DIAG] outbound SYN via mesh: src=%s dst=%s:%d via=%s (hop=%d)",
+					net.IP(data[12:16]), dstIP, uint16(data[int(data[0]&0x0f)*4])<<8|uint16(data[int(data[0]&0x0f)*4+1]),
+					selectedPeer.GetNodeID(), minHop)
+			} else {
+				util.LogDebug("[MESH-DIAG] outbound non-mesh via mesh: src=%s dst=%s proto=%d len=%d via=%s",
+					net.IP(data[12:16]), dstIP, data[9], len(data), selectedPeer.GetNodeID())
+			}
 		}
 
 		if err := selectedPeer.Send(pkt); err != nil {
@@ -903,23 +925,37 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if route == nil || len(route.Peers) == 0 {
 		// No mesh route — we're the gateway for this destination.
 		// Inject into local netstack so it goes out via proxy/direct.
-		if isMeshAddress(dstIP) {
-			proto := "unknown"
-			if len(frame) >= 20 {
-				switch frame[9] {
-				case 6:
-					proto = "TCP"
-				case 17:
-					proto = "UDP"
+		routeInfo := "no route"
+		if route != nil {
+			routeInfo = fmt.Sprintf("local route %s", route.Prefix)
+		}
+		proto := "unknown"
+		isTCPSYN := false
+		if len(frame) >= 20 {
+			switch frame[9] {
+			case 6:
+				proto = "TCP"
+				headerLen := int(frame[0]&0x0f) * 4
+				if len(frame) >= headerLen+14 {
+					tcpFlags := frame[headerLen+13]
+					isTCPSYN = (tcpFlags&0x02) != 0 && (tcpFlags&0x10) == 0 // SYN set, ACK not set
 				}
+			case 17:
+				proto = "UDP"
 			}
-			util.LogDebug("[MESH] recv frame from %s: dst=%s proto=%s injecting to local netstack", fromNodeID, dstIP, proto)
+		}
+		if isTCPSYN {
+			util.LogInfo("[MESH-DIAG] gateway deliver SYN: from=%s src=%s dst=%s len=%d (%s)",
+				fromNodeID, srcIP, dstIP, len(frame), routeInfo)
+		} else {
+			util.LogDebug("[MESH-DIAG] gateway deliver: from=%s src=%s dst=%s proto=%s len=%d (%s)",
+				fromNodeID, srcIP, dstIP, proto, len(frame), routeInfo)
 		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
 		if m.tun != nil {
 			if err := m.tun.InjectMeshPacket(pkt); err != nil {
-				util.LogWarn("[MESH] inject to local netstack failed: %v", err)
+				util.LogWarn("[MESH-DIAG] inject to local netstack failed: %v", err)
 			}
 		}
 		return

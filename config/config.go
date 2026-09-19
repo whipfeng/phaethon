@@ -1845,6 +1845,21 @@ func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) (*Prox
 	return nil, nil
 }
 
+// FindMapping returns the mapping with the given name, or nil if not found.
+func (c *RuleConfiguration) FindMapping(name string) *Mapping {
+	if c == nil || name == "" {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, m := range c.Mappings {
+		if m.Name == name {
+			return m
+		}
+	}
+	return nil
+}
+
 // PrependTimeRange adds a zero (always-match) TimeRange at the front of
 // matcherTimeRanges. Call this when prepending a Matcher externally.
 func (c *RuleConfiguration) PrependTimeRange() {

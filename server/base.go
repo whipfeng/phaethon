@@ -21,13 +21,17 @@ type BaseServer struct {
 // MeshDialWithModeB dials through mesh and handles Mode B registration automatically.
 // The returned conn will unregister from ModeBTable when closed.
 func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
-	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound)
+	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound, b.Mapping)
 	if err != nil {
 		return nil, err
 	}
-	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort}, nil
+	// Get the source port assigned by the netstack
+	srcPort := uint16(0)
+	if localAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+		srcPort = uint16(localAddr.Port)
+	}
+	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort, srcPort: srcPort}, nil
 }
-
 // LogMeshConnection logs a successful mesh connection and tracks it as active.
 // Returns a cleanup function that should be deferred.
 func (b *BaseServer) LogMeshConnection(connID, proto, clientAddr, dstAddr string, dstPort int) (cleanup func()) {
@@ -42,13 +46,14 @@ type modeBConn struct {
 	net.Conn
 	dstAddr string
 	dstPort int
+	srcPort uint16 // source port assigned by netstack (for ModeBTable lookup)
 	closed  bool
 }
 
 func (c *modeBConn) Close() error {
 	if !c.closed {
 		c.closed = true
-		dialer.UnregisterModeB(6, c.dstAddr, c.dstPort)
+		dialer.UnregisterModeB(6, c.dstAddr, c.dstPort, c.srcPort)
 	}
 	return c.Conn.Close()
 }

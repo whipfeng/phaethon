@@ -86,36 +86,31 @@
             </table>
         </div>
 
-        <!-- Config (collapsible) -->
-        <details class="mesh-section mesh-config-section">
-            <summary class="mesh-section-header" style="cursor:pointer;">
-                <h4 style="margin:0;" data-i18n="mesh.config">Config</h4>
-            </summary>
+        <!-- Config -->
+        <div class="mesh-section" id="mesh-config-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.config">Config</h4>
+            </div>
             <div class="mesh-config-form">
                 <label>Domain Suffixes</label>
                 <input type="text" id="mesh-domain-suffixes" placeholder="comma-separated" class="mesh-input">
                 <label>Advertise (CIDR)</label>
                 <input type="text" id="mesh-advertise" placeholder="comma-separated CIDRs" class="mesh-input">
-                <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+                <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
                     <button onclick="saveMeshConfig()" class="btn btn-sm btn-primary" data-i18n="mesh.save">Save</button>
                     <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>
                 </div>
             </div>
-        </details>
+        </div>
     </div>
 
     <script>
-    // Use htmx:afterSwap for htmx-loaded content, DOMContentLoaded for initial load
+    _meshConfigInitialized = false;
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', fetchMeshStatus);
     } else {
         fetchMeshStatus();
     }
-    document.addEventListener('htmx:afterSwap', function(event) {
-        if (event.detail.target.id === 'main-content') {
-            fetchMeshStatus();
-        }
-    });
     </script>
     {{end}}
 </div>

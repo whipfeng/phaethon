@@ -112,12 +112,17 @@ type Engine struct {
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
+	meshNetwork     *net.IPNet      // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
 	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
 	modeBTable      *mesh.ModeBTable  // Mode B (proxy entry) connection tracking
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 
 	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
 	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
+
+	// preConnectCallback is called after bind (port allocated) but before connect (SYN sent).
+	// Used for ModeBTable registration before the forwarder is triggered.
+	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
 
 	adminHandler AdminHandler // direct admin server connection handler (bypasses OS network stack)
 }
@@ -156,7 +161,7 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 			e.localMeshVIPs[v4.String()] = true
 		}
 	}
-	e.meshOutboundCh = make(chan meshOutboundPacket, 4096)
+	e.meshOutboundCh = make(chan meshOutboundPacket, 16384)
 	e.tunWG.Add(1)
 	go e.meshOutboundLoop()
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
@@ -170,6 +175,12 @@ func (e *Engine) SetNATTable(nat *mesh.NATTable) {
 // SetModeBTable sets the Mode B connection tracking table.
 func (e *Engine) SetModeBTable(t *mesh.ModeBTable) {
 	e.modeBTable = t
+}
+
+// SetPreConnectCallback sets a callback that is called after bind (port allocated)
+// but before connect (SYN sent). Used for ModeBTable registration.
+func (e *Engine) SetPreConnectCallback(callback func(dstAddr tcpip.Address, dstPort, srcPort uint16)) {
+	e.preConnectCallback = callback
 }
 
 // GetModeBTable returns the Mode B connection tracking table.
@@ -338,7 +349,8 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 	switch network {
 	case "tcp", "tcp4":
 		util.LogDebug("netstack: DialContextTCP to %s:%d", host, portNum)
-		conn, err := gonet.DialContextTCP(ctx, ns, remoteAddr, ipv4.ProtocolNumber)
+		// Use custom dial that allows pre-connect callback for ModeBTable registration
+		conn, err := e.dialTCPWithPreConnect(ctx, ns, remoteAddr)
 		if err != nil {
 			util.LogWarn("netstack: DialContextTCP failed: %v", err)
 			return nil, err
@@ -349,6 +361,203 @@ func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 		return gonet.DialUDP(ns, nil, &remoteAddr, ipv4.ProtocolNumber)
 	default:
 		return nil, fmt.Errorf("netstack dial: unsupported network: %s", network)
+	}
+}
+
+// dialTCPWithPreConnect creates a TCP connection with a pre-connect callback.
+// The callback is called after bind (port allocated) but before connect (SYN sent),
+// allowing ModeBTable registration before the forwarder is triggered.
+func (e *Engine) dialTCPWithPreConnect(ctx context.Context, s *stack.Stack, remoteAddr tcpip.FullAddress) (net.Conn, error) {
+	var wq waiter.Queue
+	ep, tcpErr := s.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if tcpErr != nil {
+		return nil, fmt.Errorf("create endpoint: %s", tcpErr)
+	}
+
+	// Bind to GIP (dnsAddr) with port 0 to allocate a source port
+	localAddr := tcpip.FullAddress{
+		Addr: e.dnsAddr,
+		Port: 0, // Let gVisor allocate the port
+	}
+	if tcpErr := ep.Bind(localAddr); tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind: %s", tcpErr)
+	}
+
+	// Get the allocated source port
+	localAddr, tcpErr = ep.GetLocalAddress()
+	if tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("get local address: %s", tcpErr)
+	}
+	srcPort := localAddr.Port
+
+	// Call pre-connect callback if set (for ModeBTable registration)
+	if e.preConnectCallback != nil {
+		e.preConnectCallback(remoteAddr.Addr, remoteAddr.Port, srcPort)
+	}
+
+	// Create wait queue entry for connect completion
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	select {
+	case <-ctx.Done():
+		ep.Close()
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Now connect (sends SYN)
+	tcpErr = ep.Connect(remoteAddr)
+	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
+		select {
+		case <-ctx.Done():
+			ep.Close()
+			return nil, ctx.Err()
+		case <-notifyCh:
+		}
+		tcpErr = ep.LastError()
+	}
+	if tcpErr != nil {
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "connect",
+			Net:  "tcp",
+			Addr: fullToTCPAddr(remoteAddr),
+			Err:  fmt.Errorf("%s", tcpErr),
+		}
+	}
+
+	return gonet.NewTCPConn(&wq, ep), nil
+}
+
+// NetDialWithModeB dials through the netstack and registers in ModeBTable before sending SYN.
+// This ensures the forwarder can find the entry for local loopback cases.
+func (e *Engine) NetDialWithModeB(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
+	util.LogDebug("netstack: NetDialWithModeB called with network=%s addr=%s client=%s", network, addr, clientAddr)
+	e.mu.Lock()
+	running := e.running
+	ns := e.ns
+	modeBTable := e.modeBTable
+	e.mu.Unlock()
+
+	if !running || ns == nil {
+		return nil, fmt.Errorf("netstack not running")
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial: parse addr: %w", err)
+	}
+	portNum, err := net.LookupPort(network, port)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial: parse port: %w", err)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("netstack dial: not an IP: %s", host)
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("netstack dial: IPv6 not supported: %s", host)
+	}
+
+	var arr [4]byte
+	copy(arr[:], ip4)
+	remoteAddr := tcpip.FullAddress{
+		Addr: tcpip.AddrFrom4(arr),
+		Port: uint16(portNum),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	if network != "tcp" && network != "tcp4" {
+		return nil, fmt.Errorf("netstack dial: unsupported network: %s", network)
+	}
+
+	// Create endpoint and bind
+	var wq waiter.Queue
+	ep, tcpErr := ns.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if tcpErr != nil {
+		return nil, fmt.Errorf("create endpoint: %s", tcpErr)
+	}
+
+	// Bind to GIP with port 0 to allocate source port
+	localAddr := tcpip.FullAddress{
+		Addr: e.dnsAddr,
+		Port: 0,
+	}
+	if tcpErr := ep.Bind(localAddr); tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind: %s", tcpErr)
+	}
+
+	// Get allocated source port
+	localAddr, tcpErr = ep.GetLocalAddress()
+	if tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("get local address: %s", tcpErr)
+	}
+	srcPort := localAddr.Port
+
+	// Register in ModeBTable BEFORE connect (before SYN is sent)
+	if modeBTable != nil {
+		dstKey := net.JoinHostPort(host, port)
+		modeBTable.Register(6, dstKey, srcPort, clientAddr, inbound, mapping)
+		util.LogDebug("netstack: registered ModeBTable before SYN: dst=%s srcPort=%d client=%s", dstKey, srcPort, clientAddr)
+	}
+
+	// Create wait queue entry for connect completion
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	select {
+	case <-ctx.Done():
+		ep.Close()
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Now connect (sends SYN)
+	tcpErr = ep.Connect(remoteAddr)
+	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
+		select {
+		case <-ctx.Done():
+			ep.Close()
+			return nil, ctx.Err()
+		case <-notifyCh:
+		}
+		tcpErr = ep.LastError()
+	}
+	if tcpErr != nil {
+		// Unregister on connect failure
+		if modeBTable != nil {
+			dstKey := net.JoinHostPort(host, port)
+			modeBTable.Unregister(6, dstKey, srcPort)
+		}
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "connect",
+			Net:  "tcp",
+			Addr: fullToTCPAddr(remoteAddr),
+			Err:  fmt.Errorf("%s", tcpErr),
+		}
+	}
+
+	util.LogDebug("netstack: NetDialWithModeB succeeded to %s:%d srcPort=%d", host, portNum, srcPort)
+	return gonet.NewTCPConn(&wq, ep), nil
+}
+
+// fullToTCPAddr converts a tcpip.FullAddress to a net.TCPAddr
+func fullToTCPAddr(addr tcpip.FullAddress) *net.TCPAddr {
+	return &net.TCPAddr{
+		IP:   net.IP(addr.Addr.AsSlice()),
+		Port: int(addr.Port),
 	}
 }
 
@@ -413,6 +622,16 @@ func (e *Engine) InjectMeshPacket(data []byte) error {
 		util.LogDebug("tun: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
 		if len(data) >= 20 && data[9] == 6 {
 			logTCPPacket("[TCP-DEBUG] InjectMeshPacket:", data)
+			headerLen := int(data[0]&0x0f) * 4
+			if len(data) >= headerLen+14 {
+				flags := data[headerLen+13]
+				isSYN := (flags&0x02) != 0 && (flags&0x10) == 0
+				if isSYN {
+					dstPort := uint16(data[headerLen+2])<<8 | uint16(data[headerLen+3])
+					util.LogInfo("[TCP-DIAG] InjectMeshPacket SYN: src=%s dst=%s:%d len=%d meshSrc=%v meshDst=%v",
+						srcIP, dstIP, dstPort, len(data), e.isMeshIP(srcIP), e.isMeshIP(dstIP))
+				}
+			}
 		}
 	}
 
@@ -481,6 +700,22 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 // This is called when mesh is configured to ensure mesh-destined packets reach the TUN.
 func (e *Engine) AddMeshRoute(subnet string) error {
 	return e.addMeshRoute(subnet)
+}
+
+// SetMeshNetwork sets the overall mesh network range for identifying mesh IPs.
+func (e *Engine) SetMeshNetwork(network *net.IPNet) {
+	e.meshNetwork = network
+}
+
+// isMeshIP checks if an IP belongs to the mesh network (full range, not just local subnet).
+func (e *Engine) isMeshIP(ip net.IP) bool {
+	if e.meshNetwork != nil && e.meshNetwork.Contains(ip) {
+		return true
+	}
+	if e.meshSubnet != nil && e.meshSubnet.Contains(ip) {
+		return true
+	}
+	return false
 }
 
 // AddMeshVIP registers a mesh virtual IP with the gVisor netstack so it responds
@@ -858,7 +1093,7 @@ func (e *Engine) StartTUN() error {
 	// Start TUN-level goroutines
 	e.tunRunning = true
 	e.tunCloseCh = make(chan struct{})
-	e.meshWriteCh = make(chan []byte, 2048)
+	e.meshWriteCh = make(chan []byte, 8192)
 	e.mu.Unlock()
 
 	e.tunWG.Add(1)
@@ -1013,7 +1248,7 @@ func (e *Engine) Stop() error {
 // All traffic (TUN, DNS hijacker, TCP forwarder, Mode B sockets) shares one NIC.
 // writeLoop handles all routing decisions: VIP/hostIP → TUN, mesh → mesh link, other → re-inject.
 func (e *Engine) initStack() error {
-	linkEP := channel.New(2048, 1500, "")
+	linkEP := channel.New(8192, 1500, "")
 	e.linkEP = linkEP
 
 	s := stack.New(stack.Options{
@@ -1073,6 +1308,14 @@ func (e *Engine) meshOutboundLoop() {
 			return
 		case pkt := <-e.meshOutboundCh:
 			if e.meshInterceptor != nil && !e.meshInterceptor(pkt.dstIP, pkt.data) {
+				// Diagnostic: log non-mesh packets being re-injected to netstack (advertised route path)
+				if len(pkt.data) >= 20 && pkt.data[0]>>4 == 4 {
+					isMesh := e.meshSubnet != nil && e.meshSubnet.Contains(pkt.dstIP)
+					if !isMesh {
+						util.LogDebug("[TCP-DIAG] reinject to netstack: src=%s dst=%s proto=%d len=%d",
+							net.IP(pkt.data[12:16]), pkt.dstIP, pkt.data[9], len(pkt.data))
+					}
+				}
 				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buffer.MakeWithData(pkt.data),
 				})
@@ -1184,7 +1427,7 @@ func (e *Engine) readLoop() {
 				case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
 					continue
 				default:
-					util.LogDebug("[MESH] meshOutboundCh full, falling through to netstack")
+					util.LogWarn("[MESH-DIAG] meshOutboundCh full in readLoop (%d pending), falling through to netstack", len(e.meshOutboundCh))
 				}
 			}
 		}
@@ -1280,19 +1523,37 @@ func (e *Engine) writeLoop() {
 
 		} else if e.meshInterceptor != nil && !e.isLocalMeshVIP(dstIP) {
 			// Mesh interception: route packets destined for remote mesh nodes via mesh.
-			pktBuf := make([]byte, len(data))
-			copy(pktBuf, data)
-			select {
-			case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
-				// Queued for async mesh processing
-			default:
-				// Queue full — re-inject for local delivery as fallback
-				util.LogDebug("[MESH] meshOutboundCh full in writeLoop, re-injecting")
-				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: buffer.MakeWithData(data),
-				})
-				e.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
-				newPkt.DecRef()
+			// Also route packets FROM mesh VIPs to non-mesh destinations through the mesh
+			// (e.g., TCP forwarder SYN-ACK responses to external clients via advertised routes).
+			srcIP := net.IP(data[12:16])
+			isMeshDst := e.isMeshIP(dstIP)
+			isMeshSrc := e.isMeshIP(srcIP)
+			if !isMeshDst && isMeshSrc {
+				// Packet from mesh VIP to external IP: route through mesh so the
+				// response reaches the original mesh peer's client.
+				pktBuf := make([]byte, len(data))
+				copy(pktBuf, data)
+				select {
+				case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
+				default:
+					util.LogWarn("[MESH-DIAG] meshOutboundCh full in writeLoop mesh-src (%d pending)", len(e.meshOutboundCh))
+					pkt.DecRef()
+				}
+			} else {
+				pktBuf := make([]byte, len(data))
+				copy(pktBuf, data)
+				select {
+				case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
+					// Queued for async mesh processing
+				default:
+					// Queue full — re-inject for local delivery as fallback
+					util.LogWarn("[MESH-DIAG] meshOutboundCh full in writeLoop (%d pending), re-injecting", len(e.meshOutboundCh))
+					newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+						Payload: buffer.MakeWithData(data),
+					})
+					e.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
+					newPkt.DecRef()
+				}
 			}
 
 		} else {
@@ -1328,7 +1589,9 @@ func (e *Engine) acceptTCP() {
 		ep, err := r.CreateEndpoint(&wq)
 		util.LogDebug("[TCP-DEBUG] CreateEndpoint returned, err=%v", err)
 		if err != nil {
-			util.LogWarn("[TCP-DEBUG] tcp CreateEndpoint fail: %v", err)
+			util.LogWarn("[TCP-DEBUG] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
+				err, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+				net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 			r.Complete(true)
 			return
 		}
@@ -1345,18 +1608,38 @@ func (e *Engine) acceptTCP() {
 		}
 		srcAddr := srcIP.String()
 		inbound := ""
-		// If destination matches a Mode B registration, look up the real client and inbound type
+		var modeBMapping *config.Mapping
+		// If destination matches a Mode B registration, look up the real client, inbound type, and mapping.
+		// Use the remote port (srcPort from mesh peer) to avoid collisions when multiple clients
+		// connect to the same destination.
 		if e.modeBTable != nil {
-			if clientAddr, modeBInbound := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort); clientAddr != "" {
+			if clientAddr, modeBInbound, mapping := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort, id.RemotePort); clientAddr != "" {
 				srcAddr = clientAddr
 				inbound = modeBInbound
+				modeBMapping = mapping
 			}
+		}
+
+		// Diagnostic: log connections involving mesh peers or advertised routes
+		isMeshIP := e.isMeshIP(dstIP)
+		isMeshSrc := e.isMeshIP(srcIP)
+		if isMeshSrc && !isMeshIP {
+			if modeBMapping != nil {
+				util.LogInfo("[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
+					srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
+			} else {
+				util.LogInfo("[TCP-DIAG] gateway fwd conn: src=%s dst=%s:%d (no modeB)",
+					srcAddr, dstAddr, dstPort)
+			}
+		} else if !isMeshIP && modeBMapping != nil {
+			util.LogInfo("[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
+				srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
 		}
 
 		go func() {
 			defer ep.Close()
 			defer conn.Close()
-			e.handleConn(conn, srcAddr, dstAddr, dstPort, inbound)
+			e.handleConn(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
 		}()
 	})
 
@@ -1465,18 +1748,21 @@ func (e *Engine) acceptUDP() {
 			}
 			srcAddr := srcIP.String()
 			inbound := ""
-			// If destination matches a Mode B registration, look up the real client and inbound type
+			var modeBMapping *config.Mapping
+			// If destination matches a Mode B registration, look up the real client, inbound type, and mapping.
+			// Use the remote port (srcPort from mesh peer) to avoid collisions.
 			if e.modeBTable != nil {
-				if clientAddr, modeBInbound := e.modeBTable.LookupByDst(17, dstIP, id.LocalPort); clientAddr != "" {
+				if clientAddr, modeBInbound, mapping := e.modeBTable.LookupByDst(17, dstIP, id.LocalPort, id.RemotePort); clientAddr != "" {
 					srcAddr = clientAddr
 					inbound = modeBInbound
+					modeBMapping = mapping
 				}
 			}
 
 			conn := gonet.NewUDPConn(&wq, ep)
 			defer conn.Close()
 
-			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound)
+			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
 		}()
 	})
 
@@ -1487,7 +1773,7 @@ func (e *Engine) acceptUDP() {
 
 // handleUDP relays UDP datagrams between netstack and the real network via proxy or direct.
 // It preserves datagram boundaries by reading/writing one datagram at a time.
-func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string) {
+func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 	if inbound == "" {
 		inbound = "TUN"
 	}
@@ -1522,7 +1808,11 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
+		matchMapping := TUNMapping
+		if modeBMapping != nil {
+			matchMapping = modeBMapping
+		}
+		proxy, matchResult = e.ruleConf.Match(req, matchMapping)
 	}
 
 	resolvedAddr := req.DstAddr
@@ -1664,7 +1954,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 }
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.
-func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string) {
+func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 	if inbound == "" {
 		inbound = "TUN"
 	}
@@ -1698,6 +1988,12 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 
 	connID := util.NextConnID()
 
+	// Diagnostic: log Mode B connections prominently
+	if modeBMapping != nil {
+		util.LogInfo("[TCP-DIAG] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
+			connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
+	}
+
 	// Use domain for rule matching (so domain-based rules work).
 	matchAddr := dstAddr
 	if domain != "" {
@@ -1709,7 +2005,11 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
 		req = e.ruleConf.Resolving(req)
-		proxy, matchResult = e.ruleConf.Match(req, TUNMapping)
+		matchMapping := TUNMapping
+		if modeBMapping != nil {
+			matchMapping = modeBMapping
+		}
+		proxy, matchResult = e.ruleConf.Match(req, matchMapping)
 		if proxy != nil {
 			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
 		} else {

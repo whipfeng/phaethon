@@ -769,6 +769,8 @@ function updateTUNSummary(data) {
     el.innerHTML = html;
 }
 
+let _meshConfigInitialized = false;
+
 async function fetchMeshStatus() {
     const summaryEl = document.getElementById('mesh-summary');
     const card = document.getElementById('mesh-card');
@@ -798,11 +800,14 @@ async function fetchMeshStatus() {
         document.getElementById('mesh-subnet').textContent = data.subnet || '-';
         document.getElementById('mesh-routecount').textContent = data.routeCount || 0;
 
-        // Config
-        const suffixInput = document.getElementById('mesh-domain-suffixes');
-        const advertiseInput = document.getElementById('mesh-advertise');
-        if (suffixInput) suffixInput.value = (data.domainSuffixes || []).join(', ');
-        if (advertiseInput) advertiseInput.value = (data.advertise || []).join(', ');
+        // Config - only populate on first load to avoid overwriting user input
+        if (!_meshConfigInitialized) {
+            const suffixInput = document.getElementById('mesh-domain-suffixes');
+            const advertiseInput = document.getElementById('mesh-advertise');
+            if (suffixInput) suffixInput.value = (data.domainSuffixes || []).join(', ');
+            if (advertiseInput) advertiseInput.value = (data.advertise || []).join(', ');
+            _meshConfigInitialized = true;
+        }
 
         // Build a lookup for direct status from data.peers
         const directPeers = {};
@@ -1006,34 +1011,143 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
 
     const centerX = width / 2;
     const centerY = height / 2;
-    const radius = Math.min(width, height) * 0.35;
     const nodeRadius = 20;
+    const padding = nodeRadius + 10;
 
-    // Calculate positions - use circular layout as starting point
-    // Nodes will be positioned based on their connections
+    // Build edge list for layout
+    const edges = (fullTopology && fullTopology.edges) || [];
+
+    // Force-directed layout parameters
+    const repulsion = 5000;      // Repulsion force between all nodes
+    const attraction = 0.01;     // Spring constant for edges
+    const damping = 0.9;         // Velocity damping per iteration
+    const maxIterations = 100;   // Max simulation steps
+    const minDistance = 60;      // Minimum distance between nodes
+
+    // Initialize positions - use circular layout as starting point
     const positions = {};
+    const velocities = {};
     const nodeCount = allNodes.length;
-    
-    // Initial circular layout
+
     allNodes.forEach((node, i) => {
+        velocities[node.id] = { x: 0, y: 0 };
         if (_topologyState.positions[node.id]) {
             // Use saved position from drag
-            positions[node.id] = _topologyState.positions[node.id];
+            positions[node.id] = { ..._topologyState.positions[node.id] };
         } else {
-            // Arrange in circle as initial layout
+            // Start with circular layout
             const angle = i * (2 * Math.PI / nodeCount) - Math.PI / 2;
+            const r = Math.min(width, height) * 0.3;
             positions[node.id] = {
-                x: centerX + radius * Math.cos(angle),
-                y: centerY + radius * Math.sin(angle)
+                x: centerX + r * Math.cos(angle),
+                y: centerY + r * Math.sin(angle)
             };
         }
     });
 
+    // Run force simulation
+    for (let iter = 0; iter < maxIterations; iter++) {
+        // Reset forces
+        const forces = {};
+        allNodes.forEach(n => { forces[n.id] = { x: 0, y: 0 }; });
+
+        // Repulsion between all pairs
+        for (let i = 0; i < allNodes.length; i++) {
+            for (let j = i + 1; j < allNodes.length; j++) {
+                const a = allNodes[i].id;
+                const b = allNodes[j].id;
+                const dx = positions[a].x - positions[b].x;
+                const dy = positions[a].y - positions[b].y;
+                const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+                const force = repulsion / (dist * dist);
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+                forces[a].x += fx;
+                forces[a].y += fy;
+                forces[b].x -= fx;
+                forces[b].y -= fy;
+            }
+        }
+
+        // Attraction along edges
+        edges.forEach(edge => {
+            if (!positions[edge.from] || !positions[edge.to]) return;
+            const dx = positions[edge.to].x - positions[edge.from].x;
+            const dy = positions[edge.to].y - positions[edge.from].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const force = dist * attraction;
+            const fx = (dx / Math.max(dist, 1)) * force;
+            const fy = (dy / Math.max(dist, 1)) * force;
+            forces[edge.from].x += fx;
+            forces[edge.from].y += fy;
+            forces[edge.to].x -= fx;
+            forces[edge.to].y -= fy;
+        });
+
+        // Center gravity - pull nodes toward center
+        allNodes.forEach(node => {
+            const dx = centerX - positions[node.id].x;
+            const dy = centerY - positions[node.id].y;
+            forces[node.id].x += dx * 0.001;
+            forces[node.id].y += dy * 0.001;
+        });
+
+        // Apply forces with damping
+        let totalMovement = 0;
+        allNodes.forEach(node => {
+            velocities[node.id].x = (velocities[node.id].x + forces[node.id].x) * damping;
+            velocities[node.id].y = (velocities[node.id].y + forces[node.id].y) * damping;
+            positions[node.id].x += velocities[node.id].x;
+            positions[node.id].y += velocities[node.id].y;
+
+            // Keep within bounds
+            positions[node.id].x = Math.max(padding, Math.min(width - padding, positions[node.id].x));
+            positions[node.id].y = Math.max(padding, Math.min(height - padding, positions[node.id].y));
+
+            totalMovement += Math.abs(velocities[node.id].x) + Math.abs(velocities[node.id].y);
+        });
+
+        // Early exit if converged
+        if (totalMovement < 0.5) break;
+    }
+
+    // Ensure minimum distance between nodes
+    for (let pass = 0; pass < 3; pass++) {
+        for (let i = 0; i < allNodes.length; i++) {
+            for (let j = i + 1; j < allNodes.length; j++) {
+                const a = allNodes[i].id;
+                const b = allNodes[j].id;
+                const dx = positions[a].x - positions[b].x;
+                const dy = positions[a].y - positions[b].y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < minDistance && dist > 0) {
+                    const overlap = (minDistance - dist) / 2;
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    positions[a].x += nx * overlap;
+                    positions[a].y += ny * overlap;
+                    positions[b].x -= nx * overlap;
+                    positions[b].y -= ny * overlap;
+                    // Re-clamp to bounds
+                    positions[a].x = Math.max(padding, Math.min(width - padding, positions[a].x));
+                    positions[a].y = Math.max(padding, Math.min(height - padding, positions[a].y));
+                    positions[b].x = Math.max(padding, Math.min(width - padding, positions[b].x));
+                    positions[b].y = Math.max(padding, Math.min(height - padding, positions[b].y));
+                }
+            }
+        }
+    }
+
     // Save positions for next redraw
     _topologyState.positions = positions;
 
-    // Draw edges from full topology
-    const edges = (fullTopology && fullTopology.edges) || [];
+    // Save current data for drag handler redraws
+    _topologyState.localNodeId = allNodes.find(n => n.isLocal)?.id;
+    _topologyState.peers = peers;
+    _topologyState.directPeers = directPeers;
+    _topologyState.fullTopology = fullTopology;
+
+    // Draw edges from full topology (reuse `edges` from layout above)
     if (edges.length > 0) {
         // Draw all edges from full topology as solid lines (they're real announced connections)
         edges.forEach(edge => {
@@ -1076,12 +1190,28 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        // Node label
+        // Node label - truncate if too long for the circle
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 12px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(node.id, pos.x, pos.y);
+        const label = node.id;
+        const maxWidth = nodeRadius * 1.8;
+        const measured = ctx.measureText(label);
+        if (measured.width <= maxWidth) {
+            ctx.fillText(label, pos.x, pos.y);
+        } else {
+            // Truncate with ellipsis
+            let truncated = label;
+            while (truncated.length > 1 && ctx.measureText(truncated + '…').width > maxWidth) {
+                truncated = truncated.slice(0, -1);
+            }
+            ctx.fillText(truncated + '…', pos.x, pos.y);
+            // Show full ID below the node
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.fillStyle = '#8b949e';
+            ctx.fillText(label, pos.x, pos.y + nodeRadius + 12);
+        }
     });
 
     // Setup drag handlers if not already done
@@ -1116,10 +1246,14 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     x: x - _topologyState.dragOffset.x,
                     y: y - _topologyState.dragOffset.y
                 };
-                // Redraw
-                const localNode = allNodes.find(n => n.isLocal);
-                if (localNode) {
-                    drawMeshTopology(localNode.id, peers, directPeers, fullTopology);
+                // Redraw using saved state (avoids stale closure)
+                if (_topologyState.localNodeId) {
+                    drawMeshTopology(
+                        _topologyState.localNodeId,
+                        _topologyState.peers || [],
+                        _topologyState.directPeers || {},
+                        _topologyState.fullTopology
+                    );
                 }
             } else {
                 // Change cursor on hover
@@ -1179,22 +1313,26 @@ async function saveMeshConfig() {
             body: JSON.stringify({domainSuffixes, advertise})
         });
         if (resp.ok) {
-            alert('Saved');
-            fetchMeshStatus();
+            showToast('Saved', 'success');
         } else {
             const err = await resp.json();
-            alert('Error: ' + (err.error || 'unknown'));
+            showToast('Error: ' + (err.error || 'unknown'), 'error');
         }
     } catch (err) {
-        alert('Error: ' + err.message);
+        showToast('Error: ' + err.message, 'error');
     }
 }
 
 async function triggerMeshGossip() {
     try {
-        await fetch('./api/mesh/gossip', {method: 'POST'});
+        const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
+        if (resp.ok) {
+            showToast('Gossip triggered', 'success');
+        } else {
+            showToast('Gossip failed', 'error');
+        }
     } catch (err) {
-        console.error('triggerMeshGossip error:', err);
+        showToast('Gossip error: ' + err.message, 'error');
     }
 }
 

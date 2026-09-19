@@ -1,7 +1,7 @@
 # Mesh 网络改进设计
 
-> 版本: v0.11.0
-> 日期: 2026-09-16
+> 版本: v0.15.0
+> 日期: 2026-09-18
 > 状态: IMPLEMENTED
 > 负责人: Phaethon Dev
 > 依赖: [mesh_multi_vip_design.md](mesh_multi_vip_design.md) v0.4.1
@@ -25,6 +25,7 @@
 | v0.13.0 | 2026-09-16 | 多态健康检查：Dialer 接口新增 ServerAddr()，HTunnelDialer 从 URL 提取地址 | Qoder |
 | v0.14.0 | 2026-09-17 | 连接日志源地址还原：TUN 旁路网关 NAT 反查、Mode B 入口追踪 | Qoder |
 | v0.14.1 | 2026-09-17 | Mode B 注册时序修复：MeshDial 内部完成注册，避免 forwarder 竞态 | Qoder |
+| v0.15.0 | 2026-09-18 | Mode B mapping 上下文透传：MeshDial 注册 mappingName，TUN forwarder 用原始 mapping 做规则匹配 | Qoder |
 
 ## 1. 背景与目标
 
@@ -846,6 +847,108 @@ Mode B 入口:
 
 **状态**：✓ 已完成（2026-09-17）
 
+### 2.15 Mode B mapping 上下文透传
+
+#### 2.15.1 问题
+
+commit `9bc170d` 将所有 server handler 统一改为 `dialer.MeshDial()`，去掉了本地规则匹配。这导致 Mode B 入口流量的 mapping 上下文在进入 gVisor netstack 后丢失：
+
+```
+server handler (s.Mapping = "dyn-map-XXXXX")
+  → MeshDial → gVisor netstack
+  → TUN forwarder 做规则匹配
+  → 写死用 TUNMapping (Name="TUN")
+  → 动态规则 MATCH,dyn-proxy-YYYYY#dyn-map-XXXXX 匹配不上
+  → 流量无法路由到正确的 proxy
+```
+
+**影响范围**：不仅是反向连接的动态监听器，所有 Mode B 入口流量（SOCKS5、Trojan、HTTP、Direct、Reverse、HTunnel）的规则匹配都有问题。TUN forwarder 用 `TUNMapping` 做匹配，导致所有带 mapping scope（`#mappingName`）的规则对 Mode B 流量失效。
+
+#### 2.15.2 根因
+
+Mode B 流量进入 gVisor 后，TUN forwarder 无法区分：
+- **真正的 TUN 流量**（来自 Mode A 入口，应该用 `TUNMapping`）
+- **Mode B 入口流量**（来自 server handler，应该用原始 mapping）
+
+ModeBTable 已经记录了 `clientAddr` 和 `inbound`，但 `inbound` 只用于日志，没有用于规则匹配。
+
+#### 2.15.3 设计（v0.15.1 修正）
+
+**v0.15.0 方案**：ModeBTable 存 `mappingName string`，forwarder 用 `FindMapping(name)` 查找。但动态 mapping 未注册到 `ruleConf.Mappings`，`FindMapping` 返回 nil，规则匹配依然失败。
+
+**v0.15.1 方案**：ModeBTable 直接存 `*config.Mapping` 对象，forwarder 取出直接用，与旧代码 DirectServer 传 `s.Mapping` 的方式一致——直接持有对象，无需按名字查找。
+
+**本质**：把 server handler 原来本地做 `Match(req, s.Mapping)` 时的 `s.Mapping` 对象，通过 ModeBTable 直接透传到 gVisor forwarder。
+
+#### 2.15.4 数据流
+
+```
+server handler (s.Mapping = &config.Mapping{...})
+  → MeshDial(dst, port, clientAddr, inbound, mapping)
+  → ModeBTable.Register(proto, dst, clientAddr, inbound, mapping)
+  → gVisor netstack
+  → TUN forwarder:
+      ModeBTable.LookupByDst → (clientAddr, inbound, mapping)
+      if mapping != nil {
+          Match(req, mapping)    // 用原始 mapping 匹配
+      } else {
+          Match(req, TUNMapping) // 纯 TUN 流量，保持原行为
+      }
+```
+
+#### 2.15.5 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `mesh/modeb.go` | `ModeBEntry.MappingName string` → `Mapping *config.Mapping`；`Register` 参数改为 `mapping *config.Mapping`；`LookupByDst` 返回 `*config.Mapping` |
+| `dialer/bind.go` | `MeshDial` 签名 `mappingName string` → `mapping *config.Mapping` |
+| `server/base.go` | `MeshDialWithModeB` 传 `b.Mapping` 对象而非 `b.Mapping.Name` |
+| `tun/engine.go` | forwarder 直接拿 `*config.Mapping` 对象传给 `handleConn`，不再调用 `FindMapping` |
+| `config/config.go` | `FindMapping` 可保留（未来可能用到），但 forwarder 不再依赖它 |
+
+#### 2.15.6 TUN forwarder 规则匹配改动
+
+```go
+// TCP forwarder 回调中
+srcAddr := srcIP.String()
+inbound := ""
+var modeBMapping *config.Mapping
+if e.modeBTable != nil {
+    if clientAddr, modeBInbound, mapping := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort); clientAddr != "" {
+        srcAddr = clientAddr
+        inbound = modeBInbound
+        modeBMapping = mapping
+    }
+}
+
+go e.handleConn(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
+
+// handleConn 中
+func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+    if inbound == "" {
+        inbound = "TUN"
+    }
+    // ...
+    matchMapping := TUNMapping
+    if modeBMapping != nil {
+        matchMapping = modeBMapping
+    }
+    proxy, matchResult = e.ruleConf.Match(req, matchMapping)
+    // ...
+}
+```
+
+UDP forwarder 同理。
+
+#### 2.15.7 兼容性
+
+- 纯 TUN 流量（Mode A）：`modeBMapping == nil`，走 `TUNMapping`，行为不变
+- Mode B 流量：`modeBMapping != nil`，直接用原始 mapping 匹配，规则正确生效
+- 无 mapping scope 的规则（如 `MATCH,proxy`）：不受影响，因为 `MatchAllMatcher` 在 mapping scope 为空时匹配所有 mapping
+- 不再依赖 `FindMapping`，无注册/清理生命周期问题
+
+**状态**：已实现（v0.15.1）
+
 ## 3. Mode B Mesh 路由设计（✓ 已完成）
 
 ### 3.1 问题
@@ -855,7 +958,7 @@ Mode B 入口:
 ### 3.2 设计原则
 
 1. **Mesh 始终启用**：不需要判断 `IsMeshEnabled()`，所有流量直接走 mesh
-2. **不匹配规则**：Mode B 不做规则匹配，不获取 proxy，直接拨号目标
+2. **规则匹配延迟到 forwarder**：Mode B 流量进入 gVisor 后由 TUN forwarder 做规则匹配，通过 ModeBTable 透传原始 mapping 上下文（v0.15.0 修正）
 3. **统一抽象**：所有 server handler 共用同一个拨号函数 `MeshDial()`
 4. **DNS 转发**：在 writeLoop 的 `tryDNSRedirect` 中拦截，不在 DNS hijacker 中
 
@@ -1239,14 +1342,20 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 ## 4. 关键设计决策
 
-### 4.1 ADR-1: Mode B 不做规则匹配
+### 4.1 ADR-1: Mode B 规则匹配通过 mapping 上下文透传
 
-**决策**：Mode B（代理入口）流量不做规则匹配，直接通过 mesh 路由。
+**决策**：Mode B（代理入口）流量统一走 gVisor netstack，规则匹配在 TUN forwarder 中完成，使用从 ModeBTable 透传的原始 mapping（而非写死 TUNMapping）。
+
+**历史**：
+- 最初（`9bc170d` 之前）：server handler 本地做 `RuleConf.Match(req, s.Mapping)`，匹配成功后 `ChainDial` 走 proxy chain
+- `9bc170d` 简化后：server handler 统一调用 `MeshDial()`，流量进入 gVisor，由 TUN forwarder 做规则匹配
+- 问题：TUN forwarder 写死用 `TUNMapping` 匹配，Mode B 的原始 mapping 丢失，导致带 mapping scope 的规则全部失效
+- 修复（v0.15.0）：`MeshDial` 注册 ModeBTable 时带上 `mappingName`，forwarder 取出后用原始 mapping 做匹配
 
 **理由**：
-- Mode B 的流量已经进入 mesh 网络，目标是到达 mesh 内的其他节点
-- 规则匹配用于决定流量是否走代理，但 Mode B 本身就是代理入口
-- 简化实现，避免不必要的复杂性
+- Mode B 流量走 gVisor 是正确路径（统一抽象，复用 mesh 路由和 DNS 转发）
+- 规则匹配必须在 forwarder 中完成（流量已经进入 netstack）
+- 透传 mapping 上下文保证了带 mapping scope 的规则（如动态反向连接的 `#dyn-map-XXXXX`）能正确匹配
 
 ### 4.2 ADR-2: DNS 转发在 DNS hijacker 而非 writeLoop
 

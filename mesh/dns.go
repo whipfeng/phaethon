@@ -255,7 +255,9 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		util.LogDebug("tun dns: %s -> %s (cached)", domain, cachedIP)
 		resp := buildDNSResponse(packet, cachedIP.To4())
 		if resp != nil {
-			h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+			if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+				util.LogWarn("tun dns: write cached response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+			}
 		}
 		return
 	}
@@ -270,7 +272,9 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 				// This allows the client to retry and get the correct IP once mesh recovers
 				resp := buildDNSErrorResponse(packet)
 				if resp != nil {
-					h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+					if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+						util.LogWarn("tun dns: write SERVFAIL for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+					}
 				}
 				return
 			}
@@ -278,7 +282,9 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 			util.LogDebug("tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
 			resp := buildDNSResponse(packet, remoteIP.To4())
 			if resp != nil {
-				h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr})
+				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+					util.LogWarn("tun dns: write remote response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+				}
 			}
 			return
 		}

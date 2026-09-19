@@ -914,6 +914,7 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     margin-top: 1rem;
     padding-top: 1rem;
     border-top: 1px solid var(--border-color);
+    overflow-x: auto;
 }
 .mesh-section-header {
     display: flex;
@@ -1051,6 +1052,24 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     .form-row { flex-direction: column; gap: 0; }
     .port-grid { grid-template-columns: repeat(3, 1fr); }
     .reverse-grid { grid-template-columns: repeat(2, 1fr); }
+    .card { padding: 1rem; }
+    .card-header { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+    .top-bar { flex-direction: column; align-items: flex-start; }
+    .top-bar h2 { font-size: 1.2rem; }
+    .data-table { font-size: 0.8rem; }
+    .data-table th, .data-table td { padding: 0.4rem 0.5rem; }
+    .mesh-metrics { grid-template-columns: repeat(3, 1fr); gap: 0.5rem; padding: 0.5rem; }
+    .mesh-metric-value { font-size: 0.85rem; }
+    .mesh-metric-mono { font-size: 0.75rem; }
+    .mesh-peer-table,
+    .mesh-route-table { font-size: 0.78rem; }
+    .mesh-peer-table th,
+    .mesh-route-table th,
+    .mesh-peer-table td,
+    .mesh-route-table td { padding: 0.4rem 0.5rem; }
+    .mesh-peer-table th:last-child,
+    .mesh-peer-table td:last-child { display: none; }
+    .modal-content { margin: 1rem; max-height: calc(100vh - 2rem); }
 }
 
 /* Animations */

@@ -70,6 +70,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 			}
 		}
 	}
+	if network := meshMgr.GetNetwork(); network != nil {
+		engine.SetMeshNetwork(network)
+	}
 
 	if err := engine.Start(); err != nil {
 		util.LogError("Engine start failed: %v", err)
@@ -92,6 +95,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// dialing go through the netstack, which routes via loopback to the
 		// hijacker/forwarder.
 		dialer.GlobalNetstackDialFunc = engine.NetDial
+		dialer.GlobalNetstackDialWithModeBFunc = engine.NetDialWithModeB
 		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
 
 		// Set TUN reference FIRST to close the race where P2P receives mesh

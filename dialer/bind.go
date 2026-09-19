@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"phaethon/config"
 	"phaethon/util"
 )
 
@@ -39,25 +40,45 @@ var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 // GlobalModeBTable tracks Mode B (proxy entry) connections for source address resolution.
 // Set by main_tun.go when mesh is initialized.
 var GlobalModeBTable interface {
-	Register(proto byte, dstAddr string, clientAddr string, inbound string)
-	Unregister(proto byte, dstAddr string)
+	Register(proto byte, dstAddr string, srcPort uint16, clientAddr string, inbound string, mapping *config.Mapping)
+	Unregister(proto byte, dstAddr string, srcPort uint16)
 }
 
-// UnregisterModeB is a helper to unregister a Mode B connection by destination.
-func UnregisterModeB(proto byte, dstAddr string, dstPort int) {
+// GlobalNetstackDialWithModeBFunc is the custom dial function that registers in ModeBTable
+// before sending SYN. Set by main_tun.go.
+var GlobalNetstackDialWithModeBFunc func(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error)
+
+// UnregisterModeB is a helper to unregister a Mode B connection by destination and source port.
+func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {
 	if GlobalModeBTable == nil {
 		return
 	}
 	dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	GlobalModeBTable.Unregister(proto, dstKey)
+	GlobalModeBTable.Unregister(proto, dstKey, srcPort)
 }
 
 // MeshDial dials destination through mesh network.
-// Always uses netstack path: DNS resolution → Fake-IP → mesh routing.
-// Used by Mode B (proxy server) handlers for mesh routing.
-// Registers clientAddr and inbound in ModeBTable by destination BEFORE dialing,
-// so the forwarder can resolve the real client when processing packets.
-func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
+// Uses custom dial function that registers in ModeBTable before sending SYN,
+// ensuring the forwarder can find the entry for local loopback cases.
+func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
+	if GlobalNetstackDialWithModeBFunc != nil {
+		// Use custom dial that registers before SYN
+		var targetAddr string
+		if ip := net.ParseIP(dstAddr); ip == nil {
+			// Domain: resolve through DNS (should not happen for Mode B)
+			return nil, fmt.Errorf("mesh dial: domain not supported: %s", dstAddr)
+		} else {
+			targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+		}
+		conn, err := GlobalNetstackDialWithModeBFunc("tcp", targetAddr, clientAddr, inbound, mapping)
+		if err != nil {
+			return nil, err
+		}
+		util.SetTCPNoDelay(conn)
+		return conn, nil
+	}
+
+	// Fallback to old path if custom dial not available
 	if GlobalNetstackDialFunc == nil || GlobalDNSResolverFunc == nil {
 		return nil, fmt.Errorf("mesh not initialized")
 	}
@@ -75,23 +96,22 @@ func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string) (n
 		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	}
 
-	// Register Mode B mapping by destination BEFORE dialing, so forwarder can
-	// look up the real client address when processing packets from this connection.
-	dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	if GlobalModeBTable != nil {
-		GlobalModeBTable.Register(6, dstKey, clientAddr, inbound)
-	}
-
-	// Dial through netstack, goes through writeLoop → mesh routing
+	// Dial through netstack
 	conn, err := GlobalNetstackDialFunc("tcp", targetAddr)
 	if err != nil {
-		// Unregister on dial failure
-		if GlobalModeBTable != nil {
-			GlobalModeBTable.Unregister(6, dstKey)
-		}
 		return nil, err
 	}
 	util.SetTCPNoDelay(conn)
+
+	// Register after dial (fallback path, may have timing issues)
+	if GlobalModeBTable != nil {
+		srcPort := uint16(0)
+		if localAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+			srcPort = uint16(localAddr.Port)
+		}
+		dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+		GlobalModeBTable.Register(6, dstKey, srcPort, clientAddr, inbound, mapping)
+	}
 
 	return conn, nil
 }

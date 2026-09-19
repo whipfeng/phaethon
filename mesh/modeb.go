@@ -104,5 +104,5 @@ func (t *ModeBTable) LookupByDst(proto byte, dstIP net.IP, dstPort uint16, srcPo
 }
 
 func modeBKey(proto byte, dstAddr string, srcPort uint16) string {
-	return string(rune(proto)) + ":dst:" + dstAddr + ":" + itoa(srcPort)
+	return string(rune(proto)) + ":" + dstAddr + ":" + itoa(srcPort)
 }

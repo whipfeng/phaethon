@@ -885,16 +885,18 @@ ModeBTable 已经记录了 `clientAddr` 和 `inbound`，但 `inbound` 只用于�
 ```
 server handler (s.Mapping = &config.Mapping{...})
   → MeshDial(dst, port, clientAddr, inbound, mapping)
-  → ModeBTable.Register(proto, dst, clientAddr, inbound, mapping)
+  → ModeBTable.Register(proto, dstAddr, srcPort, clientAddr, inbound, mapping)
   → gVisor netstack
   → TUN forwarder:
-      ModeBTable.LookupByDst → (clientAddr, inbound, mapping)
+      ModeBTable.LookupByDst(proto, dstIP, dstPort, srcPort) → (clientAddr, inbound, mapping)
       if mapping != nil {
           Match(req, mapping)    // 用原始 mapping 匹配
       } else {
           Match(req, TUNMapping) // 纯 TUN 流量，保持原行为
       }
 ```
+
+**Key 格式**：`proto:dstAddr:srcPort`（例如 `6:10.21.20.65:22:12345`），其中 dstAddr 包含 IP 和端口。
 
 #### 2.15.5 改动清单
 
@@ -914,7 +916,7 @@ srcAddr := srcIP.String()
 inbound := ""
 var modeBMapping *config.Mapping
 if e.modeBTable != nil {
-    if clientAddr, modeBInbound, mapping := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort); clientAddr != "" {
+    if clientAddr, modeBInbound, mapping := e.modeBTable.LookupByDst(6, dstIP, id.LocalPort, id.RemotePort); clientAddr != "" {
         srcAddr = clientAddr
         inbound = modeBInbound
         modeBMapping = mapping

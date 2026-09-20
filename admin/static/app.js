@@ -1008,8 +1008,8 @@ async function fetchMeshStatus() {
             let html = '';
             const domainRoutes = [];
             const topoPeers = (data.topology && data.topology.peers) || [];
-            const topoNodes = (data.topology && data.topology.nodes) || [];
-            const topoEdges = (data.topology && data.topology.edges) || [];
+            const topoNodes = (fullTopology && fullTopology.nodes) || [];
+            const topoEdges = (fullTopology && fullTopology.edges) || [];
             
             // Collect domain suffixes from all peers
             topoPeers.forEach(peer => {

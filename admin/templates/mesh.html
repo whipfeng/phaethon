@@ -255,16 +255,20 @@
         }
     }
 
-    async function deleteDomainSuffix(idx) {
-        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?')) return;
-        try {
-            const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
-            if (!res.ok) throw new Error(await res.text());
-            loadDomainSuffixes();
-            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
-        } catch (err) {
-            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
-        }
+    function deleteDomainSuffix(idx) {
+        openConfirmModal(
+            typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?',
+            async function() {
+                try {
+                    const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
+                    if (!res.ok) throw new Error(await res.text());
+                    loadDomainSuffixes();
+                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                } catch (err) {
+                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                }
+            }
+        );
     }
 
     function closeDomainSuffixModal() {
@@ -342,16 +346,20 @@
         }
     }
 
-    async function deleteAdvertise(idx) {
-        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?')) return;
-        try {
-            const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
-            if (!res.ok) throw new Error(await res.text());
-            loadAdvertise();
-            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
-        } catch (err) {
-            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
-        }
+    function deleteAdvertise(idx) {
+        openConfirmModal(
+            typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?',
+            async function() {
+                try {
+                    const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
+                    if (!res.ok) throw new Error(await res.text());
+                    loadAdvertise();
+                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                } catch (err) {
+                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                }
+            }
+        );
     }
 
     function closeAdvertiseModal() {

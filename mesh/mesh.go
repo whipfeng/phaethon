@@ -1253,6 +1253,7 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 	if nodeID == "" {
 		return nil
 	}
+	// Check direct peers first
 	for _, peer := range m.topology.GetAllPeers() {
 		if peer.NodeID() == nodeID && peer.Subnet != nil {
 			vip := DeriveVIPFromSubnet(peer.Subnet)
@@ -1260,6 +1261,18 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 				util.LogDebug("[MESH] DNS resolve: %s -> %s", domain, vip)
 			}
 			return vip
+		}
+	}
+	// Check claimed subnets from all peers (for indirect nodes)
+	for _, peer := range m.topology.GetAllPeers() {
+		for _, cs := range peer.ClaimedSubnets {
+			if cs.NodeID == nodeID && cs.Subnet != nil {
+				vip := DeriveVIPFromSubnet(cs.Subnet)
+				if vip != nil {
+					util.LogDebug("[MESH] DNS resolve: %s -> %s (via %s)", domain, vip, peer.NodeID())
+				}
+				return vip
+			}
 		}
 	}
 	return nil

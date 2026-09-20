@@ -1018,6 +1018,8 @@ async function fetchMeshStatus() {
             let html = '';
             const domainRoutes = [];
             const topoPeers = (data.topology && data.topology.peers) || [];
+            const topoNodes = (data.topology && data.topology.nodes) || [];
+            const topoEdges = (data.topology && data.topology.edges) || [];
             
             // Collect domain suffixes from all peers
             topoPeers.forEach(peer => {
@@ -1032,14 +1034,39 @@ async function fetchMeshStatus() {
                 });
             });
             
-            // Also add auto-generated nodeID.phn entries
-            topoPeers.forEach(peer => {
-                if (peer.nodeId && peer.subnet) {
+            // Build adjacency list for hop calculation
+            const adjacency = {};
+            topoEdges.forEach(edge => {
+                if (!adjacency[edge.from]) adjacency[edge.from] = [];
+                if (!adjacency[edge.to]) adjacency[edge.to] = [];
+                adjacency[edge.from].push(edge.to);
+                adjacency[edge.to].push(edge.from);
+            });
+            
+            // Calculate hop count using BFS from local node
+            const hopCounts = {};
+            const queue = [{nodeId: data.nodeId, hop: 0}];
+            hopCounts[data.nodeId] = 0;
+            while (queue.length > 0) {
+                const {nodeId, hop} = queue.shift();
+                const neighbors = adjacency[nodeId] || [];
+                neighbors.forEach(neighbor => {
+                    if (hopCounts[neighbor] === undefined) {
+                        hopCounts[neighbor] = hop + 1;
+                        queue.push({nodeId: neighbor, hop: hop + 1});
+                    }
+                });
+            }
+            
+            // Add auto-generated nodeID.phn entries for all known nodes
+            topoNodes.forEach(node => {
+                if (node.nodeId && node.subnet) {
+                    const hop = hopCounts[node.nodeId] !== undefined ? hopCounts[node.nodeId] : 999;
                     domainRoutes.push({
-                        domain: peer.nodeId + '.phn',
-                        subnet: peer.subnet,
-                        via: peer.nodeId,
-                        hop: 1
+                        domain: node.nodeId + '.phn',
+                        subnet: node.subnet,
+                        via: node.nodeId,
+                        hop: hop
                     });
                 }
             });

@@ -1068,14 +1068,20 @@ async function fetchMeshStatus() {
             
             uniqueDomainRoutes.forEach(r => {
                 const hopClass = r.hop <= 1 ? 'direct' : '';
+                const isDirect = directPeers[r.via] === true;
+                const isLocal = r.via === 'local';
+                const statusClass = isLocal ? 'local' : (isDirect ? 'online' : 'relay');
+                const statusText = isLocal ? 'Local' : (isDirect ? 'Direct' : 'Relay');
+                
                 html += '<tr>';
                 html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
                 html += '<td><code>' + escapeHtml(r.subnet) + '</code></td>';
                 html += '<td>' + escapeHtml(r.via) + '</td>';
+                html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + r.hop + '</span></td>';
                 html += '</tr>';
             });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No domain routes</td></tr>';
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="5" class="text-muted">No domain routes</td></tr>';
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);

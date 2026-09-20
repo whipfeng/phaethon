@@ -408,8 +408,10 @@ func reverseHandshake(mc *ManagedConn) error {
 // exits (e.g. due to timeout or connection close), it automatically
 // unregisters from the registry and closes the connection.
 func HandleReverseConnection(conn net.Conn, address string) {
+	util.LogInfo("[REVERSE] registering reverse connection: address=%s from=%s", address, conn.RemoteAddr())
 	registry := GlobalRegistry()
 	if registry == nil {
+		util.LogError("[REVERSE] registry not initialized, closing connection for %s", address)
 		conn.Close()
 		return
 	}
@@ -418,6 +420,7 @@ func HandleReverseConnection(conn net.Conn, address string) {
 	mc.stopPing = make(chan struct{})
 
 	registry.Register(address, mc)
+	util.LogInfo("[REVERSE] registered successfully: address=%s from=%s", address, conn.RemoteAddr())
 
 	// Immediately send PENG to confirm registration, so the client knows
 	// the connection is registered and can enter steady heartbeat wait.

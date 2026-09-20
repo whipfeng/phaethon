@@ -194,17 +194,17 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5:"+s.Mapping.Name)
+	targetConn, cleanup, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5")
 	if err != nil {
 		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
 	defer targetConn.Close()
+	defer cleanup()
 
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
-	defer s.LogMeshConnection(connID, "SOCKS5", clientConn.RemoteAddr().String(), dstAddr, dstPort)()
 
 	// Handshake complete — clear the deadline so the relay idle timeout takes over.
 	if ds, ok := clientConn.(interface{ SetReadDeadline(time.Time) error }); ok {

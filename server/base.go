@@ -20,25 +20,30 @@ type BaseServer struct {
 
 // MeshDialWithModeB dials through mesh and handles Mode B registration automatically.
 // The returned conn will unregister from ModeBTable when closed.
-func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr string, inbound string) (net.Conn, error) {
+// It also handles connlog logging for both success and failure cases.
+// Returns the connection and a cleanup function that should be deferred.
+func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr string, proto string) (net.Conn, func(), error) {
+	inbound := proto + ":" + b.Mapping.Name
+	connID := util.NextConnID()
+
 	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound, b.Mapping)
 	if err != nil {
-		return nil, err
+		connlog.Log(inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "fail", err)
+		return nil, nil, err
 	}
+
 	// Get the source port assigned by the netstack
 	srcPort := uint16(0)
 	if localAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
 		srcPort = uint16(localAddr.Port)
 	}
-	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort, srcPort: srcPort}, nil
-}
-// LogMeshConnection logs a successful mesh connection and tracks it as active.
-// Returns a cleanup function that should be deferred.
-func (b *BaseServer) LogMeshConnection(connID, proto, clientAddr, dstAddr string, dstPort int) (cleanup func()) {
-	inbound := proto + ":" + b.Mapping.Name
+
+	// Log successful connection
 	connlog.Log(inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
 	connlog.TrackActive(connID, inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
-	return func() { connlog.RemoveActive(connID) }
+
+	cleanup := func() { connlog.RemoveActive(connID) }
+	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort, srcPort: srcPort}, cleanup, nil
 }
 
 // modeBConn wraps a net.Conn and unregisters from ModeBTable on Close.

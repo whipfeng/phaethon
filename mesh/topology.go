@@ -6,27 +6,26 @@ import (
 	"time"
 )
 
-// PeerRouteEntry represents a route learned from a peer, with hop count.
+// PeerRouteEntry represents a route learned from a peer, referencing the owner node.
 type PeerRouteEntry struct {
 	Prefix    *net.IPNet
 	PrefixStr string
-	Hop       int // hop count (already incremented on receive)
+	NodeID    string // route owner
 }
 
-// PeerDomainSuffixEntry represents a domain suffix learned from a peer, with hop count.
+// PeerDomainSuffixEntry represents a domain suffix learned from a peer, referencing the owner node.
 type PeerDomainSuffixEntry struct {
-	Suffix    string
-	Subnet    *net.IPNet // Fake-IP subnet of the node that owns this suffix
-	SubnetStr string
-	Hop       int // hop count (already incremented on receive)
+	Suffix string
+	NodeID string // domain suffix owner
 }
 
-// PeerClaimedSubnetEntry represents a subnet claim learned via gossip, with hop count.
+// PeerClaimedSubnetEntry represents a subnet claim learned via gossip, with hop count and neighbors.
 type PeerClaimedSubnetEntry struct {
 	Subnet    *net.IPNet
 	SubnetStr string
 	NodeID    string
-	Hop       int // hop count (already incremented on receive)
+	Hop       int      // hop count (already incremented on receive)
+	Neighbors []string // direct neighbors of this node
 }
 
 // PeerTopologyEdgeEntry represents a topology edge learned from a peer.
@@ -57,24 +56,24 @@ func (p *PeerInfo) NodeID() string {
 	return p.Sender.GetNodeID()
 }
 
-// GossipRoute is a serializable route entry with hop count.
+// GossipRoute is a serializable route entry referencing the owner node.
 type GossipRoute struct {
 	Prefix string `json:"prefix"`
-	Hop    int    `json:"hop"`
+	NodeID string `json:"nodeId"` // route owner
 }
 
-// GossipDomainSuffix is a serializable domain suffix entry with hop count.
+// GossipDomainSuffix is a serializable domain suffix entry referencing the owner node.
 type GossipDomainSuffix struct {
 	Suffix string `json:"suffix"`
-	Subnet string `json:"subnet,omitempty"` // Fake-IP subnet of the owning node, e.g. "100.0.0.0/16"
-	Hop    int    `json:"hop"`
+	NodeID string `json:"nodeId"` // domain suffix owner
 }
 
-// GossipClaimedSubnet is a serializable subnet claim with nodeId and hop count.
+// GossipClaimedSubnet is a serializable subnet claim with nodeId, hop count, and neighbors.
 type GossipClaimedSubnet struct {
-	Subnet string `json:"subnet"`
-	NodeID string `json:"nodeId"`
-	Hop    int    `json:"hop"`
+	Subnet    string   `json:"subnet"`
+	NodeID    string   `json:"nodeId"`
+	Hop       int      `json:"hop"`
+	Neighbors []string `json:"neighbors,omitempty"` // direct neighbors of this node
 }
 
 // GossipTopologyEdge represents a topology edge in gossip messages.
@@ -85,12 +84,12 @@ type GossipTopologyEdge struct {
 
 // GossipInfo is the gossip payload exchanged between nodes.
 type GossipInfo struct {
-	NodeID         string                `json:"nodeId"`
-	Subnet         string                `json:"subnet"`
+	// NodeID and Subnet fields removed - sender identified by PeerSender,
+	// own subnet derived from ClaimedSubnets with hop=0
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
 	Routes         []GossipRoute         `json:"routes,omitempty"`
 	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
-	TopologyEdges  []GossipTopologyEdge  `json:"topologyEdges,omitempty"`
+	// TopologyEdges removed - topology expressed via ClaimedSubnets.Neighbors
 }
 
 // Topology tracks mesh peers and their advertised capabilities.
@@ -143,17 +142,7 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		return false
 	}
 
-	// Parse subnet
-	var subnet *net.IPNet
-	if info.Subnet != "" {
-		_, ipNet, err := net.ParseCIDR(info.Subnet)
-		if err != nil {
-			return false
-		}
-		subnet = ipNet
-	}
-
-	// Parse routes (increment hop count for each entry)
+	// Parse routes (reference owner node, hop count derived from ClaimedSubnets)
 	var routes []PeerRouteEntry
 	for _, r := range info.Routes {
 		_, ipNet, err := net.ParseCIDR(r.Prefix)
@@ -163,32 +152,28 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		routes = append(routes, PeerRouteEntry{
 			Prefix:    ipNet,
 			PrefixStr: r.Prefix,
-			Hop:       r.Hop + 1,
+			NodeID:    r.NodeID,
 		})
 	}
 
-	// Parse domain suffixes (increment hop count for each entry)
+	// Parse domain suffixes (reference owner node, hop count and subnet derived from ClaimedSubnets)
 	var domainSuffixes []PeerDomainSuffixEntry
 	for _, ds := range info.DomainSuffixes {
-		entry := PeerDomainSuffixEntry{
-			Suffix:    ds.Suffix,
-			SubnetStr: ds.Subnet,
-			Hop:       ds.Hop + 1,
-		}
-		if ds.Subnet != "" {
-			_, ipNet, err := net.ParseCIDR(ds.Subnet)
-			if err == nil {
-				entry.Subnet = ipNet
-			}
-		}
-		domainSuffixes = append(domainSuffixes, entry)
+		domainSuffixes = append(domainSuffixes, PeerDomainSuffixEntry{
+			Suffix: ds.Suffix,
+			NodeID: ds.NodeID,
+		})
 	}
 
-	// Parse claimed subnets (increment hop count for each entry)
+	// Parse claimed subnets (increment hop count, preserve neighbors)
 	var claimedSubnets []PeerClaimedSubnetEntry
 	for _, cs := range info.ClaimedSubnets {
 		_, ipNet, err := net.ParseCIDR(cs.Subnet)
 		if err != nil {
+			continue
+		}
+		// Discard claimed subnets with hop count exceeding maximum (prevents stale route accumulation)
+		if cs.Hop+1 > 20 {
 			continue
 		}
 		claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
@@ -196,21 +181,25 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 			SubnetStr: cs.Subnet,
 			NodeID:    cs.NodeID,
 			Hop:       cs.Hop + 1,
+			Neighbors: cs.Neighbors,
 		})
 	}
 
-	// Parse topology edges
-	var topologyEdges []PeerTopologyEdgeEntry
-	for _, te := range info.TopologyEdges {
-		topologyEdges = append(topologyEdges, PeerTopologyEdgeEntry{
-			NodeID:   te.NodeID,
-			Neighbor: te.Neighbor,
-		})
+	// Derive peer's own subnet from ClaimedSubnets with hop=1 (originally hop=0 from sender)
+	var subnet *net.IPNet
+	var subnetStr string
+	for _, cs := range claimedSubnets {
+		if cs.Hop == 1 && cs.NodeID != "" {
+			// This is the sender's own subnet (hop was 0, now 1 after increment)
+			subnet = cs.Subnet
+			subnetStr = cs.SubnetStr
+			break
+		}
 	}
 
 	// Check if anything changed
 	changed := false
-	if peer.SubnetStr != info.Subnet {
+	if peer.SubnetStr != subnetStr {
 		changed = true
 	}
 	if !domainSuffixesEqual(peer.DomainSuffixes, domainSuffixes) {
@@ -222,17 +211,14 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	if !claimedSubnetsEqual(peer.ClaimedSubnets, claimedSubnets) {
 		changed = true
 	}
-	if !topologyEdgesEqual(peer.TopologyEdges, topologyEdges) {
-		changed = true
-	}
 
 	// Update in-place
 	peer.Subnet = subnet
-	peer.SubnetStr = info.Subnet
+	peer.SubnetStr = subnetStr
 	peer.DomainSuffixes = domainSuffixes
 	peer.Routes = routes
 	peer.ClaimedSubnets = claimedSubnets
-	peer.TopologyEdges = topologyEdges
+	// TopologyEdges removed - topology expressed via ClaimedSubnets.Neighbors
 	peer.LastSeen = time.Now()
 
 	return changed
@@ -284,7 +270,7 @@ func routesEqual(a, b []PeerRouteEntry) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].PrefixStr != b[i].PrefixStr || a[i].Hop != b[i].Hop {
+		if a[i].PrefixStr != b[i].PrefixStr || a[i].NodeID != b[i].NodeID {
 			return false
 		}
 	}
@@ -297,7 +283,7 @@ func domainSuffixesEqual(a, b []PeerDomainSuffixEntry) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Suffix != b[i].Suffix || a[i].SubnetStr != b[i].SubnetStr || a[i].Hop != b[i].Hop {
+		if a[i].Suffix != b[i].Suffix || a[i].NodeID != b[i].NodeID {
 			return false
 		}
 	}
@@ -313,18 +299,15 @@ func claimedSubnetsEqual(a, b []PeerClaimedSubnetEntry) bool {
 		if a[i].SubnetStr != b[i].SubnetStr || a[i].NodeID != b[i].NodeID || a[i].Hop != b[i].Hop {
 			return false
 		}
-	}
-	return true
-}
-
-// topologyEdgesEqual compares two topology edge entry slices for equality.
-func topologyEdgesEqual(a, b []PeerTopologyEdgeEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].NodeID != b[i].NodeID || a[i].Neighbor != b[i].Neighbor {
+		// Compare neighbors
+		if len(a[i].Neighbors) != len(b[i].Neighbors) {
 			return false
+		}
+		// Simple comparison - order matters
+		for j := range a[i].Neighbors {
+			if a[i].Neighbors[j] != b[i].Neighbors[j] {
+				return false
+			}
 		}
 	}
 	return true

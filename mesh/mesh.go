@@ -1584,177 +1584,128 @@ func (m *MeshManager) broadcastGossip() {
 	copy(domainSuffixes, m.domainSuffixes)
 	m.mu.RUnlock()
 
-	// Build global route table (non-mesh routes only)
-	type globalRouteEntry struct {
-		hop     int
-		nextHop *PeerInfo // nil = own route
-		prefix  string
-		ipNet   *net.IPNet
-	}
-	bestRoutes := make(map[string]globalRouteEntry)
-
-	// Own advertise routes (Hop=0) — not mesh subnets
-	for _, r := range advertise {
-		_, ipNet, _ := net.ParseCIDR(r)
-		bestRoutes[r] = globalRouteEntry{0, nil, r, ipNet}
-	}
-	// Peer routes (non-mesh, learned from peers)
-	for _, peer := range allPeers {
-		if peer.Sender == nil {
-			continue
-		}
-		for _, r := range peer.Routes {
-			if existing, ok := bestRoutes[r.PrefixStr]; !ok || r.Hop < existing.hop {
-				bestRoutes[r.PrefixStr] = globalRouteEntry{r.Hop, peer, r.PrefixStr, r.Prefix}
-			}
-		}
-	}
-
 	// Build global claimed subnets table (mesh subnets)
 	type globalClaimEntry struct {
-		hop     int
-		nextHop *PeerInfo // nil = own claim
-		nodeID  string
-		subnet  string
+		hop       int
+		nextHop   *PeerInfo // nil = own claim
+		nodeID    string
+		subnet    string
+		neighbors []string
 	}
 	bestClaims := make(map[string]globalClaimEntry)
 
-	// Own claim (Hop=0)
-	bestClaims[m.subnetStr] = globalClaimEntry{0, nil, m.nodeID, m.subnetStr}
+	// Collect own neighbors (direct peer nodeIDs)
+	ownNeighbors := make([]string, 0, len(allPeers))
+	for _, peer := range allPeers {
+		if peer.Sender != nil {
+			ownNeighbors = append(ownNeighbors, peer.NodeID())
+		}
+	}
+
+	// Own claim (Hop=0, with neighbors)
+	bestClaims[m.subnetStr] = globalClaimEntry{0, nil, m.nodeID, m.subnetStr, ownNeighbors}
+
 	// Peer claims
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
-		// Peer's own subnet
-		if peer.SubnetStr != "" {
-			key := peer.SubnetStr
-			if existing, ok := bestClaims[key]; !ok || 1 < existing.hop {
-				bestClaims[key] = globalClaimEntry{1, peer, peer.NodeID(), peer.SubnetStr}
-			}
-		}
-		// Peer's learned claims
+		// Peer's learned claims (includes peer's own subnet with hop=1)
 		for _, cs := range peer.ClaimedSubnets {
 			if existing, ok := bestClaims[cs.SubnetStr]; !ok || cs.Hop < existing.hop {
-				bestClaims[cs.SubnetStr] = globalClaimEntry{cs.Hop, peer, cs.NodeID, cs.SubnetStr}
+				bestClaims[cs.SubnetStr] = globalClaimEntry{cs.Hop, peer, cs.NodeID, cs.SubnetStr, cs.Neighbors}
 			}
 		}
 	}
 
-	// Build global domain suffix map
+	// Build global route table (non-mesh routes, referencing owner node)
+	type globalRouteEntry struct {
+		nextHop *PeerInfo // nil = own route
+		nodeID  string
+		prefix  string
+	}
+	bestRoutes := make(map[string]globalRouteEntry)
+
+	// Own advertise routes
+	for _, r := range advertise {
+		_, ipNet, _ := net.ParseCIDR(r)
+		bestRoutes[r] = globalRouteEntry{nil, m.nodeID, r}
+		_ = ipNet // ipNet not used, kept for potential future use
+	}
+	// Peer routes (reference owner node)
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, r := range peer.Routes {
+			if _, ok := bestRoutes[r.PrefixStr]; !ok {
+				bestRoutes[r.PrefixStr] = globalRouteEntry{peer, r.NodeID, r.PrefixStr}
+			}
+		}
+	}
+
+	// Build global domain suffix map (referencing owner node)
 	type globalDSEntry struct {
-		hop     int
 		nextHop *PeerInfo // nil = own entry
-		subnet  string    // Fake-IP subnet of the owning node
+		nodeID  string
 	}
 	bestDS := make(map[string]globalDSEntry)
 	for _, s := range domainSuffixes {
-		bestDS[s] = globalDSEntry{0, nil, m.subnetStr}
+		bestDS[s] = globalDSEntry{nil, m.nodeID}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			if existing, ok := bestDS[entry.Suffix]; !ok || entry.Hop < existing.hop {
-				bestDS[entry.Suffix] = globalDSEntry{entry.Hop, peer, entry.SubnetStr}
-			}
-		}
-	}
-
-	// Build global topology edge set (deduplicated)
-	type globalEdgeEntry struct {
-		nextHop  *PeerInfo // nil = own observation
-		nodeID   string
-		neighbor string
-	}
-	bestEdges := make(map[string]globalEdgeEntry) // key: "nodeA|nodeB" (sorted)
-
-	// Own direct edges (to all peers)
-	for _, peer := range allPeers {
-		if peer.Sender == nil {
-			continue
-		}
-		key := edgeKey(m.nodeID, peer.NodeID())
-		if _, exists := bestEdges[key]; !exists {
-			bestEdges[key] = globalEdgeEntry{nil, m.nodeID, peer.NodeID()}
-		}
-	}
-
-	// Edges learned from peers
-	for _, peer := range allPeers {
-		if peer.Sender == nil {
-			continue
-		}
-		for _, e := range peer.TopologyEdges {
-			key := edgeKey(e.NodeID, e.Neighbor)
-			if _, exists := bestEdges[key]; !exists {
-				bestEdges[key] = globalEdgeEntry{peer, e.NodeID, e.Neighbor}
+			if _, ok := bestDS[entry.Suffix]; !ok {
+				bestDS[entry.Suffix] = globalDSEntry{peer, entry.NodeID}
 			}
 		}
 	}
 
 	// Per-peer: filter by split horizon and send
-	// Iterate over all peers (including multiple connections to same node)
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
 
-		// Filter routes: exclude entries where nextHop == this peer
+		// Filter routes: exclude entries where nextHop's nodeID == this peer's nodeID
 		var routes []GossipRoute
 		for _, e := range bestRoutes {
-			if e.nextHop == peer {
+			if e.nextHop != nil && e.nextHop.NodeID() == peer.NodeID() {
 				continue // split horizon
 			}
-			routes = append(routes, GossipRoute{Prefix: e.prefix, Hop: e.hop})
+			routes = append(routes, GossipRoute{Prefix: e.prefix, NodeID: e.nodeID})
 		}
 
-		// Filter domain suffixes: exclude entries where nextHop == this peer
+		// Filter domain suffixes: exclude entries where nextHop's nodeID == this peer's nodeID
 		var ds []GossipDomainSuffix
 		for suffix, e := range bestDS {
-			if e.nextHop == peer {
+			if e.nextHop != nil && e.nextHop.NodeID() == peer.NodeID() {
 				continue // split horizon
 			}
-			ds = append(ds, GossipDomainSuffix{Suffix: suffix, Subnet: e.subnet, Hop: e.hop})
+			ds = append(ds, GossipDomainSuffix{Suffix: suffix, NodeID: e.nodeID})
 		}
 
-		// Filter claimed subnets: exclude entries where nextHop == this peer
+		// Filter claimed subnets: exclude entries where nextHop's nodeID == this peer's nodeID
 		var claims []GossipClaimedSubnet
 		for _, e := range bestClaims {
-			if e.nextHop == peer {
+			if e.nextHop != nil && e.nextHop.NodeID() == peer.NodeID() {
 				continue // split horizon
 			}
 			claims = append(claims, GossipClaimedSubnet{
-				Subnet: e.subnet,
-				NodeID: e.nodeID,
-				Hop:    e.hop,
-			})
-		}
-
-		// Filter topology edges: exclude entries learned from this peer,
-		// and entries involving this peer (they already know)
-		var edges []GossipTopologyEdge
-		for _, e := range bestEdges {
-			if e.nextHop == peer {
-				continue // split horizon
-			}
-			if e.nodeID == peer.NodeID() || e.neighbor == peer.NodeID() {
-				continue // peer already knows about its own edges
-			}
-			edges = append(edges, GossipTopologyEdge{
-				NodeID:   e.nodeID,
-				Neighbor: e.neighbor,
+				Subnet:    e.subnet,
+				NodeID:    e.nodeID,
+				Hop:       e.hop,
+				Neighbors: e.neighbors,
 			})
 		}
 
 		info := GossipInfo{
-			NodeID:         m.nodeID,
-			Subnet:         m.subnetStr,
 			DomainSuffixes: ds,
 			Routes:         routes,
 			ClaimedSubnets: claims,
-			TopologyEdges:  edges,
 		}
 		data, err := json.Marshal(info)
 		if err != nil {

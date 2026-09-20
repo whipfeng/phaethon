@@ -25,15 +25,15 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 
-	targetConn, err := s.MeshDialWithModeB(dstHost, dstPort, clientConn.RemoteAddr().String(), "Direct:"+s.Mapping.Name)
+	targetConn, cleanup, err := s.MeshDialWithModeB(dstHost, dstPort, clientConn.RemoteAddr().String(), "Direct")
 	if err != nil {
 		util.LogInfo("[DIRECT-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
+	defer cleanup()
 
 	util.LogInfo("[DIRECT-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
-	defer s.LogMeshConnection(connID, "Direct", clientConn.RemoteAddr().String(), dstHost, dstPort)()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 

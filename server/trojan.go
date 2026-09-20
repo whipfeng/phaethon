@@ -145,15 +145,15 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	connID := util.NextConnID()
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
-	targetConn, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan:"+s.Mapping.Name)
+	targetConn, cleanup, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan")
 	if err != nil {
 		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
+	defer cleanup()
 
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
-	defer s.LogMeshConnection(connID, "Trojan", clientConn.RemoteAddr().String(), dstAddr, dstPort)()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 

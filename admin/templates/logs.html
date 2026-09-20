@@ -2,7 +2,13 @@
 {{define "content"}}
 <div class="page-content" style="display:flex; flex-direction:column; flex:1; min-height:0;">
     <div class="card" style="flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0;">
-        <h3 style="flex-shrink:0;" data-i18n="logs.title">📋 运行日志</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0;">
+            <h3 style="margin:0;" data-i18n="logs.title">📋 运行日志</h3>
+            <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--text-secondary); cursor:pointer;">
+                <input type="checkbox" id="log-auto-scroll" checked style="width:16px; height:16px; cursor:pointer;">
+                <span data-i18n="logs.autoScroll">自动滚动</span>
+            </label>
+        </div>
         <pre class="tun-log" id="conn-logs" style="flex:1; max-height:none; margin-bottom:0; overflow-y:auto;" data-i18n="common.loading">Loading...</pre>
     </div>
 </div>

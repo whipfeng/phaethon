@@ -179,7 +179,37 @@ function toggleUserMenu() {
 
 function toggleBottomDrawer() {
     const drawer = document.getElementById('bottom-drawer');
-    if (drawer) drawer.classList.toggle('hidden');
+    if (drawer) {
+        drawer.classList.toggle('hidden');
+        // Setup touch handler for swipe-to-close if not already done
+        if (!drawer._touchHandlerAttached) {
+            drawer._touchHandlerAttached = true;
+            const content = drawer.querySelector('.bottom-drawer-content');
+            if (content) {
+                let startY = 0;
+                let currentY = 0;
+                content.addEventListener('touchstart', (e) => {
+                    startY = e.touches[0].clientY;
+                }, { passive: true });
+                content.addEventListener('touchmove', (e) => {
+                    currentY = e.touches[0].clientY;
+                    const deltaY = currentY - startY;
+                    if (deltaY > 0) {
+                        content.style.transform = `translateY(${deltaY}px)`;
+                    }
+                }, { passive: true });
+                content.addEventListener('touchend', () => {
+                    const deltaY = currentY - startY;
+                    if (deltaY > 100) {
+                        drawer.classList.add('hidden');
+                    }
+                    content.style.transform = '';
+                    startY = 0;
+                    currentY = 0;
+                });
+            }
+        }
+    }
 }
 
 // Bottom navigation customization
@@ -946,6 +976,16 @@ async function fetchMeshStatus() {
                 ? fullTopology.nodes 
                 : peers.map(p => ({ nodeId: p.nodeId, subnet: p.subnet, vip: '' }));
             
+            // Build edges lookup for neighbors
+            const edges = (fullTopology && fullTopology.edges) || [];
+            const neighborsMap = {};
+            edges.forEach(edge => {
+                if (!neighborsMap[edge.from]) neighborsMap[edge.from] = [];
+                if (!neighborsMap[edge.to]) neighborsMap[edge.to] = [];
+                neighborsMap[edge.from].push(edge.to);
+                neighborsMap[edge.to].push(edge.from);
+            });
+            
             allNodes.forEach(n => {
                 const nodeId = n.nodeId;
                 const isDirect = directPeers[nodeId] === true;
@@ -957,16 +997,19 @@ async function fetchMeshStatus() {
                 const btnClass = isLocal ? 'btn btn-sm btn-secondary' : 'btn btn-sm btn-outline';
                 const btnText = isLocal ? 'Current' : 'Open';
                 const btnDisabled = isLocal ? 'disabled' : '';
+                const neighbors = neighborsMap[nodeId] || [];
+                const neighborsStr = neighbors.length > 0 ? neighbors.join(', ') : '-';
                 html += '<tr>';
                 html += '<td>' + escapeHtml(nodeId) + '</td>';
                 html += '<td><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
                 html += '<td><code>' + escapeHtml(n.vip || '-') + '</code></td>';
+                html += '<td>' + escapeHtml(neighborsStr) + '</td>';
                 html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td>' + lastSeen + '</td>';
                 html += '<td><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
                 html += '</tr>';
             });
-            tbody.innerHTML = html || '<tr><td colspan="6" class="text-muted">No nodes</td></tr>';
+            tbody.innerHTML = html || '<tr><td colspan="7" class="text-muted">No nodes</td></tr>';
         }
 
         // Draw topology visualization
@@ -1072,22 +1115,38 @@ async function fetchMeshStatus() {
             }
             
             // Sort by domain name
-            // Deduplicate by domain, keeping the route with lowest hop count
+            // Group by domain, keeping all routes with the lowest hop count
             const domainRouteMap = new Map();
             domainRoutes.forEach(r => {
                 const existing = domainRouteMap.get(r.domain);
-                if (!existing || r.hop < existing.hop) {
-                    domainRouteMap.set(r.domain, r);
+                if (!existing) {
+                    domainRouteMap.set(r.domain, [r]);
+                } else if (r.hop < existing[0].hop) {
+                    domainRouteMap.set(r.domain, [r]);
+                } else if (r.hop === existing[0].hop) {
+                    existing.push(r);
                 }
             });
-            const uniqueDomainRoutes = Array.from(domainRouteMap.values());
+            // Convert to array with combined via fields
+            const uniqueDomainRoutes = [];
+            domainRouteMap.forEach((routes, domain) => {
+                const viaNames = routes.map(r => r.via).filter((v, i, a) => a.indexOf(v) === i).join(', ');
+                const minHop = routes[0].hop;
+                const hasDirect = routes.some(r => directPeers[r.via] === true);
+                const isLocal = routes.some(r => r.via === 'local');
+                uniqueDomainRoutes.push({
+                    domain: domain,
+                    via: viaNames,
+                    hop: minHop,
+                    isDirect: hasDirect,
+                    isLocal: isLocal
+                });
+            });
             uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
             
             uniqueDomainRoutes.forEach(r => {
-                const isDirect = directPeers[r.via] === true;
-                const isLocal = r.via === 'local';
-                const statusClass = isLocal ? 'local' : (isDirect ? 'online' : 'relay');
-                const statusText = isLocal ? 'Local' : (isDirect ? 'Direct' : 'Relay');
+                const statusClass = r.isLocal ? 'local' : (r.isDirect ? 'online' : 'relay');
+                const statusText = r.isLocal ? 'Local' : (r.isDirect ? 'Direct' : 'Relay');
                 
                 html += '<tr>';
                 html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
@@ -1396,6 +1455,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 if (dx * dx + dy * dy <= nodeRadius * nodeRadius) {
                     _topologyState.dragging = nodeId;
                     _topologyState.dragOffset = { x: dx, y: dy };
+                    _topologyState.dragStartPos = { x: e.clientX, y: e.clientY };
                     canvas.style.cursor = 'grabbing';
                     break;
                 }
@@ -1435,17 +1495,35 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         break;
                     }
                 }
-                canvas.style.cursor = overNode ? 'grab' : 'default';
+                canvas.style.cursor = overNode ? 'pointer' : 'default';
             }
         });
 
-        canvas.addEventListener('mouseup', function() {
+        canvas.addEventListener('mouseup', function(e) {
+            // Check if it was a click (not a drag)
+            if (_topologyState.dragging && _topologyState.dragStartPos) {
+                const dx = e.clientX - _topologyState.dragStartPos.x;
+                const dy = e.clientY - _topologyState.dragStartPos.y;
+                const moved = dx * dx + dy * dy;
+                // If didn't move much, treat as click
+                if (moved < 25) {
+                    const nodeId = _topologyState.dragging;
+                    const localId = _topologyState.localNodeId;
+                    if (nodeId && nodeId !== localId) {
+                        // Open the node's admin page in new tab
+                        const url = 'https://' + nodeId + '.phn/';
+                        window.open(url, '_blank');
+                    }
+                }
+            }
             _topologyState.dragging = null;
+            _topologyState.dragStartPos = null;
             canvas.style.cursor = 'default';
         });
 
         canvas.addEventListener('mouseleave', function() {
             _topologyState.dragging = null;
+            _topologyState.dragStartPos = null;
             canvas.style.cursor = 'default';
         });
     }
@@ -1803,7 +1881,11 @@ async function fetchConnections(incremental) {
             el.textContent = allLines.slice(allLines.length - MAX_DASHBOARD_LOG_LINES).join('\n');
         }
         connLogLastSeq = data.logs[data.logs.length - 1].seq;
-        el.scrollTop = el.scrollHeight;
+        // Only auto-scroll if checkbox is checked
+        const autoScrollCheckbox = document.getElementById('log-auto-scroll');
+        if (!autoScrollCheckbox || autoScrollCheckbox.checked) {
+            el.scrollTop = el.scrollHeight;
+        }
     } catch (err) {
         if (!incremental) el.textContent = 'Failed to load: ' + err.message;
     }

@@ -2,12 +2,15 @@
 {{define "content"}}
 <div class="page-content" style="display:flex; flex-direction:column; flex:1; min-height:0;">
     <div class="card" style="flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0;">
-            <h3 style="margin:0;" data-i18n="logs.title">📋 运行日志</h3>
-            <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--text-secondary); cursor:pointer;">
-                <input type="checkbox" id="log-auto-scroll" checked style="width:16px; height:16px; cursor:pointer;">
-                <span data-i18n="logs.autoScroll">自动滚动</span>
-            </label>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0; gap:1rem; flex-wrap:wrap;">
+            <h3 style="margin:0;" data-i18n="logs.title">📋 Logs</h3>
+            <div style="display:flex; align-items:center; gap:1rem;">
+                <input type="text" id="log-filter" placeholder="Filter logs..." data-i18n-placeholder="logs.filter" style="padding:0.4rem 0.75rem; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-size:0.85rem; width:200px;">
+                <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--text-secondary); cursor:pointer;">
+                    <input type="checkbox" id="log-auto-scroll" checked style="width:16px; height:16px; cursor:pointer;">
+                    <span data-i18n="logs.autoScroll">Auto-scroll</span>
+                </label>
+            </div>
         </div>
         <pre class="tun-log" id="conn-logs" style="flex:1; max-height:none; margin-bottom:0; overflow-y:auto;" data-i18n="common.loading">Loading...</pre>
     </div>
@@ -16,6 +19,41 @@
 <script>
 (function() {
     fetchConnections();
+
+    // Log filter
+    const filterInput = document.getElementById('log-filter');
+    const logPre = document.getElementById('conn-logs');
+    let allLogLines = [];
+
+    if (filterInput && logPre) {
+        filterInput.addEventListener('input', function() {
+            const query = this.value.toLowerCase();
+            if (!query) {
+                logPre.textContent = allLogLines.join('\n');
+            } else {
+                const filtered = allLogLines.filter(line => line.toLowerCase().includes(query));
+                logPre.textContent = filtered.length > 0 ? filtered.join('\n') : 'No matching logs';
+            }
+            // Scroll to bottom after filter
+            logPre.scrollTop = logPre.scrollHeight;
+        });
+    }
+
+    // Override fetchConnections to capture all lines
+    const origFetch = window.fetchConnections;
+    window.fetchConnections = async function(incremental) {
+        await origFetch(incremental);
+        if (logPre) {
+            allLogLines = logPre.textContent.split('\n');
+            // Re-apply filter after update
+            const query = filterInput ? filterInput.value.toLowerCase() : '';
+            if (query) {
+                const filtered = allLogLines.filter(line => line.toLowerCase().includes(query));
+                logPre.textContent = filtered.length > 0 ? filtered.join('\n') : 'No matching logs';
+                logPre.scrollTop = logPre.scrollHeight;
+            }
+        }
+    };
 
     if (typeof startSSE === 'function') {
         startSSE();

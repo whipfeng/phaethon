@@ -1044,10 +1044,7 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 .mesh-status-dot.offline { background: var(--danger); }
 
 /* Responsive */
-@media (max-width: 768px) {
-    .sidebar { width: 60px; }
-    .sidebar .nav-menu span, .sidebar .sidebar-footer, .sidebar .version { display: none; }
-    .main-content { margin-left: 60px; padding: 1rem; padding-bottom: 70px; }
+@media (max-width: 767px) {
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .form-row { flex-direction: column; gap: 0; }
     .port-grid { grid-template-columns: repeat(3, 1fr); }
@@ -1070,17 +1067,15 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     .mesh-peer-table th:last-child,
     .mesh-peer-table td:last-child { display: none; }
     .modal-content { margin: 1rem; max-height: calc(100vh - 2rem); }
-}
 
-/* Mobile-first responsive (small screens < 768px) */
-@media (max-width: 767px) {
     /* Hide sidebar, show bottom nav */
     .sidebar {
         display: none;
     }
-    
+
     .main-content {
         margin-left: 0;
+        padding: 1rem;
         padding-bottom: 80px; /* Space for bottom nav */
     }
 

@@ -980,35 +980,25 @@ async function fetchMeshStatus() {
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
                     if (viaList.length === 0) {
-                        html += '<tr><td><code>' + r.prefix + '</code></td><td class="text-muted">Local</td><td>-</td><td>-</td></tr>';
+                        html += '<tr><td><code>' + r.prefix + '</code></td><td class="text-muted">Local</td><td><span class="mesh-status-dot local"></span>Local</td></tr>';
                     } else {
                         const minHop = Math.min(...viaList.map(v => v.hop));
                         const bestRoutes = viaList.filter(v => v.hop === minHop);
-                        const hopClass = minHop === 1 ? 'direct' : '';
                         
-                        // Show all best routes with neighbor info
-                        bestRoutes.forEach((via, idx) => {
-                            const isDirect = directPeers[via.nodeID] === true;
-                            const statusClass = isDirect ? 'online' : 'relay';
-                            const statusText = isDirect ? 'Direct' : 'Relay';
-                            html += '<tr>';
-                            if (idx === 0) {
-                                html += '<td><code>' + escapeHtml(r.prefix) + '</code></td>';
-                            } else {
-                                html += '<td></td>';
-                            }
-                            html += '<td>' + escapeHtml(via.nodeID) + '</td>';
-                            html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
-                            if (idx === 0) {
-                                html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + minHop + '</span></td>';
-                            } else {
-                                html += '<td></td>';
-                            }
-                            html += '</tr>';
-                        });
+                        // Combine all best routes into one row
+                        const viaNames = bestRoutes.map(v => v.nodeID).join(', ');
+                        const hasDirect = bestRoutes.some(v => directPeers[v.nodeID] === true);
+                        const statusClass = hasDirect ? 'online' : 'relay';
+                        const statusText = hasDirect ? 'Direct' : 'Relay';
+                        
+                        html += '<tr>';
+                        html += '<td><code>' + escapeHtml(r.prefix) + '</code></td>';
+                        html += '<td>' + escapeHtml(viaNames) + '</td>';
+                        html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                        html += '</tr>';
                     }
                 });
-                routeTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No routes</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No routes</td></tr>';
             }
         }
 
@@ -1094,7 +1084,6 @@ async function fetchMeshStatus() {
             uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
             
             uniqueDomainRoutes.forEach(r => {
-                const hopClass = r.hop <= 1 ? 'direct' : '';
                 const isDirect = directPeers[r.via] === true;
                 const isLocal = r.via === 'local';
                 const statusClass = isLocal ? 'local' : (isDirect ? 'online' : 'relay');
@@ -1102,13 +1091,11 @@ async function fetchMeshStatus() {
                 
                 html += '<tr>';
                 html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
-                html += '<td><code>' + escapeHtml(r.subnet) + '</code></td>';
                 html += '<td>' + escapeHtml(r.via) + '</td>';
                 html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
-                html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + r.hop + '</span></td>';
                 html += '</tr>';
             });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="5" class="text-muted">No domain routes</td></tr>';
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No domain routes</td></tr>';
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);

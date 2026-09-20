@@ -167,14 +167,94 @@ type GossipClaimedSubnet struct {
 
 ### 解决过时路由游荡问题
 
-**原理**：当节点A停止通告subnet X时：
-1. A的ClaimedSubnets不再包含X
-2. B收到A的新gossip，更新A.PeerInfo.ClaimedSubnets，不再包含X
-3. B构建bestClaims时，X不再从A.PeerInfo中来
-4. 如果其他peer的ClaimedSubnets也不包含X，则X从bestClaims中消失
-5. X不再被传播，自动清理
+#### 问题场景
 
-**关键**：Routes和DomainSuffixes引用nodeID，当nodeID对应的ClaimedSubnet消失时，相关的Routes和DomainSuffixes也自动失效。
+当节点下线后，它的 ClaimedSubnet 可能继续在网络中游荡：
+
+**拓扑：A-B-C 成环，D 连 A，D 下线**
+
+1. D 在线时：D 通告 `{nodeID: "D", neighbors: ["A"]}`，A/B/C 都存储
+2. D 下线：A 检测到断开，删除 D 的 peer 条目，停止通告 D 的 claim
+3. **但 B 和 C 还存着 D 的 claim**（从 A 学来的）
+4. B 和 C 互相转发 D 的 claim，形成环路游荡
+
+#### 解决方案：互相声明验证
+
+**规则**：如果节点 X 声明邻居包含 [Y, Z, ...]，那么 Y、Z 等**所有**邻居都必须也声明 X。否则 X 的 claim 无效，丢弃。
+
+**验证逻辑**：当你收到一个 claim 时，检查 claim 的 origin 声明的**每一个** neighbor 是否也声明了 origin。如果有任何一个 neighbor 不再声明 origin（或 neighbor 本身不存在），则该 claim 无效。
+
+```go
+// 验证 claim 的有效性：必须所有邻居都通过验证
+for _, cs := range claimedSubnets {
+    originID := cs.NodeID
+    originNeighbors := cs.Neighbors  // origin 声明的邻居列表
+    
+    // 检查：origin 的每个邻居是否也声明了 origin
+    validated := true
+    for _, neighborID := range originNeighbors {
+        neighborClaim, ok := findClaim(neighborID)
+        if !ok {
+            // neighbor 不存在（下线了）→ 验证失败
+            validated = false
+            break
+        }
+        if !contains(neighborClaim.neighbors, originID) {
+            // neighbor 存在但没有声明 origin → 验证失败
+            validated = false
+            break
+        }
+    }
+    if !validated {
+        continue  // 丢弃无效 claim
+    }
+}
+```
+
+**关键点**：
+- **全部检查**：必须 origin 的**所有**邻居都声明 origin，claim 才有效
+- **等价逻辑**：neighbor 不存在（下线）和 neighbor 存在但不声明 origin，在验证逻辑看来是等价的——都导致验证失败
+- **严格验证**：只要有一个邻居不满足，整个 claim 就无效。这确保 neighbors 列表的准确性
+
+**场景追踪**：
+
+D 在线时：
+- D 通告：`{nodeID: "D", neighbors: ["A"]}`
+- A 通告：`{nodeID: "A", neighbors: ["B", "D"]}`（包含 D）
+- B 收到 D 的 claim：检查 D.Neighbors=["A"]，A 在通告 D 的 claim → ✓ 有效
+- C 收到 D 的 claim：同样检查，A 在通告 → ✓ 有效
+
+D 下线后：
+- A 检测到断开，A 的 Neighbors 变成 `["B"]`（不再包含 D）
+- A 停止通告 D 的 claim
+- B 收到 D 的 claim（从 C 转发）：检查 D.Neighbors=["A"]，A **不再通告** D 的 claim → ✗ **无效，丢弃！**
+- C 同样丢弃
+- D 的 claim 在一轮 gossip 内从全网消失 ✓
+
+**多跳传播**：
+
+拓扑 A-B-C-D-E，A 的 claim: neighbors=["B"]
+
+- B 收到 A 的 claim：检查 A.Neighbors=["B"]，B 在通告 A 的 claim → ✓ 有效
+- C 收到 A 的 claim：同样检查，B 在通告 → ✓ 有效
+- D 收到 A 的 claim：同样检查，B 在通告 → ✓ 有效
+- E 收到 A 的 claim：同样检查，B 在通告 → ✓ 有效
+
+Claim 自由传播，因为验证的是 claim 内容本身（A 和 B 的互相声明关系），不是检查 sender。
+
+A 下线后：
+- B 检测到断开，B 的 Neighbors 不再包含 A
+- B 停止通告 A 的 claim
+- C 收到 A 的 claim：检查 A.Neighbors=["B"]，B **不再通告** → ✗ 无效，丢弃
+- D、E 同样丢弃
+- 全网清理 ✓
+
+**优势**：
+- 不需要 TTL/时间戳
+- 不需要新消息类型
+- 纯拓扑推理，自动清理 stale claims
+- 支持多跳传播
+- 逻辑统一，不检查 sender，只验证 claim 内容
 
 ### 全网拓扑推导
 
@@ -201,30 +281,36 @@ for _, cs := range allClaimedSubnets {
 
 ## 实现步骤
 
-1. **协议层**：
+1. **协议层**（已完成）：
    - 修改GossipInfo结构，移除NodeID和Subnet字段
    - 修改GossipRoute和GossipDomainSuffix，移除Hop字段，添加NodeID字段
    - 修改GossipClaimedSubnet，添加Neighbors字段
    - 移除GossipTopologyEdge结构
 
-2. **发送逻辑**：
+2. **发送逻辑**（已完成）：
    - 修改broadcastGossip()，构建新的报文格式
    - 自己的ClaimedSubnet条目包含Neighbors
    - Routes和DomainSuffixes引用nodeID
 
 3. **接收逻辑**：
    - 修改UpdateGossip()，解析新格式
+   - **添加互相声明验证**：检查 claim 的 origin 声明的 neighbors 是否也声明了 origin
    - 建立nodeID到hop/subnet/neighbors的映射
    - Routes和DomainSuffixes的hop从映射中查找
 
-4. **拓扑展示**：
+4. **聚合逻辑**：
+   - 在broadcastGossip()聚合时，对每个claim执行互相声明验证
+   - 无效的claim（origin的某个neighbor不再声明origin）不纳入bestClaims
+
+5. **拓扑展示**：
    - 修改GetFullTopology()，从ClaimedSubnets.Neighbors推导边
    - 移除对TopologyEdges的依赖
 
-5. **测试验证**：
-   - 验证过时路由自动清理
+6. **测试验证**：
+   - 验证节点下线后claim自动清理
    - 验证全网拓扑正确展示
    - 验证split horizon正常工作
+   - 验证多跳传播正常
 
 ## 优势
 
@@ -239,4 +325,8 @@ for _, cs := range allClaimedSubnets {
 - [x] 问题分析完成
 - [x] 冗余分析完成
 - [x] 新设计完成
-- [ ] 实现
+- [x] 互相声明验证规则设计
+- [ ] 实现互相声明验证
+- [ ] 实现 recomputeRoutes 更新
+- [ ] 实现 GetFullTopology 更新
+- [ ] 测试验证

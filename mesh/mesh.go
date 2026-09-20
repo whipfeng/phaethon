@@ -1006,7 +1006,7 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 		util.LogDebug("[MESH] bad gossip from %s: %v", sender.GetNodeID(), err)
 		return
 	}
-	if info.NodeID == m.nodeID {
+	if sender.GetNodeID() == m.nodeID {
 		return
 	}
 	select {
@@ -1055,7 +1055,7 @@ func (m *MeshManager) GetTopology() map[string]interface{} {
 			for _, r := range p.Routes {
 				routeEntries = append(routeEntries, map[string]interface{}{
 					"prefix": r.PrefixStr,
-					"hop":    r.Hop,
+					"nodeId": r.NodeID,
 				})
 			}
 			entry["routes"] = routeEntries
@@ -1143,12 +1143,15 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		edgeSet[key] = FullTopologyEdge{From: m.nodeID, To: peerID}
 	}
 
-	// Learned edges from gossip
+	// Learned edges from ClaimedSubnets.Neighbors
+	// Each claim's Neighbors field lists the origin's direct neighbors
 	for _, p := range peers {
-		for _, e := range p.TopologyEdges {
-			key := edgeKey(e.NodeID, e.Neighbor)
-			if _, exists := edgeSet[key]; !exists {
-				edgeSet[key] = FullTopologyEdge{From: e.NodeID, To: e.Neighbor}
+		for _, cs := range p.ClaimedSubnets {
+			for _, neighbor := range cs.Neighbors {
+				key := edgeKey(cs.NodeID, neighbor)
+				if _, exists := edgeSet[key]; !exists {
+					edgeSet[key] = FullTopologyEdge{From: cs.NodeID, To: neighbor}
+				}
 			}
 		}
 	}
@@ -1297,13 +1300,38 @@ func (m *MeshManager) recomputeRoutes() {
 		ownPrefixes[r] = true
 	}
 
-	// Peer routes (non-mesh, with hop counts)
+	// Peer routes (non-mesh, with hop counts derived from ClaimedSubnets)
+	// First, build a map of nodeID → hop from all peers' ClaimedSubnets
+	nodeIDToHop := make(map[string]int)
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Peer's own subnet (hop=1, originally hop=0 from peer)
+		if peer.SubnetStr != "" {
+			if _, exists := nodeIDToHop[peer.NodeID()]; !exists {
+				nodeIDToHop[peer.NodeID()] = 1
+			}
+		}
+		// Peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if existing, exists := nodeIDToHop[cs.NodeID]; !exists || cs.Hop < existing {
+				nodeIDToHop[cs.NodeID] = cs.Hop
+			}
+		}
+	}
+
+	// Now process routes, looking up hop from nodeID
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, r := range peer.Routes {
-			allEntries[r.PrefixStr] = append(allEntries[r.PrefixStr], peerEntry{peer.Sender, r.Hop, r.Prefix})
+			hop, ok := nodeIDToHop[r.NodeID]
+			if !ok {
+				continue // Route owner not found, skip
+			}
+			allEntries[r.PrefixStr] = append(allEntries[r.PrefixStr], peerEntry{peer.Sender, hop, r.Prefix})
 		}
 	}
 
@@ -1382,6 +1410,31 @@ func (m *MeshManager) recomputeRoutes() {
 		trie.Insert(s, nil, nil, 0)
 		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
+
+	// Build a map of nodeID → (subnet, hop) from ClaimedSubnets
+	type nodeInfo struct {
+		subnet *net.IPNet
+		hop    int
+	}
+	nodeIDToInfo := make(map[string]nodeInfo)
+	for _, peer := range peers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Peer's own subnet
+		if peer.Subnet != nil {
+			if _, exists := nodeIDToInfo[peer.NodeID()]; !exists {
+				nodeIDToInfo[peer.NodeID()] = nodeInfo{peer.Subnet, 1}
+			}
+		}
+		// Peer's learned claims
+		for _, cs := range peer.ClaimedSubnets {
+			if existing, exists := nodeIDToInfo[cs.NodeID]; !exists || cs.Hop < existing.hop {
+				nodeIDToInfo[cs.NodeID] = nodeInfo{cs.Subnet, cs.Hop}
+			}
+		}
+	}
+
 	// Peer domain suffixes — skip if we own the same suffix
 	for _, peer := range peers {
 		if peer.Sender == nil {
@@ -1392,7 +1445,12 @@ func (m *MeshManager) recomputeRoutes() {
 			if ownSuffixSet[normalized] {
 				continue
 			}
-			trie.Insert(entry.Suffix, peer.Sender, entry.Subnet, entry.Hop)
+			// Look up subnet and hop from the owner nodeID
+			info, ok := nodeIDToInfo[entry.NodeID]
+			if !ok {
+				continue // Owner not found, skip
+			}
+			trie.Insert(entry.Suffix, peer.Sender, info.subnet, info.hop)
 		}
 	}
 
@@ -1527,7 +1585,7 @@ func (m *MeshManager) gossipLoop() {
 					util.LogDebug("[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
 					break
 				}
-				util.LogDebug("[MESH] gossip from %s: subnet=%s routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), info.Subnet, len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
+				util.LogDebug("[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.recomputeRoutes()
 					util.DefaultVersionNotifier.BumpVersion("mesh")
@@ -1617,6 +1675,39 @@ func (m *MeshManager) broadcastGossip() {
 			}
 		}
 	}
+
+	// Mutual neighbor validation: filter out claims where origin's neighbors
+	// don't reciprocally declare the origin.
+	// Rule: if X declares neighbors=[Y], then Y must also declare X.
+	// This prevents stale claims from wandering after a node goes offline.
+	nodeIDToClaim := make(map[string]globalClaimEntry, len(bestClaims))
+	for _, c := range bestClaims {
+		nodeIDToClaim[c.nodeID] = c
+	}
+	validatedClaims := make(map[string]globalClaimEntry, len(bestClaims))
+	for subnet, claim := range bestClaims {
+		if claim.hop == 0 {
+			// Own claim, always valid
+			validatedClaims[subnet] = claim
+			continue
+		}
+		valid := true
+		for _, neighborID := range claim.neighbors {
+			neighborClaim, ok := nodeIDToClaim[neighborID]
+			if !ok {
+				valid = false
+				break
+			}
+			if !containsStr(neighborClaim.neighbors, claim.nodeID) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			validatedClaims[subnet] = claim
+		}
+	}
+	bestClaims = validatedClaims
 
 	// Build global route table (non-mesh routes, referencing owner node)
 	type globalRouteEntry struct {
@@ -1721,6 +1812,16 @@ func edgeKey(a, b string) string {
 		a, b = b, a
 	}
 	return a + "|" + b
+}
+
+// containsStr checks if a string slice contains a specific string.
+func containsStr(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteSrcIPInPacket rewrites the source IP in a raw IPv4 packet

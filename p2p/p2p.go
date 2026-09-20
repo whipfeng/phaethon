@@ -108,7 +108,8 @@ type Peer struct {
 	conn          net.Conn
 	writeCh       chan writeReq
 	stopCh        chan struct{}
-	serveFilePath string // file path to serve chunks from (set during update_request handling)
+	stopOnce      sync.Once // ensures stopCh is closed exactly once
+	serveFilePath string    // file path to serve chunks from (set during update_request handling)
 
 	meshSender *peerSender // mesh peer sender, created once on hello
 
@@ -244,8 +245,25 @@ func (m *P2PManager) HandleP2PConn(conn net.Conn, address string) {
 	m.runSession(peer)
 }
 
+// StopPeer disconnects a P2P peer permanently.
+// The peer will not reconnect after being stopped.
+func (m *P2PManager) StopPeer(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if peer, ok := m.peers[id]; ok {
+		util.LogInfo("[P2P] stopping peer %s", id)
+		peer.stopOnce.Do(func() {
+			close(peer.stopCh)
+		})
+		if peer.conn != nil {
+			peer.conn.Close()
+		}
+	}
+}
+
 // StartPeer initiates a P2P connection to a peer through the given proxy.
 // It reconnects automatically with exponential backoff if the connection drops.
+// Call StopPeer to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
@@ -266,7 +284,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	m.mu.Unlock()
 
 	defer func() {
-		close(peer.stopCh)
+		peer.stopOnce.Do(func() {
+			close(peer.stopCh)
+		})
 		m.mu.Lock()
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
@@ -279,11 +299,21 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	const maxBackoff = 60 * time.Second
 
 	for {
+		// Check if peer has been stopped before attempting to connect
+		select {
+		case <-peer.stopCh:
+			util.LogInfo("[P2P] peer %s stopped, exiting reconnect loop", peer.ID)
+			return
+		default:
+		}
+
 		conn, err := p2pDialer.DialP2P()
 		if err != nil {
 			util.LogInfo("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
 			peer.Status = "failed"
 			select {
+			case <-peer.stopCh:
+				return
 			case <-time.After(backoff):
 			}
 			backoff *= 2
@@ -319,6 +349,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		util.LogInfo("[P2P] disconnected from %s, reconnecting in %v", peer.ID, backoff)
 		peer.Status = "connecting"
 		select {
+		case <-peer.stopCh:
+			return
 		case <-time.After(backoff):
 		}
 		backoff *= 2

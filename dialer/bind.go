@@ -29,10 +29,6 @@ type BindContext struct {
 
 var globalBindContext atomic.Pointer[BindContext]
 
-// GlobalNetstackDialFunc dials through the gVisor netstack instead of the OS network stack.
-// Used by MeshDial for outbound connections, enabling mesh routing.
-var GlobalNetstackDialFunc func(network, addr string) (net.Conn, error)
-
 // GlobalDNSResolverFunc resolves a domain name through the DNS hijacker, returning a fakeIP.
 // Used by MeshDial for domain resolution before netstack dialing.
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
@@ -58,61 +54,33 @@ func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {
 }
 
 // MeshDial dials destination through mesh network.
-// Uses custom dial function that registers in ModeBTable before sending SYN,
-// ensuring the forwarder can find the entry for local loopback cases.
+// Registers in ModeBTable before sending SYN, ensuring the forwarder can find
+// the entry for local loopback cases.
 func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
-	if GlobalNetstackDialWithModeBFunc != nil {
-		// Use custom dial that registers before SYN
-		var targetAddr string
-		if ip := net.ParseIP(dstAddr); ip == nil {
-			// Domain: resolve through DNS (should not happen for Mode B)
-			return nil, fmt.Errorf("mesh dial: domain not supported: %s", dstAddr)
-		} else {
-			targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-		}
-		conn, err := GlobalNetstackDialWithModeBFunc("tcp", targetAddr, clientAddr, inbound, mapping)
-		if err != nil {
-			return nil, err
-		}
-		util.SetTCPNoDelay(conn)
-		return conn, nil
-	}
-
-	// Fallback to old path if custom dial not available
-	if GlobalNetstackDialFunc == nil || GlobalDNSResolverFunc == nil {
+	if GlobalNetstackDialWithModeBFunc == nil {
 		return nil, fmt.Errorf("mesh not initialized")
 	}
 
 	var targetAddr string
 	if ip := net.ParseIP(dstAddr); ip == nil {
 		// Domain: resolve through netstack DNS to get Fake-IP
+		if GlobalDNSResolverFunc == nil {
+			return nil, fmt.Errorf("mesh dial: DNS resolver not available for domain: %s", dstAddr)
+		}
 		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
 		if err != nil {
-			return nil, fmt.Errorf("mesh dns resolve %s: %w", dstAddr, err)
+			return nil, fmt.Errorf("mesh dial: resolve %s: %w", dstAddr, err)
 		}
 		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
 	} else {
-		// IP: use directly
 		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	}
 
-	// Dial through netstack
-	conn, err := GlobalNetstackDialFunc("tcp", targetAddr)
+	conn, err := GlobalNetstackDialWithModeBFunc("tcp", targetAddr, clientAddr, inbound, mapping)
 	if err != nil {
 		return nil, err
 	}
 	util.SetTCPNoDelay(conn)
-
-	// Register after dial (fallback path, may have timing issues)
-	if GlobalModeBTable != nil {
-		srcPort := uint16(0)
-		if localAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
-			srcPort = uint16(localAddr.Port)
-		}
-		dstKey := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-		GlobalModeBTable.Register(6, dstKey, srcPort, clientAddr, inbound, mapping)
-	}
-
 	return conn, nil
 }
 

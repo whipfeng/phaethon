@@ -94,7 +94,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
 		// dialing go through the netstack, which routes via loopback to the
 		// hijacker/forwarder.
-		dialer.GlobalNetstackDialFunc = engine.NetDial
 		dialer.GlobalNetstackDialWithModeBFunc = engine.NetDialWithModeB
 		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
 

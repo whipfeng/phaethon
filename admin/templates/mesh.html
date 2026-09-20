@@ -86,30 +86,281 @@
             </table>
         </div>
 
-        <!-- Config -->
-        <div class="mesh-section" id="mesh-config-section">
+        <!-- Domain Suffixes Config -->
+        <div class="mesh-section" id="mesh-domain-suffixes-section">
             <div class="mesh-section-header">
-                <h4 data-i18n="mesh.config">Config</h4>
+                <h4 data-i18n="mesh.domainSuffixes">Domain Suffixes</h4>
+                <button onclick="showAddDomainSuffix()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
             </div>
-            <div class="mesh-config-form">
-                <label>Domain Suffixes</label>
-                <input type="text" id="mesh-domain-suffixes" placeholder="comma-separated" class="mesh-input">
-                <label>Advertise (CIDR)</label>
-                <input type="text" id="mesh-advertise" placeholder="comma-separated CIDRs" class="mesh-input">
-                <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                    <button onclick="saveMeshConfig()" class="btn btn-sm btn-primary" data-i18n="mesh.save">Save</button>
-                    <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="mesh.domainSuffix">Domain Suffix</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="domain-suffixes-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- Advertise Config -->
+        <div class="mesh-section" id="mesh-advertise-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.advertise">Advertise Routes</h4>
+                <button onclick="showAddAdvertise()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
+            </div>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="mesh.cidr">CIDR</th>
+                        <th data-i18n="proxy.actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="advertise-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- Force Gossip -->
+        <div class="mesh-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.tools">Tools</h4>
+            </div>
+            <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>
+        </div>
+    </div>
+
+    <!-- Domain Suffix Modal -->
+    <div id="domain-suffix-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="domain-suffix-modal-title" data-i18n="mesh.addDomainSuffix">Add Domain Suffix</h3>
+                <button onclick="closeDomainSuffixModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="domain-suffix-form" onsubmit="saveDomainSuffix(event)">
+                <input type="hidden" id="domain-suffix-edit-idx" value="-1">
+                <div class="form-group">
+                    <label data-i18n="mesh.domainSuffix">Domain Suffix</label>
+                    <input type="text" id="domain-suffix-input" required placeholder="example.com" class="mesh-input">
                 </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeDomainSuffixModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Advertise Modal -->
+    <div id="advertise-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="advertise-modal-title" data-i18n="mesh.addAdvertise">Add Advertise Route</h3>
+                <button onclick="closeAdvertiseModal()" class="close-btn">&times;</button>
             </div>
+            <form id="advertise-form" onsubmit="saveAdvertise(event)">
+                <input type="hidden" id="advertise-edit-idx" value="-1">
+                <div class="form-group">
+                    <label data-i18n="mesh.cidr">CIDR</label>
+                    <input type="text" id="advertise-input" required placeholder="192.168.1.0/24" class="mesh-input">
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeAdvertiseModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
         </div>
     </div>
 
     <script>
-    _meshConfigInitialized = false;
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', fetchMeshStatus);
+        document.addEventListener('DOMContentLoaded', function() {
+            fetchMeshStatus();
+            loadDomainSuffixes();
+            loadAdvertise();
+        });
     } else {
         fetchMeshStatus();
+        loadDomainSuffixes();
+        loadAdvertise();
+    }
+
+    // Domain Suffixes CRUD
+    async function loadDomainSuffixes() {
+        try {
+            const res = await fetch('./api/mesh/domain-suffixes');
+            if (!res.ok) return;
+            const suffixes = await res.json();
+            const tbody = document.getElementById('domain-suffixes-tbody');
+            if (suffixes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
+                return;
+            }
+            tbody.innerHTML = suffixes.map((suffix, idx) => `
+                <tr>
+                    <td>${escapeHtml(suffix)}</td>
+                    <td>
+                        <button onclick="editDomainSuffix(${idx})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteDomainSuffix(${idx})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (err) {
+            console.error('loadDomainSuffixes error:', err);
+        }
+    }
+
+    function showAddDomainSuffix() {
+        document.getElementById('domain-suffix-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.addDomainSuffix') : 'Add Domain Suffix';
+        document.getElementById('domain-suffix-edit-idx').value = '-1';
+        document.getElementById('domain-suffix-form').reset();
+        document.getElementById('domain-suffix-modal').classList.remove('hidden');
+    }
+
+    function editDomainSuffix(idx) {
+        fetch('./api/mesh/domain-suffixes').then(res => res.json()).then(suffixes => {
+            document.getElementById('domain-suffix-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editDomainSuffix') : 'Edit Domain Suffix';
+            document.getElementById('domain-suffix-edit-idx').value = idx;
+            document.getElementById('domain-suffix-input').value = suffixes[idx] || '';
+            document.getElementById('domain-suffix-modal').classList.remove('hidden');
+        });
+    }
+
+    async function saveDomainSuffix(e) {
+        e.preventDefault();
+        const idx = parseInt(document.getElementById('domain-suffix-edit-idx').value);
+        const suffix = document.getElementById('domain-suffix-input').value.trim();
+        if (!suffix) return;
+
+        try {
+            let res;
+            if (idx >= 0) {
+                res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({suffix})
+                });
+            } else {
+                res = await fetch('./api/mesh/domain-suffixes', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({suffix})
+                });
+            }
+            if (!res.ok) throw new Error(await res.text());
+            closeDomainSuffixModal();
+            loadDomainSuffixes();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saved') : 'Saved', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function deleteDomainSuffix(idx) {
+        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?')) return;
+        try {
+            const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+            loadDomainSuffixes();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    function closeDomainSuffixModal() {
+        document.getElementById('domain-suffix-modal').classList.add('hidden');
+    }
+
+    // Advertise CRUD
+    async function loadAdvertise() {
+        try {
+            const res = await fetch('./api/mesh/advertise');
+            if (!res.ok) return;
+            const advertise = await res.json();
+            const tbody = document.getElementById('advertise-tbody');
+            if (advertise.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
+                return;
+            }
+            tbody.innerHTML = advertise.map((cidr, idx) => `
+                <tr>
+                    <td><code>${escapeHtml(cidr)}</code></td>
+                    <td>
+                        <button onclick="editAdvertise(${idx})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteAdvertise(${idx})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (err) {
+            console.error('loadAdvertise error:', err);
+        }
+    }
+
+    function showAddAdvertise() {
+        document.getElementById('advertise-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.addAdvertise') : 'Add Advertise Route';
+        document.getElementById('advertise-edit-idx').value = '-1';
+        document.getElementById('advertise-form').reset();
+        document.getElementById('advertise-modal').classList.remove('hidden');
+    }
+
+    function editAdvertise(idx) {
+        fetch('./api/mesh/advertise').then(res => res.json()).then(advertise => {
+            document.getElementById('advertise-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editAdvertise') : 'Edit Advertise Route';
+            document.getElementById('advertise-edit-idx').value = idx;
+            document.getElementById('advertise-input').value = advertise[idx] || '';
+            document.getElementById('advertise-modal').classList.remove('hidden');
+        });
+    }
+
+    async function saveAdvertise(e) {
+        e.preventDefault();
+        const idx = parseInt(document.getElementById('advertise-edit-idx').value);
+        const cidr = document.getElementById('advertise-input').value.trim();
+        if (!cidr) return;
+
+        try {
+            let res;
+            if (idx >= 0) {
+                res = await fetch(`./api/mesh/advertise/${idx}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({cidr})
+                });
+            } else {
+                res = await fetch('./api/mesh/advertise', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({cidr})
+                });
+            }
+            if (!res.ok) throw new Error(await res.text());
+            closeAdvertiseModal();
+            loadAdvertise();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saved') : 'Saved', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function deleteAdvertise(idx) {
+        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?')) return;
+        try {
+            const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+            loadAdvertise();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    function closeAdvertiseModal() {
+        document.getElementById('advertise-modal').classList.add('hidden');
+    }
+
+    function escapeHtml(s) {
+        if (!s) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     </script>
     {{end}}

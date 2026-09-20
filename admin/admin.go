@@ -1028,6 +1028,10 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mesh/config", s.apiMesh)
 	mux.HandleFunc("/api/mesh/gossip", s.apiMesh)
 	mux.HandleFunc("/api/mesh/topology", s.apiMesh)
+	mux.HandleFunc("/api/mesh/domain-suffixes", s.apiMeshDomainSuffixes)
+	mux.HandleFunc("/api/mesh/domain-suffixes/", s.apiMeshDomainSuffixItem)
+	mux.HandleFunc("/api/mesh/advertise", s.apiMeshAdvertise)
+	mux.HandleFunc("/api/mesh/advertise/", s.apiMeshAdvertiseItem)
 	mux.HandleFunc("/api/tun", s.apiTUN)
 	mux.HandleFunc("/api/events", s.apiEvents)
 	mux.HandleFunc("/api/versions", s.apiVersions)
@@ -4144,6 +4148,244 @@ func (s *AdminServer) apiMeshTopologyGet(w http.ResponseWriter, r *http.Request)
 	result := mesh.GlobalMeshManager.GetFullTopology()
 	result["enabled"] = true
 	jsonResponse(w, result)
+}
+
+// apiMeshDomainSuffixes handles GET/POST for /api/mesh/domain-suffixes
+func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		suffixes := []string{}
+		if s.conf.Mesh != nil {
+			suffixes = s.conf.Mesh.DomainSuffixes
+		}
+		s.mu.RUnlock()
+		jsonResponse(w, suffixes)
+
+	case http.MethodPost:
+		var req struct {
+			Suffix string `json:"suffix"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Suffix == "" {
+			httpError(w, "suffix required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		if s.conf.Mesh != nil {
+			s.conf.Mesh.DomainSuffixes = append(s.conf.Mesh.DomainSuffixes, req.Suffix)
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if mesh.GlobalMeshManager != nil {
+				mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			}
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh domain-suffix added: %s", req.Suffix)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshDomainSuffixItem handles PUT/DELETE for /api/mesh/domain-suffixes/:index
+func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Request) {
+	indexStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/domain-suffixes/")
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		httpError(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			Suffix string `json:"suffix"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Suffix == "" {
+			httpError(w, "suffix required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.DomainSuffixes) {
+			s.mu.Unlock()
+			httpError(w, "index out of range", http.StatusBadRequest)
+			return
+		}
+		s.conf.Mesh.DomainSuffixes[index] = req.Suffix
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh domain-suffix updated: index=%d suffix=%s", index, req.Suffix)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	case http.MethodDelete:
+		s.mu.Lock()
+		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.DomainSuffixes) {
+			s.mu.Unlock()
+			httpError(w, "index out of range", http.StatusBadRequest)
+			return
+		}
+		s.conf.Mesh.DomainSuffixes = append(s.conf.Mesh.DomainSuffixes[:index], s.conf.Mesh.DomainSuffixes[index+1:]...)
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh domain-suffix deleted: index=%d", index)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshAdvertise handles GET/POST for /api/mesh/advertise
+func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		advertise := []string{}
+		if s.conf.Mesh != nil {
+			advertise = s.conf.Mesh.Advertise
+		}
+		s.mu.RUnlock()
+		jsonResponse(w, advertise)
+
+	case http.MethodPost:
+		var req struct {
+			CIDR string `json:"cidr"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, _, err := net.ParseCIDR(req.CIDR); err != nil {
+			httpError(w, "invalid CIDR: "+req.CIDR, http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		if s.conf.Mesh != nil {
+			s.conf.Mesh.Advertise = append(s.conf.Mesh.Advertise, req.CIDR)
+			if err := s.saveConfigLocked(); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if mesh.GlobalMeshManager != nil {
+				mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			}
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh advertise added: %s", req.CIDR)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshAdvertiseItem handles PUT/DELETE for /api/mesh/advertise/:index
+func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Request) {
+	indexStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/advertise/")
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		httpError(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			CIDR string `json:"cidr"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, _, err := net.ParseCIDR(req.CIDR); err != nil {
+			httpError(w, "invalid CIDR: "+req.CIDR, http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.Advertise) {
+			s.mu.Unlock()
+			httpError(w, "index out of range", http.StatusBadRequest)
+			return
+		}
+		s.conf.Mesh.Advertise[index] = req.CIDR
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh advertise updated: index=%d cidr=%s", index, req.CIDR)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	case http.MethodDelete:
+		s.mu.Lock()
+		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.Advertise) {
+			s.mu.Unlock()
+			httpError(w, "index out of range", http.StatusBadRequest)
+			return
+		}
+		s.conf.Mesh.Advertise = append(s.conf.Mesh.Advertise[:index], s.conf.Mesh.Advertise[index+1:]...)
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+		}
+		s.mu.Unlock()
+
+		util.DefaultVersionNotifier.BumpVersion("mesh")
+		util.LogInfo("[ADMIN] mesh advertise deleted: index=%d", index)
+		jsonResponse(w, map[string]interface{}{"ok": true})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {

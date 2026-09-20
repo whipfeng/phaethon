@@ -19,6 +19,8 @@ func (s *DirectServer) Serve(listener net.Listener) {
 func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	defer clientConn.Close()
 
+	util.LogInfo("[DEBUG] [DIRECT-SVR] HandleConn called from %s", clientConn.RemoteAddr())
+
 	dstHost := s.Mapping.DstHost
 	dstPort := s.Mapping.DstPort
 

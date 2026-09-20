@@ -26,20 +26,20 @@
                 <tbody>
                     {{range .Mappings}}
                     <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
-                        <td><strong>{{.Name}}</strong></td>
-                        <td><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
-                        <td><code>:{{.Port}}</code></td>
-                        <td>{{.Sni}}</td>
-                        <td>{{if .ReverseAddress}}<span class="badge badge-info">{{.ReverseAddress}}{{else}}—{{end}}</span></td>
-                        <td>{{if .DstHost}}{{.DstHost}}:{{.DstPort}}{{else}}—{{end}}</td>
-                        <td><span class="status-dot {{if .Enabled | enabled}}status-active{{else}}status-inactive{{end}}"></span></td>
-                        <td>
+                        <td data-label="Name"><strong>{{.Name}}</strong></td>
+                        <td data-label="Type"><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
+                        <td data-label="Port"><code>:{{.Port}}</code></td>
+                        <td data-label="SNI">{{.Sni}}</td>
+                        <td data-label="Reverse Address">{{if .ReverseAddress}}<span class="badge badge-info">{{.ReverseAddress}}{{else}}—{{end}}</span></td>
+                        <td data-label="Dst Host">{{if .DstHost}}{{.DstHost}}:{{.DstPort}}{{else}}—{{end}}</td>
+                        <td data-label="Status"><span class="status-dot {{if .Enabled | enabled}}status-active{{else}}status-inactive{{end}}"></span></td>
+                        <td data-label="Enabled">
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleMapping('{{.Name}}', this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td>
+                        <td data-label="Actions">
                             <button onclick="editMapping('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
                             <button onclick="copyMapping('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
                             <button onclick="deleteMapping('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">Delete</button>

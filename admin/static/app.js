@@ -42,6 +42,10 @@ document.addEventListener('DOMContentLoaded', () => {
     registerDefaultVersionHandlers();
     updateUptime();
 
+    // Initialize bottom navigation
+    renderBottomNav();
+    updateDrawerPinStates();
+
     // Initial load for TUN status if on dashboard
     if (document.getElementById('tun-status')) {
         fetchTUNStatus();
@@ -83,6 +87,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Update sidebar active state
         updateActiveNav();
+
+        // Update bottom nav active state
+        renderBottomNav();
 
         // Update page title in top bar
         updatePageTitle();
@@ -168,6 +175,130 @@ function setupUserMenu() {
 function toggleUserMenu() {
     const dropdown = document.getElementById('user-menu-dropdown');
     if (dropdown) dropdown.classList.toggle('show');
+}
+
+function toggleBottomDrawer() {
+    const drawer = document.getElementById('bottom-drawer');
+    if (drawer) drawer.classList.toggle('hidden');
+}
+
+// Bottom navigation customization
+const DEFAULT_BOTTOM_NAV = ['./', './mesh', './logs'];
+const MAX_BOTTOM_NAV_ITEMS = 4;
+
+const NAV_ITEMS = {
+    './': { icon: '📊', label: 'Dashboard', i18n: 'nav.dashboard' },
+    './tun': { icon: '🌐', label: 'TUN', i18n: 'nav.tun' },
+    './mesh': { icon: '🔷', label: 'Mesh', i18n: 'nav.mesh' },
+    './logs': { icon: '📋', label: 'Logs', i18n: 'nav.logs' },
+    './connections': { icon: '🔗', label: 'Connections', i18n: 'nav.connections' },
+    './subscriptions': { icon: '📡', label: 'Subscriptions', i18n: 'nav.subscriptions' },
+    './proxies': { icon: '🔌', label: 'Proxies', i18n: 'nav.proxies' },
+    './rules': { icon: '📜', label: 'Rules', i18n: 'nav.rules' },
+    './mappings': { icon: '🗺️', label: 'Mappings', i18n: 'nav.mappings' },
+    './resolvers': { icon: '↗️', label: 'Resolvers', i18n: 'nav.resolvers' },
+    './reverse': { icon: '🧙', label: 'Reverse', i18n: 'nav.reverse' },
+    './config': { icon: '⚙️', label: 'Config', i18n: 'nav.rawConfig' }
+};
+
+function getBottomNavItems() {
+    const stored = localStorage.getItem('bottomNavItems');
+    if (stored) {
+        try {
+            return JSON.parse(stored);
+        } catch (e) {
+            return DEFAULT_BOTTOM_NAV;
+        }
+    }
+    return DEFAULT_BOTTOM_NAV;
+}
+
+function saveBottomNavItems(items) {
+    localStorage.setItem('bottomNavItems', JSON.stringify(items));
+}
+
+function showCustomizeBottomNav() {
+    toggleBottomDrawer();
+    const modal = document.getElementById('customize-bottom-nav-modal');
+    if (!modal) return;
+    
+    const currentItems = getBottomNavItems();
+    const list = document.getElementById('customize-nav-list');
+    if (!list) return;
+    
+    let html = '';
+    Object.keys(NAV_ITEMS).forEach(path => {
+        const item = NAV_ITEMS[path];
+        const isChecked = currentItems.includes(path);
+        html += `<label style="display:flex; align-items:center; gap:0.75rem; padding:0.5rem; border-radius:6px; cursor:pointer; ${isChecked ? 'background:rgba(var(--accent-rgb, 88, 166, 255), 0.1);' : ''}">`;
+        html += `<input type="checkbox" value="${path}" ${isChecked ? 'checked' : ''} style="width:18px; height:18px;">`;
+        html += `<span style="font-size:1.2rem;">${item.icon}</span>`;
+        html += `<span style="flex:1;" data-i18n="${item.i18n}">${item.label}</span>`;
+        html += '</label>';
+    });
+    
+    list.innerHTML = html;
+    modal.classList.remove('hidden');
+    
+    if (typeof i18n !== 'undefined' && i18n.update) {
+        i18n.update(modal);
+    }
+}
+
+function closeCustomizeBottomNav() {
+    const modal = document.getElementById('customize-bottom-nav-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+function saveBottomNavCustomization() {
+    const checkboxes = document.querySelectorAll('#customize-nav-list input[type="checkbox"]:checked');
+    const items = Array.from(checkboxes).map(cb => cb.value).slice(0, MAX_BOTTOM_NAV_ITEMS);
+    
+    if (items.length === 0) {
+        if (typeof showToast === 'function') {
+            showToast('至少选择一个项目', 'error');
+        }
+        return;
+    }
+    
+    saveBottomNavItems(items);
+    renderBottomNav();
+    closeCustomizeBottomNav();
+    
+    if (typeof showToast === 'function') {
+        showToast('保存成功', 'success');
+    }
+}
+
+function renderBottomNav() {
+    const nav = document.getElementById('bottom-nav');
+    if (!nav) return;
+    
+    const items = getBottomNavItems();
+    const currentPath = window.location.pathname;
+    
+    let html = '';
+    items.forEach(path => {
+        const item = NAV_ITEMS[path];
+        if (item) {
+            const isActive = currentPath === path || (path === './' && currentPath === '/');
+            html += `<a href="${path}" class="bottom-nav-item ${isActive ? 'active' : ''}" hx-get="${path}" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true">`;
+            html += `<span class="icon">${item.icon}</span>`;
+            html += `<span class="label" data-i18n="${item.i18n}">${item.label}</span>`;
+            html += '</a>';
+        }
+    });
+    
+    html += `<button class="bottom-nav-item" onclick="toggleBottomDrawer()">`;
+    html += `<span class="icon">☰</span>`;
+    html += `<span class="label" data-i18n="nav.more">更多</span>`;
+    html += '</button>';
+    
+    nav.innerHTML = html;
+    
+    if (typeof i18n !== 'undefined' && i18n.update) {
+        i18n.update(nav);
+    }
 }
 
 function logout() {
@@ -769,8 +900,6 @@ function updateTUNSummary(data) {
     el.innerHTML = html;
 }
 
-let _meshConfigInitialized = false;
-
 async function fetchMeshStatus() {
     const summaryEl = document.getElementById('mesh-summary');
     const card = document.getElementById('mesh-card');
@@ -799,15 +928,6 @@ async function fetchMeshStatus() {
         document.getElementById('mesh-vip').textContent = data.vip || '-';
         document.getElementById('mesh-subnet').textContent = data.subnet || '-';
         document.getElementById('mesh-routecount').textContent = data.routeCount || 0;
-
-        // Config - only populate on first load to avoid overwriting user input
-        if (!_meshConfigInitialized) {
-            const suffixInput = document.getElementById('mesh-domain-suffixes');
-            const advertiseInput = document.getElementById('mesh-advertise');
-            if (suffixInput) suffixInput.value = (data.domainSuffixes || []).join(', ');
-            if (advertiseInput) advertiseInput.value = (data.advertise || []).join(', ');
-            _meshConfigInitialized = true;
-        }
 
         // Build a lookup for direct status from data.peers
         const directPeers = {};
@@ -860,19 +980,35 @@ async function fetchMeshStatus() {
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
                     if (viaList.length === 0) {
-                        html += '<tr><td><code>' + r.prefix + '</code></td><td class="text-muted">Local</td><td>-</td></tr>';
+                        html += '<tr><td><code>' + r.prefix + '</code></td><td class="text-muted">Local</td><td>-</td><td>-</td></tr>';
                     } else {
                         const minHop = Math.min(...viaList.map(v => v.hop));
-                        const viaNames = [...new Set(viaList.filter(v => v.hop === minHop).map(v => v.nodeID))].join(', ');
+                        const bestRoutes = viaList.filter(v => v.hop === minHop);
                         const hopClass = minHop === 1 ? 'direct' : '';
-                        html += '<tr>';
-                        html += '<td><code>' + escapeHtml(r.prefix) + '</code></td>';
-                        html += '<td>' + escapeHtml(viaNames) + '</td>';
-                        html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + minHop + '</span></td>';
-                        html += '</tr>';
+                        
+                        // Show all best routes with neighbor info
+                        bestRoutes.forEach((via, idx) => {
+                            const isDirect = directPeers[via.nodeID] === true;
+                            const statusClass = isDirect ? 'online' : 'relay';
+                            const statusText = isDirect ? 'Direct' : 'Relay';
+                            html += '<tr>';
+                            if (idx === 0) {
+                                html += '<td><code>' + escapeHtml(r.prefix) + '</code></td>';
+                            } else {
+                                html += '<td></td>';
+                            }
+                            html += '<td>' + escapeHtml(via.nodeID) + '</td>';
+                            html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                            if (idx === 0) {
+                                html += '<td><span class="mesh-hop-badge ' + hopClass + '">' + minHop + '</span></td>';
+                            } else {
+                                html += '<td></td>';
+                            }
+                            html += '</tr>';
+                        });
                     }
                 });
-                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No routes</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">No routes</td></tr>';
             }
         }
 
@@ -919,9 +1055,18 @@ async function fetchMeshStatus() {
             }
             
             // Sort by domain name
-            domainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
-            
+            // Deduplicate by domain, keeping the route with lowest hop count
+            const domainRouteMap = new Map();
             domainRoutes.forEach(r => {
+                const existing = domainRouteMap.get(r.domain);
+                if (!existing || r.hop < existing.hop) {
+                    domainRouteMap.set(r.domain, r);
+                }
+            });
+            const uniqueDomainRoutes = Array.from(domainRouteMap.values());
+            uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
+            
+            uniqueDomainRoutes.forEach(r => {
                 const hopClass = r.hop <= 1 ? 'direct' : '';
                 html += '<tr>';
                 html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
@@ -1303,26 +1448,6 @@ function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-async function saveMeshConfig() {
-    const domainSuffixes = document.getElementById('mesh-domain-suffixes').value.split(',').map(s => s.trim()).filter(Boolean);
-    const advertise = document.getElementById('mesh-advertise').value.split(',').map(s => s.trim()).filter(Boolean);
-    try {
-        const resp = await fetch('./api/mesh/config', {
-            method: 'PATCH',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({domainSuffixes, advertise})
-        });
-        if (resp.ok) {
-            showToast('Saved', 'success');
-        } else {
-            const err = await resp.json();
-            showToast('Error: ' + (err.error || 'unknown'), 'error');
-        }
-    } catch (err) {
-        showToast('Error: ' + err.message, 'error');
-    }
-}
-
 async function triggerMeshGossip() {
     try {
         const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
@@ -1417,7 +1542,7 @@ function renderActiveConns() {
             }
             const inbound = c.inbound || '';
             const selected = c.id === selectedConnId ? ' class="selected"' : '';
-            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + src + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
+            html += '<tr' + selected + ' data-conn-id="' + c.id + '" onclick="selectConn(\'' + c.id + '\')"><td data-label="Protocol">' + c.protocol + '</td><td data-label="Inbound">' + inbound + '</td><td data-label="Source">' + src + '</td><td data-label="Destination">' + dst + '</td><td data-label="Rule">' + rule + '</td><td data-label="Duration" data-start="' + c.startTime + '">' + dur + '</td></tr>';
         });
         html += '</tbody></table>';
         el.innerHTML = html;

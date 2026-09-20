@@ -24,17 +24,17 @@
                     {{range .Subscriptions}}
                     {{$runtime := index $.SubData .Name}}
                     <tr data-name="{{.Name}}" data-url="{{.URL}}" data-interval="{{if .Interval}}{{.Interval}}{{else}}3600{{end}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
-                        <td><strong>{{.Name}}</strong></td>
-                        <td class="text-muted text-small" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{.URL}}</td>
-                        <td>{{if .Interval}}{{.Interval}}{{else}}3600{{end}}s</td>
-                        <td>{{if $runtime}}{{len $runtime.nodes}}{{else}}0{{end}}</td>
-                        <td>
+                        <td data-label="Name"><strong>{{.Name}}</strong></td>
+                        <td data-label="URL" class="text-muted text-small" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{.URL}}</td>
+                        <td data-label="Interval">{{if .Interval}}{{.Interval}}{{else}}3600{{end}}s</td>
+                        <td data-label="Nodes">{{if $runtime}}{{len $runtime.nodes}}{{else}}0{{end}}</td>
+                        <td data-label="Enabled">
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleSubscription('{{.Name}}', this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td>
+                        <td data-label="Actions">
                             <button onclick="refreshSub('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="sub.refresh">🔄 Refresh</button>
                             <button onclick="editSub('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="sub.btnEdit">Edit</button>
                             <button onclick="copySub('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>

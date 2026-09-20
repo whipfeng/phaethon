@@ -25,18 +25,18 @@
                     {{range $idx, $rule := .Rules}}
                     {{$parsed := parseRule $rule}}
                     <tr data-idx="{{$idx}}" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
-                        <td>{{$idx}}</td>
-                        <td><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
-                        <td><strong>{{index $parsed 2}}</strong></td>
-                        <td>{{if index $parsed 3}}<span class="badge badge-info">{{index $parsed 3}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
-                        <td>{{if index $parsed 4}}<span class="badge badge-warn">{{index $parsed 4}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
-                        <td>
+                        <td data-label="#">{{$idx}}</td>
+                        <td data-label="Match"><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
+                        <td data-label="Target"><strong>{{index $parsed 2}}</strong></td>
+                        <td data-label="Mapping Source">{{if index $parsed 3}}<span class="badge badge-info">{{index $parsed 3}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
+                        <td data-label="Time">{{if index $parsed 4}}<span class="badge badge-warn">{{index $parsed 4}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
+                        <td data-label="Enabled">
                             <label class="switch" title="{{if ruleEnabled $rule}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if ruleEnabled $rule}}checked{{end}} onchange="toggleRule({{$idx}}, this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td>
+                        <td data-label="Actions">
                             <button onclick="insertRuleAt({{$idx}}, 'above')" class="btn btn-sm btn-outline" data-i18n="rule.insertAbove">⬆ 上方插入</button>
                             <button onclick="insertRuleAt({{$idx}}, 'below')" class="btn btn-sm btn-outline" data-i18n="rule.insertBelow">⬇ 下方插入</button>
                             <button onclick="editRule({{$idx}})" class="btn btn-sm btn-outline">Edit</button>

@@ -24,6 +24,7 @@
 | [doc_management_spec.md](specs/doc_management_spec.md) | 文档管理规范 | 1.0.0 | ACTIVE |
 | [core_spec.md](specs/core_spec.md) | 核心数据模型、API 规格与业务规则 | v0.2.0 | DRAFT |
 | [admin_spec.md](specs/admin_spec.md) | Admin 面板页面与完整 API 总览 | v0.1.0 | DRAFT |
+| [admin_mobile_mesh_spec.md](specs/admin_mobile_mesh_spec.md) | Admin 移动端适配与 Mesh 页面交互规格 | v0.1.0 | DRAFT |
 | [protocol_spec.md](specs/protocol_spec.md) | 入站/出站协议支持矩阵与实现约定 | v0.1.0 | DRAFT |
 | [reverse_spec.md](specs/reverse_spec.md) | 反向连接、Registry 与统一帧协议规格 | v0.1.0 | DRAFT |
 | [tun_spec.md](specs/tun_spec.md) | TUN 模式架构、路由与 DNS 规则 | v0.3.0 | DRAFT |
@@ -47,6 +48,7 @@
 | [tun_watchdog_http_probe_design.md](plans/tun_watchdog_http_probe_design.md) | TUN watchdog HTTP 真实连通性探测改造 | v0.1.0 | ACTIVE |
 | [mesh_multi_vip_design.md](plans/mesh_multi_vip_design.md) | Mesh 多 VIP 支持与源 IP 选择机制 | v0.4.1 | DRAFT |
 | [mesh_network_improvements.md](plans/mesh_network_improvements.md) | Mesh 网络改进：src IP 重写、Auto P2P、地址空间扩大、Mode B 路由 | v0.3.0 | DRAFT |
+| [admin_mobile_mesh_design.md](plans/admin_mobile_mesh_design.md) | Admin 移动端适配与 Mesh 页面交互重构设计 | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 
@@ -68,6 +70,8 @@
 |------|------|
 | [reverse-udp-topology-bug-analysis.md](inputs/reverse-udp-topology-bug-analysis.md) | 反向 UDP 拓扑 Bug 分析 |
 | [reverse-udp-topology-correct.md](inputs/reverse-udp-topology-correct.md) | 反向 UDP 正确拓扑记录 |
+| [proxy_server_tun_routing_issue.md](inputs/proxy_server_tun_routing_issue.md) | 代理 Server 流量被 TUN 路由规则错误匹配问题 |
+| [admin_mobile_and_mesh_ux.md](inputs/admin_mobile_and_mesh_ux.md) | Admin 控制台移动端适配与 Mesh 页面交互改进 |
 
 ### runbooks/ (运维经验)
 

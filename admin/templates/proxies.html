@@ -26,20 +26,20 @@
                 <tbody>
                     {{range .Proxies}}
                     <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
-                        <td><strong>{{.Name}}</strong></td>
-                        <td><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
-                        <td>{{.Server}}</td>
-                        <td>{{.Port}}</td>
-                        <td>{{.Sni}}</td>
-                        <td>{{if .UDP}}✅{{else}}❌{{end}}</td>
-                        <td>{{.ViaProxy}}</td>
-                        <td>
+                        <td data-label="Name"><strong>{{.Name}}</strong></td>
+                        <td data-label="Type"><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
+                        <td data-label="Server">{{.Server}}</td>
+                        <td data-label="Port">{{.Port}}</td>
+                        <td data-label="SNI">{{.Sni}}</td>
+                        <td data-label="UDP">{{if .UDP}}✅{{else}}❌{{end}}</td>
+                        <td data-label="Via">{{.ViaProxy}}</td>
+                        <td data-label="Enabled">
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleProxy('{{.Name}}', this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td>
+                        <td data-label="Actions">
                             <button onclick="editProxy('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">Edit</button>
                             <button onclick="testProxy('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">Test</button>
                             <button onclick="copyProxy('{{.Name}}')" class="btn btn-sm btn-outline" title="Copy">📋</button>

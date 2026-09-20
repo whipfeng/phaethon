@@ -110,6 +110,7 @@ func AcceptLoop(listener net.Listener, handler ConnHandler, name string) {
 			util.LogError("%s accept error: %v", name, err)
 			return
 		}
+		util.LogInfo("[DEBUG] %s accepted connection from %s", name, conn.RemoteAddr())
 		configureTCPConn(conn)
 		go handler.HandleConn(conn)
 	}

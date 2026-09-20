@@ -26,10 +26,10 @@
                 <li><a href="./connections" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Connections"}}class="active"{{end}} data-i18n="nav.connections">🔗 Connections</a></li>
                 <li class="nav-section"><span data-i18n="nav.config">Configuration</span></li>
                 <li><a href="./subscriptions" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
-                <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔗 Proxies</a></li>
-                <li><a href="./rules" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📋 Rules</a></li>
-                <li><a href="./mappings" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🔌 Mappings</a></li>
-                <li><a href="./resolvers" hx-get="./resolvers" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Resolvers"}}class="active"{{end}} data-i18n="nav.resolvers">↗ Resolvers</a></li>
+                <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔌 Proxies</a></li>
+                <li><a href="./rules" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📜 Rules</a></li>
+                <li><a href="./mappings" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🗺️ Mappings</a></li>
+                <li><a href="./resolvers" hx-get="./resolvers" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Resolvers"}}class="active"{{end}} data-i18n="nav.resolvers">↗️ Resolvers</a></li>
                 <li class="nav-divider"></li>
                 <li class="nav-section"><span data-i18n="nav.tools">Tools</span></li>
                 <li><a href="./reverse" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
@@ -154,6 +154,98 @@
             <div class="form-actions">
                 <button onclick="closeConfirmModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
                 <button id="confirm-modal-ok" class="btn btn-primary" data-i18n="common.confirm">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Navigation (Mobile) -->
+    <nav class="bottom-nav" id="bottom-nav">
+        <!-- Dynamically populated by JavaScript -->
+    </nav>
+
+    <!-- Bottom Drawer -->
+    <div id="bottom-drawer" class="bottom-drawer hidden">
+        <div class="bottom-drawer-overlay" onclick="toggleBottomDrawer()"></div>
+        <div class="bottom-drawer-content">
+            <div class="bottom-drawer-header">
+                <h3 data-i18n="nav.menu">菜单</h3>
+                <div style="display:flex; gap:0.5rem;">
+                    <button onclick="showCustomizeBottomNav()" class="btn btn-sm btn-outline" title="Customize bottom nav">⚙️</button>
+                    <button onclick="toggleBottomDrawer()" class="close-btn">×</button>
+                </div>
+            </div>
+            <div class="bottom-drawer-body">
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.runtime">Runtime</h4>
+                    <a href="./tun" class="drawer-item" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🌐</span>
+                        <span class="label" data-i18n="nav.tun">TUN</span>
+                    </a>
+                    <a href="./mesh" class="drawer-item" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🔷</span>
+                        <span class="label" data-i18n="nav.mesh">Mesh</span>
+                    </a>
+                    <a href="./logs" class="drawer-item" hx-get="./logs" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">📋</span>
+                        <span class="label" data-i18n="nav.logs">Logs</span>
+                    </a>
+                    <a href="./connections" class="drawer-item" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🔗</span>
+                        <span class="label" data-i18n="nav.connections">Connections</span>
+                    </a>
+                </div>
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.config">Configuration</h4>
+                    <a href="./subscriptions" class="drawer-item" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">📡</span>
+                        <span class="label" data-i18n="nav.subscriptions">Subscriptions</span>
+                    </a>
+                    <a href="./proxies" class="drawer-item" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🔌</span>
+                        <span class="label" data-i18n="nav.proxies">Proxies</span>
+                    </a>
+                    <a href="./rules" class="drawer-item" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">📜</span>
+                        <span class="label" data-i18n="nav.rules">Rules</span>
+                    </a>
+                    <a href="./mappings" class="drawer-item" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🗺️</span>
+                        <span class="label" data-i18n="nav.mappings">Mappings</span>
+                    </a>
+                    <a href="./resolvers" class="drawer-item" hx-get="./resolvers" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">↗️</span>
+                        <span class="label" data-i18n="nav.resolvers">Resolvers</span>
+                    </a>
+                </div>
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.tools">Tools</h4>
+                    <a href="./reverse" class="drawer-item" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🧙</span>
+                        <span class="label" data-i18n="nav.reverse">Reverse Wizard</span>
+                    </a>
+                    <a href="./config" class="drawer-item" hx-get="./config" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">⚙️</span>
+                        <span class="label" data-i18n="nav.rawConfig">Raw Config</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Customize Bottom Nav Modal -->
+    <div id="customize-bottom-nav-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 data-i18n="nav.customizeBottomNav">自定义底部导航</h3>
+                <button onclick="closeCustomizeBottomNav()" class="close-btn">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted" style="margin-bottom:1rem; font-size:0.85rem;" data-i18n="nav.customizeHint">选择最多4个功能显示在底部导航栏</p>
+                <div id="customize-nav-list" style="display:flex; flex-direction:column; gap:0.5rem;"></div>
+            </div>
+            <div class="form-actions">
+                <button onclick="closeCustomizeBottomNav()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                <button onclick="saveBottomNavCustomization()" class="btn btn-primary" data-i18n="common.save">保存</button>
             </div>
         </div>
     </div>

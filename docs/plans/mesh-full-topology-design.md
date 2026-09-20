@@ -147,6 +147,13 @@ type GossipClaimedSubnet struct {
 
 #### 接收方（UpdateGossip）
 
+**注意**：接收方**不做**互相声明验证。验证只在发送方（broadcastGossip）进行，原因：
+1. **避免重复验证**：发送方已经验证过，接收方再验证是冗余的
+2. **提高效率**：减少不必要的计算
+3. **简化逻辑**：接收方只需存储，不需要复杂验证
+
+接收方的处理逻辑：
+
 1. **解析ClaimedSubnets**：
    - 建立nodeID到hop count的映射
    - 建立nodeID到neighbors的映射
@@ -293,15 +300,16 @@ for _, cs := range allClaimedSubnets {
    - 自己的ClaimedSubnet条目包含Neighbors
    - Routes和DomainSuffixes引用nodeID
 
-3. **接收逻辑**：
+3. **接收逻辑**（已完成）：
    - 修改UpdateGossip()，解析新格式
-   - **添加互相声明验证**：检查 claim 的 origin 声明的 neighbors 是否也声明了 origin
+   - **移除互相声明验证**：验证只在发送方进行，接收方只负责存储
    - 建立nodeID到hop/subnet/neighbors的映射
    - Routes和DomainSuffixes的hop从映射中查找
 
-4. **聚合逻辑**：
+4. **聚合逻辑**（已完成）：
    - 在broadcastGossip()聚合时，对每个claim执行互相声明验证
    - 无效的claim（origin的某个neighbor不再声明origin）不纳入bestClaims
+   - **验证只在发送方进行**，避免重复验证
 
 5. **拓扑展示**：
    - 修改GetFullTopology()，从ClaimedSubnets.Neighbors推导边
@@ -321,13 +329,88 @@ for _, cs := range allClaimedSubnets {
 4. **逻辑清晰**：引用式设计，关系明确
 5. **自动一致性**：节点信息变更时，相关路由和拓扑自动更新
 
+## DNS 域名解析优化
+
+### 问题
+
+在实现全网拓扑后，发现间接节点（如 ms9.phn、ms10.phn）无法通过 DNS 解析。原因是 `ResolveMeshDomain` 函数只检查直接连接的 peers，不检查通过 gossip 学习到的间接节点。
+
+### 解决方案
+
+修改 `ResolveMeshDomain` 函数，增加对 `ClaimedSubnets` 的检查：
+
+```go
+func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
+    nodeID := ParseNodeDomain(domain)
+    if nodeID == "" {
+        return nil
+    }
+    // 1. 先检查直接连接的 peers
+    for _, peer := range m.topology.GetAllPeers() {
+        if peer.NodeID() == nodeID && peer.Subnet != nil {
+            vip := DeriveVIPFromSubnet(peer.Subnet)
+            if vip != nil {
+                util.LogDebug("[MESH] DNS resolve: %s -> %s", domain, vip)
+            }
+            return vip
+        }
+    }
+    // 2. 再检查所有 peers 的 ClaimedSubnets（间接节点）
+    for _, peer := range m.topology.GetAllPeers() {
+        for _, cs := range peer.ClaimedSubnets {
+            if cs.NodeID == nodeID && cs.Subnet != nil {
+                vip := DeriveVIPFromSubnet(cs.Subnet)
+                if vip != nil {
+                    util.LogDebug("[MESH] DNS resolve: %s -> %s (via %s)", domain, vip, peer.NodeID())
+                }
+                return vip
+            }
+        }
+    }
+    return nil
+}
+```
+
+### 优势
+
+- 支持解析所有已知节点的域名（包括间接节点）
+- 逻辑清晰：先直接，后间接
+- 性能影响小：只在 DNS 解析时执行，不在关键路径上
+
+## 验证逻辑优化
+
+### 问题
+
+最初设计在两个地方进行互相声明验证：
+1. **UpdateGossip**（接收方）：收到 gossip 时验证
+2. **broadcastGossip**（发送方）：发送 gossip 前验证
+
+这导致重复验证，降低效率。
+
+### 解决方案
+
+**只在发送方（broadcastGossip）进行验证**，接收方（UpdateGossip）不做验证。
+
+**原因**：
+1. **避免重复验证**：发送方已经验证过，接收方再验证是冗余的
+2. **提高效率**：减少不必要的计算
+3. **简化逻辑**：接收方只需存储，不需要复杂验证
+4. **结果一致**：发送方过滤掉无效 claims，接收方不会收到无效数据
+
+### 实现
+
+- **UpdateGossip**：移除验证逻辑，直接存储所有 claims
+- **broadcastGossip**：保留验证逻辑，只发送经过验证的 claims
+
 ## 状态
 
 - [x] 问题分析完成
 - [x] 冗余分析完成
 - [x] 新设计完成
 - [x] 互相声明验证规则设计
-- [ ] 实现互相声明验证
-- [ ] 实现 recomputeRoutes 更新
-- [ ] 实现 GetFullTopology 更新
+- [x] 实现互相声明验证（只在发送方）
+- [x] 实现 recomputeRoutes 更新
+- [x] 实现 GetFullTopology 更新
+- [x] 实现 DNS 域名解析优化
+- [x] 优化验证逻辑（移除接收方验证）
 - [ ] 测试验证

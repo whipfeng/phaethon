@@ -105,12 +105,13 @@ type PeerWithHop struct {
 }
 
 // MeshRoute represents a route to a network prefix via one or more peers.
-// Peers are sorted by hop count (ascending). Selection uses round-robin
-// within the lowest-hop group; lastIdx tracks the next index.
+// Peers are sorted by hop count (ascending). Selection is stable using
+// hash-based selection on destination IP, ensuring the same destination
+// always routes to the same peer.
 type MeshRoute struct {
 	Prefix  *net.IPNet
 	Peers   []PeerWithHop
-	lastIdx int
+	lastIdx int // kept for compatibility but no longer used
 }
 
 // MeshManager coordinates mesh overlay networking.
@@ -718,7 +719,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// IMPORTANT: Check findRoute FIRST before local subnet check.
 	// Remote Fake-IPs (e.g., 100.64.0.x on VM with subnet 100.64.1.0/24) should be
 	// routed via the peer that owns that subnet, not passed to local netstack.
-	// Round-robin across peers with the lowest hop count.
+	// Stable selection: use hash of destination IP to consistently select the same peer.
 	route := m.findRoute(dstIP)
 	if route != nil && len(route.Peers) > 0 {
 		// Find lowest hop count and count peers at that hop.
@@ -732,10 +733,16 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}
 
-		// Round-robin selection within the lowest-hop group.
-		idx := route.lastIdx % count
+		// Hash-based stable selection: same destination always selects the same peer.
+		hash := 0
+		for _, b := range dstIP {
+			hash = hash*31 + int(b)
+		}
+		if hash < 0 {
+			hash = -hash
+		}
+		idx := hash % count
 		selectedPeer := route.Peers[idx].Peer
-		route.lastIdx++
 
 		// Debug log for VIP-like destinations
 		if len(dstIP) >= 4 && dstIP[3] == 1 {
@@ -961,7 +968,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	// Round-robin selection within the lowest-hop group.
+	// Hash-based stable selection: same destination always selects the same peer.
 	minHop := route.Peers[0].Hop
 	count := 0
 	for _, p := range route.Peers {
@@ -971,9 +978,15 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			break
 		}
 	}
-	idx := route.lastIdx % count
+	hash := 0
+	for _, b := range dstIP {
+		hash = hash*31 + int(b)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	idx := hash % count
 	selectedPeer := route.Peers[idx].Peer
-	route.lastIdx++
 
 	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s (hop=%d, idx=%d/%d)", fromNodeID, dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
@@ -1315,7 +1328,11 @@ func (m *MeshManager) recomputeRoutes() {
 			continue
 		}
 		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].hop < entries[j].hop
+			if entries[i].hop != entries[j].hop {
+				return entries[i].hop < entries[j].hop
+			}
+			// Secondary sort by node ID for deterministic ordering
+			return entries[i].sender.GetNodeID() < entries[j].sender.GetNodeID()
 		})
 		peerList := make([]PeerWithHop, len(entries))
 		for i, e := range entries {
@@ -1466,7 +1483,7 @@ func (m *MeshManager) recomputeRoutes() {
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
-// The returned pointer allows updating lastIdx for round-robin selection.
+// The returned pointer is used for stable peer selection.
 func (m *MeshManager) findRoute(dstIP net.IP) *MeshRoute {
 	rt := m.getRouteTable()
 

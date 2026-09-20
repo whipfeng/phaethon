@@ -1712,8 +1712,40 @@ func wireAdminCallbacks(resources *activeResources) {
 	}
 	admin.OnIncrementalUpdate = func() error {
 		// mergeAndInitLocked already updated s.conf in place, which is the same
-		// object as resources.ruleConf. All servers see the changes immediately.
+		// object as resources.ruleConf. All servers see changes immediately.
 		activeRuleConf.Store(resources.ruleConf)
+
+		// Sync P2P peers with proxy enable/disable state
+		resources.ruleConf.Lock()
+		proxies := make([]*config.Proxy, len(resources.ruleConf.Proxies))
+		copy(proxies, resources.ruleConf.Proxies)
+		resources.ruleConf.Unlock()
+
+		// Build set of existing P2P peer IDs
+		existingPeers := make(map[string]bool)
+		for _, p := range p2p.GlobalP2PManager.GetPeers() {
+			existingPeers[p.ID] = true
+		}
+
+		for _, proxy := range proxies {
+			isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
+			if !isCompatible {
+				continue
+			}
+
+			_, exists := existingPeers[proxy.Name]
+
+			if proxy.IsEnabled() && !exists {
+				// Proxy enabled and not running - start P2P
+				util.LogInfo("[P2P] starting peer for newly enabled proxy %s", proxy.Name)
+				go p2p.GlobalP2PManager.StartPeer(proxy)
+			} else if !proxy.IsEnabled() && exists {
+				// Proxy disabled and running - stop P2P
+				util.LogInfo("[P2P] stopping peer for disabled proxy %s", proxy.Name)
+				p2p.GlobalP2PManager.StopPeer(proxy.Name)
+			}
+		}
+
 		return nil
 	}
 	admin.OnMappingUpdate = func(old, newMapping *config.Mapping) error {

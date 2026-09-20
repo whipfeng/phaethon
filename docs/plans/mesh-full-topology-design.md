@@ -286,6 +286,7 @@ for _, cs := range allClaimedSubnets {
    - 修改GossipRoute和GossipDomainSuffix，移除Hop字段，添加NodeID字段
    - 修改GossipClaimedSubnet，添加Neighbors字段
    - 移除GossipTopologyEdge结构
+   - **P2PProtocolVersion 从 2 升到 3**（协议不兼容，旧版本节点会拒绝连接）
 
 2. **发送逻辑**（已完成）：
    - 修改broadcastGossip()，构建新的报文格式

@@ -19,7 +19,10 @@ import (
 
 // P2PProtocolVersion is the current P2P protocol version.
 // Bump when making incompatible changes to the P2P frame protocol or hello semantics.
-const P2PProtocolVersion = 2
+// Version 3: Gossip protocol redesigned - GossipInfo removed NodeID/Subnet fields,
+// Routes/DomainSuffixes now reference nodeID, ClaimedSubnets added Neighbors field,
+// mutual neighbor validation added to prevent stale claim wandering.
+const P2PProtocolVersion = 3
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {

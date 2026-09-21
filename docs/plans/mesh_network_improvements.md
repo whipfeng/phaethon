@@ -1498,39 +1498,56 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - `.phn` 域名是确定性的（每个节点都有 `<nodeID>.phn`），但被当作动态域名处理
 - 动态域名路由在节点未连接时 fallback 到本地 pool，导致错误解析
 
-### 20.2 设计方案
+### 20.2 设计方案（v0.16.2 重构）
 
 **核心思路：**
-1. `.phn` 域名改为静态路由，不通过 gossip 传播
-2. 静态域名和动态域名分离处理
-3. 静态域名匹配但节点未就绪时返回 SERVFAIL，不 fallback
+1. 静态和动态路由都用 Trie 树，统一最长后缀匹配（从右向左）
+2. 两个 Trie 都只存 `nodeID`，节点信息集中在 `nodeMap`
+3. 静态优先，动态次之，最后 fallback
 
-**数据结构简化：**
+**数据结构：**
 
 ```go
-// 静态域名路由（配置 + 自动学习）
-type StaticDomainSuffix struct {
-    Suffix string  // "vm.phn", "test.via.jf.local"
-    Via    string  // nodeID: "vm", "jf"
+// routeTable 包含两个 trie 和 nodeMap
+type routeTable struct {
+    routes     []MeshRoute
+    staticTrie *DomainTrie  // 静态路由树（配置 + .phn）
+    dynamicTrie *DomainTrie // 动态路由树（gossip 学习）
+    nodeMap    map[string]*nodeInfo  // nodeID → (subnet, sender, hop)
 }
 
-// Topology 中的 Peer 对象
-type PeerInfo struct {
-    Sender PeerSender
-    Subnet *net.IPNet  // 只要 Peer 存在，Subnet 必有值
-    Hop    int
-    DomainSuffixes []DomainSuffixEntry
+// DomainTrie 节点只存 nodeID
+type trieNode struct {
+    children map[string]*trieNode
+    nodeID   string  // 该后缀对应的目标节点
 }
 ```
 
-**解析优先级：**
+**匹配流程：**
 
 ```
 查询 domain:
   ↓
-1. 静态域名路由（高优先级）
-   - 配置的 static-domain-suffixes
-   - 自动学习的 <nodeID>.phn
+1. 查静态 trie（高优先级）
+   - 有匹配 → 用 nodeID 查 nodeMap
+     - 找到 → 返回 subnet
+     - 找不到 → SERVFAIL（节点未就绪）
+   - 无匹配 → 进入步骤 2
+  ↓
+2. 查动态 trie（低优先级）
+   - 有匹配 → 用 nodeID 查 nodeMap
+     - 找到 → 返回 subnet
+     - 找不到 → 理论上不会发生
+   - 无匹配 → 进入步骤 3
+  ↓
+3. Fallback 到本地 pool
+   - 分配本地 Fake-IP
+```
+
+**关键设计：**
+- 静态匹配但节点不在 nodeMap → **SERVFAIL**（明确配置但节点未就绪，不 fallback）
+- 动态匹配但节点不在 nodeMap → 理论上不可能（gossip 保证一致性）
+- 两个 trie 结构统一，都只存 nodeID，简化实现
    ↓ 匹配到
    查 topology 找节点
    ↓ 找到 → 转发

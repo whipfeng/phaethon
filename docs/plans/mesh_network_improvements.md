@@ -1695,3 +1695,28 @@ TCP（`handleConn`）和 UDP（`handleUDP`）两条路径统一修改。
 ### 22.4 验证
 
 - QG 侧 `ssh Docker@ws.vm.phn`（经 mesh 到 VM，VM resolver 重写后直连 10.21.20.65:39022）连接成功
+## 24. 协议版本纪律与 DNS 卡死事故复盘 (v0.16.4)
+
+### 24.1 事故：QG 远程 .phn 解析卡死
+
+**现象**：VM 重启后 QG 上 `nslookup qg.phn` 失败（远程 .phn 域名解析 wedge）。
+
+**根因（版本混跑）**：QG 运行 mesh-130（P2PProtocolVersion=4，但**不含** 16281a8 的双 trie DNS 语义），VM 运行 mesh-132（协议版本同为 4，但**包含** 16281a8）。16281a8 把跨节点 `.phn` DNS 应答语义从「gossip 远程路由 + 远程回退」改为「双 trie：静态 trie 本地直接应答（属主节点宕机也能答），不再远程回退」，但**没有 bump 协议版本** —— 于是 v4==v4 链路照常建立，两端对 DNS 应答职责的理解不一致：VM（新语义）不再把远程 .phn 作为可解析条目通告/处理，QG（旧语义）依赖 gossip 路由在 VM 重启后重新学习，而新语义端不再提供这些信息，QG 的缓存过期后进入 wedge。
+
+**排查修正**：最初误读 `/root/phaethon.log`（supervise-daemon stdout 捕获，内容陈旧）；真实日志在 `/root/.phaethon/phaethon.log`（应用自身日志）。误导性服务 stdout 已截断。
+
+### 24.2 版本门禁本来就存在且有效
+
+hello 携带 `ProtocolVersion`，不匹配即断链（`p2p.go` disconnect 逻辑）。GG 环境的 v3 旧节点连接本节点时日志出现 194 次 `protocol version mismatch ... disconnecting` —— 门禁工作正常。**问题不在门禁，而在于改跨节点语义时忘了 bump 版本**，导致 v4（旧语义）与 v4（新语义）被误判为兼容。
+
+### 24.3 处置
+
+1. `P2PProtocolVersion` 4 → 5，并追加 `// Version 5: ...` 注释（覆盖 16281a8 双 trie DNS 语义变更）。bump 后，残留 mesh-130/131 的节点与新节点显式互拒（可见失败），而不是悄悄混跑。
+2. **协议版本纪律（铁律）**：凡修改**跨节点线上语义**（P2P/gossip 消息格式、DNS 应答职责、路由通告方式、hello 字段）的提交，**必须** bump `P2PProtocolVersion` 并追加 `// Version N: <变更说明>` 注释。仅改本节点内部行为（UI、admin API、单机转发）无需 bump。
+3. 部署注意：bump 版本会使新旧节点互拒，**所有 mesh 节点必须同步升级**，否则 mesh 分裂（这是显式失败的预期行为，比静默 wedge 好）。
+
+### 24.4 验证（版本对齐后）
+
+- VM 重启测试：QG 对 `vm.phn` 的解析由静态 trie 本地直接应答（即使 VM 宕机也立即返回），VM 恢复后 SSH e2e 正常 —— 无 wedge。
+- **保持观察**：版本混跑可能不是唯一隐患，用户判断「可能有别的潜在没发现的问题」。后续每次 VM 重启后观察 QG DNS 与链路状态，出现异常优先查 `/root/.phaethon/phaethon.log`。
+

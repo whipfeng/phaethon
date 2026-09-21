@@ -1893,3 +1893,58 @@ gVisor 的 IPv4 源地址选择是**确定性最长前缀匹配**（非随机）
 - VM 部署后，VM→QG 方向域名解析正常，QG 日志收到的查询源地址为 VM 的 GIP
   （100.1.0.3）；
 - QG 部署后重启 VM 复现场景：远端域名解析全程无 `i/o timeout`、无 SERVFAIL。
+
+## 27. Fake-IP de-NAT miss 快速拒绝 (v0.16.7)
+
+### 27.1 问题
+
+节点重启后 Fake-IP 池（纯内存，无持久化）清空，而客户端（macOS/Windows 解析器存在
+serve-stale 行为）仍持有重启前的旧 fake-IP 并发起连接。SYN 到达节点后
+`LookupDomain(dst)` 反查 miss，引擎把该地址当作普通 IP 走 DIRECT 直连：从物理网卡
+dial 一个全网中不存在的地址，Windows connectex ~21s 超时后才失败。
+
+实测（2026-09-21 VM 重启场景）：重启前 `ws.vm.phn → 100.1.0.47`；重启后池重建，
+首次查询分配 `100.1.0.41`。客户端持旧 .47 发起 ssh → VM 日志
+`direct dial 100.1.0.47:22 fail: connectex: timeout`（21s）→ 第一次必失败；
+客户端重新解析后持 .41 重试 → 命中映射 → 成功。
+
+### 27.2 备选方案与决策
+
+| 方案 | 效果 | 改动量 |
+|------|------|--------|
+| A. de-NAT miss 快速拒绝 | 首次失败 21s → <1s，客户端立即重试成功 | 小 |
+| B. Fake-IP 持久化 | 旧映射复活，首次即成功 | 中 |
+| C. 确定性分配（hash） | 同 B + 多节点一致性 | 大 |
+
+**决策：采用方案 A**（用户拍板）。B/C 暂不做；A 将失败窗口从 21s 压到毫秒级，
+配合客户端自动重试，实际体验为"第一次立即失败、重试即成功"。
+
+### 27.3 设计
+
+1. `mesh/fakeip.go` 新增 `InAllocRange(ip net.IP) bool`：判定 IP 是否落在可分配
+   区间（池范围内且不是保留地址 —— 网络地址、广播地址、前 skip 个基础设施地址
+   VIP/host/GIP/EIP 等）。
+2. `tun/engine.go handleConn`：在 fake-IP 反查 miss 且 dst ∈ 可分配区间时，
+   输出 WARN 日志并立即 return（经 `defer conn.Close()` 发 FIN 关闭）。
+
+判定条件刻意收窄：
+
+- `e.fakeIP == nil`（非 mesh 部署）不拒绝，行为不变；
+- dst 不是 IP 字符串（handleConn 其他入口）不拒绝；
+- dst 命中映射（正常 fake-IP 连接）不拒绝；
+- dst 为保留地址（VIP/GIP/EIP 等 .0-.9）不拒绝，本地服务可达性不受影响。
+
+仅对"池可分配区间内、无映射"的地址拒绝 —— 该地址在 mesh 网络中必然无人监听
+（整个子网为虚拟地址，分配之外即不存在），直连注定超时。
+
+### 27.4 变更文件
+
+- `mesh/fakeip.go`：新增 `InAllocRange`
+- `tun/engine.go`：`handleConn` 增加快速拒绝分支（WARN 日志含 connID/src/dst 便于定位）
+
+### 27.5 验收标准
+
+- VM 重启（池清空）后，客户端持旧 fake-IP 发起 TCP 连接：毫秒级收到关闭，
+  不再出现 21s `connectex: timeout`；VM 日志出现 `stale fake-IP ... rejected`；
+- 客户端重试（重新解析获得新 fake-IP 后）连接成功；
+- 正常 fake-IP 连接、nodeID.phn 本地域名、保留地址（VIP/GIP/EIP）连接不受影响。

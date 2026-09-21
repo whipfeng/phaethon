@@ -558,6 +558,7 @@ func (m *MeshManager) Stop() {
 //   - subnet == nil && needsFail == false: no match, fallback to local pool
 func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 	d := strings.ToLower(domain)
+	util.LogInfo("[DNS-DEBUG] ResolveDomainSubnet(%s) called", domain)
 	
 	// Special handling for .phn domains (auto-generated for each node)
 	// These are treated as static routes but don't need to be stored in staticDomainSuffixes
@@ -570,14 +571,14 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 			nodeID = strings.TrimSuffix(d, "."+MeshDomainSuffix)
 		}
 		if nodeID != "" {
-			util.LogDebug("[MESH] ResolveDomainSubnet(%s): .phn domain, nodeID=%s", domain, nodeID)
+			util.LogInfo("[DNS-DEBUG] .phn domain, nodeID=%s", nodeID)
 			peer := m.topology.GetPeer(nodeID)
 			if peer != nil && peer.Subnet != nil {
-				util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, nodeID, peer.Subnet)
+				util.LogInfo("[DNS-DEBUG] found node %s subnet %s", nodeID, peer.Subnet)
 				return peer.Subnet, false  // .phn match, node ready → forward
 			}
 			// Node not found in topology yet
-			util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not found in topology", domain, nodeID)
+			util.LogWarn("[DNS-DEBUG] node %s not found in topology, returning SERVFAIL", nodeID)
 			return nil, true  // .phn match, node not ready → SERVFAIL
 		}
 	}

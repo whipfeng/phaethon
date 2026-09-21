@@ -1620,3 +1620,21 @@ if subnet != nil {
 - [ ] 测试：节点未连接时返回 SERVFAIL
 - [ ] 测试：动态域名 fallback 正常
 
+
+## 21. DNS 解析优化修复 (v0.16.1)
+
+### 问题
+DNS 优化版本（静态 .phn 路由）部署后，所有 .phn 域名解析返回 SERVFAIL。
+
+### 根因
+`main_tun.go` 中缺少 `SetDNSDomainResolver` 调用，导致 DNS 劫持器的 `resolveDomainSubnet` 回调为 nil，无法调用 `ResolveDomainSubnet` 方法。
+
+### 修复
+在 `main_tun.go` 的 mesh 接线代码中添加：
+```go
+engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
+```
+
+### 状态
+- 已修复并提交
+- 日志系统存在独立 bug（worker 进程日志未转发），需要单独排查

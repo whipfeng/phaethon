@@ -91,6 +91,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 			return nil
 		}
 
+		// Register the domain resolver callback for mesh DNS resolution
+		engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
+
 		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
 		// dialing go through the netstack, which routes via loopback to the
 		// hijacker/forwarder.

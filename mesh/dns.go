@@ -120,6 +120,7 @@ func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) (*net.IPNet
 // Start binds a UDP socket on port 53 inside netstack and starts the serve loop.
 // The wg is used to track the serve goroutine's lifetime.
 func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
+	util.LogInfo("[DNS-DEBUG] DNSHijacker.Start() called, dnsAddr=%s", h.dnsAddr)
 	var err tcpip.Error
 	h.udpEP, err = h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &h.wq)
 	if err != nil {
@@ -134,6 +135,7 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 	if err := h.udpEP.Bind(addr); err != nil {
 		return fmt.Errorf("bind udp 53 on %s: %v", h.dnsAddr, err)
 	}
+	util.LogInfo("[DNS-DEBUG] DNSHijacker bound to %s:53", h.dnsAddr)
 
 	// Start worker pool for DNS query processing
 	for i := 0; i < 4; i++ {
@@ -230,7 +232,7 @@ func (h *DNSHijacker) serveLoop() {
 		if ok && domain != "" {
 			srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
 			srcPort := res.RemoteAddr.Port
-			util.LogDebug("[DNS] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
+			util.LogInfo("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 		}
 
 		// Queue for async processing by worker pool

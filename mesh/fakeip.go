@@ -163,6 +163,21 @@ func (p *FakeIPPool) Contains(ip net.IP) bool {
 	return n >= p.poolStart && n <= p.poolEnd
 }
 
+// InAllocRange reports whether ip falls inside the allocatable fake-IP range:
+// within [poolStart, poolEnd] but not one of the reserved infrastructure
+// addresses (network/broadcast and the first skip addresses).
+func (p *FakeIPPool) InAllocRange(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	n := ipToUint32(ip4)
+	if n < p.poolStart || n > p.poolEnd {
+		return false
+	}
+	return !p.reserved[n]
+}
+
 func ipToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])

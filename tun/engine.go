@@ -1984,6 +1984,18 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 
 	connID := util.NextConnID()
 
+	// A dst inside the fake-IP alloc range with no mapping means the client is
+	// using a stale fake-IP (pool was reset, e.g. node restart). Close right
+	// away instead of direct-dialing a dead address for ~20s; the client's
+	// retry re-resolves DNS and gets the fresh fake-IP.
+	if domain == "" && e.fakeIP != nil {
+		if ip := net.ParseIP(dstAddr); ip != nil && e.fakeIP.InAllocRange(ip) {
+			util.LogWarn("[TUN] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
+				connID, dstAddr, dstPort, srcAddr)
+			return
+		}
+	}
+
 	// Diagnostic: log Mode B connections prominently
 	if modeBMapping != nil {
 		util.LogInfo("[TCP-DIAG] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",

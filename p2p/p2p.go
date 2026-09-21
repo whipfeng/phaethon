@@ -24,7 +24,10 @@ import (
 // mutual neighbor validation added to prevent stale claim wandering.
 // Version 4: DNS resolution optimized - .phn domains treated as static routes (not gossiped),
 // ResolveDomainSubnet returns (subnet, needsFail) for proper SERVFAIL handling.
-const P2PProtocolVersion = 4
+// Version 5: two-trie DNS routing (16281a8) changed cross-node .phn answer semantics
+// (static trie answers even when the owning node is down; no remote fallback); mixing
+// pre/post versions silently wedges remote .phn resolution after node restarts.
+const P2PProtocolVersion = 5
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {

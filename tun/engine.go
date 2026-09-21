@@ -111,7 +111,7 @@ type Engine struct {
 	// Returns true if the packet was handled.
 	meshInterceptor func(dstIP net.IP, data []byte) bool
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
-	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (nil = use default 198.18.0.0/15)
+	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (set when mesh is enabled)
 	meshNetwork     *net.IPNet      // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
 	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
 	modeBTable      *mesh.ModeBTable  // Mode B (proxy entry) connection tracking

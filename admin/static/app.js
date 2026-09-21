@@ -286,7 +286,7 @@ function saveBottomNavCustomization() {
     
     if (items.length === 0) {
         if (typeof showToast === 'function') {
-            showToast('至少选择一个项目', 'error');
+            showToast(i18n.t('common.selectAtLeastOne'), 'error');
         }
         return;
     }
@@ -296,7 +296,7 @@ function saveBottomNavCustomization() {
     closeCustomizeBottomNav();
     
     if (typeof showToast === 'function') {
-        showToast('保存成功', 'success');
+        showToast(i18n.t('common.saved'), 'success');
     }
 }
 
@@ -991,26 +991,26 @@ async function fetchMeshStatus() {
                 const isDirect = directPeers[nodeId] && directPeers[nodeId].direct;
                 const isLocal = nodeId === data.nodeId;
                 const statusClass = isLocal ? 'local' : (isDirect ? 'online' : 'relay');
-                const statusText = isLocal ? 'Local' : (isDirect ? 'Direct' : 'Relay');
+                const statusText = isLocal ? i18n.t('mesh.local') : (isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay'));
                 const peerData = directPeers[nodeId];
                 const lastSeen = isLocal ? '-' : (peerData && peerData.lastSeen ? timeAgo(new Date(peerData.lastSeen)) : '-');
                 const adminUrl = isLocal ? '#' : ('https://' + escapeHtml(nodeId) + '.phn/');
                 const btnClass = isLocal ? 'btn btn-sm btn-secondary' : 'btn btn-sm btn-outline';
-                const btnText = isLocal ? 'Current' : 'Open';
+                const btnText = isLocal ? i18n.t('mesh.current') : i18n.t('mesh.open');
                 const btnDisabled = isLocal ? 'disabled' : '';
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 ? neighbors.join(', ') : '-';
                 html += '<tr>';
-                html += '<td data-label="Node">' + escapeHtml(nodeId) + '</td>';
-                html += '<td data-label="Subnet"><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
-                html += '<td data-label="VIP"><code>' + escapeHtml(n.vip || '-') + '</code></td>';
-                html += '<td data-label="Neighbors">' + escapeHtml(neighborsStr) + '</td>';
-                html += '<td data-label="Status"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
-                html += '<td data-label="Last Seen">' + lastSeen + '</td>';
-                html += '<td data-label="Admin"><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
+                html += '<td data-label="' + i18n.t('mesh.node') + '">' + escapeHtml(nodeId) + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.subnet') + '"><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
+                html += '<td data-label="' + i18n.t('mesh.vip') + '"><code>' + escapeHtml(n.vip || '-') + '</code></td>';
+                html += '<td data-label="' + i18n.t('mesh.neighbors') + '">' + escapeHtml(neighborsStr) + '</td>';
+                html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.lastSeen') + '">' + lastSeen + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.admin') + '"><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
                 html += '</tr>';
             });
-            tbody.innerHTML = html || '<tr><td colspan="7" class="text-muted">No nodes</td></tr>';
+            tbody.innerHTML = html || '<tr><td colspan="7" class="text-muted">' + i18n.t('mesh.noNodes') + '</td></tr>';
         }
 
         // Draw topology visualization
@@ -1024,7 +1024,7 @@ async function fetchMeshStatus() {
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
                     if (viaList.length === 0) {
-                        html += '<tr><td data-label="Prefix"><code>' + r.prefix + '</code></td><td data-label="Via" class="text-muted">Local</td><td data-label="Status"><span class="mesh-status-dot local"></span>Local</td></tr>';
+                        html += '<tr><td data-label="' + i18n.t('mesh.prefix') + '"><code>' + r.prefix + '</code></td><td data-label="' + i18n.t('mesh.via') + '" class="text-muted">' + i18n.t('mesh.local') + '</td><td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot local"></span>' + i18n.t('mesh.local') + '</td></tr>';
                     } else {
                         const minHop = Math.min(...viaList.map(v => v.hop));
                         const bestRoutes = viaList.filter(v => v.hop === minHop);
@@ -1033,16 +1033,16 @@ async function fetchMeshStatus() {
                         const viaNames = bestRoutes.map(v => v.nodeID).join(', ');
                         const hasDirect = bestRoutes.some(v => directPeers[v.nodeID] && directPeers[v.nodeID].direct);
                         const statusClass = hasDirect ? 'online' : 'relay';
-                        const statusText = hasDirect ? 'Direct' : 'Relay';
+                        const statusText = hasDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay');
 
                         html += '<tr>';
-                        html += '<td data-label="Prefix"><code>' + escapeHtml(r.prefix) + '</code></td>';
-                        html += '<td data-label="Via">' + escapeHtml(viaNames) + '</td>';
-                        html += '<td data-label="Status"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                        html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
+                        html += '<td data-label="' + i18n.t('mesh.via') + '">' + escapeHtml(viaNames) + '</td>';
+                        html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                         html += '</tr>';
                     }
                 });
-                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No routes</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
             }
         }
 
@@ -1147,7 +1147,7 @@ async function fetchMeshStatus() {
             
             uniqueDomainRoutes.forEach(r => {
                 const statusClass = r.isLocal ? 'local' : (r.isDirect ? 'online' : 'relay');
-                const statusText = r.isLocal ? 'Local' : (r.isDirect ? 'Direct' : 'Relay');
+                const statusText = r.isLocal ? i18n.t('mesh.local') : (r.isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay'));
                 
                 html += '<tr>';
                 html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
@@ -1155,12 +1155,12 @@ async function fetchMeshStatus() {
                 html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '</tr>';
             });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">No domain routes</td></tr>';
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);
         const summaryEl = document.getElementById('mesh-summary');
-        if (summaryEl) summaryEl.innerHTML = '<p class="text-muted">Failed to load mesh status</p>';
+        if (summaryEl) summaryEl.innerHTML = '<p class="text-muted">' + i18n.t('mesh.loadFailed') + '</p>';
     }
 }
 
@@ -1614,14 +1614,14 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
 
 function timeAgo(date) {
     const seconds = Math.floor((new Date() - date) / 1000);
-    if (seconds < 10) return 'just now';
-    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 10) return i18n.t('time.justNow');
+    if (seconds < 60) return i18n.t('time.secondsAgo').replace('{}', seconds);
     const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return minutes + 'm ago';
+    if (minutes < 60) return i18n.t('time.minutesAgo').replace('{}', minutes);
     const hours = Math.floor(minutes / 60);
-    if (hours < 24) return hours + 'h ago';
+    if (hours < 24) return i18n.t('time.hoursAgo').replace('{}', hours);
     const days = Math.floor(hours / 24);
-    return days + 'd ago';
+    return i18n.t('time.daysAgo').replace('{}', days);
 }
 
 function escapeHtml(s) {
@@ -1633,12 +1633,12 @@ async function triggerMeshGossip() {
     try {
         const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
         if (resp.ok) {
-            showToast('Gossip triggered', 'success');
+            showToast(i18n.t('mesh.gossipTriggered'), 'success');
         } else {
-            showToast('Gossip failed', 'error');
+            showToast(i18n.t('mesh.gossipFailed'), 'error');
         }
     } catch (err) {
-        showToast('Gossip error: ' + err.message, 'error');
+        showToast(i18n.t('mesh.gossipError') + err.message, 'error');
     }
 }
 

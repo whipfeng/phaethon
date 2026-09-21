@@ -396,34 +396,8 @@ func cmdFix(luid uint64, index uint32) {
 		}
 	}
 
-	// Step 5: Also fix Fake-IP route
-	fmt.Println("\n--- Step 5: Fix Fake-IP pool route ---")
-	{
-		// Delete old on-link
-		_, fakeIPNet, _ := net.ParseCIDR("198.18.0.0/15")
-		var delRow mibIpForwardRow2
-		delRow.init()
-		delRow.setInterfaceLuid(luid)
-		delRow.setInterfaceIndex(index)
-		delRow.setDestinationPrefix(fakeIPNet.IP, 15)
-		delRow.setNextHop(net.IPv4zero)
-		delRow.setMetric(1)
-		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&delRow[0])))
-
-		// Add off-link
-		var addRow mibIpForwardRow2
-		addRow.init()
-		addRow.setInterfaceLuid(luid)
-		addRow.setInterfaceIndex(index)
-		addRow.setDestinationPrefix(fakeIPNet.IP, 15)
-		addRow.setNextHop(net.ParseIP("192.0.2.1").To4())
-		addRow.setMetric(1)
-		ret, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(&addRow[0])))
-		fmt.Printf("  Fake-IP route via 192.0.2.1: 0x%x\n", ret)
-	}
-
-	// Step 6: Test
-	fmt.Println("\n--- Step 6: Test ping ---")
+	// Step 5: Test
+	fmt.Println("\n--- Step 5: Test ping ---")
 	out, _ := exec.Command("ping", "-n", "2", "-w", "3000", "1.1.1.1").CombinedOutput()
 	fmt.Println(string(out))
 

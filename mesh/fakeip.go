@@ -5,9 +5,6 @@ import (
 	"sync"
 )
 
-// FakeIPPoolCIDR is the CIDR used for Fake-IP allocations.
-const FakeIPPoolCIDR = "198.18.0.0/15"
-
 // FakeIPPool manages fake IP allocation.
 type FakeIPPool struct {
 	mu         sync.RWMutex
@@ -19,26 +16,6 @@ type FakeIPPool struct {
 	poolStart  uint32 // first IP in pool range
 	poolEnd    uint32 // last IP in pool range
 	onChange   func() // callback when pool stats change
-}
-
-// NewFakeIPPool creates a Fake-IP pool starting at 198.18.0.0.
-// It reserves the network and broadcast addresses of 198.18.0.0/15.
-func NewFakeIPPool() *FakeIPPool {
-	poolStart := ipToUint32(net.ParseIP("198.18.0.0").To4())
-	poolEnd := ipToUint32(net.ParseIP("198.19.255.255").To4())
-	reserved := map[uint32]bool{
-		poolStart: true, // network address
-		poolEnd:   true, // broadcast address
-	}
-	return &FakeIPPool{
-		domainToIP: make(map[string]net.IP),
-		ipToDomain: make(map[string]string),
-		ipToRealIP: make(map[string]net.IP),
-		reserved:   reserved,
-		nextIP:     poolStart,
-		poolStart:  poolStart,
-		poolEnd:    poolEnd,
-	}
 }
 
 // NewFakeIPPoolWithSubnet creates a Fake-IP pool from a custom subnet.

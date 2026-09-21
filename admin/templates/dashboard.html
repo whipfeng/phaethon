@@ -209,7 +209,7 @@
             })
             .catch(err => {
                 const statusEl = document.getElementById('security-status');
-                if (statusEl) statusEl.innerHTML = '<p class="text-muted">Failed to load security status</p>';
+                if (statusEl) statusEl.innerHTML = '<p class="text-muted">' + (typeof i18n !== 'undefined' ? i18n.t('dash.loadSecurityFailed') : 'Failed to load security status') + '</p>';
             });
     })();
 
@@ -217,7 +217,7 @@
     if (document.getElementById('tun-summary')) {
         fetch('./api/tun').then(r => r.json()).then(data => updateTUNSummary(data)).catch(err => {
             const el = document.getElementById('tun-summary');
-            if (el) el.innerHTML = '<p class="text-muted">Failed to load TUN status</p>';
+            if (el) el.innerHTML = '<p class="text-muted">' + (typeof i18n !== 'undefined' ? i18n.t('dash.loadTunFailed') : 'Failed to load TUN status') + '</p>';
         });
     }
     if (document.getElementById('mesh-summary')) {

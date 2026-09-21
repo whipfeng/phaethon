@@ -191,7 +191,7 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 - **Wintun**: Windows TUN 驱动，使用共享内存环形缓冲区（DLL 调用）
 - **gVisor netstack**: 用户态 TCP/IP 协议栈，处理数据包
 - **channel.Endpoint**: gVisor 链路层端点，512 包容量，非阻塞写入
-- **Fake-IP**: DNS 域名→198.18.0.0/15 虚拟 IP 映射
+- **Fake-IP**: DNS 域名→mesh subnet 虚拟 IP 映射（mesh 模式下从节点 subnet 分配）
 - **TCP Forwarder**: gVisor `tcp.Forwarder`，maxInFlight=1024，每个连接在独立 goroutine 处理
 - **UDP Forwarder**: 自定义 UDP 转发，带空闲超时
 

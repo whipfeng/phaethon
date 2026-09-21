@@ -50,7 +50,7 @@ sequenceDiagram
 
     App->>SysDNS: getaddrinfo("www.example.com")
     SysDNS->>TUNDNS: DNS 查询 (192.0.2.2)
-    TUNDNS->>TUNDNS: 分配 Fake-IP (198.18.0.5)
+    TUNDNS->>TUNDNS: 分配 Fake-IP (从 mesh subnet)
     TUNDNS-->>SysDNS: 返回 Fake-IP (快速响应)
     SysDNS-->>App: 返回 Fake-IP
     
@@ -372,7 +372,7 @@ Darwin 和 Linux 平台仍有残留，待后续处理。
 
 **症状**：
 - `curl http://www.baidu.com` 超时或连接重置
-- `netstat` 显示大量到 Fake-IP（198.18.x.x）的 SYN_SENT 连接
+- `netstat` 显示大量到 Fake-IP（mesh subnet）的 SYN_SENT 连接
 - 日志中没有 "resolved ... for DIRECT" 的记录
 
 ### 9.2 根本原因
@@ -382,7 +382,7 @@ Darwin 和 Linux 平台仍有残留，待后续处理。
 
 1. 引擎调用 `net.LookupIP("www.baidu.com")`
 2. 系统 DNS 查询发送到 192.0.2.2（TUN DNS）
-3. TUN DNS 返回 Fake-IP（如 198.18.0.5）
+3. TUN DNS 返回 Fake-IP（从 mesh subnet 分配）
 4. 引擎尝试连接到 Fake-IP
 5. Fake-IP 连接进入 TUN → 死循环或失败
 

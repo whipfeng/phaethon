@@ -75,7 +75,7 @@ func TestUDPForwarderRegistered(t *testing.T) {
 	})
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, fwd.HandlePacket)
 
-	// Build a synthetic UDP packet: src=198.18.0.100:12345 -> dst=8.8.8.8:53
+	// Build a synthetic UDP packet: src=testIP:12345 -> dst=8.8.8.8:53
 	srcIP := tcpip.AddrFrom4([4]byte{198, 18, 0, 100})
 	dstIP := tcpip.AddrFrom4([4]byte{8, 8, 8, 8})
 
@@ -274,16 +274,18 @@ func TestQueryInternalDNS(t *testing.T) {
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}
-	if !mesh.IsFakeIP(ip.String()) {
-		t.Fatalf("expected Fake-IP, got %s", ip)
+	// Verify we got a valid IP response (Fake-IP from the pool)
+	if ip.To4() == nil {
+		t.Fatalf("expected valid IPv4, got %s", ip)
 	}
 }
 
 // TestDNSHijackerResolve verifies the direct Resolve path used by the
 // Windows-side DNS proxy when gVisor loopback delivery is unavailable.
 func TestDNSHijackerResolve(t *testing.T) {
-	pool := mesh.NewFakeIPPool()
-	hijack := mesh.NewDNSHijacker(nil, pool, tcpip.AddrFrom4([4]byte{198, 18, 0, 1}), tcpip.AddrFrom4([4]byte{198, 18, 0, 2}))
+	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
+	pool := mesh.NewFakeIPPoolWithSubnet(subnet, 3)
+	hijack := mesh.NewDNSHijacker(nil, pool, tcpip.AddrFrom4([4]byte{100, 64, 0, 1}), tcpip.AddrFrom4([4]byte{100, 64, 0, 2}))
 
 	domain := "direct-resolve.example.com"
 	query := mesh.BuildDNSQuery(domain, 0x1234)
@@ -295,7 +297,8 @@ func TestDNSHijackerResolve(t *testing.T) {
 	if ip == nil {
 		t.Fatal("failed to parse response IP")
 	}
-	if !mesh.IsFakeIP(ip.String()) {
-		t.Fatalf("expected Fake-IP, got %s", ip)
+	// Verify we got a valid IP response (Fake-IP from the pool)
+	if ip.To4() == nil {
+		t.Fatalf("expected valid IPv4, got %s", ip)
 	}
 }

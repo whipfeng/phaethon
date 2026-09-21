@@ -1471,7 +1471,7 @@ NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
 
 ```
 1. 源节点：应用查询 5738291046.phn
-2. 源节点：DNS hijacker 分配 fakeIP（如 198.18.0.5）
+2. 源节点：DNS hijacker 分配 fakeIP（从 mesh subnet）
 3. 源节点：forwarder 识别 .phn 后缀 → 查 claimedSubnets
    → 找到 nodeId=5738291046 → subnet=100.64.1.0/24, hop=1
 4. 源节点：走 mesh 路由到目标节点

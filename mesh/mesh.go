@@ -1133,14 +1133,17 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		})
 	}
 
-	// Build edge list: local peer connections + learned edges
+	// Build edge list: only local peer connections (active P2P connections)
 	edgeSet := make(map[string]FullTopologyEdge)
 
-	// Local direct peer connections
+	// Local direct peer connections - only add edges for peers with active Senders
 	for _, p := range peers {
 		peerID := p.NodeID()
-		key := edgeKey(m.nodeID, peerID)
-		edgeSet[key] = FullTopologyEdge{From: m.nodeID, To: peerID}
+		// Only add edge if peer has an active Sender (indicating active P2P connection)
+		if p.Sender != nil && peerID != "" {
+			key := edgeKey(m.nodeID, peerID)
+			edgeSet[key] = FullTopologyEdge{From: m.nodeID, To: peerID}
+		}
 	}
 
 	// Learned edges from ClaimedSubnets.Neighbors

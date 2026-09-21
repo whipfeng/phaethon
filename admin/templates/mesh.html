@@ -29,23 +29,23 @@
         <!-- Key Metrics -->
         <div class="mesh-metrics">
             <div class="mesh-metric">
-                <span class="mesh-metric-label">Node ID</span>
+                <span class="mesh-metric-label" data-i18n="mesh.nodeId">Node ID</span>
                 <span class="mesh-metric-value" id="mesh-nodeid">-</span>
             </div>
             <div class="mesh-metric">
-                <span class="mesh-metric-label">VIP</span>
+                <span class="mesh-metric-label" data-i18n="mesh.vip">VIP</span>
                 <span class="mesh-metric-value mesh-metric-mono" id="mesh-vip">-</span>
             </div>
             <div class="mesh-metric">
-                <span class="mesh-metric-label">Subnet</span>
+                <span class="mesh-metric-label" data-i18n="mesh.subnet">Subnet</span>
                 <span class="mesh-metric-value mesh-metric-mono" id="mesh-subnet">-</span>
             </div>
             <div class="mesh-metric">
-                <span class="mesh-metric-label">Peers</span>
+                <span class="mesh-metric-label" data-i18n="mesh.peers">Peers</span>
                 <span class="mesh-metric-value" id="mesh-peercount">-</span>
             </div>
             <div class="mesh-metric">
-                <span class="mesh-metric-label">Routes</span>
+                <span class="mesh-metric-label" data-i18n="mesh.routeCount">Routes</span>
                 <span class="mesh-metric-value" id="mesh-routecount">-</span>
             </div>
         </div>
@@ -59,7 +59,7 @@
                 <canvas id="mesh-topology-canvas" width="400" height="200"></canvas>
             </div>
             <table class="mesh-peer-table">
-                <thead><tr><th>Node</th><th>Subnet</th><th>VIP</th><th>Neighbors</th><th>Status</th><th>Last Seen</th><th>Admin</th></tr></thead>
+                <thead><tr><th data-i18n="mesh.node">Node</th><th data-i18n="mesh.subnet">Subnet</th><th data-i18n="mesh.vip">VIP</th><th data-i18n="mesh.neighbors">Neighbors</th><th data-i18n="dash.listenerStatus">Status</th><th data-i18n="mesh.lastSeen">Last Seen</th><th data-i18n="mesh.admin">Admin</th></tr></thead>
                 <tbody id="mesh-topology"></tbody>
             </table>
         </div>
@@ -70,7 +70,7 @@
                 <h4 data-i18n="mesh.routes">Routes</h4>
             </div>
             <table class="mesh-route-table">
-                <thead><tr><th>Prefix</th><th>Via</th><th>Status</th></tr></thead>
+                <thead><tr><th data-i18n="mesh.prefix">Prefix</th><th data-i18n="mesh.via">Via</th><th data-i18n="dash.listenerStatus">Status</th></tr></thead>
                 <tbody id="mesh-routes"></tbody>
             </table>
         </div>
@@ -81,7 +81,7 @@
                 <h4 data-i18n="mesh.domainRoutes">Domain Suffix Routes</h4>
             </div>
             <table class="mesh-route-table">
-                <thead><tr><th>Domain</th><th>Via</th><th>Status</th></tr></thead>
+                <thead><tr><th data-i18n="mesh.domain">Domain</th><th data-i18n="mesh.via">Via</th><th data-i18n="dash.listenerStatus">Status</th></tr></thead>
                 <tbody id="mesh-domain-routes"></tbody>
             </table>
         </div>

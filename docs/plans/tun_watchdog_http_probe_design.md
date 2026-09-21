@@ -282,7 +282,7 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 
 | 解析方式 | 第 1 次 | 第 2 次 | 第 3 次 | 结果 |
 |----------|---------|---------|---------|------|
-| `PreferGo: false` | 18ms | **683µs** | **683µs** | Fake-IP（198.18.0.5） |
+| `PreferGo: false` | 18ms | **683µs** | **683µs** | Fake-IP（mesh subnet） |
 | `PreferGo: true` | 3.5ms | 1.3ms | 1.2ms | 真实 IP（104.16.132.x） |
 
 - `PreferGo: false` 首次查询走 TUN hijacker（18ms），后续命中 Windows DNS 缓存（683µs），快 30 倍
@@ -301,8 +301,8 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 | 解析方式 | 结果 | 是否走 TUN DNS hijacker |
 |----------|------|------------------------|
 | `PreferGo: true` | 真实 IP（104.16.132.229） | ❌ 绕过 |
-| `PreferGo: false` | Fake-IP（198.18.0.8） | ✅ 正确 |
-| 显式查询 192.0.2.2 | Fake-IP（198.18.0.8） | ✅ 正确 |
+| `PreferGo: false` | Fake-IP（mesh subnet） | ✅ 正确 |
+| 显式查询 192.0.2.2 | Fake-IP（mesh subnet） | ✅ 正确 |
 
 #### 3.8.2 修正方案：系统 DNS（`PreferGo: false`）
 
@@ -456,8 +456,8 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 
 **验证结果**：
 
-- DNS 解析返回 Fake-IP（198.18.0.x），确认走 TUN DNS hijacker
-- TUN 引擎日志显示 `fake-ip 198.18.0.5 -> cp.cloudflare.com`，域名正确还原
+- DNS 解析返回 Fake-IP（mesh subnet），确认走 TUN DNS hijacker
+- TUN 引擎日志显示 `fake-ip <mesh-ip> -> cp.cloudflare.com`，域名正确还原
 - 看门狗连续运行 2+ 分钟，零失败
 - 代理场景测试：github.com 走 SOCKS5 代理（HTTP 200，~2-3s），baidu.com 走 DIRECT（HTTP 200，~0.2s）
 

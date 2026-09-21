@@ -5,33 +5,6 @@ import (
 	"testing"
 )
 
-func TestFakeIPPool_DefaultRange(t *testing.T) {
-	pool := NewFakeIPPool()
-
-	// Should allocate from 198.18.0.0/15
-	ip1 := pool.Lookup("example.com")
-	if ip1 == nil {
-		t.Fatal("Lookup returned nil")
-	}
-
-	// Check it's in the expected range
-	if !pool.Contains(ip1) {
-		t.Errorf("allocated IP %s not in pool range", ip1)
-	}
-
-	// Same domain should return same IP
-	ip2 := pool.Lookup("example.com")
-	if !ip1.Equal(ip2) {
-		t.Errorf("same domain returned different IPs: %s vs %s", ip1, ip2)
-	}
-
-	// Different domain should return different IP
-	ip3 := pool.Lookup("other.com")
-	if ip1.Equal(ip3) {
-		t.Errorf("different domains returned same IP: %s", ip1)
-	}
-}
-
 func TestFakeIPPool_CustomSubnet(t *testing.T) {
 	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
 	pool := NewFakeIPPoolWithSubnet(subnet, 3) // skip first 3 (.1=VIP, .2=hostIP, .3=GIP)
@@ -79,7 +52,8 @@ func TestFakeIPPool_CustomSubnet_SkipReserved(t *testing.T) {
 }
 
 func TestFakeIPPool_LookupDomain(t *testing.T) {
-	pool := NewFakeIPPool()
+	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
+	pool := NewFakeIPPoolWithSubnet(subnet, 3)
 
 	ip := pool.Lookup("example.com")
 	domain := pool.LookupDomain(ip.String())
@@ -95,7 +69,8 @@ func TestFakeIPPool_LookupDomain(t *testing.T) {
 }
 
 func TestFakeIPPool_Release(t *testing.T) {
-	pool := NewFakeIPPool()
+	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
+	pool := NewFakeIPPoolWithSubnet(subnet, 3)
 
 	ip := pool.Lookup("example.com")
 	pool.Release("example.com")

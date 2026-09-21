@@ -584,17 +584,3 @@ func ParseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
 	}
 	return net.IP(resp[off : off+4]), ttl
 }
-
-// IsFakeIP reports whether the given IP string is in the Fake-IP range
-// 198.18.0.0/15.
-func IsFakeIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return false
-	}
-	return ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19
-}

@@ -877,12 +877,12 @@ func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
 // ========== Resolver ==========
 
 type Resolver struct {
-	Name    string `yaml:"name"`
+	Name    string `yaml:"name" json:"name"`
 	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	SrcHost string `yaml:"src-host"`
-	SrcPort int    `yaml:"src-port"`
-	DstHost string `yaml:"dst-host"`
-	DstPort int    `yaml:"dst-port"`
+	SrcHost string `yaml:"src-host" json:"src-host"`
+	SrcPort int    `yaml:"src-port" json:"src-port"`
+	DstHost string `yaml:"dst-host" json:"dst-host"`
+	DstPort int    `yaml:"dst-port" json:"dst-port"`
 }
 
 // IsEnabled reports whether the resolver is enabled. Omitted or nil means enabled.

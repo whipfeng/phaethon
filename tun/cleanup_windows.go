@@ -33,18 +33,6 @@ func CleanupResidual() {
 			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 		}
 
-		// Delete Fake-IP pool route (198.18.0.0/15) with on-link next hop.
-		if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
-			var fwdRow mibIpForwardRow2
-			fwdRow.init()
-			fwdRow.setInterfaceLuid(luid)
-			fwdRow.setInterfaceIndex(index)
-			fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
-			fwdRow.setNextHop(net.IPv4zero)
-			fwdRow.setMetric(1)
-			procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-		}
-
 		// Sweep the full route table for residual TUN routes that may not match
 		// the specific combinations above (e.g. persistent routes detached from
 		// the adapter LUID).
@@ -95,7 +83,7 @@ func CleanupResidual() {
 
 	// Reset physical interface DNS to DHCP as a crash-recovery best effort.
 	// The original DNS backup is only available during normal Stop(); after a
-	// crash we restore DHCP so the machine does not remain stuck on 198.18.0.1.
+	// crash we restore DHCP so the machine does not remain stuck on the TUN DNS IP.
 	if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
 		if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
 			if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {

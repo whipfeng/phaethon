@@ -72,7 +72,7 @@ tun:
   enabled: true
   name: "phaethon-tun"
   mtu: 1500
-  address: 198.18.0.1/16
+  address: <mesh-derived-hostIP>/16  # 从 mesh subnet 派生
   dns-hijack: true
 ```
 

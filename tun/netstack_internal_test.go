@@ -88,7 +88,7 @@ func TestNetstackLoopback(t *testing.T) {
 	defer udpEP.Close()
 
 	// --- Test 1: TCP dial to local fakeIP (should go through loopback → forwarder) ---
-	t.Log("=== Test 1: TCP dial to local fakeIP 198.18.0.4:8080 ===")
+	t.Log("=== Test 1: TCP dial to local fakeIP ===")
 	go func() {
 		conn, err := gonet.DialTCP(s, tcpip.FullAddress{
 			NIC:  loNICID,
@@ -125,7 +125,7 @@ func TestNetstackLoopback(t *testing.T) {
 	}
 
 	// --- Test 2: UDP dial to dnsAddr:53 (should go through loopback → hijacker) ---
-	t.Log("=== Test 2: UDP dial to dnsAddr 198.18.0.3:53 ===")
+	t.Log("=== Test 2: UDP dial to dnsAddr ===")
 	udpConn, udpDialErr := gonet.DialUDP(s, nil, &tcpip.FullAddress{
 		Addr: dnsAddr,
 		Port: 53,

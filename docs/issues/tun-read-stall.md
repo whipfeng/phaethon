@@ -9,7 +9,7 @@ TUN 模式启动后约 4-30 秒，`Wintun session.ReceivePacket()` 永久阻塞�
 1. `tun counters` 日志显示 `read` 计数器停止增长，`write` 计数器继续增长
 2. 进程没有崩溃，没有 panic，没有 read error
 3. TUN 接口状态正常（Up, Connected）
-4. 路由表正常（0.0.0.0/1 + 128.0.0.0/1 via TUN, 198.18.0.0/15 via TUN）
+4. 路由表正常（0.0.0.0/1 + 128.0.0.0/1 via TUN, mesh subnet via TUN）
 5. `device.Write()` (SendPacket) 仍然正常工作
 6. curl/ping/浏览器全部超时
 
@@ -25,13 +25,13 @@ TUN 模式启动后约 4-30 秒，`Wintun session.ReceivePacket()` 永久阻塞�
 ```
 # 正常工作（启动后 0-4 秒）
 [15:51:16] tun engine started on phaethontun
-[15:51:16] tun read FAKE: 192.0.2.2 -> 198.18.0.1 (proto=6 len=52 cnt=33)
-[15:51:17] tun read FAKE: 192.0.2.2 -> 198.18.0.4 (proto=6 len=52 cnt=52)
-[15:51:18] tun read FAKE: 192.0.2.2 -> 198.18.0.5 (proto=6 len=52 cnt=96)
-[15:51:19] tun read FAKE: 192.0.2.2 -> 198.18.0.8 (proto=6 len=52 cnt=119)
+[15:51:16] tun read FAKE: <dnsAddr> -> <fakeIP1> (proto=6 len=52 cnt=33)
+[15:51:17] tun read FAKE: <dnsAddr> -> <fakeIP2> (proto=6 len=52 cnt=52)
+[15:51:18] tun read FAKE: <dnsAddr> -> <fakeIP3> (proto=6 len=52 cnt=96)
+[15:51:19] tun read FAKE: <dnsAddr> -> <fakeIP4> (proto=6 len=52 cnt=119)
 
 # 最后一个 read 包
-[15:51:20] tun read FAKE: 192.0.2.2 -> 198.18.0.8 (proto=17 len=1278 cnt=181)
+[15:51:20] tun read FAKE: <dnsAddr> -> <fakeIP4> (proto=17 len=1278 cnt=181)
 
 # read 卡住，write 继续
 [15:51:20] tun counters: read=181 write=44
@@ -59,7 +59,7 @@ readLoop() [engine.go:511]
 
 ## 已排除的原因
 
-1. **不是路由问题**：路由表正常，TUN 接口 Up，split-tunnel 路由 (0.0.0.0/1 + 128.0.0.0/1) 和 Fake-IP 路由 (198.18.0.0/15) 都存在
+1. **不是路由问题**：路由表正常，TUN 接口 Up，split-tunnel 路由 (0.0.0.0/1 + 128.0.0.0/1) 和 Fake-IP 路由 (mesh subnet) 都存在
 2. **不是进程崩溃**：进程正常运行，没有 panic/fatal/deadlock
 3. **不是 read error**：ReceivePacket 没有返回错误，只是阻塞
 4. **不是 Write 端问题**：SendPacket 正常工作，write 计数器持续增长

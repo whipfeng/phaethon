@@ -152,7 +152,7 @@ DNSHijacker 是内嵌在 gVisor netstack 里的 DNS 服务器，绑定专用 IP 
 路由到 TUN → gVisor netstack
     │
     ▼
-DNSHijacker (192.0.2.3:53) 返回 Fake-IP (198.18.x.x)
+DNSHijacker (192.0.2.3:53) 返回 Fake-IP (从 mesh subnet 分配)
 ```
 
 #### Windows TUN 模式验证结果

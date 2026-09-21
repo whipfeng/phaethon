@@ -691,6 +691,70 @@
             'setup.authDisabled': '未启用',
             'setup.passwordMismatch': '两次输入的密码不一致',
             'toast.enterCredentials': '请输入用户名和密码',
+
+            // ===== Common =====
+            'common.confirm': '确认',
+            'common.cancel': '取消',
+            'common.save': '保存',
+            'common.delete': '删除',
+            'common.edit': '编辑',
+            'common.add': '添加',
+            'common.loading': '加载中...',
+            'common.confirmDelete': '确认删除？',
+            'common.saved': '保存成功',
+            'common.failed': '操作失败',
+            'common.selectAtLeastOne': '请至少选择一个项目',
+
+            // ===== Time =====
+            'time.justNow': '刚刚',
+            'time.secondsAgo': '{}秒前',
+            'time.minutesAgo': '{}分钟前',
+            'time.hoursAgo': '{}小时前',
+            'time.daysAgo': '{}天前',
+
+            // ===== Mesh (additional) =====
+            'mesh.local': '本地',
+            'mesh.direct': '直连',
+            'mesh.relay': '中继',
+            'mesh.current': '当前',
+            'mesh.open': '打开',
+            'mesh.noNodes': '暂无节点',
+            'mesh.noRoutes': '暂无路由',
+            'mesh.noDomainRoutes': '暂无域名路由',
+            'mesh.loadFailed': '加载 Mesh 状态失败',
+            'mesh.gossipTriggered': '已触发广播',
+            'mesh.gossipFailed': '广播失败',
+            'mesh.gossipError': '广播错误: ',
+            'mesh.node': '节点',
+            'mesh.subnet': '子网',
+            'mesh.vip': 'VIP',
+            'mesh.neighbors': '邻居',
+            'mesh.lastSeen': '最后活跃',
+            'mesh.admin': '管理',
+            'mesh.prefix': '前缀',
+            'mesh.via': '经由',
+            'mesh.domain': '域名',
+
+            // ===== Logs (additional) =====
+            'logs.loading': '加载中...',
+            'logs.loadFailed': '加载失败: ',
+            'logs.filter': '过滤',
+
+            // ===== Dashboard (additional) =====
+            'dash.confirmReload': '确认重载配置？',
+            'dash.loadSecurityFailed': '加载安全状态失败',
+            'dash.loadTunFailed': '加载 TUN 状态失败',
+
+            // ===== Connections (additional) =====
+            'conn.protocol': '协议',
+            'conn.inbound': '来源',
+            'conn.source': '源地址',
+            'conn.destination': '目标地址',
+            'conn.rule': '规则',
+            'conn.duration': '时长',
+
+            // ===== Proxy (additional) =====
+            'proxy.copy': '复制',
         },
         en: {
             // ===== Layout / Navigation =====
@@ -1378,6 +1442,69 @@
             'setup.authDisabled': 'Disabled',
             'setup.passwordMismatch': 'Passwords do not match',
             'toast.enterCredentials': 'Please enter username and password',
+
+            // ===== Common (additional) =====
+            'common.confirm': 'Confirm',
+            'common.cancel': 'Cancel',
+            'common.save': 'Save',
+            'common.delete': 'Delete',
+            'common.edit': 'Edit',
+            'common.add': 'Add',
+            'common.confirmDelete': 'Confirm delete?',
+            'common.saved': 'Saved successfully',
+            'common.failed': 'Operation failed',
+            'common.selectAtLeastOne': 'Please select at least one item',
+
+            // ===== Time =====
+            'time.justNow': 'just now',
+            'time.secondsAgo': '{}s ago',
+            'time.minutesAgo': '{}m ago',
+            'time.hoursAgo': '{}h ago',
+            'time.daysAgo': '{}d ago',
+
+            // ===== Mesh (additional) =====
+            'mesh.local': 'Local',
+            'mesh.direct': 'Direct',
+            'mesh.relay': 'Relay',
+            'mesh.current': 'Current',
+            'mesh.open': 'Open',
+            'mesh.noNodes': 'No nodes',
+            'mesh.noRoutes': 'No routes',
+            'mesh.noDomainRoutes': 'No domain routes',
+            'mesh.loadFailed': 'Failed to load mesh status',
+            'mesh.gossipTriggered': 'Gossip triggered',
+            'mesh.gossipFailed': 'Gossip failed',
+            'mesh.gossipError': 'Gossip error: ',
+            'mesh.node': 'Node',
+            'mesh.subnet': 'Subnet',
+            'mesh.vip': 'VIP',
+            'mesh.neighbors': 'Neighbors',
+            'mesh.lastSeen': 'Last Seen',
+            'mesh.admin': 'Admin',
+            'mesh.prefix': 'Prefix',
+            'mesh.via': 'Via',
+            'mesh.domain': 'Domain',
+
+            // ===== Logs (additional) =====
+            'logs.loading': 'Loading...',
+            'logs.loadFailed': 'Failed to load: ',
+            'logs.filter': 'Filter',
+
+            // ===== Dashboard (additional) =====
+            'dash.confirmReload': 'Reload configuration?',
+            'dash.loadSecurityFailed': 'Failed to load security status',
+            'dash.loadTunFailed': 'Failed to load TUN status',
+
+            // ===== Connections (additional) =====
+            'conn.protocol': 'Protocol',
+            'conn.inbound': 'Inbound',
+            'conn.source': 'Source',
+            'conn.destination': 'Destination',
+            'conn.rule': 'Rule',
+            'conn.duration': 'Duration',
+
+            // ===== Proxy (additional) =====
+            'proxy.copy': 'Copy',
         }
     };
 
@@ -1417,7 +1544,7 @@
                     el.textContent = text;
                 } else {
                     // Only replace text nodes, preserve icons/emoji
-                    const icon = el.textContent.match(/^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡]+\s*/);
+                    const icon = el.textContent.match(/^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡🔷📜🗺️↗️🧙]+\s*/);
                     if (icon) {
                         el.childNodes[0].textContent = icon[0] + text;
                     } else {

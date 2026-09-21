@@ -60,8 +60,8 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// tunnel; Windows' strong-host model drops packets whose source/destination
 	// IPs are not assigned to the adapter. Weak-host allows the Fake-IP scheme to
 	// work: outgoing SYNs have source = mesh-derived hostIP (local) but destination
-	// in 198.18.x.x (not local), and incoming replies have destination = hostIP
-	// (local) but source 198.18.x.x (not local).
+	// in mesh subnet (not local), and incoming replies have destination = hostIP
+	// (local) but source from mesh subnet (not local).
 	if err := ensureWeakHostEnabled(r.devName); err != nil {
 		util.LogWarn("tun: enable weak-host on %s fail: %v", r.devName, err)
 	}
@@ -313,18 +313,6 @@ func (r *RouteManager) platformTeardown() {
 		fwdRow.setInterfaceLuid(luid)
 		fwdRow.setInterfaceIndex(index)
 		fwdRow.setDestinationPrefix(prefix.ip, prefix.len)
-		fwdRow.setNextHop(net.IPv4zero)
-		fwdRow.setMetric(1)
-		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
-	}
-
-	// Delete the Fake-IP pool route (on-link variant).
-	if _, fakeIPNet, err := net.ParseCIDR(mesh.FakeIPPoolCIDR); err == nil {
-		var fwdRow mibIpForwardRow2
-		fwdRow.init()
-		fwdRow.setInterfaceLuid(luid)
-		fwdRow.setInterfaceIndex(index)
-		fwdRow.setDestinationPrefix(fakeIPNet.IP, uint8(prefixLenFromMask(fakeIPNet.Mask)))
 		fwdRow.setNextHop(net.IPv4zero)
 		fwdRow.setMetric(1)
 		procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))

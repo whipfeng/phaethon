@@ -340,7 +340,11 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	util.LogDebug("[DNS] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
 
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
-	conn, err := gonet.DialUDP(h.ns, nil, &remoteAddr, ipv4.ProtocolNumber)
+	// Pin the source to our own GIP: gVisor picks the source by longest-prefix
+	// match over the NIC's primary address list, so a stray remote-subnet
+	// address in that list would beat the GIP and get replies black-holed.
+	localAddr := tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr}
+	conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {
 		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
 	}
@@ -357,7 +361,7 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	resp := make([]byte, 512)
 	n, err := conn.Read(resp)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read response: %v", err)
+		return nil, 0, fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, conn.LocalAddr(), err)
 	}
 
 	respIP, ttl := ParseDNSResponseIP(resp[:n])

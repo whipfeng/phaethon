@@ -551,41 +551,66 @@ func (m *MeshManager) Stop() {
 	close(m.closeCh)
 }
 
-// ResolveDomainSubnet looks up a domain in the domain trie and returns the
-// Fake-IP subnet of the remote node that owns the matching suffix.
-// Returns nil if the domain is local (this node owns the suffix) or no match.
-func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
-	// Check static domain suffixes first
+// ResolveDomainSubnet looks up a domain in static and dynamic domain routes.
+// Returns (subnet, needsFail):
+//   - subnet != nil: matched a route, forward to remote
+//   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
+//   - subnet == nil && needsFail == false: no match, fallback to local pool
+func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
+	d := strings.ToLower(domain)
+	
+	// Special handling for .phn domains (auto-generated for each node)
+	// These are treated as static routes but don't need to be stored in staticDomainSuffixes
+	if strings.HasSuffix(d, "."+MeshDomainSuffix) || d == MeshDomainSuffix {
+		// Extract nodeID from domain (e.g., "vm.phn" → "vm")
+		var nodeID string
+		if d == MeshDomainSuffix {
+			nodeID = ""  // bare "phn" is invalid
+		} else {
+			nodeID = strings.TrimSuffix(d, "."+MeshDomainSuffix)
+		}
+		if nodeID != "" {
+			util.LogDebug("[MESH] ResolveDomainSubnet(%s): .phn domain, nodeID=%s", domain, nodeID)
+			peer := m.topology.GetPeer(nodeID)
+			if peer != nil && peer.Subnet != nil {
+				util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, nodeID, peer.Subnet)
+				return peer.Subnet, false  // .phn match, node ready → forward
+			}
+			// Node not found in topology yet
+			util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not found in topology", domain, nodeID)
+			return nil, true  // .phn match, node not ready → SERVFAIL
+		}
+	}
+	
+	// Check static domain suffixes (high priority)
 	m.mu.RLock()
 	staticSuffixes := m.staticDomainSuffixes
 	m.mu.RUnlock()
 	
 	for _, suffix := range staticSuffixes {
 		s := strings.ToLower(suffix.Suffix)
-		d := strings.ToLower(domain)
 		if d == s || strings.HasSuffix(d, "."+s) {
 			// Matched static domain suffix, get target node's subnet
 			targetNodeID := suffix.Via
 			util.LogDebug("[MESH] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
 			
-			// Get target node's subnet from topology
-			for _, peer := range m.topology.GetAllPeers() {
-				if peer.NodeID() == targetNodeID && peer.Subnet != nil {
-					util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
-					return peer.Subnet
-				}
+			// Get target node from topology (returns whole peer object)
+			peer := m.topology.GetPeer(targetNodeID)
+			if peer != nil && peer.Subnet != nil {
+				util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
+				return peer.Subnet, false  // Static match, node ready → forward
 			}
-			// Node not found in topology yet, return nil
+			// Node not found in topology yet, return needsFail=true
 			util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not found in topology", domain, targetNodeID)
-			return nil
+			return nil, true  // Static match, node not ready → SERVFAIL
 		}
 	}
 	
-	// Fall back to advertised domain trie
+	// Fall back to advertised domain trie (low priority, dynamic routes)
 	rt := m.getRouteTable()
 	trie := rt.domainTrie
 	if trie == nil {
-		return nil
+		return nil, false
 	}
 	peers, subnet, suffixLen := trie.Lookup(domain)
 	var peerIDs []string
@@ -598,9 +623,9 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) *net.IPNet {
 	}
 	util.LogDebug("[MESH] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
 	if suffixLen == 0 || len(peers) == 0 {
-		return nil // no match or local entry
+		return nil, false // no match → fallback to local pool
 	}
-	return subnet
+	return subnet, false  // Dynamic match, node must exist → forward
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
@@ -1501,22 +1526,9 @@ func (m *MeshManager) recomputeRoutes() {
 			}
 		}
 	}
-	for nid, entry := range bestNodes {
-		domain := NodeDomain(nid)
-		var senderStr string
-		if entry.sender == nil {
-			senderStr = "self"
-		} else {
-			senderStr = entry.sender.GetNodeID()
-		}
-		var subnetStr string
-		if entry.subnet != nil {
-			subnetStr = entry.subnet.String()
-		}
-		util.LogDebug("[MESH] auto-insert: %s → sender=%s subnet=%s hop=%d", domain, senderStr, subnetStr, entry.hop)
-		trie.Insert(domain, entry.sender, entry.subnet, entry.hop)
-	}
-
+	// Note: .phn domains are no longer inserted into domainTrie
+	// They are handled specially in ResolveDomainSubnet() as static routes
+	
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,

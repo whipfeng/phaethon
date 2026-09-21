@@ -1,8 +1,8 @@
 # Mesh 网络改进设计
 
-> 版本: v0.15.0
-> 日期: 2026-09-18
-> 状态: IMPLEMENTED
+> 版本: v0.16.0
+> 日期: 2026-09-21
+> 状态: IMPLEMENTING
 > 负责人: Phaethon Dev
 > 依赖: [mesh_multi_vip_design.md](mesh_multi_vip_design.md) v0.4.1
 
@@ -26,6 +26,7 @@
 | v0.14.0 | 2026-09-17 | 连接日志源地址还原：TUN 旁路网关 NAT 反查、Mode B 入口追踪 | Qoder |
 | v0.14.1 | 2026-09-17 | Mode B 注册时序修复：MeshDial 内部完成注册，避免 forwarder 竞态 | Qoder |
 | v0.15.0 | 2026-09-18 | Mode B mapping 上下文透传：MeshDial 注册 mappingName，TUN forwarder 用原始 mapping 做规则匹配 | Qoder |
+| v0.16.0 | 2026-09-21 | 域名路由收敛优化：.phn 域名改为静态路由、静态/动态域名分离处理、节点未就绪返回 SERVFAIL | Qoder |
 
 ## 1. 背景与目标
 
@@ -1479,3 +1480,143 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 - [x] JF 查询 qg.phn → 100.0.0.13 (remote, forwarded to QG ✓)
 - [x] JF SOCKS5 通过 vm.phn 访问 VM 服务（SOCKS5 request granted, TCP via MESH ✓）
 - [x] 用户自定义后缀（httpbin.org）仍正常工作（JF SOCKS5 → httpbin.org/get ✓）
+
+## 20. v0.16.0: 域名路由收敛优化
+
+> 日期: 2026-09-21
+> 状态: IMPLEMENTING
+
+### 20.1 问题背景
+
+**当前问题：**
+1. `.phn` 域名（如 `vm.phn`, `jf.phn`）通过 gossip 动态学习
+2. 节点重启后需要等待 gossip 收敛（25-75 秒）才能解析 `.phn` 域名
+3. 收敛前 DNS 查询 fallback 到本地 pool，分配错误的 fakeIP
+4. 用户访问 `ws.vm.phn:22` 等服务时连接失败
+
+**根本原因：**
+- `.phn` 域名是确定性的（每个节点都有 `<nodeID>.phn`），但被当作动态域名处理
+- 动态域名路由在节点未连接时 fallback 到本地 pool，导致错误解析
+
+### 20.2 设计方案
+
+**核心思路：**
+1. `.phn` 域名改为静态路由，不通过 gossip 传播
+2. 静态域名和动态域名分离处理
+3. 静态域名匹配但节点未就绪时返回 SERVFAIL，不 fallback
+
+**数据结构简化：**
+
+```go
+// 静态域名路由（配置 + 自动学习）
+type StaticDomainSuffix struct {
+    Suffix string  // "vm.phn", "test.via.jf.local"
+    Via    string  // nodeID: "vm", "jf"
+}
+
+// Topology 中的 Peer 对象
+type PeerInfo struct {
+    Sender PeerSender
+    Subnet *net.IPNet  // 只要 Peer 存在，Subnet 必有值
+    Hop    int
+    DomainSuffixes []DomainSuffixEntry
+}
+```
+
+**解析优先级：**
+
+```
+查询 domain:
+  ↓
+1. 静态域名路由（高优先级）
+   - 配置的 static-domain-suffixes
+   - 自动学习的 <nodeID>.phn
+   ↓ 匹配到
+   查 topology 找节点
+   ↓ 找到 → 转发
+   ↓ 找不到 → SERVFAIL（不 fallback）
+   
+  ↓ 没匹配到
+2. 动态域名路由（低优先级）
+   - gossip 学习的 custom domain suffixes
+   ↓ 匹配到 → 节点必存在（domainTrie 从 topology 构建）
+   转发到远端
+   
+  ↓ 没匹配到
+3. 本地 pool（默认）
+   - 分配本地 fakeIP
+```
+
+**解析逻辑：**
+
+```go
+func ResolveDomainSubnet(domain string) (subnet *net.IPNet, needsFail bool) {
+    // 1. 先查静态路由
+    for _, entry := range staticSuffixes {
+        if matchSuffix(domain, entry.Suffix) {
+            peer := topology.GetPeer(entry.Via)
+            if peer != nil {
+                return peer.Subnet, false  // 静态匹配，找到节点 → 转发
+            }
+            return nil, true  // 静态匹配，节点未连接 → SERVFAIL
+        }
+    }
+    
+    // 2. 再查动态路由（匹配到就一定有节点）
+    peer, subnet := domainTrie.Lookup(domain)
+    if peer != nil {
+        return subnet, false  // 动态匹配，节点必存在 → 转发
+    }
+    
+    // 3. 都没匹配
+    return nil, false  // 不匹配 → fallback
+}
+```
+
+**DNS 处理：**
+
+```go
+subnet, needsFail := ResolveDomainSubnet(domain)
+
+if subnet != nil {
+    // 匹配到路由（静态或动态），转发
+    forwardToRemote(subnet, packet)
+} else if needsFail {
+    // 静态匹配但节点未就绪 → SERVFAIL
+    return SERVFAIL
+} else {
+    // 没匹配到任何路由 → fallback 到本地 pool
+    fakeIP := localPool.Lookup(domain)
+    return fakeIP
+}
+```
+
+### 20.3 实现要点
+
+1. **自动添加 `.phn` 到静态路由：**
+   - 每个节点启动时，自动把自己的 `<nodeID>.phn` 加入静态路由表
+   - P2P 学习到对端节点后，也自动把 `<nodeID>.phn` 加入静态路由表
+
+2. **Topology 查找返回整个 peer 对象：**
+   - `topology.GetPeer(nodeID)` 返回完整 PeerInfo
+   - Peer 存在 ⇒ Subnet 必有值（不变量）
+
+3. **Gossip 简化：**
+   - 不再通告 `.phn` 域名（每个节点自动生成）
+   - 只通告 custom domain suffixes（用户配置的）
+
+4. **版本号升级：**
+   - 通告版本号从 v0.15.0 升级到 v0.16.0
+   - 确保新旧版本兼容性问题被检测
+
+### 20.4 任务清单
+
+- [ ] 修改 `ResolveDomainSubnet` 返回 `(subnet, needsFail)`
+- [ ] 修改 `processQuery` 根据 `needsFail` 决定返回 SERVFAIL 还是 fallback
+- [ ] 自动为所有已知节点生成 `.phn` 静态路由
+- [ ] 移除 `.phn` 域名的 gossip 传播
+- [ ] 升级通告版本号
+- [ ] 测试：重启后 `.phn` 域名解析
+- [ ] 测试：节点未连接时返回 SERVFAIL
+- [ ] 测试：动态域名 fallback 正常
+

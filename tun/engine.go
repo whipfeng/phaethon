@@ -202,8 +202,11 @@ func (e *Engine) SetAdminHandler(h AdminHandler) {
 }
 
 // SetDNSDomainResolver registers a callback on the DNS hijacker that returns
-// the remote Fake-IP subnet for a domain (nil = local or no match).
-func (e *Engine) SetDNSDomainResolver(resolver func(domain string) *net.IPNet) {
+// the remote Fake-IP subnet for a domain. Returns (subnet, needsFail):
+//   - subnet != nil: matched a route, forward to remote
+//   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
+//   - subnet == nil && needsFail == false: no match, fallback to local pool
+func (e *Engine) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
 	if e.dnsHijack != nil {
 		e.dnsHijack.SetDomainResolver(resolver)
 		util.LogDebug("tun: DNS domain resolver set")

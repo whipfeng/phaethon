@@ -227,6 +227,19 @@ func (t *Topology) GetAllPeers() []*PeerInfo {
 	return result
 }
 
+// GetPeer returns a peer by nodeID, or nil if not found.
+func (t *Topology) GetPeer(nodeID string) *PeerInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, peer := range t.peers {
+		if peer.NodeID() == nodeID {
+			return peer
+		}
+	}
+	return nil
+}
+
 // DeriveVIPFromSubnet computes the .1 VIP address from a subnet.
 func DeriveVIPFromSubnet(subnet *net.IPNet) net.IP {
 	if subnet == nil {

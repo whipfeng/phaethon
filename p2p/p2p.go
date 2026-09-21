@@ -22,7 +22,9 @@ import (
 // Version 3: Gossip protocol redesigned - GossipInfo removed NodeID/Subnet fields,
 // Routes/DomainSuffixes now reference nodeID, ClaimedSubnets added Neighbors field,
 // mutual neighbor validation added to prevent stale claim wandering.
-const P2PProtocolVersion = 3
+// Version 4: DNS resolution optimized - .phn domains treated as static routes (not gossiped),
+// ResolveDomainSubnet returns (subnet, needsFail) for proper SERVFAIL handling.
+const P2PProtocolVersion = 4
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {

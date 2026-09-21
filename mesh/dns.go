@@ -31,7 +31,7 @@ type DNSHijacker struct {
 	closeCh chan struct{}
 
 	// Cross-node DNS forwarding
-	resolveDomainSubnet func(domain string) *net.IPNet // nil = local or no match
+	resolveDomainSubnet func(domain string) (*net.IPNet, bool) // returns (subnet, needsFail)
 	cache               *DNSCache
 
 	// Async query processing
@@ -109,8 +109,11 @@ func (h *DNSHijacker) IsBound() bool {
 }
 
 // SetDomainResolver registers a callback that returns the remote Fake-IP subnet
-// for a domain. Returns nil for local domains or no match.
-func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) *net.IPNet) {
+// for a domain. Returns (subnet, needsFail):
+//   - subnet != nil: matched a route, forward to remote
+//   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
+//   - subnet == nil && needsFail == false: no match, fallback to local pool
+func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
 	h.resolveDomainSubnet = resolver
 }
 
@@ -264,7 +267,9 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 
 	// Check if domain belongs to a remote node
 	if h.resolveDomainSubnet != nil {
-		if remoteSubnet := h.resolveDomainSubnet(domain); remoteSubnet != nil {
+		remoteSubnet, needsFail := h.resolveDomainSubnet(domain)
+		if remoteSubnet != nil {
+			// Matched a route (static or dynamic), forward to remote
 			remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
 			if err != nil {
 				util.LogWarn("tun dns: forward %s to remote failed: %v", domain, err)
@@ -287,7 +292,18 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 				}
 			}
 			return
+		} else if needsFail {
+			// Static match but node not ready → SERVFAIL
+			util.LogWarn("tun dns: %s matched static route but node not ready, returning SERVFAIL", domain)
+			resp := buildDNSErrorResponse(packet)
+			if resp != nil {
+				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+					util.LogWarn("tun dns: write SERVFAIL for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+				}
+			}
+			return
 		}
+		// else: no match, fallback to local pool
 	}
 
 	// Local pool resolution (default)

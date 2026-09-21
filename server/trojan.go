@@ -176,8 +176,8 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 	udpPort := udpLn.LocalAddr().(*net.UDPAddr).Port
 	util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP ASSOCIATE started (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
-	connlog.TrackActive(connID, "Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "", "", 0, nil)
-	defer connlog.RemoveActive(connID)
+	rec := connlog.Start("Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "")
+	defer rec.Close()
 
 	closeAll := func() {
 		closeOnce.Do(func() {
@@ -316,12 +316,12 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 			return
 		}
 
-		req := config.NewConnectRequest(dstAddr, dstPort)
-		req = s.RuleConf.Resolving(req)
-		proxy, _ := s.RuleConf.Match(req, s.Mapping)
+		req, proxy, matchResult := s.RuleConf.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), s.Mapping)
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}
+		// Session-level record: idempotent, so the first resolved target wins.
+		rec.Resolve(req.DstAddr, req.DstPort, matchResult).Establish(connID, proxy, proxy.IsDirect())
 
 		targetKey := fmt.Sprintf("%s:%d", req.DstAddr, req.DstPort)
 		if seenTargets.Put(targetKey) {

@@ -879,10 +879,30 @@ func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
 type Resolver struct {
 	Name    string `yaml:"name" json:"name"`
 	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Proto restricts the resolver to one protocol: "tcp", "udp", or ""
+	// (empty) to match both.
+	Proto   string `yaml:"proto,omitempty" json:"proto,omitempty"`
 	SrcHost string `yaml:"src-host" json:"src-host"`
 	SrcPort int    `yaml:"src-port" json:"src-port"`
 	DstHost string `yaml:"dst-host" json:"dst-host"`
 	DstPort int    `yaml:"dst-port" json:"dst-port"`
+	// SrcRelative treats SrcHost as a single label and matches
+	// "<SrcHost>.<local node-id>.phn" instead, so the config survives local
+	// node-id changes. Requires the mesh section with node-id set.
+	SrcRelative bool `yaml:"src-relative,omitempty" json:"src-relative,omitempty"`
+
+	// srcFull is the expanded match domain for SrcRelative resolvers,
+	// recomputed on every Init().
+	srcFull string
+}
+
+// EffectiveSrcHost returns the host this resolver matches: the expanded
+// "<label>.<node-id>.phn" domain when SrcRelative is set, otherwise SrcHost.
+func (r *Resolver) EffectiveSrcHost() string {
+	if r.SrcRelative && r.srcFull != "" {
+		return r.srcFull
+	}
+	return r.SrcHost
 }
 
 // IsEnabled reports whether the resolver is enabled. Omitted or nil means enabled.
@@ -941,10 +961,14 @@ type AddrRequest struct {
 	DstPort int
 	// CmdType: "CONNECT" or "BIND"
 	CmdType string
+	// Proto: "tcp" or "udp". Empty means unspecified (proto-filtered
+	// resolvers are skipped only when both sides are known and differ).
+	Proto string
 }
 
-func NewConnectRequest(dstAddr string, dstPort int) *AddrRequest {
-	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "CONNECT"}
+// NewConnectRequest creates a CONNECT request. proto is "tcp" or "udp".
+func NewConnectRequest(proto, dstAddr string, dstPort int) *AddrRequest {
+	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "CONNECT", Proto: proto}
 }
 
 func NewBindRequest(dstAddr string, dstPort int) *AddrRequest {
@@ -1637,6 +1661,35 @@ func (c *RuleConfiguration) Init() error {
 		c.SubscriptionNames[sub.Name] = sub
 	}
 
+	// Validate and precompute resolvers. Init() may run repeatedly on the
+	// same object (admin edits), so srcFull is always rebuilt from the
+	// SrcHost label instead of mutated in place.
+	nodeID := ""
+	if c.Mesh != nil {
+		nodeID = strings.TrimSpace(c.Mesh.NodeID)
+	}
+	for _, resolver := range c.Resolvers {
+		if resolver == nil {
+			continue
+		}
+		resolver.Proto = strings.ToLower(strings.TrimSpace(resolver.Proto))
+		switch resolver.Proto {
+		case "", "tcp", "udp":
+		default:
+			return fmt.Errorf("resolver %s: invalid proto %q (must be tcp or udp)", resolver.Name, resolver.Proto)
+		}
+		resolver.srcFull = ""
+		if resolver.SrcRelative {
+			if strings.TrimSpace(resolver.SrcHost) == "" {
+				return fmt.Errorf("resolver %s: src-relative requires src-host", resolver.Name)
+			}
+			if nodeID == "" {
+				return fmt.Errorf("resolver %s: src-relative requires mesh node-id", resolver.Name)
+			}
+			resolver.srcFull = resolver.SrcHost + "." + nodeID + ".phn"
+		}
+	}
+
 	// Register proxy groups FIRST so setNext can resolve proxy chains
 	// that reference group names (e.g. proxy: MGMS_NET).
 	for _, group := range c.ProxyGroups {
@@ -1927,15 +1980,33 @@ func (c *RuleConfiguration) Resolving(req *AddrRequest) *AddrRequest {
 		if !resolver.IsEnabled() {
 			continue
 		}
-		if req.DstAddr == resolver.SrcHost && req.DstPort == resolver.SrcPort {
-			return &AddrRequest{
-				DstAddr: resolver.DstHost,
-				DstPort: resolver.DstPort,
-				CmdType: req.CmdType,
-			}
+		if resolver.Proto != "" && req.Proto != "" && resolver.Proto != req.Proto {
+			continue
+		}
+		if req.DstAddr != resolver.EffectiveSrcHost() || req.DstPort != resolver.SrcPort {
+			continue
+		}
+		return &AddrRequest{
+			DstAddr: resolver.DstHost,
+			DstPort: resolver.DstPort,
+			CmdType: req.CmdType,
+			Proto:   req.Proto,
 		}
 	}
 	return req
+}
+
+// ResolveMatch applies resolver rewrite then rule matching in one step.
+func (c *RuleConfiguration) ResolveMatch(req *AddrRequest, mapping *Mapping) (*AddrRequest, *Proxy, *MatchResult) {
+	req = c.Resolving(req)
+	proxy, matchResult := c.Match(req, mapping)
+	return req, proxy, matchResult
+}
+
+// IsDirect reports whether this proxy means a direct (non-proxied) dial.
+// A nil proxy (no rule matched) also dials direct.
+func (p *Proxy) IsDirect() bool {
+	return p == nil || strings.EqualFold(p.Type, ProxyDIRECT)
 }
 
 // NeedHysteria2 checks if any proxy uses hysteria2

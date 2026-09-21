@@ -475,6 +475,11 @@
             'res.srcPort': '端口',
             'res.dstHost': '主机',
             'res.dstPort': '端口',
+            'res.proto': '协议',
+            'res.protoAll': '全部',
+            'res.srcRelative': '本节点子域名（匹配 <标签>.<本节点ID>.phn）',
+            'res.selfTag': '本机',
+            'res.meshUnavailable': '无法获取本节点 node-id，请检查 mesh 配置',
             'res.confirmDelete': '删除重定向规则',
 
             // ===== Reverse Wizard =====
@@ -1226,6 +1231,11 @@
             'res.srcPort': 'Port',
             'res.dstHost': 'Host',
             'res.dstPort': 'Port',
+            'res.proto': 'Protocol',
+            'res.protoAll': 'All',
+            'res.srcRelative': 'Self subdomain (match <label>.<local node-id>.phn)',
+            'res.selfTag': 'self',
+            'res.meshUnavailable': 'mesh node-id unavailable, check mesh config',
             'res.confirmDelete': 'Delete resolver',
 
             // ===== Reverse Wizard =====

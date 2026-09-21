@@ -1809,24 +1809,25 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		matchAddr = domain
 	}
 
-	req := config.NewConnectRequest(matchAddr, dstPort)
+	req := config.NewConnectRequest("udp", matchAddr, dstPort)
 	var proxy *config.Proxy
 	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
-		req = e.ruleConf.Resolving(req)
 		matchMapping := TUNMapping
 		if modeBMapping != nil {
 			matchMapping = modeBMapping
 		}
-		proxy, matchResult = e.ruleConf.Match(req, matchMapping)
+		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
 	}
 
 	resolvedAddr := req.DstAddr
 	resolvedPort := req.DstPort
+	rec := connlog.Start(inbound, "UDP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
+	defer rec.Close()
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogDebug("[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
-		connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
+		rec.Reject()
 		return
 	}
 
@@ -1838,7 +1839,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
 			util.LogWarn("[%s] [%s] udp dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
+			rec.Fail(err)
 			return
 		}
 		dialIP = net.ParseIP(resolvedAddr)
@@ -1856,7 +1857,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 			ips, err := e.resolveForDirect(resolvedAddr)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[%s] [%s] udp resolve %s fail: %v", inbound, connID, resolvedAddr, err)
-				connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				rec.Fail(err)
 				return
 			}
 			// Prefer IPv4
@@ -1871,7 +1872,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
 			util.LogWarn("[%s] [%s] udp direct dial %s:%d fail: %v", inbound, connID, resolvedAddr, resolvedPort, err)
-			connlog.Log(inbound, "UDP", srcAddr, matchAddr, dialIP.String(), resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			rec.SetDst(dialIP.String()).Fail(err)
 			return
 		}
 	}
@@ -1880,20 +1881,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
 	util.LogDebug("[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
-		// Preserve Rule and TimeRange from original matchResult if available
-		if matchResult != nil {
-			matchResult.ProxyName = "DIRECT"
-		} else {
-			matchResult = &config.MatchResult{ProxyName: "DIRECT"}
-		}
-	} else if matchResult != nil && proxy.Name != matchResult.ProxyName {
-		// Set actual proxy name when different from rule (e.g., group resolution)
-		matchResult.ActualProxy = proxy.Name
-	}
-	connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
-	defer connlog.RemoveActive(connID)
+	rec.Establish(connID, proxy, proxy.IsDirect())
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
 }
@@ -2008,16 +1996,15 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		matchAddr = domain
 	}
 
-	req := config.NewConnectRequest(matchAddr, dstPort)
+	req := config.NewConnectRequest("tcp", matchAddr, dstPort)
 	var proxy *config.Proxy
 	var matchResult *config.MatchResult
 	if e.ruleConf != nil {
-		req = e.ruleConf.Resolving(req)
 		matchMapping := TUNMapping
 		if modeBMapping != nil {
 			matchMapping = modeBMapping
 		}
-		proxy, matchResult = e.ruleConf.Match(req, matchMapping)
+		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
 		if proxy != nil {
 			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
 		} else {
@@ -2028,13 +2015,15 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	// Use the (possibly redirected) destination from Resolving
 	resolvedAddr := req.DstAddr
 	resolvedPort := req.DstPort
+	rec := connlog.Start(inbound, "TCP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
+	defer rec.Close()
 
 	var targetConn net.Conn
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogDebug("[%s] [%s] %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
-		connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "reject", nil)
+		rec.Reject()
 		return
 	}
 
@@ -2042,9 +2031,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		// Direct admin handler: bypass OS network stack entirely
 		if e.adminHandler != nil {
 			util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", connID)
-			connlog.Log(inbound, "TCP", srcAddr, matchAddr, "localhost", resolvedPort, matchResult, "ok", nil)
-			connlog.TrackActive(connID, inbound, "TCP", srcAddr, matchAddr, "localhost", resolvedPort, matchResult)
-			defer connlog.RemoveActive(connID)
+			rec.SetDst("localhost").Establish(connID, proxy, false)
 			e.adminHandler.ServeConn(conn)
 			return
 		}
@@ -2055,7 +2042,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
 			util.LogWarn("[%s] [%s] local dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
-			connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, matchResult, "fail", err)
+			rec.SetDst(dialAddr).Fail(err)
 			return
 		}
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
@@ -2063,7 +2050,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogWarn("[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "fail", err)
+			rec.Fail(err)
 			return
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] proxy dial success", connID)
@@ -2078,7 +2065,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 			ips, err := e.resolveForDirect(dialAddr)
 			if err != nil || len(ips) == 0 {
 				util.LogWarn("[%s] [%s] resolve %s fail: %v", inbound, connID, dialAddr, err)
-				connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				rec.Fail(err)
 				return
 			}
 			// Prefer IPv4
@@ -2094,7 +2081,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 		if err != nil {
 			util.LogWarn("[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
-			connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+			rec.SetDst(dialAddr).Fail(err)
 			return
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
@@ -2102,20 +2089,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	defer targetConn.Close()
 
 	util.LogDebug("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	if proxy == nil || strings.EqualFold(proxy.Type, config.ProxyDIRECT) {
-		// Preserve Rule and TimeRange from original matchResult if available
-		if matchResult != nil {
-			matchResult.ProxyName = "DIRECT"
-		} else {
-			matchResult = &config.MatchResult{ProxyName: "DIRECT"}
-		}
-	} else if matchResult != nil && proxy.Name != matchResult.ProxyName {
-		// Set actual proxy name when different from rule (e.g., group resolution)
-		matchResult.ActualProxy = proxy.Name
-	}
-	connlog.Log(inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult, "ok", nil)
-	connlog.TrackActive(connID, inbound, "TCP", srcAddr, matchAddr, resolvedAddr, resolvedPort, matchResult)
-	defer connlog.RemoveActive(connID)
+	rec.Establish(connID, proxy, proxy.IsDirect())
 	relayWithIdleTimeout(conn, targetConn, 90*time.Second)
 }
 

@@ -1655,3 +1655,43 @@ engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
 ### 状态
 - 已修复并提交
 - 日志系统存在独立 bug（worker 进程日志未转发），需要单独排查
+
+## 22. Resolver 重定向修复 (v0.16.2)
+
+> 日期: 2026-09-21
+> 状态: DONE
+
+### 22.1 问题背景
+
+VM 环境配置了 resolver（`ws.vm.phn:22` → `10.21.20.65:39022`），访问 `ssh Docker@ws.vm.phn` 时连接失败：
+
+```
+✗ [TUN] TCP 100.0.0.1 → ws.vm.phn:39022 → DIRECT (lookup ws.vm.phn on 172.30.0.1:53: no such host)
+```
+
+日志中端口已是 39022（说明 resolver 匹配成功），但地址仍显示 ws.vm.phn，且系统 DNS 解析失败。
+
+### 22.2 根因
+
+`handleConn`/`handleUDP` 的直连拨号路径中：
+
+```go
+dialAddr := resolvedAddr
+if domain != "" {
+    ips, err := e.resolveForDirect(domain)  // 解析的是原始 domain，不是替换后的 resolvedAddr
+```
+
+resolver 语义是「解析前的无脑字符串替换」（host:port → host':port'，host' 可以是 IP 也可以是域名）。替换后 `resolvedAddr` 已是权威目标，但直连路径只要 fakeIP 还原出的原始 `domain` 非空，就**无条件用系统 DNS 解析原始域名**，完全无视 resolver 的替换结果。原始域名不在系统 DNS 上，解析失败连接被丢弃。
+
+### 22.3 修复方案
+
+直连拨号以 `resolvedAddr` 为准：
+
+- `net.ParseIP(resolvedAddr) != nil`：是 IP，直接拨号，不做任何 DNS 解析
+- 是域名（原始域名或 resolver 替换后的新域名）：解析 `resolvedAddr` 本身
+
+TCP（`handleConn`）和 UDP（`handleUDP`）两条路径统一修改。
+
+### 22.4 验证
+
+- QG 侧 `ssh Docker@ws.vm.phn`（经 mesh 到 VM，VM resolver 重写后直连 10.21.20.65:39022）连接成功

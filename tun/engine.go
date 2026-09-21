@@ -1843,18 +1843,20 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		}
 		dialIP = net.ParseIP(resolvedAddr)
 	} else {
-		// Direct dial: resolve real IP now if we have a domain.
+		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
+		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
+		// dial it directly.
 		dialIP = net.ParseIP(resolvedAddr)
 		if localNodeDomain {
 			// Local mesh nodeID domain: connect to localhost
 			dialIP = net.ParseIP("127.0.0.1")
 			util.LogDebug("[%s] [%s] udp local mesh nodeID domain: %s -> %s", inbound, connID, domain, dialIP)
-		} else if domain != "" {
+		} else if dialIP == nil {
 			// Resolve the real IP for DIRECT connections.
-			ips, err := e.resolveForDirect(domain)
+			ips, err := e.resolveForDirect(resolvedAddr)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[%s] [%s] udp resolve %s fail: %v", inbound, connID, domain, err)
-				connlog.Log(inbound, "UDP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				util.LogWarn("[%s] [%s] udp resolve %s fail: %v", inbound, connID, resolvedAddr, err)
+				connlog.Log(inbound, "UDP", srcAddr, matchAddr, resolvedAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -1864,7 +1866,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 					break
 				}
 			}
-			util.LogDebug("[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, domain, dialIP)
+			util.LogDebug("[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, resolvedAddr, dialIP)
 		}
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
@@ -2066,15 +2068,17 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] proxy dial success", connID)
 	} else {
-		// Direct dial: resolve real IP now if we have a domain.
+		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
+		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
+		// dial it directly.
 		dialAddr := resolvedAddr
-		if domain != "" {
+		if net.ParseIP(dialAddr) == nil {
 			// Resolve the real IP for DIRECT connections.
-			util.LogDebug("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, domain)
-			ips, err := e.resolveForDirect(domain)
+			util.LogDebug("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, dialAddr)
+			ips, err := e.resolveForDirect(dialAddr)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[%s] [%s] resolve %s fail: %v", inbound, connID, domain, err)
-				connlog.Log(inbound, "TCP", srcAddr, matchAddr, domain, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
+				util.LogWarn("[%s] [%s] resolve %s fail: %v", inbound, connID, dialAddr, err)
+				connlog.Log(inbound, "TCP", srcAddr, matchAddr, dialAddr, resolvedPort, &config.MatchResult{ProxyName: "DIRECT"}, "fail", err)
 				return
 			}
 			// Prefer IPv4
@@ -2084,9 +2088,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 					break
 				}
 			}
-			util.LogDebug("[TCP-DEBUG] [%s] resolved %s -> %s", connID, domain, dialAddr)
-		} else {
-			util.LogDebug("[TCP-DEBUG] [%s] direct dial with no domain, addr=%s", connID, dialAddr)
+			util.LogDebug("[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
 		}
 		util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))

@@ -44,7 +44,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize bottom navigation
     renderBottomNav();
-    updateDrawerPinStates();
 
     // Initial load for TUN status if on dashboard
     if (document.getElementById('tun-status')) {

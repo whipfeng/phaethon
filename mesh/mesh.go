@@ -131,7 +131,7 @@ type MeshManager struct {
 	network         *net.IPNet // overall mesh network (e.g., 100.0.0.0/8)
 	subnetPrefixLen int        // per-node subnet prefix length (e.g., 16 for /16)
 
-	// routeTable holds routes and domainTrie, accessed atomically for lock-free reads.
+	// routeTable holds routes and domain tries, accessed atomically for lock-free reads.
 	// Writes create a new routeTable and Store() it atomically.
 	routeTable atomic.Value // stores *routeTable
 
@@ -151,10 +151,19 @@ type MeshManager struct {
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
 }
 
+// nodeInfo stores information about a discovered node (from claimedSubnets).
+type nodeInfo struct {
+	sender PeerSender // nil for own node
+	subnet *net.IPNet
+	hop    int
+}
+
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute // sorted by prefix length (longest first)
-	domainTrie *DomainTrie
+	routes      []MeshRoute // sorted by prefix length (longest first)
+	staticTrie  *NodeTrie   // static domain routes (config + .phn)
+	dynamicTrie *NodeTrie   // dynamic domain routes (gossip)
+	nodeMap     map[string]*nodeInfo // nodeID → info
 }
 
 // getRouteTable returns the current route table (lock-free).
@@ -178,8 +187,10 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
-		routes:     make([]MeshRoute, 0),
-		domainTrie: NewDomainTrie(),
+		routes:      make([]MeshRoute, 0),
+		staticTrie:  NewNodeTrie(),
+		dynamicTrie: NewNodeTrie(),
+		nodeMap:     make(map[string]*nodeInfo),
 	})
 
 	// Create Fake-IP pool from node subnet (skip first 10: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.9=future)
@@ -557,76 +568,50 @@ func (m *MeshManager) Stop() {
 //   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
 //   - subnet == nil && needsFail == false: no match, fallback to local pool
 func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
-	d := strings.ToLower(domain)
-	util.LogInfo("[DNS-DEBUG] ResolveDomainSubnet(%s) called", domain)
-	
-	// Special handling for .phn domains (auto-generated for each node)
-	// These are treated as static routes but don't need to be stored in staticDomainSuffixes
-	if strings.HasSuffix(d, "."+MeshDomainSuffix) || d == MeshDomainSuffix {
-		// Extract nodeID from domain (e.g., "vm.phn" → "vm")
-		var nodeID string
-		if d == MeshDomainSuffix {
-			nodeID = ""  // bare "phn" is invalid
-		} else {
-			nodeID = strings.TrimSuffix(d, "."+MeshDomainSuffix)
-		}
-		if nodeID != "" {
-			util.LogInfo("[DNS-DEBUG] .phn domain, nodeID=%s", nodeID)
-			peer := m.topology.GetPeer(nodeID)
-			if peer != nil && peer.Subnet != nil {
-				util.LogInfo("[DNS-DEBUG] found node %s subnet %s", nodeID, peer.Subnet)
-				return peer.Subnet, false  // .phn match, node ready → forward
-			}
-			// Node not found in topology yet
-			util.LogWarn("[DNS-DEBUG] node %s not found in topology, returning SERVFAIL", nodeID)
-			return nil, true  // .phn match, node not ready → SERVFAIL
-		}
-	}
-	
-	// Check static domain suffixes (high priority)
-	m.mu.RLock()
-	staticSuffixes := m.staticDomainSuffixes
-	m.mu.RUnlock()
-	
-	for _, suffix := range staticSuffixes {
-		s := strings.ToLower(suffix.Suffix)
-		if d == s || strings.HasSuffix(d, "."+s) {
-			// Matched static domain suffix, get target node's subnet
-			targetNodeID := suffix.Via
-			util.LogDebug("[MESH] ResolveDomainSubnet(%s): matched static suffix %s via %s", domain, suffix.Suffix, targetNodeID)
-			
-			// Get target node from topology (returns whole peer object)
-			peer := m.topology.GetPeer(targetNodeID)
-			if peer != nil && peer.Subnet != nil {
-				util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, targetNodeID, peer.Subnet)
-				return peer.Subnet, false  // Static match, node ready → forward
-			}
-			// Node not found in topology yet, return needsFail=true
-			util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not found in topology", domain, targetNodeID)
-			return nil, true  // Static match, node not ready → SERVFAIL
-		}
-	}
-	
-	// Fall back to advertised domain trie (low priority, dynamic routes)
 	rt := m.getRouteTable()
-	trie := rt.domainTrie
-	if trie == nil {
-		return nil, false
+	
+	// 1. Check static trie (high priority)
+	staticNodeID, staticLen := rt.staticTrie.Lookup(domain)
+	if staticLen > 0 {
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): static match nodeID=%s len=%d", domain, staticNodeID, staticLen)
+		
+		// Look up node in nodeMap
+		nodeInfo := rt.nodeMap[staticNodeID]
+		
+		// Local node (sender == nil) → fallback to local pool
+		if nodeInfo != nil && nodeInfo.sender == nil {
+			util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, fallback to local pool", domain, staticNodeID)
+			return nil, false
+		}
+		
+		if nodeInfo != nil && nodeInfo.subnet != nil {
+			util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, staticNodeID, nodeInfo.subnet)
+			return nodeInfo.subnet, false
+		}
+		
+		// Static match but node not in nodeMap → SERVFAIL
+		util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but node %s not in nodeMap, SERVFAIL", domain, staticNodeID)
+		return nil, true
 	}
-	peers, subnet, suffixLen := trie.Lookup(domain)
-	var peerIDs []string
-	for _, p := range peers {
-		peerIDs = append(peerIDs, p.Peer.GetNodeID())
+	
+	// 2. Check dynamic trie (low priority)
+	dynamicNodeID, dynamicLen := rt.dynamicTrie.Lookup(domain)
+	if dynamicLen > 0 {
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): dynamic match nodeID=%s len=%d", domain, dynamicNodeID, dynamicLen)
+		
+		// Look up node in nodeMap
+		nodeInfo := rt.nodeMap[dynamicNodeID]
+		if nodeInfo != nil && nodeInfo.subnet != nil {
+			util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, dynamicNodeID, nodeInfo.subnet)
+			return nodeInfo.subnet, false
+		}
+		
+		// Dynamic match but node not in nodeMap → shouldn't happen, but treat as no match
+		util.LogWarn("[MESH] ResolveDomainSubnet(%s): dynamic match but node %s not in nodeMap", domain, dynamicNodeID)
 	}
-	var subnetStr string
-	if subnet != nil {
-		subnetStr = subnet.String()
-	}
-	util.LogDebug("[MESH] ResolveDomainSubnet(%s): suffixLen=%d peers=%v subnet=%s", domain, suffixLen, peerIDs, subnetStr)
-	if suffixLen == 0 || len(peers) == 0 {
-		return nil, false // no match → fallback to local pool
-	}
-	return subnet, false  // Dynamic match, node must exist → forward
+	
+	// 3. No match → fallback to local pool
+	return nil, false
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
@@ -1444,21 +1429,23 @@ func (m *MeshManager) recomputeRoutes() {
 		return lenI > lenJ
 	})
 
-	// Build global domain trie
-	trie := NewDomainTrie()
-	// Own domain suffixes (Hop=0, NextHop=nil)
+	// Build static and dynamic domain tries
+	staticTrie := NewNodeTrie()
+	dynamicTrie := NewNodeTrie()
+	
+	// Static trie: own domain suffixes (from config)
 	ownSuffixSet := make(map[string]bool, len(domainSuffixes))
 	for _, s := range domainSuffixes {
-		trie.Insert(s, nil, nil, 0)
+		staticTrie.Insert(s, m.nodeID)  // own suffixes point to self
 		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
 
 	// Build a map of nodeID → (subnet, hop) from ClaimedSubnets
-	type nodeInfo struct {
+	type nodeInfoLocal struct {
 		subnet *net.IPNet
 		hop    int
 	}
-	nodeIDToInfo := make(map[string]nodeInfo)
+	nodeIDToInfo := make(map[string]nodeInfoLocal)
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -1466,18 +1453,18 @@ func (m *MeshManager) recomputeRoutes() {
 		// Peer's own subnet
 		if peer.Subnet != nil {
 			if _, exists := nodeIDToInfo[peer.NodeID()]; !exists {
-				nodeIDToInfo[peer.NodeID()] = nodeInfo{peer.Subnet, 1}
+				nodeIDToInfo[peer.NodeID()] = nodeInfoLocal{peer.Subnet, 1}
 			}
 		}
 		// Peer's learned claims
 		for _, cs := range peer.ClaimedSubnets {
 			if existing, exists := nodeIDToInfo[cs.NodeID]; !exists || cs.Hop < existing.hop {
-				nodeIDToInfo[cs.NodeID] = nodeInfo{cs.Subnet, cs.Hop}
+				nodeIDToInfo[cs.NodeID] = nodeInfoLocal{cs.Subnet, cs.Hop}
 			}
 		}
 	}
 
-	// Peer domain suffixes — skip if we own the same suffix
+	// Dynamic trie: peer domain suffixes (from gossip) — skip if we own the same suffix
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -1487,17 +1474,12 @@ func (m *MeshManager) recomputeRoutes() {
 			if ownSuffixSet[normalized] {
 				continue
 			}
-			// Look up subnet and hop from the owner nodeID
-			info, ok := nodeIDToInfo[entry.NodeID]
-			if !ok {
-				continue // Owner not found, skip
-			}
-			trie.Insert(entry.Suffix, peer.Sender, info.subnet, info.hop)
+			// Insert into dynamic trie with the owner nodeID
+			dynamicTrie.Insert(entry.Suffix, entry.NodeID)
 		}
 	}
 
-	// Auto-generate nodeID.phn entries from claimed subnets.
-	// Each known node gets a "nodeID.phn" entry in the trie.
+	// Static trie: auto-generate nodeID.phn entries from claimed subnets
 	type nodeClaim struct {
 		sender PeerSender
 		subnet *net.IPNet
@@ -1527,13 +1509,27 @@ func (m *MeshManager) recomputeRoutes() {
 			}
 		}
 	}
-	// Note: .phn domains are no longer inserted into domainTrie
-	// They are handled specially in ResolveDomainSubnet() as static routes
+	// Insert nodeID.phn entries into static trie
+	for nid := range bestNodes {
+		staticTrie.Insert(nid+"."+MeshDomainSuffix, nid)
+	}
+	
+	// Convert bestNodes to nodeMap for routeTable
+	nodeMap := make(map[string]*nodeInfo)
+	for nid, claim := range bestNodes {
+		nodeMap[nid] = &nodeInfo{
+			sender: claim.sender,
+			subnet: claim.subnet,
+			hop:    claim.hop,
+		}
+	}
 	
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
-		routes:     routes,
-		domainTrie: trie,
+		routes:      routes,
+		staticTrie:  staticTrie,
+		dynamicTrie: dynamicTrie,
+		nodeMap:     nodeMap,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {

@@ -1847,3 +1847,49 @@ TUN 进入、目标为远端 mesh subnet 的连接由 netstack 在 L3 直接转�
 - `server/trojan.go`、`server/socks5.go`、`server/htunnel.go`：UDP 会话级记录、htunnel TCP 记录、UDP 转发地址修正
 
 
+
+## 26. DNS 跨节点转发源地址绑定本机 GIP (v0.16.6)
+
+### 26.1 问题
+
+mesh 数据面间歇性故障（#244）：QG 上所有远端域名解析在 VM 重启后的几分钟窗口内
+全部失败（SERVFAIL），随后自愈。生产日志三个窗口（14:48 / 16:15 / 17:32）均复现
+同一特征：QG 的 `forwardToRemote` UDP socket 源地址不是默认本机 GIP（100.0.0.3），
+而是远端子网 fake-IP（100.1.0.37/38/39）；QG 报 `read udp 100.1.0.38:59370: i/o
+timeout`，与 VM 侧收到的查询端口逐一吻合。
+
+### 26.2 根因
+
+gVisor 的 IPv4 源地址选择是**确定性最长前缀匹配**（非随机）：
+`acquirePrimaryAddressRLocked` 只遍历 NIC 的 primary 地址列表
+（srcHint 精确匹配 > 与目标地址 MatchingPrefix 最长者 > 首个非 deprecated 项），
+该路径不创建临时地址。因此：
+
+1. 源地址 100.1.0.38 出现 ⇒ 它必然在故障时刻被加入了 netstack 的 primary 地址表
+   （干净代码树中无此路径，唯一嫌疑是当时 QG 部署的脏构建，增量无法从 git 还原）；
+2. 一旦进入地址表，对 dst=100.1.0.3 的前缀匹配长度（≈/21-23）必然大于
+   100.0.0.3（/8）⇒ 每次都被选中，故障持续；
+3. 地址表恢复后源地址立即回退 GIP ⇒ 表现为自愈。
+
+**故障机制**：VM 收到源地址为自己池内 fake-IP 的查询后，回包目的地址被本节点
+判定为本地投递（own-subnet），永远回不到 QG → 5s 超时 → SERVFAIL。
+
+### 26.3 设计决策
+
+`forwardToRemote` 的 UDP socket 显式绑定本节点 GIP（`h.dnsAddr`）：
+
+- 源地址不再依赖 netstack 地址表状态，地址表无论被什么路径污染都不影响 DNS 转发；
+- 正常状态下与隐式选择结果一致（地址表只有 GIP），行为无变化；
+- 若远端节点不可达，`DialUDP` 直接报错 → SERVFAIL（显式失败优于超时）。
+
+读取响应失败的错误信息附带 `dst` 与 `local`，任何复发可立即从日志定位源地址。
+
+### 26.4 变更文件
+
+- `mesh/dns.go`：`forwardToRemote` 增加 `localAddr` 绑定 + 失败日志增强
+
+### 26.5 验收标准
+
+- VM 部署后，VM→QG 方向域名解析正常，QG 日志收到的查询源地址为 VM 的 GIP
+  （100.1.0.3）；
+- QG 部署后重启 VM 复现场景：远端域名解析全程无 `i/o timeout`、无 SERVFAIL。

@@ -12,7 +12,6 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"phaethon/mesh"
 	"phaethon/util"
 )
 

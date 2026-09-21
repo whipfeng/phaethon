@@ -7,7 +7,6 @@ import (
 	"time"
 	"unsafe"
 
-	"phaethon/mesh"
 	"phaethon/util"
 )
 

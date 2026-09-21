@@ -262,6 +262,8 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 		proxyConns:  make(map[string]*udpProxyConn),
 		seenTargets: util.NewFIFOSet(maxSeenTargets),
 		closed:      make(chan struct{}),
+		rec:         connlog.Start("SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), ""),
+		connID:      connID,
 	}
 
 	// Monitor TCP control connection; close UDP relay on disconnect.
@@ -289,8 +291,7 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 
 	util.LogInfo("[SOCKS5-SVR] [%s] [%s] UDP ASSOCIATE started on port %d", s.Mapping.Name, clientConn.RemoteAddr(), udpAddr.Port)
 
-	connlog.TrackActive(connID, "SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), "", "", 0, nil)
-	defer connlog.RemoveActive(connID)
+	defer relay.rec.Close()
 
 	relay.run()
 }
@@ -313,6 +314,8 @@ type socks5UDPRelay struct {
 	mapping      *config.Mapping
 	proxyConns   map[string]*udpProxyConn // proxy name -> downstream PacketConn
 	seenTargets  *util.FIFOSet            // targets already logged (FIFO, capped at maxSeenTargets)
+	rec          *connlog.Record          // session-level record; first resolved target wins
+	connID       string
 	proxyMu      sync.Mutex
 	closed       chan struct{}
 	closeOnce    sync.Once
@@ -419,25 +422,25 @@ func (r *socks5UDPRelay) run() {
 
 		data := buf[offset:n]
 		util.LogDebug("[SOCKS5-SVR] [%s] UDP RX from=%s to=%s:%d n=%d", r.mapping.Name, srcAddr, dstAddr, dstPort, len(data))
-		req := config.NewConnectRequest(dstAddr, dstPort)
-		req = r.ruleConf.Resolving(req)
-
-		proxy, _ := r.ruleConf.Match(req, r.mapping)
+		req, proxy, matchResult := r.ruleConf.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), r.mapping)
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}
-		targetKey := fmt.Sprintf("%s:%d", dstAddr, dstPort)
+		// Session-level record: idempotent, so the first resolved target wins.
+		r.rec.Resolve(req.DstAddr, req.DstPort, matchResult).Establish(r.connID, proxy, proxy.IsDirect())
+
+		targetKey := fmt.Sprintf("%s:%d", req.DstAddr, req.DstPort)
 		var isFirst bool
 		r.proxyMu.Lock()
 		isFirst = r.seenTargets.Put(targetKey)
 		r.proxyMu.Unlock()
 		if isFirst {
-			util.LogInfo("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s)", r.mapping.Name, dstAddr, dstPort, proxy.Name, proxy.Type)
+			util.LogInfo("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s)", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
 		} else {
-			util.LogDebug("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s) %d bytes", r.mapping.Name, dstAddr, dstPort, proxy.Name, proxy.Type, len(data))
+			util.LogDebug("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s) %d bytes", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type, len(data))
 		}
 
-		targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(dstAddr, strconv.Itoa(dstPort)))
+		targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(req.DstAddr, strconv.Itoa(req.DstPort)))
 		if err != nil {
 			continue
 		}

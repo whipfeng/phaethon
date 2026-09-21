@@ -2354,7 +2354,7 @@ func startSubscriptionRefresh(ruleConf *config.RuleConfiguration, subCacheDir st
 func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscription, subCacheDir string) error {
 	// Resolve proxy for subscription URL via rules
 	subHost, subPort, _ := parseTestURL(sub.URL)
-	req := config.NewConnectRequest(subHost, subPort)
+	req := config.NewConnectRequest("tcp", subHost, subPort)
 	proxy, _ := ruleConf.Match(req, nil)
 
 	var content string

@@ -26,9 +26,11 @@ func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr s
 	inbound := proto + ":" + b.Mapping.Name
 	connID := util.NextConnID()
 
+	rec := connlog.Start(inbound, "TCP", clientAddr, dstAddr).Resolve(dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
+
 	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound, b.Mapping)
 	if err != nil {
-		connlog.Log(inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "fail", err)
+		rec.Fail(err)
 		return nil, nil, err
 	}
 
@@ -38,12 +40,8 @@ func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr s
 		srcPort = uint16(localAddr.Port)
 	}
 
-	// Log successful connection
-	connlog.Log(inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"}, "ok", nil)
-	connlog.TrackActive(connID, inbound, "TCP", clientAddr, dstAddr, dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
-
-	cleanup := func() { connlog.RemoveActive(connID) }
-	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort, srcPort: srcPort}, cleanup, nil
+	rec.Establish(connID, nil, false)
+	return &modeBConn{Conn: conn, dstAddr: dstAddr, dstPort: dstPort, srcPort: srcPort}, func() { rec.Close() }, nil
 }
 
 // modeBConn wraps a net.Conn and unregisters from ModeBTable on Close.

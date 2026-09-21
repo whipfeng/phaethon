@@ -2496,12 +2496,15 @@ func resolverSummary(rv *config.Resolver) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{
-		"name":    rv.Name,
-		"enabled": rv.IsEnabled(),
-		"srcHost": rv.SrcHost,
-		"srcPort": rv.SrcPort,
-		"dstHost": rv.DstHost,
-		"dstPort": rv.DstPort,
+		"name":        rv.Name,
+		"enabled":     rv.IsEnabled(),
+		"proto":       rv.Proto,
+		"srcHost":     rv.SrcHost,
+		"srcPort":     rv.SrcPort,
+		"dstHost":     rv.DstHost,
+		"dstPort":     rv.DstPort,
+		"srcRelative": rv.SrcRelative,
+		"srcFull":     rv.EffectiveSrcHost(),
 	}
 }
 

@@ -8,6 +8,9 @@
     <link rel="stylesheet" href="./static/style.css?v={{.Version}}">
     <script src="./static/i18n.js?v={{.Version}}"></script>
     <script src="./static/htmx.min.js?v={{.Version}}"></script>
+    <!-- app.js must load in <head> (blocking): page templates define inline
+         init scripts that call its functions during body parse. -->
+    <script src="./static/app.js?v={{.Version}}"></script>
 </head>
 <body>
     <div class="app-layout">
@@ -249,8 +252,6 @@
             </div>
         </div>
     </div>
-
-    <script src="./static/app.js?v={{.Version}}"></script>
 </body>
 </html>
 {{end}}

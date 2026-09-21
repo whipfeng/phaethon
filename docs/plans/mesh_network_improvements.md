@@ -1695,6 +1695,69 @@ TCP（`handleConn`）和 UDP（`handleUDP`）两条路径统一修改。
 ### 22.4 验证
 
 - QG 侧 `ssh Docker@ws.vm.phn`（经 mesh 到 VM，VM resolver 重写后直连 10.21.20.65:39022）连接成功
+
+## 23. Resolver 增强：协议区分 + 本节点子域名模式 (v0.16.3)
+
+### 23.1 需求背景
+
+1. **协议区分**：重定向（Resolver）此前不区分 TCP/UDP，同一条规则对两种协议同时生效。需要支持按协议过滤（tcp/udp/全部）。
+2. **本节点子域名模式**：`<nodeID>.phn` 是运行时算出来的，配置里写死完整域名（如 `a.vm.phn`）会在 nodeID 变更后失效。支持只填标签 `a`，后缀 `<本节点nodeID>.phn` 由节点自身在加载时计算。
+3. **logs 页脚本报错**：直接访问 `/logs` 时 `fetchConnections is not defined`。
+
+约束（用户确认）：
+- 子域名模式只支持 SRC 侧（匹配侧），DST 侧不需要。
+- mesh 必然启动，不考虑无 mesh 的分支。
+
+### 23.2 协议区分设计
+
+**数据模型**：
+
+- `Resolver` 增加 `Proto` 字段（yaml `proto`）：`"tcp"` / `"udp"` / `""`（空 = 全部，向后兼容）。
+- `AddrRequest` 增加 `Proto` 字段。
+
+**抽象方式**：proto 是请求的构造属性，直接并入构造器签名 `NewConnectRequest(proto, dstAddr, dstPort)`，而不是在每个调用点手动赋值。全项目仅 6 个调用点（tun TCP/UDP、htunnel/trojan/socks5 UDP、main.go 订阅刷新 TCP），机械替换。
+
+**匹配语义**（`Resolving()`）：
+
+- `resolver.Proto == ""`：不过滤（匹配两种协议）。
+- `req.Proto == ""`：请求未携带协议信息时不过滤（容忍旧调用方）。
+- 两者都非空：必须相等才匹配。
+
+`Init()` 中校验：proto 归一化为小写，仅允许 `""/tcp/udp`，非法值报配置错误。
+
+### 23.3 本节点子域名模式设计
+
+**存储**：`Resolver` 增加 `SrcRelative`（yaml `src-relative`，默认 false）。开启时 `SrcHost` 存**标签**（如 `a`），完整匹配域由节点自身计算。
+
+**展开**：`Init()` 时计算非导出字段 `srcFull = SrcHost + "." + Mesh.NodeID + ".phn"`：
+
+- `Init()` 会在同一对象上反复执行（admin 编辑路径），因此每次从 `SrcHost` 标签重建 `srcFull`，不原地追加，天然幂等。
+- mesh 必然启动；`Mesh.NodeID` 为空时 `Init()` 直接报错（src-relative 依赖 node-id）。
+- 标签为空同样报错。
+
+**匹配**：`Resolving()` 通过 `EffectiveSrcHost()`（srcFull 优先，回退 SrcHost）做精确匹配，与既有语义一致（不引入后缀通配）。
+
+**API/UI**：
+
+- `resolverSummary` 增加 `proto` / `srcRelative` / `srcFull`（展开后的完整域名）。
+- 表单增加协议下拉（全部/TCP/UDP）和「本节点子域名」勾选框；勾选后实时预览 `<label>.<nodeID>.phn`（nodeID 从 `/api/mesh` 的 `nodeId` 获取）。
+- 列表源地址列显示展开后的完整域名，并带「本机」/协议徽标。
+- PATCH 切换 enabled 只改 Enabled 字段，新字段不受影响。
+
+### 23.4 admin 页面直载脚本报错修复（根因级）
+
+根因：`layout.html` 在 `</body>` 前加载 `app.js`，所有页面模板的 content 内联脚本先于 `app.js` 执行。直接访问任一页面时其初始化调用全部未定义（`/logs`: fetchConnections、`/connections`: fetchActiveConns、`/`: fetchMeshStatus…）；HTMX 导航路径因脚本重执行时机不同而碰巧正常。
+
+修复（根因级，一处修所有页）：`app.js` 移到 `<head>` 同步加载（i18n.js/htmx 已在 head），经典阻塞脚本保证任何 body 内联脚本执行前 app.js 已就绪。app.js 顶层仅有 `DOMContentLoaded`/`keydown` 监听，无 body 解析期 DOM 依赖，head 化安全。页面模板不做任何逐页补丁。
+
+### 23.5 变更文件
+
+- `config/config.go`：Resolver（Proto/SrcRelative/srcFull/EffectiveSrcHost）、AddrRequest.Proto、Resolving() 过滤、Init() 校验展开、NewConnectRequest 签名
+- `tun/engine.go`、`server/{htunnel,trojan,socks5}.go`、`main.go`：构造器调用点
+- `admin/admin.go`：resolverSummary
+- `admin/templates/{resolvers,logs}.html`：表单/预览/徽标、初始化时序修复
+- `admin/static/i18n.js`：中英文案
+
 ## 24. 协议版本纪律与 DNS 卡死事故复盘 (v0.16.4)
 
 ### 24.1 事故：QG 远程 .phn 解析卡死
@@ -1719,4 +1782,68 @@ hello 携带 `ProtocolVersion`，不匹配即断链（`p2p.go` disconnect 逻辑
 
 - VM 重启测试：QG 对 `vm.phn` 的解析由静态 trie 本地直接应答（即使 VM 宕机也立即返回），VM 恢复后 SSH e2e 正常 —— 无 wedge。
 - **保持观察**：版本混跑可能不是唯一隐患，用户判断「可能有别的潜在没发现的问题」。后续每次 VM 重启后观察 QG DNS 与链路状态，出现异常优先查 `/root/.phaethon/phaethon.log`。
+
+## 25. 连接记录统一抽象：connlog.Record + ResolveMatch (v0.16.5)
+
+### 25.1 背景：记录逻辑散落且覆盖不齐
+
+连接日志（connlog.Log）与活跃连接（TrackActive/RemoveActive）此前由各协议路径自行调用：
+
+| 路径 | connlog.Log | TrackActive | 问题 |
+|------|-------------|-------------|------|
+| TUN TCP/UDP | ✓ 全结果 | ✓ | 正常 |
+| trojan/socks5 TCP | ✓（经 base.MeshDialWithModeB） | ✓ | resolver 重写细节依赖下游 handleTCP 补记 |
+| htunnel TCP | ✗（直接调 dialer.MeshDial 绕过 base 助手） | ✗ | 缺 MESH 条目 |
+| trojan/socks5/htunnel UDP | ✗ 完全没有 | ✓ 但 dst/port/match 全空 | resolver 命中后无任何记录 |
+
+且 `NewConnectRequest → Resolving → Match` 三连在 5 处重复，记录调用散落 15+ 处——每新增一个字段（OriginalDstAddr、Proto）都需要逐点补齐，遗漏即出现「某类连接无记录」。
+
+### 25.2 设计
+
+**公共管线**（config）：`ResolveMatch(req, mapping) (req, proxy, matchResult)` —— Resolving + Match 合为一步，消灭 5 处三连。
+
+**记录生命周期**（connlog.Record）—— 唯一实现，所有转发路径共用。协议相关部分（解析请求、inbound 命名）留在各协议 handler，即多态入口；之后的解析→匹配→记录→收尾全部走公共实现：
+
+- `Start(inbound, protocol, srcAddr, originalDst)`：协议解析出请求后创建。
+- `Resolve(dst, port, matchResult)`：Resolving+Match 后记录解析结果（REJECT 判断也基于此）。
+- `SetDst(addr)`：DIRECT 拨号 DNS 解析出真实 IP 后覆盖展示地址。
+- 终态（互斥、幂等）：`Reject()` / `Fail(err)` / `Establish(connID, proxy, direct)`；Establish 内完成 DIRECT 替换 / ActualProxy 回填 + Log(ok) + TrackActive。
+- `Close()`：handler defer 调用，RemoveActive（未 Establish 则 no-op）。
+
+**语义修正**（统一带来的行为收敛）：
+1. server UDP（trojan/socks5/htunnel）从「无记录/空字段」改为**会话级记录**：以首个数据包 Resolving 后的真实 dst/match 建立 Record（每包记录会刷爆 100 条日志环，不做 per-datagram 记录）。
+2. Fail 路径统一记录匹配到的 matchResult（原 TUN direct 分支另造 DIRECT 对象，丢失 Rule/TimeRange）。
+3. UDP ok 路径补 ActualProxy 回填（原仅 TCP 有）。
+4. socks5 UDP 会话在首个数据包到达前不出现在活跃连接列表（原以空字段立即出现）。
+
+### 25.3 mesh 客户端侧不记录是设计行为
+
+TUN 进入、目标为远端 mesh subnet 的连接由 netstack 在 L3 直接转发至 P2P 链路，客户端 handleTCP 不执行 —— 日志与活跃连接只出现在属主（终结 TCP）节点。排查时先看属主节点，不要在客户端找记录。
+
+### 25.4 协议覆盖清单（入站与出站支持程度不同，逐一核对）
+
+**入站 server（接收用户/对端流量）**——记录统一接入点：
+
+| 入站 | TCP | UDP | 接入方式 |
+|------|-----|-----|---------|
+| TUN | handleTCP | handleUDP | 直接改用 Record |
+| trojan server | ✓（经 base） | 会话级 Record（原空字段） | base.go 一处覆盖 |
+| socks5 server | ✓（经 base） | 会话级 Record（原空字段） | base.go 一处覆盖 |
+| HTTP proxy server（CONNECT/明文） | ✓（经 base） | 无 UDP | base.go 一处覆盖 |
+| direct server | ✓（经 base） | 无 UDP | base.go 一处覆盖 |
+| reverse 数据连接 | ✓（经 base） | — | base.go 一处覆盖 |
+| htunnel server | Record 接入 connectHTTarget（原本完全无记录） | 会话级 Record（懒初始化，ch.mu 保护） | 本次新增 |
+
+**出站 proxy（拨号协议，dialer 包）**：trojan / socks5 / http / h_tunnel / shadowsocks / ssh / vless / hysteria2 / mesh / direct——全部经 `ChainDialWithID` / `ChainUDPDial` 漏斗出站。记录层不做 per-协议处理：Record 只负责记录「实际使用的出站 proxy」（ActualProxy 回填），各协议握手逻辑保持协议自有实现（多态），无需逐协议接入。
+
+**顺带修正的转发地址 bug**：socks5 UDP 与 htunnel UDP 此前 resolver 重写只用于规则匹配，实际 `WriteTo` 仍发往重写前的原地址（trojan UDP 用的是重写后地址，三者不一致）。统一后一律以 ResolveMatch 返回的 `req.DstAddr/DstPort` 为实际转发目标。
+
+### 25.5 变更文件
+
+- `connlog/record.go`（新增）：Record 生命周期
+- `config/config.go`：ResolveMatch、Proxy.IsDirect
+- `tun/engine.go`：handleTCP/handleUDP 改用 Record + ResolveMatch
+- `server/base.go`：MeshDialWithModeB 内部改用 Record（一处覆盖 trojan/socks5/HTTP/direct/reverse 的 TCP）
+- `server/trojan.go`、`server/socks5.go`、`server/htunnel.go`：UDP 会话级记录、htunnel TCP 记录、UDP 转发地址修正
+
 

@@ -88,6 +88,7 @@ type P2PTransport interface {
 	SendMeshGossipToAll(data []byte)
 	ListMeshPeerIDs() []string
 	SetMeshInfo(nodeID, vip string)
+	ResendHelloToAll()
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -149,6 +150,9 @@ type MeshManager struct {
 	ipipTunnel         *IPIPTunnel
 	staticRoutes       []config.MeshStaticRoute
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
+
+	// OnPeerRegistered is called when a new peer is registered (for package sync)
+	OnPeerRegistered func(nodeID string)
 }
 
 // nodeInfo stores information about a discovered node (from claimedSubnets).
@@ -383,6 +387,11 @@ func (m *MeshManager) GetVIP() net.IP {
 
 func (m *MeshManager) GetNodeID() string {
 	return m.nodeID
+}
+
+// CloseCh returns the close channel for cleanup.
+func (m *MeshManager) CloseCh() <-chan struct{} {
+	return m.closeCh
 }
 
 func (m *MeshManager) GetAllVIPs() []net.IP {
@@ -630,6 +639,11 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 	default:
 		util.LogDebug("[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
 	}
+}
+
+// UnregisterPeerByNodeID removes a peer by nodeID (used when re-registering after hello).
+func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
+	m.topology.UnregisterPeerByNodeID(nodeID)
 }
 
 // HandleOutboundPacket is the TUN readLoop interceptor.
@@ -1597,7 +1611,14 @@ func (m *MeshManager) gossipLoop() {
 				m.topology.RegisterPeer(ev.sender)
 				m.recomputeRoutes()
 				util.DefaultVersionNotifier.BumpVersion("mesh")
-				util.LogInfo("[MESH] peer registered: %s", ev.sender.GetNodeID())
+				nodeID := ev.sender.GetNodeID()
+				util.LogInfo("[MESH] peer registered: %s", nodeID)
+				// Immediately broadcast gossip so routing is established without waiting for 15s tick
+				m.broadcastGossip()
+				// Notify for package sync
+				if m.OnPeerRegistered != nil {
+					go m.OnPeerRegistered(nodeID)
+				}
 			case meshEventUnregister:
 				nodeID := ev.sender.GetNodeID()
 				m.topology.UnregisterPeer(ev.sender)
@@ -1618,6 +1639,10 @@ func (m *MeshManager) gossipLoop() {
 				// Check for subnet conflicts and re-select if needed
 				if m.checkSubnetConflict() {
 					m.recomputeRoutes()
+					// Resend hello to all peers to clean up old state and advertise new subnet/VIP
+					if m.p2p != nil {
+						m.p2p.ResendHelloToAll()
+					}
 					m.broadcastGossip()
 				}
 			case meshEventConfigUpdate:
@@ -1819,6 +1844,7 @@ func (m *MeshManager) broadcastGossip() {
 		}
 
 		info := GossipInfo{
+			Cmd:            "gossip",
 			DomainSuffixes: ds,
 			Routes:         routes,
 			ClaimedSubnets: claims,
@@ -1827,7 +1853,115 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
+		util.LogInfo("[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
 		peer.Sender.SendGossip(data)
+	}
+}
+
+// BuildGossipInfo builds the current gossip content (used for hello messages).
+// Returns a global view without per-peer split horizon filtering.
+func (m *MeshManager) BuildGossipInfo() *GossipInfo {
+	allPeers := m.topology.GetAllPeers()
+
+	m.mu.RLock()
+	advertise := make([]string, len(m.advertise))
+	copy(advertise, m.advertise)
+	domainSuffixes := make([]string, len(m.domainSuffixes))
+	copy(domainSuffixes, m.domainSuffixes)
+	m.mu.RUnlock()
+
+	// Build global claimed subnets table (mesh subnets)
+	type globalClaimEntry struct {
+		hop       int
+		nodeID    string
+		subnet    string
+		neighbors []string
+	}
+	bestClaims := make(map[string]globalClaimEntry)
+
+	// Collect own neighbors (direct peer nodeIDs)
+	ownNeighbors := make([]string, 0, len(allPeers))
+	for _, peer := range allPeers {
+		if peer.Sender != nil {
+			ownNeighbors = append(ownNeighbors, peer.NodeID())
+		}
+	}
+
+	// Own claim (Hop=0, with neighbors)
+	bestClaims[m.subnetStr] = globalClaimEntry{0, m.nodeID, m.subnetStr, ownNeighbors}
+
+	// Peer claims
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, cs := range peer.ClaimedSubnets {
+			if existing, ok := bestClaims[cs.SubnetStr]; !ok || cs.Hop < existing.hop {
+				bestClaims[cs.SubnetStr] = globalClaimEntry{cs.Hop, cs.NodeID, cs.SubnetStr, cs.Neighbors}
+			}
+		}
+	}
+
+	// Build global route table (non-mesh routes, referencing owner node)
+	bestRoutes := make(map[string]GossipRoute)
+
+	// Own advertise routes
+	for _, r := range advertise {
+		bestRoutes[r] = GossipRoute{Prefix: r, NodeID: m.nodeID}
+	}
+	// Peer routes (reference owner node)
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, r := range peer.Routes {
+			if _, ok := bestRoutes[r.PrefixStr]; !ok {
+				bestRoutes[r.PrefixStr] = GossipRoute{Prefix: r.PrefixStr, NodeID: r.NodeID}
+			}
+		}
+	}
+
+	// Build global domain suffix map (referencing owner node)
+	bestDS := make(map[string]GossipDomainSuffix)
+	for _, s := range domainSuffixes {
+		bestDS[s] = GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}
+	}
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, entry := range peer.DomainSuffixes {
+			if _, ok := bestDS[entry.Suffix]; !ok {
+				bestDS[entry.Suffix] = GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}
+			}
+		}
+	}
+
+	// Convert to slices
+	routes := make([]GossipRoute, 0, len(bestRoutes))
+	for _, r := range bestRoutes {
+		routes = append(routes, r)
+	}
+
+	ds := make([]GossipDomainSuffix, 0, len(bestDS))
+	for _, d := range bestDS {
+		ds = append(ds, d)
+	}
+
+	claims := make([]GossipClaimedSubnet, 0, len(bestClaims))
+	for _, c := range bestClaims {
+		claims = append(claims, GossipClaimedSubnet{
+			Subnet:    c.subnet,
+			NodeID:    c.nodeID,
+			Hop:       c.hop,
+			Neighbors: c.neighbors,
+		})
+	}
+
+	return &GossipInfo{
+		DomainSuffixes: ds,
+		Routes:         routes,
+		ClaimedSubnets: claims,
 	}
 }
 

@@ -477,33 +477,64 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 ```
 工作目录/（例如 /root/ 或 /home/layer4/phaethon-gg/）
 ├── phaethon                    # 看门狗 binary（固化，不升级）
-├── config.yaml                 # 配置文件
-├── phaethon.log                # 日志
-└── .phaethon/
+├── config.yaml                 # 主配置文件
+└── data/                       # 所有运行时数据
     ├── packages/               # pkg 文件（分发的 source of truth）
     │   ├── xxx.pkg
     │   └── xxx.json
-    └── worker/                 # 提取的 worker binary（缓存，避免重复提取）
-        ├── phaethon-v0.3.5
-        └── phaethon-v0.3.6
+    ├── worker/                 # 提取的 worker binary（缓存，避免重复提取）
+    │   ├── phaethon-v0.3.5
+    │   └── phaethon-v0.3.6
+    ├── state/                  # 运行时状态
+    │   ├── mesh-state.json     # mesh 网络状态
+    │   ├── phaethon.pid        # PID 文件
+    │   └── stopped             # 优雅停止标记
+    ├── logs/                   # 日志文件
+    │   ├── phaethon.log        # 主日志
+    │   └── access.log          # 访问日志
+    ├── cache/                  # 缓存（可安全删除）
+    │   └── dns-cache.db
+    └── certs/                  # 证书和密钥
+        ├── admin.crt
+        └── admin.key
 ```
 
+**设计原则**：
+- **单目录结构**：工作目录包含所有内容，便于备份、迁移、容器化
+- **配置在根**：config.yaml 在工作目录根，便于查找和编辑
+- **数据集中**：所有运行时数据在 data/ 下，便于清理和管理
+- **跨平台**：Windows/Linux 都适用，不依赖系统特定路径
+
 **pkg 存放位置**：
-- 放在 `.phaethon/packages/` 目录（相对于看门狗的工作目录）
+- 放在 `data/packages/` 目录（相对于看门狗的工作目录）
 - pkg 文件是分发的 source of truth，包含签名、元数据、binary
 
 **worker binary 存放位置**：
-- 提取到 `.phaethon/worker/` 目录（相对于看门狗的工作目录）
-- 例如：`.phaethon/worker/phaethon-v0.3.5`
+- 提取到 `data/worker/` 目录（相对于看门狗的工作目录）
+- 例如：`data/worker/phaethon-v0.3.5`
 - 不使用 `/tmp`，避免被系统自动清理，统一管理
 - 如果 binary 已存在，直接复用，不重复提取
+- 只保留最近 5 个版本，自动清理旧版本
+
+**状态文件位置**：
+- mesh-state.json → `data/state/mesh-state.json`
+- PID 文件 → `data/state/phaethon.pid`
+- 停止标记 → `data/state/stopped`
+
+**日志文件位置**：
+- 主日志 → `data/logs/phaethon.log`
+- 支持日志轮转，保留最近 7 天或 100MB
+
+**证书文件位置**：
+- 证书和密钥 → `data/certs/`
+- 便于备份和权限管理
 
 **看门狗启动流程**：
-1. 从 `./.phaethon/packages/` 查找最高版本的 pkg 文件
-2. 检查 `.phaethon/worker/` 是否已有对应版本的 binary
-3. 如果没有，从 pkg 文件中提取 binary 到 `.phaethon/worker/` 目录（必须提取，不能直接执行 zip 中的文件）
-4. 启动 binary 时，**工作目录设置为看门狗的工作目录**（即 `.` 目录，不是 `.phaethon/packages/`）
-5. 配置文件（`config.yaml`）、日志等都在看门狗的工作目录，确保 binary 能正确读取
+1. 从 `./data/packages/` 查找最高版本的 pkg 文件
+2. 检查 `data/worker/` 是否已有对应版本的 binary
+3. 如果没有，从 pkg 文件中提取 binary 到 `data/worker/` 目录（必须提取，不能直接执行 zip 中的文件）
+4. 启动 binary 时，**工作目录设置为看门狗的工作目录**（即 `.` 目录，不是 `data/packages/`）
+5. 配置文件（`config.yaml`）在工作目录根，确保 binary 能正确读取
 
 **为什么看门狗不需要升级**：
 - 看门狗是启动器，类似 BIOS/bootloader，逻辑简单且稳定

@@ -191,10 +191,10 @@ var runCnt int
 // mix with user configuration files.
 var subCacheDir string
 
-// dataDir is the unified runtime data directory (.phaethon/).
+// dataDir is the unified runtime data directory (data/).
 // All non-configuration persistent data (reverse-id, bindings, subscription cache)
 // is stored here, separate from the static conf/ directory.
-var dataDir = filepath.Join(".", ".phaethon")
+var dataDir = filepath.Join(".", "data")
 var configPath = "config.yaml" // default, will be updated in getRuleConf()
 
 func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeResources, error) {
@@ -592,7 +592,7 @@ func getRuleConf() *config.RuleConfiguration {
 
 	// 4. Ensure every instance has a stable ReverseID (even pure registry instances
 	//    with no reverse configs need one for identification in the admin UI).
-	//    ReverseID is stored in .phaethon/setup/reverse-id file.
+	//    ReverseID is stored in data/setup/reverse-id file.
 	_ = loadOrGenerateInstanceReverseID(ruleConf)
 
 	// 5. Normalize reverse configs: assign Seq numbers to any config lacking one.
@@ -646,11 +646,11 @@ func getRuleConf() *config.RuleConfiguration {
 }
 
 // loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
-// Priority: .phaethon/setup/reverse-id file > generate new.
+// Priority: data/setup/reverse-id file > generate new.
 // If a new one is generated, it is saved to the reverse-id file.
 func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration) string {
-	// Load from .phaethon/setup/reverse-id file
-	dataDir := filepath.Join(".phaethon", "setup")
+	// Load from data/setup/reverse-id file
+	dataDir := filepath.Join("data", "setup")
 	id, err := reverse.GetReverseID(dataDir)
 	if err != nil {
 		util.Logger.Printf("[REVERSE] load/generate instance reverse-id fail: %v", err)
@@ -1016,12 +1016,12 @@ func (cp *childProcess) wait() {
 	<-cp.done
 }
 
-// findLatestPkgAndExtract finds the highest version pkg file in .phaethon/packages/
+// findLatestPkgAndExtract finds the highest version pkg file in data/packages/
 // that matches the current platform/arch, extracts the binary to a temp location,
 // and returns the path to the extracted binary.
 // Returns empty string if no suitable pkg is found.
 func findLatestPkgAndExtract() string {
-	packagesDir := ".phaethon/packages"
+	packagesDir := "data/packages"
 
 	// List all .pkg files
 	entries, err := os.ReadDir(packagesDir)
@@ -1065,8 +1065,8 @@ func findLatestPkgAndExtract() string {
 
 	util.LogInfo("watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
 
-	// Check if binary already exists in .phaethon/worker/
-	workerDir := ".phaethon/worker"
+	// Check if binary already exists in data/worker/
+	workerDir := "data/worker"
 	binaryPath := filepath.Join(workerDir, fmt.Sprintf("phaethon-%s", latestVersion))
 	if _, err := os.Stat(binaryPath); err == nil {
 		// Binary already exists, no need to extract
@@ -1081,7 +1081,7 @@ func findLatestPkgAndExtract() string {
 		return ""
 	}
 
-	// Write binary to .phaethon/worker/ directory
+	// Write binary to data/worker/ directory
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
 		util.LogError("watchdog: create worker dir failed: %v", err)
 		return ""
@@ -1121,7 +1121,7 @@ func runWatchdogMode() {
 		util.LogInfo("watchdog: no pkg found, using current executable: %s", exe)
 	} else {
 		util.LogInfo("watchdog: using extracted binary: %s", exe)
-		// Keep extracted binary in .phaethon/worker/ for reuse and debugging
+		// Keep extracted binary in data/worker/ for reuse and debugging
 	}
 
 	lastRestart := time.Time{}

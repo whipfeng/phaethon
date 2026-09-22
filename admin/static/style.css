@@ -616,11 +616,11 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 100;
+    z-index: 150;
 }
 .modal.hidden { display: none; }
-#group-nodes-modal { z-index: 110; }
-#blocked-delete-modal { z-index: 110; }
+#group-nodes-modal { z-index: 160; }
+#blocked-delete-modal { z-index: 160; }
 .modal-content {
     position: relative;
     display: flex;

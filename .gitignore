@@ -55,3 +55,4 @@ scripts/.env
 
 # Qoder CLI local state
 .qoder/
+scripts/signing.key

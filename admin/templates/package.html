@@ -1,0 +1,263 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <!-- Upload -->
+    <div class="card">
+        <h3 data-i18n="package.uploadTitle">上传发布包</h3>
+        <div id="package-upload-area"
+             style="border:2px dashed var(--border-color, #444); border-radius:8px; padding:1.5rem; text-align:center; cursor:pointer;"
+             onclick="document.getElementById('package-file-input').click()">
+            <div style="font-size:1.6rem;">📦</div>
+            <div data-i18n="package.uploadHint">点击选择或拖拽 .pkg 文件到此处</div>
+            <div class="text-muted text-small" style="margin-top:0.5rem;" data-i18n="package.uploadFormat">格式：phaethon-v1.0-linux-amd64.pkg（zip 包含 binary + meta.json + signature）</div>
+        </div>
+        <input type="file" id="package-file-input" accept=".pkg" class="hidden">
+        <div id="package-upload-progress" class="hidden" style="margin-top:0.75rem;">
+            <div class="text-muted text-small" id="package-upload-status"></div>
+            <div style="background:var(--bg-tertiary, #222); border-radius:4px; height:10px; overflow:hidden; margin-top:4px;">
+                <div id="package-upload-bar" style="background:var(--accent); height:100%; width:0%; transition:width 0.2s;"></div>
+            </div>
+        </div>
+        <div id="package-disabled-warn" class="hidden" style="margin-top:0.75rem; padding:0.5rem 0.75rem; background:rgba(248,81,73,0.1); border-radius:6px; color:var(--text-secondary);" data-i18n="package.uploadDisabledWarn"></div>
+    </div>
+
+    <!-- Package list -->
+    <div class="card" style="margin-top:1rem;">
+        <h3 data-i18n="package.listTitle">发布包列表</h3>
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="package.colFilename">文件名</th>
+                        <th data-i18n="package.colVersion">版本</th>
+                        <th data-i18n="package.colPlatform">平台</th>
+                        <th data-i18n="package.colSize">大小</th>
+                        <th data-i18n="package.colTime">上传时间</th>
+                        <th data-i18n="package.colSignature">签名</th>
+                        <th data-i18n="package.colPublished">发布状态</th>
+                        <th data-i18n="package.colActions">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="package-list-tbody"></tbody>
+            </table>
+        </div>
+        <div id="package-list-empty" class="text-muted"></div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const PackagePage = {
+        data: null,
+
+        t(key, fallback) {
+            if (typeof i18n !== 'undefined' && i18n.t) {
+                const val = i18n.t(key);
+                if (val !== key) return val;
+            }
+            return fallback || key;
+        },
+
+        init() {
+            this.setupUpload();
+            this.refresh();
+        },
+
+        setupUpload() {
+            const area = document.getElementById('package-upload-area');
+            const input = document.getElementById('package-file-input');
+
+            // Drag & drop
+            area.addEventListener('dragover', e => {
+                e.preventDefault();
+                area.style.borderColor = 'var(--accent)';
+            });
+            area.addEventListener('dragleave', () => {
+                area.style.borderColor = '';
+            });
+            area.addEventListener('drop', e => {
+                e.preventDefault();
+                area.style.borderColor = '';
+                if (e.dataTransfer.files.length > 0) {
+                    this.uploadFile(e.dataTransfer.files[0]);
+                }
+            });
+
+            // File input
+            input.addEventListener('change', () => {
+                if (input.files.length > 0) {
+                    this.uploadFile(input.files[0]);
+                }
+            });
+        },
+
+        uploadFile(file) {
+            if (!file.name.endsWith('.pkg')) {
+                showToast(this.t('package.toast.invalidFormat', '请选择 .pkg 文件'), 'error');
+                return;
+            }
+
+            const progress = document.getElementById('package-upload-progress');
+            const status = document.getElementById('package-upload-status');
+            const bar = document.getElementById('package-upload-bar');
+
+            progress.classList.remove('hidden');
+            status.textContent = this.t('package.uploading', '上传中…');
+            bar.style.width = '0%';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', './api/packages/upload');
+
+            xhr.upload.onprogress = e => {
+                if (e.lengthComputable) {
+                    const pct = (e.loaded / e.total * 100).toFixed(0);
+                    bar.style.width = pct + '%';
+                    status.textContent = this.t('package.uploading', '上传中…') + ' ' + pct + '%';
+                }
+            };
+
+            xhr.onload = () => {
+                if (xhr.status === 201) {
+                    status.textContent = this.t('package.uploadOk', '上传成功');
+                    bar.style.width = '100%';
+                    showToast(this.t('package.toast.uploadOk', '发布包上传成功'), 'success');
+                    setTimeout(() => {
+                        progress.classList.add('hidden');
+                        this.refresh();
+                    }, 1500);
+                } else {
+                    const err = JSON.parse(xhr.responseText);
+                    status.textContent = this.t('package.uploadFailed', '上传失败') + ': ' + (err.error || xhr.statusText);
+                    showToast(this.t('package.toast.uploadFailed', '上传失败') + ': ' + (err.error || ''), 'error');
+                }
+            };
+
+            xhr.onerror = () => {
+                status.textContent = this.t('package.uploadFailed', '上传失败');
+                showToast(this.t('package.toast.networkError', '网络错误'), 'error');
+            };
+
+            xhr.send(formData);
+        },
+
+        refresh() {
+            fetch('./api/packages')
+                .then(r => r.json())
+                .then(data => {
+                    this.data = data;
+                    this.render();
+                })
+                .catch(err => {
+                    console.error('fetch packages failed:', err);
+                });
+        },
+
+        render() {
+            const tbody = document.getElementById('package-list-tbody');
+            const empty = document.getElementById('package-list-empty');
+            const packages = this.data.packages || [];
+
+            tbody.innerHTML = '';
+            empty.textContent = packages.length === 0 ? this.t('package.emptyList', '暂无发布包') : '';
+
+            packages.forEach(pkg => {
+                const tr = document.createElement('tr');
+                const sigBadge = pkg.signatureValid
+                    ? '<span class="badge badge-info">✅</span>'
+                    : '<span class="badge badge-error">❌</span>';
+                const pubBadge = pkg.published
+                    ? '<span class="badge badge-info">🏆 ' + this.t('package.published', '已发布') + '</span>'
+                    : '<span class="badge">' + this.t('package.notPublished', '未发布') + '</span>';
+
+                tr.innerHTML =
+                    '<td style="font-family:monospace;">' + this.escapeHtml(pkg.filename) + '</td>' +
+                    '<td>' + this.escapeHtml(pkg.meta.version) + '</td>' +
+                    '<td>' + this.escapeHtml(pkg.meta.platform) + '/' + this.escapeHtml(pkg.meta.arch) + '</td>' +
+                    '<td>' + this.fmtSize(pkg.size) + '</td>' +
+                    '<td>' + this.fmtTime(pkg.uploadedAt) + '</td>' +
+                    '<td>' + sigBadge + '</td>' +
+                    '<td>' + pubBadge + '</td>' +
+                    '<td>' +
+                    '<button class="btn btn-sm btn-outline" onclick="PackagePage.download(\'' + pkg.id + '\')">' + this.t('package.download', '下载') + '</button> ' +
+                    (pkg.published ? '' : '<button class="btn btn-sm btn-primary" onclick="PackagePage.publish(\'' + pkg.id + '\')">' + this.t('package.publish', '发布') + '</button> ') +
+                    '<button class="btn btn-sm btn-danger" onclick="PackagePage.remove(\'' + pkg.id + '\')">' + this.t('package.delete', '删除') + '</button>' +
+                    '</td>';
+                tbody.appendChild(tr);
+            });
+        },
+
+        download(id) {
+            window.open('./api/packages/' + id + '/download', '_blank');
+        },
+
+        publish(id) {
+            if (!confirm(this.t('package.confirmPublish', '确认将此包标记为已发布？'))) {
+                return;
+            }
+            fetch('./api/packages/' + id + '/publish', {method: 'POST'})
+                .then(r => {
+                    if (r.ok) {
+                        showToast(this.t('package.toast.publishOk', '已标记为发布'), 'success');
+                        this.refresh();
+                    } else {
+                        return r.json().then(err => {
+                            showToast(this.t('package.toast.publishFailed', '发布失败') + ': ' + err.error, 'error');
+                        });
+                    }
+                })
+                .catch(err => {
+                    showToast(this.t('package.toast.networkError', '网络错误'), 'error');
+                });
+        },
+
+        remove(id) {
+            if (!confirm(this.t('package.confirmDelete', '确认删除此发布包？'))) {
+                return;
+            }
+            fetch('./api/packages/' + id, {method: 'DELETE'})
+                .then(r => {
+                    if (r.ok) {
+                        showToast(this.t('package.toast.deleteOk', '已删除'), 'success');
+                        this.refresh();
+                    } else {
+                        return r.json().then(err => {
+                            showToast(this.t('package.toast.deleteFailed', '删除失败') + ': ' + err.error, 'error');
+                        });
+                    }
+                })
+                .catch(err => {
+                    showToast(this.t('package.toast.networkError', '网络错误'), 'error');
+                });
+        },
+
+        escapeHtml(s) {
+            if (!s) return '';
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        },
+
+        fmtSize(bytes) {
+            if (bytes == null) return '-';
+            if (typeof formatBytes === 'function') return formatBytes(bytes);
+            return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+        },
+
+        fmtTime(t) {
+            if (!t) return '-';
+            const d = new Date(t);
+            return d.toLocaleString();
+        }
+    };
+
+    window.PackagePage = PackagePage;
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => PackagePage.init());
+    } else {
+        PackagePage.init();
+    }
+})();
+</script>
+{{end}}

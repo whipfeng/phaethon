@@ -103,9 +103,8 @@ type Peer struct {
 	Arch      string         `json:"arch"`
 	BuildTag  string         `json:"buildTag,omitempty"`
 	Checksum  string         `json:"checksum"`
-	Status    string         `json:"status"` // "connecting", "helloed", "updating", "upToDate", "update_failed", "failed"
+	Status    string         `json:"status"` // "connecting", "helloed", "upToDate", "failed"
 	LastSeen  time.Time      `json:"lastSeen"`
-	Inventory []CacheEntry   `json:"inventory,omitempty"`
 
 	MeshNodeID string `json:"meshNodeId,omitempty"`
 	MeshVIP    string `json:"meshVip,omitempty"`
@@ -114,20 +113,7 @@ type Peer struct {
 	writeCh       chan writeReq
 	stopCh        chan struct{}
 	stopOnce      sync.Once // ensures stopCh is closed exactly once
-	serveFilePath string    // file path to serve chunks from (set during update_request handling)
-
 	meshSender *peerSender // mesh peer sender, created once on hello
-
-	// Chunk transfer state - prevents deadlock when both sides transfer simultaneously
-	transferMu      sync.Mutex
-	receivingChunks bool
-	chunkCh         chan chunkFrame
-}
-
-// chunkFrame represents a frame received during chunk transfer.
-type chunkFrame struct {
-	frameType byte
-	payload   []byte
 }
 
 // HelloMsg is exchanged after P2P connection is established.
@@ -140,7 +126,6 @@ type HelloMsg struct {
 	Platform  string       `json:"platform"`
 	Arch      string       `json:"arch"`
 	Checksum  string       `json:"checksum"`
-	Inventory []CacheEntry `json:"inventory,omitempty"`
 	MeshNodeID string     `json:"meshNodeId,omitempty"`
 	MeshVIP    string     `json:"meshVip,omitempty"`
 }
@@ -396,32 +381,6 @@ func (m *P2PManager) runSession(peer *Peer) {
 		}
 		util.LogDebug("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
-		// During chunk transfer, route chunk data and heartbeats to channel but still dispatch commands
-		peer.transferMu.Lock()
-		if peer.receivingChunks && (frameType == reverse.FrameData || frameType == reverse.FrameHeartbeat) {
-			// Check if this is a command (JSON with "cmd" field) or chunk data
-			if frameType == reverse.FrameData && len(payload) > 0 {
-				var msg map[string]interface{}
-				if json.Unmarshal(payload, &msg) == nil {
-					if _, hasCmd := msg["cmd"]; hasCmd {
-						peer.transferMu.Unlock()
-						m.handleCommand(peer, payload)
-						continue
-					}
-				}
-			}
-			// Not a command, route to chunk channel (includes heartbeats and chunk data)
-			ch := peer.chunkCh
-			peer.transferMu.Unlock()
-			select {
-			case ch <- chunkFrame{frameType: frameType, payload: payload}:
-			case <-peer.stopCh:
-				return
-			}
-			continue
-		}
-		peer.transferMu.Unlock()
-
 		switch frameType {
 		case reverse.FrameHeartbeat:
 			continue
@@ -461,9 +420,6 @@ func (m *P2PManager) sendHello(peer *Peer) {
 		Platform:        m.platform,
 		Arch:            m.arch,
 	}
-	if m.cache != nil {
-		hello.Inventory = m.cache.ListInventory()
-	}
 	if m.meshEnabled {
 		hello.MeshNodeID = m.meshNodeID
 		hello.MeshVIP = m.meshVIP
@@ -484,38 +440,6 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 	switch cmd {
 	case "hello":
 		m.handleHello(peer, payload)
-	case "update_request":
-		// Binary distribution disabled
-		util.LogDebug("[P2P] ignoring update_request from %s (binary distribution disabled)", peer.ID)
-	case "chunk_req":
-		// Binary distribution disabled
-		util.LogDebug("[P2P] ignoring chunk_req from %s (binary distribution disabled)", peer.ID)
-	case "manifest":
-		// Binary distribution disabled - ignore manifests
-		util.LogDebug("[P2P] ignoring manifest from %s (binary distribution disabled)", peer.ID)
-		// // Set up chunk channel before spawning goroutine to prevent race
-		// peer.transferMu.Lock()
-		// if peer.receivingChunks {
-		// 	peer.transferMu.Unlock()
-		// 	util.LogWarn("[P2P] already receiving chunks from %s, ignoring manifest", peer.ID)
-		// 	return
-		// }
-		// peer.receivingChunks = true
-		// peer.chunkCh = make(chan chunkFrame, 16)
-		// peer.transferMu.Unlock()
-		//
-		// go func() {
-		// 	defer func() {
-		// 		peer.transferMu.Lock()
-		// 		peer.receivingChunks = false
-		// 		peer.chunkCh = nil
-		// 		peer.transferMu.Unlock()
-		// 	}()
-		// 	m.handleManifest(peer, payload)
-		// }()
-	case "update_ack":
-		// Binary distribution disabled
-		util.LogDebug("[P2P] ignoring update_ack from %s (binary distribution disabled)", peer.ID)
 	case "mesh_gossip":
 		if m.meshHandler != nil {
 			// Extract payload - it could be json.RawMessage, []byte, or map[string]interface{}
@@ -560,14 +484,13 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	peer.Arch = hello.Arch
 	peer.BuildTag = hello.BuildTag
 	peer.Checksum = hello.Checksum
-	peer.Inventory = hello.Inventory
 	peer.MeshNodeID = hello.MeshNodeID
 	peer.MeshVIP = hello.MeshVIP
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
 
-	util.LogInfo("[P2P] hello from %s: node=%s version=%s platform=%s/%s buildTag=%s inventory=%d entries",
-		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag, len(hello.Inventory))
+	util.LogInfo("[P2P] hello from %s: node=%s version=%s platform=%s/%s buildTag=%s",
+		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag)
 
 	if hello.MeshNodeID != "" {
 		if m.meshHandler != nil {
@@ -577,51 +500,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		}
 	}
 
-	// Compare inventories: request entries we don't have or have older versions of
-	if m.cache == nil {
-		return
-	}
-
-	myInventory := m.cache.ListInventory()
-	var toRequest []CacheEntry
-
-	for _, peerEntry := range hello.Inventory {
-		// Find our entry with matching platform/arch/buildTag
-		var myVersion string
-		for _, myEntry := range myInventory {
-			if myEntry.Platform == peerEntry.Platform && myEntry.Arch == peerEntry.Arch && myEntry.BuildTag == peerEntry.BuildTag {
-				myVersion = myEntry.Version
-				break
-			}
-		}
-
-		if myVersion == "" {
-			// We don't have this entry at all
-			util.LogInfo("[P2P] peer has %s/%s/%s/%s which we don't have, requesting",
-				peerEntry.Platform, peerEntry.Arch, peerEntry.BuildTag, peerEntry.Version)
-			toRequest = append(toRequest, peerEntry)
-		} else if compareVersions(myVersion, peerEntry.Version) < 0 {
-			// Peer has a newer version
-			util.LogInfo("[P2P] peer has newer %s/%s/%s: %s > %s, requesting",
-				peerEntry.Platform, peerEntry.Arch, peerEntry.BuildTag, peerEntry.Version, myVersion)
-			toRequest = append(toRequest, peerEntry)
-		}
-	}
-
-	// Binary distribution disabled - just mark as upToDate
-	// if len(toRequest) > 0 {
-	// 	peer.Status = "updating"
-	// 	go func() {
-	// 		for _, entry := range toRequest {
-	// 			m.requestUpdate(peer, entry)
-	// 			// Small delay between requests to avoid overwhelming the peer
-	// 			time.Sleep(100 * time.Millisecond)
-	// 		}
-	// 	}()
-	// } else {
-	util.LogInfo("[P2P] inventories sync skipped (binary distribution disabled) with %s", peer.ID)
 	peer.Status = "upToDate"
-	// }
 }
 
 // SetMeshInfo configures mesh networking parameters.
@@ -747,7 +626,6 @@ func (m *P2PManager) GetPeers() []Peer {
 			Checksum:  p.Checksum,
 			Status:    p.Status,
 			LastSeen:  p.LastSeen,
-			Inventory: p.Inventory,
 		})
 	}
 	return result
@@ -778,12 +656,43 @@ func (m *P2PManager) VersionString() string {
 	return fmt.Sprintf("%s/%s/%s", m.version, m.platform, m.arch)
 }
 
-// compareVersions compares two version strings produced by `git describe --tags --always --dirty`.
+// BuildInfo returns the running binary's version, platform, arch and buildTag
+// (recorded at manager construction from main.Version).
+func (m *P2PManager) BuildInfo() (version, platform, arch, buildTag string) {
+	return m.version, m.platform, m.arch, m.buildTag
+}
+
+// runningVersion returns the running binary's version for self-update logging.
+func runningVersion() string {
+	if GlobalP2PManager != nil {
+		return GlobalP2PManager.version
+	}
+	return "unknown"
+}
+
+// CacheInventory returns the p2p-cache entries with file sizes and mod times.
+// Used by the admin console to show the node's binary version history.
+func (m *P2PManager) CacheInventory() []CacheEntryInfo {
+	if m.cache == nil {
+		return nil
+	}
+	return m.cache.Inventory()
+}
+
+// CacheFilePath returns the file path of a cache entry (for admin publish).
+func (m *P2PManager) CacheFilePath(platform, arch, buildTag, version string) (string, error) {
+	if m.cache == nil {
+		return "", fmt.Errorf("p2p cache not initialized")
+	}
+	return m.cache.FilePath(platform, arch, buildTag, version)
+}
+
+// CompareVersions compares two version strings produced by `git describe --tags --always --dirty`.
 // Returns -1 if a < b, 0 if equal, 1 if a > b.
 //
 // Formats: "v1.2.3", "v1.2.3-5-gabc1234", "v1.2.3-5-gabc1234-dirty", "78e9dfc", "dev"
 // Tagged versions are always newer than untagged. More commits after tag = newer.
-func compareVersions(a, b string) int {
+func CompareVersions(a, b string) int {
 	if a == b {
 		return 0
 	}

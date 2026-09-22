@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -353,6 +354,11 @@ type AdminServer struct {
 	// defaultRaw holds the embedded default config bytes, used for reset/fallback.
 	defaultRaw []byte
 
+	// package upload/publish state (see package.go)
+	packageUploadMu   sync.Mutex // one upload at a time
+	packagePublishMu  sync.Mutex // one publish at a time (single-flight)
+	packagePublishing atomic.Bool
+
 	// sessionSecret is a per-process random fallback HMAC key for signed cookies,
 	// used only when the admin token is empty. It is generated at startup so that
 	// deployments without an explicit token are still protected against cookie forgery.
@@ -522,6 +528,7 @@ type pageTemplates struct {
 	mappings      *template.Template
 	resolvers     *template.Template
 	reverseWizard *template.Template
+	packagePage   *template.Template
 	login         *template.Template
 	setup         *template.Template
 	config        *template.Template
@@ -661,6 +668,7 @@ func (s *AdminServer) parseTemplates() {
 		mappings:      parsePage("mappings.html"),
 		resolvers:     parsePage("resolvers.html"),
 		reverseWizard: parsePage("reverse-wizard.html"),
+		packagePage:   parsePage("package.html"),
 		login:         parseStandalone("login.html"),
 		setup:         parseStandalone("setup.html"),
 		config:        parsePage("config.html"),
@@ -993,6 +1001,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/connections", s.handleConnectionsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
+	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
 
@@ -1024,6 +1033,9 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reverse/bindings/", s.apiReverseBindings)
 	mux.HandleFunc("/api/reverse/", s.apiReverseItem)
 	mux.HandleFunc("/api/p2p", s.apiP2P)
+	mux.HandleFunc("/api/packages", s.apiPackages)
+	mux.HandleFunc("/api/packages/upload", s.apiPackageUpload)
+	mux.HandleFunc("/api/packages/", s.apiPackageItem)
 	mux.HandleFunc("/api/mesh", s.apiMesh)
 	mux.HandleFunc("/api/mesh/config", s.apiMesh)
 	mux.HandleFunc("/api/mesh/gossip", s.apiMesh)
@@ -1091,6 +1103,14 @@ func (s *AdminServer) handleMeshPage(w http.ResponseWriter, r *http.Request) {
 		"MeshEnabled": mesh.GlobalMeshManager != nil,
 	}
 	s.render(w, r, "mesh.html", data)
+}
+
+func (s *AdminServer) handlePackagePage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title":   "Package",
+		"Version": os.Getenv("PHAETHON_VERSION"),
+	}
+	s.render(w, r, "package.html", data)
 }
 
 // envInfo detects whether an environment-specific config override file exists.
@@ -4897,6 +4917,8 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.resolvers
 	case "reverse-wizard.html":
 		t = s.pages.reverseWizard
+	case "package.html":
+		t = s.pages.packagePage
 	case "config.html":
 		t = s.pages.config
 	case "login.html":

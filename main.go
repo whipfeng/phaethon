@@ -693,6 +693,13 @@ func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
 }
 
 func main() {
+	// Handle --version before anything else: a CLI version query must not
+	// spawn a watchdog or worker process (also used by admin package probe).
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(Version)
+		return
+	}
+
 	// If PHAETHON_WORKER is not set, this process is the watchdog.
 	// The watchdog spawns the actual server as a child and monitors it.
 	if os.Getenv("PHAETHON_WORKER") == "" {
@@ -706,11 +713,6 @@ func main() {
 
 	// Handle --cleanup-pid for self-update: wait for old watchdog, clean up .bak
 	handleCleanupPid()
-
-	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Println(Version)
-		return
-	}
 
 	// Parse command-line flags early so they can override config values.
 	// ADMIN_PORT environment variable is also supported for container/script

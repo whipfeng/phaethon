@@ -37,9 +37,9 @@ func TestCompareVersions(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := compareVersions(tt.a, tt.b)
+		got := CompareVersions(tt.a, tt.b)
 		if got != tt.want {
-			t.Errorf("compareVersions(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
 	}
 }

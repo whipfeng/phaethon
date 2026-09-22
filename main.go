@@ -1534,9 +1534,9 @@ func wireAdminCallbacks(resources *activeResources) {
 	if resources == nil || resources.adminServer == nil || resources.ruleConf == nil {
 		return
 	}
-	admin := resources.adminServer
-	admin.RefreshSubscription = func(subName string) error {
-		conf := admin.GetConfig()
+	adminSrv := resources.adminServer
+	adminSrv.RefreshSubscription = func(subName string) error {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return fmt.Errorf("config not ready")
 		}
@@ -1547,8 +1547,8 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return fmt.Errorf("subscription not found: %s", subName)
 	}
-	admin.CheckGroupHealth = func(groupName string) error {
-		conf := admin.GetConfig()
+	adminSrv.CheckGroupHealth = func(groupName string) error {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return fmt.Errorf("config not ready")
 		}
@@ -1560,8 +1560,8 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return fmt.Errorf("group not found: %s", groupName)
 	}
-	admin.CheckGroupTest = func(groupName string) error {
-		conf := admin.GetConfig()
+	adminSrv.CheckGroupTest = func(groupName string) error {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return fmt.Errorf("config not ready")
 		}
@@ -1573,8 +1573,8 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return fmt.Errorf("group not found: %s", groupName)
 	}
-	admin.CheckGroupProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
-		conf := admin.GetConfig()
+	adminSrv.CheckGroupProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return config.HealthInfo{}, fmt.Errorf("config not ready")
 		}
@@ -1625,8 +1625,8 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return config.HealthInfo{}, fmt.Errorf("group not found: %s", groupName)
 	}
-	admin.CheckSubscriptionHealth = func(subName, nodeName, url string) (config.HealthInfo, error) {
-		conf := admin.GetConfig()
+	adminSrv.CheckSubscriptionHealth = func(subName, nodeName, url string) (config.HealthInfo, error) {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return config.HealthInfo{}, fmt.Errorf("config not ready")
 		}
@@ -1673,8 +1673,8 @@ func wireAdminCallbacks(resources *activeResources) {
 			LastCheck: time.Now(),
 		}, nil
 	}
-	admin.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
-		conf := admin.GetConfig()
+	adminSrv.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
+		conf := adminSrv.GetConfig()
 		if conf == nil {
 			return config.HealthInfo{}, fmt.Errorf("config not ready")
 		}
@@ -1706,19 +1706,19 @@ func wireAdminCallbacks(resources *activeResources) {
 			LastCheck: time.Now(),
 		}, nil
 	}
-	admin.GetReverseBindings = func() []server.PortBinding {
+	adminSrv.GetReverseBindings = func() []server.PortBinding {
 		if server.GlobalControlManager == nil {
 			return nil
 		}
 		return server.GlobalControlManager.GetBindings()
 	}
-	admin.ForceRemoveBinding = func(reverseID string, seq int) error {
+	adminSrv.ForceRemoveBinding = func(reverseID string, seq int) error {
 		if server.GlobalControlManager == nil {
 			return fmt.Errorf("control manager not available")
 		}
 		return server.GlobalControlManager.ForceRemoveBinding(reverseID, seq)
 	}
-	admin.OnIncrementalUpdate = func() error {
+	adminSrv.OnIncrementalUpdate = func() error {
 		// mergeAndInitLocked already updated s.conf in place, which is the same
 		// object as resources.ruleConf. All servers see changes immediately.
 		activeRuleConf.Store(resources.ruleConf)
@@ -1756,7 +1756,7 @@ func wireAdminCallbacks(resources *activeResources) {
 
 		return nil
 	}
-	admin.OnMappingUpdate = func(old, newMapping *config.Mapping) error {
+	adminSrv.OnMappingUpdate = func(old, newMapping *config.Mapping) error {
 		// Mapping deleted
 		if newMapping == nil && old != nil {
 			if ln, ok := resources.mappingListeners[old.Name]; ok {
@@ -1831,7 +1831,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return nil
 	}
-	admin.OnReverseConfigUpdate = func(old, newConfig *config.ReverseConfig) error {
+	adminSrv.OnReverseConfigUpdate = func(old, newConfig *config.ReverseConfig) error {
 		// Reverse config deleted
 		if newConfig == nil && old != nil {
 			// Close the per-config stop channel to stop the goroutine
@@ -1867,6 +1867,56 @@ func wireAdminCallbacks(resources *activeResources) {
 			}
 		}
 		return nil
+		}
+
+	// Mesh package distribution setup
+	if resources.meshMgr != nil && resources.tunRes != nil && resources.tunRes.engine != nil {
+		// Set peer lister
+		adminSrv.SetPeerLister(func() []admin.PeerBrief {
+			peers := resources.meshMgr.GetPeers()
+			result := make([]admin.PeerBrief, 0, len(peers))
+			for _, p := range peers {
+				result = append(result, admin.PeerBrief{
+					NodeID: p.NodeID,
+				})
+			}
+			return result
+		})
+
+		// Set mesh dial function
+		adminSrv.SetMeshDialFn(func(network, addr string) (net.Conn, error) {
+			return resources.tunRes.engine.NetDial(network, addr)
+		})
+
+		// Set admin port
+		if adminAddr := adminSrv.ListenAddr(); adminAddr != "" {
+			if _, portStr, err := net.SplitHostPort(adminAddr); err == nil {
+				if port, err := strconv.Atoi(portStr); err == nil {
+					adminSrv.SetAdminPort(port)
+				}
+			}
+		}
+
+		// Set peer registered callback for package sync
+		resources.meshMgr.OnPeerRegistered = func(nodeID string) {
+			adminSrv.SyncFromPeer(nodeID)
+		}
+
+		// Periodic sync as fallback (every 5 minutes)
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					for _, peer := range resources.meshMgr.GetPeers() {
+						adminSrv.SyncFromPeer(peer.NodeID)
+					}
+				case <-resources.meshMgr.CloseCh():
+					return
+				}
+			}
+		}()
 	}
 }
 

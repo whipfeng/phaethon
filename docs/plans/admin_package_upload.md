@@ -3,7 +3,7 @@
 ## 元数据
 
 - 文档类型：Plan
-- 版本：0.3.1
+- 版本：0.3.2
 - 所属项目：phaethon
 - 创建日期：2026-09-21
 - 状态：已评审通过（2026-09-22，简化为文件管理 + 签名验证，为跨节点分发打基础）
@@ -16,6 +16,7 @@
 | 0.2.0 | 2026-09-21 | 评审结论：采纳 D1-D7 推荐方案；D6 升级为**彻底移除 P2P 二进制分发**（非仅禁用）；admin 直接 import p2p（已有依赖，无需回调）；`--version` 判断移到 watchdog 模式之前；probe 以 `PHAETHON_WORKER=1` 环境变量运行以兼容旧版二进制 | Qoder |
 | 0.3.0 | 2026-09-22 | **重大简化**：移除本地自更新流程（不替换运行中程序）；移除 probe 执行（元数据由签名保证可信）；移除 sha256 单独校验（签名包含完整性）；移除缓存区 UI（p2p-cache）；改为 `.pkg` 打包格式（zip：binary + meta.json + signature）；Ed25519 签名验证；"发布"仅为标记状态，为跨节点分发打基础 | Qoder |
 | 0.3.1 | 2026-09-22 | 移除 403 认证门控：签名验证已提供足够安全保障（只有私钥持有者能创建有效包），无需额外的 `AuthEnabled` 或 `package-upload-insecure` 检查。简化配置，符合"签名即信任"理念，为跨节点分发扫清障碍 | Qoder |
+| 0.3.2 | 2026-09-22 | 所有构建信息（version、platform、arch）必须通过 `-ldflags -X` 在编译时注入，不允许运行时检测。`phaethon --version` 输出 `version=X platform=Y arch=Z` 格式供外部探测。meta.json 移除 `buildTag` 字段（windows7 直接作为 platform 值） | Qoder |
 
 ---
 
@@ -104,8 +105,7 @@ dist/
   "arch": "amd64",
   "buildTime": "2026-09-22T10:00:00Z",
   "gitCommit": "abc123def",
-  "goVersion": "go1.21.0",
-  "buildTag": ""
+  "goVersion": "go1.21.0"
 }
 ```
 
@@ -123,6 +123,44 @@ dist/
 phaethon build --version v1.0 --platform linux --arch amd64 --sign-key key.pem
 → 输出：phaethon-v1.0-linux-amd64.pkg
 ```
+
+### 2.5 构建信息注入（已实现）
+
+所有构建信息必须通过 `-ldflags -X` 在编译时注入，**不允许运行时检测**（如 `runtime.GOOS`）：
+
+```go
+// main.go
+var (
+    Version  = "dev"  // -X main.Version=$(GIT_TAG)
+    Platform = ""     // -X main.Platform=linux
+    Arch     = ""     // -X main.Arch=amd64
+)
+```
+
+**Makefile 示例**：
+```makefile
+linux:
+    GOOS=linux GOARCH=amd64 go build -ldflags "-s -w \
+      -X main.Version=$(GIT_TAG) \
+      -X main.Platform=linux \
+      -X main.Arch=amd64" \
+      -o dist/linux-amd64/phaethon .
+
+windows7:
+    $(GO_LEGACY_WIN7) build -ldflags "-s -w \
+      -X main.Version=$(GIT_TAG) \
+      -X main.Platform=windows7 \
+      -X main.Arch=amd64" \
+      -o dist/windows7-amd64/phaethon.exe .
+```
+
+**探测命令**：
+```bash
+$ phaethon --version
+version=v0.1.0-mesh-144-g9e5fca5 platform=linux arch=amd64
+```
+
+此输出格式用于外部工具（如 admin 包 probe、自更新逻辑）探测当前运行的二进制信息。
 
 ---
 

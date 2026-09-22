@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,8 +40,12 @@ import (
 //go:embed conf/default.yaml
 var defaultConfig []byte
 
-// Version is set via -ldflags at build time.
-var Version = "dev"
+// Build info set via -ldflags at build time.
+var (
+	Version  = "dev"
+	Platform = "" // e.g., "linux", "windows", "darwin"
+	Arch     = "" // e.g., "amd64", "arm64"
+)
 
 // activeRuleConf holds the most recent loaded runtime configuration so callbacks
 // scheduled after a reload can still locate the current group instance.
@@ -226,13 +229,16 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	if err != nil {
 		util.Logger.Printf("P2P cache init failed: %v", err)
 	} else {
-		if err := p2pCache.SeedOwnBinary(Version, runtime.GOOS, runtime.GOARCH, p2p.DetectBuildTag()); err != nil {
+		if Platform == "" || Arch == "" {
+			util.Logger.Printf("ERROR: Platform and Arch must be set via -ldflags at build time")
+		}
+		if err := p2pCache.SeedOwnBinary(Version, Platform, Arch, p2p.DetectBuildTag()); err != nil {
 			util.Logger.Printf("P2P seed own binary failed: %v", err)
 		}
 		p2p.CleanupBackup()
 	}
 	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
-	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, runtime.GOOS, runtime.GOARCH)
+	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
 
 	// Initialize mesh overlay network (always enabled)
 	// If mesh config is missing, create a default configuration
@@ -696,7 +702,7 @@ func main() {
 	// Handle --version before anything else: a CLI version query must not
 	// spawn a watchdog or worker process (also used by admin package probe).
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Println(Version)
+		fmt.Printf("version=%s platform=%s arch=%s\n", Version, Platform, Arch)
 		return
 	}
 

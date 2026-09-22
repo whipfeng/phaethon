@@ -31,7 +31,11 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // Version 5: two-trie DNS routing (16281a8) changed cross-node .phn answer semantics
 // (static trie answers even when the owning node is down; no remote fallback); mixing
 // pre/post versions silently wedges remote .phn resolution after node restarts.
-const P2PProtocolVersion = 5
+// Version 6: hello/gossip unified - both use GossipInfo structure, hello carries topology
+// for immediate route establishment, sender nodeID extracted from ClaimedSubnets[hop=0],
+// removed unused HelloMsg fields (NodeID/Version/Platform/Arch/BuildTag/Checksum/MeshNodeID/MeshVIP),
+// renamed "mesh_gossip" to "gossip".
+const P2PProtocolVersion = 6
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
@@ -64,11 +68,14 @@ type MeshHandler interface {
 	HandleTopologyGossip(sender mesh.PeerSender, data []byte)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(sender mesh.PeerSender)
+	UnregisterPeerByNodeID(nodeID string)
+	BuildGossipInfo() *mesh.GossipInfo
 }
 
 // peerSender wraps a P2P peer connection to implement mesh.PeerSender.
 type peerSender struct {
-	peer *Peer
+	peer   *Peer
+	nodeID string // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 }
 
 func (s *peerSender) Send(data []byte) error {
@@ -77,19 +84,11 @@ func (s *peerSender) Send(data []byte) error {
 }
 
 func (s *peerSender) SendGossip(data []byte) {
-	cmd := map[string]interface{}{
-		"cmd":     "mesh_gossip",
-		"payload": json.RawMessage(data),
-	}
-	wrapped, err := json.Marshal(cmd)
-	if err != nil {
-		return
-	}
-	enqueueWrite(s.peer, reverse.FrameData, wrapped)
+	enqueueWrite(s.peer, reverse.FrameData, data)
 }
 
 func (s *peerSender) GetNodeID() string {
-	return s.peer.MeshNodeID
+	return s.nodeID
 }
 
 // writeReq is a frame queued for async write on the peer connection.
@@ -100,38 +99,16 @@ type writeReq struct {
 
 // Peer represents a connected P2P peer.
 type Peer struct {
-	ID        string         // proxy name used to reach this peer (local only, not serialized)
-	NodeID    string         `json:"nodeId"`
-	Version   string         `json:"version"`
-	Platform  string         `json:"platform"`
-	Arch      string         `json:"arch"`
-	BuildTag  string         `json:"buildTag,omitempty"`
-	Checksum  string         `json:"checksum"`
-	Status    string         `json:"status"` // "connecting", "helloed", "upToDate", "failed"
-	LastSeen  time.Time      `json:"lastSeen"`
-
-	MeshNodeID string `json:"meshNodeId,omitempty"`
-	MeshVIP    string `json:"meshVip,omitempty"`
+	ID       string    // proxy name used to reach this peer (local only, not serialized)
+	NodeID   string    `json:"nodeId"`   // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
+	Status   string    `json:"status"`   // "connecting", "helloed", "upToDate", "failed"
+	LastSeen time.Time `json:"lastSeen"`
 
 	conn          net.Conn
 	writeCh       chan writeReq
 	stopCh        chan struct{}
-	stopOnce      sync.Once // ensures stopCh is closed exactly once
-	meshSender *peerSender // mesh peer sender, created once on hello
-}
-
-// HelloMsg is exchanged after P2P connection is established.
-type HelloMsg struct {
-	Cmd             string       `json:"cmd"`
-	NodeID          string       `json:"nodeId"`
-	Version         string       `json:"version"`
-	ProtocolVersion int          `json:"protocolVersion"`
-	BuildTag        string       `json:"buildTag,omitempty"`
-	Platform  string       `json:"platform"`
-	Arch      string       `json:"arch"`
-	Checksum  string       `json:"checksum"`
-	MeshNodeID string     `json:"meshNodeId,omitempty"`
-	MeshVIP    string     `json:"meshVip,omitempty"`
+	stopOnce      sync.Once    // ensures stopCh is closed exactly once
+	meshSender    *peerSender  // mesh peer sender, created on hello
 }
 
 // NewP2PManager creates a new P2P manager.
@@ -165,7 +142,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if req.frameType == reverse.FrameMeshPacket {
-				util.LogDebug("[P2P] writing FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(req.data))
+				util.LogDebug("[P2P] writing FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(req.data))
 			}
 			if err := reverse.WriteFrame(peer.conn, req.frameType, req.data); err != nil {
 				_ = peer.conn.SetWriteDeadline(time.Time{})
@@ -196,7 +173,7 @@ func (m *P2PManager) meshInboundLoop() {
 // enqueueWrite queues a frame for async write. Non-blocking: drops if channel is full.
 func enqueueWrite(peer *Peer, frameType byte, data []byte) {
 	if frameType == reverse.FrameMeshPacket {
-		util.LogDebug("[P2P] enqueue FrameMeshPacket to %s (meshNodeId=%s, %d bytes)", peer.ID, peer.MeshNodeID, len(data))
+		util.LogDebug("[P2P] enqueue FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(data))
 	}
 	select {
 	case peer.writeCh <- writeReq{frameType: frameType, data: data}:
@@ -373,7 +350,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 	// Send hello immediately
 	m.sendHello(peer)
 
-	util.LogInfo("[P2P] runSession started for %s (meshNodeId=%s)", peer.ID, peer.MeshNodeID)
+	util.LogInfo("[P2P] runSession started for %s", peer.ID)
 
 	for {
 		peer.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -393,16 +370,16 @@ func (m *P2PManager) runSession(peer *Peer) {
 				m.handleCommand(peer, payload)
 			}
 		case reverse.FrameMeshPacket:
-			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), meshNodeId=%s", peer.ID, len(payload), peer.MeshNodeID)
+			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), nodeID=%s", peer.ID, len(payload), peer.NodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
-				util.LogDebug("[P2P] queuing HandleMeshFrame for %s with %d bytes", peer.MeshNodeID, len(payload))
+				util.LogDebug("[P2P] queuing HandleMeshFrame for %s with %d bytes", peer.NodeID, len(payload))
 				frameCopy := make([]byte, len(payload))
 				copy(frameCopy, payload)
 				select {
-				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.MeshNodeID, frame: frameCopy}:
+				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, frame: frameCopy}:
 					// Queued for async processing
 				default:
-					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.MeshNodeID)
+					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
 			} else {
 				util.LogWarn("[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
@@ -413,22 +390,22 @@ func (m *P2PManager) runSession(peer *Peer) {
 	}
 }
 
-// sendHello sends a hello message to the peer.
+// sendHello sends a hello message to the peer, carrying gossip topology for immediate route establishment.
 func (m *P2PManager) sendHello(peer *Peer) {
-	hello := HelloMsg{
+	info := mesh.GossipInfo{
 		Cmd:             "hello",
-		NodeID:          m.nodeId,
-		Version:         m.version,
 		ProtocolVersion: P2PProtocolVersion,
-		BuildTag:        m.buildTag,
-		Platform:        m.platform,
-		Arch:            m.arch,
 	}
-	if m.meshEnabled {
-		hello.MeshNodeID = m.meshNodeID
-		hello.MeshVIP = m.meshVIP
+
+	// Build gossip content from mesh handler
+	if m.meshHandler != nil {
+		gossipInfo := m.meshHandler.BuildGossipInfo()
+		info.DomainSuffixes = gossipInfo.DomainSuffixes
+		info.Routes = gossipInfo.Routes
+		info.ClaimedSubnets = gossipInfo.ClaimedSubnets
 	}
-	data, _ := json.Marshal(hello)
+
+	data, _ := json.Marshal(info)
 	enqueueWrite(peer, reverse.FrameData, data)
 }
 
@@ -444,24 +421,8 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 	switch cmd {
 	case "hello":
 		m.handleHello(peer, payload)
-	case "mesh_gossip":
-		if m.meshHandler != nil {
-			// Extract payload - it could be json.RawMessage, []byte, or map[string]interface{}
-			var payloadData []byte
-			if p, ok := msg["payload"].(json.RawMessage); ok {
-				payloadData = []byte(p)
-			} else if p, ok := msg["payload"].([]byte); ok {
-				payloadData = p
-			} else if p, ok := msg["payload"].(map[string]interface{}); ok {
-				// Re-marshal the map back to JSON
-				payloadData, _ = json.Marshal(p)
-			}
-			if payloadData != nil && peer.meshSender != nil {
-				m.meshHandler.HandleTopologyGossip(peer.meshSender, payloadData)
-			} else {
-				util.LogDebug("[P2P] mesh_gossip from %s dropped: payloadData=%v meshSender=%v", peer.ID, payloadData != nil, peer.meshSender != nil)
-			}
-		}
+	case "gossip":
+		m.handleGossip(peer, payload)
 	default:
 		util.LogDebug("[P2P] unknown command %q from %s", cmd, peer.ID)
 	}
@@ -469,42 +430,76 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 
 // handleHello processes a hello message from a peer.
 func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
-	var hello HelloMsg
-	if err := json.Unmarshal(payload, &hello); err != nil {
+	var info mesh.GossipInfo
+	if err := json.Unmarshal(payload, &info); err != nil {
 		util.LogDebug("[P2P] invalid hello from %s: %v", peer.ID, err)
 		return
 	}
 
-	if hello.ProtocolVersion != P2PProtocolVersion {
+	// 1. Version check
+	if info.ProtocolVersion != P2PProtocolVersion {
 		util.LogWarn("[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
-			peer.ID, hello.ProtocolVersion, P2PProtocolVersion)
+			peer.ID, info.ProtocolVersion, P2PProtocolVersion)
 		peer.conn.Close()
 		return
 	}
 
-	peer.NodeID = hello.NodeID
-	peer.Version = hello.Version
-	peer.Platform = hello.Platform
-	peer.Arch = hello.Arch
-	peer.BuildTag = hello.BuildTag
-	peer.Checksum = hello.Checksum
-	peer.MeshNodeID = hello.MeshNodeID
-	peer.MeshVIP = hello.MeshVIP
+	// 2. Extract nodeID from ClaimedSubnets[hop=0]
+	nodeID := extractNodeIDFromGossip(info)
+	if nodeID == "" {
+		util.LogDebug("[P2P] hello from %s has no claimed subnet with hop=0", peer.ID)
+		peer.conn.Close()
+		return
+	}
+
+	peer.NodeID = nodeID
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
 
-	util.LogInfo("[P2P] hello from %s: node=%s version=%s platform=%s/%s buildTag=%s",
-		peer.ID, hello.NodeID, hello.Version, hello.Platform, hello.Arch, hello.BuildTag)
+	util.LogInfo("[P2P] hello from %s: nodeID=%s", peer.ID, nodeID)
 
-	if hello.MeshNodeID != "" {
-		if m.meshHandler != nil {
-			ps := &peerSender{peer: peer}
-			peer.meshSender = ps
-			m.meshHandler.RegisterPeer(ps)
-		}
+	// 3. Clean up old state + re-register
+	if m.meshHandler != nil {
+		m.meshHandler.UnregisterPeerByNodeID(nodeID)
+		ps := &peerSender{peer: peer, nodeID: nodeID}
+		peer.meshSender = ps
+		m.meshHandler.RegisterPeer(ps)
 	}
 
+	// 4. Process topology (shared logic)
+	m.processGossipInfo(peer, info)
+
 	peer.Status = "upToDate"
+}
+
+// handleGossip processes a gossip message from a peer.
+func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
+	var info mesh.GossipInfo
+	if err := json.Unmarshal(payload, &info); err != nil {
+		util.LogDebug("[P2P] invalid gossip from %s: %v", peer.ID, err)
+		return
+	}
+
+	// Process topology (shared logic)
+	m.processGossipInfo(peer, info)
+}
+
+// processGossipInfo is the unified topology processing logic for both hello and gossip.
+func (m *P2PManager) processGossipInfo(peer *Peer, info mesh.GossipInfo) {
+	if m.meshHandler != nil && peer.meshSender != nil {
+		data, _ := json.Marshal(info)
+		m.meshHandler.HandleTopologyGossip(peer.meshSender, data)
+	}
+}
+
+// extractNodeIDFromGossip extracts the sender's nodeID from ClaimedSubnets with hop=0.
+func extractNodeIDFromGossip(info mesh.GossipInfo) string {
+	for _, cs := range info.ClaimedSubnets {
+		if cs.Hop == 0 {
+			return cs.NodeID
+		}
+	}
+	return ""
 }
 
 // SetMeshInfo configures mesh networking parameters.
@@ -519,11 +514,11 @@ func (m *P2PManager) SetMeshHandler(h MeshHandler) {
 	m.meshHandler = h
 }
 
-// BroadcastMeshGossip sends a mesh_gossip JSON command to all mesh-enabled peers.
+// BroadcastMeshGossip sends a gossip JSON command to all mesh-enabled peers.
 func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	// Wrap the topology data in a JSON command
 	cmd := map[string]interface{}{
-		"cmd":     "mesh_gossip",
+		"cmd":     "gossip",
 		"payload": json.RawMessage(data),
 	}
 	gossip, err := json.Marshal(cmd)
@@ -534,7 +529,7 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	m.mu.Lock()
 	peers := make([]*Peer, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.MeshNodeID != "" {
+		if p.meshSender != nil {
 			peers = append(peers, p)
 		}
 	}
@@ -546,10 +541,10 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	return nil
 }
 
-// SendMeshGossipTo sends a mesh_gossip JSON command to a specific mesh peer.
+// SendMeshGossipTo sends a gossip JSON command to a specific mesh peer.
 func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 	cmd := map[string]interface{}{
-		"cmd":     "mesh_gossip",
+		"cmd":     "gossip",
 		"payload": json.RawMessage(data),
 	}
 	gossip, err := json.Marshal(cmd)
@@ -560,7 +555,7 @@ func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 	m.mu.Lock()
 	var target *Peer
 	for _, p := range m.peers {
-		if p.MeshNodeID == peerNodeID {
+		if p.meshSender != nil && p.meshSender.nodeID == peerNodeID {
 			target = p
 			break
 		}
@@ -574,10 +569,10 @@ func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 	return nil
 }
 
-// SendMeshGossipToAll sends a mesh_gossip JSON command to all mesh-enabled peers.
+// SendMeshGossipToAll sends a gossip JSON command to all mesh-enabled peers.
 func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	cmd := map[string]interface{}{
-		"cmd":     "mesh_gossip",
+		"cmd":     "gossip",
 		"payload": json.RawMessage(data),
 	}
 	gossip, err := json.Marshal(cmd)
@@ -588,7 +583,7 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	m.mu.Lock()
 	peers := make([]*Peer, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.MeshNodeID != "" {
+		if p.meshSender != nil {
 			peers = append(peers, p)
 		}
 	}
@@ -599,6 +594,16 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	}
 }
 
+// ResendHelloToAll resends hello to all connected peers (used after subnet conflict resolution).
+func (m *P2PManager) ResendHelloToAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, peer := range m.peers {
+		m.sendHello(peer)
+	}
+	util.LogDebug("[P2P] resent hello to all peers (%d)", len(m.peers))
+}
+
 // ListMeshPeerIDs returns node IDs of all mesh-enabled peers.
 func (m *P2PManager) ListMeshPeerIDs() []string {
 	m.mu.Lock()
@@ -606,8 +611,8 @@ func (m *P2PManager) ListMeshPeerIDs() []string {
 
 	var result []string
 	for _, p := range m.peers {
-		if p.MeshNodeID != "" {
-			result = append(result, p.MeshNodeID)
+		if p.meshSender != nil {
+			result = append(result, p.meshSender.nodeID)
 		}
 	}
 	return result
@@ -621,15 +626,10 @@ func (m *P2PManager) GetPeers() []Peer {
 	result := make([]Peer, 0, len(m.peers))
 	for _, p := range m.peers {
 		result = append(result, Peer{
-			ID:        p.ID,
-			NodeID:    p.NodeID,
-			Version:   p.Version,
-			Platform:  p.Platform,
-			Arch:      p.Arch,
-			BuildTag:  p.BuildTag,
-			Checksum:  p.Checksum,
-			Status:    p.Status,
-			LastSeen:  p.LastSeen,
+			ID:       p.ID,
+			NodeID:   p.NodeID,
+			Status:   p.Status,
+			LastSeen: p.LastSeen,
 		})
 	}
 	return result

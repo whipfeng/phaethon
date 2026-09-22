@@ -19,19 +19,22 @@ VERSION="$1"
 MESSAGE="${2:-Release $VERSION}"
 
 # Validate version format: v<major>.<minor>.<patch>[+<build>]
-# Examples: v1.0.0, v1.0.0+mesh, v2.1.3+tun-v2
-if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._-]+)?$'; then
+# Build metadata cannot contain dash (to avoid ambiguity with git describe)
+# Examples: v1.0.0, v1.0.0+mesh, v2.1.3+tun.v2
+if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._]+)?$'; then
     echo "Error: Invalid version format: $VERSION"
     echo ""
     echo "Expected format: v<major>.<minor>.<patch>[+<build>]"
     echo "Examples:"
     echo "  v1.0.0          - plain release"
     echo "  v1.0.0+mesh     - with build metadata"
-    echo "  v2.1.3+tun-v2   - build metadata can contain dashes"
+    echo "  v2.1.3+tun.v2   - build metadata with dots"
     echo ""
-    echo "Do NOT use dash (-) before the + sign!"
-    echo "  BAD:  v1.0.0-mesh"
-    echo "  GOOD: v1.0.0+mesh"
+    echo "Rules:"
+    echo "  - Do NOT use dash (-) in tag name (conflicts with git describe)"
+    echo "  - Build metadata cannot contain dash"
+    echo "  - BAD:  v1.0.0-mesh, v1.0.0+mesh-build"
+    echo "  - GOOD: v1.0.0+mesh, v1.0.0+mesh.build"
     exit 1
 fi
 

@@ -34,6 +34,15 @@ func TestCompareVersions(t *testing.T) {
 		// Untagged vs untagged (string comparison)
 		{"dev", "78e9dfc", -1},
 		{"abc", "def", -1},
+
+		// Build metadata (+build) - should be ignored for comparison
+		{"v1.0.0+mesh", "v1.0.0+mesh", 0},
+		{"v1.0.0+mesh", "v1.0.0", 0},           // build metadata ignored
+		{"v1.0.0+mesh", "v1.0.0+tun", 0},       // different build metadata, same version
+		{"v1.0.0+mesh", "v1.1.0+mesh", -1},     // version still matters
+		{"v1.0.0+mesh-5-gabc1234", "v1.0.0+mesh", 1}, // commits after tag
+		{"v1.0.0+mesh-5-gabc1234", "v1.0.0+mesh-10-gdef5678", -1},
+		{"v1.0.0+mesh-5-gabc1234-dirty", "v1.0.0+mesh-5-gabc1234", 0},
 	}
 
 	for _, tt := range tests {

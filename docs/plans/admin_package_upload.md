@@ -70,16 +70,29 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
 - `platform`：`linux` / `windows` / `windows7` / `darwin`
 - `arch`：`amd64` / `arm64`
 - `version`：由 `git describe --tags --always --dirty` 生成
-  - 正式版本：`v1.0.0`（打 tag 时）
-  - 开发版本：`v0.1.0-mesh-140-g8dba21c`（tag-提交数-gcommit hash）
-  - 无 tag：`g8dba21c`（只有 commit hash）
-  - 有未提交改动：末尾加 `-dirty`
+
+**Tag 命名规范**：
+- 使用 Semver 格式：`v<major>.<minor>.<patch>[+<build>]`
+- **不要用横线**（如 `v1.0.0-mesh`），会和 git describe 的分隔符冲突
+- 用 **加号** 添加构建标识：`v1.0.0+mesh`、`v1.0.0+win7`
+- 示例：
+  - `v1.0.0` - 正式版
+  - `v1.0.0+mesh` - mesh 特性版本
+  - `v1.1.0+tun` - TUN 特性版本
+
+**Version 格式**（git describe 输出）：
+| 场景 | 格式 | 示例 |
+|------|------|------|
+| 正好在 tag 上 | tag | `v1.0.0+mesh` |
+| tag 后有提交 | tag-提交数-gcommit | `v1.0.0+mesh-150-g85a1766` |
+| 无 tag | gcommit | `g85a1766` |
+| 有未提交改动 | 末尾加 -dirty | `v1.0.0+mesh-150-g85a1766-dirty` |
 
 **示例**：
 - `phaethon_linux_amd64_v1.0.0.pkg` - Linux amd64 正式版
-- `phaethon_linux_amd64_v0.1.0-mesh-140-g8dba21c.pkg` - Linux amd64 开发版
+- `phaethon_linux_amd64_v1.0.0+mesh-150-g85a1766.pkg` - Linux amd64 mesh 开发版
 - `phaethon_windows_amd64_v1.0.0.pkg` - Windows 10+ amd64
-- `phaethon_windows7_amd64_v1.0.0.pkg` - Windows 7 兼容版（用旧编译器构建）
+- `phaethon_windows7_amd64_v1.0.0.pkg` - Windows 7 兼容版
 - `phaethon_darwin_arm64_v1.0.0.pkg` - macOS Apple Silicon
 
 **编译产物目录结构**（未打包）：

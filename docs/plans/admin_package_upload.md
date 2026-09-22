@@ -64,11 +64,10 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
 └── signature     (Ed25519 签名)
 ```
 
-**命名规则**：`phaethon_{platform}_{arch}[_{buildTag}]_{version}.pkg`
+**命名规则**：`phaethon_{platform}_{arch}_{version}.pkg`
 
-- `platform`：`linux` / `windows` / `darwin`
+- `platform`：`linux` / `windows` / `windows7` / `darwin`
 - `arch`：`amd64` / `arm64`
-- `buildTag`（可选）：特殊构建标识，如 `win7`（Windows 7 兼容版）
 - `version`：由 `git describe --tags --always --dirty` 生成
   - 正式版本：`v1.0.0`（打 tag 时）
   - 开发版本：`v0.1.0-mesh-140-g8dba21c`（tag-提交数-gcommit hash）
@@ -78,9 +77,9 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
 **示例**：
 - `phaethon_linux_amd64_v1.0.0.pkg` - Linux amd64 正式版
 - `phaethon_linux_amd64_v0.1.0-mesh-140-g8dba21c.pkg` - Linux amd64 开发版
-- `phaethon_windows_amd64_v1.0.0.pkg` - Windows amd64 正式版
-- `phaethon_windows_amd64_win7_v1.0.0.pkg` - Windows 7 兼容版（buildTag=win7）
-- `phaethon_darwin_arm64_v1.0.0.pkg` - macOS ARM64 (Apple Silicon)
+- `phaethon_windows_amd64_v1.0.0.pkg` - Windows 10+ amd64
+- `phaethon_windows7_amd64_v1.0.0.pkg` - Windows 7 兼容版（用旧编译器构建）
+- `phaethon_darwin_arm64_v1.0.0.pkg` - macOS Apple Silicon
 
 **编译产物目录结构**（未打包）：
 ```
@@ -94,7 +93,7 @@ dist/
 └── darwin-arm64/phaethon         ← macOS Apple Silicon
 ```
 
-**注意**：`windows7-amd64/` 是单独的目录（不是 `windows-amd64-win7/`），因为需要使用特殊的旧版 Go 编译器（`GO_LEGACY_WIN7`）构建。打包时，从 `dist/windows7-amd64/` 取出二进制，生成的 .pkg 文件名为 `phaethon_windows_amd64_win7_{version}.pkg`（platform 仍是 `windows`，`win7` 作为 buildTag）。
+打包时，从 `dist/{platform}-{arch}/` 取出二进制，配合 meta.json 和 signature，生成 `phaethon_{platform}_{arch}_{version}.pkg`。目录名与 .pkg 的 platform 字段一致。
 
 ### 2.2 meta.json 结构
 

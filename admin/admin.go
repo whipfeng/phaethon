@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -363,6 +364,17 @@ type AdminServer struct {
 	// used only when the admin token is empty. It is generated at startup so that
 	// deployments without an explicit token are still protected against cookie forgery.
 	sessionSecret []byte
+
+	// Mesh package distribution
+	peerLister   func() []PeerBrief                    // returns connected mesh peers
+	meshDialFn   func(network, addr string) (net.Conn, error) // dials through mesh network
+	meshHTTPClient *http.Client                        // HTTP client for mesh communication
+	adminPort    int                                   // admin API port for mesh peers
+}
+
+// PeerBrief contains brief information about a mesh peer.
+type PeerBrief struct {
+	NodeID string
 }
 
 // triggerReload schedules a full runtime reload without blocking the caller.
@@ -397,6 +409,31 @@ func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defa
 
 	s.parseTemplates()
 	return s
+}
+
+// SetPeerLister sets the function to list connected mesh peers.
+func (s *AdminServer) SetPeerLister(f func() []PeerBrief) {
+	s.peerLister = f
+}
+
+// SetMeshDialFn sets the function to dial through the mesh network.
+func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, error)) {
+	s.meshDialFn = f
+	// Initialize mesh HTTP client
+	s.meshHTTPClient = &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return f(network, addr)
+			},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		Timeout: 30 * time.Second,
+	}
+}
+
+// SetAdminPort sets the admin API port for mesh peer communication.
+func (s *AdminServer) SetAdminPort(port int) {
+	s.adminPort = port
 }
 
 // loadOrGenerateSessionSecret loads the session secret from a file or generates a new one.
@@ -901,9 +938,30 @@ func (s *AdminServer) verifySession(r *http.Request) string {
 }
 
 // isPublicPath returns true for paths that don't require authentication.
-func isPublicPath(path string) bool {
-	return path == "/login" || path == "/api/login" || path == "/api/captcha" || path == "/setup" || path == "/api/setup" ||
-		strings.HasPrefix(path, "/static/")
+func isPublicPath(path string, method string) bool {
+	// Static files and auth endpoints
+	if path == "/login" || path == "/api/login" || path == "/api/captcha" || path == "/setup" || path == "/api/setup" ||
+		strings.HasPrefix(path, "/static/") {
+		return true
+	}
+
+	// Mesh package distribution endpoints (read-only + receive)
+	if method == http.MethodGet {
+		// GET /api/packages - list packages
+		if path == "/api/packages" {
+			return true
+		}
+		// GET /api/packages/{id}/download - download package
+		if strings.HasPrefix(path, "/api/packages/") && strings.HasSuffix(path, "/download") {
+			return true
+		}
+	}
+	// POST /api/packages/receive - receive package from mesh peer
+	if method == http.MethodPost && path == "/api/packages/receive" {
+		return true
+	}
+
+	return false
 }
 
 // authMiddleware checks authentication (session or token).
@@ -916,7 +974,7 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Public paths are always accessible
-		if isPublicPath(r.URL.Path) {
+		if isPublicPath(r.URL.Path, r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1035,6 +1093,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/p2p", s.apiP2P)
 	mux.HandleFunc("/api/packages", s.apiPackages)
 	mux.HandleFunc("/api/packages/upload", s.apiPackageUpload)
+	mux.HandleFunc("/api/packages/receive", s.apiPackageReceive)
 	mux.HandleFunc("/api/packages/", s.apiPackageItem)
 	mux.HandleFunc("/api/mesh", s.apiMesh)
 	mux.HandleFunc("/api/mesh/config", s.apiMesh)

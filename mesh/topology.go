@@ -76,9 +76,13 @@ type GossipTopologyEdge struct {
 }
 
 // GossipInfo is the gossip payload exchanged between nodes.
+// hello and gossip use the same structure; hello is a superset with Cmd and ProtocolVersion.
 type GossipInfo struct {
-	// NodeID and Subnet fields removed - sender identified by PeerSender,
-	// own subnet derived from ClaimedSubnets with hop=0
+	// Protocol fields (only used by hello)
+	Cmd             string `json:"cmd,omitempty"`             // "hello" or "gossip"
+	ProtocolVersion int    `json:"protocolVersion,omitempty"` // only in hello
+
+	// Topology information (both hello and gossip carry this)
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
 	Routes         []GossipRoute         `json:"routes,omitempty"`
 	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
@@ -112,6 +116,18 @@ func (t *Topology) UnregisterPeer(sender PeerSender) {
 	defer t.mu.Unlock()
 	for i, p := range t.peers {
 		if p.Sender == sender {
+			t.peers = append(t.peers[:i], t.peers[i+1:]...)
+			return
+		}
+	}
+}
+
+// UnregisterPeerByNodeID removes a peer entry by nodeID.
+func (t *Topology) UnregisterPeerByNodeID(nodeID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, p := range t.peers {
+		if p.NodeID() == nodeID {
 			t.peers = append(t.peers[:i], t.peers[i+1:]...)
 			return
 		}

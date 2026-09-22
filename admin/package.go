@@ -10,8 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"time"
 
+	"phaethon/mesh"
+	"phaethon/p2p"
 	"phaethon/pkg/signing"
 	"phaethon/util"
 )
@@ -21,6 +24,10 @@ const (
 	packagesDir = ".phaethon/packages"
 
 	defaultPackageUploadMaxMB = 100
+
+	// packageRetention is the number of versions to keep per platform/arch.
+	// Older versions are automatically deleted.
+	packageRetention = 3
 )
 
 // versionPattern validates Semver format with strict completeness rules:
@@ -281,6 +288,7 @@ func (s *AdminServer) apiPackageDownload(w http.ResponseWriter, r *http.Request)
 }
 
 // apiPackagePublish handles POST /api/packages/{id}/publish — mark as published.
+// Version monotonic: the version must be higher than the current latest for the same platform/arch.
 func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -303,22 +311,46 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Mark this as published, others as unpublished
+	// Version monotonic check: must be higher than current latest for same platform/arch
 	packages := s.listPackages()
+	platform := info.Meta.Platform
+	arch := info.Meta.Arch
+	newVersion := info.Meta.Version
+
+	// Find current latest version for this platform/arch
+	var currentLatest string
 	for _, pkg := range packages {
-		if pkg.ID == id {
-			pkg.Published = true
-		} else {
-			pkg.Published = false
-		}
-		if err := s.savePackageMeta(pkg); err != nil {
-			httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
-			return
+		if pkg.Meta.Platform == platform && pkg.Meta.Arch == arch && pkg.Published {
+			if currentLatest == "" || p2p.CompareVersions(pkg.Meta.Version, currentLatest) > 0 {
+				currentLatest = pkg.Meta.Version
+			}
 		}
 	}
 
-	util.LogInfo("[ADMIN] package published: %s (version=%s)", id, info.Meta.Version)
+	// Check if new version is higher
+	if currentLatest != "" && p2p.CompareVersions(newVersion, currentLatest) <= 0 {
+		httpError(w, fmt.Sprintf("version must be higher than current latest (%s)", currentLatest), http.StatusBadRequest)
+		return
+	}
+
+	// Mark this as published
+	info.Published = true
+	if err := s.savePackageMeta(*info); err != nil {
+		httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	util.LogInfo("[ADMIN] package published: %s (version=%s platform=%s arch=%s)", id, info.Meta.Version, platform, arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
+
+	// Read the package file and distribute to mesh peers
+	pkgPath := filepath.Join(packagesDir, id+".pkg")
+	if pkgData, err := os.ReadFile(pkgPath); err == nil {
+		go s.DistributePackage(pkgData)
+		// Apply retention after distribution
+		go s.applyRetention(platform, arch)
+	}
+
 	jsonResponse(w, map[string]interface{}{
 		"status": "published",
 		"id":     id,
@@ -410,4 +442,325 @@ func splitString(s string, sep byte) []string {
 		result = append(result, s[start:])
 	}
 	return result
+}
+
+// apiPackageReceive handles POST /api/packages/receive — receive package from mesh peer.
+func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read body (.pkg file)
+	pkgData, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpError(w, "read body failed", http.StatusBadRequest)
+		return
+	}
+
+	// Verify signature
+	contents, err := signing.VerifyPkgBytes(pkgData, signing.PublicKey)
+	if err != nil {
+		util.LogDebug("[ADMIN] receive package verify failed: %v", err)
+		httpError(w, "verify failed", http.StatusBadRequest)
+		return
+	}
+
+	// Check if we already have this package
+	packages := s.listPackages()
+	for _, p := range packages {
+		if p.Meta.Version == contents.Meta.Version {
+			util.LogDebug("[ADMIN] receive package: already have version %s", contents.Meta.Version)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
+	// Save the package
+	id, err := s.saveExternalPackage(pkgData, contents)
+	if err != nil {
+		util.LogDebug("[ADMIN] receive package save failed: %v", err)
+		httpError(w, "save failed", http.StatusInternalServerError)
+		return
+	}
+
+	util.LogInfo("[ADMIN] received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
+	util.DefaultVersionNotifier.BumpVersion("packages")
+
+	// Continue distributing to other peers (flood fill)
+	go s.DistributePackage(pkgData)
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// saveExternalPackage saves a package received from a mesh peer.
+func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgContents) (string, error) {
+	if err := os.MkdirAll(packagesDir, 0755); err != nil {
+		return "", fmt.Errorf("create packages dir: %w", err)
+	}
+
+	// Generate ID from content hash
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(idBytes)
+
+	// Save .pkg file
+	pkgPath := filepath.Join(packagesDir, id+".pkg")
+	if err := os.WriteFile(pkgPath, pkgData, 0644); err != nil {
+		return "", err
+	}
+
+	// Save metadata
+	info := packageInfo{
+		ID:             id,
+		Filename:       fmt.Sprintf("phaethon-%s.pkg", contents.Meta.Version),
+		Size:           int64(len(pkgData)),
+		UploadedAt:     time.Now(),
+		SignatureValid: true,
+		Meta:           contents.Meta,
+		Published:      true, // Auto-publish received packages
+	}
+
+	if err := s.savePackageMeta(info); err != nil {
+		os.Remove(pkgPath)
+		return "", err
+	}
+
+	return id, nil
+}
+
+// DistributePackage distributes a package to all connected mesh peers.
+func (s *AdminServer) DistributePackage(pkgData []byte) {
+	if s.peerLister == nil || s.meshHTTPClient == nil {
+		return
+	}
+
+	peers := s.peerLister()
+	if len(peers) == 0 {
+		return
+	}
+
+	util.LogDebug("[ADMIN] distributing package to %d peers", len(peers))
+
+	for _, peer := range peers {
+		go func(nodeID string) {
+			domain := mesh.NodeDomain(nodeID)
+			url := fmt.Sprintf("https://%s:%d/api/packages/receive", domain, s.adminPort)
+			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
+			if err != nil {
+				util.LogDebug("[ADMIN] distribute package to %s failed: %v", nodeID, err)
+				return
+			}
+			resp.Body.Close()
+			util.LogDebug("[ADMIN] distributed package to %s", nodeID)
+		}(peer.NodeID)
+	}
+}
+
+// bytesReaderAt wraps a byte slice to implement io.ReaderAt.
+type bytesReaderAt struct {
+	data []byte
+}
+
+func newBytesReaderAt(data []byte) *bytesReaderAt {
+	return &bytesReaderAt{data: data}
+}
+
+func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n = copy(p, r.data[off:])
+	if n < len(p) {
+		err = io.EOF
+	}
+	return
+}
+
+// SyncFromPeer syncs packages from a specific mesh peer (called when peer connects).
+func (s *AdminServer) SyncFromPeer(nodeID string) {
+	if s.meshHTTPClient == nil {
+		return
+	}
+	// Small delay to ensure routing is established
+	time.Sleep(2 * time.Second)
+	s.syncFromPeer(nodeID)
+}
+
+func (s *AdminServer) syncFromPeer(nodeID string) {
+	domain := mesh.NodeDomain(nodeID)
+	url := fmt.Sprintf("https://%s:%d/api/packages", domain, s.adminPort)
+	resp, err := s.meshHTTPClient.Get(url)
+	if err != nil {
+		util.LogDebug("[ADMIN] sync from %s failed: %v", nodeID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		util.LogDebug("[ADMIN] sync from %s failed: status %d", nodeID, resp.StatusCode)
+		return
+	}
+
+	var result struct {
+		Packages []packageInfo `json:"packages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		util.LogDebug("[ADMIN] sync from %s decode failed: %v", nodeID, err)
+		return
+	}
+
+	// Build target set: for each platform/arch, keep only the latest packageRetention versions
+	type platformArch struct {
+		platform string
+		arch     string
+	}
+	peerGroups := make(map[platformArch][]packageInfo)
+	for _, pkg := range result.Packages {
+		if !pkg.Published {
+			continue
+		}
+		key := platformArch{pkg.Meta.Platform, pkg.Meta.Arch}
+		peerGroups[key] = append(peerGroups[key], pkg)
+	}
+
+	// For each group, sort by version descending and take top N
+	targetSet := make(map[string]bool) // package ID → should have
+	for _, pkgs := range peerGroups {
+		sort.Slice(pkgs, func(i, j int) bool {
+			return p2p.CompareVersions(pkgs[i].Meta.Version, pkgs[j].Meta.Version) > 0
+		})
+		limit := packageRetention
+		if limit > len(pkgs) {
+			limit = len(pkgs)
+		}
+		for _, pkg := range pkgs[:limit] {
+			targetSet[pkg.ID] = true
+		}
+	}
+
+	// Get local packages
+	localPackages := s.listPackages()
+	localByID := make(map[string]packageInfo)
+	for _, p := range localPackages {
+		localByID[p.ID] = p
+	}
+
+	// Download packages in target set that we don't have
+	downloadSuccess := true
+	for _, pkg := range result.Packages {
+		if !targetSet[pkg.ID] {
+			continue
+		}
+		if _, exists := localByID[pkg.ID]; exists {
+			continue
+		}
+
+		// Download the package
+		downloadURL := fmt.Sprintf("https://%s:%d/api/packages/%s/download", domain, s.adminPort, pkg.ID)
+		dlResp, err := s.meshHTTPClient.Get(downloadURL)
+		if err != nil {
+			util.LogDebug("[ADMIN] download package %s from %s failed: %v", pkg.ID, nodeID, err)
+			downloadSuccess = false
+			continue
+		}
+
+		pkgData, err := io.ReadAll(dlResp.Body)
+		dlResp.Body.Close()
+		if err != nil {
+			util.LogDebug("[ADMIN] download package %s from %s read failed: %v", pkg.ID, nodeID, err)
+			downloadSuccess = false
+			continue
+		}
+
+		// Verify and save
+		contents, err := signing.VerifyPkgBytes(pkgData, signing.PublicKey)
+		if err != nil {
+			util.LogDebug("[ADMIN] download package %s from %s verify failed: %v", pkg.ID, nodeID, err)
+			downloadSuccess = false
+			continue
+		}
+
+		id, err := s.saveExternalPackage(pkgData, contents)
+		if err != nil {
+			util.LogDebug("[ADMIN] download package %s from %s save failed: %v", pkg.ID, nodeID, err)
+			downloadSuccess = false
+			continue
+		}
+
+		util.LogInfo("[ADMIN] synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
+		util.DefaultVersionNotifier.BumpVersion("packages")
+	}
+
+	// Only delete old versions if all downloads succeeded
+	if downloadSuccess {
+		// Delete local packages not in target set
+		for id, pkg := range localByID {
+			if !targetSet[id] {
+				util.LogInfo("[ADMIN] retention: deleting %s/%s version %s (id=%s)", pkg.Meta.Platform, pkg.Meta.Arch, pkg.Meta.Version, id)
+				os.Remove(filepath.Join(packagesDir, id+".pkg"))
+				os.Remove(filepath.Join(packagesDir, id+".json"))
+			}
+		}
+		if len(localByID) > 0 {
+			util.DefaultVersionNotifier.BumpVersion("packages")
+		}
+	}
+}
+
+// applyAllRetention applies retention policy to all platform/arch combinations.
+func (s *AdminServer) applyAllRetention() {
+	packages := s.listPackages()
+
+	// Group by platform/arch
+	type platformArch struct {
+		platform string
+		arch     string
+	}
+	groups := make(map[platformArch][]packageInfo)
+	for _, pkg := range packages {
+		key := platformArch{pkg.Meta.Platform, pkg.Meta.Arch}
+		groups[key] = append(groups[key], pkg)
+	}
+
+	// Apply retention to each group
+	for key, pkgs := range groups {
+		s.applyRetentionForGroup(pkgs, key.platform, key.arch)
+	}
+}
+
+// applyRetention applies retention policy to a specific platform/arch combination.
+func (s *AdminServer) applyRetention(platform, arch string) {
+	packages := s.listPackages()
+	var group []packageInfo
+	for _, pkg := range packages {
+		if pkg.Meta.Platform == platform && pkg.Meta.Arch == arch {
+			group = append(group, pkg)
+		}
+	}
+	s.applyRetentionForGroup(group, platform, arch)
+}
+
+// applyRetentionForGroup applies retention to a group of packages for the same platform/arch.
+// Keeps the latest packageRetention versions, deletes the rest.
+func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch string) {
+	if len(pkgs) <= packageRetention {
+		return
+	}
+
+	// Sort by version descending (newest first)
+	sort.Slice(pkgs, func(i, j int) bool {
+		return p2p.CompareVersions(pkgs[i].Meta.Version, pkgs[j].Meta.Version) > 0
+	})
+
+	// Delete packages beyond retention limit
+	toDelete := pkgs[packageRetention:]
+	for _, pkg := range toDelete {
+		util.LogInfo("[ADMIN] retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Meta.Version, pkg.ID)
+		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
+		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
+	}
+	util.DefaultVersionNotifier.BumpVersion("packages")
 }

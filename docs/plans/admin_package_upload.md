@@ -58,11 +58,37 @@ P2P 库存式自动分发已彻底移除（v0.2.0 决策），需要一个**简�
 `.pkg` 文件是 zip 格式，包含三个文件：
 
 ```
-phaethon-v1.0-linux-amd64.pkg (zip)
+phaethon_{platform}_{arch}_{version}.pkg (zip)
 ├── binary        (可执行文件)
 ├── meta.json     (元数据)
 └── signature     (Ed25519 签名)
 ```
+
+**命名规则**：`phaethon_{platform}_{arch}_{version}.pkg`
+- `platform`：`linux` / `windows` / `darwin`
+- `arch`：`amd64` / `arm64`
+- `version`：git tag 或 commit hash（如 `v1.0.0`、`v0.1.0-mesh-140-g8dba21c`）
+- 如有 `buildTag`（如 `win7`），插入在 arch 后：`phaethon_windows_amd64_win7_v1.0.0.pkg`
+
+**示例**：
+- `phaethon_linux_amd64_v1.0.0.pkg`
+- `phaethon_windows_amd64_v1.0.0.pkg`
+- `phaethon_darwin_arm64_v1.0.0.pkg`
+- `phaethon_windows_amd64_win7_v1.0.0.pkg`（Windows 7 特殊构建）
+
+**编译产物目录结构**（未打包）：
+```
+dist/
+├── linux-amd64/phaethon          ← 按 {os}-{arch}/ 目录区分
+├── linux-arm64/phaethon
+├── windows-amd64/phaethon.exe
+├── windows7-amd64/phaethon.exe   ← windows7 单独目录
+├── windows-arm64/phaethon.exe
+├── darwin-amd64/phaethon
+└── darwin-arm64/phaethon
+```
+
+打包时，从 `dist/{os}-{arch}/` 取出二进制，配合 meta.json 和 signature，生成 `phaethon_{platform}_{arch}_{version}.pkg`。
 
 ### 2.2 meta.json 结构
 

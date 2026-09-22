@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"time"
 
@@ -223,6 +224,10 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 
 	util.LogInfo("[ADMIN] package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
+
+	// Check if there's a newer version, exit if so
+	go s.checkForNewerVersion(contents)
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(info)
@@ -692,6 +697,9 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 
 		util.LogInfo("[ADMIN] synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
 		util.DefaultVersionNotifier.BumpVersion("packages")
+
+		// Check if there's a newer version, exit if so
+		go s.checkForNewerVersion(contents)
 	}
 
 	// Only delete old versions if all downloads succeeded
@@ -763,4 +771,38 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch 
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 	}
 	util.DefaultVersionNotifier.BumpVersion("packages")
+}
+
+// checkForNewerVersion checks if the package version is higher than current.
+// If so, exits the process so watchdog can restart with the new version.
+func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
+	// 1. Check if platform/arch matches
+	if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
+		util.LogInfo("[ADMIN] checkForNewerVersion: platform/arch mismatch (current=%s/%s)",
+			runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	// 2. Check if version is higher
+	if s.GetCurrentVersion == nil {
+		util.LogInfo("[ADMIN] checkForNewerVersion: GetCurrentVersion is nil")
+		return
+	}
+	currentVersion := s.GetCurrentVersion()
+	util.LogInfo("[ADMIN] checkForNewerVersion: current version=%s", currentVersion)
+	if p2p.CompareVersions(contents.Meta.Version, currentVersion) <= 0 {
+		util.LogInfo("[ADMIN] checkForNewerVersion: version not higher")
+		return
+	}
+
+	util.LogInfo("[ADMIN] detected newer version %s > current %s, exiting for watchdog restart...",
+		contents.Meta.Version, currentVersion)
+
+	// 3. Exit immediately, watchdog will restart with new version
+	// Use os.Exit(0) instead of SIGTERM for immediate exit (no graceful shutdown)
+	// This is safe because we're about to restart anyway
+	go func() {
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}()
 }

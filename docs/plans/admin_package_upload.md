@@ -64,31 +64,37 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
 └── signature     (Ed25519 签名)
 ```
 
-**命名规则**：`phaethon_{platform}_{arch}_{version}.pkg`
+**命名规则**：`phaethon_{platform}_{arch}[_{buildTag}]_{version}.pkg`
+
 - `platform`：`linux` / `windows` / `darwin`
 - `arch`：`amd64` / `arm64`
-- `version`：git tag 或 commit hash（如 `v1.0.0`、`v0.1.0-mesh-140-g8dba21c`）
-- 如有 `buildTag`（如 `win7`），插入在 arch 后：`phaethon_windows_amd64_win7_v1.0.0.pkg`
+- `buildTag`（可选）：特殊构建标识，如 `win7`（Windows 7 兼容版）
+- `version`：由 `git describe --tags --always --dirty` 生成
+  - 正式版本：`v1.0.0`（打 tag 时）
+  - 开发版本：`v0.1.0-mesh-140-g8dba21c`（tag-提交数-gcommit hash）
+  - 无 tag：`g8dba21c`（只有 commit hash）
+  - 有未提交改动：末尾加 `-dirty`
 
 **示例**：
-- `phaethon_linux_amd64_v1.0.0.pkg`
-- `phaethon_windows_amd64_v1.0.0.pkg`
-- `phaethon_darwin_arm64_v1.0.0.pkg`
-- `phaethon_windows_amd64_win7_v1.0.0.pkg`（Windows 7 特殊构建）
+- `phaethon_linux_amd64_v1.0.0.pkg` - Linux amd64 正式版
+- `phaethon_linux_amd64_v0.1.0-mesh-140-g8dba21c.pkg` - Linux amd64 开发版
+- `phaethon_windows_amd64_v1.0.0.pkg` - Windows amd64 正式版
+- `phaethon_windows_amd64_win7_v1.0.0.pkg` - Windows 7 兼容版（buildTag=win7）
+- `phaethon_darwin_arm64_v1.0.0.pkg` - macOS ARM64 (Apple Silicon)
 
 **编译产物目录结构**（未打包）：
 ```
 dist/
 ├── linux-amd64/phaethon          ← 按 {os}-{arch}/ 目录区分
 ├── linux-arm64/phaethon
-├── windows-amd64/phaethon.exe
-├── windows7-amd64/phaethon.exe   ← windows7 单独目录
+├── windows-amd64/phaethon.exe    ← Windows 10+ 版本
+├── windows7-amd64/phaethon.exe   ← Windows 7 兼容版（用旧编译器构建）
 ├── windows-arm64/phaethon.exe
-├── darwin-amd64/phaethon
-└── darwin-arm64/phaethon
+├── darwin-amd64/phaethon         ← macOS Intel
+└── darwin-arm64/phaethon         ← macOS Apple Silicon
 ```
 
-打包时，从 `dist/{os}-{arch}/` 取出二进制，配合 meta.json 和 signature，生成 `phaethon_{platform}_{arch}_{version}.pkg`。
+**注意**：`windows7-amd64/` 是单独的目录（不是 `windows-amd64-win7/`），因为需要使用特殊的旧版 Go 编译器（`GO_LEGACY_WIN7`）构建。打包时，从 `dist/windows7-amd64/` 取出二进制，生成的 .pkg 文件名为 `phaethon_windows_amd64_win7_{version}.pkg`（platform 仍是 `windows`，`win7` 作为 buildTag）。
 
 ### 2.2 meta.json 结构
 

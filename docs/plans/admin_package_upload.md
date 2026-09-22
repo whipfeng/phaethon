@@ -115,7 +115,7 @@ dist/
 - **签名对象**：`sha256(binary + meta.json)`（对拼接后的内容算 hash，再签名）
 - **签名文件**：base64 编码的 Ed25519 签名
 - **私钥**：通过 `scripts/.env` 中的 `PHAETHON_SIGNING_KEY` 指定路径，**不 git 跟踪**
-- **公钥**：硬编码在 `pkg/signing/signing.go` 的 `TestPublicKey`（git 跟踪）
+- **公钥**：硬编码在 `pkg/signing/signing.go` 的 `PublicKey`（git 跟踪）
 
 **私钥配置**（在 `scripts/.env` 中）：
 ```bash

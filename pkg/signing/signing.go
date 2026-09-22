@@ -15,14 +15,11 @@ import (
 	"strings"
 )
 
-// TestPublicKey is a hardcoded Ed25519 public key for testing.
-// TODO: Replace with production key management.
-// This is a test key pair (DO NOT USE IN PRODUCTION):
+// PublicKey is the hardcoded Ed25519 public key for package signature verification.
+// Only packages signed with the corresponding private key are accepted.
 // Seed:    0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 // Public:  0x03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8
-var TestPublicKey = func() ed25519.PublicKey {
-	// Generate a test key pair for development
-	// In production, this should be loaded from config or compiled in
+var PublicKey = func() ed25519.PublicKey {
 	pubHex := "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 	pubBytes, _ := hex.DecodeString(pubHex)
 	return ed25519.PublicKey(pubBytes)

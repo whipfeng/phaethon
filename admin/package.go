@@ -38,15 +38,6 @@ type packageInfo struct {
 	Published      bool              `json:"published"`
 }
 
-// packageUploadEnabled reports whether upload may be used:
-// auth must be on, or the operator must have opted in explicitly.
-func (s *AdminServer) packageUploadEnabled() bool {
-	if s.config == nil {
-		return false
-	}
-	return s.config.AuthEnabled || s.config.PackageUploadInsecure
-}
-
 func (s *AdminServer) packageMaxUploadBytes() int64 {
 	mb := defaultPackageUploadMaxMB
 	if s.config != nil && s.config.PackageUploadMaxMB > 0 {
@@ -108,10 +99,6 @@ func (s *AdminServer) listPackages() []packageInfo {
 func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.packageUploadEnabled() {
-		httpError(w, "package upload disabled: enable admin auth or set admin.package-upload-insecure", http.StatusForbidden)
 		return
 	}
 

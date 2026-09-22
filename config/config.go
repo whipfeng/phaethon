@@ -1244,10 +1244,7 @@ type AdminConfig struct {
 	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener
 
 	// Package upload/publish (admin console binary deployment).
-	// Upload and publish return 403 unless auth is enabled or this is
-	// explicitly set — uploading and executing a binary is RCE-level capability.
-	PackageUploadInsecure bool `yaml:"package-upload-insecure,omitempty"`
-	// PackageUploadMaxMB caps uploaded package size; 0 means default (64MB).
+	// PackageUploadMaxMB caps uploaded package size; 0 means default (100MB).
 	PackageUploadMaxMB int `yaml:"package-upload-max-mb,omitempty"`
 }
 

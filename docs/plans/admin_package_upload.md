@@ -114,8 +114,13 @@ dist/
 - **签名算法**：Ed25519（现代、快、安全）
 - **签名对象**：`sha256(binary + meta.json)`（对拼接后的内容算 hash，再签名）
 - **签名文件**：base64 编码的 Ed25519 签名
-- **私钥**：编译机器上（或 CI/CD 环境）
-- **公钥**：硬编码在 phaethon 源码中（或配置文件指定，一期硬编码）
+- **私钥**：通过 `scripts/.env` 中的 `PHAETHON_SIGNING_KEY` 指定路径，**不 git 跟踪**
+- **公钥**：硬编码在 `pkg/signing/signing.go` 的 `TestPublicKey`（git 跟踪）
+
+**私钥配置**（在 `scripts/.env` 中）：
+```bash
+PHAETHON_SIGNING_KEY=/path/to/private.key
+```
 
 ### 2.4 编译命令（后续实现）
 

@@ -1,5 +1,7 @@
 # P2P 节点互联与自动分发
 
+> **⚠️ 已废弃（2026-09-21）**：本文档中的二进制自动分发机制从未在生产启用，后于代码中禁用（`p2p.go` handleHello），现已**整体移除**（含 transfer.go、hello 库存交换、chunk 协议）。发布/升级改由控制台「发布包」手动上传 + 可选发布实现，见 `docs/plans/admin_package_upload.md`。P2P 连接、mesh gossip、BinaryCache（版本历史）等其他能力不受影响。
+
 ## 元数据
 
 - 文档类型：Plan

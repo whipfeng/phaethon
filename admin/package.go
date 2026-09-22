@@ -152,7 +152,7 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify signature
-	contents, err := signing.VerifyPkg(tmpPath, signing.TestPublicKey)
+	contents, err := signing.VerifyPkg(tmpPath, signing.PublicKey)
 	if err != nil {
 		os.Remove(tmpPath)
 		httpError(w, "signature verification failed: "+err.Error(), http.StatusBadRequest)

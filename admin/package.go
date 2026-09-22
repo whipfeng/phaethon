@@ -23,15 +23,29 @@ const (
 	defaultPackageUploadMaxMB = 100
 )
 
-// versionPattern validates Semver format: v<major>.<minor>.<patch>[+<build>][-<commits>-g<hash>][-dirty]
+// versionPattern validates Semver format with strict completeness rules:
+// - Base: v<major>.<minor>.<patch>[+<build>]
+// - With commits: must have both -<commits> AND -g<hash>
+// - Dirty: only allowed if commits info is present
+// - Build metadata cannot contain dash (to avoid ambiguity with commits)
+//
 // Examples:
 //
-//	v1.0.0
-//	v1.0.0+mesh
-//	v1.0.0+mesh-150-g85a1766
-//	v1.0.0+mesh-150-g85a1766-dirty
-//	dev
-var versionPattern = regexp.MustCompile(`^(dev|v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._-]+)?(-[0-9]+-g[0-9a-f]+)?(-dirty)?)$`)
+//	v1.0.0                                    ✓ base version
+//	v1.0.0+mesh                               ✓ with build metadata
+//	v1.0.0+mesh-150-g85a1766                  ✓ with commits (complete)
+//	v1.0.0+mesh-150-g85a1766-dirty            ✓ with commits + dirty
+//	v1.0.0-150-g85a1766                       ✓ without build, with commits
+//	dev                                       ✓ dev build
+//
+// Invalid:
+//
+//	v1.0.0-mesh                               ✗ dash before build (use +)
+//	v1.0.0+mesh-150                           ✗ commits without hash
+//	v1.0.0+mesh-g85a1766                      ✗ hash without commits
+//	v1.0.0-dirty                              ✗ dirty without commits
+//	v1.0.0+mesh-build                         ✗ build cannot contain dash
+var versionPattern = regexp.MustCompile(`^(dev|v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._]+)?(-[0-9]+-g[0-9a-f]+(-dirty)?)?)$`)
 
 var (
 	packageIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)

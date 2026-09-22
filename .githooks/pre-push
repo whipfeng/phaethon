@@ -6,8 +6,8 @@ remote="$1"
 url="$2"
 
 # Version tag pattern: v<major>.<minor>.<patch>[+<build>]
-# The +build part is optional, but if present must follow Semver build metadata rules
-VERSION_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._-]+)?$'
+# Build metadata cannot contain dash (to avoid ambiguity with git describe)
+VERSION_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._]+)?$'
 
 zero=$(git hash-object --stdin </dev/null | tr -d '\n')
 while read local_ref local_sha remote_ref remote_sha; do

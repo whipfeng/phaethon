@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/p2p"
+	"phaethon/pkg/signing"
 	"phaethon/reverse"
 	"phaethon/server"
 	"phaethon/tun"
@@ -1014,6 +1016,85 @@ func (cp *childProcess) wait() {
 	<-cp.done
 }
 
+// findLatestPkgAndExtract finds the highest version pkg file in .phaethon/packages/
+// that matches the current platform/arch, extracts the binary to a temp location,
+// and returns the path to the extracted binary.
+// Returns empty string if no suitable pkg is found.
+func findLatestPkgAndExtract() string {
+	packagesDir := ".phaethon/packages"
+
+	// List all .pkg files
+	entries, err := os.ReadDir(packagesDir)
+	if err != nil {
+		util.LogDebug("watchdog: cannot read packages dir: %v", err)
+		return ""
+	}
+
+	var latestPkg string
+	var latestVersion string
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pkg") {
+			continue
+		}
+
+		pkgPath := filepath.Join(packagesDir, entry.Name())
+
+		// Verify and read metadata
+		contents, err := signing.VerifyPkg(pkgPath, signing.PublicKey)
+		if err != nil {
+			util.LogDebug("watchdog: verify pkg %s failed: %v", entry.Name(), err)
+			continue
+		}
+
+		// Check platform/arch match
+		if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
+			continue
+		}
+
+		// Check if this version is higher
+		if latestVersion == "" || p2p.CompareVersions(contents.Meta.Version, latestVersion) > 0 {
+			latestVersion = contents.Meta.Version
+			latestPkg = pkgPath
+		}
+	}
+
+	if latestPkg == "" {
+		return ""
+	}
+
+	util.LogInfo("watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
+
+	// Check if binary already exists in .phaethon/worker/
+	workerDir := ".phaethon/worker"
+	binaryPath := filepath.Join(workerDir, fmt.Sprintf("phaethon-%s", latestVersion))
+	if _, err := os.Stat(binaryPath); err == nil {
+		// Binary already exists, no need to extract
+		util.LogInfo("watchdog: binary already exists: %s", binaryPath)
+		return binaryPath
+	}
+
+	// Extract binary from pkg
+	contents, err := signing.VerifyPkg(latestPkg, signing.PublicKey)
+	if err != nil {
+		util.LogError("watchdog: extract pkg failed: %v", err)
+		return ""
+	}
+
+	// Write binary to .phaethon/worker/ directory
+	if err := os.MkdirAll(workerDir, 0755); err != nil {
+		util.LogError("watchdog: create worker dir failed: %v", err)
+		return ""
+	}
+	if err := os.WriteFile(binaryPath, contents.Binary, 0755); err != nil {
+		util.LogError("watchdog: write binary failed: %v", err)
+		return ""
+	}
+
+	util.LogInfo("watchdog: extracted binary to %s", binaryPath)
+	return binaryPath
+}
+
 // runWatchdogMode is the watchdog entry point. It spawns the actual server as
 // a child process (with PHAETHON_WORKER=1), monitors it via a JSON protocol
 // on stdout, and restarts it on crash or stuck detection. On graceful shutdown
@@ -1027,10 +1108,20 @@ func runWatchdogMode() {
 		restartCooldown = 10 * time.Second
 	)
 
-	exe, err := os.Executable()
-	if err != nil {
-		util.LogError("watchdog: cannot determine executable path: %v", err)
-		return
+	// Try to find latest pkg and extract binary
+	exe := findLatestPkgAndExtract()
+	if exe == "" {
+		// No pkg found, use current executable
+		var err error
+		exe, err = os.Executable()
+		if err != nil {
+			util.LogError("watchdog: cannot determine executable path: %v", err)
+			return
+		}
+		util.LogInfo("watchdog: no pkg found, using current executable: %s", exe)
+	} else {
+		util.LogInfo("watchdog: using extracted binary: %s", exe)
+		// Keep extracted binary in .phaethon/worker/ for reuse and debugging
 	}
 
 	lastRestart := time.Time{}
@@ -1053,7 +1144,18 @@ func runWatchdogMode() {
 			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
 			time.Sleep(remain)
 		}
-		newCp, err := spawnChildProcess(exe)
+		// Re-scan for latest pkg before restarting (hot swap support)
+		newExe := findLatestPkgAndExtract()
+		if newExe == "" {
+			// No pkg found, use current executable
+			var err error
+			newExe, err = os.Executable()
+			if err != nil {
+				util.LogError("watchdog: cannot determine executable path: %v", err)
+				return nil
+			}
+		}
+		newCp, err := spawnChildProcess(newExe)
 		if err != nil {
 			util.LogError("watchdog: restart failed: %v", err)
 			return nil
@@ -1895,6 +1997,11 @@ func wireAdminCallbacks(resources *activeResources) {
 					adminSrv.SetAdminPort(port)
 				}
 			}
+		}
+
+		// Set current version getter for hot swap
+		adminSrv.GetCurrentVersion = func() string {
+			return Version
 		}
 
 		// Set peer registered callback for package sync

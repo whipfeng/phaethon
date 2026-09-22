@@ -17,6 +17,7 @@
 | 0.3.0 | 2026-09-22 | **重大简化**：移除本地自更新流程（不替换运行中程序）；移除 probe 执行（元数据由签名保证可信）；移除 sha256 单独校验（签名包含完整性）；移除缓存区 UI（p2p-cache）；改为 `.pkg` 打包格式（zip：binary + meta.json + signature）；Ed25519 签名验证；"发布"仅为标记状态，为跨节点分发打基础 | Qoder |
 | 0.3.1 | 2026-09-22 | 移除 403 认证门控：签名验证已提供足够安全保障（只有私钥持有者能创建有效包），无需额外的 `AuthEnabled` 或 `package-upload-insecure` 检查。简化配置，符合"签名即信任"理念，为跨节点分发扫清障碍 | Qoder |
 | 0.3.2 | 2026-09-22 | 所有构建信息（version、platform、arch）必须通过 `-ldflags -X` 在编译时注入，不允许运行时检测。`phaethon --version` 输出 `version=X platform=Y arch=Z` 格式供外部探测。meta.json 移除 `buildTag` 字段（windows7 直接作为 platform 值） | Qoder |
+| 0.3.3 | 2026-09-22 | 新增跨客户端版本通知机制：上传/发布/删除包后调用 `util.DefaultVersionNotifier.BumpVersion("packages")`，前端通过 SSE 订阅 `/api/events` 监听 `packages` 版本变化并自动刷新列表 | Qoder |
 
 ---
 
@@ -363,21 +364,69 @@ i18n：`package.*` 命名空间，zh/en 全套。
 
 ---
 
-## 8. 变更文件清单
+## 8. 跨客户端版本通知
+
+当包列表发生变化（上传、发布、删除）时，需要通知所有打开控制台的客户端刷新列表，避免手动刷新。
+
+**机制**：复用现有的 `util.DefaultVersionNotifier` SSE 广播模式。
+
+**后端**（`admin/package.go`）：
+```go
+// 上传成功后
+util.DefaultVersionNotifier.BumpVersion("packages")
+
+// 发布成功后
+util.DefaultVersionNotifier.BumpVersion("packages")
+
+// 删除成功后
+util.DefaultVersionNotifier.BumpVersion("packages")
+```
+
+**前端**（`admin/templates/package.html`）：
+```javascript
+setupSSE() {
+    const sse = new EventSource('./api/events');
+    let lastVersion = 0;
+    sse.addEventListener('heartbeat', (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.packages && data.packages > lastVersion) {
+                lastVersion = data.packages;
+                this.refresh();
+            }
+        } catch {}
+    });
+    sse.onerror = () => {
+        sse.close();
+    };
+}
+```
+
+**流程**：
+1. 用户 A 上传/发布/删除包
+2. 后端调用 `BumpVersion("packages")`，版本号递增并广播
+3. 用户 B（或其他标签页）的 SSE 收到 `heartbeat` 事件，`data.packages` 版本号变化
+4. 前端自动调用 `refresh()` 刷新列表
+
+此模式与 `logs`、`mesh`、`reverse`、`tun` 等模块一致。
+
+---
+
+## 9. 变更文件清单
 
 | 文件 | 变更 |
 |------|------|
 | `docs/plans/admin_package_upload.md` | 本文档（v0.3.0 重大简化） |
-| `admin/package.go`（重写） | 简化为文件管理（上传/列表/下载/删除/标记发布）；移除 probe、自更新、缓存区逻辑；新增 .pkg 解压 + Ed25519 签名验证 |
+| `admin/package.go`（重写） | 简化为文件管理（上传/列表/下载/删除/标记发布）；移除 probe、自更新、缓存区逻辑；新增 .pkg 解压 + Ed25519 签名验证；上传/发布/删除后调用 `BumpVersion("packages")` 通知客户端 |
 | `admin/admin.go` | 路由调整：`/api/packages`（复数）；移除 `/api/package/staged/`、`/api/package/publish`（自更新）、`/api/package/cache-hash` |
-| `admin/templates/package.html`（重写） | 简化 UI：上传 + 文件列表（无缓存区、无 probe 徽章、无发布确认哈希） |
+| `admin/templates/package.html`（重写） | 简化 UI：上传 + 文件列表（无缓存区、无 probe 徽章、无发布确认哈希）；新增 SSE 订阅 `packages` 版本变化自动刷新 |
 | `admin/static/i18n.js` | 更新 `package.*` 翻译（移除 probe、自更新相关） |
 | `config/config.go` | `AdminConfig` 保留 `package-upload-max-mb`（默认 100）、`package-upload-insecure`（默认 false） |
 | `pkg/signing/signing.go`（新增） | Ed25519 签名/验证工具；内置公钥（或从配置读取） |
 
 ---
 
-## 9. 决策记录（2026-09-22 简化评审）
+## 10. 决策记录（2026-09-22 简化评审）
 
 | # | 决策点 | 结论 |
 |---|--------|------|
@@ -391,7 +440,7 @@ i18n：`package.*` 命名空间，zh/en 全套。
 
 ---
 
-## 10. 验收标准
+## 11. 验收标准
 
 1. 上传有效 .pkg（签名正确）→ 201，文件列表可见，元数据正确（版本/平台/架构）
 2. 上传篡改的 .pkg（签名无效）→ 400，无文件残留
@@ -404,7 +453,7 @@ i18n：`package.*` 命名空间，zh/en 全套。
 
 ---
 
-## 11. 后续议题（本期不实现）
+## 12. 后续议题（本期不实现）
 
 1. **本地自更新**：基于"已发布"标记，下载并替换本地二进制（独立设计）
 2. **跨节点分发**：节点间同步"已发布"文件（基于 mesh 网络）

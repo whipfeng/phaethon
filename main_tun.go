@@ -142,7 +142,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	return &TUNResource{engine: engine}
 }
 
-const stoppedMarkerPath = "/var/run/phaethon.stopped"
+const stoppedMarkerPath = "data/state/stopped"
 
 func writeStoppedMarker() {
 	_ = os.WriteFile(stoppedMarkerPath, []byte("1"), 0644)

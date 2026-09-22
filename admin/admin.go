@@ -1333,7 +1333,7 @@ func (s *AdminServer) handleResolversPage(w http.ResponseWriter, r *http.Request
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	// Load instance ReverseID from file
-	dataDir := filepath.Join(".phaethon", "setup")
+	dataDir := filepath.Join("data", "setup")
 	instanceReverseID, _ := reverse.GetReverseID(dataDir)
 
 	// Build proxy list with reverse-support flag
@@ -3858,7 +3858,7 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Ensure instance ReverseID exists in file
-		dataDir := filepath.Join(".phaethon", "setup")
+		dataDir := filepath.Join("data", "setup")
 		_, _ = reverse.GetReverseID(dataDir)
 		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
 		s.mu.Unlock()
@@ -4905,7 +4905,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			s.conf = &config.RuleConfiguration{}
 		}
 		// Ensure instance ReverseID exists in file
-		dataDir := filepath.Join(".phaethon", "setup")
+		dataDir := filepath.Join("data", "setup")
 		_, _ = reverse.GetReverseID(dataDir)
 		s.conf.ReverseConfigs = req.ReverseConfigs
 		s.mu.Unlock()

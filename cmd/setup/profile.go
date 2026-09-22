@@ -15,7 +15,7 @@ import (
 // reverse-client goroutines and the admin API.
 var profileMu sync.Mutex
 
-const profilePath = ".phaethon/setup/profile.yaml"
+const profilePath = "data/setup/profile.yaml"
 
 // HasProfile returns true if a saved setup profile exists.
 func HasProfile() bool {

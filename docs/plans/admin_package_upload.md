@@ -75,23 +75,36 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
 - 使用 Semver 格式：`v<major>.<minor>.<patch>[+<build>]`
 - **不要用横线**（如 `v1.0.0-mesh`），会和 git describe 的分隔符冲突
 - 用 **加号** 添加构建标识：`v1.0.0+mesh`、`v1.0.0+win7`
+- **构建标识不能包含横线**（避免与 commits 信息混淆）
 - 示例：
   - `v1.0.0` - 正式版
   - `v1.0.0+mesh` - mesh 特性版本
-  - `v1.1.0+tun` - TUN 特性版本
+  - `v1.1.0+tun.v2` - 用点号分隔
 
 **创建 Tag 工具**：
 - 脚本：`./scripts/create-tag.sh v1.0.0+mesh "Release message"`
 - Git Hook：`.githooks/pre-push` 自动校验 tag 格式
 - 启用 hook：`git config core.hooksPath .githooks`
 
-**Version 格式**（git describe 输出）：
-| 场景 | 格式 | 示例 |
-|------|------|------|
-| 正好在 tag 上 | tag | `v1.0.0+mesh` |
-| tag 后有提交 | tag-提交数-gcommit | `v1.0.0+mesh-150-g85a1766` |
-| 无 tag | gcommit | `g85a1766` |
-| 有未提交改动 | 末尾加 -dirty | `v1.0.0+mesh-150-g85a1766-dirty` |
+**Version 格式**（git describe 输出，上传时会校验）：
+
+| 场景 | 格式 | 示例 | 有效性 |
+|------|------|------|--------|
+| 基础版本 | `v<major>.<minor>.<patch>` | `v1.0.0` | ✅ |
+| 带构建标识 | `+<build>` | `v1.0.0+mesh` | ✅ |
+| 带提交信息 | `-<N>-g<hash>` 必须完整 | `v1.0.0+mesh-150-g85a1766` | ✅ |
+| 带 dirty | 必须有提交信息 | `v1.0.0+mesh-150-g85a1766-dirty` | ✅ |
+| 开发版本 | `dev` | `dev` | ✅ |
+
+**校验规则**（上传时强制执行）：
+- ✅ `v1.0.0` - 基础版本
+- ✅ `v1.0.0+mesh` - 带构建标识
+- ✅ `v1.0.0+mesh-150-g85a1766` - 完整提交信息
+- ❌ `v1.0.0-mesh` - 横线冲突
+- ❌ `v1.0.0+mesh-150` - 有 commits 无 hash
+- ❌ `v1.0.0+mesh-g85a1766` - 有 hash 无 commits
+- ❌ `v1.0.0-dirty` - dirty 无提交信息
+- ❌ `v1.0.0+mesh-build` - 构建标识含横线
 
 **示例**：
 - `phaethon_linux_amd64_v1.0.0.pkg` - Linux amd64 正式版

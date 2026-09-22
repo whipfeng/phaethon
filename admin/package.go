@@ -802,14 +802,7 @@ func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
 	// Use os.Exit(0) instead of SIGTERM for immediate exit (no graceful shutdown)
 	// This is safe because we're about to restart anyway
 	go func() {
-		if err := os.WriteFile("/tmp/hotswap-exit-scheduled.txt", []byte(time.Now().String()+"\n"), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "[HOTSWAP] write scheduled file failed: %v\n", err)
-		}
 		time.Sleep(1 * time.Second)
-		if err := os.WriteFile("/tmp/hotswap-exit-now.txt", []byte(time.Now().String()+"\n"), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "[HOTSWAP] write exit file failed: %v\n", err)
-		}
-		fmt.Fprintf(os.Stderr, "[HOTSWAP] about to call os.Exit(0)\n")
 		os.Exit(0)
 	}()
 }

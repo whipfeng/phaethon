@@ -1194,6 +1194,31 @@ func runWatchdogMode() {
 
 	for {
 		select {
+		case <-cp.done:
+			// Child process exited (stdout closed) - reap immediately
+			exitCode, reaped := reapChild(pid)
+			// Check for self-update request (exit code 42)
+			if reaped && exitCode == 42 {
+				util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
+				spawnNewWatchdogAndExit(os.Getpid())
+				signal.Stop(sigCh)
+				return
+			}
+			if wasStoppedGracefully() {
+				util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
+				removeStoppedMarker()
+				signal.Stop(sigCh)
+				return
+			}
+			// Child exited (hot swap or crash) — restart immediately
+			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode))
+			if cp == nil {
+				signal.Stop(sigCh)
+				return
+			}
+			pid = cp.proc.Pid
+			spawnTime = time.Now()
+			continue
 		case <-monitorTicker.C:
 			if !processExists(pid) {
 				exitCode, reaped := reapChild(pid)

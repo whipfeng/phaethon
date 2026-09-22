@@ -80,6 +80,11 @@ phaethon_{platform}_{arch}_{version}.pkg (zip)
   - `v1.0.0+mesh` - mesh 特性版本
   - `v1.1.0+tun` - TUN 特性版本
 
+**创建 Tag 工具**：
+- 脚本：`./scripts/create-tag.sh v1.0.0+mesh "Release message"`
+- Git Hook：`.githooks/pre-push` 自动校验 tag 格式
+- 启用 hook：`git config core.hooksPath .githooks`
+
 **Version 格式**（git describe 输出）：
 | 场景 | 格式 | 示例 |
 |------|------|------|

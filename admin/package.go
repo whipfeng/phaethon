@@ -22,7 +22,7 @@ import (
 
 const (
 	// packagesDir is where uploaded .pkg files are stored.
-	packagesDir = ".phaethon/packages"
+	packagesDir = "data/packages"
 
 	defaultPackageUploadMaxMB = 100
 

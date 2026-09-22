@@ -1,11 +1,14 @@
 package p2p
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"phaethon/util"
 )
@@ -66,6 +69,7 @@ func (c *BinaryCache) FilePath(platform, arch, buildTag, version string) (string
 }
 
 // SeedOwnBinary copies the running binary into the cache if not already present.
+// It also computes sha256 and writes a .sha256 sidecar file for fast admin queries.
 func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) error {
 	target, err := c.FilePath(platform, arch, buildTag, version)
 	if err != nil {
@@ -93,7 +97,9 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 		return fmt.Errorf("create temp file: %w", err)
 	}
 
-	if _, err := io.Copy(dst, src); err != nil {
+	// Compute sha256 while copying
+	hasher := sha256.New()
+	if _, err := io.Copy(dst, io.TeeReader(src, hasher)); err != nil {
 		dst.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("copy binary: %w", err)
@@ -105,19 +111,33 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 		return fmt.Errorf("rename to cache: %w", err)
 	}
 
-	util.LogInfo("[P2P] cache: seeded own binary: %s", filepath.Base(target))
+	// Write sha256 sidecar
+	hashHex := hex.EncodeToString(hasher.Sum(nil))
+	shaPath := target + ".sha256"
+	if err := os.WriteFile(shaPath, []byte(hashHex+"\n"), 0644); err != nil {
+		util.LogWarn("[P2P] cache: failed to write sha256 sidecar: %v", err)
+	}
+
+	util.LogInfo("[P2P] cache: seeded own binary: %s (sha256: %s)", filepath.Base(target), hashHex[:16]+"...")
 	return nil
 }
 
-// ListInventory scans the cache directory and returns all entries.
-func (c *BinaryCache) ListInventory() []CacheEntry {
+// CacheEntryInfo is a cache entry plus its file metadata (for admin display).
+type CacheEntryInfo struct {
+	CacheEntry
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+}
+
+// Inventory scans the cache directory and returns all entries with file metadata.
+func (c *BinaryCache) Inventory() []CacheEntryInfo {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
 		util.LogDebug("[P2P] cache: read dir: %v", err)
 		return nil
 	}
 
-	var result []CacheEntry
+	var result []CacheEntryInfo
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -130,7 +150,12 @@ func (c *BinaryCache) ListInventory() []CacheEntry {
 		if !ok {
 			continue
 		}
-		result = append(result, entry)
+		info := CacheEntryInfo{CacheEntry: entry}
+		if fi, err := e.Info(); err == nil {
+			info.Size = fi.Size()
+			info.ModTime = fi.ModTime()
+		}
+		result = append(result, info)
 	}
 	return result
 }
@@ -195,25 +220,6 @@ func (c *BinaryCache) StoreFromReader(platform, arch, buildTag, version string, 
 
 	util.LogInfo("[P2P] cache: stored %s/%s/%s/%s → %s", platform, arch, buildTag, version, filepath.Base(target))
 	return target, nil
-}
-
-// RemoveEntry deletes a specific entry from the cache.
-func (c *BinaryCache) RemoveEntry(platform, arch, buildTag, version string) error {
-	path, err := c.FilePath(platform, arch, buildTag, version)
-	if err != nil {
-		return err
-	}
-	return os.Remove(path)
-}
-
-// HasEntry checks if a specific entry exists in the cache.
-func (c *BinaryCache) HasEntry(platform, arch, buildTag, version string) bool {
-	path, err := c.FilePath(platform, arch, buildTag, version)
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(path)
-	return err == nil
 }
 
 // CleanupBackup removes the .bak file next to the running executable.

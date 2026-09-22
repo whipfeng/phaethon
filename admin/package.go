@@ -23,6 +23,16 @@ const (
 	defaultPackageUploadMaxMB = 100
 )
 
+// versionPattern validates Semver format: v<major>.<minor>.<patch>[+<build>][-<commits>-g<hash>][-dirty]
+// Examples:
+//
+//	v1.0.0
+//	v1.0.0+mesh
+//	v1.0.0+mesh-150-g85a1766
+//	v1.0.0+mesh-150-g85a1766-dirty
+//	dev
+var versionPattern = regexp.MustCompile(`^(dev|v[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9._-]+)?(-[0-9]+-g[0-9a-f]+)?(-dirty)?)$`)
+
 var (
 	packageIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
@@ -156,6 +166,13 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		os.Remove(tmpPath)
 		httpError(w, "signature verification failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate version format
+	if !versionPattern.MatchString(contents.Meta.Version) {
+		os.Remove(tmpPath)
+		httpError(w, fmt.Sprintf("invalid version format: %s (expected: v<major>.<minor>.<patch>[+<build>])", contents.Meta.Version), http.StatusBadRequest)
 		return
 	}
 

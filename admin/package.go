@@ -215,6 +215,7 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	util.LogInfo("[ADMIN] package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
+	util.DefaultVersionNotifier.BumpVersion("packages")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(info)
@@ -317,6 +318,7 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 	}
 
 	util.LogInfo("[ADMIN] package published: %s (version=%s)", id, info.Meta.Version)
+	util.DefaultVersionNotifier.BumpVersion("packages")
 	jsonResponse(w, map[string]interface{}{
 		"status": "published",
 		"id":     id,
@@ -340,6 +342,7 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 	os.Remove(filepath.Join(packagesDir, id+".pkg"))
 	os.Remove(filepath.Join(packagesDir, id+".json"))
 	util.LogInfo("[ADMIN] package deleted: %s", id)
+	util.DefaultVersionNotifier.BumpVersion("packages")
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }
 

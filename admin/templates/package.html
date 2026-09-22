@@ -60,7 +60,25 @@
 
         init() {
             this.setupUpload();
+            this.setupSSE();
             this.refresh();
+        },
+
+        setupSSE() {
+            const sse = new EventSource('./api/events');
+            let lastVersion = 0;
+            sse.addEventListener('heartbeat', (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.packages && data.packages > lastVersion) {
+                        lastVersion = data.packages;
+                        this.refresh();
+                    }
+                } catch {}
+            });
+            sse.onerror = () => {
+                sse.close();
+            };
         },
 
         setupUpload() {

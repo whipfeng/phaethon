@@ -21,28 +21,9 @@
         <div id="package-disabled-warn" class="hidden" style="margin-top:0.75rem; padding:0.5rem 0.75rem; background:rgba(248,81,73,0.1); border-radius:6px; color:var(--text-secondary);" data-i18n="package.uploadDisabledWarn"></div>
     </div>
 
-    <!-- Package list -->
-    <div class="card" style="margin-top:1rem;">
-        <h3 data-i18n="package.listTitle">发布包列表</h3>
-        <div class="table-responsive">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th data-i18n="package.colFilename">文件名</th>
-                        <th data-i18n="package.colVersion">版本</th>
-                        <th data-i18n="package.colPlatform">平台</th>
-                        <th data-i18n="package.colSize">大小</th>
-                        <th data-i18n="package.colTime">上传时间</th>
-                        <th data-i18n="package.colSignature">签名</th>
-                        <th data-i18n="package.colPublished">发布状态</th>
-                        <th data-i18n="package.colActions">操作</th>
-                    </tr>
-                </thead>
-                <tbody id="package-list-tbody"></tbody>
-            </table>
-        </div>
-        <div id="package-list-empty" class="text-muted"></div>
-    </div>
+    <!-- Package list grouped by platform/arch -->
+    <div id="package-groups-container"></div>
+    <div id="package-list-empty" class="text-muted"></div>
 </div>
 
 <script>
@@ -174,81 +155,95 @@
         },
 
         render() {
-            const tbody = document.getElementById('package-list-tbody');
+            const container = document.getElementById('package-groups-container');
             const empty = document.getElementById('package-list-empty');
             const packages = this.data.packages || [];
 
-            tbody.innerHTML = '';
+            container.innerHTML = '';
             empty.textContent = packages.length === 0 ? this.t('package.emptyList', '暂无发布包') : '';
 
+            // Group by platform/arch
+            const groups = {};
             packages.forEach(pkg => {
-                const tr = document.createElement('tr');
-                const sigBadge = pkg.signatureValid
-                    ? '<span class="badge badge-info">✅</span>'
-                    : '<span class="badge badge-error">❌</span>';
-                const pubBadge = pkg.published
-                    ? '<span class="badge badge-info">🏆 ' + this.t('package.published', '已发布') + '</span>'
-                    : '<span class="badge">' + this.t('package.notPublished', '未发布') + '</span>';
-
-                tr.innerHTML =
-                    '<td style="font-family:monospace;">' + this.escapeHtml(pkg.filename) + '</td>' +
-                    '<td>' + this.escapeHtml(pkg.meta.version) + '</td>' +
-                    '<td>' + this.escapeHtml(pkg.meta.platform) + '/' + this.escapeHtml(pkg.meta.arch) + '</td>' +
-                    '<td>' + this.fmtSize(pkg.size) + '</td>' +
-                    '<td>' + this.fmtTime(pkg.uploadedAt) + '</td>' +
-                    '<td>' + sigBadge + '</td>' +
-                    '<td>' + pubBadge + '</td>' +
-                    '<td>' +
-                    '<button class="btn btn-sm btn-outline" onclick="PackagePage.download(\'' + pkg.id + '\')">' + this.t('package.download', '下载') + '</button> ' +
-                    (pkg.published ? '' : '<button class="btn btn-sm btn-primary" onclick="PackagePage.publish(\'' + pkg.id + '\')">' + this.t('package.publish', '发布') + '</button> ') +
-                    '<button class="btn btn-sm btn-danger" onclick="PackagePage.remove(\'' + pkg.id + '\')">' + this.t('package.delete', '删除') + '</button>' +
-                    '</td>';
-                tbody.appendChild(tr);
+                const key = pkg.meta.platform + '/' + pkg.meta.arch;
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(pkg);
             });
+
+            // Sort groups by key
+            const sortedKeys = Object.keys(groups).sort();
+
+            sortedKeys.forEach(key => {
+                const pkgs = groups[key];
+                // Sort by version descending within group
+                pkgs.sort((a, b) => {
+                    return this.compareVersions(b.meta.version, a.meta.version);
+                });
+
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.style.marginTop = '1rem';
+
+                const title = document.createElement('h3');
+                title.textContent = '🖥️ ' + key + ' (' + pkgs.length + ')';
+                card.appendChild(title);
+
+                const tableWrap = document.createElement('div');
+                tableWrap.className = 'table-responsive';
+                tableWrap.innerHTML = `
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th data-i18n="package.colFilename">文件名</th>
+                                <th data-i18n="package.colVersion">版本</th>
+                                <th data-i18n="package.colSize">大小</th>
+                                <th data-i18n="package.colTime">上传时间</th>
+                                <th data-i18n="package.colSignature">签名</th>
+                                <th data-i18n="package.colActions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                `;
+                const tbody = tableWrap.querySelector('tbody');
+
+                pkgs.forEach(pkg => {
+                    const tr = document.createElement('tr');
+                    const sigBadge = pkg.signatureValid
+                        ? '<span class="badge badge-info">✅</span>'
+                        : '<span class="badge badge-error">❌</span>';
+
+                    tr.innerHTML =
+                        '<td style="font-family:monospace;">' + this.escapeHtml(pkg.filename) + '</td>' +
+                        '<td>' + this.escapeHtml(pkg.meta.version) + '</td>' +
+                        '<td>' + this.fmtSize(pkg.size) + '</td>' +
+                        '<td>' + this.fmtTime(pkg.uploadedAt) + '</td>' +
+                        '<td>' + sigBadge + '</td>' +
+                        '<td>' +
+                        '<button class="btn btn-sm btn-outline" onclick="PackagePage.download(\'' + pkg.id + '\')">' + this.t('package.download', '下载') + '</button>' +
+                        '</td>';
+                    tbody.appendChild(tr);
+                });
+
+                card.appendChild(tableWrap);
+                container.appendChild(card);
+            });
+        },
+
+        compareVersions(a, b) {
+            // Simple version comparison (v1.2.3 format)
+            const parseVer = v => v.replace(/^v/, '').split(/[.\+]/).map(x => parseInt(x) || 0);
+            const va = parseVer(a), vb = parseVer(b);
+            for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+                const na = va[i] || 0, nb = vb[i] || 0;
+                if (na > nb) return 1;
+                if (na < nb) return -1;
+            }
+            return 0;
         },
 
         download(id) {
             window.open('./api/packages/' + id + '/download', '_blank');
-        },
-
-        publish(id) {
-            if (!confirm(this.t('package.confirmPublish', '确认将此包标记为已发布？'))) {
-                return;
-            }
-            fetch('./api/packages/' + id + '/publish', {method: 'POST'})
-                .then(r => {
-                    if (r.ok) {
-                        showToast(this.t('package.toast.publishOk', '已标记为发布'), 'success');
-                        this.refresh();
-                    } else {
-                        return r.json().then(err => {
-                            showToast(this.t('package.toast.publishFailed', '发布失败') + ': ' + err.error, 'error');
-                        });
-                    }
-                })
-                .catch(err => {
-                    showToast(this.t('package.toast.networkError', '网络错误'), 'error');
-                });
-        },
-
-        remove(id) {
-            if (!confirm(this.t('package.confirmDelete', '确认删除此发布包？'))) {
-                return;
-            }
-            fetch('./api/packages/' + id, {method: 'DELETE'})
-                .then(r => {
-                    if (r.ok) {
-                        showToast(this.t('package.toast.deleteOk', '已删除'), 'success');
-                        this.refresh();
-                    } else {
-                        return r.json().then(err => {
-                            showToast(this.t('package.toast.deleteFailed', '删除失败') + ': ' + err.error, 'error');
-                        });
-                    }
-                })
-                .catch(err => {
-                    showToast(this.t('package.toast.networkError', '网络错误'), 'error');
-                });
         },
 
         escapeHtml(s) {

@@ -370,6 +370,9 @@ type AdminServer struct {
 	meshDialFn   func(network, addr string) (net.Conn, error) // dials through mesh network
 	meshHTTPClient *http.Client                        // HTTP client for mesh communication
 	adminPort    int                                   // admin API port for mesh peers
+
+	// GetCurrentVersion returns the current running version. Set by main package.
+	GetCurrentVersion func() string
 }
 
 // PeerBrief contains brief information about a mesh peer.

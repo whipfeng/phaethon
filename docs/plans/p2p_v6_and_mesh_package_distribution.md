@@ -302,7 +302,15 @@ hello/gossip 统一后，peer 注册完成时路由已建立，可以立刻通�
 
 ### 6.2 Mesh HTTP Client
 
-通过 `engine.NetDial` 创建 mesh HTTP client，使用 mesh 域名寻址：
+通过 `dialer.MeshDial` 创建 mesh HTTP client，复用 Mode B 入口的连接方式：
+
+**关键点**：
+- 使用 `dialer.MeshDial` 而非 `engine.NetDial`
+- `dialer.MeshDial` 内部会：
+  1. 用 `engine.ResolveDomain` 解析域名得到 Fake-IP（走 netstack DNS 流程）
+  2. 用 `engine.NetDialWithModeB` 拨号 Fake-IP
+- 连接源地址是 GIP (.3)，回程包到 GIP → 投递给 gVisor netstack → 匹配到连接的 socket
+- 这样 mesh HTTP client 的连接就和 Mode B 入口一样，走 gVisor netstack
 
 ```go
 // admin/admin.go
@@ -310,7 +318,11 @@ func (s *AdminServer) newMeshHTTPClient() *http.Client {
     return &http.Client{
         Transport: &http.Transport{
             DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-                return s.meshDialFn(network, addr)  // engine.NetDial
+                // 使用 dialer.MeshDial 而非 engine.NetDial
+                // MeshDial 内部会解析域名（得到 Fake-IP）+ NetDialWithModeB（GIP 源地址）
+                host, port, _ := net.SplitHostPort(addr)
+                portNum, _ := strconv.Atoi(port)
+                return dialer.MeshDial(host, portNum, "", "admin-mesh", nil)
             },
             TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
         },
@@ -318,6 +330,12 @@ func (s *AdminServer) newMeshHTTPClient() *http.Client {
     }
 }
 ```
+
+**为什么不用 engine.NetDial**：
+- `engine.NetDial` 用 VIP 或 hostIP 作为源地址
+- VIP (.1) 只用于 NAT 回程，没有 NAT 记录会被丢包
+- hostIP (.2) 回程写到 TUN → OS，但连接在 gVisor netstack，收不到
+- GIP (.3) 回程投递给 gVisor netstack，才能匹配到连接的 socket
 
 ### 6.3 发布推送
 
@@ -429,7 +447,226 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
    保留旧版本，下次再试
 ```
 
-### 6.8 路由注册
+### 6.8 热替换（Hot Swap）
+
+**设计原则**：
+- 看门狗是启动器（launcher），不是业务程序
+- 看门狗逻辑足够简单（找 pkg → 提取 → 启动 → 监控），可以固化，不需要升级
+- 类似 BIOS/bootloader：只负责加载和启动，本身不包含业务逻辑
+- Worker 包含所有业务逻辑，通过热替换升级
+
+**包分发流程**：
+1. 节点 A 上传包 → 保存 pkg 到工作目录 → 通知邻居 B、C（"我有新包了"）
+2. 节点 B 收到通知 → 查询 A 的包列表 → 决定要不要下载 → 调用 `syncFromPeer` 从 A 拉取
+3. 节点 B 下载完成 → 验证签名 OK → 保存 pkg 到工作目录 → 通知自己的邻居 D、E
+
+**热替换触发点**（2个）：
+1. `apiPackageUpload` - 本地上传后，保存成功
+2. `syncFromPeer` - 从 peer 拉取包，下载验证成功后
+
+**注意**：`apiPackageReceive` 只接收通知（不接收包本身），不触发热替换。收到通知后调用 `syncFromPeer` 去拉取包。
+
+**热替换逻辑**：
+- Worker 检测到比自己高的版本，直接退出
+- 看门狗发现 worker 退出，重新查找最新 pkg
+- 看门狗提取最新 binary（如果还没提取过）
+- 看门狗启动新 worker，工作目录保持不变
+- 看门狗自身不升级（逻辑固化，不需要升级）
+
+**目录结构**：
+```
+工作目录/（例如 /root/ 或 /home/layer4/phaethon-gg/）
+├── phaethon                    # 看门狗 binary（固化，不升级）
+├── config.yaml                 # 配置文件
+├── phaethon.log                # 日志
+└── .phaethon/
+    ├── packages/               # pkg 文件（分发的 source of truth）
+    │   ├── xxx.pkg
+    │   └── xxx.json
+    └── worker/                 # 提取的 worker binary（缓存，避免重复提取）
+        ├── phaethon-v0.3.5
+        └── phaethon-v0.3.6
+```
+
+**pkg 存放位置**：
+- 放在 `.phaethon/packages/` 目录（相对于看门狗的工作目录）
+- pkg 文件是分发的 source of truth，包含签名、元数据、binary
+
+**worker binary 存放位置**：
+- 提取到 `.phaethon/worker/` 目录（相对于看门狗的工作目录）
+- 例如：`.phaethon/worker/phaethon-v0.3.5`
+- 不使用 `/tmp`，避免被系统自动清理，统一管理
+- 如果 binary 已存在，直接复用，不重复提取
+
+**看门狗启动流程**：
+1. 从 `./.phaethon/packages/` 查找最高版本的 pkg 文件
+2. 检查 `.phaethon/worker/` 是否已有对应版本的 binary
+3. 如果没有，从 pkg 文件中提取 binary 到 `.phaethon/worker/` 目录（必须提取，不能直接执行 zip 中的文件）
+4. 启动 binary 时，**工作目录设置为看门狗的工作目录**（即 `.` 目录，不是 `.phaethon/packages/`）
+5. 配置文件（`config.yaml`）、日志等都在看门狗的工作目录，确保 binary 能正确读取
+
+**为什么看门狗不需要升级**：
+- 看门狗是启动器，类似 BIOS/bootloader，逻辑简单且稳定
+- 只负责：查找 pkg、提取 binary、启动进程、监控心跳
+- 不包含业务逻辑（代理、路由、mesh 等）
+- 即使 pkg 格式变化，可以做向后兼容
+- 服务管理器（OpenRC/systemd）是稳定基座，负责重启看门狗（如果需要）
+
+**架构设计原则：基座固化，上层可变**：
+
+这是经典的计算机架构分层模式，基座层简单稳定，上层复杂多变：
+
+| 基座层（固化） | 上层（可变） | 说明 |
+|--------------|------------|------|
+| 硬件 | 软件 | 硬件稳定，软件可替换 |
+| OS 内核 | 应用程序 | 内核稳定，应用变化 |
+| Bootloader (GRUB/UEFI) | 操作系统 | 启动器固化，OS 可替换 |
+| 运行时 (JVM/Node.js) | 业务代码 | 运行时稳定，用户代码变化 |
+| 框架 | 业务逻辑 | 框架稳定，业务逻辑变化 |
+| 数据库引擎 (MySQL/PostgreSQL) | 数据/Schema | 引擎稳定，数据结构变化 |
+| **看门狗 (phaethon)** | **Worker (phaethon)** | **启动器固化，业务程序变化** |
+
+**共同点**：
+- 基座层简单、稳定、经过充分验证
+- 上层复杂、多变、包含业务逻辑
+- 基座提供能力，上层使用能力
+
+我们的设计遵循这个原则：看门狗作为基座（启动器）固化，Worker 作为上层（业务程序）通过热替换升级。
+
+**实现**：
+```go
+// admin/package.go
+func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
+    // 1. 检查平台/架构是否匹配
+    if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
+        return
+    }
+    
+    // 2. 检查版本是否更高
+    if s.GetCurrentVersion == nil {
+        return
+    }
+    currentVersion := s.GetCurrentVersion()
+    if p2p.CompareVersions(contents.Meta.Version, currentVersion) <= 0 {
+        return
+    }
+    
+    util.LogInfo("[ADMIN] detected newer version %s > current %s, exiting for watchdog restart...",
+        contents.Meta.Version, currentVersion)
+    
+    // 3. 直接退出，看门狗会拉起新版本
+    go func() {
+        time.Sleep(1 * time.Second)
+        syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+    }()
+}
+```
+
+**看门狗逻辑**（固化，不升级）：
+```go
+// 看门狗启动时：
+// 1. 查找 .phaethon/packages/ 中最高版本的 pkg 文件
+// 2. 检查 .phaethon/worker/ 是否已有对应版本的 binary
+// 3. 如果没有，从 pkg 文件中提取 binary 到 .phaethon/worker/ 目录
+// 4. 启动该 binary，工作目录设置为看门狗的工作目录
+// 5. 监控 worker 心跳，如果崩溃或退出，重复 1-4
+
+// 看门狗不升级的原因：
+// - 逻辑简单：查找、提取、启动、监控
+// - 不包含业务逻辑
+// - 类似 BIOS/bootloader，可以固化
+// - 即使 pkg 格式变化，可以做向后兼容
+```
+
+**调用时机**：
+```go
+// admin/package.go - apiPackageUpload
+func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
+    // ... 验证、保存 pkg 到工作目录 ...
+    
+    // 检查是否有更高版本
+    go s.checkForNewerVersion(contents)
+}
+
+// admin/package.go - syncFromPeer
+func (s *AdminServer) syncFromPeer(nodeID string) {
+    // ... 下载、保存 pkg 到工作目录 ...
+    
+    // 每个包下载成功后检查是否有更高版本
+    go s.checkForNewerVersion(contents)
+}
+```
+
+**版本获取**：
+```go
+// admin/admin.go
+type AdminServer struct {
+    // ...
+    // GetCurrentVersion returns the current running version. Set by main package.
+    GetCurrentVersion func() string
+}
+
+// main.go
+adminSrv.GetCurrentVersion = func() string {
+    return Version
+}
+```
+
+**版本号升级规范**：
+遵循语义化版本（Semantic Versioning）规范：
+- **大版本号（MAJOR）**：不兼容的 API 变更或重大架构调整
+  - 例如：v1.0.0 → v2.0.0（协议不兼容、配置格式大改）
+- **小版本号（MINOR）**：向下兼容的功能新增
+  - 例如：v0.2.0 → v0.3.0（新增热替换功能、新增 API 端点）
+- **修订版本号（PATCH）**：向下兼容的问题修正
+  - 例如：v0.3.0 → v0.3.1（修复 bug、性能优化）
+
+**当前项目阶段**：
+- 项目处于 v0.x.x 阶段，API 和架构仍在快速迭代
+- 大版本号保持为 0，直到 API 稳定后升到 v1.0.0
+- 新功能升小版本，bug 修复升修订版本
+
+**构建和打包流程**：
+
+1. **打 git tag**（触发版本号）：
+   ```bash
+   git tag v0.3.2
+   git push origin v0.3.2
+   ```
+
+2. **构建 binary**（使用 Makefile）：
+   ```bash
+   make linux  # 构建 Linux amd64
+   # 或
+   make windows  # 构建 Windows amd64
+   ```
+   Makefile 会自动从 git tag 获取版本号。
+
+3. **打包成 pkg**（使用 scripts/build-pkg.sh）：
+   ```bash
+   ./scripts/build-pkg.sh linux amd64
+   ```
+   脚本会：
+   - 构建 binary（如果不存在）
+   - 创建 meta.json
+   - 使用 PHAETHON_SIGNING_KEY 签名（如果设置）
+   - 打包成 .pkg 文件
+
+4. **上传到 admin**：
+   - 通过 admin UI 上传
+   - 或通过 API：`curl -k -X POST -F 'file=@phaethon_linux_amd64_v0.3.2.pkg' https://localhost:39999/api/packages/upload`
+
+5. **触发热替换**：
+   - 上传成功后，如果平台/架构匹配且版本更高，自动触发热替换
+   - 进程退出，看门狗拉起新版本
+```
+
+**注意事项**：
+- watchdog 必须已部署，否则进程退出后不会自动拉起
+- Windows 环境不支持原子替换（文件被占用），需要特殊处理或禁用
+- 热替换失败不影响当前运行（回滚到旧版本）
+
+### 6.9 路由注册
 
 ```go
 // admin/admin.go - registerRoutes
@@ -446,7 +683,7 @@ func isPublicPath(path string, method string) bool {
 }
 ```
 
-### 6.9 组装
+### 6.10 组装
 
 ```go
 // main.go
@@ -468,9 +705,9 @@ adminServer.SetAdminPort(conf.AdminPort)
 | `mesh/topology.go` | GossipInfo 加 Cmd、ProtocolVersion 字段 |
 | `p2p/p2p.go` | 删除 HelloMsg，用 GossipInfo 替代；handleHello 改为提取 nodeID + UnregisterPeer → RegisterPeer + 处理拓扑；handleGossip 处理拓扑；processGossipInfo 共用逻辑；sendHello/sendGossip 构建 GossipInfo；ProtocolVersion → 6；新增 ResendHelloToAll |
 | `mesh/mesh.go` | 新增 BuildGossipInfo()、UnregisterPeerByNodeID()、OnPeerRegistered 回调、CloseCh()；冲突后调 ResendHelloToAll；gossipLoop 中 RegisterPeer 后调 broadcastGossip |
-| `admin/admin.go` | 新增 PeerBrief、meshHTTPClient、peerLister、meshDialFn、adminPort；新增 SetPeerLister、SetMeshDialFn、SetAdminPort；更新 isPublicPath 支持 method 参数；包端点无需认证 |
-| `admin/package.go` | 新增 apiPackageReceive；apiPackagePublish 后调 DistributePackage；SyncFromPeer 实现同步逻辑（目标集合、下载、retention）；版本单调递增检查 |
-| `main.go` | 组装：SetPeerLister、SetMeshDialFn、SetAdminPort、OnPeerRegistered 回调、5 分钟定时同步 |
+| `admin/admin.go` | 新增 PeerBrief、meshHTTPClient、peerLister、meshDialFn、adminPort；新增 SetPeerLister、SetMeshDialFn、SetAdminPort；新增 GetCurrentVersion 回调获取当前版本；更新 isPublicPath 支持 method 参数；包端点无需认证 |
+| `admin/package.go` | 新增 apiPackageReceive；apiPackagePublish 后调 DistributePackage；SyncFromPeer 实现同步逻辑（目标集合、下载、retention）；版本单调递增检查；新增 tryHotSwap 实现热替换（平台/架构匹配 + 版本更高时触发）；三个触发点：apiPackageUpload、apiPackageReceive、syncFromPeer |
+| `main.go` | 组装：SetPeerLister、SetMeshDialFn、SetAdminPort、GetCurrentVersion 回调、OnPeerRegistered 回调、5 分钟定时同步 |
 | `docs/plans/p2p_v6_and_mesh_package_distribution.md` | 本文档 |
 
 ---

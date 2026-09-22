@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,6 +17,9 @@ import (
 	"phaethon/reverse"
 	"phaethon/util"
 )
+
+// commitPattern matches the git describe commit info: -<digits>-g<hash>
+var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 
 // P2PProtocolVersion is the current P2P protocol version.
 // Bump when making incompatible changes to the P2P frame protocol or hello semantics.
@@ -751,20 +755,43 @@ func CompareVersions(a, b string) int {
 }
 
 // parseVersion extracts numeric tag segments and commit count from a version string.
-// "v1.2.3" → [1,2,3], 0
-// "v1.2.3-5-gabc1234" → [1,2,3], 5
-// "v1.2.3-5-gabc1234-dirty" → [1,2,3], 5
-// "78e9dfc" → nil, 0
-// "dev" → nil, 0
+// Supports Semver build metadata format: v1.2.3+build[-commits-ghash][-dirty]
+//
+// Examples:
+//
+//	"v1.2.3" → [1,2,3], 0
+//	"v1.2.3+mesh" → [1,2,3], 0
+//	"v1.2.3+mesh-5-gabc1234" → [1,2,3], 5
+//	"v1.2.3-5-gabc1234" → [1,2,3], 5
+//	"v1.2.3+mesh-5-gabc1234-dirty" → [1,2,3], 5
+//	"78e9dfc" → nil, 0
+//	"dev" → nil, 0
 func parseVersion(v string) (tag []int, commits int) {
 	v = strings.TrimPrefix(v, "v")
 	v = strings.TrimSuffix(v, "-dirty")
 
-	// Split by '-' to separate tag from commit info
-	parts := strings.SplitN(v, "-", 3)
+	// Try to extract commit count from the end: -<digits>-g<hash>
+	// Pattern: something-N-ghash where N is the commit count
+	if match := commitPattern.FindStringSubmatch(v); match != nil {
+		if n, err := strconv.Atoi(match[1]); err == nil {
+			commits = n
+		}
+		// Remove the -N-ghash part to get the tag
+		v = v[:len(v)-len(match[0])]
+	}
 
-	// Try to parse the first part as a version tag (e.g., "1.2.3")
-	segments := strings.Split(parts[0], ".")
+	// Split by '+' to separate version from build metadata
+	// e.g., "1.2.3+mesh" → "1.2.3" (we ignore "+mesh" for comparison)
+	if idx := strings.Index(v, "+"); idx != -1 {
+		v = v[:idx]
+	}
+
+	// Parse version segments (e.g., "1.2.3" → [1, 2, 3])
+	segments := strings.Split(v, ".")
+	if len(segments) == 0 {
+		return nil, 0
+	}
+
 	allNumeric := true
 	for _, s := range segments {
 		if _, err := strconv.Atoi(s); err != nil {
@@ -773,20 +800,13 @@ func parseVersion(v string) (tag []int, commits int) {
 		}
 	}
 
-	if !allNumeric || len(segments) == 0 {
+	if !allNumeric {
 		return nil, 0
 	}
 
 	for _, s := range segments {
 		n, _ := strconv.Atoi(s)
 		tag = append(tag, n)
-	}
-
-	// If there's a commit count (e.g., "5" in "v1.2.3-5-gabc1234")
-	if len(parts) >= 2 {
-		if n, err := strconv.Atoi(parts[1]); err == nil {
-			commits = n
-		}
 	}
 
 	return tag, commits

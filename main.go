@@ -1125,20 +1125,27 @@ func runWatchdogMode() {
 	}
 
 	lastRestart := time.Time{}
+	isRestarting := false
 
-	restartChild := func(cp *childProcess, pid int, reason string) *childProcess {
+	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool) *childProcess {
 		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
-		cp.kill(syscall.SIGTERM)
-		// Wait up to 10 seconds for the child to exit. If it's stuck,
-		// escalate to SIGKILL.
-		select {
-		case <-cp.done:
-		case <-time.After(10 * time.Second):
-			util.LogWarn("watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
-			cp.kill(syscall.SIGKILL)
-			<-cp.done
+		isRestarting = true
+		defer func() { isRestarting = false }()
+
+		if !alreadyExited {
+			cp.kill(syscall.SIGTERM)
+			// Wait up to 10 seconds for the child to exit. If it's stuck,
+			// escalate to SIGKILL.
+			select {
+			case <-cp.done:
+			case <-time.After(10 * time.Second):
+				util.LogWarn("watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
+				cp.kill(syscall.SIGKILL)
+				<-cp.done
+			}
+			reapChild(pid)
 		}
-		reapChild(pid)
+
 		if elapsed := time.Since(lastRestart); elapsed < restartCooldown {
 			remain := restartCooldown - elapsed
 			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
@@ -1180,7 +1187,10 @@ func runWatchdogMode() {
 	go func() {
 		for sig := range sigCh {
 			util.LogInfo("watchdog: received %v, forwarding to child %d", sig, cp.proc.Pid)
-			writeStoppedMarker()
+			// Only write stopped marker if not restarting (to avoid false graceful exit detection)
+			if !isRestarting {
+				writeStoppedMarker()
+			}
 			cp.kill(sig)
 		}
 	}()
@@ -1211,7 +1221,8 @@ func runWatchdogMode() {
 				return
 			}
 			// Child exited (hot swap or crash) — restart immediately
-			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode))
+			// Pass alreadyExited=true since we already reaped the child
+			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode), true)
 			if cp == nil {
 				signal.Stop(sigCh)
 				return
@@ -1221,6 +1232,7 @@ func runWatchdogMode() {
 			continue
 		case <-monitorTicker.C:
 			if !processExists(pid) {
+				// Child exited but cp.done not yet closed — reap and restart
 				exitCode, reaped := reapChild(pid)
 				// Check for self-update request (exit code 42)
 				if reaped && exitCode == 42 {
@@ -1235,8 +1247,9 @@ func runWatchdogMode() {
 					signal.Stop(sigCh)
 					return
 				}
-				// Child crashed — restart immediately.
-				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid))
+				// Child crashed — restart immediately
+				// Pass alreadyExited=true since we already reaped the child
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid), true)
 				if cp == nil {
 					signal.Stop(sigCh)
 					return
@@ -1247,7 +1260,8 @@ func runWatchdogMode() {
 			}
 			// Check ready timeout: child has not signaled ready within the limit.
 			if !cp.ready.Load() && time.Since(spawnTime) > childReadyTimeout {
-				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout))
+				// Child still running but stuck — pass alreadyExited=false
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout), false)
 				if cp == nil {
 					signal.Stop(sigCh)
 					return
@@ -1260,7 +1274,8 @@ func runWatchdogMode() {
 			if cp.ready.Load() {
 				lastHB := time.Unix(0, cp.lastHB.Load())
 				if time.Since(lastHB) > childHeartbeatTimeout {
-					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout))
+					// Child still running but stuck — pass alreadyExited=false
+					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout), false)
 					if cp == nil {
 						signal.Stop(sigCh)
 						return

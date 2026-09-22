@@ -1125,12 +1125,12 @@ func runWatchdogMode() {
 	}
 
 	lastRestart := time.Time{}
-	isRestarting := false
+	var isRestarting atomic.Bool
 
 	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool) *childProcess {
 		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
-		isRestarting = true
-		defer func() { isRestarting = false }()
+		isRestarting.Store(true)
+		defer func() { isRestarting.Store(false) }()
 
 		if !alreadyExited {
 			cp.kill(syscall.SIGTERM)
@@ -1182,16 +1182,19 @@ func runWatchdogMode() {
 	spawnTime := time.Now()
 
 	// Forward signals to the child for graceful shutdown.
+	// Use a pointer to track current child so signal handler always forwards to the right process.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	currentCp := &cp // pointer to the cp variable
 	go func() {
 		for sig := range sigCh {
-			util.LogInfo("watchdog: received %v, forwarding to child %d", sig, cp.proc.Pid)
+			child := *currentCp
+			util.LogInfo("watchdog: received %v, forwarding to child %d", sig, child.proc.Pid)
 			// Only write stopped marker if not restarting (to avoid false graceful exit detection)
-			if !isRestarting {
+			if !isRestarting.Load() {
 				writeStoppedMarker()
 			}
-			cp.kill(sig)
+			child.kill(sig)
 		}
 	}()
 

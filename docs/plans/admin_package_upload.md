@@ -122,12 +122,25 @@ dist/
 PHAETHON_SIGNING_KEY=/path/to/private.key
 ```
 
-### 2.4 编译命令（后续实现）
+### 2.4 打包脚本（已实现）
+
+使用 `scripts/build-pkg.sh` 打包：
 
 ```bash
-phaethon build --version v1.0 --platform linux --arch amd64 --sign-key key.pem
-→ 输出：phaethon-v1.0-linux-amd64.pkg
+# 用法
+./scripts/build-pkg.sh [platform] [arch]
+
+# 示例
+./scripts/build-pkg.sh linux amd64      # → dist/linux-amd64/phaethon_linux_amd64_xxx.pkg
+./scripts/build-pkg.sh windows amd64    # → dist/windows-amd64/phaethon_windows_amd64_xxx.pkg
+./scripts/build-pkg.sh darwin arm64     # → dist/darwin-arm64/phaethon_darwin_arm64_xxx.pkg
 ```
+
+脚本会：
+1. 编译二进制（注入 version/platform/arch）
+2. 生成 meta.json
+3. 用私钥签名（从 `scripts/.env` 读取 `PHAETHON_SIGNING_KEY`）
+4. 打包成 `.pkg`（zip 格式：binary + meta.json + signature）
 
 ### 2.5 构建信息注入（已实现）
 

@@ -569,11 +569,11 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 			url := fmt.Sprintf("https://%s:%d/api/packages/receive", domain, s.adminPort)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
 			if err != nil {
-				util.LogDebug("[ADMIN] distribute package to %s failed: %v", nodeID, err)
+				util.LogInfo("[ADMIN] distribute package to %s (%s) failed: %v", nodeID, domain, err)
 				return
 			}
 			resp.Body.Close()
-			util.LogDebug("[ADMIN] distributed package to %s", nodeID)
+			util.LogInfo("[ADMIN] distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)
 		}(peer.NodeID)
 	}
 }

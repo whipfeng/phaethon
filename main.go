@@ -2028,10 +2028,15 @@ func wireAdminCallbacks(resources *activeResources) {
 			return result
 		})
 
-		// Set mesh dial function
-		adminSrv.SetMeshDialFn(func(network, addr string) (net.Conn, error) {
-			return resources.tunRes.engine.NetDial(network, addr)
-		})
+		// Set mesh dial function and DNS resolver
+		adminSrv.SetMeshDialFn(
+			func(network, addr string) (net.Conn, error) {
+				return resources.tunRes.engine.NetDial(network, addr)
+			},
+			func(domain string) (net.IP, error) {
+				return resources.tunRes.engine.ResolveDomain(domain)
+			},
+		)
 
 		// Set admin port
 		if adminAddr := adminSrv.ListenAddr(); adminAddr != "" {

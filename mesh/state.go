@@ -20,7 +20,7 @@ type MeshState struct {
 // LoadState loads the mesh state from <dataDir>/mesh-state.json.
 // Returns nil if the file does not exist.
 func LoadState(dataDir string) (*MeshState, error) {
-	stateFile := filepath.Join(dataDir, "mesh-state.json")
+	stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
 	data, err := os.ReadFile(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -37,14 +37,15 @@ func LoadState(dataDir string) (*MeshState, error) {
 
 // SaveState persists the mesh state to <dataDir>/mesh-state.json.
 func SaveState(dataDir string, state *MeshState) error {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("create data dir fail: %w", err)
+	stateDir := filepath.Join(dataDir, "state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("create state dir fail: %w", err)
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal mesh state fail: %w", err)
 	}
-	stateFile := filepath.Join(dataDir, "mesh-state.json")
+	stateFile := filepath.Join(stateDir, "mesh-state.json")
 	if err := os.WriteFile(stateFile, data, 0644); err != nil {
 		return fmt.Errorf("save mesh state fail: %w", err)
 	}

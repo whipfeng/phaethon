@@ -210,7 +210,7 @@ func (s *BindingStore) FindOldestDisconnectedBinding(portMin, portMax int) *Port
 
 // bindingFilePath returns the full path to the bindings file.
 func (s *BindingStore) bindingFilePath() string {
-	return filepath.Join(s.dataDir, bindingFileName)
+	return filepath.Join(s.dataDir, "state", bindingFileName)
 }
 
 // load reads bindings from disk.

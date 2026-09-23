@@ -28,7 +28,7 @@ type BinaryCache struct {
 
 // NewBinaryCache creates or opens the p2p-cache directory under workdir.
 func NewBinaryCache(workdir string) (*BinaryCache, error) {
-	dir := filepath.Join(workdir, "p2p-cache")
+	dir := filepath.Join(workdir, "cache", "p2p-cache")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}

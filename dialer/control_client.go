@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"sync"
 	"time"
 
@@ -76,18 +77,18 @@ func (c *ControlClient) Register(req reverse.ControlRequest) (*reverse.ControlRe
 
 	reqBytes, _ := json.Marshal(req)
 
-	if err := reverse.WriteFrame(conn, reverse.FrameData, reqBytes); err != nil {
+	if err := frame.WriteFrame(conn, frame.FrameData, reqBytes); err != nil {
 		return nil, fmt.Errorf("send register fail: %w", err)
 	}
 
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	frameType, payload, err := reverse.ReadFrame(conn)
+	frameType, payload, err := frame.ReadFrame(conn)
 	if err != nil {
 		return nil, fmt.Errorf("read register reply fail: %w", err)
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	if frameType != reverse.FrameData || len(payload) == 0 {
+	if frameType != frame.FrameData || len(payload) == 0 {
 		return nil, fmt.Errorf("unexpected reply frame type: 0x%02x", frameType)
 	}
 
@@ -130,7 +131,7 @@ func (c *ControlClient) Keepalive() {
 			if conn == nil {
 				return
 			}
-			if err := reverse.WriteFrame(conn, reverse.FrameHeartbeat, nil); err != nil {
+			if err := frame.WriteFrame(conn, frame.FrameHeartbeat, nil); err != nil {
 				util.LogInfo("[CONTROL-CLIENT] heartbeat send fail to %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
@@ -154,7 +155,7 @@ func (c *ControlClient) StartMonitor() {
 			}
 			// Deadline slightly longer than the registry heartbeat interval (30s)
 			conn.SetReadDeadline(time.Now().Add(70 * time.Second))
-			_, _, err := reverse.ReadFrame(conn)
+			_, _, err := frame.ReadFrame(conn)
 			if err != nil {
 				util.LogInfo("[CONTROL-CLIENT] monitor detected disconnect from %s: %v", c.registryAddr(), err)
 				c.Close()

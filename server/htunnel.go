@@ -63,6 +63,11 @@ type htChannel struct {
 	port      int
 	isReverse bool
 	isUDP     bool // UDP tunnel mode
+	isMesh    bool // P2P direct mesh channel (frames in POST/GET bodies)
+
+	// mesh channel queues (only used when isMesh is true)
+	meshIn  chan meshMsg // client → local P2P session (fed by POST handler)
+	meshOut chan meshMsg // local P2P session → client (drained by GET handler)
 
 	// Cached results for step==0 retry
 	lastReadData []byte
@@ -331,6 +336,13 @@ func (s *HTunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.Request) {
+	// MESH channel (P2P direct mode): no target address, frames flow in
+	// POST/GET bodies — see htunnel_mesh.go.
+	if r.Header.Get(htHeaderCommand) == dialer.HTunnelCmdMesh {
+		s.handleMeshChannelRequest(w)
+		return
+	}
+
 	encHost := r.Header.Get(htHeaderTargetHost)
 	encPort := r.Header.Get(htHeaderTargetPort)
 	if encHost == "" || encPort == "" {
@@ -686,6 +698,11 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	ch := chI.(*htChannel)
 	ch.resetReqTimeout(s, id)
 
+	if ch.isMesh {
+		s.meshHandleRead(ch, w, r)
+		return
+	}
+
 	for {
 		ch.mu.Lock()
 		step := contentSeq - ch.readSeq
@@ -752,6 +769,11 @@ func (s *HTunnelServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	ch := chI.(*htChannel)
 	ch.resetReqTimeout(s, id)
+
+	if ch.isMesh {
+		s.meshHandleWrite(ch, w, r)
+		return
+	}
 
 	for {
 		ch.mu.Lock()
@@ -888,6 +910,9 @@ func (s *HTunnelServer) closeChannel(id int64) {
 	ch.closeOnce.Do(func() {
 		if ch.isUDP {
 			util.LogInfo("[HT-SVR] [%s] [%s] UDP tunnel closed (%s:%d)", s.Mapping.Name, ch.connID, ch.address, ch.port)
+		}
+		if ch.isMesh {
+			util.LogInfo("[HT-SVR] [%s] [%s] MESH channel closed", s.Mapping.Name, ch.connID)
 		}
 		close(ch.closed)
 		if ch.udpReplyCond != nil {

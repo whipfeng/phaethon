@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"strconv"
 	"strings"
 	"sync"
@@ -170,7 +171,7 @@ func (m *ControlManager) sendHeartbeats(session *ControlSession) {
 		case <-session.stopCh:
 			return
 		case <-ticker.C:
-			if err := reverse.WriteFrame(session.Conn, reverse.FrameHeartbeat, nil); err != nil {
+			if err := frame.WriteFrame(session.Conn, frame.FrameHeartbeat, nil); err != nil {
 				return
 			}
 		}
@@ -181,7 +182,7 @@ func (m *ControlManager) sendHeartbeats(session *ControlSession) {
 func (m *ControlManager) runSession(session *ControlSession) {
 	for {
 		session.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, payload, err := reverse.ReadFrame(session.Conn)
+		frameType, payload, err := frame.ReadFrame(session.Conn)
 		session.touch()
 		if err != nil {
 			util.LogError("[CONTROL] read error for %s: %v", session.Address, err)
@@ -189,18 +190,18 @@ func (m *ControlManager) runSession(session *ControlSession) {
 		}
 
 		switch frameType {
-		case reverse.FrameHeartbeat:
+		case frame.FrameHeartbeat:
 			continue
 		default:
 			// Treat non-heartbeat frames as potential JSON commands
-			if len(payload) > 0 && frameType == reverse.FrameData {
+			if len(payload) > 0 && frameType == frame.FrameData {
 				reply := m.handleCommand(session, payload)
 				if reply.Status == "ok" && reply.Address != "" {
 					session.DynAddr = reply.Address
 				}
 				respBytes, _ := json.Marshal(reply)
-				reverse.WriteFrame(session.Conn, reverse.FrameData, respBytes)
-			} else if frameType == reverse.FrameHeartbeat {
+				frame.WriteFrame(session.Conn, frame.FrameData, respBytes)
+			} else if frameType == frame.FrameHeartbeat {
 				continue
 			} else {
 				util.LogInfo("[CONTROL] unexpected frame type 0x%02x for %s", frameType, session.Address)

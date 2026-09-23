@@ -269,14 +269,14 @@ func drawDigit(img *image.RGBA, x, y int, d byte, c color.Color) {
 
 // AdminServer provides a web management interface.
 type AdminServer struct {
-	config     *config.AdminConfig
-	conf       *config.RuleConfiguration // single source of truth: loaded from config.yaml, edited in-place, saved directly
-	stats      *StatsCollector
-	server     *http.Server
-	ln         net.Listener
-	tlsConfig  *tls.Config // cached TLS config for ServeConn
-	mu         sync.RWMutex
-	confPath   string // path to the config.yaml file for saving
+	config    *config.AdminConfig
+	conf      *config.RuleConfiguration // single source of truth: loaded from config.yaml, edited in-place, saved directly
+	stats     *StatsCollector
+	server    *http.Server
+	ln        net.Listener
+	tlsConfig *tls.Config // cached TLS config for ServeConn
+	mu        sync.RWMutex
+	confPath  string // path to the config.yaml file for saving
 
 	// SSE broadcaster lifecycle
 	sseStopCh chan struct{}
@@ -366,11 +366,11 @@ type AdminServer struct {
 	sessionSecret []byte
 
 	// Mesh package distribution
-	peerLister   func() []PeerBrief                    // returns connected mesh peers
-	meshDialFn   func(network, addr string) (net.Conn, error) // dials through mesh network
-	dnsResolver  func(domain string) (net.IP, error)   // resolves domain through mesh DNS
-	meshHTTPClient *http.Client                        // HTTP client for mesh communication
-	adminPort    int                                   // admin API port for mesh peers
+	peerLister     func() []PeerBrief                           // returns connected mesh peers
+	meshDialFn     func(network, addr string) (net.Conn, error) // dials through mesh network
+	dnsResolver    func(domain string) (net.IP, error)          // resolves domain through mesh DNS
+	meshHTTPClient *http.Client                                 // HTTP client for mesh communication
+	adminPort      int                                          // admin API port for mesh peers
 
 	// GetCurrentVersion returns the current running version. Set by main package.
 	GetCurrentVersion func() string
@@ -432,7 +432,7 @@ func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, erro
 				if err != nil {
 					return nil, fmt.Errorf("parse addr: %w", err)
 				}
-				
+
 				// Resolve domain name if needed
 				if ip := net.ParseIP(host); ip == nil {
 					// It's a domain name, resolve it
@@ -445,12 +445,15 @@ func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, erro
 					}
 					addr = net.JoinHostPort(fakeIP.String(), port)
 				}
-				
+
 				return f(network, addr)
 			},
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
-		Timeout: 30 * time.Second,
+		// Large pkg transfers over slow mesh transports shared with
+		// concurrent pushes can take minutes; must exceed the server's
+		// read/write budget so the server isn't the one that gives up first.
+		Timeout: 300 * time.Second,
 	}
 }
 
@@ -462,27 +465,27 @@ func (s *AdminServer) SetAdminPort(port int) {
 // loadOrGenerateSessionSecret loads the session secret from a file or generates a new one.
 func (s *AdminServer) loadOrGenerateSessionSecret() []byte {
 	secretFile := "admin-session-secret.key"
-	
+
 	// Try to load existing secret
 	if data, err := os.ReadFile(secretFile); err == nil && len(data) == 32 {
 		util.LogInfo("[ADMIN] loaded session secret from %s", secretFile)
 		return data
 	}
-	
+
 	// Generate new secret
 	secret := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
 		util.LogError("[ADMIN] failed to generate session secret: %v", err)
 		return nil
 	}
-	
+
 	// Save to file
 	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
 		util.LogWarn("[ADMIN] failed to save session secret to %s: %v", secretFile, err)
 	} else {
 		util.LogInfo("[ADMIN] generated and saved session secret to %s", secretFile)
 	}
-	
+
 	return secret
 }
 
@@ -746,9 +749,12 @@ func (s *AdminServer) Start() error {
 	s.registerRoutes(mux)
 
 	s.server = &http.Server{
-		Handler:      s.securityHeadersMiddleware(s.authMiddleware(mux)),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		Handler: s.securityHeadersMiddleware(s.authMiddleware(mux)),
+		// ReadTimeout covers the whole request including body: mesh package
+		// pushes (7.9MB over slow links shared by concurrent pushes) can take
+		// minutes, so keep read/write/client budgets aligned and generous.
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -854,9 +860,9 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	
+
 	util.LogInfo("[ADMIN] ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
-	
+
 	// Wrap connection with TLS if configured (same as Start() does)
 	var handledConn net.Conn
 	if s.tlsConfig != nil {
@@ -865,7 +871,7 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 	} else {
 		handledConn = conn
 	}
-	
+
 	ln := newSingleConnListener(handledConn)
 	// Serve blocks until the connection is closed
 	util.LogInfo("[ADMIN] Calling server.Serve")
@@ -1161,19 +1167,19 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"GroupCount":        len(dc.ProxyGroups),
 		"SubscriptionCount": len(dc.Subscriptions),
 		"EnvInfo":           s.envInfo(),
-		"SaveTarget": "base",
-		"CanSwitch":  false,
-		"TUNAvailable":  tun.Available(),
-		"MeshEnabled":   mesh.GlobalMeshManager != nil,
+		"SaveTarget":        "base",
+		"CanSwitch":         false,
+		"TUNAvailable":      tun.Available(),
+		"MeshEnabled":       mesh.GlobalMeshManager != nil,
 	}
 	s.render(w, r, "dashboard.html", data)
 }
 
 func (s *AdminServer) handleTUNPage(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
-		"Title":         "TUN",
-		"Version":       os.Getenv("PHAETHON_VERSION"),
-		"TUNAvailable":  tun.Available(),
+		"Title":        "TUN",
+		"Version":      os.Getenv("PHAETHON_VERSION"),
+		"TUNAvailable": tun.Available(),
 	}
 	s.render(w, r, "tun.html", data)
 }
@@ -1372,12 +1378,12 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 	}
 
 	data := map[string]interface{}{
-		"Title":            "Reverse",
-		"Proxies":          proxies,
-		"ReverseConfigs":   s.currentReverseConfigs(),
+		"Title":             "Reverse",
+		"Proxies":           proxies,
+		"ReverseConfigs":    s.currentReverseConfigs(),
 		"InstanceReverseID": instanceReverseID,
-		"SaveTarget":       "base",
-		"CanSwitch":        false,
+		"SaveTarget":        "base",
+		"CanSwitch":         false,
 	}
 	s.render(w, r, "reverse-wizard.html", data)
 }
@@ -4497,14 +4503,14 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		status := map[string]interface{}{
-			"available":       tun.Available(),
-			"enabled":         true,
-			"bypassGateway":   false,
-			"dhcpEnabled":     false,
-			"running":         false,
-			"deviceName":      "",
-			"routes":          tun.RouteSnapshot{},
-			"logs":            []string{},
+			"available":     tun.Available(),
+			"enabled":       true,
+			"bypassGateway": false,
+			"dhcpEnabled":   false,
+			"running":       false,
+			"deviceName":    "",
+			"routes":        tun.RouteSnapshot{},
+			"logs":          []string{},
 		}
 		if s.GetTUNStatus != nil {
 			if runtime := s.GetTUNStatus(); runtime != nil {
@@ -4530,10 +4536,10 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPatch:
 		var req struct {
-			Enabled            *bool                        `json:"enabled"`
-			BypassGateway      *bool                        `json:"bypassGateway"`
-			DHCPEnabled        *bool                        `json:"dhcpEnabled"`
-			DHCPStaticBindings []config.DHCPStaticBinding   `json:"dhcpStaticBindings"`
+			Enabled            *bool                      `json:"enabled"`
+			BypassGateway      *bool                      `json:"bypassGateway"`
+			DHCPEnabled        *bool                      `json:"dhcpEnabled"`
+			DHCPStaticBindings []config.DHCPStaticBinding `json:"dhcpStaticBindings"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "parse fail", http.StatusBadRequest)
@@ -5068,14 +5074,14 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 	proxies := make([]map[string]interface{}, len(conf.Proxies))
 	for i, p := range conf.Proxies {
 		proxies[i] = map[string]interface{}{
-			"name":      p.Name,
-			"type":      p.Type,
-			"server":    p.Server,
-			"port":      p.Port,
-			"sni":       p.Sni,
-			"udp":       p.UDP,
-			"p2p":       p.P2P,
-			"via":       p.ViaProxy,
+			"name":   p.Name,
+			"type":   p.Type,
+			"server": p.Server,
+			"port":   p.Port,
+			"sni":    p.Sni,
+			"udp":    p.UDP,
+			"p2p":    p.P2P,
+			"via":    p.ViaProxy,
 		}
 	}
 

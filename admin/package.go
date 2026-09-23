@@ -225,6 +225,11 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	util.LogInfo("[ADMIN] package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
+	// Distribute to mesh peers
+	if pkgData, err := os.ReadFile(pkgPath); err == nil {
+		go s.DistributePackage(pkgData)
+	}
+
 	// Check if there's a newer version, exit if so
 	go s.checkForNewerVersion(contents)
 

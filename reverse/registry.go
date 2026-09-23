@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"sync"
 	"time"
 
@@ -57,7 +58,7 @@ func (mc *ManagedConn) readLoop() {
 		}
 
 		mc.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, _, err := ReadFrame(mc.Conn)
+		frameType, _, err := frame.ReadFrame(mc.Conn)
 		if err != nil {
 			return
 		}
@@ -66,7 +67,7 @@ func (mc *ManagedConn) readLoop() {
 		mc.lastReadTime = time.Now()
 		mc.lastReadMu.Unlock()
 
-		if frameType == FrameHeartbeat {
+		if frameType == frame.FrameHeartbeat {
 			continue // heartbeat: drop immediately
 		}
 
@@ -91,7 +92,7 @@ func (mc *ManagedConn) readLoop() {
 func (mc *ManagedConn) WriteMsg(frameType byte) error {
 	mc.writeMu.Lock()
 	defer mc.writeMu.Unlock()
-	return WriteFrame(mc.Conn, frameType, nil)
+	return frame.WriteFrame(mc.Conn, frameType, nil)
 }
 
 // Stop signals the read loop to stop without closing the underlying connection.
@@ -356,7 +357,7 @@ func reverseHandshake(mc *ManagedConn) error {
 	mc.senderWg.Wait() // ensure sender has fully exited
 
 	// Send PONG
-	if err := mc.WriteMsg(FramePong); err != nil {
+	if err := mc.WriteMsg(frame.FramePong); err != nil {
 		return fmt.Errorf("reverse: send PONG fail: %w", err)
 	}
 
@@ -372,7 +373,7 @@ func reverseHandshake(mc *ManagedConn) error {
 
 	// Check if readLoop already read PENG before it exited
 	mc.pendingMu.Lock()
-	if mc.hasPending && mc.pendingMsg == FramePeng {
+	if mc.hasPending && mc.pendingMsg == frame.FramePeng {
 		mc.hasPending = false
 		mc.pendingMu.Unlock()
 		return nil
@@ -386,15 +387,15 @@ func reverseHandshake(mc *ManagedConn) error {
 		}
 
 		mc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		frameType, _, err := ReadFrame(mc.Conn)
+		frameType, _, err := frame.ReadFrame(mc.Conn)
 		if err != nil {
 			return fmt.Errorf("reverse: read PENG fail: %w", err)
 		}
 		switch frameType {
-		case FramePeng:
+		case frame.FramePeng:
 			mc.Conn.SetReadDeadline(time.Time{})
 			return nil
-		case FrameHeartbeat:
+		case frame.FrameHeartbeat:
 			continue // discard stray heartbeat
 		default:
 			util.LogError("[REVERSE] unexpected frame during handshake for %s: 0x%02x", mc.Conn.RemoteAddr(), frameType)
@@ -424,7 +425,7 @@ func HandleReverseConnection(conn net.Conn, address string) {
 
 	// Immediately send PENG to confirm registration, so the client knows
 	// the connection is registered and can enter steady heartbeat wait.
-	if err := mc.WriteMsg(FramePeng); err != nil {
+	if err := mc.WriteMsg(frame.FramePeng); err != nil {
 		util.LogError("[REVERSE] send PENG fail for %s: %v", address, err)
 		registry.Unregister(address, mc)
 		mc.Stop()
@@ -444,7 +445,7 @@ func HandleReverseConnection(conn net.Conn, address string) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := mc.WriteMsg(FrameHeartbeat); err != nil {
+				if err := mc.WriteMsg(frame.FrameHeartbeat); err != nil {
 					mc.Conn.Close() // close to trigger readLoop exit and pool cleanup
 					return
 				}

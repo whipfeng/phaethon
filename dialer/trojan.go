@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/frame"
 	"phaethon/reverse"
 	"phaethon/util"
 )
@@ -84,7 +85,7 @@ func (d *TrojanDialer) DialControl() (net.Conn, error) {
 // DialP2P establishes a P2P connection through this Trojan proxy.
 // It connects to proxy.Server:proxy.Port via the next hop,
 // performs TLS handshake, then sends a Trojan BIND with PORT=2.
-func (d *TrojanDialer) DialP2P() (net.Conn, error) {
+func (d *TrojanDialer) DialP2P() (frame.FrameTransport, error) {
 	nextDialer := NewDialer(d.Proxy.Next)
 	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
@@ -99,7 +100,7 @@ func (d *TrojanDialer) DialP2P() (net.Conn, error) {
 		tlsConn.Close()
 		return nil, err
 	}
-	return tlsConn, nil
+	return frame.NewStreamTransport(tlsConn), nil
 }
 
 // DialReverse establishes a reverse data connection through this Trojan proxy.

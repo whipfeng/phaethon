@@ -3,6 +3,7 @@ package dialer
 import (
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"strconv"
 	"strings"
 	"time"
@@ -94,11 +95,11 @@ type ControlDialer interface {
 	DialControl() (net.Conn, error)
 }
 
-// P2PDialer establishes a P2P connection to a peer.
+// P2PDialer establishes a P2P frame transport to a peer.
 // Each proxy type that supports BIND implements this: the connection targets
 // the proxy's own server using protocol-specific handshake with PORT=2.
 type P2PDialer interface {
-	DialP2P() (net.Conn, error)
+	DialP2P() (frame.FrameTransport, error)
 }
 
 // ReverseDialer establishes a reverse data connection.
@@ -154,7 +155,7 @@ func (d *BaseDialer) TryReverse() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	framedConn := reverse.NewReverseFramedConn(conn)
+	framedConn := frame.NewReverseFramedConn(conn)
 	// Send empty DATA frame as mode indicator so the server-side handler
 	// in StartReverseMapping can distinguish TCP vs UDP_CHANNEL mode.
 	if _, werr := framedConn.Write(nil); werr != nil {

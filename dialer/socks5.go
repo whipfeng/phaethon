@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"phaethon/config"
+	"phaethon/frame"
 	"phaethon/reverse"
 	"phaethon/util"
 )
@@ -82,7 +83,7 @@ func (d *Socks5Dialer) DialControl() (net.Conn, error) {
 // DialP2P establishes a P2P connection through this SOCKS5 proxy.
 // It connects to proxy.Server:proxy.Port via the next hop,
 // then performs a SOCKS5 BIND with PORT=2 to mark it as a P2P channel.
-func (d *Socks5Dialer) DialP2P() (net.Conn, error) {
+func (d *Socks5Dialer) DialP2P() (frame.FrameTransport, error) {
 	nextDialer := NewDialer(d.Proxy.Next)
 	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
@@ -92,7 +93,7 @@ func (d *Socks5Dialer) DialP2P() (net.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
-	return conn, nil
+	return frame.NewStreamTransport(conn), nil
 }
 
 // DialReverse establishes a reverse data connection through this SOCKS5 proxy.

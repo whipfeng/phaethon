@@ -49,6 +49,10 @@
 | [mesh_multi_vip_design.md](plans/mesh_multi_vip_design.md) | Mesh 多 VIP 支持与源 IP 选择机制 | v0.4.1 | DRAFT |
 | [mesh_network_improvements.md](plans/mesh_network_improvements.md) | Mesh 网络改进：src IP 重写、Auto P2P、地址空间扩大、Mode B 路由 | v0.3.0 | DRAFT |
 | [admin_mobile_mesh_design.md](plans/admin_mobile_mesh_design.md) | Admin 移动端适配与 Mesh 页面交互重构设计 | v0.1.0 | DRAFT |
+| [p2p_v6_and_mesh_package_distribution.md](plans/p2p_v6_and_mesh_package_distribution.md) | P2P 协议 v6 统一 hello/gossip 与 Mesh 包分发 | v2.1.2 | ACTIVE |
+| [p2p_control_frame_congestion.md](plans/p2p_control_frame_congestion.md) | P2P 控制帧拥塞韧性与传输缓冲治理 | v0.3.0 | DRAFT |
+| [htunnel_transport_optimization.md](plans/htunnel_transport_optimization.md) | h_tunnel 传输优化：共享 Client + RTT 节奏合帧批量 | v0.1.0 | DRAFT |
+| [htunnel_p2p_direct_mode.md](plans/htunnel_p2p_direct_mode.md) | h_tunnel P2P 直发模式：FrameTransport 多态 + MESH 通道 | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 

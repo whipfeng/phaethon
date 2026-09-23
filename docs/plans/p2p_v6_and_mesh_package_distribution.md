@@ -552,14 +552,15 @@ pkgKey = platform + "/" + arch + "@" + version    // 例如 linux/amd64@v0.7.4
 
 **看门狗启动流程**：
 1. 从 `./data/packages/` 查找最高版本的 pkg 文件
-2. 检查 `data/worker/` 是否已有对应版本的 binary
-3. 如果没有，从 pkg 文件中提取 binary 到 `data/worker/` 目录（必须提取，不能直接执行 zip 中的文件）
-4. 启动 binary 时，**工作目录设置为看门狗的工作目录**（即 `.` 目录，不是 `data/packages/`）
-5. 配置文件（`config.yaml`）在工作目录根，确保 binary 能正确读取
+2. **版本比较**：pkg 版本高于看门狗自身版本（ldflags 注入的 `main.Version`，`p2p.CompareVersions` 比较）时才使用 pkg；否则使用看门狗自身二进制。防止旧 pkg 将手动部署的新版本降级，保证「pkg 分发」和「直接部署」两条升级路径都可靠
+3. 检查 `data/worker/` 是否已有对应版本的 binary
+4. 如果没有，从 pkg 文件中提取 binary 到 `data/worker/` 目录（必须提取，不能直接执行 zip 中的文件）
+5. 启动 binary 时，**工作目录设置为看门狗的工作目录**（即 `.` 目录，不是 `data/packages/`）
+6. 配置文件（`config.yaml`）在工作目录根，确保 binary 能正确读取
 
 **为什么看门狗不需要升级**：
 - 看门狗是启动器，类似 BIOS/bootloader，逻辑简单且稳定
-- 只负责：查找 pkg、提取 binary、启动进程、监控心跳
+- 只负责：查找 pkg、版本比较、提取 binary、启动进程、监控心跳
 - 不包含业务逻辑（代理、路由、mesh 等）
 - 即使 pkg 格式变化，可以做向后兼容
 - 服务管理器（OpenRC/systemd）是稳定基座，负责重启看门狗（如果需要）

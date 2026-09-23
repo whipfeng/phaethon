@@ -13,6 +13,7 @@
 | 2.0.0 | 2026-09-22 | 加入版本单调递增约束、retention 策略、同步优化、域名寻址 | Qoder |
 | 2.1.0 | 2026-09-23 | mesh 数据帧传输设计（drop-tail + 大缓冲 + 分帧型写超时）；同步删除改为与本地 merge 后取 top N；分发 URL 去掉端口（mesh localNodeDomain 机制端口无关） | Qoder |
 | 2.1.1 | 2026-09-23 | 明确包唯一性语义：唯一性由 (version, platform, arch) 元组决定，ID 仅作本地文件名（随机生成，跨节点不一致）；syncFromPeer 的"本地是否已有"判断与 retention 删除改用该元组对比，receive 去重按 platform+arch+version 三元组；修复随机 ID 被当作唯一键导致的同版本包重复繁殖 | Qoder |
+| 2.1.2 | 2026-09-23 | 路由/域名副本选择改为按经 peer 的真实距离（claims hop）取最小，via hop 同源标注；移除 claims hop≤20 过滤（邻居互认已足够）；修复先到先得选择导致的 GG→qg→vm→GG 幽灵路由自持环与 10.161.88.0/24 黑洞 | Qoder |
 
 ---
 
@@ -789,6 +790,28 @@ BDP 只需几百帧，"吞吐匹配"不是瓶颈。真正的缓冲需求来自�
 **不做的事**：
 - 不对数据帧做阻塞式背压（中间路由不能被压）
 - 不在 mesh 层做 ACK/重传（overlay TCP 已承担）
+
+### 6.12 路由/域名副本选择与 via hop 标注（2026-09-23 排查 10.161.88.0/24 幽灵路由）
+
+**问题现象**：GG 控制台看到 10.161.88.0/24 由 vm 通告（via [{ms9,1},{vm,1}]），VM 控制台该路由却经由 qg 而非 gg；经 mesh 访问 10.161.88.10/.12/.13 全部黑洞，.9 正常（哈希分流落点不同）。
+
+**根因（两个缺陷叠加成自持环）**：
+
+1. `broadcastGossip` 的 bestRoutes/bestDS 对同一前缀/域名的多条副本**先到先得**（`if _, ok := ...; !ok` 才收录），不比较路径长短。GG 上 vm 转发的副本（peer 注册顺序先于 ms9）被选为最优 → split horizon 禁止 GG 回发 vm → VM 只能从 qg 学到 → VM 又按规则转发回 GG → **GG→qg→vm→GG 三元环每 gossip 周期自我刷新**，形成"幽灵路由"（ms9 停止通告也不会消失；routes 无 hop 字段、无老化，claimedSubnets 的两道防残留机制对它不生效）。
+2. `recomputeRoutes` 给 via 项标注的 hop 查的是**归属者**的全局最小 hop（`nodeIDToHop[r.NodeID]`），不是经该 peer 的真实路径 → GG 认为 vm(1) 与 ms9(1) 等价 → 转发按目的地址哈希二选一 → 分到 vm 的目的地址进 GG→vm→qg→gg→GG 转发环，TTL 耗尽丢弃。
+
+**修正原则**：路由/域名路由本来就锚定 nodeID，最终解析全走 claimedSubnets——因此不给 routes 另搞老化机制，而是让**副本选择与 hop 标注统一从 claims 取真实距离**：
+
+> 候选（转发者 p，归属者 X）的分数 = **p 的 ClaimedSubnets 中 X 项的 hop**（即经 p 到 X 的真实距离）；取最小者；p 的 claims 查不到 X → 该副本无效，丢弃。
+
+| 位置 | 修正 |
+|------|------|
+| `broadcastGossip` bestRoutes | 先到先得 → 按上述分数取最小；无 claim 支撑的副本不收录 |
+| `broadcastGossip` bestDS | 同上（域名路由同病同修） |
+| `recomputeRoutes` via hop | 全局 `nodeIDToHop[X]` → 同一分数；无 claim 支撑的副本不进路由表 |
+| `topology.go UpdateGossip` | 移除 claims hop≤20 过滤（冗余：邻居互认校验已在一两个周期内清场离线节点的声明，claims 的 min-hop 比较防膨胀） |
+
+**效果**：GG 的 via 只剩 [ms9(1)]，环消散；VM 显示经由 gg(2)、转发走 gg；ms9 离线后 claims 互认清场 → 路由候选全部失去支撑 → 路由自然消失，无残留。协议格式与 P2PProtocolVersion 不变。
 
 ---
 

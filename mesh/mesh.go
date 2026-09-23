@@ -112,7 +112,8 @@ type PeerWithHop struct {
 type MeshRoute struct {
 	Prefix  *net.IPNet
 	Peers   []PeerWithHop
-	lastIdx int // kept for compatibility but no longer used
+	NodeIDs []string // owner nodeIDs anchoring this route (display only)
+	lastIdx int      // kept for compatibility but no longer used
 }
 
 // MeshManager coordinates mesh overlay networking.
@@ -1241,8 +1242,9 @@ func (m *MeshManager) GetRoutes() map[string]interface{} {
 			})
 		}
 		routeList = append(routeList, map[string]interface{}{
-			"prefix": r.Prefix.String(),
-			"via":    peerInfos,
+			"prefix":  r.Prefix.String(),
+			"nodeIds": r.NodeIDs,
+			"via":     peerInfos,
 		})
 	}
 	return map[string]interface{}{"routes": routeList}
@@ -1306,6 +1308,18 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 	return nil
 }
 
+// claimHopFor returns the peer's claim hop for the given origin nodeID —
+// the real distance to the origin through that peer. ok=false when the
+// peer carries no claim for the nodeID (copy without path support).
+func claimHopFor(peer *PeerInfo, nodeID string) (int, bool) {
+	for _, cs := range peer.ClaimedSubnets {
+		if cs.NodeID == nodeID {
+			return cs.Hop, true
+		}
+	}
+	return 0, false
+}
+
 func (m *MeshManager) recomputeRoutes() {
 	m.mu.RLock()
 	advertise := make([]string, len(m.advertise))
@@ -1322,6 +1336,7 @@ func (m *MeshManager) recomputeRoutes() {
 		sender PeerSender
 		hop    int
 		prefix *net.IPNet
+		owner  string // nodeID anchoring this entry (display only)
 	}
 	allEntries := make(map[string][]peerEntry)
 	ownPrefixes := make(map[string]bool)
@@ -1341,38 +1356,19 @@ func (m *MeshManager) recomputeRoutes() {
 		ownPrefixes[r] = true
 	}
 
-	// Peer routes (non-mesh, with hop counts derived from ClaimedSubnets)
-	// First, build a map of nodeID → hop from all peers' ClaimedSubnets
-	nodeIDToHop := make(map[string]int)
-	for _, peer := range peers {
-		if peer.Sender == nil {
-			continue
-		}
-		// Peer's own subnet (hop=1, originally hop=0 from peer)
-		if peer.SubnetStr != "" {
-			if _, exists := nodeIDToHop[peer.NodeID()]; !exists {
-				nodeIDToHop[peer.NodeID()] = 1
-			}
-		}
-		// Peer's learned claims
-		for _, cs := range peer.ClaimedSubnets {
-			if existing, exists := nodeIDToHop[cs.NodeID]; !exists || cs.Hop < existing {
-				nodeIDToHop[cs.NodeID] = cs.Hop
-			}
-		}
-	}
-
-	// Now process routes, looking up hop from nodeID
+	// Peer routes (non-mesh, referencing owner node). Candidate score =
+	// the sender's claim hop for the owner (= real distance through that
+	// peer); candidates without claim support are invalid and dropped.
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, r := range peer.Routes {
-			hop, ok := nodeIDToHop[r.NodeID]
+			hop, ok := claimHopFor(peer, r.NodeID)
 			if !ok {
-				continue // Route owner not found, skip
+				continue // No claim support for the owner, drop the copy
 			}
-			allEntries[r.PrefixStr] = append(allEntries[r.PrefixStr], peerEntry{peer.Sender, hop, r.Prefix})
+			allEntries[r.PrefixStr] = append(allEntries[r.PrefixStr], peerEntry{peer.Sender, hop, r.Prefix, r.NodeID})
 		}
 	}
 
@@ -1383,10 +1379,15 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		if peer.Subnet != nil {
 			key := peer.Subnet.String()
-			allEntries[key] = append(allEntries[key], peerEntry{peer.Sender, 1, peer.Subnet})
+			allEntries[key] = append(allEntries[key], peerEntry{peer.Sender, 1, peer.Subnet, peer.NodeID()})
 		}
 		for _, cs := range peer.ClaimedSubnets {
-			allEntries[cs.SubnetStr] = append(allEntries[cs.SubnetStr], peerEntry{peer.Sender, cs.Hop, cs.Subnet})
+			// The peer's own claim (hop=1, own nodeID) duplicates the
+			// peer.Subnet entry already appended above.
+			if cs.Hop == 1 && cs.NodeID == peer.NodeID() {
+				continue
+			}
+			allEntries[cs.SubnetStr] = append(allEntries[cs.SubnetStr], peerEntry{peer.Sender, cs.Hop, cs.Subnet, cs.NodeID})
 		}
 	}
 
@@ -1407,9 +1408,18 @@ func (m *MeshManager) recomputeRoutes() {
 		for i, e := range entries {
 			peerList[i] = PeerWithHop{Peer: e.sender, Hop: e.hop}
 		}
+		ownerSet := make(map[string]bool, len(entries))
+		nodeIDs := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.owner != "" && !ownerSet[e.owner] {
+				ownerSet[e.owner] = true
+				nodeIDs = append(nodeIDs, e.owner)
+			}
+		}
 		routes = append(routes, MeshRoute{
 			Prefix:  entries[0].prefix,
 			Peers:   peerList,
+			NodeIDs: nodeIDs,
 			lastIdx: 0,
 		})
 	}
@@ -1419,6 +1429,7 @@ func (m *MeshManager) recomputeRoutes() {
 		routes = append(routes, MeshRoute{
 			Prefix:  ownSubnet,
 			Peers:   nil,
+			NodeIDs: []string{m.nodeID},
 			lastIdx: 0,
 		})
 	}
@@ -1432,6 +1443,7 @@ func (m *MeshManager) recomputeRoutes() {
 		routes = append(routes, MeshRoute{
 			Prefix:  ipNet,
 			Peers:   nil,
+			NodeIDs: []string{m.nodeID},
 			lastIdx: 0,
 		})
 	}
@@ -1764,23 +1776,30 @@ func (m *MeshManager) broadcastGossip() {
 		nextHop *PeerInfo // nil = own route
 		nodeID  string
 		prefix  string
+		hop     int // real distance to the owner through nextHop (0 = own route)
 	}
 	bestRoutes := make(map[string]globalRouteEntry)
 
 	// Own advertise routes
 	for _, r := range advertise {
 		_, ipNet, _ := net.ParseCIDR(r)
-		bestRoutes[r] = globalRouteEntry{nil, m.nodeID, r}
+		bestRoutes[r] = globalRouteEntry{nil, m.nodeID, r, 0}
 		_ = ipNet // ipNet not used, kept for potential future use
 	}
-	// Peer routes (reference owner node)
+	// Peer routes (reference owner node). Score = the sender's claim hop
+	// for the owner (real distance through that peer); copies without
+	// claim support are invalid and dropped.
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, r := range peer.Routes {
-			if _, ok := bestRoutes[r.PrefixStr]; !ok {
-				bestRoutes[r.PrefixStr] = globalRouteEntry{peer, r.NodeID, r.PrefixStr}
+			hop, ok := claimHopFor(peer, r.NodeID)
+			if !ok {
+				continue
+			}
+			if e, exists := bestRoutes[r.PrefixStr]; !exists || hop < e.hop {
+				bestRoutes[r.PrefixStr] = globalRouteEntry{peer, r.NodeID, r.PrefixStr, hop}
 			}
 		}
 	}
@@ -1789,18 +1808,23 @@ func (m *MeshManager) broadcastGossip() {
 	type globalDSEntry struct {
 		nextHop *PeerInfo // nil = own entry
 		nodeID  string
+		hop     int // real distance to the owner through nextHop (0 = own entry)
 	}
 	bestDS := make(map[string]globalDSEntry)
 	for _, s := range domainSuffixes {
-		bestDS[s] = globalDSEntry{nil, m.nodeID}
+		bestDS[s] = globalDSEntry{nil, m.nodeID, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			if _, ok := bestDS[entry.Suffix]; !ok {
-				bestDS[entry.Suffix] = globalDSEntry{peer, entry.NodeID}
+			hop, ok := claimHopFor(peer, entry.NodeID)
+			if !ok {
+				continue
+			}
+			if e, exists := bestDS[entry.Suffix]; !exists || hop < e.hop {
+				bestDS[entry.Suffix] = globalDSEntry{peer, entry.NodeID, hop}
 			}
 		}
 	}
@@ -1902,12 +1926,18 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		}
 	}
 
-	// Build global route table (non-mesh routes, referencing owner node)
-	bestRoutes := make(map[string]GossipRoute)
+	// Build global route table (non-mesh routes, referencing owner node).
+	// Score = the sender's claim hop for the owner (real distance through
+	// that peer); copies without claim support are invalid and dropped.
+	type routeEntry struct {
+		route GossipRoute
+		hop   int // 0 = own route
+	}
+	bestRoutes := make(map[string]routeEntry)
 
 	// Own advertise routes
 	for _, r := range advertise {
-		bestRoutes[r] = GossipRoute{Prefix: r, NodeID: m.nodeID}
+		bestRoutes[r] = routeEntry{GossipRoute{Prefix: r, NodeID: m.nodeID}, 0}
 	}
 	// Peer routes (reference owner node)
 	for _, peer := range allPeers {
@@ -1915,37 +1945,49 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			continue
 		}
 		for _, r := range peer.Routes {
-			if _, ok := bestRoutes[r.PrefixStr]; !ok {
-				bestRoutes[r.PrefixStr] = GossipRoute{Prefix: r.PrefixStr, NodeID: r.NodeID}
+			hop, ok := claimHopFor(peer, r.NodeID)
+			if !ok {
+				continue
+			}
+			if e, exists := bestRoutes[r.PrefixStr]; !exists || hop < e.hop {
+				bestRoutes[r.PrefixStr] = routeEntry{GossipRoute{Prefix: r.PrefixStr, NodeID: r.NodeID}, hop}
 			}
 		}
 	}
 
 	// Build global domain suffix map (referencing owner node)
-	bestDS := make(map[string]GossipDomainSuffix)
+	type dsEntry struct {
+		ds   GossipDomainSuffix
+		hop  int // 0 = own entry
+	}
+	bestDS := make(map[string]dsEntry)
 	for _, s := range domainSuffixes {
-		bestDS[s] = GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}
+		bestDS[s] = dsEntry{GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			if _, ok := bestDS[entry.Suffix]; !ok {
-				bestDS[entry.Suffix] = GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}
+			hop, ok := claimHopFor(peer, entry.NodeID)
+			if !ok {
+				continue
+			}
+			if e, exists := bestDS[entry.Suffix]; !exists || hop < e.hop {
+				bestDS[entry.Suffix] = dsEntry{GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}, hop}
 			}
 		}
 	}
 
 	// Convert to slices
 	routes := make([]GossipRoute, 0, len(bestRoutes))
-	for _, r := range bestRoutes {
-		routes = append(routes, r)
+	for _, e := range bestRoutes {
+		routes = append(routes, e.route)
 	}
 
 	ds := make([]GossipDomainSuffix, 0, len(bestDS))
-	for _, d := range bestDS {
-		ds = append(ds, d)
+	for _, e := range bestDS {
+		ds = append(ds, e.ds)
 	}
 
 	claims := make([]GossipClaimedSubnet, 0, len(bestClaims))

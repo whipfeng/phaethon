@@ -771,6 +771,7 @@
             'mesh.admin': '管理',
             'mesh.prefix': '前缀',
             'mesh.via': '经由',
+            'mesh.owner': '归属节点',
             'mesh.domain': '域名',
 
             // ===== Logs (additional) =====
@@ -1559,6 +1560,7 @@
             'mesh.admin': 'Admin',
             'mesh.prefix': 'Prefix',
             'mesh.via': 'Via',
+            'mesh.owner': 'Owner',
             'mesh.domain': 'Domain',
 
             // ===== Logs (additional) =====

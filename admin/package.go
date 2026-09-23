@@ -227,7 +227,10 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Distribute to mesh peers
 	if pkgData, err := os.ReadFile(pkgPath); err == nil {
+		util.LogInfo("[ADMIN] read pkg for distribution: %d bytes", len(pkgData))
 		go s.DistributePackage(pkgData)
+	} else {
+		util.LogInfo("[ADMIN] failed to read pkg for distribution: %v", err)
 	}
 
 	// Check if there's a newer version, exit if so
@@ -543,16 +546,22 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 
 // DistributePackage distributes a package to all connected mesh peers.
 func (s *AdminServer) DistributePackage(pkgData []byte) {
-	if s.peerLister == nil || s.meshHTTPClient == nil {
+	if s.peerLister == nil {
+		util.LogInfo("[ADMIN] distribute: peerLister is nil")
+		return
+	}
+	if s.meshHTTPClient == nil {
+		util.LogInfo("[ADMIN] distribute: meshHTTPClient is nil")
 		return
 	}
 
 	peers := s.peerLister()
 	if len(peers) == 0 {
+		util.LogInfo("[ADMIN] distribute: no peers")
 		return
 	}
 
-	util.LogDebug("[ADMIN] distributing package to %d peers", len(peers))
+	util.LogInfo("[ADMIN] distributing package to %d peers", len(peers))
 
 	for _, peer := range peers {
 		go func(nodeID string) {

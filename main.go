@@ -300,7 +300,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 						util.Logger.Printf("WARNING: save config after mesh migration fail: %v", err)
 					}
 					// Remove old mesh-state.json
-					stateFile := filepath.Join(dataDir, "mesh-state.json")
+					stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
 					if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
 						util.Logger.Printf("WARNING: remove old mesh-state.json fail: %v", err)
 					} else {
@@ -601,7 +601,7 @@ func getRuleConf() *config.RuleConfiguration {
 	// 7. Load subscription node pools from the on-disk cache so groups have nodes
 	// immediately without blocking startup on network I/O. Missing or stale caches
 	// are refreshed in the background once the listeners are up.
-	subCacheDir = filepath.Join(dataDir, "subscription")
+	subCacheDir = filepath.Join(dataDir, "cache", "subscription")
 	for _, sub := range ruleConf.Subscriptions {
 		if !sub.IsEnabled() || sub.URL == "" {
 			continue
@@ -2290,7 +2290,7 @@ type persistedHealthEntry struct {
 }
 
 func healthStatePath() string {
-	return filepath.Join(dataDir, "health-state.json")
+	return filepath.Join(dataDir, "state", "health-state.json")
 }
 
 // loadHealthState restores group health from the last saved state so that
@@ -2369,8 +2369,8 @@ func saveHealthState(ruleConf *config.RuleConfiguration) {
 	}
 
 	path := healthStatePath()
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		util.LogWarn("[HEALTH] create data dir fail: %v", err)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		util.LogWarn("[HEALTH] create state dir fail: %v", err)
 		return
 	}
 	tmp := path + ".tmp"

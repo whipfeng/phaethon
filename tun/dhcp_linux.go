@@ -331,7 +331,7 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 	}
 
 	if dataDir != "" {
-		s.leaseFile = filepath.Join(dataDir, "dhcp-leases.json")
+		s.leaseFile = filepath.Join(dataDir, "state", "dhcp-leases.json")
 		s.loadLeases()
 	}
 

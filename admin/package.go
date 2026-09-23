@@ -61,13 +61,13 @@ var (
 
 // packageInfo is the metadata stored for each uploaded package.
 type packageInfo struct {
-	ID             string            `json:"id"`
-	Filename       string            `json:"filename"`
-	Size           int64             `json:"size"`
-	UploadedAt     time.Time         `json:"uploadedAt"`
-	SignatureValid bool              `json:"signatureValid"`
+	ID             string              `json:"id"`
+	Filename       string              `json:"filename"`
+	Size           int64               `json:"size"`
+	UploadedAt     time.Time           `json:"uploadedAt"`
+	SignatureValid bool                `json:"signatureValid"`
 	Meta           signing.PackageMeta `json:"meta"`
-	Published      bool              `json:"published"`
+	Published      bool                `json:"published"`
 }
 
 func (s *AdminServer) packageMaxUploadBytes() int64 {
@@ -479,11 +479,12 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check if we already have this package
+	// Uniqueness is (platform, arch, version) — not version alone, and not the
+	// ID, which is a random local filename that differs across nodes.
 	packages := s.listPackages()
 	for _, p := range packages {
-		if p.Meta.Version == contents.Meta.Version {
-			util.LogDebug("[ADMIN] receive package: already have version %s", contents.Meta.Version)
+		if p.Meta.Platform == contents.Meta.Platform && p.Meta.Arch == contents.Meta.Arch && p.Meta.Version == contents.Meta.Version {
+			util.LogDebug("[ADMIN] receive package: already have %s/%s@%s", p.Meta.Platform, p.Meta.Arch, p.Meta.Version)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -512,7 +513,7 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 		return "", fmt.Errorf("create packages dir: %w", err)
 	}
 
-	// Generate ID from content hash
+	// Random local file ID — cross-node uniqueness is (platform, arch, version)
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return "", err
@@ -566,13 +567,18 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 	for _, peer := range peers {
 		go func(nodeID string) {
 			domain := mesh.NodeDomain(nodeID)
-			url := fmt.Sprintf("https://%s:%d/api/packages/receive", domain, s.adminPort)
+			url := fmt.Sprintf("https://%s/api/packages/receive", domain)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
 			if err != nil {
 				util.LogInfo("[ADMIN] distribute package to %s (%s) failed: %v", nodeID, domain, err)
 				return
 			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				util.LogInfo("[ADMIN] distribute package to %s (%s) rejected: status=%d body=%s", nodeID, domain, resp.StatusCode, string(body))
+				return
+			}
 			util.LogInfo("[ADMIN] distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)
 		}(peer.NodeID)
 	}
@@ -598,6 +604,12 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
 	return
 }
 
+// pkgKey is the package uniqueness key: platform/arch@version. IDs are random
+// local filenames and differ across nodes, so dedup must never compare by ID.
+func pkgKey(meta signing.PackageMeta) string {
+	return meta.Platform + "/" + meta.Arch + "@" + meta.Version
+}
+
 // SyncFromPeer syncs packages from a specific mesh peer (called when peer connects).
 func (s *AdminServer) SyncFromPeer(nodeID string) {
 	if s.meshHTTPClient == nil {
@@ -610,7 +622,7 @@ func (s *AdminServer) SyncFromPeer(nodeID string) {
 
 func (s *AdminServer) syncFromPeer(nodeID string) {
 	domain := mesh.NodeDomain(nodeID)
-	url := fmt.Sprintf("https://%s:%d/api/packages", domain, s.adminPort)
+	url := fmt.Sprintf("https://%s/api/packages", domain)
 	resp, err := s.meshHTTPClient.Get(url)
 	if err != nil {
 		util.LogDebug("[ADMIN] sync from %s failed: %v", nodeID, err)
@@ -631,23 +643,34 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		return
 	}
 
-	// Build target set: for each platform/arch, keep only the latest packageRetention versions
+	// Build the retention set: per platform/arch, merge the peer's list with
+	// the local list, sort by version descending, keep the top N. Deletion
+	// must be based on the merged set — a peer with an empty (or partial)
+	// list must never wipe packages synced from other peers.
 	type platformArch struct {
 		platform string
 		arch     string
 	}
-	peerGroups := make(map[platformArch][]packageInfo)
+	groups := make(map[platformArch][]packageInfo)
 	for _, pkg := range result.Packages {
 		if !pkg.Published {
 			continue
 		}
 		key := platformArch{pkg.Meta.Platform, pkg.Meta.Arch}
-		peerGroups[key] = append(peerGroups[key], pkg)
+		groups[key] = append(groups[key], pkg)
 	}
 
-	// For each group, sort by version descending and take top N
-	targetSet := make(map[string]bool) // package ID → should have
-	for _, pkgs := range peerGroups {
+	// Get local packages
+	localPackages := s.listPackages()
+	localKeys := make(map[string]bool) // pkgKey → have
+	for _, p := range localPackages {
+		localKeys[pkgKey(p.Meta)] = true
+		groups[platformArch{p.Meta.Platform, p.Meta.Arch}] = append(groups[platformArch{p.Meta.Platform, p.Meta.Arch}], p)
+	}
+
+	// Per group, sort by version descending and take top N
+	targetKeys := make(map[string]bool) // pkgKey → should have
+	for _, pkgs := range groups {
 		sort.Slice(pkgs, func(i, j int) bool {
 			return p2p.CompareVersions(pkgs[i].Meta.Version, pkgs[j].Meta.Version) > 0
 		})
@@ -656,29 +679,23 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 			limit = len(pkgs)
 		}
 		for _, pkg := range pkgs[:limit] {
-			targetSet[pkg.ID] = true
+			targetKeys[pkgKey(pkg.Meta)] = true
 		}
-	}
-
-	// Get local packages
-	localPackages := s.listPackages()
-	localByID := make(map[string]packageInfo)
-	for _, p := range localPackages {
-		localByID[p.ID] = p
 	}
 
 	// Download packages in target set that we don't have
 	downloadSuccess := true
 	for _, pkg := range result.Packages {
-		if !targetSet[pkg.ID] {
+		key := pkgKey(pkg.Meta)
+		if !targetKeys[key] {
 			continue
 		}
-		if _, exists := localByID[pkg.ID]; exists {
+		if localKeys[key] {
 			continue
 		}
 
 		// Download the package
-		downloadURL := fmt.Sprintf("https://%s:%d/api/packages/%s/download", domain, s.adminPort, pkg.ID)
+		downloadURL := fmt.Sprintf("https://%s/api/packages/%s/download", domain, pkg.ID)
 		dlResp, err := s.meshHTTPClient.Get(downloadURL)
 		if err != nil {
 			util.LogDebug("[ADMIN] download package %s from %s failed: %v", pkg.ID, nodeID, err)
@@ -709,6 +726,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 			continue
 		}
 
+		localKeys[key] = true
 		util.LogInfo("[ADMIN] synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
 		util.DefaultVersionNotifier.BumpVersion("packages")
 
@@ -718,15 +736,21 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 
 	// Only delete old versions if all downloads succeeded
 	if downloadSuccess {
-		// Delete local packages not in target set
-		for id, pkg := range localByID {
-			if !targetSet[id] {
-				util.LogInfo("[ADMIN] retention: deleting %s/%s version %s (id=%s)", pkg.Meta.Platform, pkg.Meta.Arch, pkg.Meta.Version, id)
-				os.Remove(filepath.Join(packagesDir, id+".pkg"))
-				os.Remove(filepath.Join(packagesDir, id+".json"))
+		// Delete local packages not in the target set; a pkgKey in the target
+		// set keeps exactly one copy (extra copies are duplicates left by the
+		// old ID-based comparison).
+		keptKeys := make(map[string]bool)
+		for _, pkg := range localPackages {
+			key := pkgKey(pkg.Meta)
+			if targetKeys[key] && !keptKeys[key] {
+				keptKeys[key] = true
+				continue
 			}
+			util.LogInfo("[ADMIN] retention: deleting %s (id=%s)", key, pkg.ID)
+			os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
+			os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 		}
-		if len(localByID) > 0 {
+		if len(localPackages) > 0 {
 			util.DefaultVersionNotifier.BumpVersion("packages")
 		}
 	}

@@ -181,10 +181,6 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		if err != nil {
 			continue
 		}
-		// Discard claimed subnets with hop count exceeding maximum (prevents stale route accumulation)
-		if cs.Hop+1 > 20 {
-			continue
-		}
 		claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
 			Subnet:    ipNet,
 			SubnetStr: cs.Subnet,

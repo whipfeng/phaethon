@@ -368,6 +368,7 @@ type AdminServer struct {
 	// Mesh package distribution
 	peerLister   func() []PeerBrief                    // returns connected mesh peers
 	meshDialFn   func(network, addr string) (net.Conn, error) // dials through mesh network
+	dnsResolver  func(domain string) (net.IP, error)   // resolves domain through mesh DNS
 	meshHTTPClient *http.Client                        // HTTP client for mesh communication
 	adminPort    int                                   // admin API port for mesh peers
 
@@ -420,12 +421,31 @@ func (s *AdminServer) SetPeerLister(f func() []PeerBrief) {
 }
 
 // SetMeshDialFn sets the function to dial through the mesh network.
-func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, error)) {
+func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, error), dnsResolver func(domain string) (net.IP, error)) {
 	s.meshDialFn = f
-	// Initialize mesh HTTP client
+	s.dnsResolver = dnsResolver
+	// Initialize mesh HTTP client with DNS resolution support
 	s.meshHTTPClient = &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, fmt.Errorf("parse addr: %w", err)
+				}
+				
+				// Resolve domain name if needed
+				if ip := net.ParseIP(host); ip == nil {
+					// It's a domain name, resolve it
+					if dnsResolver == nil {
+						return nil, fmt.Errorf("DNS resolver not available for domain: %s", host)
+					}
+					fakeIP, err := dnsResolver(host)
+					if err != nil {
+						return nil, fmt.Errorf("resolve %s: %w", host, err)
+					}
+					addr = net.JoinHostPort(fakeIP.String(), port)
+				}
+				
 				return f(network, addr)
 			},
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},

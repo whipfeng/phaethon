@@ -1018,16 +1018,16 @@ func (cp *childProcess) wait() {
 
 // findLatestPkgAndExtract finds the highest version pkg file in data/packages/
 // that matches the current platform/arch, extracts the binary to a temp location,
-// and returns the path to the extracted binary.
-// Returns empty string if no suitable pkg is found.
-func findLatestPkgAndExtract() string {
+// and returns the path to the extracted binary along with its version.
+// Returns empty strings if no suitable pkg is found.
+func findLatestPkgAndExtract() (string, string) {
 	packagesDir := "data/packages"
 
 	// List all .pkg files
 	entries, err := os.ReadDir(packagesDir)
 	if err != nil {
 		util.LogDebug("watchdog: cannot read packages dir: %v", err)
-		return ""
+		return "", ""
 	}
 
 	var latestPkg string
@@ -1060,7 +1060,7 @@ func findLatestPkgAndExtract() string {
 	}
 
 	if latestPkg == "" {
-		return ""
+		return "", ""
 	}
 
 	util.LogInfo("watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
@@ -1071,28 +1071,51 @@ func findLatestPkgAndExtract() string {
 	if _, err := os.Stat(binaryPath); err == nil {
 		// Binary already exists, no need to extract
 		util.LogInfo("watchdog: binary already exists: %s", binaryPath)
-		return binaryPath
+		return binaryPath, latestVersion
 	}
 
 	// Extract binary from pkg
 	contents, err := signing.VerifyPkg(latestPkg, signing.PublicKey)
 	if err != nil {
 		util.LogError("watchdog: extract pkg failed: %v", err)
-		return ""
+		return "", ""
 	}
 
 	// Write binary to data/worker/ directory
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
 		util.LogError("watchdog: create worker dir failed: %v", err)
-		return ""
+		return "", ""
 	}
 	if err := os.WriteFile(binaryPath, contents.Binary, 0755); err != nil {
 		util.LogError("watchdog: write binary failed: %v", err)
-		return ""
+		return "", ""
 	}
 
 	util.LogInfo("watchdog: extracted binary to %s", binaryPath)
-	return binaryPath
+	return binaryPath, latestVersion
+}
+
+// selectWorkerBinary picks the worker binary to run: the latest distributed
+// pkg only if it is newer than this watchdog build, otherwise the watchdog's
+// own executable. This prevents a stale pkg from downgrading a manually
+// deployed newer binary, so both upgrade paths (pkg distribution and direct
+// binary deployment) stay reliable.
+func selectWorkerBinary() string {
+	pkgPath, pkgVersion := findLatestPkgAndExtract()
+	if pkgPath == "" {
+		util.LogInfo("watchdog: no pkg found, using current executable")
+	} else if p2p.CompareVersions(pkgVersion, Version) > 0 {
+		util.LogInfo("watchdog: pkg version %s newer than self %s, using pkg worker: %s", pkgVersion, Version, pkgPath)
+		return pkgPath
+	} else {
+		util.LogInfo("watchdog: pkg version %s not newer than self %s, using current executable", pkgVersion, Version)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		util.LogError("watchdog: cannot determine executable path: %v", err)
+		return ""
+	}
+	return exe
 }
 
 // runWatchdogMode is the watchdog entry point. It spawns the actual server as
@@ -1108,21 +1131,12 @@ func runWatchdogMode() {
 		restartCooldown = 10 * time.Second
 	)
 
-	// Try to find latest pkg and extract binary
-	exe := findLatestPkgAndExtract()
+	// Pick worker binary: distributed pkg if newer than this build, else self
+	exe := selectWorkerBinary()
 	if exe == "" {
-		// No pkg found, use current executable
-		var err error
-		exe, err = os.Executable()
-		if err != nil {
-			util.LogError("watchdog: cannot determine executable path: %v", err)
-			return
-		}
-		util.LogInfo("watchdog: no pkg found, using current executable: %s", exe)
-	} else {
-		util.LogInfo("watchdog: using extracted binary: %s", exe)
-		// Keep extracted binary in data/worker/ for reuse and debugging
+		return
 	}
+	util.LogInfo("watchdog: using worker binary: %s", exe)
 
 	lastRestart := time.Time{}
 	var isRestarting atomic.Bool
@@ -1151,16 +1165,10 @@ func runWatchdogMode() {
 			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
 			time.Sleep(remain)
 		}
-		// Re-scan for latest pkg before restarting (hot swap support)
-		newExe := findLatestPkgAndExtract()
+		// Re-scan before restarting (hot swap support): pkg only if newer than self
+		newExe := selectWorkerBinary()
 		if newExe == "" {
-			// No pkg found, use current executable
-			var err error
-			newExe, err = os.Executable()
-			if err != nil {
-				util.LogError("watchdog: cannot determine executable path: %v", err)
-				return nil
-			}
+			return nil
 		}
 		newCp, err := spawnChildProcess(newExe)
 		if err != nil {

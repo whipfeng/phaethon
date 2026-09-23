@@ -72,25 +72,3 @@ type PackageMeta struct {
 	CreatedAt time.Time `json:"created_at"`
 	Published bool      `json:"published"`
 }
-
-// PeerInfo Peer 信息
-type PeerInfo struct {
-	NodeID   string    `json:"node_id"`
-	VIP      string    `json:"vip"`
-	LastSeen time.Time `json:"last_seen"`
-	Status   string    `json:"status"`
-	Version  string    `json:"version,omitempty"`
-}
-
-// ConnectionLog 连接日志
-type ConnectionLog struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Src       string    `json:"src"`
-	Dst       string    `json:"dst"`
-	Proxy     string    `json:"proxy"`
-	Protocol  string    `json:"protocol"`
-	Duration  float64   `json:"duration"`
-	BytesSent int64     `json:"bytes_sent"`
-	BytesRecv int64     `json:"bytes_recv"`
-}

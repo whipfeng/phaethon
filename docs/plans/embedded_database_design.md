@@ -109,17 +109,6 @@ Value: {
 }
 ```
 
-#### 2.2 活跃连接（可选）
-```
-Key: conn:{id}
-Value: {
-  "src": "192.168.1.100:12345",
-  "dst": "google.com:443",
-  "proxy": "GG_PROXY",
-  "started_at": "2026-09-24T10:00:00Z"
-}
-```
-
 ### 3. 历史数据（History）
 
 #### 3.1 包元数据
@@ -137,31 +126,9 @@ Value: {
 }
 ```
 
-#### 3.2 连接日志
-```
-Key: log:{timestamp}:{id}
-Value: {
-  "timestamp": "2026-09-24T10:00:00Z",
-  "src": "192.168.1.100:12345",
-  "dst": "google.com:443",
-  "proxy": "GG_PROXY",
-  "duration": 5.2,
-  "bytes_sent": 1234,
-  "bytes_recv": 5678
-}
-```
-
-#### 3.3 Peer 历史
-```
-Key: peer:{node_id}
-Value: {
-  "node_id": "xxxxx",
-  "vip": "100.179.0.2",
-  "last_seen": "2026-09-24T10:00:00Z",
-  "status": "connected",
-  "version": "v1.2.3"
-}
-```
+**不持久化的数据：**
+- ✗ Peer 历史：内存维护当前连接的 peer，通过 mesh gossip 重新发现
+- ✗ 连接日志：使用现有文件系统日志（轮转），避免数据库过大
 
 ## 初始化流程
 
@@ -251,26 +218,67 @@ phaethon --import ./config.yaml
 
 ## Admin API 扩展
 
-### 配置管理
+### 配置管理（CRUD 完整覆盖）
 
 ```
-GET    /api/config          # 获取所有配置
-GET    /api/config/proxies  # 获取代理列表
-POST   /api/config/proxies  # 添加代理
-PUT    /api/config/proxies/{name}  # 更新代理
-DELETE /api/config/proxies/{name}  # 删除代理
+# 代理配置
+GET    /api/config/proxies           # 列出所有代理
+GET    /api/config/proxies/{name}    # 查看单个代理
+POST   /api/config/proxies           # 添加代理
+PUT    /api/config/proxies/{name}    # 更新代理
+DELETE /api/config/proxies/{name}    # 删除代理
 
-GET    /api/config/rules    # 获取规则列表
-POST   /api/config/rules    # 添加规则
-...
+# 规则配置
+GET    /api/config/rules             # 列出所有规则（按索引排序）
+GET    /api/config/rules/{index}     # 查看单个规则
+POST   /api/config/rules             # 添加规则
+PUT    /api/config/rules/{index}     # 更新规则（支持调整顺序）
+DELETE /api/config/rules/{index}     # 删除规则
+
+# Mesh 配置
+GET    /api/config/mesh              # 查看 Mesh 配置
+PUT    /api/config/mesh              # 更新 Mesh 配置
+
+# Admin 配置
+GET    /api/config/admin             # 查看 Admin 配置
+PUT    /api/config/admin             # 更新 Admin 配置
 ```
 
-### 数据导出/导入
+### 状态数据查看
 
 ```
-POST /api/export  # 导出配置到 YAML
-POST /api/import  # 从 YAML 导入配置
+# Fake-IP 映射
+GET    /api/fakeip                   # 列出所有 Fake-IP 映射
+GET    /api/fakeip/{domain}          # 查看指定域名映射
+DELETE /api/fakeip/{domain}          # 删除指定映射（强制释放）
 ```
+
+### 包管理（已有 + 数据库化）
+
+```
+GET    /api/packages                 # 列出所有包（从数据库查询）
+GET    /api/packages/{platform}/{arch}/{version}  # 查看包详情
+DELETE /api/packages/{platform}/{arch}/{version}  # 删除包
+```
+
+### 数据备份
+
+```
+POST /api/export    # 导出配置到 YAML
+POST /api/import    # 从 YAML 导入配置
+```
+
+### 控制台页面映射
+
+| 页面 | 数据来源 | 操作 |
+|------|---------|------|
+| 代理管理页 | BucketProxies | 查看/添加/编辑/删除 |
+| 规则管理页 | BucketRules | 查看/添加/编辑/删除/排序 |
+| Mesh 页面 | BucketConfig(mesh) | 查看/编辑 |
+| 系统设置页 | BucketConfig(admin) | 查看/编辑 |
+| Fake-IP 页面 | BucketFakeIP | 查看/搜索/删除 |
+| 包管理页 | BucketPackages | 查看/上传/删除/分发 |
+| 导出/导入 | 整库 | YAML 导出/导入 |
 
 ## 优势
 

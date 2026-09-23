@@ -167,7 +167,7 @@ func GetPackage(platform, arch, version string) (*PackageMeta, error) {
 // ListPackages 列出所有包
 func ListPackages() ([]*PackageMeta, error) {
 	var packages []*PackageMeta
-	
+
 	err := ForEach(BucketPackages, func(k, v []byte) error {
 		var pkg PackageMeta
 		if err := jsonUnmarshal(v, &pkg); err != nil {
@@ -176,61 +176,8 @@ func ListPackages() ([]*PackageMeta, error) {
 		packages = append(packages, &pkg)
 		return nil
 	})
-	
+
 	return packages, err
-}
-
-// PutPeer 存储 Peer 信息
-func PutPeer(peer *PeerInfo) error {
-	return Put(BucketPeers, []byte(peer.NodeID), peer)
-}
-
-// GetPeer 获取 Peer 信息
-func GetPeer(nodeID string) (*PeerInfo, error) {
-	var peer PeerInfo
-	err := Get(BucketPeers, []byte(nodeID), &peer)
-	if err != nil {
-		return nil, err
-	}
-	return &peer, nil
-}
-
-// ListPeers 列出所有 Peer
-func ListPeers() ([]*PeerInfo, error) {
-	var peers []*PeerInfo
-	
-	err := ForEach(BucketPeers, func(k, v []byte) error {
-		var peer PeerInfo
-		if err := jsonUnmarshal(v, &peer); err != nil {
-			return err
-		}
-		peers = append(peers, &peer)
-		return nil
-	})
-	
-	return peers, err
-}
-
-// PutConnectionLog 存储连接日志
-func PutConnectionLog(log *ConnectionLog) error {
-	key := fmt.Sprintf("%d:%s", log.Timestamp.UnixNano(), log.ID)
-	return Put(BucketLogs, []byte(key), log)
-}
-
-// ListConnectionLogs 列出连接日志
-func ListConnectionLogs() ([]*ConnectionLog, error) {
-	var logs []*ConnectionLog
-	
-	err := ForEach(BucketLogs, func(k, v []byte) error {
-		var log ConnectionLog
-		if err := jsonUnmarshal(v, &log); err != nil {
-			return err
-		}
-		logs = append(logs, &log)
-		return nil
-	})
-	
-	return logs, err
 }
 
 // jsonUnmarshal 辅助函数

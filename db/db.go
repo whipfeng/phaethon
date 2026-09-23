@@ -19,8 +19,6 @@ var (
 	BucketRules     = []byte("rules")
 	BucketFakeIP    = []byte("fakeip")
 	BucketPackages  = []byte("packages")
-	BucketPeers     = []byte("peers")
-	BucketLogs      = []byte("logs")
 )
 
 // Init 初始化数据库
@@ -47,8 +45,6 @@ func Init(dbPath string) error {
 			BucketRules,
 			BucketFakeIP,
 			BucketPackages,
-			BucketPeers,
-			BucketLogs,
 		}
 		
 		for _, bucket := range buckets {

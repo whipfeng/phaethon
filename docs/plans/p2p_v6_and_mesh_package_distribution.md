@@ -11,6 +11,8 @@
 |------|------|----------|------|
 | 1.0.0 | 2026-09-21 | 初始版本 | Qoder |
 | 2.0.0 | 2026-09-22 | 加入版本单调递增约束、retention 策略、同步优化、域名寻址 | Qoder |
+| 2.1.0 | 2026-09-23 | mesh 数据帧传输设计（drop-tail + 大缓冲 + 分帧型写超时）；同步删除改为与本地 merge 后取 top N；分发 URL 去掉端口（mesh localNodeDomain 机制端口无关） | Qoder |
+| 2.1.1 | 2026-09-23 | 明确包唯一性语义：唯一性由 (version, platform, arch) 元组决定，ID 仅作本地文件名（随机生成，跨节点不一致）；syncFromPeer 的"本地是否已有"判断与 retention 删除改用该元组对比，receive 去重按 platform+arch+version 三元组；修复随机 ID 被当作唯一键导致的同版本包重复繁殖 | Qoder |
 
 ---
 
@@ -348,7 +350,8 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
     for _, peer := range s.peerLister() {
         go func(nodeID string) {
             domain := mesh.NodeDomain(nodeID)  // nodeID.phn
-            url := fmt.Sprintf("https://%s:%d/api/packages/receive", domain, s.adminPort)
+            // 不带端口：mesh 访问走 netstack localNodeDomain 直连 admin handler，端口无关
+            url := fmt.Sprintf("https://%s/api/packages/receive", domain)
             s.meshHTTPClient.Post(url, "application/octet-stream", bytes.NewReader(pkgData))
         }(peer.NodeID)
     }
@@ -374,13 +377,19 @@ func (s *AdminServer) SyncFromPeer(nodeID string) {
 
 func (s *AdminServer) syncFromPeer(nodeID string) {
     domain := mesh.NodeDomain(nodeID)
-    url := fmt.Sprintf("https://%s:%d/api/packages", domain, s.adminPort)
+    // 不带端口：mesh 访问走 netstack localNodeDomain 直连 admin handler，端口无关
+    url := fmt.Sprintf("https://%s/api/packages", domain)
     
     // 1. GET /api/packages 获取 peer 的包列表
-    // 2. 按 platform/arch 分组，每组取最新 N 个 → 目标集合
-    // 3. 对比本地：目标集合中有、本地没有的 → 下载
-    // 4. 如果下载全部成功 → 删除本地有但不在目标集合中的
-    // 5. 如果下载失败 → 保留旧版本，下次再试
+    // 2. 按 platform/arch 维度，peer 列表与本地列表 merge，
+    //    按版本降序取前 N 个（N=packageRetention）→ 保留集合
+    // 3. 保留集合中有、本地没有的 → 下载
+    // 4. 下载全部成功 → 删除本地不在保留集合中的（其余的才删）
+    // 5. 下载失败 → 保留旧版本，下次再试
+    //
+    // 注意：目标集必须与本地 merge 后再决定删除。
+    // 不能只按单个 peer 的列表构建目标集——peer 包列表为空（或缺失某些
+    // platform/arch 组）时会把本地其他 peer 同步过来的包全部误删。
 }
 ```
 
@@ -424,6 +433,17 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 ```
 
 ### 6.7 同步逻辑详解
+
+**包唯一性语义（去重的基础）**：包的唯一性由 **(version, platform, arch) 元组**决定——同一平台/架构下，一个版本号唯一对应一个包。ID 只是本地文件名（随机生成，**跨节点不一致**），不参与唯一性判断。
+
+```
+pkgKey = platform + "/" + arch + "@" + version    // 例如 linux/amd64@v0.7.4
+```
+
+因此：
+- `syncFromPeer` 的"本地是否已有"判断与 retention 删除都必须按 pkgKey 对比。按 ID 对比会因随机 ID 误判"本地缺失"，导致同版本包被反复下载、重复繁殖；
+- retention 删除时，同 pkgKey 的多份重复文件只保留一份（清理历史遗留的重复）；
+- receive 端点按 platform+arch+version 三元组去重（不能只按 version——同版本不同平台的包会被误判为已存在）。
 
 ```
 同步流程（从 peer 同步包）：
@@ -727,6 +747,49 @@ adminServer.SetMeshDialFn(func(network, addr string) (net.Conn, error) {
 adminServer.SetAdminPort(conf.AdminPort)
 ```
 
+### 6.11 Mesh 数据帧传输设计（drop-tail + 大缓冲 + 控制/数据分队列）
+
+**设计定位**：mesh 层是网络层（IP 语义）——尽力转发、缓冲满即尾部丢弃，**不做背压**；可靠性由 overlay TCP 的重传/拥塞控制承担。中间路由节点必须保持响应性，不能因为某一流量扛不住而阻塞（head-of-line blocking 会拖垮包括 gossip/心跳在内的所有过路流量）。
+
+**丢弃是安全的**：被丢的 mesh 帧 = 丢的 TCP segment。接收端 netstack 看到序号空洞 → 重复 ACK → 发送端 fast retransmit，流不损坏、自动恢复。mesh 层不重传。
+
+**带宽估算**（帧 payload ≈ 1400B）：
+
+| 传输路径 | 有效带宽 | RTT | BDP（带宽×时延积） |
+|----------|----------|-----|--------------------|
+| LAN 直连（VM↔QG） | 100M~1Gbps | 1~5ms | 12~600KB ≈ 9~430 帧 |
+| trojan 经 GG（VPS 公网） | 10~100Mbps | 30~50ms | 37~625KB ≈ 27~450 帧 |
+| h_tunnel 经 JF（移动网络） | 2~8Mbps | 80~150ms | 20~150KB ≈ 15~110 帧 |
+
+BDP 只需几百帧，"吞吐匹配"不是瓶颈。真正的缓冲需求来自：
+
+1. **源端突发**：overlay TCP 慢启动可短时以 LAN 速率灌帧（100Mbps ≈ 9000 帧/s），而 h_tunnel 有请求/响应循环的秒级停顿（协议受限，非带宽受限）。需吸收：突发速率 × 停顿时长（100Mbps × 1~2s ≈ 9000~18000 帧）
+2. **整包突发**：单次 pkg 分发最大 ~30MB ≈ 21400 帧，理想情况下整包零丢帧
+
+**参数**：
+
+| 队列 | 容量 | 说明 |
+|------|------|------|
+| 数据队列 `writeCh`（FrameMeshPacket） | **16384 帧 ≈ 23MB/peer** | 覆盖 ~1.8s 的 100Mbps 突发停顿；22MB 以下整包零丢帧；更大的包丢帧由 overlay TCP 重传恢复 |
+| 控制队列 `controlCh`（心跳/hello/gossip） | 512 帧 ≈ 0.7MB | **优先发送**（peerWriteLoop 先排空控制队列），防止被 23MB 数据排队拖死导致拓扑失效/误判掉线 |
+| 入站 `meshInboundCh` | **16384 帧** | 中转节点入站吸收突发 |
+
+**问题修正（2026-09-23 排查包分发大 body 失败）**：
+
+| 问题 | 修正 |
+|------|------|
+| `writeCh` 仅 1024 帧（≈1.4MB），7.9MB 包体传输必然溢出丢帧 | 扩大到 16384 帧，并与控制帧分队列 |
+| 控制帧（心跳/hello/gossip）与数据帧同队列，大流量时排队延迟可达分钟级 | 控制帧独立小队列 + 优先发送 |
+| `meshInboundCh` 4096 帧，中转节点高吞吐下入站丢帧 | 扩大到 16384 帧 |
+| `peerWriteLoop` 每帧 5s 写超时 → 拥塞时连接被踢（RST），overlay TCP 来不及重传，流损坏（表现为接收端 "read body failed"） | `FrameMeshPacket` 写超时放宽到 30s；控制帧保持 5s 快速失败 |
+| 分发客户端 30s 超时对慢链路过紧（8MB 包在 2~8Mbps h_tunnel 上需 8~32s） | mesh HTTP 客户端超时放宽到 120s |
+| admin 服务端 `ReadTimeout: 15s` 覆盖整个请求（含 body），慢链路上 7.9MB 包体传输超 15s 即被服务端掐断（接收端报 "read body failed" 400，实测 QG→JF 推送 15s 整失败） | 服务端 ReadTimeout 放宽到 120s，与 WriteTimeout 对齐 |
+| 120s 仍不够：QG 同时向 3 个 peer 并发推 7.9MB，上行被分摊后 gg/jf 链路 <66KB/s，120s 整客户端超时（"awaiting headers" context deadline） | 客户端 Timeout 与服务端 Read/Write 统一放宽到 300s |
+
+**不做的事**：
+- 不对数据帧做阻塞式背压（中间路由不能被压）
+- 不在 mesh 层做 ACK/重传（overlay TCP 已承担）
+
 ---
 
 ## 七、文件变更清单
@@ -789,3 +852,6 @@ adminServer.SetAdminPort(conf.AdminPort)
 | 认证方式 | **包端点无需认证** | 签名即信任，简化 mesh 通信 |
 | 数据结构 | **统一 GossipInfo** | hello 是 gossip 超集，减少冗余 |
 | 协议版本 | **v5 → v6** | 不兼容变更，版本不一致断连 |
+| mesh 帧传输 | **drop-tail + 大缓冲** | mesh 层是 IP 语义，中间路由不被压；丢帧由 overlay TCP 重传恢复 |
+| 同步删除 | **peer 与本地 merge 后取 top N** | 防止空列表 peer 误删本地包 |
+| 分发寻址 | **域名不带端口** | netstack localNodeDomain 直连 admin handler，端口无关 |

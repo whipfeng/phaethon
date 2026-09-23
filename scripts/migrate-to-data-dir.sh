@@ -44,9 +44,21 @@ if [ -d ".phaethon" ]; then
         mv .phaethon/setup/* data/setup/ 2>/dev/null || true
     fi
     
-    # Remove old .phaethon directory
+    # Move p2p-cache files
+    if [ -d ".phaethon/p2p-cache" ]; then
+        echo "  Moving p2p-cache files..."
+        mv .phaethon/p2p-cache data/cache/ 2>/dev/null || true
+    fi
+    
+    # Remove old .phaethon directory (only if empty or nearly empty)
     echo "  Removing .phaethon/..."
-    rm -rf .phaethon
+    # Check if directory is empty or only contains empty directories
+    if [ -z "$(find .phaethon -type f)" ]; then
+        rm -rf .phaethon
+    else
+        echo "  WARNING: .phaethon/ still contains files, not removing:"
+        find .phaethon -type f
+    fi
 fi
 
 # 3. Move scattered pkg files from root directory
@@ -55,11 +67,13 @@ if ls *.pkg 1> /dev/null 2>&1; then
     mv *.pkg data/packages/ 2>/dev/null || true
 fi
 
-# 4. Move log files
-if ls *.log 1> /dev/null 2>&1; then
-    echo "Moving log files..."
-    mv *.log data/logs/ 2>/dev/null || true
-fi
+# 4. Move log files (only phaethon-related logs)
+echo "Moving log files..."
+for logfile in phaethon.log access.log error.log debug.log; do
+    if [ -f "$logfile" ]; then
+        mv "$logfile" data/logs/ 2>/dev/null || true
+    fi
+done
 
 # 5. Move certificate files
 if ls admin.{crt,key} 1> /dev/null 2>&1; then

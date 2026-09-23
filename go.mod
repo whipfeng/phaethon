@@ -9,7 +9,7 @@ require (
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.50.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.45.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20250428193742-2d800c3129d5
@@ -29,6 +29,7 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.34.0 // indirect

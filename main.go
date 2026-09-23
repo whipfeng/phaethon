@@ -29,6 +29,7 @@ import (
 
 	"phaethon/admin"
 	"phaethon/config"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/p2p"
@@ -751,6 +752,33 @@ func main() {
 
 	util.Logger.Printf("Working directory: %s", workDir)
 	util.Logger.Printf("------------------------starting------------------------")
+
+	// Initialize database
+	dbPath := filepath.Join(workDir, "phaethon.db")
+	
+	// Check if this is first run (database doesn't exist)
+	_, err = os.Stat(dbPath)
+	isFirstRun := os.IsNotExist(err)
+	
+	// Open database
+	if err := db.Init(dbPath); err != nil {
+		util.Logger.Printf("ERROR: 初始化数据库失败: %v", err)
+		fmt.Fprintf(os.Stderr, "初始化数据库失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	
+	if isFirstRun {
+		// First run: interactive initialization
+		util.Logger.Printf("首次启动，进入初始化模式")
+		if err := db.InteractiveInit(); err != nil {
+			util.Logger.Printf("ERROR: 交互式初始化失败: %v", err)
+			fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		util.Logger.Printf("数据库已加载: %s", dbPath)
+	}
 
 	// Load config first
 	ruleConf := getRuleConf()

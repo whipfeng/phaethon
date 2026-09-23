@@ -1024,6 +1024,7 @@ async function fetchMeshStatus() {
                 let html = '';
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
+                    const owners = (r.nodeIds && r.nodeIds.length > 0) ? r.nodeIds.join(', ') : '-';
                     let viaCell, statusCell;
                     if (viaList.length === 0) {
                         // Local prefix: no intermediate hop
@@ -1042,11 +1043,12 @@ async function fetchMeshStatus() {
                     }
                     html += '<tr>';
                     html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
+                    html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(owners) + '</code></td>';
                     html += viaCell;
                     html += statusCell;
                     html += '</tr>';
                 });
-                routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
             }
         }
 
@@ -1143,11 +1145,12 @@ async function fetchMeshStatus() {
                 const info = ownerRouteInfo(r.owner);
                 html += '<tr>';
                 html += '<td data-label="' + i18n.t('mesh.domain') + '"><code>' + escapeHtml(r.domain) + '</code></td>';
+                html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(r.owner || '-') + '</code></td>';
                 html += '<td data-label="' + i18n.t('mesh.via') + '"' + (info.via === '-' ? ' class="text-muted"' : '') + '>' + escapeHtml(info.via) + '</td>';
                 html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + info.cls + '"></span>' + info.text + '</td>';
                 html += '</tr>';
             });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);

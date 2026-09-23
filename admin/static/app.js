@@ -1024,24 +1024,27 @@ async function fetchMeshStatus() {
                 let html = '';
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
+                    let viaCell, statusCell;
                     if (viaList.length === 0) {
-                        html += '<tr><td data-label="' + i18n.t('mesh.prefix') + '"><code>' + r.prefix + '</code></td><td data-label="' + i18n.t('mesh.via') + '" class="text-muted">' + i18n.t('mesh.local') + '</td><td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot local"></span>' + i18n.t('mesh.local') + '</td></tr>';
+                        // Local prefix: no intermediate hop
+                        viaCell = '<td data-label="' + i18n.t('mesh.via') + '" class="text-muted">-</td>';
+                        statusCell = '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot local"></span>' + i18n.t('mesh.local') + '</td>';
                     } else {
                         const minHop = Math.min(...viaList.map(v => v.hop));
                         const bestRoutes = viaList.filter(v => v.hop === minHop);
-
-                        // Combine all best routes into one row
                         const viaNames = bestRoutes.map(v => v.nodeID).join(', ');
-                        const hasDirect = bestRoutes.some(v => directPeers[v.nodeID] && directPeers[v.nodeID].direct);
-                        const statusClass = hasDirect ? 'online' : 'relay';
-                        const statusText = hasDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay');
-
-                        html += '<tr>';
-                        html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
-                        html += '<td data-label="' + i18n.t('mesh.via') + '">' + escapeHtml(viaNames) + '</td>';
-                        html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
-                        html += '</tr>';
+                        // hop=1: destination is the next-hop peer itself; hop>=2: relayed
+                        const isDirect = minHop === 1;
+                        const statusClass = isDirect ? 'online' : 'relay';
+                        const statusText = isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay');
+                        viaCell = '<td data-label="' + i18n.t('mesh.via') + '">' + escapeHtml(viaNames) + '</td>';
+                        statusCell = '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                     }
+                    html += '<tr>';
+                    html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
+                    html += viaCell;
+                    html += statusCell;
+                    html += '</tr>';
                 });
                 routeTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
             }
@@ -1054,72 +1057,73 @@ async function fetchMeshStatus() {
             const domainRoutes = [];
             const topoPeers = (data.topology && data.topology.peers) || [];
             const topoNodes = (fullTopology && fullTopology.nodes) || [];
-            const topoEdges = (fullTopology && fullTopology.edges) || [];
-            
-            // Collect domain suffixes from all peers
+
+            // Best routing info per node (same source as the route table):
+            // nodeID -> {hop, via}, where via is the next-hop direct peer.
+            const nodeRoutes = {};
+            topoPeers.forEach(peer => {
+                const via = peer.nodeId;
+                if (!via || via === data.nodeId) return;
+                if (peer.subnet) {
+                    // Direct peer's own subnet: hop=1
+                    if (!nodeRoutes[via] || nodeRoutes[via].hop > 1) {
+                        nodeRoutes[via] = {hop: 1, via: via};
+                    }
+                }
+                (peer.claimedSubnets || []).forEach(cs => {
+                    if (!cs.nodeId || cs.nodeId === data.nodeId) return;
+                    if (!nodeRoutes[cs.nodeId] || cs.hop < nodeRoutes[cs.nodeId].hop) {
+                        nodeRoutes[cs.nodeId] = {hop: cs.hop, via: via};
+                    }
+                });
+            });
+
+            // Resolve a domain owner to via/status display
+            const ownerRouteInfo = (owner) => {
+                if (owner === data.nodeId) {
+                    return {via: '-', cls: 'local', text: i18n.t('mesh.local')};
+                }
+                const rt = nodeRoutes[owner];
+                if (rt) {
+                    const isDirect = rt.hop === 1;
+                    return {via: rt.via, cls: isDirect ? 'online' : 'relay', text: isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay')};
+                }
+                return {via: '-', cls: 'relay', text: i18n.t('mesh.relay')};
+            };
+
+            // Collect domain suffixes from all peers (owner = s.NodeID)
             topoPeers.forEach(peer => {
                 const suffixes = peer.domainSuffixes || [];
                 suffixes.forEach(s => {
                     domainRoutes.push({
                         domain: s.Suffix,
-                        subnet: s.SubnetStr,
-                        via: peer.nodeId,
-                        hop: s.Hop
+                        owner: s.NodeID
                     });
                 });
             });
-            
-            // Build adjacency list for hop calculation
-            const adjacency = {};
-            topoEdges.forEach(edge => {
-                if (!adjacency[edge.from]) adjacency[edge.from] = [];
-                if (!adjacency[edge.to]) adjacency[edge.to] = [];
-                adjacency[edge.from].push(edge.to);
-                adjacency[edge.to].push(edge.from);
-            });
-            
-            // Calculate hop count using BFS from local node
-            const hopCounts = {};
-            const queue = [{nodeId: data.nodeId, hop: 0}];
-            hopCounts[data.nodeId] = 0;
-            while (queue.length > 0) {
-                const {nodeId, hop} = queue.shift();
-                const neighbors = adjacency[nodeId] || [];
-                neighbors.forEach(neighbor => {
-                    if (hopCounts[neighbor] === undefined) {
-                        hopCounts[neighbor] = hop + 1;
-                        queue.push({nodeId: neighbor, hop: hop + 1});
-                    }
-                });
-            }
-            
-            // Add auto-generated nodeID.phn entries for all known nodes
+
+            // Add auto-generated nodeID.phn entries for all known nodes (skip self)
             topoNodes.forEach(node => {
-                if (node.nodeId && node.subnet) {
-                    const hop = hopCounts[node.nodeId] !== undefined ? hopCounts[node.nodeId] : 999;
+                if (node.nodeId && node.subnet && node.nodeId !== data.nodeId) {
                     domainRoutes.push({
                         domain: node.nodeId + '.phn',
-                        subnet: node.subnet,
-                        via: node.nodeId,
-                        hop: hop
+                        owner: node.nodeId
                     });
                 }
             });
-            
+
             // Add self
             if (data.nodeId && data.subnet) {
                 domainRoutes.push({
                     domain: data.nodeId + '.phn',
-                    subnet: data.subnet,
-                    via: 'local',
-                    hop: 0
+                    owner: data.nodeId
                 });
             }
-            
-            // Sort by domain name
-            // Group by domain, keeping all routes with the lowest hop count
+
+            // Group by domain, keeping routes with the lowest hop count
             const domainRouteMap = new Map();
             domainRoutes.forEach(r => {
+                r.hop = (r.owner === data.nodeId) ? 0 : (nodeRoutes[r.owner] ? nodeRoutes[r.owner].hop : 999);
                 const existing = domainRouteMap.get(r.domain);
                 if (!existing) {
                     domainRouteMap.set(r.domain, [r]);
@@ -1129,31 +1133,18 @@ async function fetchMeshStatus() {
                     existing.push(r);
                 }
             });
-            // Convert to array with combined via fields
             const uniqueDomainRoutes = [];
-            domainRouteMap.forEach((routes, domain) => {
-                const viaNames = routes.map(r => r.via).filter((v, i, a) => a.indexOf(v) === i).join(', ');
-                const minHop = routes[0].hop;
-                const hasDirect = routes.some(r => directPeers[r.via] && directPeers[r.via].direct);
-                const isLocal = routes.some(r => r.via === 'local');
-                uniqueDomainRoutes.push({
-                    domain: domain,
-                    via: viaNames,
-                    hop: minHop,
-                    isDirect: hasDirect,
-                    isLocal: isLocal
-                });
+            domainRouteMap.forEach(routes => {
+                uniqueDomainRoutes.push(routes[0]);
             });
             uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
-            
+
             uniqueDomainRoutes.forEach(r => {
-                const statusClass = r.isLocal ? 'local' : (r.isDirect ? 'online' : 'relay');
-                const statusText = r.isLocal ? i18n.t('mesh.local') : (r.isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay'));
-                
+                const info = ownerRouteInfo(r.owner);
                 html += '<tr>';
-                html += '<td><code>' + escapeHtml(r.domain) + '</code></td>';
-                html += '<td>' + escapeHtml(r.via) + '</td>';
-                html += '<td><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.domain') + '"><code>' + escapeHtml(r.domain) + '</code></td>';
+                html += '<td data-label="' + i18n.t('mesh.via') + '"' + (info.via === '-' ? ' class="text-muted"' : '') + '>' + escapeHtml(info.via) + '</td>';
+                html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + info.cls + '"></span>' + info.text + '</td>';
                 html += '</tr>';
             });
             domainRouteTbody.innerHTML = html || '<tr><td colspan="3" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';

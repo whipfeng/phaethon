@@ -106,6 +106,7 @@ type Peer struct {
 
 	conn          net.Conn
 	writeCh       chan writeReq
+	controlCh     chan writeReq // heartbeat/hello/gossip priority queue
 	stopCh        chan struct{}
 	stopOnce      sync.Once    // ensures stopCh is closed exactly once
 	meshSender    *peerSender  // mesh peer sender, created on hello
@@ -122,35 +123,63 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		platform: runtime.GOOS,
 		arch:     runtime.GOARCH,
 		cache:    cache,
-		meshInboundCh:     make(chan meshInboundPacket, 4096),
+		meshInboundCh:     make(chan meshInboundPacket, 16384),
 		meshInboundStopCh: make(chan struct{}),
 	}
 	go m.meshInboundLoop()
 	return m
 }
 
-// peerWriteLoop drains the peer's writeCh and writes frames to the TCP connection.
-// Serializes all writes without needing a mutex. Exits on write error or stop.
+// peerWriteLoop drains the peer's queues and writes frames to the TCP connection.
+// Control frames (heartbeat/hello/gossip) take priority over mesh data so they
+// are not delayed behind bulk transfers. Exits on write error or stop.
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
+	writeFrame := func(req writeReq) bool {
+		deadline := 5 * time.Second
+		if req.frameType == reverse.FrameMeshPacket {
+			// Bulk mesh data may legitimately stall on slow transports
+			// (h_tunnel/trojan); give overlay TCP time to drain instead of
+			// tearing the connection down mid-transfer.
+			deadline = 30 * time.Second
+		}
+		_ = peer.conn.SetWriteDeadline(time.Now().Add(deadline))
+		if req.frameType == reverse.FrameMeshPacket {
+			util.LogDebug("[P2P] writing FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(req.data))
+		}
+		if err := reverse.WriteFrame(peer.conn, req.frameType, req.data); err != nil {
+			_ = peer.conn.SetWriteDeadline(time.Time{})
+			util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
+			peer.conn.Close()
+			return false
+		}
+		_ = peer.conn.SetWriteDeadline(time.Time{})
+		return true
+	}
+
 	for {
+		// Fast path: control frames first, non-blocking.
+		select {
+		case req := <-peer.controlCh:
+			if !writeFrame(req) {
+				return
+			}
+			continue
+		default:
+		}
 		select {
 		case <-peer.stopCh:
 			return
+		case req := <-peer.controlCh:
+			if !writeFrame(req) {
+				return
+			}
 		case req, ok := <-peer.writeCh:
 			if !ok {
 				return
 			}
-			_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if req.frameType == reverse.FrameMeshPacket {
-				util.LogDebug("[P2P] writing FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(req.data))
-			}
-			if err := reverse.WriteFrame(peer.conn, req.frameType, req.data); err != nil {
-				_ = peer.conn.SetWriteDeadline(time.Time{})
-				util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
-				peer.conn.Close()
+			if !writeFrame(req) {
 				return
 			}
-			_ = peer.conn.SetWriteDeadline(time.Time{})
 		}
 	}
 }
@@ -170,13 +199,20 @@ func (m *P2PManager) meshInboundLoop() {
 	}
 }
 
-// enqueueWrite queues a frame for async write. Non-blocking: drops if channel is full.
+// enqueueWrite queues a frame for async write. Non-blocking: drops if the
+// queue is full (drop-tail; overlay TCP retransmission recovers mesh data).
+// Control frames (heartbeat/hello/gossip) use a small priority queue so they
+// never queue behind bulk mesh data.
 func enqueueWrite(peer *Peer, frameType byte, data []byte) {
+	ch := peer.writeCh
+	if frameType != reverse.FrameMeshPacket {
+		ch = peer.controlCh
+	}
 	if frameType == reverse.FrameMeshPacket {
 		util.LogDebug("[P2P] enqueue FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(data))
 	}
 	select {
-	case peer.writeCh <- writeReq{frameType: frameType, data: data}:
+	case ch <- writeReq{frameType: frameType, data: data}:
 	default:
 		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, frameType)
 	}
@@ -186,12 +222,13 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte) {
 // It wraps the connection in the frame protocol and runs the P2P session.
 func (m *P2PManager) HandleP2PConn(conn net.Conn, address string) {
 	peer := &Peer{
-		ID:       conn.RemoteAddr().String(),
-		Status:   "connecting",
-		LastSeen: time.Now(),
-		conn:     conn,
-		writeCh:  make(chan writeReq, 1024),
-		stopCh:   make(chan struct{}),
+		ID:        conn.RemoteAddr().String(),
+		Status:    "connecting",
+		LastSeen:  time.Now(),
+		conn:      conn,
+		writeCh:   make(chan writeReq, 16384),
+		controlCh: make(chan writeReq, 512),
+		stopCh:    make(chan struct{}),
 	}
 
 	m.mu.Lock()
@@ -295,7 +332,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 
 		peer.conn = conn
-		peer.writeCh = make(chan writeReq, 1024)
+		peer.writeCh = make(chan writeReq, 16384)
+		peer.controlCh = make(chan writeReq, 512)
 		peer.Status = "connecting"
 		util.LogInfo("[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 

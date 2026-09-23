@@ -168,6 +168,8 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 - **上传**: `scp -P 60002 dist/linux-amd64/phaethon layer4@36.140.28.178:/home/layer4/layer4-deploy/phaethon`
 - **启动**: `ssh -p 60002 layer4@36.140.28.178 "chmod +x /home/layer4/layer4-deploy/phaethon && cd /home/layer4/layer4-deploy && nohup ./phaethon > phaethon.log 2>&1 &"`
 - **停止**: `ssh -p 60002 layer4@36.140.28.178 "ps aux | grep phaethon | grep -v grep | awk '{print \$2}' | xargs kill"`
+- **⚠️ 部署必须确保成功**：部署 JF 时必须在同一命令内完成停止+替换+启动，部署后必须验证：进程存在（watchdog+worker 两个进程）、端口 32457/39999 处于 LISTEN、admin 接口返回 200。验证失败要立即修复。
+- **禁止用 `-version` 等参数直接运行二进制**：phaethon 无 version 参数，任何参数都会当作正常启动，产生重复实例抢占端口
 - **配置文件**: `/home/layer4/layer4-deploy/config.yaml`
 - **二进制路径**: `/home/layer4/layer4-deploy/phaethon`
 - **日志**: `/home/layer4/layer4-deploy/phaethon.log`
@@ -208,6 +210,30 @@ gVisor netstack → writeLoop → Wintun 驱动 → Windows 应用
 - **TUN Read Stall**: `WintunReceivePacket()` DLL 调用在运行 4-30 秒后可能永久阻塞
   - 详见 `docs/issues/tun-read-stall.md`
   - 修复方向: 使用 `ReadWaitEvent` + `WaitForSingleObject` 超时检测 + 自动恢复
+
+## Mesh 域名访问机制（重要！）
+
+节点间通过 mesh 网络互访 admin/API 时，**直接用域名、不带端口**（如 `https://gg.phn/api/xxx`），不要带 `:39999` 之类的端口。
+
+### 完整链路（已实测验证）
+
+```
+发起方 curl https://gg.phn/api/packages
+  1. DNS: gg.phn → mesh DNS 应答目标节点 subnet 内地址（如 gg.phn → 100.179.0.10、jf.phn → 100.2.0.11）
+     不是 100.0.0.x fakeIP，是目标节点 subnet 内的真实可路由 mesh 地址
+  2. 路由: 100.179.0.10 走 mesh 路由表 → P2P 链路（可中继）→ 到达 GG 节点
+  3. 交付: GG 的 HandleMeshFrame → InjectMeshPacket → gVisor netstack
+  4. 处理: netstack 用 fakeIP 表还原域名 == 本节点域名（gg.phn）
+     → localNodeDomain=true → adminHandler.ServeConn() 直接处理
+     （tun/engine.go:2042，绕过 OS 网络栈，端口无关）
+```
+
+### 关键结论
+
+- **端口无关**：目标节点上任何端口（443、12345、39999）都由 admin handler 接管，OS 层 listener（如 GG 39999 的 trojan）与 mesh 路径互不干扰
+- **不要在 URL 里写端口**：`https://<node>.phn/api/xxx` 即可（默认 443）
+- **证书是自签的**：客户端必须 `InsecureSkipVerify: true`，否则报 `tls: unknown certificate`（GG 日志里大量此错误来自浏览器访问）
+- **与旁路网关（bypass-gateway）的关系**：QG 的 bypass-gateway 是 iptables FORWARD 让 LAN 机器借道代理；节点互访走的是上面 netstack 直连 admin handler 的路径，两者是不同机制
 
 ## 远程浏览器验证
 

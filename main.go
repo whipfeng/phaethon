@@ -756,8 +756,8 @@ func main() {
 	ruleConf := getRuleConf()
 
 	// Setup rotating log file (10MB max)
-	logPath := filepath.Join(dataDir, "phaethon.log")
-	_ = os.MkdirAll(dataDir, 0755)
+	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
+	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
 	if err := util.SetupLogFile(logPath, 10); err != nil {
 		util.Logger.Printf("WARNING: setup log file failed: %v", err)
 	} else {
@@ -1384,8 +1384,8 @@ func buildWorkerEnv() []string {
 // read it even if the console window closes immediately (e.g. double-click
 // on Windows).
 func writeStartupError(err error) error {
-	path := filepath.Join(dataDir, "startup-error.log")
-	_ = os.MkdirAll(dataDir, 0755)
+	path := filepath.Join(dataDir, "logs", "startup-error.log")
+	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
 	msg := fmt.Sprintf("%s startup failed: %v\n", time.Now().Format(time.RFC3339), err)
 	return os.WriteFile(path, []byte(msg), 0644)
 }

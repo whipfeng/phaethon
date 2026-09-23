@@ -5,13 +5,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"phaethon/config"
 	"phaethon/dialer"
-	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -202,7 +202,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 				if pingStopped.Load() {
 					return
 				}
-				if err := reverse.WriteFrame(conn, reverse.FrameHeartbeat, nil); err != nil {
+				if err := frame.WriteFrame(conn, frame.FrameHeartbeat, nil); err != nil {
 					return
 				}
 			case <-stopPing:
@@ -215,22 +215,22 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, _, err := reverse.ReadFrame(conn)
+		frameType, _, err := frame.ReadFrame(conn)
 		if err != nil {
 			return
 		}
 
 		switch frameType {
-		case reverse.FrameHeartbeat:
+		case frame.FrameHeartbeat:
 			continue
-		case reverse.FramePong:
+		case frame.FramePong:
 			util.LogInfo("[REVERSE] [%s] [conn-N/A] Match Success: Target %s <- Registered node %s", s.address, s.address, conn.RemoteAddr())
 
 			pingStopped.Store(true)
 			close(stopPing)
 			senderWg.Wait()
 
-			if err := reverse.WriteFrame(conn, reverse.FramePeng, nil); err != nil {
+			if err := frame.WriteFrame(conn, frame.FramePeng, nil); err != nil {
 				return
 			}
 
@@ -244,7 +244,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 			// ReverseFramedConn itself. Wrapping here would cause double-framing.
 			s.serveAccepted(conn)
 			return
-		case reverse.FramePeng:
+		case frame.FramePeng:
 			continue
 		default:
 			util.LogError("[REVERSE-SVR] [%s] unexpected frame type: 0x%02x", s.address, frameType)
@@ -272,19 +272,19 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 
 		// Read first frame to determine mode (TCP or UDP channel)
 		rawConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		frameType, payload, err := reverse.ReadFrame(rawConn)
+		frameType, payload, err := frame.ReadFrame(rawConn)
 		if err != nil {
 			return
 		}
 		rawConn.SetReadDeadline(time.Time{})
 
-		if frameType == reverse.FrameUDPChannel {
+		if frameType == frame.FrameUDPChannel {
 			handleReverseUDPChannel(rawConn, ruleConf, mapping, payload)
 			return
 		}
 
 		// TCP mode: wrap in ReverseFramedConn for heartbeat + data demux
-		framedConn := reverse.NewReverseFramedConn(rawConn)
+		framedConn := frame.NewReverseFramedConn(rawConn)
 
 		// Feed the mode-frame's payload back as initial data so the
 		// protocol handler (SOCKS5/Trojan/Direct) sees it as the first bytes.
@@ -429,7 +429,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 				return
 			case <-ticker.C:
 			}
-			if err := reverse.WriteFrame(tcpConn, reverse.FrameHeartbeat, nil); err != nil {
+			if err := frame.WriteFrame(tcpConn, frame.FrameHeartbeat, nil); err != nil {
 				doClose()
 				return
 			}
@@ -445,7 +445,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 			default:
 			}
 			tcpConn.SetReadDeadline(time.Now().Add(70 * time.Second))
-			_, _, err := reverse.ReadFrame(tcpConn)
+			_, _, err := frame.ReadFrame(tcpConn)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue

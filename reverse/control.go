@@ -3,7 +3,7 @@ package reverse
 import ()
 
 // ControlRequest is a command sent from reverse side to registry side
-// over the control connection (carried in FrameData payload as JSON).
+// over the control connection (carried in frame.FrameData payload as JSON).
 type ControlRequest struct {
 	Cmd              string `json:"cmd"`            // "register"
 	Name             string `json:"name,omitempty"` // reverse-side config name (for UI pairing)

@@ -2,6 +2,7 @@ package reverse
 
 import (
 	"net"
+	"phaethon/frame"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -69,11 +70,11 @@ func (s *stubRegistry) handleConn(conn net.Conn) {
 	}()
 
 	// Step 1: wait for PENG frame (client confirming registration)
-	frameType, _, err := ReadFrame(conn)
+	frameType, _, err := frame.ReadFrame(conn)
 	if err != nil {
 		return
 	}
-	if frameType != FramePeng {
+	if frameType != frame.FramePeng {
 		return
 	}
 
@@ -89,7 +90,7 @@ func (s *stubRegistry) handleConn(conn net.Conn) {
 					if s.dropAfterN > 0 && int(s.pingCount.Load()) >= s.dropAfterN {
 						return
 					}
-					if err := WriteFrame(conn, FrameHeartbeat, nil); err != nil {
+					if err := frame.WriteFrame(conn, frame.FrameHeartbeat, nil); err != nil {
 						return
 					}
 					s.pingCount.Add(1)
@@ -103,24 +104,24 @@ func (s *stubRegistry) handleConn(conn net.Conn) {
 	// Step 2: wait for PONG frame (Match triggered), reply with PENG
 	for {
 		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-		frameType, _, err := ReadFrame(conn)
+		frameType, _, err := frame.ReadFrame(conn)
 		if err != nil {
 			return
 		}
 		switch frameType {
-		case FramePong:
+		case frame.FramePong:
 			s.pongCount.Add(1)
 			if s.delayPeng > 0 {
 				time.Sleep(s.delayPeng)
 			}
-			if err := WriteFrame(conn, FramePeng, nil); err != nil {
+			if err := frame.WriteFrame(conn, frame.FramePeng, nil); err != nil {
 				return
 			}
 			s.handshakeOk.Add(1)
 			stopOnce.Do(func() { close(stopPing) })
 			<-make(chan struct{})
 			return
-		case FrameHeartbeat:
+		case frame.FrameHeartbeat:
 			continue
 		default:
 			return

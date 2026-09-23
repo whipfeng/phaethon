@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"phaethon/frame"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,7 @@ func (d *reverseRegistryDialer) Dial(dstAddr string, dstPort int) (net.Conn, err
 		return nil, fmt.Errorf("reverse: match fail for %s: %w", address, err)
 	}
 
-	return reverse.NewReverseFramedConn(conn), nil
+	return frame.NewReverseFramedConn(conn), nil
 }
 
 // DialPacket establishes a UDP channel through the reverse connection.
@@ -102,7 +103,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 	// server's perspective.
 	cmdPayload := []byte(chainConn.LocalAddr().String())
 	util.LogInfo("[REVERSE-UDP-DIALER] [%s] sending UDP_CHANNEL to server, dialerAddr=%s", d.Proxy.Name, cmdPayload)
-	if err := reverse.WriteFrame(tcpConn, reverse.FrameUDPChannel, cmdPayload); err != nil {
+	if err := frame.WriteFrame(tcpConn, frame.FrameUDPChannel, cmdPayload); err != nil {
 		cleanupBoth(targetConn, chainConn, tcpConn, chainIsDirect)
 		return nil, fmt.Errorf("reverse-udp: send cmd fail: %w", err)
 	}
@@ -398,7 +399,7 @@ func (c *reversePacketConn) tcpKeepalive() {
 			return
 		case <-ticker.C:
 		}
-		if err := reverse.WriteFrame(c.tcpConn, reverse.FrameHeartbeat, nil); err != nil {
+		if err := frame.WriteFrame(c.tcpConn, frame.FrameHeartbeat, nil); err != nil {
 			c.Close()
 			return
 		}
@@ -417,7 +418,7 @@ func (c *reversePacketConn) tcpReader() {
 		default:
 		}
 		c.tcpConn.SetReadDeadline(time.Now().Add(70 * time.Second))
-		_, _, err := reverse.ReadFrame(c.tcpConn)
+		_, _, err := frame.ReadFrame(c.tcpConn)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue

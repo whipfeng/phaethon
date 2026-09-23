@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/frame"
 	"phaethon/reverse"
 	"phaethon/util"
 )
@@ -70,6 +71,12 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: nil,
+			// Connection pool tuned for concurrent lane POSTs on the same
+			// host (v1 doc §3.1): pooled keep-alive conns instead of a
+			// fresh TCP+TLS handshake per request.
+			MaxIdleConns:        64,
+			MaxIdleConnsPerHost: 16,
+			IdleConnTimeout:     120 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				nextType := "nil"
 				if proxy.Next != nil {
@@ -87,6 +94,38 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 			},
 		},
 	}
+}
+
+// htunnelClientSig identifies the routing configuration a client was built for.
+type htunnelClientSig struct {
+	server string
+	port   int
+	url    string
+	next   *config.Proxy
+}
+
+type htunnelClientEntry struct {
+	sig    htunnelClientSig
+	client *http.Client
+}
+
+// htunnelSharedClients caches one http.Client per proxy so concurrent lanes
+// (control POST, data POST, long-poll GET) share the connection pool instead
+// of building a fresh TCP+TLS handshake per connection.
+var htunnelSharedClients sync.Map // proxy name -> *htunnelClientEntry
+
+// sharedHTunnelClient returns the cached client for proxy, rebuilding it when
+// the routing signature (server/port/url/Next) changed.
+func sharedHTunnelClient(proxy *config.Proxy) *http.Client {
+	sig := htunnelClientSig{server: proxy.Server, port: proxy.Port, url: proxy.URL, next: proxy.Next}
+	if v, ok := htunnelSharedClients.Load(proxy.Name); ok {
+		if e, ok := v.(*htunnelClientEntry); ok && e.sig == sig {
+			return e.client
+		}
+	}
+	client := NewHTunnelHTTPClient(proxy)
+	htunnelSharedClients.Store(proxy.Name, &htunnelClientEntry{sig: sig, client: client})
+	return client
 }
 
 func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
@@ -118,7 +157,7 @@ func (d *HTunnelDialer) dialHTunnel(cmd string, dstAddr string, dstPort int) (ne
 	req.Header.Set(headerCommand, cmd)
 	connSeq++
 
-	client := NewHTunnelHTTPClient(proxy)
+	client := sharedHTunnelClient(proxy)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	resp, err := client.Do(req.WithContext(ctx))
@@ -195,10 +234,11 @@ func (d *HTunnelDialer) DialControl() (net.Conn, error) {
 	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortControl)
 }
 
-// DialP2P establishes a P2P connection through this HTunnel proxy.
-// It connects to proxy.Server with BIND PORT=2.
-func (d *HTunnelDialer) DialP2P() (net.Conn, error) {
-	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortP2P)
+// DialP2P establishes a P2P connection through this HTunnel proxy using the
+// direct mesh channel: one HEAD (X-C: MESH), frames in POST/GET bodies —
+// no BIND stream, no target dial, no splice.
+func (d *HTunnelDialer) DialP2P() (frame.FrameTransport, error) {
+	return d.dialP2PDirect()
 }
 
 // DialReverse establishes a reverse data connection through this HTunnel proxy.
@@ -454,7 +494,7 @@ func (d *HTunnelDialer) DialPacket() (net.PacketConn, error) {
 	req.Header.Set(headerCommand, "UDP")
 	connSeq++
 
-	client := NewHTunnelHTTPClient(proxy)
+	client := sharedHTunnelClient(proxy)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	resp, err := client.Do(req.WithContext(ctx))

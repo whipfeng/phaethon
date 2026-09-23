@@ -388,7 +388,7 @@ func TestReverseE2E_TrojanSOCKS5(t *testing.T) {
 //
 //	Test Client -> TrojanDialer(reverse) -> Reverse Registry -> Trojan Tunnel -> Stub Server
 //
-// This validates that TrojanDialer.TryReverse() correctly wraps in ReverseFramedConn
+// This validates that TrojanDialer.TryReverse() correctly wraps in frame.ReverseFramedConn
 // and that the server-side Trojan handler works over the framed connection.
 func TestReverseE2E_TrojanTrojan(t *testing.T) {
 	reverse.Refresh()

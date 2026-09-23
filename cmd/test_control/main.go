@@ -7,10 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"phaethon/frame"
 	"sync"
 	"time"
-
-	"phaethon/reverse"
 )
 
 func main() {
@@ -62,12 +61,12 @@ func main() {
 		"proto":          "socks5",
 		"preferred_port": 19902,
 	})
-	if err := reverse.WriteFrame(conn, reverse.FrameData, reqJSON); err != nil {
+	if err := frame.WriteFrame(conn, frame.FrameData, reqJSON); err != nil {
 		log.Fatalf("[FAIL] send register: %v", err)
 	}
 
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	_, payload, err := reverse.ReadFrame(conn)
+	_, payload, err := frame.ReadFrame(conn)
 	if err != nil {
 		log.Fatalf("[FAIL] read register reply: %v", err)
 	}
@@ -143,7 +142,7 @@ func main() {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				reverse.WriteFrame(conn, reverse.FrameHeartbeat, nil)
+				frame.WriteFrame(conn, frame.FrameHeartbeat, nil)
 			}
 		}
 	}()
@@ -159,7 +158,7 @@ func main() {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				reverse.WriteFrame(dataConn, reverse.FrameHeartbeat, nil)
+				frame.WriteFrame(dataConn, frame.FrameHeartbeat, nil)
 			}
 		}
 	}()
@@ -176,27 +175,27 @@ func main() {
 			}
 
 			dataConn.SetReadDeadline(time.Now().Add(120 * time.Second))
-			frameType, payload, err := reverse.ReadFrame(dataConn)
+			frameType, payload, err := frame.ReadFrame(dataConn)
 			if err != nil {
 				fmt.Printf("[DATA] read error: %v\n", err)
 				return
 			}
 
 			switch frameType {
-			case reverse.FrameHeartbeat:
+			case frame.FrameHeartbeat:
 				// Server heartbeat, ignore
-			case reverse.FramePeng:
+			case frame.FramePeng:
 				// Registry sends PENG twice:
 				// 1) After registration (HandleReverseConnection)
 				// 2) During Match handshake (reverseHandshake sends PONG first, then reads PENG)
 				// Always respond with PONG
 				fmt.Println("[DATA] Received PENG, sending PONG")
-				reverse.WriteFrame(dataConn, reverse.FramePong, nil)
-			case reverse.FramePong:
+				frame.WriteFrame(dataConn, frame.FramePong, nil)
+			case frame.FramePong:
 				// Match() handshake: server sends PONG, expects PENG back
 				fmt.Println("[DATA] Received PONG (from Match), sending PENG")
-				reverse.WriteFrame(dataConn, reverse.FramePeng, nil)
-			case reverse.FrameData:
+				frame.WriteFrame(dataConn, frame.FramePeng, nil)
+			case frame.FrameData:
 				// Actual data from client → forward to target → send response back
 				if len(payload) == 0 {
 					continue
@@ -228,7 +227,7 @@ func main() {
 				targetConn.Close()
 
 				if len(respBuf) > 0 {
-					if err := reverse.WriteFrame(dataConn, reverse.FrameData, respBuf); err != nil {
+					if err := frame.WriteFrame(dataConn, frame.FrameData, respBuf); err != nil {
 						fmt.Printf("[DATA] write response fail: %v\n", err)
 						return
 					}

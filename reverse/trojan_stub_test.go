@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"phaethon/frame"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -198,14 +199,14 @@ func stubTrojanClientDialBind(serverAddr, dstAddr string) (net.Conn, error) {
 	}
 
 	// Wait for PENG frame from server
-	frameType, _, err := ReadFrame(conn)
+	frameType, _, err := frame.ReadFrame(conn)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("wait for PENG fail: %w", err)
 	}
-	if frameType != FramePeng {
+	if frameType != frame.FramePeng {
 		conn.Close()
-		return nil, fmt.Errorf("expected PENG(0x%02x), got 0x%02x", FramePeng, frameType)
+		return nil, fmt.Errorf("expected PENG(0x%02x), got 0x%02x", frame.FramePeng, frameType)
 	}
 
 	return conn, nil
@@ -220,7 +221,7 @@ func runReverseHeartbeat(conn net.Conn) (net.Conn, error) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := WriteFrame(conn, FrameHeartbeat, nil); err != nil {
+				if err := frame.WriteFrame(conn, frame.FrameHeartbeat, nil); err != nil {
 					return
 				}
 			case <-stopPing:
@@ -231,21 +232,21 @@ func runReverseHeartbeat(conn net.Conn) (net.Conn, error) {
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, _, err := ReadFrame(conn)
+		frameType, _, err := frame.ReadFrame(conn)
 		if err != nil {
 			return nil, err
 		}
 		switch frameType {
-		case FrameHeartbeat:
+		case frame.FrameHeartbeat:
 			continue
-		case FramePong:
+		case frame.FramePong:
 			close(stopPing)
-			if err := WriteFrame(conn, FramePeng, nil); err != nil {
+			if err := frame.WriteFrame(conn, frame.FramePeng, nil); err != nil {
 				return nil, err
 			}
 			conn.SetReadDeadline(time.Time{})
 			return conn, nil
-		case FramePeng:
+		case frame.FramePeng:
 			conn.SetReadDeadline(time.Time{})
 			continue
 		default:

@@ -1271,9 +1271,16 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Build proxy summaries for JavaScript (includes IsP2P/IsUDP computed values)
+	proxySummaries := make([]map[string]interface{}, len(dc.Proxies))
+	for i, p := range dc.Proxies {
+		proxySummaries[i] = proxySummary(p)
+	}
+
 	data := map[string]interface{}{
 		"Title":         "Proxies",
 		"Proxies":       dc.Proxies,
+		"ProxySummaries": proxySummaries,
 		"Groups":        displayGroups,
 		"GroupStats":    groupStats,
 		"Subscriptions": dc.Subscriptions,

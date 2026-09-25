@@ -99,7 +99,7 @@ type writeReq struct {
 
 // Peer represents a connected P2P peer.
 type Peer struct {
-	ID       string    // proxy name used to reach this peer (local only, not serialized)
+	ID       string    `json:"name"`   // proxy name used to reach this peer
 	NodeID   string    `json:"nodeId"` // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 	Status   string    `json:"status"` // "connecting", "helloed", "upToDate", "failed"
 	LastSeen time.Time `json:"lastSeen"`
@@ -128,6 +128,23 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	}
 	go m.meshInboundLoop()
 	return m
+}
+
+// GetPeerStatus returns the P2P connection status for all peers.
+// Returns a map of proxy name -> status info.
+func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	result := make(map[string]map[string]interface{})
+	for name, peer := range m.peers {
+		result[name] = map[string]interface{}{
+			"status":   peer.Status,
+			"nodeId":   peer.NodeID,
+			"lastSeen": peer.LastSeen,
+		}
+	}
+	return result
 }
 
 // peerWriteLoop drains the peer's queues and writes frames via the peer
@@ -263,6 +280,7 @@ func (m *P2PManager) StopPeer(id string) {
 // It reconnects automatically with exponential backoff if the connection drops.
 // Call StopPeer to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
+	util.LogInfo("[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
 	if !ok {

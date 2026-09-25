@@ -1500,6 +1500,16 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     .main-content {
         margin-left: 60px;
     }
+    
+    /* Hide bottom nav on tablet - sidebar provides navigation */
+    .bottom-nav {
+        display: none;
+    }
+    
+    /* Remove bottom padding since no bottom nav */
+    .main-content {
+        padding-bottom: 2rem;
+    }
 }
 
 /* Desktop (> 1024px) - default styles apply */
@@ -2328,4 +2338,52 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 }
 .server-restart-close:hover {
     opacity: 1;
+}
+
+/* P2P Status Indicators */
+.p2p-status {
+    display: inline-block;
+    transition: all 0.3s ease;
+}
+
+.p2p-status.connected {
+    color: var(--success, #10b981);
+}
+
+.p2p-status.connecting {
+    animation: p2p-spin 1.5s linear infinite;
+    color: var(--accent, #3b82f6);
+}
+
+.p2p-status.failed {
+    color: var(--danger, #ef4444);
+    filter: drop-shadow(0 0 2px rgba(239, 68, 68, 0.5));
+}
+
+@keyframes p2p-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* P2P disabled state - explicitly gray */
+td[data-label="P2P"] {
+    color: var(--text-muted, #9ca3af);
+}
+
+/* Override for enabled states */
+td[data-label="P2P"] .p2p-status.connected {
+    color: var(--success, #10b981);
+}
+
+td[data-label="P2P"] .p2p-status.connecting {
+    color: var(--accent, #3b82f6);
+}
+
+td[data-label="P2P"] .p2p-status.failed {
+    color: var(--danger, #ef4444);
+}
+
+.p2p-status.disabled {
+    color: var(--text-muted, #9ca3af);
+    opacity: 0.6;
 }

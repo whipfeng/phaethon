@@ -184,26 +184,33 @@ function toggleBottomDrawer() {
         // Setup touch handler for swipe-to-close if not already done
         if (!drawer._touchHandlerAttached) {
             drawer._touchHandlerAttached = true;
-            const content = drawer.querySelector('.bottom-drawer-content');
-            if (content) {
+            const header = drawer.querySelector('.bottom-drawer-header');
+            if (header) {
                 let startY = 0;
                 let currentY = 0;
-                content.addEventListener('touchstart', (e) => {
+                // Only attach to header to avoid interfering with body scroll
+                header.addEventListener('touchstart', (e) => {
                     startY = e.touches[0].clientY;
                 }, { passive: true });
-                content.addEventListener('touchmove', (e) => {
+                header.addEventListener('touchmove', (e) => {
                     currentY = e.touches[0].clientY;
                     const deltaY = currentY - startY;
                     if (deltaY > 0) {
-                        content.style.transform = `translateY(${deltaY}px)`;
+                        const content = drawer.querySelector('.bottom-drawer-content');
+                        if (content) {
+                            content.style.transform = `translateY(${deltaY}px)`;
+                        }
                     }
                 }, { passive: true });
-                content.addEventListener('touchend', () => {
+                header.addEventListener('touchend', () => {
                     const deltaY = currentY - startY;
                     if (deltaY > 100) {
                         drawer.classList.add('hidden');
                     }
-                    content.style.transform = '';
+                    const content = drawer.querySelector('.bottom-drawer-content');
+                    if (content) {
+                        content.style.transform = '';
+                    }
                     startY = 0;
                     currentY = 0;
                 });

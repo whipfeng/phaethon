@@ -338,7 +338,8 @@ func parseTrojanURI(u *url.URL, name, host string, port int) (*Proxy, error) {
 		p.SkipCertVerify = true
 	}
 	if q.Get("udp") == "true" || q.Get("udp") == "1" {
-		p.UDP = true
+		t := true
+		p.UDP = &t
 	}
 	return p, nil
 }
@@ -360,7 +361,8 @@ func parseHysteria2URI(u *url.URL, name, host string, port int) (*Proxy, error) 
 		p.SkipCertVerify = true
 	}
 	if q.Get("udp") == "true" || q.Get("udp") == "1" {
-		p.UDP = true
+		t := true
+		p.UDP = &t
 	}
 	return p, nil
 }

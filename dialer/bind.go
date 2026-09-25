@@ -111,7 +111,11 @@ func (b *BindContext) BindSocket(c syscall.RawConn, dst net.IP) error {
 func DialRouteAware(network, addr string) (net.Conn, error) {
 	bc := GetGlobalBindContext()
 	if bc == nil {
-		return net.DialTimeout(network, addr, 30*time.Second)
+		d := net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		return d.Dial(network, addr)
 	}
 
 	host, port, err := net.SplitHostPort(addr)
@@ -191,7 +195,10 @@ func ResolveRouteAware(host string) ([]string, error) {
 // dialBound dials addr with a socket bound to the interface chosen for dst.
 func dialBound(network, addr string, dst net.IP) (net.Conn, error) {
 	bc := GetGlobalBindContext()
-	d := net.Dialer{Timeout: 30 * time.Second}
+	d := net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 
 	if bc != nil {
 		if ifaceName := resolveIfaceForDst(bc, dst); ifaceName != "" {

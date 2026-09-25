@@ -161,7 +161,7 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 			e.localMeshVIPs[v4.String()] = true
 		}
 	}
-	e.meshOutboundCh = make(chan meshOutboundPacket, 16384)
+	e.meshOutboundCh = make(chan meshOutboundPacket, 65536)
 	e.tunWG.Add(1)
 	go e.meshOutboundLoop()
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
@@ -1099,7 +1099,7 @@ func (e *Engine) StartTUN() error {
 	// Start TUN-level goroutines
 	e.tunRunning = true
 	e.tunCloseCh = make(chan struct{})
-	e.meshWriteCh = make(chan []byte, 8192)
+	e.meshWriteCh = make(chan []byte, 32768)
 	e.mu.Unlock()
 
 	e.tunWG.Add(1)
@@ -1654,17 +1654,28 @@ func (e *Engine) acceptTCP() {
 	<-e.closeCh
 }
 
-// relayWithIdleTimeout bidirectionally copies data between conn and target.
-// A watchdog goroutine monitors activity via atomic timestamps and calls Close()
-// when no data flows for idleTimeout. This avoids gVisor's SetReadDeadline lock
-// contention that previously caused CreateEndpoint timeouts.
-func relayWithIdleTimeout(conn, target net.Conn, idleTimeout time.Duration) {
+// relay bidirectionally copies data between conn and target.
+//
+// Idle timeout: 5 minutes (aggressive, like NAT/firewall tables). TCP protocol
+// has no mechanism to negotiate or communicate idle timeouts between peers, so
+// this is a unilateral decision by the proxy. Applications that need long-lived
+// connections must configure their own keepalive at the application layer:
+//   - SSH: ServerAliveInterval / ClientAliveInterval
+//   - Database: connection pool keepalive / validation queries
+//   - HTTP: Keep-Alive headers
+//
+// Design principle: the proxy is "dumb" and aggressively reclaims resources.
+// Connection lifetime management is the responsibility of the endpoints.
+func relay(conn, target net.Conn) {
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
 
 	done := make(chan struct{})
 	defer close(done)
 
+	// Watchdog: close connection if idle for 5 minutes. This reclaims resources
+	// from abandoned connections (e.g., NAT drops mapping, client crashes without
+	// sending FIN). Applications must send data within 5 minutes to keep alive.
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -1673,7 +1684,8 @@ func relayWithIdleTimeout(conn, target net.Conn, idleTimeout time.Duration) {
 			case <-done:
 				return
 			case <-ticker.C:
-				if time.Since(time.Unix(0, lastActivity.Load())) > idleTimeout {
+				if time.Since(time.Unix(0, lastActivity.Load())) > 5*time.Minute {
+					util.LogInfo("[TUN] relay idle timeout: connection idle for 5 minutes, closing")
 					conn.Close()
 					target.Close()
 					return
@@ -2102,7 +2114,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 
 	util.LogDebug("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	rec.Establish(connID, proxy, proxy.IsDirect())
-	relayWithIdleTimeout(conn, targetConn, 90*time.Second)
+	relay(conn, targetConn)
 }
 
 func proxyDesc(p *config.Proxy) string {

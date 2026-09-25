@@ -35,6 +35,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/reverse"
@@ -1088,6 +1089,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/connections", s.handleConnectionsPage)
 	mux.HandleFunc("/config", s.handleConfigPage)
+	mux.HandleFunc("/admin", s.handleAdminPage)
 	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
@@ -1097,6 +1099,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", s.apiConfig)
 	mux.HandleFunc("/api/config/raw", s.apiConfigRaw)
 	mux.HandleFunc("/api/config/reset", s.apiConfigReset)
+	mux.HandleFunc("/api/config/mesh", s.apiConfigMesh)
+	mux.HandleFunc("/api/config/admin", s.apiConfigAdmin)
 	mux.HandleFunc("/api/config/reload", s.apiReload)
 	mux.HandleFunc("/api/config/target", s.apiTarget)
 	mux.HandleFunc("/api/proxies", s.apiProxies)
@@ -1437,6 +1441,13 @@ func (s *AdminServer) handleConfigPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "config.html", data)
 }
 
+func (s *AdminServer) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title": "Admin Settings",
+	}
+	s.render(w, r, "admin.html", data)
+}
+
 // ========== API Handlers ==========
 
 func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
@@ -1624,27 +1635,52 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// Export: render the current runtime config as YAML. The database is
+		// the source of truth, so the export always reflects the live config.
 		s.mu.RLock()
-		target := s.confPath
+		conf := s.conf
+		defaultRaw := s.defaultRaw
 		s.mu.RUnlock()
-		if info, err := os.Stat(target); err == nil && info.IsDir() {
-			target = filepath.Join(target, "rule.yaml")
-		}
 
-		data, err := os.ReadFile(target)
-		if err != nil {
-			if len(s.defaultRaw) > 0 {
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.Write(s.defaultRaw)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if conf != nil {
+			data, err := config.MarshalRaw(conf)
+			if err != nil {
+				httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			httpError(w, "read config fail: "+err.Error(), http.StatusInternalServerError)
+			w.Write(data)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write(data)
+		if len(defaultRaw) > 0 {
+			w.Write(defaultRaw)
+			return
+		}
+		httpError(w, "no config available", http.StatusNotFound)
 
 	case http.MethodPut:
+		// Dangerous operation: require password confirmation via header
+		password := r.Header.Get("X-Password-Confirm")
+		if password == "" {
+			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
+			return
+		}
+		s.mu.RLock()
+		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
+		storedPassword := ""
+		if s.conf.Admin != nil {
+			storedPassword = s.conf.Admin.Password
+		}
+		s.mu.RUnlock()
+		if !authEnabled {
+			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
+			return
+		}
+		if password != storedPassword {
+			httpError(w, "incorrect password", http.StatusForbidden)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			httpError(w, "read body fail", http.StatusBadRequest)
@@ -1655,7 +1691,7 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Validate before writing.
+		// Validate before persisting.
 		newConf, err := config.LoadRawBytes(body)
 		if err != nil {
 			httpError(w, "parse config fail: "+err.Error(), http.StatusBadRequest)
@@ -1665,48 +1701,40 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "init config fail: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		_ = newConf
 
 		s.mu.Lock()
-		target := s.confPath
-		if info, err := os.Stat(target); err == nil && info.IsDir() {
-			target = filepath.Join(target, "rule.yaml")
-		}
-		if err := writeFileAtomic(target, body); err != nil {
+		// Persist to the database first (source of truth).
+		if err := db.ImportRuleConf(newConf); err != nil {
 			s.mu.Unlock()
-			httpError(w, "write config fail: "+err.Error(), http.StatusInternalServerError)
+			httpError(w, "persist config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Reload from disk into s.conf, preserving runtime health state
-		if loaded, err := config.LoadRaw(target); err == nil {
-			_ = loaded.Init()
-
-			oldHealthByGroup := make(map[string]*config.ProxyGroup)
-			if s.conf != nil {
-				for _, g := range s.conf.ProxyGroups {
-					oldHealthByGroup[g.Name] = g
-				}
-			}
-
-			s.conf = loaded
-
+		// Apply into the shared runtime object, preserving runtime health state
+		oldHealthByGroup := make(map[string]*config.ProxyGroup)
+		if s.conf != nil {
 			for _, g := range s.conf.ProxyGroups {
-				if old, ok := oldHealthByGroup[g.Name]; ok {
-					g.CopyHealthFrom(old)
-				}
+				oldHealthByGroup[g.Name] = g
+			}
+		}
+
+		s.conf = newConf
+
+		for _, g := range s.conf.ProxyGroups {
+			if old, ok := oldHealthByGroup[g.Name]; ok {
+				g.CopyHealthFrom(old)
 			}
 		}
 
 		if err := s.mergeAndInitLocked(); err != nil {
 			s.mu.Unlock()
-			util.LogWarn("[ADMIN] merge after raw config write failed: %v", err)
+			util.LogWarn("[ADMIN] merge after raw config import failed: %v", err)
 			httpError(w, "merge fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.mu.Unlock()
 
-		util.LogInfo("[ADMIN] raw config written to %s", target)
+		util.LogInfo("[ADMIN] config imported into database")
 
 		// Check if full reload was requested
 		if r.URL.Query().Get("reload") == "true" {
@@ -1725,11 +1753,36 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 // apiConfigReset restores the config to the embedded default
 // and triggers a full runtime reload.
+// Foundational settings (mesh identity, admin identity) are preserved atomically.
+// Requires password confirmation via X-Password-Confirm header (safety measure for dangerous operation).
 func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Dangerous operation: require password confirmation via header
+	password := r.Header.Get("X-Password-Confirm")
+	if password == "" {
+		httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
+	storedPassword := ""
+	if s.conf.Admin != nil {
+		storedPassword = s.conf.Admin.Password
+	}
+	s.mu.RUnlock()
+	if !authEnabled {
+		httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
+		return
+	}
+	if password != storedPassword {
+		httpError(w, "incorrect password", http.StatusForbidden)
+		return
+	}
+
 	if len(s.defaultRaw) == 0 {
 		httpError(w, "no default config available", http.StatusServiceUnavailable)
 		return
@@ -1738,19 +1791,30 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	target := s.confPath
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
-		target = filepath.Join(target, "rule.yaml")
+	// Parse default config
+	defaultConf, err := config.LoadRawBytes(s.defaultRaw)
+	if err != nil {
+		httpError(w, "parse default config fail: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	if err := writeFileAtomic(target, s.defaultRaw); err != nil {
-		httpError(w, "write default config fail: "+err.Error(), http.StatusInternalServerError)
+	if err := defaultConf.Init(); err != nil {
+		httpError(w, "init default config fail: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if loaded, err := config.LoadRaw(target); err == nil {
-		_ = loaded.Init()
-		s.conf = loaded
+	// Atomic reset: replace all config but preserve mesh/admin in single transaction
+	if err := db.ResetConfigPreserving(defaultConf); err != nil {
+		httpError(w, "reset config fail: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	// Reload from DB to get the preserved values
+	newConf, err := db.LoadRuleConf()
+	if err != nil {
+		httpError(w, "reload config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.conf = newConf
 
 	if err := s.mergeAndInitLocked(); err != nil {
 		util.LogWarn("[ADMIN] merge after reset failed: %v", err)
@@ -1762,8 +1826,146 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 		go s.OnReload()
 	}
 
-	util.LogInfo("[ADMIN] config reset to default: %s", target)
+	util.LogInfo("[ADMIN] config reset to default (foundational settings preserved atomically)")
 	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
+// apiConfigMesh handles GET/PUT for mesh foundational settings.
+// PUT triggers OnReload (mesh subsystem restart: re-announce, rebuild routing).
+func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		mesh := s.conf.Mesh
+		s.mu.RUnlock()
+		if mesh == nil {
+			jsonResponse(w, map[string]interface{}{})
+			return
+		}
+		jsonResponse(w, mesh)
+
+	case http.MethodPut:
+		// Dangerous operation: require password confirmation via header
+		password := r.Header.Get("X-Password-Confirm")
+		if password == "" {
+			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
+			return
+		}
+		s.mu.RLock()
+		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
+		storedPassword := ""
+		if s.conf.Admin != nil {
+			storedPassword = s.conf.Admin.Password
+		}
+		s.mu.RUnlock()
+		if !authEnabled {
+			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
+			return
+		}
+		if password != storedPassword {
+			httpError(w, "incorrect password", http.StatusForbidden)
+			return
+		}
+
+		var newMesh config.MeshConfig
+		if err := json.NewDecoder(r.Body).Decode(&newMesh); err != nil {
+			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if newMesh.NodeID == "" {
+			httpError(w, "node-id is required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.conf.Mesh = &newMesh
+		if err := db.PutMeshConfig(&newMesh); err != nil {
+			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		util.DefaultVersionNotifier.BumpVersion("config")
+
+		if s.OnReload != nil {
+			go s.OnReload()
+		}
+
+		util.LogInfo("[ADMIN] mesh config updated (node-id=%s, persisted to database)", newMesh.NodeID)
+		jsonResponse(w, map[string]string{"status": "ok"})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiConfigAdmin handles GET/PUT for admin foundational settings.
+// PUT triggers OnReload (admin server restart: rebind port, update auth).
+func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		admin := s.conf.Admin
+		s.mu.RUnlock()
+		if admin == nil {
+			jsonResponse(w, map[string]interface{}{})
+			return
+		}
+		jsonResponse(w, admin)
+
+	case http.MethodPut:
+		// Dangerous operation: require password confirmation via header
+		password := r.Header.Get("X-Password-Confirm")
+		if password == "" {
+			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
+			return
+		}
+		s.mu.RLock()
+		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
+		storedPassword := ""
+		if s.conf.Admin != nil {
+			storedPassword = s.conf.Admin.Password
+		}
+		s.mu.RUnlock()
+		if !authEnabled {
+			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
+			return
+		}
+		if password != storedPassword {
+			httpError(w, "incorrect password", http.StatusForbidden)
+			return
+		}
+
+		var newAdmin config.AdminConfig
+		if err := json.NewDecoder(r.Body).Decode(&newAdmin); err != nil {
+			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if newAdmin.Addr == "" {
+			httpError(w, "addr is required", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.conf.Admin = &newAdmin
+		if err := db.PutAdminConfig(&newAdmin); err != nil {
+			httpError(w, "persist admin config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		util.DefaultVersionNotifier.BumpVersion("config")
+
+		if s.OnReload != nil {
+			go s.OnReload()
+		}
+
+		util.LogInfo("[ADMIN] admin config updated (addr=%s, persisted to database)", newAdmin.Addr)
+		jsonResponse(w, map[string]string{"status": "ok"})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // apiProxyHealthCheck runs a one-off connectivity check for a top-level proxy.
@@ -1808,15 +2010,6 @@ func (s *AdminServer) apiReload(w http.ResponseWriter, r *http.Request) {
 
 	util.LogInfo("[ADMIN] reload triggered via API")
 	jsonResponse(w, map[string]string{"status": "reload triggered"})
-}
-
-// writeFileAtomic writes data to path using a temporary file and rename.
-func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 func (s *AdminServer) apiTarget(w http.ResponseWriter, r *http.Request) {
@@ -1955,6 +2148,11 @@ func (s *AdminServer) findGroupReferences(name string, c *config.RuleConfigurati
 func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 	dc := s.displayConf()
 	if r.Method == http.MethodPatch {
+		// Check if this is a P2P toggle request
+		if strings.HasSuffix(r.URL.Path, "/p2p") {
+			s.apiToggleP2P(w, r)
+			return
+		}
 		s.apiToggleProxy(w, r)
 		return
 	}
@@ -2012,10 +2210,10 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", s.confPath, p.Name, p.Type)
+			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
 			jsonResponse(w, proxySummary(&p))
 		} else {
-			util.LogInfo("[ADMIN] proxy added to %s: %s (%s)", s.confPath, p.Name, p.Type)
+			util.LogInfo("[ADMIN] proxy added to %s: %s (%s)", "database", p.Name, p.Type)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, proxySummary(&p))
 		}
@@ -2059,7 +2257,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after proxy delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] proxy deleted from %s: %s", s.confPath, name)
+				util.LogInfo("[ADMIN] proxy deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2121,6 +2319,53 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after proxy toggle failed: %v", err)
 			}
 		}
+		jsonResponse(w, proxySummary(p))
+		return
+	}
+	httpError(w, "proxy not found", http.StatusNotFound)
+}
+
+func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
+	dc := s.displayConf()
+	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
+	name = strings.TrimSuffix(name, "/p2p")
+	if name == "" {
+		httpError(w, "proxy name required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		P2P bool `json:"p2p"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, "decode fail", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range dc.Proxies {
+		if p.Name != name {
+			continue
+		}
+		p.P2P = &body.P2P
+		if err := dc.Init(); err != nil {
+			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.saveConfigLocked(); err != nil {
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.mergeAndInitLocked(); err != nil {
+			util.LogWarn("[ADMIN] merge after p2p toggle failed: %v", err)
+		}
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogWarn("[ADMIN] incremental update after p2p toggle failed: %v", err)
+			}
+		}
+		util.DefaultVersionNotifier.BumpVersion("p2p")
+		util.LogInfo("[ADMIN] P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 		jsonResponse(w, proxySummary(p))
 		return
 	}
@@ -2190,7 +2435,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rule insert failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, s.confPath, body.Rule)
+		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, "database", body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
 
 	case http.MethodPut:
@@ -2219,7 +2464,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rules update failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", s.confPath, len(rules))
+		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", "database", len(rules))
 		jsonResponse(w, map[string]interface{}{"status": "ok", "count": len(rules)})
 
 	case http.MethodDelete:
@@ -2250,7 +2495,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] merge after rule delete failed: %v", err)
 		}
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, s.confPath, deleted)
+		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, "database", deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
@@ -2367,10 +2612,10 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", s.confPath, m.Name, m.Type, m.Port)
+			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
 			jsonResponse(w, mappingSummary(&m))
 		} else {
-			util.LogInfo("[ADMIN] mapping added to %s: %s (%s:%d)", s.confPath, m.Name, m.Type, m.Port)
+			util.LogInfo("[ADMIN] mapping added to %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, mappingSummary(&m))
 		}
@@ -2408,7 +2653,7 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 						util.LogWarn("[ADMIN] mapping delete callback failed: %v", err)
 					}
 				}
-				util.LogInfo("[ADMIN] mapping deleted from %s: %s", s.confPath, name)
+				util.LogInfo("[ADMIN] mapping deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2554,10 +2799,10 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] resolver updated in %s: %s (%s:%d -> %s:%d)", s.confPath, rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogInfo("[ADMIN] resolver updated in %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			jsonResponse(w, resolverSummary(&rv))
 		} else {
-			util.LogInfo("[ADMIN] resolver added to %s: %s (%s:%d -> %s:%d)", s.confPath, rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogInfo("[ADMIN] resolver added to %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, resolverSummary(&rv))
 		}
@@ -2589,7 +2834,7 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after resolver delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] resolver deleted from %s: %s", s.confPath, name)
+				util.LogInfo("[ADMIN] resolver deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3323,9 +3568,9 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", s.confPath, g.Name, g.Type)
+			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", "database", g.Name, g.Type)
 		} else {
-			util.LogInfo("[ADMIN] group added to %s: %s (%s)", s.confPath, g.Name, g.Type)
+			util.LogInfo("[ADMIN] group added to %s: %s (%s)", "database", g.Name, g.Type)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3373,7 +3618,7 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after group delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] group deleted from %s: %s", s.confPath, name)
+				util.LogInfo("[ADMIN] group deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3468,9 +3713,9 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			interval = *sub.Interval
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] subscription updated in %s: %s", s.confPath, sub.Name)
+			util.LogInfo("[ADMIN] subscription updated in %s: %s", "database", sub.Name)
 		} else {
-			util.LogInfo("[ADMIN] subscription added to %s: %s", s.confPath, sub.Name)
+			util.LogInfo("[ADMIN] subscription added to %s: %s", "database", sub.Name)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3516,7 +3761,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 					util.LogWarn("[ADMIN] merge after subscription delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] subscription deleted from %s: %s", s.confPath, name)
+				util.LogInfo("[ADMIN] subscription deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -5033,39 +5278,31 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	}
 }
 
-// saveConfig persists the current configuration to disk.
+// saveConfig persists the current configuration to the embedded database.
 // It acquires its own read lock and is safe to call from handlers
 // that do not already hold the lock.
 func (s *AdminServer) saveConfig() error {
 	s.mu.RLock()
 	conf := s.conf
-	path := s.confPath
 	s.mu.RUnlock()
 
-	// If path is a directory, append rule.yaml
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		path = filepath.Join(path, "rule.yaml")
-	}
-
-	if err := config.SaveRaw(path, conf); err != nil {
+	if err := db.ImportRuleConf(conf); err != nil {
 		return err
 	}
-	util.LogInfo("[ADMIN] config saved to %s", path)
+	util.LogInfo("[ADMIN] config persisted to database")
+	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }
 
-// saveConfigLocked persists s.conf to disk.
+// saveConfigLocked persists s.conf to the embedded database (single source
+// of truth). The runtime config was already updated in place by the handler,
+// so the same object is written to DB under the caller's write lock.
 // Caller must hold s.mu (write lock).
 func (s *AdminServer) saveConfigLocked() error {
-	target := s.confPath
-	// If target is a directory, append rule.yaml
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
-		target = filepath.Join(target, "rule.yaml")
-	}
-	if err := config.SaveRaw(target, s.conf); err != nil {
+	if err := db.ImportRuleConf(s.conf); err != nil {
 		return err
 	}
-	util.LogInfo("[ADMIN] config saved to %s", target)
+	util.LogInfo("[ADMIN] config persisted to database")
 	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }
@@ -5079,8 +5316,8 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 			"server": p.Server,
 			"port":   p.Port,
 			"sni":    p.Sni,
-			"udp":    p.UDP,
-			"p2p":    p.P2P,
+			"udp":    p.IsUDP(),
+			"p2p":    p.IsP2P(),
 			"via":    p.ViaProxy,
 		}
 	}
@@ -5095,6 +5332,21 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 					"name": m.Name,
 					"type": m.Type,
 					"port": m.Port,
+				}
+			}
+			return result
+		}(),
+		"proxyGroups": func() []map[string]interface{} {
+			result := make([]map[string]interface{}, len(conf.ProxyGroups))
+			for i, g := range conf.ProxyGroups {
+				if g == nil {
+					continue
+				}
+				result[i] = map[string]interface{}{
+					"name":          g.Name,
+					"type":          g.Type,
+					"proxies":       g.ManualProxies,
+					"healthCheckUrl": g.HealthCheckURL,
 				}
 			}
 			return result
@@ -5126,8 +5378,8 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		"server":         p.Server,
 		"port":           p.Port,
 		"sni":            p.Sni,
-		"udp":            p.UDP,
-		"p2p":            p.P2P,
+		"udp":            p.IsUDP(),
+		"p2p":            p.IsP2P(),
 		"via":            p.ViaProxy,
 		"skipCertVerify": p.SkipCertVerify,
 	}

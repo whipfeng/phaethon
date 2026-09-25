@@ -2346,6 +2346,7 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
+	util.LogInfo("[ADMIN] apiToggleP2P called: path=%s", r.URL.Path)
 	dc := s.displayConf()
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
 	name = strings.TrimSuffix(name, "/p2p")
@@ -2360,6 +2361,7 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "decode fail", http.StatusBadRequest)
 		return
 	}
+	util.LogInfo("[ADMIN] apiToggleP2P: name=%s, p2p=%v", name, body.P2P)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

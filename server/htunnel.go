@@ -1079,14 +1079,12 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 
 // Simplified H_Tunnel mapping handler - connects to target through mesh network.
 func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
-	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d direct dial connecting", mapping.Name, connID, dstHost, dstPort)
-	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "DIRECT"})
-	// v1 capability: direct TCP forwarding for h_tunnel as via
-	targetAddr := net.JoinHostPort(dstHost, strconv.Itoa(dstPort))
-	conn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
+	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})
+	conn, err := dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name, mapping)
 	if err != nil {
 		rec.Fail(err)
-		return nil, nil, fmt.Errorf("direct dial %s: %w", targetAddr, err)
+		return nil, nil, err
 	}
 	rec.Establish(connID, nil, false)
 	return conn, rec, nil

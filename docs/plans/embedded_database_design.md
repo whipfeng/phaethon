@@ -38,93 +38,133 @@
 - SQLite：需要 CGO
 - LMDB：C 库，跨平台复杂
 
+## 架构：数据库为唯一事实源
+
+### 核心原则
+
+**数据库是唯一事实源（per-key 细粒度存储）。** 运行时 `*config.RuleConfiguration` 是从数据库派生的工作快照：启动与 OnReload 一律从 DB 装配；每次 API 授权变更在同一临界区内先改内存、再原子落库，两者永不漂移。
+
+### 数据流向
+
+```
+启动 / OnReload（读取路径，唯一装配入口）:
+  db.LoadRuleConf()
+    → 同一只读事务全量读出各 bucket → 组装 RuleConfiguration + Init() 构建索引
+    → 后处理（ReverseID、订阅缓存、健康状态、UDP 端口范围）
+    → run() 全量重建运行资源（引擎/监听器/P2P 与新 conf 共享指针）
+
+轻量变更（控制台编辑，热更新路径）:
+  API 请求 → 校验
+    → 原地修改共享 conf + mergeAndInitLocked()   # 引擎即时生效（共享指针）
+    → db.ImportRuleConf(conf)                     # 原子落库（持久化）
+    → BumpVersion("config")                       # 通知前端刷新
+```
+
+### 为什么原地修改而非"重建快照再替换"
+
+- 引擎、监听器、P2P 与 conf **共享同一指针**，原地修改 + `mergeAndInitLocked()`（迁移 SubProxies、组活跃成员等运行时状态后重新 Init）是现有热更新机制，引擎立即生效
+- 若每次改动从 DB 重建新对象再替换，引擎仍持旧指针，等于每次改动都做 OnReload 全量重建（重启监听器/引擎），代价不成比例
+- 快照的"派生"体现在装配时刻：启动/重载从 DB 读，运行时共享对象只是工作副本
+
+### 禁止事项
+
+- 禁止任何代码绕过 admin API 直接修改运行时配置
+- 禁止后台任务将运行时 conf 静默回写 DB（`ImportRuleConf` 只允许出现在 API 授权变更、mesh 自动分配 subnet 等明确持久的场景，且与内存修改同临界区）
+- YAML 仅作为导入/导出格式（`/api/config/raw` GET=导出、PUT=导入；首启迁移），不再是运行时配置来源
+
+## 根基设置（Foundational Settings）
+
+### 定义
+
+根基设置是节点身份与访问入口的核心配置，**init 交互过程中确定，reset 不覆盖，但提供单独 API 修改**：
+
+| 根基设置 | 存储位置 | 说明 |
+|---------|---------|------|
+| Mesh node-id | config bucket, key=mesh | 节点在 mesh 网络中的唯一标识，决定 VIP 与 subnet |
+| Mesh subnet | config bucket, key=mesh | 节点管理的 VIP 地址范围 |
+| Admin port | config bucket, key=admin | Admin API 监听端口 |
+| Admin auth | config bucket, key=admin | Admin API 认证配置（username/password/token） |
+
+### Reset 语义
+
+**Reset 保留根基设置**，只重置其他配置（proxies、rules、mappings、resolvers、subscriptions、reverse-configs、tun、interactive、port-range）：
+
+```
+POST /api/config/reset
+  → 加载 defaultRaw
+  → 从当前 DB 读取 mesh + admin 配置
+  → 合并到 newConf（保留根基）
+  → db.ImportRuleConf(newConf)
+  → OnReload（全量重建）
+```
+
+### 根基设置修改 API
+
+```
+PUT /api/config/mesh
+  → 更新 mesh 配置（node-id、subnet）
+  → db.ImportRuleConf(conf)
+  → OnReload（重启 mesh 子系统：重新通告、重建路由表）
+  → 警告：修改 node-id 会改变节点身份，其他节点需要重新发现
+
+PUT /api/config/admin
+  → 更新 admin 配置（port、auth）
+  → db.ImportRuleConf(conf)
+  → OnReload（重启 admin 服务器：重新绑定端口、更新认证中间件）
+  → 警告：修改 port 会改变访问地址
+```
+
+**热生效机制**：根基设置修改触发 OnReload（全量重建），因为：
+- Mesh 身份变化需要重启 P2P、重建路由表、重新通告
+- Admin 端口变化需要重新绑定监听器
+
+OnReload 是现有机制（config reset、YAML 导入都走此路径），代价可接受（根基设置修改频率极低）。
+
+### 禁止事项（补充）
+
+- 禁止 reset 覆盖根基设置（mesh node-id/subnet、admin port/auth）
+- 禁止绕过 API 直接修改根基设置（必须通过 PUT /api/config/mesh 或 PUT /api/config/admin）
+
 ## 数据模型
 
-### 1. 配置数据（Configuration）
+**存储编码**：统一 JSON（config 包结构体自带 json tag）。**config 包是唯一类型来源**，db 包不定义重复类型。
 
-#### 1.1 代理配置（Proxies）
-```
-Key: proxy:{name}
-Value: {
-  "name": "GG_PROXY",
-  "type": "trojan",
-  "server": "106.13.183.103",
-  "port": 39999,
-  "password": "xxx",
-  "sni": "www.example.com",
-  ...
-}
-```
+### Bucket 一览
 
-#### 1.2 规则配置（Rules）
-```
-Key: rule:{index}
-Value: {
-  "type": "DOMAIN-SUFFIX",
-  "value": "google.com",
-  "proxy": "GG_PROXY",
-  "index": 0
-}
-```
+| Bucket | Key | Value 类型 | 说明 |
+|--------|-----|-----------|------|
+| `config` | `admin` | config.AdminConfig | Admin 面板（addr 格式 `0.0.0.0:39999`） |
+| `config` | `tun` | config.TUNConfig | TUN 设置 |
+| `config` | `mesh` | config.MeshConfig | Mesh 设置（强制启用，node-id 必填） |
+| `config` | `interactive` | bool | 交互式引导开关 |
+| `config` | `udp-port-range` | string | `"min-max"` |
+| `config` | `tcp-port-range` | string | `"min-max"` |
+| `proxies` | `{name}` | config.Proxy | 手动代理 |
+| `proxy-groups` | `{name}` | config.ProxyGroup | 手工成员以 ManualProxies 为准 |
+| `subscriptions` | `{name}` | config.Subscription | URL + interval |
+| `rules` | `%06d` 索引 | string | 原始规则串，如 `"DOMAIN-SUFFIX,google.com,GG_PROXY"` |
+| `mappings` | `{name}` | config.Mapping | 入站映射 |
+| `resolvers` | `{name}` | config.Resolver | DNS 解析规则 |
+| `reverse-configs` | `{name}` | config.ReverseConfig | 反向客户端配置（Name 唯一，由 uniqueReverseName 保证） |
+| `fakeip` | `domain:{domain}` / `ip:{ip}` | FakeIPEntry / `{domain}` | 双向索引 |
+| `packages` | `{platform}:{arch}:{version}` | PackageMeta | 包元数据 |
 
-#### 1.3 Mesh 配置
-```
-Key: config:mesh
-Value: {
-  "node_id": "auto-generated-xxxxx",
-  "subnet": "100.179.0.0/16",
-  "vip": "100.179.0.1",
-  "enabled": true
-}
-```
+### 运行时字段不入库（持久化前清零）
 
-#### 1.4 Admin 配置
-```
-Key: config:admin
-Value: {
-  "listen": ":39999",
-  "auth": {
-    "username": "admin",
-    "password": "xxx"
-  }
-}
-```
+| 类型 | 清零字段 | 原因 |
+|------|----------|------|
+| config.ProxyGroup | `Proxies`、`Members`、`ManualMembers`、`SubMembers`、`SubCandidateCount`、`SubscriptionSelected`、`SubscriptionMode` | 运行时派生 / 已废弃（Init 会从 `proxies` 键迁移到 ManualProxies） |
+| config.ReverseConfig | `LastError`、`AssignedPort` | 运行时信息 |
+| config.Proxy | 无需处理 | `Next`/RateLimiter/`SourceGroup` 本身就是 `json:"-"` |
+| config.Subscription | 无需处理 | `SubProxies`/`SubMu` 是 `json:"-"` |
 
-### 2. 状态数据（State）
+代理组的手工成员以 `ManualProxies` 为准：YAML 旧格式（`proxies:` 键）在 `config.ProxyGroup.Init()` 中已迁移，DB 加载路径 ManualProxies 直接可用，无需二次迁移。
 
-#### 2.1 Fake-IP 映射
-```
-Key: fakeip:domain:{domain}
-Value: {
-  "ip": "100.179.0.10",
-  "domain": "google.com",
-  "created_at": "2026-09-24T10:00:00Z",
-  "last_used": "2026-09-24T10:05:00Z"
-}
+### 变更事件语义
 
-Key: fakeip:ip:{ip}
-Value: {
-  "domain": "google.com",
-  "ip": "100.179.0.10"
-}
-```
-
-### 3. 历史数据（History）
-
-#### 3.1 包元数据
-```
-Key: pkg:{platform}:{arch}:{version}
-Value: {
-  "platform": "linux",
-  "arch": "amd64",
-  "version": "v1.2.3",
-  "path": "/path/to/package.pkg",
-  "size": 12345678,
-  "hash": "sha256:xxxxx",
-  "created_at": "2026-09-24T10:00:00Z",
-  "published": true
-}
-```
+- **per-key 写入/删除**：`Put`/`Delete` 触发对应 bucket 的 ChangeEvent（细粒度）
+- **批量落库**（`ImportRuleConf`，配置持久化/YAML 导入/配置重置都走此入口）：单个写事务原子替换所有配置 bucket（先清空再写入，**不触碰** fakeip/packages），提交后触发一次合成事件 `{bucket: "config", key: "__rebuilt__", op: "put"}`
+- 配置热更新**不依赖** watcher（原地修改共享 conf 即时生效）；变更事件面向后续阶段的订阅者（如 Fake-IP 持久化、审计）与未来的外部集成。合成事件避免批量落库触发 N 次回调
 
 **不持久化的数据：**
 - ✗ Peer 历史：内存维护当前连接的 peer，通过 mesh gossip 重新发现

@@ -17,6 +17,7 @@
             'nav.rules': '📜 规则',
             'nav.mappings': '🗺️ 映射',
             'nav.resolvers': '↗️ 重定向',
+            'nav.admin': '⚙️ 管理设置',
             'nav.tools': '工具',
             'nav.reverse': '🧙 反向连接向导',
             'nav.package': '📦 发布包',
@@ -210,7 +211,20 @@
             'mesh.domainRoutes': '域名路由',
             'mesh.routeCount': '路由数',
             'mesh.nodeId': '节点 ID',
+            'mesh.nodeIdentity': '节点身份',
+            'mesh.nodeIdentityHelp': '修改节点 ID 会改变此节点在 mesh 网络中的身份，其他节点需要重新发现此节点。',
+            'mesh.nodeIdRequired': '节点 ID 不能为空',
             'mesh.peers': '对等节点',
+
+            // ===== Admin Settings =====
+            'admin.title': '管理设置',
+            'admin.help': '配置管理面板访问方式。修改需要密码确认并触发重载。',
+            'admin.addr': '监听地址',
+            'admin.addrHelp': '格式：host:port。使用 0.0.0.0 监听所有接口。',
+            'admin.addrRequired': '监听地址不能为空',
+            'admin.authEnabled': '启用认证',
+            'admin.username': '用户名',
+            'admin.password': '密码',
 
             // ===== Proxies =====
             'proxy.title': '代理',
@@ -222,6 +236,7 @@
             'proxy.port': '端口',
             'proxy.sni': 'SNI',
             'proxy.udp': 'UDP',
+            'proxy.p2p': 'P2P',
             'proxy.via': '通过代理',
             'proxy.actions': '操作',
             'proxy.enabled': '启用',
@@ -322,6 +337,8 @@
             'proxy.disableBlocked': '该代理仍被以下配置引用，无法禁用：',
             'proxy.confirmDisableGroup': '禁用代理组',
             'proxy.disableBlockedGroup': '该代理组仍被以下配置引用，无法禁用：',
+            'proxy.confirmDisableP2P': '禁用 P2P',
+            'proxy.disableP2PMessage': '禁用 P2P 将停止此代理的点对点连接。确定要继续吗？',
             'proxy.referenceRule': '规则',
             'proxy.referenceGroup': '代理组',
             'proxy.referenceProxy': '代理',
@@ -655,6 +672,7 @@
             'raw.resetting': '正在恢复默认…',
             'raw.resetDone': '已恢复为默认配置',
             'raw.resetFailed': '恢复默认失败',
+            'raw.passwordConfirm': '请输入密码确认操作：',
 
             // ===== App.js / Common =====
             'toast.reloading': '正在重载配置...',
@@ -807,6 +825,7 @@
             'nav.rules': '📜 Rules',
             'nav.mappings': '🗺️ Mappings',
             'nav.resolvers': '↗️ Resolvers',
+            'nav.admin': '⚙️ Admin',
             'nav.tools': 'Tools',
             'nav.reverse': '🧙 Reverse Wizard',
             'nav.package': '📦 Packages',
@@ -1000,7 +1019,20 @@
             'mesh.domainRoutes': 'Domain Suffix Routes',
             'mesh.routeCount': 'Route Count',
             'mesh.nodeId': 'Node ID',
+            'mesh.nodeIdentity': 'Node Identity',
+            'mesh.nodeIdentityHelp': 'Changing node-id will change this node\'s identity in the mesh network. Other nodes will need to rediscover this node.',
+            'mesh.nodeIdRequired': 'Node ID is required',
             'mesh.peers': 'Peers',
+
+            // ===== Admin Settings =====
+            'admin.title': 'Admin Settings',
+            'admin.help': 'Configure admin panel access. Changes require password confirmation and will trigger a reload.',
+            'admin.addr': 'Listen Address',
+            'admin.addrHelp': 'Format: host:port. Use 0.0.0.0 to listen on all interfaces.',
+            'admin.addrRequired': 'Listen address is required',
+            'admin.authEnabled': 'Enable Authentication',
+            'admin.username': 'Username',
+            'admin.password': 'Password',
 
             // ===== Proxies =====
             'proxy.title': 'Proxies',
@@ -1012,6 +1044,7 @@
             'proxy.port': 'Port',
             'proxy.sni': 'SNI',
             'proxy.udp': 'UDP',
+            'proxy.p2p': 'P2P',
             'proxy.via': 'Via',
             'proxy.actions': 'Actions',
             'proxy.enabled': 'Enabled',
@@ -1112,6 +1145,8 @@
             'proxy.disableBlocked': 'This proxy is still referenced and cannot be disabled:',
             'proxy.confirmDisableGroup': 'Disable Proxy Group',
             'proxy.disableBlockedGroup': 'This proxy group is still referenced and cannot be disabled:',
+            'proxy.confirmDisableP2P': 'Disable P2P',
+            'proxy.disableP2PMessage': 'Disabling P2P will stop the peer-to-peer connection for this proxy. Are you sure?',
             'proxy.referenceRule': 'Rule',
             'proxy.referenceGroup': 'Group',
             'proxy.referenceProxy': 'Proxy',
@@ -1445,6 +1480,7 @@
             'raw.resetting': 'Resetting...',
             'raw.resetDone': 'Configuration reset to defaults',
             'raw.resetFailed': 'Reset failed',
+            'raw.passwordConfirm': 'Enter password to confirm:',
 
             // ===== App.js / Common =====
             'toast.reloading': 'Reloading configuration...',

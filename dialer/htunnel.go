@@ -238,6 +238,7 @@ func (d *HTunnelDialer) DialControl() (net.Conn, error) {
 // direct mesh channel: one HEAD (X-C: MESH), frames in POST/GET bodies —
 // no BIND stream, no target dial, no splice.
 func (d *HTunnelDialer) DialP2P() (frame.FrameTransport, error) {
+	util.LogInfo("[HTUNNEL-DIRECT] [%s] DialP2P called, calling dialP2PDirect", d.Proxy.Name)
 	return d.dialP2PDirect()
 }
 

@@ -296,9 +296,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 					migrated = true
 				}
 				if migrated {
-					// Save updated config
-					if err := config.SaveRaw(configPath, ruleConf); err != nil {
-						util.Logger.Printf("WARNING: save config after mesh migration fail: %v", err)
+					// Persist updated config to the database
+					if err := db.ImportRuleConf(ruleConf); err != nil {
+						util.Logger.Printf("WARNING: persist config after mesh migration fail: %v", err)
 					}
 					// Remove old mesh-state.json
 					stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
@@ -327,9 +327,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
 			util.Logger.Printf("Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
-			// Save updated config with auto-allocated subnet
-			if err := config.SaveRaw(configPath, ruleConf); err != nil {
-				util.Logger.Printf("WARNING: save config after subnet allocation fail: %v", err)
+			// Persist updated config with auto-allocated subnet
+			if err := db.ImportRuleConf(ruleConf); err != nil {
+				util.Logger.Printf("WARNING: persist config after subnet allocation fail: %v", err)
 			}
 		}
 
@@ -375,8 +375,10 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	}
 
 	// Start P2P peers:
-	// Mesh is always enabled, so ALL compatible proxies (SOCKS5/Trojan/HTunnel) get P2P automatically
+	// Mesh is always enabled, so ALL compatible proxies (SOCKS5/Trojan/HTunnel) with P2P enabled get P2P automatically
+	util.LogInfo("[MAIN] Starting P2P peers, total proxies: %d", len(ruleConf.Proxies))
 	for _, proxy := range ruleConf.Proxies {
+		util.LogInfo("[MAIN] Checking proxy %s (type=%s, enabled=%v, p2p=%v)", proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P())
 		if !proxy.IsEnabled() {
 			continue
 		}
@@ -384,6 +386,11 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if !isCompatible {
 			continue
 		}
+		if !proxy.IsP2P() {
+			util.LogInfo("[MAIN] Skipping P2P for proxy %s (p2p disabled)", proxy.Name)
+			continue
+		}
+		util.LogInfo("[MAIN] Starting P2P peer for proxy %s (type=%s)", proxy.Name, proxy.Type)
 		go p2p.GlobalP2PManager.StartPeer(proxy)
 	}
 
@@ -542,52 +549,45 @@ func getRuleConf() *config.RuleConfiguration {
 		util.Logger.Printf("ERROR: load .env fail: %v", err)
 	}
 
-	// 2. Load config.yaml from working directory.
+	// 2. Load configuration from the embedded database (single source of
+	//    truth). On a fresh database, import the legacy config.yaml — or
+	//    generate the embedded default — so existing deployments migrate
+	//    transparently.
 	configPath = filepath.Join(workDir, "config.yaml")
-	var ruleConf *config.RuleConfiguration
-	if _, err := os.Stat(configPath); err == nil {
-		util.Logger.Printf("configPath=%s", configPath)
-		conf, err := config.LoadRaw(configPath)
-		if err != nil {
-			util.Logger.Printf("ERROR: load config fail: %v", err)
-		} else {
-			ruleConf = conf
-		}
-	} else if os.IsNotExist(err) {
-		// Write the embedded default config to disk on first run, substituting
-		// a generated admin token so users have a working config immediately.
-		util.Logger.Printf("no config.yaml found, generating initial config at %s", configPath)
-		if genErr := writeDefaultConfig(configPath); genErr != nil {
-			util.Logger.Printf("ERROR: generate initial config fail: %v", genErr)
-		} else {
-			conf, loadErr := config.LoadRaw(configPath)
-			if loadErr != nil {
-				util.Logger.Printf("ERROR: load generated config fail: %v", loadErr)
+	empty, err := db.IsEmptyConfig()
+	if err != nil {
+		util.Logger.Printf("ERROR: inspect db config fail: %v", err)
+	}
+	if empty {
+		imported := false
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			util.Logger.Printf("database empty, importing existing config from %s", configPath)
+			if importErr := db.ImportYAML(configPath); importErr != nil {
+				util.Logger.Printf("ERROR: import config into db fail: %v", importErr)
 			} else {
-				ruleConf = conf
+				imported = true
+			}
+		}
+		if !imported && len(defaultConfig) > 0 {
+			util.Logger.Printf("generating default config as fallback")
+			if genErr := writeDefaultConfig(configPath); genErr != nil {
+				util.Logger.Printf("ERROR: generate initial config fail: %v", genErr)
+			} else if importErr := db.ImportYAML(configPath); importErr != nil {
+				util.Logger.Printf("ERROR: import default config into db fail: %v", importErr)
 			}
 		}
 	}
 
-	// 3. Fall back to embedded default config.
-	if ruleConf == nil && len(defaultConfig) > 0 {
-		util.Logger.Printf("no config.yaml found, using built-in default config")
-		conf, err := config.LoadRawBytes(defaultConfig)
-		if err != nil {
-			util.Logger.Printf("ERROR: load default config fail: %v", err)
-		} else {
-			ruleConf = conf
-		}
+	var ruleConf *config.RuleConfiguration
+	conf, err := db.LoadRuleConf()
+	if err != nil {
+		util.Logger.Printf("ERROR: load config from db fail: %v", err)
+	} else {
+		ruleConf = conf
 	}
 
 	if ruleConf == nil {
 		util.Logger.Printf("No valid configuration found!")
-		return nil
-	}
-
-	// Pre-init so that Match() works for subscription routing
-	if err := ruleConf.Init(); err != nil {
-		util.Logger.Printf("ERROR: pre-init config fail: %v", err)
 		return nil
 	}
 
@@ -769,12 +769,19 @@ func main() {
 	defer db.Close()
 	
 	if isFirstRun {
-		// First run: interactive initialization
-		util.Logger.Printf("首次启动，进入初始化模式")
-		if err := db.InteractiveInit(); err != nil {
-			util.Logger.Printf("ERROR: 交互式初始化失败: %v", err)
-			fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
-			os.Exit(1)
+		// Interactive initialization is only for truly fresh deployments.
+		// An existing config.yaml means an upgrade from the YAML era: skip
+		// the prompts so getRuleConf() imports it transparently.
+		legacyConfig := filepath.Join(workDir, "config.yaml")
+		if _, err := os.Stat(legacyConfig); err == nil {
+			util.Logger.Printf("首次启动（数据库不存在），检测到 config.yaml，将自动导入并跳过交互初始化")
+		} else {
+			util.Logger.Printf("首次启动，进入初始化模式")
+			if err := db.InteractiveInit(); err != nil {
+				util.Logger.Printf("ERROR: 交互式初始化失败: %v", err)
+				fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	} else {
 		util.Logger.Printf("数据库已加载: %s", dbPath)
@@ -782,6 +789,15 @@ func main() {
 
 	// Load config first
 	ruleConf := getRuleConf()
+
+	// Migrate proxy groups: update ManualProxies from config.yaml Proxies field
+	if ruleConf != nil {
+		if err := db.MigrateProxyGroups(ruleConf); err != nil {
+			util.Logger.Printf("WARNING: 迁移代理组失败: %v", err)
+		} else {
+			util.Logger.Printf("代理组迁移完成")
+		}
+	}
 
 	// Setup rotating log file (10MB max)
 	logPath := filepath.Join(dataDir, "logs", "phaethon.log")

@@ -18,6 +18,7 @@
                         <th data-i18n="proxy.port">Port</th>
                         <th data-i18n="proxy.sni">SNI</th>
                         <th data-i18n="proxy.udp">UDP</th>
+                        <th data-i18n="proxy.p2p">P2P</th>
                         <th data-i18n="proxy.via">Via</th>
                         <th data-i18n="common.enabled">Enabled</th>
                         <th data-i18n="proxy.actions">Actions</th>
@@ -31,7 +32,10 @@
                         <td data-label="Server">{{.Server}}</td>
                         <td data-label="Port">{{.Port}}</td>
                         <td data-label="SNI">{{.Sni}}</td>
-                        <td data-label="UDP">{{if .UDP}}✅{{else}}❌{{end}}</td>
+                        <td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('{{.Name}}', {{.IsUDP}})">{{if .IsUDP}}✅{{else}}❌{{end}}</td>
+                        <td data-label="P2P" style="cursor:pointer;" onclick="toggleP2P('{{.Name}}', {{.IsP2P}})" id="p2p-status-{{.Name}}">
+                            {{if .IsP2P}}<span class="p2p-status connecting" title="Connecting...">🔄</span>{{else}}❌{{end}}
+                        </td>
                         <td data-label="Via">{{.ViaProxy}}</td>
                         <td data-label="Enabled">
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
@@ -622,6 +626,12 @@ function showAddProxy() {
     document.getElementById('proxy-form').reset();
     populateNextProxySelect('');
     validateProxyName();
+    toggleFields();
+    // Set P2P checkbox to checked by default for compatible types
+    const typeSelect = document.getElementById('f-type');
+    if (typeSelect.value && ['SOCKS5','TROJAN','H_TUNNEL'].includes(typeSelect.value.toUpperCase())) {
+        document.getElementById('f-p2p').checked = true;
+    }
     document.getElementById('proxy-modal').classList.remove('hidden');
 }
 
@@ -1024,6 +1034,75 @@ async function toggleProxy(name, enabled) {
         if (row) row.classList.toggle('row-disabled', !enabled);
     } catch (err) {
         if (checkbox) checkbox.checked = !enabled;
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function toggleP2P(name, currentValue) {
+    const newValue = !currentValue;
+    const row = document.querySelector(`#proxy-table tr[data-name="${CSS.escape(name)}"]`);
+    const p2pCell = row ? row.querySelector('td[data-label="P2P"]') : null;
+    
+    // If disabling, show confirmation dialog
+    if (!newValue) {
+        const confirmMsg = typeof i18n !== 'undefined' ? i18n.t('proxy.disableP2PMessage') : 'Disabling P2P will stop the peer-to-peer connection for this proxy. Are you sure?';
+        showConfirm(confirmMsg, async () => {
+            await doToggleP2P(name, newValue, p2pCell);
+        });
+        return;
+    }
+    
+    await doToggleP2P(name, newValue, p2pCell);
+}
+
+async function doToggleP2P(name, enabled, cell) {
+    try {
+        const res = await fetch(`./api/proxies/${encodeURIComponent(name)}/p2p`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({p2p: enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        // Update the cell display - show connecting state when enabling
+        if (cell) {
+            if (enabled) {
+                cell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+            } else {
+                cell.textContent = '❌';
+            }
+        }
+        showToast(`P2P ${enabled ? 'enabled' : 'disabled'} for ${name}`, enabled ? 'success' : 'warning');
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function toggleUDP(name, currentValue) {
+    const newValue = !currentValue;
+    const row = document.querySelector(`#proxy-table tr[data-name="${CSS.escape(name)}"]`);
+    const udpCell = row ? row.querySelector('td[data-label="UDP"]') : null;
+    
+    try {
+        // Update proxy with new UDP value
+        const proxy = proxies.find(p => p.name === name);
+        if (!proxy) return;
+        
+        const payload = {...proxy, udp: newValue};
+        const res = await fetch(`./api/proxies`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        
+        // Update the cell display
+        if (udpCell) {
+            udpCell.textContent = newValue ? '✅' : '❌';
+        }
+        // Update local data
+        proxy.udp = newValue;
+        showToast(`UDP ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
+    } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
 }
@@ -1606,7 +1685,13 @@ function toggleFields() {
     setVisible('row-ssh-key', needSSHKey);
 
     setVisible('col-udp', needUdp);
-    setVisible('col-p2p', ['SOCKS5','TROJAN','H_TUNNEL'].includes(t));
+    const showP2P = ['SOCKS5','TROJAN','H_TUNNEL'].includes(t);
+    setVisible('col-p2p', showP2P);
+    // For new proxies of compatible types, default P2P to checked
+    const editName = document.getElementById('edit-name').value;
+    if (!editName && showP2P) {
+        document.getElementById('f-p2p').checked = true;
+    }
     setVisible('col-skip', needSkip);
 }
 
@@ -1645,5 +1730,78 @@ function escapeHtml(s) {
     if (!s) return '';
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+// ===== P2P Status SSE Subscription =====
+(function() {
+    let lastP2PVersion = 0;
+    
+    function updateP2PStatus(peers) {
+        // Build a map of proxy name -> peer status
+        const peerMap = {};
+        if (peers && Array.isArray(peers)) {
+            for (const peer of peers) {
+                if (peer.name) {
+                    peerMap[peer.name] = peer.status || 'unknown';
+                }
+            }
+        }
+        
+        // Update each P2P cell in the table
+        document.querySelectorAll('#proxy-table tr[data-name]').forEach(row => {
+            const proxyName = row.getAttribute('data-name');
+            const p2pCell = row.querySelector('td[data-label="P2P"]');
+            if (!p2pCell) return;
+            
+            const status = peerMap[proxyName];
+            const proxy = proxies.find(p => p.name === proxyName);
+            const p2pEnabled = proxy && proxy.p2p;
+            
+            if (!p2pEnabled) {
+                // P2P disabled - plain X like UDP
+                p2pCell.textContent = '❌';
+            } else if (!status) {
+                // P2P enabled but no peer yet - show connecting
+                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+            } else if (status === 'upToDate' || status === 'helloed') {
+                // Connected
+                p2pCell.textContent = '✅';
+            } else {
+                // connecting or failed - show spinning
+                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+            }
+        });
+    }
+    
+    async function fetchP2PStatus() {
+        try {
+            const res = await fetch('./api/p2p');
+            if (!res.ok) return;
+            const data = await res.json();
+            updateP2PStatus(data.peers || []);
+        } catch (err) {
+            console.warn('Failed to fetch P2P status:', err);
+        }
+    }
+    
+    // Subscribe to SSE for version changes
+    if (typeof EventSource !== 'undefined') {
+        const sse = new EventSource('./api/events');
+        sse.addEventListener('heartbeat', (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                if (data.p2p && data.p2p > lastP2PVersion) {
+                    lastP2PVersion = data.p2p;
+                    fetchP2PStatus();
+                }
+            } catch {}
+        });
+        sse.onerror = () => {
+            // SSE will auto-reconnect
+        };
+    }
+    
+    // Initial fetch on page load
+    fetchP2PStatus();
+})();
 </script>
 {{end}}

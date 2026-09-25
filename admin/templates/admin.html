@@ -1,0 +1,118 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h3 data-i18n="admin.title">Admin Settings</h3>
+            <button onclick="saveAdminSettings()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+        </div>
+        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.help">Configure admin panel access. Changes require password confirmation and will trigger a reload.</p>
+
+        <div class="form-group">
+            <label data-i18n="admin.addr">Listen Address</label>
+            <input type="text" id="admin-addr" class="form-control" placeholder="e.g., 0.0.0.0:39999">
+            <small class="text-muted" data-i18n="admin.addrHelp">Format: host:port. Use 0.0.0.0 to listen on all interfaces.</small>
+        </div>
+
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="admin-auth-enabled">
+                <span data-i18n="admin.authEnabled">Enable Authentication</span>
+            </label>
+        </div>
+
+        <div id="admin-auth-fields">
+            <div class="form-group">
+                <label data-i18n="admin.username">Username</label>
+                <input type="text" id="admin-username" class="form-control" placeholder="admin">
+            </div>
+            <div class="form-group">
+                <label data-i18n="admin.password">Password</label>
+                <input type="password" id="admin-password" class="form-control" placeholder="Leave empty to keep current">
+            </div>
+        </div>
+
+        <div id="admin-status" class="text-muted"></div>
+    </div>
+</div>
+
+<script>
+(function() {
+    async function loadAdminSettings() {
+        try {
+            const res = await fetch('./api/config/admin');
+            if (!res.ok) return;
+            const admin = await res.json();
+            document.getElementById('admin-addr').value = admin.Addr || '';
+            document.getElementById('admin-auth-enabled').checked = admin.AuthEnabled || false;
+            document.getElementById('admin-username').value = admin.Username || '';
+            updateAuthFieldsVisibility();
+        } catch (err) {
+            console.error('Failed to load admin settings:', err);
+        }
+    }
+
+    function updateAuthFieldsVisibility() {
+        const enabled = document.getElementById('admin-auth-enabled').checked;
+        document.getElementById('admin-auth-fields').style.display = enabled ? 'block' : 'none';
+    }
+
+    document.getElementById('admin-auth-enabled').addEventListener('change', updateAuthFieldsVisibility);
+
+    window.saveAdminSettings = async function() {
+        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+        if (!password) return;
+
+        const addr = document.getElementById('admin-addr').value.trim();
+        const authEnabled = document.getElementById('admin-auth-enabled').checked;
+        const username = document.getElementById('admin-username').value.trim();
+        const newPassword = document.getElementById('admin-password').value;
+        const statusEl = document.getElementById('admin-status');
+
+        if (!addr) {
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+
+        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+        statusEl.style.color = 'var(--text-muted)';
+
+        const body = {
+            Addr: addr,
+            AuthEnabled: authEnabled,
+            Username: username
+        };
+        if (newPassword) {
+            body.Password = newPassword;
+        }
+
+        try {
+            const res = await fetch('./api/config/admin', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Password-Confirm': password
+                },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || 'Save failed');
+            }
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+            statusEl.style.color = 'var(--success)';
+            document.getElementById('admin-password').value = '';
+            setTimeout(() => {
+                statusEl.textContent = '';
+            }, 2000);
+        } catch (err) {
+            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+            statusEl.style.color = 'var(--danger)';
+        }
+    };
+
+    loadAdminSettings();
+})();
+</script>
+{{end}}

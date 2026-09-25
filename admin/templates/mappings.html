@@ -15,6 +15,7 @@
                         <th data-i18n="map.name">Name</th>
                         <th data-i18n="map.type">Type</th>
                         <th data-i18n="map.port">Port</th>
+                        <th data-i18n="proxy.password">Password</th>
                         <th data-i18n="proxy.sni">SNI</th>
                         <th data-i18n="map.reverseAddr">Reverse Addr</th>
                         <th data-i18n="map.dstHost">Dst Host</th>
@@ -29,6 +30,19 @@
                         <td data-label="Name"><strong>{{.Name}}</strong></td>
                         <td data-label="Type"><code class="type-badge type-{{.Type | lower}}">{{.Type}}</code></td>
                         <td data-label="Port"><code>:{{.Port}}</code></td>
+                        <td data-label="Password">
+                            {{if .Password}}
+                            <span class="password-container" data-mapping="{{.Name}}">
+                                <span class="password-text" id="map-pwd-{{.Name}}">••••••••</span>
+                                <span class="password-actual" id="map-pwd-actual-{{.Name}}" style="display:none;">{{.Password}}</span>
+                                <button onclick="toggleMappingPassword('{{.Name}}')" class="btn-icon" title="Show/Hide">
+                                    <span class="eye-icon" id="map-eye-{{.Name}}">👁️</span>
+                                </button>
+                            </span>
+                            {{else}}
+                            <span class="text-muted">-</span>
+                            {{end}}
+                        </td>
                         <td data-label="SNI">{{.Sni}}</td>
                         <td data-label="Reverse Address">{{if .ReverseAddress}}<span class="badge badge-info">{{.ReverseAddress}}{{else}}—{{end}}</span></td>
                         <td data-label="Dst Host">{{if .DstHost}}{{.DstHost}}:{{.DstPort}}{{else}}—{{end}}</td>
@@ -164,7 +178,12 @@
                         <div class="form-row" id="m-auth-row">
                             <div class="form-group">
                                 <label data-i18n="map.password">Password (optional)</label>
-                                <input type="password" id="m-password" placeholder="(advanced, optional)">
+                                <div class="input-with-toggle">
+                                    <input type="password" id="m-password" placeholder="(advanced, optional)">
+                                    <button type="button" class="toggle-visibility-btn" onclick="toggleFieldVisibility('m-password', this)" title="Show/Hide">
+                                        <span class="eye-icon">👁</span>
+                                    </button>
+                                </div>
                             </div>
                             <div class="form-group">
                                 <label data-i18n="map.username">Username</label>
@@ -195,6 +214,33 @@
 </div>
 <script>
 var mappings = {{json .Mappings}};
+
+function toggleFieldVisibility(fieldId, btn) {
+    const input = document.getElementById(fieldId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.classList.add('active');
+    } else {
+        input.type = 'password';
+        btn.classList.remove('active');
+    }
+}
+
+function toggleMappingPassword(mappingName) {
+    const pwdText = document.getElementById('map-pwd-' + mappingName);
+    const pwdActual = document.getElementById('map-pwd-actual-' + mappingName);
+    const eyeIcon = document.getElementById('map-eye-' + mappingName);
+
+    if (pwdActual.style.display === 'none') {
+        pwdActual.style.display = 'inline';
+        pwdText.style.display = 'none';
+        eyeIcon.textContent = '🙈';
+    } else {
+        pwdActual.style.display = 'none';
+        pwdText.style.display = 'inline';
+        eyeIcon.textContent = '👁️';
+    }
+}
 
 function copyMapping(name) {
     const m = mappings.find(x => x.name === name);

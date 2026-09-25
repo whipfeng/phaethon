@@ -1160,9 +1160,18 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// Counts from the config being edited
 	dc := s.displayConf()
 
+	// Get version from GetCurrentVersion if available, otherwise fallback to env
+	version := ""
+	if s.GetCurrentVersion != nil {
+		version = s.GetCurrentVersion()
+	}
+	if version == "" {
+		version = os.Getenv("PHAETHON_VERSION")
+	}
+
 	data := map[string]interface{}{
 		"Title":             "Dashboard",
-		"Version":           os.Getenv("PHAETHON_VERSION"),
+		"Version":           version,
 		"Stats":             s.stats.GetSnapshot(),
 		"UptimeSeconds":     int64(time.Since(s.stats.StartTime()).Seconds()),
 		"ProxyCount":        len(dc.Proxies),
@@ -5379,16 +5388,17 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{
-		"name":           p.Name,
-		"enabled":        p.IsEnabled(),
-		"type":           p.Type,
-		"server":         p.Server,
-		"port":           p.Port,
-		"sni":            p.Sni,
-		"udp":            p.IsUDP(),
-		"p2p":            p.IsP2P(),
-		"via":            p.ViaProxy,
-		"skipCertVerify": p.SkipCertVerify,
+		"name":              p.Name,
+		"enabled":           p.IsEnabled(),
+		"type":              p.Type,
+		"server":            p.Server,
+		"port":              p.Port,
+		"sni":               p.Sni,
+		"udp":               p.IsUDP(),
+		"p2p":               p.IsP2P(),
+		"via":               p.ViaProxy,
+		"skip-cert-verify":  p.SkipCertVerify,
+		"password":          p.Password,
 	}
 }
 
@@ -5406,6 +5416,7 @@ func mappingSummary(m *config.Mapping) map[string]interface{} {
 		"dstHost":        m.DstHost,
 		"dstPort":        m.DstPort,
 		"sni":            m.Sni,
+		"password":       m.Password,
 	}
 }
 

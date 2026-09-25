@@ -1604,6 +1604,23 @@ func (e *Engine) acceptTCP() {
 		util.LogDebug("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
 		r.Complete(false)
 
+		// Set aggressive TCP keepalive on gVisor endpoint to detect dead clients faster
+		// Idle: 30s (no data sent for 30s, start probing)
+		// Interval: 10s (send probe every 10s)
+		// Count: 3 (give up after 3 failed probes)
+		idle := tcpip.KeepaliveIdleOption(30 * time.Second)
+		if err := ep.SetSockOpt(&idle); err != nil {
+			util.LogDebug("[TCP-DEBUG] failed to set keepalive idle: %v", err)
+		}
+		interval := tcpip.KeepaliveIntervalOption(10 * time.Second)
+		if err := ep.SetSockOpt(&interval); err != nil {
+			util.LogDebug("[TCP-DEBUG] failed to set keepalive interval: %v", err)
+		}
+		count := tcpip.SockOptInt(3)
+		if err := ep.SetSockOptInt(tcpip.KeepaliveCountOption, int(count)); err != nil {
+			util.LogDebug("[TCP-DEBUG] failed to set keepalive count: %v", err)
+		}
+
 		conn := gonet.NewTCPConn(&wq, ep)
 		dstIP := net.IP(id.LocalAddress.AsSlice())
 		dstAddr := dstIP.String()

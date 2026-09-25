@@ -1920,7 +1920,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		// object as resources.ruleConf. All servers see changes immediately.
 		activeRuleConf.Store(resources.ruleConf)
 
-		// Sync P2P peers with proxy enable/disable state
+		// Sync P2P peers with proxy config changes
 		resources.ruleConf.Lock()
 		proxies := make([]*config.Proxy, len(resources.ruleConf.Proxies))
 		copy(proxies, resources.ruleConf.Proxies)
@@ -1948,6 +1948,14 @@ func wireAdminCallbacks(resources *activeResources) {
 				// Proxy disabled and running - stop P2P
 				util.LogInfo("[P2P] stopping peer for disabled proxy %s", proxy.Name)
 				p2p.GlobalP2PManager.StopPeer(proxy.Name)
+			} else if proxy.IsEnabled() && exists {
+				// Proxy config may have changed - check and restart if needed
+				oldProxy := p2p.GlobalP2PManager.GetPeerProxy(proxy.Name)
+				if oldProxy != proxy {
+					// Pointer changed means config was updated
+					util.LogInfo("[P2P] restarting peer for proxy %s due to config update", proxy.Name)
+					p2p.GlobalP2PManager.RestartPeer(proxy)
+				}
 			}
 		}
 

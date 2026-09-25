@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1091,8 +1090,8 @@ func findLatestPkgAndExtract() (string, string) {
 			continue
 		}
 
-		// Check platform/arch match
-		if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
+		// Check platform/arch match (using compile-time identifiers, not runtime)
+		if contents.Meta.Platform != Platform || contents.Meta.Arch != Arch {
 			continue
 		}
 

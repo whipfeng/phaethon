@@ -185,7 +185,6 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 - **VM 重启**: 先 Stop-Process，再 Start-ScheduledTask
 - **QG 环境**: 使用 `rc-service phaethon restart`，OpenRC 自动拉起
 - **VM 和 QG 环境不能同时关闭**：必须确保一个是正常运行状态后，才能操作另外一个。这是为了保证始终有一个可用的测试/生产环境。
-- **JF 环境（36.140.28.178）不要碰**：没有特殊要求的情况下不要操作这个环境，不要重启、不要更新、不要修改配置。
 
 ## 技术架构
 

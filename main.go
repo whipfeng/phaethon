@@ -2111,6 +2111,13 @@ func wireAdminCallbacks(resources *activeResources) {
 		adminSrv.GetCurrentVersion = func() string {
 			return Version
 		}
+		// Set platform/arch getters for hot swap (compile-time identifiers)
+		adminSrv.GetPlatform = func() string {
+			return Platform
+		}
+		adminSrv.GetArch = func() string {
+			return Arch
+		}
 
 		// Set peer registered callback for package sync
 		resources.meshMgr.OnPeerRegistered = func(nodeID string) {

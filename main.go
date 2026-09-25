@@ -1938,17 +1938,18 @@ func wireAdminCallbacks(resources *activeResources) {
 			}
 
 			_, exists := existingPeers[proxy.Name]
+			shouldRun := proxy.IsEnabled() && proxy.IsP2P()
 
-			if proxy.IsEnabled() && !exists {
-				// Proxy enabled and not running - start P2P
-				util.LogInfo("[P2P] starting peer for newly enabled proxy %s", proxy.Name)
+			if shouldRun && !exists {
+				// P2P should be running but isn't - start it
+				util.LogInfo("[P2P] starting peer for proxy %s", proxy.Name)
 				go p2p.GlobalP2PManager.StartPeer(proxy)
-			} else if !proxy.IsEnabled() && exists {
-				// Proxy disabled and running - stop P2P
-				util.LogInfo("[P2P] stopping peer for disabled proxy %s", proxy.Name)
+			} else if !shouldRun && exists {
+				// P2P should not be running but is - stop it
+				util.LogInfo("[P2P] stopping peer for proxy %s", proxy.Name)
 				p2p.GlobalP2PManager.StopPeer(proxy.Name)
-			} else if proxy.IsEnabled() && exists {
-				// Proxy config may have changed - check and restart if needed
+			} else if shouldRun && exists {
+				// P2P is running - check if config changed and needs restart
 				oldProxy := p2p.GlobalP2PManager.GetPeerProxy(proxy.Name)
 				if oldProxy != proxy {
 					// Pointer changed means config was updated

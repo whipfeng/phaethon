@@ -67,6 +67,7 @@ type htunnelDirectTransport struct {
 // direct frame transport.
 func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	proxy := d.Proxy
+	util.LogInfo("[HTUNNEL-DIRECT] [%s] dialP2PDirect called, URL=%s", proxy.Name, proxy.URL)
 	crypto := util.NewHTunnelCrypto(proxy.Password)
 
 	req, _ := http.NewRequest("HEAD", fmt.Sprintf("%s//0", proxy.URL), nil)

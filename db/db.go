@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -12,14 +13,37 @@ import (
 var (
 	// 全局数据库实例
 	globalDB *bolt.DB
-	
+
 	// Bucket 名称
-	BucketConfig    = []byte("config")
-	BucketProxies   = []byte("proxies")
-	BucketRules     = []byte("rules")
-	BucketFakeIP    = []byte("fakeip")
-	BucketPackages  = []byte("packages")
+	BucketConfig        = []byte("config")
+	BucketProxies       = []byte("proxies")
+	BucketProxyGroups   = []byte("proxy-groups")
+	BucketSubscriptions = []byte("subscriptions")
+	BucketRules         = []byte("rules")
+	BucketMappings      = []byte("mappings")
+	BucketResolvers     = []byte("resolvers")
+	BucketReverseConfs  = []byte("reverse-configs")
+	BucketFakeIP        = []byte("fakeip")
+	BucketPackages      = []byte("packages")
 )
+
+// ErrNotFound 表示 key 不存在
+var ErrNotFound = errors.New("key 不存在")
+
+// configBuckets 返回所有承载配置数据的 bucket（批量导入/重置时整体替换）。
+// fakeip/packages 是状态与历史数据，不属于配置，不在其中。
+func configBuckets() [][]byte {
+	return [][]byte{
+		BucketConfig,
+		BucketProxies,
+		BucketProxyGroups,
+		BucketSubscriptions,
+		BucketRules,
+		BucketMappings,
+		BucketResolvers,
+		BucketReverseConfs,
+	}
+}
 
 // Init 初始化数据库
 func Init(dbPath string) error {
@@ -39,17 +63,13 @@ func Init(dbPath string) error {
 	
 	// 创建所有 bucket
 	err = globalDB.Update(func(tx *bolt.Tx) error {
-		buckets := [][]byte{
-			BucketConfig,
-			BucketProxies,
-			BucketRules,
-			BucketFakeIP,
-			BucketPackages,
+		for _, bucket := range configBuckets() {
+			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
+				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
+			}
 		}
-		
-		for _, bucket := range buckets {
-			_, err := tx.CreateBucketIfNotExists(bucket)
-			if err != nil {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages} {
+			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
@@ -81,19 +101,24 @@ var dbExists bool
 
 // Put 存储键值对
 func Put(bucket, key []byte, value interface{}) error {
-	return globalDB.Update(func(tx *bolt.Tx) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("序列化失败: %w", err)
+	}
+
+	err = globalDB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket %s 不存在", string(bucket))
 		}
-		
-		data, err := json.Marshal(value)
-		if err != nil {
-			return fmt.Errorf("序列化失败: %w", err)
-		}
-		
 		return b.Put(key, data)
 	})
+	if err != nil {
+		return err
+	}
+
+	notifyChanges([]ChangeEvent{{Bucket: string(bucket), Key: string(key), Op: OpPut}})
+	return nil
 }
 
 // Get 获取键值对
@@ -106,23 +131,39 @@ func Get(bucket, key []byte, dest interface{}) error {
 		
 		data := b.Get(key)
 		if data == nil {
-			return fmt.Errorf("key 不存在")
+			return ErrNotFound
 		}
-		
+
 		return json.Unmarshal(data, dest)
 	})
 }
 
+// View 在只读事务中执行 fn（跨 bucket 一致快照）。不触发变更事件。
+func View(fn func(tx *bolt.Tx) error) error {
+	return globalDB.View(fn)
+}
+
+// Update 在写事务中执行 fn。与 Put/Delete 不同，它不自动触发变更事件；
+// 批量写入方应在提交成功后自行通知（见 configstore.ImportRuleConf）。
+func Update(fn func(tx *bolt.Tx) error) error {
+	return globalDB.Update(fn)
+}
+
 // Delete 删除键值对
 func Delete(bucket, key []byte) error {
-	return globalDB.Update(func(tx *bolt.Tx) error {
+	err := globalDB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket %s 不存在", string(bucket))
 		}
-		
 		return b.Delete(key)
 	})
+	if err != nil {
+		return err
+	}
+
+	notifyChanges([]ChangeEvent{{Bucket: string(bucket), Key: string(key), Op: OpDelete}})
+	return nil
 }
 
 // ForEach 遍历 bucket 中的所有键值对

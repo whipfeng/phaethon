@@ -50,6 +50,24 @@
             </div>
         </div>
 
+        <!-- Node Identity (Foundational Settings) -->
+        <div class="mesh-section" id="mesh-identity-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.nodeIdentity">Node Identity</h4>
+                <button onclick="saveMeshIdentity()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            </div>
+            <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.nodeIdentityHelp">Changing node-id will change this node's identity in the mesh network. Other nodes will need to rediscover this node.</p>
+            <div class="form-group">
+                <label data-i18n="mesh.nodeId">Node ID</label>
+                <input type="text" id="mesh-identity-nodeid" class="form-control" placeholder="e.g., my-node-001">
+            </div>
+            <div class="form-group">
+                <label data-i18n="mesh.subnet">Subnet</label>
+                <input type="text" id="mesh-identity-subnet" class="form-control" placeholder="e.g., 100.100.0.0/16">
+            </div>
+            <div id="mesh-identity-status" class="text-muted"></div>
+        </div>
+
         <!-- Topology Visualization -->
         <div class="mesh-section" id="mesh-topology-section">
             <div class="mesh-section-header">
@@ -175,14 +193,71 @@
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function() {
             fetchMeshStatus();
+            loadMeshIdentity();
             loadDomainSuffixes();
             loadAdvertise();
         });
     } else {
         fetchMeshStatus();
+        loadMeshIdentity();
         loadDomainSuffixes();
         loadAdvertise();
     }
+
+    // Mesh Identity (Foundational Settings)
+    async function loadMeshIdentity() {
+        try {
+            const res = await fetch('./api/config/mesh');
+            if (!res.ok) return;
+            const mesh = await res.json();
+            document.getElementById('mesh-identity-nodeid').value = mesh.NodeID || '';
+            document.getElementById('mesh-identity-subnet').value = mesh.Subnet || '';
+        } catch (err) {
+            console.error('Failed to load mesh identity:', err);
+        }
+    }
+
+    window.saveMeshIdentity = async function() {
+        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+        if (!password) return;
+
+        const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
+        const subnet = document.getElementById('mesh-identity-subnet').value.trim();
+        const statusEl = document.getElementById('mesh-identity-status');
+
+        if (!nodeid) {
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+
+        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+        statusEl.style.color = 'var(--text-muted)';
+
+        try {
+            const res = await fetch('./api/config/mesh', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Password-Confirm': password
+                },
+                body: JSON.stringify({NodeID: nodeid, Subnet: subnet})
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || 'Save failed');
+            }
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+            statusEl.style.color = 'var(--success)';
+            setTimeout(() => {
+                fetchMeshStatus();
+                statusEl.textContent = '';
+            }, 1500);
+        } catch (err) {
+            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+            statusEl.style.color = 'var(--danger)';
+        }
+    };
 
     // Domain Suffixes CRUD
     async function loadDomainSuffixes() {

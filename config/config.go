@@ -46,8 +46,8 @@ type Proxy struct {
 	Sni                  string `yaml:"sni,omitempty" json:"sni,omitempty"`
 	Servername           string `yaml:"servername,omitempty" json:"servername,omitempty"` // VLESS REALITY uses servername instead of sni
 	SkipCertVerify       bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
-	UDP                  bool   `yaml:"udp,omitempty" json:"udp,omitempty"`
-	P2P                  bool   `yaml:"p2p,omitempty" json:"p2p,omitempty"`
+	UDP                  *bool  `yaml:"udp,omitempty" json:"udp,omitempty"`
+	P2P                  *bool  `yaml:"p2p,omitempty" json:"p2p,omitempty"`
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
@@ -78,6 +78,42 @@ func (p *Proxy) IsEnabled() bool {
 		return true
 	}
 	return *p.Enabled
+}
+
+// IsP2P reports whether P2P is enabled for this proxy.
+// Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
+func (p *Proxy) IsP2P() bool {
+	if p == nil {
+		return false
+	}
+	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel"
+	if !isCompatible {
+		return false
+	}
+	// If explicitly set, use that value
+	if p.P2P != nil {
+		return *p.P2P
+	}
+	// Default to true for compatible types
+	return true
+}
+
+// IsUDP reports whether UDP is enabled for this proxy.
+// Defaults to true for compatible types if not explicitly set.
+func (p *Proxy) IsUDP() bool {
+	if p == nil {
+		return false
+	}
+	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel" || p.Type == "hysteria2" || p.Type == "vless"
+	if !isCompatible {
+		return false
+	}
+	// If explicitly set, use that value
+	if p.UDP != nil {
+		return *p.UDP
+	}
+	// Default to true for compatible types
+	return true
 }
 
 func SingletonProxy(typ string) *Proxy {
@@ -1447,6 +1483,12 @@ func LoadRawBytes(data []byte) (*RuleConfiguration, error) {
 		return nil, fmt.Errorf("parse config fail: %w", err)
 	}
 	return &conf, nil
+}
+
+// MarshalRaw serializes the RuleConfiguration to YAML bytes (same format as
+// SaveRaw writes). Used by the admin raw-config export endpoint.
+func MarshalRaw(conf *RuleConfiguration) ([]byte, error) {
+	return yaml.Marshal(conf)
 }
 
 // SaveRaw writes the RuleConfiguration back to a YAML file atomically.

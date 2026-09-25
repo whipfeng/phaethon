@@ -56,6 +56,7 @@
     <div class="card">
         <h3 data-i18n="dash.sysInfo">System Info</h3>
         <table class="info-table">
+            <tr><td data-i18n="dash.version">Version</td><td>{{.Version}}</td></tr>
             <tr><td data-i18n="dash.uptime">Uptime</td><td>{{formatUptime .UptimeSeconds}}</td></tr>
             <tr><td data-i18n="dash.started">Started</td><td>{{index .Stats "startTime"}}</td></tr>
         </table>

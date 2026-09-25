@@ -110,6 +110,7 @@ type Peer struct {
 	stopCh     chan struct{}
 	stopOnce   sync.Once   // ensures stopCh is closed exactly once
 	meshSender *peerSender // mesh peer sender, created on hello
+	proxy      *config.Proxy // proxy config this peer was started with
 }
 
 // NewP2PManager creates a new P2P manager.
@@ -276,6 +277,25 @@ func (m *P2PManager) StopPeer(id string) {
 	}
 }
 
+// GetPeerProxy returns the proxy config that a peer was started with.
+// Returns nil if the peer does not exist.
+func (m *P2PManager) GetPeerProxy(id string) *config.Proxy {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if peer, ok := m.peers[id]; ok {
+		return peer.proxy
+	}
+	return nil
+}
+
+// RestartPeer stops an existing peer and starts a new one with updated config.
+// This is used when proxy config (password, server, etc.) changes.
+func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
+	util.LogInfo("[P2P] restarting peer for proxy %s due to config change", proxy.Name)
+	m.StopPeer(proxy.Name)
+	go m.StartPeer(proxy)
+}
+
 // StartPeer initiates a P2P connection to a peer through the given proxy.
 // It reconnects automatically with exponential backoff if the connection drops.
 // Call StopPeer to permanently disconnect.
@@ -293,6 +313,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		Status:   "connecting",
 		LastSeen: time.Now(),
 		stopCh:   make(chan struct{}),
+		proxy:    proxy,
 	}
 
 	m.mu.Lock()

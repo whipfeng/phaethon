@@ -375,6 +375,10 @@ type AdminServer struct {
 
 	// GetCurrentVersion returns the current running version. Set by main package.
 	GetCurrentVersion func() string
+	// GetPlatform returns the compile-time platform identifier. Set by main package.
+	GetPlatform func() string
+	// GetArch returns the compile-time architecture identifier. Set by main package.
+	GetArch func() string
 }
 
 // PeerBrief contains brief information about a mesh peer.

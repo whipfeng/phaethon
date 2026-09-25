@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"time"
 
@@ -814,10 +813,16 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch 
 // checkForNewerVersion checks if the package version is higher than current.
 // If so, exits the process so watchdog can restart with the new version.
 func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
-	// 1. Check if platform/arch matches
-	if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
-		util.LogInfo("[ADMIN] checkForNewerVersion: platform/arch mismatch (current=%s/%s)",
-			runtime.GOOS, runtime.GOARCH)
+	// 1. Check if platform/arch matches (using compile-time identifiers, not runtime)
+	if s.GetPlatform == nil || s.GetArch == nil {
+		util.LogInfo("[ADMIN] checkForNewerVersion: GetPlatform/GetArch is nil")
+		return
+	}
+	currentPlatform := s.GetPlatform()
+	currentArch := s.GetArch()
+	if contents.Meta.Platform != currentPlatform || contents.Meta.Arch != currentArch {
+		util.LogInfo("[ADMIN] checkForNewerVersion: platform/arch mismatch (pkg=%s/%s, current=%s/%s)",
+			contents.Meta.Platform, contents.Meta.Arch, currentPlatform, currentArch)
 		return
 	}
 

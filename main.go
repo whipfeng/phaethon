@@ -995,7 +995,9 @@ func spawnChildProcess(exe string) (*childProcess, error) {
 
 	attr := &os.ProcAttr{
 		Env: env,
-		Files: []*os.File{os.Stdin, stdoutW, os.Stderr},
+		// Worker's stderr inherits from watchdog's stdout (which is redirected to log file).
+		// This ensures worker logs are visible even if watchdog's stderr is /dev/null.
+		Files: []*os.File{os.Stdin, stdoutW, os.Stdout},
 	}
 	proc, err := os.StartProcess(exe, []string{exe}, attr)
 	if err != nil {
@@ -1915,6 +1917,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		return server.GlobalControlManager.ForceRemoveBinding(reverseID, seq)
 	}
 	adminSrv.OnIncrementalUpdate = func() error {
+		util.LogInfo("[P2P] OnIncrementalUpdate called, syncing P2P peers...")
 		// mergeAndInitLocked already updated s.conf in place, which is the same
 		// object as resources.ruleConf. All servers see changes immediately.
 		activeRuleConf.Store(resources.ruleConf)

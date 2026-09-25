@@ -590,8 +590,13 @@ pkgKey = platform + "/" + arch + "@" + version    // 例如 linux/amd64@v0.7.4
 ```go
 // admin/package.go
 func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
-    // 1. 检查平台/架构是否匹配
-    if contents.Meta.Platform != runtime.GOOS || contents.Meta.Arch != runtime.GOARCH {
+    // 1. 检查平台/架构是否匹配（使用编译时标识符，不是运行时）
+    if s.GetPlatform == nil || s.GetArch == nil {
+        return
+    }
+    currentPlatform := s.GetPlatform()
+    currentArch := s.GetArch()
+    if contents.Meta.Platform != currentPlatform || contents.Meta.Arch != currentArch {
         return
     }
     
@@ -613,6 +618,50 @@ func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
         syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
     }()
 }
+```
+
+**平台/架构匹配说明**：
+
+热替换的平台/架构匹配使用**编译时标识符**（`main.Platform` 和 `main.Arch`），而不是运行时标识符（`runtime.GOOS` 和 `runtime.GOARCH`）。
+
+**原因**：
+- Windows 7 兼容版本使用特殊的编译器（go-legacy-win7），编译时通过 ldflags 设置 `-X main.Platform=windows7`
+- 运行时 `runtime.GOOS` 返回的是 `"windows"`，无法区分普通 Windows 版本和 Windows 7 兼容版本
+- 如果使用 `runtime.GOOS` 比较，Windows 7 包（`platform: "windows7"`）永远无法匹配到运行中的 Windows 进程（`runtime.GOOS: "windows"`），导致热替换失效
+
+**实现方式**：
+```go
+// main.go
+var (
+    Version  = "dev"
+    Platform = "" // 编译时通过 ldflags 设置，例如 "linux", "windows", "windows7", "darwin"
+    Arch     = "" // 编译时通过 ldflags 设置，例如 "amd64", "arm64"
+)
+
+// admin/admin.go
+type AdminServer struct {
+    // ...
+    GetCurrentVersion func() string  // 返回当前版本
+    GetPlatform       func() string  // 返回编译时平台标识符
+    GetArch           func() string  // 返回编译时架构标识符
+}
+
+// main.go 组装
+adminSrv.GetCurrentVersion = func() string { return Version }
+adminSrv.GetPlatform = func() string { return Platform }
+adminSrv.GetArch = func() string { return Arch }
+```
+
+**编译示例**：
+```bash
+# 普通 Windows 版本
+go build -ldflags "-X main.Platform=windows -X main.Arch=amd64" -o phaethon.exe
+
+# Windows 7 兼容版本
+go build -ldflags "-X main.Platform=windows7 -X main.Arch=amd64" -o phaethon.exe
+
+# Linux 版本
+go build -ldflags "-X main.Platform=linux -X main.Arch=amd64" -o phaethon
 ```
 
 **看门狗逻辑**（固化，不升级）：
@@ -657,11 +706,21 @@ type AdminServer struct {
     // ...
     // GetCurrentVersion returns the current running version. Set by main package.
     GetCurrentVersion func() string
+    // GetPlatform returns the compile-time platform identifier. Set by main package.
+    GetPlatform func() string
+    // GetArch returns the compile-time architecture identifier. Set by main package.
+    GetArch func() string
 }
 
 // main.go
 adminSrv.GetCurrentVersion = func() string {
     return Version
+}
+adminSrv.GetPlatform = func() string {
+    return Platform
+}
+adminSrv.GetArch = func() string {
+    return Arch
 }
 ```
 

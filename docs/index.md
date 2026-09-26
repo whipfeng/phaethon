@@ -55,6 +55,7 @@
 | [htunnel_p2p_direct_mode.md](plans/htunnel_p2p_direct_mode.md) | h_tunnel P2P 直发模式：FrameTransport 多态 + MESH 通道 | v0.1.0 | DRAFT |
 | [p2p_aware_routing.md](plans/p2p_aware_routing.md) | 规则感知 P2P 路由：规则匹配后优先 P2P 直连 + 连接缓存表 | v0.1.0 | DRAFT |
 | [embedded_database_design.md](plans/embedded_database_design.md) | 嵌入式数据库（bbolt）：统一数据存储、动态配置、持久化 | v0.1.0 | DRAFT |
+| [htunnel_v1_netstack.md](plans/htunnel_v1_netstack.md) | h_tunnel v1 重构：基于 gVisor Netstack 的非对称架构 | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 

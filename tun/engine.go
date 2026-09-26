@@ -17,6 +17,7 @@ import (
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/dialer"
+	"phaethon/frame"
 	"phaethon/mesh"
 	"phaethon/util"
 
@@ -120,6 +121,11 @@ type Engine struct {
 	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
 	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
 
+	// h_tunnel netstack endpoints (one per h_tunnel proxy, uplink via HTTP)
+	htunnelMu        sync.RWMutex
+	htunnelEndpoints map[string]*hTunnelEndpoint // proxy name → endpoint
+	htunnelNextNICID atomic.Uint64               // next NIC ID for h_tunnel endpoints
+
 	// preConnectCallback is called after bind (port allocated) but before connect (SYN sent).
 	// Used for ModeBTable registration before the forwarder is triggered.
 	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
@@ -141,8 +147,9 @@ type meshOutboundPacket struct {
 // NewEngine creates a new TUN engine. It does not start anything yet.
 func NewEngine(ruleConf *config.RuleConfiguration) *Engine {
 	return &Engine{
-		ruleConf: ruleConf,
-		closeCh:  make(chan struct{}),
+		ruleConf:         ruleConf,
+		closeCh:          make(chan struct{}),
+		htunnelEndpoints: make(map[string]*hTunnelEndpoint),
 	}
 }
 
@@ -1287,6 +1294,65 @@ func (e *Engine) initStack() error {
 	s.SetRouteTable(routes)
 
 	return nil
+}
+
+// AddHTunnelEndpoint creates a link.Endpoint for an h_tunnel proxy and registers
+// it with the netstack. The endpoint sends outbound IP packets as FrameMeshPacket
+// frames through the existing mesh channel (FrameTransport). The server side
+// processes these through the normal HandleMeshFrame → InjectMeshPacket path.
+func (e *Engine) AddHTunnelEndpoint(proxyName string, transport frame.FrameTransport) error {
+	e.htunnelMu.Lock()
+	defer e.htunnelMu.Unlock()
+
+	if e.htunnelEndpoints == nil {
+		e.htunnelEndpoints = make(map[string]*hTunnelEndpoint)
+	}
+	if _, exists := e.htunnelEndpoints[proxyName]; exists {
+		return nil
+	}
+
+	if e.ns == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	nicID := tcpip.NICID(100 + e.htunnelNextNICID.Add(1))
+	ep := newHTunnelEndpoint(nicID, transport)
+
+	if err := e.ns.CreateNIC(nicID, ep); err != nil {
+		return fmt.Errorf("create h_tunnel NIC: %v", err)
+	}
+
+	e.ns.SetPromiscuousMode(nicID, true)
+	e.ns.SetSpoofing(nicID, true)
+
+	e.htunnelEndpoints[proxyName] = ep
+	util.LogInfo("[HTUNNEL-EP] added endpoint for proxy %s (NIC=%d)", proxyName, nicID)
+	return nil
+}
+
+// RemoveHTunnelEndpoint removes and closes the h_tunnel endpoint for a proxy.
+func (e *Engine) RemoveHTunnelEndpoint(proxyName string) {
+	e.htunnelMu.Lock()
+	defer e.htunnelMu.Unlock()
+
+	ep, ok := e.htunnelEndpoints[proxyName]
+	if !ok {
+		return
+	}
+
+	ep.Close()
+	if e.ns != nil {
+		e.ns.RemoveNIC(ep.nicID)
+	}
+	delete(e.htunnelEndpoints, proxyName)
+	util.LogInfo("[HTUNNEL-EP] removed endpoint for proxy %s (NIC=%d)", proxyName, ep.nicID)
+}
+
+// HTunnelEndpoint returns the h_tunnel endpoint for a proxy, or nil if not found.
+func (e *Engine) HTunnelEndpoint(proxyName string) *hTunnelEndpoint {
+	e.htunnelMu.RLock()
+	defer e.htunnelMu.RUnlock()
+	return e.htunnelEndpoints[proxyName]
 }
 
 // logPacketCounts periodically logs TUN packet counters for diagnostics.

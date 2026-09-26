@@ -130,9 +130,13 @@ type RouteEntry struct {
 // selectEgressNodeID selects the best egress nodeID from a list of route entries.
 // Algorithm:
 // 1. Sort: static entries first, dynamic entries after
-// 2. Filter: remove offline nodes
-// 3. Sticky: if previously selected node is still available, keep it
-// 4. Hash: stable selection based on targetIP (first time only)
+// 2. Sticky: if previously selected node is still available, keep it
+// 3. Hash: stable selection based on targetIP (first time only)
+//
+// No online filter here: entries come from the unified route table which is
+// recomputed on topology changes, so an owner present in Entries is reachable
+// via topology (possibly multi-hop). isNodeOnline only knows direct peers and
+// would wrongly drop topology-advertised owners.
 func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -151,10 +155,10 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		return false // maintain original order within same source
 	})
 
-	// Filter: remove offline nodes
-	var available []RouteEntry
+	// Skip self: own prefixes never reach here via nextHops, but be safe.
+	available := make([]RouteEntry, 0, len(sorted))
 	for _, e := range sorted {
-		if m.isNodeOnline(e.NodeID) {
+		if e.NodeID != m.nodeID {
 			available = append(available, e)
 		}
 	}
@@ -198,16 +202,6 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 
 	util.LogDebug("[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
 	return selectedNodeID
-}
-
-// isNodeOnline checks if a node is currently online (has active peers or is self).
-func (m *MeshManager) isNodeOnline(nodeID string) bool {
-	if nodeID == m.nodeID {
-		return true // self is always online
-	}
-	// Check if we have a peer entry for this node
-	peer := m.topology.GetPeer(nodeID)
-	return peer != nil
 }
 
 // MeshManager coordinates mesh overlay networking.
@@ -597,10 +591,18 @@ func (m *MeshManager) getSubnetForNode(nodeID string) *net.IPNet {
 	if nodeID == m.nodeID {
 		return m.subnet
 	}
-	// Look up in topology
+	// Look up in topology: direct peer's own subnet first
 	for _, peer := range m.topology.GetAllPeers() {
 		if peer.NodeID() == nodeID && peer.Subnet != nil {
 			return peer.Subnet
+		}
+	}
+	// Then in claimed subnets advertised via gossip (multi-hop owners)
+	for _, peer := range m.topology.GetAllPeers() {
+		for _, cs := range peer.ClaimedSubnets {
+			if cs.NodeID == nodeID {
+				return cs.Subnet
+			}
 		}
 	}
 	return nil
@@ -896,13 +898,24 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			util.LogDebug("[MESH] outbound mesh %s: sending %d bytes directly via peer %s (hop=%d)",
 				dstIP, len(data), selectedPeer.GetNodeID(), minHop)
 		} else {
-			// Non-mesh traffic (advertised routes): use IPIP encapsulation
-			// Use the selected next-hop peer for IPIP encapsulation, not the final destination node.
-			// The selectedPeer is a direct peer that will receive the IPIP packet and forward it.
-			nextHopNodeID := selectedPeer.GetNodeID()
-			targetEIP := m.getEIPForNode(nextHopNodeID)
+			// Non-mesh traffic (advertised routes): IPIP-encapsulate with the
+			// OWNER node's EIP as the outer destination. The outer header is
+			// end-to-end: intermediate peers only relay via the mesh network
+			// and never decapsulate; the owner terminates the tunnel.
+			if len(route.Entries) == 0 {
+				util.LogWarn("[MESH] No entry for route to %s, dropping packet", dstIP)
+				return true
+			}
+
+			targetNodeID := m.selectEgressNodeID(dstIP, route.Entries)
+			if targetNodeID == "" {
+				util.LogWarn("[MESH] No egress node for route to %s, dropping packet", dstIP)
+				return true
+			}
+
+			targetEIP := m.getEIPForNode(targetNodeID)
 			if targetEIP == nil {
-				util.LogWarn("[MESH] No EIP for next-hop peer %s, dropping packet", nextHopNodeID)
+				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
 				return true
 			}
 
@@ -919,8 +932,8 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 
 			sendPacket = encapsulated
-			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d via=%s",
-				localEIP, targetEIP, len(data), len(encapsulated), nextHopNodeID)
+			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d egress=%s via=%s",
+				localEIP, targetEIP, len(data), len(encapsulated), targetNodeID, selectedPeer.GetNodeID())
 		}
 
 		if isMeshAddress(dstIP) {

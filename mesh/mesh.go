@@ -152,6 +152,10 @@ type MeshManager struct {
 	staticRoutes       []config.MeshStaticRoute
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
 
+	// Link quality tracking
+	qualityTracker *PeerQualityTracker
+	probeSeq       uint32 // sequence counter for probes
+
 	// OnPeerRegistered is called when a new peer is registered (for package sync)
 	OnPeerRegistered func(nodeID string)
 }
@@ -212,6 +216,9 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		m.ipipTunnel.SetLocalEIP(eip)
 		util.LogInfo("[MESH] Allocated EIP %s from subnet %s", eip, subnet)
 	}
+
+	// Create link quality tracker
+	m.qualityTracker = NewPeerQualityTracker()
 
 	return m
 }
@@ -565,6 +572,7 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	m.recomputeRoutes()
 	go m.gossipLoop()
+	go m.probeLoop()
 	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
 }
 
@@ -715,15 +723,9 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		util.LogDebug("[IPIP] Encapsulated packet: outer src=%s dst=%s inner len=%d total len=%d",
 			localEIP, egressEIP, len(data), len(encapsulated))
 		
-		// Find route to egress node's VIP and send encapsulated packet
-		egressVIP := m.getVIPForNode(egressNodeID)
-		if egressVIP == nil {
-			util.LogWarn("[IPIP] No VIP for egress node %s", egressNodeID)
-			return true
-		}
-		
-		// Use normal mesh routing to send encapsulated packet to egress node
-		route := m.findRoute(egressVIP)
+		// Find route to egress node's subnet (EIP is in the same subnet) and send encapsulated packet
+		// Use EIP to find route (semantically correct: we're sending to this subnet)
+		route := m.findRoute(egressEIP)
 		if route != nil && len(route.Peers) > 0 {
 			selectedPeer := route.Peers[0].Peer
 			if err := selectedPeer.Send(encapsulated); err != nil {
@@ -732,7 +734,7 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				util.LogDebug("[IPIP] Sent encapsulated packet to %s OK", egressNodeID)
 			}
 		} else {
-			util.LogWarn("[IPIP] No route to egress node %s (VIP=%s)", egressNodeID, egressVIP)
+			util.LogWarn("[IPIP] No route to egress node %s (EIP=%s)", egressNodeID, egressEIP)
 		}
 		return true
 	}
@@ -776,15 +778,52 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
 		}
 
-		// Remote peer owns this IP — send via mesh
-		pkt := make([]byte, len(data))
-		copy(pkt, data)
+		// Check if destination is in mesh network (100.0.0.0/8)
+		isMeshDest := m.network != nil && m.network.Contains(dstIP)
+
+		var sendPacket []byte
+		if isMeshDest {
+			// Mesh traffic: send directly without IPIP encapsulation
+			sendPacket = make([]byte, len(data))
+			copy(sendPacket, data)
+			util.LogDebug("[MESH] outbound mesh %s: sending %d bytes directly via peer %s (hop=%d)",
+				dstIP, len(data), selectedPeer.GetNodeID(), minHop)
+		} else {
+			// Non-mesh traffic (advertised routes): use IPIP encapsulation
+			if len(route.NodeIDs) == 0 {
+				util.LogWarn("[MESH] No nodeID for route to %s, dropping packet", dstIP)
+				return true
+			}
+			targetNodeID := route.NodeIDs[0]
+
+			targetEIP := m.getEIPForNode(targetNodeID)
+			if targetEIP == nil {
+				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
+				return true
+			}
+
+			localEIP := m.ipipTunnel.GetLocalEIP()
+			if localEIP == nil {
+				util.LogWarn("[MESH] No local EIP, dropping packet")
+				return true
+			}
+
+			encapsulated, err := m.ipipTunnel.Encapsulate(localEIP, targetEIP, data)
+			if err != nil {
+				util.LogWarn("[MESH] IPIP encapsulation failed: %v", err)
+				return true
+			}
+
+			sendPacket = encapsulated
+			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d via=%s",
+				localEIP, targetEIP, len(data), len(encapsulated), selectedPeer.GetNodeID())
+		}
 
 		if isMeshAddress(dstIP) {
 			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (hop=%d, idx=%d/%d)",
-				dstIP, len(pkt), selectedPeer.GetNodeID(), minHop, idx, count)
-			if len(pkt) >= 20 && pkt[9] == 6 {
-				logTCPPacketMesh("[TCP] outbound:", pkt)
+				dstIP, len(sendPacket), selectedPeer.GetNodeID(), minHop, idx, count)
+			if len(data) >= 20 && data[9] == 6 {
+				logTCPPacketMesh("[TCP] outbound:", data)
 			}
 		} else if len(data) >= 20 && data[0]>>4 == 4 {
 			// Log non-mesh IPv4 packets sent via mesh (advertised route traffic)
@@ -806,17 +845,18 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}
 
-		if err := selectedPeer.Send(pkt); err != nil {
+		if err := selectedPeer.Send(sendPacket); err != nil {
 			util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
 		} else {
 			// Debug log for successful sends to VIP-like destinations
 			if len(dstIP) >= 4 && dstIP[3] == 1 {
 				util.LogDebug("[MESH] Successfully sent %d bytes to %s via %s",
-					len(pkt), dstIP, selectedPeer.GetNodeID())
-			} else if len(pkt) >= 20 && pkt[0]>>4 == 4 {
-				dst := net.IP(pkt[16:20])
+					len(sendPacket), dstIP, selectedPeer.GetNodeID())
+			} else if len(data) >= 20 && data[0]>>4 == 4 {
+				dst := net.IP(data[16:20])
 				if isMeshAddress(dst) {
-					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK", len(pkt), dst, selectedPeer.GetNodeID())
+					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK",
+						len(sendPacket), dst, selectedPeer.GetNodeID())
 				}
 			}
 		}
@@ -844,15 +884,38 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 	// Check if this is an IPIP packet (protocol 4)
 	if frame[9] == 4 {
-		util.LogInfo("[IPIP] Received IPIP packet from %s, decapsulating", fromNodeID)
-		innerPacket, err := Decapsulate(frame)
-		if err != nil {
-			util.LogWarn("[IPIP] Decapsulation failed: %v", err)
+		// Extract outer destination IP (IPIP header bytes 16-19)
+		outerDstIP := net.IP(frame[16:20])
+		localEIP := m.ipipTunnel.GetLocalEIP()
+		
+		// Check if outer destination is our EIP (we are the target)
+		if localEIP != nil && outerDstIP.Equal(localEIP) {
+			util.LogInfo("[IPIP] Received IPIP packet for us from %s, decapsulating", fromNodeID)
+			innerPacket, err := Decapsulate(frame)
+			if err != nil {
+				util.LogWarn("[IPIP] Decapsulation failed: %v", err)
+				return
+			}
+			util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
+			// Recursively process the inner packet
+			m.HandleMeshFrame(fromNodeID, innerPacket)
 			return
 		}
-		util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
-		// Recursively process the inner packet
-		m.HandleMeshFrame(fromNodeID, innerPacket)
+		
+		// Not for us, forward the IPIP packet (we are a transit node)
+		util.LogDebug("[IPIP] Forwarding IPIP packet from %s to %s", fromNodeID, outerDstIP)
+		route := m.findRoute(outerDstIP)
+		if route != nil && len(route.Peers) > 0 {
+			// Select peer (use first peer for simplicity, can optimize later)
+			nextPeer := route.Peers[0].Peer
+			if err := nextPeer.Send(frame); err != nil {
+				util.LogWarn("[IPIP] Forward to %s failed: %v", nextPeer.GetNodeID(), err)
+			} else {
+				util.LogDebug("[IPIP] Forwarded IPIP packet to %s OK", nextPeer.GetNodeID())
+			}
+		} else {
+			util.LogWarn("[IPIP] No route to forward IPIP packet to %s", outerDstIP)
+		}
 		return
 	}
 
@@ -1880,6 +1943,98 @@ func (m *MeshManager) broadcastGossip() {
 		util.LogInfo("[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
 		peer.Sender.SendGossip(data)
 	}
+}
+
+// probeLoop periodically sends probe messages to all direct peers.
+func (m *MeshManager) probeLoop() {
+	util.LogInfo("[MESH] probe loop started (interval=10s)")
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.closeCh:
+			return
+		case <-ticker.C:
+			m.sendProbes()
+		}
+	}
+}
+
+// sendProbes sends probe messages to all direct peers.
+func (m *MeshManager) sendProbes() {
+	if m.p2p == nil {
+		return
+	}
+
+	allPeers := m.topology.GetAllPeers()
+	directCount := 0
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue // not a direct peer
+		}
+
+		nodeID := peer.NodeID()
+		m.probeSeq++
+		probeData := NewProbeMsg(m.probeSeq)
+		peer.Sender.SendGossip(probeData)
+
+		// Record that we sent a probe
+		quality := m.qualityTracker.Get(nodeID)
+		quality.RecordSent()
+
+		directCount++
+		util.LogDebug("[MESH] sent probe to %s (seq=%d)", nodeID, m.probeSeq)
+	}
+
+	if directCount > 0 {
+		util.LogInfo("[MESH] sent probes to %d direct peers", directCount)
+	}
+}
+
+// HandleProbe handles an incoming probe message from a peer.
+// It sends back a probe reply with the same timestamp.
+func (m *MeshManager) HandleProbe(sender PeerSender, data []byte) {
+	msg, err := ParseProbeMsg(data)
+	if err != nil {
+		util.LogDebug("[MESH] invalid probe from %s: %v", sender.GetNodeID(), err)
+		return
+	}
+
+	// Send reply with echoed timestamp
+	replyData := NewProbeReply(int64(msg.Seq), msg.Timestamp)
+	sender.SendGossip(replyData)
+
+	util.LogDebug("[MESH] received probe from %s (seq=%d), sent reply", sender.GetNodeID(), msg.Seq)
+}
+
+// HandleProbeReply handles an incoming probe reply from a peer.
+// It calculates RTT and updates the quality tracker.
+func (m *MeshManager) HandleProbeReply(sender PeerSender, data []byte) {
+	reply, err := ParseProbeReply(data)
+	if err != nil {
+		util.LogDebug("[MESH] invalid probe_reply from %s: %v", sender.GetNodeID(), err)
+		return
+	}
+
+	// Calculate RTT
+	sentTime := time.Unix(0, reply.Timestamp)
+	rtt := time.Since(sentTime)
+
+	// Update quality tracker
+	nodeID := sender.GetNodeID()
+	quality := m.qualityTracker.Get(nodeID)
+	quality.RecordRTT(rtt)
+
+	avgRTT, loss := quality.Stats()
+	util.LogInfo("[MESH] probe_reply from %s (seq=%d): rtt=%v avg=%v loss=%.1f%%",
+		nodeID, reply.Seq, rtt, avgRTT, loss*100)
+}
+
+// GetPeerQuality returns the quality metrics for a peer.
+func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss float64) {
+	quality := m.qualityTracker.Get(nodeID)
+	return quality.Stats()
 }
 
 // BuildGossipInfo builds the current gossip content (used for hello messages).

@@ -1062,12 +1062,6 @@ func (n *Netstack) writeLoop() {
 			isHostIP = dstIP.Equal(hostIP)
 		}
 
-		// Debug: log ALL packets to 10.161.88.x at Info level
-		if len(dstIP) >= 3 && dstIP[0] == 10 && dstIP[1] == 161 && dstIP[2] == 88 {
-			util.LogInfo("[MESH-DIAG] writeLoop: 10.161.88.x packet src=%s dst=%s proto=%d len=%d isVIP=%v isHostIP=%v",
-				net.IP(data[12:16]), dstIP, data[9], len(data), isVIP, isHostIP)
-		}
-
 		if isVIP || isHostIP {
 			// Bypass gateway return path: write to TUN
 			if isVIP && n.natTable != nil {

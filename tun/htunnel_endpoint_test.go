@@ -1,10 +1,12 @@
-package mesh
+package tun
 
 import (
 	"io"
 	"net"
 	"sync"
 	"testing"
+
+	"phaethon/frame"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -15,39 +17,53 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
-// mockPeerSender implements PeerSender for testing.
-type mockPeerSender struct {
-	mu     sync.Mutex
-	sent   [][]byte
-	closed bool
-	nodeID string
+// mockTransport implements frame.FrameTransport for testing.
+type mockTransport struct {
+	mu      sync.Mutex
+	sent    []mockFrame
+	closed  bool
+	closeCh chan struct{}
 }
 
-func newMockPeerSender(nodeID string) *mockPeerSender {
-	return &mockPeerSender{nodeID: nodeID}
+type mockFrame struct {
+	frameType byte
+	payload   []byte
 }
 
-func (p *mockPeerSender) Send(data []byte) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
+func newMockTransport() *mockTransport {
+	return &mockTransport{closeCh: make(chan struct{})}
+}
+
+func (t *mockTransport) Send(frameType byte, payload []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
 		return io.ErrClosedPipe
 	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	p.sent = append(p.sent, cp)
+	data := make([]byte, len(payload))
+	copy(data, payload)
+	t.sent = append(t.sent, mockFrame{frameType: frameType, payload: data})
 	return nil
 }
 
-func (p *mockPeerSender) SendGossip(data []byte) {}
+func (t *mockTransport) Recv() (byte, []byte, error) {
+	<-t.closeCh
+	return 0, nil, io.ErrClosedPipe
+}
 
-func (p *mockPeerSender) GetNodeID() string {
-	return p.nodeID
+func (t *mockTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.closed {
+		t.closed = true
+		close(t.closeCh)
+	}
+	return nil
 }
 
 func TestHTunnelEndpointWritePackets(t *testing.T) {
-	peer := newMockPeerSender("test-node")
-	ep := NewHTunnelEndpoint(100, peer)
+	transport := newMockTransport()
+	ep := newHTunnelEndpoint(100, transport)
 	defer ep.Close()
 
 	ipPkt := buildMinimalIPv4Packet(net.IP{100, 179, 0, 3}, net.IP{10, 0, 0, 1})
@@ -66,26 +82,29 @@ func TestHTunnelEndpointWritePackets(t *testing.T) {
 		t.Fatalf("expected 1 packet written, got %d", n)
 	}
 
-	peer.mu.Lock()
-	if len(peer.sent) != 1 {
-		t.Fatalf("expected 1 packet sent via peer, got %d", len(peer.sent))
+	transport.mu.Lock()
+	if len(transport.sent) != 1 {
+		t.Fatalf("expected 1 frame sent, got %d", len(transport.sent))
 	}
-	sentData := peer.sent[0]
-	peer.mu.Unlock()
+	f := transport.sent[0]
+	transport.mu.Unlock()
 
-	if len(sentData) != len(ipPkt) {
-		t.Fatalf("payload length mismatch: got %d, want %d", len(sentData), len(ipPkt))
+	if f.frameType != frame.FrameMeshPacket {
+		t.Fatalf("expected FrameMeshPacket (%d), got %d", frame.FrameMeshPacket, f.frameType)
+	}
+	if len(f.payload) != len(ipPkt) {
+		t.Fatalf("payload length mismatch: got %d, want %d", len(f.payload), len(ipPkt))
 	}
 	for i := range ipPkt {
-		if sentData[i] != ipPkt[i] {
-			t.Fatalf("payload[%d] mismatch: got %02x, want %02x", i, sentData[i], ipPkt[i])
+		if f.payload[i] != ipPkt[i] {
+			t.Fatalf("payload[%d] mismatch: got %02x, want %02x", i, f.payload[i], ipPkt[i])
 		}
 	}
 }
 
 func TestHTunnelEndpointMultiplePackets(t *testing.T) {
-	peer := newMockPeerSender("test-node")
-	ep := NewHTunnelEndpoint(100, peer)
+	transport := newMockTransport()
+	ep := newHTunnelEndpoint(100, transport)
 	defer ep.Close()
 
 	var pkts stack.PacketBufferList
@@ -105,15 +124,15 @@ func TestHTunnelEndpointMultiplePackets(t *testing.T) {
 		t.Fatalf("expected 5 packets written, got %d", n)
 	}
 
-	peer.mu.Lock()
-	if len(peer.sent) != 5 {
-		t.Fatalf("expected 5 packets sent via peer, got %d", len(peer.sent))
+	transport.mu.Lock()
+	if len(transport.sent) != 5 {
+		t.Fatalf("expected 5 frames sent, got %d", len(transport.sent))
 	}
-	peer.mu.Unlock()
+	transport.mu.Unlock()
 }
 
 func TestHTunnelEndpointInNetstack(t *testing.T) {
-	peer := newMockPeerSender("test-node")
+	transport := newMockTransport()
 
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
@@ -125,7 +144,7 @@ func TestHTunnelEndpointInNetstack(t *testing.T) {
 		t.Fatalf("CreateNIC main: %v", err)
 	}
 
-	htEP := NewHTunnelEndpoint(100, peer)
+	htEP := newHTunnelEndpoint(100, transport)
 	if err := s.CreateNIC(100, htEP); err != nil {
 		t.Fatalf("CreateNIC htunnel: %v", err)
 	}

@@ -2369,6 +2369,10 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		if p.Name != name {
 			continue
 		}
+		if strings.EqualFold(p.Type, "h_tunnel") && !body.P2P {
+			httpError(w, "h_tunnel requires P2P enabled (mesh downlink depends on it)", http.StatusBadRequest)
+			return
+		}
 		p.P2P = &body.P2P
 		if err := dc.Init(); err != nil {
 			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)

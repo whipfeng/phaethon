@@ -864,10 +864,6 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// routed via the peer that owns that subnet, not passed to local netstack.
 	route := m.findRoute(dstIP)
 	nextHops := m.findNextHops(dstIP)
-	// Debug: log route lookup for 10.161.88.x
-	if len(dstIP) >= 3 && dstIP[0] == 10 && dstIP[1] == 161 && dstIP[2] == 88 {
-		util.LogInfo("[MESH-DIAG] findRoute for %s: route=%v, nextHops=%d", dstIP, route != nil, len(nextHops))
-	}
 	if route != nil && len(nextHops) > 0 {
 		// Find lowest hop count and collect peers at that hop.
 		minHop := nextHops[0].Hop

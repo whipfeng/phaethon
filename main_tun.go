@@ -62,10 +62,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	engine := tun.NewEngine(ruleConf)
 	engine.SetDataDir(dataDir)
 
-	// Create and set the netstack before starting the engine
-	ns := mesh.NewNetstack()
-	engine.SetNetstack(ns)
-
 	// Configure mesh addresses before Start()
 	if meshMgr.GetSubnet() != "" {
 		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {

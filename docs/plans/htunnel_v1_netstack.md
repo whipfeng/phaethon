@@ -130,39 +130,118 @@ HTTP GET body → frame.ReadFrame → HandleMeshFrame
 - 不基于 NIC/endpoint
 - 回程包从 mesh endpoint 进入，只要 IP+port 匹配，socket 就能收到
 
-### 7. Fire-and-forget 数据发送
+### 7. Fire-and-forget 数据发送 + 并发控制
 
-`htunnelDirectTransport.sendData()` 对 `FrameMeshPacket` 采用 fire-and-forget 策略：
+**发送并发**：
+
+`htunnelDirectTransport.sendData()` 对 `FrameMeshPacket` 采用 fire-and-forget 策略，使用 semaphore 限制并发数：
 
 ```go
+const htunnelConcurrency = 16
+
+type htunnelDirectTransport struct {
+    // ...
+    sendSem chan struct{} // 限制并发 POST 数量
+}
+
 func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error {
     // 序列化帧
     var buf bytes.Buffer
     frame.WriteFrame(&buf, frameType, payload)
 
-    // 异步发送，不等响应
+    // 获取信号量（满了就阻塞 peerWriteLoop，形成背压）
+    t.sendSem <- struct{}{}
     go func() {
-        // HTTP POST（带加密、序号等现有逻辑）
+        defer func() { <-t.sendSem }()
         t.postBatch(buf.Bytes(), seq)
     }()
     return nil  // 立即返回
 }
 ```
 
+**接收并发**：
+
+客户端并发发送多个 GET 请求，消除 GET 间隙：
+
+```go
+func (t *htunnelDirectTransport) startRecvLoops() {
+    for i := 0; i < htunnelConcurrency; i++ {
+        go t.recvLoop()
+    }
+}
+
+func (t *htunnelDirectTransport) recvLoop() {
+    for {
+        // 发送 GET 请求，等待响应
+        // 处理帧，分发给上层
+    }
+}
+```
+
+服务端支持并发 GET（需要改动）：
+
+```go
+type htChannel struct {
+    // ...
+    getWaiters chan chan<- meshMsg  // 等待的 GET 队列
+}
+
+func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *http.Request) {
+    waiter := make(chan meshMsg, 1)
+    
+    // 注册到等待队列
+    select {
+    case ch.getWaiters <- waiter:
+    case <-time.After(htMeshPollTimeout):
+        w.WriteHeader(408)
+        return
+    }
+    
+    // 等待数据
+    select {
+    case msg := <-waiter:
+        // 处理并响应
+    case <-time.After(htMeshPollTimeout):
+        w.WriteHeader(408)
+    }
+}
+
+// 分发 goroutine: meshOut → waiters
+go func() {
+    for msg := range ch.meshOut {
+        select {
+        case waiter := <-ch.getWaiters:
+            waiter <- msg
+        case <-ch.closed:
+            return
+        }
+    }
+}()
+```
+
+**HTTP 连接池配置**：
+
+16 并发 POST + 16 并发 GET = 32 连接 per peer。需要配置 http.Client 的连接池：
+
+```go
+transport := &http.Transport{
+    MaxIdleConnsPerHost: 32,  // 默认 2，需要调大
+    MaxConnsPerHost: 0,       // 无限制
+    IdleConnTimeout: 90 * time.Second,
+}
+```
+
 **理由**：
 - `FrameMeshPacket` 承载的是 IP 包，上层 TCP 有重传机制
 - 丢包可接受（TCP 重传恢复）
-- 不需要 pending buffer、flushLoop、backpressure 等复杂机制
-- peerWriteLoop 不阻塞，可以继续消费 peer.writeCh
-
-**优势：允许包乱序发送**：
-- 每个包独立 POST，不等待前一个完成
-- 网络层可以并行处理多个 POST
-- 上层 TCP 处理乱序和重传
+- 并发发送允许包乱序，提高吞吐量
+- semaphore 限制 goroutine 数量，防止资源耗尽
+- 并发 GET 消除间隙，降低延迟
+- 收发统一 16 并发，简单对称
 
 **控制帧（heartbeat/hello/gossip）保持同步**：
 - 控制帧需要确认送达
-- 使用 `sendControl()` 同步 POST
+- 使用 `sendControl()` 同步 POST，不占用数据并发信号量
 
 ### 8. 队列与背压（类比交换机）
 
@@ -256,17 +335,22 @@ engine.AddHTunnelEndpoint(proxy.Name, peer)
 | `main.go` | 集成：创建 endpoint、路由配置 |
 | `docs/plans/htunnel_v1_netstack.md` | 本设计文档 |
 
-## 待讨论
+## 待实现
 
-### 1. Fire-and-forget 的 goroutine 堆积
+### 1. 并发控制
 
-peerWriteLoop 调用 `transport.Send()` 是 fire-and-forget，每次起一个 goroutine 做 HTTP POST。如果网络慢，goroutine 会堆积。
+- [ ] 发送：semaphore 限制 16 并发 POST
+- [ ] 接收：16 个并发 GET goroutine
+- [ ] HTTP 连接池：MaxIdleConnsPerHost = 32
+- [ ] 服务端：支持并发 GET（getWaiters 队列）
 
-**选项**：
-- A. 保持现状，依赖 TCP 拥塞控制（简单，但 goroutine 可能很多）
-- B. 限制并发 POST 数量（semaphore，超过就阻塞 peerWriteLoop）
-- C. 改回同步 POST（peerWriteLoop 阻塞等响应，但失去乱序优势）
+### 2. hTunnelEndpoint 改用 peer.Send()
 
-### 2. 路由配置
+- [ ] hTunnelEndpoint 持有 peer 而非 transport
+- [ ] WritePackets 调用 peer.Send()
+- [ ] Engine.AddHTunnelEndpoint 参数改为 peer
 
-netstack 需要知道哪些目标走 hTunnelEndpoint，哪些走 mesh endpoint。需要设计路由规则。
+### 3. 路由配置
+
+- [ ] netstack 路由规则：哪些目标走 hTunnelEndpoint
+- [ ] 集成 main.go：创建 endpoint、配置路由

@@ -695,8 +695,12 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	}
 
 	// Check static IPIP routes before normal mesh routing
-	if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
-		util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
+	// IMPORTANT: Static routes only apply to non-mesh destinations.
+	// Mesh destinations (100.0.0.0/8) use normal mesh routing without IPIP encapsulation.
+	isMeshDest := m.network != nil && m.network.Contains(dstIP)
+	if !isMeshDest {
+		if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
+			util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
 		util.LogInfo("[IPIP] Attempting encapsulation via %s", egressNodeID)
 		
 		// Get egress node's EIP (calculated from its advertised subnet)
@@ -727,16 +731,27 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		// Use EIP to find route (semantically correct: we're sending to this subnet)
 		route := m.findRoute(egressEIP)
 		if route != nil && len(route.Peers) > 0 {
-			selectedPeer := route.Peers[0].Peer
+			// Select best peer using quality metrics
+			minHop := route.Peers[0].Hop
+			var candidates []PeerWithHop
+			for _, p := range route.Peers {
+				if p.Hop == minHop {
+					candidates = append(candidates, p)
+				} else {
+					break
+				}
+			}
+			selectedPeer := m.selectBestPeer(candidates, egressEIP)
 			if err := selectedPeer.Send(encapsulated); err != nil {
 				util.LogWarn("[IPIP] Send to %s failed: %v", egressNodeID, err)
 			} else {
-				util.LogDebug("[IPIP] Sent encapsulated packet to %s OK", egressNodeID)
+				util.LogDebug("[IPIP] Sent encapsulated packet to %s OK (via %s)", egressNodeID, selectedPeer.GetNodeID())
 			}
 		} else {
 			util.LogWarn("[IPIP] No route to egress node %s (EIP=%s)", egressNodeID, egressEIP)
 		}
 		return true
+		}
 	}
 
 	// Exclude mesh subnet (Fake-IPs) from mesh interception.
@@ -750,32 +765,24 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// Stable selection: use hash of destination IP to consistently select the same peer.
 	route := m.findRoute(dstIP)
 	if route != nil && len(route.Peers) > 0 {
-		// Find lowest hop count and count peers at that hop.
+		// Find lowest hop count and collect peers at that hop.
 		minHop := route.Peers[0].Hop
-		count := 0
+		var candidates []PeerWithHop
 		for _, p := range route.Peers {
 			if p.Hop == minHop {
-				count++
+				candidates = append(candidates, p)
 			} else {
 				break // sorted, so different hop means we're done
 			}
 		}
 
-		// Hash-based stable selection: same destination always selects the same peer.
-		hash := 0
-		for _, b := range dstIP {
-			hash = hash*31 + int(b)
-		}
-		if hash < 0 {
-			hash = -hash
-		}
-		idx := hash % count
-		selectedPeer := route.Peers[idx].Peer
+		// Select best peer using quality metrics (Phase 3 smart routing)
+		selectedPeer := m.selectBestPeer(candidates, dstIP)
 
 		// Debug log for VIP-like destinations
 		if len(dstIP) >= 4 && dstIP[3] == 1 {
-			util.LogDebug("[MESH] Sending to %s: selected peer=%s (hop=%d, idx=%d/%d)",
-				dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
+			util.LogDebug("[MESH] Sending to %s: selected peer=%s (hop=%d, candidates=%d)",
+				dstIP, selectedPeer.GetNodeID(), minHop, len(candidates))
 		}
 
 		// Check if destination is in mesh network (100.0.0.0/8)
@@ -794,11 +801,50 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				util.LogWarn("[MESH] No nodeID for route to %s, dropping packet", dstIP)
 				return true
 			}
-			targetNodeID := route.NodeIDs[0]
 
-			targetEIP := m.getEIPForNode(targetNodeID)
-			if targetEIP == nil {
-				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
+			// Select best egress nodeID based on path quality
+			// When multiple nodes advertise the same route, choose the one with best RTT
+			var targetNodeID string
+			var targetEIP net.IP
+			var bestRTT time.Duration
+			first := true
+
+			for _, nodeID := range route.NodeIDs {
+				eip := m.getEIPForNode(nodeID)
+				if eip == nil {
+					continue
+				}
+				// Find route to this egress node's EIP
+				egressRoute := m.findRoute(eip)
+				if egressRoute == nil || len(egressRoute.Peers) == 0 {
+					continue
+				}
+				// Get the best peer to this egress node
+				minHop := egressRoute.Peers[0].Hop
+				var candidates []PeerWithHop
+				for _, p := range egressRoute.Peers {
+					if p.Hop == minHop {
+						candidates = append(candidates, p)
+					} else {
+						break
+					}
+				}
+				bestPeer := m.selectBestPeer(candidates, eip)
+				if bestPeer == nil {
+					continue
+				}
+				// Get quality for this path
+				avgRTT, _ := m.GetPeerQuality(bestPeer.GetNodeID())
+				if first || avgRTT < bestRTT || (avgRTT == 0 && bestRTT == 0) {
+					targetNodeID = nodeID
+					targetEIP = eip
+					bestRTT = avgRTT
+					first = false
+				}
+			}
+
+			if targetNodeID == "" || targetEIP == nil {
+				util.LogWarn("[MESH] No valid egress node for route to %s, dropping packet", dstIP)
 				return true
 			}
 
@@ -815,13 +861,13 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 
 			sendPacket = encapsulated
-			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d via=%s",
-				localEIP, targetEIP, len(data), len(encapsulated), selectedPeer.GetNodeID())
+			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d egress=%s via=%s",
+				localEIP, targetEIP, len(data), len(encapsulated), targetNodeID, selectedPeer.GetNodeID())
 		}
 
 		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (hop=%d, idx=%d/%d)",
-				dstIP, len(sendPacket), selectedPeer.GetNodeID(), minHop, idx, count)
+			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (hop=%d, candidates=%d)",
+				dstIP, len(sendPacket), selectedPeer.GetNodeID(), minHop, len(candidates))
 			if len(data) >= 20 && data[9] == 6 {
 				logTCPPacketMesh("[TCP] outbound:", data)
 			}
@@ -1057,28 +1103,20 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	// Hash-based stable selection: same destination always selects the same peer.
+	// Quality-based selection: same destination prefers lowest-RTT peer.
 	minHop := route.Peers[0].Hop
-	count := 0
+	var candidates []PeerWithHop
 	for _, p := range route.Peers {
 		if p.Hop == minHop {
-			count++
+			candidates = append(candidates, p)
 		} else {
 			break
 		}
 	}
-	hash := 0
-	for _, b := range dstIP {
-		hash = hash*31 + int(b)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	idx := hash % count
-	selectedPeer := route.Peers[idx].Peer
+	selectedPeer := m.selectBestPeer(candidates, dstIP)
 
 	if isMeshAddress(dstIP) {
-		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s (hop=%d, idx=%d/%d)", fromNodeID, dstIP, selectedPeer.GetNodeID(), minHop, idx, count)
+		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s (hop=%d, candidates=%d)", fromNodeID, dstIP, selectedPeer.GetNodeID(), minHop, len(candidates))
 	}
 	pkt := make([]byte, len(frame))
 	copy(pkt, frame)
@@ -2035,6 +2073,80 @@ func (m *MeshManager) HandleProbeReply(sender PeerSender, data []byte) {
 func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss float64) {
 	quality := m.qualityTracker.Get(nodeID)
 	return quality.Stats()
+}
+
+// selectBestPeer selects the best peer from candidates using quality metrics.
+// Priority: lowest RTT among peers with quality data.
+// Falls back to hash-based stable selection if no quality data available.
+func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) PeerSender {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Peer
+	}
+
+	// Collect quality data for all candidates
+	type peerQuality struct {
+		peer PeerSender
+		rtt  time.Duration
+		hasData bool
+	}
+
+	qualities := make([]peerQuality, len(candidates))
+	anyData := false
+	for i, c := range candidates {
+		nodeID := c.Peer.GetNodeID()
+		avgRTT, _ := m.GetPeerQuality(nodeID)
+		hasData := avgRTT > 0
+		if hasData {
+			anyData = true
+		}
+		qualities[i] = peerQuality{peer: c.Peer, rtt: avgRTT, hasData: hasData}
+	}
+
+	// If no quality data, fall back to hash-based selection
+	if !anyData {
+		hash := 0
+		for _, b := range dstIP {
+			hash = hash*31 + int(b)
+		}
+		if hash < 0 {
+			hash = -hash
+		}
+		idx := hash % len(candidates)
+		return candidates[idx].Peer
+	}
+
+	// Select peer with lowest RTT (among those with data)
+	var bestPeer PeerSender
+	var bestRTT time.Duration
+	first := true
+	for _, pq := range qualities {
+		if !pq.hasData {
+			continue
+		}
+		if first || pq.rtt < bestRTT {
+			bestPeer = pq.peer
+			bestRTT = pq.rtt
+			first = false
+		}
+	}
+
+	// If somehow no peer had data (shouldn't happen since anyData=true), fall back
+	if bestPeer == nil {
+		hash := 0
+		for _, b := range dstIP {
+			hash = hash*31 + int(b)
+		}
+		if hash < 0 {
+			hash = -hash
+		}
+		idx := hash % len(candidates)
+		return candidates[idx].Peer
+	}
+
+	return bestPeer
 }
 
 // BuildGossipInfo builds the current gossip content (used for hello messages).

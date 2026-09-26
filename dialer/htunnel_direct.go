@@ -3,7 +3,6 @@ package dialer
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,15 +19,6 @@ import (
 // address semantics, frames flow directly in POST/GET bodies.
 const HTunnelCmdMesh = "MESH"
 
-const (
-	// htunnelDirectBatchLimit caps one data-lane POST batch below nginx's
-	// default client_max_body_size (1m).
-	htunnelDirectBatchLimit = 512 * 1024
-	// htunnelDirectPendingMax is the data-lane pending high-water; Send
-	// blocks above it (backpressure) until the in-flight batch completes.
-	htunnelDirectPendingMax = 1024 * 1024
-)
-
 // htunnelDirectTransport implements frame.FrameTransport over h_tunnel
 // without the BIND stream channel: one HEAD (X-C: MESH) allocates the
 // channel, frames travel in POST bodies (client → server) and long-poll GET
@@ -39,15 +29,6 @@ type htunnelDirectTransport struct {
 	connectionID string
 	client       *http.Client
 	crypto       *util.HTunnelCrypto
-
-	// Data lane batching (pendMu guards; in-flight collection: while a POST
-	// is in flight new frames append to pending, and the next batch is sent
-	// as soon as the POST returns — no timer).
-	pendMu   sync.Mutex
-	pendCond *sync.Cond
-	pending  []byte
-	sending  bool
-	writeErr error
 
 	ctrlMu sync.Mutex // serializes control-lane POSTs
 	seqMu  sync.Mutex // guards writeSeq/deleteSeq
@@ -100,13 +81,12 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		crypto:       crypto,
 		closed:       make(chan struct{}),
 	}
-	t.pendCond = sync.NewCond(&t.pendMu)
 	return t, nil
 }
 
-// Send writes one frame. Mesh data goes through the batching data lane;
-// control frames (heartbeat/hello/gossip) get their own immediate POST so
-// they never queue behind bulk data.
+// Send writes one frame. Mesh data frames are fire-and-forget (async POST,
+// no response wait); control frames (heartbeat/hello/gossip) are sent
+// synchronously so the caller knows they reached the server.
 func (t *htunnelDirectTransport) Send(frameType byte, payload []byte) error {
 	if frameType == frame.FrameMeshPacket {
 		return t.sendData(frameType, payload)
@@ -133,113 +113,46 @@ func (t *htunnelDirectTransport) sendControl(frameType byte, payload []byte) err
 	if err := frame.WriteFrame(&buf, frameType, payload); err != nil {
 		return err
 	}
-	return t.postBatch(buf.Bytes())
+
+	t.seqMu.Lock()
+	t.writeSeq++
+	seq := t.writeSeq
+	t.seqMu.Unlock()
+
+	return t.postBatch(buf.Bytes(), seq)
 }
 
+// sendData sends a data frame (FrameMeshPacket) via fire-and-forget HTTP POST.
+// The frame is serialized, a sequence number is assigned, and a goroutine
+// performs the POST. The caller does not wait for the response — upper-layer
+// TCP retransmission handles any lost packets.
 func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error {
-	t.pendMu.Lock()
-	// Backpressure: block while pending is above the high-water mark.
-	for len(t.pending) >= htunnelDirectPendingMax {
-		select {
-		case <-t.closed:
-			t.pendMu.Unlock()
-			return io.ErrClosedPipe
-		default:
-		}
-		t.pendCond.Wait()
+	select {
+	case <-t.closed:
+		return io.ErrClosedPipe
+	default:
 	}
-	if t.writeErr != nil {
-		err := t.writeErr
-		t.pendMu.Unlock()
-		return err
-	}
+
 	var buf bytes.Buffer
 	if err := frame.WriteFrame(&buf, frameType, payload); err != nil {
-		t.pendMu.Unlock()
 		return err
 	}
-	t.pending = append(t.pending, buf.Bytes()...)
-	flush := !t.sending
-	if flush {
-		t.sending = true
-	}
-	t.pendMu.Unlock()
+	data := buf.Bytes()
 
-	if flush {
-		go t.flushLoop()
-	}
+	t.seqMu.Lock()
+	t.writeSeq++
+	seq := t.writeSeq
+	t.seqMu.Unlock()
+
+	go func() {
+		if err := t.postBatch(data, seq); err != nil {
+			util.LogDebug("[HTUNNEL-DIRECT] data POST fail (seq=%d): %v", seq, err)
+		}
+	}()
 	return nil
 }
 
-// flushLoop drains pending in bounded batches while frames keep arriving.
-// It holds the sending claim until pending is empty, so at most one data
-// POST is in flight. A POST failure records writeErr (surfaced by later
-// Send/Recv, ending the P2P session) and drops unsent frames.
-func (t *htunnelDirectTransport) flushLoop() {
-	for {
-		t.pendMu.Lock()
-		batch := t.takeBatchLocked()
-		if len(batch) == 0 {
-			t.sending = false
-			t.pendCond.Broadcast()
-			t.pendMu.Unlock()
-			return
-		}
-		t.pendMu.Unlock()
-
-		err := t.postBatch(batch)
-
-		t.pendMu.Lock()
-		if err != nil {
-			t.writeErr = err
-			t.pending = nil
-			t.sending = false
-			t.pendCond.Broadcast()
-			t.pendMu.Unlock()
-			return
-		}
-		t.pendCond.Broadcast() // pending shrank; wake backpressure waiters
-		t.pendMu.Unlock()
-	}
-}
-
-// takeBatchLocked removes up to htunnelDirectBatchLimit of pending frames
-// (cut at a frame boundary) and returns the plaintext batch.
-func (t *htunnelDirectTransport) takeBatchLocked() []byte {
-	if len(t.pending) == 0 {
-		return nil
-	}
-	n := len(t.pending)
-	if n > htunnelDirectBatchLimit {
-		n = cutBatchAtFrame(t.pending, htunnelDirectBatchLimit)
-	}
-	batch := make([]byte, n)
-	copy(batch, t.pending)
-	rest := copy(t.pending, t.pending[n:])
-	t.pending = t.pending[:rest]
-	return batch
-}
-
-// cutBatchAtFrame returns the largest prefix ≤ limit ending on a frame
-// boundary (3-byte header: type + big-endian uint16 length).
-func cutBatchAtFrame(buf []byte, limit int) int {
-	pos := 0
-	for pos+3 <= len(buf) {
-		frameLen := 3 + int(binary.BigEndian.Uint16(buf[pos+1:pos+3]))
-		if pos+frameLen > limit {
-			break
-		}
-		pos += frameLen
-	}
-	if pos == 0 && len(buf) >= 3 {
-		// A single frame can't exceed the limit (frames are ≤ 65538 bytes);
-		// take the first frame regardless to make progress.
-		pos = 3 + int(binary.BigEndian.Uint16(buf[1:3]))
-	}
-	return pos
-}
-
-func (t *htunnelDirectTransport) postBatch(plaintext []byte) error {
+func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	select {
 	case <-t.closed:
 		return io.ErrClosedPipe
@@ -250,11 +163,6 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte) error {
 	if t.crypto.IsEnabled() {
 		data = t.crypto.SealBody(plaintext)
 	}
-
-	t.seqMu.Lock()
-	t.writeSeq++
-	seq := t.writeSeq
-	t.seqMu.Unlock()
 
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), bytes.NewReader(data))
 	req.Header.Set(headerConnectionID, t.connectionID)
@@ -290,12 +198,6 @@ func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
 		case <-t.closed:
 			return 0, nil, io.ErrClosedPipe
 		default:
-		}
-		t.pendMu.Lock()
-		err := t.writeErr
-		t.pendMu.Unlock()
-		if err != nil {
-			return 0, nil, err
 		}
 
 		if t.readOffset < len(t.readBuf) {
@@ -343,16 +245,11 @@ func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
 	}
 }
 
-// Close closes the transport, drops unsent pending frames and DELETEs the
-// server-side channel (best effort). Upper layers reconnect on session end.
+// Close closes the transport and DELETEs the server-side channel (best effort).
+// Upper layers reconnect on session end.
 func (t *htunnelDirectTransport) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closed)
-
-		t.pendMu.Lock()
-		t.pending = nil
-		t.pendCond.Broadcast()
-		t.pendMu.Unlock()
 
 		t.seqMu.Lock()
 		t.deleteSeq++

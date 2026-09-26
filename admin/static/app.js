@@ -1031,7 +1031,8 @@ async function fetchMeshStatus() {
                 let html = '';
                 data.routes.routes.forEach(r => {
                     const viaList = r.via || [];
-                    const owners = (r.nodeIds && r.nodeIds.length > 0) ? r.nodeIds.join(', ') : '-';
+                    const entries = r.entries || [];
+                    const owners = (entries.length > 0) ? entries.map(e => e.NodeID).join(', ') : '-';
                     let viaCell, statusCell;
                     if (viaList.length === 0) {
                         // Local prefix: no intermediate hop

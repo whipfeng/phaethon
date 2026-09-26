@@ -897,22 +897,12 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				dstIP, len(data), selectedPeer.GetNodeID(), minHop)
 		} else {
 			// Non-mesh traffic (advertised routes): use IPIP encapsulation
-			// Use unified route entries (static + dynamic already merged)
-			if len(route.Entries) == 0 {
-				util.LogWarn("[MESH] No entry for route to %s, dropping packet", dstIP)
-				return true
-			}
-
-			// Select best egress nodeID using unified algorithm (static priority + hash stability)
-			targetNodeID := m.selectEgressNodeID(dstIP, route.Entries)
-			if targetNodeID == "" {
-				util.LogWarn("[MESH] No online egress node for route to %s, dropping packet", dstIP)
-				return true
-			}
-
-			targetEIP := m.getEIPForNode(targetNodeID)
+			// Use the selected next-hop peer for IPIP encapsulation, not the final destination node.
+			// The selectedPeer is a direct peer that will receive the IPIP packet and forward it.
+			nextHopNodeID := selectedPeer.GetNodeID()
+			targetEIP := m.getEIPForNode(nextHopNodeID)
 			if targetEIP == nil {
-				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
+				util.LogWarn("[MESH] No EIP for next-hop peer %s, dropping packet", nextHopNodeID)
 				return true
 			}
 
@@ -929,8 +919,8 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 
 			sendPacket = encapsulated
-			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d egress=%s via=%s",
-				localEIP, targetEIP, len(data), len(encapsulated), targetNodeID, selectedPeer.GetNodeID())
+			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d via=%s",
+				localEIP, targetEIP, len(data), len(encapsulated), nextHopNodeID)
 		}
 
 		if isMeshAddress(dstIP) {

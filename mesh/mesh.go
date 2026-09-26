@@ -112,8 +112,8 @@ type PeerWithHop struct {
 type MeshRoute struct {
 	Prefix  *net.IPNet
 	Peers   []PeerWithHop
-	NodeIDs []string // owner nodeIDs anchoring this route (display only)
-	lastIdx int      // kept for compatibility but no longer used
+	Entries []RouteEntry // unified entries with nodeID + source tag
+	lastIdx int          // kept for compatibility but no longer used
 }
 
 // RouteSource indicates the origin of a route entry.
@@ -241,10 +241,9 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes      []MeshRoute // sorted by prefix length (longest first)
-	staticTrie  *NodeTrie   // static domain routes (config + .phn)
-	dynamicTrie *NodeTrie   // dynamic domain routes (gossip)
-	nodeMap     map[string]*nodeInfo // nodeID → info
+	routes     []MeshRoute        // sorted by prefix length (longest first)
+	domainTrie *NodeTrie          // unified domain routes (static + dynamic merged)
+	nodeMap    map[string]*nodeInfo // nodeID → info
 }
 
 // getRouteTable returns the current route table (lock-free).
@@ -268,10 +267,9 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
-		routes:      make([]MeshRoute, 0),
-		staticTrie:  NewNodeTrie(),
-		dynamicTrie: NewNodeTrie(),
-		nodeMap:     make(map[string]*nodeInfo),
+		routes:     make([]MeshRoute, 0),
+		domainTrie: NewNodeTrie(),
+		nodeMap:    make(map[string]*nodeInfo),
 	})
 
 	// Create Fake-IP pool from node subnet (skip first 10: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.9=future)
@@ -652,7 +650,7 @@ func (m *MeshManager) Stop() {
 	close(m.closeCh)
 }
 
-// ResolveDomainSubnet looks up a domain in static and dynamic domain routes.
+// ResolveDomainSubnet looks up a domain in the unified domain route trie.
 // Returns (subnet, needsFail):
 //   - subnet != nil: matched a route, forward to remote
 //   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
@@ -660,48 +658,102 @@ func (m *MeshManager) Stop() {
 func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 	rt := m.getRouteTable()
 	
-	// 1. Check static trie (high priority)
-	staticNodeID, staticLen := rt.staticTrie.Lookup(domain)
-	if staticLen > 0 {
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): static match nodeID=%s len=%d", domain, staticNodeID, staticLen)
-		
-		// Look up node in nodeMap
-		nodeInfo := rt.nodeMap[staticNodeID]
-		
-		// Local node (sender == nil) → fallback to local pool
-		if nodeInfo != nil && nodeInfo.sender == nil {
-			util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, fallback to local pool", domain, staticNodeID)
-			return nil, false
+	// Lookup in unified domain trie (contains both static and dynamic entries)
+	entries, matchLen := rt.domainTrie.Lookup(domain)
+	if matchLen == 0 || len(entries) == 0 {
+		// No match → fallback to local pool
+		return nil, false
+	}
+	
+	util.LogDebug("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
+	
+	// Use unified selection algorithm (static priority + hash stability)
+	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
+	if selectedNodeID == "" {
+		// All nodes are offline
+		// Check if any static entries existed → SERVFAIL
+		hasStatic := false
+		for _, e := range entries {
+			if e.Source == RouteSourceStatic {
+				hasStatic = true
+				break
+			}
 		}
-		
-		if nodeInfo != nil && nodeInfo.subnet != nil {
-			util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, staticNodeID, nodeInfo.subnet)
-			return nodeInfo.subnet, false
+		if hasStatic {
+			util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but all nodes offline, SERVFAIL", domain)
+			return nil, true
 		}
-		
-		// Static match but node not in nodeMap → SERVFAIL
-		util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but node %s not in nodeMap, SERVFAIL", domain, staticNodeID)
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): all nodes offline, fallback to local pool", domain)
+		return nil, false
+	}
+	
+	// Look up node in nodeMap
+	nodeInfo := rt.nodeMap[selectedNodeID]
+	
+	// Local node (sender == nil) → fallback to local pool
+	if nodeInfo != nil && nodeInfo.sender == nil {
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, fallback to local pool", domain, selectedNodeID)
+		return nil, false
+	}
+	
+	if nodeInfo != nil && nodeInfo.subnet != nil {
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
+		return nodeInfo.subnet, false
+	}
+	
+	// Match but node not in nodeMap
+	hasStatic := false
+	for _, e := range entries {
+		if e.Source == RouteSourceStatic && e.NodeID == selectedNodeID {
+			hasStatic = true
+			break
+		}
+	}
+	if hasStatic {
+		util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but node %s not in nodeMap, SERVFAIL", domain, selectedNodeID)
 		return nil, true
 	}
-	
-	// 2. Check dynamic trie (low priority)
-	dynamicNodeID, dynamicLen := rt.dynamicTrie.Lookup(domain)
-	if dynamicLen > 0 {
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): dynamic match nodeID=%s len=%d", domain, dynamicNodeID, dynamicLen)
-		
-		// Look up node in nodeMap
-		nodeInfo := rt.nodeMap[dynamicNodeID]
-		if nodeInfo != nil && nodeInfo.subnet != nil {
-			util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, dynamicNodeID, nodeInfo.subnet)
-			return nodeInfo.subnet, false
-		}
-		
-		// Dynamic match but node not in nodeMap → shouldn't happen, but treat as no match
-		util.LogWarn("[MESH] ResolveDomainSubnet(%s): dynamic match but node %s not in nodeMap", domain, dynamicNodeID)
-	}
-	
-	// 3. No match → fallback to local pool
+	util.LogWarn("[MESH] ResolveDomainSubnet(%s): dynamic match but node %s not in nodeMap", domain, selectedNodeID)
 	return nil, false
+}
+
+// selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
+// Uses the same unified algorithm as IP routing: static priority + hash stability.
+func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+
+	// Filter: remove offline nodes
+	var available []RouteEntry
+	for _, e := range entries {
+		if m.isNodeOnline(e.NodeID) {
+			available = append(available, e)
+		}
+	}
+
+	if len(available) == 0 {
+		return ""
+	}
+
+	// Sort: static first, then dynamic
+	sort.SliceStable(available, func(i, j int) bool {
+		if available[i].Source == RouteSourceStatic && available[j].Source == RouteSourceDynamic {
+			return true
+		}
+		return false
+	})
+
+	// Hash-based stable selection using domain name
+	hash := 0
+	for _, c := range domain {
+		hash = hash*31 + int(c)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	idx := hash % len(available)
+	return available[idx].NodeID
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
@@ -766,21 +818,6 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 		return true
 	}
 
-	// Check static IPIP routes before normal mesh routing
-	// IMPORTANT: Static routes only apply to non-mesh destinations.
-	// Mesh destinations (100.0.0.0/8) use normal mesh routing without IPIP encapsulation.
-	isMeshDest := m.network != nil && m.network.Contains(dstIP)
-	
-	// Collect static route entries (only for non-mesh destinations)
-	var staticEntries []RouteEntry
-	if !isMeshDest {
-		if staticNodeIDs, matched := m.CheckStaticRoute(dstIP); matched {
-			for _, nodeID := range staticNodeIDs {
-				staticEntries = append(staticEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceStatic})
-			}
-		}
-	}
-
 	// Exclude mesh subnet (Fake-IPs) from mesh interception.
 	// Fake-IPs are allocated from the mesh subnet but are not actual VIPs.
 	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
@@ -824,20 +861,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				dstIP, len(data), selectedPeer.GetNodeID(), minHop)
 		} else {
 			// Non-mesh traffic (advertised routes): use IPIP encapsulation
-			// Merge static and dynamic route entries
-			var allEntries []RouteEntry
-			allEntries = append(allEntries, staticEntries...) // static first
-			for _, nodeID := range route.NodeIDs {
-				allEntries = append(allEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceDynamic})
-			}
-			
-			if len(allEntries) == 0 {
-				util.LogWarn("[MESH] No nodeID for route to %s, dropping packet", dstIP)
+			// Use unified route entries (static + dynamic already merged)
+			if len(route.Entries) == 0 {
+				util.LogWarn("[MESH] No entry for route to %s, dropping packet", dstIP)
 				return true
 			}
 
 			// Select best egress nodeID using unified algorithm (static priority + hash stability)
-			targetNodeID := m.selectEgressNodeID(dstIP, allEntries)
+			targetNodeID := m.selectEgressNodeID(dstIP, route.Entries)
 			if targetNodeID == "" {
 				util.LogWarn("[MESH] No online egress node for route to %s, dropping packet", dstIP)
 				return true
@@ -1343,9 +1374,9 @@ func (m *MeshManager) GetRoutes() map[string]interface{} {
 				"hop":    p.Hop,
 			})
 		}
-		routeList = append(routeList, map[string]interface{}{
+			routeList = append(routeList, map[string]interface{}{
 			"prefix":  r.Prefix.String(),
-			"nodeIds": r.NodeIDs,
+			"entries": r.Entries,
 			"via":     peerInfos,
 		})
 	}
@@ -1511,17 +1542,17 @@ func (m *MeshManager) recomputeRoutes() {
 			peerList[i] = PeerWithHop{Peer: e.sender, Hop: e.hop}
 		}
 		ownerSet := make(map[string]bool, len(entries))
-		nodeIDs := make([]string, 0, len(entries))
+		routeEntries := make([]RouteEntry, 0, len(entries))
 		for _, e := range entries {
 			if e.owner != "" && !ownerSet[e.owner] {
 				ownerSet[e.owner] = true
-				nodeIDs = append(nodeIDs, e.owner)
+				routeEntries = append(routeEntries, RouteEntry{NodeID: e.owner, Source: RouteSourceDynamic})
 			}
 		}
 		routes = append(routes, MeshRoute{
 			Prefix:  entries[0].prefix,
 			Peers:   peerList,
-			NodeIDs: nodeIDs,
+			Entries: routeEntries,
 			lastIdx: 0,
 		})
 	}
@@ -1531,7 +1562,7 @@ func (m *MeshManager) recomputeRoutes() {
 		routes = append(routes, MeshRoute{
 			Prefix:  ownSubnet,
 			Peers:   nil,
-			NodeIDs: []string{m.nodeID},
+			Entries: []RouteEntry{{NodeID: m.nodeID, Source: RouteSourceDynamic}},
 			lastIdx: 0,
 		})
 	}
@@ -1545,10 +1576,51 @@ func (m *MeshManager) recomputeRoutes() {
 		routes = append(routes, MeshRoute{
 			Prefix:  ipNet,
 			Peers:   nil,
-			NodeIDs: []string{m.nodeID},
+			Entries: []RouteEntry{{NodeID: m.nodeID, Source: RouteSourceDynamic}},
 			lastIdx: 0,
 		})
 	}
+
+	// Merge static routes into unified route table
+	m.mu.RLock()
+	for _, staticRoute := range m.staticRoutes {
+		_, prefix, err := net.ParseCIDR(staticRoute.Prefix)
+		if err != nil {
+			continue
+		}
+		
+		// Build static entries
+		staticEntries := make([]RouteEntry, 0, len(staticRoute.NodeIDs))
+		for _, nodeID := range staticRoute.NodeIDs {
+			staticEntries = append(staticEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceStatic})
+		}
+		
+		// Check if there's already a dynamic route with the same prefix
+		found := false
+		for i := range routes {
+			if routes[i].Prefix.String() == prefix.String() {
+				// Merge: prepend static entries (static first)
+				routes[i].Entries = append(staticEntries, routes[i].Entries...)
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			// Add new route with static entries only
+			// Find peers that can reach this prefix (for forwarding)
+			var peerList []PeerWithHop
+			// For static routes, we need to find route to the egress nodes
+			// For now, leave peers empty - will be resolved at send time
+			routes = append(routes, MeshRoute{
+				Prefix:  prefix,
+				Peers:   peerList,
+				Entries: staticEntries,
+				lastIdx: 0,
+			})
+		}
+	}
+	m.mu.RUnlock()
 
 	// Sort routes by prefix length (longest first) for longest-match lookup.
 	sort.Slice(routes, func(i, j int) bool {
@@ -1557,16 +1629,24 @@ func (m *MeshManager) recomputeRoutes() {
 		return lenI > lenJ
 	})
 
-	// Build static and dynamic domain tries
-	staticTrie := NewNodeTrie()
-	dynamicTrie := NewNodeTrie()
+	// Build unified domain trie (static + dynamic merged)
+	domainTrie := NewNodeTrie()
 	
-	// Static trie: own domain suffixes (from config)
+	// Add own domain suffixes (from config) as static
 	ownSuffixSet := make(map[string]bool, len(domainSuffixes))
 	for _, s := range domainSuffixes {
-		staticTrie.Insert(s, m.nodeID)  // own suffixes point to self
+		domainTrie.Insert(s, m.nodeID, RouteSourceStatic)  // own suffixes point to self
 		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
+
+	// Add static domain suffix routes (from config) as static
+	m.mu.RLock()
+	for _, suffixRoute := range m.staticDomainSuffixes {
+		for _, nodeID := range suffixRoute.NodeIDs {
+			domainTrie.Insert(suffixRoute.Suffix, nodeID, RouteSourceStatic)
+		}
+	}
+	m.mu.RUnlock()
 
 	// Build a map of nodeID → (subnet, hop) from ClaimedSubnets
 	type nodeInfoLocal struct {
@@ -1592,7 +1672,7 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
-	// Dynamic trie: peer domain suffixes (from gossip) — skip if we own the same suffix
+	// Add peer domain suffixes (from gossip) as dynamic — skip if we own the same suffix
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -1602,8 +1682,8 @@ func (m *MeshManager) recomputeRoutes() {
 			if ownSuffixSet[normalized] {
 				continue
 			}
-			// Insert into dynamic trie with the owner nodeID
-			dynamicTrie.Insert(entry.Suffix, entry.NodeID)
+			// Insert into unified trie with dynamic source
+			domainTrie.Insert(entry.Suffix, entry.NodeID, RouteSourceDynamic)
 		}
 	}
 
@@ -1637,9 +1717,9 @@ func (m *MeshManager) recomputeRoutes() {
 			}
 		}
 	}
-	// Insert nodeID.phn entries into static trie
+	// Insert nodeID.phn entries into unified domain trie as static
 	for nid := range bestNodes {
-		staticTrie.Insert(nid+"."+MeshDomainSuffix, nid)
+		domainTrie.Insert(nid+"."+MeshDomainSuffix, nid, RouteSourceStatic)
 	}
 	
 	// Convert bestNodes to nodeMap for routeTable
@@ -1654,10 +1734,9 @@ func (m *MeshManager) recomputeRoutes() {
 	
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
-		routes:      routes,
-		staticTrie:  staticTrie,
-		dynamicTrie: dynamicTrie,
-		nodeMap:     nodeMap,
+		routes:     routes,
+		domainTrie: domainTrie,
+		nodeMap:    nodeMap,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {

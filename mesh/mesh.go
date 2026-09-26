@@ -132,7 +132,7 @@ type RouteEntry struct {
 // 1. Sort: static entries first, dynamic entries after
 // 2. Filter: remove offline nodes
 // 3. Sticky: if previously selected node is still available, keep it
-// 4. Hash: stable selection based on targetIP
+// 4. Hash: stable selection based on targetIP (first time only)
 func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -163,6 +163,23 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		return ""
 	}
 
+	// Sticky: check if we have a cached selection for this target
+	targetKey := targetIP.String()
+	m.stickyMu.Lock()
+	if cachedNodeID, ok := m.stickyCache[targetKey]; ok {
+		// Verify cached node is still in available list
+		for _, e := range available {
+			if e.NodeID == cachedNodeID {
+				m.stickyMu.Unlock()
+				util.LogDebug("[MESH] sticky IP route: %s → %s (cached)", targetIP, cachedNodeID)
+				return cachedNodeID
+			}
+		}
+		// Cached node no longer available, will re-select below
+		util.LogDebug("[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
+	}
+	m.stickyMu.Unlock()
+
 	// Hash-based stable selection
 	hash := 0
 	for _, b := range targetIP {
@@ -172,7 +189,15 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		hash = -hash
 	}
 	idx := hash % len(available)
-	return available[idx].NodeID
+	selectedNodeID := available[idx].NodeID
+
+	// Cache the selection
+	m.stickyMu.Lock()
+	m.stickyCache[targetKey] = selectedNodeID
+	m.stickyMu.Unlock()
+
+	util.LogDebug("[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
+	return selectedNodeID
 }
 
 // isNodeOnline checks if a node is currently online (has active peers or is self).
@@ -225,6 +250,12 @@ type MeshManager struct {
 	qualityTracker *PeerQualityTracker
 	probeSeq       uint32 // sequence counter for probes
 
+	// Sticky node selection cache (target → nodeID)
+	// Ensures stable routing: once a nodeID is selected for a target, keep using it
+	// until the node becomes unavailable.
+	stickyMu    sync.Mutex
+	stickyCache map[string]string // target (IP/domain) → nodeID
+
 	// OnPeerRegistered is called when a new peer is registered (for package sync)
 	OnPeerRegistered func(nodeID string)
 }
@@ -262,6 +293,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		subnetPrefixLen: subnetPrefixLen,
 		closeCh:         make(chan struct{}),
 		eventCh:         make(chan meshEvent, 64),
+		stickyCache:     make(map[string]string),
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
@@ -663,10 +695,14 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		return nil, false
 	}
 	
-	util.LogDebug("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
+	util.LogInfo("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
+	for i, e := range entries {
+		util.LogInfo("[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
+	}
 	
 	// Select target node (static priority + hash stability)
 	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
+	util.LogInfo("[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
 	if selectedNodeID == "" {
 		// All entries were for self → this is a local domain
 		// Allocate from local Fake-IP pool
@@ -693,7 +729,7 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 }
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
-// Uses the same unified algorithm as IP routing: static priority + hash stability.
+// Uses the same unified algorithm as IP routing: static priority + hash stability + sticky cache.
 // Domain trie entries are generated from topology, so if an entry exists, the node is reachable.
 func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
 	if len(entries) == 0 {
@@ -720,6 +756,22 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		return false
 	})
 
+	// Sticky: check if we have a cached selection for this domain
+	m.stickyMu.Lock()
+	if cachedNodeID, ok := m.stickyCache[domain]; ok {
+		// Verify cached node is still in available list
+		for _, e := range available {
+			if e.NodeID == cachedNodeID {
+				m.stickyMu.Unlock()
+				util.LogDebug("[MESH] sticky domain route: %s → %s (cached)", domain, cachedNodeID)
+				return cachedNodeID
+			}
+		}
+		// Cached node no longer available, will re-select below
+		util.LogDebug("[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
+	}
+	m.stickyMu.Unlock()
+
 	// Hash-based stable selection using domain name
 	hash := 0
 	for _, c := range domain {
@@ -729,7 +781,15 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		hash = -hash
 	}
 	idx := hash % len(available)
-	return available[idx].NodeID
+	selectedNodeID := available[idx].NodeID
+
+	// Cache the selection
+	m.stickyMu.Lock()
+	m.stickyCache[domain] = selectedNodeID
+	m.stickyMu.Unlock()
+
+	util.LogDebug("[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
+	return selectedNodeID
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.

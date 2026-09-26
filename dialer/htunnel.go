@@ -71,11 +71,10 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: nil,
-			// Connection pool tuned for concurrent lane POSTs on the same
-			// host (v1 doc §3.1): pooled keep-alive conns instead of a
-			// fresh TCP+TLS handshake per request.
+			// Connection pool tuned for concurrent POSTs and GETs on the same
+			// host (16 concurrent POSTs + 16 concurrent GETs = 32 connections).
 			MaxIdleConns:        64,
-			MaxIdleConnsPerHost: 16,
+			MaxIdleConnsPerHost: 32,
 			IdleConnTimeout:     120 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				nextType := "nil"

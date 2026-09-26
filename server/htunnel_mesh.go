@@ -33,13 +33,14 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	id := atomic.AddInt64(&s.idGen, 1)
 	connID := util.NextConnID()
 	ch := &htChannel{
-		id:      id,
-		connID:  connID,
-		closed:  make(chan struct{}),
-		isMesh:  true,
-		crypto:  util.NewHTunnelCrypto(s.Password),
-		meshIn:  make(chan meshMsg, htMeshQueueLen),
-		meshOut: make(chan meshMsg, htMeshQueueLen),
+		id:         id,
+		connID:     connID,
+		closed:     make(chan struct{}),
+		isMesh:     true,
+		crypto:     util.NewHTunnelCrypto(s.Password),
+		meshIn:     make(chan meshMsg, htMeshQueueLen),
+		meshOut:    make(chan meshMsg, htMeshQueueLen),
+		getWaiters: make(chan chan<- meshMsg, 64), // support up to 64 concurrent GETs
 	}
 	s.channels.Store(id, ch)
 
@@ -56,6 +57,9 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	util.LogInfo("[HT-SVR] [%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
 
 	go handleP2PTransport(meshChannelTransport{ch: ch}, "mesh:"+connID)
+
+	// Start dispatcher: distributes meshOut frames to waiting GET requests
+	go s.meshDispatchLoop(ch)
 }
 
 // meshHandleWrite serves a client POST: decrypt the body, parse the frame
@@ -94,14 +98,53 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 	w.WriteHeader(200)
 }
 
-// meshHandleRead serves a client long-poll GET: wait up to htMeshPollTimeout
-// for the first frame from the local P2P session (408 on timeout), coalesce
-// further queued frames into one batch (≤ htMeshBatchLimit) and return it
-// encrypted.
+// meshDispatchLoop distributes frames from meshOut to waiting GET requests.
+// This enables concurrent GET support: multiple GET requests can be pending,
+// and frames are distributed to them one by one.
+func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
+	for {
+		select {
+		case msg := <-ch.meshOut:
+			// Wait for a GET request to be ready
+			select {
+			case waiter := <-ch.getWaiters:
+				select {
+				case waiter <- msg:
+				case <-ch.closed:
+					return
+				}
+			case <-ch.closed:
+				return
+			}
+		case <-ch.closed:
+			return
+		}
+	}
+}
+
+// meshHandleRead serves a client long-poll GET: register as a waiter, wait up
+// to htMeshPollTimeout for a frame from the dispatcher (408 on timeout),
+// coalesce further queued frames into one batch (≤ htMeshBatchLimit) and
+// return it encrypted.
 func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *http.Request) {
+	// Create a waiter channel for this GET request
+	waiter := make(chan meshMsg, 1)
+
+	// Register as a waiter
+	select {
+	case ch.getWaiters <- waiter:
+	case <-time.After(htMeshPollTimeout):
+		w.WriteHeader(408)
+		return
+	case <-ch.closed:
+		w.WriteHeader(410)
+		return
+	}
+
+	// Wait for the first frame from the dispatcher
 	var buf bytes.Buffer
 	select {
-	case msg := <-ch.meshOut:
+	case msg := <-waiter:
 		_ = frame.WriteFrame(&buf, msg.frameType, msg.payload)
 	case <-time.After(htMeshPollTimeout):
 		w.WriteHeader(408)
@@ -111,6 +154,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 		return
 	}
 
+	// Coalesce additional frames that are already available (non-blocking)
 	for buf.Len() < htMeshBatchLimit {
 		done := false
 		select {

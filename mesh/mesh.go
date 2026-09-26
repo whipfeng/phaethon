@@ -105,15 +105,12 @@ type PeerWithHop struct {
 	Hop  int
 }
 
-// MeshRoute represents a route to a network prefix via one or more peers.
-// Peers are sorted by hop count (ascending). Selection is stable using
-// hash-based selection on destination IP, ensuring the same destination
-// always routes to the same peer.
+// MeshRoute represents a route to a network prefix.
+// Entries contains the egress nodes that own/advertise this route (unified static+dynamic).
+// Next hop is looked up from topology when sending, not stored here.
 type MeshRoute struct {
 	Prefix  *net.IPNet
-	Peers   []PeerWithHop
 	Entries []RouteEntry // unified entries with nodeID + source tag
-	lastIdx int          // kept for compatibility but no longer used
 }
 
 // RouteSource indicates the origin of a route entry.
@@ -241,8 +238,9 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute        // sorted by prefix length (longest first)
-	domainTrie *NodeTrie          // unified domain routes (static + dynamic merged)
+	routes     []MeshRoute          // sorted by prefix length (longest first)
+	nextHops   map[string][]PeerWithHop // prefix string → next hop peers
+	domainTrie *NodeTrie            // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo // nodeID → info
 }
 
@@ -268,6 +266,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
 		routes:     make([]MeshRoute, 0),
+		nextHops:   make(map[string][]PeerWithHop),
 		domainTrie: NewNodeTrie(),
 		nodeMap:    make(map[string]*nodeInfo),
 	})
@@ -826,13 +825,13 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// IMPORTANT: Check findRoute FIRST before local subnet check.
 	// Remote Fake-IPs (e.g., 100.64.0.x on VM with subnet 100.64.1.0/24) should be
 	// routed via the peer that owns that subnet, not passed to local netstack.
-	// Stable selection: use hash of destination IP to consistently select the same peer.
 	route := m.findRoute(dstIP)
-	if route != nil && len(route.Peers) > 0 {
+	nextHops := m.findNextHops(dstIP)
+	if route != nil && len(nextHops) > 0 {
 		// Find lowest hop count and collect peers at that hop.
-		minHop := route.Peers[0].Hop
+		minHop := nextHops[0].Hop
 		var candidates []PeerWithHop
-		for _, p := range route.Peers {
+		for _, p := range nextHops {
 			if p.Hop == minHop {
 				candidates = append(candidates, p)
 			} else {
@@ -982,10 +981,19 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		
 		// Not for us, forward the IPIP packet (we are a transit node)
 		util.LogDebug("[IPIP] Forwarding IPIP packet from %s to %s", fromNodeID, outerDstIP)
-		route := m.findRoute(outerDstIP)
-		if route != nil && len(route.Peers) > 0 {
-			// Select peer (use first peer for simplicity, can optimize later)
-			nextPeer := route.Peers[0].Peer
+		nextHops := m.findNextHops(outerDstIP)
+		if len(nextHops) > 0 {
+			// Select best peer using quality metrics
+			minHop := nextHops[0].Hop
+			var candidates []PeerWithHop
+			for _, p := range nextHops {
+				if p.Hop == minHop {
+					candidates = append(candidates, p)
+				} else {
+					break
+				}
+			}
+			nextPeer := m.selectBestPeer(candidates, outerDstIP)
 			if err := nextPeer.Send(frame); err != nil {
 				util.LogWarn("[IPIP] Forward to %s failed: %v", nextPeer.GetNodeID(), err)
 			} else {
@@ -1096,7 +1104,8 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	route := m.findRoute(dstIP)
-	if route == nil || len(route.Peers) == 0 {
+	nextHops := m.findNextHops(dstIP)
+	if route == nil || len(nextHops) == 0 {
 		// No mesh route — we're the gateway for this destination.
 		// Inject into local netstack so it goes out via proxy/direct.
 		routeInfo := "no route"
@@ -1136,9 +1145,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 
 	// Quality-based selection: same destination prefers lowest-RTT peer.
-	minHop := route.Peers[0].Hop
+	minHop := nextHops[0].Hop
 	var candidates []PeerWithHop
-	for _, p := range route.Peers {
+	for _, p := range nextHops {
 		if p.Hop == minHop {
 			candidates = append(candidates, p)
 		} else {
@@ -1368,14 +1377,17 @@ func (m *MeshManager) GetRoutes() map[string]interface{} {
 	routeList := make([]map[string]interface{}, 0, len(rt.routes))
 	for _, r := range rt.routes {
 		var peerInfos []map[string]interface{}
-		for _, p := range r.Peers {
-			peerInfos = append(peerInfos, map[string]interface{}{
-				"nodeID": p.Peer.GetNodeID(),
-				"hop":    p.Hop,
-			})
+		prefixStr := r.Prefix.String()
+		if nextHops, ok := rt.nextHops[prefixStr]; ok {
+			for _, p := range nextHops {
+				peerInfos = append(peerInfos, map[string]interface{}{
+					"nodeID": p.Peer.GetNodeID(),
+					"hop":    p.Hop,
+				})
+			}
 		}
-			routeList = append(routeList, map[string]interface{}{
-			"prefix":  r.Prefix.String(),
+		routeList = append(routeList, map[string]interface{}{
+			"prefix":  prefixStr,
 			"entries": r.Entries,
 			"via":     peerInfos,
 		})
@@ -1524,8 +1536,9 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
-	// Build MeshRoute slice: exclude own prefixes from peer routes, sort peers by hop.
+	// Build MeshRoute slice and nextHops map: exclude own prefixes from peer routes, sort peers by hop.
 	routes := make([]MeshRoute, 0, len(allEntries)+1+len(advertise))
+	nextHops := make(map[string][]PeerWithHop)
 	for prefixStr, entries := range allEntries {
 		if ownPrefixes[prefixStr] {
 			continue
@@ -1537,10 +1550,13 @@ func (m *MeshManager) recomputeRoutes() {
 			// Secondary sort by node ID for deterministic ordering
 			return entries[i].sender.GetNodeID() < entries[j].sender.GetNodeID()
 		})
+		// Build next hop peers list
 		peerList := make([]PeerWithHop, len(entries))
 		for i, e := range entries {
 			peerList[i] = PeerWithHop{Peer: e.sender, Hop: e.hop}
 		}
+		nextHops[prefixStr] = peerList
+		// Build route entries (owner nodeIDs)
 		ownerSet := make(map[string]bool, len(entries))
 		routeEntries := make([]RouteEntry, 0, len(entries))
 		for _, e := range entries {
@@ -1551,19 +1567,15 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		routes = append(routes, MeshRoute{
 			Prefix:  entries[0].prefix,
-			Peers:   peerList,
 			Entries: routeEntries,
-			lastIdx: 0,
 		})
 	}
 
-	// Add own subnet as local route (peers empty = local).
+	// Add own subnet as local route.
 	if ownSubnet != nil {
 		routes = append(routes, MeshRoute{
 			Prefix:  ownSubnet,
-			Peers:   nil,
 			Entries: []RouteEntry{{NodeID: m.nodeID, Source: RouteSourceDynamic}},
-			lastIdx: 0,
 		})
 	}
 
@@ -1575,9 +1587,7 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 		routes = append(routes, MeshRoute{
 			Prefix:  ipNet,
-			Peers:   nil,
 			Entries: []RouteEntry{{NodeID: m.nodeID, Source: RouteSourceDynamic}},
-			lastIdx: 0,
 		})
 	}
 
@@ -1608,15 +1618,9 @@ func (m *MeshManager) recomputeRoutes() {
 		
 		if !found {
 			// Add new route with static entries only
-			// Find peers that can reach this prefix (for forwarding)
-			var peerList []PeerWithHop
-			// For static routes, we need to find route to the egress nodes
-			// For now, leave peers empty - will be resolved at send time
 			routes = append(routes, MeshRoute{
 				Prefix:  prefix,
-				Peers:   peerList,
 				Entries: staticEntries,
-				lastIdx: 0,
 			})
 		}
 	}
@@ -1735,14 +1739,18 @@ func (m *MeshManager) recomputeRoutes() {
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,
+		nextHops:   nextHops,
 		domainTrie: domainTrie,
 		nodeMap:    nodeMap,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {
 		var peerIDs []string
-		for _, p := range r.Peers {
-			peerIDs = append(peerIDs, fmt.Sprintf("%s(hop=%d)", p.Peer.GetNodeID(), p.Hop))
+		prefixStr := r.Prefix.String()
+		if peers, ok := nextHops[prefixStr]; ok {
+			for _, p := range peers {
+				peerIDs = append(peerIDs, fmt.Sprintf("%s(hop=%d)", p.Peer.GetNodeID(), p.Hop))
+			}
 		}
 		util.LogDebug("[MESH]   %s -> %s", r.Prefix, strings.Join(peerIDs, ", "))
 	}
@@ -1773,17 +1781,27 @@ func (m *MeshManager) recomputeRoutes() {
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
-// The returned pointer is used for stable peer selection.
 func (m *MeshManager) findRoute(dstIP net.IP) *MeshRoute {
 	rt := m.getRouteTable()
 
 	for i := range rt.routes {
 		if rt.routes[i].Prefix.Contains(dstIP) {
-			if isMeshAddress(dstIP) {
-				util.LogDebug("[MESH] findRoute: dst=%s matched route prefix=%s peers=%d",
-					dstIP, rt.routes[i].Prefix, len(rt.routes[i].Peers))
-			}
 			return &rt.routes[i]
+		}
+	}
+	return nil
+}
+
+// findNextHops returns the next hop peers for a given destination IP.
+func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
+	rt := m.getRouteTable()
+
+	for i := range rt.routes {
+		if rt.routes[i].Prefix.Contains(dstIP) {
+			prefixStr := rt.routes[i].Prefix.String()
+			if peers, ok := rt.nextHops[prefixStr]; ok {
+				return peers
+			}
 		}
 	}
 	return nil

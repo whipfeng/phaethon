@@ -651,69 +651,45 @@ func (m *MeshManager) Stop() {
 
 // ResolveDomainSubnet looks up a domain in the unified domain route trie.
 // Returns (subnet, needsFail):
-//   - subnet != nil: matched a route, forward to remote
-//   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
-//   - subnet == nil && needsFail == false: no match, fallback to local pool
+//   - subnet != nil: matched a remote node, forward DNS query to that node
+//   - subnet == nil && needsFail == false: local domain or no match, use local Fake-IP pool
 func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 	rt := m.getRouteTable()
 	
 	// Lookup in unified domain trie (contains both static and dynamic entries)
 	entries, matchLen := rt.domainTrie.Lookup(domain)
 	if matchLen == 0 || len(entries) == 0 {
-		// No match → fallback to local pool
+		// No match → use local pool
 		return nil, false
 	}
 	
 	util.LogDebug("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
 	
-	// Use unified selection algorithm (static priority + hash stability)
+	// Select target node (static priority + hash stability)
 	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
 	if selectedNodeID == "" {
-		// All nodes are offline
-		// Check if any static entries existed → SERVFAIL
-		hasStatic := false
-		for _, e := range entries {
-			if e.Source == RouteSourceStatic {
-				hasStatic = true
-				break
-			}
-		}
-		if hasStatic {
-			util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but all nodes offline, SERVFAIL", domain)
-			return nil, true
-		}
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): all nodes offline, fallback to local pool", domain)
+		// All entries were for self → this is a local domain
+		// Allocate from local Fake-IP pool
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): local domain, use local pool", domain)
 		return nil, false
 	}
 	
-	// Look up node in nodeMap
+	// Look up node in nodeMap (should always exist if domain trie is consistent)
 	nodeInfo := rt.nodeMap[selectedNodeID]
-	
-	// Local node (sender == nil) → fallback to local pool
-	if nodeInfo != nil && nodeInfo.sender == nil {
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, fallback to local pool", domain, selectedNodeID)
+	if nodeInfo == nil || nodeInfo.subnet == nil {
+		// This shouldn't happen if domain trie and nodeMap are in sync
+		util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not in nodeMap, inconsistent state", domain, selectedNodeID)
 		return nil, false
 	}
 	
-	if nodeInfo != nil && nodeInfo.subnet != nil {
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): found node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
-		return nodeInfo.subnet, false
+	// Local node (sender == nil) → use local pool
+	if nodeInfo.sender == nil {
+		util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, use local pool", domain, selectedNodeID)
+		return nil, false
 	}
 	
-	// Match but node not in nodeMap
-	hasStatic := false
-	for _, e := range entries {
-		if e.Source == RouteSourceStatic && e.NodeID == selectedNodeID {
-			hasStatic = true
-			break
-		}
-	}
-	if hasStatic {
-		util.LogWarn("[MESH] ResolveDomainSubnet(%s): static match but node %s not in nodeMap, SERVFAIL", domain, selectedNodeID)
-		return nil, true
-	}
-	util.LogWarn("[MESH] ResolveDomainSubnet(%s): dynamic match but node %s not in nodeMap", domain, selectedNodeID)
-	return nil, false
+	util.LogDebug("[MESH] ResolveDomainSubnet(%s): forward to node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
+	return nodeInfo.subnet, false
 }
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.

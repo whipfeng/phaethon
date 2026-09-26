@@ -127,6 +127,13 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 	e.meshOutboundCh = make(chan meshOutboundPacket, 65536)
 	e.tunWG.Add(1)
 	go e.meshOutboundLoop()
+
+	// Share the local mesh VIP check with the netstack for writeLoop routing
+	if e.netstack != nil {
+		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
+		e.netstack.SetIsMeshIPFunc(e.isMeshIP)
+	}
+
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
 }
 

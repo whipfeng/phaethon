@@ -1049,6 +1049,11 @@ func (e *Engine) readLoop() {
 		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
 		if proto == ipv4.ProtocolNumber && n >= 20 {
 			dstIP := net.IP(pktBuf[16:20])
+			// Diagnostic: log packets to 10.161.88.x at readLoop entry
+			if dstIP[0] == 10 && dstIP[1] == 161 && dstIP[2] == 88 {
+				util.LogInfo("[MESH-DIAG] readLoop: 10.161.88.x packet src=%s dst=%s proto=%d interceptor=%v",
+					net.IP(pktBuf[12:16]), dstIP, pktBuf[9], e.meshInterceptor != nil)
+			}
 			if e.meshInterceptor != nil {
 				// Debug: log TCP packets to mesh subnet
 				if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP

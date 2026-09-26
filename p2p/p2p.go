@@ -66,6 +66,8 @@ type meshInboundPacket struct {
 type MeshHandler interface {
 	HandleMeshFrame(fromNodeID string, frame []byte)
 	HandleTopologyGossip(sender mesh.PeerSender, data []byte)
+	HandleProbe(sender mesh.PeerSender, data []byte)
+	HandleProbeReply(sender mesh.PeerSender, data []byte)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(sender mesh.PeerSender)
 	UnregisterPeerByNodeID(nodeID string)
@@ -489,6 +491,16 @@ func (m *P2PManager) handleCommand(peer *Peer, payload []byte) {
 		m.handleHello(peer, payload)
 	case "gossip":
 		m.handleGossip(peer, payload)
+	case "probe":
+		if m.meshHandler != nil {
+			ps := &peerSender{peer: peer, nodeID: peer.NodeID}
+			m.meshHandler.HandleProbe(ps, payload)
+		}
+	case "probe_reply":
+		if m.meshHandler != nil {
+			ps := &peerSender{peer: peer, nodeID: peer.NodeID}
+			m.meshHandler.HandleProbeReply(ps, payload)
+		}
 	default:
 		util.LogDebug("[P2P] unknown command %q from %s", cmd, peer.ID)
 	}

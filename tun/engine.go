@@ -647,7 +647,7 @@ func (e *Engine) StartStack() error {
 			return e.isMeshIP(ip)
 		},
 		StatsNotify: func() {
-			e.writePackets.Add(0) // no-op, just for reference
+			e.writePackets.Add(1)
 			e.notifyStatsChanged()
 		},
 	})

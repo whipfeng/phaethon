@@ -116,6 +116,78 @@ type MeshRoute struct {
 	lastIdx int      // kept for compatibility but no longer used
 }
 
+// RouteSource indicates the origin of a route entry.
+type RouteSource string
+
+const (
+	RouteSourceStatic  RouteSource = "static"
+	RouteSourceDynamic RouteSource = "dynamic"
+)
+
+// RouteEntry represents a single egress node for a route, with source tracking.
+type RouteEntry struct {
+	NodeID string
+	Source RouteSource
+}
+
+// selectEgressNodeID selects the best egress nodeID from a list of route entries.
+// Algorithm:
+// 1. Sort: static entries first, dynamic entries after
+// 2. Filter: remove offline nodes
+// 3. Sticky: if previously selected node is still available, keep it
+// 4. Hash: stable selection based on targetIP
+func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+
+	// Sort: static first, then dynamic
+	sorted := make([]RouteEntry, len(entries))
+	copy(sorted, entries)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Source == RouteSourceStatic && sorted[j].Source == RouteSourceDynamic {
+			return true
+		}
+		if sorted[i].Source == RouteSourceDynamic && sorted[j].Source == RouteSourceStatic {
+			return false
+		}
+		return false // maintain original order within same source
+	})
+
+	// Filter: remove offline nodes
+	var available []RouteEntry
+	for _, e := range sorted {
+		if m.isNodeOnline(e.NodeID) {
+			available = append(available, e)
+		}
+	}
+
+	if len(available) == 0 {
+		return ""
+	}
+
+	// Hash-based stable selection
+	hash := 0
+	for _, b := range targetIP {
+		hash = hash*31 + int(b)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	idx := hash % len(available)
+	return available[idx].NodeID
+}
+
+// isNodeOnline checks if a node is currently online (has active peers or is self).
+func (m *MeshManager) isNodeOnline(nodeID string) bool {
+	if nodeID == m.nodeID {
+		return true // self is always online
+	}
+	// Check if we have a peer entry for this node
+	peer := m.topology.GetPeer(nodeID)
+	return peer != nil
+}
+
 // MeshManager coordinates mesh overlay networking.
 type MeshManager struct {
 	mu             sync.RWMutex
@@ -248,12 +320,12 @@ func (m *MeshManager) SetStaticRoutes(staticRoutes []config.MeshStaticRoute, sta
 }
 
 // CheckStaticRoute checks if a destination IP matches any static IPIP route.
-// Returns (egressNodeID, true) if matched, ("", false) otherwise.
-func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
+// Returns (nodeIDs, true) if matched, (nil, false) otherwise.
+func (m *MeshManager) CheckStaticRoute(dstIP net.IP) ([]string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.ipipTunnel == nil {
-		return "", false
+		return nil, false
 	}
 	// Special logging for 8.8.8.0/24 range (our test destination)
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
@@ -263,12 +335,12 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) (string, bool) {
 }
 
 // CheckStaticDomainSuffix checks if a domain matches any static domain suffix route.
-// Returns (egressNodeID, true) if matched, ("", false) otherwise.
-func (m *MeshManager) CheckStaticDomainSuffix(domain string) (string, bool) {
+// Returns (nodeIDs, true) if matched, (nil, false) otherwise.
+func (m *MeshManager) CheckStaticDomainSuffix(domain string) ([]string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.ipipTunnel == nil {
-		return "", false
+		return nil, false
 	}
 	return m.ipipTunnel.MatchStaticDomainSuffix(domain, m.staticDomainSuffixes)
 }
@@ -698,59 +770,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	// IMPORTANT: Static routes only apply to non-mesh destinations.
 	// Mesh destinations (100.0.0.0/8) use normal mesh routing without IPIP encapsulation.
 	isMeshDest := m.network != nil && m.network.Contains(dstIP)
+	
+	// Collect static route entries (only for non-mesh destinations)
+	var staticEntries []RouteEntry
 	if !isMeshDest {
-		if egressNodeID, matched := m.CheckStaticRoute(dstIP); matched {
-			util.LogInfo("[IPIP] Static route matched: dst=%s via=%s", dstIP, egressNodeID)
-		util.LogInfo("[IPIP] Attempting encapsulation via %s", egressNodeID)
-		
-		// Get egress node's EIP (calculated from its advertised subnet)
-		egressEIP := m.getEIPForNode(egressNodeID)
-		if egressEIP == nil {
-			util.LogWarn("[IPIP] No EIP for egress node %s (subnet not in topology), dropping packet", egressNodeID)
-			return true
-		}
-		
-		// Get local EIP
-		localEIP := m.ipipTunnel.GetLocalEIP()
-		if localEIP == nil {
-			util.LogWarn("[IPIP] No local EIP, dropping packet")
-			return true
-		}
-		
-		// Encapsulate the packet
-		encapsulated, err := m.ipipTunnel.Encapsulate(localEIP, egressEIP, data)
-		if err != nil {
-			util.LogWarn("[IPIP] Encapsulation failed: %v", err)
-			return true
-		}
-		
-		util.LogDebug("[IPIP] Encapsulated packet: outer src=%s dst=%s inner len=%d total len=%d",
-			localEIP, egressEIP, len(data), len(encapsulated))
-		
-		// Find route to egress node's subnet (EIP is in the same subnet) and send encapsulated packet
-		// Use EIP to find route (semantically correct: we're sending to this subnet)
-		route := m.findRoute(egressEIP)
-		if route != nil && len(route.Peers) > 0 {
-			// Select best peer using quality metrics
-			minHop := route.Peers[0].Hop
-			var candidates []PeerWithHop
-			for _, p := range route.Peers {
-				if p.Hop == minHop {
-					candidates = append(candidates, p)
-				} else {
-					break
-				}
+		if staticNodeIDs, matched := m.CheckStaticRoute(dstIP); matched {
+			for _, nodeID := range staticNodeIDs {
+				staticEntries = append(staticEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceStatic})
 			}
-			selectedPeer := m.selectBestPeer(candidates, egressEIP)
-			if err := selectedPeer.Send(encapsulated); err != nil {
-				util.LogWarn("[IPIP] Send to %s failed: %v", egressNodeID, err)
-			} else {
-				util.LogDebug("[IPIP] Sent encapsulated packet to %s OK (via %s)", egressNodeID, selectedPeer.GetNodeID())
-			}
-		} else {
-			util.LogWarn("[IPIP] No route to egress node %s (EIP=%s)", egressNodeID, egressEIP)
-		}
-		return true
 		}
 	}
 
@@ -797,54 +824,28 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 				dstIP, len(data), selectedPeer.GetNodeID(), minHop)
 		} else {
 			// Non-mesh traffic (advertised routes): use IPIP encapsulation
-			if len(route.NodeIDs) == 0 {
+			// Merge static and dynamic route entries
+			var allEntries []RouteEntry
+			allEntries = append(allEntries, staticEntries...) // static first
+			for _, nodeID := range route.NodeIDs {
+				allEntries = append(allEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceDynamic})
+			}
+			
+			if len(allEntries) == 0 {
 				util.LogWarn("[MESH] No nodeID for route to %s, dropping packet", dstIP)
 				return true
 			}
 
-			// Select best egress nodeID based on path quality
-			// When multiple nodes advertise the same route, choose the one with best RTT
-			var targetNodeID string
-			var targetEIP net.IP
-			var bestRTT time.Duration
-			first := true
-
-			for _, nodeID := range route.NodeIDs {
-				eip := m.getEIPForNode(nodeID)
-				if eip == nil {
-					continue
-				}
-				// Find route to this egress node's EIP
-				egressRoute := m.findRoute(eip)
-				if egressRoute == nil || len(egressRoute.Peers) == 0 {
-					continue
-				}
-				// Get the best peer to this egress node
-				minHop := egressRoute.Peers[0].Hop
-				var candidates []PeerWithHop
-				for _, p := range egressRoute.Peers {
-					if p.Hop == minHop {
-						candidates = append(candidates, p)
-					} else {
-						break
-					}
-				}
-				bestPeer := m.selectBestPeer(candidates, eip)
-				if bestPeer == nil {
-					continue
-				}
-				// Get quality for this path
-				avgRTT, _ := m.GetPeerQuality(bestPeer.GetNodeID())
-				if first || avgRTT < bestRTT || (avgRTT == 0 && bestRTT == 0) {
-					targetNodeID = nodeID
-					targetEIP = eip
-					bestRTT = avgRTT
-					first = false
-				}
+			// Select best egress nodeID using unified algorithm (static priority + hash stability)
+			targetNodeID := m.selectEgressNodeID(dstIP, allEntries)
+			if targetNodeID == "" {
+				util.LogWarn("[MESH] No online egress node for route to %s, dropping packet", dstIP)
+				return true
 			}
 
-			if targetNodeID == "" || targetEIP == nil {
-				util.LogWarn("[MESH] No valid egress node for route to %s, dropping packet", dstIP)
+			targetEIP := m.getEIPForNode(targetNodeID)
+			if targetEIP == nil {
+				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
 				return true
 			}
 

@@ -194,26 +194,26 @@ func ipChecksum(header []byte) uint16 {
 }
 
 // MatchStaticRoute checks if a destination IP matches any static IPIP route
-// Returns (nodeID, true) if matched, ("", false) otherwise
-func (t *IPIPTunnel) MatchStaticRoute(dstIP net.IP, staticRoutes []config.MeshStaticRoute) (string, bool) {
+// Returns (nodeIDs, true) if matched, (nil, false) otherwise
+func (t *IPIPTunnel) MatchStaticRoute(dstIP net.IP, staticRoutes []config.MeshStaticRoute) ([]string, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	
 	for _, route := range staticRoutes {
-		_, network, err := net.ParseCIDR(route.Dst)
+		_, network, err := net.ParseCIDR(route.Prefix)
 		if err != nil {
 			continue
 		}
 		if network.Contains(dstIP) {
-			return route.Via, true
+			return route.NodeIDs, true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 // MatchStaticDomainSuffix checks if a domain matches any static domain suffix route
-// Returns (nodeID, true) if matched, ("", false) otherwise
-func (t *IPIPTunnel) MatchStaticDomainSuffix(domain string, staticSuffixes []config.MeshStaticDomainSuffix) (string, bool) {
+// Returns (nodeIDs, true) if matched, (nil, false) otherwise
+func (t *IPIPTunnel) MatchStaticDomainSuffix(domain string, staticSuffixes []config.MeshStaticDomainSuffix) ([]string, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	
@@ -222,8 +222,8 @@ func (t *IPIPTunnel) MatchStaticDomainSuffix(domain string, staticSuffixes []con
 		s := strings.ToLower(suffix.Suffix)
 		// Match if domain equals suffix or ends with "." + suffix
 		if domain == s || strings.HasSuffix(domain, "."+s) {
-			return suffix.Via, true
+			return suffix.NodeIDs, true
 		}
 	}
-	return "", false
+	return nil, false
 }

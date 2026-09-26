@@ -718,15 +718,16 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
 // Uses the same unified algorithm as IP routing: static priority + hash stability.
+// Domain trie entries are generated from topology, so if an entry exists, the node is reachable.
 func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
 	if len(entries) == 0 {
 		return ""
 	}
 
-	// Filter: remove offline nodes
+	// Filter: skip self
 	var available []RouteEntry
 	for _, e := range entries {
-		if m.isNodeOnline(e.NodeID) {
+		if e.NodeID != m.nodeID {
 			available = append(available, e)
 		}
 	}

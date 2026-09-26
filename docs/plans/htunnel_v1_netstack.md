@@ -310,8 +310,30 @@ func (e *Engine) HTunnelEndpoint(proxyName string) *hTunnelEndpoint
 peer := p2pManager.GetPeer(proxy.Name)
 engine.AddHTunnelEndpoint(proxy.Name, peer)
 
-// 路由：netstack 需要知道哪些目标走 hTunnelEndpoint
-// （待实现：路由规则配置）
+// 使用 h_tunnel 代理时，通过 NetDialWithDevice 绑定到对应 NIC
+ep := engine.HTunnelEndpoint(proxy.Name)
+conn, err := engine.NetDialWithDevice("tcp", addr, ep.NicID())
+```
+
+### 3. 绑定 Device（SO_BINDTODEVICE）
+
+**问题**：h_tunnel 的目标地址不确定，无法配置静态路由。
+
+**方案**：使用 gVisor 的 `SO_BINDTODEVICE` 能力，将 socket 绑定到 hTunnelEndpoint 的 NIC。
+
+```go
+// 创建 TCP endpoint 后，绑定到指定 NIC
+ep.SocketOptions().SetBindToDevice(int32(nicID))
+```
+
+**效果**：
+- 不需要配置路由规则
+- socket 的所有流量自动走绑定的 NIC
+- 类似 Linux 的 `SO_BINDTODEVICE`
+
+**新增方法**：
+```go
+func (e *Engine) NetDialWithDevice(network, addr string, nicID tcpip.NICID) (net.Conn, error)
 ```
 
 ## 优势
@@ -326,29 +348,35 @@ engine.AddHTunnelEndpoint(proxy.Name, peer)
 
 | 文件 | 变更 |
 |------|------|
-| `tun/htunnel_endpoint.go` | 修改：使用 peer 而非 transport |
-| `tun/htunnel_endpoint_test.go` | 修改：适配新接口 |
-| `tun/engine.go` | 修改：AddHTunnelEndpoint 参数改为 peer |
+| `mesh/htunnel_endpoint.go` | 新增：从 tun/ 移入，使用 peer.Send() |
+| `mesh/htunnel_endpoint_test.go` | 新增：从 tun/ 移入，适配新接口 |
+| `tun/engine.go` | 修改：AddHTunnelEndpoint 参数改为 peer；新增 NetDialWithDevice |
 | `config/config.go` | h_tunnel 强制 P2P |
 | `admin/admin.go` | 拒绝禁用 h_tunnel P2P |
 | `dialer/htunnel_direct.go` | sendData 改为 fire-and-forget |
-| `main.go` | 集成：创建 endpoint、路由配置 |
+| `main.go` | 集成：创建 endpoint、使用 NetDialWithDevice |
 | `docs/plans/htunnel_v1_netstack.md` | 本设计文档 |
 
 ## 待实现
 
-### 1. 并发控制
+### 1. 并发控制（已完成）
 
-- [ ] 发送：semaphore 限制 16 并发 POST
-- [ ] 接收：16 个并发 GET goroutine
-- [ ] HTTP 连接池：MaxIdleConnsPerHost = 32
-- [ ] 服务端：支持并发 GET（getWaiters 队列）
+- [x] 发送：semaphore 限制 16 并发 POST
+- [x] 接收：16 个并发 GET goroutine
+- [x] HTTP 连接池：MaxIdleConnsPerHost = 32
+- [x] 服务端：支持并发 GET（getWaiters 队列）
 
-### 2. hTunnelEndpoint 改用 peer.Send()
+### 2. hTunnelEndpoint 改用 peer.Send()（已完成）
 
-- [ ] hTunnelEndpoint 持有 peer 而非 transport
-- [ ] WritePackets 调用 peer.Send()
-- [ ] Engine.AddHTunnelEndpoint 参数改为 peer
+- [x] hTunnelEndpoint 移到 mesh/ 包
+- [x] hTunnelEndpoint 持有 peer 而非 transport
+- [x] WritePackets 调用 peer.Send()
+- [x] Engine.AddHTunnelEndpoint 参数改为 peer
+
+### 3. 绑定 Device（已完成）
+
+- [x] 新增 NetDialWithDevice 方法
+- [x] 使用 gVisor SetBindToDevice 绑定 NIC
 
 ### 3. 路由配置
 

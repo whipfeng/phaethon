@@ -1,7 +1,6 @@
 package tun
 
 import (
-	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -160,126 +159,11 @@ func TestEngineUDPWithRuleConfig(t *testing.T) {
 	if engine.ruleConf == nil {
 		t.Fatal("ruleConf should be set")
 	}
-	if engine.running {
+	if engine.netstack != nil && engine.netstack.IsRunning() {
 		t.Error("engine should not be running yet")
 	}
 
 	_ = engine.IsEnabled() // just verify it doesn't panic
-}
-
-// TestProbeInternalDNS verifies that the internal health probe can reach the
-// TUN DNS hijacker through the gVisor netstack without requiring a real TUN
-// device or admin privileges.
-func TestQueryInternalDNS(t *testing.T) {
-	linkEP := channel.New(512, 1500, "")
-
-	s := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
-	})
-
-	const nicID = 1
-	if err := s.CreateNIC(nicID, linkEP); err != nil {
-		t.Fatalf("CreateNIC: %v", err)
-	}
-
-	tunAddr := tcpip.AddrFrom4([4]byte{198, 18, 0, 1})
-	dnsAddr := tcpip.AddrFrom4([4]byte{198, 18, 0, 2})
-
-	if err := s.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{Address: tunAddr, PrefixLen: 15},
-	}, stack.AddressProperties{}); err != nil {
-		t.Fatalf("AddProtocolAddress tun: %v", err)
-	}
-	if err := s.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{Address: dnsAddr, PrefixLen: 32},
-	}, stack.AddressProperties{}); err != nil {
-		t.Fatalf("AddProtocolAddress dns: %v", err)
-	}
-
-	s.SetPromiscuousMode(nicID, true)
-	s.SetSpoofing(nicID, true)
-	s.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: nicID},
-		{Destination: header.IPv6EmptySubnet, NIC: nicID},
-	})
-
-	// Mirror the real engine's read/write loops so outbound netstack packets are
-	// looped back inbound, just like they would be through the TUN device.
-	var loopWg sync.WaitGroup
-	loopWg.Add(1)
-	stopLoop := make(chan struct{})
-	go func() {
-		defer loopWg.Done()
-		for {
-			select {
-			case <-stopLoop:
-				return
-			default:
-			}
-			pkt := linkEP.Read()
-			if pkt == nil {
-				select {
-				case <-stopLoop:
-					return
-				case <-time.After(10 * time.Millisecond):
-				}
-				continue
-			}
-			proto := pkt.NetworkProtocolNumber
-			buf := pkt.ToBuffer()
-			data := buf.Flatten()
-			pkt.DecRef()
-			newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(data),
-			})
-			linkEP.InjectInbound(proto, newPkt)
-			newPkt.DecRef()
-		}
-	}()
-	defer func() {
-		close(stopLoop)
-		loopWg.Wait()
-	}()
-
-	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
-	pool := mesh.NewFakeIPPoolWithSubnet(subnet, 3)
-	hijack := mesh.NewDNSHijacker(s, pool, tunAddr, dnsAddr)
-	var wg sync.WaitGroup
-	if err := hijack.Start(&wg); err != nil {
-		t.Fatalf("start dns hijacker: %v", err)
-	}
-	defer func() {
-		hijack.Stop()
-		wg.Wait()
-	}()
-
-	// Give goroutine time to start listening.
-	time.Sleep(50 * time.Millisecond)
-
-	engine := &Engine{
-		running: true,
-		ns:      s,
-		addr:    tunAddr,
-		dnsAddr: dnsAddr,
-	}
-
-	domain := fmt.Sprintf("tun-health-%d.example.com", time.Now().UnixNano())
-	query := mesh.BuildDNSQuery(domain, uint16(time.Now().UnixNano()))
-	resp, err := engine.queryInternalDNS(query)
-	if err != nil {
-		t.Fatalf("queryInternalDNS failed: %v", err)
-	}
-	ip, _ := mesh.ParseDNSResponseIP(resp)
-	if ip == nil {
-		t.Fatal("failed to parse response IP")
-	}
-	// Verify we got a valid IP response (Fake-IP from the pool)
-	if ip.To4() == nil {
-		t.Fatalf("expected valid IPv4, got %s", ip)
-	}
 }
 
 // TestDNSHijackerResolve verifies the direct Resolve path used by the

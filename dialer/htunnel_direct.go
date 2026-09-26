@@ -19,6 +19,10 @@ import (
 // address semantics, frames flow directly in POST/GET bodies.
 const HTunnelCmdMesh = "MESH"
 
+// htunnelConcurrency is the number of concurrent POST and GET requests
+// for data frames. This provides high throughput while limiting resource usage.
+const htunnelConcurrency = 16
+
 // htunnelDirectTransport implements frame.FrameTransport over h_tunnel
 // without the BIND stream channel: one HEAD (X-C: MESH) allocates the
 // channel, frames travel in POST bodies (client → server) and long-poll GET
@@ -30,18 +34,27 @@ type htunnelDirectTransport struct {
 	client       *http.Client
 	crypto       *util.HTunnelCrypto
 
+	// Send concurrency control
+	sendSem chan struct{} // semaphore for concurrent POST requests
+
+	// Recv concurrency: multiple GET goroutines feed into recvCh
+	recvCh chan recvResult // channel for frames from concurrent GET loops
+
 	ctrlMu sync.Mutex // serializes control-lane POSTs
 	seqMu  sync.Mutex // guards writeSeq/deleteSeq
 
-	readMu     sync.Mutex
-	readBuf    []byte
-	readOffset int
-	readSeq    int
-	writeSeq   int
-	deleteSeq  int
+	writeSeq  int
+	deleteSeq int
 
 	closed    chan struct{}
 	closeOnce sync.Once
+}
+
+// recvResult holds a frame received from a GET request, or an error.
+type recvResult struct {
+	frameType byte
+	payload   []byte
+	err       error
 }
 
 // dialP2PDirect establishes a mesh channel via a single HEAD and returns the
@@ -79,8 +92,16 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		connectionID: connectionID,
 		client:       client,
 		crypto:       crypto,
+		sendSem:      make(chan struct{}, htunnelConcurrency),
+		recvCh:       make(chan recvResult, htunnelConcurrency*2),
 		closed:       make(chan struct{}),
 	}
+
+	// Start concurrent GET loops for receiving
+	for i := 0; i < htunnelConcurrency; i++ {
+		go t.recvLoop()
+	}
+
 	return t, nil
 }
 
@@ -124,8 +145,9 @@ func (t *htunnelDirectTransport) sendControl(frameType byte, payload []byte) err
 
 // sendData sends a data frame (FrameMeshPacket) via fire-and-forget HTTP POST.
 // The frame is serialized, a sequence number is assigned, and a goroutine
-// performs the POST. The caller does not wait for the response — upper-layer
-// TCP retransmission handles any lost packets.
+// performs the POST. The semaphore limits concurrent POSTs to prevent
+// goroutine accumulation. If the semaphore is full, the call blocks,
+// creating backpressure to peerWriteLoop.
 func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error {
 	select {
 	case <-t.closed:
@@ -144,7 +166,15 @@ func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error 
 	seq := t.writeSeq
 	t.seqMu.Unlock()
 
+	// Acquire semaphore (blocks if htunnelConcurrency POSTs are in flight)
+	select {
+	case t.sendSem <- struct{}{}:
+	case <-t.closed:
+		return io.ErrClosedPipe
+	}
+
 	go func() {
+		defer func() { <-t.sendSem }()
 		if err := t.postBatch(data, seq); err != nil {
 			util.LogDebug("[HTUNNEL-DIRECT] data POST fail (seq=%d): %v", seq, err)
 		}
@@ -186,31 +216,19 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	return nil
 }
 
-// Recv blocks for the next frame from the server, cycling long-poll GETs
-// (40s context; 408 = server-side poll timeout, retry). Liveness: any GET
-// failure ends the session; no htunnel-layer heartbeat needed.
-func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
-	t.readMu.Lock()
-	defer t.readMu.Unlock()
-
+// recvLoop continuously sends GET requests and feeds received frames into recvCh.
+// Multiple recvLoop goroutines run concurrently to eliminate the gap between GETs.
+func (t *htunnelDirectTransport) recvLoop() {
+	readSeq := 0
 	for {
 		select {
 		case <-t.closed:
-			return 0, nil, io.ErrClosedPipe
+			return
 		default:
 		}
 
-		if t.readOffset < len(t.readBuf) {
-			ft, payload, err := frame.ReadFrame(bytes.NewReader(t.readBuf[t.readOffset:]))
-			if err != nil {
-				return 0, nil, fmt.Errorf("htunnel-direct: parse batch fail: %w", err)
-			}
-			t.readOffset += 3 + len(payload)
-			return ft, payload, nil
-		}
-
-		t.readSeq++
-		seq := t.readSeq
+		readSeq++
+		seq := readSeq
 		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), nil)
 		req.Header.Set(headerConnectionID, t.connectionID)
 		req.Header.Set(headerContentSeq, strconv.Itoa(seq))
@@ -219,29 +237,80 @@ func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
 		resp, err := t.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
-			return 0, nil, fmt.Errorf("htunnel-direct: get fail: %w", err)
+			select {
+			case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: get fail: %w", err)}:
+			case <-t.closed:
+			}
+			return
 		}
+
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		cancel()
 
 		if resp.StatusCode == 410 {
-			return 0, nil, io.ErrClosedPipe
+			select {
+			case t.recvCh <- recvResult{err: io.ErrClosedPipe}:
+			case <-t.closed:
+			}
+			return
 		}
 		if resp.StatusCode == 408 {
-			continue
+			continue // timeout, retry
 		}
 		if resp.StatusCode != 200 {
-			return 0, nil, fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode)
+			select {
+			case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode)}:
+			case <-t.closed:
+			}
+			return
 		}
-		if len(body) > 0 && t.crypto.IsEnabled() {
-			body, err = t.crypto.OpenBody(body)
-			if err != nil {
-				return 0, nil, fmt.Errorf("htunnel-direct: decrypt fail: %w", err)
+
+		if len(body) > 0 {
+			if t.crypto.IsEnabled() {
+				body, err = t.crypto.OpenBody(body)
+				if err != nil {
+					select {
+					case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: decrypt fail: %w", err)}:
+					case <-t.closed:
+					}
+					return
+				}
+			}
+
+			// Parse frames from the batch and send to recvCh
+			reader := bytes.NewReader(body)
+			for reader.Len() > 0 {
+				ft, payload, err := frame.ReadFrame(reader)
+				if err != nil {
+					select {
+					case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: parse frame fail: %w", err)}:
+					case <-t.closed:
+					}
+					return
+				}
+				select {
+				case t.recvCh <- recvResult{frameType: ft, payload: payload}:
+				case <-t.closed:
+					return
+				}
 			}
 		}
-		t.readBuf = body
-		t.readOffset = 0
+	}
+}
+
+// Recv returns the next frame from the server. It reads from recvCh which is
+// fed by multiple concurrent GET goroutines (recvLoop). This eliminates the
+// gap between GETs and provides low-latency data delivery.
+func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
+	select {
+	case <-t.closed:
+		return 0, nil, io.ErrClosedPipe
+	case result := <-t.recvCh:
+		if result.err != nil {
+			return 0, nil, result.err
+		}
+		return result.frameType, result.payload, nil
 	}
 }
 

@@ -128,8 +128,9 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 	e.tunWG.Add(1)
 	go e.meshOutboundLoop()
 
-	// Share the local mesh VIP check with the netstack for writeLoop routing
+	// Share callbacks with the netstack for writeLoop routing
 	if e.netstack != nil {
+		e.netstack.SetMeshInterceptor(handler)
 		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
 		e.netstack.SetIsMeshIPFunc(e.isMeshIP)
 	}
@@ -140,6 +141,9 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 // SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
 func (e *Engine) SetNATTable(nat *mesh.NATTable) {
 	e.natTable = nat
+	if e.netstack != nil {
+		e.netstack.SetNATTable(nat)
+	}
 }
 
 // SetModeBTable sets the Mode B connection tracking table.

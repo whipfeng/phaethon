@@ -2,6 +2,7 @@ package tun
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -243,7 +244,8 @@ func TestQueryInternalDNS(t *testing.T) {
 		loopWg.Wait()
 	}()
 
-	pool := mesh.NewFakeIPPool()
+	_, subnet, _ := net.ParseCIDR("100.64.0.0/20")
+	pool := mesh.NewFakeIPPoolWithSubnet(subnet, 3)
 	hijack := mesh.NewDNSHijacker(s, pool, tunAddr, dnsAddr)
 	var wg sync.WaitGroup
 	if err := hijack.Start(&wg); err != nil {
@@ -301,4 +303,25 @@ func TestDNSHijackerResolve(t *testing.T) {
 	if ip.To4() == nil {
 		t.Fatalf("expected valid IPv4, got %s", ip)
 	}
+}
+
+// slicePayload implements stack.Payload for test data
+type slicePayload struct {
+	data []byte
+}
+
+func (s *slicePayload) Read(p []byte) (int, error) {
+	n := copy(p, s.data)
+	s.data = s.data[n:]
+	return n, nil
+}
+
+func (s *slicePayload) Len() int {
+	return len(s.data)
+}
+
+// parseDNSResponseIP parses a DNS response and returns the first IP address
+func parseDNSResponseIP(data []byte) (net.IP, error) {
+	ip, _ := mesh.ParseDNSResponseIP(data)
+	return ip, nil
 }

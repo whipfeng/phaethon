@@ -173,9 +173,18 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 	if len(query) == 0 {
 		return nil, fmt.Errorf("empty query")
 	}
-	domain, ok := parseDNSQueryDomain(query)
+	domain, qtype, ok := parseDNSQueryDomain(query)
 	if !ok || domain == "" {
 		return nil, fmt.Errorf("failed to parse query")
+	}
+
+	// Return empty response for AAAA queries (no IPv6 support)
+	if qtype == 28 { // AAAA
+		resp := buildDNSEmptyResponse(query)
+		if resp == nil {
+			return nil, fmt.Errorf("failed to build empty response")
+		}
+		return resp, nil
 	}
 
 	fakeIP := h.pool.Lookup(domain)
@@ -228,7 +237,7 @@ func (h *DNSHijacker) serveLoop() {
 		}
 
 		// Minimal DNS parsing: extract the queried domain for logging
-		domain, ok := parseDNSQueryDomain(packet)
+		domain, _, ok := parseDNSQueryDomain(packet)
 		if ok && domain != "" {
 			srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
 			srcPort := res.RemoteAddr.Port
@@ -249,9 +258,21 @@ func (h *DNSHijacker) serveLoop() {
 
 // processQuery handles a single DNS query: cache check, local pool, or remote forward.
 func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) {
-	domain, ok := parseDNSQueryDomain(packet)
+	domain, qtype, ok := parseDNSQueryDomain(packet)
 	if !ok || domain == "" {
 		util.LogWarn("tun dns: failed to parse query from %d bytes", len(packet))
+		return
+	}
+
+	// Return empty response for AAAA queries (no IPv6 support)
+	if qtype == 28 { // AAAA
+		util.LogDebug("tun dns: AAAA query for %s, returning empty response", domain)
+		resp := buildDNSEmptyResponse(packet)
+		if resp != nil {
+			if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+				util.LogWarn("tun dns: write empty response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+			}
+		}
 		return
 	}
 
@@ -387,25 +408,26 @@ func (p *SlicePayload) Read(dst []byte) (int, error) {
 	return n, nil
 }
 
-// parseDNSQueryDomain extracts the queried domain from a DNS query packet.
-func parseDNSQueryDomain(pkt []byte) (string, bool) {
+// parseDNSQueryDomain extracts the queried domain and query type from a DNS query packet.
+// Query type: 1=A, 28=AAAA, etc.
+func parseDNSQueryDomain(pkt []byte) (string, uint16, bool) {
 	if len(pkt) < 12 {
-		return "", false
+		return "", 0, false
 	}
 	flags := (uint16(pkt[2]) << 8) | uint16(pkt[3])
 	if flags&0x8000 != 0 {
-		return "", false
+		return "", 0, false
 	}
 	qdcount := (uint16(pkt[4]) << 8) | uint16(pkt[5])
 	if qdcount == 0 {
-		return "", false
+		return "", 0, false
 	}
 
 	off := 12
 	var labels []string
 	for {
 		if off >= len(pkt) {
-			return "", false
+			return "", 0, false
 		}
 		llen := int(pkt[off])
 		off++
@@ -413,11 +435,17 @@ func parseDNSQueryDomain(pkt []byte) (string, bool) {
 			break
 		}
 		if llen > 63 || off+llen > len(pkt) {
-			return "", false
+			return "", 0, false
 		}
 		labels = append(labels, string(pkt[off:off+llen]))
 		off += llen
 	}
+
+	// Read QTYPE and QCLASS (4 bytes total after domain)
+	if off+4 > len(pkt) {
+		return "", 0, false
+	}
+	qtype := (uint16(pkt[off]) << 8) | uint16(pkt[off+1])
 
 	var domain string
 	for i, l := range labels {
@@ -426,7 +454,7 @@ func parseDNSQueryDomain(pkt []byte) (string, bool) {
 		}
 		domain += l
 	}
-	return domain, true
+	return domain, qtype, true
 }
 
 // buildDNSResponse builds a minimal DNS response with a single A record.
@@ -481,6 +509,40 @@ func buildDNSErrorResponse(query []byte) []byte {
 	resp = append(resp, query[0], query[1])
 	// Flags: response + SERVFAIL (RCODE=2)
 	resp = append(resp, 0x80, 0x02)
+	// QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+	resp = append(resp, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+	// Copy question section
+	qoff := 12
+	for qoff < len(query) {
+		llen := int(query[qoff])
+		if llen == 0 {
+			resp = append(resp, 0x00)
+			qoff++
+			break
+		}
+		if qoff+1+llen > len(query) {
+			return nil
+		}
+		resp = append(resp, query[qoff:qoff+1+llen]...)
+		qoff += 1 + llen
+	}
+	// Copy QTYPE and QCLASS
+	if qoff+4 <= len(query) {
+		resp = append(resp, query[qoff:qoff+4]...)
+	}
+	return resp
+}
+
+// buildDNSEmptyResponse builds a NOERROR DNS response with no answers (for AAAA queries).
+func buildDNSEmptyResponse(query []byte) []byte {
+	if len(query) < 12 {
+		return nil
+	}
+	resp := make([]byte, 0, len(query))
+	// Transaction ID
+	resp = append(resp, query[0], query[1])
+	// Flags: response, no error (NOERROR)
+	resp = append(resp, 0x81, 0x80)
 	// QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
 	resp = append(resp, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 	// Copy question section

@@ -84,6 +84,12 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		return nil
 	}
 
+	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
+	if tunEnabled && !engine.IsTUNRunning() {
+		util.LogWarn("TUN was enabled in config but failed to start - running in mesh-only mode")
+		util.LogWarn("Local applications cannot use the proxy, but mesh routing still works")
+	}
+
 	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.

@@ -818,6 +818,7 @@ func (e *Engine) StartTUN() error {
 
 // Start starts the gVisor netstack and optionally the TUN device.
 // Convenience method equivalent to StartStack() + StartTUN() (if TUN is enabled).
+// If TUN fails to start, the netstack continues running (mesh-only mode).
 func (e *Engine) Start() error {
 	if err := e.StartStack(); err != nil {
 		return err
@@ -825,8 +826,14 @@ func (e *Engine) Start() error {
 	tunEnabled := e.ruleConf != nil && e.ruleConf.TUN != nil && e.ruleConf.TUN.IsEnabled()
 	if tunEnabled {
 		if err := e.StartTUN(); err != nil {
-			e.StopStack()
-			return err
+			// TUN failed, but keep netstack running for mesh-only mode.
+			// Log a prominent warning so the user knows TUN is not available.
+			util.LogWarn("========================================")
+			util.LogWarn("TUN initialization failed: %v", err)
+			util.LogWarn("Continuing in mesh-only mode (no TUN device)")
+			util.LogWarn("========================================")
+			// Don't call StopStack() - netstack is still needed for mesh
+			return nil
 		}
 	}
 	return nil

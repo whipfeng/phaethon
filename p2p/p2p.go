@@ -426,6 +426,30 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 	util.LogInfo("[P2P] runSession started for %s", peer.ID)
 
+	// Heartbeat timeout monitor: close connection if no data received for 30s
+	heartbeatTimeout := 30 * time.Second
+	checkInterval := 10 * time.Second
+	timeoutDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-timeoutDone:
+				return
+			case <-peer.stopCh:
+				return
+			case <-ticker.C:
+				if time.Since(peer.LastSeen) > heartbeatTimeout {
+					util.LogWarn("[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(peer.LastSeen))
+					peer.transport.Close()
+					return
+				}
+			}
+		}
+	}()
+	defer close(timeoutDone)
+
 	for {
 		frameType, payload, err := peer.transport.Recv()
 		peer.LastSeen = time.Now()

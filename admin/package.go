@@ -500,6 +500,9 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	util.LogInfo("[ADMIN] received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
+	// Check if there's a newer version, exit if so
+	go s.checkForNewerVersion(contents)
+
 	// Continue distributing to other peers (flood fill)
 	go s.DistributePackage(pkgData)
 

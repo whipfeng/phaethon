@@ -91,6 +91,7 @@ type P2PTransport interface {
 	ListMeshPeerIDs() []string
 	SetMeshInfo(nodeID, vip string)
 	ResendHelloToAll()
+	StopPeerByNodeID(nodeID string)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -886,14 +887,19 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 	route := m.findRoute(dstIP)
 	nextHops := m.findNextHops(dstIP)
 	if route != nil && len(nextHops) > 0 {
-		// Select best peer using quality metrics (consider all candidates)
-		selectedPeer := m.selectBestPeer(nextHops, dstIP)
+		// Get sorted peer list for failover
+		candidatePeers := m.selectBestPeers(nextHops, dstIP)
+		if len(candidatePeers) == 0 {
+			util.LogWarn("[MESH] No candidates for %s, dropping packet", dstIP)
+			return true
+		}
+		selectedPeer := candidatePeers[0]
 		selectedHop := m.getHopForPeer(nextHops, selectedPeer)
 
 		// Debug log for VIP-like destinations
 		if len(dstIP) >= 4 && dstIP[3] == 1 {
 			util.LogDebug("[MESH] Sending to %s: selected peer=%s (candidates=%d)",
-				dstIP, selectedPeer.GetNodeID(), len(nextHops))
+				dstIP, selectedPeer.GetNodeID(), len(candidatePeers))
 		}
 
 		// Check if destination is in mesh network (100.0.0.0/8)
@@ -971,8 +977,38 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 			}
 		}
 
-		if err := selectedPeer.Send(sendPacket); err != nil {
-			util.LogWarn("[MESH] send to %s failed: %v", selectedPeer.GetNodeID(), err)
+		// Try to send, with failover to other candidates on queue full
+		var sendErr error
+		sent := false
+		for i, peer := range candidatePeers {
+			sendErr = peer.Send(sendPacket)
+			if sendErr == nil {
+				sent = true
+				selectedPeer = peer
+				selectedHop = m.getHopForPeer(nextHops, peer)
+				if i > 0 {
+					util.LogInfo("[MESH] send to %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
+						dstIP, peer.GetNodeID(), i+1)
+				}
+				break
+			}
+			if strings.Contains(sendErr.Error(), "peer stopped") {
+				// Peer stopped, trigger removal and try next
+				util.LogWarn("[MESH] send to %s failed: peer %s stopped, triggering removal",
+					dstIP, peer.GetNodeID())
+				if m.p2p != nil {
+					m.p2p.StopPeerByNodeID(peer.GetNodeID())
+				}
+				continue
+			}
+			// Queue full, try next candidate
+			util.LogDebug("[MESH] send to %s via %s failed (queue full), trying next candidate",
+				dstIP, peer.GetNodeID())
+		}
+
+		if !sent {
+			util.LogWarn("[MESH] send to %s failed on all %d candidates: %v",
+				dstIP, len(candidatePeers), sendErr)
 		} else {
 			// Debug log for successful sends to VIP-like destinations
 			if len(dstIP) >= 4 && dstIP[3] == 1 {
@@ -1194,7 +1230,14 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	copy(pkt, frame)
 	decrementIPTTL(pkt)
 	if err := selectedPeer.Send(pkt); err != nil {
-		util.LogWarn("[MESH] forward to %s failed: %v", selectedPeer.GetNodeID(), err)
+		if strings.Contains(err.Error(), "peer stopped") {
+			util.LogWarn("[MESH] forward to %s failed: peer stopped, triggering removal", selectedPeer.GetNodeID())
+			if m.p2p != nil {
+				m.p2p.StopPeerByNodeID(selectedPeer.GetNodeID())
+			}
+		} else {
+			util.LogWarn("[MESH] forward to %s failed: %v", selectedPeer.GetNodeID(), err)
+		}
 	}
 }
 
@@ -2171,6 +2214,37 @@ func (m *MeshManager) probeLoop() {
 			return
 		case <-ticker.C:
 			m.sendProbes()
+			m.checkProbeFailures()
+		}
+	}
+}
+
+// checkProbeFailures checks for peers with consecutive probe failures.
+// If a peer has failed to respond to 3 consecutive probes (30 seconds),
+// it is considered dead and disconnected.
+func (m *MeshManager) checkProbeFailures() {
+	if m.p2p == nil {
+		return
+	}
+
+	const maxFailures = 3 // 3 consecutive failures = 30 seconds
+
+	allPeers := m.topology.GetAllPeers()
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue // not a direct peer
+		}
+
+		nodeID := peer.NodeID()
+		quality := m.qualityTracker.Get(nodeID)
+
+		// Check if peer has too many consecutive failures
+		if quality.ConsecutiveFailures() >= maxFailures {
+			util.LogWarn("[MESH] peer %s has %d consecutive probe failures, disconnecting",
+				nodeID, quality.ConsecutiveFailures())
+			m.p2p.StopPeerByNodeID(nodeID)
+			// Reset counters after disconnect
+			quality.Reset()
 		}
 	}
 }
@@ -2193,9 +2267,9 @@ func (m *MeshManager) sendProbes() {
 		probeData := NewProbeMsg(m.probeSeq)
 		peer.Sender.SendGossip(probeData)
 
-		// Record that we sent a probe
+		// Record that we sent a probe (also checks if previous probe was replied)
 		quality := m.qualityTracker.Get(nodeID)
-		quality.RecordSent()
+		quality.RecordSent(m.probeSeq)
 
 		directCount++
 		util.LogDebug("[MESH] sent probe to %s (seq=%d)", nodeID, m.probeSeq)
@@ -2238,7 +2312,7 @@ func (m *MeshManager) HandleProbeReply(sender PeerSender, data []byte) {
 	// Update quality tracker
 	nodeID := sender.GetNodeID()
 	quality := m.qualityTracker.Get(nodeID)
-	quality.RecordRTT(rtt)
+	quality.RecordRTT(rtt, reply.Seq)
 
 	avgRTT, loss := quality.Stats()
 	util.LogInfo("[MESH] probe_reply from %s (seq=%d): rtt=%v avg=%v loss=%.1f%%",
@@ -2255,11 +2329,18 @@ func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss 
 // Priority: lowest hop count first, then best link quality (lowest effectiveRTT) as tiebreaker.
 // Falls back to random selection among min-hop candidates if no quality data.
 func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) PeerSender {
-	if len(candidates) == 0 {
+	peers := m.selectBestPeers(candidates, dstIP)
+	if len(peers) == 0 {
 		return nil
 	}
-	if len(candidates) == 1 {
-		return candidates[0].Peer
+	return peers[0]
+}
+
+// selectBestPeers returns candidates sorted by preference (best first).
+// Priority: lowest hop count first, then best link quality (lowest effectiveRTT) as tiebreaker.
+func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []PeerSender {
+	if len(candidates) == 0 {
+		return nil
 	}
 
 	// Find minimum hop count
@@ -2278,12 +2359,7 @@ func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) Pee
 		}
 	}
 
-	// If only one candidate with min hop, use it
-	if len(minHopCandidates) == 1 {
-		return minHopCandidates[0].Peer
-	}
-
-	// Among min-hop candidates, select by link quality (lowest effectiveRTT)
+	// Among min-hop candidates, sort by link quality (lowest effectiveRTT first)
 	type peerQuality struct {
 		peer        PeerSender
 		effectiveRT time.Duration
@@ -2298,8 +2374,6 @@ func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) Pee
 		hasData := avgRTT > 0
 		if hasData {
 			anyData = true
-			// effectiveRTT = avgRTT / (1 - loss)
-			// loss=0.5 -> effectiveRTT=2*avgRTT, loss=0.9 -> effectiveRTT=10*avgRTT
 			effectiveRT := time.Duration(float64(avgRTT) / (1.0 - loss))
 			qualities[i] = peerQuality{peer: c.Peer, effectiveRT: effectiveRT, hasData: hasData}
 		} else {
@@ -2307,33 +2381,47 @@ func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) Pee
 		}
 	}
 
-	// If no quality data, fall back to random selection among min-hop candidates
+	// If no quality data, shuffle min-hop candidates for load balancing
 	if !anyData {
-		idx := rand.Intn(len(minHopCandidates))
-		return minHopCandidates[idx].Peer
+		result := make([]PeerSender, len(minHopCandidates))
+		perm := rand.Perm(len(minHopCandidates))
+		for i, idx := range perm {
+			result[i] = minHopCandidates[idx].Peer
+		}
+		return result
 	}
 
-	// Select peer with lowest effectiveRTT among min-hop candidates with data
-	var bestPeer PeerSender
-	var bestEffectiveRT time.Duration
-	first := true
+	// Sort: peers with data first (by effectiveRTT), then peers without data
+	var withData, withoutData []PeerSender
 	for _, pq := range qualities {
-		if !pq.hasData {
-			continue
-		}
-		if first || pq.effectiveRT < bestEffectiveRT {
-			bestPeer = pq.peer
-			bestEffectiveRT = pq.effectiveRT
-			first = false
+		if pq.hasData {
+			withData = append(withData, pq.peer)
+		} else {
+			withoutData = append(withoutData, pq.peer)
 		}
 	}
 
-	// If somehow no peer had data, fall back to first min-hop candidate
-	if bestPeer == nil {
-		return minHopCandidates[0].Peer
+	// Sort withData by effectiveRTT (bubble sort for simplicity, list is small)
+	for i := 0; i < len(withData); i++ {
+		for j := i + 1; j < len(withData); j++ {
+			_, lossI := m.GetPeerQuality(withData[i].GetNodeID())
+			_, lossJ := m.GetPeerQuality(withData[j].GetNodeID())
+			avgI, _ := m.GetPeerQuality(withData[i].GetNodeID())
+			avgJ, _ := m.GetPeerQuality(withData[j].GetNodeID())
+			effectiveI := time.Duration(float64(avgI) / (1.0 - lossI))
+			effectiveJ := time.Duration(float64(avgJ) / (1.0 - lossJ))
+			if effectiveI > effectiveJ {
+				withData[i], withData[j] = withData[j], withData[i]
+			}
+		}
 	}
 
-	return bestPeer
+	// Shuffle withoutData for load balancing
+	rand.Shuffle(len(withoutData), func(i, j int) {
+		withoutData[i], withoutData[j] = withoutData[j], withoutData[i]
+	})
+
+	return append(withData, withoutData...)
 }
 
 // getHopForPeer returns the hop count for a selected peer from the candidates list.

@@ -82,8 +82,7 @@ type peerSender struct {
 }
 
 func (s *peerSender) Send(data []byte) error {
-	enqueueWrite(s.peer, frame.FrameMeshPacket, data)
-	return nil
+	return enqueueWrite(s.peer, frame.FrameMeshPacket, data)
 }
 
 func (s *peerSender) SendGossip(data []byte) {
@@ -210,11 +209,25 @@ func (m *P2PManager) meshInboundLoop() {
 	}
 }
 
+// ErrPeerStopped is returned when sending to a peer that has been stopped.
+var ErrPeerStopped = fmt.Errorf("peer stopped")
+
+// ErrQueueFull is returned when the peer's write queue is full.
+var ErrQueueFull = fmt.Errorf("write queue full")
+
 // enqueueWrite queues a frame for async write. Non-blocking: drops if the
 // queue is full (drop-tail; overlay TCP retransmission recovers mesh data).
 // Control frames (heartbeat/hello/gossip) use a small priority queue so they
 // never queue behind bulk mesh data.
-func enqueueWrite(peer *Peer, frameType byte, data []byte) {
+// Returns error: nil if enqueued, ErrPeerStopped if peer stopped, ErrQueueFull if queue full.
+func enqueueWrite(peer *Peer, frameType byte, data []byte) error {
+	// Check if peer is stopped
+	select {
+	case <-peer.stopCh:
+		return ErrPeerStopped
+	default:
+	}
+
 	ch := peer.writeCh
 	if frameType != frame.FrameMeshPacket {
 		ch = peer.controlCh
@@ -224,8 +237,10 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte) {
 	}
 	select {
 	case ch <- writeReq{frameType: frameType, data: data}:
+		return nil
 	default:
 		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, frameType)
+		return ErrQueueFull
 	}
 }
 
@@ -276,6 +291,25 @@ func (m *P2PManager) StopPeer(id string) {
 		})
 		if peer.transport != nil {
 			peer.transport.Close()
+		}
+	}
+}
+
+// StopPeerByNodeID disconnects a P2P peer by its mesh node ID.
+// Used when probe failures indicate the peer is unreachable.
+func (m *P2PManager) StopPeerByNodeID(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, peer := range m.peers {
+		if peer.NodeID == nodeID {
+			util.LogInfo("[P2P] stopping peer %s (nodeID=%s) due to probe failures", id, nodeID)
+			peer.stopOnce.Do(func() {
+				close(peer.stopCh)
+			})
+			if peer.transport != nil {
+				peer.transport.Close()
+			}
+			return
 		}
 	}
 }

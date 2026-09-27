@@ -7,13 +7,16 @@ import (
 
 // PeerQuality tracks the link quality to a direct peer.
 type PeerQuality struct {
-	mu         sync.RWMutex
-	rttWindow  []time.Duration // sliding window of RTT samples
-	rttIdx     int             // current index in circular buffer
-	rttCount   int             // number of samples (up to window size)
-	sent       int             // probes sent
-	received   int             // probe replies received
-	lastUpdate time.Time
+	mu                sync.RWMutex
+	rttWindow         []time.Duration // sliding window of RTT samples
+	rttIdx            int             // current index in circular buffer
+	rttCount          int             // number of samples (up to window size)
+	sent              int             // probes sent
+	received          int             // probe replies received
+	consecutiveFailed int             // consecutive probe failures
+	lastProbeSeq      uint32          // last probe sequence number sent
+	lastReplySeq      uint32          // last probe reply sequence number received
+	lastUpdate        time.Time
 }
 
 // NewPeerQuality creates a new PeerQuality tracker.
@@ -24,7 +27,7 @@ func NewPeerQuality() *PeerQuality {
 }
 
 // RecordRTT adds an RTT sample to the sliding window.
-func (q *PeerQuality) RecordRTT(rtt time.Duration) {
+func (q *PeerQuality) RecordRTT(rtt time.Duration, seq uint32) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -34,14 +37,36 @@ func (q *PeerQuality) RecordRTT(rtt time.Duration) {
 		q.rttCount++
 	}
 	q.received++
+	q.lastReplySeq = seq
+	q.consecutiveFailed = 0 // reset on success
 	q.lastUpdate = time.Now()
 }
 
-// RecordSent increments the sent counter.
-func (q *PeerQuality) RecordSent() {
+// RecordSent increments the sent counter and records the probe sequence number.
+func (q *PeerQuality) RecordSent(seq uint32) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.sent++
+	// Check if we received the previous probe
+	if q.lastProbeSeq > 0 && q.lastReplySeq < q.lastProbeSeq {
+		// Previous probe was not replied
+		q.consecutiveFailed++
+	}
+	q.lastProbeSeq = seq
+}
+
+// RecordFailure increments the consecutive failure counter.
+func (q *PeerQuality) RecordFailure() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.consecutiveFailed++
+}
+
+// ConsecutiveFailures returns the number of consecutive probe failures.
+func (q *PeerQuality) ConsecutiveFailures() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.consecutiveFailed
 }
 
 // AverageRTT returns the average RTT over the sliding window.
@@ -87,6 +112,25 @@ func (q *PeerQuality) LastUpdate() time.Time {
 // Stats returns a snapshot of the quality metrics.
 func (q *PeerQuality) Stats() (avgRTT time.Duration, loss float64) {
 	return q.AverageRTT(), q.PacketLoss()
+}
+
+// Counters returns the sent and received counters.
+func (q *PeerQuality) Counters() (sent, received int) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.sent, q.received
+}
+
+// Reset resets all counters and RTT samples.
+func (q *PeerQuality) Reset() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.sent = 0
+	q.received = 0
+	q.consecutiveFailed = 0
+	q.rttIdx = 0
+	q.rttCount = 0
+	q.lastUpdate = time.Time{}
 }
 
 // PeerQualityTracker manages quality tracking for all peers.

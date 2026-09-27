@@ -1944,6 +1944,8 @@ func (m *MeshManager) gossipLoop() {
 				m.recomputeRoutes()
 				util.DefaultVersionNotifier.BumpVersion("mesh")
 				nodeID := ev.sender.GetNodeID()
+				// Reset quality tracker for this peer to avoid stale probe state
+				m.qualityTracker.Get(nodeID).Reset()
 				util.LogInfo("[MESH] peer registered: %s", nodeID)
 				// Immediately broadcast gossip so routing is established without waiting for 15s tick
 				m.broadcastGossip()

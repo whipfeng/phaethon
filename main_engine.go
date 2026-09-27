@@ -46,11 +46,12 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled {
 		if !tun.Available() {
-			util.LogWarn("TUN enabled but not available on this platform")
-			return nil
+			util.LogWarn("TUN enabled but not available on this platform, falling back to TUN-disabled mode for mesh")
+			tunEnabled = false
+		} else {
+			// Clean up any residual TUN state from previous crashes before starting.
+			tun.CleanupResidual()
 		}
-		// Clean up any residual TUN state from previous crashes before starting.
-		tun.CleanupResidual()
 	}
 
 	if tunEnabled {

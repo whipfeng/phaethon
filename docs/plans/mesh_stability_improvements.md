@@ -52,7 +52,57 @@
 - 公式：`delay = baseDelay * (0.5 + rand.Float64())`（0.5~1.5 倍）
 - cap 保持 60s
 
-### 4. selectBestPeer 综合评分
+### 4. P2P 心跳超时强拆（修复拓扑残留）
+
+**问题**：
+- P2P 会话只在 `transport.Recv()` 返回错误时才结束
+- 如果对端不响应但 TCP 连接还在（如对端进程卡死、mesh 未启动），会话永远不会结束
+- `UnregisterPeer` 不会被调用，导致拓扑残留：
+  - 拓扑邻居表还保留该节点
+  - IP 路由还经过该节点
+  - 域名路由还指向该节点
+  - 其他节点继续向该节点发送 gossip，但得不到响应
+- 用户看到的现象：节点"断而不死"，路由选择了一条实际上不通的链路
+
+**修复**：
+- `p2p/p2p.go`：在 `runSession` 中添加心跳超时检测
+- 超时阈值：30 秒无心跳（3 次心跳周期，心跳间隔 10 秒）
+- 超时后主动关闭连接，触发 defer 中的 `UnregisterPeer`
+- 实现：
+  ```go
+  func (m *P2PManager) runSession(peer *Peer) {
+      heartbeatTimeout := 30 * time.Second
+      checkInterval := 10 * time.Second
+      ticker := time.NewTicker(checkInterval)
+      defer ticker.Stop()
+      
+      go func() {
+          for {
+              select {
+              case <-peer.stopCh:
+                  return
+              case <-ticker.C:
+                  if time.Since(peer.LastSeen) > heartbeatTimeout {
+                      util.LogWarn("[P2P] heartbeat timeout for %s, closing connection", peer.ID)
+                      peer.transport.Close()
+                      return
+                  }
+              }
+          }
+      }()
+      
+      // ... existing runSession logic ...
+  }
+  ```
+
+**清理链路**：
+- `transport.Close()` → `Recv()` 返回错误 → `runSession` 退出
+- defer 触发 → `UnregisterPeer(sender)` 被调用
+- `UnregisterPeer` 从拓扑表移除该 peer
+- 下次路由计算时，该 peer 的路由自动失效
+- 下次 gossip 时，该 peer 的域名路由自动清除
+
+### 5. selectBestPeer 综合评分
 
 **问题**：
 - 当前只看 RTT，不看丢包率
@@ -69,7 +119,7 @@
 - `config/config.go`：MeshConfig 加 TCPKeepalive 字段
 - `mesh/netstack.go`：TCP endpoint keepalive
 - `mesh/mesh.go`：selectBestPeer 评分逻辑
-- `p2p/p2p.go`：eventCh 容量、backoff jitter
+- `p2p/p2p.go`：eventCh 容量、backoff jitter、心跳超时检测
 - `admin/static/app.js`：mesh 配置页加 TCP keepalive 配置项
 
 不影响：

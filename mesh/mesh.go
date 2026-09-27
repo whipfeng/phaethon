@@ -303,6 +303,9 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	// Create Fake-IP pool from node subnet (skip first 10: .0=network, .1=VIP, .2=hostIP, .3=GIP, .4=EIP, .5-.9=future)
 	m.fakeIPPool = NewFakeIPPoolWithSubnet(subnet, 9)
 
+	// Load persistent FakeIP mappings from database
+	m.fakeIPPool.LoadFromDB()
+
 	// Create DNS hijacker (netstack binding deferred to BindNetstack)
 	// tunAddr and dnsAddr will be set when binding to netstack
 	m.dnsHijacker = NewDNSHijacker(nil, m.fakeIPPool, tcpip.Address{}, tcpip.Address{})

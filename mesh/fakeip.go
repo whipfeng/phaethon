@@ -3,6 +3,9 @@ package mesh
 import (
 	"net"
 	"sync"
+
+	"phaethon/db"
+	"phaethon/util"
 )
 
 // FakeIPPool manages fake IP allocation.
@@ -57,6 +60,55 @@ func (p *FakeIPPool) SetOnChange(fn func()) {
 	p.onChange = fn
 }
 
+// LoadFromDB loads existing FakeIP mappings from the database.
+// Called during startup to restore persistent mappings.
+func (p *FakeIPPool) LoadFromDB() {
+	if !db.IsInitialized() {
+		return
+	}
+
+	mappings, err := db.GetAllFakeIPs()
+	if err != nil {
+		util.LogWarn("Failed to load FakeIP mappings from db: %v", err)
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	loaded := 0
+	for _, entry := range mappings {
+		ip := net.ParseIP(entry.IP)
+		if ip == nil {
+			continue
+		}
+
+		// Skip if IP is outside our pool range
+		if !p.Contains(ip) {
+			continue
+		}
+
+		ipStr := ip.String()
+		p.domainToIP[entry.Domain] = ip
+		p.ipToDomain[ipStr] = entry.Domain
+
+		// Update nextIP to avoid collision
+		ipNum := ipToUint32(ip)
+		if ipNum >= p.nextIP {
+			p.nextIP = ipNum + 1
+			if p.nextIP > p.poolEnd {
+				p.nextIP = p.poolStart
+			}
+		}
+
+		loaded++
+	}
+
+	if loaded > 0 {
+		util.LogInfo("Loaded %d FakeIP mappings from db", loaded)
+	}
+}
+
 // Lookup returns a Fake-IP for the given domain, allocating if necessary.
 func (p *FakeIPPool) Lookup(domain string) net.IP {
 	p.mu.Lock()
@@ -84,6 +136,14 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		}
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain
+
+		// Persist to database
+		if db.IsInitialized() {
+			if err := db.PutFakeIP(domain, ipStr); err != nil {
+				util.LogWarn("Failed to persist FakeIP mapping: %v", err)
+			}
+		}
+
 		if p.onChange != nil {
 			p.onChange()
 		}
@@ -132,6 +192,14 @@ func (p *FakeIPPool) Release(domain string) {
 		delete(p.ipToDomain, ipStr)
 		delete(p.domainToIP, domain)
 		delete(p.ipToRealIP, ipStr)
+
+		// Delete from database
+		if db.IsInitialized() {
+			if err := db.DeleteFakeIP(domain, ipStr); err != nil {
+				util.LogWarn("Failed to delete FakeIP mapping from db: %v", err)
+			}
+		}
+
 		if p.onChange != nil {
 			p.onChange()
 		}

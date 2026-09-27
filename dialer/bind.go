@@ -34,14 +34,14 @@ var globalBindContext atomic.Pointer[BindContext]
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 
 // GlobalModeBTable tracks Mode B (proxy entry) connections for source address resolution.
-// Set by main_tun.go when mesh is initialized.
+// Set by main_engine.go when mesh is initialized.
 var GlobalModeBTable interface {
 	Register(proto byte, dstAddr string, srcPort uint16, clientAddr string, inbound string, mapping *config.Mapping)
 	Unregister(proto byte, dstAddr string, srcPort uint16)
 }
 
 // GlobalNetstackDialWithModeBFunc is the custom dial function that registers in ModeBTable
-// before sending SYN. Set by main_tun.go.
+// before sending SYN. Set by main_engine.go.
 var GlobalNetstackDialWithModeBFunc func(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error)
 
 // UnregisterModeB is a helper to unregister a Mode B connection by destination and source port.

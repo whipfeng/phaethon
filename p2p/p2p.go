@@ -155,9 +155,6 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 // data so they are not delayed behind bulk transfers. Exits on write error or stop.
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	writeFrame := func(req writeReq) bool {
-		if req.frameType == frame.FrameMeshPacket {
-			util.LogDebug("[P2P] writing FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(req.data))
-		}
 		if err := peer.transport.Send(req.frameType, req.data); err != nil {
 			util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
 			peer.transport.Close()
@@ -231,9 +228,6 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte) error {
 	ch := peer.writeCh
 	if frameType != frame.FrameMeshPacket {
 		ch = peer.controlCh
-	}
-	if frameType == frame.FrameMeshPacket {
-		util.LogDebug("[P2P] enqueue FrameMeshPacket to %s (nodeID=%s, %d bytes)", peer.ID, peer.NodeID, len(data))
 	}
 	select {
 	case ch <- writeReq{frameType: frameType, data: data}:
@@ -501,9 +495,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				m.handleCommand(peer, payload)
 			}
 		case frame.FrameMeshPacket:
-			util.LogDebug("[P2P] received FrameMeshPacket from %s (%d bytes), nodeID=%s", peer.ID, len(payload), peer.NodeID)
 			if m.meshHandler != nil && len(payload) > 0 {
-				util.LogDebug("[P2P] queuing HandleMeshFrame for %s with %d bytes", peer.NodeID, len(payload))
 				frameCopy := make([]byte, len(payload))
 				copy(frameCopy, payload)
 				select {

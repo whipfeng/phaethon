@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1117,6 +1118,7 @@ func findLatestPkgAndExtract() (string, string) {
 	if _, err := os.Stat(binaryPath); err == nil {
 		// Binary already exists, no need to extract
 		util.LogInfo("watchdog: binary already exists: %s", binaryPath)
+		ensureWintunDLL(workerDir)
 		return binaryPath, latestVersion
 	}
 
@@ -1137,8 +1139,37 @@ func findLatestPkgAndExtract() (string, string) {
 		return "", ""
 	}
 
+	// On Windows, also copy wintun.dll to the worker directory so the worker
+	// binary can find it (Windows DLL search uses the exe directory, not CWD).
+	ensureWintunDLL(workerDir)
+
 	util.LogInfo("watchdog: extracted binary to %s", binaryPath)
 	return binaryPath, latestVersion
+}
+
+// ensureWintunDLL copies wintun.dll to the worker directory on Windows.
+// Windows DLL search uses the executable's directory, not CWD, so when the
+// worker binary lives in data/worker/ but wintun.dll is in the main directory,
+// CreateDevice() fails to load the DLL.
+func ensureWintunDLL(workerDir string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	src := "wintun.dll"
+	dst := filepath.Join(workerDir, "wintun.dll")
+	if _, err := os.Stat(dst); err == nil {
+		return // already there
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		util.LogWarn("watchdog: cannot copy wintun.dll to worker dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		util.LogWarn("watchdog: failed to write wintun.dll to worker dir: %v", err)
+		return
+	}
+	util.LogInfo("watchdog: copied wintun.dll to %s", workerDir)
 }
 
 // selectWorkerBinary picks the worker binary to run: the latest distributed

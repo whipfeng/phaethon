@@ -92,6 +92,11 @@ func Close() error {
 	return nil
 }
 
+// IsInitialized 检查数据库是否已初始化
+func IsInitialized() bool {
+	return globalDB != nil
+}
+
 // IsFirstRun 检查是否首次运行
 func IsFirstRun() bool {
 	return !dbExists

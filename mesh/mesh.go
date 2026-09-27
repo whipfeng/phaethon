@@ -2272,11 +2272,10 @@ func (m *MeshManager) sendProbes() {
 		quality.RecordSent(m.probeSeq)
 
 		directCount++
-		util.LogDebug("[MESH] sent probe to %s (seq=%d)", nodeID, m.probeSeq)
 	}
 
 	if directCount > 0 {
-		util.LogInfo("[MESH] sent probes to %d direct peers", directCount)
+		util.LogDebug("[MESH] sent probes to %d direct peers", directCount)
 	}
 }
 
@@ -2315,7 +2314,7 @@ func (m *MeshManager) HandleProbeReply(sender PeerSender, data []byte) {
 	quality.RecordRTT(rtt, reply.Seq)
 
 	avgRTT, loss := quality.Stats()
-	util.LogInfo("[MESH] probe_reply from %s (seq=%d): rtt=%v avg=%v loss=%.1f%%",
+	util.LogDebug("[MESH] probe_reply from %s (seq=%d): rtt=%v avg=%v loss=%.1f%%",
 		nodeID, reply.Seq, rtt, avgRTT, loss*100)
 }
 

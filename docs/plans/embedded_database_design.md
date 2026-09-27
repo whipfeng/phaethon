@@ -209,9 +209,51 @@ INFO: 启动服务...
 
 ### Phase 2：数据迁移
 
-1. 包元数据迁移（文件系统 → 数据库）
-2. Fake-IP 映射持久化
-3. 配置数据迁移（YAML → 数据库）
+1. 包元数据迁移（文件系统 → 数据库）✅
+2. Fake-IP 映射持久化（详见 2.1 节）
+3. 配置数据迁移（YAML → 数据库）✅
+
+#### 2.1 Fake-IP 映射持久化设计
+
+**目标**：重启后保留域名到 Fake-IP 的映射，便于会话跟踪和问题诊断。
+
+**数据模型**（已实现）：
+```go
+type FakeIPEntry struct {
+    IP        string    `json:"ip"`
+    Domain    string    `json:"domain"`
+    CreatedAt time.Time `json:"created_at"`
+    LastUsed  time.Time `json:"last_used"`
+}
+```
+
+**存储结构**：
+- Bucket: `fakeip`
+- 双向索引：
+  - `domain:{domain}` → `FakeIPEntry`
+  - `ip:{ip}` → `{"domain": domain}`
+
+**集成点**：
+
+| 操作 | 触发时机 | db 操作 |
+|------|----------|---------|
+| 分配 | `FakeIPPool.Lookup()` 首次分配新 IP | `PutFakeIP(domain, ip)` |
+| 查询 | `FakeIPPool.Lookup()` 域名已存在 | 无（内存命中） |
+| 加载 | `FakeIPPool` 初始化 | 遍历 `fakeip` bucket 加载到内存 |
+| 删除 | `FakeIPPool.Release()` | `DeleteFakeIP(domain, ip)` |
+
+**性能考虑**：
+- 写入频率：每次新域名查询写一次 db（非高频）
+- 启动加载：一次性加载所有映射到内存
+- `LastUsed` 更新：暂不持久化（避免每次使用都写 db）
+
+**错误处理**：
+- db 写入失败：记录警告，继续运行（内存映射仍可用）
+- db 加载失败：记录警告，从空池开始（不影响功能）
+
+**过期清理**（后续优化）：
+- 可添加 Admin API 手动清理
+- 或按 `CreatedAt` 自动清理超过 N 天的记录
 
 ### Phase 3：功能增强
 

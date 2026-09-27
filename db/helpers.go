@@ -49,6 +49,28 @@ func DeleteFakeIP(domain, ip string) error {
 	return Delete(BucketFakeIP, []byte("ip:"+ip))
 }
 
+// GetAllFakeIPs 获取所有 Fake-IP 映射
+func GetAllFakeIPs() ([]*FakeIPEntry, error) {
+	var entries []*FakeIPEntry
+
+	err := ForEach(BucketFakeIP, func(k, v []byte) error {
+		// Only process "domain:" keys to get complete entries
+		key := string(k)
+		if len(key) < 7 || key[:7] != "domain:" {
+			return nil
+		}
+
+		var entry FakeIPEntry
+		if err := json.Unmarshal(v, &entry); err != nil {
+			return err
+		}
+		entries = append(entries, &entry)
+		return nil
+	})
+
+	return entries, err
+}
+
 // 包元数据
 
 // PutPackage 存储包元数据

@@ -1400,6 +1400,37 @@ func (t *TUNConfig) DirectNameserverList() []string {
 	return t.DirectNameserver
 }
 
+// MeshTCPKeepalive holds TCP keepalive settings for mesh connections.
+type MeshTCPKeepalive struct {
+	Idle     int `yaml:"idle" json:"idle"`         // Idle time before sending probes (seconds), default 30
+	Interval int `yaml:"interval" json:"interval"` // Interval between probes (seconds), default 10
+	Count    int `yaml:"count" json:"count"`       // Number of probes before giving up, default 3
+}
+
+// GetIdle returns the idle time with default fallback.
+func (k *MeshTCPKeepalive) GetIdle() int {
+	if k == nil || k.Idle <= 0 {
+		return 30
+	}
+	return k.Idle
+}
+
+// GetInterval returns the probe interval with default fallback.
+func (k *MeshTCPKeepalive) GetInterval() int {
+	if k == nil || k.Interval <= 0 {
+		return 10
+	}
+	return k.Interval
+}
+
+// GetCount returns the probe count with default fallback.
+func (k *MeshTCPKeepalive) GetCount() int {
+	if k == nil || k.Count <= 0 {
+		return 3
+	}
+	return k.Count
+}
+
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
 	NodeID               string                `yaml:"node-id,omitempty" json:"node-id,omitempty"`
@@ -1409,6 +1440,7 @@ type MeshConfig struct {
 	Advertise            []string              `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
 	StaticRoutes         []MeshStaticRoute     `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
+	TCPKeepalive         *MeshTCPKeepalive     `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
 }
 
 // MeshStaticRoute defines a static IPIP route through specific mesh node(s)

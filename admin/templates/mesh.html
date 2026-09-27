@@ -68,6 +68,31 @@
             <div id="mesh-identity-status" class="text-muted"></div>
         </div>
 
+        <!-- TCP Keepalive Settings -->
+        <div class="mesh-section" id="mesh-keepalive-section">
+            <div class="mesh-section-header">
+                <h4 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h4>
+                <button onclick="saveTCPKeepalive()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            </div>
+            <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.tcpKeepaliveHelp">TCP keepalive detects dead connections. When a link breaks, keepalive probes fail and the connection is closed after (idle + interval × count) seconds.</p>
+            <div class="form-group">
+                <label data-i18n="mesh.keepaliveIdle">Idle Time (seconds)</label>
+                <input type="number" id="mesh-keepalive-idle" class="form-control" min="1" max="3600" placeholder="30">
+                <small class="text-muted" data-i18n="mesh.keepaliveIdleHelp">Time before sending first probe</small>
+            </div>
+            <div class="form-group">
+                <label data-i18n="mesh.keepaliveInterval">Probe Interval (seconds)</label>
+                <input type="number" id="mesh-keepalive-interval" class="form-control" min="1" max="300" placeholder="10">
+                <small class="text-muted" data-i18n="mesh.keepaliveIntervalHelp">Interval between probes</small>
+            </div>
+            <div class="form-group">
+                <label data-i18n="mesh.keepaliveCount">Probe Count</label>
+                <input type="number" id="mesh-keepalive-count" class="form-control" min="1" max="20" placeholder="3">
+                <small class="text-muted" data-i18n="mesh.keepaliveCountHelp">Number of probes before giving up</small>
+            </div>
+            <div id="mesh-keepalive-status" class="text-muted"></div>
+        </div>
+
         <!-- Topology Visualization -->
         <div class="mesh-section" id="mesh-topology-section">
             <div class="mesh-section-header">
@@ -194,12 +219,14 @@
         document.addEventListener('DOMContentLoaded', function() {
             fetchMeshStatus();
             loadMeshIdentity();
+            loadTCPKeepalive();
             loadDomainSuffixes();
             loadAdvertise();
         });
     } else {
         fetchMeshStatus();
         loadMeshIdentity();
+        loadTCPKeepalive();
         loadDomainSuffixes();
         loadAdvertise();
     }
@@ -251,6 +278,65 @@
             statusEl.style.color = 'var(--success)';
             setTimeout(() => {
                 fetchMeshStatus();
+                statusEl.textContent = '';
+            }, 1500);
+        } catch (err) {
+            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+            statusEl.style.color = 'var(--danger)';
+        }
+    };
+
+    // TCP Keepalive Settings
+    async function loadTCPKeepalive() {
+        try {
+            const res = await fetch('./api/config/mesh');
+            if (!res.ok) return;
+            const mesh = await res.json();
+            const ka = mesh.TCPKeepalive || {};
+            document.getElementById('mesh-keepalive-idle').value = ka.idle || 30;
+            document.getElementById('mesh-keepalive-interval').value = ka.interval || 10;
+            document.getElementById('mesh-keepalive-count').value = ka.count || 3;
+        } catch (err) {
+            console.error('Failed to load TCP keepalive:', err);
+        }
+    }
+
+    window.saveTCPKeepalive = async function() {
+        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+        if (!password) return;
+
+        const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
+        const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
+        const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
+        const statusEl = document.getElementById('mesh-keepalive-status');
+
+        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+        statusEl.style.color = 'var(--text-muted)';
+
+        try {
+            // First get current mesh config
+            const getRes = await fetch('./api/config/mesh');
+            if (!getRes.ok) throw new Error('Failed to load current config');
+            const currentMesh = await getRes.json();
+
+            // Update with new TCP keepalive settings
+            currentMesh.TCPKeepalive = { idle, interval, count };
+
+            const res = await fetch('./api/config/mesh', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Password-Confirm': password
+                },
+                body: JSON.stringify(currentMesh)
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || 'Save failed');
+            }
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+            statusEl.style.color = 'var(--success)';
+            setTimeout(() => {
                 statusEl.textContent = '';
             }, 1500);
         } catch (err) {

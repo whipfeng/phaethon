@@ -3,6 +3,7 @@ package p2p
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"phaethon/frame"
 	"regexp"
@@ -350,10 +351,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if err != nil {
 			util.LogInfo("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
 			peer.Status = "failed"
+			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
+			jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
 			select {
 			case <-peer.stopCh:
 				return
-			case <-time.After(backoff):
+			case <-time.After(jitteredBackoff):
 			}
 			backoff *= 2
 			if backoff > maxBackoff {
@@ -388,10 +391,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 		util.LogInfo("[P2P] disconnected from %s, reconnecting in %v", peer.ID, backoff)
 		peer.Status = "connecting"
+		// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
+		jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
 		select {
 		case <-peer.stopCh:
 			return
-		case <-time.After(backoff):
+		case <-time.After(jitteredBackoff):
 		}
 		backoff *= 2
 		if backoff > maxBackoff {

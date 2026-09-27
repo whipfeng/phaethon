@@ -97,6 +97,9 @@ type Netstack struct {
 	// Set by the TUN engine.
 	MeshOutboundFullFunc func(dstIP net.IP, data []byte)
 
+	// TCP keepalive settings
+	tcpKeepalive *config.MeshTCPKeepalive
+
 	// Packet counters for diagnostics
 	ReadPackets  atomic.Uint64
 	WritePackets atomic.Uint64
@@ -174,6 +177,31 @@ func (n *Netstack) SetIsMeshIPFunc(f func(ip net.IP) bool) {
 // SetCallbacks sets the forwarder callbacks.
 func (n *Netstack) SetCallbacks(cb *ForwarderCallbacks) {
 	n.callbacks = cb
+}
+
+// SetTCPKeepalive sets the TCP keepalive settings.
+func (n *Netstack) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
+	n.tcpKeepalive = ka
+}
+
+// applyTCPKeepalive applies TCP keepalive settings to an endpoint.
+func (n *Netstack) applyTCPKeepalive(ep tcpip.Endpoint) {
+	kaIdle := n.tcpKeepalive.GetIdle()
+	kaInterval := n.tcpKeepalive.GetInterval()
+	kaCount := n.tcpKeepalive.GetCount()
+	ep.SocketOptions().SetKeepAlive(true)
+	idle := tcpip.KeepaliveIdleOption(time.Duration(kaIdle) * time.Second)
+	if err := ep.SetSockOpt(&idle); err != nil {
+		util.LogDebug("[TCP] failed to set keepalive idle: %v", err)
+	}
+	interval := tcpip.KeepaliveIntervalOption(time.Duration(kaInterval) * time.Second)
+	if err := ep.SetSockOpt(&interval); err != nil {
+		util.LogDebug("[TCP] failed to set keepalive interval: %v", err)
+	}
+	count := tcpip.SockOptInt(kaCount)
+	if err := ep.SetSockOptInt(tcpip.KeepaliveCountOption, int(count)); err != nil {
+		util.LogDebug("[TCP] failed to set keepalive count: %v", err)
+	}
 }
 
 // ConfigureMeshAddresses computes and stores the mesh-derived addresses.
@@ -484,6 +512,7 @@ func (n *Netstack) dialTCP(ctx context.Context, s *stack.Stack, remoteAddr tcpip
 		}
 	}
 
+	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
 
@@ -594,6 +623,7 @@ func (n *Netstack) NetDialWithPreConnect(network, addr string, preConnect func(d
 		}
 	}
 
+	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
 
@@ -713,6 +743,7 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 	}
 
 	util.LogDebug("netstack: NetDialWithModeB succeeded to %s:%d srcPort=%d", host, portNum, srcPort)
+	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
 
@@ -895,19 +926,8 @@ func (n *Netstack) acceptTCP() {
 		util.LogDebug("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
 		r.Complete(false)
 
-		// Set aggressive TCP keepalive on gVisor endpoint to detect dead clients faster
-		idle := tcpip.KeepaliveIdleOption(30 * time.Second)
-		if err := ep.SetSockOpt(&idle); err != nil {
-			util.LogDebug("[TCP-DEBUG] failed to set keepalive idle: %v", err)
-		}
-		interval := tcpip.KeepaliveIntervalOption(10 * time.Second)
-		if err := ep.SetSockOpt(&interval); err != nil {
-			util.LogDebug("[TCP-DEBUG] failed to set keepalive interval: %v", err)
-		}
-		count := tcpip.SockOptInt(3)
-		if err := ep.SetSockOptInt(tcpip.KeepaliveCountOption, int(count)); err != nil {
-			util.LogDebug("[TCP-DEBUG] failed to set keepalive count: %v", err)
-		}
+		// Set TCP keepalive on inbound connection
+		n.applyTCPKeepalive(ep)
 
 		conn := gonet.NewTCPConn(&wq, ep)
 		dstIP := net.IP(id.LocalAddress.AsSlice())

@@ -3,6 +3,7 @@ package mesh
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"sort"
 	"strconv"
@@ -72,6 +73,7 @@ func ParseNodeDomain(domain string) string {
 type TunInterface interface {
 	InjectMeshPacket(data []byte) error
 	WriteMeshPacket(data []byte) error
+	GetNetstack() *Netstack
 }
 
 // PeerSender sends data directly to a connected peer.
@@ -250,6 +252,9 @@ type MeshManager struct {
 	stickyMu    sync.Mutex
 	stickyCache map[string]string // target (IP/domain) → nodeID
 
+	// TCP keepalive settings for mesh connections
+	tcpKeepalive *config.MeshTCPKeepalive
+
 	// OnPeerRegistered is called when a new peer is registered (for package sync)
 	OnPeerRegistered func(nodeID string)
 }
@@ -286,7 +291,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		network:         network,
 		subnetPrefixLen: subnetPrefixLen,
 		closeCh:         make(chan struct{}),
-		eventCh:         make(chan meshEvent, 64),
+		eventCh:         make(chan meshEvent, 1024),
 		stickyCache:     make(map[string]string),
 	}
 	// Initialize routeTable with empty routes
@@ -542,7 +547,7 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventConfigUpdate}:
 	default:
-		util.LogDebug("[MESH] eventCh full, dropping config update event")
+		util.LogWarn("[MESH] eventCh full, dropping config update event")
 	}
 }
 
@@ -551,7 +556,7 @@ func (m *MeshManager) TriggerGossip() {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventTick}:
 	default:
-		util.LogDebug("[MESH] eventCh full, dropping trigger gossip event")
+		util.LogWarn("[MESH] eventCh full, dropping trigger gossip event")
 	}
 }
 
@@ -664,6 +669,19 @@ func (m *MeshManager) isLocalNetstackAddr(ip net.IP) bool {
 
 func (m *MeshManager) SetTun(tun TunInterface) {
 	m.tun = tun
+	// Set TCP keepalive on netstack if available
+	if tun != nil && tun.GetNetstack() != nil && m.tcpKeepalive != nil {
+		tun.GetNetstack().SetTCPKeepalive(m.tcpKeepalive)
+	}
+}
+
+// SetTCPKeepalive sets the TCP keepalive settings for mesh connections.
+func (m *MeshManager) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
+	m.tcpKeepalive = ka
+	// If TUN is already set, apply immediately
+	if m.tun != nil && m.tun.GetNetstack() != nil && ka != nil {
+		m.tun.GetNetstack().SetTCPKeepalive(ka)
+	}
 }
 
 var GlobalMeshManager *MeshManager
@@ -799,7 +817,7 @@ func (m *MeshManager) RegisterPeer(sender PeerSender) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}:
 	default:
-		util.LogDebug("[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
+		util.LogWarn("[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
 	}
 }
 
@@ -808,7 +826,7 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}:
 	default:
-		util.LogDebug("[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
+		util.LogWarn("[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
 	}
 }
 
@@ -1220,7 +1238,7 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}:
 	default:
-		util.LogDebug("[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
+		util.LogWarn("[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
 	}
 }
 
@@ -2214,8 +2232,8 @@ func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss 
 }
 
 // selectBestPeer selects the best peer from candidates using quality metrics.
-// Priority: lowest RTT among peers with quality data.
-// Falls back to hash-based stable selection if no quality data available.
+// Priority: lowest effective RTT (avgRTT / (1 - packetLoss)) among peers with quality data.
+// Falls back to random selection if no quality data available.
 func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) PeerSender {
 	if len(candidates) == 0 {
 		return nil
@@ -2226,61 +2244,52 @@ func (m *MeshManager) selectBestPeer(candidates []PeerWithHop, dstIP net.IP) Pee
 
 	// Collect quality data for all candidates
 	type peerQuality struct {
-		peer PeerSender
-		rtt  time.Duration
-		hasData bool
+		peer        PeerSender
+		effectiveRT time.Duration
+		hasData     bool
 	}
 
 	qualities := make([]peerQuality, len(candidates))
 	anyData := false
 	for i, c := range candidates {
 		nodeID := c.Peer.GetNodeID()
-		avgRTT, _ := m.GetPeerQuality(nodeID)
+		avgRTT, loss := m.GetPeerQuality(nodeID)
 		hasData := avgRTT > 0
 		if hasData {
 			anyData = true
+			// effectiveRTT = avgRTT / (1 - loss)
+			// loss=0.5 -> effectiveRTT=2*avgRTT, loss=0.9 -> effectiveRTT=10*avgRTT
+			effectiveRT := time.Duration(float64(avgRTT) / (1.0 - loss))
+			qualities[i] = peerQuality{peer: c.Peer, effectiveRT: effectiveRT, hasData: hasData}
+		} else {
+			qualities[i] = peerQuality{peer: c.Peer, hasData: false}
 		}
-		qualities[i] = peerQuality{peer: c.Peer, rtt: avgRTT, hasData: hasData}
 	}
 
-	// If no quality data, fall back to hash-based selection
+	// If no quality data, fall back to random selection
 	if !anyData {
-		hash := 0
-		for _, b := range dstIP {
-			hash = hash*31 + int(b)
-		}
-		if hash < 0 {
-			hash = -hash
-		}
-		idx := hash % len(candidates)
+		idx := rand.Intn(len(candidates))
 		return candidates[idx].Peer
 	}
 
-	// Select peer with lowest RTT (among those with data)
+	// Select peer with lowest effective RTT (among those with data)
 	var bestPeer PeerSender
-	var bestRTT time.Duration
+	var bestEffectiveRT time.Duration
 	first := true
 	for _, pq := range qualities {
 		if !pq.hasData {
 			continue
 		}
-		if first || pq.rtt < bestRTT {
+		if first || pq.effectiveRT < bestEffectiveRT {
 			bestPeer = pq.peer
-			bestRTT = pq.rtt
+			bestEffectiveRT = pq.effectiveRT
 			first = false
 		}
 	}
 
 	// If somehow no peer had data (shouldn't happen since anyData=true), fall back
 	if bestPeer == nil {
-		hash := 0
-		for _, b := range dstIP {
-			hash = hash*31 + int(b)
-		}
-		if hash < 0 {
-			hash = -hash
-		}
-		idx := hash % len(candidates)
+		idx := rand.Intn(len(candidates))
 		return candidates[idx].Peer
 	}
 

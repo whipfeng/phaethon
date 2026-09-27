@@ -48,6 +48,7 @@ func (q *PeerQuality) RecordSent(seq uint32) {
 	defer q.mu.Unlock()
 	q.sent++
 	// Check if we received the previous probe
+	// Skip check if lastProbeSeq is 0 (first probe or after reset)
 	if q.lastProbeSeq > 0 && q.lastReplySeq < q.lastProbeSeq {
 		// Previous probe was not replied
 		q.consecutiveFailed++
@@ -130,6 +131,8 @@ func (q *PeerQuality) Reset() {
 	q.consecutiveFailed = 0
 	q.rttIdx = 0
 	q.rttCount = 0
+	q.lastProbeSeq = 0
+	q.lastReplySeq = 0
 	q.lastUpdate = time.Time{}
 }
 

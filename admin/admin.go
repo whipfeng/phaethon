@@ -2274,6 +2274,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after proxy add failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
 			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
@@ -2322,6 +2323,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 				if err := s.mergeAndInitLocked(); err != nil {
 					util.LogWarn("[ADMIN] merge after proxy delete failed: %v", err)
 				}
+				util.DefaultVersionNotifier.BumpVersion("proxies")
 				s.mu.Unlock()
 				util.LogInfo("[ADMIN] proxy deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
@@ -2385,6 +2387,7 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after proxy toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		jsonResponse(w, proxySummary(p))
 		return
 	}

@@ -26,8 +26,8 @@ const htunnelConcurrency = 16
 // htunnelDirectTransport implements frame.FrameTransport over h_tunnel
 // without the BIND stream channel: one HEAD (X-C: MESH) allocates the
 // channel, frames travel in POST bodies (client → server) and long-poll GET
-// bodies (server → client). Datagram semantics: the two concurrent lanes may
-// drop/duplicate/reorder frames — all P2P frame consumers tolerate this.
+// bodies (server → client). Control and data frames use separate receive
+// buffers to prevent data congestion from starving control traffic.
 type htunnelDirectTransport struct {
 	proxy        *config.Proxy
 	connectionID string
@@ -37,10 +37,10 @@ type htunnelDirectTransport struct {
 	// Send concurrency control
 	sendSem chan struct{} // semaphore for concurrent POST requests
 
-	// Recv concurrency: multiple GET goroutines feed into recvCh
-	recvCh chan recvResult // channel for frames from concurrent GET loops
+	// Recv: separate channels for control and data frames
+	ctrlRecvCh chan recvResult // control frames (heartbeat, hello, gossip, probe)
+	dataRecvCh chan recvResult // data frames (FrameMeshPacket)
 
-	ctrlMu sync.Mutex // serializes control-lane POSTs
 	seqMu  sync.Mutex // guards writeSeq/deleteSeq
 
 	writeSeq  int
@@ -93,62 +93,29 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		client:       client,
 		crypto:       crypto,
 		sendSem:      make(chan struct{}, htunnelConcurrency),
-		recvCh:       make(chan recvResult, htunnelConcurrency*2),
+		ctrlRecvCh:   make(chan recvResult, 16),
+		dataRecvCh:   make(chan recvResult, 64),
 		closed:       make(chan struct{}),
 	}
 
-	// Start concurrent GET loops for receiving
-	for i := 0; i < htunnelConcurrency; i++ {
-		go t.recvLoop()
+	// Start 1 control recvLoop + N data recvLoops
+	go t.recvLoop(true)
+	for i := 0; i < htunnelConcurrency-1; i++ {
+		go t.recvLoop(false)
 	}
 
 	return t, nil
 }
 
-// Send writes one frame. Mesh data frames are fire-and-forget (async POST,
-// no response wait); control frames (heartbeat/hello/gossip) are sent
-// synchronously so the caller knows they reached the server.
-func (t *htunnelDirectTransport) Send(frameType byte, payload []byte) error {
-	if frameType == frame.FrameMeshPacket {
-		return t.sendData(frameType, payload)
-	}
-	return t.sendControl(frameType, payload)
+// Send writes one frame. Both control and data frames use the same async POST
+// path with sendSem concurrency control. Priority scheduling is handled by
+// the P2P layer's peerWriteLoop, which prioritizes control frames before
+// calling transport.Send().
+func (t *htunnelDirectTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	return t.sendFrame(frameType, payload)
 }
 
-func (t *htunnelDirectTransport) sendControl(frameType byte, payload []byte) error {
-	select {
-	case <-t.closed:
-		return io.ErrClosedPipe
-	default:
-	}
-	t.ctrlMu.Lock()
-	defer t.ctrlMu.Unlock()
-
-	select {
-	case <-t.closed:
-		return io.ErrClosedPipe
-	default:
-	}
-
-	var buf bytes.Buffer
-	if err := frame.WriteFrame(&buf, frameType, payload); err != nil {
-		return err
-	}
-
-	t.seqMu.Lock()
-	t.writeSeq++
-	seq := t.writeSeq
-	t.seqMu.Unlock()
-
-	return t.postBatch(buf.Bytes(), seq)
-}
-
-// sendData sends a data frame (FrameMeshPacket) via fire-and-forget HTTP POST.
-// The frame is serialized, a sequence number is assigned, and a goroutine
-// performs the POST. The semaphore limits concurrent POSTs to prevent
-// goroutine accumulation. If the semaphore is full, the call blocks,
-// creating backpressure to peerWriteLoop.
-func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error {
+func (t *htunnelDirectTransport) sendFrame(frameType byte, payload []byte) error {
 	select {
 	case <-t.closed:
 		return io.ErrClosedPipe
@@ -176,7 +143,7 @@ func (t *htunnelDirectTransport) sendData(frameType byte, payload []byte) error 
 	go func() {
 		defer func() { <-t.sendSem }()
 		if err := t.postBatch(data, seq); err != nil {
-			util.LogDebug("[HTUNNEL-DIRECT] data POST fail (seq=%d): %v", seq, err)
+			util.LogDebug("[HTUNNEL-DIRECT] POST fail (seq=%d): %v", seq, err)
 		}
 	}()
 	return nil
@@ -216,9 +183,10 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	return nil
 }
 
-// recvLoop continuously sends GET requests and feeds received frames into recvCh.
-// Multiple recvLoop goroutines run concurrently to eliminate the gap between GETs.
-func (t *htunnelDirectTransport) recvLoop() {
+// recvLoop continuously sends GET requests and routes received frames to
+// ctrlRecvCh or dataRecvCh based on frame type. Multiple recvLoop goroutines
+// run concurrently to eliminate the gap between GETs.
+func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 	readSeq := 0
 	for {
 		select {
@@ -237,10 +205,7 @@ func (t *htunnelDirectTransport) recvLoop() {
 		resp, err := t.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
-			select {
-			case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: get fail: %w", err)}:
-			case <-t.closed:
-			}
+			t.sendError(fmt.Errorf("htunnel-direct: get fail: %w", err), isCtrlLoop)
 			return
 		}
 
@@ -249,20 +214,14 @@ func (t *htunnelDirectTransport) recvLoop() {
 		cancel()
 
 		if resp.StatusCode == 410 {
-			select {
-			case t.recvCh <- recvResult{err: io.ErrClosedPipe}:
-			case <-t.closed:
-			}
+			t.sendError(io.ErrClosedPipe, isCtrlLoop)
 			return
 		}
 		if resp.StatusCode == 408 {
 			continue // timeout, retry
 		}
 		if resp.StatusCode != 200 {
-			select {
-			case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode)}:
-			case <-t.closed:
-			}
+			t.sendError(fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode), isCtrlLoop)
 			return
 		}
 
@@ -270,43 +229,74 @@ func (t *htunnelDirectTransport) recvLoop() {
 			if t.crypto.IsEnabled() {
 				body, err = t.crypto.OpenBody(body)
 				if err != nil {
-					select {
-					case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: decrypt fail: %w", err)}:
-					case <-t.closed:
-					}
+					t.sendError(fmt.Errorf("htunnel-direct: decrypt fail: %w", err), isCtrlLoop)
 					return
 				}
 			}
 
-			// Parse frames from the batch and send to recvCh
 			reader := bytes.NewReader(body)
 			for reader.Len() > 0 {
 				ft, payload, err := frame.ReadFrame(reader)
 				if err != nil {
-					select {
-					case t.recvCh <- recvResult{err: fmt.Errorf("htunnel-direct: parse frame fail: %w", err)}:
-					case <-t.closed:
-					}
+					t.sendError(fmt.Errorf("htunnel-direct: parse frame fail: %w", err), isCtrlLoop)
 					return
 				}
-				select {
-				case t.recvCh <- recvResult{frameType: ft, payload: payload}:
-				case <-t.closed:
-					return
-				}
+				t.routeFrame(ft, payload, isCtrlLoop)
 			}
 		}
 	}
 }
 
-// Recv returns the next frame from the server. It reads from recvCh which is
-// fed by multiple concurrent GET goroutines (recvLoop). This eliminates the
-// gap between GETs and provides low-latency data delivery.
+// sendError sends an error result to the appropriate receive channel.
+func (t *htunnelDirectTransport) sendError(err error, isCtrlLoop bool) {
+	ch := t.dataRecvCh
+	if isCtrlLoop {
+		ch = t.ctrlRecvCh
+	}
+	select {
+	case ch <- recvResult{err: err}:
+	case <-t.closed:
+	}
+}
+
+// routeFrame routes a frame to the appropriate receive channel based on type.
+func (t *htunnelDirectTransport) routeFrame(ft byte, payload []byte, isCtrlLoop bool) {
+	isData := ft == frame.FrameMeshPacket
+	ch := t.dataRecvCh
+	if !isData {
+		ch = t.ctrlRecvCh
+	}
+	select {
+	case ch <- recvResult{frameType: ft, payload: payload}:
+	case <-t.closed:
+	}
+}
+
+// Recv returns the next frame from the server. Control frames are prioritized
+// over data frames to prevent data congestion from delaying control traffic.
 func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
+	// Priority: non-blocking check for control frames
 	select {
 	case <-t.closed:
 		return 0, nil, io.ErrClosedPipe
-	case result := <-t.recvCh:
+	case result := <-t.ctrlRecvCh:
+		if result.err != nil {
+			return 0, nil, result.err
+		}
+		return result.frameType, result.payload, nil
+	default:
+	}
+
+	// Block on either channel
+	select {
+	case <-t.closed:
+		return 0, nil, io.ErrClosedPipe
+	case result := <-t.ctrlRecvCh:
+		if result.err != nil {
+			return 0, nil, result.err
+		}
+		return result.frameType, result.payload, nil
+	case result := <-t.dataRecvCh:
 		if result.err != nil {
 			return 0, nil, result.err
 		}

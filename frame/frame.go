@@ -11,15 +11,34 @@ import (
 	"phaethon/util"
 )
 
-// Frame types for the Unified Reverse Frame Protocol.
+// Frame types for reverse proxy protocol (used by ReverseFramedConn).
 const (
-	FrameHeartbeat  byte = 0x01 // HEARTBEAT: keep-alive ping (empty payload)
-	FramePong       byte = 0x02 // PONG: registration accepted (empty payload)
-	FramePeng       byte = 0x03 // PENG: registration confirmed (empty payload)
-	FrameUDPChannel byte = 0x04 // UDP_CHANNEL: UDP tunnel command (variable payload)
-	FrameData       byte = 0x05 // DATA: raw application-layer data
-	FrameMeshPacket byte = 0x06 // MESH_PACKET: mesh overlay IP packet
+	FrameHeartbeat  byte = 0x01 // Keep-alive ping
+	FramePong       byte = 0x02 // Registration accepted
+	FramePeng       byte = 0x03 // Registration confirmed
+	FrameUDPChannel byte = 0x04 // UDP tunnel command
+	FrameData       byte = 0x05 // Raw application data
 )
+
+// Frame types for P2P protocol v7.
+// Control frames (0x10-0x1F): reliable delivery with seq/ack
+// Data frames (0x20-0xFF): fire-and-forget, no seq/ack
+const (
+	// Control frames (reliable, with seq/ack)
+	FrameHello  byte = 0x11 // Hello: connection handshake
+	FrameGossip byte = 0x12 // Gossip: topology update + keepalive
+
+	// Data frames (fire-and-forget, no seq/ack)
+	FrameMeshPacket byte = 0x20 // Mesh overlay IP packet
+)
+
+// ControlFrameHeader is the header for control frames (type + seq + ack).
+// Wire format: {type(1), seq(4), ack(4), len(2), payload}
+const ControlFrameHeaderSize = 11
+
+// DataFrameHeader is the header for data frames (type + len).
+// Wire format: {type(1), len(2), payload}
+const DataFrameHeaderSize = 3
 
 // MaxPayload is the maximum frame payload size (16-bit length field).
 const MaxPayload = 65535
@@ -63,6 +82,70 @@ func WriteFrame(w io.Writer, frameType byte, payload []byte) error {
 		}
 	}
 	return nil
+}
+
+// ControlFrame represents a control frame with seq/ack for reliable delivery.
+type ControlFrame struct {
+	Type    byte
+	Seq     uint32
+	Ack     uint32
+	Payload []byte
+}
+
+// ReadControlFrame reads a control frame with seq/ack from r.
+// Wire format: {type(1), seq(4), ack(4), len(2), payload}
+func ReadControlFrame(r io.Reader) (*ControlFrame, error) {
+	var hdr [ControlFrameHeaderSize]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, fmt.Errorf("control_frame: read header fail: %w", err)
+	}
+
+	f := &ControlFrame{
+		Type: hdr[0],
+		Seq:  binary.BigEndian.Uint32(hdr[1:5]),
+		Ack:  binary.BigEndian.Uint32(hdr[5:9]),
+	}
+
+	length := binary.BigEndian.Uint16(hdr[9:11])
+	if length > MaxPayload {
+		return nil, fmt.Errorf("control_frame: payload too large (%d)", length)
+	}
+	if length > 0 {
+		f.Payload = make([]byte, length)
+		if _, err := io.ReadFull(r, f.Payload); err != nil {
+			return nil, fmt.Errorf("control_frame: read payload fail: %w", err)
+		}
+	}
+	return f, nil
+}
+
+// WriteControlFrame writes a control frame with seq/ack to w.
+// Wire format: {type(1), seq(4), ack(4), len(2), payload}
+func WriteControlFrame(w io.Writer, frameType byte, seq, ack uint32, payload []byte) error {
+	if len(payload) > MaxPayload {
+		return fmt.Errorf("control_frame: payload too large (%d)", len(payload))
+	}
+	var hdr [ControlFrameHeaderSize]byte
+	hdr[0] = frameType
+	binary.BigEndian.PutUint32(hdr[1:5], seq)
+	binary.BigEndian.PutUint32(hdr[5:9], ack)
+	binary.BigEndian.PutUint16(hdr[9:11], uint16(len(payload)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		if _, err := w.Write(payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IsControlFrame returns true if the frame type is a control frame (0x01-0x0F).
+func IsControlFrame(frameType byte) bool {
+	// P2P v7: control frames are 0x10-0x1F (hello=0x11, gossip=0x12)
+	// Reverse proxy control frames are 0x01-0x04 (heartbeat, pong, peng, udp_channel)
+	return (frameType >= 0x01 && frameType <= 0x0F) || (frameType >= 0x10 && frameType <= 0x1F)
 }
 
 // ReverseFramedConn wraps a net.Conn with frame-based multiplexing.

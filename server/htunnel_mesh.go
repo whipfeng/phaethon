@@ -99,27 +99,34 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 }
 
 // meshDispatchLoop distributes frames from meshOut to waiting GET requests.
-// This enables concurrent GET support: multiple GET requests can be pending,
-// and frames are distributed to them one by one.
+// Priority scheduling is handled by the P2P layer's peerWriteLoop, which
+// prioritizes control frames before calling transport.Send().
 func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 	for {
 		select {
 		case msg := <-ch.meshOut:
-			// Wait for a GET request to be ready
-			select {
-			case waiter := <-ch.getWaiters:
-				select {
-				case waiter <- msg:
-				case <-ch.closed:
-					return
-				}
-			case <-ch.closed:
+			if !s.dispatchToWaiter(ch, msg) {
 				return
 			}
 		case <-ch.closed:
 			return
 		}
 	}
+}
+
+// dispatchToWaiter sends msg to the next available GET waiter.
+func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
+	select {
+	case waiter := <-ch.getWaiters:
+		select {
+		case waiter <- msg:
+		case <-ch.closed:
+			return false
+		}
+	case <-ch.closed:
+		return false
+	}
+	return true
 }
 
 // meshHandleRead serves a client long-poll GET: register as a waiter, wait up
@@ -180,7 +187,7 @@ type meshChannelTransport struct {
 	ch *htChannel
 }
 
-func (t meshChannelTransport) Send(frameType byte, payload []byte) error {
+func (t meshChannelTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	select {
 	case t.ch.meshOut <- meshMsg{frameType: frameType, payload: payload}:
 		return nil

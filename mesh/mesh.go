@@ -92,6 +92,7 @@ type P2PTransport interface {
 	SetMeshInfo(nodeID, vip string)
 	ResendHelloToAll()
 	StopPeerByNodeID(nodeID string)
+	GetLinkQualityStats(nodeID string) (srtt, rto time.Duration, lossRate float64)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -245,7 +246,6 @@ type MeshManager struct {
 
 	// Link quality tracking
 	qualityTracker *PeerQualityTracker
-	probeSeq       uint32 // sequence counter for probes
 
 	// Sticky node selection cache (target → nodeID)
 	// Ensures stable routing: once a nodeID is selected for a target, keep using it
@@ -695,7 +695,7 @@ func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	m.recomputeRoutes()
 	go m.gossipLoop()
-	go m.probeLoop()
+	go m.qualityLoop()
 	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
 }
 
@@ -1944,7 +1944,7 @@ func (m *MeshManager) gossipLoop() {
 				m.recomputeRoutes()
 				util.DefaultVersionNotifier.BumpVersion("mesh")
 				nodeID := ev.sender.GetNodeID()
-				// Reset quality tracker for this peer to avoid stale probe state
+				// Reset quality tracker for this peer to avoid stale state
 				m.qualityTracker.Get(nodeID).Reset()
 				util.LogInfo("[MESH] peer registered: %s", nodeID)
 				// Immediately broadcast gossip so routing is established without waiting for 15s tick
@@ -2204,9 +2204,10 @@ func (m *MeshManager) broadcastGossip() {
 	}
 }
 
-// probeLoop periodically sends probe messages to all direct peers.
-func (m *MeshManager) probeLoop() {
-	util.LogInfo("[MESH] probe loop started (interval=10s)")
+// qualityLoop periodically pulls ACK-based link quality stats from P2P layer
+// and checks for peer connectivity issues.
+func (m *MeshManager) qualityLoop() {
+	util.LogInfo("[MESH] quality loop started (interval=10s)")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -2215,21 +2216,18 @@ func (m *MeshManager) probeLoop() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			m.sendProbes()
-			m.checkProbeFailures()
+			m.updateACKStats()
+			m.checkPeerConnectivity()
 		}
 	}
 }
 
-// checkProbeFailures checks for peers with consecutive probe failures.
-// If a peer has failed to respond to 3 consecutive probes (30 seconds),
-// it is considered dead and disconnected.
-func (m *MeshManager) checkProbeFailures() {
+// checkPeerConnectivity checks for peers with high loss rate or stale ACK stats.
+// If a peer has 100% loss rate or no ACK stats for 60 seconds, it is considered dead.
+func (m *MeshManager) checkPeerConnectivity() {
 	if m.p2p == nil {
 		return
 	}
-
-	const maxFailures = 3 // 3 consecutive failures = 30 seconds
 
 	allPeers := m.topology.GetAllPeers()
 	for _, peer := range allPeers {
@@ -2240,84 +2238,40 @@ func (m *MeshManager) checkProbeFailures() {
 		nodeID := peer.NodeID()
 		quality := m.qualityTracker.Get(nodeID)
 
-		// Check if peer has too many consecutive failures
-		if quality.ConsecutiveFailures() >= maxFailures {
-			util.LogWarn("[MESH] peer %s has %d consecutive probe failures, disconnecting",
-				nodeID, quality.ConsecutiveFailures())
-			m.p2p.StopPeerByNodeID(nodeID)
-			// Reset counters after disconnect
-			quality.Reset()
+		// Check if ACK stats are stale (no updates for 60s)
+		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
+			// Check if we ever received ACK stats
+			srtt, _, lossRate := m.p2p.GetLinkQualityStats(nodeID)
+			if srtt == 0 && lossRate == 0 {
+				// No ACK stats at all - peer might be dead
+				util.LogWarn("[MESH] peer %s has no ACK stats for 60s, disconnecting", nodeID)
+				m.p2p.StopPeerByNodeID(nodeID)
+				quality.Reset()
+			}
 		}
 	}
 }
 
-// sendProbes sends probe messages to all direct peers.
-func (m *MeshManager) sendProbes() {
+// updateACKStats pulls ACK-based link quality stats from P2P layer (v7).
+// This provides passive RTT and loss measurement without extra probe traffic.
+func (m *MeshManager) updateACKStats() {
 	if m.p2p == nil {
 		return
 	}
 
 	allPeers := m.topology.GetAllPeers()
-	directCount := 0
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue // not a direct peer
 		}
 
 		nodeID := peer.NodeID()
-		m.probeSeq++
-		probeData := NewProbeMsg(m.probeSeq)
-		peer.Sender.SendGossip(probeData)
-
-		// Record that we sent a probe (also checks if previous probe was replied)
-		quality := m.qualityTracker.Get(nodeID)
-		quality.RecordSent(m.probeSeq)
-
-		directCount++
+		srtt, _, lossRate := m.p2p.GetLinkQualityStats(nodeID)
+		if srtt > 0 || lossRate > 0 {
+			quality := m.qualityTracker.Get(nodeID)
+			quality.UpdateACKStats(srtt, lossRate)
+		}
 	}
-
-	if directCount > 0 {
-		util.LogDebug("[MESH] sent probes to %d direct peers", directCount)
-	}
-}
-
-// HandleProbe handles an incoming probe message from a peer.
-// It sends back a probe reply with the same timestamp.
-func (m *MeshManager) HandleProbe(sender PeerSender, data []byte) {
-	msg, err := ParseProbeMsg(data)
-	if err != nil {
-		util.LogDebug("[MESH] invalid probe from %s: %v", sender.GetNodeID(), err)
-		return
-	}
-
-	// Send reply with echoed timestamp
-	replyData := NewProbeReply(int64(msg.Seq), msg.Timestamp)
-	sender.SendGossip(replyData)
-
-	util.LogDebug("[MESH] received probe from %s (seq=%d), sent reply", sender.GetNodeID(), msg.Seq)
-}
-
-// HandleProbeReply handles an incoming probe reply from a peer.
-// It calculates RTT and updates the quality tracker.
-func (m *MeshManager) HandleProbeReply(sender PeerSender, data []byte) {
-	reply, err := ParseProbeReply(data)
-	if err != nil {
-		util.LogDebug("[MESH] invalid probe_reply from %s: %v", sender.GetNodeID(), err)
-		return
-	}
-
-	// Calculate RTT
-	sentTime := time.Unix(0, reply.Timestamp)
-	rtt := time.Since(sentTime)
-
-	// Update quality tracker
-	nodeID := sender.GetNodeID()
-	quality := m.qualityTracker.Get(nodeID)
-	quality.RecordRTT(rtt, reply.Seq)
-
-	avgRTT, loss := quality.Stats()
-	util.LogDebug("[MESH] probe_reply from %s (seq=%d): rtt=%v avg=%v loss=%.1f%%",
-		nodeID, reply.Seq, rtt, avgRTT, loss*100)
 }
 
 // GetPeerQuality returns the quality metrics for a peer.

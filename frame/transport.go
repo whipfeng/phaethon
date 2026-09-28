@@ -1,7 +1,9 @@
 package frame
 
 import (
+	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -9,36 +11,75 @@ import (
 // semantics: implementations MAY drop, duplicate or reorder frames
 // (all P2P frame consumers tolerate this).
 type FrameTransport interface {
-	// Send writes one frame. Implementations may buffer asynchronously
-	// (nil return does not mean the frame is on the wire); failures are
-	// surfaced through a later Send/Recv error.
-	Send(frameType byte, payload []byte) error
-	// Recv blocks for the next frame. Liveness detection is built into
-	// each implementation (stream: 60s read deadline; htunnel direct:
-	// long-poll GET cycle).
+	// Send writes one frame. isControl=true marks control frames which
+	// implementations MUST NOT block behind bulk data frames.
+	Send(frameType byte, payload []byte, isControl bool) error
+	// Recv blocks for the next frame. Implementations MUST prioritize
+	// control frames over data frames.
 	Recv() (frameType byte, payload []byte, err error)
 	Close() error
 }
 
-// streamTransport adapts a reliable, ordered net.Conn to FrameTransport,
-// preserving the exact deadline behavior of the former inline P2P write/read
-// loops: write 5s (30s for FrameMeshPacket), read 60s.
+type streamRecvResult struct {
+	frameType byte
+	payload   []byte
+	err       error
+}
+
+// streamTransport adapts a reliable, ordered net.Conn to FrameTransport.
+// A background readLoop reads frames from TCP and routes them to separate
+// ctrlRecvCh / dataRecvCh channels, ensuring control frames are never
+// delayed behind bulk data frames.
 type streamTransport struct {
-	conn net.Conn
+	conn       net.Conn
+	ctrlRecvCh chan streamRecvResult
+	dataRecvCh chan streamRecvResult
+	closed     chan struct{}
+	closeOnce  sync.Once
 }
 
 // NewStreamTransport wraps conn in a FrameTransport.
 func NewStreamTransport(conn net.Conn) FrameTransport {
-	return &streamTransport{conn: conn}
+	t := &streamTransport{
+		conn:       conn,
+		ctrlRecvCh: make(chan streamRecvResult, 16),
+		dataRecvCh: make(chan streamRecvResult, 64),
+		closed:     make(chan struct{}),
+	}
+	go t.readLoop()
+	return t
 }
 
-func (t *streamTransport) Send(frameType byte, payload []byte) error {
-	deadline := 5 * time.Second
-	if frameType == FrameMeshPacket {
-		// Bulk mesh data may legitimately stall on slow transports
-		// (h_tunnel/trojan); give overlay TCP time to drain instead of
-		// tearing the connection down mid-transfer.
-		deadline = 30 * time.Second
+func (t *streamTransport) readLoop() {
+	for {
+		_ = t.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		ft, payload, err := ReadFrame(t.conn)
+		_ = t.conn.SetReadDeadline(time.Time{})
+
+		if err != nil {
+			select {
+			case t.ctrlRecvCh <- streamRecvResult{err: err}:
+			case <-t.closed:
+			}
+			return
+		}
+
+		ch := t.dataRecvCh
+		if ft != FrameMeshPacket {
+			ch = t.ctrlRecvCh
+		}
+		select {
+		case ch <- streamRecvResult{frameType: ft, payload: payload}:
+		case <-t.closed:
+			return
+		}
+	}
+}
+
+func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	deadline := 30 * time.Second
+	if isControl {
+		deadline = 5 * time.Second
 	}
 	_ = t.conn.SetWriteDeadline(time.Now().Add(deadline))
 	if err := WriteFrame(t.conn, frameType, payload); err != nil {
@@ -50,12 +91,28 @@ func (t *streamTransport) Send(frameType byte, payload []byte) error {
 }
 
 func (t *streamTransport) Recv() (byte, []byte, error) {
-	_ = t.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	frameType, payload, err := ReadFrame(t.conn)
-	_ = t.conn.SetReadDeadline(time.Time{})
-	return frameType, payload, err
+	// Priority: non-blocking check for control frames
+	select {
+	case r := <-t.ctrlRecvCh:
+		return r.frameType, r.payload, r.err
+	default:
+	}
+
+	// Block on either channel
+	select {
+	case r := <-t.ctrlRecvCh:
+		return r.frameType, r.payload, r.err
+	case r := <-t.dataRecvCh:
+		return r.frameType, r.payload, r.err
+	case <-t.closed:
+		return 0, nil, io.ErrClosedPipe
+	}
 }
 
 func (t *streamTransport) Close() error {
-	return t.conn.Close()
+	t.closeOnce.Do(func() {
+		close(t.closed)
+		t.conn.Close()
+	})
+	return nil
 }

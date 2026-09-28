@@ -592,10 +592,7 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
-    onBusinessVersion('config', () => {
-        // Reload page content when config changes (proxy add/edit/delete/toggle)
-        reloadPage();
-    }, 'config');
+    onBusinessVersion('config', () => scheduleTopicFetch('config'), 'config');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
         fetchActiveConns(true);
@@ -694,6 +691,9 @@ function fetchForTopic(topic, expectedVersion) {
             return fetchStats(expectedVersion);
         case 'tun':
             return fetchTUNStatus(expectedVersion);
+        case 'config':
+            reloadPage();
+            return Promise.resolve();
         default:
             return Promise.resolve();
     }

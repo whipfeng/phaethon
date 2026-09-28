@@ -1,5 +1,19 @@
 // Phaethon Admin - Frontend JavaScript
 
+// ========== Fetch with timeout helper ==========
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timeoutId);
+        return res;
+    } catch (err) {
+        clearTimeout(timeoutId);
+        throw err;
+    }
+}
+
 // ========== Global State ==========
 // Version-vector state:
 //   targetVersions: latest version seen from SSE (what we should be fetching).
@@ -451,7 +465,7 @@ const VersionNotificationService = (function () {
 
     async function fetchVersions() {
         try {
-            const res = await fetch('./api/versions', { cache: 'no-store' });
+            const res = await fetchWithTimeout('./api/versions', { cache: 'no-store' });
             if (!res.ok) throw new Error('status ' + res.status);
             const vector = await res.json();
             applyVersions(vector);
@@ -592,7 +606,16 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
-    onBusinessVersion('config', () => scheduleTopicFetch('config'), 'config');
+    onBusinessVersion('proxies', () => scheduleTopicFetch('proxies'), 'proxies');
+    onBusinessVersion('rules', () => scheduleTopicFetch('rules'), 'rules');
+    onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
+    onBusinessVersion('subscriptions', () => scheduleTopicFetch('subscriptions'), 'subscriptions');
+    onBusinessVersion('p2p', () => {
+        // Only fetch P2P status if on proxies page
+        if (typeof window.fetchP2PStatus === 'function') {
+            window.fetchP2PStatus();
+        }
+    }, 'p2p');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
         fetchActiveConns(true);
@@ -691,9 +714,14 @@ function fetchForTopic(topic, expectedVersion) {
             return fetchStats(expectedVersion);
         case 'tun':
             return fetchTUNStatus(expectedVersion);
-        case 'config':
-            reloadPage();
-            return Promise.resolve();
+        case 'proxies':
+            return fetchProxies(expectedVersion);
+        case 'rules':
+            return fetchRules(expectedVersion);
+        case 'mappings':
+            return fetchMappings(expectedVersion);
+        case 'subscriptions':
+            return fetchSubscriptions(expectedVersion);
         default:
             return Promise.resolve();
     }
@@ -880,12 +908,289 @@ function updateReverseStatus(data) {
 // Poll the reverse config list.  expectedVersion lets the SSE scheduler discard
 // a response that arrived after a newer version event.
 async function pollReverseList(force, expectedVersion) {
-    const res = await fetch('./api/reverse');
+    const res = await fetchWithTimeout('./api/reverse');
     if (!res.ok) throw new Error('status ' + res.status);
     const data = await res.json();
     if (!Array.isArray(data)) throw new Error('invalid reverse data');
     if (expectedVersion !== undefined && targetVersions.reverse !== expectedVersion) return;
     updateReverseStatus(data);
+}
+
+// ===== Proxies client-side rendering =====
+async function fetchProxies(expectedVersion) {
+    const [proxiesRes, groupsRes] = await Promise.all([
+        fetchWithTimeout('./api/proxies'),
+        fetchWithTimeout('./api/groups')
+    ]);
+    if (!proxiesRes.ok || !groupsRes.ok) throw new Error('status ' + proxiesRes.status + '/' + groupsRes.status);
+    const proxiesData = await proxiesRes.json();
+    const groupsData = await groupsRes.json();
+    if (!Array.isArray(proxiesData)) throw new Error('invalid proxies data');
+    if (!Array.isArray(groupsData)) throw new Error('invalid groups data');
+    if (expectedVersion !== undefined && targetVersions.proxies !== expectedVersion) return;
+    updateProxies(proxiesData, groupsData);
+}
+
+function updateProxies(proxiesData, groupsData) {
+    if (typeof proxies !== 'undefined') proxies = proxiesData;
+    if (typeof groups !== 'undefined') groups = groupsData;
+
+    const tbody = document.querySelector('#proxy-table tbody');
+    if (tbody) {
+        tbody.innerHTML = renderProxyRows(proxiesData);
+    }
+
+    const groupsGrid = document.querySelector('.groups-grid');
+    const groupsCard = document.querySelector('#proxy-table')?.closest('.page-content')?.querySelector('.card:nth-child(2)');
+    if (groupsGrid) {
+        if (groupsData.length === 0) {
+            groupsGrid.innerHTML = '';
+            const noGroups = document.createElement('p');
+            noGroups.className = 'text-muted';
+            noGroups.setAttribute('data-i18n', 'proxy.noGroups');
+            noGroups.textContent = (typeof i18n !== 'undefined' ? i18n.t('proxy.noGroups') : null) || 'No groups defined.';
+            groupsGrid.replaceWith(noGroups);
+        } else {
+            groupsGrid.innerHTML = renderGroupCards(groupsData);
+        }
+    }
+
+    // Update proxy count in header
+    const header = document.querySelector('#proxy-table')?.closest('.card')?.querySelector('.card-header h3');
+    if (header) {
+        const label = (typeof i18n !== 'undefined' ? i18n.t('proxy.title') : null) || 'Proxies';
+        header.innerHTML = `<span data-i18n="proxy.title">${label}</span> (${proxiesData.length})`;
+    }
+}
+
+function renderProxyRows(proxiesData) {
+    return proxiesData.map(p => {
+        if (!p || !p.name) return '';
+        const enabled = p.enabled === true;
+        const udp = p.udp === true;
+        const p2p = p.p2p === true;
+        const rowClass = enabled ? '' : 'row-disabled';
+        const pwdCell = p.password
+            ? `<span class="password-container" data-proxy="${escapeHtml(p.name)}">
+                <span class="password-text" id="pwd-${escapeHtml(p.name)}">••••••••</span>
+                <span class="password-actual" id="pwd-actual-${escapeHtml(p.name)}" style="display:none;">${escapeHtml(p.password)}</span>
+                <button onclick="togglePassword('${escapeHtml(p.name)}')" class="btn-icon" title="Show/Hide">
+                    <span class="eye-icon" id="eye-${escapeHtml(p.name)}">👁️</span>
+                </button>
+               </span>`
+            : `<span class="text-muted">-</span>`;
+        const p2pCell = p2p
+            ? `<span class="p2p-status connecting" title="Connecting...">🔄</span>`
+            : '❌';
+        return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
+            <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>
+            <td data-label="Type"><code class="type-badge type-${escapeHtml((p.type || '').toLowerCase())}">${escapeHtml(p.type)}</code></td>
+            <td data-label="Server">${escapeHtml(p.server || '')}</td>
+            <td data-label="Port">${p.port || ''}</td>
+            <td data-label="Password">${pwdCell}</td>
+            <td data-label="SNI">${escapeHtml(p.sni || '')}</td>
+            <td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('${escapeHtml(p.name)}', ${udp})">${udp ? '✅' : '❌'}</td>
+            <td data-label="P2P" style="cursor:pointer;" onclick="toggleP2P('${escapeHtml(p.name)}', ${p2p})" id="p2p-status-${escapeHtml(p.name)}">${p2pCell}</td>
+            <td data-label="Via">${escapeHtml(p.via || '')}</td>
+            <td data-label="Enabled">
+                <label class="switch" title="${enabled ? (typeof i18n !== 'undefined' ? i18n.t('common.enabled') : 'Enabled') : (typeof i18n !== 'undefined' ? i18n.t('common.disabled') : 'Disabled')}">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleProxy('${escapeHtml(p.name)}', this.checked)">
+                    <span class="slider"></span>
+                </label>
+            </td>
+            <td data-label="Actions">
+                <button onclick="editProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnEdit') : null) || 'Edit'}</button>
+                <button onclick="testProxy('${escapeHtml(p.name)}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnTest') : null) || 'Test'}</button>
+                <button onclick="copyProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnDelete') : null) || 'Delete'}</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderGroupCards(groupsData) {
+    return groupsData.map(g => {
+        if (!g || !g.name) return '';
+        const enabled = g.enabled === true;
+        const cardClass = enabled ? '' : 'row-disabled';
+        const members = g.proxies || [];
+        const total = members.length + (g.manualProxies || []).length;
+        const activeMember = g['active-member'] || '';
+        const subscription = g.subscription || '';
+        const previewTags = members.slice(0, 5).map(m => {
+            const mName = typeof m === 'string' ? m : (m.name || '');
+            return `<span class="tag">${escapeHtml(mName)}</span>`;
+        }).join('');
+        return `<div class="group-card ${cardClass}" data-group="${escapeHtml(g.name)}" onclick="toggleGroupExpand('${escapeHtml(g.name)}')">
+            <h4><span class="expand-chevron">▶</span> ${escapeHtml(g.name)} <span class="type-badge">${escapeHtml(g.type || '')}</span></h4>
+            <p class="text-muted group-summary">
+                <span data-i18n="proxy.totalMembers">${(typeof i18n !== 'undefined' ? i18n.t('proxy.totalMembers') : null) || 'Total'}</span>: ${total}
+                ${activeMember ? ` · <span data-i18n="proxy.activeMember">${(typeof i18n !== 'undefined' ? i18n.t('proxy.activeMember') : null) || 'Active'}</span>: ${escapeHtml(activeMember)}` : ''}
+                ${subscription ? ` · <span data-i18n="proxy.groupSub">${(typeof i18n !== 'undefined' ? i18n.t('proxy.groupSub') : null) || 'Subscription'}</span>: ${escapeHtml(subscription)}` : ''}
+            </p>
+            <div class="group-preview-tags">${previewTags}</div>
+            <div class="group-actions" onclick="event.stopPropagation()">
+                <button onclick="testGroup('${escapeHtml(g.name)}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnTest') : null) || 'Test'}</button>
+                <label class="switch" style="margin-right:0.25rem;" title="${enabled ? 'Enabled' : 'Disabled'}">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleGroup('${escapeHtml(g.name)}', this.checked)">
+                    <span class="slider"></span>
+                </label>
+                <button onclick="editGroup('${escapeHtml(g.name)}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnEdit') : null) || 'Edit'}</button>
+                <button onclick="copyGroup('${escapeHtml(g.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteGroup('${escapeHtml(g.name)}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnDelete') : null) || 'Delete'}</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ===== Rules client-side rendering =====
+async function fetchRules(expectedVersion) {
+    const res = await fetchWithTimeout('./api/rules');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('invalid rules data');
+    if (expectedVersion !== undefined && targetVersions.rules !== expectedVersion) return;
+    updateRules(data);
+}
+
+function updateRules(data) {
+    const tbody = document.querySelector('#rules-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = data.map((r, i) => {
+        const enabled = r.enabled !== false;
+        const ruleText = r.rule || '';
+        const rowClass = enabled ? '' : 'row-disabled';
+        return `<tr data-index="${i}" data-rule="${escapeHtml(ruleText)}" class="${rowClass}" draggable="true">
+            <td data-label="#" class="drag-handle" style="cursor:grab;">⠿</td>
+            <td data-label="Rule">${escapeHtml(ruleText)}</td>
+            <td data-label="Enabled">
+                <label class="switch">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleRule(${i}, this.checked)">
+                    <span class="slider"></span>
+                </label>
+            </td>
+            <td data-label="Actions">
+                <button onclick="editRule(${i})" class="btn btn-sm btn-outline">${(typeof i18n !== 'undefined' ? i18n.t('common.edit') : null) || 'Edit'}</button>
+                <button onclick="deleteRule(${i})" class="btn btn-sm btn-danger">${(typeof i18n !== 'undefined' ? i18n.t('common.delete') : null) || 'Delete'}</button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    // Update rule count
+    const header = document.querySelector('#rules-table')?.closest('.card')?.querySelector('.card-header h3');
+    if (header) {
+        const label = (typeof i18n !== 'undefined' ? i18n.t('rule.title') : null) || 'Rules';
+        header.innerHTML = `<span data-i18n="rule.title">${label}</span> (${data.length})`;
+    }
+}
+
+// ===== Mappings client-side rendering =====
+async function fetchMappings(expectedVersion) {
+    const res = await fetchWithTimeout('./api/mappings');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('invalid mappings data');
+    if (expectedVersion !== undefined && targetVersions.mappings !== expectedVersion) return;
+    updateMappings(data);
+}
+
+function updateMappings(data) {
+    const tbody = document.querySelector('#mapping-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = data.map(m => {
+        if (!m || !m.name) return '';
+        const enabled = m.enabled !== false;
+        const rowClass = enabled ? '' : 'row-disabled';
+        const dst = m.dstHost ? `${escapeHtml(m.dstHost)}:${m.dstPort}` : (m.reverseAddress || '-');
+        return `<tr data-name="${escapeHtml(m.name)}" class="${rowClass}">
+            <td data-label="Name"><strong>${escapeHtml(m.name)}</strong></td>
+            <td data-label="Type"><code class="type-badge type-${escapeHtml((m.type || '').toLowerCase())}">${escapeHtml(m.type || '')}</code></td>
+            <td data-label="Port">${m.port || ''}</td>
+            <td data-label="Destination">${dst}</td>
+            <td data-label="SNI">${escapeHtml(m.sni || '-')}</td>
+            <td data-label="Enabled">
+                <label class="switch">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleMapping('${escapeHtml(m.name)}', this.checked)">
+                    <span class="slider"></span>
+                </label>
+            </td>
+            <td data-label="Actions">
+                <button onclick="editMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-outline">${(typeof i18n !== 'undefined' ? i18n.t('common.edit') : null) || 'Edit'}</button>
+                <button onclick="copyMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-danger">${(typeof i18n !== 'undefined' ? i18n.t('common.delete') : null) || 'Delete'}</button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    const header = document.querySelector('#mapping-table')?.closest('.card')?.querySelector('.card-header h3');
+    if (header) {
+        const label = (typeof i18n !== 'undefined' ? i18n.t('mapping.title') : null) || 'Mappings';
+        header.innerHTML = `<span data-i18n="mapping.title">${label}</span> (${data.length})`;
+    }
+}
+
+// ===== Subscriptions client-side rendering =====
+async function fetchSubscriptions(expectedVersion) {
+    const res = await fetchWithTimeout('./api/subscriptions');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('invalid subscriptions data');
+    if (expectedVersion !== undefined && targetVersions.subscriptions !== expectedVersion) return;
+    updateSubscriptions(data);
+}
+
+function updateSubscriptions(data) {
+    const tbody = document.querySelector('#sub-table tbody');
+    if (!tbody) return;
+    if (data.length === 0) {
+        tbody.innerHTML = '';
+        const table = document.querySelector('#sub-table');
+        if (table) table.style.display = 'none';
+        let emptyState = document.querySelector('#sub-empty-state');
+        if (!emptyState) {
+            emptyState = document.createElement('p');
+            emptyState.id = 'sub-empty-state';
+            emptyState.className = 'text-muted';
+            emptyState.setAttribute('data-i18n', 'sub.noSubs');
+            emptyState.textContent = (typeof i18n !== 'undefined' ? i18n.t('sub.noSubs') : null) || 'No subscriptions defined.';
+            table?.parentNode?.appendChild(emptyState);
+        }
+        emptyState.style.display = 'block';
+    } else {
+        const table = document.querySelector('#sub-table');
+        if (table) table.style.display = '';
+        const emptyState = document.querySelector('#sub-empty-state');
+        if (emptyState) emptyState.style.display = 'none';
+        tbody.innerHTML = data.map(sub => {
+            if (!sub || !sub.name) return '';
+            const enabled = sub.enabled !== false;
+            const rowClass = enabled ? '' : 'row-disabled';
+            return `<tr data-name="${escapeHtml(sub.name)}" data-url="${escapeHtml(sub.url || '')}" data-interval="${sub.interval || 3600}" class="${rowClass}">
+                <td data-label="Name"><strong>${escapeHtml(sub.name)}</strong></td>
+                <td data-label="URL" class="text-muted text-small" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(sub.url || '')}</td>
+                <td data-label="Interval">${sub.interval || 3600}s</td>
+                <td data-label="Nodes">${sub.nodeCount || 0}</td>
+                <td data-label="Enabled">
+                    <label class="switch" title="${enabled ? 'Enabled' : 'Disabled'}">
+                        <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleSubscription('${escapeHtml(sub.name)}', this.checked)">
+                        <span class="slider"></span>
+                    </label>
+                </td>
+                <td data-label="Actions">
+                    <button onclick="refreshSub('${escapeHtml(sub.name)}', this)" class="btn btn-sm btn-outline" data-i18n="sub.refresh">🔄 ${(typeof i18n !== 'undefined' ? i18n.t('sub.refresh') : null) || 'Refresh'}</button>
+                    <button onclick="editSub('${escapeHtml(sub.name)}')" class="btn btn-sm btn-outline" data-i18n="sub.btnEdit">${(typeof i18n !== 'undefined' ? i18n.t('sub.btnEdit') : null) || 'Edit'}</button>
+                    <button onclick="copySub('${escapeHtml(sub.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                    <button onclick="deleteSub('${escapeHtml(sub.name)}')" class="btn btn-sm btn-danger" data-i18n="sub.btnDelete">${(typeof i18n !== 'undefined' ? i18n.t('sub.btnDelete') : null) || 'Delete'}</button>
+                </td>
+            </tr>`;
+        }).join('');
+    }
+
+    const header = document.querySelector('#sub-table')?.closest('.card')?.querySelector('.card-header h3');
+    if (header) {
+        const label = (typeof i18n !== 'undefined' ? i18n.t('sub.title') : null) || 'Subscriptions';
+        header.innerHTML = `<span data-i18n="sub.title">${label}</span> (${data.length})`;
+    }
 }
 
 // NOTE: A faster string-replacement version is defined below (line ~557).

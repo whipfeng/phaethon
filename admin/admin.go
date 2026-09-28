@@ -2436,7 +2436,7 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after p2p toggle failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("p2p")
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		util.LogInfo("[ADMIN] P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 		jsonResponse(w, proxySummary(p))
 		return

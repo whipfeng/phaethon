@@ -2370,6 +2370,38 @@ function reloadConfig() {
     });
 }
 
+// ========== Process Restart ==========
+function restartProcess() {
+    const msg = typeof i18n !== 'undefined' ? i18n.t('dash.confirmRestart') : 'Restart process? The service will be briefly unavailable.';
+    openConfirmModal(msg, async function() {
+        // Dangerous operation: require password confirmation
+        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+        if (!password) return;
+
+        try {
+            const infoMsg = typeof i18n !== 'undefined' ? i18n.t('dash.restarting') : 'Restarting process...';
+            showToast(infoMsg, 'info');
+            const res = await fetch('./api/restart', {
+                method: 'POST',
+                headers: { 'X-Password-Confirm': password }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                const okMsg = typeof i18n !== 'undefined' ? i18n.t('dash.restartOk') : 'Process restarting. Page will reload in a few seconds.';
+                showToast('✅ ' + okMsg, 'success');
+                // Wait for the process to restart, then reload the page
+                setTimeout(() => location.reload(), 3000);
+            } else {
+                const failMsg = typeof i18n !== 'undefined' ? i18n.t('dash.restartFailed') : 'Restart failed';
+                showToast('❌ ' + (data.error || failMsg), 'error');
+            }
+        } catch (err) {
+            const netErr = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Network error';
+            showToast('❌ ' + netErr + ': ' + err.message, 'error');
+        }
+    });
+}
+
 // ========== Toast Notifications ==========
 function showToast(message, type = 'success', duration = 3500) {
     let container = document.querySelector('.toast-container');

@@ -876,6 +876,10 @@ func main() {
 				resources.tunRes.engine.UpdateDHCPStaticBindings(bindings)
 			}
 		}
+		resources.adminServer.OnRestart = func() {
+			util.LogInfo("[MAIN] restart requested via admin API, exiting for watchdog restart...")
+			os.Exit(0)
+		}
 	}
 
 	// Interactive mode: open the web reverse wizard in the default browser.
@@ -1218,7 +1222,16 @@ func runWatchdogMode() {
 	lastRestart := time.Time{}
 	var isRestarting atomic.Bool
 
-	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool) *childProcess {
+	// Track the last binary that successfully started (sent ready signal).
+	// If a new binary fails to start or crashes before ready, fall back to this.
+	// Persisted to disk so it survives watchdog restarts.
+	lastGoodBinary := readLastGoodWorker()
+	if lastGoodBinary != "" {
+		util.LogInfo("watchdog: loaded last good binary from disk: %s", lastGoodBinary)
+	}
+	currentBinary := exe
+
+	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool, wasReady bool) *childProcess {
 		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
 		isRestarting.Store(true)
 		defer func() { isRestarting.Store(false) }()
@@ -1242,17 +1255,42 @@ func runWatchdogMode() {
 			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
 			time.Sleep(remain)
 		}
-		// Re-scan before restarting (hot swap support): pkg only if newer than self
-		newExe := selectWorkerBinary()
+
+		// Determine which binary to use for restart
+		var newExe string
+		if !wasReady && lastGoodBinary != "" && currentBinary != lastGoodBinary {
+			// Child crashed before becoming ready and we have a known good binary
+			// Fall back to the last good binary
+			util.LogWarn("watchdog: child crashed before ready, falling back from %s to %s", currentBinary, lastGoodBinary)
+			newExe = lastGoodBinary
+		} else {
+			// Re-scan before restarting (hot swap support): pkg only if newer than self
+			newExe = selectWorkerBinary()
+		}
+
 		if newExe == "" {
 			return nil
 		}
+
 		newCp, err := spawnChildProcess(newExe)
 		if err != nil {
-			util.LogError("watchdog: restart failed: %v", err)
-			return nil
+			util.LogError("watchdog: restart failed with %s: %v", newExe, err)
+			// If we failed with the fallback binary too, try the original selection
+			if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
+				util.LogInfo("watchdog: fallback failed, trying %s again", currentBinary)
+				newExe = currentBinary
+				newCp, err = spawnChildProcess(newExe)
+				if err != nil {
+					util.LogError("watchdog: restart failed with %s: %v", newExe, err)
+					return nil
+				}
+			} else {
+				return nil
+			}
 		}
-		util.LogInfo("watchdog: restarted child (old=%d, new=%d)", pid, newCp.proc.Pid)
+
+		currentBinary = newExe
+		util.LogInfo("watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
 		lastRestart = time.Now()
 		return newCp
 	}
@@ -1295,6 +1333,13 @@ func runWatchdogMode() {
 		case <-cp.done:
 			// Child process exited (stdout closed) - reap immediately
 			exitCode, reaped := reapChild(pid)
+			wasReady := cp.ready.Load()
+			// Update lastGoodBinary if child became ready
+			if wasReady && lastGoodBinary != currentBinary {
+				lastGoodBinary = currentBinary
+				writeLastGoodWorker(lastGoodBinary)
+				util.LogInfo("watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+			}
 			// Check for self-update request (exit code 42)
 			if reaped && exitCode == 42 {
 				util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
@@ -1309,8 +1354,8 @@ func runWatchdogMode() {
 				return
 			}
 			// Child exited (hot swap or crash) — restart immediately
-			// Pass alreadyExited=true since we already reaped the child
-			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode), true)
+			// Pass alreadyExited=true, wasReady to restartChild
+			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode), true, wasReady)
 			if cp == nil {
 				signal.Stop(sigCh)
 				return
@@ -1319,9 +1364,23 @@ func runWatchdogMode() {
 			spawnTime = time.Now()
 			continue
 		case <-monitorTicker.C:
+			// Check if child just became ready and update lastGoodBinary
+			if cp.ready.Load() && lastGoodBinary != currentBinary {
+				lastGoodBinary = currentBinary
+				writeLastGoodWorker(lastGoodBinary)
+				util.LogInfo("watchdog: child %d is ready, persisted %s as last good binary", pid, currentBinary)
+			}
+
 			if !processExists(pid) {
 				// Child exited but cp.done not yet closed — reap and restart
 				exitCode, reaped := reapChild(pid)
+				wasReady := cp.ready.Load()
+				// Update lastGoodBinary if child became ready
+				if wasReady && lastGoodBinary != currentBinary {
+					lastGoodBinary = currentBinary
+					writeLastGoodWorker(lastGoodBinary)
+					util.LogInfo("watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+				}
 				// Check for self-update request (exit code 42)
 				if reaped && exitCode == 42 {
 					util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
@@ -1336,8 +1395,8 @@ func runWatchdogMode() {
 					return
 				}
 				// Child crashed — restart immediately
-				// Pass alreadyExited=true since we already reaped the child
-				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid), true)
+				// Pass alreadyExited=true, wasReady to restartChild
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid), true, wasReady)
 				if cp == nil {
 					signal.Stop(sigCh)
 					return
@@ -1348,8 +1407,8 @@ func runWatchdogMode() {
 			}
 			// Check ready timeout: child has not signaled ready within the limit.
 			if !cp.ready.Load() && time.Since(spawnTime) > childReadyTimeout {
-				// Child still running but stuck — pass alreadyExited=false
-				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout), false)
+				// Child still running but stuck — pass alreadyExited=false, wasReady=false
+				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout), false, false)
 				if cp == nil {
 					signal.Stop(sigCh)
 					return
@@ -1362,8 +1421,8 @@ func runWatchdogMode() {
 			if cp.ready.Load() {
 				lastHB := time.Unix(0, cp.lastHB.Load())
 				if time.Since(lastHB) > childHeartbeatTimeout {
-					// Child still running but stuck — pass alreadyExited=false
-					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout), false)
+					// Child still running but stuck — pass alreadyExited=false, wasReady=true
+					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout), false, true)
 					if cp == nil {
 						signal.Stop(sigCh)
 						return

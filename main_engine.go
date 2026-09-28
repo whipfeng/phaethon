@@ -154,6 +154,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 }
 
 const stoppedMarkerPath = "data/state/stopped"
+const lastGoodWorkerPath = "data/state/last-good-worker"
 
 func writeStoppedMarker() {
 	_ = os.WriteFile(stoppedMarkerPath, []byte("1"), 0644)
@@ -166,6 +167,24 @@ func removeStoppedMarker() {
 func wasStoppedGracefully() bool {
 	_, err := os.Stat(stoppedMarkerPath)
 	return err == nil
+}
+
+// writeLastGoodWorker persists the path of the last worker binary that
+// successfully started (sent ready signal). Used by watchdog to fall back
+// if a new binary fails.
+func writeLastGoodWorker(path string) {
+	_ = os.MkdirAll("data/state", 0755)
+	_ = os.WriteFile(lastGoodWorkerPath, []byte(path), 0644)
+}
+
+// readLastGoodWorker reads the persisted last good worker binary path.
+// Returns empty string if not found or unreadable.
+func readLastGoodWorker() string {
+	data, err := os.ReadFile(lastGoodWorkerPath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.

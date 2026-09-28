@@ -592,6 +592,12 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
+    onBusinessVersion('proxies', () => {
+        // Reload proxies page if currently on it
+        if (window.location.pathname.includes('/proxies')) {
+            location.reload();
+        }
+    }, 'proxies');
     onBusinessVersion('logs', () => {
         fetchConnections(true);
         fetchActiveConns(true);

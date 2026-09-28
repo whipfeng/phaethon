@@ -282,7 +282,9 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	m.mu.Unlock()
 
 	defer func() {
-		close(peer.stopCh)
+		peer.stopOnce.Do(func() {
+			close(peer.stopCh)
+		})
 		t.Close()
 		m.mu.Lock()
 		if peer.meshSender != nil && m.meshHandler != nil {

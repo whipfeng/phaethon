@@ -1102,6 +1102,8 @@ async function doToggleP2P(name, enabled, cell) {
             }
         }
         showToast(`P2P ${enabled ? 'enabled' : 'disabled'} for ${name}`, enabled ? 'success' : 'warning');
+        // Reload page after a short delay to reflect the updated state
+        setTimeout(() => location.reload(), 500);
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }

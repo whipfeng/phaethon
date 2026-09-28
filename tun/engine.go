@@ -133,6 +133,10 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 		e.netstack.SetMeshInterceptor(handler)
 		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
 		e.netstack.SetIsMeshIPFunc(e.isMeshIP)
+		// Set FakeIP reverse lookup for diagnostics
+		if e.fakeIP != nil {
+			e.netstack.SetLookupDomainFunc(e.fakeIP.LookupDomain)
+		}
 	}
 
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)

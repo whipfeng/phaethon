@@ -192,16 +192,21 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	}
 
 	connID := util.NextConnID()
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	startTime := time.Now()
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
 	targetConn, cleanup, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5")
+	dialDuration := time.Since(startTime)
 	if err != nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
+		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d after %v: %v", s.Mapping.Name, connID, dstAddr, dstPort, dialDuration, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
 	defer targetConn.Close()
 	defer cleanup()
+
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] mesh dial completed in %v, local=%s remote=%s",
+		connID, s.Mapping.Name, dialDuration, targetConn.LocalAddr(), targetConn.RemoteAddr())
 
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
@@ -211,8 +216,11 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 		ds.SetReadDeadline(time.Time{})
 	}
 
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH relay starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	relayStart := time.Now()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
+	relayDuration := time.Since(relayStart)
+	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH relay ended after %v", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort, relayDuration)
 }
 
 func sendSocks5Response(conn net.Conn, status byte) {

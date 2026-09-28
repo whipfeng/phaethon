@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -39,6 +40,10 @@ func (h *meshTestHandler) HandleMeshFrame(fromNodeID string, f []byte) {
 }
 
 func (h *meshTestHandler) HandleTopologyGossip(sender mesh.PeerSender, data []byte) {}
+
+func (h *meshTestHandler) HandleProbe(sender mesh.PeerSender, data []byte) {}
+
+func (h *meshTestHandler) HandleProbeReply(sender mesh.PeerSender, data []byte) {}
 
 func (h *meshTestHandler) RegisterPeer(sender mesh.PeerSender) {
 	h.mu.Lock()
@@ -126,7 +131,12 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 		},
 	}
 	helloData, _ := json.Marshal(hello)
-	if err := tr.Send(frame.FrameData, helloData); err != nil {
+	// Encode seq/ack into control frame payload (8 bytes: seq(4) + ack(4))
+	encodedHello := make([]byte, 8+len(helloData))
+	binary.BigEndian.PutUint32(encodedHello[0:4], 1) // seq=1
+	binary.BigEndian.PutUint32(encodedHello[4:8], 0) // ack=0
+	copy(encodedHello[8:], helloData)
+	if err := tr.Send(frame.FrameHello, encodedHello, true); err != nil {
 		t.Fatalf("send hello: %v", err)
 	}
 
@@ -145,9 +155,14 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recv server hello: %v", err)
 	}
-	if ft != frame.FrameData {
-		t.Fatalf("expected FrameData, got 0x%02x", ft)
+	if ft != frame.FrameHello {
+		t.Fatalf("expected FrameHello, got 0x%02x", ft)
 	}
+	// Decode seq/ack from control frame payload (8 bytes: seq(4) + ack(4))
+	if len(payload) < 8 {
+		t.Fatalf("server hello too short: %d bytes", len(payload))
+	}
+	payload = payload[8:] // strip seq/ack header
 	var srvHello mesh.GossipInfo
 	if err := json.Unmarshal(payload, &srvHello); err != nil {
 		t.Fatalf("parse server hello: %v", err)
@@ -167,7 +182,7 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 
 	// Mesh packet round trip: client → server handler → echo → client.
 	echoPayload := []byte("mesh-echo-test")
-	if err := tr.Send(frame.FrameMeshPacket, echoPayload); err != nil {
+	if err := tr.Send(frame.FrameMeshPacket, echoPayload, false); err != nil {
 		t.Fatalf("send mesh packet: %v", err)
 	}
 	select {

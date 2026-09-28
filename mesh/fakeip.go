@@ -115,6 +115,7 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 	defer p.mu.Unlock()
 
 	if ip, ok := p.domainToIP[domain]; ok {
+		util.LogInfo("[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
 		return ip
 	}
 
@@ -137,10 +138,12 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain
 
+		util.LogInfo("[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
+
 		// Persist to database
 		if db.IsInitialized() {
 			if err := db.PutFakeIP(domain, ipStr); err != nil {
-				util.LogWarn("Failed to persist FakeIP mapping: %v", err)
+				util.LogWarn("[FAKEIP] Failed to persist mapping: %v", err)
 			}
 		}
 

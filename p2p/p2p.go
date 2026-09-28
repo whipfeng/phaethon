@@ -59,6 +59,8 @@ type P2PManager struct {
 
 	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
+
+	OnStatusChange func() // callback when peer status changes
 }
 
 type meshInboundPacket struct {
@@ -401,6 +403,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if err != nil {
 			util.LogInfo("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
 			peer.Status = "failed"
+			if m.OnStatusChange != nil {
+				go m.OnStatusChange()
+			}
 			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
 			jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
 			select {
@@ -421,6 +426,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.sendState = newSendState()
 		peer.recvState = newRecvState()
 		peer.Status = "connecting"
+		if m.OnStatusChange != nil {
+			go m.OnStatusChange()
+		}
 		util.LogInfo("[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
 		// Run session in a closure so we can use defer for cleanup
@@ -442,6 +450,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 		util.LogInfo("[P2P] disconnected from %s, reconnecting in %v", peer.ID, backoff)
 		peer.Status = "connecting"
+		if m.OnStatusChange != nil {
+			go m.OnStatusChange()
+		}
 		// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
 		jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
 		select {
@@ -642,6 +653,10 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
 
+	if m.OnStatusChange != nil {
+		go m.OnStatusChange()
+	}
+
 	util.LogInfo("[P2P] hello from %s: nodeID=%s", peer.ID, nodeID)
 
 	// 3. Clean up old state + re-register
@@ -656,6 +671,9 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	m.processGossipInfo(peer, info)
 
 	peer.Status = "upToDate"
+	if m.OnStatusChange != nil {
+		go m.OnStatusChange()
+	}
 }
 
 // handleGossip processes a gossip message from a peer.

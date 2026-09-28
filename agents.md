@@ -166,7 +166,17 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 #### QGW环境 (10.11.61.40:/root/qgw) — Windows 7 兼容版
 - **位置**: QG 服务器的 `/root/qgw/` 目录
 - **用途**: 运行 Windows 7 兼容版本的 phaethon
-- **编译**: 在 VM 环境使用 go-legacy-win7 编译器：`/c/go-legacy-win7/bin/go.exe build -o dist/windows7-amd64/phaethon.exe -tags 'win7' .`
+- **编译**: 在 VM 环境使用 go-legacy-win7 编译器：
+  ```bash
+  # 设置环境变量（一次性）
+  export GO_LEGACY_WIN7=/c/go-legacy-win7/bin/go.exe
+  # 编译（自动注入版本号）
+  make windows7
+  ```
+  或手动编译（带版本号）：
+  ```bash
+  /c/go-legacy-win7/bin/go.exe build -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty) -X main.Platform=windows7 -X main.Arch=amd64" -o dist/windows7-amd64/phaethon.exe -tags 'win7' .
+  ```
 - **上传**: `scp dist/windows7-amd64/phaethon.exe root@10.11.61.40:/root/qgw/phaethon.exe`（通过 SSH 端口 2222）
 - **⚠️ 重要**: **只能放置二进制文件，不能重启服务**！用户会手动重启
 - **二进制路径**: `/root/qgw/phaethon.exe`

@@ -241,6 +241,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		p2p.CleanupBackup()
 	}
 	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
+	p2p.GlobalP2PManager.OnStatusChange = func() {
+		util.DefaultVersionNotifier.BumpVersion("p2p")
+	}
 	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
 
 	// Initialize mesh overlay network (always enabled)

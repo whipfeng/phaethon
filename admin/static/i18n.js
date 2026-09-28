@@ -801,6 +801,11 @@
 
             // ===== Dashboard (additional) =====
             'dash.confirmReload': '确认重载配置？',
+            'dash.confirmRestart': '确认重启进程？服务将短暂不可用。',
+            'dash.restarting': '正在重启进程...',
+            'dash.restartOk': '进程正在重启，页面将在几秒后刷新。',
+            'dash.restartFailed': '重启失败',
+            'dash.restartProcess': '重启进程',
             'dash.loadSecurityFailed': '加载安全状态失败',
             'dash.loadTunFailed': '加载 TUN 状态失败',
 
@@ -1610,6 +1615,11 @@
 
             // ===== Dashboard (additional) =====
             'dash.confirmReload': 'Reload configuration?',
+            'dash.confirmRestart': 'Restart process? The service will be briefly unavailable.',
+            'dash.restarting': 'Restarting process...',
+            'dash.restartOk': 'Process restarting. Page will reload in a few seconds.',
+            'dash.restartFailed': 'Restart failed',
+            'dash.restartProcess': 'Restart Process',
             'dash.loadSecurityFailed': 'Failed to load security status',
             'dash.loadTunFailed': 'Failed to load TUN status',
 

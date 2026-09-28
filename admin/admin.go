@@ -379,6 +379,11 @@ type AdminServer struct {
 	GetPlatform func() string
 	// GetArch returns the compile-time architecture identifier. Set by main package.
 	GetArch func() string
+
+	// OnRestart is called when the user requests a process restart from the admin panel.
+	// The main package should set this to trigger a graceful exit, allowing the watchdog
+	// to restart the process. Set by the main package.
+	OnRestart func()
 }
 
 // PeerBrief contains brief information about a mesh peer.
@@ -1149,6 +1154,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/me", s.apiMe)
 	mux.HandleFunc("/api/admin/auth", s.apiAdminAuth)
 	mux.HandleFunc("/api/setup", s.apiSetup)
+	mux.HandleFunc("/api/restart", s.apiRestart)
 }
 
 // ========== Page Handlers ==========
@@ -2030,6 +2036,46 @@ func (s *AdminServer) apiReload(w http.ResponseWriter, r *http.Request) {
 
 	util.LogInfo("[ADMIN] reload triggered via API")
 	jsonResponse(w, map[string]string{"status": "reload triggered"})
+}
+
+func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Dangerous operation: require password confirmation via header
+	password := r.Header.Get("X-Password-Confirm")
+	if password == "" {
+		httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
+	storedPassword := ""
+	if s.conf.Admin != nil {
+		storedPassword = s.conf.Admin.Password
+	}
+	s.mu.RUnlock()
+	if !authEnabled {
+		httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
+		return
+	}
+	if password != storedPassword {
+		httpError(w, "incorrect password", http.StatusForbidden)
+		return
+	}
+
+	util.LogInfo("[ADMIN] restart requested via API")
+	jsonResponse(w, map[string]string{"status": "restarting"})
+
+	// Trigger restart after response is sent
+	if s.OnRestart != nil {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			s.OnRestart()
+		}()
+	}
 }
 
 func (s *AdminServer) apiTarget(w http.ResponseWriter, r *http.Request) {

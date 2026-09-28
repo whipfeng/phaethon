@@ -1757,10 +1757,8 @@ function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ===== P2P Status SSE Subscription =====
+// ===== P2P Status Updates =====
 (function() {
-    let lastP2PVersion = 0;
-    
     function updateP2PStatus(peers) {
         // Build a map of proxy name -> peer status
         const peerMap = {};
@@ -1797,37 +1795,26 @@ function escapeHtml(s) {
             }
         });
     }
-    
-    async function fetchP2PStatus() {
+
+    // Expose fetchP2PStatus globally for version handler
+    window.fetchP2PStatus = async function() {
         try {
-            const res = await fetch('./api/p2p');
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch('./api/p2p', { signal: controller.signal });
+            clearTimeout(timeoutId);
             if (!res.ok) return;
             const data = await res.json();
             updateP2PStatus(data.peers || []);
         } catch (err) {
-            console.warn('Failed to fetch P2P status:', err);
+            if (err.name !== 'AbortError') {
+                console.warn('Failed to fetch P2P status:', err);
+            }
         }
-    }
-    
-    // Subscribe to SSE for version changes
-    if (typeof EventSource !== 'undefined') {
-        const sse = new EventSource('./api/events');
-        sse.addEventListener('heartbeat', (e) => {
-            try {
-                const data = JSON.parse(e.data);
-                if (data.p2p && data.p2p > lastP2PVersion) {
-                    lastP2PVersion = data.p2p;
-                    fetchP2PStatus();
-                }
-            } catch {}
-        });
-        sse.onerror = () => {
-            // SSE will auto-reconnect
-        };
-    }
-    
+    };
+
     // Initial fetch on page load
-    fetchP2PStatus();
+    window.fetchP2PStatus();
 })();
 </script>
 {{end}}

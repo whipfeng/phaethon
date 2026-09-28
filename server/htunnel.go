@@ -66,9 +66,9 @@ type htChannel struct {
 	isMesh    bool // P2P direct mesh channel (frames in POST/GET bodies)
 
 	// mesh channel queues (only used when isMesh is true)
-	meshIn     chan meshMsg          // client → local P2P session (fed by POST handler)
-	meshOut    chan meshMsg          // frames → client (drained by GET)
-	getWaiters chan chan<- meshMsg   // waiting GET requests (for concurrent GET support)
+	meshIn     chan meshMsg       // client → local P2P session (fed by POST handler)
+	meshOut    chan meshMsg       // frames → client (drained by GET)
+	getWaiters chan *meshWaiter   // waiting GET requests (for concurrent GET support)
 
 	// Cached results for step==0 retry
 	lastReadData []byte

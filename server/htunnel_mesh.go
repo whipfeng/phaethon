@@ -26,6 +26,14 @@ type meshMsg struct {
 	payload   []byte
 }
 
+// meshWaiter represents a GET request waiting for a frame.
+// The done channel is closed when the handler times out, signaling
+// the dispatcher to skip this waiter and try the next one.
+type meshWaiter struct {
+	msg  chan meshMsg   // frame delivered by dispatcher
+	done chan struct{}  // closed on handler timeout → waiter is stale
+}
+
 // handleMeshChannelRequest serves the MESH channel request (HEAD, X-C: MESH):
 // allocates the channel without dialing any target and starts the local P2P
 // session directly on the bridged transport (no reverse server splice).
@@ -40,7 +48,7 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 		crypto:     util.NewHTunnelCrypto(s.Password),
 		meshIn:     make(chan meshMsg, htMeshQueueLen),
 		meshOut:    make(chan meshMsg, htMeshQueueLen),
-		getWaiters: make(chan chan<- meshMsg, 64), // support up to 64 concurrent GETs
+		getWaiters: make(chan *meshWaiter, 64), // support up to 64 concurrent GETs
 	}
 	s.channels.Store(id, ch)
 
@@ -115,18 +123,25 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 }
 
 // dispatchToWaiter sends msg to the next available GET waiter.
+// If the waiter has timed out (done closed), the frame stays in meshOut
+// for the next waiter to pick up.
 func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
-	select {
-	case waiter := <-ch.getWaiters:
+	for {
 		select {
-		case waiter <- msg:
+		case waiter := <-ch.getWaiters:
+			select {
+			case waiter.msg <- msg:
+				return true
+			case <-waiter.done:
+				// Waiter timed out, try next waiter (frame stays in meshOut)
+				continue
+			case <-ch.closed:
+				return false
+			}
 		case <-ch.closed:
 			return false
 		}
-	case <-ch.closed:
-		return false
 	}
-	return true
 }
 
 // meshHandleRead serves a client long-poll GET: register as a waiter, wait up
@@ -134,8 +149,11 @@ func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
 // coalesce further queued frames into one batch (≤ htMeshBatchLimit) and
 // return it encrypted.
 func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *http.Request) {
-	// Create a waiter channel for this GET request
-	waiter := make(chan meshMsg, 1)
+	// Create a waiter with msg and done channels
+	waiter := &meshWaiter{
+		msg:  make(chan meshMsg, 1),
+		done: make(chan struct{}),
+	}
 
 	// Register as a waiter
 	select {
@@ -151,12 +169,15 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	// Wait for the first frame from the dispatcher
 	var buf bytes.Buffer
 	select {
-	case msg := <-waiter:
+	case msg := <-waiter.msg:
 		_ = frame.WriteFrame(&buf, msg.frameType, msg.payload)
 	case <-time.After(htMeshPollTimeout):
+		// Signal dispatcher that this waiter is stale
+		close(waiter.done)
 		w.WriteHeader(408)
 		return
 	case <-ch.closed:
+		close(waiter.done)
 		w.WriteHeader(410)
 		return
 	}

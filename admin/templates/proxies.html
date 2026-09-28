@@ -806,7 +806,6 @@ async function saveProxy(e) {
         });
         if (!res.ok) throw new Error(await res.text());
         closeModal();
-        reloadPage();
     } catch (err) {
         const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
         showToast(errLabel + ': ' + err.message, 'error');
@@ -824,7 +823,6 @@ async function deleteProxy(name) {
                 return;
             }
             if (!res.ok) throw new Error(await res.text());
-            reloadPage();
         } catch (err) {
             const errLabel = (typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error');
             showToast(errLabel + ': ' + err.message, 'error');
@@ -1026,7 +1024,6 @@ async function doSaveGroup() {
         if (!res.ok) throw new Error(await res.text());
         await refreshGroups();
         closeModal();
-        reloadPage();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -1036,7 +1033,6 @@ async function deleteGroup(name) {
     try {
         const res = await fetch(`./api/groups/${name}`, {method: 'DELETE'});
         if (!res.ok) throw new Error(await res.text());
-        reloadPage();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }

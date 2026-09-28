@@ -593,9 +593,9 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
     onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
     onBusinessVersion('proxies', () => {
-        // Reload proxies page if currently on it
+        // Reload proxies page content via HTMX if currently on it
         if (window.location.pathname.includes('/proxies')) {
-            location.reload();
+            reloadPage();
         }
     }, 'proxies');
     onBusinessVersion('logs', () => {

@@ -1354,10 +1354,19 @@ async function fetchMeshStatus() {
                 const btnDisabled = isLocal ? 'disabled' : '';
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
-                    ? neighbors.map(n => {
-                        // Each neighbor on a separate line, qualities comma-separated
-                        const qualitiesStr = n.qualities.join(', ');
-                        return `<div class="neighbor-item">${n.id}: <small class="text-muted">${qualitiesStr}</small></div>`;
+                    ? neighbors.map((n, idx) => {
+                        // Neighbor name on one line
+                        let html = `<div class="neighbor-block"><div class="neighbor-name">${n.id}</div>`;
+                        // Each link/quality on a separate line
+                        html += '<div class="neighbor-links">';
+                        html += n.qualities.map(q => `<div class="neighbor-link">${q}</div>`).join('');
+                        html += '</div>';
+                        // Horizontal separator (except for last neighbor)
+                        if (idx < neighbors.length - 1) {
+                            html += '<hr class="neighbor-separator">';
+                        }
+                        html += '</div>';
+                        return html;
                     }).join('')
                     : '-';
                 html += '<tr>';

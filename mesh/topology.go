@@ -63,9 +63,10 @@ type GossipDomainSuffix struct {
 
 // GossipLink represents a single link with quality metrics.
 type GossipLink struct {
-	LinkID   string  `json:"linkId"`             // link identifier (proxy name)
-	SRTT     float64 `json:"srtt,omitempty"`     // smoothed RTT in milliseconds
-	LossRate float64 `json:"lossRate,omitempty"` // loss rate (0.0-1.0)
+	LinkID       string  `json:"linkId"`                       // 链路唯一标识（hello 协商生成）
+	FriendlyName string  `json:"friendlyName,omitempty"`       // 友好名称（代理名，仅展示）
+	SRTT         float64 `json:"srtt,omitempty"`               // 平滑 RTT (ms)
+	LossRate     float64 `json:"lossRate,omitempty"`           // 丢包率 (0.0-1.0)
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.
@@ -94,6 +95,8 @@ type GossipInfo struct {
 	// Protocol fields (only used by hello)
 	Cmd             string `json:"cmd,omitempty"`             // "hello" or "gossip"
 	ProtocolVersion int    `json:"protocolVersion,omitempty"` // only in hello
+	Seq             uint16 `json:"seq,omitempty"`             // 本端生成的序列号（hello 协商用）
+	FriendlyName    string `json:"friendlyName,omitempty"`    // 友好名称（代理名，hello 协商用）
 
 	// Topology information (both hello and gossip carry this)
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`

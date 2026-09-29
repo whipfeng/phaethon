@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -63,6 +64,8 @@ type P2PManager struct {
 	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
 
+	linkSeqCounter uint64 // atomic counter for link sequence numbers
+
 	OnStatusChange func() // callback when peer status changes
 }
 
@@ -103,6 +106,22 @@ func (s *peerSender) GetProxyName() string {
 	return s.peer.ID
 }
 
+// GetLinkID returns the negotiated link ID (from hello negotiation).
+func (s *peerSender) GetLinkID() string {
+	return s.peer.LinkID
+}
+
+// GetFriendlyName returns the friendly name (proxy name, for display only).
+func (s *peerSender) GetFriendlyName() string {
+	return s.peer.FriendlyName
+}
+
+// HasProxy returns true if this peer was created with a proxy config (active/outbound connection).
+// Passive (inbound) peers have no proxy and should not advertise links.
+func (s *peerSender) HasProxy() bool {
+	return s.peer.proxy != nil
+}
+
 // writeReq is a frame queued for async write on the peer connection.
 type writeReq struct {
 	frameType byte
@@ -116,6 +135,11 @@ type Peer struct {
 	NodeID   string    `json:"nodeId"` // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 	Status   string    `json:"status"` // "connecting", "helloed", "upToDate", "failed"
 	LastSeen time.Time `json:"lastSeen"`
+
+	// LinkID negotiation (hello phase)
+	Seq          uint16 // 本端生成的序列号（本地递增）
+	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接）
+	FriendlyName string // 友好名称（代理名，仅展示）
 
 	transport  frame.FrameTransport
 	writeCh    chan writeReq
@@ -282,6 +306,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		stopCh:    make(chan struct{}),
 		sendState: newSendState(),
 		recvState: newRecvState(),
+		Seq:       uint16(atomic.AddUint64(&m.linkSeqCounter, 1)), // Local incrementing sequence for link ID negotiation
 	}
 
 	m.mu.Lock()
@@ -378,6 +403,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		LastSeen: time.Now(),
 		stopCh:   make(chan struct{}),
 		proxy:    proxy,
+		Seq:      uint16(atomic.AddUint64(&m.linkSeqCounter, 1)), // Local incrementing sequence for link ID negotiation
 	}
 
 	m.mu.Lock()
@@ -620,6 +646,12 @@ func (m *P2PManager) sendHello(peer *Peer) {
 	info := mesh.GossipInfo{
 		Cmd:             "hello",
 		ProtocolVersion: P2PProtocolVersion,
+		Seq:             peer.Seq, // Use peer's sequence number for link ID negotiation
+	}
+
+	// Set friendly name if this is an active (outbound) connection
+	if peer.proxy != nil {
+		info.FriendlyName = peer.proxy.Name
 	}
 
 	// Build gossip content from mesh handler
@@ -662,13 +694,33 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
 
+	// 3. Link ID negotiation
+	remoteSeq := info.Seq
+	localSeq := peer.Seq
+	
+	if remoteSeq > 0 && localSeq > 0 {
+		// Sort and concatenate to generate link ID
+		minSeq := localSeq
+		maxSeq := remoteSeq
+		if localSeq > remoteSeq {
+			minSeq = remoteSeq
+			maxSeq = localSeq
+		}
+		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
+	}
+
+	// Save friendly name from active peer
+	if info.FriendlyName != "" {
+		peer.FriendlyName = info.FriendlyName
+	}
+
 	if m.OnStatusChange != nil {
 		go m.OnStatusChange()
 	}
 
-	util.LogInfo("[P2P] hello from %s: nodeID=%s", peer.ID, nodeID)
+	util.LogInfo("[P2P] hello from %s: nodeID=%s, linkID=%s", peer.ID, nodeID, peer.LinkID)
 
-	// 3. Clean up old state + re-register
+	// 4. Clean up old state + re-register
 	if m.meshHandler != nil {
 		m.meshHandler.UnregisterPeerByNodeID(nodeID)
 		ps := &peerSender{peer: peer, nodeID: nodeID}
@@ -676,7 +728,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		m.meshHandler.RegisterPeer(ps)
 	}
 
-	// 4. Process topology (shared logic)
+	// 5. Process topology (shared logic)
 	m.processGossipInfo(peer, info)
 
 	peer.Status = "upToDate"
@@ -685,6 +737,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	}
 }
 
+// hashString generates a simple hash from a string (for sequence number generation)
 // handleGossip processes a gossip message from a peer.
 func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	var info mesh.GossipInfo

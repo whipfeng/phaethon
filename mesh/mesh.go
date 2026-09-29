@@ -81,7 +81,9 @@ type PeerSender interface {
 	Send(data []byte) error
 	SendGossip(data []byte)
 	GetNodeID() string
-	GetProxyName() string // proxy name (link identifier)
+	GetProxyName() string       // proxy name (link identifier)
+	GetLinkID() string          // negotiated link ID (seq1-seq2 sorted)
+	GetFriendlyName() string    // friendly name (proxy name, for display only)
 }
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
@@ -1315,8 +1317,18 @@ type FullTopologyNode struct {
 
 // FullTopologyEdge represents an edge in the full topology.
 type FullTopologyEdge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From  string             `json:"from"`
+	To    string             `json:"to"`
+	Links []FullTopologyLink `json:"links,omitempty"` // multiple links between same nodes
+}
+
+// FullTopologyLink represents a single link with quality metrics.
+type FullTopologyLink struct {
+	LinkID       string  `json:"linkId"`                   // negotiated link ID (seq1-seq2)
+	FriendlyName string  `json:"friendlyName,omitempty"`   // display name (proxy name)
+	SRTT         float64 `json:"srtt,omitempty"`           // smoothed RTT in milliseconds
+	LossRate     float64 `json:"lossRate,omitempty"`       // loss rate (0.0-1.0)
+	Cost         float64 `json:"cost,omitempty"`           // path cost
 }
 
 // GetFullTopology returns the complete network topology including all known nodes and edges.
@@ -1364,7 +1376,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	}
 
 	// Build edge list: only local peer connections (active P2P connections)
-	edgeSet := make(map[string]FullTopologyEdge)
+	edgeSet := make(map[string]*FullTopologyEdge)
 
 	// Local direct peer connections - only add edges for peers with active Senders
 	for _, p := range peers {
@@ -1372,18 +1384,105 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		// Only add edge if peer has an active Sender (indicating active P2P connection)
 		if p.Sender != nil && peerID != "" {
 			key := edgeKey(m.nodeID, peerID)
-			edgeSet[key] = FullTopologyEdge{From: m.nodeID, To: peerID}
+			
+			// Get link info
+			linkID := p.Sender.GetLinkID()
+			if linkID == "" {
+				linkID = p.Sender.GetProxyName() // fallback for old protocol
+			}
+			friendlyName := p.Sender.GetFriendlyName()
+			if friendlyName == "" {
+				friendlyName = p.Sender.GetProxyName() // fallback
+			}
+			
+			// Get link quality from qualityTracker
+			var srtt, lossRate, cost float64
+			if m.qualityTracker != nil {
+				quality := m.qualityTracker.Get(peerID, linkID)
+				avgRTT, loss := quality.Stats()
+				srtt = float64(avgRTT.Milliseconds())
+				lossRate = loss
+				if loss < 1.0 {
+					cost = srtt / (1 - loss)
+				} else {
+					cost = 10000
+				}
+			} else {
+				cost = 1000
+			}
+			
+			link := FullTopologyLink{
+				LinkID:       linkID,
+				FriendlyName: friendlyName,
+				SRTT:         srtt,
+				LossRate:     lossRate,
+				Cost:         cost,
+			}
+			
+			if edge, exists := edgeSet[key]; exists {
+				// Add link to existing edge
+				edge.Links = append(edge.Links, link)
+			} else {
+				// Create new edge with first link
+				edgeSet[key] = &FullTopologyEdge{
+					From:  m.nodeID,
+					To:    peerID,
+					Links: []FullTopologyLink{link},
+				}
+			}
 		}
 	}
 
 	// Learned edges from ClaimedSubnets.Neighbors
-	// Each claim's Neighbors field lists the origin's direct neighbors
+	// Each claim's Neighbors field lists the origin's direct neighbors with link quality
 	for _, p := range peers {
 		for _, cs := range p.ClaimedSubnets {
 			for _, neighbor := range cs.Neighbors {
 				key := edgeKey(cs.NodeID, neighbor.NodeID)
-				if _, exists := edgeSet[key]; !exists {
-					edgeSet[key] = FullTopologyEdge{From: cs.NodeID, To: neighbor.NodeID}
+				
+				// Convert GossipLink to FullTopologyLink
+				var links []FullTopologyLink
+				for _, gossipLink := range neighbor.Links {
+					var cost float64
+					if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
+						cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
+					} else if gossipLink.SRTT > 0 {
+						cost = 10000 // high cost for high loss
+					} else {
+						cost = 1000 // default cost for no data
+					}
+					
+					links = append(links, FullTopologyLink{
+						LinkID:       gossipLink.LinkID,
+						FriendlyName: gossipLink.FriendlyName,
+						SRTT:         gossipLink.SRTT,
+						LossRate:     gossipLink.LossRate,
+						Cost:         cost,
+					})
+				}
+				
+				if edge, exists := edgeSet[key]; exists {
+					// Edge already exists (from local peers), add learned links
+					// Deduplicate by linkID
+					for _, link := range links {
+						linkExists := false
+						for _, existingLink := range edge.Links {
+							if existingLink.LinkID == link.LinkID {
+								linkExists = true
+								break
+							}
+						}
+						if !linkExists {
+							edge.Links = append(edge.Links, link)
+						}
+					}
+				} else {
+					// Create new edge with learned links
+					edgeSet[key] = &FullTopologyEdge{
+						From:  cs.NodeID,
+						To:    neighbor.NodeID,
+						Links: links,
+					}
 				}
 			}
 		}
@@ -1424,7 +1523,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 
 	edges := make([]FullTopologyEdge, 0, len(edgeSet))
 	for _, e := range edgeSet {
-		edges = append(edges, e)
+		edges = append(edges, *e)
 	}
 
 	return map[string]interface{}{
@@ -2068,9 +2167,18 @@ func (m *MeshManager) broadcastGossip() {
 				NodeID: peer.NodeID(),
 			}
 			// Get link quality from qualityTracker
-			// Use proxy name as LinkID (supports multiple links between same nodes)
+			// Use LinkID as key (supports multiple links between same nodes)
+			linkID := peer.Sender.GetLinkID()
+			if linkID == "" {
+				linkID = peer.Sender.GetProxyName() // fallback for old protocol
+			}
+			friendlyName := peer.Sender.GetFriendlyName()
+			if friendlyName == "" {
+				friendlyName = peer.Sender.GetProxyName() // fallback
+			}
 			link := GossipLink{
-				LinkID: peer.Sender.GetProxyName(),
+				LinkID:       linkID,
+				FriendlyName: friendlyName,
 			}
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
@@ -2306,9 +2414,14 @@ func (m *MeshManager) updateACKStats() {
 		}
 
 		nodeID := peer.NodeID()
-		linkID := peer.Sender.GetProxyName()
-		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(linkID)
+		proxyName := peer.Sender.GetProxyName()
+		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(proxyName)
 		if srtt > 0 || lossRate > 0 {
+			// Use negotiated link ID as key (consistent with GetFullTopology)
+			linkID := peer.Sender.GetLinkID()
+			if linkID == "" {
+				linkID = proxyName // fallback for old protocol
+			}
 			quality := m.qualityTracker.Get(nodeID, linkID)
 			quality.UpdateACKStats(srtt, lossRate)
 		}
@@ -2469,9 +2582,18 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				NodeID: peer.NodeID(),
 			}
 			// Get link quality from qualityTracker
-			// Use proxy name as LinkID (supports multiple links between same nodes)
+			// Use LinkID as key (supports multiple links between same nodes)
+			linkID := peer.Sender.GetLinkID()
+			if linkID == "" {
+				linkID = peer.Sender.GetProxyName() // fallback for old protocol
+			}
+			friendlyName := peer.Sender.GetFriendlyName()
+			if friendlyName == "" {
+				friendlyName = peer.Sender.GetProxyName() // fallback
+			}
 			link := GossipLink{
-				LinkID: peer.Sender.GetProxyName(),
+				LinkID:       linkID,
+				FriendlyName: friendlyName,
 			}
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
@@ -2765,11 +2887,8 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 }
 
 // edgeKey returns a canonical key for an edge between two nodes (sorted order).
-func edgeKey(a, b string) string {
-	if a > b {
-		a, b = b, a
-	}
-	return a + "|" + b
+func edgeKey(from, to string) string {
+	return from + "|" + to
 }
 
 // containsStr checks if a string slice contains a specific string.

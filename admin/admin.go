@@ -5495,17 +5495,24 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{
-		"name":              p.Name,
-		"enabled":           p.IsEnabled(),
-		"type":              p.Type,
-		"server":            p.Server,
-		"port":              p.Port,
-		"sni":               p.Sni,
-		"udp":               p.IsUDP(),
-		"p2p":               p.IsP2P(),
-		"via":               p.ViaProxy,
-		"skip-cert-verify":  p.SkipCertVerify,
-		"password":          p.Password,
+		"name":                  p.Name,
+		"enabled":               p.IsEnabled(),
+		"type":                  p.Type,
+		"server":                p.Server,
+		"port":                  p.Port,
+		"sni":                   p.Sni,
+		"udp":                   p.IsUDP(),
+		"p2p":                   p.IsP2P(),
+		"via":                   p.ViaProxy,
+		"skip-cert-verify":      p.SkipCertVerify,
+		"password":              p.Password,
+		"url":                   p.URL,
+		"username":              p.Username,
+		"flow":                  p.Flow,
+		"reverse-address":       p.ReverseAddress,
+		"private-key":           p.PrivateKey,
+		"private-key-passphrase": p.PrivateKeyPassphrase,
+		"health-check-url":      p.HealthCheckURL,
 	}
 }
 

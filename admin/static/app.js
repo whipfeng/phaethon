@@ -1547,7 +1547,10 @@ var _topologyState = {
     dragOffset: { x: 0, y: 0 },
     canvas: null,
     width: 0,
-    height: 0
+    height: 0,
+    lineOffsets: {},  // Custom curve offsets per link: linkId -> offset
+    draggingLine: null,  // Currently dragging line: {linkId, startX, startY, startOffset}
+    dragStartPos: null
 };
 
 function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
@@ -1804,7 +1807,11 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             const useCurves = groups.length > 1;
             
             groups.forEach((group, groupIndex) => {
-                const curveOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
+                // Use custom offset if available, otherwise calculate default
+                const defaultOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
+                const curveOffset = _topologyState.lineOffsets[group.linkId] !== undefined 
+                    ? _topologyState.lineOffsets[group.linkId] 
+                    : defaultOffset;
                 
                 // Check if this link has bidirectional measurements
                 const hasBidirectional = group.edges.length >= 2 && 
@@ -2024,23 +2031,115 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
             
-            // Find node under cursor
+            // First, check if clicking on a node
+            let clickedNode = null;
             for (const nodeId in _topologyState.positions) {
                 const pos = _topologyState.positions[nodeId];
                 const dx = x - pos.x;
                 const dy = y - pos.y;
                 if (dx * dx + dy * dy <= nodeRadius * nodeRadius) {
-                    _topologyState.dragging = nodeId;
-                    _topologyState.dragOffset = { x: dx, y: dy };
-                    _topologyState.dragStartPos = { x: e.clientX, y: e.clientY };
-                    canvas.style.cursor = 'grabbing';
+                    clickedNode = nodeId;
                     break;
+                }
+            }
+            
+            if (clickedNode) {
+                // Drag node
+                _topologyState.dragging = clickedNode;
+                _topologyState.dragOffset = { x: x - _topologyState.positions[clickedNode].x, y: y - _topologyState.positions[clickedNode].y };
+                _topologyState.dragStartPos = { x: e.clientX, y: e.clientY };
+                canvas.style.cursor = 'grabbing';
+            } else {
+                // Check if clicking on a line
+                const fullTopology = _topologyState.fullTopology;
+                if (fullTopology && fullTopology.edges) {
+                    const positions = _topologyState.positions;
+                    let closestLine = null;
+                    let minDist = 10;  // Threshold for clicking on a line
+                    
+                    // Group edges by linkId (same logic as drawing)
+                    const linkGroups = {};
+                    fullTopology.edges.forEach(edge => {
+                        if (!edge.links || edge.links.length === 0) return;
+                        edge.links.forEach(link => {
+                            const linkId = link.linkId || 'unknown';
+                            if (!linkGroups[linkId]) {
+                                linkGroups[linkId] = { linkId, edges: [] };
+                            }
+                            linkGroups[linkId].edges.push({ from: edge.from, to: edge.to, link });
+                        });
+                    });
+                    
+                    // Group by node pair
+                    const nodePairGroups = {};
+                    Object.values(linkGroups).forEach(group => {
+                        if (group.edges.length === 0) return;
+                        const firstEdge = group.edges[0];
+                        const pairKey = [firstEdge.from, firstEdge.to].sort().join('|');
+                        if (!nodePairGroups[pairKey]) {
+                            nodePairGroups[pairKey] = [];
+                        }
+                        nodePairGroups[pairKey].push(group);
+                    });
+                    
+                    // Check distance to each line
+                    Object.values(nodePairGroups).forEach(groups => {
+                        if (groups.length === 0) return;
+                        const firstGroup = groups[0];
+                        const firstEdge = firstGroup.edges[0];
+                        const from = positions[firstEdge.from];
+                        const to = positions[firstEdge.to];
+                        if (!from || !to) return;
+                        
+                        const dx = to.x - from.x;
+                        const dy = to.y - from.y;
+                        const len = Math.sqrt(dx * dx + dy * dy);
+                        if (len === 0) return;
+                        
+                        const nx = -dy / len;
+                        const ny = dx / len;
+                        const useCurves = groups.length > 1;
+                        
+                        groups.forEach((group, groupIndex) => {
+                            const defaultOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
+                            const curveOffset = _topologyState.lineOffsets[group.linkId] !== undefined 
+                                ? _topologyState.lineOffsets[group.linkId] 
+                                : defaultOffset;
+                            
+                            // Calculate distance from click point to line
+                            // For simplicity, check distance to the midpoint of the line
+                            const midX = (from.x + to.x) / 2 + nx * curveOffset * 0.5;
+                            const midY = (from.y + to.y) / 2 + ny * curveOffset * 0.5;
+                            const dist = Math.sqrt((x - midX) * (x - midX) + (y - midY) * (y - midY));
+                            
+                            if (dist < minDist) {
+                                minDist = dist;
+                                closestLine = {
+                                    linkId: group.linkId,
+                                    from: firstEdge.from,
+                                    to: firstEdge.to,
+                                    startOffset: curveOffset,
+                                    startX: x,
+                                    startY: y,
+                                    nx, ny
+                                };
+                            }
+                        });
+                    });
+                    
+                    if (closestLine) {
+                        // Start dragging line
+                        _topologyState.draggingLine = closestLine;
+                        _topologyState.dragStartPos = { x: e.clientX, y: e.clientY };
+                        canvas.style.cursor = 'grabbing';
+                    }
                 }
             }
         });
 
         canvas.addEventListener('mousemove', function(e) {
             if (_topologyState.dragging) {
+                // Dragging node
                 const rect = canvas.getBoundingClientRect();
                 const x = e.clientX - rect.left;
                 const y = e.clientY - rect.top;
@@ -2049,6 +2148,30 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     y: y - _topologyState.dragOffset.y
                 };
                 // Redraw using saved state (avoids stale closure)
+                if (_topologyState.localNodeId) {
+                    drawMeshTopology(
+                        _topologyState.localNodeId,
+                        _topologyState.peers || [],
+                        _topologyState.directPeers || {},
+                        _topologyState.fullTopology
+                    );
+                }
+            } else if (_topologyState.draggingLine) {
+                // Dragging line
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                // Calculate perpendicular displacement
+                const dx = x - _topologyState.draggingLine.startX;
+                const dy = y - _topologyState.draggingLine.startY;
+                const perpDist = dx * _topologyState.draggingLine.nx + dy * _topologyState.draggingLine.ny;
+                
+                // Update offset
+                _topologyState.lineOffsets[_topologyState.draggingLine.linkId] = 
+                    _topologyState.draggingLine.startOffset + perpDist;
+                
+                // Redraw
                 if (_topologyState.localNodeId) {
                     drawMeshTopology(
                         _topologyState.localNodeId,
@@ -2094,12 +2217,14 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 }
             }
             _topologyState.dragging = null;
+            _topologyState.draggingLine = null;
             _topologyState.dragStartPos = null;
             canvas.style.cursor = 'default';
         });
 
         canvas.addEventListener('mouseleave', function() {
             _topologyState.dragging = null;
+            _topologyState.draggingLine = null;
             _topologyState.dragStartPos = null;
             canvas.style.cursor = 'default';
         });

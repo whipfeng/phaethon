@@ -61,12 +61,17 @@ type GossipDomainSuffix struct {
 	NodeID string `json:"nodeId"` // domain suffix owner
 }
 
-// GossipNeighbor represents a direct neighbor with link quality metrics.
-type GossipNeighbor struct {
-	NodeID   string  `json:"nodeId"`             // neighbor node ID
-	LinkID   string  `json:"linkId,omitempty"`   // link identifier (for multiple links between same nodes)
+// GossipLink represents a single link with quality metrics.
+type GossipLink struct {
+	LinkID   string  `json:"linkId"`             // link identifier (proxy name)
 	SRTT     float64 `json:"srtt,omitempty"`     // smoothed RTT in milliseconds
 	LossRate float64 `json:"lossRate,omitempty"` // loss rate (0.0-1.0)
+}
+
+// GossipNeighbor represents a direct neighbor with multiple links.
+type GossipNeighbor struct {
+	NodeID string       `json:"nodeId"`        // neighbor node ID
+	Links  []GossipLink `json:"links,omitempty"` // links to this neighbor
 }
 
 // GossipClaimedSubnet is a serializable subnet claim with nodeId, hop count, and neighbors.
@@ -329,11 +334,28 @@ func claimedSubnetsEqual(a, b []PeerClaimedSubnetEntry) bool {
 		if len(a[i].Neighbors) != len(b[i].Neighbors) {
 			return false
 		}
-		// Simple comparison - order matters
+		// Compare each neighbor
 		for j := range a[i].Neighbors {
-			if a[i].Neighbors[j] != b[i].Neighbors[j] {
+			if !compareGossipNeighbors(a[i].Neighbors[j], b[i].Neighbors[j]) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// compareGossipNeighbors compares two GossipNeighbor structs for equality.
+func compareGossipNeighbors(a, b GossipNeighbor) bool {
+	if a.NodeID != b.NodeID {
+		return false
+	}
+	if len(a.Links) != len(b.Links) {
+		return false
+	}
+	// Simple comparison - order matters
+	for i := range a.Links {
+		if a.Links[i] != b.Links[i] {
+			return false
 		}
 	}
 	return true

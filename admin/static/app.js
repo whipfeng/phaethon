@@ -1355,14 +1355,14 @@ async function fetchMeshStatus() {
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
                     ? neighbors.map(n => {
-                        const qualitiesStr = n.qualities.join('<br>');
-                        return `<div style="margin-bottom:6px">${n.id}<br><small class="text-muted" style="word-break:break-all;white-space:normal;display:block">${qualitiesStr}</small></div>`;
+                        const qualitiesStr = n.qualities.join(', ');
+                        return `<span style="display:inline-block;margin-right:12px;white-space:nowrap">${n.id}: <small class="text-muted">${qualitiesStr}</small></span>`;
                     }).join('')
                     : '-';
                 html += '<tr>';
                 html += '<td data-label="' + i18n.t('mesh.node') + '">' + escapeHtml(nodeId) + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.subnet') + '"><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.neighbors') + '" style="word-break:break-all;white-space:normal;min-width:150px">' + neighborsStr + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.neighbors') + '" style="white-space:normal">' + neighborsStr + '</td>';
                 html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.lastSeen') + '">' + lastSeen + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.admin') + '"><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
@@ -1758,12 +1758,25 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             });
         });
         
-        // Draw each link group
+        // Group linkGroups by node pair to detect multiple links between same nodes
+        const nodePairGroups = {};
         Object.values(linkGroups).forEach(group => {
             if (group.edges.length === 0) return;
-            
-            // Get node positions (use first edge's from/to)
             const firstEdge = group.edges[0];
+            const pairKey = [firstEdge.from, firstEdge.to].sort().join('|');
+            if (!nodePairGroups[pairKey]) {
+                nodePairGroups[pairKey] = [];
+            }
+            nodePairGroups[pairKey].push(group);
+        });
+        
+        // Draw each node pair group
+        Object.values(nodePairGroups).forEach(groups => {
+            if (groups.length === 0) return;
+            
+            // Get node positions (use first group's first edge)
+            const firstGroup = groups[0];
+            const firstEdge = firstGroup.edges[0];
             const from = positions[firstEdge.from];
             const to = positions[firstEdge.to];
             if (!from || !to) return;
@@ -1774,102 +1787,173 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             const len = Math.sqrt(dx * dx + dy * dy);
             if (len === 0) return;
             
-            // Check if this link has bidirectional measurements
-            const hasBidirectional = group.edges.length >= 2 && 
-                group.edges.some(e => e.from === firstEdge.from) &&
-                group.edges.some(e => e.from === firstEdge.to);
+            const nx = -dy / len; // perpendicular
+            const ny = dx / len;
             
-            if (hasBidirectional) {
-                // Bidirectional: draw single line, show measurements at both ends
-                ctx.beginPath();
-                ctx.moveTo(from.x, from.y);
-                ctx.lineTo(to.x, to.y);
-                ctx.strokeStyle = '#3fb950';
-                ctx.lineWidth = 2;
-                ctx.stroke();
+            // If multiple links between same nodes, draw as curves
+            const useCurves = groups.length > 1;
+            
+            groups.forEach((group, groupIndex) => {
+                const curveOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 40 : 0;
                 
-                // Draw link name in the middle
-                const midX = (from.x + to.x) / 2;
-                const midY = (from.y + to.y) / 2;
-                const linkIdShort = group.linkId.substring(0, 8);
-                const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                // Check if this link has bidirectional measurements
+                const hasBidirectional = group.edges.length >= 2 && 
+                    group.edges.some(e => e.from === firstEdge.from) &&
+                    group.edges.some(e => e.from === firstEdge.to);
                 
-                ctx.font = '9px -apple-system, sans-serif';
-                const metrics = ctx.measureText(name);
-                const padding = 3;
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                ctx.fillRect(
-                    midX - metrics.width / 2 - padding,
-                    midY - 6 - padding,
-                    metrics.width + padding * 2,
-                    12 + padding * 2
-                );
-                ctx.fillStyle = '#f0f6fc';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(name, midX, midY);
-                
-                // Draw measurement data near each end (outside node circles)
-                group.edges.forEach(e => {
-                    const isFromFirst = e.from === firstEdge.from;
-                    const offset = nodeRadius + 15;
-                    const t = Math.min(0.45, offset / len);
-                    const actualT = isFromFirst ? t : (1 - t);
-                    const labelX = from.x + (to.x - from.x) * actualT;
-                    const labelY = from.y + (to.y - from.y) * actualT;
+                if (useCurves) {
+                    // Draw curve
+                    const midX = (from.x + to.x) / 2;
+                    const midY = (from.y + to.y) / 2;
+                    const cpX = midX + nx * curveOffset;
+                    const cpY = midY + ny * curveOffset;
                     
-                    const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
-                    const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
-                    const text = `${srtt}${loss}`;
+                    ctx.beginPath();
+                    ctx.moveTo(from.x, from.y);
+                    ctx.quadraticCurveTo(cpX, cpY, to.x, to.y);
+                    ctx.strokeStyle = '#3fb950';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    
+                    // Draw label at midpoint of curve
+                    const t = 0.5;
+                    const labelX = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
+                    const labelY = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
+                    
+                    const linkIdShort = group.linkId.substring(0, 8);
+                    const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
                     
                     ctx.font = '9px -apple-system, sans-serif';
-                    const m = ctx.measureText(text);
+                    const metrics = ctx.measureText(name);
+                    const padding = 3;
                     ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                     ctx.fillRect(
-                        labelX - m.width / 2 - padding,
+                        labelX - metrics.width / 2 - padding,
                         labelY - 6 - padding,
-                        m.width + padding * 2,
+                        metrics.width + padding * 2,
                         12 + padding * 2
                     );
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(text, labelX, labelY);
-                });
-            } else {
-                // Unidirectional or single direction: draw straight line with label at midpoint
-                ctx.beginPath();
-                ctx.moveTo(from.x, from.y);
-                ctx.lineTo(to.x, to.y);
-                ctx.strokeStyle = '#3fb950';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                
-                // Draw link name and measurement at midpoint
-                const midX = (from.x + to.x) / 2;
-                const midY = (from.y + to.y) / 2;
-                const link = firstEdge.link;
-                const linkIdShort = group.linkId.substring(0, 8);
-                const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
-                const srtt = link.srtt > 0 ? `${link.srtt.toFixed(0)}ms` : '?';
-                const loss = link.lossRate > 0 ? `/${(link.lossRate * 100).toFixed(1)}%` : '';
-                const labelText = `${name}:${srtt}${loss}`;
-                
-                ctx.font = '9px -apple-system, sans-serif';
-                const metrics = ctx.measureText(labelText);
-                const padding = 3;
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                ctx.fillRect(
-                    midX - metrics.width / 2 - padding,
-                    midY - 6 - padding,
-                    metrics.width + padding * 2,
-                    12 + padding * 2
-                );
-                ctx.fillStyle = '#f0f6fc';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(labelText, midX, midY);
-            }
+                    ctx.fillText(name, labelX, labelY);
+                    
+                    // Draw measurements near ends for bidirectional
+                    if (hasBidirectional) {
+                        group.edges.forEach(e => {
+                            const isFromFirst = e.from === firstEdge.from;
+                            const offset = nodeRadius + 15;
+                            const t = Math.min(0.45, offset / len);
+                            const actualT = isFromFirst ? t : (1 - t);
+                            // Position along curve
+                            const labelX = (1-actualT)*(1-actualT)*from.x + 2*(1-actualT)*actualT*cpX + actualT*actualT*to.x;
+                            const labelY = (1-actualT)*(1-actualT)*from.y + 2*(1-actualT)*actualT*cpY + actualT*actualT*to.y;
+                            
+                            const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                            const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
+                            const text = `${srtt}${loss}`;
+                            
+                            ctx.font = '9px -apple-system, sans-serif';
+                            const m = ctx.measureText(text);
+                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                            ctx.fillRect(
+                                labelX - m.width / 2 - padding,
+                                labelY - 6 - padding,
+                                m.width + padding * 2,
+                                12 + padding * 2
+                            );
+                            ctx.fillStyle = '#f0f6fc';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(text, labelX, labelY);
+                        });
+                    }
+                } else {
+                    // Single link: draw straight line
+                    ctx.beginPath();
+                    ctx.moveTo(from.x, from.y);
+                    ctx.lineTo(to.x, to.y);
+                    ctx.strokeStyle = '#3fb950';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    
+                    if (hasBidirectional) {
+                        // Draw link name in the middle
+                        const midX = (from.x + to.x) / 2;
+                        const midY = (from.y + to.y) / 2;
+                        const linkIdShort = group.linkId.substring(0, 8);
+                        const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                        
+                        ctx.font = '9px -apple-system, sans-serif';
+                        const metrics = ctx.measureText(name);
+                        const padding = 3;
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                        ctx.fillRect(
+                            midX - metrics.width / 2 - padding,
+                            midY - 6 - padding,
+                            metrics.width + padding * 2,
+                            12 + padding * 2
+                        );
+                        ctx.fillStyle = '#f0f6fc';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(name, midX, midY);
+                        
+                        // Draw measurement data near each end (outside node circles)
+                        group.edges.forEach(e => {
+                            const isFromFirst = e.from === firstEdge.from;
+                            const offset = nodeRadius + 15;
+                            const t = Math.min(0.45, offset / len);
+                            const actualT = isFromFirst ? t : (1 - t);
+                            const labelX = from.x + (to.x - from.x) * actualT;
+                            const labelY = from.y + (to.y - from.y) * actualT;
+                            
+                            const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                            const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
+                            const text = `${srtt}${loss}`;
+                            
+                            ctx.font = '9px -apple-system, sans-serif';
+                            const m = ctx.measureText(text);
+                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                            ctx.fillRect(
+                                labelX - m.width / 2 - padding,
+                                labelY - 6 - padding,
+                                m.width + padding * 2,
+                                12 + padding * 2
+                            );
+                            ctx.fillStyle = '#f0f6fc';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(text, labelX, labelY);
+                        });
+                    } else {
+                        // Unidirectional: draw label at midpoint
+                        const midX = (from.x + to.x) / 2;
+                        const midY = (from.y + to.y) / 2;
+                        const link = firstEdge.link;
+                        const linkIdShort = group.linkId.substring(0, 8);
+                        const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                        const srtt = link.srtt > 0 ? `${link.srtt.toFixed(0)}ms` : '?';
+                        const loss = link.lossRate > 0 ? `/${(link.lossRate * 100).toFixed(1)}%` : '';
+                        const labelText = `${name}:${srtt}${loss}`;
+                        
+                        ctx.font = '9px -apple-system, sans-serif';
+                        const metrics = ctx.measureText(labelText);
+                        const padding = 3;
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                        ctx.fillRect(
+                            midX - metrics.width / 2 - padding,
+                            midY - 6 - padding,
+                            metrics.width + padding * 2,
+                            12 + padding * 2
+                        );
+                        ctx.fillStyle = '#f0f6fc';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(labelText, midX, midY);
+                    }
+                }
+            });
         });
     }
     // If no edges, don't draw any connections

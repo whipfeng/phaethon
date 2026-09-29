@@ -1355,8 +1355,13 @@ async function fetchMeshStatus() {
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
                     ? neighbors.map(n => {
-                        const qualitiesStr = n.qualities.join('<br class="mobile-hide">');
-                        return `<div class="neighbor-item">${n.id}<br class="mobile-hide"><small class="text-muted neighbor-qualities">${qualitiesStr}</small></div>`;
+                        // PC version: vertical layout with line breaks
+                        const qualitiesStrPC = n.qualities.join('<br>');
+                        const pcVersion = `<div class="neighbor-item-pc">${n.id}<br><small class="text-muted">${qualitiesStrPC}</small></div>`;
+                        // Mobile version: horizontal layout, comma-separated
+                        const qualitiesStrMobile = n.qualities.join(', ');
+                        const mobileVersion = `<span class="neighbor-item-mobile">${n.id}: <small class="text-muted">${qualitiesStrMobile}</small></span>`;
+                        return pcVersion + mobileVersion;
                     }).join('')
                     : '-';
                 html += '<tr>';
@@ -1794,7 +1799,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             const useCurves = groups.length > 1;
             
             groups.forEach((group, groupIndex) => {
-                const curveOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 40 : 0;
+                const curveOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
                 
                 // Check if this link has bidirectional measurements
                 const hasBidirectional = group.edges.length >= 2 && 
@@ -1843,7 +1848,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         group.edges.forEach(e => {
                             const isFromFirst = e.from === firstEdge.from;
                             const offset = nodeRadius + 15;
-                            const t = Math.min(0.45, offset / len);
+                            const t = Math.min(0.3, offset / len);
                             const actualT = isFromFirst ? t : (1 - t);
                             // Position along curve
                             const labelX = (1-actualT)*(1-actualT)*from.x + 2*(1-actualT)*actualT*cpX + actualT*actualT*to.x;
@@ -1903,7 +1908,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         group.edges.forEach(e => {
                             const isFromFirst = e.from === firstEdge.from;
                             const offset = nodeRadius + 15;
-                            const t = Math.min(0.45, offset / len);
+                            const t = Math.min(0.3, offset / len);
                             const actualT = isFromFirst ? t : (1 - t);
                             const labelX = from.x + (to.x - from.x) * actualT;
                             const labelY = from.y + (to.y - from.y) * actualT;

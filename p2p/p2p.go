@@ -722,7 +722,11 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 
 	// 4. Clean up old state + re-register
 	if m.meshHandler != nil {
-		m.meshHandler.UnregisterPeerByNodeID(nodeID)
+		// Unregister old sender for this specific peer connection (not by nodeID,
+		// to allow multiple connections to the same remote node via different proxies)
+		if peer.meshSender != nil {
+			m.meshHandler.UnregisterPeer(peer.meshSender)
+		}
 		ps := &peerSender{peer: peer, nodeID: nodeID}
 		peer.meshSender = ps
 		m.meshHandler.RegisterPeer(ps)

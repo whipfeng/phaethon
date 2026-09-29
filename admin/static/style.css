@@ -2417,16 +2417,14 @@ td[data-label="P2P"] .p2p-status.failed {
 }
 
 /* Neighbor display in topology table */
-.neighbor-item {
+.neighbor-item-pc {
     margin-bottom: 6px;
     word-break: break-all;
     white-space: normal;
 }
 
-.neighbor-qualities {
-    display: block;
-    word-break: break-all;
-    white-space: normal;
+.neighbor-item-mobile {
+    display: none;
 }
 
 .neighbors-cell {
@@ -2435,18 +2433,14 @@ td[data-label="P2P"] .p2p-status.failed {
     min-width: 150px;
 }
 
-/* Mobile: hide line breaks, display qualities inline */
+/* Mobile: show horizontal layout, hide vertical layout */
 @media (max-width: 768px) {
-    .mobile-hide {
+    .neighbor-item-pc {
         display: none !important;
     }
     
-    .neighbor-qualities {
+    .neighbor-item-mobile {
         display: inline !important;
-    }
-    
-    .neighbor-item {
-        display: inline-block;
         margin-right: 12px;
         white-space: nowrap;
     }

@@ -1355,14 +1355,14 @@ async function fetchMeshStatus() {
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
                     ? neighbors.map(n => {
-                        const qualitiesStr = n.qualities.join('<br>');
-                        return `<div style="margin-bottom:6px">${n.id}<br><small class="text-muted" style="word-break:break-all;white-space:normal;display:block">${qualitiesStr}</small></div>`;
+                        const qualitiesStr = n.qualities.join('<br class="mobile-hide">');
+                        return `<div class="neighbor-item">${n.id}<br class="mobile-hide"><small class="text-muted neighbor-qualities">${qualitiesStr}</small></div>`;
                     }).join('')
                     : '-';
                 html += '<tr>';
                 html += '<td data-label="' + i18n.t('mesh.node') + '">' + escapeHtml(nodeId) + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.subnet') + '"><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.neighbors') + '" style="word-break:break-all;white-space:normal;min-width:150px">' + neighborsStr + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.neighbors') + '" class="neighbors-cell">' + neighborsStr + '</td>';
                 html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.lastSeen') + '">' + lastSeen + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.admin') + '"><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';

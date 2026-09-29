@@ -2415,3 +2415,39 @@ td[data-label="P2P"] .p2p-status.failed {
 .btn-icon:hover {
     opacity: 1;
 }
+
+/* Neighbor display in topology table */
+.neighbor-item {
+    margin-bottom: 6px;
+    word-break: break-all;
+    white-space: normal;
+}
+
+.neighbor-qualities {
+    display: block;
+    word-break: break-all;
+    white-space: normal;
+}
+
+.neighbors-cell {
+    word-break: break-all;
+    white-space: normal;
+    min-width: 150px;
+}
+
+/* Mobile: hide line breaks, display qualities inline */
+@media (max-width: 768px) {
+    .mobile-hide {
+        display: none !important;
+    }
+    
+    .neighbor-qualities {
+        display: inline !important;
+    }
+    
+    .neighbor-item {
+        display: inline-block;
+        margin-right: 12px;
+        white-space: nowrap;
+    }
+}

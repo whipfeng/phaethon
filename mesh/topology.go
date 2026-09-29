@@ -24,8 +24,8 @@ type PeerClaimedSubnetEntry struct {
 	Subnet    *net.IPNet
 	SubnetStr string
 	NodeID    string
-	Hop       int      // hop count (already incremented on receive)
-	Neighbors []string // direct neighbors of this node
+	Hop       int              // hop count (already incremented on receive)
+	Neighbors []GossipNeighbor // direct neighbors of this node with link quality
 }
 
 // PeerInfo holds the information received from a peer via gossip.
@@ -61,12 +61,20 @@ type GossipDomainSuffix struct {
 	NodeID string `json:"nodeId"` // domain suffix owner
 }
 
+// GossipNeighbor represents a direct neighbor with link quality metrics.
+type GossipNeighbor struct {
+	NodeID   string  `json:"nodeId"`             // neighbor node ID
+	LinkID   string  `json:"linkId,omitempty"`   // link identifier (for multiple links between same nodes)
+	SRTT     float64 `json:"srtt,omitempty"`     // smoothed RTT in milliseconds
+	LossRate float64 `json:"lossRate,omitempty"` // loss rate (0.0-1.0)
+}
+
 // GossipClaimedSubnet is a serializable subnet claim with nodeId, hop count, and neighbors.
 type GossipClaimedSubnet struct {
-	Subnet    string   `json:"subnet"`
-	NodeID    string   `json:"nodeId"`
-	Hop       int      `json:"hop"`
-	Neighbors []string `json:"neighbors,omitempty"` // direct neighbors of this node
+	Subnet    string           `json:"subnet"`
+	NodeID    string           `json:"nodeId"`
+	Hop       int              `json:"hop"`
+	Neighbors []GossipNeighbor `json:"neighbors,omitempty"` // direct neighbors with link quality
 }
 
 // GossipTopologyEdge represents a topology edge in gossip messages.

@@ -272,6 +272,7 @@ type routeTable struct {
 	routes     []MeshRoute          // sorted by prefix length (longest first)
 	domainTrie *NodeTrie            // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo // nodeID → info
+	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
 }
 
 // getRouteTable returns the current route table (lock-free).
@@ -1129,25 +1130,10 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	// .2 (hostIP): src rewrite to local GIP + WriteMeshPacket to OS
-	// hostIP traffic never went through NAT, so only src rewrite is needed.
+	// .2 (hostIP): write to TUN as-is, preserve remote source address.
 	if m.isLocalHostIP(dstIP) {
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-		localGIP := m.getGIP()
-		if localGIP != nil {
-			if m.natTable != nil {
-				srcPkt := m.natTable.RewriteSrcIP(pkt, localGIP)
-				if srcPkt != nil {
-					pkt = srcPkt
-				}
-			} else {
-				rewritePkt := rewriteSrcIPInPacket(pkt, localGIP)
-				if rewritePkt != nil {
-					pkt = rewritePkt
-				}
-			}
-		}
 		if m.tun != nil {
 			if err := m.tun.WriteMeshPacket(pkt); err != nil {
 				util.LogWarn("[MESH] write hostIP packet to TUN failed: %v", err)
@@ -1393,9 +1379,9 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	for _, p := range peers {
 		for _, cs := range p.ClaimedSubnets {
 			for _, neighbor := range cs.Neighbors {
-				key := edgeKey(cs.NodeID, neighbor)
+				key := edgeKey(cs.NodeID, neighbor.NodeID)
 				if _, exists := edgeSet[key]; !exists {
-					edgeSet[key] = FullTopologyEdge{From: cs.NodeID, To: neighbor}
+					edgeSet[key] = FullTopologyEdge{From: cs.NodeID, To: neighbor.NodeID}
 				}
 			}
 		}
@@ -1798,12 +1784,17 @@ func (m *MeshManager) recomputeRoutes() {
 			hop:    claim.hop,
 		}
 	}
-	
+
+	// Build topology graph and compute best paths using Dijkstra
+	graph := m.buildTopologyGraph()
+	bestPaths := dijkstra(graph, m.nodeID)
+
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,
 		domainTrie: domainTrie,
 		nodeMap:    nodeMap,
+		bestPaths:  bestPaths,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
 	for _, r := range routes {
@@ -1869,8 +1860,45 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return nil
 	}
 
-	// Step 2: Query topology for each target nodeID to find next hop peers
+	// Step 2: Use Dijkstra results to find best next hop
 	peers := m.topology.GetAllPeers()
+	peerMap := make(map[string]PeerSender)
+	for _, peer := range peers {
+		if peer.Sender != nil {
+			peerMap[peer.NodeID()] = peer.Sender
+		}
+	}
+
+	// Find the best target based on Dijkstra path cost
+	var bestNextHop string
+	bestCost := 1e18
+	for _, targetNodeID := range targetNodeIDs {
+		if targetNodeID == m.nodeID {
+			continue // skip self
+		}
+		if path, ok := rt.bestPaths[targetNodeID]; ok {
+			if path.Cost < bestCost {
+				bestCost = path.Cost
+				bestNextHop = path.NextHop
+			}
+		}
+	}
+
+	if bestNextHop == "" {
+		// Fallback: no Dijkstra path found, use old logic
+		return m.findNextHopsFallback(targetNodeIDs, peers)
+	}
+
+	// Find the peer for the best next hop
+	if peer, ok := peerMap[bestNextHop]; ok {
+		return []PeerWithHop{{Peer: peer, Hop: 1}}
+	}
+
+	return nil
+}
+
+// findNextHopsFallback is the fallback logic when Dijkstra paths are not available.
+func (m *MeshManager) findNextHopsFallback(targetNodeIDs []string, peers []*PeerInfo) []PeerWithHop {
 	type peerWithHop struct {
 		peer PeerSender
 		hop  int
@@ -1878,21 +1906,17 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 	var candidates []peerWithHop
 
 	for _, targetNodeID := range targetNodeIDs {
-		// Skip self
 		if targetNodeID == m.nodeID {
 			continue
 		}
-		// Find peers that can reach this targetNodeID
 		for _, peer := range peers {
 			if peer.Sender == nil {
 				continue
 			}
-			// Check peer's own subnet
 			if peer.NodeID() == targetNodeID {
 				candidates = append(candidates, peerWithHop{peer.Sender, 1})
 				continue
 			}
-			// Check peer's claimed subnets
 			for _, cs := range peer.ClaimedSubnets {
 				if cs.NodeID == targetNodeID {
 					candidates = append(candidates, peerWithHop{peer.Sender, cs.Hop})
@@ -1906,7 +1930,6 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return nil
 	}
 
-	// Sort by hop count and deduplicate
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].hop != candidates[j].hop {
 			return candidates[i].hop < candidates[j].hop
@@ -1914,7 +1937,6 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return candidates[i].peer.GetNodeID() < candidates[j].peer.GetNodeID()
 	})
 
-	// Deduplicate by peer
 	seen := make(map[string]bool)
 	var result []PeerWithHop
 	for _, c := range candidates {
@@ -2032,15 +2054,26 @@ func (m *MeshManager) broadcastGossip() {
 		nextHop   *PeerInfo // nil = own claim
 		nodeID    string
 		subnet    string
-		neighbors []string
+		neighbors []GossipNeighbor
 	}
 	bestClaims := make(map[string]globalClaimEntry)
 
-	// Collect own neighbors (direct peer nodeIDs)
-	ownNeighbors := make([]string, 0, len(allPeers))
+	// Collect own neighbors (direct peer nodeIDs with link quality)
+	ownNeighbors := make([]GossipNeighbor, 0, len(allPeers))
 	for _, peer := range allPeers {
 		if peer.Sender != nil {
-			ownNeighbors = append(ownNeighbors, peer.NodeID())
+			neighbor := GossipNeighbor{
+				NodeID: peer.NodeID(),
+			}
+			// Get link quality from qualityTracker
+			if m.qualityTracker != nil {
+				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
+					avgRTT, lossRate := quality.Stats()
+					neighbor.SRTT = float64(avgRTT.Milliseconds())
+					neighbor.LossRate = lossRate
+				}
+			}
+			ownNeighbors = append(ownNeighbors, neighbor)
 		}
 	}
 
@@ -2076,13 +2109,13 @@ func (m *MeshManager) broadcastGossip() {
 			continue
 		}
 		valid := true
-		for _, neighborID := range claim.neighbors {
-			neighborClaim, ok := nodeIDToClaim[neighborID]
+		for _, neighbor := range claim.neighbors {
+			neighborClaim, ok := nodeIDToClaim[neighbor.NodeID]
 			if !ok {
 				valid = false
 				break
 			}
-			if !containsStr(neighborClaim.neighbors, claim.nodeID) {
+			if !containsNeighborNodeID(neighborClaim.neighbors, claim.nodeID) {
 				valid = false
 				break
 			}
@@ -2406,15 +2439,26 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		hop       int
 		nodeID    string
 		subnet    string
-		neighbors []string
+		neighbors []GossipNeighbor
 	}
 	bestClaims := make(map[string]globalClaimEntry)
 
-	// Collect own neighbors (direct peer nodeIDs)
-	ownNeighbors := make([]string, 0, len(allPeers))
+	// Collect own neighbors (direct peer nodeIDs with link quality)
+	ownNeighbors := make([]GossipNeighbor, 0, len(allPeers))
 	for _, peer := range allPeers {
 		if peer.Sender != nil {
-			ownNeighbors = append(ownNeighbors, peer.NodeID())
+			neighbor := GossipNeighbor{
+				NodeID: peer.NodeID(),
+			}
+			// Get link quality from qualityTracker
+			if m.qualityTracker != nil {
+				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
+					avgRTT, lossRate := quality.Stats()
+					neighbor.SRTT = float64(avgRTT.Milliseconds())
+					neighbor.LossRate = lossRate
+				}
+			}
+			ownNeighbors = append(ownNeighbors, neighbor)
 		}
 	}
 
@@ -2514,6 +2558,183 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 	}
 }
 
+// LinkQualityInfo represents a link in the topology graph.
+type LinkQualityInfo struct {
+	From     string  // source node ID
+	To       string  // target node ID
+	LinkID   string  // link identifier (for multiple links between same nodes)
+	SRTT     float64 // smoothed RTT in milliseconds
+	LossRate float64 // loss rate (0.0-1.0)
+	Cost     float64 // path cost = SRTT / (1 - LossRate)
+}
+
+// TopologyGraph represents the global topology with link qualities.
+type TopologyGraph struct {
+	Nodes map[string]bool                          // all nodes
+	Edges map[string]map[string][]*LinkQualityInfo // from -> to -> links (multiple links supported)
+}
+
+// buildTopologyGraph builds a global topology graph from all received gossip.
+func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
+	graph := &TopologyGraph{
+		Nodes: make(map[string]bool),
+		Edges: make(map[string]map[string][]*LinkQualityInfo),
+	}
+
+	// Add own links
+	selfID := m.nodeID
+	graph.Nodes[selfID] = true
+	allPeers := m.topology.GetAllPeers()
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		neighborID := peer.NodeID()
+		graph.Nodes[neighborID] = true
+
+		link := &LinkQualityInfo{
+			From:   selfID,
+			To:     neighborID,
+			LinkID: "default", // default link ID for single link
+		}
+		if m.qualityTracker != nil {
+			if quality := m.qualityTracker.Get(neighborID); quality != nil {
+				avgRTT, lossRate := quality.Stats()
+				link.SRTT = float64(avgRTT.Milliseconds())
+				link.LossRate = lossRate
+				if lossRate < 1.0 {
+					link.Cost = link.SRTT / (1 - lossRate)
+				} else {
+					link.Cost = 10000 // very high cost for high loss
+				}
+			} else {
+				link.Cost = 1000 // default high cost when no quality data
+			}
+		} else {
+			link.Cost = 1000
+		}
+
+		if graph.Edges[selfID] == nil {
+			graph.Edges[selfID] = make(map[string][]*LinkQualityInfo)
+		}
+		// Append link (support multiple links)
+		graph.Edges[selfID][neighborID] = append(graph.Edges[selfID][neighborID], link)
+	}
+
+	// Extract links from other nodes' gossip
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		for _, claim := range peer.ClaimedSubnets {
+			// Only process the peer's own subnet claim (hop=1 after increment)
+			if claim.NodeID == peer.NodeID() && claim.Hop == 1 {
+				fromNode := peer.NodeID()
+				graph.Nodes[fromNode] = true
+
+				for _, neighbor := range claim.Neighbors {
+					toNode := neighbor.NodeID
+					graph.Nodes[toNode] = true
+
+					link := &LinkQualityInfo{
+						From:     fromNode,
+						To:       toNode,
+						LinkID:   neighbor.LinkID,
+						SRTT:     neighbor.SRTT,
+						LossRate: neighbor.LossRate,
+					}
+					if neighbor.SRTT > 0 && neighbor.LossRate < 1.0 {
+						link.Cost = neighbor.SRTT / (1 - neighbor.LossRate)
+					} else {
+						link.Cost = 1000 // default high cost
+					}
+
+					if graph.Edges[fromNode] == nil {
+						graph.Edges[fromNode] = make(map[string][]*LinkQualityInfo)
+					}
+					// Append link (support multiple links)
+					graph.Edges[fromNode][toNode] = append(graph.Edges[fromNode][toNode], link)
+				}
+			}
+		}
+	}
+
+	return graph
+}
+
+// dijkstraResult represents the result of Dijkstra's algorithm for a single destination.
+type dijkstraResult struct {
+	NextHop string  // next hop node ID
+	Cost    float64 // total path cost
+}
+
+// dijkstra computes shortest paths from source to all other nodes.
+// Returns a map: nodeID -> dijkstraResult.
+func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
+	type nodeInfo struct {
+		cost    float64
+		nextHop string
+		visited bool
+	}
+
+	nodes := make(map[string]*nodeInfo)
+	for nodeID := range graph.Nodes {
+		nodes[nodeID] = &nodeInfo{
+			cost: 1e18, // infinity
+		}
+	}
+	nodes[source].cost = 0
+
+	for {
+		// Find unvisited node with minimum cost
+		var minNode string
+		minCost := 1e18
+		for nodeID, info := range nodes {
+			if !info.visited && info.cost < minCost {
+				minNode = nodeID
+				minCost = info.cost
+			}
+		}
+
+		if minNode == "" || minCost >= 1e18 {
+			break // all reachable nodes visited
+		}
+
+		nodes[minNode].visited = true
+
+		// Update neighbors' costs
+		if neighbors, ok := graph.Edges[minNode]; ok {
+			for toNode, link := range neighbors {
+				if nodes[toNode].visited {
+					continue
+				}
+				newCost := nodes[minNode].cost + link.Cost
+				if newCost < nodes[toNode].cost {
+					nodes[toNode].cost = newCost
+					if minNode == source {
+						nodes[toNode].nextHop = toNode // direct neighbor
+					} else {
+						nodes[toNode].nextHop = nodes[minNode].nextHop // inherit next hop
+					}
+				}
+			}
+		}
+	}
+
+	// Build result
+	result := make(map[string]dijkstraResult)
+	for nodeID, info := range nodes {
+		if nodeID != source && info.cost < 1e18 {
+			result[nodeID] = dijkstraResult{
+				NextHop: info.nextHop,
+				Cost:    info.cost,
+			}
+		}
+	}
+
+	return result
+}
+
 // edgeKey returns a canonical key for an edge between two nodes (sorted order).
 func edgeKey(a, b string) string {
 	if a > b {
@@ -2526,6 +2747,16 @@ func edgeKey(a, b string) string {
 func containsStr(slice []string, s string) bool {
 	for _, item := range slice {
 		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+// containsNeighborNodeID checks if a GossipNeighbor slice contains a specific node ID.
+func containsNeighborNodeID(slice []GossipNeighbor, nodeID string) bool {
+	for _, item := range slice {
+		if item.NodeID == nodeID {
 			return true
 		}
 	}

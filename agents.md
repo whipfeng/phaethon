@@ -192,18 +192,19 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
   # 2. 验证哈希（确保文件完整）
   ssh -p 39022 Docker@10.21.20.65 "md5sum /c/temp/phaethon.exe"
   # 3. 停止、替换、启动（一条命令）
-  ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Stop-ScheduledTask -TaskName PhaethonTUN; Stop-Process -Name phaethon -Force; Start-Sleep -Seconds 3; Copy-Item -Force \"C:\temp\phaethon.exe\" \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\"; Start-ScheduledTask -TaskName PhaethonTUN'"
+  ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Stop-ScheduledTask -TaskName PhaethonTUN -ErrorAction SilentlyContinue; Stop-Process -Name phaethon -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; Remove-Item -Force \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\" -ErrorAction SilentlyContinue; Copy-Item -Force \"C:\temp\phaethon.exe\" \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\"; Start-Process -FilePath \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\" -WorkingDirectory \"C:\Users\Docker\Desktop\Workspace\phaethon\"'"
   ```
 - **重要**: SCP 直接上传到 `C:\Users\Docker\Desktop\Workspace\phaethon\` 等长路径会导致文件损坏（哈希不一致）。必须先上传到简单路径（如 `/c/temp/`），再用 PowerShell 复制
-- **启动**: `ssh -p 39022 Docker@10.21.20.65 "powershell -Command \"Start-ScheduledTask -TaskName PhaethonTUN\""`
-- **停止**: `ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Stop-Process -Name phaethon -Force'"`
+- **启动**: `ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Start-Process -FilePath \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\" -WorkingDirectory \"C:\Users\Docker\Desktop\Workspace\phaethon\"'"`
+- **停止**: `ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Stop-Process -Name phaethon -Force -ErrorAction SilentlyContinue'"`
 - **部署**: 必须在一条命令中完成 stop + replace + start，否则会触发部署安全检查 hook
+- **文件锁定问题**: Windows 下 `Stop-Process` 后文件可能仍被锁定，`Copy-Item -Force` 会失败。**解决方案**：先用 `Remove-Item -Force` 删除旧文件，再 `Copy-Item` 或 `Rename-Item` 替换新文件
+- **启动方式**: 使用 `Start-Process` 直接启动（可在 SSH 会话中运行）。计划任务 `PhaethonTUN` 也可用，但 `Start-Process` 更可靠
 - **配置文件**: `C:\Users\Docker\Desktop\Workspace\phaethon\config.yaml`
 - **二进制路径**: `C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe`
 - **日志**: stdout 直接输出到控制台（VBS 隐藏窗口启动，无日志重定向文件）；调试日志在 `test-stderr.log`、`mesh-stderr.log` 等（手动启动时产生）
 - **启动方式**: 计划任务 `PhaethonTUN` → `wscript.exe start-phaethon.vbs` → `phaethon.exe`（隐藏窗口，交互式桌面会话）
 - **VBS 脚本**: `start-phaethon.vbs` 内容为 `WshShell.Run "phaethon.exe", 0, False`（0=隐藏窗口, False=异步）
-- **重要**: 必须通过计划任务或 VBS 启动，**不能通过 SSH 直接 Start-Process 启动**。phaethon 需要在 Docker 用户的交互式桌面会话中运行，因为 TUN 驱动（Wintun）和 UAC 提权依赖桌面会话上下文。SSH 启动会导致进程 ~2 秒后 hard crash（无 Go panic，疑似 access violation）
 - **看门狗**: 已合并到主程序（`PHAETHON_WORKER` 环境变量区分 watchdog/worker 模式），启动后自动产生 2 个进程（watchdog + worker）
 - **TUN**: 已启用（`tun: enabled: true`，使用 Wintun 驱动）
 - **旁路网关**: 未启用（Windows 环境，无 iptables FORWARD）
@@ -230,9 +231,10 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 ## 进程管理规则（重要）
 
 - **看门狗已合并到主程序**：`phaethon.exe` 启动后自动产生 2 个进程（watchdog 父进程 + worker 子进程），通过 `PHAETHON_WORKER` 环境变量区分。不再有独立的 `phaethon-watchdog.exe`
-- **VM 启动必须用计划任务**：`Start-ScheduledTask -TaskName PhaethonTUN`（通过 VBS 在交互式桌面会话中启动）。**禁止通过 SSH 直接 Start-Process 启动**，会因缺少桌面会话上下文导致 hard crash
-- **VM 停止**: `Stop-Process -Name phaethon -Force`（会杀掉所有 phaethon.exe 进程，包括 watchdog 和 worker）
-- **VM 重启**: 先 Stop-Process，再 Start-ScheduledTask
+- **VM 启动**: 使用 `Start-Process` 直接启动（可在 SSH 会话中运行）。计划任务 `Start-ScheduledTask -TaskName PhaethonTUN` 也可用
+- **VM 停止**: `Stop-Process -Name phaethon -Force -ErrorAction SilentlyContinue`（会杀掉所有 phaethon.exe 进程，包括 watchdog 和 worker）
+- **VM 文件锁定**: Windows 下停止进程后文件可能仍被锁定。解决方案：`Remove-Item -Force` 删除旧文件，再 `Copy-Item` 或 `Rename-Item` 替换新文件
+- **VM 重启**: 先 Stop-Process，再 Remove-Item + Copy-Item，再 Start-Process
 - **QG 环境**: 使用 `rc-service phaethon restart`，OpenRC 自动拉起
 - **VM 和 QG 环境不能同时关闭**：必须确保一个是正常运行状态后，才能操作另外一个。这是为了保证始终有一个可用的测试/生产环境。
 

@@ -39,7 +39,10 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // renamed "mesh_gossip" to "gossip".
 // Version 7: control frame reliable delivery with seq/ack, removed heartbeat/probe/probe_reply,
 // gossip serves as keepalive, link quality measured from ack timing.
-const P2PProtocolVersion = 7
+// Version 8: link-state routing with quality-aware path selection.
+// GossipClaimedSubnet.Neighbors extended from []string to []GossipNeighbor,
+// carrying per-link SRTT and loss rate metrics for Dijkstra-based routing.
+const P2PProtocolVersion = 8
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {

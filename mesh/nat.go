@@ -69,6 +69,9 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
 	} else if proto == 17 && len(packet) >= headerLen+4 { // UDP
 		srcPort = uint16(packet[headerLen])<<8 | uint16(packet[headerLen+1])
+	} else if proto == 1 && len(packet) >= headerLen+8 { // ICMP (Echo Request/Reply)
+		// ICMP ID is at offset 4-5 in ICMP header (after type, code, checksum)
+		srcPort = uint16(packet[headerLen+4])<<8 | uint16(packet[headerLen+5])
 	} else {
 		return nil // unsupported protocol
 	}
@@ -113,10 +116,16 @@ func (t *NATTable) TranslateOutbound(packet []byte) []byte {
 	// Rewrite source IP to VIP
 	copy(result[12:16], t.vip.To4())
 
-	// Rewrite source port
+	// Rewrite source port (or ICMP ID)
 	if proto == 6 || proto == 17 {
 		result[headerLen] = byte(mappedPort >> 8)
 		result[headerLen+1] = byte(mappedPort)
+	} else if proto == 1 {
+		// Rewrite ICMP ID
+		result[headerLen+4] = byte(mappedPort >> 8)
+		result[headerLen+5] = byte(mappedPort)
+		// Recompute ICMP checksum
+		recomputeICMPChecksum(result, headerLen)
 	}
 
 	// Recompute IP header checksum
@@ -161,6 +170,9 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else if proto == 17 && len(packet) >= headerLen+4 { // UDP
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
+	} else if proto == 1 && len(packet) >= headerLen+8 { // ICMP (Echo Request/Reply)
+		// ICMP ID is at offset 4-5 in ICMP header
+		dstPort = uint16(packet[headerLen+4])<<8 | uint16(packet[headerLen+5])
 	} else {
 		return nil
 	}
@@ -189,6 +201,12 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 	if proto == 6 || proto == 17 {
 		result[headerLen+2] = byte(entry.OrigSrcPort >> 8)
 		result[headerLen+3] = byte(entry.OrigSrcPort)
+	} else if proto == 1 {
+		// Rewrite ICMP ID to original
+		result[headerLen+4] = byte(entry.OrigSrcPort >> 8)
+		result[headerLen+5] = byte(entry.OrigSrcPort)
+		// Recompute ICMP checksum
+		recomputeICMPChecksum(result, headerLen)
 	}
 
 	// Recompute IP header checksum
@@ -354,6 +372,37 @@ func itoa(n uint16) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// recomputeICMPChecksum recomputes the ICMP checksum from scratch
+// after NAT rewrites the ICMP ID.
+func recomputeICMPChecksum(pkt []byte, ipHeaderLen int) {
+	icmpStart := ipHeaderLen
+	icmpLen := len(pkt) - icmpStart
+	if icmpLen < 8 {
+		return
+	}
+
+	// Zero out checksum field (offset 2-3 in ICMP header)
+	pkt[icmpStart+2] = 0
+	pkt[icmpStart+3] = 0
+
+	// Calculate checksum over entire ICMP message
+	var sum uint32
+	for i := 0; i < icmpLen-1; i += 2 {
+		sum += uint32(pkt[icmpStart+i])<<8 | uint32(pkt[icmpStart+i+1])
+	}
+	if icmpLen%2 != 0 {
+		sum += uint32(pkt[icmpStart+icmpLen-1]) << 8
+	}
+
+	for sum>>16 > 0 {
+		sum = (sum&0xffff + sum>>16)
+	}
+	cksum := ^uint16(sum)
+
+	pkt[icmpStart+2] = byte(cksum >> 8)
+	pkt[icmpStart+3] = byte(cksum)
 }
 
 // recomputeTCPUDPChecksum recomputes the TCP or UDP checksum from scratch

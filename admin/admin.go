@@ -2274,6 +2274,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after proxy add failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
 			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
@@ -2322,6 +2323,7 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 				if err := s.mergeAndInitLocked(); err != nil {
 					util.LogWarn("[ADMIN] merge after proxy delete failed: %v", err)
 				}
+				util.DefaultVersionNotifier.BumpVersion("proxies")
 				s.mu.Unlock()
 				util.LogInfo("[ADMIN] proxy deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
@@ -2385,6 +2387,7 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after proxy toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		jsonResponse(w, proxySummary(p))
 		return
 	}
@@ -2436,6 +2439,7 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after p2p toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		util.LogInfo("[ADMIN] P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 		jsonResponse(w, proxySummary(p))
 		return
@@ -2505,6 +2509,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after rule insert failed: %v", err)
 		}
+		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, "database", body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
@@ -2534,6 +2539,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after rules update failed: %v", err)
 		}
+		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", "database", len(rules))
 		jsonResponse(w, map[string]interface{}{"status": "ok", "count": len(rules)})
@@ -2565,6 +2571,7 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after rule delete failed: %v", err)
 		}
+		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, "database", deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
@@ -2612,6 +2619,7 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 			util.LogWarn("[ADMIN] incremental update after rule toggle failed: %v", err)
 		}
 	}
+	util.DefaultVersionNotifier.BumpVersion("rules")
 	jsonResponse(w, map[string]interface{}{
 		"index":   idx,
 		"enabled": body.Enabled,
@@ -2675,6 +2683,7 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after mapping add failed: %v", err)
 		}
+		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
 		// Notify runtime about mapping change
 		if s.OnMappingUpdate != nil {
@@ -2717,6 +2726,7 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 				if err := s.mergeAndInitLocked(); err != nil {
 					util.LogWarn("[ADMIN] merge after mapping delete failed: %v", err)
 				}
+				util.DefaultVersionNotifier.BumpVersion("mappings")
 				s.mu.Unlock()
 				// Notify runtime about mapping deletion
 				if s.OnMappingUpdate != nil {
@@ -2772,6 +2782,7 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after mapping toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("mappings")
 		jsonResponse(w, mappingSummary(m))
 		return
 	}
@@ -3017,6 +3028,7 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after group toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		jsonResponse(w, map[string]interface{}{
 			"name":    g.Name,
 			"enabled": g.IsEnabled(),
@@ -3168,6 +3180,7 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 				util.LogWarn("[ADMIN] incremental update after subscription filter update failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 		jsonResponse(w, map[string]interface{}{
 			"filter":        body.Filter,
@@ -3434,6 +3447,7 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 			util.LogWarn("[ADMIN] incremental update after active-member failed: %v", err)
 		}
 	}
+	util.DefaultVersionNotifier.BumpVersion("subscriptions")
 	s.mu.Unlock()
 	jsonResponse(w, map[string]interface{}{
 		"name":          body.Name,
@@ -3637,6 +3651,7 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 				util.LogWarn("[ADMIN] incremental update after group add failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
 			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", "database", g.Name, g.Type)
@@ -3688,6 +3703,7 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 				if err := s.mergeAndInitLocked(); err != nil {
 					util.LogWarn("[ADMIN] merge after group delete failed: %v", err)
 				}
+				util.DefaultVersionNotifier.BumpVersion("proxies")
 				s.mu.Unlock()
 				util.LogInfo("[ADMIN] group deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
@@ -3702,6 +3718,38 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 // apiSubscriptions handles CRUD for top-level subscriptions.
 func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodGet:
+		dc := s.displayConf()
+		s.mu.RLock()
+		runtimeConf := s.conf
+		s.mu.RUnlock()
+		summaries := make([]map[string]interface{}, 0, len(dc.Subscriptions))
+		for _, sub := range dc.Subscriptions {
+			interval := 3600
+			if sub.Interval != nil {
+				interval = *sub.Interval
+			}
+			nodeCount := 0
+			if runtimeConf != nil {
+				for _, rs := range runtimeConf.Subscriptions {
+					if rs.Name == sub.Name {
+						rs.SubMu.RLock()
+						nodeCount = len(rs.SubProxies)
+						rs.SubMu.RUnlock()
+						break
+					}
+				}
+			}
+			summaries = append(summaries, map[string]interface{}{
+				"name":      sub.Name,
+				"url":       sub.URL,
+				"interval":  interval,
+				"enabled":   sub.IsEnabled(),
+				"nodeCount": nodeCount,
+			})
+		}
+		jsonResponse(w, summaries)
+
 	case http.MethodPost:
 		dc := s.displayConf()
 		var req struct {
@@ -3777,6 +3825,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		if err := s.mergeAndInitLocked(); err != nil {
 			util.LogWarn("[ADMIN] merge after subscription edit failed: %v", err)
 		}
+		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 
 		interval := 0
@@ -3831,6 +3880,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 				if err := s.mergeAndInitLocked(); err != nil {
 					util.LogWarn("[ADMIN] merge after subscription delete failed: %v", err)
 				}
+				util.DefaultVersionNotifier.BumpVersion("subscriptions")
 				s.mu.Unlock()
 				util.LogInfo("[ADMIN] subscription deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
@@ -3870,6 +3920,7 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 
 		nodeCount := 0
 		s.mu.RLock()
@@ -4037,6 +4088,7 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 				util.LogWarn("[ADMIN] incremental update after subscription toggle failed: %v", err)
 			}
 		}
+		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		interval := 0
 		if sub.Interval != nil {
 			interval = *sub.Interval

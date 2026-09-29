@@ -837,6 +837,57 @@ func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto time.Duration
 	return 0, 0, 0
 }
 
+// GetLinkQualityStatsByProxy returns ACK-based link quality stats for a specific link (proxy).
+// Returns srtt, rto, lossRate. Returns zeros if peer not found.
+func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto time.Duration, lossRate float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.peers {
+		if p.ID == proxyName && p.sendState != nil {
+			return p.sendState.getStats()
+		}
+	}
+	return 0, 0, 0
+}
+
+// GetAllLinkQualityStats returns quality stats for all links.
+// Returns map[proxyName]{nodeID, srtt, rto, lossRate}.
+func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
+	NodeID   string
+	SRTT     time.Duration
+	RTO      time.Duration
+	LossRate float64
+} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	result := make(map[string]struct {
+		NodeID   string
+		SRTT     time.Duration
+		RTO      time.Duration
+		LossRate float64
+	})
+
+	for _, p := range m.peers {
+		if p.sendState != nil {
+			srtt, rto, lossRate := p.sendState.getStats()
+			result[p.ID] = struct {
+				NodeID   string
+				SRTT     time.Duration
+				RTO      time.Duration
+				LossRate float64
+			}{
+				NodeID:   p.NodeID,
+				SRTT:     srtt,
+				RTO:      rto,
+				LossRate: lossRate,
+			}
+		}
+	}
+	return result
+}
+
 // GlobalP2PManager is the package-level P2P manager, set from main().
 var GlobalP2PManager *P2PManager
 

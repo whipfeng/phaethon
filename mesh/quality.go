@@ -55,9 +55,10 @@ func (q *PeerQuality) Reset() {
 }
 
 // PeerQualityTracker manages quality tracking for all peers.
+// Supports per-link tracking: each (nodeID, linkID) pair has its own quality metrics.
 type PeerQualityTracker struct {
 	mu    sync.RWMutex
-	peers map[string]*PeerQuality // nodeID -> quality
+	peers map[string]*PeerQuality // key: "nodeID:linkID" -> quality
 }
 
 // NewPeerQualityTracker creates a new tracker.
@@ -67,27 +68,63 @@ func NewPeerQualityTracker() *PeerQualityTracker {
 	}
 }
 
-// Get returns the quality tracker for a peer, creating if needed.
-func (t *PeerQualityTracker) Get(nodeID string) *PeerQuality {
+// makeKey creates a composite key for per-link tracking.
+func makeKey(nodeID, linkID string) string {
+	return nodeID + ":" + linkID
+}
+
+// Get returns the quality tracker for a specific link, creating if needed.
+func (t *PeerQualityTracker) Get(nodeID, linkID string) *PeerQuality {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if q, ok := t.peers[nodeID]; ok {
+	key := makeKey(nodeID, linkID)
+	if q, ok := t.peers[key]; ok {
 		return q
 	}
 	q := NewPeerQuality()
-	t.peers[nodeID] = q
+	t.peers[key] = q
 	return q
 }
 
-// Remove removes a peer from tracking.
-func (t *PeerQualityTracker) Remove(nodeID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.peers, nodeID)
+// GetByNode returns the quality tracker for a node (first link found).
+// Deprecated: Use Get(nodeID, linkID) for per-link tracking.
+func (t *PeerQualityTracker) GetByNode(nodeID string) *PeerQuality {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// Find first link for this node (for backward compatibility)
+	prefix := nodeID + ":"
+	for key, q := range t.peers {
+		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+			return q
+		}
+	}
+	return nil
 }
 
-// GetAll returns a snapshot of all peer qualities.
+// Remove removes a specific link from tracking.
+func (t *PeerQualityTracker) Remove(nodeID, linkID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.peers, makeKey(nodeID, linkID))
+}
+
+// RemoveNode removes all links for a node from tracking.
+func (t *PeerQualityTracker) RemoveNode(nodeID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	prefix := nodeID + ":"
+	for key := range t.peers {
+		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+			delete(t.peers, key)
+		}
+	}
+}
+
+// GetAll returns a snapshot of all link qualities.
+// Returns map[key]*PeerQuality where key is "nodeID:linkID".
 func (t *PeerQualityTracker) GetAll() map[string]*PeerQuality {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -95,6 +132,22 @@ func (t *PeerQualityTracker) GetAll() map[string]*PeerQuality {
 	result := make(map[string]*PeerQuality, len(t.peers))
 	for k, v := range t.peers {
 		result[k] = v
+	}
+	return result
+}
+
+// GetNodeLinks returns all links for a specific node.
+func (t *PeerQualityTracker) GetNodeLinks(nodeID string) map[string]*PeerQuality {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	result := make(map[string]*PeerQuality)
+	prefix := nodeID + ":"
+	for key, q := range t.peers {
+		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+			linkID := key[len(prefix):]
+			result[linkID] = q
+		}
 	}
 	return result
 }

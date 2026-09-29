@@ -94,6 +94,7 @@ type P2PTransport interface {
 	ResendHelloToAll()
 	StopPeerByNodeID(nodeID string)
 	GetLinkQualityStats(nodeID string) (srtt, rto time.Duration, lossRate float64)
+	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto time.Duration, lossRate float64)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -1968,7 +1969,7 @@ func (m *MeshManager) gossipLoop() {
 				util.DefaultVersionNotifier.BumpVersion("mesh")
 				nodeID := ev.sender.GetNodeID()
 				// Reset quality tracker for this peer to avoid stale state
-				m.qualityTracker.Get(nodeID).Reset()
+				m.qualityTracker.RemoveNode(nodeID)
 				util.LogInfo("[MESH] peer registered: %s", nodeID)
 				// Immediately broadcast gossip so routing is established without waiting for 15s tick
 				m.broadcastGossip()
@@ -2072,11 +2073,10 @@ func (m *MeshManager) broadcastGossip() {
 				LinkID: peer.Sender.GetProxyName(),
 			}
 			if m.qualityTracker != nil {
-				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
-					avgRTT, lossRate := quality.Stats()
-					link.SRTT = float64(avgRTT.Milliseconds())
-					link.LossRate = lossRate
-				}
+				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
+				avgRTT, lossRate := quality.Stats()
+				link.SRTT = float64(avgRTT.Milliseconds())
+				link.LossRate = lossRate
 			}
 			neighbor.Links = []GossipLink{link}
 			ownNeighbors = append(ownNeighbors, neighbor)
@@ -2275,15 +2275,16 @@ func (m *MeshManager) checkPeerConnectivity() {
 		}
 
 		nodeID := peer.NodeID()
-		quality := m.qualityTracker.Get(nodeID)
+		linkID := peer.Sender.GetProxyName()
+		quality := m.qualityTracker.Get(nodeID, linkID)
 
 		// Check if ACK stats are stale (no updates for 60s)
 		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
 			// Check if we ever received ACK stats
-			srtt, _, lossRate := m.p2p.GetLinkQualityStats(nodeID)
+			srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(linkID)
 			if srtt == 0 && lossRate == 0 {
 				// No ACK stats at all - peer might be dead
-				util.LogWarn("[MESH] peer %s has no ACK stats for 60s, disconnecting", nodeID)
+				util.LogWarn("[MESH] peer %s (link %s) has no ACK stats for 60s, disconnecting", nodeID, linkID)
 				m.p2p.StopPeerByNodeID(nodeID)
 				quality.Reset()
 			}
@@ -2305,17 +2306,28 @@ func (m *MeshManager) updateACKStats() {
 		}
 
 		nodeID := peer.NodeID()
-		srtt, _, lossRate := m.p2p.GetLinkQualityStats(nodeID)
+		linkID := peer.Sender.GetProxyName()
+		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(linkID)
 		if srtt > 0 || lossRate > 0 {
-			quality := m.qualityTracker.Get(nodeID)
+			quality := m.qualityTracker.Get(nodeID, linkID)
 			quality.UpdateACKStats(srtt, lossRate)
 		}
 	}
 }
 
-// GetPeerQuality returns the quality metrics for a peer.
+// GetPeerQuality returns the quality metrics for a peer (first link found).
+// Deprecated: Use GetLinkQuality for per-link tracking.
 func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss float64) {
-	quality := m.qualityTracker.Get(nodeID)
+	quality := m.qualityTracker.GetByNode(nodeID)
+	if quality == nil {
+		return 0, 0
+	}
+	return quality.Stats()
+}
+
+// GetLinkQuality returns the quality metrics for a specific link.
+func (m *MeshManager) GetLinkQuality(nodeID, linkID string) (avgRTT time.Duration, loss float64) {
+	quality := m.qualityTracker.Get(nodeID, linkID)
 	return quality.Stats()
 }
 
@@ -2462,11 +2474,10 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				LinkID: peer.Sender.GetProxyName(),
 			}
 			if m.qualityTracker != nil {
-				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
-					avgRTT, lossRate := quality.Stats()
-					link.SRTT = float64(avgRTT.Milliseconds())
-					link.LossRate = lossRate
-				}
+				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
+				avgRTT, lossRate := quality.Stats()
+				link.SRTT = float64(avgRTT.Milliseconds())
+				link.LossRate = lossRate
 			}
 			neighbor.Links = []GossipLink{link}
 			ownNeighbors = append(ownNeighbors, neighbor)
@@ -2609,17 +2620,14 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 			LinkID: peer.Sender.GetProxyName(), // proxy name as link identifier
 		}
 		if m.qualityTracker != nil {
-			if quality := m.qualityTracker.Get(neighborID); quality != nil {
-				avgRTT, lossRate := quality.Stats()
-				link.SRTT = float64(avgRTT.Milliseconds())
-				link.LossRate = lossRate
-				if lossRate < 1.0 {
-					link.Cost = link.SRTT / (1 - lossRate)
-				} else {
-					link.Cost = 10000 // very high cost for high loss
-				}
+			quality := m.qualityTracker.Get(neighborID, link.LinkID)
+			avgRTT, lossRate := quality.Stats()
+			link.SRTT = float64(avgRTT.Milliseconds())
+			link.LossRate = lossRate
+			if lossRate < 1.0 {
+				link.Cost = link.SRTT / (1 - lossRate)
 			} else {
-				link.Cost = 1000 // default high cost when no quality data
+				link.Cost = 10000 // very high cost for high loss
 			}
 		} else {
 			link.Cost = 1000

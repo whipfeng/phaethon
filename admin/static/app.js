@@ -1272,7 +1272,6 @@ async function fetchMeshStatus() {
 
         // Key metrics
         document.getElementById('mesh-nodeid').textContent = data.nodeId || '-';
-        document.getElementById('mesh-vip').textContent = data.vip || '-';
         document.getElementById('mesh-subnet').textContent = data.subnet || '-';
         document.getElementById('mesh-routecount').textContent = data.routeCount || 0;
 
@@ -1293,14 +1292,52 @@ async function fetchMeshStatus() {
                 ? fullTopology.nodes 
                 : peers.map(p => ({ nodeId: p.nodeId, subnet: p.subnet, vip: '' }));
             
-            // Build edges lookup for neighbors
+            // Build edges lookup for neighbors with link quality
             const edges = (fullTopology && fullTopology.edges) || [];
             const neighborsMap = {};
             edges.forEach(edge => {
                 if (!neighborsMap[edge.from]) neighborsMap[edge.from] = [];
-                if (!neighborsMap[edge.to]) neighborsMap[edge.to] = [];
-                neighborsMap[edge.from].push(edge.to);
-                neighborsMap[edge.to].push(edge.from);
+                
+                // Format neighbor info with all link qualities
+                // Note: each edge is directional - edge.from measured the link quality
+                const formatNeighbor = (fromId, toId, links) => {
+                    if (!links || links.length === 0) {
+                        return { id: toId, qualities: ['-'] };
+                    }
+                    // Show all links with their quality
+                    // Format: friendlyName:srtt ms/loss% (truncate linkId for display)
+                    const qualities = links.map(link => {
+                        const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
+                        const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
+                        const friendlyName = escapeHtml(link.friendlyName || '');
+                        // Use friendlyName if available, otherwise truncate linkId
+                        const label = friendlyName || escapeHtml((link.linkId || '').substring(0, 8));
+                        return `${label}:${srtt}ms/${loss}%`;
+                    });
+                    return { id: escapeHtml(toId), qualities };
+                };
+                
+                const neighborFrom = formatNeighbor(edge.from, edge.to, edge.links);
+                neighborsMap[edge.from].push(neighborFrom);
+            });
+            
+            // Sort nodes: local node first, then direct peers, then relay nodes, alphabetically within each group
+            allNodes.sort((a, b) => {
+                const aIsLocal = a.nodeId === data.nodeId;
+                const bIsLocal = b.nodeId === data.nodeId;
+                const aIsDirect = directPeers[a.nodeId] && directPeers[a.nodeId].direct;
+                const bIsDirect = directPeers[b.nodeId] && directPeers[b.nodeId].direct;
+                
+                // Local node first
+                if (aIsLocal && !bIsLocal) return -1;
+                if (!aIsLocal && bIsLocal) return 1;
+                
+                // Then direct peers
+                if (aIsDirect && !bIsDirect) return -1;
+                if (!aIsDirect && bIsDirect) return 1;
+                
+                // Finally alphabetically
+                return a.nodeId.localeCompare(b.nodeId);
             });
             
             allNodes.forEach(n => {
@@ -1316,18 +1353,22 @@ async function fetchMeshStatus() {
                 const btnText = isLocal ? i18n.t('mesh.current') : i18n.t('mesh.open');
                 const btnDisabled = isLocal ? 'disabled' : '';
                 const neighbors = neighborsMap[nodeId] || [];
-                const neighborsStr = neighbors.length > 0 ? neighbors.join(', ') : '-';
+                const neighborsStr = neighbors.length > 0 
+                    ? neighbors.map(n => {
+                        const qualitiesStr = n.qualities.join('<br>');
+                        return `${n.id}<br><small class="text-muted" style="word-break:break-all;white-space:normal">${qualitiesStr}</small>`;
+                    }).join('<hr style="margin:4px 0;border-color:#30363d">')
+                    : '-';
                 html += '<tr>';
                 html += '<td data-label="' + i18n.t('mesh.node') + '">' + escapeHtml(nodeId) + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.subnet') + '"><code>' + escapeHtml(n.subnet || '-') + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.vip') + '"><code>' + escapeHtml(n.vip || '-') + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.neighbors') + '">' + escapeHtml(neighborsStr) + '</td>';
+                html += '<td data-label="' + i18n.t('mesh.neighbors') + '" style="word-break:break-all;white-space:normal;max-width:200px">' + neighborsStr + '</td>';
                 html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.lastSeen') + '">' + lastSeen + '</td>';
                 html += '<td data-label="' + i18n.t('mesh.admin') + '"><a href="' + adminUrl + '" class="' + btnClass + '" ' + btnDisabled + ' target="_blank">' + btnText + '</a></td>';
                 html += '</tr>';
             });
-            tbody.innerHTML = html || '<tr><td colspan="7" class="text-muted">' + i18n.t('mesh.noNodes') + '</td></tr>';
+            tbody.innerHTML = html || '<tr><td colspan="6" class="text-muted">' + i18n.t('mesh.noNodes') + '</td></tr>';
         }
 
         // Draw topology visualization
@@ -1505,11 +1546,12 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas size based on container - use full width, fixed height
+    // Set canvas size based on container - responsive height
     const container = canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
     const width = container.clientWidth - 32;
-    const height = 350;
+    // Responsive height: smaller on mobile, larger on desktop
+    const height = width < 600 ? 400 : 500;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + 'px';
@@ -1557,16 +1599,17 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const edges = (fullTopology && fullTopology.edges) || [];
 
     // Force-directed layout parameters
-    const repulsion = 5000;      // Repulsion force between all nodes
-    const attraction = 0.01;     // Spring constant for edges
+    const repulsion = 15000;     // Repulsion force between all nodes (increased from 5000)
+    const attraction = 0.005;    // Spring constant for edges (decreased for looser layout)
     const damping = 0.9;         // Velocity damping per iteration
     const maxIterations = 100;   // Max simulation steps
-    const minDistance = 60;      // Minimum distance between nodes
+    const minDistance = 120;     // Minimum distance between nodes (increased from 60)
 
     // Initialize positions - use circular layout as starting point
     const positions = {};
     const velocities = {};
     const nodeCount = allNodes.length;
+    let allPositionsSaved = true;
 
     allNodes.forEach((node, i) => {
         velocities[node.id] = { x: 0, y: 0 };
@@ -1574,6 +1617,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             // Use saved position from drag
             positions[node.id] = { ..._topologyState.positions[node.id] };
         } else {
+            allPositionsSaved = false;
             // Start with circular layout
             const angle = i * (2 * Math.PI / nodeCount) - Math.PI / 2;
             const r = Math.min(width, height) * 0.3;
@@ -1584,8 +1628,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         }
     });
 
-    // Run force simulation
-    for (let iter = 0; iter < maxIterations; iter++) {
+    // Run force simulation only if not all positions are saved (user hasn't dragged yet)
+    if (!allPositionsSaved) {
+        for (let iter = 0; iter < maxIterations; iter++) {
         // Reset forces
         const forces = {};
         allNodes.forEach(n => { forces[n.id] = { x: 0, y: 0 }; });
@@ -1649,9 +1694,11 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         // Early exit if converged
         if (totalMovement < 0.5) break;
     }
+    } // End of force simulation (only runs if not all positions saved)
 
-    // Ensure minimum distance between nodes
-    for (let pass = 0; pass < 3; pass++) {
+    // Ensure minimum distance between nodes (skip if user has dragged nodes)
+    if (!allPositionsSaved) {
+        for (let pass = 0; pass < 3; pass++) {
         for (let i = 0; i < allNodes.length; i++) {
             for (let j = i + 1; j < allNodes.length; j++) {
                 const a = allNodes[i].id;
@@ -1676,6 +1723,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             }
         }
     }
+    } // End of minimum distance adjustment (only runs if not all positions saved)
 
     // Save positions for next redraw
     _topologyState.positions = positions;
@@ -1688,18 +1736,140 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
 
     // Draw edges from full topology (reuse `edges` from layout above)
     if (edges.length > 0) {
-        // Draw all edges from full topology as solid lines (they're real announced connections)
+        // Group edges by linkId to handle bidirectional measurements on the same link
+        const linkGroups = {};
         edges.forEach(edge => {
-            const from = positions[edge.from];
-            const to = positions[edge.to];
+            if (!edge.links || edge.links.length === 0) return;
+            
+            edge.links.forEach(link => {
+                const linkId = link.linkId || 'unknown';
+                if (!linkGroups[linkId]) {
+                    linkGroups[linkId] = {
+                        linkId: linkId,
+                        friendlyName: link.friendlyName || '',
+                        edges: [] // All directional edges for this link
+                    };
+                }
+                linkGroups[linkId].edges.push({
+                    from: edge.from,
+                    to: edge.to,
+                    link: link
+                });
+            });
+        });
+        
+        // Draw each link group
+        Object.values(linkGroups).forEach(group => {
+            if (group.edges.length === 0) return;
+            
+            // Get node positions (use first edge's from/to)
+            const firstEdge = group.edges[0];
+            const from = positions[firstEdge.from];
+            const to = positions[firstEdge.to];
             if (!from || !to) return;
-
-            ctx.beginPath();
-            ctx.moveTo(from.x, from.y);
-            ctx.lineTo(to.x, to.y);
-            ctx.strokeStyle = '#3fb950';  // All edges are real connections
-            ctx.lineWidth = 2;
-            ctx.stroke();
+            
+            // Calculate edge geometry
+            const dx = to.x - from.x;
+            const dy = to.y - from.y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len === 0) return;
+            
+            // Check if this link has bidirectional measurements
+            const hasBidirectional = group.edges.length >= 2 && 
+                group.edges.some(e => e.from === firstEdge.from) &&
+                group.edges.some(e => e.from === firstEdge.to);
+            
+            if (hasBidirectional) {
+                // Bidirectional: draw single line, show measurements at both ends
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.lineTo(to.x, to.y);
+                ctx.strokeStyle = '#3fb950';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Draw link name in the middle
+                const midX = (from.x + to.x) / 2;
+                const midY = (from.y + to.y) / 2;
+                const linkIdShort = group.linkId.substring(0, 8);
+                const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                
+                ctx.font = '9px -apple-system, sans-serif';
+                const metrics = ctx.measureText(name);
+                const padding = 3;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(
+                    midX - metrics.width / 2 - padding,
+                    midY - 6 - padding,
+                    metrics.width + padding * 2,
+                    12 + padding * 2
+                );
+                ctx.fillStyle = '#f0f6fc';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(name, midX, midY);
+                
+                // Draw measurement data near each end (outside node circles)
+                group.edges.forEach(e => {
+                    const isFromFirst = e.from === firstEdge.from;
+                    const offset = nodeRadius + 15;
+                    const t = Math.min(0.45, offset / len);
+                    const actualT = isFromFirst ? t : (1 - t);
+                    const labelX = from.x + (to.x - from.x) * actualT;
+                    const labelY = from.y + (to.y - from.y) * actualT;
+                    
+                    const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                    const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
+                    const text = `${srtt}${loss}`;
+                    
+                    ctx.font = '9px -apple-system, sans-serif';
+                    const m = ctx.measureText(text);
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                    ctx.fillRect(
+                        labelX - m.width / 2 - padding,
+                        labelY - 6 - padding,
+                        m.width + padding * 2,
+                        12 + padding * 2
+                    );
+                    ctx.fillStyle = '#f0f6fc';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(text, labelX, labelY);
+                });
+            } else {
+                // Unidirectional or single direction: draw straight line with label at midpoint
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.lineTo(to.x, to.y);
+                ctx.strokeStyle = '#3fb950';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Draw link name and measurement at midpoint
+                const midX = (from.x + to.x) / 2;
+                const midY = (from.y + to.y) / 2;
+                const link = firstEdge.link;
+                const linkIdShort = group.linkId.substring(0, 8);
+                const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                const srtt = link.srtt > 0 ? `${link.srtt.toFixed(0)}ms` : '?';
+                const loss = link.lossRate > 0 ? `/${(link.lossRate * 100).toFixed(1)}%` : '';
+                const labelText = `${name}:${srtt}${loss}`;
+                
+                ctx.font = '9px -apple-system, sans-serif';
+                const metrics = ctx.measureText(labelText);
+                const padding = 3;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(
+                    midX - metrics.width / 2 - padding,
+                    midY - 6 - padding,
+                    metrics.width + padding * 2,
+                    12 + padding * 2
+                );
+                ctx.fillStyle = '#f0f6fc';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(labelText, midX, midY);
+            }
         });
     }
     // If no edges, don't draw any connections
@@ -1840,6 +2010,19 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             _topologyState.dragging = null;
             _topologyState.dragStartPos = null;
             canvas.style.cursor = 'default';
+        });
+
+        // Double-click to reset layout
+        canvas.addEventListener('dblclick', function() {
+            _topologyState.positions = {}; // Clear saved positions
+            if (_topologyState.localNodeId) {
+                drawMeshTopology(
+                    _topologyState.localNodeId,
+                    _topologyState.peers || [],
+                    _topologyState.directPeers || {},
+                    _topologyState.fullTopology
+                );
+            }
         });
 
         // Touch event handlers for mobile

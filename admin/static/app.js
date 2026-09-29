@@ -2229,6 +2229,48 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             canvas.style.cursor = 'default';
         });
 
+        // Touch events for mobile
+        canvas.addEventListener('touchstart', function(e) {
+            if (e.touches.length === 1) {
+                const touch = e.touches[0];
+                const rect = canvas.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+                
+                // Simulate mousedown
+                const mouseEvent = new MouseEvent('mousedown', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY,
+                    bubbles: true
+                });
+                canvas.dispatchEvent(mouseEvent);
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function(e) {
+            if (e.touches.length === 1) {
+                const touch = e.touches[0];
+                const mouseEvent = new MouseEvent('mousemove', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY,
+                    bubbles: true
+                });
+                canvas.dispatchEvent(mouseEvent);
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function(e) {
+            const mouseEvent = new MouseEvent('mouseup', {
+                clientX: 0,
+                clientY: 0,
+                bubbles: true
+            });
+            canvas.dispatchEvent(mouseEvent);
+            e.preventDefault();
+        }, { passive: false });
+
         // Double-click to reset layout
         canvas.addEventListener('dblclick', function() {
             _topologyState.positions = {}; // Clear saved positions

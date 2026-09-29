@@ -1314,10 +1314,10 @@ async function fetchMeshStatus() {
                         const friendlyName = escapeHtml(link.friendlyName || '');
                         if (isLocal && friendlyName) {
                             // Local link with friendly name
-                            return `(${friendlyName}, SRTT=${srtt}ms, Loss=${loss}%)`;
+                            return `(${friendlyName}) ${srtt}ms, ${loss}%`;
                         } else {
                             // Remote link or no friendly name
-                            return `(SRTT=${srtt}ms, Loss=${loss}%)`;
+                            return `${srtt}ms, ${loss}%`;
                         }
                     });
                     return { id: escapeHtml(toId), qualities };
@@ -1851,9 +1851,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                     ctx.fillRect(
                         labelX - metrics.width / 2 - padding,
-                        labelY - 6 - padding,
+                        labelY - 5 - padding,
                         metrics.width + padding * 2,
-                        12 + padding * 2
+                        10 + padding * 2
                     );
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
@@ -1876,19 +1876,19 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         
                         let text;
                         if (isLocal && friendlyName) {
-                            text = `(${friendlyName}, SRTT=${srtt}, Loss=${loss})`;
+                            text = `(${friendlyName}) ${srtt}, ${loss}`;
                         } else {
-                            text = `(SRTT=${srtt}, Loss=${loss})`;
+                            text = `${srtt}, ${loss}`;
                         }
-                        
-                        ctx.font = '9px -apple-system, sans-serif';
+
+                        ctx.font = '7px -apple-system, sans-serif';
                         const m = ctx.measureText(text);
                         ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                         ctx.fillRect(
                             labelX - m.width / 2 - padding,
-                            labelY - 6 - padding,
+                            labelY - 5 - padding,
                             m.width + padding * 2,
-                            12 + padding * 2
+                            10 + padding * 2
                         );
                         ctx.fillStyle = '#f0f6fc';
                         ctx.textAlign = 'center';
@@ -1915,9 +1915,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                     ctx.fillRect(
                         midX - metrics.width / 2 - padding,
-                        midY - 6 - padding,
+                        midY - 5 - padding,
                         metrics.width + padding * 2,
-                        12 + padding * 2
+                        10 + padding * 2
                     );
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
@@ -1939,19 +1939,19 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         
                         let text;
                         if (isLocal && friendlyName) {
-                            text = `(${friendlyName}, SRTT=${srtt}, Loss=${loss})`;
+                            text = `(${friendlyName}) ${srtt}, ${loss}`;
                         } else {
-                            text = `(SRTT=${srtt}, Loss=${loss})`;
+                            text = `${srtt}, ${loss}`;
                         }
-                        
-                        ctx.font = '9px -apple-system, sans-serif';
+
+                        ctx.font = '7px -apple-system, sans-serif';
                         const m = ctx.measureText(text);
                         ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                         ctx.fillRect(
                             labelX - m.width / 2 - padding,
-                            labelY - 6 - padding,
+                            labelY - 5 - padding,
                             m.width + padding * 2,
-                            12 + padding * 2
+                            10 + padding * 2
                         );
                         ctx.fillStyle = '#f0f6fc';
                         ctx.textAlign = 'center';

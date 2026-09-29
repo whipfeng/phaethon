@@ -99,6 +99,10 @@ func (s *peerSender) GetNodeID() string {
 	return s.nodeID
 }
 
+func (s *peerSender) GetProxyName() string {
+	return s.peer.ID
+}
+
 // writeReq is a frame queued for async write on the peer connection.
 type writeReq struct {
 	frameType byte

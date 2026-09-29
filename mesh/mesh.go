@@ -81,6 +81,7 @@ type PeerSender interface {
 	Send(data []byte) error
 	SendGossip(data []byte)
 	GetNodeID() string
+	GetProxyName() string // proxy name (link identifier)
 }
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
@@ -2066,13 +2067,18 @@ func (m *MeshManager) broadcastGossip() {
 				NodeID: peer.NodeID(),
 			}
 			// Get link quality from qualityTracker
+			// Use proxy name as LinkID (supports multiple links between same nodes)
+			link := GossipLink{
+				LinkID: peer.Sender.GetProxyName(),
+			}
 			if m.qualityTracker != nil {
 				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
 					avgRTT, lossRate := quality.Stats()
-					neighbor.SRTT = float64(avgRTT.Milliseconds())
-					neighbor.LossRate = lossRate
+					link.SRTT = float64(avgRTT.Milliseconds())
+					link.LossRate = lossRate
 				}
 			}
+			neighbor.Links = []GossipLink{link}
 			ownNeighbors = append(ownNeighbors, neighbor)
 		}
 	}
@@ -2451,13 +2457,18 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				NodeID: peer.NodeID(),
 			}
 			// Get link quality from qualityTracker
+			// Use proxy name as LinkID (supports multiple links between same nodes)
+			link := GossipLink{
+				LinkID: peer.Sender.GetProxyName(),
+			}
 			if m.qualityTracker != nil {
 				if quality := m.qualityTracker.Get(peer.NodeID()); quality != nil {
 					avgRTT, lossRate := quality.Stats()
-					neighbor.SRTT = float64(avgRTT.Milliseconds())
-					neighbor.LossRate = lossRate
+					link.SRTT = float64(avgRTT.Milliseconds())
+					link.LossRate = lossRate
 				}
 			}
+			neighbor.Links = []GossipLink{link}
 			ownNeighbors = append(ownNeighbors, neighbor)
 		}
 	}
@@ -2595,7 +2606,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		link := &LinkQualityInfo{
 			From:   selfID,
 			To:     neighborID,
-			LinkID: "default", // default link ID for single link
+			LinkID: peer.Sender.GetProxyName(), // proxy name as link identifier
 		}
 		if m.qualityTracker != nil {
 			if quality := m.qualityTracker.Get(neighborID); quality != nil {
@@ -2636,24 +2647,27 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 					toNode := neighbor.NodeID
 					graph.Nodes[toNode] = true
 
-					link := &LinkQualityInfo{
-						From:     fromNode,
-						To:       toNode,
-						LinkID:   neighbor.LinkID,
-						SRTT:     neighbor.SRTT,
-						LossRate: neighbor.LossRate,
-					}
-					if neighbor.SRTT > 0 && neighbor.LossRate < 1.0 {
-						link.Cost = neighbor.SRTT / (1 - neighbor.LossRate)
-					} else {
-						link.Cost = 1000 // default high cost
-					}
+					// Process all links to this neighbor
+					for _, gossipLink := range neighbor.Links {
+						link := &LinkQualityInfo{
+							From:     fromNode,
+							To:       toNode,
+							LinkID:   gossipLink.LinkID,
+							SRTT:     gossipLink.SRTT,
+							LossRate: gossipLink.LossRate,
+						}
+						if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
+							link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
+						} else {
+							link.Cost = 1000 // default high cost
+						}
 
-					if graph.Edges[fromNode] == nil {
-						graph.Edges[fromNode] = make(map[string][]*LinkQualityInfo)
+						if graph.Edges[fromNode] == nil {
+							graph.Edges[fromNode] = make(map[string][]*LinkQualityInfo)
+						}
+						// Append link (support multiple links)
+						graph.Edges[fromNode][toNode] = append(graph.Edges[fromNode][toNode], link)
 					}
-					// Append link (support multiple links)
-					graph.Edges[fromNode][toNode] = append(graph.Edges[fromNode][toNode], link)
 				}
 			}
 		}
@@ -2704,11 +2718,18 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 
 		// Update neighbors' costs
 		if neighbors, ok := graph.Edges[minNode]; ok {
-			for toNode, link := range neighbors {
+			for toNode, links := range neighbors {
 				if nodes[toNode].visited {
 					continue
 				}
-				newCost := nodes[minNode].cost + link.Cost
+				// Find the best link (lowest cost) among multiple links
+				var bestCost float64 = 1e18
+				for _, link := range links {
+					if link.Cost < bestCost {
+						bestCost = link.Cost
+					}
+				}
+				newCost := nodes[minNode].cost + bestCost
 				if newCost < nodes[toNode].cost {
 					nodes[toNode].cost = newCost
 					if minNode == source {

@@ -2450,3 +2450,15 @@ td[data-label="P2P"] .p2p-status.failed {
     white-space: normal;
     min-width: 150px;
 }
+
+/* Override flex layout on mobile for neighbors cell */
+@media (max-width: 767px) {
+    .neighbors-cell {
+        display: block !important;
+    }
+    
+    .neighbors-cell .neighbor-block {
+        display: block !important;
+        width: 100% !important;
+    }
+}

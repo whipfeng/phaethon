@@ -2417,10 +2417,29 @@ td[data-label="P2P"] .p2p-status.failed {
 }
 
 /* Neighbor display in topology table */
-.neighbor-item {
-    margin-bottom: 6px;
-    word-break: break-all;
-    white-space: normal;
+.neighbor-block {
+    margin-bottom: 8px;
+}
+
+.neighbor-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.neighbor-links {
+    margin-left: 12px;
+    font-size: 0.85em;
+    color: var(--text-muted, #6b7280);
+}
+
+.neighbor-link {
+    margin-bottom: 2px;
+}
+
+.neighbor-separator {
+    border: none;
+    border-top: 1px solid var(--border, #e5e7eb);
+    margin: 8px 0;
 }
 
 .neighbors-cell {

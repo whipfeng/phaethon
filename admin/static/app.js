@@ -1355,8 +1355,8 @@ async function fetchMeshStatus() {
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
                     ? neighbors.map(n => {
-                        const qualitiesStr = n.qualities.join(', ');
-                        return `<div style="margin-bottom:6px">${n.id}: <small class="text-muted">${qualitiesStr}</small></div>`;
+                        const qualitiesStr = n.qualities.join('<br>');
+                        return `<div style="margin-bottom:6px">${n.id}<br><small class="text-muted" style="word-break:break-all;white-space:normal;display:block">${qualitiesStr}</small></div>`;
                     }).join('')
                     : '-';
                 html += '<tr>';

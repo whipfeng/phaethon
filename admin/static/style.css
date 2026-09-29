@@ -2418,6 +2418,7 @@ td[data-label="P2P"] .p2p-status.failed {
 
 /* Neighbor display in topology table */
 .neighbor-block {
+    display: block;
     margin-bottom: 8px;
 }
 

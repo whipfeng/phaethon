@@ -1305,13 +1305,13 @@ async function fetchMeshStatus() {
                         return { id: toId, qualities: ['-'] };
                     }
                     // Show all links with their quality
-                    // Format: friendlyName:srtt ms/loss% (truncate linkId for display)
+                    // Format: friendlyName(linkId):srtt ms/loss%
                     const qualities = links.map(link => {
                         const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
                         const friendlyName = escapeHtml(link.friendlyName || '');
-                        // Use friendlyName if available, otherwise truncate linkId
-                        const label = friendlyName || escapeHtml((link.linkId || '').substring(0, 8));
+                        const linkId = escapeHtml((link.linkId || '').substring(0, 8));
+                        const label = friendlyName ? `${friendlyName}(${linkId})` : linkId;
                         return `${label}:${srtt}ms/${loss}%`;
                     });
                     return { id: escapeHtml(toId), qualities };

@@ -1355,13 +1355,9 @@ async function fetchMeshStatus() {
                 const neighbors = neighborsMap[nodeId] || [];
                 const neighborsStr = neighbors.length > 0 
                     ? neighbors.map(n => {
-                        // PC version: vertical layout with line breaks
-                        const qualitiesStrPC = n.qualities.join('<br>');
-                        const pcVersion = `<div class="neighbor-item-pc">${n.id}<br><small class="text-muted">${qualitiesStrPC}</small></div>`;
-                        // Mobile version: horizontal layout, comma-separated
-                        const qualitiesStrMobile = n.qualities.join(', ');
-                        const mobileVersion = `<span class="neighbor-item-mobile">${n.id}: <small class="text-muted">${qualitiesStrMobile}</small></span>`;
-                        return pcVersion + mobileVersion;
+                        // Each neighbor on a separate line, qualities comma-separated
+                        const qualitiesStr = n.qualities.join(', ');
+                        return `<div class="neighbor-item">${n.id}: <small class="text-muted">${qualitiesStr}</small></div>`;
                     }).join('')
                     : '-';
                 html += '<tr>';
@@ -1847,9 +1843,8 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     if (hasBidirectional) {
                         group.edges.forEach(e => {
                             const isFromFirst = e.from === firstEdge.from;
-                            const offset = nodeRadius + 15;
-                            const t = Math.min(0.3, offset / len);
-                            const actualT = isFromFirst ? t : (1 - t);
+                            // Position at 25% and 75% along the curve
+                            const actualT = isFromFirst ? 0.25 : 0.75;
                             // Position along curve
                             const labelX = (1-actualT)*(1-actualT)*from.x + 2*(1-actualT)*actualT*cpX + actualT*actualT*to.x;
                             const labelY = (1-actualT)*(1-actualT)*from.y + 2*(1-actualT)*actualT*cpY + actualT*actualT*to.y;
@@ -1907,9 +1902,8 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         // Draw measurement data near each end (outside node circles)
                         group.edges.forEach(e => {
                             const isFromFirst = e.from === firstEdge.from;
-                            const offset = nodeRadius + 15;
-                            const t = Math.min(0.3, offset / len);
-                            const actualT = isFromFirst ? t : (1 - t);
+                            // Position at 25% and 75% along the line
+                            const actualT = isFromFirst ? 0.25 : 0.75;
                             const labelX = from.x + (to.x - from.x) * actualT;
                             const labelY = from.y + (to.y - from.y) * actualT;
                             

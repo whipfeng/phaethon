@@ -1300,24 +1300,30 @@ async function fetchMeshStatus() {
                 
                 // Format neighbor info with all link qualities
                 // Note: each edge is directional - edge.from measured the link quality
-                const formatNeighbor = (fromId, toId, links) => {
+                const formatNeighbor = (fromId, toId, links, localNodeId) => {
                     if (!links || links.length === 0) {
                         return { id: toId, qualities: ['-'] };
                     }
                     // Show all links with their quality
-                    // Format: friendlyName(linkId):srtt ms/loss%
+                    // Format: (friendlyName, SRTT=xms, Loss=x%) or (SRTT=xms, Loss=x%)
+                    // Only show friendlyName if this is a local link (fromId === localNodeId)
+                    const isLocal = fromId === localNodeId;
                     const qualities = links.map(link => {
                         const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
                         const friendlyName = escapeHtml(link.friendlyName || '');
-                        const linkId = escapeHtml((link.linkId || '').substring(0, 8));
-                        const label = friendlyName ? `${friendlyName}(${linkId})` : linkId;
-                        return `${label}:${srtt}ms/${loss}%`;
+                        if (isLocal && friendlyName) {
+                            // Local link with friendly name
+                            return `(${friendlyName}, SRTT=${srtt}ms, Loss=${loss}%)`;
+                        } else {
+                            // Remote link or no friendly name
+                            return `(SRTT=${srtt}ms, Loss=${loss}%)`;
+                        }
                     });
                     return { id: escapeHtml(toId), qualities };
                 };
                 
-                const neighborFrom = formatNeighbor(edge.from, edge.to, edge.links);
+                const neighborFrom = formatNeighbor(edge.from, edge.to, edge.links, data.nodeId);
                 neighborsMap[edge.from].push(neighborFrom);
             });
             
@@ -1832,16 +1838,15 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    // Draw label at midpoint of curve
+                    // Draw linkId at midpoint of curve
                     const t = 0.5;
                     const labelX = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
                     const labelY = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
                     
                     const linkIdShort = group.linkId.substring(0, 8);
-                    const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
                     
                     ctx.font = '9px -apple-system, sans-serif';
-                    const metrics = ctx.measureText(name);
+                    const metrics = ctx.measureText(linkIdShort);
                     const padding = 3;
                     ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                     ctx.fillRect(
@@ -1853,37 +1858,43 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(name, labelX, labelY);
+                    ctx.fillText(linkIdShort, labelX, labelY);
                     
-                    // Draw measurements near ends for bidirectional
-                    if (hasBidirectional) {
-                        group.edges.forEach(e => {
-                            const isFromFirst = e.from === firstEdge.from;
-                            // Position at 25% and 75% along the curve
-                            const actualT = isFromFirst ? 0.25 : 0.75;
-                            // Position along curve
-                            const labelX = (1-actualT)*(1-actualT)*from.x + 2*(1-actualT)*actualT*cpX + actualT*actualT*to.x;
-                            const labelY = (1-actualT)*(1-actualT)*from.y + 2*(1-actualT)*actualT*cpY + actualT*actualT*to.y;
-                            
-                            const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
-                            const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
-                            const text = `${srtt}${loss}`;
-                            
-                            ctx.font = '9px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(
-                                labelX - m.width / 2 - padding,
-                                labelY - 6 - padding,
-                                m.width + padding * 2,
-                                12 + padding * 2
-                            );
-                            ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
-                        });
-                    }
+                    // Draw measurements near ends with friendly name for local end
+                    group.edges.forEach(e => {
+                        const isFromFirst = e.from === firstEdge.from;
+                        // Position at 25% and 75% along the curve
+                        const actualT = isFromFirst ? 0.25 : 0.75;
+                        // Position along curve
+                        const labelX = (1-actualT)*(1-actualT)*from.x + 2*(1-actualT)*actualT*cpX + actualT*actualT*to.x;
+                        const labelY = (1-actualT)*(1-actualT)*from.y + 2*(1-actualT)*actualT*cpY + actualT*actualT*to.y;
+                        
+                        const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                        const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
+                        const isLocal = e.from === localNodeId;
+                        const friendlyName = e.link.friendlyName || '';
+                        
+                        let text;
+                        if (isLocal && friendlyName) {
+                            text = `(${friendlyName}, SRTT=${srtt}, Loss=${loss})`;
+                        } else {
+                            text = `(SRTT=${srtt}, Loss=${loss})`;
+                        }
+                        
+                        ctx.font = '9px -apple-system, sans-serif';
+                        const m = ctx.measureText(text);
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                        ctx.fillRect(
+                            labelX - m.width / 2 - padding,
+                            labelY - 6 - padding,
+                            m.width + padding * 2,
+                            12 + padding * 2
+                        );
+                        ctx.fillStyle = '#f0f6fc';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(text, labelX, labelY);
+                    });
                 } else {
                     // Single link: draw straight line
                     ctx.beginPath();
@@ -1893,80 +1904,60 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    if (hasBidirectional) {
-                        // Draw link name in the middle
-                        const midX = (from.x + to.x) / 2;
-                        const midY = (from.y + to.y) / 2;
-                        const linkIdShort = group.linkId.substring(0, 8);
-                        const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
+                    // Draw linkId in the middle
+                    const midX = (from.x + to.x) / 2;
+                    const midY = (from.y + to.y) / 2;
+                    const linkIdShort = group.linkId.substring(0, 8);
+                    
+                    ctx.font = '9px -apple-system, sans-serif';
+                    const metrics = ctx.measureText(linkIdShort);
+                    const padding = 3;
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                    ctx.fillRect(
+                        midX - metrics.width / 2 - padding,
+                        midY - 6 - padding,
+                        metrics.width + padding * 2,
+                        12 + padding * 2
+                    );
+                    ctx.fillStyle = '#f0f6fc';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(linkIdShort, midX, midY);
+                    
+                    // Draw measurement data near each end with friendly name for local end
+                    group.edges.forEach(e => {
+                        const isFromFirst = e.from === firstEdge.from;
+                        // Position at 25% and 75% along the line
+                        const actualT = isFromFirst ? 0.25 : 0.75;
+                        const labelX = from.x + (to.x - from.x) * actualT;
+                        const labelY = from.y + (to.y - from.y) * actualT;
+                        
+                        const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                        const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
+                        const isLocal = e.from === localNodeId;
+                        const friendlyName = e.link.friendlyName || '';
+                        
+                        let text;
+                        if (isLocal && friendlyName) {
+                            text = `(${friendlyName}, SRTT=${srtt}, Loss=${loss})`;
+                        } else {
+                            text = `(SRTT=${srtt}, Loss=${loss})`;
+                        }
                         
                         ctx.font = '9px -apple-system, sans-serif';
-                        const metrics = ctx.measureText(name);
-                        const padding = 3;
+                        const m = ctx.measureText(text);
                         ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                         ctx.fillRect(
-                            midX - metrics.width / 2 - padding,
-                            midY - 6 - padding,
-                            metrics.width + padding * 2,
+                            labelX - m.width / 2 - padding,
+                            labelY - 6 - padding,
+                            m.width + padding * 2,
                             12 + padding * 2
                         );
                         ctx.fillStyle = '#f0f6fc';
                         ctx.textAlign = 'center';
                         ctx.textBaseline = 'middle';
-                        ctx.fillText(name, midX, midY);
-                        
-                        // Draw measurement data near each end (outside node circles)
-                        group.edges.forEach(e => {
-                            const isFromFirst = e.from === firstEdge.from;
-                            // Position at 25% and 75% along the line
-                            const actualT = isFromFirst ? 0.25 : 0.75;
-                            const labelX = from.x + (to.x - from.x) * actualT;
-                            const labelY = from.y + (to.y - from.y) * actualT;
-                            
-                            const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
-                            const loss = e.link.lossRate > 0 ? `/${(e.link.lossRate * 100).toFixed(1)}%` : '';
-                            const text = `${srtt}${loss}`;
-                            
-                            ctx.font = '9px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(
-                                labelX - m.width / 2 - padding,
-                                labelY - 6 - padding,
-                                m.width + padding * 2,
-                                12 + padding * 2
-                            );
-                            ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
-                        });
-                    } else {
-                        // Unidirectional: draw label at midpoint
-                        const midX = (from.x + to.x) / 2;
-                        const midY = (from.y + to.y) / 2;
-                        const link = firstEdge.link;
-                        const linkIdShort = group.linkId.substring(0, 8);
-                        const name = group.friendlyName ? `${group.friendlyName}(${linkIdShort})` : linkIdShort;
-                        const srtt = link.srtt > 0 ? `${link.srtt.toFixed(0)}ms` : '?';
-                        const loss = link.lossRate > 0 ? `/${(link.lossRate * 100).toFixed(1)}%` : '';
-                        const labelText = `${name}:${srtt}${loss}`;
-                        
-                        ctx.font = '9px -apple-system, sans-serif';
-                        const metrics = ctx.measureText(labelText);
-                        const padding = 3;
-                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                        ctx.fillRect(
-                            midX - metrics.width / 2 - padding,
-                            midY - 6 - padding,
-                            metrics.width + padding * 2,
-                            12 + padding * 2
-                        );
-                        ctx.fillStyle = '#f0f6fc';
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'middle';
-                        ctx.fillText(labelText, midX, midY);
-                    }
+                        ctx.fillText(text, labelX, labelY);
+                    });
                 }
             });
         });

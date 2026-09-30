@@ -81,16 +81,13 @@ func (p *Proxy) IsEnabled() bool {
 }
 
 // IsP2P reports whether P2P is enabled for this proxy.
-// h_tunnel always returns true (P2P is mandatory for mesh downlink).
 // Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
+// h_tunnel can disable P2P to fall back to traditional BIND mode (no mesh downlink).
 func (p *Proxy) IsP2P() bool {
 	if p == nil {
 		return false
 	}
-	if p.Type == "h_tunnel" {
-		return true
-	}
-	isCompatible := p.Type == "socks5" || p.Type == "trojan"
+	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel"
 	if !isCompatible {
 		return false
 	}
@@ -1255,6 +1252,9 @@ type RuleConfiguration struct {
 	// Mesh overlay network configuration.
 	Mesh *MeshConfig `yaml:"mesh,omitempty"`
 
+	// HTunnel transport optimization (v0.2.0)
+	HTunnel *HTunnelConfig `yaml:"htunnel,omitempty"`
+
 	// Initialized fields
 	ProxyNames        map[string]*Proxy        `yaml:"-"`
 	GroupNames        map[string]*ProxyGroup   `yaml:"-"`
@@ -1441,6 +1441,79 @@ type MeshConfig struct {
 	StaticRoutes         []MeshStaticRoute     `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
 	TCPKeepalive         *MeshTCPKeepalive     `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
+}
+
+// HTunnelConfig holds h_tunnel transport optimization settings (v0.2.0)
+type HTunnelConfig struct {
+	// Connection pool size per mesh channel (default 8)
+	PoolSize int `yaml:"pool-size,omitempty" json:"pool-size,omitempty"`
+
+	// Fixed GET long-poll count (default 2)
+	GETSlots int `yaml:"get-slots,omitempty" json:"get-slots,omitempty"`
+
+	// Max frame batch size in bytes (default 512KB)
+	MaxBatchSize int `yaml:"max-batch-size,omitempty" json:"max-batch-size,omitempty"`
+
+	// Heartbeat interval (default 30s)
+	HeartbeatInterval int `yaml:"heartbeat-interval,omitempty" json:"heartbeat-interval,omitempty"` // seconds
+
+	// GET wait time range (seconds)
+	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`       // default 1s
+	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`       // default 30s
+	DefaultWaitTime int `yaml:"default-wait-time,omitempty" json:"default-wait-time,omitempty"` // default 5s
+}
+
+// GetPoolSize returns the connection pool size with default fallback.
+func (c *HTunnelConfig) GetPoolSize() int {
+	if c == nil || c.PoolSize <= 0 {
+		return 8
+	}
+	return c.PoolSize
+}
+
+// GetGETSlots returns the fixed GET count with default fallback.
+func (c *HTunnelConfig) GetGETSlots() int {
+	if c == nil || c.GETSlots <= 0 {
+		return 2
+	}
+	return c.GETSlots
+}
+
+// GetMaxBatchSize returns the max batch size with default fallback.
+func (c *HTunnelConfig) GetMaxBatchSize() int {
+	if c == nil || c.MaxBatchSize <= 0 {
+		return 512 * 1024 // 512KB
+	}
+	return c.MaxBatchSize
+}
+
+// GetHeartbeatInterval returns the heartbeat interval with default fallback.
+func (c *HTunnelConfig) GetHeartbeatInterval() time.Duration {
+	if c == nil || c.HeartbeatInterval <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.HeartbeatInterval) * time.Second
+}
+
+// GetWaitTimeRange returns the wait time range with default fallbacks.
+func (c *HTunnelConfig) GetWaitTimeRange() (min, max, def time.Duration) {
+	minWait := 1 * time.Second
+	maxWait := 30 * time.Second
+	defWait := 5 * time.Second
+
+	if c != nil {
+		if c.MinWaitTime > 0 {
+			minWait = time.Duration(c.MinWaitTime) * time.Second
+		}
+		if c.MaxWaitTime > 0 {
+			maxWait = time.Duration(c.MaxWaitTime) * time.Second
+		}
+		if c.DefaultWaitTime > 0 {
+			defWait = time.Duration(c.DefaultWaitTime) * time.Second
+		}
+	}
+
+	return minWait, maxWait, defWait
 }
 
 // MeshStaticRoute defines a static IPIP route through specific mesh node(s)

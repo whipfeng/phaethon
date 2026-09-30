@@ -848,14 +848,6 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
-	// Log all packets entering HandleOutboundPacket
-	if len(data) >= 20 && data[0]>>4 == 4 {
-		srcIP := net.IP(data[12:16])
-		ttl := data[8]
-		util.LogInfo("[MESH-OUT-ENTRY] HandleOutboundPacket: src=%s dst=%s TTL=%d proto=%d len=%d",
-			srcIP, dstIP, ttl, data[9], len(data))
-	}
-
 	// Very visible log for 8.8.8.x to debug IPIP
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
 		util.LogDebug("[IPIP] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))

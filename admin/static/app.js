@@ -1305,7 +1305,7 @@ async function fetchMeshStatus() {
                         return { id: toId, qualities: ['-'] };
                     }
                     // Show all links with their quality and seq
-                    // Format: #localSeq#remoteSeq, friendlyName, srtt, loss
+                    // Format: #localSeq#remoteSeq, srtt, loss (friendlyName)
                     const qualities = links.map(link => {
                         const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
@@ -1322,9 +1322,9 @@ async function fetchMeshStatus() {
                         
                         const parts = [];
                         if (seqStr) parts.push(seqStr);
-                        if (friendlyName) parts.push(friendlyName);
                         parts.push(`${srtt}ms`);
                         parts.push(`${loss}%`);
+                        if (friendlyName) parts.push(`(${friendlyName})`);
                         
                         return parts.join(', ');
                     });
@@ -1873,26 +1873,25 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    // Draw measurements at 30% and 60% positions along curve
+                    // Draw measurements - each edge shows its own data near its source node
                     group.edges.forEach(e => {
                         const isFromFirst = e.from === firstEdge.from;
                         const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
                         const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
                         const friendlyName = e.link.friendlyName || '';
                         const localSeq = e.link.localSeq || '';
-                        const remoteSeq = e.link.remoteSeq || '';
                         
-                        // At 30% position: show localSeq + quality (measuring node's perspective)
+                        // Only show label near the source node (from end)
                         if (localSeq) {
-                            const seqT = isFromFirst ? 0.3 : 0.6;
+                            // Position at 20% along the curve from source
+                            const seqT = isFromFirst ? 0.2 : 0.8;
                             const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
                             const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
                             
-                            let text;
+                            // Format: #localSeq, srtt, loss (friendlyName)
+                            let text = `#${localSeq}, ${srtt}, ${loss}`;
                             if (friendlyName) {
-                                text = `(${friendlyName}) #${localSeq}, ${srtt}, ${loss}`;
-                            } else {
-                                text = `#${localSeq}, ${srtt}, ${loss}`;
+                                text += ` (${friendlyName})`;
                             }
                             
                             ctx.font = '7px -apple-system, sans-serif';
@@ -1901,24 +1900,6 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                             ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                             ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
                             ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
-                        }
-                        
-                        // At 60% position: show remoteSeq only (target node's seq)
-                        if (remoteSeq) {
-                            const seqT = isFromFirst ? 0.6 : 0.3;
-                            const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                            const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
-                            
-                            const text = `#${remoteSeq}`;
-                            ctx.font = '8px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            const padding = 2;
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
-                            ctx.fillStyle = '#58a6ff';
                             ctx.textAlign = 'center';
                             ctx.textBaseline = 'middle';
                             ctx.fillText(text, labelX, labelY);
@@ -1933,26 +1914,25 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    // Draw measurements at 30% and 60% positions
+                    // Draw measurements - each edge shows its own data near its source node
                     group.edges.forEach(e => {
                         const isFromFirst = e.from === firstEdge.from;
                         const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
                         const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
                         const friendlyName = e.link.friendlyName || '';
                         const localSeq = e.link.localSeq || '';
-                        const remoteSeq = e.link.remoteSeq || '';
                         
-                        // At 30% position: show localSeq + quality (measuring node's perspective)
+                        // Only show label near the source node (from end)
                         if (localSeq) {
-                            const seqT = isFromFirst ? 0.3 : 0.6;
+                            // Position at 20% from the source node
+                            const seqT = isFromFirst ? 0.2 : 0.8;
                             const labelX = from.x + (to.x - from.x) * seqT;
                             const labelY = from.y + (to.y - from.y) * seqT;
                             
-                            let text;
+                            // Format: #localSeq, srtt, loss (friendlyName)
+                            let text = `#${localSeq}, ${srtt}, ${loss}`;
                             if (friendlyName) {
-                                text = `(${friendlyName}) #${localSeq}, ${srtt}, ${loss}`;
-                            } else {
-                                text = `#${localSeq}, ${srtt}, ${loss}`;
+                                text += ` (${friendlyName})`;
                             }
                             
                             ctx.font = '7px -apple-system, sans-serif';
@@ -1961,24 +1941,6 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                             ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                             ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
                             ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
-                        }
-                        
-                        // At 60% position: show remoteSeq only (target node's seq)
-                        if (remoteSeq) {
-                            const seqT = isFromFirst ? 0.6 : 0.3;
-                            const labelX = from.x + (to.x - from.x) * seqT;
-                            const labelY = from.y + (to.y - from.y) * seqT;
-                            
-                            const text = `#${remoteSeq}`;
-                            ctx.font = '8px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            const padding = 2;
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
-                            ctx.fillStyle = '#58a6ff';
                             ctx.textAlign = 'center';
                             ctx.textBaseline = 'middle';
                             ctx.fillText(text, labelX, labelY);

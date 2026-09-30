@@ -1843,112 +1843,56 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             const nx = -dy / len; // perpendicular
             const ny = dx / len;
             
-            // If multiple links between same nodes, draw as curves
-            const useCurves = groups.length > 1;
-            
             groups.forEach((group, groupIndex) => {
-                // Use custom offset if available, otherwise calculate default
-                const defaultOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
+                // Always use curves; single links get a small default offset
+                const defaultOffset = (groupIndex - (groups.length - 1) / 2) * (groups.length > 1 ? 60 : 30);
                 const groupKey = `${group.edges[0].from}-${group.edges[0].to}-${group.index}`;
-                const curveOffset = _topologyState.lineOffsets[groupKey] !== undefined 
-                    ? _topologyState.lineOffsets[groupKey] 
+                const curveOffset = _topologyState.lineOffsets[groupKey] !== undefined
+                    ? _topologyState.lineOffsets[groupKey]
                     : defaultOffset;
-                
-                // Check if this link has bidirectional measurements
-                const hasBidirectional = group.edges.length >= 2 && 
-                    group.edges.some(e => e.from === firstEdge.from) &&
-                    group.edges.some(e => e.from === firstEdge.to);
-                
-                if (useCurves) {
-                    // Draw curve
-                    const midX = (from.x + to.x) / 2;
-                    const midY = (from.y + to.y) / 2;
-                    const cpX = midX + nx * curveOffset;
-                    const cpY = midY + ny * curveOffset;
-                    
-                    ctx.beginPath();
-                    ctx.moveTo(from.x, from.y);
-                    ctx.quadraticCurveTo(cpX, cpY, to.x, to.y);
-                    ctx.strokeStyle = '#3fb950';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
-                    
-                    // Draw measurements - each edge shows its own data near its source node
-                    group.edges.forEach(e => {
-                        const isFromFirst = e.from === firstEdge.from;
-                        const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
-                        const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                        const friendlyName = e.link.friendlyName || '';
-                        const localSeq = e.link.localSeq || '';
-                        
-                        // Only show label near the source node (from end)
-                        if (localSeq) {
-                            // Position at 20% along the curve from source
-                            const seqT = isFromFirst ? 0.2 : 0.8;
-                            const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                            const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
-                            
-                            // Format: #localSeq, srtt, loss (friendlyName)
-                            let text = `#${localSeq}, ${srtt}, ${loss}`;
-                            if (friendlyName) {
-                                text += ` (${friendlyName})`;
-                            }
-                            
-                            ctx.font = '7px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            const padding = 3;
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
-                            ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
+
+                // Draw curve
+                const midX = (from.x + to.x) / 2;
+                const midY = (from.y + to.y) / 2;
+                const cpX = midX + nx * curveOffset;
+                const cpY = midY + ny * curveOffset;
+
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.quadraticCurveTo(cpX, cpY, to.x, to.y);
+                ctx.strokeStyle = '#3fb950';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Draw measurements - each edge shows its own data near its source node
+                group.edges.forEach(e => {
+                    const isFromFirst = e.from === firstEdge.from;
+                    const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                    const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
+                    const friendlyName = e.link.friendlyName || '';
+                    const localSeq = e.link.localSeq || '';
+
+                    if (localSeq) {
+                        const seqT = isFromFirst ? 0.2 : 0.8;
+                        const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
+                        const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
+
+                        let text = `#${localSeq}, ${srtt}, ${loss}`;
+                        if (friendlyName) {
+                            text += ` (${friendlyName})`;
                         }
-                    });
-                } else {
-                    // Single link: draw straight line (with optional offset for dragging)
-                    const offsetX = nx * curveOffset;
-                    const offsetY = ny * curveOffset;
-                    ctx.beginPath();
-                    ctx.moveTo(from.x + offsetX, from.y + offsetY);
-                    ctx.lineTo(to.x + offsetX, to.y + offsetY);
-                    ctx.strokeStyle = '#3fb950';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
-                    
-                    // Draw measurements - each edge shows its own data near its source node
-                    group.edges.forEach(e => {
-                        const isFromFirst = e.from === firstEdge.from;
-                        const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
-                        const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                        const friendlyName = e.link.friendlyName || '';
-                        const localSeq = e.link.localSeq || '';
-                        
-                        // Only show label near the source node (from end)
-                        if (localSeq) {
-                            // Position at 20% from the source node, with offset
-                            const seqT = isFromFirst ? 0.2 : 0.8;
-                            const labelX = from.x + (to.x - from.x) * seqT + offsetX;
-                            const labelY = from.y + (to.y - from.y) * seqT + offsetY;
-                            
-                            // Format: #localSeq, srtt, loss (friendlyName)
-                            let text = `#${localSeq}, ${srtt}, ${loss}`;
-                            if (friendlyName) {
-                                text += ` (${friendlyName})`;
-                            }
-                            
-                            ctx.font = '7px -apple-system, sans-serif';
-                            const m = ctx.measureText(text);
-                            const padding = 3;
-                            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                            ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
-                            ctx.fillStyle = '#f0f6fc';
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'middle';
-                            ctx.fillText(text, labelX, labelY);
-                        }
-                    });
-                }
+
+                        ctx.font = '7px -apple-system, sans-serif';
+                        const m = ctx.measureText(text);
+                        const padding = 3;
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                        ctx.fillRect(labelX - m.width/2 - padding, labelY - 5 - padding, m.width + padding*2, 10 + padding*2);
+                        ctx.fillStyle = '#f0f6fc';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(text, labelX, labelY);
+                    }
+                });
             });
         });
     }
@@ -2100,39 +2044,25 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         
                         const nx = -dy / len;
                         const ny = dx / len;
-                        const useCurves = groups.length > 1;
-                        
+
                         groups.forEach((group, groupIndex) => {
-                            const defaultOffset = useCurves ? (groupIndex - (groups.length - 1) / 2) * 60 : 0;
+                            const defaultOffset = (groupIndex - (groups.length - 1) / 2) * (groups.length > 1 ? 60 : 30);
                             const groupKey = `${group.edges[0].from}-${group.edges[0].to}-${group.index}`;
-                            const curveOffset = _topologyState.lineOffsets[groupKey] !== undefined 
-                                ? _topologyState.lineOffsets[groupKey] 
+                            const curveOffset = _topologyState.lineOffsets[groupKey] !== undefined
+                                ? _topologyState.lineOffsets[groupKey]
                                 : defaultOffset;
-                            
-                            // Calculate distance from click point to line segment
-                            // For straight line: distance to line segment
-                            // For curve: sample multiple points along the curve
-                            let dist;
-                            if (useCurves) {
-                                // Sample points along the quadratic curve
-                                const midX = (from.x + to.x) / 2;
-                                const midY = (from.y + to.y) / 2;
-                                const cpX = midX + nx * curveOffset;
-                                const cpY = midY + ny * curveOffset;
-                                dist = Infinity;
-                                for (let t = 0; t <= 1; t += 0.1) {
-                                    const px = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
-                                    const py = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
-                                    const d = Math.sqrt((x - px) * (x - px) + (y - py) * (y - py));
-                                    if (d < dist) dist = d;
-                                }
-                            } else {
-                                // Distance to line segment
-                                const lineLen = Math.sqrt(dx * dx + dy * dy);
-                                const t = Math.max(0, Math.min(1, ((x - from.x) * dx + (y - from.y) * dy) / (lineLen * lineLen)));
-                                const projX = from.x + t * dx;
-                                const projY = from.y + t * dy;
-                                dist = Math.sqrt((x - projX) * (x - projX) + (y - projY) * (y - projY));
+
+                            // Sample points along the quadratic curve
+                            const midX = (from.x + to.x) / 2;
+                            const midY = (from.y + to.y) / 2;
+                            const cpX = midX + nx * curveOffset;
+                            const cpY = midY + ny * curveOffset;
+                            let dist = Infinity;
+                            for (let t = 0; t <= 1; t += 0.1) {
+                                const px = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
+                                const py = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
+                                const d = Math.sqrt((x - px) * (x - px) + (y - py) * (y - py));
+                                if (d < dist) dist = d;
                             }
                             
                             if (dist < minDist) {

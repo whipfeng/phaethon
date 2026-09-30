@@ -1161,15 +1161,26 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		return
 	}
 
-	if frame[8] <= 1 {
+	// Copy packet and decrement TTL early for traceroute support
+	pkt := make([]byte, len(frame))
+	copy(pkt, frame)
+	newTTL := decrementIPTTL(pkt)
+
+	if newTTL == 0 {
+		// TTL expired — inject into gVisor to generate ICMP Time Exceeded
 		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d dropped (TTL<=1)", fromNodeID, dstIP, frame[8])
+			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL expired, injecting to netstack", fromNodeID, dstIP)
+		}
+		if m.tun != nil {
+			if err := m.tun.InjectMeshPacket(pkt); err != nil {
+				util.LogWarn("[MESH] inject TTL-exceeded packet failed: %v", err)
+			}
 		}
 		return
 	}
 
-	if isMeshAddress(dstIP) && len(frame) >= 20 && frame[9] == 6 {
-		util.LogDebug("[MESH] pre-findRoute: from=%s dst=%s TTL=%d", fromNodeID, dstIP, frame[8])
+	if isMeshAddress(dstIP) && len(pkt) >= 20 && pkt[9] == 6 {
+		util.LogDebug("[MESH] pre-findRoute: from=%s dst=%s TTL=%d", fromNodeID, dstIP, newTTL)
 	}
 
 	route := m.findRoute(dstIP)
@@ -1183,13 +1194,13 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 		proto := "unknown"
 		isTCPSYN := false
-		if len(frame) >= 20 {
-			switch frame[9] {
+		if len(pkt) >= 20 {
+			switch pkt[9] {
 			case 6:
 				proto = "TCP"
-				headerLen := int(frame[0]&0x0f) * 4
-				if len(frame) >= headerLen+14 {
-					tcpFlags := frame[headerLen+13]
+				headerLen := int(pkt[0]&0x0f) * 4
+				if len(pkt) >= headerLen+14 {
+					tcpFlags := pkt[headerLen+13]
 					isTCPSYN = (tcpFlags&0x02) != 0 && (tcpFlags&0x10) == 0 // SYN set, ACK not set
 				}
 			case 17:
@@ -1198,13 +1209,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 		if isTCPSYN {
 			util.LogInfo("[MESH-DIAG] gateway deliver SYN: from=%s src=%s dst=%s len=%d (%s)",
-				fromNodeID, srcIP, dstIP, len(frame), routeInfo)
+				fromNodeID, srcIP, dstIP, len(pkt), routeInfo)
 		} else {
 			util.LogDebug("[MESH-DIAG] gateway deliver: from=%s src=%s dst=%s proto=%s len=%d (%s)",
-				fromNodeID, srcIP, dstIP, proto, len(frame), routeInfo)
+				fromNodeID, srcIP, dstIP, proto, len(pkt), routeInfo)
 		}
-		pkt := make([]byte, len(frame))
-		copy(pkt, frame)
 		if m.tun != nil {
 			if err := m.tun.InjectMeshPacket(pkt); err != nil {
 				util.LogWarn("[MESH-DIAG] inject to local netstack failed: %v", err)
@@ -1219,9 +1228,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	if isMeshAddress(dstIP) {
 		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s (candidates=%d)", fromNodeID, dstIP, selectedPeer.GetNodeID(), len(nextHops))
 	}
-	pkt := make([]byte, len(frame))
-	copy(pkt, frame)
-	decrementIPTTL(pkt)
+	// pkt already has decremented TTL
 	if err := selectedPeer.Send(pkt); err != nil {
 		if strings.Contains(err.Error(), "peer stopped") {
 			util.LogWarn("[MESH] forward to %s failed: peer stopped, triggering removal", selectedPeer.GetNodeID())

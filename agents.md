@@ -162,6 +162,16 @@ Phaethon 是一个 Go 语言实现的网络代理/TUN 隧道工具，支持 Fake
 - **管理**: OpenRC supervise-daemon，自动拉起
 - **TUN**: 已启用（`tun: enabled: true`）
 - **旁路网关**: 已启用（`tun: bypass-gateway: true`，TUN 启动后自动添加 iptables FORWARD 规则，LAN 机器可配 gateway=192.168.1.101 DNS=192.0.2.3 走代理）
+- **本地测试 mesh**: 本地 macOS 通过 QG 旁路网关连接到**整个 mesh 网络**（100.64.0.0/10），可直接测试 traceroute 到任何 mesh 节点：
+  ```bash
+  # 本地测试到 GG (100.179.0.1)
+  traceroute -n -w 2 -m 5 100.179.0.1
+  # 本地测试到 JF (100.2.0.1)
+  traceroute -n -w 2 -m 5 100.2.0.1
+  # 本地测试到 MS9 (100.189.0.1)
+  traceroute -n -w 2 -m 5 100.189.0.1
+  ```
+  网络路径: `本地 → QG旁路网关(192.168.1.101) → QG TUN → mesh网络 → 目标节点`
 
 #### QGW环境 (10.11.61.40:/root/qgw) — Windows 7 兼容版
 - **位置**: QG 服务器的 `/root/qgw/` 目录

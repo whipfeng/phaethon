@@ -56,9 +56,9 @@ func extractSrcIP(ipPacket []byte) net.IP {
 	return net.IP(ipPacket[12:16])
 }
 
-// decrementIPTTL decrements the TTL in a raw IPv4 packet in-place.
+// DecrementIPTTL decrements the TTL in a raw IPv4 packet in-place.
 // Returns the new TTL value, or 0 if TTL was already 0 or packet is invalid.
-func decrementIPTTL(ipPacket []byte) byte {
+func DecrementIPTTL(ipPacket []byte) byte {
 	if len(ipPacket) < 9 || ipPacket[0]>>4 != 4 {
 		return 0
 	}
@@ -86,10 +86,10 @@ func decrementIPTTL(ipPacket []byte) byte {
 	return ipPacket[8]
 }
 
-// generateICMPTimeExceeded creates an ICMP Time Exceeded message for the given IP packet.
+// GenerateICMPTimeExceeded creates an ICMP Time Exceeded message for the given IP packet.
 // The ICMP packet has src=localVIP and dst=original source IP.
 // Returns the complete ICMP packet (IP header + ICMP header + original IP packet as payload).
-func generateICMPTimeExceeded(localVIP net.IP, originalPacket []byte) []byte {
+func GenerateICMPTimeExceeded(localVIP net.IP, originalPacket []byte) []byte {
 	if len(originalPacket) < 20 || localVIP == nil {
 		return nil
 	}

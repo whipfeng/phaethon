@@ -2448,6 +2448,7 @@ func (m *MeshManager) updateACKStats() {
 	}
 
 	allPeers := m.topology.GetAllPeers()
+	util.LogInfo("[MESH-ACK] updateACKStats: %d peers", len(allPeers))
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue // not a direct peer
@@ -2456,6 +2457,7 @@ func (m *MeshManager) updateACKStats() {
 		nodeID := peer.NodeID()
 		proxyName := peer.Sender.GetProxyName()
 		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(proxyName)
+		util.LogInfo("[MESH-ACK] peer=%s proxy=%s srtt=%v lossRate=%.4f", nodeID, proxyName, srtt, lossRate)
 		if srtt > 0 || lossRate > 0 {
 			// Use localSeq as key
 			localSeq := peer.Sender.GetLocalSeq()

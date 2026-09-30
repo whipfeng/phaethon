@@ -92,13 +92,21 @@ func (s *sendState) processAck(ack uint32) {
 }
 
 // getRetransmissions returns frames that need retransmission (timed out).
-func (s *sendState) getRetransmissions(timeout time.Duration) []*pendingFrame {
+// getRetransmissions returns frames that have timed out and need retransmission.
+// Uses exponential backoff: timeout = baseRTO * 2^retries
+func (s *sendState) getRetransmissions(baseRTO time.Duration) []*pendingFrame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	var result []*pendingFrame
 	for _, pf := range s.pending {
+		// Exponential backoff: RTO, 2*RTO, 4*RTO, 8*RTO, 16*RTO...
+		timeout := baseRTO * time.Duration(1<<pf.retries)
+		// Cap at 60 seconds like TCP
+		if timeout > 60*time.Second {
+			timeout = 60 * time.Second
+		}
 		if now.Sub(pf.sentTime) > timeout {
 			result = append(result, pf)
 		}

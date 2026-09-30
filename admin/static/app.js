@@ -1906,10 +1906,12 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         }
                     });
                 } else {
-                    // Single link: draw straight line
+                    // Single link: draw straight line (with optional offset for dragging)
+                    const offsetX = nx * curveOffset;
+                    const offsetY = ny * curveOffset;
                     ctx.beginPath();
-                    ctx.moveTo(from.x, from.y);
-                    ctx.lineTo(to.x, to.y);
+                    ctx.moveTo(from.x + offsetX, from.y + offsetY);
+                    ctx.lineTo(to.x + offsetX, to.y + offsetY);
                     ctx.strokeStyle = '#3fb950';
                     ctx.lineWidth = 2;
                     ctx.stroke();
@@ -1924,10 +1926,10 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         
                         // Only show label near the source node (from end)
                         if (localSeq) {
-                            // Position at 20% from the source node
+                            // Position at 20% from the source node, with offset
                             const seqT = isFromFirst ? 0.2 : 0.8;
-                            const labelX = from.x + (to.x - from.x) * seqT;
-                            const labelY = from.y + (to.y - from.y) * seqT;
+                            const labelX = from.x + (to.x - from.x) * seqT + offsetX;
+                            const labelY = from.y + (to.y - from.y) * seqT + offsetY;
                             
                             // Format: #localSeq, srtt, loss (friendlyName)
                             let text = `#${localSeq}, ${srtt}, ${loss}`;

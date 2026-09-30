@@ -668,10 +668,10 @@ func (m *P2PManager) runSession(peer *Peer) {
 }
 
 // checkRetransmissions checks for timed-out control frames and retransmits them.
-// Uses exponential backoff: 1s → 2s → 4s → 8s, max 5 retries.
+// Uses exponential backoff: RTO, 2*RTO, 4*RTO, 8*RTO, 16*RTO (capped at 60s), max 5 retries.
 func (m *P2PManager) checkRetransmissions(peer *Peer) {
-	rto := peer.sendState.rttSampler.getRTO()
-	pending := peer.sendState.getRetransmissions(rto)
+	baseRTO := peer.sendState.rttSampler.getRTO()
+	pending := peer.sendState.getRetransmissions(baseRTO)
 
 	for _, pf := range pending {
 		if pf.retries >= 5 {
@@ -681,7 +681,12 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 			continue
 		}
 
-		util.LogDebug("[P2P] retransmitting control frame to %s: seq=%d retries=%d", peer.ID, pf.seq, pf.retries)
+		// Calculate timeout for this retry (for logging)
+		timeout := baseRTO * time.Duration(1<<pf.retries)
+		if timeout > 60*time.Second {
+			timeout = 60 * time.Second
+		}
+		util.LogDebug("[P2P] retransmitting control frame to %s: seq=%d retries=%d timeout=%v", peer.ID, pf.seq, pf.retries, timeout)
 
 		// Re-encode with current ack
 		ack := peer.recvState.getLastSeq()

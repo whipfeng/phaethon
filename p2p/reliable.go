@@ -15,16 +15,23 @@ type pendingFrame struct {
 	retries   int
 }
 
+// frameRecord tracks a completed frame (acked or lost) for time-window loss calculation.
+type frameRecord struct {
+	timestamp time.Time
+	lost      bool // true if lost, false if acked
+}
+
 // sendState tracks outgoing control frames for reliable delivery.
 type sendState struct {
-	mu         sync.Mutex
-	nextSeq    uint32                   // next sequence number to assign
-	pending    map[uint32]*pendingFrame // frames sent but not yet acked
-	lastAck    uint32                   // last ack received from peer
-	rttSampler *rttSampler              // RTT estimation
-	totalSent  uint64                   // total control frames sent
-	totalAcked uint64                   // total control frames acked
-	totalLost  uint64                   // total control frames lost (gave up after max retries)
+	mu           sync.Mutex
+	nextSeq      uint32                   // next sequence number to assign
+	pending      map[uint32]*pendingFrame // frames sent but not yet acked
+	lastAck      uint32                   // last ack received from peer
+	rttSampler   *rttSampler              // RTT estimation
+	frameHistory []frameRecord            // history of completed frames (last 60s)
+	totalSent    uint64                   // total control frames sent (cumulative, for backward compat)
+	totalAcked   uint64                   // total control frames acked (cumulative)
+	totalLost    uint64                   // total control frames lost (cumulative)
 }
 
 func newSendState() *sendState {
@@ -85,6 +92,11 @@ func (s *sendState) processAck(ack uint32) {
 				rtt := time.Since(pf.sentTime)
 				s.rttSampler.add(rtt)
 				s.totalAcked++
+				// Record in history for time-window loss calculation
+				s.frameHistory = append(s.frameHistory, frameRecord{
+					timestamp: time.Now(),
+					lost:      false,
+				})
 			}
 			delete(s.pending, seq)
 		}
@@ -130,6 +142,11 @@ func (s *sendState) removeFrame(seq uint32) {
 	defer s.mu.Unlock()
 	if _, ok := s.pending[seq]; ok {
 		s.totalLost++
+		// Record in history for time-window loss calculation
+		s.frameHistory = append(s.frameHistory, frameRecord{
+			timestamp: time.Now(),
+			lost:      true,
+		})
 	}
 	delete(s.pending, seq)
 }
@@ -266,27 +283,65 @@ func (s *rttSampler) getRTO() time.Duration {
 	return rto
 }
 
-// getLossRate returns the estimated loss rate based on frames lost vs sent.
+// cleanupOldRecords removes frame history older than 60 seconds.
+func (s *sendState) cleanupOldRecords() {
+	cutoff := time.Now().Add(-60 * time.Second)
+	var recent []frameRecord
+	for _, r := range s.frameHistory {
+		if r.timestamp.After(cutoff) {
+			recent = append(recent, r)
+		}
+	}
+	s.frameHistory = recent
+}
+
+// getLossRate returns the estimated loss rate based on frames lost vs sent in the last 60 seconds.
 func (s *sendState) getLossRate() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.totalSent == 0 {
+	
+	s.cleanupOldRecords()
+	
+	var sent, lost int
+	for _, r := range s.frameHistory {
+		sent++
+		if r.lost {
+			lost++
+		}
+	}
+	
+	if sent == 0 {
 		return 0
 	}
-	return float64(s.totalLost) / float64(s.totalSent)
+	return float64(lost) / float64(sent)
 }
 
 // getStats returns send state statistics.
+// Loss rate is calculated from the last 60 seconds of frame history.
 func (s *sendState) getStats() (srtt, rto time.Duration, lossRate float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	
+	s.cleanupOldRecords()
+	
 	srtt = s.rttSampler.getSRTT()
 	rto = s.rttSampler.getRTO()
-	if s.totalSent > 0 {
-		lossRate = float64(s.totalLost) / float64(s.totalSent)
+	
+	// Calculate loss rate from last 60 seconds
+	var sent, lost int
+	for _, r := range s.frameHistory {
+		sent++
+		if r.lost {
+			lost++
+		}
 	}
-	// Always log stats when queried
-	util.LogInfo("[P2P-STATS] totalSent=%d totalAcked=%d totalLost=%d lossRate=%.4f", 
-		s.totalSent, s.totalAcked, s.totalLost, lossRate)
+	
+	if sent > 0 {
+		lossRate = float64(lost) / float64(sent)
+	}
+	
+	// Log stats when queried
+	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d lossRate=%.4f (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
+		60, sent, lost, lossRate, s.totalSent, s.totalAcked, s.totalLost)
 	return
 }

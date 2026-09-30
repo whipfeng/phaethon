@@ -1,9 +1,9 @@
 # P2P 协议 v7 — 控制帧可靠传输 + 链路质量感知
 
 > **文档类型**：Plan  
-> **版本**：1.0.0  
+> **版本**：1.1.0  
 > **创建日期**：2026-09-28  
-> **最后更新**：2026-09-28
+> **最后更新**：2026-09-30
 
 ---
 
@@ -101,10 +101,20 @@ type pendingFrame struct {
 4. 启动重传定时器
 
 **重传策略**：
-- 初始超时：1s
-- 指数退避：1s → 2s → 4s → 8s
+- 初始超时：基于 RTO（RTO = SRTT + 4×RTTVAR，最小 10ms，默认 1s）
+- **指数退避**：timeout = RTO × 2^retries
+  - 第 1 次重试：RTO
+  - 第 2 次重试：2×RTO
+  - 第 3 次重试：4×RTO
+  - 第 4 次重试：8×RTO
+  - 第 5 次重试：16×RTO（最大 60 秒）
 - 最大重传次数：5 次
 - 超过后判定连接死亡，触发重连
+
+**类似 TCP 的重传机制**：
+- TCP 使用 RTO 和指数退避避免网络拥塞
+- Phaethon P2P 采用相同策略：RTO 基于 RTT 动态计算，每次重传超时时间翻倍
+- 最大超时限制 60 秒，防止等待时间过长
 
 ### 3.2 接收端
 
@@ -166,16 +176,38 @@ type rttSampler struct {
 
 ### 4.2 丢包率测量
 
-从发送统计计算：
+从发送统计计算，使用**时间窗口**（最近 60 秒）：
+
 ```go
-type lossTracker struct {
-    totalSent     uint64
-    totalAcked    uint64
-    lossRate      float64  // 滑动窗口丢包率
+type frameRecord struct {
+    timestamp time.Time
+    lost      bool  // true if lost, false if acked
+}
+
+type sendState struct {
+    frameHistory []frameRecord  // 最近 60 秒的帧记录
+    totalSent    uint64         // 累计发送（向后兼容）
+    totalAcked   uint64         // 累计确认（向后兼容）
+    totalLost    uint64         // 累计丢失（向后兼容）
 }
 ```
 
-每收到一个 ack，更新统计。超时重传的帧算作丢包。
+**计算方式**：
+- 每收到一个 ack，记录到 `frameHistory`（`lost=false`）
+- 每个帧超时放弃（5 次重传后），记录到 `frameHistory`（`lost=true`）
+- 每 10 秒计算一次丢包率：`lossRate = lost_in_window / sent_in_window`
+- 自动清理超过 60 秒的旧记录
+
+**为什么用时间窗口**：
+- 路由选择需要反映**当前**网络状态，而不是历史平均
+- 60 秒窗口 = 6 个 gossip 周期，采样足够
+- 平衡稳定性和响应速度：太短会抖动，太慢适应变化
+- 连接运行很久后，早期丢包不会稀释近期变化
+
+**日志格式**：
+```
+[P2P-STATS] window=60s sent=10 lost=2 lossRate=0.2000 (cumulative: totalSent=100 totalAcked=80 totalLost=20)
+```
 
 ### 4.3 采样频率
 

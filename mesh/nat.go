@@ -170,8 +170,13 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
 	} else if proto == 17 && len(packet) >= headerLen+4 { // UDP
 		dstPort = uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
-	} else if proto == 1 && len(packet) >= headerLen+8 { // ICMP (Echo Request/Reply)
-		// ICMP ID is at offset 4-5 in ICMP header
+	} else if proto == 1 && len(packet) >= headerLen+8 { // ICMP
+		icmpType := packet[headerLen]
+		// ICMP error messages (type 3, 11, 12) contain embedded original packet
+		if icmpType == 3 || icmpType == 11 || icmpType == 12 {
+			return t.translateICMPError(packet, headerLen)
+		}
+		// ICMP Echo Request/Reply: ID is at offset 4-5 in ICMP header
 		dstPort = uint16(packet[headerLen+4])<<8 | uint16(packet[headerLen+5])
 	} else {
 		return nil
@@ -225,6 +230,96 @@ func (t *NATTable) TranslateInbound(packet []byte) []byte {
 
 	// Recompute TCP/UDP checksum for dstIP and dstPort changes
 	recomputeTCPUDPChecksum(result, headerLen, proto, net.IP(result[12:16]), net.IP(result[16:20]))
+
+	return result
+}
+
+// translateICMPError handles reverse NAT for ICMP error messages (type 3, 11, 12).
+// These contain the embedded original packet which we use to look up the NAT entry.
+func (t *NATTable) translateICMPError(packet []byte, outerHeaderLen int) []byte {
+	// ICMP error format: outer IP + ICMP header (8 bytes) + embedded IP header + embedded data
+	icmpStart := outerHeaderLen
+	embeddedStart := icmpStart + 8 // After ICMP type/code/checksum/unused
+
+	if len(packet) < embeddedStart+20 {
+		return nil // Not enough data for embedded IP header
+	}
+
+	// Parse embedded IP header
+	embeddedIP := packet[embeddedStart:]
+	if embeddedIP[0]>>4 != 4 {
+		return nil // Not IPv4
+	}
+	embeddedHeaderLen := int(embeddedIP[0]&0x0f) * 4
+	if embeddedHeaderLen < 20 || embeddedStart+embeddedHeaderLen > len(packet) {
+		return nil
+	}
+
+	embeddedProto := embeddedIP[9]
+
+	// Extract embedded source port (the mapped port from forward NAT)
+	var embeddedSrcPort uint16
+	if embeddedProto == 6 && len(embeddedIP) >= embeddedHeaderLen+4 { // TCP
+		embeddedSrcPort = uint16(embeddedIP[embeddedHeaderLen])<<8 | uint16(embeddedIP[embeddedHeaderLen+1])
+	} else if embeddedProto == 17 && len(embeddedIP) >= embeddedHeaderLen+4 { // UDP
+		embeddedSrcPort = uint16(embeddedIP[embeddedHeaderLen])<<8 | uint16(embeddedIP[embeddedHeaderLen+1])
+	} else if embeddedProto == 1 && len(embeddedIP) >= embeddedHeaderLen+8 { // ICMP
+		embeddedSrcPort = uint16(embeddedIP[embeddedHeaderLen+4])<<8 | uint16(embeddedIP[embeddedHeaderLen+5])
+	} else {
+		return nil
+	}
+
+	// Look up NAT entry by embedded (proto, mappedPort)
+	key := natReverseKey(embeddedProto, embeddedSrcPort)
+	t.mu.RLock()
+	entry, exists := t.reverse[key]
+	t.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	entry.LastSeen.Store(time.Now().UnixNano())
+
+	// Build translated packet
+	result := make([]byte, len(packet))
+	copy(result, packet)
+
+	// Rewrite outer destination IP to original source
+	copy(result[16:20], entry.OrigSrcIP.To4())
+
+	// Rewrite embedded source IP to original source
+	copy(result[embeddedStart+12:embeddedStart+16], entry.OrigSrcIP.To4())
+
+	// Rewrite embedded source port to original
+	if embeddedProto == 6 || embeddedProto == 17 {
+		result[embeddedStart+embeddedHeaderLen] = byte(entry.OrigSrcPort >> 8)
+		result[embeddedStart+embeddedHeaderLen+1] = byte(entry.OrigSrcPort)
+	} else if embeddedProto == 1 {
+		result[embeddedStart+embeddedHeaderLen+4] = byte(entry.OrigSrcPort >> 8)
+		result[embeddedStart+embeddedHeaderLen+5] = byte(entry.OrigSrcPort)
+	}
+
+	// Recompute embedded transport layer checksum
+	recomputeTCPUDPChecksum(result, embeddedStart+embeddedHeaderLen, embeddedProto,
+		net.IP(result[embeddedStart+12:embeddedStart+16]), net.IP(result[embeddedStart+16:embeddedStart+20]))
+
+	// Recompute outer ICMP checksum
+	recomputeICMPChecksum(result, outerHeaderLen)
+
+	// Recompute outer IP header checksum
+	result[10] = 0
+	result[11] = 0
+	var sum uint32
+	for i := 0; i < outerHeaderLen-1; i += 2 {
+		sum += uint32(result[i])<<8 | uint32(result[i+1])
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	cksum := ^uint16(sum)
+	result[10] = byte(cksum >> 8)
+	result[11] = byte(cksum)
 
 	return result
 }

@@ -24,6 +24,7 @@ const (
 	HeaderTargetPort   = "X-P"
 	HeaderContentSeq   = "X-S"
 	HeaderCommand      = "X-C"
+	HeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time
 
 	// Backward-compatible aliases.
 	headerConnectionID = HeaderConnectionID
@@ -31,6 +32,7 @@ const (
 	headerTargetPort   = HeaderTargetPort
 	headerContentSeq   = HeaderContentSeq
 	headerCommand      = HeaderCommand
+	headerWaitTime     = HeaderWaitTime
 )
 
 // HTunnelDialer connects through an HTTP tunnel proxy

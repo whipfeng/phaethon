@@ -82,7 +82,9 @@ type PeerSender interface {
 	SendGossip(data []byte)
 	GetNodeID() string
 	GetProxyName() string       // proxy name (link identifier)
-	GetLinkID() string          // negotiated link ID (seq1-seq2 sorted)
+	GetLinkID() string          // negotiated link ID (seq1-seq2 sorted, internal use)
+	GetLocalSeq() uint16        // local sequence number (for gossip advertisement)
+	GetRemoteSeq() uint16       // remote sequence number (for gossip advertisement)
 	GetFriendlyName() string    // friendly name (proxy name, for display only)
 }
 
@@ -95,6 +97,7 @@ type P2PTransport interface {
 	SetMeshInfo(nodeID, vip string)
 	ResendHelloToAll()
 	StopPeerByNodeID(nodeID string)
+	StopPeerByLinkID(linkID string)
 	GetLinkQualityStats(nodeID string) (srtt, rto time.Duration, lossRate float64)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto time.Duration, lossRate float64)
 }
@@ -1452,8 +1455,20 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 						cost = 1000 // default cost for no data
 					}
 					
+					// Construct LinkID from LocalSeq+RemoteSeq for internal use
+					linkID := ""
+					if gossipLink.LocalSeq > 0 && gossipLink.RemoteSeq > 0 {
+						minSeq := gossipLink.LocalSeq
+						maxSeq := gossipLink.RemoteSeq
+						if gossipLink.LocalSeq > gossipLink.RemoteSeq {
+							minSeq = gossipLink.RemoteSeq
+							maxSeq = gossipLink.LocalSeq
+						}
+						linkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
+					}
+					
 					links = append(links, FullTopologyLink{
-						LinkID:       gossipLink.LinkID,
+						LinkID:       linkID,
 						FriendlyName: gossipLink.FriendlyName,
 						SRTT:         gossipLink.SRTT,
 						LossRate:     gossipLink.LossRate,
@@ -1963,15 +1978,10 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 
 	// Step 2: Use Dijkstra results to find best next hop
 	peers := m.topology.GetAllPeers()
-	peerMap := make(map[string]PeerSender)
-	for _, peer := range peers {
-		if peer.Sender != nil {
-			peerMap[peer.NodeID()] = peer.Sender
-		}
-	}
 
 	// Find the best target based on Dijkstra path cost
 	var bestNextHop string
+	var bestLinkID string
 	bestCost := 1e18
 	for _, targetNodeID := range targetNodeIDs {
 		if targetNodeID == m.nodeID {
@@ -1981,6 +1991,7 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 			if path.Cost < bestCost {
 				bestCost = path.Cost
 				bestNextHop = path.NextHop
+				bestLinkID = path.LinkID
 			}
 		}
 	}
@@ -1990,9 +2001,17 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return m.findNextHopsFallback(targetNodeIDs, peers)
 	}
 
-	// Find the peer for the best next hop
-	if peer, ok := peerMap[bestNextHop]; ok {
-		return []PeerWithHop{{Peer: peer, Hop: 1}}
+	// Find the peer for the best next hop with matching link ID
+	for _, peer := range peers {
+		if peer.Sender != nil && peer.NodeID() == bestNextHop {
+			linkID := peer.Sender.GetLinkID()
+			if linkID == "" {
+				linkID = peer.Sender.GetProxyName() // fallback for old protocol
+			}
+			if linkID == bestLinkID {
+				return []PeerWithHop{{Peer: peer.Sender, Hop: 1}}
+			}
+		}
 	}
 
 	return nil
@@ -2160,35 +2179,47 @@ func (m *MeshManager) broadcastGossip() {
 	bestClaims := make(map[string]globalClaimEntry)
 
 	// Collect own neighbors (direct peer nodeIDs with link quality)
-	ownNeighbors := make([]GossipNeighbor, 0, len(allPeers))
+	// Group links by nodeID (support multiple links between same nodes)
+	neighborMap := make(map[string]*GossipNeighbor)
 	for _, peer := range allPeers {
 		if peer.Sender != nil {
-			neighbor := GossipNeighbor{
-				NodeID: peer.NodeID(),
+			nodeID := peer.NodeID()
+			if _, ok := neighborMap[nodeID]; !ok {
+				neighborMap[nodeID] = &GossipNeighbor{
+					NodeID: nodeID,
+					Links:  []GossipLink{},
+				}
 			}
-			// Get link quality from qualityTracker
-			// Use LinkID as key (supports multiple links between same nodes)
+			// Get seq values for gossip advertisement
+			localSeq := peer.Sender.GetLocalSeq()
+			remoteSeq := peer.Sender.GetRemoteSeq()
+			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
+			
+			link := GossipLink{
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
+				FriendlyName: friendlyName,
+			}
+			
+			// Use LinkID as internal key for qualityTracker (stable identifier)
 			linkID := peer.Sender.GetLinkID()
 			if linkID == "" {
 				linkID = peer.Sender.GetProxyName() // fallback for old protocol
 			}
-			friendlyName := peer.Sender.GetFriendlyName()
-			if friendlyName == "" {
-				friendlyName = peer.Sender.GetProxyName() // fallback
-			}
-			link := GossipLink{
-				LinkID:       linkID,
-				FriendlyName: friendlyName,
-			}
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
+				quality := m.qualityTracker.Get(nodeID, linkID)
 				avgRTT, lossRate := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
 			}
-			neighbor.Links = []GossipLink{link}
-			ownNeighbors = append(ownNeighbors, neighbor)
+			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
+	}
+
+	// Convert map to slice
+	ownNeighbors := make([]GossipNeighbor, 0, len(neighborMap))
+	for _, neighbor := range neighborMap {
+		ownNeighbors = append(ownNeighbors, *neighbor)
 	}
 
 	// Own claim (Hop=0, with neighbors)
@@ -2383,7 +2414,10 @@ func (m *MeshManager) checkPeerConnectivity() {
 		}
 
 		nodeID := peer.NodeID()
-		linkID := peer.Sender.GetProxyName()
+		linkID := peer.Sender.GetLinkID()
+		if linkID == "" {
+			linkID = peer.Sender.GetProxyName() // fallback for old protocol
+		}
 		quality := m.qualityTracker.Get(nodeID, linkID)
 
 		// Check if ACK stats are stale (no updates for 60s)
@@ -2393,7 +2427,7 @@ func (m *MeshManager) checkPeerConnectivity() {
 			if srtt == 0 && lossRate == 0 {
 				// No ACK stats at all - peer might be dead
 				util.LogWarn("[MESH] peer %s (link %s) has no ACK stats for 60s, disconnecting", nodeID, linkID)
-				m.p2p.StopPeerByNodeID(nodeID)
+				m.p2p.StopPeerByLinkID(linkID)
 				quality.Reset()
 			}
 		}
@@ -2575,35 +2609,47 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 	bestClaims := make(map[string]globalClaimEntry)
 
 	// Collect own neighbors (direct peer nodeIDs with link quality)
-	ownNeighbors := make([]GossipNeighbor, 0, len(allPeers))
+	// Group links by nodeID (support multiple links between same nodes)
+	neighborMap := make(map[string]*GossipNeighbor)
 	for _, peer := range allPeers {
 		if peer.Sender != nil {
-			neighbor := GossipNeighbor{
-				NodeID: peer.NodeID(),
+			nodeID := peer.NodeID()
+			if _, ok := neighborMap[nodeID]; !ok {
+				neighborMap[nodeID] = &GossipNeighbor{
+					NodeID: nodeID,
+					Links:  []GossipLink{},
+				}
 			}
-			// Get link quality from qualityTracker
-			// Use LinkID as key (supports multiple links between same nodes)
+			// Get seq values for gossip advertisement
+			localSeq := peer.Sender.GetLocalSeq()
+			remoteSeq := peer.Sender.GetRemoteSeq()
+			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
+			
+			link := GossipLink{
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
+				FriendlyName: friendlyName,
+			}
+			
+			// Use LinkID as internal key for qualityTracker (stable identifier)
 			linkID := peer.Sender.GetLinkID()
 			if linkID == "" {
 				linkID = peer.Sender.GetProxyName() // fallback for old protocol
 			}
-			friendlyName := peer.Sender.GetFriendlyName()
-			if friendlyName == "" {
-				friendlyName = peer.Sender.GetProxyName() // fallback
-			}
-			link := GossipLink{
-				LinkID:       linkID,
-				FriendlyName: friendlyName,
-			}
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.Get(peer.NodeID(), link.LinkID)
+				quality := m.qualityTracker.Get(nodeID, linkID)
 				avgRTT, lossRate := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
 			}
-			neighbor.Links = []GossipLink{link}
-			ownNeighbors = append(ownNeighbors, neighbor)
+			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
+	}
+
+	// Convert map to slice
+	ownNeighbors := make([]GossipNeighbor, 0, len(neighborMap))
+	for _, neighbor := range neighborMap {
+		ownNeighbors = append(ownNeighbors, *neighbor)
 	}
 
 	// Own claim (Hop=0, with neighbors)
@@ -2739,7 +2785,10 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		link := &LinkQualityInfo{
 			From:   selfID,
 			To:     neighborID,
-			LinkID: peer.Sender.GetProxyName(), // proxy name as link identifier
+			LinkID: peer.Sender.GetLinkID(), // negotiated link ID
+		}
+		if link.LinkID == "" {
+			link.LinkID = peer.Sender.GetProxyName() // fallback for old protocol
 		}
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, link.LinkID)
@@ -2779,10 +2828,22 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 
 					// Process all links to this neighbor
 					for _, gossipLink := range neighbor.Links {
+						// Construct LinkID from LocalSeq+RemoteSeq for internal use
+						linkID := ""
+						if gossipLink.LocalSeq > 0 && gossipLink.RemoteSeq > 0 {
+							minSeq := gossipLink.LocalSeq
+							maxSeq := gossipLink.RemoteSeq
+							if gossipLink.LocalSeq > gossipLink.RemoteSeq {
+								minSeq = gossipLink.RemoteSeq
+								maxSeq = gossipLink.LocalSeq
+							}
+							linkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
+						}
+						
 						link := &LinkQualityInfo{
 							From:     fromNode,
 							To:       toNode,
-							LinkID:   gossipLink.LinkID,
+							LinkID:   linkID,
 							SRTT:     gossipLink.SRTT,
 							LossRate: gossipLink.LossRate,
 						}
@@ -2809,6 +2870,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 // dijkstraResult represents the result of Dijkstra's algorithm for a single destination.
 type dijkstraResult struct {
 	NextHop string  // next hop node ID
+	LinkID  string  // link ID of the best link to next hop
 	Cost    float64 // total path cost
 }
 
@@ -2818,6 +2880,7 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 	type nodeInfo struct {
 		cost    float64
 		nextHop string
+		linkID  string // link ID of the best link to next hop
 		visited bool
 	}
 
@@ -2854,9 +2917,11 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				}
 				// Find the best link (lowest cost) among multiple links
 				var bestCost float64 = 1e18
+				var bestLinkID string
 				for _, link := range links {
 					if link.Cost < bestCost {
 						bestCost = link.Cost
+						bestLinkID = link.LinkID
 					}
 				}
 				newCost := nodes[minNode].cost + bestCost
@@ -2864,8 +2929,10 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 					nodes[toNode].cost = newCost
 					if minNode == source {
 						nodes[toNode].nextHop = toNode // direct neighbor
+						nodes[toNode].linkID = bestLinkID
 					} else {
 						nodes[toNode].nextHop = nodes[minNode].nextHop // inherit next hop
+						nodes[toNode].linkID = nodes[minNode].linkID   // inherit link ID
 					}
 				}
 			}
@@ -2878,6 +2945,7 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 		if nodeID != source && info.cost < 1e18 {
 			result[nodeID] = dijkstraResult{
 				NextHop: info.nextHop,
+				LinkID:  info.linkID,
 				Cost:    info.cost,
 			}
 		}

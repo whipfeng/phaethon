@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"phaethon/util"
 	"sync"
 	"time"
 )
@@ -23,6 +24,7 @@ type sendState struct {
 	rttSampler *rttSampler              // RTT estimation
 	totalSent  uint64                   // total control frames sent
 	totalAcked uint64                   // total control frames acked
+	totalLost  uint64                   // total control frames lost (gave up after max retries)
 }
 
 func newSendState() *sendState {
@@ -118,6 +120,9 @@ func (s *sendState) markRetransmitted(seq uint32) {
 func (s *sendState) removeFrame(seq uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.pending[seq]; ok {
+		s.totalLost++
+	}
 	delete(s.pending, seq)
 }
 
@@ -253,14 +258,14 @@ func (s *rttSampler) getRTO() time.Duration {
 	return rto
 }
 
-// getLossRate returns the estimated loss rate based on sent vs acked frames.
+// getLossRate returns the estimated loss rate based on frames lost vs sent.
 func (s *sendState) getLossRate() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.totalSent == 0 {
 		return 0
 	}
-	return float64(s.totalSent-s.totalAcked) / float64(s.totalSent)
+	return float64(s.totalLost) / float64(s.totalSent)
 }
 
 // getStats returns send state statistics.
@@ -270,7 +275,10 @@ func (s *sendState) getStats() (srtt, rto time.Duration, lossRate float64) {
 	srtt = s.rttSampler.getSRTT()
 	rto = s.rttSampler.getRTO()
 	if s.totalSent > 0 {
-		lossRate = float64(s.totalSent-s.totalAcked) / float64(s.totalSent)
+		lossRate = float64(s.totalLost) / float64(s.totalSent)
 	}
+	// Always log stats when queried
+	util.LogInfo("[P2P-STATS] totalSent=%d totalAcked=%d totalLost=%d lossRate=%.4f", 
+		s.totalSent, s.totalAcked, s.totalLost, lossRate)
 	return
 }

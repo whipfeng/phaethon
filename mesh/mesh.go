@@ -1167,13 +1167,54 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	newTTL := decrementIPTTL(pkt)
 
 	if newTTL == 0 {
-		// TTL expired — inject into gVisor to generate ICMP Time Exceeded
+		// TTL expired — generate ICMP Time Exceeded and send back through mesh
 		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL expired, injecting to netstack", fromNodeID, dstIP)
+			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL expired, generating ICMP", fromNodeID, dstIP)
 		}
-		if m.tun != nil {
-			if err := m.tun.InjectMeshPacket(pkt); err != nil {
-				util.LogWarn("[MESH] inject TTL-exceeded packet failed: %v", err)
+
+		// Get local VIP for ICMP source
+		localVIP := m.vip
+		if localVIP == nil {
+			util.LogWarn("[MESH] no local VIP, cannot generate ICMP TTL exceeded")
+			return
+		}
+
+		// Generate ICMP Time Exceeded
+		icmpPacket := generateICMPTimeExceeded(localVIP, pkt)
+		if icmpPacket == nil {
+			util.LogWarn("[MESH] failed to generate ICMP TTL exceeded")
+			return
+		}
+
+		// Send ICMP back to original source through mesh
+		srcIP := extractSrcIP(pkt)
+		if srcIP == nil {
+			util.LogWarn("[MESH] cannot extract source IP from packet")
+			return
+		}
+
+		if isMeshAddress(srcIP) {
+			util.LogDebug("[MESH] sending ICMP TTL exceeded to %s (original src)", srcIP)
+			// Find route to original source
+			srcRoute := m.findRoute(srcIP)
+			srcNextHops := m.findNextHops(srcIP)
+			if srcRoute != nil && len(srcNextHops) > 0 {
+				srcPeer := m.selectBestPeer(srcNextHops, srcIP)
+				if srcPeer != nil {
+					if err := srcPeer.Send(icmpPacket); err != nil {
+						util.LogWarn("[MESH] send ICMP TTL exceeded to %s failed: %v", srcIP, err)
+					}
+				}
+			} else {
+				util.LogWarn("[MESH] no route to %s for ICMP TTL exceeded", srcIP)
+			}
+		} else {
+			// Source is not a mesh address (e.g., bypass gateway client after NAT)
+			// Inject into local netstack to handle response
+			if m.tun != nil {
+				if err := m.tun.InjectMeshPacket(icmpPacket); err != nil {
+					util.LogWarn("[MESH] inject ICMP TTL exceeded failed: %v", err)
+				}
 			}
 		}
 		return

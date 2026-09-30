@@ -356,7 +356,12 @@ func (n *Netstack) InjectMeshPacket(data []byte) error {
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
-		util.LogDebug("netstack: InjectMeshPacket %s -> %s proto=%d len=%d", srcIP, dstIP, proto, len(data))
+		ttl := data[8]
+		util.LogInfo("[NETSTACK-INJECT] InjectMeshPacket: %s -> %s proto=%d TTL=%d len=%d",
+			srcIP, dstIP, data[9], ttl, len(data))
+		if ttl == 0 {
+			util.LogInfo("[NETSTACK-INJECT] *** TTL=0 packet being injected into gVisor! ***")
+		}
 		if len(data) >= 20 && data[9] == 6 {
 			logTCPPacket("[TCP-DEBUG] InjectMeshPacket:", data)
 			headerLen := int(data[0]&0x0f) * 4

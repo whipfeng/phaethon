@@ -848,6 +848,14 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 // HandleOutboundPacket is the TUN readLoop interceptor.
 // Returns true if the packet was handled.
 func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
+	// Log all packets entering HandleOutboundPacket
+	if len(data) >= 20 && data[0]>>4 == 4 {
+		srcIP := net.IP(data[12:16])
+		ttl := data[8]
+		util.LogInfo("[MESH-OUT-ENTRY] HandleOutboundPacket: src=%s dst=%s TTL=%d proto=%d len=%d",
+			srcIP, dstIP, ttl, data[9], len(data))
+	}
+
 	// Very visible log for 8.8.8.x to debug IPIP
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
 		util.LogDebug("[IPIP] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
@@ -912,12 +920,14 @@ func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
 
 		// Check if destination is in mesh network (100.0.0.0/8)
 		isMeshDest := m.network != nil && m.network.Contains(dstIP)
+		util.LogInfo("[MESH-OUT-ROUTE] dst=%s isMeshDest=%v network=%v", dstIP, isMeshDest, m.network)
 
 		var sendPacket []byte
 		if isMeshDest {
 			// Mesh traffic: send directly without IPIP encapsulation
 			sendPacket = make([]byte, len(data))
 			copy(sendPacket, data)
+
 			util.LogDebug("[MESH] outbound mesh %s: sending %d bytes directly via peer %s (hop=%d)",
 				dstIP, len(data), selectedPeer.GetNodeID(), selectedHop)
 		} else {
@@ -1109,6 +1119,35 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		}
 	}
 
+	// Traceroute support: decrement TTL at this routing checkpoint (卡口3/4)
+	// If TTL=0, manually generate ICMP Time Exceeded.
+	pkt := make([]byte, len(frame))
+	copy(pkt, frame)
+	if len(pkt) >= 9 && pkt[0]>>4 == 4 {
+		oldTTL := pkt[8]
+		newTTL := DecrementIPTTL(pkt)
+		if newTTL == 0 {
+			util.LogInfo("[TRACEROUTE] HandleMeshFrame: TTL expired (was %d), generating ICMP: %s -> %s",
+				oldTTL, srcIP, dstIP)
+			// Manually generate ICMP Time Exceeded
+			// ICMP source = dst of original packet (this node, from the packet's perspective)
+			icmpPkt := GenerateICMPTimeExceeded(dstIP, pkt)
+			if icmpPkt != nil {
+				// Send ICMP back via mesh routing (will go through normal path including NAT reverse)
+				icmpDstIP := net.IP(icmpPkt[16:20])
+				if m.tun != nil {
+					// Write to TUN so it goes through readLoop and mesh outbound
+					if err := m.tun.WriteMeshPacket(icmpPkt); err != nil {
+						util.LogWarn("[TRACEROUTE] HandleMeshFrame: failed to write ICMP to TUN: %v", err)
+					} else {
+						util.LogDebug("[TRACEROUTE] HandleMeshFrame: wrote ICMP to TUN for dst=%s", icmpDstIP)
+					}
+				}
+			}
+			return
+		}
+	}
+
 	isVIP := m.isLocalVIP(dstIP)
 	util.LogDebug("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
 
@@ -1151,74 +1190,19 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 
 	// .3 (GIP): InjectMeshPacket to netstack (DNS hijacker)
 	if m.isLocalGIP(dstIP) {
-		pkt := make([]byte, len(frame))
-		copy(pkt, frame)
+		gipPkt := make([]byte, len(frame))
+		copy(gipPkt, frame)
 		if m.tun != nil {
-			if err := m.tun.InjectMeshPacket(pkt); err != nil {
+			if err := m.tun.InjectMeshPacket(gipPkt); err != nil {
 				util.LogWarn("[MESH] inject GIP packet to netstack failed: %v", err)
 			}
 		}
 		return
 	}
 
-	// Copy packet and decrement TTL early for traceroute support
-	pkt := make([]byte, len(frame))
-	copy(pkt, frame)
-	newTTL := decrementIPTTL(pkt)
-
-	if newTTL == 0 {
-		// TTL expired — generate ICMP Time Exceeded and send back through mesh
-		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] recv frame from %s: dst=%s TTL expired, generating ICMP", fromNodeID, dstIP)
-		}
-
-		// Get local VIP for ICMP source
-		localVIP := m.vip
-		if localVIP == nil {
-			util.LogWarn("[MESH] no local VIP, cannot generate ICMP TTL exceeded")
-			return
-		}
-
-		// Generate ICMP Time Exceeded
-		icmpPacket := generateICMPTimeExceeded(localVIP, pkt)
-		if icmpPacket == nil {
-			util.LogWarn("[MESH] failed to generate ICMP TTL exceeded")
-			return
-		}
-
-		// Send ICMP back to original source through mesh
-		srcIP := extractSrcIP(pkt)
-		if srcIP == nil {
-			util.LogWarn("[MESH] cannot extract source IP from packet")
-			return
-		}
-
-		if isMeshAddress(srcIP) {
-			util.LogDebug("[MESH] sending ICMP TTL exceeded to %s (original src)", srcIP)
-			// Find route to original source
-			srcRoute := m.findRoute(srcIP)
-			srcNextHops := m.findNextHops(srcIP)
-			if srcRoute != nil && len(srcNextHops) > 0 {
-				srcPeer := m.selectBestPeer(srcNextHops, srcIP)
-				if srcPeer != nil {
-					if err := srcPeer.Send(icmpPacket); err != nil {
-						util.LogWarn("[MESH] send ICMP TTL exceeded to %s failed: %v", srcIP, err)
-					}
-				}
-			} else {
-				util.LogWarn("[MESH] no route to %s for ICMP TTL exceeded", srcIP)
-			}
-		} else {
-			// Source is not a mesh address (e.g., bypass gateway client after NAT)
-			// Inject into local netstack to handle response
-			if m.tun != nil {
-				if err := m.tun.InjectMeshPacket(icmpPacket); err != nil {
-					util.LogWarn("[MESH] inject ICMP TTL exceeded failed: %v", err)
-				}
-			}
-		}
-		return
-	}
+	// pkt was already copied and TTL decremented earlier (卡口3/4)
+	// Use pkt[8] to get the current TTL value
+	newTTL := pkt[8]
 
 	if isMeshAddress(dstIP) && len(pkt) >= 20 && pkt[9] == 6 {
 		util.LogDebug("[MESH] pre-findRoute: from=%s dst=%s TTL=%d", fromNodeID, dstIP, newTTL)

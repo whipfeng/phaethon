@@ -973,6 +973,7 @@ func (e *Engine) meshOutboundLoop() {
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
+	util.LogInfo("[TUN-READ] readLoop started")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer e.tunWG.Done()
@@ -1009,6 +1010,11 @@ func (e *Engine) readLoop() {
 		e.readPackets.Add(1)
 		e.notifyStatsChanged()
 
+		// Debug: log every 1000th packet
+		if e.readPackets.Load()%1000 == 0 {
+			util.LogInfo("[TUN-READ] packet #%d: version=%d len=%d firstByte=%02x", e.readPackets.Load(), readBuf[0]>>4, n, readBuf[0])
+		}
+
 		// Determine network protocol from the IP version field.
 		var proto tcpip.NetworkProtocolNumber
 		switch readBuf[0] >> 4 {
@@ -1027,7 +1033,11 @@ func (e *Engine) readLoop() {
 			dstIP := net.IP(readBuf[16:20])
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
-			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
+			ttl := readBuf[8]
+			// Always log packets to mesh range (100.x) for debugging
+			if dstIP[0] == 100 {
+				util.LogInfo("[TUN-READ] mesh packet: %s -> %s (proto=%d TTL=%d len=%d)", srcIP, dstIP, ipProto, ttl, n)
+			} else if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
 				util.LogDebug("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if e.readPackets.Load() <= 200 {
 				util.LogDebug("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
@@ -1058,11 +1068,56 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// Traceroute support: decrement TTL at this routing checkpoint (卡口2)
+		// If TTL=0 after decrement, manually generate ICMP Time Exceeded.
+		if proto == ipv4.ProtocolNumber && n >= 20 {
+			oldTTL := pktBuf[8]
+			newTTL := mesh.DecrementIPTTL(pktBuf)
+			if newTTL == 0 {
+				srcIP := net.IP(pktBuf[12:16])
+				dstIP := net.IP(pktBuf[16:20])
+				util.LogInfo("[TRACEROUTE] readLoop: TTL expired (was %d), generating ICMP: %s -> %s",
+					oldTTL, srcIP, dstIP)
+				// Manually generate ICMP Time Exceeded
+				// ICMP source = local VIP, destination = source of received packet
+				var localVIP net.IP
+				for vipStr := range e.localMeshVIPs {
+					localVIP = net.ParseIP(vipStr)
+					break
+				}
+				if localVIP == nil {
+					localVIP = dstIP // fallback
+				}
+				icmpPkt := mesh.GenerateICMPTimeExceeded(localVIP, pktBuf)
+				if icmpPkt != nil {
+					// NAT reverse: translate destination back to original source
+					if e.natTable != nil {
+						if natPkt := e.natTable.TranslateInbound(icmpPkt); natPkt != nil {
+							icmpPkt = natPkt
+						}
+					}
+					// Write ICMP back to TUN
+					e.mu.Lock()
+					dev := e.device
+					e.mu.Unlock()
+					if dev != nil {
+						if _, err := dev.Write(icmpPkt); err != nil {
+							util.LogWarn("[TRACEROUTE] readLoop: failed to write ICMP to TUN: %v", err)
+						} else {
+							util.LogDebug("[TRACEROUTE] readLoop: wrote ICMP to TUN")
+						}
+					}
+				}
+				continue
+			}
+		}
+
 		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
 		// The mesh interceptor checks its routing table (including gateway routes) to determine
 		// if the packet should be sent via mesh or handled normally.
 		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
-		if proto == ipv4.ProtocolNumber && n >= 20 {
+		// Skip mesh routing if TTL=0 (traceroute: let gVisor generate ICMP).
+		if proto == ipv4.ProtocolNumber && n >= 20 && pktBuf[8] > 0 {
 			dstIP := net.IP(pktBuf[16:20])
 			if e.meshInterceptor != nil {
 				// Debug: log TCP packets to mesh subnet

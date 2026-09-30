@@ -57,13 +57,13 @@ func extractSrcIP(ipPacket []byte) net.IP {
 }
 
 // decrementIPTTL decrements the TTL in a raw IPv4 packet in-place.
-// Returns the new TTL value, or 0 if the packet is invalid.
+// Returns the new TTL value, or 0 if TTL was already 0 or packet is invalid.
 func decrementIPTTL(ipPacket []byte) byte {
 	if len(ipPacket) < 9 || ipPacket[0]>>4 != 4 {
 		return 0
 	}
-	if ipPacket[8] <= 1 {
-		return 0
+	if ipPacket[8] == 0 {
+		return 0 // TTL already 0, cannot decrement
 	}
 	ipPacket[8]--
 	// Recompute header checksum

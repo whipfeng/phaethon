@@ -1327,11 +1327,12 @@ type FullTopologyEdge struct {
 
 // FullTopologyLink represents a single link with quality metrics.
 type FullTopologyLink struct {
-	LinkID       string  `json:"linkId"`                   // negotiated link ID (seq1-seq2)
-	FriendlyName string  `json:"friendlyName,omitempty"`   // display name (proxy name)
-	SRTT         float64 `json:"srtt,omitempty"`           // smoothed RTT in milliseconds
-	LossRate     float64 `json:"lossRate,omitempty"`       // loss rate (0.0-1.0)
-	Cost         float64 `json:"cost,omitempty"`           // path cost
+	LocalSeq     uint16  `json:"localSeq"`               // local sequence number
+	RemoteSeq    uint16  `json:"remoteSeq"`              // remote sequence number
+	FriendlyName string  `json:"friendlyName,omitempty"` // display name (proxy name)
+	SRTT         float64 `json:"srtt,omitempty"`         // smoothed RTT in milliseconds
+	LossRate     float64 `json:"lossRate,omitempty"`     // loss rate (0.0-1.0)
+	Cost         float64 `json:"cost,omitempty"`         // path cost
 }
 
 // GetFullTopology returns the complete network topology including all known nodes and edges.
@@ -1389,7 +1390,9 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			key := edgeKey(m.nodeID, peerID)
 			
 			// Get link info
-			linkID := p.Sender.GetLinkID()
+			localSeq := p.Sender.GetLocalSeq()
+			remoteSeq := p.Sender.GetRemoteSeq()
+			linkID := p.Sender.GetLinkID() // for qualityTracker lookup
 			if linkID == "" {
 				linkID = p.Sender.GetProxyName() // fallback for old protocol
 			}
@@ -1415,7 +1418,8 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			}
 			
 			link := FullTopologyLink{
-				LinkID:       linkID,
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
 				FriendlyName: friendlyName,
 				SRTT:         srtt,
 				LossRate:     lossRate,
@@ -1455,20 +1459,9 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 						cost = 1000 // default cost for no data
 					}
 					
-					// Construct LinkID from LocalSeq+RemoteSeq for internal use
-					linkID := ""
-					if gossipLink.LocalSeq > 0 && gossipLink.RemoteSeq > 0 {
-						minSeq := gossipLink.LocalSeq
-						maxSeq := gossipLink.RemoteSeq
-						if gossipLink.LocalSeq > gossipLink.RemoteSeq {
-							minSeq = gossipLink.RemoteSeq
-							maxSeq = gossipLink.LocalSeq
-						}
-						linkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
-					}
-					
 					links = append(links, FullTopologyLink{
-						LinkID:       linkID,
+						LocalSeq:     gossipLink.LocalSeq,
+						RemoteSeq:    gossipLink.RemoteSeq,
 						FriendlyName: gossipLink.FriendlyName,
 						SRTT:         gossipLink.SRTT,
 						LossRate:     gossipLink.LossRate,
@@ -1478,11 +1471,11 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 				
 				if edge, exists := edgeSet[key]; exists {
 					// Edge already exists (from local peers), add learned links
-					// Deduplicate by linkID
+					// Deduplicate by seq pair
 					for _, link := range links {
 						linkExists := false
 						for _, existingLink := range edge.Links {
-							if existingLink.LinkID == link.LinkID {
+							if existingLink.LocalSeq == link.LocalSeq && existingLink.RemoteSeq == link.RemoteSeq {
 								linkExists = true
 								break
 							}

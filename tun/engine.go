@@ -1033,11 +1033,7 @@ func (e *Engine) readLoop() {
 			dstIP := net.IP(readBuf[16:20])
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
-			ttl := readBuf[8]
-			// Always log packets to mesh range (100.x) for debugging
-			if dstIP[0] == 100 {
-				util.LogInfo("[TUN-READ] mesh packet: %s -> %s (proto=%d TTL=%d len=%d)", srcIP, dstIP, ipProto, ttl, n)
-			} else if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
+			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
 				util.LogDebug("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if e.readPackets.Load() <= 200 {
 				util.LogDebug("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)

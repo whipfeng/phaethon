@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -55,10 +56,10 @@ func (q *PeerQuality) Reset() {
 }
 
 // PeerQualityTracker manages quality tracking for all peers.
-// Supports per-link tracking: each (nodeID, linkID) pair has its own quality metrics.
+// Supports per-link tracking: each (nodeID, localSeq) pair has its own quality metrics.
 type PeerQualityTracker struct {
 	mu    sync.RWMutex
-	peers map[string]*PeerQuality // key: "nodeID:linkID" -> quality
+	peers map[string]*PeerQuality // key: "nodeID:localSeq" -> quality
 }
 
 // NewPeerQualityTracker creates a new tracker.
@@ -69,16 +70,16 @@ func NewPeerQualityTracker() *PeerQualityTracker {
 }
 
 // makeKey creates a composite key for per-link tracking.
-func makeKey(nodeID, linkID string) string {
-	return nodeID + ":" + linkID
+func makeKey(nodeID string, localSeq uint16) string {
+	return fmt.Sprintf("%s:%d", nodeID, localSeq)
 }
 
 // Get returns the quality tracker for a specific link, creating if needed.
-func (t *PeerQualityTracker) Get(nodeID, linkID string) *PeerQuality {
+func (t *PeerQualityTracker) Get(nodeID string, localSeq uint16) *PeerQuality {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := makeKey(nodeID, linkID)
+	key := makeKey(nodeID, localSeq)
 	if q, ok := t.peers[key]; ok {
 		return q
 	}
@@ -88,7 +89,7 @@ func (t *PeerQualityTracker) Get(nodeID, linkID string) *PeerQuality {
 }
 
 // GetByNode returns the quality tracker for a node (first link found).
-// Deprecated: Use Get(nodeID, linkID) for per-link tracking.
+// Deprecated: Use Get(nodeID, localSeq) for per-link tracking.
 func (t *PeerQualityTracker) GetByNode(nodeID string) *PeerQuality {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -104,10 +105,10 @@ func (t *PeerQualityTracker) GetByNode(nodeID string) *PeerQuality {
 }
 
 // Remove removes a specific link from tracking.
-func (t *PeerQualityTracker) Remove(nodeID, linkID string) {
+func (t *PeerQualityTracker) Remove(nodeID string, localSeq uint16) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.peers, makeKey(nodeID, linkID))
+	delete(t.peers, makeKey(nodeID, localSeq))
 }
 
 // RemoveNode removes all links for a node from tracking.
@@ -124,7 +125,7 @@ func (t *PeerQualityTracker) RemoveNode(nodeID string) {
 }
 
 // GetAll returns a snapshot of all link qualities.
-// Returns map[key]*PeerQuality where key is "nodeID:linkID".
+// Returns map[key]*PeerQuality where key is "nodeID:localSeq".
 func (t *PeerQualityTracker) GetAll() map[string]*PeerQuality {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -145,8 +146,8 @@ func (t *PeerQualityTracker) GetNodeLinks(nodeID string) map[string]*PeerQuality
 	prefix := nodeID + ":"
 	for key, q := range t.peers {
 		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-			linkID := key[len(prefix):]
-			result[linkID] = q
+			localSeqStr := key[len(prefix):]
+			result[localSeqStr] = q
 		}
 	}
 	return result

@@ -1392,10 +1392,6 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			// Get link info
 			localSeq := p.Sender.GetLocalSeq()
 			remoteSeq := p.Sender.GetRemoteSeq()
-			linkID := p.Sender.GetLinkID() // for qualityTracker lookup
-			if linkID == "" {
-				linkID = p.Sender.GetProxyName() // fallback for old protocol
-			}
 			friendlyName := p.Sender.GetFriendlyName()
 			if friendlyName == "" {
 				friendlyName = p.Sender.GetProxyName() // fallback
@@ -1404,7 +1400,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			// Get link quality from qualityTracker
 			var srtt, lossRate, cost float64
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.Get(peerID, linkID)
+				quality := m.qualityTracker.Get(peerID, localSeq)
 				avgRTT, loss := quality.Stats()
 				srtt = float64(avgRTT.Milliseconds())
 				lossRate = loss
@@ -1974,7 +1970,7 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 
 	// Find the best target based on Dijkstra path cost
 	var bestNextHop string
-	var bestLinkID string
+	var bestLocalSeq uint16
 	bestCost := 1e18
 	for _, targetNodeID := range targetNodeIDs {
 		if targetNodeID == m.nodeID {
@@ -1984,7 +1980,7 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 			if path.Cost < bestCost {
 				bestCost = path.Cost
 				bestNextHop = path.NextHop
-				bestLinkID = path.LinkID
+				bestLocalSeq = path.LocalSeq
 			}
 		}
 	}
@@ -1994,14 +1990,10 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return m.findNextHopsFallback(targetNodeIDs, peers)
 	}
 
-	// Find the peer for the best next hop with matching link ID
+	// Find the peer for the best next hop with matching localSeq
 	for _, peer := range peers {
 		if peer.Sender != nil && peer.NodeID() == bestNextHop {
-			linkID := peer.Sender.GetLinkID()
-			if linkID == "" {
-				linkID = peer.Sender.GetProxyName() // fallback for old protocol
-			}
-			if linkID == bestLinkID {
+			if peer.Sender.GetLocalSeq() == bestLocalSeq {
 				return []PeerWithHop{{Peer: peer.Sender, Hop: 1}}
 			}
 		}
@@ -2194,13 +2186,9 @@ func (m *MeshManager) broadcastGossip() {
 				FriendlyName: friendlyName,
 			}
 			
-			// Use LinkID as internal key for qualityTracker (stable identifier)
-			linkID := peer.Sender.GetLinkID()
-			if linkID == "" {
-				linkID = peer.Sender.GetProxyName() // fallback for old protocol
-			}
+			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.Get(nodeID, linkID)
+				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
@@ -2407,11 +2395,12 @@ func (m *MeshManager) checkPeerConnectivity() {
 		}
 
 		nodeID := peer.NodeID()
-		linkID := peer.Sender.GetLinkID()
+		localSeq := peer.Sender.GetLocalSeq()
+		linkID := peer.Sender.GetLinkID() // for P2P layer calls
 		if linkID == "" {
 			linkID = peer.Sender.GetProxyName() // fallback for old protocol
 		}
-		quality := m.qualityTracker.Get(nodeID, linkID)
+		quality := m.qualityTracker.Get(nodeID, localSeq)
 
 		// Check if ACK stats are stale (no updates for 60s)
 		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
@@ -2444,12 +2433,9 @@ func (m *MeshManager) updateACKStats() {
 		proxyName := peer.Sender.GetProxyName()
 		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(proxyName)
 		if srtt > 0 || lossRate > 0 {
-			// Use negotiated link ID as key (consistent with GetFullTopology)
-			linkID := peer.Sender.GetLinkID()
-			if linkID == "" {
-				linkID = proxyName // fallback for old protocol
-			}
-			quality := m.qualityTracker.Get(nodeID, linkID)
+			// Use localSeq as key
+			localSeq := peer.Sender.GetLocalSeq()
+			quality := m.qualityTracker.Get(nodeID, localSeq)
 			quality.UpdateACKStats(srtt, lossRate)
 		}
 	}
@@ -2466,8 +2452,8 @@ func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss 
 }
 
 // GetLinkQuality returns the quality metrics for a specific link.
-func (m *MeshManager) GetLinkQuality(nodeID, linkID string) (avgRTT time.Duration, loss float64) {
-	quality := m.qualityTracker.Get(nodeID, linkID)
+func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT time.Duration, loss float64) {
+	quality := m.qualityTracker.Get(nodeID, localSeq)
 	return quality.Stats()
 }
 
@@ -2624,13 +2610,9 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				FriendlyName: friendlyName,
 			}
 			
-			// Use LinkID as internal key for qualityTracker (stable identifier)
-			linkID := peer.Sender.GetLinkID()
-			if linkID == "" {
-				linkID = peer.Sender.GetProxyName() // fallback for old protocol
-			}
+			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.Get(nodeID, linkID)
+				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
@@ -2743,12 +2725,13 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 
 // LinkQualityInfo represents a link in the topology graph.
 type LinkQualityInfo struct {
-	From     string  // source node ID
-	To       string  // target node ID
-	LinkID   string  // link identifier (for multiple links between same nodes)
-	SRTT     float64 // smoothed RTT in milliseconds
-	LossRate float64 // loss rate (0.0-1.0)
-	Cost     float64 // path cost = SRTT / (1 - LossRate)
+	From      string  // source node ID
+	To        string  // target node ID
+	LocalSeq  uint16  // local sequence number
+	RemoteSeq uint16  // remote sequence number
+	SRTT      float64 // smoothed RTT in milliseconds
+	LossRate  float64 // loss rate (0.0-1.0)
+	Cost      float64 // path cost = SRTT / (1 - LossRate)
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -2775,16 +2758,16 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		neighborID := peer.NodeID()
 		graph.Nodes[neighborID] = true
 
+		localSeq := peer.Sender.GetLocalSeq()
+		remoteSeq := peer.Sender.GetRemoteSeq()
 		link := &LinkQualityInfo{
-			From:   selfID,
-			To:     neighborID,
-			LinkID: peer.Sender.GetLinkID(), // negotiated link ID
-		}
-		if link.LinkID == "" {
-			link.LinkID = peer.Sender.GetProxyName() // fallback for old protocol
+			From:      selfID,
+			To:        neighborID,
+			LocalSeq:  localSeq,
+			RemoteSeq: remoteSeq,
 		}
 		if m.qualityTracker != nil {
-			quality := m.qualityTracker.Get(neighborID, link.LinkID)
+			quality := m.qualityTracker.Get(neighborID, localSeq)
 			avgRTT, lossRate := quality.Stats()
 			link.SRTT = float64(avgRTT.Milliseconds())
 			link.LossRate = lossRate
@@ -2821,24 +2804,13 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 
 					// Process all links to this neighbor
 					for _, gossipLink := range neighbor.Links {
-						// Construct LinkID from LocalSeq+RemoteSeq for internal use
-						linkID := ""
-						if gossipLink.LocalSeq > 0 && gossipLink.RemoteSeq > 0 {
-							minSeq := gossipLink.LocalSeq
-							maxSeq := gossipLink.RemoteSeq
-							if gossipLink.LocalSeq > gossipLink.RemoteSeq {
-								minSeq = gossipLink.RemoteSeq
-								maxSeq = gossipLink.LocalSeq
-							}
-							linkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
-						}
-						
 						link := &LinkQualityInfo{
-							From:     fromNode,
-							To:       toNode,
-							LinkID:   linkID,
-							SRTT:     gossipLink.SRTT,
-							LossRate: gossipLink.LossRate,
+							From:      fromNode,
+							To:        toNode,
+							LocalSeq:  gossipLink.LocalSeq,
+							RemoteSeq: gossipLink.RemoteSeq,
+							SRTT:      gossipLink.SRTT,
+							LossRate:  gossipLink.LossRate,
 						}
 						if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
 							link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
@@ -2862,19 +2834,19 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 
 // dijkstraResult represents the result of Dijkstra's algorithm for a single destination.
 type dijkstraResult struct {
-	NextHop string  // next hop node ID
-	LinkID  string  // link ID of the best link to next hop
-	Cost    float64 // total path cost
+	NextHop  string  // next hop node ID
+	LocalSeq uint16  // localSeq of the best link to next hop
+	Cost     float64 // total path cost
 }
 
 // dijkstra computes shortest paths from source to all other nodes.
 // Returns a map: nodeID -> dijkstraResult.
 func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 	type nodeInfo struct {
-		cost    float64
-		nextHop string
-		linkID  string // link ID of the best link to next hop
-		visited bool
+		cost     float64
+		nextHop  string
+		localSeq uint16 // localSeq of the best link to next hop
+		visited  bool
 	}
 
 	nodes := make(map[string]*nodeInfo)
@@ -2910,11 +2882,11 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				}
 				// Find the best link (lowest cost) among multiple links
 				var bestCost float64 = 1e18
-				var bestLinkID string
+				var bestLocalSeq uint16
 				for _, link := range links {
 					if link.Cost < bestCost {
 						bestCost = link.Cost
-						bestLinkID = link.LinkID
+						bestLocalSeq = link.LocalSeq
 					}
 				}
 				newCost := nodes[minNode].cost + bestCost
@@ -2922,10 +2894,10 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 					nodes[toNode].cost = newCost
 					if minNode == source {
 						nodes[toNode].nextHop = toNode // direct neighbor
-						nodes[toNode].linkID = bestLinkID
+						nodes[toNode].localSeq = bestLocalSeq
 					} else {
 						nodes[toNode].nextHop = nodes[minNode].nextHop // inherit next hop
-						nodes[toNode].linkID = nodes[minNode].linkID   // inherit link ID
+						nodes[toNode].localSeq = nodes[minNode].localSeq // inherit localSeq
 					}
 				}
 			}
@@ -2937,9 +2909,9 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 	for nodeID, info := range nodes {
 		if nodeID != source && info.cost < 1e18 {
 			result[nodeID] = dijkstraResult{
-				NextHop: info.nextHop,
-				LinkID:  info.linkID,
-				Cost:    info.cost,
+				NextHop:  info.nextHop,
+				LocalSeq: info.localSeq,
+				Cost:     info.cost,
 			}
 		}
 	}

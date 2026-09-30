@@ -43,7 +43,9 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // Version 8: link-state routing with quality-aware path selection.
 // GossipClaimedSubnet.Neighbors extended from []string to []GossipNeighbor,
 // carrying per-link SRTT and loss rate metrics for Dijkstra-based routing.
-const P2PProtocolVersion = 8
+// Version 9: GossipLink changed from linkId to localSeq+remoteSeq fields,
+// link identification now based on seq pair matching instead of combined linkId.
+const P2PProtocolVersion = 9
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
@@ -107,13 +109,32 @@ func (s *peerSender) GetProxyName() string {
 }
 
 // GetLinkID returns the negotiated link ID (from hello negotiation).
+// Deprecated: Use GetLocalSeq/GetRemoteSeq for gossip advertisement.
 func (s *peerSender) GetLinkID() string {
 	return s.peer.LinkID
 }
 
-// GetFriendlyName returns the friendly name (proxy name, for display only).
+// GetLocalSeq returns the local sequence number for this link.
+func (s *peerSender) GetLocalSeq() uint16 {
+	return s.peer.Seq
+}
+
+// GetRemoteSeq returns the remote sequence number for this link.
+func (s *peerSender) GetRemoteSeq() uint16 {
+	return s.peer.RemoteSeq
+}
+
+// GetFriendlyName returns the friendly name (for display only).
+// Passive peers (no proxy) return empty string - they should not advertise friendly names.
 func (s *peerSender) GetFriendlyName() string {
-	return s.peer.FriendlyName
+	if s.peer.proxy == nil {
+		return "" // Passive peer - no friendly name
+	}
+	name := s.peer.FriendlyName
+	if name == "" {
+		name = s.peer.ID // proxy name fallback
+	}
+	return name
 }
 
 // HasProxy returns true if this peer was created with a proxy config (active/outbound connection).
@@ -138,7 +159,8 @@ type Peer struct {
 
 	// LinkID negotiation (hello phase)
 	Seq          uint16 // 本端生成的序列号（本地递增）
-	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接）
+	RemoteSeq    uint16 // 对端声明的序列号（hello 协商获得）
+	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接，仅内部使用）
 	FriendlyName string // 友好名称（代理名，仅展示）
 
 	transport  frame.FrameTransport
@@ -366,6 +388,25 @@ func (m *P2PManager) StopPeerByNodeID(nodeID string) {
 	}
 }
 
+// StopPeerByLinkID disconnects a specific P2P peer by its link ID.
+// Used when connectivity checks indicate a specific link is unhealthy.
+func (m *P2PManager) StopPeerByLinkID(linkID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, peer := range m.peers {
+		if peer.LinkID == linkID {
+			util.LogInfo("[P2P] stopping peer %s (linkID=%s) due to connectivity failure", id, linkID)
+			peer.stopOnce.Do(func() {
+				close(peer.stopCh)
+			})
+			if peer.transport != nil {
+				peer.transport.Close()
+			}
+			return
+		}
+	}
+}
+
 // GetPeerProxy returns the proxy config that a peer was started with.
 // Returns nil if the peer does not exist.
 func (m *P2PManager) GetPeerProxy(id string) *config.Proxy {
@@ -390,6 +431,20 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // Call StopPeer to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	util.LogInfo("[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
+
+	// Stop any existing peer with the same ID to prevent duplicate connections
+	m.mu.Lock()
+	if existing, ok := m.peers[proxy.Name]; ok {
+		util.LogInfo("[P2P] stopping existing peer %s before starting new one", proxy.Name)
+		existing.stopOnce.Do(func() {
+			close(existing.stopCh)
+		})
+		if existing.transport != nil {
+			existing.transport.Close()
+		}
+	}
+	m.mu.Unlock()
+
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
 	if !ok {
@@ -418,7 +473,10 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
 		}
-		delete(m.peers, peer.ID)
+		// Only delete if we're still the current peer (prevent race with RestartPeer)
+		if current, ok := m.peers[peer.ID]; ok && current == peer {
+			delete(m.peers, peer.ID)
+		}
 		m.mu.Unlock()
 	}()
 
@@ -697,9 +755,10 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	// 3. Link ID negotiation
 	remoteSeq := info.Seq
 	localSeq := peer.Seq
+	peer.RemoteSeq = remoteSeq // Store for gossip advertisement
 	
 	if remoteSeq > 0 && localSeq > 0 {
-		// Sort and concatenate to generate link ID
+		// Sort and concatenate to generate link ID (internal use only)
 		minSeq := localSeq
 		maxSeq := remoteSeq
 		if localSeq > remoteSeq {
@@ -707,11 +766,6 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 			maxSeq = localSeq
 		}
 		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
-	}
-
-	// Save friendly name from active peer
-	if info.FriendlyName != "" {
-		peer.FriendlyName = info.FriendlyName
 	}
 
 	if m.OnStatusChange != nil {

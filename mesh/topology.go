@@ -63,10 +63,11 @@ type GossipDomainSuffix struct {
 
 // GossipLink represents a single link with quality metrics.
 type GossipLink struct {
-	LinkID       string  `json:"linkId"`                       // 链路唯一标识（hello 协商生成）
-	FriendlyName string  `json:"friendlyName,omitempty"`       // 友好名称（代理名，仅展示）
-	SRTT         float64 `json:"srtt,omitempty"`               // 平滑 RTT (ms)
-	LossRate     float64 `json:"lossRate,omitempty"`           // 丢包率 (0.0-1.0)
+	LocalSeq     uint16  `json:"localSeq"`               // 本端声明的 seq
+	RemoteSeq    uint16  `json:"remoteSeq"`              // 对端声明的 seq
+	FriendlyName string  `json:"friendlyName,omitempty"` // 友好名称（代理名，仅展示）
+	SRTT         float64 `json:"srtt,omitempty"`         // 平滑 RTT (ms)
+	LossRate     float64 `json:"lossRate,omitempty"`     // 丢包率 (0.0-1.0)
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.

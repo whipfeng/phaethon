@@ -27,6 +27,7 @@ const (
 	htHeaderTargetPort   = "X-P"
 	htHeaderContentSeq   = "X-S"
 	htHeaderCommand      = "X-C"
+	htHeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time for mesh GET
 )
 
 var errReadTimeout = errors.New("read timeout")
@@ -40,6 +41,9 @@ type HTunnelServer struct {
 
 	idGen    int64
 	channels sync.Map // int64 -> *htChannel
+
+	// v0.2.0: h_tunnel transport config (nil = use defaults)
+	htConfig *config.HTunnelConfig
 }
 
 // pendingOp tracks whether an operation for the current seq is already in
@@ -562,6 +566,13 @@ func (s *HTunnelServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ch := chI.(*htChannel)
+
+	// v0.2.0: mesh mode has simplified heartbeat (no sequence control)
+	if ch.isMesh {
+		s.meshHandleHeartbeat(ch, w, r)
+		return
+	}
+
 	ch.resetReqTimeout(s, id)
 
 	for {
@@ -986,6 +997,7 @@ func StartHTunnel(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (
 	srv := &HTunnelServer{
 		BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping},
 		Password:   mapping.Password,
+		htConfig:   ruleConf.HTunnel, // v0.2.0: pass h_tunnel config
 	}
 
 	httpSrv := &http.Server{

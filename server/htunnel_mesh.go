@@ -106,6 +106,13 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 	w.WriteHeader(200)
 }
 
+// meshHandleHeartbeat serves a client PUT for mesh channel heartbeat (v0.2.0).
+// Simply resets the request timeout and returns 200.
+func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter, r *http.Request) {
+	ch.resetReqTimeout(s, ch.id)
+	w.WriteHeader(200)
+}
+
 // meshDispatchLoop distributes frames from meshOut to waiting GET requests.
 // Priority scheduling is handled by the P2P layer's peerWriteLoop, which
 // prioritizes control frames before calling transport.Send().
@@ -145,10 +152,29 @@ func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
 }
 
 // meshHandleRead serves a client long-poll GET: register as a waiter, wait up
-// to htMeshPollTimeout for a frame from the dispatcher (408 on timeout),
-// coalesce further queued frames into one batch (≤ htMeshBatchLimit) and
-// return it encrypted.
+// to client-specified wait time (X-W header, default 5s) for a frame from the
+// dispatcher (408 on timeout), coalesce further queued frames into one batch
+// (≤maxBatchSize) and return it encrypted.
 func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *http.Request) {
+	// Read client-controlled wait time (v0.2.0)
+	waitTime := 5 * time.Second
+	if waitTimeStr := r.Header.Get(htHeaderWaitTime); waitTimeStr != "" {
+		if waitTimeSec, err := strconv.Atoi(waitTimeStr); err == nil && waitTimeSec > 0 {
+			waitTime = time.Duration(waitTimeSec) * time.Second
+			// Clamp to reasonable range
+			minWait, maxWait, _ := s.htConfig.GetWaitTimeRange()
+			if waitTime < minWait {
+				waitTime = minWait
+			}
+			if waitTime > maxWait {
+				waitTime = maxWait
+			}
+		}
+	}
+
+	// Get max batch size from config
+	maxBatchSize := s.htConfig.GetMaxBatchSize()
+
 	// Create a waiter with msg and done channels
 	waiter := &meshWaiter{
 		msg:  make(chan meshMsg, 1),
@@ -158,7 +184,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	// Register as a waiter
 	select {
 	case ch.getWaiters <- waiter:
-	case <-time.After(htMeshPollTimeout):
+	case <-time.After(waitTime):
 		w.WriteHeader(408)
 		return
 	case <-ch.closed:
@@ -171,7 +197,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	select {
 	case msg := <-waiter.msg:
 		_ = frame.WriteFrame(&buf, msg.frameType, msg.payload)
-	case <-time.After(htMeshPollTimeout):
+	case <-time.After(waitTime):
 		// Signal dispatcher that this waiter is stale
 		close(waiter.done)
 		w.WriteHeader(408)
@@ -183,7 +209,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	}
 
 	// Coalesce additional frames that are already available (non-blocking)
-	for buf.Len() < htMeshBatchLimit {
+	for buf.Len() < maxBatchSize {
 		done := false
 		select {
 		case msg := <-ch.meshOut:

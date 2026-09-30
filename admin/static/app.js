@@ -1305,7 +1305,7 @@ async function fetchMeshStatus() {
                         return { id: toId, qualities: ['-'] };
                     }
                     // Show all links with their quality and seq
-                    // Format: (friendlyName) localSeq,remoteSeq SRTT=xms, Loss=x%
+                    // Format: #localSeq#remoteSeq, friendlyName, srtt, loss
                     const qualities = links.map(link => {
                         const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
@@ -1315,18 +1315,18 @@ async function fetchMeshStatus() {
                         
                         let seqStr = '';
                         if (localSeq && remoteSeq) {
-                            seqStr = `${localSeq},${remoteSeq}`;
+                            seqStr = `#${localSeq}#${remoteSeq}`;
+                        } else if (localSeq) {
+                            seqStr = `#${localSeq}`;
                         }
                         
-                        if (friendlyName && seqStr) {
-                            return `(${friendlyName}) ${seqStr} ${srtt}ms, ${loss}%`;
-                        } else if (friendlyName) {
-                            return `(${friendlyName}) ${srtt}ms, ${loss}%`;
-                        } else if (seqStr) {
-                            return `${seqStr} ${srtt}ms, ${loss}%`;
-                        } else {
-                            return `${srtt}ms, ${loss}%`;
-                        }
+                        const parts = [];
+                        if (seqStr) parts.push(seqStr);
+                        if (friendlyName) parts.push(friendlyName);
+                        parts.push(`${srtt}ms`);
+                        parts.push(`${loss}%`);
+                        
+                        return parts.join(', ');
                     });
                     return { id: escapeHtml(toId), qualities };
                 };
@@ -1873,7 +1873,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    // Draw measurements near ends with seq and quality together
+                    // Draw measurements at 30% and 60% positions along curve
                     group.edges.forEach(e => {
                         const isFromFirst = e.from === firstEdge.from;
                         const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
@@ -1882,17 +1882,17 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         const localSeq = e.link.localSeq || '';
                         const remoteSeq = e.link.remoteSeq || '';
                         
-                        // Near 'from' end: show localSeq + quality (measuring node's perspective)
+                        // At 30% position: show localSeq + quality (measuring node's perspective)
                         if (localSeq) {
-                            const seqT = isFromFirst ? 0.15 : 0.85;
+                            const seqT = isFromFirst ? 0.3 : 0.6;
                             const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
                             const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
                             
                             let text;
                             if (friendlyName) {
-                                text = `(${friendlyName}) #${localSeq} ${srtt}, ${loss}`;
+                                text = `(${friendlyName}) #${localSeq}, ${srtt}, ${loss}`;
                             } else {
-                                text = `#${localSeq} ${srtt}, ${loss}`;
+                                text = `#${localSeq}, ${srtt}, ${loss}`;
                             }
                             
                             ctx.font = '7px -apple-system, sans-serif';
@@ -1906,9 +1906,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                             ctx.fillText(text, labelX, labelY);
                         }
                         
-                        // Near 'to' end: show remoteSeq only (target node's seq)
+                        // At 60% position: show remoteSeq only (target node's seq)
                         if (remoteSeq) {
-                            const seqT = isFromFirst ? 0.85 : 0.15;
+                            const seqT = isFromFirst ? 0.6 : 0.3;
                             const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
                             const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
                             
@@ -1933,7 +1933,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     
-                    // Draw measurements near ends with seq and quality together
+                    // Draw measurements at 30% and 60% positions
                     group.edges.forEach(e => {
                         const isFromFirst = e.from === firstEdge.from;
                         const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
@@ -1942,17 +1942,17 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         const localSeq = e.link.localSeq || '';
                         const remoteSeq = e.link.remoteSeq || '';
                         
-                        // Near 'from' end: show localSeq + quality (measuring node's perspective)
+                        // At 30% position: show localSeq + quality (measuring node's perspective)
                         if (localSeq) {
-                            const seqT = isFromFirst ? 0.15 : 0.85;
+                            const seqT = isFromFirst ? 0.3 : 0.6;
                             const labelX = from.x + (to.x - from.x) * seqT;
                             const labelY = from.y + (to.y - from.y) * seqT;
                             
                             let text;
                             if (friendlyName) {
-                                text = `(${friendlyName}) #${localSeq} ${srtt}, ${loss}`;
+                                text = `(${friendlyName}) #${localSeq}, ${srtt}, ${loss}`;
                             } else {
-                                text = `#${localSeq} ${srtt}, ${loss}`;
+                                text = `#${localSeq}, ${srtt}, ${loss}`;
                             }
                             
                             ctx.font = '7px -apple-system, sans-serif';
@@ -1966,9 +1966,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                             ctx.fillText(text, labelX, labelY);
                         }
                         
-                        // Near 'to' end: show remoteSeq only (target node's seq)
+                        // At 60% position: show remoteSeq only (target node's seq)
                         if (remoteSeq) {
-                            const seqT = isFromFirst ? 0.85 : 0.15;
+                            const seqT = isFromFirst ? 0.6 : 0.3;
                             const labelX = from.x + (to.x - from.x) * seqT;
                             const labelY = from.y + (to.y - from.y) * seqT;
                             
@@ -2145,11 +2145,31 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                                 ? _topologyState.lineOffsets[groupKey] 
                                 : defaultOffset;
                             
-                            // Calculate distance from click point to line
-                            // For simplicity, check distance to the midpoint of the line
-                            const midX = (from.x + to.x) / 2 + nx * curveOffset * 0.5;
-                            const midY = (from.y + to.y) / 2 + ny * curveOffset * 0.5;
-                            const dist = Math.sqrt((x - midX) * (x - midX) + (y - midY) * (y - midY));
+                            // Calculate distance from click point to line segment
+                            // For straight line: distance to line segment
+                            // For curve: sample multiple points along the curve
+                            let dist;
+                            if (useCurves) {
+                                // Sample points along the quadratic curve
+                                const midX = (from.x + to.x) / 2;
+                                const midY = (from.y + to.y) / 2;
+                                const cpX = midX + nx * curveOffset;
+                                const cpY = midY + ny * curveOffset;
+                                dist = Infinity;
+                                for (let t = 0; t <= 1; t += 0.1) {
+                                    const px = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
+                                    const py = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
+                                    const d = Math.sqrt((x - px) * (x - px) + (y - py) * (y - py));
+                                    if (d < dist) dist = d;
+                                }
+                            } else {
+                                // Distance to line segment
+                                const lineLen = Math.sqrt(dx * dx + dy * dy);
+                                const t = Math.max(0, Math.min(1, ((x - from.x) * dx + (y - from.y) * dy) / (lineLen * lineLen)));
+                                const projX = from.x + t * dx;
+                                const projY = from.y + t * dy;
+                                dist = Math.sqrt((x - projX) * (x - projX) + (y - projY) * (y - projY));
+                            }
                             
                             if (dist < minDist) {
                                 minDist = dist;

@@ -90,16 +90,16 @@ routes := []tcpip.Route{
 - ✅ 代码编译通过
 - ❌ **缺少 NIC 2，mesh 网络不通**
 
-### Phase 4: 实现 NIC 2 (Mesh Endpoint) ❌ 待实现
+### Phase 4: 实现 NIC 2 (Mesh Endpoint) ✅ 已完成
 
 **目标**：创建独立的 Mesh Endpoint 处理 mesh 流量
 
 **实现内容**：
-1. 创建 `MeshEndpoint` 结构，实现 `stack.LinkEndpoint`
-2. 绑定 GIP (.3) 到 NIC 2
-3. 关闭 NIC 1 的混杂模式和 spoofing
-4. 实现 mesh 包的接收和发送
-5. 更新路由表：添加 mesh 网段和 VIP 路由
+1. ✅ 创建 `MeshEndpoint` 结构，实现 `stack.LinkEndpoint`
+2. ✅ 绑定 GIP (.3) 到 NIC 2
+3. ✅ 关闭 NIC 1 的混杂模式和 spoofing
+4. ✅ 实现 mesh 包的接收和发送（`DeliverNetworkPacket` 和 `SendRawPacket`）
+5. ✅ 更新路由表：添加 mesh 网段路由（VIP 路由待后续完善）
 
 **关键配置**：
 ```go
@@ -113,16 +113,15 @@ s.AddProtocolAddress(2, gipAddr, ...)  // GIP = .3
 
 // 路由表
 s.SetRouteTable([]tcpip.Route{
-    {Destination: vipSubnet, NIC: 1},      // VIP → NIC 1
     {Destination: meshSubnet, NIC: 2},     // mesh → NIC 2
     {Destination: defaultRoute, NIC: 3},   // default → NIC 3
 })
 ```
 
 **验证**：
-- mesh 流量走 NIC 2
-- VIP 回程走 NIC 1
-- 默认流量走 NIC 3（loopback/IPIP）
+- ✅ 代码编译通过
+- ⏳ mesh 流量走 NIC 2（待测试）
+- ⏳ 默认流量走 NIC 3（loopback/IPIP）（待测试）
 
 ### Phase 5: TUN NIC 独立 ❌ 待实现
 
@@ -277,11 +276,15 @@ gVisor 无策略路由（ip rule / 多路由表），无法根据"包从哪个 N
 
 ## 当前问题
 
-1. **缺少 NIC 2 (Mesh Endpoint)**：导致 mesh 网络不通
-2. **NIC 1 配置错误**：开启了混杂模式和 spoofing（应关闭）
-3. **路由表不完整**：缺少 VIP 和 mesh 网段路由
+1. **VIP 路由缺失**：路由表中没有 VIP → NIC 1 的路由（回程 NAT 可能受影响）
+2. **需要测试验证**：Phase 4 刚完成，需要在实际环境测试 mesh 连通性
 
-**根本原因**：Phase 4 未实现，只有 NIC 1 和 NIC 3，没有独立的 Mesh Endpoint。
+**已完成**：
+- ✅ Phase 1-4 代码实现完成
+- ✅ NIC 2 (Mesh Endpoint) 已创建并绑定 GIP
+- ✅ NIC 1 混杂模式和 spoofing 已关闭
+- ✅ 路由表已更新（mesh subnet → NIC 2）
+- ✅ InjectMeshPacket 改为注入到 NIC 2
 
 ## 下一步
 

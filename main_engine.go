@@ -149,6 +149,11 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
 
+		// Configure MeshEndpoint (NIC 2) with mesh manager
+		// This enables mesh packet sending via P2P links
+		engine.GetNetstack().SetMeshManager(meshMgr)
+		util.LogInfo("Mesh manager configured on NIC 2 (mesh endpoint)")
+
 		// Configure LoopbackEndpoint (NIC 3) with IPIP encapsulation parameters
 		// This enables IPIP encapsulation for packets matching static routes
 		if loopbackEP := engine.GetNetstack().LoopbackEP(); loopbackEP != nil {

@@ -52,6 +52,7 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (Phase 2+)
+	meshEP     *MeshEndpoint     // NIC 2: Mesh endpoint for mesh traffic
 	loopbackEP *LoopbackEndpoint // NIC 3: Loopback endpoint for IPIP encapsulation
 
 	// Addresses derived from mesh subnet
@@ -131,6 +132,18 @@ func (n *Netstack) LinkEP() *channel.Endpoint {
 // LoopbackEP returns the loopback link endpoint (NIC 3).
 func (n *Netstack) LoopbackEP() *LoopbackEndpoint {
 	return n.loopbackEP
+}
+
+// MeshEP returns the mesh link endpoint (NIC 2).
+func (n *Netstack) MeshEP() *MeshEndpoint {
+	return n.meshEP
+}
+
+// SetMeshManager sets the mesh manager on the mesh endpoint for sending packets.
+func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
+	if n.meshEP != nil {
+		n.meshEP.SetMeshManager(meshMgr)
+	}
 }
 
 // Addr returns the host IP address (TUN adapter OS side, .2).
@@ -308,8 +321,9 @@ func (n *Netstack) Stop() error {
 }
 
 // initStack creates the gvisor netstack with multiple NICs.
-// NIC 1: TUN adapter (channel.Endpoint) - handles all traffic for now
-// NIC 3: Loopback endpoint - for IPIP encapsulation (Phase 2+)
+// NIC 1: TUN adapter (channel.Endpoint) - TUN device I/O, NAT at boundary
+// NIC 2: Mesh endpoint - mesh traffic, bound to GIP
+// NIC 3: Loopback endpoint - default route loopback, IPIP encapsulation
 // writeLoop handles all routing decisions: VIP/hostIP -> TUN, mesh -> mesh link, other -> re-inject.
 func (n *Netstack) initStack() error {
 	// NIC 1: TUN adapter (channel endpoint)
@@ -326,18 +340,29 @@ func (n *Netstack) initStack() error {
 		return fmt.Errorf("create nic 1: %v", err)
 	}
 
-	ap := tcpip.AddressWithPrefix{Address: n.dnsAddr, PrefixLen: 32}
-	if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: ap,
-	}, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("add dns address: %v", err)
-	}
-
-	s.SetPromiscuousMode(1, true)
-	s.SetSpoofing(1, true)
+	// NIC 1: No promiscuous mode, no spoofing (per design)
+	// VIP is not bound to any NIC, it's just a NAT translation address
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
+
+	// NIC 2: Mesh endpoint - handles mesh traffic, bound to GIP
+	meshEP := NewMeshEndpoint(1500)
+	n.meshEP = meshEP
+
+	if err := s.CreateNIC(2, meshEP); err != nil {
+		return fmt.Errorf("create nic 2 (mesh): %v", err)
+	}
+
+	// Bind GIP (.3) to NIC 2
+	gipAddr := tcpip.AddressWithPrefix{Address: n.dnsAddr, PrefixLen: 32}
+	if err := s.AddProtocolAddress(2, tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: gipAddr,
+	}, stack.AddressProperties{}); err != nil {
+		return fmt.Errorf("add GIP address to NIC 2: %v", err)
+	}
+
+	// NIC 2: No promiscuous mode (only accepts packets destined for GIP or mesh subnet)
 
 	// NIC 3: Loopback endpoint (for IPIP encapsulation in Phase 3+)
 	loopbackEP := NewLoopbackEndpoint(1500)
@@ -350,21 +375,28 @@ func (n *Netstack) initStack() error {
 	// Enable promiscuous mode for loopback to accept all packets
 	s.SetPromiscuousMode(3, true)
 
-	// Phase 3: Route default traffic through NIC 3 (LoopbackEndpoint)
-	// LoopbackEndpoint will:
-	// - IPIP encapsulate packets matching static routes and send via mesh
-	// - Loop back other packets to inbound path for writeLoop to handle
+	// Phase 4: Complete route table
+	// VIP (100.64.0.0/10) → NIC 1 (TUN, for回程 NAT)
+	// Mesh subnet (100.64.0.0/10) → NIC 2 (Mesh)
+	// Default (0.0.0.0/0) → NIC 3 (Loopback/IPIP)
+	_, meshSubnet, _ := net.ParseCIDR("100.64.0.0/10")
+	meshSubnetAddr := tcpip.AddressWithPrefix{
+		Address:   tcpip.AddrFrom4Slice(meshSubnet.IP.To4()),
+		PrefixLen: 10,
+	}
+
 	routes := []tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: 3},
+		{Destination: meshSubnetAddr.Subnet(), NIC: 2},  // Mesh traffic → NIC 2
+		{Destination: header.IPv4EmptySubnet, NIC: 3},  // Default → NIC 3 (loopback/IPIP)
 		{Destination: header.IPv6EmptySubnet, NIC: 3},
 	}
 	s.SetRouteTable(routes)
-	
-	util.LogInfo("netstack: initialized with multi-NIC architecture (NIC 1: TUN, NIC 3: Loopback, default route via NIC 3)")
+
+	util.LogInfo("netstack: initialized with multi-NIC architecture (NIC 1: TUN, NIC 2: Mesh/GIP=%s, NIC 3: Loopback, mesh subnet via NIC 2, default via NIC 3)", n.dnsAddr)
 	return nil
 }
 
-// InjectMeshPacket injects a raw IP packet into the netstack as if received from the TUN device.
+// InjectMeshPacket injects a raw IP packet into the netstack as if received from the mesh network.
 // Used by the mesh module to deliver received overlay packets to the local TCP/IP stack.
 func (n *Netstack) InjectMeshPacket(data []byte) error {
 	if len(data) == 0 {
@@ -403,6 +435,13 @@ func (n *Netstack) InjectMeshPacket(data []byte) error {
 		}
 	}
 
+	// Inject to NIC 2 (Mesh endpoint) instead of NIC 1
+	if n.meshEP != nil {
+		n.meshEP.DeliverNetworkPacket(data)
+		return nil
+	}
+
+	// Fallback to NIC 1 if mesh endpoint not available (shouldn't happen)
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})

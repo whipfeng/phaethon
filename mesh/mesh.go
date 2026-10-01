@@ -376,6 +376,44 @@ func (m *MeshManager) SelectEgressNodeIDForIP(dstIP net.IP) (nodeID string, eip 
 	return nodeID, eip, nil
 }
 
+// SendRawPacket sends a raw IP packet via the mesh network.
+// This is used by MeshEndpoint to send packets that are routed to NIC 2.
+func (m *MeshManager) SendRawPacket(data []byte) error {
+	if len(data) < 20 {
+		return fmt.Errorf("packet too short: %d bytes", len(data))
+	}
+
+	// Extract destination IP from the packet
+	var dstIP net.IP
+	version := data[0] >> 4
+	if version == 4 {
+		dstIP = net.IP(data[16:20])
+	} else {
+		return fmt.Errorf("unsupported IP version: %d", version)
+	}
+
+	// Find the route for the destination
+	nextHops := m.findNextHops(dstIP)
+	if len(nextHops) == 0 {
+		return fmt.Errorf("no next hops for %s", dstIP)
+	}
+
+	// Select the best peer
+	candidatePeers := m.selectBestPeers(nextHops, dstIP)
+	if len(candidatePeers) == 0 {
+		return fmt.Errorf("no candidate peers for %s", dstIP)
+	}
+
+	// Try to send via each candidate peer
+	for _, peer := range candidatePeers {
+		if err := peer.Send(data); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("failed to send packet via any peer")
+}
+
 // SendEncapsulatedPacket sends an IPIP-encapsulated packet via the mesh network.
 // This is used by LoopbackEndpoint after performing IPIP encapsulation.
 func (m *MeshManager) SendEncapsulatedPacket(encapsulated []byte, dstIP net.IP) error {

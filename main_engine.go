@@ -13,6 +13,8 @@ import (
 	"phaethon/p2p"
 	"phaethon/tun"
 	"phaethon/util"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // TUNResource wraps a tun.Engine for lifecycle management.
@@ -146,6 +148,24 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		}
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
+
+		// Configure LoopbackEndpoint (NIC 3) with IPIP encapsulation parameters
+		// This enables IPIP encapsulation for packets matching static routes
+		if loopbackEP := engine.GetNetstack().LoopbackEP(); loopbackEP != nil {
+			localEIP := meshMgr.GetIPIPTunnel().GetLocalEIP()
+			if localEIP != nil {
+				staticRoutes := ruleConf.Mesh.StaticRoutes
+				loopbackEP.SetIPIPConfig(
+					meshMgr.GetIPIPTunnel(),
+					meshMgr,
+					staticRoutes,
+					tcpip.AddrFrom4Slice(localEIP.To4()),
+				)
+				util.LogInfo("IPIP encapsulation configured on NIC 3 (loopback): localEIP=%s staticRoutes=%d", localEIP, len(staticRoutes))
+			} else {
+				util.LogDebug("IPIP encapsulation not configured on NIC 3: localEIP not set")
+			}
+		}
 
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}

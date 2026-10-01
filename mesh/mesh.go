@@ -348,6 +348,59 @@ func (m *MeshManager) GetIPIPTunnel() *IPIPTunnel {
 	return m.ipipTunnel
 }
 
+// SelectEgressNodeIDForIP selects the best egress node for a given destination IP.
+// This is a public wrapper for selectEgressNodeID, used by LoopbackEndpoint.
+func (m *MeshManager) SelectEgressNodeIDForIP(dstIP net.IP) (nodeID string, eip net.IP, err error) {
+	if m.ipipTunnel == nil {
+		return "", nil, fmt.Errorf("IPIP tunnel not initialized")
+	}
+
+	// Find the route for this destination
+	route := m.findRoute(dstIP)
+	if route == nil || len(route.Entries) == 0 {
+		return "", nil, fmt.Errorf("no route for %s", dstIP)
+	}
+
+	// Select the egress node
+	nodeID = m.selectEgressNodeID(dstIP, route.Entries)
+	if nodeID == "" {
+		return "", nil, fmt.Errorf("no egress node for %s", dstIP)
+	}
+
+	// Get the EIP for the egress node
+	eip = m.getEIPForNode(nodeID)
+	if eip == nil {
+		return "", nil, fmt.Errorf("no EIP for node %s", nodeID)
+	}
+
+	return nodeID, eip, nil
+}
+
+// SendEncapsulatedPacket sends an IPIP-encapsulated packet via the mesh network.
+// This is used by LoopbackEndpoint after performing IPIP encapsulation.
+func (m *MeshManager) SendEncapsulatedPacket(encapsulated []byte, dstIP net.IP) error {
+	// Find the route for the original destination
+	nextHops := m.findNextHops(dstIP)
+	if len(nextHops) == 0 {
+		return fmt.Errorf("no next hops for %s", dstIP)
+	}
+
+	// Select the best peer
+	candidatePeers := m.selectBestPeers(nextHops, dstIP)
+	if len(candidatePeers) == 0 {
+		return fmt.Errorf("no candidate peers for %s", dstIP)
+	}
+
+	// Try to send via each candidate peer
+	for _, peer := range candidatePeers {
+		if err := peer.Send(encapsulated); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("failed to send encapsulated packet via any peer")
+}
+
 // SetStaticRoutes updates the static IPIP routes from config.
 func (m *MeshManager) SetStaticRoutes(staticRoutes []config.MeshStaticRoute, staticDomainSuffixes []config.MeshStaticDomainSuffix) {
 	m.mu.Lock()

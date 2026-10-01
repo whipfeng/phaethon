@@ -51,6 +51,9 @@ type Netstack struct {
 	ns     *stack.Stack
 	linkEP *channel.Endpoint
 
+	// Multi-NIC architecture (Phase 2+)
+	loopbackEP *LoopbackEndpoint // NIC 3: Loopback endpoint for IPIP encapsulation
+
 	// Addresses derived from mesh subnet
 	addr    tcpip.Address // hostIP (.2) - TUN adapter OS side
 	dnsAddr tcpip.Address // GIP (.3) - netstack internal, DNS, proxy socket source
@@ -123,6 +126,11 @@ func (n *Netstack) Stack() *stack.Stack {
 // LinkEP returns the channel link endpoint.
 func (n *Netstack) LinkEP() *channel.Endpoint {
 	return n.linkEP
+}
+
+// LoopbackEP returns the loopback link endpoint (NIC 3).
+func (n *Netstack) LoopbackEP() *LoopbackEndpoint {
+	return n.loopbackEP
 }
 
 // Addr returns the host IP address (TUN adapter OS side, .2).
@@ -299,10 +307,12 @@ func (n *Netstack) Stop() error {
 	return nil
 }
 
-// initStack creates the gvisor netstack with a single NIC.
-// All traffic (TUN, DNS hijacker, TCP forwarder, Mode B sockets) shares one NIC.
+// initStack creates the gvisor netstack with multiple NICs.
+// NIC 1: TUN adapter (channel.Endpoint) - handles all traffic for now
+// NIC 3: Loopback endpoint - for IPIP encapsulation (Phase 2+)
 // writeLoop handles all routing decisions: VIP/hostIP -> TUN, mesh -> mesh link, other -> re-inject.
 func (n *Netstack) initStack() error {
+	// NIC 1: TUN adapter (channel endpoint)
 	linkEP := channel.New(8192, 1500, "")
 	n.linkEP = linkEP
 
@@ -313,7 +323,7 @@ func (n *Netstack) initStack() error {
 	n.ns = s
 
 	if err := s.CreateNIC(1, linkEP); err != nil {
-		return fmt.Errorf("create nic: %v", err)
+		return fmt.Errorf("create nic 1: %v", err)
 	}
 
 	ap := tcpip.AddressWithPrefix{Address: n.dnsAddr, PrefixLen: 32}
@@ -329,12 +339,28 @@ func (n *Netstack) initStack() error {
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
+	// NIC 3: Loopback endpoint (for IPIP encapsulation in Phase 3+)
+	loopbackEP := NewLoopbackEndpoint(1500)
+	n.loopbackEP = loopbackEP
+
+	if err := s.CreateNIC(3, loopbackEP); err != nil {
+		return fmt.Errorf("create nic 3 (loopback): %v", err)
+	}
+
+	// Enable promiscuous mode for loopback to accept all packets
+	s.SetPromiscuousMode(3, true)
+
+	// Phase 3: Route default traffic through NIC 3 (LoopbackEndpoint)
+	// LoopbackEndpoint will:
+	// - IPIP encapsulate packets matching static routes and send via mesh
+	// - Loop back other packets to inbound path for writeLoop to handle
 	routes := []tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: 1},
-		{Destination: header.IPv6EmptySubnet, NIC: 1},
+		{Destination: header.IPv4EmptySubnet, NIC: 3},
+		{Destination: header.IPv6EmptySubnet, NIC: 3},
 	}
 	s.SetRouteTable(routes)
-
+	
+	util.LogInfo("netstack: initialized with multi-NIC architecture (NIC 1: TUN, NIC 3: Loopback, default route via NIC 3)")
 	return nil
 }
 

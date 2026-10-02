@@ -1043,15 +1043,11 @@ func (e *Engine) readLoop() {
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
 
-		// NAT: replace src IP with VIP for non-mesh IPv4 packets (bypass gateway mode).
-		// Mesh source addresses (100.0.0.0/8) don't need NAT translation.
+		// NAT: replace src IP with VIP for all IPv4 packets from TUN (bypass gateway mode).
+		// TODO: migrate to gVisor iptables SNAT once crash issue is resolved
 		if e.natTable != nil && n >= 20 && pktBuf[0]>>4 == 4 {
-			srcIP := net.IP(pktBuf[12:16])
-			isMeshSrc := e.meshSubnet != nil && e.meshSubnet.Contains(srcIP)
-			if !isMeshSrc {
-				if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
-					pktBuf = natPkt
-				}
+			if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
+				pktBuf = natPkt
 			}
 		}
 

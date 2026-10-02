@@ -13,27 +13,38 @@
 
 ### NIC 规划
 
-| NIC | 地址绑定 | 混杂模式 | 职责 | 状态 |
-|-----|----------|----------|------|------|
-| **NIC 1 (TUN)** | 无 | **否** | TUN 适配器 I/O，NAT 在边界（readLoop/writeLoop） | ❌ 当前错误开启混杂+spoofing |
-| **NIC 2 (Mesh)** | GIP (.3) | **否** | mesh 流量 + DNS/Proxy socket 源地址 | ❌ **未实现** |
-| **NIC 3 (Loopback)** | 无 | **是** | 默认路由环回 → Forwarder，IPIP 封装 | ✅ 已实现 |
-| **NIC 100+ (h_tunnel)** | 无 | 否 | h_tunnel 代理出站绑定（SO_BINDTODEVICE） | ✅ 已存在 |
+| NIC | 地址绑定 | 混杂模式 | Spoofing | 职责 | 状态 |
+|-----|----------|----------|----------|------|------|
+| **NIC 1 (TUN)** | 无 | **否** | **是** | TUN 适配器 I/O，NAT 在边界（readLoop/writeLoop），VIP 路由用于回程 IP 转发。**Spoofing**：Forwarder 回包从 NIC 1 出去（hostIP 路由），源地址是外部 IP | ✅ 已实现 |
+| **NIC 2 (Mesh)** | GIP (.3) | **否** | **否** | mesh 流量入口/出口，DNS/Proxy socket 源地址 | ✅ 已实现 |
+| **NIC 3 (Loopback)** | 无 | **是** | **是** | **双重职责**：(1) 默认路由环回 → Forwarder（代理连接），(2) IPIP 封装（智能选路） | ✅ 已实现 |
+| **NIC 100+ (h_tunnel)** | 无 | 否 | 是 | h_tunnel 代理出站绑定（SO_BINDTODEVICE） | ✅ 已存在 |
 
 **关键设计**：
-- **VIP 不绑定**：VIP 只是 NAT 转换地址（SNAT 源 / DNAT 目标），不绑定到任何 NIC
+- **VIP 不绑定**：VIP 只是 NAT 转换地址（SNAT 源 / DNAT 目标），不绑定到任何 NIC。VIP 路由用于回程流量的 IP 转发（NIC 2 → NIC 1），不是本地交付
 - **NIC 2 非混杂**：只接收目标为 GIP 或 mesh 网段的包
-- **NIC 3 混杂 + 手动实现**：环回 endpoint，收到出站包后环回到入站或 IPIP 封装
+- **NIC 3 混杂 + Spoofing + 双重职责**：
+  - **混杂模式**：让 NIC 3 接收目标地址不是自己的包（环回包的目标是外部 IP）
+  - **Spoofing**：让 Forwarder 用外部 IP 作为源地址回 SYN-ACK（如 SYN 到 219.159.26.41:443，Forwarder 回 SYN-ACK 时 src=219.159.26.41）
+  - **职责 1（环回 → Forwarder）**：默认路由的出站包环回到入站，利用混杂模式实现本地交付，触发 TCP/UDP Forwarder（代理连接的核心机制）
+  - **职责 2（IPIP 封装）**：匹配静态路由的出站包执行 IPIP 封装，通过 mesh 网络发送到出口节点（智能选路）
 
 ### 路由表
 
 ```go
 s.SetRouteTable([]tcpip.Route{
-  {Destination: vipAddr, NIC: 1},         // VIP → NIC 1 (回程 NAT)
+  {Destination: vipAddr/32, NIC: 1},      // VIP (.1, 单个 IP) → NIC 1 (回程 NAT)
+  {Destination: hostIP/32, NIC: 1},       // hostIP (.2, 单个 IP) → NIC 1
   {Destination: "100.64.0.0/10", NIC: 2}, // mesh 网段 → NIC 2
   {Destination: defaultRoute, NIC: 3},    // 0.0.0.0/0 → loopback
 })
 ```
+
+**关键**：
+- **VIP (.1) 和 hostIP (.2) 都是单个 IP**（/32），不是子网！
+- 这两个 IP 路由到 NIC 1，用于回程流量的 IP 转发
+- **100.64.0.0/10** 是整个 mesh 网络，包括所有 fake IP
+- **路由优先级**：VIP/hostIP (/32) > mesh (/10) > default (/0)
 
 **当前实现**：
 ```go
@@ -212,33 +223,135 @@ mesh:
       node_ids: ["gg", "qg"]  # gg 优先，gg 不可用时用 qg
 ```
 
-## 数据流
+## 完整数据流
 
-### 出站（mesh 内部流量，无 IPIP）
+### 场景 1：出站 - mesh 内部流量（无 IPIP）
+
+**场景描述**：访问 mesh 网络内的其他节点（如 gg.phn → 100.179.0.1）
 
 ```
-TUN (src=任意, dst=100.x.x.x) → InjectInbound NIC 1
+TUN (src=任意, dst=100.x.x.x) → readLoop → InjectInbound NIC 1
   ↓
-gVisor 路由: dst=100.x.x.x → NIC 2
+gVisor 路由: dst=100.x.x.x → mesh 网段路由 → NIC 2
   ↓
-mesh endpoint → hop 表 → P2P 链路
+NIC 2 (MeshEndpoint) → hop 表 → P2P 链路 → 目标节点
 ```
 
-### 出站（通告路由，需要 IPIP 封装）
+**关键点**：
+- 目标地址是 mesh 网段（100.64.0.0/10）
+- 直接通过 NIC 2 发送，不经过 NIC 3
+- 不需要 IPIP 封装
+
+### 场景 2：出站 - 代理连接（外部流量，环回 → Forwarder）
+
+**场景描述**：应用通过 SOCKS5/HTTP 代理访问外部网站（目标可以是域名、真实 IP 或 fake IP）
+
+```
+应用 → SOCKS5/HTTP 代理 → gVisor TCP Forwarder 创建 socket
+  ↓
+gVisor socket (src=GIP, dst=外部地址) → 出站
+  ↓
+gVisor 路由: dst=外部地址 → 默认路由 → NIC 3
+  ↓
+NIC 3 (LoopbackEndpoint) WritePackets:
+  - 不匹配静态路由 → 环回到入站路径
+  - dispatcher.DeliverNetworkPacket() 重新注入
+  ↓
+NIC 3 混杂模式 → 接收所有包 → 本地交付
+  ↓
+TCP/UDP Forwarder 接管 → 代理连接（通过 dialer）
+  ↓
+真实连接 → 外部服务器
+```
+
+**关键点**：
+- 目标地址是外部地址（非 mesh 网段，非静态路由）
+- 通过 NIC 3 环回触发 Forwarder
+- NIC 3 的混杂模式确保环回的包能被本地交付
+- 这是**最常见的代理场景**
+
+### 场景 3：出站 - 通告路由（IPIP 封装）
+
+**场景描述**：访问匹配静态路由的外部地址，需要通过特定出口节点（如 8.8.8.8 通过 GG 出口）
 
 ```
 本地应用 (src=GIP, dst=8.8.8.8) → socket → gVisor
   ↓
 gVisor 路由: dst=8.8.8.8 → 默认路由 → NIC 3
   ↓
-NIC 3 WritePackets:
+NIC 3 (LoopbackEndpoint) WritePackets:
   - 匹配静态路由 → IPIP 封装
+  - 选择出口节点（egress node）
   - meshEndpoint.SendRawPacket(封装后的包)
   ↓
 mesh P2P 链路 → 出口节点 → decapsulate → 8.8.8.8
 ```
 
-### 回程（mesh 响应，dst=VIP）
+**关键点**：
+- 目标地址匹配 `config.MeshStaticRoute` 中的静态路由
+- NIC 3 执行 IPIP 封装而不是简单环回
+- 通过 mesh 网络发送到出口节点
+
+### 场景 4：出站 - h_tunnel 代理（NIC 100+）
+
+**场景描述**：使用 h_tunnel 类型的代理（通过 WebSocket/TCP 隧道）
+
+```
+应用 → h_tunnel 代理 → gVisor TCP Forwarder 创建 socket
+  ↓
+gVisor socket bind to NIC 100+ (SO_BINDTODEVICE)
+  ↓
+NIC 100+ (HTunnelEndpoint) → WebSocket/TCP 连接 → h_tunnel 服务器
+  ↓
+h_tunnel 服务器 → 目标地址
+```
+
+**关键点**：
+- h_tunnel 代理使用独立的 NIC 100+
+- 通过 SO_BINDTODEVICE 绑定到特定 NIC
+- 不经过 NIC 1/2/3 的路由逻辑
+
+### 场景 5：回程 - mesh 响应（dst=VIP）
+
+**场景描述**：mesh 内部流量的响应包（如访问 gg.phn 的响应）
+
+```
+mesh 响应 (src=100.179.0.x, dst=VIP) → NIC 2 入站
+  ↓
+gVisor 检查: VIP 未绑定到任何 NIC，查路由表
+  ↓
+路由: VIP 子网 → NIC 1
+  ↓
+IP 转发到 NIC 1 → writeLoop 读取
+  ↓
+writeLoop: nat.go.TranslateInbound (dst=VIP → 原始源 IP)
+  ↓
+写 TUN → 宿主机 → LAN 机器
+```
+
+**关键点**：
+- 目标地址是 VIP（本机 TUN 的 NAT 地址）
+- VIP 路由用于 IP 转发，不是本地交付
+- writeLoop 在 TUN 边界做 DNAT
+
+### 场景 6：回程 - 代理响应（dst=GIP）
+
+**场景描述**：代理连接的响应包（如访问 google.com 的响应）
+
+```
+外部响应 (src=google.com, dst=GIP) → dialer 接收
+  ↓
+gVisor socket (已建立连接) → 入站
+  ↓
+gVisor: GIP 绑定到 NIC 2 → 本地交付
+  ↓
+TCP/UDP Forwarder → 应用
+```
+
+**关键点**：
+- 目标地址是 GIP（.3，绑定到 NIC 2）
+- 直接本地交付给 Forwarder
+- 不需要路由转发
 
 ```
 mesh 响应 (dst=VIP) → NIC 2 入站

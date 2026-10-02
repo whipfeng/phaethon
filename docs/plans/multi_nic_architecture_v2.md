@@ -19,6 +19,130 @@
 
 **结论**：手动 NAT 在 readLoop/writeLoop 中是正确的方案，因为那时候有完整的上下文信息。
 
+## gVisor Spoofing 机制调研
+
+### Spoofing 检查时机
+
+Spoofing 在**路由创建时**（`FindRoute`）检查，不是在包发出后检查。
+
+```go
+// stack.go:1304-1309
+func (s *Stack) getAddressEP(nic *nic, localAddr, remoteAddr, srcHint tcpip.Address, netProto tcpip.NetworkProtocolNumber) AssignableAddressEndpoint {
+    if localAddr.BitLen() == 0 {
+        return nic.primaryEndpoint(netProto, remoteAddr, srcHint)  // 未指定 localAddr，自动选择
+    }
+    return nic.findEndpoint(netProto, localAddr, CanBePrimaryEndpoint)  // 指定了 localAddr，检查 spoofing
+}
+```
+
+### Spoofing 检查逻辑
+
+当指定了 `localAddr` 时，`findEndpoint` 会检查 NIC 是否开启 spoofing：
+
+```go
+// nic.go:497-499
+func (n *nic) findEndpoint(protocol tcpip.NetworkProtocolNumber, address tcpip.Address, peb PrimaryEndpointBehavior) AssignableAddressEndpoint {
+    return n.getAddressOrCreateTemp(protocol, address, peb, spoofing)
+}
+
+// nic.go:510-518
+func (n *nic) getAddressOrCreateTemp(..., tempRef getAddressBehaviour) AssignableAddressEndpoint {
+    var spoofingOrPromiscuous bool
+    switch tempRef {
+    case spoofing:
+        spoofingOrPromiscuous = n.Spoofing()  // 检查 NIC 是否开启 spoofing
+    }
+    return n.getAddressOrCreateTempInner(protocol, address, spoofingOrPromiscuous, peb)
+}
+```
+
+- **NIC 开启 spoofing**：允许使用任意地址作为源地址
+- **NIC 未开启 spoofing**：只能使用绑定到该 NIC 的地址作为源地址
+
+### 本地交付逻辑
+
+当目标是本机地址（绑定到某个 NIC 的地址）时，gVisor 会尝试创建本地路由：
+
+```go
+// stack.go:1476-1480
+if s.handleLocal && !isMulticast && !isLocalBroadcast {
+    if r := s.findLocalRouteRLocked(id, localAddr, remoteAddr, netProto); r != nil {
+        return r, nil  // 本地路由，包在协议栈内部环回
+    }
+}
+```
+
+`findLocalRoute` 检查 `localAddr` 和 `remoteAddr` 是否都是本机地址：
+
+```go
+// stack.go:1334-1338
+func (s *Stack) findLocalRouteFromNICRLocked(localAddressNIC *nic, localAddr, remoteAddr tcpip.Address, ...) *Route {
+    localAddressEndpoint := localAddressNIC.getAddressOrCreateTempInner(netProto, localAddr, false, NeverPrimaryEndpoint)
+    if localAddressEndpoint == nil {
+        return nil  // localAddr 不是该 NIC 绑定的地址，返回 nil
+    }
+    // ... 检查 remoteAddr 是否也是本机地址
+}
+```
+
+### 包交付路径
+
+```go
+// ipv4.go:561-569
+func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffer, headerIncluded bool) tcpip.Error {
+    if r.Loop()&stack.PacketLoop != 0 {
+        e.handleLocalPacket(pkt, !headerIncluded)  // 本地交付
+    }
+    if r.Loop()&stack.PacketOut == 0 {
+        return nil  // 不从 NIC 发出
+    }
+    // ... 从 NIC 发出到物理层
+}
+```
+
+- **`loop & PacketLoop != 0`**：调用 `handleLocalPacket`，在协议栈内部本地交付
+- **`loop & PacketOut == 0`**：不从 NIC 发出到物理层
+
+### 关键结论
+
+1. **如果 `localAddr` 是本机地址，`remoteAddr` 也是本机地址**：
+   - `findLocalRoute` 成功，创建本地路由
+   - `loop = PacketLoop`
+   - **包在协议栈内部本地交付，不从 NIC 发出**
+
+2. **如果 `localAddr` 不是本机地址，`remoteAddr` 是本机地址**：
+   - `findLocalRoute` 失败（`localAddr` 不是任何 NIC 绑定的地址）
+   - 继续走正常路由路径
+   - `loop = PacketOut`（因为 `remoteAddr != localAddr`）
+   - **包从 NIC 发出到物理层，不会本地交付**
+
+3. **如果 `remoteAddr` 不是本机地址**：
+   - 走正常路由路径
+   - 检查 spoofing
+   - **包从 NIC 发出**
+
+### 对我们架构的影响
+
+在我们的架构中：
+- **gVisor 本机地址**：只有 GIP (100.x.0.3)，绑定在 NIC 2
+- **不是本机地址**：VIP (100.x.0.1)、EIP (100.x.0.4)，没有绑定到任何 NIC
+
+可能出现的包：
+1. **本地应用发出的包**：`src=本地IP, dst=任意`
+   - `localAddr=本地IP` 不是本机地址
+   - 检查 spoofing，NIC 1 需要开启 spoofing
+
+2. **Forwarder 发出的回程包**：`src=外部IP, dst=VIP`
+   - `localAddr=外部IP` 不是本机地址
+   - `remoteAddr=VIP` 不是本机地址
+   - 检查 spoofing，NIC 1 需要开启 spoofing
+   - 包从 NIC 1 发出，被 writeLoop 读取
+
+3. **目标是 GIP 的包**：`src=任意, dst=GIP`
+   - 如果 `src` 不是本机地址，`findLocalRoute` 失败
+   - 包从 NIC 2 发出到 mesh 网络，**不会本地交付**
+   - 但在我们的架构中，这种情况不会发生（不会有包 `src=非本机地址, dst=本地GIP`）
+
 ## NIC 定义
 
 | NIC | 名称 | 绑定地址 | Promiscuous | Spoofing | 用途 |

@@ -427,61 +427,13 @@ func (n *Netstack) initStack() error {
 
 	s.SetRouteTable(routes)
 
-	// Configure gVisor iptables SNAT at Input hook per multi_nic_architecture_v2 design
-	// All packets from NIC 1 (TUN) are SNAT'd to VIP
-	// Conntrack automatically handles reverse DNAT for return packets
-	if n.meshSubnet != nil && len(n.meshSubnet.IP) >= 4 {
-		// Calculate VIP (subnet + 1)
-		vipIP := make(net.IP, 4)
-		copy(vipIP, n.meshSubnet.IP.To4())
-		vipIP[3] = vipIP[3] + 1
-
-		vipAddr := tcpip.AddrFrom4Slice(vipIP)
-
-		// Get the iptables instance and NAT table
-		iptables := s.IPTables()
-		natTable := iptables.GetTable(stack.NATID, false /* ipv6 */)
-
-		// Create SNAT rule: match packets from NIC 1 (tun), SNAT to VIP
-		snatRule := stack.Rule{
-			Filter: stack.IPHeaderFilter{
-				InputInterface: "tun",
-			},
-			Target: &stack.SNATTarget{
-				Addr: vipAddr,
-			},
-		}
-
-		// Insert SNAT rule at the beginning of Prerouting chain
-		// Prerouting is called when packets enter from NIC, before routing decision
-		preroutingChainStart := natTable.BuiltinChains[stack.Prerouting]
-		if preroutingChainStart >= 0 {
-			// Insert at the start of Prerouting chain
-			newRules := make([]stack.Rule, 0, len(natTable.Rules)+1)
-			newRules = append(newRules, natTable.Rules[:preroutingChainStart]...)
-			newRules = append(newRules, snatRule)
-			newRules = append(newRules, natTable.Rules[preroutingChainStart:]...)
-			natTable.Rules = newRules
-
-			// Update chain pointers (chains at or after insertion point shift by 1)
-			for hook := stack.Prerouting + 1; hook < stack.NumHooks; hook++ {
-				if natTable.BuiltinChains[hook] >= preroutingChainStart {
-					natTable.BuiltinChains[hook]++
-				}
-			}
-			// Update underflow pointers (underflows at or after insertion point shift by 1)
-			for hook := stack.Hook(0); hook < stack.NumHooks; hook++ {
-				if natTable.Underflows[hook] >= preroutingChainStart {
-					natTable.Underflows[hook]++
-				}
-			}
-		}
-
-		// Replace the NAT table (this also initializes conntrack automatically)
-		iptables.ReplaceTable(stack.NATID, natTable, false /* ipv6 */)
-
-		util.LogInfo("Configured gVisor iptables SNAT: NIC=tun → VIP=%s", vipIP)
-	}
+	// NAT is handled manually in tun/engine.go readLoop/writeLoop:
+	// - readLoop: TranslateOutbound (SNAT src IP to VIP for packets from TUN)
+	// - writeLoop: TranslateInbound (DNAT dst IP back to original for packets to TUN)
+	// gVisor iptables cannot support our use case because:
+	// - SNATTarget only supports Postrouting/Input hooks
+	// - Postrouting doesn't support interface matching
+	// - Input hook only triggers for locally-destined packets, not forwarded packets
 
 	util.LogInfo("netstack: initialized with multi-NIC v2 architecture (NIC 1: TUN/receive-only, NIC 2: Mesh/GIP=%s, NIC 3: Loopback/unified-dispatch)", n.dnsAddr)
 	return nil

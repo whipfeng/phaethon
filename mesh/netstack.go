@@ -385,7 +385,7 @@ func (n *Netstack) initStack() error {
 	s.SetNICName(3, "ipip")
 
 	// NIC 4: Loopback endpoint - unified dispatch (IPIP encapsulation or loopback to Forwarder)
-	// No addresses bound, Promiscuous=true, Spoofing=false
+	// No addresses bound, Promiscuous=true, Spoofing=true (needed for Forwarder route creation)
 	loopbackEP := NewLoopbackEndpoint(1500)
 	n.loopbackEP = loopbackEP
 
@@ -394,6 +394,7 @@ func (n *Netstack) initStack() error {
 	}
 
 	s.SetPromiscuousMode(4, true)  // Accept all packets
+	s.SetSpoofing(4, true)         // Allow Forwarder to create routes with arbitrary src IPs
 	s.SetNICName(4, "loopback")
 
 	// Route table per multi_nic_architecture_v2 design:

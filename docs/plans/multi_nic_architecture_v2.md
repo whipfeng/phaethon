@@ -150,7 +150,7 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 | NIC 1 | TUN adapter | **无** | false | true | 接收 TUN + writeLoop 写回外部 NAT 回程 |
 | NIC 2 | Mesh endpoint | GIP (100.x.0.3) | false | true | mesh 网络收发 |
 | NIC 3 | IPIP endpoint | **无** | true | false | IPIP 解封后环回 |
-| NIC 4 | Loopback endpoint | **无** | true | false | 统一分发：IPIP 封包 or 环回 Forwarder |
+| NIC 4 | Loopback endpoint | **无** | true | **true** | 统一分发：IPIP 封包 or 环回 Forwarder |
 
 **配置说明**：
 
@@ -160,7 +160,8 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 - **Spoofing（地址欺骗）**：允许发出的包 src 不是 NIC 绑定的地址
   - NIC 1/2：true，NIC 1 发出的包 src 是本地应用的原始 IP，NIC 2 发出的包 src 是本地 GIP
-  - NIC 3/4：false，不需要发出包（只做环回）
+  - NIC 3：false，不需要发出包（只做环回）
+  - NIC 4：**true**，Forwarder 创建 endpoint 时需要 `FindRoute(NIC4, srcIP, dstIP)`，srcIP 可能是任意地址（如外部 IP），需要 spoofing 才能创建路由
 
 ## 路由表
 

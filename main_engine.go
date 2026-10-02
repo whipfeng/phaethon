@@ -166,9 +166,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 					staticRoutes,
 					tcpip.AddrFrom4Slice(localEIP.To4()),
 				)
-				util.LogInfo("IPIP encapsulation configured on NIC 3 (loopback): localEIP=%s staticRoutes=%d", localEIP, len(staticRoutes))
+				util.LogInfo("IPIP encapsulation configured on NIC 4 (loopback): localEIP=%s staticRoutes=%d", localEIP, len(staticRoutes))
 			} else {
-				util.LogDebug("IPIP encapsulation not configured on NIC 3: localEIP not set")
+				util.LogDebug("IPIP encapsulation not configured on NIC 4: localEIP not set")
 			}
 		}
 

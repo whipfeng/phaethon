@@ -53,12 +53,14 @@ type Netstack struct {
 
 	// Multi-NIC architecture (Phase 2+)
 	meshEP     *MeshEndpoint     // NIC 2: Mesh endpoint for mesh traffic
-	loopbackEP *LoopbackEndpoint // NIC 3: Loopback endpoint for IPIP encapsulation
+	ipipEP     *IPIPEndpoint     // NIC 3: IPIP endpoint for decapsulation
+	loopbackEP *LoopbackEndpoint // NIC 4: Loopback endpoint for unified dispatch
 
 	// Addresses derived from mesh subnet
-	addr    tcpip.Address // hostIP (.2) - TUN adapter OS side
-	dnsAddr tcpip.Address // GIP (.3) - netstack internal, DNS, proxy socket source
-	addrSet bool
+	addr     tcpip.Address // hostIP (.2) - TUN adapter OS side
+	dnsAddr  tcpip.Address // GIP (.3) - netstack internal, DNS, proxy socket source
+	localEIP tcpip.Address // EIP (.4) - IPIP encapsulation source
+	addrSet  bool
 
 	// Running state
 	running bool
@@ -340,14 +342,12 @@ func (n *Netstack) initStack() error {
 		return fmt.Errorf("create nic 1: %v", err)
 	}
 
-	// NIC 1: TUN adapter - receive-only per multi_nic_architecture_v2 design
-	// No addresses bound to NIC 1, no writeLoop
-	// SNAT is handled by gVisor iptables at Input hook
-	_ = s.SetSpoofing(1, true) // Allow packets with external source IPs from Forwarder
+	// NIC 1: TUN adapter - receive-only + writeLoop for external NAT return
+	// No addresses bound to NIC 1
+	// Spoofing=true: allow packets with external source IPs from Forwarder
+	_ = s.SetSpoofing(1, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
-
-	// Set NIC name for iptables matching
 	s.SetNICName(1, "tun")
 
 	// NIC 2: Mesh endpoint - handles mesh traffic, bound to GIP
@@ -367,61 +367,88 @@ func (n *Netstack) initStack() error {
 		return fmt.Errorf("add GIP address to NIC 2: %v", err)
 	}
 
-	// Set NIC names for iptables matching
+	// NIC 2: Promiscuous=false (only accepts packets destined for GIP)
+	// Spoofing=true: allow packets with GIP as source
+	s.SetSpoofing(2, true)
 	s.SetNICName(2, "mesh")
 
-	// NIC 2: No promiscuous mode (only accepts packets destined for GIP or mesh subnet)
-	// Per design: NIC 2 should NOT be in promiscuous mode
+	// NIC 3: IPIP endpoint - dedicated IPIP decapsulation
+	// No addresses bound, Promiscuous=true, Spoofing=false
+	ipipEP := NewIPIPEndpoint(1500)
+	n.ipipEP = ipipEP
 
-	// NIC 3: Loopback endpoint (for IPIP encapsulation in Phase 3+)
+	if err := s.CreateNIC(3, ipipEP); err != nil {
+		return fmt.Errorf("create nic 3 (ipip): %v", err)
+	}
+
+	s.SetPromiscuousMode(3, true)  // Accept IPIP packets (dst=EIP)
+	s.SetNICName(3, "ipip")
+
+	// NIC 4: Loopback endpoint - unified dispatch (IPIP encapsulation or loopback to Forwarder)
+	// No addresses bound, Promiscuous=true, Spoofing=false
 	loopbackEP := NewLoopbackEndpoint(1500)
 	n.loopbackEP = loopbackEP
 
-	if err := s.CreateNIC(3, loopbackEP); err != nil {
-		return fmt.Errorf("create nic 3 (loopback): %v", err)
+	if err := s.CreateNIC(4, loopbackEP); err != nil {
+		return fmt.Errorf("create nic 4 (loopback): %v", err)
 	}
 
-	// Enable promiscuous mode for loopback to accept all packets
-	s.SetPromiscuousMode(3, true)
-	// Spoofing: Forwarder endpoints need to send SYN-ACK with external IPs as source
-	// (e.g., SYN to 219.159.26.41:443 → Forwarder replies from src=219.159.26.41)
-	s.SetSpoofing(3, true)
-	// Set NIC name for iptables matching
-	s.SetNICName(3, "loopback")
+	s.SetPromiscuousMode(4, true)  // Accept all packets
+	s.SetNICName(4, "loopback")
 
 	// Route table per multi_nic_architecture_v2 design:
-	// - Local mesh subnet (100.x.0.0/16) → NIC 3 (for return path and IPIP decapsulation)
-	// - Mesh network (100.0.0.0/8) → NIC 2 (for other mesh nodes)
-	// - Default → NIC 3 (unified dispatch point)
+	// - VIP (100.x.0.1) → NIC 1 (external NAT return → writeLoop → TUN)
+	// - Mesh network (100.0.0.0/8) → NIC 2 (other mesh nodes)
+	// - EIP (100.x.0.4) → NIC 3 (IPIP decapsulation entry)
+	// - Default → NIC 4 (unified dispatch point)
 	routes := []tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: 3},  // default → NIC 3
-		{Destination: header.IPv6EmptySubnet, NIC: 3},
+		{Destination: header.IPv4EmptySubnet, NIC: 4},  // default → NIC 4
+		{Destination: header.IPv6EmptySubnet, NIC: 4},
 	}
 
 	// Add mesh routes if available
 	if n.meshSubnet != nil {
+		// Calculate VIP (subnet + 1) and EIP (subnet + 4)
+		vipIP := make(net.IP, 4)
+		copy(vipIP, n.meshSubnet.IP.To4())
+		vipIP[3] = vipIP[3] + 1
+
+		eipIP := make(net.IP, 4)
+		copy(eipIP, n.meshSubnet.IP.To4())
+		eipIP[3] = eipIP[3] + 4
+
+		vipAddr := tcpip.AddrFrom4Slice(vipIP)
+		eipAddr := tcpip.AddrFrom4Slice(eipIP)
+
 		// Mesh network (100.0.0.0/8) → NIC 2
 		meshNetwork := tcpip.AddressWithPrefix{
 			Address:   tcpip.AddrFrom4Slice(n.meshSubnet.IP.To4()),
 			PrefixLen: 8,
 		}
-		
-		// Local mesh subnet (/16) → NIC 3
-		// This is for return path packets and IPIP decapsulated packets
-		localMeshSubnet := tcpip.AddressWithPrefix{
-			Address:   tcpip.AddrFrom4Slice(n.meshSubnet.IP.To4()),
-			PrefixLen: 16,
+
+		// VIP (/32) → NIC 1
+		vipRoute := tcpip.Route{
+			Destination: tcpip.AddressWithPrefix{Address: vipAddr, PrefixLen: 32}.Subnet(),
+			NIC:         1,
 		}
-		
+
+		// EIP (/32) → NIC 3
+		eipRoute := tcpip.Route{
+			Destination: tcpip.AddressWithPrefix{Address: eipAddr, PrefixLen: 32}.Subnet(),
+			NIC:         3,
+		}
+
 		routes = append([]tcpip.Route{
-			{Destination: localMeshSubnet.Subnet(), NIC: 3}, // local mesh /16 → NIC 3
-			{Destination: meshNetwork.Subnet(), NIC: 2},     // mesh /8 → NIC 2
+			vipRoute,                           // VIP → NIC 1
+			{Destination: meshNetwork.Subnet(), NIC: 2},  // mesh /8 → NIC 2
+			eipRoute,                           // EIP → NIC 3
 		}, routes...)
 
-		util.LogInfo("Setting route table: localMesh=%s (NIC 3), mesh=%s (NIC 2), default=%s (NIC 3)",
-			localMeshSubnet.Subnet(), meshNetwork.Subnet(), header.IPv4EmptySubnet)
+		n.localEIP = eipAddr
+		util.LogInfo("Setting route table: VIP=%s (NIC 1), mesh=%s (NIC 2), EIP=%s (NIC 3), default=%s (NIC 4)",
+			vipAddr, meshNetwork.Subnet(), eipAddr, header.IPv4EmptySubnet)
 	} else {
-		util.LogInfo("Setting route table: default=%s (NIC 3) - mesh subnet not configured",
+		util.LogInfo("Setting route table: default=%s (NIC 4) - mesh subnet not configured",
 			header.IPv4EmptySubnet)
 	}
 
@@ -430,12 +457,8 @@ func (n *Netstack) initStack() error {
 	// NAT is handled manually in tun/engine.go readLoop/writeLoop:
 	// - readLoop: TranslateOutbound (SNAT src IP to VIP for packets from TUN)
 	// - writeLoop: TranslateInbound (DNAT dst IP back to original for packets to TUN)
-	// gVisor iptables cannot support our use case because:
-	// - SNATTarget only supports Postrouting/Input hooks
-	// - Postrouting doesn't support interface matching
-	// - Input hook only triggers for locally-destined packets, not forwarded packets
 
-	util.LogInfo("netstack: initialized with multi-NIC v2 architecture (NIC 1: TUN/receive-only, NIC 2: Mesh/GIP=%s, NIC 3: Loopback/unified-dispatch)", n.dnsAddr)
+	util.LogInfo("netstack: initialized with multi-NIC v2 architecture (NIC 1: TUN, NIC 2: Mesh/GIP=%s, NIC 3: IPIP, NIC 4: Loopback)", n.dnsAddr)
 	return nil
 }
 

@@ -14,16 +14,15 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// LoopbackEndpoint implements a loopback link endpoint for NIC 3.
+// LoopbackEndpoint implements a loopback link endpoint for NIC 4.
 // It is the unified dispatch point per multi_nic_architecture_v2 design.
 // 
-// Dispatch logic (in order):
-// 1. src ∉ mesh network → send to TUN device
-// 2. src ∈ mesh network:
-//    a. IPIP packet (proto=4, outer dst=local GIP) → decapsulate → loopback to Forwarder
-//    b. Non-IPIP packet:
-//       - dst hits announced routes → IPIP encapsulate → send via mesh
-//       - dst doesn't hit routes → loopback to Forwarder
+// Dispatch logic (simplified, no src mesh check):
+// 1. dst hits announced routes → IPIP encapsulate → send via mesh (NIC 2)
+// 2. dst doesn't hit routes → loopback to Forwarder
+//
+// Note: IPIP decapsulation is handled by IPIPEndpoint (NIC 3).
+// Note: External NAT return packets (dst=VIP) go to NIC 1 writeLoop, not here.
 type LoopbackEndpoint struct {
 	mu sync.RWMutex
 
@@ -44,17 +43,6 @@ type LoopbackEndpoint struct {
 	meshManager    *MeshManager
 	staticRoutes   []config.MeshStaticRoute
 	localEIP       tcpip.Address
-	
-	// Mesh subnet for source IP classification
-	meshSubnet *net.IPNet
-	
-	// Local GIP for IPIP decapsulation check
-	localGIP net.IP
-	
-	// TUN device for sending non-mesh packets
-	tunDevice interface {
-		Write(data []byte) (int, error)
-	}
 }
 
 // LoopbackStats tracks loopback endpoint statistics
@@ -81,15 +69,6 @@ func (e *LoopbackEndpoint) SetIPIPConfig(tunnel *IPIPTunnel, meshMgr *MeshManage
 	e.meshManager = meshMgr
 	e.staticRoutes = routes
 	e.localEIP = localEIP
-}
-
-// SetDispatchConfig configures the unified dispatch parameters
-func (e *LoopbackEndpoint) SetDispatchConfig(meshSubnet *net.IPNet, localGIP net.IP, tunDevice interface{ Write([]byte) (int, error) }) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.meshSubnet = meshSubnet
-	e.localGIP = localGIP
-	e.tunDevice = tunDevice
 }
 
 // Attach saves the network dispatcher for delivering packets to the netstack
@@ -141,6 +120,7 @@ func (e *LoopbackEndpoint) SetLinkAddress(addr tcpip.LinkAddress) {
 
 // WritePackets is called by the netstack to send packets.
 // Implements the unified dispatch logic per multi_nic_architecture_v2 design.
+// Simplified: only check if dst hits announced routes for IPIP encapsulation.
 func (e *LoopbackEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	e.mu.RLock()
 	dispatcher := e.dispatcher
@@ -148,9 +128,6 @@ func (e *LoopbackEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip
 	meshMgr := e.meshManager
 	staticRoutes := e.staticRoutes
 	localEIP := e.localEIP
-	meshSubnet := e.meshSubnet
-	localGIP := e.localGIP
-	tunDevice := e.tunDevice
 	e.mu.RUnlock()
 
 	if dispatcher == nil {
@@ -171,54 +148,14 @@ func (e *LoopbackEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip
 			continue
 		}
 		
-		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
-		proto := data[9]
 		
 		if e.stats.PacketsReceived <= 10 {
-			util.LogDebug("[LOOPBACK] packet #%d: src=%v dst=%v proto=%d",
-				e.stats.PacketsReceived, srcIP, dstIP, proto)
+			srcIP := net.IP(data[12:16])
+			util.LogDebug("[LOOPBACK] packet #%d: src=%v dst=%v",
+				e.stats.PacketsReceived, srcIP, dstIP)
 		}
 		
-		// Step 1: Check if src ∈ mesh network
-		if meshSubnet != nil && !meshSubnet.Contains(srcIP) {
-			// src ∉ mesh → send to TUN device
-			if tunDevice != nil {
-				if _, err := tunDevice.Write(data); err != nil {
-					util.LogWarn("[LOOPBACK] failed to write to TUN: %v", err)
-				} else {
-					e.stats.PacketsLooped++
-					e.stats.BytesLooped += uint64(len(data))
-					count++
-				}
-			}
-			continue
-		}
-		
-		// Step 2: src ∈ mesh network
-		// Check if it's an IPIP packet (proto=4)
-		if proto == 4 && localGIP != nil && dstIP.Equal(localGIP) {
-			// IPIP packet destined for local GIP → decapsulate
-			innerPacket, err := Decapsulate(data)
-			if err == nil && innerPacket != nil {
-				// Loopback decapsulated packet to Forwarder
-				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: buffer.MakeWithData(innerPacket),
-				})
-				dispatcher.DeliverNetworkPacket(pkt.NetworkProtocolNumber, newPkt)
-				newPkt.DecRef()
-				
-				e.stats.PacketsLooped++
-				e.stats.BytesLooped += uint64(len(innerPacket))
-				count++
-				continue
-			}
-			// If decapsulation failed, drop the packet
-			util.LogWarn("[LOOPBACK] IPIP decapsulation failed for packet from %v: %v", srcIP, err)
-			continue
-		}
-		
-		// Step 3: Non-IPIP packet from mesh
 		// Check if dst hits announced routes (static routes)
 		if ipipTunnel != nil && meshMgr != nil && e.needsIPIPEncapsulation(dstIP, staticRoutes) {
 			// dst hits announced routes → IPIP encapsulate → send via mesh
@@ -233,7 +170,7 @@ func (e *LoopbackEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip
 			util.LogWarn("[LOOPBACK] IPIP encapsulation failed for dst=%v, falling back to loopback", dstIP)
 		}
 		
-		// Step 4: dst doesn't hit announced routes → loopback to Forwarder
+		// dst doesn't hit announced routes → loopback to Forwarder
 		newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: buffer.MakeWithData(data),
 		})

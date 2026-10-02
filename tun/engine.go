@@ -1051,12 +1051,15 @@ func (e *Engine) readLoop() {
 			}
 		}
 
-		// Debug: log ALL TCP packets to mesh network (100.0.0.0/8)
+		// Debug: log first TCP packets to see what readLoop receives
 		if n >= 40 && pktBuf[0]>>4 == 4 && pktBuf[9] == 6 { // TCP
 			dstIP := net.IP(pktBuf[16:20])
-			if dstIP[0] == 100 { // 100.0.0.0/8
-				dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-				util.LogDebug("[TCP-DEBUG] readLoop entry: TCP dst=%s:%d src=%s", dstIP, dstPort, net.IP(pktBuf[12:16]))
+			srcIP := net.IP(pktBuf[12:16])
+			dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
+			// Log first 5 packets, then every 100th packet
+			pktNum := e.readPackets.Load()
+			if pktNum < 5 || pktNum%100 == 0 {
+				util.LogInfo("[TCP-DEBUG] readLoop entry #%d: TCP src=%s dst=%s:%d", pktNum, srcIP, dstIP, dstPort)
 			}
 		}
 

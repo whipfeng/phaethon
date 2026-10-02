@@ -1,81 +1,121 @@
-# Multi-NIC 架构设计（gVisor iptables NAT 方案）
+# Multi-NIC 架构设计（手动 NAT 方案）
 
 ## 概述
 
-本方案将 NAT 能力下沉到 gVisor 内部，通过 iptables + conntrack 实现，NIC 3 作为统一分发点处理所有包的流向。
+本方案采用多 NIC 架构，NIC 3 作为统一分发点处理所有包的流向。NAT 在 readLoop/writeLoop 中手动实现。
+
+## 为什么不用 gVisor iptables
+
+经过源码调研，gVisor iptables 无法满足需求：
+
+1. **SNATTarget 只支持 Postrouting/Input hook**
+   - Prerouting/Output/Forward 会 panic
+2. **Postrouting 不支持接口匹配**
+   - `iptables_types.go:320-321` 直接 `return true`，忽略 InputInterface/OutputInterface
+3. **Input hook 只处理本地包**
+   - 从 TUN 进入需要转发的包不会触发 Input hook
+4. **无法区分目标**
+   - 即使 Postrouting 支持接口匹配，也无法区分目标是 mesh 网段还是外网
+
+**结论**：手动 NAT 在 readLoop/writeLoop 中是正确的方案，因为那时候有完整的上下文信息。
 
 ## NIC 定义
 
-| NIC | 名称 | 绑定地址 | 用途 |
-|-----|------|----------|------|
-| NIC 1 | TUN adapter | **无** | **仅接收** TUN 数据 |
-| NIC 2 | Mesh endpoint | GIP (100.1.0.3) | mesh 网络收发 |
-| NIC 3 | Loopback endpoint | **无** | **统一分发点** |
+| NIC | 名称 | 绑定地址 | Promiscuous | Spoofing | 用途 |
+|-----|------|----------|-------------|----------|------|
+| NIC 1 | TUN adapter | **无** | false | true | 接收 TUN + writeLoop 写回外部 NAT 回程 |
+| NIC 2 | Mesh endpoint | GIP (100.x.0.3) | false | true | mesh 网络收发 |
+| NIC 3 | IPIP endpoint | **无** | true | false | IPIP 解封后环回 |
+| NIC 4 | Loopback endpoint | **无** | true | false | 统一分发：IPIP 封包 or 环回 Forwarder |
+
+**配置说明**：
+
+- **Promiscuous（混杂模式）**：NIC 接收所有包，不检查 dst 是否匹配绑定地址
+  - NIC 1/2：false，只接收 dst 匹配绑定地址的包
+  - NIC 3/4：true，需要接收 dst=EIP 或任意地址的包
+
+- **Spoofing（地址欺骗）**：允许发出的包 src 不是 NIC 绑定的地址
+  - NIC 1/2：true，NIC 1 发出的包 src 是本地应用的原始 IP，NIC 2 发出的包 src 是本地 GIP
+  - NIC 3/4：false，不需要发出包（只做环回）
 
 ## 路由表
 
 | 目标 | NIC | 说明 |
 |------|-----|------|
-| 100.1.0.0/16 (本地 mesh 网段) | NIC 3 | 本地 mesh 地址（含 VIP、GIP） |
+| VIP (100.x.0.1) | NIC 1 | 外部 NAT 回程 → writeLoop 写回 TUN |
 | 100.0.0.0/8 (mesh) | NIC 2 | 其他 mesh 节点 |
-| 0.0.0.0/0 (default) | NIC 3 | 默认路由 |
+| EIP (100.x.0.4) | NIC 3 | IPIP 解封入口 |
+| 0.0.0.0/0 (default) | NIC 4 | 默认路由 |
 
 **说明**：
-- NIC 1 不绑定任何地址，仅用于接收 TUN 数据
-- 本地 mesh 网段 (100.1.0.0/16) 路由到 NIC 3，用于回程包和 IPIP 解封装后的包
-- VIP 不需要单独路由（包含在本地 mesh 网段中）
+- NIC 1 不绑定任何地址，但 VIP 路由指向 NIC 1，让外部 NAT 回程包（dst=VIP）从 NIC 1 writeLoop 写回 TUN
+- 本地 mesh 网段路由已移除，VIP 单独路由到 NIC 1
+- EIP 路由到 NIC 3，用于 IPIP 解封
+- 默认路由到 NIC 4，作为统一分发点
 
-## gVisor iptables 规则
+## 手动 NAT 实现
 
-### SNAT 规则（Input hook）
+### SNAT（readLoop 中）
 
 ```go
-// 所有从 NIC 1 进入的包都做 SNAT
-Rule{
-    Matcher: IPHeaderFilter{
-        InputInterface: "NIC1",
-    },
-    Target: &SNATTarget{
-        Addr: VIP, // 100.1.0.1
-    },
+// tun/engine.go readLoop
+// 所有从 TUN 进入的 IPv4 包都做 SNAT，替换 src IP 为 VIP
+if e.natTable != nil && n >= 20 && pktBuf[0]>>4 == 4 {
+    if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
+        pktBuf = natPkt
+    }
 }
 ```
 
 **说明**：
-- 不判断 src 是否属于 mesh 网段，所有 NIC 1 的包都转
-- conntrack 自动记录映射：VIP:port ↔ 原始src:port
+- 在 readLoop 中，包刚从 TUN 进来，知道来源是本地应用
+- NATTable 自动记录映射：VIP:port ↔ 原始src:port
+- 可以根据目标地址决定 SNAT 策略（mesh 网段 vs 外网）
 
-### DNAT（conntrack 自动）
+### DNAT（writeLoop 中）
 
-- **回程包**（Forwarder 发出）：Output hook，conntrack 自动 DNAT
-- **mesh 回程包**：Prerouting hook，conntrack 自动 DNAT
-- 不需要额外配置 DNAT 规则
-
-## NIC 3 统一分发逻辑
-
-NIC 3 是核心分发点，处理所有包的流向：
-
-```
-NIC 3 收到包，判断:
-
-1. src ∉ mesh 网段?
-   → 送往 TUN（写回 TUN 设备）
-
-2. src ∈ mesh 网段:
-   → 是 IPIP 包（外层 dst=本地GIP）?
-       → 解封装 IPIP
-       → 内层包环回到 Forwarder（跨节点 Forwarder，无 DNAT）
-   
-   → 普通包:
-       → dst 命中通告路由 → IPIP 封装 → NIC 2 (mesh)
-       → dst 未命中通告路由 → 环回到 Forwarder
+```go
+// tun/engine.go writeLoop（或 NIC 3 分发逻辑中写 TUN 前）
+// 回程包需要做 DNAT，替换 dst IP 为原始 src
+if e.natTable != nil {
+    if natPkt := e.natTable.TranslateInbound(pktBuf); natPkt != nil {
+        pktBuf = natPkt
+    }
+}
 ```
 
-### 送往 TUN 的机制
+**说明**：
+- 回程包在送往 TUN 前做 DNAT
+- NATTable 自动查找映射，还原原始 src IP
 
-由于 NIC 1 仅接收，需要一个机制把包写回 TUN：
-- 在 NIC 3 的分发逻辑中，直接调用 `WriteLoopDevice.Write()` 把包写入 TUN
-- 或者保留一个简化的 writeLoop，只负责写 TUN，不做 NAT
+## NIC 3 IPIP 解封逻辑
+
+NIC 3 专门处理 IPIP 解封：
+
+```
+NIC 3 收到 IPIP 包（外层 dst=本地EIP）：
+  → 解封装 IPIP
+  → 内层包环回到 Forwarder（跨节点 Forwarder，无 DNAT）
+```
+
+## NIC 4 统一分发逻辑
+
+NIC 4 是核心分发点，处理所有包的流向：
+
+```
+NIC 4 收到包，判断:
+
+1. dst 命中通告路由？
+   → IPIP 封装 → NIC 2 (mesh)
+
+2. 否则
+   → 环回到 Forwarder
+```
+
+**说明**：
+- NIC 4 不再判断 src 是否 mesh 网段
+- 外部 NAT 回程包（dst=VIP）走 VIP 路由到 NIC 1 writeLoop，不经过 NIC 4
+- IPIP 入站包（dst=EIP）走 EIP 路由到 NIC 3，不经过 NIC 4
 
 ## 包流转预演
 
@@ -84,19 +124,19 @@ NIC 3 收到包，判断:
 **去程**：
 ```
 应用: src=192.168.1.100, dst=外部IP
-  → NIC 1 readLoop → 注入 gVisor
-  → iptables SNAT: src=192.168.1.100 → src=VIP
-  → 路由: dst=外部IP → default → NIC 3
-  → NIC 3 分发: src=VIP ∈ mesh, dst 未命中通告路由 → 环回到 Forwarder
+  → NIC 1 readLoop → 手动 SNAT: src=192.168.1.100 → src=VIP
+  → 注入 gVisor
+  → 路由: dst=外部IP → default → NIC 4
+  → NIC 4 分发: dst 未命中通告路由 → 环回到 Forwarder
   → Forwarder 处理连接
 ```
 
 **回程**：
 ```
 Forwarder: src=外部IP, dst=VIP
-  → conntrack DNAT (Output hook): dst=VIP → dst=192.168.1.100
-  → 路由: dst=192.168.1.100 → default → NIC 3
-  → NIC 3 分发: src=外部IP ∉ mesh → 送往 TUN
+  → 路由: dst=VIP → NIC 1
+  → NIC 1 writeLoop: 手动 DNAT: dst=VIP → dst=192.168.1.100
+  → 写回 TUN
   → 应用收到 ✓
 ```
 
@@ -107,11 +147,10 @@ Forwarder: src=外部IP, dst=VIP
 **去程**：
 ```
 应用: src=192.168.1.100, dst=10.11.61.50 (命中通告路由)
-  → NIC 1 readLoop → 注入 gVisor
-  → iptables SNAT: src=192.168.1.100 → src=VIP
-  → 路由: dst=10.11.61.50 → default → NIC 3
-  → NIC 3 分发: 
-      src=VIP ∈ mesh ✓
+  → NIC 1 readLoop → 手动 SNAT: src=192.168.1.100 → src=VIP
+  → 注入 gVisor
+  → 路由: dst=10.11.61.50 → default → NIC 4
+  → NIC 4 分发: 
       dst=10.11.61.50 命中通告路由 ✓
       → IPIP 封装:
           外层: src=本地GIP, dst=出口节点GIP
@@ -122,7 +161,8 @@ Forwarder: src=外部IP, dst=VIP
 **出口节点处理**：
 ```
   → NIC 2 收到 IPIP 包
-  → 解封装 IPIP
+  → 传递给 NIC 3（外层 dst=本地EIP）
+  → NIC 3: 解封装 IPIP
   → 内层: src=VIP, dst=10.11.61.50
   → 访问目标: src=出口节点IP, dst=10.11.61.50
   → 目标回包: src=10.11.61.50, dst=出口节点IP
@@ -133,8 +173,8 @@ Forwarder: src=外部IP, dst=VIP
 ```
   → mesh 网络 → 本地 NIC 2 接收
   → 包: src=10.11.61.50, dst=VIP (非 IPIP)
-  → 路由: dst=VIP ∈ 100.1.0.0/16 → NIC 3
-  → NIC 3 分发: src=10.11.61.50 ∉ mesh → 送往 TUN
+  → 路由: dst=VIP → NIC 1
+  → NIC 1 writeLoop: 手动 DNAT → 写回 TUN
   → 应用收到 ✓
 ```
 
@@ -146,14 +186,12 @@ Forwarder: src=外部IP, dst=VIP
 ```
 其他节点应用: src=其他节点应用IP, dst=192.168.1.100 (本地网络)
   → 其他节点做 IPIP 封装:
-      外层: src=其他节点GIP, dst=本地GIP
+      外层: src=其他节点GIP, dst=本地EIP
       内层: src=其他节点VIP, dst=192.168.1.100
   → mesh 网络 → 本地 NIC 2 接收
-  → NIC 2 传递给 NIC 3（不解封装）
-  → NIC 3 分发:
-      src=其他节点GIP ∈ mesh ✓
-      判断: 这是 IPIP 包（外层 dst=本地GIP）
-      → 解封装 IPIP
+  → 路由: dst=本地EIP → NIC 3
+  → NIC 3:
+      解封装 IPIP
       → 内层: src=其他节点VIP, dst=192.168.1.100
       → 环回到 Forwarder（无 DNAT，跨节点执行 Forwarder）
   → Forwarder 访问 192.168.1.100
@@ -164,30 +202,42 @@ Forwarder: src=外部IP, dst=VIP
 
 ## 关键设计点
 
-1. **NIC 1 仅接收**：不做 writeLoop，所有回程数据通过 NIC 3 分发后送往 TUN
-2. **gVisor iptables NAT**：SNAT 在 Input hook，DNAT 由 conntrack 自动处理
-3. **NIC 3 统一分发**：先判断 src 是否 mesh，再判断 IPIP 和通告路由
-4. **IPIP 双向**：
-   - 出站：src ∈ mesh 且 dst 命中通告路由时封装，发送到出口节点
-   - 入站：src ∈ mesh 且外层 dst=本地GIP 时解封装，环回到 Forwarder
-5. **回程无 IPIP**：mesh 网络可以直接路由 dst=VIP，无需 IPIP 封装
+1. **NIC 1 恢复 writeLoop**：外部 NAT 回程包（dst=VIP）通过 VIP 路由到 NIC 1，writeLoop 做 DNAT 后写回 TUN
+2. **手动 NAT**：在 readLoop/writeLoop 中实现，有完整上下文信息
+3. **NIC 3 专门 IPIP 解封**：只处理 IPIP 解封后环回，职责单一
+4. **NIC 4 统一分发**：判断 dst 是否命中通告路由，决定 IPIP 封包或环回 Forwarder
+5. **IPIP 双向**：
+   - 出站：NIC 4 判断 dst 命中通告路由时封装，发送到 NIC 2
+   - 入站：NIC 3 解封装，环回到 Forwarder
+6. **回程无 IPIP**：mesh 网络可以直接路由 dst=VIP，通过 NIC 1 writeLoop 写回 TUN
 
 ## 实现要点
 
-1. **移除 NIC 1 的 writeLoop**：改为在 NIC 3 分发逻辑中直接写 TUN
-2. **配置 gVisor iptables**：Input hook SNAT 规则
-3. **实现 NIC 3 分发逻辑**（按顺序判断）：
-   - 判断 src 是否 ∈ mesh 网段
-   - src ∈ mesh 时：判断是否 IPIP 包（外层 dst=本地GIP）
-   - src ∈ mesh 且非 IPIP 时：判断 dst 是否命中通告路由
-4. **IPIP 封装/解封装**：在 NIC 3 统一处理
+1. **恢复 NIC 1 的 writeLoop**：处理外部 NAT 回程包，做 DNAT 后写回 TUN
+2. **手动 NAT**：readLoop 中 TranslateOutbound (SNAT)，writeLoop 中 TranslateInbound (DNAT)
+3. **新增 NIC 3 (IPIP endpoint)**：
+   - 不绑定 IP，开启 Promiscuous
+   - 接收 IPIP 包（外层 dst=本地EIP）
+   - 解封装后环回到 Forwarder
+4. **修改 NIC 4 (Loopback endpoint)**：
+   - 不绑定 IP，开启 Promiscuous
+   - 判断 dst 是否命中通告路由
+   - 命中则 IPIP 封装 → NIC 2
+   - 否则环回到 Forwarder
+5. **更新路由表**：
+   - VIP → NIC 1
+   - 100.0.0.0/8 → NIC 2
+   - EIP → NIC 3
+   - default → NIC 4
 
-## 与当前架构的对比
+## 与旧架构的对比
 
-| 项目 | 当前架构 | 新架构 |
+| 项目 | 旧架构 | 新架构 |
 |------|----------|--------|
-| NAT 位置 | readLoop/writeLoop | gVisor iptables + conntrack |
-| NIC 1 用途 | 收发 | 仅接收 |
-| 回程路径 | NIC 1 writeLoop | NIC 3 分发 → 送往 TUN |
-| 分发逻辑 | 分散 | NIC 3 统一 |
+| NAT 位置 | readLoop/writeLoop | readLoop/writeLoop（保持不变） |
+| NIC 1 用途 | 仅接收 | 接收 + writeLoop 写回 |
+| NIC 3 用途 | 统一分发 | IPIP 解封 |
+| NIC 4 用途 | - | 统一分发 |
+| 回程路径 | NIC 3 分发 → 送往 TUN | NIC 1 writeLoop |
 | IPIP 解封装 | NIC 2 | NIC 3 |
+| IPIP 封装 | NIC 3 | NIC 4 |

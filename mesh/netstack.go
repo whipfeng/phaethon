@@ -415,8 +415,9 @@ func (n *Netstack) initStack() error {
 	s.SetRouteTable(routes)
 
 	// Configure iptables SNAT for bypass gateway
-	// Packets from TUN (NIC 1) going to mesh (NIC 2) need SNAT: src → VIP
+	// Packets from TUN (NIC 1) going to external networks need SNAT: src → VIP
 	// conntrack automatically handles reverse NAT (DNAT) for return packets
+	// Patch #4 enables InputInterface matching in Postrouting hook
 	if n.meshSubnet != nil {
 		// Calculate VIP (subnet + 1)
 		vipIP := make(net.IP, 4)
@@ -425,12 +426,16 @@ func (n *Netstack) initStack() error {
 		vipAddr := tcpip.AddrFrom4Slice(vipIP)
 
 		// Create NAT table with Postrouting hook
-		// Rule: all packets in Postrouting, SNAT src to VIP
-		// (Postrouting doesn't support interface matching, so match all)
+		// Rule: packets from NIC 1 (TUN) in Postrouting, SNAT src to VIP
+		// InputInterface filter ensures only bypass gateway traffic is SNATed
 		natTable := stack.Table{
 			Rules: []stack.Rule{
 				{
-					// No filter - match all packets in Postrouting
+					// Filter: match packets from NIC 1 (TUN adapter)
+					Filter: stack.IPHeaderFilter{
+						InputInterface:      "nic1",
+						InputInterfaceInvert: false,
+					},
 					Target: &stack.SNATTarget{
 						Addr:            vipAddr,
 						NetworkProtocol: ipv4.ProtocolNumber,
@@ -456,7 +461,7 @@ func (n *Netstack) initStack() error {
 
 		// Replace NAT table (ipv4=false means IPv4)
 		s.IPTables().ReplaceTable(stack.NATID, natTable, false /* ipv6 */)
-		util.LogInfo("netstack: iptables SNAT configured (VIP=%s, Postrouting NIC 2)", vipAddr)
+		util.LogInfo("netstack: iptables SNAT configured (VIP=%s, Postrouting InputInterface=nic1)", vipAddr)
 	}
 
 	util.LogInfo("netstack: initialized with 2-NIC topology (NIC 1: TUN, NIC 2: Mesh/GIP=%s)", n.dnsAddr)

@@ -1,5 +1,18 @@
 # 多 NIC 架构实现计划
 
+## 状态：❌ 已废弃 - 被 `gvisor_route_selector_architecture.md` 取代
+
+**最终方案：RouteSelector + Link NICs（见 `gvisor_route_selector_architecture.md`）**
+
+**关键变化**：
+- ❌ **取消 Loopback NIC (NIC 3)**：IPIP 封装在 forwardUnicastPacket 中完成，不需要独立的 Loopback NIC
+- ✅ **Link NICs**：每个直连 peer 一个 NIC（NIC 2, 3, 4...），而非共享 mesh NIC
+- ✅ **RouteSelector**：在 FindRoute 过程中做动态路由决策，决定是否需要 IPIP 封装
+
+**以下内容为历史实现记录，仅供参考，架构决策以 `gvisor_route_selector_architecture.md` 为准。**
+
+---
+
 ## 目标
 
 将当前单 NIC 架构重构为多 NIC 架构，充分利用 gVisor 的路由能力。

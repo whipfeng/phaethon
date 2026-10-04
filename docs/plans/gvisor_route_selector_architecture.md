@@ -21,32 +21,38 @@
 
 | NIC | 角色 | 绑定 | 混杂 | 说明 |
 |-----|------|------|------|------|
-| 1 | TUN | fakeIP 子网 / 宿主网段 | 是 | 栈↔宿主边界 |
-| 2 | Link-VM | 无 | 否 | 直连 VM 的链路 |
-| 3 | Link-GG | 无 | 否 | 直连 GG 的链路 |
-| 4 | Link-MS9 | 无 | 否 | 直连 MS9 的链路 |
+| 1 | TUN | VIP(.1) / GIP(.3) | 是 | 栈↔宿主边界 + 本节点 mesh 服务地址 |
+| 2 | Link-VM | 无 | 是 | 直连 VM 的链路（收发） |
+| 3 | Link-GG | 无 | 是 | 直连 GG 的链路（收发） |
+| 4 | Link-MS9 | 无 | 是 | 直连 MS9 的链路（收发） |
 | 100+ | h_tunnel | 无 | 是 | 沿用现状 |
 
 **关键变化**：
 - ❌ **没有 Tunnel NIC**：IPIP 封装在转发路径完成
-- ✅ **Link NICs**：每个直连 peer 一个 NIC，直接与该 peer 通信
-- ✅ **VIP/EIP 不绑定**：只是 NAT 转换地址，从子网算出
+- ✅ **Link NICs**：每个直连 peer 一个 NIC，直接与该 peer 通信（发送 + 入站注入，见 §5.2）
+- ✅ **VIP/EIP 不绑定**：只是 NAT/隧道身份地址，从子网算出（EIP 仅用于 IPIP 外层 src 与对端匹配解封装）
+- ✅ **GIP 绑 NIC 1**：admin/DNS 监听地址按地址绑定，与 NIC 无关；meshEP 退役后 NIC 2 让位给 Link-VM
+- ✅ **fakeIP 不绑定**：经 NIC 1 混杂模式 + Forwarder 拦截（传输层 demuxer）
+- ✅ **Link NICs 混杂模式**：入站帧注入后需在 Link NIC 上完成本地交付判定（dst=GIP/VIP 等本地地址不绑在 Link NIC 上，混杂模式使 demuxer 放行）
+- ✅ **meshEP 退役**：不再有共享 mesh NIC；入站帧由 HandleMeshFrame 按 fromNodeID 注入对应 Link NIC，IPIP 解封装保留在帧层
 
 ### 1.2 路由表
 
 ```
 路由表:
   100.1.0.1/32      → NIC 1 (VIP，本地交付)
-  192.168.0.0/16    → NIC 1 (宿主网段，回程)
-  100.2.0.0/16      → NIC 2 (VM 子网，直连)
-  100.179.0.0/16    → NIC 3 (GG 子网，直连)
-  100.189.0.0/16    → NIC 4 (MS9 子网，直连)
+  100.1.0.0/16      → NIC 1 (本节点子网，TUN 宿主回程)
+  192.168.0.0/16    → NIC 1 (宿主网段，旁路网关客户端回程)
+  100.2.0.0/16      → Link-VM (VM 子网，直连)
+  100.179.0.0/16    → Link-GG (GG 子网，直连)
+  100.189.0.0/16    → Link-MS9 (MS9 子网，直连)
   <通告路由前缀>    → RouteSelector 决策（见下文）
 ```
 
 **注意**：
-- 本节点子网不入表（避免 fakeIP 被转发）
-- 默认路由不存在（由 RouteSelector 兜底）
+- **本节点子网入表（修订）**：原"不入表（避免 fakeIP 被转发）"的顾虑由补丁 #2b 消除——handleValidatedPacket 在转发前先查 `RouteSelectorLocalDelivery`，fakeIP/本地地址在转发路径消费路由表之前已被本地交付。入表必要性：TUN 宿主（src=hostIP .2）与 forwarder accept 路径需要到本节点子网地址的**普通出栈路由**（findLocalRoute 返回 PacketLoop 环回路由，不能用于 forwarder 回程）。
+- **宿主网段入表**：旁路网关客户端（src=192.168.x）与 DNS 应答的回程路由。补丁 #6（FindRouteViaNIC）只覆盖 conntrack DNAT 回程；栈内 socket 应答（DNSHijacker `Write(To:)`，FindRoute(1, GIP, client)）必须依赖路由表。
+- 默认路由不存在（由 RouteSelector 兜底）。
 
 ---
 
@@ -81,8 +87,10 @@ type RouteDecision struct {
 
 ```go
 func RouteSelector(dst tcpip.Address) RouteDecision {
-    // 1. fakeIP → 本地交付
-    if isFakeIP(dst) {
+    // 1. fakeIP / 本地 GIP / 本地 VIP → 本地交付
+    //    （GIP=admin/DNS 监听；VIP=本节点服务地址；conntrack 回程已在
+    //     Prerouting DNAT 改写 dst，不会走到这里）
+    if isFakeIP(dst) || isLocalGIP(dst) || isLocalVIP(dst) {
         return RouteDecision{LocalDelivery: true, Cacheable: true}
     }
     
@@ -101,6 +109,13 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
     }
 }
 ```
+
+**生效范围（补丁 #3 修订）**：RouteSelector 只在 `id == 0 && localAddr == ""` 的 FindRoute 调用中生效——即仅 IP 转发路径（forwardUnicastPacket：无接收 NIC、无本地地址上下文）。其余调用全部跳过：
+
+- TCP accept/RST：`FindRoute(inNIC, pktDst, pktSrc)`，id≠0 且 localAddr≠""。若不跳过，forwarder 回程（dst=LAN 客户端）会被误判 NeedIPIP，SYN-ACK 被错误封装发往 mesh。
+- UDP Forwarder Connect：`FindRoute(inNIC, "", client)`，id≠0 但 localAddr==""（endpoint 尚未 bind）。若不跳过，DNS/UDP 应答路由会被 selector 按 advertise 前缀误判（如 LAN 段被通告时回程被封装）。应答必须经接收 NIC 直出。
+- 栈内 socket 单播应答（如 DNSHijacker 未连接 socket 的 `Write(To:)`）：`FindRoute(0, boundGIP, client)`，localAddr≠""。这类流量走路由表（宿主网段/本节点子网 → NIC 1）。
+- 栈内跨 NIC 拨号（forwardToRemote：`FindRoute(1, GIP, remoteGIP)`）：id≠0，走路由表 + chosenRoute 兜底（本地地址在 NIC 1、出口为 Link NIC）。
 
 ### 2.4 VIP 和 EIP 的计算
 
@@ -315,7 +330,9 @@ QG 本地应用 → MS9 (100.189.0.1, 非直连)
 [NIC1 发送] → TUN → OS → LAN
 ```
 
-**关键**：DNAT 后目标是 LAN IP，路由表有明确路由（192.168.0.0/16 → NIC 1），不需要策略路由。
+**关键**：
+1. **入站注入**：HandleMeshFrame 收到外层帧 → 帧层解封装（外层 dst == 本节点 EIP）→ 内层包按 fromNodeID 注入 NIC 3 (Link-GG) → netstack 正常走 Prerouting（conntrack 得到 InputInterface=NIC3）
+2. DNAT 后目标是 LAN IP，路由表有明确路由（192.168.0.0/16 → NIC 1），不需要策略路由
 
 ---
 
@@ -332,10 +349,12 @@ QG 本地应用 → MS9 (100.189.0.1, 非直连)
 
 ### 5.2 Link NIC 的职责
 
-Link NIC 是"哑"的，只负责发送：
+Link NIC 是"哑"的，职责是收发直连：
 - 不做路由决策（路由在 FindRoute 完成）
-- 不做 IPIP 封装（封装在转发路径完成）
-- 只做链路层发送（交给 mesh hop 表选路）
+- 不做 IPIP 封装/解封装（封装在转发路径、解封装在帧层完成）
+- 发送：链路层发送交给 mesh hop 表选路（非直连目标经中继时同样由 hop 表决定下一跳）
+- 接收：HandleMeshFrame 收到帧后按 fromNodeID 找到对应 Link NIC 调用 InjectInbound；
+  conntrack 依赖该入口标识记录 OriginalInputNIC（补丁 #5），DNAT 回程靠它选出口 NIC（补丁 #6）
 
 ### 5.3 与共享 mesh NIC 的对比
 
@@ -453,6 +472,37 @@ func (s *Stack) FindRoute(...) (*Route, error) {
 
 **优势**：支持任意源 IP 回程，无需配置 LAN 网段路由。
 
+### 6.7 补丁 #2b：本地交付优先级（新增）
+
+**文件**：`pkg/tcpip/network/ipv4/ipv4.go`（+ ipv6.go）
+**函数**：`handleValidatedPacket`
+
+**问题**：补丁 #2 的转发优先是排他的——转发开启时本地交付永不发生。但 RouteSelector 标记 `LocalDelivery` 的目标（fakeIP、GIP、本地 VIP）必须在 IP 层本地交付（经传输层 demuxer 到达 Forwarder/GIP 监听），否则 fakeIP 包会被转发路径送回 TUN 形成自环。
+
+**修复**：转发前先查 RouteSelector；`LocalDelivery=true` 的目标跳过转发、走本地交付：
+
+```go
+if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
+    e.handleForwardingError(e.forwardUnicastPacket(pkt))
+    return
+}
+// 本地交付（AcquireAssignedAddress + deliverPacketLocally，原有路径）
+```
+
+`RouteSelectorLocalDelivery(dst)` 与 FindRoute 共用 §2.5 的决策缓存。
+
+### 6.8 补丁 #3 修订：RouteSelector 生效范围（新增）
+
+**问题**：补丁 #3 在所有 FindRoute 调用前执行，包括传输层 accept 路径的建连路由（`tcp/accept.go: FindRoute(inNIC, pktDst, pktSrc)`）。forwarder 回程的 remote 是 TUN 客户端（非 mesh 目标），会被误判为 NeedIPIP，SYN-ACK 被错误封装发往 mesh。
+
+**修复**：RouteSelector 仅在 `id == 0 || localAddr == ""` 时介入（无显式本地上下文的选路）。accept/RST 等带接收 NIC + 本地地址的调用直接走 NIC 出栈早退分支。
+
+### 6.9 补丁 #6 完成：FindRouteViaNIC（新增）
+
+**问题**：DNAT 回程（dst=LAN 客户端）走 `forwardUnicastPacket → FindRoute(OutputNIC, "", dst)`，但路由表没有 LAN 网段（设计 §8.4 明确不配），路由表+本地路由都失配 → 回程被丢弃。
+
+**修复**：forwardUnicastPacket 在 `pkt.OutputNICName != ""` 时改调 `stack.FindRouteViaNIC(nicID, remoteAddr)`：跳过 RouteSelector、跳过路由表，直接构造经该 NIC 的直连路由（gateway 为空，与 FindRoute 早退分支同构）。这使 conntrack 辅助路由真正闭环：去程记录 OriginalInputNIC → 回程 DNAT 时恢复输出 NIC → 直连路由出栈。
+
 ---
 
 ## 7. 实施计划
@@ -541,7 +591,7 @@ LAN(192.168.1.100) → 8.8.8.8
 ```
 8.8.8.8 → LAN(192.168.1.100)
 
-[mesh NIC 进入]
+[Link NIC 进入 (如 NIC3 Link-GG)]
   src=8.8.8.8, dst=VIP (100.1.0.1)
     ↓
 [Prerouting DNAT] (conntrack)
@@ -555,7 +605,7 @@ LAN(192.168.1.100) → 8.8.8.8
   返回路由: NIC1
     ↓
 [Postrouting]
-  InputInterface = mesh NIC ✗
+  InputInterface = NIC3 (Link-GG) ✗
   不 SNAT ✅
     ↓
 [NIC1 发送] src=8.8.8.8, dst=192.168.1.100 → LAN
@@ -563,7 +613,7 @@ LAN(192.168.1.100) → 8.8.8.8
 
 **关键**：
 - 去程：InputInterface=NIC1 → SNAT
-- 回程：InputInterface=mesh NIC → 不 SNAT
+- 回程：InputInterface=Link NIC（非 NIC1）→ 不 SNAT
 - 回程：DNAT 时从 conntrack 取出 OriginalInputNIC=1 → 路由到 NIC1
 
 ### 8.4 NAT 规则配置
@@ -582,11 +632,12 @@ natTable.AddRule(iptables.Rule{
     },
 })
 
-// 3. 路由表（不需要 LAN 网段路由！）
+// 3. 路由表（与 §1.2 一致，见其修订说明）
 routeTable := []tcpip.Route{
-    {Destination: vipAddr, NIC: 1},         // VIP → NIC1
-    {Destination: "100.0.0.0/8", NIC: 2},   // mesh → Link NICs
-    // 不需要 192.168.0.0/16 → NIC1（补丁 #6 自动处理）
+    {Destination: vipAddr, NIC: 1},            // VIP → NIC1
+    {Destination: "<本节点子网>", NIC: 1},      // 本节点子网（TUN 宿主回程）
+    {Destination: "<宿主网段>", NIC: 1},        // 宿主网段（栈内 socket 应答，如 DNSHijacker）
+    {Destination: "<peer 子网>", NIC: 2..N},   // 各 peer 子网 → 对应 Link NIC
 }
 ```
 

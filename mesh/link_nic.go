@@ -99,9 +99,10 @@ func (l *LinkNIC) LinkAddress() tcpip.LinkAddress {
 func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 
 // WritePackets implements stack.LinkEndpoint.WritePackets.
-// Sends packets to the associated peer node. Per design §5.2, the Link NIC does
-// no routing decisions - SendToNode delegates to the mesh hop table for
-// direct or relayed delivery.
+// Sends packets toward the node that owns each packet's destination IP; the
+// mesh hop table picks the next hop at send time (direct or relayed, design
+// §5.2). Routes for multi-hop nodes land on the next-hop peer's Link NIC, so
+// the bound peer is only a fallback.
 //
 // Packet buffers remain owned by the caller (same contract as channel.Endpoint,
 // which clones before queueing); we only read the data synchronously.
@@ -115,8 +116,18 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		buf := pkt.ToBuffer()
 		pktData := buf.Flatten()
 
-		if err := l.meshMgr.SendToNode(l.peerNodeID, pktData); err != nil {
-			util.LogDebug("[LINKNIC] send to node %s failed: %v", l.peerNodeID, err)
+		// Resolve the FINAL target node from the packet's destination
+		// (inner dst for plain frames, outer dst for IPIP frames — both are
+		// node-subnet addresses). SendToNode then routes via the hop table.
+		target := l.peerNodeID
+		if len(pktData) >= 20 && pktData[0]>>4 == 4 {
+			if nodeID := l.meshMgr.ResolveNodeIDForIP(net.IP(pktData[16:20])); nodeID != "" {
+				target = nodeID
+			}
+		}
+
+		if err := l.meshMgr.SendToNode(target, pktData); err != nil {
+			util.LogDebug("[LINKNIC] send to node %s failed: %v", target, err)
 			continue
 		}
 		count++

@@ -46,8 +46,12 @@
   100.2.0.0/16      → Link-VM (VM 子网，直连)
   100.179.0.0/16    → Link-GG (GG 子网，直连)
   100.189.0.0/16    → Link-MS9 (MS9 子网，直连)
-  <通告路由前缀>    → RouteSelector 决策（见下文）
+  <多跳 mesh 子网>  → 下一跳 peer 的 Link NIC（见 §4.4；如 MS9 经 GG：100.189.0.0/16 → Link-GG）
+  <非 mesh 通告前缀> → RouteSelector 决策（NeedIPIP，见下文）
 ```
+
+**注意**：
+- **多跳 mesh 子网入表**：mesh 路由表（Dijkstra 全量前缀）中所有 **mesh 网段内**的前缀都入表，指向通往出口节点的**下一跳** Link NIC；直连 peer 即自身，多跳即首跳（§4.4/§5.2）。Link NIC 发送时按包的真实目标 IP 解析最终节点，由 mesh hop 表决定下一跳（`SendToNode(最终节点)`）。非 mesh 的通告前缀（如节点后挂的 LAN 网段）**不入表**，继续走 RouteSelector 的 IPIP 出口路径。
 
 **注意**：
 - **本节点子网入表（修订）**：原"不入表（避免 fakeIP 被转发）"的顾虑由补丁 #2b 消除——handleValidatedPacket 在转发前先查 `RouteSelectorLocalDelivery`，fakeIP/本地地址在转发路径消费路由表之前已被本地交付。入表必要性：TUN 宿主（src=hostIP .2）与 forwarder accept 路径需要到本节点子网地址的**普通出栈路由**（findLocalRoute 返回 PacketLoop 环回路由，不能用于 forwarder 回程）。
@@ -72,8 +76,9 @@ type RouteDecision struct {
     // 是否需要 IPIP 封装
     NeedIPIP bool
     
-    // IPIP 出口节点 VIP（从子网算出）
-    EgressVIP tcpip.Address
+    // IPIP 出口节点 EIP（隧道终点，从子网算出；与帧层解封装条件
+    // "外层 dst == 本节点 EIP"（§2.4/§4.5）一致）
+    EgressEIP tcpip.Address
     
     // 是否可缓存（动态选路时设为 false）
     Cacheable bool
@@ -101,10 +106,10 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
     }
     
     // 3. 非 mesh 目标 → IPIP 封装
-    egressVIP := selectEgressNode(dst)  // 选择出口节点
+    egressEIP := selectEgressNode(dst)  // 选择出口节点
     return RouteDecision{
         NeedIPIP: true,
-        EgressVIP: egressVIP,  // 从子网算出，不是查表
+        EgressEIP: egressEIP,  // 从子网算出（EIP=隧道终点），不是查表
         Cacheable: true,       // 如果选路是确定性的
     }
 }
@@ -139,7 +144,7 @@ func calculateEIP(subnet net.IPNet) net.IP {
 **RouteSelector 使用**：
 ```go
 egressNodeSubnet := getEgressNodeSubnet(egressNodeID)
-egressVIP := calculateVIP(egressNodeSubnet)  // 外层封装目标
+egressEIP := calculateEIP(egressNodeSubnet)  // 外层封装目标（隧道终点）
 ```
 
 ### 2.5 路由缓存兼容性
@@ -175,12 +180,12 @@ if route.Cacheable {
 [RouteSelector 决策]
     - 非 mesh 目标
     - NeedIPIP = true
-    - EgressVIP = 100.179.0.1 (GG)
+    - EgressEIP = 100.179.0.4 (GG)
     ↓
 [返回 Route]
     Route{
         NIC: ?,  // 还不知道
-        Gateway: 100.179.0.1,  // 外层目标
+        Gateway: 100.179.0.4,  // 外层目标
         NeedIPIP: true,
     }
     ↓
@@ -189,9 +194,9 @@ if route.Cacheable {
     ↓
 [IPIP 封装]
     内层: src=QG, dst=8.8.8.8
-    外层: src=QG_EIP, dst=100.179.0.1, proto=4
+    外层: src=QG_EIP, dst=100.179.0.4, proto=4
     ↓
-[FindRoute(100.179.0.1)] ← 外层包重新路由
+[FindRoute(100.179.0.4)] ← 外层包重新路由
     ↓
 [路由表匹配]
     100.179.0.0/16 → NIC 3 (Link-GG)
@@ -257,20 +262,20 @@ LAN(192.168.1.100) → 8.8.8.8
 [RouteSelector]
   - 非 mesh 目标
   - NeedIPIP=true
-  - EgressVIP=100.179.0.1 (GG)
+  - EgressEIP=100.179.0.4 (GG)
     ↓
 [转发代码看到 NeedIPIP=true]
     ↓
 [IPIP 封装]
   内层: src=100.1.0.1, dst=8.8.8.8
-  外层: src=100.1.0.4 (QG EIP), dst=100.179.0.1 (GG VIP), proto=4
+  外层: src=100.1.0.4 (QG EIP), dst=100.179.0.4 (GG EIP，隧道终点)，proto=4
     ↓
-[FindRoute(100.179.0.1)]
+[FindRoute(100.179.0.4)]
   匹配: 100.179.0.0/16 → NIC 3 (Link-GG)
     ↓
 [NIC3 发送] → GG 节点
     ↓
-[GG 解封装] → 8.8.8.8
+[GG 解封装: 外层 dst == 本节点 EIP（§4.5）] → 8.8.8.8
 ```
 
 ### 4.3 本地应用 → mesh VIP（直连）
@@ -399,7 +404,7 @@ if s.routeSelector != nil {
         return makeLocalRoute(...)
     }
     if decision.NeedIPIP {
-        return makeIPIPRoute(decision.EgressVIP)
+        return makeIPIPRoute(decision.EgressEIP)
     }
 }
 ```

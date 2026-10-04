@@ -25,8 +25,8 @@ type RouteSelectorConfig struct {
 	// IsFakeIP checks if an IP is a fakeIP (DNS-mapped virtual IP)
 	IsFakeIP func(ip net.IP) bool
 
-	// SelectEgressNode selects the egress node for a given destination
-	// Returns (nodeVIP, found)
+	// SelectEgressNode selects the egress node for a given destination.
+	// Returns the egress node's EIP (tunnel terminator) for IPIP outer dst.
 	SelectEgressNode func(dst net.IP) (tcpip.Address, bool)
 }
 
@@ -59,13 +59,15 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 			return stack.RouteDecision{}
 		}
 
-		// 3. Non-mesh destination → IPIP encapsulation
+		// 3. Non-mesh destination → IPIP encapsulation (outer dst = egress
+		//    node EIP, the tunnel terminator identity the peer's frame-level
+		//    decapsulator matches on — design §2.4/§4.5)
 		if cfg.SelectEgressNode != nil {
-			egressVIP, found := cfg.SelectEgressNode(dstIP)
+			egressEIP, found := cfg.SelectEgressNode(dstIP)
 			if found {
 				return stack.RouteDecision{
 					NeedIPIP:  true,
-					EgressVIP: egressVIP,
+					EgressEIP: egressEIP,
 					Cacheable: true, // Static routing based on subnet
 				}
 			}

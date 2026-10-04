@@ -1,8 +1,17 @@
 # gVisor 路由栈演进方向
 
-## 状态：⚠️ 已废弃 - 被 `gvisor_stack_integration_design.md` 取代
+## 状态：❌ 已废弃 - 被 `gvisor_route_selector_architecture.md` 取代
 
-**最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）**
+**最终方案：RouteSelector + Link NICs（见 `gvisor_route_selector_architecture.md`）**
+
+**关键变化**：
+- 不再需要 Tunnel NIC（IPIP 封装在路由决策时完成）
+- 每个直连 peer 一个 Link NIC（而非共享 mesh NIC）
+- RouteSelector 扩展点在 FindRoute 过程中做动态决策
+
+---
+
+**以下内容为历史调研，仅供参考，架构决策以 `gvisor_route_selector_architecture.md` 为准。**
 
 ---
 

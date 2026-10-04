@@ -1,10 +1,18 @@
 # Multi-NIC 架构设计（手动 NAT 方案）
 
-## ⚠️ 已废弃
+## ❌ 已废弃 - 被 `gvisor_route_selector_architecture.md` 取代
 
-**本文档已废弃，被 `gvisor_stack_integration_design.md` 取代。**
+**最终方案：RouteSelector + Link NICs（见 `gvisor_route_selector_architecture.md`）**
 
-最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）。
+**关键变化**：
+- NAT 已下沉到 gVisor iptables（不需要手动 NAT）
+- 不再需要 NIC 3/4（Loopback/统一分发）
+- IPIP 封装在路由决策时完成，不需要 Tunnel NIC
+- 每个直连 peer 一个 Link NIC
+
+---
+
+**以下内容为历史设计，仅供参考，架构决策以 `gvisor_route_selector_architecture.md` 为准。**
 
 ---
 

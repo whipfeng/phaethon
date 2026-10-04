@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"net"
+
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -12,7 +14,7 @@ import (
 type LinkNIC struct {
 	nicID      tcpip.NICID
 	peerNodeID string
-	peerVIP    tcpip.Address
+	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
 	meshMgr    *MeshManager
 	
@@ -21,12 +23,12 @@ type LinkNIC struct {
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
-func NewLinkNIC(nicID tcpip.NICID, peerNodeID string, peerVIP tcpip.Address, mtu uint32, meshMgr *MeshManager) *LinkNIC {
+func NewLinkNIC(nicID tcpip.NICID, peerNodeID string, peerSubnet *net.IPNet, meshMgr *MeshManager) *LinkNIC {
 	return &LinkNIC{
 		nicID:      nicID,
 		peerNodeID: peerNodeID,
-		peerVIP:    peerVIP,
-		mtu:        mtu,
+		peerSubnet: peerSubnet,
+		mtu:        1500, // Default MTU
 		meshMgr:    meshMgr,
 	}
 }

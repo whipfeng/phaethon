@@ -51,8 +51,10 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (Phase 2+)
-	meshEP    *MeshEndpoint    // NIC 2: Mesh endpoint for mesh traffic
+	meshEP    *MeshEndpoint    // NIC 2: Mesh endpoint for mesh traffic (legacy, being replaced by linkNICs)
 	meshMgr   *MeshManager     // Mesh manager for routing decisions
+	linkNICs  map[string]*LinkNIC // NIC 2+: Per-peer Link NICs for direct mesh communication
+	linkNextNICID atomic.Uint64  // Next NIC ID for link NICs (starting at 2)
 	tunnelNICs map[string]*TunnelNIC // NIC 201+: Per-node tunnel NICs for IPIP
 	tunnelNextNICID atomic.Uint64     // Next NIC ID for tunnel NICs (starting at 201)
 
@@ -107,6 +109,7 @@ func NewNetstack() *Netstack {
 	return &Netstack{
 		htunnelEndpoints: make(map[string]*HTunnelEndpoint),
 		tunnelNICs:       make(map[string]*TunnelNIC),
+		linkNICs:         make(map[string]*LinkNIC),
 	}
 }
 
@@ -204,8 +207,130 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			routeSelector := NewRouteSelector(routeSelectorCfg)
 			n.ns.SetRouteSelector(routeSelector)
 			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
+
+			// Create Link NICs for each direct peer (per design document §1.1)
+			// Each direct peer gets its own NIC for direct mesh communication
+			if err := n.CreateLinkNICs(meshMgr); err != nil {
+				util.LogError("[NETSTACK] failed to create link NICs: %v", err)
+			}
 		}
 	}
+}
+
+// CreateLinkNICs creates a Link NIC for each direct mesh peer.
+// Per design document §1.1, each direct peer gets its own NIC (NIC 2, 3, 4, ...).
+func (n *Netstack) CreateLinkNICs(meshMgr *MeshManager) error {
+	if n.ns == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	// Get all peers
+	peers := meshMgr.GetPeers()
+	
+	// Filter for direct peers only
+	var directPeers []MeshPeerInfo
+	for _, peer := range peers {
+		if peer.Direct {
+			directPeers = append(directPeers, peer)
+		}
+	}
+
+	util.LogInfo("[NETSTACK] Creating Link NICs for %d direct peers", len(directPeers))
+
+	// Create a LinkNIC for each direct peer
+	for _, peer := range directPeers {
+		nodeID := peer.NodeID
+		
+		// Skip if already exists
+		if _, exists := n.linkNICs[nodeID]; exists {
+			continue
+		}
+
+		// Parse peer subnet
+		_, peerSubnet, err := net.ParseCIDR(peer.Subnet)
+		if err != nil {
+			util.LogError("[NETSTACK] failed to parse peer %s subnet %s: %v", nodeID, peer.Subnet, err)
+			continue
+		}
+
+		// Allocate NIC ID (starting at 2)
+		nicID := tcpip.NICID(n.linkNextNICID.Add(1))
+		if nicID < 2 {
+			nicID = 2
+			n.linkNextNICID.Store(2)
+		}
+
+		// Create LinkNIC
+		linkNIC := NewLinkNIC(nicID, nodeID, peerSubnet, meshMgr)
+		
+		// Register with gVisor stack
+		if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
+			util.LogError("[NETSTACK] failed to create NIC %d for peer %s: %v", nicID, nodeID, err)
+			continue
+		}
+
+		// Store in map
+		n.linkNICs[nodeID] = linkNIC
+
+		// Add address (local VIP) to the NIC
+		localVIP := tcpip.AddrFrom4Slice(CalculateVIP(n.meshSubnet))
+		addrWithPrefix := tcpip.AddressWithPrefix{
+			Address:   localVIP,
+			PrefixLen: 32,
+		}
+		protocolAddr := tcpip.ProtocolAddress{
+			Protocol:          ipv4.ProtocolNumber,
+			AddressWithPrefix: addrWithPrefix,
+		}
+		if err := n.ns.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
+			util.LogError("[NETSTACK] failed to add address to NIC %d: %v", nicID, err)
+		}
+
+		util.LogInfo("[NETSTACK] Created Link NIC %d for peer %s (subnet %s)", nicID, nodeID, peer.Subnet)
+	}
+
+	// Update route table with per-peer routes
+	if err := n.UpdateLinkRoutes(); err != nil {
+		util.LogError("[NETSTACK] failed to update link routes: %v", err)
+	}
+
+	return nil
+}
+
+// UpdateLinkRoutes updates the route table with per-peer routes for Link NICs.
+func (n *Netstack) UpdateLinkRoutes() error {
+	if n.ns == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	var routes []tcpip.Route
+
+	// Add route for each Link NIC (peer subnet → Link NIC)
+	for nodeID, linkNIC := range n.linkNICs {
+		// Convert subnet to tcpip.Route
+		subnet, err := tcpip.NewSubnet(
+			tcpip.AddrFrom4Slice(linkNIC.peerSubnet.IP),
+			tcpip.MaskFromBytes(linkNIC.peerSubnet.Mask),
+		)
+		if err != nil {
+			util.LogError("[NETSTACK] failed to create subnet for peer %s: %v", nodeID, err)
+			continue
+		}
+
+		// Route: peer subnet → Link NIC (no gateway)
+		routes = append(routes, tcpip.Route{
+			Destination: subnet,
+			NIC:         linkNIC.nicID,
+		})
+
+		util.LogInfo("[NETSTACK] Added route: %s → NIC %d (%s)", subnet, linkNIC.nicID, nodeID)
+	}
+
+	// Set the route table
+	n.ns.SetRouteTable(routes)
+	util.LogInfo("[NETSTACK] Updated route table with %d Link NIC routes", len(routes))
+
+	return nil
 }
 
 // Addr returns the host IP address (TUN adapter OS side, .2).

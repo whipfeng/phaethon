@@ -8,6 +8,7 @@ require (
 	github.com/refraction-networking/utls v1.8.1
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5
 	github.com/vishvananda/netlink v1.3.1
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/sys v0.45.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
@@ -29,7 +30,6 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
-	go.etcd.io/bbolt v1.5.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.34.0 // indirect
@@ -40,4 +40,4 @@ require (
 	golang.org/x/tools v0.43.0 // indirect
 )
 
-replace gvisor.dev/gvisor => ../gvisor-fork
+replace gvisor.dev/gvisor => github.com/whipfeng/gvisor-fork v0.0.0-20261004092809-2e4e3d7f4343

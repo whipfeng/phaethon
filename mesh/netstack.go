@@ -152,8 +152,10 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 		// Configure RouteSelector for dynamic routing decisions
 		// RouteSelector is called during FindRoute to handle:
 		// 1. fakeIP → LocalDelivery (to Forwarder for domain resolution)
-		// 2. Mesh subnet → empty decision (route table handles direct peer routes)
-		// 3. Non-mesh → IPIP encapsulation with egress node VIP
+		// 2. Mesh subnet → empty decision (route table handles peer routes,
+		//    incl. multi-hop via next-hop Link NICs)
+		// 3. Non-mesh → IPIP encapsulation with egress node EIP (tunnel
+		//    terminator; matches the frame-level decap condition §4.5)
 		if n.ns != nil && n.meshSubnet != nil {
 			// Calculate local VIP and EIP
 			localVIP := CalculateVIP(n.meshSubnet)
@@ -173,7 +175,12 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 					if fakeIPPool == nil {
 						return false
 					}
-					return fakeIPPool.Contains(ip)
+					// InAllocRange (not Contains): the pool range starts at the
+					// subnet base, so Contains would classify the reserved
+					// infrastructure addresses (hostIP/VIP/GIP/EIP) as fakeIP and
+					// make the selector consume mesh→host return traffic locally
+					// instead of forwarding it to the TUN (design §1.2).
+					return fakeIPPool.InAllocRange(ip)
 				},
 				SelectEgressNode: func(dst net.IP) (tcpip.Address, bool) {
 					// Get route table
@@ -194,13 +201,16 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 								continue
 							}
 
-							// Get VIP for the egress node
-							targetVIP := meshMgr.GetVIPForNode(targetNodeID)
-							if targetVIP == nil {
+							// EIP for the egress node: IPIP outer dst must be
+							// the tunnel terminator identity (EIP), matching
+							// HandleMeshFrame's decap condition (outer dst ==
+							// local EIP) — design §2.4/§4.5.
+							targetEIP := meshMgr.GetEIPForNode(targetNodeID)
+							if targetEIP == nil {
 								continue
 							}
 
-							return tcpip.AddrFrom4Slice(targetVIP), true
+							return tcpip.AddrFrom4Slice(targetEIP), true
 						}
 					}
 
@@ -298,7 +308,9 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 //   - VIP /32          → NIC 1 (local delivery)
 //   - 本节点子网 /16    → NIC 1 (TUN 宿主回程；补丁 #2b 保证 fakeIP 本地交付)
 //   - 192.168.0.0/16   → NIC 1 (宿主网段，旁路网关客户端 + 栈内 socket 应答)
-//   - <peer subnet>    → Link NIC (direct or relayed via mesh hop table)
+//   - <直连 peer 子网>  → 该 peer 的 Link NIC
+//   - <多跳 mesh 子网>  → 下一跳 peer 的 Link NIC（§4.4/§5.2，hop 表在发送时
+//     决定下一跳；非 mesh 通告前缀不入表，走 RouteSelector IPIP 出口）
 //
 // No mesh /8 fallback exists: non-mesh destinations are resolved by the
 // RouteSelector (IPIP egress), not the route table. This is the single
@@ -353,6 +365,7 @@ func (n *Netstack) UpdateLinkRoutes() error {
 	}
 
 	// Per-peer subnets → Link NICs
+	installed := make(map[string]bool, len(n.linkNICs))
 	for nodeID, linkNIC := range n.linkNICs {
 		subnet, err := tcpip.NewSubnet(
 			tcpip.AddrFrom4Slice(linkNIC.peerSubnet.IP.To4()),
@@ -366,6 +379,57 @@ func (n *Netstack) UpdateLinkRoutes() error {
 			Destination: subnet,
 			NIC:         linkNIC.nicID,
 		})
+		installed[subnet.String()] = true
+	}
+
+	// Multi-hop mesh prefixes → Link NIC of the next hop toward the egress
+	// node (design §1.2 amended + §4.4/§5.2). Direct peers are covered above;
+	// this installs the remaining mesh subnets known from the mesh route
+	// table so FindRoute succeeds for stack-socket dials (forwardToRemote)
+	// and the forwarding path alike. Non-mesh advertised prefixes are NOT
+	// installed: they must egress via the RouteSelector's IPIP path.
+	if n.meshMgr != nil && n.meshNetwork != nil {
+		for _, route := range n.meshMgr.GetRouteTable().Routes {
+			prefixIP4 := route.Prefix.IP.To4()
+			maskIP4 := net.IP(route.Prefix.Mask).To4()
+			if prefixIP4 == nil || maskIP4 == nil {
+				continue
+			}
+			prefixNet := &net.IPNet{IP: prefixIP4, Mask: net.IPMask(maskIP4)}
+			key := prefixNet.String()
+			if installed[key] {
+				continue
+			}
+			// Only mesh subnets; advertised non-mesh prefixes stay on the
+			// RouteSelector IPIP path.
+			if !n.meshNetwork.Contains(prefixNet.IP) {
+				continue
+			}
+			egressID := n.meshMgr.SelectEgressNodeID(prefixNet.IP, route.Entries)
+			if egressID == "" {
+				continue
+			}
+			nextHopID := n.meshMgr.NextHopNodeID(egressID)
+			if nextHopID == "" {
+				continue
+			}
+			linkNIC, ok := n.linkNICs[nextHopID]
+			if !ok {
+				continue
+			}
+			subnet, err := tcpip.NewSubnet(
+				tcpip.AddrFrom4Slice(prefixIP4),
+				tcpip.MaskFromBytes(maskIP4),
+			)
+			if err != nil {
+				continue
+			}
+			routes = append(routes, tcpip.Route{
+				Destination: subnet,
+				NIC:         linkNIC.nicID,
+			})
+			installed[key] = true
+		}
 	}
 
 	n.ns.SetRouteTable(routes)
@@ -603,14 +667,29 @@ func (n *Netstack) initStack() error {
 		vipIP[3] = vipIP[3] + 1
 		vipAddr := tcpip.AddrFrom4Slice(vipIP)
 
-		// Create NAT table with Postrouting hook
-		// Rule: packets that entered via NIC 1 (TUN), SNAT src to VIP
-		// InputInterface filter ensures only bypass gateway traffic is SNATed;
-		// Link NIC traffic (mesh peers) is not SNATed.
+		// Create NAT table mirroring upstream DefaultTables structure: every
+		// hook the NAT table traverses (Prerouting/Input/Output/Postrouting)
+		// MUST have a real chain — CheckPrerouting etc. index
+		// BuiltinChains[hook] unconditionally, so HookUnset there panics
+		// (Rules[-1]). Only Forward may be HookUnset (never traversed by NAT).
+		//
+		// Rule: packets that entered via NIC 1 (TUN adapter) and are being
+		// forwarded get SNAT src → VIP (bypass gateway). Packets entering via
+		// Link NICs or generated locally (InputNICName="" for stack sockets)
+		// fall through to the catch-all accept, untouched.
 		natTable := stack.Table{
 			Rules: []stack.Rule{
+				// Prerouting chain: accept all.
+				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
+				// Input chain: accept all.
+				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
+				// Output chain: accept all.
+				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
+				// Postrouting chain: SNAT TUN-entered forwarded traffic to VIP.
+				// Filter matches the receiving NIC NAME (pkt.InputNICName =
+				// FindNICNameFromID(pkt.NICID), set by handleValidatedPacket
+				// to the receiving NIC); NIC 1 is named "tun".
 				{
-					// Filter: match packets that entered via NIC 1 (TUN adapter)
 					Filter: stack.IPHeaderFilter{
 						InputInterface:       "tun",
 						InputInterfaceInvert: false,
@@ -621,20 +700,22 @@ func (n *Netstack) initStack() error {
 						ChangeAddress:   true,
 					},
 				},
+				// Postrouting catch-all: mesh/local traffic passes unchanged.
+				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
 			},
 			BuiltinChains: [stack.NumHooks]int{
-				stack.Prerouting:  stack.HookUnset,
-				stack.Input:       stack.HookUnset,
+				stack.Prerouting:  0,
+				stack.Input:       1,
 				stack.Forward:     stack.HookUnset,
-				stack.Output:      stack.HookUnset,
-				stack.Postrouting: 0, // Entry point to rules
+				stack.Output:      2,
+				stack.Postrouting: 3, // Entry point to the Postrouting chain
 			},
 			Underflows: [stack.NumHooks]int{
-				stack.Prerouting:  stack.HookUnset,
-				stack.Input:       stack.HookUnset,
+				stack.Prerouting:  0,
+				stack.Input:       1,
 				stack.Forward:     stack.HookUnset,
-				stack.Output:      stack.HookUnset,
-				stack.Postrouting: stack.HookUnset,
+				stack.Output:      2,
+				stack.Postrouting: 4,
 			},
 		}
 

@@ -574,6 +574,50 @@ func (m *MeshManager) GetEIPForNode(nodeID string) net.IP {
 	return m.getEIPForNode(nodeID)
 }
 
+// NextHopNodeID returns the next-hop peer node ID toward the target node per
+// the Dijkstra best path (design §5.2). For direct peers this is the peer
+// itself. Returns "" when no path is known.
+func (m *MeshManager) NextHopNodeID(targetNodeID string) string {
+	rt := m.getRouteTable()
+	if rt != nil {
+		if path, ok := rt.bestPaths[targetNodeID]; ok && path.NextHop != "" {
+			return path.NextHop
+		}
+	}
+	// Topology not converged yet: a direct peer is its own next hop.
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == targetNodeID && peer.Sender != nil {
+			return targetNodeID
+		}
+	}
+	return ""
+}
+
+// ResolveNodeIDForIP finds the egress node for ip via the mesh route table
+// (longest matching prefix, design §5.2). Returns "" when no prefix matches.
+func (m *MeshManager) ResolveNodeIDForIP(ip net.IP) string {
+	rt := m.GetRouteTable()
+	if rt == nil {
+		return ""
+	}
+	var best *MeshRoute
+	bestOnes := -1
+	for i := range rt.Routes {
+		r := &rt.Routes[i]
+		if r.Prefix.Contains(ip) {
+			ones, _ := r.Prefix.Mask.Size()
+			if best == nil || ones > bestOnes {
+				best = r
+				bestOnes = ones
+			}
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return m.SelectEgressNodeID(ip, best.Entries)
+}
+
 // SetOnRouteChange sets a callback to be invoked when the route table changes.
 func (m *MeshManager) SetOnRouteChange(callback func()) {
 	m.onRouteChange = callback

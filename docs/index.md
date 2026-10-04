@@ -77,6 +77,7 @@
 | [tun-stability-tasks.md](tasks/tun-stability-tasks.md) | TUN 稳定性修复 | master |
 | [tun-route-fakeip-fixes.md](tasks/tun-route-fakeip-fixes.md) | TUN 路由与 Fake-IP 修复 | master |
 | [tun-watchdog-http-probe-tasks.md](tasks/tun-watchdog-http-probe-tasks.md) | TUN watchdog HTTP 连通性探测改造 | master |
+| [gvisor_route_selector_tasks.md](tasks/gvisor_route_selector_tasks.md) | gVisor RouteSelector + Link NICs 实现任务 | gvisor-route-selector-impl |
 
 ### inputs/ (原始需求与历史分析)
 

@@ -52,6 +52,7 @@ type Netstack struct {
 
 	// Multi-NIC architecture (Phase 2+)
 	meshEP    *MeshEndpoint    // NIC 2: Mesh endpoint for mesh traffic
+	meshMgr   *MeshManager     // Mesh manager for routing decisions
 	tunnelNICs map[string]*TunnelNIC // NIC 201+: Per-node tunnel NICs for IPIP
 	tunnelNextNICID atomic.Uint64     // Next NIC ID for tunnel NICs (starting at 201)
 
@@ -126,6 +127,7 @@ func (n *Netstack) MeshEP() *MeshEndpoint {
 
 // SetMeshManager sets the mesh manager on the mesh endpoint for sending packets.
 func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
+	n.meshMgr = meshMgr // Store for RouteSelector
 	if n.meshEP != nil {
 		n.meshEP.SetMeshManager(meshMgr)
 	}
@@ -139,6 +141,69 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 		// Initial tunnel NIC update
 		if err := n.UpdateTunnelNICs(meshMgr); err != nil {
 			util.LogError("[NETSTACK] failed initial tunnel NIC update: %v", err)
+		}
+
+		// Configure RouteSelector for dynamic routing decisions
+		// RouteSelector is called during FindRoute to handle:
+		// 1. fakeIP → LocalDelivery (to Forwarder for domain resolution)
+		// 2. Mesh subnet → empty decision (route table handles direct peer routes)
+		// 3. Non-mesh → IPIP encapsulation with egress node VIP
+		if n.ns != nil && n.meshSubnet != nil {
+			// Calculate local VIP and EIP
+			localVIP := CalculateVIP(n.meshSubnet)
+			localEIP := CalculateEIP(n.meshSubnet)
+
+			// Get FakeIP pool for fakeIP checking
+			fakeIPPool := meshMgr.GetFakeIPPool()
+
+			// Create RouteSelector configuration
+			routeSelectorCfg := &RouteSelectorConfig{
+				MeshSubnet: n.meshSubnet,
+				LocalVIP:   tcpip.AddrFrom4Slice(localVIP),
+				LocalEIP:   tcpip.AddrFrom4Slice(localEIP),
+				IsFakeIP: func(ip net.IP) bool {
+					if fakeIPPool == nil {
+						return false
+					}
+					return fakeIPPool.Contains(ip)
+				},
+				SelectEgressNode: func(dst net.IP) (tcpip.Address, bool) {
+					// Get route table
+					rt := meshMgr.GetRouteTable()
+					if rt == nil {
+						return tcpip.Address{}, false
+					}
+
+					// Find matching route entry
+					for _, route := range rt.Routes {
+						if route.Prefix.Contains(dst) {
+							// Select egress node for this prefix
+							if len(route.Entries) == 0 {
+								continue
+							}
+							targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
+							if targetNodeID == "" {
+								continue
+							}
+
+							// Get VIP for the egress node
+							targetVIP := meshMgr.GetVIPForNode(targetNodeID)
+							if targetVIP == nil {
+								continue
+							}
+
+							return tcpip.AddrFrom4Slice(targetVIP), true
+						}
+					}
+
+					return tcpip.Address{}, false
+				},
+			}
+
+			// Create and set RouteSelector
+			routeSelector := NewRouteSelector(routeSelectorCfg)
+			n.ns.SetRouteSelector(routeSelector)
+			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
 		}
 	}
 }

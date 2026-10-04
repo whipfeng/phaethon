@@ -644,6 +644,12 @@ func (m *MeshManager) isLocalVIP(ip net.IP) bool {
 	return ip.Equal(m.vip)
 }
 
+// GetVIPForNode returns the VIP for a given node ID from the topology.
+// Public wrapper for getVIPForNode (used by RouteSelector).
+func (m *MeshManager) GetVIPForNode(nodeID string) net.IP {
+	return m.getVIPForNode(nodeID)
+}
+
 // getVIPForNode returns the VIP for a given node ID from the topology.
 func (m *MeshManager) getVIPForNode(nodeID string) net.IP {
 	// Check if it's our own node

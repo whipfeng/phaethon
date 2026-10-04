@@ -6,6 +6,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+
+	"phaethon/util"
 )
 
 // LinkNIC is a "dumb" NIC for direct mesh peer communication.
@@ -17,9 +19,6 @@ type LinkNIC struct {
 	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
 	meshMgr    *MeshManager
-	
-	// Link endpoint interface
-	ep stack.LinkEndpoint
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
@@ -49,6 +48,11 @@ func (l *LinkNIC) MTU() uint32 {
 	return l.mtu
 }
 
+// SetMTU implements stack.NetworkLinkEndpoint.SetMTU.
+func (l *LinkNIC) SetMTU(mtu uint32) {
+	l.mtu = mtu
+}
+
 // Capabilities implements stack.LinkEndpoint.Capabilities.
 func (l *LinkNIC) Capabilities() stack.LinkEndpointCapabilities {
 	return stack.CapabilityNone
@@ -64,8 +68,16 @@ func (l *LinkNIC) LinkAddress() tcpip.LinkAddress {
 	return "" // No link-layer address for mesh P2P
 }
 
+// SetLinkAddress implements stack.NetworkLinkEndpoint.SetLinkAddress.
+func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
+
 // WritePackets implements stack.LinkEndpoint.WritePackets.
-// Sends packets to the direct mesh peer via mesh P2P network.
+// Sends packets to the associated peer node. Per design §5.2, the Link NIC does
+// no routing decisions - SendToNode delegates to the mesh hop table for
+// direct or relayed delivery.
+//
+// Packet buffers remain owned by the caller (same contract as channel.Endpoint,
+// which clones before queueing); we only read the data synchronously.
 func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	if l.meshMgr == nil {
 		return 0, &tcpip.ErrInvalidEndpointState{}
@@ -73,33 +85,46 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 
 	count := 0
 	for _, pkt := range pkts.AsSlice() {
-		// Get the packet data
-		pktData := pkt.ToBuffer().Flatten()
-		
-		// Send via mesh P2P to the direct peer
-		err := l.meshMgr.SendToPeer(l.peerNodeID, pktData)
-		if err != nil {
-			// Log error but continue with other packets
+		buf := pkt.ToBuffer()
+		pktData := buf.Flatten()
+
+		if err := l.meshMgr.SendToNode(l.peerNodeID, pktData); err != nil {
+			util.LogDebug("[LINKNIC] send to node %s failed: %v", l.peerNodeID, err)
 			continue
 		}
 		count++
 	}
-	
+
 	return count, nil
 }
 
 // WritePacket implements stack.LinkEndpoint.WritePacket (single packet version).
 func (l *LinkNIC) WritePacket(pkt *stack.PacketBuffer) tcpip.Error {
-	count, err := l.WritePackets(stack.PacketBufferList{})
-	pkt.DecRef()
-	if count == 0 && err != nil {
-		return err
+	var list stack.PacketBufferList
+	list.PushBack(pkt)
+	n, err := l.WritePackets(list)
+	if n == 0 {
+		if err != nil {
+			return err
+		}
+		return &tcpip.ErrAborted{}
 	}
 	return nil
 }
 
 // Wait implements stack.LinkEndpoint.Wait.
 func (l *LinkNIC) Wait() {}
+
+// ParseHeader implements stack.NetworkLinkEndpoint.ParseHeader.
+func (l *LinkNIC) ParseHeader(*stack.PacketBuffer) bool {
+	return true // No link-layer header to parse
+}
+
+// Close implements stack.LinkEndpoint.Close.
+func (l *LinkNIC) Close() {}
+
+// SetOnCloseAction implements stack.LinkEndpoint.SetOnCloseAction.
+func (l *LinkNIC) SetOnCloseAction(f func()) {}
 
 // ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType.
 func (l *LinkNIC) ARPHardwareType() header.ARPHardwareType {
@@ -108,8 +133,3 @@ func (l *LinkNIC) ARPHardwareType() header.ARPHardwareType {
 
 // AddHeader implements stack.LinkEndpoint.AddHeader.
 func (l *LinkNIC) AddHeader(pkt *stack.PacketBuffer) {}
-
-// BuildAddress implements stack.LinkEndpoint.BuildAddress.
-func (l *LinkNIC) BuildAddress(addr tcpip.Address) tcpip.LinkAddress {
-	return "" // No link-layer address resolution
-}

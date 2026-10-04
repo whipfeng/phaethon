@@ -1,6 +1,15 @@
 # gVisor 路由栈演进方向
 
-## 状态：规划中
+## 状态：⚠️ 已废弃 - 被 `gvisor_stack_integration_design.md` 取代
+
+**最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）**
+
+---
+
+## 修订记录
+
+- **2026-10-03 勘误**："核心限制：DNAT 必须在路由决策前"一节的死结结论不成立。经源码逐行核实（pinned v0.0.0-20250428193742）：PREROUTING 在路由判定前执行（ipv4.go:873）、NAT target 全套可用（DNAT/SNAT/Masquerade/Redirect）、conntrack 覆盖 ICMP echo/差错翻译、回程选路可用具体路由按最长前缀匹配解决。"NAT 必须在 TUN 边界（gVisor 外部）"从技术必然降级为当前边界架构的合理选择。详见"修订后的架构决策"一节。
+- **2026-10-03 背景注**：本文"充分利用 gVisor 的 NIC 规划"及后续章节描述的多 NIC 架构存在已证实的 Forwarder 回程自环缺陷（FindRoute 连接 id 限定 + 默认路由直接匹配抢占转发兜底），架构方向待新 ADR 定夺；阅读后续章节请结合此背景。
 
 ## 结论
 
@@ -41,7 +50,19 @@
 
 ### 核心限制：DNAT 必须在路由决策前
 
-**问题场景**：旁路网关流量（源地址任意，如 192.168.1.100）需要 SNAT 成 VIP 从 mesh 发出，回程包 DNAT 还原后需要路由回 TUN。
+> **❌ 2026-10-03 勘误：本节"死结"结论不成立。**
+>
+> 前提"PREROUTING DNAT 在路由判定前执行"**正确**——已源码核实：`network/ipv4/ipv4.go:873`
+> 在 `HandlePacket` 入口调用 `CheckPrerouting`，之后才进 `handleValidatedPacket` 做
+> 本地交付/转发判定，官方注释明确 "CheckPrerouting can modify the backing storage of
+> the packet"（ipv4.go:879）。
+>
+> 错误出在"无策略路由 → 只能靠默认路由"这一步：忽略了路由表的**最长前缀匹配**。
+> 为回程前缀添加具体路由（如 `192.168.0.0/16 → TUN NIC`）即可引导 DNAT 还原后的
+> 回程包，无需策略路由。去程（默认路由出 mesh）与回程（具体路由回 TUN）按目标
+> 前缀天然分离，下列三个"死循环"分支均不存在。
+
+**问题场景（原文）**：旁路网关流量（源地址任意，如 192.168.1.100）需要 SNAT 成 VIP 从 mesh 发出，回程包 DNAT 还原后需要路由回 TUN。
 
 **gVisor 的死结**：
 ```
@@ -51,20 +72,26 @@ PREROUTING DNAT: dst=VIP → dst=192.168.1.100（必须在路由前）
     ↓
 路由决策: 目标是 192.168.1.100（任意源地址）
     ↓
-无策略路由/fwmark → 只能靠默认路由
+无策略路由/fwmark → 只能靠默认路由        ← 错误：忽略了具体路由的最长前缀匹配
     ├─ 默认路由 → NIC 3 (loopback) ❌ 死循环
     ├─ 默认路由 → NIC 1 (TUN) ❌ 去程包也走 TUN，死循环
     └─ 默认路由 → NIC 2 (Mesh) ❌ 回程包又出 mesh，死循环
 ```
 
-**根本矛盾**：
-- 去程和回程需要不同的出口 NIC
-- 但两者的目标地址都不在 mesh 网段内，都靠默认路由
-- gVisor 无策略路由，无法根据"包从哪个 NIC 来"选择路由表
+**根本矛盾（已证伪）**：
+- ~~去程和回程需要不同的出口 NIC，但两者的目标地址都不在 mesh 网段内，都靠默认路由~~
+  → 回程 dst 属于 LAN 前缀，为回程前缀添加具体路由（`192.168.0.0/16 → NIC 1`）即可，
+  最长前缀匹配优先于默认路由，去程/回程互不干扰
+- ~~gVisor 无策略路由，无法根据"包从哪个 NIC 来"选择路由表~~
+  → 本场景无需按入站 NIC 区分，按目标前缀即可完成选路
 
 ### 架构决策：NAT 必须在 TUN 边界（gVisor 外部）
 
-**方案**：在 TUN 入口/出口做 NAT，保证进入 gVisor 的包源地址已经是 VIP。
+> **⚠️ 2026-10-03 修订**：本决策依据的"死结"已证伪（见上节勘误）。栈内 NAT 可行，
+> 本决策降级为"**当前边界架构下的合理选择**"——nat.go 已在生产验证、无需 fork，
+> 短期架构继续保留；但它不再是技术必然。修订后的分析见下节。
+
+**方案**（原文，仍为当前边界架构的实际实现）：在 TUN 入口/出口做 NAT，保证进入 gVisor 的包源地址已经是 VIP。
 
 ```
 LAN 机器 (src=192.168.1.100) → TUN
@@ -88,9 +115,41 @@ TUN → 宿主机 → LAN 机器
 1. gVisor 完全不需要做 NAT——包进出都是 VIP，路由无歧义
 2. NAT 状态管理在 nat.go（栈外），简单直接
 3. 不需要 gVisor 的 IPTables/ConnTrack 参与 NAT
-4. 绕过了"DNAT 必须在路由前 + 路由后无法正确路由"的死结
+4. ~~绕过了"DNAT 必须在路由前 + 路由后无法正确路由"的死结~~（该死结已证伪，见上节勘误）
 
-**本质**：writeLoop + 自定义 NAT 就是一个手写的策略路由器，只是实现位置在 gVisor 外面。gVisor 缺的不是策略路由的"能力"，而是策略路由的"集成点"——它没有暴露让我们注入自定义路由决策的 hook。
+**本质**：writeLoop + 自定义 NAT 就是一个手写的策略路由器，只是实现位置在 gVisor 外面。gVisor 缺的不是策略路由的"能力"，而是策略路由的"集成点"——它没有暴露让我们注入自定义路由决策的 hook。（2026-10-03 注：本段依据的"死结"已证伪；对 NAT 场景"无集成点"不成立——IPTables 五钩子即集成点，且本场景无需按入站 NIC 区分。集成点缺失仅对 FindRoute 连接 id 限定的选路场景成立。）
+
+### 修订后的架构决策：栈内 NAT 可行（2026-10-03 源码核实）
+
+针对 pinned 版本 v0.0.0-20250428193742-2d800c3129d5 的逐行核实结果：
+
+1. **PREROUTING 在路由判定前执行**：`network/ipv4/ipv4.go:873`（`HandlePacket` 入口）调用
+   `CheckPrerouting`，之后才进 `handleValidatedPacket` 判定本地交付/转发；官方注释明确
+   允许钩子改写包内容（ipv4.go:879 "CheckPrerouting can modify the backing storage of the
+   packet"）。五钩子齐备：Output(:536)、Postrouting(:575)、Forward(:685/:785)、Input(:1228)。
+2. **NAT target 全套可用**（`stack/iptables_targets.go`）：DNATTarget(:186，限 Prerouting/Output)、
+   SNATTarget(:281)、**MasqueradeTarget**(:381，限 Postrouting，经 snatAction 做端口分配)、
+   RedirectTarget(:240)。
+3. **conntrack 覆盖 nat.go 的全部状态管理**：动态端口分配、ICMP 差错报文内嵌包还原
+   （conntrack.go `getHeaders` 的 `isICMPError` 分支）、ICMP echo ident 跟踪
+   （conntrack.go:73-96，`srcPortOrEchoRequestIdent`/`dstPortOrEchoReplyIdent`）。
+   `mesh/nat.go` 的 558 行可整体由 IPTables 规则 + conntrack 替代。
+4. **回程选路无需策略路由**：DNAT 还原后的 dst 属于 LAN 前缀，路由表添加具体路由
+   （如 `192.168.0.0/16 → TUN NIC`），按最长前缀匹配直达 TUN。
+
+**修订后定位**：
+- 栈内 NAT **无需 fork**——IPTables 是公开 Go API（`stack.Options.IPTables` / `s.IPTables()`），
+  在未修改的 gVisor 上即可配置规则
+- 真正需要 fork 的只有两处：
+  ① 选路语义——FindRoute 连接 id 限定 + 默认路由直接匹配抢占转发兜底（TCP 回程自环故障根因）；
+  ② 转发封装框架——IPIP 等隧道封装无上游抽象（可用自定义 Target 或路由级封装回调补齐）
+
+**PoC 时需运行时验证（当前均为源码阅读结论）**：
+- MasqueradeTarget 的源地址取自出 NIC 的 `AcquireOutgoingPrimaryAddress`——若用 masquerade，
+  VIP 需作为 primary 地址绑定在出 NIC；改用 SNATTarget 直接指定 VIP 则无此要求
+- conntrack/NAT 规则需显式配置（默认空表全放行，无副作用）
+- loopback 类型 NIC 跳过 PREROUTING（ipv4.go:866 "Loopback traffic skips the prerouting chain"），
+  环回注入路径如需 NAT 需注意此行为
 
 ### gVisor 包处理流程源码分析（2026-09-17）
 
@@ -152,11 +211,16 @@ NIC 3（Loopback）设计为混杂模式是安全的：
 - 不会被 NIC 3 的混杂模式当做本地包接收
 - 混杂模式让 NIC 3 能接受从链路层直接到达的任意目标地址包（用于环回场景）
 
-### 结论
+### 结论（2026-10-03 修订）
 
-**保留 nat.go 现状**。它虽然在栈外手写，但工作在正确的执行层（TUN 边界），协议覆盖完整（含 ICMP 错误消息翻译，这是 gVisor 都做好的部分）。
+**短期保留 nat.go 现状**。它虽然在栈外手写，但工作在正确的执行层（TUN 边界），协议覆盖完整（含 ICMP 错误消息翻译），且已在生产验证。当前边界架构（单 NIC / 2-NIC 方向）继续使用。
 
-gVisor 的能力边界到此为止。这不是版本问题（当前 v0.0.0-20250428193742 已经很新），而是 gVisor 刻意简化的设计——它的目标是轻量级用户态网络栈，不是完整复刻 Linux 内核的所有网络功能。
+**但"gVisor 的能力边界到此为止"已被证伪**（见上节勘误）：栈内 NAT 能力齐备（五钩子 + conntrack + 全套 NAT target，含 ICMP echo/差错翻译），"NAT 必须在 TUN 边界"是当时路由分析疏漏导致的误判，并非 gVisor 的能力限制。gVisor 真正缺失的只有两处：
+
+1. **选路语义**：FindRoute 连接 id 限定 + 默认路由直接匹配抢占转发兜底（TCP 回程自环故障根因，需 fork 修补）
+2. **转发封装框架**：IPIP 等隧道封装无上游抽象（可用自定义 Target/封装回调补齐）
+
+其余能力（NAT、conntrack、ICMP 翻译）上游均已提供。
 
 ## 充分利用 gVisor 的 NIC 规划
 

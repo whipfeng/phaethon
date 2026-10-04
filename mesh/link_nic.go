@@ -3,22 +3,27 @@ package mesh
 import (
 	"net"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
 	"phaethon/util"
 )
 
 // LinkNIC is a "dumb" NIC for direct mesh peer communication.
-// It only handles sending packets to the associated peer.
-// No IPIP encapsulation, no routing decisions - just link-layer sending.
+// It only handles sending packets to the associated peer, and injecting
+// received peer frames into the netstack (design §5.2).
+// No IPIP encapsulation, no routing decisions - the netstack does those.
 type LinkNIC struct {
 	nicID      tcpip.NICID
 	peerNodeID string
 	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
 	meshMgr    *MeshManager
+	dispatcher stack.NetworkDispatcher
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
@@ -34,13 +39,35 @@ func NewLinkNIC(nicID tcpip.NICID, peerNodeID string, peerSubnet *net.IPNet, mes
 
 // Attach implements stack.LinkEndpoint.Attach.
 func (l *LinkNIC) Attach(dispatcher stack.NetworkDispatcher) {
-	// LinkNIC doesn't receive packets directly - mesh endpoint handles reception
-	// This is a "send-only" NIC for direct peer communication
+	l.dispatcher = dispatcher
 }
 
 // IsAttached implements stack.LinkEndpoint.IsAttached.
 func (l *LinkNIC) IsAttached() bool {
-	return false // LinkNIC is send-only
+	return l.dispatcher != nil
+}
+
+// InjectInbound delivers a raw IP packet received from the peer into the
+// netstack via this NIC. The stack records pkt.NICID so conntrack can use it
+// as OriginalInputNIC (fork patch #5) for DNAT reply routing (patch #6).
+func (l *LinkNIC) InjectInbound(data []byte) {
+	if l.dispatcher == nil || len(data) == 0 {
+		return
+	}
+	var proto tcpip.NetworkProtocolNumber
+	switch data[0] >> 4 {
+	case 4:
+		proto = ipv4.ProtocolNumber
+	case 6:
+		proto = ipv6.ProtocolNumber
+	default:
+		return
+	}
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(data),
+	})
+	l.dispatcher.DeliverNetworkPacket(proto, pkt)
+	pkt.DecRef()
 }
 
 // MTU implements stack.LinkEndpoint.MTU.

@@ -278,13 +278,13 @@ func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
 	return e.localMeshVIPs[ip.To4().String()]
 }
 
-// InjectMeshPacket injects a raw IP packet into the netstack as if received from the TUN device.
-// Delegates to the mesh.Netstack.
-func (e *Engine) InjectMeshPacket(data []byte) error {
+// InjectFromNode injects a raw IP packet received from a mesh peer into the
+// netstack via that peer's Link NIC. Delegates to the mesh.Netstack.
+func (e *Engine) InjectFromNode(nodeID string, data []byte) error {
 	if e.netstack == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
-	return e.netstack.InjectMeshPacket(data)
+	return e.netstack.InjectFromNode(nodeID, data)
 }
 
 // meshWriteLoop consumes packets from meshWriteCh and writes them to the TUN device.
@@ -346,6 +346,9 @@ func (e *Engine) AddMeshRoute(subnet string) error {
 // SetMeshNetwork sets the overall mesh network range for identifying mesh IPs.
 func (e *Engine) SetMeshNetwork(network *net.IPNet) {
 	e.meshNetwork = network
+	if e.netstack != nil {
+		e.netstack.SetMeshNetwork(network)
+	}
 }
 
 // isMeshIP checks if an IP belongs to the mesh network (full range, not just local subnet).

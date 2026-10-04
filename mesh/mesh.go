@@ -22,40 +22,6 @@ const (
 	MeshDomainSuffix = "phn"
 )
 
-// logTCPPacketMesh logs TCP packet details for debugging
-func logTCPPacketMesh(prefix string, data []byte) {
-	if len(data) < 20 {
-		return
-	}
-	srcIP := net.IP(data[12:16])
-	dstIP := net.IP(data[16:20])
-	headerLen := int(data[0]&0x0f) * 4
-	if len(data) < headerLen+20 {
-		util.LogDebug("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
-		return
-	}
-	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
-	dstPort := uint16(data[headerLen+2])<<8 | uint16(data[headerLen+3])
-	seq := uint32(data[headerLen+4])<<24 | uint32(data[headerLen+5])<<16 | uint32(data[headerLen+6])<<8 | uint32(data[headerLen+7])
-	ack := uint32(data[headerLen+8])<<24 | uint32(data[headerLen+9])<<16 | uint32(data[headerLen+10])<<8 | uint32(data[headerLen+11])
-	flags := data[headerLen+13]
-	flagStr := ""
-	if flags&0x02 != 0 {
-		flagStr += "SYN "
-	}
-	if flags&0x10 != 0 {
-		flagStr += "ACK "
-	}
-	if flags&0x01 != 0 {
-		flagStr += "FIN "
-	}
-	if flags&0x04 != 0 {
-		flagStr += "RST "
-	}
-	util.LogDebug("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
-		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
-}
-
 func NodeDomain(nodeID string) string {
 	return nodeID + "." + MeshDomainSuffix
 }
@@ -71,7 +37,9 @@ func ParseNodeDomain(domain string) string {
 
 // TunInterface abstracts the TUN engine for mesh packet injection.
 type TunInterface interface {
-	InjectMeshPacket(data []byte) error
+	// InjectFromNode injects a frame received from the given peer into the
+	// netstack via that peer's Link NIC (design §5.2).
+	InjectFromNode(nodeID string, data []byte) error
 	WriteMeshPacket(data []byte) error
 	GetNetstack() *Netstack
 }
@@ -351,7 +319,7 @@ func (m *MeshManager) GetIPIPTunnel() *IPIPTunnel {
 }
 
 // SendRawPacket sends a raw IP packet via the mesh network.
-// This is used by MeshEndpoint to send packets that are routed to NIC 2.
+// This is used by IPIP transit forwarding at the frame layer (HandleMeshFrame).
 func (m *MeshManager) SendRawPacket(data []byte) error {
 	if len(data) < 20 {
 		return fmt.Errorf("packet too short: %d bytes", len(data))
@@ -985,7 +953,14 @@ func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 	return m.findNextHopsFallback([]string{targetNodeID}, peers)
 }
 
-// HandleMeshFrame processes a raw IP packet received from a peer.
+// HandleMeshFrame processes a raw IP packet received from a peer (design §4.5,
+// §5.2):
+//   - IPIP frames (proto=4): decapsulate when the outer dst is our EIP
+//     (tunnel terminator); otherwise relay the outer frame toward the egress
+//     node (tunnel transit) without touching the inner packet.
+//   - All other frames: inject into the fromNode's Link NIC. The netstack then
+//     decides local delivery (GIP/VIP/fakeIP), forwarding (NAT return, relay),
+//     TTL decrement and ICMP generation — no manual 卡口 at the frame layer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
@@ -998,7 +973,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		// Extract outer destination IP (IPIP header bytes 16-19)
 		outerDstIP := net.IP(frame[16:20])
 		localEIP := m.ipipTunnel.GetLocalEIP()
-		
+
 		// Check if outer destination is our EIP (we are the target)
 		if localEIP != nil && outerDstIP.Equal(localEIP) {
 			util.LogInfo("[IPIP] Received IPIP packet for us from %s, decapsulating", fromNodeID)
@@ -1012,7 +987,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			m.HandleMeshFrame(fromNodeID, innerPacket)
 			return
 		}
-		
+
 		// Not for us, forward the IPIP packet (we are a transit node)
 		util.LogDebug("[IPIP] Forwarding IPIP packet from %s to %s", fromNodeID, outerDstIP)
 		nextHops := m.findNextHops(outerDstIP)
@@ -1036,152 +1011,22 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		util.LogWarn("[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
 	}
-	if isMeshAddress(dstIP) && len(frame) >= 20 && frame[9] == 6 {
+	if len(frame) >= 20 && frame[9] == 6 {
 		dstPort := uint16(frame[22])<<8 | uint16(frame[23])
 		util.LogDebug("[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
 	}
-	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d len=%d",
-		fromNodeID, srcIP, dstIP, frame[9], len(frame))
+	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
+		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
 
-	if isMeshAddress(dstIP) {
-		util.LogDebug("[MESH] recv frame from %s: dst=%s TTL=%d len=%d", fromNodeID, dstIP, frame[8], len(frame))
-		if len(frame) >= 20 && frame[9] == 6 {
-			logTCPPacketMesh("[TCP] recv:", frame)
-		}
-	}
-
-	// Traceroute support: decrement TTL at this routing checkpoint (卡口3/4)
-	// If TTL=0, manually generate ICMP Time Exceeded.
-	pkt := make([]byte, len(frame))
-	copy(pkt, frame)
-	if len(pkt) >= 9 && pkt[0]>>4 == 4 {
-		oldTTL := pkt[8]
-		newTTL := DecrementIPTTL(pkt)
-		if newTTL == 0 {
-			util.LogInfo("[TRACEROUTE] HandleMeshFrame: TTL expired (was %d), generating ICMP: %s -> %s",
-				oldTTL, srcIP, dstIP)
-			// Manually generate ICMP Time Exceeded
-			// ICMP source = dst of original packet (this node, from the packet's perspective)
-			icmpPkt := GenerateICMPTimeExceeded(dstIP, pkt)
-			if icmpPkt != nil {
-				// Send ICMP back via mesh routing (will go through normal path including NAT reverse)
-				icmpDstIP := net.IP(icmpPkt[16:20])
-				if m.tun != nil {
-					// Write to TUN so it goes through readLoop and mesh outbound
-					if err := m.tun.WriteMeshPacket(icmpPkt); err != nil {
-						util.LogWarn("[TRACEROUTE] HandleMeshFrame: failed to write ICMP to TUN: %v", err)
-					} else {
-						util.LogDebug("[TRACEROUTE] HandleMeshFrame: wrote ICMP to TUN for dst=%s", icmpDstIP)
-					}
-				}
-			}
-			return
-		}
-	}
-
-	isVIP := m.isLocalVIP(dstIP)
-	util.LogDebug("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
-
-	// .1 (VIP): WriteMeshPacket to OS (NAT handled by gVisor iptables)
-	if isVIP {
-		util.LogDebug("[MESH] VIP path entered for packet from %s", fromNodeID)
-		pkt := make([]byte, len(frame))
-		copy(pkt, frame)
-		if m.tun != nil {
-			if err := m.tun.WriteMeshPacket(pkt); err != nil {
-				util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
-			}
-		}
+	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),
+	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
+	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.
+	if m.tun == nil {
+		util.LogWarn("[MESH] no tun interface, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
 		return
 	}
-
-	// .2 (hostIP): write to TUN as-is, preserve remote source address.
-	if m.isLocalHostIP(dstIP) {
-		pkt := make([]byte, len(frame))
-		copy(pkt, frame)
-		if m.tun != nil {
-			if err := m.tun.WriteMeshPacket(pkt); err != nil {
-				util.LogWarn("[MESH] write hostIP packet to TUN failed: %v", err)
-			}
-		}
-		return
-	}
-
-	// .3 (GIP): InjectMeshPacket to netstack (DNS hijacker)
-	if m.isLocalGIP(dstIP) {
-		gipPkt := make([]byte, len(frame))
-		copy(gipPkt, frame)
-		if m.tun != nil {
-			if err := m.tun.InjectMeshPacket(gipPkt); err != nil {
-				util.LogWarn("[MESH] inject GIP packet to netstack failed: %v", err)
-			}
-		}
-		return
-	}
-
-	// pkt was already copied and TTL decremented earlier (卡口3/4)
-	// Use pkt[8] to get the current TTL value
-	newTTL := pkt[8]
-
-	if isMeshAddress(dstIP) && len(pkt) >= 20 && pkt[9] == 6 {
-		util.LogDebug("[MESH] pre-findRoute: from=%s dst=%s TTL=%d", fromNodeID, dstIP, newTTL)
-	}
-
-	route := m.findRoute(dstIP)
-	nextHops := m.findNextHops(dstIP)
-	if route == nil || len(nextHops) == 0 {
-		// No mesh route — we're the gateway for this destination.
-		// Inject into local netstack so it goes out via proxy/direct.
-		routeInfo := "no route"
-		if route != nil {
-			routeInfo = fmt.Sprintf("local route %s", route.Prefix)
-		}
-		proto := "unknown"
-		isTCPSYN := false
-		if len(pkt) >= 20 {
-			switch pkt[9] {
-			case 6:
-				proto = "TCP"
-				headerLen := int(pkt[0]&0x0f) * 4
-				if len(pkt) >= headerLen+14 {
-					tcpFlags := pkt[headerLen+13]
-					isTCPSYN = (tcpFlags&0x02) != 0 && (tcpFlags&0x10) == 0 // SYN set, ACK not set
-				}
-			case 17:
-				proto = "UDP"
-			}
-		}
-		if isTCPSYN {
-			util.LogInfo("[MESH-DIAG] gateway deliver SYN: from=%s src=%s dst=%s len=%d (%s)",
-				fromNodeID, srcIP, dstIP, len(pkt), routeInfo)
-		} else {
-			util.LogDebug("[MESH-DIAG] gateway deliver: from=%s src=%s dst=%s proto=%s len=%d (%s)",
-				fromNodeID, srcIP, dstIP, proto, len(pkt), routeInfo)
-		}
-		if m.tun != nil {
-			if err := m.tun.InjectMeshPacket(pkt); err != nil {
-				util.LogWarn("[MESH-DIAG] inject to local netstack failed: %v", err)
-			}
-		}
-		return
-	}
-
-	// Quality-based selection: consider all candidates, not just min hop
-	selectedPeer := m.selectBestPeer(nextHops, dstIP)
-
-	if isMeshAddress(dstIP) {
-		util.LogDebug("[MESH] forwarding from %s: dst=%s to %s (candidates=%d)", fromNodeID, dstIP, selectedPeer.GetNodeID(), len(nextHops))
-	}
-	// pkt already has decremented TTL
-	if err := selectedPeer.Send(pkt); err != nil {
-		if strings.Contains(err.Error(), "peer stopped") {
-			util.LogWarn("[MESH] forward to %s failed: peer stopped, triggering removal", selectedPeer.GetNodeID())
-			if m.p2p != nil {
-				m.p2p.StopPeerByNodeID(selectedPeer.GetNodeID())
-			}
-		} else {
-			util.LogWarn("[MESH] forward to %s failed: %v", selectedPeer.GetNodeID(), err)
-		}
+	if err := m.tun.InjectFromNode(fromNodeID, frame); err != nil {
+		util.LogWarn("[MESH] inject frame from %s (dst=%s) via Link NIC failed: %v", fromNodeID, dstIP, err)
 	}
 }
 

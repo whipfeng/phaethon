@@ -142,10 +142,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 
 		meshMgr.Start(engine, p2p.GlobalP2PManager)
 
-		// Configure MeshEndpoint (NIC 2) with mesh manager
-		// This enables mesh packet sending via P2P links
+		// Configure netstack with mesh manager (Link NICs + RouteSelector)
 		engine.GetNetstack().SetMeshManager(meshMgr)
-		util.LogInfo("Mesh manager configured on NIC 2 (mesh endpoint)")
+		util.LogInfo("Mesh manager configured on netstack (Link NICs + RouteSelector)")
 
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}

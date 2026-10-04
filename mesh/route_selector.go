@@ -9,14 +9,18 @@ import (
 
 // RouteSelectorConfig holds configuration for the RouteSelector.
 type RouteSelectorConfig struct {
-	// Mesh subnet (e.g., 100.64.0.0/10)
+	// MeshNetwork is the overall mesh network (e.g., 100.0.0.0/8).
+	// Destinations inside it are left to the route table (Link NIC routes).
 	MeshSubnet *net.IPNet
 
 	// Local node's VIP (subnet + 1)
 	LocalVIP tcpip.Address
 
-	// Local node's EIP (subnet + 4)
+	// Local node's EIP (subnet + 4). Tunnel identity only; never local-delivered.
 	LocalEIP tcpip.Address
+
+	// Local node's GIP (subnet + 3, DNS/admin listen address)
+	LocalGIP tcpip.Address
 
 	// IsFakeIP checks if an IP is a fakeIP (DNS-mapped virtual IP)
 	IsFakeIP func(ip net.IP) bool
@@ -27,22 +31,31 @@ type RouteSelectorConfig struct {
 }
 
 // NewRouteSelector creates a RouteSelector function with the given configuration.
-// The RouteSelector is called during FindRoute to make dynamic routing decisions.
+// Decision order per design §2.3. The selector only fires for the pure IP
+// forwarding path (design §6.8): FindRoute(0, "", dst).
 func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 	return func(dst tcpip.Address) stack.RouteDecision {
 		dstIP := net.IP(dst.AsSlice())
 
-		// 1. fakeIP → local delivery (to Forwarder for domain resolution)
+		// 1. fakeIP / local GIP / local VIP → local delivery
+		//    (GIP = admin/DNS listen; VIP = local service address;
+		//     conntrack reply traffic is already DNAT-rewritten in Prerouting
+		//     and never reaches the selector)
 		if cfg.IsFakeIP != nil && cfg.IsFakeIP(dstIP) {
 			return stack.RouteDecision{
 				LocalDelivery: true,
 				Cacheable:     true,
 			}
 		}
+		if cfg.LocalGIP != (tcpip.Address{}) && dst == cfg.LocalGIP {
+			return stack.RouteDecision{LocalDelivery: true, Cacheable: true}
+		}
+		if cfg.LocalVIP != (tcpip.Address{}) && dst == cfg.LocalVIP {
+			return stack.RouteDecision{LocalDelivery: true, Cacheable: true}
+		}
 
-		// 2. Mesh subnet → let route table handle it (direct peer routes)
+		// 2. Mesh network → let route table handle it (Link NIC routes)
 		if cfg.MeshSubnet != nil && cfg.MeshSubnet.Contains(dstIP) {
-			// Return empty decision - route table will match peer subnets
 			return stack.RouteDecision{}
 		}
 

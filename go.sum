@@ -43,6 +43,8 @@ github.com/whipfeng/gvisor-fork v0.0.0-20261004092809-2e4e3d7f4343 h1:8+pK2AKCDe
 github.com/whipfeng/gvisor-fork v0.0.0-20261004092809-2e4e3d7f4343/go.mod h1:3r5CMtNQMKIvBlrmM9xWUNamjKBYPOWyXOjmg5Kts3g=
 github.com/whipfeng/gvisor-fork v0.0.0-20261004105140-f9203a6b4f8c h1:v/rXpdPNDZk2t/mSIfDuRlvjUSe4V15HE89a9kwpaRU=
 github.com/whipfeng/gvisor-fork v0.0.0-20261004105140-f9203a6b4f8c/go.mod h1:3r5CMtNQMKIvBlrmM9xWUNamjKBYPOWyXOjmg5Kts3g=
+github.com/whipfeng/gvisor-fork v0.0.0-20261004173730-5670ffa068ee h1:5eajs53wPQf1Zzm6WZulf5jAdaV6cwBpWMB5l8qE1Ss=
+github.com/whipfeng/gvisor-fork v0.0.0-20261004173730-5670ffa068ee/go.mod h1:3r5CMtNQMKIvBlrmM9xWUNamjKBYPOWyXOjmg5Kts3g=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
 go.etcd.io/bbolt v1.5.0 h1:S7GAl7Fxv12yohbwFfIbQCGDWbQbtDGPET4P/bD4lxU=

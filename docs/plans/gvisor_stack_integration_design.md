@@ -1,17 +1,28 @@
 # gVisor 栈内集成方案：路由 / NAT / IPIP 下沉设计
 
-## 状态：✅ 最终方案（实施中）
+## 状态：⚠️ 部分过时 - 被 `gvisor_route_selector_architecture.md` 更新
 
-**本文档是最终架构方案，采用 gVisor fork 定制。**
+**本文档的前期调研和 ADR 仍然有效，但架构方案已被更新。**
 
-实施阶段：
-- 阶段 1（零 fork）：简化拓扑，修自环 - **已完成**
-- 阶段 2（fork 演进）：路由语义 + IPIP 隧道 - **当前阶段**
+**关键更新**（见 `gvisor_route_selector_architecture.md`）：
+1. ❌ **取消 Tunnel NIC**：IPIP 封装在路由决策时完成，不需要独立的隧道 NIC
+2. ✅ **RouteSelector 扩展点**：在 FindRoute 过程中做动态路由决策
+3. ✅ **Link NICs**：每个直连 mesh peer 一个 NIC（而非共享 mesh NIC）
 
-已废弃文档：
-- `multi_nic_architecture.md` (v1)
-- `multi_nic_architecture_v2.md` (手动 NAT 方案)
-- `gvisor_routing_evolution.md` (早期调研)
+**本文档仍然有效的部分**：
+- §2 gVisor 扩展点盘点（除 Tunnel NIC 相关）
+- §3 关键调研详情（NAT、IPIP 解封装、混杂模式）
+- §7 讨论脉络纪要（历史讨论记录）
+
+**已过时的部分**：
+- §4 D2（每出口节点一个隧道 NIC）→ 改为路由时封装
+- §5.1 NIC 规划（隧道 NIC 201+）→ 改为 Link NICs
+- §5.2 路由表（通告前缀 → 隧道 NIC）→ 改为 RouteSelector 决策
+- §5.3 数据流（隧道 NIC 相关）→ 改为转发路径封装
+
+---
+
+**建议**：直接阅读 `gvisor_route_selector_architecture.md` 获取最终方案。
 
 ---
 

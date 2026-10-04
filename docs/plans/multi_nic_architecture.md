@@ -2,9 +2,19 @@
 
 > 版本: v1.0.0
 > 日期: 2026-10-01
-> 状态: ⚠️ 已废弃 - 被 `gvisor_stack_integration_design.md` 取代
+> 状态: ❌ 已废弃 - 被 `gvisor_route_selector_architecture.md` 取代
 
-**最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）**
+**最终方案：RouteSelector + Link NICs（见 `gvisor_route_selector_architecture.md`）**
+
+**关键变化**：
+- 不再需要 Tunnel NIC / Loopback NIC
+- IPIP 封装在路由决策时完成
+- 每个直连 peer 一个 Link NIC
+- RouteSelector 扩展点做动态决策
+
+---
+
+**以下内容为历史设计，仅供参考，架构决策以 `gvisor_route_selector_architecture.md` 为准。**
 
 ---
 > 整合自: gvisor_routing_evolution.md, multi_nic_implementation_plan.md, mesh_ipip_smart_routing.md

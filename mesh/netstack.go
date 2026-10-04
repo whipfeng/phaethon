@@ -51,12 +51,10 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (Phase 2+)
-	meshEP    *MeshEndpoint    // NIC 2: Mesh endpoint for mesh traffic (legacy, being replaced by linkNICs)
-	meshMgr   *MeshManager     // Mesh manager for routing decisions
-	linkNICs  map[string]*LinkNIC // NIC 2+: Per-peer Link NICs for direct mesh communication
-	linkNextNICID atomic.Uint64  // Next NIC ID for link NICs (starting at 2)
-	tunnelNICs map[string]*TunnelNIC // NIC 201+: Per-node tunnel NICs for IPIP
-	tunnelNextNICID atomic.Uint64     // Next NIC ID for tunnel NICs (starting at 201)
+	meshEP        *MeshEndpoint       // NIC 2: Mesh endpoint for mesh traffic (legacy, being replaced by linkNICs)
+	meshMgr       *MeshManager        // Mesh manager for routing decisions
+	linkNICs      map[string]*LinkNIC // NIC 10+: Per-peer Link NICs for direct mesh communication
+	linkNextNICID atomic.Uint64       // Next NIC ID for link NICs (starting at 10; design target 2,3,4 pending meshEP retirement)
 
 	// Addresses derived from mesh subnet
 	addr    tcpip.Address // hostIP (.2) - TUN adapter OS side
@@ -90,8 +88,8 @@ type Netstack struct {
 	meshSubnet *net.IPNet
 
 	// Mesh-related callbacks (interceptor removed in phase 2)
-	isLocalMeshVIP  func(ip net.IP) bool
-	isMeshIPFunc    func(ip net.IP) bool
+	isLocalMeshVIP func(ip net.IP) bool
+	isMeshIPFunc   func(ip net.IP) bool
 
 	// FakeIP reverse lookup for diagnostics
 	lookupDomainFunc func(ip string) string
@@ -106,11 +104,14 @@ type Netstack struct {
 
 // NewNetstack creates a new Netstack instance.
 func NewNetstack() *Netstack {
-	return &Netstack{
+	n := &Netstack{
 		htunnelEndpoints: make(map[string]*HTunnelEndpoint),
-		tunnelNICs:       make(map[string]*TunnelNIC),
 		linkNICs:         make(map[string]*LinkNIC),
 	}
+	// Link NIC IDs start at 10: NIC 1 = TUN, NIC 2 = meshEP (legacy), 100+ = h_tunnel.
+	// Design target is 2,3,4 - blocked on meshEP retirement decision.
+	n.linkNextNICID.Store(10)
+	return n
 }
 
 // Stack returns the underlying gVisor stack.
@@ -134,16 +135,16 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 	if n.meshEP != nil {
 		n.meshEP.SetMeshManager(meshMgr)
 	}
-	// Set route change callback to update tunnel NICs
+	// Set route change callback to sync Link NICs (per design §1.2 FIB sync)
 	if meshMgr != nil {
 		meshMgr.SetOnRouteChange(func() {
-			if err := n.UpdateTunnelNICs(meshMgr); err != nil {
-				util.LogError("[NETSTACK] failed to update tunnel NICs on route change: %v", err)
+			if err := n.SyncLinkNICs(meshMgr); err != nil {
+				util.LogError("[NETSTACK] failed to sync link NICs on route change: %v", err)
 			}
 		})
-		// Initial tunnel NIC update
-		if err := n.UpdateTunnelNICs(meshMgr); err != nil {
-			util.LogError("[NETSTACK] failed initial tunnel NIC update: %v", err)
+		// Initial link NIC sync
+		if err := n.SyncLinkNICs(meshMgr); err != nil {
+			util.LogError("[NETSTACK] failed initial link NIC sync: %v", err)
 		}
 
 		// Configure RouteSelector for dynamic routing decisions
@@ -208,88 +209,70 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			n.ns.SetRouteSelector(routeSelector)
 			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
 
-			// Create Link NICs for each direct peer (per design document §1.1)
-			// Each direct peer gets its own NIC for direct mesh communication
-			if err := n.CreateLinkNICs(meshMgr); err != nil {
+			// Create Link NICs for each known peer (per design document §1.1/§1.2)
+			if err := n.SyncLinkNICs(meshMgr); err != nil {
 				util.LogError("[NETSTACK] failed to create link NICs: %v", err)
 			}
 		}
 	}
 }
 
-// CreateLinkNICs creates a Link NIC for each direct mesh peer.
-// Per design document §1.1, each direct peer gets its own NIC (NIC 2, 3, 4, ...).
-func (n *Netstack) CreateLinkNICs(meshMgr *MeshManager) error {
+// SyncLinkNICs creates/removes Link NICs so that every known mesh peer has one.
+// Per design §1.2 + §4.4, non-direct peers also get a Link NIC; its send path
+// delegates to the mesh hop table for relay. Per design §1.1, Link NICs bind
+// no addresses (VIP/EIP are NAT addresses only).
+func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 	if n.ns == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
 
-	// Get all peers
 	peers := meshMgr.GetPeers()
-	
-	// Filter for direct peers only
-	var directPeers []MeshPeerInfo
+	current := make(map[string]MeshPeerInfo, len(peers))
 	for _, peer := range peers {
-		if peer.Direct {
-			directPeers = append(directPeers, peer)
+		if peer.Subnet == "" {
+			continue
 		}
+		current[peer.NodeID] = peer
 	}
 
-	util.LogInfo("[NETSTACK] Creating Link NICs for %d direct peers", len(directPeers))
+	// Remove Link NICs for peers that disappeared
+	for nodeID, linkNIC := range n.linkNICs {
+		if _, ok := current[nodeID]; ok {
+			continue
+		}
+		if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
+			util.LogError("[NETSTACK] failed to remove NIC %d for stale peer %s: %v", linkNIC.nicID, nodeID, err)
+		}
+		delete(n.linkNICs, nodeID)
+		util.LogInfo("[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, nodeID)
+	}
 
-	// Create a LinkNIC for each direct peer
-	for _, peer := range directPeers {
-		nodeID := peer.NodeID
-		
-		// Skip if already exists
+	// Create Link NICs for new peers
+	for nodeID, peer := range current {
 		if _, exists := n.linkNICs[nodeID]; exists {
 			continue
 		}
 
-		// Parse peer subnet
 		_, peerSubnet, err := net.ParseCIDR(peer.Subnet)
 		if err != nil {
 			util.LogError("[NETSTACK] failed to parse peer %s subnet %s: %v", nodeID, peer.Subnet, err)
 			continue
 		}
 
-		// Allocate NIC ID (starting at 2)
 		nicID := tcpip.NICID(n.linkNextNICID.Add(1))
-		if nicID < 2 {
-			nicID = 2
-			n.linkNextNICID.Store(2)
-		}
-
-		// Create LinkNIC
 		linkNIC := NewLinkNIC(nicID, nodeID, peerSubnet, meshMgr)
-		
-		// Register with gVisor stack
+
 		if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
 			util.LogError("[NETSTACK] failed to create NIC %d for peer %s: %v", nicID, nodeID, err)
 			continue
 		}
+		n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", nodeID))
 
-		// Store in map
 		n.linkNICs[nodeID] = linkNIC
-
-		// Add address (local VIP) to the NIC
-		localVIP := tcpip.AddrFrom4Slice(CalculateVIP(n.meshSubnet))
-		addrWithPrefix := tcpip.AddressWithPrefix{
-			Address:   localVIP,
-			PrefixLen: 32,
-		}
-		protocolAddr := tcpip.ProtocolAddress{
-			Protocol:          ipv4.ProtocolNumber,
-			AddressWithPrefix: addrWithPrefix,
-		}
-		if err := n.ns.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
-			util.LogError("[NETSTACK] failed to add address to NIC %d: %v", nicID, err)
-		}
-
-		util.LogInfo("[NETSTACK] Created Link NIC %d for peer %s (subnet %s)", nicID, nodeID, peer.Subnet)
+		util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, nodeID, nodeID, peer.Subnet)
 	}
 
-	// Update route table with per-peer routes
+	// Rebuild route table with per-peer routes
 	if err := n.UpdateLinkRoutes(); err != nil {
 		util.LogError("[NETSTACK] failed to update link routes: %v", err)
 	}
@@ -297,7 +280,12 @@ func (n *Netstack) CreateLinkNICs(meshMgr *MeshManager) error {
 	return nil
 }
 
-// UpdateLinkRoutes updates the route table with per-peer routes for Link NICs.
+// UpdateLinkRoutes rebuilds the gVisor route table per design §1.2:
+//   - VIP /32        → NIC 1 (local delivery)
+//   - <peer subnet>  → Link NIC (direct or relayed via mesh hop table)
+//   - mesh /8        → NIC 2 (meshEP fallback, retained until meshEP retirement)
+//
+// This is the single route-table writer; Tunnel NICs are retired per design §1/§3.
 func (n *Netstack) UpdateLinkRoutes() error {
 	if n.ns == nil {
 		return fmt.Errorf("netstack not initialized")
@@ -305,30 +293,44 @@ func (n *Netstack) UpdateLinkRoutes() error {
 
 	var routes []tcpip.Route
 
-	// Add route for each Link NIC (peer subnet → Link NIC)
+	// VIP /32 → NIC 1
+	if n.meshSubnet != nil {
+		vipIP := make(net.IP, 4)
+		copy(vipIP, n.meshSubnet.IP.To4())
+		vipIP[3] = vipIP[3] + 1
+		routes = append(routes, tcpip.Route{
+			Destination: tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4Slice(vipIP), PrefixLen: 32}.Subnet(),
+			NIC:         1,
+		})
+	}
+
+	// Per-peer subnets → Link NICs (LPM beats the mesh /8 fallback)
 	for nodeID, linkNIC := range n.linkNICs {
-		// Convert subnet to tcpip.Route
 		subnet, err := tcpip.NewSubnet(
-			tcpip.AddrFrom4Slice(linkNIC.peerSubnet.IP),
+			tcpip.AddrFrom4Slice(linkNIC.peerSubnet.IP.To4()),
 			tcpip.MaskFromBytes(linkNIC.peerSubnet.Mask),
 		)
 		if err != nil {
 			util.LogError("[NETSTACK] failed to create subnet for peer %s: %v", nodeID, err)
 			continue
 		}
-
-		// Route: peer subnet → Link NIC (no gateway)
 		routes = append(routes, tcpip.Route{
 			Destination: subnet,
 			NIC:         linkNIC.nicID,
 		})
-
-		util.LogInfo("[NETSTACK] Added route: %s → NIC %d (%s)", subnet, linkNIC.nicID, nodeID)
 	}
 
-	// Set the route table
+	// mesh /8 → NIC 2 fallback (meshEP; removed when meshEP is retired)
+	if n.meshSubnet != nil && n.meshEP != nil {
+		meshNetwork := tcpip.AddressWithPrefix{
+			Address:   tcpip.AddrFrom4Slice(n.meshSubnet.IP.To4()),
+			PrefixLen: 8,
+		}
+		routes = append(routes, tcpip.Route{Destination: meshNetwork.Subnet(), NIC: 2})
+	}
+
 	n.ns.SetRouteTable(routes)
-	util.LogInfo("[NETSTACK] Updated route table with %d Link NIC routes", len(routes))
+	util.LogInfo("[NETSTACK] route table rebuilt: %d routes (%d link NICs)", len(routes), len(n.linkNICs))
 
 	return nil
 }
@@ -623,7 +625,7 @@ func (n *Netstack) initStack() error {
 				{
 					// Filter: match packets from NIC 1 (TUN adapter)
 					Filter: stack.IPHeaderFilter{
-						InputInterface:      "nic1",
+						InputInterface:       "nic1",
 						InputInterfaceInvert: false,
 					},
 					Target: &stack.SNATTarget{
@@ -656,165 +658,6 @@ func (n *Netstack) initStack() error {
 
 	util.LogInfo("netstack: initialized with 2-NIC topology (NIC 1: TUN, NIC 2: Mesh/GIP=%s)", n.dnsAddr)
 	return nil
-}
-
-// UpdateTunnelNICs creates or updates tunnel NICs for egress nodes and syncs the route table.
-// This should be called when mesh routes change (e.g., new advertisements).
-func (n *Netstack) UpdateTunnelNICs(meshMgr *MeshManager) error {
-	if meshMgr == nil {
-		return fmt.Errorf("mesh manager is nil")
-	}
-
-	// Get mesh route table
-	rt := meshMgr.GetRouteTable()
-	if rt == nil {
-		util.LogWarn("[NETSTACK] cannot update tunnel NICs: mesh route table is nil")
-		return nil
-	}
-
-	// Identify egress nodes and their advertised prefixes
-	// Egress nodes are nodes that advertise non-mesh routes (outside 100.64.0.0/10)
-	egressNodes := make(map[string]net.IP) // nodeID -> EIP
-	advertisedRoutes := make([]struct {
-		prefix *net.IPNet
-		nodeID string
-	}, 0)
-
-	meshSubnet := meshMgr.GetMeshSubnet()
-	if meshSubnet == nil {
-		util.LogWarn("[NETSTACK] cannot update tunnel NICs: mesh subnet not configured")
-		return nil
-	}
-
-	for _, route := range rt.Routes {
-		// Skip mesh routes (100.64.0.0/10)
-		if isMeshSubnet(route.Prefix, meshSubnet) {
-			continue
-		}
-
-		// This is an advertised route (non-mesh)
-		// Select the best egress node for this prefix
-		if len(route.Entries) == 0 {
-			continue
-		}
-
-		targetNodeID := meshMgr.SelectEgressNodeID(route.Prefix.IP, route.Entries)
-		if targetNodeID == "" {
-			continue
-		}
-
-		targetEIP := meshMgr.GetEIPForNode(targetNodeID)
-		if targetEIP == nil {
-			util.LogWarn("[NETSTACK] no EIP for egress node %s, skipping route %s", targetNodeID, route.Prefix)
-			continue
-		}
-
-		egressNodes[targetNodeID] = targetEIP
-		advertisedRoutes = append(advertisedRoutes, struct {
-			prefix *net.IPNet
-			nodeID string
-		}{prefix: route.Prefix, nodeID: targetNodeID})
-	}
-
-	// Create tunnel NICs for each egress node
-	localEIP := meshMgr.GetIPIPTunnel().GetLocalEIP()
-	if localEIP == nil {
-		util.LogWarn("[NETSTACK] cannot create tunnel NICs: local EIP not set")
-		return nil
-	}
-
-	for nodeID, eip := range egressNodes {
-		if _, exists := n.tunnelNICs[nodeID]; exists {
-			// Tunnel NIC already exists for this node
-			continue
-		}
-
-		// Create new tunnel NIC
-		nicID := tcpip.NICID(201 + n.tunnelNextNICID.Add(1) - 1)
-		mtu := uint32(1400) // Conservative MTU for IPIP (1500 - 20 outer header - 80 safety margin)
-		tunnelNIC := NewTunnelNIC(nicID, nodeID, tcpip.AddrFrom4Slice(eip), tcpip.AddrFrom4Slice(localEIP), mtu, meshMgr)
-
-		// Register NIC with stack
-		if err := n.ns.CreateNIC(nicID, tunnelNIC); err != nil {
-			util.LogError("[NETSTACK] failed to create tunnel NIC for node %s: %v", nodeID, err)
-			continue
-		}
-
-		// Set NIC name for debugging
-		n.ns.SetNICName(nicID, fmt.Sprintf("tunnel_%s", nodeID))
-
-		// Enable spoofing (allow packets with any source IP)
-		n.ns.SetSpoofing(nicID, true)
-
-		n.tunnelNICs[nodeID] = tunnelNIC
-		util.LogInfo("[NETSTACK] created tunnel NIC %d for node %s (EIP=%s)", nicID, nodeID, eip)
-	}
-
-	// Build new route table
-	routes := []tcpip.Route{}
-
-	// Add VIP route (NIC 1)
-	if n.meshSubnet != nil {
-		vipIP := make(net.IP, 4)
-		copy(vipIP, n.meshSubnet.IP.To4())
-		vipIP[3] = vipIP[3] + 1
-		vipAddr := tcpip.AddrFrom4Slice(vipIP)
-		routes = append(routes, tcpip.Route{
-			Destination: tcpip.AddressWithPrefix{Address: vipAddr, PrefixLen: 32}.Subnet(),
-			NIC:         1,
-		})
-	}
-
-	// Add mesh route (NIC 2)
-	if n.meshSubnet != nil {
-		meshNetwork := tcpip.AddressWithPrefix{
-			Address:   tcpip.AddrFrom4Slice(n.meshSubnet.IP.To4()),
-			PrefixLen: 8,
-		}
-		routes = append(routes, tcpip.Route{Destination: meshNetwork.Subnet(), NIC: 2})
-	}
-
-	// Add advertised routes (tunnel NICs)
-	for _, ar := range advertisedRoutes {
-		tunnelNIC, exists := n.tunnelNICs[ar.nodeID]
-		if !exists {
-			continue
-		}
-
-		prefix := tcpip.AddressWithPrefix{
-			Address:   tcpip.AddrFrom4Slice(ar.prefix.IP.To4()),
-			PrefixLen: prefixLen(ar.prefix),
-		}
-		routes = append(routes, tcpip.Route{
-			Destination: prefix.Subnet(),
-			NIC:         tunnelNIC.NICID(),
-		})
-		util.LogDebug("[NETSTACK] route: %s → tunnel NIC %d (node %s)", ar.prefix, tunnelNIC.NICID(), ar.nodeID)
-	}
-
-	// Update route table
-	n.ns.SetRouteTable(routes)
-	util.LogInfo("[NETSTACK] route table updated: %d routes (%d advertised via tunnel NICs)", len(routes), len(advertisedRoutes))
-
-	return nil
-}
-
-// isMeshSubnet checks if a prefix is within the mesh subnet (100.64.0.0/10)
-func isMeshSubnet(prefix *net.IPNet, meshSubnet *net.IPNet) bool {
-	if prefix == nil || meshSubnet == nil {
-		return false
-	}
-	// Check if the prefix is completely within the mesh subnet
-	return meshSubnet.Contains(prefix.IP) && prefixLen(prefix) >= 10
-}
-
-// prefixLen returns the prefix length of an IPNet
-func prefixLen(ipnet *net.IPNet) int {
-	if ipnet == nil {
-		return 0
-	}
-	ones, _ := ipnet.Mask.Size()
-	return ones
 }
 
 // InjectMeshPacket injects a raw IP packet into the netstack as if received from the mesh network.

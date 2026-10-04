@@ -40,4 +40,4 @@ require (
 	golang.org/x/tools v0.43.0 // indirect
 )
 
-replace gvisor.dev/gvisor => github.com/whipfeng/gvisor-fork v0.0.0-20261004092809-2e4e3d7f4343
+replace gvisor.dev/gvisor => github.com/whipfeng/gvisor-fork v0.0.0-20261004102555-b5e623a9dab8

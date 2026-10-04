@@ -2,7 +2,11 @@
 
 > 版本: v1.0.0
 > 日期: 2026-10-01
-> 状态: IMPLEMENTING (Phase 3 部分完成)
+> 状态: ⚠️ 已废弃 - 被 `gvisor_stack_integration_design.md` 取代
+
+**最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）**
+
+---
 > 整合自: gvisor_routing_evolution.md, multi_nic_implementation_plan.md, mesh_ipip_smart_routing.md
 
 ## 概述

@@ -1,5 +1,13 @@
 # Multi-NIC 架构设计（手动 NAT 方案）
 
+## ⚠️ 已废弃
+
+**本文档已废弃，被 `gvisor_stack_integration_design.md` 取代。**
+
+最终方案：gVisor fork 定制（见 `gvisor_stack_integration_design.md` 阶段 2）。
+
+---
+
 ## 概述
 
 本方案采用多 NIC 架构，NIC 3 作为统一分发点处理所有包的流向。NAT 在 readLoop/writeLoop 中手动实现。

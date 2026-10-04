@@ -39,3 +39,5 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 )
+
+replace gvisor.dev/gvisor => ../gvisor-fork

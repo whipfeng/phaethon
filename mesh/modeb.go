@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -76,7 +77,7 @@ func (t *ModeBTable) LookupByDst(proto byte, dstIP net.IP, dstPort uint16, srcPo
 		return "", "", nil
 	}
 
-	dstAddr := net.JoinHostPort(dstIP.String(), itoa(dstPort))
+	dstAddr := net.JoinHostPort(dstIP.String(), strconv.Itoa(int(dstPort)))
 
 	// First try exact match with the specific srcPort
 	key := modeBKey(proto, dstAddr, srcPort)
@@ -104,5 +105,5 @@ func (t *ModeBTable) LookupByDst(proto byte, dstIP net.IP, dstPort uint16, srcPo
 }
 
 func modeBKey(proto byte, dstAddr string, srcPort uint16) string {
-	return string(rune(proto)) + ":" + dstAddr + ":" + itoa(srcPort)
+	return string(rune(proto)) + ":" + dstAddr + ":" + strconv.Itoa(int(srcPort))
 }

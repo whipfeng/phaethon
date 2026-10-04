@@ -238,9 +238,8 @@ type MeshManager struct {
 
 	DNSAllocator func(domain string) (net.IP, error)
 
-	natTable *NATTable
-	closeCh  chan struct{}
-	eventCh  chan meshEvent
+	closeCh chan struct{}
+	eventCh chan meshEvent
 
 	// DNS hijacker and Fake-IP pool (mesh DNS service)
 	dnsHijacker *DNSHijacker
@@ -248,6 +247,9 @@ type MeshManager struct {
 
 	// IPIP tunnel for static policy routing
 	ipipTunnel         *IPIPTunnel
+	
+	// Route change callback for netstack integration
+	onRouteChange func()
 	staticRoutes       []config.MeshStaticRoute
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
 
@@ -348,34 +350,6 @@ func (m *MeshManager) GetIPIPTunnel() *IPIPTunnel {
 	return m.ipipTunnel
 }
 
-// SelectEgressNodeIDForIP selects the best egress node for a given destination IP.
-// This is a public wrapper for selectEgressNodeID, used by LoopbackEndpoint.
-func (m *MeshManager) SelectEgressNodeIDForIP(dstIP net.IP) (nodeID string, eip net.IP, err error) {
-	if m.ipipTunnel == nil {
-		return "", nil, fmt.Errorf("IPIP tunnel not initialized")
-	}
-
-	// Find the route for this destination
-	route := m.findRoute(dstIP)
-	if route == nil || len(route.Entries) == 0 {
-		return "", nil, fmt.Errorf("no route for %s", dstIP)
-	}
-
-	// Select the egress node
-	nodeID = m.selectEgressNodeID(dstIP, route.Entries)
-	if nodeID == "" {
-		return "", nil, fmt.Errorf("no egress node for %s", dstIP)
-	}
-
-	// Get the EIP for the egress node
-	eip = m.getEIPForNode(nodeID)
-	if eip == nil {
-		return "", nil, fmt.Errorf("no EIP for node %s", nodeID)
-	}
-
-	return nodeID, eip, nil
-}
-
 // SendRawPacket sends a raw IP packet via the mesh network.
 // This is used by MeshEndpoint to send packets that are routed to NIC 2.
 func (m *MeshManager) SendRawPacket(data []byte) error {
@@ -412,31 +386,6 @@ func (m *MeshManager) SendRawPacket(data []byte) error {
 	}
 
 	return fmt.Errorf("failed to send packet via any peer")
-}
-
-// SendEncapsulatedPacket sends an IPIP-encapsulated packet via the mesh network.
-// This is used by LoopbackEndpoint after performing IPIP encapsulation.
-func (m *MeshManager) SendEncapsulatedPacket(encapsulated []byte, dstIP net.IP) error {
-	// Find the route for the original destination
-	nextHops := m.findNextHops(dstIP)
-	if len(nextHops) == 0 {
-		return fmt.Errorf("no next hops for %s", dstIP)
-	}
-
-	// Select the best peer
-	candidatePeers := m.selectBestPeers(nextHops, dstIP)
-	if len(candidatePeers) == 0 {
-		return fmt.Errorf("no candidate peers for %s", dstIP)
-	}
-
-	// Try to send via each candidate peer
-	for _, peer := range candidatePeers {
-		if err := peer.Send(encapsulated); err == nil {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("failed to send encapsulated packet via any peer")
 }
 
 // SetStaticRoutes updates the static IPIP routes from config.
@@ -615,28 +564,51 @@ func (m *MeshManager) GetNetwork() *net.IPNet {
 	return m.network
 }
 
-func (m *MeshManager) EnableNAT() {
-	m.natTable = NewNATTable(m.vip)
-	util.LogInfo("[MESH] NAT enabled (vip=%s)", m.vip)
-}
-
-func (m *MeshManager) GetNATStats() int {
-	if m.natTable == nil {
-		return 0
-	}
-	return m.natTable.Stats()
-}
-
-func (m *MeshManager) GetNATTable() *NATTable {
-	return m.natTable
-}
-
 func (m *MeshManager) GetDomainSuffixes() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make([]string, len(m.domainSuffixes))
 	copy(result, m.domainSuffixes)
 	return result
+}
+
+// GetRouteTable returns the current mesh route table (exported for netstack integration).
+func (m *MeshManager) GetRouteTable() *RouteTableSnapshot {
+	rt := m.getRouteTable()
+	if rt == nil {
+		return nil
+	}
+	// Convert to snapshot for external use
+	snapshot := &RouteTableSnapshot{
+		Routes: make([]MeshRoute, len(rt.routes)),
+	}
+	copy(snapshot.Routes, rt.routes)
+	return snapshot
+}
+
+// RouteTableSnapshot is a snapshot of the route table for external use.
+type RouteTableSnapshot struct {
+	Routes []MeshRoute
+}
+
+// GetMeshSubnet returns the mesh subnet (100.64.0.0/10).
+func (m *MeshManager) GetMeshSubnet() *net.IPNet {
+	return m.network
+}
+
+// SelectEgressNodeID selects the best egress node for a given target IP (exported).
+func (m *MeshManager) SelectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
+	return m.selectEgressNodeID(targetIP, entries)
+}
+
+// GetEIPForNode returns the EIP for a given node ID (exported).
+func (m *MeshManager) GetEIPForNode(nodeID string) net.IP {
+	return m.getEIPForNode(nodeID)
+}
+
+// SetOnRouteChange sets a callback to be invoked when the route table changes.
+func (m *MeshManager) SetOnRouteChange(callback func()) {
+	m.onRouteChange = callback
 }
 
 // UpdateConfig hot-swaps domainSuffixes and advertise without restarting.
@@ -936,205 +908,75 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 	m.topology.UnregisterPeerByNodeID(nodeID)
 }
 
-// HandleOutboundPacket is the TUN readLoop interceptor.
-// Returns true if the packet was handled.
-func (m *MeshManager) HandleOutboundPacket(dstIP net.IP, data []byte) bool {
-	// Very visible log for 8.8.8.x to debug IPIP
-	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogDebug("[IPIP] HandleOutboundPacket called for 8.8.8.x: dst=%s len=%d", dstIP, len(data))
+// SendToNode sends an encapsulated packet to a specific target node via the mesh network.
+// This is used by tunnel NICs to send IPIP-encapsulated packets to egress nodes.
+func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
+	if targetNodeID == "" {
+		return fmt.Errorf("empty target node ID")
+	}
+	if len(packet) == 0 {
+		return fmt.Errorf("empty packet")
 	}
 
-	// Debug: log all packets to mesh network
-	if isMeshAddress(dstIP) {
-		proto := "unknown"
-		if len(data) >= 20 && data[0]>>4 == 4 {
-			if data[9] == 6 {
-				proto = "TCP"
-			} else if data[9] == 17 {
-				proto = "UDP"
-			}
-		}
-		util.LogDebug("[MESH] HandleOutboundPacket: dst=%s proto=%s len=%d", dstIP, proto, len(data))
-	} else if len(data) >= 20 && data[0]>>4 == 4 {
-		// Log non-mesh IPv4 packets for debugging static routes
-		util.LogDebug("[MESH] HandleOutboundPacket non-mesh: dst=%s len=%d", dstIP, len(data))
+	// Find peers that can reach the target node
+	nextHops := m.findNextHopsForNode(targetNodeID)
+	if len(nextHops) == 0 {
+		return fmt.Errorf("no route to node %s", targetNodeID)
 	}
 
-	// Exclude local netstack addresses (GIP .3, hostIP .2) from mesh interception.
-	// These packets must reach InjectInbound so the netstack's DNS hijacker can process them.
-	if m.isLocalNetstackAddr(dstIP) {
-		return false
+	// Try to send via candidate peers with failover
+	var sendErr error
+	for i, peerWithHop := range nextHops {
+		peer := peerWithHop.Peer
+		sendErr = peer.Send(packet)
+		if sendErr == nil {
+			if i > 0 {
+				util.LogInfo("[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
+					targetNodeID, peer.GetNodeID(), i+1)
+			}
+			util.LogDebug("[MESH] sent %d bytes to node %s via peer %s (hop=%d)",
+				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop)
+			return nil
+		}
+
+		// Handle peer stopped
+		if strings.Contains(sendErr.Error(), "peer stopped") {
+			util.LogWarn("[MESH] send to node %s failed: peer %s stopped, triggering removal",
+				targetNodeID, peer.GetNodeID())
+			if m.p2p != nil {
+				m.p2p.StopPeerByNodeID(peer.GetNodeID())
+			}
+			continue
+		}
+
+		// Queue full or other error, try next candidate
+		util.LogDebug("[MESH] send to node %s via peer %s failed: %v, trying next candidate",
+			targetNodeID, peer.GetNodeID(), sendErr)
 	}
 
-	if m.isLocalVIP(dstIP) {
-		if m.tun != nil {
-			if err := m.tun.WriteMeshPacket(data); err != nil {
-				util.LogWarn("[MESH] write local packet to TUN failed: %v", err)
-			}
-		}
-		return true
-	}
+	return fmt.Errorf("send to node %s failed on all %d candidates: %v", targetNodeID, len(nextHops), sendErr)
+}
 
-	// Exclude mesh subnet (Fake-IPs) from mesh interception.
-	// Fake-IPs are allocated from the mesh subnet but are not actual VIPs.
-	// They must reach InjectInbound so the gVisor TCP forwarder can handle them
-	// and look up the original domain via fakeIP.LookupDomain.
-	//
-	// IMPORTANT: Check findRoute FIRST before local subnet check.
-	// Remote Fake-IPs (e.g., 100.64.0.x on VM with subnet 100.64.1.0/24) should be
-	// routed via the peer that owns that subnet, not passed to local netstack.
-	route := m.findRoute(dstIP)
-	nextHops := m.findNextHops(dstIP)
-	if route != nil && len(nextHops) > 0 {
-		// Get sorted peer list for failover
-		candidatePeers := m.selectBestPeers(nextHops, dstIP)
-		if len(candidatePeers) == 0 {
-			util.LogWarn("[MESH] No candidates for %s, dropping packet", dstIP)
-			return true
-		}
-		selectedPeer := candidatePeers[0]
-		selectedHop := m.getHopForPeer(nextHops, selectedPeer)
+// findNextHopsForNode finds peers that can reach a specific target node.
+func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
+	rt := m.getRouteTable()
 
-		// Debug log for VIP-like destinations
-		if len(dstIP) >= 4 && dstIP[3] == 1 {
-			util.LogDebug("[MESH] Sending to %s: selected peer=%s (candidates=%d)",
-				dstIP, selectedPeer.GetNodeID(), len(candidatePeers))
-		}
+	// Find the best path to the target node using Dijkstra results
+	peers := m.topology.GetAllPeers()
 
-		// Check if destination is in mesh network (100.0.0.0/8)
-		isMeshDest := m.network != nil && m.network.Contains(dstIP)
-		util.LogInfo("[MESH-OUT-ROUTE] dst=%s isMeshDest=%v network=%v", dstIP, isMeshDest, m.network)
-
-		var sendPacket []byte
-		if isMeshDest {
-			// Mesh traffic: send directly without IPIP encapsulation
-			sendPacket = make([]byte, len(data))
-			copy(sendPacket, data)
-
-			util.LogDebug("[MESH] outbound mesh %s: sending %d bytes directly via peer %s (hop=%d)",
-				dstIP, len(data), selectedPeer.GetNodeID(), selectedHop)
-		} else {
-			// Non-mesh traffic (advertised routes): IPIP-encapsulate with the
-			// OWNER node's EIP as the outer destination. The outer header is
-			// end-to-end: intermediate peers only relay via the mesh network
-			// and never decapsulate; the owner terminates the tunnel.
-			if len(route.Entries) == 0 {
-				util.LogWarn("[MESH] No entry for route to %s, dropping packet", dstIP)
-				return true
-			}
-
-			targetNodeID := m.selectEgressNodeID(dstIP, route.Entries)
-			if targetNodeID == "" {
-				util.LogWarn("[MESH] No egress node for route to %s, dropping packet", dstIP)
-				return true
-			}
-
-			targetEIP := m.getEIPForNode(targetNodeID)
-			if targetEIP == nil {
-				util.LogWarn("[MESH] No EIP for target node %s, dropping packet", targetNodeID)
-				return true
-			}
-
-			localEIP := m.ipipTunnel.GetLocalEIP()
-			if localEIP == nil {
-				util.LogWarn("[MESH] No local EIP, dropping packet")
-				return true
-			}
-
-			encapsulated, err := m.ipipTunnel.Encapsulate(localEIP, targetEIP, data)
-			if err != nil {
-				util.LogWarn("[MESH] IPIP encapsulation failed: %v", err)
-				return true
-			}
-
-			sendPacket = encapsulated
-			util.LogDebug("[MESH] IPIP encapsulated non-mesh: outer src=%s dst=%s inner len=%d total len=%d egress=%s via=%s",
-				localEIP, targetEIP, len(data), len(encapsulated), targetNodeID, selectedPeer.GetNodeID())
-		}
-
-		if isMeshAddress(dstIP) {
-			util.LogDebug("[MESH] outbound %s: sending %d bytes via peer %s (hop=%d, candidates=%d)",
-				dstIP, len(sendPacket), selectedPeer.GetNodeID(), selectedHop, len(nextHops))
-			if len(data) >= 20 && data[9] == 6 {
-				logTCPPacketMesh("[TCP] outbound:", data)
-			}
-		} else if len(data) >= 20 && data[0]>>4 == 4 {
-			// Log non-mesh IPv4 packets sent via mesh (advertised route traffic)
-			isSYN := false
-			if data[9] == 6 {
-				hl := int(data[0]&0x0f) * 4
-				if len(data) >= hl+14 {
-					flags := data[hl+13]
-					isSYN = (flags&0x02) != 0 && (flags&0x10) == 0
-				}
-			}
-			if isSYN {
-				util.LogInfo("[MESH-DIAG] outbound SYN via mesh: src=%s dst=%s:%d via=%s (hop=%d)",
-					net.IP(data[12:16]), dstIP, uint16(data[int(data[0]&0x0f)*4])<<8|uint16(data[int(data[0]&0x0f)*4+1]),
-					selectedPeer.GetNodeID(), selectedHop)
-			} else {
-				util.LogDebug("[MESH-DIAG] outbound non-mesh via mesh: src=%s dst=%s proto=%d len=%d via=%s",
-					net.IP(data[12:16]), dstIP, data[9], len(data), selectedPeer.GetNodeID())
-			}
-		}
-
-		// Try to send, with failover to other candidates on queue full
-		var sendErr error
-		sent := false
-		for i, peer := range candidatePeers {
-			sendErr = peer.Send(sendPacket)
-			if sendErr == nil {
-				sent = true
-				selectedPeer = peer
-				selectedHop = m.getHopForPeer(nextHops, peer)
-				if i > 0 {
-					util.LogInfo("[MESH] send to %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
-						dstIP, peer.GetNodeID(), i+1)
-				}
-				break
-			}
-			if strings.Contains(sendErr.Error(), "peer stopped") {
-				// Peer stopped, trigger removal and try next
-				util.LogWarn("[MESH] send to %s failed: peer %s stopped, triggering removal",
-					dstIP, peer.GetNodeID())
-				if m.p2p != nil {
-					m.p2p.StopPeerByNodeID(peer.GetNodeID())
-				}
-				continue
-			}
-			// Queue full, try next candidate
-			util.LogDebug("[MESH] send to %s via %s failed (queue full), trying next candidate",
-				dstIP, peer.GetNodeID())
-		}
-
-		if !sent {
-			util.LogWarn("[MESH] send to %s failed on all %d candidates: %v",
-				dstIP, len(candidatePeers), sendErr)
-		} else {
-			// Debug log for successful sends to VIP-like destinations
-			if len(dstIP) >= 4 && dstIP[3] == 1 {
-				util.LogDebug("[MESH] Successfully sent %d bytes to %s via %s",
-					len(sendPacket), dstIP, selectedPeer.GetNodeID())
-			} else if len(data) >= 20 && data[0]>>4 == 4 {
-				dst := net.IP(data[16:20])
-				if isMeshAddress(dst) {
-					util.LogDebug("[MESH] sent %d bytes to %s via peer %s OK",
-						len(sendPacket), dst, selectedPeer.GetNodeID())
+	if path, ok := rt.bestPaths[targetNodeID]; ok {
+		// Find the peer for the best next hop with matching localSeq
+		for _, peer := range peers {
+			if peer.Sender != nil && peer.NodeID() == path.NextHop {
+				if peer.Sender.GetLocalSeq() == path.LocalSeq {
+					return []PeerWithHop{{Peer: peer.Sender, Hop: 1}}
 				}
 			}
 		}
-		return true
 	}
 
-	// Local route (peers empty) or no route — pass through to netstack
-	if isMeshAddress(dstIP) {
-		if route != nil {
-			util.LogDebug("[MESH] outbound %s: local route %s, passing through", dstIP, route.Prefix)
-		} else {
-			util.LogDebug("[MESH] outbound %s: no route, passing through", dstIP)
-		}
-	}
-	return false
+	// Fallback: find any peer that has the target node in its routing table
+	return m.findNextHopsFallback([]string{targetNodeID}, peers)
 }
 
 // HandleMeshFrame processes a raw IP packet received from a peer.
@@ -1234,28 +1076,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	isVIP := m.isLocalVIP(dstIP)
 	util.LogDebug("[MESH] checking VIP: dst=%s isVIP=%v vip=%v", dstIP, isVIP, m.vip)
 
-	// .1 (VIP): NAT reverse + WriteMeshPacket to OS
-	// VIP is only for locally-originated connections (via NAT).
-	// If NAT reverse fails, drop the packet - it's not a valid response.
+	// .1 (VIP): WriteMeshPacket to OS (NAT handled by gVisor iptables)
 	if isVIP {
 		util.LogDebug("[MESH] VIP path entered for packet from %s", fromNodeID)
-		if m.natTable == nil {
-			util.LogWarn("[MESH] VIP packet from %s dropped: natTable is nil", fromNodeID)
-			return
-		}
 		pkt := make([]byte, len(frame))
 		copy(pkt, frame)
-
-		natPkt := m.natTable.TranslateInbound(pkt)
-		if natPkt != nil {
-			if m.tun != nil {
-				if err := m.tun.WriteMeshPacket(natPkt); err != nil {
-					util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
-				}
+		if m.tun != nil {
+			if err := m.tun.WriteMeshPacket(pkt); err != nil {
+				util.LogWarn("[MESH] write VIP packet to TUN failed: %v", err)
 			}
-			return
 		}
-		util.LogDebug("[MESH] VIP packet from %s dropped: NAT reverse failed", fromNodeID)
 		return
 	}
 
@@ -2017,6 +1847,12 @@ func (m *MeshManager) recomputeRoutes() {
 		bestPaths:  bestPaths,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
+	
+	// Notify netstack of route change (for tunnel NIC updates)
+	if m.onRouteChange != nil {
+		m.onRouteChange()
+	}
+	
 	for _, r := range routes {
 		var nodeIDs []string
 		for _, e := range r.Entries {
@@ -3059,29 +2895,4 @@ func containsNeighborNodeID(slice []GossipNeighbor, nodeID string) bool {
 		}
 	}
 	return false
-}
-
-// rewriteSrcIPInPacket rewrites the source IP in a raw IPv4 packet
-// and recomputes the IP header checksum. Used as a fallback when natTable is nil.
-func rewriteSrcIPInPacket(pkt []byte, newSrc net.IP) []byte {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 {
-		return nil
-	}
-	result := make([]byte, len(pkt))
-	copy(result, pkt)
-	copy(result[12:16], newSrc.To4())
-	result[10] = 0
-	result[11] = 0
-	var sum uint32
-	headerLen := int(result[0]&0x0f) * 4
-	for i := 0; i < headerLen-1; i += 2 {
-		sum += uint32(result[i])<<8 | uint32(result[i+1])
-	}
-	for sum>>16 > 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	cksum := ^uint16(sum)
-	result[10] = byte(cksum >> 8)
-	result[11] = byte(cksum)
-	return result
 }

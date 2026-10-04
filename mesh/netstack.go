@@ -15,7 +15,6 @@ import (
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -52,15 +51,14 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (Phase 2+)
-	meshEP     *MeshEndpoint     // NIC 2: Mesh endpoint for mesh traffic
-	ipipEP     *IPIPEndpoint     // NIC 3: IPIP endpoint for decapsulation
-	loopbackEP *LoopbackEndpoint // NIC 4: Loopback endpoint for unified dispatch
+	meshEP    *MeshEndpoint    // NIC 2: Mesh endpoint for mesh traffic
+	tunnelNICs map[string]*TunnelNIC // NIC 201+: Per-node tunnel NICs for IPIP
+	tunnelNextNICID atomic.Uint64     // Next NIC ID for tunnel NICs (starting at 201)
 
 	// Addresses derived from mesh subnet
-	addr     tcpip.Address // hostIP (.2) - TUN adapter OS side
-	dnsAddr  tcpip.Address // GIP (.3) - netstack internal, DNS, proxy socket source
-	localEIP tcpip.Address // EIP (.4) - IPIP encapsulation source
-	addrSet  bool
+	addr    tcpip.Address // hostIP (.2) - TUN adapter OS side
+	dnsAddr tcpip.Address // GIP (.3) - netstack internal, DNS, proxy socket source
+	addrSet bool
 
 	// Running state
 	running bool
@@ -85,26 +83,15 @@ type Netstack struct {
 	// Set by the TUN engine.
 	WriteLoopCloseCh func() <-chan struct{}
 
-	// Mesh subnet and NAT for writeLoop routing decisions
+	// Mesh subnet for writeLoop routing decisions
 	meshSubnet *net.IPNet
-	natTable   *NATTable
 
-	// Mesh interception for writeLoop
-	meshInterceptor func(dstIP net.IP, data []byte) bool
+	// Mesh-related callbacks (interceptor removed in phase 2)
 	isLocalMeshVIP  func(ip net.IP) bool
 	isMeshIPFunc    func(ip net.IP) bool
 
 	// FakeIP reverse lookup for diagnostics
 	lookupDomainFunc func(ip string) string
-
-	// MeshOutboundFunc is called by writeLoop for packets destined for mesh.
-	// Returns true if the packet was queued for async mesh processing.
-	// Set by the TUN engine.
-	MeshOutboundFunc func(dstIP net.IP, data []byte) bool
-
-	// MeshOutboundFullFunc is called when the mesh outbound queue is full.
-	// Set by the TUN engine.
-	MeshOutboundFullFunc func(dstIP net.IP, data []byte)
 
 	// TCP keepalive settings
 	tcpKeepalive *config.MeshTCPKeepalive
@@ -118,6 +105,7 @@ type Netstack struct {
 func NewNetstack() *Netstack {
 	return &Netstack{
 		htunnelEndpoints: make(map[string]*HTunnelEndpoint),
+		tunnelNICs:       make(map[string]*TunnelNIC),
 	}
 }
 
@@ -131,11 +119,6 @@ func (n *Netstack) LinkEP() *channel.Endpoint {
 	return n.linkEP
 }
 
-// LoopbackEP returns the loopback link endpoint (NIC 3).
-func (n *Netstack) LoopbackEP() *LoopbackEndpoint {
-	return n.loopbackEP
-}
-
 // MeshEP returns the mesh link endpoint (NIC 2).
 func (n *Netstack) MeshEP() *MeshEndpoint {
 	return n.meshEP
@@ -145,6 +128,18 @@ func (n *Netstack) MeshEP() *MeshEndpoint {
 func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 	if n.meshEP != nil {
 		n.meshEP.SetMeshManager(meshMgr)
+	}
+	// Set route change callback to update tunnel NICs
+	if meshMgr != nil {
+		meshMgr.SetOnRouteChange(func() {
+			if err := n.UpdateTunnelNICs(meshMgr); err != nil {
+				util.LogError("[NETSTACK] failed to update tunnel NICs on route change: %v", err)
+			}
+		})
+		// Initial tunnel NIC update
+		if err := n.UpdateTunnelNICs(meshMgr); err != nil {
+			util.LogError("[NETSTACK] failed initial tunnel NIC update: %v", err)
+		}
 	}
 }
 
@@ -178,16 +173,6 @@ func (n *Netstack) IsRunning() bool {
 // SetMeshSubnet sets the mesh subnet for writeLoop routing decisions.
 func (n *Netstack) SetMeshSubnet(subnet *net.IPNet) {
 	n.meshSubnet = subnet
-}
-
-// SetNATTable sets the NAT table for writeLoop reverse NAT.
-func (n *Netstack) SetNATTable(nat *NATTable) {
-	n.natTable = nat
-}
-
-// SetMeshInterceptor sets the mesh interception callback for writeLoop.
-func (n *Netstack) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool) {
-	n.meshInterceptor = handler
 }
 
 // SetLocalMeshVIPFunc sets the function to check if an IP is a local mesh VIP.
@@ -325,7 +310,6 @@ func (n *Netstack) Stop() error {
 // initStack creates the gvisor netstack with multiple NICs.
 // NIC 1: TUN adapter (channel.Endpoint) - TUN device I/O, NAT at boundary
 // NIC 2: Mesh endpoint - mesh traffic, bound to GIP
-// NIC 3: Loopback endpoint - default route loopback, IPIP encapsulation
 // writeLoop handles all routing decisions: VIP/hostIP -> TUN, mesh -> mesh link, other -> re-inject.
 func (n *Netstack) initStack() error {
 	// NIC 1: TUN adapter (channel endpoint)
@@ -334,7 +318,7 @@ func (n *Netstack) initStack() error {
 
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, func(s *stack.Stack) stack.TransportProtocol { return newIPIPProtocol(s, linkEP) }},
 	})
 	n.ns = s
 
@@ -343,8 +327,10 @@ func (n *Netstack) initStack() error {
 	}
 
 	// NIC 1: TUN adapter - receive-only + writeLoop for external NAT return
-	// No addresses bound to NIC 1
+	// Promiscuous=true: accept all inbound packets (raw-IP, transit traffic)
 	// Spoofing=true: allow packets with external source IPs from Forwarder
+	// Forwarding=true: stack forwards packets (required for iptables SNAT)
+	s.SetPromiscuousMode(1, true)
 	_ = s.SetSpoofing(1, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	_ = s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
@@ -367,59 +353,41 @@ func (n *Netstack) initStack() error {
 		return fmt.Errorf("add GIP address to NIC 2: %v", err)
 	}
 
+	// Bind EIP (.4) to NIC 2 (design requirement D6)
+	// EIP is used for IPIP tunnel decapsulation - the stack matches outer dst=EIP
+	if n.meshSubnet != nil {
+		eipIP := make(net.IP, 4)
+		copy(eipIP, n.meshSubnet.IP.To4())
+		eipIP[3] = eipIP[3] + 4 // EIP = subnet + 4
+		eipAddr := tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4Slice(eipIP), PrefixLen: 32}
+		if err := s.AddProtocolAddress(2, tcpip.ProtocolAddress{
+			Protocol:          ipv4.ProtocolNumber,
+			AddressWithPrefix: eipAddr,
+		}, stack.AddressProperties{}); err != nil {
+			util.LogWarn("[NETSTACK] failed to add EIP address to NIC 2: %v (IPIP decapsulation may not work)", err)
+		} else {
+			util.LogInfo("[NETSTACK] bound EIP=%s to NIC 2 for IPIP decapsulation", eipIP)
+		}
+	}
+
 	// NIC 2: Promiscuous=false (only accepts packets destined for GIP)
 	// Spoofing=true: allow packets with GIP as source
 	s.SetSpoofing(2, true)
 	s.SetNICName(2, "mesh")
 
-	// NIC 3: IPIP endpoint - dedicated IPIP decapsulation
-	// No addresses bound, Promiscuous=true, Spoofing=false
-	ipipEP := NewIPIPEndpoint(1500)
-	n.ipipEP = ipipEP
-
-	if err := s.CreateNIC(3, ipipEP); err != nil {
-		return fmt.Errorf("create nic 3 (ipip): %v", err)
-	}
-
-	s.SetPromiscuousMode(3, true)  // Accept IPIP packets (dst=EIP)
-	s.SetNICName(3, "ipip")
-
-	// NIC 4: Loopback endpoint - unified dispatch (IPIP encapsulation or loopback to Forwarder)
-	// No addresses bound, Promiscuous=true, Spoofing=true (needed for Forwarder route creation)
-	loopbackEP := NewLoopbackEndpoint(1500)
-	n.loopbackEP = loopbackEP
-
-	if err := s.CreateNIC(4, loopbackEP); err != nil {
-		return fmt.Errorf("create nic 4 (loopback): %v", err)
-	}
-
-	s.SetPromiscuousMode(4, true)  // Accept all packets
-	s.SetSpoofing(4, true)         // Allow Forwarder to create routes with arbitrary src IPs
-	s.SetNICName(4, "loopback")
-
-	// Route table per multi_nic_architecture_v2 design:
+	// Route table:
 	// - VIP (100.x.0.1) → NIC 1 (external NAT return → writeLoop → TUN)
 	// - Mesh network (100.0.0.0/8) → NIC 2 (other mesh nodes)
-	// - EIP (100.x.0.4) → NIC 3 (IPIP decapsulation entry)
-	// - Default → NIC 4 (unified dispatch point)
-	routes := []tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: 4},  // default → NIC 4
-		{Destination: header.IPv6EmptySubnet, NIC: 4},
-	}
+	routes := []tcpip.Route{}
 
 	// Add mesh routes if available
 	if n.meshSubnet != nil {
-		// Calculate VIP (subnet + 1) and EIP (subnet + 4)
+		// Calculate VIP (subnet + 1)
 		vipIP := make(net.IP, 4)
 		copy(vipIP, n.meshSubnet.IP.To4())
 		vipIP[3] = vipIP[3] + 1
 
-		eipIP := make(net.IP, 4)
-		copy(eipIP, n.meshSubnet.IP.To4())
-		eipIP[3] = eipIP[3] + 4
-
 		vipAddr := tcpip.AddrFrom4Slice(vipIP)
-		eipAddr := tcpip.AddrFrom4Slice(eipIP)
 
 		// Mesh network (100.0.0.0/8) → NIC 2
 		meshNetwork := tcpip.AddressWithPrefix{
@@ -433,34 +401,225 @@ func (n *Netstack) initStack() error {
 			NIC:         1,
 		}
 
-		// EIP (/32) → NIC 3
-		eipRoute := tcpip.Route{
-			Destination: tcpip.AddressWithPrefix{Address: eipAddr, PrefixLen: 32}.Subnet(),
-			NIC:         3,
-		}
+		routes = append(routes,
+			vipRoute, // VIP → NIC 1
+			tcpip.Route{Destination: meshNetwork.Subnet(), NIC: 2}, // mesh /8 → NIC 2
+		)
 
-		routes = append([]tcpip.Route{
-			vipRoute,                           // VIP → NIC 1
-			{Destination: meshNetwork.Subnet(), NIC: 2},  // mesh /8 → NIC 2
-			eipRoute,                           // EIP → NIC 3
-		}, routes...)
-
-		n.localEIP = eipAddr
-		util.LogInfo("Setting route table: VIP=%s (NIC 1), mesh=%s (NIC 2), EIP=%s (NIC 3), default=%s (NIC 4)",
-			vipAddr, meshNetwork.Subnet(), eipAddr, header.IPv4EmptySubnet)
+		util.LogInfo("Setting route table: VIP=%s (NIC 1), mesh=%s (NIC 2)",
+			vipAddr, meshNetwork.Subnet())
 	} else {
-		util.LogInfo("Setting route table: default=%s (NIC 4) - mesh subnet not configured",
-			header.IPv4EmptySubnet)
+		util.LogInfo("Setting route table: empty - mesh subnet not configured")
 	}
 
 	s.SetRouteTable(routes)
 
-	// NAT is handled manually in tun/engine.go readLoop/writeLoop:
-	// - readLoop: TranslateOutbound (SNAT src IP to VIP for packets from TUN)
-	// - writeLoop: TranslateInbound (DNAT dst IP back to original for packets to TUN)
+	// Configure iptables SNAT for bypass gateway
+	// Packets from TUN (NIC 1) going to mesh (NIC 2) need SNAT: src → VIP
+	// conntrack automatically handles reverse NAT (DNAT) for return packets
+	if n.meshSubnet != nil {
+		// Calculate VIP (subnet + 1)
+		vipIP := make(net.IP, 4)
+		copy(vipIP, n.meshSubnet.IP.To4())
+		vipIP[3] = vipIP[3] + 1
+		vipAddr := tcpip.AddrFrom4Slice(vipIP)
 
-	util.LogInfo("netstack: initialized with multi-NIC v2 architecture (NIC 1: TUN, NIC 2: Mesh/GIP=%s, NIC 3: IPIP, NIC 4: Loopback)", n.dnsAddr)
+		// Create NAT table with Postrouting hook
+		// Rule: all packets in Postrouting, SNAT src to VIP
+		// (Postrouting doesn't support interface matching, so match all)
+		natTable := stack.Table{
+			Rules: []stack.Rule{
+				{
+					// No filter - match all packets in Postrouting
+					Target: &stack.SNATTarget{
+						Addr:            vipAddr,
+						NetworkProtocol: ipv4.ProtocolNumber,
+						ChangeAddress:   true,
+					},
+				},
+			},
+			BuiltinChains: [stack.NumHooks]int{
+				stack.Prerouting:  stack.HookUnset,
+				stack.Input:       stack.HookUnset,
+				stack.Forward:     stack.HookUnset,
+				stack.Output:      stack.HookUnset,
+				stack.Postrouting: 0, // Entry point to rules
+			},
+			Underflows: [stack.NumHooks]int{
+				stack.Prerouting:  stack.HookUnset,
+				stack.Input:       stack.HookUnset,
+				stack.Forward:     stack.HookUnset,
+				stack.Output:      stack.HookUnset,
+				stack.Postrouting: stack.HookUnset,
+			},
+		}
+
+		// Replace NAT table (ipv4=false means IPv4)
+		s.IPTables().ReplaceTable(stack.NATID, natTable, false /* ipv6 */)
+		util.LogInfo("netstack: iptables SNAT configured (VIP=%s, Postrouting NIC 2)", vipAddr)
+	}
+
+	util.LogInfo("netstack: initialized with 2-NIC topology (NIC 1: TUN, NIC 2: Mesh/GIP=%s)", n.dnsAddr)
 	return nil
+}
+
+// UpdateTunnelNICs creates or updates tunnel NICs for egress nodes and syncs the route table.
+// This should be called when mesh routes change (e.g., new advertisements).
+func (n *Netstack) UpdateTunnelNICs(meshMgr *MeshManager) error {
+	if meshMgr == nil {
+		return fmt.Errorf("mesh manager is nil")
+	}
+
+	// Get mesh route table
+	rt := meshMgr.GetRouteTable()
+	if rt == nil {
+		util.LogWarn("[NETSTACK] cannot update tunnel NICs: mesh route table is nil")
+		return nil
+	}
+
+	// Identify egress nodes and their advertised prefixes
+	// Egress nodes are nodes that advertise non-mesh routes (outside 100.64.0.0/10)
+	egressNodes := make(map[string]net.IP) // nodeID -> EIP
+	advertisedRoutes := make([]struct {
+		prefix *net.IPNet
+		nodeID string
+	}, 0)
+
+	meshSubnet := meshMgr.GetMeshSubnet()
+	if meshSubnet == nil {
+		util.LogWarn("[NETSTACK] cannot update tunnel NICs: mesh subnet not configured")
+		return nil
+	}
+
+	for _, route := range rt.Routes {
+		// Skip mesh routes (100.64.0.0/10)
+		if isMeshSubnet(route.Prefix, meshSubnet) {
+			continue
+		}
+
+		// This is an advertised route (non-mesh)
+		// Select the best egress node for this prefix
+		if len(route.Entries) == 0 {
+			continue
+		}
+
+		targetNodeID := meshMgr.SelectEgressNodeID(route.Prefix.IP, route.Entries)
+		if targetNodeID == "" {
+			continue
+		}
+
+		targetEIP := meshMgr.GetEIPForNode(targetNodeID)
+		if targetEIP == nil {
+			util.LogWarn("[NETSTACK] no EIP for egress node %s, skipping route %s", targetNodeID, route.Prefix)
+			continue
+		}
+
+		egressNodes[targetNodeID] = targetEIP
+		advertisedRoutes = append(advertisedRoutes, struct {
+			prefix *net.IPNet
+			nodeID string
+		}{prefix: route.Prefix, nodeID: targetNodeID})
+	}
+
+	// Create tunnel NICs for each egress node
+	localEIP := meshMgr.GetIPIPTunnel().GetLocalEIP()
+	if localEIP == nil {
+		util.LogWarn("[NETSTACK] cannot create tunnel NICs: local EIP not set")
+		return nil
+	}
+
+	for nodeID, eip := range egressNodes {
+		if _, exists := n.tunnelNICs[nodeID]; exists {
+			// Tunnel NIC already exists for this node
+			continue
+		}
+
+		// Create new tunnel NIC
+		nicID := tcpip.NICID(201 + n.tunnelNextNICID.Add(1) - 1)
+		mtu := uint32(1400) // Conservative MTU for IPIP (1500 - 20 outer header - 80 safety margin)
+		tunnelNIC := NewTunnelNIC(nicID, nodeID, tcpip.AddrFrom4Slice(eip), tcpip.AddrFrom4Slice(localEIP), mtu, meshMgr)
+
+		// Register NIC with stack
+		if err := n.ns.CreateNIC(nicID, tunnelNIC); err != nil {
+			util.LogError("[NETSTACK] failed to create tunnel NIC for node %s: %v", nodeID, err)
+			continue
+		}
+
+		// Set NIC name for debugging
+		n.ns.SetNICName(nicID, fmt.Sprintf("tunnel_%s", nodeID))
+
+		// Enable spoofing (allow packets with any source IP)
+		n.ns.SetSpoofing(nicID, true)
+
+		n.tunnelNICs[nodeID] = tunnelNIC
+		util.LogInfo("[NETSTACK] created tunnel NIC %d for node %s (EIP=%s)", nicID, nodeID, eip)
+	}
+
+	// Build new route table
+	routes := []tcpip.Route{}
+
+	// Add VIP route (NIC 1)
+	if n.meshSubnet != nil {
+		vipIP := make(net.IP, 4)
+		copy(vipIP, n.meshSubnet.IP.To4())
+		vipIP[3] = vipIP[3] + 1
+		vipAddr := tcpip.AddrFrom4Slice(vipIP)
+		routes = append(routes, tcpip.Route{
+			Destination: tcpip.AddressWithPrefix{Address: vipAddr, PrefixLen: 32}.Subnet(),
+			NIC:         1,
+		})
+	}
+
+	// Add mesh route (NIC 2)
+	if n.meshSubnet != nil {
+		meshNetwork := tcpip.AddressWithPrefix{
+			Address:   tcpip.AddrFrom4Slice(n.meshSubnet.IP.To4()),
+			PrefixLen: 8,
+		}
+		routes = append(routes, tcpip.Route{Destination: meshNetwork.Subnet(), NIC: 2})
+	}
+
+	// Add advertised routes (tunnel NICs)
+	for _, ar := range advertisedRoutes {
+		tunnelNIC, exists := n.tunnelNICs[ar.nodeID]
+		if !exists {
+			continue
+		}
+
+		prefix := tcpip.AddressWithPrefix{
+			Address:   tcpip.AddrFrom4Slice(ar.prefix.IP.To4()),
+			PrefixLen: prefixLen(ar.prefix),
+		}
+		routes = append(routes, tcpip.Route{
+			Destination: prefix.Subnet(),
+			NIC:         tunnelNIC.NICID(),
+		})
+		util.LogDebug("[NETSTACK] route: %s → tunnel NIC %d (node %s)", ar.prefix, tunnelNIC.NICID(), ar.nodeID)
+	}
+
+	// Update route table
+	n.ns.SetRouteTable(routes)
+	util.LogInfo("[NETSTACK] route table updated: %d routes (%d advertised via tunnel NICs)", len(routes), len(advertisedRoutes))
+
+	return nil
+}
+
+// isMeshSubnet checks if a prefix is within the mesh subnet (100.64.0.0/10)
+func isMeshSubnet(prefix *net.IPNet, meshSubnet *net.IPNet) bool {
+	if prefix == nil || meshSubnet == nil {
+		return false
+	}
+	// Check if the prefix is completely within the mesh subnet
+	return meshSubnet.Contains(prefix.IP) && prefixLen(prefix) >= 10
+}
+
+// prefixLen returns the prefix length of an IPNet
+func prefixLen(ipnet *net.IPNet) int {
+	if ipnet == nil {
+		return 0
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ones
 }
 
 // InjectMeshPacket injects a raw IP packet into the netstack as if received from the mesh network.
@@ -1205,6 +1364,8 @@ func (n *Netstack) acceptUDP() {
 func (n *Netstack) writeLoop() {
 	defer n.wg.Done()
 
+	util.LogInfo("[WRITELOOP] started (linkEP=%T, writeLoopDevice=%v)", n.linkEP, n.WriteLoopDevice != nil)
+
 	closeCh := n.WriteLoopCloseCh()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1220,6 +1381,7 @@ func (n *Netstack) writeLoop() {
 	for {
 		pkt := n.linkEP.ReadContext(ctx)
 		if pkt == nil {
+			util.LogInfo("[WRITELOOP] ReadContext returned nil, exiting")
 			return
 		}
 
@@ -1232,11 +1394,13 @@ func (n *Netstack) writeLoop() {
 		}
 
 		dstIP := net.IP(data[16:20])
+		srcIP := net.IP(data[12:16])
 
-		if n.WritePackets.Load() < 10 {
-			util.LogDebug("netstack writeLoop pkt#%d: %s -> %s (proto=%d len=%d)",
-				n.WritePackets.Load(),
-				net.IP(data[12:16]), dstIP,
+		hl := int(data[0]&0x0f) * 4
+		pktNum := n.WritePackets.Load()
+		if pktNum < 50 || pktNum%1000 == 0 {
+			util.LogInfo("[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
+				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
 				data[9], len(data))
 		}
 
@@ -1253,24 +1417,7 @@ func (n *Netstack) writeLoop() {
 
 		if isVIP || isHostIP {
 			// Bypass gateway return path: write to TUN
-			// Reverse NAT: translate VIP back to original source
-			if isVIP && n.natTable != nil {
-				hl := int(data[0]&0x0f) * 4
-				if natPkt := n.natTable.TranslateInbound(data); natPkt != nil {
-					nhl := int(natPkt[0]&0x0f) * 4
-					util.LogDebug("netstack writeLoop reverseNAT: %s:%d -> %s:%d (proto=%d)",
-						net.IP(natPkt[12:16]), uint16(natPkt[nhl])<<8|uint16(natPkt[nhl+1]),
-						net.IP(natPkt[16:20]), uint16(natPkt[nhl+2])<<8|uint16(natPkt[nhl+3]),
-						natPkt[9])
-					data = natPkt
-				} else {
-					util.LogDebug("netstack writeLoop reverseNAT DROP: %s -> %s (proto=%d len=%d)",
-						net.IP(data[12:16]), dstIP, data[9], len(data))
-					pkt.DecRef()
-					continue
-				}
-				_ = hl
-			}
+			// NAT handled by gVisor iptables
 
 			if n.WriteLoopDevice != nil {
 				if _, err := n.WriteLoopDevice.Write(data); err != nil {
@@ -1283,64 +1430,16 @@ func (n *Netstack) writeLoop() {
 					}
 				} else {
 					n.WritePackets.Add(1)
+					if pktNum < 50 || pktNum%1000 == 0 {
+						util.LogInfo("[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
+							pktNum, srcIP, portAt(data, hl), net.IP(data[16:20]), portAt(data, hl+2))
+					}
 					if n.callbacks != nil && n.callbacks.StatsNotify != nil {
 						n.callbacks.StatsNotify()
 					}
 				}
-			}
-
-		} else if n.meshInterceptor != nil && (n.isLocalMeshVIP == nil || !n.isLocalMeshVIP(dstIP)) {
-			// Mesh interception: route packets destined for remote mesh nodes via mesh.
-			// Also route packets FROM mesh VIPs to non-mesh destinations through the mesh
-			// (e.g., TCP forwarder SYN-ACK responses to external clients via advertised routes).
-			srcIP := net.IP(data[12:16])
-			isMeshDst := n.isMeshIPFunc != nil && n.isMeshIPFunc(dstIP)
-			isMeshSrc := n.isMeshIPFunc != nil && n.isMeshIPFunc(srcIP)
-			
-			// Log domain name for FakeIP destinations (first 10 packets only for diagnostics)
-			if n.WritePackets.Load() < 10 {
-				if n.lookupDomainFunc != nil {
-					if domain := n.lookupDomainFunc(dstIP.String()); domain != "" {
-						util.LogInfo("[MESH-WRITE] %s -> %s (%s) proto=%d len=%d meshDst=%v meshSrc=%v",
-							srcIP, dstIP, domain, data[9], len(data), isMeshDst, isMeshSrc)
-					} else {
-						util.LogInfo("[MESH-WRITE] %s -> %s (unknown) proto=%d len=%d meshDst=%v meshSrc=%v",
-							srcIP, dstIP, data[9], len(data), isMeshDst, isMeshSrc)
-					}
-				} else {
-					util.LogInfo("[MESH-WRITE] %s -> %s proto=%d len=%d meshDst=%v meshSrc=%v",
-						srcIP, dstIP, data[9], len(data), isMeshDst, isMeshSrc)
-				}
-			}
-			
-			if !isMeshDst && isMeshSrc {
-				// Packet from mesh VIP to external IP: route through mesh so the
-				// response reaches the original mesh peer's client.
-				pktBuf := make([]byte, len(data))
-				copy(pktBuf, data)
-				if n.MeshOutboundFunc != nil {
-					if !n.MeshOutboundFunc(dstIP, pktBuf) {
-						util.LogWarn("[MESH-DIAG] meshOutboundCh full in writeLoop mesh-src, dropping")
-					}
-				}
-			} else {
-				pktBuf := make([]byte, len(data))
-				copy(pktBuf, data)
-				if n.MeshOutboundFunc != nil {
-					if !n.MeshOutboundFunc(dstIP, pktBuf) {
-						// Queue full -- re-inject for local delivery as fallback
-						util.LogWarn("[MESH-DIAG] meshOutboundCh full in writeLoop (%d pending), re-injecting", 0)
-						if n.MeshOutboundFullFunc != nil {
-							n.MeshOutboundFullFunc(dstIP, pktBuf)
-						} else {
-							newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-								Payload: buffer.MakeWithData(pktBuf),
-							})
-							n.linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
-							newPkt.DecRef()
-						}
-					}
-				}
+			} else if pktNum < 50 {
+				util.LogWarn("[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
 			}
 
 		} else {
@@ -1360,6 +1459,14 @@ func (n *Netstack) writeLoop() {
 
 		pkt.DecRef()
 	}
+}
+
+// portAt extracts a 16-bit port at the given byte offset (0 if out of range).
+func portAt(data []byte, offset int) uint16 {
+	if len(data) < offset+2 {
+		return 0
+	}
+	return uint16(data[offset])<<8 | uint16(data[offset+1])
 }
 
 // fullToTCPAddr converts a tcpip.FullAddress to a net.TCPAddr

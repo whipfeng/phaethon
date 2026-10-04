@@ -13,8 +13,6 @@ import (
 	"phaethon/p2p"
 	"phaethon/tun"
 	"phaethon/util"
-
-	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // TUNResource wraps a tun.Engine for lifecycle management.
@@ -120,14 +118,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		meshVIP := meshMgr.GetVIP()
 		allVIPs := meshMgr.GetAllVIPs()
 
-		// Mesh interceptor is needed in both TUN and non-TUN modes:
-		// - With TUN: intercepts outbound packets from readLoop
-		// - Without TUN: used by meshWriteLoop to send responses back through mesh
-		engine.SetMeshInterceptor(meshMgr.HandleOutboundPacket, allVIPs)
-
-		// Enable NAT and share the NATTable with the engine for TUN source/reverse NAT.
-		meshMgr.EnableNAT()
-		engine.SetNATTable(meshMgr.GetNATTable())
+		// Phase 2: Mesh interceptor retired - all traffic goes through netstack routing
+		// Tunnel NICs handle IPIP encapsulation, route table directs traffic appropriately
+		engine.SetMeshConfig(allVIPs)
 
 		// Create and share Mode B connection tracking table.
 		modeBTable := mesh.NewModeBTable()
@@ -153,24 +146,6 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// This enables mesh packet sending via P2P links
 		engine.GetNetstack().SetMeshManager(meshMgr)
 		util.LogInfo("Mesh manager configured on NIC 2 (mesh endpoint)")
-
-		// Configure LoopbackEndpoint (NIC 3) with IPIP encapsulation parameters
-		// This enables IPIP encapsulation for packets matching static routes
-		if loopbackEP := engine.GetNetstack().LoopbackEP(); loopbackEP != nil {
-			localEIP := meshMgr.GetIPIPTunnel().GetLocalEIP()
-			if localEIP != nil {
-				staticRoutes := ruleConf.Mesh.StaticRoutes
-				loopbackEP.SetIPIPConfig(
-					meshMgr.GetIPIPTunnel(),
-					meshMgr,
-					staticRoutes,
-					tcpip.AddrFrom4Slice(localEIP.To4()),
-				)
-				util.LogInfo("IPIP encapsulation configured on NIC 4 (loopback): localEIP=%s staticRoutes=%d", localEIP, len(staticRoutes))
-			} else {
-				util.LogDebug("IPIP encapsulation not configured on NIC 4: localEIP not set")
-			}
-		}
 
 		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}

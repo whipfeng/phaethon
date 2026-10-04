@@ -60,17 +60,13 @@ type Engine struct {
 	logMu sync.Mutex
 	logs  []string
 
-	// meshInterceptor diverts mesh-subnet packets before netstack.
-	// Returns true if the packet was handled.
-	meshInterceptor func(dstIP net.IP, data []byte) bool
+	// Mesh-related fields (interceptor removed in phase 2)
 	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
 	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (set when mesh is enabled)
 	meshNetwork     *net.IPNet      // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
-	natTable        *mesh.NATTable    // shared NAT table for TUN and mesh NAT
 	modeBTable      *mesh.ModeBTable  // Mode B (proxy entry) connection tracking
 	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 
-	meshOutboundCh chan meshOutboundPacket // queue for async mesh interception
 	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
 
 	// preConnectCallback is called after bind (port allocated) but before connect (SYN sent).
@@ -84,11 +80,6 @@ type Engine struct {
 // Implemented by admin.AdminServer to allow bypassing the OS network stack.
 type AdminHandler interface {
 	ServeConn(conn net.Conn)
-}
-
-type meshOutboundPacket struct {
-	dstIP net.IP
-	data  []byte
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
@@ -114,23 +105,17 @@ func (e *Engine) GetNetstack() *mesh.Netstack {
 	return e.netstack
 }
 
-// SetMeshInterceptor registers a callback to intercept packets destined for the mesh subnet.
-// The callback returns true if it handled the packet (mesh will forward it).
-func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool, localVIPs []net.IP) {
-	e.meshInterceptor = handler
+// SetMeshConfig configures mesh-related settings (interceptor removed in phase 2).
+func (e *Engine) SetMeshConfig(localVIPs []net.IP) {
 	e.localMeshVIPs = make(map[string]bool, len(localVIPs))
 	for _, vip := range localVIPs {
 		if v4 := vip.To4(); v4 != nil {
 			e.localMeshVIPs[v4.String()] = true
 		}
 	}
-	e.meshOutboundCh = make(chan meshOutboundPacket, 65536)
-	e.tunWG.Add(1)
-	go e.meshOutboundLoop()
 
-	// Share callbacks with the netstack for writeLoop routing
+	// Share callbacks with the netstack for diagnostics
 	if e.netstack != nil {
-		e.netstack.SetMeshInterceptor(handler)
 		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
 		e.netstack.SetIsMeshIPFunc(e.isMeshIP)
 		// Set FakeIP reverse lookup for diagnostics
@@ -140,14 +125,6 @@ func (e *Engine) SetMeshInterceptor(handler func(dstIP net.IP, data []byte) bool
 	}
 
 	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
-}
-
-// SetNATTable sets the shared NAT table for TUN source NAT and reverse NAT.
-func (e *Engine) SetNATTable(nat *mesh.NATTable) {
-	e.natTable = nat
-	if e.netstack != nil {
-		e.netstack.SetNATTable(nat)
-	}
 }
 
 // SetModeBTable sets the Mode B connection tracking table.
@@ -634,13 +611,6 @@ func (e *Engine) StartStack() error {
 		HandleUDPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
 		},
-		ResolveOriginalSrc: func(proto int, srcIP net.IP, srcPort uint16) (net.IP, bool) {
-			if e.natTable != nil {
-				origIP, _ := e.natTable.ResolveOriginalSrc(byte(proto), srcIP, srcPort)
-				return origIP, true
-			}
-			return srcIP, false
-		},
 		LookupModeB: func(proto int, dstIP net.IP, dstPort, srcPort uint16) (string, string, *config.Mapping) {
 			if e.modeBTable != nil {
 				return e.modeBTable.LookupByDst(byte(proto), dstIP, dstPort, srcPort)
@@ -666,25 +636,6 @@ func (e *Engine) StartStack() error {
 		}
 		// Return netstack closeCh if TUN is not running
 		return e.netstack.CloseCh()
-	}
-
-	// Set mesh outbound callbacks for writeLoop
-	e.netstack.MeshOutboundFunc = func(dstIP net.IP, data []byte) bool {
-		if e.meshOutboundCh == nil {
-			return false
-		}
-		select {
-		case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: data}:
-			return true
-		default:
-			return false
-		}
-	}
-	e.netstack.MeshOutboundFullFunc = func(dstIP net.IP, data []byte) {
-		// Re-inject for local delivery as fallback
-		if e.netstack != nil {
-			e.netstack.InjectInbound(ipv4.ProtocolNumber, data)
-		}
 	}
 
 	if err := e.netstack.Start(); err != nil {
@@ -945,31 +896,6 @@ func (e *Engine) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
 	return e.netstack.HTunnelEndpoint(proxyName)
 }
 
-// meshOutboundLoop consumes packets from meshOutboundCh and calls meshInterceptor.
-// If the interceptor returns false (packet not handled by mesh), re-inject into netstack.
-func (e *Engine) meshOutboundLoop() {
-	defer e.tunWG.Done()
-	for {
-		select {
-		case <-e.tunCloseCh:
-			return
-		case pkt := <-e.meshOutboundCh:
-			if e.meshInterceptor != nil && !e.meshInterceptor(pkt.dstIP, pkt.data) {
-				// Diagnostic: log non-mesh packets being re-injected to netstack (advertised route path)
-				if len(pkt.data) >= 20 && pkt.data[0]>>4 == 4 {
-					isMesh := e.meshSubnet != nil && e.meshSubnet.Contains(pkt.dstIP)
-					if !isMesh {
-						util.LogDebug("[TCP-DIAG] reinject to netstack: src=%s dst=%s proto=%d len=%d",
-							net.IP(pkt.data[12:16]), pkt.dstIP, pkt.data[9], len(pkt.data))
-					}
-				}
-				if e.netstack != nil {
-					e.netstack.InjectInbound(ipv4.ProtocolNumber, pkt.data)
-				}
-			}
-		}
-	}
-}
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
@@ -1043,23 +969,37 @@ func (e *Engine) readLoop() {
 		pktBuf := make([]byte, n)
 		copy(pktBuf, readBuf[:n])
 
-		// NAT: replace src IP with VIP for all IPv4 packets from TUN (bypass gateway mode).
-		// TODO: migrate to gVisor iptables SNAT once crash issue is resolved
-		if e.natTable != nil && n >= 20 && pktBuf[0]>>4 == 4 {
-			if natPkt := e.natTable.TranslateOutbound(pktBuf); natPkt != nil {
-				pktBuf = natPkt
-			}
-		}
+		// NAT is handled by gVisor iptables SNAT (configured in netstack)
 
 		// Debug: log first TCP packets to see what readLoop receives
 		if n >= 40 && pktBuf[0]>>4 == 4 && pktBuf[9] == 6 { // TCP
 			dstIP := net.IP(pktBuf[16:20])
 			srcIP := net.IP(pktBuf[12:16])
 			dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-			// Log first 5 packets, then every 100th packet
+			srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
+			hl := int(pktBuf[0]&0x0f) * 4
+			flags := byte(0)
+			if len(pktBuf) >= hl+14 {
+				flags = pktBuf[hl+13]
+			}
+			flagStr := ""
+			if flags&0x02 != 0 {
+				flagStr += "S"
+			}
+			if flags&0x10 != 0 {
+				flagStr += "A"
+			}
+			if flags&0x04 != 0 {
+				flagStr += "R"
+			}
+			if flags&0x01 != 0 {
+				flagStr += "F"
+			}
+			// Log first 5 packets, then every 100th packet; always log RST
 			pktNum := e.readPackets.Load()
-			if pktNum < 5 || pktNum%100 == 0 {
-				util.LogInfo("[TCP-DEBUG] readLoop entry #%d: TCP src=%s dst=%s:%d", pktNum, srcIP, dstIP, dstPort)
+			if flags&0x04 != 0 || pktNum < 5 || pktNum%100 == 0 {
+				util.LogInfo("[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
+					pktNum, srcIP, srcPort, dstIP, dstPort, flagStr)
 			}
 		}
 
@@ -1085,12 +1025,7 @@ func (e *Engine) readLoop() {
 				}
 				icmpPkt := mesh.GenerateICMPTimeExceeded(localVIP, pktBuf)
 				if icmpPkt != nil {
-					// NAT reverse: translate destination back to original source
-					if e.natTable != nil {
-						if natPkt := e.natTable.TranslateInbound(icmpPkt); natPkt != nil {
-							icmpPkt = natPkt
-						}
-					}
+					// NAT handled by gVisor iptables
 					// Write ICMP back to TUN
 					e.mu.Lock()
 					dev := e.device
@@ -1104,30 +1039,6 @@ func (e *Engine) readLoop() {
 					}
 				}
 				continue
-			}
-		}
-
-		// Mesh interception: let mesh layer decide if packet should be routed via mesh.
-		// The mesh interceptor checks its routing table (including gateway routes) to determine
-		// if the packet should be sent via mesh or handled normally.
-		// At this point, src is already a mesh IP (VIP), so mesh layer won't need to NAT.
-		// Skip mesh routing if TTL=0 (traceroute: let gVisor generate ICMP).
-		if proto == ipv4.ProtocolNumber && n >= 20 && pktBuf[8] > 0 {
-			dstIP := net.IP(pktBuf[16:20])
-			if e.meshInterceptor != nil {
-				// Debug: log TCP packets to mesh subnet
-				if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) && pktBuf[9] == 6 { // TCP
-					srcPort := uint16(pktBuf[20])<<8 | uint16(pktBuf[21])
-					dstPort := uint16(pktBuf[22])<<8 | uint16(pktBuf[23])
-					util.LogDebug("[TCP-DEBUG] readLoop: TCP to mesh subnet dst=%s:%d src=%s:%d",
-						dstIP, dstPort, net.IP(pktBuf[12:16]), srcPort)
-				}
-				select {
-				case e.meshOutboundCh <- meshOutboundPacket{dstIP: dstIP, data: pktBuf}:
-					continue
-				default:
-					util.LogWarn("[MESH-DIAG] meshOutboundCh full in readLoop (%d pending), falling through to netstack", len(e.meshOutboundCh))
-				}
 			}
 		}
 

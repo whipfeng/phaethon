@@ -215,6 +215,8 @@ func (h *DNSHijacker) serveLoop() {
 	h.wq.EventRegister(&waitEntry)
 	defer h.wq.EventUnregister(&waitEntry)
 
+	util.LogInfo("[DNS-DEBUG] DNSHijacker serveLoop started")
+
 	for {
 		var buf bytes.Buffer
 		res, err := h.udpEP.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
@@ -236,11 +238,14 @@ func (h *DNSHijacker) serveLoop() {
 			continue
 		}
 
+		// Debug: log every received packet
+		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
+		srcPort := res.RemoteAddr.Port
+		util.LogInfo("[DNS-DEBUG] DNSHijacker received packet: from=%s:%d len=%d", srcIP, srcPort, res.Total)
+
 		// Minimal DNS parsing: extract the queried domain for logging
 		domain, _, ok := parseDNSQueryDomain(packet)
 		if ok && domain != "" {
-			srcIP := net.IP(res.RemoteAddr.Addr.AsSlice())
-			srcPort := res.RemoteAddr.Port
 			util.LogInfo("[DNS-DEBUG] DNSHijacker: query domain=%s from=%s:%d", domain, srcIP, srcPort)
 		}
 

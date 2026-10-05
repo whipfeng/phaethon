@@ -1006,6 +1006,20 @@ func (e *Engine) readLoop() {
 			}
 		}
 
+		// Debug: log UDP packets (especially DNS queries to GIP)
+		if n >= 28 && pktBuf[0]>>4 == 4 && pktBuf[9] == 17 { // UDP
+			dstIP := net.IP(pktBuf[16:20])
+			srcIP := net.IP(pktBuf[12:16])
+			hl := int(pktBuf[0]&0x0f) * 4
+			if n >= hl+4 {
+				srcPort := uint16(pktBuf[hl])<<8 | uint16(pktBuf[hl+1])
+				dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
+				pktNum := e.readPackets.Load()
+				util.LogInfo("[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",
+					pktNum, srcIP, srcPort, dstIP, dstPort, n)
+			}
+		}
+
 		// Traceroute support: decrement TTL at this routing checkpoint (卡口2)
 		// If TTL=0 after decrement, manually generate ICMP Time Exceeded.
 		if proto == ipv4.ProtocolNumber && n >= 20 {
@@ -1047,8 +1061,21 @@ func (e *Engine) readLoop() {
 
 		if e.netstack != nil && e.netstack.LinkEP() != nil {
 			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
+			defer pkt.DecRef()  // Use defer like official TUN device
+			// Don't call NetworkHeader().Consume() here - gVisor's parse.IPv4 will do it
+			// Debug: log injection of DNS packets
+			if proto == ipv4.ProtocolNumber && n >= 28 && pktBuf[9] == 17 { // UDP
+				dstIP := net.IP(pktBuf[16:20])
+				srcIP := net.IP(pktBuf[12:16])
+				hl := int(pktBuf[0]&0x0f) * 4
+				if n >= hl+4 {
+					dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
+					if dstPort == 53 {
+						util.LogInfo("[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
+					}
+				}
+			}
 			e.netstack.LinkEP().InjectInbound(proto, pkt)
-			pkt.DecRef()
 		}
 	}
 }

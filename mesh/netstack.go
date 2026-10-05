@@ -681,7 +681,21 @@ func (n *Netstack) initStack() error {
 			Rules: []stack.Rule{
 				// Prerouting chain: accept all.
 				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
-				// Input chain: accept all.
+				// Input chain: SNAT TUN-entered locally-delivered traffic to VIP.
+				// This ensures local services (DNSHijacker, Forwarder) see src=VIP,
+				// so their replies can be DNAT'd back by conntrack.
+				{
+					Filter: stack.IPHeaderFilter{
+						InputInterface:       "tun",
+						InputInterfaceInvert: false,
+					},
+					Target: &stack.SNATTarget{
+						Addr:            vipAddr,
+						NetworkProtocol: ipv4.ProtocolNumber,
+						ChangeAddress:   true,
+					},
+				},
+				// Input catch-all: non-TUN traffic passes unchanged.
 				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
 				// Output chain: accept all.
 				{Filter: stack.EmptyFilter4(), Target: &stack.AcceptTarget{NetworkProtocol: ipv4.ProtocolNumber}},
@@ -705,17 +719,17 @@ func (n *Netstack) initStack() error {
 			},
 			BuiltinChains: [stack.NumHooks]int{
 				stack.Prerouting:  0,
-				stack.Input:       1,
+				stack.Input:       1, // Entry point to the Input chain
 				stack.Forward:     stack.HookUnset,
-				stack.Output:      2,
-				stack.Postrouting: 3, // Entry point to the Postrouting chain
+				stack.Output:      3,
+				stack.Postrouting: 4, // Entry point to the Postrouting chain
 			},
 			Underflows: [stack.NumHooks]int{
 				stack.Prerouting:  0,
-				stack.Input:       1,
+				stack.Input:       3, // After Input SNAT rule, before catch-all
 				stack.Forward:     stack.HookUnset,
-				stack.Output:      2,
-				stack.Postrouting: 4,
+				stack.Output:      3,
+				stack.Postrouting: 6, // After Postrouting SNAT rule
 			},
 		}
 

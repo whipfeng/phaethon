@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -11,9 +12,11 @@ type PeerQuality struct {
 	mu sync.RWMutex
 
 	// ACK-based passive measurement (v7)
-	ackRTT     time.Duration // smoothed RTT from ACK-based measurement
-	ackLossRate float64      // loss rate from ACK-based measurement
-	ackUpdated time.Time     // last time ACK stats were updated
+	ackRTT        time.Duration // smoothed RTT from ACK-based measurement
+	ackLossRate   float64       // loss rate from ACK-based measurement
+	ackJitter     time.Duration // jitter (RTT standard deviation)
+	ackSampleCount int          // number of samples in the window
+	ackUpdated    time.Time     // last time ACK stats were updated
 }
 
 // NewPeerQuality creates a new PeerQuality tracker.
@@ -22,20 +25,47 @@ func NewPeerQuality() *PeerQuality {
 }
 
 // Stats returns a snapshot of the quality metrics.
-// Returns ACK-based passive measurement (srtt, lossRate).
-func (q *PeerQuality) Stats() (avgRTT time.Duration, loss float64) {
+// Returns ACK-based passive measurement (srtt, lossRate, jitter).
+func (q *PeerQuality) Stats() (avgRTT time.Duration, loss, jitter float64) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return q.ackRTT, q.ackLossRate
+	return q.ackRTT, q.ackLossRate, float64(q.ackJitter.Milliseconds())
+}
+
+// StatsWithConfidence returns quality metrics with confidence score.
+func (q *PeerQuality) StatsWithConfidence() (avgRTT time.Duration, loss, jitter float64, confidence float64) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	
+	avgRTT = q.ackRTT
+	loss = q.ackLossRate
+	jitter = float64(q.ackJitter.Milliseconds())
+	confidence = q.calculateConfidence()
+	
+	return
+}
+
+// calculateConfidence calculates confidence based on sample count and time freshness.
+func (q *PeerQuality) calculateConfidence() float64 {
+	// Sample factor: need at least 10 samples for statistical significance
+	sampleFactor := math.Min(1.0, float64(q.ackSampleCount)/10.0)
+	
+	// Time factor: more recent data is more trustworthy (1 minute decay)
+	age := time.Since(q.ackUpdated)
+	timeFactor := math.Exp(-age.Minutes())
+	
+	return sampleFactor * timeFactor
 }
 
 // UpdateACKStats updates the ACK-based passive quality measurements.
 // Called by mesh layer when pulling stats from P2P sendState.
-func (q *PeerQuality) UpdateACKStats(srtt time.Duration, lossRate float64) {
+func (q *PeerQuality) UpdateACKStats(srtt time.Duration, lossRate float64, jitter time.Duration, sampleCount int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.ackRTT = srtt
 	q.ackLossRate = lossRate
+	q.ackJitter = jitter
+	q.ackSampleCount = sampleCount
 	q.ackUpdated = time.Now()
 }
 
@@ -46,12 +76,21 @@ func (q *PeerQuality) LastACKUpdate() time.Time {
 	return q.ackUpdated
 }
 
+// IsStale returns true if the stats are older than the given TTL.
+func (q *PeerQuality) IsStale(ttl time.Duration) bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return time.Since(q.ackUpdated) > ttl
+}
+
 // Reset resets all counters and RTT samples.
 func (q *PeerQuality) Reset() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.ackRTT = 0
 	q.ackLossRate = 0
+	q.ackJitter = 0
+	q.ackSampleCount = 0
 	q.ackUpdated = time.Time{}
 }
 

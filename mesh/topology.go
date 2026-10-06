@@ -68,6 +68,7 @@ type GossipLink struct {
 	FriendlyName string  `json:"friendlyName,omitempty"` // 友好名称（代理名，仅展示）
 	SRTT         float64 `json:"srtt,omitempty"`         // 平滑 RTT (ms)
 	LossRate     float64 `json:"lossRate,omitempty"`     // 丢包率 (0.0-1.0)
+	Jitter       float64 `json:"jitter,omitempty"`       // 抖动 (ms)，向后兼容（旧节点为 0）
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.

@@ -27,6 +27,7 @@ const (
 	// Control frames (reliable, with seq/ack)
 	FrameHello  byte = 0x11 // Hello: connection handshake
 	FrameGossip byte = 0x12 // Gossip: topology update + keepalive
+	FrameAck    byte = 0x13 // Pure ACK: immediate acknowledgment (no payload)
 
 	// Data frames (fire-and-forget, no seq/ack)
 	FrameMeshPacket byte = 0x20 // Mesh overlay IP packet

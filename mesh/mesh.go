@@ -66,16 +66,20 @@ type P2PTransport interface {
 	ResendHelloToAll()
 	StopPeerByNodeID(nodeID string)
 	StopPeerByLinkID(linkID string)
-	GetLinkQualityStats(nodeID string) (srtt, rto time.Duration, lossRate float64)
-	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto time.Duration, lossRate float64)
+	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
 type MeshPeerInfo struct {
-	NodeID   string    `json:"nodeId"`
-	Subnet   string    `json:"subnet"`
-	Direct   bool      `json:"direct"`
-	LastSeen time.Time `json:"lastSeen"`
+	NodeID      string    `json:"nodeId"`
+	Subnet      string    `json:"subnet"`
+	Direct      bool      `json:"direct"`
+	LastSeen    time.Time `json:"lastSeen"`
+	SRTT        float64   `json:"srtt,omitempty"`        // smoothed RTT in milliseconds
+	Jitter      float64   `json:"jitter,omitempty"`      // RTT jitter in milliseconds
+	SampleCount int       `json:"sampleCount,omitempty"` // number of RTT samples
+	LossRate    float64   `json:"lossRate,omitempty"`    // loss rate (0.0-1.0)
 }
 
 // PeerWithHop pairs a peer sender with its hop count.
@@ -224,6 +228,11 @@ type MeshManager struct {
 	// Link quality tracking
 	qualityTracker *PeerQualityTracker
 
+	// Round-robin state for multi-link load balancing (design §2.8)
+	// Key: target nodeID, Value: last used index
+	linkSelectIdx map[string]int
+	linkSelectMu  sync.Mutex
+
 	// Sticky node selection cache (target → nodeID)
 	// Ensures stable routing: once a nodeID is selected for a target, keep using it
 	// until the node becomes unavailable.
@@ -271,6 +280,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		closeCh:         make(chan struct{}),
 		eventCh:         make(chan meshEvent, 1024),
 		stickyCache:     make(map[string]string),
+		linkSelectIdx:   make(map[string]int),
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
@@ -928,6 +938,7 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 
 // SendToNode sends an encapsulated packet to a specific target node via the mesh network.
 // This is used by tunnel NICs to send IPIP-encapsulated packets to egress nodes.
+// Multi-link load balancing: round-robin among same-hop peers (design §2.8).
 func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 	if targetNodeID == "" {
 		return fmt.Errorf("empty target node ID")
@@ -942,18 +953,40 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		return fmt.Errorf("no route to node %s", targetNodeID)
 	}
 
-	// Try to send via candidate peers with failover
+	// Find minimum hop count
+	minHop := nextHops[0].Hop
+
+	// Collect all peers with minimum hop count
+	var sameHopPeers []PeerWithHop
+	for _, peerWithHop := range nextHops {
+		if peerWithHop.Hop == minHop {
+			sameHopPeers = append(sameHopPeers, peerWithHop)
+		} else {
+			break // Already sorted by hop, so we can stop
+		}
+	}
+
+	// Round-robin selection among same-hop peers (design §2.8)
+	m.linkSelectMu.Lock()
+	idx := m.linkSelectIdx[targetNodeID] % len(sameHopPeers)
+	m.linkSelectIdx[targetNodeID] = idx + 1
+	m.linkSelectMu.Unlock()
+
+	// Try to send via selected peer, with failover to other same-hop peers
 	var sendErr error
-	for i, peerWithHop := range nextHops {
+	for i := 0; i < len(sameHopPeers); i++ {
+		peerIdx := (idx + i) % len(sameHopPeers)
+		peerWithHop := sameHopPeers[peerIdx]
 		peer := peerWithHop.Peer
+
 		sendErr = peer.Send(packet)
 		if sendErr == nil {
 			if i > 0 {
 				util.LogInfo("[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
 					targetNodeID, peer.GetNodeID(), i+1)
 			}
-			util.LogDebug("[MESH] sent %d bytes to node %s via peer %s (hop=%d)",
-				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop)
+			util.LogDebug("[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
+				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 			return nil
 		}
 
@@ -972,10 +1005,12 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 			targetNodeID, peer.GetNodeID(), sendErr)
 	}
 
-	return fmt.Errorf("send to node %s failed on all %d candidates: %v", targetNodeID, len(nextHops), sendErr)
+	// All same-hop peers failed, return error
+	return fmt.Errorf("send to node %s failed on all %d same-hop candidates: %v", targetNodeID, len(sameHopPeers), sendErr)
 }
 
 // findNextHopsForNode finds peers that can reach a specific target node.
+// Returns ALL peers to the best next hop (for multi-link load balancing).
 func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 	rt := m.getRouteTable()
 
@@ -983,13 +1018,16 @@ func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 	peers := m.topology.GetAllPeers()
 
 	if path, ok := rt.bestPaths[targetNodeID]; ok {
-		// Find the peer for the best next hop with matching localSeq
+		// Find ALL peers that connect to the best next hop node
+		// (multiple links to same node = multiple peers with same NodeID)
+		var result []PeerWithHop
 		for _, peer := range peers {
 			if peer.Sender != nil && peer.NodeID() == path.NextHop {
-				if peer.Sender.GetLocalSeq() == path.LocalSeq {
-					return []PeerWithHop{{Peer: peer.Sender, Hop: 1}}
-				}
+				result = append(result, PeerWithHop{Peer: peer.Sender, Hop: 1})
 			}
+		}
+		if len(result) > 0 {
+			return result
 		}
 	}
 
@@ -1238,17 +1276,15 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			}
 			
 			// Get link quality from qualityTracker
-			var srtt, lossRate, cost float64
+			var srtt, lossRate, jitter, cost float64
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peerID, localSeq)
-				avgRTT, loss := quality.Stats()
+				avgRTT, loss, jit := quality.Stats()
 				srtt = float64(avgRTT.Milliseconds())
 				lossRate = loss
-				if loss < 1.0 {
-					cost = srtt / (1 - loss)
-				} else {
-					cost = 10000
-				}
+				jitter = jit
+				// Cost = SRTT * (1 + lossRate) + jitter
+				cost = srtt*(1+lossRate) + jitter
 			} else {
 				cost = 1000
 			}
@@ -1421,11 +1457,20 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 			continue
 		}
 		seen[nodeID] = true
+		
+		// Get RTT stats from the first link to this peer
+		avgRTT, lossRate, jitter := m.GetPeerQuality(nodeID)
+		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStats(nodeID)
+		
 		result = append(result, MeshPeerInfo{
-			NodeID:   nodeID,
-			Direct:   true,
-			Subnet:   p.SubnetStr,
-			LastSeen: p.LastSeen,
+			NodeID:      nodeID,
+			Direct:      true,
+			Subnet:      p.SubnetStr,
+			LastSeen:    p.LastSeen,
+			SRTT:        float64(avgRTT.Milliseconds()),
+			Jitter:      jitter,
+			SampleCount: sampleCount,
+			LossRate:    lossRate,
 		})
 	}
 	return result
@@ -1816,7 +1861,6 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 
 	// Find the best target based on Dijkstra path cost
 	var bestNextHop string
-	var bestLocalSeq uint16
 	bestCost := 1e18
 	for _, targetNodeID := range targetNodeIDs {
 		if targetNodeID == m.nodeID {
@@ -1826,7 +1870,6 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 			if path.Cost < bestCost {
 				bestCost = path.Cost
 				bestNextHop = path.NextHop
-				bestLocalSeq = path.LocalSeq
 			}
 		}
 	}
@@ -1836,19 +1879,21 @@ func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 		return m.findNextHopsFallback(targetNodeIDs, peers)
 	}
 
-	// Find the peer for the best next hop with matching localSeq
+	// Find ALL peers that connect to the best next hop node
+	// (multiple links to same node = multiple peers with same NodeID)
+	var result []PeerWithHop
 	for _, peer := range peers {
 		if peer.Sender != nil && peer.NodeID() == bestNextHop {
-			if peer.Sender.GetLocalSeq() == bestLocalSeq {
-				return []PeerWithHop{{Peer: peer.Sender, Hop: 1}}
-			}
+			result = append(result, PeerWithHop{Peer: peer.Sender, Hop: 1})
 		}
 	}
 
-	return nil
+	return result
 }
 
 // findNextHopsFallback is the fallback logic when Dijkstra paths are not available.
+// Returns ALL peers (including multiple links to same node) sorted by hop count.
+// Multi-link load balancing is handled by SendToNode (design §2.8).
 func (m *MeshManager) findNextHopsFallback(targetNodeIDs []string, peers []*PeerInfo) []PeerWithHop {
 	type peerWithHop struct {
 		peer PeerSender
@@ -1881,6 +1926,7 @@ func (m *MeshManager) findNextHopsFallback(targetNodeIDs []string, peers []*Peer
 		return nil
 	}
 
+	// Sort by hop count (lowest first), then by peer ID for deterministic ordering
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].hop != candidates[j].hop {
 			return candidates[i].hop < candidates[j].hop
@@ -1888,14 +1934,10 @@ func (m *MeshManager) findNextHopsFallback(targetNodeIDs []string, peers []*Peer
 		return candidates[i].peer.GetNodeID() < candidates[j].peer.GetNodeID()
 	})
 
-	seen := make(map[string]bool)
-	var result []PeerWithHop
-	for _, c := range candidates {
-		nodeID := c.peer.GetNodeID()
-		if !seen[nodeID] {
-			seen[nodeID] = true
-			result = append(result, PeerWithHop{Peer: c.peer, Hop: c.hop})
-		}
+	// Return ALL candidates (no deduplication) for multi-link load balancing
+	result := make([]PeerWithHop, len(candidates))
+	for i, c := range candidates {
+		result[i] = PeerWithHop{Peer: c.peer, Hop: c.hop}
 	}
 
 	return result
@@ -2035,9 +2077,10 @@ func (m *MeshManager) broadcastGossip() {
 			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
-				avgRTT, lossRate := quality.Stats()
+				avgRTT, lossRate, jitter := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
+				link.Jitter = jitter
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -2251,7 +2294,7 @@ func (m *MeshManager) checkPeerConnectivity() {
 		// Check if ACK stats are stale (no updates for 60s)
 		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
 			// Check if we ever received ACK stats
-			srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(linkID)
+			srtt, _, _, lossRate, _ := m.p2p.GetLinkQualityStatsByProxy(linkID)
 			if srtt == 0 && lossRate == 0 {
 				// No ACK stats at all - peer might be dead
 				util.LogWarn("[MESH] peer %s (link %s) has no ACK stats for 60s, disconnecting", nodeID, linkID)
@@ -2278,29 +2321,29 @@ func (m *MeshManager) updateACKStats() {
 
 		nodeID := peer.NodeID()
 		proxyName := peer.Sender.GetProxyName()
-		srtt, _, lossRate := m.p2p.GetLinkQualityStatsByProxy(proxyName)
-		util.LogInfo("[MESH-ACK] peer=%s proxy=%s srtt=%v lossRate=%.4f", nodeID, proxyName, srtt, lossRate)
+		srtt, _, jitter, lossRate, sampleCount := m.p2p.GetLinkQualityStatsByProxy(proxyName)
+		util.LogInfo("[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, proxyName, srtt, jitter, lossRate, sampleCount)
 		if srtt > 0 || lossRate > 0 {
 			// Use localSeq as key
 			localSeq := peer.Sender.GetLocalSeq()
 			quality := m.qualityTracker.Get(nodeID, localSeq)
-			quality.UpdateACKStats(srtt, lossRate)
+			quality.UpdateACKStats(srtt, lossRate, jitter, sampleCount)
 		}
 	}
 }
 
 // GetPeerQuality returns the quality metrics for a peer (first link found).
 // Deprecated: Use GetLinkQuality for per-link tracking.
-func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss float64) {
+func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss, jitter float64) {
 	quality := m.qualityTracker.GetByNode(nodeID)
 	if quality == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	return quality.Stats()
 }
 
 // GetLinkQuality returns the quality metrics for a specific link.
-func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT time.Duration, loss float64) {
+func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT time.Duration, loss, jitter float64) {
 	quality := m.qualityTracker.Get(nodeID, localSeq)
 	return quality.Stats()
 }
@@ -2350,11 +2393,12 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 	anyData := false
 	for i, c := range minHopCandidates {
 		nodeID := c.Peer.GetNodeID()
-		avgRTT, loss := m.GetPeerQuality(nodeID)
+		avgRTT, loss, jitter := m.GetPeerQuality(nodeID)
 		hasData := avgRTT > 0
 		if hasData {
 			anyData = true
-			effectiveRT := time.Duration(float64(avgRTT) / (1.0 - loss))
+			// Cost = SRTT * (1 + lossRate) + jitter
+			effectiveRT := time.Duration(float64(avgRTT)*(1.0+loss) + jitter)
 			qualities[i] = peerQuality{peer: c.Peer, effectiveRT: effectiveRT, hasData: hasData}
 		} else {
 			qualities[i] = peerQuality{peer: c.Peer, hasData: false}
@@ -2384,12 +2428,12 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 	// Sort withData by effectiveRTT (bubble sort for simplicity, list is small)
 	for i := 0; i < len(withData); i++ {
 		for j := i + 1; j < len(withData); j++ {
-			_, lossI := m.GetPeerQuality(withData[i].GetNodeID())
-			_, lossJ := m.GetPeerQuality(withData[j].GetNodeID())
-			avgI, _ := m.GetPeerQuality(withData[i].GetNodeID())
-			avgJ, _ := m.GetPeerQuality(withData[j].GetNodeID())
-			effectiveI := time.Duration(float64(avgI) / (1.0 - lossI))
-			effectiveJ := time.Duration(float64(avgJ) / (1.0 - lossJ))
+			_, lossI, jitterI := m.GetPeerQuality(withData[i].GetNodeID())
+			_, lossJ, jitterJ := m.GetPeerQuality(withData[j].GetNodeID())
+			avgI, _, _ := m.GetPeerQuality(withData[i].GetNodeID())
+			avgJ, _, _ := m.GetPeerQuality(withData[j].GetNodeID())
+			effectiveI := time.Duration(float64(avgI)*(1.0+lossI) + jitterI)
+			effectiveJ := time.Duration(float64(avgJ)*(1.0+lossJ) + jitterJ)
 			if effectiveI > effectiveJ {
 				withData[i], withData[j] = withData[j], withData[i]
 			}
@@ -2461,9 +2505,10 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
-				avgRTT, lossRate := quality.Stats()
+				avgRTT, lossRate, jitter := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
+				link.Jitter = jitter
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -2579,7 +2624,8 @@ type LinkQualityInfo struct {
 	RemoteSeq uint16  // remote sequence number
 	SRTT      float64 // smoothed RTT in milliseconds
 	LossRate  float64 // loss rate (0.0-1.0)
-	Cost      float64 // path cost = SRTT / (1 - LossRate)
+	Jitter    float64 // jitter in milliseconds
+	Cost      float64 // path cost = SRTT * (1 + LossRate) + Jitter
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -2616,14 +2662,12 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		}
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, localSeq)
-			avgRTT, lossRate := quality.Stats()
+			avgRTT, lossRate, jitter := quality.Stats()
 			link.SRTT = float64(avgRTT.Milliseconds())
 			link.LossRate = lossRate
-			if lossRate < 1.0 {
-				link.Cost = link.SRTT / (1 - lossRate)
-			} else {
-				link.Cost = 10000 // very high cost for high loss
-			}
+			link.Jitter = jitter
+			// Cost = SRTT * (1 + lossRate) + jitter
+			link.Cost = link.SRTT*(1+lossRate) + jitter
 		} else {
 			link.Cost = 1000
 		}
@@ -2728,25 +2772,33 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				if nodes[toNode].visited {
 					continue
 				}
-				// Find the best link (lowest cost) among multiple links
+				// Find the best link (lowest cost, then smallest localSeq for deterministic tie-breaking) among multiple links
 				var bestCost float64 = 1e18
 				var bestLocalSeq uint16
 				for _, link := range links {
-					if link.Cost < bestCost {
+					if link.Cost < bestCost || (link.Cost == bestCost && link.LocalSeq < bestLocalSeq) {
 						bestCost = link.Cost
 						bestLocalSeq = link.LocalSeq
 					}
 				}
 				newCost := nodes[minNode].cost + bestCost
-				if newCost < nodes[toNode].cost {
+				
+				// Determine next hop
+				var nextHop string
+				var localSeq uint16
+				if minNode == source {
+					nextHop = toNode // direct neighbor
+					localSeq = bestLocalSeq
+				} else {
+					nextHop = nodes[minNode].nextHop // inherit next hop
+					localSeq = nodes[minNode].localSeq // inherit localSeq
+				}
+				
+				// Update if better cost, or same cost with lexicographically smaller nextHop (deterministic tie-breaking)
+				if newCost < nodes[toNode].cost || (newCost == nodes[toNode].cost && nextHop < nodes[toNode].nextHop) {
 					nodes[toNode].cost = newCost
-					if minNode == source {
-						nodes[toNode].nextHop = toNode // direct neighbor
-						nodes[toNode].localSeq = bestLocalSeq
-					} else {
-						nodes[toNode].nextHop = nodes[minNode].nextHop // inherit next hop
-						nodes[toNode].localSeq = nodes[minNode].localSeq // inherit localSeq
-					}
+					nodes[toNode].nextHop = nextHop
+					nodes[toNode].localSeq = localSeq
 				}
 			}
 		}

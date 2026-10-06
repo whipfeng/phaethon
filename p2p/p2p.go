@@ -218,7 +218,19 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	writeFrame := func(req writeReq, isControl bool) bool {
 		payload := req.data
-		if isControl {
+		
+		// Special handling for pure ACK: no seq allocation, no retransmission
+		if req.frameType == frame.FrameAck {
+			// Pure ACK format: {seq(4)=0, ack(4), payload}
+			// The payload already contains the ack number in the first 4 bytes
+			// We need to construct: {seq(4)=0, ack(4)} + payload
+			ack := binary.BigEndian.Uint32(payload[0:4])
+			encoded := make([]byte, 8) // seq(4) + ack(4)
+			binary.BigEndian.PutUint32(encoded[0:4], 0) // seq = 0
+			binary.BigEndian.PutUint32(encoded[4:8], ack)
+			payload = encoded
+			// Don't record for retransmission (pure ACK is fire-and-forget)
+		} else if isControl {
 			// Encode seq/ack into control frame payload
 			seq := peer.sendState.allocSeq()
 			ack := peer.recvState.getLastSeq()
@@ -231,6 +243,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			// Record as sent for retransmission
 			peer.sendState.markSent(seq, req.frameType, req.data)
 		}
+		
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
 			util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
 			peer.transport.Close()
@@ -243,7 +256,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		// Fast path: control frames first, non-blocking.
 		select {
 		case req := <-peer.controlCh:
-			if !writeFrame(req, true) {
+			if !writeFrame(req, req.isControl) {
 				return
 			}
 			continue
@@ -253,7 +266,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		case <-peer.stopCh:
 			return
 		case req := <-peer.controlCh:
-			if !writeFrame(req, true) {
+			if !writeFrame(req, req.isControl) {
 				return
 			}
 		case req, ok := <-peer.writeCh:
@@ -323,7 +336,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		Status:    "connecting",
 		LastSeen:  time.Now(),
 		transport: t,
-		writeCh:   make(chan writeReq, 16384),
+		writeCh:   make(chan writeReq, 1024),
 		controlCh: make(chan writeReq, 512),
 		stopCh:    make(chan struct{}),
 		sendState: newSendState(),
@@ -514,7 +527,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 
 		peer.transport = transport
-		peer.writeCh = make(chan writeReq, 16384)
+		peer.writeCh = make(chan writeReq, 1024)
 		peer.controlCh = make(chan writeReq, 512)
 		peer.sendState = newSendState()
 		peer.recvState = newRecvState()
@@ -619,7 +632,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 		util.LogDebug("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
 		// Control frames have seq/ack encoded in the first 8 bytes
-		isControl := frameType == frame.FrameHello || frameType == frame.FrameGossip
+		isControl := frameType == frame.FrameHello || frameType == frame.FrameGossip || frameType == frame.FrameAck
 		if isControl {
 			if len(payload) < 8 {
 				util.LogWarn("[P2P] control frame too short from %s: len=%d", peer.ID, len(payload))
@@ -632,11 +645,19 @@ func (m *P2PManager) runSession(peer *Peer) {
 			// Process ack (removes acknowledged frames from pending)
 			peer.sendState.processAck(ack)
 
+			// Pure ACK frame: no further processing needed
+			if frameType == frame.FrameAck {
+				continue
+			}
+
 			// Check for duplicate
 			if !peer.recvState.checkAndRecord(seq) {
 				util.LogDebug("[P2P] duplicate control frame from %s: seq=%d", peer.ID, seq)
 				continue
 			}
+
+			// Send immediate pure ACK for Hello/Gossip frames
+			m.sendPureAck(peer)
 		}
 
 		switch frameType {
@@ -701,6 +722,31 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 			return
 		}
 		peer.sendState.markRetransmitted(pf.seq)
+	}
+}
+
+// sendPureAck sends an immediate pure ACK frame to acknowledge received control frames.
+// Pure ACK carries only the ack number and uses seq=0 (no acknowledgment expected for ACK itself).
+// This ensures accurate RTT measurement by responding immediately instead of waiting for next gossip.
+// The ACK is sent asynchronously through controlCh to avoid concurrent writes with peerWriteLoop.
+func (m *P2PManager) sendPureAck(peer *Peer) {
+	ack := peer.recvState.getLastSeq()
+	if ack == 0 {
+		return // Nothing to acknowledge
+	}
+
+	// For pure ACK, payload is just the ack number (4 bytes)
+	// peerWriteLoop will construct the full frame: {type=0x13, seq=0, ack}
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload[0:4], ack)
+
+	// Send through controlCh to avoid concurrent writes with peerWriteLoop
+	// Mark as control frame so it gets priority and correct timeout
+	select {
+	case peer.controlCh <- writeReq{frameType: frame.FrameAck, data: payload, isControl: true}:
+		// Queued successfully
+	default:
+		util.LogDebug("[P2P] control queue full, dropping pure ACK to %s", peer.ID)
 	}
 }
 
@@ -940,8 +986,8 @@ func (m *P2PManager) GetPeers() []Peer {
 }
 
 // GetLinkQualityStats returns ACK-based link quality stats for a peer by nodeID.
-// Returns srtt, rto, lossRate. Returns zeros if peer not found.
-func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto time.Duration, lossRate float64) {
+// Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
+func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -950,12 +996,12 @@ func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto time.Duration
 			return p.sendState.getStats()
 		}
 	}
-	return 0, 0, 0
+	return 0, 0, 0, 0, 0
 }
 
 // GetLinkQualityStatsByProxy returns ACK-based link quality stats for a specific link (proxy).
-// Returns srtt, rto, lossRate. Returns zeros if peer not found.
-func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto time.Duration, lossRate float64) {
+// Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
+func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -964,40 +1010,48 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto tim
 			return p.sendState.getStats()
 		}
 	}
-	return 0, 0, 0
+	return 0, 0, 0, 0, 0
 }
 
 // GetAllLinkQualityStats returns quality stats for all links.
-// Returns map[proxyName]{nodeID, srtt, rto, lossRate}.
+// Returns map[proxyName]{nodeID, srtt, rto, jitter, lossRate, sampleCount}.
 func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
-	NodeID   string
-	SRTT     time.Duration
-	RTO      time.Duration
-	LossRate float64
+	NodeID      string
+	SRTT        time.Duration
+	RTO         time.Duration
+	Jitter      time.Duration
+	LossRate    float64
+	SampleCount int
 } {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	result := make(map[string]struct {
-		NodeID   string
-		SRTT     time.Duration
-		RTO      time.Duration
-		LossRate float64
+		NodeID      string
+		SRTT        time.Duration
+		RTO         time.Duration
+		Jitter      time.Duration
+		LossRate    float64
+		SampleCount int
 	})
 
 	for _, p := range m.peers {
 		if p.sendState != nil {
-			srtt, rto, lossRate := p.sendState.getStats()
+			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats()
 			result[p.ID] = struct {
-				NodeID   string
-				SRTT     time.Duration
-				RTO      time.Duration
-				LossRate float64
+				NodeID      string
+				SRTT        time.Duration
+				RTO         time.Duration
+				Jitter      time.Duration
+				LossRate    float64
+				SampleCount int
 			}{
-				NodeID:   p.NodeID,
-				SRTT:     srtt,
-				RTO:      rto,
-				LossRate: lossRate,
+				NodeID:      p.NodeID,
+				SRTT:        srtt,
+				RTO:         rto,
+				Jitter:      jitter,
+				LossRate:    lossRate,
+				SampleCount: sampleCount,
 			}
 		}
 	}

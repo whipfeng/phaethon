@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"math"
 	"phaethon/util"
 	"sync"
 	"time"
@@ -90,7 +91,8 @@ func (s *sendState) processAck(ack uint32) {
 			// Update RTT sampler
 			if pf, ok := s.pending[seq]; ok {
 				rtt := time.Since(pf.sentTime)
-				s.rttSampler.add(rtt)
+				isRetransmission := pf.retries > 0
+				s.rttSampler.add(rtt, isRetransmission)
 				s.totalAcked++
 				// Record in history for time-window loss calculation
 				s.frameHistory = append(s.frameHistory, frameRecord{
@@ -215,36 +217,60 @@ func (s *recvState) cleanup() {
 }
 
 // rttSampler tracks RTT samples for estimation.
+type rttRecord struct {
+	timestamp        time.Time
+	rtt              time.Duration
+	isRetransmission bool
+}
+
 type rttSampler struct {
 	mu      sync.Mutex
-	samples []time.Duration
-	srtt    time.Duration // smoothed RTT
-	rttvar  time.Duration // RTT variance
+	samples []rttRecord
+	window  time.Duration // 5 minutes
+	srtt    time.Duration // smoothed RTT (for RTO calculation)
+	rttvar  time.Duration // RTT variance (for RTO calculation)
 }
 
 func newRTTSampler() *rttSampler {
 	return &rttSampler{
-		samples: make([]time.Duration, 0, 100),
+		samples: make([]rttRecord, 0, 100),
+		window:  5 * time.Minute,
 	}
 }
 
-// add adds an RTT sample and updates the smoothed estimate.
-func (s *rttSampler) add(rtt time.Duration) {
+// add adds an RTT sample with retransmission flag.
+func (s *rttSampler) add(rtt time.Duration, isRetransmission bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Keep last 100 samples
-	if len(s.samples) >= 100 {
-		s.samples = s.samples[1:]
-	}
-	s.samples = append(s.samples, rtt)
+	// Add new sample
+	s.samples = append(s.samples, rttRecord{
+		timestamp:        time.Now(),
+		rtt:              rtt,
+		isRetransmission: isRetransmission,
+	})
 
-	// Update smoothed RTT using TCP-like algorithm (RFC 6298)
+	// Cleanup old samples
+	s.cleanup()
+
+	// Update smoothed RTT using weighted algorithm
+	// Accept all samples, but retransmission samples have lower weight
+	// This avoids the death spiral where high-latency paths never collect samples
 	if s.srtt == 0 {
 		// First sample
 		s.srtt = rtt
 		s.rttvar = rtt / 2
+	} else if isRetransmission {
+		// Retransmission sample: lower weight (1/16 instead of 1/8)
+		// These samples are less reliable but still useful for high-latency paths
+		diff := s.srtt - rtt
+		if diff < 0 {
+			diff = -diff
+		}
+		s.rttvar = (15*s.rttvar + diff) / 16
+		s.srtt = (15*s.srtt + rtt) / 16
 	} else {
+		// First transmission sample: normal weight (1/8)
 		// SRTT = (1 - alpha) * SRTT + alpha * R, where alpha = 1/8
 		diff := s.srtt - rtt
 		if diff < 0 {
@@ -255,11 +281,84 @@ func (s *rttSampler) add(rtt time.Duration) {
 	}
 }
 
-// getSRTT returns the smoothed RTT.
+// cleanup removes samples older than the window (5 minutes).
+func (s *rttSampler) cleanup() {
+	cutoff := time.Now().Add(-s.window)
+	var recent []rttRecord
+	for _, r := range s.samples {
+		if r.timestamp.After(cutoff) {
+			recent = append(recent, r)
+		}
+	}
+	s.samples = recent
+}
+
+// getSRTT returns the average RTT from all samples in the window.
 func (s *rttSampler) getSRTT() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.srtt
+
+	s.cleanup()
+
+	// Calculate average from all samples (including retransmissions)
+	var sum time.Duration
+	var count int
+	for _, r := range s.samples {
+		sum += r.rtt
+		count++
+	}
+
+	if count == 0 {
+		return 0
+	}
+	return sum / time.Duration(count)
+}
+
+// getSampleCount returns the number of first transmission samples in the window.
+func (s *rttSampler) getSampleCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanup()
+
+	// Count all samples (including retransmissions)
+	return len(s.samples)
+}
+
+// getJitter returns the standard deviation of RTT samples (first transmission only).
+func (s *rttSampler) getJitter() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanup()
+
+	// Collect all samples (including retransmissions)
+	var samples []time.Duration
+	for _, r := range s.samples {
+		samples = append(samples, r.rtt)
+	}
+
+	if len(samples) < 2 {
+		return 0
+	}
+
+	// Calculate mean
+	var sum time.Duration
+	for _, rtt := range samples {
+		sum += rtt
+	}
+	mean := sum / time.Duration(len(samples))
+
+	// Calculate variance
+	var variance float64
+	for _, rtt := range samples {
+		diff := float64(rtt - mean)
+		variance += diff * diff
+	}
+	variance /= float64(len(samples))
+
+	// Return standard deviation
+	return time.Duration(math.Sqrt(variance))
 }
 
 // getRTO returns the retransmission timeout based on RTT.
@@ -283,9 +382,9 @@ func (s *rttSampler) getRTO() time.Duration {
 	return rto
 }
 
-// cleanupOldRecords removes frame history older than 60 seconds.
+// cleanupOldRecords removes frame history older than 5 minutes.
 func (s *sendState) cleanupOldRecords() {
-	cutoff := time.Now().Add(-60 * time.Second)
+	cutoff := time.Now().Add(-5 * time.Minute)
 	var recent []frameRecord
 	for _, r := range s.frameHistory {
 		if r.timestamp.After(cutoff) {
@@ -317,8 +416,8 @@ func (s *sendState) getLossRate() float64 {
 }
 
 // getStats returns send state statistics.
-// Loss rate is calculated from the last 60 seconds of frame history.
-func (s *sendState) getStats() (srtt, rto time.Duration, lossRate float64) {
+// Loss rate is calculated from the last 5 minutes of frame history, considering pending frames.
+func (s *sendState) getStats() (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	
@@ -326,9 +425,14 @@ func (s *sendState) getStats() (srtt, rto time.Duration, lossRate float64) {
 	
 	srtt = s.rttSampler.getSRTT()
 	rto = s.rttSampler.getRTO()
+	jitter = s.rttSampler.getJitter()
+	sampleCount = s.rttSampler.getSampleCount()
 	
-	// Calculate loss rate from last 60 seconds
-	var sent, lost int
+	// Calculate loss rate from last 5 minutes
+	var sent, lost, pendingOld int
+	now := time.Now()
+	
+	// Count completed frames
 	for _, r := range s.frameHistory {
 		sent++
 		if r.lost {
@@ -336,12 +440,21 @@ func (s *sendState) getStats() (srtt, rto time.Duration, lossRate float64) {
 		}
 	}
 	
-	if sent > 0 {
-		lossRate = float64(lost) / float64(sent)
+	// Count "possibly lost" pending frames (pending > 2 * RTO)
+	for _, pf := range s.pending {
+		if now.Sub(pf.sentTime) > 2*rto {
+			pendingOld++
+		}
+	}
+	
+	// Loss rate = (lost + pendingOld) / (sent + pendingOld)
+	totalWithPending := sent + pendingOld
+	if totalWithPending > 0 {
+		lossRate = float64(lost+pendingOld) / float64(totalWithPending)
 	}
 	
 	// Log stats when queried
-	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d lossRate=%.4f (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
-		60, sent, lost, lossRate, s.totalSent, s.totalAcked, s.totalLost)
+	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
+		300, sent, lost, pendingOld, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost)
 	return
 }

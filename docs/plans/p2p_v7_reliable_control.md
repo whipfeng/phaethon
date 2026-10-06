@@ -55,9 +55,22 @@
 
 | 类型 | 值 | 说明 | 可靠传输 |
 |------|-----|------|----------|
-| hello | 0x01 | 建交握手 | ✅ |
-| gossip | 0x02 | 拓扑更新 + 保活 + 链路质量采样 | ✅ |
-| mesh_packet | 0x10 | 数据帧 | ❌ |
+| hello | 0x11 | 建交握手 | ✅ |
+| gossip | 0x12 | 拓扑更新 + 保活 + 链路质量采样 | ✅ |
+| ack | 0x13 | 纯 ACK：立即确认（无 payload） | ✅（但不需确认） |
+| mesh_packet | 0x20 | 数据帧 | ❌ |
+
+**纯 ACK 帧设计**：
+- **目的**：收到控制帧（hello/gossip）后立即返回确认，不等待下次 gossip 周期
+- **格式**：`{type(1)=0x13, seq(4)=0, ack(4), len(2)=0}`
+- **特点**：
+  - seq=0 表示纯 ACK 本身不需要确认
+  - payload 为空，不携带任何数据
+  - 立即发送，不进入重传队列
+- **解决的问题**：
+  - 原设计中 ACK 捎带在 gossip 中返回，gossip 每 15 秒发送一次
+  - 导致 RTT 测量包含了等待 gossip 的时间（平均 7.5 秒）
+  - 纯 ACK 确保 RTT 测量反映真实网络往返时间
 
 **删除的帧类型**：
 - heartbeat（gossip 周期性发送，兼做保活）
@@ -130,15 +143,21 @@ type peerRecvState struct {
 1. 检查 seq 是否重复（在 seen map 中）
 2. 重复帧：丢弃，但仍发 ack
 3. 新帧：更新 lastSeq，处理 payload，记录到 seen
-4. 发送 ack（捎带在下一个发出的帧中）
+4. **立即发送纯 ACK**（不再等待下次 gossip 捎带）
+
+**纯 ACK 发送**：
+- 收到 hello/gossip 帧后，立即发送纯 ACK 帧（`FrameAck = 0x13`）
+- 纯 ACK 格式：`{type=0x13, seq=0, ack=lastSeq, len=0}`
+- seq=0 表示纯 ACK 本身不需要确认
+- 不进入重传队列，fire-and-forget 语义
 
 **去重窗口**：
 - 保留最近 1000 个 seq 的记录
 - 或 60 秒内的记录
 
-### 3.3 ACK 捎带
+### 3.3 ACK 捎带（保留）
 
-ack 不单独发送，而是捎带在每个发出的控制帧中：
+ack 仍然捎带在每个发出的控制帧中（作为冗余确认）：
 
 ```
 发送 gossip 时：
@@ -146,7 +165,7 @@ ack 不单独发送，而是捎带在每个发出的控制帧中：
   ack = recvState.lastSeq  // 最近收到的对端 seq
 ```
 
-如果长时间没有控制帧要发，发送空 gossip（只有 seq/ack，payload 为空）作为 keepalive。
+**注意**：纯 ACK 帧已实现立即确认机制，无需再发送空 gossip 作为 keepalive。gossip 仍按 15 秒周期发送，用于拓扑更新和保活。
 
 ---
 

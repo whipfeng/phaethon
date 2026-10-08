@@ -149,72 +149,92 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			util.LogError("[NETSTACK] failed initial link NIC sync: %v", err)
 		}
 
-		// Configure RouteSelector for dynamic routing decisions
-		// RouteSelector is called during FindRoute to handle:
-		// 1. fakeIP → LocalDelivery (to Forwarder for domain resolution)
-		// 2. Mesh subnet → empty decision (route table handles peer routes,
-		//    incl. multi-hop via next-hop Link NICs)
-		// 3. Non-mesh → IPIP encapsulation with egress node EIP (tunnel
-		//    terminator; matches the frame-level decap condition §4.5)
+		// Configure RouteSelector for dynamic routing decisions per design §2.3
+		// (4-branch semantic dual-track). RouteSelector is called during
+		// FindRoute (must carry EgressNIC/NeedIPIP for outbound stack sockets)
+		// and during handleValidatedPacket (LocalDelivery flag intercepts
+		// inbound locally-delivered packets — patch #2b).
 		if n.ns != nil && n.meshSubnet != nil {
 			// Calculate local VIP and EIP
 			localVIP := CalculateVIP(n.meshSubnet)
 			localEIP := CalculateEIP(n.meshSubnet)
 
-			// Get FakeIP pool for fakeIP checking
+			// Get FakeIP pool for fakeIP checking (defensive match)
 			fakeIPPool := meshMgr.GetFakeIPPool()
 
 			// Create RouteSelector configuration
 			routeSelectorCfg := &RouteSelectorConfig{
-				// Mesh network (100/8): selector stays out, Link NIC routes apply
-				MeshSubnet: n.meshNetwork,
-				LocalVIP:   tcpip.AddrFrom4Slice(localVIP),
-				LocalEIP:   tcpip.AddrFrom4Slice(localEIP),
-				LocalGIP:   n.dnsAddr,
+				// Local subnet (/16 e.g.) — branch 1: covers VIP/GIP/hostIP/fakeIP/EIP.
+				LocalSubnet: n.meshSubnet,
+				LocalVIP:    tcpip.AddrFrom4Slice(localVIP),
+				LocalGIP:    n.dnsAddr,
 				IsFakeIP: func(ip net.IP) bool {
 					if fakeIPPool == nil {
 						return false
 					}
 					// InAllocRange (not Contains): the pool range starts at the
 					// subnet base, so Contains would classify the reserved
-					// infrastructure addresses (hostIP/VIP/GIP/EIP) as fakeIP and
-					// make the selector consume mesh→host return traffic locally
-					// instead of forwarding it to the TUN (design §1.2).
+					// infrastructure addresses (hostIP/VIP/GIP/EIP) as fakeIP.
 					return fakeIPPool.InAllocRange(ip)
 				},
-				SelectEgressNode: func(dst net.IP) (tcpip.Address, bool) {
-					// Get route table
+				// SelectRoute covers both branches 2 (mesh) and 3 (non-mesh
+				// advertised). NeedIPIP=true signals branch 3.
+				SelectRoute: func(dst net.IP) (SelectRouteResult, bool) {
 					rt := meshMgr.GetRouteTable()
 					if rt == nil {
-						return tcpip.Address{}, false
+						return SelectRouteResult{}, false
 					}
 
-					// Find matching route entry
 					for _, route := range rt.Routes {
-						if route.Prefix.Contains(dst) {
-							// Select egress node for this prefix
-							if len(route.Entries) == 0 {
-								continue
-							}
-							targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
-							if targetNodeID == "" {
-								continue
-							}
-
-							// EIP for the egress node: IPIP outer dst must be
-							// the tunnel terminator identity (EIP), matching
-							// HandleMeshFrame's decap condition (outer dst ==
-							// local EIP) — design §2.4/§4.5.
-							targetEIP := meshMgr.GetEIPForNode(targetNodeID)
-							if targetEIP == nil {
-								continue
-							}
-
-							return tcpip.AddrFrom4Slice(targetEIP), true
+						if !route.Prefix.Contains(dst) {
+							continue
 						}
-					}
+						if len(route.Entries) == 0 {
+							continue
+						}
 
-					return tcpip.Address{}, false
+						targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
+						if targetNodeID == "" {
+							continue
+						}
+
+						isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
+
+						if isMeshPrefix {
+							// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
+							nextHopID := meshMgr.NextHopNodeID(targetNodeID)
+							if nextHopID == "" {
+								continue
+							}
+							linkNIC, ok := n.linkNICs[nextHopID]
+							if !ok || linkNIC.nicID == 0 {
+								continue
+							}
+							return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
+						}
+
+						// Branch 3: non-mesh advertised prefix → IPIP to egress EIP
+						// over next-hop Link NIC. The frame-level decap at the
+						// peer matches on outer dst == its local EIP (design §2.4).
+						nextHopID := meshMgr.NextHopNodeID(targetNodeID)
+						if nextHopID == "" {
+							continue
+						}
+						linkNIC, ok := n.linkNICs[nextHopID]
+						if !ok || linkNIC.nicID == 0 {
+							continue
+						}
+						targetEIP := meshMgr.GetEIPForNode(targetNodeID)
+						if targetEIP == nil {
+							continue
+						}
+						return SelectRouteResult{
+							LinkNIC:   linkNIC.nicID,
+							EgressEIP: targetEIP,
+							NeedIPIP:  true,
+						}, true
+					}
+					return SelectRouteResult{}, false
 				},
 			}
 
@@ -304,137 +324,20 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 	return nil
 }
 
-// UpdateLinkRoutes rebuilds the gVisor route table per design §1.2 (amended):
-//   - VIP /32          → NIC 1 (local delivery)
-//   - 本节点子网 /16    → NIC 1 (TUN 宿主回程；补丁 #2b 保证 fakeIP 本地交付)
-//   - 192.168.0.0/16   → NIC 1 (宿主网段，旁路网关客户端 + 栈内 socket 应答)
-//   - <直连 peer 子网>  → 该 peer 的 Link NIC
-//   - <多跳 mesh 子网>  → 下一跳 peer 的 Link NIC（§4.4/§5.2，hop 表在发送时
-//     决定下一跳；非 mesh 通告前缀不入表，走 RouteSelector IPIP 出口）
+// UpdateLinkRoutes clears the gVisor route table to honor design §1.2:
+// the static route table is empty by design — every routing decision
+// is driven by RouteSelector (branches 1-4 per §2.3). Conntrack-managed
+// return traffic is handled by FindRouteViaNIC and skips the table
+// entirely (patch #6).
 //
-// No mesh /8 fallback exists: non-mesh destinations are resolved by the
-// RouteSelector (IPIP egress), not the route table. This is the single
-// route-table writer.
+// This function remains the single writer of the table; future hooks that
+// want to add a route should be evaluated against §1.2 first.
 func (n *Netstack) UpdateLinkRoutes() error {
 	if n.ns == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
-
-	var routes []tcpip.Route
-
-	if n.meshSubnet != nil {
-		base := n.meshSubnet.IP.To4()
-
-		// VIP /32 → NIC 1
-		vipIP := make(net.IP, 4)
-		copy(vipIP, base)
-		vipIP[3] = vipIP[3] + 1
-		routes = append(routes, tcpip.Route{
-			Destination: tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4Slice(vipIP), PrefixLen: 32}.Subnet(),
-			NIC:         1,
-		})
-
-		// 本节点子网 → NIC 1 (TUN host return; forwarder accept paths need a
-		// normal egress route to own-subnet clients — findLocalRoute returns a
-		// PacketLoop route which cannot egress. Safe for fakeIPs: patch #2b
-		// locally delivers them before forwarding consults the route table.)
-		ones, _ := n.meshSubnet.Mask.Size()
-		if ones > 0 && ones <= 32 {
-			ownSubnet, err := tcpip.NewSubnet(
-				tcpip.AddrFrom4Slice(base),
-				tcpip.MaskFromBytes(n.meshSubnet.Mask),
-			)
-			if err == nil {
-				routes = append(routes, tcpip.Route{Destination: ownSubnet, NIC: 1})
-			}
-		}
-	}
-
-	// 宿主网段 → NIC 1: bypass-gateway clients + stack-socket replies
-	// (e.g. DNSHijacker Write(To:) → FindRoute(1, GIP, client)); patch #6 only
-	// covers conntrack DNAT replies, not stack sockets.
-	_, hostLAN, _ := net.ParseCIDR("192.168.0.0/16")
-	if hostLAN != nil {
-		hostSubnet, err := tcpip.NewSubnet(
-			tcpip.AddrFrom4Slice(hostLAN.IP.To4()),
-			tcpip.MaskFromBytes(hostLAN.Mask),
-		)
-		if err == nil {
-			routes = append(routes, tcpip.Route{Destination: hostSubnet, NIC: 1})
-		}
-	}
-
-	// Per-peer subnets → Link NICs
-	installed := make(map[string]bool, len(n.linkNICs))
-	for nodeID, linkNIC := range n.linkNICs {
-		subnet, err := tcpip.NewSubnet(
-			tcpip.AddrFrom4Slice(linkNIC.peerSubnet.IP.To4()),
-			tcpip.MaskFromBytes(linkNIC.peerSubnet.Mask),
-		)
-		if err != nil {
-			util.LogError("[NETSTACK] failed to create subnet for peer %s: %v", nodeID, err)
-			continue
-		}
-		routes = append(routes, tcpip.Route{
-			Destination: subnet,
-			NIC:         linkNIC.nicID,
-		})
-		installed[subnet.String()] = true
-	}
-
-	// Multi-hop mesh prefixes → Link NIC of the next hop toward the egress
-	// node (design §1.2 amended + §4.4/§5.2). Direct peers are covered above;
-	// this installs the remaining mesh subnets known from the mesh route
-	// table so FindRoute succeeds for stack-socket dials (forwardToRemote)
-	// and the forwarding path alike. Non-mesh advertised prefixes are NOT
-	// installed: they must egress via the RouteSelector's IPIP path.
-	if n.meshMgr != nil && n.meshNetwork != nil {
-		for _, route := range n.meshMgr.GetRouteTable().Routes {
-			prefixIP4 := route.Prefix.IP.To4()
-			maskIP4 := net.IP(route.Prefix.Mask).To4()
-			if prefixIP4 == nil || maskIP4 == nil {
-				continue
-			}
-			prefixNet := &net.IPNet{IP: prefixIP4, Mask: net.IPMask(maskIP4)}
-			key := prefixNet.String()
-			if installed[key] {
-				continue
-			}
-			// Only mesh subnets; advertised non-mesh prefixes stay on the
-			// RouteSelector IPIP path.
-			if !n.meshNetwork.Contains(prefixNet.IP) {
-				continue
-			}
-			egressID := n.meshMgr.SelectEgressNodeID(prefixNet.IP, route.Entries)
-			if egressID == "" {
-				continue
-			}
-			nextHopID := n.meshMgr.NextHopNodeID(egressID)
-			if nextHopID == "" {
-				continue
-			}
-			linkNIC, ok := n.linkNICs[nextHopID]
-			if !ok {
-				continue
-			}
-			subnet, err := tcpip.NewSubnet(
-				tcpip.AddrFrom4Slice(prefixIP4),
-				tcpip.MaskFromBytes(maskIP4),
-			)
-			if err != nil {
-				continue
-			}
-			routes = append(routes, tcpip.Route{
-				Destination: subnet,
-				NIC:         linkNIC.nicID,
-			})
-			installed[key] = true
-		}
-	}
-
-	n.ns.SetRouteTable(routes)
-	util.LogInfo("[NETSTACK] route table rebuilt: %d routes (%d link NICs)", len(routes), len(n.linkNICs))
-
+	n.ns.SetRouteTable(nil)
+	util.LogInfo("[NETSTACK] route table cleared (per design §1.2; all routing by RouteSelector)")
 	return nil
 }
 
@@ -648,10 +551,12 @@ func (n *Netstack) initStack() error {
 	// EIP is NOT bound anywhere: it is a tunnel identity used as the IPIP
 	// outer source; decapsulation happens at the frame layer (HandleMeshFrame).
 
-	// Base route table: VIP /32, own subnet, host LAN → NIC 1 (design §1.2).
-	// SyncLinkNICs/UpdateLinkRoutes extend it with per-peer Link NIC routes.
+	// Route table cleared (design §1.2). All routing decisions are
+	// driven by the RouteSelector (set up in SetMeshManager). This call
+	// is still useful at boot to ensure a fresh state when SyncLinkNICs
+	// is invoked from a route-change callback.
 	if err := n.UpdateLinkRoutes(); err != nil {
-		return fmt.Errorf("set base routes: %v", err)
+		return fmt.Errorf("clear routes: %v", err)
 	}
 
 	// Configure iptables SNAT for bypass gateway (design §8.4)

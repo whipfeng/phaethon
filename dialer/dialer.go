@@ -213,12 +213,14 @@ func NewDialer(proxy *config.Proxy) Dialer {
 		return &stubDialer{name: proxy.Type}
 	}
 
-	// v2 dispatch: when the proxy is configured for mesh P2P, replace the
-	// protocol-handshake Dialer with a mesh-aware one that routes through
-	// the local gVisor netstack → IPIP tunnel → remote peer netstack.
-	if proxy.IsP2P() {
-		return &meshAwareDialer{proxy: proxy}
-	}
+	// v2 dispatch DISABLED (2026-10-08): revert to v1 protocol-handshake path.
+	// All proxies (including h_tunnel) now use their original protocol Dialer.
+	// meshAwareDialer code is preserved below; re-enable by uncommenting the
+	// dispatch block when v2 is ready.
+	//
+	// if proxy.IsP2P() {
+	// 	return &meshAwareDialer{proxy: proxy}
+	// }
 	return d
 }
 

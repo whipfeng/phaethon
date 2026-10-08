@@ -178,34 +178,69 @@ func (s *stubDialer) ServerAddr() (string, int) {
 	return "", 0
 }
 
-// NewDialer creates a Dialer from a Proxy config (follows the proxy chain)
+// NewDialer creates a Dialer from a Proxy config (follows the proxy chain).
+//
+// When proxy.IsP2P() is true (socks5/trojan/h_tunnel with p2p enabled), the
+// returned Dialer's Dial() bypasses protocol handshake and routes directly
+// through the mesh IPIP tunnel (see docs/plans/dialer_bind_strategy.md §"v1/v2
+// dispatch for Dial() 路径"). Other proxy types have IsP2P()==false and
+// retain their v1 protocol handshake path unchanged.
 func NewDialer(proxy *config.Proxy) Dialer {
 	if proxy == nil {
 		return &DirectDialer{}
 	}
+	var d Dialer
 	switch strings.ToUpper(proxy.Type) {
 	case config.ProxyDIRECT:
 		return &DirectDialer{}
 	case config.ProxySOCKS5:
-		return &Socks5Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &Socks5Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyTROJAN:
-		return &TrojanDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &TrojanDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyH_TUNNEL:
-		return &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyHYSTERIA2:
-		return &Hysteria2Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &Hysteria2Dialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyVLESS:
-		return &VLESSDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &VLESSDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxySSH:
-		return &SSHDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &SSHDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case "SS":
-		return &ShadowsocksDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &ShadowsocksDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	case config.ProxyHTTP:
-		return &HTTPDialer{BaseDialer: BaseDialer{Proxy: proxy}}
+		d = &HTTPDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 	default:
 		return &stubDialer{name: proxy.Type}
 	}
+
+	// v2 dispatch: when the proxy is configured for mesh P2P, replace the
+	// protocol-handshake Dialer with a mesh-aware one that routes through
+	// the local gVisor netstack → IPIP tunnel → remote peer netstack.
+	if proxy.IsP2P() {
+		return &meshAwareDialer{proxy: proxy}
+	}
+	return d
 }
+
+// meshAwareDialer replaces a protocol-handshake Dialer when proxy.IsP2P() is
+// true. The data path does NOT traverse the proxy server (SOCKS5/Trojan/h_tunnel);
+// instead, the local gVisor netstack handles the TCP connect and routes the IP
+// packet through the mesh IPIP tunnel to the remote peer's netstack, which
+// performs the actual outbound via its own physical interface.
+//
+// Only Dial() is meaningful; protocol-specific methods (DialControl/DialP2P/
+// DialReverse/DialPacket) keep using their original v1 dialers because they
+// are reached via type assertion on the underlying types, not via NewDialer.
+type meshAwareDialer struct {
+	proxy *config.Proxy
+}
+
+func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return MeshDial(dstAddr, dstPort, "", "PROXY:"+d.proxy.Name, nil)
+}
+
+// ServerAddr returns empty for mesh dialer: no proxy server is in the data path.
+func (d *meshAwareDialer) ServerAddr() (string, int) { return "", 0 }
 
 const maxDialDepth = 10
 

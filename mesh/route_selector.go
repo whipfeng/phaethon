@@ -126,14 +126,18 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 			}
 		}
 
-		// Branch 4: default fallback → NIC 1 (TUN→OS network stack).
-		// Outbound stack-socket Connect gets a real route via NIC 1 so the
-		// packet leaves the stack instead of falling through to
-		// ErrHostUnreachable. Inbound non-mesh non-advertised packets get
-		// forwarded via writeLoop → TUN → OS routing decision.
+		// Branch 4 (设计 §2.3 + 补丁 #8): 兜底 → 出栈经 TUN 走到 OS 网络栈；
+		// 入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
+		// 给 Forwarder（同 Branch 1 loopback 路径：SYN 经 NIC 1 → TUN → OS →
+		// 路由回 TUN → NIC 1 → deliverPacketLocally → tcp/udp Forwarder）。
+		// EgressNIC=1 让 FindRoute 在出栈（stack-socket Connect）场景下能构造
+		// 真实路由。LocalDelivery=true 是兜底语义的强制要求，缺失会导致
+		// forwardUnicastPacket → FindRoute(0, "", dst) 失败 → handleForwardingError
+		// panic（QG 2026-10-08 复现）。
 		return stack.RouteDecision{
-			EgressNIC: 1,
-			Cacheable: true,
+			EgressNIC:     1,
+			LocalDelivery: true,
+			Cacheable:     true,
 		}
 	}
 }

@@ -1,6 +1,6 @@
 # gVisor 路由架构最终方案：RouteSelector + Link NICs
 
-## 状态：✅ 最终方案（2026-10-05 修订：RouteSelector 4 分支逻辑 + 路由表完全清空 + conntrack 辅助回程）
+## 状态：✅ 最终方案（2026-10-08 修订：补丁 #9 `HandleLocal=true` + RouteSelector 4 分支逻辑 + 路由表完全清空 + conntrack 辅助回程）
 
 **本文档整合并取代**：
 - `gvisor_routing_evolution.md`（早期调研，已废弃）
@@ -131,12 +131,15 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
         }
     }
     
-    // 4. 兜底 → 出栈经 TUN 走到 OS 网络栈（OS 决定如何去目标）。
-    //    入栈时 handleValidatedPacket 不拦截（无 LocalDelivery），走 forwardUnicastPacket →
-    //    FindRoute 返回 NIC 1 路由 → writeLoop → TUN → OS。
+    // 4. 兜底（匹配不上任何通告路由的外部 IP）→ 出栈经 TUN 走到 OS 网络栈；
+    //    入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付给
+    //    Forwarder（同 Branch 1 处理路径：SYN 经 NIC 1 → TUN → OS → 路由回 TUN →
+    //    NIC 1 → deliverPacketLocally → TCP/UDP Forwarder）。EgressNIC=1 让
+    //    FindRoute 在出栈（stack-socket Connect）场景下能构造真实路由。
     return RouteDecision{
-        EgressNIC: 1,
-        Cacheable: true,
+        EgressNIC:     1,
+        LocalDelivery: true,
+        Cacheable:     true,
     }
 }
 ```
@@ -146,7 +149,7 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
 - **本地 mesh 子网优先**：本节点子网（如 VM 的 100.1.0.0/16）直接 LocalDelivery，不走 Link NIC。fakeIP 在本节点子网范围内，由情况 1 覆盖。
 - **统一 EgressNIC 语义**：RouteSelector 返回的 EgressNIC 是下一跳的 Link NIC（直连 peer），gVisor 直接使用该 NIC 发送包。
 - **非 mesh 一次性算好**：RouteSelector 同时返回 EgressNIC（下一跳）和 EgressEIP（IPIP 外层目标），无需递归查找。
-- **兜底 LocalDelivery**：匹配不上通告路由的目标交给 forwarder 处理。只有匹配到通告路由的非 mesh 目标才走 IPIP 封装。
+- **兜底 LocalDelivery（补丁 #8 强化）**：匹配不上通告路由的目标**强制** `LocalDelivery=true` 走本地交付给 Forwarder，**禁止**进转发路径。只有匹配到通告路由的非 mesh 目标才走 IPIP 封装。这是 gVisor 不 panic 防御 + 兜底语义的双重保险。
 - **路由表完全清空**：所有路由由 RouteSelector 处理，路由表不再包含任何条目。
 
 **例外**：
@@ -649,6 +652,119 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 - Linux `-i tun -j SNAT` ⇔ gVisor `InputInterface=="tun"` 仅匹配真实从 NIC 1 接收的包
 - 本地 socket 流量走 OUTPUT/POSTROUTING（gVisor 同理），不受 INPUT 链影响
 
+### 6.11 补丁 #8：Branch 4 强制 LocalDelivery + handleForwardingError 不 panic（新增）
+
+**问题**（2026-10-08 QG 验证发现）：
+
+Branch 4（兜底，匹配不上任何通告路由的外部 IP）当前实现只设 `EgressNIC=1`、不设 `LocalDelivery`，导致入栈包走 `forwardUnicastPacket` → `FindRoute`（dst 不在路由表、不在 LocalSubnet、本地无 endpoint 匹配）→ 返回 `*tcpip.ErrHostUnreachable` → 在 `forwardPacketWithRoute` 包装为 `&ip.ErrOther{Err: err}` → `handleForwardingError` 落到 `*ip.ErrOther` 内层 default case → **panic**，把整个 phaethon worker 进程搞死，watchdog 每 ~10 分钟拉起一次。
+
+**双重违反设计意图**：
+1. 设计 §2.3「兜底 LocalDelivery」明确要求 Branch 4 走本地交付给 Forwarder，而不是进转发路径。
+2. gVisor fork `handleForwardingError` 用 `panic` 处理未识别的 forwarding error，是上游防御性 bug——任何新增的 forwarding 错误（iptables reject、conntrack 状态异常、未来 gVisor 升级）都会再次 panic。
+
+**修复**（双管齐下）：
+
+**(a) RouteSelector Branch 4 显式设 `LocalDelivery=true`**
+
+文件：`mesh/route_selector.go`
+```go
+// Branch 4: 兜底 → 出栈经 TUN 走到 OS 网络栈；入栈时 handleValidatedPacket
+// 拦截并本地交付给 Forwarder（同 Branch 1 loopback 路径）。
+return stack.RouteDecision{
+    EgressNIC:     1,
+    LocalDelivery: true,
+    Cacheable:     true,
+}
+```
+
+入栈包走 `deliverPacketLocally` → `AcquireAssignedAddress`（dst 不在本地，nil）→ 落到 `tcp.NewForwarder` 兜底 → phaethon 的 `acceptTCP` 接收 → 走 mesh/Proxy 转发到实际目的地。
+出栈（stack-socket Connect）包：`EgressNIC=1` 让 FindRoute 仍构造 NIC 1 路由，包经 writeLoop → TUN → OS → 路由回 TUN → NIC 1 接收 → `LocalDelivery=true` → 走 deliverPacketLocally（loopback 单跳）。
+
+**(b) handleForwardingError 防御性不 panic**
+
+文件：`gvisor-fork/pkg/tcpip/network/ipv4/ipv4.go`（同 ipv6.go）
+函数：`handleForwardingError`
+
+将 `*ip.ErrOther` 内层 default case 从 `panic(...)` 改为 `log.Errorf + stats.Forwarding.Errors.Increment()` 静默丢弃；外层 default case 同理。任何未识别的 forwarding 错误（含未来 gVisor 升级引入的新错误）只记日志、不再杀进程。
+
+**效果**：
+- ✅ QG panic 循环立即停止（消除 ssh/外部 IP 访问根因）
+- ✅ 非 mesh 外部 IP（dst=106.13.183.103 等）正常进入 Forwarder，由 Proxy 链转发
+- ✅ 防御性兜底：未来任何未知 forwarding 错误不再拖垮整个进程
+
+### 6.12 补丁 #9：`stack.Options.HandleLocal = true`（新增，2026-10-08）
+
+**问题**（VM 部署后实测发现）：
+
+gVisor `stack.Options.HandleLocal` 默认为 `false`。在 phaethon 的 2-NIC 拓扑里，这意味着：
+
+- DNS 解析（`ResolveDomain` → `mesh/netstack.go:1117`）创建的 UDP socket，src 由 gVisor 自动选为 GIP（NIC 1 绑定的本地地址），dst=GIP:53（同机 DNS hijacker）。
+- 拨号（`dialTCP` / `NetDialWithPreConnect` → `mesh/netstack.go:766/903`）创建的 TCP socket，src=GIP，dst=fakeIP。
+- 这些"自寻址"包走 `FindRoute → makeRoute`（`gvisor-fork/pkg/tcpip/stack/route.go:201-216`）：
+  ```go
+  loop := PacketOut
+  if !outgoingNIC.IsLoopback() {
+      if handleLocal && localAddr != (tcpip.Address{}) && remoteAddr == localAddr {
+          loop = PacketLoop
+      }
+      // ...
+  }
+  ```
+- 因为 `handleLocal=false`，`loop = PacketOut`，包被写出 NIC → TUN → OS 网络栈。
+- **OS（Windows / Linux）不会把 TUN 设备自己发出去的包再 loopback 回 TUN 设备**——这是 OS 网络层的物理事实，不依赖任何路由配置。
+- 结果：DNS 30 秒超时（SOCKS5 报 "connection refused"）、TCP 拨号永久卡在 SYN 阶段。
+
+**实测证据**（VM phaethon-stdout.log，2026-10-08 19:55:59）：
+
+```
+[DIAG-DEBUG] initStack: HandleLocal=false
+[DIAG-DEBUG] ResolveDomain udp src=100.1.0.3:18060 dst=100.1.0.3:53 HandleLocal=false
+[DIAG-DEBUG] GIP-touch pkt#127: 100.1.0.3:18060 -> 100.1.0.3:53 (proto=17 len=62, MeshSubnetContains=true)
+[DIAG-DEBUG] GIP-touch pkt#127 WROTE to TUN: 100.1.0.3:18060 -> 100.1.0.3:53
+```
+
+包**确实**被 gVisor 写到了 TUN（"WROTE to TUN" 日志）。但 30 秒后没有响应——OS 层 loopback 失败。
+
+**修复**：
+
+文件：`mesh/netstack.go`
+函数：`initStack`
+
+```go
+s := stack.New(stack.Options{
+    NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+    TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, func(s *stack.Stack) stack.TransportProtocol { return newIPIPProtocol(s, linkEP) }},
+    HandleLocal:        true,  // 让 gVisor 内部 loopback 自寻址包（GIP→GIP、VIP→VIP、EIP→EIP）
+})
+```
+
+**为什么是 `HandleLocal: true`，而不是依赖 OS loopback**：
+
+用户曾质疑"Mode B 借助 OS 路由环回是错误实现"——这个质疑在 TUN 边界场景下**成立**。OS 永远不会把 TUN 设备自己发出去的包 loopback 回来（TUN 不是 lo 接口），所以靠 OS loopback 是不可行的实现。`HandleLocal=true` 让 gVisor **在协议栈内部**就完成 loopback：
+
+1. `FindRoute` 命中 `findLocalRouteRLocked`（`stack.go:1835`，被 `s.handleLocal` 门控）
+3. `makeRoute` 在 `handleLocal && localAddr == remoteAddr` 时设 `loop = PacketLoop`
+4. `writePacketPostRouting` 走 `PacketLoop` 分支 → `handleLocalPacket` → `deliverPacketLocally` → DNS hijacker / TCP Forwarder
+
+整个过程**完全在 gVisor 内**，不经过 TUN 写回、不依赖 OS 任何行为。
+
+**不需要 fork**：这是公开的 `stack.Options` 字段，运行时通过 `s.HandleLocal()` 可读。
+
+**验证方法**：
+
+- `s.HandleLocal()` 返回 `true`
+- `ResolveDomain` 不再 timeout
+- `dialTCP` 的 SYN 在 gVisor 内完成 loopback，connect 成功
+- DNS hijacker 日志显示 `from=100.1.0.1:<ephemeral>`（OS-NAT 视角的 source，因为包根本没走 TUN）—— 注意：从 gVisor 看 src 仍是 100.1.0.3，只是 loopback 在栈内完成
+
+**潜在影响**：
+
+- ✅ DNS 解析正常（30s → <100ms）
+- ✅ MeshDial 拨号正常（避免 timeout 卡死）
+- ✅ 本地 socket 互访正常（如 phaethon admin 调 DNS hijacker 自身）
+- ⚠️ 所有"自寻址"流量改走栈内 loopback，**不再写 TUN 也不走 OS NAT**——这是预期行为，不会破坏 NAT（NAT 设计是给外部 LAN 主机用的，loopback 流量无需 NAT）
+- ⚠️ gVisor 内部额外开销：每次自寻址包多走一次 `handleLocalPacket`，可忽略
+
 ---
 
 ## 7. 实施计划
@@ -664,19 +780,23 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 **Fork 补丁**：
 1. ✅ 补丁 #1：FindRoute 最长前缀匹配
 2. ✅ 补丁 #2：转发优先语义
-3. ⏳ 补丁 #3：RouteSelector 扩展点
-4. ⏳ 补丁 #4：Postrouting InputInterface 匹配
-5. ⏳ 补丁 #5：Conntrack 记录输入接口
-6. ⏳ 补丁 #6：DNAT 辅助路由
+3. ✅ 补丁 #3：RouteSelector 扩展点
+4. ✅ 补丁 #4：Postrouting InputInterface 匹配
+5. ✅ 补丁 #5：Conntrack 记录输入接口
+6. ✅ 补丁 #6：DNAT 辅助路由
+7. ✅ 补丁 #7：本地 socket 流量跳过 InputInterface 匹配
+8. ✅ 补丁 #8：Branch 4 强制 LocalDelivery + handleForwardingError 不 panic
+9. 🔄 补丁 #9：`stack.Options.HandleLocal=true`（DNS 自寻址包栈内 loopback，无 fork）
 
 **架构实现**：
-1. ⏳ Link NICs：每个直连 peer 一个 NIC
-2. ⏳ IPIP 封装内化：在转发路径完成
-3. ⏳ NAT 规则配置：SNAT + DNAT + conntrack
-4. ⏳ 拦截器退役
+1. ✅ Link NICs：每个直连 peer 一个 NIC
+2. ✅ IPIP 封装内化：在转发路径完成
+3. ✅ NAT 规则配置：SNAT + DNAT + conntrack
+4. ✅ 拦截器退役
 
 ### 阶段 3：验证
 
+- [x] DNS 解析（HandleLocal=true 修复，补丁 #9）✅
 - [ ] 旁路网关 NAT（域名、raw IP）
 - [ ] mesh 路由（直连、非直连）
 - [ ] IPIP 封装/解封装

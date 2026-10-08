@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"phaethon/frame"
-	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -65,64 +64,35 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 // The proxy server IS the registry: it connects to proxy.Server:proxy.Port via the next hop,
 // performs TLS handshake, then sends a Trojan BIND with PORT=1 to mark it as a control channel.
 func (d *TrojanDialer) DialControl() (net.Conn, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeControl, "")
 	if err != nil {
-		return nil, fmt.Errorf("trojan: control connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	tlsConn, err := d.TLSHandshake(rawConn)
-	if err != nil {
-		rawConn.Close()
 		return nil, err
 	}
-	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortControl); err != nil {
-		tlsConn.Close()
-		return nil, err
-	}
-	return tlsConn, nil
+	return r.Conn, nil
 }
 
 // DialP2P establishes a P2P connection through this Trojan proxy.
-// It connects to proxy.Server:proxy.Port via the next hop,
-// performs TLS handshake, then sends a Trojan BIND with PORT=2.
+// It connects to proxy.Server:proxy.Port via the next hop, performs TLS
+// handshake, then sends a Trojan BIND with PORT=2 and wraps the result
+// in a frame transport (v1 BIND stream channel — trojan has no v2 MESH).
 func (d *TrojanDialer) DialP2P() (frame.FrameTransport, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeP2P, "")
 	if err != nil {
-		return nil, fmt.Errorf("trojan: p2p connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	tlsConn, err := d.TLSHandshake(rawConn)
-	if err != nil {
-		rawConn.Close()
 		return nil, err
 	}
-	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, d.Proxy.Server, reverse.BindPortP2P); err != nil {
-		tlsConn.Close()
-		return nil, err
-	}
-	return frame.NewStreamTransport(tlsConn), nil
+	return r.Frame, nil
 }
 
 // DialReverse establishes a reverse data connection through this Trojan proxy.
-// It connects to proxy.Server:proxy.Port via the next hop,
-// performs TLS handshake, then sends a Trojan BIND with PORT=0.
-// dstAddr is the reverse address sent in the BIND request for server validation.
+// It connects to proxy.Server:proxy.Port via the next hop, performs TLS
+// handshake, then sends a Trojan BIND with PORT=0. dstAddr is the reverse
+// address sent in the BIND request for server-side validation.
 func (d *TrojanDialer) DialReverse(dstAddr string) (net.Conn, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeData, dstAddr)
 	if err != nil {
-		return nil, fmt.Errorf("trojan: reverse connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	tlsConn, err := d.TLSHandshake(rawConn)
-	if err != nil {
-		rawConn.Close()
 		return nil, err
 	}
-	if err := d.SendTrojanRequestWithCmd(tlsConn, 0x02, dstAddr, reverse.BindPortData); err != nil {
-		tlsConn.Close()
-		return nil, err
-	}
-	return tlsConn, nil
+	return r.Conn, nil
 }
 
 // DialPacket establishes a UDP tunnel through the Trojan proxy.

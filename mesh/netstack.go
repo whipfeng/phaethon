@@ -519,6 +519,7 @@ func (n *Netstack) initStack() error {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, func(s *stack.Stack) stack.TransportProtocol { return newIPIPProtocol(s, linkEP) }},
+		HandleLocal:        true,
 	})
 	n.ns = s
 
@@ -546,6 +547,10 @@ func (n *Netstack) initStack() error {
 			return fmt.Errorf("add GIP address to NIC 1: %v", err)
 		}
 	}
+
+	// DIAG-DEBUG: log runtime HandleLocal value (used to gate stack-internal
+	// loopback for self-addressed packets — see ResolveDomain DNS path).
+	util.LogInfo("[DIAG-DEBUG] initStack: HandleLocal=%v (gVisor stack.New option, controls self-addressed packet loopback)", s.HandleLocal())
 
 	// VIP is bound via AddMeshVIP (called by the mesh module once computed).
 	// EIP is NOT bound anywhere: it is a tunnel identity used as the IPIP
@@ -809,6 +814,14 @@ func (n *Netstack) dialTCP(ctx context.Context, s *stack.Stack, remoteAddr tcpip
 		}
 	}
 
+	// DIAG-DEBUG: log the actual src/dst assigned by gVisor for outbound TCP.
+	if la, lerr := ep.GetLocalAddress(); lerr == nil {
+		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
+			util.LogInfo("[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
+				la.Addr, la.Port, ra.Addr, ra.Port, s.HandleLocal())
+		}
+	}
+
 	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
@@ -917,6 +930,14 @@ func (n *Netstack) NetDialWithPreConnect(network, addr string, preConnect func(d
 			Net:  "tcp",
 			Addr: fullToTCPAddr(remoteAddr),
 			Err:  fmt.Errorf("%s", tcpErr),
+		}
+	}
+
+	// DIAG-DEBUG: log the actual src/dst assigned by gVisor for outbound TCP.
+	if la, lerr := ep.GetLocalAddress(); lerr == nil {
+		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
+			util.LogInfo("[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
+				la.Addr, la.Port, ra.Addr, ra.Port, ns.HandleLocal())
 		}
 	}
 
@@ -1092,6 +1113,14 @@ func (n *Netstack) ResolveDomain(domain string) (net.IP, error) {
 	}
 	if err := ep.Connect(tcpip.FullAddress{Addr: dnsAddr, Port: 53}); err != nil {
 		return nil, fmt.Errorf("resolve %s: connect: %v", domain, err)
+	}
+
+	// DIAG-DEBUG: log src/dst assigned by gVisor + stack HandleLocal().
+	if la, lerr := ep.GetLocalAddress(); lerr == nil {
+		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
+			util.LogInfo("[DIAG-DEBUG] ResolveDomain udp src=%s:%d dst=%s:%d HandleLocal=%v",
+				la.Addr, la.Port, ra.Addr, ra.Port, ns.HandleLocal())
+		}
 	}
 
 	// Register waiter BEFORE write -- loopback delivery is synchronous.
@@ -1393,6 +1422,25 @@ func (n *Netstack) writeLoop() {
 
 		hl := int(data[0]&0x0f) * 4
 		pktNum := n.WritePackets.Load()
+
+		// DIAG-DEBUG: always log any packet that touches the local GIP so we
+		// can verify whether DNS / stack-originated packets escape via TUN and
+		// (if so) whether they return via OS loopback. This captures ResolveDomain
+		//'s UDP query (src=GIP, dst=GIP) — the smoking gun for HandleLocal=false.
+		isGIPSrc := false
+		isGIPDst := false
+		if n.dnsAddr != (tcpip.Address{}) {
+			gipBytes := n.dnsAddr.As4()
+			isGIPSrc = bytes.Equal(data[12:16], gipBytes[:])
+			isGIPDst = bytes.Equal(data[16:20], gipBytes[:])
+		}
+		if isGIPSrc || isGIPDst {
+			util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d: %s:%d -> %s:%d (proto=%d len=%d, MeshSubnetContains=%v)",
+				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
+				data[9], len(data),
+				n.meshSubnet != nil && n.meshSubnet.Contains(dstIP))
+		}
+
 		if pktNum < 50 || pktNum%1000 == 0 {
 			util.LogInfo("[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
 				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
@@ -1405,7 +1453,7 @@ func (n *Netstack) writeLoop() {
 		// loop it back through the TUN.
 		if n.meshNetwork != nil && n.meshNetwork.Contains(dstIP) &&
 			(n.meshSubnet == nil || !n.meshSubnet.Contains(dstIP)) {
-			if pktNum < 50 || pktNum%1000 == 0 {
+			if pktNum < 50 || pktNum%1000 == 0 || isGIPSrc || isGIPDst {
 				util.LogWarn("[WRITELOOP] dropped mesh-destined pkt#%d on TUN egress: %s -> %s (should egress via Link NIC)",
 					pktNum, srcIP, dstIP)
 			}
@@ -1418,6 +1466,10 @@ func (n *Netstack) writeLoop() {
 		// DNS hijacker replies. Write to the TUN device.
 		if n.WriteLoopDevice != nil {
 			if _, err := n.WriteLoopDevice.Write(data); err != nil {
+				if isGIPSrc || isGIPDst {
+					util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d TUN write FAILED: %s:%d -> %s:%d err=%v",
+						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2), err)
+				}
 				select {
 				case <-n.closeCh:
 					pkt.DecRef()
@@ -1430,6 +1482,10 @@ func (n *Netstack) writeLoop() {
 				if pktNum < 50 || pktNum%1000 == 0 {
 					util.LogInfo("[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
 						pktNum, srcIP, portAt(data, hl), net.IP(data[16:20]), portAt(data, hl+2))
+				}
+				if isGIPSrc || isGIPDst {
+					util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d WROTE to TUN: %s:%d -> %s:%d",
+						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2))
 				}
 				if n.callbacks != nil && n.callbacks.StatsNotify != nil {
 					n.callbacks.StatsNotify()

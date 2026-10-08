@@ -8,7 +8,6 @@ import (
 
 	"phaethon/config"
 	"phaethon/frame"
-	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -68,49 +67,35 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 // The proxy server IS the registry: it connects to proxy.Server:proxy.Port via the next hop,
 // then performs a SOCKS5 BIND with PORT=1 to mark it as a control channel.
 func (d *Socks5Dialer) DialControl() (net.Conn, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeControl, "")
 	if err != nil {
-		return nil, fmt.Errorf("socks5: control connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortControl, 0x02, d.ConnIDStr()); err != nil {
-		conn.Close()
 		return nil, err
 	}
-	return conn, nil
+	return r.Conn, nil
 }
 
 // DialP2P establishes a P2P connection through this SOCKS5 proxy.
-// It connects to proxy.Server:proxy.Port via the next hop,
-// then performs a SOCKS5 BIND with PORT=2 to mark it as a P2P channel.
+// It connects to proxy.Server:proxy.Port via the next hop, then performs
+// a SOCKS5 BIND with PORT=2 and wraps the result in a frame transport
+// (v1 BIND stream channel — socks5 has no v2 MESH).
 func (d *Socks5Dialer) DialP2P() (frame.FrameTransport, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeP2P, "")
 	if err != nil {
-		return nil, fmt.Errorf("socks5: p2p connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	if err := socks5Handshake(conn, d.Proxy, d.Proxy.Server, reverse.BindPortP2P, 0x02, d.ConnIDStr()); err != nil {
-		conn.Close()
 		return nil, err
 	}
-	return frame.NewStreamTransport(conn), nil
+	return r.Frame, nil
 }
 
 // DialReverse establishes a reverse data connection through this SOCKS5 proxy.
-// It connects to proxy.Server:proxy.Port via the next hop,
-// then performs a SOCKS5 BIND with PORT=0 to match with a client's BIND.
-// dstAddr is the reverse address sent in the BIND request for server validation.
+// It connects to proxy.Server:proxy.Port via the next hop, then performs
+// a SOCKS5 BIND with PORT=0. dstAddr is the reverse address sent in the
+// BIND request for server-side validation.
 func (d *Socks5Dialer) DialReverse(dstAddr string) (net.Conn, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	r, err := bindToBase(d.Proxy, BindModeData, dstAddr)
 	if err != nil {
-		return nil, fmt.Errorf("socks5: reverse connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
-	}
-	if err := socks5Handshake(conn, d.Proxy, dstAddr, reverse.BindPortData, 0x02, d.ConnIDStr()); err != nil {
-		conn.Close()
 		return nil, err
 	}
-	return conn, nil
+	return r.Conn, nil
 }
 
 func socks5Auth(conn net.Conn, proxy *config.Proxy) error {

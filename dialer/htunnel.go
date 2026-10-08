@@ -14,7 +14,6 @@ import (
 
 	"phaethon/config"
 	"phaethon/frame"
-	"phaethon/reverse"
 	"phaethon/util"
 )
 
@@ -232,22 +231,33 @@ func (d *HTunnelDialer) dialHTunnel(cmd string, dstAddr string, dstPort int) (ne
 // DialControl establishes a control connection to the registry through this HTunnel proxy.
 // The proxy server IS the registry: it connects to proxy.Server with BIND PORT=1.
 func (d *HTunnelDialer) DialControl() (net.Conn, error) {
-	return d.dialHTunnel("BIND", d.Proxy.Server, reverse.BindPortControl)
+	r, err := bindToBase(d.Proxy, BindModeControl, "")
+	if err != nil {
+		return nil, err
+	}
+	return r.Conn, nil
 }
 
-// DialP2P establishes a P2P connection through this HTunnel proxy using the
-// direct mesh channel: one HEAD (X-C: MESH), frames in POST/GET bodies —
-// no BIND stream, no target dial, no splice.
+// DialP2P establishes a P2P connection through this HTunnel proxy. v2 (MESH
+// direct) is used when proxy.P2P is enabled, otherwise the v1 BIND stream
+// channel is used as fallback. The BindStrategy picks the right path.
 func (d *HTunnelDialer) DialP2P() (frame.FrameTransport, error) {
-	util.LogInfo("[HTUNNEL-DIRECT] [%s] DialP2P called, calling dialP2PDirect", d.Proxy.Name)
-	return d.dialP2PDirect()
+	r, err := bindToBase(d.Proxy, BindModeP2P, "")
+	if err != nil {
+		return nil, err
+	}
+	return r.Frame, nil
 }
 
 // DialReverse establishes a reverse data connection through this HTunnel proxy.
 // It connects to proxy.Server with BIND PORT=0 to match with a client's BIND.
 // dstAddr is the reverse address sent in the BIND request for server validation.
 func (d *HTunnelDialer) DialReverse(dstAddr string) (net.Conn, error) {
-	return d.dialHTunnel("BIND", dstAddr, reverse.BindPortData)
+	r, err := bindToBase(d.Proxy, BindModeData, dstAddr)
+	if err != nil {
+		return nil, err
+	}
+	return r.Conn, nil
 }
 
 // htunnelConn implements net.Conn over HTTP tunnel

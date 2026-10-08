@@ -43,9 +43,11 @@
 ```
 
 **注意**：
-- **路由表完全清空**：所有路由决策（mesh、非 mesh、本地地址）都由 RouteSelector 处理（§2.3）。路由表不再包含任何条目。
+- **路由表完全清空**：所有路由决策（mesh、非 mesh、本地地址）都由 RouteSelector 处理（§2.3）。路由表不包含 VIP/32、本节点子网 /16、192.168/16、对端子网等任何条目。
+- **本地子网与 192.168 的处理**：本地交付（含 fakeIP、GIP、VIP）由 RouteSelector 分支 1 的 `EgressNIC=1 + LocalDelivery=true` 覆盖（出栈经 TUN、入栈由 handleValidatedPacket 拦截）；其他 192.168.x.x 等非栈内地址走分支 4 经 NIC 1 → TUN → OS，由宿主网络栈做下一跳决策。
+- **栈 socket 也能找到路由**：分支 1 的 `EgressNIC=1` 保证栈 socket `Connect(fakeIP)` 在 FindRoute 中能构造路由（fork patch #3 只对 `NeedIPIP`/显式 `EgressNIC` 构造路由）。
 - **Conntrack 管理的回程包例外**：旁路网关回程包（src=VIP, dst=客户端）通过 conntrack 记录的 `originalInputNIC` 直接路由回 NIC 1（patch #5/#6，`FindRouteViaNIC`），跳过 RouteSelector 和路由表。
-- **Socket/Forwarder 回程包走 RouteSelector**：DNSHijacker 应答、forwarder 回复等栈内 socket 的回程包仍然走 RouteSelector，由 RouteSelector 根据目标地址返回正确的 EgressNIC。
+- **Socket/Forwarder 回程包走 RouteSelector**：DNSHijacker 应答、forwarder 回复等栈内 socket 的回程包仍然走 RouteSelector，由 RouteSelector 根据目标地址返回正确的 EgressNIC（dst=LAN 客户端经分支 4 走 NIC 1）。
 
 ---
 
@@ -86,38 +88,56 @@ type RouteDecision struct {
 
 ### 2.3 决策逻辑
 
+**语义双轨**：
+- **FindRoute 路径**（stack socket `Connect()` SYN）：RouteSelector 必须给出 `EgressNIC`（或 `NeedIPIP`），否则 FindRoute 不会构造路由，SYN 无法发出。
+- **handleValidatedPacket 路径**（NIC 收包，`patch #2b`）：RouteSelector 的 `LocalDelivery=true` 会跳过转发、在 IP 层本地交付（依赖 NIC 1 混杂模式 + `AcquireAssignedAddress`，对 fakeIP/GIP/VIP 等本地地址可达）。
+
+**为什么需要 EgressNIC=1（出栈 TUN 路径）**：
+- 栈内 socket `Connect(fakeIP)` 在 gvisor 中走 IP 层 forwardUnicastPacket → FindRoute；没有路由可发包。
+- FindRoute 只对 `NeedIPIP` 或显式 `EgressNIC` 构造路由（fork patch #3 line 1674），`LocalDelivery` 单独设置不构造路由。
+- 因此 fakeIP/GIP/VIP 等"本地交付"目标在 FindRoute 中也必须附 `EgressNIC=1`——SYN 经 NIC 1 → writeLoop → TUN → OS 识别为 TUN 子网地址 → 路由回 TUN → NIC 1 入站 → handleValidatedPacket 看到 `LocalDelivery=true` → 本地交付给 Forwarder（loopback 单跳，开销可接受）。
+
 ```go
 func RouteSelector(dst tcpip.Address) RouteDecision {
-    // 1. 本地 mesh 网段（本节点子网）→ 本地交付
-    //    （admin API、本地服务、fakeIP 等）
+    // 1. 本地 mesh 子网（fakeIP / GIP / VIP / hostIP）→ 出栈经 TUN 兜底；
+    //    入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
+    //    （给 Forwarder 处理 fakeIP / 给 admin listener 处理 GIP 等）。
     if isLocalMeshSubnet(dst) {
-        return RouteDecision{LocalDelivery: true, Cacheable: true}
+        return RouteDecision{
+            EgressNIC:     1,                         // NIC 1 = TUN 兜底出口
+            LocalDelivery: true,                      // 入栈时拦截，不走 forwardUnicastPacket
+            Cacheable:     true,
+        }
     }
     
-    // 2. 其他 mesh 目标（直连或非直连）→ 计算下一跳 Link NIC，无 IPIP 封装
+    // 2. 其他 mesh 子网（直连或非直连）→ 下一跳 Link NIC 直送，无 IPIP
     if isMeshSubnet(dst) {
-        egressNodeID := selectEgressNode(dst)  // Dijkstra 选出口节点
-        nextHopNIC := getNextHopLinkNIC(egressNodeID)  // 下一跳 Link NIC
+        nextHopNIC, egressNodeID := selectNextHop(dst)  // Dijkstra 选下一跳 Link NIC
         return RouteDecision{
             EgressNIC: nextHopNIC,
             Cacheable: false,  // 拓扑变化时重新计算
         }
     }
     
-    // 3. 非 mesh → 匹配通告路由
+    // 3. 通告路由匹配（非 mesh）→ IPIP 封装到出口节点 EIP
     if egressNodeID, found := matchAdvertisedRoute(dst); found {
         nextHopNIC := getNextHopLinkNIC(egressNodeID)
         egressEIP := calculateEIP(getNodeSubnet(egressNodeID))
         return RouteDecision{
             EgressNIC: nextHopNIC,
-            NeedIPIP: true,
+            NeedIPIP:  true,
             EgressEIP: egressEIP,
             Cacheable: true,
         }
     }
     
-    // 4. 匹配不上 → 本地交付（触发 forwarder）
-    return RouteDecision{LocalDelivery: true, Cacheable: true}
+    // 4. 兜底 → 出栈经 TUN 走到 OS 网络栈（OS 决定如何去目标）。
+    //    入栈时 handleValidatedPacket 不拦截（无 LocalDelivery），走 forwardUnicastPacket →
+    //    FindRoute 返回 NIC 1 路由 → writeLoop → TUN → OS。
+    return RouteDecision{
+        EgressNIC: 1,
+        Cacheable: true,
+    }
 }
 ```
 
@@ -478,16 +498,16 @@ Link NIC 是"哑"的，职责是收发直连：
 // 在 FindRoute 中调用 RouteSelector（所有 FindRoute 调用都走，§6.8 已废弃条件限制）
 if s.routeSelector != nil {
     decision := s.routeSelector(remoteAddr)
-    if decision.LocalDelivery {
-        return makeLocalRoute(...)
-    }
+    // LocalDelivery 单独设置在 FindRoute 中**不构造路由**——它是入栈拦截标志，
+    // 由 handleValidatedPacket（patch #2b）读取；FindRoute 必须有 EgressNIC 才能
+    // 让出栈 SYN 找到出口（设计 §2.3 语义双轨）。
     if decision.NeedIPIP {
         return makeIPIPRoute(decision.EgressNIC, decision.EgressEIP)
     }
-    // 有 EgressNIC 但无 NeedIPIP（mesh 目标）→ 经该 Link NIC 的直连路由
     if decision.EgressNIC != 0 {
         return makeRouteViaNIC(decision.EgressNIC, ...)
     }
+    // 无 EgressNIC 且无 NeedIPIP → fall through 到路由表（兜底分支 4 的 fallback 行为）
 }
 ```
 
@@ -594,6 +614,40 @@ if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
 **问题**：DNAT 回程（dst=LAN 客户端）走 `forwardUnicastPacket → FindRoute(OutputNIC, "", dst)`，但路由表没有 LAN 网段（设计 §8.4 明确不配），路由表+本地路由都失配 → 回程被丢弃。
 
 **修复**：forwardUnicastPacket 在 `pkt.OutputNICName != ""` 时改调 `stack.FindRouteViaNIC(nicID, remoteAddr)`：跳过 RouteSelector、跳过路由表，直接构造经该 NIC 的直连路由（gateway 为空，与 FindRoute 早退分支同构）。这使 conntrack 辅助路由真正闭环：去程记录 OriginalInputNIC → 回程 DNAT 时恢复输出 NIC → 直连路由出栈。
+
+### 6.10 补丁 #7：本地 socket 流量跳过 InputInterface 匹配（新增，对齐 Linux 语义）
+
+**问题**：本地 socket → 本地服务的流量（典型：`MeshDial` 通过 `Netstack.ResolveDomain` 创建 UDP endpoint 解析域名，dst=100.0.0.3=GIP）在 gVisor 内部被路由到 NIC 1（dst 所在 NIC），进 `deliverPacketLocally` → `CheckInput`。此时 `inNICName = e.nic.Name() = "tun"`，**命中** Input 链的 `InputInterface=="tun"` SNAT 规则，src 被改写成 VIP。
+
+同时，本地 socket 流量**跳过 Prerouting**（`handleLocalPacket` 设计如此），所以**不建立 conntrack entry**。响应包走到 Prerouting 时 DNAT 无 entry 可查，dst 仍是 VIP（未绑地址），被丢弃或错误转发。
+
+实证（QG `/tmp/phaethon-snat-debug.log`）：458 条 `src=100.0.0.1 dst=100.0.0.3 snatDone=true`（请求被 SNAT 改写），`/tmp/phaethon-prerouting-debug.log` 中 0 条 src=100.0.0.1（响应被丢前无 conntrack entry）。
+
+**Linux 语义对照**：
+- Linux：本地 socket 发到本机的包**不进 INPUT 链**，只过 OUTPUT/POSTROUTING。`-i tun` 不会命中。
+- gVisor：本地 socket 流量走 `handleLocalPacket → handleValidatedPacket → deliverPacketLocally → CheckInput`，inNICName 被错误地设为 dst 所在 NIC 名（"tun"），行为与 Linux 不一致。
+
+**修复**：让 `handleLocalPacket` 把空 inNICName 传给 `handleValidatedPacket`，这样 `CheckInput` 中的 `InputInterface=="tun"` filter 不会命中，Input 链 SNAT 不再误伤本地 socket 流量。
+
+**文件**：`pkg/tcpip/network/ipv4/ipv4.go`
+**函数**：`handleLocalPacket`（行 983-1000）
+
+**改动**：
+```go
+func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum bool) {
+    ...
+    e.handleValidatedPacket(h, pkt, "" /* inNICName */)  // 之前是 e.nic.Name()
+}
+```
+
+**效果**：
+- ✅ 本地 socket → 本地服务：Input 链 SNAT 不命中，conntrack 不需要介入，response 正常 loopback 投递
+- ✅ 外部 NIC 接收 → 本地服务：仍然走 `HandlePacket` → `handleValidatedPacket(h, pkt, e.nic.Name())`（行 977），inNICName 是真实接收 NIC，Input 链 SNAT 正常命中（仅当接收 NIC 是 "tun" 时）
+- ✅ 旁路网关去程 SNAT 路径（NIC 1 接收 → 转发）不受影响（Postrouting 链独立工作）
+
+**心智模型统一**：改完后，gVisor iptables 规则与 Linux iptables 规则一一对应：
+- Linux `-i tun -j SNAT` ⇔ gVisor `InputInterface=="tun"` 仅匹配真实从 NIC 1 接收的包
+- 本地 socket 流量走 OUTPUT/POSTROUTING（gVisor 同理），不受 INPUT 链影响
 
 ---
 

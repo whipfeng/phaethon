@@ -7,78 +7,140 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// RouteSelectorConfig holds configuration for the RouteSelector.
-type RouteSelectorConfig struct {
-	// MeshNetwork is the overall mesh network (e.g., 100.0.0.0/8).
-	// Destinations inside it are left to the route table (Link NIC routes).
-	MeshSubnet *net.IPNet
-
-	// Local node's VIP (subnet + 1)
-	LocalVIP tcpip.Address
-
-	// Local node's EIP (subnet + 4). Tunnel identity only; never local-delivered.
-	LocalEIP tcpip.Address
-
-	// Local node's GIP (subnet + 3, DNS/admin listen address)
-	LocalGIP tcpip.Address
-
-	// IsFakeIP checks if an IP is a fakeIP (DNS-mapped virtual IP)
-	IsFakeIP func(ip net.IP) bool
-
-	// SelectEgressNode selects the egress node for a given destination.
-	// Returns the egress node's EIP (tunnel terminator) for IPIP outer dst.
-	SelectEgressNode func(dst net.IP) (tcpip.Address, bool)
+// SelectRouteResult is the decision returned by RouteSelectorConfig.SelectRoute.
+// It is consulted from the RouteSelector for branches 2 (mesh subnet, no IPIP)
+// and 3 (non-mesh advertised route, IPIP encapsulated).
+//
+// NeedIPIP distinguishes the two branches:
+//   - false → branch 2 (mesh target). Cacheable=false in the resulting
+//     RouteSelector decision because topology changes can shift the next-hop
+//     Link NIC (Dijkstra recompute).
+//   - true  → branch 3 (advertised non-mesh). Cacheable=true because the
+//     egress node selection is static per prefix.
+type SelectRouteResult struct {
+	LinkNIC   tcpip.NICID
+	EgressEIP net.IP // only meaningful when NeedIPIP=true
+	NeedIPIP  bool
 }
 
-// NewRouteSelector creates a RouteSelector function with the given configuration.
-// Decision order per design §2.3. The selector only fires for the pure IP
-// forwarding path (design §6.8): FindRoute(0, "", dst).
+// SelectRouteFunc decides how to route a non-local destination.
+//
+// Returns ok=true with a non-zero LinkNIC for both branches 2 (mesh) and
+// 3 (non-mesh advertised). ok=false means "no opinion" — RouteSelector then
+// falls through to branch 4 (default NIC 1 fallback).
+type SelectRouteFunc func(dst net.IP) (SelectRouteResult, bool)
+
+// RouteSelectorConfig holds the configuration for NewRouteSelector.
+//
+// The selector is consulted from two places (design §2.3 语义双轨):
+//   - FindRoute (stack-socket outbound Connect). The decision MUST carry an
+//     EgressNIC (or NeedIPIP) — otherwise fork patch #3 line 1674 falls through
+//     and the SYN gets no route.
+//   - handleValidatedPacket (inbound, patch #2b). The LocalDelivery flag
+//     tells the IP layer to skip forwarding and AcquireAssignedAddress the
+//     destination on the receiving NIC.
+//
+// Configure the callback to return SelectRouteResult with:
+//
+//	LinkNIC != 0  → route built via that NIC (direct for branch 2, IPIP for branch 3)
+//	NeedIPIP=true → encapsulate inner packet in IPIP outer dst=EgressEIP
+type RouteSelectorConfig struct {
+	// LocalSubnet is the local node's mesh subnet (e.g., 100.1.0.0/16).
+	// All addresses inside it (fakeIP/VIP/GIP/hostIP/EIP) match branch 1.
+	LocalSubnet *net.IPNet
+
+	// LocalVIP = subnet + 1. Optional defensive match (LocalSubnet subsumes it).
+	LocalVIP tcpip.Address
+	// LocalGIP = subnet + 3 (DNS/admin listen). Optional defensive match.
+	LocalGIP tcpip.Address
+
+	// IsFakeIP checks if an IP is a fakeIP allocated from the local pool
+	// (excludes reserved infrastructure addresses). Defensive match —
+	// LocalSubnet.Contains already covers the alloc range.
+	IsFakeIP func(ip net.IP) bool
+
+	// SelectRoute picks the egress path for non-local destinations
+	// (branches 2 + 3). It is the caller's job to encapsulate topology
+	// selection (Dijkstra next-hop, advertised-route lookup) into this
+	// callback.
+	SelectRoute SelectRouteFunc
+}
+
+// NewRouteSelector creates a RouteSelector per design §2.3 (4 branches).
+//
+// Branch resolution:
+//
+//	1. Local mesh subnet     → EgressNIC=1, LocalDelivery=true   (TUN loopback)
+//	2. Mesh subnet           → SelectRoute(),                    Link NIC direct
+//	3. Non-mesh advertised   → SelectRoute(),                    Link NIC + IPIP
+//	4. Default fallback      → EgressNIC=1                       (TUN→OS)
+//
+// LocalDelivery and EgressNIC carry independent meanings (design §2.3):
+//   - LocalDelivery gates handleValidatedPacket's local-delivery short-circuit
+//     (patch #2b). Affects only inbound.
+//   - EgressNIC is what fork patch #3 uses in FindRoute to construct a route.
+//     Affects only outbound stack-socket Connect().
 func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 	return func(dst tcpip.Address) stack.RouteDecision {
 		dstIP := net.IP(dst.AsSlice())
 
-		// 1. fakeIP / local GIP / local VIP → local delivery
-		//    (GIP = admin/DNS listen; VIP = local service address;
-		//     conntrack reply traffic is already DNAT-rewritten in Prerouting
-		//     and never reaches the selector)
-		if cfg.IsFakeIP != nil && cfg.IsFakeIP(dstIP) {
+		// Branch 1: local mesh subnet (covers VIP/GIP/hostIP/fakeIP/EIP).
+		// Outbound: EgressNIC=1 makes FindRoute build a TUN route; the SYN
+		// loops through writeLoop → TUN → OS → NIC 1 again → handleValidatedPacket
+		// (LocalDelivery=true) → Forwarder/admin listener.
+		// Inbound: handleValidatedPacket sees LocalDelivery=true; if the
+		// receiving NIC has a matching AddressEndpoint (GIP, VIP via AddProtocolAddress,
+		// or fakeIP via promiscuous-mode temp endpoint), the packet is delivered
+		// locally instead of being forwarded.
+		if cfg.LocalSubnet != nil && cfg.LocalSubnet.Contains(dstIP) {
 			return stack.RouteDecision{
+				EgressNIC:     1,
 				LocalDelivery: true,
 				Cacheable:     true,
 			}
 		}
+		// Defensive exact-match fallbacks (LocalSubnet nil case).
 		if cfg.LocalGIP != (tcpip.Address{}) && dst == cfg.LocalGIP {
-			return stack.RouteDecision{LocalDelivery: true, Cacheable: true}
+			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
 		}
 		if cfg.LocalVIP != (tcpip.Address{}) && dst == cfg.LocalVIP {
-			return stack.RouteDecision{LocalDelivery: true, Cacheable: true}
+			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
+		}
+		if cfg.IsFakeIP != nil && cfg.IsFakeIP(dstIP) {
+			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
 		}
 
-		// 2. Mesh network → let route table handle it (Link NIC routes)
-		if cfg.MeshSubnet != nil && cfg.MeshSubnet.Contains(dstIP) {
-			return stack.RouteDecision{}
-		}
-
-		// 3. Non-mesh destination → IPIP encapsulation (outer dst = egress
-		//    node EIP, the tunnel terminator identity the peer's frame-level
-		//    decapsulator matches on — design §2.4/§4.5)
-		if cfg.SelectEgressNode != nil {
-			egressEIP, found := cfg.SelectEgressNode(dstIP)
-			if found {
+		// Branches 2 & 3: SelectRoute covers both mesh and non-mesh advertised.
+		if cfg.SelectRoute != nil {
+			if r, ok := cfg.SelectRoute(dstIP); ok && r.LinkNIC != 0 {
+				var egressEIP tcpip.Address
+				if r.NeedIPIP && r.EgressEIP != nil {
+					egressEIP = tcpip.AddrFrom4Slice(r.EgressEIP)
+				}
 				return stack.RouteDecision{
-					NeedIPIP:  true,
+					EgressNIC: r.LinkNIC,
+					NeedIPIP:  r.NeedIPIP,
 					EgressEIP: egressEIP,
-					Cacheable: true, // Static routing based on subnet
+					Cacheable: r.NeedIPIP, // IPIP egress is static per prefix; mesh is dynamic
 				}
 			}
 		}
 
-		// 4. No egress node found → drop (return empty decision, will fail routing)
-		return stack.RouteDecision{}
+		// Branch 4: default fallback → NIC 1 (TUN→OS network stack).
+		// Outbound stack-socket Connect gets a real route via NIC 1 so the
+		// packet leaves the stack instead of falling through to
+		// ErrHostUnreachable. Inbound non-mesh non-advertised packets get
+		// forwarded via writeLoop → TUN → OS routing decision.
+		return stack.RouteDecision{
+			EgressNIC: 1,
+			Cacheable: true,
+		}
 	}
 }
 
 // CalculateVIP calculates the VIP for a given subnet (subnet + 1).
+// (CalculateEIP lives in ipip.go; reserved addresses spec:
+//  .0 network, .1 VIP, .2 hostIP, .3 GIP, .4 EIP.)
 func CalculateVIP(subnet *net.IPNet) net.IP {
 	if subnet == nil {
 		return nil

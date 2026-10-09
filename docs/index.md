@@ -52,7 +52,7 @@
 | [p2p_v6_and_mesh_package_distribution.md](plans/p2p_v6_and_mesh_package_distribution.md) | P2P 协议 v6 统一 hello/gossip 与 Mesh 包分发 | v2.1.2 | ACTIVE |
 | [p2p_control_frame_congestion.md](plans/p2p_control_frame_congestion.md) | P2P 控制帧拥塞韧性与传输缓冲治理 | v0.3.0 | DRAFT |
 | [p2p_mesh_data_frame_loss_design.md](plans/p2p_mesh_data_frame_loss_design.md) | P2P 会话写入串行化与生命周期修复 | v0.1.0 | ACTIVE |
-| [mesh_forwarding_trace_design.md](plans/mesh_forwarding_trace_design.md) | Mesh 跨层转发关联诊断 | v0.1.0 | ACTIVE |
+| [mesh_forwarding_trace_design.md](plans/mesh_forwarding_trace_design.md) | Mesh 跨层转发关联诊断 | v0.1.1 | ACTIVE |
 | [htunnel_transport_optimization.md](plans/htunnel_transport_optimization.md) | h_tunnel 传输优化：共享 Client + RTT 节奏合帧批量 | v0.1.0 | DRAFT |
 | [htunnel_p2p_direct_mode.md](plans/htunnel_p2p_direct_mode.md) | h_tunnel P2P 直发模式：FrameTransport 多态 + MESH 通道 | v0.1.0 | DRAFT |
 | [p2p_aware_routing.md](plans/p2p_aware_routing.md) | 规则感知 P2P 路由：规则匹配后优先 P2P 直连 + 连接缓存表 | v0.1.0 | DRAFT |
@@ -93,6 +93,7 @@
 | [admin_mobile_and_mesh_ux.md](inputs/admin_mobile_and_mesh_ux.md) | Admin 控制台移动端适配与 Mesh 页面交互改进 |
 | [p2p_mesh_data_frame_loss.md](inputs/p2p_mesh_data_frame_loss.md) | P2P Mesh 数据帧间歇性丢失故障记录 |
 | [20261009_mesh_forwarding_trace.md](inputs/20261009_mesh_forwarding_trace.md) | QG → JF Mesh 转发关联诊断需求 |
+| [20261010_mesh_forwarding_trace_vm_result.md](inputs/20261010_mesh_forwarding_trace_vm_result.md) | VM 转发追踪验证记录 |
 
 ### runbooks/ (运维经验)
 

@@ -59,3 +59,16 @@ func TestParseForwardingTraceDNSAndNonTarget(t *testing.T) {
 		t.Fatal("non-DNS UDP packet should not be traced")
 	}
 }
+
+func TestForwardingTraceToggle(t *testing.T) {
+	SetForwardingTrace(false)
+	t.Cleanup(func() { SetForwardingTrace(false) })
+	if ForwardingTraceEnabled() {
+		t.Fatal("forwarding trace should default to disabled")
+	}
+
+	SetForwardingTrace(true)
+	if !ForwardingTraceEnabled() {
+		t.Fatal("forwarding trace should be enabled")
+	}
+}

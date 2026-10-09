@@ -1135,17 +1135,6 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
-	if srcIP, dstIP, dstPort, ok := tcpSYNInfo(frame); ok {
-		localStack := false
-		if netstack := m.tun.GetNetstack(); netstack != nil {
-			localStack = netstack.Stack().RouteSelectorLocalStack(tcpip.AddrFrom4Slice(dstIP))
-		}
-		util.LogInfo("[MESH-TRACE] SYN ingress peer=%s src=%s dst=%s:%d localStack=%t", fromNodeID, srcIP, dstIP, dstPort, localStack)
-	}
-	if srcIP, dstIP, dstPort, ok := dnsPacketInfo(frame); ok {
-		util.LogInfo("[MESH-TRACE] DNS ingress peer=%s src=%s dst=%s:%d", fromNodeID, srcIP, dstIP, dstPort)
-	}
-
 	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.

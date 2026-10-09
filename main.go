@@ -55,20 +55,20 @@ var (
 var activeRuleConf atomic.Pointer[config.RuleConfiguration]
 
 type activeResources struct {
-	ruleConf          *config.RuleConfiguration
-	listeners         []net.Listener
-	reverseServers    []*server.ReverseServer
-	mappingListeners  map[string]net.Listener       // mapping name -> listener
-	mappingReverse    map[string]*server.ReverseServer // mapping name -> reverse server
-	healthStop        chan struct{}
-	subscriptionStop  chan struct{}
-	reverseClientStop chan struct{}                    // global stop for all reverse clients
-	reverseClientStops map[string]chan struct{}        // per-config stop channels
-	reverseClientWG   sync.WaitGroup
-	tunRes            *TUNResource
-	meshMgr           *mesh.MeshManager
-	adminServer       *admin.AdminServer
-	once              sync.Once
+	ruleConf           *config.RuleConfiguration
+	listeners          []net.Listener
+	reverseServers     []*server.ReverseServer
+	mappingListeners   map[string]net.Listener          // mapping name -> listener
+	mappingReverse     map[string]*server.ReverseServer // mapping name -> reverse server
+	healthStop         chan struct{}
+	subscriptionStop   chan struct{}
+	reverseClientStop  chan struct{}            // global stop for all reverse clients
+	reverseClientStops map[string]chan struct{} // per-config stop channels
+	reverseClientWG    sync.WaitGroup
+	tunRes             *TUNResource
+	meshMgr            *mesh.MeshManager
+	adminServer        *admin.AdminServer
+	once               sync.Once
 }
 
 func (r *activeResources) closeAll() {
@@ -210,6 +210,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// and receives the new config reference.
 	var prevAdmin *admin.AdminServer
 	if prev != nil {
+		if p2p.GlobalP2PManager != nil {
+			p2p.GlobalP2PManager.Stop()
+		}
 		prevAdmin = prev.adminServer
 		prev.adminServer = nil // prevent Close() from shutting it down
 		prev.closeAll()
@@ -252,7 +255,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		ruleConf.Mesh = &config.MeshConfig{}
 		util.Logger.Printf("Mesh: no config found, using defaults")
 	}
-	
+
 	var meshMgr *mesh.MeshManager
 	{
 		// Set the overall mesh network range (e.g., 100.0.0.0/8)
@@ -345,12 +348,13 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		}
 		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
 
-		util.Logger.Printf("[MESH-DEBUG] Before MeshManager creation: nodeID=%s subnet=%s vip=%s", 
+		util.Logger.Printf("[MESH-DEBUG] Before MeshManager creation: nodeID=%s subnet=%s vip=%s",
 			ruleConf.Mesh.NodeID, meshSubnetStr, vip)
 
 		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 		advertise := ruleConf.Mesh.GetAdvertise()
 		meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
+		mesh.SetForwardingTrace(ruleConf.Mesh.ForwardingTrace)
 		meshMgr.SetDataDir(dataDir)
 		meshMgr.SetTCPKeepalive(ruleConf.Mesh.TCPKeepalive)
 
@@ -358,7 +362,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		staticRoutes := ruleConf.Mesh.StaticRoutes
 		staticDomainSuffixes := ruleConf.Mesh.GetStaticDomainSuffixes()
 		meshMgr.SetStaticRoutes(staticRoutes, staticDomainSuffixes)
-		
+
 		mesh.GlobalMeshManager = meshMgr
 		p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
@@ -759,11 +763,11 @@ func main() {
 
 	// Initialize database
 	dbPath := filepath.Join(workDir, "phaethon.db")
-	
+
 	// Check if this is first run (database doesn't exist)
 	_, err = os.Stat(dbPath)
 	isFirstRun := os.IsNotExist(err)
-	
+
 	// Open database
 	if err := db.Init(dbPath); err != nil {
 		util.Logger.Printf("ERROR: 初始化数据库失败: %v", err)
@@ -771,7 +775,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	
+
 	if isFirstRun {
 		// Interactive initialization is only for truly fresh deployments.
 		// An existing config.yaml means an upgrade from the YAML era: skip
@@ -976,11 +980,11 @@ type childProtocolMsg struct {
 
 // childProcess wraps an os.Process with protocol state from the child's stdout.
 type childProcess struct {
-	proc     *os.Process
-	stdout   io.ReadCloser
-	ready    atomic.Bool
-	lastHB   atomic.Int64 // unix nano of last heartbeat
-	done     chan struct{} // closed when stdout reader exits
+	proc   *os.Process
+	stdout io.ReadCloser
+	ready  atomic.Bool
+	lastHB atomic.Int64  // unix nano of last heartbeat
+	done   chan struct{} // closed when stdout reader exits
 }
 
 // childReadyTimeout is how long the watchdog waits for the child to signal
@@ -2169,7 +2173,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			}
 		}
 		return nil
-		}
+	}
 
 	// Mesh package distribution setup
 	if resources.meshMgr != nil && resources.tunRes != nil && resources.tunRes.engine != nil {

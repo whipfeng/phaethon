@@ -79,11 +79,11 @@ type PeerSender interface {
 	Send(data []byte) error
 	SendGossip(data []byte)
 	GetNodeID() string
-	GetProxyName() string       // proxy name (link identifier)
-	GetLinkID() string          // negotiated link ID (seq1-seq2 sorted, internal use)
-	GetLocalSeq() uint16        // local sequence number (for gossip advertisement)
-	GetRemoteSeq() uint16       // remote sequence number (for gossip advertisement)
-	GetFriendlyName() string    // friendly name (proxy name, for display only)
+	GetProxyName() string    // proxy name (link identifier)
+	GetLinkID() string       // negotiated link ID (seq1-seq2 sorted, internal use)
+	GetLocalSeq() uint16     // local sequence number (for gossip advertisement)
+	GetRemoteSeq() uint16    // remote sequence number (for gossip advertisement)
+	GetFriendlyName() string // friendly name (proxy name, for display only)
 }
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
@@ -95,9 +95,11 @@ type P2PTransport interface {
 	SetMeshInfo(nodeID, vip string)
 	ResendHelloToAll()
 	StopPeerByNodeID(nodeID string)
+	StopPeerByProxyName(proxyName string)
 	StopPeerByLinkID(linkID string)
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -248,11 +250,11 @@ type MeshManager struct {
 	fakeIPPool  *FakeIPPool
 
 	// IPIP tunnel for static policy routing
-	ipipTunnel         *IPIPTunnel
-	
+	ipipTunnel *IPIPTunnel
+
 	// Route change callback for netstack integration
-	onRouteChange func()
-	staticRoutes       []config.MeshStaticRoute
+	onRouteChange        func()
+	staticRoutes         []config.MeshStaticRoute
 	staticDomainSuffixes []config.MeshStaticDomainSuffix
 
 	// Link quality tracking
@@ -285,9 +287,9 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute          // sorted by prefix length (longest first)
-	domainTrie *NodeTrie            // unified domain routes (static + dynamic merged)
-	nodeMap    map[string]*nodeInfo // nodeID → info
+	routes     []MeshRoute               // sorted by prefix length (longest first)
+	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
+	nodeMap    map[string]*nodeInfo      // nodeID → info
 	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
 }
 
@@ -838,19 +840,19 @@ func (m *MeshManager) Stop() {
 //   - subnet == nil && needsFail == false: local domain or no match, use local Fake-IP pool
 func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 	rt := m.getRouteTable()
-	
+
 	// Lookup in unified domain trie (contains both static and dynamic entries)
 	entries, matchLen := rt.domainTrie.Lookup(domain)
 	if matchLen == 0 || len(entries) == 0 {
 		// No match → use local pool
 		return nil, false
 	}
-	
+
 	util.LogInfo("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
 	for i, e := range entries {
 		util.LogInfo("[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
 	}
-	
+
 	// Select target node (static priority + hash stability)
 	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
 	util.LogInfo("[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
@@ -860,7 +862,7 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		util.LogDebug("[MESH] ResolveDomainSubnet(%s): local domain, use local pool", domain)
 		return nil, false
 	}
-	
+
 	// Look up node in nodeMap (should always exist if domain trie is consistent)
 	nodeInfo := rt.nodeMap[selectedNodeID]
 	if nodeInfo == nil || nodeInfo.subnet == nil {
@@ -868,13 +870,13 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not in nodeMap, inconsistent state", domain, selectedNodeID)
 		return nil, false
 	}
-	
+
 	// Local node (sender == nil) → use local pool
 	if nodeInfo.sender == nil {
 		util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, use local pool", domain, selectedNodeID)
 		return nil, false
 	}
-	
+
 	util.LogDebug("[MESH] ResolveDomainSubnet(%s): forward to node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
 	return nodeInfo.subnet, false
 }
@@ -1009,8 +1011,10 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		peerWithHop := sameHopPeers[peerIdx]
 		peer := peerWithHop.Peer
 
+		TraceForwarding("peer_selected", packet, "target=%s peer=%s proxy=%s linkID=%s hop=%d candidate=%d/%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 		sendErr = peer.Send(packet)
 		if sendErr == nil {
+			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s linkID=%s", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID())
 			if i > 0 {
 				util.LogInfo("[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
 					targetNodeID, peer.GetNodeID(), i+1)
@@ -1020,12 +1024,14 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 			return nil
 		}
 
+		TraceForwarding("peer_send_error", packet, "target=%s peer=%s proxy=%s linkID=%s err=%v", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID(), sendErr)
+
 		// Handle peer stopped
 		if strings.Contains(sendErr.Error(), "peer stopped") {
-			util.LogWarn("[MESH] send to node %s failed: peer %s stopped, triggering removal",
+			util.LogWarn("[MESH] send to node %s failed: peer %s stopped, removing its selected link",
 				targetNodeID, peer.GetNodeID())
 			if m.p2p != nil {
-				m.p2p.StopPeerByNodeID(peer.GetNodeID())
+				m.p2p.StopPeerByProxyName(peer.GetProxyName())
 			}
 			continue
 		}
@@ -1147,8 +1153,12 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 		util.LogWarn("[MESH] no tun interface, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
 		return
 	}
+	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
 	if err := m.tun.InjectFromNode(fromNodeID, frame); err != nil {
+		TraceForwarding("mesh_inject_error", frame, "fromNode=%s err=%v", fromNodeID, err)
 		util.LogWarn("[MESH] inject frame from %s (dst=%s) via Link NIC failed: %v", fromNodeID, dstIP, err)
+	} else {
+		TraceForwarding("mesh_inject_ok", frame, "fromNode=%s", fromNodeID)
 	}
 }
 
@@ -1306,7 +1316,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		// Only add edge if peer has an active Sender (indicating active P2P connection)
 		if p.Sender != nil && peerID != "" {
 			key := edgeKey(m.nodeID, peerID)
-			
+
 			// Get link info
 			localSeq := p.Sender.GetLocalSeq()
 			remoteSeq := p.Sender.GetRemoteSeq()
@@ -1314,7 +1324,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			if friendlyName == "" {
 				friendlyName = p.Sender.GetProxyName() // fallback
 			}
-			
+
 			// Get link quality from qualityTracker
 			var srtt, lossRate, jitter, cost float64
 			if m.qualityTracker != nil {
@@ -1328,7 +1338,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			} else {
 				cost = 1000
 			}
-			
+
 			link := FullTopologyLink{
 				LocalSeq:     localSeq,
 				RemoteSeq:    remoteSeq,
@@ -1337,7 +1347,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 				LossRate:     lossRate,
 				Cost:         cost,
 			}
-			
+
 			if edge, exists := edgeSet[key]; exists {
 				// Add link to existing edge
 				edge.Links = append(edge.Links, link)
@@ -1358,7 +1368,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 		for _, cs := range p.ClaimedSubnets {
 			for _, neighbor := range cs.Neighbors {
 				key := edgeKey(cs.NodeID, neighbor.NodeID)
-				
+
 				// Convert GossipLink to FullTopologyLink
 				var links []FullTopologyLink
 				for _, gossipLink := range neighbor.Links {
@@ -1370,7 +1380,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 					} else {
 						cost = 1000 // default cost for no data
 					}
-					
+
 					links = append(links, FullTopologyLink{
 						LocalSeq:     gossipLink.LocalSeq,
 						RemoteSeq:    gossipLink.RemoteSeq,
@@ -1380,7 +1390,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 						Cost:         cost,
 					})
 				}
-				
+
 				if edge, exists := edgeSet[key]; exists {
 					// Edge already exists (from local peers), add learned links
 					// Deduplicate by seq pair
@@ -1497,11 +1507,11 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 			continue
 		}
 		seen[nodeID] = true
-		
+
 		// Get RTT stats from the first link to this peer
 		avgRTT, lossRate, jitter := m.GetPeerQuality(nodeID)
 		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStats(nodeID)
-		
+
 		result = append(result, MeshPeerInfo{
 			NodeID:      nodeID,
 			Direct:      true,
@@ -1677,13 +1687,13 @@ func (m *MeshManager) recomputeRoutes() {
 		if err != nil {
 			continue
 		}
-		
+
 		// Build static entries
 		staticEntries := make([]RouteEntry, 0, len(staticRoute.NodeIDs))
 		for _, nodeID := range staticRoute.NodeIDs {
 			staticEntries = append(staticEntries, RouteEntry{NodeID: nodeID, Source: RouteSourceStatic})
 		}
-		
+
 		// Check if there's already a dynamic route with the same prefix
 		found := false
 		for i := range routes {
@@ -1694,7 +1704,7 @@ func (m *MeshManager) recomputeRoutes() {
 				break
 			}
 		}
-		
+
 		if !found {
 			// Add new route with static entries only
 			routes = append(routes, MeshRoute{
@@ -1714,11 +1724,11 @@ func (m *MeshManager) recomputeRoutes() {
 
 	// Build unified domain trie (static + dynamic merged)
 	domainTrie := NewNodeTrie()
-	
+
 	// Add own domain suffixes (from config) as static
 	ownSuffixSet := make(map[string]bool, len(domainSuffixes))
 	for _, s := range domainSuffixes {
-		domainTrie.Insert(s, m.nodeID, RouteSourceStatic)  // own suffixes point to self
+		domainTrie.Insert(s, m.nodeID, RouteSourceStatic) // own suffixes point to self
 		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
 
@@ -1804,7 +1814,7 @@ func (m *MeshManager) recomputeRoutes() {
 	for nid := range bestNodes {
 		domainTrie.Insert(nid+"."+MeshDomainSuffix, nid, RouteSourceStatic)
 	}
-	
+
 	// Convert bestNodes to nodeMap for routeTable
 	nodeMap := make(map[string]*nodeInfo)
 	for nid, claim := range bestNodes {
@@ -1827,12 +1837,12 @@ func (m *MeshManager) recomputeRoutes() {
 		bestPaths:  bestPaths,
 	})
 	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
-	
+
 	// Notify netstack of route change (for tunnel NIC updates)
 	if m.onRouteChange != nil {
 		m.onRouteChange()
 	}
-	
+
 	for _, r := range routes {
 		var nodeIDs []string
 		for _, e := range r.Entries {
@@ -2107,13 +2117,13 @@ func (m *MeshManager) broadcastGossip() {
 			localSeq := peer.Sender.GetLocalSeq()
 			remoteSeq := peer.Sender.GetRemoteSeq()
 			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
-			
+
 			link := GossipLink{
 				LocalSeq:     localSeq,
 				RemoteSeq:    remoteSeq,
 				FriendlyName: friendlyName,
 			}
-			
+
 			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
@@ -2310,8 +2320,7 @@ func (m *MeshManager) qualityLoop() {
 	}
 }
 
-// checkPeerConnectivity checks for peers with high loss rate or stale ACK stats.
-// If a peer has 100% loss rate or no ACK stats for 60 seconds, it is considered dead.
+// checkPeerConnectivity disconnects helloed links whose ACK updates have stalled.
 func (m *MeshManager) checkPeerConnectivity() {
 	if m.p2p == nil {
 		return
@@ -2325,19 +2334,19 @@ func (m *MeshManager) checkPeerConnectivity() {
 
 		nodeID := peer.NodeID()
 		localSeq := peer.Sender.GetLocalSeq()
-		linkID := peer.Sender.GetLinkID() // for P2P layer calls
+		linkID := peer.Sender.GetLinkID()
 		if linkID == "" {
-			linkID = peer.Sender.GetProxyName() // fallback for old protocol
+			continue
 		}
 		quality := m.qualityTracker.Get(nodeID, localSeq)
 
-		// Check if ACK stats are stale (no updates for 60s)
+		// Disconnect only after ACK updates stall.
 		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
-			// Check if we ever received ACK stats
-			srtt, _, _, lossRate, _ := m.p2p.GetLinkQualityStatsByProxy(linkID)
-			if srtt == 0 && lossRate == 0 {
-				// No ACK stats at all - peer might be dead
-				util.LogWarn("[MESH] peer %s (link %s) has no ACK stats for 60s, disconnecting", nodeID, linkID)
+			// A sampled link that stops advancing is stale.
+			_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByLinkID(linkID)
+			if sampleCount > 0 {
+				// The control plane stopped progressing for this link.
+				util.LogWarn("[MESH] peer %s (link %s) ACK updates stalled for 60s, disconnecting", nodeID, linkID)
 				m.p2p.StopPeerByLinkID(linkID)
 				quality.Reset()
 			}
@@ -2535,13 +2544,13 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			localSeq := peer.Sender.GetLocalSeq()
 			remoteSeq := peer.Sender.GetRemoteSeq()
 			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
-			
+
 			link := GossipLink{
 				LocalSeq:     localSeq,
 				RemoteSeq:    remoteSeq,
 				FriendlyName: friendlyName,
 			}
-			
+
 			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
@@ -2606,8 +2615,8 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 
 	// Build global domain suffix map (referencing owner node)
 	type dsEntry struct {
-		ds   GossipDomainSuffix
-		hop  int // 0 = own entry
+		ds  GossipDomainSuffix
+		hop int // 0 = own entry
 	}
 	bestDS := make(map[string]dsEntry)
 	for _, s := range domainSuffixes {
@@ -2822,7 +2831,7 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 					}
 				}
 				newCost := nodes[minNode].cost + bestCost
-				
+
 				// Determine next hop
 				var nextHop string
 				var localSeq uint16
@@ -2830,10 +2839,10 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 					nextHop = toNode // direct neighbor
 					localSeq = bestLocalSeq
 				} else {
-					nextHop = nodes[minNode].nextHop // inherit next hop
+					nextHop = nodes[minNode].nextHop   // inherit next hop
 					localSeq = nodes[minNode].localSeq // inherit localSeq
 				}
-				
+
 				// Update if better cost, or same cost with lexicographically smaller nextHop (deterministic tie-breaking)
 				if newCost < nodes[toNode].cost || (newCost == nodes[toNode].cost && nextHop < nodes[toNode].nextHop) {
 					nodes[toNode].cost = newCost

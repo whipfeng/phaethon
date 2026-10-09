@@ -28,7 +28,7 @@
 | [protocol_spec.md](specs/protocol_spec.md) | 入站/出站协议支持矩阵与实现约定 | v0.1.0 | DRAFT |
 | [reverse_spec.md](specs/reverse_spec.md) | 反向连接、Registry 与统一帧协议规格 | v0.1.0 | DRAFT |
 | [tun_spec.md](specs/tun_spec.md) | TUN 模式架构、路由与 DNS 规则 | v0.3.0 | DRAFT |
-| [config_spec.md](specs/config_spec.md) | 配置格式、加载顺序与环境变量规则 | 1.0.0 | ACTIVE |
+| [config_spec.md](specs/config_spec.md) | 配置格式、加载顺序、环境变量与 Mesh 诊断开关 | 1.2.0 | ACTIVE |
 
 ### plans/ (架构设计)
 
@@ -51,6 +51,8 @@
 | [admin_mobile_mesh_design.md](plans/admin_mobile_mesh_design.md) | Admin 移动端适配与 Mesh 页面交互重构设计 | v0.1.0 | DRAFT |
 | [p2p_v6_and_mesh_package_distribution.md](plans/p2p_v6_and_mesh_package_distribution.md) | P2P 协议 v6 统一 hello/gossip 与 Mesh 包分发 | v2.1.2 | ACTIVE |
 | [p2p_control_frame_congestion.md](plans/p2p_control_frame_congestion.md) | P2P 控制帧拥塞韧性与传输缓冲治理 | v0.3.0 | DRAFT |
+| [p2p_mesh_data_frame_loss_design.md](plans/p2p_mesh_data_frame_loss_design.md) | P2P 会话写入串行化与生命周期修复 | v0.1.0 | ACTIVE |
+| [mesh_forwarding_trace_design.md](plans/mesh_forwarding_trace_design.md) | Mesh 跨层转发关联诊断 | v0.1.0 | ACTIVE |
 | [htunnel_transport_optimization.md](plans/htunnel_transport_optimization.md) | h_tunnel 传输优化：共享 Client + RTT 节奏合帧批量 | v0.1.0 | DRAFT |
 | [htunnel_p2p_direct_mode.md](plans/htunnel_p2p_direct_mode.md) | h_tunnel P2P 直发模式：FrameTransport 多态 + MESH 通道 | v0.1.0 | DRAFT |
 | [p2p_aware_routing.md](plans/p2p_aware_routing.md) | 规则感知 P2P 路由：规则匹配后优先 P2P 直连 + 连接缓存表 | v0.1.0 | DRAFT |
@@ -78,6 +80,8 @@
 | [tun-route-fakeip-fixes.md](tasks/tun-route-fakeip-fixes.md) | TUN 路由与 Fake-IP 修复 | master |
 | [tun-watchdog-http-probe-tasks.md](tasks/tun-watchdog-http-probe-tasks.md) | TUN watchdog HTTP 连通性探测改造 | master |
 | [gvisor_route_selector_tasks.md](tasks/gvisor_route_selector_tasks.md) | gVisor RouteSelector + Link NICs 实现任务 | gvisor-route-selector-impl |
+| [p2p_mesh_data_frame_loss_tasks.md](tasks/p2p_mesh_data_frame_loss_tasks.md) | P2P 会话写入与生命周期修复任务 | master |
+| [mesh-forwarding-trace-tasks.md](tasks/mesh-forwarding-trace-tasks.md) | Mesh 跨层转发关联诊断任务 | master |
 
 ### inputs/ (原始需求与历史分析)
 
@@ -87,6 +91,8 @@
 | [reverse-udp-topology-correct.md](inputs/reverse-udp-topology-correct.md) | 反向 UDP 正确拓扑记录 |
 | [proxy_server_tun_routing_issue.md](inputs/proxy_server_tun_routing_issue.md) | 代理 Server 流量被 TUN 路由规则错误匹配问题 |
 | [admin_mobile_and_mesh_ux.md](inputs/admin_mobile_and_mesh_ux.md) | Admin 控制台移动端适配与 Mesh 页面交互改进 |
+| [p2p_mesh_data_frame_loss.md](inputs/p2p_mesh_data_frame_loss.md) | P2P Mesh 数据帧间歇性丢失故障记录 |
+| [20261009_mesh_forwarding_trace.md](inputs/20261009_mesh_forwarding_trace.md) | QG → JF Mesh 转发关联诊断需求 |
 
 ### runbooks/ (运维经验)
 

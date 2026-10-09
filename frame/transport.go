@@ -36,6 +36,7 @@ type streamTransport struct {
 	dataRecvCh chan streamRecvResult
 	closed     chan struct{}
 	closeOnce  sync.Once
+	writeMu    sync.Mutex
 }
 
 // NewStreamTransport wraps conn in a FrameTransport.
@@ -77,17 +78,16 @@ func (t *streamTransport) readLoop() {
 }
 
 func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	deadline := 30 * time.Second
 	if isControl {
 		deadline = 5 * time.Second
 	}
 	_ = t.conn.SetWriteDeadline(time.Now().Add(deadline))
-	if err := WriteFrame(t.conn, frameType, payload); err != nil {
-		_ = t.conn.SetWriteDeadline(time.Time{})
-		return err
-	}
-	_ = t.conn.SetWriteDeadline(time.Time{})
-	return nil
+	defer t.conn.SetWriteDeadline(time.Time{})
+	return WriteFrame(t.conn, frameType, payload)
 }
 
 func (t *streamTransport) Recv() (byte, []byte, error) {

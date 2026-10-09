@@ -208,6 +208,7 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 							if !ok || linkNIC.nicID == 0 {
 								continue
 							}
+							TraceForwardingRoute(dst, "branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
 							return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
 						}
 
@@ -226,12 +227,14 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						if targetEIP == nil {
 							continue
 						}
+						TraceForwardingRoute(dst, "branch=ipip prefix=%s target=%s nextHop=%s linkNIC=%d egressEIP=%s", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID, targetEIP)
 						return SelectRouteResult{
 							LinkNIC:   linkNIC.nicID,
 							EgressEIP: targetEIP,
 							NeedIPIP:  true,
 						}, true
 					}
+					TraceForwardingRoute(dst, "branch=none")
 					return SelectRouteResult{}, false
 				},
 			}
@@ -671,6 +674,7 @@ func (n *Netstack) InjectFromNode(nodeID string, data []byte) error {
 	}
 	linkNIC, ok := n.linkNICs[nodeID]
 	if !ok {
+		TraceForwarding("linknic_inject_error", data, "fromNode=%s err=no_link_nic", nodeID)
 		return fmt.Errorf("no Link NIC for node %s", nodeID)
 	}
 	if len(data) >= 20 {
@@ -679,6 +683,7 @@ func (n *Netstack) InjectFromNode(nodeID string, data []byte) error {
 		util.LogInfo("[NETSTACK-INJECT] InjectFromNode %s: %s -> %s proto=%d TTL=%d len=%d",
 			nodeID, srcIP, dstIP, data[9], data[8], len(data))
 	}
+	TraceForwarding("linknic_inject", data, "fromNode=%s linkNIC=%d", nodeID, linkNIC.nicID)
 	linkNIC.InjectInbound(data)
 	return nil
 }

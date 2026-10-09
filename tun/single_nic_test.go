@@ -18,8 +18,7 @@ import (
 )
 
 // TestSingleNICDesign verifies the single NIC design with promiscuous mode.
-// Key insight: socket-originated packets DO reach linkEP outbound (PacketOut flag).
-// writeLoop reads from linkEP and decides: VIP/hostIP → TUN, other → re-inject.
+// LocalStack traffic stays inside gVisor; packets that reach linkEP are TUN output.
 func TestSingleNICDesign(t *testing.T) {
 	const nicID = 1
 
@@ -32,10 +31,18 @@ func TestSingleNICDesign(t *testing.T) {
 		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol, tcp.NewProtocol},
 	})
 
-	linkEP := channel.New(512, 1500, "")
+	linkEP := channel.New(512, 1500, "tun")
 	if err := s.CreateNIC(nicID, linkEP); err != nil {
 		t.Fatalf("create NIC: %v", err)
 	}
+
+	s.SetRouteSelector(func(dst tcpip.Address) stack.RouteDecision {
+		return stack.RouteDecision{
+			EgressNIC:  nicID,
+			LocalStack: dst == dnsAddr,
+			Cacheable:  true,
+		}
+	})
 
 	ap := tcpip.AddressWithPrefix{Address: dnsAddr, PrefixLen: 32}
 	if err := s.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
@@ -82,19 +89,9 @@ func TestSingleNICDesign(t *testing.T) {
 
 			dstIP := net.IP(data[16:20])
 
-			if dstIP.Equal(hostIP.AsSlice()) || dstIP.Equal(vip.AsSlice()) {
-				tunWrites++
-				tunWriteDst = append(tunWriteDst, dstIP.String())
-				t.Logf("writeLoop: dst=%s → TUN (writes=%d)", dstIP, tunWrites)
-			} else {
-				reinjects++
-				t.Logf("writeLoop: dst=%s → re-inject (reinjects=%d)", dstIP, reinjects)
-				newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: buffer.MakeWithData(data),
-				})
-				linkEP.InjectInbound(ipv4.ProtocolNumber, newPkt)
-				newPkt.DecRef()
-			}
+			tunWrites++
+			tunWriteDst = append(tunWriteDst, dstIP.String())
+			t.Logf("writeLoop: dst=%s → TUN (writes=%d)", dstIP, tunWrites)
 		}
 	}()
 	defer func() {
@@ -245,6 +242,51 @@ func TestSingleNICDesign(t *testing.T) {
 			t.Errorf("FAIL: response to hostIP did NOT reach writeLoop TUN path")
 		} else {
 			t.Logf("PASS: response to hostIP correctly written to TUN (tunWrites=%d)", tunWrites)
+		}
+	})
+
+	// Test 4: conntrack restores an arbitrary client destination and records
+	// the original TUN NIC. That per-flow route must override Branch 4's
+	// destination-only LocalStack policy.
+	t.Run("Conntrack_return_uses_output_NIC", func(t *testing.T) {
+		prevTunWrites := tunWrites
+		clientAddr := tcpip.AddrFrom4([4]byte{192, 0, 2, 10})
+		udpHdr := make([]byte, header.UDPMinimumSize)
+		header.UDP(udpHdr).Encode(&header.UDPFields{
+			SrcPort: 443,
+			DstPort: 54321,
+			Length:  header.UDPMinimumSize,
+		})
+		ipBuf := make([]byte, header.IPv4MinimumSize+len(udpHdr))
+		copy(ipBuf[header.IPv4MinimumSize:], udpHdr)
+		ip := header.IPv4(ipBuf)
+		ip.Encode(&header.IPv4Fields{
+			TotalLength: uint16(len(ipBuf)),
+			TTL:         64,
+			Protocol:    uint8(udp.ProtocolNumber),
+			SrcAddr:     dnsAddr,
+			DstAddr:     clientAddr,
+		})
+		ip.SetChecksum(^ip.CalculateChecksum())
+
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(ipBuf),
+		})
+		pkt.OutputNICName = "tun"
+		linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
+		pkt.DecRef()
+
+		deadline := time.After(2 * time.Second)
+		for tunWrites == prevTunWrites {
+			select {
+			case <-deadline:
+				t.Fatal("conntrack return was not emitted through TUN")
+			default:
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		if got := tunWriteDst[len(tunWriteDst)-1]; got != clientAddr.String() {
+			t.Fatalf("conntrack return TUN destination = %s, want %s", got, clientAddr)
 		}
 	})
 

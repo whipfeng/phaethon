@@ -1,6 +1,6 @@
 # gVisor 路由架构最终方案：RouteSelector + Link NICs
 
-## 状态：✅ 最终方案（2026-10-08 修订：补丁 #10 `LocalLoopback` 出栈栈内环回，取代已回退的补丁 #9 `HandleLocal=true`；RouteSelector 4 分支逻辑 + 路由表完全清空 + conntrack 辅助回程）
+## 状态：✅ 最终方案（2026-10-09 修订：补丁 #12 以单一 `LocalStack` 统一本地交付/栈内环回，并让 conntrack 回程按 `OutputNICName` 直出；取代补丁 #10 的双标记模型）
 
 **本文档整合并取代**：
 - `gvisor_routing_evolution.md`（早期调研，已废弃）
@@ -44,10 +44,10 @@
 
 **注意**：
 - **路由表完全清空**：所有路由决策（mesh、非 mesh、本地地址）都由 RouteSelector 处理（§2.3）。路由表不包含 VIP/32、本节点子网 /16、192.168/16、对端子网等任何条目。
-- **本地子网与 192.168 的处理**：本地交付（含 fakeIP、GIP、VIP）由 RouteSelector 分支 1 的 `EgressNIC=1 + LocalDelivery=true` 覆盖（出栈经 TUN、入栈由 handleValidatedPacket 拦截）；其他 192.168.x.x 等非栈内地址走分支 4 经 NIC 1 → TUN → OS，由宿主网络栈做下一跳决策。
-- **栈 socket 也能找到路由**：分支 1 的 `EgressNIC=1` 保证栈 socket `Connect(fakeIP)` 在 FindRoute 中能构造路由（fork patch #3 只对 `NeedIPIP`/显式 `EgressNIC` 构造路由）。
-- **Conntrack 管理的回程包例外**：旁路网关回程包（src=VIP, dst=客户端）通过 conntrack 记录的 `originalInputNIC` 直接路由回 NIC 1（patch #5/#6，`FindRouteViaNIC`），跳过 RouteSelector 和路由表。
-- **Socket/Forwarder 回程包走 RouteSelector**：DNSHijacker 应答、forwarder 回复等栈内 socket 的回程包仍然走 RouteSelector，由 RouteSelector 根据目标地址返回正确的 EgressNIC（dst=LAN 客户端经分支 4 走 NIC 1）。
+- **本地子网与任意代理目标的处理**：GIP、fakeIP 与分支 4 的未知目的使用 `EgressNIC=1 + LocalStack=true`：入站本地交付，栈内发包以 `PacketLoop` 回环。VIP 是 SNAT/conntrack 中转地址，固定 `LocalStack=false`，仍从 NIC 1 输出。
+- **栈 socket 也能找到路由**：本地栈目标仍带 `EgressNIC=1`，使 `FindRoute` 能构造 route，再由 `LocalStack` 将它转为不写 NIC 的 `PacketLoop`。
+- **Conntrack 管理的回程包例外**：反向 NAT 后 `OutputNICName` 非空的包强制通过 `FindRouteViaNIC` 回到记录的 NIC，跳过 RouteSelector 的目的地址策略。
+- **Socket/Forwarder 回程包**：目标仍为 VIP 的回复走 NIC 1，再由 conntrack 反向 NAT 恢复客户端地址；不会按分支 4 重新判定。 
 
 ---
 
@@ -81,38 +81,31 @@ type RouteDecision struct {
     // 是否可缓存（动态选路时设为 false）
     Cacheable bool
     
-    // 本地交付（环回 forwarder）
-    LocalDelivery bool
+    // 本地服务或代理入口：入站本地交付，出站栈内环回。
+    LocalStack bool
 }
 ```
 
 ### 2.3 决策逻辑
 
-**语义双轨**：
-- **FindRoute 路径**（stack socket `Connect()` SYN）：RouteSelector 必须给出 `EgressNIC`（或 `NeedIPIP`），否则 FindRoute 不会构造路由，SYN 无法发出。
-- **handleValidatedPacket 路径**（NIC 收包，`patch #2b`）：RouteSelector 的 `LocalDelivery=true` 会跳过转发、在 IP 层本地交付（依赖 NIC 1 混杂模式 + `AcquireAssignedAddress`，对 fakeIP/GIP/VIP 等本地地址可达）。
+**统一的本地栈语义**：
+- `LocalStack=true` 同时控制两个方向：`FindRoute` 将本机产生的包设为 `PacketLoop`，`handleValidatedPacket` 将入站包本地交付（依赖 NIC 1 混杂模式 + `AcquireAssignedAddress`）。GIP、Fake-IP 与 Branch 4 的代理入口使用该语义。
+- `LocalStack=false` 表示正常转发/NIC 输出。VIP 是 SNAT/conntrack 中转地址而非监听地址，始终使用该语义；任何仍以 VIP 为目的的包都经 NIC 1 出去。
+- `OutputNICName` 是独立、优先级更高的 conntrack 回程元数据：反向 NAT 后直接按指定 NIC 转发，不再执行目的地址本地栈策略。
 
-**为什么需要 EgressNIC=1（出栈 TUN 路径）**：
-- 栈内 socket `Connect(fakeIP)` 在 gvisor 中走 IP 层 forwardUnicastPacket → FindRoute；没有路由可发包。
-- FindRoute 只对 `NeedIPIP` 或显式 `EgressNIC` 构造路由（fork patch #3 line 1674），`LocalDelivery` 单独设置不构造路由。
-- 因此 fakeIP/GIP/VIP 等"本地交付"目标在 FindRoute 中也必须附 `EgressNIC=1`——SYN 经 NIC 1 → writeLoop → TUN → OS 识别为 TUN 子网地址 → 路由回 TUN → NIC 1 入站 → handleValidatedPacket 看到 `LocalDelivery=true` → 本地交付给 Forwarder（loopback 单跳，开销可接受）。
+**为什么本地栈目标仍需要 EgressNIC=1**：
+- 栈内 socket `Connect(fakeIP)` 仍需 FindRoute 构造 route；`LocalStack` 只在 route 建成后将其改为 `PacketLoop`，不写 NIC。
+- 因此 fakeIP/GIP 等本地栈目标也附 `EgressNIC=1`，但不会再依赖 TUN 绕回。
 
 ```go
 func RouteSelector(dst tcpip.Address) RouteDecision {
-    // 1. 本地 mesh 子网（fakeIP / GIP / VIP / hostIP）
-    //    入栈：handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
-    //          （给 Forwarder 处理 fakeIP / 给 admin listener 处理 GIP 等）。
-    //    出栈：LocalLoopback=true → Route.Loop=PacketLoop，包在栈内直接交付，
-    //          不写 NIC（补丁 #10）。唯一例外是 dst==VIP —— 那是 Forwarder /
-    //          DNS 劫持器回给入站客户端的包（客户端源已被 Input 链 SNAT 归一
-    //          化成 VIP），必须出 NIC 1，由 conntrack 在 Postrouting 反翻译回
-    //          LAN 客户端地址。
+    // 1. 本地 mesh 子网：VIP 是 conntrack 中转地址，不属于本地栈；
+    //    GIP/fakeIP/hostIP/EIP 是本地服务或代理入口，双向走本地栈。
     if isLocalMeshSubnet(dst) {
         return RouteDecision{
-            EgressNIC:     1,                         // 构造 route 所需；环回时不写 NIC
-            LocalDelivery: true,                      // 入栈时拦截，不走 forwardUnicastPacket
-            LocalLoopback: dst != localVIP,           // 补丁 #10：出栈环回（VIP 除外）
-            Cacheable:     true,
+            EgressNIC: 1,
+            LocalStack: dst != localVIP,
+            Cacheable: true,
         }
     }
     
@@ -137,30 +130,23 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
         }
     }
     
-    // 4. 兜底（匹配不上任何通告路由的外部 IP）
-    //    入栈：LocalDelivery=true 拦截并本地交付给 Forwarder —— 这是 TUN 抓到
-    //          的 OS 流量、旁路网关流量的代理入口，同时是补丁 #8 的 panic 防御。
-    //    出栈：LocalLoopback=true → 栈内环回给 Forwarder（补丁 #10）。出站命中
-    //          Branch 4 的只有 phaethon 自有 socket（NetDial / 栈内 DNS）：
-    //          Forwarder 与劫持器的回包 dst 是 VIP，落 Branch 1。
-    //    EgressNIC=1 仍保留：FindRoute 需要一个 NIC 来取 address endpoint 构造
-    //          route，即使该 route 最终不写 NIC。
+    // 4. 兜底：未知目的既是 TUN/旁路流量的代理入口，也是自有 socket 的
+    //    本地栈入口；回程 conntrack 包携带 OutputNICName 时优先直出，不会命中此分支。
     return RouteDecision{
-        EgressNIC:     1,
-        LocalDelivery: true,
-        LocalLoopback: true,                          // 补丁 #10
-        Cacheable:     true,
+        EgressNIC: 1,
+        LocalStack: true,
+        Cacheable: true,
     }
 }
 ```
 
 **关键变化**：
 - **所有 FindRoute 都走 RouteSelector**：删除 `id == 0 && localAddr == ""` 限制。RouteSelector 处理所有路由决策（除了 conntrack 管理的回程包，见 patch #5/#6）。
-- **本地 mesh 子网优先**：本节点子网（如 VM 的 100.1.0.0/16）直接 LocalDelivery，不走 Link NIC。fakeIP 在本节点子网范围内，由情况 1 覆盖。
+- **本地 mesh 子网优先**：本节点 GIP/fakeIP/hostIP/EIP 走 `LocalStack`，VIP 明确不走本地栈。fakeIP 在本节点子网范围内，由情况 1 覆盖。
 - **统一 EgressNIC 语义**：RouteSelector 返回的 EgressNIC 是下一跳的 Link NIC（直连 peer），gVisor 直接使用该 NIC 发送包。
 - **非 mesh 一次性算好**：RouteSelector 同时返回 EgressNIC（下一跳）和 EgressEIP（IPIP 外层目标），无需递归查找。
-- **兜底 LocalDelivery（补丁 #8 强化）**：匹配不上通告路由的目标**强制** `LocalDelivery=true` 走本地交付给 Forwarder，**禁止**进转发路径。只有匹配到通告路由的非 mesh 目标才走 IPIP 封装。这是 gVisor 不 panic 防御 + 兜底语义的双重保险。
-- **LocalDelivery 与 LocalLoopback 是两个方向的语义（补丁 #10）**：`LocalDelivery` 是**入站** flag，只被 `handleValidatedPacket` 消费（"这个 dst 的包从 NIC 进来时别转发，交给 Forwarder"）；`FindRoute` 从不读它。`LocalLoopback` 是**出站** flag，只被 `FindRoute` 消费（"这个本地生成的包在栈内交付，别写 NIC"）。两者互不影响，必须分开。
+- **兜底 LocalStack（补丁 #8/#12）**：匹配不上通告路由的目标强制 `LocalStack=true` 走本地代理入口；只有匹配到通告路由的非 mesh 目标才走 IPIP 封装。
+- **单一 LocalStack 语义（补丁 #12）**：同一个目的地址的本地交付与栈内环回必须一致，RouteSelector 不再维护两个方向标记。conntrack 已知的回程包以 `OutputNICName` 为最高优先级，直接转发，不受 `LocalStack` 影响。
 - **路由表完全清空**：所有路由由 RouteSelector 处理，路由表不再包含任何条目。
 
 **例外**：
@@ -944,6 +930,24 @@ if pkt.InputNICName == "" {
 **影响范围**：只影响 Input 链 SNAT 命中的连接（即 TUN NIC 1 混杂模式下本地交付的流量：DNS 劫持器 GIP:53、TCP/UDP Forwarder 本机监听）的 conntrack `originalInputNIC` 记录，不改变 RouteSelector 判据、不改变 NAT 规则配置、不改变 Postrouting 链已有行为（它已经是对称正确的）。
 
 **验证方式**：QG 旁路网关场景下用独立 DNS 探针脚本反复查询 mesh 域名触发 `forwardToRemote` 超时走 SERVFAIL 分支，确认回包源地址稳定为 GIP:53（而不是物理 LAN 口地址+随机端口），且 `writeLoop` 日志里稳定出现 `wrote pktN to TUN`，不再出现 `handleUDP invoked` 介入同一条回包。
+
+### 6.15 补丁 #12：`LocalStack` 统一目的地址本地语义，conntrack 回程直出（新增，2026-10-09）
+
+**现象**：旁路客户端访问 `jf.phn` 时，SYN 已到达 JF；JF 返回 `100.2.0.10 → 100.0.0.1(VIP)` 的 TCP 包也已到达 QG，但客户端收不到 SYN-ACK。conntrack 在 PREROUTING 已把目的 VIP 逆向 SNAT 为真实客户端地址（如 `192.168.1.88`）并设置 `pkt.OutputNICName="tun"`；随后 `handleValidatedPacket` 又按改写后的客户端目的地址进入 Branch 4 的本地交付，未调用 `forwardUnicastPacket`，使指定 TUN 出口失效。
+
+**统一语义**：RouteSelector 只处理无状态的目的地址政策，删除 `LocalDelivery` 与 `LocalLoopback` 两个方向性字段，改为单一 `LocalStack`。`LocalStack=true` 同时表示入站本地交付、出站栈内环回；GIP、Fake-IP 和 Branch 4 使用此值。VIP 是 Input-SNAT/conntrack 中转地址，不是监听地址，固定 `LocalStack=false`，任何仍以 VIP 为目的的包都从 NIC 1 出去。
+
+**conntrack 优先级**：`OutputNICName` 是每流回程元数据，优先级高于 `LocalStack`。IPv4/IPv6 的 `handleValidatedPacket` 先检查它：非空即调用 `forwardUnicastPacket`；IPv4/IPv6 的转发路径用 `FindRouteViaNIC` 直接选择记录的 NIC，不调用 RouteSelector。路径为：
+
+```text
+Link NIC 收包（dst=VIP）
+  → PREROUTING conntrack 逆向 SNAT（dst=真实客户端，OutputNICName=tun）
+  → 强制 forwardUnicastPacket
+  → FindRouteViaNIC(tun)
+  → writeLoop → TUN → 客户端
+```
+
+**影响范围**：普通 TUN/Fake-IP/GIP/Branch 4 流量维持原行为；只有带 `OutputNICName` 的 conntrack 回程跳过本地栈逻辑。IPv6 同步采用同一规则。无需把流状态塞入 destination-only 的 RouteSelector 缓存。
 
 ---
 

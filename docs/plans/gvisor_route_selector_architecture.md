@@ -1,6 +1,6 @@
 # gVisor 路由架构最终方案：RouteSelector + Link NICs
 
-## 状态：✅ 最终方案（2026-10-08 修订：补丁 #9 `HandleLocal=true` + RouteSelector 4 分支逻辑 + 路由表完全清空 + conntrack 辅助回程）
+## 状态：✅ 最终方案（2026-10-08 修订：补丁 #10 `LocalLoopback` 出栈栈内环回，取代已回退的补丁 #9 `HandleLocal=true`；RouteSelector 4 分支逻辑 + 路由表完全清空 + conntrack 辅助回程）
 
 **本文档整合并取代**：
 - `gvisor_routing_evolution.md`（早期调研，已废弃）
@@ -99,13 +99,19 @@ type RouteDecision struct {
 
 ```go
 func RouteSelector(dst tcpip.Address) RouteDecision {
-    // 1. 本地 mesh 子网（fakeIP / GIP / VIP / hostIP）→ 出栈经 TUN 兜底；
-    //    入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
-    //    （给 Forwarder 处理 fakeIP / 给 admin listener 处理 GIP 等）。
+    // 1. 本地 mesh 子网（fakeIP / GIP / VIP / hostIP）
+    //    入栈：handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
+    //          （给 Forwarder 处理 fakeIP / 给 admin listener 处理 GIP 等）。
+    //    出栈：LocalLoopback=true → Route.Loop=PacketLoop，包在栈内直接交付，
+    //          不写 NIC（补丁 #10）。唯一例外是 dst==VIP —— 那是 Forwarder /
+    //          DNS 劫持器回给入站客户端的包（客户端源已被 Input 链 SNAT 归一
+    //          化成 VIP），必须出 NIC 1，由 conntrack 在 Postrouting 反翻译回
+    //          LAN 客户端地址。
     if isLocalMeshSubnet(dst) {
         return RouteDecision{
-            EgressNIC:     1,                         // NIC 1 = TUN 兜底出口
+            EgressNIC:     1,                         // 构造 route 所需；环回时不写 NIC
             LocalDelivery: true,                      // 入栈时拦截，不走 forwardUnicastPacket
+            LocalLoopback: dst != localVIP,           // 补丁 #10：出栈环回（VIP 除外）
             Cacheable:     true,
         }
     }
@@ -131,14 +137,18 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
         }
     }
     
-    // 4. 兜底（匹配不上任何通告路由的外部 IP）→ 出栈经 TUN 走到 OS 网络栈；
-    //    入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付给
-    //    Forwarder（同 Branch 1 处理路径：SYN 经 NIC 1 → TUN → OS → 路由回 TUN →
-    //    NIC 1 → deliverPacketLocally → TCP/UDP Forwarder）。EgressNIC=1 让
-    //    FindRoute 在出栈（stack-socket Connect）场景下能构造真实路由。
+    // 4. 兜底（匹配不上任何通告路由的外部 IP）
+    //    入栈：LocalDelivery=true 拦截并本地交付给 Forwarder —— 这是 TUN 抓到
+    //          的 OS 流量、旁路网关流量的代理入口，同时是补丁 #8 的 panic 防御。
+    //    出栈：LocalLoopback=true → 栈内环回给 Forwarder（补丁 #10）。出站命中
+    //          Branch 4 的只有 phaethon 自有 socket（NetDial / 栈内 DNS）：
+    //          Forwarder 与劫持器的回包 dst 是 VIP，落 Branch 1。
+    //    EgressNIC=1 仍保留：FindRoute 需要一个 NIC 来取 address endpoint 构造
+    //          route，即使该 route 最终不写 NIC。
     return RouteDecision{
         EgressNIC:     1,
         LocalDelivery: true,
+        LocalLoopback: true,                          // 补丁 #10
         Cacheable:     true,
     }
 }
@@ -150,6 +160,7 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
 - **统一 EgressNIC 语义**：RouteSelector 返回的 EgressNIC 是下一跳的 Link NIC（直连 peer），gVisor 直接使用该 NIC 发送包。
 - **非 mesh 一次性算好**：RouteSelector 同时返回 EgressNIC（下一跳）和 EgressEIP（IPIP 外层目标），无需递归查找。
 - **兜底 LocalDelivery（补丁 #8 强化）**：匹配不上通告路由的目标**强制** `LocalDelivery=true` 走本地交付给 Forwarder，**禁止**进转发路径。只有匹配到通告路由的非 mesh 目标才走 IPIP 封装。这是 gVisor 不 panic 防御 + 兜底语义的双重保险。
+- **LocalDelivery 与 LocalLoopback 是两个方向的语义（补丁 #10）**：`LocalDelivery` 是**入站** flag，只被 `handleValidatedPacket` 消费（"这个 dst 的包从 NIC 进来时别转发，交给 Forwarder"）；`FindRoute` 从不读它。`LocalLoopback` 是**出站** flag，只被 `FindRoute` 消费（"这个本地生成的包在栈内交付，别写 NIC"）。两者互不影响，必须分开。
 - **路由表完全清空**：所有路由由 RouteSelector 处理，路由表不再包含任何条目。
 
 **例外**：
@@ -678,7 +689,7 @@ return stack.RouteDecision{
 ```
 
 入栈包走 `deliverPacketLocally` → `AcquireAssignedAddress`（dst 不在本地，nil）→ 落到 `tcp.NewForwarder` 兜底 → phaethon 的 `acceptTCP` 接收 → 走 mesh/Proxy 转发到实际目的地。
-出栈（stack-socket Connect）包：`EgressNIC=1` 让 FindRoute 仍构造 NIC 1 路由，包经 writeLoop → TUN → OS → 路由回 TUN → NIC 1 接收 → `LocalDelivery=true` → 走 deliverPacketLocally（loopback 单跳）。
+出栈（stack-socket Connect）包：`EgressNIC=1` 让 FindRoute 仍构造 NIC 1 路由。~~包经 writeLoop → TUN → OS → 路由回 TUN → NIC 1 接收 → `LocalDelivery=true` → 走 deliverPacketLocally（loopback 单跳）~~ **【已被补丁 #10 取代】** 出栈改由 `LocalLoopback=true` 在栈内直接环回，不再依赖 TUN 绕回，见 §6.13。
 
 **(b) handleForwardingError 防御性不 panic**
 
@@ -692,7 +703,9 @@ return stack.RouteDecision{
 - ✅ 非 mesh 外部 IP（dst=106.13.183.103 等）正常进入 Forwarder，由 Proxy 链转发
 - ✅ 防御性兜底：未来任何未知 forwarding 错误不再拖垮整个进程
 
-### 6.12 补丁 #9：`stack.Options.HandleLocal = true`（新增，2026-10-08）
+### 6.12 补丁 #9：`stack.Options.HandleLocal = true`（❌ 已回退，由 §6.13 补丁 #10 取代）
+
+> **回退原因**：`HandleLocal` 是全局开关，除了想要的自寻址 loopback，还附带打开 `HandlePacket` 里"源地址是本机地址就丢包"的检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 组合下把外部 DNS 查询（`192.168.1.7 → 100.0.0.3:53`）静默丢弃（任务 #428 单变量测试确认）。且它只覆盖 `localAddr == remoteAddr`，覆盖不到 Branch 4。以下为原始记录，保留作决策依据。
 
 **问题**（VM 部署后实测发现）：
 
@@ -765,6 +778,173 @@ s := stack.New(stack.Options{
 - ⚠️ 所有"自寻址"流量改走栈内 loopback，**不再写 TUN 也不走 OS NAT**——这是预期行为，不会破坏 NAT（NAT 设计是给外部 LAN 主机用的，loopback 流量无需 NAT）
 - ⚠️ gVisor 内部额外开销：每次自寻址包多走一次 `handleLocalPacket`，可忽略
 
+### 6.13 补丁 #10：`LocalLoopback` 出栈栈内环回（新增，2026-10-08，取代补丁 #9）
+
+**补丁 #9（`HandleLocal=true`）已回退**：它是 `stack.Options` 的全局开关，除了想要的"自寻址包栈内 loopback"，还附带打开了 `HandlePacket` 里的"源地址是本机地址就丢包"检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 的组合下把外部 DNS 查询（`192.168.1.7 → 100.0.0.3:53`）静默丢弃（任务 #428 单变量测试确认）。而且它只覆盖 `localAddr == remoteAddr` 的自寻址包，覆盖不到 Branch 4。
+
+**问题**（JF / GG 实测）：
+
+Branch 1（非 VIP）和 Branch 4 的**本地交付**原先是靠**出栈绕一圈 TUN** 实现的：
+
+```
+EgressNIC=1 → writeLoop → TUN → OS 路由 → 回 TUN → readLoop → InjectInbound
+            → NIC 1 → handleValidatedPacket(LocalDelivery=true) → Forwarder
+```
+
+在 TUN 关闭的节点（JF / GG / MS9 / MS10）上 `tun.Engine.Write` 返回 `TUN device not available`，`mesh/netstack.go` 的 `writeLoop` 静默丢包：
+
+- GG：`100.179.0.3:44471 → 192.168.1.88:22` SYN 重传 5 次后 `context deadline exceeded` → 反向代理（Direct / HTTP / Reverse / SOCKS5 / Trojan）全挂
+- JF：`GIP → GIP:53` 栈内 DNS 丢包 544 次
+- Branch 2/3（Link NIC / IPIP）不受影响 → mesh 路由与**入站** mesh admin 正常，所以故障表现为"选择性失效"
+
+**修复**：把环回做在 gVisor 内部，不依赖 TUN 设备是否存在。
+
+`writePacketPostRouting`（`ipv4.go:576-585`）本来就有这个能力：
+
+```go
+if r.Loop()&stack.PacketLoop != 0 {
+    e.handleLocalPacket(pkt, !headerIncluded /* canSkipRXChecksum */)
+}
+if r.Loop()&stack.PacketOut == 0 {
+    return nil                      // 不写 NIC，也不走 Postrouting
+}
+```
+
+只要让 route 带上 `Loop = PacketLoop`（且清掉 `PacketOut`），包就在栈内交付。
+
+**为什么不重演补丁 #9 的回归**：`handleLocalPacket`（`ipv4.go:980-1005`）**不含** `HandleLocal()` 那段"源地址是本机就丢"的检查——那段只在 `HandlePacket`（外部收包路径）里。所以 `PacketLoop` 环回拿到了好处，碰不到那个坑。
+
+**(a) fork：`RouteDecision` 加出站专用字段**
+
+文件：`gvisor-fork/pkg/tcpip/stack/stack.go`
+
+```go
+type RouteDecision struct {
+    EgressNIC     tcpip.NICID
+    NeedIPIP      bool
+    EgressEIP     tcpip.Address
+    Cacheable     bool
+    LocalDelivery bool          // 入站语义：handleValidatedPacket 消费（补丁 #2b/#8）
+    LocalLoopback bool          // 出站语义：FindRoute 消费（补丁 #10）
+}
+```
+
+`LocalDelivery` 与 `LocalLoopback` **必须分开**：`FindRoute` 从不读 `LocalDelivery`（`stack.go:1629` 注释已明确"Don't act on it here"），`handleValidatedPacket` 从不读 `LocalLoopback`。
+
+**(b) fork：`FindRoute` 单点覆写**
+
+现有 `FindRoute` body 原样改名 `findRouteInner`，外面套一层：
+
+```go
+func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+    r, err := s.findRouteInner(id, localAddr, remoteAddr, netProto, multicastLoop)
+    if err != nil || r == nil {
+        return r, err
+    }
+    if s.RouteSelectorLocalLoopback(remoteAddr) {
+        r.setLocalLoopback()   // routeInfo.Loop = PacketLoop
+    }
+    return r, nil
+}
+```
+
+选单点覆写而不是把参数穿过 7 个 `makeRoute` 调用点：`FindRoute` 内部 return 分支太多（IPIP / EgressNIC / 路由表 / 本地路由 / 兜底），改一处比改七处安全。`RouteSelectorLocalLoopback` 复用已有的 dst 决策缓存（`decisionForSelectorRLocked`）。
+
+`setLocalLoopback()` 的连带效果都是正确语义：
+- `makeRoute` 在 `Loop()&PacketOut == 0` 时 early-return（`route.go:223`），跳过网关/链路解析——环回包本来就不需要
+- `local()`（`route.go:471`）变 true → `RequiresTXTransportChecksum()` 返回 false、`isResolutionRequiredRLocked()` 跳过 ARP——与 gVisor 自己的 `makeLocalRoute` 一致
+
+`ipv4.go` / `ipv6.go` **不改**。
+
+**(c) phaethon：RouteSelector 三分支各加一行**
+
+文件：`mesh/route_selector.go`
+
+| 分支 | `LocalLoopback` | 理由 |
+|---|---|---|
+| 1 本地 mesh 子网 | `dst != cfg.LocalVIP` | VIP 是回包目的地，见下 |
+| 2/3 mesh、已通告 | `false` | 走 Link NIC / IPIP，不变 |
+| 4 兜底 | `true` | 出站命中 Branch 4 的只有自有 socket |
+
+**判据为什么是 `dst != VIP`（关键，2026-10-08 QG 实测确认）**：
+
+Input 链的 SNAT 规则（`mesh/netstack.go:606-620`，`InputInterface=="tun"` → src 改写为 VIP）把所有从 NIC 进来、本地交付的客户端源地址**归一化成 VIP**。因此 Forwarder 与 DNS 劫持器只认得 VIP，回包在 `FindRoute` 时的 `remoteAddr` 就是 **VIP**（落 Branch 1），LAN 客户端地址是之后由 conntrack 在 Postrouting 反翻译出来的——**它从不到达 RouteSelector**。
+
+实测证据（QG `/root/data/logs/phaethon.log`）：
+
+```
+[TCP-DEBUG] tcp forwarder called local=100.0.0.14:443   remote=100.0.0.1:54806
+[TCP-DEBUG] tcp forwarder called local=8.212.124.35:443 remote=100.0.0.1:54815
+[DNS-DEBUG] DNSHijacker: query domain=qg.phn from=100.0.0.1:13616
+```
+
+`remote` / `from` **全部**是 `100.0.0.1` = VIP，无一例外。writeLoop 里看到的 `100.0.0.12 -> 192.168.1.88`、`100.0.0.3 -> 192.168.1.7` 都是 **Postrouting 反翻译之后**的地址，不能拿来推断选路时的 dst。
+
+于是出站方向在 `FindRoute` 处的全集是：
+
+| 发送者 | remoteAddr | Branch | 应做 |
+|---|---|---|---|
+| Forwarder 回包（TUN / 旁路客户端） | **VIP** | 1 | 出 NIC 1 → TUN → Postrouting 反翻译 |
+| DNS 劫持回包（TUN / 旁路客户端） | **VIP** | 1 | 出 NIC 1 → TUN |
+| Forwarder 回包（mesh peer，Link NIC 入站不过 SNAT） | peer mesh 地址 | 2/3 | 出 Link NIC |
+| NetDial SYN → 非 mesh 未通告目标 | 真实目标 | 4 | **环回** |
+| NetDial → fakeIP / GIP | Branch 1 地址 | 1 | **环回** |
+| `ResolveDomain` 栈内 DNS | GIP | 1 | **环回** |
+
+分界只有 `dst == VIP` 一条。phaethon 自有 socket **从不**主动拨 VIP（`CalculateVIP` 只用于 RouteSelector 配置，`GetVIP()` 只喂 `SetMeshConfig`，全代码无拨号），所以不会误判。
+
+**环回不会被 NAT 干扰（已核对代码）**：
+
+- `handleLocalPacket` 调 `handleValidatedPacket(h, pkt, "" /* inNICName */)`（补丁 #7）→ `deliverPacketLocally` → `CheckInput(pkt, "")` → `InputInterface=="tun"` **不匹配** → 落 Input catch-all accept → **不改源地址**。环回的 SYN 保持 `src=GIP`，Forwarder 回包 `dst=GIP`（≠VIP）→ 同样环回 → 回到 NetDial endpoint，全程不出栈。
+- `Loop=PacketLoop` 且无 `PacketOut` 时，`writePacketPostRouting` 在 `ipv4.go:582` 直接 return，**跳过 Postrouting**（`pkt.InputNICName` 在 `ipv4.go:591` 才赋值），SNAT 碰不到。
+
+**改完后的包路径**：
+
+```
+NetDial(GIP:port → 192.168.1.88:22)
+  → FindRoute → Branch 4 → LocalLoopback=true → Loop=PacketLoop
+  → writePacketPostRouting: handleLocalPacket() 后 return，不写 NIC
+  → handleValidatedPacket(inNICName="")
+      → CheckInput("") 不匹配 "tun" → 不 SNAT，src 保持 GIP
+      → RouteSelectorLocalDelivery(dst)=true → 跳过转发（补丁 #2b）
+      → AcquireAssignedAddress(promiscuous) → deliverPacketLocally
+  → TCP Forwarder → acceptTCP（Mode B 匹配）→ handleConn（规则 / 代理链）
+  → 回包 dst=GIP ≠ VIP → Branch 1 LocalLoopback=true → 同样环回 → NetDial endpoint
+```
+
+TUN 有没有、能不能写，全程无关。
+
+**⚠️ 必须守住的耦合**：`dst != VIP` 这条判据**隐式依赖 Input 链 SNAT 把入站客户端源归一化成 VIP**。谁改了 / 删了那条 SNAT 规则，Forwarder 与劫持器的回包就会掉进环回分支，QG 的 TUN 客户端与旁路网关当场全断。修改 `mesh/netstack.go` 的 NAT 配置时必须同时复核本节。
+
+**不动的东西**：`dialTCP` / `dialUDP` 仍绑 GIP、DNS 劫持器仍绑 GIP:53、Input/Postrouting SNAT 配置、`writeLoop`、地址分配（**不新增保留地址**）。
+
+### 6.14 补丁 #11：Input 链 conntrack 补记输入 NIC（新增，2026-10-09）
+
+**现象**（QG 实测，旁路网关 DNS 查询）：DNS 劫持器对 Branch 1（`dst==VIP`，§6.3 判据表第一行）的回包，`h.udpEP.Write()` 本身成功（无错误），但回包**有时**（与 `recomputeRoutes` 周期性重算在时间上相关）不经 `writeLoop`/TUN 直接出站，而是源地址被改写成 QG 物理 LAN 口地址（`192.168.1.101`）+ 随机临时端口后才到达客户端——不是补丁 #9 那种全丢，是**回包被二次误路由后由 `tun/engine.go handleUDP`（Forwarder 的直连 UDP 转发器）当成新连接转发出去**，日志实证：`handleUDP invoked: src=100.0.0.3 dst=192.168.1.88:PORT` 紧跟在 `h.udpEP.Write()` 成功之后出现，且这类误路由发生时完全没有 `writeLoop`/`wrote pktN to TUN` 日志。
+
+**根因**：补丁 #5（§6.5）引入的 `conntrackEntry.OriginalInputNIC`（fork 实际字段名 `cn.originalInputNIC`）只在 **Postrouting 链**路径被正确记录——`performNAT`（`conntrack.go:825-827`）读取的 `pkt.InputNICName` 只在 `writePacketPostRouting`（`ipv4.go:591`，`ipv6.go:864`）里被赋值一次，这是**转发流量**专属路径。但 Input 链 SNAT（`mesh/netstack.go:603-616`，命中条件 `InputInterface=="tun"`，用于 DNS 劫持器 / Forwarder 本机交付流量）命中时走的是 `deliverPacketLocally → CheckInput(pkt, inNICName)`（`ipv4.go:1349`），`inNICName`只是本地变量，从未写回 `pkt.InputNICName`。
+
+后果：Input 链 SNAT 建立的 conntrack 连接，`originalInputNIC` 永远是空，回包的 `pkt.OutputNICName`（conntrack 在 `conntrack.go:996-1000` 回填）也永远是空。`(*endpoint).writePacket`（`ipv4.go:531-574`）在目的地址被 DNAT 还原后发现 `dstAddr != newDstAddr`，本该走 `pkt.OutputNICName != ""` 的快速路径（直接复用原 Route 写 NIC，不二次路由，`ipv4.go:555-563`），但因为该字段恒为空，只能落入 fallback（`ipv4.go:564-570`，`ep.handleLocalPacket`），用 DNAT 还原后的新目的地址（真实 LAN 客户端 IP）**重新跑一次 RouteSelector**（`handleValidatedPacket` → `RouteSelectorLocalDelivery`，`ipv4.go:1272`）。真实 LAN 地址不在 mesh 子网/VIP/GIP/fakeIP 里，落 Branch 4 兜底（`LocalDelivery:true`），被当成"查无主的新连接"扔进 `deliverPacketLocally` 的传输层 demux fallback，也就是 phaethon 注册的 UDP Forwarder（`handleUDP`），从而在物理网卡上开新 socket 转发——这就是观测到的错误源地址。是否命中 fallback 的"误打误撞对了"分支（`findEndpointWithAddress(newDstAddr)` 精确匹配，`ipv4.go:194-205`）取决于当时 NIC 1 混杂模式下临时端点的存在状态，随 `SyncLinkNICs`/路由重算的时机波动，解释了现象的非确定性。
+
+**修复**：对齐补丁 #5 原本的设计意图（"记录包从哪个 NIC 进入"应覆盖**所有**本地交付路径，不止转发路径），在 Input 链交付路径补上 `pkt.InputNICName` 的赋值，使其与 Postrouting 链路径对称：
+
+```go
+// pkg/tcpip/network/ipv4/ipv4.go deliverPacketLocally（及调用链上 CheckInput 之前）
+// 补丁 #11：对齐补丁 #5，Input 链本地交付也要记录输入 NIC，
+// 否则该连接的 conntrack 条目 originalInputNIC 永远为空，
+// DNAT 回包的 OutputNICName 填不上，writePacket 只能走
+// 二次 RouteSelector 的 fallback，被误判为新连接扔给 Forwarder。
+if pkt.InputNICName == "" {
+    pkt.InputNICName = inNICName // e.nic.Name()，deliverPacketLocally 调用处已有
+}
+```
+
+`pkg/tcpip/network/ipv6/ipv6.go` 对应位置同步镜像修改（与补丁 #5/#7 的 ipv4/ipv6 双修惯例一致）。
+
+**影响范围**：只影响 Input 链 SNAT 命中的连接（即 TUN NIC 1 混杂模式下本地交付的流量：DNS 劫持器 GIP:53、TCP/UDP Forwarder 本机监听）的 conntrack `originalInputNIC` 记录，不改变 RouteSelector 判据、不改变 NAT 规则配置、不改变 Postrouting 链已有行为（它已经是对称正确的）。
+
+**验证方式**：QG 旁路网关场景下用独立 DNS 探针脚本反复查询 mesh 域名触发 `forwardToRemote` 超时走 SERVFAIL 分支，确认回包源地址稳定为 GIP:53（而不是物理 LAN 口地址+随机端口），且 `writeLoop` 日志里稳定出现 `wrote pktN to TUN`，不再出现 `handleUDP invoked` 介入同一条回包。
+
 ---
 
 ## 7. 实施计划
@@ -786,7 +966,9 @@ s := stack.New(stack.Options{
 6. ✅ 补丁 #6：DNAT 辅助路由
 7. ✅ 补丁 #7：本地 socket 流量跳过 InputInterface 匹配
 8. ✅ 补丁 #8：Branch 4 强制 LocalDelivery + handleForwardingError 不 panic
-9. 🔄 补丁 #9：`stack.Options.HandleLocal=true`（DNS 自寻址包栈内 loopback，无 fork）
+9. ❌ 补丁 #9：`stack.Options.HandleLocal=true`（**已回退**，引入外部 DNS 丢包回归，见 §6.12）
+10. ✅ 补丁 #10：`RouteDecision.LocalLoopback` + `FindRoute` 单点覆写 → 出栈栈内环回（取代 #9，见 §6.13）
+11. ✅ 补丁 #11：Input 链 conntrack 补记输入 NIC，修复 DNS 劫持器/Forwarder 回包源地址误改写（见 §6.14）
 
 **架构实现**：
 1. ✅ Link NICs：每个直连 peer 一个 NIC

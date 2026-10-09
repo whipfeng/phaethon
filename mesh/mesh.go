@@ -1115,7 +1115,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
 	if srcIP, dstIP, dstPort, ok := tcpSYNInfo(frame); ok {
-		util.LogInfo("[MESH-TRACE] SYN ingress peer=%s src=%s dst=%s:%d", fromNodeID, srcIP, dstIP, dstPort)
+		localStack := false
+		if netstack := m.tun.GetNetstack(); netstack != nil {
+			localStack = netstack.Stack().RouteSelectorLocalStack(tcpip.AddrFrom4Slice(dstIP))
+		}
+		util.LogInfo("[MESH-TRACE] SYN ingress peer=%s src=%s dst=%s:%d localStack=%t", fromNodeID, srcIP, dstIP, dstPort, localStack)
 	}
 
 	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),

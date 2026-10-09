@@ -1090,7 +1090,11 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 	}
 }
 
-// Simplified H_Tunnel mapping handler - connects to target through mesh network.
+// connectHTTarget is the h_tunnel mapping handler. It dials through the mesh
+// netstack so the target passes the full rule engine (tun.Engine.handleConn)
+// and acceptTCP's Mode B lookup can attribute the connection to the real
+// client. Dialing directly with net.DialTimeout would bypass both — see
+// docs/plans/htunnel_p2p_direct_mode.md appendix A.4 (decision retracted).
 func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
 	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
 	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})

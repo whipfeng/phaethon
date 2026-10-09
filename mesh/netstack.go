@@ -519,7 +519,16 @@ func (n *Netstack) initStack() error {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, func(s *stack.Stack) stack.TransportProtocol { return newIPIPProtocol(s, linkEP) }},
-		HandleLocal:        true,
+		// HandleLocal: REMOVED (2026-10-08) — single-variable regression test.
+		// With HandleLocal=true, external DNS queries (192.168.1.7 -> 100.0.0.3:53)
+		// are dropped before reaching the DNS hijacker. Verified at commit f1a2a87
+		// on QG: 100% of nslookup timeouts despite correct stack/route setup.
+		// Root cause investigation: see gvisor-fork pkg/tcpip/network/ipv4/ipv4.go
+		// HandlePacket's "if e.protocol.stack.HandleLocal()" branch — under
+		// NIC1 promiscuous+forwarding it drops packets whose SOURCE is one of
+		// our own addresses; combined with the Input-chain SNAT that rewrites
+		// the source to VIP before local delivery, the return-path SNAT/conntrack
+		// loop no longer matches, so the DNS reply is silently discarded.
 	})
 	n.ns = s
 

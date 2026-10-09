@@ -132,10 +132,18 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 				util.LogInfo("[MESH-TRACE] SYN egress failed linkNIC=%d boundPeer=%s target=%s src=%s dst=%s:%d err=%v",
 					l.nicID, l.peerNodeID, target, srcIP, dstIP, dstPort, err)
 			}
+			if srcIP, dstIP, dstPort, ok := dnsPacketInfo(pktData); ok {
+				util.LogInfo("[MESH-TRACE] DNS egress failed linkNIC=%d boundPeer=%s target=%s src=%s dst=%s:%d err=%v",
+					l.nicID, l.peerNodeID, target, srcIP, dstIP, dstPort, err)
+			}
 			continue
 		}
 		if srcIP, dstIP, dstPort, ok := tcpSYNInfo(pktData); ok {
 			util.LogInfo("[MESH-TRACE] SYN egress linkNIC=%d boundPeer=%s target=%s src=%s dst=%s:%d",
+				l.nicID, l.peerNodeID, target, srcIP, dstIP, dstPort)
+		}
+		if srcIP, dstIP, dstPort, ok := dnsPacketInfo(pktData); ok {
+			util.LogInfo("[MESH-TRACE] DNS egress linkNIC=%d boundPeer=%s target=%s src=%s dst=%s:%d",
 				l.nicID, l.peerNodeID, target, srcIP, dstIP, dstPort)
 		}
 		count++

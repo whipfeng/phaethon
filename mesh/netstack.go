@@ -252,10 +252,8 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 	}
 }
 
-// SyncLinkNICs creates Link NICs so that every known mesh peer has one.
-// Existing NICs are retained across transient peer disappearance: gVisor routes
-// can outlive a gossip snapshot, while SendToNode remains authoritative for
-// current next-hop availability. Per design §1.2 + §4.4, non-direct peers also get a Link NIC; its send path
+// SyncLinkNICs creates/removes Link NICs so that every known mesh peer has one.
+// Per design §1.2 + §4.4, non-direct peers also get a Link NIC; its send path
 // delegates to the mesh hop table for relay. Per design §1.1, Link NICs bind
 // no addresses (VIP/EIP are NAT addresses only).
 func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
@@ -272,9 +270,17 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 		current[peer.NodeID] = peer
 	}
 
-	// Keep existing Link NICs when a peer is absent from this snapshot. Removing
-	// them during a brief P2P/gossip interruption invalidates active gVisor
-	// routes; SendToNode rejects a genuinely unreachable next hop.
+	// Remove Link NICs for peers that disappeared
+	for nodeID, linkNIC := range n.linkNICs {
+		if _, ok := current[nodeID]; ok {
+			continue
+		}
+		if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
+			util.LogError("[NETSTACK] failed to remove NIC %d for stale peer %s: %v", linkNIC.nicID, nodeID, err)
+		}
+		delete(n.linkNICs, nodeID)
+		util.LogInfo("[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, nodeID)
+	}
 
 	// Create Link NICs for new peers
 	for nodeID, peer := range current {

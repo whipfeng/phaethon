@@ -458,6 +458,7 @@ Link NIC 是"哑"的，职责是收发直连：
 - 发送：链路层发送交给 mesh hop 表选路（非直连目标经中继时同样由 hop 表决定下一跳）
 - 接收：HandleMeshFrame 收到帧后按 fromNodeID 找到对应 Link NIC 调用 InjectInbound；
   conntrack 依赖该入口标识记录 OriginalInputNIC（补丁 #5），DNAT 回程靠它选出口 NIC（补丁 #6）
+- 生命周期：已创建的 Link NIC 在短暂 P2P/gossip 缺席时保留，不能在拓扑快照切换时删除并重建；当前可达性始终由 `SendToNode` 的 hop 表决定。这样不会让活跃 gVisor route 指向被删除的 NIC。
 
 ### 5.3 与共享 mesh NIC 的对比
 

@@ -149,11 +149,9 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			util.LogError("[NETSTACK] failed initial link NIC sync: %v", err)
 		}
 
-		// Configure RouteSelector for dynamic routing decisions per design §2.3
-		// (4-branch semantic dual-track). RouteSelector is called during
-		// FindRoute (must carry EgressNIC/NeedIPIP for outbound stack sockets)
-		// and during handleValidatedPacket (LocalDelivery flag intercepts
-		// inbound locally-delivered packets — patch #2b).
+		// Configure RouteSelector for dynamic routing decisions per design §2.3.
+		// LocalStack applies consistently to FindRoute and handleValidatedPacket;
+		// EgressNIC/NeedIPIP select ordinary outgoing paths.
 		if n.ns != nil && n.meshSubnet != nil {
 			// Calculate local VIP and EIP
 			localVIP := CalculateVIP(n.meshSubnet)
@@ -507,7 +505,9 @@ func (n *Netstack) Stop() error {
 
 // initStack creates the gvisor netstack per design §1.1:
 // NIC 1: TUN adapter (channel.Endpoint) - VIP(.1)/GIP(.3) bound, promiscuous,
-//        forwarding enabled. TUN device I/O + local mesh service addresses.
+//
+//	forwarding enabled. TUN device I/O + local mesh service addresses.
+//
 // NIC 2+: per-peer Link NICs (created by SyncLinkNICs).
 // IPIP encapsulation happens in the forwarding path; decapsulation at the
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).

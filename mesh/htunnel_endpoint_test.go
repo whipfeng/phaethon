@@ -45,6 +45,12 @@ func (p *mockPeerSender) GetNodeID() string {
 	return p.nodeID
 }
 
+func (*mockPeerSender) GetProxyName() string    { return "" }
+func (*mockPeerSender) GetLinkID() string       { return "" }
+func (*mockPeerSender) GetLocalSeq() uint16     { return 0 }
+func (*mockPeerSender) GetRemoteSeq() uint16    { return 0 }
+func (*mockPeerSender) GetFriendlyName() string { return "" }
+
 func TestHTunnelEndpointWritePackets(t *testing.T) {
 	peer := newMockPeerSender("test-node")
 	ep := NewHTunnelEndpoint(100, peer)

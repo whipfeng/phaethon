@@ -408,7 +408,7 @@ mesh:
 ```yaml
 - name: MGMS_HT
   type: h_tunnel
-  url: http://36.140.28.178:18080/ui/resdata/
+  url: http://example.invalid/ui/resdata/
   password: "${MGMS_HT_PASSWORD}"
   p2p: false  # 禁用 P2P，回退到传统 BIND 模式
 ```

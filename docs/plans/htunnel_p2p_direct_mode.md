@@ -13,6 +13,7 @@
 |------|------|------|
 | v0.1.0 | 2026-09-17 | 初稿：frame 包抽离、FrameTransport 多态、MESH 直发通道（客户端+服务端） |
 | v0.2.0 | 2026-09-30 | 连接池与心跳优化：独立心跳、GET 从 16 减到 2（动态扩展）、帧批次可配置、客户端控制等待时间 |
+| v0.3.0 | 2026-10-08 | **V2 全局回退到 V1**：客户端 BindModeP2P 强制走 V1 BIND-stream（`dialer/htunnel_bind.go:47-68` 注释掉 MESH 分支）；服务端 `connectHTTarget` 从 `dialer.MeshDial` 改回 `net.DialTimeout` 直连。原因见附录 A。 |
 
 ## 一、背景
 
@@ -494,3 +495,70 @@ mesh:
 6. **韧性**：中途断网/杀服务端 → 客户端 GET/POST 失败 → 会话结束 → 自动重连；DELETE 后服务端通道清理。
 7. **滚动升级**：JF 升级后旧 QG（BIND 模式）P2P 正常；QG 升级后日志切换到 MESH 模式。
 8. **伪装**：抓包确认 POST/GET/PUT 形态与现有流量一致（URL 模式、加密 body）。
+
+## 附录 A：V2 全局回退到 V1（2026-10-08）
+
+### A.1 现象
+
+QG 通过 `IP-CIDR,106.13.183.103/32,MGMS_HT` 访问 GG admin（39998），TUN 日志：
+
+```
+[TUN] TCP 100.0.0.1 → 106.13.183.103:39998 → IP-CIDR,106.13.183.103/32,MGMS_HT
+  (htunnel: push connect fail: Head "http://36.140.28.178:18080/ui/resdata//17/1": context deadline exceeded)
+```
+
+JF 端 `data/logs/phaethon.log`：
+
+```
+[HT-SVR] [htunnel-32457] [conn-22] 106.13.183.103:39998 mesh dial connecting
+[NETSTACK-DIAL] starting: addr=106.13.183.103:39998 client= inbound=HTunnel:htunnel-32457
+... 30s 后通道关闭
+[HT-SVR] connect target fail 106.13.183.103:39998: context deadline exceeded
+```
+
+**关键事实**：JF 真实网络能直接访问 GG（`ping 26.9ms`、39998 TLS 握手成功、39988 TCP 成功）。失败发生在 phaethon netstack 层。
+
+### A.2 根因（❌ 原判有误，2026-10-08 更正）
+
+~~`MeshDial` 把目标 106.13.183.103（**非 mesh subnet**）交给 JF netstack 路由，netstack 无规则 → 30s 超时。~~
+
+**原判错误**：netstack 并非"无规则"。非 mesh 未通告目标落 RouteSelector Branch 4，`LocalDelivery=true`，**本该**本地交付给 TCP Forwarder，由 `handleConn` 执行规则/代理链（`MATCH,DIRECT` 也是规则的一种结果）。
+
+**真实根因**：Branch 4 的本地交付当时是靠**出栈绕一圈 TUN** 实现的（`EgressNIC=1 → writeLoop → TUN → OS → 回 TUN → NIC 1 → deliverPacketLocally → Forwarder`）。JF 是 **TUN 关闭**的节点，`tun.Engine.Write` 返回 `TUN device not available`，`writeLoop` 静默丢包 → SYN 永远到不了 Forwarder → 30s 超时。
+
+同一根因还导致 GG 的反向代理全挂（`100.179.0.3:44471 → 192.168.1.88:22` 重传 5 次后 `context deadline exceeded`）、JF 栈内 DNS 丢包 544 次。Branch 2/3（Link NIC / IPIP）不受影响，所以 mesh 路由与入站 admin 看起来正常，故障呈"选择性"。
+
+**修复归属**：这是 gVisor 路由层缺陷，不是 h_tunnel 的问题。见 `gvisor_route_selector_architecture.md` §6.13 补丁 #10（`RouteDecision.LocalLoopback`，出栈包在栈内直接环回，不依赖 TUN 设备）。
+
+### A.3 V2 设计的"中继"假设
+
+V2 引入 `MeshDial` 的初衷：h_tunnel server 本身是 mesh 节点，**目标可能是另一个 mesh peer**（如 client dial `100.179.0.10:39999` = GG admin，server 是 JF，需要把 dial 转发到 GG）。这种场景下 `net.DialTimeout` 会失败（真实网络无 mesh subnet 路由），必须 `MeshDial`。
+
+但实际架构里节点互访 admin 走 TUN/fakeIP（`gg.phn` → fakeIP → mesh IPIP），**不经过 h_tunnel**。h_tunnel 当前**只**作为 `via` 代理（如 `trojan via MGMS_HT`），target 永远是真实互联网地址。
+
+`git log` 历史里 `dd77ef9` revert commit message 提到 "broke h_tunnel relay"，但无测试覆盖、无复现步骤、当前生产无该用例。
+
+### A.4 决策：~~服务端移除 mesh dial，保留 direct dial~~（❌ 已撤回，2026-10-08）
+
+原决策基于 A.2 的错误根因判断。既然真实缺陷在 gVisor 路由层（补丁 #10 修复），服务端**必须**保留 `dialer.MeshDial`：
+
+| 端 | 改动 |
+|---|------|
+| **客户端**（`dialer/htunnel_bind.go:47-68`） | BindModeP2P 强制走 V1 BIND-stream（`dialHTunnelBIND`），MESH 分支注释 —— **保留不变** |
+| **服务端**（`server/htunnel.go:connectHTTarget`） | ~~移除 `dialer.MeshDial`，改回 `net.DialTimeout("tcp", host:port, 10s)` 直连~~ → **回退为 `dialer.MeshDial`** |
+
+**为什么服务端必须走 `MeshDial`**（原决策"server 端从不该有代理路由目标的逻辑"是错的）：
+
+1. **规则与代理链只在 Forwarder 里执行**。`MeshDial` → netstack → Forwarder → `tun.Engine.handleConn` → `ResolveMatch` → REJECT / adminHandler / `ChainDialWithID(proxy)` / `DialRouteAware`。改成 `net.DialTimeout` 直接绕过整条规则引擎，`MATCH,DIRECT` 也就无从生效——不是"只做 TCP 转发"，是"跳过所有策略"。
+2. **Mode B 归因会丢**。反向 / 中继连接靠 `acceptTCP` 里的 `LookupModeB` 把真实客户端地址与 inbound 关联回来；`net.DialTimeout` 不经过 `acceptTCP`，`srcAddr` 退化成 JF 自己的地址。
+3. **A.3 的中继场景仍然成立**。h_tunnel server 本身是 mesh 节点，target 可能是另一个 mesh peer；`net.DialTimeout` 在真实网络上没有 mesh subnet 路由，必然失败。
+4. 原决策只解决了 5 个受同一根因影响的症状中的 1 个（Direct/HTTP/Reverse/SOCKS5/Trojan 五类服务端出站都走 `MeshDialWithModeB`），属于掩盖而非修复。
+
+**修复位置**：gVisor 路由层（补丁 #10），**不是**任何 server 端拨号代码。五类服务端出站协议保持 `MeshDialWithModeB` 不变。
+
+### A.5 验证
+
+- QG `curl https://106.13.183.103:39998/` 经 `IP-CIDR,106.13.183.103/32,GGDYSV_TJ` via `MGMS_HT` → 200 OK
+- JF 端 phaethon.log 应出现 `mesh dial connecting` 且**不再** 30s 超时（补丁 #10 后 SYN 在栈内环回给 Forwarder）
+- GG 反向代理恢复：`[Direct:dyn-map-*] TCP ... → MESH` 不再 `context deadline exceeded`
+- QG 旁路网关 / TUN 客户端不受影响：Forwarder 回包 dst=VIP，仍出 NIC 1 → TUN

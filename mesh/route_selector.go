@@ -49,7 +49,10 @@ type RouteSelectorConfig struct {
 	// All addresses inside it (fakeIP/VIP/GIP/hostIP/EIP) match branch 1.
 	LocalSubnet *net.IPNet
 
-	// LocalVIP = subnet + 1. Optional defensive match (LocalSubnet subsumes it).
+	// LocalVIP = subnet + 1. Required: it is the sole discriminator that keeps
+	// Forwarder / DNS-hijacker replies egressing via NIC 1 instead of being
+	// looped back in-stack (see NewRouteSelector). Must match the address the
+	// Input-chain SNAT rewrites inbound client sources to.
 	LocalVIP tcpip.Address
 	// LocalGIP = subnet + 3 (DNS/admin listen). Optional defensive match.
 	LocalGIP tcpip.Address
@@ -70,24 +73,44 @@ type RouteSelectorConfig struct {
 //
 // Branch resolution:
 //
-//	1. Local mesh subnet     → EgressNIC=1, LocalDelivery=true   (TUN loopback)
-//	2. Mesh subnet           → SelectRoute(),                    Link NIC direct
-//	3. Non-mesh advertised   → SelectRoute(),                    Link NIC + IPIP
-//	4. Default fallback      → EgressNIC=1                       (TUN→OS)
+//	1. Local mesh subnet     → EgressNIC=1, LocalDelivery=true,
+//	                           LocalLoopback=(dst != VIP)   (in-stack loopback)
+//	2. Mesh subnet           → SelectRoute(),               Link NIC direct
+//	3. Non-mesh advertised   → SelectRoute(),               Link NIC + IPIP
+//	4. Default fallback      → EgressNIC=1, LocalDelivery=true,
+//	                           LocalLoopback=true           (in-stack loopback)
 //
-// LocalDelivery and EgressNIC carry independent meanings (design §2.3):
+// The three flags carry independent meanings (design §2.3 / §6.13):
 //   - LocalDelivery gates handleValidatedPacket's local-delivery short-circuit
 //     (patch #2b). Affects only inbound.
+//   - LocalLoopback gates FindRoute's Route.Loop=PacketLoop override
+//     (patch #10). Affects only outbound stack-socket writes: the packet is
+//     delivered back into the stack instead of being written to the egress
+//     NIC, so local delivery no longer depends on a TUN device existing.
 //   - EgressNIC is what fork patch #3 uses in FindRoute to construct a route.
-//     Affects only outbound stack-socket Connect().
+//     Still required for looped-back packets — FindRoute needs a NIC to obtain
+//     an address endpoint from, even though the route never writes to it.
+//
+// Why branch 1 excludes VIP: the Input-chain SNAT (netstack.go, rule
+// InputInterface=="tun" → src rewritten to VIP) normalizes every
+// NIC-inbound locally-delivered client to VIP, so the TCP Forwarder and the
+// DNS hijacker only ever see src=VIP and address their replies to VIP. Those
+// replies must leave via NIC 1 and be reverse-translated by conntrack at
+// Postrouting; looping them back would break TUN clients and the bypass
+// gateway. Confirmed on QG: every forwarder connection logs remote=100.0.0.1
+// and every hijacker query logs from=100.0.0.1. No phaethon-owned socket ever
+// dials VIP, so the exclusion cannot misfire. Changing that SNAT rule
+// therefore requires revisiting this branch.
 func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 	return func(dst tcpip.Address) stack.RouteDecision {
 		dstIP := net.IP(dst.AsSlice())
 
 		// Branch 1: local mesh subnet (covers VIP/GIP/hostIP/fakeIP/EIP).
-		// Outbound: EgressNIC=1 makes FindRoute build a TUN route; the SYN
-		// loops through writeLoop → TUN → OS → NIC 1 again → handleValidatedPacket
-		// (LocalDelivery=true) → Forwarder/admin listener.
+		// Outbound: LocalLoopback makes FindRoute set Route.Loop=PacketLoop, so
+		// writePacketPostRouting calls handleLocalPacket and returns before any
+		// NIC write → handleValidatedPacket (LocalDelivery=true) →
+		// deliverPacketLocally → Forwarder/admin listener. VIP is excluded: it
+		// is the reply destination for NIC-inbound clients (see above).
 		// Inbound: handleValidatedPacket sees LocalDelivery=true; if the
 		// receiving NIC has a matching AddressEndpoint (GIP, VIP via AddProtocolAddress,
 		// or fakeIP via promiscuous-mode temp endpoint), the packet is delivered
@@ -96,18 +119,19 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 			return stack.RouteDecision{
 				EgressNIC:     1,
 				LocalDelivery: true,
+				LocalLoopback: dst != cfg.LocalVIP,
 				Cacheable:     true,
 			}
 		}
 		// Defensive exact-match fallbacks (LocalSubnet nil case).
 		if cfg.LocalGIP != (tcpip.Address{}) && dst == cfg.LocalGIP {
-			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
+			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, LocalLoopback: true, Cacheable: true}
 		}
 		if cfg.LocalVIP != (tcpip.Address{}) && dst == cfg.LocalVIP {
 			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
 		}
 		if cfg.IsFakeIP != nil && cfg.IsFakeIP(dstIP) {
-			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, Cacheable: true}
+			return stack.RouteDecision{EgressNIC: 1, LocalDelivery: true, LocalLoopback: true, Cacheable: true}
 		}
 
 		// Branches 2 & 3: SelectRoute covers both mesh and non-mesh advertised.
@@ -126,17 +150,22 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 			}
 		}
 
-		// Branch 4 (设计 §2.3 + 补丁 #8): 兜底 → 出栈经 TUN 走到 OS 网络栈；
-		// 入栈时 handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付
-		// 给 Forwarder（同 Branch 1 loopback 路径：SYN 经 NIC 1 → TUN → OS →
-		// 路由回 TUN → NIC 1 → deliverPacketLocally → tcp/udp Forwarder）。
-		// EgressNIC=1 让 FindRoute 在出栈（stack-socket Connect）场景下能构造
-		// 真实路由。LocalDelivery=true 是兜底语义的强制要求，缺失会导致
-		// forwardUnicastPacket → FindRoute(0, "", dst) 失败 → handleForwardingError
-		// panic（QG 2026-10-08 复现）。
+		// Branch 4 (设计 §2.3 + 补丁 #8/#10): 兜底。
+		// 入栈：handleValidatedPacket 看到 LocalDelivery=true 拦截并本地交付给
+		// Forwarder —— 这是 TUN 抓到的 OS 流量与旁路网关流量的代理入口。
+		// LocalDelivery=true 是强制要求，缺失会导致 forwardUnicastPacket →
+		// FindRoute(0, "", dst) 失败 → handleForwardingError panic
+		// （QG 2026-10-08 复现）。
+		// 出栈：LocalLoopback=true 让包在栈内环回给 Forwarder，不写 NIC，
+		// 因此不依赖 TUN 设备存在（补丁 #10）。出站命中本分支的只有 phaethon
+		// 自有 socket（NetDial / 栈内 DNS）：Forwarder 与 DNS 劫持器的回包
+		// dst 是 VIP，落 Branch 1。
+		// EgressNIC=1 仍需保留：FindRoute 要靠它取 address endpoint 构造 route，
+		// 即使该 route 最终不写 NIC。
 		return stack.RouteDecision{
 			EgressNIC:     1,
 			LocalDelivery: true,
+			LocalLoopback: true,
 			Cacheable:     true,
 		}
 	}

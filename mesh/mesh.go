@@ -35,6 +35,21 @@ func ParseNodeDomain(domain string) string {
 	return strings.TrimSuffix(domain, suffix)
 }
 
+func tcpSYNInfo(packet []byte) (net.IP, net.IP, uint16, bool) {
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
+		return nil, nil, 0, false
+	}
+	headerLen := int(packet[0]&0x0f) * 4
+	if headerLen < 20 || len(packet) < headerLen+14 {
+		return nil, nil, 0, false
+	}
+	flags := packet[headerLen+13]
+	if flags&0x02 == 0 || flags&0x10 != 0 {
+		return nil, nil, 0, false
+	}
+	return net.IP(packet[12:16]), net.IP(packet[16:20]), uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3]), true
+}
+
 // TunInterface abstracts the TUN engine for mesh packet injection.
 type TunInterface interface {
 	// InjectFromNode injects a frame received from the given peer into the
@@ -1099,6 +1114,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	}
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
+	if srcIP, dstIP, dstPort, ok := tcpSYNInfo(frame); ok {
+		util.LogInfo("[MESH-TRACE] SYN ingress peer=%s src=%s dst=%s:%d", fromNodeID, srcIP, dstIP, dstPort)
+	}
 
 	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay

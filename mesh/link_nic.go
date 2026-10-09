@@ -128,6 +128,10 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 
 		if err := l.meshMgr.SendToNode(target, pktData); err != nil {
 			util.LogDebug("[LINKNIC] send to node %s failed: %v", target, err)
+			if srcIP, dstIP, dstPort, ok := tcpSYNInfo(pktData); ok {
+				util.LogInfo("[MESH-TRACE] SYN egress failed linkNIC=%d boundPeer=%s target=%s src=%s dst=%s:%d err=%v",
+					l.nicID, l.peerNodeID, target, srcIP, dstIP, dstPort, err)
+			}
 			continue
 		}
 		if srcIP, dstIP, dstPort, ok := tcpSYNInfo(pktData); ok {

@@ -65,6 +65,9 @@ type P2PManager struct {
 
 	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
+	stopOnce          sync.Once
+	sessionsWG        sync.WaitGroup
+	stopped           bool
 
 	linkSeqCounter uint64 // atomic counter for link sequence numbers
 
@@ -145,9 +148,10 @@ func (s *peerSender) HasProxy() bool {
 
 // writeReq is a frame queued for async write on the peer connection.
 type writeReq struct {
-	frameType byte
-	data      []byte
-	isControl bool
+	frameType      byte
+	data           []byte
+	isControl      bool
+	encodedControl bool
 }
 
 // Peer represents a connected P2P peer.
@@ -167,8 +171,8 @@ type Peer struct {
 	writeCh    chan writeReq
 	controlCh  chan writeReq // hello/gossip priority queue
 	stopCh     chan struct{}
-	stopOnce   sync.Once   // ensures stopCh is closed exactly once
-	meshSender *peerSender // mesh peer sender, created on hello
+	stopOnce   sync.Once     // ensures stopCh is closed exactly once
+	meshSender *peerSender   // mesh peer sender, created on hello
 	proxy      *config.Proxy // proxy config this peer was started with
 
 	// Reliable transmission state (v7)
@@ -194,12 +198,50 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	return m
 }
 
+func (m *P2PManager) beginSession() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return false
+	}
+	m.sessionsWG.Add(1)
+	return true
+}
+
+func stopPeer(peer *Peer) {
+	peer.stopOnce.Do(func() {
+		close(peer.stopCh)
+	})
+	if peer.transport != nil {
+		peer.transport.Close()
+	}
+}
+
+// Stop closes every active P2P session and waits for reconnect and session loops to exit.
+func (m *P2PManager) Stop() {
+	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		m.stopped = true
+		peers := make([]*Peer, 0, len(m.peers))
+		for _, peer := range m.peers {
+			peers = append(peers, peer)
+		}
+		m.mu.Unlock()
+
+		for _, peer := range peers {
+			stopPeer(peer)
+		}
+		m.sessionsWG.Wait()
+		close(m.meshInboundStopCh)
+	})
+}
+
 // GetPeerStatus returns the P2P connection status for all peers.
 // Returns a map of proxy name -> status info.
 func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	result := make(map[string]map[string]interface{})
 	for name, peer := range m.peers {
 		result[name] = map[string]interface{}{
@@ -218,19 +260,19 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	writeFrame := func(req writeReq, isControl bool) bool {
 		payload := req.data
-		
+
 		// Special handling for pure ACK: no seq allocation, no retransmission
 		if req.frameType == frame.FrameAck {
 			// Pure ACK format: {seq(4)=0, ack(4), payload}
 			// The payload already contains the ack number in the first 4 bytes
 			// We need to construct: {seq(4)=0, ack(4)} + payload
 			ack := binary.BigEndian.Uint32(payload[0:4])
-			encoded := make([]byte, 8) // seq(4) + ack(4)
+			encoded := make([]byte, 8)                  // seq(4) + ack(4)
 			binary.BigEndian.PutUint32(encoded[0:4], 0) // seq = 0
 			binary.BigEndian.PutUint32(encoded[4:8], ack)
 			payload = encoded
 			// Don't record for retransmission (pure ACK is fire-and-forget)
-		} else if isControl {
+		} else if isControl && !req.encodedControl {
 			// Encode seq/ack into control frame payload
 			seq := peer.sendState.allocSeq()
 			ack := peer.recvState.getLastSeq()
@@ -243,11 +285,20 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			// Record as sent for retransmission
 			peer.sendState.markSent(seq, req.frameType, req.data)
 		}
-		
+
+		if req.frameType == frame.FrameMeshPacket {
+			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
+		}
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
+			if req.frameType == frame.FrameMeshPacket {
+				mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
+			}
 			util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
 			peer.transport.Close()
 			return false
+		}
+		if req.frameType == frame.FrameMeshPacket {
+			mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s", peer.ID)
 		}
 		return true
 	}
@@ -289,6 +340,7 @@ func (m *P2PManager) meshInboundLoop() {
 			return
 		case pkt := <-m.meshInboundCh:
 			if m.meshHandler != nil {
+				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
 				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.frame)
 			}
 		}
@@ -301,13 +353,13 @@ var ErrPeerStopped = fmt.Errorf("peer stopped")
 // ErrQueueFull is returned when the peer's write queue is full.
 var ErrQueueFull = fmt.Errorf("write queue full")
 
-// enqueueWrite queues a frame for async write. Non-blocking: drops if the
-// queue is full (drop-tail; overlay TCP retransmission recovers mesh data).
-// Control frames (isControl=true) use a small priority queue so they
-// never queue behind bulk mesh data.
-// Returns error: nil if enqueued, ErrPeerStopped if peer stopped, ErrQueueFull if queue full.
+// enqueueWrite queues a frame for async write. Mesh data is best-effort;
+// control frames use a priority queue and retain their own ACK/retry semantics.
 func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error {
-	// Check if peer is stopped
+	return enqueueWriteReq(peer, writeReq{frameType: frameType, data: data, isControl: isControl})
+}
+
+func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case <-peer.stopCh:
 		return ErrPeerStopped
@@ -315,14 +367,20 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error
 	}
 
 	ch := peer.writeCh
-	if isControl {
+	if req.isControl {
 		ch = peer.controlCh
 	}
 	select {
-	case ch <- writeReq{frameType: frameType, data: data, isControl: isControl}:
+	case ch <- req:
+		if req.frameType == frame.FrameMeshPacket {
+			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
+		}
 		return nil
 	default:
-		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, frameType)
+		if req.frameType == frame.FrameMeshPacket {
+			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
+		}
+		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
 }
@@ -331,6 +389,12 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error
 // (server side). The transport is owned by the manager and closed when the
 // session ends.
 func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) {
+	if !m.beginSession() {
+		t.Close()
+		return
+	}
+	defer m.sessionsWG.Done()
+
 	peer := &Peer{
 		ID:        address,
 		Status:    "connecting",
@@ -345,19 +409,23 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	}
 
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		stopPeer(peer)
+		return
+	}
 	m.peers[peer.ID] = peer
 	m.mu.Unlock()
 
 	defer func() {
-		peer.stopOnce.Do(func() {
-			close(peer.stopCh)
-		})
-		t.Close()
+		stopPeer(peer)
 		m.mu.Lock()
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
 		}
-		delete(m.peers, peer.ID)
+		if current, ok := m.peers[peer.ID]; ok && current == peer {
+			delete(m.peers, peer.ID)
+		}
 		m.mu.Unlock()
 		util.LogInfo("[P2P] session ended for %s", peer.ID)
 	}()
@@ -366,57 +434,53 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	m.runSession(peer)
 }
 
-// StopPeer disconnects a P2P peer permanently.
-// The peer will not reconnect after being stopped.
+// StopPeer disconnects one P2P peer permanently.
 func (m *P2PManager) StopPeer(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if peer, ok := m.peers[id]; ok {
+	peer := m.peers[id]
+	m.mu.Unlock()
+	if peer != nil {
 		util.LogInfo("[P2P] stopping peer %s", id)
-		peer.stopOnce.Do(func() {
-			close(peer.stopCh)
-		})
-		if peer.transport != nil {
-			peer.transport.Close()
-		}
+		stopPeer(peer)
 	}
 }
 
-// StopPeerByNodeID disconnects a P2P peer by its mesh node ID.
-// Used when connectivity checks indicate the peer is unreachable.
+// StopPeerByProxyName disconnects one P2P session by its configured proxy name.
+func (m *P2PManager) StopPeerByProxyName(proxyName string) {
+	m.StopPeer(proxyName)
+}
+
+// StopPeerByNodeID disconnects every P2P session for a mesh node.
 func (m *P2PManager) StopPeerByNodeID(nodeID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, peer := range m.peers {
+	peers := make([]*Peer, 0)
+	for _, peer := range m.peers {
 		if peer.NodeID == nodeID {
-			util.LogInfo("[P2P] stopping peer %s (nodeID=%s) due to connectivity failure", id, nodeID)
-			peer.stopOnce.Do(func() {
-				close(peer.stopCh)
-			})
-			if peer.transport != nil {
-				peer.transport.Close()
-			}
-			return
+			peers = append(peers, peer)
 		}
+	}
+	m.mu.Unlock()
+
+	for _, peer := range peers {
+		util.LogInfo("[P2P] stopping peer %s (nodeID=%s) due to connectivity failure", peer.ID, nodeID)
+		stopPeer(peer)
 	}
 }
 
-// StopPeerByLinkID disconnects a specific P2P peer by its link ID.
-// Used when connectivity checks indicate a specific link is unhealthy.
+// StopPeerByLinkID disconnects every session with the exact negotiated link ID.
 func (m *P2PManager) StopPeerByLinkID(linkID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, peer := range m.peers {
+	peers := make([]*Peer, 0)
+	for _, peer := range m.peers {
 		if peer.LinkID == linkID {
-			util.LogInfo("[P2P] stopping peer %s (linkID=%s) due to connectivity failure", id, linkID)
-			peer.stopOnce.Do(func() {
-				close(peer.stopCh)
-			})
-			if peer.transport != nil {
-				peer.transport.Close()
-			}
-			return
+			peers = append(peers, peer)
 		}
+	}
+	m.mu.Unlock()
+
+	for _, peer := range peers {
+		util.LogInfo("[P2P] stopping peer %s (linkID=%s) due to connectivity failure", peer.ID, linkID)
+		stopPeer(peer)
 	}
 }
 
@@ -443,20 +507,22 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // It reconnects automatically with exponential backoff if the connection drops.
 // Call StopPeer to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
+	if !m.beginSession() {
+		util.LogDebug("[P2P] manager stopped; not starting peer %s", proxy.Name)
+		return
+	}
+	defer m.sessionsWG.Done()
+
 	util.LogInfo("[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 
-	// Stop any existing peer with the same ID to prevent duplicate connections
+	// Stop any existing peer with the same ID to prevent duplicate connections.
 	m.mu.Lock()
-	if existing, ok := m.peers[proxy.Name]; ok {
-		util.LogInfo("[P2P] stopping existing peer %s before starting new one", proxy.Name)
-		existing.stopOnce.Do(func() {
-			close(existing.stopCh)
-		})
-		if existing.transport != nil {
-			existing.transport.Close()
-		}
-	}
+	existing := m.peers[proxy.Name]
 	m.mu.Unlock()
+	if existing != nil {
+		util.LogInfo("[P2P] stopping existing peer %s before starting new one", proxy.Name)
+		stopPeer(existing)
+	}
 
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
@@ -475,13 +541,16 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	}
 
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		stopPeer(peer)
+		return
+	}
 	m.peers[peer.ID] = peer
 	m.mu.Unlock()
 
 	defer func() {
-		peer.stopOnce.Do(func() {
-			close(peer.stopCh)
-		})
+		stopPeer(peer)
 		m.mu.Lock()
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
@@ -671,12 +740,14 @@ func (m *P2PManager) runSession(peer *Peer) {
 			}
 		case frame.FrameMeshPacket:
 			if m.meshHandler != nil && len(payload) > 0 {
+				mesh.TraceForwarding("p2p_received", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				frameCopy := make([]byte, len(payload))
 				copy(frameCopy, payload)
 				select {
 				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, frame: frameCopy}:
-					// Queued for async processing
+					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				default:
+					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
 			} else {
@@ -716,9 +787,13 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 		binary.BigEndian.PutUint32(encoded[4:8], ack)
 		copy(encoded[8:], pf.payload)
 
-		if err := peer.transport.Send(pf.frameType, encoded, true); err != nil {
-			util.LogWarn("[P2P] retransmit write error for %s: %v", peer.ID, err)
-			peer.transport.Close()
+		if err := enqueueWriteReq(peer, writeReq{
+			frameType:      pf.frameType,
+			data:           encoded,
+			isControl:      true,
+			encodedControl: true,
+		}); err != nil {
+			util.LogDebug("[P2P] retransmit queue unavailable for %s: %v", peer.ID, err)
 			return
 		}
 		peer.sendState.markRetransmitted(pf.seq)
@@ -807,7 +882,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	remoteSeq := info.Seq
 	localSeq := peer.Seq
 	peer.RemoteSeq = remoteSeq // Store for gossip advertisement
-	
+
 	if remoteSeq > 0 && localSeq > 0 {
 		// Sort and concatenate to generate link ID (internal use only)
 		minSeq := localSeq
@@ -1007,6 +1082,19 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, ji
 
 	for _, p := range m.peers {
 		if p.ID == proxyName && p.sendState != nil {
+			return p.sendState.getStats()
+		}
+	}
+	return 0, 0, 0, 0, 0
+}
+
+// GetLinkQualityStatsByLinkID returns ACK-based link quality stats for an exact negotiated link.
+func (m *P2PManager) GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.peers {
+		if p.LinkID == linkID && p.sendState != nil {
 			return p.sendState.getStats()
 		}
 	}

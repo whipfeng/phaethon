@@ -32,9 +32,9 @@ var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
-	ruleConf   *config.RuleConfiguration
-	device     Device
-	netstack   *mesh.Netstack
+	ruleConf  *config.RuleConfiguration
+	device    Device
+	netstack  *mesh.Netstack
 	fakeIP    *mesh.FakeIPPool
 	dnsHijack *mesh.DNSHijacker
 	routeMgr  *RouteManager
@@ -61,13 +61,13 @@ type Engine struct {
 	logs  []string
 
 	// Mesh-related fields (interceptor removed in phase 2)
-	localMeshVIPs   map[string]bool // all local mesh VIPs as string keys
-	meshSubnet      *net.IPNet      // mesh subnet for Fake-IP allocation (set when mesh is enabled)
-	meshNetwork     *net.IPNet      // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
-	modeBTable      *mesh.ModeBTable  // Mode B (proxy entry) connection tracking
-	localMeshNodeID string          // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
+	localMeshVIPs   map[string]bool  // all local mesh VIPs as string keys
+	meshSubnet      *net.IPNet       // mesh subnet for Fake-IP allocation (set when mesh is enabled)
+	meshNetwork     *net.IPNet       // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
+	modeBTable      *mesh.ModeBTable // Mode B (proxy entry) connection tracking
+	localMeshNodeID string           // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
 
-	meshWriteCh    chan []byte             // queue for async WriteMeshPacket to TUN device
+	meshWriteCh chan []byte // queue for async WriteMeshPacket to TUN device
 
 	// preConnectCallback is called after bind (port allocated) but before connect (SYN sent).
 	// Used for ModeBTable registration before the forwarder is triggered.
@@ -558,8 +558,8 @@ func (e *Engine) TUNInterfaceIP() net.IP {
 
 // TUNStats contains diagnostic statistics from the TUN engine.
 type TUNStats struct {
-	ReadPackets  uint64          `json:"readPackets"`
-	WritePackets uint64          `json:"writePackets"`
+	ReadPackets  uint64           `json:"readPackets"`
+	WritePackets uint64           `json:"writePackets"`
 	FakeIP       mesh.FakeIPStats `json:"fakeIP"`
 }
 
@@ -899,7 +899,6 @@ func (e *Engine) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
 	return e.netstack.HTunnelEndpoint(proxyName)
 }
 
-
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
 	util.LogInfo("[TUN-READ] readLoop started")
@@ -1061,7 +1060,7 @@ func (e *Engine) readLoop() {
 
 		if e.netstack != nil && e.netstack.LinkEP() != nil {
 			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
-			defer pkt.DecRef()  // Use defer like official TUN device
+			defer pkt.DecRef() // Use defer like official TUN device
 			// Don't call NetworkHeader().Consume() here - gVisor's parse.IPv4 will do it
 			// Debug: log injection of DNS packets
 			if proto == ipv4.ProtocolNumber && n >= 28 && pktBuf[9] == 17 { // UDP
@@ -1075,6 +1074,7 @@ func (e *Engine) readLoop() {
 					}
 				}
 			}
+			mesh.TraceForwarding("tun_preinject", pktBuf, "len=%d", len(pktBuf))
 			e.netstack.LinkEP().InjectInbound(proto, pkt)
 		}
 	}

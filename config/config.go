@@ -51,7 +51,7 @@ type Proxy struct {
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
-	ViaProxy             string `yaml:"via,omitempty" json:"via,omitempty"` // 通过哪个代理建立连接
+	ViaProxy             string `yaml:"via,omitempty" json:"via,omitempty"`                           // 通过哪个代理建立连接
 	HealthCheckURL       string `yaml:"health-check-url,omitempty" json:"health-check-url,omitempty"` // 健康检查 URL，配置后会通过代理发送实际请求验证
 	ReverseAddress       string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
 	UpBps                int64  `yaml:"up-bps,omitempty" json:"up-bps,omitempty"`
@@ -226,15 +226,15 @@ func (m GroupMember) HealthKey() string {
 }
 
 type ProxyGroup struct {
-	Name                string   `yaml:"name" json:"name"`
-	Enabled             *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Type                string   `yaml:"type" json:"type"`
-	Proxies             []string `yaml:"proxies" json:"proxies"`           // runtime flat names derived from Members (may contain duplicates when a name exists in both sources)
-	ManualProxies       []string `yaml:"-" json:"manualProxies,omitempty"` // manual proxy names copied from YAML
-	HealthCheckURL      string   `yaml:"health-check-url" json:"health-check-url,omitempty"`
-	HealthCheckInterval *int     `yaml:"health-check-interval" json:"health-check-interval,omitempty"`
-	HealthCheckTolerance *int    `yaml:"health-check-tolerance,omitempty" json:"health-check-tolerance,omitempty"` // best type: switch if latency difference exceeds this (ms)
-	LBStrategy          string   `yaml:"lb-strategy,omitempty" json:"lb-strategy,omitempty"`                     // load-balance: round-robin (default) or consistent-hashing
+	Name                 string   `yaml:"name" json:"name"`
+	Enabled              *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Type                 string   `yaml:"type" json:"type"`
+	Proxies              []string `yaml:"proxies" json:"proxies"`           // runtime flat names derived from Members (may contain duplicates when a name exists in both sources)
+	ManualProxies        []string `yaml:"-" json:"manualProxies,omitempty"` // manual proxy names copied from YAML
+	HealthCheckURL       string   `yaml:"health-check-url" json:"health-check-url,omitempty"`
+	HealthCheckInterval  *int     `yaml:"health-check-interval" json:"health-check-interval,omitempty"`
+	HealthCheckTolerance *int     `yaml:"health-check-tolerance,omitempty" json:"health-check-tolerance,omitempty"` // best type: switch if latency difference exceeds this (ms)
+	LBStrategy           string   `yaml:"lb-strategy,omitempty" json:"lb-strategy,omitempty"`                       // load-balance: round-robin (default) or consistent-hashing
 
 	// Subscription names the subscription provider this group draws nodes from.
 	// Selection and filter are per-group, so multiple groups can reference the
@@ -897,10 +897,10 @@ func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
 	}
 	other.healthMu.RLock()
 	defer other.healthMu.RUnlock()
-	
+
 	g.healthMu.Lock()
 	defer g.healthMu.Unlock()
-	
+
 	if g.healthMap == nil {
 		g.healthMap = make(map[string]*healthStatus)
 	}
@@ -1324,12 +1324,12 @@ type DHCPStaticBinding struct {
 }
 
 type DHCPConfig struct {
-	Enabled        *bool                `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Interface      string               `yaml:"interface,omitempty" json:"interface,omitempty"`
-	PoolStart      string               `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
-	PoolEnd        string               `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
-	LeaseTime      string               `yaml:"lease-time,omitempty" json:"lease-time,omitempty"`
-	StaticBindings []DHCPStaticBinding  `yaml:"static-bindings,omitempty" json:"static-bindings,omitempty"`
+	Enabled        *bool               `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interface      string              `yaml:"interface,omitempty" json:"interface,omitempty"`
+	PoolStart      string              `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
+	PoolEnd        string              `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
+	LeaseTime      string              `yaml:"lease-time,omitempty" json:"lease-time,omitempty"`
+	StaticBindings []DHCPStaticBinding `yaml:"static-bindings,omitempty" json:"static-bindings,omitempty"`
 }
 
 // LeaseDuration returns the lease duration, defaulting to 24h if not configured
@@ -1433,14 +1433,15 @@ func (k *MeshTCPKeepalive) GetCount() int {
 
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
-	NodeID               string                `yaml:"node-id,omitempty" json:"node-id,omitempty"`
-	Network              string                `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
-	Subnet               string                `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
-	DomainSuffixes       []string              `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
-	Advertise            []string              `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
-	StaticRoutes         []MeshStaticRoute     `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
+	NodeID               string                   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Network              string                   `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
+	Subnet               string                   `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
+	DomainSuffixes       []string                 `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
+	Advertise            []string                 `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
+	StaticRoutes         []MeshStaticRoute        `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
-	TCPKeepalive         *MeshTCPKeepalive     `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
+	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
+	ForwardingTrace      bool                     `yaml:"forwarding-trace,omitempty" json:"forwarding-trace,omitempty"`             // Cross-layer forwarding diagnostics
 }
 
 // HTunnelConfig holds h_tunnel transport optimization settings (v0.2.0)
@@ -1458,8 +1459,8 @@ type HTunnelConfig struct {
 	HeartbeatInterval int `yaml:"heartbeat-interval,omitempty" json:"heartbeat-interval,omitempty"` // seconds
 
 	// GET wait time range (seconds)
-	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`       // default 1s
-	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`       // default 30s
+	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`         // default 1s
+	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`         // default 30s
 	DefaultWaitTime int `yaml:"default-wait-time,omitempty" json:"default-wait-time,omitempty"` // default 5s
 }
 
@@ -2009,11 +2010,11 @@ func (c *RuleConfiguration) HasReverseAddress(addr string) bool {
 
 // MatchResult holds the result of a rule match
 type MatchResult struct {
-	ProxyName     string
-	ActualProxy   string // Actual proxy used after group resolution
-	Mapping       string
-	TimeRange     string
-	Rule          string
+	ProxyName   string
+	ActualProxy string // Actual proxy used after group resolution
+	Mapping     string
+	TimeRange   string
+	Rule        string
 }
 
 // Match finds the matching proxy for the given request and mapping.

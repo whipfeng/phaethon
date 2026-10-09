@@ -50,6 +50,21 @@ func tcpSYNInfo(packet []byte) (net.IP, net.IP, uint16, bool) {
 	return net.IP(packet[12:16]), net.IP(packet[16:20]), uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3]), true
 }
 
+func dnsPacketInfo(packet []byte) (net.IP, net.IP, uint16, bool) {
+	if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != 17 {
+		return nil, nil, 0, false
+	}
+	headerLen := int(packet[0]&0x0f) * 4
+	if headerLen < 20 || len(packet) < headerLen+8 {
+		return nil, nil, 0, false
+	}
+	dstPort := uint16(packet[headerLen+2])<<8 | uint16(packet[headerLen+3])
+	if dstPort != 53 {
+		return nil, nil, 0, false
+	}
+	return net.IP(packet[12:16]), net.IP(packet[16:20]), dstPort, true
+}
+
 // TunInterface abstracts the TUN engine for mesh packet injection.
 type TunInterface interface {
 	// InjectFromNode injects a frame received from the given peer into the
@@ -1120,6 +1135,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 			localStack = netstack.Stack().RouteSelectorLocalStack(tcpip.AddrFrom4Slice(dstIP))
 		}
 		util.LogInfo("[MESH-TRACE] SYN ingress peer=%s src=%s dst=%s:%d localStack=%t", fromNodeID, srcIP, dstIP, dstPort, localStack)
+	}
+	if srcIP, dstIP, dstPort, ok := dnsPacketInfo(frame); ok {
+		util.LogInfo("[MESH-TRACE] DNS ingress peer=%s src=%s dst=%s:%d", fromNodeID, srcIP, dstIP, dstPort)
 	}
 
 	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),

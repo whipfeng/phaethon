@@ -949,6 +949,8 @@ Link NIC 收包（dst=VIP）
 
 **影响范围**：普通 TUN/Fake-IP/GIP/Branch 4 流量维持原行为；只有带 `OutputNICName` 的 conntrack 回程跳过本地栈逻辑。IPv6 同步采用同一规则。无需把流状态塞入 destination-only 的 RouteSelector 缓存。
 
+**逐跳诊断**：排查跨节点 TCP 建连时，仅对首个 TCP SYN 输出 `[MESH-TRACE]` Info 日志：Link NIC 成功排队时记录出站的本地 NIC、绑定 peer 与最终目标节点，`HandleMeshFrame` 注入前记录入站 peer。它不记录 payload，不改变路由、NAT 或队列行为；同一 SYN 应依次在 QG 出站、JF 入站/JF 出站、GG 入站出现。
+
 ---
 
 ## 7. 实施计划

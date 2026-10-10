@@ -1,11 +1,11 @@
 # Mesh 转发关联追踪设计
 
-> 版本：0.1.1
+> 版本：0.2.0
 > 状态：ACTIVE
 
 ## 1. 目标
 
-为 QG → JF → GG 的数据面诊断提供默认关闭的关联日志，不改变任何转发、排队、重传或协议语义。
+为单跳及多跳 mesh 数据面诊断提供默认关闭的关联日志，不改变任何转发、排队、重传或协议语义。
 
 ## 2. 配置
 
@@ -14,11 +14,11 @@ mesh:
   forwarding-trace: false
 ```
 
-关闭时不输出新增追踪事件。开启时仅追踪 IPv4 初始 TCP SYN 与 DNS UDP/53。
+关闭时不输出新增追踪事件。开启时追踪 IPv4 TCP 段与 DNS UDP/53。
 
 ## 3. 描述符与关联
 
-共享描述符只读取 IPv4/TCP/UDP 头。TCP 的关联键为 `tcp:<dst-ip>:<dst-port>:<tcp-seq>`；DNS 的关联键包含目的地址、目的端口和 DNS transaction ID。源地址、源端口、TTL、校验和均为观察字段，不作为跨阶段键，因为 NAT 可改变它们。
+共享描述符只读取 IPv4/TCP/UDP 头。TCP 的包级关联键为 `tcp:<dst-ip>:<dst-port>:<tcp-seq>`；初始 SYN 的键格式保持不变。SYN-ACK 额外输出 `reply_to`，以 ACK-1 和反向服务端点推导原 SYN 键，不创建流状态。其他 TCP 段仅以自身包级键、seq、ack 和 flags 观察排队时间，不伪造它们与某个 SYN 的关联。DNS 的关联键包含目的地址、目的端口和 DNS transaction ID。源地址、源端口、TTL、校验和均为观察字段，不作为跨阶段键，因为 NAT 可改变它们。
 
 包内容不写入日志、不复制到持久状态、不修改原始字节。
 
@@ -31,6 +31,7 @@ mesh:
 | Link NIC | `mesh/link_nic.go` | `linknic_egress` / `linknic_egress_error` |
 | Peer 选择 | `mesh/mesh.go` | `peer_selected` / `peer_send_error` |
 | P2P 写入 | `p2p/p2p.go` | `p2p_enqueued` / `p2p_queue_drop` / `p2p_write_*` |
+| FrameTransport | `frame/transport.go` | `frame_read` / `frame_inbound_enqueued` / `frame_inbound_dequeued` / `frame_write_*` |
 | P2P 接收 | `p2p/p2p.go` | `p2p_received` / `p2p_inbound_*` |
 | Mesh 注入 | `mesh/mesh.go`、`mesh/netstack.go` | `mesh_inject` / `linknic_inject` |
 
@@ -40,8 +41,11 @@ RouteSelector 只收到目的地址，因此 `route_decision` 以目的地址和
 
 - `tun_preinject` 后无 `linknic_egress`：本地栈路由或 Link NIC handoff。
 - `linknic_egress` 后无 P2P 写入：peer 选择或队列。
-- 发送端 `p2p_write_ok` 后无远端 `p2p_received`：底层 FrameTransport（包括 h_tunnel v1 BIND stream）。
-- 远端收到后无 `linknic_inject`：入站 P2P/mesh handler。
+- `p2p_enqueued` 到 `p2p_write_start` 长：发送侧 P2P 队列积压。
+- `frame_write_start` 到 `frame_write_ok` 长：代理或底层 stream 写入阻塞。
+- `frame_read` 到 `frame_inbound_dequeued` 长：FrameTransport 接收队列积压。
+- 发送端 `p2p_write_ok` 后无远端 `frame_read`：底层 FrameTransport（包括 h_tunnel v1 BIND stream）。
+- 远端 `frame_inbound_dequeued` 后无 `linknic_inject`：入站 P2P/mesh handler。
 
 ## 6. ADR：只观察，不改变投递语义
 

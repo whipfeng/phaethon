@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"net"
+	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -24,6 +25,11 @@ type LinkNIC struct {
 	mtu        uint32
 	meshMgr    *MeshManager
 	dispatcher stack.NetworkDispatcher
+
+	// Statistics (atomic counters)
+	injectPackets  uint64 // Packets successfully injected into gVisor
+	injectBytes    uint64 // Bytes successfully injected
+	injectDrops    uint64 // Packets dropped (no dispatcher or invalid proto)
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
@@ -52,6 +58,7 @@ func (l *LinkNIC) IsAttached() bool {
 // as OriginalInputNIC (fork patch #5) for DNAT reply routing (patch #6).
 func (l *LinkNIC) InjectInbound(data []byte) {
 	if l.dispatcher == nil || len(data) == 0 {
+		atomic.AddUint64(&l.injectDrops, 1)
 		return
 	}
 	var proto tcpip.NetworkProtocolNumber
@@ -61,13 +68,16 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 	case 6:
 		proto = ipv6.ProtocolNumber
 	default:
+		atomic.AddUint64(&l.injectDrops, 1)
 		return
 	}
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})
+	defer pkt.DecRef()
 	l.dispatcher.DeliverNetworkPacket(proto, pkt)
-	pkt.DecRef()
+	atomic.AddUint64(&l.injectPackets, 1)
+	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
 }
 
 // MTU implements stack.LinkEndpoint.MTU.
@@ -152,6 +162,14 @@ func (l *LinkNIC) WritePacket(pkt *stack.PacketBuffer) tcpip.Error {
 	}
 	return nil
 }
+
+// InjectStats returns the injection statistics for this LinkNIC.
+func (l *LinkNIC) InjectStats() (packets, bytes, drops uint64) {
+	return atomic.LoadUint64(&l.injectPackets),
+		atomic.LoadUint64(&l.injectBytes),
+		atomic.LoadUint64(&l.injectDrops)
+}
+
 
 // Wait implements stack.LinkEndpoint.Wait.
 func (l *LinkNIC) Wait() {}

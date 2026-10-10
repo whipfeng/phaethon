@@ -110,12 +110,16 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 				if r.NeedIPIP && r.EgressEIP != nil {
 					egressEIP = tcpip.AddrFrom4Slice(r.EgressEIP)
 				}
-				return stack.RouteDecision{
+				decision := stack.RouteDecision{
 					EgressNIC: r.LinkNIC,
 					NeedIPIP:  r.NeedIPIP,
 					EgressEIP: egressEIP,
 					Cacheable: r.NeedIPIP, // IPIP egress is static per prefix; mesh is dynamic
 				}
+				// Diagnostic: log the full decision
+				TraceForwardingRoute(dstIP, "branch=select_route egressNIC=%d needIPIP=%v localStack=%v cacheable=%v",
+					decision.EgressNIC, decision.NeedIPIP, decision.LocalStack, decision.Cacheable)
+				return decision
 			}
 		}
 

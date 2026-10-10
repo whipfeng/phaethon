@@ -694,8 +694,34 @@ func (n *Netstack) InjectInbound(proto tcpip.NetworkProtocolNumber, data []byte)
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})
+	defer pkt.DecRef()
 	n.linkEP.InjectInbound(proto, pkt)
-	pkt.DecRef()
+}
+
+// LinkNICStats returns injection statistics for all LinkNICs.
+// Returns map[nodeID]{packets, bytes, drops}.
+func (n *Netstack) LinkNICStats() map[string]struct {
+	Packets uint64
+	Bytes   uint64
+	Drops   uint64
+} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	result := make(map[string]struct {
+		Packets uint64
+		Bytes   uint64
+		Drops   uint64
+	})
+	for nodeID, nic := range n.linkNICs {
+		pkts, bytes, drops := nic.InjectStats()
+		result[nodeID] = struct {
+			Packets uint64
+			Bytes   uint64
+			Drops   uint64
+		}{pkts, bytes, drops}
+	}
+	return result
 }
 
 // AddMeshVIP registers a mesh virtual IP with the gVisor netstack so it responds

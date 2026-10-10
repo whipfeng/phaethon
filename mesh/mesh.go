@@ -2386,6 +2386,18 @@ func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT tim
 	return quality.Stats()
 }
 
+// GetLinkNICStats returns injection statistics for all LinkNICs.
+func (m *MeshManager) GetLinkNICStats() map[string]struct {
+	Packets uint64
+	Bytes   uint64
+	Drops   uint64
+} {
+	if m.tun == nil || m.tun.GetNetstack() == nil {
+		return nil
+	}
+	return m.tun.GetNetstack().LinkNICStats()
+}
+
 // selectBestPeer selects the best peer from candidates.
 // Priority: lowest hop count first, then best link quality (lowest effectiveRTT) as tiebreaker.
 // Falls back to random selection among min-hop candidates if no quality data.

@@ -4553,6 +4553,7 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	result["topology"] = mesh.GlobalMeshManager.GetTopology()
 	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
 	result["peers"] = mesh.GlobalMeshManager.GetPeers()
+	result["linkNICStats"] = mesh.GlobalMeshManager.GetLinkNICStats()
 	if cidr := mesh.GetMeshCIDR(); cidr != nil {
 		result["meshCIDR"] = cidr.String()
 	}

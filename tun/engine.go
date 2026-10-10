@@ -1059,25 +1059,33 @@ func (e *Engine) readLoop() {
 		}
 
 		if e.netstack != nil && e.netstack.LinkEP() != nil {
-			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
-			defer pkt.DecRef() // Use defer like official TUN device
-			// Don't call NetworkHeader().Consume() here - gVisor's parse.IPv4 will do it
-			// Debug: log injection of DNS packets
-			if proto == ipv4.ProtocolNumber && n >= 28 && pktBuf[9] == 17 { // UDP
-				dstIP := net.IP(pktBuf[16:20])
-				srcIP := net.IP(pktBuf[12:16])
-				hl := int(pktBuf[0]&0x0f) * 4
-				if n >= hl+4 {
-					dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
-					if dstPort == 53 {
-						util.LogInfo("[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
-					}
-				}
-			}
-			mesh.TraceForwarding("tun_preinject", pktBuf, "len=%d", len(pktBuf))
-			e.netstack.LinkEP().InjectInbound(proto, pkt)
+			e.injectPacket(proto, pktBuf, n)
 		}
 	}
+}
+
+// injectPacket wraps packet injection with proper resource cleanup.
+// Using defer in this method ensures PacketBuffer is always released,
+// even if InjectInbound panics.
+func (e *Engine) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, n int) {
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
+	defer pkt.DecRef()
+
+	// Don't call NetworkHeader().Consume() here - gVisor's parse.IPv4 will do it
+	// Debug: log injection of DNS packets
+	if proto == ipv4.ProtocolNumber && n >= 28 && pktBuf[9] == 17 { // UDP
+		dstIP := net.IP(pktBuf[16:20])
+		srcIP := net.IP(pktBuf[12:16])
+		hl := int(pktBuf[0]&0x0f) * 4
+		if n >= hl+4 {
+			dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
+			if dstPort == 53 {
+				util.LogInfo("[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
+			}
+		}
+	}
+	mesh.TraceForwarding("tun_preinject", pktBuf, "len=%d", len(pktBuf))
+	e.netstack.LinkEP().InjectInbound(proto, pkt)
 }
 
 // relay bidirectionally copies data between conn and target.

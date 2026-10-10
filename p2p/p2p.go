@@ -183,6 +183,9 @@ type Peer struct {
 // NewP2PManager creates a new P2P manager.
 // buildTag is auto-detected at runtime (e.g., "win7" on Windows 7/8).
 func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
+	frame.SetMeshPacketTraceHook(func(stage string, payload []byte) {
+		mesh.TraceForwarding(stage, payload, "")
+	})
 	m := &P2PManager{
 		peers:             make(map[string]*Peer),
 		nodeId:            nodeId,
@@ -257,33 +260,39 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 // transport. Control frames (hello/gossip) take priority over mesh
 // data so they are not delayed behind bulk transfers. Exits on write error or stop.
 // For control frames, encodes seq/ack into the payload (8 bytes: seq(4) + ack(4)).
+// Data frames are coalesced into batches for efficient transport.
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
-	writeFrame := func(req writeReq, isControl bool) bool {
-		payload := req.data
+	const maxBatchFrames = 64 // Maximum frames per batch
 
-		// Special handling for pure ACK: no seq allocation, no retransmission
+	// encodeControlFrame encodes seq/ack into control frame payload.
+	encodeControlFrame := func(req writeReq) []byte {
+		payload := req.data
 		if req.frameType == frame.FrameAck {
-			// Pure ACK format: {seq(4)=0, ack(4), payload}
-			// The payload already contains the ack number in the first 4 bytes
-			// We need to construct: {seq(4)=0, ack(4)} + payload
+			// Pure ACK format: {seq(4)=0, ack(4)}
 			ack := binary.BigEndian.Uint32(payload[0:4])
-			encoded := make([]byte, 8)                  // seq(4) + ack(4)
-			binary.BigEndian.PutUint32(encoded[0:4], 0) // seq = 0
+			encoded := make([]byte, 8)
+			binary.BigEndian.PutUint32(encoded[0:4], 0)
 			binary.BigEndian.PutUint32(encoded[4:8], ack)
-			payload = encoded
-			// Don't record for retransmission (pure ACK is fire-and-forget)
-		} else if isControl && !req.encodedControl {
+			return encoded
+		} else if !req.encodedControl {
 			// Encode seq/ack into control frame payload
 			seq := peer.sendState.allocSeq()
 			ack := peer.recvState.getLastSeq()
-			// Prepend 8 bytes: seq(4) + ack(4)
 			encoded := make([]byte, 8+len(payload))
 			binary.BigEndian.PutUint32(encoded[0:4], seq)
 			binary.BigEndian.PutUint32(encoded[4:8], ack)
 			copy(encoded[8:], payload)
-			payload = encoded
-			// Record as sent for retransmission
 			peer.sendState.markSent(seq, req.frameType, req.data)
+			return encoded
+		}
+		return payload
+	}
+
+	// writeSingleFrame writes a single control frame.
+	writeSingleFrame := func(req writeReq, isControl bool) bool {
+		payload := req.data
+		if isControl {
+			payload = encodeControlFrame(req)
 		}
 
 		if req.frameType == frame.FrameMeshPacket {
@@ -303,28 +312,79 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		return true
 	}
 
+	// writeBatch writes multiple data frames as a batch.
+	writeBatch := func(batch []writeReq) bool {
+		if len(batch) == 0 {
+			return true
+		}
+		if len(batch) == 1 {
+			return writeSingleFrame(batch[0], false)
+		}
+
+		// Encode frames for batch sending
+		frames := make([]frame.Frame, len(batch))
+		for i, req := range batch {
+			frames[i] = frame.Frame{Type: req.frameType, Payload: req.data}
+			if req.frameType == frame.FrameMeshPacket {
+				mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s batch=%d", peer.ID, len(batch))
+			}
+		}
+
+		if err := peer.transport.SendBatch(frames); err != nil {
+			for _, req := range batch {
+				if req.frameType == frame.FrameMeshPacket {
+					mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
+				}
+			}
+			util.LogWarn("[P2P] batch write error for %s: %v", peer.ID, err)
+			peer.transport.Close()
+			return false
+		}
+
+		for _, req := range batch {
+			if req.frameType == frame.FrameMeshPacket {
+				mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s batch=%d", peer.ID, len(batch))
+			}
+		}
+		return true
+	}
+
 	for {
 		// Fast path: control frames first, non-blocking.
 		select {
 		case req := <-peer.controlCh:
-			if !writeFrame(req, req.isControl) {
+			if !writeSingleFrame(req, req.isControl) {
 				return
 			}
 			continue
 		default:
 		}
+
+		// Block until we have something to send
 		select {
 		case <-peer.stopCh:
 			return
 		case req := <-peer.controlCh:
-			if !writeFrame(req, req.isControl) {
+			if !writeSingleFrame(req, req.isControl) {
 				return
 			}
 		case req, ok := <-peer.writeCh:
 			if !ok {
 				return
 			}
-			if !writeFrame(req, false) {
+			// Coalesce more data frames (non-blocking)
+			batch := make([]writeReq, 0, maxBatchFrames)
+			batch = append(batch, req)
+			for len(batch) < maxBatchFrames {
+				select {
+				case more := <-peer.writeCh:
+					batch = append(batch, more)
+				default:
+					goto sendBatch
+				}
+			}
+		sendBatch:
+			if !writeBatch(batch) {
 				return
 			}
 		}

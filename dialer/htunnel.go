@@ -442,7 +442,7 @@ func (c *htunnelConn) heartbeatLoop() {
 			return
 		}
 
-		timer := time.NewTimer(30 * time.Second)
+		timer := time.NewTimer(15 * time.Second)
 		select {
 		case <-c.closed:
 			timer.Stop()
@@ -758,7 +758,7 @@ func (c *htunnelPacketConn) heartbeatLoop() {
 			return
 		}
 
-		timer := time.NewTimer(30 * time.Second)
+		timer := time.NewTimer(15 * time.Second)
 		select {
 		case <-c.closed:
 			timer.Stop()

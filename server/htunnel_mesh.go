@@ -243,6 +243,19 @@ func (t meshChannelTransport) Send(frameType byte, payload []byte, isControl boo
 	}
 }
 
+// SendBatch sends multiple frames to the client. Each frame is enqueued
+// individually; the GET long-poll coalesces them on the response path.
+func (t meshChannelTransport) SendBatch(frames []frame.Frame) error {
+	for _, f := range frames {
+		select {
+		case t.ch.meshOut <- meshMsg{frameType: f.Type, payload: f.Payload}:
+		case <-t.ch.closed:
+			return io.ErrClosedPipe
+		}
+	}
+	return nil
+}
+
 func (t meshChannelTransport) Recv() (byte, []byte, error) {
 	select {
 	case msg := <-t.ch.meshIn:

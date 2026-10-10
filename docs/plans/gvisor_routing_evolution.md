@@ -667,7 +667,7 @@ s.SetRouteTable([]tcpip.Route{
 | 环境 | 地址 | 角色 | Mesh VIP | 用途 |
 |------|------|------|----------|------|
 | **GG** | 106.13.183.103 | mesh 节点 | 100.179.0.1 | 主节点，IPIP 出口测试 |
-| **QG** | 10.11.61.40 | mesh 节点 | 100.64.0.1 | TUN + 旁路网关（生产） |
+| **QG** | 10.11.61.41 | mesh 节点 | 100.64.0.1 | TUN + 旁路网关（生产） |
 | **VM** | 10.21.20.65 | mesh 节点 | 100.64.1.1 | Windows TUN 测试 |
 | **JF** | 36.140.28.178 | h_tunnel 服务端 | 100.2.0.1 | h_tunnel 测试 |
 | **MS9** | 10.161.88.9 | mesh 节点 | 100.189.0.1 | 多节点路由测试 |
@@ -702,7 +702,7 @@ experimental:
 ```
 
 **⚠️ 重要限制**：
-- QGT 和 QG 在同一台物理机（10.11.61.40）上
+- QGT 和 QG 在同一台物理机（10.11.61.41）上
 - **不能启用 TUN**，否则会冲突（TUN 设备、iptables 规则）
 - 因此**不能测试旁路网关 NAT**
 - 只能验证多 NIC 架构的内部逻辑（路由、IPIP 封装、mesh 转发）
@@ -738,7 +738,7 @@ experimental:
 
 ```bash
 # 1. 在 QG 服务器上新建 QGT 目录
-ssh root@10.11.61.40 "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
+ssh root@10.11.61.41 "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
 
 # 2. 修改 QGT 配置（独立 subnet、node_id）
 # 编辑 /root/qgt/config.yaml
@@ -747,17 +747,17 @@ ssh root@10.11.61.40 "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
 make linux
 
 # 4. 上传到 QGT
-scp dist/linux-amd64/phaethon root@10.11.61.40:/root/qgt/phaethon
+scp dist/linux-amd64/phaethon root@10.11.61.41:/root/qgt/phaethon
 
 # 5. 启动 QGT（独立进程，不影响 QG 生产）
-ssh root@10.11.61.40 "cd /root/qgt && nohup ./phaethon > phaethon.log 2>&1 &"
+ssh root@10.11.61.41 "cd /root/qgt && nohup ./phaethon > phaethon.log 2>&1 &"
 ```
 
 **验证命令**：
 
 ```bash
 # 在 QGT 上测试
-ssh root@10.11.61.40 "cd /root/qgt && ./phaethon --config config.yaml"
+ssh root@10.11.61.41 "cd /root/qgt && ./phaethon --config config.yaml"
 
 # 测试 mesh 连通性
 ping 100.179.0.1  # GG

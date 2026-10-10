@@ -85,7 +85,7 @@
 
 ### Task 4.2: QG 环境部署 ✓
 - [x] 编译 Linux 版本
-- [x] 上传到 QG 环境 (10.11.61.40)
+- [x] 上传到 QG 环境 (10.11.61.41)
 - [x] 重启服务 (rc-service phaethon restart)
 - [x] 验证 API 端点 (/api/mesh/domain-suffixes, /api/mesh/advertise)
 - [x] 服务状态正常 (status: started)

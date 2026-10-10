@@ -8,6 +8,55 @@ import (
 	"testing"
 )
 
+func TestStreamTransportMeshPacketTraceOrder(t *testing.T) {
+	var mu sync.Mutex
+	stages := make([]string, 0, 5)
+	SetMeshPacketTraceHook(func(stage string, _ []byte) {
+		mu.Lock()
+		stages = append(stages, stage)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { SetMeshPacketTraceHook(nil) })
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	sender := NewStreamTransport(client)
+	receiver := NewStreamTransport(server)
+	defer sender.Close()
+	defer receiver.Close()
+
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- sender.Send(FrameMeshPacket, []byte("mesh"), false) }()
+
+	frameType, payload, err := receiver.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if frameType != FrameMeshPacket || string(payload) != "mesh" {
+		t.Fatalf("Recv() = type=0x%02x payload=%q", frameType, payload)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	index := make(map[string]int, len(stages))
+	for i, stage := range stages {
+		index[stage] = i
+	}
+	for _, stage := range []string{"frame_write_start", "frame_write_ok", "frame_read", "frame_inbound_enqueued", "frame_inbound_dequeued"} {
+		if _, ok := index[stage]; !ok {
+			t.Fatalf("missing %s in %v", stage, stages)
+		}
+	}
+	if index["frame_read"] > index["frame_inbound_enqueued"] || index["frame_inbound_enqueued"] > index["frame_inbound_dequeued"] {
+		t.Fatalf("unexpected receive order: %v", stages)
+	}
+}
+
 func TestStreamTransportConcurrentSendPreservesFrames(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

@@ -89,18 +89,17 @@ func (p *ipipProtocol) HandleUnknownDestinationPacket(id stack.TransportEndpoint
 		Payload:           buffer.MakeWithData(innerData),
 		IsForwardedPacket: false,
 	})
+	defer innerPkt.DecRef()
 
 	// Inject inner packet into NIC 1 (TUN) in promiscuous mode
 	// This allows transit traffic (dst=internet/mesh) to be accepted
 	if p.linkEP == nil {
 		util.LogWarn("[IPIP] linkEP is nil")
-		innerPkt.DecRef()
 		return stack.UnknownDestinationPacketHandled
 	}
 
 	// Inject the inner packet
 	p.linkEP.InjectInbound(header.IPv4ProtocolNumber, innerPkt)
-	innerPkt.DecRef()
 
 	return stack.UnknownDestinationPacketHandled
 }

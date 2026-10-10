@@ -14,6 +14,7 @@ func TestParseForwardingTraceTCPSYN(t *testing.T) {
 	binary.BigEndian.PutUint16(packet[20:22], 43123)
 	binary.BigEndian.PutUint16(packet[22:24], 443)
 	binary.BigEndian.PutUint32(packet[24:28], 0x12345678)
+	packet[32] = 0x50
 	packet[33] = 0x02
 
 	before := append([]byte(nil), packet...)
@@ -36,6 +37,46 @@ func TestParseForwardingTraceTCPSYN(t *testing.T) {
 	traceAfterNAT, ok := ParseForwardingTrace(packet)
 	if !ok || traceAfterNAT.Key != trace.Key {
 		t.Fatalf("NAT-stable key=%q, want %q", traceAfterNAT.Key, trace.Key)
+	}
+}
+
+func TestParseForwardingTraceTCPReturnAndData(t *testing.T) {
+	packet := make([]byte, 40)
+	packet[0] = 0x45
+	packet[9] = 6
+	copy(packet[12:16], []byte{100, 2, 0, 10})
+	copy(packet[16:20], []byte{100, 0, 0, 1})
+	binary.BigEndian.PutUint16(packet[20:22], 443)
+	binary.BigEndian.PutUint16(packet[22:24], 43123)
+	binary.BigEndian.PutUint32(packet[24:28], 0xabcdef01)
+	binary.BigEndian.PutUint32(packet[28:32], 0x12345679)
+	packet[32] = 0x50
+	packet[33] = 0x12
+
+	trace, ok := ParseForwardingTrace(packet)
+	if !ok {
+		t.Fatal("expected TCP SYN-ACK trace")
+	}
+	if got, want := trace.Key, "tcp:100.0.0.1:43123:2882400001"; got != want {
+		t.Fatalf("key=%q, want %q", got, want)
+	}
+	if got, want := trace.ReplyTo, "tcp:100.2.0.10:443:305419896"; got != want {
+		t.Fatalf("replyTo=%q, want %q", got, want)
+	}
+	if trace.Kind != "tcp_syn_ack" || trace.Seq != 0xabcdef01 || trace.Ack != 0x12345679 || trace.Flags != 0x12 {
+		t.Fatalf("trace=%+v", trace)
+	}
+
+	packet = append(packet, 1)
+	packet[33] = 0x18
+	trace, ok = ParseForwardingTrace(packet)
+	if !ok || trace.Kind != "tcp_data" || trace.ReplyTo != "" {
+		t.Fatalf("trace=%+v ok=%t", trace, ok)
+	}
+
+	packet[32] = 0x40
+	if _, ok := ParseForwardingTrace(packet); ok {
+		t.Fatal("malformed TCP header should not be traced")
 	}
 }
 

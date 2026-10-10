@@ -144,6 +144,52 @@ func (t *htunnelDirectTransport) Send(frameType byte, payload []byte, isControl 
 	return t.sendFrame(frameType, payload)
 }
 
+// SendBatch writes multiple frames as a single HTTP POST.
+// All frames are serialized into one batch and sent together.
+func (t *htunnelDirectTransport) SendBatch(frames []frame.Frame) error {
+	if len(frames) == 0 {
+		return nil
+	}
+	if len(frames) == 1 {
+		return t.sendFrame(frames[0].Type, frames[0].Payload)
+	}
+
+	select {
+	case <-t.closed:
+		return io.ErrClosedPipe
+	default:
+	}
+
+	// Serialize all frames into one buffer
+	var buf bytes.Buffer
+	for _, f := range frames {
+		if err := frame.WriteFrame(&buf, f.Type, f.Payload); err != nil {
+			return err
+		}
+	}
+	data := buf.Bytes()
+
+	t.seqMu.Lock()
+	t.writeSeq++
+	seq := t.writeSeq
+	t.seqMu.Unlock()
+
+	// Acquire semaphore (blocks if htunnelConcurrency POSTs are in flight)
+	select {
+	case t.sendSem <- struct{}{}:
+	case <-t.closed:
+		return io.ErrClosedPipe
+	}
+
+	go func() {
+		defer func() { <-t.sendSem }()
+		if err := t.postBatch(data, seq); err != nil {
+			util.LogDebug("[HTUNNEL-DIRECT] batch POST fail (seq=%d, frames=%d): %v", seq, len(frames), err)
+		}
+	}()
+	return nil
+}
+
 func (t *htunnelDirectTransport) sendFrame(frameType byte, payload []byte) error {
 	select {
 	case <-t.closed:

@@ -1023,6 +1023,13 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 				util.LogInfo("[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
 					targetNodeID, peer.GetNodeID(), i+1)
 			}
+			// Phaethon diagnostic: confirm packet handed off to P2P layer
+			if len(packet) >= 20 {
+				srcIP := net.IP(packet[12:16])
+				dstIP := net.IP(packet[16:20])
+				util.LogInfo("[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
+					targetNodeID, peer.GetNodeID(), peer.GetProxyName(), srcIP, dstIP, len(packet), peerWithHop.Hop)
+			}
 			util.LogDebug("[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
 				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 			return nil

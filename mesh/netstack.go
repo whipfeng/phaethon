@@ -28,7 +28,7 @@ import (
 // forwarders. These are set by the TUN engine so that the netstack can delegate
 // connection handling without importing the tun package.
 type ForwarderCallbacks struct {
-	HandleTCPConn func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping)
+	HandleTCPConn func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping)
 	HandleUDPConn func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping)
 	// ResolveOriginalSrc resolves the original source IP from the NAT table.
 	// proto is 6 for TCP, 17 for UDP.
@@ -205,6 +205,9 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 								continue
 							}
 							linkNIC, ok := n.linkNICs[nextHopID]
+							// Phaethon diagnostic: dump linkNICs map
+							util.LogInfo("[ROUTE-LOOKUP] dst=%s target=%s nextHop=%s linkNICFound=%v nicID=%d linkNICsMap=%v",
+								dst, targetNodeID, nextHopID, ok, linkNIC.nicID, n.linkNICs)
 							if !ok || linkNIC.nicID == 0 {
 								continue
 							}
@@ -316,6 +319,11 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 		n.linkNICs[nodeID] = linkNIC
 		util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, nodeID, nodeID, peer.Subnet)
 	}
+
+	// Phaethon fix: clear RouteSelector cache after LinkNIC changes.
+	// Cached decisions may reference stale NIC IDs that no longer exist.
+	util.LogInfo("[NETSTACK] clearing RouteSelector cache after LinkNIC sync")
+	n.ns.ClearRouteDecisionCache()
 
 	// Rebuild route table with per-peer routes
 	if err := n.UpdateLinkRoutes(); err != nil {
@@ -1299,21 +1307,25 @@ func (n *Netstack) acceptTCP() {
 
 	fwd := tcp.NewForwarder(n.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
-		util.LogInfo("[TCP-DEBUG] tcp forwarder called local=%s:%d remote=%s:%d",
-			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+		// Compute correlation ID for trace linking
+		corrID := fmt.Sprintf("%s:%d->%s:%d",
+			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort,
+			net.IP(id.LocalAddress.AsSlice()), id.LocalPort)
+		util.LogInfo("[TCP-DEBUG] [%s] tcp forwarder called local=%s:%d remote=%s:%d",
+			corrID, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		var wq waiter.Queue
-		util.LogInfo("[TCP-DEBUG] calling CreateEndpoint...")
+		util.LogInfo("[TCP-DEBUG] [%s] calling CreateEndpoint...", corrID)
 		ep, err := r.CreateEndpoint(&wq)
-		util.LogInfo("[TCP-DEBUG] CreateEndpoint returned, err=%v", err)
+		util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint returned err=%v", corrID, err)
 		if err != nil {
-			util.LogWarn("[TCP-DEBUG] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
-				err, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+			util.LogWarn("[TCP-DEBUG] [%s] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
+				corrID, err, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 				net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 			r.Complete(true)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] CreateEndpoint succeeded, calling handleConn async")
+		util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint succeeded, calling handleConn async", corrID)
 		r.Complete(false)
 
 		// Set TCP keepalive on inbound connection
@@ -1323,6 +1335,7 @@ func (n *Netstack) acceptTCP() {
 		dstIP := net.IP(id.LocalAddress.AsSlice())
 		dstAddr := dstIP.String()
 		dstPort := int(id.LocalPort)
+		srcPort := int(id.RemotePort)
 		srcIP := net.IP(id.RemoteAddress.AsSlice())
 		if n.callbacks != nil && n.callbacks.ResolveOriginalSrc != nil {
 			srcIP, _ = n.callbacks.ResolveOriginalSrc(6, srcIP, id.RemotePort)
@@ -1360,7 +1373,7 @@ func (n *Netstack) acceptTCP() {
 			go func() {
 				defer ep.Close()
 				defer conn.Close()
-				n.callbacks.HandleTCPConn(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
+				n.callbacks.HandleTCPConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
 			}()
 		} else {
 			ep.Close()

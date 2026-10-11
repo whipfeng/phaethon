@@ -1,6 +1,6 @@
 # gVisor 路由架构最终方案：RouteSelector + Link NICs
 
-## 状态：✅ 最终方案（2026-10-09 修订：补丁 #12 以单一 `LocalStack` 统一本地交付/栈内环回，并让 conntrack 回程按 `OutputNICName` 直出；取代补丁 #10 的双标记模型）
+## 状态：✅ 最终方案（2026-10-11 修订：链路对象直接持有 LinkNIC 指针，无需 linkID 索引 map，多链路自然支持）
 
 **本文档整合并取代**：
 - `gvisor_routing_evolution.md`（早期调研，已废弃）
@@ -471,33 +471,49 @@ Link NIC 是"哑"的，职责是收发直连：
 **设计目标**：两个节点间可以存在多个链路（通过不同 proxy），所有链路都参与选路和负载均衡。
 
 **链路标识机制**：
-- 每个链路用 `主动端nodeID:proxyName` 唯一标识
-- 主动连接（outbound）：`linkKey = localNodeID:localProxyName`（如 `vm:SOCKS5_7890`）
-- 被动连接（inbound）：`linkKey = remoteNodeID:remoteProxyName`（如 `vm:SOCKS5_7890`）
+- 每个链路用 `主动端nodeID:proxyName` 唯一标识（用于日志和调试）
+- 主动连接（outbound）：`linkID = localNodeID:localProxyName`（如 `vm:SOCKS5_7890`）
+- 被动连接（inbound）：`linkID = remoteNodeID:remoteProxyName`（如 `vm:SOCKS5_7890`）
 - proxyName 在 hello 握手中通过 `GossipInfo.FriendlyName` 声明
-- 入站包通过 `meshInboundPacket.linkKey` 标识来自哪条链路
+- linkID 用于日志输出，便于追踪链路来源
 
-**LinkNIC 与链路的映射**：
-- 每个链路一个 LinkNIC，使用 `n.linkNICs[linkKey]` 索引
+**LinkNIC 与链路的关系**：
+- **每个链路对象直接持有自己的 LinkNIC 指针**（不是通过 map 索引）
+- 链路对象结构：
+  ```go
+  type P2PLink struct {
+      // ... 其他字段
+      linkNIC   *mesh.LinkNIC  // 链路直接持有自己的 LinkNIC
+      nodeID    string
+      proxyName string
+      // ...
+  }
+  ```
+- **LinkNIC 生命周期与 P2P 链路绑定（同生共死）**：
+  - P2P 链路建立 → 创建 LinkNIC → `link.linkNIC = linkNIC` → 加入 RouteSelector 可选列表
+  - P2P 链路断开 → 从 RouteSelector 列表移除 → 删除 LinkNIC → `link.linkNIC = nil`
+  - P2P 重连 → 创建新的 LinkNIC（新的 NIC ID）
+- **不持久化统计信息**：每次 P2P 连接创建新的 sendState/recvState，不跨连接保留
 - 所有链路都参与 RouteSelector 的 Branch 2/3 选路（Dijkstra 计算下一跳时考虑所有链路）
 - SendToNode 在相同 hop count 的链路间做 round-robin 负载均衡（已实现）
 
 **入站包处理流程**：
-1. P2P 层收到 FrameMeshPacket → 构造 `meshInboundPacket{fromNodeID, linkKey, frame}`
-2. HandleMeshFrame 接收 `fromNodeID` 和 `linkKey`
-3. InjectFromNode 使用 `linkKey` 查找对应的 LinkNIC
-4. 调用 LinkNIC.InjectInbound 注入到 gVisor netstack
+1. P2P 链路对象收到 FrameMeshPacket
+2. 链路对象直接使用自己持有的 LinkNIC：`link.linkNIC.InjectInbound(frame)`
+3. 注入到 gVisor netstack
+4. **无需 linkID 查找**：链路对象已经持有 LinkNIC 指针
 
 **出站包处理流程**：
 1. RouteSelector 计算下一跳 nodeID（Dijkstra 选路）
-2. SendToNode 找到所有到该 nodeID 的链路（多个 proxyName）
-3. 在相同 hop count 的链路间 round-robin 选择一条链路
-4. 通过该链路的 PeerSender.Send 发送
+2. **RouteSelector 直接返回 LinkNIC**（不是 linkID，见 §5.5）
+3. 通过该 LinkNIC 发送（LinkNIC.WritePackets）
+4. LinkNIC 内部通过 PeerSender.Send 发送到对端
 
 **稳定性保证**：
 - proxyName 是配置中的固定值，重连时不变
-- LinkNIC key（`nodeID:proxyName`）在重连时保持稳定
-- TCP forwarder 的 endpoint 查找不会因重连而失败
+- LinkNIC 生命周期与 P2P 链路一致，断开即删除
+- RouteDecision cache 在 LinkNIC 删除时通过缓存自愈机制刷新（补丁 #14，§6.16）
+- TCP forwarder 的 endpoint 查找不依赖 LinkNIC（通过 fakeIP + 域名识别）
 
 ### 5.5 LinkNIC 直接绑定优化（Dijkstra 直返）
 
@@ -546,10 +562,12 @@ type nodeInfo struct {
 
 ```go
 // buildTopologyGraph 时填充 LinkNIC（只有直连链路）
+// 直连链路：从 P2P 链路对象直接获取 LinkNIC 指针
+p2pLink := m.p2pMgr.GetLink(neighborID)  // 获取到邻居的 P2P 链路对象
 link := &LinkQualityInfo{
     From:    selfID,
     To:      neighborID,
-    LinkNIC: m.netstack.GetLinkNICByLinkKey(linkKey), // 直连链路才有 LinkNIC
+    LinkNIC: p2pLink.linkNIC,  // 直连链路：从链路对象直接获取 LinkNIC
     ...
 }
 
@@ -579,10 +597,76 @@ return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
 - ✅ 逻辑更清晰：Dijkstra 直接返回可用的 LinkNIC
 
 **链路重连处理**：
-- SyncLinkNICs 检查 linkKey 是否已存在
-- 存在 → 复用 LinkNIC 对象，调用 `UpdateLocalSeq()` 更新状态
-- 不存在 → 创建新 LinkNIC
-- LinkNIC 对象复用（槽位复用），但每次链路建立都是"新绑定"
+- P2P 连接断开 → 删除 LinkNIC → 缓存自愈（补丁 #14，见 §6.16）
+- P2P 重连 → 创建新 LinkNIC（新 NIC ID）→ 加入 RouteSelector 可选列表
+- **不复用 LinkNIC 对象**：每次连接都是全新的 LinkNIC，避免残留状态
+- **不持久化统计信息**：sendState/recvState 每次连接重新创建，不跨连接保留
+
+### 5.6 LinkNIC 生命周期管理
+
+**设计原则**：LinkNIC 的生命周期与 P2P 链路完全一致（同生共死）。
+
+**生命周期事件**：
+
+| 事件 | 动作 | 说明 |
+|------|------|------|
+| P2P 连接建立 | 创建 LinkNIC | 分配新 NIC ID，加入 RouteSelector 可选列表 |
+| P2P 连接断开 | 删除 LinkNIC | 从 gVisor 移除 NIC，清空 RouteDecision cache |
+| P2P 重连 | 创建新 LinkNIC | 新 NIC ID，不复用旧对象 |
+
+**为什么不复用 LinkNIC**：
+1. **避免残留状态**：旧的 LinkNIC 可能缓存了过时的路由信息或统计
+2. **简化生命周期**：LinkNIC 与 P2P 连接一一对应，逻辑清晰
+3. **NIC ID 变化可接受**：RouteSelector 每次选路都重新计算，不依赖固定的 NIC ID
+
+**为什么不持久化统计信息**：
+1. **统计信息是链路属性，不是节点属性**：链路断开后，该链路的 RTT/丢包率已无意义
+2. **重连是新链路**：虽然两端节点相同，但底层传输路径可能已变化（不同 TCP 连接、不同代理路径）
+3. **简化实现**：不需要 linkStats map 和 save/restore 逻辑
+4. **快速收敛**：新连接从 0 开始统计，几个样本后就能准确反映当前链路质量
+
+**RouteDecision cache 处理**：
+- **LinkNIC 删除时：无需主动清空 cache**（补丁 #14 缓存自愈，见 §6.16）
+  - 后续发往受影响目的地的包会发现缓存的 NIC 无效
+  - 自动调用 RouteSelector 获取新路径，新结果覆盖缓存
+- SyncLinkNICs 后：无需主动清空 cache（同理，缓存自愈处理）
+- `ClearRouteDecisionCache()` 仍保留用于其他拓扑变化场景（如路由表变更、fakeIP 池重置）
+
+**P2P 层与 Mesh 层的交互**：
+
+```go
+// P2P 链路建立时
+func (m *P2PManager) onLinkEstablished(link *P2PLink) {
+    // 1. 创建 LinkNIC
+    linkNIC := m.meshHandler.CreateLinkNIC(link.nodeID, link.proxyName, link.subnet)
+    
+    // 2. 链路对象直接持有 LinkNIC 指针
+    link.linkNIC = linkNIC
+    
+    // 3. 创建新的 sendState/recvState
+    link.sendState = newSendState()
+    link.recvState = newRecvState()
+    
+    // 4. LinkNIC 已自动加入 RouteSelector 可选列表（在 CreateLinkNIC 内部完成）
+}
+
+// P2P 链路断开时
+func (m *P2PManager) onLinkDisconnected(link *P2PLink) {
+    // 1. 从链路对象获取 LinkNIC
+    linkNIC := link.linkNIC
+    
+    // 2. 通知 mesh 层删除 LinkNIC
+    m.meshHandler.DeleteLinkNIC(linkNIC)
+    
+    // 3. 清空链路对象的 LinkNIC 指针
+    link.linkNIC = nil
+    
+    // 4. sendState/recvState 随链路对象一起销毁（不持久化）
+    
+    // 5. 无需清空 RouteDecision cache：补丁 #14 缓存自愈机制会处理
+    //    后续包发现缓存的 NIC 无效时，自动调用 RouteSelector 获取新路径
+}
+```
 
 ---
 
@@ -1069,6 +1153,51 @@ Link NIC 收包（dst=VIP）
 
 **逐跳诊断**：排查跨节点 TCP 建连时，仅对首个 TCP SYN 输出 `[MESH-TRACE]` Info 日志：Link NIC 成功排队或失败时记录本地 NIC、绑定 peer、最终目标节点与错误，`HandleMeshFrame` 注入前记录入站 peer 与当前缓存的 `LocalStack` 判定。对 UDP/53 使用同样的逐跳入口/出口记录。它不记录 payload，不改变路由、NAT 或队列行为；同一成功 SYN 或 DNS 查询应依次在 QG 出站、JF 入站/JF 出站、GG 入站出现。
 
+### 6.16 补丁 #14：RouteSelector 缓存自愈（新增，2026-10-11）
+
+**现象**：P2P 连接断开后，LinkNIC 被删除。如果 RouteDecision 缓存中有条目指向已删除的 LinkNIC，后续发往该目的地的包会：
+1. 命中缓存，获取 `decision.EgressNIC`（指向已删除的 NIC）
+2. `s.nics[decision.EgressNIC]` 返回 `ok=false`
+3. Fall through 到路由表查询
+4. Mesh 目的地在路由表中无条目（设计 §1.2）
+5. 返回 `ErrHostUnreachable`，包被丢弃
+
+**修复**：当缓存的 `decision.EgressNIC` 无效时，不 fall through 到路由表，而是直接调用 `s.routeSelector(dst)` 获取新路径。新结果会自动覆盖缓存（`decisionForSelectorRLocked` 中 `s.routeDecisionCache[dst] = decision`），无需显式删除缓存条目。
+
+**实现逻辑**：
+
+```go
+// findRouteInner 中 RouteSelector 块
+if s.routeSelector != nil {
+    decision, ok := s.decisionForSelectorRLocked(remoteAddr)
+    if ok {
+        // 尝试用 decision.EgressNIC 建路由
+        if decision.EgressNIC != 0 && !decision.NeedIPIP {
+            outgoingNIC, nicOK := s.nics[decision.EgressNIC]
+            if nicOK && outgoingNIC.Enabled() {
+                return makeRoute(...)  // 成功
+            }
+            // NIC 无效：直接调用 RouteSelector 获取新路径
+            if freshDecision, freshOK := s.routeSelector(remoteAddr); freshOK {
+                // 用新 decision 重试（递归或内联）
+                // freshDecision 会自动覆盖缓存
+            }
+        }
+        // NeedIPIP 情况同理
+    }
+}
+```
+
+**优势**：
+- ✅ 自愈：缓存失效时自动刷新，无需外部调用 `ClearRouteDecisionCache()`
+- ✅ 精准：只刷新失效的目的地的缓存，不影响其他条目
+- ✅ 简单：不需要在 LinkNIC 删除时触发缓存清理
+
+**与 LinkNIC 生命周期的关系**：
+- P2P 连接断开 → 删除 LinkNIC → 后续包自动触发缓存自愈 → RouteSelector 选出新路径
+- 无需在删除 LinkNIC 时显式调用 `ClearRouteDecisionCache()`
+- `ClearRouteDecisionCache()` 仍保留用于其他拓扑变化场景（如路由表变更）
+
 ---
 
 ## 7. 实施计划
@@ -1093,6 +1222,8 @@ Link NIC 收包（dst=VIP）
 9. ❌ 补丁 #9：`stack.Options.HandleLocal=true`（**已回退**，引入外部 DNS 丢包回归，见 §6.12）
 10. ✅ 补丁 #10：`RouteDecision.LocalLoopback` + `FindRoute` 单点覆写 → 出栈栈内环回（取代 #9，见 §6.13）
 11. ✅ 补丁 #11：Input 链 conntrack 补记输入 NIC，修复 DNS 劫持器/Forwarder 回包源地址误改写（见 §6.14）
+12. ✅ 补丁 #12：`LocalStack` 统一目的地址本地语义，conntrack 回程直出（见 §6.15）
+13. ⏳ 补丁 #14：RouteSelector 缓存自愈，LinkNIC 删除后自动刷新失效缓存（见 §6.16）
 
 **架构实现**：
 1. ✅ Link NICs：每个直连 peer 一个 NIC

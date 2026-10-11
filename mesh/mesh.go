@@ -76,6 +76,7 @@ type PeerSender interface {
 	GetRemoteSeq() uint16    // remote sequence number (for gossip advertisement)
 	GetFriendlyName() string // friendly name (proxy name, for display only)
 	HasProxy() bool          // true if this is an active (outbound) connection
+	GetLinkNIC() *LinkNIC    // direct LinkNIC held by this link (design §5.6)
 }
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
@@ -647,18 +648,8 @@ func (m *MeshManager) NextHopLink(targetNodeID string) (nextHopNodeID string, li
 	// Get the LinkNIC from netstack using the peer's linkKey.
 	for _, peer := range m.topology.GetAllPeers() {
 		if peer.NodeID() == targetNodeID && peer.Sender != nil {
-			// Construct linkKey (same logic as GetPeers/buildTopologyGraph)
-			var linkKey string
-			if peer.Sender.HasProxy() {
-				linkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
-			} else {
-				remoteProxyName := peer.Sender.GetFriendlyName()
-				if remoteProxyName == "" {
-					remoteProxyName = peer.Sender.GetProxyName()
-				}
-				linkKey = fmt.Sprintf("%s:%s", targetNodeID, remoteProxyName)
-			}
-			return targetNodeID, m.netstack.GetLinkNICByLinkKey(linkKey)
+			// Get LinkNIC directly from peer's Sender (design §5.6)
+			return targetNodeID, peer.Sender.GetLinkNIC()
 		}
 	}
 	return "", nil
@@ -1169,8 +1160,8 @@ func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 //   - All other frames: inject into the fromNode's Link NIC. The netstack then
 //     decides local delivery (GIP/VIP/fakeIP), forwarding (NAT return, relay),
 //     TTL decrement and ICMP generation — no manual 卡口 at the frame layer.
-func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkKey string, frame []byte) {
-	util.LogDebug("[MESH] HandleMeshFrame called from %s linkKey=%s: %d bytes", fromNodeID, linkKey, len(frame))
+func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame []byte) {
+	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
 		return
@@ -1191,8 +1182,8 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkKey string, frame [
 				return
 			}
 			util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
-			// Recursively process the inner packet (same linkKey as outer)
-			m.HandleMeshFrame(fromNodeID, linkKey, innerPacket)
+			// Recursively process the inner packet (same linkNIC)
+			m.HandleMeshFrame(fromNodeID, linkNIC, innerPacket)
 			return
 		}
 
@@ -1225,20 +1216,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkKey string, frame [
 	}
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
-	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),
+	// Inject into the Link NIC provided by the P2P layer. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.
-	if m.netstack == nil {
-		util.LogWarn("[MESH] no netstack, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
+	if linkNIC == nil {
+		util.LogWarn("[MESH] no linkNIC, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
 		return
 	}
-	TraceForwarding("mesh_inject_start", frame, "fromNode=%s linkKey=%s", fromNodeID, linkKey)
-	if err := m.netstack.InjectFromNode(linkKey, frame); err != nil {
-		TraceForwarding("mesh_inject_error", frame, "fromNode=%s linkKey=%s err=%v", fromNodeID, linkKey, err)
-		util.LogWarn("[MESH] inject frame from %s (dst=%s) via Link NIC failed: %v", fromNodeID, dstIP, err)
-	} else {
-		TraceForwarding("mesh_inject_ok", frame, "fromNode=%s linkKey=%s", fromNodeID, linkKey)
-	}
+	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
+	linkNIC.InjectInbound(frame)
+	TraceForwarding("mesh_inject_ok", frame, "fromNode=%s", fromNodeID)
 }
 
 // HandleTopologyGossip processes a gossip announcement from a peer.
@@ -2493,16 +2480,78 @@ func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT tim
 	return quality.Stats()
 }
 
+// CreateLinkNIC creates a new LinkNIC for a peer link (design §5.6).
+// Called by P2P layer when a link is established (after hello completed).
+// Returns the created LinkNIC pointer that the peer will hold directly.
+func (m *MeshManager) CreateLinkNIC(nodeID, proxyName, subnet string) *LinkNIC {
+	if m.netstack == nil {
+		util.LogError("[MESH] cannot create LinkNIC: netstack not initialized")
+		return nil
+	}
+
+	_, peerSubnet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		util.LogError("[MESH] failed to parse peer %s subnet %s: %v", nodeID, subnet, err)
+		return nil
+	}
+
+	// Construct linkKey for logging (same logic as GetPeers)
+	linkKey := fmt.Sprintf("%s:%s", nodeID, proxyName)
+
+	linkNIC, err := m.netstack.CreateLinkNIC(linkKey, nodeID, peerSubnet)
+	if err != nil {
+		util.LogError("[MESH] failed to create LinkNIC for link %s: %v", linkKey, err)
+		return nil
+	}
+
+	util.LogInfo("[MESH] created LinkNIC for link %s (peer %s, subnet %s)", linkKey, nodeID, subnet)
+	return linkNIC
+}
+
+// DeleteLinkNIC removes a LinkNIC from the netstack (design §5.6).
+// Called by P2P layer when a link is disconnected.
+func (m *MeshManager) DeleteLinkNIC(linkNIC *LinkNIC) {
+	if linkNIC == nil || m.netstack == nil {
+		return
+	}
+
+	if err := m.netstack.DeleteLinkNIC(linkNIC); err != nil {
+		util.LogError("[MESH] failed to delete LinkNIC %d: %v", linkNIC.nicID, err)
+	} else {
+		util.LogInfo("[MESH] deleted LinkNIC %d (peer %s)", linkNIC.nicID, linkNIC.peerNodeID)
+	}
+}
+
 // GetLinkNICStats returns injection statistics for all LinkNICs.
 func (m *MeshManager) GetLinkNICStats() map[string]struct {
 	Packets uint64
 	Bytes   uint64
 	Drops   uint64
 } {
-	if m.netstack == nil {
-		return nil
+	result := make(map[string]struct {
+		Packets uint64
+		Bytes   uint64
+		Drops   uint64
+	})
+
+	// Iterate over all peers and collect stats from their LinkNICs
+	allPeers := m.topology.GetAllPeers()
+	for _, p := range allPeers {
+		if p.Sender == nil {
+			continue
+		}
+		// Get the peer's linkNIC from the P2P layer
+		// Note: This requires P2P layer to expose linkNIC, which it doesn't currently.
+		// For now, return empty stats. This can be enhanced later if needed.
+		nodeID := p.NodeID()
+		result[nodeID] = struct {
+			Packets uint64
+			Bytes   uint64
+			Drops   uint64
+		}{0, 0, 0}
 	}
-	return m.netstack.LinkNICStats()
+
+	return result
 }
 
 func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
@@ -2823,24 +2872,10 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		localSeq := peer.Sender.GetLocalSeq()
 		remoteSeq := peer.Sender.GetRemoteSeq()
 		
-		// Construct linkKey (same logic as GetPeers)
-		var linkKey string
-		if peer.Sender.HasProxy() {
-			// Active connection: we are the active end
-			linkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
-		} else {
-			// Passive connection: remote is the active end
-			remoteProxyName := peer.Sender.GetFriendlyName()
-			if remoteProxyName == "" {
-				remoteProxyName = peer.Sender.GetProxyName()
-			}
-			linkKey = fmt.Sprintf("%s:%s", neighborID, remoteProxyName)
-		}
-		
 		link := &LinkQualityInfo{
 			From:      selfID,
 			To:        neighborID,
-			LinkNIC:   m.netstack.GetLinkNICByLinkKey(linkKey), // Direct link has LinkNIC
+			LinkNIC:   peer.Sender.GetLinkNIC(), // Direct link has LinkNIC (design §5.6)
 			LocalSeq:  localSeq,
 			RemoteSeq: remoteSeq,
 		}

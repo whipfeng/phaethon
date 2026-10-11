@@ -1343,7 +1343,7 @@ func HandleP2PConnection(conn net.Conn, address string) {
 	}
 	if GlobalP2PManager != nil {
 		util.LogInfo("[P2P] incoming connection from %s (address=%s)", conn.RemoteAddr(), address)
-		GlobalP2PManager.HandleP2PTransport(frame.NewStreamTransport(conn), conn.RemoteAddr().String())
+		GlobalP2PManager.HandleP2PTransport(frame.NewStreamTransport(conn), address)
 	} else {
 		util.LogDebug("[P2P] no P2PManager initialized, closing conn from %s", conn.RemoteAddr())
 		conn.Close()

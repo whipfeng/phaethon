@@ -1,6 +1,6 @@
 # gVisor 路由架构最终方案：RouteSelector + Link NICs
 
-## 状态：✅ 最终方案（2026-10-11 修订：链路对象直接持有 LinkNIC 指针，无需 linkID 索引 map，多链路自然支持）
+## 状态：✅ 最终方案（2026-10-11 修订：链路对象直接持有 LinkNIC 指针，无需任何链路标识符）
 
 **本文档整合并取代**：
 - `gvisor_routing_evolution.md`（早期调研，已废弃）
@@ -470,15 +470,8 @@ Link NIC 是"哑"的，职责是收发直连：
 
 **设计目标**：两个节点间可以存在多个链路（通过不同 proxy），所有链路都参与选路和负载均衡。
 
-**链路标识机制**：
-- 每个链路用 `主动端nodeID:proxyName` 唯一标识（用于日志和调试）
-- 主动连接（outbound）：`linkID = localNodeID:localProxyName`（如 `vm:SOCKS5_7890`）
-- 被动连接（inbound）：`linkID = remoteNodeID:remoteProxyName`（如 `vm:SOCKS5_7890`）
-- proxyName 在 hello 握手中通过 `GossipInfo.FriendlyName` 声明
-- linkID 用于日志输出，便于追踪链路来源
-
 **LinkNIC 与链路的关系**：
-- **每个链路对象直接持有自己的 LinkNIC 指针**（不是通过 map 索引）
+- **每个链路对象直接持有自己的 LinkNIC 指针**
 - 链路对象结构：
   ```go
   type P2PLink struct {
@@ -501,11 +494,10 @@ Link NIC 是"哑"的，职责是收发直连：
 1. P2P 链路对象收到 FrameMeshPacket
 2. 链路对象直接使用自己持有的 LinkNIC：`link.linkNIC.InjectInbound(frame)`
 3. 注入到 gVisor netstack
-4. **无需 linkID 查找**：链路对象已经持有 LinkNIC 指针
 
 **出站包处理流程**：
 1. RouteSelector 计算下一跳 nodeID（Dijkstra 选路）
-2. **RouteSelector 直接返回 LinkNIC**（不是 linkID，见 §5.5）
+2. **RouteSelector 直接返回 LinkNIC**（见 §5.5）
 3. 通过该 LinkNIC 发送（LinkNIC.WritePackets）
 4. LinkNIC 内部通过 PeerSender.Send 发送到对端
 

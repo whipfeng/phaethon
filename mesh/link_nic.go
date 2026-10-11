@@ -85,6 +85,15 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 	}
 	
 	l.dispatcher.DeliverNetworkPacket(proto, pkt)
+	
+	// Phaethon diagnostic: confirm packet delivered to dispatcher
+	if len(data) >= 20 {
+		srcIP := net.IP(data[12:16])
+		dstIP := net.IP(data[16:20])
+		util.LogInfo("[LINKNIC-DIAG] InjectInbound delivered nicID=%d peer=%s %s -> %s proto=%d",
+			l.nicID, l.peerNodeID, srcIP, dstIP, data[9])
+	}
+	
 	atomic.AddUint64(&l.injectPackets, 1)
 	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
 }

@@ -5,6 +5,8 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+
+	"phaethon/util"
 )
 
 // SelectRouteResult is the decision returned by RouteSelectorConfig.SelectRoute.
@@ -86,11 +88,15 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 		// Branch 1: local mesh subnet. VIP is a conntrack transit address;
 		// GIP, hostIP, EIP and fakeIP are local stack destinations.
 		if cfg.LocalSubnet != nil && cfg.LocalSubnet.Contains(dstIP) {
-			return stack.RouteDecision{
+			decision := stack.RouteDecision{
 				EgressNIC:  1,
 				LocalStack: dst != cfg.LocalVIP,
 				Cacheable:  true,
 			}
+			// Phaethon diagnostic: log Branch 1 decisions
+			util.LogInfo("[ROUTE-SELECTOR] dst=%s branch=1 localSubnet=%v localStack=%v vip=%v",
+				dstIP, cfg.LocalSubnet, decision.LocalStack, dst == cfg.LocalVIP)
+			return decision
 		}
 		// Defensive exact-match fallbacks (LocalSubnet nil case).
 		if cfg.LocalGIP != (tcpip.Address{}) && dst == cfg.LocalGIP {

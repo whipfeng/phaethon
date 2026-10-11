@@ -1382,6 +1382,7 @@ func (n *Netstack) acceptTCP() {
 	})
 
 	n.ns.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
+	util.LogInfo("[NETSTACK] TCP forwarder registered for protocol %d", tcp.ProtocolNumber)
 
 	<-n.closeCh
 }

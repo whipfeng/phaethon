@@ -55,6 +55,10 @@ type Netstack struct {
 	linkNICs      map[string]*LinkNIC // NIC 2+: Per-peer Link NICs for mesh communication
 	linkNextNICID atomic.Uint64       // Next NIC ID for link NICs (starting at 2)
 
+	// Multi-link load balancing: round-robin across links to the same node
+	linkSelectMu    sync.Mutex
+	linkSelectIdx   map[string]int // per-node round-robin index
+
 	// Overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
 	meshNetwork *net.IPNet
 
@@ -200,15 +204,9 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 
 						if isMeshPrefix {
 							// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
-							nextHopID := meshMgr.NextHopNodeID(targetNodeID)
-							if nextHopID == "" {
-								continue
-							}
-							linkNIC, ok := n.linkNICs[nextHopID]
-							// Phaethon diagnostic: dump linkNICs map
-							util.LogInfo("[ROUTE-LOOKUP] dst=%s target=%s nextHop=%s linkNICFound=%v nicID=%d linkNICsMap=%v",
-								dst, targetNodeID, nextHopID, ok, linkNIC.nicID, n.linkNICs)
-							if !ok || linkNIC.nicID == 0 {
+							// Use Dijkstra result directly (LinkNIC)
+							nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
+							if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
 								continue
 							}
 							TraceForwardingRoute(dst, "branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
@@ -218,12 +216,9 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						// Branch 3: non-mesh advertised prefix → IPIP to egress EIP
 						// over next-hop Link NIC. The frame-level decap at the
 						// peer matches on outer dst == its local EIP (design §2.4).
-						nextHopID := meshMgr.NextHopNodeID(targetNodeID)
-						if nextHopID == "" {
-							continue
-						}
-						linkNIC, ok := n.linkNICs[nextHopID]
-						if !ok || linkNIC.nicID == 0 {
+						// Use Dijkstra result directly (LinkNIC)
+						nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
+						if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
 							continue
 						}
 						targetEIP := meshMgr.GetEIPForNode(targetNodeID)
@@ -270,44 +265,44 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 	peers := meshMgr.GetPeers()
 	current := make(map[string]MeshPeerInfo, len(peers))
 	for _, peer := range peers {
-		if peer.Subnet == "" {
+		if peer.Subnet == "" || peer.LinkKey == "" {
 			continue
 		}
-		current[peer.NodeID] = peer
+		current[peer.LinkKey] = peer
 	}
 
-	// Remove Link NICs for peers that disappeared
-	for nodeID, linkNIC := range n.linkNICs {
-		if _, ok := current[nodeID]; ok {
+	// Remove Link NICs for links that disappeared
+	for linkKey, linkNIC := range n.linkNICs {
+		if _, ok := current[linkKey]; ok {
 			continue
 		}
 		if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
-			util.LogError("[NETSTACK] failed to remove NIC %d for stale peer %s: %v", linkNIC.nicID, nodeID, err)
+			util.LogError("[NETSTACK] failed to remove NIC %d for stale link %s: %v", linkNIC.nicID, linkKey, err)
 		}
-		delete(n.linkNICs, nodeID)
-		util.LogInfo("[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, nodeID)
+		delete(n.linkNICs, linkKey)
+		util.LogInfo("[NETSTACK] removed Link NIC %d for link %s", linkNIC.nicID, linkKey)
 	}
 
-	// Create Link NICs for new peers
-	for nodeID, peer := range current {
-		if _, exists := n.linkNICs[nodeID]; exists {
+	// Create Link NICs for new links
+	for linkKey, peer := range current {
+		if _, exists := n.linkNICs[linkKey]; exists {
 			continue
 		}
 
 		_, peerSubnet, err := net.ParseCIDR(peer.Subnet)
 		if err != nil {
-			util.LogError("[NETSTACK] failed to parse peer %s subnet %s: %v", nodeID, peer.Subnet, err)
+			util.LogError("[NETSTACK] failed to parse peer %s subnet %s: %v", peer.NodeID, peer.Subnet, err)
 			continue
 		}
 
 		nicID := tcpip.NICID(n.linkNextNICID.Add(1))
-		linkNIC := NewLinkNIC(nicID, nodeID, peerSubnet, meshMgr)
+		linkNIC := NewLinkNIC(nicID, linkKey, peer.NodeID, peerSubnet, meshMgr)
 
 		if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
-			util.LogError("[NETSTACK] failed to create NIC %d for peer %s: %v", nicID, nodeID, err)
+			util.LogError("[NETSTACK] failed to create NIC %d for link %s: %v", nicID, linkKey, err)
 			continue
 		}
-		n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", nodeID))
+		n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", linkKey))
 
 		// Link NICs: promiscuous so inbound frames destined for our bound
 		// addresses (GIP/VIP/fakeIP, none bound on the Link NIC itself) are
@@ -316,8 +311,8 @@ func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
 		n.ns.SetPromiscuousMode(nicID, true)
 		_ = n.ns.SetSpoofing(nicID, true)
 
-		n.linkNICs[nodeID] = linkNIC
-		util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, nodeID, nodeID, peer.Subnet)
+		n.linkNICs[linkKey] = linkNIC
+		util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, linkKey, peer.NodeID, peer.Subnet)
 	}
 
 	// Phaethon fix: clear RouteSelector cache after LinkNIC changes.
@@ -672,26 +667,33 @@ func (n *Netstack) initStack() error {
 	return nil
 }
 
+// findLinkNIC finds a Link NIC by next-hop node ID and local sequence number.
+// Returns nil if no matching Link NIC exists.
+// GetLinkNICByLinkKey returns the LinkNIC for a given linkKey.
+func (n *Netstack) GetLinkNICByLinkKey(linkKey string) *LinkNIC {
+	return n.linkNICs[linkKey]
+}
+
 // InjectFromNode injects a raw IP packet received from a mesh peer into the
 // netstack via that peer's Link NIC (design §5.2). Injecting on the peer's NIC
 // lets conntrack record the entry interface (fork patch #5) so DNAT replies
 // route back out the correct side (patch #6).
-func (n *Netstack) InjectFromNode(nodeID string, data []byte) error {
+func (n *Netstack) InjectFromNode(linkKey string, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	linkNIC, ok := n.linkNICs[nodeID]
+	linkNIC, ok := n.linkNICs[linkKey]
 	if !ok {
-		TraceForwarding("linknic_inject_error", data, "fromNode=%s err=no_link_nic", nodeID)
-		return fmt.Errorf("no Link NIC for node %s", nodeID)
+		TraceForwarding("linknic_inject_error", data, "linkKey=%s err=no_link_nic", linkKey)
+		return fmt.Errorf("no Link NIC for linkKey %s", linkKey)
 	}
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
-		util.LogInfo("[NETSTACK-INJECT] InjectFromNode %s: %s -> %s proto=%d TTL=%d len=%d",
-			nodeID, srcIP, dstIP, data[9], data[8], len(data))
+		util.LogInfo("[NETSTACK-INJECT] InjectFromNode linkKey=%s: %s -> %s proto=%d TTL=%d len=%d",
+			linkKey, srcIP, dstIP, data[9], data[8], len(data))
 	}
-	TraceForwarding("linknic_inject", data, "fromNode=%s linkNIC=%d", nodeID, linkNIC.nicID)
+	TraceForwarding("linknic_inject", data, "linkKey=%s linkNIC=%d", linkKey, linkNIC.nicID)
 	linkNIC.InjectInbound(data)
 	return nil
 }

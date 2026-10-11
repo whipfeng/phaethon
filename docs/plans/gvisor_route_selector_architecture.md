@@ -466,6 +466,124 @@ Link NIC 是"哑"的，职责是收发直连：
 | 共享 mesh NIC | 2 个 | 外部判断逻辑 | 高 |
 | **Link NICs（本文）** | N+1 个 | RouteSelector | **低** |
 
+### 5.4 多链路支持（Multi-Link Support）
+
+**设计目标**：两个节点间可以存在多个链路（通过不同 proxy），所有链路都参与选路和负载均衡。
+
+**链路标识机制**：
+- 每个链路用 `主动端nodeID:proxyName` 唯一标识
+- 主动连接（outbound）：`linkKey = localNodeID:localProxyName`（如 `vm:SOCKS5_7890`）
+- 被动连接（inbound）：`linkKey = remoteNodeID:remoteProxyName`（如 `vm:SOCKS5_7890`）
+- proxyName 在 hello 握手中通过 `GossipInfo.FriendlyName` 声明
+- 入站包通过 `meshInboundPacket.linkKey` 标识来自哪条链路
+
+**LinkNIC 与链路的映射**：
+- 每个链路一个 LinkNIC，使用 `n.linkNICs[linkKey]` 索引
+- 所有链路都参与 RouteSelector 的 Branch 2/3 选路（Dijkstra 计算下一跳时考虑所有链路）
+- SendToNode 在相同 hop count 的链路间做 round-robin 负载均衡（已实现）
+
+**入站包处理流程**：
+1. P2P 层收到 FrameMeshPacket → 构造 `meshInboundPacket{fromNodeID, linkKey, frame}`
+2. HandleMeshFrame 接收 `fromNodeID` 和 `linkKey`
+3. InjectFromNode 使用 `linkKey` 查找对应的 LinkNIC
+4. 调用 LinkNIC.InjectInbound 注入到 gVisor netstack
+
+**出站包处理流程**：
+1. RouteSelector 计算下一跳 nodeID（Dijkstra 选路）
+2. SendToNode 找到所有到该 nodeID 的链路（多个 proxyName）
+3. 在相同 hop count 的链路间 round-robin 选择一条链路
+4. 通过该链路的 PeerSender.Send 发送
+
+**稳定性保证**：
+- proxyName 是配置中的固定值，重连时不变
+- LinkNIC key（`nodeID:proxyName`）在重连时保持稳定
+- TCP forwarder 的 endpoint 查找不会因重连而失败
+
+### 5.5 LinkNIC 直接绑定优化（Dijkstra 直返）
+
+**问题**：原来的实现中，Dijkstra 计算后得到 `(nextHop, localSeq)`，然后需要遍历所有 LinkNICs 查找匹配的 `(peerNodeID, localSeq)`，查询复杂度 O(n)。
+
+**核心观察**：
+- LinkNIC 只存在于直连链路（非直连链路没有 LinkNIC）
+- Dijkstra 已经追踪第一跳（nextHop）
+- 第一跳一定是直连的，有 LinkNIC
+
+**优化方案**：让 Dijkstra 直接返回 LinkNIC，不需要查找。
+
+**数据结构变化**：
+
+```go
+// 1. LinkQualityInfo 增加 LinkNIC 字段（直连链路才有值）
+type LinkQualityInfo struct {
+    From      string
+    To        string
+    LinkNIC   *LinkNIC  // 新增：直连链路的 LinkNIC（非直连为 nil）
+    LocalSeq  uint16
+    RemoteSeq uint16
+    SRTT      float64
+    LossRate  float64
+    Jitter    float64
+    Cost      float64
+}
+
+// 2. dijkstraResult 改为存 LinkNIC（原来是 LocalSeq）
+type dijkstraResult struct {
+    NextHop string
+    LinkNIC *LinkNIC  // 改自 LocalSeq uint16
+    Cost    float64
+}
+
+// 3. dijkstra 的 nodeInfo 改为追踪 linkNIC（原来是 localSeq）
+type nodeInfo struct {
+    cost    float64
+    nextHop string
+    linkNIC *LinkNIC  // 改自 localSeq uint16
+    visited bool
+}
+```
+
+**算法逻辑**：
+
+```go
+// buildTopologyGraph 时填充 LinkNIC（只有直连链路）
+link := &LinkQualityInfo{
+    From:    selfID,
+    To:      neighborID,
+    LinkNIC: m.netstack.GetLinkNICByLinkKey(linkKey), // 直连链路才有 LinkNIC
+    ...
+}
+
+// dijkstra 计算时
+if minNode == source {
+    nextHop = toNode              // 直连：设置 nextHop
+    linkNIC = bestLink.LinkNIC    // 直连：从 LinkQualityInfo 获取 LinkNIC
+} else {
+    nextHop = nodes[minNode].nextHop   // 非直连：继承第一跳 nextHop
+    linkNIC = nodes[minNode].linkNIC   // 非直连：继承第一跳 LinkNIC
+}
+
+// SelectRoute 直接使用
+nextHop, linkNIC := meshMgr.NextHopLink(targetNodeID)
+return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
+```
+
+**关键约束**：
+- ✅ LinkNIC 只在 `minNode == source`（直连邻居）时从 LinkQualityInfo 获取
+- ✅ 非直连情况继承第一跳的 LinkNIC（不会放错）
+- ✅ LinkQualityInfo.LinkNIC 在非直连链路时为 nil（不影响计算）
+
+**优势**：
+- ✅ 查询复杂度从 O(n) 降到 O(1)
+- ✅ 不需要 findLinkNIC 遍历
+- ✅ 不需要 localSeq 匹配
+- ✅ 逻辑更清晰：Dijkstra 直接返回可用的 LinkNIC
+
+**链路重连处理**：
+- SyncLinkNICs 检查 linkKey 是否已存在
+- 存在 → 复用 LinkNIC 对象，调用 `UpdateLocalSeq()` 更新状态
+- 不存在 → 创建新 LinkNIC
+- LinkNIC 对象复用（槽位复用），但每次链路建立都是"新绑定"
+
 ---
 
 ## 6. gVisor Fork 补丁

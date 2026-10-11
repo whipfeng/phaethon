@@ -153,6 +153,29 @@ func (s *sendState) removeFrame(seq uint32) {
 	delete(s.pending, seq)
 }
 
+// markAllPendingAsLost marks all pending frames as lost when connection drops.
+// Records their RTT (time since sent) before marking as lost, so they count in both loss rate and latency statistics.
+func (s *sendState) markAllPendingAsLost() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	now := time.Now()
+	for seq, pf := range s.pending {
+		// Record RTT before marking as lost
+		rtt := now.Sub(pf.sentTime)
+		isRetransmission := pf.retries > 0
+		s.rttSampler.add(rtt, isRetransmission)
+		
+		// Mark as lost
+		s.totalLost++
+		s.frameHistory = append(s.frameHistory, frameRecord{
+			timestamp: now,
+			lost:      true,
+		})
+		delete(s.pending, seq)
+	}
+}
+
 // recvState tracks incoming control frames for deduplication.
 type recvState struct {
 	mu      sync.Mutex
@@ -417,7 +440,7 @@ func (s *sendState) getLossRate() float64 {
 
 // getStats returns send state statistics.
 // Loss rate is calculated from the last 5 minutes of frame history, considering pending frames.
-func (s *sendState) getStats() (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
+func (s *sendState) getStats(channelDrops uint64) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	
@@ -447,14 +470,15 @@ func (s *sendState) getStats() (srtt, rto, jitter time.Duration, lossRate float6
 		}
 	}
 	
-	// Loss rate = (lost + pendingOld) / (sent + pendingOld)
-	totalWithPending := sent + pendingOld
-	if totalWithPending > 0 {
-		lossRate = float64(lost+pendingOld) / float64(totalWithPending)
+	// Loss rate = (lost + pendingOld + channelDrops) / (sent + pendingOld + channelDrops)
+	// Channel drops are frames that never made it into the send queue
+	totalWithDrops := sent + pendingOld + int(channelDrops)
+	if totalWithDrops > 0 {
+		lossRate = float64(lost+pendingOld+int(channelDrops)) / float64(totalWithDrops)
 	}
 	
 	// Log stats when queried
-	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
-		300, sent, lost, pendingOld, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost)
+	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d channelDrops=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
+		300, sent, lost, pendingOld, channelDrops, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost)
 	return
 }

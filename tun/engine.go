@@ -278,15 +278,6 @@ func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
 	return e.localMeshVIPs[ip.To4().String()]
 }
 
-// InjectFromNode injects a raw IP packet received from a mesh peer into the
-// netstack via that peer's Link NIC. Delegates to the mesh.Netstack.
-func (e *Engine) InjectFromNode(nodeID string, data []byte) error {
-	if e.netstack == nil {
-		return fmt.Errorf("netstack not initialized")
-	}
-	return e.netstack.InjectFromNode(nodeID, data)
-}
-
 // meshWriteLoop consumes packets from meshWriteCh and writes them to the TUN device.
 // Decouples mesh writes from callers to prevent blocking.
 func (e *Engine) meshWriteLoop() {

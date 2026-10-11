@@ -608,8 +608,8 @@ func (e *Engine) StartStack() error {
 
 	// Set up forwarder callbacks on the netstack
 	e.netstack.SetCallbacks(&mesh.ForwarderCallbacks{
-		HandleTCPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
-			e.handleConn(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
+		HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+			e.handleConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
 		},
 		HandleUDPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
@@ -1349,11 +1349,13 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 }
 
 // handleConn routes a TUN-side TCP connection through the proxy chain or direct.
-func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 	if inbound == "" {
 		inbound = "TUN"
 	}
-	util.LogDebug("[TCP-DEBUG] handleConn called dst=%s:%d", dstAddr, dstPort)
+	// Compute correlation ID for trace linking
+	corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
+	util.LogDebug("[TCP-DEBUG] [%s] handleConn called", corrID)
 	defer conn.Close()
 
 	// Check if this is a Fake-IP: restore original domain.
@@ -1361,9 +1363,9 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	if e.fakeIP != nil {
 		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 			domain = d
-			util.LogDebug("[TCP-DEBUG] fake-ip lookup: %s -> %s", dstAddr, domain)
+			util.LogDebug("[TCP-DEBUG] [%s] fake-ip lookup: %s -> %s", corrID, dstAddr, domain)
 		} else {
-			util.LogDebug("[TCP-DEBUG] fake-ip lookup: %s -> (no domain)", dstAddr)
+			util.LogDebug("[TCP-DEBUG] [%s] fake-ip lookup: %s -> (no domain)", corrID, dstAddr)
 		}
 	}
 
@@ -1373,12 +1375,12 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		expectedDomain := e.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogDebug("[TCP-DEBUG] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", domain, expectedDomain)
+			util.LogDebug("[TCP-DEBUG] [%s] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", corrID, domain, expectedDomain)
 		} else {
-			util.LogDebug("[TCP-DEBUG] domain %s != expected %s", domain, expectedDomain)
+			util.LogDebug("[TCP-DEBUG] [%s] domain %s != expected %s", corrID, domain, expectedDomain)
 		}
 	} else {
-		util.LogDebug("[TCP-DEBUG] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", domain, e.localMeshNodeID)
+		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", corrID, domain, e.localMeshNodeID)
 	}
 
 	// Phaethon patch #13: Check if dstAddr is one of our own mesh VIPs.
@@ -1388,7 +1390,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	if !localNodeDomain && e.localMeshVIPs != nil {
 		if e.localMeshVIPs[dstAddr] {
 			localNodeDomain = true
-			util.LogDebug("[TCP-DEBUG] dstAddr %s is local mesh VIP -> will serve via admin handler", dstAddr)
+			util.LogDebug("[TCP-DEBUG] [%s] dstAddr %s is local mesh VIP -> will serve via admin handler", corrID, dstAddr)
 		}
 	}
 
@@ -1400,16 +1402,16 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	// retry re-resolves DNS and gets the fresh fake-IP.
 	if domain == "" && e.fakeIP != nil {
 		if ip := net.ParseIP(dstAddr); ip != nil && e.fakeIP.InAllocRange(ip) {
-			util.LogWarn("[TUN] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
-				connID, dstAddr, dstPort, srcAddr)
+			util.LogWarn("[TUN] [%s] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
+				corrID, connID, dstAddr, dstPort, srcAddr)
 			return
 		}
 	}
 
 	// Diagnostic: log Mode B connections prominently
 	if modeBMapping != nil {
-		util.LogInfo("[TCP-DIAG] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
-			connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
+		util.LogInfo("[TCP-DIAG] [%s] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
+			corrID, connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
 	}
 
 	// Use domain for rule matching (so domain-based rules work).
@@ -1421,16 +1423,16 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	req := config.NewConnectRequest("tcp", matchAddr, dstPort)
 	var proxy *config.Proxy
 	var matchResult *config.MatchResult
-	if e.ruleConf != nil {
+		if e.ruleConf != nil {
 		matchMapping := TUNMapping
 		if modeBMapping != nil {
 			matchMapping = modeBMapping
 		}
 		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
 		if proxy != nil {
-			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> proxy=%s type=%s", matchAddr, dstPort, proxy.Name, proxy.Type)
+			util.LogDebug("[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
 		} else {
-			util.LogDebug("[TCP-DEBUG] rule match: %s:%d -> DIRECT (no proxy matched)", matchAddr, dstPort)
+			util.LogDebug("[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
 		}
 	}
 
@@ -1444,7 +1446,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogDebug("[%s] [%s] %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
+		util.LogDebug("[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)
 		rec.Reject()
 		return
 	}
@@ -1452,7 +1454,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 	if localNodeDomain {
 		// Direct admin handler: bypass OS network stack entirely
 		if e.adminHandler != nil {
-			util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", connID)
+			util.LogDebug("[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
 			rec.SetDst("localhost").Establish(connID, proxy, false)
 			e.adminHandler.ServeConn(conn)
 			return
@@ -1460,10 +1462,10 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		// Fallback: dial localhost via OS network stack
 		localIP := dialer.GetLocalIPForDial(nil)
 		dialAddr := localIP.String()
-		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", connID, dialAddr, resolvedPort)
+		util.LogDebug("[TCP-DEBUG] [%s] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", corrID, connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
-			util.LogWarn("[%s] [%s] local dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+			util.LogWarn("[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, resolvedPort, err)
 			rec.SetDst(dialAddr).Fail(err)
 			return
 		}

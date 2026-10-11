@@ -71,6 +71,9 @@ type P2PManager struct {
 
 	linkSeqCounter uint64 // atomic counter for link sequence numbers
 
+	// Channel overflow statistics (atomic counters)
+	meshInboundDrops uint64 // Frames dropped due to meshInboundCh full
+
 	OnStatusChange func() // callback when peer status changes
 }
 
@@ -178,6 +181,10 @@ type Peer struct {
 	// Reliable transmission state (v7)
 	sendState *sendState // tracks outgoing control frames
 	recvState *recvState // tracks incoming control frames
+
+	// Channel overflow statistics (atomic counters)
+	writeChDrops    uint64 // Frames dropped due to writeCh full
+	controlChDrops  uint64 // Frames dropped due to controlCh full
 }
 
 // NewP2PManager creates a new P2P manager.
@@ -194,7 +201,7 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		platform:          runtime.GOOS,
 		arch:              runtime.GOARCH,
 		cache:             cache,
-		meshInboundCh:     make(chan meshInboundPacket, 16384),
+		meshInboundCh:     make(chan meshInboundPacket, 4096),
 		meshInboundStopCh: make(chan struct{}),
 	}
 	go m.meshInboundLoop()
@@ -440,6 +447,11 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
 		}
+		if req.isControl {
+			atomic.AddUint64(&peer.controlChDrops, 1)
+		} else {
+			atomic.AddUint64(&peer.writeChDrops, 1)
+		}
 		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
@@ -460,8 +472,8 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		Status:    "connecting",
 		LastSeen:  time.Now(),
 		transport: t,
-		writeCh:   make(chan writeReq, 1024),
-		controlCh: make(chan writeReq, 512),
+		writeCh:   make(chan writeReq, 512),
+		controlCh: make(chan writeReq, 128),
 		stopCh:    make(chan struct{}),
 		sendState: newSendState(),
 		recvState: newRecvState(),
@@ -656,8 +668,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 
 		peer.transport = transport
-		peer.writeCh = make(chan writeReq, 1024)
-		peer.controlCh = make(chan writeReq, 512)
+		peer.writeCh = make(chan writeReq, 512)
+		peer.controlCh = make(chan writeReq, 128)
 		peer.sendState = newSendState()
 		peer.recvState = newRecvState()
 		peer.Status = "connecting"
@@ -807,6 +819,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, frame: frameCopy}:
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				default:
+					atomic.AddUint64(&m.meshInboundDrops, 1)
 					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
@@ -881,6 +894,7 @@ func (m *P2PManager) sendPureAck(peer *Peer) {
 	case peer.controlCh <- writeReq{frameType: frame.FrameAck, data: payload, isControl: true}:
 		// Queued successfully
 	default:
+		atomic.AddUint64(&peer.controlChDrops, 1)
 		util.LogDebug("[P2P] control queue full, dropping pure ACK to %s", peer.ID)
 	}
 }
@@ -1133,6 +1147,33 @@ func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.
 	}
 	return 0, 0, 0, 0, 0
 }
+
+// GetChannelDropStats returns channel overflow drop statistics.
+// Returns map[nodeID]{writeChDrops, controlChDrops} for all peers, plus meshInboundDrops.
+func (m *P2PManager) GetChannelDropStats() (peerStats map[string]struct {
+	WriteChDrops   uint64
+	ControlChDrops uint64
+}, meshInboundDrops uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	peerStats = make(map[string]struct {
+		WriteChDrops   uint64
+		ControlChDrops uint64
+	})
+	for _, p := range m.peers {
+		peerStats[p.NodeID] = struct {
+			WriteChDrops   uint64
+			ControlChDrops uint64
+		}{
+			WriteChDrops:   atomic.LoadUint64(&p.writeChDrops),
+			ControlChDrops: atomic.LoadUint64(&p.controlChDrops),
+		}
+	}
+	meshInboundDrops = atomic.LoadUint64(&m.meshInboundDrops)
+	return
+}
+
 
 // GetLinkQualityStatsByProxy returns ACK-based link quality stats for a specific link (proxy).
 // Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.

@@ -100,6 +100,10 @@ type P2PTransport interface {
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetChannelDropStats() (peerStats map[string]struct {
+		WriteChDrops   uint64
+		ControlChDrops uint64
+	}, meshInboundDrops uint64)
 }
 
 // MeshPeerInfo describes a connected mesh peer.
@@ -2396,6 +2400,16 @@ func (m *MeshManager) GetLinkNICStats() map[string]struct {
 		return nil
 	}
 	return m.tun.GetNetstack().LinkNICStats()
+}
+
+func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
+	WriteChDrops   uint64
+	ControlChDrops uint64
+}, meshInboundDrops uint64) {
+	if m.p2p == nil {
+		return nil, 0
+	}
+	return m.p2p.GetChannelDropStats()
 }
 
 // selectBestPeer selects the best peer from candidates.

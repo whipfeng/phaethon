@@ -75,6 +75,15 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 		Payload: buffer.MakeWithData(data),
 	})
 	defer pkt.DecRef()
+	
+	// Diagnostic: log before delivering to dispatcher
+	if len(data) >= 20 {
+		srcIP := net.IP(data[12:16])
+		dstIP := net.IP(data[16:20])
+		util.LogInfo("[LINKNIC-DIAG] InjectInbound nicID=%d peer=%s %s -> %s proto=%d len=%d",
+			l.nicID, l.peerNodeID, srcIP, dstIP, data[9], len(data))
+	}
+	
 	l.dispatcher.DeliverNetworkPacket(proto, pkt)
 	atomic.AddUint64(&l.injectPackets, 1)
 	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
@@ -121,10 +130,22 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return 0, &tcpip.ErrInvalidEndpointState{}
 	}
 
+	// Diagnostic: unconditional log at egress entry
+	pktSlice := pkts.AsSlice()
+	util.LogInfo("[LINKNIC-DIAG] WritePackets called nicID=%d peer=%s pktCount=%d", l.nicID, l.peerNodeID, len(pktSlice))
+
 	count := 0
-	for _, pkt := range pkts.AsSlice() {
+	for _, pkt := range pktSlice {
 		buf := pkt.ToBuffer()
 		pktData := buf.Flatten()
+
+		// Diagnostic: log each packet being sent
+		if len(pktData) >= 20 {
+			srcIP := net.IP(pktData[12:16])
+			dstIP := net.IP(pktData[16:20])
+			util.LogInfo("[LINKNIC-DIAG] WritePackets nicID=%d %s -> %s proto=%d len=%d",
+				l.nicID, srcIP, dstIP, pktData[9], len(pktData))
+		}
 
 		// Resolve the FINAL target node from the packet's destination
 		// (inner dst for plain frames, outer dst for IPIP frames — both are

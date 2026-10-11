@@ -1381,6 +1381,17 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 		util.LogDebug("[TCP-DEBUG] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", domain, e.localMeshNodeID)
 	}
 
+	// Phaethon patch #13: Check if dstAddr is one of our own mesh VIPs.
+	// When a connection arrives via mesh P2P to our own VIP (e.g., 100.179.0.10),
+	// domain is empty (not a fake-IP), so the nodeID.phn check above doesn't fire.
+	// Serve it via admin handler directly.
+	if !localNodeDomain && e.localMeshVIPs != nil {
+		if e.localMeshVIPs[dstAddr] {
+			localNodeDomain = true
+			util.LogDebug("[TCP-DEBUG] dstAddr %s is local mesh VIP -> will serve via admin handler", dstAddr)
+		}
+	}
+
 	connID := util.NextConnID()
 
 	// A dst inside the fake-IP alloc range with no mapping means the client is
@@ -1488,14 +1499,29 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, dstAddr string, dstPo
 			}
 			util.LogDebug("[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
 		}
-		util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
-		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
-		if err != nil {
-			util.LogWarn("[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
-			rec.SetDst(dialAddr).Fail(err)
-			return
+		// Phaethon patch #13: Mesh IP destinations use mesh routing (MeshDial)
+		// instead of OS network stack direct dial. Mesh IPs (100.64.0.0/10) are
+		// not routable via the OS network stack; they must go through the mesh
+		// network's gVisor netstack.
+		if ip := net.ParseIP(dialAddr); ip != nil && e.isMeshIP(ip) {
+			util.LogDebug("[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
+			targetConn, err = dialer.MeshDial(dialAddr, resolvedPort, srcAddr, inbound, modeBMapping)
+			if err != nil {
+				util.LogWarn("[%s] [%s] mesh dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+				rec.SetDst(dialAddr).Fail(err)
+				return
+			}
+			util.LogDebug("[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
+		} else {
+			util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
+			targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
+			if err != nil {
+				util.LogWarn("[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+				rec.SetDst(dialAddr).Fail(err)
+				return
+			}
+			util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
 		}
-		util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
 	}
 	defer targetConn.Close()
 

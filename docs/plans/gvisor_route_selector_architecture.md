@@ -472,16 +472,34 @@ Link NIC 是"哑"的，职责是收发直连：
 
 **LinkNIC 与链路的关系**：
 - **每个链路对象直接持有自己的 LinkNIC 指针**
-- 链路对象结构：
+- 链路对象结构（P2P 层）：
   ```go
-  type P2PLink struct {
+  // p2p/p2p.go
+  type Peer struct {
       // ... 其他字段
       linkNIC   *mesh.LinkNIC  // 链路直接持有自己的 LinkNIC
-      nodeID    string
-      proxyName string
       // ...
   }
   ```
+- **LinkNIC 通过 PeerSender 接口直接暴露给 Mesh 层**：
+  ```go
+  // mesh/mesh.go - PeerSender 接口
+  type PeerSender interface {
+      // ... 其他方法
+      GetLinkNIC() *LinkNIC  // 直接返回链路持有的 LinkNIC
+  }
+  
+  // p2p/p2p.go - peerSender 实现
+  func (s *peerSender) GetLinkNIC() *mesh.LinkNIC {
+      return s.peer.linkNIC  // 直接返回，无任何查找
+  }
+  ```
+- **Mesh 层直接通过 PeerInfo.Sender 访问 LinkNIC**：
+  ```go
+  // mesh/mesh.go - 直接使用，无 map 查找
+  linkNIC := peer.Sender.GetLinkNIC()
+  ```
+- **无 map 查找，无 linkID 计算，无 proxyName 查询**
 - **LinkNIC 生命周期与 P2P 链路绑定（同生共死）**：
   - P2P 链路建立 → 创建 LinkNIC → `link.linkNIC = linkNIC` → 加入 RouteSelector 可选列表
   - P2P 链路断开 → 从 RouteSelector 列表移除 → 删除 LinkNIC → `link.linkNIC = nil`

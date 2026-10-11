@@ -51,8 +51,7 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (design §1.1)
-	meshMgr       *MeshManager        // Mesh manager for routing decisions
-	linkNICs      map[string]*LinkNIC // NIC 2+: Per-peer Link NICs for mesh communication
+	meshMgr       *MeshManager // Mesh manager for routing decisions
 	linkNextNICID atomic.Uint64       // Next NIC ID for link NICs (starting at 2)
 
 	// Multi-link load balancing: round-robin across links to the same node
@@ -112,7 +111,6 @@ type Netstack struct {
 func NewNetstack() *Netstack {
 	n := &Netstack{
 		htunnelEndpoints: make(map[string]*HTunnelEndpoint),
-		linkNICs:         make(map[string]*LinkNIC),
 	}
 	// Link NIC IDs start at 2: NIC 1 = TUN (VIP/GIP bound), NIC 2+ = per-peer
 	// Link NICs (design §1.1). meshEP is retired.
@@ -139,19 +137,11 @@ func (n *Netstack) SetMeshNetwork(network *net.IPNet) {
 // SetMeshManager sets the mesh manager for route decisions and peer Link NICs.
 func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 	n.meshMgr = meshMgr // Store for RouteSelector
-	// Set route change callback to sync Link NICs (per design §1.2 FIB sync)
-	// and invalidate cached RouteSelector decisions (per design §2.5).
+	// Set route change callback to invalidate cached RouteSelector decisions (per design §2.5).
 	if meshMgr != nil {
 		meshMgr.SetOnRouteChange(func() {
 			n.ns.ClearRouteDecisionCache()
-			if err := n.SyncLinkNICs(meshMgr); err != nil {
-				util.LogError("[NETSTACK] failed to sync link NICs on route change: %v", err)
-			}
 		})
-		// Initial link NIC sync
-		if err := n.SyncLinkNICs(meshMgr); err != nil {
-			util.LogError("[NETSTACK] failed initial link NIC sync: %v", err)
-		}
 
 		// Configure RouteSelector for dynamic routing decisions per design §2.3.
 		// LocalStack applies consistently to FindRoute and handleValidatedPacket;
@@ -244,87 +234,53 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			// identity only, never bound to a NIC.
 			n.ns.SetIPIPSourceAddress(tcpip.AddrFrom4Slice(localEIP))
 			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
-
-			// Create Link NICs for each known peer (per design document §1.1/§1.2)
-			if err := n.SyncLinkNICs(meshMgr); err != nil {
-				util.LogError("[NETSTACK] failed to create link NICs: %v", err)
-			}
 		}
 	}
 }
 
-// SyncLinkNICs creates/removes Link NICs so that every known mesh peer has one.
-// Per design §1.2 + §4.4, non-direct peers also get a Link NIC; its send path
-// delegates to the mesh hop table for relay. Per design §1.1, Link NICs bind
-// no addresses (VIP/EIP are NAT addresses only).
-func (n *Netstack) SyncLinkNICs(meshMgr *MeshManager) error {
+// CreateLinkNIC creates a new LinkNIC for a peer link (design §5.6).
+// Called by MeshManager when P2P layer establishes a link.
+// Returns the created LinkNIC and any error.
+func (n *Netstack) CreateLinkNIC(linkKey, nodeID string, peerSubnet *net.IPNet) (*LinkNIC, error) {
+	if n.ns == nil {
+		return nil, fmt.Errorf("netstack not initialized")
+	}
+
+	nicID := tcpip.NICID(n.linkNextNICID.Add(1))
+	linkNIC := NewLinkNIC(nicID, linkKey, nodeID, peerSubnet, nil) // meshMgr will be set via SetMeshMgr if needed
+
+	if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
+		return nil, fmt.Errorf("failed to create NIC %d: %w", nicID, err)
+	}
+	n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", linkKey))
+
+	// Link NICs: promiscuous so inbound frames destined for our bound
+	// addresses (GIP/VIP/fakeIP, none bound on the Link NIC itself) are
+	// locally delivered via temp endpoints. Forwarding is inherited from
+	// defaultForwardingEnabled (enabled for v4/v6 in initStack).
+	n.ns.SetPromiscuousMode(nicID, true)
+	_ = n.ns.SetSpoofing(nicID, true)
+
+	util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, linkKey, nodeID, peerSubnet)
+	return linkNIC, nil
+}
+
+// DeleteLinkNIC removes a LinkNIC from the netstack (design §5.6).
+// Called by MeshManager when P2P layer disconnects a link.
+func (n *Netstack) DeleteLinkNIC(linkNIC *LinkNIC) error {
+	if linkNIC == nil {
+		return nil
+	}
 	if n.ns == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
 
-	peers := meshMgr.GetPeers()
-	current := make(map[string]MeshPeerInfo, len(peers))
-	for _, peer := range peers {
-		if peer.Subnet == "" || peer.LinkKey == "" {
-			continue
-		}
-		current[peer.LinkKey] = peer
+	// Remove from netstack
+	if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
+		return fmt.Errorf("failed to remove NIC %d: %w", linkNIC.nicID, err)
 	}
 
-	// Remove Link NICs for links that disappeared
-	for linkKey, linkNIC := range n.linkNICs {
-		if _, ok := current[linkKey]; ok {
-			continue
-		}
-		if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
-			util.LogError("[NETSTACK] failed to remove NIC %d for stale link %s: %v", linkNIC.nicID, linkKey, err)
-		}
-		delete(n.linkNICs, linkKey)
-		util.LogInfo("[NETSTACK] removed Link NIC %d for link %s", linkNIC.nicID, linkKey)
-	}
-
-	// Create Link NICs for new links
-	for linkKey, peer := range current {
-		if _, exists := n.linkNICs[linkKey]; exists {
-			continue
-		}
-
-		_, peerSubnet, err := net.ParseCIDR(peer.Subnet)
-		if err != nil {
-			util.LogError("[NETSTACK] failed to parse peer %s subnet %s: %v", peer.NodeID, peer.Subnet, err)
-			continue
-		}
-
-		nicID := tcpip.NICID(n.linkNextNICID.Add(1))
-		linkNIC := NewLinkNIC(nicID, linkKey, peer.NodeID, peerSubnet, meshMgr)
-
-		if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
-			util.LogError("[NETSTACK] failed to create NIC %d for link %s: %v", nicID, linkKey, err)
-			continue
-		}
-		n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", linkKey))
-
-		// Link NICs: promiscuous so inbound frames destined for our bound
-		// addresses (GIP/VIP/fakeIP, none bound on the Link NIC itself) are
-		// locally delivered via temp endpoints. Forwarding is inherited from
-		// defaultForwardingEnabled (enabled for v4/v6 in initStack).
-		n.ns.SetPromiscuousMode(nicID, true)
-		_ = n.ns.SetSpoofing(nicID, true)
-
-		n.linkNICs[linkKey] = linkNIC
-		util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, linkKey, peer.NodeID, peer.Subnet)
-	}
-
-	// Phaethon fix: clear RouteSelector cache after LinkNIC changes.
-	// Cached decisions may reference stale NIC IDs that no longer exist.
-	util.LogInfo("[NETSTACK] clearing RouteSelector cache after LinkNIC sync")
-	n.ns.ClearRouteDecisionCache()
-
-	// Rebuild route table with per-peer routes
-	if err := n.UpdateLinkRoutes(); err != nil {
-		util.LogError("[NETSTACK] failed to update link routes: %v", err)
-	}
-
+	util.LogInfo("[NETSTACK] removed Link NIC %d (link_%s) for peer %s", linkNIC.nicID, linkNIC.linkKey, linkNIC.peerNodeID)
 	return nil
 }
 
@@ -514,7 +470,7 @@ func (n *Netstack) Stop() error {
 //
 //	forwarding enabled. TUN device I/O + local mesh service addresses.
 //
-// NIC 2+: per-peer Link NICs (created by SyncLinkNICs).
+// NIC 2+: per-peer Link NICs (created by P2P layer via CreateLinkNIC).
 // IPIP encapsulation happens in the forwarding path; decapsulation at the
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).
 func (n *Netstack) initStack() error {
@@ -572,9 +528,7 @@ func (n *Netstack) initStack() error {
 	// outer source; decapsulation happens at the frame layer (HandleMeshFrame).
 
 	// Route table cleared (design §1.2). All routing decisions are
-	// driven by the RouteSelector (set up in SetMeshManager). This call
-	// is still useful at boot to ensure a fresh state when SyncLinkNICs
-	// is invoked from a route-change callback.
+	// driven by the RouteSelector (set up in SetMeshManager).
 	if err := n.UpdateLinkRoutes(); err != nil {
 		return fmt.Errorf("clear routes: %v", err)
 	}
@@ -663,38 +617,7 @@ func (n *Netstack) initStack() error {
 		util.LogInfo("netstack: iptables SNAT configured (VIP=%s, Postrouting InputInterface=tun)", vipAddr)
 	}
 
-	util.LogInfo("netstack: initialized (NIC 1: TUN, GIP=%s; Link NICs created by SyncLinkNICs)", n.dnsAddr)
-	return nil
-}
-
-// findLinkNIC finds a Link NIC by next-hop node ID and local sequence number.
-// Returns nil if no matching Link NIC exists.
-// GetLinkNICByLinkKey returns the LinkNIC for a given linkKey.
-func (n *Netstack) GetLinkNICByLinkKey(linkKey string) *LinkNIC {
-	return n.linkNICs[linkKey]
-}
-
-// InjectFromNode injects a raw IP packet received from a mesh peer into the
-// netstack via that peer's Link NIC (design §5.2). Injecting on the peer's NIC
-// lets conntrack record the entry interface (fork patch #5) so DNAT replies
-// route back out the correct side (patch #6).
-func (n *Netstack) InjectFromNode(linkKey string, data []byte) error {
-	if len(data) == 0 {
-		return nil
-	}
-	linkNIC, ok := n.linkNICs[linkKey]
-	if !ok {
-		TraceForwarding("linknic_inject_error", data, "linkKey=%s err=no_link_nic", linkKey)
-		return fmt.Errorf("no Link NIC for linkKey %s", linkKey)
-	}
-	if len(data) >= 20 {
-		srcIP := net.IP(data[12:16])
-		dstIP := net.IP(data[16:20])
-		util.LogInfo("[NETSTACK-INJECT] InjectFromNode linkKey=%s: %s -> %s proto=%d TTL=%d len=%d",
-			linkKey, srcIP, dstIP, data[9], data[8], len(data))
-	}
-	TraceForwarding("linknic_inject", data, "linkKey=%s linkNIC=%d", linkKey, linkNIC.nicID)
-	linkNIC.InjectInbound(data)
+	util.LogInfo("netstack: initialized (NIC 1: TUN, GIP=%s; Link NICs created by P2P layer)", n.dnsAddr)
 	return nil
 }
 
@@ -706,32 +629,6 @@ func (n *Netstack) InjectInbound(proto tcpip.NetworkProtocolNumber, data []byte)
 	})
 	defer pkt.DecRef()
 	n.linkEP.InjectInbound(proto, pkt)
-}
-
-// LinkNICStats returns injection statistics for all LinkNICs.
-// Returns map[nodeID]{packets, bytes, drops}.
-func (n *Netstack) LinkNICStats() map[string]struct {
-	Packets uint64
-	Bytes   uint64
-	Drops   uint64
-} {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	result := make(map[string]struct {
-		Packets uint64
-		Bytes   uint64
-		Drops   uint64
-	})
-	for nodeID, nic := range n.linkNICs {
-		pkts, bytes, drops := nic.InjectStats()
-		result[nodeID] = struct {
-			Packets uint64
-			Bytes   uint64
-			Drops   uint64
-		}{pkts, bytes, drops}
-	}
-	return result
 }
 
 // AddMeshVIP registers a mesh virtual IP with the gVisor netstack so it responds

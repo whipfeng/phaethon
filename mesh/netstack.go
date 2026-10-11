@@ -247,7 +247,7 @@ func (n *Netstack) CreateLinkNIC(linkKey, nodeID string, peerSubnet *net.IPNet) 
 	}
 
 	nicID := tcpip.NICID(n.linkNextNICID.Add(1))
-	linkNIC := NewLinkNIC(nicID, linkKey, nodeID, peerSubnet, nil) // meshMgr will be set via SetMeshMgr if needed
+	linkNIC := NewLinkNIC(nicID, linkKey, nodeID, peerSubnet, n.meshMgr)
 
 	if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
 		return nil, fmt.Errorf("failed to create NIC %d: %w", nicID, err)

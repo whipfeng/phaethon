@@ -47,6 +47,13 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // link identification now based on seq pair matching instead of combined linkId.
 const P2PProtocolVersion = 9
 
+// linkStats holds persistent statistics for a link (survives P2P reconnections).
+type linkStats struct {
+	sendState      *sendState
+	writeChDrops   uint64
+	controlChDrops uint64
+}
+
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
 	mu       sync.Mutex
@@ -57,6 +64,10 @@ type P2PManager struct {
 	platform string
 	arch     string
 	cache    *BinaryCache
+
+	// Persistent link statistics keyed by linkKey (nodeID:proxyName).
+	// Survives P2P reconnections to maintain accurate loss/RTT history.
+	linkStats map[string]*sendState
 
 	meshEnabled bool
 	meshNodeID  string
@@ -79,12 +90,13 @@ type P2PManager struct {
 
 type meshInboundPacket struct {
 	fromNodeID string
+	linkKey    string // stable link identity: activeNodeID:activeSeq
 	frame      []byte
 }
 
 // MeshHandler handles mesh packets and gossip from P2P peers.
 type MeshHandler interface {
-	HandleMeshFrame(fromNodeID string, frame []byte)
+	HandleMeshFrame(fromNodeID string, linkKey string, frame []byte)
 	HandleTopologyGossip(sender mesh.PeerSender, data []byte)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(sender mesh.PeerSender)
@@ -201,6 +213,7 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		platform:          runtime.GOOS,
 		arch:              runtime.GOARCH,
 		cache:             cache,
+		linkStats:         make(map[string]*sendState),
 		meshInboundCh:     make(chan meshInboundPacket, 4096),
 		meshInboundStopCh: make(chan struct{}),
 	}
@@ -407,8 +420,8 @@ func (m *P2PManager) meshInboundLoop() {
 			return
 		case pkt := <-m.meshInboundCh:
 			if m.meshHandler != nil {
-				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
-				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.frame)
+				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s linkKey=%s", pkt.fromNodeID, pkt.linkKey)
+				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.linkKey, pkt.frame)
 			}
 		}
 	}
@@ -494,6 +507,25 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		m.mu.Lock()
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
+		}
+		// Mark all pending frames as lost before saving to linkStats.
+		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
+		if peer.sendState != nil {
+			peer.sendState.markAllPendingAsLost()
+		}
+		// Save sendState to linkStats before deleting peer
+		if peer.NodeID != "" && peer.sendState != nil {
+			var linkKey string
+			if peer.proxy != nil {
+				linkKey = fmt.Sprintf("%s:%s", m.nodeId, peer.proxy.Name)
+			} else {
+				remoteProxyName := peer.FriendlyName
+				if remoteProxyName == "" {
+					remoteProxyName = peer.ID
+				}
+				linkKey = fmt.Sprintf("%s:%s", peer.NodeID, remoteProxyName)
+			}
+			m.linkStats[linkKey] = peer.sendState
 		}
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
@@ -627,6 +659,16 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if peer.meshSender != nil && m.meshHandler != nil {
 			m.meshHandler.UnregisterPeer(peer.meshSender)
 		}
+		// Mark all pending frames as lost before saving to linkStats.
+		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
+		if peer.sendState != nil {
+			peer.sendState.markAllPendingAsLost()
+		}
+		// Save sendState to linkStats before deleting peer
+		if peer.NodeID != "" && peer.sendState != nil {
+			linkKey := fmt.Sprintf("%s:%s", m.nodeId, peer.proxy.Name)
+				m.linkStats[linkKey] = peer.sendState
+		}
 		// Only delete if we're still the current peer (prevent race with RestartPeer)
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
@@ -670,8 +712,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.transport = transport
 		peer.writeCh = make(chan writeReq, 512)
 		peer.controlCh = make(chan writeReq, 128)
-		peer.sendState = newSendState()
-		peer.recvState = newRecvState()
+		// Preserve sendState/recvState across reconnections to maintain loss/RTT history.
+		// Only create new state on first connection.
+		if peer.sendState == nil {
+			peer.sendState = newSendState()
+		}
+		if peer.recvState == nil {
+			peer.recvState = newRecvState()
+		}
 		peer.Status = "connecting"
 		if m.OnStatusChange != nil {
 			go m.OnStatusChange()
@@ -815,12 +863,28 @@ func (m *P2PManager) runSession(peer *Peer) {
 				mesh.TraceForwarding("p2p_received", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				frameCopy := make([]byte, len(payload))
 				copy(frameCopy, payload)
+				// Construct linkKey: activeNodeID:proxyName
+				// Active connection (outbound): local node is active, linkKey = localNodeID:localProxyName
+				// Passive connection (inbound): remote node is active, linkKey = remoteNodeID:remoteProxyName
+				var linkKey string
+				if peer.proxy != nil {
+					// Active connection: we are the active end
+					linkKey = fmt.Sprintf("%s:%s", m.nodeId, peer.proxy.Name)
+				} else {
+					// Passive connection: remote is the active end
+					// Use remote's friendly name (proxy name from hello), fallback to peer.ID (address)
+					remoteProxyName := peer.FriendlyName
+					if remoteProxyName == "" {
+						remoteProxyName = peer.ID
+					}
+					linkKey = fmt.Sprintf("%s:%s", peer.NodeID, remoteProxyName)
+				}
 				select {
-				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, frame: frameCopy}:
-					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkKey: linkKey, frame: frameCopy}:
+					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s linkKey=%s", peer.ID, peer.NodeID, linkKey)
 				default:
 					atomic.AddUint64(&m.meshInboundDrops, 1)
-					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s linkKey=%s", peer.ID, peer.NodeID, linkKey)
 					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
 			} else {
@@ -951,6 +1015,34 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	peer.NodeID = nodeID
 	peer.Status = "helloed"
 	peer.LastSeen = time.Now()
+	
+	// Store remote friendly name (proxy name) for link key construction
+	if info.FriendlyName != "" {
+		peer.FriendlyName = info.FriendlyName
+	}
+
+	// 2.5 Restore persistent link statistics
+	// Construct linkKey: activeNodeID:proxyName
+	var linkKey string
+	if peer.proxy != nil {
+		// Active connection: we are the active end
+		linkKey = fmt.Sprintf("%s:%s", m.nodeId, peer.proxy.Name)
+	} else {
+		// Passive connection: remote is the active end
+		remoteProxyName := peer.FriendlyName
+		if remoteProxyName == "" {
+			remoteProxyName = peer.ID
+		}
+		linkKey = fmt.Sprintf("%s:%s", nodeID, remoteProxyName)
+	}
+	
+	// Restore saved stats if available
+	m.mu.Lock()
+	if savedStats, ok := m.linkStats[linkKey]; ok {
+		peer.sendState = savedStats
+		util.LogInfo("[P2P] restored link stats for %s (linkKey=%s)", peer.ID, linkKey)
+	}
+	m.mu.Unlock()
 
 	// 3. Link ID negotiation
 	remoteSeq := info.Seq
@@ -1031,6 +1123,11 @@ func (m *P2PManager) SetMeshInfo(nodeID, vip string) {
 	m.meshEnabled = true
 	m.meshNodeID = nodeID
 	m.meshVIP = vip
+	// Update nodeId to match mesh nodeID for correct linkKey construction.
+	// P2PManager is created before MeshManager, so nodeId is initially a placeholder.
+	if nodeID != "" {
+		m.nodeId = nodeID
+	}
 }
 
 // SetMeshHandler sets the mesh handler for processing mesh frames and gossip.
@@ -1142,7 +1239,8 @@ func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.
 
 	for _, p := range m.peers {
 		if p.NodeID == nodeID && p.sendState != nil {
-			return p.sendState.getStats()
+			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
+			return p.sendState.getStats(channelDrops)
 		}
 	}
 	return 0, 0, 0, 0, 0
@@ -1183,7 +1281,8 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, ji
 
 	for _, p := range m.peers {
 		if p.ID == proxyName && p.sendState != nil {
-			return p.sendState.getStats()
+			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
+			return p.sendState.getStats(channelDrops)
 		}
 	}
 	return 0, 0, 0, 0, 0
@@ -1196,7 +1295,8 @@ func (m *P2PManager) GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitt
 
 	for _, p := range m.peers {
 		if p.LinkID == linkID && p.sendState != nil {
-			return p.sendState.getStats()
+			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
+			return p.sendState.getStats(channelDrops)
 		}
 	}
 	return 0, 0, 0, 0, 0
@@ -1226,7 +1326,8 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 
 	for _, p := range m.peers {
 		if p.sendState != nil {
-			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats()
+			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
+			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats(channelDrops)
 			result[p.ID] = struct {
 				NodeID      string
 				SRTT        time.Duration

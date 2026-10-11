@@ -65,15 +65,6 @@ func dnsPacketInfo(packet []byte) (net.IP, net.IP, uint16, bool) {
 	return net.IP(packet[12:16]), net.IP(packet[16:20]), dstPort, true
 }
 
-// TunInterface abstracts the TUN engine for mesh packet injection.
-type TunInterface interface {
-	// InjectFromNode injects a frame received from the given peer into the
-	// netstack via that peer's Link NIC (design §5.2).
-	InjectFromNode(nodeID string, data []byte) error
-	WriteMeshPacket(data []byte) error
-	GetNetstack() *Netstack
-}
-
 // PeerSender sends data directly to a connected peer.
 type PeerSender interface {
 	Send(data []byte) error
@@ -84,6 +75,7 @@ type PeerSender interface {
 	GetLocalSeq() uint16     // local sequence number (for gossip advertisement)
 	GetRemoteSeq() uint16    // remote sequence number (for gossip advertisement)
 	GetFriendlyName() string // friendly name (proxy name, for display only)
+	HasProxy() bool          // true if this is an active (outbound) connection
 }
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
@@ -109,6 +101,8 @@ type P2PTransport interface {
 // MeshPeerInfo describes a connected mesh peer.
 type MeshPeerInfo struct {
 	NodeID      string    `json:"nodeId"`
+	LinkKey     string    `json:"linkKey"`     // stable link identity: activeNodeID:activeSeq
+	LocalSeq    uint16    `json:"localSeq"`    // local sequence number (for quality lookup)
 	Subnet      string    `json:"subnet"`
 	Direct      bool      `json:"direct"`
 	LastSeen    time.Time `json:"lastSeen"`
@@ -233,7 +227,7 @@ type MeshManager struct {
 	domainSuffixes []string
 	advertise      []string
 	topology       *Topology
-	tun            TunInterface
+	netstack       *Netstack // Direct netstack reference for NIC operations
 	p2p            P2PTransport
 	dataDir        string // for state file persistence
 
@@ -639,6 +633,37 @@ func (m *MeshManager) NextHopNodeID(targetNodeID string) string {
 	return ""
 }
 
+// NextHopLink returns the next-hop peer node ID and the LinkNIC for the first hop
+// toward the target node per the Dijkstra best path. Returns ("", nil) when no
+// path is known.
+func (m *MeshManager) NextHopLink(targetNodeID string) (nextHopNodeID string, linkNIC *LinkNIC) {
+	rt := m.getRouteTable()
+	if rt != nil {
+		if path, ok := rt.bestPaths[targetNodeID]; ok && path.NextHop != "" {
+			return path.NextHop, path.LinkNIC
+		}
+	}
+	// Topology not converged yet: a direct peer is its own next hop.
+	// Get the LinkNIC from netstack using the peer's linkKey.
+	for _, peer := range m.topology.GetAllPeers() {
+		if peer.NodeID() == targetNodeID && peer.Sender != nil {
+			// Construct linkKey (same logic as GetPeers/buildTopologyGraph)
+			var linkKey string
+			if peer.Sender.HasProxy() {
+				linkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
+			} else {
+				remoteProxyName := peer.Sender.GetFriendlyName()
+				if remoteProxyName == "" {
+					remoteProxyName = peer.Sender.GetProxyName()
+				}
+				linkKey = fmt.Sprintf("%s:%s", targetNodeID, remoteProxyName)
+			}
+			return targetNodeID, m.netstack.GetLinkNICByLinkKey(linkKey)
+		}
+	}
+	return "", nil
+}
+
 // ResolveNodeIDForIP finds the egress node for ip via the mesh route table
 // (longest matching prefix, design §5.2). Returns "" when no prefix matches.
 func (m *MeshManager) ResolveNodeIDForIP(ip net.IP) string {
@@ -804,27 +829,27 @@ func (m *MeshManager) isLocalNetstackAddr(ip net.IP) bool {
 	return m.isLocalHostIP(ip) || m.isLocalGIP(ip)
 }
 
-func (m *MeshManager) SetTun(tun TunInterface) {
-	m.tun = tun
+func (m *MeshManager) SetNetstack(ns *Netstack) {
+	m.netstack = ns
 	// Set TCP keepalive on netstack if available
-	if tun != nil && tun.GetNetstack() != nil && m.tcpKeepalive != nil {
-		tun.GetNetstack().SetTCPKeepalive(m.tcpKeepalive)
+	if ns != nil && m.tcpKeepalive != nil {
+		ns.SetTCPKeepalive(m.tcpKeepalive)
 	}
 }
 
 // SetTCPKeepalive sets the TCP keepalive settings for mesh connections.
 func (m *MeshManager) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
 	m.tcpKeepalive = ka
-	// If TUN is already set, apply immediately
-	if m.tun != nil && m.tun.GetNetstack() != nil && ka != nil {
-		m.tun.GetNetstack().SetTCPKeepalive(ka)
+	// If netstack is already set, apply immediately
+	if m.netstack != nil && ka != nil {
+		m.netstack.SetTCPKeepalive(ka)
 	}
 }
 
 var GlobalMeshManager *MeshManager
 
-func (m *MeshManager) Start(tun TunInterface, p2p P2PTransport) {
-	m.tun = tun
+func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
+	m.netstack = ns
 	m.p2p = p2p
 	// Set mesh info on P2P layer so hello messages include correct meshNodeId
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
@@ -972,6 +997,60 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 	m.topology.UnregisterPeerByNodeID(nodeID)
 }
 
+// SendViaLink sends a packet via a specific link identified by linkKey.
+// Used by LinkNIC.WritePackets to send directly on the selected link,
+// bypassing SendToNode's load balancing (RouteSelector already did the selection).
+func (m *MeshManager) SendViaLink(linkKey string, packet []byte) error {
+	if linkKey == "" {
+		return fmt.Errorf("empty link key")
+	}
+	if len(packet) == 0 {
+		return fmt.Errorf("empty packet")
+	}
+
+	// Find the peer with this linkKey by reconstructing linkKey for each peer
+	m.mu.RLock()
+	allPeers := m.topology.GetAllPeers()
+	m.mu.RUnlock()
+
+	var targetPeer *PeerInfo
+	for _, peer := range allPeers {
+		if peer.Sender == nil {
+			continue
+		}
+		// Reconstruct linkKey using the same logic as GetPeers
+		var peerLinkKey string
+		if peer.Sender.HasProxy() {
+			peerLinkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
+		} else {
+			remoteProxyName := peer.Sender.GetFriendlyName()
+			if remoteProxyName == "" {
+				remoteProxyName = peer.Sender.GetProxyName()
+			}
+			peerLinkKey = fmt.Sprintf("%s:%s", peer.NodeID(), remoteProxyName)
+		}
+		if peerLinkKey == linkKey {
+			targetPeer = peer
+			break
+		}
+	}
+
+	if targetPeer == nil {
+		return fmt.Errorf("no peer for linkKey %s", linkKey)
+	}
+	if targetPeer.Sender == nil {
+		return fmt.Errorf("peer for linkKey %s has no sender", linkKey)
+	}
+
+	TraceForwarding("linknic_egress_via_link", packet, "linkKey=%s peer=%s proxy=%s", linkKey, targetPeer.Sender.GetNodeID(), targetPeer.Sender.GetProxyName())
+	if err := targetPeer.Sender.Send(packet); err != nil {
+		TraceForwarding("linknic_egress_error", packet, "linkKey=%s peer=%s err=%v", linkKey, targetPeer.Sender.GetNodeID(), err)
+		return err
+	}
+	TraceForwarding("linknic_egress", packet, "linkKey=%s peer=%s proxy=%s", linkKey, targetPeer.Sender.GetNodeID(), targetPeer.Sender.GetProxyName())
+	return nil
+}
+
 // SendToNode sends an encapsulated packet to a specific target node via the mesh network.
 // This is used by tunnel NICs to send IPIP-encapsulated packets to egress nodes.
 // Multi-link load balancing: round-robin among same-hop peers (design §2.8).
@@ -1090,8 +1169,8 @@ func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 //   - All other frames: inject into the fromNode's Link NIC. The netstack then
 //     decides local delivery (GIP/VIP/fakeIP), forwarding (NAT return, relay),
 //     TTL decrement and ICMP generation — no manual 卡口 at the frame layer.
-func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
-	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
+func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkKey string, frame []byte) {
+	util.LogDebug("[MESH] HandleMeshFrame called from %s linkKey=%s: %d bytes", fromNodeID, linkKey, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
 		return
@@ -1112,8 +1191,8 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 				return
 			}
 			util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
-			// Recursively process the inner packet
-			m.HandleMeshFrame(fromNodeID, innerPacket)
+			// Recursively process the inner packet (same linkKey as outer)
+			m.HandleMeshFrame(fromNodeID, linkKey, innerPacket)
 			return
 		}
 
@@ -1149,16 +1228,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, frame []byte) {
 	// Inject into the fromNode's Link NIC. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.
-	if m.tun == nil {
-		util.LogWarn("[MESH] no tun interface, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
+	if m.netstack == nil {
+		util.LogWarn("[MESH] no netstack, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
 		return
 	}
-	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
-	if err := m.tun.InjectFromNode(fromNodeID, frame); err != nil {
-		TraceForwarding("mesh_inject_error", frame, "fromNode=%s err=%v", fromNodeID, err)
+	TraceForwarding("mesh_inject_start", frame, "fromNode=%s linkKey=%s", fromNodeID, linkKey)
+	if err := m.netstack.InjectFromNode(linkKey, frame); err != nil {
+		TraceForwarding("mesh_inject_error", frame, "fromNode=%s linkKey=%s err=%v", fromNodeID, linkKey, err)
 		util.LogWarn("[MESH] inject frame from %s (dst=%s) via Link NIC failed: %v", fromNodeID, dstIP, err)
 	} else {
-		TraceForwarding("mesh_inject_ok", frame, "fromNode=%s", fromNodeID)
+		TraceForwarding("mesh_inject_ok", frame, "fromNode=%s linkKey=%s", fromNodeID, linkKey)
 	}
 }
 
@@ -1495,25 +1574,42 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 	}
 	allPeers := m.topology.GetAllPeers()
 
-	// Deduplicate by nodeID (multiple connections to same node)
-	seen := make(map[string]bool)
-	result := make([]MeshPeerInfo, 0)
+	// Return all links (no deduplication by nodeID) - each link gets its own LinkNIC
+	result := make([]MeshPeerInfo, 0, len(allPeers))
 	for _, p := range allPeers {
 		if p.Sender == nil {
 			continue
 		}
 		nodeID := p.NodeID()
-		if nodeID == "" || seen[nodeID] {
+		if nodeID == "" {
 			continue
 		}
-		seen[nodeID] = true
 
-		// Get RTT stats from the first link to this peer
+		// Construct linkKey: activeNodeID:proxyName
+		// Active connection (outbound): local node is active, linkKey = localNodeID:localProxyName
+		// Passive connection (inbound): remote node is active, linkKey = remoteNodeID:remoteProxyName
+		var linkKey string
+		if p.Sender.HasProxy() {
+			// Active connection: we are the active end
+			linkKey = fmt.Sprintf("%s:%s", m.nodeID, p.Sender.GetProxyName())
+		} else {
+			// Passive connection: remote is the active end
+			// Use remote's friendly name (proxy name from hello), fallback to proxy name (which is address for passive)
+			remoteProxyName := p.Sender.GetFriendlyName()
+			if remoteProxyName == "" {
+				remoteProxyName = p.Sender.GetProxyName()
+			}
+			linkKey = fmt.Sprintf("%s:%s", nodeID, remoteProxyName)
+		}
+
+		// Get RTT stats for this specific link
 		avgRTT, lossRate, jitter := m.GetPeerQuality(nodeID)
 		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStats(nodeID)
 
 		result = append(result, MeshPeerInfo{
 			NodeID:      nodeID,
+			LinkKey:     linkKey,
+				LocalSeq:    p.Sender.GetLocalSeq(),
 			Direct:      true,
 			Subnet:      p.SubnetStr,
 			LastSeen:    p.LastSeen,
@@ -2403,10 +2499,10 @@ func (m *MeshManager) GetLinkNICStats() map[string]struct {
 	Bytes   uint64
 	Drops   uint64
 } {
-	if m.tun == nil || m.tun.GetNetstack() == nil {
+	if m.netstack == nil {
 		return nil
 	}
-	return m.tun.GetNetstack().LinkNICStats()
+	return m.netstack.LinkNICStats()
 }
 
 func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
@@ -2689,14 +2785,15 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 
 // LinkQualityInfo represents a link in the topology graph.
 type LinkQualityInfo struct {
-	From      string  // source node ID
-	To        string  // target node ID
-	LocalSeq  uint16  // local sequence number
-	RemoteSeq uint16  // remote sequence number
-	SRTT      float64 // smoothed RTT in milliseconds
-	LossRate  float64 // loss rate (0.0-1.0)
-	Jitter    float64 // jitter in milliseconds
-	Cost      float64 // path cost = SRTT * (1 + LossRate) + Jitter
+	From      string    // source node ID
+	To        string    // target node ID
+	LinkNIC   *LinkNIC  // LinkNIC for direct links (nil for relayed)
+	LocalSeq  uint16    // local sequence number
+	RemoteSeq uint16    // remote sequence number
+	SRTT      float64   // smoothed RTT in milliseconds
+	LossRate  float64   // loss rate (0.0-1.0)
+	Jitter    float64   // jitter in milliseconds
+	Cost      float64   // path cost = SRTT * (1 + LossRate) + Jitter
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -2725,9 +2822,25 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 
 		localSeq := peer.Sender.GetLocalSeq()
 		remoteSeq := peer.Sender.GetRemoteSeq()
+		
+		// Construct linkKey (same logic as GetPeers)
+		var linkKey string
+		if peer.Sender.HasProxy() {
+			// Active connection: we are the active end
+			linkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
+		} else {
+			// Passive connection: remote is the active end
+			remoteProxyName := peer.Sender.GetFriendlyName()
+			if remoteProxyName == "" {
+				remoteProxyName = peer.Sender.GetProxyName()
+			}
+			linkKey = fmt.Sprintf("%s:%s", neighborID, remoteProxyName)
+		}
+		
 		link := &LinkQualityInfo{
 			From:      selfID,
 			To:        neighborID,
+			LinkNIC:   m.netstack.GetLinkNICByLinkKey(linkKey), // Direct link has LinkNIC
 			LocalSeq:  localSeq,
 			RemoteSeq: remoteSeq,
 		}
@@ -2797,19 +2910,19 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 
 // dijkstraResult represents the result of Dijkstra's algorithm for a single destination.
 type dijkstraResult struct {
-	NextHop  string  // next hop node ID
-	LocalSeq uint16  // localSeq of the best link to next hop
-	Cost     float64 // total path cost
+	NextHop string   // next hop node ID
+	LinkNIC *LinkNIC // LinkNIC for the first hop (direct link)
+	Cost    float64  // total path cost
 }
 
 // dijkstra computes shortest paths from source to all other nodes.
 // Returns a map: nodeID -> dijkstraResult.
 func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 	type nodeInfo struct {
-		cost     float64
-		nextHop  string
-		localSeq uint16 // localSeq of the best link to next hop
-		visited  bool
+		cost    float64
+		nextHop string
+		linkNIC *LinkNIC // LinkNIC for the first hop (direct link)
+		visited bool
 	}
 
 	nodes := make(map[string]*nodeInfo)
@@ -2845,31 +2958,31 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				}
 				// Find the best link (lowest cost, then smallest localSeq for deterministic tie-breaking) among multiple links
 				var bestCost float64 = 1e18
-				var bestLocalSeq uint16
+				var bestLink *LinkQualityInfo
 				for _, link := range links {
-					if link.Cost < bestCost || (link.Cost == bestCost && link.LocalSeq < bestLocalSeq) {
+					if link.Cost < bestCost || (link.Cost == bestCost && link.LocalSeq < bestLink.LocalSeq) {
 						bestCost = link.Cost
-						bestLocalSeq = link.LocalSeq
+						bestLink = link
 					}
 				}
 				newCost := nodes[minNode].cost + bestCost
 
-				// Determine next hop
+				// Determine next hop and LinkNIC
 				var nextHop string
-				var localSeq uint16
+				var linkNIC *LinkNIC
 				if minNode == source {
 					nextHop = toNode // direct neighbor
-					localSeq = bestLocalSeq
+					linkNIC = bestLink.LinkNIC // direct link has LinkNIC
 				} else {
-					nextHop = nodes[minNode].nextHop   // inherit next hop
-					localSeq = nodes[minNode].localSeq // inherit localSeq
+					nextHop = nodes[minNode].nextHop  // inherit next hop
+					linkNIC = nodes[minNode].linkNIC  // inherit first hop's LinkNIC
 				}
 
 				// Update if better cost, or same cost with lexicographically smaller nextHop (deterministic tie-breaking)
 				if newCost < nodes[toNode].cost || (newCost == nodes[toNode].cost && nextHop < nodes[toNode].nextHop) {
 					nodes[toNode].cost = newCost
 					nodes[toNode].nextHop = nextHop
-					nodes[toNode].localSeq = localSeq
+					nodes[toNode].linkNIC = linkNIC
 				}
 			}
 		}
@@ -2880,9 +2993,9 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 	for nodeID, info := range nodes {
 		if nodeID != source && info.cost < 1e18 {
 			result[nodeID] = dijkstraResult{
-				NextHop:  info.nextHop,
-				LocalSeq: info.localSeq,
-				Cost:     info.cost,
+				NextHop: info.nextHop,
+				LinkNIC: info.linkNIC,
+				Cost:    info.cost,
 			}
 		}
 	}

@@ -20,7 +20,8 @@ import (
 // No IPIP encapsulation, no routing decisions - the netstack does those.
 type LinkNIC struct {
 	nicID      tcpip.NICID
-	peerNodeID string
+	linkKey    string     // Stable link identifier (activeNodeID:proxyName)
+	peerNodeID string     // Target node ID (for routing resolution)
 	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
 	meshMgr    *MeshManager
@@ -33,9 +34,10 @@ type LinkNIC struct {
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
-func NewLinkNIC(nicID tcpip.NICID, peerNodeID string, peerSubnet *net.IPNet, meshMgr *MeshManager) *LinkNIC {
+func NewLinkNIC(nicID tcpip.NICID, linkKey string, peerNodeID string, peerSubnet *net.IPNet, meshMgr *MeshManager) *LinkNIC {
 	return &LinkNIC{
 		nicID:      nicID,
+		linkKey:    linkKey,
 		peerNodeID: peerNodeID,
 		peerSubnet: peerSubnet,
 		mtu:        1500, // Default MTU
@@ -127,10 +129,9 @@ func (l *LinkNIC) LinkAddress() tcpip.LinkAddress {
 func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 
 // WritePackets implements stack.LinkEndpoint.WritePackets.
-// Sends packets toward the node that owns each packet's destination IP; the
-// mesh hop table picks the next hop at send time (direct or relayed, design
-// §5.2). Routes for multi-hop nodes land on the next-hop peer's Link NIC, so
-// the bound peer is only a fallback.
+// Sends packets directly on this link (identified by linkKey).
+// RouteSelector already chose this specific link via round-robin load balancing,
+// so we bypass SendToNode's selection logic.
 //
 // Packet buffers remain owned by the caller (same contract as channel.Endpoint,
 // which clones before queueing); we only read the data synchronously.
@@ -141,7 +142,7 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 
 	// Diagnostic: unconditional log at egress entry
 	pktSlice := pkts.AsSlice()
-	util.LogInfo("[LINKNIC-DIAG] WritePackets called nicID=%d peer=%s pktCount=%d", l.nicID, l.peerNodeID, len(pktSlice))
+	util.LogInfo("[LINKNIC-DIAG] WritePackets called nicID=%d linkKey=%s peer=%s pktCount=%d", l.nicID, l.linkKey, l.peerNodeID, len(pktSlice))
 
 	count := 0
 	for _, pkt := range pktSlice {
@@ -152,27 +153,17 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		if len(pktData) >= 20 {
 			srcIP := net.IP(pktData[12:16])
 			dstIP := net.IP(pktData[16:20])
-			util.LogInfo("[LINKNIC-DIAG] WritePackets nicID=%d %s -> %s proto=%d len=%d",
-				l.nicID, srcIP, dstIP, pktData[9], len(pktData))
+			util.LogInfo("[LINKNIC-DIAG] WritePackets nicID=%d linkKey=%s %s -> %s proto=%d len=%d",
+				l.nicID, l.linkKey, srcIP, dstIP, pktData[9], len(pktData))
 		}
 
-		// Resolve the FINAL target node from the packet's destination
-		// (inner dst for plain frames, outer dst for IPIP frames — both are
-		// node-subnet addresses). SendToNode then routes via the hop table.
-		target := l.peerNodeID
-		if len(pktData) >= 20 && pktData[0]>>4 == 4 {
-			if nodeID := l.meshMgr.ResolveNodeIDForIP(net.IP(pktData[16:20])); nodeID != "" {
-				target = nodeID
-			}
-		}
-
-		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d boundPeer=%s target=%s", l.nicID, l.peerNodeID, target)
-		if err := l.meshMgr.SendToNode(target, pktData); err != nil {
-			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d boundPeer=%s target=%s err=%v", l.nicID, l.peerNodeID, target, err)
-			util.LogDebug("[LINKNIC] send to node %s failed: %v", target, err)
+		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d linkKey=%s peer=%s", l.nicID, l.linkKey, l.peerNodeID)
+		if err := l.meshMgr.SendViaLink(l.linkKey, pktData); err != nil {
+			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d linkKey=%s peer=%s err=%v", l.nicID, l.linkKey, l.peerNodeID, err)
+			util.LogDebug("[LINKNIC] send via link %s failed: %v", l.linkKey, err)
 			continue
 		}
-		TraceForwarding("linknic_egress", pktData, "linkNIC=%d boundPeer=%s target=%s", l.nicID, l.peerNodeID, target)
+		TraceForwarding("linknic_egress", pktData, "linkNIC=%d linkKey=%s peer=%s", l.nicID, l.linkKey, l.peerNodeID)
 		count++
 	}
 

@@ -111,9 +111,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		dialer.GlobalNetstackDialWithModeBFunc = engine.NetDialWithModeB
 		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
 
-		// Set TUN reference FIRST to close the race where P2P receives mesh
+		// Set netstack reference FIRST to close the race where P2P receives mesh
 		// frames before meshMgr.Start() is called below.
-		meshMgr.SetTun(engine)
+		meshMgr.SetNetstack(engine.GetNetstack())
 
 		meshVIP := meshMgr.GetVIP()
 		allVIPs := meshMgr.GetAllVIPs()
@@ -140,7 +140,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 			return meshMgr.GetFakeIPPool().Lookup(domain), nil
 		}
 
-		meshMgr.Start(engine, p2p.GlobalP2PManager)
+		meshMgr.Start(engine.GetNetstack(), p2p.GlobalP2PManager)
 
 		// Configure netstack with mesh manager (Link NICs + RouteSelector)
 		engine.GetNetstack().SetMeshManager(meshMgr)

@@ -1662,6 +1662,8 @@
         return dict[key] !== undefined ? dict[key] : (fallback !== undefined ? fallback : key);
     }
 
+    var EMOJI_PREFIX_RE = /^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡🔷📜🗺️↗️🧙📝☰🏠📶⏱️🔧]+[\s]*/;
+
     function applyTranslations() {
         document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.dataset.i18n;
@@ -1669,10 +1671,20 @@
             if (text !== key) {
                 // For elements with child nodes (like links with icons), be careful
                 if (el.children.length === 0) {
-                    el.textContent = text;
+                    // If the element's original text doesn't start with an emoji
+                    // but the translation does, strip the emoji to avoid double icons
+                    // (e.g. drawer/bottom-nav label spans that have a sibling icon span).
+                    const currentText = el.textContent || '';
+                    const currentHasEmoji = EMOJI_PREFIX_RE.test(currentText);
+                    const translationHasEmoji = EMOJI_PREFIX_RE.test(text);
+                    if (!currentHasEmoji && translationHasEmoji) {
+                        el.textContent = text.replace(EMOJI_PREFIX_RE, '');
+                    } else {
+                        el.textContent = text;
+                    }
                 } else {
                     // Only replace text nodes, preserve icons/emoji
-                    const icon = el.textContent.match(/^[📊🔗📋🔌🔄⚡📈👥💾✅❌📤🌐⚙️←→🔍📡🔷📜🗺️↗️🧙]+\s*/);
+                    const icon = el.textContent.match(EMOJI_PREFIX_RE);
                     if (icon) {
                         el.childNodes[0].textContent = icon[0] + text;
                     } else {

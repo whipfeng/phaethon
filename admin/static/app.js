@@ -980,8 +980,8 @@ function renderProxyRows(proxiesData) {
                </span>`
             : `<span class="text-muted">-</span>`;
         const p2pCell = p2p
-            ? `<span class="p2p-status connecting" title="Connecting...">🔄</span>`
-            : '❌';
+            ? `<span class="p2p-status connecting" title="Connecting..."></span>`
+            : `<span class="p2p-status disabled" title="Disabled"></span>`;
         return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
             <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>
             <td data-label="Type"><code class="type-badge type-${escapeHtml((p.type || '').toLowerCase())}">${escapeHtml(p.type)}</code></td>
@@ -2215,12 +2215,18 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         }, { passive: false });
 
         canvas.addEventListener('touchend', function(e) {
+            // Save dragging state before synthetic mouseup clears it
+            const savedDragging = _topologyState.dragging;
+            const savedDragStartPos = _topologyState.dragStartPos;
             const mouseEvent = new MouseEvent('mouseup', {
                 clientX: 0,
                 clientY: 0,
                 bubbles: true
             });
             canvas.dispatchEvent(mouseEvent);
+            // Restore dragging state for the mobile touchend handler below
+            _topologyState.dragging = savedDragging;
+            _topologyState.dragStartPos = savedDragStartPos;
             e.preventDefault();
         }, { passive: false });
 

@@ -1858,6 +1858,17 @@ func (m *MeshManager) recomputeRoutes() {
 	graph := m.buildTopologyGraph()
 	bestPaths := dijkstra(graph, m.nodeID)
 
+	// Diagnostic: log bestPaths for debugging
+	if ForwardingTraceEnabled() {
+		for nodeID, path := range bestPaths {
+			linkNICID := tcpip.NICID(0)
+			if path.LinkNIC != nil {
+				linkNICID = path.LinkNIC.nicID
+			}
+			util.LogInfo("[MESH-DIJKSTRA] target=%s nextHop=%s cost=%.0f linkNIC=%d", nodeID, path.NextHop, path.Cost, linkNICID)
+		}
+	}
+
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,
@@ -2187,10 +2198,10 @@ func (m *MeshManager) broadcastGossip() {
 		}
 	}
 
-	// Mutual neighbor validation: filter out claims where origin's neighbors
-	// don't reciprocally declare the origin.
-	// Rule: if X declares neighbors=[Y], then Y must also declare X.
-	// This prevents stale claims from wandering after a node goes offline.
+	// Link-level mutual validation: filter out links where the reverse side doesn't exist.
+	// Rule: if X declares a link to Y with (localSeq=L, remoteSeq=R), then Y must declare
+	// a link to X with (localSeq=R, remoteSeq=L). This prevents stale links from persisting.
+	// This follows the same "strict validation, wait for bidirectional confirmation" pattern.
 	nodeIDToClaim := make(map[string]globalClaimEntry, len(bestClaims))
 	for _, c := range bestClaims {
 		nodeIDToClaim[c.nodeID] = c
@@ -2202,21 +2213,51 @@ func (m *MeshManager) broadcastGossip() {
 			validatedClaims[subnet] = claim
 			continue
 		}
-		valid := true
+		
+		// Validate each link in each neighbor
+		var validatedNeighbors []GossipNeighbor
 		for _, neighbor := range claim.neighbors {
 			neighborClaim, ok := nodeIDToClaim[neighbor.NodeID]
 			if !ok {
-				valid = false
-				break
+				// Neighbor doesn't exist, skip all its links
+				continue
 			}
-			if !containsNeighborNodeID(neighborClaim.neighbors, claim.nodeID) {
-				valid = false
-				break
+			
+			// Check each link for matching reverse
+			var validatedLinks []GossipLink
+			for _, gossipLink := range neighbor.Links {
+				// Look for reverse link: (localSeq=R, remoteSeq=L) in neighbor's claim about origin
+				for _, reverseNeighbor := range neighborClaim.neighbors {
+					if reverseNeighbor.NodeID == claim.nodeID {
+						// Found neighbor's claim about origin, check for matching link
+						for _, reverseLink := range reverseNeighbor.Links {
+							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
+								validatedLinks = append(validatedLinks, gossipLink)
+								break
+							}
+						}
+						break
+					}
+				}
+				// If not found, link is filtered out (strict validation)
+				// It will reappear once the reverse gossip arrives
+			}
+			
+			if len(validatedLinks) > 0 {
+				validatedNeighbors = append(validatedNeighbors, GossipNeighbor{
+					NodeID: neighbor.NodeID,
+					Links:  validatedLinks,
+				})
 			}
 		}
-		if valid {
-			validatedClaims[subnet] = claim
+		
+		if len(validatedNeighbors) > 0 {
+			// Claim has at least one validated neighbor, keep it with validated neighbors only
+			validatedClaim := claim
+			validatedClaim.neighbors = validatedNeighbors
+			validatedClaims[subnet] = validatedClaim
 		}
+		// If no validated neighbors, claim is dropped entirely
 	}
 	bestClaims = validatedClaims
 
@@ -2847,41 +2888,72 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		if peer.Sender == nil {
 			continue
 		}
+		peerID := peer.NodeID()
+		
+		// Diagnostic: log peer and its claimed subnets
+		if ForwardingTraceEnabled() {
+			util.LogInfo("[MESH-TOPOLOGY] processing peer=%s claimedSubnets=%d", peerID, len(peer.ClaimedSubnets))
+		}
+		
 		for _, claim := range peer.ClaimedSubnets {
-			// Only process the peer's own subnet claim (hop=1 after increment)
-			if claim.NodeID == peer.NodeID() && claim.Hop == 1 {
-				fromNode := peer.NodeID()
-				graph.Nodes[fromNode] = true
+			fromNode := claim.NodeID
+			
+			// Diagnostic: log claim details
+			if ForwardingTraceEnabled() {
+				util.LogInfo("[MESH-TOPOLOGY] peer=%s claim.NodeID=%s claim.Hop=%d neighbors=%d", 
+					peerID, claim.NodeID, claim.Hop, len(claim.Neighbors))
+			}
+			
+			// Process all claims (not just hop=1) to build complete topology
+			// Each claim's Neighbors contain that node's direct links
+			graph.Nodes[fromNode] = true
 
-				for _, neighbor := range claim.Neighbors {
-					toNode := neighbor.NodeID
-					graph.Nodes[toNode] = true
+			for _, neighbor := range claim.Neighbors {
+				toNode := neighbor.NodeID
+				graph.Nodes[toNode] = true
+				
+				// Diagnostic: log neighbor being added
+				if ForwardingTraceEnabled() {
+					util.LogInfo("[MESH-TOPOLOGY] adding edge from=%s to=%s links=%d", fromNode, toNode, len(neighbor.Links))
+				}
 
-					// Process all links to this neighbor
-					for _, gossipLink := range neighbor.Links {
-						link := &LinkQualityInfo{
-							From:      fromNode,
-							To:        toNode,
-							LocalSeq:  gossipLink.LocalSeq,
-							RemoteSeq: gossipLink.RemoteSeq,
-							SRTT:      gossipLink.SRTT,
-							LossRate:  gossipLink.LossRate,
-						}
-						if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
-							link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
-						} else {
-							link.Cost = 1000 // default high cost
-						}
-
-						if graph.Edges[fromNode] == nil {
-							graph.Edges[fromNode] = make(map[string][]*LinkQualityInfo)
-						}
-						// Append link (support multiple links)
-						graph.Edges[fromNode][toNode] = append(graph.Edges[fromNode][toNode], link)
+				// Process all links to this neighbor
+				for _, gossipLink := range neighbor.Links {
+					link := &LinkQualityInfo{
+						From:      fromNode,
+						To:        toNode,
+						LocalSeq:  gossipLink.LocalSeq,
+						RemoteSeq: gossipLink.RemoteSeq,
+						SRTT:      gossipLink.SRTT,
+						LossRate:  gossipLink.LossRate,
 					}
+					if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
+						link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
+					} else {
+						link.Cost = 1000 // default high cost
+					}
+
+					if graph.Edges[fromNode] == nil {
+						graph.Edges[fromNode] = make(map[string][]*LinkQualityInfo)
+					}
+					// Append link (support multiple links)
+					graph.Edges[fromNode][toNode] = append(graph.Edges[fromNode][toNode], link)
 				}
 			}
 		}
+	}
+	
+	// Diagnostic: log final graph state
+	if ForwardingTraceEnabled() {
+		nodeList := make([]string, 0, len(graph.Nodes))
+		for nodeID := range graph.Nodes {
+			nodeList = append(nodeList, nodeID)
+		}
+		edgeCount := 0
+		for _, neighbors := range graph.Edges {
+			edgeCount += len(neighbors)
+		}
+		util.LogInfo("[MESH-TOPOLOGY] final graph: nodes=%d edges=%d nodeList=%v", len(graph.Nodes), edgeCount, nodeList)
 	}
 
 	return graph

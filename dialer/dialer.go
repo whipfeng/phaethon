@@ -3,14 +3,14 @@ package dialer
 import (
 	"fmt"
 	"net"
+	"phaethon/config"
 	"phaethon/frame"
+	"phaethon/mesh"
+	"phaethon/reverse"
+	"phaethon/util"
 	"strconv"
 	"strings"
 	"time"
-
-	"phaethon/config"
-	"phaethon/reverse"
-	"phaethon/util"
 )
 
 // Global UDP ephemeral port range.
@@ -213,14 +213,11 @@ func NewDialer(proxy *config.Proxy) Dialer {
 		return &stubDialer{name: proxy.Type}
 	}
 
-	// v2 dispatch DISABLED (2026-10-08): revert to v1 protocol-handshake path.
-	// All proxies (including h_tunnel) now use their original protocol Dialer.
-	// meshAwareDialer code is preserved below; re-enable by uncommenting the
-	// dispatch block when v2 is ready.
-	//
-	// if proxy.IsP2P() {
-	// 	return &meshAwareDialer{proxy: proxy}
-	// }
+	// v2 dispatch: must have both p2p=true AND v2=true to use mesh direct path.
+	// v2=false (default) keeps the v1 protocol-handshake path (stable baseline).
+	if proxy.IsP2P() && proxy.V2 {
+		return &meshAwareDialer{proxy: proxy}
+	}
 	return d
 }
 
@@ -238,7 +235,30 @@ type meshAwareDialer struct {
 }
 
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
-	return MeshDial(dstAddr, dstPort, "", "PROXY:"+d.proxy.Name, nil)
+	// v2 data path: create a per-endpoint RouteFunc that bypasses RouteSelector
+	// and routes directly to the peer's LinkNIC with IPIP encapsulation.
+	routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
+
+	if GlobalNetstackDialV2Func == nil {
+		return nil, fmt.Errorf("v2 dial: netstack v2 dial not initialized")
+	}
+
+	var targetAddr string
+	if ip := net.ParseIP(dstAddr); ip == nil {
+		// Domain: resolve through netstack DNS to get Fake-IP
+		if GlobalDNSResolverFunc == nil {
+			return nil, fmt.Errorf("v2 dial: DNS resolver not available for domain: %s", dstAddr)
+		}
+		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
+		if err != nil {
+			return nil, fmt.Errorf("v2 dial: resolve %s: %w", dstAddr, err)
+		}
+		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
+	} else {
+		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+	}
+
+	return GlobalNetstackDialV2Func("tcp", targetAddr, routeFunc)
 }
 
 // ServerAddr returns empty for mesh dialer: no proxy server is in the data path.

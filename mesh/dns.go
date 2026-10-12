@@ -271,6 +271,8 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		return
 	}
 
+	util.LogInfo("[DNS-DEBUG] processQuery: domain=%s from=%s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
+
 	// Return empty response for AAAA queries (no IPv6 support)
 	if qtype == 28 { // AAAA
 		util.LogDebug("tun dns: AAAA query for %s, returning empty response", domain)
@@ -278,6 +280,8 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		if resp != nil {
 			if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 				util.LogWarn("tun dns: write empty response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+			} else {
+				util.LogInfo("[DNS-DEBUG] processQuery: sent AAAA empty response for %s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 			}
 		}
 		return
@@ -290,6 +294,8 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		if resp != nil {
 			if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 				util.LogWarn("tun dns: write cached response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+			} else {
+				util.LogInfo("[DNS-DEBUG] processQuery: sent cached response for %s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 			}
 		}
 		return
@@ -319,6 +325,8 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 			if resp != nil {
 				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 					util.LogWarn("tun dns: write remote response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+				} else {
+					util.LogInfo("[DNS-DEBUG] processQuery: sent remote response for %s -> %s to %s:%d", domain, remoteIP, remoteAddr.Addr, remoteAddr.Port)
 				}
 			}
 			return
@@ -368,36 +376,66 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	util.LogDebug("[DNS] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
 
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
-	// Pin the source to our own GIP: gVisor picks the source by longest-prefix
-	// match over the NIC's primary address list, so a stray remote-subnet
-	// address in that list would beat the GIP and get replies black-holed.
 	localAddr := tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr}
-	conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
-	if err != nil {
-		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
-	}
-	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return nil, 0, fmt.Errorf("set deadline: %v", err)
+	const maxAttempts = 3
+	const perAttemptTimeout = 5 * time.Second
+	var lastErr error
+
+	util.LogInfo("[DNS] forwardToRemote: START domain=%s remoteGIP=%s localGIP=%s", "unknown", remoteGIP, h.dnsAddr)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		util.LogInfo("[DNS] forwardToRemote: attempt %d/%d dialing %s:53", attempt, maxAttempts, remoteGIP)
+		conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
+		if err != nil {
+			lastErr = fmt.Errorf("dial %s:53: %v", remoteGIP, err)
+			util.LogInfo("[DNS] forwardToRemote: attempt %d/%d dial failed: %v", attempt, maxAttempts, err)
+			continue
+		}
+		util.LogInfo("[DNS] forwardToRemote: attempt %d/%d dial success, localAddr=%s", attempt, maxAttempts, conn.LocalAddr())
+
+		if err := conn.SetDeadline(time.Now().Add(perAttemptTimeout)); err != nil {
+			conn.Close()
+			lastErr = fmt.Errorf("set deadline: %v", err)
+			util.LogInfo("[DNS] forwardToRemote: attempt %d/%d set deadline failed: %v", attempt, maxAttempts, err)
+			continue
+		}
+
+		util.LogInfo("[DNS] forwardToRemote: attempt %d/%d writing query (%d bytes)", attempt, maxAttempts, len(query))
+		if _, err := conn.Write(query); err != nil {
+			conn.Close()
+			lastErr = fmt.Errorf("write query: %v", err)
+			util.LogInfo("[DNS] forwardToRemote: attempt %d/%d write failed: %v", attempt, maxAttempts, err)
+			continue
+		}
+		util.LogInfo("[DNS] forwardToRemote: attempt %d/%d write success, waiting for response", attempt, maxAttempts)
+
+		resp := make([]byte, 512)
+		n, err := conn.Read(resp)
+		localAddrStr := conn.LocalAddr().String()
+		conn.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, localAddrStr, err)
+			util.LogInfo("[DNS] forwardToRemote: attempt %d/%d read failed: %v", attempt, maxAttempts, err)
+			continue
+		}
+		util.LogInfo("[DNS] forwardToRemote: attempt %d/%d read success, got %d bytes", attempt, maxAttempts, n)
+
+		respIP, ttl := ParseDNSResponseIP(resp[:n])
+		if respIP == nil {
+			lastErr = fmt.Errorf("no A record in response")
+			util.LogDebug("[DNS] forwardToRemote: attempt %d/%d no A record", attempt, maxAttempts)
+			continue
+		}
+		if attempt > 1 {
+			util.LogDebug("[DNS] forwardToRemote: succeeded on attempt %d/%d Fake-IP=%s ttl=%v", attempt, maxAttempts, respIP, ttl)
+		} else {
+			util.LogDebug("[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
+		}
+		return respIP, ttl, nil
 	}
 
-	if _, err := conn.Write(query); err != nil {
-		return nil, 0, fmt.Errorf("write query: %v", err)
-	}
-
-	resp := make([]byte, 512)
-	n, err := conn.Read(resp)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, conn.LocalAddr(), err)
-	}
-
-	respIP, ttl := ParseDNSResponseIP(resp[:n])
-	if respIP == nil {
-		return nil, 0, fmt.Errorf("no A record in response")
-	}
-	util.LogDebug("[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
-	return respIP, ttl, nil
+	return nil, 0, fmt.Errorf("all %d attempts failed, last error: %v", maxAttempts, lastErr)
 }
 
 // SlicePayload implements tcpip.Payload for byte slices.

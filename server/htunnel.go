@@ -704,6 +704,7 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	contentSeq := s.getContentSeq(r)
 	chI, ok := s.channels.Load(id)
 	if !ok {
+		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
 		w.WriteHeader(410)
 		return
 	}
@@ -727,14 +728,17 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 			data := ch.lastReadData
 			ch.mu.Unlock()
 			if data != nil {
+				util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: returning cached data len=%d", id, contentSeq, len(data))
 				w.WriteHeader(200)
 				w.Write(data)
 			} else {
+				util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: no cached data → 408", id, contentSeq)
 				w.WriteHeader(408)
 			}
 			return
 		}
 		if step != 1 {
+			util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d readSeq=%d step=%d → 410", id, contentSeq, ch.readSeq, step)
 			ch.mu.Unlock()
 			w.WriteHeader(410)
 			return
@@ -760,12 +764,16 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case err == io.EOF:
+		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: EOF → 410", id, contentSeq)
 		w.WriteHeader(410)
 	case err == errReadTimeout:
+		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: readSource timeout → 408", id, contentSeq)
 		w.WriteHeader(408)
 	case err != nil:
+		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: readSource err=%v → 410", id, contentSeq, err)
 		w.WriteHeader(410)
 	default:
+		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: returning data len=%d", id, contentSeq, len(responseData))
 		w.WriteHeader(200)
 		w.Write(responseData)
 	}

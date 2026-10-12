@@ -38,6 +38,8 @@ import (
 	"phaethon/server"
 	"phaethon/tun"
 	"phaethon/util"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 //go:embed conf/default.yaml
@@ -248,6 +250,11 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		util.DefaultVersionNotifier.BumpVersion("p2p")
 	}
 	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
+
+	// Inject v2 route lookup: mesh → p2p bridge to avoid circular import
+	mesh.V2RouteLookup = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
+		return p2p.LookupProxyPeerRoute(proxyName)
+	}
 
 	// Initialize mesh overlay network (always enabled)
 	// If mesh config is missing, create a default configuration
@@ -2027,11 +2034,8 @@ func wireAdminCallbacks(resources *activeResources) {
 		copy(proxies, resources.ruleConf.Proxies)
 		resources.ruleConf.Unlock()
 
-		// Build set of existing P2P peer IDs
-		existingPeers := make(map[string]bool)
-		for _, p := range p2p.GlobalP2PManager.GetPeers() {
-			existingPeers[p.ID] = true
-		}
+		// Build set of existing P2P peer proxy names (same source as StopPeerByProxyName)
+		existingPeers := p2p.GlobalP2PManager.ActivePeerProxyNames()
 
 		for _, proxy := range proxies {
 			isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
@@ -2049,7 +2053,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			} else if !shouldRun && exists {
 				// P2P should not be running but is - stop it
 				util.LogInfo("[P2P] stopping peer for proxy %s", proxy.Name)
-				p2p.GlobalP2PManager.StopPeer(proxy.Name)
+				p2p.GlobalP2PManager.StopPeerByProxyName(proxy.Name)
 			} else if shouldRun && exists {
 				// P2P is running - check if config changed and needs restart
 				oldProxy := p2p.GlobalP2PManager.GetPeerProxy(proxy.Name)

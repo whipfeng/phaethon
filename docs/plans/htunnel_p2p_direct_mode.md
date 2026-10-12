@@ -14,6 +14,7 @@
 | v0.1.0 | 2026-09-17 | 初稿：frame 包抽离、FrameTransport 多态、MESH 直发通道（客户端+服务端） |
 | v0.2.0 | 2026-09-30 | 连接池与心跳优化：独立心跳、GET 从 16 减到 2（动态扩展）、帧批次可配置、客户端控制等待时间 |
 | v0.3.0 | 2026-10-08 | **V2 全局回退到 V1**：客户端 BindModeP2P 强制走 V1 BIND-stream（`dialer/htunnel_bind.go:47-68` 注释掉 MESH 分支）；服务端 `connectHTTarget` 从 `dialer.MeshDial` 改回 `net.DialTimeout` 直连。原因见附录 A。 |
+| v0.4.0 | 2026-10-12 | **peer.ID 重构**：统一使用 localSeq 作为 peer.ID（主动端和被动端一致），新增 peer.ProxyName 字段和 proxyPeers map，修复 h_tunnel 被动端 peer.ID 为 ":0" 的问题。详见 §8.4。 |
 
 ## 一、背景
 
@@ -443,6 +444,52 @@ mesh:
 - **部署顺序**：JF 先升（旧 QG 客户端走 BIND 不受影响）→ QG/VM 升级后自动切 MESH。**无客户端回落逻辑**。
 - 升级窗口内功能零损失（旧路径持续工作）。
 - 全部环境升级后，可另行移除 h_tunnel 的 BIND P2P 路径（不在本变更范围）。
+
+### 8.4 peer.ID 重构：统一使用 localSeq（v0.2.0 修正）
+
+**问题**：
+- 主动端（`StartPeer`）：`peer.ID = proxy.Name`（如 `"QG_HT"`）
+- 被动端（`HandleP2PTransport`）：`peer.ID = address`（如 `":0"`，h_tunnel 连接的 `RemoteAddr()` 返回无效地址）
+- 导致被动端 peer.ID 为 `":0"`，无法用于日志关联、去重、查找
+
+**方案**：
+- 主动端和被动端统一使用 `peer.ID = fmt.Sprintf("%d", localSeq)`
+- `localSeq` 来自 `m.linkSeqCounter`（全局原子递增），保证唯一性
+- 新增 `peer.ProxyName` 字段（仅主动端有值，被动端为空）
+- 新增 `proxyPeers map[string]*Peer`（按 proxy.Name 索引，仅主动端）
+
+**字段语义**：
+| 字段 | 来源 | 用途 |
+|------|------|------|
+| `peer.ID` | `localSeq`（原子递增） | 唯一连接标识，用于 `m.peers` map 键、日志、去重 |
+| `peer.ProxyName` | `proxy.Name`（主动端）/ 空（被动端） | 代理配置名，用于 `proxyPeers` map 键、配置热重载查找 |
+| `peer.NodeID` | hello 协议 `ClaimedSubnets[hop=0]` | mesh 节点标识，用于路由、gossip、LinkNIC 关联 |
+
+**代码变更**：
+- `p2p/p2p.go`:
+  - `P2PManager` 新增 `proxyPeers map[string]*Peer`
+  - `Peer` 结构新增 `ProxyName string` 字段
+  - `peerSender.GetProxyName()` 返回 `peer.ProxyName`（不再返回 `peer.ID`）
+  - `HandleP2PTransport`: `peer.ID = fmt.Sprintf("%d", seq)`
+  - `StartPeer`: `peer.ID = fmt.Sprintf("%d", seq)`, `peer.ProxyName = proxy.Name`, 注册到 `proxyPeers`
+  - `StopPeerByProxyName`: 从 `proxyPeers` 查找（不再委托给 `StopPeer`）
+  - `GetPeerProxy`: 从 `proxyPeers` 查找
+  - `RestartPeer`: 调用 `StopPeerByProxyName`（不再调用 `StopPeer`）
+  - `GetLinkQualityStatsByProxy`: 匹配 `peer.ProxyName`（不再匹配 `peer.ID`）
+  - `GetAllLinkQualityStats`: 按 `peer.ProxyName` 索引（不再按 `peer.ID`）
+  - `GetPeers`: 返回 `ProxyName` 字段
+- `main.go`:
+  - 配置热重载：`existingPeers` 按 `ProxyName` 索引（不再按 `ID`）
+  - 调用 `StopPeerByProxyName`（不再调用 `StopPeer`）
+
+**影响范围**：
+- Admin API：`GetPeers()` 返回的 JSON 中 `id` 字段为 localSeq（如 `"3"`），新增 `proxyName` 字段
+- mesh 层：`peerSender.GetProxyName()` 返回 `ProxyName`，mesh 层按 proxy name 查找链路质量统计
+- 配置热重载：按 `ProxyName` 查找和启停 peer
+
+**部署兼容性**：
+- 纯内部重构，无协议变更
+- 所有节点可同时升级，无版本依赖
 
 ## 九、范围外（明确不做）
 

@@ -5447,6 +5447,7 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 			"sni":    p.Sni,
 			"udp":    p.IsUDP(),
 			"p2p":    p.IsP2P(),
+			"v2":     p.IsV2(),
 			"via":    p.ViaProxy,
 		}
 	}
@@ -5509,6 +5510,7 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		"sni":                   p.Sni,
 		"udp":                   p.IsUDP(),
 		"p2p":                   p.IsP2P(),
+		"v2":                    p.IsV2(),
 		"via":                   p.ViaProxy,
 		"skip-cert-verify":      p.SkipCertVerify,
 		"password":              p.Password,

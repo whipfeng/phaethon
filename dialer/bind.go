@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"phaethon/config"
 	"phaethon/util"
 )
@@ -43,6 +44,11 @@ var GlobalModeBTable interface {
 // GlobalNetstackDialWithModeBFunc is the custom dial function that registers in ModeBTable
 // before sending SYN. Set by main_engine.go.
 var GlobalNetstackDialWithModeBFunc func(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error)
+
+// GlobalNetstackDialV2Func dials a TCP connection with a per-endpoint RouteFunc
+// for v2 proxy connections. Set by main_engine.go. The routeFunc parameter is
+// called by the gVisor fork's TCP connect path to determine IPIP routing.
+var GlobalNetstackDialV2Func func(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error)
 
 // UnregisterModeB is a helper to unregister a Mode B connection by destination and source port.
 func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {

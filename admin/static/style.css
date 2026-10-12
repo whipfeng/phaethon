@@ -2343,26 +2343,31 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
 /* P2P Status Indicators */
 .p2p-status {
     display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
     transition: all 0.3s ease;
+    vertical-align: middle;
 }
 
 .p2p-status.connected {
-    color: var(--success, #10b981);
+    background-color: var(--success, #10b981);
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.5);
 }
 
 .p2p-status.connecting {
-    animation: p2p-spin 1.5s linear infinite;
-    color: var(--accent, #3b82f6);
+    background-color: var(--accent, #3b82f6);
+    animation: p2p-pulse 1.5s ease-in-out infinite;
 }
 
 .p2p-status.failed {
-    color: var(--danger, #ef4444);
-    filter: drop-shadow(0 0 2px rgba(239, 68, 68, 0.5));
+    background-color: var(--danger, #ef4444);
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
 }
 
-@keyframes p2p-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+@keyframes p2p-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
 }
 
 /* P2P disabled state - explicitly gray */
@@ -2372,20 +2377,20 @@ td[data-label="P2P"] {
 
 /* Override for enabled states */
 td[data-label="P2P"] .p2p-status.connected {
-    color: var(--success, #10b981);
+    background-color: var(--success, #10b981);
 }
 
 td[data-label="P2P"] .p2p-status.connecting {
-    color: var(--accent, #3b82f6);
+    background-color: var(--accent, #3b82f6);
 }
 
 td[data-label="P2P"] .p2p-status.failed {
-    color: var(--danger, #ef4444);
+    background-color: var(--danger, #ef4444);
 }
 
 .p2p-status.disabled {
-    color: var(--text-muted, #9ca3af);
-    opacity: 0.6;
+    background-color: var(--text-muted, #9ca3af);
+    opacity: 0.5;
 }
 
 /* Password visibility toggle */

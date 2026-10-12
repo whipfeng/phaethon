@@ -169,15 +169,29 @@ func (d *TrojanDialer) DialReverse(dstAddr string) (net.Conn, error) {
 `proxy.IsP2P()=true` 时，`p2p.StartPeer` 通过 `DialP2P()`（BindStrategy v2 路径）已经在跑，已经为该代理建立了一条 mesh IPIP 隧道到远端节点。但是 `dialer.NewDialer(proxy).Dial(dstAddr, dstPort)` 这条**直连拨号路径**仍然走协议握手（socks5 CONNECT / trojan CONNECT），把数据推到远端 SOCKS5/Trojan 服务端。
 
 正确的数据流应该是：
-- v2（p2p=true）：本地 netstack → IPIP 隧道 → 远端 netstack → 远端内核 socket
-- v1（p2p=false）：本地 → SOCKS5/Trojan 协议握手 → 远端代理服务端 → 目标
+- v2（p2p=true + v2=true）：本地 netstack → IPIP 隧道 → 远端 netstack → 远端内核 socket
+- v1（其他情况）：本地 → SOCKS5/Trojan 协议握手 → 远端代理服务端 → 目标
 
 链路建立（BindStrategy/DialP2P）协议相关，但**外层数据通道（mesh IPIP 隧道）应当统一**。
 h_tunnel 的 `DialP2P()` 走 v2 MESH（用于 mesh gossip），但 `Dial()`（数据拨号）仍然走 h_tunnel 协议 CONN——和 socks5/trojan 一样需要被替换。
 
-### 设计
+### 设计决策（2026-10-12 更新）
 
-**入口：`dialer.NewDialer(proxy)` 加 v2 包装**
+**v2 开关模型**：在代理配置上新增独立的 `v2` 布尔字段，默认 `false`。
+
+- **必须同时满足 `p2p: true` 且 `v2: true` 才走 v2 路径**
+- 只有 `p2p: true` 而 `v2: false`（默认）：仍走 v1 协议握手（现有稳定基线）
+- `p2p: false`：无论 `v2` 如何，都走 v1（v2 依赖 mesh P2P 链路）
+
+**v2 数据路径**：把目标地址做 IPIP 封装，直接送入对应 peer 链路的 mesh 网络，不经过代理服务器的协议握手转发。
+
+**h_tunnel 特殊处理**：当 `p2p: true` 且 `v2: true` 时，h_tunnel 不走 v1 的 BIND 三步握手，切换到专为 mesh 准备的升级协议（`dialHTunnelMeshDirect` / `X-C: MESH` 单步 HEAD 路径）。
+
+**trojan/socks5**：当 `p2p: true` 且 `v2: true` 时，同样走 IPIP 封装入 mesh，不需要额外的协议升级，只是数据面从代理 server 切换到 mesh 链路。
+
+### 设计（2026-10-12 修正）
+
+**入口：`dialer.NewDialer(proxy)` 加 v2 包装**（不变）
 
 ```go
 func NewDialer(proxy *config.Proxy) Dialer {
@@ -191,8 +205,8 @@ func NewDialer(proxy *config.Proxy) Dialer {
         return &stubDialer{name: proxy.Type}
     }
     
-    // v2 dispatch: IsP2P() 对不支持的协议（http/ssh/hysteria2/vless/...）返回 false
-    if proxy.IsP2P() {
+    // v2 dispatch: 必须 p2p=true 且 v2=true 才走 mesh 直连
+    if proxy.IsP2P() && proxy.V2 {
         return &meshAwareDialer{proxy: proxy}
     }
     return d
@@ -202,10 +216,6 @@ func NewDialer(proxy *config.Proxy) Dialer {
 **`meshAwareDialer`：v2 包装，绕开协议握手**
 
 ```go
-// meshAwareDialer 替换协议握手，把数据直送 mesh。
-// v2 数据通道统一走 MeshDial，不需要协议层的 ConnID/log。
-// 注：BaseDialer.ConnID 是 v1 协议握手日志用的字段，v2 由 connlog 用 inbound 标识，
-// 所以这里不继承 BaseDialer。
 type meshAwareDialer struct {
     proxy *config.Proxy
 }
@@ -217,35 +227,243 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 func (d *meshAwareDialer) ServerAddr() (string, int) { return "", 0 }
 ```
 
+### IPIP 封装与路由回调
+
+#### 核心问题
+
+v2 的目标 IP 可能不在任何通告路由中（如外部 IP `8.8.8.8`），RouteSelector 无法决策。但链路已经由 proxy 配置选定，不需要 RouteSelector。
+
+#### 现有 RouteSelector 如何选 NIC 和 EIP
+
+当前 `SelectRoute` 回调（`mesh/netstack.go:174-248`）是一个闭包，直接访问 `meshMgr` 内部方法：
+
+```
+dst → 遍历路由表 rt.Routes
+    → route.Prefix.Contains(dst)?        匹配 prefix
+    → SelectEgressNodeID(dst, entries)    选出目标节点 targetNodeID
+    → NextHopLink(targetNodeID)           Dijkstra 下一跳 → *LinkNIC
+    → linkNIC.nicID                       作为 EgressNIC
+
+Branch 3 额外：
+    → GetEIPForNode(targetNodeID)         targetNodeID 的 subnet+4 → EgressEIP
+    → NeedIPIP = true
+```
+
+关键：**LinkNIC 来自 Dijkstra 下一跳 peer 的 `*LinkNIC` 对象**，**EIP = 目标出口节点的 subnet+4**。
+
+#### v2 路由回调：匹配现有模式
+
+v2 跳过路由表和 Dijkstra，直接从 proxy 配置找到 peer 的 LinkNIC：
+
+```
+proxyName → p2p.proxyPeers[proxyName] → *Peer
+    → peer.linkNIC.nicID               作为 EgressNIC（和 NextHopLink 返回的同一个东西）
+    → CalculateEIP(peer.peerSubnet)     peer subnet+4 → EgressEIP（和 GetEIPForNode 返回的同一个东西）
+    → NeedIPIP = true
+```
+
+返回类型和现有 RouteSelector **完全一致**（`stack.RouteDecision`），下游 IPIP 封装零改动。
+
+#### 回调创建与函数注入
+
+回调闭包在 `mesh` 包内创建（和现有 `SelectRoute` 一样在 `mesh/netstack.go`），直接访问 `mesh`/`p2p` 内部结构。但回调需要 `proxyName`（来自 `dialer` 层），而 `mesh` 包不能直接访问 `p2p.proxyPeers`。
+
+解决方案：**函数注入**（和 `GlobalNetstackDialWithModeBFunc` 相同模式）。
+
+```go
+// p2p/p2p.go — 函数注入变量（不是公开方法）
+var LookupProxyPeerRoute func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
+
+// main.go 初始化时注入实现
+p2p.LookupProxyPeerRoute = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
+    peer, ok := globalP2PManager.proxyPeers[proxyName]
+    if !ok || peer.linkNIC == nil {
+        return 0, nil, false
+    }
+    return peer.linkNIC.nicID, peer.peerSubnet, true
+}
+```
+
+回调闭包在 `mesh` 包内创建，调用注入函数并转换为 `stack.RouteDecision`：
+
+```go
+// mesh/netstack.go — 创建 v2 路由回调
+func CreateV2RouteFunc(proxyName string) func() stack.RouteDecision {
+    return func() stack.RouteDecision {
+        linkNICID, peerSubnet, ok := p2p.LookupProxyPeerRoute(proxyName)
+        if !ok {
+            return stack.RouteDecision{}
+        }
+        eip := CalculateEIP(peerSubnet) // subnet+4，已有函数
+        return stack.RouteDecision{
+            EgressNIC: linkNICID,
+            EgressEIP: tcpip.AddrFrom4Slice(eip),
+            NeedIPIP:  true,
+            Cacheable: true,
+        }
+    }
+}
+```
+
+#### gVisor fork — per-endpoint RouteFunc
+
+当前路由是 stack 级的（`RouteSelector`），不是 per-endpoint。v2 需要 per-endpoint 路由回调，因为不同 socket 可能对应不同 proxy/peer。
+
+**fork 补丁 #13：per-endpoint RouteFunc**
+
+```go
+// pkg/tcpip/transport/tcp/endpoint.go — tcp.Endpoint 新增字段
+type Endpoint struct {
+    ...
+    // RouteFunc is an optional per-endpoint route callback.
+    // When set, connect() calls it instead of stack.FindRoute().
+    // Returns a RouteDecision (same type as RouteSelector).
+    RouteFunc func() RouteDecision
+}
+```
+
+```go
+// pkg/tcpip/transport/tcp/endpoint.go — connect() 中检查
+// 在现有 e.stack.FindRoute() 调用之前（line 2442）：
+if e.RouteFunc != nil {
+    decision := e.RouteFunc()
+    r, err := e.stack.BuildRouteFromDecision(decision, netProto)
+    if err != nil {
+        return err
+    }
+    e.route = r
+    // 跳过 e.stack.FindRoute()，继续后续握手
+} else {
+    r, err := e.stack.FindRoute(nicID, localAddr, remoteAddr, netProto, false)
+    // ... 现有逻辑 ...
+}
+```
+
+```go
+// pkg/tcpip/stack/stack.go — 新增 BuildRouteFromDecision
+// 复用 findRouteInner 中已有的 RouteDecision → Route 构建逻辑
+func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.NetworkProtocolNumber) (*Route, tcpip.Error) {
+    // 和 findRouteInner 中 decision.NeedIPIP / decision.EgressNIC 分支相同的路由构建
+}
+```
+
+#### 数据流
+
+```
+TUN forwarder
+  → dialer.NewDialer(proxy).Dial(dst, port)
+    → meshAwareDialer.Dial(dst, port, "", "PROXY:"+proxyName, nil)
+      → MeshDial → GlobalNetstackDialWithModeBFunc
+        → gVisor netstack 创建 TCP endpoint
+        → endpoint.RouteFunc = mesh.CreateV2RouteFunc(proxyName)
+        → endpoint.connect()
+          → fork 检查 e.RouteFunc != nil
+            → 调用 RouteFunc() → RouteDecision{EgressNIC=linkNIC, EgressEIP=peer EIP, NeedIPIP=true}
+            → BuildRouteFromDecision → Route（带 IPIP 字段）
+          → TCP 握手（SYN → SYN-ACK → ACK）
+            → 发送时检查 route.NeedIPIP
+              → forwardWithIPIPEncapsulation()（已有逻辑）
+                → 外层: src=本地 EIP, dst=peer EIP, proto=4
+                → 内层: 原始 TCP 包（dst=目标 IP）
+              → 从 Link NIC 发出 → P2P 链路
+```
+
+#### 优点
+
+- **回调跟随 socket 生命周期**，零维护（无额外表，无清理逻辑）
+- **返回 `stack.RouteDecision`**，和现有 RouteSelector 完全一致，IPIP 封装零改动
+- **函数注入**，不新增 P2PManager 公开方法，和现有 `GlobalNetstackDialWithModeBFunc` 模式一致
+- **未设回调时完全走现有 RouteSelector**，零影响
+- **proxy → peer → LinkNIC 映射**复用已有 `proxyPeers` map，无需新数据结构
+
 ### 影响范围
 
 | 文件 | 改动 |
 |------|------|
-| `dialer/dialer.go` | +20 行（meshAwareDialer + NewDialer 加 if） |
-| `dialer/socks5.go` Dial() | **零改动**（v1 路径保留，p2p=true 时被 NewDialer 替换） |
-| `dialer/trojan.go` Dial() | **零改动**（同上） |
-| `dialer/htunnel.go` Dial() | **零改动**（同上，htunnel v1 CONN 保留作 p2p=false fallback）|
+| `config/config.go` | +1 字段（`V2 bool`），YAML tag `v2` |
+| `dialer/dialer.go` | 启用 v2 dispatch 条件（`proxy.IsP2P() && proxy.V2`） |
+| `dialer/htunnel_bind.go` | BindModeP2P 条件加 `p.V2`，启用 MESH direct |
+| `p2p/p2p.go` | +1 函数注入变量 `LookupProxyPeerRoute` |
+| `mesh/netstack.go` | +1 函数 `CreateV2RouteFunc(proxyName)` |
+| gVisor fork `tcp.Endpoint` | +1 字段 `RouteFunc`（补丁 #13） |
+| gVisor fork `connect()` | +1 if 分支（检查 RouteFunc） |
+| gVisor fork `stack.go` | +1 方法 `BuildRouteFromDecision` |
+| `main.go` | 注入 `LookupProxyPeerRoute` 实现 |
+| `dialer/socks5.go` Dial() | **零改动** |
+| `dialer/trojan.go` Dial() | **零改动** |
+| `dialer/htunnel.go` Dial() | **零改动** |
 
 所有 `dialer.NewDialer(p).Dial(...)` 调用点（TUN forwarder）零改动——v1 和 v2 都在 Dialer 接口背后自动切换。三个协议完全统一。
 
 ### 兼容性
 
-- `proxy.IsP2P()` 已经存在：`socks5/trojan/h_tunnel` 默认 true，其他类型 false（`config/config.go:IsP2P`）
+- 新增 `v2` 字段默认 `false`，现有配置零影响——升级后所有代理行为不变
+- `proxy.IsP2P()` 已经存在：`socks5/trojan/h_tunnel` 默认 true，其他类型 false
 - TUN forwarder 调用 `dialer.NewDialer(proxy).Dial()` 不变
-- h_tunnel v1 协议 CONN 保留作 `p2p=false` 的 fallback
+- h_tunnel v1 协议 CONN 保留作 `v2=false` 的 fallback
 - 服务端（远端 SOCKS5/Trojan/h_tunnel server）**完全不动**——v2 数据流不经过协议服务端
+- gVisor fork 补丁 #13 向后兼容：`RouteFunc` 为 nil 时行为与当前完全一致
 
 ### 验证
 
 1. `go build ./...` 编译通过
-2. VM 环境：
-   - SOCKS5_7890（p2p=true）访问外部 IP（mtalk.google.com / baidu.com）成功，**不再报 `socks5: command failed, status: 5`**
-   - 走 mesh IPIP 隧道，日志显示 `[MESH-DIAL]` 而非 `[SOCKS5-DIAL]`
-3. SOCKS5_7890（p2p=false 或 http/ssh 协议）仍然走原协议握手（v1 路径不变）
-4. 现有 5 个并发 SSH 到 GG 仍正常（BIND 路径未受影响）
-5. QG 环境：部署后 SSH 到外部 IP 仍正常（与 patch #8 修复路径一致）
+2. 默认行为不变：所有代理 `v2` 未配置时走 v1 协议握手
+3. VM 环境：手动配置 `p2p: true, v2: true` 的代理，验证走 mesh IPIP 隧道
+4. 仅 `p2p: true, v2: false` 的代理仍走 v1 协议握手
+5. h_tunnel `p2p: true, v2: true` 走 MESH direct（`X-C: MESH` 单步 HEAD）
+6. 现有 v1 代理（SSH 到 GG 等）不受影响
+7. 目标为外部 IP（如 `8.8.8.8`）的 v2 代理能正确通过 IPIP 封装送达
 
 ## 不在范围内
 
-- 不改 h_tunnel v1/v2 内部实现（`htunnel.go` + `htunnel_direct.go` 的 transport 细节）
+- 不改 h_tunnel v1 内部实现（`htunnel.go` 的 v1 CONN/BIND 传输细节）
 - 不动 UDP dialer（`socks5_udp.go` 走 SOCKS5 UDP ASSOCIATE，不是 BIND）
+- 不改 mesh IPIP 封装/转发路径（已有的 Link NIC + IPIP 架构不变）
+- 不改 BindStrategy / DialP2P 链路建立逻辑
+
+## V2 语义与热响应（2026-10-13 讨论确认）
+
+### V2 是传输通道选择，不是 Peer 生命周期事件
+
+三种协议（socks5/trojan/h_tunnel）的 v1 和 v2 **目标相同**：数据都到达 mesh P2P 网络，绕过代理服务器的业务逻辑。区别仅在传输通道：
+
+| 协议 | v1 通道 | v2 通道 |
+|------|---------|---------|
+| socks5 | BIND PORT=2 raw `net.Conn` + `frame.StreamTransport` | Link NIC IPIP 封装（`meshAwareDialer`） |
+| trojan | BIND PORT=2 raw `tls.Conn` + `frame.StreamTransport` | Link NIC IPIP 封装（`meshAwareDialer`） |
+| h_tunnel | BIND PORT=2 stream（`X-C: BIND`） | MESH 通道（`X-C: MESH` 单步 HEAD + `htunnelDirectTransport`） |
+
+### V2 是 per-socket/per-connection 决策
+
+- **socks5/trojan**：`meshAwareDialer.Dial()` 每次调用时读取 `proxy.V2`，决定走 IPIP 还是 v1 BIND
+- **h_tunnel**：`BindModeP2P` 每次调用时读取 `p.IsP2P() && p.V2`，决定走 MESH 通道还是 v1 BIND stream
+- 每次新建连接时独立决策，已有连接不受影响
+
+### 切换 V2 不需要重启 Peer
+
+Peer 连接（hello/heartbeat/LinkNIC 建立）独立于数据通道选择：
+- Peer 在 v1 和 v2 模式下都存在
+- 切换 V2 只影响新数据连接的通道选择
+- `mesh.CreateV2RouteFunc(proxyName)` 每次 Dial 时查询 `p2p.LookupProxyPeerRoute()`，运行时获取 LinkNIC 信息
+
+### V2 字段独立存储，`IsV2()` 控制生效
+
+```go
+// config.Proxy
+V2 bool  // 用户设置，独立存储
+
+func (p *Proxy) IsV2() bool {
+    if !p.IsP2P() { return false }  // P2P=false 时 V2 不生效
+    return p.V2
+}
+```
+
+- V2 字段保留用户配置意图，不随 P2P 开关自动重置
+- 用户临时关 P2P 调试，再开时 V2 自动恢复生效
+- 控制台表格显示 `IsV2()` 的有效状态（P2P=false 时显示 ❌）
+
+### 控制台热响应
+
+- **V2 切换**：保存配置即生效，新连接立即使用新路径。`OnIncrementalUpdate` 无需特殊处理
+- **P2P 切换**：`OnIncrementalUpdate` 通过集合差比较检测变化，调用 `StopPeerByProxyName` / `StartPeer`
+- **P2P 关闭时**：V2 配置保留，表格显示 ❌（`IsV2()` 返回 false），Peer 连接应被停止

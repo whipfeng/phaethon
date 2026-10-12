@@ -245,6 +245,16 @@ func (e *Engine) NetDialWithModeB(network, addr string, clientAddr string, inbou
 	return e.netstack.NetDialWithModeB(network, addr, clientAddr, inbound, mapping, e.modeBTable)
 }
 
+// NetDialV2 dials a TCP connection with a per-endpoint RouteFunc for v2 proxy
+// connections. The routeFunc is set on the endpoint before Connect, allowing
+// the connection to bypass the stack-level RouteSelector.
+func (e *Engine) NetDialV2(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error) {
+	if e.netstack == nil {
+		return nil, fmt.Errorf("netstack not initialized")
+	}
+	return e.netstack.NetDialV2(network, addr, routeFunc)
+}
+
 // ConfigureMeshAddresses reconfigures the TUN engine to use mesh subnet addresses.
 func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 	if e.netstack == nil {

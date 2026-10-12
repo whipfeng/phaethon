@@ -263,6 +263,74 @@ A 下线后：
 - 支持多跳传播
 - 逻辑统一，不检查 sender，只验证 claim 内容
 
+### 链路级互相印证（Link-Level Mutual Validation）
+
+#### 设计决策
+
+**将节点级互相印证改造为链路级互相印证**，在同一个位置（路由验证逻辑）实现，验证粒度从"节点关系"细化到"具体链路"。
+
+**原因**：
+1. **节点级验证不够**：节点关系有效时，stale link 也会通过验证
+2. **统一位置**：和节点级验证在同一个地方，逻辑一致
+3. **统一数据流**：路由和拓扑都使用 `validatedClaims`，保持一致
+4. **自然消亡机制**：严格验证，等双向确认，反向没到就过滤，到了就通过
+
+#### 实现
+
+**位置**：`mesh/mesh.go` 路由验证逻辑（原节点级验证位置）
+
+**规则**：如果 X 声明到 Y 的链路为 (localSeq=L, remoteSeq=R)，那么 Y 声明到 X 的链路必须有 (localSeq=R, remoteSeq=L)。否则该链路无效，从 claim 中移除。
+
+**逻辑**：
+```go
+// 对每个 claim 的每个 neighbor 的每个 link
+for _, neighbor := range claim.neighbors {
+    neighborClaim := nodeIDToClaim[neighbor.NodeID]
+    for _, gossipLink := range neighbor.Links {
+        // 在 neighbor 的 claim 中查找反向 link
+        for _, reverseNeighbor := range neighborClaim.neighbors {
+            if reverseNeighbor.NodeID == claim.nodeID {
+                for _, reverseLink := range reverseNeighbor.Links {
+                    if reverseLink.LocalSeq == gossipLink.RemoteSeq && 
+                       reverseLink.RemoteSeq == gossipLink.LocalSeq {
+                        // 反向匹配，保留此 link
+                        validatedLinks = append(validatedLinks, gossipLink)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**传播延迟处理**：
+
+与节点级验证相同，采用**严格过滤，等待双向确认**：
+
+- 反向 link 没到 → 过滤掉
+- 反向 link 到了 → 重新验证时通过
+- 原始数据保留在 `peers[].ClaimedSubnets`，每次重新构建 `bestClaims` 并验证
+
+#### Stale Link 清理
+
+**场景**：QG 重启后，旧 link (seq=7) 如何被清理？
+
+1. QG 重启，与 VM 建立新连接（localSeq=8, remoteSeq=2）
+2. QG 发送新 gossip，`ClaimedSubnets` 只包含新 link (seq=8)
+3. VM 收到新 gossip，更新 `peers[peerQG].ClaimedSubnets`（整体替换）
+4. VM 构建 `bestClaims` 时，只看到新 link (seq=8)
+5. 链路级验证：检查反向 link → VM 自己的 claim 有 (2, 8) ✓
+6. 新 link 通过验证，进入 `validatedClaims`
+7. **旧 link (seq=7) 不在原始数据中**（被新数据覆盖），自然消失
+8. VM 向其他节点转发新 gossip，全网逐步更新
+9. 全网清理完成 ✓
+
+**优势**：
+- 与节点级验证机制一致，逻辑统一
+- 自动清理 stale link，不需要额外的老化机制
+- 传播窗口期内临时过滤，最终一致性保证
+- 路由和拓扑都使用验证后的数据，保持一致
+
 ### 全网拓扑推导
 
 从ClaimedSubnets推导拓扑边：

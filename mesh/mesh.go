@@ -988,60 +988,6 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 	m.topology.UnregisterPeerByNodeID(nodeID)
 }
 
-// SendViaLink sends a packet via a specific link identified by linkKey.
-// Used by LinkNIC.WritePackets to send directly on the selected link,
-// bypassing SendToNode's load balancing (RouteSelector already did the selection).
-func (m *MeshManager) SendViaLink(linkKey string, packet []byte) error {
-	if linkKey == "" {
-		return fmt.Errorf("empty link key")
-	}
-	if len(packet) == 0 {
-		return fmt.Errorf("empty packet")
-	}
-
-	// Find the peer with this linkKey by reconstructing linkKey for each peer
-	m.mu.RLock()
-	allPeers := m.topology.GetAllPeers()
-	m.mu.RUnlock()
-
-	var targetPeer *PeerInfo
-	for _, peer := range allPeers {
-		if peer.Sender == nil {
-			continue
-		}
-		// Reconstruct linkKey using the same logic as GetPeers
-		var peerLinkKey string
-		if peer.Sender.HasProxy() {
-			peerLinkKey = fmt.Sprintf("%s:%s", m.nodeID, peer.Sender.GetProxyName())
-		} else {
-			remoteProxyName := peer.Sender.GetFriendlyName()
-			if remoteProxyName == "" {
-				remoteProxyName = peer.Sender.GetProxyName()
-			}
-			peerLinkKey = fmt.Sprintf("%s:%s", peer.NodeID(), remoteProxyName)
-		}
-		if peerLinkKey == linkKey {
-			targetPeer = peer
-			break
-		}
-	}
-
-	if targetPeer == nil {
-		return fmt.Errorf("no peer for linkKey %s", linkKey)
-	}
-	if targetPeer.Sender == nil {
-		return fmt.Errorf("peer for linkKey %s has no sender", linkKey)
-	}
-
-	TraceForwarding("linknic_egress_via_link", packet, "linkKey=%s peer=%s proxy=%s", linkKey, targetPeer.Sender.GetNodeID(), targetPeer.Sender.GetProxyName())
-	if err := targetPeer.Sender.Send(packet); err != nil {
-		TraceForwarding("linknic_egress_error", packet, "linkKey=%s peer=%s err=%v", linkKey, targetPeer.Sender.GetNodeID(), err)
-		return err
-	}
-	TraceForwarding("linknic_egress", packet, "linkKey=%s peer=%s proxy=%s", linkKey, targetPeer.Sender.GetNodeID(), targetPeer.Sender.GetProxyName())
-	return nil
-}
-
 // SendToNode sends an encapsulated packet to a specific target node via the mesh network.
 // This is used by tunnel NICs to send IPIP-encapsulated packets to egress nodes.
 // Multi-link load balancing: round-robin among same-hop peers (design §2.8).
@@ -2482,8 +2428,9 @@ func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT tim
 
 // CreateLinkNIC creates a new LinkNIC for a peer link (design §5.6).
 // Called by P2P layer when a link is established (after hello completed).
+// The sender is the PeerSender that this LinkNIC will use to send packets.
 // Returns the created LinkNIC pointer that the peer will hold directly.
-func (m *MeshManager) CreateLinkNIC(nodeID, proxyName, subnet string) *LinkNIC {
+func (m *MeshManager) CreateLinkNIC(sender PeerSender, nodeID, subnet string) *LinkNIC {
 	if m.netstack == nil {
 		util.LogError("[MESH] cannot create LinkNIC: netstack not initialized")
 		return nil
@@ -2495,16 +2442,13 @@ func (m *MeshManager) CreateLinkNIC(nodeID, proxyName, subnet string) *LinkNIC {
 		return nil
 	}
 
-	// Construct linkKey for logging (same logic as GetPeers)
-	linkKey := fmt.Sprintf("%s:%s", nodeID, proxyName)
-
-	linkNIC, err := m.netstack.CreateLinkNIC(linkKey, nodeID, peerSubnet)
+	linkNIC, err := m.netstack.CreateLinkNIC(sender, nodeID, peerSubnet)
 	if err != nil {
-		util.LogError("[MESH] failed to create LinkNIC for link %s: %v", linkKey, err)
+		util.LogError("[MESH] failed to create LinkNIC for peer %s: %v", nodeID, err)
 		return nil
 	}
 
-	util.LogInfo("[MESH] created LinkNIC for link %s (peer %s, subnet %s)", linkKey, nodeID, subnet)
+	util.LogInfo("[MESH] created LinkNIC for peer %s (subnet %s)", nodeID, subnet)
 	return linkNIC
 }
 

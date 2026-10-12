@@ -20,11 +20,10 @@ import (
 // No IPIP encapsulation, no routing decisions - the netstack does those.
 type LinkNIC struct {
 	nicID      tcpip.NICID
-	linkKey    string     // Stable link identifier (activeNodeID:proxyName)
-	peerNodeID string     // Target node ID (for routing resolution)
+	sender     PeerSender // Direct reference to the peer's sender (design §5.4)
+	peerNodeID string     // Target node ID (for logging only)
 	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
-	meshMgr    *MeshManager
 	dispatcher stack.NetworkDispatcher
 
 	// Statistics (atomic counters)
@@ -34,14 +33,14 @@ type LinkNIC struct {
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
-func NewLinkNIC(nicID tcpip.NICID, linkKey string, peerNodeID string, peerSubnet *net.IPNet, meshMgr *MeshManager) *LinkNIC {
+// The sender is the PeerSender that this LinkNIC will use to send packets (design §5.4).
+func NewLinkNIC(nicID tcpip.NICID, sender PeerSender, peerNodeID string, peerSubnet *net.IPNet) *LinkNIC {
 	return &LinkNIC{
 		nicID:      nicID,
-		linkKey:    linkKey,
+		sender:     sender,
 		peerNodeID: peerNodeID,
 		peerSubnet: peerSubnet,
 		mtu:        1500, // Default MTU
-		meshMgr:    meshMgr,
 	}
 }
 
@@ -78,24 +77,7 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 	})
 	defer pkt.DecRef()
 	
-	// Diagnostic: log before delivering to dispatcher
-	if len(data) >= 20 {
-		srcIP := net.IP(data[12:16])
-		dstIP := net.IP(data[16:20])
-		util.LogInfo("[LINKNIC-DIAG] InjectInbound nicID=%d peer=%s %s -> %s proto=%d len=%d",
-			l.nicID, l.peerNodeID, srcIP, dstIP, data[9], len(data))
-	}
-	
 	l.dispatcher.DeliverNetworkPacket(proto, pkt)
-	
-	// Phaethon diagnostic: confirm packet delivered to dispatcher
-	if len(data) >= 20 {
-		srcIP := net.IP(data[12:16])
-		dstIP := net.IP(data[16:20])
-		util.LogInfo("[LINKNIC-DIAG] InjectInbound delivered nicID=%d peer=%s %s -> %s proto=%d",
-			l.nicID, l.peerNodeID, srcIP, dstIP, data[9])
-	}
-	
 	atomic.AddUint64(&l.injectPackets, 1)
 	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
 }
@@ -129,41 +111,28 @@ func (l *LinkNIC) LinkAddress() tcpip.LinkAddress {
 func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 
 // WritePackets implements stack.LinkEndpoint.WritePackets.
-// Sends packets directly on this link (identified by linkKey).
-// RouteSelector already chose this specific link via round-robin load balancing,
-// so we bypass SendToNode's selection logic.
+// Sends packets directly via the held PeerSender (design §5.4).
+// RouteSelector already chose this specific LinkNIC, so we send directly.
 //
 // Packet buffers remain owned by the caller (same contract as channel.Endpoint,
 // which clones before queueing); we only read the data synchronously.
 func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
-	if l.meshMgr == nil {
+	if l.sender == nil {
 		return 0, &tcpip.ErrInvalidEndpointState{}
 	}
 
-	// Diagnostic: unconditional log at egress entry
-	pktSlice := pkts.AsSlice()
-	util.LogInfo("[LINKNIC-DIAG] WritePackets called nicID=%d linkKey=%s peer=%s pktCount=%d", l.nicID, l.linkKey, l.peerNodeID, len(pktSlice))
-
 	count := 0
-	for _, pkt := range pktSlice {
+	for _, pkt := range pkts.AsSlice() {
 		buf := pkt.ToBuffer()
 		pktData := buf.Flatten()
 
-		// Diagnostic: log each packet being sent
-		if len(pktData) >= 20 {
-			srcIP := net.IP(pktData[12:16])
-			dstIP := net.IP(pktData[16:20])
-			util.LogInfo("[LINKNIC-DIAG] WritePackets nicID=%d linkKey=%s %s -> %s proto=%d len=%d",
-				l.nicID, l.linkKey, srcIP, dstIP, pktData[9], len(pktData))
-		}
-
-		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d linkKey=%s peer=%s", l.nicID, l.linkKey, l.peerNodeID)
-		if err := l.meshMgr.SendViaLink(l.linkKey, pktData); err != nil {
-			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d linkKey=%s peer=%s err=%v", l.nicID, l.linkKey, l.peerNodeID, err)
-			util.LogDebug("[LINKNIC] send via link %s failed: %v", l.linkKey, err)
+		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
+		if err := l.sender.Send(pktData); err != nil {
+			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d peer=%s err=%v", l.nicID, l.peerNodeID, err)
+			util.LogDebug("[LINKNIC] send via peer %s failed: %v", l.peerNodeID, err)
 			continue
 		}
-		TraceForwarding("linknic_egress", pktData, "linkNIC=%d linkKey=%s peer=%s", l.nicID, l.linkKey, l.peerNodeID)
+		TraceForwarding("linknic_egress", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
 		count++
 	}
 

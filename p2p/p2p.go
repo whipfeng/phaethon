@@ -99,7 +99,7 @@ type MeshHandler interface {
 	UnregisterPeerByNodeID(nodeID string)
 	BuildGossipInfo() *mesh.GossipInfo
 	// LinkNIC 生命周期管理（设计 §5.6）
-	CreateLinkNIC(nodeID, proxyName, subnet string) *mesh.LinkNIC
+	CreateLinkNIC(sender mesh.PeerSender, nodeID, subnet string) *mesh.LinkNIC
 	DeleteLinkNIC(linkNIC *mesh.LinkNIC)
 }
 
@@ -110,6 +110,7 @@ type peerSender struct {
 }
 
 func (s *peerSender) Send(data []byte) error {
+	util.LogInfo("[P2P-SENDER-DIAG] Send called nodeID=%s peer.ID=%s dataLen=%d", s.nodeID, s.peer.ID, len(data))
 	return enqueueWrite(s.peer, frame.FrameMeshPacket, data, false) // data frame, fire-and-forget
 }
 
@@ -324,6 +325,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
 		}
+		if req.frameType == frame.FrameHello {
+			util.LogInfo("[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
+		}
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
@@ -448,6 +452,7 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error
 func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case <-peer.stopCh:
+		util.LogInfo("[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
 		return ErrPeerStopped
 	default:
 	}
@@ -459,11 +464,13 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
+			util.LogInfo("[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
 		}
 		return nil
 	default:
 		if req.frameType == frame.FrameMeshPacket {
+			util.LogWarn("[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d writeChCap=%d", peer.ID, len(req.data), cap(ch))
 			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
 		}
 		if req.isControl {
@@ -767,7 +774,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 // runSession reads frames and dispatches them.
 func (m *P2PManager) runSession(peer *Peer) {
 	// Send hello immediately
+	util.LogInfo("[P2P-DIAG] runSession calling sendHello for peer=%s", peer.ID)
 	m.sendHello(peer)
+	util.LogInfo("[P2P-DIAG] runSession sendHello completed for peer=%s", peer.ID)
 
 	util.LogInfo("[P2P] runSession started for %s", peer.ID)
 
@@ -853,8 +862,11 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 		switch frameType {
 		case frame.FrameHello:
+			util.LogInfo("[P2P-DIAG] received FrameHello from %s, payload=%d bytes", peer.ID, len(payload))
 			if len(payload) > 0 {
 				m.handleHello(peer, payload)
+			} else {
+				util.LogWarn("[P2P-DIAG] FrameHello from %s has empty payload", peer.ID)
 			}
 		case frame.FrameGossip:
 			if len(payload) > 0 {
@@ -951,6 +963,7 @@ func (m *P2PManager) sendPureAck(peer *Peer) {
 
 // sendHello sends a hello message to the peer, carrying gossip topology for immediate route establishment.
 func (m *P2PManager) sendHello(peer *Peer) {
+	util.LogInfo("[P2P-DIAG] sendHello called for peer=%s", peer.ID)
 	info := mesh.GossipInfo{
 		Cmd:             "hello",
 		ProtocolVersion: P2PProtocolVersion,
@@ -971,16 +984,20 @@ func (m *P2PManager) sendHello(peer *Peer) {
 	}
 
 	data, _ := json.Marshal(info)
+	util.LogInfo("[P2P-DIAG] sendHello enqueuing FrameHello for peer=%s dataLen=%d", peer.ID, len(data))
 	enqueueWrite(peer, frame.FrameHello, data, true) // control frame, reliable delivery
 }
 
 // handleHello processes a hello message from a peer.
 func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
+	util.LogInfo("[P2P-DIAG] handleHello entry: peer=%s payload=%d bytes", peer.ID, len(payload))
 	var info mesh.GossipInfo
 	if err := json.Unmarshal(payload, &info); err != nil {
 		util.LogDebug("[P2P] invalid hello from %s: %v", peer.ID, err)
 		return
 	}
+	util.LogInfo("[P2P-DIAG] handleHello parsed: peer=%s nodeID=%s subnets=%d version=%d", 
+		peer.ID, extractNodeIDFromGossip(info), len(info.ClaimedSubnets), info.ProtocolVersion)
 
 	// 1. Version check
 	if info.ProtocolVersion != P2PProtocolVersion {
@@ -1049,10 +1066,13 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 				break
 			}
 		}
+		util.LogInfo("[P2P-DIAG] LinkNIC creation: peer=%s nodeID=%s subnet=%q", peer.ID, nodeID, subnet)
 		if subnet != "" {
-			peer.linkNIC = m.meshHandler.CreateLinkNIC(nodeID, peer.ID, subnet)
+			peer.linkNIC = m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
 			if peer.linkNIC == nil {
 				util.LogWarn("[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
+			} else {
+				util.LogInfo("[P2P-DIAG] LinkNIC created successfully: peer=%s nodeID=%s", peer.ID, nodeID)
 			}
 		} else {
 			util.LogWarn("[P2P] no subnet in hello from %s, cannot create LinkNIC", peer.ID)

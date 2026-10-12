@@ -355,6 +355,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		advertise := ruleConf.Mesh.GetAdvertise()
 		meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
 		mesh.SetForwardingTrace(ruleConf.Mesh.ForwardingTrace)
+		util.Logger.Printf("[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", ruleConf.Mesh.ForwardingTrace, mesh.ForwardingTraceEnabled())
 		meshMgr.SetDataDir(dataDir)
 		meshMgr.SetTCPKeepalive(ruleConf.Mesh.TCPKeepalive)
 

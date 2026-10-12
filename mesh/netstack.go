@@ -240,19 +240,20 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 
 // CreateLinkNIC creates a new LinkNIC for a peer link (design §5.6).
 // Called by MeshManager when P2P layer establishes a link.
+// The sender is the PeerSender that this LinkNIC will use to send packets.
 // Returns the created LinkNIC and any error.
-func (n *Netstack) CreateLinkNIC(linkKey, nodeID string, peerSubnet *net.IPNet) (*LinkNIC, error) {
+func (n *Netstack) CreateLinkNIC(sender PeerSender, nodeID string, peerSubnet *net.IPNet) (*LinkNIC, error) {
 	if n.ns == nil {
 		return nil, fmt.Errorf("netstack not initialized")
 	}
 
 	nicID := tcpip.NICID(n.linkNextNICID.Add(1))
-	linkNIC := NewLinkNIC(nicID, linkKey, nodeID, peerSubnet, n.meshMgr)
+	linkNIC := NewLinkNIC(nicID, sender, nodeID, peerSubnet)
 
 	if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
 		return nil, fmt.Errorf("failed to create NIC %d: %w", nicID, err)
 	}
-	n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", linkKey))
+	n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", nodeID))
 
 	// Link NICs: promiscuous so inbound frames destined for our bound
 	// addresses (GIP/VIP/fakeIP, none bound on the Link NIC itself) are
@@ -261,7 +262,7 @@ func (n *Netstack) CreateLinkNIC(linkKey, nodeID string, peerSubnet *net.IPNet) 
 	n.ns.SetPromiscuousMode(nicID, true)
 	_ = n.ns.SetSpoofing(nicID, true)
 
-	util.LogInfo("[NETSTACK] created Link NIC %d (link_%s) for peer %s (subnet %s)", nicID, linkKey, nodeID, peerSubnet)
+	util.LogInfo("[NETSTACK] created Link NIC %d for peer %s (subnet %s)", nicID, nodeID, peerSubnet)
 	return linkNIC, nil
 }
 
@@ -280,7 +281,7 @@ func (n *Netstack) DeleteLinkNIC(linkNIC *LinkNIC) error {
 		return fmt.Errorf("failed to remove NIC %d: %w", linkNIC.nicID, err)
 	}
 
-	util.LogInfo("[NETSTACK] removed Link NIC %d (link_%s) for peer %s", linkNIC.nicID, linkNIC.linkKey, linkNIC.peerNodeID)
+	util.LogInfo("[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, linkNIC.peerNodeID)
 	return nil
 }
 
@@ -1210,13 +1211,19 @@ func (n *Netstack) acceptTCP() {
 		corrID := fmt.Sprintf("%s:%d->%s:%d",
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort,
 			net.IP(id.LocalAddress.AsSlice()), id.LocalPort)
-		util.LogInfo("[TCP-DEBUG] [%s] tcp forwarder called local=%s:%d remote=%s:%d",
-			corrID, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
-			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
+		if ForwardingTraceEnabled() {
+			util.LogInfo("[TCP-DEBUG] [%s] tcp forwarder called local=%s:%d remote=%s:%d",
+				corrID, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+				net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
+		}
 		var wq waiter.Queue
-		util.LogInfo("[TCP-DEBUG] [%s] calling CreateEndpoint...", corrID)
+		if ForwardingTraceEnabled() {
+			util.LogInfo("[TCP-DEBUG] [%s] calling CreateEndpoint...", corrID)
+		}
 		ep, err := r.CreateEndpoint(&wq)
-		util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint returned err=%v", corrID, err)
+		if ForwardingTraceEnabled() {
+			util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint returned err=%v", corrID, err)
+		}
 		if err != nil {
 			util.LogWarn("[TCP-DEBUG] [%s] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
 				corrID, err, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
@@ -1224,7 +1231,9 @@ func (n *Netstack) acceptTCP() {
 			r.Complete(true)
 			return
 		}
-		util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint succeeded, calling handleConn async", corrID)
+		if ForwardingTraceEnabled() {
+			util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint succeeded, calling handleConn async", corrID)
+		}
 		r.Complete(false)
 
 		// Set TCP keepalive on inbound connection

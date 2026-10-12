@@ -990,7 +990,7 @@ func (e *Engine) readLoop() {
 			}
 			// Log first 5 packets, then every 100th packet; always log RST
 			pktNum := e.readPackets.Load()
-			if flags&0x04 != 0 || pktNum < 5 || pktNum%100 == 0 {
+			if mesh.ForwardingTraceEnabled() && (flags&0x04 != 0 || pktNum < 5 || pktNum%100 == 0) {
 				util.LogInfo("[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
 					pktNum, srcIP, srcPort, dstIP, dstPort, flagStr)
 			}
@@ -1004,9 +1004,11 @@ func (e *Engine) readLoop() {
 			if n >= hl+4 {
 				srcPort := uint16(pktBuf[hl])<<8 | uint16(pktBuf[hl+1])
 				dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
-				pktNum := e.readPackets.Load()
-				util.LogInfo("[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",
-					pktNum, srcIP, srcPort, dstIP, dstPort, n)
+				if mesh.ForwardingTraceEnabled() {
+					pktNum := e.readPackets.Load()
+					util.LogInfo("[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",
+						pktNum, srcIP, srcPort, dstIP, dstPort, n)
+				}
 			}
 		}
 
@@ -1070,7 +1072,7 @@ func (e *Engine) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, 
 		hl := int(pktBuf[0]&0x0f) * 4
 		if n >= hl+4 {
 			dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
-			if dstPort == 53 {
+			if dstPort == 53 && mesh.ForwardingTraceEnabled() {
 				util.LogInfo("[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
 			}
 		}

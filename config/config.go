@@ -48,6 +48,7 @@ type Proxy struct {
 	SkipCertVerify       bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
 	UDP                  *bool  `yaml:"udp,omitempty" json:"udp,omitempty"`
 	P2P                  *bool  `yaml:"p2p,omitempty" json:"p2p,omitempty"`
+	V2                   bool   `yaml:"v2,omitempty" json:"v2,omitempty"`
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
 	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
@@ -95,6 +96,18 @@ func (p *Proxy) IsP2P() bool {
 		return *p.P2P
 	}
 	return true
+}
+
+// IsV2 reports whether the v2 data path is enabled for this proxy.
+// V2 requires P2P to also be enabled. Defaults to false.
+func (p *Proxy) IsV2() bool {
+	if p == nil {
+		return false
+	}
+	if !p.IsP2P() {
+		return false
+	}
+	return p.V2
 }
 
 // IsUDP reports whether UDP is enabled for this proxy.

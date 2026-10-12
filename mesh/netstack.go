@@ -177,9 +177,22 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						return SelectRouteResult{}, false
 					}
 
+					// Diagnostic: log route table contents for debugging
+					if ForwardingTraceEnabled() {
+						prefixes := make([]string, 0, len(rt.Routes))
+						for _, route := range rt.Routes {
+							prefixes = append(prefixes, route.Prefix.String())
+						}
+						TraceForwardingRoute(dst, "select_route_entry routeCount=%d prefixes=%v", len(rt.Routes), prefixes)
+					}
+
 					for _, route := range rt.Routes {
 						if !route.Prefix.Contains(dst) {
 							continue
+						}
+						// Diagnostic: log matching prefix
+						if ForwardingTraceEnabled() {
+							TraceForwardingRoute(dst, "select_route_match prefix=%s entries=%d", route.Prefix, len(route.Entries))
 						}
 						if len(route.Entries) == 0 {
 							continue
@@ -187,6 +200,10 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 
 						targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
 						if targetNodeID == "" {
+							// Diagnostic: log SelectEgressNodeID failure
+							if ForwardingTraceEnabled() {
+								TraceForwardingRoute(dst, "select_route_no_egress prefix=%s", route.Prefix)
+							}
 							continue
 						}
 
@@ -197,6 +214,10 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 							// Use Dijkstra result directly (LinkNIC)
 							nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
 							if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
+								// Diagnostic: log NextHopLink failure
+								if ForwardingTraceEnabled() {
+									TraceForwardingRoute(dst, "select_route_no_nexthop prefix=%s target=%s nextHopID=%s linkNIC=%v", route.Prefix, targetNodeID, nextHopID, linkNIC)
+								}
 								continue
 							}
 							TraceForwardingRoute(dst, "branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
@@ -234,6 +255,34 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			// identity only, never bound to a NIC.
 			n.ns.SetIPIPSourceAddress(tcpip.AddrFrom4Slice(localEIP))
 			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
+		}
+	}
+}
+
+// V2RouteLookup resolves a proxy name to its peer's LinkNIC ID and subnet.
+// Injected by main at startup to avoid mesh→p2p circular import.
+// Returns (linkNICID, peerSubnet, true) on success, (0, nil, false) if not found.
+var V2RouteLookup func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
+
+// CreateV2RouteFunc creates a per-endpoint route callback for v2 proxy connections.
+// The returned function produces a stack.RouteDecision matching the existing
+// RouteSelector pattern: LinkNIC from the peer's LinkNIC, EgressEIP from
+// CalculateEIP(peerSubnet), NeedIPIP=true.
+func CreateV2RouteFunc(proxyName string) func() stack.RouteDecision {
+	return func() stack.RouteDecision {
+		if V2RouteLookup == nil {
+			return stack.RouteDecision{}
+		}
+		linkNICID, peerSubnet, ok := V2RouteLookup(proxyName)
+		if !ok || peerSubnet == nil {
+			return stack.RouteDecision{}
+		}
+		eip := CalculateEIP(peerSubnet)
+		return stack.RouteDecision{
+			EgressNIC: linkNICID,
+			EgressEIP: tcpip.AddrFrom4Slice(eip),
+			NeedIPIP:  true,
+			Cacheable: true,
 		}
 	}
 }
@@ -1033,6 +1082,124 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 
 	totalDuration := time.Since(dialStart)
 	util.LogInfo("[NETSTACK-DIAL] succeeded to %s:%d srcPort=%d connect=%v total=%v", host, portNum, srcPort, connectDuration, totalDuration)
+	n.applyTCPKeepalive(ep)
+	return gonet.NewTCPConn(&wq, ep), nil
+}
+
+// NetDialV2 dials a TCP connection with a per-endpoint RouteFunc (v2 data path).
+// The RouteFunc is set on the endpoint before Connect, allowing the connection
+// to bypass the stack-level RouteSelector and use proxy-specific IPIP routing.
+func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error) {
+	dialStart := time.Now()
+	util.LogInfo("[NETSTACK-DIAL-V2] starting: network=%s addr=%s", network, addr)
+	n.mu.Lock()
+	running := n.running
+	ns := n.ns
+	n.mu.Unlock()
+
+	if !running || ns == nil {
+		return nil, fmt.Errorf("netstack not running")
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial v2: parse addr: %w", err)
+	}
+	portNum, err := net.LookupPort(network, port)
+	if err != nil {
+		return nil, fmt.Errorf("netstack dial v2: parse port: %w", err)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("netstack dial v2: not an IP: %s", host)
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("netstack dial v2: IPv6 not supported: %s", host)
+	}
+
+	var arr [4]byte
+	copy(arr[:], ip4)
+	remoteAddr := tcpip.FullAddress{
+		Addr: tcpip.AddrFrom4(arr),
+		Port: uint16(portNum),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	if network != "tcp" && network != "tcp4" {
+		return nil, fmt.Errorf("netstack dial v2: unsupported network: %s", network)
+	}
+
+	var wq waiter.Queue
+	ep, tcpErr := ns.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if tcpErr != nil {
+		return nil, fmt.Errorf("create endpoint: %s", tcpErr)
+	}
+
+	// Set the per-endpoint RouteFunc before Connect (Phaethon patch #13).
+	// This allows v2 connections to bypass the stack-level RouteSelector
+	// and use proxy-specific IPIP routing to the peer's LinkNIC.
+	if routeFunc != nil {
+		if tcpEP, ok := ep.(*tcp.Endpoint); ok {
+			tcpEP.RouteFunc = routeFunc
+		}
+	}
+
+	// Bind to GIP with port 0 to allocate source port
+	localAddr := tcpip.FullAddress{
+		Addr: n.dnsAddr,
+		Port: 0,
+	}
+	if tcpErr := ep.Bind(localAddr); tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind: %s", tcpErr)
+	}
+
+	localAddr, tcpErr = ep.GetLocalAddress()
+	if tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("get local address: %s", tcpErr)
+	}
+
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	select {
+	case <-ctx.Done():
+		ep.Close()
+		return nil, ctx.Err()
+	default:
+	}
+
+	util.LogInfo("[NETSTACK-DIAL-V2] connecting to %s:%d with RouteFunc", host, portNum)
+	connectStart := time.Now()
+	tcpErr = ep.Connect(remoteAddr)
+	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
+		select {
+		case <-ctx.Done():
+			ep.Close()
+			return nil, ctx.Err()
+		case <-notifyCh:
+		}
+		tcpErr = ep.LastError()
+	}
+	connectDuration := time.Since(connectStart)
+	if tcpErr != nil {
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "connect",
+			Net:  "tcp",
+			Addr: fullToTCPAddr(remoteAddr),
+			Err:  fmt.Errorf("%s", tcpErr),
+		}
+	}
+
+	totalDuration := time.Since(dialStart)
+	util.LogInfo("[NETSTACK-DIAL-V2] succeeded to %s:%d connect=%v total=%v", host, portNum, connectDuration, totalDuration)
 	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }

@@ -20,6 +20,7 @@
                         <th data-i18n="proxy.sni">SNI</th>
                         <th data-i18n="proxy.udp">UDP</th>
                         <th data-i18n="proxy.p2p">P2P</th>
+                        <th data-i18n="proxy.v2">V2</th>
                         <th data-i18n="proxy.via">Via</th>
                         <th data-i18n="common.enabled">Enabled</th>
                         <th data-i18n="proxy.actions">Actions</th>
@@ -48,7 +49,10 @@
                         <td data-label="SNI">{{.Sni}}</td>
                         <td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('{{.Name}}', {{.IsUDP}})">{{if .IsUDP}}✅{{else}}❌{{end}}</td>
                         <td data-label="P2P" style="cursor:pointer;" onclick="toggleP2P('{{.Name}}', {{.IsP2P}})" id="p2p-status-{{.Name}}">
-                            {{if .IsP2P}}<span class="p2p-status connecting" title="Connecting...">🔄</span>{{else}}❌{{end}}
+                            {{if .IsP2P}}<span class="p2p-status connecting" title="Connecting..."></span>{{else}}<span class="p2p-status disabled" title="Disabled"></span>{{end}}
+                        </td>
+                        <td data-label="V2" style="cursor:pointer;" onclick="toggleV2('{{.Name}}', {{.IsV2}})" id="v2-status-{{.Name}}">
+                            {{if .IsV2}}✅{{else}}❌{{end}}
                         </td>
                         <td data-label="Via">{{.ViaProxy}}</td>
                         <td data-label="Enabled">
@@ -238,6 +242,9 @@
                 </div>
                 <div class="form-group checkbox-group" id="col-p2p">
                     <label><input type="checkbox" id="f-p2p"> <span data-i18n="proxy.p2pSupport">P2P Support</span></label>
+                </div>
+                <div class="form-group checkbox-group" id="col-v2">
+                    <label><input type="checkbox" id="f-v2"> <span data-i18n="proxy.v2Support">V2 Data Path</span></label>
                 </div>
                 <div class="form-group checkbox-group" id="col-skip">
                     <label><input type="checkbox" id="f-skip-cert"> <span data-i18n="proxy.skipCert">Skip Cert Verify</span></label>
@@ -690,6 +697,7 @@ function editProxy(name) {
     document.getElementById('f-url').value = p.url || '';
     document.getElementById('f-udp').checked = p.udp;
     document.getElementById('f-p2p').checked = p.p2p;
+    document.getElementById('f-v2').checked = p.v2 || false;
     document.getElementById('f-skip-cert').checked = p['skip-cert-verify'];
     document.getElementById('f-flow').value = p.flow || '';
     document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
@@ -720,6 +728,7 @@ async function saveProxy(e) {
         'via': document.getElementById('f-proxy').value || '',
         udp: document.getElementById('f-udp').checked,
         p2p: document.getElementById('f-p2p').checked,
+        v2: document.getElementById('f-v2').checked,
         'skip-cert-verify': document.getElementById('f-skip-cert').checked,
         flow: document.getElementById('f-flow').value || '',
         'reverse-address': document.getElementById('f-reverse-addr').value || '',
@@ -1089,15 +1098,40 @@ async function doToggleP2P(name, enabled, cell) {
             body: JSON.stringify({p2p: enabled})
         });
         if (!res.ok) throw new Error(await res.text());
-        // Update the cell display - show connecting state when enabling
+        // Update the cell display immediately - SSE will trigger fetchP2PStatus for actual state
         if (cell) {
             if (enabled) {
-                cell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+                cell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
             } else {
-                cell.textContent = '❌';
+                cell.innerHTML = '<span class="p2p-status disabled" title="Disabled"></span>';
             }
         }
         showToast(`P2P ${enabled ? 'enabled' : 'disabled'} for ${name}`, enabled ? 'success' : 'warning');
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function toggleV2(name, currentValue) {
+    const newValue = !currentValue;
+    const row = document.querySelector(`#proxy-table tr[data-name="${CSS.escape(name)}"]`);
+    const v2Cell = row ? row.querySelector('td[data-label="V2"]') : null;
+
+    try {
+        const proxy = proxies.find(p => p.name === name);
+        if (!proxy) return;
+
+        const payload = {...proxy, v2: newValue};
+        const res = await fetch(`./api/proxies`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        // Table shows effective state (IsV2 = V2 && P2P), update accordingly
+        if (v2Cell) v2Cell.innerHTML = (newValue && proxy.p2p) ? '✅' : '❌';
+        proxy.v2 = newValue;
+        showToast(`V2 ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -1713,6 +1747,7 @@ function toggleFields() {
     setVisible('col-udp', needUdp);
     const showP2P = ['SOCKS5','TROJAN','H_TUNNEL'].includes(t);
     setVisible('col-p2p', showP2P);
+    setVisible('col-v2', showP2P);
     // For new proxies of compatible types, default P2P to checked
     const editName = document.getElementById('edit-name').value;
     if (!editName && showP2P) {
@@ -1764,8 +1799,8 @@ function escapeHtml(s) {
         const peerMap = {};
         if (peers && Array.isArray(peers)) {
             for (const peer of peers) {
-                if (peer.name) {
-                    peerMap[peer.name] = peer.status || 'unknown';
+                if (peer.proxyName) {
+                    peerMap[peer.proxyName] = peer.status || 'unknown';
                 }
             }
         }
@@ -1781,17 +1816,17 @@ function escapeHtml(s) {
             const p2pEnabled = proxy && proxy.p2p;
             
             if (!p2pEnabled) {
-                // P2P disabled - plain X like UDP
-                p2pCell.textContent = '❌';
+                // P2P disabled
+                p2pCell.innerHTML = '<span class="p2p-status disabled" title="Disabled"></span>';
             } else if (!status) {
                 // P2P enabled but no peer yet - show connecting
-                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
             } else if (status === 'upToDate' || status === 'helloed') {
                 // Connected
-                p2pCell.textContent = '✅';
+                p2pCell.innerHTML = '<span class="p2p-status connected" title="Connected"></span>';
             } else {
-                // connecting or failed - show spinning
-                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting...">🔄</span>';
+                // connecting or failed - show connecting
+                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
             }
         });
     }

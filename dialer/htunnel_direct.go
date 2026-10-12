@@ -262,17 +262,24 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 // ctrlRecvCh or dataRecvCh based on frame type. Multiple recvLoop goroutines
 // run concurrently to eliminate the gap between GETs.
 func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
+	loopType := "data"
+	if isCtrlLoop {
+		loopType = "ctrl"
+	}
+	util.LogInfo("[HTUNNEL-GET-DIAG] recvLoop started: proxy=%s connID=%s type=%s", t.proxy.Name, t.connectionID, loopType)
 	readSeq := 0
 	for {
 		select {
 		case <-t.closed:
+			util.LogInfo("[HTUNNEL-GET-DIAG] recvLoop exiting: proxy=%s connID=%s type=%s closed", t.proxy.Name, t.connectionID, loopType)
 			return
 		default:
 		}
 
 		readSeq++
 		seq := readSeq
-		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), nil)
+		getURL := fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq)
+		req, _ := http.NewRequest("GET", getURL, nil)
 		req.Header.Set(headerConnectionID, t.connectionID)
 		req.Header.Set(headerContentSeq, strconv.Itoa(seq))
 
@@ -285,9 +292,11 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		// Context timeout = wait time + buffer for network latency
 		ctxTimeout := waitTime + 10*time.Second
 		ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+		util.LogInfo("[HTUNNEL-GET-DIAG] sending GET: proxy=%s connID=%s seq=%d url=%s", t.proxy.Name, t.connectionID, seq, getURL)
 		resp, err := t.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
+			util.LogWarn("[HTUNNEL-GET-DIAG] GET failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
 			t.sendError(fmt.Errorf("htunnel-direct: get fail: %w", err), isCtrlLoop)
 			return
 		}
@@ -296,7 +305,10 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		resp.Body.Close()
 		cancel()
 
+		util.LogInfo("[HTUNNEL-GET-DIAG] GET response: proxy=%s connID=%s seq=%d status=%d bodyLen=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode, len(body))
+
 		if resp.StatusCode == 410 {
+			util.LogWarn("[HTUNNEL-GET-DIAG] GET 410: proxy=%s connID=%s seq=%d server closed channel", t.proxy.Name, t.connectionID, seq)
 			t.sendError(io.ErrClosedPipe, isCtrlLoop)
 			return
 		}
@@ -304,6 +316,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			continue // timeout, retry
 		}
 		if resp.StatusCode != 200 {
+			util.LogWarn("[HTUNNEL-GET-DIAG] GET bad status: proxy=%s connID=%s seq=%d status=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode)
 			t.sendError(fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode), isCtrlLoop)
 			return
 		}
@@ -312,6 +325,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			if t.crypto.IsEnabled() {
 				body, err = t.crypto.OpenBody(body)
 				if err != nil {
+					util.LogWarn("[HTUNNEL-GET-DIAG] decrypt failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
 					t.sendError(fmt.Errorf("htunnel-direct: decrypt fail: %w", err), isCtrlLoop)
 					return
 				}
@@ -323,14 +337,19 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			t.adjustWaitTime(isFullBatch)
 
 			reader := bytes.NewReader(body)
+			frameCount := 0
 			for reader.Len() > 0 {
 				ft, payload, err := frame.ReadFrame(reader)
 				if err != nil {
+					util.LogWarn("[HTUNNEL-GET-DIAG] frame parse failed: proxy=%s connID=%s seq=%d frames=%d err=%v", t.proxy.Name, t.connectionID, seq, frameCount, err)
 					t.sendError(fmt.Errorf("htunnel-direct: parse frame fail: %w", err), isCtrlLoop)
 					return
 				}
+				frameCount++
+				util.LogInfo("[HTUNNEL-GET-DIAG] frame received: proxy=%s connID=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, seq, frameCount, ft, len(payload))
 				t.routeFrame(ft, payload, isCtrlLoop)
 			}
+			util.LogInfo("[HTUNNEL-GET-DIAG] batch complete: proxy=%s connID=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, seq, frameCount)
 		} else {
 			// v0.2.0: empty batch
 			t.adjustWaitTime(false)

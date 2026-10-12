@@ -324,10 +324,13 @@ func (c *htunnelConn) Read(b []byte) (int, error) {
 			return 0, fmt.Errorf("htunnel: read body fail: %w", err)
 		}
 
+		util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: GET → status=%d bodyLen=%d", c.connectionID, readSeq, resp.StatusCode, len(body))
 		if resp.StatusCode == 410 {
+			util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 410 → ErrClosedPipe", c.connectionID, readSeq)
 			return 0, io.ErrClosedPipe
 		}
 		if resp.StatusCode == 408 {
+			util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 408 → retry", c.connectionID, readSeq)
 			// Timeout, retry
 			continue
 		}
@@ -349,6 +352,7 @@ func (c *htunnelConn) Read(b []byte) (int, error) {
 			c.readOffset = n
 			return n, nil
 		}
+		util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 200 but empty body → retry", c.connectionID, readSeq)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"phaethon/config"
 	"phaethon/dialer"
 	"phaethon/mesh"
@@ -47,6 +48,27 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // link identification now based on seq pair matching instead of combined linkId.
 const P2PProtocolVersion = 9
 
+// LookupProxyPeerRoute is injected by main to resolve a proxy name to its
+// peer's LinkNIC ID and subnet. Used by v2 route callbacks to bypass the
+// RouteSelector for proxy-selected mesh links.
+var LookupProxyPeerRoute func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
+
+func init() {
+	LookupProxyPeerRoute = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
+		mgr := GlobalP2PManager
+		if mgr == nil {
+			return 0, nil, false
+		}
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		peer, exists := mgr.proxyPeers[proxyName]
+		if !exists || peer.linkNIC == nil {
+			return 0, nil, false
+		}
+		return peer.linkNIC.NICID(), peer.linkNIC.PeerSubnet(), true
+	}
+}
+
 // linkStats holds persistent statistics for a link (survives P2P reconnections).
 type linkStats struct {
 	sendState      *sendState
@@ -56,9 +78,10 @@ type linkStats struct {
 
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
-	mu       sync.Mutex
-	peers    map[string]*Peer
-	nodeId   string
+	mu         sync.Mutex
+	peers      map[string]*Peer    // keyed by peer.ID (localSeq-based)
+	proxyPeers map[string]*Peer    // keyed by proxy.Name (active peers only, for dedup)
+	nodeId     string
 	version  string
 	buildTag string
 	platform string
@@ -123,7 +146,7 @@ func (s *peerSender) GetNodeID() string {
 }
 
 func (s *peerSender) GetProxyName() string {
-	return s.peer.ID
+	return s.peer.ProxyName
 }
 
 // GetLinkID returns the negotiated link ID (from hello negotiation).
@@ -150,7 +173,7 @@ func (s *peerSender) GetFriendlyName() string {
 	}
 	name := s.peer.FriendlyName
 	if name == "" {
-		name = s.peer.ID // proxy name fallback
+		name = s.peer.ProxyName // proxy name fallback
 	}
 	return name
 }
@@ -176,10 +199,11 @@ type writeReq struct {
 
 // Peer represents a connected P2P peer.
 type Peer struct {
-	ID       string    `json:"name"`   // proxy name used to reach this peer
-	NodeID   string    `json:"nodeId"` // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
-	Status   string    `json:"status"` // "connecting", "helloed", "upToDate", "failed"
-	LastSeen time.Time `json:"lastSeen"`
+	ID        string `json:"id"`        // unique connection ID (localSeq-based)
+	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
+	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
+	Status    string `json:"status"`    // "connecting", "helloed", "upToDate", "failed"
+	LastSeen  time.Time `json:"lastSeen"`
 
 	// LinkID negotiation (hello phase)
 	Seq          uint16 // 本端生成的序列号（本地递增）
@@ -215,6 +239,7 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	})
 	m := &P2PManager{
 		peers:             make(map[string]*Peer),
+		proxyPeers:        make(map[string]*Peer),
 		nodeId:            nodeId,
 		version:           version,
 		buildTag:          DetectBuildTag(),
@@ -493,8 +518,9 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	}
 	defer m.sessionsWG.Done()
 
+	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	peer := &Peer{
-		ID:        address,
+		ID:        fmt.Sprintf("%d", seq),
 		Status:    "connecting",
 		LastSeen:  time.Now(),
 		transport: t,
@@ -503,7 +529,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		stopCh:    make(chan struct{}),
 		sendState: newSendState(),
 		recvState: newRecvState(),
-		Seq:       uint16(atomic.AddUint64(&m.linkSeqCounter, 1)), // Local incrementing sequence for link ID negotiation
+		Seq:       seq,
 	}
 
 	m.mu.Lock()
@@ -555,7 +581,26 @@ func (m *P2PManager) StopPeer(id string) {
 
 // StopPeerByProxyName disconnects one P2P session by its configured proxy name.
 func (m *P2PManager) StopPeerByProxyName(proxyName string) {
-	m.StopPeer(proxyName)
+	m.mu.Lock()
+	peer := m.proxyPeers[proxyName]
+	m.mu.Unlock()
+	if peer != nil {
+		util.LogInfo("[P2P] stopping peer for proxy %s (peer.ID=%s)", proxyName, peer.ID)
+		stopPeer(peer)
+	}
+}
+
+// ActivePeerProxyNames returns the set of proxy names that currently have active peers.
+// This reads from the same map (proxyPeers) used by StopPeerByProxyName, avoiding
+// cross-map inconsistency.
+func (m *P2PManager) ActivePeerProxyNames() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[string]bool, len(m.proxyPeers))
+	for name := range m.proxyPeers {
+		result[name] = true
+	}
+	return result
 }
 
 // StopPeerByNodeID disconnects every P2P session for a mesh node.
@@ -594,10 +639,10 @@ func (m *P2PManager) StopPeerByLinkID(linkID string) {
 
 // GetPeerProxy returns the proxy config that a peer was started with.
 // Returns nil if the peer does not exist.
-func (m *P2PManager) GetPeerProxy(id string) *config.Proxy {
+func (m *P2PManager) GetPeerProxy(proxyName string) *config.Proxy {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if peer, ok := m.peers[id]; ok {
+	if peer, ok := m.proxyPeers[proxyName]; ok {
 		return peer.proxy
 	}
 	return nil
@@ -607,7 +652,7 @@ func (m *P2PManager) GetPeerProxy(id string) *config.Proxy {
 // This is used when proxy config (password, server, etc.) changes.
 func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 	util.LogInfo("[P2P] restarting peer for proxy %s due to config change", proxy.Name)
-	m.StopPeer(proxy.Name)
+	m.StopPeerByProxyName(proxy.Name)
 	go m.StartPeer(proxy)
 }
 
@@ -623,29 +668,24 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	util.LogInfo("[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 
-	// Stop any existing peer with the same ID to prevent duplicate connections.
+	// Stop any existing peer with the same proxy name to prevent duplicate connections.
 	m.mu.Lock()
-	existing := m.peers[proxy.Name]
+	existing := m.proxyPeers[proxy.Name]
 	m.mu.Unlock()
 	if existing != nil {
-		util.LogInfo("[P2P] stopping existing peer %s before starting new one", proxy.Name)
+		util.LogInfo("[P2P] stopping existing peer for proxy %s before starting new one", proxy.Name)
 		stopPeer(existing)
 	}
 
-	d := dialer.NewDialer(proxy)
-	p2pDialer, ok := d.(dialer.P2PDialer)
-	if !ok {
-		util.LogInfo("[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
-		return
-	}
-
+	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	peer := &Peer{
-		ID:       proxy.Name,
-		Status:   "connecting",
-		LastSeen: time.Now(),
-		stopCh:   make(chan struct{}),
-		proxy:    proxy,
-		Seq:      uint16(atomic.AddUint64(&m.linkSeqCounter, 1)), // Local incrementing sequence for link ID negotiation
+		ID:        fmt.Sprintf("%d", seq),
+		ProxyName: proxy.Name,
+		Status:    "connecting",
+		LastSeen:  time.Now(),
+		stopCh:    make(chan struct{}),
+		proxy:     proxy,
+		Seq:       seq,
 	}
 
 	m.mu.Lock()
@@ -655,6 +695,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		return
 	}
 	m.peers[peer.ID] = peer
+	m.proxyPeers[proxy.Name] = peer
 	m.mu.Unlock()
 
 	defer func() {
@@ -677,8 +718,18 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
 		}
+		if current, ok := m.proxyPeers[proxy.Name]; ok && current == peer {
+			delete(m.proxyPeers, proxy.Name)
+		}
 		m.mu.Unlock()
 	}()
+
+	d := dialer.NewDialer(proxy)
+	p2pDialer, ok := d.(dialer.P2PDialer)
+	if !ok {
+		util.LogInfo("[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
+		return
+	}
 
 	backoff := time.Second
 	const maxBackoff = 60 * time.Second
@@ -752,22 +803,15 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			m.runSession(peer)
 		}()
 
-		util.LogInfo("[P2P] disconnected from %s, reconnecting in %v", peer.ID, backoff)
-		peer.Status = "connecting"
-		if m.OnStatusChange != nil {
-			go m.OnStatusChange()
+		// Session ended. Instead of reusing the same peer object (stale
+		// seq/ID), stop this peer and spawn a fresh StartPeer so the new
+		// connection gets a brand-new seq, peer.ID, and clean state.
+		if peer.Status != "stopped" {
+			proxy := peer.proxy
+			util.LogInfo("[P2P] disconnected from %s (proxy=%s), starting fresh peer", peer.ID, proxy.Name)
+			go m.StartPeer(proxy)
 		}
-		// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
-		jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
-		select {
-		case <-peer.stopCh:
-			return
-		case <-time.After(jitteredBackoff):
-		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		return
 	}
 }
 
@@ -1223,10 +1267,11 @@ func (m *P2PManager) GetPeers() []Peer {
 	result := make([]Peer, 0, len(m.peers))
 	for _, p := range m.peers {
 		result = append(result, Peer{
-			ID:       p.ID,
-			NodeID:   p.NodeID,
-			Status:   p.Status,
-			LastSeen: p.LastSeen,
+			ID:        p.ID,
+			ProxyName: p.ProxyName,
+			NodeID:    p.NodeID,
+			Status:    p.Status,
+			LastSeen:  p.LastSeen,
 		})
 	}
 	return result
@@ -1281,7 +1326,7 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, ji
 	defer m.mu.Unlock()
 
 	for _, p := range m.peers {
-		if p.ID == proxyName && p.sendState != nil {
+		if p.ProxyName == proxyName && p.sendState != nil {
 			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
 			return p.sendState.getStats(channelDrops)
 		}
@@ -1326,10 +1371,10 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 	})
 
 	for _, p := range m.peers {
-		if p.sendState != nil {
+		if p.sendState != nil && p.ProxyName != "" {
 			channelDrops := atomic.LoadUint64(&p.writeChDrops) + atomic.LoadUint64(&p.controlChDrops)
 			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats(channelDrops)
-			result[p.ID] = struct {
+			result[p.ProxyName] = struct {
 				NodeID      string
 				SRTT        time.Duration
 				RTO         time.Duration

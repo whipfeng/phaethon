@@ -87,6 +87,16 @@ func (l *LinkNIC) MTU() uint32 {
 	return l.mtu
 }
 
+// NICID returns the LinkNIC's NIC ID.
+func (l *LinkNIC) NICID() tcpip.NICID {
+	return l.nicID
+}
+
+// PeerSubnet returns the peer's mesh subnet.
+func (l *LinkNIC) PeerSubnet() *net.IPNet {
+	return l.peerSubnet
+}
+
 // SetMTU implements stack.NetworkLinkEndpoint.SetMTU.
 func (l *LinkNIC) SetMTU(mtu uint32) {
 	l.mtu = mtu

@@ -254,6 +254,11 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			// IPIP outer source = local EIP (design §4.2); EIP is a tunnel
 			// identity only, never bound to a NIC.
 			n.ns.SetIPIPSourceAddress(tcpip.AddrFrom4Slice(localEIP))
+			// Register IPIP tunnel protocol handler for decapsulation.
+			// The handler maintains its own state (local EIP) and decapsulates
+			// IPIP packets when outer destination matches local EIP.
+			ipipHandler := newIPIPTunnelProtocol(tcpip.AddrFrom4Slice(localEIP))
+			n.ns.RegisterTunnelProtocol(ipipHandler)
 			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
 		}
 	}
@@ -530,7 +535,7 @@ func (n *Netstack) initStack() error {
 
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, func(s *stack.Stack) stack.TransportProtocol { return newIPIPProtocol(s, linkEP) }},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 		// HandleLocal: REMOVED (2026-10-08) — single-variable regression test.
 		// With HandleLocal=true, external DNS queries (192.168.1.7 -> 100.0.0.3:53)
 		// are dropped before reaching the DNS hijacker. Verified at commit f1a2a87

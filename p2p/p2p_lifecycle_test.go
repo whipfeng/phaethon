@@ -2,24 +2,6 @@ package p2p
 
 import "testing"
 
-func TestStopPeerByNodeIDStopsAllMatchingSessions(t *testing.T) {
-	manager := NewP2PManager("local", "test", nil)
-	defer manager.Stop()
-
-	first := &Peer{ID: "first", NodeID: "remote", stopCh: make(chan struct{})}
-	second := &Peer{ID: "second", NodeID: "remote", stopCh: make(chan struct{})}
-	other := &Peer{ID: "other", NodeID: "other", stopCh: make(chan struct{})}
-	manager.peers[first.ID] = first
-	manager.peers[second.ID] = second
-	manager.peers[other.ID] = other
-
-	manager.StopPeerByNodeID("remote")
-
-	assertPeerStopped(t, first)
-	assertPeerStopped(t, second)
-	assertPeerRunning(t, other)
-}
-
 func TestStopPeerByLinkIDPreservesOtherLinks(t *testing.T) {
 	manager := NewP2PManager("local", "test", nil)
 	defer manager.Stop()

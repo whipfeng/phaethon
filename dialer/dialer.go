@@ -216,7 +216,7 @@ func NewDialer(proxy *config.Proxy) Dialer {
 	// v2 dispatch: must have both p2p=true AND v2=true to use mesh direct path.
 	// v2=false (default) keeps the v1 protocol-handshake path (stable baseline).
 	if proxy.IsP2P() && proxy.V2 {
-		return &meshAwareDialer{proxy: proxy}
+		return &meshAwareDialer{proxy: proxy, underlying: d}
 	}
 	return d
 }
@@ -227,11 +227,13 @@ func NewDialer(proxy *config.Proxy) Dialer {
 // packet through the mesh IPIP tunnel to the remote peer's netstack, which
 // performs the actual outbound via its own physical interface.
 //
-// Only Dial() is meaningful; protocol-specific methods (DialControl/DialP2P/
-// DialReverse/DialPacket) keep using their original v1 dialers because they
-// are reached via type assertion on the underlying types, not via NewDialer.
+// Dial() uses the v2 mesh path. Protocol-specific methods (DialControl/DialP2P/
+// DialReverse/DialPacket) delegate to the underlying v1 dialer, because P2P
+// session setup, control channels, reverse connections and UDP still use the
+// proxy protocol handshake even in v2 mode.
 type meshAwareDialer struct {
-	proxy *config.Proxy
+	proxy      *config.Proxy
+	underlying Dialer
 }
 
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
@@ -263,6 +265,42 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 
 // ServerAddr returns empty for mesh dialer: no proxy server is in the data path.
 func (d *meshAwareDialer) ServerAddr() (string, int) { return "", 0 }
+
+// DialP2P delegates to the underlying v1 dialer. P2P session setup still uses
+// the proxy protocol handshake (PORT=2) even in v2 mode.
+func (d *meshAwareDialer) DialP2P() (frame.FrameTransport, error) {
+	if p, ok := d.underlying.(P2PDialer); ok {
+		return p.DialP2P()
+	}
+	return nil, fmt.Errorf("proxy type '%s' does not support P2P", d.proxy.Type)
+}
+
+// DialControl delegates to the underlying v1 dialer. Control connections use
+// the proxy protocol handshake (PORT=1).
+func (d *meshAwareDialer) DialControl() (net.Conn, error) {
+	if c, ok := d.underlying.(ControlDialer); ok {
+		return c.DialControl()
+	}
+	return nil, fmt.Errorf("proxy type '%s' does not support control dial", d.proxy.Type)
+}
+
+// DialReverse delegates to the underlying v1 dialer. Reverse connections use
+// the proxy protocol BIND (PORT=0).
+func (d *meshAwareDialer) DialReverse(dstAddr string) (net.Conn, error) {
+	if r, ok := d.underlying.(ReverseDialer); ok {
+		return r.DialReverse(dstAddr)
+	}
+	return nil, fmt.Errorf("proxy type '%s' does not support reverse dial", d.proxy.Type)
+}
+
+// DialPacket delegates to the underlying v1 dialer. UDP forwarding still uses
+// the proxy protocol's UDP ASSOCIATE.
+func (d *meshAwareDialer) DialPacket() (net.PacketConn, error) {
+	if u, ok := d.underlying.(UDPDialer); ok {
+		return u.DialPacket()
+	}
+	return nil, fmt.Errorf("proxy type '%s' does not support UDP forwarding", d.proxy.Type)
+}
 
 const maxDialDepth = 10
 

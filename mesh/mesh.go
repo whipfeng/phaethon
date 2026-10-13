@@ -87,7 +87,6 @@ type P2PTransport interface {
 	ListMeshPeerIDs() []string
 	SetMeshInfo(nodeID, vip string)
 	ResendHelloToAll()
-	StopPeerByNodeID(nodeID string)
 	StopPeerByProxyName(proxyName string)
 	StopPeerByLinkID(linkID string)
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)

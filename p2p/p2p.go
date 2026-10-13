@@ -348,6 +348,10 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
+			// Diagnostic: log IPIP packets (proto=4) sent via writeSingleFrame
+			if len(req.data) >= 20 && req.data[0]>>4 == 4 && req.data[9] == 4 {
+				util.LogInfo("[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
+			}
 		}
 		if req.frameType == frame.FrameHello {
 			util.LogInfo("[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
@@ -381,6 +385,11 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			frames[i] = frame.Frame{Type: req.frameType, Payload: req.data}
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s batch=%d", peer.ID, len(batch))
+				// Diagnostic: log first 20 bytes of each packet to identify IPIP
+				if len(req.data) >= 20 {
+					util.LogInfo("[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
+						peer.ID, len(req.data), req.data[0]>>4, req.data[9], req.data[:20])
+				}
 			}
 		}
 
@@ -426,6 +435,11 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			if !ok {
 				return
 			}
+			// Diagnostic: log what we read from writeCh
+			if req.frameType == frame.FrameMeshPacket && len(req.data) >= 20 {
+				util.LogInfo("[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
+					peer.ID, len(req.data), req.data[0]>>4, req.data[9])
+			}
 			// Coalesce more data frames (non-blocking)
 			batch := make([]writeReq, 0, maxBatchFrames)
 			batch = append(batch, req)
@@ -438,6 +452,13 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				}
 			}
 		sendBatch:
+			// Diagnostic: log batch contents before writing
+			for _, b := range batch {
+				if b.frameType == frame.FrameMeshPacket && len(b.data) >= 20 {
+					util.LogInfo("[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
+						peer.ID, len(b.data), b.data[0]>>4, b.data[9], len(batch))
+				}
+			}
 			if !writeBatch(batch) {
 				return
 			}

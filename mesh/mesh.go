@@ -1112,43 +1112,9 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 		return
 	}
 
-	// Check if this is an IPIP packet (protocol 4)
-	if frame[9] == 4 {
-		// Extract outer destination IP (IPIP header bytes 16-19)
-		outerDstIP := net.IP(frame[16:20])
-		localEIP := m.ipipTunnel.GetLocalEIP()
-
-		// Check if outer destination is our EIP (we are the target)
-		if localEIP != nil && outerDstIP.Equal(localEIP) {
-			util.LogInfo("[IPIP] Received IPIP packet for us from %s, decapsulating", fromNodeID)
-			innerPacket, err := Decapsulate(frame)
-			if err != nil {
-				util.LogWarn("[IPIP] Decapsulation failed: %v", err)
-				return
-			}
-			util.LogDebug("[IPIP] Decapsulated packet: inner len=%d", len(innerPacket))
-			// Recursively process the inner packet (same linkNIC)
-			m.HandleMeshFrame(fromNodeID, linkNIC, innerPacket)
-			return
-		}
-
-		// Not for us, forward the IPIP packet (we are a transit node)
-		util.LogDebug("[IPIP] Forwarding IPIP packet from %s to %s", fromNodeID, outerDstIP)
-		nextHops := m.findNextHops(outerDstIP)
-		if len(nextHops) > 0 {
-			// Select best peer using quality metrics (consider all candidates, not just min hop)
-			nextPeer := m.selectBestPeer(nextHops, outerDstIP)
-			if err := nextPeer.Send(frame); err != nil {
-				util.LogWarn("[IPIP] Forward to %s failed: %v", nextPeer.GetNodeID(), err)
-			} else {
-				util.LogDebug("[IPIP] Forwarded IPIP packet to %s OK", nextPeer.GetNodeID())
-			}
-		} else {
-			util.LogWarn("[IPIP] No route to forward IPIP packet to %s", outerDstIP)
-		}
-		return
-	}
-
+	// All packets (including IPIP) flow through Link NIC normally.
+	// gVisor's ipip_protocol handler will decapsulate IPIP packets inside the stack
+	// when the outer destination is our local EIP.
 	dstIP := extractDstIP(frame)
 	srcIP := net.IP(frame[12:16])
 	if dstIP == nil {
@@ -1158,6 +1124,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	if len(frame) >= 20 && frame[9] == 6 {
 		dstPort := uint16(frame[22])<<8 | uint16(frame[23])
 		util.LogDebug("[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
+	}
+	// Log IPIP packets (proto=4) at INFO level for debugging
+	if len(frame) >= 20 && frame[9] == 4 {
+		util.LogInfo("[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
+			fromNodeID, srcIP, dstIP, frame[9], len(frame))
 	}
 	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
@@ -3076,4 +3047,60 @@ func containsNeighborNodeID(slice []GossipNeighbor, nodeID string) bool {
 		}
 	}
 	return false
+}
+
+// isMeshAddress checks if an IP is within the overall mesh network range.
+func (m *MeshManager) isMeshAddress(ip net.IP) bool {
+	if m.network == nil {
+		return false
+	}
+	return m.network.Contains(ip)
+}
+
+// isLocalAddress checks if an IP is a local address on this node.
+// This includes VIP, hostIP, GIP, EIP, and any OS-level local IPs.
+func (m *MeshManager) isLocalAddress(ip net.IP) bool {
+	// Check if it's the VIP
+	if m.vip != nil && m.vip.Equal(ip) {
+		return true
+	}
+	// Check if it's the hostIP (subnet + 2)
+	if m.subnet != nil {
+		hostIP := make(net.IP, 4)
+		copy(hostIP, m.subnet.IP)
+		hostIP[3] = hostIP[3] + 2
+		if hostIP.Equal(ip) {
+			return true
+		}
+		// Check if it's the GIP (subnet + 3)
+		gip := make(net.IP, 4)
+		copy(gip, m.subnet.IP)
+		gip[3] = gip[3] + 3
+		if gip.Equal(ip) {
+			return true
+		}
+		// Check if it's the EIP (subnet + 4)
+		eip := make(net.IP, 4)
+		copy(eip, m.subnet.IP)
+		eip[3] = eip[3] + 4
+		if eip.Equal(ip) {
+			return true
+		}
+	}
+	// Check if it's the local EIP from ipipTunnel
+	if m.ipipTunnel != nil {
+		localEIP := m.ipipTunnel.GetLocalEIP()
+		if localEIP != nil && localEIP.Equal(ip) {
+			return true
+		}
+	}
+	// TODO: Check OS-level local IPs if needed
+	// For now, we rely on the fact that 172.30.0.2 is configured as a local IP on VM
+	// and the netstack will handle local delivery via RouteSelector Branch 4
+	return false
+}
+
+// getNetStack returns the Netstack instance.
+func (m *MeshManager) getNetStack() *Netstack {
+	return m.netstack
 }

@@ -61,11 +61,12 @@ func init() {
 		}
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
-		peer, exists := mgr.proxyPeers[proxyName]
-		if !exists || peer.linkNIC == nil {
-			return 0, nil, false
+		for _, peer := range mgr.peers {
+			if peer.ProxyName == proxyName && peer.linkNIC != nil {
+				return peer.linkNIC.NICID(), peer.linkNIC.PeerSubnet(), true
+			}
 		}
-		return peer.linkNIC.NICID(), peer.linkNIC.PeerSubnet(), true
+		return 0, nil, false
 	}
 }
 
@@ -79,8 +80,7 @@ type linkStats struct {
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
 	mu         sync.Mutex
-	peers      map[string]*Peer    // keyed by peer.ID (localSeq-based)
-	proxyPeers map[string]*Peer    // keyed by proxy.Name (active peers only, for dedup)
+	peers      map[string]*Peer    // keyed by peer.ID (localSeq-based; active + passive)
 	nodeId     string
 	version  string
 	buildTag string
@@ -239,7 +239,6 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	})
 	m := &P2PManager{
 		peers:             make(map[string]*Peer),
-		proxyPeers:        make(map[string]*Peer),
 		nodeId:            nodeId,
 		version:           version,
 		buildTag:          DetectBuildTag(),
@@ -568,21 +567,16 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	m.runSession(peer)
 }
 
-// StopPeer disconnects one P2P peer permanently.
-func (m *P2PManager) StopPeer(id string) {
-	m.mu.Lock()
-	peer := m.peers[id]
-	m.mu.Unlock()
-	if peer != nil {
-		util.LogInfo("[P2P] stopping peer %s", id)
-		stopPeer(peer)
-	}
-}
-
 // StopPeerByProxyName disconnects one P2P session by its configured proxy name.
 func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 	m.mu.Lock()
-	peer := m.proxyPeers[proxyName]
+	var peer *Peer
+	for _, p := range m.peers {
+		if p.ProxyName == proxyName {
+			peer = p
+			break
+		}
+	}
 	m.mu.Unlock()
 	if peer != nil {
 		util.LogInfo("[P2P] stopping peer for proxy %s (peer.ID=%s)", proxyName, peer.ID)
@@ -591,33 +585,17 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 }
 
 // ActivePeerProxyNames returns the set of proxy names that currently have active peers.
-// This reads from the same map (proxyPeers) used by StopPeerByProxyName, avoiding
-// cross-map inconsistency.
+// Passive (inbound) peers have no ProxyName and are excluded.
 func (m *P2PManager) ActivePeerProxyNames() map[string]bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make(map[string]bool, len(m.proxyPeers))
-	for name := range m.proxyPeers {
-		result[name] = true
-	}
-	return result
-}
-
-// StopPeerByNodeID disconnects every P2P session for a mesh node.
-func (m *P2PManager) StopPeerByNodeID(nodeID string) {
-	m.mu.Lock()
-	peers := make([]*Peer, 0)
-	for _, peer := range m.peers {
-		if peer.NodeID == nodeID {
-			peers = append(peers, peer)
+	result := make(map[string]bool)
+	for _, p := range m.peers {
+		if p.ProxyName != "" {
+			result[p.ProxyName] = true
 		}
 	}
-	m.mu.Unlock()
-
-	for _, peer := range peers {
-		util.LogInfo("[P2P] stopping peer %s (nodeID=%s) due to connectivity failure", peer.ID, nodeID)
-		stopPeer(peer)
-	}
+	return result
 }
 
 // StopPeerByLinkID disconnects every session with the exact negotiated link ID.
@@ -642,8 +620,10 @@ func (m *P2PManager) StopPeerByLinkID(linkID string) {
 func (m *P2PManager) GetPeerProxy(proxyName string) *config.Proxy {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if peer, ok := m.proxyPeers[proxyName]; ok {
-		return peer.proxy
+	for _, peer := range m.peers {
+		if peer.ProxyName == proxyName {
+			return peer.proxy
+		}
 	}
 	return nil
 }
@@ -658,7 +638,7 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 
 // StartPeer initiates a P2P connection to a peer through the given proxy.
 // It reconnects automatically with exponential backoff if the connection drops.
-// Call StopPeer to permanently disconnect.
+// Call StopPeerByProxyName to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	if !m.beginSession() {
 		util.LogDebug("[P2P] manager stopped; not starting peer %s", proxy.Name)
@@ -670,7 +650,13 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	// Stop any existing peer with the same proxy name to prevent duplicate connections.
 	m.mu.Lock()
-	existing := m.proxyPeers[proxy.Name]
+	var existing *Peer
+	for _, p := range m.peers {
+		if p.ProxyName == proxy.Name {
+			existing = p
+			break
+		}
+	}
 	m.mu.Unlock()
 	if existing != nil {
 		util.LogInfo("[P2P] stopping existing peer for proxy %s before starting new one", proxy.Name)
@@ -695,7 +681,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		return
 	}
 	m.peers[peer.ID] = peer
-	m.proxyPeers[proxy.Name] = peer
 	m.mu.Unlock()
 
 	defer func() {
@@ -717,9 +702,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// Only delete if we're still the current peer (prevent race with RestartPeer)
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
-		}
-		if current, ok := m.proxyPeers[proxy.Name]; ok && current == peer {
-			delete(m.proxyPeers, proxy.Name)
 		}
 		m.mu.Unlock()
 	}()

@@ -4641,7 +4641,7 @@ func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Reque
 	case http.MethodGet:
 		s.mu.RLock()
 		suffixes := []string{}
-		if s.conf.Mesh != nil {
+		if s.conf.Mesh != nil && s.conf.Mesh.DomainSuffixes != nil {
 			suffixes = s.conf.Mesh.DomainSuffixes
 		}
 		s.mu.RUnlock()

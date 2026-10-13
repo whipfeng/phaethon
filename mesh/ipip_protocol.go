@@ -51,38 +51,43 @@ func (p *ipipProtocol) ParsePorts(b []byte) (src, dst uint16, err tcpip.Error) {
 // HandleUnknownDestinationPacket handles IPIP packets by decapsulating them
 // and injecting the inner packet into NIC 1 (TUN).
 func (p *ipipProtocol) HandleUnknownDestinationPacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) stack.UnknownDestinationPacketDisposition {
+	util.LogInfo("[IPIP-DECAP] received IPIP packet: len=%d", len(pkt.NetworkHeader().Slice()))
+
 	// Get the outer IP header
 	if pkt.NetworkProtocolNumber != header.IPv4ProtocolNumber {
-		util.LogWarn("[IPIP] non-IPv4 outer packet, dropping")
+		util.LogWarn("[IPIP-DECAP] non-IPv4 outer packet, dropping")
 		return stack.UnknownDestinationPacketHandled
 	}
 
 	// Extract outer IPv4 header
 	outerIP := header.IPv4(pkt.NetworkHeader().Slice())
 	if !outerIP.IsValid(len(outerIP)) {
-		util.LogWarn("[IPIP] invalid outer IP header")
+		util.LogWarn("[IPIP-DECAP] invalid outer IP header")
 		return stack.UnknownDestinationPacketHandled
 	}
+
+	util.LogInfo("[IPIP-DECAP] outer header: src=%s dst=%s proto=%d ttl=%d totalLen=%d",
+		outerIP.SourceAddress(), outerIP.DestinationAddress(), outerIP.Protocol(), outerIP.TTL(), outerIP.TotalLength())
 
 	// Get inner packet (everything after outer IP header)
 	outerHdrLen := int(outerIP.HeaderLength())
 	innerData := pkt.NetworkHeader().Slice()[outerHdrLen:]
 	if len(innerData) == 0 {
-		util.LogWarn("[IPIP] empty inner packet")
+		util.LogWarn("[IPIP-DECAP] empty inner packet")
 		return stack.UnknownDestinationPacketHandled
 	}
 
 	// Parse inner IP header to validate
 	innerIP := header.IPv4(innerData)
 	if !innerIP.IsValid(len(innerIP)) {
-		util.LogWarn("[IPIP] invalid inner IP header")
+		util.LogWarn("[IPIP-DECAP] invalid inner IP header")
 		return stack.UnknownDestinationPacketHandled
 	}
 
-	util.LogDebug("[IPIP] decapsulating: outer=%s -> %s, inner=%s -> %s proto=%d",
+	util.LogInfo("[IPIP-DECAP] decapsulating: outer=%s -> %s, inner=%s -> %s proto=%d len=%d",
 		outerIP.SourceAddress(), outerIP.DestinationAddress(),
 		innerIP.SourceAddress(), innerIP.DestinationAddress(),
-		innerIP.TransportProtocol())
+		innerIP.TransportProtocol(), len(innerData))
 
 	// Create a new packet buffer for the inner packet
 	innerPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
@@ -94,12 +99,14 @@ func (p *ipipProtocol) HandleUnknownDestinationPacket(id stack.TransportEndpoint
 	// Inject inner packet into NIC 1 (TUN) in promiscuous mode
 	// This allows transit traffic (dst=internet/mesh) to be accepted
 	if p.linkEP == nil {
-		util.LogWarn("[IPIP] linkEP is nil")
+		util.LogWarn("[IPIP-DECAP] linkEP is nil")
 		return stack.UnknownDestinationPacketHandled
 	}
 
 	// Inject the inner packet
 	p.linkEP.InjectInbound(header.IPv4ProtocolNumber, innerPkt)
+	util.LogInfo("[IPIP-DECAP] injected inner packet into NIC 1: inner=%s->%s proto=%d",
+		innerIP.SourceAddress(), innerIP.DestinationAddress(), innerIP.TransportProtocol())
 
 	return stack.UnknownDestinationPacketHandled
 }

@@ -964,6 +964,9 @@ func (e *Engine) readLoop() {
 			ipProto := readBuf[9]
 			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
 				util.LogDebug("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
+			} else if len(dstIP) >= 2 && ((dstIP[0] == 10 && dstIP[1] == 99) || (dstIP[0] == 172 && dstIP[1] == 30)) {
+				// Phaethon diagnostic: always log 10.99.0.0/24 and 172.30.0.0/24 packets
+				util.LogInfo("[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
 			} else if e.readPackets.Load() <= 200 {
 				util.LogDebug("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
 			}

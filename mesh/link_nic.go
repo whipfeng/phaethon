@@ -72,6 +72,16 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 		atomic.AddUint64(&l.injectDrops, 1)
 		return
 	}
+	
+	// Module-level logging for LinkNIC inbound
+	if len(data) >= 20 {
+		srcIP := net.IP(data[12:16]).To4()
+		dstIP := net.IP(data[16:20]).To4()
+		protoNum := data[9]
+		util.LogModuleInfo("linknic", "[LINKNIC-INBOUND] linkNIC=%d peer=%s len=%d proto=%d src=%s dst=%s",
+			l.nicID, l.peerNodeID, len(data), protoNum, srcIP, dstIP)
+	}
+	
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})
@@ -127,8 +137,8 @@ func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 // Packet buffers remain owned by the caller (same contract as channel.Endpoint,
 // which clones before queueing); we only read the data synchronously.
 func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
-	// Phaethon diagnostic: log WritePackets entry with pointer
-	util.LogInfo("[LINKNIC-WRITEPACKETS-ENTRY] linkNIC=%d peer=%s pktCount=%d selfPtr=%p", l.nicID, l.peerNodeID, pkts.Len(), l)
+	// Module-level logging for LinkNIC
+	util.LogModuleInfo("linknic", "[LINKNIC-WRITEPACKETS-ENTRY] linkNIC=%d peer=%s pktCount=%d selfPtr=%p", l.nicID, l.peerNodeID, pkts.Len(), l)
 
 	if l.sender == nil {
 		return 0, &tcpip.ErrInvalidEndpointState{}
@@ -136,10 +146,10 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 
 	count := 0
 	for i, pkt := range pkts.AsSlice() {
-		util.LogInfo("[LINKNIC-WRITEPACKETS-LOOP] linkNIC=%d peer=%s pktIndex=%d", l.nicID, l.peerNodeID, i)
+		util.LogModuleDebug("linknic", "[LINKNIC-WRITEPACKETS-LOOP] linkNIC=%d peer=%s pktIndex=%d", l.nicID, l.peerNodeID, i)
 		buf := pkt.ToBuffer()
 		pktData := buf.Flatten()
-		util.LogInfo("[LINKNIC-WRITEPACKETS-DATA] linkNIC=%d peer=%s dataLen=%d", l.nicID, l.peerNodeID, len(pktData))
+		util.LogModuleDebug("linknic", "[LINKNIC-WRITEPACKETS-DATA] linkNIC=%d peer=%s dataLen=%d", l.nicID, l.peerNodeID, len(pktData))
 
 		// Log basic packet info for all packets (including IPIP)
 		if len(pktData) >= 20 {
@@ -147,14 +157,14 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 			proto := pktData[9]
 			srcIP := net.IP(pktData[12:16]).To4()
 			dstIP := net.IP(pktData[16:20]).To4()
-			util.LogInfo("[LINKNIC-WRITEPACKETS] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
+			util.LogModuleInfo("linknic", "[LINKNIC-WRITEPACKETS] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
 				l.nicID, l.peerNodeID, len(pktData), version, proto, srcIP, dstIP)
 		}
 
 		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
 		if err := l.sender.Send(pktData); err != nil {
 			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d peer=%s err=%v", l.nicID, l.peerNodeID, err)
-			util.LogDebug("[LINKNIC] send via peer %s failed: %v", l.peerNodeID, err)
+			util.LogModuleWarn("linknic", "[LINKNIC] send via peer %s failed: %v", l.peerNodeID, err)
 			continue
 		}
 		TraceForwarding("linknic_egress", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
@@ -177,7 +187,7 @@ func (l *LinkNIC) WritePacket(r *stack.Route, pkt *stack.PacketBuffer) tcpip.Err
 		proto := pktData[9]
 		srcIP := net.IP(pktData[12:16]).To4()
 		dstIP := net.IP(pktData[16:20]).To4()
-		util.LogInfo("[LINKNIC-WRITE] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
+		util.LogModuleInfo("linknic", "[LINKNIC-WRITE] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
 			l.nicID, l.peerNodeID, len(pktData), version, proto, srcIP, dstIP)
 		
 		// Also try TraceForwarding for TCP/UDP packets

@@ -152,10 +152,10 @@ func (m *ControlManager) HandleControlConnection(conn net.Conn, address string) 
 	m.sessions[remoteAddr] = session
 	m.mu.Unlock()
 
-	util.LogInfo("[CONTROL] session started for %s (registry %s)", remoteAddr, address)
+	util.LogModuleInfo("control", "session started for %s (registry %s)", remoteAddr, address)
 	defer func() {
 		m.HandleClose(remoteAddr)
-		util.LogInfo("[CONTROL] session ended for %s", remoteAddr)
+		util.LogModuleInfo("control", "session ended for %s", remoteAddr)
 	}()
 
 	go m.sendHeartbeats(session)
@@ -185,7 +185,7 @@ func (m *ControlManager) runSession(session *ControlSession) {
 		frameType, payload, err := frame.ReadFrame(session.Conn)
 		session.touch()
 		if err != nil {
-			util.LogError("[CONTROL] read error for %s: %v", session.Address, err)
+			util.LogModuleError("control", "read error for %s: %v", session.Address, err)
 			return
 		}
 
@@ -204,7 +204,7 @@ func (m *ControlManager) runSession(session *ControlSession) {
 			} else if frameType == frame.FrameHeartbeat {
 				continue
 			} else {
-				util.LogInfo("[CONTROL] unexpected frame type 0x%02x for %s", frameType, session.Address)
+				util.LogModuleInfo("control", "unexpected frame type 0x%02x for %s", frameType, session.Address)
 			}
 		}
 	}
@@ -247,10 +247,10 @@ func (m *ControlManager) closeSessionByIdentity(reverseID string, seq int) bool 
 		return false
 	}
 	if oldSess.isActive(45 * time.Second) {
-		util.LogInfo("[CONTROL] reverse %s#%d already has an active session %s, rejecting duplicate", reverseID, seq, oldAddr)
+		util.LogModuleInfo("control", "reverse %s#%d already has an active session %s, rejecting duplicate", reverseID, seq, oldAddr)
 		return true
 	}
-	util.LogInfo("[CONTROL] reverse %s#%d re-registering, closing stale session %s", reverseID, seq, oldAddr)
+	util.LogModuleInfo("control", "reverse %s#%d re-registering, closing stale session %s", reverseID, seq, oldAddr)
 	m.HandleClose(oldAddr)
 	return false
 }
@@ -275,7 +275,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 	// so the admin panel can display meaningful entries and stale bindings can
 	// be properly tracked across reconnects.
 	if req.Name == "" && req.ReverseID == "" {
-		util.LogWarn("[CONTROL] rejected anonymous registration from %s: no name or reverse_id", controlAddr)
+		util.LogModuleWarn("control", "rejected anonymous registration from %s: no name or reverse_id", controlAddr)
 		return reverse.ControlReply{Status: "error", Error: "registration requires name or reverse_id for identification"}
 	}
 
@@ -426,7 +426,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 
 	m.insertRoutingRule(mapping.Name, proxy)
 
-	util.LogInfo("[CONTROL] registered %s: register=%s listener=%s port=%d address=%s",
+	util.LogModuleInfo("control", "registered %s: register=%s listener=%s port=%d address=%s",
 		controlAddr, proto, listenerProto, port, dynAddr)
 
 	return reverse.ControlReply{
@@ -505,7 +505,7 @@ func (m *ControlManager) allocatePort(portMin, portMax int, reverseID string, se
 		_, hasSession := m.sessions[oldest.ReverseID]
 		m.mu.RUnlock()
 		if !hasSession {
-			util.LogInfo("[CONTROL] reclaiming oldest disconnected binding %s#%d port=%d (disconnected %s ago)",
+			util.LogModuleInfo("control", "reclaiming oldest disconnected binding %s#%d port=%d (disconnected %s ago)",
 				oldest.ReverseID, oldest.Seq, oldest.Port, time.Since(oldest.DisconnectedAt).Round(time.Second))
 			m.bindingStore.Remove(oldest.ReverseID, oldest.Seq)
 		}
@@ -699,7 +699,7 @@ func (m *ControlManager) HandleClose(address string) {
 	}
 
 	if resource != nil {
-		util.LogInfo("[CONTROL] cleaning up resources for %s (port:%d, proto:%s)",
+		util.LogModuleInfo("control", "cleaning up resources for %s (port:%d, proto:%s)",
 			address, resource.Port, resource.Proto)
 
 		// Close listener
@@ -788,7 +788,7 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 	}
 
 	if res != nil {
-		util.LogInfo("[CONTROL] force cleanup resources for %s#%d (port:%d, proto:%s)",
+		util.LogModuleInfo("control", "force cleanup resources for %s#%d (port:%d, proto:%s)",
 			reverseID, seq, res.Port, res.Proto)
 		if res.Listener != nil {
 			res.Listener.Close()
@@ -853,7 +853,7 @@ func handleControlConnection(conn net.Conn, address string) {
 	if GlobalControlManager != nil {
 		GlobalControlManager.HandleControlConnection(conn, address)
 	} else {
-		util.LogError("[CONTROL] no ControlManager initialized, closing control conn from %s", conn.RemoteAddr())
+		util.LogModuleError("control", "no ControlManager initialized, closing control conn from %s", conn.RemoteAddr())
 		conn.Close()
 	}
 }

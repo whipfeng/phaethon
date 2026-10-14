@@ -199,7 +199,7 @@ func (c *ReverseFramedConn) Read(b []byte) (int, error) {
 				c.writeBuf(payload)
 			}
 		default:
-			util.LogWarn("[REVERSE-FRAMED] unknown frame type 0x%02x from=%s", frameType, c.conn.RemoteAddr())
+			util.LogModuleWarn("frame", "[REVERSE-FRAMED] unknown frame type 0x%02x from=%s", frameType, c.conn.RemoteAddr())
 		}
 	}
 }

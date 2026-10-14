@@ -182,7 +182,7 @@ func (r *Registry) Register(address string, mc *ManagedConn) {
 
 		select {
 		case waiter <- mc:
-			util.LogDebug("[REVERSE] hit: %s", address)
+			util.LogModuleDebug("reverse", "hit: %s", address)
 			return
 		default:
 			// waiter expired, try next
@@ -191,7 +191,7 @@ func (r *Registry) Register(address string, mc *ManagedConn) {
 
 	// No waiter, queue the bottom connection
 	r.bottoms[address] = append(r.bottoms[address], mc)
-	util.LogDebug("[REVERSE] register: %s, pool=%d", address, len(r.bottoms[address]))
+	util.LogModuleDebug("reverse", "register: %s, pool=%d", address, len(r.bottoms[address]))
 }
 
 // Unregister removes a bottom connection.
@@ -204,7 +204,7 @@ func (r *Registry) Unregister(address string, mc *ManagedConn) bool {
 	for i, b := range bottoms {
 		if b == mc {
 			r.bottoms[address] = append(bottoms[:i], bottoms[i+1:]...)
-			util.LogDebug("[REVERSE] unregister: %s", address)
+			util.LogModuleDebug("reverse", "unregister: %s", address)
 			return true
 		}
 	}
@@ -236,7 +236,7 @@ func (r *Registry) CloseByAddress(address string) {
 	for _, mc := range bottoms {
 		mc.Stop()
 	}
-	util.LogInfo("[REVERSE-REGISTRY] closed %d connections for %s", len(bottoms), address)
+	util.LogModuleInfo("reverse", "closed %d connections for %s", len(bottoms), address)
 }
 
 // Match waits for a bottom connection matching the given address.
@@ -257,7 +257,7 @@ func (r *Registry) Match(address string) (net.Conn, error) {
 
 		// Perform handshake: send PONG, wait for PENG
 		if err := reverseHandshake(mc); err != nil {
-			util.LogWarn("[REVERSE] handshake fail for %s, skip dead connection: %v", address, err)
+			util.LogModuleWarn("reverse", "handshake fail for %s, skip dead connection: %v", address, err)
 			mc.Conn.Close()
 			r.Unregister(address, mc) // remove dead connection from pool
 			r.mu.Lock()
@@ -398,7 +398,7 @@ func reverseHandshake(mc *ManagedConn) error {
 		case frame.FrameHeartbeat:
 			continue // discard stray heartbeat
 		default:
-			util.LogError("[REVERSE] unexpected frame during handshake for %s: 0x%02x", mc.Conn.RemoteAddr(), frameType)
+			util.LogModuleError("reverse", "unexpected frame during handshake for %s: 0x%02x", mc.Conn.RemoteAddr(), frameType)
 		}
 	}
 }
@@ -409,10 +409,10 @@ func reverseHandshake(mc *ManagedConn) error {
 // exits (e.g. due to timeout or connection close), it automatically
 // unregisters from the registry and closes the connection.
 func HandleReverseConnection(conn net.Conn, address string) {
-	util.LogInfo("[REVERSE] registering reverse connection: address=%s from=%s", address, conn.RemoteAddr())
+	util.LogModuleInfo("reverse", "registering reverse connection: address=%s from=%s", address, conn.RemoteAddr())
 	registry := GlobalRegistry()
 	if registry == nil {
-		util.LogError("[REVERSE] registry not initialized, closing connection for %s", address)
+		util.LogModuleError("reverse", "registry not initialized, closing connection for %s", address)
 		conn.Close()
 		return
 	}
@@ -421,12 +421,12 @@ func HandleReverseConnection(conn net.Conn, address string) {
 	mc.stopPing = make(chan struct{})
 
 	registry.Register(address, mc)
-	util.LogInfo("[REVERSE] registered successfully: address=%s from=%s", address, conn.RemoteAddr())
+	util.LogModuleInfo("reverse", "registered successfully: address=%s from=%s", address, conn.RemoteAddr())
 
 	// Immediately send PENG to confirm registration, so the client knows
 	// the connection is registered and can enter steady heartbeat wait.
 	if err := mc.WriteMsg(frame.FramePeng); err != nil {
-		util.LogError("[REVERSE] send PENG fail for %s: %v", address, err)
+		util.LogModuleError("reverse", "send PENG fail for %s: %v", address, err)
 		registry.Unregister(address, mc)
 		mc.Stop()
 		mc.Conn.Close()
@@ -475,7 +475,7 @@ func HandleReverseConnection(conn net.Conn, address string) {
 				lastRead := mc.lastReadTime
 				mc.lastReadMu.Unlock()
 				if !lastRead.IsZero() && time.Since(lastRead) > 60*time.Second {
-					util.LogWarn("[REVERSE] reader idle timeout for %s", address)
+					util.LogModuleWarn("reverse", "reader idle timeout for %s", address)
 					mc.Conn.Close()
 					return
 				}

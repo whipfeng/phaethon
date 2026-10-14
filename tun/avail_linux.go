@@ -12,7 +12,7 @@ import (
 func Available() bool {
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR, 0)
 	if err != nil {
-		util.LogWarn("tun: /dev/net/tun not available: %v", err)
+		util.LogModuleWarn("tun", "/dev/net/tun not available: %v", err)
 		return false
 	}
 	_ = unix.Close(fd)

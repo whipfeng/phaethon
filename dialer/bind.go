@@ -64,7 +64,7 @@ func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {
 // the entry for local loopback cases.
 func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
 	dialStart := time.Now()
-	util.LogDebug("[MESH-DIAL] starting: dst=%s:%d client=%s inbound=%s", dstAddr, dstPort, clientAddr, inbound)
+	util.LogModuleDebug("bind", "starting: dst=%s:%d client=%s inbound=%s", dstAddr, dstPort, clientAddr, inbound)
 
 	if GlobalNetstackDialWithModeBFunc == nil {
 		return nil, fmt.Errorf("mesh not initialized")
@@ -80,29 +80,29 @@ func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, ma
 		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
 		dnsDuration := time.Since(dnsStart)
 		if err != nil {
-			util.LogWarn("[MESH-DIAL] DNS resolve failed for %s after %v: %v", dstAddr, dnsDuration, err)
+			util.LogModuleWarn("bind", "DNS resolve failed for %s after %v: %v", dstAddr, dnsDuration, err)
 			return nil, fmt.Errorf("mesh dial: resolve %s: %w", dstAddr, err)
 		}
-		util.LogInfo("[MESH-DIAL] DNS resolved %s -> %s (FakeIP) in %v", dstAddr, fakeIP, dnsDuration)
+		util.LogModuleInfo("bind", "DNS resolved %s -> %s (FakeIP) in %v", dstAddr, fakeIP, dnsDuration)
 		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
 	} else {
 		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	}
 
-	util.LogInfo("[MESH-DIAL] netstack dialing %s (original dst=%s:%d, domain=%s)", targetAddr, dstAddr, dstPort, dstAddr)
+	util.LogModuleInfo("bind", "netstack dialing %s (original dst=%s:%d, domain=%s)", targetAddr, dstAddr, dstPort, dstAddr)
 	netstackDialStart := time.Now()
 	conn, err := GlobalNetstackDialWithModeBFunc("tcp", targetAddr, clientAddr, inbound, mapping)
 	netstackDialDuration := time.Since(netstackDialStart)
 	if err != nil {
-		util.LogWarn("[MESH-DIAL] netstack dial failed for %s after %v: %v", targetAddr, netstackDialDuration, err)
+		util.LogModuleWarn("bind", "netstack dial failed for %s after %v: %v", targetAddr, netstackDialDuration, err)
 		return nil, err
 	}
-	util.LogDebug("[MESH-DIAL] netstack dial completed in %v, local=%s remote=%s",
+	util.LogModuleDebug("bind", "netstack dial completed in %v, local=%s remote=%s",
 		netstackDialDuration, conn.LocalAddr(), conn.RemoteAddr())
 
 	util.SetTCPNoDelay(conn)
 	totalDuration := time.Since(dialStart)
-	util.LogDebug("[MESH-DIAL] completed: dst=%s total=%v", targetAddr, totalDuration)
+	util.LogModuleDebug("bind", "completed: dst=%s total=%v", targetAddr, totalDuration)
 	return conn, nil
 }
 

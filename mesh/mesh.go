@@ -188,12 +188,12 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
 				m.stickyMu.Unlock()
-				util.LogDebug("[MESH] sticky IP route: %s → %s (cached)", targetIP, cachedNodeID)
+				util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (cached)", targetIP, cachedNodeID)
 				return cachedNodeID
 			}
 		}
 		// Cached node no longer available, will re-select below
-		util.LogDebug("[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
+		util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
 	}
 	m.stickyMu.Unlock()
 
@@ -213,7 +213,7 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 	m.stickyCache[targetKey] = selectedNodeID
 	m.stickyMu.Unlock()
 
-	util.LogDebug("[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
+	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
 	return selectedNodeID
 }
 
@@ -334,7 +334,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	m.ipipTunnel = NewIPIPTunnel()
 	if eip := AllocateEIP(subnet); eip != nil {
 		m.ipipTunnel.SetLocalEIP(eip)
-		util.LogInfo("[MESH] Allocated EIP %s from subnet %s", eip, subnet)
+		util.LogModuleInfo("mesh", "[MESH] Allocated EIP %s from subnet %s", eip, subnet)
 	}
 
 	// Create link quality tracker
@@ -402,7 +402,7 @@ func (m *MeshManager) SetStaticRoutes(staticRoutes []config.MeshStaticRoute, sta
 	defer m.mu.Unlock()
 	m.staticRoutes = staticRoutes
 	m.staticDomainSuffixes = staticDomainSuffixes
-	util.LogInfo("[MESH] Updated static routes: %d IP routes, %d domain suffixes", len(staticRoutes), len(staticDomainSuffixes))
+	util.LogModuleInfo("mesh", "[MESH] Updated static routes: %d IP routes, %d domain suffixes", len(staticRoutes), len(staticDomainSuffixes))
 }
 
 // CheckStaticRoute checks if a destination IP matches any static IPIP route.
@@ -415,7 +415,7 @@ func (m *MeshManager) CheckStaticRoute(dstIP net.IP) ([]string, bool) {
 	}
 	// Special logging for 8.8.8.0/24 range (our test destination)
 	if len(dstIP) >= 4 && dstIP[0] == 8 && dstIP[1] == 8 && dstIP[2] == 8 {
-		util.LogDebug("[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
+		util.LogModuleDebug("mesh", "[IPIP] CheckStaticRoute for 8.8.8.x: dst=%s, routes=%d", dstIP, len(m.staticRoutes))
 	}
 	return m.ipipTunnel.MatchStaticRoute(dstIP, m.staticRoutes)
 }
@@ -485,13 +485,13 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 
 	newSubnetStr, err := AllocateSubnet(m.network, m.subnetPrefixLen, usedSubnets)
 	if err != nil {
-		util.LogError("[MESH] subnet conflict: failed to allocate new subnet: %v", err)
+		util.LogModuleError("mesh", "[MESH] subnet conflict: failed to allocate new subnet: %v", err)
 		return false
 	}
 
 	_, newSubnet, err := net.ParseCIDR(newSubnetStr)
 	if err != nil {
-		util.LogError("[MESH] subnet conflict: invalid new subnet %s: %v", newSubnetStr, err)
+		util.LogModuleError("mesh", "[MESH] subnet conflict: invalid new subnet %s: %v", newSubnetStr, err)
 		return false
 	}
 
@@ -501,7 +501,7 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 	m.vip = DeriveVIPFromSubnet(newSubnet)
 	m.mu.Unlock()
 
-	util.LogInfo("[MESH] subnet conflict: re-selected subnet to %s (vip=%s)", newSubnetStr, m.vip)
+	util.LogModuleInfo("mesh", "[MESH] subnet conflict: re-selected subnet to %s (vip=%s)", newSubnetStr, m.vip)
 
 	// Update P2P layer with new VIP
 	if m.p2p != nil {
@@ -515,7 +515,7 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 			Subnet: newSubnetStr,
 		}
 		if err := SaveState(m.dataDir, state); err != nil {
-			util.LogError("[MESH] failed to save state after subnet re-selection: %v", err)
+			util.LogModuleError("mesh", "[MESH] failed to save state after subnet re-selection: %v", err)
 		}
 	}
 
@@ -693,7 +693,7 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventConfigUpdate}:
 	default:
-		util.LogWarn("[MESH] eventCh full, dropping config update event")
+		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping config update event")
 	}
 }
 
@@ -702,7 +702,7 @@ func (m *MeshManager) TriggerGossip() {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventTick}:
 	default:
-		util.LogWarn("[MESH] eventCh full, dropping trigger gossip event")
+		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping trigger gossip event")
 	}
 }
 
@@ -846,7 +846,7 @@ func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	go m.qualityLoop()
-	util.LogInfo("[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
+	util.LogModuleInfo("mesh", "[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
 }
 
 func (m *MeshManager) Stop() {
@@ -867,18 +867,18 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		return nil, false
 	}
 
-	util.LogInfo("[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
+	util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
 	for i, e := range entries {
-		util.LogInfo("[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
+		util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
 	}
 
 	// Select target node (static priority + hash stability)
 	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
-	util.LogInfo("[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
+	util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
 	if selectedNodeID == "" {
 		// All entries were for self → this is a local domain
 		// Allocate from local Fake-IP pool
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): local domain, use local pool", domain)
+		util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): local domain, use local pool", domain)
 		return nil, false
 	}
 
@@ -886,17 +886,17 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 	nodeInfo := rt.nodeMap[selectedNodeID]
 	if nodeInfo == nil || nodeInfo.subnet == nil {
 		// This shouldn't happen if domain trie and nodeMap are in sync
-		util.LogWarn("[MESH] ResolveDomainSubnet(%s): node %s not in nodeMap, inconsistent state", domain, selectedNodeID)
+		util.LogModuleWarn("mesh", "[MESH] ResolveDomainSubnet(%s): node %s not in nodeMap, inconsistent state", domain, selectedNodeID)
 		return nil, false
 	}
 
 	// Local node (sender == nil) → use local pool
 	if nodeInfo.sender == nil {
-		util.LogDebug("[MESH] ResolveDomainSubnet(%s): node %s is local, use local pool", domain, selectedNodeID)
+		util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): node %s is local, use local pool", domain, selectedNodeID)
 		return nil, false
 	}
 
-	util.LogDebug("[MESH] ResolveDomainSubnet(%s): forward to node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
+	util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): forward to node %s subnet %s", domain, selectedNodeID, nodeInfo.subnet)
 	return nodeInfo.subnet, false
 }
 
@@ -935,12 +935,12 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
 				m.stickyMu.Unlock()
-				util.LogDebug("[MESH] sticky domain route: %s → %s (cached)", domain, cachedNodeID)
+				util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (cached)", domain, cachedNodeID)
 				return cachedNodeID
 			}
 		}
 		// Cached node no longer available, will re-select below
-		util.LogDebug("[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
+		util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
 	}
 	m.stickyMu.Unlock()
 
@@ -960,7 +960,7 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 	m.stickyCache[domain] = selectedNodeID
 	m.stickyMu.Unlock()
 
-	util.LogDebug("[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
+	util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
 	return selectedNodeID
 }
 
@@ -969,7 +969,7 @@ func (m *MeshManager) RegisterPeer(sender PeerSender) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}:
 	default:
-		util.LogWarn("[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
+		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
 	}
 }
 
@@ -978,7 +978,7 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}:
 	default:
-		util.LogWarn("[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
+		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
 	}
 }
 
@@ -1035,17 +1035,17 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		if sendErr == nil {
 			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s linkID=%s", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID())
 			if i > 0 {
-				util.LogInfo("[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
+				util.LogModuleInfo("mesh", "[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
 					targetNodeID, peer.GetNodeID(), i+1)
 			}
 			// Phaethon diagnostic: confirm packet handed off to P2P layer
 			if len(packet) >= 20 {
 				srcIP := net.IP(packet[12:16])
 				dstIP := net.IP(packet[16:20])
-				util.LogInfo("[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
+				util.LogModuleInfo("mesh", "[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
 					targetNodeID, peer.GetNodeID(), peer.GetProxyName(), srcIP, dstIP, len(packet), peerWithHop.Hop)
 			}
-			util.LogDebug("[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
+			util.LogModuleDebug("mesh", "[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
 				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 			return nil
 		}
@@ -1054,7 +1054,7 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 
 		// Handle peer stopped
 		if strings.Contains(sendErr.Error(), "peer stopped") {
-			util.LogWarn("[MESH] send to node %s failed: peer %s stopped, removing its selected link",
+			util.LogModuleWarn("mesh", "[MESH] send to node %s failed: peer %s stopped, removing its selected link",
 				targetNodeID, peer.GetNodeID())
 			if m.p2p != nil {
 				m.p2p.StopPeerByProxyName(peer.GetProxyName())
@@ -1063,7 +1063,7 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		}
 
 		// Queue full or other error, try next candidate
-		util.LogDebug("[MESH] send to node %s via peer %s failed: %v, trying next candidate",
+		util.LogModuleDebug("mesh", "[MESH] send to node %s via peer %s failed: %v, trying next candidate",
 			targetNodeID, peer.GetNodeID(), sendErr)
 	}
 
@@ -1106,9 +1106,9 @@ func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
 //     decides local delivery (GIP/VIP/fakeIP), forwarding (NAT return, relay),
 //     TTL decrement and ICMP generation — no manual 卡口 at the frame layer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame []byte) {
-	util.LogDebug("[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
+	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
-		util.LogWarn("[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
+		util.LogModuleWarn("mesh", "[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
 		return
 	}
 
@@ -1118,25 +1118,25 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	dstIP := extractDstIP(frame)
 	srcIP := net.IP(frame[12:16])
 	if dstIP == nil {
-		util.LogWarn("[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
+		util.LogModuleWarn("mesh", "[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
 	}
 	if len(frame) >= 20 && frame[9] == 6 {
 		dstPort := uint16(frame[22])<<8 | uint16(frame[23])
-		util.LogDebug("[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
+		util.LogModuleDebug("mesh", "[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
 	}
 	// Log IPIP packets (proto=4) at INFO level for debugging
 	if len(frame) >= 20 && frame[9] == 4 {
-		util.LogInfo("[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
+		util.LogModuleInfo("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, srcIP, dstIP, frame[9], len(frame))
 	}
-	util.LogDebug("[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
+	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
 	// Inject into the Link NIC provided by the P2P layer. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.
 	if linkNIC == nil {
-		util.LogWarn("[MESH] no linkNIC, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
+		util.LogModuleWarn("mesh", "[MESH] no linkNIC, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
 		return
 	}
 	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
@@ -1148,7 +1148,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	var info GossipInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		util.LogDebug("[MESH] bad gossip from %s: %v", sender.GetNodeID(), err)
+		util.LogModuleDebug("mesh", "[MESH] bad gossip from %s: %v", sender.GetNodeID(), err)
 		return
 	}
 	if sender.GetNodeID() == m.nodeID {
@@ -1157,7 +1157,7 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	select {
 	case m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}:
 	default:
-		util.LogWarn("[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
+		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
 	}
 }
 
@@ -1535,7 +1535,7 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 		if peer.NodeID() == nodeID && peer.Subnet != nil {
 			vip := DeriveVIPFromSubnet(peer.Subnet)
 			if vip != nil {
-				util.LogDebug("[MESH] DNS resolve: %s -> %s", domain, vip)
+				util.LogModuleDebug("mesh", "[MESH] DNS resolve: %s -> %s", domain, vip)
 			}
 			return vip
 		}
@@ -1546,7 +1546,7 @@ func (m *MeshManager) ResolveMeshDomain(domain string) net.IP {
 			if cs.NodeID == nodeID && cs.Subnet != nil {
 				vip := DeriveVIPFromSubnet(cs.Subnet)
 				if vip != nil {
-					util.LogDebug("[MESH] DNS resolve: %s -> %s (via %s)", domain, vip, peer.NodeID())
+					util.LogModuleDebug("mesh", "[MESH] DNS resolve: %s -> %s (via %s)", domain, vip, peer.NodeID())
 				}
 				return vip
 			}
@@ -1835,7 +1835,7 @@ func (m *MeshManager) recomputeRoutes() {
 			if path.LinkNIC != nil {
 				linkNICID = path.LinkNIC.nicID
 			}
-			util.LogInfo("[MESH-DIJKSTRA] target=%s nextHop=%s cost=%.0f linkNIC=%d", nodeID, path.NextHop, path.Cost, linkNICID)
+			util.LogModuleInfo("mesh", "[MESH-DIJKSTRA] target=%s nextHop=%s cost=%.0f linkNIC=%d", nodeID, path.NextHop, path.Cost, linkNICID)
 		}
 	}
 
@@ -1846,7 +1846,7 @@ func (m *MeshManager) recomputeRoutes() {
 		nodeMap:    nodeMap,
 		bestPaths:  bestPaths,
 	})
-	util.LogInfo("[MESH] routes installed: %d routes", len(routes))
+	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
 
 	// Notify netstack of route change (for tunnel NIC updates)
 	if m.onRouteChange != nil {
@@ -1858,10 +1858,10 @@ func (m *MeshManager) recomputeRoutes() {
 		for _, e := range r.Entries {
 			nodeIDs = append(nodeIDs, e.NodeID)
 		}
-		util.LogDebug("[MESH]   %s -> %s", r.Prefix, strings.Join(nodeIDs, ", "))
+		util.LogModuleDebug("mesh", "[MESH]   %s -> %s", r.Prefix, strings.Join(nodeIDs, ", "))
 	}
 	// Log domain suffixes for debugging
-	util.LogInfo("[MESH] domain trie: own suffixes=%v", domainSuffixes)
+	util.LogModuleInfo("mesh", "[MESH] domain trie: own suffixes=%v", domainSuffixes)
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
@@ -1871,7 +1871,7 @@ func (m *MeshManager) recomputeRoutes() {
 			suffixes = append(suffixes, entry.Suffix)
 		}
 		if len(suffixes) > 0 {
-			util.LogInfo("[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
+			util.LogModuleInfo("mesh", "[MESH] domain trie: peer %s suffixes=%v", peer.Sender.GetNodeID(), suffixes)
 		}
 	}
 	// Log auto-generated nodeID.phn entries
@@ -1883,7 +1883,7 @@ func (m *MeshManager) recomputeRoutes() {
 			autoDomains = append(autoDomains, fmt.Sprintf("%s.phn(→%s,hop=%d)", nid, entry.sender.GetNodeID(), entry.hop))
 		}
 	}
-	util.LogInfo("[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
+	util.LogModuleInfo("mesh", "[MESH] domain trie: auto nodeID.phn entries=%v", autoDomains)
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
@@ -2021,7 +2021,7 @@ func (m *MeshManager) gossipLoop() {
 				nodeID := ev.sender.GetNodeID()
 				// Reset quality tracker for this peer to avoid stale state
 				m.qualityTracker.RemoveNode(nodeID)
-				util.LogInfo("[MESH] peer registered: %s", nodeID)
+				util.LogModuleInfo("mesh", "[MESH] peer registered: %s", nodeID)
 				// Immediately broadcast gossip so routing is established without waiting for 15s tick
 				m.broadcastGossip()
 				// Notify for package sync
@@ -2033,14 +2033,14 @@ func (m *MeshManager) gossipLoop() {
 				m.topology.UnregisterPeer(ev.sender)
 				m.recomputeRoutes()
 				util.DefaultVersionNotifier.BumpVersion("mesh")
-				util.LogInfo("[MESH] peer unregistered: %s", nodeID)
+				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
 			case meshEventGossip:
 				var info GossipInfo
 				if err := json.Unmarshal(ev.data, &info); err != nil {
-					util.LogDebug("[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
+					util.LogModuleDebug("mesh", "[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
 					break
 				}
-				util.LogDebug("[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
+				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.recomputeRoutes()
 					util.DefaultVersionNotifier.BumpVersion("mesh")
@@ -2059,7 +2059,7 @@ func (m *MeshManager) gossipLoop() {
 				m.broadcastGossip()
 				util.DefaultVersionNotifier.BumpVersion("mesh")
 				m.mu.RLock()
-				util.LogInfo("[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
+				util.LogModuleInfo("mesh", "[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
 				m.mu.RUnlock()
 			}
 		}
@@ -2084,15 +2084,15 @@ type meshEvent struct {
 
 func (m *MeshManager) broadcastGossip() {
 	if m.p2p == nil {
-		util.LogDebug("[MESH] broadcastGossip: p2p is nil")
+		util.LogModuleDebug("mesh", "[MESH] broadcastGossip: p2p is nil")
 		return
 	}
 	allPeers := m.topology.GetAllPeers()
 	if len(allPeers) == 0 {
-		util.LogDebug("[MESH] broadcastGossip: no peers")
+		util.LogModuleDebug("mesh", "[MESH] broadcastGossip: no peers")
 		return
 	}
-	util.LogDebug("[MESH] broadcastGossip: sending to %d peers", len(allPeers))
+	util.LogModuleDebug("mesh", "[MESH] broadcastGossip: sending to %d peers", len(allPeers))
 
 	m.mu.RLock()
 	advertise := make([]string, len(m.advertise))
@@ -2337,7 +2337,7 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
-		util.LogInfo("[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
+		util.LogModuleInfo("mesh", "[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
 		peer.Sender.SendGossip(data)
 	}
 }
@@ -2345,7 +2345,7 @@ func (m *MeshManager) broadcastGossip() {
 // qualityLoop periodically pulls ACK-based link quality stats from P2P layer
 // and checks for peer connectivity issues.
 func (m *MeshManager) qualityLoop() {
-	util.LogInfo("[MESH] quality loop started (interval=10s)")
+	util.LogModuleInfo("mesh", "[MESH] quality loop started (interval=10s)")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -2386,7 +2386,7 @@ func (m *MeshManager) checkPeerConnectivity() {
 			_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByLinkID(linkID)
 			if sampleCount > 0 {
 				// The control plane stopped progressing for this link.
-				util.LogWarn("[MESH] peer %s (link %s) ACK updates stalled for 60s, disconnecting", nodeID, linkID)
+				util.LogModuleWarn("mesh", "[MESH] peer %s (link %s) ACK updates stalled for 60s, disconnecting", nodeID, linkID)
 				m.p2p.StopPeerByLinkID(linkID)
 				quality.Reset()
 			}
@@ -2402,7 +2402,7 @@ func (m *MeshManager) updateACKStats() {
 	}
 
 	allPeers := m.topology.GetAllPeers()
-	util.LogInfo("[MESH-ACK] updateACKStats: %d peers", len(allPeers))
+	util.LogModuleInfo("mesh", "[MESH-ACK] updateACKStats: %d peers", len(allPeers))
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue // not a direct peer
@@ -2411,7 +2411,7 @@ func (m *MeshManager) updateACKStats() {
 		nodeID := peer.NodeID()
 		proxyName := peer.Sender.GetProxyName()
 		srtt, _, jitter, lossRate, sampleCount := m.p2p.GetLinkQualityStatsByProxy(proxyName)
-		util.LogInfo("[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, proxyName, srtt, jitter, lossRate, sampleCount)
+		util.LogModuleInfo("mesh", "[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, proxyName, srtt, jitter, lossRate, sampleCount)
 		if srtt > 0 || lossRate > 0 {
 			// Use localSeq as key
 			localSeq := peer.Sender.GetLocalSeq()
@@ -2443,23 +2443,23 @@ func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT tim
 // Returns the created LinkNIC pointer that the peer will hold directly.
 func (m *MeshManager) CreateLinkNIC(sender PeerSender, nodeID, subnet string) *LinkNIC {
 	if m.netstack == nil {
-		util.LogError("[MESH] cannot create LinkNIC: netstack not initialized")
+		util.LogModuleError("mesh", "[MESH] cannot create LinkNIC: netstack not initialized")
 		return nil
 	}
 
 	_, peerSubnet, err := net.ParseCIDR(subnet)
 	if err != nil {
-		util.LogError("[MESH] failed to parse peer %s subnet %s: %v", nodeID, subnet, err)
+		util.LogModuleError("mesh", "[MESH] failed to parse peer %s subnet %s: %v", nodeID, subnet, err)
 		return nil
 	}
 
 	linkNIC, err := m.netstack.CreateLinkNIC(sender, nodeID, peerSubnet)
 	if err != nil {
-		util.LogError("[MESH] failed to create LinkNIC for peer %s: %v", nodeID, err)
+		util.LogModuleError("mesh", "[MESH] failed to create LinkNIC for peer %s: %v", nodeID, err)
 		return nil
 	}
 
-	util.LogInfo("[MESH] created LinkNIC for peer %s (subnet %s)", nodeID, subnet)
+	util.LogModuleInfo("mesh", "[MESH] created LinkNIC for peer %s (subnet %s)", nodeID, subnet)
 	return linkNIC
 }
 
@@ -2471,9 +2471,9 @@ func (m *MeshManager) DeleteLinkNIC(linkNIC *LinkNIC) {
 	}
 
 	if err := m.netstack.DeleteLinkNIC(linkNIC); err != nil {
-		util.LogError("[MESH] failed to delete LinkNIC %d: %v", linkNIC.nicID, err)
+		util.LogModuleError("mesh", "[MESH] failed to delete LinkNIC %d: %v", linkNIC.nicID, err)
 	} else {
-		util.LogInfo("[MESH] deleted LinkNIC %d (peer %s)", linkNIC.nicID, linkNIC.peerNodeID)
+		util.LogModuleInfo("mesh", "[MESH] deleted LinkNIC %d (peer %s)", linkNIC.nicID, linkNIC.peerNodeID)
 	}
 }
 
@@ -2862,7 +2862,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		
 		// Diagnostic: log peer and its claimed subnets
 		if ForwardingTraceEnabled() {
-			util.LogInfo("[MESH-TOPOLOGY] processing peer=%s claimedSubnets=%d", peerID, len(peer.ClaimedSubnets))
+			util.LogModuleInfo("mesh", "[MESH-TOPOLOGY] processing peer=%s claimedSubnets=%d", peerID, len(peer.ClaimedSubnets))
 		}
 		
 		for _, claim := range peer.ClaimedSubnets {
@@ -2870,7 +2870,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 			
 			// Diagnostic: log claim details
 			if ForwardingTraceEnabled() {
-				util.LogInfo("[MESH-TOPOLOGY] peer=%s claim.NodeID=%s claim.Hop=%d neighbors=%d", 
+				util.LogModuleInfo("mesh", "[MESH-TOPOLOGY] peer=%s claim.NodeID=%s claim.Hop=%d neighbors=%d", 
 					peerID, claim.NodeID, claim.Hop, len(claim.Neighbors))
 			}
 			
@@ -2884,7 +2884,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 				
 				// Diagnostic: log neighbor being added
 				if ForwardingTraceEnabled() {
-					util.LogInfo("[MESH-TOPOLOGY] adding edge from=%s to=%s links=%d", fromNode, toNode, len(neighbor.Links))
+					util.LogModuleInfo("mesh", "[MESH-TOPOLOGY] adding edge from=%s to=%s links=%d", fromNode, toNode, len(neighbor.Links))
 				}
 
 				// Process all links to this neighbor
@@ -2923,7 +2923,7 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		for _, neighbors := range graph.Edges {
 			edgeCount += len(neighbors)
 		}
-		util.LogInfo("[MESH-TOPOLOGY] final graph: nodes=%d edges=%d nodeList=%v", len(graph.Nodes), edgeCount, nodeList)
+		util.LogModuleInfo("mesh", "[MESH-TOPOLOGY] final graph: nodes=%d edges=%d nodeList=%v", len(graph.Nodes), edgeCount, nodeList)
 	}
 
 	return graph

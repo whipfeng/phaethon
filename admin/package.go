@@ -221,15 +221,15 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	util.LogInfo("[ADMIN] package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
+	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Distribute to mesh peers
 	if pkgData, err := os.ReadFile(pkgPath); err == nil {
-		util.LogInfo("[ADMIN] read pkg for distribution: %d bytes", len(pkgData))
+		util.LogModuleInfo("admin", "read pkg for distribution: %d bytes", len(pkgData))
 		go s.DistributePackage(pkgData)
 	} else {
-		util.LogInfo("[ADMIN] failed to read pkg for distribution: %v", err)
+		util.LogModuleInfo("admin", "failed to read pkg for distribution: %v", err)
 	}
 
 	// Check if there's a newer version, exit if so
@@ -352,7 +352,7 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	util.LogInfo("[ADMIN] package published: %s (version=%s platform=%s arch=%s)", id, info.Meta.Version, platform, arch)
+	util.LogModuleInfo("admin", "package published: %s (version=%s platform=%s arch=%s)", id, info.Meta.Version, platform, arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Read the package file and distribute to mesh peers
@@ -385,7 +385,7 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 
 	os.Remove(filepath.Join(packagesDir, id+".pkg"))
 	os.Remove(filepath.Join(packagesDir, id+".json"))
-	util.LogInfo("[ADMIN] package deleted: %s", id)
+	util.LogModuleInfo("admin", "package deleted: %s", id)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }
@@ -473,7 +473,7 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	// Verify signature
 	contents, err := signing.VerifyPkgBytes(pkgData, signing.PublicKey)
 	if err != nil {
-		util.LogDebug("[ADMIN] receive package verify failed: %v", err)
+		util.LogModuleDebug("admin", "receive package verify failed: %v", err)
 		httpError(w, "verify failed", http.StatusBadRequest)
 		return
 	}
@@ -483,7 +483,7 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	packages := s.listPackages()
 	for _, p := range packages {
 		if p.Meta.Platform == contents.Meta.Platform && p.Meta.Arch == contents.Meta.Arch && p.Meta.Version == contents.Meta.Version {
-			util.LogDebug("[ADMIN] receive package: already have %s/%s@%s", p.Meta.Platform, p.Meta.Arch, p.Meta.Version)
+			util.LogModuleDebug("admin", "receive package: already have %s/%s@%s", p.Meta.Platform, p.Meta.Arch, p.Meta.Version)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -492,12 +492,12 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	// Save the package
 	id, err := s.saveExternalPackage(pkgData, contents)
 	if err != nil {
-		util.LogDebug("[ADMIN] receive package save failed: %v", err)
+		util.LogModuleDebug("admin", "receive package save failed: %v", err)
 		httpError(w, "save failed", http.StatusInternalServerError)
 		return
 	}
 
-	util.LogInfo("[ADMIN] received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
+	util.LogModuleInfo("admin", "received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Check if there's a newer version, exit if so
@@ -550,21 +550,21 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 // DistributePackage distributes a package to all connected mesh peers.
 func (s *AdminServer) DistributePackage(pkgData []byte) {
 	if s.peerLister == nil {
-		util.LogInfo("[ADMIN] distribute: peerLister is nil")
+		util.LogModuleInfo("admin", "distribute: peerLister is nil")
 		return
 	}
 	if s.meshHTTPClient == nil {
-		util.LogInfo("[ADMIN] distribute: meshHTTPClient is nil")
+		util.LogModuleInfo("admin", "distribute: meshHTTPClient is nil")
 		return
 	}
 
 	peers := s.peerLister()
 	if len(peers) == 0 {
-		util.LogInfo("[ADMIN] distribute: no peers")
+		util.LogModuleInfo("admin", "distribute: no peers")
 		return
 	}
 
-	util.LogInfo("[ADMIN] distributing package to %d peers", len(peers))
+	util.LogModuleInfo("admin", "distributing package to %d peers", len(peers))
 
 	for _, peer := range peers {
 		go func(nodeID string) {
@@ -572,16 +572,16 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 			url := fmt.Sprintf("https://%s/api/packages/receive", domain)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
 			if err != nil {
-				util.LogInfo("[ADMIN] distribute package to %s (%s) failed: %v", nodeID, domain, err)
+				util.LogModuleInfo("admin", "distribute package to %s (%s) failed: %v", nodeID, domain, err)
 				return
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
-				util.LogInfo("[ADMIN] distribute package to %s (%s) rejected: status=%d body=%s", nodeID, domain, resp.StatusCode, string(body))
+				util.LogModuleInfo("admin", "distribute package to %s (%s) rejected: status=%d body=%s", nodeID, domain, resp.StatusCode, string(body))
 				return
 			}
-			util.LogInfo("[ADMIN] distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)
+			util.LogModuleInfo("admin", "distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)
 		}(peer.NodeID)
 	}
 }
@@ -627,13 +627,13 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 	url := fmt.Sprintf("https://%s/api/packages", domain)
 	resp, err := s.meshHTTPClient.Get(url)
 	if err != nil {
-		util.LogDebug("[ADMIN] sync from %s failed: %v", nodeID, err)
+		util.LogModuleDebug("admin", "sync from %s failed: %v", nodeID, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		util.LogDebug("[ADMIN] sync from %s failed: status %d", nodeID, resp.StatusCode)
+		util.LogModuleDebug("admin", "sync from %s failed: status %d", nodeID, resp.StatusCode)
 		return
 	}
 
@@ -641,7 +641,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		Packages []packageInfo `json:"packages"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		util.LogDebug("[ADMIN] sync from %s decode failed: %v", nodeID, err)
+		util.LogModuleDebug("admin", "sync from %s decode failed: %v", nodeID, err)
 		return
 	}
 
@@ -700,7 +700,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		downloadURL := fmt.Sprintf("https://%s/api/packages/%s/download", domain, pkg.ID)
 		dlResp, err := s.meshHTTPClient.Get(downloadURL)
 		if err != nil {
-			util.LogDebug("[ADMIN] download package %s from %s failed: %v", pkg.ID, nodeID, err)
+			util.LogModuleDebug("admin", "download package %s from %s failed: %v", pkg.ID, nodeID, err)
 			downloadSuccess = false
 			continue
 		}
@@ -708,7 +708,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		pkgData, err := io.ReadAll(dlResp.Body)
 		dlResp.Body.Close()
 		if err != nil {
-			util.LogDebug("[ADMIN] download package %s from %s read failed: %v", pkg.ID, nodeID, err)
+			util.LogModuleDebug("admin", "download package %s from %s read failed: %v", pkg.ID, nodeID, err)
 			downloadSuccess = false
 			continue
 		}
@@ -716,20 +716,20 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		// Verify and save
 		contents, err := signing.VerifyPkgBytes(pkgData, signing.PublicKey)
 		if err != nil {
-			util.LogDebug("[ADMIN] download package %s from %s verify failed: %v", pkg.ID, nodeID, err)
+			util.LogModuleDebug("admin", "download package %s from %s verify failed: %v", pkg.ID, nodeID, err)
 			downloadSuccess = false
 			continue
 		}
 
 		id, err := s.saveExternalPackage(pkgData, contents)
 		if err != nil {
-			util.LogDebug("[ADMIN] download package %s from %s save failed: %v", pkg.ID, nodeID, err)
+			util.LogModuleDebug("admin", "download package %s from %s save failed: %v", pkg.ID, nodeID, err)
 			downloadSuccess = false
 			continue
 		}
 
 		localKeys[key] = true
-		util.LogInfo("[ADMIN] synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
+		util.LogModuleInfo("admin", "synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
 		util.DefaultVersionNotifier.BumpVersion("packages")
 
 		// Check if there's a newer version, exit if so
@@ -748,7 +748,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 				keptKeys[key] = true
 				continue
 			}
-			util.LogInfo("[ADMIN] retention: deleting %s (id=%s)", key, pkg.ID)
+			util.LogModuleInfo("admin", "retention: deleting %s (id=%s)", key, pkg.ID)
 			os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 			os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 		}
@@ -806,7 +806,7 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch 
 	// Delete packages beyond retention limit
 	toDelete := pkgs[packageRetention:]
 	for _, pkg := range toDelete {
-		util.LogInfo("[ADMIN] retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Meta.Version, pkg.ID)
+		util.LogModuleInfo("admin", "retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Meta.Version, pkg.ID)
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 	}
@@ -818,30 +818,30 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch 
 func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
 	// 1. Check if platform/arch matches (using compile-time identifiers, not runtime)
 	if s.GetPlatform == nil || s.GetArch == nil {
-		util.LogInfo("[ADMIN] checkForNewerVersion: GetPlatform/GetArch is nil")
+		util.LogModuleInfo("admin", "checkForNewerVersion: GetPlatform/GetArch is nil")
 		return
 	}
 	currentPlatform := s.GetPlatform()
 	currentArch := s.GetArch()
 	if contents.Meta.Platform != currentPlatform || contents.Meta.Arch != currentArch {
-		util.LogInfo("[ADMIN] checkForNewerVersion: platform/arch mismatch (pkg=%s/%s, current=%s/%s)",
+		util.LogModuleInfo("admin", "checkForNewerVersion: platform/arch mismatch (pkg=%s/%s, current=%s/%s)",
 			contents.Meta.Platform, contents.Meta.Arch, currentPlatform, currentArch)
 		return
 	}
 
 	// 2. Check if version is higher
 	if s.GetCurrentVersion == nil {
-		util.LogInfo("[ADMIN] checkForNewerVersion: GetCurrentVersion is nil")
+		util.LogModuleInfo("admin", "checkForNewerVersion: GetCurrentVersion is nil")
 		return
 	}
 	currentVersion := s.GetCurrentVersion()
-	util.LogInfo("[ADMIN] checkForNewerVersion: current version=%s", currentVersion)
+	util.LogModuleInfo("admin", "checkForNewerVersion: current version=%s", currentVersion)
 	if p2p.CompareVersions(contents.Meta.Version, currentVersion) <= 0 {
-		util.LogInfo("[ADMIN] checkForNewerVersion: version not higher")
+		util.LogModuleInfo("admin", "checkForNewerVersion: version not higher")
 		return
 	}
 
-	util.LogInfo("[ADMIN] detected newer version %s > current %s, exiting for watchdog restart...",
+	util.LogModuleInfo("admin", "detected newer version %s > current %s, exiting for watchdog restart...",
 		contents.Meta.Version, currentVersion)
 
 	// 3. Exit immediately, watchdog will restart with new version

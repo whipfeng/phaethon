@@ -205,6 +205,13 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		return prev, nil
 	}
 
+	// Configure module log levels from environment variable
+	// Example: PHAETHON_LOG_MODULES="route=info,ipip=info,linknic=info,gvisor=info,forward=info"
+	if moduleConfig := os.Getenv("PHAETHON_LOG_MODULES"); moduleConfig != "" {
+		util.ParseModuleLogLevels(moduleConfig)
+		util.Logger.Printf("Module log levels configured: %s", moduleConfig)
+	}
+
 	// Make the current runtime config available to async callbacks.
 	activeRuleConf.Store(ruleConf)
 
@@ -392,9 +399,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 	// Start P2P peers:
 	// Mesh is always enabled, so ALL compatible proxies (SOCKS5/Trojan/HTunnel) with P2P enabled get P2P automatically
-	util.LogInfo("[MAIN] Starting P2P peers, total proxies: %d", len(ruleConf.Proxies))
+	util.LogModuleInfo("main", "Starting P2P peers, total proxies: %d", len(ruleConf.Proxies))
 	for _, proxy := range ruleConf.Proxies {
-		util.LogInfo("[MAIN] Checking proxy %s (type=%s, enabled=%v, p2p=%v)", proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P())
+		util.LogModuleInfo("main", "Checking proxy %s (type=%s, enabled=%v, p2p=%v)", proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P())
 		if !proxy.IsEnabled() {
 			continue
 		}
@@ -403,10 +410,10 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			continue
 		}
 		if !proxy.IsP2P() {
-			util.LogInfo("[MAIN] Skipping P2P for proxy %s (p2p disabled)", proxy.Name)
+			util.LogModuleInfo("main", "Skipping P2P for proxy %s (p2p disabled)", proxy.Name)
 			continue
 		}
-		util.LogInfo("[MAIN] Starting P2P peer for proxy %s (type=%s)", proxy.Name, proxy.Type)
+		util.LogModuleInfo("main", "Starting P2P peer for proxy %s (type=%s)", proxy.Name, proxy.Type)
 		go p2p.GlobalP2PManager.StartPeer(proxy)
 	}
 
@@ -844,7 +851,7 @@ func main() {
 	// Start with loaded config
 	var resources *activeResources
 	startupStart := time.Now()
-	util.LogDebug("Config load took %v", time.Since(startupStart))
+	util.LogModuleDebug("main", "Config load took %v", time.Since(startupStart))
 	resources, err = run(ruleConf, resources)
 	if err != nil {
 		if strings.Contains(err.Error(), "admin server start fail") {
@@ -863,7 +870,7 @@ func main() {
 		_ = writeStartupError(err)
 		util.Logger.Fatalf("startup failed: %v", err)
 	}
-	util.LogDebug("Total startup took %v", time.Since(startupStart))
+	util.LogModuleDebug("main", "Total startup took %v", time.Since(startupStart))
 
 	// Wire up admin callbacks
 	if resources != nil && resources.adminServer != nil {
@@ -892,7 +899,7 @@ func main() {
 			}
 		}
 		resources.adminServer.OnRestart = func() {
-			util.LogInfo("[MAIN] restart requested via admin API, exiting for watchdog restart...")
+			util.LogModuleInfo("main", "restart requested via admin API, exiting for watchdog restart...")
 			os.Exit(0)
 		}
 	}
@@ -1058,7 +1065,7 @@ func (cp *childProcess) readProtocol() {
 				if msg.Ready != nil && *msg.Ready {
 					cp.ready.Store(true)
 					cp.lastHB.Store(time.Now().UnixNano())
-					util.LogInfo("watchdog: child signaled ready")
+					util.LogModuleInfo("main", "watchdog: child signaled ready")
 					continue
 				}
 				if msg.Heartbeat != nil && *msg.Heartbeat {
@@ -1092,7 +1099,7 @@ func findLatestPkgAndExtract() (string, string) {
 	// List all .pkg files
 	entries, err := os.ReadDir(packagesDir)
 	if err != nil {
-		util.LogDebug("watchdog: cannot read packages dir: %v", err)
+		util.LogModuleDebug("main", "watchdog: cannot read packages dir: %v", err)
 		return "", ""
 	}
 
@@ -1109,7 +1116,7 @@ func findLatestPkgAndExtract() (string, string) {
 		// Verify and read metadata
 		contents, err := signing.VerifyPkg(pkgPath, signing.PublicKey)
 		if err != nil {
-			util.LogDebug("watchdog: verify pkg %s failed: %v", entry.Name(), err)
+			util.LogModuleDebug("main", "watchdog: verify pkg %s failed: %v", entry.Name(), err)
 			continue
 		}
 
@@ -1129,14 +1136,14 @@ func findLatestPkgAndExtract() (string, string) {
 		return "", ""
 	}
 
-	util.LogInfo("watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
+	util.LogModuleInfo("main", "watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
 
 	// Check if binary already exists in data/worker/
 	workerDir := "data/worker"
 	binaryPath := filepath.Join(workerDir, fmt.Sprintf("phaethon-%s", latestVersion))
 	if _, err := os.Stat(binaryPath); err == nil {
 		// Binary already exists, no need to extract
-		util.LogInfo("watchdog: binary already exists: %s", binaryPath)
+		util.LogModuleInfo("main", "watchdog: binary already exists: %s", binaryPath)
 		ensureWintunDLL(workerDir)
 		return binaryPath, latestVersion
 	}
@@ -1144,17 +1151,17 @@ func findLatestPkgAndExtract() (string, string) {
 	// Extract binary from pkg
 	contents, err := signing.VerifyPkg(latestPkg, signing.PublicKey)
 	if err != nil {
-		util.LogError("watchdog: extract pkg failed: %v", err)
+		util.LogModuleError("main", "watchdog: extract pkg failed: %v", err)
 		return "", ""
 	}
 
 	// Write binary to data/worker/ directory
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
-		util.LogError("watchdog: create worker dir failed: %v", err)
+		util.LogModuleError("main", "watchdog: create worker dir failed: %v", err)
 		return "", ""
 	}
 	if err := os.WriteFile(binaryPath, contents.Binary, 0755); err != nil {
-		util.LogError("watchdog: write binary failed: %v", err)
+		util.LogModuleError("main", "watchdog: write binary failed: %v", err)
 		return "", ""
 	}
 
@@ -1162,7 +1169,7 @@ func findLatestPkgAndExtract() (string, string) {
 	// binary can find it (Windows DLL search uses the exe directory, not CWD).
 	ensureWintunDLL(workerDir)
 
-	util.LogInfo("watchdog: extracted binary to %s", binaryPath)
+	util.LogModuleInfo("main", "watchdog: extracted binary to %s", binaryPath)
 	return binaryPath, latestVersion
 }
 
@@ -1181,14 +1188,14 @@ func ensureWintunDLL(workerDir string) {
 	}
 	data, err := os.ReadFile(src)
 	if err != nil {
-		util.LogWarn("watchdog: cannot copy wintun.dll to worker dir: %v", err)
+		util.LogModuleWarn("main", "watchdog: cannot copy wintun.dll to worker dir: %v", err)
 		return
 	}
 	if err := os.WriteFile(dst, data, 0644); err != nil {
-		util.LogWarn("watchdog: failed to write wintun.dll to worker dir: %v", err)
+		util.LogModuleWarn("main", "watchdog: failed to write wintun.dll to worker dir: %v", err)
 		return
 	}
-	util.LogInfo("watchdog: copied wintun.dll to %s", workerDir)
+	util.LogModuleInfo("main", "watchdog: copied wintun.dll to %s", workerDir)
 }
 
 // selectWorkerBinary picks the worker binary to run: the latest distributed
@@ -1199,16 +1206,16 @@ func ensureWintunDLL(workerDir string) {
 func selectWorkerBinary() string {
 	pkgPath, pkgVersion := findLatestPkgAndExtract()
 	if pkgPath == "" {
-		util.LogInfo("watchdog: no pkg found, using current executable")
+		util.LogModuleInfo("main", "watchdog: no pkg found, using current executable")
 	} else if p2p.CompareVersions(pkgVersion, Version) > 0 {
-		util.LogInfo("watchdog: pkg version %s newer than self %s, using pkg worker: %s", pkgVersion, Version, pkgPath)
+		util.LogModuleInfo("main", "watchdog: pkg version %s newer than self %s, using pkg worker: %s", pkgVersion, Version, pkgPath)
 		return pkgPath
 	} else {
-		util.LogInfo("watchdog: pkg version %s not newer than self %s, using current executable", pkgVersion, Version)
+		util.LogModuleInfo("main", "watchdog: pkg version %s not newer than self %s, using current executable", pkgVersion, Version)
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		util.LogError("watchdog: cannot determine executable path: %v", err)
+		util.LogModuleError("main", "watchdog: cannot determine executable path: %v", err)
 		return ""
 	}
 	return exe
@@ -1220,7 +1227,7 @@ func selectWorkerBinary() string {
 // (child writes the stopped marker), the watchdog cleans up and exits.
 // SIGTERM/SIGINT received by the watchdog are forwarded to the child.
 func runWatchdogMode() {
-	util.LogInfo("watchdog: starting in watchdog mode")
+	util.LogModuleInfo("main", "watchdog: starting in watchdog mode")
 
 	const (
 		monitorInterval = 3 * time.Second
@@ -1232,7 +1239,7 @@ func runWatchdogMode() {
 	if exe == "" {
 		return
 	}
-	util.LogInfo("watchdog: using worker binary: %s", exe)
+	util.LogModuleInfo("main", "watchdog: using worker binary: %s", exe)
 
 	lastRestart := time.Time{}
 	var isRestarting atomic.Bool
@@ -1242,12 +1249,12 @@ func runWatchdogMode() {
 	// Persisted to disk so it survives watchdog restarts.
 	lastGoodBinary := readLastGoodWorker()
 	if lastGoodBinary != "" {
-		util.LogInfo("watchdog: loaded last good binary from disk: %s", lastGoodBinary)
+		util.LogModuleInfo("main", "watchdog: loaded last good binary from disk: %s", lastGoodBinary)
 	}
 	currentBinary := exe
 
 	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool, wasReady bool) *childProcess {
-		util.LogInfo("watchdog: %s, restarting child %d", reason, pid)
+		util.LogModuleInfo("main", "watchdog: %s, restarting child %d", reason, pid)
 		isRestarting.Store(true)
 		defer func() { isRestarting.Store(false) }()
 
@@ -1258,7 +1265,7 @@ func runWatchdogMode() {
 			select {
 			case <-cp.done:
 			case <-time.After(10 * time.Second):
-				util.LogWarn("watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
+				util.LogModuleWarn("main", "watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
 				cp.kill(syscall.SIGKILL)
 				<-cp.done
 			}
@@ -1267,7 +1274,7 @@ func runWatchdogMode() {
 
 		if elapsed := time.Since(lastRestart); elapsed < restartCooldown {
 			remain := restartCooldown - elapsed
-			util.LogInfo("watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
+			util.LogModuleInfo("main", "watchdog: cooldown, waiting %v", remain.Round(time.Millisecond))
 			time.Sleep(remain)
 		}
 
@@ -1276,7 +1283,7 @@ func runWatchdogMode() {
 		if !wasReady && lastGoodBinary != "" && currentBinary != lastGoodBinary {
 			// Child crashed before becoming ready and we have a known good binary
 			// Fall back to the last good binary
-			util.LogWarn("watchdog: child crashed before ready, falling back from %s to %s", currentBinary, lastGoodBinary)
+			util.LogModuleWarn("main", "watchdog: child crashed before ready, falling back from %s to %s", currentBinary, lastGoodBinary)
 			newExe = lastGoodBinary
 		} else {
 			// Re-scan before restarting (hot swap support): pkg only if newer than self
@@ -1289,14 +1296,14 @@ func runWatchdogMode() {
 
 		newCp, err := spawnChildProcess(newExe)
 		if err != nil {
-			util.LogError("watchdog: restart failed with %s: %v", newExe, err)
+			util.LogModuleError("main", "watchdog: restart failed with %s: %v", newExe, err)
 			// If we failed with the fallback binary too, try the original selection
 			if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
-				util.LogInfo("watchdog: fallback failed, trying %s again", currentBinary)
+				util.LogModuleInfo("main", "watchdog: fallback failed, trying %s again", currentBinary)
 				newExe = currentBinary
 				newCp, err = spawnChildProcess(newExe)
 				if err != nil {
-					util.LogError("watchdog: restart failed with %s: %v", newExe, err)
+					util.LogModuleError("main", "watchdog: restart failed with %s: %v", newExe, err)
 					return nil
 				}
 			} else {
@@ -1305,7 +1312,7 @@ func runWatchdogMode() {
 		}
 
 		currentBinary = newExe
-		util.LogInfo("watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
+		util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
 		lastRestart = time.Now()
 		return newCp
 	}
@@ -1313,10 +1320,10 @@ func runWatchdogMode() {
 	killResidualWorkers()
 	cp, err := spawnChildProcess(exe)
 	if err != nil {
-		util.LogError("watchdog: initial spawn failed: %v", err)
+		util.LogModuleError("main", "watchdog: initial spawn failed: %v", err)
 		return
 	}
-	util.LogInfo("watchdog: worker started (pid=%d)", cp.proc.Pid)
+	util.LogModuleInfo("main", "watchdog: worker started (pid=%d)", cp.proc.Pid)
 	spawnTime := time.Now()
 
 	// Forward signals to the child for graceful shutdown.
@@ -1327,7 +1334,7 @@ func runWatchdogMode() {
 	go func() {
 		for sig := range sigCh {
 			child := *currentCp
-			util.LogInfo("watchdog: received %v, forwarding to child %d", sig, child.proc.Pid)
+			util.LogModuleInfo("main", "watchdog: received %v, forwarding to child %d", sig, child.proc.Pid)
 			// Only write stopped marker if not restarting (to avoid false graceful exit detection)
 			if !isRestarting.Load() {
 				writeStoppedMarker()
@@ -1341,7 +1348,7 @@ func runWatchdogMode() {
 
 	pid := cp.proc.Pid
 
-	util.LogInfo("watchdog: entering monitor loop for pid %d", pid)
+	util.LogModuleInfo("main", "watchdog: entering monitor loop for pid %d", pid)
 
 	for {
 		select {
@@ -1353,17 +1360,17 @@ func runWatchdogMode() {
 			if wasReady && lastGoodBinary != currentBinary {
 				lastGoodBinary = currentBinary
 				writeLastGoodWorker(lastGoodBinary)
-				util.LogInfo("watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+				util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
 			}
 			// Check for self-update request (exit code 42)
 			if reaped && exitCode == 42 {
-				util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
+				util.LogModuleInfo("main", "watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
 				spawnNewWatchdogAndExit(os.Getpid())
 				signal.Stop(sigCh)
 				return
 			}
 			if wasStoppedGracefully() {
-				util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
+				util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
 				removeStoppedMarker()
 				signal.Stop(sigCh)
 				return
@@ -1383,7 +1390,7 @@ func runWatchdogMode() {
 			if cp.ready.Load() && lastGoodBinary != currentBinary {
 				lastGoodBinary = currentBinary
 				writeLastGoodWorker(lastGoodBinary)
-				util.LogInfo("watchdog: child %d is ready, persisted %s as last good binary", pid, currentBinary)
+				util.LogModuleInfo("main", "watchdog: child %d is ready, persisted %s as last good binary", pid, currentBinary)
 			}
 
 			if !processExists(pid) {
@@ -1394,17 +1401,17 @@ func runWatchdogMode() {
 				if wasReady && lastGoodBinary != currentBinary {
 					lastGoodBinary = currentBinary
 					writeLastGoodWorker(lastGoodBinary)
-					util.LogInfo("watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+					util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
 				}
 				// Check for self-update request (exit code 42)
 				if reaped && exitCode == 42 {
-					util.LogInfo("watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
+					util.LogModuleInfo("main", "watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
 					spawnNewWatchdogAndExit(os.Getpid())
 					signal.Stop(sigCh)
 					return
 				}
 				if wasStoppedGracefully() {
-					util.LogInfo("watchdog: child %d exited gracefully, cleaning up", pid)
+					util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
 					removeStoppedMarker()
 					signal.Stop(sigCh)
 					return
@@ -1456,7 +1463,7 @@ func runWatchdogMode() {
 func spawnNewWatchdogAndExit(myPid int) {
 	exe, err := os.Executable()
 	if err != nil {
-		util.LogError("watchdog: self-update: get executable path: %v", err)
+		util.LogModuleError("main", "watchdog: self-update: get executable path: %v", err)
 		return
 	}
 
@@ -1470,10 +1477,10 @@ func spawnNewWatchdogAndExit(myPid int) {
 	args := []string{exe, fmt.Sprintf("--cleanup-pid=%d", myPid)}
 	proc, err := os.StartProcess(exe, args, attr)
 	if err != nil {
-		util.LogError("watchdog: self-update: failed to spawn new watchdog: %v", err)
+		util.LogModuleError("main", "watchdog: self-update: failed to spawn new watchdog: %v", err)
 		return
 	}
-	util.LogInfo("watchdog: self-update: spawned new watchdog pid=%d, exiting", proc.Pid)
+	util.LogModuleInfo("main", "watchdog: self-update: spawned new watchdog pid=%d, exiting", proc.Pid)
 	proc.Release()
 	os.Exit(0)
 }
@@ -1497,7 +1504,7 @@ func handleCleanupPid() {
 			pidStr := strings.TrimPrefix(arg, "--cleanup-pid=")
 			cleanupPid, err := strconv.Atoi(pidStr)
 			if err != nil {
-				util.LogDebug("cleanup: invalid --cleanup-pid value: %s", pidStr)
+				util.LogModuleDebug("main", "cleanup: invalid --cleanup-pid value: %s", pidStr)
 				return
 			}
 			go cleanupAfterUpdate(cleanupPid)
@@ -1508,11 +1515,11 @@ func handleCleanupPid() {
 
 // cleanupAfterUpdate waits for the old watchdog to exit, then cleans up .bak files.
 func cleanupAfterUpdate(oldWatchdogPid int) {
-	util.LogInfo("cleanup: waiting for old watchdog pid=%d to exit", oldWatchdogPid)
+	util.LogModuleInfo("main", "cleanup: waiting for old watchdog pid=%d to exit", oldWatchdogPid)
 	if waitForProcessExit(oldWatchdogPid, 30*time.Second) {
-		util.LogInfo("cleanup: old watchdog exited")
+		util.LogModuleInfo("main", "cleanup: old watchdog exited")
 	} else {
-		util.LogWarn("cleanup: old watchdog pid=%d did not exit within 30s", oldWatchdogPid)
+		util.LogModuleWarn("main", "cleanup: old watchdog pid=%d did not exit within 30s", oldWatchdogPid)
 	}
 
 	// Clean up .bak next to the executable
@@ -1522,9 +1529,9 @@ func cleanupAfterUpdate(oldWatchdogPid int) {
 	}
 	bakPath := exe + ".bak"
 	if err := os.Remove(bakPath); err != nil && !os.IsNotExist(err) {
-		util.LogDebug("cleanup: remove %s: %v", bakPath, err)
+		util.LogModuleDebug("main", "cleanup: remove %s: %v", bakPath, err)
 	} else if err == nil {
-		util.LogInfo("cleanup: removed %s", bakPath)
+		util.LogModuleInfo("main", "cleanup: removed %s", bakPath)
 	}
 
 	// Also clean up any .bak from the P2P cache self-update
@@ -2023,7 +2030,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		return server.GlobalControlManager.ForceRemoveBinding(reverseID, seq)
 	}
 	adminSrv.OnIncrementalUpdate = func() error {
-		util.LogInfo("[P2P] OnIncrementalUpdate called, syncing P2P peers...")
+		util.LogModuleInfo("main", "[P2P] OnIncrementalUpdate called, syncing P2P peers...")
 		// mergeAndInitLocked already updated s.conf in place, which is the same
 		// object as resources.ruleConf. All servers see changes immediately.
 		activeRuleConf.Store(resources.ruleConf)
@@ -2048,18 +2055,18 @@ func wireAdminCallbacks(resources *activeResources) {
 
 			if shouldRun && !exists {
 				// P2P should be running but isn't - start it
-				util.LogInfo("[P2P] starting peer for proxy %s", proxy.Name)
+				util.LogModuleInfo("main", "[P2P] starting peer for proxy %s", proxy.Name)
 				go p2p.GlobalP2PManager.StartPeer(proxy)
 			} else if !shouldRun && exists {
 				// P2P should not be running but is - stop it
-				util.LogInfo("[P2P] stopping peer for proxy %s", proxy.Name)
+				util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s", proxy.Name)
 				p2p.GlobalP2PManager.StopPeerByProxyName(proxy.Name)
 			} else if shouldRun && exists {
 				// P2P is running - check if config changed and needs restart
 				oldProxy := p2p.GlobalP2PManager.GetPeerProxy(proxy.Name)
 				if oldProxy != proxy {
 					// Pointer changed means config was updated
-					util.LogInfo("[P2P] restarting peer for proxy %s due to config update", proxy.Name)
+					util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config update", proxy.Name)
 					p2p.GlobalP2PManager.RestartPeer(proxy)
 				}
 			}
@@ -2477,13 +2484,13 @@ func loadHealthState(ruleConf *config.RuleConfiguration) {
 	data, err := os.ReadFile(healthStatePath())
 	if err != nil {
 		if !os.IsNotExist(err) {
-			util.LogWarn("[HEALTH] load state fail: %v", err)
+			util.LogModuleWarn("main", "[HEALTH] load state fail: %v", err)
 		}
 		return
 	}
 	var state map[string]map[string]persistedHealthEntry
 	if err := json.Unmarshal(data, &state); err != nil {
-		util.LogWarn("[HEALTH] parse state fail: %v", err)
+		util.LogModuleWarn("main", "[HEALTH] parse state fail: %v", err)
 		return
 	}
 	loaded := 0
@@ -2506,7 +2513,7 @@ func loadHealthState(ruleConf *config.RuleConfiguration) {
 			}
 		}
 	}
-	util.LogInfo("[HEALTH] loaded %d entries from %d groups", loaded, len(state))
+	util.LogModuleInfo("main", "[HEALTH] loaded %d entries from %d groups", loaded, len(state))
 }
 
 // saveHealthState snapshots the current group health to disk.
@@ -2542,22 +2549,22 @@ func saveHealthState(ruleConf *config.RuleConfiguration) {
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		util.LogWarn("[HEALTH] marshal state fail: %v", err)
+		util.LogModuleWarn("main", "[HEALTH] marshal state fail: %v", err)
 		return
 	}
 
 	path := healthStatePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		util.LogWarn("[HEALTH] create state dir fail: %v", err)
+		util.LogModuleWarn("main", "[HEALTH] create state dir fail: %v", err)
 		return
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		util.LogWarn("[HEALTH] write state tmp fail: %v", err)
+		util.LogModuleWarn("main", "[HEALTH] write state tmp fail: %v", err)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		util.LogWarn("[HEALTH] rename state fail: %v", err)
+		util.LogModuleWarn("main", "[HEALTH] rename state fail: %v", err)
 	}
 }
 

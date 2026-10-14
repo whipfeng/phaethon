@@ -189,8 +189,110 @@ const (
 
 var currentLogLevel atomic.Int32
 
+// Module-level log control
+var (
+	moduleLogLevels   = make(map[string]LogLevel)
+	moduleLogLevelsMu sync.RWMutex
+)
+
 func init() {
 	currentLogLevel.Store(int32(LogLevelInfo))
+}
+
+// SetModuleLogLevel sets the log level for a specific module.
+// Modules: "tun", "mesh", "route", "ipip", "p2p", "nat", etc.
+func SetModuleLogLevel(module string, level LogLevel) {
+	moduleLogLevelsMu.Lock()
+	defer moduleLogLevelsMu.Unlock()
+	moduleLogLevels[module] = level
+}
+
+// GetModuleLogLevel gets the log level for a specific module.
+// Returns the module level if set, otherwise the global level.
+func GetModuleLogLevel(module string) LogLevel {
+	moduleLogLevelsMu.RLock()
+	defer moduleLogLevelsMu.RUnlock()
+	if level, ok := moduleLogLevels[module]; ok {
+		return level
+	}
+	return LogLevel(currentLogLevel.Load())
+}
+
+// ParseModuleLogLevels parses a comma-separated list of module=level pairs.
+// Example: "tun=debug,mesh=info,route=debug"
+func ParseModuleLogLevels(config string) {
+	moduleLogLevelsMu.Lock()
+	defer moduleLogLevelsMu.Unlock()
+	for _, pair := range strings.Split(config, ",") {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		module := strings.TrimSpace(parts[0])
+		levelStr := strings.TrimSpace(strings.ToLower(parts[1]))
+		var level LogLevel
+		switch levelStr {
+		case "debug":
+			level = LogLevelDebug
+		case "info":
+			level = LogLevelInfo
+		case "warn":
+			level = LogLevelWarn
+		case "error":
+			level = LogLevelError
+		default:
+			continue
+		}
+		moduleLogLevels[module] = level
+	}
+}
+
+// ListModuleLogLevels returns a snapshot of all configured module log levels.
+func ListModuleLogLevels() map[string]LogLevel {
+	moduleLogLevelsMu.RLock()
+	defer moduleLogLevelsMu.RUnlock()
+	result := make(map[string]LogLevel, len(moduleLogLevels))
+	for k, v := range moduleLogLevels {
+		result[k] = v
+	}
+	return result
+}
+
+// LogLevelString returns the string representation of a LogLevel.
+func LogLevelString(level LogLevel) string {
+	switch level {
+	case LogLevelDebug:
+		return "debug"
+	case LogLevelInfo:
+		return "info"
+	case LogLevelWarn:
+		return "warn"
+	case LogLevelError:
+		return "error"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseLogLevel parses a string into a LogLevel.
+func ParseLogLevel(s string) (LogLevel, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return LogLevelDebug, true
+	case "info":
+		return LogLevelInfo, true
+	case "warn":
+		return LogLevelWarn, true
+	case "error":
+		return LogLevelError, true
+	default:
+		return LogLevelInfo, false
+	}
+}
+
+// GlobalLogLevel returns the current global log level.
+func GlobalLogLevel() LogLevel {
+	return LogLevel(currentLogLevel.Load())
 }
 
 // RotatingFileWriter implements io.Writer with size-based log rotation.
@@ -305,6 +407,31 @@ func LogWarn(format string, v ...interface{}) {
 func LogError(format string, v ...interface{}) {
 	if LogLevel(currentLogLevel.Load()) <= LogLevelError {
 		Logger.Printf("[ERROR] "+format, v...)
+	}
+}
+
+// Module-level logging functions
+func LogModuleDebug(module string, format string, v ...interface{}) {
+	if GetModuleLogLevel(module) <= LogLevelDebug {
+		Logger.Printf("[DEBUG] [%s] "+format, append([]interface{}{module}, v...)...)
+	}
+}
+
+func LogModuleInfo(module string, format string, v ...interface{}) {
+	if GetModuleLogLevel(module) <= LogLevelInfo {
+		Logger.Printf("[INFO] [%s] "+format, append([]interface{}{module}, v...)...)
+	}
+}
+
+func LogModuleWarn(module string, format string, v ...interface{}) {
+	if GetModuleLogLevel(module) <= LogLevelWarn {
+		Logger.Printf("[WARN] [%s] "+format, append([]interface{}{module}, v...)...)
+	}
+}
+
+func LogModuleError(module string, format string, v ...interface{}) {
+	if GetModuleLogLevel(module) <= LogLevelError {
+		Logger.Printf("[ERROR] [%s] "+format, append([]interface{}{module}, v...)...)
 	}
 }
 

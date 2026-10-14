@@ -22,14 +22,14 @@ func setSystemDNS(tunName, tunIP string) error {
 		return err
 	}
 	if err := setInterfaceMetricAPI(tunName, 5, false); err != nil {
-		util.LogWarn("tun: set interface metric for %s fail: %v", tunName, err)
+		util.LogModuleWarn("dns-setup", "set interface metric for %s fail: %v", tunName, err)
 	}
-	util.LogInfo("tun: system dns for %s set to %s", tunName, tunIP)
+	util.LogModuleInfo("dns-setup", "system dns for %s set to %s", tunName, tunIP)
 
 	if err := flushDNSResolverCacheAPI(); err != nil {
-		util.LogWarn("tun: flush dns cache fail: %v", err)
+		util.LogModuleWarn("dns-setup", "flush dns cache fail: %v", err)
 	} else {
-		util.LogInfo("tun: dns cache flushed")
+		util.LogModuleInfo("dns-setup", "dns cache flushed")
 	}
 	return nil
 }
@@ -38,15 +38,15 @@ func setSystemDNS(tunName, tunIP string) error {
 func restoreSystemDNS(tunName string) {
 	luid, index, err := getInterfaceLUID(tunName)
 	if err != nil {
-		util.LogWarn("tun: restore dns for %s fail: %v", tunName, err)
+		util.LogModuleWarn("dns-setup", "restore dns for %s fail: %v", tunName, err)
 		return
 	}
 	if err := clearInterfaceDNSAPI(luid, index); err != nil {
-		util.LogWarn("tun: restore dns for %s fail: %v", tunName, err)
+		util.LogModuleWarn("dns-setup", "restore dns for %s fail: %v", tunName, err)
 	} else {
-		util.LogInfo("tun: system dns for %s restored to dhcp", tunName)
+		util.LogModuleInfo("dns-setup", "system dns for %s restored to dhcp", tunName)
 	}
 	if err := setInterfaceMetricAPI(tunName, 0, true); err != nil {
-		util.LogWarn("tun: restore interface metric for %s fail: %v", tunName, err)
+		util.LogModuleWarn("dns-setup", "restore interface metric for %s fail: %v", tunName, err)
 	}
 }

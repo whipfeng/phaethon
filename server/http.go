@@ -51,11 +51,11 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 	host, port := parseHostPort(req.Host, 443)
 
 	connID := util.NextConnID()
-	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	util.LogModuleInfo("http", "[%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
 	targetConn, cleanup, err := s.MeshDialWithModeB(host, port, clientConn.RemoteAddr().String(), "HTTP")
 	if err != nil {
-		util.LogInfo("[HTTP-CONNECT] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
+		util.LogModuleInfo("http", "[%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -64,7 +64,7 @@ func (s *HttpProxyServer) handleConnect(clientConn net.Conn, req *http.Request) 
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	util.LogInfo("[HTTP-CONNECT] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	util.LogModuleInfo("http", "[%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
@@ -72,11 +72,11 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 	host, port := parseHostPort(req.Host, 80)
 
 	connID := util.NextConnID()
-	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	util.LogModuleInfo("http", "[%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
 	targetConn, cleanup, err := s.MeshDialWithModeB(host, port, clientConn.RemoteAddr().String(), "HTTP")
 	if err != nil {
-		util.LogInfo("[HTTP-FWD] [%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
+		util.LogModuleInfo("http", "[%s] [%s] forward fail %s:%d: %v", s.Mapping.Name, connID, host, port, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
@@ -97,7 +97,7 @@ func (s *HttpProxyServer) handleHTTP(clientConn net.Conn, br *bufio.Reader, req 
 		return
 	}
 
-	util.LogInfo("[HTTP-FWD] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
+	util.LogModuleInfo("http", "[%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), host, port)
 
 	// Read response and forward back
 	resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)

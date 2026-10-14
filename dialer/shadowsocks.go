@@ -74,7 +74,7 @@ func (d *ShadowsocksDialer) DialPacket() (net.PacketConn, error) {
 	encPC := ciph.PacketConn(pc)
 
 	connID := util.NextConnID()
-	util.LogDebug("[SS-CLI] [%s] [%s] UDP ASSOCIATE via %s", d.Proxy.Name, connID, addr)
+	util.LogModuleDebug("shadowsocks", "UDP ASSOCIATE via %s", d.Proxy.Name, connID, addr)
 
 	return &shadowsocksPacketConn{
 		PacketConn: encPC,

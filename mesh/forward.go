@@ -26,7 +26,7 @@ func SetMeshCIDR(cidr string) error {
 		return err
 	}
 	meshCIDR = network
-	util.LogInfo("[MESH] meshCIDR set to %s", cidr)
+	util.LogModuleInfo("mesh", "[MESH] meshCIDR set to %s", cidr)
 	return nil
 }
 

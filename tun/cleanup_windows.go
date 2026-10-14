@@ -62,11 +62,11 @@ func CleanupResidual() {
 			_ = clearInterfaceDNSAPI(luid, index)
 		}
 
-		util.LogInfo("tun: removing orphaned adapter phaethontun")
+		util.LogModuleInfo("cleanup", "removing orphaned adapter phaethontun")
 		if err := removeAdapterAPI("phaethontun"); err != nil {
-			util.LogWarn("tun: remove adapter failed: %v", err)
+			util.LogModuleWarn("cleanup", "remove adapter failed: %v", err)
 			if err2 := disableInterfaceAPI("phaethontun"); err2 != nil {
-				util.LogWarn("tun: disable adapter fallback failed: %v", err2)
+				util.LogModuleWarn("cleanup", "disable adapter fallback failed: %v", err2)
 			}
 		}
 
@@ -87,15 +87,15 @@ func CleanupResidual() {
 		if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
 			if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {
 				if err3 := clearInterfaceDNSAPI(gwLuid, gwIdx); err3 != nil {
-					util.LogWarn("tun: restore dns for %s fail: %v", ifaceName, err3)
+					util.LogModuleWarn("cleanup", "restore dns for %s fail: %v", ifaceName, err3)
 				} else {
-					util.LogInfo("tun: restored dns for %s to dhcp", ifaceName)
+					util.LogModuleInfo("cleanup", "restored dns for %s to dhcp", ifaceName)
 				}
 			}
 		}
 	}
 
-	util.LogInfo("tun: residual cleanup completed")
+	util.LogModuleInfo("cleanup", "residual cleanup completed")
 }
 
 // defaultGatewayInterfaceName returns the interface name of the IPv4 default

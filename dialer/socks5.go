@@ -31,12 +31,12 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	if conn, err := d.TryReverse(); err != nil {
 		return nil, fmt.Errorf("socks5: %w", err)
 	} else if conn != nil {
-		util.LogDebug("[SOCKS5-CLI] [%s] [%s] reverse match ok, doing CONNECT handshake to %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
+		util.LogModuleDebug("socks5", "reverse match ok, doing CONNECT handshake to %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
 		if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, 0x01, d.ConnIDStr()); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("socks5: reverse handshake fail: %w", err)
 		}
-		util.LogDebug("[SOCKS5-CLI] [%s] [%s] reverse CONNECT handshake ok for %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
+		util.LogModuleDebug("socks5", "reverse CONNECT handshake ok for %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
 		return conn, nil
 	}
 
@@ -46,7 +46,7 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	if d.Proxy.Next != nil {
 		nextType = d.Proxy.Next.Type
 	}
-	util.LogDebug("[SOCKS5-DIAL] [%s] next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("socks5", "next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
 	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("socks5: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
@@ -200,6 +200,6 @@ func socks5Handshake(conn net.Conn, proxy *config.Proxy, dstAddr string, dstPort
 	if connID == "" {
 		connID = "N/A"
 	}
-	util.LogDebug("[SOCKS5-CLI] [%s] [%s] Connecting %s:%d via %s:%d", proxy.Name, connID, dstAddr, dstPort, proxy.Server, proxy.Port)
+	util.LogModuleDebug("socks5", "Connecting %s:%d via %s:%d", proxy.Name, connID, dstAddr, dstPort, proxy.Server, proxy.Port)
 	return nil
 }

@@ -53,7 +53,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	if err := setInterfaceIPAPI(luid, index, net.ParseIP(tunIP).To4(), uint8(adapterPrefixLen)); err != nil {
 		return fmt.Errorf("set interface IP %s/%d: %w", tunIP, adapterPrefixLen, err)
 	}
-	util.LogInfo("tun: interface IP set to %s/%d via API (luid=%x idx=%d)", tunIP, adapterPrefixLen, luid, index)
+	util.LogModuleInfo("route", "interface IP set to %s/%d via API (luid=%x idx=%d)", tunIP, adapterPrefixLen, luid, index)
 
 	// 1a. Enable weak-host send/receive on the Wintun adapter. Wintun is a L3
 	// tunnel; Windows' strong-host model drops packets whose source/destination
@@ -62,13 +62,13 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// in mesh subnet (not local), and incoming replies have destination = hostIP
 	// (local) but source from mesh subnet (not local).
 	if err := ensureWeakHostEnabled(r.devName); err != nil {
-		util.LogWarn("tun: enable weak-host on %s fail: %v", r.devName, err)
+		util.LogModuleWarn("route", "enable weak-host on %s fail: %v", r.devName, err)
 	}
 
 	// 2. Detect original default gateway and interface
 	gw, gwLuid, gwIndex, err := getDefaultGatewayWindows()
 	if err != nil {
-		util.LogWarn("tun: failed to detect default gateway: %v", err)
+		util.LogModuleWarn("route", "failed to detect default gateway: %v", err)
 	} else {
 		r.originalGateway = gw
 		r.defaultIfaceLUID = gwLuid
@@ -76,14 +76,14 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		if iface, err := net.InterfaceByIndex(int(gwIndex)); err == nil {
 			r.DefaultIfaceName = iface.Name
 		}
-		util.LogInfo("tun: original gateway: %s (iface %s idx=%d luid=%x)", gw, r.DefaultIfaceName, gwIndex, gwLuid)
+		util.LogModuleInfo("route", "original gateway: %s (iface %s idx=%d luid=%x)", gw, r.DefaultIfaceName, gwIndex, gwLuid)
 
 		// Capture original DNS servers before we redirect system DNS to TUN.
 		if servers, err := getAdapterDNS(r.DefaultIfaceName); err == nil {
 			r.OriginalDNSServers = servers
-			util.LogInfo("tun: original DNS servers for %s: %v", r.DefaultIfaceName, servers)
+			util.LogModuleInfo("route", "original DNS servers for %s: %v", r.DefaultIfaceName, servers)
 		} else {
-			util.LogWarn("tun: failed to capture original DNS servers: %v", err)
+			util.LogModuleWarn("route", "failed to capture original DNS servers: %v", err)
 		}
 
 		// Enable weak-host receive on the physical default interface. Replies
@@ -94,10 +94,10 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			_, recv, err := getWeakHostStateAPI(r.DefaultIfaceName)
 			if err == nil {
 				r.originalPhysicalWeakHostReceive = recv
-				util.LogInfo("tun: physical %s original weak-host receive: %v", r.DefaultIfaceName, recv)
+				util.LogModuleInfo("route", "physical %s original weak-host receive: %v", r.DefaultIfaceName, recv)
 			}
 			if err := setWeakHostReceiveAPI(r.DefaultIfaceName, true); err != nil {
-				util.LogWarn("tun: enable physical weakhostreceive fail: %v", err)
+				util.LogModuleWarn("route", "enable physical weakhostreceive fail: %v", err)
 			}
 		}
 	}
@@ -139,7 +139,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		if ret != 0 {
 			return fmt.Errorf("CreateIpForwardEntry2 %s/%d: 0x%x", prefix.ip, prefix.len, ret)
 		}
-		util.LogInfo("tun: split-tunnel route %s/%d -> on-link (luid=%x idx=%d)", prefix.ip, prefix.len, luid, index)
+		util.LogModuleInfo("route", "split-tunnel route %s/%d -> on-link (luid=%x idx=%d)", prefix.ip, prefix.len, luid, index)
 	}
 
 	// Fake-IP pool route removed: Fake-IPs are now allocated from the mesh subnet,
@@ -179,7 +179,7 @@ func verifyRoutes(expectedIndex uint32) error {
 			routeIndex, iface.Name, expectedIndex)
 	}
 
-	util.LogInfo("tun: route verification passed, best route to 1.1.1.1 uses interface %d (%s)",
+	util.LogModuleInfo("route", "route verification passed, best route to 1.1.1.1 uses interface %d (%s)",
 		expectedIndex, iface.Name)
 	return nil
 }
@@ -202,7 +202,7 @@ func waitForTUNReadiness(luid uint64, index uint32, tunIP net.IP) error {
 		if interfaceHasIPv4(int(index), tunIP) {
 			rluid, ridx := bestRouteInterface(checkDst)
 			if rluid == luid && ridx == index {
-				util.LogInfo("tun: interface %d ready, best route to %s uses TUN", index, checkDst)
+				util.LogModuleInfo("route", "interface %d ready, best route to %s uses TUN", index, checkDst)
 				return nil
 			}
 		}
@@ -292,7 +292,6 @@ func bestRouteInterface(dst net.IP) (uint64, uint32) {
 	return bestLuid, bestIdx
 }
 
-
 func (r *RouteManager) platformTeardown() {
 	luid, index, err := getInterfaceLUID(r.devName)
 	if err != nil {
@@ -323,7 +322,7 @@ func (r *RouteManager) platformTeardown() {
 	// Restore physical interface weak-host receive to its original state.
 	if r.DefaultIfaceName != "" {
 		if err := setWeakHostReceiveAPI(r.DefaultIfaceName, r.originalPhysicalWeakHostReceive); err != nil {
-			util.LogWarn("tun: restore physical weakhostreceive fail: %v", err)
+			util.LogModuleWarn("route", "restore physical weakhostreceive fail: %v", err)
 		}
 	}
 
@@ -354,7 +353,7 @@ func ensureWeakHostEnabled(name string) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	util.LogWarn("tun: weak-host send/receive could not be verified on %s after retries", name)
+	util.LogModuleWarn("route", "weak-host send/receive could not be verified on %s after retries", name)
 	return nil
 }
 
@@ -363,7 +362,7 @@ func ensureWeakHostEnabled(name string) error {
 func (r *RouteManager) addExclusionRoute(gwLuid uint64, gwIndex uint32, exclude string) bool {
 	ip, prefixLen, err := parseExclusionCIDR(exclude)
 	if err != nil {
-		util.LogWarn("tun: invalid exclusion %s: %v", exclude, err)
+		util.LogModuleWarn("route", "invalid exclusion %s: %v", exclude, err)
 		return false
 	}
 
@@ -381,13 +380,13 @@ func (r *RouteManager) addExclusionRoute(gwLuid uint64, gwIndex uint32, exclude 
 		// previous crash is still present. Treat it as success so teardown will
 		// delete it, and so the route is tracked in appliedExcludes.
 		if ret == 0x1392 {
-			util.LogDebug("tun: exclusion route %s already exists (residual)", exclude)
+			util.LogModuleDebug("route", "exclusion route %s already exists (residual)", exclude)
 			return true
 		}
-		util.LogWarn("tun: add exclusion route %s fail: 0x%x", exclude, ret)
+		util.LogModuleWarn("route", "add exclusion route %s fail: 0x%x", exclude, ret)
 		return false
 	}
-	util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+	util.LogModuleInfo("route", "exclusion route %s -> %s", exclude, r.originalGateway)
 	return true
 }
 
@@ -436,7 +435,7 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 	}
 	ip, prefixLen, err := parseExclusionCIDR(exclude)
 	if err != nil {
-		util.LogWarn("tun: invalid exclusion to delete %s: %v", exclude, err)
+		util.LogModuleWarn("route", "invalid exclusion to delete %s: %v", exclude, err)
 		return
 	}
 	var fwdRow mibIpForwardRow2
@@ -448,8 +447,6 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 	fwdRow.setMetric(1)
 	procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(&fwdRow[0])))
 }
-
-
 
 // addMeshRoute adds a route for the mesh subnet through the TUN device.
 func (e *Engine) addMeshRoute(subnet string) error {
@@ -473,6 +470,6 @@ func (e *Engine) addMeshRoute(subnet string) error {
 	if ret != 0 {
 		return fmt.Errorf("add mesh route %s failed: 0x%x", subnet, ret)
 	}
-	util.LogInfo("tun: mesh route %s -> on-link (luid=%x idx=%d)", subnet, luid, index)
+	util.LogModuleInfo("route", "mesh route %s -> on-link (luid=%x idx=%d)", subnet, luid, index)
 	return nil
 }

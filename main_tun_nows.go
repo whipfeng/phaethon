@@ -142,7 +142,7 @@ func killResidualWorkers() {
 	if len(residualPids) == 0 {
 		return
 	}
-	util.LogInfo("watchdog: found %d residual process(es): %v", len(residualPids), residualPids)
+	util.LogModuleInfo("main", "watchdog: found %d residual process(es): %v", len(residualPids), residualPids)
 	for _, pid := range residualPids {
 		p, err := os.FindProcess(pid)
 		if err == nil {
@@ -162,5 +162,5 @@ func killResidualWorkers() {
 	for _, pid := range residualPids {
 		reapChild(pid)
 	}
-	util.LogInfo("watchdog: killed %d residual process(es)", len(residualPids))
+	util.LogModuleInfo("main", "watchdog: killed %d residual process(es)", len(residualPids))
 }

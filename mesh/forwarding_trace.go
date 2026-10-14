@@ -115,15 +115,15 @@ func TraceForwarding(stage string, data []byte, format string, args ...interface
 		}
 	}
 	if format == "" {
-		util.LogInfo("%s", prefix)
+		util.LogModuleInfo("trace", "%s", prefix)
 		return
 	}
-	util.LogInfo(prefix+" "+format, args...)
+	util.LogModuleInfo("trace", prefix+" "+format, args...)
 }
 
 func TraceForwardingRoute(dst net.IP, format string, args ...interface{}) {
 	if !ForwardingTraceEnabled() {
 		return
 	}
-	util.LogInfo("[MESH-TRACE] stage=route_decision dst=%s "+format, append([]interface{}{dst}, args...)...)
+	util.LogModuleDebug("trace", "[MESH-TRACE] stage=route_decision dst=%s "+format, append([]interface{}{dst}, args...)...)
 }

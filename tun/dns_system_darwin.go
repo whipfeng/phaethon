@@ -13,10 +13,10 @@ import (
 )
 
 var (
-	dnsMu        sync.Mutex
-	dnsService   string
-	dnsSaved     []string
-	dnsWasDHCP   bool
+	dnsMu      sync.Mutex
+	dnsService string
+	dnsSaved   []string
+	dnsWasDHCP bool
 )
 
 // setSystemDNS redirects the active network service DNS to the given TUN IP.
@@ -32,7 +32,7 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	// Save current DNS servers
 	saved, wasDHCP, err := getDNSServers(service)
 	if err != nil {
-		util.LogWarn("tun: failed to read current dns for %s: %v", service, err)
+		util.LogModuleWarn("dns-setup", "failed to read current dns for %s: %v", service, err)
 	}
 
 	if out, err := exec.Command("networksetup", "-setdnsservers", service, tunIP).CombinedOutput(); err != nil {
@@ -42,7 +42,7 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	dnsService = service
 	dnsSaved = saved
 	dnsWasDHCP = wasDHCP
-	util.LogInfo("tun: macOS dns for service %s set to %s", service, tunIP)
+	util.LogModuleInfo("dns-setup", "macOS dns for service %s set to %s", service, tunIP)
 	return nil
 }
 
@@ -62,9 +62,9 @@ func restoreSystemDNS(ifaceName string) {
 		args = append([]string{"-setdnsservers", dnsService}, dnsSaved...)
 	}
 	if out, err := exec.Command("networksetup", args...).CombinedOutput(); err != nil {
-		util.LogWarn("tun: restore dns for service %s fail: %v: %s", dnsService, err, out)
+		util.LogModuleWarn("dns-setup", "restore dns for service %s fail: %v: %s", dnsService, err, out)
 	} else {
-		util.LogInfo("tun: macOS dns for service %s restored", dnsService)
+		util.LogModuleInfo("dns-setup", "macOS dns for service %s restored", dnsService)
 	}
 
 	dnsService = ""

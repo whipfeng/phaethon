@@ -76,7 +76,7 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 		return err
 	}
 	if _, err := os.Stat(target); err == nil {
-		util.LogDebug("[P2P] cache: own binary already cached: %s", filepath.Base(target))
+		util.LogModuleDebug("p2p", "[P2P] cache: own binary already cached: %s", filepath.Base(target))
 		return nil
 	}
 
@@ -115,10 +115,10 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 	hashHex := hex.EncodeToString(hasher.Sum(nil))
 	shaPath := target + ".sha256"
 	if err := os.WriteFile(shaPath, []byte(hashHex+"\n"), 0644); err != nil {
-		util.LogWarn("[P2P] cache: failed to write sha256 sidecar: %v", err)
+		util.LogModuleWarn("p2p", "[P2P] cache: failed to write sha256 sidecar: %v", err)
 	}
 
-	util.LogInfo("[P2P] cache: seeded own binary: %s (sha256: %s)", filepath.Base(target), hashHex[:16]+"...")
+	util.LogModuleInfo("p2p", "[P2P] cache: seeded own binary: %s (sha256: %s)", filepath.Base(target), hashHex[:16]+"...")
 	return nil
 }
 
@@ -133,7 +133,7 @@ type CacheEntryInfo struct {
 func (c *BinaryCache) Inventory() []CacheEntryInfo {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
-		util.LogDebug("[P2P] cache: read dir: %v", err)
+		util.LogModuleDebug("p2p", "[P2P] cache: read dir: %v", err)
 		return nil
 	}
 
@@ -218,7 +218,7 @@ func (c *BinaryCache) StoreFromReader(platform, arch, buildTag, version string, 
 		return "", fmt.Errorf("rename to cache: %w", err)
 	}
 
-	util.LogInfo("[P2P] cache: stored %s/%s/%s/%s → %s", platform, arch, buildTag, version, filepath.Base(target))
+	util.LogModuleInfo("p2p", "[P2P] cache: stored %s/%s/%s/%s → %s", platform, arch, buildTag, version, filepath.Base(target))
 	return target, nil
 }
 
@@ -230,8 +230,8 @@ func CleanupBackup() {
 	}
 	bakPath := execPath + ".bak"
 	if err := os.Remove(bakPath); err != nil && !os.IsNotExist(err) {
-		util.LogDebug("[P2P] cleanup backup %s: %v", bakPath, err)
+		util.LogModuleDebug("p2p", "[P2P] cleanup backup %s: %v", bakPath, err)
 	} else if err == nil {
-		util.LogInfo("[P2P] cleanup: removed %s", bakPath)
+		util.LogModuleInfo("p2p", "[P2P] cleanup: removed %s", bakPath)
 	}
 }

@@ -124,7 +124,7 @@ func (e *Engine) SetMeshConfig(localVIPs []net.IP) {
 		}
 	}
 
-	util.LogDebug("tun: mesh interceptor set (localVIPs=%v)", localVIPs)
+	util.LogModuleDebug("tun", "tun: mesh interceptor set (localVIPs=%v)", localVIPs)
 }
 
 // SetModeBTable sets the Mode B connection tracking table.
@@ -146,7 +146,7 @@ func (e *Engine) GetModeBTable() *mesh.ModeBTable {
 // SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
 func (e *Engine) SetLocalMeshNodeID(nodeID string) {
 	e.localMeshNodeID = nodeID
-	util.LogDebug("tun: local mesh nodeID set: %s", nodeID)
+	util.LogModuleDebug("tun", "tun: local mesh nodeID set: %s", nodeID)
 }
 
 // Write writes data to the TUN device. Implements the WriteLoopDevice interface
@@ -165,7 +165,7 @@ func (e *Engine) Write(data []byte) (int, error) {
 // When set, connections to nodeid.phn will be served directly without going through OS network stack.
 func (e *Engine) SetAdminHandler(h AdminHandler) {
 	e.adminHandler = h
-	util.LogDebug("tun: admin handler set for direct connection handling")
+	util.LogModuleDebug("tun", "tun: admin handler set for direct connection handling")
 }
 
 // SetDNSDomainResolver registers a callback on the DNS hijacker that returns
@@ -174,12 +174,12 @@ func (e *Engine) SetAdminHandler(h AdminHandler) {
 //   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
 //   - subnet == nil && needsFail == false: no match, fallback to local pool
 func (e *Engine) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
-	util.LogInfo("[DNS-DEBUG] Engine.SetDNSDomainResolver() called")
+	util.LogModuleInfo("tun", "[DNS-DEBUG] Engine.SetDNSDomainResolver() called")
 	if e.dnsHijack != nil {
 		e.dnsHijack.SetDomainResolver(resolver)
-		util.LogInfo("[DNS-DEBUG] DNS hijacker resolver set successfully")
+		util.LogModuleInfo("tun", "[DNS-DEBUG] DNS hijacker resolver set successfully")
 	} else {
-		util.LogWarn("[DNS-DEBUG] DNS hijacker is nil, cannot set resolver")
+		util.LogModuleWarn("tun", "[DNS-DEBUG] DNS hijacker is nil, cannot set resolver")
 	}
 }
 
@@ -207,7 +207,7 @@ func (e *Engine) SetDNSHijacker(h *mesh.DNSHijacker, fakeIP *mesh.FakeIPPool) er
 		fakeIP.SetOnChange(e.notifyStatsChanged)
 	}
 
-	util.LogInfo("tun: DNS hijacker bound from mesh")
+	util.LogModuleInfo("tun", "tun: DNS hijacker bound from mesh")
 	return nil
 }
 
@@ -276,7 +276,7 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 			e.prefixLen = 29
 		}
 		hostIP := net.IP{ip4[0], ip4[1], ip4[2], ip4[3] + 2}
-		util.LogDebug("tun: mesh addresses: hostIP=%s prefixLen=%d", hostIP, e.prefixLen)
+		util.LogModuleDebug("tun", "tun: mesh addresses: hostIP=%s prefixLen=%d", hostIP, e.prefixLen)
 	}
 	return nil
 }
@@ -305,7 +305,7 @@ func (e *Engine) meshWriteLoop() {
 				continue
 			}
 			if _, err := dev.Write(data); err != nil {
-				util.LogWarn("tun: meshWriteLoop device.Write failed: %v", err)
+				util.LogModuleWarn("tun", "tun: meshWriteLoop device.Write failed: %v", err)
 			}
 		}
 	}
@@ -324,7 +324,7 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16])
 		dstIP := net.IP(data[16:20])
-		util.LogDebug("tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
+		util.LogModuleDebug("tun", "tun: WriteMeshPacket %s -> %s len=%d", srcIP, dstIP, len(data))
 	}
 
 	// Queue for async write to TUN device
@@ -647,7 +647,7 @@ func (e *Engine) StartStack() error {
 	}
 
 	e.logEvent("gVisor netstack started")
-	util.LogDebug("gVisor netstack started")
+	util.LogModuleDebug("tun", "gVisor netstack started")
 	return nil
 }
 
@@ -738,7 +738,7 @@ func (e *Engine) StartTUN() error {
 	dnsAddr := e.netstack.DNSAddr()
 	dnsIP := net.IP(dnsAddr.AsSlice())
 	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
-		util.LogWarn("tun: failed to set system dns: %v", err)
+		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
 
 	if e.ruleConf != nil {
@@ -758,20 +758,20 @@ func (e *Engine) StartTUN() error {
 		dnsIPIP := net.IP(dnsAddr2.AsSlice())
 		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIPIP, e.dataDir)
 		if err != nil {
-			util.LogWarn("dhcp: failed to create server: %v", err)
+			util.LogModuleWarn("tun", "dhcp: failed to create server: %v", err)
 		} else if srv != nil {
 			if err := srv.Start(); err != nil {
-				util.LogWarn("dhcp: failed to start: %v", err)
+				util.LogModuleWarn("tun", "dhcp: failed to start: %v", err)
 			} else {
 				e.dhcpSrv = srv
-				util.LogDebug("dhcp: server started on %s", ifaceName)
+				util.LogModuleDebug("tun", "dhcp: server started on %s", ifaceName)
 			}
 		}
 	}
 
 	e.logEvent("TUN device started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", "", dev.Name(), 0, nil, "ok", nil)
-	util.LogDebug("TUN device started on %s", dev.Name())
+	util.LogModuleDebug("tun", "TUN device started on %s", dev.Name())
 	return nil
 }
 
@@ -787,10 +787,10 @@ func (e *Engine) Start() error {
 		if err := e.StartTUN(); err != nil {
 			// TUN failed, but keep netstack running for mesh-only mode.
 			// Log a prominent warning so the user knows TUN is not available.
-			util.LogWarn("========================================")
-			util.LogWarn("TUN initialization failed: %v", err)
-			util.LogWarn("Continuing in mesh-only mode (no TUN device)")
-			util.LogWarn("========================================")
+			util.LogModuleWarn("tun", "========================================")
+			util.LogModuleWarn("tun", "TUN initialization failed: %v", err)
+			util.LogModuleWarn("tun", "Continuing in mesh-only mode (no TUN device)")
+			util.LogModuleWarn("tun", "========================================")
 			// Don't call StopStack() - netstack is still needed for mesh
 			return nil
 		}
@@ -841,7 +841,7 @@ func (e *Engine) StopTUN() error {
 	e.tunWG.Wait()
 
 	e.logEvent("TUN device stopped")
-	util.LogDebug("TUN device stopped (netstack still running)")
+	util.LogModuleDebug("tun", "TUN device stopped (netstack still running)")
 	return nil
 }
 
@@ -863,7 +863,7 @@ func (e *Engine) StopStack() error {
 	}
 
 	e.logEvent("gVisor netstack stopped")
-	util.LogDebug("gVisor netstack stopped")
+	util.LogModuleDebug("tun", "gVisor netstack stopped")
 	return nil
 }
 
@@ -902,7 +902,7 @@ func (e *Engine) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
 func (e *Engine) readLoop() {
-	util.LogInfo("[TUN-READ] readLoop started")
+	util.LogModuleInfo("tun", "[TUN-READ] readLoop started")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer e.tunWG.Done()
@@ -923,13 +923,13 @@ func (e *Engine) readLoop() {
 				return
 			default:
 				if errors.Is(err, ErrSessionClosed) {
-					util.LogError("tun: session closed, stopping read loop: %v", err)
+					util.LogModuleError("tun", "tun: session closed, stopping read loop: %v", err)
 					return
 				}
 				if errors.Is(err, syscall.EAGAIN) {
 					continue
 				}
-				util.LogWarn("tun: read error: %v", err)
+				util.LogModuleWarn("tun", "tun: read error: %v", err)
 				continue
 			}
 		}
@@ -937,11 +937,28 @@ func (e *Engine) readLoop() {
 			continue
 		}
 		e.readPackets.Add(1)
+		
+		// Diagnostic: log every packet entry to readLoop
+		util.LogModuleInfo("tun", "[TUN-READ-ENTRY] packet #%d len=%d version=%d", e.readPackets.Load(), n, readBuf[0]>>4)
 		e.notifyStatsChanged()
 
 		// Debug: log every 1000th packet
 		if e.readPackets.Load()%1000 == 0 {
-			util.LogInfo("[TUN-READ] packet #%d: version=%d len=%d firstByte=%02x", e.readPackets.Load(), readBuf[0]>>4, n, readBuf[0])
+			util.LogModuleInfo("tun", "[TUN-READ] packet #%d: version=%d len=%d firstByte=%02x", e.readPackets.Load(), readBuf[0]>>4, n, readBuf[0])
+		}
+
+		// Diagnostic: log ALL IPv4 packets unconditionally for debugging
+		if n >= 20 && readBuf[0]>>4 == 4 { // IPv4
+			dstIP := net.IP(readBuf[16:20])
+			srcIP := net.IP(readBuf[12:16])
+			proto := readBuf[9]
+			// Always log with both old and new format to diagnose logging issue
+			util.LogModuleInfo("tun", "[TUN-READ-ALL] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+			util.LogModuleInfo("tun", "[TUN-READ] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+			if dstIP.IsPrivate() || dstIP.IsLoopback() {
+				// Log all packets to private/loopback addresses for debugging
+				util.LogModuleInfo("tun", "[TUN-READ-PRIVATE] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+			}
 		}
 
 		// Determine network protocol from the IP version field.
@@ -952,7 +969,7 @@ func (e *Engine) readLoop() {
 		case 6:
 			proto = ipv6.ProtocolNumber
 		default:
-			util.LogWarn("tun: dropped non-IP packet (version=%d)", readBuf[0]>>4)
+			util.LogModuleWarn("tun", "tun: dropped non-IP packet (version=%d)", readBuf[0]>>4)
 			continue
 		}
 
@@ -963,12 +980,12 @@ func (e *Engine) readLoop() {
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
 			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
-				util.LogDebug("tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
+				util.LogModuleDebug("tun", "tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if len(dstIP) >= 2 && ((dstIP[0] == 10 && dstIP[1] == 99) || (dstIP[0] == 172 && dstIP[1] == 30)) {
 				// Phaethon diagnostic: always log 10.99.0.0/24 and 172.30.0.0/24 packets
-				util.LogInfo("[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
+				util.LogModuleInfo("tun", "[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
 			} else if e.readPackets.Load() <= 200 {
-				util.LogDebug("tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
+				util.LogModuleDebug("tun", "tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
 			}
 		}
 
@@ -1004,7 +1021,7 @@ func (e *Engine) readLoop() {
 			// Log first 5 packets, then every 100th packet; always log RST
 			pktNum := e.readPackets.Load()
 			if mesh.ForwardingTraceEnabled() && (flags&0x04 != 0 || pktNum < 5 || pktNum%100 == 0) {
-				util.LogInfo("[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
+				util.LogModuleInfo("tun", "[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
 					pktNum, srcIP, srcPort, dstIP, dstPort, flagStr)
 			}
 		}
@@ -1019,7 +1036,7 @@ func (e *Engine) readLoop() {
 				dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
 				if mesh.ForwardingTraceEnabled() {
 					pktNum := e.readPackets.Load()
-					util.LogInfo("[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",
+					util.LogModuleInfo("tun", "[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",
 						pktNum, srcIP, srcPort, dstIP, dstPort, n)
 				}
 			}
@@ -1033,7 +1050,7 @@ func (e *Engine) readLoop() {
 			if newTTL == 0 {
 				srcIP := net.IP(pktBuf[12:16])
 				dstIP := net.IP(pktBuf[16:20])
-				util.LogInfo("[TRACEROUTE] readLoop: TTL expired (was %d), generating ICMP: %s -> %s",
+				util.LogModuleInfo("tun", "[TRACEROUTE] readLoop: TTL expired (was %d), generating ICMP: %s -> %s",
 					oldTTL, srcIP, dstIP)
 				// Manually generate ICMP Time Exceeded
 				// ICMP source = local VIP, destination = source of received packet
@@ -1054,9 +1071,9 @@ func (e *Engine) readLoop() {
 					e.mu.Unlock()
 					if dev != nil {
 						if _, err := dev.Write(icmpPkt); err != nil {
-							util.LogWarn("[TRACEROUTE] readLoop: failed to write ICMP to TUN: %v", err)
+							util.LogModuleWarn("tun", "[TRACEROUTE] readLoop: failed to write ICMP to TUN: %v", err)
 						} else {
-							util.LogDebug("[TRACEROUTE] readLoop: wrote ICMP to TUN")
+							util.LogModuleDebug("tun", "[TRACEROUTE] readLoop: wrote ICMP to TUN")
 						}
 					}
 				}
@@ -1086,7 +1103,7 @@ func (e *Engine) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, 
 		if n >= hl+4 {
 			dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
 			if dstPort == 53 && mesh.ForwardingTraceEnabled() {
-				util.LogInfo("[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
+				util.LogModuleInfo("tun", "[INJECT-DEBUG] Injecting DNS packet: %s -> %s:%d", srcIP, dstIP, dstPort)
 			}
 		}
 	}
@@ -1125,7 +1142,7 @@ func relay(conn, target net.Conn) {
 				return
 			case <-ticker.C:
 				if time.Since(time.Unix(0, lastActivity.Load())) > 5*time.Minute {
-					util.LogInfo("[TUN] relay idle timeout: connection idle for 5 minutes, closing")
+					util.LogModuleInfo("tun", "[TUN] relay idle timeout: connection idle for 5 minutes, closing")
 					conn.Close()
 					target.Close()
 					return
@@ -1193,7 +1210,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	var domain string
 	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 		domain = d
-		util.LogDebug("tun: udp fake-ip %s -> %s", dstAddr, domain)
+		util.LogModuleDebug("tun", "tun: udp fake-ip %s -> %s", dstAddr, domain)
 	}
 
 	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
@@ -1202,7 +1219,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		expectedDomain := e.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogDebug("tun: local mesh nodeID domain detected (udp): %s -> 127.0.0.1", domain)
+			util.LogModuleDebug("tun", "tun: local mesh nodeID domain detected (udp): %s -> 127.0.0.1", domain)
 		}
 	}
 
@@ -1231,7 +1248,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	defer rec.Close()
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogDebug("[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
+		util.LogModuleDebug("tun", "[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
 		rec.Reject()
 		return
 	}
@@ -1243,7 +1260,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
 		targetConn, err = dialer.ChainUDPDial(proxy)
 		if err != nil {
-			util.LogWarn("[%s] [%s] udp dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			util.LogModuleWarn("tun", "[%s] [%s] udp dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
 			rec.Fail(err)
 			return
 		}
@@ -1256,12 +1273,12 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 		if localNodeDomain {
 			// Local mesh nodeID domain: connect to localhost
 			dialIP = net.ParseIP("127.0.0.1")
-			util.LogDebug("[%s] [%s] udp local mesh nodeID domain: %s -> %s", inbound, connID, domain, dialIP)
+			util.LogModuleDebug("tun", "[%s] [%s] udp local mesh nodeID domain: %s -> %s", inbound, connID, domain, dialIP)
 		} else if dialIP == nil {
 			// Resolve the real IP for DIRECT connections.
 			ips, err := e.resolveForDirect(resolvedAddr)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[%s] [%s] udp resolve %s fail: %v", inbound, connID, resolvedAddr, err)
+				util.LogModuleWarn("tun", "[%s] [%s] udp resolve %s fail: %v", inbound, connID, resolvedAddr, err)
 				rec.Fail(err)
 				return
 			}
@@ -1272,11 +1289,11 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 					break
 				}
 			}
-			util.LogDebug("[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, resolvedAddr, dialIP)
+			util.LogModuleDebug("tun", "[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, resolvedAddr, dialIP)
 		}
 		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
 		if err != nil {
-			util.LogWarn("[%s] [%s] udp direct dial %s:%d fail: %v", inbound, connID, resolvedAddr, resolvedPort, err)
+			util.LogModuleWarn("tun", "[%s] [%s] udp direct dial %s:%d fail: %v", inbound, connID, resolvedAddr, resolvedPort, err)
 			rec.SetDst(dialIP.String()).Fail(err)
 			return
 		}
@@ -1285,7 +1302,7 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
-	util.LogDebug("[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogModuleDebug("tun", "[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	rec.Establish(connID, proxy, proxy.IsDirect())
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
@@ -1361,7 +1378,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	}
 	// Compute correlation ID for trace linking
 	corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
-	util.LogDebug("[TCP-DEBUG] [%s] handleConn called", corrID)
+	util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] handleConn called", corrID)
 	defer conn.Close()
 
 	// Check if this is a Fake-IP: restore original domain.
@@ -1369,9 +1386,9 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	if e.fakeIP != nil {
 		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
 			domain = d
-			util.LogDebug("[TCP-DEBUG] [%s] fake-ip lookup: %s -> %s", corrID, dstAddr, domain)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> %s", corrID, dstAddr, domain)
 		} else {
-			util.LogDebug("[TCP-DEBUG] [%s] fake-ip lookup: %s -> (no domain)", corrID, dstAddr)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> (no domain)", corrID, dstAddr)
 		}
 	}
 
@@ -1381,12 +1398,12 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		expectedDomain := e.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogDebug("[TCP-DEBUG] [%s] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", corrID, domain, expectedDomain)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", corrID, domain, expectedDomain)
 		} else {
-			util.LogDebug("[TCP-DEBUG] [%s] domain %s != expected %s", corrID, domain, expectedDomain)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] domain %s != expected %s", corrID, domain, expectedDomain)
 		}
 	} else {
-		util.LogDebug("[TCP-DEBUG] [%s] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", corrID, domain, e.localMeshNodeID)
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", corrID, domain, e.localMeshNodeID)
 	}
 
 	// Phaethon patch #13: Check if dstAddr is one of our own mesh VIPs.
@@ -1396,7 +1413,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	if !localNodeDomain && e.localMeshVIPs != nil {
 		if e.localMeshVIPs[dstAddr] {
 			localNodeDomain = true
-			util.LogDebug("[TCP-DEBUG] [%s] dstAddr %s is local mesh VIP -> will serve via admin handler", corrID, dstAddr)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dstAddr %s is local mesh VIP -> will serve via admin handler", corrID, dstAddr)
 		}
 	}
 
@@ -1408,7 +1425,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	// retry re-resolves DNS and gets the fresh fake-IP.
 	if domain == "" && e.fakeIP != nil {
 		if ip := net.ParseIP(dstAddr); ip != nil && e.fakeIP.InAllocRange(ip) {
-			util.LogWarn("[TUN] [%s] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
+			util.LogModuleWarn("tun", "[TUN] [%s] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
 				corrID, connID, dstAddr, dstPort, srcAddr)
 			return
 		}
@@ -1416,7 +1433,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 
 	// Diagnostic: log Mode B connections prominently
 	if modeBMapping != nil {
-		util.LogInfo("[TCP-DIAG] [%s] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
+		util.LogModuleInfo("tun", "[TCP-DIAG] [%s] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
 			corrID, connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
 	}
 
@@ -1436,9 +1453,9 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		}
 		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
 		if proxy != nil {
-			util.LogDebug("[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
 		} else {
-			util.LogDebug("[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
 		}
 	}
 
@@ -1452,7 +1469,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogDebug("[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)
+		util.LogModuleDebug("tun", "[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)
 		rec.Reject()
 		return
 	}
@@ -1460,7 +1477,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	if localNodeDomain {
 		// Direct admin handler: bypass OS network stack entirely
 		if e.adminHandler != nil {
-			util.LogDebug("[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
 			rec.SetDst("localhost").Establish(connID, proxy, false)
 			e.adminHandler.ServeConn(conn)
 			return
@@ -1468,22 +1485,22 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		// Fallback: dial localhost via OS network stack
 		localIP := dialer.GetLocalIPForDial(nil)
 		dialAddr := localIP.String()
-		util.LogDebug("[TCP-DEBUG] [%s] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", corrID, connID, dialAddr, resolvedPort)
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", corrID, connID, dialAddr, resolvedPort)
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
-			util.LogWarn("[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, resolvedPort, err)
+			util.LogModuleWarn("tun", "[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, resolvedPort, err)
 			rec.SetDst(dialAddr).Fail(err)
 			return
 		}
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		util.LogDebug("[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
-			util.LogWarn("[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			util.LogModuleWarn("tun", "[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
 			rec.Fail(err)
 			return
 		}
-		util.LogDebug("[TCP-DEBUG] [%s] proxy dial success", connID)
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] proxy dial success", connID)
 	} else {
 		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
 		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
@@ -1491,10 +1508,10 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		dialAddr := resolvedAddr
 		if net.ParseIP(dialAddr) == nil {
 			// Resolve the real IP for DIRECT connections.
-			util.LogDebug("[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, dialAddr)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, dialAddr)
 			ips, err := e.resolveForDirect(dialAddr)
 			if err != nil || len(ips) == 0 {
-				util.LogWarn("[%s] [%s] resolve %s fail: %v", inbound, connID, dialAddr, err)
+				util.LogModuleWarn("tun", "[%s] [%s] resolve %s fail: %v", inbound, connID, dialAddr, err)
 				rec.Fail(err)
 				return
 			}
@@ -1505,35 +1522,35 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 					break
 				}
 			}
-			util.LogDebug("[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
 		}
 		// Phaethon patch #13: Mesh IP destinations use mesh routing (MeshDial)
 		// instead of OS network stack direct dial. Mesh IPs (100.64.0.0/10) are
 		// not routable via the OS network stack; they must go through the mesh
 		// network's gVisor netstack.
 		if ip := net.ParseIP(dialAddr); ip != nil && e.isMeshIP(ip) {
-			util.LogDebug("[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
 			targetConn, err = dialer.MeshDial(dialAddr, resolvedPort, srcAddr, inbound, modeBMapping)
 			if err != nil {
-				util.LogWarn("[%s] [%s] mesh dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+				util.LogModuleWarn("tun", "[%s] [%s] mesh dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
 				rec.SetDst(dialAddr).Fail(err)
 				return
 			}
-			util.LogDebug("[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
 		} else {
-			util.LogDebug("[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
 			targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
 			if err != nil {
-				util.LogWarn("[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
+				util.LogModuleWarn("tun", "[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
 				rec.SetDst(dialAddr).Fail(err)
 				return
 			}
-			util.LogDebug("[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
+			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
 		}
 	}
 	defer targetConn.Close()
 
-	util.LogDebug("[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
 	rec.Establish(connID, proxy, proxy.IsDirect())
 	relay(conn, targetConn)
 }

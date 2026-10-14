@@ -214,9 +214,9 @@ func (c *Socks5UDPConn) keepalive() {
 		}
 		if _, err := c.ctrlConn.Read(buf); err != nil {
 			if util.IsClosedErr(err) {
-				util.LogDebug("[SOCKS5-DIALER] keepalive: ctrlConn closed (normal): %v (ctrl=%s)", err, c.ctrlConn.RemoteAddr())
+				util.LogModuleDebug("socks5", "keepalive: ctrlConn closed (normal): %v (ctrl=%s)", err, c.ctrlConn.RemoteAddr())
 			} else {
-				util.LogInfo("[SOCKS5-DIALER] keepalive: ctrlConn read error=%v, closing relay (ctrl=%s)", err, c.ctrlConn.RemoteAddr())
+				util.LogModuleInfo("socks5", "keepalive: ctrlConn read error=%v, closing relay (ctrl=%s)", err, c.ctrlConn.RemoteAddr())
 			}
 			c.Close()
 			return
@@ -413,9 +413,9 @@ func Socks5UDPAssociate(proxy *config.Proxy) (*Socks5UDPConn, error) {
 	go conn.keepalive()
 
 	if proxy.Next != nil {
-		util.LogDebug("[SOCKS5-UDP] [%s] UDP ASSOCIATE cascade ok, nextHop=%s, relay=%s", proxy.Name, relayAddr, nextRelayAddr)
+		util.LogModuleDebug("socks5", "UDP ASSOCIATE cascade ok, nextHop=%s, relay=%s", proxy.Name, relayAddr, nextRelayAddr)
 	} else {
-		util.LogDebug("[SOCKS5-UDP] [%s] UDP ASSOCIATE ok, relay=%s", proxy.Name, relayAddr)
+		util.LogModuleDebug("socks5", "UDP ASSOCIATE ok, relay=%s", proxy.Name, relayAddr)
 	}
 	return conn, nil
 }

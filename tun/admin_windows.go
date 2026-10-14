@@ -52,7 +52,7 @@ func RestartAsAdmin() error {
 	}
 	argStr := strings.Join(args, " ")
 
-	util.LogInfo("tun: requesting administrator privileges via UAC...")
+	util.LogModuleInfo("tun-admin", "requesting administrator privileges via UAC...")
 
 	verb, _ := windows.UTF16PtrFromString("runas")
 	exePtr, _ := windows.UTF16PtrFromString(exe)

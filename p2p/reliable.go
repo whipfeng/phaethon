@@ -478,7 +478,7 @@ func (s *sendState) getStats(channelDrops uint64) (srtt, rto, jitter time.Durati
 	}
 	
 	// Log stats when queried
-	util.LogInfo("[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d channelDrops=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
+	util.LogModuleInfo("p2p", "[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d channelDrops=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
 		300, sent, lost, pendingOld, channelDrops, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost)
 	return
 }

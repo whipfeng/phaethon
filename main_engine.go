@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"phaethon/config"
 	"phaethon/dialer"
 	"phaethon/mesh"
@@ -46,7 +47,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled {
 		if !tun.Available() {
-			util.LogWarn("TUN enabled but not available on this platform, falling back to TUN-disabled mode for mesh")
+			util.LogModuleWarn("engine", "TUN enabled but not available on this platform, falling back to TUN-disabled mode for mesh")
 			tunEnabled = false
 		} else {
 			// Clean up any residual TUN state from previous crashes before starting.
@@ -55,9 +56,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	}
 
 	if tunEnabled {
-		util.LogInfo("TUN enabled, initializing engine...")
+		util.LogModuleInfo("engine", "TUN enabled, initializing engine...")
 	} else {
-		util.LogInfo("TUN disabled, starting gVisor netstack for mesh...")
+		util.LogModuleInfo("engine", "TUN disabled, starting gVisor netstack for mesh...")
 	}
 
 	engine := tun.NewEngine(ruleConf)
@@ -71,7 +72,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	if meshMgr.GetSubnet() != "" {
 		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {
 			if err := engine.ConfigureMeshAddresses(subnet); err != nil {
-				util.LogWarn("failed to configure mesh addresses: %v", err)
+				util.LogModuleWarn("engine", "failed to configure mesh addresses: %v", err)
 			}
 		}
 	}
@@ -79,15 +80,26 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		engine.SetMeshNetwork(network)
 	}
 
+	// Inject phaethon's module logging into gVisor fork diagnostic logs.
+	// Route "gvisor" module (per-packet verbose logs) to Debug level to reduce noise.
+	// IPIP tunnel handler logs use "ipip" module and stay at Info level.
+	stack.SetLogFunc(func(module string, format string, args ...interface{}) {
+		if module == "gvisor" {
+			util.LogModuleDebug(module, format, args...)
+		} else {
+			util.LogModuleInfo(module, format, args...)
+		}
+	})
+
 	if err := engine.Start(); err != nil {
-		util.LogError("Engine start failed: %v", err)
+		util.LogModuleError("engine", "Engine start failed: %v", err)
 		return nil
 	}
 
 	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
 	if tunEnabled && !engine.IsTUNRunning() {
-		util.LogWarn("TUN was enabled in config but failed to start - running in mesh-only mode")
-		util.LogWarn("Local applications cannot use the proxy, but mesh routing still works")
+		util.LogModuleWarn("engine", "TUN was enabled in config but failed to start - running in mesh-only mode")
+		util.LogModuleWarn("engine", "Local applications cannot use the proxy, but mesh routing still works")
 	}
 
 	// Wire mesh to engine immediately after start.
@@ -98,7 +110,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// This must happen after engine.Start() (netstack is ready) and before
 		// any DNS queries are made.
 		if err := engine.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool()); err != nil {
-			util.LogError("Failed to bind DNS hijacker: %v", err)
+			util.LogModuleError("engine", "Failed to bind DNS hijacker: %v", err)
 			return nil
 		}
 
@@ -133,7 +145,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// Set admin handler for direct connection handling (bypasses OS network stack)
 		if adminHandler != nil {
 			engine.SetAdminHandler(adminHandler)
-			util.LogInfo("Admin handler set for direct connection handling")
+			util.LogModuleInfo("engine", "Admin handler set for direct connection handling")
 		}
 
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
@@ -145,9 +157,9 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 
 		// Configure netstack with mesh manager (Link NICs + RouteSelector)
 		engine.GetNetstack().SetMeshManager(meshMgr)
-		util.LogInfo("Mesh manager configured on netstack (Link NICs + RouteSelector)")
+		util.LogModuleInfo("engine", "Mesh manager configured on netstack (Link NICs + RouteSelector)")
 
-		util.LogInfo("Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
+		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
 	return &TUNResource{engine: engine}

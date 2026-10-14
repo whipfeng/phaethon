@@ -73,7 +73,7 @@ type recvResult struct {
 // direct frame transport.
 func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	proxy := d.Proxy
-	util.LogInfo("[HTUNNEL-DIRECT] [%s] dialP2PDirect called, URL=%s", proxy.Name, proxy.URL)
+	util.LogModuleInfo("htunnel", "dialP2PDirect called, URL=%s", proxy.Name, proxy.URL)
 	crypto := util.NewHTunnelCrypto(proxy.Password)
 
 	req, _ := http.NewRequest("HEAD", fmt.Sprintf("%s//0", proxy.URL), nil)
@@ -97,7 +97,7 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		return nil, fmt.Errorf("htunnel-direct: no connection ID returned")
 	}
 
-	util.LogDebug("[HTUNNEL-DIRECT] [%s] [%s] mesh channel established via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), proxy.URL, connectionID)
+	util.LogModuleDebug("htunnel", "mesh channel established via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), proxy.URL, connectionID)
 
 	// v0.2.0: get h_tunnel config (nil = use defaults)
 	// TODO: pass config through dialer chain instead of accessing global
@@ -184,7 +184,7 @@ func (t *htunnelDirectTransport) SendBatch(frames []frame.Frame) error {
 	go func() {
 		defer func() { <-t.sendSem }()
 		if err := t.postBatch(data, seq); err != nil {
-			util.LogDebug("[HTUNNEL-DIRECT] batch POST fail (seq=%d, frames=%d): %v", seq, len(frames), err)
+			util.LogModuleDebug("htunnel", "batch POST fail (seq=%d, frames=%d): %v", seq, len(frames), err)
 		}
 	}()
 	return nil
@@ -218,7 +218,7 @@ func (t *htunnelDirectTransport) sendFrame(frameType byte, payload []byte) error
 	go func() {
 		defer func() { <-t.sendSem }()
 		if err := t.postBatch(data, seq); err != nil {
-			util.LogDebug("[HTUNNEL-DIRECT] POST fail (seq=%d): %v", seq, err)
+			util.LogModuleDebug("htunnel", "POST fail (seq=%d): %v", seq, err)
 		}
 	}()
 	return nil
@@ -266,12 +266,12 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 	if isCtrlLoop {
 		loopType = "ctrl"
 	}
-	util.LogInfo("[HTUNNEL-GET-DIAG] recvLoop started: proxy=%s connID=%s type=%s", t.proxy.Name, t.connectionID, loopType)
+	util.LogModuleDebug("htunnel", "recvLoop started: proxy=%s connID=%s type=%s", t.proxy.Name, t.connectionID, loopType)
 	readSeq := 0
 	for {
 		select {
 		case <-t.closed:
-			util.LogInfo("[HTUNNEL-GET-DIAG] recvLoop exiting: proxy=%s connID=%s type=%s closed", t.proxy.Name, t.connectionID, loopType)
+			util.LogModuleDebug("htunnel", "recvLoop exiting: proxy=%s connID=%s type=%s closed", t.proxy.Name, t.connectionID, loopType)
 			return
 		default:
 		}
@@ -292,11 +292,11 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		// Context timeout = wait time + buffer for network latency
 		ctxTimeout := waitTime + 10*time.Second
 		ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
-		util.LogInfo("[HTUNNEL-GET-DIAG] sending GET: proxy=%s connID=%s seq=%d url=%s", t.proxy.Name, t.connectionID, seq, getURL)
+		util.LogModuleDebug("htunnel", "sending GET: proxy=%s connID=%s seq=%d url=%s", t.proxy.Name, t.connectionID, seq, getURL)
 		resp, err := t.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
-			util.LogWarn("[HTUNNEL-GET-DIAG] GET failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
+			util.LogModuleWarn("htunnel", "GET failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
 			t.sendError(fmt.Errorf("htunnel-direct: get fail: %w", err), isCtrlLoop)
 			return
 		}
@@ -305,10 +305,10 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		resp.Body.Close()
 		cancel()
 
-		util.LogInfo("[HTUNNEL-GET-DIAG] GET response: proxy=%s connID=%s seq=%d status=%d bodyLen=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode, len(body))
+		util.LogModuleDebug("htunnel", "GET response: proxy=%s connID=%s seq=%d status=%d bodyLen=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode, len(body))
 
 		if resp.StatusCode == 410 {
-			util.LogWarn("[HTUNNEL-GET-DIAG] GET 410: proxy=%s connID=%s seq=%d server closed channel", t.proxy.Name, t.connectionID, seq)
+			util.LogModuleWarn("htunnel", "GET 410: proxy=%s connID=%s seq=%d server closed channel", t.proxy.Name, t.connectionID, seq)
 			t.sendError(io.ErrClosedPipe, isCtrlLoop)
 			return
 		}
@@ -316,7 +316,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			continue // timeout, retry
 		}
 		if resp.StatusCode != 200 {
-			util.LogWarn("[HTUNNEL-GET-DIAG] GET bad status: proxy=%s connID=%s seq=%d status=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode)
+			util.LogModuleWarn("htunnel", "GET bad status: proxy=%s connID=%s seq=%d status=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode)
 			t.sendError(fmt.Errorf("htunnel-direct: get status: %d", resp.StatusCode), isCtrlLoop)
 			return
 		}
@@ -325,7 +325,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			if t.crypto.IsEnabled() {
 				body, err = t.crypto.OpenBody(body)
 				if err != nil {
-					util.LogWarn("[HTUNNEL-GET-DIAG] decrypt failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
+					util.LogModuleWarn("htunnel", "decrypt failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
 					t.sendError(fmt.Errorf("htunnel-direct: decrypt fail: %w", err), isCtrlLoop)
 					return
 				}
@@ -341,15 +341,15 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			for reader.Len() > 0 {
 				ft, payload, err := frame.ReadFrame(reader)
 				if err != nil {
-					util.LogWarn("[HTUNNEL-GET-DIAG] frame parse failed: proxy=%s connID=%s seq=%d frames=%d err=%v", t.proxy.Name, t.connectionID, seq, frameCount, err)
+					util.LogModuleWarn("htunnel", "frame parse failed: proxy=%s connID=%s seq=%d frames=%d err=%v", t.proxy.Name, t.connectionID, seq, frameCount, err)
 					t.sendError(fmt.Errorf("htunnel-direct: parse frame fail: %w", err), isCtrlLoop)
 					return
 				}
 				frameCount++
-				util.LogInfo("[HTUNNEL-GET-DIAG] frame received: proxy=%s connID=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, seq, frameCount, ft, len(payload))
+				util.LogModuleDebug("htunnel", "frame received: proxy=%s connID=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, seq, frameCount, ft, len(payload))
 				t.routeFrame(ft, payload, isCtrlLoop)
 			}
-			util.LogInfo("[HTUNNEL-GET-DIAG] batch complete: proxy=%s connID=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, seq, frameCount)
+			util.LogModuleDebug("htunnel", "batch complete: proxy=%s connID=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, seq, frameCount)
 		} else {
 			// v0.2.0: empty batch
 			t.adjustWaitTime(false)
@@ -471,7 +471,7 @@ func (t *htunnelDirectTransport) adjustWaitTime(isFullBatch bool) {
 				newWait = minWait
 			}
 			if newWait != t.waitTime {
-				util.LogDebug("[HTUNNEL-DIRECT] [%s] wait time decreased: %v → %v (full batches)",
+				util.LogModuleDebug("htunnel", "wait time decreased: %v → %v (full batches)",
 					connIDLog, t.waitTime, newWait)
 				t.waitTime = newWait
 			}
@@ -487,7 +487,7 @@ func (t *htunnelDirectTransport) adjustWaitTime(isFullBatch bool) {
 				newWait = maxWait
 			}
 			if newWait != t.waitTime {
-				util.LogDebug("[HTUNNEL-DIRECT] [%s] wait time increased: %v → %v (empty batches)",
+				util.LogModuleDebug("htunnel", "wait time increased: %v → %v (empty batches)",
 					connIDLog, t.waitTime, newWait)
 				t.waitTime = newWait
 			}
@@ -540,7 +540,7 @@ func (t *htunnelDirectTransport) sendHeartbeat() {
 		if len(connIDLog) > 8 {
 			connIDLog = connIDLog[:8]
 		}
-		util.LogDebug("[HTUNNEL-DIRECT] [%s] heartbeat fail (seq=%d): %v", connIDLog, seq, err)
+		util.LogModuleDebug("htunnel", "heartbeat fail (seq=%d): %v", connIDLog, seq, err)
 		return
 	}
 	resp.Body.Close()

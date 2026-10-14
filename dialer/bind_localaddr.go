@@ -21,13 +21,13 @@ import (
 func selectLocalIP(ifIndex int, dst net.IP) net.IP {
 	iface, err := net.InterfaceByIndex(ifIndex)
 	if err != nil {
-		util.LogWarn("dialer/bind: interface %d not found: %v", ifIndex, err)
+		util.LogModuleWarn("bind", "dialer/bind: interface %d not found: %v", ifIndex, err)
 		return nil
 	}
 
 	addrs, err := iface.Addrs()
 	if err != nil {
-		util.LogWarn("dialer/bind: failed to get addresses for interface %d: %v", ifIndex, err)
+		util.LogModuleWarn("bind", "dialer/bind: failed to get addresses for interface %d: %v", ifIndex, err)
 		return nil
 	}
 
@@ -61,7 +61,7 @@ func selectLocalIP(ifIndex int, dst net.IP) net.IP {
 	}
 
 	if bestIP == nil {
-		util.LogWarn("dialer/bind: no suitable IP on interface %d for dst %s", ifIndex, dst)
+		util.LogModuleWarn("bind", "dialer/bind: no suitable IP on interface %d for dst %s", ifIndex, dst)
 		return nil
 	}
 

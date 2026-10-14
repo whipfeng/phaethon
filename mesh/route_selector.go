@@ -20,9 +20,10 @@ import (
 //   - true  → branch 3 (advertised non-mesh). Cacheable=true because the
 //     egress node selection is static per prefix.
 type SelectRouteResult struct {
-	LinkNIC   tcpip.NICID
-	EgressEIP net.IP // only meaningful when NeedIPIP=true
-	NeedIPIP  bool
+	LinkNIC    tcpip.NICID
+	EgressEIP  net.IP // only meaningful when NeedIPIP=true
+	NeedIPIP   bool
+	LocalStack bool   // true = deliver to local stack (for locally-owned advertised routes)
 }
 
 // SelectRouteFunc decides how to route a non-local destination.
@@ -93,8 +94,8 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 				LocalStack: dst != cfg.LocalVIP,
 				Cacheable:  true,
 			}
-			// Phaethon diagnostic: log Branch 1 decisions
-			util.LogInfo("[ROUTE-SELECTOR] dst=%s branch=1 localSubnet=%v localStack=%v vip=%v",
+			// Module-level logging for RouteSelector
+			util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=1 localSubnet=%v localStack=%v vip=%v",
 				dstIP, cfg.LocalSubnet, decision.LocalStack, dst == cfg.LocalVIP)
 			return decision
 		}
@@ -111,21 +112,38 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 
 		// Branches 2 & 3: SelectRoute covers both mesh and non-mesh advertised.
 		if cfg.SelectRoute != nil {
-			if r, ok := cfg.SelectRoute(dstIP); ok && r.LinkNIC != 0 {
-				var egressEIP tcpip.Address
-				if r.NeedIPIP && r.EgressEIP != nil {
-					egressEIP = tcpip.AddrFrom4Slice(r.EgressEIP)
+			if r, ok := cfg.SelectRoute(dstIP); ok {
+				// Check if this is a local delivery (locally-owned advertised route)
+				if r.LocalStack {
+					decision := stack.RouteDecision{
+						EgressNIC:  1,
+						LocalStack: true,
+						Cacheable:  true,
+					}
+					util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=local_advertised localStack=true", dstIP)
+					return decision
 				}
-				decision := stack.RouteDecision{
-					EgressNIC: r.LinkNIC,
-					NeedIPIP:  r.NeedIPIP,
-					EgressEIP: egressEIP,
-					Cacheable: r.NeedIPIP, // IPIP egress is static per prefix; mesh is dynamic
+				// Otherwise, it's a forwarding decision (branch 2 or 3)
+				if r.LinkNIC != 0 {
+					var egressEIP tcpip.Address
+					if r.NeedIPIP && r.EgressEIP != nil {
+						egressEIP = tcpip.AddrFrom4Slice(r.EgressEIP)
+					}
+					decision := stack.RouteDecision{
+						EgressNIC: r.LinkNIC,
+						NeedIPIP:  r.NeedIPIP,
+						EgressEIP: egressEIP,
+						Cacheable: r.NeedIPIP, // IPIP egress is static per prefix; mesh is dynamic
+					}
+					// Module-level logging for RouteSelector
+					branch := 2
+					if r.NeedIPIP {
+						branch = 3
+					}
+					util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=%d egressNIC=%d needIPIP=%v egressEIP=%v localStack=%v cacheable=%v",
+						dstIP, branch, decision.EgressNIC, decision.NeedIPIP, decision.EgressEIP, decision.LocalStack, decision.Cacheable)
+					return decision
 				}
-				// Diagnostic: log the full decision
-				TraceForwardingRoute(dstIP, "branch=select_route egressNIC=%d needIPIP=%v localStack=%v cacheable=%v",
-					decision.EgressNIC, decision.NeedIPIP, decision.LocalStack, decision.Cacheable)
-				return decision
 			}
 		}
 

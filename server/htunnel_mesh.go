@@ -62,7 +62,7 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 
 	w.Header().Set(htHeaderConnectionID, strconv.FormatInt(id, 10))
 	w.WriteHeader(200)
-	util.LogInfo("[HT-SVR] [%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
+	util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
 
 	go handleP2PTransport(meshChannelTransport{ch: ch}, "mesh:"+connID)
 
@@ -82,7 +82,7 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 	if len(data) > 0 {
 		data, err = ch.crypto.OpenBody(data)
 		if err != nil {
-			util.LogWarn("[HT-SVR] [%s] [%s] mesh POST decrypt fail: %v", s.Mapping.Name, ch.connID, err)
+			util.LogModuleWarn("htunnel", "[%s] [%s] mesh POST decrypt fail: %v", s.Mapping.Name, ch.connID, err)
 			w.WriteHeader(410)
 			return
 		}
@@ -91,7 +91,7 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 	for len(data) >= 3 {
 		ft, payload, err := frame.ReadFrame(bytes.NewReader(data))
 		if err != nil {
-			util.LogWarn("[HT-SVR] [%s] [%s] mesh POST parse fail: %v", s.Mapping.Name, ch.connID, err)
+			util.LogModuleWarn("htunnel", "[%s] [%s] mesh POST parse fail: %v", s.Mapping.Name, ch.connID, err)
 			w.WriteHeader(410)
 			return
 		}

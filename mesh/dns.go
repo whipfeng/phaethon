@@ -378,64 +378,39 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
 	localAddr := tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr}
 
-	const maxAttempts = 3
-	const perAttemptTimeout = 5 * time.Second
-	var lastErr error
+	const timeout = 3 * time.Second
 
 	util.LogModuleInfo("dns", "[DNS] forwardToRemote: START domain=%s remoteGIP=%s localGIP=%s", "unknown", remoteGIP, h.dnsAddr)
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d dialing %s:53", attempt, maxAttempts, remoteGIP)
-		conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
-		if err != nil {
-			lastErr = fmt.Errorf("dial %s:53: %v", remoteGIP, err)
-			util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d dial failed: %v", attempt, maxAttempts, err)
-			continue
-		}
-		util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d dial success, localAddr=%s", attempt, maxAttempts, conn.LocalAddr())
+	conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
+	}
+	defer conn.Close()
+	util.LogModuleInfo("dns", "[DNS] forwardToRemote: dial success, localAddr=%s", conn.LocalAddr())
 
-		if err := conn.SetDeadline(time.Now().Add(perAttemptTimeout)); err != nil {
-			conn.Close()
-			lastErr = fmt.Errorf("set deadline: %v", err)
-			util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d set deadline failed: %v", attempt, maxAttempts, err)
-			continue
-		}
-
-		util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d writing query (%d bytes)", attempt, maxAttempts, len(query))
-		if _, err := conn.Write(query); err != nil {
-			conn.Close()
-			lastErr = fmt.Errorf("write query: %v", err)
-			util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d write failed: %v", attempt, maxAttempts, err)
-			continue
-		}
-		util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d write success, waiting for response", attempt, maxAttempts)
-
-		resp := make([]byte, 512)
-		n, err := conn.Read(resp)
-		localAddrStr := conn.LocalAddr().String()
-		conn.Close()
-		if err != nil {
-			lastErr = fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, localAddrStr, err)
-			util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d read failed: %v", attempt, maxAttempts, err)
-			continue
-		}
-		util.LogModuleInfo("dns", "[DNS] forwardToRemote: attempt %d/%d read success, got %d bytes", attempt, maxAttempts, n)
-
-		respIP, ttl := ParseDNSResponseIP(resp[:n])
-		if respIP == nil {
-			lastErr = fmt.Errorf("no A record in response")
-			util.LogModuleDebug("dns", "[DNS] forwardToRemote: attempt %d/%d no A record", attempt, maxAttempts)
-			continue
-		}
-		if attempt > 1 {
-			util.LogModuleDebug("dns", "[DNS] forwardToRemote: succeeded on attempt %d/%d Fake-IP=%s ttl=%v", attempt, maxAttempts, respIP, ttl)
-		} else {
-			util.LogModuleDebug("dns", "[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
-		}
-		return respIP, ttl, nil
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, 0, fmt.Errorf("set deadline: %v", err)
 	}
 
-	return nil, 0, fmt.Errorf("all %d attempts failed, last error: %v", maxAttempts, lastErr)
+	util.LogModuleInfo("dns", "[DNS] forwardToRemote: writing query (%d bytes)", len(query))
+	if _, err := conn.Write(query); err != nil {
+		return nil, 0, fmt.Errorf("write query: %v", err)
+	}
+
+	resp := make([]byte, 512)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, conn.LocalAddr(), err)
+	}
+	util.LogModuleInfo("dns", "[DNS] forwardToRemote: read success, got %d bytes", n)
+
+	respIP, ttl := ParseDNSResponseIP(resp[:n])
+	if respIP == nil {
+		return nil, 0, fmt.Errorf("no A record in response")
+	}
+	util.LogModuleDebug("dns", "[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
+	return respIP, ttl, nil
 }
 
 // SlicePayload implements tcpip.Payload for byte slices.

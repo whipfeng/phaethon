@@ -50,7 +50,7 @@
         <div class="mesh-section" id="mesh-identity-section">
             <div class="mesh-section-header">
                 <h4 data-i18n="mesh.nodeIdentity">Node Identity</h4>
-                <button onclick="saveMeshIdentity()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+                <button onclick="saveMeshIdentity(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
             </div>
             <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.nodeIdentityHelp">Changing node-id will change this node's identity in the mesh network. Other nodes will need to rediscover this node.</p>
             <div class="form-group">
@@ -68,7 +68,7 @@
         <div class="mesh-section" id="mesh-keepalive-section">
             <div class="mesh-section-header">
                 <h4 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h4>
-                <button onclick="saveTCPKeepalive()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+                <button onclick="saveTCPKeepalive(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
             </div>
             <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.tcpKeepaliveHelp">TCP keepalive detects dead connections. When a link breaks, keepalive probes fail and the connection is closed after (idle + interval × count) seconds.</p>
             <div class="form-group">
@@ -240,24 +240,33 @@
         }
     }
 
-    window.saveMeshIdentity = async function() {
-        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-        if (!password) return;
-
-        const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
-        const subnet = document.getElementById('mesh-identity-subnet').value.trim();
-        const statusEl = document.getElementById('mesh-identity-status');
-
-        if (!nodeid) {
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
-            statusEl.style.color = 'var(--danger)';
-            return;
+    window.saveMeshIdentity = async function(event) {
+        const btn = event ? event.target : null;
+        const originalText = btn ? btn.textContent : '';
+        const originalDisabled = btn ? btn.disabled : false;
+        
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = i18n.t('common.processing') || 'Processing...';
         }
-
-        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-        statusEl.style.color = 'var(--text-muted)';
-
+        
         try {
+            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+            if (!password) return;
+
+            const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
+            const subnet = document.getElementById('mesh-identity-subnet').value.trim();
+            const statusEl = document.getElementById('mesh-identity-status');
+
+            if (!nodeid) {
+                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
+                statusEl.style.color = 'var(--danger)';
+                return;
+            }
+
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+            statusEl.style.color = 'var(--text-muted)';
+
             const res = await fetch('./api/config/mesh', {
                 method: 'PUT',
                 headers: {
@@ -279,6 +288,11 @@
         } catch (err) {
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
+        } finally {
+            if (btn) {
+                btn.disabled = originalDisabled;
+                btn.textContent = originalText;
+            }
         }
     };
 
@@ -297,19 +311,28 @@
         }
     }
 
-    window.saveTCPKeepalive = async function() {
-        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-        if (!password) return;
-
-        const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
-        const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
-        const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
-        const statusEl = document.getElementById('mesh-keepalive-status');
-
-        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-        statusEl.style.color = 'var(--text-muted)';
-
+    window.saveTCPKeepalive = async function(event) {
+        const btn = event ? event.target : null;
+        const originalText = btn ? btn.textContent : '';
+        const originalDisabled = btn ? btn.disabled : false;
+        
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = i18n.t('common.processing') || 'Processing...';
+        }
+        
         try {
+            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+            if (!password) return;
+
+            const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
+            const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
+            const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
+            const statusEl = document.getElementById('mesh-keepalive-status');
+
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+            statusEl.style.color = 'var(--text-muted)';
+
             // First get current mesh config
             const getRes = await fetch('./api/config/mesh');
             if (!getRes.ok) throw new Error('Failed to load current config');
@@ -338,6 +361,11 @@
         } catch (err) {
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
+        } finally {
+            if (btn) {
+                btn.disabled = originalDisabled;
+                btn.textContent = originalText;
+            }
         }
     };
 

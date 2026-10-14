@@ -2321,6 +2321,11 @@ function escapeHtml(s) {
 }
 
 async function triggerMeshGossip() {
+    const btn = event.target;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = i18n.t('common.processing') || 'Processing...';
+    
     try {
         const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
         if (resp.ok) {
@@ -2330,6 +2335,9 @@ async function triggerMeshGossip() {
         }
     } catch (err) {
         showToast(i18n.t('mesh.gossipError') + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
     }
 }
 

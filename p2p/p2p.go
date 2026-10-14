@@ -864,6 +864,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 		peer.transport = transport
 		peer.writeCh = make(chan writeReq, 512)
+		peer.highPriorityCh = make(chan writeReq, 256)
 		peer.controlCh = make(chan writeReq, 128)
 		// Preserve sendState/recvState across reconnections to maintain loss/RTT history.
 		// Only create new state on first connection.

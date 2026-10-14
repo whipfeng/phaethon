@@ -133,7 +133,7 @@ type peerSender struct {
 }
 
 func (s *peerSender) Send(data []byte) error {
-	util.LogModuleInfo("p2p", "[P2P-SENDER-DIAG] Send called nodeID=%s peer.ID=%s dataLen=%d", s.nodeID, s.peer.ID, len(data))
+	util.LogModuleDebug("p2p", "[P2P-SENDER-DIAG] Send called nodeID=%s peer.ID=%s dataLen=%d", s.nodeID, s.peer.ID, len(data))
 	return enqueueWrite(s.peer, frame.FrameMeshPacket, data, false) // data frame, fire-and-forget
 }
 
@@ -350,11 +350,11 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
 			// Diagnostic: log IPIP packets (proto=4) sent via writeSingleFrame
 			if len(req.data) >= 20 && req.data[0]>>4 == 4 && req.data[9] == 4 {
-				util.LogModuleInfo("p2p", "[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
+				util.LogModuleDebug("p2p", "[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
 			}
 		}
 		if req.frameType == frame.FrameHello {
-			util.LogModuleInfo("p2p", "[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
+			util.LogModuleDebug("p2p", "[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
 		}
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
 			if req.frameType == frame.FrameMeshPacket {
@@ -387,7 +387,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s batch=%d", peer.ID, len(batch))
 				// Diagnostic: log first 20 bytes of each packet to identify IPIP
 				if len(req.data) >= 20 {
-					util.LogModuleInfo("p2p", "[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
+					util.LogModuleDebug("p2p", "[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
 						peer.ID, len(req.data), req.data[0]>>4, req.data[9], req.data[:20])
 				}
 			}
@@ -437,7 +437,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			// Diagnostic: log what we read from writeCh
 			if req.frameType == frame.FrameMeshPacket && len(req.data) >= 20 {
-				util.LogModuleInfo("p2p", "[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
+				util.LogModuleDebug("p2p", "[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
 					peer.ID, len(req.data), req.data[0]>>4, req.data[9])
 			}
 			// Coalesce more data frames (non-blocking)
@@ -455,7 +455,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			// Diagnostic: log batch contents before writing
 			for _, b := range batch {
 				if b.frameType == frame.FrameMeshPacket && len(b.data) >= 20 {
-					util.LogModuleInfo("p2p", "[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
+					util.LogModuleDebug("p2p", "[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
 						peer.ID, len(b.data), b.data[0]>>4, b.data[9], len(batch))
 				}
 			}
@@ -497,7 +497,7 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error
 func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case <-peer.stopCh:
-		util.LogModuleInfo("p2p", "[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
+		util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
 		return ErrPeerStopped
 	default:
 	}
@@ -509,7 +509,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogModuleInfo("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
+			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
 		}
 		return nil

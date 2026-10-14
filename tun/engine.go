@@ -939,12 +939,12 @@ func (e *Engine) readLoop() {
 		e.readPackets.Add(1)
 		
 		// Diagnostic: log every packet entry to readLoop
-		util.LogModuleInfo("tun", "[TUN-READ-ENTRY] packet #%d len=%d version=%d", e.readPackets.Load(), n, readBuf[0]>>4)
+		util.LogModuleDebug("tun", "[TUN-READ-ENTRY] packet #%d len=%d version=%d", e.readPackets.Load(), n, readBuf[0]>>4)
 		e.notifyStatsChanged()
 
 		// Debug: log every 1000th packet
 		if e.readPackets.Load()%1000 == 0 {
-			util.LogModuleInfo("tun", "[TUN-READ] packet #%d: version=%d len=%d firstByte=%02x", e.readPackets.Load(), readBuf[0]>>4, n, readBuf[0])
+			util.LogModuleDebug("tun", "[TUN-READ] packet #%d: version=%d len=%d firstByte=%02x", e.readPackets.Load(), readBuf[0]>>4, n, readBuf[0])
 		}
 
 		// Diagnostic: log ALL IPv4 packets unconditionally for debugging
@@ -953,11 +953,11 @@ func (e *Engine) readLoop() {
 			srcIP := net.IP(readBuf[12:16])
 			proto := readBuf[9]
 			// Always log with both old and new format to diagnose logging issue
-			util.LogModuleInfo("tun", "[TUN-READ-ALL] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
-			util.LogModuleInfo("tun", "[TUN-READ] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+			util.LogModuleDebug("tun", "[TUN-READ-ALL] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+			util.LogModuleDebug("tun", "[TUN-READ] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
 			if dstIP.IsPrivate() || dstIP.IsLoopback() {
 				// Log all packets to private/loopback addresses for debugging
-				util.LogModuleInfo("tun", "[TUN-READ-PRIVATE] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
+				util.LogModuleDebug("tun", "[TUN-READ-PRIVATE] src=%s dst=%s proto=%d len=%d", srcIP, dstIP, proto, n)
 			}
 		}
 
@@ -983,7 +983,7 @@ func (e *Engine) readLoop() {
 				util.LogModuleDebug("tun", "tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
 			} else if len(dstIP) >= 2 && ((dstIP[0] == 10 && dstIP[1] == 99) || (dstIP[0] == 172 && dstIP[1] == 30)) {
 				// Phaethon diagnostic: always log 10.99.0.0/24 and 172.30.0.0/24 packets
-				util.LogModuleInfo("tun", "[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
+				util.LogModuleDebug("tun", "[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
 			} else if e.readPackets.Load() <= 200 {
 				util.LogModuleDebug("tun", "tun read: %s -> %s (proto=%d len=%d)", srcIP, dstIP.String(), ipProto, n)
 			}
@@ -1021,7 +1021,7 @@ func (e *Engine) readLoop() {
 			// Log first 5 packets, then every 100th packet; always log RST
 			pktNum := e.readPackets.Load()
 			if mesh.ForwardingTraceEnabled() && (flags&0x04 != 0 || pktNum < 5 || pktNum%100 == 0) {
-				util.LogModuleInfo("tun", "[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
+				util.LogModuleDebug("tun", "[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
 					pktNum, srcIP, srcPort, dstIP, dstPort, flagStr)
 			}
 		}

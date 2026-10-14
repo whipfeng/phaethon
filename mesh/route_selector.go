@@ -95,7 +95,7 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 				Cacheable:  true,
 			}
 			// Module-level logging for RouteSelector
-			util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=1 localSubnet=%v localStack=%v vip=%v",
+			util.LogModuleDebug("route", "[ROUTE-SELECTOR] dst=%s branch=1 localSubnet=%v localStack=%v vip=%v",
 				dstIP, cfg.LocalSubnet, decision.LocalStack, dst == cfg.LocalVIP)
 			return decision
 		}
@@ -120,7 +120,7 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 						LocalStack: true,
 						Cacheable:  true,
 					}
-					util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=local_advertised localStack=true", dstIP)
+					util.LogModuleDebug("route", "[ROUTE-SELECTOR] dst=%s branch=local_advertised localStack=true", dstIP)
 					return decision
 				}
 				// Otherwise, it's a forwarding decision (branch 2 or 3)
@@ -140,7 +140,7 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 					if r.NeedIPIP {
 						branch = 3
 					}
-					util.LogModuleInfo("route", "[ROUTE-SELECTOR] dst=%s branch=%d egressNIC=%d needIPIP=%v egressEIP=%v localStack=%v cacheable=%v",
+					util.LogModuleDebug("route", "[ROUTE-SELECTOR] dst=%s branch=%d egressNIC=%d needIPIP=%v egressEIP=%v localStack=%v cacheable=%v",
 						dstIP, branch, decision.EgressNIC, decision.NeedIPIP, decision.EgressEIP, decision.LocalStack, decision.Cacheable)
 					return decision
 				}

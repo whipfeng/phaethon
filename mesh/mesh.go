@@ -1127,7 +1127,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	}
 	// Log IPIP packets (proto=4) at INFO level for debugging
 	if len(frame) >= 20 && frame[9] == 4 {
-		util.LogModuleInfo("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
+		util.LogModuleDebug("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, srcIP, dstIP, frame[9], len(frame))
 	}
 	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",

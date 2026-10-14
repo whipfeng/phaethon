@@ -78,7 +78,7 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 		srcIP := net.IP(data[12:16]).To4()
 		dstIP := net.IP(data[16:20]).To4()
 		protoNum := data[9]
-		util.LogModuleInfo("linknic", "[LINKNIC-INBOUND] linkNIC=%d peer=%s len=%d proto=%d src=%s dst=%s",
+		util.LogModuleDebug("linknic", "[LINKNIC-INBOUND] linkNIC=%d peer=%s len=%d proto=%d src=%s dst=%s",
 			l.nicID, l.peerNodeID, len(data), protoNum, srcIP, dstIP)
 	}
 	
@@ -138,7 +138,7 @@ func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 // which clones before queueing); we only read the data synchronously.
 func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	// Module-level logging for LinkNIC
-	util.LogModuleInfo("linknic", "[LINKNIC-WRITEPACKETS-ENTRY] linkNIC=%d peer=%s pktCount=%d selfPtr=%p", l.nicID, l.peerNodeID, pkts.Len(), l)
+	util.LogModuleDebug("linknic", "[LINKNIC-WRITEPACKETS-ENTRY] linkNIC=%d peer=%s pktCount=%d selfPtr=%p", l.nicID, l.peerNodeID, pkts.Len(), l)
 
 	if l.sender == nil {
 		return 0, &tcpip.ErrInvalidEndpointState{}
@@ -157,7 +157,7 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 			proto := pktData[9]
 			srcIP := net.IP(pktData[12:16]).To4()
 			dstIP := net.IP(pktData[16:20]).To4()
-			util.LogModuleInfo("linknic", "[LINKNIC-WRITEPACKETS] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
+			util.LogModuleDebug("linknic", "[LINKNIC-WRITEPACKETS] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
 				l.nicID, l.peerNodeID, len(pktData), version, proto, srcIP, dstIP)
 		}
 
@@ -187,7 +187,7 @@ func (l *LinkNIC) WritePacket(r *stack.Route, pkt *stack.PacketBuffer) tcpip.Err
 		proto := pktData[9]
 		srcIP := net.IP(pktData[12:16]).To4()
 		dstIP := net.IP(pktData[16:20]).To4()
-		util.LogModuleInfo("linknic", "[LINKNIC-WRITE] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
+		util.LogModuleDebug("linknic", "[LINKNIC-WRITE] linkNIC=%d peer=%s len=%d version=%d proto=%d src=%s dst=%s",
 			l.nicID, l.peerNodeID, len(pktData), version, proto, srcIP, dstIP)
 		
 		// Also try TraceForwarding for TCP/UDP packets

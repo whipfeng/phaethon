@@ -285,7 +285,8 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute               // sorted by prefix length (longest first)
+	routes     []MeshRoute               // sorted by prefix length (longest first) - kept for backward compatibility
+	routeTrie  *routeTrie                // IP prefix trie for O(log R) lookup
 	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo      // nodeID → info
 	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
@@ -1568,11 +1569,16 @@ func claimHopFor(peer *PeerInfo, nodeID string) (int, bool) {
 }
 
 func (m *MeshManager) recomputeRoutes() {
+	// Take all snapshots under lock upfront to minimize lock holding time
 	m.mu.RLock()
 	advertise := make([]string, len(m.advertise))
 	copy(advertise, m.advertise)
 	domainSuffixes := make([]string, len(m.domainSuffixes))
 	copy(domainSuffixes, m.domainSuffixes)
+	staticRoutes := make([]config.MeshStaticRoute, len(m.staticRoutes))
+	copy(staticRoutes, m.staticRoutes)
+	staticDomainSuffixes := make([]config.MeshStaticDomainSuffix, len(m.staticDomainSuffixes))
+	copy(staticDomainSuffixes, m.staticDomainSuffixes)
 	m.mu.RUnlock()
 
 	peers := m.topology.GetAllPeers()
@@ -1679,9 +1685,8 @@ func (m *MeshManager) recomputeRoutes() {
 		})
 	}
 
-	// Merge static routes into unified route table
-	m.mu.RLock()
-	for _, staticRoute := range m.staticRoutes {
+	// Merge static routes into unified route table (using snapshot taken earlier)
+	for _, staticRoute := range staticRoutes {
 		_, prefix, err := net.ParseCIDR(staticRoute.Prefix)
 		if err != nil {
 			continue
@@ -1712,7 +1717,6 @@ func (m *MeshManager) recomputeRoutes() {
 			})
 		}
 	}
-	m.mu.RUnlock()
 
 	// Sort routes by prefix length (longest first) for longest-match lookup.
 	sort.Slice(routes, func(i, j int) bool {
@@ -1731,14 +1735,12 @@ func (m *MeshManager) recomputeRoutes() {
 		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
 
-	// Add static domain suffix routes (from config) as static
-	m.mu.RLock()
-	for _, suffixRoute := range m.staticDomainSuffixes {
+	// Add static domain suffix routes (from config snapshot taken earlier) as static
+	for _, suffixRoute := range staticDomainSuffixes {
 		for _, nodeID := range suffixRoute.NodeIDs {
 			domainTrie.Insert(suffixRoute.Suffix, nodeID, RouteSourceStatic)
 		}
 	}
-	m.mu.RUnlock()
 
 	// Build a map of nodeID → (subnet, hop) from ClaimedSubnets
 	type nodeInfoLocal struct {
@@ -1839,9 +1841,16 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
+	// Build route trie for O(log R) lookup
+	routeTrie := newRouteTrie()
+	for i := range routes {
+		routeTrie.Insert(routes[i].Prefix, &routes[i])
+	}
+
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,
+		routeTrie:  routeTrie,
 		domainTrie: domainTrie,
 		nodeMap:    nodeMap,
 		bestPaths:  bestPaths,
@@ -1887,30 +1896,26 @@ func (m *MeshManager) recomputeRoutes() {
 }
 
 // findRoute returns the MeshRoute matching dstIP, or nil if no match.
+// Uses route trie for O(log R) lookup instead of linear scan.
 func (m *MeshManager) findRoute(dstIP net.IP) *MeshRoute {
 	rt := m.getRouteTable()
-
-	for i := range rt.routes {
-		if rt.routes[i].Prefix.Contains(dstIP) {
-			return &rt.routes[i]
-		}
-	}
-	return nil
+	return rt.routeTrie.Lookup(dstIP)
 }
 
 // findNextHops returns the next hop peers for a given destination IP.
+// Uses route trie for O(log R) lookup instead of linear scan.
 func (m *MeshManager) findNextHops(dstIP net.IP) []PeerWithHop {
 	rt := m.getRouteTable()
 
-	// Step 1: Find route (prefix → nodeIDs)
+	// Step 1: Find route using trie (prefix → nodeIDs)
+	route := rt.routeTrie.Lookup(dstIP)
+	if route == nil {
+		return nil
+	}
+
 	var targetNodeIDs []string
-	for i := range rt.routes {
-		if rt.routes[i].Prefix.Contains(dstIP) {
-			for _, entry := range rt.routes[i].Entries {
-				targetNodeIDs = append(targetNodeIDs, entry.NodeID)
-			}
-			break
-		}
+	for _, entry := range route.Entries {
+		targetNodeIDs = append(targetNodeIDs, entry.NodeID)
 	}
 	if len(targetNodeIDs) == 0 {
 		return nil

@@ -211,13 +211,14 @@ type Peer struct {
 	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接，仅内部使用）
 	FriendlyName string // 友好名称（代理名，仅展示）
 
-	transport  frame.FrameTransport
-	writeCh    chan writeReq
-	controlCh  chan writeReq // hello/gossip priority queue
-	stopCh     chan struct{}
-	stopOnce   sync.Once     // ensures stopCh is closed exactly once
-	meshSender *peerSender   // mesh peer sender, created on hello
-	proxy      *config.Proxy // proxy config this peer was started with
+	transport        frame.FrameTransport
+	writeCh          chan writeReq // bulk data frames (>= 500 bytes)
+	highPriorityCh   chan writeReq // high priority data frames (< 500 bytes)
+	controlCh        chan writeReq // hello/gossip priority queue
+	stopCh           chan struct{}
+	stopOnce         sync.Once // ensures stopCh is closed exactly once
+	meshSender       *peerSender   // mesh peer sender, created on hello
+	proxy            *config.Proxy // proxy config this peer was started with
 
 	// Reliable transmission state (v7)
 	sendState *sendState // tracks outgoing control frames
@@ -227,8 +228,9 @@ type Peer struct {
 	linkNIC *mesh.LinkNIC
 
 	// Channel overflow statistics (atomic counters)
-	writeChDrops    uint64 // Frames dropped due to writeCh full
-	controlChDrops  uint64 // Frames dropped due to controlCh full
+	writeChDrops        uint64 // Frames dropped due to writeCh full
+	highPriorityChDrops uint64 // Frames dropped due to highPriorityCh full
+	controlChDrops      uint64 // Frames dropped due to controlCh full
 }
 
 // NewP2PManager creates a new P2P manager.
@@ -423,11 +425,25 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		default:
 		}
 
+		// Fast path: high priority data frames, non-blocking.
+		select {
+		case req := <-peer.highPriorityCh:
+			if !writeSingleFrame(req, req.isControl) {
+				return
+			}
+			continue
+		default:
+		}
+
 		// Block until we have something to send
 		select {
 		case <-peer.stopCh:
 			return
 		case req := <-peer.controlCh:
+			if !writeSingleFrame(req, req.isControl) {
+				return
+			}
+		case req := <-peer.highPriorityCh:
 			if !writeSingleFrame(req, req.isControl) {
 				return
 			}
@@ -502,30 +518,108 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	default:
 	}
 
+	// Select channel based on priority:
+	// 1. Control frames -> controlCh (highest priority)
+	// 2. Small data frames (< 500 bytes) -> highPriorityCh
+	// 3. Bulk data frames (>= 500 bytes) -> writeCh
 	ch := peer.writeCh
 	if req.isControl {
 		ch = peer.controlCh
+	} else if len(req.data) < 500 {
+		ch = peer.highPriorityCh
 	}
+
+	// RED (Random Early Detection) for data frames only
+	// Control frames are never dropped to ensure ACKs get through
+	if !req.isControl {
+		queueLen := len(ch)
+		capacity := cap(ch)
+		
+		// RED parameters
+		minThreshold := capacity * 50 / 100  // 50% capacity
+		maxThreshold := capacity * 80 / 100  // 80% capacity
+		
+		if queueLen >= maxThreshold {
+			// Queue almost full: drop with high probability (80%)
+			if queueLen >= capacity-1 || (queueLen >= maxThreshold && randomDrop(80)) {
+				if req.frameType == frame.FrameMeshPacket {
+					util.LogModuleWarn("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s reason=max_threshold", 
+						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer))
+					mesh.TraceForwarding("p2p_red_drop", req.data, "peer=%s reason=max_threshold", peer.ID)
+				}
+				if ch == peer.highPriorityCh {
+					atomic.AddUint64(&peer.highPriorityChDrops, 1)
+				} else {
+					atomic.AddUint64(&peer.writeChDrops, 1)
+				}
+				return ErrQueueFull
+			}
+		} else if queueLen >= minThreshold {
+			// Queue between min and max: drop with increasing probability (0-50%)
+			// Linear increase: probability = (queueLen - minThreshold) / (maxThreshold - minThreshold) * 50%
+			dropProbability := (queueLen - minThreshold) * 50 / (maxThreshold - minThreshold)
+			if randomDrop(dropProbability) {
+				if req.frameType == frame.FrameMeshPacket {
+					util.LogModuleDebug("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s probability=%d%%", 
+						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer), dropProbability)
+					mesh.TraceForwarding("p2p_red_drop", req.data, "peer=%s probability=%d", peer.ID, dropProbability)
+				}
+				if ch == peer.highPriorityCh {
+					atomic.AddUint64(&peer.highPriorityChDrops, 1)
+				} else {
+					atomic.AddUint64(&peer.writeChDrops, 1)
+				}
+				return ErrQueueFull
+			}
+		}
+	}
+
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
+			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d chLen=%d priority=%s", 
+				peer.ID, len(req.data), len(ch), channelPriorityName(ch, peer))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
 		}
 		return nil
 	default:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d writeChCap=%d", peer.ID, len(req.data), cap(ch))
+			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d chCap=%d priority=%s", 
+				peer.ID, len(req.data), cap(ch), channelPriorityName(ch, peer))
 			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
 		}
 		if req.isControl {
 			atomic.AddUint64(&peer.controlChDrops, 1)
+		} else if ch == peer.highPriorityCh {
+			atomic.AddUint64(&peer.highPriorityChDrops, 1)
 		} else {
 			atomic.AddUint64(&peer.writeChDrops, 1)
 		}
 		util.LogModuleDebug("p2p", "[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
+}
+
+// randomDrop returns true with the given probability (0-100)
+func randomDrop(probability int) bool {
+	if probability <= 0 {
+		return false
+	}
+	if probability >= 100 {
+		return true
+	}
+	// Use a simple random number generator
+	return int(time.Now().UnixNano()%100) < probability
+}
+
+// channelPriorityName returns the priority name for logging
+func channelPriorityName(ch chan writeReq, peer *Peer) string {
+	if ch == peer.controlCh {
+		return "control"
+	} else if ch == peer.highPriorityCh {
+		return "high"
+	}
+	return "bulk"
 }
 
 // HandleP2PTransport runs a P2P session over an established frame transport
@@ -540,16 +634,17 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	peer := &Peer{
-		ID:        fmt.Sprintf("%d", seq),
-		Status:    "connecting",
-		LastSeen:  time.Now(),
-		transport: t,
-		writeCh:   make(chan writeReq, 512),
-		controlCh: make(chan writeReq, 128),
-		stopCh:    make(chan struct{}),
-		sendState: newSendState(),
-		recvState: newRecvState(),
-		Seq:       seq,
+		ID:             fmt.Sprintf("%d", seq),
+		Status:         "connecting",
+		LastSeen:       time.Now(),
+		transport:      t,
+		writeCh:        make(chan writeReq, 512),
+		highPriorityCh: make(chan writeReq, 256),
+		controlCh:      make(chan writeReq, 128),
+		stopCh:         make(chan struct{}),
+		sendState:      newSendState(),
+		recvState:      newRecvState(),
+		Seq:            seq,
 	}
 
 	m.mu.Lock()

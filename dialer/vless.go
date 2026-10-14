@@ -80,7 +80,7 @@ func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (ne
 		return nil, fmt.Errorf("vless: read response header fail: %w", err)
 	}
 
-	util.LogDebug("[VLESS-CLI] [%s] [%s] Connecting %s:%d via %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("vless", "Connecting %s:%d via %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
 	return conn, nil
 }
 

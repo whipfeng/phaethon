@@ -80,7 +80,7 @@ func (s *ReverseServer) Close() {
 	// The registry side will call CloseByAddress when it detects control channel loss,
 	// which triggers proper teardown of matched connections.
 	s.mu.Unlock()
-	util.LogInfo("[REVERSE-SVR] [%s] graceful close: stopping new connections, %d active will drain", s.address, len(s.connections))
+	util.LogModuleInfo("reverse", "[%s] graceful close: stopping new connections, %d active will drain", s.address, len(s.connections))
 }
 
 // CloseForce immediately closes all pooled connections. Use for process shutdown.
@@ -118,10 +118,10 @@ func (s *ReverseServer) genConnection() {
 		return
 	}
 
-	util.LogInfo("[REVERSE-SVR] [%s] genConnection: dialing via %s to %s", s.address, s.proxy.Name, s.address)
+	util.LogModuleInfo("reverse", "[%s] genConnection: dialing via %s to %s", s.address, s.proxy.Name, s.address)
 	conn, err := s.reverseConnect()
 	if err != nil {
-		util.LogWarn("[REVERSE-SVR] [%s] connect fail, retry after %dms: %v", s.address, s.retryMs, err)
+		util.LogModuleWarn("reverse", "[%s] connect fail, retry after %dms: %v", s.address, s.retryMs, err)
 		time.AfterFunc(time.Duration(s.retryMs)*time.Millisecond, s.notifyNeedConn)
 		return
 	}
@@ -135,7 +135,7 @@ func (s *ReverseServer) genConnection() {
 	s.connections[conn] = struct{}{}
 	s.mu.Unlock()
 
-	util.LogDebug("[REVERSE-SVR] [%s] connected via %s, pool=%d", s.address, s.proxy.Name, currentSize+1)
+	util.LogModuleDebug("reverse", "[%s] connected via %s, pool=%d", s.address, s.proxy.Name, currentSize+1)
 
 	go s.handleReverseConn(conn)
 	s.notifyNeedConn()
@@ -224,7 +224,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 		case frame.FrameHeartbeat:
 			continue
 		case frame.FramePong:
-			util.LogInfo("[REVERSE] [%s] [conn-N/A] Match Success: Target %s <- Registered node %s", s.address, s.address, conn.RemoteAddr())
+			util.LogModuleInfo("reverse", "[%s] [conn-N/A] Match Success: Target %s <- Registered node %s", s.address, s.address, conn.RemoteAddr())
 
 			pingStopped.Store(true)
 			close(stopPing)
@@ -247,7 +247,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 		case frame.FramePeng:
 			continue
 		default:
-			util.LogError("[REVERSE-SVR] [%s] unexpected frame type: 0x%02x", s.address, frameType)
+			util.LogModuleError("reverse", "[%s] unexpected frame type: 0x%02x", s.address, frameType)
 			return
 		}
 	}
@@ -255,7 +255,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 
 func (s *ReverseServer) serveAccepted(bottomConn net.Conn) {
 	connID := util.NextConnID()
-	util.LogInfo("[REVERSE-SVR] [%s] [%s] serve accepted %s, remoteAddr=%s, localAddr=%s",
+	util.LogModuleInfo("reverse", "[%s] [%s] serve accepted %s, remoteAddr=%s, localAddr=%s",
 		s.address, connID, s.address, bottomConn.RemoteAddr(), bottomConn.LocalAddr())
 	if s.Handler != nil {
 		s.Handler(bottomConn)
@@ -326,20 +326,20 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 //	Target reply -> targetConn(B) -> build frame -> encrypt -> tunnelConn(A<->D) -> ... -> Client
 func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguration, mapping *config.Mapping, payload []byte) {
 	connID := util.NextConnID()
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] UDP channel request from %s", mapping.Name, connID, tcpConn.RemoteAddr())
+	util.LogModuleInfo("reverse", "[%s] [%s] UDP channel request from %s", mapping.Name, connID, tcpConn.RemoteAddr())
 
 	// Dialer's Port D address is the payload of the UDP_CHANNEL frame
 	// (sent by client's DialPacket before waiting for our response).
 	dialerChainAddr := string(payload)
 	if dialerChainAddr == "" {
-		util.LogError("[REVERSE-UDP] [%s] [%s] empty dialer addr in frame payload", mapping.Name, connID)
+		util.LogModuleError("reverse", "[%s] [%s] empty dialer addr in frame payload", mapping.Name, connID)
 		return
 	}
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] dialer addr: %s", mapping.Name, connID, dialerChainAddr)
+	util.LogModuleInfo("reverse", "[%s] [%s] dialer addr: %s", mapping.Name, connID, dialerChainAddr)
 
 	dialerAddr, err := net.ResolveUDPAddr("udp", dialerChainAddr)
 	if err != nil {
-		util.LogError("[REVERSE-UDP] [%s] resolve dialer addr fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] resolve dialer addr fail: %v", mapping.Name, err)
 		return
 	}
 
@@ -354,16 +354,16 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 
 	sessionKey := generateSessionKey()
 	keyHex := hex.EncodeToString(sessionKey[:])
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] sending session key", mapping.Name, connID)
+	util.LogModuleInfo("reverse", "[%s] [%s] sending session key", mapping.Name, connID)
 	if _, err := fmt.Fprintf(tcpConn, "%s\n", keyHex); err != nil {
-		util.LogError("[REVERSE-UDP] [%s] send session key fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] send session key fail: %v", mapping.Name, err)
 		return
 	}
 	crypto := util.NewReverseCrypto(sessionKey)
 
 	reverseProxy, ok := ruleConf.ProxyNames[mapping.ReverseProxy]
 	if !ok || reverseProxy == nil {
-		util.LogError("[REVERSE-UDP] [%s] reverse proxy not found: %s", mapping.Name, mapping.ReverseProxy)
+		util.LogModuleError("reverse", "[%s] reverse proxy not found: %s", mapping.Name, mapping.ReverseProxy)
 		return
 	}
 	var tunnelConn net.PacketConn
@@ -373,29 +373,29 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 		tunnelConn, err = dialer.ListenUDP()
 	}
 	if err != nil {
-		util.LogError("[REVERSE-UDP] [%s] create tunnel udp fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] create tunnel udp fail: %v", mapping.Name, err)
 		return
 	}
 
 	targetConn, err := dialer.ListenUDP()
 	if err != nil {
-		util.LogError("[REVERSE-UDP] [%s] listen target udp fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] listen target udp fail: %v", mapping.Name, err)
 		tunnelConn.Close()
 		return
 	}
 
 	tunnelLocalAddr := tunnelConn.LocalAddr().String()
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] sending tunnel addr=%s", mapping.Name, connID, tunnelLocalAddr)
+	util.LogModuleInfo("reverse", "[%s] [%s] sending tunnel addr=%s", mapping.Name, connID, tunnelLocalAddr)
 	if _, err := fmt.Fprintf(tcpConn, "%s\n", tunnelLocalAddr); err != nil {
-		util.LogError("[REVERSE-UDP] [%s] send tunnel addr fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] send tunnel addr fail: %v", mapping.Name, err)
 		tunnelConn.Close()
 		targetConn.Close()
 		return
 	}
 
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] sending READY", mapping.Name, connID)
+	util.LogModuleInfo("reverse", "[%s] [%s] sending READY", mapping.Name, connID)
 	if _, err := fmt.Fprintf(tcpConn, "READY\n"); err != nil {
-		util.LogError("[REVERSE-UDP] [%s] send READY fail: %v", mapping.Name, err)
+		util.LogModuleError("reverse", "[%s] send READY fail: %v", mapping.Name, err)
 		tunnelConn.Close()
 		targetConn.Close()
 		return
@@ -463,13 +463,13 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 		dialerAddrMu.Lock()
 		dstAddr := currentDialerAddr
 		dialerAddrMu.Unlock()
-		util.LogInfo("[REVERSE-UDP] [%s] [%s] sending initial UDP heartbeat to %s", mapping.Name, connID, dstAddr)
+		util.LogModuleInfo("reverse", "[%s] [%s] sending initial UDP heartbeat to %s", mapping.Name, connID, dstAddr)
 		if _, err := tunnelConn.WriteTo(ciphertext, dstAddr); err != nil {
-			util.LogInfo("[REVERSE-UDP] [%s] [%s] UDP heartbeat initial send fail: %v", mapping.Name, connID, err)
+			util.LogModuleInfo("reverse", "[%s] [%s] UDP heartbeat initial send fail: %v", mapping.Name, connID, err)
 			doClose()
 			return
 		}
-		util.LogInfo("[REVERSE-UDP] [%s] [%s] initial UDP heartbeat sent ok", mapping.Name, connID)
+		util.LogModuleInfo("reverse", "[%s] [%s] initial UDP heartbeat sent ok", mapping.Name, connID)
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -491,7 +491,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 			dstAddr := currentDialerAddr
 			dialerAddrMu.Unlock()
 			if _, err := tunnelConn.WriteTo(ciphertext, dstAddr); err != nil {
-				util.LogInfo("[REVERSE-UDP] [%s] [%s] UDP heartbeat send fail: %v", mapping.Name, connID, err)
+				util.LogModuleInfo("reverse", "[%s] [%s] UDP heartbeat send fail: %v", mapping.Name, connID, err)
 				doClose()
 				return
 			}
@@ -499,7 +499,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 	}()
 
 	connID = util.NextConnID()
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] channel established, tunnel=%s target=%s dialer=%s key=%x...",
+	util.LogModuleInfo("reverse", "[%s] [%s] channel established, tunnel=%s target=%s dialer=%s key=%x...",
 		mapping.Name, connID, tunnelConn.LocalAddr(), targetConn.LocalAddr(), dialerAddr, sessionKey[:4])
 
 	seenTargets := util.NewFIFOSet(maxSeenTargets)
@@ -513,7 +513,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 			if isInbound {
 				dir = "<-"
 			}
-			util.LogInfo("[REVERSE-UDP-SVR] [%s] [%s] UDP %s %s", mapping.Name, connID, dir, key)
+			util.LogModuleInfo("reverse", "[%s] [%s] UDP %s %s", mapping.Name, connID, dir, key)
 		}
 	}
 
@@ -534,9 +534,9 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 					continue
 				}
 				if util.IsClosedErr(err) {
-					util.LogDebug("[REVERSE-UDP] [%s] [%s] G1 tunnel closed (normal): %v", mapping.Name, gid, err)
+					util.LogModuleDebug("reverse", "[%s] [%s] G1 tunnel closed (normal): %v", mapping.Name, gid, err)
 				} else {
-					util.LogInfo("[REVERSE-UDP] [%s] [%s] G1 tunnel read err: %v", mapping.Name, gid, err)
+					util.LogModuleInfo("reverse", "[%s] [%s] G1 tunnel read err: %v", mapping.Name, gid, err)
 				}
 				doClose()
 				return
@@ -544,7 +544,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 
 			plaintext, err := crypto.Open(buf[:n])
 			if err != nil {
-				util.LogWarn("[REVERSE-UDP] [%s] [%s] G1 decrypt fail from=%s n=%d err=%v", mapping.Name, gid, fromAddr, n, err)
+				util.LogModuleWarn("reverse", "[%s] [%s] G1 decrypt fail from=%s n=%d err=%v", mapping.Name, gid, fromAddr, n, err)
 				continue
 			}
 
@@ -555,23 +555,23 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 
 			targetAddr, payload, err := util.ParseReverseUDPFrame(plaintext)
 			if err != nil {
-				util.LogWarn("[REVERSE-UDP] [%s] [%s] G1 parse fail from=%s n=%d err=%v", mapping.Name, gid, fromAddr, n, err)
+				util.LogModuleWarn("reverse", "[%s] [%s] G1 parse fail from=%s n=%d err=%v", mapping.Name, gid, fromAddr, n, err)
 				continue
 			}
 
 			// Heartbeat frame: ATYP=0xFF returns (nil,nil,nil)
 			if targetAddr == nil {
-				util.LogDebug("[REVERSE-UDP] [%s] [%s] G1 heartbeat from=%s", mapping.Name, gid, fromAddr)
+				util.LogModuleDebug("reverse", "[%s] [%s] G1 heartbeat from=%s", mapping.Name, gid, fromAddr)
 				continue
 			}
 
 			logSeen(targetAddr.String(), false)
-			util.LogDebug("[REVERSE-UDP] [%s] [%s] G1 recv tunnel=%s target=%s n=%d", mapping.Name, gid, fromAddr, targetAddr, len(payload))
+			util.LogModuleDebug("reverse", "[%s] [%s] G1 recv tunnel=%s target=%s n=%d", mapping.Name, gid, fromAddr, targetAddr, len(payload))
 
 			if nw, err := targetConn.WriteTo(payload, targetAddr); err != nil {
-				util.LogError("[REVERSE-UDP] [%s] [%s] G1 write target FAIL %s: %v", mapping.Name, gid, targetAddr, err)
+				util.LogModuleError("reverse", "[%s] [%s] G1 write target FAIL %s: %v", mapping.Name, gid, targetAddr, err)
 			} else {
-				util.LogDebug("[REVERSE-UDP] [%s] [%s] G1 write target OK %s: wrote=%d", mapping.Name, gid, targetAddr, nw)
+				util.LogModuleDebug("reverse", "[%s] [%s] G1 write target OK %s: wrote=%d", mapping.Name, gid, targetAddr, nw)
 			}
 		}
 	}(connID)
@@ -593,19 +593,19 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 					continue
 				}
 				if util.IsClosedErr(err) {
-					util.LogDebug("[REVERSE-UDP] [%s] [%s] G2 target closed (normal): %v", mapping.Name, gid, err)
+					util.LogModuleDebug("reverse", "[%s] [%s] G2 target closed (normal): %v", mapping.Name, gid, err)
 				} else {
-					util.LogInfo("[REVERSE-UDP] [%s] [%s] G2 target read err: %v", mapping.Name, gid, err)
+					util.LogModuleInfo("reverse", "[%s] [%s] G2 target read err: %v", mapping.Name, gid, err)
 				}
 				doClose()
 				return
 			}
 			logSeen(srcAddr.String(), true)
-			util.LogDebug("[REVERSE-UDP] [%s] [%s] G2 recv target=%s n=%d", mapping.Name, gid, srcAddr, n)
+			util.LogModuleDebug("reverse", "[%s] [%s] G2 recv target=%s n=%d", mapping.Name, gid, srcAddr, n)
 
 			frame := util.BuildReverseUDPFrame(srcAddr, buf[:n])
 			if frame == nil {
-				util.LogWarn("[REVERSE-UDP] [%s] [%s] G2 build frame fail target=%s n=%d", mapping.Name, gid, srcAddr, n)
+				util.LogModuleWarn("reverse", "[%s] [%s] G2 build frame fail target=%s n=%d", mapping.Name, gid, srcAddr, n)
 				continue
 			}
 
@@ -614,12 +614,12 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 			dstAddr := currentDialerAddr
 			dialerAddrMu.Unlock()
 			if dstAddr == nil {
-				util.LogWarn("[REVERSE-UDP] [%s] [%s] G2 dialerAddr is nil, dropping reply from %s", mapping.Name, gid, srcAddr)
+				util.LogModuleWarn("reverse", "[%s] [%s] G2 dialerAddr is nil, dropping reply from %s", mapping.Name, gid, srcAddr)
 				continue
 			}
-			util.LogDebug("[REVERSE-UDP] [%s] [%s] G2 write tunnel dst=%s n=%d", mapping.Name, gid, dstAddr, len(ciphertext))
+			util.LogModuleDebug("reverse", "[%s] [%s] G2 write tunnel dst=%s n=%d", mapping.Name, gid, dstAddr, len(ciphertext))
 			if _, err := tunnelConn.WriteTo(ciphertext, dstAddr); err != nil {
-				util.LogError("[REVERSE-UDP] [%s] [%s] G2 tunnel write err: %v", mapping.Name, gid, err)
+				util.LogModuleError("reverse", "[%s] [%s] G2 tunnel write err: %v", mapping.Name, gid, err)
 				doClose()
 				return
 			}
@@ -627,7 +627,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 	}(connID)
 
 	<-closed
-	util.LogInfo("[REVERSE-UDP] [%s] [%s] channel closed", mapping.Name, connID)
+	util.LogModuleInfo("reverse", "[%s] [%s] channel closed", mapping.Name, connID)
 }
 
 func generateSessionKey() [32]byte {
@@ -647,16 +647,16 @@ func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Ma
 
 	base := &BaseServer{RuleConf: ruleConf, Mapping: mapping}
 	connID := util.NextConnID()
-	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d mesh dial connecting", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
+	util.LogModuleInfo("reverse", "[%s] [%s] %s -> %s:%d mesh dial connecting", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 
 	targetConn, cleanup, err := base.MeshDialWithModeB(dstHost, dstPort, clientConn.RemoteAddr().String(), "Reverse")
 	if err != nil {
-		util.LogError("[REVERSE-GENERIC] [%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, dstHost, dstPort, err)
+		util.LogModuleError("reverse", "[%s] [%s] connect fail %s:%d: %v", mapping.Name, connID, dstHost, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 	defer cleanup()
 
-	util.LogInfo("[REVERSE-GENERIC] [%s] [%s] %s -> %s:%d via MESH", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
+	util.LogModuleInfo("reverse", "[%s] [%s] %s -> %s:%d via MESH", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }

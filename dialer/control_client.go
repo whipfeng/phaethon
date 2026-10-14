@@ -59,7 +59,7 @@ func (c *ControlClient) Connect() error {
 	c.ctrlConn = conn
 	c.mu.Unlock()
 
-	util.LogInfo("[CONTROL-CLIENT] connected to %s via %s as control channel", c.registryAddr(), c.proxy.Type)
+	util.LogModuleInfo("control", "connected to %s via %s as control channel", c.registryAddr(), c.proxy.Type)
 	return nil
 }
 
@@ -102,10 +102,10 @@ func (c *ControlClient) Register(req reverse.ControlRequest) (*reverse.ControlRe
 		c.address = reply.Address
 		c.mu.Unlock()
 
-		util.LogInfo("[CONTROL-CLIENT] registered: proto=%s, port=%d, address=%s",
+		util.LogModuleInfo("control", "registered: proto=%s, port=%d, address=%s",
 			req.Proto, reply.Port, reply.Address)
 	} else {
-		util.LogInfo("[CONTROL-CLIENT] register rejected: status=%s error=%s",
+		util.LogModuleInfo("control", "register rejected: status=%s error=%s",
 			reply.Status, reply.Error)
 	}
 
@@ -132,7 +132,7 @@ func (c *ControlClient) Keepalive() {
 				return
 			}
 			if err := frame.WriteFrame(conn, frame.FrameHeartbeat, nil); err != nil {
-				util.LogInfo("[CONTROL-CLIENT] heartbeat send fail to %s: %v", c.registryAddr(), err)
+				util.LogModuleInfo("control", "heartbeat send fail to %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
 			}
@@ -157,7 +157,7 @@ func (c *ControlClient) StartMonitor() {
 			conn.SetReadDeadline(time.Now().Add(70 * time.Second))
 			_, _, err := frame.ReadFrame(conn)
 			if err != nil {
-				util.LogInfo("[CONTROL-CLIENT] monitor detected disconnect from %s: %v", c.registryAddr(), err)
+				util.LogModuleInfo("control", "monitor detected disconnect from %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
 			}

@@ -69,7 +69,7 @@ func (p *FakeIPPool) LoadFromDB() {
 
 	mappings, err := db.GetAllFakeIPs()
 	if err != nil {
-		util.LogWarn("Failed to load FakeIP mappings from db: %v", err)
+		util.LogModuleWarn("dns", "Failed to load FakeIP mappings from db: %v", err)
 		return
 	}
 
@@ -105,7 +105,7 @@ func (p *FakeIPPool) LoadFromDB() {
 	}
 
 	if loaded > 0 {
-		util.LogInfo("Loaded %d FakeIP mappings from db", loaded)
+		util.LogModuleInfo("dns", "Loaded %d FakeIP mappings from db", loaded)
 	}
 }
 
@@ -115,7 +115,7 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 	defer p.mu.Unlock()
 
 	if ip, ok := p.domainToIP[domain]; ok {
-		util.LogInfo("[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
+		util.LogModuleInfo("dns", "[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
 		return ip
 	}
 
@@ -138,12 +138,12 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain
 
-		util.LogInfo("[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
+		util.LogModuleInfo("dns", "[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
 
 		// Persist to database
 		if db.IsInitialized() {
 			if err := db.PutFakeIP(domain, ipStr); err != nil {
-				util.LogWarn("[FAKEIP] Failed to persist mapping: %v", err)
+				util.LogModuleWarn("dns", "[FAKEIP] Failed to persist mapping: %v", err)
 			}
 		}
 
@@ -199,7 +199,7 @@ func (p *FakeIPPool) Release(domain string) {
 		// Delete from database
 		if db.IsInitialized() {
 			if err := db.DeleteFakeIP(domain, ipStr); err != nil {
-				util.LogWarn("Failed to delete FakeIP mapping from db: %v", err)
+				util.LogModuleWarn("dns", "Failed to delete FakeIP mapping from db: %v", err)
 			}
 		}
 

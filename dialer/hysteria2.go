@@ -177,7 +177,7 @@ func (d *Hysteria2Dialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("hysteria2-udp: UDP init fail: %w", err)
 	}
 
-	util.LogDebug("[HYSTERIA2-CLI] [%s] [%s] UDP ASSOCIATE via %s:%d", d.Proxy.Name, d.ConnIDStr(), d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("hysteria2", "UDP ASSOCIATE via %s:%d", d.Proxy.Name, d.ConnIDStr(), d.Proxy.Server, d.Proxy.Port)
 
 	return &hysteria2PacketConn{
 		hyConn: hyUDP,

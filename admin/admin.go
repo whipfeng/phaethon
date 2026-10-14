@@ -478,22 +478,22 @@ func (s *AdminServer) loadOrGenerateSessionSecret() []byte {
 
 	// Try to load existing secret
 	if data, err := os.ReadFile(secretFile); err == nil && len(data) == 32 {
-		util.LogInfo("[ADMIN] loaded session secret from %s", secretFile)
+		util.LogModuleInfo("admin", "loaded session secret from %s", secretFile)
 		return data
 	}
 
 	// Generate new secret
 	secret := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
-		util.LogError("[ADMIN] failed to generate session secret: %v", err)
+		util.LogModuleError("admin", "failed to generate session secret: %v", err)
 		return nil
 	}
 
 	// Save to file
 	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
-		util.LogWarn("[ADMIN] failed to save session secret to %s: %v", secretFile, err)
+		util.LogModuleWarn("admin", "failed to save session secret to %s: %v", secretFile, err)
 	} else {
-		util.LogInfo("[ADMIN] generated and saved session secret to %s", secretFile)
+		util.LogModuleInfo("admin", "generated and saved session secret to %s", secretFile)
 	}
 
 	return secret
@@ -751,7 +751,7 @@ func (s *AdminServer) parseTemplates() {
 // Start launches the admin HTTP server.
 func (s *AdminServer) Start() error {
 	if !s.config.Enabled {
-		util.LogInfo("[ADMIN] disabled, skipping")
+		util.LogModuleInfo("admin", "disabled, skipping")
 		return nil
 	}
 
@@ -783,24 +783,24 @@ func (s *AdminServer) Start() error {
 		// This ensures HTTPS always works for mesh access
 		cert, key, err := s.loadOrGenerateTLSCert()
 		if err != nil {
-			util.LogWarn("[ADMIN] failed to auto-generate TLS cert: %v, falling back to HTTP", err)
+			util.LogModuleWarn("admin", "failed to auto-generate TLS cert: %v, falling back to HTTP", err)
 		} else {
 			tlsCert, err := tls.X509KeyPair(cert, key)
 			if err != nil {
-				util.LogWarn("[ADMIN] failed to parse auto-generated TLS cert: %v, falling back to HTTP", err)
+				util.LogModuleWarn("admin", "failed to parse auto-generated TLS cert: %v, falling back to HTTP", err)
 			} else {
 				s.tlsConfig = &tls.Config{
 					Certificates: []tls.Certificate{tlsCert},
 				}
 				s.server.TLSConfig = s.tlsConfig
-				util.LogInfo("[ADMIN] auto-generated self-signed TLS certificate")
+				util.LogModuleInfo("admin", "auto-generated self-signed TLS certificate")
 			}
 		}
 	}
 
 	// Skip network listener if mesh-only mode
 	if s.config.MeshOnly {
-		util.LogInfo("[ADMIN] mesh-only mode enabled, no network listener")
+		util.LogModuleInfo("admin", "mesh-only mode enabled, no network listener")
 		// Start the global version heartbeat
 		util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
 		s.sseStopCh = make(chan struct{})
@@ -818,19 +818,19 @@ func (s *AdminServer) Start() error {
 
 	// Use TLS if certificate and key are configured
 	if s.tlsConfig != nil {
-		util.LogInfo("[ADMIN] starting on https://%s", addr)
+		util.LogModuleInfo("admin", "starting on https://%s", addr)
 		go func() {
 			// Wrap listener with TLS and use Serve (not ServeTLS)
 			tlsLn := tls.NewListener(ln, s.tlsConfig)
 			if err := s.server.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
-				util.LogError("[ADMIN] serve error: %v", err)
+				util.LogModuleError("admin", "serve error: %v", err)
 			}
 		}()
 	} else {
-		util.LogInfo("[ADMIN] starting on http://%s", addr)
+		util.LogModuleInfo("admin", "starting on http://%s", addr)
 		go func() {
 			if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-				util.LogError("[ADMIN] serve error: %v", err)
+				util.LogModuleError("admin", "serve error: %v", err)
 			}
 		}()
 	}
@@ -866,17 +866,17 @@ func (s *AdminServer) Close() error {
 // This allows bypassing the OS network stack for local connections (e.g., from mesh).
 func (s *AdminServer) ServeConn(conn net.Conn) {
 	if s.server == nil {
-		util.LogWarn("[ADMIN] ServeConn called but server is nil")
+		util.LogModuleWarn("admin", "ServeConn called but server is nil")
 		conn.Close()
 		return
 	}
 
-	util.LogInfo("[ADMIN] ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
+	util.LogModuleInfo("admin", "ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
 
 	// Wrap connection with TLS if configured (same as Start() does)
 	var handledConn net.Conn
 	if s.tlsConfig != nil {
-		util.LogInfo("[ADMIN] Wrapping connection with TLS")
+		util.LogModuleInfo("admin", "Wrapping connection with TLS")
 		handledConn = tls.Server(conn, s.tlsConfig)
 	} else {
 		handledConn = conn
@@ -884,11 +884,11 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 
 	ln := newSingleConnListener(handledConn)
 	// Serve blocks until the connection is closed
-	util.LogInfo("[ADMIN] Calling server.Serve")
+	util.LogModuleInfo("admin", "Calling server.Serve")
 	if err := s.server.Serve(ln); err != nil && err != io.EOF {
-		util.LogInfo("[ADMIN] ServeConn ended: %v", err)
+		util.LogModuleInfo("admin", "ServeConn ended: %v", err)
 	}
-	util.LogInfo("[ADMIN] ServeConn finished")
+	util.LogModuleInfo("admin", "ServeConn finished")
 }
 
 // singleConnListener is a net.Listener that yields a single connection then blocks until it's closed.
@@ -1155,6 +1155,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/auth", s.apiAdminAuth)
 	mux.HandleFunc("/api/setup", s.apiSetup)
 	mux.HandleFunc("/api/restart", s.apiRestart)
+	mux.HandleFunc("/api/log/modules", s.apiLogModules)
 }
 
 // ========== Page Handlers ==========
@@ -1439,7 +1440,7 @@ func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if err := s.pages.login.Execute(w, map[string]interface{}{
 		"AuthEnabled": s.config.AuthEnabled,
 	}); err != nil {
-		util.LogError("[ADMIN] login template error: %v", err)
+		util.LogModuleError("admin", "login template error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
@@ -1450,7 +1451,7 @@ func (s *AdminServer) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 		"AuthEnabled": s.config.AuthEnabled,
 		"Username":    s.config.Username,
 	}); err != nil {
-		util.LogError("[ADMIN] setup template error: %v", err)
+		util.LogModuleError("admin", "setup template error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
@@ -1653,7 +1654,7 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 		s.conf = &newConf
 		s.mu.Unlock()
 
-		util.LogInfo("[ADMIN] config updated via API")
+		util.LogModuleInfo("admin", "config updated via API")
 		jsonResponse(w, map[string]string{"status": "ok"})
 	}
 }
@@ -1754,13 +1755,13 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 		if err := s.mergeAndInitLocked(); err != nil {
 			s.mu.Unlock()
-			util.LogWarn("[ADMIN] merge after raw config import failed: %v", err)
+			util.LogModuleWarn("admin", "merge after raw config import failed: %v", err)
 			httpError(w, "merge fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.mu.Unlock()
 
-		util.LogInfo("[ADMIN] config imported into database")
+		util.LogModuleInfo("admin", "config imported into database")
 
 		// Check if full reload was requested
 		if r.URL.Query().Get("reload") == "true" {
@@ -1843,7 +1844,7 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 	s.conf = newConf
 
 	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogWarn("[ADMIN] merge after reset failed: %v", err)
+		util.LogModuleWarn("admin", "merge after reset failed: %v", err)
 		httpError(w, "merge fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1852,7 +1853,7 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 		go s.OnReload()
 	}
 
-	util.LogInfo("[ADMIN] config reset to default (foundational settings preserved atomically)")
+	util.LogModuleInfo("admin", "config reset to default (foundational settings preserved atomically)")
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
@@ -1917,7 +1918,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogInfo("[ADMIN] mesh config updated (node-id=%s, persisted to database)", newMesh.NodeID)
+		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", newMesh.NodeID)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -1986,7 +1987,7 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogInfo("[ADMIN] admin config updated (addr=%s, persisted to database)", newAdmin.Addr)
+		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", newAdmin.Addr)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -2034,7 +2035,7 @@ func (s *AdminServer) apiReload(w http.ResponseWriter, r *http.Request) {
 		s.OnReload()
 	}
 
-	util.LogInfo("[ADMIN] reload triggered via API")
+	util.LogModuleInfo("admin", "reload triggered via API")
 	jsonResponse(w, map[string]string{"status": "reload triggered"})
 }
 
@@ -2066,7 +2067,7 @@ func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	util.LogInfo("[ADMIN] restart requested via API")
+	util.LogModuleInfo("admin", "restart requested via API")
 	jsonResponse(w, map[string]string{"status": "restarting"})
 
 	// Trigger restart after response is sent
@@ -2267,20 +2268,20 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after proxy add failed: %v", err)
+			util.LogModuleWarn("admin", "merge after proxy add failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after proxy add failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after proxy add failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
+			util.LogModuleInfo("admin", "proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
 			jsonResponse(w, proxySummary(&p))
 		} else {
-			util.LogInfo("[ADMIN] proxy added to %s: %s (%s)", "database", p.Name, p.Type)
+			util.LogModuleInfo("admin", "proxy added to %s: %s (%s)", "database", p.Name, p.Type)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, proxySummary(&p))
 		}
@@ -2321,11 +2322,11 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after proxy delete failed: %v", err)
+					util.LogModuleWarn("admin", "merge after proxy delete failed: %v", err)
 				}
 				util.DefaultVersionNotifier.BumpVersion("proxies")
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] proxy deleted from %s: %s", "database", name)
+				util.LogModuleInfo("admin", "proxy deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2380,11 +2381,11 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after proxy toggle failed: %v", err)
+			util.LogModuleWarn("admin", "merge after proxy toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after proxy toggle failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
@@ -2395,7 +2396,7 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
-	util.LogInfo("[ADMIN] apiToggleP2P called: path=%s", r.URL.Path)
+	util.LogModuleInfo("admin", "apiToggleP2P called: path=%s", r.URL.Path)
 	dc := s.displayConf()
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
 	name = strings.TrimSuffix(name, "/p2p")
@@ -2410,7 +2411,7 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "decode fail", http.StatusBadRequest)
 		return
 	}
-	util.LogInfo("[ADMIN] apiToggleP2P: name=%s, p2p=%v", name, body.P2P)
+	util.LogModuleInfo("admin", "apiToggleP2P: name=%s, p2p=%v", name, body.P2P)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2432,15 +2433,15 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after p2p toggle failed: %v", err)
+			util.LogModuleWarn("admin", "merge after p2p toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after p2p toggle failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after p2p toggle failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
-		util.LogInfo("[ADMIN] P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
+		util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 		jsonResponse(w, proxySummary(p))
 		return
 	}
@@ -2507,11 +2508,11 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after rule insert failed: %v", err)
+			util.LogModuleWarn("admin", "merge after rule insert failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule inserted at %d in %s: %s", idx, "database", body.Rule)
+		util.LogModuleInfo("admin", "rule inserted at %d in %s: %s", idx, "database", body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
 
 	case http.MethodPut:
@@ -2537,11 +2538,11 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after rules update failed: %v", err)
+			util.LogModuleWarn("admin", "merge after rules update failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rules updated in %s (%d rules)", "database", len(rules))
+		util.LogModuleInfo("admin", "rules updated in %s (%d rules)", "database", len(rules))
 		jsonResponse(w, map[string]interface{}{"status": "ok", "count": len(rules)})
 
 	case http.MethodDelete:
@@ -2569,11 +2570,11 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after rule delete failed: %v", err)
+			util.LogModuleWarn("admin", "merge after rule delete failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
-		util.LogInfo("[ADMIN] rule deleted at %d from %s: %s", idx, "database", deleted)
+		util.LogModuleInfo("admin", "rule deleted at %d from %s: %s", idx, "database", deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
@@ -2612,11 +2613,11 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogWarn("[ADMIN] merge after rule toggle failed: %v", err)
+		util.LogModuleWarn("admin", "merge after rule toggle failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogWarn("[ADMIN] incremental update after rule toggle failed: %v", err)
+			util.LogModuleWarn("admin", "incremental update after rule toggle failed: %v", err)
 		}
 	}
 	util.DefaultVersionNotifier.BumpVersion("rules")
@@ -2681,21 +2682,21 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after mapping add failed: %v", err)
+			util.LogModuleWarn("admin", "merge after mapping add failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
 		// Notify runtime about mapping change
 		if s.OnMappingUpdate != nil {
 			if err := s.OnMappingUpdate(oldMapping, &m); err != nil {
-				util.LogWarn("[ADMIN] mapping update callback failed: %v", err)
+				util.LogModuleWarn("admin", "mapping update callback failed: %v", err)
 			}
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] mapping updated in %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
+			util.LogModuleInfo("admin", "mapping updated in %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
 			jsonResponse(w, mappingSummary(&m))
 		} else {
-			util.LogInfo("[ADMIN] mapping added to %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
+			util.LogModuleInfo("admin", "mapping added to %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, mappingSummary(&m))
 		}
@@ -2724,17 +2725,17 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after mapping delete failed: %v", err)
+					util.LogModuleWarn("admin", "merge after mapping delete failed: %v", err)
 				}
 				util.DefaultVersionNotifier.BumpVersion("mappings")
 				s.mu.Unlock()
 				// Notify runtime about mapping deletion
 				if s.OnMappingUpdate != nil {
 					if err := s.OnMappingUpdate(m, nil); err != nil {
-						util.LogWarn("[ADMIN] mapping delete callback failed: %v", err)
+						util.LogModuleWarn("admin", "mapping delete callback failed: %v", err)
 					}
 				}
-				util.LogInfo("[ADMIN] mapping deleted from %s: %s", "database", name)
+				util.LogModuleInfo("admin", "mapping deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -2775,11 +2776,11 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after mapping toggle failed: %v", err)
+			util.LogModuleWarn("admin", "merge after mapping toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after mapping toggle failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("mappings")
@@ -2818,11 +2819,11 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after resolver toggle failed: %v", err)
+					util.LogModuleWarn("admin", "merge after resolver toggle failed: %v", err)
 				}
 				if s.OnIncrementalUpdate != nil {
 					if err := s.OnIncrementalUpdate(); err != nil {
-						util.LogWarn("[ADMIN] incremental update after resolver toggle failed: %v", err)
+						util.LogModuleWarn("admin", "incremental update after resolver toggle failed: %v", err)
 					}
 				}
 				jsonResponse(w, resolverSummary(rv))
@@ -2877,14 +2878,14 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after resolver add failed: %v", err)
+			util.LogModuleWarn("admin", "merge after resolver add failed: %v", err)
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] resolver updated in %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogModuleInfo("admin", "resolver updated in %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			jsonResponse(w, resolverSummary(&rv))
 		} else {
-			util.LogInfo("[ADMIN] resolver added to %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogModuleInfo("admin", "resolver added to %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, resolverSummary(&rv))
 		}
@@ -2913,10 +2914,10 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after resolver delete failed: %v", err)
+					util.LogModuleWarn("admin", "merge after resolver delete failed: %v", err)
 				}
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] resolver deleted from %s: %s", "database", name)
+				util.LogModuleInfo("admin", "resolver deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3021,11 +3022,11 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after group toggle failed: %v", err)
+			util.LogModuleWarn("admin", "merge after group toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after group toggle failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
@@ -3173,11 +3174,11 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after subscription filter update failed: %v", err)
+			util.LogModuleWarn("admin", "merge after subscription filter update failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after subscription filter update failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after subscription filter update failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
@@ -3428,7 +3429,7 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		for _, rg := range s.conf.ProxyGroups {
 			if rg.Name == groupName {
 				if err := rg.SetActiveMember(body.Name); err != nil {
-					util.LogWarn("[ADMIN] SetActiveMember failed: %v", err)
+					util.LogModuleWarn("admin", "SetActiveMember failed: %v", err)
 				}
 				break
 			}
@@ -3440,11 +3441,11 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogWarn("[ADMIN] merge after active-member failed: %v", err)
+		util.LogModuleWarn("admin", "merge after active-member failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogWarn("[ADMIN] incremental update after active-member failed: %v", err)
+			util.LogModuleWarn("admin", "incremental update after active-member failed: %v", err)
 		}
 	}
 	util.DefaultVersionNotifier.BumpVersion("subscriptions")
@@ -3644,19 +3645,19 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after group add failed: %v", err)
+			util.LogModuleWarn("admin", "merge after group add failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after group add failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after group add failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
-			util.LogInfo("[ADMIN] group updated in %s: %s (%s)", "database", g.Name, g.Type)
+			util.LogModuleInfo("admin", "group updated in %s: %s (%s)", "database", g.Name, g.Type)
 		} else {
-			util.LogInfo("[ADMIN] group added to %s: %s (%s)", "database", g.Name, g.Type)
+			util.LogModuleInfo("admin", "group added to %s: %s (%s)", "database", g.Name, g.Type)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3701,11 +3702,11 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after group delete failed: %v", err)
+					util.LogModuleWarn("admin", "merge after group delete failed: %v", err)
 				}
 				util.DefaultVersionNotifier.BumpVersion("proxies")
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] group deleted from %s: %s", "database", name)
+				util.LogModuleInfo("admin", "group deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -3823,7 +3824,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after subscription edit failed: %v", err)
+			util.LogModuleWarn("admin", "merge after subscription edit failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
@@ -3833,9 +3834,9 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			interval = *sub.Interval
 		}
 		if replaced {
-			util.LogInfo("[ADMIN] subscription updated in %s: %s", "database", sub.Name)
+			util.LogModuleInfo("admin", "subscription updated in %s: %s", "database", sub.Name)
 		} else {
-			util.LogInfo("[ADMIN] subscription added to %s: %s", "database", sub.Name)
+			util.LogModuleInfo("admin", "subscription added to %s: %s", "database", sub.Name)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3878,11 +3879,11 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogWarn("[ADMIN] merge after subscription delete failed: %v", err)
+					util.LogModuleWarn("admin", "merge after subscription delete failed: %v", err)
 				}
 				util.DefaultVersionNotifier.BumpVersion("subscriptions")
 				s.mu.Unlock()
-				util.LogInfo("[ADMIN] subscription deleted from %s: %s", "database", name)
+				util.LogModuleInfo("admin", "subscription deleted from %s: %s", "database", name)
 				jsonResponse(w, map[string]string{"status": "deleted"})
 				return
 			}
@@ -4081,11 +4082,11 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogWarn("[ADMIN] merge after subscription toggle failed: %v", err)
+			util.LogModuleWarn("admin", "merge after subscription toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after subscription toggle failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
@@ -4264,17 +4265,17 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(nil, &rc); err != nil {
-				util.LogWarn("[ADMIN] reverse config start after create failed: %v", err)
+				util.LogModuleWarn("admin", "reverse config start after create failed: %v", err)
 			}
 		}
 
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after reverse config create failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after reverse config create failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("reverse")
-		util.LogInfo("[ADMIN] reverse config created: %s", rc.Name)
+		util.LogModuleInfo("admin", "reverse config created: %s", rc.Name)
 		jsonResponse(w, &rc)
 
 	default:
@@ -4348,17 +4349,17 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
-				util.LogWarn("[ADMIN] reverse config update callback failed: %v", err)
+				util.LogModuleWarn("admin", "reverse config update callback failed: %v", err)
 			}
 		}
 
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after reverse config update failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after reverse config update failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("reverse")
-		util.LogInfo("[ADMIN] reverse config updated: %s", rc.Name)
+		util.LogModuleInfo("admin", "reverse config updated: %s", rc.Name)
 		jsonResponse(w, found)
 
 	case http.MethodDelete:
@@ -4393,17 +4394,17 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(removedConfig, nil); err != nil {
-				util.LogWarn("[ADMIN] reverse config delete callback failed: %v", err)
+				util.LogModuleWarn("admin", "reverse config delete callback failed: %v", err)
 			}
 		}
 
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogWarn("[ADMIN] incremental update after reverse config delete failed: %v", err)
+				util.LogModuleWarn("admin", "incremental update after reverse config delete failed: %v", err)
 			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("reverse")
-		util.LogInfo("[ADMIN] reverse config deleted: %s", name)
+		util.LogModuleInfo("admin", "reverse config deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -4455,17 +4456,17 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 
 	if s.OnReverseConfigUpdate != nil {
 		if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
-			util.LogWarn("[ADMIN] reverse config toggle callback failed: %v", err)
+			util.LogModuleWarn("admin", "reverse config toggle callback failed: %v", err)
 		}
 	}
 
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogWarn("[ADMIN] incremental update after reverse config toggle failed: %v", err)
+			util.LogModuleWarn("admin", "incremental update after reverse config toggle failed: %v", err)
 		}
 	}
 	util.DefaultVersionNotifier.BumpVersion("reverse")
-	util.LogInfo("[ADMIN] reverse config %s toggled: enabled=%v", name, req.Enabled)
+	util.LogModuleInfo("admin", "reverse config %s toggled: enabled=%v", name, req.Enabled)
 	jsonResponse(w, found)
 }
 
@@ -4604,7 +4605,7 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 	s.mu.Unlock()
 
 	util.DefaultVersionNotifier.BumpVersion("mesh")
-	util.LogInfo("[ADMIN] mesh config updated: domainSuffixes=%v advertise=%v", req.DomainSuffixes, req.Advertise)
+	util.LogModuleInfo("admin", "mesh config updated: domainSuffixes=%v advertise=%v", req.DomainSuffixes, req.Advertise)
 	jsonResponse(w, map[string]interface{}{"ok": true})
 }
 
@@ -4675,7 +4676,7 @@ func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Reque
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh domain-suffix added: %s", req.Suffix)
+		util.LogModuleInfo("admin", "mesh domain-suffix added: %s", req.Suffix)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:
@@ -4724,7 +4725,7 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh domain-suffix updated: index=%d suffix=%s", index, req.Suffix)
+		util.LogModuleInfo("admin", "mesh domain-suffix updated: index=%d suffix=%s", index, req.Suffix)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	case http.MethodDelete:
@@ -4746,7 +4747,7 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh domain-suffix deleted: index=%d", index)
+		util.LogModuleInfo("admin", "mesh domain-suffix deleted: index=%d", index)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:
@@ -4794,7 +4795,7 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh advertise added: %s", req.CIDR)
+		util.LogModuleInfo("admin", "mesh advertise added: %s", req.CIDR)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:
@@ -4843,7 +4844,7 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh advertise updated: index=%d cidr=%s", index, req.CIDR)
+		util.LogModuleInfo("admin", "mesh advertise updated: index=%d cidr=%s", index, req.CIDR)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	case http.MethodDelete:
@@ -4865,7 +4866,7 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
-		util.LogInfo("[ADMIN] mesh advertise deleted: index=%d", index)
+		util.LogModuleInfo("admin", "mesh advertise deleted: index=%d", index)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:
@@ -4949,7 +4950,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Unlock()
-			util.LogInfo("[ADMIN] TUN toggle enabled=%v", *req.Enabled)
+			util.LogModuleInfo("admin", "TUN toggle enabled=%v", *req.Enabled)
 			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
@@ -4972,7 +4973,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Unlock()
-			util.LogInfo("[ADMIN] TUN bypass-gateway=%v", *req.BypassGateway)
+			util.LogModuleInfo("admin", "TUN bypass-gateway=%v", *req.BypassGateway)
 		}
 
 		// DHCP toggle — config-only, takes effect on next TUN start.
@@ -5000,7 +5001,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Unlock()
-			util.LogInfo("[ADMIN] TUN dhcp-enabled=%v", *req.DHCPEnabled)
+			util.LogModuleInfo("admin", "TUN dhcp-enabled=%v", *req.DHCPEnabled)
 		}
 
 		// DHCP static bindings — update config and hot-reload running server.
@@ -5051,7 +5052,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			if s.OnDHCPStaticBindingsUpdate != nil {
 				s.OnDHCPStaticBindingsUpdate(req.DHCPStaticBindings)
 			}
-			util.LogInfo("[ADMIN] DHCP static-bindings updated (%d entries)", len(req.DHCPStaticBindings))
+			util.LogModuleInfo("admin", "DHCP static-bindings updated (%d entries)", len(req.DHCPStaticBindings))
 		}
 
 		jsonResponse(w, map[string]string{"status": "ok"})
@@ -5236,7 +5237,7 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	util.LogInfo("[ADMIN] auth settings updated")
+	util.LogModuleInfo("admin", "auth settings updated")
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
@@ -5336,7 +5337,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 		s.OnReload()
 	}
 
-	util.LogInfo("[ADMIN] setup wizard completed")
+	util.LogModuleInfo("admin", "setup wizard completed")
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
@@ -5388,21 +5389,21 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	case "setup.html":
 		t = s.pages.setup
 	default:
-		util.LogError("[ADMIN] unknown page: %s", pageName)
+		util.LogModuleError("admin", "unknown page: %s", pageName)
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
 	if r.Header.Get("HX-Request") == "true" {
 		if err := t.ExecuteTemplate(w, "content", data); err != nil {
-			util.LogError("[ADMIN] fragment template error (%s): %v", pageName, err)
+			util.LogModuleError("admin", "fragment template error (%s): %v", pageName, err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 		return
 	}
 
 	if err := t.Execute(w, data); err != nil {
-		util.LogError("[ADMIN] template error (%s): %v", pageName, err)
+		util.LogModuleError("admin", "template error (%s): %v", pageName, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
@@ -5418,7 +5419,7 @@ func (s *AdminServer) saveConfig() error {
 	if err := db.ImportRuleConf(conf); err != nil {
 		return err
 	}
-	util.LogInfo("[ADMIN] config persisted to database")
+	util.LogModuleInfo("admin", "config persisted to database")
 	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }
@@ -5431,7 +5432,7 @@ func (s *AdminServer) saveConfigLocked() error {
 	if err := db.ImportRuleConf(s.conf); err != nil {
 		return err
 	}
-	util.LogInfo("[ADMIN] config persisted to database")
+	util.LogModuleInfo("admin", "config persisted to database")
 	util.DefaultVersionNotifier.BumpVersion("config")
 	return nil
 }
@@ -5622,7 +5623,7 @@ func (s *AdminServer) loadOrGenerateTLSCert() (certPEM, keyPEM []byte, err error
 	certData, certErr := os.ReadFile(certFile)
 	keyData, keyErr := os.ReadFile(keyFile)
 	if certErr == nil && keyErr == nil && len(certData) > 0 && len(keyData) > 0 {
-		util.LogInfo("[ADMIN] loaded TLS cert from %s and %s", certFile, keyFile)
+		util.LogModuleInfo("admin", "loaded TLS cert from %s and %s", certFile, keyFile)
 		return certData, keyData, nil
 	}
 
@@ -5634,15 +5635,67 @@ func (s *AdminServer) loadOrGenerateTLSCert() (certPEM, keyPEM []byte, err error
 
 	// Save to files
 	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
-		util.LogWarn("[ADMIN] failed to save TLS cert to %s: %v", certFile, err)
+		util.LogModuleWarn("admin", "failed to save TLS cert to %s: %v", certFile, err)
 	} else {
-		util.LogInfo("[ADMIN] saved TLS cert to %s", certFile)
+		util.LogModuleInfo("admin", "saved TLS cert to %s", certFile)
 	}
 	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
-		util.LogWarn("[ADMIN] failed to save TLS key to %s: %v", keyFile, err)
+		util.LogModuleWarn("admin", "failed to save TLS key to %s: %v", keyFile, err)
 	} else {
-		util.LogInfo("[ADMIN] saved TLS key to %s", keyFile)
+		util.LogModuleInfo("admin", "saved TLS key to %s", keyFile)
 	}
 
 	return certPEM, keyPEM, nil
+}
+
+// apiLogModules handles GET/PUT /api/log/modules.
+// GET: returns all module log levels and the global level.
+// PUT: sets module log levels. Body: {"modules": {"socks5": "debug", "trojan": "warn"}}
+//
+//	or {"global": "debug"} to set the global level.
+func (s *AdminServer) apiLogModules(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		modules := util.ListModuleLogLevels()
+		result := make(map[string]string, len(modules))
+		for k, v := range modules {
+			result[k] = util.LogLevelString(v)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"global":  util.LogLevelString(util.GlobalLogLevel()),
+			"modules": result,
+		})
+
+	case http.MethodPut:
+		var req struct {
+			Global  string            `json:"global"`
+			Modules map[string]string `json:"modules"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Global != "" {
+			if level, ok := util.ParseLogLevel(req.Global); ok {
+				util.SetLogLevel(level)
+			} else {
+				http.Error(w, `{"error":"invalid global level"}`, http.StatusBadRequest)
+				return
+			}
+		}
+		applied := make(map[string]string)
+		for module, levelStr := range req.Modules {
+			if level, ok := util.ParseLogLevel(levelStr); ok {
+				util.SetModuleLogLevel(module, level)
+				applied[module] = levelStr
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"global":  util.LogLevelString(util.GlobalLogLevel()),
+			"applied": applied,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }

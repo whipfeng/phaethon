@@ -133,7 +133,7 @@ type peerSender struct {
 }
 
 func (s *peerSender) Send(data []byte) error {
-	util.LogInfo("[P2P-SENDER-DIAG] Send called nodeID=%s peer.ID=%s dataLen=%d", s.nodeID, s.peer.ID, len(data))
+	util.LogModuleInfo("p2p", "[P2P-SENDER-DIAG] Send called nodeID=%s peer.ID=%s dataLen=%d", s.nodeID, s.peer.ID, len(data))
 	return enqueueWrite(s.peer, frame.FrameMeshPacket, data, false) // data frame, fire-and-forget
 }
 
@@ -350,17 +350,17 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
 			// Diagnostic: log IPIP packets (proto=4) sent via writeSingleFrame
 			if len(req.data) >= 20 && req.data[0]>>4 == 4 && req.data[9] == 4 {
-				util.LogInfo("[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
+				util.LogModuleInfo("p2p", "[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
 			}
 		}
 		if req.frameType == frame.FrameHello {
-			util.LogInfo("[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
+			util.LogModuleInfo("p2p", "[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
 		}
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
 			}
-			util.LogWarn("[P2P] write error for %s: %v", peer.ID, err)
+			util.LogModuleWarn("p2p", "[P2P] write error for %s: %v", peer.ID, err)
 			peer.transport.Close()
 			return false
 		}
@@ -387,7 +387,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s batch=%d", peer.ID, len(batch))
 				// Diagnostic: log first 20 bytes of each packet to identify IPIP
 				if len(req.data) >= 20 {
-					util.LogInfo("[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
+					util.LogModuleInfo("p2p", "[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
 						peer.ID, len(req.data), req.data[0]>>4, req.data[9], req.data[:20])
 				}
 			}
@@ -399,7 +399,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 					mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
 				}
 			}
-			util.LogWarn("[P2P] batch write error for %s: %v", peer.ID, err)
+			util.LogModuleWarn("p2p", "[P2P] batch write error for %s: %v", peer.ID, err)
 			peer.transport.Close()
 			return false
 		}
@@ -437,7 +437,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			// Diagnostic: log what we read from writeCh
 			if req.frameType == frame.FrameMeshPacket && len(req.data) >= 20 {
-				util.LogInfo("[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
+				util.LogModuleInfo("p2p", "[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
 					peer.ID, len(req.data), req.data[0]>>4, req.data[9])
 			}
 			// Coalesce more data frames (non-blocking)
@@ -455,7 +455,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			// Diagnostic: log batch contents before writing
 			for _, b := range batch {
 				if b.frameType == frame.FrameMeshPacket && len(b.data) >= 20 {
-					util.LogInfo("[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
+					util.LogModuleInfo("p2p", "[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
 						peer.ID, len(b.data), b.data[0]>>4, b.data[9], len(batch))
 				}
 			}
@@ -497,7 +497,7 @@ func enqueueWrite(peer *Peer, frameType byte, data []byte, isControl bool) error
 func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case <-peer.stopCh:
-		util.LogInfo("[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
+		util.LogModuleInfo("p2p", "[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
 		return ErrPeerStopped
 	default:
 	}
@@ -509,13 +509,13 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogInfo("[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
+			util.LogModuleInfo("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d writeChLen=%d", peer.ID, len(req.data), len(ch))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
 		}
 		return nil
 	default:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogWarn("[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d writeChCap=%d", peer.ID, len(req.data), cap(ch))
+			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d writeChCap=%d", peer.ID, len(req.data), cap(ch))
 			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
 		}
 		if req.isControl {
@@ -523,7 +523,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		} else {
 			atomic.AddUint64(&peer.writeChDrops, 1)
 		}
-		util.LogDebug("[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
+		util.LogModuleDebug("p2p", "[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
 }
@@ -581,7 +581,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 			delete(m.peers, peer.ID)
 		}
 		m.mu.Unlock()
-		util.LogInfo("[P2P] session ended for %s", peer.ID)
+		util.LogModuleInfo("p2p", "[P2P] session ended for %s", peer.ID)
 	}()
 
 	go m.peerWriteLoop(peer)
@@ -600,7 +600,7 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 	}
 	m.mu.Unlock()
 	if peer != nil {
-		util.LogInfo("[P2P] stopping peer for proxy %s (peer.ID=%s)", proxyName, peer.ID)
+		util.LogModuleInfo("p2p", "[P2P] stopping peer for proxy %s (peer.ID=%s)", proxyName, peer.ID)
 		stopPeer(peer)
 	}
 }
@@ -631,7 +631,7 @@ func (m *P2PManager) StopPeerByLinkID(linkID string) {
 	m.mu.Unlock()
 
 	for _, peer := range peers {
-		util.LogInfo("[P2P] stopping peer %s (linkID=%s) due to connectivity failure", peer.ID, linkID)
+		util.LogModuleInfo("p2p", "[P2P] stopping peer %s (linkID=%s) due to connectivity failure", peer.ID, linkID)
 		stopPeer(peer)
 	}
 }
@@ -652,7 +652,7 @@ func (m *P2PManager) GetPeerProxy(proxyName string) *config.Proxy {
 // RestartPeer stops an existing peer and starts a new one with updated config.
 // This is used when proxy config (password, server, etc.) changes.
 func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
-	util.LogInfo("[P2P] restarting peer for proxy %s due to config change", proxy.Name)
+	util.LogModuleInfo("p2p", "[P2P] restarting peer for proxy %s due to config change", proxy.Name)
 	m.StopPeerByProxyName(proxy.Name)
 	go m.StartPeer(proxy)
 }
@@ -662,12 +662,12 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // Call StopPeerByProxyName to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	if !m.beginSession() {
-		util.LogDebug("[P2P] manager stopped; not starting peer %s", proxy.Name)
+		util.LogModuleDebug("p2p", "[P2P] manager stopped; not starting peer %s", proxy.Name)
 		return
 	}
 	defer m.sessionsWG.Done()
 
-	util.LogInfo("[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
+	util.LogModuleInfo("p2p", "[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 
 	// Stop any existing peer with the same proxy name to prevent duplicate connections.
 	m.mu.Lock()
@@ -680,7 +680,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	}
 	m.mu.Unlock()
 	if existing != nil {
-		util.LogInfo("[P2P] stopping existing peer for proxy %s before starting new one", proxy.Name)
+		util.LogModuleInfo("p2p", "[P2P] stopping existing peer for proxy %s before starting new one", proxy.Name)
 		stopPeer(existing)
 	}
 
@@ -730,7 +730,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
 	if !ok {
-		util.LogInfo("[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
+		util.LogModuleInfo("p2p", "[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
 		return
 	}
 
@@ -741,14 +741,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// Check if peer has been stopped before attempting to connect
 		select {
 		case <-peer.stopCh:
-			util.LogInfo("[P2P] peer %s stopped, exiting reconnect loop", peer.ID)
+			util.LogModuleInfo("p2p", "[P2P] peer %s stopped, exiting reconnect loop", peer.ID)
 			return
 		default:
 		}
 
 		transport, err := p2pDialer.DialP2P()
 		if err != nil {
-			util.LogInfo("[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
+			util.LogModuleInfo("p2p", "[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
 			peer.Status = "failed"
 			if m.OnStatusChange != nil {
 				go m.OnStatusChange()
@@ -782,7 +782,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if m.OnStatusChange != nil {
 			go m.OnStatusChange()
 		}
-		util.LogInfo("[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
+		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
 		// Run session in a closure so we can use defer for cleanup
 		func() {
@@ -811,7 +811,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// connection gets a brand-new seq, peer.ID, and clean state.
 		if peer.Status != "stopped" {
 			proxy := peer.proxy
-			util.LogInfo("[P2P] disconnected from %s (proxy=%s), starting fresh peer", peer.ID, proxy.Name)
+			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s), starting fresh peer", peer.ID, proxy.Name)
 			go m.StartPeer(proxy)
 		}
 		return
@@ -821,11 +821,11 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 // runSession reads frames and dispatches them.
 func (m *P2PManager) runSession(peer *Peer) {
 	// Send hello immediately
-	util.LogInfo("[P2P-DIAG] runSession calling sendHello for peer=%s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer=%s", peer.ID)
 	m.sendHello(peer)
-	util.LogInfo("[P2P-DIAG] runSession sendHello completed for peer=%s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession sendHello completed for peer=%s", peer.ID)
 
-	util.LogInfo("[P2P] runSession started for %s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P] runSession started for %s", peer.ID)
 
 	// Heartbeat timeout monitor: close connection if no data received for 30s
 	heartbeatTimeout := 30 * time.Second
@@ -842,7 +842,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				return
 			case <-ticker.C:
 				if time.Since(peer.LastSeen) > heartbeatTimeout {
-					util.LogWarn("[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(peer.LastSeen))
+					util.LogModuleWarn("p2p", "[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(peer.LastSeen))
 					peer.transport.Close()
 					return
 				}
@@ -873,16 +873,16 @@ func (m *P2PManager) runSession(peer *Peer) {
 		frameType, payload, err := peer.transport.Recv()
 		peer.LastSeen = time.Now()
 		if err != nil {
-			util.LogInfo("[P2P] read error for %s: %v", peer.ID, err)
+			util.LogModuleInfo("p2p", "[P2P] read error for %s: %v", peer.ID, err)
 			return
 		}
-		util.LogDebug("[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
+		util.LogModuleDebug("p2p", "[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
 		// Control frames have seq/ack encoded in the first 8 bytes
 		isControl := frameType == frame.FrameHello || frameType == frame.FrameGossip || frameType == frame.FrameAck
 		if isControl {
 			if len(payload) < 8 {
-				util.LogWarn("[P2P] control frame too short from %s: len=%d", peer.ID, len(payload))
+				util.LogModuleWarn("p2p", "[P2P] control frame too short from %s: len=%d", peer.ID, len(payload))
 				continue
 			}
 			seq := binary.BigEndian.Uint32(payload[0:4])
@@ -899,7 +899,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 			// Check for duplicate
 			if !peer.recvState.checkAndRecord(seq) {
-				util.LogDebug("[P2P] duplicate control frame from %s: seq=%d", peer.ID, seq)
+				util.LogModuleDebug("p2p", "[P2P] duplicate control frame from %s: seq=%d", peer.ID, seq)
 				continue
 			}
 
@@ -909,11 +909,11 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 		switch frameType {
 		case frame.FrameHello:
-			util.LogInfo("[P2P-DIAG] received FrameHello from %s, payload=%d bytes", peer.ID, len(payload))
+			util.LogModuleInfo("p2p", "[P2P-DIAG] received FrameHello from %s, payload=%d bytes", peer.ID, len(payload))
 			if len(payload) > 0 {
 				m.handleHello(peer, payload)
 			} else {
-				util.LogWarn("[P2P-DIAG] FrameHello from %s has empty payload", peer.ID)
+				util.LogModuleWarn("p2p", "[P2P-DIAG] FrameHello from %s has empty payload", peer.ID)
 			}
 		case frame.FrameGossip:
 			if len(payload) > 0 {
@@ -930,13 +930,13 @@ func (m *P2PManager) runSession(peer *Peer) {
 				default:
 					atomic.AddUint64(&m.meshInboundDrops, 1)
 					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-					util.LogDebug("[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
+					util.LogModuleDebug("p2p", "[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
 			} else {
-				util.LogWarn("[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
+				util.LogModuleWarn("p2p", "[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
 			}
 		default:
-			util.LogInfo("[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))
+			util.LogModuleInfo("p2p", "[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))
 		}
 	}
 }
@@ -950,7 +950,7 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 	for _, pf := range pending {
 		if pf.retries >= 5 {
 			// Give up after 5 retries
-			util.LogWarn("[P2P] giving up on control frame to %s: seq=%d retries=%d", peer.ID, pf.seq, pf.retries)
+			util.LogModuleWarn("p2p", "[P2P] giving up on control frame to %s: seq=%d retries=%d", peer.ID, pf.seq, pf.retries)
 			peer.sendState.removeFrame(pf.seq)
 			continue
 		}
@@ -960,7 +960,7 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 		if timeout > 60*time.Second {
 			timeout = 60 * time.Second
 		}
-		util.LogDebug("[P2P] retransmitting control frame to %s: seq=%d retries=%d timeout=%v", peer.ID, pf.seq, pf.retries, timeout)
+		util.LogModuleDebug("p2p", "[P2P] retransmitting control frame to %s: seq=%d retries=%d timeout=%v", peer.ID, pf.seq, pf.retries, timeout)
 
 		// Re-encode with current ack
 		ack := peer.recvState.getLastSeq()
@@ -975,7 +975,7 @@ func (m *P2PManager) checkRetransmissions(peer *Peer) {
 			isControl:      true,
 			encodedControl: true,
 		}); err != nil {
-			util.LogDebug("[P2P] retransmit queue unavailable for %s: %v", peer.ID, err)
+			util.LogModuleDebug("p2p", "[P2P] retransmit queue unavailable for %s: %v", peer.ID, err)
 			return
 		}
 		peer.sendState.markRetransmitted(pf.seq)
@@ -1004,13 +1004,13 @@ func (m *P2PManager) sendPureAck(peer *Peer) {
 		// Queued successfully
 	default:
 		atomic.AddUint64(&peer.controlChDrops, 1)
-		util.LogDebug("[P2P] control queue full, dropping pure ACK to %s", peer.ID)
+		util.LogModuleDebug("p2p", "[P2P] control queue full, dropping pure ACK to %s", peer.ID)
 	}
 }
 
 // sendHello sends a hello message to the peer, carrying gossip topology for immediate route establishment.
 func (m *P2PManager) sendHello(peer *Peer) {
-	util.LogInfo("[P2P-DIAG] sendHello called for peer=%s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] sendHello called for peer=%s", peer.ID)
 	info := mesh.GossipInfo{
 		Cmd:             "hello",
 		ProtocolVersion: P2PProtocolVersion,
@@ -1031,24 +1031,24 @@ func (m *P2PManager) sendHello(peer *Peer) {
 	}
 
 	data, _ := json.Marshal(info)
-	util.LogInfo("[P2P-DIAG] sendHello enqueuing FrameHello for peer=%s dataLen=%d", peer.ID, len(data))
+	util.LogModuleInfo("p2p", "[P2P-DIAG] sendHello enqueuing FrameHello for peer=%s dataLen=%d", peer.ID, len(data))
 	enqueueWrite(peer, frame.FrameHello, data, true) // control frame, reliable delivery
 }
 
 // handleHello processes a hello message from a peer.
 func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
-	util.LogInfo("[P2P-DIAG] handleHello entry: peer=%s payload=%d bytes", peer.ID, len(payload))
+	util.LogModuleInfo("p2p", "[P2P-DIAG] handleHello entry: peer=%s payload=%d bytes", peer.ID, len(payload))
 	var info mesh.GossipInfo
 	if err := json.Unmarshal(payload, &info); err != nil {
-		util.LogDebug("[P2P] invalid hello from %s: %v", peer.ID, err)
+		util.LogModuleDebug("p2p", "[P2P] invalid hello from %s: %v", peer.ID, err)
 		return
 	}
-	util.LogInfo("[P2P-DIAG] handleHello parsed: peer=%s nodeID=%s subnets=%d version=%d", 
+	util.LogModuleInfo("p2p", "[P2P-DIAG] handleHello parsed: peer=%s nodeID=%s subnets=%d version=%d", 
 		peer.ID, extractNodeIDFromGossip(info), len(info.ClaimedSubnets), info.ProtocolVersion)
 
 	// 1. Version check
 	if info.ProtocolVersion != P2PProtocolVersion {
-		util.LogWarn("[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
+		util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
 			peer.ID, info.ProtocolVersion, P2PProtocolVersion)
 		peer.transport.Close()
 		return
@@ -1057,7 +1057,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	// 2. Extract nodeID from ClaimedSubnets[hop=0]
 	nodeID := extractNodeIDFromGossip(info)
 	if nodeID == "" {
-		util.LogDebug("[P2P] hello from %s has no claimed subnet with hop=0", peer.ID)
+		util.LogModuleDebug("p2p", "[P2P] hello from %s has no claimed subnet with hop=0", peer.ID)
 		peer.transport.Close()
 		return
 	}
@@ -1091,7 +1091,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		go m.OnStatusChange()
 	}
 
-	util.LogInfo("[P2P] hello from %s: nodeID=%s, linkID=%s", peer.ID, nodeID, peer.LinkID)
+	util.LogModuleInfo("p2p", "[P2P] hello from %s: nodeID=%s, linkID=%s", peer.ID, nodeID, peer.LinkID)
 
 	// 4. Clean up old state + re-register
 	if m.meshHandler != nil {
@@ -1113,16 +1113,16 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 				break
 			}
 		}
-		util.LogInfo("[P2P-DIAG] LinkNIC creation: peer=%s nodeID=%s subnet=%q", peer.ID, nodeID, subnet)
+		util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC creation: peer=%s nodeID=%s subnet=%q", peer.ID, nodeID, subnet)
 		if subnet != "" {
 			peer.linkNIC = m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
 			if peer.linkNIC == nil {
-				util.LogWarn("[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
+				util.LogModuleWarn("p2p", "[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
 			} else {
-				util.LogInfo("[P2P-DIAG] LinkNIC created successfully: peer=%s nodeID=%s", peer.ID, nodeID)
+				util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC created successfully: peer=%s nodeID=%s", peer.ID, nodeID)
 			}
 		} else {
-			util.LogWarn("[P2P] no subnet in hello from %s, cannot create LinkNIC", peer.ID)
+			util.LogModuleWarn("p2p", "[P2P] no subnet in hello from %s, cannot create LinkNIC", peer.ID)
 		}
 	}
 
@@ -1140,7 +1140,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	var info mesh.GossipInfo
 	if err := json.Unmarshal(payload, &info); err != nil {
-		util.LogDebug("[P2P] invalid gossip from %s: %v", peer.ID, err)
+		util.LogModuleDebug("p2p", "[P2P] invalid gossip from %s: %v", peer.ID, err)
 		return
 	}
 
@@ -1245,7 +1245,7 @@ func (m *P2PManager) ResendHelloToAll() {
 	for _, peer := range m.peers {
 		m.sendHello(peer)
 	}
-	util.LogDebug("[P2P] resent hello to all peers (%d)", len(m.peers))
+	util.LogModuleDebug("p2p", "[P2P] resent hello to all peers (%d)", len(m.peers))
 }
 
 // ListMeshPeerIDs returns node IDs of all mesh-enabled peers.
@@ -1410,10 +1410,10 @@ func HandleP2PConnection(conn net.Conn, address string) {
 		conn = framed.Unwrap()
 	}
 	if GlobalP2PManager != nil {
-		util.LogInfo("[P2P] incoming connection from %s (address=%s)", conn.RemoteAddr(), address)
+		util.LogModuleInfo("p2p", "[P2P] incoming connection from %s (address=%s)", conn.RemoteAddr(), address)
 		GlobalP2PManager.HandleP2PTransport(frame.NewStreamTransport(conn), address)
 	} else {
-		util.LogDebug("[P2P] no P2PManager initialized, closing conn from %s", conn.RemoteAddr())
+		util.LogModuleDebug("p2p", "[P2P] no P2PManager initialized, closing conn from %s", conn.RemoteAddr())
 		conn.Close()
 	}
 }
@@ -1421,10 +1421,10 @@ func HandleP2PConnection(conn net.Conn, address string) {
 // HandleP2PTransport is called from server-side mesh channel handlers.
 func HandleP2PTransport(t frame.FrameTransport, address string) {
 	if GlobalP2PManager != nil {
-		util.LogInfo("[P2P] incoming mesh transport from %s", address)
+		util.LogModuleInfo("p2p", "[P2P] incoming mesh transport from %s", address)
 		GlobalP2PManager.HandleP2PTransport(t, address)
 	} else {
-		util.LogDebug("[P2P] no P2PManager initialized, dropping transport from %s", address)
+		util.LogModuleDebug("p2p", "[P2P] no P2PManager initialized, dropping transport from %s", address)
 		t.Close()
 	}
 }

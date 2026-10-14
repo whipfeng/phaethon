@@ -102,7 +102,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 	// address is unspecified, which yields the correct registry IP from the
 	// server's perspective.
 	cmdPayload := []byte(chainConn.LocalAddr().String())
-	util.LogInfo("[REVERSE-UDP-DIALER] [%s] sending UDP_CHANNEL to server, dialerAddr=%s", d.Proxy.Name, cmdPayload)
+	util.LogModuleInfo("reverse", "sending UDP_CHANNEL to server, dialerAddr=%s", d.Proxy.Name, cmdPayload)
 	if err := frame.WriteFrame(tcpConn, frame.FrameUDPChannel, cmdPayload); err != nil {
 		cleanupBoth(targetConn, chainConn, tcpConn, chainIsDirect)
 		return nil, fmt.Errorf("reverse-udp: send cmd fail: %w", err)
@@ -121,7 +121,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("reverse-udp: read session key fail: %w", err)
 	}
 	keyLine = strings.TrimRight(keyLine, "\r\n")
-	util.LogInfo("[REVERSE-UDP-DIALER] [%s] received session key len=%d", d.Proxy.Name, len(keyLine))
+	util.LogModuleInfo("reverse", "received session key len=%d", d.Proxy.Name, len(keyLine))
 	var sessionKey [32]byte
 	keyBytes, hexErr := hex.DecodeString(keyLine)
 	if hexErr != nil || len(keyBytes) != 32 {
@@ -138,7 +138,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("reverse-udp: read server addr fail: %w", err)
 	}
 	addrLine = strings.TrimRight(addrLine, "\r\n")
-	util.LogInfo("[REVERSE-UDP-DIALER] [%s] received server tunnel addr=%s", d.Proxy.Name, addrLine)
+	util.LogModuleInfo("reverse", "received server tunnel addr=%s", d.Proxy.Name, addrLine)
 	remoteAddr, err := net.ResolveUDPAddr("udp", addrLine)
 	if err != nil {
 		cleanupBoth(targetConn, chainConn, tcpConn, chainIsDirect)
@@ -152,7 +152,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("reverse-udp: read READY fail: %w", err)
 	}
 	readyLine = strings.TrimRight(readyLine, "\r\n")
-	util.LogInfo("[REVERSE-UDP-DIALER] [%s] received READY=%q", d.Proxy.Name, readyLine)
+	util.LogModuleInfo("reverse", "received READY=%q", d.Proxy.Name, readyLine)
 	if readyLine != "READY" {
 		cleanupBoth(targetConn, chainConn, tcpConn, chainIsDirect)
 		return nil, fmt.Errorf("reverse-udp: expected READY, got %q", readyLine)
@@ -204,7 +204,7 @@ func (d *reverseRegistryDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("reverse-udp: closed while waiting for heartbeat")
 	}
 
-	util.LogDebug("[REVERSE-UDP] [%s] channel established, target=%s chain=%s remote=%s key=%x...",
+	util.LogModuleDebug("reverse", "channel established, target=%s chain=%s remote=%s key=%x...",
 		d.Proxy.Name, targetConn.LocalAddr(), chainConn.LocalAddr(), pc.remoteAddr, sessionKey[:4])
 	return pc, nil
 }
@@ -249,7 +249,7 @@ func (c *reversePacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 			return 0, nil, fmt.Errorf("reverse-udp: closed")
 		case result := <-c.dataCh:
 			nCopied := copy(b, result.payload)
-			util.LogDebug("[REVERSE-UDP-DIALER] ReadFrom n=%d target=%s", nCopied, result.targetAddr)
+			util.LogModuleDebug("reverse", "ReadFrom n=%d target=%s", nCopied, result.targetAddr)
 			return nCopied, result.targetAddr, nil
 		}
 	}
@@ -278,7 +278,7 @@ func (c *reversePacketConn) chainReader() {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			util.LogInfo("[REVERSE-UDP-DIALER] chainReader read err from=%s: %v", c.remoteAddr, err)
+			util.LogModuleInfo("reverse", "chainReader read err from=%s: %v", c.remoteAddr, err)
 			c.Close()
 			return
 		}
@@ -287,21 +287,21 @@ func (c *reversePacketConn) chainReader() {
 		if err != nil {
 			c.authFailCount++
 			if c.authFailCount <= 5 || c.authFailCount%100 == 0 {
-				util.LogWarn("[REVERSE-UDP-DIALER] auth fail #%d from=%s n=%d err=%v", c.authFailCount, srcAddr, n, err)
+				util.LogModuleWarn("reverse", "auth fail #%d from=%s n=%d err=%v", c.authFailCount, srcAddr, n, err)
 			}
 			continue
 		}
 
 		targetAddr, payload, err := util.ParseReverseUDPFrame(plaintext)
 		if err != nil {
-			util.LogDebug("[REVERSE-UDP-DIALER] parse fail from=%s n=%d plaintext_len=%d err=%v", srcAddr, n, len(plaintext), err)
+			util.LogModuleDebug("reverse", "parse fail from=%s n=%d plaintext_len=%d err=%v", srcAddr, n, len(plaintext), err)
 			continue
 		}
 
 		// Heartbeat (ATYP=0xFF): update remoteAddr from packet source.
 		// First heartbeat also unblocks DialPacket's wait (data-plane confirmed).
 		if targetAddr == nil && payload == nil {
-			util.LogDebug("[REVERSE-UDP-DIALER] heartbeat from=%s", srcAddr)
+			util.LogModuleDebug("reverse", "heartbeat from=%s", srcAddr)
 			c.addrMu.Lock()
 			c.remoteAddr = srcAddr
 			c.addrMu.Unlock()
@@ -314,9 +314,9 @@ func (c *reversePacketConn) chainReader() {
 		}
 
 		if c.seenTargets.Put(targetAddr.String()) {
-			util.LogInfo("[REVERSE-UDP-DIALER] UDP <- %s (from=%s n=%d payload=%d)", targetAddr.String(), srcAddr, n, len(payload))
+			util.LogModuleInfo("reverse", "UDP <- %s (from=%s n=%d payload=%d)", targetAddr.String(), srcAddr, n, len(payload))
 		} else {
-			util.LogDebug("[REVERSE-UDP-DIALER] UDP <- %s (from=%s n=%d payload=%d)", targetAddr.String(), srcAddr, n, len(payload))
+			util.LogModuleDebug("reverse", "UDP <- %s (from=%s n=%d payload=%d)", targetAddr.String(), srcAddr, n, len(payload))
 		}
 
 		p := make([]byte, len(payload))
@@ -346,7 +346,7 @@ func (c *reversePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 
 	if c.seenTargets.Put(addr.String()) {
-		util.LogInfo("[REVERSE-UDP-DIALER] UDP -> %s", addr.String())
+		util.LogModuleInfo("reverse", "UDP -> %s", addr.String())
 	}
 
 	ciphertext := c.crypto.Seal(frame)
@@ -355,14 +355,14 @@ func (c *reversePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	dstAddr := c.remoteAddr
 	c.addrMu.Unlock()
 	if dstAddr == nil {
-		util.LogError("[REVERSE-UDP-DIALER] WriteTo %s FAILED: remoteAddr is nil", addr)
+		util.LogModuleError("reverse", "WriteTo %s FAILED: remoteAddr is nil", addr)
 		return 0, fmt.Errorf("reverse-udp: remoteAddr is nil")
 	}
 	if _, writeErr := c.chainConn.WriteTo(ciphertext, dstAddr); writeErr != nil {
-		util.LogError("[REVERSE-UDP-DIALER] WriteTo %s FAILED: dst=%s err=%v", addr, dstAddr, writeErr)
+		util.LogModuleError("reverse", "WriteTo %s FAILED: dst=%s err=%v", addr, dstAddr, writeErr)
 		return 0, fmt.Errorf("reverse-udp: write fail: %w", writeErr)
 	}
-	util.LogDebug("[REVERSE-UDP-DIALER] WriteTo %s OK: n=%d dst=%s", addr, len(b), dstAddr)
+	util.LogModuleDebug("reverse", "WriteTo %s OK: n=%d dst=%s", addr, len(b), dstAddr)
 	return len(b), nil
 }
 
@@ -478,7 +478,7 @@ func (c *reversePacketConn) targetToChain() {
 				continue
 			}
 			if !util.IsClosedErr(err) {
-				util.LogWarn("[REVERSE-UDP-DIALER] target read err from=%s: %v", srcAddr, err)
+				util.LogModuleWarn("reverse", "target read err from=%s: %v", srcAddr, err)
 			}
 			c.Close()
 			return

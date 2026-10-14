@@ -207,6 +207,14 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 							continue
 						}
 
+						// Check if target is local node (advertised route owned by this node)
+						localNodeID := meshMgr.GetNodeID()
+						if targetNodeID == localNodeID {
+							// Local delivery: this node owns the advertised route
+							TraceForwardingRoute(dst, "branch=local_advertised prefix=%s target=%s (local node)", route.Prefix, targetNodeID)
+							return SelectRouteResult{LocalStack: true}, true
+						}
+
 						isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
 
 						if isMeshPrefix {
@@ -259,7 +267,7 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			// IPIP packets when outer destination matches local EIP.
 			ipipHandler := newIPIPTunnelProtocol(tcpip.AddrFrom4Slice(localEIP))
 			n.ns.RegisterTunnelProtocol(ipipHandler)
-			util.LogInfo("netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
+			util.LogModuleInfo("netstack", "netstack: RouteSelector configured (VIP=%s, EIP=%s)", localVIP, localEIP)
 		}
 	}
 }
@@ -316,7 +324,7 @@ func (n *Netstack) CreateLinkNIC(sender PeerSender, nodeID string, peerSubnet *n
 	n.ns.SetPromiscuousMode(nicID, true)
 	_ = n.ns.SetSpoofing(nicID, true)
 
-	util.LogInfo("[NETSTACK] created Link NIC %d for peer %s (subnet %s)", nicID, nodeID, peerSubnet)
+	util.LogModuleInfo("netstack", "[NETSTACK] created Link NIC %d for peer %s (subnet %s)", nicID, nodeID, peerSubnet)
 	return linkNIC, nil
 }
 
@@ -335,7 +343,7 @@ func (n *Netstack) DeleteLinkNIC(linkNIC *LinkNIC) error {
 		return fmt.Errorf("failed to remove NIC %d: %w", linkNIC.nicID, err)
 	}
 
-	util.LogInfo("[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, linkNIC.peerNodeID)
+	util.LogModuleInfo("netstack", "[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, linkNIC.peerNodeID)
 	return nil
 }
 
@@ -352,7 +360,7 @@ func (n *Netstack) UpdateLinkRoutes() error {
 		return fmt.Errorf("netstack not initialized")
 	}
 	n.ns.SetRouteTable(nil)
-	util.LogInfo("[NETSTACK] route table cleared (per design §1.2; all routing by RouteSelector)")
+	util.LogModuleInfo("netstack", "[NETSTACK] route table cleared (per design §1.2; all routing by RouteSelector)")
 	return nil
 }
 
@@ -421,15 +429,15 @@ func (n *Netstack) applyTCPKeepalive(ep tcpip.Endpoint) {
 	ep.SocketOptions().SetKeepAlive(true)
 	idle := tcpip.KeepaliveIdleOption(time.Duration(kaIdle) * time.Second)
 	if err := ep.SetSockOpt(&idle); err != nil {
-		util.LogDebug("[TCP] failed to set keepalive idle: %v", err)
+		util.LogModuleDebug("netstack", "[TCP] failed to set keepalive idle: %v", err)
 	}
 	interval := tcpip.KeepaliveIntervalOption(time.Duration(kaInterval) * time.Second)
 	if err := ep.SetSockOpt(&interval); err != nil {
-		util.LogDebug("[TCP] failed to set keepalive interval: %v", err)
+		util.LogModuleDebug("netstack", "[TCP] failed to set keepalive interval: %v", err)
 	}
 	count := tcpip.SockOptInt(kaCount)
 	if err := ep.SetSockOptInt(tcpip.KeepaliveCountOption, int(count)); err != nil {
-		util.LogDebug("[TCP] failed to set keepalive count: %v", err)
+		util.LogModuleDebug("netstack", "[TCP] failed to set keepalive count: %v", err)
 	}
 }
 
@@ -454,7 +462,7 @@ func (n *Netstack) ConfigureMeshAddresses(subnet *net.IPNet) error {
 	n.dnsAddr = tcpip.AddrFrom4Slice(gip)
 	n.addrSet = true
 
-	util.LogDebug("netstack: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
+	util.LogModuleDebug("netstack", "netstack: mesh addresses: hostIP=%s GIP=%s", hostIP, gip)
 	return nil
 }
 
@@ -494,7 +502,7 @@ func (n *Netstack) Start() error {
 	n.wg.Add(1)
 	go n.logPacketCounts()
 
-	util.LogDebug("netstack: started")
+	util.LogModuleDebug("netstack", "netstack: started")
 	return nil
 }
 
@@ -516,7 +524,7 @@ func (n *Netstack) Stop() error {
 		n.ns.Close()
 	}
 
-	util.LogDebug("netstack: stopped")
+	util.LogModuleDebug("netstack", "netstack: stopped")
 	return nil
 }
 
@@ -576,7 +584,7 @@ func (n *Netstack) initStack() error {
 
 	// DIAG-DEBUG: log runtime HandleLocal value (used to gate stack-internal
 	// loopback for self-addressed packets — see ResolveDomain DNS path).
-	util.LogInfo("[DIAG-DEBUG] initStack: HandleLocal=%v (gVisor stack.New option, controls self-addressed packet loopback)", s.HandleLocal())
+	util.LogModuleInfo("netstack", "[DIAG-DEBUG] initStack: HandleLocal=%v (gVisor stack.New option, controls self-addressed packet loopback)", s.HandleLocal())
 
 	// VIP is bound via AddMeshVIP (called by the mesh module once computed).
 	// EIP is NOT bound anywhere: it is a tunnel identity used as the IPIP
@@ -669,10 +677,10 @@ func (n *Netstack) initStack() error {
 
 		// Replace NAT table (ipv4=false means IPv4)
 		s.IPTables().ReplaceTable(stack.NATID, natTable, false /* ipv6 */)
-		util.LogInfo("netstack: iptables SNAT configured (VIP=%s, Postrouting InputInterface=tun)", vipAddr)
+		util.LogModuleInfo("netstack", "netstack: iptables SNAT configured (VIP=%s, Postrouting InputInterface=tun)", vipAddr)
 	}
 
-	util.LogInfo("netstack: initialized (NIC 1: TUN, GIP=%s; Link NICs created by P2P layer)", n.dnsAddr)
+	util.LogModuleInfo("netstack", "netstack: initialized (NIC 1: TUN, GIP=%s; Link NICs created by P2P layer)", n.dnsAddr)
 	return nil
 }
 
@@ -704,13 +712,13 @@ func (n *Netstack) AddMeshVIP(vip net.IP) error {
 	if err := n.ns.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); err != nil {
 		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
 	}
-	util.LogDebug("netstack: registered mesh VIP %s", vip)
+	util.LogModuleDebug("netstack", "netstack: registered mesh VIP %s", vip)
 	return nil
 }
 
 // NetDial dials a connection through the netstack.
 func (n *Netstack) NetDial(network, addr string) (net.Conn, error) {
-	util.LogDebug("netstack: NetDial called with network=%s addr=%s", network, addr)
+	util.LogModuleDebug("netstack", "netstack: NetDial called with network=%s addr=%s", network, addr)
 	n.mu.Lock()
 	running := n.running
 	ns := n.ns
@@ -750,13 +758,13 @@ func (n *Netstack) NetDial(network, addr string) (net.Conn, error) {
 
 	switch network {
 	case "tcp", "tcp4":
-		util.LogDebug("netstack: DialContextTCP to %s:%d", host, portNum)
+		util.LogModuleDebug("netstack", "netstack: DialContextTCP to %s:%d", host, portNum)
 		conn, err := n.dialTCP(ctx, ns, remoteAddr)
 		if err != nil {
-			util.LogWarn("netstack: DialContextTCP failed: %v", err)
+			util.LogModuleWarn("netstack", "netstack: DialContextTCP failed: %v", err)
 			return nil, err
 		}
-		util.LogDebug("netstack: DialContextTCP succeeded to %s:%d", host, portNum)
+		util.LogModuleDebug("netstack", "netstack: DialContextTCP succeeded to %s:%d", host, portNum)
 		return conn, nil
 	case "udp", "udp4":
 		return gonet.DialUDP(ns, nil, &remoteAddr, ipv4.ProtocolNumber)
@@ -819,7 +827,7 @@ func (n *Netstack) dialTCP(ctx context.Context, s *stack.Stack, remoteAddr tcpip
 	// DIAG-DEBUG: log the actual src/dst assigned by gVisor for outbound TCP.
 	if la, lerr := ep.GetLocalAddress(); lerr == nil {
 		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
-			util.LogInfo("[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
+			util.LogModuleInfo("netstack", "[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
 				la.Addr, la.Port, ra.Addr, ra.Port, s.HandleLocal())
 		}
 	}
@@ -938,7 +946,7 @@ func (n *Netstack) NetDialWithPreConnect(network, addr string, preConnect func(d
 	// DIAG-DEBUG: log the actual src/dst assigned by gVisor for outbound TCP.
 	if la, lerr := ep.GetLocalAddress(); lerr == nil {
 		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
-			util.LogInfo("[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
+			util.LogModuleInfo("netstack", "[DIAG-DEBUG] dialTCP src=%s:%d dst=%s:%d HandleLocal=%v",
 				la.Addr, la.Port, ra.Addr, ra.Port, ns.HandleLocal())
 		}
 	}
@@ -951,36 +959,36 @@ func (n *Netstack) NetDialWithPreConnect(network, addr string, preConnect func(d
 // This ensures the forwarder can find the entry for local loopback cases.
 func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inbound string, mapping *config.Mapping, modeBTable *ModeBTable) (net.Conn, error) {
 	dialStart := time.Now()
-	util.LogInfo("[NETSTACK-DIAL] starting: network=%s addr=%s client=%s inbound=%s", network, addr, clientAddr, inbound)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL] starting: network=%s addr=%s client=%s inbound=%s", network, addr, clientAddr, inbound)
 	n.mu.Lock()
 	running := n.running
 	ns := n.ns
 	n.mu.Unlock()
 
 	if !running || ns == nil {
-		util.LogWarn("[NETSTACK-DIAL] failed: netstack not running")
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed: netstack not running")
 		return nil, fmt.Errorf("netstack not running")
 	}
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		util.LogWarn("[NETSTACK-DIAL] failed to parse addr %s: %v", addr, err)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed to parse addr %s: %v", addr, err)
 		return nil, fmt.Errorf("netstack dial: parse addr: %w", err)
 	}
 	portNum, err := net.LookupPort(network, port)
 	if err != nil {
-		util.LogWarn("[NETSTACK-DIAL] failed to parse port %s: %v", port, err)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed to parse port %s: %v", port, err)
 		return nil, fmt.Errorf("netstack dial: parse port: %w", err)
 	}
 
 	ip := net.ParseIP(host)
 	if ip == nil {
-		util.LogWarn("[NETSTACK-DIAL] failed: not an IP: %s", host)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed: not an IP: %s", host)
 		return nil, fmt.Errorf("netstack dial: not an IP: %s", host)
 	}
 	ip4 := ip.To4()
 	if ip4 == nil {
-		util.LogWarn("[NETSTACK-DIAL] failed: IPv6 not supported: %s", host)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed: IPv6 not supported: %s", host)
 		return nil, fmt.Errorf("netstack dial: IPv6 not supported: %s", host)
 	}
 
@@ -995,20 +1003,20 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 	defer cancel()
 
 	if network != "tcp" && network != "tcp4" {
-		util.LogWarn("[NETSTACK-DIAL] failed: unsupported network: %s", network)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed: unsupported network: %s", network)
 		return nil, fmt.Errorf("netstack dial: unsupported network: %s", network)
 	}
 
 	// Create endpoint and bind
-	util.LogDebug("[NETSTACK-DIAL] creating endpoint for %s", addr)
+	util.LogModuleDebug("netstack", "[NETSTACK-DIAL] creating endpoint for %s", addr)
 	epCreateStart := time.Now()
 	var wq waiter.Queue
 	ep, tcpErr := ns.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
 	if tcpErr != nil {
-		util.LogWarn("[NETSTACK-DIAL] failed to create endpoint after %v: %v", time.Since(epCreateStart), tcpErr)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed to create endpoint after %v: %v", time.Since(epCreateStart), tcpErr)
 		return nil, fmt.Errorf("create endpoint: %s", tcpErr)
 	}
-	util.LogDebug("[NETSTACK-DIAL] endpoint created in %v", time.Since(epCreateStart))
+	util.LogModuleDebug("netstack", "[NETSTACK-DIAL] endpoint created in %v", time.Since(epCreateStart))
 
 	// Bind to GIP with port 0 to allocate source port
 	localAddr := tcpip.FullAddress{
@@ -1017,7 +1025,7 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 	}
 	bindStart := time.Now()
 	if tcpErr := ep.Bind(localAddr); tcpErr != nil {
-		util.LogWarn("[NETSTACK-DIAL] failed to bind after %v: %v", time.Since(bindStart), tcpErr)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed to bind after %v: %v", time.Since(bindStart), tcpErr)
 		ep.Close()
 		return nil, fmt.Errorf("bind: %s", tcpErr)
 	}
@@ -1025,18 +1033,18 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 	// Get allocated source port
 	localAddr, tcpErr = ep.GetLocalAddress()
 	if tcpErr != nil {
-		util.LogWarn("[NETSTACK-DIAL] failed to get local address: %v", tcpErr)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] failed to get local address: %v", tcpErr)
 		ep.Close()
 		return nil, fmt.Errorf("get local address: %s", tcpErr)
 	}
 	srcPort := localAddr.Port
-	util.LogDebug("[NETSTACK-DIAL] bound to local addr=%s srcPort=%d in %v", localAddr.Addr, srcPort, time.Since(bindStart))
+	util.LogModuleDebug("netstack", "[NETSTACK-DIAL] bound to local addr=%s srcPort=%d in %v", localAddr.Addr, srcPort, time.Since(bindStart))
 
 	// Register in ModeBTable BEFORE connect (before SYN is sent)
 	if modeBTable != nil {
 		dstKey := net.JoinHostPort(host, port)
 		modeBTable.Register(6, dstKey, srcPort, clientAddr, inbound, mapping)
-		util.LogDebug("[NETSTACK-DIAL] registered ModeBTable before SYN: dst=%s srcPort=%d client=%s", dstKey, srcPort, clientAddr)
+		util.LogModuleDebug("netstack", "[NETSTACK-DIAL] registered ModeBTable before SYN: dst=%s srcPort=%d client=%s", dstKey, srcPort, clientAddr)
 	}
 
 	// Create wait queue entry for connect completion
@@ -1046,31 +1054,31 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 
 	select {
 	case <-ctx.Done():
-		util.LogWarn("[NETSTACK-DIAL] context done before connect")
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] context done before connect")
 		ep.Close()
 		return nil, ctx.Err()
 	default:
 	}
 
 	// Now connect (sends SYN)
-	util.LogInfo("[NETSTACK-DIAL] connecting to %s:%d (srcPort=%d)", host, portNum, srcPort)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL] connecting to %s:%d (srcPort=%d)", host, portNum, srcPort)
 	connectStart := time.Now()
 	tcpErr = ep.Connect(remoteAddr)
 	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
-		util.LogDebug("[NETSTACK-DIAL] connect in progress, waiting for completion")
+		util.LogModuleDebug("netstack", "[NETSTACK-DIAL] connect in progress, waiting for completion")
 		select {
 		case <-ctx.Done():
-			util.LogWarn("[NETSTACK-DIAL] context timeout while waiting for connect")
+			util.LogModuleWarn("netstack", "[NETSTACK-DIAL] context timeout while waiting for connect")
 			ep.Close()
 			return nil, ctx.Err()
 		case <-notifyCh:
-			util.LogDebug("[NETSTACK-DIAL] connect notification received after %v", time.Since(connectStart))
+			util.LogModuleDebug("netstack", "[NETSTACK-DIAL] connect notification received after %v", time.Since(connectStart))
 		}
 		tcpErr = ep.LastError()
 	}
 	connectDuration := time.Since(connectStart)
 	if tcpErr != nil {
-		util.LogWarn("[NETSTACK-DIAL] connect failed to %s:%d after %v: %v", host, portNum, connectDuration, tcpErr)
+		util.LogModuleWarn("netstack", "[NETSTACK-DIAL] connect failed to %s:%d after %v: %v", host, portNum, connectDuration, tcpErr)
 		// Unregister on connect failure
 		if modeBTable != nil {
 			dstKey := net.JoinHostPort(host, port)
@@ -1086,7 +1094,7 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 	}
 
 	totalDuration := time.Since(dialStart)
-	util.LogInfo("[NETSTACK-DIAL] succeeded to %s:%d srcPort=%d connect=%v total=%v", host, portNum, srcPort, connectDuration, totalDuration)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL] succeeded to %s:%d srcPort=%d connect=%v total=%v", host, portNum, srcPort, connectDuration, totalDuration)
 	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
@@ -1096,7 +1104,7 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 // to bypass the stack-level RouteSelector and use proxy-specific IPIP routing.
 func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error) {
 	dialStart := time.Now()
-	util.LogInfo("[NETSTACK-DIAL-V2] starting: network=%s addr=%s", network, addr)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] starting: network=%s addr=%s", network, addr)
 	n.mu.Lock()
 	running := n.running
 	ns := n.ns
@@ -1180,7 +1188,7 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 	default:
 	}
 
-	util.LogInfo("[NETSTACK-DIAL-V2] connecting to %s:%d with RouteFunc", host, portNum)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connecting to %s:%d with RouteFunc", host, portNum)
 	connectStart := time.Now()
 	tcpErr = ep.Connect(remoteAddr)
 	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
@@ -1204,7 +1212,7 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 	}
 
 	totalDuration := time.Since(dialStart)
-	util.LogInfo("[NETSTACK-DIAL-V2] succeeded to %s:%d connect=%v total=%v", host, portNum, connectDuration, totalDuration)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] succeeded to %s:%d connect=%v total=%v", host, portNum, connectDuration, totalDuration)
 	n.applyTCPKeepalive(ep)
 	return gonet.NewTCPConn(&wq, ep), nil
 }
@@ -1212,7 +1220,7 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 // ResolveDomain resolves a domain name by sending a DNS query through the
 // netstack UDP socket to the local hijacker (dnsAddr:53).
 func (n *Netstack) ResolveDomain(domain string) (net.IP, error) {
-	util.LogDebug("netstack: ResolveDomain called for domain=%s", domain)
+	util.LogModuleDebug("netstack", "netstack: ResolveDomain called for domain=%s", domain)
 	n.mu.Lock()
 	ns := n.ns
 	dnsAddr := n.dnsAddr
@@ -1238,7 +1246,7 @@ func (n *Netstack) ResolveDomain(domain string) (net.IP, error) {
 	// DIAG-DEBUG: log src/dst assigned by gVisor + stack HandleLocal().
 	if la, lerr := ep.GetLocalAddress(); lerr == nil {
 		if ra, rerr := ep.GetRemoteAddress(); rerr == nil {
-			util.LogInfo("[DIAG-DEBUG] ResolveDomain udp src=%s:%d dst=%s:%d HandleLocal=%v",
+			util.LogModuleInfo("netstack", "[DIAG-DEBUG] ResolveDomain udp src=%s:%d dst=%s:%d HandleLocal=%v",
 				la.Addr, la.Port, ra.Addr, ra.Port, ns.HandleLocal())
 		}
 	}
@@ -1329,7 +1337,7 @@ func (n *Netstack) AddHTunnelEndpoint(proxyName string, peer PeerSender) error {
 	n.ns.SetSpoofing(nicID, true)
 
 	n.htunnelEndpoints[proxyName] = ep
-	util.LogInfo("[HTUNNEL-EP] added endpoint for proxy %s (NIC=%d)", proxyName, nicID)
+	util.LogModuleInfo("netstack", "[HTUNNEL-EP] added endpoint for proxy %s (NIC=%d)", proxyName, nicID)
 	return nil
 }
 
@@ -1348,7 +1356,7 @@ func (n *Netstack) RemoveHTunnelEndpoint(proxyName string) {
 		n.ns.RemoveNIC(ep.NicID())
 	}
 	delete(n.htunnelEndpoints, proxyName)
-	util.LogInfo("[HTUNNEL-EP] removed endpoint for proxy %s (NIC=%d)", proxyName, ep.NicID())
+	util.LogModuleInfo("netstack", "[HTUNNEL-EP] removed endpoint for proxy %s (NIC=%d)", proxyName, ep.NicID())
 }
 
 // HTunnelEndpoint returns the h_tunnel endpoint for a proxy, or nil if not found.
@@ -1368,7 +1376,7 @@ func (n *Netstack) logPacketCounts() {
 		case <-n.closeCh:
 			return
 		case <-ticker.C:
-			util.LogDebug("netstack counters: read=%d write=%d", n.ReadPackets.Load(), n.WritePackets.Load())
+			util.LogModuleDebug("netstack", "netstack counters: read=%d write=%d", n.ReadPackets.Load(), n.WritePackets.Load())
 		}
 	}
 }
@@ -1376,6 +1384,7 @@ func (n *Netstack) logPacketCounts() {
 // acceptTCP accepts TCP connections from netstack and delegates to the callback.
 func (n *Netstack) acceptTCP() {
 	defer n.wg.Done()
+	util.LogModuleInfo("netstack", "[TCP-DEBUG] acceptTCP goroutine started, registering TCP forwarder...")
 
 	fwd := tcp.NewForwarder(n.ns, 0, 1024, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
@@ -1383,28 +1392,31 @@ func (n *Netstack) acceptTCP() {
 		corrID := fmt.Sprintf("%s:%d->%s:%d",
 			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort,
 			net.IP(id.LocalAddress.AsSlice()), id.LocalPort)
+		util.LogModuleInfo("netstack", "[TCP-DEBUG] TCP forwarder CALLBACK entered local=%s:%d remote=%s:%d",
+			net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
+			net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		if ForwardingTraceEnabled() {
-			util.LogInfo("[TCP-DEBUG] [%s] tcp forwarder called local=%s:%d remote=%s:%d",
+			util.LogModuleInfo("netstack", "[TCP-DEBUG] [%s] tcp forwarder called local=%s:%d remote=%s:%d",
 				corrID, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 				net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 		}
 		var wq waiter.Queue
 		if ForwardingTraceEnabled() {
-			util.LogInfo("[TCP-DEBUG] [%s] calling CreateEndpoint...", corrID)
+			util.LogModuleInfo("netstack", "[TCP-DEBUG] [%s] calling CreateEndpoint...", corrID)
 		}
 		ep, err := r.CreateEndpoint(&wq)
 		if ForwardingTraceEnabled() {
-			util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint returned err=%v", corrID, err)
+			util.LogModuleInfo("netstack", "[TCP-DEBUG] [%s] CreateEndpoint returned err=%v", corrID, err)
 		}
 		if err != nil {
-			util.LogWarn("[TCP-DEBUG] [%s] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
+			util.LogModuleWarn("netstack", "[TCP-DEBUG] [%s] tcp CreateEndpoint fail: %v (local=%s:%d remote=%s:%d)",
 				corrID, err, net.IP(id.LocalAddress.AsSlice()), id.LocalPort,
 				net.IP(id.RemoteAddress.AsSlice()), id.RemotePort)
 			r.Complete(true)
 			return
 		}
 		if ForwardingTraceEnabled() {
-			util.LogInfo("[TCP-DEBUG] [%s] CreateEndpoint succeeded, calling handleConn async", corrID)
+			util.LogModuleInfo("netstack", "[TCP-DEBUG] [%s] CreateEndpoint succeeded, calling handleConn async", corrID)
 		}
 		r.Complete(false)
 
@@ -1437,14 +1449,14 @@ func (n *Netstack) acceptTCP() {
 			isMeshSrc := n.callbacks.IsMeshIP(srcIP)
 			if isMeshSrc && !isMeshIP {
 				if modeBMapping != nil {
-					util.LogInfo("[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
+					util.LogModuleInfo("netstack", "[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
 						srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
 				} else {
-					util.LogInfo("[TCP-DIAG] gateway fwd conn: src=%s dst=%s:%d (no modeB)",
+					util.LogModuleInfo("netstack", "[TCP-DIAG] gateway fwd conn: src=%s dst=%s:%d (no modeB)",
 						srcAddr, dstAddr, dstPort)
 				}
 			} else if !isMeshIP && modeBMapping != nil {
-				util.LogInfo("[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
+				util.LogModuleInfo("netstack", "[TCP-DIAG] advertised route conn: src=%s dst=%s:%d modeB=%s inbound=%s",
 					srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
 			}
 		}
@@ -1462,7 +1474,7 @@ func (n *Netstack) acceptTCP() {
 	})
 
 	n.ns.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
-	util.LogInfo("[NETSTACK] TCP forwarder registered for protocol %d", tcp.ProtocolNumber)
+	util.LogModuleInfo("netstack", "[NETSTACK] TCP forwarder registered for protocol %d", tcp.ProtocolNumber)
 
 	<-n.closeCh
 }
@@ -1522,7 +1534,7 @@ func (n *Netstack) acceptUDP() {
 func (n *Netstack) writeLoop() {
 	defer n.wg.Done()
 
-	util.LogInfo("[WRITELOOP] started (linkEP=%T, writeLoopDevice=%v)", n.linkEP, n.WriteLoopDevice != nil)
+	util.LogModuleInfo("netstack", "[WRITELOOP] started (linkEP=%T, writeLoopDevice=%v)", n.linkEP, n.WriteLoopDevice != nil)
 
 	closeCh := n.WriteLoopCloseCh()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1539,7 +1551,7 @@ func (n *Netstack) writeLoop() {
 	for {
 		pkt := n.linkEP.ReadContext(ctx)
 		if pkt == nil {
-			util.LogInfo("[WRITELOOP] ReadContext returned nil, exiting")
+			util.LogModuleInfo("netstack", "[WRITELOOP] ReadContext returned nil, exiting")
 			return
 		}
 
@@ -1569,14 +1581,14 @@ func (n *Netstack) writeLoop() {
 			isGIPDst = bytes.Equal(data[16:20], gipBytes[:])
 		}
 		if isGIPSrc || isGIPDst {
-			util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d: %s:%d -> %s:%d (proto=%d len=%d, MeshSubnetContains=%v)",
+			util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d: %s:%d -> %s:%d (proto=%d len=%d, MeshSubnetContains=%v)",
 				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
 				data[9], len(data),
 				n.meshSubnet != nil && n.meshSubnet.Contains(dstIP))
 		}
 
 		if pktNum < 50 || pktNum%1000 == 0 {
-			util.LogInfo("[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
+			util.LogModuleInfo("netstack", "[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
 				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
 				data[9], len(data))
 		}
@@ -1588,7 +1600,7 @@ func (n *Netstack) writeLoop() {
 		if n.meshNetwork != nil && n.meshNetwork.Contains(dstIP) &&
 			(n.meshSubnet == nil || !n.meshSubnet.Contains(dstIP)) {
 			if pktNum < 50 || pktNum%1000 == 0 || isGIPSrc || isGIPDst {
-				util.LogWarn("[WRITELOOP] dropped mesh-destined pkt#%d on TUN egress: %s -> %s (should egress via Link NIC)",
+				util.LogModuleWarn("netstack", "[WRITELOOP] dropped mesh-destined pkt#%d on TUN egress: %s -> %s (should egress via Link NIC)",
 					pktNum, srcIP, dstIP)
 			}
 			pkt.DecRef()
@@ -1601,7 +1613,7 @@ func (n *Netstack) writeLoop() {
 		if n.WriteLoopDevice != nil {
 			if _, err := n.WriteLoopDevice.Write(data); err != nil {
 				if isGIPSrc || isGIPDst {
-					util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d TUN write FAILED: %s:%d -> %s:%d err=%v",
+					util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d TUN write FAILED: %s:%d -> %s:%d err=%v",
 						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2), err)
 				}
 				select {
@@ -1609,16 +1621,16 @@ func (n *Netstack) writeLoop() {
 					pkt.DecRef()
 					return
 				default:
-					util.LogWarn("netstack: write error: %v", err)
+					util.LogModuleWarn("netstack", "netstack: write error: %v", err)
 				}
 			} else {
 				n.WritePackets.Add(1)
 				if pktNum < 50 || pktNum%1000 == 0 {
-					util.LogInfo("[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
+					util.LogModuleInfo("netstack", "[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
 						pktNum, srcIP, portAt(data, hl), net.IP(data[16:20]), portAt(data, hl+2))
 				}
 				if isGIPSrc || isGIPDst {
-					util.LogInfo("[DIAG-DEBUG] GIP-touch pkt#%d WROTE to TUN: %s:%d -> %s:%d",
+					util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d WROTE to TUN: %s:%d -> %s:%d",
 						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2))
 				}
 				if n.callbacks != nil && n.callbacks.StatsNotify != nil {
@@ -1626,7 +1638,7 @@ func (n *Netstack) writeLoop() {
 				}
 			}
 		} else if pktNum < 50 {
-			util.LogWarn("[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
+			util.LogModuleWarn("netstack", "[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
 		}
 
 		pkt.DecRef()
@@ -1658,7 +1670,7 @@ func logTCPPacket(prefix string, data []byte) {
 	dstIP := net.IP(data[16:20])
 	headerLen := int(data[0]&0x0f) * 4
 	if len(data) < headerLen+20 {
-		util.LogDebug("%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
+		util.LogModuleDebug("netstack", "%s %s -> %s (TCP header too short)", prefix, srcIP, dstIP)
 		return
 	}
 	srcPort := uint16(data[headerLen])<<8 | uint16(data[headerLen+1])
@@ -1679,6 +1691,6 @@ func logTCPPacket(prefix string, data []byte) {
 	if flags&0x04 != 0 {
 		flagStr += "RST "
 	}
-	util.LogDebug("%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
+	util.LogModuleDebug("netstack", "%s %s:%d -> %s:%d [%s] seq=%d ack=%d len=%d",
 		prefix, srcIP, srcPort, dstIP, dstPort, flagStr, seq, ack, len(data))
 }

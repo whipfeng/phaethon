@@ -16,28 +16,28 @@ import (
 func PerformSelfUpdate(newBinaryPath, version string) {
 	execPath, err := os.Executable()
 	if err != nil {
-		util.LogError("[UPDATE] get executable path: %v", err)
+		util.LogModuleError("p2p", "get executable path: %v", err)
 		return
 	}
 	backupPath := execPath + ".bak"
 
-	util.LogInfo("[UPDATE] self-update: %s → %s from %s", runningVersion(), version, newBinaryPath)
+	util.LogModuleInfo("p2p", "self-update: %s → %s from %s", runningVersion(), version, newBinaryPath)
 
 	// Windows allows renaming a running exe
 	if err := os.Rename(execPath, backupPath); err != nil {
-		util.LogError("[UPDATE] backup %s → %s: %v", execPath, backupPath, err)
+		util.LogModuleError("p2p", "backup %s → %s: %v", execPath, backupPath, err)
 		return
 	}
-	util.LogInfo("[UPDATE] backed up %s → %s", execPath, backupPath)
+	util.LogModuleInfo("p2p", "backed up %s → %s", execPath, backupPath)
 
 	// Copy new binary to original path (now free since we renamed it)
 	if err := copyFileLocal(newBinaryPath, execPath); err != nil {
-		util.LogError("[UPDATE] copy %s → %s: %v", newBinaryPath, execPath, err)
+		util.LogModuleError("p2p", "copy %s → %s: %v", newBinaryPath, execPath, err)
 		os.Rename(backupPath, execPath)
 		return
 	}
 
-	util.LogInfo("[UPDATE] replaced binary, exiting with code 42 for watchdog handoff")
+	util.LogModuleInfo("p2p", "replaced binary, exiting with code 42 for watchdog handoff")
 
 	// Exit with code 42 — watchdog sees this and spawns a new watchdog
 	os.Exit(42)

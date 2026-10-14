@@ -28,7 +28,7 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 			conn.Close()
 			return nil, fmt.Errorf("trojan: reverse request fail: %w", err)
 		}
-		util.LogDebug("[TROJAN-CLI] [%s] [%s] reverse match ok for %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
+		util.LogModuleDebug("trojan", "reverse match ok for %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
 		return conn, nil
 	}
 
@@ -38,7 +38,7 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	if d.Proxy.Next != nil {
 		nextType = d.Proxy.Next.Type
 	}
-	util.LogDebug("[TROJAN-DIAL] [%s] next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("trojan", "next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
 	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("trojan: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
@@ -56,7 +56,7 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, err
 	}
 
-	util.LogDebug("[TROJAN-CLI] [%s] [%s] Connecting %s:%d via %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("trojan", "Connecting %s:%d via %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
 	return tlsConn, nil
 }
 
@@ -117,7 +117,7 @@ func (d *TrojanDialer) DialPacket() (net.PacketConn, error) {
 		return nil, err
 	}
 
-	util.LogDebug("[TROJAN-CLI] [%s] [%s] UDP ASSOCIATE via %s:%d", d.Proxy.Name, d.ConnIDStr(), d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("trojan", "UDP ASSOCIATE via %s:%d", d.Proxy.Name, d.ConnIDStr(), d.Proxy.Server, d.Proxy.Port)
 
 	return &trojanPacketConn{
 		tlsConn: tlsConn,

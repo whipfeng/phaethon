@@ -38,12 +38,12 @@ func CleanupResidual() {
 	if _, err := os.Stat(backupPath); err == nil {
 		if origData, err := os.ReadFile(backupPath); err == nil {
 			if err := os.WriteFile(resolvConf, origData, 0644); err == nil {
-				util.LogInfo("tun: cleanup restored resolv.conf")
+				util.LogModuleInfo("cleanup", "cleanup restored resolv.conf")
 			} else {
-				util.LogWarn("tun: cleanup restore resolv.conf fail: %v", err)
+				util.LogModuleWarn("cleanup", "cleanup restore resolv.conf fail: %v", err)
 			}
 		} else {
-			util.LogWarn("tun: cleanup read resolv.conf backup fail: %v", err)
+			util.LogModuleWarn("cleanup", "cleanup read resolv.conf backup fail: %v", err)
 		}
 		_ = os.Remove(backupPath)
 	}
@@ -56,18 +56,18 @@ func CleanupResidual() {
 			// Restore rp_filter on the physical interface
 			if state.IfaceName != "" {
 				if err := writeRpFilter(state.IfaceName, state.RpFilter); err == nil {
-					util.LogInfo("tun: cleanup restored %s rp_filter=%d", state.IfaceName, state.RpFilter)
+					util.LogModuleInfo("cleanup", "cleanup restored %s rp_filter=%d", state.IfaceName, state.RpFilter)
 				} else {
-					util.LogWarn("tun: cleanup restore rp_filter fail: %v", err)
+					util.LogModuleWarn("cleanup", "cleanup restore rp_filter fail: %v", err)
 				}
 				// Also restore "all" to the common relaxed value
 				_ = writeRpFilter("all", 2)
 			}
 			// Restore ip_forward
 			if err := writeIPForward(state.IPForward); err == nil {
-				util.LogInfo("tun: cleanup restored ip_forward=%d", state.IPForward)
+				util.LogModuleInfo("cleanup", "cleanup restored ip_forward=%d", state.IPForward)
 			} else {
-				util.LogWarn("tun: cleanup restore ip_forward fail: %v", err)
+				util.LogModuleWarn("cleanup", "cleanup restore ip_forward fail: %v", err)
 			}
 			// Clean up iptables FORWARD rules - loop to remove ALL duplicates
 			if state.IfaceName != "" {
@@ -76,25 +76,25 @@ func CleanupResidual() {
 					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", "tun0", "-j", "ACCEPT").Run(); err != nil {
 						break
 					}
-					util.LogInfo("tun: cleanup removed iptables FORWARD %s->tun0", state.IfaceName)
+					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->tun0", state.IfaceName)
 				}
 				// Remove all tun0->eth1 rules
 				for {
 					if err := exec.Command("iptables", "-D", "FORWARD", "-i", "tun0", "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
 						break
 					}
-					util.LogInfo("tun: cleanup removed iptables FORWARD tun0->%s", state.IfaceName)
+					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD tun0->%s", state.IfaceName)
 				}
 				// Remove all eth1->eth1 rules
 				for {
 					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
 						break
 					}
-					util.LogInfo("tun: cleanup removed iptables FORWARD %s->%s", state.IfaceName, state.IfaceName)
+					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, state.IfaceName)
 				}
 			}
 		} else {
-			util.LogWarn("tun: cleanup parse state file fail: %v", err)
+			util.LogModuleWarn("cleanup", "cleanup parse state file fail: %v", err)
 		}
 		_ = os.Remove(tunStateFile)
 	}
@@ -120,9 +120,9 @@ func CleanupResidual() {
 				}
 				if ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19 {
 					if out, err := exec.Command("ip", "link", "set", iface.Name, "down").CombinedOutput(); err != nil {
-						util.LogWarn("tun: cleanup ip link set %s down fail: %v, %s", iface.Name, err, out)
+						util.LogModuleWarn("cleanup", "cleanup ip link set %s down fail: %v, %s", iface.Name, err, out)
 					} else {
-						util.LogInfo("tun: cleanup brought %s down", iface.Name)
+						util.LogModuleInfo("cleanup", "cleanup brought %s down", iface.Name)
 					}
 					break
 				}

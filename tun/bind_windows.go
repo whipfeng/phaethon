@@ -28,7 +28,7 @@ func bindToInterface(ifIndex int) func(network, address string, c syscall.RawCon
 			return err
 		}
 		if sockErr != nil {
-			util.LogWarn("tun/bind: IP_UNICAST_IF for iface %d failed: %v", ifIndex, sockErr)
+			util.LogModuleWarn("bind", "tun/bind: IP_UNICAST_IF for iface %d failed: %v", ifIndex, sockErr)
 		}
 		return sockErr
 	}

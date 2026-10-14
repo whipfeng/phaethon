@@ -31,6 +31,6 @@ func (d *DirectDialer) DialPacket() (net.PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	util.LogDebug("[DIRECT] UDP socket ready on %s", pc.LocalAddr())
+	util.LogModuleDebug("direct", "UDP socket ready on %s", pc.LocalAddr())
 	return pc, nil
 }

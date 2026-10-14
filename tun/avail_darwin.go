@@ -15,7 +15,7 @@ import (
 func Available() bool {
 	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, 2)
 	if err != nil {
-		util.LogWarn("tun: unable to create system control socket: %v", err)
+		util.LogModuleWarn("tun", "unable to create system control socket: %v", err)
 		return false
 	}
 	defer unix.Close(fd)
@@ -30,7 +30,7 @@ func Available() bool {
 		uintptr(unsafe.Pointer(&ctlInfo)),
 	)
 	if errno != 0 {
-		util.LogWarn("tun: utun control not available: %v", errno)
+		util.LogModuleWarn("tun", "utun control not available: %v", errno)
 		return false
 	}
 	return true

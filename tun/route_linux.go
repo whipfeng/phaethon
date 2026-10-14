@@ -49,7 +49,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// 3. Detect original default gateway and interface
 	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
 	if err != nil {
-		util.LogWarn("tun: failed to list routes: %v", err)
+		util.LogModuleWarn("route", "failed to list routes: %v", err)
 	} else {
 		for _, route := range routes {
 			isDefault := route.Dst == nil
@@ -64,7 +64,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 					r.DefaultIfaceName = ifaceLink.Attrs().Name
 					r.DefaultIfaceIndex = ifaceLink.Attrs().Index
 				}
-				util.LogInfo("tun: original gateway: %s (iface=%s idx=%d)", r.originalGateway, r.DefaultIfaceName, r.DefaultIfaceIndex)
+				util.LogModuleInfo("route", "original gateway: %s (iface=%s idx=%d)", r.originalGateway, r.DefaultIfaceName, r.DefaultIfaceIndex)
 				break
 			}
 		}
@@ -74,7 +74,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		// original DNS instead of TUN-contaminated values.
 		const staleBackup = "/etc/resolv.conf.phaethon.bak"
 		if _, err := os.Stat(staleBackup); err == nil {
-			util.LogWarn("tun: stale DNS backup found (previous crash?), restoring first")
+			util.LogModuleWarn("route", "stale DNS backup found (previous crash?), restoring first")
 			if origData, err := os.ReadFile(staleBackup); err == nil {
 				_ = os.WriteFile("/etc/resolv.conf", origData, 0644)
 			}
@@ -84,9 +84,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		// Capture original DNS servers before TUN redirects system DNS.
 		if servers, err := readResolvConfNameservers(); err == nil {
 			r.OriginalDNSServers = servers
-			util.LogInfo("tun: original DNS servers: %v", servers)
+			util.LogModuleInfo("route", "original DNS servers: %v", servers)
 		} else {
-			util.LogWarn("tun: failed to capture original DNS servers: %v", err)
+			util.LogModuleWarn("route", "failed to capture original DNS servers: %v", err)
 		}
 
 		// Save and relax rp_filter on the physical interface. The split-tunnel
@@ -100,26 +100,26 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		if r.DefaultIfaceName != "" && r.bypassGateway {
 			if orig, err := readRpFilter(r.DefaultIfaceName); err == nil {
 				r.originalRpFilter = orig
-				util.LogInfo("tun: physical %s original rp_filter: %d", r.DefaultIfaceName, orig)
+				util.LogModuleInfo("route", "physical %s original rp_filter: %d", r.DefaultIfaceName, orig)
 			}
 			if err := writeRpFilter(r.DefaultIfaceName, 2); err != nil {
-				util.LogWarn("tun: set %s rp_filter=2 fail: %v", r.DefaultIfaceName, err)
+				util.LogModuleWarn("route", "set %s rp_filter=2 fail: %v", r.DefaultIfaceName, err)
 			}
 			if err := writeRpFilter("all", 2); err != nil {
-				util.LogWarn("tun: set all rp_filter=2 fail: %v", err)
+				util.LogModuleWarn("route", "set all rp_filter=2 fail: %v", err)
 			}
 
 			// Enable IP forwarding so the kernel forwards packets between interfaces.
 			if orig, err := readIPForward(); err == nil {
 				r.originalIPForward = orig
-				util.LogInfo("tun: original ip_forward: %d", orig)
+				util.LogModuleInfo("route", "original ip_forward: %d", orig)
 				if orig == 0 {
 					if err := writeIPForward(1); err != nil {
-						util.LogWarn("tun: enable ip_forward fail: %v", err)
+						util.LogModuleWarn("route", "enable ip_forward fail: %v", err)
 					}
 				}
 			} else {
-				util.LogWarn("tun: read ip_forward fail: %v", err)
+				util.LogModuleWarn("route", "read ip_forward fail: %v", err)
 			}
 
 			// Save original kernel parameter values to a state file so the watchdog
@@ -135,7 +135,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 		dst, err := parseExclusionLinux(exclude)
 		if err != nil {
-			util.LogWarn("tun: invalid exclusion %s: %v", exclude, err)
+			util.LogModuleWarn("route", "invalid exclusion %s: %v", exclude, err)
 			continue
 		}
 		rt := &netlink.Route{
@@ -143,9 +143,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			Gw:  r.originalGateway,
 		}
 		if err := netlink.RouteAdd(rt); err != nil {
-			util.LogWarn("tun: add exclusion route %s fail: %v", exclude, err)
+			util.LogModuleWarn("route", "add exclusion route %s fail: %v", exclude, err)
 		} else {
-			util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+			util.LogModuleInfo("route", "exclusion route %s -> %s", exclude, r.originalGateway)
 			r.appliedExcludes = append(r.appliedExcludes, exclude)
 		}
 	}
@@ -177,34 +177,34 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		// Allow traffic from physical to TUN (client queries going to netstack)
 		if !iptablesRuleExists(ctx, physIface, tunIface) {
 			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
+				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
 			} else {
-				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
+				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
 			}
 		} else {
-			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", physIface, tunIface)
+			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", physIface, tunIface)
 		}
 		// Allow traffic from TUN to physical (responses going back to clients/proxy)
 		if !iptablesRuleExists(ctx, tunIface, physIface) {
 			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
+				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
 			} else {
-				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
+				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
 			}
 		} else {
-			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", tunIface, physIface)
+			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", tunIface, physIface)
 		}
 		// Allow traffic from physical interface back out the same physical interface.
 		// LAN client traffic arrives on physIface and must be forwarded back out
 		// physIface to reach the real gateway on the same subnet.
 		if !iptablesRuleExists(ctx, physIface, physIface) {
 			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogWarn("tun: iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
+				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
 			} else {
-				util.LogInfo("tun: iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
+				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
 			}
 		} else {
-			util.LogDebug("tun: iptables FORWARD %s->%s already exists, skipping", physIface, physIface)
+			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", physIface, physIface)
 		}
 	}
 
@@ -225,7 +225,7 @@ func iptablesDeleteAll(ctx context.Context, inIface, outIface string) {
 		if err != nil {
 			break
 		}
-		util.LogDebug("tun: iptables deleted FORWARD %s->%s", inIface, outIface)
+		util.LogModuleDebug("route", "iptables deleted FORWARD %s->%s", inIface, outIface)
 	}
 }
 
@@ -245,13 +245,13 @@ func (r *RouteManager) platformTeardown() {
 	// Restore rp_filter on the physical interface.
 	if r.DefaultIfaceName != "" {
 		if err := writeRpFilter(r.DefaultIfaceName, r.originalRpFilter); err != nil {
-			util.LogWarn("tun: restore %s rp_filter=%d fail: %v", r.DefaultIfaceName, r.originalRpFilter, err)
+			util.LogModuleWarn("route", "restore %s rp_filter=%d fail: %v", r.DefaultIfaceName, r.originalRpFilter, err)
 		}
 	}
 
 	// Restore ip_forward.
 	if err := writeIPForward(r.originalIPForward); err != nil {
-		util.LogWarn("tun: restore ip_forward=%d fail: %v", r.originalIPForward, err)
+		util.LogModuleWarn("route", "restore ip_forward=%d fail: %v", r.originalIPForward, err)
 	}
 
 	link, err := netlink.LinkByName(r.devName)
@@ -287,7 +287,7 @@ func parseExclusionLinux(exclude string) (*net.IPNet, error) {
 func (r *RouteManager) deleteExclusionRoute(exclude string) {
 	dst, err := parseExclusionLinux(exclude)
 	if err != nil {
-		util.LogWarn("tun: invalid exclusion to delete %s: %v", exclude, err)
+		util.LogModuleWarn("route", "invalid exclusion to delete %s: %v", exclude, err)
 		return
 	}
 	rt := &netlink.Route{
@@ -386,13 +386,13 @@ func saveTUNState(ifaceName string, rpFilter, ipForward int) {
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
-		util.LogWarn("tun: marshal state fail: %v", err)
+		util.LogModuleWarn("route", "marshal state fail: %v", err)
 		return
 	}
 	if err := os.WriteFile(tunStateFile, data, 0644); err != nil {
-		util.LogWarn("tun: save state fail: %v", err)
+		util.LogModuleWarn("route", "save state fail: %v", err)
 	} else {
-		util.LogInfo("tun: saved state to %s: iface=%s rp_filter=%d ip_forward=%d", tunStateFile, ifaceName, rpFilter, ipForward)
+		util.LogModuleInfo("route", "saved state to %s: iface=%s rp_filter=%d ip_forward=%d", tunStateFile, ifaceName, rpFilter, ipForward)
 	}
 }
 
@@ -418,6 +418,6 @@ func (e *Engine) addMeshRoute(subnet string) error {
 	if err := netlink.RouteAdd(rt); err != nil {
 		return fmt.Errorf("add mesh route %s: %w", subnet, err)
 	}
-	util.LogInfo("tun: mesh route %s -> %s (idx=%d)", subnet, e.routeMgr.devName, link.Attrs().Index)
+	util.LogModuleInfo("route", "mesh route %s -> %s (idx=%d)", subnet, e.routeMgr.devName, link.Attrs().Index)
 	return nil
 }

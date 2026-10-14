@@ -24,7 +24,7 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 				idx = bestIdx
 				setCachedRoute(dst, "", strconv.Itoa(idx))
 			} else if err != nil {
-				util.LogDebug("dialer/bind: route lookup for %s failed: %v", dst, err)
+				util.LogModuleDebug("bind", "dialer/bind: route lookup for %s failed: %v", dst, err)
 			}
 		}
 	}

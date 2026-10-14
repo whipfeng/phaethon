@@ -85,11 +85,11 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 				if proxy.Next != nil && proxy.Next.Type != config.ProxyDIRECT {
 					d := &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 					server, port := d.ServerAddr()
-					util.LogDebug("[HTUNNEL-DIAL] [%s] chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, server, port, addr)
+					util.LogModuleDebug("htunnel", "chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, server, port, addr)
 					nextDialer := NewDialer(proxy.Next)
 					return nextDialer.Dial(server, port)
 				}
-				util.LogDebug("[HTUNNEL-DIAL] [%s] direct to URL addr=%s (server=%s:%d, next=%s)", proxy.Name, addr, proxy.Server, proxy.Port, nextType)
+				util.LogModuleDebug("htunnel", "direct to URL addr=%s (server=%s:%d, next=%s)", proxy.Name, addr, proxy.Server, proxy.Port, nextType)
 				return DialRouteAware(network, addr)
 			},
 		},
@@ -211,7 +211,7 @@ func (d *HTunnelDialer) dialHTunnel(cmd string, dstAddr string, dstPort int) (ne
 		return nil, fmt.Errorf("htunnel: ack connect status: %d", resp.StatusCode)
 	}
 
-	util.LogDebug("[HTUNNEL-CLI] [%s] [%s] Connecting %s:%d via %s (connectionID=%s, cmd=%s)", proxy.Name, d.ConnIDStr(), dstAddr, dstPort, proxy.URL, connectionID, cmd)
+	util.LogModuleDebug("htunnel", "Connecting %s:%d via %s (connectionID=%s, cmd=%s)", proxy.Name, d.ConnIDStr(), dstAddr, dstPort, proxy.URL, connectionID, cmd)
 
 	conn := &htunnelConn{
 		proxy:        proxy,
@@ -324,13 +324,13 @@ func (c *htunnelConn) Read(b []byte) (int, error) {
 			return 0, fmt.Errorf("htunnel: read body fail: %w", err)
 		}
 
-		util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: GET → status=%d bodyLen=%d", c.connectionID, readSeq, resp.StatusCode, len(body))
+		util.LogModuleInfo("htunnel", "connID=%s readSeq=%d: GET → status=%d bodyLen=%d", c.connectionID, readSeq, resp.StatusCode, len(body))
 		if resp.StatusCode == 410 {
-			util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 410 → ErrClosedPipe", c.connectionID, readSeq)
+			util.LogModuleInfo("htunnel", "connID=%s readSeq=%d: 410 → ErrClosedPipe", c.connectionID, readSeq)
 			return 0, io.ErrClosedPipe
 		}
 		if resp.StatusCode == 408 {
-			util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 408 → retry", c.connectionID, readSeq)
+			util.LogModuleInfo("htunnel", "connID=%s readSeq=%d: 408 → retry", c.connectionID, readSeq)
 			// Timeout, retry
 			continue
 		}
@@ -352,7 +352,7 @@ func (c *htunnelConn) Read(b []byte) (int, error) {
 			c.readOffset = n
 			return n, nil
 		}
-		util.LogInfo("[HTUNNEL-READ-DIAG] connID=%s readSeq=%d: 200 but empty body → retry", c.connectionID, readSeq)
+		util.LogModuleInfo("htunnel", "connID=%s readSeq=%d: 200 but empty body → retry", c.connectionID, readSeq)
 	}
 }
 
@@ -399,7 +399,7 @@ func (c *htunnelConn) Write(b []byte) (int, error) {
 
 func (c *htunnelConn) heartbeatLoop() {
 	// Initial delay before first heartbeat - must be shorter than server's 30s timeout
-	util.LogInfo("[HTUNNEL-CLI] [%s] heartbeat loop started (connectionID=%s, connSeq=%d)", c.proxy.Name, c.connectionID, c.connSeq)
+	util.LogModuleInfo("htunnel", "heartbeat loop started (connectionID=%s, connSeq=%d)", c.proxy.Name, c.connectionID, c.connSeq)
 	select {
 	case <-c.closed:
 		return
@@ -423,12 +423,12 @@ func (c *htunnelConn) heartbeatLoop() {
 		req.Header.Set(headerConnectionID, c.connectionID)
 		req.Header.Set(headerContentSeq, strconv.Itoa(connSeq))
 
-		util.LogInfo("[HTUNNEL-CLI] [%s] heartbeat PUT sending (seq=%d, url=%s)", c.proxy.Name, connSeq, url)
+		util.LogModuleInfo("htunnel", "heartbeat PUT sending (seq=%d, url=%s)", c.proxy.Name, connSeq, url)
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		resp, err := c.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
-			util.LogWarn("[HTUNNEL-CLI] [%s] heartbeat PUT fail (seq=%d): %T %v", c.proxy.Name, connSeq, err, err)
+			util.LogModuleWarn("htunnel", "heartbeat PUT fail (seq=%d): %T %v", c.proxy.Name, connSeq, err, err)
 			c.Close()
 			return
 		}
@@ -436,12 +436,12 @@ func (c *htunnelConn) heartbeatLoop() {
 		cancel()
 
 		if resp.StatusCode == 410 {
-			util.LogWarn("[HTUNNEL-CLI] [%s] heartbeat PUT 410 (seq=%d): server closed channel", c.proxy.Name, connSeq)
+			util.LogModuleWarn("htunnel", "heartbeat PUT 410 (seq=%d): server closed channel", c.proxy.Name, connSeq)
 			c.Close()
 			return
 		}
 		if resp.StatusCode != 200 {
-			util.LogWarn("[HTUNNEL-CLI] [%s] heartbeat PUT status=%d (seq=%d): unexpected", c.proxy.Name, resp.StatusCode, connSeq)
+			util.LogModuleWarn("htunnel", "heartbeat PUT status=%d (seq=%d): unexpected", c.proxy.Name, resp.StatusCode, connSeq)
 			c.Close()
 			return
 		}
@@ -564,7 +564,7 @@ func (d *HTunnelDialer) DialPacket() (net.PacketConn, error) {
 		return nil, fmt.Errorf("htunnel-udp: ack connect status: %d", resp.StatusCode)
 	}
 
-	util.LogDebug("[HTUNNEL-CLI] [%s] [%s] UDP ASSOCIATE via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), proxy.URL, connectionID)
+	util.LogModuleDebug("htunnel", "UDP ASSOCIATE via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), proxy.URL, connectionID)
 
 	conn := &htunnelPacketConn{
 		proxy:        proxy,
@@ -744,7 +744,7 @@ func (c *htunnelPacketConn) heartbeatLoop() {
 		resp, err := c.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
-			util.LogWarn("[HTUNNEL-CLI] [%s] UDP heartbeat PUT fail (seq=%d): %T %v", c.proxy.Name, connSeq, err, err)
+			util.LogModuleWarn("htunnel", "UDP heartbeat PUT fail (seq=%d): %T %v", c.proxy.Name, connSeq, err, err)
 			c.Close()
 			return
 		}
@@ -752,12 +752,12 @@ func (c *htunnelPacketConn) heartbeatLoop() {
 		cancel()
 
 		if resp.StatusCode == 410 {
-			util.LogWarn("[HTUNNEL-CLI] [%s] UDP heartbeat PUT 410 (seq=%d): server closed channel", c.proxy.Name, connSeq)
+			util.LogModuleWarn("htunnel", "UDP heartbeat PUT 410 (seq=%d): server closed channel", c.proxy.Name, connSeq)
 			c.Close()
 			return
 		}
 		if resp.StatusCode != 200 {
-			util.LogWarn("[HTUNNEL-CLI] [%s] UDP heartbeat PUT status=%d (seq=%d): unexpected", c.proxy.Name, resp.StatusCode, connSeq)
+			util.LogModuleWarn("htunnel", "UDP heartbeat PUT status=%d (seq=%d): unexpected", c.proxy.Name, resp.StatusCode, connSeq)
 			c.Close()
 			return
 		}

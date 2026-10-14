@@ -101,14 +101,14 @@ func AcceptLoop(listener net.Listener, handler ConnHandler, name string) {
 		conn, err := listener.Accept()
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				util.LogWarn("%s accept temporary error: %v", name, err)
+				util.LogModuleWarn("base", "%s accept temporary error: %v", name, err)
 				time.Sleep(5 * time.Millisecond)
 				continue
 			}
-			util.LogError("%s accept error: %v", name, err)
+			util.LogModuleError("base", "%s accept error: %v", name, err)
 			return
 		}
-		util.LogInfo("[DEBUG] %s accepted connection from %s", name, conn.RemoteAddr())
+		util.LogModuleInfo("base", "%s accepted connection from %s", name, conn.RemoteAddr())
 		configureTCPConn(conn)
 		go handler.HandleConn(conn)
 	}

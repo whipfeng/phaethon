@@ -59,7 +59,7 @@ func (e *HTunnelEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.
 		}
 
 		if err := e.peer.Send(data); err != nil {
-			util.LogWarn("[HTUNNEL-EP] send fail: %v", err)
+			util.LogModuleWarn("mesh", "[HTUNNEL-EP] send fail: %v", err)
 			pkt.DecRef()
 			if n == 0 {
 				return 0, &tcpip.ErrAborted{}

@@ -307,7 +307,7 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 		poolStart = dhcpUint32ToIP(startUint32)
 		poolEnd = dhcpUint32ToIP(endUint32)
 
-		util.LogInfo("dhcp: auto-generated pool %s-%s from %s/%d", poolStart, poolEnd, networkIP, ones)
+		util.LogModuleInfo("dhcp", "auto-generated pool %s-%s from %s/%d", poolStart, poolEnd, networkIP, ones)
 	}
 
 	s := &dhcpServerImpl{
@@ -390,10 +390,10 @@ func (s *dhcpServerImpl) Start() error {
 		return fmt.Errorf("dhcp: AF_PACKET bind: %w", err)
 	}
 
-	util.LogInfo("dhcp: AF_PACKET socket fd=%d ifindex=%d mac=%s", rawFD, s.ifIndex, s.ifHWAddr)
+	util.LogModuleInfo("dhcp", "AF_PACKET socket fd=%d ifindex=%d mac=%s", rawFD, s.ifIndex, s.ifHWAddr)
 
 	gw, _, _, _ := s.getIfaceInfo()
-	util.LogInfo("dhcp: listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
+	util.LogModuleInfo("dhcp", "listening on %s (gateway=%s, dns=%s, pool=%s-%s)",
 		s.ifaceName, gw, s.dnsAddr, s.poolNext, s.poolEnd)
 
 	s.wg.Add(1)
@@ -415,7 +415,7 @@ func (s *dhcpServerImpl) loadLeases() {
 	}
 	var entries []leaseJSON
 	if err := json.Unmarshal(data, &entries); err != nil {
-		util.LogWarn("dhcp: failed to parse lease file: %v", err)
+		util.LogModuleWarn("dhcp", "failed to parse lease file: %v", err)
 		return
 	}
 	now := time.Now()
@@ -438,7 +438,7 @@ func (s *dhcpServerImpl) loadLeases() {
 		count++
 	}
 	if count > 0 {
-		util.LogInfo("dhcp: loaded %d leases from %s", count, s.leaseFile)
+		util.LogModuleInfo("dhcp", "loaded %d leases from %s", count, s.leaseFile)
 	}
 }
 
@@ -463,12 +463,12 @@ func (s *dhcpServerImpl) saveLeases() {
 
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
-		util.LogWarn("dhcp: failed to marshal leases: %v", err)
+		util.LogModuleWarn("dhcp", "failed to marshal leases: %v", err)
 		return
 	}
 	_ = os.MkdirAll(filepath.Dir(s.leaseFile), 0755)
 	if err := os.WriteFile(s.leaseFile, data, 0644); err != nil {
-		util.LogWarn("dhcp: failed to write leases: %v", err)
+		util.LogModuleWarn("dhcp", "failed to write leases: %v", err)
 	} else {
 		util.DefaultVersionNotifier.BumpVersion("tun")
 	}
@@ -484,7 +484,7 @@ func (s *dhcpServerImpl) Stop() {
 		syscall.Close(s.rawFD)
 	}
 	s.wg.Wait()
-	util.LogInfo("dhcp: stopped")
+	util.LogModuleInfo("dhcp", "stopped")
 }
 
 func (s *dhcpServerImpl) ActiveLeases() int {
@@ -562,14 +562,14 @@ func (s *dhcpServerImpl) serve() {
 			case <-s.stopCh:
 				return
 			default:
-				util.LogWarn("dhcp: read error: %v", err)
+				util.LogModuleWarn("dhcp", "read error: %v", err)
 				continue
 			}
 		}
 
 		msg, err := parseDHCPMessage(buf[:n])
 		if err != nil {
-			util.LogWarn("dhcp: parse error: %v", err)
+			util.LogModuleWarn("dhcp", "parse error: %v", err)
 			continue
 		}
 		if msg.op != 1 { // not a BOOTREQUEST
@@ -607,12 +607,12 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 		s.mu.Unlock()
 
 		if offeredIP == nil {
-			util.LogWarn("dhcp: pool exhausted for %s", macStr)
+			util.LogModuleWarn("dhcp", "pool exhausted for %s", macStr)
 			return
 		}
 		s.sendReply(dhcpOffer, req, offeredIP)
 		s.saveLeases()
-		util.LogInfo("dhcp: OFFER %s -> %s", macStr, offeredIP)
+		util.LogModuleInfo("dhcp", "OFFER %s -> %s", macStr, offeredIP)
 
 	case dhcpRequest:
 		reqIP := req.requestedIP()
@@ -636,7 +636,7 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
 			s.saveLeases()
-			util.LogInfo("dhcp: ACK (renew) %s -> %s", macStr, reqIP)
+			util.LogModuleInfo("dhcp", "ACK (renew) %s -> %s", macStr, reqIP)
 		} else {
 			s.leases[macStr] = &lease{
 				ip:       reqIP,
@@ -647,20 +647,20 @@ func (s *dhcpServerImpl) handleMessage(req *dhcpMessage, from *net.UDPAddr) {
 			s.mu.Unlock()
 			s.sendReply(dhcpACK, req, reqIP)
 			s.saveLeases()
-			util.LogInfo("dhcp: ACK %s -> %s", macStr, reqIP)
+			util.LogModuleInfo("dhcp", "ACK %s -> %s", macStr, reqIP)
 		}
 
 	case dhcpRelease:
 		s.mu.Lock()
 		delete(s.leases, macStr)
 		s.mu.Unlock()
-		util.LogInfo("dhcp: RELEASE %s", macStr)
+		util.LogModuleInfo("dhcp", "RELEASE %s", macStr)
 
 	case dhcpDecline:
 		s.mu.Lock()
 		delete(s.leases, macStr)
 		s.mu.Unlock()
-		util.LogWarn("dhcp: DECLINE %s", macStr)
+		util.LogModuleWarn("dhcp", "DECLINE %s", macStr)
 	}
 }
 
@@ -749,7 +749,7 @@ func (s *dhcpServerImpl) advancePool() {
 func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP net.IP) {
 	gateway, mask, _, err := s.getIfaceInfo()
 	if err != nil {
-		util.LogWarn("dhcp: failed to get interface info: %v", err)
+		util.LogModuleWarn("dhcp", "failed to get interface info: %v", err)
 		return
 	}
 
@@ -803,10 +803,10 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 
 	udpLen := 8 + len(dhcpData)
 	udp := make([]byte, udpLen)
-	binary.BigEndian.PutUint16(udp[0:], 67)    // src port
-	binary.BigEndian.PutUint16(udp[2:], 68)    // dst port
+	binary.BigEndian.PutUint16(udp[0:], 67) // src port
+	binary.BigEndian.PutUint16(udp[2:], 68) // dst port
 	binary.BigEndian.PutUint16(udp[4:], uint16(udpLen))
-	binary.BigEndian.PutUint16(udp[6:], 0)     // checksum placeholder
+	binary.BigEndian.PutUint16(udp[6:], 0) // checksum placeholder
 	copy(udp[8:], dhcpData)
 
 	// Compute UDP checksum with pseudo-header
@@ -816,14 +816,14 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	// Build IP header (20 bytes, no options)
 	ipLen := 20 + len(udp)
 	ip := make([]byte, ipLen)
-	ip[0] = 0x45                      // version=4, IHL=5
-	ip[1] = 0                         // TOS
+	ip[0] = 0x45 // version=4, IHL=5
+	ip[1] = 0    // TOS
 	binary.BigEndian.PutUint16(ip[2:], uint16(ipLen))
 	binary.BigEndian.PutUint16(ip[4:], 0) // identification
-	ip[6] = 0                         // flags=0 (no DF), fragment offset=0
+	ip[6] = 0                             // flags=0 (no DF), fragment offset=0
 	ip[7] = 0
-	ip[8] = 255                       // TTL
-	ip[9] = 17                        // protocol = UDP
+	ip[8] = 255                            // TTL
+	ip[9] = 17                             // protocol = UDP
 	binary.BigEndian.PutUint16(ip[10:], 0) // checksum placeholder
 	copy(ip[12:16], srcIP)
 	copy(ip[16:20], dstIP)
@@ -853,13 +853,13 @@ func (s *dhcpServerImpl) sendReply(msgType byte, req *dhcpMessage, assignedIP ne
 	copy(dst.Addr[:6], dstMAC)
 
 	if err := syscall.Sendto(s.rawFD, frame, 0, dst); err != nil {
-		util.LogWarn("dhcp: send %s to %v: %v", msgTypeName(msgType), dstIP, err)
+		util.LogModuleWarn("dhcp", "send %s to %v: %v", msgTypeName(msgType), dstIP, err)
 	} else {
 		hex := ""
 		for i := 0; i < len(frame) && i < 42; i++ {
 			hex += fmt.Sprintf("%02x", frame[i])
 		}
-		util.LogInfo("dhcp: sent %d bytes via AF_PACKET fd=%d frame_hex=%s", len(frame), s.rawFD, hex)
+		util.LogModuleInfo("dhcp", "sent %d bytes via AF_PACKET fd=%d frame_hex=%s", len(frame), s.rawFD, hex)
 	}
 }
 

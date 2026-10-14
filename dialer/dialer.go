@@ -324,26 +324,26 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 	}
 	d := NewDialer(p)
 	server, port := d.ServerAddr()
-	util.LogDebug("[HEALTH] %s: ServerAddr() = %s:%d", p.Name, server, port)
+	util.LogModuleDebug("dialer", "%s: ServerAddr() = %s:%d", p.Name, server, port)
 	if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
-		util.LogDebug("[HEALTH] %s: dialing via %s (%s:%d)", p.Name, p.Next.Name, server, port)
+		util.LogModuleDebug("dialer", "%s: dialing via %s (%s:%d)", p.Name, p.Next.Name, server, port)
 		nextDialer := NewDialer(p.Next)
 		conn, err := nextDialer.Dial(server, port)
 		if err != nil {
-			util.LogDebug("[HEALTH] %s: via dial failed: %v", p.Name, err)
+			util.LogModuleDebug("dialer", "%s: via dial failed: %v", p.Name, err)
 			return nil, err
 		}
-		util.LogDebug("[HEALTH] %s: via dial success", p.Name)
+		util.LogModuleDebug("dialer", "%s: via dial success", p.Name)
 		return conn, nil
 	}
 	addr := net.JoinHostPort(server, strconv.Itoa(port))
-	util.LogDebug("[HEALTH] %s: direct dial to %s", p.Name, addr)
+	util.LogModuleDebug("dialer", "%s: direct dial to %s", p.Name, addr)
 	conn, err := DialRouteAware("tcp", addr)
 	if err != nil {
-		util.LogDebug("[HEALTH] %s: direct dial failed: %v", p.Name, err)
+		util.LogModuleDebug("dialer", "%s: direct dial failed: %v", p.Name, err)
 		return nil, err
 	}
-	util.LogDebug("[HEALTH] %s: direct dial success", p.Name)
+	util.LogModuleDebug("dialer", "%s: direct dial success", p.Name)
 	return conn, nil
 }
 
@@ -357,7 +357,7 @@ func PreWarmSSHProxies(proxies []*config.Proxy) {
 		if strings.EqualFold(p.Type, config.ProxySSH) {
 			d := &SSHDialer{BaseDialer: BaseDialer{Proxy: p}}
 			if err := d.PreWarm(); err != nil {
-				util.LogWarn("[SSH-CLI] [%s] pre-warm failed: %v", p.Name, err)
+				util.LogModuleWarn("dialer", "pre-warm failed: %v", p.Name, err)
 			}
 		}
 	}

@@ -147,7 +147,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	dstPort := int(binary.BigEndian.Uint16(portBuf))
 
 	if cmd == 0x02 { // BIND -> reverse registration
-		util.LogInfo("[SOCKS5-SVR] [%s] BIND received for %s:%d from %s", s.Mapping.Name, dstAddr, dstPort, clientConn.RemoteAddr())
+		util.LogModuleInfo("socks5", "[%s] BIND received for %s:%d from %s", s.Mapping.Name, dstAddr, dstPort, clientConn.RemoteAddr())
 		if dstPort == reverse.BindPortControl {
 			// Control connection: PORT=1 means this is a control channel
 			sendSocks5Response(clientConn, 0x00) // success
@@ -163,7 +163,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 			return
 		}
 		if dstPort != reverse.BindPortData {
-			util.LogInfo("[SOCKS5-SVR] [%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
+			util.LogModuleInfo("socks5", "[%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
 			sendSocks5Response(clientConn, 0x05) // connection refused
 			return
 		}
@@ -193,19 +193,19 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 
 	connID := util.NextConnID()
 	startTime := time.Now()
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d mesh dial starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.LogModuleInfo("socks5", "[%s] [%s] %s -> %s:%d mesh dial starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
 	targetConn, cleanup, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "SOCKS5")
 	dialDuration := time.Since(startTime)
 	if err != nil {
-		util.LogInfo("[SOCKS5-SVR] [%s] [%s] connect fail %s:%d after %v: %v", s.Mapping.Name, connID, dstAddr, dstPort, dialDuration, err)
+		util.LogModuleInfo("socks5", "[%s] [%s] connect fail %s:%d after %v: %v", s.Mapping.Name, connID, dstAddr, dstPort, dialDuration, err)
 		sendSocks5Response(clientConn, 0x05) // Connection refused
 		return
 	}
 	defer targetConn.Close()
 	defer cleanup()
 
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] mesh dial completed in %v, local=%s remote=%s",
+	util.LogModuleInfo("socks5", "[%s] [%s] mesh dial completed in %v, local=%s remote=%s",
 		connID, s.Mapping.Name, dialDuration, targetConn.LocalAddr(), targetConn.RemoteAddr())
 
 	// Send success response
@@ -216,11 +216,11 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 		ds.SetReadDeadline(time.Time{})
 	}
 
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH relay starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.LogModuleInfo("socks5", "[%s] [%s] %s -> %s:%d via MESH relay starting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 	relayStart := time.Now()
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 	relayDuration := time.Since(relayStart)
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] %s -> %s:%d via MESH relay ended after %v", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort, relayDuration)
+	util.LogModuleInfo("socks5", "[%s] [%s] %s -> %s:%d via MESH relay ended after %v", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort, relayDuration)
 }
 
 func sendSocks5Response(conn net.Conn, status byte) {
@@ -283,21 +283,21 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 		for {
 			n, err := clientConn.Read(buf)
 			if n == 0 && err == io.EOF {
-				util.LogInfo("[SOCKS5-SVR] [%s] [%s] monitor: EOF, closing relay", s.Mapping.Name, clientConn.RemoteAddr())
+				util.LogModuleInfo("socks5", "[%s] [%s] monitor: EOF, closing relay", s.Mapping.Name, clientConn.RemoteAddr())
 				relay.Close()
 				return
 			}
 			if err != nil {
-				util.LogInfo("[SOCKS5-SVR] [%s] [%s] monitor: read error=%v, closing relay", s.Mapping.Name, clientConn.RemoteAddr(), err)
+				util.LogModuleInfo("socks5", "[%s] [%s] monitor: read error=%v, closing relay", s.Mapping.Name, clientConn.RemoteAddr(), err)
 				relay.Close()
 				return
 			}
 			// n > 0: client sent keepalive data, ignore per RFC 1928
-			util.LogDebug("[SOCKS5-SVR] [%s] [%s] monitor: received %d bytes on control conn (ignored)", s.Mapping.Name, clientConn.RemoteAddr(), n)
+			util.LogModuleDebug("socks5", "[%s] [%s] monitor: received %d bytes on control conn (ignored)", s.Mapping.Name, clientConn.RemoteAddr(), n)
 		}
 	}()
 
-	util.LogInfo("[SOCKS5-SVR] [%s] [%s] UDP ASSOCIATE started on port %d", s.Mapping.Name, clientConn.RemoteAddr(), udpAddr.Port)
+	util.LogModuleInfo("socks5", "[%s] [%s] UDP ASSOCIATE started on port %d", s.Mapping.Name, clientConn.RemoteAddr(), udpAddr.Port)
 
 	defer relay.rec.Close()
 
@@ -359,20 +359,20 @@ func (r *socks5UDPRelay) run() {
 				continue
 			}
 			if util.IsClosedErr(err) {
-				util.LogDebug("[SOCKS5-SVR] [%s] UDP client read closed (normal): %v", r.mapping.Name, err)
+				util.LogModuleDebug("socks5", "[%s] UDP client read closed (normal): %v", r.mapping.Name, err)
 			} else {
-				util.LogWarn("[SOCKS5-SVR] [%s] UDP client read error: %v", r.mapping.Name, err)
+				util.LogModuleWarn("socks5", "[%s] UDP client read error: %v", r.mapping.Name, err)
 			}
 			return
 		}
 
 		if n < 10 {
-			util.LogWarn("[SOCKS5-SVR] [%s] UDP client packet too short: n=%d from=%s", r.mapping.Name, n, srcAddr)
+			util.LogModuleWarn("socks5", "[%s] UDP client packet too short: n=%d from=%s", r.mapping.Name, n, srcAddr)
 			continue
 		}
 		// Parse SOCKS5 UDP request header
 		if binary.BigEndian.Uint16(buf[0:2]) != 0 || buf[2] != 0 {
-			util.LogWarn("[SOCKS5-SVR] [%s] UDP client packet bad header: rsv=%x frag=%x from=%s", r.mapping.Name, binary.BigEndian.Uint16(buf[0:2]), buf[2], srcAddr)
+			util.LogModuleWarn("socks5", "[%s] UDP client packet bad header: rsv=%x frag=%x from=%s", r.mapping.Name, binary.BigEndian.Uint16(buf[0:2]), buf[2], srcAddr)
 			continue
 		}
 
@@ -421,15 +421,15 @@ func (r *socks5UDPRelay) run() {
 		}
 		r.addrMu.Unlock()
 		if oldAddr == nil {
-			util.LogInfo("[SOCKS5-SVR] [%s] clientAddr SET: %s (was nil)", r.mapping.Name, srcAddr)
+			util.LogModuleInfo("socks5", "clientAddr SET: %s (was nil)", r.mapping.Name, srcAddr)
 		} else if oldAddr.String() != srcAddr.String() {
-			util.LogInfo("[SOCKS5-SVR] [%s] clientAddr CHANGED: %s -> %s", r.mapping.Name, oldAddr, srcAddr)
+			util.LogModuleInfo("socks5", "clientAddr CHANGED: %s -> %s", r.mapping.Name, oldAddr, srcAddr)
 		} else {
-			util.LogDebug("[SOCKS5-SVR] [%s] clientAddr SAME: %s", r.mapping.Name, srcAddr)
+			util.LogModuleDebug("socks5", "clientAddr SAME: %s", r.mapping.Name, srcAddr)
 		}
 
 		data := buf[offset:n]
-		util.LogDebug("[SOCKS5-SVR] [%s] UDP RX from=%s to=%s:%d n=%d", r.mapping.Name, srcAddr, dstAddr, dstPort, len(data))
+		util.LogModuleDebug("socks5", "UDP RX from=%s to=%s:%d n=%d", r.mapping.Name, srcAddr, dstAddr, dstPort, len(data))
 		req, proxy, matchResult := r.ruleConf.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), r.mapping)
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
@@ -443,9 +443,9 @@ func (r *socks5UDPRelay) run() {
 		isFirst = r.seenTargets.Put(targetKey)
 		r.proxyMu.Unlock()
 		if isFirst {
-			util.LogInfo("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s)", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
+			util.LogModuleInfo("socks5", "UDP -> %s:%d via %s(%s)", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
 		} else {
-			util.LogDebug("[SOCKS5-SVR] [%s] UDP -> %s:%d via %s(%s) %d bytes", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type, len(data))
+			util.LogModuleDebug("socks5", "UDP -> %s:%d via %s(%s) %d bytes", r.mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type, len(data))
 		}
 
 		targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(req.DstAddr, strconv.Itoa(req.DstPort)))
@@ -456,7 +456,7 @@ func (r *socks5UDPRelay) run() {
 		// Get or create downstream PacketConn for this proxy
 		upc, startGoroutine, err := r.getProxyConn(proxy)
 		if err != nil {
-			util.LogInfo("[SOCKS5-SVR] [%s] UDP proxy conn fail for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
+			util.LogModuleInfo("socks5", "UDP proxy conn fail for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
 			continue
 		}
 		if startGoroutine != nil {
@@ -466,16 +466,16 @@ func (r *socks5UDPRelay) run() {
 		r.addrMu.Lock()
 		curClientAddr := r.clientAddr
 		r.addrMu.Unlock()
-		util.LogDebug("[SOCKS5-SVR] [%s] UDP SEND srcClient=%s curClientAddr=%s target=%s via=%s data=%d",
+		util.LogModuleDebug("socks5", "UDP SEND srcClient=%s curClientAddr=%s target=%s via=%s data=%d",
 			r.mapping.Name, srcAddr, curClientAddr, targetAddr, proxy.Name, len(data))
 		if nw, err := upc.pc.WriteTo(data, targetAddr); err != nil {
 			if util.IsClosedErr(err) {
-				util.LogDebug("[SOCKS5-SVR] [%s] UDP write closed for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
+				util.LogModuleDebug("socks5", "UDP write closed for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
 			} else {
-				util.LogWarn("[SOCKS5-SVR] [%s] UDP write fail for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
+				util.LogModuleWarn("socks5", "UDP write fail for %s:%d via %s: %v", r.mapping.Name, dstAddr, dstPort, proxy.Name, err)
 			}
 		} else {
-			util.LogDebug("[SOCKS5-SVR] [%s] UDP write ok for %s:%d via %s, sent=%d, client=%s", r.mapping.Name, dstAddr, dstPort, proxy.Name, nw, curClientAddr)
+			util.LogModuleDebug("socks5", "UDP write ok for %s:%d via %s, sent=%d, client=%s", r.mapping.Name, dstAddr, dstPort, proxy.Name, nw, curClientAddr)
 		}
 	}
 }
@@ -500,14 +500,14 @@ func (r *socks5UDPRelay) getProxyConn(proxy *config.Proxy) (*udpProxyConn, func(
 		// proxyReadLoop has exited, remove stale entry and recreate below.
 		delete(r.proxyConns, proxy.Name)
 		upc.pc.Close()
-		util.LogDebug("[SOCKS5-SVR] [%s] UDP stale proxy conn removed for %s, will recreate", r.mapping.Name, proxy.Name)
+		util.LogModuleDebug("socks5", "UDP stale proxy conn removed for %s, will recreate", r.mapping.Name, proxy.Name)
 	}
 
 	pc, err := dialer.NewUDPDialer(proxy).DialPacket()
 	if err != nil {
 		return nil, nil, err
 	}
-	util.LogDebug("[SOCKS5-SVR] [%s] UDP DialPacket ok for %s(%s), local=%s", r.mapping.Name, proxy.Name, proxy.Type, pc.LocalAddr())
+	util.LogModuleDebug("socks5", "UDP DialPacket ok for %s(%s), local=%s", r.mapping.Name, proxy.Name, proxy.Type, pc.LocalAddr())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	upc := &udpProxyConn{pc: pc, cancel: cancel}
@@ -538,7 +538,7 @@ func (r *socks5UDPRelay) proxyReadLoop(ctx context.Context, pc net.PacketConn, p
 			delete(r.proxyConns, proxyName)
 		}
 		r.proxyMu.Unlock()
-		util.LogDebug("[SOCKS5-SVR] [%s] UDP proxyReadLoop exited for %s, cache removed", r.mapping.Name, proxyName)
+		util.LogModuleDebug("socks5", "UDP proxyReadLoop exited for %s, cache removed", r.mapping.Name, proxyName)
 	}()
 
 	buf := make([]byte, 65535)
@@ -555,27 +555,27 @@ func (r *socks5UDPRelay) proxyReadLoop(ctx context.Context, pc net.PacketConn, p
 		n, srcAddr, err := pc.ReadFrom(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				util.LogDebug("[SOCKS5-SVR] [%s] UDP reply read timeout from proxy %s", r.mapping.Name, proxyName)
+				util.LogModuleDebug("socks5", "UDP reply read timeout from proxy %s", r.mapping.Name, proxyName)
 				continue
 			}
 			if util.IsClosedErr(err) {
-				util.LogDebug("[SOCKS5-SVR] [%s] UDP reply read closed from proxy %s (normal): %v", r.mapping.Name, proxyName, err)
+				util.LogModuleDebug("socks5", "[%s] UDP reply read closed from proxy %s (normal): %v", r.mapping.Name, proxyName, err)
 			} else {
-				util.LogWarn("[SOCKS5-SVR] [%s] UDP reply read error from proxy %s: %v", r.mapping.Name, proxyName, err)
+				util.LogModuleWarn("socks5", "[%s] UDP reply read error from proxy %s: %v", r.mapping.Name, proxyName, err)
 			}
 			return
 		}
-		util.LogDebug("[SOCKS5-SVR] [%s] UDP reply from proxy %s: n=%d src=%s", r.mapping.Name, proxyName, n, srcAddr)
+		util.LogModuleDebug("socks5", "[%s] UDP reply from proxy %s: n=%d src=%s", r.mapping.Name, proxyName, n, srcAddr)
 		r.proxyMu.Lock()
 		if r.seenTargets.Put(srcAddr.String()) {
-			util.LogDebug("[SOCKS5-SVR] [%s] UDP <- %s via %s", r.mapping.Name, srcAddr.String(), proxyName)
+			util.LogModuleDebug("socks5", "[%s] UDP <- %s via %s", r.mapping.Name, srcAddr.String(), proxyName)
 		}
 		r.proxyMu.Unlock()
 		r.addrMu.Lock()
 		addr := r.clientAddr
 		r.addrMu.Unlock()
 		if addr == nil {
-			util.LogWarn("[SOCKS5-SVR] [%s] UDP reply DROPPED (no clientAddr yet) from=%s via=%s", r.mapping.Name, srcAddr, proxyName)
+			util.LogModuleWarn("socks5", "[%s] UDP reply DROPPED (no clientAddr yet) from=%s via=%s", r.mapping.Name, srcAddr, proxyName)
 			// Buffer reply until clientAddr is known
 			r.earlyMu.Lock()
 			if len(r.earlyReplies) < maxEarlyReplies {
@@ -595,12 +595,12 @@ func (r *socks5UDPRelay) proxyReadLoop(ctx context.Context, pc net.PacketConn, p
 		copy(packet[len(header):], buf[:n])
 		if nw, werr := r.clientLn.WriteTo(packet, addr); werr != nil {
 			if util.IsClosedErr(werr) {
-				util.LogDebug("[SOCKS5-SVR] [%s] UDP reply write closed (normal): client=%s echoSrc=%s", r.mapping.Name, addr, srcAddr)
+				util.LogModuleDebug("socks5", "[%s] UDP reply write closed (normal): client=%s echoSrc=%s", r.mapping.Name, addr, srcAddr)
 			} else {
-				util.LogWarn("[SOCKS5-SVR] [%s] UDP reply TX error: client=%s echoSrc=%s wrote=%d err=%v", r.mapping.Name, addr, srcAddr, 0, werr)
+				util.LogModuleWarn("socks5", "[%s] UDP reply TX error: client=%s echoSrc=%s wrote=%d err=%v", r.mapping.Name, addr, srcAddr, 0, werr)
 			}
 		} else {
-			util.LogDebug("[SOCKS5-SVR] [%s] UDP reply TX: client=%s echoSrc=%s wrote=%d",
+			util.LogModuleDebug("socks5", "[%s] UDP reply TX: client=%s echoSrc=%s wrote=%d",
 				r.mapping.Name, addr, srcAddr, nw)
 		}
 	}
@@ -628,9 +628,9 @@ func (r *socks5UDPRelay) flushEarlyReplies() {
 		copy(packet[len(header):], er.data)
 		if _, werr := r.clientLn.WriteTo(packet, clientAddr); werr != nil {
 			if util.IsClosedErr(werr) {
-				util.LogDebug("[SOCKS5-SVR] [%s] early reply write closed (normal): %v", r.mapping.Name, werr)
+				util.LogModuleDebug("socks5", "[%s] early reply write closed (normal): %v", r.mapping.Name, werr)
 			} else {
-				util.LogWarn("[SOCKS5-SVR] [%s] early reply WriteTo error: %v", r.mapping.Name, werr)
+				util.LogModuleWarn("socks5", "[%s] early reply WriteTo error: %v", r.mapping.Name, werr)
 			}
 		}
 	}
@@ -688,7 +688,7 @@ func buildSOCKS5UDPHeader(srcAddr net.Addr) []byte {
 
 func (r *socks5UDPRelay) Close() {
 	r.closeOnce.Do(func() {
-		util.LogInfo("[SOCKS5-SVR] [%s] [%s] UDP ASSOCIATE closing (port %d)", r.mapping.Name, r.clientConn.RemoteAddr(), r.clientLn.LocalAddr().(*net.UDPAddr).Port)
+		util.LogModuleInfo("socks5", "[%s] [%s] UDP ASSOCIATE closing (port %d)", r.mapping.Name, r.clientConn.RemoteAddr(), r.clientLn.LocalAddr().(*net.UDPAddr).Port)
 		close(r.closed)
 		r.proxyMu.Lock()
 		for _, upc := range r.proxyConns {

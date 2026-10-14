@@ -38,9 +38,9 @@ func CleanupResidual() {
 				}
 				if ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19 {
 					if out, err := exec.Command("ifconfig", iface.Name, "down").CombinedOutput(); err != nil {
-						util.LogWarn("tun: cleanup ifconfig %s down fail: %v, %s", iface.Name, err, out)
+						util.LogModuleWarn("cleanup", "cleanup ifconfig %s down fail: %v", iface.Name, err, out)
 					} else {
-						util.LogInfo("tun: cleanup brought %s down", iface.Name)
+						util.LogModuleInfo("cleanup", "cleanup brought %s down", iface.Name)
 					}
 					break
 				}

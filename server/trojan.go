@@ -45,7 +45,7 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 		return
 	}
 	if string(passwordBuf) != s.Password {
-		util.LogInfo("[TROJAN-SVR] [%s] auth fail from %s, expected=%s, got=%s", s.Mapping.Name, clientConn.RemoteAddr(), s.Password, string(passwordBuf))
+		util.LogModuleInfo("trojan", "[%s] auth fail from %s, expected=%s, got=%s", s.Mapping.Name, clientConn.RemoteAddr(), s.Password, string(passwordBuf))
 		return
 	}
 
@@ -55,7 +55,7 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 		return
 	}
 	if crlf[0] != 0x0D || crlf[1] != 0x0A {
-		util.LogDebug("[TROJAN-SVR] [%s] invalid CRLF in handshake: %02X %02X", s.Mapping.Name, crlf[0], crlf[1])
+		util.LogModuleDebug("trojan", "[%s] invalid CRLF in handshake: %02X %02X", s.Mapping.Name, crlf[0], crlf[1])
 		return
 	}
 
@@ -107,7 +107,7 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	}
 
 	if cmd == 0x02 { // BIND -> reverse registration
-		util.LogInfo("[TROJAN-SVR] [%s] BIND received for %s:%d from %s", s.Mapping.Name, dstAddr, dstPort, clientConn.RemoteAddr())
+		util.LogModuleInfo("trojan", "[%s] BIND received for %s:%d from %s", s.Mapping.Name, dstAddr, dstPort, clientConn.RemoteAddr())
 		if dstPort == reverse.BindPortControl {
 			// Control connection: PORT=1 means this is a control channel
 			handleControlConnection(clientConn, dstAddr)
@@ -121,7 +121,7 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 			return
 		}
 		if dstPort != reverse.BindPortData {
-			util.LogInfo("[TROJAN-SVR] [%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
+			util.LogModuleInfo("trojan", "[%s] BIND rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, dstPort)
 			return
 		}
 		// Data connection: PORT=0 only, goes to Registry
@@ -143,17 +143,17 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 	}
 
 	connID := util.NextConnID()
-	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.LogModuleInfo("trojan", "[%s] [%s] %s -> %s:%d mesh dial connecting", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 
 	targetConn, cleanup, err := s.MeshDialWithModeB(dstAddr, dstPort, clientConn.RemoteAddr().String(), "Trojan")
 	if err != nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
+		util.LogModuleInfo("trojan", "[%s] [%s] connect fail %s:%d: %v", s.Mapping.Name, connID, dstAddr, dstPort, err)
 		return
 	}
 	defer targetConn.Close()
 	defer cleanup()
 
-	util.LogInfo("[TROJAN-SVR] [%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
+	util.LogModuleInfo("trojan", "[%s] [%s] %s -> %s:%d via MESH", s.Mapping.Name, connID, clientConn.RemoteAddr(), dstAddr, dstPort)
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
@@ -162,7 +162,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 	connID := util.NextConnID()
 	udpLn, err := dialer.ListenUDP()
 	if err != nil {
-		util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP listen fail: %v", s.Mapping.Name, tlsConn.RemoteAddr(), err)
+		util.LogModuleInfo("trojan", "[%s] [%s] UDP listen fail: %v", s.Mapping.Name, tlsConn.RemoteAddr(), err)
 		return
 	}
 	defer udpLn.Close()
@@ -175,13 +175,13 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 	var closeOnce sync.Once
 
 	udpPort := udpLn.LocalAddr().(*net.UDPAddr).Port
-	util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP ASSOCIATE started (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
+	util.LogModuleInfo("trojan", "[%s] [%s] UDP ASSOCIATE started (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
 	rec := connlog.Start("Trojan:"+s.Mapping.Name, "UDP", tlsConn.RemoteAddr().String(), "")
 	defer rec.Close()
 
 	closeAll := func() {
 		closeOnce.Do(func() {
-			util.LogInfo("[TROJAN-SVR] [%s] [%s] UDP ASSOCIATE closed (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
+			util.LogModuleInfo("trojan", "[%s] [%s] UDP ASSOCIATE closed (port %d)", s.Mapping.Name, tlsConn.RemoteAddr(), udpPort)
 			close(closed)
 			proxyMu.Lock()
 			for _, upc := range proxyConns {
@@ -213,15 +213,15 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 					continue
 				}
 				if util.IsClosedErr(err) {
-					util.LogDebug("[TROJAN-SVR] [%s] UDP reply read closed (normal): %v", s.Mapping.Name, err)
+					util.LogModuleDebug("trojan", "[%s] UDP reply read closed (normal): %v", s.Mapping.Name, err)
 				} else {
-					util.LogWarn("[TROJAN-SVR] [%s] UDP reply read error: %v", s.Mapping.Name, err)
+					util.LogModuleWarn("trojan", "[%s] UDP reply read error: %v", s.Mapping.Name, err)
 				}
 				return
 			}
 
 			if seenTargets.Put(srcAddr.String()) {
-				util.LogInfo("[TROJAN-SVR] [%s] UDP <- %s", s.Mapping.Name, srcAddr.String())
+				util.LogModuleInfo("trojan", "[%s] UDP <- %s", s.Mapping.Name, srcAddr.String())
 			}
 
 			atyp, addrBytes := util.EncodeTrojanAddrFromNetAddr(srcAddr)
@@ -239,9 +239,9 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 			writeMu.Unlock()
 			if err != nil {
 				if util.IsClosedErr(err) {
-					util.LogDebug("[TROJAN-SVR] [%s] UDP reply write closed (normal): %v", s.Mapping.Name, err)
+					util.LogModuleDebug("trojan", "[%s] UDP reply write closed (normal): %v", s.Mapping.Name, err)
 				} else {
-					util.LogWarn("[TROJAN-SVR] [%s] UDP reply write (target->client) error: %v", s.Mapping.Name, err)
+					util.LogModuleWarn("trojan", "[%s] UDP reply write (target->client) error: %v", s.Mapping.Name, err)
 				}
 				return
 			}
@@ -307,7 +307,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 			return
 		}
 		if crlf[0] != 0x0D || crlf[1] != 0x0A {
-			util.LogDebug("[TROJAN-SVR] [%s] invalid CRLF: %02X %02X", s.Mapping.Name, crlf[0], crlf[1])
+			util.LogModuleDebug("trojan", "[%s] invalid CRLF: %02X %02X", s.Mapping.Name, crlf[0], crlf[1])
 			return
 		}
 
@@ -325,7 +325,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 		targetKey := fmt.Sprintf("%s:%d", req.DstAddr, req.DstPort)
 		if seenTargets.Put(targetKey) {
-			util.LogInfo("[TROJAN-SVR] [%s] UDP -> %s:%d via %s(%s)", s.Mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
+			util.LogModuleInfo("trojan", "[%s] UDP -> %s:%d via %s(%s)", s.Mapping.Name, req.DstAddr, req.DstPort, proxy.Name, proxy.Type)
 		}
 
 		targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(req.DstAddr, strconv.Itoa(req.DstPort)))
@@ -336,9 +336,9 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 		if strings.ToUpper(proxy.Type) == config.ProxyDIRECT {
 			if _, err := udpLn.WriteTo(payload, targetAddr); err != nil {
 				if util.IsClosedErr(err) {
-					util.LogDebug("[TROJAN-SVR] [%s] UDP direct write closed for %s:%d: %v", s.Mapping.Name, dstAddr, dstPort, err)
+					util.LogModuleDebug("trojan", "[%s] UDP direct write closed for %s:%d: %v", s.Mapping.Name, dstAddr, dstPort, err)
 				} else {
-					util.LogWarn("[TROJAN-SVR] [%s] UDP direct write fail for %s:%d: %v", s.Mapping.Name, dstAddr, dstPort, err)
+					util.LogModuleWarn("trojan", "[%s] UDP direct write fail for %s:%d: %v", s.Mapping.Name, dstAddr, dstPort, err)
 				}
 			}
 		} else {
@@ -349,7 +349,7 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 				pc, err := dialer.NewUDPDialer(proxy).DialPacket()
 				if err != nil {
 					proxyMu.Unlock()
-					util.LogInfo("[TROJAN-SVR] [%s] UDP proxy conn fail for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
+					util.LogModuleInfo("trojan", "[%s] UDP proxy conn fail for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
 					continue
 				}
 				ctx, cancel := context.WithCancel(context.Background())
@@ -388,15 +388,15 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 							if seenTargets.Put(srcAddr.String()) {
 								if util.IsClosedErr(err) {
-									util.LogDebug("[TROJAN-SVR] [%s] UDP proxy read closed (normal): %v", s.Mapping.Name, err)
+									util.LogModuleDebug("trojan", "[%s] UDP proxy read closed (normal): %v", s.Mapping.Name, err)
 								} else {
-									util.LogWarn("[TROJAN-SVR] [%s] UDP proxy read error: %v", s.Mapping.Name, err)
+									util.LogModuleWarn("trojan", "[%s] UDP proxy read error: %v", s.Mapping.Name, err)
 								}
 								return
 							}
 
 							if seenTargets.Put(srcAddr.String()) {
-								util.LogInfo("[TROJAN-SVR] [%s] UDP <- %s via %s", s.Mapping.Name, srcAddr.String(), proxy.Name)
+								util.LogModuleInfo("trojan", "[%s] UDP <- %s via %s", s.Mapping.Name, srcAddr.String(), proxy.Name)
 							}
 
 							atyp, addrBytes := util.EncodeTrojanAddrFromNetAddr(srcAddr)
@@ -414,9 +414,9 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 							writeMu.Unlock()
 							if err != nil {
 								if util.IsClosedErr(err) {
-									util.LogDebug("[TROJAN-SVR] [%s] UDP proxy write closed (normal): %v", s.Mapping.Name, err)
+									util.LogModuleDebug("trojan", "[%s] UDP proxy write closed (normal): %v", s.Mapping.Name, err)
 								} else {
-									util.LogWarn("[TROJAN-SVR] [%s] UDP proxy write error: %v", s.Mapping.Name, err)
+									util.LogModuleWarn("trojan", "[%s] UDP proxy write error: %v", s.Mapping.Name, err)
 								}
 								return
 							}
@@ -432,9 +432,9 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 
 			if _, err := upc.pc.WriteTo(payload, targetAddr); err != nil {
 				if util.IsClosedErr(err) {
-					util.LogDebug("[TROJAN-SVR] [%s] UDP write closed for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
+					util.LogModuleDebug("trojan", "[%s] UDP write closed for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
 				} else {
-					util.LogWarn("[TROJAN-SVR] [%s] UDP write fail for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
+					util.LogModuleWarn("trojan", "[%s] UDP write fail for %s:%d via %s: %v", s.Mapping.Name, dstAddr, dstPort, proxy.Name, err)
 				}
 			}
 		}
@@ -518,7 +518,7 @@ func StartTrojanSNI(ruleConf *config.RuleConfiguration, mappings []*config.Mappi
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				util.LogInfo("[TROJAN-SNI] accept error: %v", err)
+				util.LogModuleInfo("trojan", "accept error: %v", err)
 				return
 			}
 			go func(c net.Conn) {
@@ -533,7 +533,7 @@ func StartTrojanSNI(ruleConf *config.RuleConfiguration, mappings []*config.Mappi
 				// We must explicitly complete it here so that
 				// ConnectionState().ServerName is populated.
 				if err := tlsConn.Handshake(); err != nil {
-					util.LogInfo("[TROJAN-SNI] handshake error from %s: %v", c.RemoteAddr(), err)
+					util.LogModuleInfo("trojan", "handshake error from %s: %v", c.RemoteAddr(), err)
 					c.Close()
 					return
 				}
@@ -545,12 +545,12 @@ func StartTrojanSNI(ruleConf *config.RuleConfiguration, mappings []*config.Mappi
 					m = defaultMapping
 				}
 				if m == nil {
-					util.LogInfo("[TROJAN-SNI] no mapping for SNI=%q from %s", sni, c.RemoteAddr())
+					util.LogModuleInfo("trojan", "no mapping for SNI=%q from %s", sni, c.RemoteAddr())
 					c.Close()
 					return
 				}
 
-				util.LogInfo("[TROJAN-SNI] SNI=%q mapped to %s for %s", sni, m.Name, c.RemoteAddr())
+				util.LogModuleInfo("trojan", "SNI=%q mapped to %s for %s", sni, m.Name, c.RemoteAddr())
 				srv := &TrojanServer{
 					BaseServer: BaseServer{RuleConf: ruleConf, Mapping: m},
 					Password:   util.Sha224Hex(m.Password),

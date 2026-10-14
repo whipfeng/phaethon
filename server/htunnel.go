@@ -404,9 +404,9 @@ func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set(htHeaderConnectionID, strconv.FormatInt(id, 10))
 	w.WriteHeader(200)
 	if ch.isUDP {
-		util.LogInfo("[HT-SVR] [%s] [%s] UDP tunnel started (%s:%d)", s.Mapping.Name, connID, dstHost, dstPortInt)
+		util.LogModuleInfo("htunnel", "[%s] [%s] UDP tunnel started (%s:%d)", s.Mapping.Name, connID, dstHost, dstPortInt)
 	} else {
-		util.LogInfo("[HT-SVR] [%s] [%s] TCP tunnel started -> %s:%d", s.Mapping.Name, connID, dstHost, dstPortInt)
+		util.LogModuleInfo("htunnel", "[%s] [%s] TCP tunnel started -> %s:%d", s.Mapping.Name, connID, dstHost, dstPortInt)
 	}
 }
 
@@ -414,18 +414,18 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	id := s.getConnectionID(r)
 	chI, ok := s.channels.Load(id)
 	if !ok {
-		util.LogInfo("[HTUNNEL-SVR] push channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
+		util.LogModuleInfo("htunnel", "push channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
 		w.WriteHeader(410)
 		return
 	}
 	ch := chI.(*htChannel)
 	ch.resetReqTimeout(s, id)
-	util.LogInfo("[HTUNNEL-SVR] push channelID=%d contentSeq=%d connSeq=%d", id, contentSeq, ch.connSeq)
+	util.LogModuleInfo("htunnel", "push channelID=%d contentSeq=%d connSeq=%d", id, contentSeq, ch.connSeq)
 
 	for {
 		ch.mu.Lock()
 		step := contentSeq - ch.connSeq
-		util.LogInfo("[HTUNNEL-SVR] channelID=%d loop: step=%d connPend.active=%v", id, step, ch.connPend.active)
+		util.LogModuleInfo("htunnel", "channelID=%d loop: step=%d connPend.active=%v", id, step, ch.connPend.active)
 		if step == 0 {
 			if ch.connPend.active {
 				ch.leaderOrWait(&ch.connPend)
@@ -457,7 +457,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 			// step > 1 but connPend not active yet: step 1 hasn't started.
 			// Wait for connReady (closed when step 1 completes).
 			ready := ch.connReady
-			util.LogInfo("[HTUNNEL-SVR] step %d waiting connReady for channelID=%d", step, id)
+			util.LogModuleInfo("htunnel", "step %d waiting connReady for channelID=%d", step, id)
 			ch.mu.Unlock()
 			select {
 			case <-ready:
@@ -478,7 +478,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 
 	var connOk, failed bool
 
-	util.LogInfo("[HTUNNEL-SVR] channelID=%d contentSeq=%d: past loop, starting setup", id, contentSeq)
+	util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: past loop, starting setup", id, contentSeq)
 	ch.mu.Lock()
 	isReverse := ch.isReverse
 	isUDP := ch.isUDP
@@ -490,7 +490,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	if contentSeq == 1 {
 		if isReverse {
 			if port > reverse.BindPortP2P {
-				util.LogInfo("[HTUNNEL-SVR] [%s] reverse rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, port)
+				util.LogModuleInfo("htunnel", "[%s] reverse rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, port)
 				return
 			}
 			if port == reverse.BindPortData && !s.RuleConf.HasReverseAddress(address) {
@@ -518,7 +518,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 			if !hasTarget {
 				targetConn, rec, err := connectHTTarget(s.RuleConf, s.Mapping, address, port, ch.connID)
 				if err != nil {
-					util.LogError("[HT-SVR] [%s] [%s] connect target fail %s:%d: %v", s.Mapping.Name, ch.connID, address, port, err)
+					util.LogModuleError("htunnel", "[%s] [%s] connect target fail %s:%d: %v", s.Mapping.Name, ch.connID, address, port, err)
 					failed = true
 				} else {
 					ch.mu.Lock()
@@ -541,7 +541,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 	}
 	ch.broadcast(&ch.connPend)
 	if contentSeq == 1 {
-		util.LogInfo("[HTUNNEL-SVR] closing connReady for channelID=%d, connSeq=%d, connOk=%v", id, ch.connSeq, connOk)
+		util.LogModuleInfo("htunnel", "closing connReady for channelID=%d, connSeq=%d, connOk=%v", id, ch.connSeq, connOk)
 		close(ch.connReady)
 	}
 	ch.mu.Unlock()
@@ -559,7 +559,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 func (s *HTunnelServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := s.getConnectionID(r)
 	contentSeq := s.getContentSeq(r)
-	util.LogInfo("[HTUNNEL-SVR] heartbeat received: channelID=%d, contentSeq=%d", id, contentSeq)
+	util.LogModuleInfo("htunnel", "heartbeat received: channelID=%d, contentSeq=%d", id, contentSeq)
 	chI, ok := s.channels.Load(id)
 	if !ok {
 		w.WriteHeader(410)
@@ -704,7 +704,7 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	contentSeq := s.getContentSeq(r)
 	chI, ok := s.channels.Load(id)
 	if !ok {
-		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
+		util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: channel not found → 410", id, contentSeq)
 		w.WriteHeader(410)
 		return
 	}
@@ -728,17 +728,17 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 			data := ch.lastReadData
 			ch.mu.Unlock()
 			if data != nil {
-				util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: returning cached data len=%d", id, contentSeq, len(data))
+				util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: returning cached data len=%d", id, contentSeq, len(data))
 				w.WriteHeader(200)
 				w.Write(data)
 			} else {
-				util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: no cached data → 408", id, contentSeq)
+				util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: no cached data → 408", id, contentSeq)
 				w.WriteHeader(408)
 			}
 			return
 		}
 		if step != 1 {
-			util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d readSeq=%d step=%d → 410", id, contentSeq, ch.readSeq, step)
+			util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d readSeq=%d step=%d → 410", id, contentSeq, ch.readSeq, step)
 			ch.mu.Unlock()
 			w.WriteHeader(410)
 			return
@@ -764,16 +764,16 @@ func (s *HTunnelServer) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case err == io.EOF:
-		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: EOF → 410", id, contentSeq)
+		util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: EOF → 410", id, contentSeq)
 		w.WriteHeader(410)
 	case err == errReadTimeout:
-		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: readSource timeout → 408", id, contentSeq)
+		util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: readSource timeout → 408", id, contentSeq)
 		w.WriteHeader(408)
 	case err != nil:
-		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: readSource err=%v → 410", id, contentSeq, err)
+		util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: readSource err=%v → 410", id, contentSeq, err)
 		w.WriteHeader(410)
 	default:
-		util.LogInfo("[HTUNNEL-READ-DIAG] channelID=%d contentSeq=%d: returning data len=%d", id, contentSeq, len(responseData))
+		util.LogModuleInfo("htunnel", "channelID=%d contentSeq=%d: returning data len=%d", id, contentSeq, len(responseData))
 		w.WriteHeader(200)
 		w.Write(responseData)
 	}
@@ -920,7 +920,7 @@ func (s *HTunnelServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 // closeChannel closes a channel and cleans up its resources. Safe to call multiple times.
 func (s *HTunnelServer) closeChannel(id int64) {
-	util.LogInfo("[HTUNNEL-SVR] closeChannel: channelID=%d", id)
+	util.LogModuleInfo("htunnel", "closeChannel: channelID=%d", id)
 	chI, ok := s.channels.Load(id)
 	if !ok {
 		return
@@ -929,10 +929,10 @@ func (s *HTunnelServer) closeChannel(id int64) {
 
 	ch.closeOnce.Do(func() {
 		if ch.isUDP {
-			util.LogInfo("[HT-SVR] [%s] [%s] UDP tunnel closed (%s:%d)", s.Mapping.Name, ch.connID, ch.address, ch.port)
+			util.LogModuleInfo("htunnel", "[%s] [%s] UDP tunnel closed (%s:%d)", s.Mapping.Name, ch.connID, ch.address, ch.port)
 		}
 		if ch.isMesh {
-			util.LogInfo("[HT-SVR] [%s] [%s] MESH channel closed", s.Mapping.Name, ch.connID)
+			util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel closed", s.Mapping.Name, ch.connID)
 		}
 		close(ch.closed)
 		if ch.udpReplyCond != nil {
@@ -1072,9 +1072,9 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 				continue
 			}
 			if util.IsClosedErr(err) {
-				util.LogDebug("[HT-SVR] [%s] [%s] UDP proxy read closed (normal): %v", s.Mapping.Name, ch.connID, err)
+				util.LogModuleDebug("htunnel", "[%s] [%s] UDP proxy read closed (normal): %v", s.Mapping.Name, ch.connID, err)
 			} else {
-				util.LogWarn("[HT-SVR] [%s] [%s] UDP proxy read error: %v", s.Mapping.Name, ch.connID, err)
+				util.LogModuleWarn("htunnel", "[%s] [%s] UDP proxy read error: %v", s.Mapping.Name, ch.connID, err)
 			}
 			return
 		}
@@ -1104,7 +1104,7 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 // client. Dialing directly with net.DialTimeout would bypass both — see
 // docs/plans/htunnel_p2p_direct_mode.md appendix A.4 (decision retracted).
 func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
-	util.LogInfo("[HT-SVR] [%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
+	util.LogModuleInfo("htunnel", "[%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
 	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})
 	conn, err := dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name, mapping)
 	if err != nil {

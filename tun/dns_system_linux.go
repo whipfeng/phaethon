@@ -14,9 +14,9 @@ import (
 )
 
 var (
-	dnsMu        sync.Mutex
-	dnsMethod    string // "resolved", "nm", "resolvconf"
-	dnsBackup    []byte
+	dnsMu         sync.Mutex
+	dnsMethod     string // "resolved", "nm", "resolvconf"
+	dnsBackup     []byte
 	dnsBackupPath string
 )
 
@@ -31,20 +31,20 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	if _, err := exec.LookPath("resolvectl"); err == nil {
 		if out, err := exec.CommandContext(ctx, "resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "resolved"
-			util.LogInfo("tun: systemd-resolved dns for %s set to %s", ifaceName, tunIP)
+			util.LogModuleInfo("dns-setup", "systemd-resolved dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
-			util.LogWarn("tun: resolvectl dns failed, trying next method: %v: %s", err, out)
+			util.LogModuleWarn("dns-setup", "resolvectl dns failed, trying next method: %v: %s", err, out)
 		}
 	}
 
 	if _, err := exec.LookPath("nmcli"); err == nil {
 		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "nm"
-			util.LogInfo("tun: NetworkManager dns for %s set to %s", ifaceName, tunIP)
+			util.LogModuleInfo("dns-setup", "NetworkManager dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
-			util.LogWarn("tun: nmcli dns failed, trying next method: %v: %s", err, out)
+			util.LogModuleWarn("dns-setup", "nmcli dns failed, trying next method: %v: %s", err, out)
 		}
 	}
 
@@ -57,7 +57,7 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	// before restoring. Restore it first so we don't capture TUN-contaminated
 	// DNS or overwrite a good backup.
 	if _, err := os.Stat(backupPath); err == nil {
-		util.LogWarn("tun: stale DNS backup found (previous crash?), restoring first")
+		util.LogModuleWarn("dns-setup", "stale DNS backup found (previous crash?), restoring first")
 		origData, err := os.ReadFile(backupPath)
 		if err == nil {
 			_ = os.WriteFile(resolvConf, origData, 0644)
@@ -80,7 +80,7 @@ func setSystemDNS(ifaceName, tunIP string) error {
 		return fmt.Errorf("write resolv.conf: %w", err)
 	}
 	dnsMethod = "resolvconf"
-	util.LogInfo("tun: resolv.conf dns set to %s", tunIP)
+	util.LogModuleInfo("dns-setup", "resolv.conf dns set to %s", tunIP)
 	return nil
 }
 
@@ -95,35 +95,35 @@ func restoreSystemDNS(ifaceName string) {
 	switch dnsMethod {
 	case "resolved":
 		if out, err := exec.CommandContext(ctx, "resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
-			util.LogWarn("tun: restore resolved dns fail: %v: %s", err, out)
+			util.LogModuleWarn("dns-setup", "restore resolved dns fail: %v: %s", err, out)
 		} else {
-			util.LogInfo("tun: systemd-resolved dns for %s reverted", ifaceName)
+			util.LogModuleInfo("dns-setup", "systemd-resolved dns for %s reverted", ifaceName)
 		}
 	case "nm":
 		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
-			util.LogWarn("tun: restore NetworkManager dns fail: %v: %s", err, out)
+			util.LogModuleWarn("dns-setup", "restore NetworkManager dns fail: %v: %s", err, out)
 		} else {
-			util.LogInfo("tun: NetworkManager dns for %s restored", ifaceName)
+			util.LogModuleInfo("dns-setup", "NetworkManager dns for %s restored", ifaceName)
 		}
 	case "resolvconf":
 		if dnsBackupPath == "" {
 			return
 		}
 		if _, err := os.Stat(dnsBackupPath); err != nil {
-			util.LogWarn("tun: resolv.conf backup missing, cannot restore")
+			util.LogModuleWarn("dns-setup", "resolv.conf backup missing, cannot restore")
 			return
 		}
 		data, err := os.ReadFile(dnsBackupPath)
 		if err != nil {
-			util.LogWarn("tun: read resolv.conf backup fail: %v", err)
+			util.LogModuleWarn("dns-setup", "read resolv.conf backup fail: %v", err)
 			return
 		}
 		if err := os.WriteFile(dnsBackupPath[:len(dnsBackupPath)-len(".phaethon.bak")], data, 0644); err != nil {
-			util.LogWarn("tun: restore resolv.conf fail: %v", err)
+			util.LogModuleWarn("dns-setup", "restore resolv.conf fail: %v", err)
 			return
 		}
 		_ = os.Remove(dnsBackupPath)
-		util.LogInfo("tun: resolv.conf dns restored")
+		util.LogModuleInfo("dns-setup", "resolv.conf dns restored")
 	}
 
 	dnsMethod = ""

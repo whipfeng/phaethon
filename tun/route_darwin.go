@@ -20,34 +20,34 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	if iface, err := net.InterfaceByName(r.devName); err == nil {
 		r.tunIndex = iface.Index
 	} else {
-		util.LogWarn("tun: failed to get index for %s: %v", r.devName, err)
+		util.LogModuleWarn("route", "failed to get index for %s: %v", r.devName, err)
 	}
 
 	// 1. Detect original default gateway and interface
 	gw, ifaceName, err := getDefaultGatewayDarwin()
 	if err != nil {
-		util.LogWarn("tun: failed to detect default gateway: %v", err)
+		util.LogModuleWarn("route", "failed to detect default gateway: %v", err)
 	} else {
 		r.originalGateway = gw
 		r.DefaultIfaceName = ifaceName
 		if iface, err := net.InterfaceByName(ifaceName); err == nil {
 			r.DefaultIfaceIndex = iface.Index
 		} else {
-			util.LogWarn("tun: interface %s not found: %v", ifaceName, err)
+			util.LogModuleWarn("route", "interface %s not found: %v", ifaceName, err)
 		}
-		util.LogInfo("tun: original gateway: %s (iface=%s idx=%d)", gw, ifaceName, r.DefaultIfaceIndex)
+		util.LogModuleInfo("route", "original gateway: %s (iface=%s idx=%d)", gw, ifaceName, r.DefaultIfaceIndex)
 	}
 
 	// Capture original DNS servers before TUN redirects system DNS.
 	if service, err := findActiveNetworkService(r.DefaultIfaceName); err == nil {
 		if servers, _, err := getDNSServers(service); err == nil {
 			r.OriginalDNSServers = servers
-			util.LogInfo("tun: original DNS servers for %s: %v", service, servers)
+			util.LogModuleInfo("route", "original DNS servers for %s: %v", service, servers)
 		} else {
-			util.LogWarn("tun: failed to read current dns for %s: %v", service, err)
+			util.LogModuleWarn("route", "failed to read current dns for %s: %v", service, err)
 		}
 	} else {
-		util.LogWarn("tun: failed to find active network service for DNS capture: %v", err)
+		util.LogModuleWarn("route", "failed to find active network service for DNS capture: %v", err)
 	}
 
 	// 2. Add exclusion routes (LAN/private subnets bypass TUN via original gateway)
@@ -56,9 +56,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			continue
 		}
 		if err := r.addExclusionRoute(exclude); err != nil {
-			util.LogWarn("tun: add exclusion route %s fail: %v", exclude, err)
+			util.LogModuleWarn("route", "add exclusion route %s fail: %v", exclude, err)
 		} else {
-			util.LogInfo("tun: exclusion route %s -> %s", exclude, r.originalGateway)
+			util.LogModuleInfo("route", "exclusion route %s -> %s", exclude, r.originalGateway)
 			r.appliedExcludes = append(r.appliedExcludes, exclude)
 		}
 	}
@@ -128,6 +128,6 @@ func getDefaultGatewayDarwin() (net.IP, string, error) {
 // addMeshRoute adds a route for the mesh subnet through the TUN device.
 func (e *Engine) addMeshRoute(subnet string) error {
 	// TODO: implement for Darwin
-	util.LogInfo("tun: mesh route %s (darwin not implemented yet)", subnet)
+	util.LogModuleInfo("route", "mesh route %s (darwin not implemented yet)", subnet)
 	return nil
 }

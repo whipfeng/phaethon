@@ -47,7 +47,7 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 		if bestIdx, err := bestRouteIndex(dst, b.TUNLUID, uint32(idx)); err == nil {
 			idx = int(bestIdx)
 		} else {
-			util.LogDebug("dialer/bind: route lookup for %s failed: %v", dst, err)
+			util.LogModuleDebug("bind", "dialer/bind: route lookup for %s failed: %v", dst, err)
 		}
 	}
 
@@ -70,7 +70,7 @@ func (b *BindContext) bindSocket(c syscall.RawConn, dst net.IP) error {
 		return err
 	}
 	if sockErr != nil {
-		util.LogWarn("dialer/bind: IP_UNICAST_IF for iface %d failed: %v", idx, sockErr)
+		util.LogModuleWarn("bind", "dialer/bind: IP_UNICAST_IF for iface %d failed: %v", idx, sockErr)
 	}
 	return sockErr
 }

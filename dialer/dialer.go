@@ -239,6 +239,7 @@ type meshAwareDialer struct {
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	// v2 data path: create a per-endpoint RouteFunc that bypasses RouteSelector
 	// and routes directly to the peer's LinkNIC with IPIP encapsulation.
+	util.LogInfo("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
 	routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
 
 	if GlobalNetstackDialV2Func == nil {

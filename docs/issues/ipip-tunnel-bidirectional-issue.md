@@ -925,6 +925,16 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 3. 确认 SNAT 规则条件是否匹配旁路网关流量
 4. 对比之前 SNAT 工作的代码版本，找出差异
 
+**⚠️ 重要：gVisor fork 编译必须使用 `-a` 标志**：
+```bash
+# 强制重建所有依赖，确保 gVisor fork 的修改被编译进去
+GOOS=linux GOARCH=amd64 go build -a -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty) -X main.Platform=linux -X main.Arch=amd64" -o dist/linux-amd64/phaethon .
+
+# Windows 同理
+GOOS=windows GOARCH=amd64 go build -a -ldflags "..." -o dist/windows-amd64/phaethon.exe .
+```
+**原因**：Go 的构建缓存可能不会自动检测 gVisor fork（`../gvisor-fork`）的变更，导致修改后的代码未被编译。`-a` 标志强制重新编译所有包，包括依赖项。
+
 **影响**：
 - 回程包目标地址错误（应该是 VIP，但现在是 192.168.1.88）
 - VM 发送 SYN-ACK 到 192.168.1.88，但 192.168.1.88 不在 VM 的路由表中

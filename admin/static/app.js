@@ -1,5 +1,18 @@
 // Phaethon Admin - Frontend JavaScript
 
+// ========== Button loading state helper ==========
+function withButtonLoading(btn, asyncFn) {
+    const originalText = btn.textContent;
+    const originalDisabled = btn.disabled;
+    btn.disabled = true;
+    btn.textContent = i18n.t('common.processing') || 'Processing...';
+    
+    return asyncFn().finally(() => {
+        btn.disabled = originalDisabled;
+        btn.textContent = originalText;
+    });
+}
+
 // ========== Fetch with timeout helper ==========
 async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     const controller = new AbortController();
@@ -2322,23 +2335,18 @@ function escapeHtml(s) {
 
 async function triggerMeshGossip() {
     const btn = event.target;
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = i18n.t('common.processing') || 'Processing...';
-    
-    try {
-        const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
-        if (resp.ok) {
-            showToast(i18n.t('mesh.gossipTriggered'), 'success');
-        } else {
-            showToast(i18n.t('mesh.gossipFailed'), 'error');
+    await withButtonLoading(btn, async () => {
+        try {
+            const resp = await fetch('./api/mesh/gossip', {method: 'POST'});
+            if (resp.ok) {
+                showToast(i18n.t('mesh.gossipTriggered'), 'success');
+            } else {
+                showToast(i18n.t('mesh.gossipFailed'), 'error');
+            }
+        } catch (err) {
+            showToast(i18n.t('mesh.gossipError') + err.message, 'error');
         }
-    } catch (err) {
-        showToast(i18n.t('mesh.gossipError') + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-    }
+    });
 }
 
 let connLogLastSeq = 0;

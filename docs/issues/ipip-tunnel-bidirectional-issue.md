@@ -1,15 +1,15 @@
 # IPIP 隧道双向通信问题跟踪
 
 **创建时间**: 2026-10-14  
-**状态**: SNAT 未执行导致回程路由错误（待修复）  
+**状态**: ✅ SNAT 问题已修复，双向通信已打通  
 **优先级**: 高
 
 **问题摘要**：
 - ✅ IPIP 封装已执行（QG 日志确认）
 - ✅ IPIP 解封已执行（VM 日志确认）
 - ✅ RouteSelector 决策正确（branch=ipip, needIPIP=true）
-- ❌ **当前问题**：内层包源地址未经 SNAT（仍是 192.168.1.88，应该是 VIP）
-- ❌ 导致回程包目标地址错误，TCP 握手失败
+- ✅ **SNAT 已修复**：内层包源地址正确（100.0.0.1 VIP，不是 192.168.1.88 LAN 地址）
+- ✅ SSH 连接成功建立（VM netstat 显示 ESTABLISHED）
 
 **根本原因（已确认，2026-10-14 10:30）**：
 
@@ -156,19 +156,21 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 **需要验证**：
 - [x] QG 日志中是否有 SNAT 执行记录？
 - [x] SNAT 执行后，包的 src 是否变成 VIP？
-- [ ] IPIP 封装时，内层包的 src 是否是 VIP？
+- [x] IPIP 封装时，内层包的 src 是否是 VIP？
 
 **诊断结果**：
 - ✅ **SNAT 确实执行**：`/tmp/phaethon-nat-action-debug.log` 显示 `hook=1 srcBefore=100.0.0.2 srcAfter=100.0.0.1`
 - ✅ **SNAT 目标地址正确**：VIP=100.0.0.1
-- ❌ **IPIP 封装时内层包 src 未确认**：VM 日志显示的内层包是 `100.179.0.3->10.21.20.65`（GG → VM 物理 IP），不是 172.30.0.2 测试流量
+- ✅ **IPIP 封装时内层包 src 正确**：`inner=100.0.0.1->172.30.0.2`（2026-10-14 14:17 验证）
 - ✅ **代码逻辑正确**：`ipv4.go:940` 在 IPIP 封装前调用 `CheckPostrouting`（SNAT）
+- ✅ **根因已修复**：`pkt.InputNICName` 在转发前已设置，SNAT 规则正确匹配
 
 **代码位置**：
 - SNAT 规则：`mesh/netstack.go:618-650`（InputInterface=tun）
 - IPIP 封装前 SNAT：`gvisor-fork/pkg/tcpip/network/ipv4/ipv4.go:940`
+- **修复位置**：`gvisor-fork/pkg/tcpip/network/ipv4/ipv4.go:1410-1422`（设置 `pkt.InputNICName`）
 
-**当前状态**: ✅ 部分验证（SNAT 执行确认，IPIP 内层包待验证）
+**当前状态**: ✅ 已验证并修复
 
 ---
 
@@ -939,4 +941,65 @@ GOOS=windows GOARCH=amd64 go build -a -ldflags "..." -o dist/windows-amd64/phaet
 - 回程包目标地址错误（应该是 VIP，但现在是 192.168.1.88）
 - VM 发送 SYN-ACK 到 192.168.1.88，但 192.168.1.88 不在 VM 的路由表中
 - TCP 握手失败
+
+---
+
+## ✅ SNAT 问题已修复（2026-10-14 14:17）
+
+### 根本原因
+
+**问题**：`pkt.InputNICName` 在调用 `forwardUnicastPacket` 之前未设置，导致 `CheckPostrouting` 无法匹配 `InputInterface="tun"` 的 SNAT 规则。
+
+**代码位置**：`/Users/cmll/IdeaProjects/gvisor-fork/pkg/tcpip/network/ipv4/ipv4.go:1410-1422`
+
+**修复方案**：
+```go
+// Phaethon fix: set InputNICName before forwarding so that CheckPostrouting
+// can match InputInterface conditions (e.g., SNAT rules matching "tun").
+// Without this, forwarded packets have empty InputNICName, and iptables
+// rules that depend on InputInterface never match.
+if pkt.InputNICName == "" && inNICName != "" {
+    pkt.InputNICName = inNICName
+}
+if e.Forwarding() && (pkt.OutputNICName != "" || !localStack) {
+    e.handleForwardingError(e.forwardUnicastPacket(pkt))
+```
+
+### 验证结果
+
+**QG 端日志**（修复后）：
+```
+[ipip] forwardPacketWithRoute OK: inner=100.0.0.1->172.30.0.2 outer=100.0.0.4->100.1.0.4
+```
+
+**关键改进**：
+- ❌ 修复前：`inner=192.168.1.88->172.30.0.2`（LAN 地址，SNAT 未执行）
+- ✅ 修复后：`inner=100.0.0.1->172.30.0.2`（VIP 地址，SNAT 已执行）
+
+**SSH 测试结果**：
+- SSH 连接成功到达 VM（收到 authentication failures，说明 TCP 握手完成）
+- VM netstat 显示 ESTABLISHED 连接
+- IPIP 隧道双向通信已打通
+
+### 经验教训
+
+**教训13：gVisor iptables 规则依赖 InputNICName**
+- ❌ 错误：认为 `CheckPostrouting` 会自动知道包的输入接口
+- ✅ 正确：必须在调用 `forwardUnicastPacket` 之前设置 `pkt.InputNICName`
+- ✅ 关键：`InputInterface="tun"` 匹配依赖于 `pkt.InputNICName == "tun"`
+
+**教训14：诊断日志要完整**
+- ❌ 错误：只记录"SNAT 未执行"，没有追踪为什么未执行
+- ✅ 正确：追踪完整调用链，找到 `InputNICName` 未设置的根因
+- ✅ 方法：在 `CheckPostrouting` 前后添加日志，对比 `inNIC` 参数和 `pkt.InputNICName`
+
+### 编译注意事项
+
+**⚠️ gVisor fork 修改后必须使用 `-a` 标志重新编译**：
+```bash
+GOOS=linux GOARCH=amd64 go build -a -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty) -X main.Platform=linux -X main.Arch=amd64" -o dist/linux-amd64/phaethon .
+```
+
+**原因**：Go 构建缓存不会自动检测 `../gvisor-fork` 的变更，`-a` 强制重建所有依赖包。
+
 

@@ -81,14 +81,10 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 	}
 
 	// Inject phaethon's module logging into gVisor fork diagnostic logs.
-	// Route "gvisor" module (per-packet verbose logs) to Debug level to reduce noise.
-	// IPIP tunnel handler logs use "ipip" module and stay at Info level.
+	// Route gVisor diagnostic logs to Debug level to reduce noise.
+	// Per-packet logs (gvisor, ipip, route, etc.) should not flood at Info level.
 	stack.SetLogFunc(func(module string, format string, args ...interface{}) {
-		if module == "gvisor" {
-			util.LogModuleDebug(module, format, args...)
-		} else {
-			util.LogModuleInfo(module, format, args...)
-		}
+		util.LogModuleDebug(module, format, args...)
 	})
 
 	if err := engine.Start(); err != nil {

@@ -1,16 +1,15 @@
 # IPIP 隧道双向通信问题跟踪
 
 **创建时间**: 2026-10-14  
-**状态**: 已定位根因并修复（待验证）  
+**状态**: SNAT 未执行导致回程路由错误（待修复）  
 **优先级**: 高
 
 **问题摘要**：
 - ✅ IPIP 封装已执行（QG 日志确认）
 - ✅ IPIP 解封已执行（VM 日志确认）
 - ✅ RouteSelector 决策正确（branch=ipip, needIPIP=true）
-- ❌ SSH 连接仍然失败
-- ✅ **根因已定位**：内层包的 TransportHeader 未解析，导致端口为 0
-- ✅ **修复已实施**：在 gVisor fork 中添加 parseTransport() 调用
+- ❌ **当前问题**：内层包源地址未经 SNAT（仍是 192.168.1.88，应该是 VIP）
+- ❌ 导致回程包目标地址错误，TCP 握手失败
 
 **根本原因（已确认，2026-10-14 10:30）**：
 
@@ -45,6 +44,28 @@
 - 检查 VM 日志是否出现 `parsing transport header for inner packet` 日志
 - 检查端口是否正确解析（不再是 0）
 - 检查 SSH 连接是否成功建立
+
+**最新发现（2026-10-14 12:10）**：
+1. ✅ Mac 发包正确：src=192.168.1.88 → dst=172.30.0.2，目标 MAC=QG eth1
+2. ✅ QG eth1 收到包：tcpdump 抓到 192.168.1.88 → 172.30.0.2
+3. ✅ QG tun0 收到包：tcpdump 抓到 192.168.1.88 → 172.30.0.2
+4. ❌ QG readLoop 没有读到包：日志中没有 TUN-READ 172.30.0.2
+5. ❌ 没有 IPIP 封装：因为 readLoop 没有读到包
+
+**根因分析（2026-10-14 12:10）**：
+- tcpdump 在内核层面抓包，能看到所有经过 tun0 接口的包
+- readLoop 从 /dev/net/tun 文件描述符读取，读取 TUN 设备队列中的包
+- 包到达 tun0 接口（tcpdump 看到了），但没有进入 TUN 设备队列（readLoop 没读到）
+- 可能原因：
+  1. TUN 设备队列溢出（但 qlen=500，应该足够）
+  2. 内核网络栈在转发到 TUN 设备时丢弃（但 /proc/net/dev 显示接收 0 丢弃）
+  3. TUN 设备驱动问题
+  4. 包被其他进程读取（但只有 phaethon worker 有 /dev/net/tun 打开）
+
+**待验证**：
+- 检查 TUN 设备的实际队列使用情况
+- 检查是否有其他因素阻止包进入 TUN 设备队列
+- 尝试从 QG 本地发包到 tun0，看 readLoop 是否能读到
 
 **历史发现（2026-10-14 10:12）**：
 1. ✅ IPIP 解封装成功：`Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64`
@@ -755,4 +776,157 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 2. 检查 QG 是否发送了 RST
 3. 检查 conntrack 状态
 4. 检查 VM OS 网络栈的 NAT 规则
+
+---
+
+## 最新状态（2026-10-14 11:45）
+
+### ✅ IPIP 隧道全链路已验证打通
+
+**端到端日志证据**：
+
+**QG 端（封装方）**：
+```
+[ipip] start: inner=100.0.0.1->172.30.0.2 proto=6 len=40, outer=100.0.0.4->100.1.0.4
+[ipip] outer_header: src=100.0.0.4 dst=100.1.0.4 proto=4 ttl=64 totalLen=60
+[ipip] FindRoute OK: egressEIP=100.1.0.4 nicID=4 needIPIP=false
+[ipip] writePacketPostRouting: proto=4 loop=1 packetOut=true
+[ipip] forwardPacketWithRoute OK: inner=100.0.0.1->172.30.0.2 outer=100.0.0.4->100.1.0.4
+```
+
+**VM 端（解封装方）**：
+```
+[ipip] [IPIP-TUNNEL] ShouldDecapsulate: outer dst=100.1.0.4 local EIP=100.1.0.4 match=true
+[ipip] [IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=100.0.0.1->172.30.0.2 proto=6 len=52
+[ipip] [IPIP-TUNNEL] Decapsulate: innerData len=52 (complete IP packet, no link header)
+```
+
+多次 TCP SYN 重试（11:41:42 ~ 11:42:07），说明 QG→VM 的 IPIP 封装→P2P 传输→解封装链路稳定工作。
+
+### 当前卡点：解封装后内层包的交付
+
+**现象**：
+- IPIP 解封装成功，内层包（100.0.0.1→172.30.0.2 proto=6）通过 `HandlePacket` 注入 gVisor netstack
+- SSH 报错从 "Operation timed out" 变为 "Connection timed out during banner exchange"（有进展，说明 TCP 部分连通）
+- 但 SSH 最终超时
+
+**正确理解解封装后的包处理**：
+
+解封装后的内层包就是一个**普通 IP 包**，跟其他任何进入 gVisor netstack 的包没有区别。它的去向完全由 RouteSelector 决定：
+- 如果 RouteSelector 判定 LocalStack=true → 交付给本地 TCP Forwarder
+- 如果 RouteSelector 判定需要转发 → 走转发路径（可能经 Link NIC 或再次 IPIP）
+- 不需要也不应该考虑"把某个地址绑定到某个 NIC"之类的概念
+
+**当前缺失的诊断**：
+- VM 上解封装后内层包的 RouteSelector 决策日志（route 模块当前设为 info 级别，但 route-selector 日志已降为 debug）
+- 需要设 `route=debug` 才能看到解封装后内层包的路由决策
+
+### 日志级别调整（本次部署）
+
+逐包诊断日志全部降为 Debug 级别，默认 INFO 下不再输出，需要时通过模块日志级别开启：
+
+| 模块 | 日志内容 | 原级别 | 新级别 |
+|------|----------|--------|--------|
+| `mesh` | MESH-TRACE 转发追踪 | Info | Debug |
+| `mesh` | RouteSelector 决策 | Info | Debug |
+| `mesh` | LinkNIC 收发包 | Info | Debug |
+| `mesh` | HandleMeshFrame IPIP 接收 | Info | Debug |
+| `p2p` | P2P 收发包诊断 | Info | Debug |
+| `tun` | TUN read 逐包日志 | Info | Debug |
+| `ipip`（gVisor fork） | IPIP 封装路径日志 | Info（via stack.Logf） | Debug（via stack.Logf） |
+
+开启方式：启动环境变量 `PHAETHON_LOG_MODULES=route=debug,mesh=debug,p2p=debug,tun=debug,ipip=debug` 或 admin API `PUT /api/log/modules`。
+
+### 下一步
+
+1. 在 VM 上设 `route=debug`，触发 SSH 测试
+2. 检查解封装后内层包（dst=172.30.0.2）的 RouteSelector 决策
+3. 确认 LocalStack 是否为 true（本地交付）还是走了转发
+4. 根据 RouteSelector 决策结果判断下一步修复方向
+
+---
+
+## 最新诊断进展（2026-10-14 11:55）
+
+### ✅ 已完成：VM 端日志级别调整
+
+- 设置 VM 的 `route=debug, gvisor=debug, ipip=debug`
+- 触发 SSH 测试（从本地 Mac 通过 QG 旁路网关）
+- VM 日志确认 IPIP 解封装成功：`Decapsulating: outer=100.0.0.4->100.1.0.4 inner=100.0.0.1->172.30.0.2 proto=6 len=40`
+- **但是没有看到解封装后内层包的 RouteSelector 决策日志**
+
+### ❌ 当前卡点：QG 本地流量未进入 gVisor
+
+**现象**：
+- tcpdump 在 QG tun0 上抓到包：`100.0.0.2.48326 > 172.30.0.2.22: Flags [S]`
+- 但 QG 的 readLoop 日志中没有 172.30.0.2 的相关记录
+- 说明包到达 tun0 后，没有被 gVisor 的 readLoop 读取
+
+**可能原因**：
+1. tcpdump 在内核层抓包，readLoop 在用户态读取 TUN 文件描述符，包可能在内核层面被丢弃
+2. 或者 readLoop 读取了包，但在某个地方被过滤掉（没有输出日志）
+
+**本地 Mac 路由问题**：
+- 初始路由错误：172.30.0.2 指向 www.whipfeng2.com（en0 接口）
+- 已修复：删除旧路由，添加 `172.30.0.0/24 via 192.168.1.101`
+- 但 tcpdump 显示 src=100.0.0.2（QG IP），说明本地流量到达 QG 后被 SNAT 转换
+
+### 待验证
+
+1. **QG readLoop 为何没有读取 172.30.0.2 的包**：
+   - 检查 readLoop 是否有过滤逻辑
+   - 检查 TUN 设备配置是否正确
+   - 检查是否有内核层面的包丢弃
+
+2. **VM 解封装后内层包的处理**：
+   - 需要确认内层包是否再次经过 RouteSelector
+   - 如果经过，RouteSelector 的决策是什么
+   - 如果没有经过，说明 gVisor fork 的 HandlePacket 递归调用有问题
+
+### 经验教训
+
+**教训11：tcpdump 抓包 ≠ readLoop 读取**
+- tcpdump 在内核层抓包，能看到所有到达接口的包
+- readLoop 在用户态读取 TUN 文件描述符，可能因为各种原因读取不到包
+- 不能仅凭 tcpdump 抓到包就认为 readLoop 会读取到
+
+**教训12：本地流量可能不走预期路径**
+- QG 本地发起的流量（src=100.0.0.2）虽然路由指向 tun0，但可能不经过 gVisor readLoop
+- 旁路网关流量（src=192.168.1.88）是正常的（有 TUN-READ 日志）
+- 需要区分"本地发起的流量"和"经过旁路网关的流量"
+
+---
+
+## 最新发现（2026-10-14 14:15）
+
+### ❌ 当前问题：SNAT 未执行，内层包源地址错误
+
+**现象**：
+- QG IPIP 封装成功：`inner=192.168.1.88->172.30.0.2`
+- VM IPIP 解封成功：内层包进入 gVisor
+- **但内层包源地址是 192.168.1.88（LAN 地址），不是 VIP（100.0.0.1）**
+
+**预期行为**：
+- IPIP 封装前应该执行 SNAT，把 src 从 192.168.1.88 改成 VIP（100.0.0.1）
+- 这样回程包才能正确路由回 QG
+
+**历史对比**：
+- ✅ 之前验证过 SNAT 工作正常（line 571）：`inner=100.0.0.1->172.30.0.2`
+- ❌ 现在 SNAT 未执行：`inner=192.168.1.88->172.30.0.2`
+
+**可能原因**：
+1. gVisor iptables SNAT 规则条件不匹配（InputInterface=tun 可能不适用于旁路网关流量）
+2. CheckPostrouting 没有被调用
+3. SNAT 规则被覆盖或丢失
+
+**下一步诊断**：
+1. 检查 gVisor iptables SNAT 规则配置
+2. 检查 CheckPostrouting 是否被调用（添加日志）
+3. 确认 SNAT 规则条件是否匹配旁路网关流量
+4. 对比之前 SNAT 工作的代码版本，找出差异
+
+**影响**：
+- 回程包目标地址错误（应该是 VIP，但现在是 192.168.1.88）
+- VM 发送 SYN-ACK 到 192.168.1.88，但 192.168.1.88 不在 VM 的路由表中
+- TCP 握手失败
 

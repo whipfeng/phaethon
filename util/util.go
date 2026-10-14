@@ -196,7 +196,7 @@ var (
 )
 
 func init() {
-	currentLogLevel.Store(int32(LogLevelInfo))
+	currentLogLevel.Store(int32(LogLevelError))
 }
 
 // SetModuleLogLevel sets the log level for a specific module.

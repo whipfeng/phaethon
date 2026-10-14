@@ -1404,33 +1404,14 @@ async function fetchMeshStatus() {
             if (routeTbody) {
                 let html = '';
                 data.routes.routes.forEach(r => {
-                    const viaList = r.via || [];
                     const entries = r.entries || [];
                     const owners = (entries.length > 0) ? entries.map(e => e.NodeID).join(', ') : '-';
-                    let viaCell, statusCell;
-                    if (viaList.length === 0) {
-                        // Local prefix: no intermediate hop
-                        viaCell = '<td data-label="' + i18n.t('mesh.via') + '" class="text-muted">-</td>';
-                        statusCell = '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot local"></span>' + i18n.t('mesh.local') + '</td>';
-                    } else {
-                        const minHop = Math.min(...viaList.map(v => v.hop));
-                        const bestRoutes = viaList.filter(v => v.hop === minHop);
-                        const viaNames = bestRoutes.map(v => v.nodeID).join(', ');
-                        // hop=1: destination is the next-hop peer itself; hop>=2: relayed
-                        const isDirect = minHop === 1;
-                        const statusClass = isDirect ? 'online' : 'relay';
-                        const statusText = isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay');
-                        viaCell = '<td data-label="' + i18n.t('mesh.via') + '">' + escapeHtml(viaNames) + '</td>';
-                        statusCell = '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + statusClass + '"></span>' + statusText + '</td>';
-                    }
                     html += '<tr>';
                     html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
                     html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(owners) + '</code></td>';
-                    html += viaCell;
-                    html += statusCell;
                     html += '</tr>';
                 });
-                routeTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
+                routeTbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
             }
         }
 
@@ -1524,15 +1505,12 @@ async function fetchMeshStatus() {
             uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
 
             uniqueDomainRoutes.forEach(r => {
-                const info = ownerRouteInfo(r.owner);
                 html += '<tr>';
                 html += '<td data-label="' + i18n.t('mesh.domain') + '"><code>' + escapeHtml(r.domain) + '</code></td>';
                 html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(r.owner || '-') + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.via') + '"' + (info.via === '-' ? ' class="text-muted"' : '') + '>' + escapeHtml(info.via) + '</td>';
-                html += '<td data-label="' + i18n.t('dash.listenerStatus') + '"><span class="mesh-status-dot ' + info.cls + '"></span>' + info.text + '</td>';
                 html += '</tr>';
             });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="4" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
+            domainRouteTbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);

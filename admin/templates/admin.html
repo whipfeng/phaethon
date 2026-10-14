@@ -4,7 +4,7 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
             <h3 data-i18n="admin.title">Admin Settings</h3>
-            <button onclick="saveAdminSettings()" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            <button onclick="saveAdminSettings(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
         </div>
         <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.help">Configure admin panel access. Changes require password confirmation and will trigger a reload.</p>
 
@@ -59,35 +59,44 @@
 
     document.getElementById('admin-auth-enabled').addEventListener('change', updateAuthFieldsVisibility);
 
-    window.saveAdminSettings = async function() {
-        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-        if (!password) return;
-
-        const addr = document.getElementById('admin-addr').value.trim();
-        const authEnabled = document.getElementById('admin-auth-enabled').checked;
-        const username = document.getElementById('admin-username').value.trim();
-        const newPassword = document.getElementById('admin-password').value;
-        const statusEl = document.getElementById('admin-status');
-
-        if (!addr) {
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
-            statusEl.style.color = 'var(--danger)';
-            return;
+    window.saveAdminSettings = async function(event) {
+        const btn = event ? event.target : document.querySelector('button[onclick="saveAdminSettings()"]');
+        const originalText = btn ? btn.textContent : '';
+        const originalDisabled = btn ? btn.disabled : false;
+        
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = i18n.t('common.processing') || 'Processing...';
         }
-
-        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-        statusEl.style.color = 'var(--text-muted)';
-
-        const body = {
-            Addr: addr,
-            AuthEnabled: authEnabled,
-            Username: username
-        };
-        if (newPassword) {
-            body.Password = newPassword;
-        }
-
+        
         try {
+            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+            if (!password) return;
+
+            const addr = document.getElementById('admin-addr').value.trim();
+            const authEnabled = document.getElementById('admin-auth-enabled').checked;
+            const username = document.getElementById('admin-username').value.trim();
+            const newPassword = document.getElementById('admin-password').value;
+            const statusEl = document.getElementById('admin-status');
+
+            if (!addr) {
+                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
+                statusEl.style.color = 'var(--danger)';
+                return;
+            }
+
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+            statusEl.style.color = 'var(--text-muted)';
+
+            const body = {
+                Addr: addr,
+                AuthEnabled: authEnabled,
+                Username: username
+            };
+            if (newPassword) {
+                body.Password = newPassword;
+            }
+
             const res = await fetch('./api/config/admin', {
                 method: 'PUT',
                 headers: {
@@ -109,6 +118,11 @@
         } catch (err) {
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
+        } finally {
+            if (btn) {
+                btn.disabled = originalDisabled;
+                btn.textContent = originalText;
+            }
         }
     };
 

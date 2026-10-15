@@ -93,7 +93,7 @@ type P2PTransport interface {
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetChannelDropStats() (peerStats map[string]struct {
-		WriteChDrops   uint64
+		DataDrops      uint64
 		ControlChDrops uint64
 	}, meshInboundDrops uint64)
 }
@@ -2576,7 +2576,7 @@ func (m *MeshManager) GetLinkNICStats() map[string]struct {
 }
 
 func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
-	WriteChDrops   uint64
+	DataDrops      uint64
 	ControlChDrops uint64
 }, meshInboundDrops uint64) {
 	if m.p2p == nil {

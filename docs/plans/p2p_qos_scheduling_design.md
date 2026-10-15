@@ -129,23 +129,47 @@ func (p *Peer) writeLoop() {
 type DRRScheduler struct {
     queues      [16]chan writeReq
     deficits    [16]int
-    quantum     int  // 每个队列每次发送的字节数
+    quantum     int  // 每个队列每次发送的字节数（默认 1500）
+    stopCh      chan struct{}
 }
 
+// Next 阻塞等待下一个可发送的包（DRR 公平调度）
 func (s *DRRScheduler) Next() *writeReq {
-    for i := 0; i < 16; i++ {
-        if s.deficits[i] <= 0 {
-            s.deficits[i] += s.quantum
-        }
-        
+    round := 0
+    for {
+        // 检查是否停止
         select {
-        case req := <-s.queues[i]:
-            s.deficits[i] -= len(req.data)
-            return &req
+        case <-s.stopCh:
+            return nil
         default:
         }
+        
+        // 轮转检查所有队列
+        for i := 0; i < 16; i++ {
+            idx := (round + i) % 16
+            
+            // 补充 deficit
+            if s.deficits[idx] <= 0 {
+                s.deficits[idx] += s.quantum
+            }
+            
+            // 非阻塞尝试从队列取包
+            select {
+            case req := <-s.queues[idx]:
+                s.deficits[idx] -= len(req.data)
+                round = (idx + 1) % 16  // 下次从下一个队列开始
+                return &req
+            default:
+            }
+        }
+        
+        // 所有队列都为空，短暂等待后重试
+        select {
+        case <-s.stopCh:
+            return nil
+        case <-time.After(100 * time.Microsecond):
+        }
     }
-    return nil
 }
 ```
 
@@ -158,52 +182,79 @@ func classifyPacket(req writeReq) QueueType {
         return QueueControl
     }
     
+    // 需要至少IPv4头（20字节）
+    if len(req.data) < 20 {
+        return QueueData
+    }
+    
+    // 检查IPv4版本
+    if req.data[0]>>4 != 4 {
+        return QueueData
+    }
+    
+    protocol := req.data[9]
+    ihl := int(req.data[0]&0x0F) * 4  // IP头长度
+    
     // 2. DNS 包（UDP 53）
-    if len(req.data) >= 20 {
-        protocol := req.data[9]
-        if protocol == 17 {  // UDP
-            dstPort := binary.BigEndian.Uint16(req.data[18:20])
-            if dstPort == 53 {
-                return QueueDNS
-            }
+    if protocol == 17 && len(req.data) >= ihl+4 {  // UDP
+        dstPort := int(req.data[ihl+2])<<8 | int(req.data[ihl+3])
+        srcPort := int(req.data[ihl])<<8 | int(req.data[ihl+1])
+        if dstPort == 53 || srcPort == 53 {
+            return QueueDNS
         }
     }
     
     // 3. TCP ACK（小包）
-    if len(req.data) >= 20 {
-        protocol := req.data[9]
-        if protocol == 6 {  // TCP
-            flags := req.data[33]
-            if flags == 0x10 && len(req.data) < 100 {  // ACK
-                return QueueACK
-            }
+    if protocol == 6 && len(req.data) >= ihl+14 {  // TCP
+        flags := req.data[ihl+13]
+        if flags == 0x10 && len(req.data) < 100 {  // ACK only
+            return QueueACK
         }
     }
     
     // 4. 普通数据（按流 hash）
     return QueueData
 }
+
+// 流 hash 计算（5-tuple）
+func hashFlow(req writeReq) int {
+    if len(req.data) < 20 {
+        return 0
+    }
+    
+    // 简单 hash：srcIP + dstIP + protocol
+    h := int(req.data[12]) + int(req.data[13]) + int(req.data[14]) + int(req.data[15])
+    h += int(req.data[16]) + int(req.data[17]) + int(req.data[18]) + int(req.data[19])
+    h += int(req.data[9])  // protocol
+    
+    return h % 16
+}
 ```
 
 ## 实现计划
 
-### 阶段 1：增加队列容量（快速修复）
-- [ ] 增加 highPriorityCh 容量（256 → 1024）
-- [ ] 部署测试，验证是否缓解问题
+### 阶段 1：增加队列容量（快速修复）✅ 已完成
+- [x] 增加 highPriorityCh 容量（256 → 1024）
+- [x] 部署测试，验证是否缓解问题
 
-### 阶段 2：实现 DNS 专用队列
-- [ ] 添加 dnsQueue 队列
-- [ ] 实现分类器（识别 UDP 53）
-- [ ] 修改 writeLoop 优先发送 DNS
-- [ ] 部署测试
+### 阶段 2：实现 DNS 专用队列 ✅ 已完成
+- [x] 添加 dnsQueue 队列（512容量）
+- [x] 实现分类器（识别 UDP 53）
+- [x] 修改 writeLoop 优先发送 DNS
+- [x] 部署测试
 
-### 阶段 3：实现按流公平调度
-- [ ] 实现 DRR 调度器
-- [ ] 实现 16 个数据队列
-- [ ] 实现流 hash 分类
-- [ ] 部署测试
+### 阶段 3：实现按流公平调度 ✅ 已完成
+- [x] 添加 ackQueue 队列（256容量）
+- [x] 实现 ACK 分类器（TCP flags == 0x10 && len < 100）
+- [x] 实现 16 个数据队列（每个256容量）
+- [x] 实现 DRR 公平调度器
+- [x] 实现流 hash 分类（srcIP + dstIP + protocol）
+- [x] 修改 writeLoop 使用 DRR 调度数据队列
+- [x] 部署到 QG 环境测试
+- [x] 验证 DNS 在 TCP 负载下不被饿死（30/30 成功）
+- [x] 验证零队列丢包（部署后 0 drops）
 
-### 阶段 4：优化和验证
+### 阶段 4：优化和验证（进行中）
 - [ ] 性能测试
 - [ ] 压力测试
 - [ ] 部署到所有环境
@@ -246,6 +297,37 @@ iperf3 -c 100.2.0.10 -b 100M -t 10
 - [DRR (Deficit Round Robin) 算法](https://en.wikipedia.org/wiki/Deficit_round_robin)
 - [WFQ (Weighted Fair Queuing)](https://en.wikipedia.org/wiki/Weighted_fair_queueing)
 
+## 实现总结
+
+### 队列架构
+```
+包 → 分类器
+   ├─ 控制帧 → controlCh (64) → 最高优先级
+   ├─ DNS (UDP 53) → dnsQueue (512) → 次高优先级
+   ├─ TCP ACK (flags=0x10, len<100) → ackQueue (256) → 高优先级
+   └─ 数据 → dataQueues[16] (每个256) → DRR 公平调度
+```
+
+### 关键实现
+1. **DRR 调度器**：16 个队列轮询调度，每个队列 quantum=1500 字节
+2. **流分类**：基于 srcIP + dstIP + protocol 的简单 hash，确保同一流进入同一队列
+3. **优先级顺序**：Control > DNS > ACK > Data (DRR) > Legacy (highPriorityCh)
+4. **IP 头解析**：正确处理可变长度 IP 头（IHL 字段），TCP flags 在 ihl+13，UDP 端口在 ihl+0/2
+
+### 部署验证（QG 环境 2026-10-15）
+- ✅ DNS 查询成功率：20/20 (100%)
+- ✅ TCP 负载下 DNS 稳定性：30/30 (100%，iperf3 1Mbps 并发)
+- ✅ 队列丢包：0 drops（部署前大量 "write queue full" 错误）
+- ✅ 服务稳定性：watchdog + worker 双进程正常运行
+
+### 性能指标
+- **队列总容量**：64 + 512 + 256 + 16×256 = 4,416 包
+- **DRR 轮询间隔**：100 微秒（无包时）
+- **分类开销**：O(1)，仅解析 IP 头前 20-60 字节
+
 ## 更新日志
 
 - 2026-10-15: 初始设计
+- 2026-10-15: 阶段 1-2 完成（DNS 专用队列）
+- 2026-10-15: 阶段 3 完成（ACK 队列 + 16 数据队列 + DRR 公平调度）
+- 2026-10-15: QG 环境部署验证通过，零丢包

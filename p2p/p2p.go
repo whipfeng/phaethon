@@ -639,7 +639,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		LastSeen:       time.Now(),
 		transport:      t,
 		writeCh:        make(chan writeReq, 512),
-		highPriorityCh: make(chan writeReq, 256),
+		highPriorityCh: make(chan writeReq, 1024),
 		controlCh:      make(chan writeReq, 128),
 		stopCh:         make(chan struct{}),
 		sendState:      newSendState(),
@@ -864,7 +864,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 		peer.transport = transport
 		peer.writeCh = make(chan writeReq, 512)
-		peer.highPriorityCh = make(chan writeReq, 256)
+		peer.highPriorityCh = make(chan writeReq, 1024)
 		peer.controlCh = make(chan writeReq, 128)
 		// Preserve sendState/recvState across reconnections to maintain loss/RTT history.
 		// Only create new state on first connection.

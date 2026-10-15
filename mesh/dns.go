@@ -303,45 +303,55 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 
 	// Check if domain belongs to a remote node
 	if h.resolveDomainSubnet != nil {
+		util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] resolveDomainSubnet called: domain=%s", domain)
 		remoteSubnet, needsFail := h.resolveDomainSubnet(domain)
+		util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] resolveDomainSubnet result: domain=%s remoteSubnet=%v needsFail=%v", domain, remoteSubnet, needsFail)
 		if remoteSubnet != nil {
 			// Matched a route (static or dynamic), forward to remote
+			util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] FORWARDING: domain=%s to subnet=%s", domain, remoteSubnet)
 			remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
 			if err != nil {
-				util.LogModuleWarn("dns", "tun dns: forward %s to remote failed: %v", domain, err)
+				util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] FORWARD FAILED: domain=%s err=%v", domain, err)
 				// Return SERVFAIL instead of fallback to local pool
 				// This allows the client to retry and get the correct IP once mesh recovers
 				resp := buildDNSErrorResponse(packet)
 				if resp != nil {
 					if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 						util.LogModuleWarn("dns", "tun dns: write SERVFAIL for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+					} else {
+						util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] SENT SERVFAIL: domain=%s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 					}
 				}
 				return
 			}
 			h.cache.Set(domain, remoteIP, ttl)
-			util.LogModuleDebug("dns", "tun dns: %s -> %s (remote, ttl=%v, cached)", domain, remoteIP, ttl)
+			util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] FORWARD SUCCESS: domain=%s -> %s ttl=%v", domain, remoteIP, ttl)
 			resp := buildDNSResponse(packet, remoteIP.To4())
 			if resp != nil {
 				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 					util.LogModuleWarn("dns", "tun dns: write remote response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
 				} else {
-					util.LogModuleInfo("dns", "[DNS-DEBUG] processQuery: sent remote response for %s -> %s to %s:%d", domain, remoteIP, remoteAddr.Addr, remoteAddr.Port)
+					util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] SENT RESPONSE: domain=%s -> %s to %s:%d", domain, remoteIP, remoteAddr.Addr, remoteAddr.Port)
 				}
 			}
 			return
 		} else if needsFail {
 			// Static match but node not ready → SERVFAIL
-			util.LogModuleWarn("dns", "tun dns: %s matched static route but node not ready, returning SERVFAIL", domain)
+			util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] NEEDSFAIL: domain=%s matched static route but node not ready, returning SERVFAIL", domain)
 			resp := buildDNSErrorResponse(packet)
 			if resp != nil {
 				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 					util.LogModuleWarn("dns", "tun dns: write SERVFAIL for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
+				} else {
+					util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] SENT SERVFAIL (needsFail): domain=%s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 				}
 			}
 			return
 		}
 		// else: no match, fallback to local pool
+		util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] NO MATCH: domain=%s fallback to local pool", domain)
+	} else {
+		util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] NO RESOLVER: resolveDomainSubnet is nil, using local pool", domain)
 	}
 
 	// Local pool resolution (default)
@@ -364,6 +374,8 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 // routing → remote HandleMeshFrame → GIP path → InjectMeshPacket → remote DNS
 // hijacker. The response follows the reverse path.
 func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (net.IP, time.Duration, error) {
+	startTime := time.Now()
+	
 	// Derive remote GIP (.3) from subnet
 	baseIP := remoteSubnet.IP.To4()
 	if baseIP == nil {
@@ -373,43 +385,63 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	copy(remoteGIP, baseIP)
 	remoteGIP[3] |= 3
 
-	util.LogModuleDebug("dns", "[DNS] forwardToRemote: remoteGIP=%s subnet=%s", remoteGIP, remoteSubnet)
+	// Extract domain from query for logging
+	domain, _, _ := parseDNSQueryDomain(query)
+	if domain == "" {
+		domain = "unknown"
+	}
+
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] START: domain=%s remoteGIP=%s localGIP=%s", domain, remoteGIP, h.dnsAddr)
 
 	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
 	localAddr := tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr}
 
 	const timeout = 3 * time.Second
 
-	util.LogModuleInfo("dns", "[DNS] forwardToRemote: START domain=%s remoteGIP=%s localGIP=%s", "unknown", remoteGIP, h.dnsAddr)
-
+	dialStart := time.Now()
 	conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
 	if err != nil {
+		util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] DIAL FAILED: domain=%s remoteGIP=%s err=%v duration=%v", domain, remoteGIP, err, time.Since(dialStart))
 		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
 	}
 	defer conn.Close()
-	util.LogModuleInfo("dns", "[DNS] forwardToRemote: dial success, localAddr=%s", conn.LocalAddr())
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] DIAL OK: domain=%s remoteGIP=%s localAddr=%s duration=%v", domain, remoteGIP, conn.LocalAddr(), time.Since(dialStart))
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, 0, fmt.Errorf("set deadline: %v", err)
 	}
 
-	util.LogModuleInfo("dns", "[DNS] forwardToRemote: writing query (%d bytes)", len(query))
+	writeStart := time.Now()
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] WRITE START: domain=%s queryLen=%d", domain, len(query))
 	if _, err := conn.Write(query); err != nil {
+		util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] WRITE FAILED: domain=%s err=%v duration=%v", domain, err, time.Since(writeStart))
 		return nil, 0, fmt.Errorf("write query: %v", err)
 	}
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] WRITE OK: domain=%s duration=%v", domain, time.Since(writeStart))
 
 	resp := make([]byte, 512)
+	readStart := time.Now()
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] READ START: domain=%s timeout=%v", domain, timeout)
 	n, err := conn.Read(resp)
+	readDuration := time.Since(readStart)
 	if err != nil {
+		// Log detailed timeout information
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] READ TIMEOUT: domain=%s remoteGIP=%s duration=%v timeout=%v local=%s", 
+				domain, remoteGIP, readDuration, timeout, conn.LocalAddr())
+		} else {
+			util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] READ FAILED: domain=%s err=%v duration=%v", domain, err, readDuration)
+		}
 		return nil, 0, fmt.Errorf("read response (dst=%s:53 local=%s): %v", remoteGIP, conn.LocalAddr(), err)
 	}
-	util.LogModuleInfo("dns", "[DNS] forwardToRemote: read success, got %d bytes", n)
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] READ OK: domain=%s gotBytes=%d duration=%v", domain, n, readDuration)
 
 	respIP, ttl := ParseDNSResponseIP(resp[:n])
 	if respIP == nil {
+		util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] PARSE FAILED: domain=%s respLen=%d", domain, n)
 		return nil, 0, fmt.Errorf("no A record in response")
 	}
-	util.LogModuleDebug("dns", "[DNS] forwardToRemote: got response Fake-IP=%s ttl=%v", respIP, ttl)
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] COMPLETE: domain=%s fakeIP=%s ttl=%v totalDuration=%v", domain, respIP, ttl, time.Since(startTime))
 	return respIP, ttl, nil
 }
 

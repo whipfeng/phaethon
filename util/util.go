@@ -344,7 +344,24 @@ func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 		w.rotate()
 	}
 
+	// If file is nil (rotation failed), write to stderr as fallback
+	if w.file == nil {
+		return fmt.Fprintf(os.Stderr, "[LOG-FALLBACK] %s", string(p))
+	}
+
 	n, err = w.file.Write(p)
+	if err != nil {
+		// Write failed, try to reopen
+		fmt.Fprintf(os.Stderr, "[LOG] write failed: %v, attempting reopen\n", err)
+		w.file.Close()
+		w.file = nil
+		if openErr := w.openFile(); openErr != nil {
+			fmt.Fprintf(os.Stderr, "[LOG] reopen after write failure: %v\n", openErr)
+			return 0, openErr
+		}
+		// Retry write
+		n, err = w.file.Write(p)
+	}
 	w.curSize += int64(n)
 	return n, err
 }
@@ -355,10 +372,25 @@ func (w *RotatingFileWriter) rotate() {
 	}
 	// Remove old backup and rename current to .old
 	oldPath := w.path + ".old"
-	os.Remove(oldPath)
-	os.Rename(w.path, oldPath)
+	if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+		// Log error but continue - old file might not exist
+		fmt.Fprintf(os.Stderr, "[LOG] remove old log failed: %v\n", err)
+	}
+	if err := os.Rename(w.path, oldPath); err != nil {
+		// Critical error - log to stderr
+		fmt.Fprintf(os.Stderr, "[LOG] rotate log failed: %v\n", err)
+		// Try to reopen the original file
+		if err := w.openFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "[LOG] reopen log failed: %v\n", err)
+			w.file = nil
+		}
+		return
+	}
 	// Open new file
-	w.openFile()
+	if err := w.openFile(); err != nil {
+		fmt.Fprintf(os.Stderr, "[LOG] open new log failed: %v\n", err)
+		w.file = nil
+	}
 }
 
 func (w *RotatingFileWriter) Close() error {

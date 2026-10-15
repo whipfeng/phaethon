@@ -197,6 +197,8 @@ var (
 
 func init() {
 	currentLogLevel.Store(int32(LogLevelError))
+	// System module (startup/shutdown markers) defaults to Info
+	moduleLogLevels["system"] = LogLevelInfo
 }
 
 // SetModuleLogLevel sets the log level for a specific module.

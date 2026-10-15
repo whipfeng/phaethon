@@ -840,12 +840,12 @@ func (m *MeshManager) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
 var GlobalMeshManager *MeshManager
 
 func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
-	util.Logger.Printf("[MESH-START] ENTER: node=%s", m.nodeID)
+	util.LogModuleInfo("mesh", "[MESH-START] ENTER: node=%s", m.nodeID)
 	m.netstack = ns
 	m.p2p = p2p
 	// Set mesh info on P2P layer so hello messages include correct meshNodeId
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
-	util.Logger.Printf("[MESH-START] calling recomputeRoutes: node=%s", m.nodeID)
+	util.LogModuleInfo("mesh", "[MESH-START] calling recomputeRoutes: node=%s", m.nodeID)
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	go m.qualityLoop()
@@ -1619,7 +1619,7 @@ func (m *MeshManager) recomputeRoutes() {
 			peerIDs = append(peerIDs, p.NodeID())
 		}
 	}
-	util.Logger.Printf("[RECOMPUTE-ROUTES] node=%s peerCount=%d peers=%v", m.nodeID, len(peers), peerIDs)
+	util.LogModuleInfo("mesh", "[RECOMPUTE-ROUTES] node=%s peerCount=%d peers=%v", m.nodeID, len(peers), peerIDs)
 
 	// Collect all peers per prefix (not just the best one).
 	// ownPrefixes tracks prefixes owned by this node (no forwarding needed).
@@ -1872,7 +1872,7 @@ func (m *MeshManager) recomputeRoutes() {
 		for nid := range bestNodes {
 			nodeIDs = append(nodeIDs, nid)
 		}
-		util.Logger.Printf("[DOMAIN-TRIE] node=%s entries=%v count=%d", m.nodeID, nodeIDs, len(bestNodes))
+		util.LogModuleInfo("mesh", "[DOMAIN-TRIE] node=%s entries=%v count=%d", m.nodeID, nodeIDs, len(bestNodes))
 	}
 
 	// Convert bestNodes to nodeMap for routeTable

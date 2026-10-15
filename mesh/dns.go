@@ -688,3 +688,86 @@ func ParseDNSResponseIP(resp []byte) (net.IP, time.Duration) {
 	}
 	return net.IP(resp[off : off+4]), ttl
 }
+
+// ParseDNSResponseIPs extracts all A record IPv4 addresses from a DNS response.
+// Returns empty slice if the response is invalid or contains no A records.
+func ParseDNSResponseIPs(resp []byte) []net.IP {
+	var ips []net.IP
+	if len(resp) < 12 {
+		return ips
+	}
+	flags := (uint16(resp[2]) << 8) | uint16(resp[3])
+	if flags&0x8000 == 0 { // not a response
+		return ips
+	}
+	if flags&0x000f != 0 { // RCODE != 0
+		return ips
+	}
+	ancount := (uint16(resp[6]) << 8) | uint16(resp[7])
+	if ancount == 0 {
+		return ips
+	}
+
+	// Skip question section.
+	off := 12
+	for {
+		if off >= len(resp) {
+			return ips
+		}
+		llen := int(resp[off])
+		off++
+		if llen == 0 {
+			break
+		}
+		if llen&0xc0 == 0xc0 { // compression pointer
+			off++
+			break
+		}
+		if llen > 63 || off+llen > len(resp) {
+			return ips
+		}
+		off += llen
+	}
+	off += 4 // QTYPE + QCLASS
+
+	// Parse all answers.
+	for i := 0; i < int(ancount) && off < len(resp); i++ {
+		// Skip name
+		if off >= len(resp) {
+			break
+		}
+		if resp[off]&0xc0 == 0xc0 {
+			off += 2
+		} else {
+			for {
+				if off >= len(resp) {
+					return ips
+				}
+				llen := int(resp[off])
+				off++
+				if llen == 0 {
+					break
+				}
+				if llen&0xc0 == 0xc0 {
+					off++
+					break
+				}
+				if llen > 63 || off+llen > len(resp) {
+					return ips
+				}
+				off += llen
+			}
+		}
+		if off+10 > len(resp) {
+			break
+		}
+		rtype := (uint16(resp[off]) << 8) | uint16(resp[off+1])
+		rdlen := (uint16(resp[off+8]) << 8) | uint16(resp[off+9])
+		off += 10
+		if rtype == 0x0001 && rdlen == 4 && off+4 <= len(resp) {
+			ips = append(ips, net.IP(resp[off:off+4]))
+		}
+		off += int(rdlen)
+	}
+	return ips
+}

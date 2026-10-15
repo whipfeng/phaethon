@@ -376,6 +376,65 @@ TUN forwarder
 - **未设回调时完全走现有 RouteSelector**，零影响
 - **proxy → peer → LinkNIC 映射**复用已有 `proxyPeers` map，无需新数据结构
 
+#### 域名 vs 裸 IP 处理（2026-10-14 修正）
+
+v2 模式下，目标地址是域名还是裸 IP 决定了不同的处理路径：
+
+**域名场景**：
+- 目标域名应直接在**对端节点**解析（对端有自己的 DNS 服务）
+- 不需要本地 IPIP 封装
+- 不需要 routeFunc
+- 流程：
+  1. 从 proxy.Name 查到 peer subnet（如 `100.179.0.0/16`）
+  2. 从 peer subnet 算出对端 DNS server IP（如 `subnet+3` = `100.179.0.3`，即 GIP）
+  3. 用对端 DNS server 解析域名
+  4. 直接连接解析后的地址（走对端节点的本地网络栈）
+
+**裸 IP 场景**：
+- 目标 IP 需要通过 mesh 网络路由到对端
+- 需要 IPIP 封装 + routeFunc
+- 流程：
+  1. 从 proxy.Name 查到 peer subnet + LinkNIC
+  2. 创建 routeFunc 返回 `RouteDecision{EgressNIC=linkNIC, EgressEIP=peerEIP, NeedIPIP=true}`
+  3. 调用 `GlobalNetstackDialV2Func("tcp", targetAddr, routeFunc)`
+  4. gVisor netstack 做 IPIP 封装，从 Link NIC 发出
+
+**代码实现**：
+
+```go
+func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+    util.LogInfo("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
+    
+    if ip := net.ParseIP(dstAddr); ip == nil {
+        // 域名：用对端 DNS 解析，不走 IPIP
+        // 1. 查 peer subnet
+        linkNICID, peerSubnet, ok := p2p.LookupProxyPeerRoute(d.proxy.Name)
+        if !ok {
+            return nil, fmt.Errorf("v2 dial: peer not found for proxy %s", d.proxy.Name)
+        }
+        // 2. 算对端 DNS IP（subnet+3 = GIP）
+        dnsIP := CalculateDNSIP(peerSubnet) // 已有函数或新增
+        // 3. 用对端 DNS 解析域名
+        ips, err := resolveViaDNS(dstAddr, dnsIP)
+        if err != nil {
+            return nil, fmt.Errorf("v2 dial: resolve %s via %s: %w", dstAddr, dnsIP, err)
+        }
+        // 4. 直接连接（不走 IPIP，走对端本地网络）
+        targetIP := ips[0]
+        return directDialToPeer("tcp", net.JoinHostPort(targetIP.String(), strconv.Itoa(dstPort)), linkNICID)
+    } else {
+        // 裸 IP：IPIP 封装 + routeFunc
+        routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
+        targetAddr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+        return GlobalNetstackDialV2Func("tcp", targetAddr, routeFunc)
+    }
+}
+```
+
+**关键区别**：
+- 域名：对端解析 + 对端本地交付，**无 IPIP**
+- 裸 IP：本地 IPIP 封装 + 对端接收后交付，**有 IPIP**
+
 ### 影响范围
 
 | 文件 | 改动 |

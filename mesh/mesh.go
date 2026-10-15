@@ -840,10 +840,12 @@ func (m *MeshManager) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
 var GlobalMeshManager *MeshManager
 
 func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
+	util.Logger.Printf("[MESH-START] ENTER: node=%s", m.nodeID)
 	m.netstack = ns
 	m.p2p = p2p
 	// Set mesh info on P2P layer so hello messages include correct meshNodeId
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
+	util.Logger.Printf("[MESH-START] calling recomputeRoutes: node=%s", m.nodeID)
 	m.recomputeRoutes()
 	go m.gossipLoop()
 	go m.qualityLoop()
@@ -1184,6 +1186,28 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 	}
 }
 
+func (m *MeshManager) GetBestPaths() []map[string]interface{} {
+	rt := m.getRouteTable()
+	if rt == nil || len(rt.bestPaths) == 0 {
+		return []map[string]interface{}{}
+	}
+	paths := make([]map[string]interface{}, 0, len(rt.bestPaths))
+	for target, path := range rt.bestPaths {
+		entry := map[string]interface{}{
+			"target":  target,
+			"nextHop": path.NextHop,
+			"cost":    path.Cost,
+		}
+		if path.LinkNIC != nil {
+			entry["linkNIC"] = int(path.LinkNIC.nicID)
+		} else {
+			entry["linkNIC"] = 0
+		}
+		paths = append(paths, entry)
+	}
+	return paths
+}
+
 func (m *MeshManager) GetTopology() map[string]interface{} {
 	peers := m.topology.GetAllPeers()
 	peerList := make([]map[string]interface{}, 0, len(peers))
@@ -1309,15 +1333,21 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			}
 
 			// Get link quality from qualityTracker
-			var srtt, lossRate, jitter, cost float64
+			var srtt, lossRate, cost float64
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peerID, localSeq)
-				avgRTT, loss, jit := quality.Stats()
+				avgRTT, loss, _ := quality.Stats()
 				srtt = float64(avgRTT.Milliseconds())
 				lossRate = loss
-				jitter = jit
-				// Cost = SRTT * (1 + lossRate) + jitter
-				cost = srtt*(1+lossRate) + jitter
+				// Cost calculation: penalize high loss rates
+				// Use same formula as gossiped links (line 1361-1367)
+				if srtt > 0 && lossRate < 1.0 {
+					cost = srtt / (1 - lossRate) // high loss → high cost
+				} else if srtt > 0 {
+					cost = 10000 // complete loss
+				} else {
+					cost = 1000 // no RTT data (e.g., high loss prevents ACK sampling)
+				}
 			} else {
 				cost = 1000
 			}
@@ -1582,6 +1612,14 @@ func (m *MeshManager) recomputeRoutes() {
 	m.mu.RUnlock()
 
 	peers := m.topology.GetAllPeers()
+	// Diagnostic: log peer count and peer IDs
+	peerIDs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if p.Sender != nil {
+			peerIDs = append(peerIDs, p.NodeID())
+		}
+	}
+	util.Logger.Printf("[RECOMPUTE-ROUTES] node=%s peerCount=%d peers=%v", m.nodeID, len(peers), peerIDs)
 
 	// Collect all peers per prefix (not just the best one).
 	// ownPrefixes tracks prefixes owned by this node (no forwarding needed).
@@ -1725,6 +1763,19 @@ func (m *MeshManager) recomputeRoutes() {
 		return lenI > lenJ
 	})
 
+	// Diagnostic: log route entries for mesh subnets
+	for _, route := range routes {
+		prefixStr := route.Prefix.String()
+		// Log mesh subnets (100.x.0.0/16)
+		if len(route.Entries) > 0 && prefixStr != "0.0.0.0/0" {
+			entryStrs := make([]string, 0, len(route.Entries))
+			for _, e := range route.Entries {
+				entryStrs = append(entryStrs, e.NodeID)
+			}
+			util.LogModuleDebug("mesh", "[ROUTE-TABLE] prefix=%s entries=%v", prefixStr, entryStrs)
+		}
+	}
+
 	// Build unified domain trie (static + dynamic merged)
 	domainTrie := NewNodeTrie()
 
@@ -1814,6 +1865,14 @@ func (m *MeshManager) recomputeRoutes() {
 	// Insert nodeID.phn entries into unified domain trie as static
 	for nid := range bestNodes {
 		domainTrie.Insert(nid+"."+MeshDomainSuffix, nid, RouteSourceStatic)
+	}
+	// Diagnostic: log domain trie entries
+	if len(bestNodes) > 0 {
+		nodeIDs := make([]string, 0, len(bestNodes))
+		for nid := range bestNodes {
+			nodeIDs = append(nodeIDs, nid)
+		}
+		util.Logger.Printf("[DOMAIN-TRIE] node=%s entries=%v count=%d", m.nodeID, nodeIDs, len(bestNodes))
 	}
 
 	// Convert bestNodes to nodeMap for routeTable
@@ -2841,12 +2900,18 @@ func (m *MeshManager) buildTopologyGraph() *TopologyGraph {
 		}
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, localSeq)
-			avgRTT, lossRate, jitter := quality.Stats()
+			avgRTT, lossRate, jitterVal := quality.Stats()
 			link.SRTT = float64(avgRTT.Milliseconds())
 			link.LossRate = lossRate
-			link.Jitter = jitter
-			// Cost = SRTT * (1 + lossRate) + jitter
-			link.Cost = link.SRTT*(1+lossRate) + jitter
+			link.Jitter = jitterVal
+			// Cost calculation: penalize high loss rates (consistent with line 1322-1328)
+			if link.SRTT > 0 && lossRate < 1.0 {
+				link.Cost = link.SRTT / (1 - lossRate)
+			} else if link.SRTT > 0 {
+				link.Cost = 10000 // complete loss
+			} else {
+				link.Cost = 1000 // no RTT data
+			}
 		} else {
 			link.Cost = 1000
 		}

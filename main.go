@@ -209,7 +209,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// Example: PHAETHON_LOG_MODULES="route=info,ipip=info,linknic=info,gvisor=info,forward=info"
 	if moduleConfig := os.Getenv("PHAETHON_LOG_MODULES"); moduleConfig != "" {
 		util.ParseModuleLogLevels(moduleConfig)
-		util.Logger.Printf("Module log levels configured: %s", moduleConfig)
+		util.LogModuleInfo("system", "Module log levels configured: %s", moduleConfig)
 	}
 
 	// Make the current runtime config available to async callbacks.
@@ -237,18 +237,18 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		server.GlobalControlManager.CloseAll()
 	}
 	server.GlobalControlManager = server.NewControlManager(ruleConf, dataDir)
-	util.Logger.Printf("ControlManager initialized")
+	util.LogModuleInfo("system", "ControlManager initialized")
 
 	// Initialize P2P manager
 	p2pCache, err := p2p.NewBinaryCache(dataDir)
 	if err != nil {
-		util.Logger.Printf("P2P cache init failed: %v", err)
+		util.LogModuleInfo("system", "P2P cache init failed: %v", err)
 	} else {
 		if Platform == "" || Arch == "" {
-			util.Logger.Printf("ERROR: Platform and Arch must be set via -ldflags at build time")
+			util.LogModuleError("system", " Platform and Arch must be set via -ldflags at build time")
 		}
 		if err := p2pCache.SeedOwnBinary(Version, Platform, Arch, p2p.DetectBuildTag()); err != nil {
-			util.Logger.Printf("P2P seed own binary failed: %v", err)
+			util.LogModuleInfo("system", "P2P seed own binary failed: %v", err)
 		}
 		p2p.CleanupBackup()
 	}
@@ -256,7 +256,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	p2p.GlobalP2PManager.OnStatusChange = func() {
 		util.DefaultVersionNotifier.BumpVersion("p2p")
 	}
-	util.Logger.Printf("P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
+	util.LogModuleInfo("system", "P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
 
 	// Inject v2 route lookup: mesh → p2p bridge to avoid circular import
 	mesh.V2RouteLookup = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
@@ -267,7 +267,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// If mesh config is missing, create a default configuration
 	if ruleConf.Mesh == nil {
 		ruleConf.Mesh = &config.MeshConfig{}
-		util.Logger.Printf("Mesh: no config found, using defaults")
+		util.LogModuleInfo("system", "Mesh: no config found, using defaults")
 	}
 
 	var meshMgr *mesh.MeshManager
@@ -301,31 +301,31 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if ruleConf.Mesh.NodeID == "" || ruleConf.Mesh.GetSubnet() == "" {
 			state, err := mesh.LoadState(dataDir)
 			if err != nil {
-				util.Logger.Printf("WARNING: load mesh-state.json fail: %v", err)
+				util.LogModuleWarn("system", " load mesh-state.json fail: %v", err)
 			}
 			if state != nil {
 				migrated := false
 				if ruleConf.Mesh.NodeID == "" && state.NodeID != "" {
 					ruleConf.Mesh.NodeID = state.NodeID
-					util.Logger.Printf("Mesh: migrated node-id from mesh-state.json to config.yaml: %s", state.NodeID)
+					util.LogModuleInfo("system", "Mesh: migrated node-id from mesh-state.json to config.yaml: %s", state.NodeID)
 					migrated = true
 				}
 				if ruleConf.Mesh.GetSubnet() == "" && state.Subnet != "" {
 					ruleConf.Mesh.Subnet = state.Subnet
-					util.Logger.Printf("Mesh: migrated subnet from mesh-state.json to config.yaml: %s", state.Subnet)
+					util.LogModuleInfo("system", "Mesh: migrated subnet from mesh-state.json to config.yaml: %s", state.Subnet)
 					migrated = true
 				}
 				if migrated {
 					// Persist updated config to the database
 					if err := db.ImportRuleConf(ruleConf); err != nil {
-						util.Logger.Printf("WARNING: persist config after mesh migration fail: %v", err)
+						util.LogModuleWarn("system", " persist config after mesh migration fail: %v", err)
 					}
 					// Remove old mesh-state.json
 					stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
 					if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
-						util.Logger.Printf("WARNING: remove old mesh-state.json fail: %v", err)
+						util.LogModuleWarn("system", " remove old mesh-state.json fail: %v", err)
 					} else {
-						util.Logger.Printf("Mesh: removed old mesh-state.json (migrated to config.yaml)")
+						util.LogModuleInfo("system", "Mesh: removed old mesh-state.json (migrated to config.yaml)")
 					}
 				}
 			}
@@ -337,7 +337,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			if err != nil {
 				return nil, fmt.Errorf("mesh generate node id fail: %w", err)
 			}
-			util.Logger.Printf("Mesh: generated new nodeID: %s", ruleConf.Mesh.NodeID)
+			util.LogModuleInfo("system", "Mesh: generated new nodeID: %s", ruleConf.Mesh.NodeID)
 		}
 
 		// Auto-allocate subnet if still empty
@@ -346,10 +346,10 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			if err != nil {
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
-			util.Logger.Printf("Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
+			util.LogModuleInfo("system", "Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
 			// Persist updated config with auto-allocated subnet
 			if err := db.ImportRuleConf(ruleConf); err != nil {
-				util.Logger.Printf("WARNING: persist config after subnet allocation fail: %v", err)
+				util.LogModuleWarn("system", " persist config after subnet allocation fail: %v", err)
 			}
 		}
 
@@ -362,14 +362,14 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		}
 		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
 
-		util.Logger.Printf("[MESH-DEBUG] Before MeshManager creation: nodeID=%s subnet=%s vip=%s",
+		util.LogModuleDebug("system", "[MESH-DEBUG] Before MeshManager creation: nodeID=%s subnet=%s vip=%s",
 			ruleConf.Mesh.NodeID, meshSubnetStr, vip)
 
 		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
 		advertise := ruleConf.Mesh.GetAdvertise()
 		meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
 		mesh.SetForwardingTrace(ruleConf.Mesh.ForwardingTrace)
-		util.Logger.Printf("[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", ruleConf.Mesh.ForwardingTrace, mesh.ForwardingTraceEnabled())
+		util.LogModuleDebug("system", "[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", ruleConf.Mesh.ForwardingTrace, mesh.ForwardingTraceEnabled())
 		meshMgr.SetDataDir(dataDir)
 		meshMgr.SetTCPKeepalive(ruleConf.Mesh.TCPKeepalive)
 
@@ -381,7 +381,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		mesh.GlobalMeshManager = meshMgr
 		p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-		util.Logger.Printf("Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
+		util.LogModuleInfo("system", "Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference
@@ -437,21 +437,21 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		if len(trojanMappings) == 1 && trojanMappings[0].Sni == "" {
 			// Single trojan, no SNI
 			m := trojanMappings[0]
-			util.Logger.Printf("Binding mapping: %+v", m)
+			util.LogModuleInfo("system", "Binding mapping: %+v", m)
 			ln, err := server.StartTrojan(ruleConf, m)
 			if err != nil {
-				util.Logger.Printf("ERROR: bind trojan fail: %v", err)
+				util.LogModuleError("system", " bind trojan fail: %v", err)
 				continue
 			}
 			res.listeners = append(res.listeners, ln)
 		} else {
 			// Multiple trojans on same port, use SNI routing
 			for _, m := range trojanMappings {
-				util.Logger.Printf("Binding mapping(SNI): %+v", m)
+				util.LogModuleInfo("system", "Binding mapping(SNI): %+v", m)
 			}
 			ln, err := server.StartTrojanSNI(ruleConf, trojanMappings, port)
 			if err != nil {
-				util.Logger.Printf("ERROR: bind trojan-sni fail: %v", err)
+				util.LogModuleError("system", " bind trojan-sni fail: %v", err)
 				continue
 			}
 			res.listeners = append(res.listeners, ln)
@@ -460,13 +460,13 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 	// 2. Start other mappings
 	for _, m := range otherMappings {
-		util.Logger.Printf("Binding mapping: %+v", m)
+		util.LogModuleInfo("system", "Binding mapping: %+v", m)
 
 		if m.ReverseAddress != "" {
 			// This mapping uses reverse outbound connections instead of TCP listener
 			rs, err := startReverseBinding(ruleConf, m)
 			if err != nil {
-				util.Logger.Printf("ERROR: bind reverse fail: %v", err)
+				util.LogModuleError("system", " bind reverse fail: %v", err)
 				continue
 			}
 			res.reverseServers = append(res.reverseServers, rs)
@@ -490,12 +490,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		case "https":
 			ln, err = server.StartHTTPS(ruleConf, m)
 		default:
-			util.Logger.Printf("ERROR: unsupported mapping type: %s", m.Type)
+			util.LogModuleError("system", " unsupported mapping type: %s", m.Type)
 			continue
 		}
 
 		if err != nil {
-			util.Logger.Printf("ERROR: bind %s fail: %v", m.Type, err)
+			util.LogModuleError("system", " bind %s fail: %v", m.Type, err)
 			continue
 		}
 		res.listeners = append(res.listeners, ln)
@@ -503,7 +503,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	}
 
 	runCnt++
-	util.Logger.Printf("------------------------started ok %d------------------------", runCnt)
+	util.LogModuleInfo("system", "------------------------started ok %d------------------------", runCnt)
 
 	// Start health check for best groups
 	res.healthStop = startHealthChecks(ruleConf)
@@ -526,7 +526,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		// Inject admin handler into TUN engine for direct connection handling
 		if res.tunRes != nil {
 			res.tunRes.engine.SetAdminHandler(res.adminServer)
-			util.Logger.Printf("Admin handler injected into TUN engine for direct connection handling")
+			util.LogModuleInfo("system", "Admin handler injected into TUN engine for direct connection handling")
 		}
 	}
 
@@ -562,14 +562,14 @@ func writeDefaultConfig(path string) error {
 func getRuleConf() *config.RuleConfiguration {
 	workDir, err := os.Getwd()
 	if err != nil {
-		util.Logger.Printf("ERROR: get working directory fail: %v", err)
+		util.LogModuleError("system", " get working directory fail: %v", err)
 		return nil
 	}
 
 	// 1. Load .env from working directory (optional).
 	envFile := filepath.Join(workDir, ".env")
 	if err := config.LoadEnvFile(envFile); err != nil {
-		util.Logger.Printf("ERROR: load .env fail: %v", err)
+		util.LogModuleError("system", " load .env fail: %v", err)
 	}
 
 	// 2. Load configuration from the embedded database (single source of
@@ -579,24 +579,24 @@ func getRuleConf() *config.RuleConfiguration {
 	configPath = filepath.Join(workDir, "config.yaml")
 	empty, err := db.IsEmptyConfig()
 	if err != nil {
-		util.Logger.Printf("ERROR: inspect db config fail: %v", err)
+		util.LogModuleError("system", " inspect db config fail: %v", err)
 	}
 	if empty {
 		imported := false
 		if _, statErr := os.Stat(configPath); statErr == nil {
-			util.Logger.Printf("database empty, importing existing config from %s", configPath)
+			util.LogModuleInfo("system", "database empty, importing existing config from %s", configPath)
 			if importErr := db.ImportYAML(configPath); importErr != nil {
-				util.Logger.Printf("ERROR: import config into db fail: %v", importErr)
+				util.LogModuleError("system", " import config into db fail: %v", importErr)
 			} else {
 				imported = true
 			}
 		}
 		if !imported && len(defaultConfig) > 0 {
-			util.Logger.Printf("generating default config as fallback")
+			util.LogModuleInfo("system", "generating default config as fallback")
 			if genErr := writeDefaultConfig(configPath); genErr != nil {
-				util.Logger.Printf("ERROR: generate initial config fail: %v", genErr)
+				util.LogModuleError("system", " generate initial config fail: %v", genErr)
 			} else if importErr := db.ImportYAML(configPath); importErr != nil {
-				util.Logger.Printf("ERROR: import default config into db fail: %v", importErr)
+				util.LogModuleError("system", " import default config into db fail: %v", importErr)
 			}
 		}
 	}
@@ -604,13 +604,13 @@ func getRuleConf() *config.RuleConfiguration {
 	var ruleConf *config.RuleConfiguration
 	conf, err := db.LoadRuleConf()
 	if err != nil {
-		util.Logger.Printf("ERROR: load config from db fail: %v", err)
+		util.LogModuleError("system", " load config from db fail: %v", err)
 	} else {
 		ruleConf = conf
 	}
 
 	if ruleConf == nil {
-		util.Logger.Printf("No valid configuration found!")
+		util.LogModuleInfo("system", "No valid configuration found!")
 		return nil
 	}
 
@@ -636,7 +636,7 @@ func getRuleConf() *config.RuleConfiguration {
 		}
 		proxies, err := config.ParseSubscription(cached)
 		if err != nil {
-			util.Logger.Printf("subscription %s cache parse failed: %v", sub.Name, err)
+			util.LogModuleInfo("system", "subscription %s cache parse failed: %v", sub.Name, err)
 			continue
 		}
 		sub.SetNodes(proxies)
@@ -645,7 +645,7 @@ func getRuleConf() *config.RuleConfiguration {
 				continue
 			}
 			g.RebuildProxies()
-			util.Logger.Printf("group %s (sub=%s): loaded %d nodes from cache, members %d", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
+			util.LogModuleInfo("system", "group %s (sub=%s): loaded %d nodes from cache, members %d", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
 		}
 	}
 
@@ -656,12 +656,12 @@ func getRuleConf() *config.RuleConfiguration {
 			min, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
 			max, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
 			dialer.SetUDPPortRange(min, max)
-			util.Logger.Printf("UDP port range: %d-%d", min, max)
+			util.LogModuleInfo("system", "UDP port range: %d-%d", min, max)
 		}
 	}
 
 	if ruleConf.NeedHysteria2() {
-		util.Logger.Printf("Hysteria2 Available!!!")
+		util.LogModuleInfo("system", "Hysteria2 Available!!!")
 	}
 
 	loadHealthState(ruleConf)
@@ -677,7 +677,7 @@ func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration) string 
 	dataDir := filepath.Join("data", "setup")
 	id, err := reverse.GetReverseID(dataDir)
 	if err != nil {
-		util.Logger.Printf("[REVERSE] load/generate instance reverse-id fail: %v", err)
+		util.LogModuleInfo("system", "[REVERSE] load/generate instance reverse-id fail: %v", err)
 		return ""
 	}
 	return id
@@ -763,9 +763,9 @@ func main() {
 		adminPort = util.JavaProp("admin.port")
 	}
 
-	util.Logger.Printf("")
-	util.Logger.Printf("phaethon %s", Version)
-	util.Logger.Printf("------------------------我是分隔符------------------------~~~")
+	util.LogModuleInfo("system", "")
+	util.LogModuleInfo("system", "phaethon %s", Version)
+	util.LogModuleInfo("system", "------------------------我是分隔符------------------------~~~")
 
 	// Determine working directory for config loading.
 	workDir, err := os.Getwd()
@@ -773,8 +773,8 @@ func main() {
 		workDir = "."
 	}
 
-	util.Logger.Printf("Working directory: %s", workDir)
-	util.Logger.Printf("------------------------starting------------------------")
+	util.LogModuleInfo("system", "Working directory: %s", workDir)
+	util.LogModuleInfo("system", "------------------------starting------------------------")
 
 	// Initialize database
 	dbPath := filepath.Join(workDir, "phaethon.db")
@@ -785,7 +785,7 @@ func main() {
 
 	// Open database
 	if err := db.Init(dbPath); err != nil {
-		util.Logger.Printf("ERROR: 初始化数据库失败: %v", err)
+		util.LogModuleError("system", " 初始化数据库失败: %v", err)
 		fmt.Fprintf(os.Stderr, "初始化数据库失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -797,17 +797,17 @@ func main() {
 		// the prompts so getRuleConf() imports it transparently.
 		legacyConfig := filepath.Join(workDir, "config.yaml")
 		if _, err := os.Stat(legacyConfig); err == nil {
-			util.Logger.Printf("首次启动（数据库不存在），检测到 config.yaml，将自动导入并跳过交互初始化")
+			util.LogModuleInfo("system", "首次启动（数据库不存在），检测到 config.yaml，将自动导入并跳过交互初始化")
 		} else {
-			util.Logger.Printf("首次启动，进入初始化模式")
+			util.LogModuleInfo("system", "首次启动，进入初始化模式")
 			if err := db.InteractiveInit(); err != nil {
-				util.Logger.Printf("ERROR: 交互式初始化失败: %v", err)
+				util.LogModuleError("system", " 交互式初始化失败: %v", err)
 				fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
 				os.Exit(1)
 			}
 		}
 	} else {
-		util.Logger.Printf("数据库已加载: %s", dbPath)
+		util.LogModuleInfo("system", "数据库已加载: %s", dbPath)
 	}
 
 	// Load config first
@@ -816,9 +816,9 @@ func main() {
 	// Migrate proxy groups: update ManualProxies from config.yaml Proxies field
 	if ruleConf != nil {
 		if err := db.MigrateProxyGroups(ruleConf); err != nil {
-			util.Logger.Printf("WARNING: 迁移代理组失败: %v", err)
+			util.LogModuleWarn("system", " 迁移代理组失败: %v", err)
 		} else {
-			util.Logger.Printf("代理组迁移完成")
+			util.LogModuleInfo("system", "代理组迁移完成")
 		}
 	}
 
@@ -826,9 +826,9 @@ func main() {
 	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
 	if err := util.SetupLogFile(logPath, 1024); err != nil {
-		util.Logger.Printf("WARNING: setup log file failed: %v", err)
+		util.LogModuleWarn("system", " setup log file failed: %v", err)
 	} else {
-		util.Logger.Printf("Log file: %s (max 1024MB, rotates to .old)", logPath)
+		util.LogModuleInfo("system", "Log file: %s (max 1024MB, rotates to .old)", logPath)
 	}
 
 	// Apply -admin-port / ADMIN_PORT override if provided
@@ -845,7 +845,7 @@ func main() {
 		}
 		ruleConf.Admin.Addr = net.JoinHostPort(host, adminPort)
 		ruleConf.Admin.Enabled = true
-		util.Logger.Printf("[STARTUP] admin port overridden to %s", ruleConf.Admin.Addr)
+		util.LogModuleInfo("system", "[STARTUP] admin port overridden to %s", ruleConf.Admin.Addr)
 	}
 
 	// Start with loaded config
@@ -876,12 +876,12 @@ func main() {
 	if resources != nil && resources.adminServer != nil {
 		wireAdminCallbacks(resources)
 		resources.adminServer.OnReload = func() {
-			util.Logger.Printf("------------------------admin reload triggered------------------------")
+			util.LogModuleInfo("system", "------------------------admin reload triggered------------------------")
 			if newConf := getRuleConf(); newConf != nil {
 				newResources, err := run(newConf, resources)
 
 				if err != nil {
-					util.Logger.Printf("reload failed: %v", err)
+					util.LogModuleInfo("system", "reload failed: %v", err)
 					return
 				}
 				resources = newResources
@@ -909,7 +909,7 @@ func main() {
 		if resources != nil && resources.adminServer != nil {
 			openReverseWizardURL(resources.adminServer)
 		} else {
-			util.Logger.Printf("[INTERACTIVE] admin panel disabled; cannot open reverse wizard")
+			util.LogModuleInfo("system", "[INTERACTIVE] admin panel disabled; cannot open reverse wizard")
 		}
 	}
 
@@ -938,9 +938,9 @@ func openReverseWizardURL(adminServer *admin.AdminServer) {
 			host, port = "127.0.0.1", addr[1:]
 		} else if strings.Contains(addr, "://") {
 			url := addr + "/reverse"
-			util.Logger.Printf("[INTERACTIVE] opening reverse wizard: %s", url)
+			util.LogModuleInfo("system", "[INTERACTIVE] opening reverse wizard: %s", url)
 			if err := util.OpenBrowser(url); err != nil {
-				util.Logger.Printf("[INTERACTIVE] open browser failed: %v", err)
+				util.LogModuleInfo("system", "[INTERACTIVE] open browser failed: %v", err)
 			}
 			return
 		} else {
@@ -952,9 +952,9 @@ func openReverseWizardURL(adminServer *admin.AdminServer) {
 	}
 
 	url := fmt.Sprintf("http://%s:%s/reverse", host, port)
-	util.Logger.Printf("[INTERACTIVE] opening reverse wizard: %s", url)
+	util.LogModuleInfo("system", "[INTERACTIVE] opening reverse wizard: %s", url)
 	if err := util.OpenBrowser(url); err != nil {
-		util.Logger.Printf("[INTERACTIVE] open browser failed: %v", err)
+		util.LogModuleInfo("system", "[INTERACTIVE] open browser failed: %v", err)
 	}
 }
 
@@ -965,18 +965,18 @@ func watchAndRun(resources *activeResources) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
-	util.Logger.Printf("Server running. Press Ctrl+C to stop.")
+	util.LogModuleInfo("system", "Server running. Press Ctrl+C to stop.")
 	for {
 		select {
 		case sig := <-sigCh:
-			util.Logger.Printf("Received signal %v, shutting down...", sig)
+			util.LogModuleInfo("system", "Received signal %v, shutting down...", sig)
 			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
 			}
 			return
 		case <-consoleCloseNotify():
-			util.Logger.Printf("Received console close event, shutting down...")
+			util.LogModuleInfo("system", "Received console close event, shutting down...")
 			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
@@ -1568,27 +1568,27 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 	for {
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		default:
 		}
 
 		err := runReverseSession(rc, ruleConf, configStop, globalStop)
 		if err != nil {
-			util.Logger.Printf("[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
 		} else {
-			util.Logger.Printf("[REVERSE-CLIENT] session ended (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] session ended (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
 		}
 
 		select {
 		case <-configStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-globalStop:
-			util.Logger.Printf("[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
+			util.LogModuleInfo("system", "[REVERSE-CLIENT] stopping reverse client name=%s addr=%s", rc.Name, rc.RegistryProxy)
 			return
 		case <-time.After(interval):
 		}
@@ -1702,28 +1702,28 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	if host == "" {
 		host = rc.RegistryProxy
 	}
-	util.Logger.Printf("══════════════════════════════════════════")
-	util.Logger.Printf("  ✓ 反向客户端注册成功 [%s]", rc.Name)
-	util.Logger.Printf("  实际监听地址: %s:%d", host, actualPort)
-	util.Logger.Printf("  动态地址:     %s", dynAddr)
-	util.Logger.Printf("  监听协议:     %s", listenerProto)
-	util.Logger.Printf("══════════════════════════════════════════")
-	util.Logger.Printf("[REVERSE-CLIENT] registered: name=%s addr=%s port=%d listener=%s",
+	util.LogModuleInfo("system", "══════════════════════════════════════════")
+	util.LogModuleInfo("system", "  ✓ 反向客户端注册成功 [%s]", rc.Name)
+	util.LogModuleInfo("system", "  实际监听地址: %s:%d", host, actualPort)
+	util.LogModuleInfo("system", "  动态地址:     %s", dynAddr)
+	util.LogModuleInfo("system", "  监听协议:     %s", listenerProto)
+	util.LogModuleInfo("system", "══════════════════════════════════════════")
+	util.LogModuleInfo("system", "[REVERSE-CLIENT] registered: name=%s addr=%s port=%d listener=%s",
 		rc.Name, dynAddr, actualPort, listenerProto)
 
 	// Build and output proxy config JSON for easy copy-paste into clients.
 	if proxyJSON, err := buildProxyConfigJSON(host, actualPort, listenerProto,
 		req.ListenerUser, req.ListenerPassword, req.ListenerSNI); err == nil {
-		util.Logger.Printf("  ┌─ 代理配置 JSON ───────────────────────────")
+		util.LogModuleInfo("system", "  ┌─ 代理配置 JSON ───────────────────────────")
 		for _, line := range strings.Split(proxyJSON, "\n") {
-			util.Logger.Printf("  │ %s", line)
+			util.LogModuleInfo("system", "  │ %s", line)
 		}
-		util.Logger.Printf("  └───────────────────────────────────────────")
+		util.LogModuleInfo("system", "  └───────────────────────────────────────────")
 		// Save to file for easy copy-paste into clients. Use a per-config filename
 		// so multiple reverse connections do not overwrite each other's JSON.
 		proxyFile := filepath.Join(dataDir, "latest-proxy-"+safeFilename(rc.Name)+".json")
 		if err := os.WriteFile(proxyFile, []byte(proxyJSON), 0644); err == nil {
-			util.Logger.Printf("  代理配置已保存到: %s", proxyFile)
+			util.LogModuleInfo("system", "  代理配置已保存到: %s", proxyFile)
 		}
 	}
 
@@ -1757,11 +1757,11 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	}
 	defer rvSrv.CloseForce()
 
-	util.Logger.Printf("[REVERSE-CLIENT] data pool running via ReverseServer for %s", dynAddr)
+	util.LogModuleInfo("system", "[REVERSE-CLIENT] data pool running via ReverseServer for %s", dynAddr)
 
 	select {
 	case <-cc.Done():
-		util.Logger.Printf("[REVERSE-CLIENT] control channel lost, closing session")
+		util.LogModuleInfo("system", "[REVERSE-CLIENT] control channel lost, closing session")
 	}
 
 	return nil
@@ -2114,7 +2114,7 @@ func wireAdminCallbacks(resources *activeResources) {
 				if newMapping.ReverseAddress != "" {
 					rs, err := startReverseBinding(resources.ruleConf, newMapping)
 					if err != nil {
-						util.Logger.Printf("ERROR: bind reverse fail for %s: %v", newMapping.Name, err)
+						util.LogModuleError("system", " bind reverse fail for %s: %v", newMapping.Name, err)
 					} else {
 						resources.reverseServers = append(resources.reverseServers, rs)
 						resources.mappingReverse[newMapping.Name] = rs
@@ -2139,7 +2139,7 @@ func wireAdminCallbacks(resources *activeResources) {
 						err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
 					}
 					if err != nil {
-						util.Logger.Printf("ERROR: bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
+						util.LogModuleError("system", " bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
 					} else {
 						resources.listeners = append(resources.listeners, ln)
 						resources.mappingListeners[newMapping.Name] = ln
@@ -2764,16 +2764,16 @@ func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscri
 		content, fromCache, err = config.FetchSubscriptionCached(sub.URL, nil, subCacheDir, sub.Name)
 	}
 	if fromCache {
-		util.Logger.Printf("subscription %s refresh: network fetch failed, using cached copy", sub.Name)
+		util.LogModuleInfo("system", "subscription %s refresh: network fetch failed, using cached copy", sub.Name)
 	}
 	if err != nil {
-		util.Logger.Printf("subscription %s refresh failed: %v", sub.Name, err)
+		util.LogModuleInfo("system", "subscription %s refresh failed: %v", sub.Name, err)
 		return fmt.Errorf("fetch subscription fail: %w", err)
 	}
 
 	proxies, err := config.ParseSubscription(content)
 	if err != nil {
-		util.Logger.Printf("subscription %s parse failed: %v", sub.Name, err)
+		util.LogModuleInfo("system", "subscription %s parse failed: %v", sub.Name, err)
 		return fmt.Errorf("parse subscription fail: %w", err)
 	}
 
@@ -2810,7 +2810,7 @@ func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscri
 				g.ActiveMember = ""
 			}
 		}
-		util.Logger.Printf("group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
+		util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
 	}
 	return nil
 }

@@ -333,12 +333,32 @@ for _, neighbor := range claim.neighbors {
 
 ### 全网拓扑推导
 
-从ClaimedSubnets推导拓扑边：
+从**经过邻居印证的** ClaimedSubnets 推导拓扑边（`buildValidatedClaims` + `buildTopologyGraph`）：
 
 ```go
-// 从ClaimedSubnets推导拓扑
-edgeSet := make(map[string]FullTopologyEdge)
+// 从 validatedClaims 推导拓扑（不用原始 peer.ClaimedSubnets）
+validatedClaims := m.buildValidatedClaims(allPeers)
+graph := m.buildTopologyGraph(validatedClaims)
+```
 
+**关键设计决策**：`buildTopologyGraph` 必须使用经过邻居印证的 `validatedClaims`，而不是原始的 `peer.ClaimedSubnets`。原因：
+
+- 原始 `ClaimedSubnets` 在 `UpdateGossip` 中不验证，直接存储
+- 如果直接使用原始数据，拓扑图会包含已过时的节点/链路（如 qgw 下线后仍被纳入拓扑）
+- Dijkstra 基于这个拓扑图计算的 `bestPaths` 会指向不存在的节点，导致数据面不通
+- 使用印证后的数据，拓扑图与路由表（`bestClaims`/`bestRoutes`）同步收敛
+
+**示例**（qgw 下线后）：
+- qgw 下线前：validatedClaims 包含 qgw，bestPaths 指向 qgw ✓
+- qgw 下线后：qgw 的直连邻居（如 qg）停止通告 qgw 的 claim
+- 一轮 gossip 内：全网其他节点的 validatedClaims 都删除 qgw
+- buildTopologyGraph 立即反映：qgw 节点和边从拓扑图消失
+- Dijkstra 重新计算：bestPaths 指向新的下一跳（如 jf） ✓
+
+**原始 ClaimedSubnets 推导（已废弃）**：
+```go
+// 从ClaimedSubnets推导拓扑（旧实现，未印证）
+edgeSet := make(map[string]FullTopologyEdge)
 for _, cs := range allClaimedSubnets {
     for _, neighbor := range cs.Neighbors {
         key := edgeKey(cs.NodeID, neighbor)
@@ -347,10 +367,11 @@ for _, cs := range allClaimedSubnets {
 }
 ```
 
-**示例**：
-- gg.neighbors=[ms9, ms10] → 边(gg,ms9), (gg,ms10)
-- ms9.neighbors=[gg, x] → 边(ms9,gg), (ms9,x)
-- ms10.neighbors=[gg] → 边(ms10,gg)
+**印证后 ClaimedSubnets 推导（当前实现）**：
+- gg.neighbors=[ms9, ms10]（经过 ms9/ms10 反向印证） → 边(gg,ms9), (gg,ms10)
+- ms9.neighbors=[gg, x]（经过 gg/x 反向印证） → 边(ms9,gg), (ms9,x)
+- ms10.neighbors=[gg]（经过 gg 反向印证） → 边(ms10,gg)
+- qgw 下线后：qgw 的 claim 因无法通过印证被过滤，不出现在拓扑图中 ✓
 
 去重后得到全网拓扑。
 

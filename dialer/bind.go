@@ -34,6 +34,12 @@ var globalBindContext atomic.Pointer[BindContext]
 // Used by MeshDial for domain resolution before netstack dialing.
 var GlobalDNSResolverFunc func(domain string) (net.IP, error)
 
+// GlobalRemoteDNSResolverFunc resolves a domain name through a remote DNS server.
+// Used by v2 mesh dialer to resolve domains via peer's DNS server.
+// Parameters: domain, dnsServerIP
+// Returns: resolved IP addresses
+var GlobalRemoteDNSResolverFunc func(domain string, dnsServer net.IP) ([]net.IP, error)
+
 // GlobalModeBTable tracks Mode B (proxy entry) connections for source address resolution.
 // Set by main_engine.go when mesh is initialized.
 var GlobalModeBTable interface {

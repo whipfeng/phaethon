@@ -237,10 +237,10 @@ type meshAwareDialer struct {
 }
 
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
-	// v2 data path: create a per-endpoint RouteFunc that bypasses RouteSelector
-	// and routes directly to the peer's LinkNIC with IPIP encapsulation.
+	// v2 data path: domain vs IP handling differs
+	// - Domain: resolve via peer's DNS server, then dial with IPIP
+	// - Bare IP: dial directly with IPIP + routeFunc
 	util.LogInfo("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
-	routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
 
 	if GlobalNetstackDialV2Func == nil {
 		return nil, fmt.Errorf("v2 dial: netstack v2 dial not initialized")
@@ -248,19 +248,46 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 
 	var targetAddr string
 	if ip := net.ParseIP(dstAddr); ip == nil {
-		// Domain: resolve through netstack DNS to get Fake-IP
-		if GlobalDNSResolverFunc == nil {
-			return nil, fmt.Errorf("v2 dial: DNS resolver not available for domain: %s", dstAddr)
+		// Domain: resolve via peer's DNS server (not local fake-IP DNS)
+		// 1. Get peer subnet from proxy name (use mesh.V2RouteLookup to avoid circular import)
+		if mesh.V2RouteLookup == nil {
+			return nil, fmt.Errorf("v2 dial: V2RouteLookup not initialized")
 		}
-		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
-		if err != nil {
-			return nil, fmt.Errorf("v2 dial: resolve %s: %w", dstAddr, err)
+		_, peerSubnet, ok := mesh.V2RouteLookup(d.proxy.Name)
+		if !ok || peerSubnet == nil {
+			return nil, fmt.Errorf("v2 dial: peer not found for proxy %s", d.proxy.Name)
 		}
-		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
+		// 2. Calculate peer's DNS server IP (subnet+2)
+		dnsIP := mesh.CalculateDNSIP(peerSubnet)
+		if dnsIP == nil {
+			return nil, fmt.Errorf("v2 dial: cannot calculate DNS IP for subnet %s", peerSubnet)
+		}
+		util.LogInfo("dialer", "[V2-DISPATCH] resolving %s via peer DNS %s", dstAddr, dnsIP)
+		// 3. Resolve domain via peer's DNS server
+		if GlobalRemoteDNSResolverFunc == nil {
+			return nil, fmt.Errorf("v2 dial: remote DNS resolver not initialized")
+		}
+		ips, err := GlobalRemoteDNSResolverFunc(dstAddr, dnsIP)
+		if err != nil || len(ips) == 0 {
+			return nil, fmt.Errorf("v2 dial: resolve %s via %s: %w", dstAddr, dnsIP, err)
+		}
+		// Prefer IPv4
+		resolvedIP := ips[0]
+		for _, ip := range ips {
+			if ip4 := ip.To4(); ip4 != nil {
+				resolvedIP = ip4
+				break
+			}
+		}
+		util.LogInfo("dialer", "[V2-DISPATCH] resolved %s -> %s via peer DNS", dstAddr, resolvedIP)
+		targetAddr = net.JoinHostPort(resolvedIP.String(), strconv.Itoa(dstPort))
 	} else {
+		// Bare IP: use directly
 		targetAddr = net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 	}
 
+	// Both domain and IP cases use IPIP encapsulation + routeFunc
+	routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
 	return GlobalNetstackDialV2Func("tcp", targetAddr, routeFunc)
 }
 

@@ -229,6 +229,15 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 	return e.netstack.ResolveDomain(domain)
 }
 
+// ResolveDomainViaDNS resolves a domain name via a specific DNS server.
+// Used by v2 mesh dialer to resolve domains via peer's DNS server.
+func (e *Engine) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.IP, error) {
+	if e.netstack == nil {
+		return nil, fmt.Errorf("netstack not initialized")
+	}
+	return e.netstack.ResolveDomainViaDNS(domain, dnsServer)
+}
+
 // NetDial dials a connection through the netstack.
 func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
 	if e.netstack == nil {

@@ -4555,6 +4555,7 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
 	result["peers"] = mesh.GlobalMeshManager.GetPeers()
 	result["linkNICStats"] = mesh.GlobalMeshManager.GetLinkNICStats()
+	result["bestPaths"] = mesh.GlobalMeshManager.GetBestPaths()
 	peerChannelDrops, meshInboundDrops := mesh.GlobalMeshManager.GetChannelDropStats()
 	result["channelDropStats"] = map[string]interface{}{
 		"peers":            peerChannelDrops,

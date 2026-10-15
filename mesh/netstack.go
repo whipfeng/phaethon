@@ -1279,6 +1279,66 @@ func (n *Netstack) ResolveDomain(domain string) (net.IP, error) {
 	return fakeIP, nil
 }
 
+// ResolveDomainViaDNS resolves a domain name by sending a DNS query to a
+// specific DNS server IP. Used by v2 mesh dialer to resolve domains via
+// peer's DNS server, getting real IPs (not fake-IPs).
+func (n *Netstack) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.IP, error) {
+	util.LogModuleDebug("netstack", "ResolveDomainViaDNS: domain=%s dns=%s", domain, dnsServer)
+	n.mu.Lock()
+	ns := n.ns
+	n.mu.Unlock()
+	if ns == nil {
+		return nil, fmt.Errorf("netstack not running")
+	}
+
+	dnsServerAddr := tcpip.AddrFromSlice(dnsServer.To4())
+
+	var wq waiter.Queue
+	ep, err := ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s via %s: new endpoint: %v", domain, dnsServer, err)
+	}
+	defer ep.Close()
+
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		return nil, fmt.Errorf("resolve %s via %s: bind: %v", domain, dnsServer, err)
+	}
+	// Connect to the remote DNS server (not local hijacker)
+	if err := ep.Connect(tcpip.FullAddress{Addr: dnsServerAddr, Port: 53}); err != nil {
+		return nil, fmt.Errorf("resolve %s via %s: connect: %v", domain, dnsServer, err)
+	}
+
+	// Register waiter BEFORE write
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	txID := uint16(time.Now().UnixNano())
+	query := BuildDNSQuery(domain, txID)
+	if _, err := ep.Write(&SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
+		return nil, fmt.Errorf("resolve %s via %s: write: %v", domain, dnsServer, err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		return nil, fmt.Errorf("resolve %s via %s: timeout", domain, dnsServer)
+	}
+
+	var buf bytes.Buffer
+	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
+		return nil, fmt.Errorf("resolve %s via %s: read: %v", domain, dnsServer, err)
+	}
+
+	// Parse all IPs from response (not just first)
+	ips := ParseDNSResponseIPs(buf.Bytes())
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s via %s: no IPs in response", domain, dnsServer)
+	}
+	util.LogModuleDebug("netstack", "ResolveDomainViaDNS: %s -> %v", domain, ips)
+	return ips, nil
+}
+
 // QueryInternalDNS sends a raw DNS query to the TUN DNS hijacker and returns
 // the raw response bytes.
 func (n *Netstack) QueryInternalDNS(query []byte) ([]byte, error) {

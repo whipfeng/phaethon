@@ -79,6 +79,27 @@ func CalculateEIP(subnet *net.IPNet) net.IP {
 	return eip
 }
 
+// CalculateDNSIP calculates the DNS server IP for a given subnet.
+// DNS server is subnet + 3 (GIP - GVisor Internal address for DNS).
+// Each node's DNS server can resolve domains from that node's perspective.
+func CalculateDNSIP(subnet *net.IPNet) net.IP {
+	if subnet == nil {
+		return nil
+	}
+
+	ip := subnet.IP.To4()
+	if ip == nil {
+		return nil // IPv6 not supported yet
+	}
+
+	// DNS server is subnet + 3 (GIP)
+	dnsIP := make(net.IP, 4)
+	copy(dnsIP, ip)
+	dnsIP[3] = ip[3] + 3
+
+	return dnsIP
+}
+
 // AllocateEIP allocates an EIP from the given subnet
 // EIP is the last usable IP in the subnet (e.g., 100.0.0.254 for 100.0.0.0/24)
 // Deprecated: Use CalculateEIP instead

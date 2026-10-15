@@ -1188,7 +1188,11 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 	default:
 	}
 
-	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connecting to %s:%d with RouteFunc", host, portNum)
+	if routeFunc != nil {
+		util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connecting to %s:%d with RouteFunc (IPIP)", host, portNum)
+	} else {
+		util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connecting to %s:%d without RouteFunc (direct)", host, portNum)
+	}
 	connectStart := time.Now()
 	tcpErr = ep.Connect(remoteAddr)
 	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {

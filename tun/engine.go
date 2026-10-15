@@ -1502,7 +1502,7 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 			return
 		}
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d", connID, proxy.Name, resolvedAddr, resolvedPort)
+		util.LogInfo("tun", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d (v2=%v)", connID, proxy.Name, resolvedAddr, resolvedPort, proxy.V2)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogModuleWarn("tun", "[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)

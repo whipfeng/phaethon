@@ -186,6 +186,7 @@ func (e *Engine) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, 
 // SetDNSHijacker binds the mesh's DNS hijacker to this engine's netstack.
 // Called when mesh is configured and TUN engine is started.
 func (e *Engine) SetDNSHijacker(h *mesh.DNSHijacker, fakeIP *mesh.FakeIPPool) error {
+	util.LogModuleInfo("tun", "[DNS-HIJACK] SetDNSHijacker called, netstack=%v, isRunning=%v", e.netstack != nil, e.netstack != nil && e.netstack.IsRunning())
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

@@ -1,239 +1,127 @@
 package p2p
 
 import (
+	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
 
-	"phaethon/frame"
-	"phaethon/util"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/libp2p/go-libp2p/core/transport"
+	"phaethon/util"
 )
 
-// MeshStreamHandler handles mesh protocol streams
+// MeshStreamHandler handles mesh protocol streams.
 type MeshStreamHandler struct {
-	host *Libp2pHost
-	
-	// Stream management
+	p2pMgr *P2PManager
+
 	mu      sync.RWMutex
-	streams map[string]map[uint32]*MeshStream // proxyName -> localSeq -> stream
+	streams map[peer.ID]network.Stream // peer -> active stream
 }
 
-// MeshStream represents a mesh protocol stream
-type MeshStream struct {
-	conn       transport.CapableConn
-	proxyName  string
-	localSeq   uint32
-	remotePeer string
-	
-	// Frame transport for sending/receiving
-	frameTransport frame.FrameTransport
-	
-	// Lifecycle
-	stopCh chan struct{}
-	wg     sync.WaitGroup
-}
-
-// NewMeshStreamHandler creates a new mesh stream handler
-func NewMeshStreamHandler(host *Libp2pHost) *MeshStreamHandler {
+// NewMeshStreamHandler creates a new MeshStreamHandler.
+func NewMeshStreamHandler(p2pMgr *P2PManager) *MeshStreamHandler {
 	return &MeshStreamHandler{
-		host:    host,
-		streams: make(map[string]map[uint32]*MeshStream),
+		p2pMgr:  p2pMgr,
+		streams: make(map[peer.ID]network.Stream),
 	}
 }
 
-// RegisterStream registers a new mesh stream
-func (h *MeshStreamHandler) RegisterStream(proxyName string, localSeq uint32, conn transport.CapableConn, remotePeer string) error {
-	// Get frame transport from connection
-	var ft frame.FrameTransport
-	if tc, ok := conn.(interface{ FrameTransport() frame.FrameTransport }); ok {
-		ft = tc.FrameTransport()
-	} else {
-		return fmt.Errorf("connection does not support frame transport")
+// HandleStream handles an incoming mesh stream.
+func (h *MeshStreamHandler) HandleStream(stream network.Stream) {
+	defer stream.Close()
+
+	peerID := stream.Conn().RemotePeer()
+	util.LogInfo("P2P", "New mesh stream from peer: %s", peerID)
+
+	// Read mesh packets from the stream
+	for {
+		// Read length prefix (4 bytes)
+		var length uint32
+		if err := binary.Read(stream, binary.BigEndian, &length); err != nil {
+			if err == io.EOF {
+				util.LogInfo("P2P", "Stream closed by peer: %s", peerID)
+			} else {
+				util.LogError("P2P", "Failed to read from stream (peer=%s): %v", peerID, err)
+			}
+			return
+		}
+
+		// Read packet data
+		data := make([]byte, length)
+		if _, err := io.ReadFull(stream, data); err != nil {
+			util.LogError("P2P", "Failed to read packet data (peer=%s): %v", peerID, err)
+			return
+		}
+
+		// Process mesh packet
+		// TODO: Integrate with MeshManager to handle the packet
+		util.LogDebug("P2P", "Received mesh packet from %s: %d bytes", peerID, length)
 	}
-	
-	stream := &MeshStream{
-		conn:           conn,
-		proxyName:      proxyName,
-		localSeq:       localSeq,
-		remotePeer:     remotePeer,
-		frameTransport: ft,
-		stopCh:         make(chan struct{}),
+}
+
+// SendPacket sends a mesh packet to a peer through a specific proxy.
+func (h *MeshStreamHandler) SendPacket(ctx context.Context, proxyName string, peerID peer.ID, data []byte) error {
+	// Get or create stream for this peer
+	stream, err := h.getOrCreateStream(ctx, proxyName, peerID)
+	if err != nil {
+		return fmt.Errorf("get stream: %w", err)
 	}
-	
-	h.mu.Lock()
-	if h.streams[proxyName] == nil {
-		h.streams[proxyName] = make(map[uint32]*MeshStream)
+
+	// Write length prefix
+	if err := binary.Write(stream, binary.BigEndian, uint32(len(data))); err != nil {
+		return fmt.Errorf("write length: %w", err)
 	}
-	h.streams[proxyName][localSeq] = stream
-	h.mu.Unlock()
-	
-	// Start read loop
-	stream.wg.Add(1)
-	go stream.readLoop(h)
-	
-	util.LogInfo("p2p", "Registered mesh stream: proxy=%s localSeq=%d peer=%s", proxyName, localSeq, remotePeer)
-	
+
+	// Write packet data
+	if _, err := stream.Write(data); err != nil {
+		return fmt.Errorf("write data: %w", err)
+	}
+
 	return nil
 }
 
-// UnregisterStream unregisters a mesh stream
-func (h *MeshStreamHandler) UnregisterStream(proxyName string, localSeq uint32) {
-	h.mu.Lock()
-	stream, ok := h.streams[proxyName][localSeq]
-	if ok {
-		delete(h.streams[proxyName], localSeq)
-		if len(h.streams[proxyName]) == 0 {
-			delete(h.streams, proxyName)
-		}
-	}
-	h.mu.Unlock()
-	
-	if ok && stream != nil {
-		close(stream.stopCh)
-		stream.wg.Wait()
-		util.LogInfo("p2p", "Unregistered mesh stream: proxy=%s localSeq=%d", proxyName, localSeq)
-	}
-}
-
-// GetStream gets a mesh stream
-func (h *MeshStreamHandler) GetStream(proxyName string, localSeq uint32) (*MeshStream, bool) {
+// getOrCreateStream gets or creates a stream to a peer.
+func (h *MeshStreamHandler) getOrCreateStream(ctx context.Context, proxyName string, peerID peer.ID) (network.Stream, error) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	
-	streams, ok := h.streams[proxyName]
-	if !ok {
-		return nil, false
+	stream, ok := h.streams[peerID]
+	h.mu.RUnlock()
+
+	if ok && stream != nil {
+		return stream, nil
 	}
-	
-	stream, ok := streams[localSeq]
-	return stream, ok
-}
 
-// SendMeshPacket sends a mesh packet through a stream
-func (h *MeshStreamHandler) SendMeshPacket(proxyName string, localSeq uint32, packet []byte) error {
-	stream, ok := h.GetStream(proxyName, localSeq)
-	if !ok {
-		return fmt.Errorf("stream not found: proxy=%s localSeq=%d", proxyName, localSeq)
-	}
-	
-	// Send frame
-	return stream.frameTransport.Send(frame.FrameMeshPacket, packet, false)
-}
-
-// readLoop reads frames from the stream
-func (s *MeshStream) readLoop(handler *MeshStreamHandler) {
-	defer s.wg.Done()
-	defer handler.UnregisterStream(s.proxyName, s.localSeq)
-	
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		default:
-			// Read frame
-			frameType, payload, err := s.frameTransport.Recv()
-			if err != nil {
-				if err != io.EOF {
-					util.LogError("p2p", "Stream read error: proxy=%s localSeq=%d err=%v", s.proxyName, s.localSeq, err)
-				}
-				return
-			}
-			
-			// Handle frame
-			switch frameType {
-			case frame.FrameMeshPacket:
-				handler.handleMeshPacket(s, payload)
-			default:
-				util.LogDebug("p2p", "Unknown frame type: %d", frameType)
-			}
-		}
-	}
-}
-
-// handleMeshPacket handles a mesh packet
-func (h *MeshStreamHandler) handleMeshPacket(stream *MeshStream, packet []byte) {
-	// TODO: Integrate with mesh.MeshManager to handle the packet
-	// For now, just log
-	util.LogDebug("p2p", "Received mesh packet: proxy=%s localSeq=%d len=%d", stream.proxyName, stream.localSeq, len(packet))
-}
-
-// Close closes the mesh stream handler
-func (h *MeshStreamHandler) Close() error {
+	// Create new stream
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	
-	// Close all streams
-	for proxyName, streams := range h.streams {
-		for localSeq, stream := range streams {
-			close(stream.stopCh)
-			stream.conn.Close()
-			util.LogDebug("p2p", "Closed mesh stream: proxy=%s localSeq=%d", proxyName, localSeq)
-		}
+
+	// Double-check after acquiring write lock
+	if stream, ok := h.streams[peerID]; ok && stream != nil {
+		return stream, nil
 	}
-	
-	h.streams = make(map[string]map[uint32]*MeshStream)
-	
-	return nil
-}
 
-// LinkQualityMonitor monitors link quality for routing decisions
-type LinkQualityMonitor struct {
-	host *Libp2pHost
-	
-	mu       sync.RWMutex
-	metrics  map[string]map[uint32]*LinkMetrics // proxyName -> localSeq -> metrics
-	stopCh   chan struct{}
-}
-
-// LinkMetrics contains link quality metrics
-type LinkMetrics struct {
-	RTT         float64 // milliseconds
-	ErrorRate   float64 // 0.0 - 1.0
-	Throughput  int64   // bytes per second
-	QualityScore float64 // 0.0 - 100.0
-	
-	// Statistics
-	totalPings  int
-	failedPings int
-	lastUpdated int64
-}
-
-// NewLinkQualityMonitor creates a new link quality monitor
-func NewLinkQualityMonitor(host *Libp2pHost) *LinkQualityMonitor {
-	return &LinkQualityMonitor{
-		host:    host,
-		metrics: make(map[string]map[uint32]*LinkMetrics),
-		stopCh:  make(chan struct{}),
+	// Create new stream through the specified proxy
+	stream, err := h.p2pMgr.NewStream(ctx, proxyName, peerID)
+	if err != nil {
+		return nil, fmt.Errorf("create stream: %w", err)
 	}
+
+	h.streams[peerID] = stream
+	util.LogInfo("P2P", "Created stream to peer %s via proxy %s", peerID, proxyName)
+
+	return stream, nil
 }
 
-// StartMonitoring starts monitoring a connection
-func (m *LinkQualityMonitor) StartMonitoring(proxyName string, localSeq uint32, conn transport.CapableConn) {
-	m.mu.Lock()
-	if m.metrics[proxyName] == nil {
-		m.metrics[proxyName] = make(map[uint32]*LinkMetrics)
+// RemoveStream removes a stream for a peer.
+func (h *MeshStreamHandler) RemoveStream(peerID peer.ID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if stream, ok := h.streams[peerID]; ok {
+		stream.Close()
+		delete(h.streams, peerID)
+		util.LogInfo("P2P", "Removed stream for peer: %s", peerID)
 	}
-	m.metrics[proxyName][localSeq] = &LinkMetrics{
-		QualityScore: 100.0, // Start with perfect score
-	}
-	m.mu.Unlock()
-	
-	// TODO: Start RTT probing goroutine
-	util.LogDebug("p2p", "Started monitoring: proxy=%s localSeq=%d", proxyName, localSeq)
-}
-
-// GetLinkMetrics gets link metrics
-func (m *LinkQualityMonitor) GetLinkMetrics(proxyName string, localSeq uint32) (*LinkMetrics, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	
-	metrics, ok := m.metrics[proxyName][localSeq]
-	return metrics, ok
-}
-
-// Stop stops the monitor
-func (m *LinkQualityMonitor) Stop() {
-	close(m.stopCh)
 }

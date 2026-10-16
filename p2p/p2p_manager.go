@@ -3,143 +3,190 @@ package p2p
 import (
 	"context"
 	"fmt"
-
-	"phaethon/config"
-	"phaethon/util"
+	"sync"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/core/transport"
+	"github.com/multiformats/go-multiaddr"
+
+	"phaethon/config"
+	"phaethon/util"
 )
 
-// P2PManager manages P2P connections using real libp2p.Host
+const (
+	meshProtocol protocol.ID = "/phaethon/mesh/1.0.0"
+)
+
+// P2PManager manages multiple libp2p.Host instances (one per proxy).
+// Each proxy gets its own host with its own transport, maintaining
+// independent links for quality-based routing decisions.
 type P2PManager struct {
-	// Real libp2p host
-	host host.Host
-	
-	// Local node info
-	localNodeID string
-	
+	// One libp2p.Host per proxy
+	hosts map[string]host.Host // proxyName -> libp2p.Host
+
 	// Proxy configurations
-	proxies map[string]*config.Proxy
-	
-	// Mesh protocol ID
-	meshProtocol protocol.ID
-	
-	// Context for lifecycle
+	proxies map[string]*config.Proxy // proxyName -> proxy config
+
+	// LocalSeq management
+	mu              sync.RWMutex
+	localSeqCounter uint32
+	localSeqToProxy map[uint32]string // localSeq -> proxyName
+
+	// Link quality monitor
+	monitor *LinkQualityMonitor
+
+	// Mesh stream handler
+	meshHandler *MeshStreamHandler
+
+	// Local node ID
+	localNodeID string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-// NewP2PManager creates a new P2P manager with real libp2p host
-func NewP2PManager(localNodeID string) (*P2PManager, error) {
+// NewP2PManager creates a new P2PManager with one libp2p.Host per proxy.
+func NewP2PManager(localNodeID string, proxies map[string]*config.Proxy) (*P2PManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	
-	// Create libp2p host with custom options
+
+	mgr := &P2PManager{
+		hosts:           make(map[string]host.Host),
+		proxies:         proxies,
+		localSeqToProxy: make(map[uint32]string),
+		localNodeID:     localNodeID,
+		ctx:             ctx,
+		cancel:          cancel,
+	}
+
+	// Create mesh stream handler
+	mgr.meshHandler = NewMeshStreamHandler(mgr)
+
+	// Create link quality monitor
+	mgr.monitor = NewLinkQualityMonitor(mgr, localNodeID)
+
+	// Create one libp2p.Host for each proxy
+	for proxyName, proxy := range proxies {
+		h, err := mgr.createHostForProxy(proxyName, proxy)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("create host for proxy %s: %w", proxyName, err)
+		}
+		mgr.hosts[proxyName] = h
+		util.LogInfo("P2P", "Created libp2p.Host for proxy: %s (type=%s)", proxyName, proxy.Type)
+	}
+
+	util.LogInfo("P2P", "P2PManager initialized with %d hosts", len(mgr.hosts))
+	return mgr, nil
+}
+
+// createHostForProxy creates a libp2p.Host for a specific proxy.
+func (m *P2PManager) createHostForProxy(proxyName string, proxy *config.Proxy) (host.Host, error) {
+	var t transport.Transport
+
+	switch proxy.Type {
+	case config.ProxyTROJAN:
+		t = NewTrojanTransport(proxy)
+	case config.ProxySOCKS5:
+		t = NewSOCKS5Transport(proxy)
+	case config.ProxyH_TUNNEL:
+		t = NewH_TunnelTransport(proxy)
+	default:
+		return nil, fmt.Errorf("unsupported proxy type: %s", proxy.Type)
+	}
+
 	h, err := libp2p.New(
-		// Disable default transports (we'll add custom ones)
 		libp2p.NoTransports,
-		
-		// Disable listen addresses (we're client-only for proxy connections)
-		libp2p.ListenAddrStrings(),
-		
-		// Enable yamux multiplexing
-		libp2p.DefaultMuxers,
-		
-		// Enable security (noise)
+		libp2p.Transport(t),
+		libp2p.DefaultMuxers, // yamux
 		libp2p.DefaultSecurity,
+		libp2p.ListenAddrStrings(), // client mode, no listening
 	)
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+		return nil, err
 	}
-	
-	pm := &P2PManager{
-		host:         h,
-		localNodeID:  localNodeID,
-		proxies:      make(map[string]*config.Proxy),
-		meshProtocol: protocol.ID("/mesh/1.0.0"),
-		ctx:          ctx,
-		cancel:       cancel,
-	}
-	
-	util.LogInfo("p2p", "P2PManager initialized with libp2p host: nodeID=%s peerID=%s", 
-		localNodeID, h.ID())
-	
-	return pm, nil
+
+	// Register mesh protocol handler
+	h.SetStreamHandler(meshProtocol, m.meshHandler.HandleStream)
+
+	return h, nil
 }
 
-// AddProxy adds a proxy configuration
-func (pm *P2PManager) AddProxy(proxy *config.Proxy) error {
-	pm.proxies[proxy.Name] = proxy
-	
-	// Create and register custom transport for this proxy
-	transport, err := NewProxyTransport(proxy)
-	if err != nil {
-		return fmt.Errorf("failed to create transport for proxy %s: %w", proxy.Name, err)
+// Connect connects to a peer through a specific proxy.
+func (m *P2PManager) Connect(proxyName string, peerID peer.ID, addr multiaddr.Multiaddr) error {
+	h := m.hosts[proxyName]
+	if h == nil {
+		return fmt.Errorf("no host for proxy: %s", proxyName)
 	}
-	
-	// Note: In real libp2p, we would add this transport to the host
-	// But libp2p doesn't support adding transports dynamically
-	// So we need to recreate the host with all transports upfront
-	// Or use a different approach
-	
-	util.LogInfo("p2p", "Added proxy: name=%s type=%s", proxy.Name, proxy.Type)
-	
-	return nil
+
+	peerInfo := peer.AddrInfo{ID: peerID, Addrs: []multiaddr.Multiaddr{addr}}
+	return h.Connect(m.ctx, peerInfo)
 }
 
-// Host returns the underlying libp2p host
-func (pm *P2PManager) Host() host.Host {
-	return pm.host
+// NewStream creates a stream to a peer through a specific proxy.
+func (m *P2PManager) NewStream(ctx context.Context, proxyName string, peerID peer.ID) (network.Stream, error) {
+	h := m.hosts[proxyName]
+	if h == nil {
+		return nil, fmt.Errorf("no host for proxy: %s", proxyName)
+	}
+
+	return h.NewStream(ctx, peerID, meshProtocol)
 }
 
-// LocalPeerID returns the local peer ID
-func (pm *P2PManager) LocalPeerID() peer.ID {
-	return pm.host.ID()
+// AllocateLocalSeq allocates a new localSeq for a proxy.
+func (m *P2PManager) AllocateLocalSeq(proxyName string) uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.localSeqCounter++
+	seq := m.localSeqCounter
+	m.localSeqToProxy[seq] = proxyName
+	return seq
 }
 
-// Connect connects to a peer through a specific proxy
-func (pm *P2PManager) Connect(proxyName string, peerInfo peer.AddrInfo) error {
-	proxy, ok := pm.proxies[proxyName]
-	if !ok {
-		return fmt.Errorf("proxy not found: %s", proxyName)
-	}
-	
-	// Create custom transport for this proxy
-	transport, err := NewProxyTransport(proxy)
-	if err != nil {
-		return fmt.Errorf("failed to create transport: %w", err)
-	}
-	
-	// Dial through the transport
-	conn, err := transport.Dial(pm.ctx, nil, peerInfo.ID)
-	if err != nil {
-		return fmt.Errorf("failed to dial: %w", err)
-	}
-	
-	// Add connection to host's network
-	// Note: This is tricky because libp2p.Host doesn't expose a direct way to add connections
-	// We might need to use a different approach
-	
-	util.LogInfo("p2p", "Connected to peer: proxy=%s peer=%s", proxyName, peerInfo.ID)
-	
-	// Close the connection for now (placeholder)
-	conn.Close()
-	
-	return nil
+// GetProxyForLocalSeq returns the proxyName for a given localSeq.
+func (m *P2PManager) GetProxyForLocalSeq(localSeq uint32) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	proxyName, ok := m.localSeqToProxy[localSeq]
+	return proxyName, ok
 }
 
-// Close closes the P2P manager
-func (pm *P2PManager) Close() error {
-	pm.cancel()
-	
-	if pm.host != nil {
-		pm.host.Close()
+// GetHost returns the libp2p.Host for a specific proxy.
+func (m *P2PManager) GetHost(proxyName string) (host.Host, bool) {
+	h, ok := m.hosts[proxyName]
+	return h, ok
+}
+
+// GetAllHosts returns all libp2p.Host instances.
+func (m *P2PManager) GetAllHosts() map[string]host.Host {
+	return m.hosts
+}
+
+// GetMonitor returns the link quality monitor.
+func (m *P2PManager) GetMonitor() *LinkQualityMonitor {
+	return m.monitor
+}
+
+// GetLocalNodeID returns the local node ID.
+func (m *P2PManager) GetLocalNodeID() string {
+	return m.localNodeID
+}
+
+// Close closes all libp2p.Host instances.
+func (m *P2PManager) Close() error {
+	m.cancel()
+
+	for proxyName, h := range m.hosts {
+		if err := h.Close(); err != nil {
+			util.LogError("P2P", "Failed to close host for proxy %s: %v", proxyName, err)
+		}
 	}
-	
-	util.LogInfo("p2p", "P2PManager closed")
-	
+
+	util.LogInfo("P2P", "P2PManager closed")
 	return nil
 }

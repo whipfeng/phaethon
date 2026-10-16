@@ -105,10 +105,12 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		// Bind mesh's DNS hijacker to the engine's netstack.
 		// This must happen after engine.Start() (netstack is ready) and before
 		// any DNS queries are made.
+		util.LogModuleInfo("engine", "[DNS-INIT] About to call SetDNSHijacker, dnsHijacker=%v, fakeIPPool=%v", meshMgr.GetDNSHijacker() != nil, meshMgr.GetFakeIPPool() != nil)
 		if err := engine.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool()); err != nil {
 			util.LogModuleError("engine", "Failed to bind DNS hijacker: %v", err)
 			return nil
 		}
+		util.LogModuleInfo("engine", "[DNS-INIT] SetDNSHijacker succeeded")
 
 		// Register the domain resolver callback for mesh DNS resolution
 		engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)

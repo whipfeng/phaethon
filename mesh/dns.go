@@ -39,6 +39,7 @@ type DNSHijacker struct {
 
 	// Async DNS forwarder (v0.2.0)
 	forwarderSocket tcpip.Endpoint            // persistent UDP socket for forwarding
+	forwarderWQ     waiter.Queue              // waiter queue for forwarder socket
 	pendingQueries  map[string]chan dnsResult // domain -> callback channel
 	pendingMu       sync.Mutex                // protects pendingQueries
 	forwarderStopCh chan struct{}             // stops background listener
@@ -131,8 +132,7 @@ func (h *DNSHijacker) startForwarder() {
 	}
 	
 	// Create persistent UDP endpoint for forwarding
-	var wq waiter.Queue
-	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &h.forwarderWQ)
 	if err != nil {
 		util.LogModuleWarn("dns", "[DNS-FWD] failed to create forwarder endpoint: %v", err)
 		return
@@ -165,18 +165,29 @@ func (h *DNSHijacker) forwarderListener() {
 		}
 	}()
 	
+	util.LogModuleInfo("dns", "[DNS-FWD] listener started, socket=%v dnsAddr=%s", h.forwarderSocket != nil, h.dnsAddr)
+	
+	// Register waiter for blocking reads
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	h.forwarderWQ.EventRegister(&waitEntry)
+	defer h.forwarderWQ.EventUnregister(&waitEntry)
+	
+	readCount := 0
 	for {
-		select {
-		case <-h.forwarderStopCh:
-			util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
-			return
-		default:
-		}
-		
-		// Read response (blocks until data arrives or error)
+		// Read response (returns ErrWouldBlock when no data available)
 		var buf bytes.Buffer
 		res, err := h.forwarderSocket.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 		if err != nil {
+			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
+				// No data available, block until notification or stop signal
+				select {
+				case <-ch:
+					continue
+				case <-h.forwarderStopCh:
+					util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
+					return
+				}
+			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // timeout, keep listening
 			}
@@ -185,31 +196,48 @@ func (h *DNSHijacker) forwarderListener() {
 			continue
 		}
 		
+		readCount++
+		util.LogModuleInfo("dns", "[DNS-FWD] received packet #%d: len=%d from=%s:%d", readCount, res.Total, res.RemoteAddr.Addr, res.RemoteAddr.Port)
+		
 		if res.Total < 12 {
+			util.LogModuleWarn("dns", "[DNS-FWD] packet too short: %d bytes", res.Total)
 			continue // too short to be a valid DNS response
 		}
 		
+		// Log raw packet for debugging
+		packetBytes := buf.Bytes()
+		if len(packetBytes) >= 12 {
+			flags := (uint16(packetBytes[2]) << 8) | uint16(packetBytes[3])
+			qdcount := (uint16(packetBytes[4]) << 8) | uint16(packetBytes[5])
+			ancount := (uint16(packetBytes[6]) << 8) | uint16(packetBytes[7])
+			util.LogModuleInfo("dns", "[DNS-FWD] packet header: flags=0x%04x qdcount=%d ancount=%d", flags, qdcount, ancount)
+		}
+		
 		// Parse response
-		domain, ip, ttl := parseDNSResponseForCache(buf.Bytes())
+		domain, ip, ttl := parseDNSResponseForCache(packetBytes)
 		if domain == "" || ip == nil {
+			util.LogModuleWarn("dns", "[DNS-FWD] failed to parse response: domain=%s ip=%v len=%d", domain, ip, len(packetBytes))
 			continue
 		}
 		
-		util.LogModuleDebug("dns", "[DNS-FWD] received response: domain=%s ip=%s ttl=%v", domain, ip, ttl)
+		util.LogModuleInfo("dns", "[DNS-FWD] parsed response: domain=%s ip=%s ttl=%v", domain, ip, ttl)
 		
 		// 1. Cache the response
 		h.cache.Set(domain, ip, ttl)
 		
 		// 2. Trigger callback if client is waiting
 		h.pendingMu.Lock()
+		pendingCount := len(h.pendingQueries)
 		if ch, ok := h.pendingQueries[domain]; ok {
 			select {
 			case ch <- dnsResult{ip: ip, ttl: ttl}:
-				util.LogModuleDebug("dns", "[DNS-FWD] triggered callback for %s", domain)
+				util.LogModuleInfo("dns", "[DNS-FWD] triggered callback for %s", domain)
 			default:
 				util.LogModuleWarn("dns", "[DNS-FWD] callback channel full for %s", domain)
 			}
 			delete(h.pendingQueries, domain)
+		} else {
+			util.LogModuleInfo("dns", "[DNS-FWD] no pending query for %s (cached only), pendingCount=%d", domain, pendingCount)
 		}
 		h.pendingMu.Unlock()
 	}
@@ -224,9 +252,66 @@ func parseDNSResponseForCache(resp []byte) (domain string, ip net.IP, ttl time.D
 	}
 	
 	// Extract domain from response (question section)
-	domain, _, _ = parseDNSQueryDomain(resp)
+	// Note: parseDNSQueryDomain only works for queries (QR=0), so we need a separate function for responses
+	domain, _, ok := parseDNSResponseDomain(resp)
+	if !ok {
+		return "", parsedIP, parsedTTL
+	}
 	
 	return domain, parsedIP, parsedTTL
+}
+
+// parseDNSResponseDomain extracts the domain from a DNS response's question section.
+// Unlike parseDNSQueryDomain, this works for responses (QR=1).
+func parseDNSResponseDomain(pkt []byte) (string, uint16, bool) {
+	if len(pkt) < 12 {
+		return "", 0, false
+	}
+	
+	// For responses, we don't check the QR bit - we just parse the question section
+	qdcount := (uint16(pkt[4]) << 8) | uint16(pkt[5])
+	if qdcount == 0 {
+		return "", 0, false
+	}
+
+	off := 12
+	var labels []string
+	for {
+		if off >= len(pkt) {
+			return "", 0, false
+		}
+		llen := int(pkt[off])
+		off++
+		if llen == 0 {
+			break
+		}
+		// Handle compression pointers (0xC0 mask)
+		if llen&0xc0 == 0xc0 {
+			// Compression pointer - skip it and break
+			off++
+			break
+		}
+		if llen > 63 || off+llen > len(pkt) {
+			return "", 0, false
+		}
+		labels = append(labels, string(pkt[off:off+llen]))
+		off += llen
+	}
+
+	// Read QTYPE and QCLASS (4 bytes total after domain)
+	if off+4 > len(pkt) {
+		return "", 0, false
+	}
+	qtype := (uint16(pkt[off]) << 8) | uint16(pkt[off+1])
+
+	var domain string
+	for i, l := range labels {
+		if i > 0 {
+			domain += "."
+		}
+		domain += l
+	}
+	return domain, qtype, true
 }
 
 // IsBound returns true if the netstack has been bound.
@@ -541,6 +626,8 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 	h.pendingQueries[domain] = resultCh
 	h.pendingMu.Unlock()
 	
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] registered callback for domain=%s pendingCount=%d", domain, len(h.pendingQueries))
+	
 	// Ensure cleanup on exit
 	defer func() {
 		h.pendingMu.Lock()
@@ -558,7 +645,7 @@ func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (ne
 		util.LogModuleWarn("dns", "[DNS-FWD] WRITE FAILED: domain=%s err=%v", domain, err)
 		return nil, 0, fmt.Errorf("write query: %v", err)
 	}
-	util.LogModuleDebug("dns", "[DNS-FWD] WRITE OK: domain=%s duration=%v", domain, time.Since(writeStart))
+	util.LogModuleInfo("dns", "[DNS-FWD] WRITE OK: domain=%s remoteAddr=%s:%d duration=%v", domain, remoteGIP, 53, time.Since(writeStart))
 	
 	// 5. Wait for callback (with timeout)
 	const timeout = 5 * time.Second

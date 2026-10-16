@@ -3,7 +3,6 @@ package p2p
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -31,11 +30,6 @@ type P2PManager struct {
 	// Proxy configurations
 	proxies map[string]*config.Proxy // proxyName -> proxy config
 
-	// LocalSeq management
-	mu              sync.RWMutex
-	localSeqCounter uint32
-	localSeqToProxy map[uint32]string // localSeq -> proxyName
-
 	// Link quality monitor
 	monitor *LinkQualityMonitor
 
@@ -54,12 +48,11 @@ func NewP2PManager(localNodeID string, proxies map[string]*config.Proxy) (*P2PMa
 	ctx, cancel := context.WithCancel(context.Background())
 
 	mgr := &P2PManager{
-		hosts:           make(map[string]host.Host),
-		proxies:         proxies,
-		localSeqToProxy: make(map[uint32]string),
-		localNodeID:     localNodeID,
-		ctx:             ctx,
-		cancel:          cancel,
+		hosts:       make(map[string]host.Host),
+		proxies:     proxies,
+		localNodeID: localNodeID,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 
 	// Create mesh stream handler
@@ -134,26 +127,6 @@ func (m *P2PManager) NewStream(ctx context.Context, proxyName string, peerID pee
 	}
 
 	return h.NewStream(ctx, peerID, meshProtocol)
-}
-
-// AllocateLocalSeq allocates a new localSeq for a proxy.
-func (m *P2PManager) AllocateLocalSeq(proxyName string) uint32 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.localSeqCounter++
-	seq := m.localSeqCounter
-	m.localSeqToProxy[seq] = proxyName
-	return seq
-}
-
-// GetProxyForLocalSeq returns the proxyName for a given localSeq.
-func (m *P2PManager) GetProxyForLocalSeq(localSeq uint32) (string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	proxyName, ok := m.localSeqToProxy[localSeq]
-	return proxyName, ok
 }
 
 // GetHost returns the libp2p.Host for a specific proxy.

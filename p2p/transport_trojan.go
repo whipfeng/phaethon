@@ -19,14 +19,12 @@ import (
 // TrojanTransport implements libp2p.Transport using trojan proxy
 type TrojanTransport struct {
 	proxyConfig *config.Proxy
-	localSeq    uint32
 }
 
 // NewTrojanTransport creates a new trojan transport
-func NewTrojanTransport(proxy *config.Proxy, localSeq uint32) *TrojanTransport {
+func NewTrojanTransport(proxy *config.Proxy) *TrojanTransport {
 	return &TrojanTransport{
 		proxyConfig: proxy,
-		localSeq:    localSeq,
 	}
 }
 
@@ -50,7 +48,7 @@ func (t *TrojanTransport) Dial(ctx context.Context, addr multiaddr.Multiaddr, p 
 	}
 	
 	// Wrap frame transport into libp2p connection
-	return newTrojanCapableConn(frameTransport, p, t.localSeq)
+	return newTrojanCapableConn(frameTransport, p)
 }
 
 // Listen is not supported by trojan transport (client-only)
@@ -74,9 +72,9 @@ func (t *TrojanTransport) Proxy() bool {
 	return true
 }
 
-// LocalSeq returns the local sequence number for this transport
+// LocalSeq returns 0 (not used in new architecture)
 func (t *TrojanTransport) LocalSeq() uint32 {
-	return t.localSeq
+	return 0
 }
 
 // Protocols returns the set of protocols handled by this transport
@@ -96,13 +94,12 @@ type trojanCapableConn struct {
 	
 	frameTransport frame.FrameTransport
 	remotePeer     peer.ID
-	localSeq       uint32
 	localAddr      multiaddr.Multiaddr
 	remoteAddr     multiaddr.Multiaddr
 }
 
 // newTrojanCapableConn creates a new trojan capable connection
-func newTrojanCapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSeq uint32) (transport.CapableConn, error) {
+func newTrojanCapableConn(ft frame.FrameTransport, remotePeer peer.ID) (transport.CapableConn, error) {
 	// Create dummy addresses (trojan proxy hides real addresses)
 	localAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
 	remoteAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
@@ -110,7 +107,6 @@ func newTrojanCapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSeq 
 	return &trojanCapableConn{
 		frameTransport: ft,
 		remotePeer:     remotePeer,
-		localSeq:       localSeq,
 		localAddr:      localAddr,
 		remoteAddr:     remoteAddr,
 	}, nil
@@ -158,7 +154,7 @@ func (c *trojanCapableConn) Multiplexer() protocol.ID {
 
 // LocalSequence returns the local sequence number
 func (c *trojanCapableConn) LocalSequence() uint32 {
-	return c.localSeq
+	return 0
 }
 
 // FrameTransport returns the underlying frame transport

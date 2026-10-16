@@ -1,7 +1,8 @@
 # libp2p 集成设计方案
 
-**文档版本**: v1.0  
+**文档版本**: v2.0  
 **创建时间**: 2026-10-14  
+**最后更新**: 2026-10-14（v2.0: one-host-per-proxy 架构）  
 **状态**: 设计中  
 **优先级**: 高
 
@@ -41,30 +42,45 @@
 ### 2.1 整体架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Application Layer (SSH, HTTP, DNS, etc.)           │
-├─────────────────────────────────────────────────────┤
-│  Mesh Layer                                          │
-│  ├─ RouteSelector (路由决策，集成 LinkQualityMonitor)│
-│  ├─ DNSHijacker (DNS 解析，不变)                    │
-│  ├─ MeshManager (mesh 包处理，不变)                 │
-│  └─ LinkQualityMonitor (新增：链路质量监控)         │
-├─────────────────────────────────────────────────────┤
-│  P2P Layer (libp2p 替换)                            │
-│  ├─ libp2p.Host (替代 P2PManager)                   │
-│  ├─ Stream Multiplexing (yamux，自动)               │
-│  ├─ Connection Management (自动)                    │
-│  └─ Protocol Negotiation (自定义 mesh 协议)         │
-├─────────────────────────────────────────────────────┤
-│  Transport Layer (不变)                              │
-│  ├─ TrojanTransport (自定义 libp2p.Transport)       │
-│  ├─ SOCKS5Transport (自定义 libp2p.Transport)       │
-│  └─ H_TunnelTransport (自定义 libp2p.Transport)     │
-├─────────────────────────────────────────────────────┤
-│  Proxy Connections (不变)                            │
-│  (trojan/SOCKS5/H_Tunnel over TCP)                  │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Application Layer (SSH, HTTP, DNS, etc.)                   │
+├─────────────────────────────────────────────────────────────┤
+│  Mesh Layer                                                  │
+│  ├─ RouteSelector (路由决策，集成 LinkQualityMonitor)        │
+│  ├─ DNSHijacker (DNS 解析，不变)                            │
+│  ├─ MeshManager (mesh 包处理，不变)                         │
+│  └─ LinkQualityMonitor (新增：链路质量监控)                 │
+├─────────────────────────────────────────────────────────────┤
+│  P2P Layer (libp2p 替换 - one host per proxy)               │
+│  ├─ P2PManager (管理器，持有多个 libp2p.Host)               │
+│  ├─ libp2p.Host[proxyName] (每个代理一个 host)              │
+│  │   ├─ Stream Multiplexing (yamux，自动)                   │
+│  │   ├─ Connection Management (自动)                        │
+│  │   └─ Protocol Negotiation (自定义 mesh 协议)             │
+│  └─ LinkQualityMonitor (按 proxyName+localSeq 跟踪)         │
+├─────────────────────────────────────────────────────────────┤
+│  Transport Layer (每个 host 一个自定义 transport)            │
+│  ├─ TrojanTransport (proxyName="trojan-1" 的 host 使用)     │
+│  ├─ SOCKS5Transport (proxyName="socks5-2" 的 host 使用)     │
+│  └─ H_TunnelTransport (proxyName="htunnel-3" 的 host 使用)  │
+├─────────────────────────────────────────────────────────────┤
+│  Proxy Connections (不变)                                    │
+│  (trojan/SOCKS5/H_Tunnel over TCP)                          │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+**核心设计决策：One Host Per Proxy**
+
+每个代理配置对应一个独立的 libp2p.Host 实例：
+- proxyName="trojan-1" → libp2p.Host#1 (TrojanTransport)
+- proxyName="socks5-2" → libp2p.Host#2 (SOCKS5Transport)
+- proxyName="htunnel-3" → libp2p.Host#3 (H_TunnelTransport)
+
+**优势**：
+1. 保留多链路模型（每个代理独立链路）
+2. 每个 host 真正使用 libp2p 的 yamux、连接管理、协议协商
+3. 链路质量按 proxyName 隔离，符合业务语义
+4. 简化 transport 实现（每个 transport 只处理一种代理类型）
 
 ### 2.2 核心组件
 
@@ -102,61 +118,176 @@ A 的视角：到 B 的链路 = (B, localSeq=12345)
 B 的视角：到 A 的链路 = (A, localSeq=67890)
 ```
 
-**libp2p 集成策略**：
+**libp2p 集成策略（v2.0: One Host Per Proxy）**：
 
-1. **保留 localSeq 机制**：我们自己管理序列号，不依赖 libp2p 内部实现
-2. **建立映射关系**：localSeq ↔ libp2p conn ID
-3. **每个 proxyName = 一个 libp2p 连接**：不会自动扩缩（也不需要）
-4. **LinkQualityMonitor 按链路跟踪**：
+1. **每个代理一个 libp2p.Host**：proxyName → libp2p.Host 映射
+2. **保留 localSeq 机制**：我们自己管理序列号，用于链路标识
+3. **建立映射关系**：localSeq ↔ libp2p conn/stream
+4. **每个 host 只配置一个 transport**：
+   - trojan-1 的 host 只配置 TrojanTransport
+   - socks5-2 的 host 只配置 SOCKS5Transport
+   - htunnel-3 的 host 只配置 H_TunnelTransport
+5. **LinkQualityMonitor 按链路跟踪**：
    - 主动端：按 (proxyName, localSeq) 跟踪
    - 被动端：按 localSeq 跟踪
 
 ```go
-type Libp2pHost struct {
-    host libp2p.Host
+type P2PManager struct {
+    // 每个代理一个 libp2p.Host
+    hosts map[string]host.Host  // proxyName -> libp2p.Host
     
-    // localSeq → libp2p conn 的映射
-    localSeqToConn map[uint32]network.Conn
+    // 代理配置
+    proxies map[string]*config.Proxy  // proxyName -> proxy config
     
-    // libp2p conn → localSeq 的反向映射
-    connToLocalSeq map[string]uint32
+    // localSeq 管理
+    localSeqCounter uint32
+    localSeqToProxy map[uint32]string  // localSeq -> proxyName
     
-    // 主动端：proxyName → localSeq 列表
-    proxyToLinks map[string][]uint32
+    // 链路质量监控
+    monitor *LinkQualityMonitor
+}
+
+// 创建新的 libp2p.Host（每个代理调用一次）
+func (m *P2PManager) createHostForProxy(proxyName string, proxy *config.Proxy) (host.Host, error) {
+    var t transport.Transport
+    switch proxy.Type {
+    case "TROJAN":
+        t = NewTrojanTransport(proxy)
+    case "SOCKS5":
+        t = NewSOCKS5Transport(proxy)
+    case "H_TUNNEL":
+        t = NewHTunnelTransport(proxy)
+    }
+    
+    h, err := libp2p.New(
+        libp2p.NoTransports,
+        libp2p.Transport(t),
+        libp2p.DefaultMuxers,  // yamux
+        libp2p.DefaultSecurity,
+        libp2p.ListenAddrStrings(),  // 不监听（客户端模式）
+    )
+    return h, err
 }
 ```
 
-#### 2.2.1 libp2p.Host（替代 P2PManager）
+#### 2.2.1 P2PManager（管理器，持有多个 libp2p.Host）
 
 **职责**：
-- 管理 peer 连接
-- 提供 stream 多路复用
-- 内置连接管理（心跳、重连、健康检查）
+- 管理多个 libp2p.Host 实例（每个代理一个）
+- 根据 proxyName 选择对应的 host
+- 管理 localSeq 分配和映射
+- 协调链路质量监控
 
 **接口设计**：
 ```go
-type Libp2pHost struct {
-    host    libp2p.Host
+type P2PManager struct {
+    // 每个代理一个 libp2p.Host
+    hosts map[string]host.Host  // proxyName -> libp2p.Host
+    
+    // 代理配置
+    proxies map[string]*config.Proxy
+    
+    // localSeq 管理
+    mu              sync.RWMutex
+    localSeqCounter uint32
+    localSeqToProxy map[uint32]string  // localSeq -> proxyName
+    
+    // 链路质量监控
     monitor *LinkQualityMonitor
     
     // mesh 协议处理器
     meshHandler *MeshStreamHandler
+    
+    ctx    context.Context
+    cancel context.CancelFunc
 }
 
-// 启动 libp2p host
-func NewLibp2pHost(config *P2PConfig) (*Libp2pHost, error)
+// 初始化 P2PManager（为每个代理创建 host）
+func NewP2PManager(localNodeID string, proxies map[string]*config.Proxy) (*P2PManager, error) {
+    mgr := &P2PManager{
+        hosts:         make(map[string]host.Host),
+        proxies:       proxies,
+        localSeqToProxy: make(map[uint32]string),
+    }
+    
+    // 为每个代理创建独立的 libp2p.Host
+    for proxyName, proxy := range proxies {
+        h, err := mgr.createHostForProxy(proxyName, proxy)
+        if err != nil {
+            return nil, fmt.Errorf("create host for %s: %w", proxyName, err)
+        }
+        mgr.hosts[proxyName] = h
+    }
+    
+    return mgr, nil
+}
 
-// 连接到 peer
-func (h *Libp2pHost) Connect(peerID peer.ID, addr multiaddr.Multiaddr) error
+// 创建新的 libp2p.Host（每个代理调用一次）
+func (m *P2PManager) createHostForProxy(proxyName string, proxy *config.Proxy) (host.Host, error) {
+    var t transport.Transport
+    switch proxy.Type {
+    case "TROJAN":
+        t = NewTrojanTransport(proxy)
+    case "SOCKS5":
+        t = NewSOCKS5Transport(proxy)
+    case "H_TUNNEL":
+        t = NewHTunnelTransport(proxy)
+    default:
+        return nil, fmt.Errorf("unsupported proxy type: %s", proxy.Type)
+    }
+    
+    h, err := libp2p.New(
+        libp2p.NoTransports,
+        libp2p.Transport(t),
+        libp2p.DefaultMuxers,  // yamux
+        libp2p.DefaultSecurity,
+        libp2p.ListenAddrStrings(),  // 不监听（客户端模式）
+    )
+    if err != nil {
+        return nil, err
+    }
+    
+    // 注册 mesh 协议处理器
+    h.SetStreamHandler(meshProtocol, m.meshHandler.HandleStream)
+    
+    return h, nil
+}
 
-// 创建 stream 到 peer
-func (h *Libp2pHost) NewStream(ctx context.Context, peerID peer.ID, protocol protocol.ID) (network.Stream, error)
+// 连接到 peer（通过指定代理）
+func (m *P2PManager) Connect(proxyName string, peerID peer.ID, addr multiaddr.Multiaddr) error {
+    h := m.hosts[proxyName]
+    if h == nil {
+        return fmt.Errorf("no host for proxy: %s", proxyName)
+    }
+    return h.Connect(m.ctx, peer.AddrInfo{ID: peerID, Addrs: []multiaddr.Multiaddr{addr}})
+}
 
-// 注册 mesh 协议处理器
-func (h *Libp2pHost) SetStreamHandler(protocol protocol.ID, handler network.StreamHandler)
+// 创建 stream 到 peer（通过指定代理）
+func (m *P2PManager) NewStream(ctx context.Context, proxyName string, peerID peer.ID) (network.Stream, error) {
+    h := m.hosts[proxyName]
+    if h == nil {
+        return nil, fmt.Errorf("no host for proxy: %s", proxyName)
+    }
+    return h.NewStream(ctx, peerID, meshProtocol)
+}
 
-// 关闭
-func (h *Libp2pHost) Close() error
+// 分配 localSeq
+func (m *P2PManager) allocateLocalSeq(proxyName string) uint32 {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.localSeqCounter++
+    seq := m.localSeqCounter
+    m.localSeqToProxy[seq] = proxyName
+    return seq
+}
+
+// 关闭所有 host
+func (m *P2PManager) Close() error {
+    for _, h := range m.hosts {
+        h.Close()
+    }
+    return nil
+}
 ```
 
 #### 2.2.2 LinkQualityMonitor（新增）
@@ -171,7 +302,7 @@ func (h *Libp2pHost) Close() error
 ```go
 type LinkQualityMonitor struct {
     mu     sync.RWMutex
-    host   *Libp2pHost
+    p2pMgr *P2PManager  // 引用 P2PManager（持有多个 host）
     localID string
     
     // 主动端：按 (proxyName, localSeq) 跟踪
@@ -261,7 +392,7 @@ func (lqm *LinkQualityMonitor) GetInboundLinkQuality(localSeq uint32) *LinkMetri
 
 **RTT 测量**：
 ```go
-// 使用 libp2p 内置 ping 协议
+// 使用 libp2p 内置 ping 协议（每个 host 独立探测）
 func (lqm *LinkQualityMonitor) probeRTT() {
     ticker := time.NewTicker(lqm.probeInterval)
     defer ticker.Stop()
@@ -269,16 +400,21 @@ func (lqm *LinkQualityMonitor) probeRTT() {
     for {
         select {
         case <-ticker.C:
-            for peerID := range lqm.directLinks {
-                go func(pid peer.ID) {
-                    // libp2p 内置 ping
-                    result := <-ping.Ping(lqm.ctx, lqm.host, pid)
-                    if result.Error != nil {
-                        lqm.recordPingFailure(pid)
-                    } else {
-                        lqm.recordRTT(pid, result.RTT)
-                    }
-                }(peerID)
+            // 遍历每个代理的 host
+            for proxyName, h := range lqm.p2pMgr.hosts {
+                // 遍历该 host 连接的所有 peer
+                for _, conn := range h.Network().Conns() {
+                    peerID := conn.RemotePeer()
+                    go func(pn string, host host.Host, pid peer.ID) {
+                        // libp2p 内置 ping
+                        result := <-ping.Ping(lqm.ctx, host, pid)
+                        if result.Error != nil {
+                            lqm.recordPingFailure(pn, pid)
+                        } else {
+                            lqm.recordRTT(pn, pid, result.RTT)
+                        }
+                    }(proxyName, h, peerID)
+                }
             }
         case <-lqm.stopCh:
             return
@@ -393,17 +529,17 @@ Application (SSH/HTTP)
     ↓
 gVisor netstack (TCP/UDP)
     ↓
-RouteSelector (路由决策)
+RouteSelector (路由决策，选择 proxyName)
     ↓
 MeshManager.HandleMeshPacket()
     ↓
-MeshStreamHandler.SendPacket()
+P2PManager.NewStream(proxyName, peerID)
     ↓
-libp2p stream (yamux multiplexing)
+libp2p.Host[proxyName] → stream (yamux multiplexing)
     ↓
-TrojanTransport / SOCKS5Transport
+TrojanTransport / SOCKS5Transport / H_TunnelTransport
     ↓
-Proxy connection (trojan/SOCKS5 over TCP)
+Proxy connection (trojan/SOCKS5/H_Tunnel over TCP)
     ↓
 Network
 ```
@@ -413,11 +549,11 @@ Network
 ```
 Network
     ↓
-Proxy connection (trojan/SOCKS5 over TCP)
+Proxy connection (trojan/SOCKS5/H_Tunnel over TCP)
     ↓
-TrojanTransport / SOCKS5Transport
+TrojanTransport / SOCKS5Transport / H_TunnelTransport
     ↓
-libp2p stream (yamux demultiplexing)
+libp2p.Host[proxyName] → stream (yamux demultiplexing)
     ↓
 MeshStreamHandler.HandleStream()
     ↓
@@ -456,7 +592,7 @@ RouteSelector 查询链路质量
 
 | 组件 | 文件 | 行数 | 说明 |
 |------|------|------|------|
-| `P2PManager` | `p2p/p2p.go` | ~500 | 由 `Libp2pHost` 替代 |
+| `P2PManager` | `p2p/p2p.go` | ~500 | 由新的 `P2PManager`（多 host）替代 |
 | `dataQueues[16]` | `p2p/p2p.go` | ~100 | 由 yamux stream 替代 |
 | `DRRScheduler` | `p2p/drr.go` | ~200 | 由 yamux 自动调度替代 |
 | `writeLoop` | `p2p/p2p.go` | ~150 | 由 libp2p stream 替代 |
@@ -469,13 +605,13 @@ RouteSelector 查询链路质量
 
 | 组件 | 文件 | 行数 | 说明 |
 |------|------|------|------|
-| `Libp2pHost` | `p2p/libp2p_host.go` | ~300 | libp2p host 封装 |
+| `P2PManager` (新) | `p2p/p2p_manager.go` | ~350 | 多 host 管理器 |
 | `LinkQualityMonitor` | `p2p/link_quality.go` | ~400 | 链路质量监控 |
 | `MeshStreamHandler` | `p2p/mesh_stream.go` | ~200 | mesh stream 处理 |
 | `TrojanTransport` | `p2p/transport_trojan.go` | ~150 | trojan transport |
 | `SOCKS5Transport` | `p2p/transport_socks5.go` | ~150 | SOCKS5 transport |
 | `H_TunnelTransport` | `p2p/transport_htunnel.go` | ~150 | H_Tunnel transport |
-| **总计** | | **~1350** | |
+| **总计** | | **~1400** | |
 
 **净变化**：+100 行（但复杂度大幅降低）
 
@@ -484,8 +620,8 @@ RouteSelector 查询链路质量
 | 组件 | 文件 | 修改内容 |
 |------|------|---------|
 | `RouteSelector` | `mesh/route_selector.go` | 集成 `LinkQualityMonitor`，查询链路质量 |
-| `MeshManager` | `mesh/mesh.go` | 使用 `MeshStreamHandler` 发送/接收 mesh 包 |
-| `main_engine.go` | `main_engine.go` | 初始化 `Libp2pHost` 替代 `P2PManager` |
+| `MeshManager` | `mesh/mesh.go` | 使用新的 `P2PManager` 发送/接收 mesh 包 |
+| `main_engine.go` | `main_engine.go` | 初始化新的 `P2PManager`（多 host）替代旧的 |
 
 ### 3.4 不变的组件
 
@@ -518,13 +654,14 @@ server/admin_mesh.go     // Mesh 相关 API 实现
 ```go
 // 修改前
 func (s *Server) handleGetPeers() {
-    peers := s.p2pManager.GetPeers()  // 从 P2PManager 获取
+    peers := s.p2pManager.GetPeers()  // 从旧 P2PManager 获取
     // ...
 }
 
 // 修改后
 func (s *Server) handleGetPeers() {
-    peers := s.libp2pHost.GetPeers()  // 从 Libp2pHost 获取
+    peers := s.p2pManager.GetPeers()  // 从新 P2PManager（多 host）获取
+    // 内部实现：遍历所有 host，聚合 peer 信息
     // ...
 }
 ```
@@ -723,3 +860,4 @@ require (
 | 日期 | 版本 | 更新内容 | 作者 |
 |------|------|---------|------|
 | 2026-10-14 | v1.0 | 初始版本 | Phaethon Team |
+| 2026-10-14 | v2.0 | 架构重构：One Host Per Proxy，每个代理一个独立的 libp2p.Host 实例 | Phaethon Team |

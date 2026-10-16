@@ -19,14 +19,12 @@ import (
 // H_TunnelTransport implements libp2p.Transport using H_Tunnel proxy
 type H_TunnelTransport struct {
 	proxyConfig *config.Proxy
-	localSeq    uint32
 }
 
 // NewH_TunnelTransport creates a new H_Tunnel transport
-func NewH_TunnelTransport(proxy *config.Proxy, localSeq uint32) *H_TunnelTransport {
+func NewH_TunnelTransport(proxy *config.Proxy) *H_TunnelTransport {
 	return &H_TunnelTransport{
 		proxyConfig: proxy,
-		localSeq:    localSeq,
 	}
 }
 
@@ -48,7 +46,7 @@ func (t *H_TunnelTransport) Dial(ctx context.Context, addr multiaddr.Multiaddr, 
 	}
 	
 	// Wrap frame transport into libp2p connection
-	return newH_TunnelCapableConn(frameTransport, p, t.localSeq)
+	return newH_TunnelCapableConn(frameTransport, p)
 }
 
 // Listen is not supported by H_Tunnel transport (client-only)
@@ -74,7 +72,7 @@ func (t *H_TunnelTransport) Proxy() bool {
 
 // LocalSeq returns the local sequence number for this transport
 func (t *H_TunnelTransport) LocalSeq() uint32 {
-	return t.localSeq
+	return 0
 }
 
 // Protocols returns the set of protocols handled by this transport
@@ -94,13 +92,13 @@ type hTunnelCapableConn struct {
 	
 	frameTransport frame.FrameTransport
 	remotePeer     peer.ID
-	localSeq       uint32
+	
 	localAddr      multiaddr.Multiaddr
 	remoteAddr     multiaddr.Multiaddr
 }
 
 // newH_TunnelCapableConn creates a new H_Tunnel capable connection
-func newH_TunnelCapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSeq uint32) (transport.CapableConn, error) {
+func newH_TunnelCapableConn(ft frame.FrameTransport, remotePeer peer.ID) (transport.CapableConn, error) {
 	// Create dummy addresses (H_Tunnel proxy hides real addresses)
 	localAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
 	remoteAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
@@ -108,7 +106,6 @@ func newH_TunnelCapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSe
 	return &hTunnelCapableConn{
 		frameTransport: ft,
 		remotePeer:     remotePeer,
-		localSeq:       localSeq,
 		localAddr:      localAddr,
 		remoteAddr:     remoteAddr,
 	}, nil
@@ -156,7 +153,7 @@ func (c *hTunnelCapableConn) Multiplexer() protocol.ID {
 
 // LocalSequence returns the local sequence number
 func (c *hTunnelCapableConn) LocalSequence() uint32 {
-	return c.localSeq
+	return 0
 }
 
 // FrameTransport returns the underlying frame transport

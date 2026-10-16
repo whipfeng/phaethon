@@ -19,14 +19,12 @@ import (
 // SOCKS5Transport implements libp2p.Transport using SOCKS5 proxy
 type SOCKS5Transport struct {
 	proxyConfig *config.Proxy
-	localSeq    uint32
 }
 
 // NewSOCKS5Transport creates a new SOCKS5 transport
-func NewSOCKS5Transport(proxy *config.Proxy, localSeq uint32) *SOCKS5Transport {
+func NewSOCKS5Transport(proxy *config.Proxy) *SOCKS5Transport {
 	return &SOCKS5Transport{
 		proxyConfig: proxy,
-		localSeq:    localSeq,
 	}
 }
 
@@ -48,7 +46,7 @@ func (t *SOCKS5Transport) Dial(ctx context.Context, addr multiaddr.Multiaddr, p 
 	}
 	
 	// Wrap frame transport into libp2p connection
-	return newSOCKS5CapableConn(frameTransport, p, t.localSeq)
+	return newSOCKS5CapableConn(frameTransport, p)
 }
 
 // Listen is not supported by SOCKS5 transport (client-only)
@@ -74,7 +72,7 @@ func (t *SOCKS5Transport) Proxy() bool {
 
 // LocalSeq returns the local sequence number for this transport
 func (t *SOCKS5Transport) LocalSeq() uint32 {
-	return t.localSeq
+	return 0
 }
 
 // Protocols returns the set of protocols handled by this transport
@@ -94,13 +92,13 @@ type socks5CapableConn struct {
 	
 	frameTransport frame.FrameTransport
 	remotePeer     peer.ID
-	localSeq       uint32
+	
 	localAddr      multiaddr.Multiaddr
 	remoteAddr     multiaddr.Multiaddr
 }
 
 // newSOCKS5CapableConn creates a new SOCKS5 capable connection
-func newSOCKS5CapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSeq uint32) (transport.CapableConn, error) {
+func newSOCKS5CapableConn(ft frame.FrameTransport, remotePeer peer.ID) (transport.CapableConn, error) {
 	// Create dummy addresses (SOCKS5 proxy hides real addresses)
 	localAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
 	remoteAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
@@ -108,7 +106,6 @@ func newSOCKS5CapableConn(ft frame.FrameTransport, remotePeer peer.ID, localSeq 
 	return &socks5CapableConn{
 		frameTransport: ft,
 		remotePeer:     remotePeer,
-		localSeq:       localSeq,
 		localAddr:      localAddr,
 		remoteAddr:     remoteAddr,
 	}, nil
@@ -156,7 +153,7 @@ func (c *socks5CapableConn) Multiplexer() protocol.ID {
 
 // LocalSequence returns the local sequence number
 func (c *socks5CapableConn) LocalSequence() uint32 {
-	return c.localSeq
+	return 0
 }
 
 // FrameTransport returns the underlying frame transport

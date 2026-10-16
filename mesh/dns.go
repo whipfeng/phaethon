@@ -113,6 +113,7 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 // BindNetstack sets the netstack and addresses for the DNS hijacker.
 // Called when TUN engine is initialized and can provide the netstack.
 func (h *DNSHijacker) BindNetstack(ns *stack.Stack, tunAddr, dnsAddr tcpip.Address) {
+	util.LogModuleInfo("dns", "[DNS-FWD] BindNetstack called, dnsAddr=%s", dnsAddr)
 	h.ns = ns
 	h.tunAddr = tunAddr
 	h.dnsAddr = dnsAddr

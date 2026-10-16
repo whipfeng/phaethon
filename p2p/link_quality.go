@@ -5,21 +5,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
 
 	"phaethon/util"
 )
 
-// LinkQualityMonitor monitors link quality for each proxy link.
+// LinkQualityMonitor monitors link quality for each connection.
 type LinkQualityMonitor struct {
 	p2pMgr  *P2PManager
 	localID string
 
 	mu sync.RWMutex
 
-	// Link quality by (proxyName, peerID)
-	links map[string]map[peer.ID]*LinkMetrics // proxyName -> peerID -> metrics
+	// Link quality by connection ID
+	links map[string]*LinkMetrics // connID -> metrics
 
 	// Configuration
 	probeInterval time.Duration
@@ -53,7 +54,7 @@ func NewLinkQualityMonitor(p2pMgr *P2PManager, localID string) *LinkQualityMonit
 	return &LinkQualityMonitor{
 		p2pMgr:        p2pMgr,
 		localID:       localID,
-		links:         make(map[string]map[peer.ID]*LinkMetrics),
+		links:         make(map[string]*LinkMetrics),
 		probeInterval: 10 * time.Second,
 		probeTimeout:  5 * time.Second,
 		stopCh:        make(chan struct{}),
@@ -81,17 +82,18 @@ func (lqm *LinkQualityMonitor) probeRTT() {
 		select {
 		case <-ticker.C:
 			// Probe each host's connections
-			for proxyName, h := range lqm.p2pMgr.GetAllHosts() {
+			for _, h := range lqm.p2pMgr.GetAllHosts() {
 				for _, conn := range h.Network().Conns() {
+					connID := conn.ID()
 					peerID := conn.RemotePeer()
-					go func(pn string, pid peer.ID) {
-						result := <-ping.Ping(lqm.p2pMgr.ctx, lqm.p2pMgr.hosts[pn], pid)
+					go func(cid string, pid peer.ID, host host.Host) {
+						result := <-ping.Ping(lqm.p2pMgr.ctx, host, pid)
 						if result.Error != nil {
-							lqm.recordPingFailure(pn, pid)
+							lqm.recordPingFailure(cid)
 						} else {
-							lqm.recordRTT(pn, pid, result.RTT)
+							lqm.recordRTT(cid, result.RTT)
 						}
-					}(proxyName, peerID)
+					}(connID, peerID, h)
 				}
 			}
 		case <-lqm.stopCh:
@@ -100,62 +102,49 @@ func (lqm *LinkQualityMonitor) probeRTT() {
 	}
 }
 
-// RecordRTT records RTT for a link.
-func (lqm *LinkQualityMonitor) RecordRTT(proxyName string, peerID peer.ID, rtt time.Duration) {
+// RecordRTT records RTT for a connection.
+func (lqm *LinkQualityMonitor) RecordRTT(connID string, rtt time.Duration) {
 	lqm.mu.Lock()
 	defer lqm.mu.Unlock()
 
-	if lqm.links[proxyName] == nil {
-		lqm.links[proxyName] = make(map[peer.ID]*LinkMetrics)
-	}
-
-	metrics := lqm.links[proxyName][peerID]
+	metrics := lqm.links[connID]
 	if metrics == nil {
 		metrics = &LinkMetrics{}
-		lqm.links[proxyName][peerID] = metrics
+		lqm.links[connID] = metrics
 	}
 
 	metrics.updateRTT(float64(rtt.Milliseconds()))
 }
 
-// GetLinkQuality gets link quality for a specific proxy and peer.
-func (lqm *LinkQualityMonitor) GetLinkQuality(proxyName string, peerID peer.ID) *LinkMetrics {
+// GetLinkQuality gets link quality for a specific connection.
+func (lqm *LinkQualityMonitor) GetLinkQuality(connID string) *LinkMetrics {
 	lqm.mu.RLock()
 	defer lqm.mu.RUnlock()
 
-	if lqm.links[proxyName] == nil {
-		return nil
-	}
-	return lqm.links[proxyName][peerID]
+	return lqm.links[connID]
 }
 
-// GetAllLinkQualities gets all link qualities for a proxy.
-func (lqm *LinkQualityMonitor) GetAllLinkQualities(proxyName string) map[peer.ID]*LinkMetrics {
+// GetAllLinkQualities gets all link qualities.
+func (lqm *LinkQualityMonitor) GetAllLinkQualities() map[string]*LinkMetrics {
 	lqm.mu.RLock()
 	defer lqm.mu.RUnlock()
 
-	result := make(map[peer.ID]*LinkMetrics)
-	if links, ok := lqm.links[proxyName]; ok {
-		for pid, metrics := range links {
-			result[pid] = metrics
-		}
+	result := make(map[string]*LinkMetrics)
+	for connID, metrics := range lqm.links {
+		result[connID] = metrics
 	}
 	return result
 }
 
 // recordPingFailure records a ping failure.
-func (lqm *LinkQualityMonitor) recordPingFailure(proxyName string, peerID peer.ID) {
+func (lqm *LinkQualityMonitor) recordPingFailure(connID string) {
 	lqm.mu.Lock()
 	defer lqm.mu.Unlock()
 
-	if lqm.links[proxyName] == nil {
-		lqm.links[proxyName] = make(map[peer.ID]*LinkMetrics)
-	}
-
-	metrics := lqm.links[proxyName][peerID]
+	metrics := lqm.links[connID]
 	if metrics == nil {
 		metrics = &LinkMetrics{}
-		lqm.links[proxyName][peerID] = metrics
+		lqm.links[connID] = metrics
 	}
 
 	metrics.TotalPings++
@@ -164,26 +153,22 @@ func (lqm *LinkQualityMonitor) recordPingFailure(proxyName string, peerID peer.I
 	metrics.ErrorRate = float64(metrics.FailedPings) / float64(metrics.TotalPings)
 	metrics.QualityScore = calculateQualityScore(metrics)
 
-	util.LogDebug("P2P", "Ping failed to peer %s via proxy %s", peerID, proxyName)
+	util.LogDebug("P2P", "Ping failed on connection %s", connID)
 }
 
 // recordRTT records a successful RTT measurement.
-func (lqm *LinkQualityMonitor) recordRTT(proxyName string, peerID peer.ID, rtt time.Duration) {
+func (lqm *LinkQualityMonitor) recordRTT(connID string, rtt time.Duration) {
 	lqm.mu.Lock()
 	defer lqm.mu.Unlock()
 
-	if lqm.links[proxyName] == nil {
-		lqm.links[proxyName] = make(map[peer.ID]*LinkMetrics)
-	}
-
-	metrics := lqm.links[proxyName][peerID]
+	metrics := lqm.links[connID]
 	if metrics == nil {
 		metrics = &LinkMetrics{}
-		lqm.links[proxyName][peerID] = metrics
+		lqm.links[connID] = metrics
 	}
 
 	metrics.updateRTT(float64(rtt.Milliseconds()))
-	util.LogDebug("P2P", "RTT to peer %s via proxy %s: %v", peerID, proxyName, rtt)
+	util.LogDebug("P2P", "RTT on connection %s: %v", connID, rtt)
 }
 
 // updateRTT updates RTT statistics.

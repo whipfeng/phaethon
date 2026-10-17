@@ -470,15 +470,17 @@ func (s *sendState) getStats(channelDrops uint64) (srtt, rto, jitter time.Durati
 		}
 	}
 	
-	// Loss rate = (lost + pendingOld + channelDrops) / (sent + pendingOld + channelDrops)
-	// Channel drops are frames that never made it into the send queue
-	totalWithDrops := sent + pendingOld + int(channelDrops)
-	if totalWithDrops > 0 {
-		lossRate = float64(lost+pendingOld+int(channelDrops)) / float64(totalWithDrops)
+	// Loss rate = (lost + pendingOld) / (sent + pendingOld)
+	// Note: channelDrops are NOT included because they represent queue rejection (backpressure),
+	// not network packet loss. Including cumulative channelDrops with windowed sent/lost
+	// causes misleading results in low-traffic scenarios.
+	total := sent + pendingOld
+	if total > 0 {
+		lossRate = float64(lost+pendingOld) / float64(total)
 	}
 	
 	// Log stats when queried
-	util.LogModuleInfo("p2p", "[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d channelDrops=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d)", 
-		300, sent, lost, pendingOld, channelDrops, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost)
+	util.LogModuleInfo("p2p", "[P2P-STATS] window=%ds sent=%d lost=%d pendingOld=%d lossRate=%.4f jitter=%v samples=%d (cumulative: totalSent=%d totalAcked=%d totalLost=%d channelDrops=%d)", 
+		300, sent, lost, pendingOld, lossRate, jitter, sampleCount, s.totalSent, s.totalAcked, s.totalLost, channelDrops)
 	return
 }

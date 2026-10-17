@@ -276,31 +276,37 @@ func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeRe
 	}
 	
 	// No packets found, block until a packet arrives or stopped
-	select {
-	case <-stopCh:
-		return batch
-	case <-s.notifyCh:
-		// A packet arrived, do another round
-		roundsChecked = 0
-		for i := 0; i < 256 && len(batch) < maxBatch; i++ {
-			idx := (s.round + i) % 256
-			roundsChecked = i + 1
+	for {
+		select {
+		case <-stopCh:
+			return batch
+		case <-s.notifyCh:
+			// A packet arrived, do another round
+			roundsChecked = 0
+			for i := 0; i < 256 && len(batch) < maxBatch; i++ {
+				idx := (s.round + i) % 256
+				roundsChecked = i + 1
 
-			if s.deficits[idx] <= 0 {
-				s.deficits[idx] += s.quantum
-			}
+				if s.deficits[idx] <= 0 {
+					s.deficits[idx] += s.quantum
+				}
 
-			select {
-			case req := <-s.queues[idx]:
-				s.deficits[idx] -= len(req.data)
-				batch = append(batch, req)
-			default:
+				select {
+				case req := <-s.queues[idx]:
+					s.deficits[idx] -= len(req.data)
+					batch = append(batch, req)
+				default:
+				}
 			}
+			s.round = (s.round + roundsChecked) % 256
+			
+			// If we got packets, return; otherwise loop and wait again
+			if len(batch) > 0 {
+				return batch
+			}
+			// Stale notification or packet consumed elsewhere, wait again
 		}
-		s.round = (s.round + roundsChecked) % 256
 	}
-	
-	return batch
 }
 
 // Peer represents a connected P2P peer.

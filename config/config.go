@@ -1480,7 +1480,7 @@ type HTunnelConfig struct {
 // GetPoolSize returns the connection pool size with default fallback.
 func (c *HTunnelConfig) GetPoolSize() int {
 	if c == nil || c.PoolSize <= 0 {
-		return 8
+		return 16
 	}
 	return c.PoolSize
 }

@@ -143,24 +143,6 @@ func (t *PeerQualityTracker) GetByNode(nodeID string) *PeerQuality {
 	return nil
 }
 
-// GetByConnID returns the quality tracker for a specific connection ID.
-func (t *PeerQualityTracker) GetByConnID(connID string) *PeerQuality {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if connID == "" {
-		// Return a dummy quality for empty connID
-		return NewPeerQuality()
-	}
-
-	if q, ok := t.peers[connID]; ok {
-		return q
-	}
-	q := NewPeerQuality()
-	t.peers[connID] = q
-	return q
-}
-
 // Remove removes a specific link from tracking.
 func (t *PeerQualityTracker) Remove(nodeID string, localSeq uint16) {
 	t.mu.Lock()

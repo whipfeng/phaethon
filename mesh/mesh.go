@@ -72,9 +72,8 @@ type PeerSender interface {
 	GetNodeID() string
 	GetProxyName() string    // proxy name (link identifier)
 	GetLinkID() string       // negotiated link ID (seq1-seq2 sorted, internal use)
-	GetLocalSeq() uint16     // local sequence number (for quality lookup, legacy)
-	GetRemoteSeq() uint16    // remote sequence number (legacy)
-	GetConnID() string       // connection ID (both ends see the same ID)
+	GetLocalSeq() uint16     // local sequence number (for gossip advertisement)
+	GetRemoteSeq() uint16    // remote sequence number (for gossip advertisement)
 	GetFriendlyName() string // friendly name (proxy name, for display only)
 	HasProxy() bool          // true if this is an active (outbound) connection
 	GetLinkNIC() *LinkNIC    // direct LinkNIC held by this link (design §5.6)
@@ -87,6 +86,7 @@ type P2PTransport interface {
 	SendMeshGossipToAll(data []byte)
 	ListMeshPeerIDs() []string
 	SetMeshInfo(nodeID, vip string)
+	ResendHelloToAll()
 	StopPeerByProxyName(proxyName string)
 	StopPeerByLinkID(linkID string)
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
@@ -101,8 +101,8 @@ type P2PTransport interface {
 // MeshPeerInfo describes a connected mesh peer.
 type MeshPeerInfo struct {
 	NodeID      string    `json:"nodeId"`
-	LinkKey     string    `json:"linkKey"`     // stable link identity
-	ConnID      string    `json:"connId"`      // connection ID
+	LinkKey     string    `json:"linkKey"`     // stable link identity: activeNodeID:activeSeq
+	LocalSeq    uint16    `json:"localSeq"`    // local sequence number (for quality lookup)
 	Subnet      string    `json:"subnet"`
 	Direct      bool      `json:"direct"`
 	LastSeen    time.Time `json:"lastSeen"`
@@ -1262,7 +1262,8 @@ type FullTopologyEdge struct {
 
 // FullTopologyLink represents a single link with quality metrics.
 type FullTopologyLink struct {
-	ConnID       string  `json:"connId"`               // connection ID
+	LocalSeq     uint16  `json:"localSeq"`               // local sequence number
+	RemoteSeq    uint16  `json:"remoteSeq"`              // remote sequence number
 	FriendlyName string  `json:"friendlyName,omitempty"` // display name (proxy name)
 	SRTT         float64 `json:"srtt,omitempty"`         // smoothed RTT in milliseconds
 	LossRate     float64 `json:"lossRate,omitempty"`     // loss rate (0.0-1.0)
@@ -1324,16 +1325,17 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			key := edgeKey(m.nodeID, peerID)
 
 			// Get link info
-			connID := p.Sender.GetConnID()
+			localSeq := p.Sender.GetLocalSeq()
+			remoteSeq := p.Sender.GetRemoteSeq()
 			friendlyName := p.Sender.GetFriendlyName()
 			if friendlyName == "" {
 				friendlyName = p.Sender.GetProxyName() // fallback
 			}
 
-			// Get link quality from qualityTracker (using connID as key)
+			// Get link quality from qualityTracker
 			var srtt, lossRate, cost float64
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.GetByConnID(connID)
+				quality := m.qualityTracker.Get(peerID, localSeq)
 				avgRTT, loss, _ := quality.Stats()
 				srtt = float64(avgRTT.Milliseconds())
 				lossRate = loss
@@ -1351,7 +1353,8 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			}
 
 			link := FullTopologyLink{
-				ConnID:       connID,
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
 				FriendlyName: friendlyName,
 				SRTT:         srtt,
 				LossRate:     lossRate,
@@ -1392,20 +1395,22 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 					}
 
 					links = append(links, FullTopologyLink{
-						ConnID:   gossipLink.ConnID,
-						SRTT:     gossipLink.SRTT,
-						LossRate: gossipLink.LossRate,
-						Cost:     cost,
+						LocalSeq:     gossipLink.LocalSeq,
+						RemoteSeq:    gossipLink.RemoteSeq,
+						FriendlyName: gossipLink.FriendlyName,
+						SRTT:         gossipLink.SRTT,
+						LossRate:     gossipLink.LossRate,
+						Cost:         cost,
 					})
 				}
 
 				if edge, exists := edgeSet[key]; exists {
 					// Edge already exists (from local peers), add learned links
-					// Deduplicate by connID
+					// Deduplicate by seq pair
 					for _, link := range links {
 						linkExists := false
 						for _, existingLink := range edge.Links {
-							if existingLink.ConnID == link.ConnID {
+							if existingLink.LocalSeq == link.LocalSeq && existingLink.RemoteSeq == link.RemoteSeq {
 								linkExists = true
 								break
 							}
@@ -1538,7 +1543,7 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 		result = append(result, MeshPeerInfo{
 			NodeID:      nodeID,
 			LinkKey:     linkKey,
-			ConnID:      p.Sender.GetConnID(),
+				LocalSeq:    p.Sender.GetLocalSeq(),
 			Direct:      true,
 			Subnet:      p.SubnetStr,
 			LastSeen:    p.LastSeen,
@@ -2109,6 +2114,10 @@ func (m *MeshManager) gossipLoop() {
 				// Check for subnet conflicts and re-select if needed
 				if m.checkSubnetConflict() {
 					m.recomputeRoutes()
+					// Resend hello to all peers to clean up old state and advertise new subnet/VIP
+					if m.p2p != nil {
+						m.p2p.ResendHelloToAll()
+					}
 					m.broadcastGossip()
 				}
 			case meshEventConfigUpdate:
@@ -2180,16 +2189,20 @@ func (m *MeshManager) broadcastGossip() {
 					Links:  []GossipLink{},
 				}
 			}
-			// Get connID for gossip advertisement
-			connID := peer.Sender.GetConnID()
+			// Get seq values for gossip advertisement
+			localSeq := peer.Sender.GetLocalSeq()
+			remoteSeq := peer.Sender.GetRemoteSeq()
+			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
 
 			link := GossipLink{
-				ConnID: connID,
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
+				FriendlyName: friendlyName,
 			}
 
-			// Use connID as key for qualityTracker
+			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.GetByConnID(connID)
+				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate, jitter := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
@@ -2254,7 +2267,7 @@ func (m *MeshManager) broadcastGossip() {
 					if reverseNeighbor.NodeID == claim.nodeID {
 						// Found neighbor's claim about origin, check for matching link
 						for _, reverseLink := range reverseNeighbor.Links {
-							if reverseLink.ConnID == gossipLink.ConnID {
+							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
 								validatedLinks = append(validatedLinks, gossipLink)
 								break
 							}
@@ -2381,6 +2394,7 @@ func (m *MeshManager) broadcastGossip() {
 		}
 
 		info := GossipInfo{
+			Cmd:            "gossip",
 			DomainSuffixes: ds,
 			Routes:         routes,
 			ClaimedSubnets: claims,
@@ -2714,16 +2728,20 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 					Links:  []GossipLink{},
 				}
 			}
-			// Get connID for gossip advertisement
-			connID := peer.Sender.GetConnID()
+			// Get seq values for gossip advertisement
+			localSeq := peer.Sender.GetLocalSeq()
+			remoteSeq := peer.Sender.GetRemoteSeq()
+			friendlyName := peer.Sender.GetFriendlyName() // empty for passive peers
 
 			link := GossipLink{
-				ConnID: connID,
+				LocalSeq:     localSeq,
+				RemoteSeq:    remoteSeq,
+				FriendlyName: friendlyName,
 			}
 
-			// Use connID as key for qualityTracker
+			// Use localSeq as internal key for qualityTracker
 			if m.qualityTracker != nil {
-				quality := m.qualityTracker.GetByConnID(connID)
+				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate, jitter := quality.Stats()
 				link.SRTT = float64(avgRTT.Milliseconds())
 				link.LossRate = lossRate
@@ -2837,14 +2855,15 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 
 // LinkQualityInfo represents a link in the topology graph.
 type LinkQualityInfo struct {
-	From    string   // source node ID
-	To      string   // target node ID
-	LinkNIC *LinkNIC // LinkNIC for direct links (nil for relayed)
-	ConnID  string   // connection ID
-	SRTT    float64  // smoothed RTT in milliseconds
-	LossRate float64 // loss rate (0.0-1.0)
-	Jitter  float64  // jitter in milliseconds
-	Cost    float64  // path cost = SRTT * (1 + LossRate) + Jitter
+	From      string    // source node ID
+	To        string    // target node ID
+	LinkNIC   *LinkNIC  // LinkNIC for direct links (nil for relayed)
+	LocalSeq  uint16    // local sequence number
+	RemoteSeq uint16    // remote sequence number
+	SRTT      float64   // smoothed RTT in milliseconds
+	LossRate  float64   // loss rate (0.0-1.0)
+	Jitter    float64   // jitter in milliseconds
+	Cost      float64   // path cost = SRTT * (1 + LossRate) + Jitter
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -2890,12 +2909,15 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 				Links:  []GossipLink{},
 			}
 		}
-		connID := peer.Sender.GetConnID()
+		localSeq := peer.Sender.GetLocalSeq()
+		remoteSeq := peer.Sender.GetRemoteSeq()
 		link := GossipLink{
-			ConnID: connID,
+			LocalSeq:     localSeq,
+			RemoteSeq:    remoteSeq,
+			FriendlyName: peer.Sender.GetFriendlyName(),
 		}
 		if m.qualityTracker != nil {
-			quality := m.qualityTracker.GetByConnID(connID)
+			quality := m.qualityTracker.Get(nodeID, localSeq)
 			avgRTT, lossRate, jitter := quality.Stats()
 			link.SRTT = float64(avgRTT.Milliseconds())
 			link.LossRate = lossRate
@@ -2947,7 +2969,7 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 				for _, reverseNeighbor := range neighborClaim.neighbors {
 					if reverseNeighbor.NodeID == claim.nodeID {
 						for _, reverseLink := range reverseNeighbor.Links {
-							if reverseLink.ConnID == gossipLink.ConnID {
+							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
 								validatedLinks = append(validatedLinks, gossipLink)
 								break
 							}
@@ -2990,16 +3012,18 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		neighborID := peer.NodeID()
 		graph.Nodes[neighborID] = true
 
-		connID := peer.Sender.GetConnID()
+		localSeq := peer.Sender.GetLocalSeq()
+		remoteSeq := peer.Sender.GetRemoteSeq()
 
 		link := &LinkQualityInfo{
-			From:    selfID,
-			To:      neighborID,
-			LinkNIC: peer.Sender.GetLinkNIC(), // Direct link has LinkNIC (design §5.6)
-			ConnID:  connID,
+			From:      selfID,
+			To:        neighborID,
+			LinkNIC:   peer.Sender.GetLinkNIC(), // Direct link has LinkNIC (design §5.6)
+			LocalSeq:  localSeq,
+			RemoteSeq: remoteSeq,
 		}
 		if m.qualityTracker != nil {
-			quality := m.qualityTracker.GetByConnID(connID)
+			quality := m.qualityTracker.Get(neighborID, localSeq)
 			avgRTT, lossRate, jitterVal := quality.Stats()
 			link.SRTT = float64(avgRTT.Milliseconds())
 			link.LossRate = lossRate
@@ -3042,11 +3066,12 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 			// Process all validated links to this neighbor
 			for _, gossipLink := range neighbor.Links {
 				link := &LinkQualityInfo{
-					From:     fromNode,
-					To:       toNode,
-					ConnID:   gossipLink.ConnID,
-					SRTT:     gossipLink.SRTT,
-					LossRate: gossipLink.LossRate,
+					From:      fromNode,
+					To:        toNode,
+					LocalSeq:  gossipLink.LocalSeq,
+					RemoteSeq: gossipLink.RemoteSeq,
+					SRTT:      gossipLink.SRTT,
+					LossRate:  gossipLink.LossRate,
 				}
 				if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
 					link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
@@ -3127,11 +3152,11 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				if nodes[toNode].visited {
 					continue
 				}
-				// Find the best link (lowest cost, then smallest connID for deterministic tie-breaking) among multiple links
+				// Find the best link (lowest cost, then smallest localSeq for deterministic tie-breaking) among multiple links
 				var bestCost float64 = 1e18
 				var bestLink *LinkQualityInfo
 				for _, link := range links {
-					if link.Cost < bestCost || (link.Cost == bestCost && link.ConnID < bestLink.ConnID) {
+					if link.Cost < bestCost || (link.Cost == bestCost && link.LocalSeq < bestLink.LocalSeq) {
 						bestCost = link.Cost
 						bestLink = link
 					}

@@ -252,8 +252,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		}
 		p2p.CleanupBackup()
 	}
-	p2p.RunningVersion = Version
-	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon")
+	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
 	p2p.GlobalP2PManager.OnStatusChange = func() {
 		util.DefaultVersionNotifier.BumpVersion("p2p")
 	}
@@ -2043,11 +2042,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		resources.ruleConf.Unlock()
 
 		// Build set of existing P2P peer proxy names (same source as StopPeerByProxyName)
-		existingPeersList := p2p.GlobalP2PManager.ActivePeerProxyNames()
-		existingPeers := make(map[string]bool)
-		for _, name := range existingPeersList {
-			existingPeers[name] = true
-		}
+		existingPeers := p2p.GlobalP2PManager.ActivePeerProxyNames()
 
 		for _, proxy := range proxies {
 			isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"

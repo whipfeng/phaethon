@@ -198,36 +198,52 @@ type writeReq struct {
 }
 
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
+// v2: 256 queues (was 16) + Jenkins hash + batch dequeue.
 type DRRScheduler struct {
-	queues   [16]chan writeReq
-	deficits [16]int
+	queues   [256]chan writeReq
+	deficits [256]int
 	quantum  int // bytes per queue per round (default 1500 = MTU)
 	round    int // next queue to check
+	salt     uint32 // random salt for Jenkins hash
 }
 
 // newDRRScheduler creates a new DRR scheduler with the given queues.
-func newDRRScheduler(queues [16]chan writeReq) *DRRScheduler {
+func newDRRScheduler(queues [256]chan writeReq) *DRRScheduler {
 	return &DRRScheduler{
 		queues:  queues,
 		quantum: 1500, // MTU
 		round:   0,
+		salt:    rand.Uint32(),
 	}
 }
 
 // Next returns the next packet to send using DRR fair scheduling.
 // Blocks until a packet is available or stopCh is closed.
 func (s *DRRScheduler) Next(stopCh <-chan struct{}) *writeReq {
-	for {
+	batch := s.NextBatch(1, stopCh)
+	if len(batch) > 0 {
+		return &batch[0]
+	}
+	return nil
+}
+
+// NextBatch returns up to maxBatch packets using DRR fair scheduling.
+// v2: batch dequeue to reduce channel overhead.
+func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeReq {
+	batch := make([]writeReq, 0, maxBatch)
+	
+	for len(batch) < maxBatch {
 		// Check if stopped
 		select {
 		case <-stopCh:
-			return nil
+			return batch
 		default:
 		}
 
 		// Round-robin check all queues
-		for i := 0; i < 16; i++ {
-			idx := (s.round + i) % 16
+		found := false
+		for i := 0; i < 256; i++ {
+			idx := (s.round + i) % 256
 
 			// Replenish deficit if needed
 			if s.deficits[idx] <= 0 {
@@ -238,19 +254,27 @@ func (s *DRRScheduler) Next(stopCh <-chan struct{}) *writeReq {
 			select {
 			case req := <-s.queues[idx]:
 				s.deficits[idx] -= len(req.data)
-				s.round = (idx + 1) % 16 // next round starts from next queue
-				return &req
+				s.round = (idx + 1) % 256 // next round starts from next queue
+				batch = append(batch, req)
+				found = true
+				if len(batch) >= maxBatch {
+					return batch
+				}
 			default:
 			}
 		}
 
 		// All queues empty, brief wait before retry
-		select {
-		case <-stopCh:
-			return nil
-		case <-time.After(100 * time.Microsecond):
+		if !found {
+			select {
+			case <-stopCh:
+				return batch
+			case <-time.After(100 * time.Microsecond):
+			}
 		}
 	}
+	
+	return batch
 }
 
 // Peer represents a connected P2P peer.
@@ -270,7 +294,7 @@ type Peer struct {
 	transport        frame.FrameTransport
 	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
 	ackQueue         chan writeReq // TCP ACK packets (high priority)
-	dataQueues       [16]chan writeReq // per-flow data queues (DRR fair scheduling)
+	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
 	drrOutput        chan writeReq // DRR scheduler output channel
 	controlCh        chan writeReq // hello/gossip priority queue
 	stopCh           chan struct{}
@@ -291,7 +315,7 @@ type Peer struct {
 	// Channel overflow statistics (atomic counters)
 	dnsQueueDrops       uint64 // Frames dropped due to dnsQueue full
 	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
-	dataQueueDrops      [16]uint64 // Frames dropped due to dataQueues[i] full
+	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
 	controlChDrops      uint64 // Frames dropped due to controlCh full
 }
 
@@ -633,7 +657,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		isACK = true
 	} else {
 		// All data packets: use DRR fair scheduling
-		dataQueueIdx = hashFlow(req.data)
+		dataQueueIdx = peer.drrScheduler.hashFlow(req.data)
 		ch = peer.dataQueues[dataQueueIdx]
 	}
 
@@ -802,10 +826,11 @@ func isACKPacket(data []byte) bool {
 	return tcpPayloadLen < 100
 }
 
-// hashFlow computes a flow hash for fair scheduling.
+// hashFlow computes a flow hash for fair scheduling using Jenkins one-at-a-time.
 // Uses 5-tuple (srcIP, dstIP, protocol, srcPort, dstPort) for TCP/UDP,
 // falls back to 3-tuple (srcIP, dstIP, protocol) for other protocols.
-func hashFlow(data []byte) int {
+// v2: Jenkins hash with random salt for better distribution.
+func (s *DRRScheduler) hashFlow(data []byte) int {
 	if len(data) < 20 {
 		return 0
 	}
@@ -821,19 +846,34 @@ func hashFlow(data []byte) int {
 		ihl = 20
 	}
 	
+	// Jenkins one-at-a-time hash with salt
+	h := s.salt
+	
 	// Base hash: srcIP + dstIP + protocol
-	h := int(data[12]) + int(data[13]) + int(data[14]) + int(data[15])   // srcIP
-	h += int(data[16]) + int(data[17]) + int(data[18]) + int(data[19])   // dstIP
-	h += int(protocol)                                                      // protocol
+	for i := 12; i < 20; i++ {
+		h += uint32(data[i])
+		h += h << 10
+		h ^= h >> 6
+	}
+	h += uint32(protocol)
+	h += h << 10
+	h ^= h >> 6
 	
 	// Add ports only for TCP (6) and UDP (17)
 	if (protocol == 6 || protocol == 17) && len(data) >= ihl+4 {
-		srcPort := int(data[ihl])<<8 | int(data[ihl+1])
-		dstPort := int(data[ihl+2])<<8 | int(data[ihl+3])
-		h += srcPort + dstPort
+		for i := ihl; i < ihl+4; i++ {
+			h += uint32(data[i])
+			h += h << 10
+			h ^= h >> 6
+		}
 	}
 	
-	return h % 16
+	// Final mixing
+	h += h << 3
+	h ^= h >> 11
+	h += h << 15
+	
+	return int(h % 256)
 }
 
 // channelPriorityName returns the priority name for logging
@@ -867,9 +907,9 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	
 	// Initialize data queues for DRR fair scheduling
-	var dataQueues [16]chan writeReq
+	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 256)
+		dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
 	}
 	
 	peer := &Peer{
@@ -1025,9 +1065,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	
 	// Initialize data queues for DRR fair scheduling
-	var dataQueues [16]chan writeReq
+	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 256)
+		dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
 	}
 	
 	peer := &Peer{
@@ -1125,11 +1165,11 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.drrOutput = make(chan writeReq, 64)
 		// Reinitialize data queues for DRR fair scheduling
 		for i := range peer.dataQueues {
-			peer.dataQueues[i] = make(chan writeReq, 256)
+			peer.dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
 		}
 		if peer.drrScheduler != nil {
 			peer.drrScheduler.queues = peer.dataQueues
-			peer.drrScheduler.deficits = [16]int{}
+			peer.drrScheduler.deficits = [256]int{}
 			peer.drrScheduler.round = 0
 		}
 		// Create sendState/recvState on first connection attempt.

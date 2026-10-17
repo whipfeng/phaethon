@@ -325,9 +325,117 @@ iperf3 -c 100.2.0.10 -b 100M -t 10
 - **DRR 轮询间隔**：100 微秒（无包时）
 - **分类开销**：O(1)，仅解析 IP 头前 20-60 字节
 
+## v2 优化方案（2026-10-17）
+
+### 问题分析
+
+当前 v1 实现（16 队列）存在以下问题：
+
+1. **Hash 冲突严重**：100+ 流 hash 到 16 队列，平均每队列 6 个流，公平性差
+2. **加法 hash 分布差**：简单相加导致更多冲突
+3. **每次调度 1 个包**：DRR `Next()` 返回 1 个包，channel 跳转开销大
+
+**对比业界**：
+- Linux FQ-CoDel：1024 队列，冲突率 <5%
+- WireGuard/Tailscale：不做公平队列，依赖外层 TCP
+
+### 优化方案
+
+#### 1. 队列数：16 → 256
+
+```go
+const numDataQueues = 256  // 16 → 256
+const queueCapacity = 32   // 256 → 32（保持总内存）
+```
+
+**内存对比**：
+- v1：16 × 256 × 1.5KB = ~6MB
+- v2：256 × 32 × 1.5KB = ~12MB（可接受）
+
+**收益**：冲突率从 ~100% 降到 ~5%
+
+#### 2. Hash 算法：加法 → Jenkins
+
+```go
+func (s *DRRScheduler) hashFlow(data []byte) uint32 {
+    h := s.salt  // 随机 salt，启动时生成
+    // Jenkins one-at-a-time
+    for _, b := range tupleBytes {
+        h += uint32(b)
+        h += h << 10
+        h ^= h >> 6
+    }
+    h += h << 3
+    h ^= h >> 11
+    h += h << 15
+    return h
+}
+```
+
+**收益**：分布更均匀，减少冲突
+
+#### 3. 批量出队：每次 1 包 → 每次 4-8 包
+
+```go
+func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeReq {
+    batch := make([]writeReq, 0, maxBatch)
+    for len(batch) < maxBatch {
+        // DRR 轮询，每次从不同队列取包
+        for i := 0; i < len(s.queues); i++ {
+            idx := (s.round + i) % len(s.queues)
+            if s.deficits[idx] <= 0 {
+                s.deficits[idx] += s.quantum
+            }
+            select {
+            case req := <-s.queues[idx]:
+                batch = append(batch, req)
+                s.deficits[idx] -= len(req.data)
+                s.round = (idx + 1) % len(s.queues)
+                if len(batch) >= maxBatch {
+                    return batch
+                }
+            default:
+            }
+        }
+        // 所有队列空，等待
+        select {
+        case <-stopCh:
+            return batch
+        case <-time.After(100 * time.Microsecond):
+        }
+    }
+    return batch
+}
+```
+
+**收益**：减少 channel 跳转开销，提升效率
+
+### 不做 CoDel 丢包
+
+**原因**：隧道流量会双重重传（外层 TCP + 内层 TCP），有害无益。
+
+**替代方案**：队列满时 tail drop（当前行为）即可。
+
+### 实现计划
+
+- [ ] 修改 `DRRScheduler`：16 → 256 队列
+- [ ] 实现 Jenkins hash + 随机 salt
+- [ ] 实现 `NextBatch` 批量出队
+- [ ] 修改 `writeLoop` 使用 `NextBatch`
+- [ ] 编译验证
+- [ ] 部署到 QG 环境测试
+- [ ] 验证公平性和性能
+
+### 预期效果
+
+- **公平性**：100 个流带宽分配误差 <10%（v1 误差 >50%）
+- **效率**：批量发送减少 50% channel 开销
+- **内存**：增加 ~6MB（可接受）
+
 ## 更新日志
 
 - 2026-10-15: 初始设计
 - 2026-10-15: 阶段 1-2 完成（DNS 专用队列）
 - 2026-10-15: 阶段 3 完成（ACK 队列 + 16 数据队列 + DRR 公平调度）
 - 2026-10-15: QG 环境部署验证通过，零丢包
+- 2026-10-17: v2 优化方案设计（256 队列 + Jenkins hash + 批量出队）

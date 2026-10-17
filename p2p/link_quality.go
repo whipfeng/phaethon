@@ -35,8 +35,9 @@ type LinkMetrics struct {
 	RTT        float64 // Average RTT (ms)
 	RTTMin     float64 // Minimum RTT
 	RTTMax     float64 // Maximum RTT
+	Jitter     float64 // RTT jitter (ms) - mean deviation
 	ErrorRate  float64 // Error rate (0-1)
-	Throughput int64   // Throughput (bytes/sec)
+	Throughput int64   // Throughput (bytes/sec) - smoothed
 
 	// Statistics
 	TotalPings  uint64 // Total ping count
@@ -47,30 +48,36 @@ type LinkMetrics struct {
 
 	// Last update time
 	LastUpdated time.Time
+
+	// For jitter calculation
+	lastRTT float64
 }
 
 // NewLinkQualityMonitor creates a new LinkQualityMonitor.
 func NewLinkQualityMonitor(p2pMgr *P2PManager, localID string) *LinkQualityMonitor {
-	return &LinkQualityMonitor{
+	lqm := &LinkQualityMonitor{
 		p2pMgr:        p2pMgr,
 		localID:       localID,
 		links:         make(map[string]*LinkMetrics),
-		probeInterval: 10 * time.Second,
-		probeTimeout:  5 * time.Second,
+		probeInterval: 5 * time.Second, // More frequent probing
+		probeTimeout:  3 * time.Second,
 		stopCh:        make(chan struct{}),
 	}
+	// Auto-start the monitor
+	lqm.Start()
+	return lqm
 }
 
 // Start starts the link quality monitor.
 func (lqm *LinkQualityMonitor) Start() {
 	go lqm.probeRTT()
-	util.LogInfo("P2P", "LinkQualityMonitor started")
+	util.LogModuleInfo("P2P", "LinkQualityMonitor started")
 }
 
 // Stop stops the link quality monitor.
 func (lqm *LinkQualityMonitor) Stop() {
 	close(lqm.stopCh)
-	util.LogInfo("P2P", "LinkQualityMonitor stopped")
+	util.LogModuleInfo("P2P", "LinkQualityMonitor stopped")
 }
 
 // probeRTT periodically probes RTT to all connected peers.
@@ -153,7 +160,7 @@ func (lqm *LinkQualityMonitor) recordPingFailure(connID string) {
 	metrics.ErrorRate = float64(metrics.FailedPings) / float64(metrics.TotalPings)
 	metrics.QualityScore = calculateQualityScore(metrics)
 
-	util.LogDebug("P2P", "Ping failed on connection %s", connID)
+	util.LogModuleDebug("P2P", "Ping failed on connection %s", connID)
 }
 
 // recordRTT records a successful RTT measurement.
@@ -168,7 +175,7 @@ func (lqm *LinkQualityMonitor) recordRTT(connID string, rtt time.Duration) {
 	}
 
 	metrics.updateRTT(float64(rtt.Milliseconds()))
-	util.LogDebug("P2P", "RTT on connection %s: %v", connID, rtt)
+	util.LogModuleDebug("P2P", "RTT on connection %s: %v", connID, rtt)
 }
 
 // updateRTT updates RTT statistics.
@@ -183,7 +190,18 @@ func (m *LinkMetrics) updateRTT(rttMs float64) {
 		m.RTTMax = rttMs
 	}
 
-	// Exponential moving average
+	// Calculate jitter (mean absolute deviation)
+	if m.lastRTT > 0 {
+		deviation := math.Abs(rttMs - m.lastRTT)
+		if m.Jitter == 0 {
+			m.Jitter = deviation
+		} else {
+			m.Jitter = m.Jitter*0.8 + deviation*0.2 // Exponential moving average
+		}
+	}
+	m.lastRTT = rttMs
+
+	// Exponential moving average for RTT
 	if m.RTT == 0 {
 		m.RTT = rttMs
 	} else {
@@ -199,14 +217,17 @@ func calculateQualityScore(m *LinkMetrics) float64 {
 	// RTT score: lower is better (baseline: 100ms = 0, 10ms = 100)
 	rttScore := math.Max(0, 100-(m.RTT-10))
 
+	// Jitter score: lower is better (0ms = 100, 50ms = 0)
+	jitterScore := math.Max(0, 100-m.Jitter*2)
+
 	// Error rate score: lower is better
 	errorScore := (1 - m.ErrorRate) * 100
 
 	// Throughput score: higher is better (log scale)
 	throughputScore := math.Min(100, math.Log10(float64(m.Throughput)/1000+1)*20)
 
-	// Weighted average
-	score := rttScore*0.4 + errorScore*0.4 + throughputScore*0.2
+	// Weighted average: RTT and error rate are most important
+	score := rttScore*0.3 + jitterScore*0.2 + errorScore*0.3 + throughputScore*0.2
 
 	return math.Max(0, math.Min(100, score))
 }

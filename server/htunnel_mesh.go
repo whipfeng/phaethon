@@ -64,8 +64,7 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	w.WriteHeader(200)
 	util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
 
-	// TODO: libp2p integration - old P2P transport handling removed
-	// go handleP2PTransport(meshChannelTransport{ch: ch}, "mesh:"+connID)
+	go handleP2PTransport(meshChannelTransport{ch: ch}, "mesh:"+connID)
 
 	// Start dispatcher: distributes meshOut frames to waiting GET requests
 	go s.meshDispatchLoop(ch)

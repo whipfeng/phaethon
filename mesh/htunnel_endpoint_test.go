@@ -49,7 +49,6 @@ func (*mockPeerSender) GetProxyName() string    { return "" }
 func (*mockPeerSender) GetLinkID() string       { return "" }
 func (*mockPeerSender) GetLocalSeq() uint16     { return 0 }
 func (*mockPeerSender) GetRemoteSeq() uint16    { return 0 }
-func (*mockPeerSender) GetConnID() string       { return "" }
 func (*mockPeerSender) GetFriendlyName() string { return "" }
 func (*mockPeerSender) GetLinkNIC() *LinkNIC    { return nil }
 func (*mockPeerSender) HasProxy() bool          { return false }

@@ -73,7 +73,7 @@ func init() {
 // linkStats holds persistent statistics for a link (survives P2P reconnections).
 type linkStats struct {
 	sendState      *sendState
-	dataDrops      uint64 // total data queue drops (dns + ack + data[16])
+	dataDrops      uint64 // total data queue drops (dns + ack + data[256])
 	controlChDrops uint64
 }
 
@@ -205,15 +205,27 @@ type DRRScheduler struct {
 	quantum  int // bytes per queue per round (default 1500 = MTU)
 	round    int // next queue to check
 	salt     uint32 // random salt for Jenkins hash
+	notifyCh chan struct{} // signaled when a packet is enqueued
 }
 
 // newDRRScheduler creates a new DRR scheduler with the given queues.
 func newDRRScheduler(queues [256]chan writeReq) *DRRScheduler {
 	return &DRRScheduler{
-		queues:  queues,
-		quantum: 1500, // MTU
-		round:   0,
-		salt:    rand.Uint32(),
+		queues:   queues,
+		quantum:  1500, // MTU
+		round:    0,
+		salt:     rand.Uint32(),
+		notifyCh: make(chan struct{}, 1), // buffered channel for notification
+	}
+}
+
+// Notify signals that a packet has been enqueued.
+// Called by enqueueWriteReq when a packet is added to a data queue.
+func (s *DRRScheduler) Notify() {
+	select {
+	case s.notifyCh <- struct{}{}:
+	default:
+		// Already notified, don't block
 	}
 }
 
@@ -229,49 +241,63 @@ func (s *DRRScheduler) Next(stopCh <-chan struct{}) *writeReq {
 
 // NextBatch returns up to maxBatch packets using DRR fair scheduling.
 // v2: batch dequeue to reduce channel overhead.
+// Does ONE round through all 256 queues, collecting packets fairly.
+// If no packets are found, blocks until a packet arrives or stopCh is closed.
+// Next round starts from where this round stopped (fair across rounds).
 func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeReq {
 	batch := make([]writeReq, 0, maxBatch)
 	
-	for len(batch) < maxBatch {
-		// Check if stopped
-		select {
-		case <-stopCh:
-			return batch
-		default:
+	// Do ONE round through all 256 queues (or until batch is full)
+	roundsChecked := 0
+	for i := 0; i < 256 && len(batch) < maxBatch; i++ {
+		idx := (s.round + i) % 256
+		roundsChecked = i + 1
+
+		// Replenish deficit if needed
+		if s.deficits[idx] <= 0 {
+			s.deficits[idx] += s.quantum
 		}
 
-		// Round-robin check all queues
-		found := false
-		for i := 0; i < 256; i++ {
+		// Non-blocking try to dequeue
+		select {
+		case req := <-s.queues[idx]:
+			s.deficits[idx] -= len(req.data)
+			batch = append(batch, req)
+		default:
+		}
+	}
+	
+	// Update round for next time: start from where we stopped
+	s.round = (s.round + roundsChecked) % 256
+	
+	// If we got at least one packet, return immediately
+	if len(batch) > 0 {
+		return batch
+	}
+	
+	// No packets found, block until a packet arrives or stopped
+	select {
+	case <-stopCh:
+		return batch
+	case <-s.notifyCh:
+		// A packet arrived, do another round
+		roundsChecked = 0
+		for i := 0; i < 256 && len(batch) < maxBatch; i++ {
 			idx := (s.round + i) % 256
+			roundsChecked = i + 1
 
-			// Replenish deficit if needed
 			if s.deficits[idx] <= 0 {
 				s.deficits[idx] += s.quantum
 			}
 
-			// Non-blocking try to dequeue
 			select {
 			case req := <-s.queues[idx]:
 				s.deficits[idx] -= len(req.data)
-				s.round = (idx + 1) % 256 // next round starts from next queue
 				batch = append(batch, req)
-				found = true
-				if len(batch) >= maxBatch {
-					return batch
-				}
 			default:
 			}
 		}
-
-		// All queues empty, brief wait before retry
-		if !found {
-			select {
-			case <-stopCh:
-				return batch
-			case <-time.After(100 * time.Microsecond):
-			}
-		}
+		s.round = (s.round + roundsChecked) % 256
 	}
 	
 	return batch
@@ -585,18 +611,24 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 }
 
 // drrLoop runs the DRR fair scheduler in a dedicated goroutine.
-// Reads from dataQueues[16] using DRR algorithm, sends to drrOutput.
+// Reads from dataQueues[256] using DRR algorithm, sends to drrOutput.
+// v2: batch dequeue to reduce channel overhead and queue iteration.
 // Exits when stopCh is closed.
 func (m *P2PManager) drrLoop(peer *Peer) {
 	for {
-		req := peer.drrScheduler.Next(peer.stopCh)
-		if req == nil {
+		// Batch dequeue: get up to 64 packets in one iteration
+		batch := peer.drrScheduler.NextBatch(64, peer.stopCh)
+		if len(batch) == 0 {
 			return // stopped
 		}
-		select {
-		case <-peer.stopCh:
-			return
-		case peer.drrOutput <- *req:
+		
+		// Send batch to drrOutput channel
+		for _, req := range batch {
+			select {
+			case <-peer.stopCh:
+				return
+			case peer.drrOutput <- req:
+			}
 		}
 	}
 }
@@ -716,6 +748,10 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d chLen=%d priority=%s", 
 				peer.ID, len(req.data), len(ch), channelPriorityName(ch, peer))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
+		}
+		// Notify DRR scheduler if this is a data queue
+		if dataQueueIdx >= 0 {
+			peer.drrScheduler.Notify()
 		}
 		return nil
 	default:
@@ -1685,7 +1721,7 @@ func (m *P2PManager) GetPeers() []Peer {
 }
 
 // GetLinkQualityStats returns ACK-based link quality stats for a peer by nodeID.
-// totalDataDrops returns the sum of all data queue drops (dns + ack + data[16]).
+// totalDataDrops returns the sum of all data queue drops (dns + ack + data[256]).
 func (p *Peer) totalDataDrops() uint64 {
 	var total uint64
 	total += atomic.LoadUint64(&p.dnsQueueDrops)

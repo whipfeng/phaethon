@@ -63,12 +63,10 @@ type GossipDomainSuffix struct {
 
 // GossipLink represents a single link with quality metrics.
 type GossipLink struct {
-	LocalSeq     uint16  `json:"localSeq"`               // 本端声明的 seq
-	RemoteSeq    uint16  `json:"remoteSeq"`              // 对端声明的 seq
-	FriendlyName string  `json:"friendlyName,omitempty"` // 友好名称（代理名，仅展示）
-	SRTT         float64 `json:"srtt,omitempty"`         // 平滑 RTT (ms)
-	LossRate     float64 `json:"lossRate,omitempty"`     // 丢包率 (0.0-1.0)
-	Jitter       float64 `json:"jitter,omitempty"`       // 抖动 (ms)，向后兼容（旧节点为 0）
+	ConnID   string  `json:"connId"`             // connection ID (both ends see the same ID)
+	SRTT     float64 `json:"srtt,omitempty"`     // 平滑 RTT (ms)
+	LossRate float64 `json:"lossRate,omitempty"` // 丢包率 (0.0-1.0)
+	Jitter   float64 `json:"jitter,omitempty"`   // 抖动 (ms)
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.
@@ -92,19 +90,18 @@ type GossipTopologyEdge struct {
 }
 
 // GossipInfo is the gossip payload exchanged between nodes.
-// hello and gossip use the same structure; hello is a superset with Cmd and ProtocolVersion.
+// With libp2p, connection establishment is handled by libp2p, so we only need topology advertisement.
+// ProtocolVersion/Seq/FriendlyName are kept for console display, not for connection identification.
 type GossipInfo struct {
-	// Protocol fields (only used by hello)
-	Cmd             string `json:"cmd,omitempty"`             // "hello" or "gossip"
-	ProtocolVersion int    `json:"protocolVersion,omitempty"` // only in hello
-	Seq             uint16 `json:"seq,omitempty"`             // 本端生成的序列号（hello 协商用）
-	FriendlyName    string `json:"friendlyName,omitempty"`    // 友好名称（代理名，hello 协商用）
+	// Protocol fields (for display/versioning, not for connection identification)
+	ProtocolVersion int    `json:"protocolVersion,omitempty"` // 协议版本
+	Seq             uint16 `json:"seq,omitempty"`             // 序列号（控制台展示用，非链路标识）
+	FriendlyName    string `json:"friendlyName,omitempty"`    // 友好名称（主动端传递，控制台展示用）
 
-	// Topology information (both hello and gossip carry this)
+	// Topology information
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`
 	Routes         []GossipRoute         `json:"routes,omitempty"`
 	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
-	// TopologyEdges removed - topology expressed via ClaimedSubnets.Neighbors
 }
 
 // Topology tracks mesh peers and their advertised capabilities.

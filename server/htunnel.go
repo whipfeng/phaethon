@@ -504,7 +504,8 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 				case reverse.BindPortControl:
 					go handleControlConnection(revConn, address)
 				case reverse.BindPortP2P:
-					go handleP2PConnection(revConn, address)
+					// TODO: libp2p integration - old P2P handling removed
+					// go handleP2PConnection(revConn, address)
 				default:
 					go reverse.HandleReverseConnection(revConn, ch.address)
 				}

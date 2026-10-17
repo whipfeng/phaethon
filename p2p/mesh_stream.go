@@ -34,7 +34,7 @@ func (h *MeshStreamHandler) HandleStream(stream network.Stream) {
 	defer stream.Close()
 
 	peerID := stream.Conn().RemotePeer()
-	util.LogInfo("P2P", "New mesh stream from peer: %s", peerID)
+	util.LogModuleInfo("P2P", "New mesh stream from peer: %s", peerID)
 
 	// Read mesh packets from the stream
 	for {
@@ -42,9 +42,9 @@ func (h *MeshStreamHandler) HandleStream(stream network.Stream) {
 		var length uint32
 		if err := binary.Read(stream, binary.BigEndian, &length); err != nil {
 			if err == io.EOF {
-				util.LogInfo("P2P", "Stream closed by peer: %s", peerID)
+				util.LogModuleInfo("P2P", "Stream closed by peer: %s", peerID)
 			} else {
-				util.LogError("P2P", "Failed to read from stream (peer=%s): %v", peerID, err)
+				util.LogModuleError("P2P", "Failed to read from stream (peer=%s): %v", peerID, err)
 			}
 			return
 		}
@@ -52,13 +52,13 @@ func (h *MeshStreamHandler) HandleStream(stream network.Stream) {
 		// Read packet data
 		data := make([]byte, length)
 		if _, err := io.ReadFull(stream, data); err != nil {
-			util.LogError("P2P", "Failed to read packet data (peer=%s): %v", peerID, err)
+			util.LogModuleError("P2P", "Failed to read packet data (peer=%s): %v", peerID, err)
 			return
 		}
 
 		// Process mesh packet
 		// TODO: Integrate with MeshManager to handle the packet
-		util.LogDebug("P2P", "Received mesh packet from %s: %d bytes", peerID, length)
+		util.LogModuleDebug("P2P", "Received mesh packet from %s: %d bytes", peerID, length)
 	}
 }
 
@@ -109,7 +109,7 @@ func (h *MeshStreamHandler) getOrCreateStream(ctx context.Context, proxyName str
 	}
 
 	h.streams[peerID] = stream
-	util.LogInfo("P2P", "Created stream to peer %s via proxy %s", peerID, proxyName)
+	util.LogModuleInfo("P2P", "Created stream to peer %s via proxy %s", peerID, proxyName)
 
 	return stream, nil
 }
@@ -122,6 +122,6 @@ func (h *MeshStreamHandler) RemoveStream(peerID peer.ID) {
 	if stream, ok := h.streams[peerID]; ok {
 		stream.Close()
 		delete(h.streams, peerID)
-		util.LogInfo("P2P", "Removed stream for peer: %s", peerID)
+		util.LogModuleInfo("P2P", "Removed stream for peer: %s", peerID)
 	}
 }

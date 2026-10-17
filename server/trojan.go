@@ -116,7 +116,8 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 		}
 		if dstPort == reverse.BindPortP2P {
 			// P2P connection: PORT=2 means this is a P2P channel
-			handleP2PConnection(clientConn, dstAddr)
+			// TODO: libp2p integration - old P2P handling removed
+			// handleP2PConnection(clientConn, dstAddr)
 			shouldClose = false
 			return
 		}

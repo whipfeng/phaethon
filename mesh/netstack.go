@@ -284,13 +284,20 @@ var V2RouteLookup func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net
 func CreateV2RouteFunc(proxyName string) func() stack.RouteDecision {
 	return func() stack.RouteDecision {
 		if V2RouteLookup == nil {
+			util.LogModuleError("netstack", "[V2-ROUTE] V2RouteLookup not initialized for proxy=%s", proxyName)
 			return stack.RouteDecision{}
 		}
 		linkNICID, peerSubnet, ok := V2RouteLookup(proxyName)
 		if !ok || peerSubnet == nil {
+			util.LogModuleError("netstack", "[V2-ROUTE] lookup failed for proxy=%s ok=%v peerSubnet=%v", proxyName, ok, peerSubnet)
+			return stack.RouteDecision{}
+		}
+		if linkNICID == 0 {
+			util.LogModuleError("netstack", "[V2-ROUTE] invalid linkNICID=0 for proxy=%s", proxyName)
 			return stack.RouteDecision{}
 		}
 		eip := CalculateEIP(peerSubnet)
+		util.LogModuleInfo("netstack", "[V2-ROUTE] proxy=%s linkNICID=%d peerSubnet=%s eip=%s", proxyName, linkNICID, peerSubnet, eip)
 		return stack.RouteDecision{
 			EgressNIC: linkNICID,
 			EgressEIP: tcpip.AddrFrom4Slice(eip),

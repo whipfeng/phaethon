@@ -57,15 +57,24 @@ func init() {
 	LookupProxyPeerRoute = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
 		mgr := GlobalP2PManager
 		if mgr == nil {
+			util.LogModuleError("p2p", "[V2-LOOKUP] GlobalP2PManager is nil for proxy=%s", proxyName)
 			return 0, nil, false
 		}
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		for _, peer := range mgr.peers {
-			if peer.ProxyName == proxyName && peer.linkNIC != nil {
-				return peer.linkNIC.NICID(), peer.linkNIC.PeerSubnet(), true
+			if peer.ProxyName == proxyName {
+				if peer.linkNIC == nil {
+					util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.Status)
+					return 0, nil, false
+				}
+				nicID := peer.linkNIC.NICID()
+				subnet := peer.linkNIC.PeerSubnet()
+				util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.Status)
+				return nicID, subnet, true
 			}
 		}
+		util.LogModuleError("p2p", "[V2-LOOKUP] no peer found for proxy=%s", proxyName)
 		return 0, nil, false
 	}
 }

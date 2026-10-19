@@ -64,13 +64,15 @@ func init() {
 		defer mgr.mu.Unlock()
 		for _, peer := range mgr.peers {
 			if peer.ProxyName == proxyName {
-				if peer.linkNIC == nil {
-					util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.Status)
+				// Use thread-safe GetLinkNIC() (fix race condition #2)
+				linkNIC := peer.GetLinkNIC()
+				if linkNIC == nil {
+					util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
 					return 0, nil, false
 				}
-				nicID := peer.linkNIC.NICID()
-				subnet := peer.linkNIC.PeerSubnet()
-				util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.Status)
+				nicID := linkNIC.NICID()
+				subnet := linkNIC.PeerSubnet()
+				util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
 				return nicID, subnet, true
 			}
 		}
@@ -114,6 +116,10 @@ type P2PManager struct {
 	meshInboundDrops uint64 // Frames dropped due to meshInboundCh full
 
 	OnStatusChange func() // callback when peer status changes
+
+	// Debounce mechanism for OnStatusChange (fix race condition #5)
+	statusChangeTimer *time.Timer
+	statusChangeMu    sync.Mutex
 }
 
 type meshInboundPacket struct {
@@ -195,7 +201,7 @@ func (s *peerSender) HasProxy() bool {
 
 // GetLinkNIC returns the LinkNIC directly held by this link (design §5.6).
 func (s *peerSender) GetLinkNIC() *mesh.LinkNIC {
-	return s.peer.linkNIC
+	return s.peer.GetLinkNIC()
 }
 
 // writeReq is a frame queued for async write on the peer connection.
@@ -323,7 +329,6 @@ type Peer struct {
 	ID        string `json:"id"`        // unique connection ID (localSeq-based)
 	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
 	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
-	Status    string `json:"status"`    // "connecting", "helloed", "upToDate", "failed"
 	LastSeen  time.Time `json:"lastSeen"`
 
 	// LinkID negotiation (hello phase)
@@ -332,7 +337,12 @@ type Peer struct {
 	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接，仅内部使用）
 	FriendlyName string // 友好名称（代理名，仅展示）
 
-	transport        frame.FrameTransport
+	// Atomic fields for concurrent access (fix race condition #2 and #4)
+	statusAtomic   atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
+	linkNICPtr     atomic.Pointer[mesh.LinkNIC]
+	meshSenderPtr  atomic.Pointer[peerSender]
+
+	transport        frame.FrameTransport // protected by mutex (atomic.Pointer cannot wrap interface)
 	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
 	ackQueue         chan writeReq // TCP ACK packets (high priority)
 	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
@@ -340,7 +350,7 @@ type Peer struct {
 	controlCh        chan writeReq // hello/gossip priority queue
 	stopCh           chan struct{}
 	stopOnce         sync.Once // ensures stopCh is closed exactly once
-	meshSender       *peerSender   // mesh peer sender, created on hello
+	meshSender       *peerSender   // DEPRECATED: use meshSenderPtr
 	proxy            *config.Proxy // proxy config this peer was started with
 
 	// Reliable transmission state (v7)
@@ -348,6 +358,7 @@ type Peer struct {
 	recvState *recvState // tracks incoming control frames
 
 	// LinkNIC: 链路直接持有自己的 LinkNIC 指针（设计 §5.4）
+	// DEPRECATED: use linkNICPtr
 	linkNIC *mesh.LinkNIC
 
 	// DRR scheduler for data queues
@@ -358,6 +369,36 @@ type Peer struct {
 	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
 	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
 	controlChDrops      uint64 // Frames dropped due to controlCh full
+}
+
+// Status getter/setter (thread-safe)
+func (p *Peer) GetStatus() string {
+	if v := p.statusAtomic.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func (p *Peer) SetStatus(status string) {
+	p.statusAtomic.Store(status)
+}
+
+// LinkNIC getter/setter (thread-safe, fix race condition #2)
+func (p *Peer) GetLinkNIC() *mesh.LinkNIC {
+	return p.linkNICPtr.Load()
+}
+
+func (p *Peer) SetLinkNIC(nic *mesh.LinkNIC) {
+	p.linkNICPtr.Store(nic)
+}
+
+// MeshSender getter/setter (thread-safe)
+func (p *Peer) GetMeshSender() *peerSender {
+	return p.meshSenderPtr.Load()
+}
+
+func (p *Peer) SetMeshSender(s *peerSender) {
+	p.meshSenderPtr.Store(s)
 }
 
 // NewP2PManager creates a new P2P manager.
@@ -428,12 +469,33 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 	result := make(map[string]map[string]interface{})
 	for name, peer := range m.peers {
 		result[name] = map[string]interface{}{
-			"status":   peer.Status,
+			"status":   peer.GetStatus(),
 			"nodeId":   peer.NodeID,
 			"lastSeen": peer.LastSeen,
 		}
 	}
 	return result
+}
+
+// notifyStatusChange debounces OnStatusChange calls.
+// Multiple rapid status changes within 100ms are coalesced into a single callback.
+func (m *P2PManager) notifyStatusChange() {
+	if m.OnStatusChange == nil {
+		return
+	}
+
+	m.statusChangeMu.Lock()
+	defer m.statusChangeMu.Unlock()
+
+	// Cancel any pending timer
+	if m.statusChangeTimer != nil {
+		m.statusChangeTimer.Stop()
+	}
+
+	// Schedule new callback after 100ms debounce window
+	m.statusChangeTimer = time.AfterFunc(100*time.Millisecond, func() {
+		m.OnStatusChange()
+	})
 }
 
 // peerWriteLoop drains the peer's queues and writes frames via the peer
@@ -965,7 +1027,6 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	
 	peer := &Peer{
 		ID:             fmt.Sprintf("%d", seq),
-		Status:         "connecting",
 		LastSeen:       time.Now(),
 		transport:      t,
 		dnsQueue:       make(chan writeReq, 512),
@@ -979,6 +1040,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		Seq:            seq,
 		drrScheduler:   newDRRScheduler(dataQueues),
 	}
+	peer.SetStatus("connecting")
 
 	m.mu.Lock()
 	if m.stopped {
@@ -992,13 +1054,13 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	defer func() {
 		stopPeer(peer)
 		m.mu.Lock()
-		if peer.meshSender != nil && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(peer.meshSender)
+		if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
+			m.meshHandler.UnregisterPeer(sender)
 		}
 		// Delete LinkNIC when peer disconnects (design §5.6)
-		if peer.linkNIC != nil && m.meshHandler != nil {
-			m.meshHandler.DeleteLinkNIC(peer.linkNIC)
-			peer.linkNIC = nil
+		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
+			m.meshHandler.DeleteLinkNIC(linkNIC)
+			peer.SetLinkNIC(nil)
 		}
 		// Mark all pending frames as lost before saving to linkStats.
 		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
@@ -1098,21 +1160,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	util.LogModuleInfo("p2p", "[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 
-	// Stop any existing peer with the same proxy name to prevent duplicate connections.
-	m.mu.Lock()
-	var existing *Peer
-	for _, p := range m.peers {
-		if p.ProxyName == proxy.Name {
-			existing = p
-			break
-		}
-	}
-	m.mu.Unlock()
-	if existing != nil {
-		util.LogModuleInfo("p2p", "[P2P] stopping existing peer for proxy %s before starting new one", proxy.Name)
-		stopPeer(existing)
-	}
-
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	
 	// Initialize data queues for DRR fair scheduling
@@ -1124,7 +1171,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	peer := &Peer{
 		ID:           fmt.Sprintf("%d", seq),
 		ProxyName:    proxy.Name,
-		Status:       "connecting",
 		LastSeen:     time.Now(),
 		stopCh:       make(chan struct{}),
 		proxy:        proxy,
@@ -1136,26 +1182,42 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		controlCh:    make(chan writeReq, 128),
 		drrScheduler: newDRRScheduler(dataQueues),
 	}
+	peer.SetStatus("connecting")
 
+	// Atomic check-stop-create-register (fix race condition #1)
+	// Hold the lock throughout to prevent duplicate peers with same ProxyName
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
 		stopPeer(peer)
 		return
 	}
+	
+	// Stop any existing peer with the same proxy name
+	for _, p := range m.peers {
+		if p.ProxyName == proxy.Name {
+			util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", p.ID, proxy.Name)
+			// stopPeer uses sync.Once, safe to call while holding lock
+			stopPeer(p)
+			delete(m.peers, p.ID)
+			break
+		}
+	}
+	
+	// Register new peer atomically
 	m.peers[peer.ID] = peer
 	m.mu.Unlock()
 
 	defer func() {
 		stopPeer(peer)
 		m.mu.Lock()
-		if peer.meshSender != nil && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(peer.meshSender)
+		if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
+			m.meshHandler.UnregisterPeer(sender)
 		}
 		// Delete LinkNIC when peer disconnects (design §5.6)
-		if peer.linkNIC != nil && m.meshHandler != nil {
-			m.meshHandler.DeleteLinkNIC(peer.linkNIC)
-			peer.linkNIC = nil
+		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
+			m.meshHandler.DeleteLinkNIC(linkNIC)
+			peer.SetLinkNIC(nil)
 		}
 		// Mark all pending frames as lost.
 		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
@@ -1191,10 +1253,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		transport, err := p2pDialer.DialP2P()
 		if err != nil {
 			util.LogModuleInfo("p2p", "[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
-			peer.Status = "failed"
-			if m.OnStatusChange != nil {
-				go m.OnStatusChange()
-			}
+			peer.SetStatus("failed")
+			m.notifyStatusChange()
 			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
 			jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
 			select {
@@ -1232,10 +1292,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if peer.recvState == nil {
 			peer.recvState = newRecvState()
 		}
-		peer.Status = "connecting"
-		if m.OnStatusChange != nil {
-			go m.OnStatusChange()
-		}
+		peer.SetStatus("connecting")
+		m.notifyStatusChange()
 		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
 		// Run session in a closure so we can use defer for cleanup
@@ -1244,15 +1302,15 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				transport.Close()
 				// Clean up mesh peer registration
 				m.mu.Lock()
-				if peer.meshSender != nil && m.meshHandler != nil {
-					m.meshHandler.UnregisterPeer(peer.meshSender)
+				if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
+					m.meshHandler.UnregisterPeer(sender)
 				}
 				// Delete LinkNIC when peer disconnects (design §5.6)
-				if peer.linkNIC != nil && m.meshHandler != nil {
-					m.meshHandler.DeleteLinkNIC(peer.linkNIC)
-					peer.linkNIC = nil
+				if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
+					m.meshHandler.DeleteLinkNIC(linkNIC)
+					peer.SetLinkNIC(nil)
 				}
-				peer.meshSender = nil
+				peer.SetMeshSender(nil)
 				m.mu.Unlock()
 			}()
 
@@ -1264,7 +1322,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// Session ended. Instead of reusing the same peer object (stale
 		// seq/ID), stop this peer and spawn a fresh StartPeer so the new
 		// connection gets a brand-new seq, peer.ID, and clean state.
-		if peer.Status != "stopped" {
+		if peer.GetStatus() != "stopped" {
 			proxy := peer.proxy
 			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s), starting fresh peer", peer.ID, proxy.Name)
 			go m.StartPeer(proxy)
@@ -1379,8 +1437,12 @@ func (m *P2PManager) runSession(peer *Peer) {
 				mesh.TraceForwarding("p2p_received", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				frameCopy := make([]byte, len(payload))
 				copy(frameCopy, payload)
+				linkNIC := peer.GetLinkNIC()
+				if linkNIC == nil {
+					util.LogModuleWarn("p2p", "[P2P-DIAG] FrameMeshPacket: peer.GetLinkNIC() is nil! peer.ID=%s node=%s status=%s", peer.ID, peer.NodeID, peer.GetStatus())
+				}
 				select {
-				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: peer.linkNIC, frame: frameCopy}:
+				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: frameCopy}:
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				default:
 					atomic.AddUint64(&m.meshInboundDrops, 1)
@@ -1518,7 +1580,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	}
 
 	peer.NodeID = nodeID
-	peer.Status = "helloed"
+	peer.SetStatus("helloed")
 	peer.LastSeen = time.Now()
 	
 	// Store remote friendly name (proxy name)
@@ -1542,9 +1604,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
 	}
 
-	if m.OnStatusChange != nil {
-		go m.OnStatusChange()
-	}
+	m.notifyStatusChange()
 
 	util.LogModuleInfo("p2p", "[P2P] hello from %s: nodeID=%s, linkID=%s", peer.ID, nodeID, peer.LinkID)
 
@@ -1552,11 +1612,11 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	if m.meshHandler != nil {
 		// Unregister old sender for this specific peer connection (not by nodeID,
 		// to allow multiple connections to the same remote node via different proxies)
-		if peer.meshSender != nil {
-			m.meshHandler.UnregisterPeer(peer.meshSender)
+		if sender := peer.GetMeshSender(); sender != nil {
+			m.meshHandler.UnregisterPeer(sender)
 		}
 		ps := &peerSender{peer: peer, nodeID: nodeID}
-		peer.meshSender = ps
+		peer.SetMeshSender(ps)
 		m.meshHandler.RegisterPeer(ps)
 		
 		// 5. Create LinkNIC for this link (design §5.6)
@@ -1570,8 +1630,9 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 		}
 		util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC creation: peer=%s nodeID=%s subnet=%q", peer.ID, nodeID, subnet)
 		if subnet != "" {
-			peer.linkNIC = m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
-			if peer.linkNIC == nil {
+			linkNIC := m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
+			peer.SetLinkNIC(linkNIC)
+			if linkNIC == nil {
 				util.LogModuleWarn("p2p", "[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
 			} else {
 				util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC created successfully: peer=%s nodeID=%s", peer.ID, nodeID)
@@ -1584,10 +1645,8 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	// 6. Process topology (shared logic)
 	m.processGossipInfo(peer, info)
 
-	peer.Status = "upToDate"
-	if m.OnStatusChange != nil {
-		go m.OnStatusChange()
-	}
+	peer.SetStatus("upToDate")
+	m.notifyStatusChange()
 }
 
 // hashString generates a simple hash from a string (for sequence number generation)
@@ -1605,9 +1664,9 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 
 // processGossipInfo is the unified topology processing logic for both hello and gossip.
 func (m *P2PManager) processGossipInfo(peer *Peer, info mesh.GossipInfo) {
-	if m.meshHandler != nil && peer.meshSender != nil {
+	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
 		data, _ := json.Marshal(info)
-		m.meshHandler.HandleTopologyGossip(peer.meshSender, data)
+		m.meshHandler.HandleTopologyGossip(sender, data)
 	}
 }
 
@@ -1728,7 +1787,6 @@ func (m *P2PManager) GetPeers() []Peer {
 			ID:        p.ID,
 			ProxyName: p.ProxyName,
 			NodeID:    p.NodeID,
-			Status:    p.Status,
 			LastSeen:  p.LastSeen,
 		})
 	}

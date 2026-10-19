@@ -350,6 +350,7 @@ type Peer struct {
 	controlCh        chan writeReq // hello/gossip priority queue
 	stopCh           chan struct{}
 	stopOnce         sync.Once // ensures stopCh is closed exactly once
+	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
 	meshSender       *peerSender   // DEPRECATED: use meshSenderPtr
 	proxy            *config.Proxy // proxy config this peer was started with
 
@@ -1173,6 +1174,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		ProxyName:    proxy.Name,
 		LastSeen:     time.Now(),
 		stopCh:       make(chan struct{}),
+		sessionDone:  make(chan struct{}),
 		proxy:        proxy,
 		Seq:          seq,
 		dnsQueue:     make(chan writeReq, 512),
@@ -1193,13 +1195,23 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		return
 	}
 	
-	// Stop any existing peer with the same proxy name
+	// Stop any existing peer with the same proxy name and wait for cleanup
 	for _, p := range m.peers {
 		if p.ProxyName == proxy.Name {
 			util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", p.ID, proxy.Name)
 			// stopPeer uses sync.Once, safe to call while holding lock
 			stopPeer(p)
 			delete(m.peers, p.ID)
+			// Wait for old peer's session to fully end (including LinkNIC cleanup)
+			// This prevents LinkNIC leak when StartPeer is called concurrently
+			m.mu.Unlock()
+			select {
+			case <-p.sessionDone:
+				util.LogModuleInfo("p2p", "[P2P] old peer %s session fully ended, proceeding with new peer", p.ID)
+			case <-time.After(5 * time.Second):
+				util.LogModuleWarn("p2p", "[P2P] timeout waiting for old peer %s session to end, proceeding anyway", p.ID)
+			}
+			m.mu.Lock()
 			break
 		}
 	}
@@ -1229,6 +1241,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			delete(m.peers, peer.ID)
 		}
 		m.mu.Unlock()
+		// Signal that session has fully ended (including LinkNIC cleanup)
+		close(peer.sessionDone)
 	}()
 
 	d := dialer.NewDialer(proxy)

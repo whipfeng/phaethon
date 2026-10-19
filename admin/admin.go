@@ -5490,6 +5490,12 @@ func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
 			"username":     conf.Admin.Username,
 		}
 	}
+	if conf.TUN != nil {
+		result["tun"] = conf.TUN
+	}
+	if conf.Mesh != nil {
+		result["mesh"] = conf.Mesh
+	}
 	return result
 }
 

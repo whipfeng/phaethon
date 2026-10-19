@@ -526,3 +526,305 @@ func (p *Proxy) IsV2() bool {
 - **V2 切换**：保存配置即生效，新连接立即使用新路径。`OnIncrementalUpdate` 无需特殊处理
 - **P2P 切换**：`OnIncrementalUpdate` 通过集合差比较检测变化，调用 `StopPeerByProxyName` / `StartPeer`
 - **P2P 关闭时**：V2 配置保留，表格显示 ❌（`IsV2()` 返回 false），Peer 连接应被停止
+
+## 已知同步问题（待修复）
+
+### 问题 1：StartPeer 竞态导致同一 ProxyName 建立多条链路
+
+**发现时间**：2026-10-19
+**严重程度**：高（导致系统崩溃）
+
+**问题描述**：
+
+`StartPeer` 的检查（1092-1105 行）和创建（1137 行）之间没有持锁，存在竞态窗口。当**断连重连**和**配置更新**同时发生时，可能导致同一个 ProxyName 建立多个 peer，每个 peer 创建独立的 LinkNIC，形成多条链路。
+
+**竞态场景**：
+
+```
+T1: Peer A (MGMS_HT) 连接断开，runSession 返回
+T2: 1258 行检查 peer.Status != "stopped" → true
+T3: 1261 行 `go m.StartPeer(proxy)` → goroutine B 被调度
+T4: 同时，用户通过 admin API 更新 MGMS_HT 配置（如开启 v2）
+T5: OnIncrementalUpdate 被调用（main.go:2032）
+T6: 2045 行 ActivePeerProxyNames() → {"MGMS_HT": true}（peer A 还在 map 中）
+T7: 2053-2067 行判断需要 restart
+T8: 2070 行 RestartPeer(proxy) 被调用
+T9: RestartPeer 1076 行 StopPeerByProxyName("MGMS_HT")
+T10: StopPeerByProxyName 找到 peer A，调用 stopPeer(peer A)
+T11: RestartPeer 1077 行 `go m.StartPeer(proxy)` → goroutine C 被调度
+
+现在有两个 goroutine（B 和 C）都在执行 StartPeer！
+
+T12: Goroutine B 执行到 1137 行，m.peers[peer B.ID] = peer B
+T13: Goroutine C 执行到 1093-1101 行检查 existing peer
+T14: 找到 peer B → 1104 行 stopPeer(peer B)
+T15: Goroutine C 继续执行，创建 peer C
+T16: 1137 行 m.peers[peer C.ID] = peer C
+
+结果：peers map 中同时存在 peer B 和 peer C，都有 ProxyName = "MGMS_HT"
+```
+
+**根本原因**：
+
+```go
+// p2p/p2p.go:1092-1105, 1137
+m.mu.Lock()
+var existing *Peer
+for _, p := range m.peers {
+    if p.ProxyName == proxy.Name {
+        existing = p
+        break
+    }
+}
+m.mu.Unlock()  // ← 释放锁，竞态窗口开始
+if existing != nil {
+    stopPeer(existing)
+}
+// ... 创建新 peer（没有锁保护）
+m.mu.Lock()
+m.peers[peer.ID] = peer  // ← 添加新 peer
+m.mu.Unlock()
+```
+
+**影响**：
+
+1. 同一个 ProxyName 有多个 peer，每个 peer 创建独立的 LinkNIC
+2. `LookupProxyPeerRoute` 返回第一个匹配的 peer，路由不确定
+3. 多个 LinkNIC 可能导致 gVisor netstack 路由混乱
+4. 可能导致 panic 或 undefined behavior
+
+**修复方案**：
+
+持锁检查+创建，确保原子性：
+
+```go
+m.mu.Lock()
+// 检查 existing
+for _, p := range m.peers {
+    if p.ProxyName == proxy.Name {
+        existing = p
+        break
+    }
+}
+if existing != nil {
+    stopPeer(existing)
+    delete(m.peers, existing.ID)
+}
+// 创建新 peer（在锁内）
+peer := &Peer{...}
+m.peers[peer.ID] = peer
+m.mu.Unlock()
+```
+
+**修复状态**：❌ 待修复
+
+### 问题 2：LinkNIC 生命周期竞态
+
+**发现时间**：2026-10-19
+**严重程度**：中（可能导致 panic）
+
+**问题描述**：
+
+Peer 断开连接时，defer 中删除 LinkNIC（`p2p/p2p.go:1147-1149`），但数据面可能仍在使用该 LinkNIC 发送数据包。gVisor 的 RouteFunc 可能缓存了 RouteDecision（包含 NIC ID），在 NIC 被删除后仍尝试使用，导致 panic。
+
+**竞态场景**：
+
+```
+T1: Peer 连接断开，runSession 返回
+T2: defer 开始执行，DeleteLinkNIC(peer.linkNIC)  ← 控制面删除 LinkNIC
+T3: 同时，数据面正在使用这个 LinkNIC 发送数据包
+T4: gVisor netstack 尝试通过已删除的 NIC ID 发送 → panic
+```
+
+**代码位置**：
+
+```go
+// p2p/p2p.go:1147-1149
+if peer.linkNIC != nil && m.meshHandler != nil {
+    m.meshHandler.DeleteLinkNIC(peer.linkNIC)
+    peer.linkNIC = nil
+}
+```
+
+**修复方案**：
+
+1. LinkNIC 引用计数：删除前等待所有使用方释放
+2. 路由缓存失效机制：LinkNIC 删除时通知 gVisor 清除相关缓存
+3. 同步删除：确保 LinkNIC 删除时没有正在使用的数据包
+
+**修复状态**：❌ 待修复
+
+### 问题 3：V2RouteLookup 返回过期数据
+
+**发现时间**：2026-10-19
+**严重程度**：中（导致连接失败）
+
+**问题描述**：
+
+`CreateV2RouteFunc` 每次调用时查询 `V2RouteLookup`，如果 peer 断开连接后重连，新的 peer 可能有不同的 LinkNIC ID。但如果 v2 连接复用了旧的 RouteDecision 缓存，可能使用过期的 NIC ID。
+
+**竞态场景**：
+
+```
+T1: Peer A 连接建立，linkNIC = NIC 3
+T2: v2 连接使用 CreateV2RouteFunc("MGMS_HT")，缓存 RouteDecision{EgressNIC: 3}
+T3: Peer A 断开，NIC 3 被删除
+T4: Peer B 连接建立，linkNIC = NIC 4
+T5: 新的 v2 连接复用缓存的 RouteDecision，尝试使用 NIC 3 → 失败
+```
+
+**代码位置**：
+
+```go
+// mesh/netstack.go:284-300
+func CreateV2RouteFunc(proxyName string) func() stack.RouteDecision {
+    return func() stack.RouteDecision {
+        linkNICID, peerSubnet, ok := V2RouteLookup(proxyName)
+        if !ok || peerSubnet == nil {
+            return stack.RouteDecision{}  // 空决策，导致连接失败
+        }
+        return stack.RouteDecision{
+            EgressNIC: linkNICID,
+            EgressEIP: tcpip.AddrFrom4Slice(eip),
+            NeedIPIP:  true,
+            Cacheable: true,  // ← 标记为可缓存
+        }
+    }
+}
+```
+
+**修复方案**：
+
+1. 禁用 RouteDecision 缓存（`Cacheable: false`）
+2. 或在 LinkNIC 删除时通知 gVisor 清除相关缓存
+
+**修复状态**：❌ 待修复
+
+### 问题 4：peer 字段并发读写无锁保护
+
+**发现时间**：2026-10-19
+**严重程度**：中（可能导致数据竞争）
+
+**问题描述**：
+
+`Peer` 结构体的多个字段（`Status`、`linkNIC`、`transport`、`meshSender`）在多处被读写，但大部分访问没有锁保护。这些字段可能在不同的 goroutine 中被并发访问，导致数据竞争。
+
+**具体问题**：
+
+1. **peer.Status**：
+   - 写入：1185、1226、1512、1578 行（无锁）
+   - 读取：422、1258 行（无锁）
+   - 竞态：一个 goroutine 设置 Status，另一个 goroutine 读取，可能看到不一致的值
+
+2. **peer.linkNIC**：
+   - 写入：992、1149、1244、1564 行（部分在锁外）
+   - 读取：65-66、189、1374 行（无锁）
+   - 竞态：`peerSender.GetLinkNIC()` 返回 linkNIC 指针时，另一个 goroutine 可能正在将其设为 nil
+
+3. **peer.meshSender**：
+   - 写入：1150、1246、1550 行（部分在锁外）
+   - 读取：1546 行（无锁）
+   - 竞态：meshSender 被删除时，其他 goroutine 可能仍在使用
+
+**代码示例**：
+
+```go
+// p2p/p2p.go:189 - 无锁读取
+func (s *peerSender) GetLinkNIC() *mesh.LinkNIC {
+    return s.peer.linkNIC  // ← 可能被其他 goroutine 设为 nil
+}
+
+// p2p/p2p.go:1564 - 无锁写入
+peer.linkNIC = m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
+
+// p2p/p2p.go:1149 - 无锁写入
+peer.linkNIC = nil
+```
+
+**影响**：
+
+1. 数据竞争导致 undefined behavior
+2. 使用已删除的 linkNIC/meshSender 导致 panic
+3. Status 不一致导致逻辑错误（如重连判断错误）
+
+**修复方案**：
+
+1. **使用 atomic 操作**：对于简单字段（如 Status），使用 `atomic.Value` 或 `atomic.Pointer`
+2. **使用 mutex 保护**：对于复杂字段（如 linkNIC），在 Peer 结构体中添加 mutex
+3. **使用 RWMutex**：读多写少的场景，使用 `sync.RWMutex` 提高并发性能
+
+```go
+type Peer struct {
+    // ... 其他字段
+    mu        sync.RWMutex  // 保护 linkNIC、meshSender 等字段
+    linkNIC   *mesh.LinkNIC
+    meshSender *peerSender
+    status    atomic.Value  // 存储 string
+}
+
+func (p *Peer) GetLinkNIC() *mesh.LinkNIC {
+    p.mu.RLock()
+    defer p.mu.RUnlock()
+    return p.linkNIC
+}
+
+func (p *Peer) SetLinkNIC(nic *mesh.LinkNIC) {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+    p.linkNIC = nic
+}
+```
+
+**修复状态**：❌ 待修复
+
+### 问题 5：OnStatusChange 回调并发调用
+
+**发现时间**：2026-10-19
+**严重程度**：低（可能导致重复通知）
+
+**问题描述**：
+
+`OnStatusChange` 回调在多处被调用（如 1187、1228、1580 行），通常以 `go m.OnStatusChange()` 的方式异步调用。如果多个 goroutine 同时触发状态变化，可能导致 `OnStatusChange` 被并发调用多次。
+
+**代码位置**：
+
+```go
+// p2p/p2p.go:1187
+if m.OnStatusChange != nil {
+    go m.OnStatusChange()
+}
+
+// p2p/p2p.go:1228
+if m.OnStatusChange != nil {
+    go m.OnStatusChange()
+}
+
+// p2p/p2p.go:1580
+if m.OnStatusChange != nil {
+    go m.OnStatusChange()
+}
+```
+
+**影响**：
+
+1. `OnStatusChange` 被多次调用，可能导致重复的状态同步操作
+2. 如果 `OnStatusChange` 内部有锁，可能导致性能问题
+
+**修复方案**：
+
+1. 使用 `sync.Once` 确保只调用一次
+2. 或使用 debounce 机制，合并短时间内的多次调用
+3. 或在 `OnStatusChange` 内部做幂等处理
+
+**修复状态**：❌ 待修复
+
+### 总结
+
+以上 5 个同步问题中，**问题 1（StartPeer 竞态）** 是最严重的，已确认会导致同一 ProxyName 建立多条链路，可能引发系统崩溃。**问题 2-4** 可能导致 panic 或数据竞争，需要尽快修复。**问题 5** 影响较小，可以后续优化。
+
+**修复优先级**：
+1. 🔴 问题 1：StartPeer 竞态（高优先级）
+2. 🟠 问题 2：LinkNIC 生命周期竞态（高优先级）
+3. 🟠 问题 3：V2RouteLookup 返回过期数据（中优先级）
+4. 🟡 问题 4：peer 字段并发读写（中优先级）
+5. 🟢 问题 5：OnStatusChange 并发调用（低优先级）

@@ -246,23 +246,28 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, fmt.Errorf("v2 dial: netstack v2 dial not initialized")
 	}
 
+	// Check if peer's LinkNIC is ready before attempting v2 path
+	if mesh.V2RouteLookup == nil {
+		util.LogInfo("dialer", "[V2-DISPATCH] V2RouteLookup not initialized, falling back to v1")
+		return d.underlying.Dial(dstAddr, dstPort)
+	}
+
+	_, peerSubnet, ok := mesh.V2RouteLookup(d.proxy.Name)
+	if !ok || peerSubnet == nil {
+		// LinkNIC not ready yet (peer still connecting), fall back to v1
+		util.LogInfo("dialer", "[V2-DISPATCH] peer LinkNIC not ready for proxy=%s, falling back to v1", d.proxy.Name)
+		return d.underlying.Dial(dstAddr, dstPort)
+	}
+
 	if ip := net.ParseIP(dstAddr); ip == nil {
 		// Domain: resolve via peer's DNS server, then dial directly (no IPIP)
-		// 1. Get peer subnet from proxy name
-		if mesh.V2RouteLookup == nil {
-			return nil, fmt.Errorf("v2 dial: V2RouteLookup not initialized")
-		}
-		_, peerSubnet, ok := mesh.V2RouteLookup(d.proxy.Name)
-		if !ok || peerSubnet == nil {
-			return nil, fmt.Errorf("v2 dial: peer not found for proxy %s", d.proxy.Name)
-		}
-		// 2. Calculate peer's DNS server IP (subnet+3 = GIP)
+		// 1. Calculate peer's DNS server IP (subnet+3 = GIP)
 		dnsIP := mesh.CalculateDNSIP(peerSubnet)
 		if dnsIP == nil {
 			return nil, fmt.Errorf("v2 dial: cannot calculate DNS IP for subnet %s", peerSubnet)
 		}
 		util.LogInfo("dialer", "[V2-DISPATCH] resolving %s via peer DNS %s", dstAddr, dnsIP)
-		// 3. Resolve domain via peer's DNS server
+		// 2. Resolve domain via peer's DNS server
 		if GlobalRemoteDNSResolverFunc == nil {
 			return nil, fmt.Errorf("v2 dial: remote DNS resolver not initialized")
 		}
@@ -279,7 +284,7 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 			}
 		}
 		util.LogInfo("dialer", "[V2-DISPATCH] resolved %s -> %s via peer DNS, dialing directly (no IPIP)", dstAddr, resolvedIP)
-		// 4. Dial directly (no IPIP, no routeFunc) - goes through peer's local network
+		// 3. Dial directly (no IPIP, no routeFunc) - goes through peer's local network
 		targetAddr := net.JoinHostPort(resolvedIP.String(), strconv.Itoa(dstPort))
 		return GlobalNetstackDialV2Func("tcp", targetAddr, nil)
 	} else {

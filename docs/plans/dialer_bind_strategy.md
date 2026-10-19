@@ -828,3 +828,329 @@ if m.OnStatusChange != nil {
 3. 🟠 问题 3：V2RouteLookup 返回过期数据（中优先级）
 4. 🟡 问题 4：peer 字段并发读写（中优先级）
 5. 🟢 问题 5：OnStatusChange 并发调用（低优先级）
+
+---
+
+## 详细修复方案
+
+### 问题 1 修复：StartPeer 原子化操作
+
+**目标**：确保同一 ProxyName 在任意时刻只有一个 peer 实例
+
+**方案**：将"检查-停止-创建-注册"合并为一个原子操作
+
+```go
+func (m *P2PManager) StartPeer(proxy *config.Proxy) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    
+    // 1. 检查并停止旧 peer（在锁内）
+    for _, p := range m.peers {
+        if p.ProxyName == proxy.Name {
+            // 在锁内调用 stopPeer（stopPeer 内部用 sync.Once，安全）
+            stopPeer(p)
+            delete(m.peers, p.ID)
+            break
+        }
+    }
+    
+    // 2. 创建新 peer（在锁内）
+    peer := &Peer{
+        ID:        generatePeerID(),
+        ProxyName: proxy.Name,
+        proxy:     proxy,
+        Status:    "starting",
+    }
+    
+    // 3. 注册到 map（在锁内）
+    m.peers[peer.ID] = peer
+    
+    // 4. 异步启动（锁外执行实际启动逻辑）
+    go func() {
+        if err := peer.start(proxy); err != nil {
+            m.mu.Lock()
+            peer.Status = "failed"
+            m.mu.Unlock()
+        }
+    }()
+}
+```
+
+**关键改进**：
+- 整个"检查-停止-创建-注册"流程在同一个锁内完成
+- `stopPeer` 使用 `sync.Once`，在锁内调用安全
+- 实际启动逻辑异步执行，避免长时间持锁
+
+**验证点**：
+- ✅ 同一 ProxyName 不可能有多个 peer 同时存在
+- ✅ 配置更新时，旧 peer 会被原子替换
+- ✅ 断线重连时，不会创建重复 peer
+
+### 问题 2 修复：LinkNIC 生命周期与 peer 绑定
+
+**目标**：确保 LinkNIC 生命周期与 peer 严格绑定，避免野指针
+
+**方案**：使用 atomic.Pointer 存储 linkNIC
+
+```go
+type Peer struct {
+    ID        string
+    ProxyName string
+    Status    string
+    proxy     *config.Proxy
+    
+    // 使用 atomic.Pointer 存储 linkNIC
+    linkNICPtr atomic.Pointer[LinkNIC]
+    
+    // 其他字段...
+}
+
+func (p *Peer) SetLinkNIC(nic *LinkNIC) {
+    p.linkNICPtr.Store(nic)
+}
+
+func (p *Peer) GetLinkNIC() *LinkNIC {
+    return p.linkNICPtr.Load()
+}
+
+// stopPeer 中清理
+func stopPeer(p *Peer) {
+    p.stopOnce.Do(func() {
+        // 1. 先清理 LinkNIC
+        if nic := p.GetLinkNIC(); nic != nil {
+            if err := netstack.DeleteLinkNIC(nic); err != nil {
+                util.LogModuleError("p2p", "failed to delete LinkNIC", err)
+            }
+            p.SetLinkNIC(nil)
+        }
+        
+        // 2. 清理其他资源...
+        p.Status = "stopped"
+    })
+}
+```
+
+**关键改进**：
+- LinkNIC 使用 atomic.Pointer，读写无锁
+- stopPeer 中先清理 LinkNIC，再置 nil
+- 使用 sync.Once 确保只清理一次
+
+**验证点**：
+- ✅ LinkNIC 不会被重复清理
+- ✅ 读取 LinkNIC 时不会得到已释放的指针
+- ✅ peer 停止后，LinkNIC 立即从 gVisor netstack 移除
+
+### 问题 3 修复：V2RouteLookup 返回最新数据
+
+**目标**：确保 RouteFunc 使用最新的 LinkNIC ID
+
+**方案 A**：RouteFunc 每次调用时动态查询（推荐）
+
+```go
+func CreateV2RouteFunc(proxyName string) func() stack.RouteDecision {
+    return func() stack.RouteDecision {
+        // 每次调用时查询最新 peer
+        peer := p2p.GlobalP2PManager.GetPeerByProxyName(proxyName)
+        if peer == nil {
+            return stack.RouteDecision{}
+        }
+        
+        nic := peer.GetLinkNIC()
+        if nic == nil {
+            return stack.RouteDecision{}
+        }
+        
+        // 使用当前 LinkNIC ID
+        return stack.RouteDecision{
+            EgressNIC: nic.nicID,
+            // ...
+        }
+    }
+}
+```
+
+**方案 B**：RouteDecision 不缓存（依赖 gVisor 行为）
+
+如果 gVisor 每次都调用 RouteFunc，则无需改动。需要验证 gVisor 的行为。
+
+**推荐方案 A**：显式查询最新数据，避免依赖隐式假设
+
+**验证点**：
+- ✅ peer 重启后，新连接使用新 LinkNIC ID
+- ✅ 不会使用已删除的 LinkNIC ID
+
+### 问题 4 修复：peer 字段并发读写保护
+
+**目标**：消除 peer 字段的数据竞争
+
+**方案**：对关键字段使用 atomic 操作或 RWMutex
+
+```go
+type Peer struct {
+    ID        string
+    ProxyName string
+    proxy     *config.Proxy
+    
+    // 使用 atomic 操作保护频繁读写的字段
+    statusAtomic   atomic.Value  // string
+    linkNICPtr     atomic.Pointer[LinkNIC]
+    transportPtr   atomic.Pointer[Transport]
+    meshSenderPtr  atomic.Pointer[MeshSender]
+    
+    // 只读字段，无需锁
+    stopOnce sync.Once
+}
+
+func (p *Peer) SetStatus(status string) {
+    p.statusAtomic.Store(status)
+}
+
+func (p *Peer) GetStatus() string {
+    if v := p.statusAtomic.Load(); v != nil {
+        return v.(string)
+    }
+    return ""
+}
+```
+
+**关键改进**：
+- Status、linkNIC、transport、meshSender 使用 atomic 操作
+- 读多写少的字段用 atomic.Value
+- 指针类型用 atomic.Pointer（Go 1.19+）
+
+**验证点**：
+- ✅ 数据竞争检测器（race detector）不报错
+- ✅ 性能影响小（atomic 操作比 mutex 快）
+
+### 问题 5 修复：OnStatusChange debounce
+
+**目标**：避免 OnStatusChange 被频繁调用
+
+**方案**：使用 debounce 机制合并短时间内的多次调用
+
+```go
+type P2PManager struct {
+    mu            sync.Mutex
+    peers         map[string]*Peer
+    OnStatusChange func()
+    
+    // debounce 机制
+    statusChangeTimer *time.Timer
+    statusChangeMu    sync.Mutex
+}
+
+func (m *P2PManager) notifyStatusChange() {
+    if m.OnStatusChange == nil {
+        return
+    }
+    
+    m.statusChangeMu.Lock()
+    defer m.statusChangeMu.Unlock()
+    
+    // 取消之前的定时器
+    if m.statusChangeTimer != nil {
+        m.statusChangeTimer.Stop()
+    }
+    
+    // 设置新的定时器，100ms 后触发
+    m.statusChangeTimer = time.AfterFunc(100*time.Millisecond, func() {
+        m.OnStatusChange()
+    })
+}
+
+// 使用
+func (p *Peer) updateStatus(status string) {
+    p.SetStatus(status)
+    p.manager.notifyStatusChange()  // debounce
+}
+```
+
+**关键改进**：
+- 100ms 内的多次状态变更只触发一次 OnStatusChange
+- 避免重复的状态同步操作
+- 性能友好
+
+**验证点**：
+- ✅ 批量状态变更只触发一次回调
+- ✅ 最终状态正确同步
+- ✅ 不影响单次状态变更的及时性
+
+---
+
+## 修复实施计划
+
+### 优先级排序
+
+| 优先级 | 问题 | 修复复杂度 | 预计工作量 |
+|--------|------|-----------|-----------|
+| P0 | 问题 1：StartPeer 竞态 | 中 | 2h |
+| P1 | 问题 2：LinkNIC 生命周期 | 中 | 2h |
+| P1 | 问题 4：peer 字段并发读写 | 中 | 2h |
+| P2 | 问题 3：V2RouteLookup 过期 | 低 | 1h |
+| P3 | 问题 5：OnStatusChange debounce | 低 | 1h |
+
+**总计**：约 8h（1 个工作日）
+
+### 实施阶段
+
+**阶段 1：P0 修复（问题 1）**
+1. 重构 `StartPeer` 为原子操作
+2. 添加单元测试：并发启动同一 ProxyName
+3. 使用 race detector 验证
+4. 在 VM 环境测试：配置更新、断线重连
+
+**阶段 2：P1 修复（问题 2 + 问题 4）**
+1. 为 peer 字段添加 atomic 操作
+2. 重构 LinkNIC 生命周期管理
+3. 添加单元测试：并发读写 peer 字段
+4. 在 VM 环境测试：peer 启动/停止、LinkNIC 创建/删除
+
+**阶段 3：P2 修复（问题 3）**
+1. 修改 `CreateV2RouteFunc` 动态查询
+2. 添加集成测试：peer 重启后路由正确
+3. 在 VM 环境测试：v2 模式连接
+
+**阶段 4：P3 修复（问题 5）**
+1. 添加 debounce 机制
+2. 添加单元测试：批量状态变更
+3. 在 VM 环境测试：状态同步
+
+### 测试策略
+
+**单元测试**：
+- 并发启动/停止 peer
+- 并发读写 peer 字段
+- LinkNIC 生命周期
+- debounce 机制
+
+**集成测试**：
+- 配置更新场景
+- 断线重连场景
+- v2 模式连接场景
+
+**压力测试**：
+- 使用 race detector 运行 1 小时
+- 模拟高频配置更新
+- 模拟网络抖动（频繁断线重连）
+
+**验证环境**：
+1. 本地 macOS：单元测试
+2. VM 环境：集成测试、压力测试
+3. QG 环境：最终验证（生产环境）
+
+### 回滚计划
+
+如果修复引入新问题：
+1. 立即回滚到 commit `c370759`（当前版本）
+2. 在 VM 环境验证回滚后正常
+3. 分析问题原因，重新设计修复方案
+4. 修复后重新走测试流程
+
+### 验收标准
+
+- ✅ 所有单元测试通过
+- ✅ race detector 无报错
+- ✅ VM 环境运行 24h 无崩溃
+- ✅ QG 环境运行 7d 无异常
+- ✅ 配置更新、断线重连场景正常
+- ✅ v2 模式连接正常

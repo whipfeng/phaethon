@@ -238,7 +238,7 @@ type meshAwareDialer struct {
 
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	// v2 data path: domain vs IP handling differs
-	// - Domain: resolve via peer's DNS server, then dial directly (no IPIP)
+	// - Domain: resolve locally, then dial via peer's network (no IPIP)
 	// - Bare IP: dial directly with IPIP + routeFunc
 	util.LogInfo("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
 
@@ -248,15 +248,12 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 
 	// Check if peer's LinkNIC is ready before attempting v2 path
 	if mesh.V2RouteLookup == nil {
-		util.LogInfo("dialer", "[V2-DISPATCH] V2RouteLookup not initialized, falling back to v1")
-		return d.underlying.Dial(dstAddr, dstPort)
+		return nil, fmt.Errorf("v2 dial: V2RouteLookup not initialized for proxy=%s", d.proxy.Name)
 	}
 
 	_, peerSubnet, ok := mesh.V2RouteLookup(d.proxy.Name)
 	if !ok || peerSubnet == nil {
-		// LinkNIC not ready yet (peer still connecting), fall back to v1
-		util.LogInfo("dialer", "[V2-DISPATCH] peer LinkNIC not ready for proxy=%s, falling back to v1", d.proxy.Name)
-		return d.underlying.Dial(dstAddr, dstPort)
+		return nil, fmt.Errorf("v2 dial: peer LinkNIC not ready for proxy=%s", d.proxy.Name)
 	}
 
 	if ip := net.ParseIP(dstAddr); ip == nil {

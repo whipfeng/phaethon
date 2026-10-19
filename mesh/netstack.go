@@ -1164,7 +1164,10 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 	// and use proxy-specific IPIP routing to the peer's LinkNIC.
 	if routeFunc != nil {
 		if tcpEP, ok := ep.(*tcp.Endpoint); ok {
+			util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] setting RouteFunc on tcp.Endpoint %p", tcpEP)
 			tcpEP.RouteFunc = routeFunc
+		} else {
+			util.LogModuleError("netstack", "[NETSTACK-DIAL-V2] ERROR: endpoint is not *tcp.Endpoint, type=%T", ep)
 		}
 	}
 
@@ -1201,18 +1204,24 @@ func (n *Netstack) NetDialV2(network, addr string, routeFunc func() stack.RouteD
 		util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connecting to %s:%d without RouteFunc (direct)", host, portNum)
 	}
 	connectStart := time.Now()
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] calling ep.Connect for %s:%d", host, portNum)
 	tcpErr = ep.Connect(remoteAddr)
+	util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] ep.Connect returned: %v", tcpErr)
 	if _, ok := tcpErr.(*tcpip.ErrConnectStarted); ok {
+		util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connect started, waiting for completion")
 		select {
 		case <-ctx.Done():
 			ep.Close()
 			return nil, ctx.Err()
 		case <-notifyCh:
+			util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] connect completed")
 		}
 		tcpErr = ep.LastError()
+		util.LogModuleInfo("netstack", "[NETSTACK-DIAL-V2] last error: %v", tcpErr)
 	}
 	connectDuration := time.Since(connectStart)
 	if tcpErr != nil {
+		util.LogModuleError("netstack", "[NETSTACK-DIAL-V2] connect failed after %v: %v", connectDuration, tcpErr)
 		ep.Close()
 		return nil, &net.OpError{
 			Op:   "connect",

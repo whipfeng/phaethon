@@ -215,13 +215,14 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, _, err := frame.ReadFrame(conn)
+		frameType, payload, err := frame.ReadFrame(conn)
 		if err != nil {
 			return
 		}
 
 		switch frameType {
 		case frame.FrameHeartbeat:
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			continue
 		case frame.FramePong:
 			util.LogModuleInfo("reverse", "[%s] [conn-N/A] Match Success: Target %s <- Registered node %s", s.address, s.address, conn.RemoteAddr())
@@ -231,6 +232,7 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 			senderWg.Wait()
 
 			if err := frame.WriteFrame(conn, frame.FramePeng, nil); err != nil {
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 				return
 			}
 
@@ -242,12 +244,15 @@ func (s *ReverseServer) handleReverseConn(conn net.Conn) {
 
 			// Pass raw conn — the handler (StartReverseMapping) wraps it in
 			// ReverseFramedConn itself. Wrapping here would cause double-framing.
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			s.serveAccepted(conn)
 			return
 		case frame.FramePeng:
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			continue
 		default:
 			util.LogModuleError("reverse", "[%s] unexpected frame type: 0x%02x", s.address, frameType)
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			return
 		}
 	}
@@ -280,6 +285,7 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 
 		if frameType == frame.FrameUDPChannel {
 			handleReverseUDPChannel(rawConn, ruleConf, mapping, payload)
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			return
 		}
 
@@ -291,6 +297,7 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 		if len(payload) > 0 {
 			framedConn.Inject(payload)
 		}
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 
 		switch mapping.Type {
 		case "socks5":
@@ -445,7 +452,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 			default:
 			}
 			tcpConn.SetReadDeadline(time.Now().Add(70 * time.Second))
-			_, _, err := frame.ReadFrame(tcpConn)
+			_, payload, err := frame.ReadFrame(tcpConn)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
@@ -453,6 +460,7 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 				doClose()
 				return
 			}
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		}
 	}()
 

@@ -348,6 +348,8 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 				frameCount++
 				util.LogModuleDebug("htunnel", "frame received: proxy=%s connID=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, seq, frameCount, ft, len(payload))
 				t.routeFrame(ft, payload, isCtrlLoop)
+				// Note: payload ownership transferred to routeFrame -> Recv() -> P2P readLoop
+				// P2P readLoop will return the buffer (issue 10)
 			}
 			util.LogModuleDebug("htunnel", "batch complete: proxy=%s connID=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, seq, frameCount)
 		} else {

@@ -79,8 +79,10 @@ func main() {
 		Error   string `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &reply); err != nil {
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		log.Fatalf("[FAIL] parse reply: %v", err)
 	}
+	frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 	replyPretty, _ := json.MarshalIndent(reply, "", "  ")
 	fmt.Printf("[OK] Register reply:\n%s\n", string(replyPretty))
 	if reply.Status != "ok" {
@@ -184,6 +186,7 @@ func main() {
 			switch frameType {
 			case frame.FrameHeartbeat:
 				// Server heartbeat, ignore
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			case frame.FramePeng:
 				// Registry sends PENG twice:
 				// 1) After registration (HandleReverseConnection)
@@ -191,13 +194,16 @@ func main() {
 				// Always respond with PONG
 				fmt.Println("[DATA] Received PENG, sending PONG")
 				frame.WriteFrame(dataConn, frame.FramePong, nil)
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			case frame.FramePong:
 				// Match() handshake: server sends PONG, expects PENG back
 				fmt.Println("[DATA] Received PONG (from Match), sending PENG")
 				frame.WriteFrame(dataConn, frame.FramePeng, nil)
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			case frame.FrameData:
 				// Actual data from client → forward to target → send response back
 				if len(payload) == 0 {
+					frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 					continue
 				}
 				fmt.Printf("[DATA] Got %d bytes of data, forwarding to target\n", len(payload))
@@ -205,13 +211,16 @@ func main() {
 				targetConn, err := net.DialTimeout("tcp", "httpbin.org:80", 10*time.Second)
 				if err != nil {
 					fmt.Printf("[DATA] dial target fail: %v\n", err)
+					frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 					continue
 				}
 				if _, err := targetConn.Write(payload); err != nil {
 					targetConn.Close()
 					fmt.Printf("[DATA] write to target fail: %v\n", err)
+					frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 					continue
 				}
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer (copied to targetConn)
 				targetConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 				var respBuf []byte
 				tmp := make([]byte, 4096)
@@ -235,6 +244,7 @@ func main() {
 				}
 			default:
 				fmt.Printf("[DATA] unknown frame type 0x%02x\n", frameType)
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			}
 		}
 	}()

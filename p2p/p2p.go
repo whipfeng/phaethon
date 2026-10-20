@@ -750,6 +750,8 @@ func (m *P2PManager) meshInboundLoop() {
 				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
 				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.linkNIC, pkt.frame)
 			}
+			// Return buffer to pool after processing (issue 10)
+			frame.ReturnBuffer(pkt.frame)
 		}
 	}
 }
@@ -1438,11 +1440,17 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 	for {
 		frameType, payload, err := peer.transport.Recv()
+		// Return pooled buffer at end of iteration (issue 10)
+		// Note: For mesh packets passed to meshInboundCh, the consumer will return it
+		originalPayload := payload
+		payloadReturned := false
+		
 		now := time.Now()
 		peer.LastSeen = now
 		peer.lastSeenNano.Store(now.UnixNano())
 		if err != nil {
 			util.LogModuleInfo("p2p", "[P2P] read error for %s: %v", peer.ID, err)
+			frame.ReturnBuffer(originalPayload)
 			return
 		}
 		util.LogModuleDebug("p2p", "[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
@@ -1452,6 +1460,8 @@ func (m *P2PManager) runSession(peer *Peer) {
 		if isControl {
 			if len(payload) < 8 {
 				util.LogModuleWarn("p2p", "[P2P] control frame too short from %s: len=%d", peer.ID, len(payload))
+				frame.ReturnBuffer(originalPayload)
+				payloadReturned = true
 				continue
 			}
 			seq := binary.BigEndian.Uint32(payload[0:4])
@@ -1463,12 +1473,16 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 			// Pure ACK frame: no further processing needed
 			if frameType == frame.FrameAck {
+				frame.ReturnBuffer(originalPayload)
+				payloadReturned = true
 				continue
 			}
 
 			// Check for duplicate
 			if !peer.recvState.checkAndRecord(seq) {
 				util.LogModuleDebug("p2p", "[P2P] duplicate control frame from %s: seq=%d", peer.ID, seq)
+				frame.ReturnBuffer(originalPayload)
+				payloadReturned = true
 				continue
 			}
 
@@ -1495,13 +1509,12 @@ func (m *P2PManager) runSession(peer *Peer) {
 				if linkNIC == nil {
 					util.LogModuleWarn("p2p", "[P2P-DIAG] FrameMeshPacket: peer.GetLinkNIC() is nil! peer.ID=%s node=%s status=%s", peer.ID, peer.NodeID, peer.GetStatus())
 				}
-				// Zero-copy: pass payload directly to mesh layer without copying.
-				// The transport layer (Recv/ReadFrame) allocates a new buffer for each frame,
-				// so the payload buffer is not reused and can be safely passed to the mesh layer.
-				// The mesh layer will handle the packet lifecycle (inject to gVisor netstack).
+				// Zero-copy: pass payload directly to mesh layer.
+				// Consumer (meshInboundLoop) MUST call frame.ReturnBuffer when done (issue 10).
 				select {
 				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+					payloadReturned = true  // Consumer will return it
 				default:
 					atomic.AddUint64(&m.meshInboundDrops, 1)
 					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
@@ -1512,6 +1525,11 @@ func (m *P2PManager) runSession(peer *Peer) {
 			}
 		default:
 			util.LogModuleInfo("p2p", "[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))
+		}
+		
+		// Return buffer if not passed to consumer
+		if !payloadReturned {
+			frame.ReturnBuffer(originalPayload)
 		}
 	}
 }

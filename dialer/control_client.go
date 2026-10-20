@@ -89,13 +89,16 @@ func (c *ControlClient) Register(req reverse.ControlRequest) (*reverse.ControlRe
 	conn.SetReadDeadline(time.Time{})
 
 	if frameType != frame.FrameData || len(payload) == 0 {
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		return nil, fmt.Errorf("unexpected reply frame type: 0x%02x", frameType)
 	}
 
 	var reply reverse.ControlReply
 	if err := json.Unmarshal(payload, &reply); err != nil {
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		return nil, fmt.Errorf("parse register reply fail: %w", err)
 	}
+	frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 
 	if reply.Status == "ok" {
 		c.mu.Lock()
@@ -155,12 +158,13 @@ func (c *ControlClient) StartMonitor() {
 			}
 			// Deadline slightly longer than the registry heartbeat interval (30s)
 			conn.SetReadDeadline(time.Now().Add(70 * time.Second))
-			_, _, err := frame.ReadFrame(conn)
+			_, payload, err := frame.ReadFrame(conn)
 			if err != nil {
 				util.LogModuleInfo("control", "monitor detected disconnect from %s: %v", c.registryAddr(), err)
 				c.Close()
 				return
 			}
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		}
 	}()
 }

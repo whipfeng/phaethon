@@ -191,6 +191,7 @@ func (m *ControlManager) runSession(session *ControlSession) {
 
 		switch frameType {
 		case frame.FrameHeartbeat:
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			continue
 		default:
 			// Treat non-heartbeat frames as potential JSON commands
@@ -202,10 +203,12 @@ func (m *ControlManager) runSession(session *ControlSession) {
 				respBytes, _ := json.Marshal(reply)
 				frame.WriteFrame(session.Conn, frame.FrameData, respBytes)
 			} else if frameType == frame.FrameHeartbeat {
+				frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 				continue
 			} else {
 				util.LogModuleInfo("control", "unexpected frame type 0x%02x for %s", frameType, session.Address)
 			}
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		}
 	}
 }

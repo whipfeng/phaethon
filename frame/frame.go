@@ -44,8 +44,41 @@ const DataFrameHeaderSize = 3
 // MaxPayload is the maximum frame payload size (16-bit length field).
 const MaxPayload = 65535
 
+// readBufferPool pools byte slices for ReadFrame to reduce allocations.
+// Callers MUST call ReturnBuffer when done with the payload.
+var readBufferPool = sync.Pool{
+	New: func() interface{} {
+		// Pre-allocate max size to avoid reallocation
+		buf := make([]byte, MaxPayload)
+		return &buf
+	},
+}
+
+// GetReadBuffer gets a buffer from the pool (for advanced use cases).
+// Most callers should use ReadFrame instead.
+func GetReadBuffer() []byte {
+	bufPtr := readBufferPool.Get().(*[]byte)
+	return *bufPtr
+}
+
+// ReturnBuffer returns a buffer to the pool.
+// MUST be called for every non-nil payload returned by ReadFrame.
+// Safe to call with nil or empty slices.
+func ReturnBuffer(buf []byte) {
+	if len(buf) == 0 {
+		return
+	}
+	// Verify it's a pooled buffer (capacity check)
+	if cap(buf) == MaxPayload {
+		bufPtr := (*[]byte)(&buf)
+		readBufferPool.Put(bufPtr)
+	}
+	// Non-pooled buffers are silently discarded (GC will collect)
+}
+
 // ReadFrame reads one complete frame from conn.
 // Returns (frameType, payload, error).
+// IMPORTANT: Caller MUST call ReturnBuffer(payload) when done to avoid memory leaks.
 func ReadFrame(r io.Reader) (byte, []byte, error) {
 	var hdr [3]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -59,8 +92,13 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 	if length == 0 {
 		return frameType, nil, nil
 	}
-	payload := make([]byte, length)
+	
+	// Get buffer from pool
+	buf := GetReadBuffer()
+	payload := buf[:length]
+	
 	if _, err := io.ReadFull(r, payload); err != nil {
+		ReturnBuffer(payload)  // Return on error
 		return 0, nil, fmt.Errorf("reverse_frame: read payload fail: %w", err)
 	}
 	return frameType, payload, nil
@@ -90,11 +128,19 @@ type ControlFrame struct {
 	Type    byte
 	Seq     uint32
 	Ack     uint32
-	Payload []byte
+	Payload []byte  // Pooled buffer, MUST call ReturnPayload when done
+}
+
+// ReturnPayload returns the payload buffer to the pool.
+// MUST be called when done with the ControlFrame to avoid memory leaks.
+func (f *ControlFrame) ReturnPayload() {
+	ReturnBuffer(f.Payload)
+	f.Payload = nil
 }
 
 // ReadControlFrame reads a control frame with seq/ack from r.
 // Wire format: {type(1), seq(4), ack(4), len(2), payload}
+// IMPORTANT: Caller MUST call frame.ReturnPayload() when done to avoid memory leaks.
 func ReadControlFrame(r io.Reader) (*ControlFrame, error) {
 	var hdr [ControlFrameHeaderSize]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -112,8 +158,12 @@ func ReadControlFrame(r io.Reader) (*ControlFrame, error) {
 		return nil, fmt.Errorf("control_frame: payload too large (%d)", length)
 	}
 	if length > 0 {
-		f.Payload = make([]byte, length)
+		// Get buffer from pool
+		buf := GetReadBuffer()
+		f.Payload = buf[:length]
+		
 		if _, err := io.ReadFull(r, f.Payload); err != nil {
+			f.ReturnPayload()  // Return on error
 			return nil, fmt.Errorf("control_frame: read payload fail: %w", err)
 		}
 	}
@@ -193,13 +243,16 @@ func (c *ReverseFramedConn) Read(b []byte) (int, error) {
 
 		switch frameType {
 		case FrameHeartbeat, FramePong, FramePeng:
-			continue // silently consume control frames
+			ReturnBuffer(payload) // issue 10: return pooled buffer
+			continue              // silently consume control frames
 		case FrameData:
 			if len(payload) > 0 {
 				c.writeBuf(payload)
 			}
+			ReturnBuffer(payload) // issue 10: return pooled buffer
 		default:
 			util.LogModuleWarn("frame", "[REVERSE-FRAMED] unknown frame type 0x%02x from=%s", frameType, c.conn.RemoteAddr())
+			ReturnBuffer(payload) // issue 10: return pooled buffer
 		}
 	}
 }

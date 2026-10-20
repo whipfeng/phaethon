@@ -58,7 +58,7 @@ func (mc *ManagedConn) readLoop() {
 		}
 
 		mc.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		frameType, _, err := frame.ReadFrame(mc.Conn)
+		frameType, payload, err := frame.ReadFrame(mc.Conn)
 		if err != nil {
 			return
 		}
@@ -68,7 +68,8 @@ func (mc *ManagedConn) readLoop() {
 		mc.lastReadMu.Unlock()
 
 		if frameType == frame.FrameHeartbeat {
-			continue // heartbeat: drop immediately
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
+			continue                    // heartbeat: drop immediately
 		}
 
 		// Save the first non-heartbeat message (PENG/PONG) for handshake.
@@ -79,6 +80,7 @@ func (mc *ManagedConn) readLoop() {
 			mc.hasPending = true
 		}
 		mc.pendingMu.Unlock()
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 
 		select {
 		case <-mc.stopCh:
@@ -387,18 +389,21 @@ func reverseHandshake(mc *ManagedConn) error {
 		}
 
 		mc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		frameType, _, err := frame.ReadFrame(mc.Conn)
+		frameType, payload, err := frame.ReadFrame(mc.Conn)
 		if err != nil {
 			return fmt.Errorf("reverse: read PENG fail: %w", err)
 		}
 		switch frameType {
 		case frame.FramePeng:
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			mc.Conn.SetReadDeadline(time.Time{})
 			return nil
 		case frame.FrameHeartbeat:
-			continue // discard stray heartbeat
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
+			continue                    // discard stray heartbeat
 		default:
 			util.LogModuleError("reverse", "unexpected frame during handshake for %s: 0x%02x", mc.Conn.RemoteAddr(), frameType)
+			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		}
 	}
 }

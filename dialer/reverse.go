@@ -418,13 +418,14 @@ func (c *reversePacketConn) tcpReader() {
 		default:
 		}
 		c.tcpConn.SetReadDeadline(time.Now().Add(70 * time.Second))
-		_, _, err := frame.ReadFrame(c.tcpConn)
+		_, payload, err := frame.ReadFrame(c.tcpConn)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
 			return
 		}
+		frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 		// Heartbeat and any stray frames are silently consumed.
 	}
 }

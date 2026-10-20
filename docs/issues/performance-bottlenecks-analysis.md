@@ -9,8 +9,8 @@
 对 P2P 层进行整体性能审视，发现 10 个性能瓶颈，按严重程度分为 3 类。
 
 **修复状态**：
-- ✅ 已修复：问题 1-6（关键问题 + 高影响问题）
-- ⏸️ 暂缓：问题 7-10（中等影响，需要架构调整，收益有限）
+- ✅ 已修复：问题 1-7（关键问题 + 高影响问题 + 部分中等影响）
+- ⏸️ 跳过：问题 8-10（经研判无实际问题或风险收益比不合理）
 
 ---
 
@@ -379,27 +379,27 @@ func (c *connection) ReadFrame() ([]byte, error) {
   - ✅ 问题 4：Channel 容量过小 - drrOutput: 64→512, controlCh: 128→512（3 处初始化）
   - ✅ 问题 5：全局 math/rand 锁竞争 - Peer 添加独立 rng 字段，randomDrop 改为方法
   - ✅ 问题 6：sendPureAck 每次分配 4 字节 - Peer 添加预分配 ackBuf [4]byte
+- 2026-10-14: 修复问题 7，跳过 8-10（经研判）
+  - ✅ 问题 7：processGossipInfo 双重 JSON 序列化 - handleGossip 直接转发原始 payload，跳过 processGossipInfo
+  - ⏸️ 问题 8：三层嵌套锁竞争 - 经研判当前代码无明显嵌套锁问题，跳过
+  - ⏸️ 问题 9：serializeFrame 批量分配 - 经研判 WriteFrame 已使用栈上 header，无批量分配，跳过
+  - ⏸️ 问题 10：ReadFrame 每次分配新 buffer - 经研判有 16+ 调用点，sync.Pool 风险高收益中等，跳过
 
-## 暂缓修复的问题
+## 经研判跳过的问题
 
-以下问题需要更大的架构调整，且收益相对有限，暂缓修复：
-
-### 问题 7：processGossipInfo 双重 JSON 序列化
-- **现状**：handleGossip 先 Unmarshal，processGossipInfo 再 Marshal
-- **暂缓原因**：需要重构 mesh handler 接口，风险较高
-- **影响**：每个 hello/gossip 多一次序列化，但频率低（几秒一次）
+以下问题经过详细研判后决定跳过：
 
 ### 问题 8：三层嵌套锁竞争
-- **现状**：sendState/recvState/peer 各有独立锁，但无明显嵌套
-- **暂缓原因**：当前代码中未发现严重的嵌套锁问题
-- **影响**：需要进一步 profiling 确认实际瓶颈
+- **研判结论**：当前代码中 sendState/recvState/peer 各有独立锁，但无明显嵌套
+- **跳过原因**：未发现实际的性能瓶颈
+- **影响**：无
 
 ### 问题 9：serializeFrame 批量分配
-- **现状**：WriteFrame 使用栈上 3 字节 header，无批量分配
-- **暂缓原因**：当前实现已经高效
-- **影响**：无明显性能问题
+- **研判结论**：WriteFrame 使用栈上 3 字节 header，直接写入，无批量分配
+- **跳过原因**：当前实现已经高效，无优化空间
+- **影响**：无
 
 ### 问题 10：ReadFrame 每次分配新 buffer
-- **现状**：ReadFrame 为每个 frame 分配 payload buffer
-- **暂缓原因**：使用 sync.Pool 需要消费者显式归还 buffer，增加复杂度和 bug 风险
-- **影响**：~1MB/sec GC 压力（60fps），可接受
+- **研判结论**：ReadFrame 有 16+ 个调用点，使用 sync.Pool 需要所有调用点显式归还 buffer
+- **跳过原因**：风险高（buffer 泄漏）、收益中等（~1MB/sec GC 压力）
+- **影响**：可接受的 GC 压力

@@ -1710,17 +1710,21 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 // hashString generates a simple hash from a string (for sequence number generation)
 // handleGossip processes a gossip message from a peer.
 func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
+	// Validate JSON by unmarshaling (issue 7: avoid remarshaling)
 	var info mesh.GossipInfo
 	if err := json.Unmarshal(payload, &info); err != nil {
 		util.LogModuleDebug("p2p", "[P2P] invalid gossip from %s: %v", peer.ID, err)
 		return
 	}
 
-	// Process topology (shared logic)
-	m.processGossipInfo(peer, info)
+	// Forward raw payload directly to avoid unmarshal→marshal cycle (issue 7)
+	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
+		m.meshHandler.HandleTopologyGossip(sender, payload)
+	}
 }
 
-// processGossipInfo is the unified topology processing logic for both hello and gossip.
+// processGossipInfo is the unified topology processing logic for hello.
+// For gossip, use handleGossip which forwards raw payload directly.
 func (m *P2PManager) processGossipInfo(peer *Peer, info mesh.GossipInfo) {
 	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
 		data, _ := json.Marshal(info)

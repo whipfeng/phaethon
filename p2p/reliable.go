@@ -156,15 +156,20 @@ func (s *sendState) removeFrame(seq uint32) {
 // markAllPendingAsLost marks all pending frames as lost when connection drops.
 // Records their RTT (time since sent) before marking as lost, so they count in both loss rate and latency statistics.
 func (s *sendState) markAllPendingAsLost() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Collect RTT samples first to avoid nested locking (issue 8)
+	type rttSample struct {
+		rtt              time.Duration
+		isRetransmission bool
+	}
+	var samples []rttSample
 	
+	s.mu.Lock()
 	now := time.Now()
 	for seq, pf := range s.pending {
-		// Record RTT before marking as lost
+		// Collect RTT for later recording
 		rtt := now.Sub(pf.sentTime)
 		isRetransmission := pf.retries > 0
-		s.rttSampler.add(rtt, isRetransmission)
+		samples = append(samples, rttSample{rtt: rtt, isRetransmission: isRetransmission})
 		
 		// Mark as lost
 		s.totalLost++
@@ -173,6 +178,12 @@ func (s *sendState) markAllPendingAsLost() {
 			lost:      true,
 		})
 		delete(s.pending, seq)
+	}
+	s.mu.Unlock()
+	
+	// Record RTT samples outside of sendState lock to avoid nesting (issue 8)
+	for _, sample := range samples {
+		s.rttSampler.add(sample.rtt, sample.isRetransmission)
 	}
 }
 

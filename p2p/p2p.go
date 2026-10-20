@@ -355,6 +355,7 @@ type Peer struct {
 	statusAtomic   atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
 	linkNICPtr     atomic.Pointer[mesh.LinkNIC]
 	meshSenderPtr  atomic.Pointer[peerSender]
+	lastSeenNano   atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
 
 	transport        frame.FrameTransport // protected by mutex (atomic.Pointer cannot wrap interface)
 	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
@@ -487,10 +488,11 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 
 	result := make(map[string]map[string]interface{})
 	for name, peer := range m.peers {
+		lastSeenNano := peer.lastSeenNano.Load()
 		result[name] = map[string]interface{}{
 			"status":   peer.GetStatus(),
 			"nodeId":   peer.NodeID,
-			"lastSeen": peer.LastSeen,
+			"lastSeen": time.Unix(0, lastSeenNano),
 		}
 	}
 	return result
@@ -1059,6 +1061,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		Seq:            seq,
 		drrScheduler:   newDRRScheduler(dataQueues),
 	}
+	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
 	m.mu.Lock()
@@ -1202,6 +1205,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		controlCh:    make(chan writeReq, 128),
 		drrScheduler: newDRRScheduler(dataQueues),
 	}
+	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
 	// Atomic check-stop-create-register (fix race condition #1)
@@ -1386,8 +1390,10 @@ func (m *P2PManager) runSession(peer *Peer) {
 			case <-peer.stopCh:
 				return
 			case <-ticker.C:
-				if time.Since(peer.LastSeen) > heartbeatTimeout {
-					util.LogModuleWarn("p2p", "[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(peer.LastSeen))
+				lastSeenNano := peer.lastSeenNano.Load()
+				lastSeenTime := time.Unix(0, lastSeenNano)
+				if time.Since(lastSeenTime) > heartbeatTimeout {
+					util.LogModuleWarn("p2p", "[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(lastSeenTime))
 					peer.transport.Close()
 					return
 				}
@@ -1416,7 +1422,9 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 	for {
 		frameType, payload, err := peer.transport.Recv()
-		peer.LastSeen = time.Now()
+		now := time.Now()
+		peer.LastSeen = now
+		peer.lastSeenNano.Store(now.UnixNano())
 		if err != nil {
 			util.LogModuleInfo("p2p", "[P2P] read error for %s: %v", peer.ID, err)
 			return
@@ -1615,7 +1623,9 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 
 	peer.NodeID = nodeID
 	peer.SetStatus("helloed")
-	peer.LastSeen = time.Now()
+	now := time.Now()
+	peer.LastSeen = now
+	peer.lastSeenNano.Store(now.UnixNano())
 	
 	// Store remote friendly name (proxy name)
 	if info.FriendlyName != "" {
@@ -1737,7 +1747,7 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 	m.mu.Lock()
 	peers := make([]*Peer, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.meshSender != nil {
+		if p.meshSenderPtr.Load() != nil {
 			peers = append(peers, p)
 		}
 	}
@@ -1755,7 +1765,8 @@ func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 	m.mu.Lock()
 	var target *Peer
 	for _, p := range m.peers {
-		if p.meshSender != nil && p.meshSender.nodeID == peerNodeID {
+		sender := p.meshSenderPtr.Load()
+		if sender != nil && sender.nodeID == peerNodeID {
 			target = p
 			break
 		}
@@ -1775,7 +1786,7 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	m.mu.Lock()
 	peers := make([]*Peer, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.meshSender != nil {
+		if p.meshSenderPtr.Load() != nil {
 			peers = append(peers, p)
 		}
 	}
@@ -1803,8 +1814,9 @@ func (m *P2PManager) ListMeshPeerIDs() []string {
 
 	var result []string
 	for _, p := range m.peers {
-		if p.meshSender != nil {
-			result = append(result, p.meshSender.nodeID)
+		sender := p.meshSenderPtr.Load()
+		if sender != nil {
+			result = append(result, sender.nodeID)
 		}
 	}
 	return result
@@ -1817,11 +1829,12 @@ func (m *P2PManager) GetPeers() []Peer {
 
 	result := make([]Peer, 0, len(m.peers))
 	for _, p := range m.peers {
+		lastSeenNano := p.lastSeenNano.Load()
 		result = append(result, Peer{
 			ID:        p.ID,
 			ProxyName: p.ProxyName,
 			NodeID:    p.NodeID,
-			LastSeen:  p.LastSeen,
+			LastSeen:  time.Unix(0, lastSeenNano),
 		})
 	}
 	return result

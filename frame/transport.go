@@ -146,14 +146,31 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 	_ = t.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	defer t.conn.SetWriteDeadline(time.Time{})
 
-	// Serialize all frames into buffer
-	var buf []byte
+	// Pre-calculate total buffer size to avoid multiple allocations (issue 9)
+	totalSize := 0
+	for _, f := range frames {
+		totalSize += 3 + len(f.Payload) // 3-byte header + payload
+	}
+	
+	// Allocate buffer once (issue 9)
+	buf := make([]byte, totalSize)
+	offset := 0
+	
+	// Serialize all frames directly into buffer
 	for _, f := range frames {
 		if f.Type == FrameMeshPacket {
 			traceMeshPacket("frame_write_start", f.Payload)
 		}
-		frameBytes := serializeFrame(f.Type, f.Payload)
-		buf = append(buf, frameBytes...)
+		// Serialize frame header
+		buf[offset] = f.Type
+		buf[offset+1] = byte(len(f.Payload) >> 8)
+		buf[offset+2] = byte(len(f.Payload))
+		offset += 3
+		// Copy payload
+		if len(f.Payload) > 0 {
+			copy(buf[offset:], f.Payload)
+			offset += len(f.Payload)
+		}
 	}
 
 	// Single write for all frames

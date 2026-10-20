@@ -380,6 +380,13 @@ type Peer struct {
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
 
+	// Per-peer random number generator (avoid global rand lock contention)
+	rng   *rand.Rand
+	rngMu sync.Mutex
+
+	// Pre-allocated buffer for pure ACK (avoid 4-byte allocation per ACK)
+	ackBuf [4]byte
+
 	// Channel overflow statistics (atomic counters)
 	dnsQueueDrops       uint64 // Frames dropped due to dnsQueue full
 	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
@@ -803,7 +810,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		
 		if queueLen >= maxThreshold {
 			// Queue almost full: drop with high probability (80%)
-			if queueLen >= capacity-1 || (queueLen >= maxThreshold && randomDrop(80)) {
+			if queueLen >= capacity-1 || (queueLen >= maxThreshold && peer.randomDrop(80)) {
 				if req.frameType == frame.FrameMeshPacket {
 					util.LogModuleWarn("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s reason=max_threshold", 
 						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer))
@@ -822,7 +829,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 			// Queue between min and max: drop with increasing probability (0-50%)
 			// Linear increase: probability = (queueLen - minThreshold) / (maxThreshold - minThreshold) * 50%
 			dropProbability := (queueLen - minThreshold) * 50 / (maxThreshold - minThreshold)
-			if randomDrop(dropProbability) {
+			if peer.randomDrop(dropProbability) {
 				if req.frameType == frame.FrameMeshPacket {
 					util.LogModuleDebug("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s probability=%d%%", 
 						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer), dropProbability)
@@ -873,14 +880,17 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 }
 
 // randomDrop returns true with the given probability (0-100)
-func randomDrop(probability int) bool {
+func (p *Peer) randomDrop(probability int) bool {
 	if probability <= 0 {
 		return false
 	}
 	if probability >= 100 {
 		return true
 	}
-	return rand.Intn(100) < probability
+	p.rngMu.Lock()
+	result := p.rng.Intn(100) < probability
+	p.rngMu.Unlock()
+	return result
 }
 
 // isDNSPacket checks if a mesh packet contains UDP traffic to/from port 53 (DNS)
@@ -1053,14 +1063,15 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		dnsQueue:       make(chan writeReq, 512),
 		ackQueue:       make(chan writeReq, 256),
 		dataQueues:     dataQueues,
-		drrOutput:      make(chan writeReq, 64),
-		controlCh:      make(chan writeReq, 128),
+		drrOutput:      make(chan writeReq, 512),
+		controlCh:      make(chan writeReq, 512),
 		stopCh:         make(chan struct{}),
 		sendState:      newSendState(),
 		recvState:      newRecvState(),
 		Seq:            seq,
 		drrScheduler:   newDRRScheduler(dataQueues),
 	}
+	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
@@ -1201,10 +1212,11 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		dnsQueue:     make(chan writeReq, 512),
 		ackQueue:     make(chan writeReq, 256),
 		dataQueues:   dataQueues,
-		drrOutput:    make(chan writeReq, 64),
-		controlCh:    make(chan writeReq, 128),
+		drrOutput:    make(chan writeReq, 512),
+		controlCh:    make(chan writeReq, 512),
 		drrScheduler: newDRRScheduler(dataQueues),
 	}
+	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
@@ -1292,7 +1304,10 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			peer.SetStatus("failed")
 			m.notifyStatusChange()
 			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
-			jitteredBackoff := time.Duration(float64(backoff) * (0.5 + rand.Float64()))
+			peer.rngMu.Lock()
+			jitter := 0.5 + peer.rng.Float64()
+			peer.rngMu.Unlock()
+			jitteredBackoff := time.Duration(float64(backoff) * jitter)
 			select {
 			case <-peer.stopCh:
 				return
@@ -1308,8 +1323,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.transport = transport
 		peer.dnsQueue = make(chan writeReq, 512)
 		peer.ackQueue = make(chan writeReq, 256)
-		peer.controlCh = make(chan writeReq, 128)
-		peer.drrOutput = make(chan writeReq, 64)
+		peer.controlCh = make(chan writeReq, 512)
+		peer.drrOutput = make(chan writeReq, 512)
+		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 		// Reinitialize data queues for DRR fair scheduling
 		for i := range peer.dataQueues {
 			peer.dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
@@ -1551,15 +1567,13 @@ func (m *P2PManager) sendPureAck(peer *Peer) {
 		return // Nothing to acknowledge
 	}
 
-	// For pure ACK, payload is just the ack number (4 bytes)
-	// peerWriteLoop will construct the full frame: {type=0x13, seq=0, ack}
-	payload := make([]byte, 4)
-	binary.BigEndian.PutUint32(payload[0:4], ack)
+	// Use pre-allocated buffer to avoid allocation per ACK
+	binary.BigEndian.PutUint32(peer.ackBuf[:], ack)
 
 	// Send through controlCh to avoid concurrent writes with peerWriteLoop
 	// Mark as control frame so it gets priority and correct timeout
 	select {
-	case peer.controlCh <- writeReq{frameType: frame.FrameAck, data: payload, isControl: true}:
+	case peer.controlCh <- writeReq{frameType: frame.FrameAck, data: peer.ackBuf[:], isControl: true}:
 		// Queued successfully
 	default:
 		atomic.AddUint64(&peer.controlChDrops, 1)

@@ -307,13 +307,15 @@ func (s *rttSampler) add(rtt time.Duration, isRetransmission bool) {
 // cleanup removes samples older than the window (5 minutes).
 func (s *rttSampler) cleanup() {
 	cutoff := time.Now().Add(-s.window)
-	var recent []rttRecord
+	// In-place filtering to avoid allocation
+	n := 0
 	for _, r := range s.samples {
 		if r.timestamp.After(cutoff) {
-			recent = append(recent, r)
+			s.samples[n] = r
+			n++
 		}
 	}
-	s.samples = recent
+	s.samples = s.samples[:n]
 }
 
 // getSRTT returns the average RTT from all samples in the window.
@@ -408,13 +410,15 @@ func (s *rttSampler) getRTO() time.Duration {
 // cleanupOldRecords removes frame history older than 5 minutes.
 func (s *sendState) cleanupOldRecords() {
 	cutoff := time.Now().Add(-5 * time.Minute)
-	var recent []frameRecord
+	// In-place filtering to avoid allocation
+	n := 0
 	for _, r := range s.frameHistory {
 		if r.timestamp.After(cutoff) {
-			recent = append(recent, r)
+			s.frameHistory[n] = r
+			n++
 		}
 	}
-	s.frameHistory = recent
+	s.frameHistory = s.frameHistory[:n]
 }
 
 // getLossRate returns the estimated loss rate based on frames lost vs sent in the last 60 seconds.

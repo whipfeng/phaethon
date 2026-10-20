@@ -1449,14 +1449,16 @@ func (m *P2PManager) runSession(peer *Peer) {
 		case frame.FrameMeshPacket:
 			if m.meshHandler != nil && len(payload) > 0 {
 				mesh.TraceForwarding("p2p_received", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-				frameCopy := make([]byte, len(payload))
-				copy(frameCopy, payload)
 				linkNIC := peer.GetLinkNIC()
 				if linkNIC == nil {
 					util.LogModuleWarn("p2p", "[P2P-DIAG] FrameMeshPacket: peer.GetLinkNIC() is nil! peer.ID=%s node=%s status=%s", peer.ID, peer.NodeID, peer.GetStatus())
 				}
+				// Zero-copy: pass payload directly to mesh layer without copying.
+				// The transport layer (Recv/ReadFrame) allocates a new buffer for each frame,
+				// so the payload buffer is not reused and can be safely passed to the mesh layer.
+				// The mesh layer will handle the packet lifecycle (inject to gVisor netstack).
 				select {
-				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: frameCopy}:
+				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 				default:
 					atomic.AddUint64(&m.meshInboundDrops, 1)

@@ -3,6 +3,8 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -10,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -1024,6 +1027,12 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Try signature-based auth (public key verification)
+		if s.config.PublicKey != "" && s.verifySignature(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Fall back to token-based auth (for API/programmatic access)
 		token := r.URL.Query().Get("token")
 		if token == "" {
@@ -1052,6 +1061,99 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Location", "./login")
 		w.WriteHeader(http.StatusFound)
 	})
+}
+
+// verifySignature checks if the request has a valid signature using the configured public key.
+// Signature format: X-Signature header contains base64-encoded signature of (timestamp + "\n" + method + "\n" + path + "\n" + bodyHash)
+// X-Timestamp header contains Unix timestamp (used to prevent replay attacks, valid for 5 minutes)
+func (s *AdminServer) verifySignature(r *http.Request) bool {
+	sigHeader := r.Header.Get("X-Signature")
+	tsHeader := r.Header.Get("X-Timestamp")
+	if sigHeader == "" || tsHeader == "" {
+		return false
+	}
+
+	// Parse and validate timestamp (prevent replay attacks, 5-minute window)
+	ts, err := strconv.ParseInt(tsHeader, 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().Unix()
+	if abs(now-ts) > 300 { // 5 minutes
+		return false
+	}
+
+	// Decode signature
+	sig, err := hex.DecodeString(sigHeader)
+	if err != nil {
+		// Try base64 if hex fails
+		sig, err = decodeBase64(sigHeader)
+		if err != nil {
+			return false
+		}
+	}
+
+	// Read body and compute hash
+	var bodyBytes []byte
+	if r.Body != nil {
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			return false
+		}
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body for handlers
+	}
+	bodyHash := sha256.Sum256(bodyBytes)
+
+	// Construct signed data: timestamp + "\n" + method + "\n" + path + "\n" + bodyHash
+	signedData := fmt.Sprintf("%s\n%s\n%s\n%s",
+		tsHeader,
+		r.Method,
+		r.URL.Path,
+		hex.EncodeToString(bodyHash[:]),
+	)
+
+	// Parse public key
+	block, _ := pem.Decode([]byte(s.config.PublicKey))
+	if block == nil {
+		return false
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return false
+	}
+
+	// Verify signature based on key type
+	hash := sha256.Sum256([]byte(signedData))
+	switch pubKey := pub.(type) {
+	case *rsa.PublicKey:
+		return rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], sig) == nil
+	case *ecdsa.PublicKey:
+		return ecdsa.VerifyASN1(pubKey, hash[:], sig)
+	default:
+		return false
+	}
+}
+
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+func decodeBase64(s string) ([]byte, error) {
+	// Try with padding
+	s = strings.TrimRight(s, "=")
+	s = strings.ReplaceAll(s, "-", "+")
+	s = strings.ReplaceAll(s, "_", "/")
+	switch len(s) % 4 {
+	case 2:
+		s += "=="
+	case 3:
+		s += "="
+	}
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // securityHeadersMiddleware adds Content-Security-Policy and other security

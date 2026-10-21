@@ -163,6 +163,23 @@
         </div>
     </div>
 
+    <!-- Password confirmation modal (replaces native prompt() for password) -->
+    <div id="password-modal" class="modal hidden" onclick="if (event.target === this) closePasswordModal();">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 data-i18n="common.passwordConfirm">输入密码确认</h3>
+                <button onclick="closePasswordModal()" class="close-btn">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="password" id="password-modal-input" class="form-control" placeholder="Password" autocomplete="current-password">
+            </div>
+            <div class="form-actions">
+                <button onclick="closePasswordModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                <button id="password-modal-ok" class="btn btn-primary" data-i18n="common.confirm">确认</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Bottom Navigation (Mobile) -->
     <nav class="bottom-nav" id="bottom-nav">
         <!-- Dynamically populated by JavaScript -->

@@ -70,55 +70,66 @@
         }
         
         try {
-            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-            if (!password) return;
+            // Use custom password modal instead of native prompt
+            window.showPasswordConfirm(async function(password) {
+                try {
+                    const addr = document.getElementById('admin-addr').value.trim();
+                    const authEnabled = document.getElementById('admin-auth-enabled').checked;
+                    const username = document.getElementById('admin-username').value.trim();
+                    const newPassword = document.getElementById('admin-password').value;
+                    const statusEl = document.getElementById('admin-status');
 
-            const addr = document.getElementById('admin-addr').value.trim();
-            const authEnabled = document.getElementById('admin-auth-enabled').checked;
-            const username = document.getElementById('admin-username').value.trim();
-            const newPassword = document.getElementById('admin-password').value;
-            const statusEl = document.getElementById('admin-status');
+                    if (!addr) {
+                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
+                        statusEl.style.color = 'var(--danger)';
+                        return;
+                    }
 
-            if (!addr) {
-                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
-                statusEl.style.color = 'var(--danger)';
-                return;
-            }
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+                    statusEl.style.color = 'var(--text-muted)';
 
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-            statusEl.style.color = 'var(--text-muted)';
+                    const body = {
+                        Addr: addr,
+                        AuthEnabled: authEnabled,
+                        Username: username
+                    };
+                    if (newPassword) {
+                        body.Password = newPassword;
+                    }
 
-            const body = {
-                Addr: addr,
-                AuthEnabled: authEnabled,
-                Username: username
-            };
-            if (newPassword) {
-                body.Password = newPassword;
-            }
-
-            const res = await fetch('./api/config/admin', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Password-Confirm': password
-                },
-                body: JSON.stringify(body)
+                    const res = await fetch('./api/config/admin', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Password-Confirm': password
+                        },
+                        body: JSON.stringify(body)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        throw new Error(data.error || 'Save failed');
+                    }
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                    statusEl.style.color = 'var(--success)';
+                    document.getElementById('admin-password').value = '';
+                    setTimeout(() => {
+                        statusEl.textContent = '';
+                    }, 2000);
+                } catch (err) {
+                    const statusEl = document.getElementById('admin-status');
+                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+                    statusEl.style.color = 'var(--danger)';
+                } finally {
+                    if (btn) {
+                        btn.disabled = originalDisabled;
+                        btn.textContent = originalText;
+                    }
+                }
             });
-            const data = await res.json();
-            if (!res.ok) {
-                throw new Error(data.error || 'Save failed');
-            }
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-            statusEl.style.color = 'var(--success)';
-            document.getElementById('admin-password').value = '';
-            setTimeout(() => {
-                statusEl.textContent = '';
-            }, 2000);
         } catch (err) {
+            const statusEl = document.getElementById('admin-status');
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
-        } finally {
             if (btn) {
                 btn.disabled = originalDisabled;
                 btn.textContent = originalText;

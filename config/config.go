@@ -1290,6 +1290,7 @@ type AdminConfig struct {
 	AuthEnabled bool   `yaml:"auth-enabled"`
 	Username    string `yaml:"username"`
 	Password    string `yaml:"password"`
+	PublicKey   string `yaml:"public-key,omitempty"` // PEM-encoded RSA/ECDSA public key for signature auth
 	TLSCert     string `yaml:"tls-cert,omitempty"`
 	TLSKey      string `yaml:"tls-key,omitempty"`
 	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener

@@ -4,6 +4,26 @@
 **状态**: ✅ 已解决（2026-10-21 确认）
 **优先级**: 高（已解决）
 
+## 研判记录（2026-10-21）
+
+**研判依据**:
+1. ✅ **QG 日志检查**: `tail -500 /root/data/logs/phaethon.log | grep -i 'SERVFAIL\|dns.*fail'` → 无 DNS 错误
+2. ✅ **GG 日志检查**: `tail -500 /home/layer4/phaethon-gg/data/logs/phaethon.log | grep -i 'SERVFAIL\|dns.*fail'` → 无 DNS 错误
+3. ✅ **代码确认**: DNS 诊断日志系统已添加（commit 8145677），可捕获 DNS 解析失败
+
+**局限性**:
+- ❌ 未做**批量 DNS 解析测试**（需查询 100+ 次统计成功率）
+- ❌ 未做**跨节点 DNS 测试**（需验证所有节点间 DNS 转发正常）
+- ❌ 仅检查最近 500 行日志，可能遗漏间歇性问题
+
+**结论**: 基于最近日志无 DNS 错误，判断问题已解决。如复现需检查 DNS 转发链路和上游 DNS 可达性。
+
+**复现排查方向**:
+1. 检查 `mesh/dns.go` 中 DNSHijacker 是否正常启动
+2. 检查跨节点 DNS 转发是否成功（查看 DNS-DEBUG 日志）
+3. 检查上游 DNS（direct-nameserver）是否可达
+4. 使用 `curl -sk https://localhost:39999/api/mesh/dns/resolve?domain=xxx.phn` 测试解析
+
 ## 问题描述
 
 所有 mesh 域名（jf.phn, gg.phn 等）DNS 解析失败，返回 SERVFAIL。

@@ -2,7 +2,25 @@
 
 **状态**: ✅ 已解决（2026-10-21 确认）  
 **解决方案**: 实现 ReadWaitEvent + WaitForSingleObject 超时检测机制  
-**验证**: VM 环境 TUN 正常运行，最近日志未发现 read stall 问题
+
+## 研判记录（2026-10-21）
+
+**研判依据**:
+1. ✅ **代码检查**: `tun/device_windows.go` 已实现 `ReadWaitEvent()` + `WaitForSingleObject()` 超时检测
+2. ✅ **状态检查**: VM 环境 TUN 接口状态 `Up`，正常运行
+3. ✅ **日志检查**: VM 最近日志（`Get-Content phaethon.log -Tail 100`）无 stall 相关错误
+
+**局限性**:
+- ❌ 未做**长时间压力测试**（需运行数小时验证不会复现）
+- ❌ 未做**高并发流量测试**（需验证高负载下不会 stall）
+
+**结论**: 基于代码实现和短期运行日志，判断问题已解决。如复现需检查超时检测逻辑是否生效。
+
+**复现排查方向**:
+1. 检查 `tun/device_windows.go` 中 `ReadWaitEvent()` 是否被正确调用
+2. 检查 `WaitForSingleObject()` 超时时间设置是否合理
+3. 查看日志中是否有 timeout 相关警告
+4. 监控 `tun counters` 日志，观察 read/write 计数器是否同步增长
 
 ---
 

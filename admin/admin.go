@@ -5351,9 +5351,18 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	w.Header().Set("Expires", "0")
 
 	// Ensure every page has a non-empty Version for static-file cache busting.
+	// Use GetCurrentVersion (git describe format) for consistency across all pages.
 	if m, ok := data.(map[string]interface{}); ok {
 		if v, _ := m["Version"].(string); v == "" {
-			m["Version"] = adminVersion
+			if s.GetCurrentVersion != nil {
+				if version := s.GetCurrentVersion(); version != "" {
+					m["Version"] = version
+				} else {
+					m["Version"] = adminVersion
+				}
+			} else {
+				m["Version"] = adminVersion
+			}
 		}
 	}
 

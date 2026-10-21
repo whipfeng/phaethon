@@ -1293,6 +1293,7 @@ type AdminConfig struct {
 	PublicKey   string `yaml:"public-key,omitempty"` // PEM-encoded RSA/ECDSA public key for signature auth
 	TLSCert     string `yaml:"tls-cert,omitempty"`
 	TLSKey      string `yaml:"tls-key,omitempty"`
+	ClientCA    string `yaml:"client-ca,omitempty"` // PEM-encoded CA certificate for mTLS client verification
 	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener
 
 	// Package upload/publish (admin console binary deployment).

@@ -780,6 +780,20 @@ func (s *AdminServer) Start() error {
 		s.tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
+		// Enable mTLS if ClientCA is configured
+		if s.config.ClientCA != "" {
+			caCert, err := os.ReadFile(s.config.ClientCA)
+			if err != nil {
+				return fmt.Errorf("admin read client CA fail: %w", err)
+			}
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				return fmt.Errorf("admin parse client CA fail")
+			}
+			s.tlsConfig.ClientCAs = caCertPool
+			s.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			util.LogModuleInfo("admin", "mTLS enabled: client certificate required")
+		}
 		s.server.TLSConfig = s.tlsConfig
 	} else if s.config.MeshOnly || s.config.Enabled {
 		// Auto-generate TLS certificate if not configured
@@ -1017,6 +1031,14 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 
 		// Public paths are always accessible
 		if isPublicPath(r.URL.Path, r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Try mTLS client certificate authentication first
+		if s.config.ClientCA != "" && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			// Client certificate was already verified by TLS handshake
+			util.LogModuleInfo("admin", "mTLS auth success: client=%s", r.TLS.PeerCertificates[0].Subject.CommonName)
 			next.ServeHTTP(w, r)
 			return
 		}

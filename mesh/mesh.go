@@ -1337,7 +1337,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peerID, localSeq)
 				avgRTT, loss, _ := quality.Stats()
-				srtt = float64(avgRTT.Milliseconds())
+				srtt = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				lossRate = loss
 				// Cost calculation: penalize high loss rates
 				// Use same formula as gossiped links (line 1361-1367)
@@ -1547,7 +1547,7 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 			Direct:      true,
 			Subnet:      p.SubnetStr,
 			LastSeen:    p.LastSeen,
-			SRTT:        float64(avgRTT.Milliseconds()),
+			SRTT:        float64(avgRTT) / float64(time.Millisecond), // Preserve sub-millisecond precision
 			Jitter:      jitter,
 			SampleCount: sampleCount,
 			LossRate:    lossRate,
@@ -2204,7 +2204,7 @@ func (m *MeshManager) broadcastGossip() {
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate, jitter := quality.Stats()
-				link.SRTT = float64(avgRTT.Milliseconds())
+				link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				link.LossRate = lossRate
 				link.Jitter = jitter
 			}
@@ -2743,7 +2743,7 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(nodeID, localSeq)
 				avgRTT, lossRate, jitter := quality.Stats()
-				link.SRTT = float64(avgRTT.Milliseconds())
+				link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				link.LossRate = lossRate
 				link.Jitter = jitter
 			}
@@ -2919,7 +2919,7 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(nodeID, localSeq)
 			avgRTT, lossRate, jitter := quality.Stats()
-			link.SRTT = float64(avgRTT.Milliseconds())
+			link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 			link.LossRate = lossRate
 			link.Jitter = jitter
 		}
@@ -3025,7 +3025,7 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, localSeq)
 			avgRTT, lossRate, jitterVal := quality.Stats()
-			link.SRTT = float64(avgRTT.Milliseconds())
+			link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 			link.LossRate = lossRate
 			link.Jitter = jitterVal
 			// Cost calculation: penalize high loss rates (consistent with line 1322-1328)

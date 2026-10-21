@@ -251,44 +251,56 @@
         }
         
         try {
-            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-            if (!password) return;
+            // Use custom password modal instead of native prompt
+            window.showPasswordConfirm(async function(password) {
+                try {
+                    const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
+                    const subnet = document.getElementById('mesh-identity-subnet').value.trim();
+                    const statusEl = document.getElementById('mesh-identity-status');
 
-            const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
-            const subnet = document.getElementById('mesh-identity-subnet').value.trim();
-            const statusEl = document.getElementById('mesh-identity-status');
+                    if (!nodeid) {
+                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
+                        statusEl.style.color = 'var(--danger)';
+                        return;
+                    }
 
-            if (!nodeid) {
-                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
-                statusEl.style.color = 'var(--danger)';
-                return;
-            }
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+                    statusEl.style.color = 'var(--text-muted)';
 
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-            statusEl.style.color = 'var(--text-muted)';
-
-            const res = await fetch('./api/config/mesh', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Password-Confirm': password
-                },
-                body: JSON.stringify({NodeID: nodeid, Subnet: subnet})
+                    const res = await fetch('./api/config/mesh', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Password-Confirm': password
+                        },
+                        body: JSON.stringify({'node-id': nodeid, subnet: subnet})
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        throw new Error(data.error || 'Save failed');
+                    }
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                    statusEl.style.color = 'var(--success)';
+                    setTimeout(() => {
+                        fetchMeshStatus();
+                        loadMeshIdentity(); // Reload mesh identity to show updated node-id
+                        statusEl.textContent = '';
+                    }, 1500);
+                } catch (err) {
+                    const statusEl = document.getElementById('mesh-identity-status');
+                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+                    statusEl.style.color = 'var(--danger)';
+                } finally {
+                    if (btn) {
+                        btn.disabled = originalDisabled;
+                        btn.textContent = originalText;
+                    }
+                }
             });
-            const data = await res.json();
-            if (!res.ok) {
-                throw new Error(data.error || 'Save failed');
-            }
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-            statusEl.style.color = 'var(--success)';
-            setTimeout(() => {
-                fetchMeshStatus();
-                statusEl.textContent = '';
-            }, 1500);
         } catch (err) {
+            const statusEl = document.getElementById('mesh-identity-status');
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
-        } finally {
             if (btn) {
                 btn.disabled = originalDisabled;
                 btn.textContent = originalText;
@@ -322,46 +334,57 @@
         }
         
         try {
-            const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-            if (!password) return;
+            // Use custom password modal instead of native prompt
+            window.showPasswordConfirm(async function(password) {
+                try {
+                    const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
+                    const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
+                    const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
+                    const statusEl = document.getElementById('mesh-keepalive-status');
 
-            const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
-            const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
-            const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
-            const statusEl = document.getElementById('mesh-keepalive-status');
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+                    statusEl.style.color = 'var(--text-muted)';
 
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-            statusEl.style.color = 'var(--text-muted)';
+                    // First get current mesh config
+                    const getRes = await fetch('./api/config/mesh');
+                    if (!getRes.ok) throw new Error('Failed to load current config');
+                    const currentMesh = await getRes.json();
 
-            // First get current mesh config
-            const getRes = await fetch('./api/config/mesh');
-            if (!getRes.ok) throw new Error('Failed to load current config');
-            const currentMesh = await getRes.json();
+                    // Update with new TCP keepalive settings
+                    currentMesh['tcp-keepalive'] = { idle, interval, count };
 
-            // Update with new TCP keepalive settings
-            currentMesh.TCPKeepalive = { idle, interval, count };
-
-            const res = await fetch('./api/config/mesh', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Password-Confirm': password
-                },
-                body: JSON.stringify(currentMesh)
+                    const res = await fetch('./api/config/mesh', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Password-Confirm': password
+                        },
+                        body: JSON.stringify(currentMesh)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        throw new Error(data.error || 'Save failed');
+                    }
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                    statusEl.style.color = 'var(--success)';
+                    setTimeout(() => {
+                        statusEl.textContent = '';
+                    }, 1500);
+                } catch (err) {
+                    const statusEl = document.getElementById('mesh-keepalive-status');
+                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+                    statusEl.style.color = 'var(--danger)';
+                } finally {
+                    if (btn) {
+                        btn.disabled = originalDisabled;
+                        btn.textContent = originalText;
+                    }
+                }
             });
-            const data = await res.json();
-            if (!res.ok) {
-                throw new Error(data.error || 'Save failed');
-            }
-            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-            statusEl.style.color = 'var(--success)';
-            setTimeout(() => {
-                statusEl.textContent = '';
-            }, 1500);
         } catch (err) {
+            const statusEl = document.getElementById('mesh-keepalive-status');
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
-        } finally {
             if (btn) {
                 btn.disabled = originalDisabled;
                 btn.textContent = originalText;

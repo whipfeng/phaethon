@@ -1794,6 +1794,9 @@ function escapeHtml(s) {
 
 // ===== P2P Status Updates =====
 (function() {
+    // Store P2P status globally so renderProxyRows can use it
+    window._p2pStatusMap = {};
+    
     function updateP2PStatus(peers) {
         // Build a map of proxy name -> peer status
         const peerMap = {};
@@ -1804,6 +1807,9 @@ function escapeHtml(s) {
                 }
             }
         }
+        
+        // Store globally for renderProxyRows
+        window._p2pStatusMap = peerMap;
         
         // Update each P2P cell in the table
         document.querySelectorAll('#proxy-table tr[data-name]').forEach(row => {

@@ -940,8 +940,14 @@ async function fetchProxies(expectedVersion) {
     const groupsData = await groupsRes.json();
     if (!Array.isArray(proxiesData)) throw new Error('invalid proxies data');
     if (!Array.isArray(groupsData)) throw new Error('invalid groups data');
-    if (expectedVersion !== undefined && targetVersions.proxies !== expectedVersion) return;
+    if (expectedVersion !== undefined && targetVersions.proxies !== expectedVersion) {
+        return;
+    }
     updateProxies(proxiesData, groupsData);
+    // Refresh P2P status after updating proxy list
+    if (typeof window.fetchP2PStatus === 'function') {
+        window.fetchP2PStatus();
+    }
 }
 
 function updateProxies(proxiesData, groupsData) {
@@ -992,9 +998,20 @@ function renderProxyRows(proxiesData) {
                 </button>
                </span>`
             : `<span class="text-muted">-</span>`;
-        const p2pCell = p2p
-            ? `<span class="p2p-status connecting" title="Connecting..."></span>`
-            : `<span class="p2p-status disabled" title="Disabled"></span>`;
+        // Use current P2P status from global map to avoid flickering
+        let p2pCell;
+        if (!p2p) {
+            p2pCell = '<span class="p2p-status disabled" title="Disabled"></span>';
+        } else {
+            const p2pStatus = (typeof window._p2pStatusMap !== 'undefined') ? window._p2pStatusMap[p.name] : null;
+            if (!p2pStatus) {
+                p2pCell = '<span class="p2p-status connecting" title="Connecting..."></span>';
+            } else if (p2pStatus === 'upToDate' || p2pStatus === 'helloed') {
+                p2pCell = '<span class="p2p-status connected" title="Connected"></span>';
+            } else {
+                p2pCell = '<span class="p2p-status connecting" title="Connecting..."></span>';
+            }
+        }
         return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
             <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>
             <td data-label="Type"><code class="type-badge type-${escapeHtml((p.type || '').toLowerCase())}">${escapeHtml(p.type)}</code></td>
@@ -3161,6 +3178,42 @@ function closeConfirmModal() {
 
 window.showConfirm = openConfirmModal;
 window.closeConfirmModal = closeConfirmModal;
+
+// ========== Password Modal ==========
+let passwordModalCallback = null;
+
+function openPasswordModal(onConfirm) {
+    const modal = document.getElementById('password-modal');
+    const input = document.getElementById('password-modal-input');
+    const okBtn = document.getElementById('password-modal-ok');
+    if (!modal || !input || !okBtn) {
+        // Fallback to native prompt if modal not available
+        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
+        if (password && onConfirm) onConfirm(password);
+        return;
+    }
+    passwordModalCallback = onConfirm;
+    input.value = '';
+    okBtn.onclick = () => {
+        const password = input.value;
+        modal.classList.add('hidden');
+        const cb = passwordModalCallback;
+        passwordModalCallback = null;
+        if (cb) cb(password);
+    };
+    modal.classList.remove('hidden');
+    // Focus the input field
+    setTimeout(() => input.focus(), 100);
+}
+
+function closePasswordModal() {
+    const modal = document.getElementById('password-modal');
+    if (modal) modal.classList.add('hidden');
+    passwordModalCallback = null;
+}
+
+window.showPasswordConfirm = openPasswordModal;
+window.closePasswordModal = closePasswordModal;
 
 // ========== Utility ==========
 // JSON helper for templates

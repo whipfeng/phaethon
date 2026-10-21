@@ -48,17 +48,15 @@ const MaxPayload = 65535
 // Callers MUST call ReturnBuffer when done with the payload.
 var readBufferPool = sync.Pool{
 	New: func() interface{} {
-		// Pre-allocate max size to avoid reallocation
 		buf := make([]byte, MaxPayload)
-		return &buf
+		return buf
 	},
 }
 
 // GetReadBuffer gets a buffer from the pool (for advanced use cases).
 // Most callers should use ReadFrame instead.
 func GetReadBuffer() []byte {
-	bufPtr := readBufferPool.Get().(*[]byte)
-	return *bufPtr
+	return readBufferPool.Get().([]byte)
 }
 
 // ReturnBuffer returns a buffer to the pool.
@@ -68,12 +66,12 @@ func ReturnBuffer(buf []byte) {
 	if len(buf) == 0 {
 		return
 	}
-	// Verify it's a pooled buffer (capacity check)
 	if cap(buf) == MaxPayload {
-		bufPtr := (*[]byte)(&buf)
-		readBufferPool.Put(bufPtr)
+		// Reset length to capacity before returning to pool.
+		// This ensures the next Get returns a buffer with len=MaxPayload.
+		buf = buf[:MaxPayload]
+		readBufferPool.Put(buf)
 	}
-	// Non-pooled buffers are silently discarded (GC will collect)
 }
 
 // ReadFrame reads one complete frame from conn.

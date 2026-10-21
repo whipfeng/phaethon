@@ -343,6 +343,7 @@ type Peer struct {
 	ID        string `json:"id"`        // unique connection ID (localSeq-based)
 	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
 	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
+	Status    string `json:"status"`    // current peer status: connecting, helloed, upToDate, failed
 	LastSeen  time.Time `json:"lastSeen"`
 
 	// LinkID negotiation (hello phase)
@@ -1870,6 +1871,7 @@ func (m *P2PManager) GetPeers() []Peer {
 			ID:        p.ID,
 			ProxyName: p.ProxyName,
 			NodeID:    p.NodeID,
+			Status:    p.GetStatus(),
 			LastSeen:  time.Unix(0, lastSeenNano),
 		})
 	}

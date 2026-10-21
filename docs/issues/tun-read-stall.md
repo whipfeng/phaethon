@@ -1,5 +1,11 @@
 # TUN Read Stall: Wintun.ReceivePacket() 永久阻塞
 
+**状态**: ✅ 已解决（2026-10-21 确认）  
+**解决方案**: 实现 ReadWaitEvent + WaitForSingleObject 超时检测机制  
+**验证**: VM 环境 TUN 正常运行，最近日志未发现 read stall 问题
+
+---
+
 ## 问题概述
 
 TUN 模式启动后约 4-30 秒，`Wintun session.ReceivePacket()` 永久阻塞，不再返回任何数据包。Windows 停止向 TUN 设备发送流量，导致所有通过 TUN 的网络连接中断。

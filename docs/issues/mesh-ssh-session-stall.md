@@ -4,6 +4,26 @@
 **状态**: ✅ 未复现（2026-10-21 确认）
 **说明**: 最近日志中未发现 SSH 会话僵死问题，可能是历史问题或已随 P2P 性能优化自动解决
 
+## 研判记录（2026-10-21）
+
+**研判依据**:
+1. ✅ **GG 日志检查**: `tail -1000 /home/layer4/phaethon-gg/data/logs/phaethon.log | grep -i 'ssh.*stall\|session.*stall'` → 无相关问题
+2. ✅ **QG 日志检查**: `tail -1000 /root/data/logs/phaethon.log | grep -i 'ssh.*stall\|session.*stall'` → 无相关问题
+3. ✅ **P2P 性能优化**: 近期完成 10 项 P2P 性能优化（buffer 池化、零拷贝、并发优化等），可能自动解决此问题
+
+**局限性**:
+- ❌ 未做**长时间 SSH 会话测试**（需保持连接数小时验证不会僵死）
+- ❌ 未做**高延迟链路测试**（需验证经中继的 SSH 连接稳定性）
+- ❌ 仅检查最近 1000 行日志，可能遗漏低频问题
+
+**结论**: 基于最近日志无 SSH 僵死问题，且 P2P 性能已大幅优化，判断问题可能已自动解决。如复现需检查 P2P 链路质量和 TCP 参数。
+
+**复现排查方向**:
+1. 检查 P2P 链路质量（RTT、丢包率）：`curl -sk https://localhost:39999/api/mesh/topology`
+2. 检查 TCP 连接是否设置 `TCP_NODELAY`（避免 Nagle 算法延迟）
+3. 检查 Mode B 代理层缓冲队列是否过大（导致背压不足）
+4. 检查 mesh 路由切换是否导致丢包（查看 forwarding-trace 日志）
+
 ---
 
 ## 问题描述

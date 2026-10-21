@@ -1320,7 +1320,7 @@ async function fetchMeshStatus() {
                     // Show all links with their quality and seq
                     // Format: #localSeq#remoteSeq, srtt, loss (friendlyName)
                     const qualities = links.map(link => {
-                        const srtt = link.srtt ? link.srtt.toFixed(1) : '?';
+                        const srtt = (link.srtt !== undefined && link.srtt !== null) ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
                         const friendlyName = link.friendlyName || '';
                         const localSeq = link.localSeq || '';
@@ -1858,7 +1858,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 // Draw measurements - each edge shows its own data near its source node
                 group.edges.forEach(e => {
                     const isFromFirst = e.from === firstEdge.from;
-                    const srtt = e.link.srtt > 0 ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                    const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(0)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
                     const friendlyName = e.link.friendlyName || '';
                     const localSeq = e.link.localSeq || '';

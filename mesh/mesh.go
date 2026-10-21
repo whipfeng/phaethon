@@ -1265,9 +1265,9 @@ type FullTopologyLink struct {
 	LocalSeq     uint16  `json:"localSeq"`               // local sequence number
 	RemoteSeq    uint16  `json:"remoteSeq"`              // remote sequence number
 	FriendlyName string  `json:"friendlyName,omitempty"` // display name (proxy name)
-	SRTT         float64 `json:"srtt,omitempty"`         // smoothed RTT in milliseconds
-	LossRate     float64 `json:"lossRate,omitempty"`     // loss rate (0.0-1.0)
-	Cost         float64 `json:"cost,omitempty"`         // path cost
+	SRTT         float64 `json:"srtt"`                   // smoothed RTT in milliseconds
+	LossRate     float64 `json:"lossRate"`               // loss rate (0.0-1.0)
+	Cost         float64 `json:"cost"`                   // path cost
 }
 
 // GetFullTopology returns the complete network topology including all known nodes and edges.

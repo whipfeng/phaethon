@@ -12,7 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"embed"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"

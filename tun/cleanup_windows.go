@@ -4,6 +4,7 @@ package tun
 
 import (
 	"net"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -12,8 +13,10 @@ import (
 
 // CleanupResidual removes leftover TUN adapter and routes from a previous crash.
 func CleanupResidual() {
+	util.LogModuleInfo("cleanup", "[DIAG] step 1: getInterfaceLUID")
 	luid, index, err := getInterfaceLUID("phaethontun")
 	if err == nil {
+		util.LogModuleInfo("cleanup", "[DIAG] step 2: interface exists, deleting split-tunnel routes")
 		// Delete split-tunnel routes (0.0.0.0/1 and 128.0.0.0/1) with on-link next hop.
 		for _, prefix := range []struct {
 			ip  net.IP
@@ -35,12 +38,15 @@ func CleanupResidual() {
 		// Sweep the full route table for residual TUN routes that may not match
 		// the specific combinations above (e.g. persistent routes detached from
 		// the adapter LUID).
+		util.LogModuleInfo("cleanup", "[DIAG] step 3: deleteResidualRoutesAPI")
 		deleteResidualRoutesAPI()
 
 		// Remove residual exclusion routes left by a previous abnormal exit.
 		// These routes point at the original physical gateway with metric 1 and
 		// would otherwise make the next Setup() fail with ERROR_OBJECT_ALREADY_EXISTS.
+		util.LogModuleInfo("cleanup", "[DIAG] step 4: getDefaultGatewayWindows")
 		if gw, gwLuid, gwIdx, err := getDefaultGatewayWindows(); err == nil {
+			util.LogModuleInfo("cleanup", "[DIAG] step 5: deleteResidualExclusionRoute loop")
 			for _, exclude := range DefaultLANExclusions {
 				deleteResidualExclusionRoute(gwLuid, gwIdx, gw, exclude)
 			}
@@ -48,6 +54,7 @@ func CleanupResidual() {
 
 		// Delete interface addresses (mesh-derived addresses).
 		// The actual TUN IP is set dynamically, so we clear all IPs from the interface.
+		util.LogModuleInfo("cleanup", "[DIAG] step 6: clearInterfaceIPAPI")
 		_ = clearInterfaceIPAPI(luid, index)
 	}
 
@@ -55,7 +62,9 @@ func CleanupResidual() {
 	// adapter leaves a dead Wintun interface in the system that prevents
 	// subsequent CreateAdapter calls from creating a fresh adapter, so we
 	// explicitly delete it.
+	util.LogModuleInfo("cleanup", "[DIAG] step 7: InterfaceExists check")
 	if InterfaceExists() {
+		util.LogModuleInfo("cleanup", "[DIAG] step 8: interface exists, clearing IP/DNS")
 		// Release any static IP/DNS first so the removal is clean.
 		if luid, index, err := getInterfaceLUID("phaethontun"); err == nil {
 			_ = clearInterfaceIPAPI(luid, index)
@@ -63,26 +72,42 @@ func CleanupResidual() {
 		}
 
 		util.LogModuleInfo("cleanup", "removing orphaned adapter phaethontun")
+		util.LogModuleInfo("cleanup", "[DIAG] step 9: removing orphaned adapter")
+		adapterRemoved := false
 		if err := removeAdapterAPI("phaethontun"); err != nil {
 			util.LogModuleWarn("cleanup", "remove adapter failed: %v", err)
-			if err2 := disableInterfaceAPI("phaethontun"); err2 != nil {
-				util.LogModuleWarn("cleanup", "disable adapter fallback failed: %v", err2)
+			// If adapter is not found in device list, consider it already removed
+			// and skip the wait loop to avoid hanging.
+			if strings.Contains(err.Error(), "not found") {
+				adapterRemoved = true
+			} else {
+				if err2 := disableInterfaceAPI("phaethontun"); err2 != nil {
+					util.LogModuleWarn("cleanup", "disable adapter fallback failed: %v", err2)
+				}
 			}
+		} else {
+			adapterRemoved = true
 		}
 
 		// Wait until the adapter is actually gone; CreateAdapter can fail or
 		// attach to a stale adapter if we proceed too quickly.
-		for i := 0; i < 150; i++ {
-			if _, _, err := getInterfaceLUID("phaethontun"); err != nil {
-				break
+		// Skip wait if adapter was already reported as not found.
+		if !adapterRemoved {
+			util.LogModuleInfo("cleanup", "[DIAG] step 10: waiting for adapter removal")
+			for i := 0; i < 150; i++ {
+				if _, _, err := getInterfaceLUID("phaethontun"); err != nil {
+					util.LogModuleInfo("cleanup", "[DIAG] step 11: adapter removed after %d iterations", i)
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
 	// Reset physical interface DNS to DHCP as a crash-recovery best effort.
 	// The original DNS backup is only available during normal Stop(); after a
 	// crash we restore DHCP so the machine does not remain stuck on the TUN DNS IP.
+	util.LogModuleInfo("cleanup", "[DIAG] step 12: restore DNS for default gateway")
 	if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
 		if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
 			if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {

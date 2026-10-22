@@ -1850,13 +1850,11 @@ func (s *AdminServer) sseBroadcaster() {
 }
 
 func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	switch r.Method {
 	case http.MethodGet:
-		// Return config without sensitive fields
+		s.mu.RLock()
 		conf := sanitizeConfig(s.conf)
+		s.mu.RUnlock()
 		jsonResponse(w, conf)
 
 	case http.MethodPut:
@@ -1880,6 +1878,11 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 
 		s.mu.Lock()
 		s.conf = &newConf
+		if err := s.saveConfigLocked(); err != nil {
+			s.mu.Unlock()
+			httpError(w, "persist config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.mu.Unlock()
 
 		util.LogModuleInfo("admin", "config updated via API")

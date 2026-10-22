@@ -895,6 +895,17 @@ func (s *AdminServer) Start() error {
 				s.tlsConfig = &tls.Config{
 					Certificates: []tls.Certificate{tlsCert},
 				}
+				
+				// Configure mTLS with embedded CA certificate (same as configured cert path)
+				if len(defaultClientCA) > 0 {
+					caCertPool := x509.NewCertPool()
+					if caCertPool.AppendCertsFromPEM(defaultClientCA) {
+						s.tlsConfig.ClientCAs = caCertPool
+						s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+						util.LogModuleInfo("admin", "auto-generated cert with mTLS (embedded CA)")
+					}
+				}
+				
 				s.server.TLSConfig = s.tlsConfig
 				util.LogModuleInfo("admin", "auto-generated self-signed TLS certificate")
 			}

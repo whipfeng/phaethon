@@ -157,11 +157,6 @@
                 </div>
                 <button type="submit" class="btn btn-primary login-btn" data-i18n="login.submit">Sign In</button>
             </form>
-            <div style="margin-top: 1.5rem; text-align: center;">
-                <button type="button" class="btn btn-secondary login-btn" onclick="loginWithClientCert()" style="margin-top: 0;" data-i18n="login.useClientCert">
-                    🔐 Use Client Certificate
-                </button>
-            </div>
         </div>
     </div>
     <script src="./static/i18n.js"></script>
@@ -234,32 +229,6 @@
             })
             .catch(() => {
                 errorEl.textContent = i18n.t('login.error');
-                errorEl.classList.add('show');
-            });
-        }
-
-        function loginWithClientCert() {
-            const errorEl = document.getElementById('login-error');
-            errorEl.classList.remove('show');
-            
-            // Try to access a protected endpoint with client certificate
-            // If cert is valid, server will authenticate and redirect to main page
-            fetch('./api/status', {
-                method: 'GET',
-                credentials: 'include'
-            })
-            .then(async res => {
-                if (res.ok) {
-                    // Client cert authenticated successfully, redirect to main page
-                    window.location.href = './';
-                } else {
-                    // Authentication failed
-                    errorEl.textContent = i18n.t('login.clientCertError') || 'Client certificate authentication failed';
-                    errorEl.classList.add('show');
-                }
-            })
-            .catch(err => {
-                errorEl.textContent = i18n.t('login.clientCertError') || 'Client certificate authentication failed';
                 errorEl.classList.add('show');
             });
         }

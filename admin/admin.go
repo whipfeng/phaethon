@@ -753,10 +753,12 @@ func (s *AdminServer) parseTemplates() {
 
 // Start launches the admin HTTP server.
 func (s *AdminServer) Start() error {
+	util.Logger.Printf("[INFO] [admin] Start() method entered, Enabled=%v", s.config.Enabled)
 	if !s.config.Enabled {
 		util.LogModuleInfo("admin", "disabled, skipping")
 		return nil
 	}
+	util.Logger.Printf("[INFO] [admin] Start() continuing after Enabled check")
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -771,20 +773,72 @@ func (s *AdminServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	util.Logger.Printf("[INFO] [admin] Start() reached TLS setup check")
 	// Setup TLS if certificate and key are configured, or auto-generate if needed
+	util.Logger.Printf("[INFO] [admin] TLS setup check: TLSCert=%q, TLSKey=%q, ClientCA=%q (len=%d)",
+		s.config.TLSCert, s.config.TLSKey, 
+		func() string {
+			if len(s.config.ClientCA) > 50 {
+				return s.config.ClientCA[:50] + "..."
+			}
+			return s.config.ClientCA
+		}(),
+		len(s.config.ClientCA))
+	
 	if s.config.TLSCert != "" && s.config.TLSKey != "" {
-		cert, err := tls.LoadX509KeyPair(s.config.TLSCert, s.config.TLSKey)
-		if err != nil {
-			return fmt.Errorf("admin load TLS cert/key fail: %w", err)
+		var certPEM, keyPEM []byte
+		var err error
+		
+		// Check if TLSCert is inline PEM or file path
+		if strings.HasPrefix(s.config.TLSCert, "-----BEGIN") {
+			certPEM = []byte(s.config.TLSCert)
+			util.Logger.Printf("[INFO] [admin] TLS: using inline certificate")
+		} else {
+			certPEM, err = os.ReadFile(s.config.TLSCert)
+			if err != nil {
+				return fmt.Errorf("admin read TLS cert fail: %w", err)
+			}
+			util.Logger.Printf("[INFO] [admin] TLS: loaded certificate from file: %s", s.config.TLSCert)
 		}
+		
+		// Check if TLSKey is inline PEM or file path
+		if strings.HasPrefix(s.config.TLSKey, "-----BEGIN") {
+			keyPEM = []byte(s.config.TLSKey)
+			util.Logger.Printf("[INFO] [admin] TLS: using inline private key")
+		} else {
+			keyPEM, err = os.ReadFile(s.config.TLSKey)
+			if err != nil {
+				return fmt.Errorf("admin read TLS key fail: %w", err)
+			}
+			util.Logger.Printf("[INFO] [admin] TLS: loaded private key from file: %s", s.config.TLSKey)
+		}
+		
+		util.Logger.Printf("[INFO] [admin] TLS: parsing X509 key pair (certPEM=%d bytes, keyPEM=%d bytes)", len(certPEM), len(keyPEM))
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			util.Logger.Printf("[ERROR] [admin] TLS: X509KeyPair failed: %v", err)
+			return fmt.Errorf("admin parse TLS cert/key fail: %w", err)
+		}
+		util.Logger.Printf("[INFO] [admin] TLS: certificate parsed successfully")
 		s.tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
 		// Enable mTLS if ClientCA is configured
+		util.Logger.Printf("[INFO] [admin] mTLS check: ClientCA length=%d, is empty=%v", 
+			len(s.config.ClientCA), s.config.ClientCA == "")
 		if s.config.ClientCA != "" {
-			caCert, err := os.ReadFile(s.config.ClientCA)
-			if err != nil {
-				return fmt.Errorf("admin read client CA fail: %w", err)
+			var caCert []byte
+			// Check if ClientCA is PEM content or file path
+			if strings.HasPrefix(s.config.ClientCA, "-----BEGIN CERTIFICATE-----") {
+				caCert = []byte(s.config.ClientCA)
+				util.Logger.Printf("[INFO] [admin] mTLS: using inline CA certificate")
+			} else {
+				var err error
+				caCert, err = os.ReadFile(s.config.ClientCA)
+				if err != nil {
+					return fmt.Errorf("admin read client CA fail: %w", err)
+				}
+				util.Logger.Printf("[INFO] [admin] mTLS: loaded CA from file: %s", s.config.ClientCA)
 			}
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(caCert) {
@@ -792,7 +846,7 @@ func (s *AdminServer) Start() error {
 			}
 			s.tlsConfig.ClientCAs = caCertPool
 			s.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			util.LogModuleInfo("admin", "mTLS enabled: client certificate required")
+			util.Logger.Printf("[INFO] [admin] mTLS enabled: client certificate required")
 		}
 		s.server.TLSConfig = s.tlsConfig
 	} else if s.config.MeshOnly || s.config.Enabled {

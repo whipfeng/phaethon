@@ -512,16 +512,29 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	res.subscriptionStop = startSubscriptionRefresh(ruleConf, subCacheDir)
 
 	// Start web admin panel (if configured)
+	util.LogModuleInfo("system", "Admin check: Admin=%v, Enabled=%v, prevAdmin=%v",
+		ruleConf.Admin != nil,
+		func() bool {
+			if ruleConf.Admin != nil {
+				return ruleConf.Admin.Enabled
+			}
+			return false
+		}(),
+		prevAdmin != nil)
 	if ruleConf.Admin != nil && ruleConf.Admin.Enabled {
 		if prevAdmin != nil {
 			// Reuse existing admin server, just update config reference
+			util.LogModuleInfo("system", "Reusing existing admin server")
 			prevAdmin.UpdateConfig(ruleConf)
 			res.adminServer = prevAdmin
 		} else {
+			util.LogModuleInfo("system", "Creating new admin server")
 			res.adminServer = admin.NewAdminServer(ruleConf, ruleConf.Admin, defaultConfig)
+			util.LogModuleInfo("system", "Calling admin server Start()")
 			if err := res.adminServer.Start(); err != nil {
 				return nil, fmt.Errorf("admin server start fail: %w", err)
 			}
+			util.LogModuleInfo("system", "Admin server Start() completed")
 		}
 		// Inject admin handler into TUN engine for direct connection handling
 		if res.tunRes != nil {

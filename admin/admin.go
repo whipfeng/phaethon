@@ -830,14 +830,19 @@ func (s *AdminServer) Start() error {
 		
 		// Configure mTLS with embedded CA certificate
 		embeddedCAConfigured := false
+		util.Logger.Printf("[DEBUG] admin: defaultClientCA length = %d", len(defaultClientCA))
 		if len(defaultClientCA) > 0 {
+			util.Logger.Printf("[DEBUG] admin: entering mTLS configuration block")
 			caCertPool := x509.NewCertPool()
+			util.Logger.Printf("[DEBUG] admin: created caCertPool, calling AppendCertsFromPEM")
 			if !caCertPool.AppendCertsFromPEM(defaultClientCA) {
 				util.Logger.Printf("[ERROR] [admin] TLS: failed to parse embedded CA certificate")
 				return fmt.Errorf("admin parse embedded CA fail")
 			}
+			util.Logger.Printf("[DEBUG] admin: AppendCertsFromPEM succeeded, setting ClientCAs")
 			s.tlsConfig.ClientCAs = caCertPool
 			embeddedCAConfigured = true
+			util.Logger.Printf("[DEBUG] admin: embeddedCAConfigured = true, checking AuthEnabled=%v", s.config.AuthEnabled)
 			
 			if s.config.AuthEnabled {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven

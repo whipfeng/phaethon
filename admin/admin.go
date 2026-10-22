@@ -2096,21 +2096,58 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var newMesh config.MeshConfig
-		if err := json.NewDecoder(r.Body).Decode(&newMesh); err != nil {
+		var updates map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if newMesh.NodeID == "" {
-			httpError(w, "node-id is required", http.StatusBadRequest)
 			return
 		}
 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		s.conf.Mesh = &newMesh
-		if err := db.PutMeshConfig(&newMesh); err != nil {
+		if s.conf.Mesh == nil {
+			s.conf.Mesh = &config.MeshConfig{}
+		}
+
+		// Merge updates: only update fields that are present
+		if nodeID, ok := updates["NodeID"].(string); ok && nodeID != "" {
+			s.conf.Mesh.NodeID = nodeID
+		}
+		if subnet, ok := updates["Subnet"].(string); ok {
+			s.conf.Mesh.Subnet = subnet
+		}
+		if network, ok := updates["Network"].(string); ok {
+			s.conf.Mesh.Network = network
+		}
+		if domainSuffixes, ok := updates["DomainSuffixes"].([]interface{}); ok {
+			suffixes := make([]string, 0, len(domainSuffixes))
+			for _, s := range domainSuffixes {
+				if str, ok := s.(string); ok {
+					suffixes = append(suffixes, str)
+				}
+			}
+			s.conf.Mesh.DomainSuffixes = suffixes
+		}
+		if advertise, ok := updates["Advertise"].([]interface{}); ok {
+			advList := make([]string, 0, len(advertise))
+			for _, a := range advertise {
+				if str, ok := a.(string); ok {
+					advList = append(advList, str)
+				}
+			}
+			s.conf.Mesh.Advertise = advList
+		}
+		if forwardingTrace, ok := updates["ForwardingTrace"].(bool); ok {
+			s.conf.Mesh.ForwardingTrace = forwardingTrace
+		}
+
+		// Validate required fields
+		if s.conf.Mesh.NodeID == "" {
+			httpError(w, "node-id is required", http.StatusBadRequest)
+			return
+		}
+
+		if err := db.PutMeshConfig(s.conf.Mesh); err != nil {
 			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2120,7 +2157,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", newMesh.NodeID)
+		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", s.conf.Mesh.NodeID)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -2165,41 +2202,71 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var newAdmin config.AdminConfig
-		if err := json.NewDecoder(r.Body).Decode(&newAdmin); err != nil {
+		var updates map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if newAdmin.Addr == "" {
-			httpError(w, "addr is required", http.StatusBadRequest)
 			return
 		}
 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Detect auth-enabled change for hot-reload
-		oldAuthEnabled := s.config.AuthEnabled
-		if s.conf.Admin != nil {
-			oldAuthEnabled = s.conf.Admin.AuthEnabled
+		if s.conf.Admin == nil {
+			s.conf.Admin = &config.AdminConfig{}
 		}
 
-		s.conf.Admin = &newAdmin
-		if err := db.PutAdminConfig(&newAdmin); err != nil {
-			httpError(w, "persist admin config fail: "+err.Error(), http.StatusInternalServerError)
+		// Merge updates: only update fields that are present
+		if addr, ok := updates["Addr"].(string); ok && addr != "" {
+			s.conf.Admin.Addr = addr
+		}
+		if authEnabled, ok := updates["AuthEnabled"].(bool); ok {
+			oldAuthEnabled := s.config.AuthEnabled
+			s.conf.Admin.AuthEnabled = authEnabled
+			// Hot-reload: update runtime auth settings immediately
+			if authEnabled != oldAuthEnabled {
+				s.config.AuthEnabled = authEnabled
+				util.LogModuleInfo("admin", "auth-enabled changed to %v, hot-reloaded", authEnabled)
+			}
+		}
+		if username, ok := updates["Username"].(string); ok {
+			s.conf.Admin.Username = username
+			s.config.Username = username
+		}
+		if password, ok := updates["Password"].(string); ok && password != "" {
+			s.conf.Admin.Password = password
+			s.config.Password = password
+		}
+		if token, ok := updates["Token"].(string); ok {
+			s.conf.Admin.Token = token
+		}
+		if publicKey, ok := updates["PublicKey"].(string); ok {
+			s.conf.Admin.PublicKey = publicKey
+		}
+		if tlsCert, ok := updates["TLSCert"].(string); ok {
+			s.conf.Admin.TLSCert = tlsCert
+		}
+		if tlsKey, ok := updates["TLSKey"].(string); ok {
+			s.conf.Admin.TLSKey = tlsKey
+		}
+		if clientCA, ok := updates["ClientCA"].(string); ok {
+			s.conf.Admin.ClientCA = clientCA
+		}
+		if meshOnly, ok := updates["MeshOnly"].(bool); ok {
+			s.conf.Admin.MeshOnly = meshOnly
+		}
+		if pkgMaxMB, ok := updates["PackageUploadMaxMB"].(float64); ok {
+			s.conf.Admin.PackageUploadMaxMB = int(pkgMaxMB)
+		}
+
+		// Validate required fields
+		if s.conf.Admin.Addr == "" {
+			httpError(w, "addr is required", http.StatusBadRequest)
 			return
 		}
 
-		// Hot-reload: update runtime auth settings immediately
-		if newAdmin.AuthEnabled != oldAuthEnabled {
-			s.config.AuthEnabled = newAdmin.AuthEnabled
-			util.LogModuleInfo("admin", "auth-enabled changed to %v, hot-reloaded", newAdmin.AuthEnabled)
-		}
-		if newAdmin.Username != "" {
-			s.config.Username = newAdmin.Username
-		}
-		if newAdmin.Password != "" {
-			s.config.Password = newAdmin.Password
+		if err := db.PutAdminConfig(s.conf.Admin); err != nil {
+			httpError(w, "persist admin config fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		util.DefaultVersionNotifier.BumpVersion("config")
@@ -2208,7 +2275,7 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", newAdmin.Addr)
+		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", s.conf.Admin.Addr)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:

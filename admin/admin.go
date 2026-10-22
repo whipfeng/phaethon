@@ -828,27 +828,29 @@ func (s *AdminServer) Start() error {
 			Certificates: []tls.Certificate{cert},
 		}
 		
-		// Configure mTLS with embedded CA certificate
+		// DISABLED: mTLS configuration causes service hang
+		// TODO: Investigate deadlock in TLS config initialization
+		/*
+		embeddedCAConfigured := false
 		if len(defaultClientCA) > 0 {
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(defaultClientCA) {
+				util.Logger.Printf("[ERROR] [admin] TLS: failed to parse embedded CA certificate")
 				return fmt.Errorf("admin parse embedded CA fail")
 			}
 			s.tlsConfig.ClientCAs = caCertPool
+			embeddedCAConfigured = true
 			
 			if s.config.AuthEnabled {
-				// Authentication enabled: mTLS is optional (user can choose mTLS or password)
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-				util.LogModuleInfo("admin", "authentication enabled (mTLS or password)")
+				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
 			} else {
-				// Authentication disabled: no client certificate required
 				s.tlsConfig.ClientAuth = tls.NoClientCert
-				util.LogModuleInfo("admin", "authentication disabled")
+				util.LogModuleInfo("admin", "authentication enabled (password/session/token) with embedded CA")
 			}
 		}
 		
-		// Legacy support: if ClientCA is configured in database, use it (override embedded CA)
-		if s.config.ClientCA != "" {
+		if s.config.ClientCA != "" && !embeddedCAConfigured {
 			var caCert []byte
 			if strings.HasPrefix(s.config.ClientCA, "-----BEGIN CERTIFICATE-----") {
 				caCert = []byte(s.config.ClientCA)
@@ -865,7 +867,6 @@ func (s *AdminServer) Start() error {
 			}
 			s.tlsConfig.ClientCAs = caCertPool
 			
-			// Respect AuthEnabled flag even for legacy database CA
 			if s.config.AuthEnabled {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
 				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication enabled, mTLS or password)")
@@ -874,8 +875,10 @@ func (s *AdminServer) Start() error {
 				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication disabled)")
 			}
 		}
+		*/
 		
 		s.server.TLSConfig = s.tlsConfig
+		util.LogModuleInfo("admin", "TLS configured (mTLS disabled pending investigation)")
 	} else if s.config.MeshOnly || s.config.Enabled {
 		// Auto-generate TLS certificate if not configured
 		// This ensures HTTPS always works for mesh access
@@ -896,6 +899,8 @@ func (s *AdminServer) Start() error {
 		}
 	}
 
+	util.Logger.Printf("[DEBUG] admin: TLS setup complete, checking MeshOnly=%v", s.config.MeshOnly)
+	
 	// Skip network listener if mesh-only mode
 	if s.config.MeshOnly {
 		util.LogModuleInfo("admin", "mesh-only mode enabled, no network listener")
@@ -908,10 +913,12 @@ func (s *AdminServer) Start() error {
 	}
 
 	addr := s.config.Addr
+	util.Logger.Printf("[DEBUG] admin: about to listen on %s", addr)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("admin listen on %s fail: %w", addr, err)
 	}
+	util.Logger.Printf("[DEBUG] admin: listen success, s.ln assigned")
 	s.ln = ln
 
 	// Use TLS if certificate and key are configured
@@ -919,7 +926,9 @@ func (s *AdminServer) Start() error {
 		util.LogModuleInfo("admin", "starting on https://%s", addr)
 		go func() {
 			// Wrap listener with TLS and use Serve (not ServeTLS)
+			util.Logger.Printf("[DEBUG] admin: creating TLS listener")
 			tlsLn := tls.NewListener(ln, s.tlsConfig)
+			util.Logger.Printf("[DEBUG] admin: TLS listener created, calling Serve")
 			if err := s.server.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
 				util.LogModuleError("admin", "serve error: %v", err)
 			}
@@ -1110,13 +1119,18 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// If auth is not enabled, allow everything
-		if !s.config.AuthEnabled {
+		// Authentication is enforced if:
+		// 1. AuthEnabled flag is true in config, OR
+		// 2. Embedded CA certificate exists (security requirement)
+		authRequired := s.config.AuthEnabled || len(defaultClientCA) > 0
+		
+		// If auth is not required, allow everything
+		if !authRequired {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Authentication enabled: try multiple auth methods (user chooses)
+		// Authentication required: try multiple auth methods (user chooses)
 
 		// 1. Try mTLS client certificate authentication
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {

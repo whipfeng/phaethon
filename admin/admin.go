@@ -1850,44 +1850,15 @@ func (s *AdminServer) sseBroadcaster() {
 }
 
 func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.mu.RLock()
-		conf := sanitizeConfig(s.conf)
-		s.mu.RUnlock()
-		jsonResponse(w, conf)
-
-	case http.MethodPut:
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			httpError(w, "read body fail", http.StatusBadRequest)
-			return
-		}
-
-		var newConf config.RuleConfiguration
-		if err := json.Unmarshal(body, &newConf); err != nil {
-			httpError(w, "parse config fail: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Validate and init
-		if err := newConf.Init(); err != nil {
-			httpError(w, "init config fail: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		s.conf = &newConf
-		if err := s.saveConfigLocked(); err != nil {
-			s.mu.Unlock()
-			httpError(w, "persist config fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.mu.Unlock()
-
-		util.LogModuleInfo("admin", "config updated via API")
-		jsonResponse(w, map[string]string{"status": "ok"})
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	s.mu.RLock()
+	conf := sanitizeConfig(s.conf)
+	s.mu.RUnlock()
+	jsonResponse(w, conf)
 }
 
 func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {

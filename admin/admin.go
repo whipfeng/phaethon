@@ -5263,6 +5263,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN bypass-gateway=%v", *req.BypassGateway)
+			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		// DHCP toggle — config-only, takes effect on next TUN start.
@@ -5291,6 +5292,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN dhcp-enabled=%v", *req.DHCPEnabled)
+			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		// DHCP static bindings — update config and hot-reload running server.
@@ -5342,6 +5344,7 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				s.OnDHCPStaticBindingsUpdate(req.DHCPStaticBindings)
 			}
 			util.LogModuleInfo("admin", "DHCP static-bindings updated (%d entries)", len(req.DHCPStaticBindings))
+			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		jsonResponse(w, map[string]string{"status": "ok"})

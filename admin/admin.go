@@ -2178,11 +2178,30 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
+		// Detect auth-enabled change for hot-reload
+		oldAuthEnabled := s.config.AuthEnabled
+		if s.conf.Admin != nil {
+			oldAuthEnabled = s.conf.Admin.AuthEnabled
+		}
+
 		s.conf.Admin = &newAdmin
 		if err := db.PutAdminConfig(&newAdmin); err != nil {
 			httpError(w, "persist admin config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// Hot-reload: update runtime auth settings immediately
+		if newAdmin.AuthEnabled != oldAuthEnabled {
+			s.config.AuthEnabled = newAdmin.AuthEnabled
+			util.LogModuleInfo("admin", "auth-enabled changed to %v, hot-reloaded", newAdmin.AuthEnabled)
+		}
+		if newAdmin.Username != "" {
+			s.config.Username = newAdmin.Username
+		}
+		if newAdmin.Password != "" {
+			s.config.Password = newAdmin.Password
+		}
+
 		util.DefaultVersionNotifier.BumpVersion("config")
 
 		if s.OnReload != nil {

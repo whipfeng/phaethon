@@ -716,6 +716,9 @@
             'login.captchaPlaceholder': '请输入验证码',
             'login.showPassword': '显示密码',
             'login.hidePassword': '隐藏密码',
+            'login.or': '或',
+            'login.useClientCert': '🔐 使用客户端证书登录',
+            'login.clientCertError': '客户端证书认证失败',
 
             // ===== Security =====
             'security.title': '🔐 安全设置',
@@ -1533,6 +1536,9 @@
             'login.captchaPlaceholder': 'Enter CAPTCHA',
             'login.showPassword': 'Show password',
             'login.hidePassword': 'Hide password',
+            'login.or': 'OR',
+            'login.useClientCert': '🔐 Use Client Certificate',
+            'login.clientCertError': 'Client certificate authentication failed',
 
             // ===== Security =====
             'security.title': '🔐 Security',

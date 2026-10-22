@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -46,6 +47,9 @@ import (
 	"phaethon/tun"
 	"phaethon/util"
 )
+
+//go:embed certs/ca.crt
+var defaultClientCA []byte
 
 // adminVersion is used to bust browser caches for embedded static files.
 // It is set once at process startup so a new deployment forces clients to
@@ -823,22 +827,37 @@ func (s *AdminServer) Start() error {
 		s.tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-		// Enable mTLS if ClientCA is configured
-		util.Logger.Printf("[INFO] [admin] mTLS check: ClientCA length=%d, is empty=%v", 
-			len(s.config.ClientCA), s.config.ClientCA == "")
+		
+		// Configure mTLS with embedded CA certificate
+		if len(defaultClientCA) > 0 {
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(defaultClientCA) {
+				return fmt.Errorf("admin parse embedded CA fail")
+			}
+			s.tlsConfig.ClientCAs = caCertPool
+			
+			if s.config.AuthEnabled {
+				// Authentication enabled: mTLS is optional (user can choose mTLS or password)
+				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+				util.LogModuleInfo("admin", "authentication enabled (mTLS or password)")
+			} else {
+				// Authentication disabled: no client certificate required
+				s.tlsConfig.ClientAuth = tls.NoClientCert
+				util.LogModuleInfo("admin", "authentication disabled")
+			}
+		}
+		
+		// Legacy support: if ClientCA is configured in database, use it (override embedded CA)
 		if s.config.ClientCA != "" {
 			var caCert []byte
-			// Check if ClientCA is PEM content or file path
 			if strings.HasPrefix(s.config.ClientCA, "-----BEGIN CERTIFICATE-----") {
 				caCert = []byte(s.config.ClientCA)
-				util.Logger.Printf("[INFO] [admin] mTLS: using inline CA certificate")
 			} else {
 				var err error
 				caCert, err = os.ReadFile(s.config.ClientCA)
 				if err != nil {
 					return fmt.Errorf("admin read client CA fail: %w", err)
 				}
-				util.Logger.Printf("[INFO] [admin] mTLS: loaded CA from file: %s", s.config.ClientCA)
 			}
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(caCert) {
@@ -846,8 +865,9 @@ func (s *AdminServer) Start() error {
 			}
 			s.tlsConfig.ClientCAs = caCertPool
 			s.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			util.Logger.Printf("[INFO] [admin] mTLS enabled: client certificate required")
+			util.LogModuleInfo("admin", "mTLS enabled with database CA (legacy)")
 		}
+		
 		s.server.TLSConfig = s.tlsConfig
 	} else if s.config.MeshOnly || s.config.Enabled {
 		// Auto-generate TLS certificate if not configured
@@ -1077,39 +1097,41 @@ func isPublicPath(path string, method string) bool {
 // authMiddleware checks authentication (session or token).
 func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If auth is not enabled, allow everything
-		if !s.config.AuthEnabled {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// Public paths are always accessible
 		if isPublicPath(r.URL.Path, r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Try mTLS client certificate authentication first
-		if s.config.ClientCA != "" && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		// If auth is not enabled, allow everything
+		if !s.config.AuthEnabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Authentication enabled: try multiple auth methods (user chooses)
+
+		// 1. Try mTLS client certificate authentication
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			// Client certificate was already verified by TLS handshake
 			util.LogModuleInfo("admin", "mTLS auth success: client=%s", r.TLS.PeerCertificates[0].Subject.CommonName)
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Try session-based login first
+		// 2. Try session-based login
 		if user := s.verifySession(r); user != "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Try signature-based auth (public key verification)
+		// 3. Try signature-based auth (public key verification)
 		if s.config.PublicKey != "" && s.verifySignature(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Fall back to token-based auth (for API/programmatic access)
+		// 4. Try token-based auth (for API/programmatic access)
 		token := r.URL.Query().Get("token")
 		if token == "" {
 			token = r.Header.Get("X-Admin-Token")
@@ -1124,7 +1146,7 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Not authenticated — redirect to login for pages, 401 for API
+		// 5. Not authenticated — redirect to login for pages, 401 for API
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)

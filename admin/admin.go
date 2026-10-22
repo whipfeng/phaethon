@@ -848,8 +848,8 @@ func (s *AdminServer) Start() error {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
 				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
 			} else {
-				s.tlsConfig.ClientAuth = tls.NoClientCert
-				util.LogModuleInfo("admin", "authentication enabled (password/session/token) with embedded CA")
+				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+				util.LogModuleInfo("admin", "authentication enabled (mTLS) with embedded CA")
 			}
 		}
 		

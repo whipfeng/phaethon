@@ -864,8 +864,15 @@ func (s *AdminServer) Start() error {
 				return fmt.Errorf("admin parse client CA fail")
 			}
 			s.tlsConfig.ClientCAs = caCertPool
-			s.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			util.LogModuleInfo("admin", "mTLS enabled with database CA (legacy)")
+			
+			// Respect AuthEnabled flag even for legacy database CA
+			if s.config.AuthEnabled {
+				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication enabled, mTLS or password)")
+			} else {
+				s.tlsConfig.ClientAuth = tls.NoClientCert
+				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication disabled)")
+			}
 		}
 		
 		s.server.TLSConfig = s.tlsConfig

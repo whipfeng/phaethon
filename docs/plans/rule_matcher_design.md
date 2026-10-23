@@ -173,30 +173,52 @@ var (
     globalMatcher *RuleMatcher
     matcherMu     sync.RWMutex
     matcherBuilt  bool
+    
+    // 重建控制
+    rebuildCh = make(chan string, 1)  // 触发通道，buffer=1
 )
+
+// init 启动重建循环（单 goroutine 串行处理）
+func init() {
+    go rebuildLoop()
+}
+
+// rebuildLoop 串行处理重建请求
+func rebuildLoop() {
+    for triggerBucket := range rebuildCh {
+        // Debounce: 等待静默期
+        time.Sleep(500 * time.Millisecond)
+        
+        // 排空通道中的待处理触发
+        for len(rebuildCh) > 0 {
+            <-rebuildCh
+        }
+        
+        // 执行重建（串行，不会并发）
+        doRebuildMatcher(triggerBucket)
+    }
+}
 
 // GetMatcher 获取当前的 RuleMatcher（如果未构建则构建）
 func GetMatcher() (*RuleMatcher, error) {
     matcherMu.RLock()
-    if matcherBuilt {
-        m := globalMatcher
-        matcherMu.RUnlock()
-        return m, nil
-    }
+    m := globalMatcher
     matcherMu.RUnlock()
     
-    // 构建新的 matcher
+    if m != nil {
+        return m, nil
+    }
+    
+    // 首次构建
     matcherMu.Lock()
     defer matcherMu.Unlock()
     
-    if !matcherBuilt {
+    if globalMatcher == nil {
         m, err := BuildRuleMatcher()
         if err != nil {
             return nil, err
         }
         globalMatcher = m
-        matcherBuilt = true
-        
         // 注册 watcher，数据变化时重建
         registerWatcher()
     }
@@ -211,27 +233,80 @@ func registerWatcher() {
     db.Subscribe(db.BucketProxies, rebuildMatcher)
     db.Subscribe(db.BucketProxyGroups, rebuildMatcher)
     db.Subscribe(db.BucketSubscriptions, rebuildMatcher)
+    db.Subscribe(db.BucketSubscriptionNodes, rebuildMatcher)  // 节点池变更
     db.Subscribe(db.BucketMappings, rebuildMatcher)
     db.Subscribe(db.BucketResolvers, rebuildMatcher)
     db.Subscribe(db.BucketConfig, rebuildMatcher)  // Mesh 配置变化
 }
 
-// rebuildMatcher 重建 RuleMatcher
+// rebuildMatcher 由 watcher 调用，触发重建（非阻塞）
 func rebuildMatcher(event db.ChangeEvent) {
-    util.LogModuleInfo("db", "rebuilding RuleMatcher due to %s change", event.Bucket)
+    bucket := string(event.Bucket)
     
+    // 检查是否需要重建
+    if !shouldRebuild(bucket) {
+        return
+    }
+    
+    // 非阻塞发送触发信号
+    select {
+    case rebuildCh <- bucket:
+        util.LogModuleInfo("db", "triggered rebuild for %s", bucket)
+    default:
+        // 已有重建待处理，跳过
+        util.LogModuleInfo("db", "rebuild already pending, skipping %s", bucket)
+    }
+}
+
+// doRebuildMatcher 执行重建（旧配置继续服务）
+func doRebuildMatcher(triggerBucket string) {
+    util.LogModuleInfo("db", "rebuilding RuleMatcher due to %s change", triggerBucket)
+    
+    // 1. 构建新 matcher（不持锁，旧 matcher 继续服务）
     m, err := BuildRuleMatcher()
     if err != nil {
         util.LogModuleError("db", "rebuild RuleMatcher failed: %v", err)
         return
     }
     
+    // 2. 原子替换（短暂持锁）
     matcherMu.Lock()
     globalMatcher = m
     matcherMu.Unlock()
     
     util.LogModuleInfo("db", "RuleMatcher rebuilt successfully")
 }
+```
+
+### 并发安全与同步机制
+
+**问题场景**：
+- 500ms 内多次数据变更 → 可能启动多个重建 goroutine
+- 重建过程中有匹配请求 → 需要保证旧配置继续服务
+
+**解决方案**：
+
+1. **Channel 串行化**：
+   - 使用 `rebuildCh` (buffer=1) 作为触发通道
+   - 单 goroutine `rebuildLoop` 串行处理重建请求
+   - 非阻塞 `select` 发送，避免阻塞 watcher
+
+2. **旧配置继续服务**：
+   - 重建时不持锁，读操作使用旧 matcher
+   - 构建完成后短暂持写锁替换指针
+
+3. **Debounce 合并**：
+   - Sleep 500ms 等待静默期
+   - 排空通道中待处理的触发，合并为一次重建
+
+**时序图**：
+```
+T0: 变更 A → rebuildCh <- A
+T1: rebuildLoop 收到 A → sleep 500ms
+T2: 变更 B → rebuildCh <- B (非阻塞)
+T3: 变更 C → rebuildCh 已满，跳过
+T4: sleep 结束 → 排空通道 → 执行重建
+T5: 重建完成 → globalMatcher 原子替换
 ```
 
 ### 便捷接口

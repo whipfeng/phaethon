@@ -437,8 +437,96 @@ POST /api/import    # 从 YAML 导入配置
 
 **总计：5-7 天**
 
+## 实现状态（2026-10-14 更新）
+
+### 已完成
+
+1. **数据库基础设施** ✅
+   - bbolt 集成（mmap 内存映射，读操作为内存速度）
+   - 所有 bucket 实现（config, proxies, proxy-groups, subscriptions, rules, mappings, resolvers, reverse-configs, fakeip, packages）
+   - 事务支持（View/Update）
+   - 变更事件机制
+
+2. **Admin API 直接操作数据库** ✅
+   - 规则管理 API（GET/POST/DELETE/PATCH /api/rules）直接调用 `db.ListRules()`、`db.PutRule()`、`db.DeleteRuleByIndex()` 等
+   - 绕过 `LoadConf()` 避免配置验证死锁
+   - 代理、映射、订阅等 CRUD API 直接操作对应 bucket
+   - 配置导出 API（/api/config/raw）仍使用 `LoadConf()` 生成完整 YAML
+
+3. **数据迁移** ✅
+   - YAML → 数据库自动迁移（首次启动）
+   - 包元数据迁移（文件系统 → 数据库）
+   - Fake-IP 持久化
+
+### 进行中
+
+**消除 RuleConfiguration 中间层** 🚧
+
+当前状态：
+- `config.RuleConfiguration` 结构体仍然存在，包含 Proxies、ProxyGroups、Rules、Mappings 等字段
+- `db.LoadConf()` 函数仍然存在，从数据库加载全量配置到 RuleConfiguration 结构体
+- 92 处代码引用 `ruleConf` 变量或字段（分布在 10 个文件中）
+- 主要使用场景：
+  - `main.go`: 启动时加载配置，传递给各组件
+  - `admin/admin.go`: reloadRuntimeLocked() 重新加载配置
+  - 各组件：通过 `conf.Proxies`、`conf.Rules` 等方式访问配置
+
+目标架构：
+- 各组件直接查询数据库（`db.ListProxies()`、`db.ListRules()` 等）
+- 按需缓存（如 ProxyCache、RuleCache），缓存按 bucket 独立设计
+- 消除 `*config.RuleConfiguration` 作为中间传递结构
+
+迁移计划：
+1. **Phase A: 组件级直接查询**（优先级：高）
+   - 识别各组件的配置访问模式
+   - 为高频读取的 bucket 实现按需缓存（如 ProxyCache）
+   - 逐步替换 `conf.Proxies` → `db.ListProxies()` 或 `proxyCache.Get(name)`
+   - 逐步替换 `conf.Rules` → `db.ListRules()` 或 `ruleCache.List()`
+
+2. **Phase B: 消除 LoadConf()**（优先级：中）
+   - 当所有组件都直接查询数据库后，`LoadConf()` 仅用于配置导出
+   - 重命名 `LoadConf()` → `ExportConfig()`，明确其用途
+   - 删除 `activeConf`、`res.conf` 等全局/运行时配置传递
+
+3. **Phase C: 清理 RuleConfiguration 结构体**（优先级：低）
+   - 保留 `config.RuleConfiguration` 仅作为配置导出/导入的数据结构
+   - 或者完全删除，导出时直接构造 JSON/YAML
+
+### 性能考虑
+
+**BoltDB mmap 性能**：
+- 读操作通过 mmap 直接访问内存映射文件，速度接近内存读取
+- 无需额外缓存层（RuleConfiguration）
+- 单次读操作延迟：< 1μs（内存速度）
+- 全量加载 1000 条规则：< 1ms
+
+**缓存策略**：
+- 仅在以下情况引入缓存：
+  - 某 bucket 的数据被极高频读取（如每秒数千次）
+  - 需要复杂的内存索引（如按名称快速查找代理）
+- 缓存必须提供 Invalidate() 方法，API 修改后调用
+- 缓存是可选优化，不是必须
+
+### 禁止事项（强化）
+
+- ❌ 禁止新增使用 `*config.RuleConfiguration` 作为中间传递结构的代码
+- ❌ 禁止在 API handler 中调用 `LoadConf()` 读取配置（应直接查询数据库）
+- ❌ 禁止维护全局的 `activeConf` 或 `res.conf`（各组件应持有自己的缓存或引用）
+- ✅ 新增功能应直接查询数据库（`db.GetXxx()`、`db.ListXxx()`）
+- ✅ 高频读取场景应设计按需缓存（按 bucket 独立）
+
 ## 下一步
 
-1. 确认设计方案
-2. 创建任务清单
-3. 开始 Phase 1 实现
+1. **Phase A 实施**：识别高频访问模式，实现 ProxyCache、RuleCache
+2. **逐步迁移**：从 admin API 开始，逐步替换 `conf.Xxx` 为直接查询
+3. **测试验证**：每个组件迁移后部署测试，确保功能正常
+4. **性能监控**：对比迁移前后的性能，验证 mmap 性能足够
+
+## 时间估算（更新）
+
+- Phase A（组件级直接查询）：3-5 天
+- Phase B（消除 LoadConf）：1-2 天
+- Phase C（清理结构体）：1 天
+- 测试验证：2-3 天
+
+**总计：7-11 天**

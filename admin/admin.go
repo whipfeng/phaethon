@@ -1877,7 +1877,7 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 
 	// TUN config
 	tunCfg, err := db.GetTUNConfig()
-	if err != nil {
+	if err != nil && err.Error() != "key 不存在" {
 		httpError(w, "load TUN config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1887,7 +1887,7 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Mesh config
 	meshCfg, err := db.GetMeshConfig()
-	if err != nil {
+	if err != nil && err.Error() != "key 不存在" {
 		httpError(w, "load mesh config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1952,19 +1952,19 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conf.Admin, err = db.GetAdminConfig()
-	if err != nil {
+	if err != nil && err.Error() != "key 不存在" {
 		httpError(w, "load admin config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	conf.TUN, err = db.GetTUNConfig()
-	if err != nil {
+	if err != nil && err.Error() != "key 不存在" {
 		httpError(w, "load TUN config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	conf.Mesh, err = db.GetMeshConfig()
-	if err != nil {
+	if err != nil && err.Error() != "key 不存在" {
 		httpError(w, "load mesh config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

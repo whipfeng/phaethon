@@ -607,13 +607,161 @@ POST /api/import    # 从 YAML 导入配置
    health, _ := db.GetProxyHealth(groupName, proxyName)
    ```
 
+## 动态配置融合机制
+
+### 背景
+
+反向连接（reverse connection）注册时，会动态生成以下配置：
+- **动态 Proxy**：`dyn-proxy-{hexID}`，用于反向代理
+- **动态 Mapping**：`dyn-{hexID}`，映射到反向端地址
+- **动态 Rule**：`MATCH,dyn-proxy-{hexID}#dyn-{hexID}`，路由规则
+- **动态 Matcher**：编译后的规则匹配器
+
+这些动态配置的特点：
+- **参与匹配**：需要和静态配置一起参与规则匹配
+- **不持久化**：不应该写入数据库（反向端断开后应自动清理）
+- **运行时注入**：由 `ControlManager` 在反向连接注册时创建
+
+### 问题
+
+重构后使用 `db.RuleMatcher` 从数据库构建匹配规则，但：
+1. 动态配置不在数据库中
+2. `RuleMatcher` 重建时会丢失动态配置
+3. 需要一种机制让动态配置参与匹配
+
+### 方案：关闭重连法
+
+**核心思路**：DB 变更时关闭所有控制连接，重建 `RuleMatcher`，反向连接自动重连重建动态配置。
+
+**流程**：
+```
+DB 变更（proxies/rules/mappings 等）
+  ↓
+db.rebuildMatcher() 触发
+  ↓
+调用 ControlManager.CloseAll()
+  ↓ 关闭所有反向连接的控制会话
+反向端检测到断开
+  ↓ 自动重连
+重新注册动态配置
+  ↓
+ControlManager 将动态配置注入到新的 RuleMatcher
+  ↓
+匹配恢复正常
+```
+
+**优点**：
+- 简单可靠，沿用旧实现的成熟方案
+- 动态配置不持久化，符合设计原则
+- 自动恢复，无需手动干预
+
+**缺点**：
+- DB 变更时有短暂中断（通常 < 1 秒）
+- 反向端需要支持自动重连（已实现）
+
+### 实现要点
+
+**1. RuleMatcher 支持动态配置注入**
+
+```go
+type RuleMatcher struct {
+    // 静态配置（从 DB 加载）
+    proxies       []*config.Proxy
+    rules         []string
+    // ...
+    
+    // 动态配置（运行时注入）
+    dynamicProxies  []*config.Proxy
+    dynamicRules    []string
+    dynamicMatchers []config.Matcher
+    
+    // 统一查找表（静态 + 动态）
+    proxyNames map[string]*config.Proxy
+    matchers   []config.Matcher
+}
+
+// AddDynamicConfig 注入动态配置（由 ControlManager 调用）
+func (m *RuleMatcher) AddDynamicConfig(proxy *config.Proxy, rule string, matcher config.Matcher) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    
+    m.dynamicProxies = append(m.dynamicProxies, proxy)
+    m.dynamicRules = append(m.dynamicRules, rule)
+    m.dynamicMatchers = append(m.dynamicMatchers, matcher)
+    
+    // 重建查找表
+    m.rebuildLookupTables()
+}
+
+// ClearDynamicConfig 清空动态配置（重建时调用）
+func (m *RuleMatcher) ClearDynamicConfig() {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    
+    m.dynamicProxies = nil
+    m.dynamicRules = nil
+    m.dynamicMatchers = nil
+    
+    m.rebuildLookupTables()
+}
+```
+
+**2. DB 变更时关闭控制连接**
+
+```go
+// db/matcher.go
+func rebuildMatcher(event ChangeEvent) {
+    bucket := string(event.Bucket)
+    if !shouldRebuildBucket(bucket) {
+        return
+    }
+    
+    // 关闭所有控制连接（动态配置随之消失）
+    if server.GlobalControlManager != nil {
+        server.GlobalControlManager.CloseAll()
+    }
+    
+    // 重建 RuleMatcher（仅静态配置）
+    doRebuildMatcher(bucket)
+    
+    // 反向连接自动重连，重新注入动态配置
+}
+```
+
+**3. ControlManager 注入动态配置**
+
+```go
+// server/control_server.go
+func (m *ControlManager) handleRegister(...) {
+    // 创建动态 proxy/rule/matcher
+    proxy := &config.Proxy{Name: "dyn-proxy-" + hexID, ...}
+    rule := fmt.Sprintf("MATCH,%s#%s", proxy.Name, mappingName)
+    matcher := config.NewMatchAllMatcher(...)
+    
+    // 注入到当前 RuleMatcher
+    matcher, _ := db.GetMatcher()
+    matcher.AddDynamicConfig(proxy, rule, matcher)
+    
+    // 记录到 session（断开时清理）
+    session.DynamicProxy = proxy
+    session.DynamicRule = rule
+}
+```
+
+### 禁止事项
+
+- 禁止将动态配置持久化到数据库
+- 禁止在 DB 重载时保留控制连接（会导致动态配置不一致）
+- 禁止绕过 `AddDynamicConfig` 直接修改 `RuleMatcher` 内部字段
+
 ## 下一步
 
 1. **Phase 1: 运行时状态落库** - 创建proxy_health和subscription_nodes bucket，实现DB操作函数
 2. **Phase 2: 修改健康检查和订阅拉取逻辑** - 完成后写入数据库
 3. **Phase 3: 消除s.runtime** - 修改所有使用s.runtime的地方，改为查询数据库
 4. **Phase 4: 消除启动时全量加载** - 修改main.go启动逻辑
-5. **测试验证**：每个阶段迁移后部署测试，确保功能正常
+5. **Phase 5: 动态配置融合** - 实现 RuleMatcher 动态配置注入机制
+6. **测试验证**：每个阶段迁移后部署测试，确保功能正常
 
 ## 时间估算（更新）
 

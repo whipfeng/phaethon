@@ -1793,12 +1793,108 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conf, err := db.LoadConf()
+	// Query each bucket directly from database instead of loading full config
+	result := make(map[string]interface{})
+
+	// Proxies
+	proxies, err := db.ListProxies()
 	if err != nil {
-		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
+		httpError(w, "load proxies fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	result := sanitizeConfig(conf)
+	proxyList := make([]map[string]interface{}, len(proxies))
+	for i, p := range proxies {
+		proxyList[i] = map[string]interface{}{
+			"name":   p.Name,
+			"type":   p.Type,
+			"server": p.Server,
+			"port":   p.Port,
+			"sni":    p.Sni,
+			"udp":    p.IsUDP(),
+			"p2p":    p.IsP2P(),
+			"v2":     p.IsV2(),
+			"via":    p.ViaProxy,
+		}
+	}
+	result["proxies"] = proxyList
+
+	// Rules
+	rules, err := db.ListRules()
+	if err != nil {
+		httpError(w, "load rules fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	result["rules"] = rules
+
+	// Mappings
+	mappings, err := db.ListMappings()
+	if err != nil {
+		httpError(w, "load mappings fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	mappingList := make([]map[string]interface{}, len(mappings))
+	for i, m := range mappings {
+		mappingList[i] = map[string]interface{}{
+			"name": m.Name,
+			"type": m.Type,
+			"port": m.Port,
+		}
+	}
+	result["mappings"] = mappingList
+
+	// ProxyGroups
+	groups, err := db.ListProxyGroups()
+	if err != nil {
+		httpError(w, "load proxy groups fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	groupList := make([]map[string]interface{}, 0, len(groups))
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		groupList = append(groupList, map[string]interface{}{
+			"name":          g.Name,
+			"type":          g.Type,
+			"proxies":       g.ManualProxies,
+			"healthCheckUrl": g.HealthCheckURL,
+		})
+	}
+	result["proxyGroups"] = groupList
+
+	// Admin config
+	adminCfg, err := db.GetAdminConfig()
+	if err != nil {
+		httpError(w, "load admin config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if adminCfg != nil {
+		result["admin"] = map[string]interface{}{
+			"auth-enabled": adminCfg.AuthEnabled,
+			"username":     adminCfg.Username,
+		}
+	}
+
+	// TUN config
+	tunCfg, err := db.GetTUNConfig()
+	if err != nil {
+		httpError(w, "load TUN config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if tunCfg != nil {
+		result["tun"] = tunCfg
+	}
+
+	// Mesh config
+	meshCfg, err := db.GetMeshConfig()
+	if err != nil {
+		httpError(w, "load mesh config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if meshCfg != nil {
+		result["mesh"] = meshCfg
+	}
+
 	jsonResponse(w, result)
 }
 
@@ -1808,30 +1904,78 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Export: render the current runtime config as YAML. The database is
-	// the source of truth, so the export always reflects the live config.
-	conf, err := db.LoadConf()
+	// Export: construct RuleConfiguration from individual DB queries
+	// instead of loading full config at once
+	conf := &config.RuleConfiguration{}
+
+	var err error
+	conf.Proxies, err = db.ListProxies()
 	if err != nil {
-		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
+		httpError(w, "load proxies fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defaultRaw := s.defaultRaw
+
+	conf.Rules, err = db.ListRules()
+	if err != nil {
+		httpError(w, "load rules fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.Mappings, err = db.ListMappings()
+	if err != nil {
+		httpError(w, "load mappings fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.ProxyGroups, err = db.ListProxyGroups()
+	if err != nil {
+		httpError(w, "load proxy groups fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.Subscriptions, err = db.ListSubscriptions()
+	if err != nil {
+		httpError(w, "load subscriptions fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.ReverseConfigs, err = db.ListReverseConfigs()
+	if err != nil {
+		httpError(w, "load reverse configs fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.Resolvers, err = db.ListResolvers()
+	if err != nil {
+		httpError(w, "load resolvers fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.Admin, err = db.GetAdminConfig()
+	if err != nil {
+		httpError(w, "load admin config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.TUN, err = db.GetTUNConfig()
+	if err != nil {
+		httpError(w, "load TUN config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	conf.Mesh, err = db.GetMeshConfig()
+	if err != nil {
+		httpError(w, "load mesh config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	if conf != nil {
-		data, err := config.MarshalRaw(conf)
-		if err != nil {
-			httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Write(data)
+	data, err := config.MarshalRaw(conf)
+	if err != nil {
+		httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if len(defaultRaw) > 0 {
-		w.Write(defaultRaw)
-		return
-	}
-	httpError(w, "no config available", http.StatusNotFound)
+	w.Write(data)
 }
 
 // apiConfigMesh handles GET/PUT for mesh foundational settings.
@@ -5263,67 +5407,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		util.LogModuleError("admin", "template error (%s): %v", pageName, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
-}
-
-func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
-	proxies := make([]map[string]interface{}, len(conf.Proxies))
-	for i, p := range conf.Proxies {
-		proxies[i] = map[string]interface{}{
-			"name":   p.Name,
-			"type":   p.Type,
-			"server": p.Server,
-			"port":   p.Port,
-			"sni":    p.Sni,
-			"udp":    p.IsUDP(),
-			"p2p":    p.IsP2P(),
-			"v2":     p.IsV2(),
-			"via":    p.ViaProxy,
-		}
-	}
-
-	result := map[string]interface{}{
-		"proxies": proxies,
-		"rules":   conf.Rules,
-		"mappings": func() []map[string]interface{} {
-			result := make([]map[string]interface{}, len(conf.Mappings))
-			for i, m := range conf.Mappings {
-				result[i] = map[string]interface{}{
-					"name": m.Name,
-					"type": m.Type,
-					"port": m.Port,
-				}
-			}
-			return result
-		}(),
-		"proxyGroups": func() []map[string]interface{} {
-			result := make([]map[string]interface{}, len(conf.ProxyGroups))
-			for i, g := range conf.ProxyGroups {
-				if g == nil {
-					continue
-				}
-				result[i] = map[string]interface{}{
-					"name":          g.Name,
-					"type":          g.Type,
-					"proxies":       g.ManualProxies,
-					"healthCheckUrl": g.HealthCheckURL,
-				}
-			}
-			return result
-		}(),
-	}
-	if conf.Admin != nil {
-		result["admin"] = map[string]interface{}{
-			"auth-enabled": conf.Admin.AuthEnabled,
-			"username":     conf.Admin.Username,
-		}
-	}
-	if conf.TUN != nil {
-		result["tun"] = conf.TUN
-	}
-	if conf.Mesh != nil {
-		result["mesh"] = conf.Mesh
-	}
-	return result
 }
 
 func jsonResponse(w http.ResponseWriter, v interface{}) {

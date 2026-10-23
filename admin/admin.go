@@ -1932,8 +1932,8 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		// Persist to the database first (source of truth).
-		if err := db.ImportRuleConf(newConf); err != nil {
+		// Sync to database using diff-based precise operation
+		if err := db.SyncConfigToDB(newConf); err != nil {
 			s.mu.Unlock()
 			httpError(w, "persist config fail: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -2031,8 +2031,16 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomic reset: replace all config but preserve mesh/admin in single transaction
-	if err := db.ResetConfigPreserving(defaultConf); err != nil {
+	// Preserve mesh/admin before reset
+	preservedMesh := s.conf.Mesh
+	preservedAdmin := s.conf.Admin
+	
+	// Apply preserved values to default config
+	defaultConf.Mesh = preservedMesh
+	defaultConf.Admin = preservedAdmin
+	
+	// Sync to database using diff-based precise operation
+	if err := db.SyncConfigToDB(defaultConf); err != nil {
 		httpError(w, "reset config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -5717,7 +5725,7 @@ func (s *AdminServer) saveConfig() error {
 	conf := s.conf
 	s.mu.RUnlock()
 
-	if err := db.ImportRuleConf(conf); err != nil {
+	if err := db.SyncConfigToDB(conf); err != nil {
 		return err
 	}
 	util.LogModuleInfo("admin", "config persisted to database")
@@ -5730,7 +5738,7 @@ func (s *AdminServer) saveConfig() error {
 // so the same object is written to DB under the caller's write lock.
 // Caller must hold s.mu (write lock).
 func (s *AdminServer) saveConfigLocked() error {
-	if err := db.ImportRuleConf(s.conf); err != nil {
+	if err := db.SyncConfigToDB(s.conf); err != nil {
 		return err
 	}
 	util.LogModuleInfo("admin", "config persisted to database")

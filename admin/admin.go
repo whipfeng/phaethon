@@ -278,13 +278,12 @@ func drawDigit(img *image.RGBA, x, y int, d byte, c color.Color) {
 // AdminServer provides a web management interface.
 type AdminServer struct {
 	config    *config.AdminConfig
-	conf      *config.RuleConfiguration // single source of truth: loaded from config.yaml, edited in-place, saved directly
+	runtime   *config.RuleConfiguration // live runtime state for main.go callbacks (health, subscriptions, etc.)
 	stats     *StatsCollector
 	server    *http.Server
 	ln        net.Listener
 	tlsConfig *tls.Config // cached TLS config for ServeConn
 	mu        sync.RWMutex
-	confPath  string // path to the config.yaml file for saving
 
 	// SSE broadcaster lifecycle
 	sseStopCh chan struct{}
@@ -408,7 +407,7 @@ func (s *AdminServer) triggerReload() {
 }
 
 // NewAdminServer creates a new admin server instance.
-func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defaultRaw []byte) *AdminServer {
+func NewAdminServer(ac *config.AdminConfig, defaultRaw []byte) *AdminServer {
 	if ac == nil {
 		ac = &config.AdminConfig{Enabled: false}
 	}
@@ -418,9 +417,7 @@ func NewAdminServer(conf *config.RuleConfiguration, ac *config.AdminConfig, defa
 
 	s := &AdminServer{
 		config:     ac,
-		conf:       conf,
 		stats:      NewStatsCollector(),
-		confPath:   "./config.yaml",
 		defaultRaw: defaultRaw,
 	}
 
@@ -522,76 +519,6 @@ func (s *AdminServer) ListenAddr() string {
 		return s.config.Addr
 	}
 	return ""
-}
-
-// displayConf returns the config being edited (always s.conf in the unified model).
-func (s *AdminServer) displayConf() *config.RuleConfiguration {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.conf
-}
-
-// mergeAndInitLocked re-initializes the runtime config after edits.
-// It preserves runtime state (subscription nodes, group active member/filter)
-// that is not persisted in the config file.
-// Caller MUST already hold s.mu (write lock).
-func (s *AdminServer) mergeAndInitLocked() error {
-	if s.conf == nil {
-		return fmt.Errorf("config not initialized")
-	}
-
-	// Preserve per-subscription node pool across admin edits
-	oldSubByName := make(map[string]*config.Subscription)
-	for _, sub := range s.conf.Subscriptions {
-		oldSubByName[sub.Name] = sub
-	}
-
-	// Preserve per-group active member and filter
-	oldGroupByName := make(map[string]*config.ProxyGroup)
-	for _, g := range s.conf.ProxyGroups {
-		oldGroupByName[g.Name] = g
-	}
-
-	if err := s.conf.Init(); err != nil {
-		return fmt.Errorf("init fail: %w", err)
-	}
-
-	// Restore subscription SubProxies from old objects to new ones
-	for _, sub := range s.conf.Subscriptions {
-		old, ok := oldSubByName[sub.Name]
-		if !ok {
-			continue
-		}
-		old.SubMu.RLock()
-		subCopy := make(map[string]*config.Proxy, len(old.SubProxies))
-		for n, p := range old.SubProxies {
-			subCopy[n] = p
-		}
-		old.SubMu.RUnlock()
-		sub.SubMu.Lock()
-		sub.SubProxies = subCopy
-		sub.SubMu.Unlock()
-	}
-
-	// Restore per-group active member and filter, then rebuild
-	for _, g := range s.conf.ProxyGroups {
-		old, ok := oldGroupByName[g.Name]
-		if !ok {
-			g.RebuildProxies()
-			continue
-		}
-		if g.Subscription == old.Subscription {
-			if g.ActiveMember == "" {
-				g.ActiveMember = old.ActiveMember
-			}
-			if g.SubscriptionFilter == "" {
-				g.SubscriptionFilter = old.SubscriptionFilter
-			}
-		}
-		g.RebuildProxies()
-	}
-
-	return nil
 }
 
 // pageTemplates holds parsed templates for each page (layout + page content).
@@ -1335,7 +1262,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stats", s.apiStats)
 	mux.HandleFunc("/api/config", s.apiConfig)
 	mux.HandleFunc("/api/config/raw", s.apiConfigRaw)
-	mux.HandleFunc("/api/config/reset", s.apiConfigReset)
 	mux.HandleFunc("/api/config/mesh", s.apiConfigMesh)
 	mux.HandleFunc("/api/config/admin", s.apiConfigAdmin)
 	mux.HandleFunc("/api/config/reload", s.apiReload)
@@ -1389,15 +1315,19 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 // ========== Page Handlers ==========
 
 func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// Runtime stats from merged config
+	// Runtime stats from runtime config
 	s.mu.RLock()
-	runtimeConf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
 
 	s.stats.CollectFromConfig(runtimeConf)
 
-	// Counts from the config being edited
-	dc := s.displayConf()
+	// Counts from the database
+	proxies, _ := db.ListProxies()
+	rules, _ := db.ListRules()
+	mappings, _ := db.ListMappings()
+	groups, _ := db.ListProxyGroups()
+	subs, _ := db.ListSubscriptions()
 
 	// Get version from GetCurrentVersion if available, otherwise fallback to env
 	version := ""
@@ -1413,11 +1343,11 @@ func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Version":           version,
 		"Stats":             s.stats.GetSnapshot(),
 		"UptimeSeconds":     int64(time.Since(s.stats.StartTime()).Seconds()),
-		"ProxyCount":        len(dc.Proxies),
-		"RuleCount":         len(dc.Rules),
-		"MappingCount":      len(dc.Mappings),
-		"GroupCount":        len(dc.ProxyGroups),
-		"SubscriptionCount": len(dc.Subscriptions),
+		"ProxyCount":        len(proxies),
+		"RuleCount":         len(rules),
+		"MappingCount":      len(mappings),
+		"GroupCount":        len(groups),
+		"SubscriptionCount": len(subs),
 		"EnvInfo":           s.envInfo(),
 		"SaveTarget":        "base",
 		"CanSwitch":         false,
@@ -1463,35 +1393,30 @@ func (s *AdminServer) envInfo() map[string]interface{} {
 		"Name":       env,
 		"HasOverlay": false,
 	}
-	if env != "" {
-		dir := filepath.Dir(s.confPath)
-		overlayPath := filepath.Join(dir, "rule-"+env+".yaml")
-		if _, err := os.Stat(overlayPath); err == nil {
-			info["HasOverlay"] = true
-			info["OverlayPath"] = overlayPath
-		}
-	}
 	return info
 }
 
 func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
+	proxies, _ := db.ListProxies()
+	groups, _ := db.ListProxyGroups()
+	subs, _ := db.ListSubscriptions()
+
 	s.mu.RLock()
-	runtimeConf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
 
 	// Show runtime subscription selections on the page without mutating the
 	// editable base/env config.  We copy the base groups and overlay the
 	// runtime Proxies / ManualProxies so the card totals reflect reality.
-	displayGroups := dc.ProxyGroups
+	displayGroups := groups
 	groupStats := make(map[string]map[string]interface{})
 	if runtimeConf != nil {
 		runtimeGroups := make(map[string]*config.ProxyGroup, len(runtimeConf.ProxyGroups))
 		for _, g := range runtimeConf.ProxyGroups {
 			runtimeGroups[g.Name] = g
 		}
-		displayGroups = make([]*config.ProxyGroup, 0, len(dc.ProxyGroups))
-		for _, g := range dc.ProxyGroups {
+		displayGroups = make([]*config.ProxyGroup, 0, len(groups))
+		for _, g := range groups {
 			cp := *g
 			if rg, ok := runtimeGroups[g.Name]; ok {
 				cp.Proxies = rg.Proxies
@@ -1511,7 +1436,7 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 			displayGroups = append(displayGroups, &cp)
 		}
 	} else {
-		for _, g := range dc.ProxyGroups {
+		for _, g := range groups {
 			groupStats[g.Name] = map[string]interface{}{
 				"total":  g.SubCandidateCount + len(g.ManualProxies),
 				"active": "",
@@ -1520,18 +1445,18 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Build proxy summaries for JavaScript (includes IsP2P/IsUDP computed values)
-	proxySummaries := make([]map[string]interface{}, len(dc.Proxies))
-	for i, p := range dc.Proxies {
+	proxySummaries := make([]map[string]interface{}, len(proxies))
+	for i, p := range proxies {
 		proxySummaries[i] = proxySummary(p)
 	}
 
 	data := map[string]interface{}{
 		"Title":         "Proxies",
-		"Proxies":       dc.Proxies,
+		"Proxies":       proxies,
 		"ProxySummaries": proxySummaries,
 		"Groups":        displayGroups,
 		"GroupStats":    groupStats,
-		"Subscriptions": dc.Subscriptions,
+		"Subscriptions": subs,
 		"SaveTarget":    "base",
 		"CanSwitch":     false,
 	}
@@ -1539,9 +1464,10 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
+	subs, _ := db.ListSubscriptions()
+
 	s.mu.RLock()
-	runtimeConf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
 
 	// Build subscription snapshot from runtime config so the page can show
@@ -1569,7 +1495,7 @@ func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Req
 
 	data := map[string]interface{}{
 		"Title":         "Subscriptions",
-		"Subscriptions": dc.Subscriptions,
+		"Subscriptions": subs,
 		"SubData":       subData,
 		"SaveTarget":    "base",
 		"CanSwitch":     false,
@@ -1578,15 +1504,16 @@ func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Req
 }
 
 func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
-	s.mu.RLock()
-	s.mu.RUnlock()
+	rules, _ := db.ListRules()
+	proxies, _ := db.ListProxies()
+	groups, _ := db.ListProxyGroups()
+	mappings, _ := db.ListMappings()
 	data := map[string]interface{}{
 		"Title":      "Rules",
-		"Rules":      dc.Rules,
-		"Proxies":    dc.Proxies,
-		"Groups":     dc.ProxyGroups,
-		"Mappings":   dc.Mappings,
+		"Rules":      rules,
+		"Proxies":    proxies,
+		"Groups":     groups,
+		"Mappings":   mappings,
 		"SaveTarget": "base",
 		"CanSwitch":  false,
 	}
@@ -1594,12 +1521,10 @@ func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
-	s.mu.RLock()
-	s.mu.RUnlock()
+	mappings, _ := db.ListMappings()
 	data := map[string]interface{}{
 		"Title":      "Mappings",
-		"Mappings":   dc.Mappings,
+		"Mappings":   mappings,
 		"SaveTarget": "base",
 		"CanSwitch":  false,
 	}
@@ -1607,16 +1532,16 @@ func (s *AdminServer) handleMappingsPage(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *AdminServer) handleResolversPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
+	resolvers, _ := db.ListResolvers()
 	data := map[string]interface{}{
 		"Title":     "Resolvers",
-		"Resolvers": dc.Resolvers,
+		"Resolvers": resolvers,
 	}
 	s.render(w, r, "resolvers.html", data)
 }
 
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
+	proxies, _ := db.ListProxies()
 	// Load instance ReverseID from file
 	dataDir := filepath.Join("data", "setup")
 	instanceReverseID, _ := reverse.GetReverseID(dataDir)
@@ -1626,19 +1551,19 @@ func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Req
 		*config.Proxy
 		SupportsReverse bool
 	}
-	var proxies []proxyInfo
-	for _, p := range dc.Proxies {
+	var proxyInfos []proxyInfo
+	for _, p := range proxies {
 		supports := false
 		switch p.Type {
 		case "socks5", "trojan", "h_tunnel":
 			supports = true
 		}
-		proxies = append(proxies, proxyInfo{p, supports})
+		proxyInfos = append(proxyInfos, proxyInfo{p, supports})
 	}
 
 	data := map[string]interface{}{
 		"Title":             "Reverse",
-		"Proxies":           proxies,
+		"Proxies":           proxyInfos,
 		"ReverseConfigs":    s.currentReverseConfigs(),
 		"InstanceReverseID": instanceReverseID,
 		"SaveTarget":        "base",
@@ -1707,7 +1632,7 @@ func (s *AdminServer) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	conf := s.conf
+	conf := s.runtime
 	s.mu.RUnlock()
 
 	s.stats.CollectFromConfig(conf)
@@ -1839,7 +1764,7 @@ func (s *AdminServer) sseBroadcaster() {
 		select {
 		case <-ticker.C:
 			s.mu.RLock()
-			conf := s.conf
+			conf := s.runtime
 			s.mu.RUnlock()
 
 			s.stats.CollectFromConfig(conf)
@@ -1855,216 +1780,45 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	conf := sanitizeConfig(s.conf)
-	s.mu.RUnlock()
-	jsonResponse(w, conf)
+	conf, err := db.LoadRuleConf()
+	if err != nil {
+		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	result := sanitizeConfig(conf)
+	jsonResponse(w, result)
 }
 
 func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		// Export: render the current runtime config as YAML. The database is
-		// the source of truth, so the export always reflects the live config.
-		s.mu.RLock()
-		conf := s.conf
-		defaultRaw := s.defaultRaw
-		s.mu.RUnlock()
-
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if conf != nil {
-			data, err := config.MarshalRaw(conf)
-			if err != nil {
-				httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Write(data)
-			return
-		}
-		if len(defaultRaw) > 0 {
-			w.Write(defaultRaw)
-			return
-		}
-		httpError(w, "no config available", http.StatusNotFound)
-
-	case http.MethodPut:
-		// Dangerous operation: require password confirmation via header
-		password := r.Header.Get("X-Password-Confirm")
-		if password == "" {
-			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
-			return
-		}
-		s.mu.RLock()
-		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
-		storedPassword := ""
-		if s.conf.Admin != nil {
-			storedPassword = s.conf.Admin.Password
-		}
-		s.mu.RUnlock()
-		if !authEnabled {
-			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
-			return
-		}
-		if password != storedPassword {
-			httpError(w, "incorrect password", http.StatusForbidden)
-			return
-		}
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			httpError(w, "read body fail", http.StatusBadRequest)
-			return
-		}
-		if len(bytes.TrimSpace(body)) == 0 {
-			httpError(w, "empty config", http.StatusBadRequest)
-			return
-		}
-
-		// Validate before persisting.
-		newConf, err := config.LoadRawBytes(body)
-		if err != nil {
-			httpError(w, "parse config fail: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := newConf.Init(); err != nil {
-			httpError(w, "init config fail: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		// Sync to database using diff-based precise operation
-		if err := db.SyncConfigToDB(newConf); err != nil {
-			s.mu.Unlock()
-			httpError(w, "persist config fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Apply into the shared runtime object, preserving runtime health state
-		oldHealthByGroup := make(map[string]*config.ProxyGroup)
-		if s.conf != nil {
-			for _, g := range s.conf.ProxyGroups {
-				oldHealthByGroup[g.Name] = g
-			}
-		}
-
-		s.conf = newConf
-
-		for _, g := range s.conf.ProxyGroups {
-			if old, ok := oldHealthByGroup[g.Name]; ok {
-				g.CopyHealthFrom(old)
-			}
-		}
-
-		if err := s.mergeAndInitLocked(); err != nil {
-			s.mu.Unlock()
-			util.LogModuleWarn("admin", "merge after raw config import failed: %v", err)
-			httpError(w, "merge fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.mu.Unlock()
-
-		util.LogModuleInfo("admin", "config imported into database")
-
-		// Check if full reload was requested
-		if r.URL.Query().Get("reload") == "true" {
-			if s.OnReload != nil {
-				go s.OnReload()
-				jsonResponse(w, map[string]string{"status": "saved and reloading"})
-				return
-			}
-		}
-		jsonResponse(w, map[string]string{"status": "ok"})
-
-	default:
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// apiConfigReset restores the config to the embedded default
-// and triggers a full runtime reload.
-// Foundational settings (mesh identity, admin identity) are preserved atomically.
-// Requires password confirmation via X-Password-Confirm header (safety measure for dangerous operation).
-func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Dangerous operation: require password confirmation via header
-	password := r.Header.Get("X-Password-Confirm")
-	if password == "" {
-		httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
-		return
-	}
-	s.mu.RLock()
-	authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
-	storedPassword := ""
-	if s.conf.Admin != nil {
-		storedPassword = s.conf.Admin.Password
-	}
-	s.mu.RUnlock()
-	if !authEnabled {
-		httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
-		return
-	}
-	if password != storedPassword {
-		httpError(w, "incorrect password", http.StatusForbidden)
-		return
-	}
-
-	if len(s.defaultRaw) == 0 {
-		httpError(w, "no default config available", http.StatusServiceUnavailable)
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Parse default config
-	defaultConf, err := config.LoadRawBytes(s.defaultRaw)
+	// Export: render the current runtime config as YAML. The database is
+	// the source of truth, so the export always reflects the live config.
+	conf, err := db.LoadRuleConf()
 	if err != nil {
-		httpError(w, "parse default config fail: "+err.Error(), http.StatusInternalServerError)
+		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := defaultConf.Init(); err != nil {
-		httpError(w, "init default config fail: "+err.Error(), http.StatusBadRequest)
+	defaultRaw := s.defaultRaw
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if conf != nil {
+		data, err := config.MarshalRaw(conf)
+		if err != nil {
+			httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Write(data)
 		return
 	}
-
-	// Preserve mesh/admin before reset
-	preservedMesh := s.conf.Mesh
-	preservedAdmin := s.conf.Admin
-	
-	// Apply preserved values to default config
-	defaultConf.Mesh = preservedMesh
-	defaultConf.Admin = preservedAdmin
-	
-	// Sync to database using diff-based precise operation
-	if err := db.SyncConfigToDB(defaultConf); err != nil {
-		httpError(w, "reset config fail: "+err.Error(), http.StatusInternalServerError)
+	if len(defaultRaw) > 0 {
+		w.Write(defaultRaw)
 		return
 	}
-
-	// Reload from DB to get the preserved values
-	newConf, err := db.LoadRuleConf()
-	if err != nil {
-		httpError(w, "reload config fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.conf = newConf
-
-	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogModuleWarn("admin", "merge after reset failed: %v", err)
-		httpError(w, "merge fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if s.OnReload != nil {
-		go s.OnReload()
-	}
-
-	util.LogModuleInfo("admin", "config reset to default (foundational settings preserved atomically)")
-	jsonResponse(w, map[string]string{"status": "ok"})
+	httpError(w, "no config available", http.StatusNotFound)
 }
 
 // apiConfigMesh handles GET/PUT for mesh foundational settings.
@@ -2072,14 +1826,12 @@ func (s *AdminServer) apiConfigReset(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		mesh := s.conf.Mesh
-		s.mu.RUnlock()
-		if mesh == nil {
+		meshCfg, err := db.GetMeshConfig()
+		if err != nil || meshCfg == nil {
 			jsonResponse(w, map[string]interface{}{})
 			return
 		}
-		jsonResponse(w, mesh)
+		jsonResponse(w, meshCfg)
 
 	case http.MethodPut:
 		// Dangerous operation: require password confirmation via header
@@ -2088,18 +1840,11 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
 			return
 		}
-		s.mu.RLock()
-		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
-		storedPassword := ""
-		if s.conf.Admin != nil {
-			storedPassword = s.conf.Admin.Password
-		}
-		s.mu.RUnlock()
-		if !authEnabled {
+		if !s.config.AuthEnabled {
 			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
 			return
 		}
-		if password != storedPassword {
+		if password != s.config.Password {
 			httpError(w, "incorrect password", http.StatusForbidden)
 			return
 		}
@@ -2113,19 +1858,20 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		if s.conf.Mesh == nil {
-			s.conf.Mesh = &config.MeshConfig{}
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil {
+			meshCfg = &config.MeshConfig{}
 		}
 
 		// Merge updates: only update fields that are present
 		if nodeID, ok := updates["NodeID"].(string); ok && nodeID != "" {
-			s.conf.Mesh.NodeID = nodeID
+			meshCfg.NodeID = nodeID
 		}
 		if subnet, ok := updates["Subnet"].(string); ok {
-			s.conf.Mesh.Subnet = subnet
+			meshCfg.Subnet = subnet
 		}
 		if network, ok := updates["Network"].(string); ok {
-			s.conf.Mesh.Network = network
+			meshCfg.Network = network
 		}
 		if domainSuffixes, ok := updates["DomainSuffixes"].([]interface{}); ok {
 			suffixes := make([]string, 0, len(domainSuffixes))
@@ -2134,7 +1880,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 					suffixes = append(suffixes, str)
 				}
 			}
-			s.conf.Mesh.DomainSuffixes = suffixes
+			meshCfg.DomainSuffixes = suffixes
 		}
 		if advertise, ok := updates["Advertise"].([]interface{}); ok {
 			advList := make([]string, 0, len(advertise))
@@ -2143,19 +1889,19 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 					advList = append(advList, str)
 				}
 			}
-			s.conf.Mesh.Advertise = advList
+			meshCfg.Advertise = advList
 		}
 		if forwardingTrace, ok := updates["ForwardingTrace"].(bool); ok {
-			s.conf.Mesh.ForwardingTrace = forwardingTrace
+			meshCfg.ForwardingTrace = forwardingTrace
 		}
 
 		// Validate required fields
-		if s.conf.Mesh.NodeID == "" {
+		if meshCfg.NodeID == "" {
 			httpError(w, "node-id is required", http.StatusBadRequest)
 			return
 		}
 
-		if err := db.PutMeshConfig(s.conf.Mesh); err != nil {
+		if err := db.PutMeshConfig(meshCfg); err != nil {
 			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2165,7 +1911,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", s.conf.Mesh.NodeID)
+		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", meshCfg.NodeID)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -2178,14 +1924,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		admin := s.conf.Admin
-		s.mu.RUnlock()
-		if admin == nil {
-			jsonResponse(w, map[string]interface{}{})
-			return
-		}
-		jsonResponse(w, admin)
+		jsonResponse(w, s.config)
 
 	case http.MethodPut:
 		// Dangerous operation: require password confirmation via header
@@ -2194,18 +1933,11 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
 			return
 		}
-		s.mu.RLock()
-		authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
-		storedPassword := ""
-		if s.conf.Admin != nil {
-			storedPassword = s.conf.Admin.Password
-		}
-		s.mu.RUnlock()
-		if !authEnabled {
+		if !s.config.AuthEnabled {
 			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
 			return
 		}
-		if password != storedPassword {
+		if password != s.config.Password {
 			httpError(w, "incorrect password", http.StatusForbidden)
 			return
 		}
@@ -2219,17 +1951,12 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		if s.conf.Admin == nil {
-			s.conf.Admin = &config.AdminConfig{}
-		}
-
 		// Merge updates: only update fields that are present
 		if addr, ok := updates["Addr"].(string); ok && addr != "" {
-			s.conf.Admin.Addr = addr
+			s.config.Addr = addr
 		}
 		if authEnabled, ok := updates["AuthEnabled"].(bool); ok {
 			oldAuthEnabled := s.config.AuthEnabled
-			s.conf.Admin.AuthEnabled = authEnabled
 			// Hot-reload: update runtime auth settings immediately
 			if authEnabled != oldAuthEnabled {
 				s.config.AuthEnabled = authEnabled
@@ -2237,42 +1964,40 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if username, ok := updates["Username"].(string); ok {
-			s.conf.Admin.Username = username
 			s.config.Username = username
 		}
 		if password, ok := updates["Password"].(string); ok && password != "" {
-			s.conf.Admin.Password = password
 			s.config.Password = password
 		}
 		if token, ok := updates["Token"].(string); ok {
-			s.conf.Admin.Token = token
+			s.config.Token = token
 		}
 		if publicKey, ok := updates["PublicKey"].(string); ok {
-			s.conf.Admin.PublicKey = publicKey
+			s.config.PublicKey = publicKey
 		}
 		if tlsCert, ok := updates["TLSCert"].(string); ok {
-			s.conf.Admin.TLSCert = tlsCert
+			s.config.TLSCert = tlsCert
 		}
 		if tlsKey, ok := updates["TLSKey"].(string); ok {
-			s.conf.Admin.TLSKey = tlsKey
+			s.config.TLSKey = tlsKey
 		}
 		if clientCA, ok := updates["ClientCA"].(string); ok {
-			s.conf.Admin.ClientCA = clientCA
+			s.config.ClientCA = clientCA
 		}
 		if meshOnly, ok := updates["MeshOnly"].(bool); ok {
-			s.conf.Admin.MeshOnly = meshOnly
+			s.config.MeshOnly = meshOnly
 		}
 		if pkgMaxMB, ok := updates["PackageUploadMaxMB"].(float64); ok {
-			s.conf.Admin.PackageUploadMaxMB = int(pkgMaxMB)
+			s.config.PackageUploadMaxMB = int(pkgMaxMB)
 		}
 
 		// Validate required fields
-		if s.conf.Admin.Addr == "" {
+		if s.config.Addr == "" {
 			httpError(w, "addr is required", http.StatusBadRequest)
 			return
 		}
 
-		if err := db.PutAdminConfig(s.conf.Admin); err != nil {
+		if err := db.PutAdminConfig(s.config); err != nil {
 			httpError(w, "persist admin config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2283,7 +2008,7 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			go s.OnReload()
 		}
 
-		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", s.conf.Admin.Addr)
+		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", s.config.Addr)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
@@ -2348,11 +2073,8 @@ func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.RLock()
-	authEnabled := s.conf.Admin != nil && s.conf.Admin.AuthEnabled
-	storedPassword := ""
-	if s.conf.Admin != nil {
-		storedPassword = s.conf.Admin.Password
-	}
+	authEnabled := s.config.AuthEnabled
+	storedPassword := s.config.Password
 	s.mu.RUnlock()
 	if !authEnabled {
 		httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
@@ -2378,13 +2100,11 @@ func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) apiTarget(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
 		info := map[string]interface{}{
 			"saveTarget": "base",
-			"basePath":   s.confPath,
+			"basePath":   "",
 			"canSwitch":  false,
 		}
-		s.mu.RUnlock()
 		jsonResponse(w, info)
 
 	default:
@@ -2399,11 +2119,17 @@ type proxyReference struct {
 }
 
 // findProxyReferences returns every rule, group, proxy, or mapping that refers
-// to the named proxy. It checks the merged runtime configuration.
-func (s *AdminServer) findProxyReferences(name string, c *config.RuleConfiguration) []proxyReference {
+// to the named proxy. It queries the database directly.
+func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error) {
 	var refs []proxyReference
-	if c == nil || name == "" {
-		return refs
+	if name == "" {
+		return refs, nil
+	}
+
+	// Load full config from DB for cross-reference checks
+	c, err := db.LoadRuleConf()
+	if err != nil {
+		return nil, err
 	}
 
 	for _, rule := range c.Rules {
@@ -2450,15 +2176,20 @@ func (s *AdminServer) findProxyReferences(name string, c *config.RuleConfigurati
 		}
 	}
 
-	return refs
+	return refs, nil
 }
 
 // findGroupReferences returns every rule, group, proxy, mapping, or reverse
-// config that refers to the named proxy group.
-func (s *AdminServer) findGroupReferences(name string, c *config.RuleConfiguration) []proxyReference {
+// config that refers to the named proxy group. It queries the database directly.
+func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error) {
 	var refs []proxyReference
-	if c == nil || name == "" {
-		return refs
+	if name == "" {
+		return refs, nil
+	}
+
+	c, err := db.LoadRuleConf()
+	if err != nil {
+		return nil, err
 	}
 
 	for _, rule := range c.Rules {
@@ -2505,11 +2236,10 @@ func (s *AdminServer) findGroupReferences(name string, c *config.RuleConfigurati
 		}
 	}
 
-	return refs
+	return refs, nil
 }
 
 func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	if r.Method == http.MethodPatch {
 		// Check if this is a P2P toggle request
 		if strings.HasSuffix(r.URL.Path, "/p2p") {
@@ -2521,9 +2251,14 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		summaries := make([]map[string]interface{}, len(dc.Proxies))
-		for i, p := range dc.Proxies {
-			summaries[i] = proxySummary(p)
+		proxies, err := db.ListProxies()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		summaries := make([]map[string]interface{}, 0, len(proxies))
+		for _, p := range proxies {
+			summaries = append(summaries, proxySummary(p))
 		}
 		jsonResponse(w, summaries)
 
@@ -2539,32 +2274,18 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		replaced := false
-		for i, existing := range dc.Proxies {
-			if existing.Name == p.Name {
-				dc.Proxies[i] = &p
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			dc.Proxies = append(dc.Proxies, &p)
-		}
-		if err := dc.Init(); err != nil {
-			if !replaced {
-				dc.Proxies = dc.Proxies[:len(dc.Proxies)-1]
-			}
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+		// Check if replacing an existing proxy
+		existing, _ := db.GetProxy(p.Name)
+		replaced := existing != nil
+
+		// Direct database write
+		if err := db.PutProxy(&p); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after proxy add failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after proxy add failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -2574,10 +2295,10 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
-			util.LogModuleInfo("admin", "proxy updated in %s: %s (%s)", "database", p.Name, p.Type)
+			util.LogModuleInfo("admin", "proxy updated: %s (%s)", p.Name, p.Type)
 			jsonResponse(w, proxySummary(&p))
 		} else {
-			util.LogModuleInfo("admin", "proxy added to %s: %s (%s)", "database", p.Name, p.Type)
+			util.LogModuleInfo("admin", "proxy added: %s (%s)", p.Name, p.Type)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, proxySummary(&p))
 		}
@@ -2591,7 +2312,13 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 
 		s.mu.Lock()
 		// Block deletion while the proxy is still referenced.
-		if refs := s.findProxyReferences(name, s.conf); len(refs) > 0 {
+		refs, err := s.findProxyReferences(name)
+		if err != nil {
+			s.mu.Unlock()
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(refs) > 0 {
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusConflict)
@@ -2602,38 +2329,22 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		for i, p := range dc.Proxies {
-			if p.Name == name {
-				old := dc.Proxies
-				dc.Proxies = append(dc.Proxies[:i], dc.Proxies[i+1:]...)
-				if err := dc.Init(); err != nil {
-					dc.Proxies = old
-					s.mu.Unlock()
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					s.mu.Unlock()
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after proxy delete failed: %v", err)
-				}
-				util.DefaultVersionNotifier.BumpVersion("proxies")
-				s.mu.Unlock()
-				util.LogModuleInfo("admin", "proxy deleted from %s: %s", "database", name)
-				jsonResponse(w, map[string]string{"status": "deleted"})
-				return
-			}
+		if err := db.DeleteProxy(name); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after proxy delete failed: %v", err)
+		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
-		httpError(w, "proxy not found", http.StatusNotFound)
+		util.LogModuleInfo("admin", "proxy deleted: %s", name)
+		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
 func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
 	if name == "" {
 		httpError(w, "proxy name required", http.StatusBadRequest)
@@ -2650,7 +2361,13 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	// Block disabling while the proxy is still referenced.
 	if !body.Enabled {
-		if refs := s.findProxyReferences(name, s.conf); len(refs) > 0 {
+		refs, err := s.findProxyReferences(name)
+		if err != nil {
+			s.mu.Unlock()
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(refs) > 0 {
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusConflict)
@@ -2663,37 +2380,30 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer s.mu.Unlock()
-	for _, p := range dc.Proxies {
-		if p.Name != name {
-			continue
-		}
-		p.Enabled = &body.Enabled
-		if err := dc.Init(); err != nil {
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after proxy toggle failed: %v", err)
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
-			}
-		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
-		jsonResponse(w, proxySummary(p))
+	p, err := db.GetProxy(name)
+	if err != nil || p == nil {
+		httpError(w, "proxy not found", http.StatusNotFound)
 		return
 	}
-	httpError(w, "proxy not found", http.StatusNotFound)
+	p.Enabled = &body.Enabled
+	if err := db.PutProxy(p); err != nil {
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after proxy toggle failed: %v", err)
+	}
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
+		}
+	}
+	util.DefaultVersionNotifier.BumpVersion("proxies")
+	jsonResponse(w, proxySummary(p))
 }
 
 func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 	util.LogModuleInfo("admin", "apiToggleP2P called: path=%s", r.URL.Path)
-	dc := s.displayConf()
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
 	name = strings.TrimSuffix(name, "/p2p")
 	if name == "" {
@@ -2711,47 +2421,45 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, p := range dc.Proxies {
-		if p.Name != name {
-			continue
-		}
-		if strings.EqualFold(p.Type, "h_tunnel") && !body.P2P {
-			httpError(w, "h_tunnel requires P2P enabled (mesh downlink depends on it)", http.StatusBadRequest)
-			return
-		}
-		p.P2P = &body.P2P
-		if err := dc.Init(); err != nil {
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after p2p toggle failed: %v", err)
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after p2p toggle failed: %v", err)
-			}
-		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
-		util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
-		jsonResponse(w, proxySummary(p))
+	p, err := db.GetProxy(name)
+	if err != nil || p == nil {
+		httpError(w, "proxy not found", http.StatusNotFound)
 		return
 	}
-	httpError(w, "proxy not found", http.StatusNotFound)
+	if strings.EqualFold(p.Type, "h_tunnel") && !body.P2P {
+		httpError(w, "h_tunnel requires P2P enabled (mesh downlink depends on it)", http.StatusBadRequest)
+		return
+	}
+	p.P2P = &body.P2P
+	if err := db.PutProxy(p); err != nil {
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after p2p toggle failed: %v", err)
+	}
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogModuleWarn("admin", "incremental update after p2p toggle failed: %v", err)
+		}
+	}
+	util.DefaultVersionNotifier.BumpVersion("proxies")
+	util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
+	jsonResponse(w, proxySummary(p))
 }
 
 func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	if r.Method == http.MethodPatch {
 		s.apiToggleRule(w, r)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
+		dc, err := db.LoadRuleConf()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		rules := make([]map[string]interface{}, len(dc.Rules))
 		for i, rule := range dc.Rules {
 			trimmed := strings.TrimSpace(rule)
@@ -2779,6 +2487,12 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
+		dc, err := db.LoadRuleConf()
+		if err != nil {
+			s.mu.Unlock()
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		idx := len(dc.Rules)
 		if body.Index != nil {
 			idx = *body.Index
@@ -2789,97 +2503,62 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 				idx = len(dc.Rules)
 			}
 		}
-		// Insert at position
-		dc.Rules = append(dc.Rules[:idx], append([]string{body.Rule}, dc.Rules[idx:]...)...)
-		if err := dc.Init(); err != nil {
-			// Rollback: remove inserted rule
-			dc.Rules = append(dc.Rules[:idx], dc.Rules[idx+1:]...)
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+		// Insert rule (single transaction handles re-indexing)
+		if err := db.InsertRule(idx, body.Rule); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after rule insert failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after rule insert failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
-		util.LogModuleInfo("admin", "rule inserted at %d in %s: %s", idx, "database", body.Rule)
+		util.LogModuleInfo("admin", "rule inserted at %d: %s", idx, body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
-
-	case http.MethodPut:
-		// Full replace (bulk update)
-		var rules []string
-		if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
-			httpError(w, "decode fail", http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		oldRules := dc.Rules
-		dc.Rules = rules
-		if err := dc.Init(); err != nil {
-			dc.Rules = oldRules
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			s.mu.Unlock()
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after rules update failed: %v", err)
-		}
-		util.DefaultVersionNotifier.BumpVersion("rules")
-		s.mu.Unlock()
-		util.LogModuleInfo("admin", "rules updated in %s (%d rules)", "database", len(rules))
-		jsonResponse(w, map[string]interface{}{"status": "ok", "count": len(rules)})
 
 	case http.MethodDelete:
 		// Delete by index: /api/rules/3
 		pathIdx := strings.TrimPrefix(r.URL.Path, "/api/rules/")
 		idx, err := strconv.Atoi(pathIdx)
-		if err != nil || idx < 0 || idx >= len(dc.Rules) {
+		if err != nil || idx < 0 {
 			httpError(w, "invalid rule index", http.StatusBadRequest)
 			return
 		}
 
 		s.mu.Lock()
-		deleted := dc.Rules[idx]
-		dc.Rules = append(dc.Rules[:idx], dc.Rules[idx+1:]...)
-		if err := dc.Init(); err != nil {
-			// Rollback is hard here; just re-insert
-			dc.Rules = append(dc.Rules[:idx], append([]string{deleted}, dc.Rules[idx:]...)...)
+		dc, err := db.LoadRuleConf()
+		if err != nil {
 			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.saveConfigLocked(); err != nil {
+		if idx >= len(dc.Rules) {
+			s.mu.Unlock()
+			httpError(w, "invalid rule index", http.StatusBadRequest)
+			return
+		}
+		deleted := dc.Rules[idx]
+		// Delete rule (single transaction handles re-indexing)
+		if err := db.DeleteRuleByIndex(idx); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after rule delete failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after rule delete failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
-		util.LogModuleInfo("admin", "rule deleted at %d from %s: %s", idx, "database", deleted)
+		util.LogModuleInfo("admin", "rule deleted at %d: %s", idx, deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
 func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	pathIdx := strings.TrimPrefix(r.URL.Path, "/api/rules/")
 	idx, err := strconv.Atoi(pathIdx)
-	if err != nil || idx < 0 || idx >= len(dc.Rules) {
+	if err != nil || idx < 0 {
 		httpError(w, "invalid rule index", http.StatusBadRequest)
 		return
 	}
@@ -2893,6 +2572,15 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	dc, err := db.LoadRuleConf()
+	if err != nil {
+		httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if idx >= len(dc.Rules) {
+		httpError(w, "invalid rule index", http.StatusBadRequest)
+		return
+	}
 	rule := strings.TrimSpace(dc.Rules[idx])
 	hasComment := strings.HasPrefix(rule, "//")
 	if body.Enabled && hasComment {
@@ -2900,16 +2588,12 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 	} else if !body.Enabled && !hasComment {
 		dc.Rules[idx] = "//" + rule
 	}
-	if err := dc.Init(); err != nil {
-		httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.saveConfigLocked(); err != nil {
+	if err := db.PutRule(idx, dc.Rules[idx]); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogModuleWarn("admin", "merge after rule toggle failed: %v", err)
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after rule toggle failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
@@ -2925,16 +2609,20 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	if r.Method == http.MethodPatch {
 		s.apiToggleMapping(w, r)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		summaries := make([]map[string]interface{}, len(dc.Mappings))
-		for i, m := range dc.Mappings {
-			summaries[i] = mappingSummary(m)
+		mappings, err := db.ListMappings()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		summaries := make([]map[string]interface{}, 0, len(mappings))
+		for _, m := range mappings {
+			summaries = append(summaries, mappingSummary(m))
 		}
 		jsonResponse(w, summaries)
 
@@ -2950,35 +2638,22 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		// Update in place if name already exists, otherwise append
-		replaced := false
+		// Check if replacing an existing mapping
+		existing, _ := db.GetMapping(m.Name)
+		replaced := existing != nil
 		var oldMapping *config.Mapping
-		for i, existing := range dc.Mappings {
-			if existing.Name == m.Name {
-				oldMapping = existing
-				dc.Mappings[i] = &m
-				replaced = true
-				break
-			}
+		if replaced {
+			oldCopy := *existing
+			oldMapping = &oldCopy
 		}
-		if !replaced {
-			dc.Mappings = append(dc.Mappings, &m)
-		}
-		if err := dc.Init(); err != nil {
-			if !replaced {
-				dc.Mappings = dc.Mappings[:len(dc.Mappings)-1]
-			}
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+
+		if err := db.PutMapping(&m); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after mapping add failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after mapping add failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
@@ -2989,10 +2664,10 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if replaced {
-			util.LogModuleInfo("admin", "mapping updated in %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
+			util.LogModuleInfo("admin", "mapping updated: %s (%s:%d)", m.Name, m.Type, m.Port)
 			jsonResponse(w, mappingSummary(&m))
 		} else {
-			util.LogModuleInfo("admin", "mapping added to %s: %s (%s:%d)", "database", m.Name, m.Type, m.Port)
+			util.LogModuleInfo("admin", "mapping added: %s (%s:%d)", m.Name, m.Type, m.Port)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, mappingSummary(&m))
 		}
@@ -3005,44 +2680,34 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		for i, m := range dc.Mappings {
-			if m.Name == name {
-				old := dc.Mappings
-				dc.Mappings = append(dc.Mappings[:i], dc.Mappings[i+1:]...)
-				if err := dc.Init(); err != nil {
-					dc.Mappings = old
-					s.mu.Unlock()
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					s.mu.Unlock()
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after mapping delete failed: %v", err)
-				}
-				util.DefaultVersionNotifier.BumpVersion("mappings")
-				s.mu.Unlock()
-				// Notify runtime about mapping deletion
-				if s.OnMappingUpdate != nil {
-					if err := s.OnMappingUpdate(m, nil); err != nil {
-						util.LogModuleWarn("admin", "mapping delete callback failed: %v", err)
-					}
-				}
-				util.LogModuleInfo("admin", "mapping deleted from %s: %s", "database", name)
-				jsonResponse(w, map[string]string{"status": "deleted"})
-				return
+		existing, err := db.GetMapping(name)
+		if err != nil || existing == nil {
+			s.mu.Unlock()
+			httpError(w, "mapping not found", http.StatusNotFound)
+			return
+		}
+		if err := db.DeleteMapping(name); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after mapping delete failed: %v", err)
+		}
+		util.DefaultVersionNotifier.BumpVersion("mappings")
+		s.mu.Unlock()
+		// Notify runtime about mapping deletion
+		if s.OnMappingUpdate != nil {
+			if err := s.OnMappingUpdate(existing, nil); err != nil {
+				util.LogModuleWarn("admin", "mapping delete callback failed: %v", err)
 			}
 		}
-		s.mu.Unlock()
-		httpError(w, "mapping not found", http.StatusNotFound)
+		util.LogModuleInfo("admin", "mapping deleted: %s", name)
+		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
 func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	name := strings.TrimPrefix(r.URL.Path, "/api/mappings/")
 	if name == "" {
 		httpError(w, "mapping name required", http.StatusBadRequest)
@@ -3058,36 +2723,29 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, m := range dc.Mappings {
-		if m.Name != name {
-			continue
-		}
-		m.Enabled = &body.Enabled
-		if err := dc.Init(); err != nil {
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after mapping toggle failed: %v", err)
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
-			}
-		}
-		util.DefaultVersionNotifier.BumpVersion("mappings")
-		jsonResponse(w, mappingSummary(m))
+	m, err := db.GetMapping(name)
+	if err != nil || m == nil {
+		httpError(w, "mapping not found", http.StatusNotFound)
 		return
 	}
-	httpError(w, "mapping not found", http.StatusNotFound)
+	m.Enabled = &body.Enabled
+	if err := db.PutMapping(m); err != nil {
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after mapping toggle failed: %v", err)
+	}
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
+		}
+	}
+	util.DefaultVersionNotifier.BumpVersion("mappings")
+	jsonResponse(w, mappingSummary(m))
 }
 
 func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	if r.Method == http.MethodPatch {
 		name := strings.TrimPrefix(r.URL.Path, "/api/resolvers/")
 		if name == "" {
@@ -3103,37 +2761,37 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		for _, rv := range dc.Resolvers {
-			if rv.Name == name {
-				rv.Enabled = &body.Enabled
-				if err := dc.Init(); err != nil {
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after resolver toggle failed: %v", err)
-				}
-				if s.OnIncrementalUpdate != nil {
-					if err := s.OnIncrementalUpdate(); err != nil {
-						util.LogModuleWarn("admin", "incremental update after resolver toggle failed: %v", err)
-					}
-				}
-				jsonResponse(w, resolverSummary(rv))
-				return
+		rv, err := db.GetResolver(name)
+		if err != nil || rv == nil {
+			httpError(w, "resolver not found", http.StatusNotFound)
+			return
+		}
+		rv.Enabled = &body.Enabled
+		if err := db.PutResolver(rv); err != nil {
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after resolver toggle failed: %v", err)
+		}
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogModuleWarn("admin", "incremental update after resolver toggle failed: %v", err)
 			}
 		}
-		httpError(w, "resolver not found", http.StatusNotFound)
+		jsonResponse(w, resolverSummary(rv))
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		summaries := make([]map[string]interface{}, len(dc.Resolvers))
-		for i, rv := range dc.Resolvers {
-			summaries[i] = resolverSummary(rv)
+		resolvers, err := db.ListResolvers()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		summaries := make([]map[string]interface{}, 0, len(resolvers))
+		for _, rv := range resolvers {
+			summaries = append(summaries, resolverSummary(rv))
 		}
 		jsonResponse(w, summaries)
 
@@ -3149,39 +2807,23 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		replaced := false
-		for i, existing := range dc.Resolvers {
-			if existing.Name == rv.Name {
-				dc.Resolvers[i] = &rv
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			dc.Resolvers = append(dc.Resolvers, &rv)
-		}
-		if err := dc.Init(); err != nil {
-			if !replaced {
-				dc.Resolvers = dc.Resolvers[:len(dc.Resolvers)-1]
-			}
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+		existing, _ := db.GetResolver(rv.Name)
+		replaced := existing != nil
+
+		if err := db.PutResolver(&rv); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after resolver add failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after resolver add failed: %v", err)
 		}
 		s.mu.Unlock()
 		if replaced {
-			util.LogModuleInfo("admin", "resolver updated in %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogModuleInfo("admin", "resolver updated: %s (%s:%d -> %s:%d)", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			jsonResponse(w, resolverSummary(&rv))
 		} else {
-			util.LogModuleInfo("admin", "resolver added to %s: %s (%s:%d -> %s:%d)", "database", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
+			util.LogModuleInfo("admin", "resolver added: %s (%s:%d -> %s:%d)", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, resolverSummary(&rv))
 		}
@@ -3194,32 +2836,17 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		for i, rv := range dc.Resolvers {
-			if rv.Name == name {
-				old := dc.Resolvers
-				dc.Resolvers = append(dc.Resolvers[:i], dc.Resolvers[i+1:]...)
-				if err := dc.Init(); err != nil {
-					dc.Resolvers = old
-					s.mu.Unlock()
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					s.mu.Unlock()
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after resolver delete failed: %v", err)
-				}
-				s.mu.Unlock()
-				util.LogModuleInfo("admin", "resolver deleted from %s: %s", "database", name)
-				jsonResponse(w, map[string]string{"status": "deleted"})
-				return
-			}
+		if err := db.DeleteResolver(name); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after resolver delete failed: %v", err)
 		}
 		s.mu.Unlock()
-		httpError(w, "resolver not found", http.StatusNotFound)
+		util.LogModuleInfo("admin", "resolver deleted: %s", name)
+		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
@@ -3272,7 +2899,6 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	dc := s.displayConf()
 	path := strings.TrimPrefix(r.URL.Path, "/api/groups/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 1 || parts[0] == "" {
@@ -3291,7 +2917,13 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	// Block disabling while the group is still referenced.
 	if !body.Enabled {
-		if refs := s.findGroupReferences(name, s.conf); len(refs) > 0 {
+		refs, err := s.findGroupReferences(name)
+		if err != nil {
+			s.mu.Unlock()
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(refs) > 0 {
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusConflict)
@@ -3304,37 +2936,31 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer s.mu.Unlock()
-	for _, g := range dc.ProxyGroups {
-		if g.Name != name {
-			continue
-		}
-		g.Enabled = &body.Enabled
-		if err := dc.Init(); err != nil {
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after group toggle failed: %v", err)
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
-			}
-		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
-		jsonResponse(w, map[string]interface{}{
-			"name":    g.Name,
-			"enabled": g.IsEnabled(),
-			"type":    g.Type,
-			"proxies": g.Proxies,
-		})
+	g, err := db.GetProxyGroup(name)
+	if err != nil || g == nil {
+		httpError(w, "group not found", http.StatusNotFound)
 		return
 	}
-	httpError(w, "group not found", http.StatusNotFound)
+	g.Enabled = &body.Enabled
+	if err := db.PutProxyGroup(g); err != nil {
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after group toggle failed: %v", err)
+	}
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
+		}
+	}
+	util.DefaultVersionNotifier.BumpVersion("proxies")
+	jsonResponse(w, map[string]interface{}{
+		"name":    g.Name,
+		"enabled": g.IsEnabled(),
+		"type":    g.Type,
+		"proxies": g.Proxies,
+	})
 }
 
 // apiGroupSubscription returns/updates a group's subscription selection and filter.
@@ -3348,15 +2974,15 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 	groupName := parts[0]
 
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
-	if conf == nil {
+	if runtimeConf == nil {
 		httpError(w, "config not ready", http.StatusServiceUnavailable)
 		return
 	}
 
 	var group *config.ProxyGroup
-	for _, g := range conf.ProxyGroups {
+	for _, g := range runtimeConf.ProxyGroups {
 		if g.Name == groupName {
 			group = g
 			break
@@ -3372,7 +2998,7 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		var nodes []map[string]interface{}
 		var subName string
 		if group.Subscription != "" {
-			for _, sub := range conf.Subscriptions {
+			for _, sub := range runtimeConf.Subscriptions {
 				if sub.Name == group.Subscription {
 					subName = sub.Name
 					sub.SubMu.RLock()
@@ -3400,8 +3026,6 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		respNodes := make([]map[string]interface{}, 0, len(nodes))
 		for _, n := range nodes {
 			name := n["name"].(string)
-			// Subscription nodes are keyed with the "sub:" prefix in the group's
-			// health map so they do not collide with manual proxies of the same name.
 			h, ok := health["sub:"+name]
 			if !ok {
 				h = config.HealthInfo{}
@@ -3435,42 +3059,30 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			httpError(w, "decode fail", http.StatusBadRequest)
 			return
 		}
-		// Persist filter/active changes into the config being edited (base or env).
-		dc := s.displayConf()
-		var dcGroup *config.ProxyGroup
-		for _, gg := range dc.ProxyGroups {
-			if gg.Name == groupName {
-				dcGroup = gg
-				break
-			}
-		}
-		if dcGroup == nil {
-			httpError(w, "group not found in editable config", http.StatusNotFound)
-			return
-		}
-		dcGroup.SubscriptionFilter = body.Filter
-		dcGroup.ActiveMember = body.ActiveMember
 
 		s.mu.Lock()
-		// Update the current runtime group while holding the write lock so the
-		// merge step below preserves the new filter instead of a stale one.
-		if s.conf != nil {
-			for _, rg := range s.conf.ProxyGroups {
+		// Update the runtime group
+		var updatedGroup *config.ProxyGroup
+		if s.runtime != nil {
+			for _, rg := range s.runtime.ProxyGroups {
 				if rg.Name == groupName {
 					rg.SubscriptionFilter = body.Filter
 					rg.ActiveMember = body.ActiveMember
 					rg.RebuildProxies()
+					updatedGroup = rg
 					break
 				}
 			}
 		}
-		if err := s.saveConfigLocked(); err != nil {
-			s.mu.Unlock()
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
+		if updatedGroup != nil {
+			if err := db.PutProxyGroup(updatedGroup); err != nil {
+				s.mu.Unlock()
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after subscription filter update failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after subscription filter update failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -3537,9 +3149,9 @@ func (s *AdminServer) apiGroupHealthCheck(w http.ResponseWriter, r *http.Request
 
 	// Return health snapshot for the group.
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
-	for _, g := range conf.ProxyGroups {
+	for _, g := range runtimeConf.ProxyGroups {
 		if g.Name == groupName {
 			jsonResponse(w, g.HealthSnapshot())
 			return
@@ -3564,14 +3176,14 @@ func (s *AdminServer) apiGroupMembers(w http.ResponseWriter, r *http.Request) {
 	groupName := parts[0]
 
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
-	if conf == nil {
+	if runtimeConf == nil {
 		httpError(w, "config not ready", http.StatusServiceUnavailable)
 		return
 	}
 
-	for _, g := range conf.ProxyGroups {
+	for _, g := range runtimeConf.ProxyGroups {
 		if g.Name == groupName {
 			jsonResponse(w, buildGroupMemberList(g))
 			return
@@ -3606,13 +3218,13 @@ func (s *AdminServer) apiGroupTest(w http.ResponseWriter, r *http.Request) {
 
 	// Return the latest health snapshot from the current runtime config.
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
-	if conf == nil {
+	if runtimeConf == nil {
 		httpError(w, "config not ready", http.StatusServiceUnavailable)
 		return
 	}
-	for _, g := range conf.ProxyGroups {
+	for _, g := range runtimeConf.ProxyGroups {
 		if g.Name != groupName {
 			continue
 		}
@@ -3665,15 +3277,15 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
-	if conf == nil {
+	if runtimeConf == nil {
 		httpError(w, "config not ready", http.StatusServiceUnavailable)
 		return
 	}
 
 	var runtimeGroup *config.ProxyGroup
-	for _, g := range conf.ProxyGroups {
+	for _, g := range runtimeConf.ProxyGroups {
 		if g.Name == groupName {
 			runtimeGroup = g
 			break
@@ -3706,38 +3318,28 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	dc := s.displayConf()
-	var dcGroup *config.ProxyGroup
-	for _, gg := range dc.ProxyGroups {
-		if gg.Name == groupName {
-			dcGroup = gg
-			break
-		}
-	}
-	if dcGroup == nil {
-		httpError(w, "group not found in editable config", http.StatusNotFound)
-		return
-	}
-	dcGroup.ActiveMember = body.Name
-
 	s.mu.Lock()
-	if s.conf != nil {
-		for _, rg := range s.conf.ProxyGroups {
+	var updatedGroup *config.ProxyGroup
+	if s.runtime != nil {
+		for _, rg := range s.runtime.ProxyGroups {
 			if rg.Name == groupName {
 				if err := rg.SetActiveMember(body.Name); err != nil {
 					util.LogModuleWarn("admin", "SetActiveMember failed: %v", err)
 				}
+				updatedGroup = rg
 				break
 			}
 		}
 	}
-	if err := s.saveConfigLocked(); err != nil {
-		s.mu.Unlock()
-		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-		return
+	if updatedGroup != nil {
+		if err := db.PutProxyGroup(updatedGroup); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	if err := s.mergeAndInitLocked(); err != nil {
-		util.LogModuleWarn("admin", "merge after active-member failed: %v", err)
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after active-member failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
@@ -3807,44 +3409,29 @@ func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 }
 
 func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		runtimeConf := s.conf
-		s.mu.RUnlock()
-		runtimeGroups := make(map[string]*config.ProxyGroup)
-		if runtimeConf != nil {
-			for _, g := range runtimeConf.ProxyGroups {
-				runtimeGroups[g.Name] = g
-			}
+		groups, err := db.ListProxyGroups()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
-		summaries := make([]map[string]interface{}, len(dc.ProxyGroups))
-		for i, g := range dc.ProxyGroups {
-			proxies := g.Proxies
-			manualProxies := g.ManualProxies
-			activeMember := g.ActiveMember
-			filter := g.SubscriptionFilter
-			if rg, ok := runtimeGroups[g.Name]; ok {
-				proxies = rg.Proxies
-				manualProxies = rg.ManualProxies
-				activeMember = rg.ActiveMember
-				filter = rg.SubscriptionFilter
-			}
-			summaries[i] = map[string]interface{}{
+		summaries := make([]map[string]interface{}, 0, len(groups))
+		for _, g := range groups {
+			summaries = append(summaries, map[string]interface{}{
 				"name":                   g.Name,
 				"enabled":                g.IsEnabled(),
 				"type":                   g.Type,
-				"proxies":                proxies,
-				"manualProxies":          manualProxies,
+				"proxies":                g.Proxies,
+				"manualProxies":          g.ManualProxies,
 				"health-check-url":       g.HealthCheckURL,
 				"health-check-interval":  g.HealthCheckInterval,
 				"health-check-tolerance": g.HealthCheckTolerance,
 				"lb-strategy":            g.LBStrategy,
 				"subscription":           g.Subscription,
-				"active-member":          activeMember,
-				"subscription-filter":    filter,
-			}
+				"active-member":          g.ActiveMember,
+				"subscription-filter":    g.SubscriptionFilter,
+			})
 		}
 		jsonResponse(w, summaries)
 
@@ -3864,8 +3451,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.SubscriptionMode = strings.ToLower(strings.TrimSpace(g.SubscriptionMode))
-		// subscription-mode is deprecated and ignored; clear it so it never
-		// leaks back into the persisted YAML.
 		g.SubscriptionMode = ""
 		if len(g.Proxies) == 0 && g.Subscription == "" {
 			httpError(w, "group must have at least one manual proxy or a subscription source", http.StatusBadRequest)
@@ -3873,24 +3458,13 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		var existing *config.ProxyGroup
-		for _, eg := range dc.ProxyGroups {
-			if eg.Name == g.Name {
-				existing = eg
-				break
-			}
-		}
+		existing, _ := db.GetProxyGroup(g.Name)
+		replaced := existing != nil
 
-		// Persist manual nodes only in YAML. Runtime rebuild will add matching
-		// subscription nodes on the next reload.
 		g.ManualProxies = make([]string, len(g.Proxies))
 		copy(g.ManualProxies, g.Proxies)
-		// Keep g.Proxies as the YAML source of truth for manual members
-		// since ManualProxies is yaml:"-".
 
 		if existing != nil {
-			// Accept the incoming subscription source. If the subscription
-			// itself changed, the active member no longer applies.
 			if g.Subscription != existing.Subscription {
 				g.ActiveMember = ""
 			} else {
@@ -3898,8 +3472,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 					g.ActiveMember = existing.ActiveMember
 				}
 			}
-			// Preserve health-check settings and filter when the client did not
-			// explicitly supply them.
 			if g.HealthCheckURL == "" {
 				g.HealthCheckURL = existing.HealthCheckURL
 			}
@@ -3916,32 +3488,15 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 				g.SubscriptionFilter = existing.SubscriptionFilter
 			}
 			g.CopyHealthFrom(existing)
-			for i, eg := range dc.ProxyGroups {
-				if eg.Name == g.Name {
-					dc.ProxyGroups[i] = &g
-					break
-				}
-			}
-		} else {
-			dc.ProxyGroups = append(dc.ProxyGroups, &g)
 		}
-		replaced := existing != nil
 
-		if err := dc.Init(); err != nil {
-			if !replaced {
-				dc.ProxyGroups = dc.ProxyGroups[:len(dc.ProxyGroups)-1]
-			}
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+		if err := db.PutProxyGroup(&g); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after group add failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after group add failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -3951,9 +3506,9 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
-			util.LogModuleInfo("admin", "group updated in %s: %s (%s)", "database", g.Name, g.Type)
+			util.LogModuleInfo("admin", "group updated: %s (%s)", g.Name, g.Type)
 		} else {
-			util.LogModuleInfo("admin", "group added to %s: %s (%s)", "database", g.Name, g.Type)
+			util.LogModuleInfo("admin", "group added: %s (%s)", g.Name, g.Type)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3970,8 +3525,13 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		// Block deletion while the group is still referenced.
-		if refs := s.findGroupReferences(name, s.conf); len(refs) > 0 {
+		refs, err := s.findGroupReferences(name)
+		if err != nil {
+			s.mu.Unlock()
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(refs) > 0 {
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusConflict)
@@ -3982,33 +3542,18 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		for i, g := range dc.ProxyGroups {
-			if g.Name == name {
-				old := dc.ProxyGroups
-				dc.ProxyGroups = append(dc.ProxyGroups[:i], dc.ProxyGroups[i+1:]...)
-				if err := dc.Init(); err != nil {
-					dc.ProxyGroups = old
-					s.mu.Unlock()
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					s.mu.Unlock()
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after group delete failed: %v", err)
-				}
-				util.DefaultVersionNotifier.BumpVersion("proxies")
-				s.mu.Unlock()
-				util.LogModuleInfo("admin", "group deleted from %s: %s", "database", name)
-				jsonResponse(w, map[string]string{"status": "deleted"})
-				return
-			}
+		if err := db.DeleteProxyGroup(name); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after group delete failed: %v", err)
+		}
+		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
-		httpError(w, "group not found", http.StatusNotFound)
+		util.LogModuleInfo("admin", "group deleted: %s", name)
+		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
@@ -4016,12 +3561,16 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		dc := s.displayConf()
+		subs, err := db.ListSubscriptions()
+		if err != nil {
+			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.mu.RLock()
-		runtimeConf := s.conf
+		runtimeConf := s.runtime
 		s.mu.RUnlock()
-		summaries := make([]map[string]interface{}, 0, len(dc.Subscriptions))
-		for _, sub := range dc.Subscriptions {
+		summaries := make([]map[string]interface{}, 0, len(subs))
+		for _, sub := range subs {
 			interval := 3600
 			if sub.Interval != nil {
 				interval = *sub.Interval
@@ -4048,7 +3597,6 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, summaries)
 
 	case http.MethodPost:
-		dc := s.displayConf()
 		var req struct {
 			Name     string `json:"name"`
 			URL      string `json:"url"`
@@ -4064,15 +3612,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		var existing *config.Subscription
-		var existingIdx int
-		for i, es := range dc.Subscriptions {
-			if es.Name == req.Name {
-				existing = es
-				existingIdx = i
-				break
-			}
-		}
+		existing, _ := db.GetSubscription(req.Name)
 
 		sub := config.Subscription{
 			Name:     req.Name,
@@ -4088,8 +3628,7 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Preserve the runtime node pool if the URL did not change; otherwise
-		// start fresh so the next refresh populates the new pool.
+		// Preserve the runtime node pool if the URL did not change
 		sub.SubProxies = make(map[string]*config.Proxy)
 		if existing != nil && existing.URL == sub.URL {
 			existing.SubMu.RLock()
@@ -4100,27 +3639,13 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		replaced := existing != nil
-		if replaced {
-			dc.Subscriptions[existingIdx] = &sub
-		} else {
-			dc.Subscriptions = append(dc.Subscriptions, &sub)
-		}
-
-		if err := dc.Init(); err != nil {
-			if !replaced {
-				dc.Subscriptions = dc.Subscriptions[:len(dc.Subscriptions)-1]
-			}
-			s.mu.Unlock()
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
+		if err := db.PutSubscription(&sub); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after subscription edit failed: %v", err)
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after subscription edit failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
@@ -4130,9 +3655,9 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			interval = *sub.Interval
 		}
 		if replaced {
-			util.LogModuleInfo("admin", "subscription updated in %s: %s", "database", sub.Name)
+			util.LogModuleInfo("admin", "subscription updated: %s", sub.Name)
 		} else {
-			util.LogModuleInfo("admin", "subscription added to %s: %s", "database", sub.Name)
+			util.LogModuleInfo("admin", "subscription added: %s", sub.Name)
 			w.WriteHeader(http.StatusCreated)
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -4143,7 +3668,6 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
-		dc := s.displayConf()
 		name := strings.TrimPrefix(r.URL.Path, "/api/subscriptions/")
 		if name == "" {
 			httpError(w, "subscription name required", http.StatusBadRequest)
@@ -4151,7 +3675,9 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		for _, g := range dc.ProxyGroups {
+		// Check if any group references this subscription
+		groups, _ := db.ListProxyGroups()
+		for _, g := range groups {
 			if g.Subscription == name {
 				s.mu.Unlock()
 				httpError(w, "subscription is referenced by group "+g.Name, http.StatusBadRequest)
@@ -4159,33 +3685,18 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		for i, sub := range dc.Subscriptions {
-			if sub.Name == name {
-				old := dc.Subscriptions
-				dc.Subscriptions = append(dc.Subscriptions[:i], dc.Subscriptions[i+1:]...)
-				if err := dc.Init(); err != nil {
-					dc.Subscriptions = old
-					s.mu.Unlock()
-					httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := s.saveConfigLocked(); err != nil {
-					s.mu.Unlock()
-					httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := s.mergeAndInitLocked(); err != nil {
-					util.LogModuleWarn("admin", "merge after subscription delete failed: %v", err)
-				}
-				util.DefaultVersionNotifier.BumpVersion("subscriptions")
-				s.mu.Unlock()
-				util.LogModuleInfo("admin", "subscription deleted from %s: %s", "database", name)
-				jsonResponse(w, map[string]string{"status": "deleted"})
-				return
-			}
+		if err := db.DeleteSubscription(name); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after subscription delete failed: %v", err)
+		}
+		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
-		httpError(w, "subscription not found", http.StatusNotFound)
+		util.LogModuleInfo("admin", "subscription deleted: %s", name)
+		jsonResponse(w, map[string]string{"status": "deleted"})
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -4221,10 +3732,10 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 
 		nodeCount := 0
 		s.mu.RLock()
-		conf := s.conf
+		rt := s.runtime
 		s.mu.RUnlock()
-		if conf != nil {
-			for _, sub := range conf.Subscriptions {
+		if rt != nil {
+			for _, sub := range rt.Subscriptions {
 				if sub.Name == name {
 					sub.SubMu.RLock()
 					nodeCount = len(sub.SubProxies)
@@ -4251,14 +3762,14 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		s.mu.RLock()
-		conf := s.conf
+		rt := s.runtime
 		s.mu.RUnlock()
-		if conf == nil {
+		if rt == nil {
 			httpError(w, "config not ready", http.StatusServiceUnavailable)
 			return
 		}
 		var sub *config.Subscription
-		for _, ss := range conf.Subscriptions {
+		for _, ss := range rt.Subscriptions {
 			if ss.Name == name {
 				sub = ss
 				break
@@ -4279,7 +3790,8 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 		// Collect the latest health info from any runtime group that references
 		// this subscription so the unified node viewer can show initial status.
 		healthByNode := make(map[string]config.HealthInfo)
-		for _, g := range conf.ProxyGroups {
+		groups, _ := db.ListProxyGroups()
+		for _, g := range groups {
 			if g.Subscription != name {
 				continue
 			}
@@ -4346,7 +3858,6 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Request) {
-	dc := s.displayConf()
 	path := strings.TrimPrefix(r.URL.Path, "/api/subscriptions/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 1 || parts[0] == "" {
@@ -4364,65 +3875,57 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, sub := range dc.Subscriptions {
-		if sub.Name != name {
-			continue
-		}
-		sub.Enabled = &body.Enabled
-		if err := dc.Init(); err != nil {
-			httpError(w, "config invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.saveConfigLocked(); err != nil {
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.mergeAndInitLocked(); err != nil {
-			util.LogModuleWarn("admin", "merge after subscription toggle failed: %v", err)
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
-			}
-		}
-		util.DefaultVersionNotifier.BumpVersion("subscriptions")
-		interval := 0
-		if sub.Interval != nil {
-			interval = *sub.Interval
-		}
-		jsonResponse(w, map[string]interface{}{
-			"name":      sub.Name,
-			"enabled":   sub.IsEnabled(),
-			"url":       sub.URL,
-			"interval":  interval,
-			"nodeCount": len(sub.SubProxies),
-		})
+	sub, err := db.GetSubscription(name)
+	if err != nil || sub == nil {
+		httpError(w, "subscription not found", http.StatusNotFound)
 		return
 	}
-	httpError(w, "subscription not found", http.StatusNotFound)
+	sub.Enabled = &body.Enabled
+	if err := db.PutSubscription(sub); err != nil {
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after subscription toggle failed: %v", err)
+	}
+	if s.OnIncrementalUpdate != nil {
+		if err := s.OnIncrementalUpdate(); err != nil {
+			util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
+		}
+	}
+	util.DefaultVersionNotifier.BumpVersion("subscriptions")
+	interval := 0
+	if sub.Interval != nil {
+		interval = *sub.Interval
+	}
+	jsonResponse(w, map[string]interface{}{
+		"name":      sub.Name,
+		"enabled":   sub.IsEnabled(),
+		"url":       sub.URL,
+		"interval":  interval,
+		"nodeCount": len(sub.SubProxies),
+	})
 }
 
 func (s *AdminServer) apiHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	conf := s.conf
+	runtimeConf := s.runtime
 	s.mu.RUnlock()
 
-	s.stats.CollectFromConfig(conf)
+	s.stats.CollectFromConfig(runtimeConf)
 	snapshot := s.stats.GetSnapshot()
 	jsonResponse(w, snapshot["healthData"])
 }
 
 // reverseConfigHelpers (used by apiReverse and apiReverseItem)
 
-// currentReverseConfigs returns the active reverse config list from the runtime config.
+// currentReverseConfigs returns the active reverse config list from the database.
 func (s *AdminServer) currentReverseConfigs() []*config.ReverseConfig {
-	s.mu.RLock()
-	conf := s.conf
-	s.mu.RUnlock()
-	if conf != nil && len(conf.ReverseConfigs) > 0 {
-		return conf.ReverseConfigs
+	configs, err := db.ListReverseConfigs()
+	if err != nil {
+		return []*config.ReverseConfig{}
 	}
-	return []*config.ReverseConfig{}
+	return configs
 }
 
 func cleanReverseName(n string) string {
@@ -4527,16 +4030,10 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		rc.Name = uniqueReverseName(rc.Name, configs)
 
 		s.mu.Lock()
-		if s.conf == nil {
-			s.conf = &config.RuleConfiguration{}
-		}
-
-		// Assign a seq number if not provided, so it's persisted to the config file.
-		// Find the first available gap to reuse seq numbers from deleted configs.
-		// Must be inside the lock to prevent race conditions.
+		// Assign a seq number if not provided.
 		if rc.Seq <= 0 {
 			used := make(map[int]bool)
-			for _, existing := range s.conf.ReverseConfigs {
+			for _, existing := range configs {
 				if existing.Seq > 0 {
 					used[existing.Seq] = true
 				}
@@ -4551,13 +4048,16 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 		// Ensure instance ReverseID exists in file
 		dataDir := filepath.Join("data", "setup")
 		_, _ = reverse.GetReverseID(dataDir)
-		s.conf.ReverseConfigs = append(s.conf.ReverseConfigs, &rc)
-		s.mu.Unlock()
 
-		if err := s.saveConfig(); err != nil {
+		if err := db.PutReverseConfig(&rc); err != nil {
+			s.mu.Unlock()
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after reverse config create failed: %v", err)
+		}
+		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(nil, &rc); err != nil {
@@ -4615,36 +4115,26 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		if s.conf == nil {
-			s.conf = &config.RuleConfiguration{}
-		}
-		var oldRc *config.ReverseConfig
-		var updatedRc *config.ReverseConfig
-		var found bool
-		for i, existing := range s.conf.ReverseConfigs {
-			if existing != nil && existing.Name == name {
-				oldCopy := *existing
-				oldRc = &oldCopy
-				s.conf.ReverseConfigs[i] = &rc
-				updatedRc = s.conf.ReverseConfigs[i]
-				found = true
-				break
-			}
-		}
-		s.mu.Unlock()
-
-		if !found {
+		oldRc, err := db.GetReverseConfig(name)
+		if err != nil || oldRc == nil {
+			s.mu.Unlock()
 			httpError(w, "reverse config not found", http.StatusNotFound)
 			return
 		}
+		oldCopy := *oldRc
 
-		if err := s.saveConfig(); err != nil {
+		if err := db.PutReverseConfig(&rc); err != nil {
+			s.mu.Unlock()
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after reverse config update failed: %v", err)
+		}
+		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
-			if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
+			if err := s.OnReverseConfigUpdate(&oldCopy, &rc); err != nil {
 				util.LogModuleWarn("admin", "reverse config update callback failed: %v", err)
 			}
 		}
@@ -4656,37 +4146,26 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		}
 		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogModuleInfo("admin", "reverse config updated: %s", rc.Name)
-		jsonResponse(w, found)
+		jsonResponse(w, true)
 
 	case http.MethodDelete:
 		s.mu.Lock()
-		var removedConfig *config.ReverseConfig
-		var filtered []*config.ReverseConfig
-		var removed bool
-		if s.conf != nil {
-			for _, existing := range s.conf.ReverseConfigs {
-				if existing != nil && existing.Name == name {
-					removed = true
-					removedConfig = existing
-					continue
-				}
-				filtered = append(filtered, existing)
-			}
-			if removed {
-				s.conf.ReverseConfigs = filtered
-			}
-		}
-		s.mu.Unlock()
-
-		if !removed {
+		removedConfig, err := db.GetReverseConfig(name)
+		if err != nil || removedConfig == nil {
+			s.mu.Unlock()
 			httpError(w, "reverse config not found", http.StatusNotFound)
 			return
 		}
 
-		if err := s.saveConfig(); err != nil {
+		if err := db.DeleteReverseConfig(name); err != nil {
+			s.mu.Unlock()
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after reverse config delete failed: %v", err)
+		}
+		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(removedConfig, nil); err != nil {
@@ -4722,36 +4201,27 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 	}
 
 	s.mu.Lock()
-	if s.conf == nil {
-		s.conf = &config.RuleConfiguration{}
-	}
-	var oldRc *config.ReverseConfig
-	var updatedRc *config.ReverseConfig
-	var found bool
-	for _, existing := range s.conf.ReverseConfigs {
-		if existing != nil && existing.Name == name {
-			oldCopy := *existing
-			oldRc = &oldCopy
-			existing.Enabled = req.Enabled
-			updatedRc = existing
-			found = true
-			break
-		}
-	}
-	s.mu.Unlock()
-
-	if !found {
+	existing, err := db.GetReverseConfig(name)
+	if err != nil || existing == nil {
+		s.mu.Unlock()
 		httpError(w, "reverse config not found", http.StatusNotFound)
 		return
 	}
+	oldCopy := *existing
+	existing.Enabled = req.Enabled
 
-	if err := s.saveConfig(); err != nil {
+	if err := db.PutReverseConfig(existing); err != nil {
+		s.mu.Unlock()
 		httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after reverse config toggle failed: %v", err)
+	}
+	s.mu.Unlock()
 
 	if s.OnReverseConfigUpdate != nil {
-		if err := s.OnReverseConfigUpdate(oldRc, updatedRc); err != nil {
+		if err := s.OnReverseConfigUpdate(&oldCopy, existing); err != nil {
 			util.LogModuleWarn("admin", "reverse config toggle callback failed: %v", err)
 		}
 	}
@@ -4763,7 +4233,7 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 	}
 	util.DefaultVersionNotifier.BumpVersion("reverse")
 	util.LogModuleInfo("admin", "reverse config %s toggled: enabled=%v", name, req.Enabled)
-	jsonResponse(w, found)
+	jsonResponse(w, true)
 }
 
 func (s *AdminServer) apiReverseBindings(w http.ResponseWriter, r *http.Request) {
@@ -4890,11 +4360,12 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 	mesh.GlobalMeshManager.UpdateConfig(req.DomainSuffixes, req.Advertise)
 
 	s.mu.Lock()
-	if s.conf.Mesh != nil {
-		s.conf.Mesh.DomainSuffixes = req.DomainSuffixes
-		s.conf.Mesh.Advertise = req.Advertise
+	meshCfg, _ := db.GetMeshConfig()
+	if meshCfg != nil {
+		meshCfg.DomainSuffixes = req.DomainSuffixes
+		meshCfg.Advertise = req.Advertise
 	}
-	if err := s.saveConfigLocked(); err != nil {
+	if err := db.PutMeshConfig(meshCfg); err != nil {
 		s.mu.Unlock()
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -4937,12 +4408,11 @@ func (s *AdminServer) apiMeshTopologyGet(w http.ResponseWriter, r *http.Request)
 func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
 		suffixes := []string{}
-		if s.conf.Mesh != nil && s.conf.Mesh.DomainSuffixes != nil {
-			suffixes = s.conf.Mesh.DomainSuffixes
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg != nil && meshCfg.DomainSuffixes != nil {
+			suffixes = meshCfg.DomainSuffixes
 		}
-		s.mu.RUnlock()
 		jsonResponse(w, suffixes)
 
 	case http.MethodPost:
@@ -4959,15 +4429,16 @@ func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Reque
 		}
 
 		s.mu.Lock()
-		if s.conf.Mesh != nil {
-			s.conf.Mesh.DomainSuffixes = append(s.conf.Mesh.DomainSuffixes, req.Suffix)
-			if err := s.saveConfigLocked(); err != nil {
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg != nil {
+			meshCfg.DomainSuffixes = append(meshCfg.DomainSuffixes, req.Suffix)
+			if err := db.PutMeshConfig(meshCfg); err != nil {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 			if mesh.GlobalMeshManager != nil {
-				mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+				mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 			}
 		}
 		s.mu.Unlock()
@@ -5005,19 +4476,20 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		}
 
 		s.mu.Lock()
-		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.DomainSuffixes) {
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil || index < 0 || index >= len(meshCfg.DomainSuffixes) {
 			s.mu.Unlock()
 			httpError(w, "index out of range", http.StatusBadRequest)
 			return
 		}
-		s.conf.Mesh.DomainSuffixes[index] = req.Suffix
-		if err := s.saveConfigLocked(); err != nil {
+		meshCfg.DomainSuffixes[index] = req.Suffix
+		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if mesh.GlobalMeshManager != nil {
-			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 		}
 		s.mu.Unlock()
 
@@ -5027,19 +4499,20 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 
 	case http.MethodDelete:
 		s.mu.Lock()
-		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.DomainSuffixes) {
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil || index < 0 || index >= len(meshCfg.DomainSuffixes) {
 			s.mu.Unlock()
 			httpError(w, "index out of range", http.StatusBadRequest)
 			return
 		}
-		s.conf.Mesh.DomainSuffixes = append(s.conf.Mesh.DomainSuffixes[:index], s.conf.Mesh.DomainSuffixes[index+1:]...)
-		if err := s.saveConfigLocked(); err != nil {
+		meshCfg.DomainSuffixes = append(meshCfg.DomainSuffixes[:index], meshCfg.DomainSuffixes[index+1:]...)
+		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if mesh.GlobalMeshManager != nil {
-			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 		}
 		s.mu.Unlock()
 
@@ -5056,12 +4529,11 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
 		advertise := []string{}
-		if s.conf.Mesh != nil {
-			advertise = s.conf.Mesh.Advertise
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg != nil {
+			advertise = meshCfg.Advertise
 		}
-		s.mu.RUnlock()
 		jsonResponse(w, advertise)
 
 	case http.MethodPost:
@@ -5078,16 +4550,23 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		if s.conf.Mesh != nil {
-			s.conf.Mesh.Advertise = append(s.conf.Mesh.Advertise, req.CIDR)
-			if err := s.saveConfigLocked(); err != nil {
-				s.mu.Unlock()
-				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if mesh.GlobalMeshManager != nil {
-				mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
-			}
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.Advertise = append(meshCfg.Advertise, req.CIDR)
+		if err := db.PutMeshConfig(meshCfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after mesh advertise add failed: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -5124,19 +4603,23 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 
 		s.mu.Lock()
-		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.Advertise) {
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil || index < 0 || index >= len(meshCfg.Advertise) {
 			s.mu.Unlock()
 			httpError(w, "index out of range", http.StatusBadRequest)
 			return
 		}
-		s.conf.Mesh.Advertise[index] = req.CIDR
-		if err := s.saveConfigLocked(); err != nil {
+		meshCfg.Advertise[index] = req.CIDR
+		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if mesh.GlobalMeshManager != nil {
-			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after mesh advertise update failed: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -5146,19 +4629,23 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 
 	case http.MethodDelete:
 		s.mu.Lock()
-		if s.conf.Mesh == nil || index < 0 || index >= len(s.conf.Mesh.Advertise) {
+		meshCfg, _ := db.GetMeshConfig()
+		if meshCfg == nil || index < 0 || index >= len(meshCfg.Advertise) {
 			s.mu.Unlock()
 			httpError(w, "index out of range", http.StatusBadRequest)
 			return
 		}
-		s.conf.Mesh.Advertise = append(s.conf.Mesh.Advertise[:index], s.conf.Mesh.Advertise[index+1:]...)
-		if err := s.saveConfigLocked(); err != nil {
+		meshCfg.Advertise = append(meshCfg.Advertise[:index], meshCfg.Advertise[index+1:]...)
+		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if mesh.GlobalMeshManager != nil {
-			mesh.GlobalMeshManager.UpdateConfig(s.conf.Mesh.DomainSuffixes, s.conf.Mesh.Advertise)
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
+		}
+		if err := s.reloadRuntimeLocked(); err != nil {
+			util.LogModuleWarn("admin", "reload after mesh advertise delete failed: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -5191,16 +4678,16 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			// Fallback: derive enabled from the config being edited
-			dc := s.displayConf()
-			if dc.TUN != nil {
-				if dc.TUN.Enabled != nil {
-					status["enabled"] = *dc.TUN.Enabled
+			// Fallback: derive from DB config
+			tunCfg, _ := db.GetTUNConfig()
+			if tunCfg != nil {
+				if tunCfg.Enabled != nil {
+					status["enabled"] = *tunCfg.Enabled
 				}
-				status["bypassGateway"] = dc.TUN.IsBypassGateway()
-				status["dhcpEnabled"] = dc.TUN.IsDHCPEnabled()
-				if dc.TUN.DHCP != nil {
-					status["dhcpStaticBindings"] = dc.TUN.DHCP.StaticBindings
+				status["bypassGateway"] = tunCfg.IsBypassGateway()
+				status["dhcpEnabled"] = tunCfg.IsDHCPEnabled()
+				if tunCfg.DHCP != nil {
+					status["dhcpStaticBindings"] = tunCfg.DHCP.StaticBindings
 				}
 			}
 		}
@@ -5218,8 +4705,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		dc := s.displayConf()
-
 		// TUN enabled toggle — requires callback to start/stop the engine.
 		if req.Enabled != nil {
 			if s.OnTUNToggle == nil {
@@ -5231,20 +4716,18 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Lock()
-			if dc.TUN == nil {
-				dc.TUN = &config.TUNConfig{}
+			tunCfg, _ := db.GetTUNConfig()
+			if tunCfg == nil {
+				tunCfg = &config.TUNConfig{}
 			}
-			dc.TUN.Enabled = req.Enabled
-			if s.conf != nil {
-				if s.conf.TUN == nil {
-					s.conf.TUN = &config.TUNConfig{}
-				}
-				s.conf.TUN.Enabled = req.Enabled
-			}
-			if err := s.saveConfigLocked(); err != nil {
+			tunCfg.Enabled = req.Enabled
+			if err := db.PutTUNConfig(tunCfg); err != nil {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if err := s.reloadRuntimeLocked(); err != nil {
+				util.LogModuleWarn("admin", "reload after TUN toggle failed: %v", err)
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN toggle enabled=%v", *req.Enabled)
@@ -5254,20 +4737,18 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 		// Bypass gateway toggle — config-only, takes effect on next TUN start.
 		if req.BypassGateway != nil {
 			s.mu.Lock()
-			if dc.TUN == nil {
-				dc.TUN = &config.TUNConfig{}
+			tunCfg, _ := db.GetTUNConfig()
+			if tunCfg == nil {
+				tunCfg = &config.TUNConfig{}
 			}
-			dc.TUN.BypassGateway = req.BypassGateway
-			if s.conf != nil {
-				if s.conf.TUN == nil {
-					s.conf.TUN = &config.TUNConfig{}
-				}
-				s.conf.TUN.BypassGateway = req.BypassGateway
-			}
-			if err := s.saveConfigLocked(); err != nil {
+			tunCfg.BypassGateway = req.BypassGateway
+			if err := db.PutTUNConfig(tunCfg); err != nil {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if err := s.reloadRuntimeLocked(); err != nil {
+				util.LogModuleWarn("admin", "reload after TUN bypass-gateway failed: %v", err)
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN bypass-gateway=%v", *req.BypassGateway)
@@ -5277,26 +4758,21 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 		// DHCP toggle — config-only, takes effect on next TUN start.
 		if req.DHCPEnabled != nil {
 			s.mu.Lock()
-			if dc.TUN == nil {
-				dc.TUN = &config.TUNConfig{}
+			tunCfg, _ := db.GetTUNConfig()
+			if tunCfg == nil {
+				tunCfg = &config.TUNConfig{}
 			}
-			if dc.TUN.DHCP == nil {
-				dc.TUN.DHCP = &config.DHCPConfig{}
+			if tunCfg.DHCP == nil {
+				tunCfg.DHCP = &config.DHCPConfig{}
 			}
-			dc.TUN.DHCP.Enabled = req.DHCPEnabled
-			if s.conf != nil {
-				if s.conf.TUN == nil {
-					s.conf.TUN = &config.TUNConfig{}
-				}
-				if s.conf.TUN.DHCP == nil {
-					s.conf.TUN.DHCP = &config.DHCPConfig{}
-				}
-				s.conf.TUN.DHCP.Enabled = req.DHCPEnabled
-			}
-			if err := s.saveConfigLocked(); err != nil {
+			tunCfg.DHCP.Enabled = req.DHCPEnabled
+			if err := db.PutTUNConfig(tunCfg); err != nil {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if err := s.reloadRuntimeLocked(); err != nil {
+				util.LogModuleWarn("admin", "reload after TUN dhcp-enabled failed: %v", err)
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN dhcp-enabled=%v", *req.DHCPEnabled)
@@ -5326,26 +4802,21 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.mu.Lock()
-			if dc.TUN == nil {
-				dc.TUN = &config.TUNConfig{}
+			tunCfg, _ := db.GetTUNConfig()
+			if tunCfg == nil {
+				tunCfg = &config.TUNConfig{}
 			}
-			if dc.TUN.DHCP == nil {
-				dc.TUN.DHCP = &config.DHCPConfig{}
+			if tunCfg.DHCP == nil {
+				tunCfg.DHCP = &config.DHCPConfig{}
 			}
-			dc.TUN.DHCP.StaticBindings = req.DHCPStaticBindings
-			if s.conf != nil {
-				if s.conf.TUN == nil {
-					s.conf.TUN = &config.TUNConfig{}
-				}
-				if s.conf.TUN.DHCP == nil {
-					s.conf.TUN.DHCP = &config.DHCPConfig{}
-				}
-				s.conf.TUN.DHCP.StaticBindings = req.DHCPStaticBindings
-			}
-			if err := s.saveConfigLocked(); err != nil {
+			tunCfg.DHCP.StaticBindings = req.DHCPStaticBindings
+			if err := db.PutTUNConfig(tunCfg); err != nil {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if err := s.reloadRuntimeLocked(); err != nil {
+				util.LogModuleWarn("admin", "reload after DHCP static-bindings failed: %v", err)
 			}
 			s.mu.Unlock()
 			if s.OnDHCPStaticBindingsUpdate != nil {
@@ -5506,22 +4977,22 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 	if req.Password != "" {
 		s.config.Password = req.Password
 	}
-	// Sync to the runtime config so saveConfig() persists admin settings
-	if s.conf != nil {
-		if s.conf.Admin == nil {
-			s.conf.Admin = &config.AdminConfig{}
-		}
-		s.conf.Admin.AuthEnabled = s.config.AuthEnabled
-		s.conf.Admin.Username = s.config.Username
-		s.conf.Admin.Password = s.config.Password
-	}
 	s.mu.Unlock()
 
-	// Save to config file
-	if err := s.saveConfig(); err != nil {
+	// Save to database
+	if err := db.PutAdminConfig(s.config); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	s.mu.Lock()
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after admin auth update failed: %v", err)
+	}
+	s.mu.Unlock()
+
+	util.LogModuleInfo("admin", "config persisted to database")
+	util.DefaultVersionNotifier.BumpVersion("config")
 
 	// If enabling auth and credentials were just set, create session immediately
 	if req.AuthEnabled && req.Username != "" && req.Password != "" {
@@ -5564,15 +5035,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 		s.config.Username = req.Username
 		s.config.Password = req.Password
 	}
-	// Sync to runtime config so saveConfig() persists admin settings
-	if s.conf != nil {
-		if s.conf.Admin == nil {
-			s.conf.Admin = &config.AdminConfig{}
-		}
-		s.conf.Admin.AuthEnabled = s.config.AuthEnabled
-		s.conf.Admin.Username = s.config.Username
-		s.conf.Admin.Password = s.config.Password
-	}
 	s.mu.Unlock()
 
 	// Save reverse configs to runtime config (setup wizard always replaces the list)
@@ -5600,23 +5062,38 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			newNames[candidate] = true
 		}
 
-		// Update runtime and ensure instance ReverseID exists.
-		s.mu.Lock()
-		if s.conf == nil {
-			s.conf = &config.RuleConfiguration{}
-		}
-		// Ensure instance ReverseID exists in file
+		// Ensure instance ReverseID exists
 		dataDir := filepath.Join("data", "setup")
 		_, _ = reverse.GetReverseID(dataDir)
-		s.conf.ReverseConfigs = req.ReverseConfigs
-		s.mu.Unlock()
 	}
 
-	// Save config
-	if err := s.saveConfig(); err != nil {
+	// Save admin config to database
+	if err := db.PutAdminConfig(s.config); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Save reverse configs to database
+	if len(req.ReverseConfigs) > 0 {
+		for _, rc := range req.ReverseConfigs {
+			if rc == nil {
+				continue
+			}
+			if err := db.PutReverseConfig(rc); err != nil {
+				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	s.mu.Lock()
+	if err := s.reloadRuntimeLocked(); err != nil {
+		util.LogModuleWarn("admin", "reload after setup failed: %v", err)
+	}
+	s.mu.Unlock()
+
+	util.LogModuleInfo("admin", "config persisted to database")
+	util.DefaultVersionNotifier.BumpVersion("config")
 
 	// Create session if auth enabled
 	if req.AuthEnabled && req.Username != "" {
@@ -5715,35 +5192,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		util.LogModuleError("admin", "template error (%s): %v", pageName, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
-}
-
-// saveConfig persists the current configuration to the embedded database.
-// It acquires its own read lock and is safe to call from handlers
-// that do not already hold the lock.
-func (s *AdminServer) saveConfig() error {
-	s.mu.RLock()
-	conf := s.conf
-	s.mu.RUnlock()
-
-	if err := db.SyncConfigToDB(conf); err != nil {
-		return err
-	}
-	util.LogModuleInfo("admin", "config persisted to database")
-	util.DefaultVersionNotifier.BumpVersion("config")
-	return nil
-}
-
-// saveConfigLocked persists s.conf to the embedded database (single source
-// of truth). The runtime config was already updated in place by the handler,
-// so the same object is written to DB under the caller's write lock.
-// Caller must hold s.mu (write lock).
-func (s *AdminServer) saveConfigLocked() error {
-	if err := db.SyncConfigToDB(s.conf); err != nil {
-		return err
-	}
-	util.LogModuleInfo("admin", "config persisted to database")
-	util.DefaultVersionNotifier.BumpVersion("config")
-	return nil
 }
 
 func sanitizeConfig(conf *config.RuleConfiguration) map[string]interface{} {
@@ -5877,18 +5325,56 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// UpdateConfig allows external callers (e.g., main.go reload) to update the config reference.
+// reloadRuntimeLocked reloads the runtime config from the database,
+// preserving live state (health info, subscription node pools) from the
+// previous runtime. Caller must hold s.mu (write lock).
+func (s *AdminServer) reloadRuntimeLocked() error {
+	conf, err := db.LoadRuleConf()
+	if err != nil {
+		return err
+	}
+	if s.runtime != nil {
+		// Preserve health state
+		oldHealthByGroup := make(map[string]*config.ProxyGroup)
+		for _, g := range s.runtime.ProxyGroups {
+			oldHealthByGroup[g.Name] = g
+		}
+		for _, g := range conf.ProxyGroups {
+			if old, ok := oldHealthByGroup[g.Name]; ok {
+				g.CopyHealthFrom(old)
+			}
+		}
+		// Preserve subscription node pools
+		oldSubsByName := make(map[string]*config.Subscription)
+		for _, sub := range s.runtime.Subscriptions {
+			oldSubsByName[sub.Name] = sub
+		}
+		for _, sub := range conf.Subscriptions {
+			if old, ok := oldSubsByName[sub.Name]; ok {
+				sub.SubMu.Lock()
+				old.SubMu.RLock()
+				sub.SubProxies = old.SubProxies
+				old.SubMu.RUnlock()
+				sub.SubMu.Unlock()
+			}
+		}
+	}
+	s.runtime = conf
+	return nil
+}
+
+// UpdateConfig allows external callers (e.g., main.go reload) to update the runtime config reference.
 func (s *AdminServer) UpdateConfig(conf *config.RuleConfiguration) {
 	s.mu.Lock()
-	s.conf = conf
+	s.runtime = conf
 	s.mu.Unlock()
 }
 
-// GetConfig returns current config reference (for read-only access).
+// GetConfig returns current runtime config reference (for read-only access by main.go callbacks).
 func (s *AdminServer) GetConfig() *config.RuleConfiguration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.conf
+	return s.runtime
 }
 
 // generateSelfSignedCert generates a self-signed TLS certificate and key.

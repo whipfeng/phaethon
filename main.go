@@ -529,7 +529,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			res.adminServer = prevAdmin
 		} else {
 			util.LogModuleInfo("system", "Creating new admin server")
-			res.adminServer = admin.NewAdminServer(ruleConf, ruleConf.Admin, defaultConfig)
+			res.adminServer = admin.NewAdminServer(ruleConf.Admin, defaultConfig)
 			util.LogModuleInfo("system", "Calling admin server Start()")
 			if err := res.adminServer.Start(); err != nil {
 				return nil, fmt.Errorf("admin server start fail: %w", err)

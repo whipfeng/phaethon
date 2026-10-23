@@ -18,7 +18,7 @@ var (
 	keyTCPPortRange = []byte("tcp-port-range")
 )
 
-// KeyRebuilt 是 ImportRuleConf 提交后发出的合成事件 key，
+// KeyRebuilt 是 ReplaceAllConfig 提交后发出的合成事件 key，
 // 重建 watcher 收到即全量 LoadRuleConf。
 const KeyRebuilt = "__rebuilt__"
 
@@ -308,34 +308,189 @@ func ListReverseConfigs() ([]*config.ReverseConfig, error) {
 
 // ===== 规则 =====
 
-// ruleKey 将规则索引编码为零填充 key，保证 bucket 遍历即规则顺序。
-func ruleKey(index int) []byte {
-	return []byte(fmt.Sprintf("%06d", index))
+// rulesKey 是存储所有规则的单一 key（JSON 数组格式）
+var rulesKey = []byte("__all_rules__")
+
+// PutRules 替换整个规则列表（原子操作）
+func PutRules(rules []string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
 }
 
+// ListRules 返回所有规则
+func ListRules() ([]string, error) {
+	var rules []string
+	err := View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return nil
+		}
+		data := b.Get(rulesKey)
+		if data == nil {
+			// 兼容旧格式：尝试读取索引式规则
+			var legacyRules []string
+			_ = b.ForEach(func(k, v []byte) error {
+				if string(k) == string(rulesKey) {
+					return nil
+				}
+				var r string
+				if err := json.Unmarshal(v, &r); err == nil {
+					legacyRules = append(legacyRules, r)
+				}
+				return nil
+			})
+			if len(legacyRules) > 0 {
+				rules = legacyRules
+				return nil
+			}
+			return nil
+		}
+		return json.Unmarshal(data, &rules)
+	})
+	return rules, err
+}
+
+// InsertRule 在指定位置插入规则
+func InsertRule(index int, rule string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data != nil {
+			if err := json.Unmarshal(data, &rules); err != nil {
+				return err
+			}
+		}
+		
+		if index < 0 || index > len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules = append(rules[:index], append([]string{rule}, rules[index:]...)...)
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// DeleteRuleByIndex 删除指定位置的规则
+func DeleteRuleByIndex(index int) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data == nil {
+			return fmt.Errorf("no rules found")
+		}
+		if err := json.Unmarshal(data, &rules); err != nil {
+			return err
+		}
+		
+		if index < 0 || index >= len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules = append(rules[:index], rules[index+1:]...)
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// PutRule 在指定位置设置规则（用于更新单个规则）
 func PutRule(index int, rule string) error {
-	return Put(BucketRules, ruleKey(index), rule)
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data != nil {
+			if err := json.Unmarshal(data, &rules); err != nil {
+				return err
+			}
+		}
+		
+		if index < 0 || index >= len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules[index] = rule
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
 }
 
+// DeleteRule 删除指定位置的规则（DeleteRuleByIndex 的别名）
 func DeleteRule(index int) error {
-	return Delete(BucketRules, ruleKey(index))
+	return DeleteRuleByIndex(index)
 }
 
+// listRulesTx 在事务内读取所有规则（供 LoadRuleConf 使用）
 func listRulesTx(tx *bolt.Tx) ([]string, error) {
 	b := tx.Bucket(BucketRules)
 	if b == nil {
-		return nil, fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		return nil, nil
 	}
-	rules := []string{}
-	err := b.ForEach(func(k, v []byte) error {
-		var r string
-		if err := json.Unmarshal(v, &r); err != nil {
-			return fmt.Errorf("解析规则 %s 失败: %w", k, err)
-		}
-		rules = append(rules, r)
-		return nil
-	})
-	return rules, err
+	data := b.Get(rulesKey)
+	if data == nil {
+		// 兼容旧格式
+		var rules []string
+		_ = b.ForEach(func(k, v []byte) error {
+			if string(k) == string(rulesKey) {
+				return nil
+			}
+			var r string
+			if err := json.Unmarshal(v, &r); err == nil {
+				rules = append(rules, r)
+			}
+			return nil
+		})
+		return rules, nil
+	}
+	var rules []string
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }
 
 // readScalarInto 读取标量配置节。key 不存在返回 (false, nil) 且不改 dest。
@@ -425,177 +580,6 @@ func LoadRuleConf() (*config.RuleConfiguration, error) {
 	return conf, nil
 }
 
-// SyncConfigToDB 将内存中的配置精确同步到数据库：单个写事务内对每个 bucket 做 key 级
-// 精确对比（删除 conf 中不存在的旧 key，写入/更新 conf 中存在的 key），不触碰 fakeip/packages。
-// 提交成功后触发一次合成变更事件（config/__rebuilt__），供重建 watcher 全量重建快照。
-//
-// 与旧 ImportRuleConf 的区别：
-// 1. 不再"先 DeleteBucket 再 CreateBucket"，而是逐个 key 精确对比，避免事务中途失败导致数据丢失
-// 2. 语义从"从配置文件导入"改为"同步内存配置到数据库"
-// 3. 安全检查：如果 conf 为 nil 或所有列表项均为空，拒绝执行，防止意外清空数据库
-func SyncConfigToDB(conf *config.RuleConfiguration) error {
-	// 验证配置完整性，防止意外清空数据库
-	if conf == nil {
-		return fmt.Errorf("拒绝同步空配置：conf 为 nil")
-	}
-	
-	// 检查是否所有列表都为空（可能是未初始化的配置）
-	allListsEmpty := len(conf.Proxies) == 0 &&
-		len(conf.ProxyGroups) == 0 &&
-		len(conf.Subscriptions) == 0 &&
-		len(conf.Rules) == 0 &&
-		len(conf.Mappings) == 0 &&
-		len(conf.Resolvers) == 0 &&
-		len(conf.ReverseConfigs) == 0
-	
-	if allListsEmpty {
-		return fmt.Errorf("拒绝同步空配置：所有列表项（Proxies/Rules/Mappings 等）均为空，可能是未初始化的配置")
-	}
-	
-	err := Update(func(tx *bolt.Tx) error {
-		cb := tx.Bucket(BucketConfig)
-		pb := tx.Bucket(BucketProxies)
-		gb := tx.Bucket(BucketProxyGroups)
-		sb := tx.Bucket(BucketSubscriptions)
-		rb := tx.Bucket(BucketRules)
-		mb := tx.Bucket(BucketMappings)
-		resb := tx.Bucket(BucketResolvers)
-		rvb := tx.Bucket(BucketReverseConfs)
-
-		// 同步列表类型：对比现有 keys 和 conf 中的 keys，删除多余的，写入新增的
-		if err := syncNamedList(pb, conf.Proxies, func(p *config.Proxy) (string, interface{}) {
-			return p.Name, p
-		}); err != nil {
-			return fmt.Errorf("同步 proxies 失败: %w", err)
-		}
-		if err := syncNamedList(gb, conf.ProxyGroups, func(g *config.ProxyGroup) (string, interface{}) {
-			return g.Name, storeGroup(g)
-		}); err != nil {
-			return fmt.Errorf("同步 proxy_groups 失败: %w", err)
-		}
-		if err := syncNamedList(sb, conf.Subscriptions, func(s *config.Subscription) (string, interface{}) {
-			return s.Name, s
-		}); err != nil {
-			return fmt.Errorf("同步 subscriptions 失败: %w", err)
-		}
-		if err := syncNamedList(mb, conf.Mappings, func(m *config.Mapping) (string, interface{}) {
-			return m.Name, m
-		}); err != nil {
-			return fmt.Errorf("同步 mappings 失败: %w", err)
-		}
-		if err := syncNamedList(resb, conf.Resolvers, func(r *config.Resolver) (string, interface{}) {
-			return r.Name, r
-		}); err != nil {
-			return fmt.Errorf("同步 resolvers 失败: %w", err)
-		}
-		if err := syncNamedList(rvb, conf.ReverseConfigs, func(rc *config.ReverseConfig) (string, interface{}) {
-			return rc.Name, storeReverse(rc)
-		}); err != nil {
-			return fmt.Errorf("同步 reverse_configs 失败: %w", err)
-		}
-		
-		// Rules 特殊处理：用索引作为 key
-		if err := syncRules(rb, conf.Rules); err != nil {
-			return fmt.Errorf("同步 rules 失败: %w", err)
-		}
-
-		// 同步标量配置：直接覆盖写
-		if conf.Admin != nil {
-			if err := putJSON(cb, keyAdmin, conf.Admin); err != nil {
-				return err
-			}
-		}
-		if conf.TUN != nil {
-			if err := putJSON(cb, keyTUN, conf.TUN); err != nil {
-				return err
-			}
-		}
-		if conf.Mesh != nil {
-			if err := putJSON(cb, keyMesh, conf.Mesh); err != nil {
-				return err
-			}
-		}
-		if err := putJSON(cb, keyInteractive, conf.Interactive); err != nil {
-			return err
-		}
-		if conf.UDPPortRange != "" {
-			if err := putJSON(cb, keyUDPPortRange, conf.UDPPortRange); err != nil {
-				return err
-			}
-		} else {
-			// 如果为空，删除旧 key
-			_ = cb.Delete(keyUDPPortRange)
-		}
-		if conf.TCPPortRange != "" {
-			if err := putJSON(cb, keyTCPPortRange, conf.TCPPortRange); err != nil {
-				return err
-			}
-		} else {
-			// 如果为空，删除旧 key
-			_ = cb.Delete(keyTCPPortRange)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	notifyChanges([]ChangeEvent{{
-		Bucket: string(BucketConfig), Key: KeyRebuilt, Op: OpPut,
-	}})
-	return nil
-}
-
-// syncNamedList 同步命名列表到 bucket：删除 conf 中不存在的旧 key，写入新增/修改的 key。
-// keyFunc 从项中提取 name 和可序列化的值。
-func syncNamedList[T any](b *bolt.Bucket, items []*T, keyFunc func(*T) (string, interface{})) error {
-	// 收集 conf 中应该存在的 keys
-	newKeys := make(map[string]bool)
-	for _, item := range items {
-		if item == nil {
-			continue
-		}
-		name, value := keyFunc(item)
-		newKeys[name] = true
-		if err := putJSON(b, []byte(name), value); err != nil {
-			return err
-		}
-	}
-	
-	// 删除 bucket 中存在但 conf 中不存在的旧 keys
-	return b.ForEach(func(k, v []byte) error {
-		key := string(k)
-		if !newKeys[key] {
-			return b.Delete(k)
-		}
-		return nil
-	})
-}
-
-// syncRules 同步规则列表到 bucket：用索引作为 key，删除多余的旧规则。
-func syncRules(b *bolt.Bucket, rules []string) error {
-	// 写入新规则
-	for i, r := range rules {
-		if err := putJSON(b, ruleKey(i), r); err != nil {
-			return err
-		}
-	}
-	
-	// 删除多余的旧规则（索引 >= len(rules) 的）
-	newLen := len(rules)
-	return b.ForEach(func(k, v []byte) error {
-		// 解析索引
-		var idx int
-		if _, err := fmt.Sscanf(string(k), "%d", &idx); err != nil {
-			return nil // 忽略无法解析的 key
-		}
-		if idx >= newLen {
-			return b.Delete(k)
-		}
-		return nil
-	})
-}
-
 // MigrateProxyGroups updates existing proxy groups with proxies from the config.
 // This fixes the issue where old migrations only stored ManualProxies but not Proxies.
 func MigrateProxyGroups(conf *config.RuleConfiguration) error {
@@ -631,7 +615,7 @@ func MigrateProxyGroups(conf *config.RuleConfiguration) error {
 	})
 }
 
-// ResetConfigPreserving has been removed. Use SyncConfigToDB with preserved values instead.
+// ResetConfigPreserving has been removed. Use ReplaceAllConfig with preserved values instead.
 // See admin/admin.go config reset handler for example usage.
 
 // IsEmptyConfig 报告配置 bucket 是否全部为空。数据库文件存在但从未写入

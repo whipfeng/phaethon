@@ -149,7 +149,7 @@ func View(fn func(tx *bolt.Tx) error) error {
 }
 
 // Update 在写事务中执行 fn。与 Put/Delete 不同，它不自动触发变更事件；
-// 批量写入方应在提交成功后自行通知（见 configstore.ImportRuleConf）。
+// 批量写入方应在提交成功后自行通知（见 configstore.ReplaceAllConfig）。
 func Update(fn func(tx *bolt.Tx) error) error {
 	return globalDB.Update(fn)
 }

@@ -1039,6 +1039,15 @@ type TimeRange struct {
 	EndMin   int
 }
 
+// Rule 是结构化的规则对象
+type Rule struct {
+	Type        string     // DOMAIN, DOMAIN-SUFFIX, IP-CIDR, MATCH 等
+	Pattern     string     // 匹配模式
+	ProxyName   string     // 目标代理名称
+	MappingName string     // 可选映射名称
+	TimeRange   *TimeRange // 可选时间范围
+}
+
 func (tr TimeRange) Matches(nowMin int) bool {
 	if tr.StartMin == 0 && tr.EndMin == 0 {
 		return true

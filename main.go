@@ -229,15 +229,6 @@ func run(prev *activeResources) (*activeResources, error) {
 	server.GlobalControlManager = server.NewControlManager(dataDir)
 	util.LogModuleInfo("system", "ControlManager initialized")
 
-	// Register rebuild hook: close all control connections after DB-triggered rebuild
-	// so reverse connections reconnect and re-inject dynamic configs into the new RuleMatcher
-	db.RebuildHook = func() {
-		if server.GlobalControlManager != nil {
-			util.LogModuleInfo("system", "rebuild hook: closing all control connections")
-			server.GlobalControlManager.CloseAll()
-		}
-	}
-
 	// Initialize P2P manager
 	p2pCache, err := p2p.NewBinaryCache(dataDir)
 	if err != nil {
@@ -1842,6 +1833,14 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 		Username:              req.ListenerUser,
 		Password:              req.ListenerPassword,
 		Sni:                   req.ListenerSNI,
+	}
+
+	// Inject dynamic mapping into RuleMatcher for architecture consistency
+	if ruleMatcher, err := db.GetMatcher(); err == nil {
+		ruleMatcher.AddMapping(mapping)
+		defer ruleMatcher.RemoveMapping(mapping.Name)
+	} else {
+		util.LogModuleWarn("system", "[REVERSE-CLIENT] failed to get RuleMatcher for mapping injection: %v", err)
 	}
 
 	rvSrv, err := server.StartReverseMapping(mapping)

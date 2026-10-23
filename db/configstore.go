@@ -508,6 +508,17 @@ func listRulesTx(tx *bolt.Tx) ([]string, error) {
 	return rules, nil
 }
 
+// listRules 读取所有规则（供 Watch 使用）
+func listRules() ([]string, error) {
+	var rules []string
+	err := View(func(tx *bolt.Tx) error {
+		var err error
+		rules, err = listRulesTx(tx)
+		return err
+	})
+	return rules, err
+}
+
 // readScalarInto 读取标量配置节。key 不存在返回 (false, nil) 且不改 dest。
 func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error) {
 	data := cb.Get(key)

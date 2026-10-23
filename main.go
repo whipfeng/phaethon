@@ -2551,61 +2551,47 @@ func checkGroupTest(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 	saveHealthState(conf)
 }
 
-type persistedHealthEntry struct {
-	Alive     bool      `json:"alive"`
-	LatencyMs int64     `json:"latencyMs"`
-	LastCheck time.Time `json:"lastCheck"`
-	FailCount int       `json:"failCount"`
-}
-
-func healthStatePath() string {
-	return filepath.Join(dataDir, "state", "health-state.json")
-}
-
-// loadHealthState restores group health from the last saved state so that
+// loadHealthState restores group health from the database so that
 // previously tested latency/alive information survives a process restart.
 func loadHealthState(conf *config.RuleConfiguration) {
-	data, err := os.ReadFile(healthStatePath())
-	if err != nil {
-		if !os.IsNotExist(err) {
-			util.LogModuleWarn("main", "[HEALTH] load state fail: %v", err)
-		}
-		return
-	}
-	var state map[string]map[string]persistedHealthEntry
-	if err := json.Unmarshal(data, &state); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] parse state fail: %v", err)
-		return
-	}
 	loaded := 0
+	groupCount := 0
+	
 	for _, g := range conf.ProxyGroups {
 		if !g.IsEnabled() {
 			continue
 		}
-		groupState, ok := state[g.Name]
-		if !ok {
+		
+		// Load health from database
+		healths, err := db.ListProxyHealthByGroup(g.Name)
+		if err != nil {
+			util.LogModuleWarn("main", "[HEALTH] load from db fail: group=%s err=%v", g.Name, err)
 			continue
 		}
-		for _, m := range g.Members {
-			key := m.HealthKey()
-			if e, ok := groupState[key]; ok {
-				if !e.Alive {
-					continue
-				}
-				g.SetHealth(key, e.Alive, time.Duration(e.LatencyMs)*time.Millisecond)
-				loaded++
+		
+		if len(healths) == 0 {
+			continue
+		}
+		
+		groupCount++
+		for _, h := range healths {
+			if !h.Alive {
+				continue
 			}
+			g.SetHealth(h.ProxyName, h.Alive, time.Duration(h.Latency)*time.Millisecond)
+			loaded++
 		}
 	}
-	util.LogModuleInfo("main", "[HEALTH] loaded %d entries from %d groups", loaded, len(state))
+	
+	util.LogModuleInfo("main", "[HEALTH] loaded %d entries from %d groups (from db)", loaded, groupCount)
 }
 
 // saveHealthState snapshots the current group health to disk.
 func saveHealthState(conf *config.RuleConfiguration) {
+	// Save health state to database instead of file
 	conf.RLock()
 	defer conf.RUnlock()
 
-	state := make(map[string]map[string]persistedHealthEntry)
 	for _, g := range conf.ProxyGroups {
 		if !g.IsEnabled() {
 			continue
@@ -2614,41 +2600,20 @@ func saveHealthState(conf *config.RuleConfiguration) {
 		if len(snap) == 0 {
 			continue
 		}
-		groupState := make(map[string]persistedHealthEntry, len(snap))
 		for key, hi := range snap {
 			if hi.LastCheck.IsZero() {
 				continue
 			}
-			groupState[key] = persistedHealthEntry{
+			health := &db.ProxyHealth{
 				Alive:     hi.Alive,
-				LatencyMs: hi.Latency.Milliseconds(),
+				Latency:   int(hi.Latency.Milliseconds()),
 				LastCheck: hi.LastCheck,
 				FailCount: hi.FailCount,
 			}
+			if err := db.PutProxyHealth(g.Name, key, health); err != nil {
+				util.LogModuleWarn("main", "[HEALTH] save to db fail: group=%s key=%s err=%v", g.Name, key, err)
+			}
 		}
-		if len(groupState) > 0 {
-			state[g.Name] = groupState
-		}
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		util.LogModuleWarn("main", "[HEALTH] marshal state fail: %v", err)
-		return
-	}
-
-	path := healthStatePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] create state dir fail: %v", err)
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] write state tmp fail: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] rename state fail: %v", err)
 	}
 }
 

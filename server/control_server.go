@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"phaethon/db"
 	"phaethon/frame"
 	"strconv"
 	"strings"
@@ -65,7 +66,13 @@ type ControlManager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*ControlSession  // address -> session
 	resources    map[string]*DynamicResource // address -> resource
-	ruleConf     *config.RuleConfiguration
+	
+	// Dynamic runtime state (not persisted to DB)
+	dynamicProxies   map[string]*config.Proxy   // name -> proxy
+	dynamicMatchers  []config.Matcher           // dynamic routing rules
+	dynamicTimeRanges []config.TimeRange        // time ranges for dynamic rules
+	dynamicRules     []string                   // raw rule strings
+	
 	portMin      int           // dynamic port range min (0 = unrestricted)
 	portMax      int           // dynamic port range max (0 = unrestricted)
 	portNext     int           // next port to try within range (round-robin)
@@ -92,16 +99,20 @@ func parsePortRange(s string) (min, max int, err error) {
 }
 
 // NewControlManager creates a new ControlManager.
-func NewControlManager(ruleConf *config.RuleConfiguration, dataDir string) *ControlManager {
+func NewControlManager(dataDir string) *ControlManager {
 	m := &ControlManager{
-		sessions:     make(map[string]*ControlSession),
-		resources:    make(map[string]*DynamicResource),
-		ruleConf:     ruleConf,
-		bindingStore: NewBindingStore(dataDir),
-		pendingRegs:  make(map[string]bool),
+		sessions:          make(map[string]*ControlSession),
+		resources:         make(map[string]*DynamicResource),
+		dynamicProxies:    make(map[string]*config.Proxy),
+		dynamicMatchers:   make([]config.Matcher, 0),
+		dynamicTimeRanges: make([]config.TimeRange, 0),
+		dynamicRules:      make([]string, 0),
+		bindingStore:      NewBindingStore(dataDir),
+		pendingRegs:       make(map[string]bool),
 	}
-	if ruleConf != nil && ruleConf.TCPPortRange != "" {
-		min, max, err := parsePortRange(ruleConf.TCPPortRange)
+	// Load TCPPortRange from database
+	if tcpPortRange, err := db.GetTCPPortRange(); err == nil && tcpPortRange != "" {
+		min, max, err := parsePortRange(tcpPortRange)
 		if err == nil && min > 0 && max > 0 {
 			m.portMin = min
 			m.portMax = max
@@ -403,10 +414,9 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 		ReverseAddress: dynAddr,
 	}
 
-	m.ruleConf.Lock()
-	m.ruleConf.Proxies = append(m.ruleConf.Proxies, proxy)
-	m.ruleConf.ProxyNames[proxy.Name] = proxy
-	m.ruleConf.Unlock()
+	m.mu.Lock()
+	m.dynamicProxies[proxy.Name] = proxy
+	m.mu.Unlock()
 
 	resource := &DynamicResource{
 		Address:     dynAddr,
@@ -548,7 +558,8 @@ func (m *ControlManager) portConflictReason(port int, reverseID string, seq int)
 			return "already allocated to an active reverse session"
 		}
 	}
-	for _, mapping := range m.ruleConf.Mappings {
+	mappings, _ := db.ListMappings()
+	for _, mapping := range mappings {
 		if !mapping.IsEnabled() {
 			continue
 		}
@@ -578,7 +589,8 @@ func (m *ControlManager) isPortAvailableLocked(port int, reverseID string, seq i
 		}
 	}
 	// Also check static mappings in config
-	for _, mapping := range m.ruleConf.Mappings {
+	mappings, _ := db.ListMappings()
+	for _, mapping := range mappings {
 		if !mapping.IsEnabled() {
 			continue
 		}
@@ -653,16 +665,16 @@ func (m *ControlManager) createListener(proto string, port int, dynAddr string,
 func (m *ControlManager) insertRoutingRule(mappingName string, proxy *config.Proxy) {
 	ruleStr := fmt.Sprintf("MATCH,%s#%s", proxy.Name, mappingName)
 
-	m.ruleConf.Lock()
+	m.mu.Lock()
 	rs := strings.SplitN(ruleStr, ",", 3)
 	if len(rs) >= 2 {
 		name, mapping, _ := config.ParseProxyName(strings.Trim(rs[1], "'"))
 		matcher := config.NewMatchAllMatcher(name, mapping)
-		m.ruleConf.Matchers = append([]config.Matcher{matcher}, m.ruleConf.Matchers...)
-		m.ruleConf.PrependTimeRange()
-		m.ruleConf.PrependRule(ruleStr)
+		m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...)
+		m.dynamicTimeRanges = append([]config.TimeRange{{}}, m.dynamicTimeRanges...)
+		m.dynamicRules = append([]string{ruleStr}, m.dynamicRules...)
 	}
-	m.ruleConf.Unlock()
+	m.mu.Unlock()
 }
 
 // HandleClose cleans up all resources for an address when control disconnects.
@@ -710,39 +722,39 @@ func (m *ControlManager) HandleClose(address string) {
 			resource.Listener.Close()
 		}
 
-		// Remove proxy and its scoped MATCH rule from RuleConfiguration
-		m.ruleConf.Lock()
+		// Remove proxy and its scoped MATCH rule from dynamic state
+		m.mu.Lock()
 		if resource.Proxy != nil {
-			delete(m.ruleConf.ProxyNames, resource.Proxy.Name)
-			// Remove from Proxies slice
-			for i, p := range m.ruleConf.Proxies {
-				if p == resource.Proxy {
-					m.ruleConf.Proxies = append(m.ruleConf.Proxies[:i], m.ruleConf.Proxies[i+1:]...)
-					break
-				}
-			}
+			delete(m.dynamicProxies, resource.Proxy.Name)
 		}
 		// Remove the MATCH rule inserted by insertRoutingRule.
 		if resource.MappingName != "" && resource.Proxy != nil {
 			targetProxy := resource.Proxy.Name
 			targetMap := resource.MappingName
-			newMatchers := make([]config.Matcher, 0, len(m.ruleConf.Matchers))
-			newTimeRanges := make([]config.TimeRange, 0, len(m.ruleConf.Matchers))
-			for i, matcher := range m.ruleConf.Matchers {
+			newMatchers := make([]config.Matcher, 0, len(m.dynamicMatchers))
+			newTimeRanges := make([]config.TimeRange, 0, len(m.dynamicMatchers))
+			newRules := make([]string, 0, len(m.dynamicRules))
+			for i, matcher := range m.dynamicMatchers {
 				if mam, ok := matcher.(*config.MatchAllMatcher); ok {
 					if mam.ProxyName() == targetProxy && mam.MappingName() == targetMap {
-						continue // skip the dynamic rule we created
+						// Skip the dynamic rule we created, also skip corresponding time range and rule
+						if i < len(m.dynamicRules) {
+							newRules = append(newRules, m.dynamicRules[:i]...)
+							newRules = append(newRules, m.dynamicRules[i+1:]...)
+						}
+						continue
 					}
 				}
 				newMatchers = append(newMatchers, matcher)
-				if i < len(m.ruleConf.MatcherTimeRanges()) {
-					newTimeRanges = append(newTimeRanges, m.ruleConf.MatcherTimeRanges()[i])
+				if i < len(m.dynamicTimeRanges) {
+					newTimeRanges = append(newTimeRanges, m.dynamicTimeRanges[i])
 				}
 			}
-			m.ruleConf.Matchers = newMatchers
-			m.ruleConf.SetMatcherTimeRanges(newTimeRanges)
+			m.dynamicMatchers = newMatchers
+			m.dynamicTimeRanges = newTimeRanges
+			m.dynamicRules = newRules
 		}
-		m.ruleConf.Unlock()
+		m.mu.Unlock()
 
 		// Close all data connections in Registry for this dyn address.
 		// Registry bottoms are keyed by dynAddr, not the control address.
@@ -796,36 +808,36 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 		if res.Listener != nil {
 			res.Listener.Close()
 		}
-		m.ruleConf.Lock()
+		m.mu.Lock()
 		if res.Proxy != nil {
-			delete(m.ruleConf.ProxyNames, res.Proxy.Name)
-			for i, p := range m.ruleConf.Proxies {
-				if p == res.Proxy {
-					m.ruleConf.Proxies = append(m.ruleConf.Proxies[:i], m.ruleConf.Proxies[i+1:]...)
-					break
-				}
-			}
+			delete(m.dynamicProxies, res.Proxy.Name)
 		}
 		if res.MappingName != "" && res.Proxy != nil {
 			targetProxy := res.Proxy.Name
 			targetMap := res.MappingName
-			newMatchers := make([]config.Matcher, 0, len(m.ruleConf.Matchers))
-			newTimeRanges := make([]config.TimeRange, 0, len(m.ruleConf.Matchers))
-			for i, matcher := range m.ruleConf.Matchers {
+			newMatchers := make([]config.Matcher, 0, len(m.dynamicMatchers))
+			newTimeRanges := make([]config.TimeRange, 0, len(m.dynamicMatchers))
+			newRules := make([]string, 0, len(m.dynamicRules))
+			for i, matcher := range m.dynamicMatchers {
 				if mam, ok := matcher.(*config.MatchAllMatcher); ok {
 					if mam.ProxyName() == targetProxy && mam.MappingName() == targetMap {
+						if i < len(m.dynamicRules) {
+							newRules = append(newRules, m.dynamicRules[:i]...)
+							newRules = append(newRules, m.dynamicRules[i+1:]...)
+						}
 						continue
 					}
 				}
 				newMatchers = append(newMatchers, matcher)
-				if i < len(m.ruleConf.MatcherTimeRanges()) {
-					newTimeRanges = append(newTimeRanges, m.ruleConf.MatcherTimeRanges()[i])
+				if i < len(m.dynamicTimeRanges) {
+					newTimeRanges = append(newTimeRanges, m.dynamicTimeRanges[i])
 				}
 			}
-			m.ruleConf.Matchers = newMatchers
-			m.ruleConf.SetMatcherTimeRanges(newTimeRanges)
+			m.dynamicMatchers = newMatchers
+			m.dynamicTimeRanges = newTimeRanges
+			m.dynamicRules = newRules
 		}
-		m.ruleConf.Unlock()
+		m.mu.Unlock()
 		reg := reverse.GlobalRegistry()
 		if reg != nil && res.Address != "" {
 			reg.CloseByAddress(res.Address)

@@ -537,7 +537,6 @@ type pageTemplates struct {
 	packagePage   *template.Template
 	login         *template.Template
 	setup         *template.Template
-	config        *template.Template
 }
 
 // templateFuncs returns the common template function map.
@@ -677,7 +676,6 @@ func (s *AdminServer) parseTemplates() {
 		packagePage:   parsePage("package.html"),
 		login:         parseStandalone("login.html"),
 		setup:         parseStandalone("setup.html"),
-		config:        parsePage("config.html"),
 	}
 }
 
@@ -1256,7 +1254,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/connections", s.handleConnectionsPage)
-	mux.HandleFunc("/config", s.handleConfigPage)
 	mux.HandleFunc("/admin", s.handleAdminPage)
 	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
@@ -1264,7 +1261,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 
 	// API endpoints — use HandleFunc with path checks for RESTful routing
 	mux.HandleFunc("/api/stats", s.apiStats)
-	mux.HandleFunc("/api/config/raw", s.apiConfigRaw)
 	mux.HandleFunc("/api/config/mesh", s.apiConfigMesh)
 	mux.HandleFunc("/api/config/admin", s.apiConfigAdmin)
 	mux.HandleFunc("/api/config/reload", s.apiReload)
@@ -1572,18 +1568,6 @@ func (s *AdminServer) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *AdminServer) handleConfigPage(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	s.mu.RUnlock()
-
-	data := map[string]interface{}{
-		"Title":      "Raw Config",
-		"SaveTarget": "base",
-		"CanSwitch":  false,
-	}
-	s.render(w, r, "config.html", data)
-}
-
 func (s *AdminServer) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"Title": "Admin Settings",
@@ -1727,86 +1711,6 @@ func (s *AdminServer) sseBroadcaster() {
 			return
 		}
 	}
-}
-
-func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Export: construct RuleConfiguration from individual DB queries
-	// instead of loading full config at once
-	conf := &config.RuleConfiguration{}
-
-	var err error
-	conf.Proxies, err = db.ListProxies()
-	if err != nil {
-		httpError(w, "load proxies fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Rules, err = db.ListRules()
-	if err != nil {
-		httpError(w, "load rules fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Mappings, err = db.ListMappings()
-	if err != nil {
-		httpError(w, "load mappings fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.ProxyGroups, err = db.ListProxyGroups()
-	if err != nil {
-		httpError(w, "load proxy groups fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Subscriptions, err = db.ListSubscriptions()
-	if err != nil {
-		httpError(w, "load subscriptions fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.ReverseConfigs, err = db.ListReverseConfigs()
-	if err != nil {
-		httpError(w, "load reverse configs fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Resolvers, err = db.ListResolvers()
-	if err != nil {
-		httpError(w, "load resolvers fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Admin, err = db.GetAdminConfig()
-	if err != nil && err.Error() != "key 不存在" {
-		httpError(w, "load admin config fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.TUN, err = db.GetTUNConfig()
-	if err != nil && err.Error() != "key 不存在" {
-		httpError(w, "load TUN config fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conf.Mesh, err = db.GetMeshConfig()
-	if err != nil && err.Error() != "key 不存在" {
-		httpError(w, "load mesh config fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	data, err := config.MarshalRaw(conf)
-	if err != nil {
-		httpError(w, "marshal config fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Write(data)
 }
 
 // apiConfigMesh handles GET/PUT for mesh foundational settings.
@@ -5048,8 +4952,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.reverseWizard
 	case "package.html":
 		t = s.pages.packagePage
-	case "config.html":
-		t = s.pages.config
 	case "login.html":
 		t = s.pages.login
 	case "setup.html":

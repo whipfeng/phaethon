@@ -520,91 +520,16 @@ func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error)
 	return true, nil
 }
 
-// ===== 整份配置装配 =====
-
-// LoadConf 从数据库全量装配 *config.RuleConfiguration 并执行 Init()。
-// 所有 bucket 在同一个只读事务中读取，保证快照一致。
-// 缺失的节保持零值（Admin/TUN/Mesh 为 nil，列表为空）。
-func LoadConf() (*config.RuleConfiguration, error) {
-	conf := &config.RuleConfiguration{}
-	err := View(func(tx *bolt.Tx) error {
-		var err error
-		if conf.Proxies, err = listTx[config.Proxy](tx, BucketProxies); err != nil {
-			return err
-		}
-		if conf.ProxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
-			return err
-		}
-		if conf.Subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
-			return err
-		}
-		if conf.Rules, err = listRulesTx(tx); err != nil {
-			return err
-		}
-		if conf.Mappings, err = listTx[config.Mapping](tx, BucketMappings); err != nil {
-			return err
-		}
-		if conf.Resolvers, err = listTx[config.Resolver](tx, BucketResolvers); err != nil {
-			return err
-		}
-		if conf.ReverseConfigs, err = listTx[config.ReverseConfig](tx, BucketReverseConfs); err != nil {
-			return err
-		}
-
-		cb := tx.Bucket(BucketConfig)
-
-		var admin config.AdminConfig
-		if present, err := readScalarInto(cb, keyAdmin, &admin); err != nil {
-			return err
-		} else if present {
-			conf.Admin = &admin
-		}
-
-		var tun config.TUNConfig
-		if present, err := readScalarInto(cb, keyTUN, &tun); err != nil {
-			return err
-		} else if present {
-			conf.TUN = &tun
-		}
-
-		var mesh config.MeshConfig
-		if present, err := readScalarInto(cb, keyMesh, &mesh); err != nil {
-			return err
-		} else if present {
-			conf.Mesh = &mesh
-		}
-
-		if _, err := readScalarInto(cb, keyInteractive, &conf.Interactive); err != nil {
-			return err
-		}
-		if _, err := readScalarInto(cb, keyUDPPortRange, &conf.UDPPortRange); err != nil {
-			return err
-		}
-		if _, err := readScalarInto(cb, keyTCPPortRange, &conf.TCPPortRange); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := conf.Init(); err != nil {
-		return nil, fmt.Errorf("config init: %w", err)
-	}
-	return conf, nil
-}
-
 // MigrateProxyGroups updates existing proxy groups with proxies from the config.
 // This fixes the issue where old migrations only stored ManualProxies but not Proxies.
-func MigrateProxyGroups(conf *config.RuleConfiguration) error {
+func MigrateProxyGroups(proxyGroups []*config.ProxyGroup) error {
 	return Update(func(tx *bolt.Tx) error {
 		gb := tx.Bucket(BucketProxyGroups)
 		if gb == nil {
 			return nil
 		}
 
-		for _, g := range conf.ProxyGroups {
+		for _, g := range proxyGroups {
 			if g == nil {
 				continue
 			}
@@ -652,3 +577,5 @@ func IsEmptyConfig() (bool, error) {
 	})
 	return empty, err
 }
+
+

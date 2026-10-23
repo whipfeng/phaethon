@@ -44,6 +44,7 @@ type HTunnelServer struct {
 	channels sync.Map // int64 -> *htChannel
 
 	// v0.2.0: h_tunnel transport config (nil = use defaults)
+	// Note: HTunnel config is not stored in database, always nil for now
 	htConfig *config.HTunnelConfig
 }
 
@@ -1005,16 +1006,9 @@ func StartHTunnel(mapping *config.Mapping) (net.Listener, error) {
 		return nil, err
 	}
 
-	// Load HTunnel config from DB
-	var htConfig *config.HTunnelConfig
-	if conf, confErr := db.LoadConf(); confErr == nil && conf != nil {
-		htConfig = conf.HTunnel
-	}
-
 	srv := &HTunnelServer{
 		BaseServer: BaseServer{Mapping: mapping},
 		Password:   mapping.Password,
-		htConfig:   htConfig,
 	}
 
 	httpSrv := &http.Server{

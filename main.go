@@ -1931,9 +1931,9 @@ func wireAdminCallbacks(resources *activeResources) {
 	}
 	adminSrv := resources.adminServer
 	adminSrv.RefreshSubscription = func(subName string) error {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
 		}
 		for _, sub := range conf.Subscriptions {
 			if sub.Name == subName {
@@ -1943,9 +1943,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		return fmt.Errorf("subscription not found: %s", subName)
 	}
 	adminSrv.CheckGroupHealth = func(groupName string) error {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
 		}
 		for _, g := range conf.ProxyGroups {
 			if g.Name == groupName {
@@ -1956,9 +1956,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		return fmt.Errorf("group not found: %s", groupName)
 	}
 	adminSrv.CheckGroupTest = func(groupName string) error {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
 		}
 		for _, g := range conf.ProxyGroups {
 			if g.Name == groupName {
@@ -1969,9 +1969,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		return fmt.Errorf("group not found: %s", groupName)
 	}
 	adminSrv.CheckGroupProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return config.HealthInfo{}, fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
 		}
 		for _, g := range conf.ProxyGroups {
 			if g.Name != groupName {
@@ -2021,9 +2021,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		return config.HealthInfo{}, fmt.Errorf("group not found: %s", groupName)
 	}
 	adminSrv.CheckSubscriptionHealth = func(subName, nodeName, url string) (config.HealthInfo, error) {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return config.HealthInfo{}, fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
 		}
 		var sub *config.Subscription
 		for _, s := range conf.Subscriptions {
@@ -2035,9 +2035,12 @@ func wireAdminCallbacks(resources *activeResources) {
 		if sub == nil {
 			return config.HealthInfo{}, fmt.Errorf("subscription not found: %s", subName)
 		}
-		sub.SubMu.RLock()
-		p := sub.SubProxies[nodeName]
-		sub.SubMu.RUnlock()
+		// Get subscription nodes from database
+		proxies, err := db.GetSubscriptionNodes(subName)
+		if err != nil {
+			return config.HealthInfo{}, fmt.Errorf("load subscription nodes: %w", err)
+		}
+		p := proxies[nodeName]
 		if p == nil {
 			return config.HealthInfo{}, fmt.Errorf("node not found: %s", nodeName)
 		}
@@ -2069,9 +2072,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		}, nil
 	}
 	adminSrv.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
-		conf := adminSrv.GetConfig()
-		if conf == nil {
-			return config.HealthInfo{}, fmt.Errorf("config not ready")
+		conf, err := db.LoadConf()
+		if err != nil {
+			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
 		}
 		p := conf.ProxyNames[proxyName]
 		if p == nil {

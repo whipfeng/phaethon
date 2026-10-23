@@ -2133,19 +2133,20 @@ type proxyReference struct {
 
 // findProxyReferences returns every rule, group, proxy, or mapping that refers
 // to the named proxy. It queries the database directly.
+// findProxyReferences queries the database directly for cross-reference checks.
 func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error) {
 	var refs []proxyReference
 	if name == "" {
 		return refs, nil
 	}
 
-	// Load full config from DB for cross-reference checks
-	c, err := db.LoadConf()
+	// Query rules directly from database
+	rules, err := db.ListRules()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, rule := range c.Rules {
+	for _, rule := range rules {
 		rs := strings.SplitN(rule, ",", 3)
 		var target string
 		switch {
@@ -2159,7 +2160,13 @@ func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error)
 		}
 	}
 
-	for _, g := range c.ProxyGroups {
+	// Query proxy groups directly from database
+	groups, err := db.ListProxyGroups()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, g := range groups {
 		if g == nil {
 			continue
 		}
@@ -2171,19 +2178,37 @@ func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error)
 		}
 	}
 
-	for _, p := range c.Proxies {
+	// Query proxies directly from database
+	proxies, err := db.ListProxies()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, p := range proxies {
 		if p != nil && p.ViaProxy == name {
 			refs = append(refs, proxyReference{Kind: "proxy", Name: p.Name})
 		}
 	}
 
-	for _, m := range c.Mappings {
+	// Query mappings directly from database
+	mappings, err := db.ListMappings()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, m := range mappings {
 		if m != nil && m.ReverseProxy == name {
 			refs = append(refs, proxyReference{Kind: "mapping", Name: m.Name})
 		}
 	}
 
-	for _, rc := range c.ReverseConfigs {
+	// Query reverse configs directly from database
+	reverseConfigs, err := db.ListReverseConfigs()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, rc := range reverseConfigs {
 		if rc != nil && rc.RegistryProxy == name {
 			refs = append(refs, proxyReference{Kind: "reverse", Name: rc.Name})
 		}
@@ -2200,12 +2225,13 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 		return refs, nil
 	}
 
-	c, err := db.LoadConf()
+	// Query rules directly from database
+	rules, err := db.ListRules()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, rule := range c.Rules {
+	for _, rule := range rules {
 		rs := strings.SplitN(rule, ",", 3)
 		var target string
 		switch {
@@ -2219,7 +2245,13 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 		}
 	}
 
-	for _, g := range c.ProxyGroups {
+	// Query proxy groups directly from database
+	groups, err := db.ListProxyGroups()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, g := range groups {
 		if g == nil || g.Name == name {
 			continue
 		}
@@ -2231,19 +2263,37 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 		}
 	}
 
-	for _, p := range c.Proxies {
+	// Query proxies directly from database
+	proxies, err := db.ListProxies()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, p := range proxies {
 		if p != nil && p.ViaProxy == name {
 			refs = append(refs, proxyReference{Kind: "proxy", Name: p.Name})
 		}
 	}
 
-	for _, m := range c.Mappings {
+	// Query mappings directly from database
+	mappings, err := db.ListMappings()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, m := range mappings {
 		if m != nil && m.ReverseProxy == name {
 			refs = append(refs, proxyReference{Kind: "mapping", Name: m.Name})
 		}
 	}
 
-	for _, rc := range c.ReverseConfigs {
+	// Query reverse configs directly from database
+	reverseConfigs, err := db.ListReverseConfigs()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, rc := range reverseConfigs {
 		if rc != nil && rc.RegistryProxy == name {
 			refs = append(refs, proxyReference{Kind: "reverse", Name: rc.Name})
 		}

@@ -188,16 +188,15 @@
     <script>
     (function() {
         // Check auth status on load
-        fetch('./api/config')
+        fetch('./api/config/admin')
             .then(r => r.json())
-            .then(data => {
-                const admin = data.admin || {};
+            .then(admin => {
                 const statusEl = document.getElementById('security-status');
                 const actionBtn = document.getElementById('btn-security-action');
                 const logoutBtn = document.getElementById('btn-logout');
-                if (admin['auth-enabled']) {
+                if (admin.AuthEnabled) {
                     const t1 = typeof i18n !== 'undefined' ? i18n.t('security.enabled') : 'Authentication enabled';
-                    statusEl.innerHTML = '<p>🔐 ' + t1 + ' (user: <strong>' + (admin.username || '') + '</strong>)</p>';
+                    statusEl.innerHTML = '<p>🔐 ' + t1 + ' (user: <strong>' + (admin.Username || '') + '</strong>)</p>';
                     actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.change') : 'Change Credentials';
                     actionBtn.onclick = () => openSecurityModal(true);
                     logoutBtn.style.display = '';

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 )
 
 // StatsCollector collects runtime statistics for the admin dashboard.
@@ -109,23 +109,29 @@ func (s *StatsCollector) GetSnapshot() map[string]interface{} {
 	}
 }
 
-// CollectFromConfig extracts health data from RuleConfiguration.
-func (s *StatsCollector) CollectFromConfig(conf *config.RuleConfiguration) {
-	for _, g := range conf.ProxyGroups {
-		snapshot := g.HealthSnapshot()
-		if len(snapshot) == 0 {
-			continue
+// CollectFromConfig extracts health data from database.
+func (s *StatsCollector) CollectFromConfig() {
+	// Query all health records from database
+	allHealth, err := db.ListAllProxyHealth()
+	if err != nil {
+		return
+	}
+	
+	// Group by group name
+	grouped := make(map[string][]*ProxyHealth)
+	for _, h := range allHealth {
+		health := &ProxyHealth{
+			Name:      strings.TrimPrefix(h.ProxyName, "sub:"),
+			Alive:     h.Alive,
+			Latency:   time.Duration(h.Latency) * time.Millisecond,
+			LastCheck: h.LastCheck,
+			FailCount: h.FailCount,
 		}
-		var health []*ProxyHealth
-		for name, hi := range snapshot {
-			health = append(health, &ProxyHealth{
-				Name:      strings.TrimPrefix(name, "sub:"),
-				Alive:     hi.Alive,
-				Latency:   hi.Latency,
-				LastCheck: hi.LastCheck,
-				FailCount: hi.FailCount,
-			})
-		}
-		s.UpdateHealth(g.Name, health)
+		grouped[h.GroupName] = append(grouped[h.GroupName], health)
+	}
+	
+	// Update each group
+	for groupName, health := range grouped {
+		s.UpdateHealth(groupName, health)
 	}
 }

@@ -124,6 +124,11 @@ func DeleteSubscriptionNodes(subName string) error {
 	return Delete(BucketSubscriptionNodes, []byte(subName))
 }
 
+// ListAllProxyHealth 列出所有代理健康状态
+func ListAllProxyHealth() ([]*ProxyHealth, error) {
+	return listView[ProxyHealth](BucketProxyHealth)
+}
+
 // ListAllSubscriptionNodes 列出所有订阅节点池
 func ListAllSubscriptionNodes() ([]*SubscriptionNodes, error) {
 	return listView[SubscriptionNodes](BucketSubscriptionNodes)

@@ -278,7 +278,6 @@ func drawDigit(img *image.RGBA, x, y int, d byte, c color.Color) {
 // AdminServer provides a web management interface.
 type AdminServer struct {
 	config    *config.AdminConfig
-	runtime   *config.RuleConfiguration // live runtime state for main.go callbacks (health, subscriptions, etc.)
 	stats     *StatsCollector
 	server    *http.Server
 	ln        net.Listener
@@ -690,14 +689,6 @@ func (s *AdminServer) Start() error {
 		return nil
 	}
 	util.Logger.Printf("[INFO] [admin] Start() continuing after Enabled check")
-
-	// Load initial runtime config from database
-	if conf, err := db.LoadConf(); err != nil {
-		util.LogModuleError("admin", "load initial runtime config: %v", err)
-	} else {
-		s.runtime = conf
-		util.LogModuleInfo("admin", "initial runtime config loaded from DB")
-	}
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -1446,30 +1437,22 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Request) {
 	subs, _ := db.ListSubscriptions()
 
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-
-	// Build subscription snapshot from runtime config so the page can show
-	// live subscription nodes without leaking them into the global proxy list.
+	// Build subscription snapshot from database
 	subData := make(map[string]map[string]interface{})
-	if runtimeConf != nil {
-		for _, sub := range runtimeConf.Subscriptions {
-			sub.SubMu.RLock()
-			nodes := make([]map[string]interface{}, 0, len(sub.SubProxies))
-			for name, p := range sub.SubProxies {
-				nodes = append(nodes, map[string]interface{}{
-					"name":   name,
-					"type":   p.Type,
-					"server": p.Server,
-					"port":   p.Port,
-				})
-			}
-			sub.SubMu.RUnlock()
-			subData[sub.Name] = map[string]interface{}{
-				"nodes": nodes,
-				"url":   sub.URL,
-			}
+	for _, sub := range subs {
+		proxies := s.getSubscriptionProxies(sub.Name)
+		nodes := make([]map[string]interface{}, 0, len(proxies))
+		for name, p := range proxies {
+			nodes = append(nodes, map[string]interface{}{
+				"name":   name,
+				"type":   p.Type,
+				"server": p.Server,
+				"port":   p.Port,
+			})
+		}
+		subData[sub.Name] = map[string]interface{}{
+			"nodes": nodes,
+			"url":   sub.URL,
 		}
 	}
 
@@ -2339,9 +2322,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after proxy add failed: %v", err)
-		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
 				util.LogModuleWarn("admin", "incremental update after proxy add failed: %v", err)
@@ -2388,9 +2368,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after proxy delete failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
@@ -2445,9 +2422,6 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after proxy toggle failed: %v", err)
-	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
 			util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
@@ -2489,9 +2463,6 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 	if err := db.PutProxy(p); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after p2p toggle failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
@@ -2566,9 +2537,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after rule insert failed: %v", err)
-		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "rule inserted at %d: %s", idx, body.Rule)
@@ -2602,9 +2570,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after rule delete failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
@@ -2650,9 +2615,6 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 	if err := db.PutRule(idx, rules[idx]); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after rule toggle failed: %v", err)
 	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
@@ -2711,9 +2673,6 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after mapping add failed: %v", err)
-		}
 		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
 		// Notify runtime about mapping change
@@ -2749,9 +2708,6 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after mapping delete failed: %v", err)
 		}
 		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
@@ -2792,9 +2748,6 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after mapping toggle failed: %v", err)
-	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
 			util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
@@ -2829,9 +2782,6 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		if err := db.PutResolver(rv); err != nil {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after resolver toggle failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -2874,9 +2824,6 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after resolver add failed: %v", err)
-		}
 		s.mu.Unlock()
 		if replaced {
 			util.LogModuleInfo("admin", "resolver updated: %s (%s:%d -> %s:%d)", rv.Name, rv.SrcHost, rv.SrcPort, rv.DstHost, rv.DstPort)
@@ -2899,9 +2846,6 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after resolver delete failed: %v", err)
 		}
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "resolver deleted: %s", name)
@@ -3005,9 +2949,6 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after group toggle failed: %v", err)
-	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
 			util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
@@ -3048,33 +2989,22 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			sub, err := db.GetSubscription(group.Subscription)
 			if err == nil {
 				subName = sub.Name
-				// Get SubProxies from runtime (runtime state not yet in DB)
-				s.mu.RLock()
-				runtimeConf := s.runtime
-				s.mu.RUnlock()
-				if runtimeConf != nil {
-					for _, rsub := range runtimeConf.Subscriptions {
-						if rsub.Name == subName {
-							rsub.SubMu.RLock()
-							names := make([]string, 0, len(rsub.SubProxies))
-							for name := range rsub.SubProxies {
-								names = append(names, name)
-							}
-							sort.Strings(names)
-							nodes = make([]map[string]interface{}, 0, len(rsub.SubProxies))
-							for _, name := range names {
-								p := rsub.SubProxies[name]
-								nodes = append(nodes, map[string]interface{}{
-									"name":   name,
-									"type":   p.Type,
-									"server": p.Server,
-									"port":   p.Port,
-								})
-							}
-							rsub.SubMu.RUnlock()
-							break
-						}
-					}
+				// Get SubProxies from database
+				proxies := s.getSubscriptionProxies(subName)
+				names := make([]string, 0, len(proxies))
+				for name := range proxies {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				nodes = make([]map[string]interface{}, 0, len(proxies))
+				for _, name := range names {
+					p := proxies[name]
+					nodes = append(nodes, map[string]interface{}{
+						"name":   name,
+						"type":   p.Type,
+						"server": p.Server,
+						"port":   p.Port,
+					})
 				}
 			}
 		}
@@ -3135,9 +3065,6 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after subscription filter update failed: %v", err)
 		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
@@ -3358,9 +3285,6 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after active-member failed: %v", err)
-	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
 			util.LogModuleWarn("admin", "incremental update after active-member failed: %v", err)
@@ -3519,9 +3443,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after group add failed: %v", err)
-		}
 		if s.OnIncrementalUpdate != nil {
 			if err := s.OnIncrementalUpdate(); err != nil {
 				util.LogModuleWarn("admin", "incremental update after group add failed: %v", err)
@@ -3571,9 +3492,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after group delete failed: %v", err)
-		}
 		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "group deleted: %s", name)
@@ -3590,26 +3508,14 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.mu.RLock()
-		runtimeConf := s.runtime
-		s.mu.RUnlock()
 		summaries := make([]map[string]interface{}, 0, len(subs))
 		for _, sub := range subs {
 			interval := 3600
 			if sub.Interval != nil {
 				interval = *sub.Interval
 			}
-			nodeCount := 0
-			if runtimeConf != nil {
-				for _, rs := range runtimeConf.Subscriptions {
-					if rs.Name == sub.Name {
-						rs.SubMu.RLock()
-						nodeCount = len(rs.SubProxies)
-						rs.SubMu.RUnlock()
-						break
-					}
-				}
-			}
+			proxies := s.getSubscriptionProxies(sub.Name)
+			nodeCount := len(proxies)
 			summaries = append(summaries, map[string]interface{}{
 				"name":      sub.Name,
 				"url":       sub.URL,
@@ -3652,14 +3558,13 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Preserve the runtime node pool if the URL did not change
+		// Preserve the node pool from database if the URL did not change
 		sub.SubProxies = make(map[string]*config.Proxy)
 		if existing != nil && existing.URL == sub.URL {
-			existing.SubMu.RLock()
-			for n, p := range existing.SubProxies {
-				sub.SubProxies[n] = p
+			existingProxies, _ := db.GetSubscriptionNodes(sub.Name)
+			if existingProxies != nil {
+				sub.SubProxies = existingProxies
 			}
-			existing.SubMu.RUnlock()
 		}
 
 		replaced := existing != nil
@@ -3668,8 +3573,11 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after subscription edit failed: %v", err)
+		// Persist node pool to database
+		if len(sub.SubProxies) > 0 {
+			if err := db.PutSubscriptionNodes(sub.Name, sub.SubProxies); err != nil {
+				util.LogModuleWarn("admin", "persist subscription nodes failed: %v", err)
+			}
 		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
@@ -3714,9 +3622,6 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after subscription delete failed: %v", err)
-		}
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "subscription deleted: %s", name)
@@ -3755,18 +3660,9 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 
 		nodeCount := 0
-		s.mu.RLock()
-		rt := s.runtime
-		s.mu.RUnlock()
-		if rt != nil {
-			for _, sub := range rt.Subscriptions {
-				if sub.Name == name {
-					sub.SubMu.RLock()
-					nodeCount = len(sub.SubProxies)
-					sub.SubMu.RUnlock()
-					break
-				}
-			}
+		proxies := s.getSubscriptionProxies(name)
+		if proxies != nil {
+			nodeCount = len(proxies)
 		}
 		jsonResponse(w, map[string]interface{}{
 			"status":    "ok",
@@ -3785,30 +3681,21 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.mu.RLock()
-		rt := s.runtime
-		s.mu.RUnlock()
-		if rt == nil {
-			httpError(w, "config not ready", http.StatusServiceUnavailable)
-			return
-		}
-		var sub *config.Subscription
-		for _, ss := range rt.Subscriptions {
-			if ss.Name == name {
-				sub = ss
-				break
-			}
-		}
-		if sub == nil {
+		// Check subscription exists
+		_, err := db.GetSubscription(name)
+		if err != nil {
 			httpError(w, "subscription not found", http.StatusNotFound)
 			return
 		}
-		sub.SubMu.RLock()
-		names := make([]string, 0, len(sub.SubProxies))
-		for n := range sub.SubProxies {
+		// Get subscription nodes from database
+		proxies := s.getSubscriptionProxies(name)
+		if proxies == nil {
+			proxies = make(map[string]*config.Proxy)
+		}
+		names := make([]string, 0, len(proxies))
+		for n := range proxies {
 			names = append(names, n)
 		}
-		sub.SubMu.RUnlock()
 		sort.Strings(names)
 
 		// Collect the latest health info from any runtime group that references
@@ -3834,9 +3721,7 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 
 		nodes := make([]map[string]interface{}, len(names))
 		for i, n := range names {
-			sub.SubMu.RLock()
-			p := sub.SubProxies[n]
-			sub.SubMu.RUnlock()
+			p := proxies[n]
 			h := healthByNode[n]
 			nodes[i] = map[string]interface{}{
 				"name":      n,
@@ -3909,9 +3794,6 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after subscription toggle failed: %v", err)
-	}
 	if s.OnIncrementalUpdate != nil {
 		if err := s.OnIncrementalUpdate(); err != nil {
 			util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
@@ -3922,12 +3804,17 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 	if sub.Interval != nil {
 		interval = *sub.Interval
 	}
+	nodeCount := 0
+	proxies := s.getSubscriptionProxies(sub.Name)
+	if proxies != nil {
+		nodeCount = len(proxies)
+	}
 	jsonResponse(w, map[string]interface{}{
 		"name":      sub.Name,
 		"enabled":   sub.IsEnabled(),
 		"url":       sub.URL,
 		"interval":  interval,
-		"nodeCount": len(sub.SubProxies),
+		"nodeCount": nodeCount,
 	})
 }
 
@@ -4082,9 +3969,6 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after reverse config create failed: %v", err)
-		}
 		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
@@ -4156,9 +4040,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after reverse config update failed: %v", err)
-		}
 		s.mu.Unlock()
 
 		if s.OnReverseConfigUpdate != nil {
@@ -4189,9 +4070,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after reverse config delete failed: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -4242,9 +4120,6 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 		s.mu.Unlock()
 		httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after reverse config toggle failed: %v", err)
 	}
 	s.mu.Unlock()
 
@@ -4597,9 +4472,6 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 		if mesh.GlobalMeshManager != nil {
 			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after mesh advertise add failed: %v", err)
-		}
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
@@ -4650,9 +4522,6 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		if mesh.GlobalMeshManager != nil {
 			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after mesh advertise update failed: %v", err)
-		}
 		s.mu.Unlock()
 
 		util.DefaultVersionNotifier.BumpVersion("mesh")
@@ -4675,9 +4544,6 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 		if mesh.GlobalMeshManager != nil {
 			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
-		}
-		if err := s.reloadRuntimeLocked(); err != nil {
-			util.LogModuleWarn("admin", "reload after mesh advertise delete failed: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -4758,9 +4624,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if err := s.reloadRuntimeLocked(); err != nil {
-				util.LogModuleWarn("admin", "reload after TUN toggle failed: %v", err)
-			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN toggle enabled=%v", *req.Enabled)
 			util.DefaultVersionNotifier.BumpVersion("tun")
@@ -4778,9 +4641,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
-			}
-			if err := s.reloadRuntimeLocked(); err != nil {
-				util.LogModuleWarn("admin", "reload after TUN bypass-gateway failed: %v", err)
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN bypass-gateway=%v", *req.BypassGateway)
@@ -4802,9 +4662,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
-			}
-			if err := s.reloadRuntimeLocked(); err != nil {
-				util.LogModuleWarn("admin", "reload after TUN dhcp-enabled failed: %v", err)
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN dhcp-enabled=%v", *req.DHCPEnabled)
@@ -4846,9 +4703,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				s.mu.Unlock()
 				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 				return
-			}
-			if err := s.reloadRuntimeLocked(); err != nil {
-				util.LogModuleWarn("admin", "reload after DHCP static-bindings failed: %v", err)
 			}
 			s.mu.Unlock()
 			if s.OnDHCPStaticBindingsUpdate != nil {
@@ -5018,9 +4872,6 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after admin auth update failed: %v", err)
-	}
 	s.mu.Unlock()
 
 	util.LogModuleInfo("admin", "config persisted to database")
@@ -5119,9 +4970,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	if err := s.reloadRuntimeLocked(); err != nil {
-		util.LogModuleWarn("admin", "reload after setup failed: %v", err)
-	}
 	s.mu.Unlock()
 
 	util.LogModuleInfo("admin", "config persisted to database")
@@ -5296,56 +5144,17 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// reloadRuntimeLocked reloads the runtime config from the database,
-// preserving live state (health info, subscription node pools) from the
-// previous runtime. Caller must hold s.mu (write lock).
-func (s *AdminServer) reloadRuntimeLocked() error {
-	conf, err := db.LoadConf()
-	if err != nil {
-		return err
-	}
-	if s.runtime != nil {
-		// Preserve health state
-		oldHealthByGroup := make(map[string]*config.ProxyGroup)
-		for _, g := range s.runtime.ProxyGroups {
-			oldHealthByGroup[g.Name] = g
-		}
-		for _, g := range conf.ProxyGroups {
-			if old, ok := oldHealthByGroup[g.Name]; ok {
-				g.CopyHealthFrom(old)
-			}
-		}
-		// Preserve subscription node pools
-		oldSubsByName := make(map[string]*config.Subscription)
-		for _, sub := range s.runtime.Subscriptions {
-			oldSubsByName[sub.Name] = sub
-		}
-		for _, sub := range conf.Subscriptions {
-			if old, ok := oldSubsByName[sub.Name]; ok {
-				sub.SubMu.Lock()
-				old.SubMu.RLock()
-				sub.SubProxies = old.SubProxies
-				old.SubMu.RUnlock()
-				sub.SubMu.Unlock()
-			}
-		}
-	}
-	s.runtime = conf
-	return nil
-}
-
 // UpdateConfig allows external callers (e.g., main.go reload) to update the runtime config reference.
+// Deprecated: runtime config is now stored in database, this method is kept for compatibility only.
 func (s *AdminServer) UpdateConfig(conf *config.RuleConfiguration) {
-	s.mu.Lock()
-	s.runtime = conf
-	s.mu.Unlock()
+	// No-op: runtime config is now loaded from database on demand
 }
 
 // GetConfig returns current runtime config reference (for read-only access by main.go callbacks).
+// Deprecated: runtime config is now stored in database, use db.LoadConf() directly.
 func (s *AdminServer) GetConfig() *config.RuleConfiguration {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.runtime
+	conf, _ := db.LoadConf()
+	return conf
 }
 
 // generateSelfSignedCert generates a self-signed TLS certificate and key.

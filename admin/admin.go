@@ -1327,12 +1327,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 // ========== Page Handlers ==========
 
 func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// Runtime stats from runtime config
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-
-	s.stats.CollectFromConfig(runtimeConf)
+	// Runtime stats from database
+	s.stats.CollectFromConfig()
 
 	// Counts from the database
 	proxies, _ := db.ListProxies()
@@ -1413,48 +1409,20 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 	groups, _ := db.ListProxyGroups()
 	subs, _ := db.ListSubscriptions()
 
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-
-	// Show runtime subscription selections on the page without mutating the
-	// editable base/env config.  We copy the base groups and overlay the
-	// runtime Proxies / ManualProxies so the card totals reflect reality.
-	displayGroups := groups
+	// Build group stats from database (single source of truth)
 	groupStats := make(map[string]map[string]interface{})
-	if runtimeConf != nil {
-		runtimeGroups := make(map[string]*config.ProxyGroup, len(runtimeConf.ProxyGroups))
-		for _, g := range runtimeConf.ProxyGroups {
-			runtimeGroups[g.Name] = g
+	for _, g := range groups {
+		active := g.PickActiveMember()
+		activeName := ""
+		if active.Name != "" {
+			activeName = active.Name
 		}
-		displayGroups = make([]*config.ProxyGroup, 0, len(groups))
-		for _, g := range groups {
-			cp := *g
-			if rg, ok := runtimeGroups[g.Name]; ok {
-				cp.Proxies = rg.Proxies
-				cp.ManualProxies = rg.ManualProxies
-				cp.SubCandidateCount = len(rg.SubscriptionCandidates())
-				active := rg.PickActiveMember()
-				groupStats[g.Name] = map[string]interface{}{
-					"total":  len(rg.GetMembers()),
-					"active": active.Name,
-				}
-			} else {
-				groupStats[g.Name] = map[string]interface{}{
-					"total":  cp.SubCandidateCount + len(cp.ManualProxies),
-					"active": "",
-				}
-			}
-			displayGroups = append(displayGroups, &cp)
-		}
-	} else {
-		for _, g := range groups {
-			groupStats[g.Name] = map[string]interface{}{
-				"total":  g.SubCandidateCount + len(g.ManualProxies),
-				"active": "",
-			}
+		groupStats[g.Name] = map[string]interface{}{
+			"total":  len(g.GetMembers()),
+			"active": activeName,
 		}
 	}
+	displayGroups := groups
 
 	// Build proxy summaries for JavaScript (includes IsP2P/IsUDP computed values)
 	proxySummaries := make([]map[string]interface{}, len(proxies))
@@ -1643,11 +1611,7 @@ func (s *AdminServer) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 // ========== API Handlers ==========
 
 func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	conf := s.runtime
-	s.mu.RUnlock()
-
-	s.stats.CollectFromConfig(conf)
+	s.stats.CollectFromConfig()
 	jsonResponse(w, s.stats.GetSnapshot())
 }
 
@@ -1775,11 +1739,7 @@ func (s *AdminServer) sseBroadcaster() {
 	for {
 		select {
 		case <-ticker.C:
-			s.mu.RLock()
-			conf := s.runtime
-			s.mu.RUnlock()
-
-			s.stats.CollectFromConfig(conf)
+			s.stats.CollectFromConfig()
 		case <-s.sseStopCh:
 			return
 		}
@@ -3072,22 +3032,9 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 	}
 	groupName := parts[0]
 
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-	if runtimeConf == nil {
-		httpError(w, "config not ready", http.StatusServiceUnavailable)
-		return
-	}
-
-	var group *config.ProxyGroup
-	for _, g := range runtimeConf.ProxyGroups {
-		if g.Name == groupName {
-			group = g
-			break
-		}
-	}
-	if group == nil {
+	// Get group from database
+	group, err := db.GetProxyGroup(groupName)
+	if err != nil {
 		httpError(w, "group not found", http.StatusNotFound)
 		return
 	}
@@ -3097,46 +3044,66 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		var nodes []map[string]interface{}
 		var subName string
 		if group.Subscription != "" {
-			for _, sub := range runtimeConf.Subscriptions {
-				if sub.Name == group.Subscription {
-					subName = sub.Name
-					sub.SubMu.RLock()
-					names := make([]string, 0, len(sub.SubProxies))
-					for name := range sub.SubProxies {
-						names = append(names, name)
+			// Get subscription config from DB
+			sub, err := db.GetSubscription(group.Subscription)
+			if err == nil {
+				subName = sub.Name
+				// Get SubProxies from runtime (runtime state not yet in DB)
+				s.mu.RLock()
+				runtimeConf := s.runtime
+				s.mu.RUnlock()
+				if runtimeConf != nil {
+					for _, rsub := range runtimeConf.Subscriptions {
+						if rsub.Name == subName {
+							rsub.SubMu.RLock()
+							names := make([]string, 0, len(rsub.SubProxies))
+							for name := range rsub.SubProxies {
+								names = append(names, name)
+							}
+							sort.Strings(names)
+							nodes = make([]map[string]interface{}, 0, len(rsub.SubProxies))
+							for _, name := range names {
+								p := rsub.SubProxies[name]
+								nodes = append(nodes, map[string]interface{}{
+									"name":   name,
+									"type":   p.Type,
+									"server": p.Server,
+									"port":   p.Port,
+								})
+							}
+							rsub.SubMu.RUnlock()
+							break
+						}
 					}
-					sort.Strings(names)
-					nodes = make([]map[string]interface{}, 0, len(sub.SubProxies))
-					for _, name := range names {
-						p := sub.SubProxies[name]
-						nodes = append(nodes, map[string]interface{}{
-							"name":   name,
-							"type":   p.Type,
-							"server": p.Server,
-							"port":   p.Port,
-						})
-					}
-					sub.SubMu.RUnlock()
-					break
 				}
 			}
 		}
-		health := group.HealthSnapshot()
+		// Get health from database
+		healthList, _ := db.ListProxyHealthByGroup(groupName)
+		healthMap := make(map[string]*db.ProxyHealth)
+		for _, h := range healthList {
+			healthMap[h.ProxyName] = h
+		}
 		respNodes := make([]map[string]interface{}, 0, len(nodes))
 		for _, n := range nodes {
 			name := n["name"].(string)
-			h, ok := health["sub:"+name]
-			if !ok {
-				h = config.HealthInfo{}
+			key := "sub:" + name
+			var alive bool
+			var latencyMs int64
+			var lastCheck time.Time
+			if h, ok := healthMap[key]; ok {
+				alive = h.Alive
+				latencyMs = int64(h.Latency)
+				lastCheck = h.LastCheck
 			}
 			respNodes = append(respNodes, map[string]interface{}{
 				"name":      name,
 				"type":      n["type"],
 				"server":    n["server"],
 				"port":      n["port"],
-				"alive":     h.Alive,
-				"latencyMs": h.Latency.Milliseconds(),
-				"lastCheck": h.LastCheck,
+				"alive":     alive,
+				"latencyMs": latencyMs,
+				"lastCheck": lastCheck,
 			})
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -3160,25 +3127,14 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		}
 
 		s.mu.Lock()
-		// Update the runtime group
-		var updatedGroup *config.ProxyGroup
-		if s.runtime != nil {
-			for _, rg := range s.runtime.ProxyGroups {
-				if rg.Name == groupName {
-					rg.SubscriptionFilter = body.Filter
-					rg.ActiveMember = body.ActiveMember
-					rg.RebuildProxies()
-					updatedGroup = rg
-					break
-				}
-			}
-		}
-		if updatedGroup != nil {
-			if err := db.PutProxyGroup(updatedGroup); err != nil {
-				s.mu.Unlock()
-				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
+		// Update the group in database directly
+		group.SubscriptionFilter = body.Filter
+		group.ActiveMember = body.ActiveMember
+		group.RebuildProxies()
+		if err := db.PutProxyGroup(group); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 		if err := s.reloadRuntimeLocked(); err != nil {
 			util.LogModuleWarn("admin", "reload after subscription filter update failed: %v", err)
@@ -3246,17 +3202,23 @@ func (s *AdminServer) apiGroupHealthCheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Return health snapshot for the group.
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-	for _, g := range runtimeConf.ProxyGroups {
-		if g.Name == groupName {
-			jsonResponse(w, g.HealthSnapshot())
-			return
+	// Return health snapshot from database.
+	healthList, err := db.ListProxyHealthByGroup(groupName)
+	if err != nil {
+		httpError(w, "query health fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Convert to map format for JSON response
+	snap := make(map[string]config.HealthInfo)
+	for _, h := range healthList {
+		snap[h.ProxyName] = config.HealthInfo{
+			Alive:     h.Alive,
+			Latency:   time.Duration(h.Latency) * time.Millisecond,
+			LastCheck: h.LastCheck,
+			FailCount: h.FailCount,
 		}
 	}
-	httpError(w, "group not found", http.StatusNotFound)
+	jsonResponse(w, snap)
 }
 
 // apiGroupMembers returns the flattened member list for a group, including
@@ -3274,21 +3236,13 @@ func (s *AdminServer) apiGroupMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	groupName := parts[0]
 
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-	if runtimeConf == nil {
-		httpError(w, "config not ready", http.StatusServiceUnavailable)
+	g, err := db.GetProxyGroup(groupName)
+	if err != nil {
+		httpError(w, "group not found", http.StatusNotFound)
 		return
 	}
 
-	for _, g := range runtimeConf.ProxyGroups {
-		if g.Name == groupName {
-			jsonResponse(w, buildGroupMemberList(g))
-			return
-		}
-	}
-	httpError(w, "group not found", http.StatusNotFound)
+	jsonResponse(w, buildGroupMemberList(g))
 }
 
 // apiGroupTest runs an immediate one-off health test for every member of a
@@ -3315,31 +3269,21 @@ func (s *AdminServer) apiGroupTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return the latest health snapshot from the current runtime config.
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-	if runtimeConf == nil {
-		httpError(w, "config not ready", http.StatusServiceUnavailable)
+	// Return the latest health snapshot from the database.
+	healthList, err := db.ListProxyHealthByGroup(groupName)
+	if err != nil {
+		httpError(w, "query health fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	for _, g := range runtimeConf.ProxyGroups {
-		if g.Name != groupName {
-			continue
+	resp := make(map[string]interface{}, len(healthList))
+	for _, h := range healthList {
+		resp[h.ProxyName] = map[string]interface{}{
+			"alive":     h.Alive,
+			"latencyMs": h.Latency,
+			"lastCheck": h.LastCheck,
 		}
-		snap := g.HealthSnapshot()
-		resp := make(map[string]interface{}, len(snap))
-		for key, hi := range snap {
-			resp[key] = map[string]interface{}{
-				"alive":     hi.Alive,
-				"latencyMs": hi.Latency.Milliseconds(),
-				"lastCheck": hi.LastCheck,
-			}
-		}
-		jsonResponse(w, resp)
-		return
 	}
-	httpError(w, "group not found", http.StatusNotFound)
+	jsonResponse(w, resp)
 }
 
 // apiGroupActiveMember sets the active member for a select group.
@@ -3375,22 +3319,9 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-	if runtimeConf == nil {
-		httpError(w, "config not ready", http.StatusServiceUnavailable)
-		return
-	}
-
-	var runtimeGroup *config.ProxyGroup
-	for _, g := range runtimeConf.ProxyGroups {
-		if g.Name == groupName {
-			runtimeGroup = g
-			break
-		}
-	}
-	if runtimeGroup == nil {
+	// Get group from database
+	runtimeGroup, err := db.GetProxyGroup(groupName)
+	if err != nil {
 		httpError(w, "group not found", http.StatusNotFound)
 		return
 	}
@@ -3418,24 +3349,14 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.mu.Lock()
-	var updatedGroup *config.ProxyGroup
-	if s.runtime != nil {
-		for _, rg := range s.runtime.ProxyGroups {
-			if rg.Name == groupName {
-				if err := rg.SetActiveMember(body.Name); err != nil {
-					util.LogModuleWarn("admin", "SetActiveMember failed: %v", err)
-				}
-				updatedGroup = rg
-				break
-			}
-		}
+	// Update the group in database directly
+	if err := runtimeGroup.SetActiveMember(body.Name); err != nil {
+		util.LogModuleWarn("admin", "SetActiveMember failed: %v", err)
 	}
-	if updatedGroup != nil {
-		if err := db.PutProxyGroup(updatedGroup); err != nil {
-			s.mu.Unlock()
-			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := db.PutProxyGroup(runtimeGroup); err != nil {
+		s.mu.Unlock()
+		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if err := s.reloadRuntimeLocked(); err != nil {
 		util.LogModuleWarn("admin", "reload after active-member failed: %v", err)
@@ -3457,7 +3378,12 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 // buildGroupMemberList builds the flattened member response for a group.
 func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 	members := g.GetMembers()
-	health := g.HealthSnapshot()
+	// Get health from database instead of runtime snapshot
+	healthList, _ := db.ListProxyHealthByGroup(g.Name)
+	healthMap := make(map[string]*db.ProxyHealth)
+	for _, h := range healthList {
+		healthMap[h.ProxyName] = h
+	}
 	active := g.PickActiveMember()
 
 	resp := make([]map[string]interface{}, 0, len(members))
@@ -3468,14 +3394,13 @@ func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 		}
 
 		key := m.HealthKey()
-		hi, ok := health[key]
-		alive := false
-		latencyMs := int64(0)
+		var alive bool
+		var latencyMs int64
 		var lastCheck time.Time
-		if ok {
-			alive = hi.Alive
-			latencyMs = hi.Latency.Milliseconds()
-			lastCheck = hi.LastCheck
+		if h, ok := healthMap[key]; ok {
+			alive = h.Alive
+			latencyMs = int64(h.Latency)
+			lastCheck = h.LastCheck
 		} else if !m.FromSubscription {
 			// Manual proxies are considered alive until explicitly tested.
 			alive = true
@@ -4007,11 +3932,7 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *AdminServer) apiHealth(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	runtimeConf := s.runtime
-	s.mu.RUnlock()
-
-	s.stats.CollectFromConfig(runtimeConf)
+	s.stats.CollectFromConfig()
 	snapshot := s.stats.GetSnapshot()
 	jsonResponse(w, snapshot["healthData"])
 }

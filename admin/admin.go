@@ -5144,19 +5144,6 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// UpdateConfig allows external callers (e.g., main.go reload) to update the runtime config reference.
-// Deprecated: runtime config is now stored in database, this method is kept for compatibility only.
-func (s *AdminServer) UpdateConfig(conf *config.RuleConfiguration) {
-	// No-op: runtime config is now loaded from database on demand
-}
-
-// GetConfig returns current runtime config reference (for read-only access by main.go callbacks).
-// Deprecated: runtime config is now stored in database, use db.LoadConf() directly.
-func (s *AdminServer) GetConfig() *config.RuleConfiguration {
-	conf, _ := db.LoadConf()
-	return conf
-}
-
 // generateSelfSignedCert generates a self-signed TLS certificate and key.
 // Returns PEM-encoded certificate and key.
 func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {

@@ -523,9 +523,8 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 		prevAdmin != nil)
 	if conf.Admin != nil && conf.Admin.Enabled {
 		if prevAdmin != nil {
-			// Reuse existing admin server, just update config reference
+			// Reuse existing admin server
 			util.LogModuleInfo("system", "Reusing existing admin server")
-			prevAdmin.UpdateConfig(conf)
 			res.adminServer = prevAdmin
 		} else {
 			util.LogModuleInfo("system", "Creating new admin server")

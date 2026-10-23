@@ -316,9 +316,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 					migrated = true
 				}
 				if migrated {
-					// Persist updated config to the database
-					if err := db.ImportRuleConf(ruleConf); err != nil {
-						util.LogModuleWarn("system", " persist config after mesh migration fail: %v", err)
+					// Persist updated mesh config to the database
+					if err := db.PutMeshConfig(ruleConf.Mesh); err != nil {
+						util.LogModuleWarn("system", " persist mesh config after migration fail: %v", err)
 					}
 					// Remove old mesh-state.json
 					stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
@@ -347,9 +347,9 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
 			util.LogModuleInfo("system", "Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
-			// Persist updated config with auto-allocated subnet
-			if err := db.ImportRuleConf(ruleConf); err != nil {
-				util.LogModuleWarn("system", " persist config after subnet allocation fail: %v", err)
+			// Persist updated mesh config with auto-allocated subnet
+			if err := db.PutMeshConfig(ruleConf.Mesh); err != nil {
+				util.LogModuleWarn("system", " persist mesh config after subnet allocation fail: %v", err)
 			}
 		}
 
@@ -585,32 +585,17 @@ func getRuleConf() *config.RuleConfiguration {
 		util.LogModuleError("system", " load .env fail: %v", err)
 	}
 
-	// 2. Load configuration from the embedded database (single source of
-	//    truth). On a fresh database, import the legacy config.yaml — or
-	//    generate the embedded default — so existing deployments migrate
-	//    transparently.
+	// 2. Load configuration from the embedded database (single source of truth).
+	//    On a fresh database, initialize with default settings.
 	configPath = filepath.Join(workDir, "config.yaml")
 	empty, err := db.IsEmptyConfig()
 	if err != nil {
 		util.LogModuleError("system", " inspect db config fail: %v", err)
 	}
 	if empty {
-		imported := false
-		if _, statErr := os.Stat(configPath); statErr == nil {
-			util.LogModuleInfo("system", "database empty, importing existing config from %s", configPath)
-			if importErr := db.ImportYAML(configPath); importErr != nil {
-				util.LogModuleError("system", " import config into db fail: %v", importErr)
-			} else {
-				imported = true
-			}
-		}
-		if !imported && len(defaultConfig) > 0 {
-			util.LogModuleInfo("system", "generating default config as fallback")
-			if genErr := writeDefaultConfig(configPath); genErr != nil {
-				util.LogModuleError("system", " generate initial config fail: %v", genErr)
-			} else if importErr := db.ImportYAML(configPath); importErr != nil {
-				util.LogModuleError("system", " import default config into db fail: %v", importErr)
-			}
+		util.LogModuleInfo("system", "database is empty, initializing with defaults")
+		if initErr := db.InitDefault(); initErr != nil {
+			util.LogModuleError("system", " initialize default config fail: %v", initErr)
 		}
 	}
 
@@ -1303,31 +1288,73 @@ func runWatchdogMode() {
 			newExe = selectWorkerBinary()
 		}
 
-		if newExe == "" {
-			return nil
-		}
-
-		newCp, err := spawnChildProcess(newExe)
-		if err != nil {
-			util.LogModuleError("main", "watchdog: restart failed with %s: %v", newExe, err)
-			// If we failed with the fallback binary too, try the original selection
-			if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
-				util.LogModuleInfo("main", "watchdog: fallback failed, trying %s again", currentBinary)
-				newExe = currentBinary
-				newCp, err = spawnChildProcess(newExe)
+		// CRITICAL FIX: Never give up - keep trying to restart
+		const maxRetries = 5
+		const retryBackoff = 2 * time.Second
+		
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			if newExe == "" {
+				util.LogModuleError("main", "watchdog: no worker binary found (attempt %d/%d), using current executable", attempt, maxRetries)
+				exe, err := os.Executable()
 				if err != nil {
-					util.LogModuleError("main", "watchdog: restart failed with %s: %v", newExe, err)
-					return nil
+					util.LogModuleError("main", "watchdog: cannot determine executable path: %v", err)
+					if attempt < maxRetries {
+						time.Sleep(retryBackoff * time.Duration(attempt))
+						continue
+					}
+					// Last resort: wait and return nil, but DON'T exit watchdog
+					util.LogModuleError("main", "watchdog: all retries exhausted, will retry in monitor loop")
+					time.Sleep(30 * time.Second)
+					return cp // Return current cp to keep watchdog alive
 				}
-			} else {
-				return nil
+				newExe = exe
 			}
-		}
 
-		currentBinary = newExe
-		util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
-		lastRestart = time.Now()
-		return newCp
+			newCp, err := spawnChildProcess(newExe)
+			if err != nil {
+				util.LogModuleError("main", "watchdog: restart attempt %d/%d failed with %s: %v", attempt, maxRetries, newExe, err)
+				
+				// If we failed with the fallback binary, try the original selection
+				if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
+					util.LogModuleInfo("main", "watchdog: fallback failed, trying %s again", currentBinary)
+					newExe = currentBinary
+					newCp, err = spawnChildProcess(newExe)
+					if err == nil {
+						currentBinary = newExe
+						util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
+						lastRestart = time.Now()
+						return newCp
+					}
+					util.LogModuleError("main", "watchdog: restart with %s also failed: %v", newExe, err)
+				}
+				
+				// Retry with backoff
+				if attempt < maxRetries {
+					backoff := retryBackoff * time.Duration(attempt)
+					util.LogModuleInfo("main", "watchdog: retrying in %v...", backoff)
+					time.Sleep(backoff)
+					
+					// Re-select binary for next attempt
+					newExe = selectWorkerBinary()
+					continue
+				}
+				
+				// All retries exhausted - but DON'T exit watchdog
+				util.LogModuleError("main", "watchdog: all %d retries exhausted, will retry in monitor loop", maxRetries)
+				time.Sleep(30 * time.Second)
+				return cp // Return current cp to keep watchdog alive
+			}
+
+			// Success!
+			currentBinary = newExe
+			util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
+			lastRestart = time.Now()
+			return newCp
+		}
+		
+		// Should never reach here, but just in case
+		util.LogModuleError("main", "watchdog: restart loop exited unexpectedly")
+		return cp
 	}
 
 	killResidualWorkers()
@@ -1390,10 +1417,20 @@ func runWatchdogMode() {
 			}
 			// Child exited (hot swap or crash) — restart immediately
 			// Pass alreadyExited=true, wasReady to restartChild
+			oldPid := pid
 			cp = restartChild(cp, pid, fmt.Sprintf("child %d exited (code=%d)", pid, exitCode), true, wasReady)
 			if cp == nil {
-				signal.Stop(sigCh)
-				return
+				// CRITICAL FIX: Never exit watchdog - wait and retry
+				util.LogModuleError("main", "watchdog: restart returned nil, waiting 30s before retry")
+				time.Sleep(30 * time.Second)
+				continue
+			}
+			// Check if restart actually succeeded (new pid) or failed (same pid)
+			if cp.proc.Pid == oldPid {
+				// Restart failed, cp is the old one - wait before retrying
+				util.LogModuleWarn("main", "watchdog: restart failed (pid unchanged), waiting 30s before retry")
+				time.Sleep(30 * time.Second)
+				continue
 			}
 			pid = cp.proc.Pid
 			spawnTime = time.Now()
@@ -1431,10 +1468,18 @@ func runWatchdogMode() {
 				}
 				// Child crashed — restart immediately
 				// Pass alreadyExited=true, wasReady to restartChild
+				oldPid := pid
 				cp = restartChild(cp, pid, fmt.Sprintf("child %d crashed", pid), true, wasReady)
 				if cp == nil {
-					signal.Stop(sigCh)
-					return
+					// CRITICAL FIX: Never exit watchdog - wait and retry
+					util.LogModuleError("main", "watchdog: restart returned nil, waiting 30s before retry")
+					time.Sleep(30 * time.Second)
+					continue
+				}
+				if cp.proc.Pid == oldPid {
+					util.LogModuleWarn("main", "watchdog: restart failed (pid unchanged), waiting 30s before retry")
+					time.Sleep(30 * time.Second)
+					continue
 				}
 				pid = cp.proc.Pid
 				spawnTime = time.Now()
@@ -1443,10 +1488,18 @@ func runWatchdogMode() {
 			// Check ready timeout: child has not signaled ready within the limit.
 			if !cp.ready.Load() && time.Since(spawnTime) > childReadyTimeout {
 				// Child still running but stuck — pass alreadyExited=false, wasReady=false
+				oldPid := pid
 				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout), false, false)
 				if cp == nil {
-					signal.Stop(sigCh)
-					return
+					// CRITICAL FIX: Never exit watchdog - wait and retry
+					util.LogModuleError("main", "watchdog: restart returned nil, waiting 30s before retry")
+					time.Sleep(30 * time.Second)
+					continue
+				}
+				if cp.proc.Pid == oldPid {
+					util.LogModuleWarn("main", "watchdog: restart failed (pid unchanged), waiting 30s before retry")
+					time.Sleep(30 * time.Second)
+					continue
 				}
 				pid = cp.proc.Pid
 				spawnTime = time.Now()
@@ -1457,10 +1510,18 @@ func runWatchdogMode() {
 				lastHB := time.Unix(0, cp.lastHB.Load())
 				if time.Since(lastHB) > childHeartbeatTimeout {
 					// Child still running but stuck — pass alreadyExited=false, wasReady=true
+					oldPid := pid
 					cp = restartChild(cp, pid, fmt.Sprintf("child %d heartbeat timeout (%v)", pid, childHeartbeatTimeout), false, true)
 					if cp == nil {
-						signal.Stop(sigCh)
-						return
+						// CRITICAL FIX: Never exit watchdog - wait and retry
+						util.LogModuleError("main", "watchdog: restart returned nil, waiting 30s before retry")
+						time.Sleep(30 * time.Second)
+						continue
+					}
+					if cp.proc.Pid == oldPid {
+						util.LogModuleWarn("main", "watchdog: restart failed (pid unchanged), waiting 30s before retry")
+						time.Sleep(30 * time.Second)
+						continue
 					}
 					pid = cp.proc.Pid
 					spawnTime = time.Now()

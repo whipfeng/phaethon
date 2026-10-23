@@ -71,26 +71,9 @@ func InteractiveInit() error {
 		return fmt.Errorf("保存 Mesh 配置失败: %w", err)
 	}
 
-	// 询问是否导入现有配置
-	fmt.Print("是否导入现有配置？(y/N): ")
-	importStr, _ := reader.ReadString('\n')
-	importStr = strings.TrimSpace(strings.ToLower(importStr))
-
-	if importStr == "y" || importStr == "yes" {
-		fmt.Print("配置文件路径: ")
-		configPath, _ := reader.ReadString('\n')
-		configPath = strings.TrimSpace(configPath)
-
-		if err := ImportYAML(configPath); err != nil {
-			fmt.Printf("导入配置失败: %v\n", err)
-			fmt.Println("将使用当前已保存的配置启动")
-		} else {
-			fmt.Println("导入配置成功")
-		}
-	}
-
 	fmt.Println()
 	fmt.Println("初始化完成！")
+	fmt.Println("请通过 Admin API 或控制台 UI 管理配置（代理、映射、规则等）")
 
 	return nil
 }
@@ -102,14 +85,8 @@ func generateNodeID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// ImportYAML 从 YAML 配置文件导入到数据库（全量替换）
-func ImportYAML(path string) error {
-	conf, err := config.LoadRaw(path)
-	if err != nil {
-		return fmt.Errorf("读取配置失败: %w", err)
-	}
-	return ImportRuleConf(conf)
-}
+// ImportYAML has been removed. Configuration is now managed through the admin API
+// using fine-grained operations (PutProxy, PutMapping, etc.).
 
 // InitDefault 使用默认配置初始化（非交互式）
 func InitDefault() error {

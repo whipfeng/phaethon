@@ -528,7 +528,49 @@ POST /api/import    # 从 YAML 导入配置
    - Rules API 端点 - 使用 `db.ListRules()`, `db.PutRule()`, `db.DeleteRuleByIndex()`
    - 消除了配置验证死锁问题
 
-2. **消除启动时全量加载** 🚧 待实施
+2. **消除配置导出API的全量加载** ✅
+   - `apiConfig()` 已删除（冗余API）
+   - `apiConfigRaw()` 直接查询各bucket构造RuleConfiguration
+   - 前端改用细粒度API（`/api/config/admin`, `/api/config/mesh`等）
+
+3. **UI清理：config页面改为只读导出** ✅
+   - 移除编辑功能（PUT /api/config/raw已不支持）
+   - 移除重置功能（POST /api/config/reset已不存在）
+   - 改为只读显示+复制+下载YAML
+
+**待实施的重构：**
+
+4. **运行时状态全部落库** 🚧 待实施
+   - **核心原则**：数据库是唯一事实源，所有状态（配置+运行时）都存储在数据库
+   - **新增bucket**：
+     - `proxy_health` - 代理健康状态（alive, latency, lastCheck, failCount）
+     - `subscription_nodes` - 订阅节点池（从订阅URL拉取的节点列表）
+   - **更新时机**：
+     - 健康检查完成后，异步批量写入 `proxy_health`
+     - 订阅拉取完成后，写入 `subscription_nodes`
+   - **优势**：
+     - 重启后自动恢复所有状态
+     - 无内存缓存，无一致性问题
+     - 代码简化，不需要维护 `s.runtime`
+   
+   ```go
+   // 健康状态存储
+   // Bucket: proxy_health
+   // Key: {groupName}:{proxyName}
+   // Value: JSON {alive, latency, lastCheck, failCount}
+   db.PutProxyHealth(groupName, proxyName, &ProxyHealth{...})
+   health, _ := db.GetProxyHealth(groupName, proxyName)
+   healths, _ := db.ListProxyHealthByGroup(groupName)
+   
+   // 订阅节点池存储
+   // Bucket: subscription_nodes
+   // Key: subscriptionName
+   // Value: JSON {nodes: [...], lastUpdate: ...}
+   db.PutSubscriptionNodes(subName, nodes)
+   nodes, _ := db.GetSubscriptionNodes(subName)
+   ```
+
+5. **消除启动时全量加载** 🚧 待实施
    - 当前：`main.go` 启动时调用 `db.LoadConf()` 加载完整配置，传递给各组件
    - 目标：各组件自己查询需要的配置
    ```go
@@ -546,24 +588,9 @@ POST /api/import    # 从 YAML 导入配置
    server.StartTrojan(meshCfg, mapping, ...)
    ```
 
-3. **消除配置导出时的全量加载** 🚧 待实施
-   - 当前：`apiConfig()` 和 `apiConfigRaw()` 调用 `db.LoadConf()` 加载完整配置
-   - 目标：直接查询各bucket构造导出结构
-   ```go
-   // 重构前
-   conf, _ := db.LoadConf()
-   result := sanitizeConfig(conf)
-   
-   // 重构后
-   proxies, _ := db.ListProxies()
-   rules, _ := db.ListRules()
-   mappings, _ := db.ListMappings()
-   // ... 直接构造 result map
-   ```
-
-4. **消除运行时缓存 s.runtime** 🚧 待实施方案B
+6. **消除运行时缓存 s.runtime** 🚧 待实施
    - 当前：`AdminServer.runtime` 保存完整配置缓存，reload时保留健康状态
-   - 目标：完全消除缓存，每次查询DB，健康状态单独存储
+   - 目标：完全消除缓存，每次查询DB
    ```go
    // 重构前
    type AdminServer struct {
@@ -572,25 +599,28 @@ POST /api/import    # 从 YAML 导入配置
    
    // 重构后
    type AdminServer struct {
-       healthStore *HealthStore  // 只存储运行时健康状态
+       // 无runtime字段，按需查询DB
    }
    // 需要ProxyGroups时直接查询DB
    groups, _ := db.ListProxyGroups()
-   health := s.healthStore.Get(groupName)
+   // 需要健康状态时查询proxy_health bucket
+   health, _ := db.GetProxyHealth(groupName, proxyName)
    ```
 
 ## 下一步
 
-1. **Phase A 实施**：识别高频访问模式，实现 ProxyCache、RuleCache
-2. **逐步迁移**：从 admin API 开始，逐步替换 `conf.Xxx` 为直接查询
-3. **测试验证**：每个组件迁移后部署测试，确保功能正常
-4. **性能监控**：对比迁移前后的性能，验证 mmap 性能足够
+1. **Phase 1: 运行时状态落库** - 创建proxy_health和subscription_nodes bucket，实现DB操作函数
+2. **Phase 2: 修改健康检查和订阅拉取逻辑** - 完成后写入数据库
+3. **Phase 3: 消除s.runtime** - 修改所有使用s.runtime的地方，改为查询数据库
+4. **Phase 4: 消除启动时全量加载** - 修改main.go启动逻辑
+5. **测试验证**：每个阶段迁移后部署测试，确保功能正常
 
 ## 时间估算（更新）
 
-- Phase A（组件级直接查询）：3-5 天
-- Phase B（消除 LoadConf）：1-2 天
-- Phase C（清理结构体）：1 天
+- Phase 1（运行时状态落库）：1-2 天
+- Phase 2（修改健康检查和订阅拉取）：1 天
+- Phase 3（消除s.runtime）：2-3 天
+- Phase 4（消除启动时全量加载）：1 天
 - 测试验证：2-3 天
 
-**总计：7-11 天**
+**总计：7-10 天**

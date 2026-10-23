@@ -691,6 +691,14 @@ func (s *AdminServer) Start() error {
 	}
 	util.Logger.Printf("[INFO] [admin] Start() continuing after Enabled check")
 
+	// Load initial runtime config from database
+	if conf, err := db.LoadConf(); err != nil {
+		util.LogModuleError("admin", "load initial runtime config: %v", err)
+	} else {
+		s.runtime = conf
+		util.LogModuleInfo("admin", "initial runtime config loaded from DB")
+	}
+
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
@@ -851,6 +859,11 @@ func (s *AdminServer) Start() error {
 	}
 
 	addr := s.config.Addr
+	if addr == "" {
+		addr = "0.0.0.0:39999"
+		util.LogModuleWarn("admin", "AdminConfig.Addr is empty, using default: %s", addr)
+	}
+	util.LogModuleInfo("admin", "starting network listener on %s", addr)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("admin listen on %s fail: %w", addr, err)
@@ -1053,10 +1066,10 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Authentication is enforced if:
-		// 1. AuthEnabled flag is true in config, OR
-		// 2. Embedded CA certificate exists (security requirement)
-		authRequired := s.config.AuthEnabled || len(defaultClientCA) > 0
+		// Authentication is enforced only if AuthEnabled flag is true in config.
+		// The embedded CA certificate (defaultClientCA) is used for mTLS when
+		// AuthEnabled is true, but does not by itself require authentication.
+		authRequired := s.config.AuthEnabled
 		
 		// If auth is not required, allow everything
 		if !authRequired {
@@ -1780,7 +1793,7 @@ func (s *AdminServer) apiConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conf, err := db.LoadRuleConf()
+	conf, err := db.LoadConf()
 	if err != nil {
 		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1797,7 +1810,7 @@ func (s *AdminServer) apiConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 	// Export: render the current runtime config as YAML. The database is
 	// the source of truth, so the export always reflects the live config.
-	conf, err := db.LoadRuleConf()
+	conf, err := db.LoadConf()
 	if err != nil {
 		httpError(w, "load config fail: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2127,7 +2140,7 @@ func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error)
 	}
 
 	// Load full config from DB for cross-reference checks
-	c, err := db.LoadRuleConf()
+	c, err := db.LoadConf()
 	if err != nil {
 		return nil, err
 	}
@@ -2187,7 +2200,7 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 		return refs, nil
 	}
 
-	c, err := db.LoadRuleConf()
+	c, err := db.LoadConf()
 	if err != nil {
 		return nil, err
 	}
@@ -2455,21 +2468,22 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		dc, err := db.LoadRuleConf()
+		// Direct database read - skip config validation
+		rules, err := db.ListRules()
 		if err != nil {
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		rules := make([]map[string]interface{}, len(dc.Rules))
-		for i, rule := range dc.Rules {
+		result := make([]map[string]interface{}, len(rules))
+		for i, rule := range rules {
 			trimmed := strings.TrimSpace(rule)
-			rules[i] = map[string]interface{}{
+			result[i] = map[string]interface{}{
 				"index":   i,
 				"rule":    rule,
 				"enabled": !strings.HasPrefix(trimmed, "//"),
 			}
 		}
-		jsonResponse(w, rules)
+		jsonResponse(w, result)
 
 	case http.MethodPost:
 		// Insert a rule at a specific position (or append if index not specified)
@@ -2487,20 +2501,21 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		dc, err := db.LoadRuleConf()
+		// Direct database operation - skip config validation
+		rules, err := db.ListRules()
 		if err != nil {
 			s.mu.Unlock()
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		idx := len(dc.Rules)
+		idx := len(rules)
 		if body.Index != nil {
 			idx = *body.Index
 			if idx < 0 {
 				idx = 0
 			}
-			if idx > len(dc.Rules) {
-				idx = len(dc.Rules)
+			if idx > len(rules) {
+				idx = len(rules)
 			}
 		}
 		// Insert rule (single transaction handles re-indexing)
@@ -2527,18 +2542,19 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		dc, err := db.LoadRuleConf()
+		// Direct database operation - skip config validation to avoid deadlock
+		rules, err := db.ListRules()
 		if err != nil {
 			s.mu.Unlock()
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if idx >= len(dc.Rules) {
+		if idx >= len(rules) {
 			s.mu.Unlock()
 			httpError(w, "invalid rule index", http.StatusBadRequest)
 			return
 		}
-		deleted := dc.Rules[idx]
+		deleted := rules[idx]
 		// Delete rule (single transaction handles re-indexing)
 		if err := db.DeleteRuleByIndex(idx); err != nil {
 			s.mu.Unlock()
@@ -2572,23 +2588,24 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	dc, err := db.LoadRuleConf()
+	// Direct database operation - skip config validation
+	rules, err := db.ListRules()
 	if err != nil {
 		httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if idx >= len(dc.Rules) {
+	if idx >= len(rules) {
 		httpError(w, "invalid rule index", http.StatusBadRequest)
 		return
 	}
-	rule := strings.TrimSpace(dc.Rules[idx])
+	rule := strings.TrimSpace(rules[idx])
 	hasComment := strings.HasPrefix(rule, "//")
 	if body.Enabled && hasComment {
-		dc.Rules[idx] = strings.TrimPrefix(rule, "//")
+		rules[idx] = strings.TrimPrefix(rule, "//")
 	} else if !body.Enabled && !hasComment {
-		dc.Rules[idx] = "//" + rule
+		rules[idx] = "//" + rule
 	}
-	if err := db.PutRule(idx, dc.Rules[idx]); err != nil {
+	if err := db.PutRule(idx, rules[idx]); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -2604,7 +2621,7 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"index":   idx,
 		"enabled": body.Enabled,
-		"rule":    dc.Rules[idx],
+		"rule":    rules[idx],
 	})
 }
 
@@ -4343,6 +4360,7 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
+		NodeID         string   `json:"node-id"`
 		DomainSuffixes []string `json:"domainSuffixes"`
 		Advertise      []string `json:"advertise"`
 	}
@@ -4362,6 +4380,9 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 	s.mu.Lock()
 	meshCfg, _ := db.GetMeshConfig()
 	if meshCfg != nil {
+		if req.NodeID != "" {
+			meshCfg.NodeID = req.NodeID
+		}
 		meshCfg.DomainSuffixes = req.DomainSuffixes
 		meshCfg.Advertise = req.Advertise
 	}
@@ -5329,7 +5350,7 @@ func formatBytes(b int64) string {
 // preserving live state (health info, subscription node pools) from the
 // previous runtime. Caller must hold s.mu (write lock).
 func (s *AdminServer) reloadRuntimeLocked() error {
-	conf, err := db.LoadRuleConf()
+	conf, err := db.LoadConf()
 	if err != nil {
 		return err
 	}

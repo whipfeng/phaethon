@@ -257,9 +257,9 @@ func TestRulesOrderedByIndex(t *testing.T) {
 		}
 	}
 
-	conf, err := LoadRuleConf()
+	conf, err := LoadConf()
 	if err != nil {
-		t.Fatalf("LoadRuleConf failed: %v", err)
+		t.Fatalf("LoadConf failed: %v", err)
 	}
 	want := []string{"idx0", "idx1", "idx9", "idx15"}
 	if len(conf.Rules) != len(want) {
@@ -275,9 +275,9 @@ func TestRulesOrderedByIndex(t *testing.T) {
 	if err := DeleteRule(1); err != nil {
 		t.Fatalf("DeleteRule failed: %v", err)
 	}
-	conf, err = LoadRuleConf()
+	conf, err = LoadConf()
 	if err != nil {
-		t.Fatalf("LoadRuleConf failed: %v", err)
+		t.Fatalf("LoadConf failed: %v", err)
 	}
 	if len(conf.Rules) != 3 || conf.Rules[1] != "idx9" {
 		t.Errorf("rules after delete = %v", conf.Rules)
@@ -329,7 +329,7 @@ func TestIsEmptyConfig(t *testing.T) {
 	}
 }
 
-func TestLoadRuleConfEmpty(t *testing.T) {
+func TestLoadConfEmpty(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -338,9 +338,9 @@ func TestLoadRuleConfEmpty(t *testing.T) {
 	}
 	defer Close()
 
-	conf, err := LoadRuleConf()
+	conf, err := LoadConf()
 	if err != nil {
-		t.Fatalf("LoadRuleConf on empty db failed: %v", err)
+		t.Fatalf("LoadConf on empty db failed: %v", err)
 	}
 	if conf.Admin != nil || conf.Mesh != nil || conf.TUN != nil {
 		t.Errorf("scalar sections should be nil on empty db: %+v", conf)

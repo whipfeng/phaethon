@@ -19,7 +19,7 @@ var (
 )
 
 // KeyRebuilt 是 ReplaceAllConfig 提交后发出的合成事件 key，
-// 重建 watcher 收到即全量 LoadRuleConf。
+// 重建 watcher 收到即全量 LoadConf。
 const KeyRebuilt = "__rebuilt__"
 
 // ===== 事务内 JSON 读写（调用方负责事务生命周期）=====
@@ -464,7 +464,7 @@ func DeleteRule(index int) error {
 	return DeleteRuleByIndex(index)
 }
 
-// listRulesTx 在事务内读取所有规则（供 LoadRuleConf 使用）
+// listRulesTx 在事务内读取所有规则（供 LoadConf 使用）
 func listRulesTx(tx *bolt.Tx) ([]string, error) {
 	b := tx.Bucket(BucketRules)
 	if b == nil {
@@ -507,10 +507,10 @@ func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error)
 
 // ===== 整份配置装配 =====
 
-// LoadRuleConf 从数据库全量装配 *config.RuleConfiguration 并执行 Init()。
+// LoadConf 从数据库全量装配 *config.RuleConfiguration 并执行 Init()。
 // 所有 bucket 在同一个只读事务中读取，保证快照一致。
 // 缺失的节保持零值（Admin/TUN/Mesh 为 nil，列表为空）。
-func LoadRuleConf() (*config.RuleConfiguration, error) {
+func LoadConf() (*config.RuleConfiguration, error) {
 	conf := &config.RuleConfiguration{}
 	err := View(func(tx *bolt.Tx) error {
 		var err error

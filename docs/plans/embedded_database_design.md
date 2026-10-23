@@ -511,9 +511,73 @@ POST /api/import    # 从 YAML 导入配置
 
 - ❌ 禁止新增使用 `*config.RuleConfiguration` 作为中间传递结构的代码
 - ❌ 禁止在 API handler 中调用 `LoadConf()` 读取配置（应直接查询数据库）
-- ❌ 禁止维护全局的 `activeConf` 或 `res.conf`（各组件应持有自己的缓存或引用）
+- ❌ 禁止维护全局的 `activeConf`、`res.conf` 或 `s.runtime`（各组件应直接查询数据库）
+- ❌ 禁止在启动时加载完整配置传递给各组件（各组件应查询自己需要的配置）
+- ❌ 禁止为了导出配置而加载完整RuleConfiguration结构（应直接查询各bucket构造导出）
 - ✅ 新增功能应直接查询数据库（`db.GetXxx()`、`db.ListXxx()`）
 - ✅ 高频读取场景应设计按需缓存（按 bucket 独立）
+- ✅ 运行时状态（如健康信息）应与配置分离，单独存储在内存map中
+
+### 架构重构记录（2026-10-23）
+
+**已完成的优化：**
+
+1. **Admin API 直接查询数据库** ✅
+   - `findProxyReferences()` - 使用 `db.ListProxies()`, `db.ListRules()`, `db.ListMappings()`, `db.ListReverseConfigs()`
+   - `findGroupReferences()` - 使用 `db.ListProxyGroups()`, `db.ListRules()`, `db.ListProxies()`, `db.ListMappings()`, `db.ListReverseConfigs()`
+   - Rules API 端点 - 使用 `db.ListRules()`, `db.PutRule()`, `db.DeleteRuleByIndex()`
+   - 消除了配置验证死锁问题
+
+2. **消除启动时全量加载** 🚧 待实施
+   - 当前：`main.go` 启动时调用 `db.LoadConf()` 加载完整配置，传递给各组件
+   - 目标：各组件自己查询需要的配置
+   ```go
+   // 重构前
+   conf, _ := db.LoadConf()
+   startEngine(conf, ...)
+   server.StartTrojan(conf, ...)
+   
+   // 重构后
+   meshCfg := db.GetMeshConfig()
+   tunCfg := db.GetTUNConfig()
+   proxies, _ := db.ListProxies()
+   mappings, _ := db.ListMappings()
+   startEngine(meshCfg, tunCfg, ...)
+   server.StartTrojan(meshCfg, mapping, ...)
+   ```
+
+3. **消除配置导出时的全量加载** 🚧 待实施
+   - 当前：`apiConfig()` 和 `apiConfigRaw()` 调用 `db.LoadConf()` 加载完整配置
+   - 目标：直接查询各bucket构造导出结构
+   ```go
+   // 重构前
+   conf, _ := db.LoadConf()
+   result := sanitizeConfig(conf)
+   
+   // 重构后
+   proxies, _ := db.ListProxies()
+   rules, _ := db.ListRules()
+   mappings, _ := db.ListMappings()
+   // ... 直接构造 result map
+   ```
+
+4. **消除运行时缓存 s.runtime** 🚧 待实施方案B
+   - 当前：`AdminServer.runtime` 保存完整配置缓存，reload时保留健康状态
+   - 目标：完全消除缓存，每次查询DB，健康状态单独存储
+   ```go
+   // 重构前
+   type AdminServer struct {
+       runtime *config.RuleConfiguration  // 完整配置缓存
+   }
+   
+   // 重构后
+   type AdminServer struct {
+       healthStore *HealthStore  // 只存储运行时健康状态
+   }
+   // 需要ProxyGroups时直接查询DB
+   groups, _ := db.ListProxyGroups()
+   health := s.healthStore.Get(groupName)
+   ```
 
 ## 下一步
 

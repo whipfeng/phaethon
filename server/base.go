@@ -14,8 +14,7 @@ import (
 
 // BaseServer holds fields common to all protocol servers.
 type BaseServer struct {
-	RuleConf *config.RuleConfiguration
-	Mapping  *config.Mapping
+	Mapping *config.Mapping
 }
 
 // MeshDialWithModeB dials through mesh and handles Mode B registration automatically.

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"phaethon/config"
 	"phaethon/mesh"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -131,7 +130,7 @@ func TestUDPForwarderRegistered(t *testing.T) {
 // TestEngineStartStop exercises Engine lifecycle without requiring admin/TUN device.
 // It verifies that Start() fails gracefully when not admin (expected on CI).
 func TestEngineStartStop(t *testing.T) {
-	engine := NewEngine(nil)
+	engine := NewEngine()
 
 	err := engine.Start()
 	if err == nil {
@@ -145,20 +144,11 @@ func TestEngineStartStop(t *testing.T) {
 	}
 }
 
-// TestEngineUDPWithRuleConfig tests handleUDP path through rule matching
-// using a mock rule configuration.
+// TestEngineUDPWithRuleConfig tests engine creation and basic state.
 func TestEngineUDPWithRuleConfig(t *testing.T) {
-	rc := &config.RuleConfiguration{
-		Proxies: []*config.Proxy{
-			{Name: "test-direct", Type: "DIRECT"},
-		},
-	}
-	engine := NewEngine(rc)
+	engine := NewEngine()
 
-	// Verify engine creation doesn't panic and fields are set
-	if engine.ruleConf == nil {
-		t.Fatal("ruleConf should be set")
-	}
+	// Verify engine creation doesn't panic
 	if engine.netstack != nil && engine.netstack.IsRunning() {
 		t.Error("engine should not be running yet")
 	}

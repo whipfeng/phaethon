@@ -385,12 +385,12 @@ func startMinimalChain(t *testing.T) (*e2eEchoServer, *e2eStubTrojanServer, *ser
 		t.Fatalf("config init: %v", err)
 	}
 
-	rvSrv, err := server.StartReverseMapping(ruleConf, ruleConf.Mappings[0])
+	rvSrv, err := server.StartReverseMapping(ruleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("reverse start: %v", err)
 	}
 
-	entryLn, err := server.StartSocks5(ruleConf, ruleConf.Mappings[1])
+	entryLn, err := server.StartSocks5(ruleConf.Mappings[1])
 	if err != nil {
 		t.Fatalf("entry start: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestReverseUDPE2E_MidProxy(t *testing.T) {
 	if err := middleRuleConf.Init(); err != nil {
 		t.Fatalf("middle config: %v", err)
 	}
-	middleLn, err := server.StartSocks5(middleRuleConf, middleRuleConf.Mappings[0])
+	middleLn, err := server.StartSocks5(middleRuleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("middle start: %v", err)
 	}
@@ -635,13 +635,13 @@ func TestReverseUDPE2E_MidProxy(t *testing.T) {
 		t.Fatalf("config init: %v", err)
 	}
 
-	rvSrv, err := server.StartReverseMapping(ruleConf, ruleConf.Mappings[0])
+	rvSrv, err := server.StartReverseMapping(ruleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("reverse start: %v", err)
 	}
 	defer rvSrv.Close()
 
-	entryLn, err := server.StartSocks5(ruleConf, ruleConf.Mappings[1])
+	entryLn, err := server.StartSocks5(ruleConf.Mappings[1])
 	if err != nil {
 		t.Fatalf("entry start: %v", err)
 	}

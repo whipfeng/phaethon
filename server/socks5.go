@@ -14,6 +14,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/reverse"
 	"phaethon/util"
@@ -168,7 +169,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 			return
 		}
 		// Data connection: PORT=0 only, goes to Registry
-		if !s.RuleConf.HasReverseAddress(dstAddr) {
+		if !db.HasReverseAddress(dstAddr) {
 			// Fallback: check if this is a dynamically allocated address
 			if GlobalControlManager == nil || !GlobalControlManager.IsDynamicAddress(dstAddr) {
 				sendSocks5Response(clientConn, 0x05) // connection refused
@@ -265,7 +266,6 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 	relay := &socks5UDPRelay{
 		clientConn:  clientConn,
 		clientLn:    clientLn,
-		ruleConf:    s.RuleConf,
 		mapping:     s.Mapping,
 		proxyConns:  make(map[string]*udpProxyConn),
 		seenTargets: util.NewFIFOSet(maxSeenTargets),
@@ -314,11 +314,10 @@ type udpProxyConn struct {
 const maxSeenTargets = 64
 
 // socks5UDPRelay handles UDP packet forwarding for a single SOCKS5 UDP ASSOCIATE session.
-// It routes client packets through proxy chains based on RuleConf.Match.
+// It routes client packets through proxy chains based on db.ResolveMatch.
 type socks5UDPRelay struct {
 	clientConn   net.Conn
 	clientLn     net.PacketConn // receives client SOCKS5 UDP requests
-	ruleConf     *config.RuleConfiguration
 	mapping      *config.Mapping
 	proxyConns   map[string]*udpProxyConn // proxy name -> downstream PacketConn
 	seenTargets  *util.FIFOSet            // targets already logged (FIFO, capped at maxSeenTargets)
@@ -430,7 +429,11 @@ func (r *socks5UDPRelay) run() {
 
 		data := buf[offset:n]
 		util.LogModuleDebug("socks5", "UDP RX from=%s to=%s:%d n=%d", r.mapping.Name, srcAddr, dstAddr, dstPort, len(data))
-		req, proxy, matchResult := r.ruleConf.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), r.mapping)
+		req, proxy, matchResult, err := db.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), r.mapping.Name)
+		if err != nil {
+			util.LogModuleWarn("socks5", "[%s] resolve match failed: %v", r.mapping.Name, err)
+			continue
+		}
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}
@@ -701,7 +704,7 @@ func (r *socks5UDPRelay) Close() {
 	})
 }
 
-func StartSocks5(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
-	srv := &Socks5Server{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+func StartSocks5(mapping *config.Mapping) (net.Listener, error) {
+	srv := &Socks5Server{BaseServer: BaseServer{Mapping: mapping}}
 	return startTCP(mapping.Port, srv)
 }

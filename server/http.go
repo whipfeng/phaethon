@@ -142,12 +142,12 @@ func parseHostPort(hostPort string, defaultPort int) (string, int) {
 	return host, port
 }
 
-func StartHTTP(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
-	srv := &HttpProxyServer{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+func StartHTTP(mapping *config.Mapping) (net.Listener, error) {
+	srv := &HttpProxyServer{BaseServer: BaseServer{Mapping: mapping}}
 	return startTCP(mapping.Port, srv)
 }
 
-func StartHTTPS(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
-	srv := &HttpProxyServer{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+func StartHTTPS(mapping *config.Mapping) (net.Listener, error) {
+	srv := &HttpProxyServer{BaseServer: BaseServer{Mapping: mapping}}
 	return startTLS(mapping.Port, srv)
 }

@@ -29,7 +29,7 @@ type meshTestHandler struct {
 	meshGot chan []byte
 }
 
-func (h *meshTestHandler) HandleMeshFrame(fromNodeID string, f []byte) {
+func (h *meshTestHandler) HandleMeshFrame(fromNodeID string, linkNIC *mesh.LinkNIC, f []byte) {
 	h.mu.Lock()
 	s := h.send
 	h.mu.Unlock()
@@ -44,6 +44,12 @@ func (h *meshTestHandler) HandleTopologyGossip(sender mesh.PeerSender, data []by
 func (h *meshTestHandler) HandleProbe(sender mesh.PeerSender, data []byte) {}
 
 func (h *meshTestHandler) HandleProbeReply(sender mesh.PeerSender, data []byte) {}
+
+func (h *meshTestHandler) CreateLinkNIC(sender mesh.PeerSender, nodeID, subnet string) *mesh.LinkNIC {
+	return nil
+}
+
+func (h *meshTestHandler) DeleteLinkNIC(linkNIC *mesh.LinkNIC) {}
 
 func (h *meshTestHandler) RegisterPeer(sender mesh.PeerSender) {
 	h.mu.Lock()
@@ -100,8 +106,7 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	srv := &HTunnelServer{
 		BaseServer: BaseServer{
-			RuleConf: &config.RuleConfiguration{},
-			Mapping:  &config.Mapping{Name: "ht-mesh-test", Port: port},
+			Mapping: &config.Mapping{Name: "ht-mesh-test", Port: port},
 		},
 		Password: "testpw",
 	}

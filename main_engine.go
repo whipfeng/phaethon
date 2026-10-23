@@ -61,7 +61,7 @@ func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, 
 		util.LogModuleInfo("engine", "TUN disabled, starting gVisor netstack for mesh...")
 	}
 
-	engine := tun.NewEngine(ruleConf)
+	engine := tun.NewEngine()
 	engine.SetDataDir(dataDir)
 
 	// Create and set the netstack before starting the engine

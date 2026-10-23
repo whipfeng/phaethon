@@ -16,6 +16,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/reverse"
 	"phaethon/util"
@@ -493,7 +494,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 				util.LogModuleInfo("htunnel", "[%s] reverse rejected: invalid port %d (only 0, 1, or 2 allowed)", s.Mapping.Name, port)
 				return
 			}
-			if port == reverse.BindPortData && !s.RuleConf.HasReverseAddress(address) {
+			if port == reverse.BindPortData && !db.HasReverseAddress(address) {
 				return // address not supported, close connection
 			}
 			ch.mu.Lock()
@@ -516,7 +517,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 			connOk = true
 		} else {
 			if !hasTarget {
-				targetConn, rec, err := connectHTTarget(s.RuleConf, s.Mapping, address, port, ch.connID)
+				targetConn, rec, err := connectHTTarget(s.Mapping, address, port, ch.connID)
 				if err != nil {
 					util.LogModuleError("htunnel", "[%s] [%s] connect target fail %s:%d: %v", s.Mapping.Name, ch.connID, address, port, err)
 					failed = true
@@ -865,8 +866,10 @@ func (s *HTunnelServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 			if err == nil && len(payload) > 0 {
 				host, portStr, _ := net.SplitHostPort(targetAddr.String())
 				port, _ := strconv.Atoi(portStr)
-				req, proxy, matchResult := s.RuleConf.ResolveMatch(config.NewConnectRequest("udp", host, port), s.Mapping)
-				if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyREJECT {
+				req, proxy, matchResult, err := db.ResolveMatch(config.NewConnectRequest("udp", host, port), s.Mapping.Name)
+				if err != nil {
+					util.LogModuleWarn("htunnel", "[%s] UDP resolve match failed: %v", s.Mapping.Name, err)
+				} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyREJECT {
 					// Session-level record: idempotent, so the first resolved target wins.
 					// Under ch.mu so Close (from closeChannel) cannot race Establish.
 					ch.mu.Lock()
@@ -995,17 +998,23 @@ func (s *HTunnelServer) getContentSeq(r *http.Request) int {
 	return seq
 }
 
-func StartHTunnel(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
+func StartHTunnel(mapping *config.Mapping) (net.Listener, error) {
 	addr := fmt.Sprintf(":%d", mapping.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 
+	// Load HTunnel config from DB
+	var htConfig *config.HTunnelConfig
+	if conf, confErr := db.LoadConf(); confErr == nil && conf != nil {
+		htConfig = conf.HTunnel
+	}
+
 	srv := &HTunnelServer{
-		BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping},
+		BaseServer: BaseServer{Mapping: mapping},
 		Password:   mapping.Password,
-		htConfig:   ruleConf.HTunnel, // v0.2.0: pass h_tunnel config
+		htConfig:   htConfig,
 	}
 
 	httpSrv := &http.Server{
@@ -1103,7 +1112,7 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 // and acceptTCP's Mode B lookup can attribute the connection to the real
 // client. Dialing directly with net.DialTimeout would bypass both — see
 // docs/plans/htunnel_p2p_direct_mode.md appendix A.4 (decision retracted).
-func connectHTTarget(ruleConf *config.RuleConfiguration, mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
+func connectHTTarget(mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
 	util.LogModuleInfo("htunnel", "[%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
 	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})
 	conn, err := dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name, mapping)

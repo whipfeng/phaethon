@@ -15,6 +15,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/reverse"
 	"phaethon/util"
@@ -125,7 +126,7 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 			return
 		}
 		// Data connection: PORT=0 only, goes to Registry
-		if !s.RuleConf.HasReverseAddress(dstAddr) {
+		if !db.HasReverseAddress(dstAddr) {
 			// Fallback: check if this is a dynamically allocated address
 			if GlobalControlManager == nil || !GlobalControlManager.IsDynamicAddress(dstAddr) {
 				return // address not supported, close connection
@@ -316,7 +317,11 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 			return
 		}
 
-		req, proxy, matchResult := s.RuleConf.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), s.Mapping)
+		req, proxy, matchResult, err := db.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), s.Mapping.Name)
+		if err != nil {
+			util.LogModuleWarn("trojan", "[%s] UDP resolve match failed: %v", s.Mapping.Name, err)
+			continue
+		}
 		if proxy == nil || strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 			continue
 		}
@@ -441,16 +446,16 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 	}
 }
 
-func StartTrojan(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
+func StartTrojan(mapping *config.Mapping) (net.Listener, error) {
 	srv := &TrojanServer{
-		BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping},
+		BaseServer: BaseServer{Mapping: mapping},
 		Password:   util.Sha224Hex(mapping.Password),
 	}
 	return startTLS(mapping.Port, srv)
 }
 
 // StartTrojanSNI starts a Trojan server with SNI-based routing for multiple mappings on the same port
-func StartTrojanSNI(ruleConf *config.RuleConfiguration, mappings []*config.Mapping, port int) (net.Listener, error) {
+func StartTrojanSNI(mappings []*config.Mapping, port int) (net.Listener, error) {
 	// Build SNI -> mapping/cert maps
 	sniCerts := make(map[string]*tls.Certificate)
 	sniMappings := make(map[string]*config.Mapping)
@@ -552,7 +557,7 @@ func StartTrojanSNI(ruleConf *config.RuleConfiguration, mappings []*config.Mappi
 
 				util.LogModuleInfo("trojan", "SNI=%q mapped to %s for %s", sni, m.Name, c.RemoteAddr())
 				srv := &TrojanServer{
-					BaseServer: BaseServer{RuleConf: ruleConf, Mapping: m},
+					BaseServer: BaseServer{Mapping: m},
 					Password:   util.Sha224Hex(m.Password),
 				}
 				srv.HandleConn(c)

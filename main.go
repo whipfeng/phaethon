@@ -438,7 +438,7 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 			// Single trojan, no SNI
 			m := trojanMappings[0]
 			util.LogModuleInfo("system", "Binding mapping: %+v", m)
-			ln, err := server.StartTrojan(conf, m)
+			ln, err := server.StartTrojan(m)
 			if err != nil {
 				util.LogModuleError("system", " bind trojan fail: %v", err)
 				continue
@@ -449,7 +449,7 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 			for _, m := range trojanMappings {
 				util.LogModuleInfo("system", "Binding mapping(SNI): %+v", m)
 			}
-			ln, err := server.StartTrojanSNI(conf, trojanMappings, port)
+			ln, err := server.StartTrojanSNI(trojanMappings, port)
 			if err != nil {
 				util.LogModuleError("system", " bind trojan-sni fail: %v", err)
 				continue
@@ -464,7 +464,7 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 
 		if m.ReverseAddress != "" {
 			// This mapping uses reverse outbound connections instead of TCP listener
-			rs, err := startReverseBinding(conf, m)
+			rs, err := startReverseBinding(m)
 			if err != nil {
 				util.LogModuleError("system", " bind reverse fail: %v", err)
 				continue
@@ -478,17 +478,17 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 		var err error
 		switch m.Type {
 		case "socks5":
-			ln, err = server.StartSocks5(conf, m)
+			ln, err = server.StartSocks5(m)
 		case "direct", "DIRECT":
-			ln, err = server.StartDirect(conf, m)
+			ln, err = server.StartDirect(m)
 		case "trojan":
-			ln, err = server.StartTrojan(conf, m)
+			ln, err = server.StartTrojan(m)
 		case "h_tunnel":
-			ln, err = server.StartHTunnel(conf, m)
+			ln, err = server.StartHTunnel(m)
 		case "http":
-			ln, err = server.StartHTTP(conf, m)
+			ln, err = server.StartHTTP(m)
 		case "https":
-			ln, err = server.StartHTTPS(conf, m)
+			ln, err = server.StartHTTPS(m)
 		default:
 			util.LogModuleError("system", " unsupported mapping type: %s", m.Type)
 			continue
@@ -563,8 +563,8 @@ func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResource
 
 // startReverseBinding starts a mapping using outbound reverse connections.
 // It delegates to server.StartReverseMapping which handles all protocol types.
-func startReverseBinding(conf *config.RuleConfiguration, m *config.Mapping) (*server.ReverseServer, error) {
-	return server.StartReverseMapping(conf, m)
+func startReverseBinding(m *config.Mapping) (*server.ReverseServer, error) {
+	return server.StartReverseMapping(m)
 }
 
 func writeDefaultConfig(path string) error {
@@ -1834,7 +1834,7 @@ func runReverseSession(rc *config.ReverseConfig, conf *config.RuleConfiguration,
 		Sni:                   req.ListenerSNI,
 	}
 
-	rvSrv, err := server.StartReverseMapping(conf, mapping)
+	rvSrv, err := server.StartReverseMapping(mapping)
 	if err != nil {
 		return fmt.Errorf("start reverse mapping fail: %w", err)
 	}
@@ -1929,17 +1929,19 @@ func wireAdminCallbacks(resources *activeResources) {
 		return
 	}
 	adminSrv := resources.adminServer
+	conf := resources.conf
 	adminSrv.RefreshSubscription = func(subName string) error {
-		conf, err := db.LoadConf()
-		if err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		for _, sub := range conf.Subscriptions {
-			if sub.Name == subName {
-				return refreshSubscription(conf, sub, subCacheDir)
+		var sub *config.Subscription
+		for _, s := range conf.Subscriptions {
+			if s.Name == subName {
+				sub = s
+				break
 			}
 		}
-		return fmt.Errorf("subscription not found: %s", subName)
+		if sub == nil {
+			return fmt.Errorf("subscription not found: %s", subName)
+		}
+		return refreshSubscription(conf, sub, subCacheDir)
 	}
 	adminSrv.CheckGroupHealth = func(groupName string) error {
 		g, err := db.GetProxyGroup(groupName)
@@ -2188,7 +2190,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			// Start new listener
 			if newMapping.IsEnabled() {
 				if newMapping.ReverseAddress != "" {
-					rs, err := startReverseBinding(resources.conf, newMapping)
+					rs, err := startReverseBinding(newMapping)
 					if err != nil {
 						util.LogModuleError("system", " bind reverse fail for %s: %v", newMapping.Name, err)
 					} else {
@@ -2200,17 +2202,17 @@ func wireAdminCallbacks(resources *activeResources) {
 					var err error
 					switch newMapping.Type {
 					case "socks5":
-						ln, err = server.StartSocks5(resources.conf, newMapping)
+						ln, err = server.StartSocks5(newMapping)
 					case "direct", "DIRECT":
-						ln, err = server.StartDirect(resources.conf, newMapping)
+						ln, err = server.StartDirect(newMapping)
 					case "trojan":
-						ln, err = server.StartTrojan(resources.conf, newMapping)
+						ln, err = server.StartTrojan(newMapping)
 					case "h_tunnel":
-						ln, err = server.StartHTunnel(resources.conf, newMapping)
+						ln, err = server.StartHTunnel(newMapping)
 					case "http":
-						ln, err = server.StartHTTP(resources.conf, newMapping)
+						ln, err = server.StartHTTP(newMapping)
 					case "https":
-						ln, err = server.StartHTTPS(resources.conf, newMapping)
+						ln, err = server.StartHTTPS(newMapping)
 					default:
 						err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
 					}

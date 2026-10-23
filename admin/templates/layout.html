@@ -39,11 +39,6 @@
                 <li><a href="./reverse" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
                 <li><a href="./package" hx-get="./package" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Package"}}class="active"{{end}} data-i18n="nav.package">📦 Package</a></li>
             </ul>
-            <div class="sidebar-footer">
-                <div class="sidebar-footer-actions">
-                    <a href="./config" hx-get="./config" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" class="btn btn-sm btn-outline" data-i18n="nav.rawConfig">📝 Raw Config</a>
-                </div>
-            </div>
         </nav>
         <main class="main-content">
             <header class="top-bar">
@@ -252,10 +247,6 @@
                     <a href="./package" class="drawer-item" hx-get="./package" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">📦</span>
                         <span class="label" data-i18n="nav.package">Package</span>
-                    </a>
-                    <a href="./config" class="drawer-item" hx-get="./config" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">⚙️</span>
-                        <span class="label" data-i18n="nav.rawConfig">Raw Config</span>
                     </a>
                 </div>
             </div>

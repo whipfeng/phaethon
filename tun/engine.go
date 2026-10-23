@@ -33,7 +33,8 @@ var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
-	ruleConf  *config.RuleConfiguration
+	tunConfig *config.TUNConfig
+	proxies   []*config.Proxy
 	device    Device
 	netstack  *mesh.Netstack
 	fakeIP    *mesh.FakeIPPool
@@ -86,13 +87,19 @@ type AdminHandler interface {
 // NewEngine creates a new TUN engine. It does not start anything yet.
 // Configuration is loaded from the database.
 func NewEngine() *Engine {
-	conf, err := db.LoadConf()
+	tunConfig, err := db.GetTUNConfig()
 	if err != nil {
-		util.LogModuleWarn("tun", "failed to load config from db: %v", err)
-		return &Engine{}
+		util.LogModuleWarn("tun", "failed to load TUN config from db: %v", err)
 	}
+
+	proxies, err := db.ListProxies()
+	if err != nil {
+		util.LogModuleWarn("tun", "failed to load proxies from db: %v", err)
+	}
+
 	return &Engine{
-		ruleConf: conf,
+		tunConfig: tunConfig,
+		proxies:   proxies,
 	}
 }
 
@@ -393,7 +400,10 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 // It uses configured direct-nameserver if available, otherwise falls back to
 // ResolveRouteAware which uses the original DNS servers captured at TUN startup.
 func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
-	servers := e.ruleConf.TUN.DirectNameserverList()
+	var servers []string
+	if e.tunConfig != nil {
+		servers = e.tunConfig.DirectNameserverList()
+	}
 	if len(servers) > 0 {
 		return resolveWithServers(domain, servers)
 	}
@@ -707,8 +717,8 @@ func (e *Engine) StartTUN() error {
 	// outbound sockets are bound to the correct physical interface by the
 	// dialer package, so proxy traffic does not loop back into TUN.
 	e.routeMgr = NewRouteManager(dev.Name(), dev.GUID())
-	if e.ruleConf != nil && e.ruleConf.TUN != nil {
-		e.routeMgr.bypassGateway = e.ruleConf.TUN.IsBypassGateway()
+	if e.tunConfig != nil {
+		e.routeMgr.bypassGateway = e.tunConfig.IsBypassGateway()
 	}
 	// On Windows the Wintun adapter LUID is available immediately; passing it in
 	// avoids waiting for the TCP/IP stack to register the adapter by name.
@@ -758,22 +768,22 @@ func (e *Engine) StartTUN() error {
 		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
 
-	if e.ruleConf != nil {
-		go dialer.PreWarmSSHProxies(e.ruleConf.Proxies)
+	if e.proxies != nil {
+		go dialer.PreWarmSSHProxies(e.proxies)
 	}
 
 	// Start DHCP server if bypass-gateway and DHCP are both enabled.
-	if e.ruleConf != nil && e.ruleConf.TUN != nil &&
-		e.ruleConf.TUN.IsBypassGateway() && e.ruleConf.TUN.IsDHCPEnabled() {
+	if e.tunConfig != nil &&
+		e.tunConfig.IsBypassGateway() && e.tunConfig.IsDHCPEnabled() {
 		ifaceName := ""
-		if e.ruleConf.TUN.DHCP != nil && e.ruleConf.TUN.DHCP.Interface != "" {
-			ifaceName = e.ruleConf.TUN.DHCP.Interface
+		if e.tunConfig.DHCP != nil && e.tunConfig.DHCP.Interface != "" {
+			ifaceName = e.tunConfig.DHCP.Interface
 		} else if e.routeMgr != nil {
 			ifaceName = e.routeMgr.DefaultIfaceName
 		}
 		dnsAddr2 := e.netstack.DNSAddr()
 		dnsIPIP := net.IP(dnsAddr2.AsSlice())
-		srv, err := newDHCPServer(ifaceName, e.ruleConf.TUN.DHCP, dnsIPIP, e.dataDir)
+		srv, err := newDHCPServer(ifaceName, e.tunConfig.DHCP, dnsIPIP, e.dataDir)
 		if err != nil {
 			util.LogModuleWarn("tun", "dhcp: failed to create server: %v", err)
 		} else if srv != nil {
@@ -799,7 +809,7 @@ func (e *Engine) Start() error {
 	if err := e.StartStack(); err != nil {
 		return err
 	}
-	tunEnabled := e.ruleConf != nil && e.ruleConf.TUN != nil && e.ruleConf.TUN.IsEnabled()
+	tunEnabled := e.tunConfig != nil && e.tunConfig.IsEnabled()
 	if tunEnabled {
 		if err := e.StartTUN(); err != nil {
 			// TUN failed, but keep netstack running for mesh-only mode.

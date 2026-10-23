@@ -2,7 +2,9 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 	"phaethon/config"
@@ -12,36 +14,48 @@ import (
 // RuleMatcher 是专门的规则匹配器
 // 只包含规则匹配需要的数据，不包含 Admin/TUN/ReverseConfigs 等无关配置
 type RuleMatcher struct {
-	conf *config.RuleConfiguration
+	proxies       []*config.Proxy
+	proxyGroups   []*config.ProxyGroup
+	subscriptions []*config.Subscription
+	rules         []string
+	mappings      []*config.Mapping
+	resolvers     []*config.Resolver
+	mesh          *config.MeshConfig
+
+	// Initialized fields (built from above data)
+	proxyNames        map[string]*config.Proxy
+	groupNames        map[string]*config.ProxyGroup
+	subscriptionNames map[string]*config.Subscription
+	matchers          []config.Matcher
+	matcherTimeRanges []config.TimeRange
+	matcherRules      []string
 }
 
 // BuildRuleMatcher 从数据库构建 RuleMatcher
 func BuildRuleMatcher() (*RuleMatcher, error) {
-	m := &RuleMatcher{
-		conf: &config.RuleConfiguration{},
-	}
+	m := &RuleMatcher{}
 
 	// 从数据库加载规则匹配需要的数据
 	err := View(func(tx *bolt.Tx) error {
 		var err error
 
 		// 加载代理
-		if m.conf.Proxies, err = listTx[config.Proxy](tx, BucketProxies); err != nil {
+		if m.proxies, err = listTx[config.Proxy](tx, BucketProxies); err != nil {
 			return fmt.Errorf("load proxies: %w", err)
 		}
 
 		// 加载代理组
-		if m.conf.ProxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
+		if m.proxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
 			return fmt.Errorf("load proxy groups: %w", err)
 		}
 
 		// 加载订阅（元数据 + 节点池）
-		if m.conf.Subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
+		if m.subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
 			return fmt.Errorf("load subscriptions: %w", err)
 		}
 		// 为每个订阅加载节点池到 SubProxies
-		for i := range m.conf.Subscriptions {
-			sub := m.conf.Subscriptions[i]
+		for i := range m.subscriptions {
+			sub := m.subscriptions[i]
 			nodes, err := GetSubscriptionNodes(sub.Name)
 			if err != nil {
 				return fmt.Errorf("load subscription nodes for %s: %w", sub.Name, err)
@@ -54,17 +68,17 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 		}
 
 		// 加载规则
-		if m.conf.Rules, err = listRulesTx(tx); err != nil {
+		if m.rules, err = listRulesTx(tx); err != nil {
 			return fmt.Errorf("load rules: %w", err)
 		}
 
 		// 加载映射
-		if m.conf.Mappings, err = listTx[config.Mapping](tx, BucketMappings); err != nil {
+		if m.mappings, err = listTx[config.Mapping](tx, BucketMappings); err != nil {
 			return fmt.Errorf("load mappings: %w", err)
 		}
 
 		// 加载解析器
-		if m.conf.Resolvers, err = listTx[config.Resolver](tx, BucketResolvers); err != nil {
+		if m.resolvers, err = listTx[config.Resolver](tx, BucketResolvers); err != nil {
 			return fmt.Errorf("load resolvers: %w", err)
 		}
 
@@ -75,7 +89,7 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 			if present, err := readScalarInto(cb, keyMesh, &mesh); err != nil {
 				return err
 			} else if present {
-				m.conf.Mesh = &mesh
+				m.mesh = &mesh
 			}
 		}
 
@@ -85,8 +99,8 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 		return nil, err
 	}
 
-	// 调用 Init() 构建对象关系
-	if err := m.conf.Init(); err != nil {
+	// 调用 init() 构建对象关系
+	if err := m.init(); err != nil {
 		return nil, fmt.Errorf("config init: %w", err)
 	}
 
@@ -97,13 +111,337 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) (
 	*config.AddrRequest, *config.Proxy, *config.MatchResult, error) {
 
+	// Apply resolver rules first
+	req = m.resolving(req)
+
 	var mapping *config.Mapping
 	if mappingName != "" {
-		mapping = m.conf.FindMapping(mappingName)
+		mapping = m.findMapping(mappingName)
 	}
 
-	newReq, proxy, matchResult := m.conf.ResolveMatch(req, mapping)
-	return newReq, proxy, matchResult, nil
+	proxy, matchResult := m.match(req, mapping)
+	return req, proxy, matchResult, nil
+}
+
+// init builds internal lookup maps and matchers from loaded data
+func (m *RuleMatcher) init() error {
+	m.proxyNames = make(map[string]*config.Proxy)
+	m.groupNames = make(map[string]*config.ProxyGroup)
+	m.subscriptionNames = make(map[string]*config.Subscription)
+	m.proxyNames[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
+	m.proxyNames[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
+
+	// Register proxies
+	for _, proxy := range m.proxies {
+		if !proxy.IsEnabled() {
+			continue
+		}
+		proxy.Type = strings.ToLower(proxy.Type)
+		if _, exists := m.proxyNames[proxy.Name]; exists {
+			return fmt.Errorf("proxyName conflict: %s", proxy.Name)
+		}
+		if _, exists := m.groupNames[proxy.Name]; exists {
+			return fmt.Errorf("proxyName conflict with group: %s", proxy.Name)
+		}
+		if _, exists := m.subscriptionNames[proxy.Name]; exists {
+			return fmt.Errorf("proxyName conflict with subscription: %s", proxy.Name)
+		}
+		m.proxyNames[proxy.Name] = proxy
+
+		// Convert Clash/Mihomo shorthand bandwidth (Mbps) to bytes per second.
+		if proxy.Up > 0 && proxy.UpBps == 0 {
+			proxy.UpBps = proxy.Up * 125000
+		}
+		if proxy.Down > 0 && proxy.DownBps == 0 {
+			proxy.DownBps = proxy.Down * 125000
+		}
+
+		if proxy.UpBps > 0 {
+			proxy.UpRateLimiter = config.NewRateLimiter("UpRateLimiter_"+proxy.Name, proxy.UpBps)
+		}
+		if proxy.DownBps > 0 {
+			proxy.DownRateLimiter = config.NewRateLimiter("DownRateLimiter_"+proxy.Name, proxy.DownBps)
+		}
+	}
+
+	// Register subscriptions before groups so groups can reference them.
+	for _, sub := range m.subscriptions {
+		if !sub.IsEnabled() {
+			continue
+		}
+		if _, exists := m.proxyNames[sub.Name]; exists {
+			return fmt.Errorf("subscription name conflict with proxy: %s", sub.Name)
+		}
+		if _, exists := m.groupNames[sub.Name]; exists {
+			return fmt.Errorf("subscription name conflict with group: %s", sub.Name)
+		}
+		if _, exists := m.subscriptionNames[sub.Name]; exists {
+			return fmt.Errorf("subscription name conflict: %s", sub.Name)
+		}
+		if sub.SubProxies == nil {
+			sub.SubProxies = make(map[string]*config.Proxy)
+		}
+		m.subscriptionNames[sub.Name] = sub
+	}
+
+	// Validate and precompute resolvers.
+	nodeID := ""
+	if m.mesh != nil {
+		nodeID = strings.TrimSpace(m.mesh.NodeID)
+	}
+	for _, resolver := range m.resolvers {
+		if resolver == nil {
+			continue
+		}
+		resolver.Proto = strings.ToLower(strings.TrimSpace(resolver.Proto))
+		switch resolver.Proto {
+		case "", "tcp", "udp":
+		default:
+			return fmt.Errorf("resolver %s: invalid proto %q (must be tcp or udp)", resolver.Name, resolver.Proto)
+		}
+		resolver.SrcFull = ""
+		if resolver.SrcRelative {
+			if strings.TrimSpace(resolver.SrcHost) == "" {
+				return fmt.Errorf("resolver %s: src-relative requires src-host", resolver.Name)
+			}
+			if nodeID == "" {
+				return fmt.Errorf("resolver %s: src-relative requires mesh node-id", resolver.Name)
+			}
+			resolver.SrcFull = resolver.SrcHost + "." + nodeID + ".phn"
+		}
+	}
+
+	// Register proxy groups FIRST so setNext can resolve proxy chains
+	for _, group := range m.proxyGroups {
+		if !group.IsEnabled() {
+			continue
+		}
+		if err := group.Init(); err != nil {
+			return err
+		}
+		if _, exists := m.proxyNames[group.Name]; exists {
+			return fmt.Errorf("groupName conflict with proxy: %s", group.Name)
+		}
+		if _, exists := m.groupNames[group.Name]; exists {
+			return fmt.Errorf("groupName conflict: %s", group.Name)
+		}
+		if _, exists := m.subscriptionNames[group.Name]; exists {
+			return fmt.Errorf("groupName conflict with subscription: %s", group.Name)
+		}
+		m.groupNames[group.Name] = group
+	}
+
+	// Detect cyclic group references before callbacks are injected.
+	for _, group := range m.proxyGroups {
+		if !group.IsEnabled() {
+			continue
+		}
+		if err := m.checkGroupCycle(group.Name, make(map[string]bool)); err != nil {
+			return err
+		}
+	}
+
+	// Inject lookup callbacks into each group.
+	for _, group := range m.proxyGroups {
+		g := group
+		g.ResolveProxy = func(name string) *config.Proxy {
+			return m.proxyNames[name]
+		}
+		g.ResolveGroup = func(name string) *config.ProxyGroup {
+			return m.groupNames[name]
+		}
+		g.ResolveSubscription = func(name string) *config.Subscription {
+			return m.subscriptionNames[name]
+		}
+	}
+
+	// Rebuild runtime member lists for all groups now that lookup callbacks are in place.
+	for _, group := range m.proxyGroups {
+		group.RebuildProxies()
+	}
+
+	// Validate group subscription references.
+	for _, group := range m.proxyGroups {
+		if !group.IsEnabled() {
+			continue
+		}
+		if group.Subscription != "" {
+			if _, ok := m.subscriptionNames[group.Subscription]; !ok {
+				return fmt.Errorf("group %s references unknown subscription: %s", group.Name, group.Subscription)
+			}
+		}
+	}
+
+	// Set proxy chains (must run after groups are registered)
+	for _, proxy := range m.proxies {
+		visited := map[*config.Proxy]bool{}
+		if err := m.setNext(proxy, visited); err != nil {
+			return err
+		}
+	}
+
+	// Build matchers
+	m.matchers = make([]config.Matcher, 0, len(m.rules))
+	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
+	m.matcherRules = make([]string, 0, len(m.rules))
+	for _, rule := range m.rules {
+		trimmed := strings.TrimSpace(rule)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		rs := strings.SplitN(rule, ",", 3)
+		if len(rs) < 2 {
+			continue
+		}
+		switch rs[0] {
+		case "DOMAIN-SUFFIX":
+			if len(rs) < 3 {
+				continue
+			}
+			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			m.matchers = append(m.matchers, config.NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
+			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
+			m.matcherRules = append(m.matcherRules, rule)
+		case "IP-CIDR":
+			if len(rs) < 3 {
+				continue
+			}
+			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			m.matchers = append(m.matchers, config.NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
+			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
+			m.matcherRules = append(m.matcherRules, rule)
+		case "MATCH":
+			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[1], `"'`))
+			m.matchers = append(m.matchers, config.NewMatchAllMatcher(name, mapping))
+			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
+			m.matcherRules = append(m.matcherRules, rule)
+		default:
+			return fmt.Errorf("unsupported matcher type: %s", rs[0])
+		}
+	}
+
+	return nil
+}
+
+func (m *RuleMatcher) setNext(proxy *config.Proxy, visited map[*config.Proxy]bool) error {
+	next, ok := m.proxyNames[proxy.ViaProxy]
+	if !ok || next == nil {
+		// If the name matches a proxy group, resolve it directly.
+		if group, gok := m.groupNames[proxy.ViaProxy]; gok && group != nil {
+			next = group.NextWithVisited(make(map[string]bool))
+			if next != nil {
+				ok = true
+			}
+		}
+	}
+	if !ok || next == nil {
+		proxy.Next = config.SingletonProxy(config.ProxyDIRECT)
+		return nil
+	}
+	if visited[next] {
+		return fmt.Errorf("recycle proxy: %s", proxy.ViaProxy)
+	}
+	visited[next] = true
+	proxy.Next = next
+	return m.setNext(next, visited)
+}
+
+func (m *RuleMatcher) checkGroupCycle(name string, visited map[string]bool) error {
+	if visited[name] {
+		return fmt.Errorf("proxy group cycle detected involving %s", name)
+	}
+	visited[name] = true
+	defer delete(visited, name)
+
+	group, ok := m.groupNames[name]
+	if !ok {
+		return nil
+	}
+	for _, member := range group.ManualProxies {
+		if _, isGroup := m.groupNames[member]; isGroup {
+			if err := m.checkGroupCycle(member, visited); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *RuleMatcher) findMapping(name string) *config.Mapping {
+	if name == "" {
+		return nil
+	}
+	for _, mapping := range m.mappings {
+		if mapping.Name == name {
+			return mapping
+		}
+	}
+	return nil
+}
+
+func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping) (*config.Proxy, *config.MatchResult) {
+	nowMin := time.Now().Hour()*60 + time.Now().Minute()
+	for i, matcher := range m.matchers {
+		if i < len(m.matcherTimeRanges) && !m.matcherTimeRanges[i].Matches(nowMin) {
+			continue
+		}
+		proxyName := matcher.Match(request, mapping)
+		if proxyName == "" {
+			continue
+		}
+		result := &config.MatchResult{
+			ProxyName: proxyName,
+		}
+		if i < len(m.matcherRules) {
+			result.Rule = m.matcherRules[i]
+		}
+		if mapping != nil {
+			result.Mapping = mapping.Name
+		}
+		if i < len(m.matcherTimeRanges) {
+			tr := m.matcherTimeRanges[i]
+			if tr.StartMin >= 0 {
+				result.TimeRange = tr.String()
+			}
+		}
+		return m.resolveName(proxyName), result
+	}
+	return nil, nil
+}
+
+func (m *RuleMatcher) resolveName(name string) *config.Proxy {
+	if proxy, ok := m.proxyNames[name]; ok && proxy != nil {
+		return proxy
+	}
+	group, ok := m.groupNames[name]
+	if !ok || len(group.Members) == 0 {
+		return nil
+	}
+	return group.NextWithVisited(make(map[string]bool))
+}
+
+func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
+	if m.resolvers == nil {
+		return req
+	}
+	for _, resolver := range m.resolvers {
+		if !resolver.IsEnabled() {
+			continue
+		}
+		if resolver.Proto != "" && req.Proto != "" && resolver.Proto != req.Proto {
+			continue
+		}
+		if req.DstAddr != resolver.EffectiveSrcHost() || req.DstPort != resolver.SrcPort {
+			continue
+		}
+		return &config.AddrRequest{
+			DstAddr: resolver.DstHost,
+			DstPort: resolver.DstPort,
+			CmdType: req.CmdType,
+			Proto:   req.Proto,
+		}
+	}
+	return req
 }
 
 // ===== 全局缓存和 watcher 机制 =====

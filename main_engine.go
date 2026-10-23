@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	"phaethon/config"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/p2p"
@@ -34,15 +34,18 @@ func (r *TUNResource) Stop() {
 // When TUN is enabled, the TUN device and OS routes are also set up.
 // If meshMgr is non-nil, it is wired to the engine immediately after start.
 // If adminHandler is non-nil, it is set for direct connection handling (bypasses OS network stack).
-func startEngine(ruleConf *config.RuleConfiguration, meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNResource {
+func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNResource {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
-	if ruleConf == nil {
-		return nil
+	// Load TUN config directly from database
+	tunConfig, err := db.GetTUNConfig()
+	if err != nil {
+		util.LogModuleWarn("engine", "failed to load TUN config: %v, defaulting to disabled", err)
+		tunConfig = nil
 	}
 
-	tunEnabled := ruleConf.TUN != nil && ruleConf.TUN.IsEnabled()
+	tunEnabled := tunConfig != nil && tunConfig.IsEnabled()
 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled {

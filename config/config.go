@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ========== Proxy ==========
@@ -130,6 +127,12 @@ func (p *Proxy) IsUDP() bool {
 
 func SingletonProxy(typ string) *Proxy {
 	return &Proxy{Type: typ}
+}
+
+// IsDirect reports whether this proxy means a direct (non-proxied) dial.
+// A nil proxy (no rule matched) also dials direct.
+func (p *Proxy) IsDirect() bool {
+	return p == nil || strings.EqualFold(p.Type, ProxyDIRECT)
 }
 
 // ========== Mapping ==========
@@ -279,9 +282,9 @@ type ProxyGroup struct {
 	healthMu  sync.RWMutex
 	selMu     sync.RWMutex `yaml:"-" json:"-"` // protects Members rebuild
 
-	resolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
-	resolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
-	resolveSubscription func(name string) *Subscription `yaml:"-" json:"-"`
+	ResolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
+	ResolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
+	ResolveSubscription func(name string) *Subscription `yaml:"-" json:"-"`
 }
 
 // IsEnabled reports whether the group is enabled. Omitted or nil means enabled.
@@ -337,15 +340,15 @@ func (g *ProxyGroup) Resolve(name string) *Proxy {
 	// Manual members of this group always resolve via the global proxy list.
 	for _, m := range g.ManualProxies {
 		if m == name {
-			if g.resolveProxy != nil {
-				return g.resolveProxy(name)
+			if g.ResolveProxy != nil {
+				return g.ResolveProxy(name)
 			}
 			return nil
 		}
 	}
 	// Otherwise, if the group references a subscription, resolve in its node pool.
-	if g.resolveSubscription != nil && g.Subscription != "" {
-		if sub := g.resolveSubscription(g.Subscription); sub != nil {
+	if g.ResolveSubscription != nil && g.Subscription != "" {
+		if sub := g.ResolveSubscription(g.Subscription); sub != nil {
 			sub.SubMu.RLock()
 			if p, ok := sub.SubProxies[name]; ok {
 				sub.SubMu.RUnlock()
@@ -355,8 +358,8 @@ func (g *ProxyGroup) Resolve(name string) *Proxy {
 		}
 	}
 	// Fallback for direct global proxies that are not listed as manual members.
-	if g.resolveProxy != nil {
-		return g.resolveProxy(name)
+	if g.ResolveProxy != nil {
+		return g.ResolveProxy(name)
 	}
 	return nil
 }
@@ -369,8 +372,8 @@ func (g *ProxyGroup) ResolveMember(m GroupMember) *Proxy {
 		return nil
 	}
 	if m.FromSubscription {
-		if g.resolveSubscription != nil && g.Subscription != "" {
-			if sub := g.resolveSubscription(g.Subscription); sub != nil {
+		if g.ResolveSubscription != nil && g.Subscription != "" {
+			if sub := g.ResolveSubscription(g.Subscription); sub != nil {
 				sub.SubMu.RLock()
 				p := sub.SubProxies[m.Name]
 				sub.SubMu.RUnlock()
@@ -379,8 +382,8 @@ func (g *ProxyGroup) ResolveMember(m GroupMember) *Proxy {
 		}
 		return nil
 	}
-	if g.resolveProxy != nil {
-		return g.resolveProxy(m.Name)
+	if g.ResolveProxy != nil {
+		return g.ResolveProxy(m.Name)
 	}
 	return nil
 }
@@ -399,19 +402,19 @@ func (g *ProxyGroup) rebuildProxiesLocked() {
 		// Manual members may be individual proxies or nested proxy groups.
 		// Skip disabled or missing entries so groups stay valid when a proxy
 		// is disabled without removing it from every group's manual list.
-		if g.resolveProxy != nil && g.resolveProxy(name) != nil {
+		if g.ResolveProxy != nil && g.ResolveProxy(name) != nil {
 			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false})
 			continue
 		}
-		if g.resolveGroup != nil && g.resolveGroup(name) != nil {
+		if g.ResolveGroup != nil && g.ResolveGroup(name) != nil {
 			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false, IsGroup: true})
 			continue
 		}
 	}
 
 	g.SubMembers = nil
-	if g.Subscription != "" && g.resolveSubscription != nil {
-		if sub := g.resolveSubscription(g.Subscription); sub != nil {
+	if g.Subscription != "" && g.ResolveSubscription != nil {
+		if sub := g.ResolveSubscription(g.Subscription); sub != nil {
 			names := g.subscriptionCandidatesLocked(sub)
 			g.SubMembers = make([]GroupMember, 0, len(names))
 			for _, name := range names {
@@ -504,10 +507,10 @@ func (g *ProxyGroup) SetActiveMember(name string) error {
 // regular expression; if it fails to compile, it falls back to a case-insensitive
 // substring match. The returned names are sorted.
 func (g *ProxyGroup) SubscriptionCandidates() []string {
-	if g.Subscription == "" || g.resolveSubscription == nil {
+	if g.Subscription == "" || g.ResolveSubscription == nil {
 		return nil
 	}
-	sub := g.resolveSubscription(g.Subscription)
+	sub := g.ResolveSubscription(g.Subscription)
 	if sub == nil {
 		return nil
 	}
@@ -633,8 +636,8 @@ func (g *ProxyGroup) PickActiveMember() GroupMember {
 			return GroupMember{}
 		}
 		if m.IsGroup {
-			if g.resolveGroup != nil {
-				if inner := g.resolveGroup(m.Name); inner != nil {
+			if g.ResolveGroup != nil {
+				if inner := g.ResolveGroup(m.Name); inner != nil {
 					if inner.PickActiveMember().Name != "" {
 						return m
 					}
@@ -668,8 +671,8 @@ func (g *ProxyGroup) pickMember(list []GroupMember) GroupMember {
 // resolved recursively using the shared visited map.
 func (g *ProxyGroup) resolveMemberWithVisited(m GroupMember, visited map[string]bool) *Proxy {
 	if m.IsGroup {
-		if g.resolveGroup != nil {
-			if inner := g.resolveGroup(m.Name); inner != nil {
+		if g.ResolveGroup != nil {
+			if inner := g.ResolveGroup(m.Name); inner != nil {
 				return inner.NextWithVisited(visited)
 			}
 		}
@@ -939,16 +942,16 @@ type Resolver struct {
 	// node-id changes. Requires the mesh section with node-id set.
 	SrcRelative bool `yaml:"src-relative,omitempty" json:"src-relative,omitempty"`
 
-	// srcFull is the expanded match domain for SrcRelative resolvers,
+	// SrcFull is the expanded match domain for SrcRelative resolvers,
 	// recomputed on every Init().
-	srcFull string
+	SrcFull string
 }
 
 // EffectiveSrcHost returns the host this resolver matches: the expanded
 // "<label>.<node-id>.phn" domain when SrcRelative is set, otherwise SrcHost.
 func (r *Resolver) EffectiveSrcHost() string {
-	if r.SrcRelative && r.srcFull != "" {
-		return r.srcFull
+	if r.SrcRelative && r.SrcFull != "" {
+		return r.SrcFull
 	}
 	return r.SrcHost
 }
@@ -1032,28 +1035,28 @@ type Matcher interface {
 // when startMin > endMin it wraps around midnight (e.g. 22:00-08:00).
 // A zero value means "always match".
 type TimeRange struct {
-	startMin int
-	endMin   int
+	StartMin int
+	EndMin   int
 }
 
-func (tr TimeRange) matches(nowMin int) bool {
-	if tr.startMin == 0 && tr.endMin == 0 {
+func (tr TimeRange) Matches(nowMin int) bool {
+	if tr.StartMin == 0 && tr.EndMin == 0 {
 		return true
 	}
-	if tr.startMin <= tr.endMin {
-		return nowMin >= tr.startMin && nowMin < tr.endMin
+	if tr.StartMin <= tr.EndMin {
+		return nowMin >= tr.StartMin && nowMin < tr.EndMin
 	}
-	return nowMin >= tr.startMin || nowMin < tr.endMin
+	return nowMin >= tr.StartMin || nowMin < tr.EndMin
 }
 
 func (tr TimeRange) String() string {
-	if tr.startMin == 0 && tr.endMin == 0 {
+	if tr.StartMin == 0 && tr.EndMin == 0 {
 		return ""
 	}
-	startH := tr.startMin / 60
-	startM := tr.startMin % 60
-	endH := tr.endMin / 60
-	endM := tr.endMin % 60
+	startH := tr.StartMin / 60
+	startM := tr.StartMin % 60
+	endH := tr.EndMin / 60
+	endM := tr.EndMin % 60
 	return fmt.Sprintf("%02d:%02d-%02d:%02d", startH, startM, endH, endM)
 }
 
@@ -1080,7 +1083,7 @@ func parseTimeRange(s string) TimeRange {
 	if start < 0 || end < 0 {
 		return TimeRange{}
 	}
-	return TimeRange{startMin: start, endMin: end}
+	return TimeRange{StartMin: start, EndMin: end}
 }
 
 // ParseProxyName splits "PROXY[#MAPPING][@HH:MM-HH:MM]" into its components.
@@ -1224,62 +1227,19 @@ func (m *MatchAllMatcher) Match(req *AddrRequest, mapping *Mapping) string {
 func (m *MatchAllMatcher) ProxyName() string   { return m.proxyName }
 func (m *MatchAllMatcher) MappingName() string { return m.mappingName }
 
-// ========== RuleConfiguration ==========
-
 // Default UDP ephemeral port range (IANA dynamic ports: 49152-65535)
 const (
 	DefaultUDPPortMin = 49152
 	DefaultUDPPortMax = 65535
 )
 
-type RuleConfiguration struct {
-	Proxies       []*Proxy        `yaml:"proxies"`
-	ProxyGroups   []*ProxyGroup   `yaml:"proxy-groups"`
-	Subscriptions []*Subscription `yaml:"subscriptions"`
-	Rules         []string        `yaml:"rules"`
-	Mappings      []*Mapping      `yaml:"mappings"`
-	Resolvers     []*Resolver     `yaml:"resolvers"`
-
-	// ReverseConfigs holds multiple reverse client configurations within a
-	// single process.
-	ReverseConfigs []*ReverseConfig `yaml:"reverse-configs,omitempty"`
-
-	// Enable interactive console setup when no config file is found.
-	// Default: true in default.yaml, false in user configs.
-	Interactive bool `yaml:"interactive"`
-
-	// Global UDP port range for all ephemeral UDP bindings.
-	// Format: "min-max" e.g. "30000-30100". Default: OS-assigned.
-	UDPPortRange string `yaml:"udp-port-range"`
-
-	// TCP port range for reverse-side listener allocation (registry side).
-	// Format: "min-max" e.g. "20000-20100". Empty = no restriction.
-	TCPPortRange string `yaml:"tcp-port-range"`
-
-	// Web admin panel configuration.
-	Admin *AdminConfig `yaml:"admin,omitempty"`
-
-	// TUN traffic interception configuration.
-	TUN *TUNConfig `yaml:"tun,omitempty"`
-
-	// Mesh overlay network configuration.
-	Mesh *MeshConfig `yaml:"mesh,omitempty"`
-
-	// HTunnel transport optimization (v0.2.0)
-	HTunnel *HTunnelConfig `yaml:"htunnel,omitempty"`
-
-	// Initialized fields
-	ProxyNames        map[string]*Proxy        `yaml:"-"`
-	GroupNames        map[string]*ProxyGroup   `yaml:"-"`
-	SubscriptionNames map[string]*Subscription `yaml:"-"`
-	Matchers          []Matcher                `yaml:"-"`
-	matcherTimeRanges []TimeRange              `yaml:"-"`
-	matcherRules      []string                 `yaml:"-"`
-	mu                sync.RWMutex             `yaml:"-"`
-
-	// Parsed UDP port range
-	udpPortMin int // 0 = use OS default
-	udpPortMax int
+// MatchResult holds the result of a rule match
+type MatchResult struct {
+	ProxyName   string
+	ActualProxy string // Actual proxy used after group resolution
+	Mapping     string
+	TimeRange   string
+	Rule        string
 }
 
 // AdminConfig holds web admin settings.
@@ -1591,608 +1551,3 @@ func (m *MeshConfig) GetStaticDomainSuffixes() []MeshStaticDomainSuffix {
 	return m.StaticDomainSuffixes
 }
 
-func LoadRaw(filePath string) (*RuleConfiguration, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("read config file fail: %w", err)
-	}
-	return LoadRawBytes(data)
-}
-
-func LoadRawBytes(data []byte) (*RuleConfiguration, error) {
-	data = SubstituteEnv(data)
-	var conf RuleConfiguration
-	if err := yaml.Unmarshal(data, &conf); err != nil {
-		return nil, fmt.Errorf("parse config fail: %w", err)
-	}
-	return &conf, nil
-}
-
-// MarshalRaw serializes the RuleConfiguration to YAML bytes (same format as
-// SaveRaw writes). Used by the admin raw-config export endpoint.
-func MarshalRaw(conf *RuleConfiguration) ([]byte, error) {
-	return yaml.Marshal(conf)
-}
-
-// SaveRaw writes the RuleConfiguration back to a YAML file atomically.
-// It writes to a temporary file and renames it to avoid partial reads
-// by fsnotify watchers or other processes.
-// Comments and custom formatting are not preserved.
-func SaveRaw(filePath string, conf *RuleConfiguration) error {
-	data, err := yaml.Marshal(conf)
-	if err != nil {
-		return fmt.Errorf("marshal config fail: %w", err)
-	}
-
-	// Atomic write: write to temp file, then rename.
-	// This ensures watchers never see a partially-written file.
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("write temp config file fail: %w", err)
-	}
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		os.Remove(tmpPath) // best-effort cleanup
-		return fmt.Errorf("rename config file fail: %w", err)
-	}
-	return nil
-}
-
-func Load(filePath string) (*RuleConfiguration, error) {
-	conf, err := LoadRaw(filePath)
-	if err != nil {
-		return nil, err
-	}
-	if err := conf.Init(); err != nil {
-		return nil, err
-	}
-	return conf, nil
-}
-
-// Merge merges override config into this (base) config.
-// Same-name items are replaced, different-name items are appended.
-// Rules from override are prepended (env rules take priority).
-func (c *RuleConfiguration) Merge(override *RuleConfiguration) error {
-	if override == nil {
-		return nil
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// proxies
-	if len(override.Proxies) > 0 {
-		if c.Proxies == nil {
-			c.Proxies = make([]*Proxy, 0)
-		}
-		mergeByName(
-			&c.Proxies, override.Proxies,
-			func(p *Proxy) string { return p.Name },
-		)
-	}
-
-	// subscriptions
-	if len(override.Subscriptions) > 0 {
-		if c.Subscriptions == nil {
-			c.Subscriptions = make([]*Subscription, 0)
-		}
-		mergeByName(
-			&c.Subscriptions, override.Subscriptions,
-			func(s *Subscription) string { return s.Name },
-		)
-	}
-
-	// proxyGroups
-	if len(override.ProxyGroups) > 0 {
-		if c.ProxyGroups == nil {
-			c.ProxyGroups = make([]*ProxyGroup, 0)
-		}
-		mergeByName(
-			&c.ProxyGroups, override.ProxyGroups,
-			func(p *ProxyGroup) string { return p.Name },
-		)
-	}
-
-	// mappings
-	if len(override.Mappings) > 0 {
-		if c.Mappings == nil {
-			c.Mappings = make([]*Mapping, 0)
-		}
-		mergeByName(
-			&c.Mappings, override.Mappings,
-			func(p *Mapping) string { return p.Name },
-		)
-	}
-
-	// resolvers
-	if len(override.Resolvers) > 0 {
-		if c.Resolvers == nil {
-			c.Resolvers = make([]*Resolver, 0)
-		}
-		mergeByName(
-			&c.Resolvers, override.Resolvers,
-			func(p *Resolver) string { return p.Name },
-		)
-	}
-
-	// rules: env rules prepend (higher priority)
-	if len(override.Rules) > 0 {
-		if c.Rules == nil {
-			c.Rules = make([]string, 0, len(override.Rules))
-		}
-		merged := make([]string, 0, len(override.Rules)+len(c.Rules))
-		merged = append(merged, override.Rules...)
-		merged = append(merged, c.Rules...)
-		c.Rules = merged
-	}
-
-	// Rebuild internal mappings so Match/Resolving use up-to-date data.
-	return c.Init()
-}
-
-func mergeByName[T any](baseList *[]T, overrideList []T, nameExtractor func(T) string) {
-	nameToIdx := make(map[string]int, len(*baseList))
-	for i, item := range *baseList {
-		nameToIdx[nameExtractor(item)] = i
-	}
-	for _, item := range overrideList {
-		name := nameExtractor(item)
-		if idx, ok := nameToIdx[name]; ok {
-			(*baseList)[idx] = item
-		} else {
-			*baseList = append(*baseList, item)
-			nameToIdx[name] = len(*baseList) - 1
-		}
-	}
-}
-
-func (c *RuleConfiguration) setNext(proxy *Proxy, visited map[*Proxy]bool) error {
-	next, ok := c.ProxyNames[proxy.ViaProxy]
-	if !ok || next == nil {
-		// If the name matches a proxy group, resolve it directly.
-		// The group returns a *Proxy from its internal subscription pool,
-		// nested groups, or the global proxy namespace.
-		if group, gok := c.GroupNames[proxy.ViaProxy]; gok && group != nil {
-			next = group.NextWithVisited(make(map[string]bool))
-			if next != nil {
-				ok = true
-			}
-		}
-	}
-	if !ok || next == nil {
-		proxy.Next = SingletonProxy(ProxyDIRECT)
-		return nil
-	}
-	if visited[next] {
-		return fmt.Errorf("recycle proxy: %s", proxy.ViaProxy)
-	}
-	visited[next] = true
-	proxy.Next = next
-	return c.setNext(next, visited)
-}
-
-func (c *RuleConfiguration) Init() error {
-	c.ProxyNames = make(map[string]*Proxy)
-	c.GroupNames = make(map[string]*ProxyGroup)
-	c.SubscriptionNames = make(map[string]*Subscription)
-	c.ProxyNames[ProxyDIRECT] = SingletonProxy(ProxyDIRECT)
-	c.ProxyNames[ProxyREJECT] = SingletonProxy(ProxyREJECT)
-
-	// Register proxies
-	for _, proxy := range c.Proxies {
-		if !proxy.IsEnabled() {
-			continue
-		}
-		proxy.Type = strings.ToLower(proxy.Type)
-		if _, exists := c.ProxyNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict: %s", proxy.Name)
-		}
-		if _, exists := c.GroupNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict with group: %s", proxy.Name)
-		}
-		if _, exists := c.SubscriptionNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict with subscription: %s", proxy.Name)
-		}
-		c.ProxyNames[proxy.Name] = proxy
-
-		// Convert Clash/Mihomo shorthand bandwidth (Mbps) to bytes per second.
-		if proxy.Up > 0 && proxy.UpBps == 0 {
-			proxy.UpBps = proxy.Up * 125000
-		}
-		if proxy.Down > 0 && proxy.DownBps == 0 {
-			proxy.DownBps = proxy.Down * 125000
-		}
-
-		if proxy.UpBps > 0 {
-			proxy.UpRateLimiter = NewRateLimiter("UpRateLimiter_"+proxy.Name, proxy.UpBps)
-		}
-		if proxy.DownBps > 0 {
-			proxy.DownRateLimiter = NewRateLimiter("DownRateLimiter_"+proxy.Name, proxy.DownBps)
-		}
-	}
-
-	// Register subscriptions before groups so groups can reference them.
-	for _, sub := range c.Subscriptions {
-		if !sub.IsEnabled() {
-			continue
-		}
-		if _, exists := c.ProxyNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict with proxy: %s", sub.Name)
-		}
-		if _, exists := c.GroupNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict with group: %s", sub.Name)
-		}
-		if _, exists := c.SubscriptionNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict: %s", sub.Name)
-		}
-		if sub.SubProxies == nil {
-			sub.SubProxies = make(map[string]*Proxy)
-		}
-		c.SubscriptionNames[sub.Name] = sub
-	}
-
-	// Validate and precompute resolvers. Init() may run repeatedly on the
-	// same object (admin edits), so srcFull is always rebuilt from the
-	// SrcHost label instead of mutated in place.
-	nodeID := ""
-	if c.Mesh != nil {
-		nodeID = strings.TrimSpace(c.Mesh.NodeID)
-	}
-	for _, resolver := range c.Resolvers {
-		if resolver == nil {
-			continue
-		}
-		resolver.Proto = strings.ToLower(strings.TrimSpace(resolver.Proto))
-		switch resolver.Proto {
-		case "", "tcp", "udp":
-		default:
-			return fmt.Errorf("resolver %s: invalid proto %q (must be tcp or udp)", resolver.Name, resolver.Proto)
-		}
-		resolver.srcFull = ""
-		if resolver.SrcRelative {
-			if strings.TrimSpace(resolver.SrcHost) == "" {
-				return fmt.Errorf("resolver %s: src-relative requires src-host", resolver.Name)
-			}
-			if nodeID == "" {
-				return fmt.Errorf("resolver %s: src-relative requires mesh node-id", resolver.Name)
-			}
-			resolver.srcFull = resolver.SrcHost + "." + nodeID + ".phn"
-		}
-	}
-
-	// Register proxy groups FIRST so setNext can resolve proxy chains
-	// that reference group names (e.g. proxy: MGMS_NET).
-	for _, group := range c.ProxyGroups {
-		if !group.IsEnabled() {
-			continue
-		}
-		if err := group.Init(); err != nil {
-			return err
-		}
-		if _, exists := c.ProxyNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict with proxy: %s", group.Name)
-		}
-		if _, exists := c.GroupNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict: %s", group.Name)
-		}
-		if _, exists := c.SubscriptionNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict with subscription: %s", group.Name)
-		}
-		c.GroupNames[group.Name] = group
-	}
-
-	// Detect cyclic group references before callbacks are injected.
-	for _, group := range c.ProxyGroups {
-		if !group.IsEnabled() {
-			continue
-		}
-		if err := c.checkGroupCycle(group.Name, make(map[string]bool)); err != nil {
-			return err
-		}
-	}
-
-	// Inject lookup callbacks into each group.
-	for _, group := range c.ProxyGroups {
-		g := group
-		g.resolveProxy = func(name string) *Proxy {
-			return c.ProxyNames[name]
-		}
-		g.resolveGroup = func(name string) *ProxyGroup {
-			return c.GroupNames[name]
-		}
-		g.resolveSubscription = func(name string) *Subscription {
-			return c.SubscriptionNames[name]
-		}
-	}
-
-	// Rebuild runtime member lists for all groups now that lookup callbacks are
-	// in place. This is required for manual-only groups to work immediately.
-	for _, group := range c.ProxyGroups {
-		group.RebuildProxies()
-	}
-
-	// Validate group subscription references.
-	for _, group := range c.ProxyGroups {
-		if !group.IsEnabled() {
-			continue
-		}
-		if group.Subscription != "" {
-			if _, ok := c.SubscriptionNames[group.Subscription]; !ok {
-				return fmt.Errorf("group %s references unknown subscription: %s", group.Name, group.Subscription)
-			}
-		}
-	}
-
-	// Set proxy chains (must run after groups are registered)
-	for _, proxy := range c.Proxies {
-		visited := map[*Proxy]bool{}
-		if err := c.setNext(proxy, visited); err != nil {
-			return err
-		}
-	}
-
-	// Build matchers
-	c.Matchers = make([]Matcher, 0, len(c.Rules))
-	c.matcherTimeRanges = make([]TimeRange, 0, len(c.Rules))
-	c.matcherRules = make([]string, 0, len(c.Rules))
-	for _, rule := range c.Rules {
-		trimmed := strings.TrimSpace(rule)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		rs := strings.SplitN(rule, ",", 3)
-		if len(rs) < 2 {
-			continue
-		}
-		switch rs[0] {
-		case "DOMAIN-SUFFIX":
-			if len(rs) < 3 {
-				continue
-			}
-			name, mapping, tr := ParseProxyName(strings.Trim(rs[2], `"'`))
-			c.Matchers = append(c.Matchers, NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
-			c.matcherRules = append(c.matcherRules, rule)
-		case "IP-CIDR":
-			if len(rs) < 3 {
-				continue
-			}
-			name, mapping, tr := ParseProxyName(strings.Trim(rs[2], `"'`))
-			c.Matchers = append(c.Matchers, NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
-			c.matcherRules = append(c.matcherRules, rule)
-		case "MATCH":
-			name, mapping, tr := ParseProxyName(strings.Trim(rs[1], `"'`))
-			c.Matchers = append(c.Matchers, NewMatchAllMatcher(name, mapping))
-			c.matcherTimeRanges = append(c.matcherTimeRanges, tr)
-			c.matcherRules = append(c.matcherRules, rule)
-		default:
-			return fmt.Errorf("unsupported matcher type: %s", rs[0])
-		}
-	}
-
-	// Parse UDP port range
-	if c.UDPPortRange != "" {
-		parts := strings.SplitN(c.UDPPortRange, "-", 2)
-		if len(parts) == 2 {
-			min, err1 := strconv.Atoi(parts[0])
-			max, err2 := strconv.Atoi(parts[1])
-			if err1 == nil && err2 == nil && min > 0 && max <= 65535 && min <= max {
-				c.udpPortMin = min
-				c.udpPortMax = max
-			} else {
-				return fmt.Errorf("invalid udp-port-range: %s (expected format: min-max, e.g. 30000-30100)", c.UDPPortRange)
-			}
-		} else {
-			return fmt.Errorf("invalid udp-port-range: %s (expected format: min-max)", c.UDPPortRange)
-		}
-	}
-
-	return nil
-}
-
-func (c *RuleConfiguration) Lock() {
-	c.mu.Lock()
-}
-
-func (c *RuleConfiguration) Unlock() {
-	c.mu.Unlock()
-}
-
-func (c *RuleConfiguration) RLock() {
-	c.mu.RLock()
-}
-
-func (c *RuleConfiguration) RUnlock() {
-	c.mu.RUnlock()
-}
-
-// HasReverseAddress returns true if any mapping uses the given address for
-// reverse connections. Used by the passive side to reject reverse registrations
-// for addresses that are no longer configured.
-func (c *RuleConfiguration) HasReverseAddress(addr string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, p := range c.Proxies {
-		if !p.IsEnabled() {
-			continue
-		}
-		if p.ReverseAddress == addr {
-			return true
-		}
-	}
-	return false
-}
-
-// MatchResult holds the result of a rule match
-type MatchResult struct {
-	ProxyName   string
-	ActualProxy string // Actual proxy used after group resolution
-	Mapping     string
-	TimeRange   string
-	Rule        string
-}
-
-// Match finds the matching proxy for the given request and mapping.
-// It resolves Group names by delegating to group.Next(), which returns a *Proxy
-// from the group's internal subscription pool or the global namespace.
-func (c *RuleConfiguration) Match(request *AddrRequest, mapping *Mapping) (*Proxy, *MatchResult) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	nowMin := time.Now().Hour()*60 + time.Now().Minute()
-	for i, matcher := range c.Matchers {
-		if i < len(c.matcherTimeRanges) && !c.matcherTimeRanges[i].matches(nowMin) {
-			continue
-		}
-		proxyName := matcher.Match(request, mapping)
-		if proxyName == "" {
-			continue
-		}
-		result := &MatchResult{
-			ProxyName: proxyName,
-		}
-		if i < len(c.matcherRules) {
-			result.Rule = c.matcherRules[i]
-		}
-		if mapping != nil {
-			result.Mapping = mapping.Name
-		}
-		if i < len(c.matcherTimeRanges) {
-			tr := c.matcherTimeRanges[i]
-			if tr.startMin >= 0 {
-				result.TimeRange = tr.String()
-			}
-		}
-		return c.resolveName(proxyName), result
-	}
-	return nil, nil
-}
-
-// FindMapping returns the mapping with the given name, or nil if not found.
-func (c *RuleConfiguration) FindMapping(name string) *Mapping {
-	if c == nil || name == "" {
-		return nil
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, m := range c.Mappings {
-		if m.Name == name {
-			return m
-		}
-	}
-	return nil
-}
-
-// PrependTimeRange adds a zero (always-match) TimeRange at the front of
-// matcherTimeRanges. Call this when prepending a Matcher externally.
-func (c *RuleConfiguration) PrependTimeRange() {
-	c.matcherTimeRanges = append([]TimeRange{{}}, c.matcherTimeRanges...)
-}
-
-// PrependRule adds a raw rule string at the front of matcherRules.
-// Call this when prepending a Matcher externally.
-func (c *RuleConfiguration) PrependRule(rule string) {
-	c.matcherRules = append([]string{rule}, c.matcherRules...)
-}
-
-// MatcherTimeRanges returns the time ranges parallel to Matchers.
-func (c *RuleConfiguration) MatcherTimeRanges() []TimeRange {
-	return c.matcherTimeRanges
-}
-
-// SetMatcherTimeRanges replaces the matcherTimeRanges slice.
-func (c *RuleConfiguration) SetMatcherTimeRanges(trs []TimeRange) {
-	c.matcherTimeRanges = trs
-}
-
-func (c *RuleConfiguration) resolveName(name string) *Proxy {
-	if proxy, ok := c.ProxyNames[name]; ok && proxy != nil {
-		return proxy
-	}
-	group, ok := c.GroupNames[name]
-	if !ok || len(group.Members) == 0 {
-		return nil
-	}
-	return group.NextWithVisited(make(map[string]bool))
-}
-
-// checkGroupCycle detects cyclic references among proxy groups through manual
-// members. It is called during Init() so invalid configs fail early.
-func (c *RuleConfiguration) checkGroupCycle(name string, visited map[string]bool) error {
-	if visited[name] {
-		return fmt.Errorf("proxy group cycle detected involving %s", name)
-	}
-	visited[name] = true
-	defer delete(visited, name)
-
-	group, ok := c.GroupNames[name]
-	if !ok {
-		return nil
-	}
-	for _, m := range group.ManualProxies {
-		if _, isGroup := c.GroupNames[m]; isGroup {
-			if err := c.checkGroupCycle(m, visited); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Resolving applies resolver rules to transform the request address
-func (c *RuleConfiguration) Resolving(req *AddrRequest) *AddrRequest {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.Resolvers == nil {
-		return req
-	}
-	for _, resolver := range c.Resolvers {
-		if !resolver.IsEnabled() {
-			continue
-		}
-		if resolver.Proto != "" && req.Proto != "" && resolver.Proto != req.Proto {
-			continue
-		}
-		if req.DstAddr != resolver.EffectiveSrcHost() || req.DstPort != resolver.SrcPort {
-			continue
-		}
-		return &AddrRequest{
-			DstAddr: resolver.DstHost,
-			DstPort: resolver.DstPort,
-			CmdType: req.CmdType,
-			Proto:   req.Proto,
-		}
-	}
-	return req
-}
-
-// ResolveMatch applies resolver rewrite then rule matching in one step.
-func (c *RuleConfiguration) ResolveMatch(req *AddrRequest, mapping *Mapping) (*AddrRequest, *Proxy, *MatchResult) {
-	req = c.Resolving(req)
-	proxy, matchResult := c.Match(req, mapping)
-	return req, proxy, matchResult
-}
-
-// IsDirect reports whether this proxy means a direct (non-proxied) dial.
-// A nil proxy (no rule matched) also dials direct.
-func (p *Proxy) IsDirect() bool {
-	return p == nil || strings.EqualFold(p.Type, ProxyDIRECT)
-}
-
-// NeedHysteria2 checks if any proxy uses hysteria2
-func (c *RuleConfiguration) NeedHysteria2() bool {
-	for _, proxy := range c.Proxies {
-		if !proxy.IsEnabled() {
-			continue
-		}
-		if proxy.Type == ProxyHYSTERIA2 {
-			return true
-		}
-	}
-	return false
-}
-
-// UDPPortRangeValues returns the configured UDP ephemeral port range.
-// If not configured (0, 0), the caller should use OS default (net.ListenUDP with nil addr).
-func (c *RuleConfiguration) UDPPortRangeValues() (min, max int) {
-	return c.udpPortMin, c.udpPortMax
-}

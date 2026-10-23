@@ -145,7 +145,6 @@ const PAGE_TITLES = {
     '/mappings': 'Mappings',
     '/reverse': 'Reverse',
     '/package': 'Package',
-    '/config': 'Raw Config',
 };
 
 function updateActiveNav() {
@@ -262,8 +261,7 @@ const NAV_ITEMS = {
     './mappings': { icon: '🗺️', label: 'Mappings', i18n: 'nav.mappings' },
     './resolvers': { icon: '↗️', label: 'Resolvers', i18n: 'nav.resolvers' },
     './reverse': { icon: '🧙', label: 'Reverse', i18n: 'nav.reverse' },
-    './package': { icon: '📦', label: 'Package', i18n: 'nav.package' },
-    './config': { icon: '⚙️', label: 'Config', i18n: 'nav.rawConfig' }
+    './package': { icon: '📦', label: 'Package', i18n: 'nav.package' }
 };
 
 function getBottomNavItems() {

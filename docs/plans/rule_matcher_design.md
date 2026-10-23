@@ -183,18 +183,10 @@ func init() {
     go rebuildLoop()
 }
 
-// rebuildLoop 串行处理重建请求
+// rebuildLoop 串行处理重建请求（单 goroutine）
 func rebuildLoop() {
     for triggerBucket := range rebuildCh {
-        // Debounce: 等待静默期
-        time.Sleep(500 * time.Millisecond)
-        
-        // 排空通道中的待处理触发
-        for len(rebuildCh) > 0 {
-            <-rebuildCh
-        }
-        
-        // 执行重建（串行，不会并发）
+        // 直接重建，channel 串行化已防止并发
         doRebuildMatcher(triggerBucket)
     }
 }
@@ -281,7 +273,7 @@ func doRebuildMatcher(triggerBucket string) {
 ### 并发安全与同步机制
 
 **问题场景**：
-- 500ms 内多次数据变更 → 可能启动多个重建 goroutine
+- 短时间内多次数据变更 → 可能启动多个重建 goroutine
 - 重建过程中有匹配请求 → 需要保证旧配置继续服务
 
 **解决方案**：
@@ -290,23 +282,23 @@ func doRebuildMatcher(triggerBucket string) {
    - 使用 `rebuildCh` (buffer=1) 作为触发通道
    - 单 goroutine `rebuildLoop` 串行处理重建请求
    - 非阻塞 `select` 发送，避免阻塞 watcher
+   - 数据变更后立即重建，无 debounce 延迟
 
 2. **旧配置继续服务**：
    - 重建时不持锁，读操作使用旧 matcher
    - 构建完成后短暂持写锁替换指针
 
-3. **Debounce 合并**：
-   - Sleep 500ms 等待静默期
-   - 排空通道中待处理的触发，合并为一次重建
+3. **立即重建**：
+   - 数据变更后立即重建，无 debounce 延迟
+   - 重建本身很快（数据库 mmap，毫秒级）
 
 **时序图**：
 ```
 T0: 变更 A → rebuildCh <- A
-T1: rebuildLoop 收到 A → sleep 500ms
-T2: 变更 B → rebuildCh <- B (非阻塞)
-T3: 变更 C → rebuildCh 已满，跳过
-T4: sleep 结束 → 排空通道 → 执行重建
-T5: 重建完成 → globalMatcher 原子替换
+T1: rebuildLoop 收到 A → 立即执行重建
+T2: 变更 B → rebuildCh <- B (非阻塞，排队等待)
+T3: T1 重建完成 → 处理 B → 执行重建
+T4: 重建完成 → globalMatcher 原子替换
 ```
 
 ### 便捷接口

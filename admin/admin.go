@@ -1069,11 +1069,28 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		// Authentication required: try multiple auth methods (user chooses)
 
 		// 1. Try mTLS client certificate authentication
+		// Valid CN values: "all" (global cert) or current mesh nodeID (node cert)
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			// Client certificate was already verified by TLS handshake
-			util.LogModuleInfo("admin", "mTLS auth success: client=%s", r.TLS.PeerCertificates[0].Subject.CommonName)
-			next.ServeHTTP(w, r)
-			return
+			cn := r.TLS.PeerCertificates[0].Subject.CommonName
+			
+			// Get current mesh nodeID for node certificate validation
+			var nodeID string
+			if mesh, err := db.GetMeshConfig(); err == nil && mesh != nil {
+				nodeID = mesh.NodeID
+			}
+			
+			// Accept if CN is "all" (global) or matches current nodeID
+			if cn == "all" || cn == nodeID {
+				certType := "global"
+				if cn == nodeID {
+					certType = "node"
+				}
+				util.LogModuleInfo("admin", "mTLS auth success: %s cert, cn=%s", certType, cn)
+				next.ServeHTTP(w, r)
+				return
+			}
+			// CN not valid, reject
+			util.LogModuleWarn("admin", "mTLS auth failed: invalid cn=%s (expected 'all' or nodeID=%s)", cn, nodeID)
 		}
 
 		// 2. Try session-based login

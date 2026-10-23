@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"phaethon/config"
 )
 
 // ProxyHealth 代理健康状态
@@ -90,33 +92,31 @@ func ClearProxyHealthByGroup(groupName string) error {
 
 // SubscriptionNodes 订阅节点池
 type SubscriptionNodes struct {
-	SubscriptionName string      `json:"subscription_name"`
-	Nodes            []NodeInfo  `json:"nodes"`
-	LastUpdate       time.Time   `json:"last_update"`
-}
-
-// NodeInfo 节点信息
-type NodeInfo struct {
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-	Server string `json:"server"`
-	Port   int    `json:"port"`
-	// 其他代理字段...
+	SubscriptionName string                `json:"subscription_name"`
+	Proxies          map[string]*config.Proxy `json:"proxies"`
+	LastUpdate       time.Time             `json:"last_update"`
 }
 
 // PutSubscriptionNodes 存储订阅节点池
-func PutSubscriptionNodes(subName string, nodes *SubscriptionNodes) error {
-	if nodes == nil {
-		return fmt.Errorf("nodes is nil")
+func PutSubscriptionNodes(subName string, proxies map[string]*config.Proxy) error {
+	nodes := &SubscriptionNodes{
+		SubscriptionName: subName,
+		Proxies:          proxies,
+		LastUpdate:       time.Now(),
 	}
-	nodes.SubscriptionName = subName
-	nodes.LastUpdate = time.Now()
 	return Put(BucketSubscriptionNodes, []byte(subName), nodes)
 }
 
 // GetSubscriptionNodes 获取订阅节点池
-func GetSubscriptionNodes(subName string) (*SubscriptionNodes, error) {
-	return getView[SubscriptionNodes](BucketSubscriptionNodes, []byte(subName))
+func GetSubscriptionNodes(subName string) (map[string]*config.Proxy, error) {
+	nodes, err := getView[SubscriptionNodes](BucketSubscriptionNodes, []byte(subName))
+	if err != nil {
+		return nil, err
+	}
+	if nodes == nil {
+		return nil, nil
+	}
+	return nodes.Proxies, nil
 }
 
 // DeleteSubscriptionNodes 删除订阅节点池

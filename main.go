@@ -1942,98 +1942,86 @@ func wireAdminCallbacks(resources *activeResources) {
 		return fmt.Errorf("subscription not found: %s", subName)
 	}
 	adminSrv.CheckGroupHealth = func(groupName string) error {
-		conf, err := db.LoadConf()
+		g, err := db.GetProxyGroup(groupName)
 		if err != nil {
-			return fmt.Errorf("load config: %w", err)
+			return fmt.Errorf("load group: %w", err)
 		}
-		for _, g := range conf.ProxyGroups {
-			if g.Name == groupName {
-				checkGroupHealth(conf, g)
-				return nil
-			}
+		if g == nil {
+			return fmt.Errorf("group not found: %s", groupName)
 		}
-		return fmt.Errorf("group not found: %s", groupName)
+		checkGroupHealth(g)
+		return nil
 	}
 	adminSrv.CheckGroupTest = func(groupName string) error {
-		conf, err := db.LoadConf()
+		g, err := db.GetProxyGroup(groupName)
 		if err != nil {
-			return fmt.Errorf("load config: %w", err)
+			return fmt.Errorf("load group: %w", err)
 		}
-		for _, g := range conf.ProxyGroups {
-			if g.Name == groupName {
-				checkGroupTest(conf, g)
-				return nil
-			}
+		if g == nil {
+			return fmt.Errorf("group not found: %s", groupName)
 		}
-		return fmt.Errorf("group not found: %s", groupName)
+		checkGroupTest(g)
+		return nil
 	}
 	adminSrv.CheckGroupProxyHealth = func(groupName, proxyName string) (config.HealthInfo, error) {
-		conf, err := db.LoadConf()
+		g, err := db.GetProxyGroup(groupName)
 		if err != nil {
-			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
+			return config.HealthInfo{}, fmt.Errorf("load group: %w", err)
 		}
-		for _, g := range conf.ProxyGroups {
-			if g.Name != groupName {
-				continue
-			}
-			m := config.GroupMember{Name: proxyName, FromSubscription: true}
-			for _, mn := range g.ManualProxies {
-				if mn == proxyName {
-					m.FromSubscription = false
-					break
-				}
-			}
-			key := m.HealthKey()
-			if !m.FromSubscription {
-				if innerGroup, ok := conf.GroupNames[proxyName]; ok {
-					selected := innerGroup.NextWithVisited(make(map[string]bool))
-					g.SetHealthImmediate(key, selected != nil, 0)
-					saveHealthState(conf)
-					return g.GetHealthInfo(key), nil
-				}
-			}
-			p := g.Resolve(proxyName)
-			if p == nil {
-				g.SetHealthImmediate(key, false, 0)
-				saveHealthState(conf)
-				return g.GetHealthInfo(key), nil
-			}
-			if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
-				g.SetHealthImmediate(key, true, 0)
-				saveHealthState(conf)
-				return g.GetHealthInfo(key), nil
-			}
-			testURL := g.HealthCheckURL
-			var alive bool
-			var latency time.Duration
-			if testURL == "" {
-				alive, latency = checkProxyTCPHealth(p)
-			} else {
-				host, port, useHTTP := parseTestURL(testURL)
-				path := getTestPath(testURL)
-				alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
-			}
-			g.SetHealthImmediate(key, alive, latency)
-			saveHealthState(conf)
-			return g.GetHealthInfo(key), nil
+		if g == nil {
+			return config.HealthInfo{}, fmt.Errorf("group not found: %s", groupName)
 		}
-		return config.HealthInfo{}, fmt.Errorf("group not found: %s", groupName)
-	}
-	adminSrv.CheckSubscriptionHealth = func(subName, nodeName, url string) (config.HealthInfo, error) {
-		conf, err := db.LoadConf()
-		if err != nil {
-			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
-		}
-		var sub *config.Subscription
-		for _, s := range conf.Subscriptions {
-			if s.Name == subName {
-				sub = s
+		m := config.GroupMember{Name: proxyName, FromSubscription: true}
+		for _, mn := range g.ManualProxies {
+			if mn == proxyName {
+				m.FromSubscription = false
 				break
 			}
 		}
-		if sub == nil {
-			return config.HealthInfo{}, fmt.Errorf("subscription not found: %s", subName)
+		key := m.HealthKey()
+		if !m.FromSubscription {
+			if innerGroup, err := db.GetProxyGroup(proxyName); err == nil && innerGroup != nil {
+				selected := innerGroup.NextWithVisited(make(map[string]bool))
+				g.SetHealthImmediate(key, selected != nil, 0)
+				// Save health state
+				snap := g.HealthSnapshot()
+				_ = db.SaveGroupHealthState(g.Name, snap)
+				_ = db.PutProxyGroup(g)
+				return g.GetHealthInfo(key), nil
+			}
 		}
+		p := g.Resolve(proxyName)
+		if p == nil {
+			g.SetHealthImmediate(key, false, 0)
+			snap := g.HealthSnapshot()
+			_ = db.SaveGroupHealthState(g.Name, snap)
+			_ = db.PutProxyGroup(g)
+			return g.GetHealthInfo(key), nil
+		}
+		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
+			g.SetHealthImmediate(key, true, 0)
+			snap := g.HealthSnapshot()
+			_ = db.SaveGroupHealthState(g.Name, snap)
+			_ = db.PutProxyGroup(g)
+			return g.GetHealthInfo(key), nil
+		}
+		testURL := g.HealthCheckURL
+		var alive bool
+		var latency time.Duration
+		if testURL == "" {
+			alive, latency = checkProxyTCPHealth(p)
+		} else {
+			host, port, useHTTP := parseTestURL(testURL)
+			path := getTestPath(testURL)
+			alive, latency = checkProxyHealth(p, host, port, useHTTP, path)
+		}
+		g.SetHealthImmediate(key, alive, latency)
+		snap := g.HealthSnapshot()
+		_ = db.SaveGroupHealthState(g.Name, snap)
+		_ = db.PutProxyGroup(g)
+		return g.GetHealthInfo(key), nil
+	}
+	adminSrv.CheckSubscriptionHealth = func(subName, nodeName, url string) (config.HealthInfo, error) {
 		// Get subscription nodes from database
 		proxies, err := db.GetSubscriptionNodes(subName)
 		if err != nil {
@@ -2054,15 +2042,18 @@ func wireAdminCallbacks(resources *activeResources) {
 		// so the proxy-group node popup can show latency without running its
 		// own health check.
 		key := config.GroupMember{Name: nodeName, FromSubscription: true}.HealthKey()
-		conf.RLock()
-		for _, g := range conf.ProxyGroups {
-			if g.Subscription != subName {
-				continue
+		groups, err := db.ListProxyGroupsBySubscription(subName)
+		if err != nil {
+			util.LogModuleWarn("main", "[HEALTH] list groups for sub %s fail: %v", subName, err)
+		} else {
+			for _, g := range groups {
+				g.SetHealthImmediate(key, alive, latency)
+				// Save health state for this group
+				snap := g.HealthSnapshot()
+				_ = db.SaveGroupHealthState(g.Name, snap)
+				_ = db.PutProxyGroup(g)
 			}
-			g.SetHealthImmediate(key, alive, latency)
 		}
-		conf.RUnlock()
-		saveHealthState(conf)
 
 		return config.HealthInfo{
 			Alive:     alive,
@@ -2071,11 +2062,10 @@ func wireAdminCallbacks(resources *activeResources) {
 		}, nil
 	}
 	adminSrv.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
-		conf, err := db.LoadConf()
+		p, err := db.GetProxy(proxyName)
 		if err != nil {
-			return config.HealthInfo{}, fmt.Errorf("load config: %w", err)
+			return config.HealthInfo{}, fmt.Errorf("proxy not found: %s", proxyName)
 		}
-		p := conf.ProxyNames[proxyName]
 		if p == nil {
 			return config.HealthInfo{}, fmt.Errorf("proxy not found: %s", proxyName)
 		}
@@ -2373,7 +2363,7 @@ func startHealthChecks(conf *config.RuleConfiguration) chan struct{} {
 		select {
 		case <-time.After(5 * time.Second):
 			for _, g := range checkGroups {
-				checkGroupHealth(conf, g)
+				checkGroupHealth(g)
 			}
 		case <-stop:
 			return
@@ -2386,7 +2376,7 @@ func startHealthChecks(conf *config.RuleConfiguration) chan struct{} {
 			select {
 			case <-ticker.C:
 				for _, g := range checkGroups {
-					checkGroupHealth(conf, g)
+					checkGroupHealth(g)
 				}
 			case <-stop:
 				return
@@ -2402,7 +2392,7 @@ const (
 	healthCheckTimeout     = 5 * time.Second
 )
 
-func checkGroupHealth(conf *config.RuleConfiguration, g *config.ProxyGroup) {
+func checkGroupHealth(g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
 	var host string
 	var port int
@@ -2426,10 +2416,8 @@ func checkGroupHealth(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 		key := m.HealthKey()
 		// Nested group references only come from manual members.
 		if m.IsGroup {
-			conf.RLock()
-			innerGroup, ok := conf.GroupNames[m.Name]
-			conf.RUnlock()
-			if !ok {
+			innerGroup, err := db.GetProxyGroup(m.Name)
+			if err != nil || innerGroup == nil {
 				g.SetHealth(key, false, 0)
 				continue
 			}
@@ -2483,14 +2471,22 @@ func checkGroupHealth(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	saveHealthState(conf)
+	// Save only this group's health state to database
+	snap := g.HealthSnapshot()
+	if err := db.SaveGroupHealthState(g.Name, snap); err != nil {
+		util.LogModuleWarn("main", "[HEALTH] save group %s health to db fail: %v", g.Name, err)
+	}
+	// Also persist the updated group object
+	if err := db.PutProxyGroup(g); err != nil {
+		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
+	}
 	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // checkGroupTest runs an immediate one-off test for every member of a group.
 // Unlike the periodic checkGroupHealth, this uses SetHealthImmediate so the
 // result is visible right away.
-func checkGroupTest(conf *config.RuleConfiguration, g *config.ProxyGroup) {
+func checkGroupTest(g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
 	var host string
 	var port int
@@ -2508,10 +2504,8 @@ func checkGroupTest(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 		key := m.HealthKey()
 		var p *config.Proxy
 		if m.IsGroup {
-			conf.RLock()
-			innerGroup, ok := conf.GroupNames[m.Name]
-			conf.RUnlock()
-			if !ok {
+			innerGroup, err := db.GetProxyGroup(m.Name)
+			if err != nil || innerGroup == nil {
 				g.SetHealthImmediate(key, false, 0)
 				continue
 			}
@@ -2550,7 +2544,15 @@ func checkGroupTest(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	saveHealthState(conf)
+	// Save only this group's health state to database
+	snap := g.HealthSnapshot()
+	if err := db.SaveGroupHealthState(g.Name, snap); err != nil {
+		util.LogModuleWarn("main", "[HEALTH] save group %s health to db fail: %v", g.Name, err)
+	}
+	// Also persist the updated group object
+	if err := db.PutProxyGroup(g); err != nil {
+		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
+	}
 }
 
 // loadHealthState restores group health from the database so that
@@ -2586,37 +2588,6 @@ func loadHealthState(conf *config.RuleConfiguration) {
 	}
 	
 	util.LogModuleInfo("main", "[HEALTH] loaded %d entries from %d groups (from db)", loaded, groupCount)
-}
-
-// saveHealthState snapshots the current group health to disk.
-func saveHealthState(conf *config.RuleConfiguration) {
-	// Save health state to database instead of file
-	conf.RLock()
-	defer conf.RUnlock()
-
-	for _, g := range conf.ProxyGroups {
-		if !g.IsEnabled() {
-			continue
-		}
-		snap := g.HealthSnapshot()
-		if len(snap) == 0 {
-			continue
-		}
-		for key, hi := range snap {
-			if hi.LastCheck.IsZero() {
-				continue
-			}
-			health := &db.ProxyHealth{
-				Alive:     hi.Alive,
-				Latency:   int(hi.Latency.Milliseconds()),
-				LastCheck: hi.LastCheck,
-				FailCount: hi.FailCount,
-			}
-			if err := db.PutProxyHealth(g.Name, key, health); err != nil {
-				util.LogModuleWarn("main", "[HEALTH] save to db fail: group=%s key=%s err=%v", g.Name, key, err)
-			}
-		}
-	}
 }
 
 // checkProxyTCPHealth tests TCP connectivity to the proxy's own server.
@@ -2835,11 +2806,14 @@ func refreshSubscription(conf *config.RuleConfiguration, sub *config.Subscriptio
 		active string
 	}
 	var groups []groupActive
-	for _, g := range conf.ProxyGroups {
-		if g.Subscription != sub.Name {
-			continue
+	// Load groups referencing this subscription from database
+	refGroups, err := db.ListProxyGroupsBySubscription(sub.Name)
+	if err != nil {
+		util.LogModuleWarn("system", "list groups for sub %s failed: %v", sub.Name, err)
+	} else {
+		for _, g := range refGroups {
+			groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
 		}
-		groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
 	}
 
 	sub.SetNodes(proxies)
@@ -2866,6 +2840,10 @@ func refreshSubscription(conf *config.RuleConfiguration, sub *config.Subscriptio
 			if !found {
 				g.ActiveMember = ""
 			}
+		}
+		// Persist the updated group
+		if err := db.PutProxyGroup(g); err != nil {
+			util.LogModuleWarn("system", "persist group %s failed: %v", g.Name, err)
 		}
 		util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
 	}

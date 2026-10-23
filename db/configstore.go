@@ -226,6 +226,21 @@ func ListProxyGroups() ([]*config.ProxyGroup, error) {
 	return listView[config.ProxyGroup](BucketProxyGroups)
 }
 
+// ListProxyGroupsBySubscription returns all proxy groups that reference the given subscription
+func ListProxyGroupsBySubscription(subName string) ([]*config.ProxyGroup, error) {
+	allGroups, err := ListProxyGroups()
+	if err != nil {
+		return nil, err
+	}
+	var result []*config.ProxyGroup
+	for _, g := range allGroups {
+		if g.Subscription == subName {
+			result = append(result, g)
+		}
+	}
+	return result, nil
+}
+
 // ===== 订阅 =====
 
 func PutSubscription(s *config.Subscription) error {

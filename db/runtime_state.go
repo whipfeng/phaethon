@@ -133,3 +133,22 @@ func ListAllProxyHealth() ([]*ProxyHealth, error) {
 func ListAllSubscriptionNodes() ([]*SubscriptionNodes, error) {
 	return listView[SubscriptionNodes](BucketSubscriptionNodes)
 }
+
+// SaveGroupHealthState saves health state for a specific group to database
+func SaveGroupHealthState(groupName string, snap map[string]config.HealthInfo) error {
+	for key, hi := range snap {
+		if hi.LastCheck.IsZero() {
+			continue
+		}
+		health := &ProxyHealth{
+			Alive:     hi.Alive,
+			Latency:   int(hi.Latency.Milliseconds()),
+			LastCheck: hi.LastCheck,
+			FailCount: hi.FailCount,
+		}
+		if err := PutProxyHealth(groupName, key, health); err != nil {
+			return fmt.Errorf("save health for group=%s key=%s: %w", groupName, key, err)
+		}
+	}
+	return nil
+}

@@ -42,35 +42,89 @@
 
 ### 核心原则
 
-**数据库是唯一事实源（per-key 细粒度存储）。** 运行时 `*config.RuleConfiguration` 是从数据库派生的工作快照：启动与 OnReload 一律从 DB 装配；每次 API 授权变更在同一临界区内先改内存、再原子落库，两者永不漂移。
+**数据库是唯一事实源（per-key 细粒度存储）。** 不存在 `*config.RuleConfiguration` 这样的中间结构。各组件按需直接查询数据库，缓存按 bucket 单独设计（如需要）。
 
 ### 数据流向
 
 ```
-启动 / OnReload（读取路径，唯一装配入口）:
-  db.LoadRuleConf()
-    → 同一只读事务全量读出各 bucket → 组装 RuleConfiguration + Init() 构建索引
-    → 后处理（ReverseID、订阅缓存、健康状态、UDP 端口范围）
-    → run() 全量重建运行资源（引擎/监听器/P2P 与新 conf 共享指针）
+启动 / OnReload（读取路径）:
+  各组件直接调用 db.GetXxx() 查询所需配置
+    → Admin 服务器: db.GetAdminConfig()
+    → Mesh 子系统: db.GetMeshConfig()
+    → TUN 引擎: db.GetTUNConfig()
+    → 规则路由: db.ListRules()
+    → 代理管理: db.ListProxies()
+    → 映射管理: db.ListMappings()
+    → ...
 
 轻量变更（控制台编辑，热更新路径）:
   API 请求 → 校验
-    → 原地修改共享 conf + mergeAndInitLocked()   # 引擎即时生效（共享指针）
     → db.PutXxx(item)                             # 细粒度落库（持久化）
+    → OnReload（通知相关组件重新加载）              # 组件从 DB 重新查询
     → BumpVersion("config")                       # 通知前端刷新
 ```
 
-### 为什么原地修改而非"重建快照再替换"
+### 为什么废除中间结构
 
-- 引擎、监听器、P2P 与 conf **共享同一指针**，原地修改 + `mergeAndInitLocked()`（迁移 SubProxies、组活跃成员等运行时状态后重新 Init）是现有热更新机制，引擎立即生效
-- 若每次改动从 DB 重建新对象再替换，引擎仍持旧指针，等于每次改动都做 OnReload 全量重建（重启监听器/引擎），代价不成比例
-- 快照的"派生"体现在装配时刻：启动/重载从 DB 读，运行时共享对象只是工作副本
+- **消除数据不一致**：没有内存快照与数据库的同步问题
+- **简化代码**：不需要维护 mergeAndInitLocked() 等复杂逻辑
+- **精确控制**：每个组件只查询自己需要的数据，避免加载无关配置
+- **按需缓存**：如某组件需要频繁读取，可单独为该 bucket 设计缓存（如 ProxyCache、MappingCache）
+
+### 缓存设计原则（按需）
+
+如果某 bucket 的数据被频繁读取，可为该 bucket 单独设计缓存：
+
+```go
+// 示例：ProxyCache 按需缓存 proxies bucket
+type ProxyCache struct {
+    mu      sync.RWMutex
+    proxies map[string]*config.Proxy
+    dirty   bool
+}
+
+func (c *ProxyCache) Get(name string) (*config.Proxy, error) {
+    c.mu.RLock()
+    if !c.dirty {
+        if p, ok := c.proxies[name]; ok {
+            c.mu.RUnlock()
+            return p, nil
+        }
+    }
+    c.mu.RUnlock()
+    
+    // Cache miss or dirty, query DB
+    p, err := db.GetProxy(name)
+    if err != nil {
+        return nil, err
+    }
+    
+    c.mu.Lock()
+    c.proxies[name] = p
+    c.dirty = false
+    c.mu.Unlock()
+    
+    return p, nil
+}
+
+func (c *ProxyCache) Invalidate() {
+    c.mu.Lock()
+    c.dirty = true
+    c.mu.Unlock()
+}
+```
+
+**关键点**：
+- 缓存按 bucket 独立设计，不是全量缓存
+- 提供 Invalidate() 方法，API 修改后调用
+- 缓存是可选优化，不是必须
 
 ### 禁止事项
 
 - 禁止任何代码绕过 admin API 直接修改运行时配置
 - 禁止后台任务将运行时 conf 静默回写 DB（所有配置变更必须通过细粒度 API）
 - YAML 仅作为导出格式（`/api/config/raw` GET=导出），不再是运行时配置来源，不支持批量导入
+- 禁止使用 `*config.RuleConfiguration` 作为中间结构传递配置（应直接查询数据库）
 
 ## 根基设置（Foundational Settings）
 

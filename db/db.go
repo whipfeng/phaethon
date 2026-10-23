@@ -15,16 +15,18 @@ var (
 	globalDB *bolt.DB
 
 	// Bucket 名称
-	BucketConfig        = []byte("config")
-	BucketProxies       = []byte("proxies")
-	BucketProxyGroups   = []byte("proxy-groups")
-	BucketSubscriptions = []byte("subscriptions")
-	BucketRules         = []byte("rules")
-	BucketMappings      = []byte("mappings")
-	BucketResolvers     = []byte("resolvers")
-	BucketReverseConfs  = []byte("reverse-configs")
-	BucketFakeIP        = []byte("fakeip")
-	BucketPackages      = []byte("packages")
+	BucketConfig           = []byte("config")
+	BucketProxies          = []byte("proxies")
+	BucketProxyGroups      = []byte("proxy-groups")
+	BucketSubscriptions    = []byte("subscriptions")
+	BucketRules            = []byte("rules")
+	BucketMappings         = []byte("mappings")
+	BucketResolvers        = []byte("resolvers")
+	BucketReverseConfs     = []byte("reverse-configs")
+	BucketFakeIP           = []byte("fakeip")
+	BucketPackages         = []byte("packages")
+	BucketProxyHealth      = []byte("proxy-health")       // 运行时状态：代理健康检查
+	BucketSubscriptionNodes = []byte("subscription-nodes") // 运行时状态：订阅节点池
 )
 
 // ErrNotFound 表示 key 不存在
@@ -68,7 +70,7 @@ func Init(dbPath string) error {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
-		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages} {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketProxyHealth, BucketSubscriptionNodes} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}

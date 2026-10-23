@@ -437,7 +437,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 	}
 	m.mu.Unlock()
 
-	m.insertRoutingRule(mapping.Name, proxy)
+	m.insertRoutingRule(mapping, proxy)
 
 	util.LogModuleInfo("control", "registered %s: register=%s listener=%s port=%d address=%s",
 		controlAddr, proto, listenerProto, port, dynAddr)
@@ -662,14 +662,14 @@ func (m *ControlManager) createListener(proto string, port int, dynAddr string,
 // so all traffic from that listener routes to its dedicated reverse proxy.
 // Format: MATCH,proxyName#mappingName — the # suffix scopes the rule to
 // this specific mapping only.
-func (m *ControlManager) insertRoutingRule(mappingName string, proxy *config.Proxy) {
-	ruleStr := fmt.Sprintf("MATCH,%s#%s", proxy.Name, mappingName)
+func (m *ControlManager) insertRoutingRule(mapping *config.Mapping, proxy *config.Proxy) {
+	ruleStr := fmt.Sprintf("MATCH,%s#%s", proxy.Name, mapping.Name)
 
 	m.mu.Lock()
 	rs := strings.SplitN(ruleStr, ",", 3)
 	if len(rs) >= 2 {
-		name, mapping, _ := config.ParseProxyName(strings.Trim(rs[1], "'"))
-		matcher := config.NewMatchAllMatcher(name, mapping)
+		name, mappingName, _ := config.ParseProxyName(strings.Trim(rs[1], "'"))
+		matcher := config.NewMatchAllMatcher(name, mappingName)
 		m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...)
 		m.dynamicTimeRanges = append([]config.TimeRange{{}}, m.dynamicTimeRanges...)
 		m.dynamicRules = append([]string{ruleStr}, m.dynamicRules...)
@@ -677,7 +677,14 @@ func (m *ControlManager) insertRoutingRule(mappingName string, proxy *config.Pro
 		// Inject into global RuleMatcher (dynamic config participates in matching)
 		m.mu.Unlock()
 		if ruleMatcher, err := db.GetMatcher(); err == nil {
-			ruleMatcher.AddDynamicConfig(proxy, ruleStr, matcher, config.TimeRange{})
+			ruleMatcher.AddProxy(proxy)
+			ruleMatcher.AddMapping(mapping)
+			ruleMatcher.AddRule(&config.Rule{
+				Type:        "MATCH",
+				ProxyName:   proxy.Name,
+				MappingName: mapping.Name,
+				TimeRange:   &config.TimeRange{},
+			})
 		} else {
 			util.LogModuleError("control", "failed to get RuleMatcher for dynamic config injection: %v", err)
 		}
@@ -764,15 +771,23 @@ func (m *ControlManager) HandleClose(address string) {
 			m.dynamicRules = newRules
 		}
 		proxyName := ""
+		mappingName := ""
 		if resource.Proxy != nil {
 			proxyName = resource.Proxy.Name
+		}
+		if resource.MappingName != "" {
+			mappingName = resource.MappingName
 		}
 		m.mu.Unlock()
 		
 		// Remove from global RuleMatcher
 		if proxyName != "" {
 			if ruleMatcher, err := db.GetMatcher(); err == nil {
-				ruleMatcher.RemoveDynamicConfig(proxyName)
+				ruleMatcher.RemoveProxy(proxyName)
+				ruleMatcher.RemoveRule(proxyName)
+				if mappingName != "" {
+					ruleMatcher.RemoveMapping(mappingName)
+				}
 			} else {
 				util.LogModuleError("control", "failed to get RuleMatcher for dynamic config removal: %v", err)
 			}
@@ -860,15 +875,23 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 			m.dynamicRules = newRules
 		}
 		proxyName := ""
+		mappingName := ""
 		if res.Proxy != nil {
 			proxyName = res.Proxy.Name
+		}
+		if res.MappingName != "" {
+			mappingName = res.MappingName
 		}
 		m.mu.Unlock()
 		
 		// Remove from global RuleMatcher
 		if proxyName != "" {
 			if ruleMatcher, err := db.GetMatcher(); err == nil {
-				ruleMatcher.RemoveDynamicConfig(proxyName)
+				ruleMatcher.RemoveProxy(proxyName)
+				ruleMatcher.RemoveRule(proxyName)
+				if mappingName != "" {
+					ruleMatcher.RemoveMapping(mappingName)
+				}
 			} else {
 				util.LogModuleError("control", "failed to get RuleMatcher for dynamic config removal: %v", err)
 			}

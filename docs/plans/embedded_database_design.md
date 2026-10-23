@@ -629,35 +629,195 @@ POST /api/import    # 从 YAML 导入配置
 2. `RuleMatcher` 重建时会丢失动态配置
 3. 需要一种机制让动态配置参与匹配
 
-### 方案：关闭重连法
+### 方案：统一对象 Map + Watch 同步
 
-**核心思路**：DB 变更时关闭所有控制连接，重建 `RuleMatcher`，反向连接自动重连重建动态配置。
+**核心思路**：所有配置（静态+动态）统一存储在对象 Map 中，通过 Watch 实时同步 DB 变更，无需 rebuild，无需关闭连接。
 
-**流程**：
+#### 数据结构
+
+```go
+type RuleMatcher struct {
+    // 统一对象 Map（包含静态+动态）
+    proxies       map[string]*config.Proxy
+    groups        map[string]*config.ProxyGroup
+    mappings      map[string]*config.Mapping
+    subscriptions map[string]*config.Subscription  // 包含节点池
+    rules         []*config.Rule                    // 结构化对象
+    
+    mu sync.RWMutex  // 保护并发访问
+}
+
+// config.Rule 结构化定义
+type Rule struct {
+    Type        string      // DOMAIN, DOMAIN-SUFFIX, IP-CIDR, MATCH 等
+    Pattern     string      // 匹配模式
+    ProxyName   string      // 目标代理名称
+    MappingName string      // 可选映射名称
+    TimeRange   *TimeRange  // 可选时间范围
+}
 ```
-DB 变更（proxies/rules/mappings 等）
-  ↓
-db.rebuildMatcher() 触发
-  ↓
-调用 ControlManager.CloseAll()
-  ↓ 关闭所有反向连接的控制会话
-反向端检测到断开
-  ↓ 自动重连
-重新注册动态配置
-  ↓
-ControlManager 将动态配置注入到新的 RuleMatcher
-  ↓
-匹配恢复正常
+
+#### 设计原则
+
+1. **统一存储**：静态和动态对象存在同一个 Map，不区分来源
+2. **名称引用**：所有关联使用名称（如 `ProxyGroup.Subscription`），不持有对象引用
+3. **Watch 同步**：DB 变更时 Watch 直接更新 Map，不触发 rebuild
+4. **无重建**：没有"重建整个 RuleMatcher"的概念，只有增量更新
+
+#### Watch 处理逻辑
+
+```go
+func onDBChange(event ChangeEvent) {
+    matcher.mu.Lock()
+    defer matcher.mu.Unlock()
+    
+    switch event.Bucket {
+    case BucketProxies:
+        if event.Op == "delete" {
+            delete(matcher.proxies, event.Key)
+        } else {
+            proxy := loadProxyFromDB(event.Key)
+            matcher.proxies[event.Key] = proxy
+        }
+        
+    case BucketProxyGroups:
+        // 类似处理
+        
+    case BucketSubscriptions:
+        // 更新订阅（包含节点池）
+        
+    case BucketSubscriptionNodes:
+        // 更新节点池
+        
+    case BucketMappings:
+        // 类似处理
+        
+    case BucketRules:
+        // 规则变更：重新解析规则字符串为 Rule 对象
+        matcher.rules = parseRulesFromDB()
+    }
+}
 ```
 
-**优点**：
-- 简单可靠，沿用旧实现的成熟方案
-- 动态配置不持久化，符合设计原则
-- 自动恢复，无需手动干预
+#### 动态对象生命周期
 
-**缺点**：
-- DB 变更时有短暂中断（通常 < 1 秒）
-- 反向端需要支持自动重连（已实现）
+```go
+// 反向连接注册时
+func (m *ControlManager) insertRoutingRule(...) {
+    matcher.mu.Lock()
+    defer matcher.mu.Unlock()
+    
+    // 直接加入统一 Map
+    matcher.proxies[proxy.Name] = proxy
+    matcher.mappings[mapping.Name] = mapping
+    matcher.rules = append(matcher.rules, rule)
+}
+
+// 反向连接断开时
+func (m *ControlManager) HandleClose(...) {
+    matcher.mu.Lock()
+    defer matcher.mu.Unlock()
+    
+    // 直接从统一 Map 移除
+    delete(matcher.proxies, proxyName)
+    delete(matcher.mappings, mappingName)
+    // 从 rules 中移除对应规则
+}
+```
+
+#### 优点
+
+- ✅ **无中断**：DB 变更不关闭控制连接，反向连接不中断
+- ✅ **实时同步**：Watch 立即更新，无延迟
+- ✅ **简洁统一**：静态/动态对象同等对待，代码简单
+- ✅ **性能优化**：规则预解析为对象，匹配效率高
+- ✅ **松耦合**：名称引用，对象独立更新互不影响
+
+#### 缺点
+
+- ⚠️ **并发控制**：需要仔细处理 Map 的并发访问（已用 mutex 保护）
+- ⚠️ **内存占用**：所有对象常驻内存（但配置量小，可接受）
+
+### 影响分析
+
+#### 代理组管理逻辑
+
+**当前实现**：
+- `ProxyGroup` 通过 `ResolveSubscription` 回调查找订阅
+- 回调从 `RuleMatcher.subscriptionNames` 缓存查找
+- 订阅变更触发 rebuild，更新缓存
+
+**新方案影响**：
+- ✅ **无影响**：`ResolveSubscription` 回调改为从 `matcher.subscriptions` Map 查找
+- ✅ **更简单**：订阅变更直接更新 Map，ProxyGroup 自动拿到最新数据
+- ✅ **无需 rebuild**：ProxyGroup 的成员列表可以在 `Next()` 时实时查询订阅节点池
+
+**实现方式**：
+```go
+// ProxyGroup 只保存名称引用
+type ProxyGroup struct {
+    Subscription string  // 订阅名称
+    // ...
+}
+
+// Next() 时实时查询
+func (g *ProxyGroup) Next() *config.Proxy {
+    // 从 matcher.subscriptions 获取最新订阅和节点池
+    sub := matcher.subscriptions[g.Subscription]
+    nodes := sub.SubProxies
+    // 应用 filter，选择节点
+}
+```
+
+#### 健康检查逻辑
+
+**当前实现**：
+- 健康检查结果存在 `ProxyGroup.healthMap`（内存）
+- 不持久化到 DB
+- 重启后重新检查
+
+**新方案影响**：
+- ✅ **无影响**：健康检查已经是内存化，符合设计
+- ✅ **更简单**：无需考虑 rebuild 时如何保留健康状态
+
+**实现方式**：
+```go
+type ProxyGroup struct {
+    healthMap map[string]*healthStatus  // 内存，不持久化
+    healthMu  sync.RWMutex
+}
+
+// 健康检查更新
+func (g *ProxyGroup) UpdateHealth(proxyName string, status *healthStatus) {
+    g.healthMu.Lock()
+    defer g.healthMu.Unlock()
+    g.healthMap[proxyName] = status
+}
+```
+
+### 实施计划
+
+1. **重构 RuleMatcher 数据结构**
+   - 改为统一对象 Map
+   - 规则改为结构化对象 `[]*config.Rule`
+   
+2. **实现 Watch 同步逻辑**
+   - 处理 Insert/Update/Delete 事件
+   - 直接更新 Map，不触发 rebuild
+   
+3. **移除 rebuild 机制**
+   - 删除 `doRebuildMatcher()`
+   - 删除 `RebuildHook` 回调
+   - 删除 `shouldRebuildBucket()`
+   
+4. **修改动态对象注入逻辑**
+   - `ControlManager` 直接操作统一 Map
+   - 加锁保护并发访问
+   
+5. **测试验证**
+   - DB 变更不中断反向连接
+   - 动态配置正确参与匹配
+   - 代理组和健康检查正常工作
 
 ### 实现要点
 

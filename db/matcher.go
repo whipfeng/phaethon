@@ -11,61 +11,61 @@ import (
 	"phaethon/util"
 )
 
-// RuleMatcher 是专门的规则匹配器
-// 只包含规则匹配需要的数据，不包含 Admin/TUN/ReverseConfigs 等无关配置
+// RuleMatcher 是统一的规则匹配器
+// 所有配置（静态+动态）存储在对象 Map 中，通过 Watch 实时同步
 type RuleMatcher struct {
-	// 静态配置（从 DB 加载，不可变）
-	proxies       []*config.Proxy
-	proxyGroups   []*config.ProxyGroup
-	subscriptions []*config.Subscription
-	rules         []string
-	mappings      []*config.Mapping
+	// 统一对象 Map（包含静态+动态）
+	proxies       map[string]*config.Proxy
+	groups        map[string]*config.ProxyGroup
+	subscriptions map[string]*config.Subscription
+	mappings      map[string]*config.Mapping
+	rules         []*config.Rule
 	resolvers     []*config.Resolver
 	mesh          *config.MeshConfig
 
-	// 动态配置（运行时注入，反向连接注册）
-	dynamicProxies  []*config.Proxy
-	dynamicRules    []string
-	dynamicMatchers []config.Matcher
-	dynamicTimeRanges []config.TimeRange
-
-	// Initialized fields (built from above data)
-	proxyNames        map[string]*config.Proxy
-	groupNames        map[string]*config.ProxyGroup
-	subscriptionNames map[string]*config.Subscription
+	// 编译后的匹配器（从 rules 生成）
 	matchers          []config.Matcher
 	matcherTimeRanges []config.TimeRange
-	matcherRules      []string
 
-	// 保护动态配置的并发访问
-	dynamicMu sync.RWMutex
+	// 保护并发访问
+	mu sync.RWMutex
 }
 
 // BuildRuleMatcher 从数据库构建 RuleMatcher
 func BuildRuleMatcher() (*RuleMatcher, error) {
-	m := &RuleMatcher{}
+	m := &RuleMatcher{
+		proxies:       make(map[string]*config.Proxy),
+		groups:        make(map[string]*config.ProxyGroup),
+		subscriptions: make(map[string]*config.Subscription),
+		mappings:      make(map[string]*config.Mapping),
+	}
 
 	// 从数据库加载规则匹配需要的数据
 	err := View(func(tx *bolt.Tx) error {
-		var err error
-
-		// 加载代理
-		if m.proxies, err = listTx[config.Proxy](tx, BucketProxies); err != nil {
+		// 加载代理到 map
+		proxies, err := listTx[config.Proxy](tx, BucketProxies)
+		if err != nil {
 			return fmt.Errorf("load proxies: %w", err)
 		}
+		for _, p := range proxies {
+			m.proxies[p.Name] = p
+		}
 
-		// 加载代理组
-		if m.proxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
+		// 加载代理组到 map
+		groups, err := listTx[config.ProxyGroup](tx, BucketProxyGroups)
+		if err != nil {
 			return fmt.Errorf("load proxy groups: %w", err)
 		}
+		for _, g := range groups {
+			m.groups[g.Name] = g
+		}
 
-		// 加载订阅（元数据 + 节点池）
-		if m.subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
+		// 加载订阅到 map（元数据 + 节点池）
+		subs, err := listTx[config.Subscription](tx, BucketSubscriptions)
+		if err != nil {
 			return fmt.Errorf("load subscriptions: %w", err)
 		}
-		// 为每个订阅加载节点池到 SubProxies
-		for i := range m.subscriptions {
-			sub := m.subscriptions[i]
+		for _, sub := range subs {
 			nodes, err := GetSubscriptionNodes(sub.Name)
 			if err != nil {
 				return fmt.Errorf("load subscription nodes for %s: %w", sub.Name, err)
@@ -75,16 +75,23 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 				sub.SubProxies = nodes
 				sub.SubMu.Unlock()
 			}
+			m.subscriptions[sub.Name] = sub
 		}
 
-		// 加载规则
-		if m.rules, err = listRulesTx(tx); err != nil {
+		// 加载规则（字符串，后续解析为 Rule 对象）
+		ruleStrs, err := listRulesTx(tx)
+		if err != nil {
 			return fmt.Errorf("load rules: %w", err)
 		}
+		m.rules = parseRules(ruleStrs)
 
-		// 加载映射
-		if m.mappings, err = listTx[config.Mapping](tx, BucketMappings); err != nil {
+		// 加载映射到 map
+		mappings, err := listTx[config.Mapping](tx, BucketMappings)
+		if err != nil {
 			return fmt.Errorf("load mappings: %w", err)
+		}
+		for _, mp := range mappings {
+			m.mappings[mp.Name] = mp
 		}
 
 		// 加载解析器
@@ -117,6 +124,42 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 	return m, nil
 }
 
+// parseRules 将规则字符串解析为 Rule 对象
+func parseRules(ruleStrs []string) []*config.Rule {
+	rules := make([]*config.Rule, 0, len(ruleStrs))
+	for _, ruleStr := range ruleStrs {
+		rule := parseRule(ruleStr)
+		if rule != nil {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+// parseRule 解析单条规则字符串
+func parseRule(ruleStr string) *config.Rule {
+	parts := strings.Split(ruleStr, ",")
+	if len(parts) < 2 {
+		return nil
+	}
+	
+	ruleType := strings.TrimSpace(parts[0])
+	proxyName, mappingName, tr := config.ParseProxyName(strings.TrimSpace(parts[len(parts)-1]))
+	
+	var pattern string
+	if len(parts) >= 3 {
+		pattern = strings.TrimSpace(parts[1])
+	}
+	
+	return &config.Rule{
+		Type:        ruleType,
+		Pattern:     pattern,
+		ProxyName:   proxyName,
+		MappingName: mappingName,
+		TimeRange:   &tr,
+	}
+}
+
 // ResolveMatch 执行规则匹配
 func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) (
 	*config.AddrRequest, *config.Proxy, *config.MatchResult, error) {
@@ -135,28 +178,16 @@ func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) 
 
 // init builds internal lookup maps and matchers from loaded data
 func (m *RuleMatcher) init() error {
-	m.proxyNames = make(map[string]*config.Proxy)
-	m.groupNames = make(map[string]*config.ProxyGroup)
-	m.subscriptionNames = make(map[string]*config.Subscription)
-	m.proxyNames[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
-	m.proxyNames[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
+	// 添加内置代理
+	m.proxies[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
+	m.proxies[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
 
-	// Register proxies
+	// 初始化代理（类型转换、速率限制器等）
 	for _, proxy := range m.proxies {
 		if !proxy.IsEnabled() {
 			continue
 		}
 		proxy.Type = strings.ToLower(proxy.Type)
-		if _, exists := m.proxyNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict: %s", proxy.Name)
-		}
-		if _, exists := m.groupNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict with group: %s", proxy.Name)
-		}
-		if _, exists := m.subscriptionNames[proxy.Name]; exists {
-			return fmt.Errorf("proxyName conflict with subscription: %s", proxy.Name)
-		}
-		m.proxyNames[proxy.Name] = proxy
 
 		// Convert Clash/Mihomo shorthand bandwidth (Mbps) to bytes per second.
 		if proxy.Up > 0 && proxy.UpBps == 0 {
@@ -174,24 +205,14 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// Register subscriptions before groups so groups can reference them.
+	// 初始化订阅
 	for _, sub := range m.subscriptions {
 		if !sub.IsEnabled() {
 			continue
 		}
-		if _, exists := m.proxyNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict with proxy: %s", sub.Name)
-		}
-		if _, exists := m.groupNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict with group: %s", sub.Name)
-		}
-		if _, exists := m.subscriptionNames[sub.Name]; exists {
-			return fmt.Errorf("subscription name conflict: %s", sub.Name)
-		}
 		if sub.SubProxies == nil {
 			sub.SubProxies = make(map[string]*config.Proxy)
 		}
-		m.subscriptionNames[sub.Name] = sub
 	}
 
 	// Validate and precompute resolvers.
@@ -221,28 +242,18 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// Register proxy groups FIRST so setNext can resolve proxy chains
-	for _, group := range m.proxyGroups {
+	// 初始化代理组
+	for _, group := range m.groups {
 		if !group.IsEnabled() {
 			continue
 		}
 		if err := group.Init(); err != nil {
 			return err
 		}
-		if _, exists := m.proxyNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict with proxy: %s", group.Name)
-		}
-		if _, exists := m.groupNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict: %s", group.Name)
-		}
-		if _, exists := m.subscriptionNames[group.Name]; exists {
-			return fmt.Errorf("groupName conflict with subscription: %s", group.Name)
-		}
-		m.groupNames[group.Name] = group
 	}
 
-	// Detect cyclic group references before callbacks are injected.
-	for _, group := range m.proxyGroups {
+	// 检测代理组循环引用
+	for _, group := range m.groups {
 		if !group.IsEnabled() {
 			continue
 		}
@@ -251,38 +262,38 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// Inject lookup callbacks into each group.
-	for _, group := range m.proxyGroups {
+	// 注入查找回调
+	for _, group := range m.groups {
 		g := group
 		g.ResolveProxy = func(name string) *config.Proxy {
-			return m.proxyNames[name]
+			return m.proxies[name]
 		}
 		g.ResolveGroup = func(name string) *config.ProxyGroup {
-			return m.groupNames[name]
+			return m.groups[name]
 		}
 		g.ResolveSubscription = func(name string) *config.Subscription {
-			return m.subscriptionNames[name]
+			return m.subscriptions[name]
 		}
 	}
 
-	// Rebuild runtime member lists for all groups now that lookup callbacks are in place.
-	for _, group := range m.proxyGroups {
+	// 构建代理组的运行时成员列表
+	for _, group := range m.groups {
 		group.RebuildProxies()
 	}
 
-	// Validate group subscription references.
-	for _, group := range m.proxyGroups {
+	// 验证代理组的订阅引用
+	for _, group := range m.groups {
 		if !group.IsEnabled() {
 			continue
 		}
 		if group.Subscription != "" {
-			if _, ok := m.subscriptionNames[group.Subscription]; !ok {
+			if _, ok := m.subscriptions[group.Subscription]; !ok {
 				return fmt.Errorf("group %s references unknown subscription: %s", group.Name, group.Subscription)
 			}
 		}
 	}
 
-	// Set proxy chains (must run after groups are registered)
+	// 设置代理链（必须在组注册之后）
 	for _, proxy := range m.proxies {
 		visited := map[*config.Proxy]bool{}
 		if err := m.setNext(proxy, visited); err != nil {
@@ -290,195 +301,110 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// Build lookup tables (static configs only, dynamic configs added later via AddDynamicConfig)
-	// Note: rebuildLookupTablesLocked requires dynamicMu to be held
-	m.dynamicMu.Lock()
-	m.rebuildLookupTablesLocked()
-	m.dynamicMu.Unlock()
+	// 构建匹配器
+	if err := m.buildMatchers(); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-// AddDynamicConfig 注入动态配置（由 ControlManager 调用）
-// 动态配置会插入到匹配列表的最前面，优先于静态配置
-func (m *RuleMatcher) AddDynamicConfig(proxy *config.Proxy, rule string, matcher config.Matcher, tr config.TimeRange) {
-	m.dynamicMu.Lock()
-	defer m.dynamicMu.Unlock()
-
-	// 添加到动态配置列表
-	m.dynamicProxies = append(m.dynamicProxies, proxy)
-	m.dynamicRules = append(m.dynamicRules, rule)
-	m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...) // 前置
-	m.dynamicTimeRanges = append([]config.TimeRange{tr}, m.dynamicTimeRanges...) // 前置
-
-	// 重建查找表（包含动态配置）
-	m.rebuildLookupTablesLocked()
-
-	util.LogModuleInfo("db", "added dynamic config: proxy=%s rule=%s", proxy.Name, rule)
+// AddProxy 添加代理到统一 Map（由 ControlManager 调用）
+func (m *RuleMatcher) AddProxy(proxy *config.Proxy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.proxies[proxy.Name] = proxy
+	util.LogModuleInfo("db", "added proxy: %s", proxy.Name)
 }
 
-// RemoveDynamicConfig 移除动态配置（由 ControlManager 调用）
-func (m *RuleMatcher) RemoveDynamicConfig(proxyName string) {
-	m.dynamicMu.Lock()
-	defer m.dynamicMu.Unlock()
-
-	// 查找并移除
-	for i, p := range m.dynamicProxies {
-		if p.Name == proxyName {
-			// 移除 proxy
-			m.dynamicProxies = append(m.dynamicProxies[:i], m.dynamicProxies[i+1:]...)
-			// 移除对应的 rule、matcher、timeRange（索引相同）
-			if i < len(m.dynamicRules) {
-				m.dynamicRules = append(m.dynamicRules[:i], m.dynamicRules[i+1:]...)
-			}
-			if i < len(m.dynamicMatchers) {
-				m.dynamicMatchers = append(m.dynamicMatchers[:i], m.dynamicMatchers[i+1:]...)
-			}
-			if i < len(m.dynamicTimeRanges) {
-				m.dynamicTimeRanges = append(m.dynamicTimeRanges[:i], m.dynamicTimeRanges[i+1:]...)
-			}
-			// 重建查找表
-			m.rebuildLookupTablesLocked()
-			util.LogModuleInfo("db", "removed dynamic config: proxy=%s", proxyName)
-			return
-		}
-	}
+// RemoveProxy 从统一 Map 移除代理（由 ControlManager 调用）
+func (m *RuleMatcher) RemoveProxy(proxyName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.proxies, proxyName)
+	util.LogModuleInfo("db", "removed proxy: %s", proxyName)
 }
 
-// rebuildLookupTablesLocked 重建查找表（包含静态+动态配置）
-// 调用者必须持有 dynamicMu.Lock()
-func (m *RuleMatcher) rebuildLookupTablesLocked() {
-	// ============ 合并 proxyNames ============
-	// 静态 proxies
-	mergedProxyNames := make(map[string]*config.Proxy)
-	mergedProxyNames[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
-	mergedProxyNames[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
-
-	for _, proxy := range m.proxies {
-		if !proxy.IsEnabled() {
-			continue
-		}
-		mergedProxyNames[proxy.Name] = proxy
-	}
-	// 动态 proxies（覆盖静态，如果同名）
-	for _, proxy := range m.dynamicProxies {
-		if !proxy.IsEnabled() {
-			continue
-		}
-		mergedProxyNames[proxy.Name] = proxy
-	}
-	m.proxyNames = mergedProxyNames
-
-	// ============ 合并 matchers ============
-	// 动态 matchers 在前，静态 matchers 在后
-	m.matchers = append(m.dynamicMatchers, m.buildStaticMatchers()...)
-
-	// ============ 合并 time ranges ============
-	m.matcherTimeRanges = append(m.dynamicTimeRanges, m.buildStaticTimeRanges()...)
-
-	// ============ 合并 rules ============
-	m.matcherRules = append(m.dynamicRules, m.buildStaticRules()...)
+// AddMapping 添加映射到统一 Map
+func (m *RuleMatcher) AddMapping(mapping *config.Mapping) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mappings[mapping.Name] = mapping
 }
 
-// buildStaticMatchers 构建静态 matchers（从 m.rules）
-func (m *RuleMatcher) buildStaticMatchers() []config.Matcher {
-	matchers := make([]config.Matcher, 0, len(m.rules))
+// RemoveMapping 从统一 Map 移除映射
+func (m *RuleMatcher) RemoveMapping(mappingName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.mappings, mappingName)
+}
+
+// AddRule 添加规则
+func (m *RuleMatcher) AddRule(rule *config.Rule) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// 前置，优先级最高
+	m.rules = append([]*config.Rule{rule}, m.rules...)
+	// 重建匹配器
+	m.buildMatchers()
+}
+
+// RemoveRule 移除规则（按代理名）
+func (m *RuleMatcher) RemoveRule(proxyName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	newRules := make([]*config.Rule, 0, len(m.rules))
 	for _, rule := range m.rules {
-		trimmed := strings.TrimSpace(rule)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		rs := strings.SplitN(rule, ",", 3)
-		if len(rs) < 2 {
-			continue
-		}
-		switch rs[0] {
-		case "DOMAIN-SUFFIX":
-			if len(rs) < 3 {
-				continue
-			}
-			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			matchers = append(matchers, config.NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-		case "IP-CIDR":
-			if len(rs) < 3 {
-				continue
-			}
-			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			matchers = append(matchers, config.NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-		case "MATCH":
-			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[1], `"'`))
-			matchers = append(matchers, config.NewMatchAllMatcher(name, mapping))
+		if rule.ProxyName != proxyName {
+			newRules = append(newRules, rule)
 		}
 	}
-	return matchers
+	m.rules = newRules
+	// 重建匹配器
+	m.buildMatchers()
 }
 
-// buildStaticTimeRanges 构建静态 time ranges
-func (m *RuleMatcher) buildStaticTimeRanges() []config.TimeRange {
-	trs := make([]config.TimeRange, 0, len(m.rules))
+// buildMatchers 构建匹配器（从 rules）
+func (m *RuleMatcher) buildMatchers() error {
+	m.matchers = make([]config.Matcher, 0, len(m.rules))
+	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
+	
 	for _, rule := range m.rules {
-		trimmed := strings.TrimSpace(rule)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		rs := strings.SplitN(rule, ",", 3)
-		if len(rs) < 2 {
-			continue
-		}
-		switch rs[0] {
+		switch rule.Type {
 		case "DOMAIN-SUFFIX":
-			if len(rs) < 3 {
-				continue
+			matcher := config.NewDomainSuffixMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
+			m.matchers = append(m.matchers, matcher)
+			if rule.TimeRange != nil {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
+			} else {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
 			}
-			_, _, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			trs = append(trs, tr)
 		case "IP-CIDR":
-			if len(rs) < 3 {
-				continue
+			matcher := config.NewIpCidMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
+			m.matchers = append(m.matchers, matcher)
+			if rule.TimeRange != nil {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
+			} else {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
 			}
-			_, _, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			trs = append(trs, tr)
 		case "MATCH":
-			_, _, tr := config.ParseProxyName(strings.Trim(rs[1], `"'`))
-			trs = append(trs, tr)
+			matcher := config.NewMatchAllMatcher(rule.ProxyName, rule.MappingName)
+			m.matchers = append(m.matchers, matcher)
+			if rule.TimeRange != nil {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
+			} else {
+				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
+			}
 		}
 	}
-	return trs
-}
-
-// buildStaticRules 构建静态 rules（过滤后的原始规则串）
-func (m *RuleMatcher) buildStaticRules() []string {
-	rules := make([]string, 0, len(m.rules))
-	for _, rule := range m.rules {
-		trimmed := strings.TrimSpace(rule)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		rs := strings.SplitN(rule, ",", 3)
-		if len(rs) < 2 {
-			continue
-		}
-		valid := false
-		switch rs[0] {
-		case "DOMAIN-SUFFIX":
-			valid = len(rs) >= 3
-		case "IP-CIDR":
-			valid = len(rs) >= 3
-		case "MATCH":
-			valid = len(rs) >= 2
-		}
-		if valid {
-			rules = append(rules, rule)
-		}
-	}
-	return rules
+	return nil
 }
 
 func (m *RuleMatcher) setNext(proxy *config.Proxy, visited map[*config.Proxy]bool) error {
-	next, ok := m.proxyNames[proxy.ViaProxy]
+	next, ok := m.proxies[proxy.ViaProxy]
 	if !ok || next == nil {
 		// If the name matches a proxy group, resolve it directly.
-		if group, gok := m.groupNames[proxy.ViaProxy]; gok && group != nil {
+		if group, gok := m.groups[proxy.ViaProxy]; gok && group != nil {
 			next = group.NextWithVisited(make(map[string]bool))
 			if next != nil {
 				ok = true
@@ -504,12 +430,12 @@ func (m *RuleMatcher) checkGroupCycle(name string, visited map[string]bool) erro
 	visited[name] = true
 	defer delete(visited, name)
 
-	group, ok := m.groupNames[name]
+	group, ok := m.groups[name]
 	if !ok {
 		return nil
 	}
 	for _, member := range group.ManualProxies {
-		if _, isGroup := m.groupNames[member]; isGroup {
+		if _, isGroup := m.groups[member]; isGroup {
 			if err := m.checkGroupCycle(member, visited); err != nil {
 				return err
 			}
@@ -522,13 +448,9 @@ func (m *RuleMatcher) findMapping(name string) *config.Mapping {
 	if name == "" {
 		return nil
 	}
-	for _, mapping := range m.mappings {
-		if mapping.Name == name {
-			return mapping
-		}
-	}
-	return nil
+	return m.mappings[name]
 }
+
 
 func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping) (*config.Proxy, *config.MatchResult) {
 	nowMin := time.Now().Hour()*60 + time.Now().Minute()
@@ -542,9 +464,6 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 		}
 		result := &config.MatchResult{
 			ProxyName: proxyName,
-		}
-		if i < len(m.matcherRules) {
-			result.Rule = m.matcherRules[i]
 		}
 		if mapping != nil {
 			result.Mapping = mapping.Name
@@ -561,10 +480,10 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 }
 
 func (m *RuleMatcher) resolveName(name string) *config.Proxy {
-	if proxy, ok := m.proxyNames[name]; ok && proxy != nil {
+	if proxy, ok := m.proxies[name]; ok && proxy != nil {
 		return proxy
 	}
-	group, ok := m.groupNames[name]
+	group, ok := m.groups[name]
 	if !ok || len(group.Members) == 0 {
 		return nil
 	}
@@ -601,26 +520,7 @@ var (
 	globalMatcher *RuleMatcher
 	matcherMu     sync.RWMutex
 	watcherID     int64 = -1
-
-	// 重建控制：channel 串行化，避免并发重建
-	rebuildCh = make(chan string, 1) // buffer=1，非阻塞发送
-
-	// RebuildHook 是重建后调用的回调函数（用于关闭控制连接等）
-	// 由 main.go 注册，避免 db → server 的循环依赖
-	RebuildHook func()
 )
-
-func init() {
-	go rebuildLoop()
-}
-
-// rebuildLoop 串行处理重建请求（单 goroutine）
-func rebuildLoop() {
-	for triggerBucket := range rebuildCh {
-		// 直接重建，channel 串行化已防止并发
-		doRebuildMatcher(triggerBucket)
-	}
-}
 
 // GetMatcher 获取当前的 RuleMatcher
 func GetMatcher() (*RuleMatcher, error) {
@@ -650,64 +550,117 @@ func GetMatcher() (*RuleMatcher, error) {
 
 	// 注册 watcher（只需一次）
 	if watcherID < 0 {
-		watcherID = Subscribe(nil, rebuildMatcher)
+		watcherID = Subscribe(nil, onConfigChange)
 		util.LogModuleInfo("db", "registered RuleMatcher watcher (id=%d)", watcherID)
 	}
 
 	return globalMatcher, nil
 }
 
-// shouldRebuildBucket 判断是否需要触发重建
-func shouldRebuildBucket(bucket string) bool {
-	return bucket == string(BucketRules) ||
-		bucket == string(BucketProxies) ||
-		bucket == string(BucketProxyGroups) ||
-		bucket == string(BucketSubscriptions) ||
-		bucket == string(BucketSubscriptionNodes) || // 节点池变更
-		bucket == string(BucketMappings) ||
-		bucket == string(BucketResolvers) ||
-		bucket == string(BucketConfig)
-}
+// onConfigChange 处理 DB 变更事件，直接更新 Map
+func onConfigChange(event ChangeEvent) {
+	matcherMu.RLock()
+	m := globalMatcher
+	matcherMu.RUnlock()
 
-// rebuildMatcher 由 watcher 调用，触发重建（非阻塞）
-func rebuildMatcher(event ChangeEvent) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	bucket := string(event.Bucket)
+	key := event.Key
+	op := string(event.Op)
 
-	if !shouldRebuildBucket(bucket) {
-		return
-	}
+	switch bucket {
+	case string(BucketProxies):
+		if op == "delete" {
+			delete(m.proxies, key)
+			util.LogModuleInfo("db", "watch: removed proxy %s", key)
+		} else {
+			// Insert or update
+			proxy, err := GetProxy(key)
+			if err != nil || proxy == nil {
+				util.LogModuleError("db", "watch: failed to load proxy %s: %v", key, err)
+				return
+			}
+			m.proxies[key] = proxy
+			util.LogModuleInfo("db", "watch: updated proxy %s", key)
+		}
 
-	// 非阻塞发送触发信号
-	select {
-	case rebuildCh <- bucket:
-		util.LogModuleInfo("db", "triggered rebuild for %s", bucket)
-	default:
-		// 已有重建待处理，跳过
-		util.LogModuleInfo("db", "rebuild already pending, skipping %s", bucket)
-	}
-}
+	case string(BucketProxyGroups):
+		if op == "delete" {
+			delete(m.groups, key)
+			util.LogModuleInfo("db", "watch: removed group %s", key)
+		} else {
+			group, err := GetProxyGroup(key)
+			if err != nil || group == nil {
+				util.LogModuleError("db", "watch: failed to load group %s: %v", key, err)
+				return
+			}
+			m.groups[key] = group
+			util.LogModuleInfo("db", "watch: updated group %s", key)
+		}
 
-// doRebuildMatcher 执行重建（旧配置继续服务）
-func doRebuildMatcher(triggerBucket string) {
-	util.LogModuleInfo("db", "rebuilding RuleMatcher due to %s change", triggerBucket)
+	case string(BucketSubscriptions):
+		if op == "delete" {
+			delete(m.subscriptions, key)
+			util.LogModuleInfo("db", "watch: removed subscription %s", key)
+		} else {
+			sub, err := GetSubscription(key)
+			if err != nil || sub == nil {
+				util.LogModuleError("db", "watch: failed to load subscription %s: %v", key, err)
+				return
+			}
+			// 加载节点池
+			nodes, err := GetSubscriptionNodes(key)
+			if err == nil && nodes != nil {
+				sub.SubMu.Lock()
+				sub.SubProxies = nodes
+				sub.SubMu.Unlock()
+			}
+			m.subscriptions[key] = sub
+			util.LogModuleInfo("db", "watch: updated subscription %s", key)
+		}
 
-	// 1. 构建新 matcher（不持锁，旧 matcher 继续服务）
-	m, err := BuildRuleMatcher()
-	if err != nil {
-		util.LogModuleError("db", "rebuild RuleMatcher failed: %v", err)
-		return
-	}
+	case string(BucketSubscriptionNodes):
+		// 节点池变更，更新订阅的 SubProxies
+		if sub, ok := m.subscriptions[key]; ok {
+			nodes, err := GetSubscriptionNodes(key)
+			if err == nil && nodes != nil {
+				sub.SubMu.Lock()
+				sub.SubProxies = nodes
+				sub.SubMu.Unlock()
+				util.LogModuleInfo("db", "watch: updated subscription nodes for %s", key)
+			}
+		}
 
-	// 2. 原子替换（短暂持写锁）
-	matcherMu.Lock()
-	globalMatcher = m
-	matcherMu.Unlock()
+	case string(BucketMappings):
+		if op == "delete" {
+			delete(m.mappings, key)
+			util.LogModuleInfo("db", "watch: removed mapping %s", key)
+		} else {
+			mapping, err := GetMapping(key)
+			if err != nil || mapping == nil {
+				util.LogModuleError("db", "watch: failed to load mapping %s: %v", key, err)
+				return
+			}
+			m.mappings[key] = mapping
+			util.LogModuleInfo("db", "watch: updated mapping %s", key)
+		}
 
-	util.LogModuleInfo("db", "RuleMatcher rebuilt successfully")
-
-	// 3. 最后调用回调（关闭控制连接，让反向连接重连并注入动态配置）
-	if RebuildHook != nil {
-		RebuildHook()
+	case string(BucketRules):
+		// 规则变更，重新加载所有规则
+		ruleStrs, err := listRules()
+		if err != nil {
+			util.LogModuleError("db", "watch: failed to load rules: %v", err)
+			return
+		}
+		m.rules = parseRules(ruleStrs)
+		m.buildMatchers()
+		util.LogModuleInfo("db", "watch: updated rules (%d rules)", len(m.rules))
 	}
 }
 

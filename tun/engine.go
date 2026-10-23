@@ -15,6 +15,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/connlog"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/util"
@@ -83,9 +84,15 @@ type AdminHandler interface {
 }
 
 // NewEngine creates a new TUN engine. It does not start anything yet.
-func NewEngine(ruleConf *config.RuleConfiguration) *Engine {
+// Configuration is loaded from the database.
+func NewEngine() *Engine {
+	conf, err := db.LoadConf()
+	if err != nil {
+		util.LogModuleWarn("tun", "failed to load config from db: %v", err)
+		return &Engine{}
+	}
 	return &Engine{
-		ruleConf: ruleConf,
+		ruleConf: conf,
 	}
 }
 
@@ -1244,12 +1251,15 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	req := config.NewConnectRequest("udp", matchAddr, dstPort)
 	var proxy *config.Proxy
 	var matchResult *config.MatchResult
-	if e.ruleConf != nil {
-		matchMapping := TUNMapping
-		if modeBMapping != nil {
-			matchMapping = modeBMapping
-		}
-		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
+	matchMapping := TUNMapping
+	if modeBMapping != nil {
+		matchMapping = modeBMapping
+	}
+	var err error
+	req, proxy, matchResult, err = db.ResolveMatch(req, matchMapping.Name)
+	if err != nil {
+		util.LogModuleWarn("tun", "[%s] udp resolve match failed: %v", inbound, err)
+		return
 	}
 
 	resolvedAddr := req.DstAddr
@@ -1264,7 +1274,6 @@ func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string
 	}
 
 	var targetConn net.PacketConn
-	var err error
 	var dialIP net.IP
 
 	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
@@ -1456,17 +1465,20 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	req := config.NewConnectRequest("tcp", matchAddr, dstPort)
 	var proxy *config.Proxy
 	var matchResult *config.MatchResult
-		if e.ruleConf != nil {
-		matchMapping := TUNMapping
-		if modeBMapping != nil {
-			matchMapping = modeBMapping
-		}
-		req, proxy, matchResult = e.ruleConf.ResolveMatch(req, matchMapping)
-		if proxy != nil {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
-		} else {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
-		}
+	matchMapping := TUNMapping
+	if modeBMapping != nil {
+		matchMapping = modeBMapping
+	}
+	var err error
+	req, proxy, matchResult, err = db.ResolveMatch(req, matchMapping.Name)
+	if err != nil {
+		util.LogModuleWarn("tun", "[%s] tcp resolve match failed: %v", corrID, err)
+		return
+	}
+	if proxy != nil {
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
+	} else {
+		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
 	}
 
 	// Use the (possibly redirected) destination from Resolving
@@ -1476,7 +1488,6 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	defer rec.Close()
 
 	var targetConn net.Conn
-	var err error
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogModuleDebug("tun", "[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)

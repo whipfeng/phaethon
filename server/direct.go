@@ -39,7 +39,7 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 	util.RelayWithRateLimit(clientConn, targetConn, nil, nil)
 }
 
-func StartDirect(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (net.Listener, error) {
-	srv := &DirectServer{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+func StartDirect(mapping *config.Mapping) (net.Listener, error) {
+	srv := &DirectServer{BaseServer: BaseServer{Mapping: mapping}}
 	return startTCP(mapping.Port, srv)
 }

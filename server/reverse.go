@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/util"
 )
@@ -36,9 +37,9 @@ type ReverseServer struct {
 }
 
 // StartReverse creates and starts a ReverseServer.
-func StartReverse(ruleConf *config.RuleConfiguration, mapping *config.Mapping, handler func(net.Conn)) (*ReverseServer, error) {
-	proxy, ok := ruleConf.ProxyNames[mapping.ReverseProxy]
-	if !ok {
+func StartReverse(mapping *config.Mapping, handler func(net.Conn)) (*ReverseServer, error) {
+	proxy, err := db.GetProxy(mapping.ReverseProxy)
+	if err != nil || proxy == nil {
 		return nil, fmt.Errorf("reverse: proxy not found: %s", mapping.ReverseProxy)
 	}
 
@@ -52,7 +53,7 @@ func StartReverse(ruleConf *config.RuleConfiguration, mapping *config.Mapping, h
 	}
 
 	srv := &ReverseServer{
-		BaseServer:  BaseServer{RuleConf: ruleConf, Mapping: mapping},
+		BaseServer:  BaseServer{Mapping: mapping},
 		Handler:     handler,
 		proxy:       proxy,
 		address:     mapping.ReverseAddress,
@@ -270,7 +271,7 @@ func (s *ReverseServer) serveAccepted(bottomConn net.Conn) {
 // StartReverseMapping starts a reverse mapping that handles connections according to the mapping type.
 // The handler reads a frame to determine mode (TCP or UDP channel),
 // then either wraps in ReverseFramedConn for TCP or handles UDP channel setup.
-func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Mapping) (*ReverseServer, error) {
+func StartReverseMapping(mapping *config.Mapping) (*ReverseServer, error) {
 
 	handler := func(rawConn net.Conn) {
 		defer rawConn.Close()
@@ -284,7 +285,7 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 		rawConn.SetReadDeadline(time.Time{})
 
 		if frameType == frame.FrameUDPChannel {
-			handleReverseUDPChannel(rawConn, ruleConf, mapping, payload)
+			handleReverseUDPChannel(rawConn, mapping, payload)
 			frame.ReturnBuffer(payload) // issue 10: return pooled buffer
 			return
 		}
@@ -301,23 +302,23 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 
 		switch mapping.Type {
 		case "socks5":
-			srv := &Socks5Server{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+			srv := &Socks5Server{BaseServer: BaseServer{Mapping: mapping}}
 			srv.HandleConn(framedConn)
 		case "trojan":
 			srv := &TrojanServer{
-				BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping},
+				BaseServer: BaseServer{Mapping: mapping},
 				Password:   util.Sha224Hex(mapping.Password),
 			}
 			srv.HandleConn(framedConn)
 		case "direct":
-			srv := &DirectServer{BaseServer: BaseServer{RuleConf: ruleConf, Mapping: mapping}}
+			srv := &DirectServer{BaseServer: BaseServer{Mapping: mapping}}
 			srv.HandleConn(framedConn)
 		default:
-			handleReverseGeneric(ruleConf, mapping, framedConn)
+			handleReverseGeneric(mapping, framedConn)
 		}
 	}
 
-	return StartReverse(ruleConf, mapping, handler)
+	return StartReverse(mapping, handler)
 }
 
 // handleReverseUDPChannel handles the server-side of a Reverse UDP channel.
@@ -331,7 +332,7 @@ func StartReverseMapping(ruleConf *config.RuleConfiguration, mapping *config.Map
 //
 //	Client -> [SOCKS5] -> Entry -> DialPacket -> encrypt -> tunnelConn(A<->D) -> decrypt -> send to target(B)
 //	Target reply -> targetConn(B) -> build frame -> encrypt -> tunnelConn(A<->D) -> ... -> Client
-func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguration, mapping *config.Mapping, payload []byte) {
+func handleReverseUDPChannel(tcpConn net.Conn, mapping *config.Mapping, payload []byte) {
 	connID := util.NextConnID()
 	util.LogModuleInfo("reverse", "[%s] [%s] UDP channel request from %s", mapping.Name, connID, tcpConn.RemoteAddr())
 
@@ -368,8 +369,8 @@ func handleReverseUDPChannel(tcpConn net.Conn, ruleConf *config.RuleConfiguratio
 	}
 	crypto := util.NewReverseCrypto(sessionKey)
 
-	reverseProxy, ok := ruleConf.ProxyNames[mapping.ReverseProxy]
-	if !ok || reverseProxy == nil {
+	reverseProxy, err := db.GetProxy(mapping.ReverseProxy)
+	if err != nil || reverseProxy == nil {
 		util.LogModuleError("reverse", "[%s] reverse proxy not found: %s", mapping.Name, mapping.ReverseProxy)
 		return
 	}
@@ -646,14 +647,14 @@ func generateSessionKey() [32]byte {
 	return key
 }
 
-func handleReverseGeneric(ruleConf *config.RuleConfiguration, mapping *config.Mapping, clientConn net.Conn) {
+func handleReverseGeneric(mapping *config.Mapping, clientConn net.Conn) {
 	dstHost := mapping.DstHost
 	dstPort := mapping.DstPort
 	if dstHost == "" || dstPort == 0 {
 		return
 	}
 
-	base := &BaseServer{RuleConf: ruleConf, Mapping: mapping}
+	base := &BaseServer{Mapping: mapping}
 	connID := util.NextConnID()
 	util.LogModuleInfo("reverse", "[%s] [%s] %s -> %s:%d mesh dial connecting", mapping.Name, connID, clientConn.RemoteAddr(), dstHost, dstPort)
 

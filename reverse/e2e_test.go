@@ -319,14 +319,14 @@ func TestReverseE2E_TrojanSOCKS5(t *testing.T) {
 	}
 
 	// 4. Start reverse mapping (this dials out to stub server)
-	rvSrv, err := server.StartReverseMapping(ruleConf, ruleConf.Mappings[0])
+	rvSrv, err := server.StartReverseMapping(ruleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("start reverse mapping fail: %v", err)
 	}
 	defer rvSrv.Close()
 
 	// 5. Start SOCKS5 entry server
-	ss5Ln, err := server.StartSocks5(ruleConf, ruleConf.Mappings[1])
+	ss5Ln, err := server.StartSocks5(ruleConf.Mappings[1])
 	if err != nil {
 		t.Fatalf("start socks5 fail: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestReverseE2E_TrojanTrojan(t *testing.T) {
 	}
 
 	// 4. Start reverse mapping (dials out to stub server via Trojan)
-	rvSrv, err := server.StartReverseMapping(ruleConf, ruleConf.Mappings[0])
+	rvSrv, err := server.StartReverseMapping(ruleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("start reverse mapping fail: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestReverseRecursionGuard(t *testing.T) {
 		t.Fatalf("config init fail: %v", err)
 	}
 
-	rvSrv, err := server.StartReverseMapping(ruleConf, ruleConf.Mappings[0])
+	rvSrv, err := server.StartReverseMapping(ruleConf.Mappings[0])
 	if err != nil {
 		t.Fatalf("start reverse mapping fail: %v", err)
 	}

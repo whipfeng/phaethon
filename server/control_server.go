@@ -622,19 +622,19 @@ func (m *ControlManager) createListener(proto string, port int, dynAddr string,
 
 	switch proto {
 	case "socks5":
-		ln, err = StartSocks5(m.ruleConf, mapping)
+		ln, err = StartSocks5(mapping)
 		if err != nil {
 			return nil, nil, err
 		}
 
 	case "trojan":
-		ln, err = StartTrojan(m.ruleConf, mapping)
+		ln, err = StartTrojan(mapping)
 		if err != nil {
 			return nil, nil, err
 		}
 
 	case "direct":
-		ln, err = StartDirect(m.ruleConf, mapping)
+		ln, err = StartDirect(mapping)
 		if err != nil {
 			return nil, nil, err
 		}

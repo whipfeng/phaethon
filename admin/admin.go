@@ -3939,6 +3939,14 @@ func (s *AdminServer) apiHealth(w http.ResponseWriter, r *http.Request) {
 
 // reverseConfigHelpers (used by apiReverse and apiReverseItem)
 
+func (s *AdminServer) getSubscriptionProxies(subName string) map[string]*config.Proxy {
+	proxies, err := db.GetSubscriptionNodes(subName)
+	if err != nil {
+		return nil
+	}
+	return proxies
+}
+
 // currentReverseConfigs returns the active reverse config list from the database.
 func (s *AdminServer) currentReverseConfigs() []*config.ReverseConfig {
 	configs, err := db.ListReverseConfigs()

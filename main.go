@@ -2841,6 +2841,12 @@ func refreshSubscription(conf *config.RuleConfiguration, sub *config.Subscriptio
 	}
 
 	sub.SetNodes(proxies)
+	// Persist subscription nodes to database
+	sub.SubMu.RLock()
+	if err := db.PutSubscriptionNodes(sub.Name, sub.SubProxies); err != nil {
+		util.LogModuleWarn("system", "persist subscription nodes failed: %v", err)
+	}
+	sub.SubMu.RUnlock()
 
 	// Rebuild each group referencing this subscription. The active member is
 	// preserved when it still exists in the new pool.

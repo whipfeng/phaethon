@@ -14,6 +14,7 @@ import (
 // RuleMatcher 是专门的规则匹配器
 // 只包含规则匹配需要的数据，不包含 Admin/TUN/ReverseConfigs 等无关配置
 type RuleMatcher struct {
+	// 静态配置（从 DB 加载，不可变）
 	proxies       []*config.Proxy
 	proxyGroups   []*config.ProxyGroup
 	subscriptions []*config.Subscription
@@ -22,6 +23,12 @@ type RuleMatcher struct {
 	resolvers     []*config.Resolver
 	mesh          *config.MeshConfig
 
+	// 动态配置（运行时注入，反向连接注册）
+	dynamicProxies  []*config.Proxy
+	dynamicRules    []string
+	dynamicMatchers []config.Matcher
+	dynamicTimeRanges []config.TimeRange
+
 	// Initialized fields (built from above data)
 	proxyNames        map[string]*config.Proxy
 	groupNames        map[string]*config.ProxyGroup
@@ -29,6 +36,9 @@ type RuleMatcher struct {
 	matchers          []config.Matcher
 	matcherTimeRanges []config.TimeRange
 	matcherRules      []string
+
+	// 保护动态配置的并发访问
+	dynamicMu sync.RWMutex
 }
 
 // BuildRuleMatcher 从数据库构建 RuleMatcher
@@ -280,10 +290,99 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// Build matchers
-	m.matchers = make([]config.Matcher, 0, len(m.rules))
-	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
-	m.matcherRules = make([]string, 0, len(m.rules))
+	// Build lookup tables (static configs only, dynamic configs added later via AddDynamicConfig)
+	// Note: rebuildLookupTablesLocked requires dynamicMu to be held
+	m.dynamicMu.Lock()
+	m.rebuildLookupTablesLocked()
+	m.dynamicMu.Unlock()
+
+	return nil
+}
+
+// AddDynamicConfig 注入动态配置（由 ControlManager 调用）
+// 动态配置会插入到匹配列表的最前面，优先于静态配置
+func (m *RuleMatcher) AddDynamicConfig(proxy *config.Proxy, rule string, matcher config.Matcher, tr config.TimeRange) {
+	m.dynamicMu.Lock()
+	defer m.dynamicMu.Unlock()
+
+	// 添加到动态配置列表
+	m.dynamicProxies = append(m.dynamicProxies, proxy)
+	m.dynamicRules = append(m.dynamicRules, rule)
+	m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...) // 前置
+	m.dynamicTimeRanges = append([]config.TimeRange{tr}, m.dynamicTimeRanges...) // 前置
+
+	// 重建查找表（包含动态配置）
+	m.rebuildLookupTablesLocked()
+
+	util.LogModuleInfo("db", "added dynamic config: proxy=%s rule=%s", proxy.Name, rule)
+}
+
+// RemoveDynamicConfig 移除动态配置（由 ControlManager 调用）
+func (m *RuleMatcher) RemoveDynamicConfig(proxyName string) {
+	m.dynamicMu.Lock()
+	defer m.dynamicMu.Unlock()
+
+	// 查找并移除
+	for i, p := range m.dynamicProxies {
+		if p.Name == proxyName {
+			// 移除 proxy
+			m.dynamicProxies = append(m.dynamicProxies[:i], m.dynamicProxies[i+1:]...)
+			// 移除对应的 rule、matcher、timeRange（索引相同）
+			if i < len(m.dynamicRules) {
+				m.dynamicRules = append(m.dynamicRules[:i], m.dynamicRules[i+1:]...)
+			}
+			if i < len(m.dynamicMatchers) {
+				m.dynamicMatchers = append(m.dynamicMatchers[:i], m.dynamicMatchers[i+1:]...)
+			}
+			if i < len(m.dynamicTimeRanges) {
+				m.dynamicTimeRanges = append(m.dynamicTimeRanges[:i], m.dynamicTimeRanges[i+1:]...)
+			}
+			// 重建查找表
+			m.rebuildLookupTablesLocked()
+			util.LogModuleInfo("db", "removed dynamic config: proxy=%s", proxyName)
+			return
+		}
+	}
+}
+
+// rebuildLookupTablesLocked 重建查找表（包含静态+动态配置）
+// 调用者必须持有 dynamicMu.Lock()
+func (m *RuleMatcher) rebuildLookupTablesLocked() {
+	// ============ 合并 proxyNames ============
+	// 静态 proxies
+	mergedProxyNames := make(map[string]*config.Proxy)
+	mergedProxyNames[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
+	mergedProxyNames[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
+
+	for _, proxy := range m.proxies {
+		if !proxy.IsEnabled() {
+			continue
+		}
+		mergedProxyNames[proxy.Name] = proxy
+	}
+	// 动态 proxies（覆盖静态，如果同名）
+	for _, proxy := range m.dynamicProxies {
+		if !proxy.IsEnabled() {
+			continue
+		}
+		mergedProxyNames[proxy.Name] = proxy
+	}
+	m.proxyNames = mergedProxyNames
+
+	// ============ 合并 matchers ============
+	// 动态 matchers 在前，静态 matchers 在后
+	m.matchers = append(m.dynamicMatchers, m.buildStaticMatchers()...)
+
+	// ============ 合并 time ranges ============
+	m.matcherTimeRanges = append(m.dynamicTimeRanges, m.buildStaticTimeRanges()...)
+
+	// ============ 合并 rules ============
+	m.matcherRules = append(m.dynamicRules, m.buildStaticRules()...)
+}
+
+// buildStaticMatchers 构建静态 matchers（从 m.rules）
+func (m *RuleMatcher) buildStaticMatchers() []config.Matcher {
+	matchers := make([]config.Matcher, 0, len(m.rules))
 	for _, rule := range m.rules {
 		trimmed := strings.TrimSpace(rule)
 		if strings.HasPrefix(trimmed, "//") {
@@ -298,29 +397,81 @@ func (m *RuleMatcher) init() error {
 			if len(rs) < 3 {
 				continue
 			}
-			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			m.matchers = append(m.matchers, config.NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
-			m.matcherRules = append(m.matcherRules, rule)
+			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			matchers = append(matchers, config.NewDomainSuffixMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
 		case "IP-CIDR":
 			if len(rs) < 3 {
 				continue
 			}
-			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
-			m.matchers = append(m.matchers, config.NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
-			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
-			m.matcherRules = append(m.matcherRules, rule)
+			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			matchers = append(matchers, config.NewIpCidMatcher(name, mapping, strings.Trim(rs[1], `"'`)))
 		case "MATCH":
-			name, mapping, tr := config.ParseProxyName(strings.Trim(rs[1], `"'`))
-			m.matchers = append(m.matchers, config.NewMatchAllMatcher(name, mapping))
-			m.matcherTimeRanges = append(m.matcherTimeRanges, tr)
-			m.matcherRules = append(m.matcherRules, rule)
-		default:
-			return fmt.Errorf("unsupported matcher type: %s", rs[0])
+			name, mapping, _ := config.ParseProxyName(strings.Trim(rs[1], `"'`))
+			matchers = append(matchers, config.NewMatchAllMatcher(name, mapping))
 		}
 	}
+	return matchers
+}
 
-	return nil
+// buildStaticTimeRanges 构建静态 time ranges
+func (m *RuleMatcher) buildStaticTimeRanges() []config.TimeRange {
+	trs := make([]config.TimeRange, 0, len(m.rules))
+	for _, rule := range m.rules {
+		trimmed := strings.TrimSpace(rule)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		rs := strings.SplitN(rule, ",", 3)
+		if len(rs) < 2 {
+			continue
+		}
+		switch rs[0] {
+		case "DOMAIN-SUFFIX":
+			if len(rs) < 3 {
+				continue
+			}
+			_, _, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			trs = append(trs, tr)
+		case "IP-CIDR":
+			if len(rs) < 3 {
+				continue
+			}
+			_, _, tr := config.ParseProxyName(strings.Trim(rs[2], `"'`))
+			trs = append(trs, tr)
+		case "MATCH":
+			_, _, tr := config.ParseProxyName(strings.Trim(rs[1], `"'`))
+			trs = append(trs, tr)
+		}
+	}
+	return trs
+}
+
+// buildStaticRules 构建静态 rules（过滤后的原始规则串）
+func (m *RuleMatcher) buildStaticRules() []string {
+	rules := make([]string, 0, len(m.rules))
+	for _, rule := range m.rules {
+		trimmed := strings.TrimSpace(rule)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		rs := strings.SplitN(rule, ",", 3)
+		if len(rs) < 2 {
+			continue
+		}
+		valid := false
+		switch rs[0] {
+		case "DOMAIN-SUFFIX":
+			valid = len(rs) >= 3
+		case "IP-CIDR":
+			valid = len(rs) >= 3
+		case "MATCH":
+			valid = len(rs) >= 2
+		}
+		if valid {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
 }
 
 func (m *RuleMatcher) setNext(proxy *config.Proxy, visited map[*config.Proxy]bool) error {
@@ -453,6 +604,10 @@ var (
 
 	// 重建控制：channel 串行化，避免并发重建
 	rebuildCh = make(chan string, 1) // buffer=1，非阻塞发送
+
+	// RebuildHook 是重建后调用的回调函数（用于关闭控制连接等）
+	// 由 main.go 注册，避免 db → server 的循环依赖
+	RebuildHook func()
 )
 
 func init() {
@@ -549,6 +704,11 @@ func doRebuildMatcher(triggerBucket string) {
 	matcherMu.Unlock()
 
 	util.LogModuleInfo("db", "RuleMatcher rebuilt successfully")
+
+	// 3. 最后调用回调（关闭控制连接，让反向连接重连并注入动态配置）
+	if RebuildHook != nil {
+		RebuildHook()
+	}
 }
 
 // ===== 便捷接口 =====

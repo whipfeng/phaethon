@@ -229,6 +229,15 @@ func run(prev *activeResources) (*activeResources, error) {
 	server.GlobalControlManager = server.NewControlManager(dataDir)
 	util.LogModuleInfo("system", "ControlManager initialized")
 
+	// Register rebuild hook: close all control connections after DB-triggered rebuild
+	// so reverse connections reconnect and re-inject dynamic configs into the new RuleMatcher
+	db.RebuildHook = func() {
+		if server.GlobalControlManager != nil {
+			util.LogModuleInfo("system", "rebuild hook: closing all control connections")
+			server.GlobalControlManager.CloseAll()
+		}
+	}
+
 	// Initialize P2P manager
 	p2pCache, err := p2p.NewBinaryCache(dataDir)
 	if err != nil {

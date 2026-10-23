@@ -673,6 +673,15 @@ func (m *ControlManager) insertRoutingRule(mappingName string, proxy *config.Pro
 		m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...)
 		m.dynamicTimeRanges = append([]config.TimeRange{{}}, m.dynamicTimeRanges...)
 		m.dynamicRules = append([]string{ruleStr}, m.dynamicRules...)
+		
+		// Inject into global RuleMatcher (dynamic config participates in matching)
+		m.mu.Unlock()
+		if ruleMatcher, err := db.GetMatcher(); err == nil {
+			ruleMatcher.AddDynamicConfig(proxy, ruleStr, matcher, config.TimeRange{})
+		} else {
+			util.LogModuleError("control", "failed to get RuleMatcher for dynamic config injection: %v", err)
+		}
+		return
 	}
 	m.mu.Unlock()
 }
@@ -754,7 +763,20 @@ func (m *ControlManager) HandleClose(address string) {
 			m.dynamicTimeRanges = newTimeRanges
 			m.dynamicRules = newRules
 		}
+		proxyName := ""
+		if resource.Proxy != nil {
+			proxyName = resource.Proxy.Name
+		}
 		m.mu.Unlock()
+		
+		// Remove from global RuleMatcher
+		if proxyName != "" {
+			if ruleMatcher, err := db.GetMatcher(); err == nil {
+				ruleMatcher.RemoveDynamicConfig(proxyName)
+			} else {
+				util.LogModuleError("control", "failed to get RuleMatcher for dynamic config removal: %v", err)
+			}
+		}
 
 		// Close all data connections in Registry for this dyn address.
 		// Registry bottoms are keyed by dynAddr, not the control address.
@@ -837,7 +859,20 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 			m.dynamicTimeRanges = newTimeRanges
 			m.dynamicRules = newRules
 		}
+		proxyName := ""
+		if res.Proxy != nil {
+			proxyName = res.Proxy.Name
+		}
 		m.mu.Unlock()
+		
+		// Remove from global RuleMatcher
+		if proxyName != "" {
+			if ruleMatcher, err := db.GetMatcher(); err == nil {
+				ruleMatcher.RemoveDynamicConfig(proxyName)
+			} else {
+				util.LogModuleError("control", "failed to get RuleMatcher for dynamic config removal: %v", err)
+			}
+		}
 		reg := reverse.GlobalRegistry()
 		if reg != nil && res.Address != "" {
 			reg.CloseByAddress(res.Address)

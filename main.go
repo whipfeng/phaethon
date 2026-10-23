@@ -52,12 +52,12 @@ var (
 	Arch     = "" // e.g., "amd64", "arm64"
 )
 
-// activeRuleConf holds the most recent loaded runtime configuration so callbacks
+// activeConf holds the most recent loaded runtime configuration so callbacks
 // scheduled after a reload can still locate the current group instance.
-var activeRuleConf atomic.Pointer[config.RuleConfiguration]
+var activeConf atomic.Pointer[config.RuleConfiguration]
 
 type activeResources struct {
-	ruleConf           *config.RuleConfiguration
+	conf               *config.RuleConfiguration
 	listeners          []net.Listener
 	reverseServers     []*server.ReverseServer
 	mappingListeners   map[string]net.Listener          // mapping name -> listener
@@ -106,7 +106,7 @@ func (r *activeResources) closeAll() {
 // toggleTUN starts or stops the TUN device on the running stack.
 // The gVisor netstack is always running; this only controls the TUN input source.
 func toggleTUN(enable bool, res *activeResources) error {
-	if res == nil || res.ruleConf == nil {
+	if res == nil || res.conf == nil {
 		return fmt.Errorf("runtime not ready")
 	}
 	if enable {
@@ -126,7 +126,7 @@ func toggleTUN(enable bool, res *activeResources) error {
 
 // buildTUNStatus returns the current TUN state for the admin API.
 func buildTUNStatus(res *activeResources) map[string]interface{} {
-	if res == nil || res.ruleConf == nil {
+	if res == nil || res.conf == nil {
 		return map[string]interface{}{
 			"available":     tun.Available(),
 			"enabled":       false,
@@ -148,13 +148,13 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 			"dhcpLeases": []tun.DHCPLease{},
 		}
 	}
-	enabled := res.ruleConf.TUN.IsEnabled()
+	enabled := res.conf.TUN.IsEnabled()
 	status := map[string]interface{}{
 		"available":          tun.Available(),
 		"enabled":            enabled,
-		"bypassGateway":      res.ruleConf.TUN.IsBypassGateway(),
-		"dhcpEnabled":        res.ruleConf.TUN.IsDHCPEnabled(),
-		"dhcpStaticBindings": res.ruleConf.TUN.DHCPStaticBindings(),
+		"bypassGateway":      res.conf.TUN.IsBypassGateway(),
+		"dhcpEnabled":        res.conf.TUN.IsDHCPEnabled(),
+		"dhcpStaticBindings": res.conf.TUN.DHCPStaticBindings(),
 		"running":            false,
 		"deviceName":         "",
 		"routes": map[string]interface{}{
@@ -200,8 +200,8 @@ var subCacheDir string
 var dataDir = filepath.Join(".", "data")
 var configPath = "config.yaml" // default, will be updated in getRuleConf()
 
-func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeResources, error) {
-	if ruleConf == nil {
+func run(conf *config.RuleConfiguration, prev *activeResources) (*activeResources, error) {
+	if conf == nil {
 		return prev, nil
 	}
 
@@ -213,7 +213,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	}
 
 	// Make the current runtime config available to async callbacks.
-	activeRuleConf.Store(ruleConf)
+	activeConf.Store(conf)
 
 	// Preserve admin server across reloads so the web UI stays up
 	// and receives the new config reference.
@@ -231,12 +231,12 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	reverse.Refresh()
 
 	// Recreate control manager on every reload so dynamic resources
-	// are re-injected into the new ruleConf. Old sessions/connections
+	// are re-injected into the new conf. Old sessions/connections
 	// are closed → reverse side detects disconnect and reconnects.
 	if server.GlobalControlManager != nil {
 		server.GlobalControlManager.CloseAll()
 	}
-	server.GlobalControlManager = server.NewControlManager(ruleConf, dataDir)
+	server.GlobalControlManager = server.NewControlManager(conf, dataDir)
 	util.LogModuleInfo("system", "ControlManager initialized")
 
 	// Initialize P2P manager
@@ -265,15 +265,15 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 	// Initialize mesh overlay network (always enabled)
 	// If mesh config is missing, create a default configuration
-	if ruleConf.Mesh == nil {
-		ruleConf.Mesh = &config.MeshConfig{}
+	if conf.Mesh == nil {
+		conf.Mesh = &config.MeshConfig{}
 		util.LogModuleInfo("system", "Mesh: no config found, using defaults")
 	}
 
 	var meshMgr *mesh.MeshManager
 	{
 		// Set the overall mesh network range (e.g., 100.0.0.0/8)
-		meshNetworkStr := ruleConf.Mesh.GetNetwork()
+		meshNetworkStr := conf.Mesh.GetNetwork()
 		_, meshNetwork, err := net.ParseCIDR(meshNetworkStr)
 		if err != nil {
 			return nil, fmt.Errorf("mesh network invalid: %w", err)
@@ -287,7 +287,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		// - Otherwise, default to network_prefix + 8 (256 possible subnets)
 		networkPrefixLen, _ := meshNetwork.Mask.Size()
 		subnetPrefixLen := networkPrefixLen + 8
-		if cfgSubnet := ruleConf.Mesh.GetSubnet(); cfgSubnet != "" {
+		if cfgSubnet := conf.Mesh.GetSubnet(); cfgSubnet != "" {
 			if _, cfgNet, err := net.ParseCIDR(cfgSubnet); err == nil {
 				subnetPrefixLen, _ = cfgNet.Mask.Size()
 			}
@@ -298,26 +298,26 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		// Subnet priority: config → mesh-state.json (migrate) → auto-allocate
 
 		// Try to migrate from mesh-state.json if config doesn't have values
-		if ruleConf.Mesh.NodeID == "" || ruleConf.Mesh.GetSubnet() == "" {
+		if conf.Mesh.NodeID == "" || conf.Mesh.GetSubnet() == "" {
 			state, err := mesh.LoadState(dataDir)
 			if err != nil {
 				util.LogModuleWarn("system", " load mesh-state.json fail: %v", err)
 			}
 			if state != nil {
 				migrated := false
-				if ruleConf.Mesh.NodeID == "" && state.NodeID != "" {
-					ruleConf.Mesh.NodeID = state.NodeID
+				if conf.Mesh.NodeID == "" && state.NodeID != "" {
+					conf.Mesh.NodeID = state.NodeID
 					util.LogModuleInfo("system", "Mesh: migrated node-id from mesh-state.json to config.yaml: %s", state.NodeID)
 					migrated = true
 				}
-				if ruleConf.Mesh.GetSubnet() == "" && state.Subnet != "" {
-					ruleConf.Mesh.Subnet = state.Subnet
+				if conf.Mesh.GetSubnet() == "" && state.Subnet != "" {
+					conf.Mesh.Subnet = state.Subnet
 					util.LogModuleInfo("system", "Mesh: migrated subnet from mesh-state.json to config.yaml: %s", state.Subnet)
 					migrated = true
 				}
 				if migrated {
 					// Persist updated mesh config to the database
-					if err := db.PutMeshConfig(ruleConf.Mesh); err != nil {
+					if err := db.PutMeshConfig(conf.Mesh); err != nil {
 						util.LogModuleWarn("system", " persist mesh config after migration fail: %v", err)
 					}
 					// Remove old mesh-state.json
@@ -332,28 +332,28 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		}
 
 		// Generate nodeID if still empty
-		if ruleConf.Mesh.NodeID == "" {
-			ruleConf.Mesh.NodeID, err = mesh.GenerateNodeID()
+		if conf.Mesh.NodeID == "" {
+			conf.Mesh.NodeID, err = mesh.GenerateNodeID()
 			if err != nil {
 				return nil, fmt.Errorf("mesh generate node id fail: %w", err)
 			}
-			util.LogModuleInfo("system", "Mesh: generated new nodeID: %s", ruleConf.Mesh.NodeID)
+			util.LogModuleInfo("system", "Mesh: generated new nodeID: %s", conf.Mesh.NodeID)
 		}
 
 		// Auto-allocate subnet if still empty
-		if ruleConf.Mesh.GetSubnet() == "" {
-			ruleConf.Mesh.Subnet, err = mesh.AllocateSubnet(meshNetwork, subnetPrefixLen, nil)
+		if conf.Mesh.GetSubnet() == "" {
+			conf.Mesh.Subnet, err = mesh.AllocateSubnet(meshNetwork, subnetPrefixLen, nil)
 			if err != nil {
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
-			util.LogModuleInfo("system", "Mesh: auto-allocated subnet: %s", ruleConf.Mesh.Subnet)
+			util.LogModuleInfo("system", "Mesh: auto-allocated subnet: %s", conf.Mesh.Subnet)
 			// Persist updated mesh config with auto-allocated subnet
-			if err := db.PutMeshConfig(ruleConf.Mesh); err != nil {
+			if err := db.PutMeshConfig(conf.Mesh); err != nil {
 				util.LogModuleWarn("system", " persist mesh config after subnet allocation fail: %v", err)
 			}
 		}
 
-		meshSubnetStr := ruleConf.Mesh.GetSubnet()
+		meshSubnetStr := conf.Mesh.GetSubnet()
 
 		// Parse subnet and derive VIP
 		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
@@ -363,44 +363,44 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
 
 		util.LogModuleDebug("system", "[MESH-DEBUG] Before MeshManager creation: nodeID=%s subnet=%s vip=%s",
-			ruleConf.Mesh.NodeID, meshSubnetStr, vip)
+			conf.Mesh.NodeID, meshSubnetStr, vip)
 
-		domainSuffixes := ruleConf.Mesh.GetDomainSuffixes()
-		advertise := ruleConf.Mesh.GetAdvertise()
-		meshMgr = mesh.NewMeshManager(ruleConf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
-		mesh.SetForwardingTrace(ruleConf.Mesh.ForwardingTrace)
-		util.LogModuleDebug("system", "[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", ruleConf.Mesh.ForwardingTrace, mesh.ForwardingTraceEnabled())
+		domainSuffixes := conf.Mesh.GetDomainSuffixes()
+		advertise := conf.Mesh.GetAdvertise()
+		meshMgr = mesh.NewMeshManager(conf.Mesh.NodeID, vip, nil, meshSubnet, meshSubnetStr, domainSuffixes, advertise, meshNetwork, subnetPrefixLen)
+		mesh.SetForwardingTrace(conf.Mesh.ForwardingTrace)
+		util.LogModuleDebug("system", "[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", conf.Mesh.ForwardingTrace, mesh.ForwardingTraceEnabled())
 		meshMgr.SetDataDir(dataDir)
-		meshMgr.SetTCPKeepalive(ruleConf.Mesh.TCPKeepalive)
+		meshMgr.SetTCPKeepalive(conf.Mesh.TCPKeepalive)
 
 		// Set static IPIP routes
-		staticRoutes := ruleConf.Mesh.StaticRoutes
-		staticDomainSuffixes := ruleConf.Mesh.GetStaticDomainSuffixes()
+		staticRoutes := conf.Mesh.StaticRoutes
+		staticDomainSuffixes := conf.Mesh.GetStaticDomainSuffixes()
 		meshMgr.SetStaticRoutes(staticRoutes, staticDomainSuffixes)
 
 		mesh.GlobalMeshManager = meshMgr
-		p2p.GlobalP2PManager.SetMeshInfo(ruleConf.Mesh.NodeID, vip.String())
+		p2p.GlobalP2PManager.SetMeshInfo(conf.Mesh.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
-		util.LogModuleInfo("system", "Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", ruleConf.Mesh.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
+		util.LogModuleInfo("system", "Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", conf.Mesh.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference
 	// ready when P2P receives the first mesh frames.
 	res := &activeResources{
-		ruleConf:           ruleConf,
+		conf:           conf,
 		mappingListeners:   make(map[string]net.Listener),
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-	res.tunRes = startEngine(ruleConf, meshMgr, nil)
+	res.tunRes = startEngine(conf, meshMgr, nil)
 	if res.tunRes != nil {
 		res.meshMgr = meshMgr
 	}
 
 	// Start P2P peers:
 	// Mesh is always enabled, so ALL compatible proxies (SOCKS5/Trojan/HTunnel) with P2P enabled get P2P automatically
-	util.LogModuleInfo("main", "Starting P2P peers, total proxies: %d", len(ruleConf.Proxies))
-	for _, proxy := range ruleConf.Proxies {
+	util.LogModuleInfo("main", "Starting P2P peers, total proxies: %d", len(conf.Proxies))
+	for _, proxy := range conf.Proxies {
 		util.LogModuleInfo("main", "Checking proxy %s (type=%s, enabled=%v, p2p=%v)", proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P())
 		if !proxy.IsEnabled() {
 			continue
@@ -421,7 +421,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	trojanPortGroups := make(map[int][]*config.Mapping)
 	var otherMappings []*config.Mapping
 
-	for _, m := range ruleConf.Mappings {
+	for _, m := range conf.Mappings {
 		if !m.IsEnabled() {
 			continue
 		}
@@ -438,7 +438,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			// Single trojan, no SNI
 			m := trojanMappings[0]
 			util.LogModuleInfo("system", "Binding mapping: %+v", m)
-			ln, err := server.StartTrojan(ruleConf, m)
+			ln, err := server.StartTrojan(conf, m)
 			if err != nil {
 				util.LogModuleError("system", " bind trojan fail: %v", err)
 				continue
@@ -449,7 +449,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 			for _, m := range trojanMappings {
 				util.LogModuleInfo("system", "Binding mapping(SNI): %+v", m)
 			}
-			ln, err := server.StartTrojanSNI(ruleConf, trojanMappings, port)
+			ln, err := server.StartTrojanSNI(conf, trojanMappings, port)
 			if err != nil {
 				util.LogModuleError("system", " bind trojan-sni fail: %v", err)
 				continue
@@ -464,7 +464,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 		if m.ReverseAddress != "" {
 			// This mapping uses reverse outbound connections instead of TCP listener
-			rs, err := startReverseBinding(ruleConf, m)
+			rs, err := startReverseBinding(conf, m)
 			if err != nil {
 				util.LogModuleError("system", " bind reverse fail: %v", err)
 				continue
@@ -478,17 +478,17 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		var err error
 		switch m.Type {
 		case "socks5":
-			ln, err = server.StartSocks5(ruleConf, m)
+			ln, err = server.StartSocks5(conf, m)
 		case "direct", "DIRECT":
-			ln, err = server.StartDirect(ruleConf, m)
+			ln, err = server.StartDirect(conf, m)
 		case "trojan":
-			ln, err = server.StartTrojan(ruleConf, m)
+			ln, err = server.StartTrojan(conf, m)
 		case "h_tunnel":
-			ln, err = server.StartHTunnel(ruleConf, m)
+			ln, err = server.StartHTunnel(conf, m)
 		case "http":
-			ln, err = server.StartHTTP(ruleConf, m)
+			ln, err = server.StartHTTP(conf, m)
 		case "https":
-			ln, err = server.StartHTTPS(ruleConf, m)
+			ln, err = server.StartHTTPS(conf, m)
 		default:
 			util.LogModuleError("system", " unsupported mapping type: %s", m.Type)
 			continue
@@ -506,30 +506,30 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	util.LogModuleInfo("system", "------------------------started ok %d------------------------", runCnt)
 
 	// Start health check for best groups
-	res.healthStop = startHealthChecks(ruleConf)
+	res.healthStop = startHealthChecks(conf)
 
 	// Start subscription refresh
-	res.subscriptionStop = startSubscriptionRefresh(ruleConf, subCacheDir)
+	res.subscriptionStop = startSubscriptionRefresh(conf, subCacheDir)
 
 	// Start web admin panel (if configured)
 	util.LogModuleInfo("system", "Admin check: Admin=%v, Enabled=%v, prevAdmin=%v",
-		ruleConf.Admin != nil,
+		conf.Admin != nil,
 		func() bool {
-			if ruleConf.Admin != nil {
-				return ruleConf.Admin.Enabled
+			if conf.Admin != nil {
+				return conf.Admin.Enabled
 			}
 			return false
 		}(),
 		prevAdmin != nil)
-	if ruleConf.Admin != nil && ruleConf.Admin.Enabled {
+	if conf.Admin != nil && conf.Admin.Enabled {
 		if prevAdmin != nil {
 			// Reuse existing admin server, just update config reference
 			util.LogModuleInfo("system", "Reusing existing admin server")
-			prevAdmin.UpdateConfig(ruleConf)
+			prevAdmin.UpdateConfig(conf)
 			res.adminServer = prevAdmin
 		} else {
 			util.LogModuleInfo("system", "Creating new admin server")
-			res.adminServer = admin.NewAdminServer(ruleConf.Admin, defaultConfig)
+			res.adminServer = admin.NewAdminServer(conf.Admin, defaultConfig)
 			util.LogModuleInfo("system", "Calling admin server Start()")
 			if err := res.adminServer.Start(); err != nil {
 				return nil, fmt.Errorf("admin server start fail: %w", err)
@@ -546,7 +546,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 	// Start reverse clients for all enabled reverse configs. A single stop channel
 	// broadcasts shutdown to every goroutine; the WaitGroup waits for all of them.
 	res.reverseClientStop = make(chan struct{})
-	for _, rc := range ruleConf.ReverseConfigs {
+	for _, rc := range conf.ReverseConfigs {
 		if rc == nil || !rc.Enabled {
 			continue
 		}
@@ -555,7 +555,7 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 		res.reverseClientWG.Add(1)
 		go func(rc *config.ReverseConfig) {
 			defer res.reverseClientWG.Done()
-			startReverseClient(rc, ruleConf, configStop, res.reverseClientStop)
+			startReverseClient(rc, conf, configStop, res.reverseClientStop)
 		}(rc)
 	}
 
@@ -564,8 +564,8 @@ func run(ruleConf *config.RuleConfiguration, prev *activeResources) (*activeReso
 
 // startReverseBinding starts a mapping using outbound reverse connections.
 // It delegates to server.StartReverseMapping which handles all protocol types.
-func startReverseBinding(ruleConf *config.RuleConfiguration, m *config.Mapping) (*server.ReverseServer, error) {
-	return server.StartReverseMapping(ruleConf, m)
+func startReverseBinding(conf *config.RuleConfiguration, m *config.Mapping) (*server.ReverseServer, error) {
+	return server.StartReverseMapping(conf, m)
 }
 
 func writeDefaultConfig(path string) error {
@@ -599,15 +599,12 @@ func getRuleConf() *config.RuleConfiguration {
 		}
 	}
 
-	var ruleConf *config.RuleConfiguration
-	conf, err := db.LoadRuleConf()
+	conf, err := db.LoadConf()
 	if err != nil {
 		util.LogModuleError("system", " load config from db fail: %v", err)
-	} else {
-		ruleConf = conf
 	}
 
-	if ruleConf == nil {
+	if conf == nil {
 		util.LogModuleInfo("system", "No valid configuration found!")
 		return nil
 	}
@@ -615,16 +612,16 @@ func getRuleConf() *config.RuleConfiguration {
 	// 4. Ensure every instance has a stable ReverseID (even pure registry instances
 	//    with no reverse configs need one for identification in the admin UI).
 	//    ReverseID is stored in data/setup/reverse-id file.
-	_ = loadOrGenerateInstanceReverseID(ruleConf)
+	_ = loadOrGenerateInstanceReverseID(conf)
 
 	// 5. Normalize reverse configs: assign Seq numbers to any config lacking one.
-	normalizeReverseConfigs(ruleConf)
+	normalizeReverseConfigs(conf)
 
 	// 7. Load subscription node pools from the on-disk cache so groups have nodes
 	// immediately without blocking startup on network I/O. Missing or stale caches
 	// are refreshed in the background once the listeners are up.
 	subCacheDir = filepath.Join(dataDir, "cache", "subscription")
-	for _, sub := range ruleConf.Subscriptions {
+	for _, sub := range conf.Subscriptions {
 		if !sub.IsEnabled() || sub.URL == "" {
 			continue
 		}
@@ -638,7 +635,7 @@ func getRuleConf() *config.RuleConfiguration {
 			continue
 		}
 		sub.SetNodes(proxies)
-		for _, g := range ruleConf.ProxyGroups {
+		for _, g := range conf.ProxyGroups {
 			if !g.IsEnabled() || g.Subscription != sub.Name {
 				continue
 			}
@@ -648,8 +645,8 @@ func getRuleConf() *config.RuleConfiguration {
 	}
 
 	// 8. Configure UDP port range for all listeners
-	if ruleConf.UDPPortRange != "" {
-		parts := strings.SplitN(ruleConf.UDPPortRange, "-", 2)
+	if conf.UDPPortRange != "" {
+		parts := strings.SplitN(conf.UDPPortRange, "-", 2)
 		if len(parts) == 2 {
 			min, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
 			max, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
@@ -658,19 +655,19 @@ func getRuleConf() *config.RuleConfiguration {
 		}
 	}
 
-	if ruleConf.NeedHysteria2() {
+	if conf.NeedHysteria2() {
 		util.LogModuleInfo("system", "Hysteria2 Available!!!")
 	}
 
-	loadHealthState(ruleConf)
+	loadHealthState(conf)
 
-	return ruleConf
+	return conf
 }
 
 // loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
 // Priority: data/setup/reverse-id file > generate new.
 // If a new one is generated, it is saved to the reverse-id file.
-func loadOrGenerateInstanceReverseID(ruleConf *config.RuleConfiguration) string {
+func loadOrGenerateInstanceReverseID(conf *config.RuleConfiguration) string {
 	// Load from data/setup/reverse-id file
 	dataDir := filepath.Join("data", "setup")
 	id, err := reverse.GetReverseID(dataDir)
@@ -705,21 +702,21 @@ func assignSeqToReverseConfigs(configs []*config.ReverseConfig, start int) {
 }
 
 // normalizeReverseConfigs assigns Seq to any rc that lacks one.
-func normalizeReverseConfigs(ruleConf *config.RuleConfiguration) {
-	if ruleConf == nil {
+func normalizeReverseConfigs(conf *config.RuleConfiguration) {
+	if conf == nil {
 		return
 	}
 
 	// Find max existing Seq to start from.
 	maxSeq := 0
-	for _, rc := range ruleConf.ReverseConfigs {
+	for _, rc := range conf.ReverseConfigs {
 		if rc != nil && rc.Seq > maxSeq {
 			maxSeq = rc.Seq
 		}
 	}
 
 	// Assign Seq to configs that lack one.
-	assignSeqToReverseConfigs(ruleConf.ReverseConfigs, maxSeq)
+	assignSeqToReverseConfigs(conf.ReverseConfigs, maxSeq)
 }
 
 func main() {
@@ -797,11 +794,24 @@ func main() {
 		if _, err := os.Stat(legacyConfig); err == nil {
 			util.LogModuleInfo("system", "首次启动（数据库不存在），检测到 config.yaml，将自动导入并跳过交互初始化")
 		} else {
-			util.LogModuleInfo("system", "首次启动，进入初始化模式")
-			if err := db.InteractiveInit(); err != nil {
-				util.LogModuleError("system", " 交互式初始化失败: %v", err)
-				fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
-				os.Exit(1)
+			// Check if stdin is a terminal (interactive mode)
+			fi, err := os.Stdin.Stat()
+			isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+			
+			if isTerminal {
+				util.LogModuleInfo("system", "首次启动，进入初始化模式")
+				if err := db.InteractiveInit(); err != nil {
+					util.LogModuleError("system", " 交互式初始化失败: %v", err)
+					fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				util.LogModuleInfo("system", "首次启动（非交互模式），使用默认配置初始化")
+				if err := db.InitDefault(); err != nil {
+					util.LogModuleError("system", " 默认初始化失败: %v", err)
+					fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
+					os.Exit(1)
+				}
 			}
 		}
 	} else {
@@ -809,11 +819,11 @@ func main() {
 	}
 
 	// Load config first
-	ruleConf := getRuleConf()
+	conf := getRuleConf()
 
 	// Migrate proxy groups: update ManualProxies from config.yaml Proxies field
-	if ruleConf != nil {
-		if err := db.MigrateProxyGroups(ruleConf); err != nil {
+	if conf != nil {
+		if err := db.MigrateProxyGroups(conf); err != nil {
 			util.LogModuleWarn("system", " 迁移代理组失败: %v", err)
 		} else {
 			util.LogModuleInfo("system", "代理组迁移完成")
@@ -830,32 +840,32 @@ func main() {
 	}
 
 	// Apply -admin-port / ADMIN_PORT override if provided
-	if adminPort != "" && ruleConf != nil {
-		if ruleConf.Admin == nil {
-			ruleConf.Admin = &config.AdminConfig{Enabled: true}
+	if adminPort != "" && conf != nil {
+		if conf.Admin == nil {
+			conf.Admin = &config.AdminConfig{Enabled: true}
 		}
 		// Preserve host, replace port
 		host := "127.0.0.1"
-		if ruleConf.Admin.Addr != "" {
-			if h, _, err := net.SplitHostPort(ruleConf.Admin.Addr); err == nil && h != "" {
+		if conf.Admin.Addr != "" {
+			if h, _, err := net.SplitHostPort(conf.Admin.Addr); err == nil && h != "" {
 				host = h
 			}
 		}
-		ruleConf.Admin.Addr = net.JoinHostPort(host, adminPort)
-		ruleConf.Admin.Enabled = true
-		util.LogModuleInfo("system", "[STARTUP] admin port overridden to %s", ruleConf.Admin.Addr)
+		conf.Admin.Addr = net.JoinHostPort(host, adminPort)
+		conf.Admin.Enabled = true
+		util.LogModuleInfo("system", "[STARTUP] admin port overridden to %s", conf.Admin.Addr)
 	}
 
 	// Start with loaded config
 	var resources *activeResources
 	startupStart := time.Now()
 	util.LogModuleDebug("main", "Config load took %v", time.Since(startupStart))
-	resources, err = run(ruleConf, resources)
+	resources, err = run(conf, resources)
 	if err != nil {
 		if strings.Contains(err.Error(), "admin server start fail") {
 			adminAddr := "unknown"
-			if ruleConf != nil && ruleConf.Admin != nil {
-				adminAddr = ruleConf.Admin.Addr
+			if conf != nil && conf.Admin != nil {
+				adminAddr = conf.Admin.Addr
 			}
 			fmt.Fprintf(os.Stderr, "\nAdmin server failed to start on %s\n", adminAddr)
 			fmt.Fprintf(os.Stderr, "Working directory: %s\n", workDir)
@@ -903,7 +913,7 @@ func main() {
 	}
 
 	// Interactive mode: open the web reverse wizard in the default browser.
-	if ruleConf != nil && ruleConf.Interactive {
+	if conf != nil && conf.Interactive {
 		if resources != nil && resources.adminServer != nil {
 			openReverseWizardURL(resources.adminServer)
 		} else {
@@ -1633,7 +1643,7 @@ func writeStartupError(err error) error {
 // startReverseClient starts a reverse client goroutine.
 // Reuses server.ReverseServer for the data connection pool — no custom relay logic.
 // The goroutine exits when stop is closed.
-func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) {
+func startReverseClient(rc *config.ReverseConfig, conf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) {
 	interval := time.Duration(rc.ReconnectInterval) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Second
@@ -1650,7 +1660,7 @@ func startReverseClient(rc *config.ReverseConfig, ruleConf *config.RuleConfigura
 		default:
 		}
 
-		err := runReverseSession(rc, ruleConf, configStop, globalStop)
+		err := runReverseSession(rc, conf, configStop, globalStop)
 		if err != nil {
 			util.LogModuleInfo("system", "[REVERSE-CLIENT] session error (name=%s addr=%s): %v, reconnecting in %v...", rc.Name, rc.RegistryProxy, err, interval)
 		} else {
@@ -1675,7 +1685,7 @@ func publishReverseEvent(rc *config.ReverseConfig) {
 	util.DefaultVersionNotifier.BumpVersion("reverse")
 }
 
-func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) (err error) {
+func runReverseSession(rc *config.ReverseConfig, conf *config.RuleConfiguration, configStop <-chan struct{}, globalStop <-chan struct{}) (err error) {
 	// Update runtime state (last error) and notify admin UI whenever this
 	// session function returns.
 	defer func() {
@@ -1690,7 +1700,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	if rc.RegistryProxy == "" {
 		return fmt.Errorf("reverse client requires registry-proxy (must connect to registry through proxy chain)")
 	}
-	registryProxy := ruleConf.ProxyNames[rc.RegistryProxy]
+	registryProxy := conf.ProxyNames[rc.RegistryProxy]
 	if registryProxy == nil {
 		return fmt.Errorf("registry proxy not found: %s", rc.RegistryProxy)
 	}
@@ -1719,7 +1729,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 	// Use the instance-level ReverseID for stable port allocation.
 	// All reverse configs from this instance share the same identity;
 	// the Seq field differentiates them on the registry.
-	clientID := loadOrGenerateInstanceReverseID(ruleConf)
+	clientID := loadOrGenerateInstanceReverseID(conf)
 
 	// For direct listeners configured through the admin wizard, the target may
 	// be stored as a single "target-address" string. Split it into host/port so
@@ -1825,7 +1835,7 @@ func runReverseSession(rc *config.ReverseConfig, ruleConf *config.RuleConfigurat
 		Sni:                   req.ListenerSNI,
 	}
 
-	rvSrv, err := server.StartReverseMapping(ruleConf, mapping)
+	rvSrv, err := server.StartReverseMapping(conf, mapping)
 	if err != nil {
 		return fmt.Errorf("start reverse mapping fail: %w", err)
 	}
@@ -1916,7 +1926,7 @@ func buildProxyConfigJSON(host string, port int, proto, user, password, sni stri
 
 // wireAdminCallbacks connects admin-server actions to the current runtime config.
 func wireAdminCallbacks(resources *activeResources) {
-	if resources == nil || resources.adminServer == nil || resources.ruleConf == nil {
+	if resources == nil || resources.adminServer == nil || resources.conf == nil {
 		return
 	}
 	adminSrv := resources.adminServer
@@ -2106,14 +2116,14 @@ func wireAdminCallbacks(resources *activeResources) {
 	adminSrv.OnIncrementalUpdate = func() error {
 		util.LogModuleInfo("main", "[P2P] OnIncrementalUpdate called, syncing P2P peers...")
 		// mergeAndInitLocked already updated s.conf in place, which is the same
-		// object as resources.ruleConf. All servers see changes immediately.
-		activeRuleConf.Store(resources.ruleConf)
+		// object as resources.conf. All servers see changes immediately.
+		activeConf.Store(resources.conf)
 
 		// Sync P2P peers with proxy config changes
-		resources.ruleConf.Lock()
-		proxies := make([]*config.Proxy, len(resources.ruleConf.Proxies))
-		copy(proxies, resources.ruleConf.Proxies)
-		resources.ruleConf.Unlock()
+		resources.conf.Lock()
+		proxies := make([]*config.Proxy, len(resources.conf.Proxies))
+		copy(proxies, resources.conf.Proxies)
+		resources.conf.Unlock()
 
 		// Build set of existing P2P peer proxy names (same source as StopPeerByProxyName)
 		existingPeers := p2p.GlobalP2PManager.ActivePeerProxyNames()
@@ -2159,15 +2169,15 @@ func wireAdminCallbacks(resources *activeResources) {
 				rs.Close()
 				delete(resources.mappingReverse, old.Name)
 			}
-			// Remove from ruleConf
-			resources.ruleConf.Lock()
-			for i, m := range resources.ruleConf.Mappings {
+			// Remove from conf
+			resources.conf.Lock()
+			for i, m := range resources.conf.Mappings {
 				if m.Name == old.Name {
-					resources.ruleConf.Mappings = append(resources.ruleConf.Mappings[:i], resources.ruleConf.Mappings[i+1:]...)
+					resources.conf.Mappings = append(resources.conf.Mappings[:i], resources.conf.Mappings[i+1:]...)
 					break
 				}
 			}
-			resources.ruleConf.Unlock()
+			resources.conf.Unlock()
 			return nil
 		}
 		// Mapping added or updated
@@ -2186,7 +2196,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			// Start new listener
 			if newMapping.IsEnabled() {
 				if newMapping.ReverseAddress != "" {
-					rs, err := startReverseBinding(resources.ruleConf, newMapping)
+					rs, err := startReverseBinding(resources.conf, newMapping)
 					if err != nil {
 						util.LogModuleError("system", " bind reverse fail for %s: %v", newMapping.Name, err)
 					} else {
@@ -2198,17 +2208,17 @@ func wireAdminCallbacks(resources *activeResources) {
 					var err error
 					switch newMapping.Type {
 					case "socks5":
-						ln, err = server.StartSocks5(resources.ruleConf, newMapping)
+						ln, err = server.StartSocks5(resources.conf, newMapping)
 					case "direct", "DIRECT":
-						ln, err = server.StartDirect(resources.ruleConf, newMapping)
+						ln, err = server.StartDirect(resources.conf, newMapping)
 					case "trojan":
-						ln, err = server.StartTrojan(resources.ruleConf, newMapping)
+						ln, err = server.StartTrojan(resources.conf, newMapping)
 					case "h_tunnel":
-						ln, err = server.StartHTunnel(resources.ruleConf, newMapping)
+						ln, err = server.StartHTunnel(resources.conf, newMapping)
 					case "http":
-						ln, err = server.StartHTTP(resources.ruleConf, newMapping)
+						ln, err = server.StartHTTP(resources.conf, newMapping)
 					case "https":
-						ln, err = server.StartHTTPS(resources.ruleConf, newMapping)
+						ln, err = server.StartHTTPS(resources.conf, newMapping)
 					default:
 						err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
 					}
@@ -2231,15 +2241,15 @@ func wireAdminCallbacks(resources *activeResources) {
 				close(stopCh)
 				delete(resources.reverseClientStops, old.Name)
 			}
-			// Remove from ruleConf
-			resources.ruleConf.Lock()
-			for i, rc := range resources.ruleConf.ReverseConfigs {
+			// Remove from conf
+			resources.conf.Lock()
+			for i, rc := range resources.conf.ReverseConfigs {
 				if rc.Name == old.Name {
-					resources.ruleConf.ReverseConfigs = append(resources.ruleConf.ReverseConfigs[:i], resources.ruleConf.ReverseConfigs[i+1:]...)
+					resources.conf.ReverseConfigs = append(resources.conf.ReverseConfigs[:i], resources.conf.ReverseConfigs[i+1:]...)
 					break
 				}
 			}
-			resources.ruleConf.Unlock()
+			resources.conf.Unlock()
 			return nil
 		}
 		// Reverse config added or updated
@@ -2255,7 +2265,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			if newConfig.Enabled {
 				stopCh := make(chan struct{})
 				resources.reverseClientStops[newConfig.Name] = stopCh
-				go startReverseClient(newConfig, resources.ruleConf, stopCh, resources.reverseClientStop)
+				go startReverseClient(newConfig, resources.conf, stopCh, resources.reverseClientStop)
 			}
 		}
 		return nil
@@ -2331,12 +2341,12 @@ func wireAdminCallbacks(resources *activeResources) {
 
 // ========== Health Check for best groups ==========
 
-func startHealthChecks(ruleConf *config.RuleConfiguration) chan struct{} {
+func startHealthChecks(conf *config.RuleConfiguration) chan struct{} {
 	stop := make(chan struct{})
 
 	// All groups that have interval configured will be health-checked
 	var checkGroups []*config.ProxyGroup
-	for _, g := range ruleConf.ProxyGroups {
+	for _, g := range conf.ProxyGroups {
 		if !g.IsEnabled() {
 			continue
 		}
@@ -2361,7 +2371,7 @@ func startHealthChecks(ruleConf *config.RuleConfiguration) chan struct{} {
 		select {
 		case <-time.After(5 * time.Second):
 			for _, g := range checkGroups {
-				checkGroupHealth(ruleConf, g)
+				checkGroupHealth(conf, g)
 			}
 		case <-stop:
 			return
@@ -2374,7 +2384,7 @@ func startHealthChecks(ruleConf *config.RuleConfiguration) chan struct{} {
 			select {
 			case <-ticker.C:
 				for _, g := range checkGroups {
-					checkGroupHealth(ruleConf, g)
+					checkGroupHealth(conf, g)
 				}
 			case <-stop:
 				return
@@ -2390,7 +2400,7 @@ const (
 	healthCheckTimeout     = 5 * time.Second
 )
 
-func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
+func checkGroupHealth(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
 	var host string
 	var port int
@@ -2414,9 +2424,9 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 		key := m.HealthKey()
 		// Nested group references only come from manual members.
 		if m.IsGroup {
-			ruleConf.RLock()
-			innerGroup, ok := ruleConf.GroupNames[m.Name]
-			ruleConf.RUnlock()
+			conf.RLock()
+			innerGroup, ok := conf.GroupNames[m.Name]
+			conf.RUnlock()
 			if !ok {
 				g.SetHealth(key, false, 0)
 				continue
@@ -2471,14 +2481,14 @@ func checkGroupHealth(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) 
 	}
 	wg.Wait()
 
-	saveHealthState(ruleConf)
+	saveHealthState(conf)
 	util.DefaultVersionNotifier.BumpVersion("stats")
 }
 
 // checkGroupTest runs an immediate one-off test for every member of a group.
 // Unlike the periodic checkGroupHealth, this uses SetHealthImmediate so the
 // result is visible right away.
-func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
+func checkGroupTest(conf *config.RuleConfiguration, g *config.ProxyGroup) {
 	testURL := g.HealthCheckURL
 	var host string
 	var port int
@@ -2496,9 +2506,9 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 		key := m.HealthKey()
 		var p *config.Proxy
 		if m.IsGroup {
-			ruleConf.RLock()
-			innerGroup, ok := ruleConf.GroupNames[m.Name]
-			ruleConf.RUnlock()
+			conf.RLock()
+			innerGroup, ok := conf.GroupNames[m.Name]
+			conf.RUnlock()
 			if !ok {
 				g.SetHealthImmediate(key, false, 0)
 				continue
@@ -2538,7 +2548,7 @@ func checkGroupTest(ruleConf *config.RuleConfiguration, g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	saveHealthState(ruleConf)
+	saveHealthState(conf)
 }
 
 type persistedHealthEntry struct {
@@ -2554,7 +2564,7 @@ func healthStatePath() string {
 
 // loadHealthState restores group health from the last saved state so that
 // previously tested latency/alive information survives a process restart.
-func loadHealthState(ruleConf *config.RuleConfiguration) {
+func loadHealthState(conf *config.RuleConfiguration) {
 	data, err := os.ReadFile(healthStatePath())
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -2568,7 +2578,7 @@ func loadHealthState(ruleConf *config.RuleConfiguration) {
 		return
 	}
 	loaded := 0
-	for _, g := range ruleConf.ProxyGroups {
+	for _, g := range conf.ProxyGroups {
 		if !g.IsEnabled() {
 			continue
 		}
@@ -2591,12 +2601,12 @@ func loadHealthState(ruleConf *config.RuleConfiguration) {
 }
 
 // saveHealthState snapshots the current group health to disk.
-func saveHealthState(ruleConf *config.RuleConfiguration) {
-	ruleConf.RLock()
-	defer ruleConf.RUnlock()
+func saveHealthState(conf *config.RuleConfiguration) {
+	conf.RLock()
+	defer conf.RUnlock()
 
 	state := make(map[string]map[string]persistedHealthEntry)
-	for _, g := range ruleConf.ProxyGroups {
+	for _, g := range conf.ProxyGroups {
 		if !g.IsEnabled() {
 			continue
 		}
@@ -2753,12 +2763,12 @@ func getTestPath(url string) string {
 
 // ========== Subscription Refresh ==========
 
-func startSubscriptionRefresh(ruleConf *config.RuleConfiguration, subCacheDir string) chan struct{} {
+func startSubscriptionRefresh(conf *config.RuleConfiguration, subCacheDir string) chan struct{} {
 	stop := make(chan struct{})
 
 	var allSubs []*config.Subscription
 	var refreshSubs []*config.Subscription
-	for _, sub := range ruleConf.Subscriptions {
+	for _, sub := range conf.Subscriptions {
 		if !sub.IsEnabled() {
 			continue
 		}
@@ -2792,7 +2802,7 @@ func startSubscriptionRefresh(ruleConf *config.RuleConfiguration, subCacheDir st
 			wg.Add(1)
 			go func(sub *config.Subscription) {
 				defer wg.Done()
-				refreshSubscription(ruleConf, sub, subCacheDir)
+				refreshSubscription(conf, sub, subCacheDir)
 			}(sub)
 		}
 		wg.Wait()
@@ -2807,7 +2817,7 @@ func startSubscriptionRefresh(ruleConf *config.RuleConfiguration, subCacheDir st
 			select {
 			case <-ticker.C:
 				for _, sub := range refreshSubs {
-					refreshSubscription(ruleConf, sub, subCacheDir)
+					refreshSubscription(conf, sub, subCacheDir)
 				}
 			case <-stop:
 				return
@@ -2818,11 +2828,11 @@ func startSubscriptionRefresh(ruleConf *config.RuleConfiguration, subCacheDir st
 	return stop
 }
 
-func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscription, subCacheDir string) error {
+func refreshSubscription(conf *config.RuleConfiguration, sub *config.Subscription, subCacheDir string) error {
 	// Resolve proxy for subscription URL via rules
 	subHost, subPort, _ := parseTestURL(sub.URL)
 	req := config.NewConnectRequest("tcp", subHost, subPort)
-	proxy, _ := ruleConf.Match(req, nil)
+	proxy, _ := conf.Match(req, nil)
 
 	var content string
 	var err error
@@ -2858,7 +2868,7 @@ func refreshSubscription(ruleConf *config.RuleConfiguration, sub *config.Subscri
 		active string
 	}
 	var groups []groupActive
-	for _, g := range ruleConf.ProxyGroups {
+	for _, g := range conf.ProxyGroups {
 		if g.Subscription != sub.Name {
 			continue
 		}

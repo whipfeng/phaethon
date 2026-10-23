@@ -112,80 +112,109 @@ func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) 
 var (
 	globalMatcher *RuleMatcher
 	matcherMu     sync.RWMutex
-	matcherBuilt  bool
 	watcherID     int64 = -1
+
+	// 重建控制：channel 串行化，避免并发重建
+	rebuildCh = make(chan string, 1) // buffer=1，非阻塞发送
 )
+
+func init() {
+	go rebuildLoop()
+}
+
+// rebuildLoop 串行处理重建请求（单 goroutine）
+func rebuildLoop() {
+	for triggerBucket := range rebuildCh {
+		// Debounce: 等待静默期，合并短时间内的多次变更
+		time.Sleep(500 * time.Millisecond)
+
+		// 排空通道中的待处理触发
+		for len(rebuildCh) > 0 {
+			<-rebuildCh
+		}
+
+		// 执行重建（串行，不会并发）
+		doRebuildMatcher(triggerBucket)
+	}
+}
 
 // GetMatcher 获取当前的 RuleMatcher
 func GetMatcher() (*RuleMatcher, error) {
+	// 快速路径：读锁获取当前 matcher
 	matcherMu.RLock()
-	if matcherBuilt {
-		m := globalMatcher
-		matcherMu.RUnlock()
-		return m, nil
-	}
+	m := globalMatcher
 	matcherMu.RUnlock()
 
+	if m != nil {
+		return m, nil
+	}
+
+	// 慢路径：首次构建
 	matcherMu.Lock()
 	defer matcherMu.Unlock()
 
-	if !matcherBuilt {
-		m, err := BuildRuleMatcher()
-		if err != nil {
-			return nil, err
-		}
-		globalMatcher = m
-		matcherBuilt = true
-		registerMatcherWatcher()
+	// 双重检查
+	if globalMatcher != nil {
+		return globalMatcher, nil
+	}
+
+	m, err := BuildRuleMatcher()
+	if err != nil {
+		return nil, err
+	}
+	globalMatcher = m
+
+	// 注册 watcher（只需一次）
+	if watcherID < 0 {
+		watcherID = Subscribe(nil, rebuildMatcher)
+		util.LogModuleInfo("db", "registered RuleMatcher watcher (id=%d)", watcherID)
 	}
 
 	return globalMatcher, nil
 }
 
-// registerMatcherWatcher 注册数据库变更监听器
-func registerMatcherWatcher() {
-	if watcherID >= 0 {
-		return
-	}
-	watcherID = Subscribe(nil, rebuildMatcher)
-	util.LogModuleInfo("db", "registered RuleMatcher watcher (id=%d)", watcherID)
+// shouldRebuildBucket 判断是否需要触发重建
+func shouldRebuildBucket(bucket string) bool {
+	return bucket == string(BucketRules) ||
+		bucket == string(BucketProxies) ||
+		bucket == string(BucketProxyGroups) ||
+		bucket == string(BucketSubscriptions) ||
+		bucket == string(BucketSubscriptionNodes) || // 节点池变更
+		bucket == string(BucketMappings) ||
+		bucket == string(BucketResolvers) ||
+		bucket == string(BucketConfig)
 }
 
-// rebuildMatcher 重建 RuleMatcher（带 debounce）
-var rebuildTimer *time.Timer
-var rebuildMu sync.Mutex
-
+// rebuildMatcher 由 watcher 调用，触发重建（非阻塞）
 func rebuildMatcher(event ChangeEvent) {
 	bucket := string(event.Bucket)
-	if bucket != string(BucketRules) &&
-		bucket != string(BucketProxies) &&
-		bucket != string(BucketProxyGroups) &&
-		bucket != string(BucketSubscriptions) &&
-		bucket != string(BucketMappings) &&
-		bucket != string(BucketResolvers) &&
-		bucket != string(BucketConfig) {
+
+	if !shouldRebuildBucket(bucket) {
 		return
 	}
 
-	rebuildMu.Lock()
-	if rebuildTimer != nil {
-		rebuildTimer.Stop()
+	// 非阻塞发送触发信号
+	select {
+	case rebuildCh <- bucket:
+		util.LogModuleInfo("db", "triggered rebuild for %s", bucket)
+	default:
+		// 已有重建待处理，跳过
+		util.LogModuleInfo("db", "rebuild already pending, skipping %s", bucket)
 	}
-	rebuildTimer = time.AfterFunc(500*time.Millisecond, func() {
-		doRebuildMatcher(bucket)
-	})
-	rebuildMu.Unlock()
 }
 
+// doRebuildMatcher 执行重建（旧配置继续服务）
 func doRebuildMatcher(triggerBucket string) {
 	util.LogModuleInfo("db", "rebuilding RuleMatcher due to %s change", triggerBucket)
 
+	// 1. 构建新 matcher（不持锁，旧 matcher 继续服务）
 	m, err := BuildRuleMatcher()
 	if err != nil {
 		util.LogModuleError("db", "rebuild RuleMatcher failed: %v", err)
 		return
 	}
 
+	// 2. 原子替换（短暂持写锁）
 	matcherMu.Lock()
 	globalMatcher = m
 	matcherMu.Unlock()

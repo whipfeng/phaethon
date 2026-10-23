@@ -32,8 +32,8 @@ var (
 // ErrNotFound 表示 key 不存在
 var ErrNotFound = errors.New("key 不存在")
 
-// configBuckets 返回所有承载配置数据的 bucket（批量导入/重置时整体替换）。
-// fakeip/packages 是状态与历史数据，不属于配置，不在其中。
+// configBuckets 返回所有承载配置数据的 bucket。
+// fakeip/packages/proxy-health/subscription-nodes 是状态与历史数据，不属于配置，不在其中。
 func configBuckets() [][]byte {
 	return [][]byte{
 		BucketConfig,

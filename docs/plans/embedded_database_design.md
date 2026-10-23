@@ -56,7 +56,7 @@
 轻量变更（控制台编辑，热更新路径）:
   API 请求 → 校验
     → 原地修改共享 conf + mergeAndInitLocked()   # 引擎即时生效（共享指针）
-    → db.ImportRuleConf(conf)                     # 原子落库（持久化）
+    → db.PutXxx(item)                             # 细粒度落库（持久化）
     → BumpVersion("config")                       # 通知前端刷新
 ```
 
@@ -69,8 +69,8 @@
 ### 禁止事项
 
 - 禁止任何代码绕过 admin API 直接修改运行时配置
-- 禁止后台任务将运行时 conf 静默回写 DB（`ImportRuleConf` 只允许出现在 API 授权变更、mesh 自动分配 subnet 等明确持久的场景，且与内存修改同临界区）
-- YAML 仅作为导入/导出格式（`/api/config/raw` GET=导出、PUT=导入；首启迁移），不再是运行时配置来源
+- 禁止后台任务将运行时 conf 静默回写 DB（所有配置变更必须通过细粒度 API）
+- YAML 仅作为导出格式（`/api/config/raw` GET=导出），不再是运行时配置来源，不支持批量导入
 
 ## 根基设置（Foundational Settings）
 
@@ -85,31 +85,20 @@
 | Admin port | config bucket, key=admin | Admin API 监听端口 |
 | Admin auth | config bucket, key=admin | Admin API 认证配置（username/password/token） |
 
-### Reset 语义
-
-**Reset 保留根基设置**，只重置其他配置（proxies、rules、mappings、resolvers、subscriptions、reverse-configs、tun、interactive、port-range）：
-
-```
-POST /api/config/reset
-  → 加载 defaultRaw
-  → 从当前 DB 读取 mesh + admin 配置
-  → 合并到 newConf（保留根基）
-  → db.ImportRuleConf(newConf)
-  → OnReload（全量重建）
-```
-
 ### 根基设置修改 API
+
+根基设置通过独立 API 修改，不支持批量重置：
 
 ```
 PUT /api/config/mesh
   → 更新 mesh 配置（node-id、subnet）
-  → db.ImportRuleConf(conf)
+  → db.PutMeshConfig(mesh)
   → OnReload（重启 mesh 子系统：重新通告、重建路由表）
   → 警告：修改 node-id 会改变节点身份，其他节点需要重新发现
 
 PUT /api/config/admin
   → 更新 admin 配置（port、auth）
-  → db.ImportRuleConf(conf)
+  → db.PutAdminConfig(admin)
   → OnReload（重启 admin 服务器：重新绑定端口、更新认证中间件）
   → 警告：修改 port 会改变访问地址
 ```
@@ -118,12 +107,12 @@ PUT /api/config/admin
 - Mesh 身份变化需要重启 P2P、重建路由表、重新通告
 - Admin 端口变化需要重新绑定监听器
 
-OnReload 是现有机制（config reset、YAML 导入都走此路径），代价可接受（根基设置修改频率极低）。
+OnReload 是现有机制，代价可接受（根基设置修改频率极低）。
 
 ### 禁止事项（补充）
 
-- 禁止 reset 覆盖根基设置（mesh node-id/subnet、admin port/auth）
 - 禁止绕过 API 直接修改根基设置（必须通过 PUT /api/config/mesh 或 PUT /api/config/admin）
+- 禁止批量导入/重置配置（所有配置项通过细粒度 API 逐个管理）
 
 ## 数据模型
 
@@ -163,8 +152,8 @@ OnReload 是现有机制（config reset、YAML 导入都走此路径），代价
 ### 变更事件语义
 
 - **per-key 写入/删除**：`Put`/`Delete` 触发对应 bucket 的 ChangeEvent（细粒度）
-- **批量落库**（`ImportRuleConf`，配置持久化/YAML 导入/配置重置都走此入口）：单个写事务原子替换所有配置 bucket（先清空再写入，**不触碰** fakeip/packages），提交后触发一次合成事件 `{bucket: "config", key: "__rebuilt__", op: "put"}`
-- 配置热更新**不依赖** watcher（原地修改共享 conf 即时生效）；变更事件面向后续阶段的订阅者（如 Fake-IP 持久化、审计）与未来的外部集成。合成事件避免批量落库触发 N 次回调
+- **规则列表更新**（`ReplaceAllRules`，规则增删改查走此入口）：单个写事务原子替换规则 bucket（先清空再写入），提交后触发一次合成事件 `{bucket: "rules", key: "__rebuilt__", op: "put"}`
+- 配置热更新**不依赖** watcher（原地修改共享 conf 即时生效）；变更事件面向后续阶段的订阅者（如 Fake-IP 持久化、审计）与未来的外部集成
 
 **不持久化的数据：**
 - ✗ Peer 历史：内存维护当前连接的 peer，通过 mesh gossip 重新发现
@@ -181,12 +170,11 @@ INFO: 数据库不存在，进入初始化模式
 ? Admin API 端口 (默认 39999): 39999
 ? Mesh node-id (留空自动生成): 
 INFO: 生成 Mesh node-id: 15538109650403028488
-? 是否导入现有配置？(y/N): y
-? 配置文件路径: ./config.yaml
-INFO: 导入配置成功
 INFO: 数据库创建完成：phaethon.db
 INFO: 启动服务...
 ```
+
+**注意**：如果工作目录存在旧版 `config.yaml`，程序会自动迁移到数据库并跳过交互初始化。迁移完成后，`config.yaml` 不再使用，所有配置通过控制台 UI 或 Admin API 管理。
 
 ### 后续启动
 
@@ -360,7 +348,7 @@ POST /api/import    # 从 YAML 导入配置
 | 系统设置页 | BucketConfig(admin) | 查看/编辑 |
 | Fake-IP 页面 | BucketFakeIP | 查看/搜索/删除 |
 | 包管理页 | BucketPackages | 查看/上传/删除/分发 |
-| 导出/导入 | 整库 | YAML 导出/导入 |
+| 导出配置 | 整库 | YAML 导出（仅导出，不支持批量导入） |
 
 ## 优势
 

@@ -53,11 +53,21 @@ Admin 是 phaethon 内置的 Web 管理面板与 HTTP API，默认监听 `:39999
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/api/config` | 获取/保存完整配置 |
-| GET | `/api/config/raw` | 原始 YAML |
-| POST | `/api/config/reset` | 重置配置 |
-| POST | `/api/config/reload` | 从磁盘重新加载 |
+| GET | `/api/config` | 获取完整配置（JSON） |
+| GET | `/api/config/raw` | 获取原始 YAML 导出 |
+| POST | `/api/config/reload` | 从数据库重新加载运行时 |
 | GET | `/api/config/target` | 当前保存目标（base/env） |
+| GET/PUT | `/api/config/mesh` | 获取/更新 Mesh 基础配置 |
+| GET/PUT | `/api/config/admin` | 获取/更新 Admin 基础配置 |
+
+**注意**：配置管理采用细粒度操作，不支持批量导入/重置。所有配置项通过独立 API 管理：
+- 代理：`/api/proxies`
+- 代理组：`/api/groups`
+- 订阅：`/api/subscriptions`
+- 规则：`/api/rules`
+- 映射：`/api/mappings`
+- 解析器：`/api/resolvers`
+- 反向配置：`/api/reverse`
 
 ### 4.3 代理与代理组
 

@@ -122,13 +122,13 @@ func ImportRuleConf(conf *config.RuleConfiguration) error {
 
 - [x] 备份所有环境数据库
 - [x] 分析问题根因
-- [ ] 删除 `ImportRuleConf`、`ResetConfigPreserving`、`ImportYAML`
-- [ ] 新增 `SyncConfigToDB`（diff-based 精确同步）
-- [ ] 重构 `saveConfig/saveConfig_locked`
-- [ ] 重构 `main.go` 启动逻辑
-- [ ] 重构配置初始化 API
-- [ ] 重构配置重置 API
-- [ ] 编译验证
+- [x] 删除 `ImportRuleConf`、`ResetConfigPreserving`、`ImportYAML`
+- [x] 新增细粒度数据库操作（`PutXxx`/`DeleteXxx`/`ListXxx`）
+- [x] 重构所有 API handler 使用细粒度操作
+- [x] 删除批量导入/重置 API（`POST /api/config`、`PUT /api/config/raw`、`POST /api/config/reset`）
+- [x] 删除 `fullConfigImport` 和 `ReplaceAllConfig` 函数
+- [x] 更新设计文档反映新架构
+- [x] 编译验证
 - [ ] 部署 VM 环境测试
 - [ ] 恢复 VM 数据库数据
 - [ ] 部署到其他环境

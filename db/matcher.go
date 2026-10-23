@@ -3,7 +3,6 @@ package db
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	bolt "go.etcd.io/bbolt"
 	"phaethon/config"
@@ -125,15 +124,7 @@ func init() {
 // rebuildLoop 串行处理重建请求（单 goroutine）
 func rebuildLoop() {
 	for triggerBucket := range rebuildCh {
-		// Debounce: 等待静默期，合并短时间内的多次变更
-		time.Sleep(500 * time.Millisecond)
-
-		// 排空通道中的待处理触发
-		for len(rebuildCh) > 0 {
-			<-rebuildCh
-		}
-
-		// 执行重建（串行，不会并发）
+		// 直接重建，channel 串行化已防止并发
 		doRebuildMatcher(triggerBucket)
 	}
 }

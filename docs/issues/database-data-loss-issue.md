@@ -97,26 +97,33 @@ func ImportRuleConf(conf *config.RuleConfiguration) error {
    - 配置初始化 API → 调用 `SyncConfigToDB`
    - 配置重置 API → 调用 `SyncConfigToDB`（保留 mesh/admin）
 
-### 阶段 2：彻底重构（计划中）
+### 阶段 2：彻底重构（已完成）
 
-废除 `s.conf` 中间对象，所有 API 直接操作数据库：
+废除 `s.conf` 中间对象和 `RuleConfiguration` 结构，所有组件直接查询数据库：
 
-1. **废除 `SyncConfigToDB`**
-2. **废除 `saveConfig` / `saveConfig_locked`**
-3. **重构所有 40+ 个 API handler**：
-   - 添加代理：`PUT /api/proxies` → `db.PutProxy(proxy)` + `notifyChanges`
-   - 删除代理：`DELETE /api/proxies/:name` → `db.DeleteProxy(name)` + `notifyChanges`
-   - 修改映射：`PUT /api/mappings/:name` → `db.PutMapping(mapping)` + `notifyChanges`
-   - 查询配置：`GET /api/config` → `db.LoadRuleConf()`（按需加载）
-4. **移除 `AdminServer.conf` 字段**：改为按需从数据库加载
-5. **保留内存缓存**：通过 watcher 机制自动更新（性能优化）
+1. **已废除**：
+   - `SyncConfigToDB` - 已删除
+   - `saveConfig` / `saveConfig_locked` - 已删除
+   - `LoadRuleConf()` - 已删除（不再全量加载到内存结构）
+   - `config.RuleConfiguration` - 标记为废弃，不再使用
+
+2. **已重构**：
+   - 所有 API handler 直接使用 `db.PutXxx()` / `db.DeleteXxx()` / `db.ListXxx()`
+   - Admin 服务器启动时直接调用 `db.GetAdminConfig()`
+   - Mesh 子系统启动时直接调用 `db.GetMeshConfig()`
+   - 各组件按需查询数据库，不再依赖统一的 ruleConf 结构
+
+3. **缓存设计**（按需）：
+   - 如某 bucket 数据被频繁读取，可为该 bucket 单独设计缓存
+   - 缓存按 bucket 独立，不是全量缓存
+   - 提供 Invalidate() 方法，API 修改后调用
 
 ### 安全保障
 
-1. **完整性检查**：如果 conf 为 nil 或所有列表项均为空，拒绝执行
+1. **完整性检查**：数据库操作前验证参数
 2. **事务原子性**：所有操作在单个事务内完成
-3. **diff-based 同步**：逐个 key 对比，避免"先清空再重写"的中间态
-4. **数据库为唯一真实源**：废除内存中的冗余副本
+3. **细粒度操作**：逐个 key 增删改查，避免"先清空再重写"的中间态
+4. **数据库为唯一真实源**：不存在内存中的冗余副本
 
 ## 修复进度
 
@@ -127,8 +134,11 @@ func ImportRuleConf(conf *config.RuleConfiguration) error {
 - [x] 重构所有 API handler 使用细粒度操作
 - [x] 删除批量导入/重置 API（`POST /api/config`、`PUT /api/config/raw`、`POST /api/config/reset`）
 - [x] 删除 `fullConfigImport` 和 `ReplaceAllConfig` 函数
+- [x] 删除 `SyncConfigToDB` 和相关辅助函数
+- [x] 删除 `LoadRuleConf()` 和 `RuleConfiguration` 结构
 - [x] 更新设计文档反映新架构
 - [x] 编译验证
+- [ ] 修复 VM admin 服务端口问题（数据库 AdminConfig.Addr 可能为空）
 - [ ] 部署 VM 环境测试
 - [ ] 恢复 VM 数据库数据
 - [ ] 部署到其他环境

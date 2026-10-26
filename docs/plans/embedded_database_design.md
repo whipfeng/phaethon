@@ -932,3 +932,188 @@ func (m *ControlManager) handleRegister(...) {
 - 测试验证：2-3 天
 
 **总计：7-10 天**
+
+## Phase 5：运行时状态统一落库
+
+### 背景
+
+当前系统中存在多个运行时状态分散存储在文件系统中，违反了"数据库是唯一事实源"的核心原则。需要审视所有文件操作，将运行时状态迁移到数据库。
+
+### 决策原则
+
+**核心原则：能落库的就落库。** 数据库是唯一事实源，所有运行时状态都应存储在数据库中。
+
+**例外情况（必须保留为文件）**：
+- ✅ Watchdog 使用的数据（数据库初始化前需要访问）
+- ✅ 大文件（>1MB，数据库不适合存储大 blob）
+- ✅ 日志文件（追加写入，自动轮转）
+
+**文件存储（watchdog 使用，DB 初始化前需要访问）**：
+
+| 文件 | 用途 | 理由 |
+|------|------|------|
+| `data/state/stopped` | 优雅停止标记 | watchdog 在 DB 初始化前读取，判断是否需要回滚到上一个可用版本 |
+| `data/state/last-good-worker` | 最后成功的 worker 路径 | watchdog 在 DB 初始化前读取，用于回滚时启动旧版本 |
+
+**数据库存储（非 watchdog 使用）**：
+
+| Key | Value 类型 | 用途 |
+|-----|-----------|------|
+| `node-id` | string | 全局实例标识（mesh、reverse、admin 共用） |
+| `session-secret` | []byte (32B) | Admin 会话密钥（敏感数据） |
+| `tls-cert` | []byte | 自动生成的 TLS 证书（敏感数据） |
+| `tls-key` | []byte | 自动生成的 TLS 私钥（敏感数据） |
+| `dhcp-leases` | []DHCPLease | DHCP 租约列表（运行时状态） |
+| `port-bindings` | []PortBinding | 端口绑定列表（运行时状态） |
+| `tun-state` | *TUNState | TUN 设备状态（运行时状态） |
+
+### 迁移决策
+
+#### ✅ 已迁移到数据库（10个）
+
+| 原文件 | 数据库 Key | 大小 | 理由 |
+|--------|-----------|------|------|
+| `data/state/mesh-state.json` | `state/node-id` + `config/mesh` | ~100B | node-id 是全局实例标识，subnet 是 mesh 配置 |
+| `data/reverse-id` | `state/node-id` | 32B | 统一使用 node-id，不再单独存储 reverse-id |
+| `data/state/dhcp-leases.json` | `state/dhcp-leases` | 几KB | 运行时状态，频繁更新 |
+| `data/state/bindings.json` | `state/port-bindings` | 几KB | 运行时状态，频繁更新 |
+| `admin-session-secret.key` | `state/session-secret` | 32B | 敏感数据，需要原子更新 |
+| `admin-tls-cert.pem` + `admin-tls-key.pem` | `state/tls-cert` + `state/tls-key` | 几KB | 程序自动生成，敏感数据 |
+| `data/packages/*.json` | `BucketPackages` | 几KB/个 | 元数据应统一存储，二进制文件保留在文件系统 |
+
+#### ✅ 保留在文件系统（正确设计）
+
+**Watchdog 文件（2个）** - 数据库初始化前需要访问：
+
+| 文件 | 用途 | 理由 |
+|------|------|------|
+| `data/state/stopped` | 优雅停止标记 | watchdog 在 DB 初始化前读取，判断是否需要回滚 |
+| `data/state/last-good-worker` | 最后成功的 worker 路径 | watchdog 在 DB 初始化前读取，用于启动旧版本 |
+
+**大文件（3类）** - 数据库不适合存储大 blob：
+
+| 文件 | 大小 | 理由 |
+|------|------|------|
+| `packages/*.json` | 每个几KB，总数多 | 包元数据是内容/资产，不是运行时状态 |
+| P2P 缓存二进制 | 几MB~几十MB | 大二进制文件 |
+| `wintun.dll` | 几MB | 大二进制文件 |
+
+**崩溃恢复文件（1个）** - 必须在数据库损坏时仍可访问：
+
+| 文件 | 位置 | 理由 |
+|------|------|------|
+| `/var/run/phaethon-tun.state` | tmpfs | 数据库损坏时仍需恢复内核参数 |
+
+**用户管理的凭证** - 用户通过外部工具管理：
+
+| 文件 | 理由 |
+|------|------|
+| TLS 证书文件（配置指定） | 用户通过 openssl/certbot 生成，配置中的 `tls-cert`/`tls-key`/`client-ca` 只存文件路径（不支持 inline PEM）。优先级：AdminConfig 文件路径 > `state/tls-cert`/`state/tls-key`（自动生成）。用户想替换证书：方式 A）配置 AdminConfig 文件路径；方式 B）直接替换 `state/tls-cert`/`state/tls-key` |
+| SSH 私钥（配置指定） | 用户通过 ssh-keygen 生成，配置中的 `private-key` 字段作为文件路径或 inline PEM |
+
+**系统文件** - 只读，OS 管理：
+
+| 文件 | 理由 |
+|------|------|
+| `/proc/net/route` | 系统只读文件 |
+| `/proc/sys/net/ipv4/*` | 系统内核参数 |
+| `/etc/resolv.conf` | 系统 DNS 配置 |
+
+**日志文件** - 追加写入，自动轮转：
+
+| 文件 | 理由 |
+|------|------|
+| `phaethon.log` | 日志文件 |
+| `startup-error.log` | 日志文件 |
+
+### 新增 Bucket 设计
+
+| Bucket | Key | Value 类型 | 说明 | 原文件位置 |
+|--------|-----|-----------|------|-----------|
+| `state` | `node-id` | string | 全局实例标识（mesh、reverse、admin 共用） | `data/state/mesh-state.json` + `data/reverse-id` |
+| `state` | `session-secret` | []byte (32B) | Admin 会话密钥（敏感数据） | `admin-session-secret.key` |
+| `state` | `tls-cert` | []byte | 自动生成的 TLS 证书（敏感数据） | `admin-tls-cert.pem` |
+| `state` | `tls-key` | []byte | 自动生成的 TLS 私钥（敏感数据） | `admin-tls-key.pem` |
+| `state` | `dhcp-leases` | []DHCPLease | DHCP 租约列表（运行时状态） | `data/state/dhcp-leases.json` |
+| `state` | `port-bindings` | []PortBinding | 端口绑定列表（运行时状态） | `data/state/bindings.json` |
+| `state` | `tun-state` | *TUNState | TUN 设备状态（运行时状态） | 新增 |
+| `packages` | `{id}` | PackageMeta | 包元数据（二进制文件保留在 `data/packages/*.pkg`） | `data/packages/*.json` |
+
+**注意**：原设计中的 `instance-state` 和 `runtime-state` 两个 bucket 已合并为统一的 `state` bucket，简化 bucket 结构。
+
+### 数据模型
+
+```go
+// DHCPLease 存储单个 DHCP 租约
+type DHCPLease struct {
+    IP        string    `json:"ip"`
+    MAC       string    `json:"mac"`
+    Hostname  string    `json:"hostname,omitempty"`
+    ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// PortBinding 存储端口绑定（复用 server.PortBinding 的 13 个字段）
+// 已在 db/runtime_state_extended.go 中定义
+
+// TUNState 存储 TUN 设备状态
+type TUNState struct {
+    Interface string `json:"iface"`
+    RPFilter  int    `json:"rp_filter"`
+    IPForward int    `json:"ip_forward"`
+}
+```
+
+**注意**：原设计中的 `MeshIdentity` 结构体已删除。node-id 作为全局实例标识独立存储在 `state/node-id`，subnet 存储在 `config/mesh` 的 MeshConfig 中。
+
+### 迁移策略
+
+**一次性割接**（无向后兼容）：
+1. 部署前运行独立迁移工具：`./migrate_data`
+2. 迁移工具读取旧文件，写入数据库
+3. 输出迁移报告
+4. 部署新版本应用（只使用数据库）
+
+**应用代码原则**：
+- ❌ 不包含任何 legacy 兼容逻辑
+- ❌ 不尝试读取旧文件
+- ✅ 只使用数据库
+- ✅ 迁移逻辑独立于应用代码
+
+### 实现状态
+
+#### ✅ 已完成
+
+- [x] 添加统一的 `state` bucket（合并原 `instance-state` 和 `runtime-state`）
+- [x] 实现 Get/Put 辅助函数
+- [x] 添加数据模型定义
+- [x] 迁移 mesh-state.json → `state/node-id`（全局实例标识）+ `config/mesh`（subnet）
+- [x] 迁移 reverse-id → 统一使用 `state/node-id`（消除冗余身份概念）
+- [x] 迁移 dhcp-leases.json → `state/dhcp-leases`
+- [x] 迁移 bindings.json → `state/port-bindings`
+- [x] 迁移 admin-session-secret.key → `state/session-secret`
+- [x] 迁移 admin-tls-cert.pem → `state/tls-cert`
+- [x] 迁移 admin-tls-key.pem → `state/tls-key`
+- [x] 迁移 data/packages/*.json → BucketPackages（二进制文件保留在文件系统）
+- [x] 移除所有 legacy 文件读写代码
+- [x] 移除文件路径常量和未使用的 import
+- [x] 扩展迁移工具支持所有运行时状态和 Package 元数据
+- [x] 删除死代码 cmd/setup/profile.go
+- [x] 删除 MeshIdentity 结构体和 GetMeshIdentity/PutMeshIdentity 函数
+- [x] 删除 GetReverseID/PutReverseID 函数（统一使用 node-id）
+- [x] 保留 stopped-marker 和 last-good-worker 为文件（watchdog 使用）
+
+### 优势
+
+1. **统一数据源**：所有运行时状态都在数据库中，消除不一致风险
+2. **简化备份**：只需备份 phaethon.db，不需要分散的状态文件
+3. **原子操作**：数据库事务保证状态一致性
+4. **性能提升**：mmap 访问比文件系统更快
+5. **代码清晰**：消除文件路径拼接和错误处理
+6. **无兼容包袱**：应用代码纯净，不包含 legacy 逻辑
+
+### 风险评估
+
+- **低风险**：这些都是小状态文件，迁移简单
+- **回滚方案**：迁移工具不删除旧文件，可手动恢复
+- **测试策略**：在每个环境验证迁移和读写
+

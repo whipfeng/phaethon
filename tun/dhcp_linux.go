@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"phaethon/config"
+	"phaethon/db"
 	"phaethon/util"
 	"sort"
 	"sync"
@@ -216,10 +217,9 @@ type lease struct {
 // dhcpServerImpl is the Linux DHCP server implementation.
 type dhcpServerImpl struct {
 	ifaceName string
-	cfg       *config.DHCPConfig
-	dnsAddr   net.IP
-	dataDir   string
-	leaseFile string
+	cfg     *config.DHCPConfig
+	dnsAddr net.IP
+	dataDir string
 
 	rawFD    int // AF_PACKET socket for sending
 	ifIndex  int
@@ -330,10 +330,7 @@ func newDHCPServerImpl(ifaceName string, cfg *config.DHCPConfig, dnsAddr net.IP,
 		}
 	}
 
-	if dataDir != "" {
-		s.leaseFile = filepath.Join(dataDir, "state", "dhcp-leases.json")
-		s.loadLeases()
-	}
+	s.loadLeases()
 
 	return s, nil
 }
@@ -409,19 +406,15 @@ type leaseJSON struct {
 }
 
 func (s *dhcpServerImpl) loadLeases() {
-	data, err := os.ReadFile(s.leaseFile)
+	dbLeases, err := db.GetDHCPLeases()
 	if err != nil {
-		return // file doesn't exist yet, that's fine
-	}
-	var entries []leaseJSON
-	if err := json.Unmarshal(data, &entries); err != nil {
-		util.LogModuleWarn("dhcp", "failed to parse lease file: %v", err)
+		util.LogModuleWarn("dhcp", "failed to load leases from database: %v", err)
 		return
 	}
 	now := time.Now()
 	count := 0
-	for _, e := range entries {
-		if e.Expires.Before(now) {
+	for _, e := range dbLeases {
+		if e.ExpiresAt.Before(now) {
 			continue // expired
 		}
 		ip := net.ParseIP(e.IP).To4()
@@ -433,42 +426,33 @@ func (s *dhcpServerImpl) loadLeases() {
 			ip:       ip,
 			mac:      mac,
 			hostname: e.Hostname,
-			expires:  e.Expires,
+			expires:  e.ExpiresAt,
 		}
 		count++
 	}
 	if count > 0 {
-		util.LogModuleInfo("dhcp", "loaded %d leases from %s", count, s.leaseFile)
+		util.LogModuleInfo("dhcp", "loaded %d leases from database", count)
 	}
 }
 
 func (s *dhcpServerImpl) saveLeases() {
-	if s.leaseFile == "" {
-		return
-	}
 	s.mu.Lock()
-	entries := make([]leaseJSON, 0, len(s.leases))
+	entries := make([]db.DHCPLease, 0, len(s.leases))
 	now := time.Now()
 	for mac, l := range s.leases {
 		if l.expires.After(now) {
-			entries = append(entries, leaseJSON{
-				IP:       l.ip.String(),
-				MAC:      mac,
-				Hostname: l.hostname,
-				Expires:  l.expires,
+			entries = append(entries, db.DHCPLease{
+				IP:        l.ip.String(),
+				MAC:       mac,
+				Hostname:  l.hostname,
+				ExpiresAt: l.expires,
 			})
 		}
 	}
 	s.mu.Unlock()
 
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		util.LogModuleWarn("dhcp", "failed to marshal leases: %v", err)
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(s.leaseFile), 0755)
-	if err := os.WriteFile(s.leaseFile, data, 0644); err != nil {
-		util.LogModuleWarn("dhcp", "failed to write leases: %v", err)
+	if err := db.PutDHCPLeases(entries); err != nil {
+		util.LogModuleWarn("dhcp", "failed to save leases to database: %v", err)
 	} else {
 		util.DefaultVersionNotifier.BumpVersion("tun")
 	}

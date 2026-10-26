@@ -9,8 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -433,64 +431,4 @@ func parseClashSubscription(content string) ([]*Proxy, error) {
 		return nil, err
 	}
 	return sub.Proxies, nil
-}
-
-// FetchSubscriptionCached fetches subscription content, falling back to disk cache
-// on failure. On success, the content is saved to cache for future restarts.
-// Returns (content, fromCache, error).
-func FetchSubscriptionCached(subURL string, dialFunc func(network, addr string) (net.Conn, error), cacheDir, groupName string) (string, bool, error) {
-	// 1. Try network fetch
-	content, err := FetchSubscription(subURL, dialFunc)
-	if err == nil {
-		// Save to cache (best-effort, don't fail on cache write error)
-		_ = SaveSubscriptionCache(cacheDir, groupName, content)
-		return content, false, nil
-	}
-
-	// 2. Network fetch failed, try cache
-	if cached, cacheErr := LoadSubscriptionCache(cacheDir, groupName); cacheErr == nil && cached != "" {
-		return cached, true, nil
-	}
-
-	// 3. Both failed
-	return "", false, err
-}
-
-// ========== Subscription Cache ==========
-
-// cacheFileName returns a safe filename for a group's subscription cache.
-// Uses the group name sanitized for filesystem use.
-func cacheFileName(groupName string) string {
-	// Replace path separators and other problematic chars
-	safe := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' ||
-			r == '"' || r == '<' || r == '>' || r == '|' {
-			return '_'
-		}
-		return r
-	}, groupName)
-	return safe + ".cache"
-}
-
-// SaveSubscriptionCache writes raw subscription content to disk.
-func SaveSubscriptionCache(cacheDir, groupName, content string) error {
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return err
-	}
-	path := filepath.Join(cacheDir, cacheFileName(groupName))
-	return os.WriteFile(path, []byte(content), 0644)
-}
-
-// LoadSubscriptionCache reads cached subscription content from disk.
-// Returns ("", nil) if no cache exists.
-func LoadSubscriptionCache(cacheDir, groupName string) (string, error) {
-	path := filepath.Join(cacheDir, cacheFileName(groupName))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return string(data), nil
 }

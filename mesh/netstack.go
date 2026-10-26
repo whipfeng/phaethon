@@ -1542,12 +1542,23 @@ func (n *Netstack) acceptTCP() {
 		}
 
 		if n.callbacks != nil && n.callbacks.HandleTCPConn != nil {
+			util.LogModuleInfo("netstack", "[HANDLECONN-LAUNCH] [%s] launching goroutine for HandleTCPConn callback", corrID)
 			go func() {
-				defer ep.Close()
-				defer conn.Close()
+				util.LogModuleInfo("netstack", "[HANDLECONN-GOROUTINE] [%s] goroutine STARTED", corrID)
+				defer func() {
+					if r := recover(); r != nil {
+						util.LogModuleWarn("netstack", "[HANDLECONN-PANIC] [%s] panic recovered: %v", corrID, r)
+					}
+					ep.Close()
+					conn.Close()
+				}()
+				util.LogModuleInfo("netstack", "[HANDLECONN-CALL] [%s] calling HandleTCPConn callback now", corrID)
 				n.callbacks.HandleTCPConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
+				util.LogModuleInfo("netstack", "[HANDLECONN-RETURN] [%s] HandleTCPConn callback returned", corrID)
 			}()
+			util.LogModuleInfo("netstack", "[HANDLECONN-LAUNCHED] [%s] goroutine launched successfully", corrID)
 		} else {
+			util.LogModuleWarn("netstack", "[HANDLECONN-SKIP] [%s] HandleTCPConn callback is nil, closing connection", corrID)
 			ep.Close()
 			conn.Close()
 		}

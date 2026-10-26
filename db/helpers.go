@@ -2,7 +2,7 @@ package db
 
 import (
 	"encoding/json"
-	"fmt"
+	"sort"
 )
 
 // Fake-IP 映射
@@ -73,24 +73,22 @@ func GetAllFakeIPs() ([]*FakeIPEntry, error) {
 
 // 包元数据
 
-// PutPackage 存储包元数据
+// PutPackage 存储包元数据（key = ID）
 func PutPackage(pkg *PackageMeta) error {
-	key := fmt.Sprintf("%s:%s:%s", pkg.Platform, pkg.Arch, pkg.Version)
-	return Put(BucketPackages, []byte(key), pkg)
+	return Put(BucketPackages, []byte(pkg.ID), pkg)
 }
 
-// GetPackage 获取包元数据
-func GetPackage(platform, arch, version string) (*PackageMeta, error) {
-	key := fmt.Sprintf("%s:%s:%s", platform, arch, version)
+// GetPackage 获取包元数据（by ID）
+func GetPackage(id string) (*PackageMeta, error) {
 	var pkg PackageMeta
-	err := Get(BucketPackages, []byte(key), &pkg)
+	err := Get(BucketPackages, []byte(id), &pkg)
 	if err != nil {
 		return nil, err
 	}
 	return &pkg, nil
 }
 
-// ListPackages 列出所有包
+// ListPackages 列出所有包（按上传时间倒序）
 func ListPackages() ([]*PackageMeta, error) {
 	var packages []*PackageMeta
 
@@ -103,5 +101,19 @@ func ListPackages() ([]*PackageMeta, error) {
 		return nil
 	})
 
-	return packages, err
+	if err != nil {
+		return nil, err
+	}
+
+	// 按上传时间倒序排序
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].UploadedAt.After(packages[j].UploadedAt)
+	})
+
+	return packages, nil
+}
+
+// DeletePackage 删除包元数据（by ID）
+func DeletePackage(id string) error {
+	return Delete(BucketPackages, []byte(id))
 }

@@ -171,6 +171,7 @@ const stoppedMarkerPath = "data/state/stopped"
 const lastGoodWorkerPath = "data/state/last-good-worker"
 
 func writeStoppedMarker() {
+	_ = os.MkdirAll("data/state", 0755)
 	_ = os.WriteFile(stoppedMarkerPath, []byte("1"), 0644)
 }
 

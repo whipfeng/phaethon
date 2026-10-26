@@ -66,9 +66,15 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 			return fmt.Errorf("load subscriptions: %w", err)
 		}
 		for _, sub := range subs {
-			nodes, err := GetSubscriptionNodes(sub.Name)
-			if err != nil {
+			// 直接在当前事务中读取订阅节点，避免嵌套事务
+			var nodesData *SubscriptionNodes
+			nodesData, err = getTx[SubscriptionNodes](tx, BucketSubscriptionNodes, []byte(sub.Name))
+			if err != nil && err != ErrNotFound {
 				return fmt.Errorf("load subscription nodes for %s: %w", sub.Name, err)
+			}
+			var nodes map[string]*config.Proxy
+			if nodesData != nil {
+				nodes = nodesData.Proxies
 			}
 			if nodes != nil {
 				sub.SubMu.Lock()
@@ -276,11 +282,6 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// 构建代理组的运行时成员列表
-	for _, group := range m.groups {
-		group.RebuildProxies()
-	}
-
 	// 验证代理组的订阅引用
 	for _, group := range m.groups {
 		if !group.IsEnabled() {
@@ -307,6 +308,13 @@ func (m *RuleMatcher) init() error {
 	}
 
 	return nil
+}
+
+// GetGroup 获取指定的代理组（用于 API 查询）
+func (m *RuleMatcher) GetGroup(name string) *config.ProxyGroup {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.groups[name]
 }
 
 // AddProxy 添加代理到统一 Map（由 ControlManager 调用）
@@ -484,7 +492,7 @@ func (m *RuleMatcher) resolveName(name string) *config.Proxy {
 		return proxy
 	}
 	group, ok := m.groups[name]
-	if !ok || len(group.Members) == 0 {
+	if !ok || len(group.GetMembers()) == 0 {
 		return nil
 	}
 	return group.NextWithVisited(make(map[string]bool))
@@ -589,6 +597,7 @@ func onConfigChange(event ChangeEvent) {
 			m.proxies[key] = proxy
 			util.LogModuleInfo("db", "watch: updated proxy %s", key)
 		}
+		// 代理变更不需要重建成员列表，因为 Members 是按需计算的
 
 	case string(BucketProxyGroups):
 		if op == "delete" {
@@ -599,6 +608,16 @@ func onConfigChange(event ChangeEvent) {
 			if err != nil || group == nil {
 				util.LogModuleError("db", "watch: failed to load group %s: %v", key, err)
 				return
+			}
+			// 注入查找回调（与 init() 保持一致）
+			group.ResolveProxy = func(name string) *config.Proxy {
+				return m.proxies[name]
+			}
+			group.ResolveGroup = func(name string) *config.ProxyGroup {
+				return m.groups[name]
+			}
+			group.ResolveSubscription = func(name string) *config.Subscription {
+				return m.subscriptions[name]
 			}
 			m.groups[key] = group
 			util.LogModuleInfo("db", "watch: updated group %s", key)
@@ -624,6 +643,7 @@ func onConfigChange(event ChangeEvent) {
 			m.subscriptions[key] = sub
 			util.LogModuleInfo("db", "watch: updated subscription %s", key)
 		}
+		// 订阅变更不需要重建成员列表，因为 Members 是按需计算的
 
 	case string(BucketSubscriptionNodes):
 		// 节点池变更，更新订阅的 SubProxies
@@ -635,6 +655,7 @@ func onConfigChange(event ChangeEvent) {
 				sub.SubMu.Unlock()
 				util.LogModuleInfo("db", "watch: updated subscription nodes for %s", key)
 			}
+			// 订阅节点变更不需要重建成员列表，因为 Members 是按需计算的
 		}
 
 	case string(BucketMappings):

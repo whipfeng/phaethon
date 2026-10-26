@@ -475,13 +475,11 @@ func (s *AdminServer) SetAdminPort(port int) {
 	s.adminPort = port
 }
 
-// loadOrGenerateSessionSecret loads the session secret from a file or generates a new one.
+// loadOrGenerateSessionSecret loads the session secret from database or generates a new one.
 func (s *AdminServer) loadOrGenerateSessionSecret() []byte {
-	secretFile := "admin-session-secret.key"
-
-	// Try to load existing secret
-	if data, err := os.ReadFile(secretFile); err == nil && len(data) == 32 {
-		util.LogModuleInfo("admin", "loaded session secret from %s", secretFile)
+	// Try to load existing secret from database
+	if data, err := db.GetSessionSecret(); err == nil && len(data) == 32 {
+		util.LogModuleInfo("admin", "loaded session secret from database")
 		return data
 	}
 
@@ -492,11 +490,11 @@ func (s *AdminServer) loadOrGenerateSessionSecret() []byte {
 		return nil
 	}
 
-	// Save to file
-	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
-		util.LogModuleWarn("admin", "failed to save session secret to %s: %v", secretFile, err)
+	// Save to database
+	if err := db.PutSessionSecret(secret); err != nil {
+		util.LogModuleWarn("admin", "failed to save session secret to database: %v", err)
 	} else {
-		util.LogModuleInfo("admin", "generated and saved session secret to %s", secretFile)
+		util.LogModuleInfo("admin", "generated and saved session secret to database")
 	}
 
 	return secret
@@ -702,44 +700,23 @@ func (s *AdminServer) Start() error {
 	}
 
 	util.Logger.Printf("[INFO] [admin] Start() reached TLS setup check")
-	// Setup TLS if certificate and key are configured, or auto-generate if needed
-	util.Logger.Printf("[INFO] [admin] TLS setup check: TLSCert=%q, TLSKey=%q, ClientCA=%q (len=%d)",
-		s.config.TLSCert, s.config.TLSKey, 
-		func() string {
-			if len(s.config.ClientCA) > 50 {
-				return s.config.ClientCA[:50] + "..."
-			}
-			return s.config.ClientCA
-		}(),
-		len(s.config.ClientCA))
+	// Setup TLS: AdminConfig file paths > state/tls-cert (auto-generated)
+	util.Logger.Printf("[INFO] [admin] TLS setup check: TLSCert=%q, TLSKey=%q, ClientCA=%q",
+		s.config.TLSCert, s.config.TLSKey, s.config.ClientCA)
 	
 	if s.config.TLSCert != "" && s.config.TLSKey != "" {
-		var certPEM, keyPEM []byte
-		var err error
-		
-		// Check if TLSCert is inline PEM or file path
-		if strings.HasPrefix(s.config.TLSCert, "-----BEGIN") {
-			certPEM = []byte(s.config.TLSCert)
-			util.Logger.Printf("[INFO] [admin] TLS: using inline certificate")
-		} else {
-			certPEM, err = os.ReadFile(s.config.TLSCert)
-			if err != nil {
-				return fmt.Errorf("admin read TLS cert fail: %w", err)
-			}
-			util.Logger.Printf("[INFO] [admin] TLS: loaded certificate from file: %s", s.config.TLSCert)
+		// User-provided certificate files (file paths only, no inline PEM)
+		certPEM, err := os.ReadFile(s.config.TLSCert)
+		if err != nil {
+			return fmt.Errorf("admin read TLS cert file fail: %w", err)
 		}
+		util.Logger.Printf("[INFO] [admin] TLS: loaded certificate from file: %s", s.config.TLSCert)
 		
-		// Check if TLSKey is inline PEM or file path
-		if strings.HasPrefix(s.config.TLSKey, "-----BEGIN") {
-			keyPEM = []byte(s.config.TLSKey)
-			util.Logger.Printf("[INFO] [admin] TLS: using inline private key")
-		} else {
-			keyPEM, err = os.ReadFile(s.config.TLSKey)
-			if err != nil {
-				return fmt.Errorf("admin read TLS key fail: %w", err)
-			}
-			util.Logger.Printf("[INFO] [admin] TLS: loaded private key from file: %s", s.config.TLSKey)
+		keyPEM, err := os.ReadFile(s.config.TLSKey)
+		if err != nil {
+			return fmt.Errorf("admin read TLS key file fail: %w", err)
 		}
+		util.Logger.Printf("[INFO] [admin] TLS: loaded private key from file: %s", s.config.TLSKey)
 		
 		util.Logger.Printf("[INFO] [admin] TLS: parsing X509 key pair (certPEM=%d bytes, keyPEM=%d bytes)", len(certPEM), len(keyPEM))
 		cert, err := tls.X509KeyPair(certPEM, keyPEM)
@@ -777,17 +754,11 @@ func (s *AdminServer) Start() error {
 			}
 		}
 		
-		// Legacy support: if ClientCA is configured in database, use it (override embedded CA)
+		// Legacy support: if ClientCA file path is configured, use it (override embedded CA)
 		if s.config.ClientCA != "" && !embeddedCAConfigured {
-			var caCert []byte
-			if strings.HasPrefix(s.config.ClientCA, "-----BEGIN CERTIFICATE-----") {
-				caCert = []byte(s.config.ClientCA)
-			} else {
-				var err error
-				caCert, err = os.ReadFile(s.config.ClientCA)
-				if err != nil {
-					return fmt.Errorf("admin read client CA fail: %w", err)
-				}
+			caCert, err := os.ReadFile(s.config.ClientCA)
+			if err != nil {
+				return fmt.Errorf("admin read client CA file fail: %w", err)
 			}
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(caCert) {
@@ -797,16 +768,16 @@ func (s *AdminServer) Start() error {
 			
 			if s.config.AuthEnabled {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication enabled, mTLS or password)")
+				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication enabled, mTLS or password)")
 			} else {
 				s.tlsConfig.ClientAuth = tls.NoClientCert
-				util.LogModuleInfo("admin", "mTLS enabled with database CA (authentication disabled)")
+				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication disabled)")
 			}
 		}
 		
 		s.server.TLSConfig = s.tlsConfig
 	} else if s.config.MeshOnly || s.config.Enabled {
-		// Auto-generate TLS certificate if not configured
+		// Fallback: load from state/tls-cert or auto-generate
 		// This ensures HTTPS always works for mesh access
 		cert, key, err := s.loadOrGenerateTLSCert()
 		if err != nil {
@@ -2981,7 +2952,6 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		// Update the group in database directly
 		group.SubscriptionFilter = body.Filter
 		group.ActiveMember = body.ActiveMember
-		group.RebuildProxies()
 		if err := db.PutProxyGroup(group); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
@@ -3088,6 +3058,14 @@ func (s *AdminServer) apiGroupMembers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(w, "group not found", http.StatusNotFound)
 		return
+	}
+
+	// 从 RuleMatcher 获取完整的组信息（包含已构建的 Members 列表）
+	matcher, err := db.GetMatcher()
+	if err == nil && matcher != nil {
+		if runtimeGroup := matcher.GetGroup(groupName); runtimeGroup != nil {
+			g = runtimeGroup
+		}
 	}
 
 	jsonResponse(w, buildGroupMemberList(g))
@@ -5101,16 +5079,13 @@ func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
 	return certPEM, keyPEM, nil
 }
 
-// loadOrGenerateTLSCert loads TLS cert/key from files or generates and saves them.
+// loadOrGenerateTLSCert loads TLS cert/key from database or generates and saves them.
 func (s *AdminServer) loadOrGenerateTLSCert() (certPEM, keyPEM []byte, err error) {
-	certFile := "admin-tls-cert.pem"
-	keyFile := "admin-tls-key.pem"
-
-	// Try to load existing cert and key
-	certData, certErr := os.ReadFile(certFile)
-	keyData, keyErr := os.ReadFile(keyFile)
+	// Try to load existing cert and key from database
+	certData, certErr := db.GetTLSCertificate()
+	keyData, keyErr := db.GetTLSKey()
 	if certErr == nil && keyErr == nil && len(certData) > 0 && len(keyData) > 0 {
-		util.LogModuleInfo("admin", "loaded TLS cert from %s and %s", certFile, keyFile)
+		util.LogModuleInfo("admin", "loaded TLS cert from database")
 		return certData, keyData, nil
 	}
 
@@ -5120,16 +5095,16 @@ func (s *AdminServer) loadOrGenerateTLSCert() (certPEM, keyPEM []byte, err error
 		return nil, nil, err
 	}
 
-	// Save to files
-	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
-		util.LogModuleWarn("admin", "failed to save TLS cert to %s: %v", certFile, err)
+	// Save to database
+	if err := db.PutTLSCertificate(certPEM); err != nil {
+		util.LogModuleWarn("admin", "failed to save TLS cert to database: %v", err)
 	} else {
-		util.LogModuleInfo("admin", "saved TLS cert to %s", certFile)
+		util.LogModuleInfo("admin", "saved TLS cert to database")
 	}
-	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
-		util.LogModuleWarn("admin", "failed to save TLS key to %s: %v", keyFile, err)
+	if err := db.PutTLSKey(keyPEM); err != nil {
+		util.LogModuleWarn("admin", "failed to save TLS key to database: %v", err)
 	} else {
-		util.LogModuleInfo("admin", "saved TLS key to %s", keyFile)
+		util.LogModuleInfo("admin", "saved TLS key to database")
 	}
 
 	return certPEM, keyPEM, nil

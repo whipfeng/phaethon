@@ -186,10 +186,6 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 
 var runCnt int
 
-// subCacheDir is the subscription cache directory, set during getRuleConf.
-// It is kept outside the conf/ directory so subscription cache writes never
-// mix with user configuration files.
-var subCacheDir string
 
 // dataDir is the unified runtime data directory (data/).
 // All non-configuration persistent data (reverse-id, bindings, subscription cache)
@@ -544,7 +540,7 @@ func run(prev *activeResources) (*activeResources, error) {
 	res.healthStop = startHealthChecks(proxies, proxyGroups)
 
 	// Start subscription refresh
-	res.subscriptionStop = startSubscriptionRefresh(subscriptions, subCacheDir)
+	res.subscriptionStop = startSubscriptionRefresh(subscriptions)
 
 	// Start web admin panel (if configured)
 	util.LogModuleInfo("system", "Admin check: Admin=%v, Enabled=%v, prevAdmin=%v",
@@ -606,7 +602,7 @@ func writeDefaultConfig(path string) error {
 	return os.WriteFile(path, defaultConfig, 0644)
 }
 
-// loadSubscriptionCaches loads subscription node pools from disk cache
+// loadSubscriptionCaches loads subscription node pools from database
 func loadSubscriptionCaches() {
 	subscriptions, err := db.ListSubscriptions()
 	if err != nil {
@@ -620,27 +616,31 @@ func loadSubscriptionCaches() {
 		return
 	}
 
-	subCacheDir = filepath.Join(dataDir, "cache", "subscription")
 	for _, sub := range subscriptions {
 		if !sub.IsEnabled() || sub.URL == "" {
 			continue
 		}
-		cached, err := config.LoadSubscriptionCache(subCacheDir, sub.Name)
-		if err != nil || cached == "" {
+		// Load from database instead of file cache
+		proxiesMap, err := db.GetSubscriptionNodes(sub.Name)
+		if err != nil {
+			util.LogModuleInfo("system", "subscription %s db load failed: %v", sub.Name, err)
 			continue
 		}
-		proxies, err := config.ParseSubscription(cached)
-		if err != nil {
-			util.LogModuleInfo("system", "subscription %s cache parse failed: %v", sub.Name, err)
+		if proxiesMap == nil {
 			continue
+		}
+		// Convert map to slice
+		proxies := make([]*config.Proxy, 0, len(proxiesMap))
+		for _, p := range proxiesMap {
+			proxies = append(proxies, p)
 		}
 		sub.SetNodes(proxies)
 		for _, g := range proxyGroups {
 			if !g.IsEnabled() || g.Subscription != sub.Name {
 				continue
 			}
-			g.RebuildProxies()
-			util.LogModuleInfo("system", "group %s (sub=%s): loaded %d nodes from cache, members %d", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
+			// Members 是按需计算的，不需要预构建
+			util.LogModuleInfo("system", "group %s (sub=%s): loaded %d nodes from db, members %d", g.Name, sub.Name, len(sub.SubProxies), len(g.GetMembers()))
 		}
 	}
 }
@@ -1946,7 +1946,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		if sub == nil {
 			return fmt.Errorf("subscription not found: %s", subName)
 		}
-		return refreshSubscription(sub, subCacheDir)
+		return refreshSubscription(sub)
 	}
 	adminSrv.CheckGroupHealth = func(groupName string) error {
 		g, err := db.GetProxyGroup(groupName)
@@ -2653,7 +2653,7 @@ func getTestPath(url string) string {
 
 // ========== Subscription Refresh ==========
 
-func startSubscriptionRefresh(subscriptions []*config.Subscription, subCacheDir string) chan struct{} {
+func startSubscriptionRefresh(subscriptions []*config.Subscription) chan struct{} {
 	stop := make(chan struct{})
 
 	var allSubs []*config.Subscription
@@ -2692,7 +2692,7 @@ func startSubscriptionRefresh(subscriptions []*config.Subscription, subCacheDir 
 			wg.Add(1)
 			go func(sub *config.Subscription) {
 				defer wg.Done()
-				refreshSubscription(sub, subCacheDir)
+				refreshSubscription(sub)
 			}(sub)
 		}
 		wg.Wait()
@@ -2707,7 +2707,7 @@ func startSubscriptionRefresh(subscriptions []*config.Subscription, subCacheDir 
 			select {
 			case <-ticker.C:
 				for _, sub := range refreshSubs {
-					refreshSubscription(sub, subCacheDir)
+					refreshSubscription(sub)
 				}
 			case <-stop:
 				return
@@ -2718,7 +2718,7 @@ func startSubscriptionRefresh(subscriptions []*config.Subscription, subCacheDir 
 	return stop
 }
 
-func refreshSubscription(sub *config.Subscription, subCacheDir string) error {
+func refreshSubscription(sub *config.Subscription) error {
 	// Resolve proxy for subscription URL via rules
 	subHost, subPort, _ := parseTestURL(sub.URL)
 	req := config.NewConnectRequest("tcp", subHost, subPort)
@@ -2726,78 +2726,151 @@ func refreshSubscription(sub *config.Subscription, subCacheDir string) error {
 
 	var content string
 	var err error
-	var fromCache bool
+	var fromDB bool
 	if proxy != nil && proxy.Type != config.ProxyDIRECT && proxy.Type != config.ProxyREJECT {
 		dialFunc := func(network, addr string) (net.Conn, error) {
 			host, portStr, _ := net.SplitHostPort(addr)
 			port, _ := strconv.Atoi(portStr)
 			return dialer.ChainDial(proxy, host, port)
 		}
-		content, fromCache, err = config.FetchSubscriptionCached(sub.URL, dialFunc, subCacheDir, sub.Name)
+		content, err = config.FetchSubscription(sub.URL, dialFunc)
 	} else {
-		content, fromCache, err = config.FetchSubscriptionCached(sub.URL, nil, subCacheDir, sub.Name)
-	}
-	if fromCache {
-		util.LogModuleInfo("system", "subscription %s refresh: network fetch failed, using cached copy", sub.Name)
-	}
-	if err != nil {
-		util.LogModuleInfo("system", "subscription %s refresh failed: %v", sub.Name, err)
-		return fmt.Errorf("fetch subscription fail: %w", err)
+		content, err = config.FetchSubscription(sub.URL, nil)
 	}
 
-	proxies, err := config.ParseSubscription(content)
 	if err != nil {
-		util.LogModuleInfo("system", "subscription %s parse failed: %v", sub.Name, err)
-		return fmt.Errorf("parse subscription fail: %w", err)
-	}
-
-	// Snapshot old active members per referencing group so they can be
-	// restored when the node still exists in the refreshed pool.
-	type groupActive struct {
-		g      *config.ProxyGroup
-		active string
-	}
-	var groups []groupActive
-	// Load groups referencing this subscription from database
-	refGroups, err := db.ListProxyGroupsBySubscription(sub.Name)
-	if err != nil {
-		util.LogModuleWarn("system", "list groups for sub %s failed: %v", sub.Name, err)
-	} else {
-		for _, g := range refGroups {
-			groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
+		// Network fetch failed, try database fallback
+		util.LogModuleInfo("system", "subscription %s network fetch failed: %v, trying database fallback", sub.Name, err)
+		proxiesMap, dbErr := db.GetSubscriptionNodes(sub.Name)
+		if dbErr != nil || proxiesMap == nil {
+			util.LogModuleInfo("system", "subscription %s database fallback failed: %v", sub.Name, dbErr)
+			return fmt.Errorf("fetch subscription fail: %w", err)
 		}
+		// Convert map to slice
+		proxies := make([]*config.Proxy, 0, len(proxiesMap))
+		for _, p := range proxiesMap {
+			proxies = append(proxies, p)
+		}
+		// Successfully loaded from database
+		sub.SetNodes(proxies)
+		fromDB = true
+		util.LogModuleInfo("system", "subscription %s refresh: using %d nodes from database", sub.Name, len(proxies))
 	}
 
-	sub.SetNodes(proxies)
-	// Persist subscription nodes to database
-	sub.SubMu.RLock()
-	if err := db.PutSubscriptionNodes(sub.Name, sub.SubProxies); err != nil {
-		util.LogModuleWarn("system", "persist subscription nodes failed: %v", err)
-	}
-	sub.SubMu.RUnlock()
+	if !fromDB {
+		// Successfully fetched from network, parse and save to database
+		proxies, parseErr := config.ParseSubscription(content)
+		if parseErr != nil {
+			util.LogModuleInfo("system", "subscription %s parse failed: %v", sub.Name, parseErr)
+			return fmt.Errorf("parse subscription fail: %w", parseErr)
+		}
 
-	// Rebuild each group referencing this subscription. The active member is
-	// preserved when it still exists in the new pool.
-	for _, ga := range groups {
-		g := ga.g
-		g.RebuildProxies()
-		if ga.active != "" {
-			found := false
-			for _, m := range g.Members {
-				if m.Name == ga.active {
-					found = true
-					break
+		// Snapshot old active members per referencing group so they can be
+		// restored when the node still exists in the refreshed pool.
+		type groupActive struct {
+			g      *config.ProxyGroup
+			active string
+		}
+		var groups []groupActive
+		// Load groups referencing this subscription from database
+		refGroups, listErr := db.ListProxyGroupsBySubscription(sub.Name)
+		if listErr != nil {
+			util.LogModuleWarn("system", "list groups for sub %s failed: %v", sub.Name, listErr)
+		} else {
+			for _, g := range refGroups {
+				groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
+			}
+		}
+
+		sub.SetNodes(proxies)
+		// Persist subscription nodes to database
+		sub.SubMu.RLock()
+		if putErr := db.PutSubscriptionNodes(sub.Name, sub.SubProxies); putErr != nil {
+			util.LogModuleWarn("system", "persist subscription nodes failed: %v", putErr)
+		}
+		sub.SubMu.RUnlock()
+
+		// Rebuild each group referencing this subscription. The active member is
+		// preserved when the node still exists in the new pool.
+		// Members 是按需计算的，不需要预构建
+		for _, ga := range groups {
+			g := ga.g
+			if ga.active != "" {
+				found := false
+				for _, m := range g.GetMembers() {
+					if m.Name == ga.active {
+						found = true
+						break
+					}
+				}
+				if !found {
+					g.ActiveMember = ""
 				}
 			}
-			if !found {
-				g.ActiveMember = ""
+			// Persist the updated group
+			if putErr := db.PutProxyGroup(g); putErr != nil {
+				util.LogModuleWarn("system", "persist group %s failed: %v", g.Name, putErr)
 			}
+			util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.GetMembers()))
 		}
-		// Persist the updated group
-		if err := db.PutProxyGroup(g); err != nil {
-			util.LogModuleWarn("system", "persist group %s failed: %v", g.Name, err)
-		}
-		util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.Members))
 	}
 	return nil
+}
+
+// runMigration performs one-time data migration and exits.
+// This is used to fix data inconsistencies after database structure changes.
+func runMigration() {
+	fmt.Println("Starting data migration...")
+	
+	// Initialize database
+	if err := db.Init(dataDir); err != nil {
+		fmt.Printf("Failed to initialize database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+
+	// Get all subscriptions
+	subs, err := db.ListSubscriptions()
+	if err != nil {
+		fmt.Printf("Failed to list subscriptions: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Found %d subscriptions\n", len(subs))
+
+	migrated := 0
+	for _, sub := range subs {
+		if !sub.IsEnabled() || sub.URL == "" {
+			continue
+		}
+
+		// Check if nodes already exist
+		nodes, err := db.GetSubscriptionNodes(sub.Name)
+		if err == nil && len(nodes) > 0 {
+			fmt.Printf("  [SKIP] %s: already has %d nodes\n", sub.Name, len(nodes))
+			continue
+		}
+
+		fmt.Printf("  [MIGRATE] %s: fetching nodes...\n", sub.Name)
+		
+		// Create a temporary subscription object and refresh it
+		subCopy := *sub
+		if err := refreshSubscription(&subCopy); err != nil {
+			fmt.Printf("  [FAIL] %s: %v\n", sub.Name, err)
+			continue
+		}
+
+		// Verify nodes were saved
+		nodes, err = db.GetSubscriptionNodes(sub.Name)
+		if err != nil {
+			fmt.Printf("  [FAIL] %s: nodes not saved: %v\n", sub.Name, err)
+			continue
+		}
+
+		fmt.Printf("  [OK] %s: migrated %d nodes\n", sub.Name, len(nodes))
+		migrated++
+	}
+
+	fmt.Printf("\nMigration complete: %d/%d subscriptions migrated\n", migrated, len(subs))
 }

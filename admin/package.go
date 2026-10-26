@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	"phaethon/db"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/pkg/signing"
@@ -58,17 +59,6 @@ var (
 	packageIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
-// packageInfo is the metadata stored for each uploaded package.
-type packageInfo struct {
-	ID             string              `json:"id"`
-	Filename       string              `json:"filename"`
-	Size           int64               `json:"size"`
-	UploadedAt     time.Time           `json:"uploadedAt"`
-	SignatureValid bool                `json:"signatureValid"`
-	Meta           signing.PackageMeta `json:"meta"`
-	Published      bool                `json:"published"`
-}
-
 func (s *AdminServer) packageMaxUploadBytes() int64 {
 	mb := defaultPackageUploadMaxMB
 	if s.config != nil && s.config.PackageUploadMaxMB > 0 {
@@ -90,37 +80,22 @@ func (s *AdminServer) apiPackages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// listPackages reads all package metadata files, newest first.
-func (s *AdminServer) listPackages() []packageInfo {
-	metas, err := filepath.Glob(filepath.Join(packagesDir, "*.json"))
+// listPackages reads all package metadata from database, newest first.
+func (s *AdminServer) listPackages() []*db.PackageMeta {
+	packages, err := db.ListPackages()
 	if err != nil {
-		return []packageInfo{}
+		util.LogModuleWarn("admin", "list packages from database failed: %v", err)
+		return []*db.PackageMeta{}
 	}
 
-	var result []packageInfo
-	for _, metaPath := range metas {
-		data, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue
-		}
-		var info packageInfo
-		if err := json.Unmarshal(data, &info); err != nil {
-			continue
-		}
-		// Skip entries whose .pkg file vanished
-		if _, err := os.Stat(filepath.Join(packagesDir, info.ID+".pkg")); err != nil {
-			os.Remove(metaPath)
-			continue
-		}
-		result = append(result, info)
-	}
-
-	// Newest first
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].UploadedAt.After(result[i].UploadedAt) {
-				result[i], result[j] = result[j], result[i]
-			}
+	// Filter out entries whose .pkg file vanished
+	var result []*db.PackageMeta
+	for _, pkg := range packages {
+		if _, err := os.Stat(filepath.Join(packagesDir, pkg.ID+".pkg")); err == nil {
+			result = append(result, pkg)
+		} else {
+			// Clean up orphaned metadata
+			_ = db.DeletePackage(pkg.ID)
 		}
 	}
 	return result
@@ -206,22 +181,28 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save metadata
-	info := packageInfo{
+	info := &db.PackageMeta{
 		ID:             id,
 		Filename:       header.Filename,
 		Size:           size,
 		UploadedAt:     time.Now(),
 		SignatureValid: true,
-		Meta:           contents.Meta,
+		Version:        contents.Meta.Version,
+		Platform:       contents.Meta.Platform,
+		Arch:           contents.Meta.Arch,
+		BuildTime:      contents.Meta.BuildTime,
+		GitCommit:      contents.Meta.GitCommit,
+		GoVersion:      contents.Meta.GoVersion,
+		BuildTag:       contents.Meta.BuildTag,
 		Published:      false,
 	}
-	if err := s.savePackageMeta(info); err != nil {
+	if err := db.PutPackage(info); err != nil {
 		os.Remove(pkgPath)
 		httpError(w, "save metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, contents.Meta.Version, contents.Meta.Platform, contents.Meta.Arch)
+	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, info.Version, info.Platform, info.Arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Distribute to mesh peers
@@ -240,29 +221,16 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
-// savePackageMeta persists package metadata as JSON.
-func (s *AdminServer) savePackageMeta(info packageInfo) error {
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(packagesDir, info.ID+".json"), data, 0644)
-}
-
-// loadPackageMeta reads package metadata by id.
-func (s *AdminServer) loadPackageMeta(id string) (*packageInfo, error) {
+// loadPackageMeta reads package metadata by id from database.
+func (s *AdminServer) loadPackageMeta(id string) (*db.PackageMeta, error) {
 	if !packageIDPattern.MatchString(id) {
 		return nil, fmt.Errorf("invalid package id")
 	}
-	data, err := os.ReadFile(filepath.Join(packagesDir, id+".json"))
+	pkg, err := db.GetPackage(id)
 	if err != nil {
 		return nil, fmt.Errorf("package not found")
 	}
-	var info packageInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return nil, fmt.Errorf("corrupt package metadata")
-	}
-	return &info, nil
+	return pkg, nil
 }
 
 // apiPackageDownload handles GET /api/packages/{id}/download.
@@ -325,16 +293,16 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 
 	// Version monotonic check: must be higher than current latest for same platform/arch
 	packages := s.listPackages()
-	platform := info.Meta.Platform
-	arch := info.Meta.Arch
-	newVersion := info.Meta.Version
+	platform := info.Platform
+	arch := info.Arch
+	newVersion := info.Version
 
 	// Find current latest version for this platform/arch
 	var currentLatest string
 	for _, pkg := range packages {
-		if pkg.Meta.Platform == platform && pkg.Meta.Arch == arch && pkg.Published {
-			if currentLatest == "" || p2p.CompareVersions(pkg.Meta.Version, currentLatest) > 0 {
-				currentLatest = pkg.Meta.Version
+		if pkg.Platform == platform && pkg.Arch == arch && pkg.Published {
+			if currentLatest == "" || p2p.CompareVersions(pkg.Version, currentLatest) > 0 {
+				currentLatest = pkg.Version
 			}
 		}
 	}
@@ -347,12 +315,12 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 
 	// Mark this as published
 	info.Published = true
-	if err := s.savePackageMeta(*info); err != nil {
+	if err := db.PutPackage(info); err != nil {
 		httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	util.LogModuleInfo("admin", "package published: %s (version=%s platform=%s arch=%s)", id, info.Meta.Version, platform, arch)
+	util.LogModuleInfo("admin", "package published: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Read the package file and distribute to mesh peers
@@ -384,7 +352,7 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	os.Remove(filepath.Join(packagesDir, id+".pkg"))
-	os.Remove(filepath.Join(packagesDir, id+".json"))
+	_ = db.DeletePackage(id)
 	util.LogModuleInfo("admin", "package deleted: %s", id)
 	util.DefaultVersionNotifier.BumpVersion("packages")
 	jsonResponse(w, map[string]string{"status": "deleted"})
@@ -482,8 +450,8 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	// ID, which is a random local filename that differs across nodes.
 	packages := s.listPackages()
 	for _, p := range packages {
-		if p.Meta.Platform == contents.Meta.Platform && p.Meta.Arch == contents.Meta.Arch && p.Meta.Version == contents.Meta.Version {
-			util.LogModuleDebug("admin", "receive package: already have %s/%s@%s", p.Meta.Platform, p.Meta.Arch, p.Meta.Version)
+		if p.Platform == contents.Meta.Platform && p.Arch == contents.Meta.Arch && p.Version == contents.Meta.Version {
+			util.LogModuleDebug("admin", "receive package: already have %s/%s@%s", p.Platform, p.Arch, p.Version)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -529,17 +497,23 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 	}
 
 	// Save metadata
-	info := packageInfo{
+	info := &db.PackageMeta{
 		ID:             id,
 		Filename:       fmt.Sprintf("phaethon-%s.pkg", contents.Meta.Version),
 		Size:           int64(len(pkgData)),
 		UploadedAt:     time.Now(),
 		SignatureValid: true,
-		Meta:           contents.Meta,
+		Version:        contents.Meta.Version,
+		Platform:       contents.Meta.Platform,
+		Arch:           contents.Meta.Arch,
+		BuildTime:      contents.Meta.BuildTime,
+		GitCommit:      contents.Meta.GitCommit,
+		GoVersion:      contents.Meta.GoVersion,
+		BuildTag:       contents.Meta.BuildTag,
 		Published:      true, // Auto-publish received packages
 	}
 
-	if err := s.savePackageMeta(info); err != nil {
+	if err := db.PutPackage(info); err != nil {
 		os.Remove(pkgPath)
 		return "", err
 	}
@@ -608,8 +582,8 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
 
 // pkgKey is the package uniqueness key: platform/arch@version. IDs are random
 // local filenames and differ across nodes, so dedup must never compare by ID.
-func pkgKey(meta signing.PackageMeta) string {
-	return meta.Platform + "/" + meta.Arch + "@" + meta.Version
+func pkgKey(pkg *db.PackageMeta) string {
+	return pkg.Platform + "/" + pkg.Arch + "@" + pkg.Version
 }
 
 // SyncFromPeer syncs packages from a specific mesh peer (called when peer connects).
@@ -638,7 +612,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 	}
 
 	var result struct {
-		Packages []packageInfo `json:"packages"`
+		Packages []*db.PackageMeta `json:"packages"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		util.LogModuleDebug("admin", "sync from %s decode failed: %v", nodeID, err)
@@ -653,12 +627,12 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		platform string
 		arch     string
 	}
-	groups := make(map[platformArch][]packageInfo)
+	groups := make(map[platformArch][]*db.PackageMeta)
 	for _, pkg := range result.Packages {
 		if !pkg.Published {
 			continue
 		}
-		key := platformArch{pkg.Meta.Platform, pkg.Meta.Arch}
+		key := platformArch{pkg.Platform, pkg.Arch}
 		groups[key] = append(groups[key], pkg)
 	}
 
@@ -666,29 +640,29 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 	localPackages := s.listPackages()
 	localKeys := make(map[string]bool) // pkgKey → have
 	for _, p := range localPackages {
-		localKeys[pkgKey(p.Meta)] = true
-		groups[platformArch{p.Meta.Platform, p.Meta.Arch}] = append(groups[platformArch{p.Meta.Platform, p.Meta.Arch}], p)
+		localKeys[pkgKey(p)] = true
+		groups[platformArch{p.Platform, p.Arch}] = append(groups[platformArch{p.Platform, p.Arch}], p)
 	}
 
 	// Per group, sort by version descending and take top N
 	targetKeys := make(map[string]bool) // pkgKey → should have
 	for _, pkgs := range groups {
 		sort.Slice(pkgs, func(i, j int) bool {
-			return p2p.CompareVersions(pkgs[i].Meta.Version, pkgs[j].Meta.Version) > 0
+			return p2p.CompareVersions(pkgs[i].Version, pkgs[j].Version) > 0
 		})
 		limit := packageRetention
 		if limit > len(pkgs) {
 			limit = len(pkgs)
 		}
 		for _, pkg := range pkgs[:limit] {
-			targetKeys[pkgKey(pkg.Meta)] = true
+			targetKeys[pkgKey(pkg)] = true
 		}
 	}
 
 	// Download packages in target set that we don't have
 	downloadSuccess := true
 	for _, pkg := range result.Packages {
-		key := pkgKey(pkg.Meta)
+		key := pkgKey(pkg)
 		if !targetKeys[key] {
 			continue
 		}
@@ -743,7 +717,7 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 		// old ID-based comparison).
 		keptKeys := make(map[string]bool)
 		for _, pkg := range localPackages {
-			key := pkgKey(pkg.Meta)
+			key := pkgKey(pkg)
 			if targetKeys[key] && !keptKeys[key] {
 				keptKeys[key] = true
 				continue
@@ -767,9 +741,9 @@ func (s *AdminServer) applyAllRetention() {
 		platform string
 		arch     string
 	}
-	groups := make(map[platformArch][]packageInfo)
+	groups := make(map[platformArch][]*db.PackageMeta)
 	for _, pkg := range packages {
-		key := platformArch{pkg.Meta.Platform, pkg.Meta.Arch}
+		key := platformArch{pkg.Platform, pkg.Arch}
 		groups[key] = append(groups[key], pkg)
 	}
 
@@ -782,9 +756,9 @@ func (s *AdminServer) applyAllRetention() {
 // applyRetention applies retention policy to a specific platform/arch combination.
 func (s *AdminServer) applyRetention(platform, arch string) {
 	packages := s.listPackages()
-	var group []packageInfo
+	var group []*db.PackageMeta
 	for _, pkg := range packages {
-		if pkg.Meta.Platform == platform && pkg.Meta.Arch == arch {
+		if pkg.Platform == platform && pkg.Arch == arch {
 			group = append(group, pkg)
 		}
 	}
@@ -793,20 +767,20 @@ func (s *AdminServer) applyRetention(platform, arch string) {
 
 // applyRetentionForGroup applies retention to a group of packages for the same platform/arch.
 // Keeps the latest packageRetention versions, deletes the rest.
-func (s *AdminServer) applyRetentionForGroup(pkgs []packageInfo, platform, arch string) {
+func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, arch string) {
 	if len(pkgs) <= packageRetention {
 		return
 	}
 
 	// Sort by version descending (newest first)
 	sort.Slice(pkgs, func(i, j int) bool {
-		return p2p.CompareVersions(pkgs[i].Meta.Version, pkgs[j].Meta.Version) > 0
+		return p2p.CompareVersions(pkgs[i].Version, pkgs[j].Version) > 0
 	})
 
 	// Delete packages beyond retention limit
 	toDelete := pkgs[packageRetention:]
 	for _, pkg := range toDelete {
-		util.LogModuleInfo("admin", "retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Meta.Version, pkg.ID)
+		util.LogModuleInfo("admin", "retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Version, pkg.ID)
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 	}

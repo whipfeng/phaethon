@@ -14,14 +14,20 @@ type FakeIPEntry struct {
 	LastUsed  time.Time `json:"last_used"`
 }
 
-// PackageMeta 包元数据
+// PackageMeta 包元数据（对应 admin/package.go 的 packageInfo）
 type PackageMeta struct {
-	Platform  string    `json:"platform"`
-	Arch      string    `json:"arch"`
-	Version   string    `json:"version"`
-	Path      string    `json:"path"`
-	Size      int64     `json:"size"`
-	Hash      string    `json:"hash"`
-	CreatedAt time.Time `json:"created_at"`
-	Published bool      `json:"published"`
+	ID             string    `json:"id"`
+	Filename       string    `json:"filename"`
+	Size           int64     `json:"size"`
+	UploadedAt     time.Time `json:"uploadedAt"`
+	SignatureValid bool      `json:"signatureValid"`
+	// 嵌入 signing.PackageMeta 的字段
+	Version   string `json:"version"`
+	Platform  string `json:"platform"`
+	Arch      string `json:"arch"`
+	BuildTime string `json:"buildTime,omitempty"`
+	GitCommit string `json:"gitCommit,omitempty"`
+	GoVersion string `json:"goVersion,omitempty"`
+	BuildTag  string `json:"buildTag,omitempty"`
+	Published bool   `json:"published"`
 }

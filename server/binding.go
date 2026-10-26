@@ -1,18 +1,14 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
+	"phaethon/db"
 	"phaethon/util"
 )
-
-const bindingFileName = "bindings.json"
 
 // PortBinding records the mapping between a client identity and its allocated port.
 type PortBinding struct {
@@ -208,46 +204,59 @@ func (s *BindingStore) FindOldestDisconnectedBinding(portMin, portMax int) *Port
 	return oldest
 }
 
-// bindingFilePath returns the full path to the bindings file.
-func (s *BindingStore) bindingFilePath() string {
-	return filepath.Join(s.dataDir, "state", bindingFileName)
-}
-
-// load reads bindings from disk.
+// load reads bindings from database.
 func (s *BindingStore) load() {
-	path := s.bindingFilePath()
-	data, err := os.ReadFile(path)
+	dbBindings, err := db.GetPortBindings()
 	if err != nil {
-		return // file not exist is ok
+		util.LogWarn("load bindings from database failed: %v", err)
+		return
 	}
-	var list []PortBinding
-	if err := json.Unmarshal(data, &list); err != nil {
-		return // corrupt file, start fresh
-	}
-	for i := range list {
-		b := &list[i]
-		key := makeKey(b.ReverseID, b.Seq)
-		// Migrate any legacy reverse_id-only keys (pre-Seq format) to the new composite key.
-		if b.Seq == 0 && b.ReverseID != "" {
-			delete(s.bindings, b.ReverseID)
+	for i := range dbBindings {
+		b := &dbBindings[i]
+		// Convert db.PortBinding to server.PortBinding
+		serverBinding := &PortBinding{
+			ReverseID:      b.ReverseID,
+			Seq:            b.Seq,
+			Port:           b.Port,
+			ListenerProto:  b.ListenerProto,
+			Identity:       b.Identity,
+			DirectDstHost:  b.DirectDstHost,
+			DirectDstPort:  b.DirectDstPort,
+			RegistryProxy:  b.RegistryProxy,
+			ControlAddr:    b.ControlAddr,
+			RegistryAddr:   b.RegistryAddr,
+			CreatedAt:      b.CreatedAt,
+			UpdatedAt:      b.UpdatedAt,
+			DisconnectedAt: b.DisconnectedAt,
 		}
-		s.bindings[key] = b
+		key := makeKey(serverBinding.ReverseID, serverBinding.Seq)
+		s.bindings[key] = serverBinding
 	}
+	util.LogInfo("bindings loaded from database: %d entries", len(dbBindings))
 }
 
-// saveLocked writes bindings to disk. Must be called with mu held.
+// saveLocked writes bindings to database. Must be called with mu held.
 func (s *BindingStore) saveLocked() {
-	list := make([]PortBinding, 0, len(s.bindings))
+	list := make([]db.PortBinding, 0, len(s.bindings))
 	for _, b := range s.bindings {
-		list = append(list, *b)
+		// Convert server.PortBinding to db.PortBinding
+		list = append(list, db.PortBinding{
+			ReverseID:      b.ReverseID,
+			Seq:            b.Seq,
+			Port:           b.Port,
+			ListenerProto:  b.ListenerProto,
+			Identity:       b.Identity,
+			DirectDstHost:  b.DirectDstHost,
+			DirectDstPort:  b.DirectDstPort,
+			RegistryProxy:  b.RegistryProxy,
+			ControlAddr:    b.ControlAddr,
+			RegistryAddr:   b.RegistryAddr,
+			CreatedAt:      b.CreatedAt,
+			UpdatedAt:      b.UpdatedAt,
+			DisconnectedAt: b.DisconnectedAt,
+		})
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return
+	if err := db.PutPortBindings(list); err != nil {
+		util.LogWarn("save bindings to database failed: %v", err)
 	}
-	path := s.bindingFilePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0644)
 }

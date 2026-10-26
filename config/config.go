@@ -261,26 +261,10 @@ type ProxyGroup struct {
 	ActiveMember         string   `yaml:"active-member,omitempty" json:"active-member,omitempty"`
 	SubscriptionMode     string   `yaml:"subscription-mode,omitempty" json:"subscription-mode,omitempty"` // deprecated: ignored
 
-	// Members is the runtime ordered member list: selected subscription nodes
-	// first, then manual members. It carries source information so manual and
-	// subscription nodes with identical names can coexist in the same group.
-	Members []GroupMember `yaml:"-" json:"members,omitempty"`
-
-	// ManualMembers and SubMembers are the same members split by source.
-	// Next() uses Members so that both sources participate in selection;
-	// subscription nodes are tried first and manual proxies serve as fallback.
-	ManualMembers []GroupMember `yaml:"-" json:"-"`
-	SubMembers    []GroupMember `yaml:"-" json:"-"`
-
-	// SubCandidateCount is a runtime display hint set by the admin UI. It holds
-	// the number of subscription nodes that match the group's filter so the card
-	// button count matches the nodes shown in the selection modal.
-	SubCandidateCount int `yaml:"-" json:"-"`
-
 	idx       int64 // for load-balance
 	healthMap map[string]*healthStatus
 	healthMu  sync.RWMutex
-	selMu     sync.RWMutex `yaml:"-" json:"-"` // protects Members rebuild
+	selMu     sync.RWMutex `yaml:"-" json:"-"` // protects on-demand member computation
 
 	ResolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
 	ResolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
@@ -388,44 +372,60 @@ func (g *ProxyGroup) ResolveMember(m GroupMember) *Proxy {
 	return nil
 }
 
-// rebuildProxiesLocked rebuilds the runtime member lists from ManualProxies plus
-// all subscription nodes that match SubscriptionFilter. g.Members keeps the full
-// ordered list (subscription nodes first, then manual members) for display/health
-// purposes, while g.ManualMembers and g.SubMembers split them by source.
-// Subscription nodes are tried first so that manual proxies (e.g. DIRECT) act as
-// fallback when all subscription nodes are unavailable.
-// Names are NOT deduplicated so a manual proxy and a subscription node can share
-// the same name and remain independent members. Caller must hold g.selMu.
-func (g *ProxyGroup) rebuildProxiesLocked() {
-	g.ManualMembers = make([]GroupMember, 0, len(g.ManualProxies))
+// computeMembersLocked computes the runtime member list on-demand: selected
+// subscription nodes first, then manual members. Subscription nodes are tried
+// first so that manual proxies (e.g. DIRECT) act as fallback when all
+// subscription nodes are unavailable. Names are NOT deduplicated so a manual
+// proxy and a subscription node can share the same name and remain independent
+// members. Caller must hold g.selMu.
+func (g *ProxyGroup) computeMembersLocked() []GroupMember {
+	var manualMembers []GroupMember
 	for _, name := range g.ManualProxies {
 		// Manual members may be individual proxies or nested proxy groups.
 		// Skip disabled or missing entries so groups stay valid when a proxy
 		// is disabled without removing it from every group's manual list.
 		if g.ResolveProxy != nil && g.ResolveProxy(name) != nil {
-			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false})
+			manualMembers = append(manualMembers, GroupMember{Name: name, FromSubscription: false})
 			continue
 		}
 		if g.ResolveGroup != nil && g.ResolveGroup(name) != nil {
-			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false, IsGroup: true})
+			manualMembers = append(manualMembers, GroupMember{Name: name, FromSubscription: false, IsGroup: true})
 			continue
 		}
 	}
 
-	g.SubMembers = nil
+	var subMembers []GroupMember
 	if g.Subscription != "" && g.ResolveSubscription != nil {
 		if sub := g.ResolveSubscription(g.Subscription); sub != nil {
 			names := g.subscriptionCandidatesLocked(sub)
-			g.SubMembers = make([]GroupMember, 0, len(names))
+			subMembers = make([]GroupMember, 0, len(names))
 			for _, name := range names {
-				g.SubMembers = append(g.SubMembers, GroupMember{Name: name, FromSubscription: true})
+				subMembers = append(subMembers, GroupMember{Name: name, FromSubscription: true})
 			}
 		}
 	}
 
-	g.Members = make([]GroupMember, 0, len(g.SubMembers)+len(g.ManualMembers))
-	g.Members = append(g.Members, g.SubMembers...)
-	g.Members = append(g.Members, g.ManualMembers...)
+	members := make([]GroupMember, 0, len(subMembers)+len(manualMembers))
+	members = append(members, subMembers...)
+	members = append(members, manualMembers...)
+	return members
+}
+
+// computeManualMembersLocked computes only the manual members on-demand.
+// Caller must hold g.selMu.
+func (g *ProxyGroup) computeManualMembersLocked() []GroupMember {
+	var manualMembers []GroupMember
+	for _, name := range g.ManualProxies {
+		if g.ResolveProxy != nil && g.ResolveProxy(name) != nil {
+			manualMembers = append(manualMembers, GroupMember{Name: name, FromSubscription: false})
+			continue
+		}
+		if g.ResolveGroup != nil && g.ResolveGroup(name) != nil {
+			manualMembers = append(manualMembers, GroupMember{Name: name, FromSubscription: false, IsGroup: true})
+			continue
+		}
+	}
+	return manualMembers
 }
 
 // hasSubscriptionSelection reports whether the group is subscription-driven.
@@ -441,32 +441,21 @@ func (g *ProxyGroup) hasSubscriptionSelection() bool {
 // all subscription nodes are unavailable.
 // Caller must hold g.selMu (read or write).
 func (g *ProxyGroup) activeMembersLocked() []GroupMember {
-	return g.Members
-}
-
-// RebuildProxies is the public, concurrency-safe wrapper.
-func (g *ProxyGroup) RebuildProxies() {
-	g.selMu.Lock()
-	defer g.selMu.Unlock()
-	g.rebuildProxiesLocked()
+	return g.computeMembersLocked()
 }
 
 // GetMembers returns a snapshot of the current runtime member list.
 func (g *ProxyGroup) GetMembers() []GroupMember {
 	g.selMu.RLock()
 	defer g.selMu.RUnlock()
-	members := make([]GroupMember, len(g.Members))
-	copy(members, g.Members)
-	return members
+	return g.computeMembersLocked()
 }
 
 // GetManualMembers returns a snapshot of the manual member list.
 func (g *ProxyGroup) GetManualMembers() []GroupMember {
 	g.selMu.RLock()
 	defer g.selMu.RUnlock()
-	members := make([]GroupMember, len(g.ManualMembers))
-	copy(members, g.ManualMembers)
-	return members
+	return g.computeManualMembersLocked()
 }
 
 // GetActiveMember returns the currently configured active member for select
@@ -478,8 +467,7 @@ func (g *ProxyGroup) GetActiveMember() string {
 }
 
 // SetActiveMember sets the active member for a select group. The name must
-// correspond to a current member; otherwise an error is returned. Rebuild is
-// triggered so membership changes (e.g. from a filter update) are reflected.
+// correspond to a current member; otherwise an error is returned.
 func (g *ProxyGroup) SetActiveMember(name string) error {
 	g.selMu.Lock()
 	defer g.selMu.Unlock()
@@ -487,8 +475,9 @@ func (g *ProxyGroup) SetActiveMember(name string) error {
 		g.ActiveMember = ""
 		return nil
 	}
+	members := g.computeMembersLocked()
 	found := false
-	for _, m := range g.Members {
+	for _, m := range members {
 		if m.Name == name {
 			found = true
 			break
@@ -498,7 +487,6 @@ func (g *ProxyGroup) SetActiveMember(name string) error {
 		return fmt.Errorf("member %q not found in group %s", name, g.Name)
 	}
 	g.ActiveMember = name
-	g.rebuildProxiesLocked()
 	return nil
 }
 
@@ -1260,10 +1248,10 @@ type AdminConfig struct {
 	Username    string `yaml:"username"`
 	Password    string `yaml:"password"`
 	PublicKey   string `yaml:"public-key,omitempty"` // PEM-encoded RSA/ECDSA public key for signature auth
-	TLSCert     string `yaml:"tls-cert,omitempty"`
-	TLSKey      string `yaml:"tls-key,omitempty"`
-	ClientCA    string `yaml:"client-ca,omitempty"` // PEM-encoded CA certificate for mTLS client verification
-	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener
+	TLSCert     string `yaml:"tls-cert,omitempty"`     // File path to TLS certificate (PEM). If empty, uses state/tls-cert (auto-generated)
+	TLSKey      string `yaml:"tls-key,omitempty"`      // File path to TLS private key (PEM). If empty, uses state/tls-key (auto-generated)
+	ClientCA    string `yaml:"client-ca,omitempty"`    // File path to CA certificate for mTLS client verification (PEM)
+	MeshOnly    bool   `yaml:"mesh-only,omitempty"`    // Only accessible via mesh network, no network listener
 
 	// Package upload/publish (admin console binary deployment).
 	// PackageUploadMaxMB caps uploaded package size; 0 means default (100MB).

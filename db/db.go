@@ -27,6 +27,7 @@ var (
 	BucketPackages         = []byte("packages")
 	BucketProxyHealth      = []byte("proxy-health")       // 运行时状态：代理健康检查
 	BucketSubscriptionNodes = []byte("subscription-nodes") // 运行时状态：订阅节点池
+	BucketState            = []byte("state")               // 统一状态：实例身份 + 运行时状态
 )
 
 // ErrNotFound 表示 key 不存在
@@ -70,7 +71,7 @@ func Init(dbPath string) error {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
-		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketProxyHealth, BucketSubscriptionNodes} {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketProxyHealth, BucketSubscriptionNodes, BucketState} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}

@@ -637,7 +637,10 @@ func (e *Engine) StartStack() error {
 	// Set up forwarder callbacks on the netstack
 	e.netstack.SetCallbacks(&mesh.ForwarderCallbacks{
 		HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+			corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
+			util.LogModuleInfo("tun", "[CALLBACK-ENTRY] [%s] HandleTCPConn callback ENTERED, about to call e.handleConn", corrID)
 			e.handleConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
+			util.LogModuleInfo("tun", "[CALLBACK-EXIT] [%s] HandleTCPConn callback EXITED, e.handleConn returned", corrID)
 		},
 		HandleUDPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
@@ -1407,8 +1410,12 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	}
 	// Compute correlation ID for trace linking
 	corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
+	util.LogModuleInfo("tun", "[HANDLECONN-ENTRY] [%s] handleConn START - inbound=%s modeB=%v", corrID, inbound, modeBMapping != nil)
 	util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] handleConn called", corrID)
-	defer conn.Close()
+	defer func() {
+		util.LogModuleInfo("tun", "[HANDLECONN-EXIT] [%s] handleConn END", corrID)
+		conn.Close()
+	}()
 
 	// Check if this is a Fake-IP: restore original domain.
 	var domain string
@@ -1480,14 +1487,18 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		matchMapping = modeBMapping
 	}
 	var err error
+	util.LogModuleInfo("tun", "[HANDLECONN-RESOLVE] [%s] calling db.ResolveMatch for %s:%d mapping=%s", corrID, matchAddr, dstPort, matchMapping.Name)
 	req, proxy, matchResult, err = db.ResolveMatch(req, matchMapping.Name)
 	if err != nil {
 		util.LogModuleWarn("tun", "[%s] tcp resolve match failed: %v", corrID, err)
 		return
 	}
+	util.LogModuleInfo("tun", "[HANDLECONN-RESOLVED] [%s] ResolveMatch done: proxy=%v matchResult=%v", corrID, proxy != nil, matchResult != nil)
 	if proxy != nil {
+		util.LogModuleInfo("tun", "[HANDLECONN-PROXY] [%s] rule match: %s:%d -> proxy=%s type=%s v2=%v", corrID, matchAddr, dstPort, proxy.Name, proxy.Type, proxy.V2)
 		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
 	} else {
+		util.LogModuleInfo("tun", "[HANDLECONN-DIRECT] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
 		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
 	}
 
@@ -1506,9 +1517,11 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 	}
 
 	if localNodeDomain {
+		util.LogModuleInfo("tun", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch", connID)
 		// Direct admin handler: bypass OS network stack entirely
 		if e.adminHandler != nil {
 			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
+			util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
 			rec.SetDst("localhost").Establish(connID, proxy, false)
 			e.adminHandler.ServeConn(conn)
 			return
@@ -1520,19 +1533,25 @@ func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr 
 		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
 		if err != nil {
 			util.LogModuleWarn("tun", "[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, resolvedPort, err)
+			util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-FAIL] [%s] local dial FAILED: %v", connID, err)
 			rec.SetDst(dialAddr).Fail(err)
 			return
 		}
+		util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-SUCCESS] [%s] local dial SUCCESS", connID)
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
+		util.LogModuleInfo("tun", "[HANDLECONN-PROXY-DIAL] [%s] ENTER proxy dial branch: proxy=%s type=%s dst=%s:%d v2=%v", connID, proxy.Name, proxy.Type, resolvedAddr, resolvedPort, proxy.V2)
 		util.LogInfo("tun", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d (v2=%v)", connID, proxy.Name, resolvedAddr, resolvedPort, proxy.V2)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogModuleWarn("tun", "[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
+			util.LogModuleInfo("tun", "[HANDLECONN-PROXY-FAIL] [%s] proxy dial FAILED: %v", connID, err)
 			rec.Fail(err)
 			return
 		}
+		util.LogModuleInfo("tun", "[HANDLECONN-PROXY-SUCCESS] [%s] proxy dial SUCCESS", connID)
 		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] proxy dial success", connID)
 	} else {
+		util.LogModuleInfo("tun", "[HANDLECONN-DIRECT-DIAL] [%s] ENTER direct dial branch: resolvedAddr=%s resolvedPort=%d", connID, resolvedAddr, resolvedPort)
 		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
 		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
 		// dial it directly.

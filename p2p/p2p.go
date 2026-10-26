@@ -76,19 +76,17 @@ func init() {
 		}
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
-		for _, peer := range mgr.peers {
-			if peer.ProxyName == proxyName {
-				// Use thread-safe GetLinkNIC() (fix race condition #2)
-				linkNIC := peer.GetLinkNIC()
-				if linkNIC == nil {
-					util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
-					return 0, nil, false
-				}
-				nicID := linkNIC.NICID()
-				subnet := linkNIC.PeerSubnet()
-				util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
-				return nicID, subnet, true
+		if peer, ok := mgr.proxyPeers[proxyName]; ok {
+			// Use thread-safe GetLinkNIC() (fix race condition #2)
+			linkNIC := peer.GetLinkNIC()
+			if linkNIC == nil {
+				util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
+				return 0, nil, false
 			}
+			nicID := linkNIC.NICID()
+			subnet := linkNIC.PeerSubnet()
+			util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
+			return nicID, subnet, true
 		}
 		util.LogModuleError("p2p", "[V2-LOOKUP] no peer found for proxy=%s", proxyName)
 		return 0, nil, false
@@ -106,6 +104,7 @@ type linkStats struct {
 type P2PManager struct {
 	mu         sync.Mutex
 	peers      map[string]*Peer    // keyed by peer.ID (localSeq-based; active + passive)
+	proxyPeers map[string]*Peer    // keyed by proxy.Name (active peers only, for dedup)
 	nodeId     string
 	version  string
 	buildTag string
@@ -433,6 +432,7 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	})
 	m := &P2PManager{
 		peers:             make(map[string]*Peer),
+		proxyPeers:        make(map[string]*Peer),
 		nodeId:            nodeId,
 		version:           version,
 		buildTag:          DetectBuildTag(),
@@ -489,13 +489,13 @@ func (m *P2PManager) Stop() {
 }
 
 // GetPeerStatus returns the P2P connection status for all peers.
-// Returns a map of proxy name -> status info.
+// Returns a map of proxy name -> status info (active peers only).
 func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	result := make(map[string]map[string]interface{})
-	for name, peer := range m.peers {
+	result := make(map[string]map[string]interface{}, len(m.proxyPeers))
+	for name, peer := range m.proxyPeers {
 		lastSeenNano := peer.lastSeenNano.Load()
 		result[name] = map[string]interface{}{
 			"status":   peer.GetStatus(),
@@ -1118,12 +1118,10 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 // StopPeerByProxyName disconnects one P2P session by its configured proxy name.
 func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 	m.mu.Lock()
-	var peer *Peer
-	for _, p := range m.peers {
-		if p.ProxyName == proxyName {
-			peer = p
-			break
-		}
+	peer := m.proxyPeers[proxyName]
+	if peer != nil {
+		delete(m.proxyPeers, proxyName)
+		delete(m.peers, peer.ID)
 	}
 	m.mu.Unlock()
 	if peer != nil {
@@ -1137,11 +1135,9 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 func (m *P2PManager) ActivePeerProxyNames() map[string]bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make(map[string]bool)
-	for _, p := range m.peers {
-		if p.ProxyName != "" {
-			result[p.ProxyName] = true
-		}
+	result := make(map[string]bool, len(m.proxyPeers))
+	for name := range m.proxyPeers {
+		result[name] = true
 	}
 	return result
 }
@@ -1168,10 +1164,8 @@ func (m *P2PManager) StopPeerByLinkID(linkID string) {
 func (m *P2PManager) GetPeerProxy(proxyName string) *config.Proxy {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, peer := range m.peers {
-		if peer.ProxyName == proxyName {
-			return peer.proxy
-		}
+	if peer, ok := m.proxyPeers[proxyName]; ok {
+		return peer.proxy
 	}
 	return nil
 }
@@ -1223,8 +1217,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
-	// Atomic check-stop-create-register (fix race condition #1)
-	// Hold the lock throughout to prevent duplicate peers with same ProxyName
+	// Atomic check-stop-create-register using proxyPeers for O(1) dedup
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
@@ -1232,29 +1225,17 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		return
 	}
 	
-	// Stop any existing peer with the same proxy name and wait for cleanup
-	for _, p := range m.peers {
-		if p.ProxyName == proxy.Name {
-			util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", p.ID, proxy.Name)
-			// stopPeer uses sync.Once, safe to call while holding lock
-			stopPeer(p)
-			delete(m.peers, p.ID)
-			// Wait for old peer's session to fully end (including LinkNIC cleanup)
-			// This prevents LinkNIC leak when StartPeer is called concurrently
-			m.mu.Unlock()
-			select {
-			case <-p.sessionDone:
-				util.LogModuleInfo("p2p", "[P2P] old peer %s session fully ended, proceeding with new peer", p.ID)
-			case <-time.After(5 * time.Second):
-				util.LogModuleWarn("p2p", "[P2P] timeout waiting for old peer %s session to end, proceeding anyway", p.ID)
-			}
-			m.mu.Lock()
-			break
-		}
+	// Check for existing peer with same proxy name (O(1) lookup)
+	if existing, ok := m.proxyPeers[proxy.Name]; ok {
+		util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", existing.ID, proxy.Name)
+		stopPeer(existing)
+		delete(m.proxyPeers, proxy.Name)
+		delete(m.peers, existing.ID)
 	}
 	
-	// Register new peer atomically
+	// Register new peer atomically in both maps
 	m.peers[peer.ID] = peer
+	m.proxyPeers[proxy.Name] = peer
 	m.mu.Unlock()
 
 	defer func() {
@@ -1273,9 +1254,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if peer.sendState != nil {
 			peer.sendState.markAllPendingAsLost()
 		}
-		// Only delete if we're still the current peer (prevent race with RestartPeer)
+		// Remove from both maps (prevent race with RestartPeer)
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
+		}
+		if current, ok := m.proxyPeers[proxy.Name]; ok && current == peer {
+			delete(m.proxyPeers, proxy.Name)
 		}
 		m.mu.Unlock()
 		// Signal that session has fully ended (including LinkNIC cleanup)

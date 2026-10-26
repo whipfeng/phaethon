@@ -1871,6 +1871,20 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			s.config.PackageUploadMaxMB = int(pkgMaxMB)
 		}
 
+		// Validate TLS fields: only file paths allowed, no inline PEM
+		if strings.HasPrefix(s.config.TLSCert, "-----BEGIN") {
+			httpError(w, "TLSCert must be a file path, inline PEM not supported", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(s.config.TLSKey, "-----BEGIN") {
+			httpError(w, "TLSKey must be a file path, inline PEM not supported", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(s.config.ClientCA, "-----BEGIN") {
+			httpError(w, "ClientCA must be a file path, inline PEM not supported", http.StatusBadRequest)
+			return
+		}
+
 		// Validate required fields
 		if s.config.Addr == "" {
 			httpError(w, "addr is required", http.StatusBadRequest)

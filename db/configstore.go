@@ -309,6 +309,21 @@ func PutReverseConfig(rc *config.ReverseConfig) error {
 	return Put(BucketReverseConfs, []byte(rc.Name), storeReverse(rc))
 }
 
+// PutReverseRuntime persists only the runtime-mutable fields (AssignedPort,
+// LastError) of a reverse config. The admin UI reads these to display the
+// current registration state; without persistence, the UI would always show
+// "未启用" because the in-memory updates made by the reverse client goroutine
+// are invisible to the DB-backed admin API.
+func PutReverseRuntime(rc *config.ReverseConfig) error {
+	existing, err := GetReverseConfig(rc.Name)
+	if err != nil {
+		return err
+	}
+	existing.AssignedPort = rc.AssignedPort
+	existing.LastError = rc.LastError
+	return Put(BucketReverseConfs, []byte(rc.Name), existing)
+}
+
 func GetReverseConfig(name string) (*config.ReverseConfig, error) {
 	return getView[config.ReverseConfig](BucketReverseConfs, []byte(name))
 }

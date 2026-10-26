@@ -1279,11 +1279,11 @@ type ReverseConfig struct {
 	SkipCertVerify    bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
 	// LastError holds the most recent reverse client registration error so the
 	// admin UI can surface it instead of showing "waiting for port" forever.
-	LastError string `yaml:"-" json:"last-error,omitempty"`
+	LastError string `yaml:"-" json:"lastError,omitempty"`
 	// AssignedPort is the actual port allocated by the registry after a
 	// successful reverse registration. It is informational only and is updated
 	// by the reverse client at runtime.
-	AssignedPort int `yaml:"-" json:"assigned-port,omitempty"`
+	AssignedPort int `yaml:"-" json:"assignedPort,omitempty"`
 }
 
 // DHCPConfig holds DHCP server settings for bypass gateway mode.

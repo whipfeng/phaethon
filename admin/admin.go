@@ -531,6 +531,7 @@ type pageTemplates struct {
 	rules         *template.Template
 	mappings      *template.Template
 	resolvers     *template.Template
+	admin         *template.Template
 	reverseWizard *template.Template
 	packagePage   *template.Template
 	login         *template.Template
@@ -670,6 +671,7 @@ func (s *AdminServer) parseTemplates() {
 		rules:         parsePage("rules.html"),
 		mappings:      parsePage("mappings.html"),
 		resolvers:     parsePage("resolvers.html"),
+		admin:         parsePage("admin.html"),
 		reverseWizard: parsePage("reverse-wizard.html"),
 		packagePage:   parsePage("package.html"),
 		login:         parseStandalone("login.html"),
@@ -1297,6 +1299,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/setup", s.apiSetup)
 	mux.HandleFunc("/api/restart", s.apiRestart)
 	mux.HandleFunc("/api/log/modules", s.apiLogModules)
+	mux.HandleFunc("/api/db/", s.apiDatabase)
 }
 
 // ========== Page Handlers ==========
@@ -4107,6 +4110,129 @@ func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"peers": p2p.GlobalP2PManager.GetPeers()})
 }
 
+// apiDatabase provides generic CRUD operations on the database
+// GET /api/db/<bucket>/<key> - get a specific key
+// GET /api/db/<bucket> - list all keys in a bucket
+// POST /api/db/<bucket>/<key> - create/update a key (body is the value)
+// DELETE /api/db/<bucket>/<key> - delete a key
+func (s *AdminServer) apiDatabase(w http.ResponseWriter, r *http.Request) {
+	// Parse path: /api/db/<bucket>[/<key>]
+	path := strings.TrimPrefix(r.URL.Path, "/api/db/")
+	parts := strings.SplitN(path, "/", 2)
+	
+	if len(parts) == 0 || parts[0] == "" {
+		httpError(w, "bucket name required", http.StatusBadRequest)
+		return
+	}
+	
+	bucket := parts[0]
+	key := ""
+	if len(parts) > 1 {
+		key = parts[1]
+	}
+	
+	switch r.Method {
+	case http.MethodGet:
+		if key == "" {
+			// List all keys in bucket
+			s.apiDatabaseList(w, bucket)
+		} else {
+			// Get specific key
+			s.apiDatabaseGet(w, bucket, key)
+		}
+	case http.MethodPost:
+		if key == "" {
+			httpError(w, "key required for POST", http.StatusBadRequest)
+			return
+		}
+		s.apiDatabaseSet(w, bucket, key, r)
+	case http.MethodDelete:
+		if key == "" {
+			httpError(w, "key required for DELETE", http.StatusBadRequest)
+			return
+		}
+		s.apiDatabaseDelete(w, bucket, key)
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *AdminServer) apiDatabaseList(w http.ResponseWriter, bucket string) {
+	keys, err := db.ListBucketKeys(bucket)
+	if err != nil {
+		httpError(w, fmt.Sprintf("list bucket failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{
+		"bucket": bucket,
+		"keys":   keys,
+		"count":  len(keys),
+	})
+}
+
+func (s *AdminServer) apiDatabaseGet(w http.ResponseWriter, bucket, key string) {
+	value, err := db.GetRawKeyValue(bucket, key)
+	if err != nil {
+		if err == db.ErrNotFound {
+			httpError(w, "key not found", http.StatusNotFound)
+			return
+		}
+		httpError(w, fmt.Sprintf("get key failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	// Try to parse as JSON for pretty display
+	var jsonValue interface{}
+	if err := json.Unmarshal(value, &jsonValue); err == nil {
+		jsonResponse(w, map[string]interface{}{
+			"bucket": bucket,
+			"key":    key,
+			"value":  jsonValue,
+		})
+	} else {
+		// Return as string
+		jsonResponse(w, map[string]interface{}{
+			"bucket": bucket,
+			"key":    key,
+			"value":  string(value),
+		})
+	}
+}
+
+func (s *AdminServer) apiDatabaseSet(w http.ResponseWriter, bucket, key string, r *http.Request) {
+	// Read request body as the value
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpError(w, fmt.Sprintf("read body failed: %v", err), http.StatusBadRequest)
+		return
+	}
+	
+	if err := db.PutRawKeyValue(bucket, key, body); err != nil {
+		httpError(w, fmt.Sprintf("set key failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	jsonResponse(w, map[string]interface{}{
+		"success": true,
+		"bucket":  bucket,
+		"key":     key,
+		"size":    len(body),
+	})
+}
+
+func (s *AdminServer) apiDatabaseDelete(w http.ResponseWriter, bucket, key string) {
+	if err := db.DeleteKeyValue(bucket, key); err != nil {
+		httpError(w, fmt.Sprintf("delete key failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	jsonResponse(w, map[string]interface{}{
+		"success": true,
+		"bucket":  bucket,
+		"key":     key,
+	})
+}
+
 func (s *AdminServer) apiMesh(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/mesh")
 	switch {
@@ -4957,6 +5083,8 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.mappings
 	case "resolvers.html":
 		t = s.pages.resolvers
+	case "admin.html":
+		t = s.pages.admin
 	case "reverse-wizard.html":
 		t = s.pages.reverseWizard
 	case "package.html":

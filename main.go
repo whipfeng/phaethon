@@ -753,7 +753,14 @@ func main() {
 	util.LogModuleInfo("system", "------------------------starting------------------------")
 
 	// Initialize database
-	dbPath := filepath.Join(workDir, "phaethon.db")
+	// Database should be in data/ directory alongside logs, certs, cache, etc.
+	dataDir := filepath.Join(workDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		util.LogModuleError("system", " 创建 data 目录失败: %v", err)
+		fmt.Fprintf(os.Stderr, "创建 data 目录失败: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(dataDir, "phaethon.db")
 
 	// Check if this is first run (database doesn't exist)
 	_, err = os.Stat(dbPath)
@@ -1691,6 +1698,7 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 		} else {
 			rc.LastError = ""
 		}
+		_ = db.PutReverseRuntime(rc)
 		publishReverseEvent(rc)
 	}()
 
@@ -1774,6 +1782,7 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 	// so the admin UI can display the real listening endpoint.
 	rc.AssignedPort = actualPort
 	rc.LastError = ""
+	_ = db.PutReverseRuntime(rc)
 	publishReverseEvent(rc)
 
 	listenerProto := req.ListenerProto

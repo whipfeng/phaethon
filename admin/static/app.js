@@ -804,15 +804,23 @@ function updateReverseStatus(data) {
                         : `<span data-i18n="rv.targetDynamic">${i18n.t('rv.targetDynamic') || '动态'}</span>`;
                     let statusClass = 'badge-secondary';
                     let statusText = i18n.t('rv.statusInactive') || '未启用';
+                    let dotClass = 'status-inactive';
+                    let dotTitle = 'Waiting for port';
                     if (!enabled) {
                         statusClass = 'badge-secondary';
                         statusText = i18n.t('rv.statusDisabled') || '已禁用';
+                        dotClass = 'status-inactive';
+                        dotTitle = 'Disabled';
                     } else if (lastError) {
                         statusClass = 'badge-danger';
                         statusText = i18n.t('rv.statusError') || '错误';
+                        dotClass = 'status-error';
+                        dotTitle = lastError;
                     } else if (assignedPort) {
                         statusClass = 'badge-success';
                         statusText = i18n.t('rv.statusEnabled') || '已启用';
+                        dotClass = 'status-active';
+                        dotTitle = 'Connected';
                     }
                     return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-seq="${seq}" data-listener-proto="${listenerProto}" data-registry-proxy="${escapeHtml(registryProxy)}" data-assigned-port="${assignedPort}" class="${enabled ? '' : 'row-disabled'}">
                         <td class="rv-name"><strong>${escapeHtml(item.name)}</strong></td>
@@ -832,7 +840,7 @@ function updateReverseStatus(data) {
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td class="rv-status"><span class="badge ${statusClass}">${statusText}</span></td>
+                        <td class="rv-status"><span class="status-dot ${dotClass}" title="${escapeHtml(dotTitle)}"></span><span class="badge ${statusClass}">${statusText}</span></td>
                         <td>
                             <button class="btn btn-sm btn-outline rv-copy-endpoint-btn" onclick="copyEndpointRow(this)" title="${i18n.t('rv.copyEndpoint') || '复制访问地址'}" style="display: ${assignedPort ? 'inline-flex' : 'none'}">🔗</button>
                             <button class="btn btn-sm btn-outline" onclick="copyReverse('${escapeHtml(item.name)}')" title="${i18n.t('proxy.copy') || '复制'}">📋</button>

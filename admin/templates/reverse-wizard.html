@@ -66,12 +66,16 @@
                         </td>
                         <td class="rv-status">
                             {{if not .Enabled}}
+                            <span class="status-dot status-inactive" title="Disabled"></span>
                             <span class="badge badge-secondary" data-i18n="rv.statusDisabled">已禁用</span>
                             {{else if .LastError}}
+                            <span class="status-dot status-error" title="{{.LastError}}"></span>
                             <span class="badge badge-danger" data-i18n="rv.statusError">错误</span>
                             {{else if and .AssignedPort (gt .AssignedPort 0)}}
+                            <span class="status-dot status-active" title="Connected"></span>
                             <span class="badge badge-success" data-i18n="rv.statusEnabled">已启用</span>
                             {{else}}
+                            <span class="status-dot status-inactive" title="Waiting for port"></span>
                             <span class="badge badge-secondary" data-i18n="rv.statusInactive">未启用</span>
                             {{end}}
                         </td>

@@ -65,6 +65,37 @@ loadSubHealthCache();
 
 // ========== Init ==========
 document.addEventListener('DOMContentLoaded', () => {
+    // Loading indicator for HTMX requests
+    const indicator = document.getElementById('loading-indicator');
+    const progressBar = document.getElementById('loading-progress');
+    let hideTimer = null;
+
+    function showLoadingIndicator() {
+        if (!indicator || !progressBar) return;
+        if (hideTimer) {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+        }
+        indicator.classList.remove('hidden');
+        progressBar.style.width = '0%';
+        setTimeout(() => {
+            if (progressBar) progressBar.style.width = '80%';
+        }, 50);
+    }
+
+    function hideLoadingIndicator() {
+        if (!indicator || !progressBar) return;
+        progressBar.style.width = '100%';
+        hideTimer = setTimeout(() => {
+            indicator.classList.add('hidden');
+            progressBar.style.width = '0%';
+            hideTimer = null;
+        }, 300);
+    }
+
+    document.body.addEventListener('htmx:before-request', showLoadingIndicator);
+    document.body.addEventListener('htmx:after-request', hideLoadingIndicator);
+
     VersionNotificationService.start();
     registerDefaultVersionHandlers();
     updateUptime();

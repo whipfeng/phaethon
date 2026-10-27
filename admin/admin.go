@@ -1411,6 +1411,25 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		proxySummaries[i] = proxySummary(p)
 	}
 
+	// Build subscription snapshot for summary display
+	subData := make(map[string]map[string]interface{})
+	for _, sub := range subs {
+		proxies := s.getSubscriptionProxies(sub.Name)
+		nodes := make([]map[string]interface{}, 0, len(proxies))
+		for name, p := range proxies {
+			nodes = append(nodes, map[string]interface{}{
+				"name":   name,
+				"type":   p.Type,
+				"server": p.Server,
+				"port":   p.Port,
+			})
+		}
+		subData[sub.Name] = map[string]interface{}{
+			"nodes": nodes,
+			"url":   sub.URL,
+		}
+	}
+
 	data := map[string]interface{}{
 		"Title":         "Proxies",
 		"Proxies":       proxies,
@@ -1418,6 +1437,7 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		"Groups":        displayGroups,
 		"GroupStats":    groupStats,
 		"Subscriptions": subs,
+		"SubData":       subData,
 		"SaveTarget":    "base",
 		"CanSwitch":     false,
 	}

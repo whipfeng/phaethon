@@ -1358,6 +1358,27 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
         margin-left: 0.25rem;
     }
 
+    /* Subscription table mobile optimizations */
+    .sub-url-cell {
+        word-break: break-all;
+        white-space: normal !important;
+        max-width: 100% !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+
+    .sub-actions-cell {
+        display: flex !important;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+        justify-content: flex-end !important;
+    }
+
+    .sub-actions-cell .btn {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.5rem;
+    }
+
     /* Special table types */
     .mesh-peer-table,
     .mesh-route-table {

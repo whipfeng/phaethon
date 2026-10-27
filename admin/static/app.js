@@ -72,7 +72,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     console.log('[Loading Indicator] Init:', { indicator: !!indicator, progressBar: !!progressBar });
 
-    function showLoadingIndicator() {
+    function showLoadingIndicator(event) {
+        console.log('[Loading Indicator] htmx:before-request fired', {
+            target: event.detail.elt,
+            path: event.detail.pathInfo?.requestPath,
+            indicator: !!indicator,
+            progressBar: !!progressBar
+        });
         if (!indicator || !progressBar) {
             console.warn('[Loading Indicator] Elements not found');
             return;
@@ -83,25 +89,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         indicator.classList.remove('hidden');
         progressBar.style.width = '0%';
-        console.log('[Loading Indicator] Show');
+        console.log('[Loading Indicator] Show - indicator visible');
         setTimeout(() => {
             if (progressBar) progressBar.style.width = '80%';
         }, 50);
     }
 
-    function hideLoadingIndicator() {
+    function hideLoadingIndicator(event) {
+        console.log('[Loading Indicator] htmx:after-request fired', {
+            successful: event.detail.successful,
+            path: event.detail.pathInfo?.requestPath
+        });
         if (!indicator || !progressBar) return;
         progressBar.style.width = '100%';
-        console.log('[Loading Indicator] Hide');
+        console.log('[Loading Indicator] Hide - progress at 100%');
         hideTimer = setTimeout(() => {
             indicator.classList.add('hidden');
             progressBar.style.width = '0%';
             hideTimer = null;
+            console.log('[Loading Indicator] Hidden after delay');
         }, 300);
     }
 
     document.body.addEventListener('htmx:before-request', showLoadingIndicator);
     document.body.addEventListener('htmx:after-request', hideLoadingIndicator);
+    console.log('[Loading Indicator] Event listeners attached to document.body');
 
     VersionNotificationService.start();
     registerDefaultVersionHandlers();

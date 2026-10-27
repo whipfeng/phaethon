@@ -70,14 +70,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressBar = document.getElementById('loading-progress');
     let hideTimer = null;
 
+    console.log('[Loading Indicator] Init:', { indicator: !!indicator, progressBar: !!progressBar });
+
     function showLoadingIndicator() {
-        if (!indicator || !progressBar) return;
+        if (!indicator || !progressBar) {
+            console.warn('[Loading Indicator] Elements not found');
+            return;
+        }
         if (hideTimer) {
             clearTimeout(hideTimer);
             hideTimer = null;
         }
         indicator.classList.remove('hidden');
         progressBar.style.width = '0%';
+        console.log('[Loading Indicator] Show');
         setTimeout(() => {
             if (progressBar) progressBar.style.width = '80%';
         }, 50);
@@ -86,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function hideLoadingIndicator() {
         if (!indicator || !progressBar) return;
         progressBar.style.width = '100%';
+        console.log('[Loading Indicator] Hide');
         hideTimer = setTimeout(() => {
             indicator.classList.add('hidden');
             progressBar.style.width = '0%';

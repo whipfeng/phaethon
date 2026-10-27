@@ -203,7 +203,6 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, info.Version, info.Platform, info.Arch)
-	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Distribute to mesh peers
 	if pkgData, err := os.ReadFile(pkgPath); err == nil {
@@ -321,7 +320,6 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 	}
 
 	util.LogModuleInfo("admin", "package published: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
-	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Read the package file and distribute to mesh peers
 	pkgPath := filepath.Join(packagesDir, id+".pkg")
@@ -354,7 +352,6 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 	os.Remove(filepath.Join(packagesDir, id+".pkg"))
 	_ = db.DeletePackage(id)
 	util.LogModuleInfo("admin", "package deleted: %s", id)
-	util.DefaultVersionNotifier.BumpVersion("packages")
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }
 
@@ -466,7 +463,6 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 	}
 
 	util.LogModuleInfo("admin", "received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
-	util.DefaultVersionNotifier.BumpVersion("packages")
 
 	// Check if there's a newer version, exit if so
 	go s.checkForNewerVersion(contents)
@@ -704,7 +700,6 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 
 		localKeys[key] = true
 		util.LogModuleInfo("admin", "synced package from %s: %s (version=%s)", nodeID, id, contents.Meta.Version)
-		util.DefaultVersionNotifier.BumpVersion("packages")
 
 		// Check if there's a newer version, exit if so
 		go s.checkForNewerVersion(contents)
@@ -727,7 +722,6 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 			os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 		}
 		if len(localPackages) > 0 {
-			util.DefaultVersionNotifier.BumpVersion("packages")
 		}
 	}
 }
@@ -784,7 +778,6 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, a
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
 	}
-	util.DefaultVersionNotifier.BumpVersion("packages")
 }
 
 // checkForNewerVersion checks if the package version is higher than current.

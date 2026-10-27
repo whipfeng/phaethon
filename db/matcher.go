@@ -106,7 +106,7 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 		}
 
 		// 加载 Mesh 配置（仅用于 resolver 的 src-relative）
-		cb := tx.Bucket(BucketConfig)
+		cb := tx.Bucket(BucketMeshConfig)
 		if cb != nil {
 			var mesh config.MeshConfig
 			if present, err := readScalarInto(cb, keyMesh, &mesh); err != nil {
@@ -170,15 +170,19 @@ func parseRule(ruleStr string) *config.Rule {
 func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) (
 	*config.AddrRequest, *config.Proxy, *config.MatchResult, error) {
 
+	util.LogModuleInfo("system", "[RESOLVE-DEBUG] ResolveMatch called: dst=%s:%d mapping=%s", req.DstAddr, req.DstPort, mappingName)
+
 	// Apply resolver rules first
 	req = m.resolving(req)
 
 	var mapping *config.Mapping
 	if mappingName != "" {
 		mapping = m.findMapping(mappingName)
+		util.LogModuleInfo("system", "[RESOLVE-DEBUG] findMapping(%s) = %v", mappingName, mapping != nil)
 	}
 
 	proxy, matchResult := m.match(req, mapping)
+	util.LogModuleInfo("system", "[RESOLVE-DEBUG] ResolveMatch returning: proxy=%v matchResult=%v", proxy != nil, matchResult != nil)
 	return req, proxy, matchResult, nil
 }
 
@@ -187,6 +191,9 @@ func (m *RuleMatcher) init() error {
 	// 添加内置代理
 	m.proxies[config.ProxyDIRECT] = config.SingletonProxy(config.ProxyDIRECT)
 	m.proxies[config.ProxyREJECT] = config.SingletonProxy(config.ProxyREJECT)
+
+	// 添加内置映射（TUN）
+	m.mappings["TUN"] = &config.Mapping{Name: "TUN", Type: "tun"}
 
 	// 初始化代理（类型转换、速率限制器等）
 	for _, proxy := range m.proxies {
@@ -462,14 +469,19 @@ func (m *RuleMatcher) findMapping(name string) *config.Mapping {
 
 func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping) (*config.Proxy, *config.MatchResult) {
 	nowMin := time.Now().Hour()*60 + time.Now().Minute()
+	util.LogModuleInfo("system", "[MATCH-DEBUG] Starting match: dst=%s:%d mapping=%s nowMin=%d totalMatchers=%d",
+		request.DstAddr, request.DstPort, func() string { if mapping != nil { return mapping.Name }; return "<nil>" }(), nowMin, len(m.matchers))
 	for i, matcher := range m.matchers {
 		if i < len(m.matcherTimeRanges) && !m.matcherTimeRanges[i].Matches(nowMin) {
+			util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d skipped: time range %s doesn't match nowMin=%d", i, m.matcherTimeRanges[i].String(), nowMin)
 			continue
 		}
 		proxyName := matcher.Match(request, mapping)
 		if proxyName == "" {
+			util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d: no match (proxyName empty)", i)
 			continue
 		}
+		util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d matched: proxyName=%s", i, proxyName)
 		result := &config.MatchResult{
 			ProxyName: proxyName,
 		}
@@ -482,8 +494,11 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 				result.TimeRange = tr.String()
 			}
 		}
-		return m.resolveName(proxyName), result
+		resolved := m.resolveName(proxyName)
+		util.LogModuleInfo("system", "[MATCH-DEBUG] resolveName(%s) = %v", proxyName, resolved != nil)
+		return resolved, result
 	}
+	util.LogModuleInfo("system", "[MATCH-DEBUG] No rule matched, returning nil")
 	return nil, nil
 }
 

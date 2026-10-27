@@ -174,26 +174,23 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 				SelectRoute: func(dst net.IP) (SelectRouteResult, bool) {
 					rt := meshMgr.GetRouteTable()
 					if rt == nil {
+						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeTable=nil", dst)
 						return SelectRouteResult{}, false
 					}
 
 					// Diagnostic: log route table contents for debugging
-					if ForwardingTraceEnabled() {
-						prefixes := make([]string, 0, len(rt.Routes))
-						for _, route := range rt.Routes {
-							prefixes = append(prefixes, route.Prefix.String())
-						}
-						TraceForwardingRoute(dst, "select_route_entry routeCount=%d prefixes=%v", len(rt.Routes), prefixes)
+					prefixes := make([]string, 0, len(rt.Routes))
+					for _, route := range rt.Routes {
+						prefixes = append(prefixes, route.Prefix.String())
 					}
+					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
 
 					for _, route := range rt.Routes {
 						if !route.Prefix.Contains(dst) {
 							continue
 						}
 						// Diagnostic: log matching prefix
-						if ForwardingTraceEnabled() {
-							TraceForwardingRoute(dst, "select_route_match prefix=%s entries=%d", route.Prefix, len(route.Entries))
-						}
+						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s match prefix=%s entries=%d", dst, route.Prefix, len(route.Entries))
 						if len(route.Entries) == 0 {
 							continue
 						}
@@ -201,17 +198,16 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
 						if targetNodeID == "" {
 							// Diagnostic: log SelectEgressNodeID failure
-							if ForwardingTraceEnabled() {
-								TraceForwardingRoute(dst, "select_route_no_egress prefix=%s", route.Prefix)
-							}
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
 							continue
 						}
+						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s targetNode=%s", dst, route.Prefix, targetNodeID)
 
 						// Check if target is local node (advertised route owned by this node)
 						localNodeID := meshMgr.GetNodeID()
 						if targetNodeID == localNodeID {
 							// Local delivery: this node owns the advertised route
-							TraceForwardingRoute(dst, "branch=local_advertised prefix=%s target=%s (local node)", route.Prefix, targetNodeID)
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
 							return SelectRouteResult{LocalStack: true}, true
 						}
 
@@ -221,14 +217,13 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 							// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
 							// Use Dijkstra result directly (LinkNIC)
 							nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%v", dst, route.Prefix, targetNodeID, nextHopID, linkNIC)
 							if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
 								// Diagnostic: log NextHopLink failure
-								if ForwardingTraceEnabled() {
-									TraceForwardingRoute(dst, "select_route_no_nexthop prefix=%s target=%s nextHopID=%s linkNIC=%v", route.Prefix, targetNodeID, nextHopID, linkNIC)
-								}
+								util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link", dst, route.Prefix, targetNodeID)
 								continue
 							}
-							TraceForwardingRoute(dst, "branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
 							return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
 						}
 
@@ -238,20 +233,22 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						// Use Dijkstra result directly (LinkNIC)
 						nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
 						if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link_ipip", dst, route.Prefix, targetNodeID)
 							continue
 						}
 						targetEIP := meshMgr.GetEIPForNode(targetNodeID)
 						if targetEIP == nil {
+							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_eip", dst, route.Prefix, targetNodeID)
 							continue
 						}
-						TraceForwardingRoute(dst, "branch=ipip prefix=%s target=%s nextHop=%s linkNIC=%d egressEIP=%s", route.Prefix, targetNodeID, nextHopID, linkNIC.nicID, targetEIP)
+						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=ipip prefix=%s target=%s nextHop=%s linkNIC=%d egressEIP=%s", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID, targetEIP)
 						return SelectRouteResult{
 							LinkNIC:   linkNIC.nicID,
 							EgressEIP: targetEIP,
 							NeedIPIP:  true,
 						}, true
 					}
-					TraceForwardingRoute(dst, "branch=none")
+					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s no_match", dst)
 					return SelectRouteResult{}, false
 				},
 			}

@@ -98,35 +98,35 @@ func listView[T any](bucket []byte) ([]*T, error) {
 // ===== 标量配置节 =====
 
 func PutAdminConfig(c *config.AdminConfig) error {
-	return Put(BucketConfig, keyAdmin, c)
+	return Put(BucketAdminConfig, keyAdmin, c)
 }
 
 func GetAdminConfig() (*config.AdminConfig, error) {
-	return getView[config.AdminConfig](BucketConfig, keyAdmin)
+	return getView[config.AdminConfig](BucketAdminConfig, keyAdmin)
 }
 
 func PutTUNConfig(c *config.TUNConfig) error {
-	return Put(BucketConfig, keyTUN, c)
+	return Put(BucketTUNConfig, keyTUN, c)
 }
 
 func GetTUNConfig() (*config.TUNConfig, error) {
-	return getView[config.TUNConfig](BucketConfig, keyTUN)
+	return getView[config.TUNConfig](BucketTUNConfig, keyTUN)
 }
 
 func PutMeshConfig(c *config.MeshConfig) error {
-	return Put(BucketConfig, keyMesh, c)
+	return Put(BucketMeshConfig, keyMesh, c)
 }
 
 func GetMeshConfig() (*config.MeshConfig, error) {
-	return getView[config.MeshConfig](BucketConfig, keyMesh)
+	return getView[config.MeshConfig](BucketMeshConfig, keyMesh)
 }
 
 func PutInteractive(v bool) error {
-	return Put(BucketConfig, keyInteractive, v)
+	return Put(BucketInteractiveConfig, keyInteractive, v)
 }
 
 func GetInteractive() (bool, error) {
-	v, err := getView[bool](BucketConfig, keyInteractive)
+	v, err := getView[bool](BucketInteractiveConfig, keyInteractive)
 	if err != nil {
 		return false, err
 	}
@@ -134,11 +134,11 @@ func GetInteractive() (bool, error) {
 }
 
 func PutUDPPortRange(s string) error {
-	return Put(BucketConfig, keyUDPPortRange, s)
+	return Put(BucketPortRangeConfig, keyUDPPortRange, s)
 }
 
 func GetUDPPortRange() (string, error) {
-	v, err := getView[string](BucketConfig, keyUDPPortRange)
+	v, err := getView[string](BucketPortRangeConfig, keyUDPPortRange)
 	if err != nil {
 		return "", err
 	}
@@ -146,11 +146,11 @@ func GetUDPPortRange() (string, error) {
 }
 
 func PutTCPPortRange(s string) error {
-	return Put(BucketConfig, keyTCPPortRange, s)
+	return Put(BucketPortRangeConfig, keyTCPPortRange, s)
 }
 
 func GetTCPPortRange() (string, error) {
-	v, err := getView[string](BucketConfig, keyTCPPortRange)
+	v, err := getView[string](BucketPortRangeConfig, keyTCPPortRange)
 	if err != nil {
 		return "", err
 	}
@@ -338,8 +338,9 @@ func ListReverseConfigs() ([]*config.ReverseConfig, error) {
 
 // ===== 规则 =====
 
-// rulesKey 是存储所有规则的单一 key（JSON 数组格式）
-var rulesKey = []byte("__all_rules__")
+// RulesKey 是存储所有规则的单一 key（JSON 数组格式）
+// RulesKey 是规则数组的存储 key（新格式）
+var RulesKey = []byte("__all_rules__")
 
 // PutRules 替换整个规则列表（原子操作）
 func PutRules(rules []string) error {
@@ -348,7 +349,7 @@ func PutRules(rules []string) error {
 		if b == nil {
 			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
 		}
-		return putJSON(b, rulesKey, rules)
+		return putJSON(b, RulesKey, rules)
 	})
 	if err != nil {
 		return err
@@ -367,24 +368,8 @@ func ListRules() ([]string, error) {
 		if b == nil {
 			return nil
 		}
-		data := b.Get(rulesKey)
+		data := b.Get(RulesKey)
 		if data == nil {
-			// 兼容旧格式：尝试读取索引式规则
-			var legacyRules []string
-			_ = b.ForEach(func(k, v []byte) error {
-				if string(k) == string(rulesKey) {
-					return nil
-				}
-				var r string
-				if err := json.Unmarshal(v, &r); err == nil {
-					legacyRules = append(legacyRules, r)
-				}
-				return nil
-			})
-			if len(legacyRules) > 0 {
-				rules = legacyRules
-				return nil
-			}
 			return nil
 		}
 		return json.Unmarshal(data, &rules)
@@ -401,7 +386,7 @@ func InsertRule(index int, rule string) error {
 		}
 		
 		var rules []string
-		data := b.Get(rulesKey)
+		data := b.Get(RulesKey)
 		if data != nil {
 			if err := json.Unmarshal(data, &rules); err != nil {
 				return err
@@ -413,7 +398,7 @@ func InsertRule(index int, rule string) error {
 		}
 		
 		rules = append(rules[:index], append([]string{rule}, rules[index:]...)...)
-		return putJSON(b, rulesKey, rules)
+		return putJSON(b, RulesKey, rules)
 	})
 	if err != nil {
 		return err
@@ -433,7 +418,7 @@ func DeleteRuleByIndex(index int) error {
 		}
 		
 		var rules []string
-		data := b.Get(rulesKey)
+		data := b.Get(RulesKey)
 		if data == nil {
 			return fmt.Errorf("no rules found")
 		}
@@ -446,7 +431,7 @@ func DeleteRuleByIndex(index int) error {
 		}
 		
 		rules = append(rules[:index], rules[index+1:]...)
-		return putJSON(b, rulesKey, rules)
+		return putJSON(b, RulesKey, rules)
 	})
 	if err != nil {
 		return err
@@ -466,7 +451,7 @@ func PutRule(index int, rule string) error {
 		}
 		
 		var rules []string
-		data := b.Get(rulesKey)
+		data := b.Get(RulesKey)
 		if data != nil {
 			if err := json.Unmarshal(data, &rules); err != nil {
 				return err
@@ -478,7 +463,7 @@ func PutRule(index int, rule string) error {
 		}
 		
 		rules[index] = rule
-		return putJSON(b, rulesKey, rules)
+		return putJSON(b, RulesKey, rules)
 	})
 	if err != nil {
 		return err
@@ -500,21 +485,9 @@ func listRulesTx(tx *bolt.Tx) ([]string, error) {
 	if b == nil {
 		return nil, nil
 	}
-	data := b.Get(rulesKey)
+	data := b.Get(RulesKey)
 	if data == nil {
-		// 兼容旧格式
-		var rules []string
-		_ = b.ForEach(func(k, v []byte) error {
-			if string(k) == string(rulesKey) {
-				return nil
-			}
-			var r string
-			if err := json.Unmarshal(v, &r); err == nil {
-				rules = append(rules, r)
-			}
-			return nil
-		})
-		return rules, nil
+		return nil, nil
 	}
 	var rules []string
 	if err := json.Unmarshal(data, &rules); err != nil {

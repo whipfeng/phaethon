@@ -17,11 +17,11 @@
             'nav.rules': '📜 规则',
             'nav.mappings': '🗺️ 映射',
             'nav.resolvers': '↗️ 重定向',
-            'nav.admin': '⚙️ 管理设置',
+            'nav.admin': '⚙️ 设置',
             'nav.tools': '工具',
-            'nav.reverse': '🧙 反向连接向导',
+            'nav.reverse': '🧙 反向连接',
             'nav.package': '📦 发布包',
-            'nav.logs': '📋 运行日志',
+            'nav.logs': '📋 日志',
             'nav.connections': '🔗 活跃连接',
             'nav.rawConfig': '📝 原始配置',
             'nav.more': '更多',
@@ -67,8 +67,8 @@
             'package.toast.deleteOk': '已删除',
             'package.toast.deleteFail': '删除失败：{}',
 
-            // ===== Logs =====
-            'logs.title': '运行日志',
+            // ===== Runtime Logs =====
+            'logs.title': '日志',
             'logs.clear': '清空',
             'logs.refresh': '刷新',
 
@@ -83,8 +83,8 @@
             'connections.proxy': '代理',
             'connections.duration': '时长',
 
-            // ===== PiP (Picture-in-Picture) Logs =====
-            'pip.title': '运行日志',
+            // ===== PiP (Picture-in-Picture) Runtime Logs =====
+            'pip.title': '日志',
             'pip.autoscroll': '自动滚动',
             'pip.logCount': '{} 条日志',
             'pip.noLogs': '暂无日志',
@@ -125,7 +125,7 @@
             'dash.viewLogs': '查看日志',
             'dash.viewConns': '查看连接',
             'dash.expandLogs': '展开',
-            'dash.logs': '运行日志',
+            'dash.logs': '日志',
             'dash.clearLogs': '清空',
 
             // ===== Active Connections =====
@@ -144,7 +144,7 @@
             'dash.connRule': '规则',
 
             // ===== LOGS POPUP =====
-            'logs.title': '📋 运行日志',
+            'logs.title': '📋 日志',
             'logs.refresh': '🔄 刷新',
             'logs.clear': '🗑 清空',
             'logs.count': '{count} 条日志',
@@ -218,7 +218,7 @@
             'mesh.peers': '对等节点',
 
             // ===== Admin Settings =====
-            'admin.title': '管理设置',
+            'admin.title': '设置',
             'admin.help': '配置管理面板访问方式。修改需要密码确认并触发重载。',
             'admin.addr': '监听地址',
             'admin.addrHelp': '格式：host:port。使用 0.0.0.0 监听所有接口。',
@@ -516,7 +516,7 @@
             // ===== Resolvers =====
             'res.title': '重定向',
             'res.add': '+ 新增重定向',
-            'res.desc': '重定向规则在规则匹配前重写目标地址。例如将 git.example.com:80 重定向到 10.0.0.1:9003。',
+            'res.desc': '重定向规则在规则匹配前重写目标地址。例如将 git.example.com:80 重定向到 10.0.0.1:9003。源端口填 0 表示匹配任意端口；目标端口填 0 表示保持原始端口不变（仅替换 host）。',
             'res.name': '名称',
             'res.src': '源地址',
             'res.dst': '目标地址',
@@ -533,10 +533,11 @@
             'res.protoAll': '全部',
             'res.srcRelative': '本节点子域名（匹配 <标签>.<本节点ID>.phn）',
             'res.selfTag': '本机',
+            'res.keepPort': '保持',
             'res.meshUnavailable': '无法获取本节点 node-id，请检查 mesh 配置',
             'res.confirmDelete': '删除重定向规则',
 
-            // ===== Reverse Wizard =====
+            // ===== Reverse Connection =====
             'rv.title': '反向连接配置',
             'rv.add': '+ 新增反向连接',
             'rv.modalAdd': '新增反向连接',
@@ -796,7 +797,7 @@
             'mesh.owner': '归属节点',
             'mesh.domain': '域名',
 
-            // ===== Logs (additional) =====
+            // ===== Runtime Logs (additional) =====
             'logs.loading': '加载中...',
             'logs.loadFailed': '加载失败: ',
             'logs.filter': '过滤',
@@ -834,9 +835,9 @@
             'nav.rules': '📜 Rules',
             'nav.mappings': '🗺️ Mappings',
             'nav.resolvers': '↗️ Resolvers',
-            'nav.admin': '⚙️ Admin',
+            'nav.admin': '⚙️ Settings',
             'nav.tools': 'Tools',
-            'nav.reverse': '🧙 Reverse Wizard',
+            'nav.reverse': '🧙 Reverse Connection',
             'nav.package': '📦 Packages',
             'nav.logs': '📋 Logs',
             'nav.connections': '🔗 Connections',
@@ -884,8 +885,8 @@
             'package.toast.deleteOk': 'Deleted',
             'package.toast.deleteFail': 'Delete failed: {}',
 
-            // ===== Logs =====
-            'logs.title': 'Runtime Logs',
+            // ===== Runtime Logs =====
+            'logs.title': 'Logs',
             'logs.clear': 'Clear',
             'logs.refresh': 'Refresh',
 
@@ -900,8 +901,8 @@
             'connections.proxy': 'Proxy',
             'connections.duration': 'Duration',
 
-            // ===== PiP (Picture-in-Picture) Logs =====
-            'pip.title': 'Runtime Logs',
+            // ===== PiP (Picture-in-Picture) Runtime Logs =====
+            'pip.title': 'Logs',
             'pip.autoscroll': 'Auto-scroll',
             'pip.logCount': '{} logs',
             'pip.noLogs': 'No logs yet',
@@ -939,7 +940,7 @@
             'dash.editRules': 'Edit Rules',
             'dash.viewMappings': 'View Mappings',
             'dash.reloadConfig': 'Reload Config',
-            'dash.viewLogs': 'View Logs',
+            'dash.viewLogs': 'View Runtime Logs',
             'dash.viewConns': 'View Connections',
             'dash.expandLogs': 'Expand',
             'dash.logs': 'Runtime Logs',
@@ -961,7 +962,7 @@
             'dash.connRule': 'Rule',
 
             // ===== LOGS POPUP =====
-            'logs.title': '📋 Runtime Logs',
+            'logs.title': '📋 Logs',
             'logs.refresh': '🔄 Refresh',
             'logs.clear': '🗑 Clear',
             'logs.count': '{count} logs',
@@ -1035,7 +1036,7 @@
             'mesh.peers': 'Peers',
 
             // ===== Admin Settings =====
-            'admin.title': 'Admin Settings',
+            'admin.title': 'Settings',
             'admin.help': 'Configure admin panel access. Changes require password confirmation and will trigger a reload.',
             'admin.addr': 'Listen Address',
             'admin.addrHelp': 'Format: host:port. Use 0.0.0.0 to listen on all interfaces.',
@@ -1333,7 +1334,7 @@
             // ===== Resolvers =====
             'res.title': 'Resolvers',
             'res.add': '+ Add Resolver',
-            'res.desc': 'Resolvers rewrite the destination address before rule matching. e.g. redirect git.example.com:80 to 10.0.0.1:9003.',
+            'res.desc': 'Resolvers rewrite the destination address before rule matching. e.g. redirect git.example.com:80 to 10.0.0.1:9003. Source port 0 matches any port; destination port 0 keeps the original port (host-only rewrite).',
             'res.name': 'Name',
             'res.src': 'Source',
             'res.dst': 'Destination',
@@ -1350,10 +1351,11 @@
             'res.protoAll': 'All',
             'res.srcRelative': 'Self subdomain (match <label>.<local node-id>.phn)',
             'res.selfTag': 'self',
+            'res.keepPort': 'keep',
             'res.meshUnavailable': 'mesh node-id unavailable, check mesh config',
             'res.confirmDelete': 'Delete resolver',
 
-            // ===== Reverse Wizard =====
+            // ===== Reverse Connection =====
             'rv.title': 'Reverse Connections',
             'rv.add': '+ Add Reverse Connection',
             'rv.modalAdd': 'Add Reverse Connection',
@@ -1612,7 +1614,7 @@
             'mesh.owner': 'Owner',
             'mesh.domain': 'Domain',
 
-            // ===== Logs (additional) =====
+            // ===== Runtime Logs (additional) =====
             'logs.loading': 'Loading...',
             'logs.loadFailed': 'Failed to load: ',
             'logs.filter': 'Filter',

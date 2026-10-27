@@ -27,12 +27,12 @@
                     <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
                         <td><strong>{{.Name}}</strong></td>
                         <td>
-                            <code>{{.EffectiveSrcHost}}:{{.SrcPort}}</code>
+                            {{if .SrcPort}}<code>{{.EffectiveSrcHost}}:{{.SrcPort}}</code>{{else}}<code>{{.EffectiveSrcHost}}:<span style="color:var(--text-secondary);">*:any</span></code>{{end}}
                             {{if .SrcRelative}}<span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);" data-i18n="res.selfTag">self</span>{{end}}
                             {{if .Proto}}<span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);text-transform:uppercase;">{{.Proto}}</span>{{end}}
                         </td>
                         <td style="text-align:center;color:var(--text-secondary);">&rarr;</td>
-                        <td><code>{{.DstHost}}:{{.DstPort}}</code></td>
+                        <td>{{if .DstPort}}<code>{{.DstHost}}:{{.DstPort}}</code>{{else}}<code>{{.DstHost}}:<span style="color:var(--text-secondary);" data-i18n="res.keepPort">keep</span></code>{{end}}</td>
                         <td>
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleResolver('{{.Name}}', this.checked)">
@@ -79,7 +79,7 @@
                         </div>
                         <div class="form-group" style="flex:1;">
                             <label data-i18n="res.srcPort">Port</label>
-                            <input type="number" id="r-src-port" required min="0" max="65535" placeholder="80">
+                            <input type="number" id="r-src-port" min="0" max="65535" placeholder="0 = any">
                         </div>
                         <div class="form-group" style="flex:1;">
                             <label data-i18n="res.proto">Protocol</label>
@@ -105,7 +105,7 @@
                         </div>
                         <div class="form-group" style="flex:1;">
                             <label data-i18n="res.dstPort">Port</label>
-                            <input type="number" id="r-dst-port" required min="0" max="65535" placeholder="9003">
+                            <input type="number" id="r-dst-port" min="0" max="65535" placeholder="0 = keep">
                         </div>
                     </div>
                 </fieldset>

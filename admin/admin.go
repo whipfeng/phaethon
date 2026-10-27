@@ -2778,7 +2778,6 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusCreated)
 			jsonResponse(w, resolverSummary(&rv))
 		}
-
 	case http.MethodDelete:
 		name := strings.TrimPrefix(r.URL.Path, "/api/resolvers/")
 		if name == "" {
@@ -2903,7 +2902,7 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		"name":    g.Name,
 		"enabled": g.IsEnabled(),
 		"type":    g.Type,
-		"proxies": g.Proxies,
+		"proxies": g.ManualProxies,
 	})
 }
 
@@ -3305,6 +3304,17 @@ func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 	return resp
 }
 
+// groupMemberNames returns the computed member names for a proxy group.
+// This includes both manual proxies and subscription-derived proxies.
+func groupMemberNames(g *config.ProxyGroup) []string {
+	members := g.GetMembers()
+	names := make([]string, 0, len(members))
+	for _, m := range members {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
 func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -3313,13 +3323,22 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Prefer runtime groups from RuleMatcher: they have resolver callbacks
+		// attached, so GetMembers() returns the full list (manual + subscription).
+		if matcher, merr := db.GetMatcher(); merr == nil && matcher != nil {
+			for i, g := range groups {
+				if rg := matcher.GetGroup(g.Name); rg != nil {
+					groups[i] = rg
+				}
+			}
+		}
 		summaries := make([]map[string]interface{}, 0, len(groups))
 		for _, g := range groups {
 			summaries = append(summaries, map[string]interface{}{
 				"name":                   g.Name,
 				"enabled":                g.IsEnabled(),
 				"type":                   g.Type,
-				"proxies":                g.Proxies,
+				"proxies":                groupMemberNames(g),
 				"manualProxies":          g.ManualProxies,
 				"health-check-url":       g.HealthCheckURL,
 				"health-check-interval":  g.HealthCheckInterval,
@@ -3404,10 +3423,13 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleInfo("admin", "group added: %s (%s)", g.Name, g.Type)
 			w.WriteHeader(http.StatusCreated)
 		}
+		// Response uses manual proxies only here; the full computed member list
+		// (including subscription members) is returned by subsequent GET /api/groups
+		// after the RuleMatcher reload attaches resolver callbacks.
 		jsonResponse(w, map[string]interface{}{
 			"name":    g.Name,
 			"type":    g.Type,
-			"proxies": g.Proxies,
+			"proxies": g.ManualProxies,
 		})
 
 	case http.MethodDelete:

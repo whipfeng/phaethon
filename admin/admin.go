@@ -526,7 +526,6 @@ type pageTemplates struct {
 	mesh          *template.Template
 	logs          *template.Template
 	connections   *template.Template
-	monitor       *template.Template
 	proxies       *template.Template
 	subscriptions *template.Template
 	rules         *template.Template
@@ -667,7 +666,6 @@ func (s *AdminServer) parseTemplates() {
 		mesh:          parsePage("mesh.html"),
 		logs:          parsePage("logs.html"),
 		connections:   parsePage("connections.html"),
-		monitor:       parsePage("monitor.html"),
 		proxies:       parsePage("proxies.html"),
 		subscriptions: parsePage("subscriptions.html"),
 		rules:         parsePage("rules.html"),
@@ -1246,7 +1244,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/connections", s.handleConnectionsPage)
-	mux.HandleFunc("/monitor", s.handleMonitorPage)
 	mux.HandleFunc("/admin", s.handleAdminPage)
 	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
@@ -1411,25 +1408,6 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		proxySummaries[i] = proxySummary(p)
 	}
 
-	// Build subscription snapshot for summary display
-	subData := make(map[string]map[string]interface{})
-	for _, sub := range subs {
-		proxies := s.getSubscriptionProxies(sub.Name)
-		nodes := make([]map[string]interface{}, 0, len(proxies))
-		for name, p := range proxies {
-			nodes = append(nodes, map[string]interface{}{
-				"name":   name,
-				"type":   p.Type,
-				"server": p.Server,
-				"port":   p.Port,
-			})
-		}
-		subData[sub.Name] = map[string]interface{}{
-			"nodes": nodes,
-			"url":   sub.URL,
-		}
-	}
-
 	data := map[string]interface{}{
 		"Title":         "Proxies",
 		"Proxies":       proxies,
@@ -1437,7 +1415,6 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 		"Groups":        displayGroups,
 		"GroupStats":    groupStats,
 		"Subscriptions": subs,
-		"SubData":       subData,
 		"SaveTarget":    "base",
 		"CanSwitch":     false,
 	}
@@ -1561,14 +1538,6 @@ func (s *AdminServer) handleConnectionsPage(w http.ResponseWriter, r *http.Reque
 	s.render(w, r, "connections.html", data)
 }
 
-func (s *AdminServer) handleMonitorPage(w http.ResponseWriter, r *http.Request) {
-	data := map[string]interface{}{
-		"Title":   "Monitor",
-		"Version": os.Getenv("PHAETHON_VERSION"),
-	}
-	s.render(w, r, "monitor.html", data)
-}
-
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.pages.login.Execute(w, map[string]interface{}{
@@ -1679,8 +1648,6 @@ func (s *AdminServer) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	util.DefaultVersionNotifier.Subscribe(writer)
-	// Send initial version vector so client knows what to fetch
-	util.DefaultVersionNotifier.SendHeartbeat(writer)
 	defer util.DefaultVersionNotifier.Unsubscribe(writer)
 
 	// Wait for the client to disconnect.
@@ -5096,8 +5063,6 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.logs
 	case "connections.html":
 		t = s.pages.connections
-	case "monitor.html":
-		t = s.pages.monitor
 	case "proxies.html":
 		t = s.pages.proxies
 	case "subscriptions.html":

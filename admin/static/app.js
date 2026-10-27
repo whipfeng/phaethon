@@ -27,44 +27,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     }
 }
 
-// ========== Loading indicator for HTMX requests ==========
-(function() {
-    const indicator = document.getElementById('loading-indicator');
-    const progressBar = document.getElementById('loading-progress');
-    let hideTimer = null;
-
-    function showLoadingIndicator() {
-        if (!indicator || !progressBar) return;
-        if (hideTimer) {
-            clearTimeout(hideTimer);
-            hideTimer = null;
-        }
-        indicator.classList.remove('hidden');
-        progressBar.style.width = '0%';
-        // Animate to 80% over 300ms
-        setTimeout(() => {
-            if (progressBar) progressBar.style.width = '80%';
-        }, 50);
-    }
-
-    function hideLoadingIndicator() {
-        if (!indicator || !progressBar) return;
-        // Complete the progress bar
-        progressBar.style.width = '100%';
-        // Hide after animation completes
-        hideTimer = setTimeout(() => {
-            indicator.classList.add('hidden');
-            progressBar.style.width = '0%';
-            hideTimer = null;
-        }, 300);
-    }
-
-    // Listen to HTMX events
-    document.body.addEventListener('htmx:before-request', showLoadingIndicator);
-    document.body.addEventListener('htmx:after-settle', hideLoadingIndicator);
-    document.body.addEventListener('htmx:on-error', hideLoadingIndicator);
-})();
-
 // ========== Global State ==========
 // Version-vector state:
 //   targetVersions: latest version seen from SSE (what we should be fetching).
@@ -204,17 +166,6 @@ function updatePageTitle() {
 }
 
 function reloadPage() {
-    // Show loading indicator before reload
-    const indicator = document.getElementById('loading-indicator');
-    const progressBar = document.getElementById('loading-progress');
-    if (indicator && progressBar) {
-        indicator.classList.remove('hidden');
-        progressBar.style.width = '0%';
-        setTimeout(() => {
-            progressBar.style.width = '100%';
-        }, 50);
-    }
-
     if (typeof htmx !== 'undefined') {
         htmx.ajax('GET', window.location.pathname, {target: '#main-content', swap: 'innerHTML'});
     } else {

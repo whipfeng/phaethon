@@ -92,8 +92,8 @@ func (n *VersionNotifier) Subscribe(conn *SSEWriter) {
 	n.mu.Unlock()
 }
 
-// SendHeartbeat sends the current full version vector to a single connection.
-func (n *VersionNotifier) SendHeartbeat(conn *SSEWriter) {
+// sendHeartbeat sends the current full version vector to a single connection.
+func (n *VersionNotifier) sendHeartbeat(conn *SSEWriter) {
 	if n.getAllVersions == nil {
 		return
 	}

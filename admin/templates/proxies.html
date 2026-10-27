@@ -1,58 +1,6 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
-    <!-- Subscriptions Section (Collapsible) -->
-    <div class="card">
-        <div class="card-header" style="cursor:pointer;" onclick="toggleSubscriptions()">
-            <h3 style="display:flex;align-items:center;gap:0.5rem;">
-                <span id="subscriptions-toggle-icon" style="transition:transform 0.2s;">▶</span>
-                <span data-i18n="sub.title">Subscriptions</span> ({{len .Subscriptions}})
-            </h3>
-            <div style="display:flex;gap:0.5rem;align-items:center;" onclick="event.stopPropagation();">
-                <a href="./subscriptions" class="btn btn-sm btn-outline" data-i18n="sub.manage">Manage</a>
-                <button onclick="showAddSub()" class="btn btn-primary btn-sm" data-i18n="sub.add">+ Add</button>
-            </div>
-        </div>
-        <div id="subscriptions-section" class="card-body" style="display:none;">
-            {{if .Subscriptions}}
-            <div class="table-responsive">
-                <table class="data-table" id="sub-table-summary">
-                    <thead>
-                        <tr>
-                            <th data-i18n="sub.name">Name</th>
-                            <th data-i18n="sub.nodes">Nodes</th>
-                            <th data-i18n="common.enabled">Enabled</th>
-                            <th data-i18n="sub.actions">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {{range .Subscriptions}}
-                        {{$runtime := index $.SubData .Name}}
-                        <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
-                            <td data-label="Name"><strong>{{.Name}}</strong></td>
-                            <td data-label="Nodes">{{if $runtime}}{{len $runtime.nodes}}{{else}}0{{end}}</td>
-                            <td data-label="Enabled">
-                                <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
-                                    <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleSubscription('{{.Name}}', this.checked)">
-                                    <span class="slider"></span>
-                                </label>
-                            </td>
-                            <td data-label="Actions">
-                                <button onclick="refreshSub('{{.Name}}', this)" class="btn btn-sm btn-outline" data-i18n="sub.refresh">🔄</button>
-                                <button onclick="editSub('{{.Name}}')" class="btn btn-sm btn-outline" data-i18n="sub.btnEdit">Edit</button>
-                                <button onclick="deleteSub('{{.Name}}')" class="btn btn-sm btn-danger" data-i18n="sub.btnDelete">Delete</button>
-                            </td>
-                        </tr>
-                        {{end}}
-                    </tbody>
-                </table>
-            </div>
-            {{else}}
-            <p class="text-muted" data-i18n="sub.noSubs">No subscriptions defined.</p>
-            {{end}}
-        </div>
-    </div>
-
     <div class="card">
         <div class="card-header">
             <h3><span data-i18n="proxy.title">Proxies</span> ({{len .Proxies}})</h3>
@@ -1909,64 +1857,5 @@ function escapeHtml(s) {
     // Initial fetch on page load
     window.fetchP2PStatus();
 })();
-
-// Subscriptions toggle
-function toggleSubscriptions() {
-    const section = document.getElementById('subscriptions-section');
-    const icon = document.getElementById('subscriptions-toggle-icon');
-    if (section.style.display === 'none') {
-        section.style.display = 'block';
-        icon.style.transform = 'rotate(90deg)';
-    } else {
-        section.style.display = 'none';
-        icon.style.transform = 'rotate(0deg)';
-    }
-}
-
-// Subscription management functions (simplified versions)
-function showAddSub() {
-    window.location.href = './subscriptions';
-}
-
-function editSub(name) {
-    window.location.href = './subscriptions';
-}
-
-function deleteSub(name) {
-    if (!confirm('Delete subscription ' + name + '?')) return;
-    fetch('./api/subscriptions?name=' + encodeURIComponent(name), {method: 'DELETE'})
-        .then(r => r.ok ? reloadPage() : r.text().then(t => showToast('❌ ' + t, 'error')))
-        .catch(err => showToast('❌ ' + err.message, 'error'));
-}
-
-function refreshSub(name, btn) {
-    const originalText = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '⏳';
-    fetch('./api/subscriptions/refresh?name=' + encodeURIComponent(name), {method: 'POST'})
-        .then(r => {
-            if (r.ok) {
-                showToast('✅ ' + name + ' refreshed', 'success');
-                reloadPage();
-            } else {
-                return r.text().then(t => { throw new Error(t); });
-            }
-        })
-        .catch(err => showToast('❌ ' + err.message, 'error'))
-        .finally(() => {
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-        });
-}
-
-function toggleSubscription(name, enabled) {
-    fetch('./api/subscriptions/toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: name, enabled: enabled})
-    })
-    .then(r => r.ok ? showToast('✅ ' + (enabled ? 'Enabled' : 'Disabled'), 'success') : r.text().then(t => { throw new Error(t); }))
-    .catch(err => showToast('❌ ' + err.message, 'error'));
-}
 </script>
 {{end}}

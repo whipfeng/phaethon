@@ -171,7 +171,7 @@ func (s *BindingStore) SetDisconnected(reverseID string, seq int) {
 // publishSnapshot bumps the bindings topic version so connected browsers know
 // to fetch the latest binding list via REST.
 func (s *BindingStore) publishSnapshot() {
-	util.DefaultVersionNotifier.BumpVersion("bindings")
+	db.BumpRuntimeVersion("bindings")
 }
 
 // FindBindingByPort returns the binding that owns the given port, or nil.

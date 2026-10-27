@@ -22,7 +22,7 @@ type EventBus struct {
 // NewEventBus creates a new EventBus backed by a VersionNotifier.
 func NewEventBus() *EventBus {
 	return &EventBus{
-		VersionNotifier: NewVersionNotifier(),
+		VersionNotifier: NewVersionNotifier(nil),
 		subs:            make(map[<-chan Event]chan Event),
 	}
 }
@@ -74,8 +74,8 @@ func (b *EventBus) Publish(ev Event) {
 	}
 }
 
-// PublishVersion increments the version for topic and broadcasts the full
-// version vector as a heartbeat. It returns the new version number.
-func (b *EventBus) PublishVersion(topic string) uint64 {
-	return b.BumpVersion(topic)
+// PublishVersion sends an incremental version update for the specified topic.
+// The version number is already stored in the database; this just notifies SSE clients.
+func (b *EventBus) PublishVersion(topic string, version uint64) {
+	b.BumpVersion(topic, version)
 }

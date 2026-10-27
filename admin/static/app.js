@@ -415,14 +415,16 @@ const VersionNotificationService = (function () {
     const POLLING_INTERVAL = 3000;
 
     function applyVersions(vector) {
-        const bt = vector._bootTime;
-        if (bt !== undefined) {
-            if (serverBootTime !== null && serverBootTime !== bt) {
+        // Check for server restart via boot version number
+        const bootVersion = vector.boot;
+        if (bootVersion !== undefined) {
+            if (serverBootTime !== null && serverBootTime !== bootVersion) {
                 console.log('[SSE] Server restart detected, showing refresh banner');
                 showRestartBanner();
             }
-            serverBootTime = bt;
+            serverBootTime = bootVersion;
         }
+        // Update all topic versions
         for (const [topic, version] of Object.entries(vector)) {
             if (typeof version === 'number') {
                 topicVersions[topic] = version;
@@ -530,10 +532,13 @@ const VersionNotificationService = (function () {
                     console.log('[SSE] Heartbeat resumed, exiting polling mode');
                     stopPolling();
                 }
-                const vector = JSON.parse(e.data);
-                applyVersions(vector);
-                handleVersionVector(vector);
-                dispatchAll();
+                const update = JSON.parse(e.data);
+                // Apply the version updates (incremental or full vector)
+                applyVersions(update);
+                // Dispatch only the topics that were updated
+                for (const topic of Object.keys(update)) {
+                    dispatchTopic(topic);
+                }
             } catch {}
         });
         sseSource.onopen = () => {
@@ -652,7 +657,7 @@ function handleVersionVector(vector) {
     // Keep the legacy global targetVersions map in sync with the service's
     // internal vector so existing fetch helpers can compare target/cached.
     for (const [topic, version] of Object.entries(vector)) {
-        if (topic === '_bootTime') continue;
+        if (topic === 'boot') continue; // Skip boot version (used for restart detection only)
         handleVersionUpdate(topic, version, false);
     }
 }

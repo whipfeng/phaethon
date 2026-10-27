@@ -1454,13 +1454,13 @@ func (s *AdminServer) handleSubscriptionsPage(w http.ResponseWriter, r *http.Req
 }
 
 func (s *AdminServer) handleRulesPage(w http.ResponseWriter, r *http.Request) {
-	rules, _ := db.ListRules()
+	rulesWithIDs, _ := db.ListRulesWithIDs()
 	proxies, _ := db.ListProxies()
 	groups, _ := db.ListProxyGroups()
 	mappings, _ := db.ListMappings()
 	data := map[string]interface{}{
 		"Title":      "Rules",
-		"Rules":      rules,
+		"Rules":      rulesWithIDs,
 		"Proxies":    proxies,
 		"Groups":     groups,
 		"Mappings":   mappings,
@@ -2384,28 +2384,73 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		// Direct database read - skip config validation
-		rules, err := db.ListRules()
+		// Direct database read - return rules with IDs
+		rules, err := db.ListRulesWithIDs()
 		if err != nil {
 			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		result := make([]map[string]interface{}, len(rules))
-		for i, rule := range rules {
-			trimmed := strings.TrimSpace(rule)
+		for i, r := range rules {
+			trimmed := strings.TrimSpace(r.Rule)
 			result[i] = map[string]interface{}{
-				"index":   i,
-				"rule":    rule,
+				"id":      r.ID,
+				"rule":    r.Rule,
 				"enabled": !strings.HasPrefix(trimmed, "//"),
 			}
 		}
 		jsonResponse(w, result)
 
 	case http.MethodPost:
-		// Insert a rule at a specific position (or append if index not specified)
+		// Insert a rule at a specific position (or append if after_id not specified)
 		var body struct {
-			Rule  string `json:"rule"`
-			Index *int   `json:"index"` // nil = append
+			Rule    string `json:"rule"`
+			AfterID *int64 `json:"after_id"` // nil = append to end, -1 = insert at beginning, >0 = insert after ID
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, "decode fail", http.StatusBadRequest)
+			return
+		}
+		if body.Rule == "" {
+			httpError(w, "rule required", http.StatusBadRequest)
+			return
+		}
+
+		// Convert after_id: nil = append, -1 = insert at beginning (use 0 as sentinel), >0 = insert after ID
+		var dbAfterID *uint64
+		if body.AfterID != nil {
+			if *body.AfterID == -1 {
+				// Insert at beginning: use 0 as sentinel value
+				zero := uint64(0)
+				dbAfterID = &zero
+			} else if *body.AfterID > 0 {
+				v := uint64(*body.AfterID)
+				dbAfterID = &v
+			}
+			// If after_id is 0 or other invalid value, treat as nil (append to end)
+		}
+
+		s.mu.Lock()
+		newID, err := db.InsertRuleWithID(body.Rule, dbAfterID)
+		s.mu.Unlock()
+		if err != nil {
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		util.LogModuleInfo("admin", "rule inserted with ID %d: %s", newID, body.Rule)
+		jsonResponse(w, map[string]interface{}{"status": "inserted", "id": newID})
+
+	case http.MethodPut:
+		// Update a single rule by ID: /api/rules/{id}
+		pathID := strings.TrimPrefix(r.URL.Path, "/api/rules/")
+		id, err := strconv.ParseUint(pathID, 10, 64)
+		if err != nil {
+			httpError(w, "invalid rule id", http.StatusBadRequest)
+			return
+		}
+
+		var body struct {
+			Rule string `json:"rule"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, "decode fail", http.StatusBadRequest)
@@ -2417,73 +2462,49 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
-		// Direct database operation - skip config validation
-		rules, err := db.ListRules()
+		err = db.UpdateRuleByID(id, body.Rule)
+		s.mu.Unlock()
 		if err != nil {
-			s.mu.Unlock()
-			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		idx := len(rules)
-		if body.Index != nil {
-			idx = *body.Index
-			if idx < 0 {
-				idx = 0
+			if err == db.ErrNotFound {
+				httpError(w, "rule not found", http.StatusNotFound)
+				return
 			}
-			if idx > len(rules) {
-				idx = len(rules)
-			}
-		}
-		// Insert rule (single transaction handles re-indexing)
-		if err := db.InsertRule(idx, body.Rule); err != nil {
-			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.mu.Unlock()
-		util.LogModuleInfo("admin", "rule inserted at %d: %s", idx, body.Rule)
-		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
+		util.LogModuleInfo("admin", "rule updated ID %d: %s", id, body.Rule)
+		jsonResponse(w, map[string]interface{}{"status": "updated", "id": id})
 
 	case http.MethodDelete:
-		// Delete by index: /api/rules/3
-		pathIdx := strings.TrimPrefix(r.URL.Path, "/api/rules/")
-		idx, err := strconv.Atoi(pathIdx)
-		if err != nil || idx < 0 {
-			httpError(w, "invalid rule index", http.StatusBadRequest)
+		// Delete by ID: /api/rules/{id}
+		pathID := strings.TrimPrefix(r.URL.Path, "/api/rules/")
+		id, err := strconv.ParseUint(pathID, 10, 64)
+		if err != nil {
+			httpError(w, "invalid rule id", http.StatusBadRequest)
 			return
 		}
 
 		s.mu.Lock()
-		// Direct database operation - skip config validation to avoid deadlock
-		rules, err := db.ListRules()
+		err = db.DeleteRuleByID(id)
+		s.mu.Unlock()
 		if err != nil {
-			s.mu.Unlock()
-			httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if idx >= len(rules) {
-			s.mu.Unlock()
-			httpError(w, "invalid rule index", http.StatusBadRequest)
-			return
-		}
-		deleted := rules[idx]
-		// Delete rule (single transaction handles re-indexing)
-		if err := db.DeleteRuleByIndex(idx); err != nil {
-			s.mu.Unlock()
+			if err == db.ErrNotFound {
+				httpError(w, "rule not found", http.StatusNotFound)
+				return
+			}
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.mu.Unlock()
-		util.LogModuleInfo("admin", "rule deleted at %d: %s", idx, deleted)
+		util.LogModuleInfo("admin", "rule deleted ID %d", id)
 		jsonResponse(w, map[string]string{"status": "deleted"})
 	}
 }
 
 func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
-	pathIdx := strings.TrimPrefix(r.URL.Path, "/api/rules/")
-	idx, err := strconv.Atoi(pathIdx)
-	if err != nil || idx < 0 {
-		httpError(w, "invalid rule index", http.StatusBadRequest)
+	pathID := strings.TrimPrefix(r.URL.Path, "/api/rules/")
+	id, err := strconv.ParseUint(pathID, 10, 64)
+	if err != nil {
+		httpError(w, "invalid rule id", http.StatusBadRequest)
 		return
 	}
 	var body struct {
@@ -2496,36 +2517,43 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Direct database operation - skip config validation
-	rules, err := db.ListRules()
+	// Read the rule by ID
+	rules, err := db.ListRulesWithIDs()
 	if err != nil {
 		httpError(w, "load fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if idx >= len(rules) {
-		httpError(w, "invalid rule index", http.StatusBadRequest)
+	var ruleStr string
+	found := false
+	for _, r := range rules {
+		if r.ID == id {
+			ruleStr = r.Rule
+			found = true
+			break
+		}
+	}
+	if !found {
+		httpError(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	rule := strings.TrimSpace(rules[idx])
+	rule := strings.TrimSpace(ruleStr)
 	hasComment := strings.HasPrefix(rule, "//")
+	var newRule string
 	if body.Enabled && hasComment {
-		rules[idx] = strings.TrimPrefix(rule, "//")
+		newRule = strings.TrimPrefix(rule, "//")
 	} else if !body.Enabled && !hasComment {
-		rules[idx] = "//" + rule
+		newRule = "//" + rule
+	} else {
+		newRule = ruleStr // no change
 	}
-	if err := db.PutRule(idx, rules[idx]); err != nil {
+	if err := db.UpdateRuleByID(id, newRule); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after rule toggle failed: %v", err)
-		}
-	}
 	jsonResponse(w, map[string]interface{}{
-		"index":   idx,
+		"id":      id,
 		"enabled": body.Enabled,
-		"rule":    rules[idx],
+		"rule":    newRule,
 	})
 }
 

@@ -338,12 +338,296 @@ func ListReverseConfigs() ([]*config.ReverseConfig, error) {
 
 // ===== 规则 =====
 
-// RulesKey 是存储所有规则的单一 key（JSON 数组格式）
-// RulesKey 是规则数组的存储 key（新格式）
+// RulesKey 是存储所有规则的单一 key（JSON 数组格式）- 旧格式，迁移后废弃
 var RulesKey = []byte("__all_rules__")
 
-// PutRules 替换整个规则列表（原子操作）
-func PutRules(rules []string) error {
+// ===== 新格式：每条规则独立存储 =====
+// Key 结构：
+// - "next_id" → uint64 (自增序列)
+// - "order" → []uint64 (规则 ID 有序列表)
+// - "rule:{id}" → string (规则内容)
+var (
+	KeyNextID    = []byte("next_id")
+	KeyOrder     = []byte("order")
+	RuleKeyPrefix = []byte("rule:")
+)
+
+// ruleKey 生成规则的存储 key: "rule:{id}"
+func ruleKey(id uint64) []byte {
+	return append(RuleKeyPrefix, []byte(fmt.Sprintf("%d", id))...)
+}
+
+// getNextIDTx 读取下一个可用 ID（事务内）
+func getNextIDTx(tx *bolt.Tx) (uint64, error) {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return 0, fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	data := b.Get(KeyNextID)
+	if data == nil {
+		return 1, nil // 默认从 1 开始
+	}
+	var id uint64
+	if err := json.Unmarshal(data, &id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// putNextIDTx 设置下一个可用 ID（事务内）
+func putNextIDTx(tx *bolt.Tx, id uint64) error {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	return putJSON(b, KeyNextID, id)
+}
+
+// getOrderTx 读取规则顺序列表（事务内）
+func getOrderTx(tx *bolt.Tx) ([]uint64, error) {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return nil, fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	data := b.Get(KeyOrder)
+	if data == nil {
+		return []uint64{}, nil
+	}
+	var order []uint64
+	if err := json.Unmarshal(data, &order); err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+// putOrderTx 设置规则顺序列表（事务内）
+func putOrderTx(tx *bolt.Tx, order []uint64) error {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	return putJSON(b, KeyOrder, order)
+}
+
+// getRuleByIDTx 读取单条规则（事务内）
+func getRuleByIDTx(tx *bolt.Tx, id uint64) (string, error) {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return "", fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	data := b.Get(ruleKey(id))
+	if data == nil {
+		return "", ErrNotFound
+	}
+	var rule string
+	if err := json.Unmarshal(data, &rule); err != nil {
+		return "", err
+	}
+	return rule, nil
+}
+
+// putRuleByIDTx 写入单条规则（事务内）
+func putRuleByIDTx(tx *bolt.Tx, id uint64, rule string) error {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	return putJSON(b, ruleKey(id), rule)
+}
+
+// deleteRuleByIDTx 删除单条规则（事务内）
+func deleteRuleByIDTx(tx *bolt.Tx, id uint64) error {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+	}
+	return b.Delete(ruleKey(id))
+}
+
+// ===== 高层 API =====
+
+// RuleWithID 表示带 ID 的规则
+type RuleWithID struct {
+	ID   uint64 `json:"id"`
+	Rule string `json:"rule"`
+}
+
+// ListRules 返回所有规则（不带 ID，向后兼容）
+func ListRules() ([]string, error) {
+	rulesWithIDs, err := ListRulesWithIDs()
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]string, len(rulesWithIDs))
+	for i, r := range rulesWithIDs {
+		rules[i] = r.Rule
+	}
+	return rules, nil
+}
+
+// ListRulesWithIDs 返回所有规则（带 ID）
+func ListRulesWithIDs() ([]RuleWithID, error) {
+	var rules []RuleWithID
+	err := View(func(tx *bolt.Tx) error {
+		order, err := getOrderTx(tx)
+		if err != nil {
+			return err
+		}
+		for _, id := range order {
+			rule, err := getRuleByIDTx(tx, id)
+			if err != nil {
+				if err == ErrNotFound {
+					continue // 跳过不存在的规则（数据不一致）
+				}
+				return err
+			}
+			rules = append(rules, RuleWithID{ID: id, Rule: rule})
+		}
+		return nil
+	})
+	return rules, err
+}
+
+// InsertRuleWithID 插入规则并返回新 ID
+// afterID: 插入到该 ID 之后；nil=追加到末尾；如果 afterID 不存在则报错
+func InsertRuleWithID(rule string, afterID *uint64) (uint64, error) {
+	var newID uint64
+	err := Update(func(tx *bolt.Tx) error {
+		// 1. 分配新 ID
+		nextID, err := getNextIDTx(tx)
+		if err != nil {
+			return err
+		}
+		newID = nextID
+		
+		// 2. 写入规则
+		if err := putRuleByIDTx(tx, newID, rule); err != nil {
+			return err
+		}
+		
+		// 3. 更新顺序列表
+		order, err := getOrderTx(tx)
+		if err != nil {
+			return err
+		}
+		
+		if afterID == nil {
+			// 追加到末尾
+			order = append(order, newID)
+		} else if *afterID == 0 {
+			// afterID=0 表示插入到开头
+			order = append([]uint64{newID}, order...)
+		} else {
+			// 插入到 afterID 之后
+			pos := -1
+			for i, id := range order {
+				if id == *afterID {
+					pos = i
+					break
+				}
+			}
+			if pos == -1 {
+				return fmt.Errorf("after_id %d not found", *afterID)
+			}
+			// 在 pos+1 位置插入
+			order = append(order[:pos+1], append([]uint64{newID}, order[pos+1:]...)...)
+		}
+		
+		if err := putOrderTx(tx, order); err != nil {
+			return err
+		}
+		
+		// 4. 递增 next_id
+		return putNextIDTx(tx, newID+1)
+	})
+	if err != nil {
+		return 0, err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return newID, nil
+}
+
+// UpdateRuleByID 更新单条规则
+func UpdateRuleByID(id uint64, rule string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		// 检查规则是否存在
+		_, err := getRuleByIDTx(tx, id)
+		if err != nil {
+			return err
+		}
+		return putRuleByIDTx(tx, id, rule)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// DeleteRuleByID 删除单条规则
+func DeleteRuleByID(id uint64) error {
+	err := Update(func(tx *bolt.Tx) error {
+		// 检查规则是否存在
+		_, err := getRuleByIDTx(tx, id)
+		if err != nil {
+			return err
+		}
+		
+		// 删除规则
+		if err := deleteRuleByIDTx(tx, id); err != nil {
+			return err
+		}
+		
+		// 从 order 列表中移除
+		order, err := getOrderTx(tx)
+		if err != nil {
+			return err
+		}
+		newOrder := make([]uint64, 0, len(order)-1)
+		for _, oid := range order {
+			if oid != id {
+				newOrder = append(newOrder, oid)
+			}
+		}
+		return putOrderTx(tx, newOrder)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// ReorderRules 批量调整规则顺序
+func ReorderRules(order []uint64) error {
+	err := Update(func(tx *bolt.Tx) error {
+		// 验证所有 ID 都存在
+		for _, id := range order {
+			if _, err := getRuleByIDTx(tx, id); err != nil {
+				return fmt.Errorf("id %d not found: %w", id, err)
+			}
+		}
+		return putOrderTx(tx, order)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// ===== 旧格式函数（供迁移工具使用）=====
+
+// PutRulesOld 替换整个规则列表（旧格式，原子操作）
+func PutRulesOld(rules []string) error {
 	err := Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(BucketRules)
 		if b == nil {
@@ -360,8 +644,8 @@ func PutRules(rules []string) error {
 	return nil
 }
 
-// ListRules 返回所有规则
-func ListRules() ([]string, error) {
+// ListRulesOld 返回所有规则（旧格式）
+func ListRulesOld() ([]string, error) {
 	var rules []string
 	err := View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(BucketRules)
@@ -377,121 +661,47 @@ func ListRules() ([]string, error) {
 	return rules, err
 }
 
-// InsertRule 在指定位置插入规则
-func InsertRule(index int, rule string) error {
-	err := Update(func(tx *bolt.Tx) error {
+// DeleteOldRulesKey 删除旧格式的 rules key（迁移后调用）
+func DeleteOldRulesKey() error {
+	return Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(BucketRules)
 		if b == nil {
-			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+			return nil
 		}
-		
-		var rules []string
-		data := b.Get(RulesKey)
-		if data != nil {
-			if err := json.Unmarshal(data, &rules); err != nil {
-				return err
-			}
-		}
-		
-		if index < 0 || index > len(rules) {
-			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
-		}
-		
-		rules = append(rules[:index], append([]string{rule}, rules[index:]...)...)
-		return putJSON(b, RulesKey, rules)
+		return b.Delete(RulesKey)
 	})
-	if err != nil {
-		return err
-	}
-	notifyChanges([]ChangeEvent{{
-		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
-	}})
-	return nil
-}
-
-// DeleteRuleByIndex 删除指定位置的规则
-func DeleteRuleByIndex(index int) error {
-	err := Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(BucketRules)
-		if b == nil {
-			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
-		}
-		
-		var rules []string
-		data := b.Get(RulesKey)
-		if data == nil {
-			return fmt.Errorf("no rules found")
-		}
-		if err := json.Unmarshal(data, &rules); err != nil {
-			return err
-		}
-		
-		if index < 0 || index >= len(rules) {
-			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
-		}
-		
-		rules = append(rules[:index], rules[index+1:]...)
-		return putJSON(b, RulesKey, rules)
-	})
-	if err != nil {
-		return err
-	}
-	notifyChanges([]ChangeEvent{{
-		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
-	}})
-	return nil
-}
-
-// PutRule 在指定位置设置规则（用于更新单个规则）
-func PutRule(index int, rule string) error {
-	err := Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(BucketRules)
-		if b == nil {
-			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
-		}
-		
-		var rules []string
-		data := b.Get(RulesKey)
-		if data != nil {
-			if err := json.Unmarshal(data, &rules); err != nil {
-				return err
-			}
-		}
-		
-		if index < 0 || index >= len(rules) {
-			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
-		}
-		
-		rules[index] = rule
-		return putJSON(b, RulesKey, rules)
-	})
-	if err != nil {
-		return err
-	}
-	notifyChanges([]ChangeEvent{{
-		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
-	}})
-	return nil
-}
-
-// DeleteRule 删除指定位置的规则（DeleteRuleByIndex 的别名）
-func DeleteRule(index int) error {
-	return DeleteRuleByIndex(index)
 }
 
 // listRulesTx 在事务内读取所有规则（供 LoadConf 使用）
+// listRulesTx 在事务内读取所有规则（供 LoadConf 使用）- 新格式
 func listRulesTx(tx *bolt.Tx) ([]string, error) {
-	b := tx.Bucket(BucketRules)
-	if b == nil {
-		return nil, nil
+	order, err := getOrderTx(tx)
+	if err != nil {
+		// 如果 order key 不存在，尝试旧格式（兼容未迁移的情况）
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return nil, nil
+		}
+		data := b.Get(RulesKey)
+		if data == nil {
+			return nil, nil
+		}
+		var rules []string
+		if err := json.Unmarshal(data, &rules); err != nil {
+			return nil, err
+		}
+		return rules, nil
 	}
-	data := b.Get(RulesKey)
-	if data == nil {
-		return nil, nil
-	}
-	var rules []string
-	if err := json.Unmarshal(data, &rules); err != nil {
-		return nil, err
+	rules := make([]string, 0, len(order))
+	for _, id := range order {
+		rule, err := getRuleByIDTx(tx, id)
+		if err != nil {
+			if err == ErrNotFound {
+				continue // 跳过不存在的规则
+			}
+			return nil, err
+		}
+		rules = append(rules, rule)
 	}
 	return rules, nil
 }

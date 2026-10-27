@@ -22,26 +22,26 @@
                     </tr>
                 </thead>
                 <tbody id="rules-tbody">
-                    {{range $idx, $rule := .Rules}}
-                    {{$parsed := parseRule $rule}}
-                    <tr data-idx="{{$idx}}" class="{{if not (ruleEnabled $rule)}}row-disabled{{end}}">
-                        <td data-label="#">{{$idx}}</td>
+                    {{range .Rules}}
+                    {{$parsed := parseRule .Rule}}
+                    <tr data-id="{{.ID}}" class="{{if not (ruleEnabled .Rule)}}row-disabled{{end}}">
+                        <td data-label="#">{{.ID}}</td>
                         <td data-label="Match"><code>{{index $parsed 0}}</code>{{if index $parsed 1}}: {{index $parsed 1}}{{end}}</td>
                         <td data-label="Target"><strong>{{index $parsed 2}}</strong></td>
                         <td data-label="Mapping Source">{{if index $parsed 3}}<span class="badge badge-info">{{index $parsed 3}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
                         <td data-label="Time">{{if index $parsed 4}}<span class="badge badge-warn">{{index $parsed 4}}</span>{{else}}<span class="text-muted">—</span>{{end}}</td>
                         <td data-label="Enabled">
-                            <label class="switch" title="{{if ruleEnabled $rule}}Enabled{{else}}Disabled{{end}}">
-                                <input type="checkbox" {{if ruleEnabled $rule}}checked{{end}} onchange="toggleRule({{$idx}}, this.checked)">
+                            <label class="switch" title="{{if ruleEnabled .Rule}}Enabled{{else}}Disabled{{end}}">
+                                <input type="checkbox" {{if ruleEnabled .Rule}}checked{{end}} onchange="toggleRule({{.ID}}, this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
                         <td data-label="Actions">
-                            <button onclick="insertRuleAt({{$idx}}, 'above')" class="btn btn-sm btn-outline" data-i18n="rule.insertAbove">⬆ 上方插入</button>
-                            <button onclick="insertRuleAt({{$idx}}, 'below')" class="btn btn-sm btn-outline" data-i18n="rule.insertBelow">⬇ 下方插入</button>
-                            <button onclick="editRule({{$idx}})" class="btn btn-sm btn-outline">Edit</button>
-                            <button onclick="copyRule({{$idx}})" class="btn btn-sm btn-outline" title="Copy">📋</button>
-                            <button onclick="deleteRule({{$idx}})" class="btn btn-sm btn-danger">Delete</button>
+                            <button onclick="insertRuleAt({{.ID}}, 'above')" class="btn btn-sm btn-outline" data-i18n="rule.insertAbove">⬆ 上方插入</button>
+                            <button onclick="insertRuleAt({{.ID}}, 'below')" class="btn btn-sm btn-outline" data-i18n="rule.insertBelow">⬇ 下方插入</button>
+                            <button onclick="editRule({{.ID}})" class="btn btn-sm btn-outline">Edit</button>
+                            <button onclick="copyRule({{.ID}})" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                            <button onclick="deleteRule({{.ID}})" class="btn btn-sm btn-danger">Delete</button>
                         </td>
                     </tr>
                     {{end}}
@@ -72,7 +72,7 @@
                 <button onclick="closeRuleModal()" class="close-btn">&times;</button>
             </div>
             <form id="rule-form" onsubmit="saveRule(event)">
-                <input type="hidden" id="rule-edit-idx" value="-1">
+                <input type="hidden" id="rule-edit-id" value="">
                 <div class="form-group">
                     <label><span data-i18n="rule.pattern">Match Pattern</span> *</label>
                     <select id="f-rule-keyword" required onchange="toggleRuleFields()">
@@ -143,8 +143,19 @@
     </div>
 </div>
 <script>
-var rules = {{json .Rules}};
+var rulesData = {{json .Rules}};  // Array of {id, rule}
 var mappings = {{json .Mappings}};
+
+// Helper function to find rule by ID
+function findRuleById(id) {
+    return rulesData.find(r => r.id === id);
+}
+
+// Helper function to get rule string by ID
+function getRuleString(id) {
+    const rule = findRuleById(id);
+    return rule ? rule.rule : '';
+}
 
 // Initialize time picker selects
 (function initTimePicker() {
@@ -202,9 +213,9 @@ function clearTimeRange() {
     setTimeRange('');
 }
 
-function copyRule(idx) {
-    const rule = rules[idx];
-    if (rule === undefined) return;
+function copyRule(id) {
+    const rule = getRuleString(id);
+    if (!rule) return;
     navigator.clipboard.writeText(JSON.stringify({version: 1, type: 'rule', data: {raw: rule}}, null, 2)).then(() => {
         showToast(typeof i18n !== 'undefined' ? i18n.t('rule.copied') : 'Rule copied', 'success');
     }).catch(err => {
@@ -297,28 +308,43 @@ function splitTargetMapping(target) {
 
 function showAddRule() {
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
-    document.getElementById('rule-edit-idx').value = '-1';
-    document.getElementById('rule-form').dataset.insertAt = '';
+    document.getElementById('rule-edit-id').value = '';  // Empty = new rule
+    document.getElementById('rule-form').dataset.afterId = '';  // Empty = append to end
     document.getElementById('rule-form').reset();
     setTimeRange('');
     toggleRuleFields();
     document.getElementById('rule-modal').classList.remove('hidden');
 }
 
-function insertRuleAt(idx, position) {
+function insertRuleAt(id, position) {
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalAdd') : 'Add Rule');
-    document.getElementById('rule-edit-idx').value = '-1';
-    document.getElementById('rule-form').dataset.insertAt = position === 'above' ? String(idx) : String(idx + 1);
+    document.getElementById('rule-edit-id').value = '';  // Empty = new rule
+    // Store the after_id for insertion - use DOM to find positions (always in sync after SSE refresh)
+    if (position === 'above') {
+        // Find the current row in DOM, then get the previous row's ID
+        const currentRow = document.querySelector(`#rules-tbody tr[data-id="${id}"]`);
+        const prevRow = currentRow ? currentRow.previousElementSibling : null;
+        if (prevRow && prevRow.dataset.id) {
+            document.getElementById('rule-form').dataset.afterId = prevRow.dataset.id;
+        } else {
+            document.getElementById('rule-form').dataset.afterId = '-1';  // Insert at beginning
+        }
+    } else {
+        // position === 'below' - insert after current rule's ID
+        document.getElementById('rule-form').dataset.afterId = id;
+    }
     document.getElementById('rule-form').reset();
     setTimeRange('');
     toggleRuleFields();
     document.getElementById('rule-modal').classList.remove('hidden');
 }
 
-function editRule(idx) {
-    const [keyword, value, target, mappingName, timeRange] = parseRule(rules[idx]);
+function editRule(id) {
+    const ruleStr = getRuleString(id);
+    if (!ruleStr) return;
+    const [keyword, value, target, mappingName, timeRange] = parseRule(ruleStr);
     document.getElementById('rule-modal-title').textContent = (typeof i18n !== 'undefined' ? i18n.t('rule.modalEdit') : 'Edit Rule');
-    document.getElementById('rule-edit-idx').value = idx;
+    document.getElementById('rule-edit-id').value = id;
 
     document.getElementById('f-rule-keyword').value = keyword;
     document.getElementById('f-rule-value').value = value;
@@ -340,7 +366,7 @@ function editRule(idx) {
 
 async function saveRule(e) {
     e.preventDefault();
-    const editIdx = parseInt(document.getElementById('rule-edit-idx').value);
+    const editId = document.getElementById('rule-edit-id').value;
     const keyword = document.getElementById('f-rule-keyword').value;
     const value = document.getElementById('f-rule-value').value.trim();
     let target = document.getElementById('f-rule-target').value;
@@ -360,31 +386,28 @@ async function saveRule(e) {
         return;
     }
 
-    const insertAt = document.getElementById('rule-form').dataset.insertAt;
+    const afterId = document.getElementById('rule-form').dataset.afterId;
 
     try {
         let res;
-        if (editIdx >= 0) {
-            const newRules = [...rules];
-            newRules[editIdx] = ruleStr;
-            res = await fetch('./api/rules', {
+        if (editId) {
+            // Update existing rule
+            res = await fetch(`./api/rules/${editId}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(newRules)
+                body: JSON.stringify({rule: ruleStr})
             });
-        } else if (insertAt !== '' && insertAt !== undefined) {
+        } else {
+            // Insert new rule
+            const body = {rule: ruleStr};
+            if (afterId !== undefined && afterId !== '') {
+                body.after_id = parseInt(afterId);  // -1 = insert at beginning, >0 = insert after ID
+            }
+            // If afterId is undefined or empty, omit after_id (append to end)
             res = await fetch('./api/rules', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({rule: ruleStr, index: parseInt(insertAt)})
-            });
-        } else {
-            const newRules = [...rules];
-            newRules.push(ruleStr);
-            res = await fetch('./api/rules', {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(newRules)
+                body: JSON.stringify(body)
             });
         }
         if (!res.ok) {
@@ -398,9 +421,9 @@ async function saveRule(e) {
     }
 }
 
-async function deleteRule(idx) {
+async function deleteRule(id) {
     try {
-        const res = await fetch(`./api/rules/${idx}`, {method: 'DELETE'});
+        const res = await fetch(`./api/rules/${id}`, {method: 'DELETE'});
         if (!res.ok) throw new Error(await res.text());
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
@@ -408,15 +431,15 @@ async function deleteRule(idx) {
     }
 }
 
-async function toggleRule(idx, enabled) {
+async function toggleRule(id, enabled) {
     try {
-        const res = await fetch(`./api/rules/${idx}`, {
+        const res = await fetch(`./api/rules/${id}`, {
             method: 'PATCH',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({enabled})
         });
         if (!res.ok) throw new Error(await res.text());
-        const row = document.querySelector(`#rules-tbody tr[data-idx="${idx}"]`);
+        const row = document.querySelector(`#rules-tbody tr[data-id="${id}"]`);
         if (row) row.classList.toggle('row-disabled', !enabled);
     } catch (err) {
         const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
@@ -479,18 +502,18 @@ async function testRule() {
     resultDiv.classList.remove('hidden');
     resultDiv.innerHTML = '<p>Testing: <code>' + escapeHtml(input) + '</code></p>';
 
-    let matchedIdx = -1;
+    let matchedId = null;
     let matchedRule = '';
-    for (let i = 0; i < rules.length; i++) {
-        if (!isRuleEnabled(rules[i])) continue;
-        if (ruleMatches(input, rules[i])) {
-            matchedIdx = i;
-            matchedRule = rules[i];
+    for (const ruleObj of rulesData) {
+        if (!isRuleEnabled(ruleObj.rule)) continue;
+        if (ruleMatches(input, ruleObj.rule)) {
+            matchedId = ruleObj.id;
+            matchedRule = ruleObj.rule;
             break;
         }
     }
-    if (matchedIdx >= 0) {
-        resultDiv.innerHTML += `<p class="text-success">→ Rule #${matchedIdx}: ${escapeHtml(matchedRule)}</p>`;
+    if (matchedId !== null) {
+        resultDiv.innerHTML += `<p class="text-success">→ Rule ID=${matchedId}: ${escapeHtml(matchedRule)}</p>`;
     } else {
         const noMatch = typeof i18n !== 'undefined' ? i18n.t('rule.noMatch') : 'No explicit match found';
         resultDiv.innerHTML += '<p class="text-muted">' + noMatch + '</p>';

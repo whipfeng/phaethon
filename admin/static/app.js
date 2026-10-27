@@ -1072,33 +1072,45 @@ async function fetchRules(expectedVersion) {
 }
 
 function updateRules(data) {
-    const tbody = document.querySelector('#rules-table tbody');
+    // Update the global rulesData variable for insertRuleAt
+    if (typeof rulesData !== 'undefined') {
+        rulesData = data;
+    }
+
+    const tbody = document.querySelector('#rules-tbody');
     if (!tbody) return;
-    tbody.innerHTML = data.map((r, i) => {
+    tbody.innerHTML = data.map((r) => {
+        const id = r.id;
         const enabled = r.enabled !== false;
         const ruleText = r.rule || '';
         const rowClass = enabled ? '' : 'row-disabled';
-        return `<tr data-index="${i}" data-rule="${escapeHtml(ruleText)}" class="${rowClass}" draggable="true">
-            <td data-label="#" class="drag-handle" style="cursor:grab;">⠿</td>
-            <td data-label="Rule">${escapeHtml(ruleText)}</td>
+        return `<tr data-id="${id}" class="${rowClass}">
+            <td data-label="#">${id}</td>
+            <td data-label="Match"><code>${escapeHtml(ruleText)}</code></td>
+            <td data-label="Target">—</td>
+            <td data-label="Mapping Source">—</td>
+            <td data-label="Time">—</td>
             <td data-label="Enabled">
-                <label class="switch">
-                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleRule(${i}, this.checked)">
+                <label class="switch" title="${enabled ? 'Enabled' : 'Disabled'}">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleRule(${id}, this.checked)">
                     <span class="slider"></span>
                 </label>
             </td>
             <td data-label="Actions">
-                <button onclick="editRule(${i})" class="btn btn-sm btn-outline">${(typeof i18n !== 'undefined' ? i18n.t('common.edit') : null) || 'Edit'}</button>
-                <button onclick="deleteRule(${i})" class="btn btn-sm btn-danger">${(typeof i18n !== 'undefined' ? i18n.t('common.delete') : null) || 'Delete'}</button>
+                <button onclick="insertRuleAt(${id}, 'above')" class="btn btn-sm btn-outline">⬆ 上方插入</button>
+                <button onclick="insertRuleAt(${id}, 'below')" class="btn btn-sm btn-outline">⬇ 下方插入</button>
+                <button onclick="editRule(${id})" class="btn btn-sm btn-outline">Edit</button>
+                <button onclick="copyRule(${id})" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteRule(${id})" class="btn btn-sm btn-danger">Delete</button>
             </td>
         </tr>`;
     }).join('');
 
     // Update rule count
-    const header = document.querySelector('#rules-table')?.closest('.card')?.querySelector('.card-header h3');
-    if (header) {
+    const cardHeader = document.querySelector('.card-header h3');
+    if (cardHeader) {
         const label = (typeof i18n !== 'undefined' ? i18n.t('rule.title') : null) || 'Rules';
-        header.innerHTML = `<span data-i18n="rule.title">${label}</span> (${data.length})`;
+        cardHeader.innerHTML = `<span data-i18n="rule.title">${label}</span> (${data.length})`;
     }
 }
 

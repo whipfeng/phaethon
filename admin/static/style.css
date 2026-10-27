@@ -2505,6 +2505,13 @@ td[data-label="P2P"] .p2p-status.failed {
     padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
 
+/* Show bottom nav on mobile */
+@media (max-width: 767px) {
+    .bottom-nav {
+        display: flex;
+    }
+}
+
 .bottom-nav.hidden {
     display: none !important;
 }

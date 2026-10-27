@@ -70,47 +70,6 @@
         </main>
     </div>
 
-    <!-- Mobile Bottom Navigation -->
-    <nav class="bottom-nav hidden">
-        <a href="./" class="nav-item {{if eq .Title "Dashboard"}}active{{end}}">
-            <span class="nav-icon">📊</span>
-            <span class="nav-label" data-i18n="nav.dashboard">Dashboard</span>
-        </a>
-        <a href="./proxies" class="nav-item {{if eq .Title "Proxies"}}active{{end}}">
-            <span class="nav-icon">🔌</span>
-            <span class="nav-label" data-i18n="nav.proxies">Proxies</span>
-        </a>
-        <a href="./rules" class="nav-item {{if eq .Title "Rules"}}active{{end}}">
-            <span class="nav-icon">📜</span>
-            <span class="nav-label" data-i18n="nav.rules">Rules</span>
-        </a>
-        <a href="./monitor" class="nav-item {{if or (eq .Title "Monitor") (eq .Title "Connections") (eq .Title "Logs")}}active{{end}}">
-            <span class="nav-icon">🔗</span>
-            <span class="nav-label" data-i18n="nav.monitor">Monitor</span>
-        </a>
-        <button onclick="toggleMoreMenu()" class="nav-item">
-            <span class="nav-icon">⋯</span>
-            <span class="nav-label" data-i18n="nav.more">More</span>
-        </button>
-    </nav>
-
-    <!-- More Menu Drawer -->
-    <div id="more-menu" class="more-menu hidden">
-        <div class="more-menu-header">
-            <h3 data-i18n="nav.moreTitle">更多功能</h3>
-            <button onclick="toggleMoreMenu()" class="close-btn">×</button>
-        </div>
-        <div class="more-menu-items">
-            <a href="./mappings">🗺️ <span data-i18n="nav.mappings">Mappings</span></a>
-            <a href="./tun">🌐 <span data-i18n="nav.tun">TUN</span></a>
-            <a href="./mesh">🔷 <span data-i18n="nav.mesh">Mesh</span></a>
-            <a href="./resolvers">↗️ <span data-i18n="nav.resolvers">Resolvers</span></a>
-            <a href="./admin">⚙️ <span data-i18n="nav.admin">Admin</span></a>
-            <a href="./reverse">🧙 <span data-i18n="nav.reverse">Reverse</span></a>
-            <a href="./package">📦 <span data-i18n="nav.package">Package</span></a>
-        </div>
-    </div>
-
     <!-- Unified node viewer / health-check modal (used by subscriptions and proxy groups) -->
     <div id="node-viewer-modal" class="modal hidden">
         <div class="modal-content modal-xl sub-nodes-scroll">

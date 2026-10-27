@@ -255,6 +255,31 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
+	// Inject built-in loopback resolver: loc.<node-id>.phn -> 127.0.0.1
+	// (host-only rewrite, port preserved). Only when mesh node-id is available
+	// and no user-defined resolver already matches this source.
+	if nodeID != "" {
+		loopbackSrc := "loc." + nodeID + ".phn"
+		hasLoopback := false
+		for _, resolver := range m.resolvers {
+			if resolver != nil && resolver.EffectiveSrcHost() == loopbackSrc {
+				hasLoopback = true
+				break
+			}
+		}
+		if !hasLoopback {
+			enabled := true
+			m.resolvers = append([]*config.Resolver{{
+				Name:    "__LOOPBACK_LOC__",
+				Enabled: &enabled,
+				SrcHost: loopbackSrc,
+				SrcPort: 0,
+				DstHost: "127.0.0.1",
+				DstPort: 0,
+			}}, m.resolvers...)
+		}
+	}
+
 	// 初始化代理组
 	for _, group := range m.groups {
 		if !group.IsEnabled() {
@@ -524,12 +549,21 @@ func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 		if resolver.Proto != "" && req.Proto != "" && resolver.Proto != req.Proto {
 			continue
 		}
-		if req.DstAddr != resolver.EffectiveSrcHost() || req.DstPort != resolver.SrcPort {
+		if req.DstAddr != resolver.EffectiveSrcHost() {
 			continue
+		}
+		// SrcPort == 0 means "match any port"; otherwise require exact match.
+		if resolver.SrcPort != 0 && req.DstPort != resolver.SrcPort {
+			continue
+		}
+		// DstPort == 0 means "keep original port" (host-only rewrite).
+		newPort := req.DstPort
+		if resolver.DstPort != 0 {
+			newPort = resolver.DstPort
 		}
 		return &config.AddrRequest{
 			DstAddr: resolver.DstHost,
-			DstPort: resolver.DstPort,
+			DstPort: newPort,
 			CmdType: req.CmdType,
 			Proto:   req.Proto,
 		}

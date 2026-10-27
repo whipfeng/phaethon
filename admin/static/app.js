@@ -445,7 +445,12 @@ const VersionNotificationService = (function () {
     let connected = false;
     let pollingMode = false;
     let consecutiveHeartbeats = 0;
-    let serverBootTime = null;
+    
+    // Persist boot version across page refreshes to detect server restarts
+    let serverBootTime = sessionStorage.getItem('serverBootTime');
+    if (serverBootTime !== null) {
+        serverBootTime = parseInt(serverBootTime, 10);
+    }
 
     const RECONNECT_DELAY = 5000;
     const HEARTBEAT_TIMEOUT = 15000;
@@ -460,6 +465,7 @@ const VersionNotificationService = (function () {
                 showRestartBanner();
             }
             serverBootTime = bootVersion;
+            sessionStorage.setItem('serverBootTime', bootVersion.toString());
         }
         // Update all topic versions
         for (const [topic, version] of Object.entries(vector)) {

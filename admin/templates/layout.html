@@ -28,7 +28,6 @@
             <ul class="nav-menu">
                 <li><a href="./" hx-get="./" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
                 <li class="nav-section"><span data-i18n="nav.config">配置</span></li>
-                <li><a href="./subscriptions" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
                 <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔌 Proxies</a></li>
                 <li><a href="./rules" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📜 Rules</a></li>
                 <li><a href="./mappings" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🗺️ Mappings</a></li>
@@ -218,10 +217,6 @@
                 </div>
                 <div class="drawer-section">
                     <h4 data-i18n="nav.config">Configuration</h4>
-                    <a href="./subscriptions" class="drawer-item" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">📡</span>
-                        <span class="label" data-i18n="nav.subscriptions">Subscriptions</span>
-                    </a>
                     <a href="./proxies" class="drawer-item" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">🔌</span>
                         <span class="label" data-i18n="nav.proxies">Proxies</span>

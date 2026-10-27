@@ -69,6 +69,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const indicator = document.getElementById('loading-indicator');
     const progressBar = document.getElementById('loading-progress');
     let hideTimer = null;
+    let showTime = 0;
+    const MIN_DISPLAY_TIME = 300; // Minimum display time in ms
 
     console.log('[Loading Indicator] Init:', { indicator: !!indicator, progressBar: !!progressBar });
 
@@ -87,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
             clearTimeout(hideTimer);
             hideTimer = null;
         }
+        showTime = Date.now();
         indicator.classList.remove('hidden');
         progressBar.style.width = '0%';
         console.log('[Loading Indicator] Show - indicator visible');
@@ -96,19 +99,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function hideLoadingIndicator(event) {
+        const elapsed = Date.now() - showTime;
+        const remainingTime = Math.max(0, MIN_DISPLAY_TIME - elapsed);
+        
         console.log('[Loading Indicator] htmx:after-request fired', {
             successful: event.detail.successful,
-            path: event.detail.pathInfo?.requestPath
+            path: event.detail.pathInfo?.requestPath,
+            elapsed: elapsed + 'ms',
+            remainingTime: remainingTime + 'ms'
         });
         if (!indicator || !progressBar) return;
         progressBar.style.width = '100%';
-        console.log('[Loading Indicator] Hide - progress at 100%');
+        console.log('[Loading Indicator] Hide - progress at 100%, waiting', remainingTime + 'ms');
+        
         hideTimer = setTimeout(() => {
             indicator.classList.add('hidden');
             progressBar.style.width = '0%';
             hideTimer = null;
             console.log('[Loading Indicator] Hidden after delay');
-        }, 300);
+        }, remainingTime + 200); // Add 200ms for the 100% progress animation
     }
 
     document.body.addEventListener('htmx:before-request', showLoadingIndicator);

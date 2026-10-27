@@ -65,6 +65,24 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     document.body.addEventListener('htmx:on-error', hideLoadingIndicator);
 })();
 
+// ========== More menu toggle (mobile) ==========
+function toggleMoreMenu() {
+    const menu = document.getElementById('more-menu');
+    if (!menu) return;
+    menu.classList.toggle('hidden');
+}
+
+// Close more menu when clicking outside
+document.addEventListener('click', function(e) {
+    const menu = document.getElementById('more-menu');
+    if (!menu || menu.classList.contains('hidden')) return;
+    
+    // Check if click is outside the menu
+    if (!menu.contains(e.target) && !e.target.closest('.bottom-nav button')) {
+        menu.classList.add('hidden');
+    }
+});
+
 // ========== Global State ==========
 // Version-vector state:
 //   targetVersions: latest version seen from SSE (what we should be fetching).

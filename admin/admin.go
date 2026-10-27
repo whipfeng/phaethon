@@ -526,6 +526,7 @@ type pageTemplates struct {
 	mesh          *template.Template
 	logs          *template.Template
 	connections   *template.Template
+	monitor       *template.Template
 	proxies       *template.Template
 	subscriptions *template.Template
 	rules         *template.Template
@@ -666,6 +667,7 @@ func (s *AdminServer) parseTemplates() {
 		mesh:          parsePage("mesh.html"),
 		logs:          parsePage("logs.html"),
 		connections:   parsePage("connections.html"),
+		monitor:       parsePage("monitor.html"),
 		proxies:       parsePage("proxies.html"),
 		subscriptions: parsePage("subscriptions.html"),
 		rules:         parsePage("rules.html"),
@@ -1244,6 +1246,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/reverse", s.handleReverseWizardPage)
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/connections", s.handleConnectionsPage)
+	mux.HandleFunc("/monitor", s.handleMonitorPage)
 	mux.HandleFunc("/admin", s.handleAdminPage)
 	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
@@ -1536,6 +1539,14 @@ func (s *AdminServer) handleConnectionsPage(w http.ResponseWriter, r *http.Reque
 		"Version": os.Getenv("PHAETHON_VERSION"),
 	}
 	s.render(w, r, "connections.html", data)
+}
+
+func (s *AdminServer) handleMonitorPage(w http.ResponseWriter, r *http.Request) {
+	data := map[string]interface{}{
+		"Title":   "Monitor",
+		"Version": os.Getenv("PHAETHON_VERSION"),
+	}
+	s.render(w, r, "monitor.html", data)
 }
 
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -5063,6 +5074,8 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 		t = s.pages.logs
 	case "connections.html":
 		t = s.pages.connections
+	case "monitor.html":
+		t = s.pages.monitor
 	case "proxies.html":
 		t = s.pages.proxies
 	case "subscriptions.html":

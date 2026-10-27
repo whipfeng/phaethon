@@ -1,0 +1,44 @@
+{{template "layout" .}}
+{{define "content"}}
+<div class="page-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="tab-buttons" style="display:flex;gap:0.5rem;">
+                <button id="tab-connections" class="btn btn-primary btn-sm" onclick="switchMonitorTab('connections')" data-i18n="nav.connections">Connections</button>
+                <button id="tab-logs" class="btn btn-outline btn-sm" onclick="switchMonitorTab('logs')" data-i18n="nav.logs">Logs</button>
+            </div>
+        </div>
+        <div id="monitor-content">
+            {{block "monitor-content" .}}{{end}}
+        </div>
+    </div>
+</div>
+
+<script>
+function switchMonitorTab(tab) {
+    const connBtn = document.getElementById('tab-connections');
+    const logsBtn = document.getElementById('tab-logs');
+    const content = document.getElementById('monitor-content');
+    
+    if (tab === 'connections') {
+        connBtn.className = 'btn btn-primary btn-sm';
+        logsBtn.className = 'btn btn-outline btn-sm';
+        // Load connections via HTMX
+        if (typeof htmx !== 'undefined') {
+            htmx.ajax('GET', './connections?partial=true', {target: '#monitor-content', swap: 'innerHTML'});
+        } else {
+            window.location.href = './connections';
+        }
+    } else {
+        logsBtn.className = 'btn btn-primary btn-sm';
+        connBtn.className = 'btn btn-outline btn-sm';
+        // Load logs via HTMX
+        if (typeof htmx !== 'undefined') {
+            htmx.ajax('GET', './logs?partial=true', {target: '#monitor-content', swap: 'innerHTML'});
+        } else {
+            window.location.href = './logs';
+        }
+    }
+}
+</script>
+{{end}}

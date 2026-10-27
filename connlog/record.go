@@ -70,6 +70,8 @@ func (r *Record) Establish(connID string, proxy *config.Proxy, direct bool) {
 	}
 	r.established = true
 	r.log("ok", nil)
+	// Track active connection after logging
+	TrackActive(connID, r.inbound, r.protocol, r.srcAddr, r.originalDst, r.dst, r.port, r.matchResult)
 }
 
 // Close removes the active-connection entry. Safe to defer unconditionally.

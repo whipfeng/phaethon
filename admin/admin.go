@@ -1679,6 +1679,8 @@ func (s *AdminServer) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	util.DefaultVersionNotifier.Subscribe(writer)
+	// Send initial version vector so client knows what to fetch
+	util.DefaultVersionNotifier.SendHeartbeat(writer)
 	defer util.DefaultVersionNotifier.Unsubscribe(writer)
 
 	// Wait for the client to disconnect.

@@ -1,0 +1,683 @@
+package db
+
+import (
+	"encoding/json"
+	"fmt"
+
+	bolt "go.etcd.io/bbolt"
+	"phaethon/config"
+)
+
+// BucketConfig 内的标量配置 key
+var (
+	keyAdmin        = []byte("admin")
+	keyTUN          = []byte("tun")
+	keyMesh         = []byte("mesh")
+	keyInteractive  = []byte("interactive")
+	keyUDPPortRange = []byte("udp-port-range")
+	keyTCPPortRange = []byte("tcp-port-range")
+)
+
+// KeyRebuilt 是 ReplaceAllConfig 提交后发出的合成事件 key，
+// 重建 watcher 收到即全量 LoadConf。
+const KeyRebuilt = "__rebuilt__"
+
+// ===== 事务内 JSON 读写（调用方负责事务生命周期）=====
+
+func putJSON(b *bolt.Bucket, key []byte, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("序列化 %s 失败: %w", key, err)
+	}
+	return b.Put(key, data)
+}
+
+// getTx 读取单条记录。返回的指针是 JSON 反序列化产物，
+// 不引用 bolt mmap 内存，事务结束后仍可安全使用。
+func getTx[T any](tx *bolt.Tx, bucket, key []byte) (*T, error) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, fmt.Errorf("bucket %s 不存在", string(bucket))
+	}
+	data := b.Get(key)
+	if data == nil {
+		return nil, ErrNotFound
+	}
+	var v T
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf("解析 %s/%s 失败: %w", string(bucket), key, err)
+	}
+	return &v, nil
+}
+
+func listTx[T any](tx *bolt.Tx, bucket []byte) ([]*T, error) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, fmt.Errorf("bucket %s 不存在", string(bucket))
+	}
+	var out []*T
+	err := b.ForEach(func(k, v []byte) error {
+		var e T
+		if err := json.Unmarshal(v, &e); err != nil {
+			return fmt.Errorf("解析 %s/%s 失败: %w", string(bucket), k, err)
+		}
+		out = append(out, &e)
+		return nil
+	})
+	return out, err
+}
+
+// getView / listView 是单 key 与全量遍历的快捷方法，
+// 各自用独立的只读事务包裹（事务在 View 返回时释放）。
+func getView[T any](bucket, key []byte) (*T, error) {
+	var out *T
+	err := View(func(tx *bolt.Tx) error {
+		v, err := getTx[T](tx, bucket, key)
+		if err != nil {
+			return err
+		}
+		out = v
+		return nil
+	})
+	return out, err
+}
+
+func listView[T any](bucket []byte) ([]*T, error) {
+	var out []*T
+	err := View(func(tx *bolt.Tx) error {
+		v, err := listTx[T](tx, bucket)
+		if err != nil {
+			return err
+		}
+		out = v
+		return nil
+	})
+	return out, err
+}
+
+// ===== 标量配置节 =====
+
+func PutAdminConfig(c *config.AdminConfig) error {
+	return Put(BucketConfig, keyAdmin, c)
+}
+
+func GetAdminConfig() (*config.AdminConfig, error) {
+	return getView[config.AdminConfig](BucketConfig, keyAdmin)
+}
+
+func PutTUNConfig(c *config.TUNConfig) error {
+	return Put(BucketConfig, keyTUN, c)
+}
+
+func GetTUNConfig() (*config.TUNConfig, error) {
+	return getView[config.TUNConfig](BucketConfig, keyTUN)
+}
+
+func PutMeshConfig(c *config.MeshConfig) error {
+	return Put(BucketConfig, keyMesh, c)
+}
+
+func GetMeshConfig() (*config.MeshConfig, error) {
+	return getView[config.MeshConfig](BucketConfig, keyMesh)
+}
+
+func PutInteractive(v bool) error {
+	return Put(BucketConfig, keyInteractive, v)
+}
+
+func GetInteractive() (bool, error) {
+	v, err := getView[bool](BucketConfig, keyInteractive)
+	if err != nil {
+		return false, err
+	}
+	return *v, nil
+}
+
+func PutUDPPortRange(s string) error {
+	return Put(BucketConfig, keyUDPPortRange, s)
+}
+
+func GetUDPPortRange() (string, error) {
+	v, err := getView[string](BucketConfig, keyUDPPortRange)
+	if err != nil {
+		return "", err
+	}
+	return *v, nil
+}
+
+func PutTCPPortRange(s string) error {
+	return Put(BucketConfig, keyTCPPortRange, s)
+}
+
+func GetTCPPortRange() (string, error) {
+	v, err := getView[string](BucketConfig, keyTCPPortRange)
+	if err != nil {
+		return "", err
+	}
+	return *v, nil
+}
+
+// ===== 代理 =====
+
+func PutProxy(p *config.Proxy) error {
+	return Put(BucketProxies, []byte(p.Name), p)
+}
+
+func GetProxy(name string) (*config.Proxy, error) {
+	return getView[config.Proxy](BucketProxies, []byte(name))
+}
+
+func DeleteProxy(name string) error {
+	return Delete(BucketProxies, []byte(name))
+}
+
+func ListProxies() ([]*config.Proxy, error) {
+	return listView[config.Proxy](BucketProxies)
+}
+
+// ===== 代理组 =====
+
+// storeGroup 返回可持久化的代理组副本，清零运行时派生与废弃字段。
+// 不能整体拷贝结构体：内含 sync.RWMutex（go vet copylocks 会报错）。
+func storeGroup(g *config.ProxyGroup) *config.ProxyGroup {
+	// Merge Proxies and ManualProxies for backwards compatibility
+	allProxies := append([]string(nil), g.ManualProxies...)
+	for _, p := range g.Proxies {
+		found := false
+		for _, mp := range g.ManualProxies {
+			if mp == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			allProxies = append(allProxies, p)
+		}
+	}
+	
+	return &config.ProxyGroup{
+		Name:                 g.Name,
+		Enabled:              g.Enabled,
+		Type:                 g.Type,
+		ManualProxies:        allProxies,
+		HealthCheckURL:       g.HealthCheckURL,
+		HealthCheckInterval:  g.HealthCheckInterval,
+		HealthCheckTolerance: g.HealthCheckTolerance,
+		LBStrategy:           g.LBStrategy,
+		Subscription:         g.Subscription,
+		SubscriptionFilter:   g.SubscriptionFilter,
+		ActiveMember:         g.ActiveMember,
+	}
+}
+
+func PutProxyGroup(g *config.ProxyGroup) error {
+	return Put(BucketProxyGroups, []byte(g.Name), storeGroup(g))
+}
+
+func GetProxyGroup(name string) (*config.ProxyGroup, error) {
+	return getView[config.ProxyGroup](BucketProxyGroups, []byte(name))
+}
+
+func DeleteProxyGroup(name string) error {
+	return Delete(BucketProxyGroups, []byte(name))
+}
+
+func ListProxyGroups() ([]*config.ProxyGroup, error) {
+	return listView[config.ProxyGroup](BucketProxyGroups)
+}
+
+// ListProxyGroupsBySubscription returns all proxy groups that reference the given subscription
+func ListProxyGroupsBySubscription(subName string) ([]*config.ProxyGroup, error) {
+	allGroups, err := ListProxyGroups()
+	if err != nil {
+		return nil, err
+	}
+	var result []*config.ProxyGroup
+	for _, g := range allGroups {
+		if g.Subscription == subName {
+			result = append(result, g)
+		}
+	}
+	return result, nil
+}
+
+// ===== 订阅 =====
+
+func PutSubscription(s *config.Subscription) error {
+	return Put(BucketSubscriptions, []byte(s.Name), s)
+}
+
+func GetSubscription(name string) (*config.Subscription, error) {
+	return getView[config.Subscription](BucketSubscriptions, []byte(name))
+}
+
+func DeleteSubscription(name string) error {
+	return Delete(BucketSubscriptions, []byte(name))
+}
+
+func ListSubscriptions() ([]*config.Subscription, error) {
+	return listView[config.Subscription](BucketSubscriptions)
+}
+
+// ===== 映射 =====
+
+func PutMapping(m *config.Mapping) error {
+	return Put(BucketMappings, []byte(m.Name), m)
+}
+
+func GetMapping(name string) (*config.Mapping, error) {
+	return getView[config.Mapping](BucketMappings, []byte(name))
+}
+
+func DeleteMapping(name string) error {
+	return Delete(BucketMappings, []byte(name))
+}
+
+func ListMappings() ([]*config.Mapping, error) {
+	return listView[config.Mapping](BucketMappings)
+}
+
+// ===== 解析器 =====
+
+func PutResolver(r *config.Resolver) error {
+	return Put(BucketResolvers, []byte(r.Name), r)
+}
+
+func GetResolver(name string) (*config.Resolver, error) {
+	return getView[config.Resolver](BucketResolvers, []byte(name))
+}
+
+func DeleteResolver(name string) error {
+	return Delete(BucketResolvers, []byte(name))
+}
+
+func ListResolvers() ([]*config.Resolver, error) {
+	return listView[config.Resolver](BucketResolvers)
+}
+
+// ===== 反向配置 =====
+
+// storeReverse 清零反向配置的运行时信息字段。
+func storeReverse(rc *config.ReverseConfig) *config.ReverseConfig {
+	c := *rc
+	c.LastError = ""
+	c.AssignedPort = 0
+	return &c
+}
+
+func PutReverseConfig(rc *config.ReverseConfig) error {
+	return Put(BucketReverseConfs, []byte(rc.Name), storeReverse(rc))
+}
+
+func GetReverseConfig(name string) (*config.ReverseConfig, error) {
+	return getView[config.ReverseConfig](BucketReverseConfs, []byte(name))
+}
+
+func DeleteReverseConfig(name string) error {
+	return Delete(BucketReverseConfs, []byte(name))
+}
+
+func ListReverseConfigs() ([]*config.ReverseConfig, error) {
+	return listView[config.ReverseConfig](BucketReverseConfs)
+}
+
+// ===== 规则 =====
+
+// rulesKey 是存储所有规则的单一 key（JSON 数组格式）
+var rulesKey = []byte("__all_rules__")
+
+// PutRules 替换整个规则列表（原子操作）
+func PutRules(rules []string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// ListRules 返回所有规则
+func ListRules() ([]string, error) {
+	var rules []string
+	err := View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return nil
+		}
+		data := b.Get(rulesKey)
+		if data == nil {
+			// 兼容旧格式：尝试读取索引式规则
+			var legacyRules []string
+			_ = b.ForEach(func(k, v []byte) error {
+				if string(k) == string(rulesKey) {
+					return nil
+				}
+				var r string
+				if err := json.Unmarshal(v, &r); err == nil {
+					legacyRules = append(legacyRules, r)
+				}
+				return nil
+			})
+			if len(legacyRules) > 0 {
+				rules = legacyRules
+				return nil
+			}
+			return nil
+		}
+		return json.Unmarshal(data, &rules)
+	})
+	return rules, err
+}
+
+// InsertRule 在指定位置插入规则
+func InsertRule(index int, rule string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data != nil {
+			if err := json.Unmarshal(data, &rules); err != nil {
+				return err
+			}
+		}
+		
+		if index < 0 || index > len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules = append(rules[:index], append([]string{rule}, rules[index:]...)...)
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// DeleteRuleByIndex 删除指定位置的规则
+func DeleteRuleByIndex(index int) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data == nil {
+			return fmt.Errorf("no rules found")
+		}
+		if err := json.Unmarshal(data, &rules); err != nil {
+			return err
+		}
+		
+		if index < 0 || index >= len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules = append(rules[:index], rules[index+1:]...)
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// PutRule 在指定位置设置规则（用于更新单个规则）
+func PutRule(index int, rule string) error {
+	err := Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketRules)
+		if b == nil {
+			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
+		}
+		
+		var rules []string
+		data := b.Get(rulesKey)
+		if data != nil {
+			if err := json.Unmarshal(data, &rules); err != nil {
+				return err
+			}
+		}
+		
+		if index < 0 || index >= len(rules) {
+			return fmt.Errorf("invalid index %d (rules count: %d)", index, len(rules))
+		}
+		
+		rules[index] = rule
+		return putJSON(b, rulesKey, rules)
+	})
+	if err != nil {
+		return err
+	}
+	notifyChanges([]ChangeEvent{{
+		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
+	}})
+	return nil
+}
+
+// DeleteRule 删除指定位置的规则（DeleteRuleByIndex 的别名）
+func DeleteRule(index int) error {
+	return DeleteRuleByIndex(index)
+}
+
+// listRulesTx 在事务内读取所有规则（供 LoadConf 使用）
+func listRulesTx(tx *bolt.Tx) ([]string, error) {
+	b := tx.Bucket(BucketRules)
+	if b == nil {
+		return nil, nil
+	}
+	data := b.Get(rulesKey)
+	if data == nil {
+		// 兼容旧格式
+		var rules []string
+		_ = b.ForEach(func(k, v []byte) error {
+			if string(k) == string(rulesKey) {
+				return nil
+			}
+			var r string
+			if err := json.Unmarshal(v, &r); err == nil {
+				rules = append(rules, r)
+			}
+			return nil
+		})
+		return rules, nil
+	}
+	var rules []string
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// readScalarInto 读取标量配置节。key 不存在返回 (false, nil) 且不改 dest。
+func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error) {
+	data := cb.Get(key)
+	if data == nil {
+		return false, nil
+	}
+	if err := json.Unmarshal(data, dest); err != nil {
+		return true, fmt.Errorf("解析 %s 失败: %w", key, err)
+	}
+	return true, nil
+}
+
+// MigrateProxyGroups updates existing proxy groups with proxies from the config.
+// This fixes the issue where old migrations only stored ManualProxies but not Proxies.
+func MigrateProxyGroups(conf *config.RuleConfiguration) error {
+	return Update(func(tx *bolt.Tx) error {
+		gb := tx.Bucket(BucketProxyGroups)
+		if gb == nil {
+			return nil
+		}
+
+		for _, g := range conf.ProxyGroups {
+			if g == nil {
+				continue
+			}
+			// Read existing group from DB
+			data := gb.Get([]byte(g.Name))
+			if data == nil {
+				continue
+			}
+			var existing config.ProxyGroup
+			if err := json.Unmarshal(data, &existing); err != nil {
+				continue
+			}
+
+			// If ManualProxies is empty but config has Proxies, update it
+			if len(existing.ManualProxies) == 0 && len(g.Proxies) > 0 {
+				existing.ManualProxies = append([]string(nil), g.Proxies...)
+				if err := putJSON(gb, []byte(g.Name), &existing); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// ResetConfigPreserving has been removed. Use ReplaceAllConfig with preserved values instead.
+// See admin/admin.go config reset handler for example usage.
+
+// IsEmptyConfig 报告配置 bucket 是否全部为空。数据库文件存在但从未写入
+// 配置时（如初始化中断），主流程仍需走导入流程。
+func IsEmptyConfig() (bool, error) {
+	empty := true
+	err := View(func(tx *bolt.Tx) error {
+		for _, bucket := range configBuckets() {
+			b := tx.Bucket(bucket)
+			if b == nil {
+				continue
+			}
+			if b.Stats().KeyN > 0 {
+				empty = false
+				return nil
+			}
+		}
+		return nil
+	})
+	return empty, err
+}
+
+// StartupConf holds the minimal configuration needed at startup.
+type StartupConf struct {
+	Subscriptions  []*config.Subscription
+	ProxyGroups    []*config.ProxyGroup
+	ReverseConfigs []*config.ReverseConfig
+}
+
+// LoadStartupConf loads the minimal configuration needed at startup.
+// This is used for one-time initialization (e.g., loading subscription caches,
+// normalizing reverse configs). For runtime rule matching, use RuleMatcher instead.
+func LoadStartupConf() (*StartupConf, error) {
+	conf := &StartupConf{}
+	err := View(func(tx *bolt.Tx) error {
+		var err error
+		if conf.Subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
+			return err
+		}
+		if conf.ProxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
+			return err
+		}
+		if conf.ReverseConfigs, err = listTx[config.ReverseConfig](tx, BucketReverseConfs); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return conf, nil
+}
+
+// LoadRuleConfiguration loads the full rule configuration for service initialization.
+// This is used at startup and reload to initialize services (run(), ControlManager, etc.).
+// For runtime rule matching, use RuleMatcher instead (which reads from DB in real-time).
+func LoadRuleConfiguration() (*config.RuleConfiguration, error) {
+	conf := &config.RuleConfiguration{}
+	err := View(func(tx *bolt.Tx) error {
+		var err error
+		if conf.Proxies, err = listTx[config.Proxy](tx, BucketProxies); err != nil {
+			return err
+		}
+		if conf.ProxyGroups, err = listTx[config.ProxyGroup](tx, BucketProxyGroups); err != nil {
+			return err
+		}
+		if conf.Subscriptions, err = listTx[config.Subscription](tx, BucketSubscriptions); err != nil {
+			return err
+		}
+		if conf.Rules, err = listRulesTx(tx); err != nil {
+			return err
+		}
+		if conf.Mappings, err = listTx[config.Mapping](tx, BucketMappings); err != nil {
+			return err
+		}
+		if conf.Resolvers, err = listTx[config.Resolver](tx, BucketResolvers); err != nil {
+			return err
+		}
+		if conf.ReverseConfigs, err = listTx[config.ReverseConfig](tx, BucketReverseConfs); err != nil {
+			return err
+		}
+
+		cb := tx.Bucket(BucketConfig)
+
+		var admin config.AdminConfig
+		if present, err := readScalarInto(cb, keyAdmin, &admin); err != nil {
+			return err
+		} else if present {
+			conf.Admin = &admin
+		}
+
+		var tun config.TUNConfig
+		if present, err := readScalarInto(cb, keyTUN, &tun); err != nil {
+			return err
+		} else if present {
+			conf.TUN = &tun
+		}
+
+		var mesh config.MeshConfig
+		if present, err := readScalarInto(cb, keyMesh, &mesh); err != nil {
+			return err
+		} else if present {
+			conf.Mesh = &mesh
+		}
+
+		if _, err := readScalarInto(cb, keyInteractive, &conf.Interactive); err != nil {
+			return err
+		}
+		if _, err := readScalarInto(cb, keyUDPPortRange, &conf.UDPPortRange); err != nil {
+			return err
+		}
+		if _, err := readScalarInto(cb, keyTCPPortRange, &conf.TCPPortRange); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := conf.Init(); err != nil {
+		return nil, fmt.Errorf("config init: %w", err)
+	}
+	return conf, nil
+}

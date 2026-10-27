@@ -1,0 +1,1547 @@
+package config
+
+import (
+	"encoding/binary"
+	"fmt"
+	"net"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ========== Proxy ==========
+
+const (
+	ProxyDIRECT    = "DIRECT"
+	ProxyREJECT    = "REJECT"
+	ProxySERVER    = "SERVER"
+	ProxyTROJAN    = "TROJAN"
+	ProxySOCKS5    = "SOCKS5"
+	ProxyH_TUNNEL  = "H_TUNNEL"
+	ProxyHYSTERIA2 = "HYSTERIA2"
+	ProxyHTTP      = "HTTP"
+	ProxyHTTPS     = "HTTPS"
+	ProxyVLESS     = "VLESS"
+	ProxySSH       = "SSH"
+)
+
+type Proxy struct {
+	Name                 string `yaml:"name" json:"name"`
+	Enabled              *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Type                 string `yaml:"type" json:"type"`
+	Server               string `yaml:"server" json:"server,omitempty"`
+	Port                 int    `yaml:"port" json:"port,omitempty"`
+	Username             string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password             string `yaml:"password,omitempty" json:"password,omitempty"`
+	PrivateKey           string `yaml:"private-key,omitempty" json:"private-key,omitempty"`
+	PrivateKeyPassphrase string `yaml:"private-key-passphrase,omitempty" json:"private-key-passphrase,omitempty"`
+	UUID                 string `yaml:"uuid,omitempty" json:"uuid,omitempty"`
+	Sni                  string `yaml:"sni,omitempty" json:"sni,omitempty"`
+	Servername           string `yaml:"servername,omitempty" json:"servername,omitempty"` // VLESS REALITY uses servername instead of sni
+	SkipCertVerify       bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
+	UDP                  *bool  `yaml:"udp,omitempty" json:"udp,omitempty"`
+	P2P                  *bool  `yaml:"p2p,omitempty" json:"p2p,omitempty"`
+	V2                   bool   `yaml:"v2,omitempty" json:"v2,omitempty"`
+	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
+	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
+	URL                  string `yaml:"url,omitempty" json:"url,omitempty"`
+	ViaProxy             string `yaml:"via,omitempty" json:"via,omitempty"`                           // 通过哪个代理建立连接
+	HealthCheckURL       string `yaml:"health-check-url,omitempty" json:"health-check-url,omitempty"` // 健康检查 URL，配置后会通过代理发送实际请求验证
+	ReverseAddress       string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
+	UpBps                int64  `yaml:"up-bps,omitempty" json:"up-bps,omitempty"`
+	DownBps              int64  `yaml:"down-bps,omitempty" json:"down-bps,omitempty"`
+	// Up/Down are the Clash/Mihomo shorthand bandwidth fields (in Mbps).
+	// They are converted to UpBps/DownBps (bytes per second) during Init.
+	Up   int64 `yaml:"up,omitempty" json:"up,omitempty"`
+	Down int64 `yaml:"down,omitempty" json:"down,omitempty"`
+
+	// VLESS/XTLS/REALITY fields
+	Flow        string            `yaml:"flow,omitempty" json:"flow,omitempty"`
+	Fingerprint string            `yaml:"client-fingerprint,omitempty" json:"client-fingerprint,omitempty"`
+	RealityOpts map[string]string `yaml:"reality-opts,omitempty" json:"reality-opts,omitempty"`
+
+	SourceGroup     string       `yaml:"-" json:"-"` // 来源订阅组名，手动配置为空
+	Next            *Proxy       `yaml:"-" json:"-"`
+	UpRateLimiter   *RateLimiter `yaml:"-" json:"-"`
+	DownRateLimiter *RateLimiter `yaml:"-" json:"-"`
+}
+
+// IsEnabled reports whether the proxy is enabled. Omitted or nil means enabled.
+func (p *Proxy) IsEnabled() bool {
+	if p == nil || p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
+// IsP2P reports whether P2P is enabled for this proxy.
+// Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
+// h_tunnel can disable P2P to fall back to traditional BIND mode (no mesh downlink).
+func (p *Proxy) IsP2P() bool {
+	if p == nil {
+		return false
+	}
+	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel"
+	if !isCompatible {
+		return false
+	}
+	if p.P2P != nil {
+		return *p.P2P
+	}
+	return true
+}
+
+// IsV2 reports whether the v2 data path is enabled for this proxy.
+// V2 requires P2P to also be enabled. Defaults to false.
+func (p *Proxy) IsV2() bool {
+	if p == nil {
+		return false
+	}
+	if !p.IsP2P() {
+		return false
+	}
+	return p.V2
+}
+
+// IsUDP reports whether UDP is enabled for this proxy.
+// Defaults to true for compatible types if not explicitly set.
+func (p *Proxy) IsUDP() bool {
+	if p == nil {
+		return false
+	}
+	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel" || p.Type == "hysteria2" || p.Type == "vless"
+	if !isCompatible {
+		return false
+	}
+	// If explicitly set, use that value
+	if p.UDP != nil {
+		return *p.UDP
+	}
+	// Default to true for compatible types
+	return true
+}
+
+func SingletonProxy(typ string) *Proxy {
+	return &Proxy{Type: typ}
+}
+
+// ========== Mapping ==========
+
+type Mapping struct {
+	Name                  string `yaml:"name" json:"name"`
+	Enabled               *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Type                  string `yaml:"type" json:"type"`
+	Port                  int    `yaml:"port" json:"port"`
+	ReverseAddress        string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
+	ReverseProxy          string `yaml:"reverse-proxy,omitempty" json:"reverse-proxy,omitempty"`
+	ReverseMaxConnections int    `yaml:"reverse-max-connections,omitempty" json:"reverse-max-connections,omitempty"`
+	ReverseRetryInterval  int64  `yaml:"reverse-retry-interval,omitempty" json:"reverse-retry-interval,omitempty"`
+	DstHost               string `yaml:"dst-host,omitempty" json:"dst-host,omitempty"`
+	DstPort               int    `yaml:"dst-port,omitempty" json:"dst-port,omitempty"`
+	Username              string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password              string `yaml:"password,omitempty" json:"password,omitempty"`
+	Sni                   string `yaml:"sni,omitempty" json:"sni,omitempty"`
+}
+
+// IsEnabled reports whether the mapping is enabled. Omitted or nil means enabled.
+func (m *Mapping) IsEnabled() bool {
+	if m == nil || m.Enabled == nil {
+		return true
+	}
+	return *m.Enabled
+}
+
+// ========== ProxyGroup ==========
+
+const (
+	GroupSelect      = "select"
+	GroupLoadBalance = "load-balance"
+	GroupBest        = "best"
+)
+
+// Health-check sampling thresholds.
+// A proxy is marked dead only after consecutive failures,
+// and marked alive only after consecutive successes.
+const (
+	healthFailThreshold    = 3
+	healthSuccessThreshold = 2
+)
+
+type healthStatus struct {
+	latency      time.Duration
+	alive        bool
+	failCount    int
+	successCount int
+	lastCheck    time.Time
+}
+
+type Subscription struct {
+	Name     string `yaml:"name" json:"name"`
+	Enabled  *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	URL      string `yaml:"url" json:"url"`
+	Interval *int   `yaml:"interval" json:"interval,omitempty"` // seconds
+
+	// SubProxies is the parsed node pool. It is runtime-only and not persisted.
+	SubProxies map[string]*Proxy `yaml:"-" json:"-"`
+	SubMu      sync.RWMutex      `yaml:"-" json:"-"`
+}
+
+// SetNodes replaces the subscription node pool and sets SourceGroup to the
+// subscription name so health checks can distinguish subscription nodes from
+// manual proxies.
+func (s *Subscription) SetNodes(nodes []*Proxy) {
+	s.SubMu.Lock()
+	defer s.SubMu.Unlock()
+	s.SubProxies = make(map[string]*Proxy)
+	for _, p := range nodes {
+		if p.Name == "" {
+			p.Name = fmt.Sprintf("%s:%d", p.Server, p.Port)
+		}
+		p.SourceGroup = s.Name
+		s.SubProxies[p.Name] = p
+	}
+}
+
+// IsEnabled reports whether the subscription is enabled. Omitted or nil means enabled.
+func (s *Subscription) IsEnabled() bool {
+	if s == nil || s.Enabled == nil {
+		return true
+	}
+	return *s.Enabled
+}
+
+// GroupMember identifies a single member of a ProxyGroup and its source.
+// Manual members reference the global proxy namespace or another proxy group;
+// subscription members reference the group-local subscription node pool. Keeping
+// the source lets a manual proxy and a subscription node share the same name
+// without shadowing each other inside the same group.
+type GroupMember struct {
+	Name             string
+	FromSubscription bool // false = manual global proxy or group, true = selected subscription node
+	IsGroup          bool // true = manual member is a nested proxy group
+}
+
+// HealthKey returns the key used in the group's health map. Subscription
+// members are prefixed so that a subscription node and a manual proxy with the
+// same name can have independent health states.
+func (m GroupMember) HealthKey() string {
+	if m.FromSubscription {
+		return "sub:" + m.Name
+	}
+	return m.Name
+}
+
+type ProxyGroup struct {
+	Name                 string   `yaml:"name" json:"name"`
+	Enabled              *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Type                 string   `yaml:"type" json:"type"`
+	Proxies              []string `yaml:"proxies" json:"proxies"`           // runtime flat names derived from Members (may contain duplicates when a name exists in both sources)
+	ManualProxies        []string `yaml:"-" json:"manualProxies,omitempty"` // manual proxy names copied from YAML
+	HealthCheckURL       string   `yaml:"health-check-url" json:"health-check-url,omitempty"`
+	HealthCheckInterval  *int     `yaml:"health-check-interval" json:"health-check-interval,omitempty"`
+	HealthCheckTolerance *int     `yaml:"health-check-tolerance,omitempty" json:"health-check-tolerance,omitempty"` // best type: switch if latency difference exceeds this (ms)
+	LBStrategy           string   `yaml:"lb-strategy,omitempty" json:"lb-strategy,omitempty"`                       // load-balance: round-robin (default) or consistent-hashing
+
+	// Subscription names the subscription provider this group draws nodes from.
+	// Selection and filter are per-group, so multiple groups can reference the
+	// same subscription and choose different nodes.
+	Subscription         string   `yaml:"subscription,omitempty" json:"subscription,omitempty"`
+	SubscriptionFilter   string   `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
+	SubscriptionSelected []string `yaml:"subscription-selected,omitempty" json:"subscription-selected,omitempty"` // deprecated: migrated to ActiveMember on Init
+	ActiveMember         string   `yaml:"active-member,omitempty" json:"active-member,omitempty"`
+	SubscriptionMode     string   `yaml:"subscription-mode,omitempty" json:"subscription-mode,omitempty"` // deprecated: ignored
+
+	// Members is the runtime ordered member list: selected subscription nodes
+	// first, then manual members. It carries source information so manual and
+	// subscription nodes with identical names can coexist in the same group.
+	Members []GroupMember `yaml:"-" json:"members,omitempty"`
+
+	// ManualMembers and SubMembers are the same members split by source.
+	// Next() uses Members so that both sources participate in selection;
+	// subscription nodes are tried first and manual proxies serve as fallback.
+	ManualMembers []GroupMember `yaml:"-" json:"-"`
+	SubMembers    []GroupMember `yaml:"-" json:"-"`
+
+	// SubCandidateCount is a runtime display hint set by the admin UI. It holds
+	// the number of subscription nodes that match the group's filter so the card
+	// button count matches the nodes shown in the selection modal.
+	SubCandidateCount int `yaml:"-" json:"-"`
+
+	idx       int64 // for load-balance
+	healthMap map[string]*healthStatus
+	healthMu  sync.RWMutex
+	selMu     sync.RWMutex `yaml:"-" json:"-"` // protects Members rebuild
+
+	resolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
+	resolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
+	resolveSubscription func(name string) *Subscription `yaml:"-" json:"-"`
+}
+
+// IsEnabled reports whether the group is enabled. Omitted or nil means enabled.
+func (g *ProxyGroup) IsEnabled() bool {
+	if g == nil || g.Enabled == nil {
+		return true
+	}
+	return *g.Enabled
+}
+
+func (g *ProxyGroup) Init() error {
+	switch g.Type {
+	case GroupSelect, GroupLoadBalance, GroupBest:
+		// ok
+	default:
+		return fmt.Errorf("unsupported group type: %s", g.Type)
+	}
+
+	// subscription-mode is deprecated and ignored.
+	g.SubscriptionMode = ""
+	// Migrate the old subscription-selected list to the single active-member
+	// field used by select groups. Only the first entry is kept; membership is
+	// now determined by subscription-filter.
+	if g.ActiveMember == "" && len(g.SubscriptionSelected) > 0 {
+		g.ActiveMember = g.SubscriptionSelected[0]
+	}
+	g.SubscriptionSelected = nil
+
+	if len(g.ManualProxies) == 0 && len(g.Proxies) > 0 {
+		// Both subscription and non-subscription groups store manual proxy
+		// names in YAML under the `proxies` key. Copy them once so runtime
+		// rebuilds can append selected subscription nodes without mutating
+		// the persisted list.
+		g.ManualProxies = make([]string, len(g.Proxies))
+		copy(g.ManualProxies, g.Proxies)
+	}
+	g.healthMu.Lock()
+	if g.healthMap == nil {
+		g.healthMap = make(map[string]*healthStatus)
+	}
+	g.healthMu.Unlock()
+	return nil
+}
+
+// Resolve looks up a proxy name for this group. Manual members are resolved in
+// the global proxy namespace; selected subscription nodes are resolved in the
+// group-local subscription pool. This keeps subscription nodes from leaking
+// into the global proxy namespace and avoids collisions with manual proxies.
+func (g *ProxyGroup) Resolve(name string) *Proxy {
+	if name == "" {
+		return nil
+	}
+	// Manual members of this group always resolve via the global proxy list.
+	for _, m := range g.ManualProxies {
+		if m == name {
+			if g.resolveProxy != nil {
+				return g.resolveProxy(name)
+			}
+			return nil
+		}
+	}
+	// Otherwise, if the group references a subscription, resolve in its node pool.
+	if g.resolveSubscription != nil && g.Subscription != "" {
+		if sub := g.resolveSubscription(g.Subscription); sub != nil {
+			sub.SubMu.RLock()
+			if p, ok := sub.SubProxies[name]; ok {
+				sub.SubMu.RUnlock()
+				return p
+			}
+			sub.SubMu.RUnlock()
+		}
+	}
+	// Fallback for direct global proxies that are not listed as manual members.
+	if g.resolveProxy != nil {
+		return g.resolveProxy(name)
+	}
+	return nil
+}
+
+// ResolveMember resolves a single group member according to its source.
+// Group references (IsGroup) are not resolved here; Next()/NextWithVisited()
+// handles nested groups so that a nil inner result can be skipped.
+func (g *ProxyGroup) ResolveMember(m GroupMember) *Proxy {
+	if m.IsGroup {
+		return nil
+	}
+	if m.FromSubscription {
+		if g.resolveSubscription != nil && g.Subscription != "" {
+			if sub := g.resolveSubscription(g.Subscription); sub != nil {
+				sub.SubMu.RLock()
+				p := sub.SubProxies[m.Name]
+				sub.SubMu.RUnlock()
+				return p
+			}
+		}
+		return nil
+	}
+	if g.resolveProxy != nil {
+		return g.resolveProxy(m.Name)
+	}
+	return nil
+}
+
+// rebuildProxiesLocked rebuilds the runtime member lists from ManualProxies plus
+// all subscription nodes that match SubscriptionFilter. g.Members keeps the full
+// ordered list (subscription nodes first, then manual members) for display/health
+// purposes, while g.ManualMembers and g.SubMembers split them by source.
+// Subscription nodes are tried first so that manual proxies (e.g. DIRECT) act as
+// fallback when all subscription nodes are unavailable.
+// Names are NOT deduplicated so a manual proxy and a subscription node can share
+// the same name and remain independent members. Caller must hold g.selMu.
+func (g *ProxyGroup) rebuildProxiesLocked() {
+	g.ManualMembers = make([]GroupMember, 0, len(g.ManualProxies))
+	for _, name := range g.ManualProxies {
+		// Manual members may be individual proxies or nested proxy groups.
+		// Skip disabled or missing entries so groups stay valid when a proxy
+		// is disabled without removing it from every group's manual list.
+		if g.resolveProxy != nil && g.resolveProxy(name) != nil {
+			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false})
+			continue
+		}
+		if g.resolveGroup != nil && g.resolveGroup(name) != nil {
+			g.ManualMembers = append(g.ManualMembers, GroupMember{Name: name, FromSubscription: false, IsGroup: true})
+			continue
+		}
+	}
+
+	g.SubMembers = nil
+	if g.Subscription != "" && g.resolveSubscription != nil {
+		if sub := g.resolveSubscription(g.Subscription); sub != nil {
+			names := g.subscriptionCandidatesLocked(sub)
+			g.SubMembers = make([]GroupMember, 0, len(names))
+			for _, name := range names {
+				g.SubMembers = append(g.SubMembers, GroupMember{Name: name, FromSubscription: true})
+			}
+		}
+	}
+
+	g.Members = make([]GroupMember, 0, len(g.SubMembers)+len(g.ManualMembers))
+	g.Members = append(g.Members, g.SubMembers...)
+	g.Members = append(g.Members, g.ManualMembers...)
+}
+
+// hasSubscriptionSelection reports whether the group is subscription-driven.
+// A group is considered subscription-driven when it references a subscription,
+// regardless of how many nodes are currently selected.
+func (g *ProxyGroup) hasSubscriptionSelection() bool {
+	return g.Subscription != ""
+}
+
+// activeMembersLocked returns the members that participate in the group-type
+// selection logic. Selected subscription nodes are listed first, followed by
+// manual members. This lets a manual proxy (e.g. DIRECT) act as fallback when
+// all subscription nodes are unavailable.
+// Caller must hold g.selMu (read or write).
+func (g *ProxyGroup) activeMembersLocked() []GroupMember {
+	return g.Members
+}
+
+// RebuildProxies is the public, concurrency-safe wrapper.
+func (g *ProxyGroup) RebuildProxies() {
+	g.selMu.Lock()
+	defer g.selMu.Unlock()
+	g.rebuildProxiesLocked()
+}
+
+// GetMembers returns a snapshot of the current runtime member list.
+func (g *ProxyGroup) GetMembers() []GroupMember {
+	g.selMu.RLock()
+	defer g.selMu.RUnlock()
+	members := make([]GroupMember, len(g.Members))
+	copy(members, g.Members)
+	return members
+}
+
+// GetManualMembers returns a snapshot of the manual member list.
+func (g *ProxyGroup) GetManualMembers() []GroupMember {
+	g.selMu.RLock()
+	defer g.selMu.RUnlock()
+	members := make([]GroupMember, len(g.ManualMembers))
+	copy(members, g.ManualMembers)
+	return members
+}
+
+// GetActiveMember returns the currently configured active member for select
+// groups. It may be empty if no explicit active member has been set.
+func (g *ProxyGroup) GetActiveMember() string {
+	g.selMu.RLock()
+	defer g.selMu.RUnlock()
+	return g.ActiveMember
+}
+
+// SetActiveMember sets the active member for a select group. The name must
+// correspond to a current member; otherwise an error is returned. Rebuild is
+// triggered so membership changes (e.g. from a filter update) are reflected.
+func (g *ProxyGroup) SetActiveMember(name string) error {
+	g.selMu.Lock()
+	defer g.selMu.Unlock()
+	if name == "" {
+		g.ActiveMember = ""
+		return nil
+	}
+	found := false
+	for _, m := range g.Members {
+		if m.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("member %q not found in group %s", name, g.Name)
+	}
+	g.ActiveMember = name
+	g.rebuildProxiesLocked()
+	return nil
+}
+
+// SubscriptionCandidates returns the subscription node names that are available
+// for this group, filtered by SubscriptionFilter. The filter is treated as a
+// regular expression; if it fails to compile, it falls back to a case-insensitive
+// substring match. The returned names are sorted.
+func (g *ProxyGroup) SubscriptionCandidates() []string {
+	if g.Subscription == "" || g.resolveSubscription == nil {
+		return nil
+	}
+	sub := g.resolveSubscription(g.Subscription)
+	if sub == nil {
+		return nil
+	}
+	g.selMu.RLock()
+	defer g.selMu.RUnlock()
+	return g.subscriptionCandidatesLocked(sub)
+}
+
+// subscriptionCandidatesLocked returns the filtered, sorted candidate names from
+// the provided subscription. Caller must hold g.selMu.
+func (g *ProxyGroup) subscriptionCandidatesLocked(sub *Subscription) []string {
+	var re *regexp.Regexp
+	filter := strings.TrimSpace(g.SubscriptionFilter)
+	if filter != "" {
+		var err error
+		re, err = regexp.Compile(filter)
+		if err != nil {
+			// Fall back to substring match on compile failure so a bad filter
+			// does not break the group entirely.
+			re = nil
+		}
+	}
+
+	sub.SubMu.RLock()
+	defer sub.SubMu.RUnlock()
+
+	names := make([]string, 0, len(sub.SubProxies))
+	for name := range sub.SubProxies {
+		if filter == "" {
+			names = append(names, name)
+			continue
+		}
+		if re != nil {
+			if re.MatchString(name) {
+				names = append(names, name)
+			}
+		} else {
+			if strings.Contains(strings.ToLower(name), strings.ToLower(filter)) {
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// UpdateDynamicSelection is deprecated and no-ops. Membership is now determined
+// by SubscriptionFilter; selection strategies use health data at Next() time.
+func (g *ProxyGroup) UpdateDynamicSelection() {}
+
+// Next returns the currently selected Proxy according to the group type.
+// It is the entry point for nested group resolution and creates a fresh
+// visited map to detect cycles.
+func (g *ProxyGroup) Next() *Proxy {
+	return g.NextWithVisited(make(map[string]bool))
+}
+
+// NextWithVisited returns the currently selected Proxy while tracking visited
+// group names to prevent infinite recursion on cyclic group references.
+// If the selected member is a nested group that returns nil, the next member
+// is tried according to the group's selection type.
+func (g *ProxyGroup) NextWithVisited(visited map[string]bool) *Proxy {
+	if g.Name != "" {
+		if visited[g.Name] {
+			return nil
+		}
+		visited[g.Name] = true
+	}
+
+	g.selMu.RLock()
+	members := g.activeMembersLocked()
+	g.selMu.RUnlock()
+
+	if len(members) == 0 {
+		return nil
+	}
+
+	list := make([]GroupMember, len(members))
+	copy(list, members)
+
+	for len(list) > 0 {
+		m := g.pickMember(list)
+		if m.Name == "" {
+			return nil
+		}
+		p := g.resolveMemberWithVisited(m, visited)
+		if p != nil {
+			return p
+		}
+		// Inner group returned nil; remove this member and keep looking.
+		list = removeGroupMember(list, m)
+	}
+	return nil
+}
+
+// PickActiveMember returns the GroupMember that Next() would select before
+// resolving nested groups. It is useful for admin UIs that need to highlight
+// the active row. If the selected member is a nested group, the group member
+// itself is returned as long as the inner group has a selectable member.
+func (g *ProxyGroup) PickActiveMember() GroupMember {
+	visited := make(map[string]bool)
+	if g.Name != "" {
+		if visited[g.Name] {
+			return GroupMember{}
+		}
+		visited[g.Name] = true
+	}
+
+	g.selMu.RLock()
+	members := g.activeMembersLocked()
+	g.selMu.RUnlock()
+
+	if len(members) == 0 {
+		return GroupMember{}
+	}
+
+	list := make([]GroupMember, len(members))
+	copy(list, members)
+
+	for len(list) > 0 {
+		m := g.pickMember(list)
+		if m.Name == "" {
+			return GroupMember{}
+		}
+		if m.IsGroup {
+			if g.resolveGroup != nil {
+				if inner := g.resolveGroup(m.Name); inner != nil {
+					if inner.PickActiveMember().Name != "" {
+						return m
+					}
+				}
+			}
+		} else {
+			return m
+		}
+		// Inner group returned no selectable member; keep looking.
+		list = removeGroupMember(list, m)
+	}
+	return GroupMember{}
+}
+
+// pickMember applies the group's selection strategy to the supplied member
+// list. The list is assumed to be non-empty.
+func (g *ProxyGroup) pickMember(list []GroupMember) GroupMember {
+	switch g.Type {
+	case GroupSelect:
+		return g.nextSelectMember(list)
+	case GroupLoadBalance:
+		return g.nextRoundRobinAliveMember(list)
+	case GroupBest:
+		return g.nextByHealthMember(list)
+	default:
+		return list[0]
+	}
+}
+
+// resolveMemberWithVisited resolves a single member. Nested groups are
+// resolved recursively using the shared visited map.
+func (g *ProxyGroup) resolveMemberWithVisited(m GroupMember, visited map[string]bool) *Proxy {
+	if m.IsGroup {
+		if g.resolveGroup != nil {
+			if inner := g.resolveGroup(m.Name); inner != nil {
+				return inner.NextWithVisited(visited)
+			}
+		}
+		return nil
+	}
+	return g.ResolveMember(m)
+}
+
+func removeGroupMember(list []GroupMember, m GroupMember) []GroupMember {
+	for i, x := range list {
+		if x == m {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
+// HealthSnapshot returns a snapshot of the group's health check data.
+// Each entry maps a member health key to its current health status.
+func (g *ProxyGroup) HealthSnapshot() map[string]HealthInfo {
+	g.healthMu.RLock()
+	defer g.healthMu.RUnlock()
+	result := make(map[string]HealthInfo, len(g.healthMap))
+	for key, hs := range g.healthMap {
+		result[key] = HealthInfo{
+			Alive:     hs.alive,
+			Latency:   hs.latency,
+			FailCount: hs.failCount,
+			LastCheck: hs.lastCheck,
+		}
+	}
+	return result
+}
+
+// HealthInfo is a public snapshot of a proxy's health status.
+type HealthInfo struct {
+	Alive     bool
+	Latency   time.Duration
+	FailCount int
+	LastCheck time.Time
+}
+
+// nextSelectMember returns the active member for a select group. If the
+// configured ActiveMember is not present in the member list (or is empty), the
+// first member is returned. Health status is intentionally ignored so that the
+// user's explicit selection is honored, matching the behavior of mainstream
+// clients.
+func (g *ProxyGroup) nextSelectMember(members []GroupMember) GroupMember {
+	if g.ActiveMember != "" {
+		for _, m := range members {
+			if m.Name == g.ActiveMember {
+				return m
+			}
+		}
+	}
+	if len(members) > 0 {
+		return members[0]
+	}
+	return GroupMember{}
+}
+
+// nextRoundRobinAliveMember returns the next alive member in round-robin from
+// the given list, skipping dead ones. If all members have been checked and are
+// dead, returns a zero member so the caller can fall through to the next rule
+// (e.g. MATCH, DIRECT).
+func (g *ProxyGroup) nextRoundRobinAliveMember(members []GroupMember) GroupMember {
+	count := len(members)
+	if count == 0 {
+		return GroupMember{}
+	}
+	g.healthMu.RLock()
+	defer g.healthMu.RUnlock()
+
+	// Try up to count times to find an alive one
+	for i := 0; i < count; i++ {
+		idx := atomic.AddInt64(&g.idx, 1) - 1
+		m := members[idx%int64(count)]
+		key := m.HealthKey()
+		if h, ok := g.healthMap[key]; ok {
+			if h.alive {
+				return m
+			}
+		} else {
+			// no health data yet, assume healthy and return
+			return m
+		}
+	}
+	// all members have health data and all are dead
+	return GroupMember{}
+}
+
+// nextByHealthMember returns the alive member with the lowest latency from the
+// given list. If all members have been checked and are dead, returns a zero
+// member so the caller can fall through to the next rule (e.g. MATCH, DIRECT).
+func (g *ProxyGroup) nextByHealthMember(members []GroupMember) GroupMember {
+	g.healthMu.RLock()
+	defer g.healthMu.RUnlock()
+
+	var best GroupMember
+	var bestLatency time.Duration
+	allChecked := true
+	for _, m := range members {
+		key := m.HealthKey()
+		h, ok := g.healthMap[key]
+		if ok {
+			if !h.alive {
+				continue
+			}
+			if best.Name == "" || h.latency < bestLatency {
+				best = m
+				bestLatency = h.latency
+			}
+		} else {
+			// no health data yet for this member
+			allChecked = false
+		}
+	}
+	if best.Name != "" {
+		return best
+	}
+	// fallback: if not all members have been checked, assume the unchecked ones are healthy and return the first one
+	if !allChecked {
+		for _, m := range members {
+			if _, ok := g.healthMap[m.HealthKey()]; !ok {
+				return m
+			}
+		}
+	}
+	return GroupMember{}
+}
+
+// SetHealth records the result of a single health check. It uses consecutive
+// sampling: a member is marked dead only after healthFailThreshold consecutive
+// failures, and marked alive only after healthSuccessThreshold consecutive
+// successes. The key must be GroupMember.HealthKey(). It returns true if the
+// member's alive state actually changed.
+func (g *ProxyGroup) SetHealth(key string, checkAlive bool, latency time.Duration) bool {
+	g.healthMu.Lock()
+	defer g.healthMu.Unlock()
+
+	h := g.healthMap[key]
+	isNew := false
+	if h == nil {
+		h = &healthStatus{}
+		g.healthMap[key] = h
+		isNew = true
+	}
+
+	h.latency = latency
+	h.lastCheck = time.Now()
+
+	if checkAlive {
+		h.successCount++
+		h.failCount = 0
+		if isNew || (!h.alive && h.successCount >= healthSuccessThreshold) {
+			h.alive = true
+			return true
+		}
+	} else {
+		h.failCount++
+		h.successCount = 0
+		if isNew || (h.alive && h.failCount >= healthFailThreshold) {
+			h.alive = false
+			return true
+		}
+	}
+	return false
+}
+
+// SetHealthImmediate sets the alive state directly, bypassing the consecutive-
+// success/failure thresholds used by periodic automated checks. This is intended
+// for explicit manual health tests where the user expects the result to be
+// reflected immediately in dynamic subscription selection.
+func (g *ProxyGroup) SetHealthImmediate(key string, alive bool, latency time.Duration) bool {
+	g.healthMu.Lock()
+	defer g.healthMu.Unlock()
+
+	h := g.healthMap[key]
+	isNew := false
+	if h == nil {
+		h = &healthStatus{}
+		g.healthMap[key] = h
+		isNew = true
+	}
+
+	changed := isNew || h.alive != alive
+	h.latency = latency
+	h.lastCheck = time.Now()
+	h.alive = alive
+	if alive {
+		h.successCount++
+		h.failCount = 0
+	} else {
+		h.failCount++
+		h.successCount = 0
+	}
+	return changed
+}
+
+func (g *ProxyGroup) GetHealth(key string) *healthStatus {
+	g.healthMu.RLock()
+	defer g.healthMu.RUnlock()
+	return g.healthMap[key]
+}
+
+// GetHealthInfo returns a public snapshot of a member's health status.
+func (g *ProxyGroup) GetHealthInfo(key string) HealthInfo {
+	g.healthMu.RLock()
+	defer g.healthMu.RUnlock()
+	if hs, ok := g.healthMap[key]; ok {
+		return HealthInfo{
+			Alive:     hs.alive,
+			Latency:   hs.latency,
+			FailCount: hs.failCount,
+			LastCheck: hs.lastCheck,
+		}
+	}
+	return HealthInfo{}
+}
+
+func (h *healthStatus) IsAlive() bool {
+	return h != nil && h.alive
+}
+
+// RemoveHealth deletes health status for the given member keys.
+func (g *ProxyGroup) RemoveHealth(keys []string) {
+	g.healthMu.Lock()
+	defer g.healthMu.Unlock()
+	for _, key := range keys {
+		delete(g.healthMap, key)
+	}
+}
+
+// CopyHealthFrom copies health data from another ProxyGroup.
+func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
+	if other == nil {
+		return
+	}
+	other.healthMu.RLock()
+	defer other.healthMu.RUnlock()
+
+	g.healthMu.Lock()
+	defer g.healthMu.Unlock()
+
+	if g.healthMap == nil {
+		g.healthMap = make(map[string]*healthStatus)
+	}
+	for k, v := range other.healthMap {
+		g.healthMap[k] = v
+	}
+}
+
+// ========== Resolver ==========
+
+type Resolver struct {
+	Name    string `yaml:"name" json:"name"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Proto restricts the resolver to one protocol: "tcp", "udp", or ""
+	// (empty) to match both.
+	Proto   string `yaml:"proto,omitempty" json:"proto,omitempty"`
+	SrcHost string `yaml:"src-host" json:"src-host"`
+	SrcPort int    `yaml:"src-port" json:"src-port"`
+	DstHost string `yaml:"dst-host" json:"dst-host"`
+	DstPort int    `yaml:"dst-port" json:"dst-port"`
+	// SrcRelative treats SrcHost as a single label and matches
+	// "<SrcHost>.<local node-id>.phn" instead, so the config survives local
+	// node-id changes. Requires the mesh section with node-id set.
+	SrcRelative bool `yaml:"src-relative,omitempty" json:"src-relative,omitempty"`
+
+	// srcFull is the expanded match domain for SrcRelative resolvers,
+	// recomputed on every Init().
+	srcFull string
+}
+
+// EffectiveSrcHost returns the host this resolver matches: the expanded
+// "<label>.<node-id>.phn" domain when SrcRelative is set, otherwise SrcHost.
+func (r *Resolver) EffectiveSrcHost() string {
+	if r.SrcRelative && r.srcFull != "" {
+		return r.srcFull
+	}
+	return r.SrcHost
+}
+
+// IsEnabled reports whether the resolver is enabled. Omitted or nil means enabled.
+func (r *Resolver) IsEnabled() bool {
+	if r == nil || r.Enabled == nil {
+		return true
+	}
+	return *r.Enabled
+}
+
+// ========== RateLimiter ==========
+
+type RateLimiter struct {
+	Name           string
+	bytesPerSecond int64
+	mu             sync.Mutex
+	nextSendTimeNs int64
+}
+
+func NewRateLimiter(name string, bytesPerSecond int64) *RateLimiter {
+	return &RateLimiter{
+		Name:           name,
+		bytesPerSecond: bytesPerSecond,
+		nextSendTimeNs: time.Now().UnixNano(),
+	}
+}
+
+func (r *RateLimiter) Schedule(bytes int) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.bytesPerSecond <= 0 {
+		return 0
+	}
+
+	now := time.Now().UnixNano()
+	sendTime := now
+	if r.nextSendTimeNs > now {
+		sendTime = r.nextSendTimeNs
+	}
+	duration := int64(bytes) * 1_000_000_000 / r.bytesPerSecond
+	r.nextSendTimeNs = sendTime + duration
+
+	delay := sendTime - now
+	if delay < 0 {
+		delay = 0
+	}
+	return time.Duration(delay)
+}
+
+// ========== Matcher (Mather in Java) ==========
+
+// AddrRequest represents a destination address request
+type AddrRequest struct {
+	DstAddr string
+	DstPort int
+	// CmdType: "CONNECT" or "BIND"
+	CmdType string
+	// Proto: "tcp" or "udp". Empty means unspecified (proto-filtered
+	// resolvers are skipped only when both sides are known and differ).
+	Proto string
+}
+
+// NewConnectRequest creates a CONNECT request. proto is "tcp" or "udp".
+func NewConnectRequest(proto, dstAddr string, dstPort int) *AddrRequest {
+	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "CONNECT", Proto: proto}
+}
+
+func NewBindRequest(dstAddr string, dstPort int) *AddrRequest {
+	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "BIND"}
+}
+
+type Matcher interface {
+	Match(request *AddrRequest, mapping *Mapping) string
+}
+
+// TimeRange represents a daily time window. Both startMin and endMin are
+// minutes since midnight. When startMin <= endMin the range is within one day;
+// when startMin > endMin it wraps around midnight (e.g. 22:00-08:00).
+// A zero value means "always match".
+type TimeRange struct {
+	startMin int
+	endMin   int
+}
+
+func (tr TimeRange) matches(nowMin int) bool {
+	if tr.startMin == 0 && tr.endMin == 0 {
+		return true
+	}
+	if tr.startMin <= tr.endMin {
+		return nowMin >= tr.startMin && nowMin < tr.endMin
+	}
+	return nowMin >= tr.startMin || nowMin < tr.endMin
+}
+
+func (tr TimeRange) String() string {
+	if tr.startMin == 0 && tr.endMin == 0 {
+		return ""
+	}
+	startH := tr.startMin / 60
+	startM := tr.startMin % 60
+	endH := tr.endMin / 60
+	endM := tr.endMin % 60
+	return fmt.Sprintf("%02d:%02d-%02d:%02d", startH, startM, endH, endM)
+}
+
+func parseHM(s string) int {
+	parts := strings.SplitN(strings.TrimSpace(s), ":", 2)
+	if len(parts) != 2 {
+		return -1
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return -1
+	}
+	return h*60 + m
+}
+
+func parseTimeRange(s string) TimeRange {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return TimeRange{}
+	}
+	start := parseHM(parts[0])
+	end := parseHM(parts[1])
+	if start < 0 || end < 0 {
+		return TimeRange{}
+	}
+	return TimeRange{startMin: start, endMin: end}
+}
+
+// ParseProxyName splits "PROXY[#MAPPING][@HH:MM-HH:MM]" into its components.
+// The # and @ delimiters may appear in any order.
+func ParseProxyName(proxyName string) (name, mapping string, tr TimeRange) {
+	remaining := proxyName
+	for {
+		atIdx := strings.Index(remaining, "@")
+		hashIdx := strings.Index(remaining, "#")
+		if atIdx < 0 && hashIdx < 0 {
+			break
+		}
+		// Process the first delimiter we find (@ or #)
+		if atIdx >= 0 && (hashIdx < 0 || atIdx < hashIdx) {
+			// @ comes first, extract time range
+			tr = parseTimeRange(remaining[atIdx+1:])
+			remaining = remaining[:atIdx]
+		} else {
+			// # comes first, extract mapping
+			mappingPart := remaining[hashIdx+1:]
+			remaining = remaining[:hashIdx]
+			// Check if the mapping part contains @ for time range
+			if atIdxInMapping := strings.Index(mappingPart, "@"); atIdxInMapping >= 0 {
+				tr = parseTimeRange(mappingPart[atIdxInMapping+1:])
+				mapping = mappingPart[:atIdxInMapping]
+			} else {
+				mapping = mappingPart
+			}
+		}
+	}
+	return remaining, mapping, tr
+}
+
+// DomainSuffixMatcher
+type DomainSuffixMatcher struct {
+	proxyName    string
+	domainSuffix string
+	mappingName  string
+}
+
+func NewDomainSuffixMatcher(name, mapping, domainSuffix string) *DomainSuffixMatcher {
+	return &DomainSuffixMatcher{
+		proxyName:    name,
+		domainSuffix: domainSuffix,
+		mappingName:  mapping,
+	}
+}
+
+func (m *DomainSuffixMatcher) Match(req *AddrRequest, mapping *Mapping) string {
+	if strings.HasSuffix(req.DstAddr, m.domainSuffix) {
+		if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
+			return m.proxyName
+		}
+	}
+	return ""
+}
+
+// IpCidrMatcher
+type IpCidrMatcher struct {
+	proxyName   string
+	network     uint32
+	mask        uint32
+	mappingName string
+}
+
+func NewIpCidMatcher(name, mapping, cidr string) *IpCidrMatcher {
+	cidrParts := strings.SplitN(cidr, "/", 2)
+	if len(cidrParts) != 2 {
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
+	}
+	ipStr := cidrParts[0]
+	prefixLen, err := strconv.Atoi(cidrParts[1])
+	if err != nil || prefixLen < 0 || prefixLen > 32 {
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
+	}
+
+	mask := uint32(0xffffffff) << (32 - prefixLen)
+	network := ip2Uint32(ipStr)
+	if network == 0 && ipStr != "0.0.0.0" {
+		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
+	}
+
+	return &IpCidrMatcher{
+		proxyName:   name,
+		network:     network,
+		mask:        mask,
+		mappingName: mapping,
+	}
+}
+
+func (m *IpCidrMatcher) Match(req *AddrRequest, mapping *Mapping) string {
+	ip := net.ParseIP(req.DstAddr)
+	if ip == nil {
+		return ""
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ""
+	}
+	ipInt := binary.BigEndian.Uint32(ip4)
+	if (ipInt & m.mask) == (m.network & m.mask) {
+		if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
+			return m.proxyName
+		}
+	}
+	return ""
+}
+
+func ip2Uint32(ipStr string) uint32 {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return 0
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(ip4)
+}
+
+// MatchAllMatcher (MATCH rule)
+type MatchAllMatcher struct {
+	proxyName   string
+	mappingName string
+}
+
+func NewMatchAllMatcher(name, mapping string) *MatchAllMatcher {
+	return &MatchAllMatcher{
+		proxyName:   name,
+		mappingName: mapping,
+	}
+}
+
+func (m *MatchAllMatcher) Match(req *AddrRequest, mapping *Mapping) string {
+	if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
+		return m.proxyName
+	}
+	return ""
+}
+
+func (m *MatchAllMatcher) ProxyName() string   { return m.proxyName }
+func (m *MatchAllMatcher) MappingName() string { return m.mappingName }
+
+// Default UDP ephemeral port range (IANA dynamic ports: 49152-65535)
+const (
+	DefaultUDPPortMin = 49152
+	DefaultUDPPortMax = 65535
+)
+
+// MatchResult holds the result of a rule match
+type MatchResult struct {
+	ProxyName   string
+	ActualProxy string // Actual proxy used after group resolution
+	Mapping     string
+	TimeRange   string
+	Rule        string
+}
+
+// AdminConfig holds web admin settings.
+type AdminConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Addr        string `yaml:"addr"`
+	Token       string `yaml:"token"`
+	AuthEnabled bool   `yaml:"auth-enabled"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	PublicKey   string `yaml:"public-key,omitempty"` // PEM-encoded RSA/ECDSA public key for signature auth
+	TLSCert     string `yaml:"tls-cert,omitempty"`
+	TLSKey      string `yaml:"tls-key,omitempty"`
+	ClientCA    string `yaml:"client-ca,omitempty"` // PEM-encoded CA certificate for mTLS client verification
+	MeshOnly    bool   `yaml:"mesh-only,omitempty"` // Only accessible via mesh network, no network listener
+
+	// Package upload/publish (admin console binary deployment).
+	// PackageUploadMaxMB caps uploaded package size; 0 means default (100MB).
+	PackageUploadMaxMB int `yaml:"package-upload-max-mb,omitempty"`
+}
+
+// ReverseConfig holds configuration for running as a reverse client.
+type ReverseConfig struct {
+	Enabled           bool   `yaml:"enabled" json:"enabled"`
+	Name              string `yaml:"name,omitempty" json:"name,omitempty"`
+	Seq               int    `yaml:"seq,omitempty" json:"seq,omitempty"`
+	RegistryProxy     string `yaml:"registry-proxy" json:"registry-proxy"`
+	PreferredPort     int    `yaml:"preferred-port" json:"preferred-port"`
+	TargetAddress     string `yaml:"target-address" json:"target-address"`
+	ReconnectInterval int    `yaml:"reconnect-interval" json:"reconnect-interval"`
+	RegistryUser      string `yaml:"registry-user,omitempty" json:"registry-user,omitempty"`
+	RegistryPassword  string `yaml:"registry-password,omitempty" json:"registry-password,omitempty"`
+	RegistrySNI       string `yaml:"registry-sni,omitempty" json:"registry-sni,omitempty"`
+	ListenerProto     string `yaml:"listener-proto,omitempty" json:"listener-proto,omitempty"`
+	ListenerUser      string `yaml:"listener-user,omitempty" json:"listener-user,omitempty"`
+	ListenerPassword  string `yaml:"listener-password,omitempty" json:"listener-password,omitempty"`
+	ListenerSNI       string `yaml:"listener-sni,omitempty" json:"listener-sni,omitempty"`
+	DirectDstHost     string `yaml:"direct-dst-host,omitempty" json:"direct-dst-host,omitempty"`
+	DirectDstPort     int    `yaml:"direct-dst-port,omitempty" json:"direct-dst-port,omitempty"`
+	SkipCertVerify    bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
+	// LastError holds the most recent reverse client registration error so the
+	// admin UI can surface it instead of showing "waiting for port" forever.
+	LastError string `yaml:"-" json:"last-error,omitempty"`
+	// AssignedPort is the actual port allocated by the registry after a
+	// successful reverse registration. It is informational only and is updated
+	// by the reverse client at runtime.
+	AssignedPort int `yaml:"-" json:"assigned-port,omitempty"`
+}
+
+// DHCPConfig holds DHCP server settings for bypass gateway mode.
+// Only effective when bypass-gateway is enabled.
+type DHCPStaticBinding struct {
+	ID       string `yaml:"id,omitempty" json:"id,omitempty"`
+	MAC      string `yaml:"mac" json:"mac"`
+	IP       string `yaml:"ip" json:"ip"`
+	Hostname string `yaml:"hostname,omitempty" json:"hostname,omitempty"`
+}
+
+type DHCPConfig struct {
+	Enabled        *bool               `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interface      string              `yaml:"interface,omitempty" json:"interface,omitempty"`
+	PoolStart      string              `yaml:"pool-start,omitempty" json:"pool-start,omitempty"`
+	PoolEnd        string              `yaml:"pool-end,omitempty" json:"pool-end,omitempty"`
+	LeaseTime      string              `yaml:"lease-time,omitempty" json:"lease-time,omitempty"`
+	StaticBindings []DHCPStaticBinding `yaml:"static-bindings,omitempty" json:"static-bindings,omitempty"`
+}
+
+// LeaseDuration returns the lease duration, defaulting to 24h if not configured
+// or if the value cannot be parsed.
+func (d *DHCPConfig) LeaseDuration() time.Duration {
+	if d == nil || d.LeaseTime == "" {
+		return 24 * time.Hour
+	}
+	dur, err := time.ParseDuration(d.LeaseTime)
+	if err != nil || dur <= 0 {
+		return 24 * time.Hour
+	}
+	return dur
+}
+
+// TUNConfig holds TUN traffic interception settings.
+type TUNConfig struct {
+	Enabled          *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	BypassGateway    *bool       `yaml:"bypass-gateway,omitempty" json:"bypass-gateway,omitempty"`
+	DHCP             *DHCPConfig `yaml:"dhcp,omitempty" json:"dhcp,omitempty"`
+	DirectNameserver []string    `yaml:"direct-nameserver,omitempty" json:"direct-nameserver,omitempty"`
+}
+
+// IsEnabled reports whether TUN is enabled. Omitted or nil means disabled
+// (TUN must be explicitly enabled in the configuration).
+func (t *TUNConfig) IsEnabled() bool {
+	if t == nil || t.Enabled == nil {
+		return false
+	}
+	return *t.Enabled
+}
+
+// IsBypassGateway reports whether bypass gateway mode is enabled.
+// When enabled, TUN setup modifies rp_filter, ip_forward, and adds iptables
+// FORWARD rules to allow LAN clients to route traffic through the TUN interface.
+// Omitted or nil means disabled.
+func (t *TUNConfig) IsBypassGateway() bool {
+	if t == nil || t.BypassGateway == nil {
+		return false
+	}
+	return *t.BypassGateway
+}
+
+// IsDHCPEnabled reports whether the built-in DHCP server is enabled.
+// Only effective when bypass-gateway is also enabled.
+// Omitted or nil means disabled.
+func (t *TUNConfig) IsDHCPEnabled() bool {
+	if t == nil || t.DHCP == nil || t.DHCP.Enabled == nil {
+		return false
+	}
+	return *t.DHCP.Enabled
+}
+
+// DHCPStaticBindings returns the configured DHCP static bindings, or nil.
+func (t *TUNConfig) DHCPStaticBindings() []DHCPStaticBinding {
+	if t == nil || t.DHCP == nil {
+		return nil
+	}
+	return t.DHCP.StaticBindings
+}
+
+// DirectNameserverList returns the configured DNS servers for DIRECT connection
+// resolution, or nil if none are configured.
+func (t *TUNConfig) DirectNameserverList() []string {
+	if t == nil {
+		return nil
+	}
+	return t.DirectNameserver
+}
+
+// MeshTCPKeepalive holds TCP keepalive settings for mesh connections.
+type MeshTCPKeepalive struct {
+	Idle     int `yaml:"idle" json:"idle"`         // Idle time before sending probes (seconds), default 30
+	Interval int `yaml:"interval" json:"interval"` // Interval between probes (seconds), default 10
+	Count    int `yaml:"count" json:"count"`       // Number of probes before giving up, default 3
+}
+
+// GetIdle returns the idle time with default fallback.
+func (k *MeshTCPKeepalive) GetIdle() int {
+	if k == nil || k.Idle <= 0 {
+		return 30
+	}
+	return k.Idle
+}
+
+// GetInterval returns the probe interval with default fallback.
+func (k *MeshTCPKeepalive) GetInterval() int {
+	if k == nil || k.Interval <= 0 {
+		return 10
+	}
+	return k.Interval
+}
+
+// GetCount returns the probe count with default fallback.
+func (k *MeshTCPKeepalive) GetCount() int {
+	if k == nil || k.Count <= 0 {
+		return 3
+	}
+	return k.Count
+}
+
+// MeshConfig holds mesh overlay network settings.
+type MeshConfig struct {
+	NodeID               string                   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+	Network              string                   `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
+	Subnet               string                   `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
+	DomainSuffixes       []string                 `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
+	Advertise            []string                 `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
+	StaticRoutes         []MeshStaticRoute        `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
+	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
+	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
+	ForwardingTrace      bool                     `yaml:"forwarding-trace,omitempty" json:"forwarding-trace,omitempty"`             // Cross-layer forwarding diagnostics
+}
+
+// HTunnelConfig holds h_tunnel transport optimization settings (v0.2.0)
+type HTunnelConfig struct {
+	// Connection pool size per mesh channel (default 8)
+	PoolSize int `yaml:"pool-size,omitempty" json:"pool-size,omitempty"`
+
+	// Fixed GET long-poll count (default 2)
+	GETSlots int `yaml:"get-slots,omitempty" json:"get-slots,omitempty"`
+
+	// Max frame batch size in bytes (default 512KB)
+	MaxBatchSize int `yaml:"max-batch-size,omitempty" json:"max-batch-size,omitempty"`
+
+	// Heartbeat interval (default 30s)
+	HeartbeatInterval int `yaml:"heartbeat-interval,omitempty" json:"heartbeat-interval,omitempty"` // seconds
+
+	// GET wait time range (seconds)
+	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`         // default 1s
+	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`         // default 30s
+	DefaultWaitTime int `yaml:"default-wait-time,omitempty" json:"default-wait-time,omitempty"` // default 5s
+}
+
+// GetPoolSize returns the connection pool size with default fallback.
+func (c *HTunnelConfig) GetPoolSize() int {
+	if c == nil || c.PoolSize <= 0 {
+		return 16
+	}
+	return c.PoolSize
+}
+
+// GetGETSlots returns the fixed GET count with default fallback.
+func (c *HTunnelConfig) GetGETSlots() int {
+	if c == nil || c.GETSlots <= 0 {
+		return 2
+	}
+	return c.GETSlots
+}
+
+// GetMaxBatchSize returns the max batch size with default fallback.
+func (c *HTunnelConfig) GetMaxBatchSize() int {
+	if c == nil || c.MaxBatchSize <= 0 {
+		return 512 * 1024 // 512KB
+	}
+	return c.MaxBatchSize
+}
+
+// GetHeartbeatInterval returns the heartbeat interval with default fallback.
+func (c *HTunnelConfig) GetHeartbeatInterval() time.Duration {
+	if c == nil || c.HeartbeatInterval <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.HeartbeatInterval) * time.Second
+}
+
+// GetWaitTimeRange returns the wait time range with default fallbacks.
+func (c *HTunnelConfig) GetWaitTimeRange() (min, max, def time.Duration) {
+	minWait := 1 * time.Second
+	maxWait := 30 * time.Second
+	defWait := 5 * time.Second
+
+	if c != nil {
+		if c.MinWaitTime > 0 {
+			minWait = time.Duration(c.MinWaitTime) * time.Second
+		}
+		if c.MaxWaitTime > 0 {
+			maxWait = time.Duration(c.MaxWaitTime) * time.Second
+		}
+		if c.DefaultWaitTime > 0 {
+			defWait = time.Duration(c.DefaultWaitTime) * time.Second
+		}
+	}
+
+	return minWait, maxWait, defWait
+}
+
+// MeshStaticRoute defines a static IPIP route through specific mesh node(s)
+type MeshStaticRoute struct {
+	Prefix  string   `yaml:"prefix" json:"prefix"`     // Destination CIDR (e.g., "10.0.0.0/8")
+	NodeIDs []string `yaml:"node-ids" json:"node-ids"` // Egress node IDs (e.g., ["qg", "vm"])
+}
+
+// MeshStaticDomainSuffix defines a static IPIP route for domain suffixes
+type MeshStaticDomainSuffix struct {
+	Suffix  string   `yaml:"suffix" json:"suffix"`     // Domain suffix (e.g., "internal.company.com")
+	NodeIDs []string `yaml:"node-ids" json:"node-ids"` // Egress node IDs (e.g., ["vm", "gg"])
+}
+
+// IsEnabled reports whether mesh networking is configured.
+// Mesh is always enabled when MeshConfig exists (no enabled switch).
+func (m *MeshConfig) IsEnabled() bool {
+	return m != nil
+}
+
+// GetAdvertise returns the list of prefixes this node advertises.
+func (m *MeshConfig) GetAdvertise() []string {
+	if m == nil {
+		return nil
+	}
+	return m.Advertise
+}
+
+// GetSubnet returns the mesh subnet for this node (e.g., "100.64.0.0/20").
+func (m *MeshConfig) GetSubnet() string {
+	if m == nil {
+		return ""
+	}
+	return m.Subnet
+}
+
+// GetNetwork returns the overall mesh network range (e.g., "100.0.0.0/8").
+// Defaults to "100.0.0.0/8" for large-scale mesh deployments.
+func (m *MeshConfig) GetNetwork() string {
+	if m == nil || m.Network == "" {
+		return "100.0.0.0/8"
+	}
+	return m.Network
+}
+
+// GetDomainSuffixes returns the domain suffixes this node can resolve.
+func (m *MeshConfig) GetDomainSuffixes() []string {
+	if m == nil {
+		return nil
+	}
+	return m.DomainSuffixes
+}
+
+// GetStaticDomainSuffixes returns the static domain suffix routes for IPIP tunneling.
+func (m *MeshConfig) GetStaticDomainSuffixes() []MeshStaticDomainSuffix {
+	if m == nil {
+		return nil
+	}
+	return m.StaticDomainSuffixes
+}
+

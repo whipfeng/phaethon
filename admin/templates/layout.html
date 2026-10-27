@@ -197,26 +197,7 @@
             </div>
             <div class="bottom-drawer-body">
                 <div class="drawer-section">
-                    <h4 data-i18n="nav.runtime">Runtime</h4>
-                    <a href="./tun" class="drawer-item" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">🌐</span>
-                        <span class="label" data-i18n="nav.tun">TUN</span>
-                    </a>
-                    <a href="./mesh" class="drawer-item" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">🔷</span>
-                        <span class="label" data-i18n="nav.mesh">Mesh</span>
-                    </a>
-                    <a href="./logs" class="drawer-item" hx-get="./logs" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">📋</span>
-                        <span class="label" data-i18n="nav.logs">Logs</span>
-                    </a>
-                    <a href="./connections" class="drawer-item" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
-                        <span class="icon">🔗</span>
-                        <span class="label" data-i18n="nav.connections">Connections</span>
-                    </a>
-                </div>
-                <div class="drawer-section">
-                    <h4 data-i18n="nav.config">Configuration</h4>
+                    <h4 data-i18n="nav.config">配置</h4>
                     <a href="./proxies" class="drawer-item" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">🔌</span>
                         <span class="label" data-i18n="nav.proxies">Proxies</span>
@@ -229,17 +210,39 @@
                         <span class="icon">🗺️</span>
                         <span class="label" data-i18n="nav.mappings">Mappings</span>
                     </a>
+                </div>
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.network">网络</h4>
+                    <a href="./tun" class="drawer-item" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🌐</span>
+                        <span class="label" data-i18n="nav.tun">TUN</span>
+                    </a>
+                    <a href="./mesh" class="drawer-item" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🔷</span>
+                        <span class="label" data-i18n="nav.mesh">Mesh</span>
+                    </a>
                     <a href="./resolvers" class="drawer-item" hx-get="./resolvers" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">↗️</span>
                         <span class="label" data-i18n="nav.resolvers">Resolvers</span>
                     </a>
+                </div>
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.monitor">监控</h4>
+                    <a href="./connections" class="drawer-item" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">🔗</span>
+                        <span class="label" data-i18n="nav.connections">Connections</span>
+                    </a>
+                    <a href="./logs" class="drawer-item" hx-get="./logs" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
+                        <span class="icon">📋</span>
+                        <span class="label" data-i18n="nav.logs">Logs</span>
+                    </a>
+                </div>
+                <div class="drawer-section">
+                    <h4 data-i18n="nav.system">系统</h4>
                     <a href="./admin" class="drawer-item" hx-get="./admin" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">⚙️</span>
                         <span class="label" data-i18n="nav.admin">Admin</span>
                     </a>
-                </div>
-                <div class="drawer-section">
-                    <h4 data-i18n="nav.tools">Tools</h4>
                     <a href="./reverse" class="drawer-item" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" onclick="toggleBottomDrawer()">
                         <span class="icon">🧙</span>
                         <span class="label" data-i18n="nav.reverse">Reverse Wizard</span>

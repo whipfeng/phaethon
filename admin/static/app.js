@@ -396,7 +396,6 @@ function showRestartBanner() {
 }
 
 const VersionNotificationService = (function () {
-    const topicVersions = {};                         // latest server version per topic
     const handlers = new Map();                       // topic -> Map<id, Subscription>
     let nextHandlerId = 0;
 
@@ -427,7 +426,7 @@ const VersionNotificationService = (function () {
         // Update all topic versions
         for (const [topic, version] of Object.entries(vector)) {
             if (typeof version === 'number') {
-                topicVersions[topic] = version;
+                targetVersions[topic] = version;
             }
         }
     }
@@ -435,7 +434,7 @@ const VersionNotificationService = (function () {
     async function dispatchTopic(topic) {
         const topicHandlers = handlers.get(topic);
         if (!topicHandlers || topicHandlers.size === 0) return;
-        const hbVersion = topicVersions[topic];
+        const hbVersion = targetVersions[topic];
         if (hbVersion === undefined) return;
 
         for (const sub of topicHandlers.values()) {
@@ -482,7 +481,6 @@ const VersionNotificationService = (function () {
             if (!res.ok) throw new Error('status ' + res.status);
             const vector = await res.json();
             applyVersions(vector);
-            handleVersionVector(vector);
             dispatchAll();
         } catch {}
     }
@@ -582,7 +580,7 @@ const VersionNotificationService = (function () {
         const sub = { id, handler, localVersion: -1, runningVersion: null, pendingVersion: null, label };
         topicHandlers.set(id, sub);
 
-        const currentVersion = topicVersions[topic];
+        const currentVersion = targetVersions[topic];
         if (currentVersion !== undefined && sub.localVersion !== currentVersion) {
             dispatchTopic(topic);
         }
@@ -651,24 +649,6 @@ function startSSEUpdates() {
 
 function stopSSE() {
     VersionNotificationService.stop();
-}
-
-function handleVersionVector(vector) {
-    // Keep the legacy global targetVersions map in sync with the service's
-    // internal vector so existing fetch helpers can compare target/cached.
-    for (const [topic, version] of Object.entries(vector)) {
-        if (topic === 'boot') continue; // Skip boot version (used for restart detection only)
-        handleVersionUpdate(topic, version, false);
-    }
-}
-
-function handleVersionUpdate(topic, version, schedule = true) {
-    if (targetVersions[topic] !== version) {
-        targetVersions[topic] = version;
-    }
-    if (schedule) {
-        scheduleTopicFetch(topic);
-    }
 }
 
 function updateSyncStatus() {

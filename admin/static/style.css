@@ -2474,9 +2474,9 @@ td[data-label="P2P"] .p2p-status.failed {
     top: 0;
     left: 0;
     right: 0;
-    height: 3px;
-    z-index: 9999;
-    background: transparent;
+    height: 4px;
+    z-index: 99999;
+    background: rgba(0, 0, 0, 0.1);
 }
 
 .loading-indicator.hidden {
@@ -2486,7 +2486,7 @@ td[data-label="P2P"] .p2p-status.failed {
 .loading-progress {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 100%);
+    background: linear-gradient(90deg, #58a6ff 0%, #79c0ff 100%);
     transition: width 0.3s ease;
-    box-shadow: 0 0 10px var(--accent);
+    box-shadow: 0 0 10px rgba(88, 166, 255, 0.8);
 }

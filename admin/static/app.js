@@ -613,13 +613,12 @@ function onBusinessVersion(topic, handler, label) {
 // additional listeners via onBusinessVersion(); the service deduplicates by
 // handler-local version and only advances the local version after success.
 function registerDefaultVersionHandlers() {
-    onBusinessVersion('reverse', () => scheduleTopicFetch('reverse'), 'reverse');
-    onBusinessVersion('bindings', () => scheduleTopicFetch('bindings'), 'bindings');
-    onBusinessVersion('tun', () => scheduleTopicFetch('tun'), 'tun');
-    onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
+    onBusinessVersion('reverse-configs', () => scheduleTopicFetch('reverse-configs'), 'reverse-configs');
+    onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
+    onBusinessVersion('tun-config', () => scheduleTopicFetch('tun-config'), 'tun-config');
+    onBusinessVersion('mesh-config', () => fetchMeshStatus(), 'mesh-config');
     onBusinessVersion('proxies', () => scheduleTopicFetch('proxies'), 'proxies');
     onBusinessVersion('rules', () => scheduleTopicFetch('rules'), 'rules');
-    onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
     onBusinessVersion('subscriptions', () => scheduleTopicFetch('subscriptions'), 'subscriptions');
     onBusinessVersion('p2p', () => {
         // Only fetch P2P status if on proxies page
@@ -715,15 +714,11 @@ function scheduleTopicFetch(topic) {
 
 function fetchForTopic(topic, expectedVersion) {
     switch (topic) {
-        case 'bindings':
-            return typeof pollReverseBindings === 'function'
-                ? pollReverseBindings(undefined, expectedVersion)
-                : Promise.resolve();
-        case 'reverse':
+        case 'reverse-configs':
             return pollReverseList(undefined, expectedVersion);
         case 'stats':
             return fetchStats(expectedVersion);
-        case 'tun':
+        case 'tun-config':
             return fetchTUNStatus(expectedVersion);
         case 'proxies':
             return fetchProxies(expectedVersion);
@@ -733,6 +728,8 @@ function fetchForTopic(topic, expectedVersion) {
             return fetchMappings(expectedVersion);
         case 'subscriptions':
             return fetchSubscriptions(expectedVersion);
+        case 'mesh-config':
+            return fetchMeshStatus(expectedVersion);
         default:
             return Promise.resolve();
     }

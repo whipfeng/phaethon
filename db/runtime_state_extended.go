@@ -41,7 +41,7 @@ type PortBinding struct {
 // GetNodeID 获取全局实例标识 node-id
 // node-id 是实例的唯一身份标识，被 mesh、reverse proxy、admin 等子系统共用
 func GetNodeID() (string, error) {
-	id, err := getView[string](BucketState, []byte("node-id"))
+	id, err := getView[string](BucketInstanceIdentity, []byte("node-id"))
 	if err != nil {
 		return "", err
 	}
@@ -53,12 +53,14 @@ func GetNodeID() (string, error) {
 
 // PutNodeID 存储全局实例标识 node-id
 func PutNodeID(id string) error {
-	return Put(BucketState, []byte("node-id"), id)
+	return Put(BucketInstanceIdentity, []byte("node-id"), id)
 }
+
+// ========== 运行时状态 ==========
 
 // GetSessionSecret 获取 admin 会话密钥
 func GetSessionSecret() ([]byte, error) {
-	secret, err := getView[[]byte](BucketState, []byte("session-secret"))
+	secret, err := getView[[]byte](BucketRuntimeState, []byte("session-secret"))
 	if err != nil {
 		return nil, err
 	}
@@ -70,12 +72,12 @@ func GetSessionSecret() ([]byte, error) {
 
 // PutSessionSecret 存储 admin 会话密钥
 func PutSessionSecret(secret []byte) error {
-	return Put(BucketState, []byte("session-secret"), secret)
+	return Put(BucketRuntimeState, []byte("session-secret"), secret)
 }
 
 // GetTLSCertificate 获取自动生成的 TLS 证书
 func GetTLSCertificate() ([]byte, error) {
-	cert, err := getView[[]byte](BucketState, []byte("tls-cert"))
+	cert, err := getView[[]byte](BucketRuntimeState, []byte("tls-cert"))
 	if err != nil {
 		return nil, err
 	}
@@ -87,12 +89,12 @@ func GetTLSCertificate() ([]byte, error) {
 
 // PutTLSCertificate 存储自动生成的 TLS 证书
 func PutTLSCertificate(cert []byte) error {
-	return Put(BucketState, []byte("tls-cert"), cert)
+	return Put(BucketRuntimeState, []byte("tls-cert"), cert)
 }
 
 // GetTLSKey 获取自动生成的 TLS 私钥
 func GetTLSKey() ([]byte, error) {
-	key, err := getView[[]byte](BucketState, []byte("tls-key"))
+	key, err := getView[[]byte](BucketRuntimeState, []byte("tls-key"))
 	if err != nil {
 		return nil, err
 	}
@@ -104,14 +106,12 @@ func GetTLSKey() ([]byte, error) {
 
 // PutTLSKey 存储自动生成的 TLS 私钥
 func PutTLSKey(key []byte) error {
-	return Put(BucketState, []byte("tls-key"), key)
+	return Put(BucketRuntimeState, []byte("tls-key"), key)
 }
-
-// ========== 运行时状态 ==========
 
 // GetDHCPLenses 获取所有 DHCP 租约
 func GetDHCPLeases() ([]DHCPLease, error) {
-	leases, err := getView[[]DHCPLease](BucketState, []byte("dhcp-leases"))
+	leases, err := getView[[]DHCPLease](BucketRuntimeState, []byte("dhcp-leases"))
 	if err != nil {
 		return nil, err
 	}
@@ -123,12 +123,12 @@ func GetDHCPLeases() ([]DHCPLease, error) {
 
 // PutDHCPLeases 存储所有 DHCP 租约
 func PutDHCPLeases(leases []DHCPLease) error {
-	return Put(BucketState, []byte("dhcp-leases"), leases)
+	return Put(BucketRuntimeState, []byte("dhcp-leases"), leases)
 }
 
 // GetPortBindings 获取所有端口绑定
 func GetPortBindings() ([]PortBinding, error) {
-	bindings, err := getView[[]PortBinding](BucketState, []byte("port-bindings"))
+	bindings, err := getView[[]PortBinding](BucketRuntimeState, []byte("port-bindings"))
 	if err != nil {
 		return nil, err
 	}
@@ -140,20 +140,20 @@ func GetPortBindings() ([]PortBinding, error) {
 
 // PutPortBindings 存储所有端口绑定
 func PutPortBindings(bindings []PortBinding) error {
-	return Put(BucketState, []byte("port-bindings"), bindings)
+	return Put(BucketRuntimeState, []byte("port-bindings"), bindings)
 }
 
 // GetTUNState 获取 TUN 设备状态
 func GetTUNState() (*TUNState, error) {
-	return getView[TUNState](BucketState, []byte("tun-state"))
+	return getView[TUNState](BucketRuntimeState, []byte("tun-state"))
 }
 
 // PutTUNState 存储 TUN 设备状态
 func PutTUNState(state *TUNState) error {
-	return Put(BucketState, []byte("tun-state"), state)
+	return Put(BucketRuntimeState, []byte("tun-state"), state)
 }
 
 // DeleteTUNState 删除 TUN 设备状态
 func DeleteTUNState() error {
-	return Delete(BucketState, []byte("tun-state"))
+	return Delete(BucketRuntimeState, []byte("tun-state"))
 }

@@ -1788,7 +1788,6 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("config")
 
 		if s.OnReload != nil {
 			go s.OnReload()
@@ -1899,7 +1898,6 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		util.DefaultVersionNotifier.BumpVersion("config")
 
 		if s.OnReload != nil {
 			go s.OnReload()
@@ -2236,7 +2234,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "incremental update after proxy add failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
 			util.LogModuleInfo("admin", "proxy updated: %s (%s)", p.Name, p.Type)
@@ -2278,7 +2275,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "proxy deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "deleted"})
@@ -2336,7 +2332,6 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("proxies")
 	jsonResponse(w, proxySummary(p))
 }
 
@@ -2378,7 +2373,6 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "incremental update after p2p toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("proxies")
 	util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 	jsonResponse(w, proxySummary(p))
 }
@@ -2446,7 +2440,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "rule inserted at %d: %s", idx, body.Rule)
 		jsonResponse(w, map[string]interface{}{"status": "inserted", "index": idx})
@@ -2480,7 +2473,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("rules")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "rule deleted at %d: %s", idx, deleted)
 		jsonResponse(w, map[string]string{"status": "deleted"})
@@ -2530,7 +2522,6 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "incremental update after rule toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("rules")
 	jsonResponse(w, map[string]interface{}{
 		"index":   idx,
 		"enabled": body.Enabled,
@@ -2582,7 +2573,6 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
 		// Notify runtime about mapping change
 		if s.OnMappingUpdate != nil {
@@ -2618,7 +2608,6 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("mappings")
 		s.mu.Unlock()
 		// Notify runtime about mapping deletion
 		if s.OnMappingUpdate != nil {
@@ -2662,7 +2651,6 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("mappings")
 	jsonResponse(w, mappingSummary(m))
 }
 
@@ -2863,7 +2851,6 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("proxies")
 	jsonResponse(w, map[string]interface{}{
 		"name":    g.Name,
 		"enabled": g.IsEnabled(),
@@ -2979,7 +2966,6 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 				util.LogModuleWarn("admin", "incremental update after subscription filter update failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 		jsonResponse(w, map[string]interface{}{
 			"filter":        body.Filter,
@@ -3206,7 +3192,6 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 			util.LogModuleWarn("admin", "incremental update after active-member failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("subscriptions")
 	s.mu.Unlock()
 	jsonResponse(w, map[string]interface{}{
 		"name":          body.Name,
@@ -3364,7 +3349,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "incremental update after group add failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		if replaced {
 			util.LogModuleInfo("admin", "group updated: %s (%s)", g.Name, g.Type)
@@ -3408,7 +3392,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("proxies")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "group deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "deleted"})
@@ -3495,7 +3478,6 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "persist subscription nodes failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 
 		interval := 0
@@ -3538,7 +3520,6 @@ func (s *AdminServer) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "subscription deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "deleted"})
@@ -3573,7 +3554,6 @@ func (s *AdminServer) apiSubscriptionActions(w http.ResponseWriter, r *http.Requ
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		util.DefaultVersionNotifier.BumpVersion("subscriptions")
 
 		nodeCount := 0
 		proxies := s.getSubscriptionProxies(name)
@@ -3715,7 +3695,6 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 			util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("subscriptions")
 	interval := 0
 	if sub.Interval != nil {
 		interval = *sub.Interval
@@ -3898,7 +3877,6 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "incremental update after reverse config create failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogModuleInfo("admin", "reverse config created: %s", rc.Name)
 		jsonResponse(w, &rc)
 
@@ -3969,7 +3947,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "incremental update after reverse config update failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogModuleInfo("admin", "reverse config updated: %s", rc.Name)
 		jsonResponse(w, true)
 
@@ -4000,7 +3977,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "incremental update after reverse config delete failed: %v", err)
 			}
 		}
-		util.DefaultVersionNotifier.BumpVersion("reverse")
 		util.LogModuleInfo("admin", "reverse config deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
@@ -4050,7 +4026,6 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 			util.LogModuleWarn("admin", "incremental update after reverse config toggle failed: %v", err)
 		}
 	}
-	util.DefaultVersionNotifier.BumpVersion("reverse")
 	util.LogModuleInfo("admin", "reverse config %s toggled: enabled=%v", name, req.Enabled)
 	jsonResponse(w, true)
 }
@@ -4318,7 +4293,6 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 	}
 	s.mu.Unlock()
 
-	util.DefaultVersionNotifier.BumpVersion("mesh")
 	util.LogModuleInfo("admin", "mesh config updated: domainSuffixes=%v advertise=%v", req.DomainSuffixes, req.Advertise)
 	jsonResponse(w, map[string]interface{}{"ok": true})
 }
@@ -4389,7 +4363,6 @@ func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Reque
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh domain-suffix added: %s", req.Suffix)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4439,7 +4412,6 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh domain-suffix updated: index=%d suffix=%s", index, req.Suffix)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4462,7 +4434,6 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh domain-suffix deleted: index=%d", index)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4513,7 +4484,6 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh advertise added: %s", req.CIDR)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4563,7 +4533,6 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh advertise updated: index=%d cidr=%s", index, req.CIDR)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4586,7 +4555,6 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 		s.mu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("mesh")
 		util.LogModuleInfo("admin", "mesh advertise deleted: index=%d", index)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
@@ -4665,7 +4633,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN toggle enabled=%v", *req.Enabled)
-			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		// Bypass gateway toggle — config-only, takes effect on next TUN start.
@@ -4683,7 +4650,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN bypass-gateway=%v", *req.BypassGateway)
-			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		// DHCP toggle — config-only, takes effect on next TUN start.
@@ -4704,7 +4670,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 			}
 			s.mu.Unlock()
 			util.LogModuleInfo("admin", "TUN dhcp-enabled=%v", *req.DHCPEnabled)
-			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		// DHCP static bindings — update config and hot-reload running server.
@@ -4748,7 +4713,6 @@ func (s *AdminServer) apiTUN(w http.ResponseWriter, r *http.Request) {
 				s.OnDHCPStaticBindingsUpdate(req.DHCPStaticBindings)
 			}
 			util.LogModuleInfo("admin", "DHCP static-bindings updated (%d entries)", len(req.DHCPStaticBindings))
-			util.DefaultVersionNotifier.BumpVersion("tun")
 		}
 
 		jsonResponse(w, map[string]string{"status": "ok"})
@@ -4914,7 +4878,6 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	util.LogModuleInfo("admin", "config persisted to database")
-	util.DefaultVersionNotifier.BumpVersion("config")
 
 	// If enabling auth and credentials were just set, create session immediately
 	if req.AuthEnabled && req.Username != "" && req.Password != "" {
@@ -5012,7 +4975,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	util.LogModuleInfo("admin", "config persisted to database")
-	util.DefaultVersionNotifier.BumpVersion("config")
 
 	// Create session if auth enabled
 	if req.AuthEnabled && req.Username != "" {

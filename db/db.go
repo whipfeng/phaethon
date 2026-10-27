@@ -15,29 +15,54 @@ var (
 	globalDB *bolt.DB
 
 	// Bucket 名称
-	BucketConfig           = []byte("config")
-	BucketProxies          = []byte("proxies")
-	BucketProxyGroups      = []byte("proxy-groups")
-	BucketSubscriptions    = []byte("subscriptions")
-	BucketRules            = []byte("rules")
-	BucketMappings         = []byte("mappings")
-	BucketResolvers        = []byte("resolvers")
-	BucketReverseConfs     = []byte("reverse-configs")
-	BucketFakeIP           = []byte("fakeip")
-	BucketPackages         = []byte("packages")
-	BucketProxyHealth      = []byte("proxy-health")       // 运行时状态：代理健康检查
-	BucketSubscriptionNodes = []byte("subscription-nodes") // 运行时状态：订阅节点池
-	BucketState            = []byte("state")               // 统一状态：实例身份 + 运行时状态
+	// 配置类 bucket
+	BucketConfig            = []byte("config")              // 旧：统一配置（待迁移）
+	BucketAdminConfig       = []byte("admin-config")        // 新：管理配置
+	BucketTUNConfig         = []byte("tun-config")          // 新：TUN 配置
+	BucketMeshConfig        = []byte("mesh-config")         // 新：Mesh 网络配置
+	BucketInteractiveConfig = []byte("interactive-config")  // 新：交互式配置
+	BucketPortRangeConfig   = []byte("port-range-config")   // 新：端口范围配置
+	BucketProxies           = []byte("proxies")             // 代理配置
+	BucketProxyGroups       = []byte("proxy-groups")        // 代理组
+	BucketSubscriptions     = []byte("subscriptions")       // 订阅配置
+	BucketSubscriptionNodes = []byte("subscription-nodes")  // 订阅节点池
+	BucketRules             = []byte("rules")               // 规则列表
+	BucketMappings          = []byte("mappings")            // 映射配置
+	BucketResolvers         = []byte("resolvers")           // DNS 解析器
+	BucketReverseConfs      = []byte("reverse-configs")     // 反向连接配置
+	BucketPackages          = []byte("packages")            // 套餐配置
+	BucketCertificates      = []byte("certificates")        // TLS 证书
+	BucketAPIKeys           = []byte("api-keys")            // API 密钥
+	BucketWebhooks          = []byte("webhooks")            // Webhook 配置
+	BucketLogs              = []byte("logs")                // 日志配置
+
+	// 身份与状态 bucket
+	BucketState             = []byte("state")               // 旧：统一状态（待迁移）
+	BucketInstanceIdentity  = []byte("instance-identity")   // 新：实例身份
+	BucketRuntimeState      = []byte("runtime-state")       // 新：运行时状态
+
+	// 运行时状态 bucket（不触发版本通知）
+	BucketFakeIP            = []byte("fakeip")              // Fake-IP 映射
+	BucketProxyHealth       = []byte("proxy-health")        // 代理健康检查
+	BucketAuditLog          = []byte("audit-log")           // 审计日志
 )
 
 // ErrNotFound 表示 key 不存在
 var ErrNotFound = errors.New("key 不存在")
 
 // configBuckets 返回所有承载配置数据的 bucket。
-// fakeip/packages/proxy-health/subscription-nodes 是状态与历史数据，不属于配置，不在其中。
+// fakeip/proxy-health/audit-log 是运行时状态，不属于配置，不在其中。
 func configBuckets() [][]byte {
 	return [][]byte{
+		// 旧 bucket（迁移期间保留）
 		BucketConfig,
+		// 新 bucket（拆分后）
+		BucketAdminConfig,
+		BucketTUNConfig,
+		BucketMeshConfig,
+		BucketInteractiveConfig,
+		BucketPortRangeConfig,
+		// 其他配置 bucket
 		BucketProxies,
 		BucketProxyGroups,
 		BucketSubscriptions,
@@ -45,6 +70,11 @@ func configBuckets() [][]byte {
 		BucketMappings,
 		BucketResolvers,
 		BucketReverseConfs,
+		BucketPackages,
+		BucketCertificates,
+		BucketAPIKeys,
+		BucketWebhooks,
+		BucketLogs,
 	}
 }
 
@@ -71,7 +101,7 @@ func Init(dbPath string) error {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
-		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketProxyHealth, BucketSubscriptionNodes, BucketState} {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketProxyHealth, BucketSubscriptionNodes, BucketInstanceIdentity, BucketRuntimeState} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}

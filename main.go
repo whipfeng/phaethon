@@ -774,6 +774,9 @@ func main() {
 	}
 	defer db.Close()
 
+	// Initialize automatic version notification based on bucket changes
+	db.InitVersionNotifier()
+
 	if isFirstRun {
 		// Interactive initialization is only for truly fresh deployments.
 		// An existing config.yaml means an upgrade from the YAML era: skip
@@ -1685,9 +1688,6 @@ func startReverseClient(rc *config.ReverseConfig, configStop <-chan struct{}, gl
 
 // publishReverseEvent bumps the reverse topic version so the admin UI knows to
 // fetch the latest reverse-connection list via REST.
-func publishReverseEvent(rc *config.ReverseConfig) {
-	util.DefaultVersionNotifier.BumpVersion("reverse")
-}
 
 func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, globalStop <-chan struct{}) (err error) {
 	// Update runtime state (last error) and notify admin UI whenever this
@@ -1699,7 +1699,6 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 			rc.LastError = ""
 		}
 		_ = db.PutReverseRuntime(rc)
-		publishReverseEvent(rc)
 	}()
 
 	if rc.RegistryProxy == "" {
@@ -1783,7 +1782,6 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 	rc.AssignedPort = actualPort
 	rc.LastError = ""
 	_ = db.PutReverseRuntime(rc)
-	publishReverseEvent(rc)
 
 	listenerProto := req.ListenerProto
 	if listenerProto == "" {

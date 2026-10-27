@@ -2467,3 +2467,26 @@ td[data-label="P2P"] .p2p-status.failed {
         width: 100% !important;
     }
 }
+
+/* Loading Indicator */
+.loading-indicator {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    z-index: 9999;
+    background: transparent;
+}
+
+.loading-indicator.hidden {
+    display: none;
+}
+
+.loading-progress {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 100%);
+    transition: width 0.3s ease;
+    box-shadow: 0 0 10px var(--accent);
+}

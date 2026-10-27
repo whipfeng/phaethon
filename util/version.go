@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -51,52 +50,54 @@ func (s *SSEWriter) Close() {
 	s.closed = true
 }
 
-// VersionNotifier maintains an in-memory version table and a set of SSE
-// connections. All fields are protected by mu; versions and connections are
-// intentionally not persisted across restarts.
+// VersionNotifier maintains SSE connections and broadcasts version updates.
+// Version numbers are stored in the database (db.BucketVersions), not in memory.
 type VersionNotifier struct {
 	mu            sync.RWMutex
-	versions      map[string]uint64
 	connections   map[*SSEWriter]struct{}
-	bootTime      string
 	heartbeatStop chan struct{}
+	getAllVersions func() map[string]interface{} // 从数据库读取所有版本号
 }
 
-// NewVersionNotifier creates a new, empty VersionNotifier.
-func NewVersionNotifier() *VersionNotifier {
+// NewVersionNotifier creates a new VersionNotifier.
+// getAllVersions is a callback to read all versions from the database.
+func NewVersionNotifier(getAllVersions func() map[string]interface{}) *VersionNotifier {
 	return &VersionNotifier{
-		versions:    make(map[string]uint64),
-		connections: make(map[*SSEWriter]struct{}),
-		bootTime:    strconv.FormatInt(time.Now().UnixNano(), 10),
+		connections:    make(map[*SSEWriter]struct{}),
+		getAllVersions: getAllVersions,
 	}
 }
 
-// BumpVersion increments the version for typ and broadcasts the full version
-// vector as a heartbeat to all connected clients. It returns the new version
-// number.
-func (n *VersionNotifier) BumpVersion(typ string) uint64 {
-	n.mu.Lock()
-	n.versions[typ]++
-	v := n.versions[typ]
-	n.mu.Unlock()
-
-	n.broadcastSnapshot()
-	return v
+// BumpVersion sends an incremental update for the specified topic.
+// The version number is already stored in the database; this just notifies SSE clients.
+func (n *VersionNotifier) BumpVersion(typ string, version uint64) {
+	// 只发送变化的 topic
+	data, _ := json.Marshal(map[string]uint64{typ: version})
+	
+	n.mu.RLock()
+	conns := make([]*SSEWriter, 0, len(n.connections))
+	for c := range n.connections {
+		conns = append(conns, c)
+	}
+	n.mu.RUnlock()
+	
+	n.broadcast("heartbeat", data, conns)
 }
 
-// Subscribe registers a connection and immediately sends the current full
-// version vector as a heartbeat.
+// Subscribe registers a connection. Does not send initial data;
+// clients will receive updates via heartbeat events.
 func (n *VersionNotifier) Subscribe(conn *SSEWriter) {
 	n.mu.Lock()
 	n.connections[conn] = struct{}{}
 	n.mu.Unlock()
-
-	n.sendHeartbeat(conn)
 }
 
 // sendHeartbeat sends the current full version vector to a single connection.
 func (n *VersionNotifier) sendHeartbeat(conn *SSEWriter) {
-	data, _ := json.Marshal(n.Versions())
+	if n.getAllVersions == nil {
+		return
+	}
+	data, _ := json.Marshal(n.getAllVersions())
 	conn.WriteEvent("heartbeat", data)
 }
 
@@ -108,21 +109,12 @@ func (n *VersionNotifier) Unsubscribe(conn *SSEWriter) {
 	conn.Close()
 }
 
-// Versions returns a copy of the current version vector plus the server boot
-// time under the key "_bootTime". The boot time is an opaque string that
-// changes on every process restart; clients should compare it for equality
-// only.
+// Versions returns the current version vector from the database.
 func (n *VersionNotifier) Versions() map[string]interface{} {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	return n.snapshotLocked()
-}
-
-// BootTime returns the opaque server boot time string.
-func (n *VersionNotifier) BootTime() string {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	return n.bootTime
+	if n.getAllVersions == nil {
+		return make(map[string]interface{})
+	}
+	return n.getAllVersions()
 }
 
 // StartHeartbeat starts a goroutine that broadcasts the full version vector
@@ -163,7 +155,10 @@ func (n *VersionNotifier) StopHeartbeat() {
 }
 
 func (n *VersionNotifier) broadcastSnapshot() {
-	data, _ := json.Marshal(n.Versions())
+	if n.getAllVersions == nil {
+		return
+	}
+	data, _ := json.Marshal(n.getAllVersions())
 	n.mu.RLock()
 	conns := make([]*SSEWriter, 0, len(n.connections))
 	for c := range n.connections {
@@ -189,15 +184,12 @@ func (n *VersionNotifier) connectionsLocked() []*SSEWriter {
 	return conns
 }
 
-func (n *VersionNotifier) snapshotLocked() map[string]interface{} {
-	out := make(map[string]interface{}, len(n.versions)+1)
-	for k, v := range n.versions {
-		out[k] = v
-	}
-	out["_bootTime"] = n.bootTime
-	return out
-}
-
 // DefaultVersionNotifier is the process-wide version notifier used by the
-// admin panel.
-var DefaultVersionNotifier = NewVersionNotifier()
+// admin panel. It will be initialized with a database callback in db.InitVersionNotifier.
+var DefaultVersionNotifier *VersionNotifier
+
+func init() {
+	// Temporary initialization without database callback.
+	// Will be replaced in db.InitVersionNotifier() with proper callback.
+	DefaultVersionNotifier = NewVersionNotifier(nil)
+}

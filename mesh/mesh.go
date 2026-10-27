@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phaethon/config"
+	"phaethon/db"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -2083,7 +2084,7 @@ func (m *MeshManager) gossipLoop() {
 			case meshEventRegister:
 				m.topology.RegisterPeer(ev.sender)
 				m.recomputeRoutes()
-				util.DefaultVersionNotifier.BumpVersion("mesh")
+				db.BumpRuntimeVersion("mesh")
 				nodeID := ev.sender.GetNodeID()
 				// Reset quality tracker for this peer to avoid stale state
 				m.qualityTracker.RemoveNode(nodeID)
@@ -2098,7 +2099,7 @@ func (m *MeshManager) gossipLoop() {
 				nodeID := ev.sender.GetNodeID()
 				m.topology.UnregisterPeer(ev.sender)
 				m.recomputeRoutes()
-				util.DefaultVersionNotifier.BumpVersion("mesh")
+				db.BumpRuntimeVersion("mesh")
 				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
 			case meshEventGossip:
 				var info GossipInfo
@@ -2109,7 +2110,7 @@ func (m *MeshManager) gossipLoop() {
 				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.recomputeRoutes()
-					util.DefaultVersionNotifier.BumpVersion("mesh")
+					db.BumpRuntimeVersion("mesh")
 				}
 				// Check for subnet conflicts and re-select if needed
 				if m.checkSubnetConflict() {
@@ -2123,7 +2124,7 @@ func (m *MeshManager) gossipLoop() {
 			case meshEventConfigUpdate:
 				m.recomputeRoutes()
 				m.broadcastGossip()
-				util.DefaultVersionNotifier.BumpVersion("mesh")
+				db.BumpRuntimeVersion("mesh")
 				m.mu.RLock()
 				util.LogModuleInfo("mesh", "[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
 				m.mu.RUnlock()

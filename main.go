@@ -240,7 +240,7 @@ func run(prev *activeResources) (*activeResources, error) {
 	}
 	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
 	p2p.GlobalP2PManager.OnStatusChange = func() {
-		util.DefaultVersionNotifier.BumpVersion("p2p")
+		db.BumpRuntimeVersion("p2p")
 	}
 	util.LogModuleInfo("system", "P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
 
@@ -2474,7 +2474,7 @@ func checkGroupHealth(g *config.ProxyGroup) {
 	if err := db.PutProxyGroup(g); err != nil {
 		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
 	}
-	util.DefaultVersionNotifier.BumpVersion("stats")
+	db.BumpRuntimeVersion("stats")
 }
 
 // checkGroupTest runs an immediate one-off test for every member of a group.

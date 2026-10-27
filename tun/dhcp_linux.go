@@ -451,7 +451,7 @@ func (s *dhcpServerImpl) saveLeases() {
 	if err := db.PutDHCPLeases(entries); err != nil {
 		util.LogModuleWarn("dhcp", "failed to save leases to database: %v", err)
 	} else {
-		util.DefaultVersionNotifier.BumpVersion("tun")
+		db.BumpRuntimeVersion("tun")
 	}
 }
 

@@ -527,7 +527,7 @@ func (e *Engine) notifyStatsChanged() {
 		e.statsNotifyTimer = nil
 		e.statsNotifyMu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("tun")
+		db.BumpRuntimeVersion("tun")
 	})
 }
 

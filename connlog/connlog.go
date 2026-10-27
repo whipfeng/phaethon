@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"phaethon/config"
-	"phaethon/util"
+	"phaethon/db"
 )
 
 const maxLogs = 100
@@ -96,7 +96,7 @@ func scheduleNotify() {
 		notifyTimer = nil
 		notifyMu.Unlock()
 
-		util.DefaultVersionNotifier.BumpVersion("logs")
+		db.BumpRuntimeVersion("logs")
 	})
 }
 

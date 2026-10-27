@@ -1032,7 +1032,7 @@ function renderGroupCards(groupsData) {
         const enabled = g.enabled === true;
         const cardClass = enabled ? '' : 'row-disabled';
         const members = g.proxies || [];
-        const total = members.length + (g.manualProxies || []).length;
+        const total = members.length; // g.proxies already contains all proxies (manual + subscription)
         const activeMember = g['active-member'] || '';
         const subscription = g.subscription || '';
         const previewTags = members.slice(0, 5).map(m => {

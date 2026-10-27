@@ -175,7 +175,9 @@ const PAGE_TITLES = {
     '/proxies': 'Proxies',
     '/rules': 'Rules',
     '/mappings': 'Mappings',
+    '/resolvers': 'Resolvers',
     '/reverse': 'Reverse',
+    '/admin': 'Settings',
     '/package': 'Package',
 };
 

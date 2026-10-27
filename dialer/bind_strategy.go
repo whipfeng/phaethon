@@ -8,7 +8,9 @@ import (
 	"sync"
 
 	"phaethon/config"
+	"phaethon/db"
 	"phaethon/frame"
+	"phaethon/util"
 )
 
 // BindMode selects the BIND semantic for protocol-specific handshakes.
@@ -92,8 +94,19 @@ func bindToBase(proxy *config.Proxy, mode BindMode, dstAddr string) (*BindResult
 
 // dialToProxyServer is shared by trojan/socks5/htunnel BindStrategy
 // implementations: opens a TCP (or chain-routed) connection to proxy.Server.
-// Honors the via-chain (proxy.Next).
+// Honors the via-chain (proxy.ViaProxy).
 func dialToProxyServer(proxy *config.Proxy) (net.Conn, error) {
-	d := NewDialer(proxy.Next)
+	// If via proxy is specified, look it up and use it
+	if proxy.ViaProxy != "" {
+		viaProxy, err := db.GetProxy(proxy.ViaProxy)
+		if err == nil && viaProxy != nil {
+			d := NewDialer(viaProxy)
+			return d.Dial(proxy.Server, proxy.Port)
+		}
+		// Via proxy not found, log warning and fall through to direct connection
+		util.LogModuleWarn("dialer", "via proxy %q not found for %s, connecting directly", proxy.ViaProxy, proxy.Name)
+	}
+	// No via proxy or not found, connect directly
+	d := NewDialer(nil)
 	return d.Dial(proxy.Server, proxy.Port)
 }

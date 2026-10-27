@@ -13,6 +13,11 @@
     <script src="./static/app.js?v={{.Version}}"></script>
 </head>
 <body>
+    <!-- Loading indicator -->
+    <div id="loading-indicator" class="loading-indicator hidden">
+        <div id="loading-progress" class="loading-progress"></div>
+    </div>
+
     <div class="app-layout">
         <nav class="sidebar">
             <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
@@ -22,21 +27,20 @@
             </div>
             <ul class="nav-menu">
                 <li><a href="./" hx-get="./" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Dashboard"}}class="active"{{end}} data-i18n="nav.dashboard">📊 Dashboard</a></li>
-                <li class="nav-section"><span data-i18n="nav.runtime">Runtime</span></li>
-                <li><a href="./tun" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "TUN"}}class="active"{{end}} data-i18n="nav.tun">🌐 TUN</a></li>
-                <li><a href="./mesh" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mesh"}}class="active"{{end}} data-i18n="nav.mesh">🔷 Mesh</a></li>
-                <li><a href="./logs" hx-get="./logs" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Logs"}}class="active"{{end}} data-i18n="nav.logs">📋 Logs</a></li>
-                <li><a href="./connections" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Connections"}}class="active"{{end}} data-i18n="nav.connections">🔗 Connections</a></li>
-                <li class="nav-section"><span data-i18n="nav.config">Configuration</span></li>
-                <li><a href="./subscriptions" hx-get="./subscriptions" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Subscriptions"}}class="active"{{end}} data-i18n="nav.subscriptions">📡 Subscriptions</a></li>
+                <li class="nav-section"><span data-i18n="nav.config">配置</span></li>
                 <li><a href="./proxies" hx-get="./proxies" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Proxies"}}class="active"{{end}} data-i18n="nav.proxies">🔌 Proxies</a></li>
                 <li><a href="./rules" hx-get="./rules" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Rules"}}class="active"{{end}} data-i18n="nav.rules">📜 Rules</a></li>
                 <li><a href="./mappings" hx-get="./mappings" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mappings"}}class="active"{{end}} data-i18n="nav.mappings">🗺️ Mappings</a></li>
+                <li class="nav-section"><span data-i18n="nav.network">网络</span></li>
+                <li><a href="./tun" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "TUN"}}class="active"{{end}} data-i18n="nav.tun">🌐 TUN</a></li>
+                <li><a href="./mesh" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Mesh"}}class="active"{{end}} data-i18n="nav.mesh">🔷 Mesh</a></li>
                 <li><a href="./resolvers" hx-get="./resolvers" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Resolvers"}}class="active"{{end}} data-i18n="nav.resolvers">↗️ Resolvers</a></li>
+                <li class="nav-section"><span data-i18n="nav.monitor">监控</span></li>
+                <li><a href="./connections" hx-get="./connections" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Connections"}}class="active"{{end}} data-i18n="nav.connections">🔗 Connections</a></li>
+                <li><a href="./logs" hx-get="./logs" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Logs"}}class="active"{{end}} data-i18n="nav.logs">📋 Logs</a></li>
+                <li class="nav-section"><span data-i18n="nav.system">系统</span></li>
                 <li><a href="./admin" hx-get="./admin" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Admin Settings"}}class="active"{{end}} data-i18n="nav.admin">⚙️ Admin</a></li>
-                <li class="nav-divider"></li>
-                <li class="nav-section"><span data-i18n="nav.tools">Tools</span></li>
-                <li><a href="./reverse" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse Wizard</a></li>
+                <li><a href="./reverse" hx-get="./reverse" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Reverse"}}class="active"{{end}} data-i18n="nav.reverse">🧙 Reverse</a></li>
                 <li><a href="./package" hx-get="./package" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" {{if eq .Title "Package"}}class="active"{{end}} data-i18n="nav.package">📦 Package</a></li>
             </ul>
         </nav>

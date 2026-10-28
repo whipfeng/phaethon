@@ -172,6 +172,23 @@ func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) 
 
 	util.LogModuleInfo("system", "[RESOLVE-DEBUG] ResolveMatch called: dst=%s:%d mapping=%s", req.DstAddr, req.DstPort, mappingName)
 
+	// Special handling for loopback resolver domain: loc.{nodeid}.phn
+	// Bypass rule matching and return DIRECT immediately to ensure loopback
+	// traffic always goes direct, regardless of configured rules.
+	if m.mesh != nil && m.mesh.NodeID != "" {
+		loopbackDomain := "loc." + m.mesh.NodeID + ".phn"
+		if strings.EqualFold(req.DstAddr, loopbackDomain) {
+			util.LogModuleInfo("system", "[RESOLVE-DEBUG] loopback domain detected: %s -> DIRECT (bypassing rules)", req.DstAddr)
+			// Rewrite to 127.0.0.1 but keep the original port
+			return &config.AddrRequest{
+				DstAddr: "127.0.0.1",
+				DstPort: req.DstPort,
+				CmdType: req.CmdType,
+				Proto:   req.Proto,
+			}, config.SingletonProxy(config.ProxyDIRECT), nil, nil
+		}
+	}
+
 	// Apply resolver rules first
 	req = m.resolving(req)
 

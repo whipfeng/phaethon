@@ -27,7 +27,7 @@
                     <tr data-name="{{.Name}}" class="{{if not (.Enabled | enabled)}}row-disabled{{end}}">
                         <td><strong>{{.Name}}</strong></td>
                         <td>
-                            {{if .SrcPort}}<code>{{.EffectiveSrcHost}}:{{.SrcPort}}</code>{{else}}<code>{{.EffectiveSrcHost}}:</code><span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);">*:any</span>{{end}}
+                            {{if .SrcPort}}<code>{{.EffectiveSrcHost}}:{{.SrcPort}}</code>{{else}}<code>{{.EffectiveSrcHost}}:</code><span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);" data-i18n="res.anyPort">any</span>{{end}}
                             {{if .SrcRelative}}<span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);" data-i18n="res.selfTag">self</span>{{end}}
                             {{if .Proto}}<span style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-secondary);text-transform:uppercase;">{{.Proto}}</span>{{end}}
                         </td>

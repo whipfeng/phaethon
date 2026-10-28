@@ -397,7 +397,7 @@ func saveTUNState(ifaceName string, rpFilter, ipForward int) {
 }
 
 // addMeshRoute adds a route for the mesh subnet through the TUN device.
-func (e *Engine) addMeshRoute(subnet string) error {
+func (e *Manager) addMeshRoute(subnet string) error {
 	_, ipNet, err := net.ParseCIDR(subnet)
 	if err != nil {
 		return fmt.Errorf("invalid mesh subnet %s: %w", subnet, err)

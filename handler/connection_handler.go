@@ -26,7 +26,7 @@ type AdminHandler interface {
 
 // ConnectionHandler manages TCP and UDP connection handling for the mesh network.
 // It is responsible for rule matching, proxy dialing, and connection relaying.
-// This separates connection handling logic from TUN device I/O (which remains in tun.Engine).
+// This separates connection handling logic from TUN device I/O (which remains in tun.Manager).
 type ConnectionHandler struct {
 	// Fake-IP pool for domain restoration
 	fakeIP *mesh.FakeIPPool
@@ -75,6 +75,11 @@ func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 	}
 }
 
+// SetAdminHandler updates the admin handler for local node domain connections.
+func (h *ConnectionHandler) SetAdminHandler(handler AdminHandler) {
+	h.adminHandler = handler
+}
+
 // HandleTCPConn handles an incoming TCP connection from the netstack forwarder.
 // It performs rule matching, proxy dialing, and relays data between the connection and the target.
 func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
@@ -98,16 +103,25 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> %s", corrID, dstAddr, domain)
 		} else {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> (no domain)", corrID, dstAddr)
+			// Add diagnostic: dump all fake-IP mappings
+			if h.fakeIP != nil {
+				stats := h.fakeIP.Stats()
+				util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] fake-ip pool stats: domainCount=%d realIPCacheCount=%d", 
+					corrID, stats.DomainCount, stats.RealIPCacheCount)
+			}
 		}
+	} else {
+		util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] fakeIP is nil", corrID)
 	}
 
 	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
 	var localNodeDomain bool
+	util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] localNodeDomain check: domain=%q localMeshNodeID=%q", corrID, domain, h.localMeshNodeID)
 	if domain != "" && h.localMeshNodeID != "" {
 		expectedDomain := h.localMeshNodeID + ".phn"
 		if domain == expectedDomain {
 			localNodeDomain = true
-			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", corrID, domain, expectedDomain)
+			util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] local mesh nodeID domain MATCH: %s == %s -> will serve via admin handler", corrID, domain, expectedDomain)
 		} else {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] domain %s != expected %s", corrID, domain, expectedDomain)
 		}
@@ -123,6 +137,16 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 		if h.localMeshVIPs[dstAddr] {
 			localNodeDomain = true
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] dstAddr %s is local mesh VIP -> will serve via admin handler", corrID, dstAddr)
+		}
+	}
+
+	// Check if dstAddr is in local mesh subnet (for mesh domain access)
+	// When accessing qg.phn, DNS returns an IP in QG's subnet (e.g., 100.0.0.12),
+	// which is not a fake-IP and not a VIP, but should still be handled locally.
+	if !localNodeDomain && h.isMeshIP != nil {
+		if dstIP := net.ParseIP(dstAddr); dstIP != nil && h.isMeshIP(dstIP) {
+			localNodeDomain = true
+			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SUBNET] [%s] dstAddr %s is in local mesh subnet -> will serve via admin handler", corrID, dstAddr)
 		}
 	}
 
@@ -144,6 +168,38 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 	if modeBMapping != nil {
 		util.LogModuleInfo("handler", "[TCP-DIAG] [%s] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
 			corrID, connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
+	}
+
+	// EARLY RETURN: If this is a local mesh node domain, serve via admin handler immediately.
+	// Skip rule matching entirely - local mesh domains should NEVER be proxied.
+	if localNodeDomain {
+		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch (early return)", connID)
+		// Direct admin handler: bypass OS network stack entirely
+		if h.adminHandler != nil {
+			util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
+			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
+			rec := connlog.Start(inbound, "TCP", srcAddr, domain)
+			rec.SetDst("localhost").Establish(connID, nil, false)
+			h.adminHandler.ServeConn(conn)
+			rec.Close()
+			return
+		}
+		// Fallback: dial localhost via OS network stack
+		localIP := dialer.GetLocalIPForDial(nil)
+		dialAddr := localIP.String()
+		util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", corrID, connID, dialAddr, dstPort)
+		targetConn, err := dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(dstPort)))
+		if err != nil {
+			util.LogModuleWarn("handler", "[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, dstPort, err)
+			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-FAIL] [%s] local dial FAILED: %v", connID, err)
+			return
+		}
+		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SUCCESS] [%s] local dial SUCCESS", connID)
+		defer targetConn.Close()
+		// Start relay
+		util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] relay started: %s:%d -> localhost:%d", connID, srcAddr, srcPort, dstPort)
+		relay(conn, targetConn)
+		return
 	}
 
 	// Use domain for rule matching (so domain-based rules work).

@@ -165,7 +165,23 @@ func (p *FakeIPPool) LookupDomain(ip string) string {
 	}
 	p.mu.RUnlock()
 	
-	return ipToDomainCopy[ip]
+	result := ipToDomainCopy[ip]
+	if result == "" {
+		util.LogModuleInfo("dns", "[FAKEIP] LookupDomain: %s -> (not found, map has %d entries)", ip, len(ipToDomainCopy))
+		// Log first 5 entries for debugging
+		count := 0
+		for k, v := range ipToDomainCopy {
+			if count >= 5 {
+				break
+			}
+			util.LogModuleInfo("dns", "[FAKEIP]   sample: %s -> %s", k, v)
+			count++
+		}
+	} else {
+		util.LogModuleInfo("dns", "[FAKEIP] LookupDomain: %s -> %s", ip, result)
+	}
+	
+	return result
 }
 
 // SetRealIP caches the real IP address for a Fake-IP. This is called by the DNS

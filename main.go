@@ -32,6 +32,7 @@ import (
 	"phaethon/config"
 	"phaethon/db"
 	"phaethon/dialer"
+	"phaethon/handler"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/pkg/signing"
@@ -63,7 +64,9 @@ type activeResources struct {
 	reverseClientStop  chan struct{}            // global stop for all reverse clients
 	reverseClientStops map[string]chan struct{} // per-config stop channels
 	reverseClientWG    sync.WaitGroup
-	tunRes             *TUNResource
+	tunMgr             *tun.Manager
+	netstack           *mesh.Netstack
+	connHandler        *handler.ConnectionHandler
 	meshMgr            *mesh.MeshManager
 	adminServer        *admin.AdminServer
 	once               sync.Once
@@ -90,8 +93,8 @@ func (r *activeResources) closeAll() {
 		if r.meshMgr != nil {
 			r.meshMgr.Stop()
 		}
-		if r.tunRes != nil {
-			r.tunRes.Stop()
+		if r.tunMgr != nil {
+			r.tunMgr.Stop()
 		}
 		if r.adminServer != nil {
 			r.adminServer.Close()
@@ -106,16 +109,16 @@ func toggleTUN(enable bool, res *activeResources) error {
 		return fmt.Errorf("runtime not ready")
 	}
 	if enable {
-		if res.tunRes == nil || res.tunRes.engine == nil {
+		if res.tunMgr == nil || res.tunMgr == nil {
 			return fmt.Errorf("stack not running")
 		}
-		if res.tunRes.engine.IsTUNRunning() {
+		if res.tunMgr.IsTUNRunning() {
 			return nil
 		}
-		return res.tunRes.engine.StartTUN()
+		return res.tunMgr.StartTUN()
 	}
-	if res.tunRes != nil && res.tunRes.engine != nil {
-		return res.tunRes.engine.StopTUN()
+	if res.tunMgr != nil && res.tunMgr != nil {
+		return res.tunMgr.StopTUN()
 	}
 	return nil
 }
@@ -168,8 +171,8 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		"stats":      tun.TUNStats{},
 		"dhcpLeases": []tun.DHCPLease{},
 	}
-	if res.tunRes != nil && res.tunRes.engine != nil {
-		engine := res.tunRes.engine
+	if res.tunMgr != nil && res.tunMgr != nil {
+		engine := res.tunMgr
 		status["running"] = engine.IsTUNRunning()
 		status["routes"] = engine.RouteSnapshot()
 		status["logs"] = engine.Logs()
@@ -386,8 +389,8 @@ func run(prev *activeResources) (*activeResources, error) {
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-	res.tunRes = startEngine(meshMgr, nil)
-	if res.tunRes != nil {
+	res.tunMgr, res.netstack, res.connHandler = startEngine(meshMgr, nil)
+	if res.tunMgr != nil {
 		res.meshMgr = meshMgr
 	}
 
@@ -571,10 +574,10 @@ func run(prev *activeResources) (*activeResources, error) {
 			}
 			util.LogModuleInfo("system", "Admin server Start() completed")
 		}
-		// Inject admin handler into TUN engine for direct connection handling
-		if res.tunRes != nil {
-			res.tunRes.engine.SetAdminHandler(res.adminServer)
-			util.LogModuleInfo("system", "Admin handler injected into TUN engine for direct connection handling")
+		// Inject admin handler into connection handler for direct connection handling
+		if res.connHandler != nil {
+			res.connHandler.SetAdminHandler(res.adminServer)
+			util.LogModuleInfo("system", "Admin handler injected into ConnectionHandler for direct connection handling")
 		}
 	}
 
@@ -923,8 +926,8 @@ func main() {
 			return buildTUNStatus(resources)
 		}
 		resources.adminServer.OnDHCPStaticBindingsUpdate = func(bindings []config.DHCPStaticBinding) {
-			if resources.tunRes != nil && resources.tunRes.engine != nil {
-				resources.tunRes.engine.UpdateDHCPStaticBindings(bindings)
+			if resources.tunMgr != nil && resources.tunMgr != nil {
+				resources.tunMgr.UpdateDHCPStaticBindings(bindings)
 			}
 		}
 		resources.adminServer.OnRestart = func() {
@@ -2263,7 +2266,7 @@ func wireAdminCallbacks(resources *activeResources) {
 	}
 
 	// Mesh package distribution setup
-	if resources.meshMgr != nil && resources.tunRes != nil && resources.tunRes.netstack != nil {
+	if resources.meshMgr != nil && resources.tunMgr != nil && resources.netstack != nil {
 		// Set peer lister
 		adminSrv.SetPeerLister(func() []admin.PeerBrief {
 			peers := resources.meshMgr.GetPeers()
@@ -2279,10 +2282,10 @@ func wireAdminCallbacks(resources *activeResources) {
 		// Set mesh dial function and DNS resolver
 		adminSrv.SetMeshDialFn(
 			func(network, addr string) (net.Conn, error) {
-				return resources.tunRes.netstack.NetDial(network, addr)
+				return resources.netstack.NetDial(network, addr)
 			},
 			func(domain string) (net.IP, error) {
-				return resources.tunRes.netstack.ResolveDomain(domain)
+				return resources.netstack.ResolveDomain(domain)
 			},
 		)
 

@@ -76,7 +76,7 @@ type Netstack struct {
 	htunnelEndpoints map[string]*HTunnelEndpoint
 	htunnelNextNICID atomic.Uint64
 
-	// Forwarder callbacks (set by TUN engine)
+	// Forwarder callbacks
 	callbacks *ForwarderCallbacks
 
 	// WriteLoopDevice is the TUN device for writeLoop to write packets to.
@@ -1550,8 +1550,13 @@ func (n *Netstack) acceptTCP() {
 					conn.Close()
 				}()
 				util.LogModuleInfo("netstack", "[HANDLECONN-CALL] [%s] calling HandleTCPConn callback now", corrID)
-				n.callbacks.HandleTCPConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
-				util.LogModuleInfo("netstack", "[HANDLECONN-RETURN] [%s] HandleTCPConn callback returned", corrID)
+				if n.callbacks.HandleTCPConn == nil {
+					util.LogModuleError("netstack", "[HANDLECONN-NIL] [%s] HandleTCPConn callback is NIL!", corrID)
+				} else {
+					util.LogModuleInfo("netstack", "[HANDLECONN-PRE] [%s] about to invoke callback, conn=%v src=%s:%d dst=%s:%d", corrID, conn != nil, srcAddr, srcPort, dstAddr, dstPort)
+					n.callbacks.HandleTCPConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
+					util.LogModuleInfo("netstack", "[HANDLECONN-RETURN] [%s] HandleTCPConn callback returned", corrID)
+				}
 			}()
 			util.LogModuleInfo("netstack", "[HANDLECONN-LAUNCHED] [%s] goroutine launched successfully", corrID)
 		} else {

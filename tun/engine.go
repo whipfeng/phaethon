@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -27,9 +25,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// TUNMapping is a special mapping that represents traffic entering through
-// the TUN interface. Rules can use "#TUN" suffix to target TUN traffic.
-var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // Engine manages the TUN device, netstack, and traffic interception.
 type Engine struct {
@@ -76,6 +71,7 @@ type Engine struct {
 	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
 
 	adminHandler AdminHandler // direct admin server connection handler (bypasses OS network stack)
+	
 }
 
 // AdminHandler can serve a single network connection directly.
@@ -131,7 +127,7 @@ func (e *Engine) SetMeshConfig(localVIPs []net.IP) {
 	// Share callbacks with the netstack for diagnostics
 	if e.netstack != nil {
 		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
-		e.netstack.SetIsMeshIPFunc(e.isMeshIP)
+		e.netstack.SetIsMeshIPFunc(e.IsMeshIP)
 		// Set FakeIP reverse lookup for diagnostics
 		if e.fakeIP != nil {
 			e.netstack.SetLookupDomainFunc(e.fakeIP.LookupDomain)
@@ -377,7 +373,7 @@ func (e *Engine) SetMeshNetwork(network *net.IPNet) {
 }
 
 // isMeshIP checks if an IP belongs to the mesh network (full range, not just local subnet).
-func (e *Engine) isMeshIP(ip net.IP) bool {
+func (e *Engine) IsMeshIP(ip net.IP) bool {
 	if e.meshNetwork != nil && e.meshNetwork.Contains(ip) {
 		return true
 	}
@@ -399,7 +395,7 @@ func (e *Engine) AddMeshVIP(vip net.IP) error {
 // resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
 // It uses configured direct-nameserver if available, otherwise falls back to
 // ResolveRouteAware which uses the original DNS servers captured at TUN startup.
-func (e *Engine) resolveForDirect(domain string) ([]net.IP, error) {
+func (e *Engine) ResolveForDirect(domain string) ([]net.IP, error) {
 	var servers []string
 	if e.tunConfig != nil {
 		servers = e.tunConfig.DirectNameserverList()
@@ -629,36 +625,11 @@ func (e *Engine) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
 
 // StartStack starts the gVisor netstack (FakeIP, DNS hijacker, TCP/UDP forwarders).
 // This is the core networking layer and should always be running.
+// Note: Forwarder callbacks are set up by main_engine.go directly on the netstack.
 func (e *Engine) StartStack() error {
 	if e.netstack == nil {
 		return fmt.Errorf("tun: netstack not set (call SetNetstack before Start)")
 	}
-
-	// Set up forwarder callbacks on the netstack
-	e.netstack.SetCallbacks(&mesh.ForwarderCallbacks{
-		HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
-			corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
-			util.LogModuleInfo("tun", "[CALLBACK-ENTRY] [%s] HandleTCPConn callback ENTERED, about to call e.handleConn", corrID)
-			e.handleConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
-			util.LogModuleInfo("tun", "[CALLBACK-EXIT] [%s] HandleTCPConn callback EXITED, e.handleConn returned", corrID)
-		},
-		HandleUDPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
-			e.handleUDP(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
-		},
-		LookupModeB: func(proto int, dstIP net.IP, dstPort, srcPort uint16) (string, string, *config.Mapping) {
-			if e.modeBTable != nil {
-				return e.modeBTable.LookupByDst(byte(proto), dstIP, dstPort, srcPort)
-			}
-			return "", "", nil
-		},
-		IsMeshIP: func(ip net.IP) bool {
-			return e.isMeshIP(ip)
-		},
-		StatsNotify: func() {
-			e.writePackets.Add(1)
-			e.notifyStatsChanged()
-		},
-	})
 
 	// Set writeLoop device and close channel
 	e.netstack.WriteLoopDevice = e
@@ -1141,473 +1112,3 @@ func (e *Engine) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, 
 	e.netstack.LinkEP().InjectInbound(proto, pkt)
 }
 
-// relay bidirectionally copies data between conn and target.
-//
-// Idle timeout: 5 minutes (aggressive, like NAT/firewall tables). TCP protocol
-// has no mechanism to negotiate or communicate idle timeouts between peers, so
-// this is a unilateral decision by the proxy. Applications that need long-lived
-// connections must configure their own keepalive at the application layer:
-//   - SSH: ServerAliveInterval / ClientAliveInterval
-//   - Database: connection pool keepalive / validation queries
-//   - HTTP: Keep-Alive headers
-//
-// Design principle: the proxy is "dumb" and aggressively reclaims resources.
-// Connection lifetime management is the responsibility of the endpoints.
-func relay(conn, target net.Conn) {
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
-
-	done := make(chan struct{})
-	defer close(done)
-
-	// Watchdog: close connection if idle for 5 minutes. This reclaims resources
-	// from abandoned connections (e.g., NAT drops mapping, client crashes without
-	// sending FIN). Applications must send data within 5 minutes to keep alive.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if time.Since(time.Unix(0, lastActivity.Load())) > 5*time.Minute {
-					util.LogModuleInfo("tun", "[TUN] relay idle timeout: connection idle for 5 minutes, closing")
-					conn.Close()
-					target.Close()
-					return
-				}
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 32*1024)
-		for {
-			lastActivity.Store(time.Now().UnixNano())
-			n, err := conn.Read(buf)
-			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
-				if _, werr := target.Write(buf[:n]); werr != nil {
-					return
-				}
-			}
-			if err != nil {
-				if cw, ok := target.(interface{ CloseWrite() error }); ok {
-					cw.CloseWrite()
-				}
-				return
-			}
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 32*1024)
-		for {
-			lastActivity.Store(time.Now().UnixNano())
-			n, err := target.Read(buf)
-			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
-				if _, werr := conn.Write(buf[:n]); werr != nil {
-					return
-				}
-			}
-			if err != nil {
-				if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-					cw.CloseWrite()
-				}
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
-}
-
-// handleUDP relays UDP datagrams between netstack and the real network via proxy or direct.
-// It preserves datagram boundaries by reading/writing one datagram at a time.
-func (e *Engine) handleUDP(netstackConn net.Conn, srcAddr string, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
-	if inbound == "" {
-		inbound = "TUN"
-	}
-
-	// Check if this is a Fake-IP: restore original domain.
-	var domain string
-	if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
-		domain = d
-		util.LogModuleDebug("tun", "tun: udp fake-ip %s -> %s", dstAddr, domain)
-	}
-
-	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
-	var localNodeDomain bool
-	if domain != "" && e.localMeshNodeID != "" {
-		expectedDomain := e.localMeshNodeID + ".phn"
-		if domain == expectedDomain {
-			localNodeDomain = true
-			util.LogModuleDebug("tun", "tun: local mesh nodeID domain detected (udp): %s -> 127.0.0.1", domain)
-		}
-	}
-
-	connID := util.NextConnID()
-
-	// Use domain for rule matching (so domain-based rules work).
-	matchAddr := dstAddr
-	if domain != "" {
-		matchAddr = domain
-	}
-
-	req := config.NewConnectRequest("udp", matchAddr, dstPort)
-	var proxy *config.Proxy
-	var matchResult *config.MatchResult
-	matchMapping := TUNMapping
-	if modeBMapping != nil {
-		matchMapping = modeBMapping
-	}
-	var err error
-	req, proxy, matchResult, err = db.ResolveMatch(req, matchMapping.Name)
-	if err != nil {
-		util.LogModuleWarn("tun", "[%s] udp resolve match failed: %v", inbound, err)
-		return
-	}
-
-	resolvedAddr := req.DstAddr
-	resolvedPort := req.DstPort
-	rec := connlog.Start(inbound, "UDP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
-	defer rec.Close()
-
-	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogModuleDebug("tun", "[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)
-		rec.Reject()
-		return
-	}
-
-	var targetConn net.PacketConn
-	var dialIP net.IP
-
-	if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		targetConn, err = dialer.ChainUDPDial(proxy)
-		if err != nil {
-			util.LogModuleWarn("tun", "[%s] [%s] udp dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			rec.Fail(err)
-			return
-		}
-		dialIP = net.ParseIP(resolvedAddr)
-	} else {
-		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
-		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
-		// dial it directly.
-		dialIP = net.ParseIP(resolvedAddr)
-		if localNodeDomain {
-			// Local mesh nodeID domain: connect to localhost
-			dialIP = net.ParseIP("127.0.0.1")
-			util.LogModuleDebug("tun", "[%s] [%s] udp local mesh nodeID domain: %s -> %s", inbound, connID, domain, dialIP)
-		} else if dialIP == nil {
-			// Resolve the real IP for DIRECT connections.
-			ips, err := e.resolveForDirect(resolvedAddr)
-			if err != nil || len(ips) == 0 {
-				util.LogModuleWarn("tun", "[%s] [%s] udp resolve %s fail: %v", inbound, connID, resolvedAddr, err)
-				rec.Fail(err)
-				return
-			}
-			// Prefer IPv4
-			for _, ip := range ips {
-				if ip4 := ip.To4(); ip4 != nil {
-					dialIP = ip4
-					break
-				}
-			}
-			util.LogModuleDebug("tun", "[%s] [%s] udp resolved %s -> %s for DIRECT", inbound, connID, resolvedAddr, dialIP)
-		}
-		targetConn, err = dialer.ListenPacketBoundTo("udp", "", dialIP)
-		if err != nil {
-			util.LogModuleWarn("tun", "[%s] [%s] udp direct dial %s:%d fail: %v", inbound, connID, resolvedAddr, resolvedPort, err)
-			rec.SetDst(dialIP.String()).Fail(err)
-			return
-		}
-	}
-	defer targetConn.Close()
-
-	// Use the resolved IP for the destination address.
-	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
-	util.LogModuleDebug("tun", "[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	rec.Establish(connID, proxy, proxy.IsDirect())
-
-	relayUDP(netstackConn, targetConn, dstUDPAddr)
-}
-
-// relayUDP copies datagrams between the netstack UDP connection and the target
-// PacketConn, preserving datagram boundaries. Uses a watchdog goroutine to
-// enforce a 30-second idle timeout, preventing goroutine leaks when the remote
-// stops responding.
-func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
-	const bufSize = 65535
-	const idleTimeout = 30 * time.Second
-
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
-
-	done := make(chan struct{})
-	defer close(done)
-
-	// Watchdog: force-close when idle
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if time.Since(time.Unix(0, lastActivity.Load())) > idleTimeout {
-					netstackConn.Close()
-					targetConn.Close()
-					return
-				}
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, bufSize)
-		for {
-			n, err := netstackConn.Read(buf)
-			if err != nil {
-				return
-			}
-			lastActivity.Store(time.Now().UnixNano())
-			if _, err := targetConn.WriteTo(buf[:n], dstAddr); err != nil {
-				return
-			}
-		}
-	}()
-
-	buf := make([]byte, bufSize)
-	for {
-		n, _, err := targetConn.ReadFrom(buf)
-		if err != nil {
-			break
-		}
-		lastActivity.Store(time.Now().UnixNano())
-		if _, err := netstackConn.Write(buf[:n]); err != nil {
-			break
-		}
-	}
-	wg.Wait()
-}
-
-// handleConn routes a TUN-side TCP connection through the proxy chain or direct.
-func (e *Engine) handleConn(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
-	if inbound == "" {
-		inbound = "TUN"
-	}
-	// Compute correlation ID for trace linking
-	corrID := fmt.Sprintf("%s:%d->%s:%d", srcAddr, srcPort, dstAddr, dstPort)
-	util.LogModuleInfo("tun", "[HANDLECONN-ENTRY] [%s] handleConn START - inbound=%s modeB=%v", corrID, inbound, modeBMapping != nil)
-	util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] handleConn called", corrID)
-	defer func() {
-		util.LogModuleInfo("tun", "[HANDLECONN-EXIT] [%s] handleConn END", corrID)
-		conn.Close()
-	}()
-
-	// Check if this is a Fake-IP: restore original domain.
-	var domain string
-	if e.fakeIP != nil {
-		if d := e.fakeIP.LookupDomain(dstAddr); d != "" {
-			domain = d
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> %s", corrID, dstAddr, domain)
-		} else {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] fake-ip lookup: %s -> (no domain)", corrID, dstAddr)
-		}
-	}
-
-	// Check if this is a local mesh nodeID domain (nodeID.phn → 127.0.0.1)
-	var localNodeDomain bool
-	if domain != "" && e.localMeshNodeID != "" {
-		expectedDomain := e.localMeshNodeID + ".phn"
-		if domain == expectedDomain {
-			localNodeDomain = true
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] local mesh nodeID domain: %s == %s -> will dial 127.0.0.1", corrID, domain, expectedDomain)
-		} else {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] domain %s != expected %s", corrID, domain, expectedDomain)
-		}
-	} else {
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] localNodeDomain check skipped: domain=%q localMeshNodeID=%q", corrID, domain, e.localMeshNodeID)
-	}
-
-	// Phaethon patch #13: Check if dstAddr is one of our own mesh VIPs.
-	// When a connection arrives via mesh P2P to our own VIP (e.g., 100.179.0.10),
-	// domain is empty (not a fake-IP), so the nodeID.phn check above doesn't fire.
-	// Serve it via admin handler directly.
-	if !localNodeDomain && e.localMeshVIPs != nil {
-		if e.localMeshVIPs[dstAddr] {
-			localNodeDomain = true
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dstAddr %s is local mesh VIP -> will serve via admin handler", corrID, dstAddr)
-		}
-	}
-
-	connID := util.NextConnID()
-
-	// A dst inside the fake-IP alloc range with no mapping means the client is
-	// using a stale fake-IP (pool was reset, e.g. node restart). Close right
-	// away instead of direct-dialing a dead address for ~20s; the client's
-	// retry re-resolves DNS and gets the fresh fake-IP.
-	if domain == "" && e.fakeIP != nil {
-		if ip := net.ParseIP(dstAddr); ip != nil && e.fakeIP.InAllocRange(ip) {
-			util.LogModuleWarn("tun", "[TUN] [%s] [%s] stale fake-IP dst=%s:%d src=%s rejected (no pool mapping, node restarted?)",
-				corrID, connID, dstAddr, dstPort, srcAddr)
-			return
-		}
-	}
-
-	// Diagnostic: log Mode B connections prominently
-	if modeBMapping != nil {
-		util.LogModuleInfo("tun", "[TCP-DIAG] [%s] [%s] Mode B conn: src=%s dst=%s:%d mapping=%s inbound=%s",
-			corrID, connID, srcAddr, dstAddr, dstPort, modeBMapping.Name, inbound)
-	}
-
-	// Use domain for rule matching (so domain-based rules work).
-	matchAddr := dstAddr
-	if domain != "" {
-		matchAddr = domain
-	}
-
-	req := config.NewConnectRequest("tcp", matchAddr, dstPort)
-	var proxy *config.Proxy
-	var matchResult *config.MatchResult
-	matchMapping := TUNMapping
-	if modeBMapping != nil {
-		matchMapping = modeBMapping
-	}
-	var err error
-	util.LogModuleInfo("tun", "[HANDLECONN-RESOLVE] [%s] calling db.ResolveMatch for %s:%d mapping=%s", corrID, matchAddr, dstPort, matchMapping.Name)
-	req, proxy, matchResult, err = db.ResolveMatch(req, matchMapping.Name)
-	if err != nil {
-		util.LogModuleWarn("tun", "[%s] tcp resolve match failed: %v", corrID, err)
-		return
-	}
-	util.LogModuleInfo("tun", "[HANDLECONN-RESOLVED] [%s] ResolveMatch done: proxy=%v matchResult=%v", corrID, proxy != nil, matchResult != nil)
-	if proxy != nil {
-		util.LogModuleInfo("tun", "[HANDLECONN-PROXY] [%s] rule match: %s:%d -> proxy=%s type=%s v2=%v", corrID, matchAddr, dstPort, proxy.Name, proxy.Type, proxy.V2)
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> proxy=%s type=%s", corrID, matchAddr, dstPort, proxy.Name, proxy.Type)
-	} else {
-		util.LogModuleInfo("tun", "[HANDLECONN-DIRECT] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] rule match: %s:%d -> DIRECT (no proxy matched)", corrID, matchAddr, dstPort)
-	}
-
-	// Use the (possibly redirected) destination from Resolving
-	resolvedAddr := req.DstAddr
-	resolvedPort := req.DstPort
-	rec := connlog.Start(inbound, "TCP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
-	defer rec.Close()
-
-	var targetConn net.Conn
-
-	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
-		util.LogModuleDebug("tun", "[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)
-		rec.Reject()
-		return
-	}
-
-	if localNodeDomain {
-		util.LogModuleInfo("tun", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch", connID)
-		// Direct admin handler: bypass OS network stack entirely
-		if e.adminHandler != nil {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
-			util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
-			rec.SetDst("localhost").Establish(connID, proxy, false)
-			e.adminHandler.ServeConn(conn)
-			return
-		}
-		// Fallback: dial localhost via OS network stack
-		localIP := dialer.GetLocalIPForDial(nil)
-		dialAddr := localIP.String()
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, dialing local %s:%d (bypassing proxy)", corrID, connID, dialAddr, resolvedPort)
-		targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, strconv.Itoa(resolvedPort)))
-		if err != nil {
-			util.LogModuleWarn("tun", "[%s] [%s] [%s] local dial %s:%d fail: %v", corrID, inbound, connID, dialAddr, resolvedPort, err)
-			util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-FAIL] [%s] local dial FAILED: %v", connID, err)
-			rec.SetDst(dialAddr).Fail(err)
-			return
-		}
-		util.LogModuleInfo("tun", "[HANDLECONN-LOCAL-SUCCESS] [%s] local dial SUCCESS", connID)
-	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
-		util.LogModuleInfo("tun", "[HANDLECONN-PROXY-DIAL] [%s] ENTER proxy dial branch: proxy=%s type=%s dst=%s:%d v2=%v", connID, proxy.Name, proxy.Type, resolvedAddr, resolvedPort, proxy.V2)
-		util.LogInfo("tun", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d (v2=%v)", connID, proxy.Name, resolvedAddr, resolvedPort, proxy.V2)
-		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
-		if err != nil {
-			util.LogModuleWarn("tun", "[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)
-			util.LogModuleInfo("tun", "[HANDLECONN-PROXY-FAIL] [%s] proxy dial FAILED: %v", connID, err)
-			rec.Fail(err)
-			return
-		}
-		util.LogModuleInfo("tun", "[HANDLECONN-PROXY-SUCCESS] [%s] proxy dial SUCCESS", connID)
-		util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] proxy dial success", connID)
-	} else {
-		util.LogModuleInfo("tun", "[HANDLECONN-DIRECT-DIAL] [%s] ENTER direct dial branch: resolvedAddr=%s resolvedPort=%d", connID, resolvedAddr, resolvedPort)
-		// Direct dial: resolvedAddr may be the original domain or a resolver-rewritten
-		// host (IP or domain). If it is still a domain, resolve it; if it is an IP,
-		// dial it directly.
-		dialAddr := resolvedAddr
-		if net.ParseIP(dialAddr) == nil {
-			// Resolve the real IP for DIRECT connections.
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] resolving %s for DIRECT dial", connID, dialAddr)
-			ips, err := e.resolveForDirect(dialAddr)
-			if err != nil || len(ips) == 0 {
-				util.LogModuleWarn("tun", "[%s] [%s] resolve %s fail: %v", inbound, connID, dialAddr, err)
-				rec.Fail(err)
-				return
-			}
-			// Prefer IPv4
-			for _, ip := range ips {
-				if ip4 := ip.To4(); ip4 != nil {
-					dialAddr = ip4.String()
-					break
-				}
-			}
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
-		}
-		// Phaethon patch #13: Mesh IP destinations use mesh routing (MeshDial)
-		// instead of OS network stack direct dial. Mesh IPs (100.64.0.0/10) are
-		// not routable via the OS network stack; they must go through the mesh
-		// network's gVisor netstack.
-		if ip := net.ParseIP(dialAddr); ip != nil && e.isMeshIP(ip) {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
-			targetConn, err = dialer.MeshDial(dialAddr, resolvedPort, srcAddr, inbound, modeBMapping)
-			if err != nil {
-				util.LogModuleWarn("tun", "[%s] [%s] mesh dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
-				rec.SetDst(dialAddr).Fail(err)
-				return
-			}
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
-		} else {
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
-			targetConn, err = dialer.DialRouteAware("tcp", net.JoinHostPort(dialAddr, fmt.Sprintf("%d", resolvedPort)))
-			if err != nil {
-				util.LogModuleWarn("tun", "[%s] [%s] direct dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
-				rec.SetDst(dialAddr).Fail(err)
-				return
-			}
-			util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] direct dial success, starting relay", connID)
-		}
-	}
-	defer targetConn.Close()
-
-	util.LogModuleDebug("tun", "[TCP-DEBUG] [%s] relay started: %s:%d -> %s", connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
-	rec.Establish(connID, proxy, proxy.IsDirect())
-	relay(conn, targetConn)
-}
-
-func proxyDesc(p *config.Proxy) string {
-	if p == nil || strings.EqualFold(p.Type, config.ProxyDIRECT) {
-		return "DIRECT"
-	}
-	return p.Name
-}

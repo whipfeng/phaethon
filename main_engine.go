@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"phaethon/config"
 	"phaethon/db"
 	"phaethon/dialer"
 	"phaethon/mesh"
+	"phaethon/handler"
 	"phaethon/p2p"
 	"phaethon/tun"
 	"phaethon/util"
@@ -150,15 +152,58 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 			util.LogModuleInfo("engine", "Admin handler set for direct connection handling")
 		}
 
+		// Create and set connection handler for TCP/UDP connection processing
+		// Convert allVIPs slice to map for ConnectionHandler
+		localMeshVIPsMap := make(map[string]bool)
+		for _, vip := range allVIPs {
+			localMeshVIPsMap[vip.String()] = true
+		}
+		
+		connHandler := handler.NewConnectionHandler(handler.ConnectionHandlerConfig{
+			FakeIP:           meshMgr.GetFakeIPPool(),
+			LocalMeshNodeID:  meshMgr.GetNodeID(),
+			LocalMeshVIPs:    localMeshVIPsMap,
+			AdminHandler:     adminHandler,
+			ModeBTable:       modeBTable,
+			TUNConfig:        tunConfig,
+			IsMeshIP:         engine.IsMeshIP,
+			ResolveForDirect: engine.ResolveForDirect,
+		})
+		
+		// Set up forwarder callbacks directly on netstack (not through tun.Engine)
+		ns.SetCallbacks(&mesh.ForwarderCallbacks{
+			HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+				if connHandler != nil {
+					connHandler.HandleTCPConn(conn, srcAddr, srcPort, dstAddr, dstPort, inbound, modeBMapping)
+				}
+			},
+			HandleUDPConn: func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
+				if connHandler != nil {
+					connHandler.HandleUDPConn(conn, srcAddr, dstAddr, dstPort, inbound, modeBMapping)
+				}
+			},
+			LookupModeB: func(proto int, dstIP net.IP, dstPort, srcPort uint16) (string, string, *config.Mapping) {
+				if modeBTable != nil {
+					return modeBTable.LookupByDst(byte(proto), dstIP, dstPort, srcPort)
+				}
+				return "", "", nil
+			},
+			IsMeshIP: engine.IsMeshIP,
+			StatsNotify: func() {
+				// Stats notification handled by netstack internally
+			},
+		})
+		util.LogModuleInfo("engine", "Connection handler and callbacks set on netstack")
+
 		// Set up mesh DNS allocator (gateway allocates fakeIPs from local pool)
 		meshMgr.DNSAllocator = func(domain string) (net.IP, error) {
 			return meshMgr.GetFakeIPPool().Lookup(domain), nil
 		}
 
-		meshMgr.Start(engine.GetNetstack(), p2p.GlobalP2PManager)
+		meshMgr.Start(ns, p2p.GlobalP2PManager)
 
 		// Configure netstack with mesh manager (Link NICs + RouteSelector)
-		engine.GetNetstack().SetMeshManager(meshMgr)
+		ns.SetMeshManager(meshMgr)
 		util.LogModuleInfo("engine", "Mesh manager configured on netstack (Link NICs + RouteSelector)")
 
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)

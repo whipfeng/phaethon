@@ -2398,23 +2398,14 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateResolver checks if a resolver contains forbidden patterns.
-// Rejects resolvers that match loopback domains (loc.*.phn) or node mesh domains ({nodeid}.phn).
+// Rejects resolvers that match any *.phn domains (reserved for mesh network).
 func validateResolver(rv *config.Resolver) error {
 	srcHost := strings.TrimSpace(rv.SrcHost)
 	srcLower := strings.ToLower(srcHost)
 	
-	// Match loc.{anything}.phn (case-insensitive)
-	if strings.HasPrefix(srcLower, "loc.") && strings.HasSuffix(srcLower, ".phn") {
-		return fmt.Errorf("重定向禁止：loc.*.phn 是保留域名，用于本地回环测试")
-	}
-	
-	// Match {nodeid}.phn (the node's own mesh domain)
-	meshConfig, err := db.GetMeshConfig()
-	if err == nil && meshConfig != nil && meshConfig.NodeID != "" {
-		nodeDomain := strings.ToLower(meshConfig.NodeID + ".phn")
-		if srcLower == nodeDomain {
-			return fmt.Errorf("重定向禁止：%s 是本节点的 mesh 域名，保留用于内部路由", meshConfig.NodeID+".phn")
-		}
+	// Match any *.phn domain (case-insensitive)
+	if strings.HasSuffix(srcLower, ".phn") {
+		return fmt.Errorf("重定向禁止：*.phn 是 mesh 网络保留域名，不允许配置重定向")
 	}
 	
 	return nil

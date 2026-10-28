@@ -672,16 +672,17 @@ func loadUDPPortRange() {
 }
 
 // loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
-// Priority: data/setup/reverse-id file > generate new.
-// If a new one is generated, it is saved to the reverse-id file.
+// Priority: database node-id > legacy file reverse-id > generate new.
+// If a legacy file is found, it is migrated to the database automatically.
 func loadOrGenerateInstanceReverseID() string {
-	// Load from data/setup/reverse-id file
+	// Load from database or migrate from legacy file
 	dataDir := filepath.Join("data", "setup")
 	id, err := reverse.GetReverseID(dataDir)
 	if err != nil {
 		util.LogModuleInfo("system", "[REVERSE] load/generate instance reverse-id fail: %v", err)
 		return ""
 	}
+	util.LogModuleInfo("system", "[REVERSE] instance reverse-id loaded: %s (length=%d)", id, len(id))
 	return id
 }
 
@@ -1745,6 +1746,11 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 	// All reverse configs from this instance share the same identity;
 	// the Seq field differentiates them on the registry.
 	clientID := loadOrGenerateInstanceReverseID()
+	if clientID == "" {
+		util.LogModuleWarn("system", "[REVERSE] clientID is empty, registration will fail or use empty reverse-id")
+	} else {
+		util.LogModuleInfo("system", "[REVERSE] using clientID for registration: %s", clientID)
+	}
 
 	// For direct listeners configured through the admin wizard, the target may
 	// be stored as a single "target-address" string. Split it into host/port so

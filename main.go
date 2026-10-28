@@ -12,6 +12,7 @@ import (
 	"bufio"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -253,9 +254,13 @@ func run(prev *activeResources) (*activeResources, error) {
 	// Load mesh config from database
 	meshConfig, err := db.GetMeshConfig()
 	if err != nil {
-		return nil, fmt.Errorf("load mesh config: %w", err)
-	}
-	if meshConfig == nil {
+		// If bucket or key doesn't exist, use defaults
+		if !errors.Is(err, db.ErrNotFound) && !strings.Contains(err.Error(), "不存在") {
+			return nil, fmt.Errorf("load mesh config: %w", err)
+		}
+		util.LogModuleInfo("system", "Mesh: no config found (%v), using defaults", err)
+		meshConfig = &config.MeshConfig{}
+	} else if meshConfig == nil {
 		meshConfig = &config.MeshConfig{}
 		util.LogModuleInfo("system", "Mesh: no config found, using defaults")
 	}

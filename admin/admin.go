@@ -2397,42 +2397,14 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, proxySummary(p))
 }
 
-// validateRule checks if a rule string contains forbidden patterns.
-// Rejects rules that match loopback domains (loc.*.phn) or loopback IPs (127.0.0.0/8).
-func validateRule(ruleStr string) error {
-	// Parse rule: TYPE,PATTERN,PROXY[,MAPPING]
-	parts := strings.Split(strings.TrimSpace(ruleStr), ",")
-	if len(parts) < 3 {
-		return nil // Let the database handle malformed rules
+// validateResolver checks if a resolver contains forbidden patterns.
+// Rejects resolvers that match loopback domains (loc.*.phn).
+func validateResolver(rv *config.Resolver) error {
+	srcHost := strings.TrimSpace(rv.SrcHost)
+	// Match loc.{anything}.phn (case-insensitive)
+	if strings.HasPrefix(strings.ToLower(srcHost), "loc.") && strings.HasSuffix(strings.ToLower(srcHost), ".phn") {
+		return fmt.Errorf("重定向禁止：loc.*.phn 是保留域名，用于本地回环测试")
 	}
-
-	ruleType := strings.TrimSpace(parts[0])
-	pattern := strings.TrimSpace(parts[1])
-
-	// Check DOMAIN and DOMAIN-SUFFIX for loc.*.phn pattern
-	if ruleType == "DOMAIN" || ruleType == "DOMAIN-SUFFIX" {
-		// Match loc.{anything}.phn (case-insensitive)
-		if strings.HasPrefix(strings.ToLower(pattern), "loc.") && strings.HasSuffix(strings.ToLower(pattern), ".phn") {
-			return fmt.Errorf("规则禁止：loc.*.phn 是保留域名，用于本地回环测试")
-		}
-	}
-
-	// Check IP-CIDR for loopback ranges
-	if ruleType == "IP-CIDR" {
-		// Parse CIDR
-		_, ipNet, err := net.ParseCIDR(pattern)
-		if err == nil {
-			// Check if it's in 127.0.0.0/8
-			loopbackNet := net.IPNet{
-				IP:   net.ParseIP("127.0.0.0"),
-				Mask: net.CIDRMask(8, 32),
-			}
-			if loopbackNet.Contains(ipNet.IP) {
-				return fmt.Errorf("规则禁止：127.0.0.0/8 是回环地址，不能用于规则匹配")
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -2472,12 +2444,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Rule == "" {
 			httpError(w, "rule required", http.StatusBadRequest)
-			return
-		}
-
-		// Validate rule: reject loopback domain patterns
-		if err := validateRule(body.Rule); err != nil {
-			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -2523,12 +2489,6 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Rule == "" {
 			httpError(w, "rule required", http.StatusBadRequest)
-			return
-		}
-
-		// Validate rule: reject loopback domain patterns
-		if err := validateRule(body.Rule); err != nil {
-			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -2808,6 +2768,12 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		}
 		if rv.Name == "" {
 			httpError(w, "name required", http.StatusBadRequest)
+			return
+		}
+
+		// Validate resolver: reject loopback domain patterns
+		if err := validateResolver(&rv); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 

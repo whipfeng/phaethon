@@ -26,14 +26,12 @@ import (
 )
 
 
-// Engine manages the TUN device, netstack, and traffic interception.
-type Engine struct {
+// Manager manages the TUN device I/O and lifecycle.
+type Manager struct {
 	tunConfig *config.TUNConfig
 	proxies   []*config.Proxy
 	device    Device
 	netstack  *mesh.Netstack
-	fakeIP    *mesh.FakeIPPool
-	dnsHijack *mesh.DNSHijacker
 	routeMgr  *RouteManager
 	dhcpSrv   DHCPServer
 	prefixLen int
@@ -57,32 +55,16 @@ type Engine struct {
 	logMu sync.Mutex
 	logs  []string
 
-	// Mesh-related fields (interceptor removed in phase 2)
-	localMeshVIPs   map[string]bool  // all local mesh VIPs as string keys
-	meshSubnet      *net.IPNet       // mesh subnet for Fake-IP allocation (set when mesh is enabled)
-	meshNetwork     *net.IPNet       // overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
-	modeBTable      *mesh.ModeBTable // Mode B (proxy entry) connection tracking
-	localMeshNodeID string           // local mesh node ID for nodeID.phn → 127.0.0.1 resolution
-
 	meshWriteCh chan []byte // queue for async WriteMeshPacket to TUN device
 
 	// preConnectCallback is called after bind (port allocated) but before connect (SYN sent).
 	// Used for ModeBTable registration before the forwarder is triggered.
 	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
-
-	adminHandler AdminHandler // direct admin server connection handler (bypasses OS network stack)
-	
 }
 
-// AdminHandler can serve a single network connection directly.
-// Implemented by admin.AdminServer to allow bypassing the OS network stack.
-type AdminHandler interface {
-	ServeConn(conn net.Conn)
-}
-
-// NewEngine creates a new TUN engine. It does not start anything yet.
+// NewManager creates a new TUN engine. It does not start anything yet.
 // Configuration is loaded from the database.
-func NewEngine() *Engine {
+func NewManager() *Manager {
 	tunConfig, err := db.GetTUNConfig()
 	if err != nil {
 		util.LogModuleWarn("tun", "failed to load TUN config from db: %v", err)
@@ -93,75 +75,37 @@ func NewEngine() *Engine {
 		util.LogModuleWarn("tun", "failed to load proxies from db: %v", err)
 	}
 
-	return &Engine{
+	return &Manager{
 		tunConfig: tunConfig,
 		proxies:   proxies,
 	}
 }
 
 // SetDataDir sets the runtime data directory for persistent storage (e.g. DHCP leases).
-func (e *Engine) SetDataDir(dir string) {
+func (e *Manager) SetDataDir(dir string) {
 	e.dataDir = dir
 }
 
 // SetNetstack sets the mesh.Netstack instance for this engine.
 // Must be called before Start().
-func (e *Engine) SetNetstack(ns *mesh.Netstack) {
+func (e *Manager) SetNetstack(ns *mesh.Netstack) {
 	e.netstack = ns
 }
 
 // GetNetstack returns the mesh.Netstack instance.
-func (e *Engine) GetNetstack() *mesh.Netstack {
+func (e *Manager) GetNetstack() *mesh.Netstack {
 	return e.netstack
-}
-
-// SetMeshConfig configures mesh-related settings (interceptor removed in phase 2).
-func (e *Engine) SetMeshConfig(localVIPs []net.IP) {
-	e.localMeshVIPs = make(map[string]bool, len(localVIPs))
-	for _, vip := range localVIPs {
-		if v4 := vip.To4(); v4 != nil {
-			e.localMeshVIPs[v4.String()] = true
-		}
-	}
-
-	// Share callbacks with the netstack for diagnostics
-	if e.netstack != nil {
-		e.netstack.SetLocalMeshVIPFunc(e.isLocalMeshVIP)
-		e.netstack.SetIsMeshIPFunc(e.IsMeshIP)
-		// Set FakeIP reverse lookup for diagnostics
-		if e.fakeIP != nil {
-			e.netstack.SetLookupDomainFunc(e.fakeIP.LookupDomain)
-		}
-	}
-
-	util.LogModuleDebug("tun", "tun: mesh interceptor set (localVIPs=%v)", localVIPs)
-}
-
-// SetModeBTable sets the Mode B connection tracking table.
-func (e *Engine) SetModeBTable(t *mesh.ModeBTable) {
-	e.modeBTable = t
 }
 
 // SetPreConnectCallback sets a callback that is called after bind (port allocated)
 // but before connect (SYN sent). Used for ModeBTable registration.
-func (e *Engine) SetPreConnectCallback(callback func(dstAddr tcpip.Address, dstPort, srcPort uint16)) {
+func (e *Manager) SetPreConnectCallback(callback func(dstAddr tcpip.Address, dstPort, srcPort uint16)) {
 	e.preConnectCallback = callback
-}
-
-// GetModeBTable returns the Mode B connection tracking table.
-func (e *Engine) GetModeBTable() *mesh.ModeBTable {
-	return e.modeBTable
-}
-
-// SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
-func (e *Engine) SetLocalMeshNodeID(nodeID string) {
-	e.localMeshNodeID = nodeID
-	util.LogModuleDebug("tun", "tun: local mesh nodeID set: %s", nodeID)
 }
 
 // Write writes data to the TUN device. Implements the WriteLoopDevice interface
 // for mesh.Netstack.
-func (e *Engine) Write(data []byte) (int, error) {
+func (e *Manager) Write(data []byte) (int, error) {
 	e.mu.Lock()
 	dev := e.device
 	e.mu.Unlock()
@@ -171,69 +115,8 @@ func (e *Engine) Write(data []byte) (int, error) {
 	return dev.Write(data)
 }
 
-// SetAdminHandler sets the admin server for direct connection handling.
-// When set, connections to nodeid.phn will be served directly without going through OS network stack.
-func (e *Engine) SetAdminHandler(h AdminHandler) {
-	e.adminHandler = h
-	util.LogModuleDebug("tun", "tun: admin handler set for direct connection handling")
-}
-
-// SetDNSDomainResolver registers a callback on the DNS hijacker that returns
-// the remote Fake-IP subnet for a domain. Returns (subnet, needsFail):
-//   - subnet != nil: matched a route, forward to remote
-//   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
-//   - subnet == nil && needsFail == false: no match, fallback to local pool
-func (e *Engine) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
-	util.LogModuleInfo("tun", "[DNS-DEBUG] Engine.SetDNSDomainResolver() called")
-	if e.dnsHijack != nil {
-		e.dnsHijack.SetDomainResolver(resolver)
-		util.LogModuleInfo("tun", "[DNS-DEBUG] DNS hijacker resolver set successfully")
-	} else {
-		util.LogModuleWarn("tun", "[DNS-DEBUG] DNS hijacker is nil, cannot set resolver")
-	}
-}
-
-// SetDNSHijacker binds the mesh's DNS hijacker to this engine's netstack.
-// Called when mesh is configured and TUN engine is started.
-func (e *Engine) SetDNSHijacker(h *mesh.DNSHijacker, fakeIP *mesh.FakeIPPool) error {
-	util.LogModuleInfo("tun", "[DNS-HIJACK] SetDNSHijacker called, netstack=%v, isRunning=%v", e.netstack != nil, e.netstack != nil && e.netstack.IsRunning())
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.netstack == nil || !e.netstack.IsRunning() {
-		return fmt.Errorf("tun: netstack not running")
-	}
-
-	// Bind netstack to the hijacker
-	h.BindNetstack(e.netstack.Stack(), e.netstack.Addr(), e.netstack.DNSAddr())
-
-	// Start the hijacker
-	if err := h.Start(e.netstack.WaitGroup()); err != nil {
-		return fmt.Errorf("tun: start dns hijacker: %w", err)
-	}
-
-	e.dnsHijack = h
-	e.fakeIP = fakeIP
-	if fakeIP != nil {
-		fakeIP.SetOnChange(e.notifyStatsChanged)
-	}
-
-	util.LogModuleInfo("tun", "tun: DNS hijacker bound from mesh")
-	return nil
-}
-
-// GetFakeIPPool returns the Fake-IP pool for external use (e.g., mesh DNS allocator).
-func (e *Engine) GetFakeIPPool() *mesh.FakeIPPool {
-	return e.fakeIP
-}
-
-// GetDNSHijacker returns the DNS hijacker for external use (e.g., mesh DNS forwarding).
-func (e *Engine) GetDNSHijacker() *mesh.DNSHijacker {
-	return e.dnsHijack
-}
-
 // ResolveDomain resolves a domain name by delegating to the netstack.
-func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
+func (e *Manager) ResolveDomain(domain string) (net.IP, error) {
 	if e.netstack == nil {
 		return nil, fmt.Errorf("netstack not initialized")
 	}
@@ -242,7 +125,7 @@ func (e *Engine) ResolveDomain(domain string) (net.IP, error) {
 
 // ResolveDomainViaDNS resolves a domain name via a specific DNS server.
 // Used by v2 mesh dialer to resolve domains via peer's DNS server.
-func (e *Engine) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.IP, error) {
+func (e *Manager) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.IP, error) {
 	if e.netstack == nil {
 		return nil, fmt.Errorf("netstack not initialized")
 	}
@@ -250,25 +133,17 @@ func (e *Engine) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.IP,
 }
 
 // NetDial dials a connection through the netstack.
-func (e *Engine) NetDial(network, addr string) (net.Conn, error) {
+func (e *Manager) NetDial(network, addr string) (net.Conn, error) {
 	if e.netstack == nil {
 		return nil, fmt.Errorf("netstack not initialized")
 	}
 	return e.netstack.NetDial(network, addr)
 }
 
-// NetDialWithModeB dials through the netstack and registers in ModeBTable before sending SYN.
-func (e *Engine) NetDialWithModeB(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
-	if e.netstack == nil {
-		return nil, fmt.Errorf("netstack not initialized")
-	}
-	return e.netstack.NetDialWithModeB(network, addr, clientAddr, inbound, mapping, e.modeBTable)
-}
-
 // NetDialV2 dials a TCP connection with a per-endpoint RouteFunc for v2 proxy
 // connections. The routeFunc is set on the endpoint before Connect, allowing
 // the connection to bypass the stack-level RouteSelector.
-func (e *Engine) NetDialV2(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error) {
+func (e *Manager) NetDialV2(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error) {
 	if e.netstack == nil {
 		return nil, fmt.Errorf("netstack not initialized")
 	}
@@ -276,16 +151,15 @@ func (e *Engine) NetDialV2(network, addr string, routeFunc func() stack.RouteDec
 }
 
 // ConfigureMeshAddresses reconfigures the TUN engine to use mesh subnet addresses.
-func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
+func (e *Manager) ConfigureMeshAddresses(subnet *net.IPNet) error {
 	if e.netstack == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
 	if err := e.netstack.ConfigureMeshAddresses(subnet); err != nil {
 		return err
 	}
-	// Also store meshSubnet locally for readLoop/writeLoop routing
+	// Store mesh subnet info for prefixLen calculation
 	if subnet != nil {
-		e.meshSubnet = subnet
 		e.netstack.SetMeshSubnet(subnet)
 
 		ip4 := subnet.IP.To4()
@@ -301,16 +175,9 @@ func (e *Engine) ConfigureMeshAddresses(subnet *net.IPNet) error {
 	return nil
 }
 
-func (e *Engine) isLocalMeshVIP(ip net.IP) bool {
-	if e.localMeshVIPs == nil {
-		return false
-	}
-	return e.localMeshVIPs[ip.To4().String()]
-}
-
 // meshWriteLoop consumes packets from meshWriteCh and writes them to the TUN device.
 // Decouples mesh writes from callers to prevent blocking.
-func (e *Engine) meshWriteLoop() {
+func (e *Manager) meshWriteLoop() {
 	defer e.tunWG.Done()
 	for {
 		select {
@@ -333,7 +200,7 @@ func (e *Engine) meshWriteLoop() {
 
 // WriteMeshPacket writes a raw IP packet directly to the TUN device so the OS
 // kernel receives it as an incoming packet from the adapter.
-func (e *Engine) WriteMeshPacket(data []byte) error {
+func (e *Manager) WriteMeshPacket(data []byte) error {
 	e.mu.Lock()
 	tunUp := e.tunRunning
 	e.mu.Unlock()
@@ -360,42 +227,14 @@ func (e *Engine) WriteMeshPacket(data []byte) error {
 
 // AddMeshRoute adds a route for the mesh subnet through the TUN device.
 // This is called when mesh is configured to ensure mesh-destined packets reach the TUN.
-func (e *Engine) AddMeshRoute(subnet string) error {
-	return e.addMeshRoute(subnet)
-}
-
-// SetMeshNetwork sets the overall mesh network range for identifying mesh IPs.
-func (e *Engine) SetMeshNetwork(network *net.IPNet) {
-	e.meshNetwork = network
-	if e.netstack != nil {
-		e.netstack.SetMeshNetwork(network)
-	}
-}
-
-// isMeshIP checks if an IP belongs to the mesh network (full range, not just local subnet).
-func (e *Engine) IsMeshIP(ip net.IP) bool {
-	if e.meshNetwork != nil && e.meshNetwork.Contains(ip) {
-		return true
-	}
-	if e.meshSubnet != nil && e.meshSubnet.Contains(ip) {
-		return true
-	}
-	return false
-}
-
-// AddMeshVIP registers a mesh virtual IP with the gVisor netstack.
-// Delegates to the mesh.Netstack.
-func (e *Engine) AddMeshVIP(vip net.IP) error {
-	if e.netstack == nil {
-		return fmt.Errorf("netstack not initialized")
-	}
-	return e.netstack.AddMeshVIP(vip)
+func (e *Manager) AddMeshRoute(subnet string) error {
+	return e.AddMeshRoute(subnet)
 }
 
 // resolveForDirect resolves a domain name to IP addresses for DIRECT connections.
 // It uses configured direct-nameserver if available, otherwise falls back to
 // ResolveRouteAware which uses the original DNS servers captured at TUN startup.
-func (e *Engine) ResolveForDirect(domain string) ([]net.IP, error) {
+func (e *Manager) ResolveForDirect(domain string) ([]net.IP, error) {
 	var servers []string
 	if e.tunConfig != nil {
 		servers = e.tunConfig.DirectNameserverList()
@@ -475,12 +314,12 @@ func resolveWithServers(domain string, servers []string) ([]net.IP, error) {
 }
 
 // IsEnabled reports whether the TUN engine is active.
-func (e *Engine) IsEnabled() bool {
+func (e *Manager) IsEnabled() bool {
 	return e.netstack != nil && e.netstack.IsRunning()
 }
 
 // IsTUNRunning reports whether the TUN device is active.
-func (e *Engine) IsTUNRunning() bool {
+func (e *Manager) IsTUNRunning() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.tunRunning
@@ -488,7 +327,7 @@ func (e *Engine) IsTUNRunning() bool {
 
 const maxTUNLogs = 32
 
-func (e *Engine) logEvent(format string, args ...interface{}) {
+func (e *Manager) logEvent(format string, args ...interface{}) {
 	e.logMu.Lock()
 	defer e.logMu.Unlock()
 	msg := fmt.Sprintf(format, args...)
@@ -499,7 +338,7 @@ func (e *Engine) logEvent(format string, args ...interface{}) {
 }
 
 // Logs returns the most recent TUN engine event log entries.
-func (e *Engine) Logs() []string {
+func (e *Manager) Logs() []string {
 	e.logMu.Lock()
 	defer e.logMu.Unlock()
 	out := make([]string, len(e.logs))
@@ -509,7 +348,7 @@ func (e *Engine) Logs() []string {
 
 // notifyStatsChanged schedules a "tun" version bump with debounce.
 // Called when packet counters or fakeIP stats change.
-func (e *Engine) notifyStatsChanged() {
+func (e *Manager) notifyStatsChanged() {
 	e.statsNotifyMu.Lock()
 	defer e.statsNotifyMu.Unlock()
 
@@ -528,7 +367,7 @@ func (e *Engine) notifyStatsChanged() {
 }
 
 // RouteSnapshot returns the current route manager state.
-func (e *Engine) RouteSnapshot() RouteSnapshot {
+func (e *Manager) RouteSnapshot() RouteSnapshot {
 	e.mu.Lock()
 	rm := e.routeMgr
 	e.mu.Unlock()
@@ -544,7 +383,7 @@ func (e *Engine) RouteSnapshot() RouteSnapshot {
 // TUNInterfaceIndex returns the OS interface index of the phaethon TUN adapter.
 // The watchdog uses this to bind its HTTP probe sockets directly to the TUN
 // interface so probe traffic cannot bypass TUN.
-func (e *Engine) TUNInterfaceIndex() int {
+func (e *Manager) TUNInterfaceIndex() int {
 	e.mu.Lock()
 	rm := e.routeMgr
 	e.mu.Unlock()
@@ -557,7 +396,7 @@ func (e *Engine) TUNInterfaceIndex() int {
 // PhysicalInterfaceIndex returns the OS interface index of the original default
 // interface (before TUN was activated). The watchdog uses this to bind
 // DNS queries to the original default interface, bypassing TUN split-tunnel routes.
-func (e *Engine) PhysicalInterfaceIndex() int {
+func (e *Manager) PhysicalInterfaceIndex() int {
 	e.mu.Lock()
 	rm := e.routeMgr
 	e.mu.Unlock()
@@ -570,7 +409,7 @@ func (e *Engine) PhysicalInterfaceIndex() int {
 // TUNInterfaceIP returns the IPv4 address assigned to the phaethon TUN adapter.
 // The watchdog uses this as the source address for its HTTP probes so Windows
 // routes the packets into the Wintun ring.
-func (e *Engine) TUNInterfaceIP() net.IP {
+func (e *Manager) TUNInterfaceIP() net.IP {
 	e.mu.Lock()
 	rm := e.routeMgr
 	e.mu.Unlock()
@@ -588,22 +427,16 @@ type TUNStats struct {
 }
 
 // Stats returns a snapshot of the TUN engine diagnostic statistics.
-func (e *Engine) Stats() TUNStats {
+func (e *Manager) Stats() TUNStats {
 	s := TUNStats{
 		ReadPackets:  e.readPackets.Load(),
 		WritePackets: e.writePackets.Load(),
-	}
-	e.mu.Lock()
-	fakeIP := e.fakeIP
-	e.mu.Unlock()
-	if fakeIP != nil {
-		s.FakeIP = fakeIP.Stats()
 	}
 	return s
 }
 
 // DHCPLeaseSnapshot returns the current DHCP lease list, or nil if DHCP is not running.
-func (e *Engine) DHCPLeaseSnapshot() []DHCPLease {
+func (e *Manager) DHCPLeaseSnapshot() []DHCPLease {
 	e.mu.Lock()
 	srv := e.dhcpSrv
 	e.mu.Unlock()
@@ -614,7 +447,7 @@ func (e *Engine) DHCPLeaseSnapshot() []DHCPLease {
 }
 
 // UpdateDHCPStaticBindings hot-updates the DHCP static bindings if the server is running.
-func (e *Engine) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
+func (e *Manager) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
 	e.mu.Lock()
 	srv := e.dhcpSrv
 	e.mu.Unlock()
@@ -626,7 +459,7 @@ func (e *Engine) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) {
 // StartStack starts the gVisor netstack (FakeIP, DNS hijacker, TCP/UDP forwarders).
 // This is the core networking layer and should always be running.
 // Note: Forwarder callbacks are set up by main_engine.go directly on the netstack.
-func (e *Engine) StartStack() error {
+func (e *Manager) StartStack() error {
 	if e.netstack == nil {
 		return fmt.Errorf("tun: netstack not set (call SetNetstack before Start)")
 	}
@@ -654,7 +487,7 @@ func (e *Engine) StartStack() error {
 
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
 // Requires StartStack() to be called first.
-func (e *Engine) StartTUN() error {
+func (e *Manager) StartTUN() error {
 	e.mu.Lock()
 	if e.netstack == nil || !e.netstack.IsRunning() {
 		e.mu.Unlock()
@@ -779,7 +612,7 @@ func (e *Engine) StartTUN() error {
 // Start starts the gVisor netstack and optionally the TUN device.
 // Convenience method equivalent to StartStack() + StartTUN() (if TUN is enabled).
 // If TUN fails to start, the netstack continues running (mesh-only mode).
-func (e *Engine) Start() error {
+func (e *Manager) Start() error {
 	if err := e.StartStack(); err != nil {
 		return err
 	}
@@ -801,7 +634,7 @@ func (e *Engine) Start() error {
 
 // StopTUN stops the TUN device, restores routes and system DNS.
 // The gVisor netstack continues running.
-func (e *Engine) StopTUN() error {
+func (e *Manager) StopTUN() error {
 	e.mu.Lock()
 	if !e.tunRunning {
 		e.mu.Unlock()
@@ -848,15 +681,9 @@ func (e *Engine) StopTUN() error {
 
 // StopStack stops the gVisor netstack (DNS hijacker, forwarders, etc.).
 // Should be called after StopTUN() if TUN was running.
-func (e *Engine) StopStack() error {
+func (e *Manager) StopStack() error {
 	if e.netstack == nil {
 		return nil
-	}
-
-	// Stop services before waiting for goroutines, since service goroutines
-	// (e.g. DNS hijacker) are part of wg and need their endpoints closed to exit.
-	if e.dnsHijack != nil {
-		e.dnsHijack.Stop()
 	}
 
 	if err := e.netstack.Stop(); err != nil {
@@ -870,7 +697,7 @@ func (e *Engine) StopStack() error {
 
 // Stop tears down everything: TUN device and gVisor netstack.
 // Convenience method equivalent to StopTUN() + StopStack().
-func (e *Engine) Stop() error {
+func (e *Manager) Stop() error {
 	e.StopTUN()
 	e.StopStack()
 	connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "stopped", nil)
@@ -879,7 +706,7 @@ func (e *Engine) Stop() error {
 
 // AddHTunnelEndpoint creates a link.Endpoint for an h_tunnel proxy.
 // Delegates to the mesh.Netstack.
-func (e *Engine) AddHTunnelEndpoint(proxyName string, peer mesh.PeerSender) error {
+func (e *Manager) AddHTunnelEndpoint(proxyName string, peer mesh.PeerSender) error {
 	if e.netstack == nil {
 		return fmt.Errorf("netstack not initialized")
 	}
@@ -887,14 +714,14 @@ func (e *Engine) AddHTunnelEndpoint(proxyName string, peer mesh.PeerSender) erro
 }
 
 // RemoveHTunnelEndpoint removes and closes the h_tunnel endpoint for a proxy.
-func (e *Engine) RemoveHTunnelEndpoint(proxyName string) {
+func (e *Manager) RemoveHTunnelEndpoint(proxyName string) {
 	if e.netstack != nil {
 		e.netstack.RemoveHTunnelEndpoint(proxyName)
 	}
 }
 
 // HTunnelEndpoint returns the h_tunnel endpoint for a proxy, or nil if not found.
-func (e *Engine) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
+func (e *Manager) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
 	if e.netstack == nil {
 		return nil
 	}
@@ -902,7 +729,7 @@ func (e *Engine) HTunnelEndpoint(proxyName string) *mesh.HTunnelEndpoint {
 }
 
 // readLoop reads IP packets from the TUN device and injects them into netstack.
-func (e *Engine) readLoop() {
+func (e *Manager) readLoop() {
 	util.LogModuleInfo("tun", "[TUN-READ] readLoop started")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -980,9 +807,7 @@ func (e *Engine) readLoop() {
 			dstIP := net.IP(readBuf[16:20])
 			srcIP := net.IP(readBuf[12:16]).String()
 			ipProto := readBuf[9]
-			if e.meshSubnet != nil && e.meshSubnet.Contains(dstIP) {
-				util.LogModuleDebug("tun", "tun read FAKE: %s -> %s (proto=%d len=%d cnt=%d)", srcIP, dstIP, ipProto, n, e.readPackets.Load())
-			} else if len(dstIP) >= 2 && ((dstIP[0] == 10 && dstIP[1] == 99) || (dstIP[0] == 172 && dstIP[1] == 30)) {
+			if len(dstIP) >= 2 && ((dstIP[0] == 10 && dstIP[1] == 99) || (dstIP[0] == 172 && dstIP[1] == 30)) {
 				// Phaethon diagnostic: always log 10.99.0.0/24 and 172.30.0.0/24 packets
 				util.LogModuleDebug("tun", "[TUN-READ-TEST] packet #%d: %s -> %s proto=%d len=%d", e.readPackets.Load(), srcIP, dstIP, ipProto, n)
 			} else if e.readPackets.Load() <= 200 {
@@ -1054,15 +879,8 @@ func (e *Engine) readLoop() {
 				util.LogModuleInfo("tun", "[TRACEROUTE] readLoop: TTL expired (was %d), generating ICMP: %s -> %s",
 					oldTTL, srcIP, dstIP)
 				// Manually generate ICMP Time Exceeded
-				// ICMP source = local VIP, destination = source of received packet
-				var localVIP net.IP
-				for vipStr := range e.localMeshVIPs {
-					localVIP = net.ParseIP(vipStr)
-					break
-				}
-				if localVIP == nil {
-					localVIP = dstIP // fallback
-				}
+				// ICMP source = destination IP (fallback), destination = source of received packet
+				localVIP := dstIP // fallback
 				icmpPkt := mesh.GenerateICMPTimeExceeded(localVIP, pktBuf)
 				if icmpPkt != nil {
 					// NAT handled by gVisor iptables
@@ -1091,7 +909,7 @@ func (e *Engine) readLoop() {
 // injectPacket wraps packet injection with proper resource cleanup.
 // Using defer in this method ensures PacketBuffer is always released,
 // even if InjectInbound panics.
-func (e *Engine) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, n int) {
+func (e *Manager) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte, n int) {
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pktBuf)})
 	defer pkt.DecRef()
 

@@ -1102,7 +1102,7 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 }
 
 // connectHTTarget is the h_tunnel mapping handler. It dials through the mesh
-// netstack so the target passes the full rule engine (tun.Engine.handleConn)
+// netstack so the target passes the full rule engine (tun.Manager.handleConn)
 // and acceptTCP's Mode B lookup can attribute the connection to the real
 // client. Dialing directly with net.DialTimeout would bypass both — see
 // docs/plans/htunnel_p2p_direct_mode.md appendix A.4 (decision retracted).

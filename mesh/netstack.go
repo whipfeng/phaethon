@@ -87,6 +87,10 @@ type Netstack struct {
 	localMeshNodeID string
 	localMeshVIPs   map[string]bool
 
+	// Stats notification (debounced)
+	statsNotifyMu    sync.Mutex
+	statsNotifyTimer *time.Timer
+
 	// Forwarder callbacks
 	callbacks *ForwarderCallbacks
 
@@ -460,7 +464,32 @@ func (n *Netstack) StartDNSHijacker() error {
 	if err := n.dnsHijacker.Start(n.WaitGroup()); err != nil {
 		return fmt.Errorf("start DNS hijacker: %w", err)
 	}
+	if n.fakeIPPool != nil {
+		n.fakeIPPool.SetOnChange(n.notifyStatsChanged)
+	}
 	return nil
+}
+
+// notifyStatsChanged debounces stats notifications to avoid excessive API calls.
+func (n *Netstack) notifyStatsChanged() {
+	n.statsNotifyMu.Lock()
+	defer n.statsNotifyMu.Unlock()
+
+	if n.statsNotifyTimer != nil {
+		return // already scheduled
+	}
+
+	// Use 2-second debounce to avoid excessive API calls from rapidly changing counters
+	n.statsNotifyTimer = time.AfterFunc(2*time.Second, func() {
+		n.statsNotifyMu.Lock()
+		n.statsNotifyTimer = nil
+		n.statsNotifyMu.Unlock()
+
+		// Call the stats notify callback if set
+		if n.callbacks != nil && n.callbacks.StatsNotify != nil {
+			n.callbacks.StatsNotify()
+		}
+	})
 }
 
 // GetDNSHijacker returns the DNS hijacker.

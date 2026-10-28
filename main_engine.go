@@ -8,28 +8,16 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"phaethon/admin"
 	"phaethon/config"
 	"phaethon/db"
 	"phaethon/dialer"
-	"phaethon/mesh"
 	"phaethon/handler"
+	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/tun"
 	"phaethon/util"
 )
-
-// TUNResource wraps a tun.Engine for lifecycle management.
-type TUNResource struct {
-	engine   *tun.Engine
-	netstack *mesh.Netstack
-}
-
-// Stop shuts down the TUN engine.
-func (r *TUNResource) Stop() {
-	if r.engine != nil {
-		r.engine.Stop()
-	}
-}
 
 // startEngine creates and starts the engine.
 // The gVisor netstack (with DNS hijacker) is always started when there is a config,
@@ -37,7 +25,8 @@ func (r *TUNResource) Stop() {
 // When TUN is enabled, the TUN device and OS routes are also set up.
 // If meshMgr is non-nil, it is wired to the engine immediately after start.
 // If adminHandler is non-nil, it is set for direct connection handling (bypasses OS network stack).
-func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNResource {
+// Returns: (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler)
+func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler) {
 	// Clear the graceful-shutdown marker from any previous run.
 	removeStoppedMarker()
 
@@ -67,7 +56,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 		util.LogModuleInfo("engine", "TUN disabled, starting gVisor netstack for mesh...")
 	}
 
-	engine := tun.NewEngine()
+	engine := tun.NewManager()
 	engine.SetDataDir(dataDir)
 
 	// Create and set the netstack before starting the engine
@@ -82,9 +71,6 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 			}
 		}
 	}
-	if network := meshMgr.GetNetwork(); network != nil {
-		engine.SetMeshNetwork(network)
-	}
 
 	// Inject phaethon's module logging into gVisor fork diagnostic logs.
 	// Route gVisor diagnostic logs to Debug level to reduce noise.
@@ -95,7 +81,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 
 	if err := engine.Start(); err != nil {
 		util.LogModuleError("engine", "Engine start failed: %v", err)
-		return nil
+		return nil, nil, nil
 	}
 
 	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
@@ -107,6 +93,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 	// Wire mesh to engine immediately after start.
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
+	var connHandler *handler.ConnectionHandler
 	{
 		// Create Mode B connection tracking table early (needed by dialer functions)
 		modeBTable := mesh.NewModeBTable()
@@ -118,11 +105,11 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 		ns.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool())
 		if err := ns.BindNetstack(); err != nil {
 			util.LogModuleError("engine", "Failed to bind DNS hijacker to netstack: %v", err)
-			return nil
+			return nil, nil, nil
 		}
 		if err := ns.StartDNSHijacker(); err != nil {
 			util.LogModuleError("engine", "Failed to start DNS hijacker: %v", err)
-			return nil
+			return nil, nil, nil
 		}
 		util.LogModuleInfo("engine", "[DNS-INIT] DNS hijacker bound and started")
 
@@ -150,17 +137,20 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 		// Tunnel NICs handle IPIP encapsulation, route table directs traffic appropriately
 		ns.SetMeshConfig(allVIPs)
 
+		// Set the overall mesh network range for RouteSelector
+		meshNetwork := meshMgr.GetNetwork()
+		if meshNetwork != nil {
+			ns.SetMeshNetwork(meshNetwork)
+			util.LogModuleInfo("engine", "Mesh network range set: %s", meshNetwork.String())
+		} else {
+			util.LogModuleWarn("engine", "Mesh network is nil")
+		}
+
 		// Share Mode B table globally and with netstack
 		ns.SetModeBTable(modeBTable)
 		dialer.GlobalModeBTable = modeBTable
 
 		ns.SetLocalMeshNodeID(meshMgr.GetNodeID())
-
-		// Set admin handler for direct connection handling (bypasses OS network stack)
-		if adminHandler != nil {
-			engine.SetAdminHandler(adminHandler)
-			util.LogModuleInfo("engine", "Admin handler set for direct connection handling")
-		}
 
 		// Create and set connection handler for TCP/UDP connection processing
 		// Convert allVIPs slice to map for ConnectionHandler
@@ -169,7 +159,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 			localMeshVIPsMap[vip.String()] = true
 		}
 		
-		connHandler := handler.NewConnectionHandler(handler.ConnectionHandlerConfig{
+		connHandler = handler.NewConnectionHandler(handler.ConnectionHandlerConfig{
 			FakeIP:           meshMgr.GetFakeIPPool(),
 			LocalMeshNodeID:  meshMgr.GetNodeID(),
 			LocalMeshVIPs:    localMeshVIPsMap,
@@ -219,7 +209,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
-	return &TUNResource{engine: engine, netstack: ns}
+	return engine, ns, connHandler
 }
 
 const stoppedMarkerPath = "data/state/stopped"

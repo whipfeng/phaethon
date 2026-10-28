@@ -671,11 +671,9 @@ func loadUDPPortRange() {
 	}
 }
 
-// loadOrGenerateInstanceReverseID returns the instance-level ReverseID.
-// Priority: database node-id > legacy file reverse-id > generate new.
-// If a legacy file is found, it is migrated to the database automatically.
+// loadOrGenerateInstanceReverseID returns the instance-level ReverseID (node-id).
+// If node-id does not exist in database, generates a new one and saves it.
 func loadOrGenerateInstanceReverseID() string {
-	// Load from database or migrate from legacy file
 	dataDir := filepath.Join("data", "setup")
 	id, err := reverse.GetReverseID(dataDir)
 	if err != nil {

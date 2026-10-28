@@ -76,8 +76,22 @@ type Netstack struct {
 	htunnelEndpoints map[string]*HTunnelEndpoint
 	htunnelNextNICID atomic.Uint64
 
+	// DNS and FakeIP
+	dnsHijacker *DNSHijacker
+	fakeIPPool  *FakeIPPool
+
+	// Mode B (proxy entry) connection tracking
+	modeBTable *ModeBTable
+
+	// Local mesh node identity
+	localMeshNodeID string
+	localMeshVIPs   map[string]bool
+
 	// Forwarder callbacks
 	callbacks *ForwarderCallbacks
+
+	// Pre-connect callback for Mode B registration
+	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
 
 	// WriteLoopDevice is the TUN device for writeLoop to write packets to.
 	// Set by the TUN engine.
@@ -420,6 +434,80 @@ func (n *Netstack) SetCallbacks(cb *ForwarderCallbacks) {
 	n.callbacks = cb
 }
 
+// SetDNSHijacker sets the DNS hijacker and FakeIP pool.
+func (n *Netstack) SetDNSHijacker(h *DNSHijacker, fakeIP *FakeIPPool) {
+	n.dnsHijacker = h
+	n.fakeIPPool = fakeIP
+}
+
+// BindNetstack binds the netstack to the DNS hijacker.
+func (n *Netstack) BindNetstack() error {
+	if n.dnsHijacker == nil {
+		return fmt.Errorf("DNS hijacker not set")
+	}
+	if !n.IsRunning() {
+		return fmt.Errorf("netstack not running")
+	}
+	n.dnsHijacker.BindNetstack(n.Stack(), n.Addr(), n.DNSAddr())
+	return nil
+}
+
+// StartDNSHijacker starts the DNS hijacker.
+func (n *Netstack) StartDNSHijacker() error {
+	if n.dnsHijacker == nil {
+		return fmt.Errorf("DNS hijacker not set")
+	}
+	if err := n.dnsHijacker.Start(n.WaitGroup()); err != nil {
+		return fmt.Errorf("start DNS hijacker: %w", err)
+	}
+	return nil
+}
+
+// GetDNSHijacker returns the DNS hijacker.
+func (n *Netstack) GetDNSHijacker() *DNSHijacker {
+	return n.dnsHijacker
+}
+
+// GetFakeIPPool returns the FakeIP pool.
+func (n *Netstack) GetFakeIPPool() *FakeIPPool {
+	return n.fakeIPPool
+}
+
+// SetDNSDomainResolver sets the domain resolver callback for mesh DNS resolution.
+func (n *Netstack) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
+	if n.dnsHijacker != nil {
+		n.dnsHijacker.SetDomainResolver(resolver)
+	}
+}
+
+// SetModeBTable sets the Mode B connection tracking table.
+func (n *Netstack) SetModeBTable(t *ModeBTable) {
+	n.modeBTable = t
+}
+
+// GetModeBTable returns the Mode B connection tracking table.
+func (n *Netstack) GetModeBTable() *ModeBTable {
+	return n.modeBTable
+}
+
+// SetPreConnectCallback sets the callback for Mode B registration before connect.
+func (n *Netstack) SetPreConnectCallback(callback func(dstAddr tcpip.Address, dstPort, srcPort uint16)) {
+	n.preConnectCallback = callback
+}
+
+// SetLocalMeshNodeID sets the local mesh node ID for nodeID.phn → 127.0.0.1 resolution.
+func (n *Netstack) SetLocalMeshNodeID(nodeID string) {
+	n.localMeshNodeID = nodeID
+}
+
+// SetMeshConfig sets the mesh VIP configuration.
+func (n *Netstack) SetMeshConfig(localVIPs []net.IP) {
+	n.localMeshVIPs = make(map[string]bool)
+	for _, vip := range localVIPs {
+		n.localMeshVIPs[vip.String()] = true
+	}
+}
+
 // SetTCPKeepalive sets the TCP keepalive settings.
 func (n *Netstack) SetTCPKeepalive(ka *config.MeshTCPKeepalive) {
 	n.tcpKeepalive = ka
@@ -718,6 +806,22 @@ func (n *Netstack) AddMeshVIP(vip net.IP) error {
 	}
 	util.LogModuleDebug("netstack", "netstack: registered mesh VIP %s", vip)
 	return nil
+}
+
+// IsMeshIP checks if an IP belongs to the mesh network.
+func (n *Netstack) IsMeshIP(ip net.IP) bool {
+	if n.isMeshIPFunc != nil {
+		return n.isMeshIPFunc(ip)
+	}
+	return false
+}
+
+// IsLocalMeshVIP checks if an IP is a local mesh VIP.
+func (n *Netstack) IsLocalMeshVIP(ip net.IP) bool {
+	if n.isLocalMeshVIP != nil {
+		return n.isLocalMeshVIP(ip)
+	}
+	return false
 }
 
 // NetDial dials a connection through the netstack.

@@ -20,7 +20,8 @@ import (
 
 // TUNResource wraps a tun.Engine for lifecycle management.
 type TUNResource struct {
-	engine *tun.Engine
+	engine   *tun.Engine
+	netstack *mesh.Netstack
 }
 
 // Stop shuts down the TUN engine.
@@ -107,44 +108,53 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 	// This must happen here (not in run()) because engine.Start() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
 	{
-		// Bind mesh's DNS hijacker to the engine's netstack.
+		// Create Mode B connection tracking table early (needed by dialer functions)
+		modeBTable := mesh.NewModeBTable()
+
+		// Bind mesh's DNS hijacker to the netstack.
 		// This must happen after engine.Start() (netstack is ready) and before
 		// any DNS queries are made.
-		util.LogModuleInfo("engine", "[DNS-INIT] About to call SetDNSHijacker, dnsHijacker=%v, fakeIPPool=%v", meshMgr.GetDNSHijacker() != nil, meshMgr.GetFakeIPPool() != nil)
-		if err := engine.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool()); err != nil {
-			util.LogModuleError("engine", "Failed to bind DNS hijacker: %v", err)
+		util.LogModuleInfo("engine", "[DNS-INIT] About to bind DNS hijacker, dnsHijacker=%v, fakeIPPool=%v", meshMgr.GetDNSHijacker() != nil, meshMgr.GetFakeIPPool() != nil)
+		ns.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool())
+		if err := ns.BindNetstack(); err != nil {
+			util.LogModuleError("engine", "Failed to bind DNS hijacker to netstack: %v", err)
 			return nil
 		}
-		util.LogModuleInfo("engine", "[DNS-INIT] SetDNSHijacker succeeded")
+		if err := ns.StartDNSHijacker(); err != nil {
+			util.LogModuleError("engine", "Failed to start DNS hijacker: %v", err)
+			return nil
+		}
+		util.LogModuleInfo("engine", "[DNS-INIT] DNS hijacker bound and started")
 
 		// Register the domain resolver callback for mesh DNS resolution
-		engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
+		ns.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
 
 		// Wire Mode B (SOCKS5) netstack callbacks: DNS resolution and connection
 		// dialing go through the netstack, which routes via loopback to the
 		// hijacker/forwarder.
-		dialer.GlobalNetstackDialWithModeBFunc = engine.NetDialWithModeB
-		dialer.GlobalNetstackDialV2Func = engine.NetDialV2
-		dialer.GlobalDNSResolverFunc = engine.ResolveDomain
-		dialer.GlobalRemoteDNSResolverFunc = engine.ResolveDomainViaDNS
+		dialer.GlobalNetstackDialWithModeBFunc = func(network, addr string, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
+			return ns.NetDialWithModeB(network, addr, clientAddr, inbound, mapping, modeBTable)
+		}
+		dialer.GlobalNetstackDialV2Func = ns.NetDialV2
+		dialer.GlobalDNSResolverFunc = ns.ResolveDomain
+		dialer.GlobalRemoteDNSResolverFunc = ns.ResolveDomainViaDNS
 
 		// Set netstack reference FIRST to close the race where P2P receives mesh
 		// frames before meshMgr.Start() is called below.
-		meshMgr.SetNetstack(engine.GetNetstack())
+		meshMgr.SetNetstack(ns)
 
 		meshVIP := meshMgr.GetVIP()
 		allVIPs := meshMgr.GetAllVIPs()
 
 		// Phase 2: Mesh interceptor retired - all traffic goes through netstack routing
 		// Tunnel NICs handle IPIP encapsulation, route table directs traffic appropriately
-		engine.SetMeshConfig(allVIPs)
+		ns.SetMeshConfig(allVIPs)
 
-		// Create and share Mode B connection tracking table.
-		modeBTable := mesh.NewModeBTable()
-		engine.SetModeBTable(modeBTable)
+		// Share Mode B table globally and with netstack
+		ns.SetModeBTable(modeBTable)
 		dialer.GlobalModeBTable = modeBTable
 
-		engine.SetLocalMeshNodeID(meshMgr.GetNodeID())
+		ns.SetLocalMeshNodeID(meshMgr.GetNodeID())
 
 		// Set admin handler for direct connection handling (bypasses OS network stack)
 		if adminHandler != nil {
@@ -166,11 +176,11 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 			AdminHandler:     adminHandler,
 			ModeBTable:       modeBTable,
 			TUNConfig:        tunConfig,
-			IsMeshIP:         engine.IsMeshIP,
+			IsMeshIP:         ns.IsMeshIP,
 			ResolveForDirect: engine.ResolveForDirect,
 		})
 		
-		// Set up forwarder callbacks directly on netstack (not through tun.Engine)
+		// Set up forwarder callbacks directly on netstack
 		ns.SetCallbacks(&mesh.ForwarderCallbacks{
 			HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {
 				if connHandler != nil {
@@ -188,7 +198,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 				}
 				return "", "", nil
 			},
-			IsMeshIP: engine.IsMeshIP,
+			IsMeshIP: ns.IsMeshIP,
 			StatsNotify: func() {
 				// Stats notification handled by netstack internally
 			},
@@ -209,7 +219,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler tun.AdminHandler) *TUNR
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
-	return &TUNResource{engine: engine}
+	return &TUNResource{engine: engine, netstack: ns}
 }
 
 const stoppedMarkerPath = "data/state/stopped"

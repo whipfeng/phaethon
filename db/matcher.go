@@ -233,6 +233,7 @@ func (m *RuleMatcher) init() error {
 	if m.mesh != nil {
 		nodeID = strings.TrimSpace(m.mesh.NodeID)
 	}
+	util.LogModuleInfo("system", "init: mesh=%v nodeID=%q resolverCount=%d", m.mesh != nil, nodeID, len(m.resolvers))
 	for _, resolver := range m.resolvers {
 		if resolver == nil {
 			continue
@@ -277,7 +278,12 @@ func (m *RuleMatcher) init() error {
 				DstHost: "127.0.0.1",
 				DstPort: 0,
 			}}, m.resolvers...)
+			util.LogModuleInfo("system", "injected loopback resolver: %s -> 127.0.0.1", loopbackSrc)
+		} else {
+			util.LogModuleInfo("system", "loopback resolver already exists: %s", loopbackSrc)
 		}
+	} else {
+		util.LogModuleWarn("system", "nodeID is empty, skip loopback resolver injection")
 	}
 
 	// 初始化代理组
@@ -540,20 +546,27 @@ func (m *RuleMatcher) resolveName(name string) *config.Proxy {
 
 func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 	if m.resolvers == nil {
+		util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolving: resolvers is nil, returning original")
 		return req
 	}
-	for _, resolver := range m.resolvers {
+	util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolving: checking %d resolvers for %s:%d", len(m.resolvers), req.DstAddr, req.DstPort)
+	for i, resolver := range m.resolvers {
 		if !resolver.IsEnabled() {
+			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: disabled, skipping", i, resolver.Name)
 			continue
 		}
 		if resolver.Proto != "" && req.Proto != "" && resolver.Proto != req.Proto {
+			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: proto mismatch (%s != %s), skipping", i, resolver.Name, resolver.Proto, req.Proto)
 			continue
 		}
-		if req.DstAddr != resolver.EffectiveSrcHost() {
+		effectiveSrc := resolver.EffectiveSrcHost()
+		if req.DstAddr != effectiveSrc {
+			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: src mismatch (req=%s != resolver=%s), skipping", i, resolver.Name, req.DstAddr, effectiveSrc)
 			continue
 		}
 		// SrcPort == 0 means "match any port"; otherwise require exact match.
 		if resolver.SrcPort != 0 && req.DstPort != resolver.SrcPort {
+			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: port mismatch (%d != %d), skipping", i, resolver.Name, req.DstPort, resolver.SrcPort)
 			continue
 		}
 		// DstPort == 0 means "keep original port" (host-only rewrite).
@@ -561,6 +574,7 @@ func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 		if resolver.DstPort != 0 {
 			newPort = resolver.DstPort
 		}
+		util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolver[%d] %s: MATCHED! rewriting %s:%d -> %s:%d", i, resolver.Name, req.DstAddr, req.DstPort, resolver.DstHost, newPort)
 		return &config.AddrRequest{
 			DstAddr: resolver.DstHost,
 			DstPort: newPort,
@@ -568,6 +582,7 @@ func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 			Proto:   req.Proto,
 		}
 	}
+	util.LogModuleDebug("system", "[RESOLVE-DEBUG] no resolver matched, returning original request")
 	return req
 }
 

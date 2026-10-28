@@ -48,7 +48,11 @@ func selectLocalIP(ifIndex int, dst net.IP) net.IP {
 			continue
 		}
 
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsLoopback() {
+		// Skip link-local and loopback addresses unless the destination is also loopback
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			continue
+		}
+		if ip.IsLoopback() && !dst.IsLoopback() {
 			continue
 		}
 

@@ -3,14 +3,10 @@
 package dialer
 
 import (
-	"bufio"
-	"math/bits"
 	"net"
-	"os"
-	"strconv"
-	"strings"
 	"syscall"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,8 +41,9 @@ func setBindToDevice(c syscall.RawConn, iface string) error {
 }
 
 // linuxRouteIface returns the interface name that should carry an IPv4 packet
-// to dst by parsing /proc/net/route. It excludes the TUN interface and falls
-// back to defaultIface if no route matches.
+// to dst by querying kernel routing tables via netlink. It checks both the
+// local table (higher priority) and main table, excluding the TUN interface.
+// Falls back to defaultIface if no route matches.
 func linuxRouteIface(dst net.IP, tunIface, defaultIface string) (string, error) {
 	if dst == nil {
 		return defaultIface, nil
@@ -55,54 +52,88 @@ func linuxRouteIface(dst net.IP, tunIface, defaultIface string) (string, error) 
 	if dst4 == nil {
 		return defaultIface, nil
 	}
-	f, err := os.Open("/proc/net/route")
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
 	dstU := ipToUint32LE(dst4)
+
 	var bestIface string
 	bestPrefix := -1
+	bestTable := -1 // Track which table the route came from (local=255, main=254)
 
-	scanner := bufio.NewScanner(f)
-	first := true
-	for scanner.Scan() {
-		if first {
-			first = false
-			continue
-		}
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 8 {
-			continue
-		}
-		iface := strings.TrimSpace(fields[0])
-		if iface == tunIface {
-			continue
-		}
-		destU, err1 := strconv.ParseUint(fields[1], 16, 32)
-		maskU, err2 := strconv.ParseUint(fields[7], 16, 32)
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		mask := uint32(maskU)
-		dest := uint32(destU)
-		if dstU&mask != dest&mask {
-			continue
-		}
-		prefix := bits.OnesCount32(mask)
-		if prefix > bestPrefix {
-			bestPrefix = prefix
-			bestIface = iface
+	// Query local table first (higher priority)
+	if localRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
+		Table: syscall.RT_TABLE_LOCAL,
+	}, netlink.RT_FILTER_TABLE); err == nil {
+		for _, rt := range localRoutes {
+			if rt.Dst == nil {
+				continue
+			}
+			iface, prefix, ok := matchRoute(rt, dstU, tunIface)
+			if !ok {
+				continue
+			}
+			// Local table has higher priority, prefer it
+			if bestTable < syscall.RT_TABLE_LOCAL || (bestTable == syscall.RT_TABLE_LOCAL && prefix > bestPrefix) {
+				bestPrefix = prefix
+				bestIface = iface
+				bestTable = syscall.RT_TABLE_LOCAL
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return "", err
+
+	// Query main table
+	if mainRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
+		Table: syscall.RT_TABLE_MAIN,
+	}, netlink.RT_FILTER_TABLE); err == nil {
+		for _, rt := range mainRoutes {
+			if rt.Dst == nil {
+				continue
+			}
+			iface, prefix, ok := matchRoute(rt, dstU, tunIface)
+			if !ok {
+				continue
+			}
+			// Only use main table if we didn't find a local table match
+			if bestTable < syscall.RT_TABLE_MAIN || (bestTable == syscall.RT_TABLE_MAIN && prefix > bestPrefix) {
+				bestPrefix = prefix
+				bestIface = iface
+				bestTable = syscall.RT_TABLE_MAIN
+			}
+		}
 	}
+
 	if bestIface == "" {
 		return defaultIface, nil
 	}
 	return bestIface, nil
+}
+
+// matchRoute checks if a route matches the destination and returns the interface,
+// prefix length, and whether it matched.
+func matchRoute(rt netlink.Route, dstU uint32, tunIface string) (string, int, bool) {
+	// Get interface name
+	iface, err := net.InterfaceByIndex(rt.LinkIndex)
+	if err != nil {
+		return "", 0, false
+	}
+	ifaceName := iface.Name
+
+	// Skip TUN interface
+	if ifaceName == tunIface {
+		return "", 0, false
+	}
+
+	// Calculate prefix match
+	ones, _ := rt.Dst.Mask.Size()
+	mask := uint32(0)
+	if ones > 0 {
+		mask = ^uint32(0) << (32 - ones)
+	}
+
+	rtDstU := ipToUint32LE(rt.Dst.IP.To4())
+	if dstU&mask != rtDstU&mask {
+		return "", 0, false
+	}
+
+	return ifaceName, ones, true
 }
 
 // ipToUint32LE converts an IPv4 address to a uint32 in the same byte order as

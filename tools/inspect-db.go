@@ -17,37 +17,23 @@ func main() {
 
 	db, err := bolt.Open(dbPath, 0600, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to open db: %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
+	fmt.Println("=== Database Buckets and Keys ===")
 	db.View(func(tx *bolt.Tx) error {
-		fmt.Printf("=== Database: %s ===\n\n", dbPath)
-
-		tx.ForEach(func(name []byte, b *bolt.Bucket) error {
-			stats := b.Stats()
-			fmt.Printf("Bucket: %s (keys: %d, depth: %d)\n", string(name), stats.KeyN, stats.Depth)
-
-			// Show first 10 keys
-			c := b.Cursor()
-			count := 0
-			for k, v := c.First(); k != nil && count < 10; k, v = c.Next() {
-				valuePreview := ""
-				if len(v) > 50 {
-					valuePreview = string(v[:50]) + "..."
-				} else {
-					valuePreview = string(v)
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			fmt.Printf("\nBucket: %s\n", string(name))
+			return b.ForEach(func(k, v []byte) error {
+				valueStr := string(v)
+				if len(valueStr) > 200 {
+					valueStr = valueStr[:200] + "..."
 				}
-				fmt.Printf("  [%d] %s = %s\n", count, string(k), valuePreview)
-				count++
-			}
-			if stats.KeyN > 10 {
-				fmt.Printf("  ... and %d more keys\n", stats.KeyN-10)
-			}
-			fmt.Println()
-			return nil
+				fmt.Printf("  Key: %s = %s\n", string(k), valueStr)
+				return nil
+			})
 		})
-		return nil
 	})
 }

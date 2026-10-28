@@ -2263,7 +2263,7 @@ func wireAdminCallbacks(resources *activeResources) {
 	}
 
 	// Mesh package distribution setup
-	if resources.meshMgr != nil && resources.tunRes != nil && resources.tunRes.engine != nil {
+	if resources.meshMgr != nil && resources.tunRes != nil && resources.tunRes.netstack != nil {
 		// Set peer lister
 		adminSrv.SetPeerLister(func() []admin.PeerBrief {
 			peers := resources.meshMgr.GetPeers()
@@ -2279,10 +2279,10 @@ func wireAdminCallbacks(resources *activeResources) {
 		// Set mesh dial function and DNS resolver
 		adminSrv.SetMeshDialFn(
 			func(network, addr string) (net.Conn, error) {
-				return resources.tunRes.engine.NetDial(network, addr)
+				return resources.tunRes.netstack.NetDial(network, addr)
 			},
 			func(domain string) (net.IP, error) {
-				return resources.tunRes.engine.ResolveDomain(domain)
+				return resources.tunRes.netstack.ResolveDomain(domain)
 			},
 		)
 

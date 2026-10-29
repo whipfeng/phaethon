@@ -2174,48 +2174,33 @@ func wireAdminCallbacks(resources *activeResources) {
 			return fmt.Errorf("load mesh config: %w", err)
 		}
 		
-		// Parse new config
-		meshNetworkStr := meshConfig.GetNetwork()
-		_, meshNetwork, err := net.ParseCIDR(meshNetworkStr)
-		if err != nil {
-			util.LogModuleError("main", "[MESH] network invalid: %v", err)
-			return fmt.Errorf("parse network: %w", err)
-		}
-		
-		subnetPrefixLen := 16
-		if meshConfig.Subnet != "" {
-			_, subnet, err := net.ParseCIDR(meshConfig.Subnet)
-			if err != nil {
-				util.LogModuleError("main", "[MESH] subnet invalid: %v", err)
-				return fmt.Errorf("parse subnet: %w", err)
-			}
-			ones, _ := subnet.Mask.Size()
-			subnetPrefixLen = ones
-		}
-		
-		meshSubnetStr := meshConfig.GetSubnet()
-		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
-		if err != nil {
-			util.LogModuleError("main", "[MESH] subnet invalid: %v", err)
-			return fmt.Errorf("parse subnet: %w", err)
-		}
-		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
-		
-		// Update mesh manager identity (lightweight update, no rebuild)
+		// Check if identity fields changed (node-id, subnet)
+		// These fields require restart to take effect
+		var currentNodeID, currentSubnet string
 		if mesh.GlobalMeshManager != nil {
-			util.LogModuleInfo("main", "[MESH] updating mesh manager identity")
-			mesh.GlobalMeshManager.UpdateIdentity(meshConfig.NodeID, vip, meshSubnet, meshSubnetStr, meshNetwork, subnetPrefixLen)
-			// Also update domain suffixes and advertise routes
+			currentNodeID = mesh.GlobalMeshManager.GetNodeID()
+			currentSubnet = mesh.GlobalMeshManager.GetSubnet()
+		}
+		identityChanged := (meshConfig.NodeID != currentNodeID) || (meshConfig.GetSubnet() != currentSubnet)
+		
+		if identityChanged {
+			util.LogModuleInfo("main", "[MESH] identity fields changed (node-id: %s->%s, subnet: %s->%s), skipping runtime update, restart required",
+				currentNodeID, meshConfig.NodeID, currentSubnet, meshConfig.GetSubnet())
+			// Only update non-identity fields (domainSuffixes, advertise)
+			if mesh.GlobalMeshManager != nil {
+				mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
+			}
+			return nil
+		}
+		
+		// Identity fields unchanged, only update config (domainSuffixes, advertise)
+		if mesh.GlobalMeshManager != nil {
+			util.LogModuleInfo("main", "[MESH] updating mesh manager config (domainSuffixes, advertise)")
 			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
 		}
 		
-		// Update P2P manager mesh info
-		if p2p.GlobalP2PManager != nil {
-			p2p.GlobalP2PManager.SetMeshInfo(meshConfig.NodeID, vip.String())
-		}
-		
-		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s vip=%s subnet=%s advertise=%v", 
-			meshConfig.NodeID, vip, meshSubnetStr, meshConfig.GetAdvertise())
+		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s subnet=%s advertise=%v", 
+			meshConfig.NodeID, meshConfig.GetSubnet(), meshConfig.GetAdvertise())
 		
 		return nil
 	}

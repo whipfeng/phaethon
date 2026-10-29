@@ -1748,6 +1748,10 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			meshCfg = &config.MeshConfig{}
 		}
 
+		// Track identity fields for restart notification
+		oldNodeID := meshCfg.NodeID
+		oldSubnet := meshCfg.Subnet
+
 		// Merge updates: only update fields that are present and non-empty (kebab-case)
 		if nodeID, ok := updates["node-id"].(string); ok && nodeID != "" {
 			meshCfg.NodeID = nodeID
@@ -1791,7 +1795,10 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Trigger mesh subsystem reinitialization
+		// Check if identity fields changed (require restart)
+		identityChanged := (meshCfg.NodeID != oldNodeID) || (meshCfg.Subnet != oldSubnet)
+
+		// Trigger mesh subsystem reinitialization (only for non-identity fields)
 		if s.OnMeshConfigUpdate != nil {
 			util.LogModuleInfo("admin", "mesh config updated, triggering subsystem reinitialization")
 			if err := s.OnMeshConfigUpdate(); err != nil {
@@ -1802,7 +1809,15 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		}
 
 		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", meshCfg.NodeID)
-		jsonResponse(w, map[string]string{"status": "ok"})
+		
+		// Return response with restart notification if identity changed
+		resp := map[string]string{"status": "ok"}
+		if identityChanged {
+			resp["restart_required"] = "node-id or subnet changed, restart required to take effect"
+			util.LogModuleInfo("admin", "mesh identity changed (node-id: %s->%s, subnet: %s->%s), restart required", 
+				oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet)
+		}
+		jsonResponse(w, resp)
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)

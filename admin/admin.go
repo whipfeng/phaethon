@@ -350,6 +350,10 @@ type AdminServer struct {
 	// The callback handles starting/stopping reverse client goroutines.
 	OnReverseConfigUpdate func(old, newConfig *config.ReverseConfig) error
 
+	// OnMeshConfigUpdate is called when mesh foundational config is updated.
+	// The callback handles mesh subsystem reinitialization (re-announce, rebuild routing).
+	OnMeshConfigUpdate func() error
+
 	// templates
 	pages *pageTemplates
 
@@ -1744,14 +1748,14 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			meshCfg = &config.MeshConfig{}
 		}
 
-		// Merge updates: only update fields that are present (kebab-case)
+		// Merge updates: only update fields that are present and non-empty (kebab-case)
 		if nodeID, ok := updates["node-id"].(string); ok && nodeID != "" {
 			meshCfg.NodeID = nodeID
 		}
-		if subnet, ok := updates["subnet"].(string); ok {
+		if subnet, ok := updates["subnet"].(string); ok && subnet != "" {
 			meshCfg.Subnet = subnet
 		}
-		if network, ok := updates["network"].(string); ok {
+		if network, ok := updates["network"].(string); ok && network != "" {
 			meshCfg.Network = network
 		}
 		if domainSuffixes, ok := updates["domain-suffixes"].([]interface{}); ok {
@@ -1785,6 +1789,16 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		if err := db.PutMeshConfig(meshCfg); err != nil {
 			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		// Trigger mesh subsystem reinitialization
+		if s.OnMeshConfigUpdate != nil {
+			util.LogModuleInfo("admin", "mesh config updated, triggering subsystem reinitialization")
+			if err := s.OnMeshConfigUpdate(); err != nil {
+				util.LogModuleWarn("admin", "mesh config update callback failed: %v", err)
+			}
+		} else {
+			util.LogModuleWarn("admin", "mesh config updated but OnMeshConfigUpdate callback is nil")
 		}
 
 		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", meshCfg.NodeID)

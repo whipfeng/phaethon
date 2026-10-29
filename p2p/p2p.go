@@ -1142,6 +1142,28 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 	}
 }
 
+// StopAllPeers stops all active P2P peers but keeps the manager alive for restart.
+// Used when mesh config changes and peers need to be re-established.
+func (m *P2PManager) StopAllPeers() {
+	m.mu.Lock()
+	peers := make([]*Peer, 0, len(m.peers))
+	for _, peer := range m.peers {
+		peers = append(peers, peer)
+	}
+	m.proxyPeers = make(map[string]*Peer)
+	m.peers = make(map[string]*Peer)
+	m.mu.Unlock()
+
+	util.LogModuleInfo("p2p", "[P2P] stopping all %d peers", len(peers))
+	for _, peer := range peers {
+		stopPeer(peer)
+	}
+	
+	// Wait for all sessions to complete
+	m.sessionsWG.Wait()
+	util.LogModuleInfo("p2p", "[P2P] all peers stopped")
+}
+
 // ActivePeerProxyNames returns the set of proxy names that currently have active peers.
 // Passive (inbound) peers have no ProxyName and are excluded.
 func (m *P2PManager) ActivePeerProxyNames() map[string]bool {

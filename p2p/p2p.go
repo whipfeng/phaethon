@@ -806,11 +806,13 @@ func (m *P2PManager) dialAndRunSession(peer *Peer, proxy *config.Proxy) {
 }
 
 
-// updateSnapshot creates a new snapshot of proxyPeers and stores it atomically.
+// updateSnapshot creates a new snapshot of all peers and stores it atomically.
 // Called by commandWorker after map modifications.
+// Snapshot includes both active (proxyPeers) and passive (peers only) peers.
 func (m *P2PManager) updateSnapshot() {
 	snapshot := make(map[string]*Peer)
-	for k, v := range m.proxyPeers {
+	// Add all peers from m.peers (includes both active and passive)
+	for k, v := range m.peers {
 		snapshot[k] = v
 	}
 	m.peersSnapshot.Store(snapshot)
@@ -859,13 +861,17 @@ func (m *P2PManager) Stop() {
 }
 
 // GetPeerStatus returns the P2P connection status for all peers.
-// Returns a map of proxy name -> status info (active peers only).
+// Returns a map of proxy name -> status info (active peers only, passive peers excluded).
 func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
-	result := make(map[string]map[string]interface{}, len(snapshot))
-	for name, peer := range snapshot {
+	result := make(map[string]map[string]interface{})
+	for _, peer := range snapshot {
+		// Only include active peers (those with proxy name)
+		if peer.ProxyName == "" {
+			continue
+		}
 		lastSeenNano := peer.lastSeenNano.Load()
-		result[name] = map[string]interface{}{
+		result[peer.ProxyName] = map[string]interface{}{
 			"status":   peer.GetStatus(),
 			"nodeId":   peer.NodeID,
 			"lastSeen": time.Unix(0, lastSeenNano),
@@ -1498,9 +1504,12 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 func (m *P2PManager) ActivePeerProxyNames() map[string]bool {
 	// Read from snapshot (lock-free)
 	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
-	result := make(map[string]bool, len(snapshot))
-	for name := range snapshot {
-		result[name] = true
+	result := make(map[string]bool)
+	for _, peer := range snapshot {
+		// Only include active peers (those with proxy name)
+		if peer.ProxyName != "" {
+			result[peer.ProxyName] = true
+		}
 	}
 	return result
 }

@@ -94,10 +94,7 @@ func (r *activeResources) closeAll() {
 			r.meshMgr.Stop()
 		}
 		if r.tunMgr != nil {
-			r.tunMgr.StopTUN()
-		}
-		if r.netstack != nil {
-			r.netstack.Stop()
+			r.tunMgr.Stop()
 		}
 		if r.adminServer != nil {
 			r.adminServer.Close()
@@ -112,15 +109,15 @@ func toggleTUN(enable bool, res *activeResources) error {
 		return fmt.Errorf("runtime not ready")
 	}
 	if enable {
-		if res.tunMgr == nil {
-			return fmt.Errorf("TUN manager not initialized")
+		if res.tunMgr == nil || res.tunMgr == nil {
+			return fmt.Errorf("stack not running")
 		}
 		if res.tunMgr.IsTUNRunning() {
 			return nil
 		}
 		return res.tunMgr.StartTUN()
 	}
-	if res.tunMgr != nil {
+	if res.tunMgr != nil && res.tunMgr != nil {
 		return res.tunMgr.StopTUN()
 	}
 	return nil
@@ -174,7 +171,7 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		"stats":      tun.TUNStats{},
 		"dhcpLeases": []tun.DHCPLease{},
 	}
-	if res.tunMgr != nil {
+	if res.tunMgr != nil && res.tunMgr != nil {
 		engine := res.tunMgr
 		status["running"] = engine.IsTUNRunning()
 		status["routes"] = engine.RouteSnapshot()

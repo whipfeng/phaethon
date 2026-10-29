@@ -1352,11 +1352,13 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
 		// Run session in a closure so we can use defer for cleanup
+		sessionStartTime := time.Now()
 		func() {
 			defer func() {
+				sessionDuration := time.Since(sessionStartTime)
 				// Log disconnection reason
-				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v",
-					peer.ID, proxy.Name, peer.GetStatus(), peer.LastError)
+				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v duration=%v",
+					peer.ID, proxy.Name, peer.GetStatus(), peer.LastError, sessionDuration)
 				
 				transport.Close()
 				
@@ -1390,8 +1392,36 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// connection gets a brand-new seq, peer.ID, and clean state.
 		if peer.GetStatus() != "stopped" {
 			proxy := peer.proxy
-			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s status=%s), starting fresh peer",
-				peer.ID, proxy.Name, peer.GetStatus())
+			sessionDuration := time.Since(sessionStartTime)
+			
+			// If session was very short (< 5s), apply backoff to prevent rapid reconnection loops
+			if sessionDuration < 5*time.Second {
+				util.LogModuleWarn("p2p", "[P2P-DIAG] session too short (%v) for peer.ID=%s proxy=%s, applying backoff before reconnect",
+					sessionDuration, peer.ID, proxy.Name)
+				
+				// Exponential backoff with jitter
+				peer.rngMu.Lock()
+				jitter := 0.5 + peer.rng.Float64()
+				peer.rngMu.Unlock()
+				jitteredBackoff := time.Duration(float64(backoff) * jitter)
+				
+				select {
+				case <-peer.stopCh:
+					return
+				case <-time.After(jitteredBackoff):
+				}
+				
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				// Reset backoff for long-lived sessions
+				backoff = time.Second
+			}
+			
+			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s status=%s duration=%v), starting fresh peer",
+				peer.ID, proxy.Name, peer.GetStatus(), sessionDuration)
 			go m.StartPeer(proxy)
 		}
 		return

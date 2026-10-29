@@ -589,6 +589,10 @@ func (m *MeshManager) GetNetwork() *net.IPNet {
 	return m.network
 }
 
+func (m *MeshManager) GetSubnetPrefixLen() int {
+	return m.subnetPrefixLen
+}
+
 func (m *MeshManager) GetDomainSuffixes() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

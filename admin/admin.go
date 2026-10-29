@@ -1757,7 +1757,37 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			meshCfg.NodeID = nodeID
 		}
 		if subnet, ok := updates["subnet"].(string); ok && subnet != "" {
-			meshCfg.Subnet = subnet
+			// Check for subnet conflict with existing peers
+			if mesh.GlobalMeshManager != nil {
+				peers := mesh.GlobalMeshManager.GetPeers()
+				usedSubnets := make(map[string]bool)
+				for _, peer := range peers {
+					if peer.Subnet != "" {
+						usedSubnets[peer.Subnet] = true
+					}
+				}
+				// If requested subnet conflicts, auto-allocate a new one
+				if usedSubnets[subnet] {
+					network := mesh.GlobalMeshManager.GetNetwork()
+					prefixLen := mesh.GlobalMeshManager.GetSubnetPrefixLen()
+					if network != nil {
+						newSubnet, err := mesh.AllocateSubnet(network, prefixLen, usedSubnets)
+						if err == nil {
+							util.LogModuleInfo("admin", "subnet %s conflicts, auto-allocated %s", subnet, newSubnet)
+							meshCfg.Subnet = newSubnet
+						} else {
+							util.LogModuleWarn("admin", "failed to auto-allocate subnet: %v", err)
+							meshCfg.Subnet = subnet // fallback to user's choice
+						}
+					} else {
+						meshCfg.Subnet = subnet
+					}
+				} else {
+					meshCfg.Subnet = subnet
+				}
+			} else {
+				meshCfg.Subnet = subnet
+			}
 		}
 		if network, ok := updates["network"].(string); ok && network != "" {
 			meshCfg.Network = network

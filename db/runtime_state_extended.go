@@ -43,6 +43,9 @@ type PortBinding struct {
 func GetNodeID() (string, error) {
 	id, err := getView[string](BucketInstanceIdentity, []byte("node-id"))
 	if err != nil {
+		if err == ErrNotFound {
+			return "", nil
+		}
 		return "", err
 	}
 	if id == nil {

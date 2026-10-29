@@ -1,7 +1,6 @@
 package p2p
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -46,7 +45,7 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // carrying per-link SRTT and loss rate metrics for Dijkstra-based routing.
 // Version 9: GossipLink changed from linkId to localSeq+remoteSeq fields,
 // link identification now based on seq pair matching instead of combined linkId.
-const P2PProtocolVersion = 9
+const P2PProtocolVersion = 8
 
 // meshInboundWorkers is the number of goroutines that consume from meshInboundCh
 // and process incoming mesh frames (inject into gVisor netstack).
@@ -95,7 +94,6 @@ func init() {
 
 // linkStats holds persistent statistics for a link (survives P2P reconnections).
 type linkStats struct {
-	sendState      *sendState
 	dataDrops      uint64 // total data queue drops (dns + ack + data[256])
 	controlChDrops uint64
 }
@@ -219,10 +217,9 @@ func (s *peerSender) GetLinkNIC() *mesh.LinkNIC {
 
 // writeReq is a frame queued for async write on the peer connection.
 type writeReq struct {
-	frameType      byte
-	data           []byte
-	isControl      bool
-	encodedControl bool
+	frameType byte
+	data      []byte
+	isControl bool
 }
 
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
@@ -363,16 +360,12 @@ type Peer struct {
 	ackQueue         chan writeReq // TCP ACK packets (high priority)
 	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
 	drrOutput        chan writeReq // DRR scheduler output channel
-	controlCh        chan writeReq // hello/gossip priority queue
+	controlCh        chan writeReq // gossip/ping/pong priority queue
 	stopCh           chan struct{}
 	stopOnce         sync.Once // ensures stopCh is closed exactly once
 	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
 	meshSender       *peerSender   // DEPRECATED: use meshSenderPtr
 	proxy            *config.Proxy // proxy config this peer was started with
-
-	// Reliable transmission state (v7)
-	sendState *sendState // tracks outgoing control frames
-	recvState *recvState // tracks incoming control frames
 
 	// LinkNIC: 链路直接持有自己的 LinkNIC 指针（设计 §5.4）
 	// DEPRECATED: use linkNICPtr
@@ -385,8 +378,8 @@ type Peer struct {
 	rng   *rand.Rand
 	rngMu sync.Mutex
 
-	// Pre-allocated buffer for pure ACK (avoid 4-byte allocation per ACK)
-	ackBuf [4]byte
+	// Ping/pong measurement state (v8)
+	pingTracker *pingTracker // tracks ping/pong for RTT and loss rate
 
 	// Channel overflow statistics (atomic counters)
 	dnsQueueDrops       uint64 // Frames dropped due to dnsQueue full
@@ -538,43 +531,15 @@ func (m *P2PManager) notifyStatusChange() {
 }
 
 // peerWriteLoop drains the peer's queues and writes frames via the peer
-// transport. Control frames (hello/gossip) take priority over mesh
+// transport. Control frames (gossip/ping/pong) take priority over mesh
 // data so they are not delayed behind bulk transfers. Exits on write error or stop.
-// For control frames, encodes seq/ack into the payload (8 bytes: seq(4) + ack(4)).
 // Data frames are coalesced into batches for efficient transport.
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	const maxBatchFrames = 64 // Maximum frames per batch
 
-	// encodeControlFrame encodes seq/ack into control frame payload.
-	encodeControlFrame := func(req writeReq) []byte {
-		payload := req.data
-		if req.frameType == frame.FrameAck {
-			// Pure ACK format: {seq(4)=0, ack(4)}
-			ack := binary.BigEndian.Uint32(payload[0:4])
-			encoded := make([]byte, 8)
-			binary.BigEndian.PutUint32(encoded[0:4], 0)
-			binary.BigEndian.PutUint32(encoded[4:8], ack)
-			return encoded
-		} else if !req.encodedControl {
-			// Encode seq/ack into control frame payload
-			seq := peer.sendState.allocSeq()
-			ack := peer.recvState.getLastSeq()
-			encoded := make([]byte, 8+len(payload))
-			binary.BigEndian.PutUint32(encoded[0:4], seq)
-			binary.BigEndian.PutUint32(encoded[4:8], ack)
-			copy(encoded[8:], payload)
-			peer.sendState.markSent(seq, req.frameType, req.data)
-			return encoded
-		}
-		return payload
-	}
-
-	// writeSingleFrame writes a single control frame.
+	// writeSingleFrame writes a single frame.
 	writeSingleFrame := func(req writeReq, isControl bool) bool {
 		payload := req.data
-		if isControl {
-			payload = encodeControlFrame(req)
-		}
 
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
@@ -582,9 +547,6 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			if len(req.data) >= 20 && req.data[0]>>4 == 4 && req.data[9] == 4 {
 				util.LogModuleDebug("p2p", "[P2P-IPIP-SEND-SINGLE] peer=%s len=%d", peer.ID, len(req.data))
 			}
-		}
-		if req.frameType == frame.FrameHello {
-			util.LogModuleDebug("p2p", "[P2P-DIAG] sending FrameHello to %s, payload=%d bytes isControl=%v", peer.ID, len(payload), isControl)
 		}
 		if err := peer.transport.Send(req.frameType, payload, isControl); err != nil {
 			if req.frameType == frame.FrameMeshPacket {
@@ -1081,8 +1043,6 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		drrOutput:      make(chan writeReq, 512),
 		controlCh:      make(chan writeReq, 512),
 		stopCh:         make(chan struct{}),
-		sendState:      newSendState(),
-		recvState:      newRecvState(),
 		Seq:            seq,
 		drrScheduler:   newDRRScheduler(dataQueues),
 	}
@@ -1109,11 +1069,6 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
 			m.meshHandler.DeleteLinkNIC(linkNIC)
 			peer.SetLinkNIC(nil)
-		}
-		// Mark all pending frames as lost before saving to linkStats.
-		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
-		if peer.sendState != nil {
-			peer.sendState.markAllPendingAsLost()
 		}
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
@@ -1257,6 +1212,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		drrOutput:    make(chan writeReq, 512),
 		controlCh:    make(chan writeReq, 512),
 		drrScheduler: newDRRScheduler(dataQueues),
+		pingTracker:  newPingTracker(),
 	}
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
@@ -1296,11 +1252,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
 			m.meshHandler.DeleteLinkNIC(linkNIC)
 			peer.SetLinkNIC(nil)
-		}
-		// Mark all pending frames as lost.
-		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
-		if peer.sendState != nil {
-			peer.sendState.markAllPendingAsLost()
 		}
 		// Remove from both maps (prevent race with RestartPeer)
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
@@ -1370,15 +1321,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			peer.drrScheduler.queues = peer.dataQueues
 			peer.drrScheduler.deficits = [256]int{}
 			peer.drrScheduler.round = 0
-		}
-		// Create sendState/recvState on first connection attempt.
-		// Note: These are NOT preserved across reconnections (line 1178 creates a new peer object).
-		// The nil check only matters when retrying failed dial attempts within the same StartPeer invocation.
-		if peer.sendState == nil {
-			peer.sendState = newSendState()
-		}
-		if peer.recvState == nil {
-			peer.recvState = newRecvState()
 		}
 		peer.SetStatus("connecting")
 		m.notifyStatusChange()
@@ -1478,10 +1420,10 @@ func (m *P2PManager) runSession(peer *Peer) {
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession START for peer.ID=%s proxy=%s nodeID=%s status=%s",
 		peer.ID, proxyName, peer.NodeID, peer.GetStatus())
 	
-	// Send hello immediately
-	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer.ID=%s proxy=%s", peer.ID, proxyName)
-	m.sendHello(peer)
-	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession sendHello completed for peer.ID=%s", peer.ID)
+	// Send gossip immediately on connection establishment
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling broadcastGossipToPeer for peer.ID=%s proxy=%s", peer.ID, proxyName)
+	m.broadcastGossipToPeer(peer)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession broadcastGossipToPeer completed for peer.ID=%s", peer.ID)
 
 	util.LogModuleInfo("p2p", "[P2P] runSession started for %s (proxy=%s)", peer.ID, proxyName)
 
@@ -1513,23 +1455,23 @@ func (m *P2PManager) runSession(peer *Peer) {
 	}()
 	defer close(timeoutDone)
 
-	// Retransmission monitor: periodically check for timed-out control frames
-	retransmitDone := make(chan struct{})
+	// Ping timer: send ping every 1 second for link quality measurement
+	pingDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-retransmitDone:
+			case <-pingDone:
 				return
 			case <-peer.stopCh:
 				return
 			case <-ticker.C:
-				m.checkRetransmissions(peer)
+				m.sendPing(peer)
 			}
 		}
 	}()
-	defer close(retransmitDone)
+	defer close(pingDone)
 
 	for {
 		frameType, payload, err := peer.transport.Recv()
@@ -1551,52 +1493,18 @@ func (m *P2PManager) runSession(peer *Peer) {
 		}
 		util.LogModuleDebug("p2p", "[P2P] received frame type=0x%02x len=%d from %s", frameType, len(payload), peer.ID)
 
-		// Control frames have seq/ack encoded in the first 8 bytes
-		isControl := frameType == frame.FrameHello || frameType == frame.FrameGossip || frameType == frame.FrameAck
-		if isControl {
-			if len(payload) < 8 {
-				util.LogModuleWarn("p2p", "[P2P] control frame too short from %s: len=%d", peer.ID, len(payload))
-				frame.ReturnBuffer(originalPayload)
-				payloadReturned = true
-				continue
-			}
-			seq := binary.BigEndian.Uint32(payload[0:4])
-			ack := binary.BigEndian.Uint32(payload[4:8])
-			payload = payload[8:] // strip seq/ack header
-
-			// Process ack (removes acknowledged frames from pending)
-			peer.sendState.processAck(ack)
-
-			// Pure ACK frame: no further processing needed
-			if frameType == frame.FrameAck {
-				frame.ReturnBuffer(originalPayload)
-				payloadReturned = true
-				continue
-			}
-
-			// Check for duplicate
-			if !peer.recvState.checkAndRecord(seq) {
-				util.LogModuleDebug("p2p", "[P2P] duplicate control frame from %s: seq=%d", peer.ID, seq)
-				frame.ReturnBuffer(originalPayload)
-				payloadReturned = true
-				continue
-			}
-
-			// Send immediate pure ACK for Hello/Gossip frames
-			m.sendPureAck(peer)
-		}
-
 		switch frameType {
-		case frame.FrameHello:
-			util.LogModuleInfo("p2p", "[P2P-DIAG] received FrameHello from %s, payload=%d bytes", peer.ID, len(payload))
-			if len(payload) > 0 {
-				m.handleHello(peer, payload)
-			} else {
-				util.LogModuleWarn("p2p", "[P2P-DIAG] FrameHello from %s has empty payload", peer.ID)
-			}
 		case frame.FrameGossip:
 			if len(payload) > 0 {
 				m.handleGossip(peer, payload)
+			}
+		case frame.FrameLinkPing:
+			if len(payload) > 0 {
+				m.handlePing(peer, payload)
+			}
+		case frame.FrameLinkPong:
+			if len(payload) > 0 {
+				m.handlePong(peer, payload)
 			}
 		case frame.FrameMeshPacket:
 			if m.meshHandler != nil && len(payload) > 0 {
@@ -1628,199 +1536,6 @@ func (m *P2PManager) runSession(peer *Peer) {
 			frame.ReturnBuffer(originalPayload)
 		}
 	}
-}
-
-// checkRetransmissions checks for timed-out control frames and retransmits them.
-// Uses exponential backoff: RTO, 2*RTO, 4*RTO, 8*RTO, 16*RTO (capped at 60s), max 5 retries.
-func (m *P2PManager) checkRetransmissions(peer *Peer) {
-	baseRTO := peer.sendState.rttSampler.getRTO()
-	pending := peer.sendState.getRetransmissions(baseRTO)
-
-	for _, pf := range pending {
-		if pf.retries >= 5 {
-			// Give up after 5 retries
-			util.LogModuleWarn("p2p", "[P2P] giving up on control frame to %s: seq=%d retries=%d", peer.ID, pf.seq, pf.retries)
-			peer.sendState.removeFrame(pf.seq)
-			continue
-		}
-
-		// Calculate timeout for this retry (for logging)
-		timeout := baseRTO * time.Duration(1<<pf.retries)
-		if timeout > 60*time.Second {
-			timeout = 60 * time.Second
-		}
-		util.LogModuleDebug("p2p", "[P2P] retransmitting control frame to %s: seq=%d retries=%d timeout=%v", peer.ID, pf.seq, pf.retries, timeout)
-
-		// Re-encode with current ack
-		ack := peer.recvState.getLastSeq()
-		encoded := make([]byte, 8+len(pf.payload))
-		binary.BigEndian.PutUint32(encoded[0:4], pf.seq)
-		binary.BigEndian.PutUint32(encoded[4:8], ack)
-		copy(encoded[8:], pf.payload)
-
-		if err := enqueueWriteReq(peer, writeReq{
-			frameType:      pf.frameType,
-			data:           encoded,
-			isControl:      true,
-			encodedControl: true,
-		}); err != nil {
-			util.LogModuleDebug("p2p", "[P2P] retransmit queue unavailable for %s: %v", peer.ID, err)
-			return
-		}
-		peer.sendState.markRetransmitted(pf.seq)
-	}
-}
-
-// sendPureAck sends an immediate pure ACK frame to acknowledge received control frames.
-// Pure ACK carries only the ack number and uses seq=0 (no acknowledgment expected for ACK itself).
-// This ensures accurate RTT measurement by responding immediately instead of waiting for next gossip.
-// The ACK is sent asynchronously through controlCh to avoid concurrent writes with peerWriteLoop.
-func (m *P2PManager) sendPureAck(peer *Peer) {
-	ack := peer.recvState.getLastSeq()
-	if ack == 0 {
-		return // Nothing to acknowledge
-	}
-
-	// Use pre-allocated buffer to avoid allocation per ACK
-	binary.BigEndian.PutUint32(peer.ackBuf[:], ack)
-
-	// Send through controlCh to avoid concurrent writes with peerWriteLoop
-	// Mark as control frame so it gets priority and correct timeout
-	select {
-	case peer.controlCh <- writeReq{frameType: frame.FrameAck, data: peer.ackBuf[:], isControl: true}:
-		// Queued successfully
-	default:
-		atomic.AddUint64(&peer.controlChDrops, 1)
-		util.LogModuleDebug("p2p", "[P2P] control queue full, dropping pure ACK to %s", peer.ID)
-	}
-}
-
-// sendHello sends a hello message to the peer, carrying gossip topology for immediate route establishment.
-func (m *P2PManager) sendHello(peer *Peer) {
-	util.LogModuleInfo("p2p", "[P2P-DIAG] sendHello called for peer=%s", peer.ID)
-	info := mesh.GossipInfo{
-		Cmd:             "hello",
-		ProtocolVersion: P2PProtocolVersion,
-		Seq:             peer.Seq, // Use peer's sequence number for link ID negotiation
-	}
-
-	// Set friendly name if this is an active (outbound) connection
-	if peer.proxy != nil {
-		info.FriendlyName = peer.proxy.Name
-	}
-
-	// Build gossip content from mesh handler
-	if m.meshHandler != nil {
-		gossipInfo := m.meshHandler.BuildGossipInfo()
-		info.DomainSuffixes = gossipInfo.DomainSuffixes
-		info.Routes = gossipInfo.Routes
-		info.ClaimedSubnets = gossipInfo.ClaimedSubnets
-	}
-
-	data, _ := json.Marshal(info)
-	util.LogModuleInfo("p2p", "[P2P-DIAG] sendHello enqueuing FrameHello for peer=%s dataLen=%d", peer.ID, len(data))
-	enqueueWrite(peer, frame.FrameHello, data, true) // control frame, reliable delivery
-}
-
-// handleHello processes a hello message from a peer.
-func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
-	util.LogModuleInfo("p2p", "[P2P-DIAG] handleHello entry: peer=%s payload=%d bytes", peer.ID, len(payload))
-	var info mesh.GossipInfo
-	if err := json.Unmarshal(payload, &info); err != nil {
-		util.LogModuleDebug("p2p", "[P2P] invalid hello from %s: %v", peer.ID, err)
-		return
-	}
-	util.LogModuleInfo("p2p", "[P2P-DIAG] handleHello parsed: peer=%s nodeID=%s subnets=%d version=%d", 
-		peer.ID, extractNodeIDFromGossip(info), len(info.ClaimedSubnets), info.ProtocolVersion)
-
-	// 1. Version check
-	if info.ProtocolVersion != P2PProtocolVersion {
-		util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
-			peer.ID, info.ProtocolVersion, P2PProtocolVersion)
-		peer.transport.Close()
-		return
-	}
-
-	// 2. Extract nodeID from ClaimedSubnets[hop=0]
-	nodeID := extractNodeIDFromGossip(info)
-	if nodeID == "" {
-		util.LogModuleDebug("p2p", "[P2P] hello from %s has no claimed subnet with hop=0", peer.ID)
-		peer.transport.Close()
-		return
-	}
-
-	peer.NodeID = nodeID
-	peer.LastError = ""
-	peer.SetStatus("helloed")
-	now := time.Now()
-	peer.LastSeen = now
-	peer.lastSeenNano.Store(now.UnixNano())
-	
-	// Store remote friendly name (proxy name)
-	if info.FriendlyName != "" {
-		peer.FriendlyName = info.FriendlyName
-	}
-
-	// 3. Link ID negotiation
-	remoteSeq := info.Seq
-	localSeq := peer.Seq
-	peer.RemoteSeq = remoteSeq // Store for gossip advertisement
-
-	if remoteSeq > 0 && localSeq > 0 {
-		// Sort and concatenate to generate link ID (internal use only)
-		minSeq := localSeq
-		maxSeq := remoteSeq
-		if localSeq > remoteSeq {
-			minSeq = remoteSeq
-			maxSeq = localSeq
-		}
-		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
-	}
-
-	m.notifyStatusChange()
-
-	util.LogModuleInfo("p2p", "[P2P] hello from %s: nodeID=%s, linkID=%s", peer.ID, nodeID, peer.LinkID)
-
-	// 4. Clean up old state + re-register
-	if m.meshHandler != nil {
-		// Unregister old sender for this specific peer connection.
-		// Each proxy has its own link, so we unregister by sender pointer (not by nodeID)
-		// to avoid affecting other links to the same remote node via different proxies.
-		if sender := peer.GetMeshSender(); sender != nil {
-			m.meshHandler.UnregisterPeer(sender)
-		}
-		ps := &peerSender{peer: peer, nodeID: nodeID}
-		peer.SetMeshSender(ps)
-		m.meshHandler.RegisterPeer(ps)
-		
-		// 5. Create LinkNIC for this link (design §5.6)
-		// Extract subnet from ClaimedSubnets[hop=0]
-		var subnet string
-		for _, cs := range info.ClaimedSubnets {
-			if cs.Hop == 0 {
-				subnet = cs.Subnet
-				break
-			}
-		}
-		util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC creation: peer=%s nodeID=%s subnet=%q", peer.ID, nodeID, subnet)
-		if subnet != "" {
-			linkNIC := m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
-			peer.SetLinkNIC(linkNIC)
-			if linkNIC == nil {
-				util.LogModuleWarn("p2p", "[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
-			} else {
-				util.LogModuleInfo("p2p", "[P2P-DIAG] LinkNIC created successfully: peer=%s nodeID=%s", peer.ID, nodeID)
-			}
-		} else {
-			util.LogModuleWarn("p2p", "[P2P] no subnet in hello from %s, cannot create LinkNIC", peer.ID)
-		}
-	}
-
-	// 6. Process topology (shared logic)
-	m.processGossipInfo(peer, info)
-
-	peer.SetStatus("upToDate")
-	m.notifyStatusChange()
 }
 
 // hashString generates a simple hash from a string (for sequence number generation)
@@ -1856,6 +1571,186 @@ func extractNodeIDFromGossip(info mesh.GossipInfo) string {
 		}
 	}
 	return ""
+}
+
+// PingInfo is the payload for ping/pong frames.
+type PingInfo struct {
+	Timestamp int64  `json:"timestamp"` // Send time (UnixNano)
+	Seq       uint32 `json:"seq"`       // Sequence number (for loss rate calculation)
+}
+
+// rttSampler maintains RTT statistics using exponential weighted moving average.
+type rttSampler struct {
+	mu         sync.Mutex
+	srtt       time.Duration // Smoothed RTT
+	rttVar     time.Duration // RTT variance
+	sampleCount int
+	lastSample  time.Duration
+}
+
+// add records a new RTT sample and updates statistics.
+func (r *rttSampler) add(rtt time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	
+	r.sampleCount++
+	r.lastSample = rtt
+	
+	if r.srtt == 0 {
+		// First sample
+		r.srtt = rtt
+		r.rttVar = rtt / 2
+	} else {
+		// Exponential weighted moving average (similar to TCP)
+		// α = 1/8, β = 1/4
+		diff := rtt - r.srtt
+		if diff < 0 {
+			diff = -diff
+		}
+		r.rttVar = (3*r.rttVar + diff) / 4
+		r.srtt = (7*r.srtt + rtt) / 8
+	}
+}
+
+// getStats returns current RTT statistics.
+func (r *rttSampler) getStats() (srtt, rttVar time.Duration, sampleCount int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.srtt, r.rttVar, r.sampleCount
+}
+
+// pingTracker tracks pending ping requests for RTT and loss rate measurement.
+type pingTracker struct {
+	mu            sync.Mutex
+	pendingPings  map[uint32]time.Time // seq -> send time
+	nextSeq       uint32
+	totalSent     uint64
+	totalReceived uint64
+	rttSampler    *rttSampler
+}
+
+// newPingTracker creates a new ping tracker.
+func newPingTracker() *pingTracker {
+	return &pingTracker{
+		pendingPings: make(map[uint32]time.Time),
+		nextSeq:      1,
+		rttSampler:   &rttSampler{},
+	}
+}
+
+// recordPing records a ping send and returns the sequence number.
+func (t *pingTracker) recordPing() uint32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	seq := t.nextSeq
+	t.nextSeq++
+	t.totalSent++
+	t.pendingPings[seq] = time.Now()
+	
+	// Clean up old pending pings (older than 5 seconds)
+	cutoff := time.Now().Add(-5 * time.Second)
+	for s, sendTime := range t.pendingPings {
+		if sendTime.Before(cutoff) {
+			delete(t.pendingPings, s)
+		}
+	}
+	
+	return seq
+}
+
+// recordPong records a pong receive and calculates RTT.
+func (t *pingTracker) recordPong(seq uint32, timestamp int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	if sendTime, ok := t.pendingPings[seq]; ok {
+		delete(t.pendingPings, seq)
+		t.totalReceived++
+		
+		// Calculate RTT
+		rtt := time.Since(sendTime)
+		t.rttSampler.add(rtt)
+	}
+}
+
+// getLossRate returns the current loss rate (0.0 - 1.0).
+func (t *pingTracker) getLossRate() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	if t.totalSent == 0 {
+		return 0.0
+	}
+	return 1.0 - float64(t.totalReceived)/float64(t.totalSent)
+}
+
+// getStats returns all link quality statistics.
+func (t *pingTracker) getStats() (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
+	srtt, rttVar, sampleCount := t.rttSampler.getStats()
+	lossRate = t.getLossRate()
+	
+	// RTO = SRTT + 4 * RTTVAR (similar to TCP)
+	rto = srtt + 4*rttVar
+	if rto < 100*time.Millisecond {
+		rto = 100 * time.Millisecond // Minimum RTO
+	}
+	
+	jitter = rttVar
+	
+	return srtt, rto, jitter, lossRate, sampleCount
+}
+
+// handlePing processes a ping request from a peer and sends a pong response.
+func (m *P2PManager) handlePing(peer *Peer, payload []byte) {
+	var ping PingInfo
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		util.LogModuleDebug("p2p", "[P2P] invalid ping from %s: %v", peer.ID, err)
+		return
+	}
+	
+	// Immediately reply with pong, echoing the same timestamp and seq
+	pong := PingInfo{
+		Timestamp: ping.Timestamp,
+		Seq:       ping.Seq,
+	}
+	data, _ := json.Marshal(pong)
+	enqueueWrite(peer, frame.FrameLinkPong, data, true)
+	
+	util.LogModuleDebug("p2p", "[P2P] sent pong to %s: seq=%d", peer.ID, ping.Seq)
+}
+
+// handlePong processes a pong response from a peer and calculates RTT.
+func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
+	var pong PingInfo
+	if err := json.Unmarshal(payload, &pong); err != nil {
+		util.LogModuleDebug("p2p", "[P2P] invalid pong from %s: %v", peer.ID, err)
+		return
+	}
+	
+	// Record the pong response
+	if peer.pingTracker != nil {
+		peer.pingTracker.recordPong(pong.Seq, pong.Timestamp)
+	}
+	
+	util.LogModuleDebug("p2p", "[P2P] received pong from %s: seq=%d", peer.ID, pong.Seq)
+}
+
+// sendPing sends a ping request to a peer for link quality measurement.
+func (m *P2PManager) sendPing(peer *Peer) {
+	if peer.pingTracker == nil {
+		return
+	}
+	
+	seq := peer.pingTracker.recordPing()
+	ping := PingInfo{
+		Timestamp: time.Now().UnixNano(),
+		Seq:       seq,
+	}
+	data, _ := json.Marshal(ping)
+	enqueueWrite(peer, frame.FrameLinkPing, data, true)
+	
+	util.LogModuleDebug("p2p", "[P2P] sent ping to %s: seq=%d", peer.ID, seq)
 }
 
 // SetMeshInfo configures mesh networking parameters.
@@ -1931,14 +1826,45 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	}
 }
 
-// ResendHelloToAll resends hello to all connected peers (used after subnet conflict resolution).
-func (m *P2PManager) ResendHelloToAll() {
+// BroadcastGossipToAll broadcasts gossip to all connected peers (used after subnet conflict resolution).
+func (m *P2PManager) BroadcastGossipToAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, peer := range m.peers {
-		m.sendHello(peer)
+	peers := make([]*Peer, 0, len(m.peers))
+	for _, p := range m.peers {
+	if p.meshSenderPtr.Load() != nil {
+		peers = append(peers, p)
 	}
-	util.LogModuleDebug("p2p", "[P2P] resent hello to all peers (%d)", len(m.peers))
+}
+	m.mu.Unlock()
+
+	for _, peer := range peers {
+		m.broadcastGossipToPeer(peer)
+	}
+	util.LogModuleDebug("p2p", "[P2P] broadcast gossip to all peers (%d)", len(peers))
+}
+
+// broadcastGossipToPeer sends a gossip message to a specific peer.
+func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
+	info := mesh.GossipInfo{
+		Cmd:             "gossip",
+		ProtocolVersion: P2PProtocolVersion,
+	}
+
+	// Set friendly name if this is an active (outbound) connection
+	if peer.proxy != nil {
+		info.FriendlyName = peer.proxy.Name
+	}
+
+	// Build gossip content from mesh handler
+	if m.meshHandler != nil {
+		gossipInfo := m.meshHandler.BuildGossipInfo()
+		info.DomainSuffixes = gossipInfo.DomainSuffixes
+		info.Routes = gossipInfo.Routes
+		info.ClaimedSubnets = gossipInfo.ClaimedSubnets
+	}
+
+	data, _ := json.Marshal(info)
+	enqueueWrite(peer, frame.FrameGossip, data, true)
 }
 
 // ListMeshPeerIDs returns node IDs of all mesh-enabled peers.
@@ -1993,9 +1919,8 @@ func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.
 	defer m.mu.Unlock()
 
 	for _, p := range m.peers {
-		if p.NodeID == nodeID && p.sendState != nil {
-			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
-			return p.sendState.getStats(channelDrops)
+		if p.NodeID == nodeID && p.pingTracker != nil {
+			return p.pingTracker.getStats()
 		}
 	}
 	return 0, 0, 0, 0, 0
@@ -2028,30 +1953,28 @@ func (m *P2PManager) GetChannelDropStats() (peerStats map[string]struct {
 }
 
 
-// GetLinkQualityStatsByProxy returns ACK-based link quality stats for a specific link (proxy).
+// GetLinkQualityStatsByProxy returns ping/pong-based link quality stats for a specific link (proxy).
 // Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
 func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, p := range m.peers {
-		if p.ProxyName == proxyName && p.sendState != nil {
-			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
-			return p.sendState.getStats(channelDrops)
+		if p.ProxyName == proxyName && p.pingTracker != nil {
+			return p.pingTracker.getStats()
 		}
 	}
 	return 0, 0, 0, 0, 0
 }
 
-// GetLinkQualityStatsByLinkID returns ACK-based link quality stats for an exact negotiated link.
+// GetLinkQualityStatsByLinkID returns ping/pong-based link quality stats for an exact negotiated link.
 func (m *P2PManager) GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, p := range m.peers {
-		if p.LinkID == linkID && p.sendState != nil {
-			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
-			return p.sendState.getStats(channelDrops)
+		if p.LinkID == linkID && p.pingTracker != nil {
+			return p.pingTracker.getStats()
 		}
 	}
 	return 0, 0, 0, 0, 0
@@ -2072,7 +1995,7 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 
 	result := make(map[string]struct {
 		NodeID      string
-		SRTT        time.Duration
+	SRTT        time.Duration
 		RTO         time.Duration
 		Jitter      time.Duration
 		LossRate    float64
@@ -2080,9 +2003,8 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 	})
 
 	for _, p := range m.peers {
-		if p.sendState != nil && p.ProxyName != "" {
-			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
-			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats(channelDrops)
+		if p.pingTracker != nil && p.ProxyName != "" {
+			srtt, rto, jitter, lossRate, sampleCount := p.pingTracker.getStats()
 			result[p.ProxyName] = struct {
 				NodeID      string
 				SRTT        time.Duration

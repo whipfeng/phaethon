@@ -2553,6 +2553,11 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogModuleWarn("admin", "incremental update after mapping add failed: %v", err)
+			}
+		}
 		s.mu.Unlock()
 		// Notify runtime about mapping change
 		if s.OnMappingUpdate != nil {

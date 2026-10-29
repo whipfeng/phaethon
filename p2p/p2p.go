@@ -1895,6 +1895,7 @@ func (m *P2PManager) GetPeers() []Peer {
 			ProxyName: p.ProxyName,
 			NodeID:    p.NodeID,
 			Status:    p.GetStatus(),
+			LastError: p.LastError,
 			LastSeen:  time.Unix(0, lastSeenNano),
 		})
 	}

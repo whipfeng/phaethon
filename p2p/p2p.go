@@ -581,7 +581,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
 			}
-			util.LogModuleWarn("p2p", "[P2P] write error for %s: %v", peer.ID, err)
+			util.LogModuleWarn("p2p", "[P2P-DIAG] write error for peer.ID=%s proxy=%s nodeID=%s status=%s frameType=0x%02x: %v",
+				peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), req.frameType, err)
+			peer.LastError = err.Error()
 			peer.transport.Close()
 			return false
 		}
@@ -1229,6 +1231,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	// Check for existing peer with same proxy name (O(1) lookup)
 	if existing, ok := m.proxyPeers[proxy.Name]; ok {
 		util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", existing.ID, proxy.Name)
+		// CRITICAL: Unregister existing peer's sender from topology BEFORE stopping.
+		// This prevents stale PeerInfo entries from accumulating when peers reconnect rapidly.
+		// The defer in the existing peer's session will run asynchronously, but we need to
+		// clean up the topology synchronously to avoid race conditions.
+		if sender := existing.GetMeshSender(); sender != nil && m.meshHandler != nil {
+			m.meshHandler.UnregisterPeer(sender)
+			existing.SetMeshSender(nil) // Prevent defer from unregistering again
+		}
 		stopPeer(existing)
 		delete(m.proxyPeers, proxy.Name)
 		delete(m.peers, existing.ID)
@@ -1242,10 +1252,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	defer func() {
 		stopPeer(peer)
 		m.mu.Lock()
-		if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(sender)
-		}
+		// DON'T UnregisterPeer here! The inner defer (line 1350) already handles it.
+		// Since defers are LIFO, the inner defer runs first and calls UnregisterPeer.
+		// If we also call it here, it would be a no-op (sender already removed from topology),
+		// but it's cleaner to let the inner defer handle all mesh cleanup.
+		
 		// Delete LinkNIC when peer disconnects (design §5.6)
+		// Note: Inner defer also does this, but it's safe to call DeleteLinkNIC twice
+		// (second call is a no-op since LinkNIC is already deleted).
 		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
 			m.meshHandler.DeleteLinkNIC(linkNIC)
 			peer.SetLinkNIC(nil)
@@ -1340,7 +1354,18 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// Run session in a closure so we can use defer for cleanup
 		func() {
 			defer func() {
+				// Log disconnection reason
+				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v",
+					peer.ID, proxy.Name, peer.GetStatus(), peer.LastError)
+				
 				transport.Close()
+				
+				// Update status to disconnected before cleanup
+				if peer.GetStatus() != "stopped" {
+					peer.SetStatus("disconnected")
+					m.notifyStatusChange()
+				}
+				
 				// Clean up mesh peer registration
 				m.mu.Lock()
 				if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
@@ -1365,7 +1390,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// connection gets a brand-new seq, peer.ID, and clean state.
 		if peer.GetStatus() != "stopped" {
 			proxy := peer.proxy
-			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s), starting fresh peer", peer.ID, proxy.Name)
+			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s status=%s), starting fresh peer",
+				peer.ID, proxy.Name, peer.GetStatus())
 			go m.StartPeer(proxy)
 		}
 		return
@@ -1374,12 +1400,16 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 // runSession reads frames and dispatches them.
 func (m *P2PManager) runSession(peer *Peer) {
+	// Log session start with full context
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession START for peer.ID=%s proxy=%s nodeID=%s status=%s",
+		peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus())
+	
 	// Send hello immediately
-	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer=%s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer.ID=%s proxy=%s", peer.ID, peer.proxy.Name)
 	m.sendHello(peer)
-	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession sendHello completed for peer=%s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession sendHello completed for peer.ID=%s", peer.ID)
 
-	util.LogModuleInfo("p2p", "[P2P] runSession started for %s", peer.ID)
+	util.LogModuleInfo("p2p", "[P2P] runSession started for %s (proxy=%s)", peer.ID, peer.proxy.Name)
 
 	// Heartbeat timeout monitor: close connection if no data received for 30s
 	heartbeatTimeout := 30 * time.Second
@@ -1398,7 +1428,9 @@ func (m *P2PManager) runSession(peer *Peer) {
 				lastSeenNano := peer.lastSeenNano.Load()
 				lastSeenTime := time.Unix(0, lastSeenNano)
 				if time.Since(lastSeenTime) > heartbeatTimeout {
-					util.LogModuleWarn("p2p", "[P2P] heartbeat timeout for %s (last seen %v ago), closing connection", peer.ID, time.Since(lastSeenTime))
+					util.LogModuleWarn("p2p", "[P2P-DIAG] heartbeat timeout for peer.ID=%s proxy=%s nodeID=%s status=%s (last seen %v ago), closing connection",
+						peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), time.Since(lastSeenTime))
+					peer.LastError = fmt.Sprintf("heartbeat timeout: no data for %v", time.Since(lastSeenTime))
 					peer.transport.Close()
 					return
 				}
@@ -1436,7 +1468,10 @@ func (m *P2PManager) runSession(peer *Peer) {
 		peer.LastSeen = now
 		peer.lastSeenNano.Store(now.UnixNano())
 		if err != nil {
-			util.LogModuleInfo("p2p", "[P2P] read error for %s: %v", peer.ID, err)
+			// Log detailed disconnection reason
+			util.LogModuleInfo("p2p", "[P2P-DIAG] read error for peer.ID=%s proxy=%s nodeID=%s status=%s: %v",
+				peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), err)
+			peer.LastError = err.Error()
 			frame.ReturnBuffer(originalPayload)
 			return
 		}
@@ -1674,8 +1709,9 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 
 	// 4. Clean up old state + re-register
 	if m.meshHandler != nil {
-		// Unregister old sender for this specific peer connection (not by nodeID,
-		// to allow multiple connections to the same remote node via different proxies)
+		// Unregister old sender for this specific peer connection.
+		// Each proxy has its own link, so we unregister by sender pointer (not by nodeID)
+		// to avoid affecting other links to the same remote node via different proxies.
 		if sender := peer.GetMeshSender(); sender != nil {
 			m.meshHandler.UnregisterPeer(sender)
 		}

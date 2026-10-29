@@ -128,7 +128,7 @@ func PutDHCPLeases(leases []DHCPLease) error {
 
 // GetPortBindings 获取所有端口绑定
 func GetPortBindings() ([]PortBinding, error) {
-	bindings, err := getView[[]PortBinding](BucketRuntimeState, []byte("port-bindings"))
+	bindings, err := getView[[]PortBinding](BucketBindings, []byte("port-bindings"))
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func GetPortBindings() ([]PortBinding, error) {
 
 // PutPortBindings 存储所有端口绑定
 func PutPortBindings(bindings []PortBinding) error {
-	return Put(BucketRuntimeState, []byte("port-bindings"), bindings)
+	return Put(BucketBindings, []byte("port-bindings"), bindings)
 }
 
 // GetTUNState 获取 TUN 设备状态

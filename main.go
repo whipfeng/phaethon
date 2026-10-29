@@ -908,16 +908,6 @@ func main() {
 	// Wire up admin callbacks
 	if resources != nil && resources.adminServer != nil {
 		wireAdminCallbacks(resources)
-		resources.adminServer.OnReload = func() {
-			util.LogModuleInfo("system", "------------------------admin reload triggered------------------------")
-			newResources, err := run(resources)
-
-			if err != nil {
-				util.LogModuleInfo("system", "reload failed: %v", err)
-				return
-			}
-			resources = newResources
-		}
 		resources.adminServer.OnTUNToggle = func(enable bool) error {
 			return toggleTUN(enable, resources)
 		}

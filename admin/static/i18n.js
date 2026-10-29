@@ -121,7 +121,6 @@
             'dash.manageProxies': '管理代理',
             'dash.editRules': '编辑规则',
             'dash.viewMappings': '查看映射',
-            'dash.reloadConfig': '重载配置',
             'dash.viewLogs': '查看日志',
             'dash.viewConns': '查看连接',
             'dash.expandLogs': '展开',
@@ -669,7 +668,6 @@
             'raw.saveOnly': '💾 仅保存',
             'raw.saving': '正在保存…',
             'raw.saved': '配置已保存',
-            'raw.savedAndReloading': '已保存，正在重载...',
             'raw.saveFailed': '保存失败',
             'raw.copyFailed': '复制失败',
             'raw.placeholder': '正在加载配置…',
@@ -682,9 +680,6 @@
             'raw.passwordConfirm': '请输入密码确认操作：',
 
             // ===== App.js / Common =====
-            'toast.reloading': '正在重载配置...',
-            'toast.reloadOk': '配置已重载',
-            'toast.reloadFailed': '重载失败',
             'toast.configChanged': '配置已修改，点击重载生效',
             'toast.noOverlay': '未检测到环境覆盖文件',
             'toast.targetSwitched': '保存目标已切换',
@@ -805,7 +800,6 @@
             'logs.filter': '过滤',
 
             // ===== Dashboard (additional) =====
-            'dash.confirmReload': '确认重载配置？',
             'dash.confirmRestart': '确认重启进程？服务将短暂不可用。',
             'dash.restarting': '正在重启进程...',
             'dash.restartOk': '进程正在重启，页面将在几秒后刷新。',
@@ -941,7 +935,6 @@
             'dash.manageProxies': 'Manage Proxies',
             'dash.editRules': 'Edit Rules',
             'dash.viewMappings': 'View Mappings',
-            'dash.reloadConfig': 'Reload Config',
             'dash.viewLogs': 'View Runtime Logs',
             'dash.viewConns': 'View Connections',
             'dash.expandLogs': 'Expand',
@@ -1489,7 +1482,6 @@
             'raw.saveOnly': '💾 Save Only',
             'raw.saving': 'Saving...',
             'raw.saved': 'Configuration saved',
-            'raw.savedAndReloading': 'Saved, reloading...',
             'raw.saveFailed': 'Save failed',
             'raw.copyFailed': 'Copy failed',
             'raw.placeholder': 'Loading configuration...',
@@ -1502,9 +1494,6 @@
             'raw.passwordConfirm': 'Enter password to confirm:',
 
             // ===== App.js / Common =====
-            'toast.reloading': 'Reloading configuration...',
-            'toast.reloadOk': 'Config reload triggered',
-            'toast.reloadFailed': 'Reload failed',
             'toast.configChanged': 'Configuration changed. Click to reload.',
             'toast.noOverlay': 'No env overlay file detected',
             'toast.targetSwitched': 'Save target switched to',
@@ -1624,7 +1613,6 @@
             'logs.filter': 'Filter',
 
             // ===== Dashboard (additional) =====
-            'dash.confirmReload': 'Reload configuration?',
             'dash.confirmRestart': 'Restart process? The service will be briefly unavailable.',
             'dash.restarting': 'Restarting process...',
             'dash.restartOk': 'Process restarting. Page will reload in a few seconds.',

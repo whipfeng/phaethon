@@ -656,6 +656,12 @@ function onBusinessVersion(topic, handler, label) {
 // handler-local version and only advances the local version after success.
 function registerDefaultVersionHandlers() {
     onBusinessVersion('reverse-configs', () => scheduleTopicFetch('reverse-configs'), 'reverse-configs');
+    onBusinessVersion('bindings', () => {
+        // Refresh bindings list if on reverse-wizard page
+        if (typeof window.loadBindings === 'function') {
+            window.loadBindings();
+        }
+    }, 'bindings');
     onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
     onBusinessVersion('tun-config', () => scheduleTopicFetch('tun-config'), 'tun-config');
     onBusinessVersion('mesh-config', () => fetchMeshStatus(), 'mesh-config');
@@ -740,6 +746,12 @@ function fetchForTopic(topic, expectedVersion) {
     switch (topic) {
         case 'reverse-configs':
             return pollReverseList(undefined, expectedVersion);
+        case 'bindings':
+            // Call global loadBindings if available (set by reverse-wizard page)
+            if (typeof window.loadBindings === 'function') {
+                return window.loadBindings(expectedVersion);
+            }
+            return Promise.resolve();
         case 'stats':
             return fetchStats(expectedVersion);
         case 'tun-config':
@@ -3107,29 +3119,6 @@ function initModalResize(handle, content) {
     });
 }
 
-// ========== Config Reload ==========
-function reloadConfig() {
-    const msg = typeof i18n !== 'undefined' ? i18n.t('dash.confirmReload') : 'Reload configuration? This may disrupt active connections.';
-    openConfirmModal(msg, async function() {
-        try {
-            const infoMsg = typeof i18n !== 'undefined' ? i18n.t('toast.reloading') : 'Reloading configuration...';
-            showToast(infoMsg, 'info');
-            const res = await fetch('./api/config/reload', { method: 'POST' });
-            const data = await res.json();
-            if (res.ok) {
-                const okMsg = typeof i18n !== 'undefined' ? i18n.t('toast.reloadOk') : 'Config reload triggered';
-                showToast('✅ ' + okMsg, 'success');
-            } else {
-                const failMsg = typeof i18n !== 'undefined' ? i18n.t('toast.reloadFailed') : 'Reload failed';
-                showToast('❌ ' + (data.error || failMsg), 'error');
-            }
-        } catch (err) {
-            const netErr = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Network error';
-            showToast('❌ ' + netErr + ': ' + err.message, 'error');
-        }
-    });
-}
-
 // ========== Process Restart ==========
 function restartProcess() {
     const msg = typeof i18n !== 'undefined' ? i18n.t('dash.confirmRestart') : 'Restart process? The service will be briefly unavailable.';
@@ -3713,10 +3702,5 @@ document.addEventListener('keydown', (e) => {
     // Escape closes modals
     if (e.key === 'Escape') {
         document.querySelectorAll('.modal:not(.hidden)').forEach(m => m.classList.add('hidden'));
-    }
-    // Ctrl+R / Cmd+R prevents browser reload, triggers config reload instead
-    if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-        e.preventDefault();
-        reloadConfig();
     }
 });

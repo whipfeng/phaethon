@@ -105,10 +105,6 @@ func (s *BindingStore) Set(reverseID string, seq int, port int, listenerProto, i
 	}
 	s.saveLocked()
 	s.mu.Unlock()
-
-	// Publish outside the lock — Snapshot() acquires its own RLock and would
-	// deadlock if called while we still hold the write lock.
-	s.publishSnapshot()
 }
 
 // Remove deletes a binding.
@@ -117,9 +113,6 @@ func (s *BindingStore) Remove(reverseID string, seq int) {
 	delete(s.bindings, makeKey(reverseID, seq))
 	s.saveLocked()
 	s.mu.Unlock()
-
-	// Publish outside the lock (same reason as Set).
-	s.publishSnapshot()
 }
 
 // RemoveByReverseID removes all bindings for the given reverseID, regardless of seq.
@@ -136,7 +129,6 @@ func (s *BindingStore) RemoveByReverseID(reverseID string) {
 	}
 	s.saveLocked()
 	s.mu.Unlock()
-	s.publishSnapshot()
 }
 
 // IsPortBoundByOther checks if the given port is already bound to a different
@@ -163,15 +155,6 @@ func (s *BindingStore) SetDisconnected(reverseID string, seq int) {
 		s.saveLocked()
 	}
 	s.mu.Unlock()
-
-	// Publish outside the lock (same reason as Set).
-	s.publishSnapshot()
-}
-
-// publishSnapshot bumps the bindings topic version so connected browsers know
-// to fetch the latest binding list via REST.
-func (s *BindingStore) publishSnapshot() {
-	db.BumpRuntimeVersion("bindings")
 }
 
 // FindBindingByPort returns the binding that owns the given port, or nil.

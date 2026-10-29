@@ -272,6 +272,9 @@ func (m *ControlManager) closeSessionByIdentity(reverseID string, seq int) bool 
 // handleRegister processes a register request: allocates address, opens listener,
 // creates proxy, inserts routing rule.
 func (m *ControlManager) handleRegister(controlAddr string, registryAddr string, req *reverse.ControlRequest) reverse.ControlReply {
+	util.LogModuleInfo("control", "received register request from %s: name=%s reverse_id=%s seq=%d proto=%s",
+		controlAddr, req.Name, req.ReverseID, req.Seq, req.Proto)
+
 	proto := req.Proto
 	if proto == "" {
 		proto = "socks5"

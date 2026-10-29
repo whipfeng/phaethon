@@ -100,8 +100,7 @@
                     const res = await fetch('./api/config/admin', {
                         method: 'PUT',
                         headers: {
-                            'Content-Type': 'application/json',
-                            'X-Password-Confirm': password
+                            'Content-Type': 'application/json'
                         },
                         body: JSON.stringify(body)
                     });

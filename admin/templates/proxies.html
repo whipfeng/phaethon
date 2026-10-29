@@ -642,18 +642,22 @@ function populateNextProxySelect(selected) {
     rejectOpt.value = 'REJECT';
     rejectOpt.textContent = 'REJECT';
     sel.appendChild(rejectOpt);
-    proxies.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.name;
-        opt.textContent = `${p.name} (${p.type})`;
-        sel.appendChild(opt);
-    });
-    groups.forEach(g => {
-        const opt = document.createElement('option');
-        opt.value = g.name;
-        opt.textContent = `${g.name} [GROUP]`;
-        sel.appendChild(opt);
-    });
+    if (proxies) {
+        proxies.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.name;
+            opt.textContent = `${p.name} (${p.type})`;
+            sel.appendChild(opt);
+        });
+    }
+    if (groups) {
+        groups.forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = g.name;
+            opt.textContent = `${g.name} [GROUP]`;
+            sel.appendChild(opt);
+        });
+    }
     if (selected) sel.value = selected;
 }
 

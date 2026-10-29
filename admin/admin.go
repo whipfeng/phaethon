@@ -1387,6 +1387,14 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 	groups, _ := db.ListProxyGroups()
 	subs, _ := db.ListSubscriptions()
 
+	// Ensure non-nil slices for JavaScript (nil serializes to null, not [])
+	if proxies == nil {
+		proxies = []*config.Proxy{}
+	}
+	if groups == nil {
+		groups = []*config.ProxyGroup{}
+	}
+
 	// Build group stats from database (single source of truth)
 	groupStats := make(map[string]map[string]interface{})
 	for _, g := range groups {
@@ -4538,7 +4546,7 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		advertise := []string{}
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg != nil {
+		if meshCfg != nil && meshCfg.Advertise != nil {
 			advertise = meshCfg.Advertise
 		}
 		jsonResponse(w, advertise)

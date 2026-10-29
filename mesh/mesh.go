@@ -242,7 +242,16 @@ type MeshManager struct {
 	DNSAllocator func(domain string) (net.IP, error)
 
 	closeCh chan struct{}
-	eventCh chan meshEvent
+	
+	// Dual-channel design for performance isolation:
+	// criticalCh: blocking queue for critical operations (register/unregister/gossip processing)
+	// normalCh: non-blocking queue for non-critical operations (config update/tick/broadcast)
+	criticalCh chan meshEvent
+	normalCh   chan meshEvent
+	
+	// topologySnapshot holds a copy of topology.peers for lock-free reads by gossipWorker.
+	// Updated atomically by criticalWorker after modifying topology.peers.
+	topologySnapshot atomic.Value // stores *TopologySnapshot
 
 	// DNS hijacker and Fake-IP pool (mesh DNS service)
 	dnsHijacker *DNSHijacker
@@ -293,6 +302,11 @@ type routeTable struct {
 	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
 }
 
+// TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
+type TopologySnapshot struct {
+	peers []*PeerInfo
+}
+
 // getRouteTable returns the current route table (lock-free).
 func (m *MeshManager) getRouteTable() *routeTable {
 	return m.routeTable.Load().(*routeTable)
@@ -310,7 +324,8 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		network:         network,
 		subnetPrefixLen: subnetPrefixLen,
 		closeCh:         make(chan struct{}),
-		eventCh:         make(chan meshEvent, 1024),
+		criticalCh:      make(chan meshEvent, 256),   // blocking queue for critical ops
+		normalCh:        make(chan meshEvent, 1024),  // non-blocking queue for non-critical ops
 		stickyCache:     make(map[string]string),
 		linkSelectIdx:   make(map[string]int),
 	}
@@ -693,18 +708,18 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	m.advertise = advertise
 	m.mu.Unlock()
 	select {
-	case m.eventCh <- meshEvent{kind: meshEventConfigUpdate}:
+	case m.normalCh <- meshEvent{kind: configUpdate}:
 	default:
-		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping config update event")
+		util.LogModuleWarn("mesh", "[MESH] normalCh full, dropping config update event")
 	}
 }
 
 // TriggerGossip sends an immediate gossip broadcast.
 func (m *MeshManager) TriggerGossip() {
 	select {
-	case m.eventCh <- meshEvent{kind: meshEventTick}:
+	case m.normalCh <- meshEvent{kind: gossipBroadcast}:
 	default:
-		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping trigger gossip event")
+		util.LogModuleWarn("mesh", "[MESH] normalCh full, dropping trigger gossip event")
 	}
 }
 
@@ -848,7 +863,8 @@ func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	util.LogModuleInfo("mesh", "[MESH-START] calling recomputeRoutes: node=%s", m.nodeID)
 	m.recomputeRoutes()
-	go m.gossipLoop()
+	go m.criticalWorker()
+	go m.gossipWorker()
 	go m.qualityLoop()
 	util.LogModuleInfo("mesh", "[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
 }
@@ -969,38 +985,21 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
-// Direct call to topology (bypassing event loop) to ensure registration even when eventCh is full.
-// This prevents missed registrations when peers connect rapidly.
+// Blocking send to criticalCh to ensure registration is never dropped.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
-	m.topology.RegisterPeer(sender)
-	nodeID := sender.GetNodeID()
-	// Reset quality tracker for this peer to avoid stale state
-	m.qualityTracker.RemoveNode(nodeID)
-	util.LogModuleInfo("mesh", "[MESH] peer registered: %s", nodeID)
-	// Recompute routes immediately (critical for routing)
-	m.recomputeRoutes()
-	// Notify for package sync
-	if m.OnPeerRegistered != nil {
-		go m.OnPeerRegistered(nodeID)
-	}
-	// Broadcast gossip (non-critical, can be skipped if busy)
-	m.broadcastGossip()
+	m.criticalCh <- meshEvent{kind: peerRegister, sender: sender}
 }
 
 // UnregisterPeer is called when a P2P peer disconnects.
-// Direct call to topology (bypassing event loop) to ensure cleanup even when eventCh is full.
-// This prevents stale PeerInfo entries from accumulating when peers reconnect rapidly.
+// Blocking send to criticalCh to ensure cleanup is never dropped.
 func (m *MeshManager) UnregisterPeer(sender PeerSender) {
-	nodeID := sender.GetNodeID()
-	m.topology.UnregisterPeer(sender)
-	util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
-	// Recompute routes immediately (critical for routing)
-	m.recomputeRoutes()
+	m.criticalCh <- meshEvent{kind: peerUnregister, sender: sender}
 }
 
 // UnregisterPeerByNodeID removes a peer by nodeID (used when re-registering after hello).
+// Blocking send to criticalCh to ensure cleanup is never dropped.
 func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
-	m.topology.UnregisterPeerByNodeID(nodeID)
+	m.criticalCh <- meshEvent{kind: peerUnregisterByNodeID, nodeID: nodeID}
 }
 
 // SendToNode sends an encapsulated packet to a specific target node via the mesh network.
@@ -1170,11 +1169,8 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
 	if sender.GetNodeID() == m.nodeID {
 		return
 	}
-	select {
-	case m.eventCh <- meshEvent{kind: meshEventGossip, sender: sender, data: data}:
-	default:
-		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping gossip from %s", sender.GetNodeID())
-	}
+	// Gossip processing modifies topology, so it goes to criticalCh (blocking)
+	m.criticalCh <- meshEvent{kind: processGossip, sender: sender, data: data}
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {
@@ -2082,38 +2078,92 @@ func (m *MeshManager) findNextHopsFallback(targetNodeIDs []string, peers []*Peer
 	return result
 }
 
-func (m *MeshManager) gossipLoop() {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+// criticalWorker processes critical events that must not be dropped.
+// These events modify topology and must be processed serially.
+func (m *MeshManager) criticalWorker() {
 	for {
 		select {
 		case <-m.closeCh:
 			return
-		case <-ticker.C:
-			m.broadcastGossip()
-		case ev := <-m.eventCh:
+		case ev := <-m.criticalCh:
 			switch ev.kind {
-			case meshEventGossip:
+			case peerRegister:
+				m.topology.RegisterPeer(ev.sender)
+				m.updateTopologySnapshot()
+				m.recomputeRoutes()
+				util.LogModuleInfo("mesh", "[MESH] peer registered: %s", ev.sender.GetNodeID())
+				if m.OnPeerRegistered != nil {
+					go m.OnPeerRegistered(ev.sender.GetNodeID())
+				}
+				// Trigger gossip broadcast (non-critical, can be dropped)
+				select {
+				case m.normalCh <- meshEvent{kind: gossipBroadcast}:
+				default:
+				}
+				
+			case peerUnregister:
+				nodeID := ev.sender.GetNodeID()
+				m.topology.UnregisterPeer(ev.sender)
+				m.updateTopologySnapshot()
+				m.recomputeRoutes()
+				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
+				
+			case peerUnregisterByNodeID:
+				m.topology.UnregisterPeerByNodeID(ev.nodeID)
+				m.updateTopologySnapshot()
+				m.recomputeRoutes()
+				util.LogModuleInfo("mesh", "[MESH] peer unregistered by nodeID: %s", ev.nodeID)
+				
+			case processGossip:
 				var info GossipInfo
 				if err := json.Unmarshal(ev.data, &info); err != nil {
 					util.LogModuleDebug("mesh", "[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
 					break
 				}
-				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
+				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", 
+					ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
+					m.updateTopologySnapshot()
 					m.recomputeRoutes()
 					db.BumpRuntimeVersion("mesh")
 				}
 				// Check for subnet conflicts and re-select if needed
 				if m.checkSubnetConflict() {
 					m.recomputeRoutes()
-					// Resend hello to all peers to clean up old state and advertise new subnet/VIP
 					if m.p2p != nil {
 						m.p2p.ResendHelloToAll()
 					}
-					m.broadcastGossip()
+					// Trigger gossip broadcast (non-critical)
+					select {
+					case m.normalCh <- meshEvent{kind: gossipBroadcast}:
+					default:
+					}
 				}
-			case meshEventConfigUpdate:
+				
+			case recomputeRoute:
+				m.recomputeRoutes()
+			}
+		}
+	}
+}
+
+// gossipWorker processes non-critical events that can be dropped if the queue is full.
+// These events read topology but don't modify it (except for broadcasting).
+func (m *MeshManager) gossipWorker() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-m.closeCh:
+			return
+		case <-ticker.C:
+			m.broadcastGossip()
+		case ev := <-m.normalCh:
+			switch ev.kind {
+			case gossipBroadcast:
+				m.broadcastGossip()
+			case configUpdate:
 				m.recomputeRoutes()
 				m.broadcastGossip()
 				db.BumpRuntimeVersion("mesh")
@@ -2125,18 +2175,46 @@ func (m *MeshManager) gossipLoop() {
 	}
 }
 
+// updateTopologySnapshot creates an atomic snapshot of topology.peers for lock-free reads.
+// Called by criticalWorker after modifying topology.peers.
+func (m *MeshManager) updateTopologySnapshot() {
+	m.topology.mu.RLock()
+	peersCopy := make([]*PeerInfo, len(m.topology.peers))
+	copy(peersCopy, m.topology.peers)
+	m.topology.mu.RUnlock()
+	
+	snapshot := &TopologySnapshot{peers: peersCopy}
+	m.topologySnapshot.Store(snapshot)
+}
+
+// getTopologySnapshot returns the current topology snapshot (lock-free).
+func (m *MeshManager) getTopologySnapshot() []*PeerInfo {
+	if snapshot := m.topologySnapshot.Load(); snapshot != nil {
+		return snapshot.(*TopologySnapshot).peers
+	}
+	return nil
+}
+
 type meshEventKind int
 
 const (
-	meshEventGossip meshEventKind = iota
-	meshEventTick
-	meshEventConfigUpdate
+	// Critical events (criticalCh) - blocking, never dropped
+	peerRegister meshEventKind = iota
+	peerUnregister
+	peerUnregisterByNodeID
+	processGossip
+	recomputeRoute
+	
+	// Normal events (normalCh) - non-blocking, can be dropped
+	gossipBroadcast
+	configUpdate
 )
 
 type meshEvent struct {
 	kind   meshEventKind
 	sender PeerSender
 	data   []byte
+	nodeID string // for peerUnregisterByNodeID
 }
 
 func (m *MeshManager) broadcastGossip() {
@@ -2144,7 +2222,8 @@ func (m *MeshManager) broadcastGossip() {
 		util.LogModuleDebug("mesh", "[MESH] broadcastGossip: p2p is nil")
 		return
 	}
-	allPeers := m.topology.GetAllPeers()
+	// Use snapshot for lock-free reads (design: gossipWorker reads from snapshot)
+	allPeers := m.getTopologySnapshot()
 	if len(allPeers) == 0 {
 		util.LogModuleDebug("mesh", "[MESH] broadcastGossip: no peers")
 		return

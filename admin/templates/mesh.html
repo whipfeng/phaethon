@@ -233,8 +233,8 @@
             const res = await fetch('./api/config/mesh');
             if (!res.ok) return;
             const mesh = await res.json();
-            document.getElementById('mesh-identity-nodeid').value = mesh.NodeID || '';
-            document.getElementById('mesh-identity-subnet').value = mesh.Subnet || '';
+            document.getElementById('mesh-identity-nodeid').value = mesh['node-id'] || '';
+            document.getElementById('mesh-identity-subnet').value = mesh.subnet || '';
         } catch (err) {
             console.error('Failed to load mesh identity:', err);
         }

@@ -289,11 +289,6 @@ type AdminServer struct {
 	sseWG     sync.WaitGroup
 	sseLast   []byte // last published stats JSON
 
-	// OnReload is called when the user explicitly requests a config reload
-	// from the admin panel. The main package should set this to trigger
-	// a full runtime resource rebuild (listeners, reverse bindings, etc.).
-	OnReload func()
-
 	// OnTUNToggle is called when the user enables/disables TUN from the admin panel.
 	// The main package should set this to start or stop the TUN engine directly.
 	OnTUNToggle func(enable bool) error
@@ -397,14 +392,6 @@ type PeerBrief struct {
 }
 
 // triggerReload schedules a full runtime reload without blocking the caller.
-// It is safe to call while holding s.mu because the reload runs in a new
-// goroutine and will wait for the lock to be released.
-func (s *AdminServer) triggerReload() {
-	if s.OnReload != nil {
-		go s.OnReload()
-	}
-}
-
 // NewAdminServer creates a new admin server instance.
 func NewAdminServer(ac *config.AdminConfig, defaultRaw []byte) *AdminServer {
 	if ac == nil {
@@ -1253,7 +1240,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stats", s.apiStats)
 	mux.HandleFunc("/api/config/mesh", s.apiConfigMesh)
 	mux.HandleFunc("/api/config/admin", s.apiConfigAdmin)
-	mux.HandleFunc("/api/config/reload", s.apiReload)
 	mux.HandleFunc("/api/config/target", s.apiTarget)
 	mux.HandleFunc("/api/proxies", s.apiProxies)
 	mux.HandleFunc("/api/proxies/health-check/", s.apiProxyHealthCheck)
@@ -1733,7 +1719,6 @@ func (s *AdminServer) sseBroadcaster() {
 }
 
 // apiConfigMesh handles GET/PUT for mesh foundational settings.
-// PUT triggers OnReload (mesh subsystem restart: re-announce, rebuild routing).
 func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1817,10 +1802,6 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if s.OnReload != nil {
-			go s.OnReload()
-		}
-
 		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", meshCfg.NodeID)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
@@ -1830,7 +1811,6 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiConfigAdmin handles GET/PUT for admin foundational settings.
-// PUT triggers OnReload (admin server restart: rebind port, update auth).
 func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1926,11 +1906,6 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-
-		if s.OnReload != nil {
-			go s.OnReload()
-		}
-
 		util.LogModuleInfo("admin", "admin config updated (addr=%s, persisted to database)", s.config.Addr)
 		jsonResponse(w, map[string]string{"status": "ok"})
 
@@ -1965,22 +1940,6 @@ func (s *AdminServer) apiProxyHealthCheck(w http.ResponseWriter, r *http.Request
 		"latencyMs": info.Latency.Milliseconds(),
 		"lastCheck": info.LastCheck,
 	})
-}
-
-func (s *AdminServer) apiReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Trigger a full config reload from disk.
-	// This recreates listeners, reverse bindings, and other runtime resources.
-	if s.OnReload != nil {
-		s.OnReload()
-	}
-
-	util.LogModuleInfo("admin", "reload triggered via API")
-	jsonResponse(w, map[string]string{"status": "reload triggered"})
 }
 
 func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
@@ -5106,10 +5065,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trigger reload
-	if s.OnReload != nil {
-		s.OnReload()
-	}
-
 	util.LogModuleInfo("admin", "setup wizard completed")
 	jsonResponse(w, map[string]string{"status": "ok"})
 }

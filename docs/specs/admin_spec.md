@@ -55,7 +55,6 @@ Admin 是 phaethon 内置的 Web 管理面板与 HTTP API，默认监听 `:39999
 |------|------|------|
 | GET | `/api/config` | 获取完整配置（JSON） |
 | GET | `/api/config/raw` | 获取原始 YAML 导出 |
-| POST | `/api/config/reload` | 从数据库重新加载运行时 |
 | GET | `/api/config/target` | 当前保存目标（base/env） |
 | GET/PUT | `/api/config/mesh` | 获取/更新 Mesh 基础配置 |
 | GET/PUT | `/api/config/admin` | 获取/更新 Admin 基础配置 |

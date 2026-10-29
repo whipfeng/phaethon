@@ -4919,12 +4919,29 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{"username": "admin"})
 		return
 	}
+	
+	// Auth is enabled: determine username from authentication method
+	
+	// 1. Try mTLS client certificate authentication
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		cn := r.TLS.PeerCertificates[0].Subject.CommonName
+		if cn != "" {
+			// Return the certificate CN as username
+			jsonResponse(w, map[string]string{"username": cn})
+			return
+		}
+	}
+	
+	// 2. Try session-based authentication
 	username := s.verifySession(r)
-	if username == "" {
-		httpError(w, "unauthorized", http.StatusUnauthorized)
+	if username != "" {
+		jsonResponse(w, map[string]string{"username": username})
 		return
 	}
-	jsonResponse(w, map[string]string{"username": username})
+	
+	// 3. Other auth methods (signature, token) - return generic admin username
+	// If request reached here, it passed authMiddleware, so it's authenticated
+	jsonResponse(w, map[string]string{"username": "admin"})
 }
 
 func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {

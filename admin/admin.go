@@ -1757,37 +1757,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			meshCfg.NodeID = nodeID
 		}
 		if subnet, ok := updates["subnet"].(string); ok && subnet != "" {
-			// Check for subnet conflict with existing peers
-			if mesh.GlobalMeshManager != nil {
-				peers := mesh.GlobalMeshManager.GetPeers()
-				usedSubnets := make(map[string]bool)
-				for _, peer := range peers {
-					if peer.Subnet != "" {
-						usedSubnets[peer.Subnet] = true
-					}
-				}
-				// If requested subnet conflicts, auto-allocate a new one
-				if usedSubnets[subnet] {
-					network := mesh.GlobalMeshManager.GetNetwork()
-					prefixLen := mesh.GlobalMeshManager.GetSubnetPrefixLen()
-					if network != nil {
-						newSubnet, err := mesh.AllocateSubnet(network, prefixLen, usedSubnets)
-						if err == nil {
-							util.LogModuleInfo("admin", "subnet %s conflicts, auto-allocated %s", subnet, newSubnet)
-							meshCfg.Subnet = newSubnet
-						} else {
-							util.LogModuleWarn("admin", "failed to auto-allocate subnet: %v", err)
-							meshCfg.Subnet = subnet // fallback to user's choice
-						}
-					} else {
-						meshCfg.Subnet = subnet
-					}
-				} else {
-					meshCfg.Subnet = subnet
-				}
-			} else {
-				meshCfg.Subnet = subnet
-			}
+			meshCfg.Subnet = subnet
 		}
 		if network, ok := updates["network"].(string); ok && network != "" {
 			meshCfg.Network = network
@@ -1825,10 +1795,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check if identity fields changed (require restart)
-		identityChanged := (meshCfg.NodeID != oldNodeID) || (meshCfg.Subnet != oldSubnet)
-
-		// Trigger mesh subsystem reinitialization (only for non-identity fields)
+		// Trigger mesh subsystem reinitialization (handles all changes at runtime)
 		if s.OnMeshConfigUpdate != nil {
 			util.LogModuleInfo("admin", "mesh config updated, triggering subsystem reinitialization")
 			if err := s.OnMeshConfigUpdate(); err != nil {
@@ -1838,16 +1805,21 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "mesh config updated but OnMeshConfigUpdate callback is nil")
 		}
 
-		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, persisted to database)", meshCfg.NodeID)
+		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, subnet=%s, persisted to database)", 
+			meshCfg.NodeID, meshCfg.GetSubnet())
 		
-		// Return response with restart notification if identity changed
-		resp := map[string]string{"status": "ok"}
-		if identityChanged {
-			resp["restart_required"] = "node-id or subnet changed, restart required to take effect"
-			util.LogModuleInfo("admin", "mesh identity changed (node-id: %s->%s, subnet: %s->%s), restart required", 
-				oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet)
+		// Log what changed
+		if meshCfg.NodeID != oldNodeID {
+			util.LogModuleInfo("admin", "node-id changed (%s->%s), updated at runtime", 
+				oldNodeID, meshCfg.NodeID)
 		}
-		jsonResponse(w, resp)
+		if meshCfg.Subnet != oldSubnet {
+			util.LogModuleInfo("admin", "subnet changed (%s->%s), updated at runtime", 
+				oldSubnet, meshCfg.Subnet)
+		}
+		
+		// Return success response (no restart required)
+		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)

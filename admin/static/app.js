@@ -1077,6 +1077,43 @@ function renderProxyRows(proxiesData) {
     }).join('');
 }
 
+async function toggleP2P(name, currentValue) {
+    const newValue = !currentValue;
+    try {
+        const resp = await fetch(`/api/proxies/${encodeURIComponent(name)}/p2p`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({p2p: newValue})
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert(err.error || `Toggle P2P failed: ${resp.status}`);
+            return;
+        }
+        if (typeof loadProxies === 'function') loadProxies();
+    } catch (e) {
+        alert('Toggle P2P error: ' + e.message);
+    }
+}
+
+async function toggleProxy(name, enabled) {
+    try {
+        const resp = await fetch(`/api/proxies/${encodeURIComponent(name)}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enabled})
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert(err.error || `Toggle failed: ${resp.status}`);
+            return;
+        }
+        if (typeof loadProxies === 'function') loadProxies();
+    } catch (e) {
+        alert('Toggle error: ' + e.message);
+    }
+}
+
 function renderGroupCards(groupsData) {
     return groupsData.map(g => {
         if (!g || !g.name) return '';

@@ -278,13 +278,20 @@
                     if (!res.ok) {
                         throw new Error(data.error || 'Save failed');
                     }
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-                    statusEl.style.color = 'var(--success)';
+                    
+                    // Check if restart is required
+                    if (data.restart_required) {
+                        statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartRequired') : 'Saved, restart required') + ': ' + data.restart_required;
+                        statusEl.style.color = 'var(--warning)';
+                    } else {
+                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                        statusEl.style.color = 'var(--success)';
+                    }
                     setTimeout(() => {
                         fetchMeshStatus();
                         loadMeshIdentity(); // Reload mesh identity to show updated node-id
                         statusEl.textContent = '';
-                    }, 1500);
+                    }, 3000);
                 } catch (err) {
                     const statusEl = document.getElementById('mesh-identity-status');
                     statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;

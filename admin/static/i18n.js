@@ -214,6 +214,7 @@
             'mesh.nodeIdentity': '节点身份',
             'mesh.nodeIdentityHelp': '修改节点 ID 会改变此节点在 mesh 网络中的身份，其他节点需要重新发现此节点。',
             'mesh.nodeIdRequired': '节点 ID 不能为空',
+            'mesh.restartRequired': '已保存，需要重启生效',
             'mesh.peers': '对等节点',
 
             // ===== Admin Settings =====
@@ -1028,6 +1029,7 @@
             'mesh.nodeIdentity': 'Node Identity',
             'mesh.nodeIdentityHelp': 'Changing node-id will change this node\'s identity in the mesh network. Other nodes will need to rediscover this node.',
             'mesh.nodeIdRequired': 'Node ID is required',
+            'mesh.restartRequired': 'Saved, restart required',
             'mesh.peers': 'Peers',
 
             // ===== Admin Settings =====

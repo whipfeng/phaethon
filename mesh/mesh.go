@@ -969,21 +969,33 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 }
 
 // RegisterPeer is called when a P2P peer with mesh capability connects.
+// Direct call to topology (bypassing event loop) to ensure registration even when eventCh is full.
+// This prevents missed registrations when peers connect rapidly.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
-	select {
-	case m.eventCh <- meshEvent{kind: meshEventRegister, sender: sender}:
-	default:
-		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping peer register event for %s", sender.GetNodeID())
+	m.topology.RegisterPeer(sender)
+	nodeID := sender.GetNodeID()
+	// Reset quality tracker for this peer to avoid stale state
+	m.qualityTracker.RemoveNode(nodeID)
+	util.LogModuleInfo("mesh", "[MESH] peer registered: %s", nodeID)
+	// Recompute routes immediately (critical for routing)
+	m.recomputeRoutes()
+	// Notify for package sync
+	if m.OnPeerRegistered != nil {
+		go m.OnPeerRegistered(nodeID)
 	}
+	// Broadcast gossip (non-critical, can be skipped if busy)
+	m.broadcastGossip()
 }
 
 // UnregisterPeer is called when a P2P peer disconnects.
+// Direct call to topology (bypassing event loop) to ensure cleanup even when eventCh is full.
+// This prevents stale PeerInfo entries from accumulating when peers reconnect rapidly.
 func (m *MeshManager) UnregisterPeer(sender PeerSender) {
-	select {
-	case m.eventCh <- meshEvent{kind: meshEventUnregister, sender: sender}:
-	default:
-		util.LogModuleWarn("mesh", "[MESH] eventCh full, dropping peer unregister event for %s", sender.GetNodeID())
-	}
+	nodeID := sender.GetNodeID()
+	m.topology.UnregisterPeer(sender)
+	util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
+	// Recompute routes immediately (critical for routing)
+	m.recomputeRoutes()
 }
 
 // UnregisterPeerByNodeID removes a peer by nodeID (used when re-registering after hello).
@@ -2081,26 +2093,6 @@ func (m *MeshManager) gossipLoop() {
 			m.broadcastGossip()
 		case ev := <-m.eventCh:
 			switch ev.kind {
-			case meshEventRegister:
-				m.topology.RegisterPeer(ev.sender)
-				m.recomputeRoutes()
-				db.BumpRuntimeVersion("mesh")
-				nodeID := ev.sender.GetNodeID()
-				// Reset quality tracker for this peer to avoid stale state
-				m.qualityTracker.RemoveNode(nodeID)
-				util.LogModuleInfo("mesh", "[MESH] peer registered: %s", nodeID)
-				// Immediately broadcast gossip so routing is established without waiting for 15s tick
-				m.broadcastGossip()
-				// Notify for package sync
-				if m.OnPeerRegistered != nil {
-					go m.OnPeerRegistered(nodeID)
-				}
-			case meshEventUnregister:
-				nodeID := ev.sender.GetNodeID()
-				m.topology.UnregisterPeer(ev.sender)
-				m.recomputeRoutes()
-				db.BumpRuntimeVersion("mesh")
-				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
 			case meshEventGossip:
 				var info GossipInfo
 				if err := json.Unmarshal(ev.data, &info); err != nil {
@@ -2136,9 +2128,7 @@ func (m *MeshManager) gossipLoop() {
 type meshEventKind int
 
 const (
-	meshEventRegister meshEventKind = iota
-	meshEventUnregister
-	meshEventGossip
+	meshEventGossip meshEventKind = iota
 	meshEventTick
 	meshEventConfigUpdate
 )

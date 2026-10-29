@@ -490,7 +490,7 @@
             if (!res.ok) return;
             const advertise = await res.json();
             const tbody = document.getElementById('advertise-tbody');
-            if (advertise.length === 0) {
+            if (!advertise || advertise.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }

@@ -1744,32 +1744,17 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			meshCfg = &config.MeshConfig{}
 		}
 
-		// Merge updates: only update fields that are present
-		// Support both "node-id" (frontend) and "NodeID" (Go convention)
+		// Merge updates: only update fields that are present (kebab-case)
 		if nodeID, ok := updates["node-id"].(string); ok && nodeID != "" {
-			meshCfg.NodeID = nodeID
-		} else if nodeID, ok := updates["NodeID"].(string); ok && nodeID != "" {
 			meshCfg.NodeID = nodeID
 		}
 		if subnet, ok := updates["subnet"].(string); ok {
 			meshCfg.Subnet = subnet
-		} else if subnet, ok := updates["Subnet"].(string); ok {
-			meshCfg.Subnet = subnet
 		}
 		if network, ok := updates["network"].(string); ok {
 			meshCfg.Network = network
-		} else if network, ok := updates["Network"].(string); ok {
-			meshCfg.Network = network
 		}
 		if domainSuffixes, ok := updates["domain-suffixes"].([]interface{}); ok {
-			suffixes := make([]string, 0, len(domainSuffixes))
-			for _, s := range domainSuffixes {
-				if str, ok := s.(string); ok {
-					suffixes = append(suffixes, str)
-				}
-			}
-			meshCfg.DomainSuffixes = suffixes
-		} else if domainSuffixes, ok := updates["DomainSuffixes"].([]interface{}); ok {
 			suffixes := make([]string, 0, len(domainSuffixes))
 			for _, s := range domainSuffixes {
 				if str, ok := s.(string); ok {
@@ -1786,18 +1771,8 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			meshCfg.Advertise = advList
-		} else if advertise, ok := updates["Advertise"].([]interface{}); ok {
-			advList := make([]string, 0, len(advertise))
-			for _, a := range advertise {
-				if str, ok := a.(string); ok {
-					advList = append(advList, str)
-				}
-			}
-			meshCfg.Advertise = advList
 		}
 		if forwardingTrace, ok := updates["forwarding-trace"].(bool); ok {
-			meshCfg.ForwardingTrace = forwardingTrace
-		} else if forwardingTrace, ok := updates["ForwardingTrace"].(bool); ok {
 			meshCfg.ForwardingTrace = forwardingTrace
 		}
 
@@ -1836,11 +1811,11 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Merge updates: only update fields that are present
-		if addr, ok := updates["Addr"].(string); ok && addr != "" {
+		// Merge updates: only update fields that are present (kebab-case)
+		if addr, ok := updates["addr"].(string); ok && addr != "" {
 			s.config.Addr = addr
 		}
-		if authEnabled, ok := updates["AuthEnabled"].(bool); ok {
+		if authEnabled, ok := updates["auth-enabled"].(bool); ok {
 			oldAuthEnabled := s.config.AuthEnabled
 			// Hot-reload: update runtime auth settings immediately
 			if authEnabled != oldAuthEnabled {
@@ -1848,28 +1823,28 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleInfo("admin", "auth-enabled changed to %v, hot-reloaded", authEnabled)
 			}
 		}
-		if username, ok := updates["Username"].(string); ok {
+		if username, ok := updates["username"].(string); ok {
 			s.config.Username = username
 		}
-		if password, ok := updates["Password"].(string); ok && password != "" {
+		if password, ok := updates["password"].(string); ok && password != "" {
 			s.config.Password = password
 		}
-		if token, ok := updates["Token"].(string); ok {
+		if token, ok := updates["token"].(string); ok {
 			s.config.Token = token
 		}
-		if publicKey, ok := updates["PublicKey"].(string); ok {
+		if publicKey, ok := updates["public-key"].(string); ok {
 			s.config.PublicKey = publicKey
 		}
-		if tlsCert, ok := updates["TLSCert"].(string); ok {
+		if tlsCert, ok := updates["tls-cert"].(string); ok {
 			s.config.TLSCert = tlsCert
 		}
-		if tlsKey, ok := updates["TLSKey"].(string); ok {
+		if tlsKey, ok := updates["tls-key"].(string); ok {
 			s.config.TLSKey = tlsKey
 		}
-		if clientCA, ok := updates["ClientCA"].(string); ok {
+		if clientCA, ok := updates["client-ca"].(string); ok {
 			s.config.ClientCA = clientCA
 		}
-		if meshOnly, ok := updates["MeshOnly"].(bool); ok {
+		if meshOnly, ok := updates["mesh-only"].(bool); ok {
 			s.config.MeshOnly = meshOnly
 		}
 		if pkgMaxMB, ok := updates["PackageUploadMaxMB"].(float64); ok {

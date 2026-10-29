@@ -89,12 +89,12 @@
                     statusEl.style.color = 'var(--text-muted)';
 
                     const body = {
-                        Addr: addr,
-                        AuthEnabled: authEnabled,
-                        Username: username
+                        addr: addr,
+                        'auth-enabled': authEnabled,
+                        username: username
                     };
                     if (newPassword) {
-                        body.Password = newPassword;
+                        body.password = newPassword;
                     }
 
                     const res = await fetch('./api/config/admin', {

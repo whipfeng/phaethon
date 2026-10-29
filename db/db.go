@@ -30,6 +30,7 @@ var (
 	BucketMappings          = []byte("mappings")            // 映射配置
 	BucketResolvers         = []byte("resolvers")           // DNS 解析器
 	BucketReverseConfs      = []byte("reverse-configs")     // 反向连接配置
+	BucketBindings          = []byte("bindings")            // 反向连接端口绑定
 	BucketPackages          = []byte("packages")            // 套餐配置
 	BucketCertificates      = []byte("certificates")        // TLS 证书
 	BucketAPIKeys           = []byte("api-keys")            // API 密钥
@@ -73,6 +74,7 @@ func configBuckets() [][]byte {
 		BucketMappings,
 		BucketResolvers,
 		BucketReverseConfs,
+		BucketBindings,
 		BucketPackages,
 		BucketCertificates,
 		BucketAPIKeys,

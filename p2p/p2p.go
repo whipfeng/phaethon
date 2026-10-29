@@ -425,6 +425,14 @@ func (p *Peer) SetMeshSender(s *peerSender) {
 	p.meshSenderPtr.Store(s)
 }
 
+// ProxyNameSafe returns the proxy name, or empty string if proxy is nil (passive/inbound peer).
+func (p *Peer) ProxyNameSafe() string {
+	if p.proxy == nil {
+		return ""
+	}
+	return p.proxy.Name
+}
+
 // NewP2PManager creates a new P2P manager.
 // buildTag is auto-detected at runtime (e.g., "win7" on Windows 7/8).
 func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
@@ -582,7 +590,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)
 			}
 			util.LogModuleWarn("p2p", "[P2P-DIAG] write error for peer.ID=%s proxy=%s nodeID=%s status=%s frameType=0x%02x: %v",
-				peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), req.frameType, err)
+				peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), req.frameType, err)
 			peer.LastError = err.Error()
 			peer.transport.Close()
 			return false
@@ -1430,16 +1438,17 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 // runSession reads frames and dispatches them.
 func (m *P2PManager) runSession(peer *Peer) {
-	// Log session start with full context
+	// Log session start with full context (peer.proxy may be nil for passive/inbound sessions)
+	proxyName := peer.ProxyNameSafe()
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession START for peer.ID=%s proxy=%s nodeID=%s status=%s",
-		peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus())
+		peer.ID, proxyName, peer.NodeID, peer.GetStatus())
 	
 	// Send hello immediately
-	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer.ID=%s proxy=%s", peer.ID, peer.proxy.Name)
+	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling sendHello for peer.ID=%s proxy=%s", peer.ID, proxyName)
 	m.sendHello(peer)
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession sendHello completed for peer.ID=%s", peer.ID)
 
-	util.LogModuleInfo("p2p", "[P2P] runSession started for %s (proxy=%s)", peer.ID, peer.proxy.Name)
+	util.LogModuleInfo("p2p", "[P2P] runSession started for %s (proxy=%s)", peer.ID, proxyName)
 
 	// Heartbeat timeout monitor: close connection if no data received for 30s
 	heartbeatTimeout := 30 * time.Second
@@ -1459,7 +1468,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				lastSeenTime := time.Unix(0, lastSeenNano)
 				if time.Since(lastSeenTime) > heartbeatTimeout {
 					util.LogModuleWarn("p2p", "[P2P-DIAG] heartbeat timeout for peer.ID=%s proxy=%s nodeID=%s status=%s (last seen %v ago), closing connection",
-						peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), time.Since(lastSeenTime))
+						peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), time.Since(lastSeenTime))
 					peer.LastError = fmt.Sprintf("heartbeat timeout: no data for %v", time.Since(lastSeenTime))
 					peer.transport.Close()
 					return
@@ -1500,7 +1509,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 		if err != nil {
 			// Log detailed disconnection reason
 			util.LogModuleInfo("p2p", "[P2P-DIAG] read error for peer.ID=%s proxy=%s nodeID=%s status=%s: %v",
-				peer.ID, peer.proxy.Name, peer.NodeID, peer.GetStatus(), err)
+				peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), err)
 			peer.LastError = err.Error()
 			frame.ReturnBuffer(originalPayload)
 			return

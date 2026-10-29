@@ -672,5 +672,10 @@ updateInstanceReverseID();
 // Initial load to clear the loading spinner and populate bindings
 pollReverseBindings(false).catch(() => {});
 // Bindings table is also refreshed via SSE version events.
+
+// Expose to global scope for SSE version notification handler
+window.loadBindings = function(expectedVersion) {
+    return pollReverseBindings(false, expectedVersion);
+};
 </script>
 {{end}}

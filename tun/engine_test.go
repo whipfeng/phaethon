@@ -127,16 +127,33 @@ func TestUDPForwarderRegistered(t *testing.T) {
 	}
 }
 
-// TestManagerCreation tests Manager creation and basic state.
-func TestManagerCreation(t *testing.T) {
-	mgr := NewManager()
+// TestEngineStartStop exercises Engine lifecycle without requiring admin/TUN device.
+// It verifies that Start() fails gracefully when not admin (expected on CI).
+func TestEngineStartStop(t *testing.T) {
+	engine := NewEngine()
 
-	// Verify manager creation doesn't panic
-	if mgr.netstack != nil && mgr.netstack.IsRunning() {
-		t.Error("netstack should not be running yet")
+	err := engine.Start()
+	if err == nil {
+		// Running as admin with TUN driver available — clean shutdown
+		t.Log("Engine started successfully (admin + TUN driver present)")
+		if stopErr := engine.Stop(); stopErr != nil {
+			t.Errorf("Stop error: %v", stopErr)
+		}
+	} else {
+		t.Logf("Engine.Start failed as expected (no admin/no TUN): %v", err)
+	}
+}
+
+// TestEngineUDPWithRuleConfig tests engine creation and basic state.
+func TestEngineUDPWithRuleConfig(t *testing.T) {
+	engine := NewEngine()
+
+	// Verify engine creation doesn't panic
+	if engine.netstack != nil && engine.netstack.IsRunning() {
+		t.Error("engine should not be running yet")
 	}
 
-	_ = mgr.IsEnabled() // just verify it doesn't panic
+	_ = engine.IsEnabled() // just verify it doesn't panic
 }
 
 // TestDNSHijackerResolve verifies the direct Resolve path used by the

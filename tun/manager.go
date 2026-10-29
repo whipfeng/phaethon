@@ -456,13 +456,42 @@ func (e *Manager) UpdateDHCPStaticBindings(bindings []config.DHCPStaticBinding) 
 	}
 }
 
+// StartStack starts the gVisor netstack (FakeIP, DNS hijacker, TCP/UDP forwarders).
+// This is the core networking layer and should always be running.
+// Note: Forwarder callbacks are set up by main_engine.go directly on the netstack.
+func (e *Manager) StartStack() error {
+	if e.netstack == nil {
+		return fmt.Errorf("tun: netstack not set (call SetNetstack before Start)")
+	}
+
+	// Set writeLoop device and close channel
+	e.netstack.WriteLoopDevice = e
+	e.netstack.WriteLoopCloseCh = func() <-chan struct{} {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.tunCloseCh != nil {
+			return e.tunCloseCh
+		}
+		// Return netstack closeCh if TUN is not running
+		return e.netstack.CloseCh()
+	}
+
+	if err := e.netstack.Start(); err != nil {
+		return fmt.Errorf("tun: start netstack: %w", err)
+	}
+
+	e.logEvent("gVisor netstack started")
+	util.LogModuleDebug("tun", "gVisor netstack started")
+	return nil
+}
+
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
-// Requires the netstack to be running (ns.Start() must have been called).
+// Requires StartStack() to be called first.
 func (e *Manager) StartTUN() error {
 	e.mu.Lock()
 	if e.netstack == nil || !e.netstack.IsRunning() {
 		e.mu.Unlock()
-		return fmt.Errorf("netstack not running")
+		return fmt.Errorf("stack not running, call StartStack() first")
 	}
 	if e.tunRunning {
 		e.mu.Unlock()
@@ -526,17 +555,6 @@ func (e *Manager) StartTUN() error {
 		OriginalDNSServers: e.routeMgr.OriginalDNSServers,
 	})
 
-	// Wire netstack writeLoop to TUN device
-	e.netstack.WriteLoopDevice = e
-	e.netstack.WriteLoopCloseCh = func() <-chan struct{} {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.tunCloseCh != nil {
-			return e.tunCloseCh
-		}
-		return e.netstack.CloseCh()
-	}
-
 	// Start TUN-level goroutines
 	e.tunRunning = true
 	e.tunCloseCh = make(chan struct{})
@@ -591,6 +609,29 @@ func (e *Manager) StartTUN() error {
 	return nil
 }
 
+// Start starts the gVisor netstack and optionally the TUN device.
+// Convenience method equivalent to StartStack() + StartTUN() (if TUN is enabled).
+// If TUN fails to start, the netstack continues running (mesh-only mode).
+func (e *Manager) Start() error {
+	if err := e.StartStack(); err != nil {
+		return err
+	}
+	tunEnabled := e.tunConfig != nil && e.tunConfig.IsEnabled()
+	if tunEnabled {
+		if err := e.StartTUN(); err != nil {
+			// TUN failed, but keep netstack running for mesh-only mode.
+			// Log a prominent warning so the user knows TUN is not available.
+			util.LogModuleWarn("tun", "========================================")
+			util.LogModuleWarn("tun", "TUN initialization failed: %v", err)
+			util.LogModuleWarn("tun", "Continuing in mesh-only mode (no TUN device)")
+			util.LogModuleWarn("tun", "========================================")
+			// Don't call StopStack() - netstack is still needed for mesh
+			return nil
+		}
+	}
+	return nil
+}
+
 // StopTUN stops the TUN device, restores routes and system DNS.
 // The gVisor netstack continues running.
 func (e *Manager) StopTUN() error {
@@ -601,12 +642,6 @@ func (e *Manager) StopTUN() error {
 	}
 	e.tunRunning = false
 	close(e.tunCloseCh)
-
-	// Disconnect netstack writeLoop from TUN device
-	if e.netstack != nil {
-		e.netstack.WriteLoopDevice = nil
-		e.netstack.WriteLoopCloseCh = nil
-	}
 	e.mu.Unlock()
 
 	// Clear the global bind context so subsequent dials resume normal behavior.
@@ -641,6 +676,31 @@ func (e *Manager) StopTUN() error {
 
 	e.logEvent("TUN device stopped")
 	util.LogModuleDebug("tun", "TUN device stopped (netstack still running)")
+	return nil
+}
+
+// StopStack stops the gVisor netstack (DNS hijacker, forwarders, etc.).
+// Should be called after StopTUN() if TUN was running.
+func (e *Manager) StopStack() error {
+	if e.netstack == nil {
+		return nil
+	}
+
+	if err := e.netstack.Stop(); err != nil {
+		return err
+	}
+
+	e.logEvent("gVisor netstack stopped")
+	util.LogModuleDebug("tun", "gVisor netstack stopped")
+	return nil
+}
+
+// Stop tears down everything: TUN device and gVisor netstack.
+// Convenience method equivalent to StopTUN() + StopStack().
+func (e *Manager) Stop() error {
+	e.StopTUN()
+	e.StopStack()
+	connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "stopped", nil)
 	return nil
 }
 

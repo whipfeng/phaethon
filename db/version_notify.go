@@ -55,8 +55,8 @@ func InitVersionNotifier() {
 		util.DefaultVersionNotifier.BumpVersion(topic, newVersion)
 	})
 
-	// 5. 启动定期心跳（全量同步，30秒间隔）
-	util.DefaultVersionNotifier.StartHeartbeat(30 * 1000000000) // 30 seconds in nanoseconds
+	// 5. 启动定期心跳（全量同步，10秒间隔）
+	util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
 }
 
 // BumpRuntimeVersion 手动递增运行时状态的版本号

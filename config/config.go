@@ -85,7 +85,7 @@ func (p *Proxy) IsP2P() bool {
 	if p == nil {
 		return false
 	}
-	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel"
+	isCompatible := strings.EqualFold(p.Type, "socks5") || strings.EqualFold(p.Type, "trojan") || strings.EqualFold(p.Type, "h_tunnel")
 	if !isCompatible {
 		return false
 	}

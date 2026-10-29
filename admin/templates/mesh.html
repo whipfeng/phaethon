@@ -270,8 +270,7 @@
                     const res = await fetch('./api/config/mesh', {
                         method: 'PUT',
                         headers: {
-                            'Content-Type': 'application/json',
-                            'X-Password-Confirm': password
+                            'Content-Type': 'application/json'
                         },
                         body: JSON.stringify({'node-id': nodeid, subnet: subnet})
                     });
@@ -356,8 +355,7 @@
                     const res = await fetch('./api/config/mesh', {
                         method: 'PUT',
                         headers: {
-                            'Content-Type': 'application/json',
-                            'X-Password-Confirm': password
+                            'Content-Type': 'application/json'
                         },
                         body: JSON.stringify(currentMesh)
                     });

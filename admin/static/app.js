@@ -3213,27 +3213,8 @@ window.closeConfirmModal = closeConfirmModal;
 let passwordModalCallback = null;
 
 function openPasswordModal(onConfirm) {
-    const modal = document.getElementById('password-modal');
-    const input = document.getElementById('password-modal-input');
-    const okBtn = document.getElementById('password-modal-ok');
-    if (!modal || !input || !okBtn) {
-        // Fallback to native prompt if modal not available
-        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-        if (password && onConfirm) onConfirm(password);
-        return;
-    }
-    passwordModalCallback = onConfirm;
-    input.value = '';
-    okBtn.onclick = () => {
-        const password = input.value;
-        modal.classList.add('hidden');
-        const cb = passwordModalCallback;
-        passwordModalCallback = null;
-        if (cb) cb(password);
-    };
-    modal.classList.remove('hidden');
-    // Focus the input field
-    setTimeout(() => input.focus(), 100);
+    // Password confirmation removed - just execute callback directly
+    if (onConfirm) onConfirm('');
 }
 
 function closePasswordModal() {

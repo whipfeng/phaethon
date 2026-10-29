@@ -1730,21 +1730,6 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, meshCfg)
 
 	case http.MethodPut:
-		// Dangerous operation: require password confirmation via header
-		password := r.Header.Get("X-Password-Confirm")
-		if password == "" {
-			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
-			return
-		}
-		if !s.config.AuthEnabled {
-			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
-			return
-		}
-		if password != s.config.Password {
-			httpError(w, "incorrect password", http.StatusForbidden)
-			return
-		}
-
 		var updates map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -1817,21 +1802,6 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, s.config)
 
 	case http.MethodPut:
-		// Dangerous operation: require password confirmation via header
-		password := r.Header.Get("X-Password-Confirm")
-		if password == "" {
-			httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
-			return
-		}
-		if !s.config.AuthEnabled {
-			httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
-			return
-		}
-		if password != s.config.Password {
-			httpError(w, "incorrect password", http.StatusForbidden)
-			return
-		}
-
 		var updates map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -1945,25 +1915,6 @@ func (s *AdminServer) apiProxyHealthCheck(w http.ResponseWriter, r *http.Request
 func (s *AdminServer) apiRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Dangerous operation: require password confirmation via header
-	password := r.Header.Get("X-Password-Confirm")
-	if password == "" {
-		httpError(w, "password confirmation required (X-Password-Confirm header)", http.StatusBadRequest)
-		return
-	}
-	s.mu.RLock()
-	authEnabled := s.config.AuthEnabled
-	storedPassword := s.config.Password
-	s.mu.RUnlock()
-	if !authEnabled {
-		httpError(w, "this operation requires authentication to be enabled", http.StatusForbidden)
-		return
-	}
-	if password != storedPassword {
-		httpError(w, "incorrect password", http.StatusForbidden)
 		return
 	}
 

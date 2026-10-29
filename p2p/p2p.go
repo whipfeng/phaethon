@@ -471,6 +471,7 @@ func (m *P2PManager) beginSession() bool {
 
 func stopPeer(peer *Peer) {
 	peer.stopOnce.Do(func() {
+		peer.SetStatus("stopped")
 		close(peer.stopCh)
 	})
 	if peer.transport != nil {
@@ -1193,6 +1194,17 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // It reconnects automatically with exponential backoff if the connection drops.
 // Call StopPeerByProxyName to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
+	// Early check: if a peer already exists for this proxy, skip creation.
+	// This prevents wasteful dial attempts when multiple goroutines call StartPeer
+	// concurrently (e.g., config watcher + sessionLoop reconnect).
+	m.mu.Lock()
+	if existing, ok := m.proxyPeers[proxy.Name]; ok {
+		m.mu.Unlock()
+		util.LogModuleDebug("p2p", "[P2P] peer already exists for proxy %s (peer.ID=%s), skipping StartPeer", proxy.Name, existing.ID)
+		return
+	}
+	m.mu.Unlock()
+
 	if !m.beginSession() {
 		util.LogModuleDebug("p2p", "[P2P] manager stopped; not starting peer %s", proxy.Name)
 		return
@@ -1228,31 +1240,22 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
-	// Atomic check-stop-create-register using proxyPeers for O(1) dedup
+	// Register peer atomically. If another goroutine created a peer for this proxy
+	// while we were dialing, abort and let the existing peer continue.
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
 		stopPeer(peer)
 		return
 	}
-	
-	// Check for existing peer with same proxy name (O(1) lookup)
 	if existing, ok := m.proxyPeers[proxy.Name]; ok {
-		util.LogModuleInfo("p2p", "[P2P] stopping existing peer %s for proxy %s before starting new one", existing.ID, proxy.Name)
-		// CRITICAL: Unregister existing peer's sender from topology BEFORE stopping.
-		// This prevents stale PeerInfo entries from accumulating when peers reconnect rapidly.
-		// The defer in the existing peer's session will run asynchronously, but we need to
-		// clean up the topology synchronously to avoid race conditions.
-		if sender := existing.GetMeshSender(); sender != nil && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(sender)
-			existing.SetMeshSender(nil) // Prevent defer from unregistering again
-		}
-		stopPeer(existing)
-		delete(m.proxyPeers, proxy.Name)
-		delete(m.peers, existing.ID)
+		m.mu.Unlock()
+		util.LogModuleInfo("p2p", "[P2P] peer created by another goroutine for proxy %s (peer.ID=%s), aborting duplicate", proxy.Name, existing.ID)
+		stopPeer(peer)
+		return
 	}
 	
-	// Register new peer atomically in both maps
+	// Register new peer in both maps
 	m.peers[peer.ID] = peer
 	m.proxyPeers[proxy.Name] = peer
 	m.mu.Unlock()
@@ -1395,11 +1398,21 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			m.runSession(peer)
 		}()
 
-		// Session ended. Instead of reusing the same peer object (stale
-		// seq/ID), stop this peer and spawn a fresh StartPeer so the new
-		// connection gets a brand-new seq, peer.ID, and clean state.
+		// Session ended. Clean up this peer from maps BEFORE spawning a fresh
+		// StartPeer, so the new peer won't find the old one and won't need to
+		// stop it. This ensures a clean handoff: old finishes → cleanup → new starts.
+		m.mu.Lock()
+		if current, ok := m.peers[peer.ID]; ok && current == peer {
+			delete(m.peers, peer.ID)
+		}
+		if current, ok := m.proxyPeers[proxy.Name]; ok && current == peer {
+			delete(m.proxyPeers, proxy.Name)
+		}
+		m.mu.Unlock()
+		
+		// Now spawn a fresh StartPeer so the new connection gets a brand-new
+		// seq, peer.ID, and clean state.
 		if peer.GetStatus() != "stopped" {
-			proxy := peer.proxy
 			sessionDuration := time.Since(sessionStartTime)
 			
 			// If session was very short (< 5s), apply backoff to prevent rapid reconnection loops

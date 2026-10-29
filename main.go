@@ -195,7 +195,6 @@ var runCnt int
 // All non-configuration persistent data (reverse-id, bindings, subscription cache)
 // is stored here, separate from the static conf/ directory.
 var dataDir = filepath.Join(".", "data")
-var configPath = "config.yaml" // default, will be updated in getRuleConf()
 
 func run(prev *activeResources) (*activeResources, error) {
 	// Configure module log levels from environment variable
@@ -291,9 +290,9 @@ func run(prev *activeResources) (*activeResources, error) {
 			}
 		}
 
-		// Load mesh state: config.yaml is the source of truth, with migration from mesh-state.json
-		// NodeID priority: config → mesh-state.json (migrate) → generate
-		// Subnet priority: config → mesh-state.json (migrate) → auto-allocate
+		// Load mesh state: database is the source of truth, with migration from mesh-state.json
+		// NodeID priority: database → mesh-state.json (migrate) → generate
+		// Subnet priority: database → mesh-state.json (migrate) → auto-allocate
 
 		// Try to migrate from mesh-state.json if config doesn't have values
 		if meshConfig.NodeID == "" || meshConfig.GetSubnet() == "" {
@@ -305,12 +304,12 @@ func run(prev *activeResources) (*activeResources, error) {
 				migrated := false
 				if meshConfig.NodeID == "" && state.NodeID != "" {
 					meshConfig.NodeID = state.NodeID
-					util.LogModuleInfo("system", "Mesh: migrated node-id from mesh-state.json to config.yaml: %s", state.NodeID)
+					util.LogModuleInfo("system", "Mesh: migrated node-id from mesh-state.json to database: %s", state.NodeID)
 					migrated = true
 				}
 				if meshConfig.GetSubnet() == "" && state.Subnet != "" {
 					meshConfig.Subnet = state.Subnet
-					util.LogModuleInfo("system", "Mesh: migrated subnet from mesh-state.json to config.yaml: %s", state.Subnet)
+					util.LogModuleInfo("system", "Mesh: migrated subnet from mesh-state.json to database: %s", state.Subnet)
 					migrated = true
 				}
 				if migrated {
@@ -323,7 +322,7 @@ func run(prev *activeResources) (*activeResources, error) {
 					if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
 						util.LogModuleWarn("system", " remove old mesh-state.json fail: %v", err)
 					} else {
-						util.LogModuleInfo("system", "Mesh: removed old mesh-state.json (migrated to config.yaml)")
+						util.LogModuleInfo("system", "Mesh: removed old mesh-state.json (migrated to database)")
 					}
 				}
 			}
@@ -785,31 +784,24 @@ func main() {
 	db.InitVersionNotifier()
 
 	if isFirstRun {
-		// Interactive initialization is only for truly fresh deployments.
-		// An existing config.yaml means an upgrade from the YAML era: skip
-		// the prompts so getRuleConf() imports it transparently.
-		legacyConfig := filepath.Join(workDir, "config.yaml")
-		if _, err := os.Stat(legacyConfig); err == nil {
-			util.LogModuleInfo("system", "首次启动（数据库不存在），检测到 config.yaml，将自动导入并跳过交互初始化")
+		// Fresh deployment - use default initialization
+		// Check if stdin is a terminal (interactive mode)
+		fi, err := os.Stdin.Stat()
+		isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+		
+		if isTerminal {
+			util.LogModuleInfo("system", "首次启动，进入初始化模式")
+			if err := db.InteractiveInit(); err != nil {
+				util.LogModuleError("system", " 交互式初始化失败: %v", err)
+				fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
-			// Check if stdin is a terminal (interactive mode)
-			fi, err := os.Stdin.Stat()
-			isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
-			
-			if isTerminal {
-				util.LogModuleInfo("system", "首次启动，进入初始化模式")
-				if err := db.InteractiveInit(); err != nil {
-					util.LogModuleError("system", " 交互式初始化失败: %v", err)
-					fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				util.LogModuleInfo("system", "首次启动（非交互模式），使用默认配置初始化")
-				if err := db.InitDefault(); err != nil {
-					util.LogModuleError("system", " 默认初始化失败: %v", err)
-					fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
-					os.Exit(1)
-				}
+			util.LogModuleInfo("system", "首次启动（非交互模式），使用默认配置初始化")
+			if err := db.InitDefault(); err != nil {
+				util.LogModuleError("system", " 默认初始化失败: %v", err)
+				fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
+				os.Exit(1)
 			}
 		}
 	} else {

@@ -79,9 +79,23 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		util.LogModuleDebug(module, format, args...)
 	})
 
-	if err := engine.Start(); err != nil {
-		util.LogModuleError("engine", "Engine start failed: %v", err)
+	// Start the gVisor netstack (always runs, regardless of TUN switch)
+	// This sets up WriteLoopDevice and starts the netstack core.
+	if err := engine.StartStack(); err != nil {
+		util.LogModuleError("engine", "Netstack start failed: %v", err)
 		return nil, nil, nil
+	}
+	util.LogModuleInfo("engine", "gVisor netstack started")
+
+	// Start TUN device if enabled (optional, can be hot-reloaded later)
+	if tunEnabled {
+		if err := engine.StartTUN(); err != nil {
+			// TUN failed, but keep netstack running for mesh-only mode.
+			util.LogModuleWarn("engine", "========================================")
+			util.LogModuleWarn("engine", "TUN initialization failed: %v", err)
+			util.LogModuleWarn("engine", "Continuing in mesh-only mode (no TUN device)")
+			util.LogModuleWarn("engine", "========================================")
+		}
 	}
 
 	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
@@ -91,7 +105,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	}
 
 	// Wire mesh to engine immediately after start.
-	// This must happen here (not in run()) because engine.Start() may block
+	// This must happen here (not in run()) because engine.StartStack() may block
 	// on Windows in later steps, preventing run() from reaching the wiring code.
 	var connHandler *handler.ConnectionHandler
 	{
@@ -99,7 +113,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		modeBTable := mesh.NewModeBTable()
 
 		// Bind mesh's DNS hijacker to the netstack.
-		// This must happen after engine.Start() (netstack is ready) and before
+		// This must happen after engine.StartStack() (netstack is ready) and before
 		// any DNS queries are made.
 		util.LogModuleInfo("engine", "[DNS-INIT] About to bind DNS hijacker, dnsHijacker=%v, fakeIPPool=%v", meshMgr.GetDNSHijacker() != nil, meshMgr.GetFakeIPPool() != nil)
 		ns.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool())

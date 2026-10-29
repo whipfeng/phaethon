@@ -223,7 +223,48 @@ func DeleteProxyGroup(name string) error {
 }
 
 func ListProxyGroups() ([]*config.ProxyGroup, error) {
-	return listView[config.ProxyGroup](BucketProxyGroups)
+	groups, err := listView[config.ProxyGroup](BucketProxyGroups)
+	if err != nil {
+		return nil, err
+	}
+	// Inject resolver callbacks so GetMembers() can compute member lists
+	injectGroupResolvers(groups)
+	return groups, nil
+}
+
+// injectGroupResolvers sets the ResolveProxy/ResolveGroup/ResolveSubscription
+// callbacks on proxy groups so they can resolve member references.
+func injectGroupResolvers(groups []*config.ProxyGroup) {
+	// Build lookup maps
+	proxies, _ := ListProxies()
+	proxyMap := make(map[string]*config.Proxy, len(proxies))
+	for _, p := range proxies {
+		proxyMap[p.Name] = p
+	}
+
+	groupMap := make(map[string]*config.ProxyGroup, len(groups))
+	for _, g := range groups {
+		groupMap[g.Name] = g
+	}
+
+	subs, _ := ListSubscriptions()
+	subMap := make(map[string]*config.Subscription, len(subs))
+	for _, s := range subs {
+		subMap[s.Name] = s
+	}
+
+	// Inject resolvers
+	for _, g := range groups {
+		g.ResolveProxy = func(name string) *config.Proxy {
+			return proxyMap[name]
+		}
+		g.ResolveGroup = func(name string) *config.ProxyGroup {
+			return groupMap[name]
+		}
+		g.ResolveSubscription = func(name string) *config.Subscription {
+			return subMap[name]
+		}
+	}
 }
 
 // ListProxyGroupsBySubscription returns all proxy groups that reference the given subscription

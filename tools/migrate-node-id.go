@@ -63,8 +63,12 @@ func main() {
 			return fmt.Errorf("node-id is empty in mesh config")
 		}
 
-		// Store node-id in instance-identity bucket
-		if err := identityBucket.Put([]byte("node-id"), []byte(meshConfig.NodeID)); err != nil {
+		// Store node-id in instance-identity bucket (JSON serialized)
+		nodeIDData, err := json.Marshal(meshConfig.NodeID)
+		if err != nil {
+			return fmt.Errorf("failed to marshal node-id: %w", err)
+		}
+		if err := identityBucket.Put([]byte("node-id"), nodeIDData); err != nil {
 			return fmt.Errorf("failed to store node-id: %w", err)
 		}
 

@@ -898,7 +898,9 @@ func main() {
 	util.LogModuleDebug("main", "Total startup took %v", time.Since(startupStart))
 
 	// Wire up admin callbacks
+	util.LogModuleInfo("main", "[ADMIN] About to wire admin callbacks, resources=%v, adminServer=%v", resources != nil, resources != nil && resources.adminServer != nil)
 	if resources != nil && resources.adminServer != nil {
+		util.LogModuleInfo("main", "[ADMIN] Calling wireAdminCallbacks")
 		wireAdminCallbacks(resources)
 		resources.adminServer.OnTUNToggle = func(enable bool) error {
 			return toggleTUN(enable, resources)
@@ -1935,7 +1937,9 @@ func buildProxyConfigJSON(host string, port int, proto, user, password, sni stri
 
 // wireAdminCallbacks connects admin-server actions to the current runtime config.
 func wireAdminCallbacks(resources *activeResources) {
+	util.LogModuleInfo("main", "[ADMIN] wireAdminCallbacks called, resources=%v, adminServer=%v", resources != nil, resources != nil && resources.adminServer != nil)
 	if resources == nil || resources.adminServer == nil {
+		util.LogModuleWarn("main", "[ADMIN] wireAdminCallbacks: resources or adminServer is nil, returning early")
 		return
 	}
 	adminSrv := resources.adminServer
@@ -2135,6 +2139,9 @@ func wireAdminCallbacks(resources *activeResources) {
 			_, exists := existingPeers[proxy.Name]
 			shouldRun := proxy.IsEnabled() && proxy.IsP2P()
 
+			util.LogModuleInfo("main", "[P2P] checking proxy %s: type=%s enabled=%v p2p=%v shouldRun=%v exists=%v",
+				proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P(), shouldRun, exists)
+
 			if shouldRun && !exists {
 				// P2P should be running but isn't - start it
 				util.LogModuleInfo("main", "[P2P] starting peer for proxy %s", proxy.Name)
@@ -2156,6 +2163,63 @@ func wireAdminCallbacks(resources *activeResources) {
 
 		return nil
 	}
+	util.LogModuleInfo("main", "[MESH] About to register OnMeshConfigUpdate callback, adminSrv=%v", adminSrv != nil)
+	adminSrv.OnMeshConfigUpdate = func() error {
+		util.LogModuleInfo("main", "[MESH] OnMeshConfigUpdate called, updating mesh config")
+		
+		// Load updated mesh config from database
+		meshConfig, err := db.GetMeshConfig()
+		if err != nil {
+			util.LogModuleError("main", "[MESH] failed to load updated config: %v", err)
+			return fmt.Errorf("load mesh config: %w", err)
+		}
+		
+		// Parse new config
+		meshNetworkStr := meshConfig.GetNetwork()
+		_, meshNetwork, err := net.ParseCIDR(meshNetworkStr)
+		if err != nil {
+			util.LogModuleError("main", "[MESH] network invalid: %v", err)
+			return fmt.Errorf("parse network: %w", err)
+		}
+		
+		subnetPrefixLen := 16
+		if meshConfig.Subnet != "" {
+			_, subnet, err := net.ParseCIDR(meshConfig.Subnet)
+			if err != nil {
+				util.LogModuleError("main", "[MESH] subnet invalid: %v", err)
+				return fmt.Errorf("parse subnet: %w", err)
+			}
+			ones, _ := subnet.Mask.Size()
+			subnetPrefixLen = ones
+		}
+		
+		meshSubnetStr := meshConfig.GetSubnet()
+		_, meshSubnet, err := net.ParseCIDR(meshSubnetStr)
+		if err != nil {
+			util.LogModuleError("main", "[MESH] subnet invalid: %v", err)
+			return fmt.Errorf("parse subnet: %w", err)
+		}
+		vip := mesh.DeriveVIPFromSubnet(meshSubnet)
+		
+		// Update mesh manager identity (lightweight update, no rebuild)
+		if mesh.GlobalMeshManager != nil {
+			util.LogModuleInfo("main", "[MESH] updating mesh manager identity")
+			mesh.GlobalMeshManager.UpdateIdentity(meshConfig.NodeID, vip, meshSubnet, meshSubnetStr, meshNetwork, subnetPrefixLen)
+			// Also update domain suffixes and advertise routes
+			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
+		}
+		
+		// Update P2P manager mesh info
+		if p2p.GlobalP2PManager != nil {
+			p2p.GlobalP2PManager.SetMeshInfo(meshConfig.NodeID, vip.String())
+		}
+		
+		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s vip=%s subnet=%s advertise=%v", 
+			meshConfig.NodeID, vip, meshSubnetStr, meshConfig.GetAdvertise())
+		
+		return nil
+	}
+	util.LogModuleInfo("main", "[MESH] OnMeshConfigUpdate callback registered")
 	adminSrv.OnMappingUpdate = func(old, newMapping *config.Mapping) error {
 		// Mapping deleted
 		if newMapping == nil && old != nil {

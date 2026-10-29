@@ -507,7 +507,7 @@ func (m *P2PManager) commandWorker() {
 	}
 }
 
-// handleStartCommand processes a "start" command: check → dial → add → run session
+// handleStartCommand processes a "start" command: check → add to maps → dial in background
 func (m *P2PManager) handleStartCommand(cmd peerCommand) {
 	proxy := cmd.proxy
 	if proxy == nil {
@@ -527,9 +527,49 @@ func (m *P2PManager) handleStartCommand(cmd peerCommand) {
 		return
 	}
 	
-	// 3. Create peer object and dial transport (existing logic from StartPeer)
-	// This is done in the worker to ensure serialized map access
-	m.startPeerInternal(proxy)
+	// 3. Create peer object and add to maps (worker has exclusive access)
+	if !m.beginSession() {
+		util.LogModuleDebug("p2p", "[P2P] manager stopped; not starting peer %s", proxy.Name)
+		return
+	}
+	
+	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
+	
+	// Initialize data queues for DRR fair scheduling
+	var dataQueues [256]chan writeReq
+	for i := range dataQueues {
+		dataQueues[i] = make(chan writeReq, 32)
+	}
+	
+	peer := &Peer{
+		ID:           fmt.Sprintf("%d", seq),
+		ProxyName:    proxy.Name,
+		LastSeen:     time.Now(),
+		stopCh:       make(chan struct{}),
+		sessionDone:  make(chan struct{}),
+		proxy:        proxy,
+		Seq:          seq,
+		dnsQueue:     make(chan writeReq, 512),
+		ackQueue:     make(chan writeReq, 256),
+		dataQueues:   dataQueues,
+		drrOutput:    make(chan writeReq, 512),
+		controlCh:    make(chan writeReq, 512),
+		drrScheduler: newDRRScheduler(dataQueues),
+	}
+	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	peer.lastSeenNano.Store(time.Now().UnixNano())
+	peer.SetStatus("connecting")
+	
+	// 4. Add to maps
+	m.peers[peer.ID] = peer
+	m.proxyPeers[proxy.Name] = peer
+	m.updateSnapshot()
+	m.notifyStatusChange()
+	
+	util.LogModuleInfo("p2p", "[P2P-WORKER] added peer %s for proxy %s, starting dial in background", peer.ID, proxy.Name)
+	
+	// 5. Dial and run session in background goroutine (don't block worker)
+	go m.dialAndRunSession(peer, proxy)
 }
 
 // handleStopCommand processes a "stop" command: remove from maps → stop peer
@@ -616,91 +656,17 @@ func (m *P2PManager) handleRemovePassiveCommand(cmd peerCommand) {
 	util.LogModuleInfo("p2p", "[P2P-WORKER] removed passive peer %s", peer.ID)
 }
 
-// startPeerInternal contains the existing StartPeer logic for creating peer object,
-// dialing transport, and running session. Called by commandWorker.
-func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
-	if !m.beginSession() {
-		util.LogModuleDebug("p2p", "[P2P] manager stopped; not starting peer %s", proxy.Name)
-		return
-	}
+// dialAndRunSession dials the transport and runs the session.
+// This is called in a separate goroutine to avoid blocking the worker.
+func (m *P2PManager) dialAndRunSession(peer *Peer, proxy *config.Proxy) {
 	defer m.sessionsWG.Done()
-
-	util.LogModuleInfo("p2p", "[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
-
-	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	
-	// Initialize data queues for DRR fair scheduling
-	var dataQueues [256]chan writeReq
-	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
-	}
-	
-	peer := &Peer{
-		ID:           fmt.Sprintf("%d", seq),
-		ProxyName:    proxy.Name,
-		LastSeen:     time.Now(),
-		stopCh:       make(chan struct{}),
-		sessionDone:  make(chan struct{}),
-		proxy:        proxy,
-		Seq:          seq,
-		dnsQueue:     make(chan writeReq, 512),
-		ackQueue:     make(chan writeReq, 256),
-		dataQueues:   dataQueues,
-		drrOutput:    make(chan writeReq, 512),
-		controlCh:    make(chan writeReq, 512),
-		drrScheduler: newDRRScheduler(dataQueues),
-	}
-	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	peer.lastSeenNano.Store(time.Now().UnixNano())
-	peer.SetStatus("connecting")
-
-	// Add peer to maps (worker has exclusive access, no lock needed)
-	if m.stopped {
-		stopPeer(peer)
-		return
-	}
-	
-	// Register new peer in both maps
-	m.peers[peer.ID] = peer
-	m.proxyPeers[proxy.Name] = peer
-	
-	// Update snapshot
-	m.updateSnapshot()
-	
-	// Trigger version notification
-	m.notifyStatusChange()
-
-	defer func() {
-		stopPeer(peer)
-		// DON'T UnregisterPeer here! The inner defer (line 1350) already handles it.
-		// Since defers are LIFO, the inner defer runs first and calls UnregisterPeer.
-		// If we also call it here, it would be a no-op (sender already removed from topology),
-		// but it's cleaner to let the inner defer handle all mesh cleanup.
-		
-		// Delete LinkNIC when peer disconnects (design §5.6)
-		// Note: Inner defer also does this, but it's safe to call DeleteLinkNIC twice
-		// (second call is a no-op since LinkNIC is already deleted).
-		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
-			m.meshHandler.DeleteLinkNIC(linkNIC)
-			peer.SetLinkNIC(nil)
-		}
-		// Mark all pending frames as lost.
-		// This ensures frames in-flight during disconnection count in both loss rate and latency statistics.
-		if peer.sendState != nil {
-			peer.sendState.markAllPendingAsLost()
-		}
-		
-		// Remove from maps (worker has exclusive access, send stop command)
-		m.cmdCh <- peerCommand{action: "stop", proxyName: proxy.Name}
-		
-		// Signal that session has fully ended (including LinkNIC cleanup)
-		close(peer.sessionDone)
-	}()
-
 	d := dialer.NewDialer(proxy)
 	p2pDialer, ok := d.(dialer.P2PDialer)
 	if !ok {
 		util.LogModuleInfo("p2p", "[P2P] proxy %s (%s) does not support P2P", proxy.Name, proxy.Type)
+		// Remove peer from maps
+		m.cmdCh <- peerCommand{action: "stop", proxyName: proxy.Name}
 		return
 	}
 
@@ -747,16 +713,13 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 		// Reinitialize data queues for DRR fair scheduling
 		for i := range peer.dataQueues {
-			peer.dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
+			peer.dataQueues[i] = make(chan writeReq, 32)
 		}
 		if peer.drrScheduler != nil {
 			peer.drrScheduler.queues = peer.dataQueues
 			peer.drrScheduler.deficits = [256]int{}
 			peer.drrScheduler.round = 0
 		}
-		// Create sendState/recvState on first connection attempt.
-		// Note: These are NOT preserved across reconnections (line 1178 creates a new peer object).
-		// The nil check only matters when retrying failed dial attempts within the same StartPeer invocation.
 		if peer.sendState == nil {
 			peer.sendState = newSendState()
 		}
@@ -772,13 +735,11 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 		func() {
 			defer func() {
 				sessionDuration := time.Since(sessionStartTime)
-				// Log disconnection reason
 				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v duration=%v",
 					peer.ID, proxy.Name, peer.GetStatus(), peer.LastError, sessionDuration)
 				
 				transport.Close()
 				
-				// Update status to disconnected before cleanup
 				if peer.GetStatus() != "stopped" {
 					peer.SetStatus("disconnected")
 					m.notifyStatusChange()
@@ -789,7 +750,6 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 				if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
 					m.meshHandler.UnregisterPeer(sender)
 				}
-				// Delete LinkNIC when peer disconnects (design §5.6)
 				if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
 					m.meshHandler.DeleteLinkNIC(linkNIC)
 					peer.SetLinkNIC(nil)
@@ -803,21 +763,17 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 			m.runSession(peer)
 		}()
 
-		// Session ended. Send stop command to remove from maps, then reconnect.
-		// The stop command will be processed by the worker before the next start.
+		// Session ended. Send stop command to remove from maps.
 		m.cmdCh <- peerCommand{action: "stop", proxyName: proxy.Name}
 		
-		// Now spawn a fresh start command so the new connection gets a brand-new
-		// seq, peer.ID, and clean state.
+		// Reconnect if not stopped
 		if peer.GetStatus() != "stopped" {
 			sessionDuration := time.Since(sessionStartTime)
 			
-			// If session was very short (< 5s), apply backoff to prevent rapid reconnection loops
 			if sessionDuration < 5*time.Second {
 				util.LogModuleWarn("p2p", "[P2P-DIAG] session too short (%v) for peer.ID=%s proxy=%s, applying backoff before reconnect",
 					sessionDuration, peer.ID, proxy.Name)
 				
-				// Exponential backoff with jitter
 				peer.rngMu.Lock()
 				jitter := 0.5 + peer.rng.Float64()
 				peer.rngMu.Unlock()
@@ -834,7 +790,6 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 					backoff = maxBackoff
 				}
 			} else {
-				// Reset backoff for long-lived sessions
 				backoff = time.Second
 			}
 			
@@ -842,13 +797,14 @@ func (m *P2PManager) startPeerInternal(proxy *config.Proxy) {
 				proxy.Server, proxy.Name, peer.GetStatus(), sessionDuration)
 			// Send start command to queue for reconnection
 			m.cmdCh <- peerCommand{action: "start", proxy: proxy}
-			return // Exit this goroutine; the new start command will create a fresh peer
+			return
 		}
 		
 		util.LogModuleInfo("p2p", "[P2P] peer %s (proxy=%s) stopped, not reconnecting", peer.ID, proxy.Name)
 		return
 	}
 }
+
 
 // updateSnapshot creates a new snapshot of proxyPeers and stores it atomically.
 // Called by commandWorker after map modifications.
@@ -905,11 +861,9 @@ func (m *P2PManager) Stop() {
 // GetPeerStatus returns the P2P connection status for all peers.
 // Returns a map of proxy name -> status info (active peers only).
 func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	result := make(map[string]map[string]interface{}, len(m.proxyPeers))
-	for name, peer := range m.proxyPeers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	result := make(map[string]map[string]interface{}, len(snapshot))
+	for name, peer := range snapshot {
 		lastSeenNano := peer.lastSeenNano.Load()
 		result[name] = map[string]interface{}{
 			"status":   peer.GetStatus(),
@@ -1592,7 +1546,7 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // Call StopPeerByProxyName to permanently disconnect.
 // StartPeer initiates a P2P connection to a peer through the given proxy.
 // It sends a command to the worker queue for serialized map access.
-// The actual peer creation and dial logic is in startPeerInternal.
+// The actual peer creation and dial logic is in handleStartCommand and dialAndRunSession.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	// Send start command to queue (non-blocking if queue has space)
 	m.cmdCh <- peerCommand{action: "start", proxy: proxy}
@@ -2005,14 +1959,13 @@ func (m *P2PManager) SetMeshHandler(h MeshHandler) {
 // BroadcastMeshGossip sends gossip to all mesh-enabled peers.
 // In v7, data is sent directly as FrameGossip (no JSON command wrapper).
 func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
-	m.mu.Lock()
-	peers := make([]*Peer, 0, len(m.peers))
-	for _, p := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	peers := make([]*Peer, 0, len(snapshot))
+	for _, p := range snapshot {
 		if p.meshSenderPtr.Load() != nil {
 			peers = append(peers, p)
 		}
 	}
-	m.mu.Unlock()
 
 	for _, p := range peers {
 		enqueueWrite(p, frame.FrameGossip, data, true) // control frame, reliable delivery
@@ -2023,16 +1976,15 @@ func (m *P2PManager) BroadcastMeshGossip(data []byte) error {
 // SendMeshGossipTo sends gossip to a specific mesh peer.
 // In v7, data is sent directly as FrameGossip (no JSON command wrapper).
 func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
-	m.mu.Lock()
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
 	var target *Peer
-	for _, p := range m.peers {
+	for _, p := range snapshot {
 		sender := p.meshSenderPtr.Load()
 		if sender != nil && sender.nodeID == peerNodeID {
 			target = p
 			break
 		}
 	}
-	m.mu.Unlock()
 
 	if target == nil {
 		return nil
@@ -2044,14 +1996,13 @@ func (m *P2PManager) SendMeshGossipTo(peerNodeID string, data []byte) error {
 // SendMeshGossipToAll sends gossip to all mesh-enabled peers.
 // In v7, data is sent directly as FrameGossip (no JSON command wrapper).
 func (m *P2PManager) SendMeshGossipToAll(data []byte) {
-	m.mu.Lock()
-	peers := make([]*Peer, 0, len(m.peers))
-	for _, p := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	peers := make([]*Peer, 0, len(snapshot))
+	for _, p := range snapshot {
 		if p.meshSenderPtr.Load() != nil {
 			peers = append(peers, p)
 		}
 	}
-	m.mu.Unlock()
 
 	for _, p := range peers {
 		enqueueWrite(p, frame.FrameGossip, data, true) // control frame, reliable delivery
@@ -2060,21 +2011,18 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 
 // ResendHelloToAll resends hello to all connected peers (used after subnet conflict resolution).
 func (m *P2PManager) ResendHelloToAll() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, peer := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	for _, peer := range snapshot {
 		m.sendHello(peer)
 	}
-	util.LogModuleDebug("p2p", "[P2P] resent hello to all peers (%d)", len(m.peers))
+	util.LogModuleDebug("p2p", "[P2P] resent hello to all peers (%d)", len(snapshot))
 }
 
 // ListMeshPeerIDs returns node IDs of all mesh-enabled peers.
 func (m *P2PManager) ListMeshPeerIDs() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
 	var result []string
-	for _, p := range m.peers {
+	for _, p := range snapshot {
 		sender := p.meshSenderPtr.Load()
 		if sender != nil {
 			result = append(result, sender.nodeID)
@@ -2116,10 +2064,8 @@ func (p *Peer) totalDataDrops() uint64 {
 
 // Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
 func (m *P2PManager) GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, p := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	for _, p := range snapshot {
 		if p.NodeID == nodeID && p.sendState != nil {
 			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
 			return p.sendState.getStats(channelDrops)
@@ -2134,14 +2080,12 @@ func (m *P2PManager) GetChannelDropStats() (peerStats map[string]struct {
 	DataDrops      uint64
 	ControlChDrops uint64
 }, meshInboundDrops uint64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
 	peerStats = make(map[string]struct {
 		DataDrops      uint64
 		ControlChDrops uint64
 	})
-	for _, p := range m.peers {
+	for _, p := range snapshot {
 		peerStats[p.NodeID] = struct {
 			DataDrops      uint64
 			ControlChDrops uint64
@@ -2158,10 +2102,8 @@ func (m *P2PManager) GetChannelDropStats() (peerStats map[string]struct {
 // GetLinkQualityStatsByProxy returns ACK-based link quality stats for a specific link (proxy).
 // Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
 func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, p := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	for _, p := range snapshot {
 		if p.ProxyName == proxyName && p.sendState != nil {
 			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
 			return p.sendState.getStats(channelDrops)
@@ -2172,10 +2114,8 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, ji
 
 // GetLinkQualityStatsByLinkID returns ACK-based link quality stats for an exact negotiated link.
 func (m *P2PManager) GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, p := range m.peers {
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
+	for _, p := range snapshot {
 		if p.LinkID == linkID && p.sendState != nil {
 			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
 			return p.sendState.getStats(channelDrops)
@@ -2194,9 +2134,7 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 	LossRate    float64
 	SampleCount int
 } {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	snapshot := m.peersSnapshot.Load().(map[string]*Peer)
 	result := make(map[string]struct {
 		NodeID      string
 		SRTT        time.Duration
@@ -2206,7 +2144,7 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 		SampleCount int
 	})
 
-	for _, p := range m.peers {
+	for _, p := range snapshot {
 		if p.sendState != nil && p.ProxyName != "" {
 			channelDrops := p.totalDataDrops() + atomic.LoadUint64(&p.controlChDrops)
 			srtt, rto, jitter, lossRate, sampleCount := p.sendState.getStats(channelDrops)

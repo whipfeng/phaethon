@@ -714,6 +714,32 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	}
 }
 
+// UpdateIdentity updates core identity fields (nodeID, subnet, etc.) without rebuilding.
+// This triggers route re-announcement to peers.
+func (m *MeshManager) UpdateIdentity(nodeID string, vip net.IP, subnet *net.IPNet, subnetStr string, network *net.IPNet, subnetPrefixLen int) {
+	m.mu.Lock()
+	oldNodeID := m.nodeID
+	oldSubnetStr := m.subnetStr
+	
+	m.nodeID = nodeID
+	m.vip = vip
+	m.subnet = subnet
+	m.subnetStr = subnetStr
+	m.network = network
+	m.subnetPrefixLen = subnetPrefixLen
+	m.mu.Unlock()
+	
+	if oldNodeID != nodeID || oldSubnetStr != subnetStr {
+		util.LogModuleInfo("mesh", "[MESH] identity updated: nodeID %s->%s, subnet %s->%s", oldNodeID, nodeID, oldSubnetStr, subnetStr)
+	}
+	
+	select {
+	case m.normalCh <- meshEvent{kind: configUpdate}:
+	default:
+		util.LogModuleWarn("mesh", "[MESH] normalCh full, dropping identity update event")
+	}
+}
+
 // TriggerGossip sends an immediate gossip broadcast.
 func (m *MeshManager) TriggerGossip() {
 	select {

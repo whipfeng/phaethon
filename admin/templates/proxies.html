@@ -110,7 +110,7 @@
                         <td data-label="V2" style="cursor:pointer;" onclick="toggleV2('{{.Name}}', {{.IsV2}})" id="v2-status-{{.Name}}">
                             {{if .IsV2}}✅{{else}}❌{{end}}
                         </td>
-                        <td data-label="Via">{{.ViaProxy}}</td>
+                        <td data-label="Via">{{if .ViaProxy}}{{.ViaProxy}}{{else}}<span class="text-muted">-</span>{{end}}</td>
                         <td data-label="Enabled">
                             <label class="switch" title="{{if .Enabled | enabled}}Enabled{{else}}Disabled{{end}}">
                                 <input type="checkbox" {{if .Enabled | enabled}}checked{{end}} onchange="toggleProxy('{{.Name}}', this.checked)">
@@ -1888,12 +1888,15 @@ function escapeHtml(s) {
     window._p2pStatusMap = {};
     
     function updateP2PStatus(peers) {
-        // Build a map of proxy name -> peer status
+        // Build a map of proxy name -> {status, lastError}
         const peerMap = {};
         if (peers && Array.isArray(peers)) {
             for (const peer of peers) {
                 if (peer.proxyName) {
-                    peerMap[peer.proxyName] = peer.status || 'unknown';
+                    peerMap[peer.proxyName] = {
+                        status: peer.status || 'unknown',
+                        lastError: peer.lastError || ''
+                    };
                 }
             }
         }
@@ -1907,7 +1910,9 @@ function escapeHtml(s) {
             const p2pCell = row.querySelector('td[data-label="P2P"]');
             if (!p2pCell) return;
             
-            const status = peerMap[proxyName];
+            const peerInfo = peerMap[proxyName];
+            const status = peerInfo ? peerInfo.status : null;
+            const lastError = peerInfo ? peerInfo.lastError : '';
             const proxy = proxies.find(p => p.name === proxyName);
             const p2pEnabled = proxy && proxy.p2p;
             
@@ -1920,8 +1925,12 @@ function escapeHtml(s) {
             } else if (status === 'upToDate' || status === 'helloed') {
                 // Connected
                 p2pCell.innerHTML = '<span class="p2p-status connected" title="Connected"></span>';
+            } else if (status === 'failed') {
+                // Failed - show red dot with error tooltip
+                const errorTitle = lastError ? `Connection failed: ${lastError}` : 'Connection failed';
+                p2pCell.innerHTML = `<span class="p2p-status failed" title="${errorTitle}"></span>`;
             } else {
-                // connecting or failed - show connecting
+                // connecting - show blue dot
                 p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
             }
         });

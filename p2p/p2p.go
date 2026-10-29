@@ -343,6 +343,7 @@ type Peer struct {
 	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
 	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 	Status    string `json:"status"`    // current peer status: connecting, helloed, upToDate, failed
+	LastError string `json:"lastError,omitempty"` // last error message (empty if no error)
 	LastSeen  time.Time `json:"lastSeen"`
 
 	// LinkID negotiation (hello phase)
@@ -1288,6 +1289,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		transport, err := p2pDialer.DialP2P()
 		if err != nil {
 			util.LogModuleInfo("p2p", "[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
+			peer.LastError = err.Error()
 			peer.SetStatus("failed")
 			m.notifyStatusChange()
 			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
@@ -1639,6 +1641,7 @@ func (m *P2PManager) handleHello(peer *Peer, payload []byte) {
 	}
 
 	peer.NodeID = nodeID
+	peer.LastError = ""
 	peer.SetStatus("helloed")
 	now := time.Now()
 	peer.LastSeen = now

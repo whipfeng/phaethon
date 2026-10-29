@@ -113,7 +113,7 @@ func (p *Proxy) IsUDP() bool {
 	if p == nil {
 		return false
 	}
-	isCompatible := p.Type == "socks5" || p.Type == "trojan" || p.Type == "h_tunnel" || p.Type == "hysteria2" || p.Type == "vless"
+	isCompatible := strings.EqualFold(p.Type, "socks5") || strings.EqualFold(p.Type, "trojan") || strings.EqualFold(p.Type, "h_tunnel") || strings.EqualFold(p.Type, "hysteria2") || strings.EqualFold(p.Type, "vless")
 	if !isCompatible {
 		return false
 	}

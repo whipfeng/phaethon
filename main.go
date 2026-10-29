@@ -416,7 +416,7 @@ func run(prev *activeResources) (*activeResources, error) {
 		if !proxy.IsEnabled() {
 			continue
 		}
-		isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
+		isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
 		if !isCompatible {
 			continue
 		}

@@ -664,7 +664,7 @@ function registerDefaultVersionHandlers() {
     }, 'bindings');
     onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
     onBusinessVersion('tun-config', () => scheduleTopicFetch('tun-config'), 'tun-config');
-    onBusinessVersion('mesh-config', () => fetchMeshStatus(), 'mesh-config');
+    onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
     onBusinessVersion('proxies', () => scheduleTopicFetch('proxies'), 'proxies');
     onBusinessVersion('rules', () => scheduleTopicFetch('rules'), 'rules');
     onBusinessVersion('subscriptions', () => scheduleTopicFetch('subscriptions'), 'subscriptions');
@@ -764,7 +764,7 @@ function fetchForTopic(topic, expectedVersion) {
             return fetchMappings(expectedVersion);
         case 'subscriptions':
             return fetchSubscriptions(expectedVersion);
-        case 'mesh-config':
+        case 'mesh':
             return fetchMeshStatus(expectedVersion);
         default:
             return Promise.resolve();
@@ -1484,7 +1484,9 @@ async function fetchMeshStatus() {
             const routeTbody = document.getElementById('mesh-routes');
             if (routeTbody) {
                 let html = '';
-                data.routes.routes.forEach(r => {
+                // Sort routes by prefix
+                const sortedRoutes = [...data.routes.routes].sort((a, b) => a.prefix.localeCompare(b.prefix));
+                sortedRoutes.forEach(r => {
                     const entries = r.entries || [];
                     const owners = (entries.length > 0) ? entries.map(e => e.NodeID).join(', ') : '-';
                     html += '<tr>';

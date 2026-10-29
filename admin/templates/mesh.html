@@ -403,7 +403,9 @@
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            tbody.innerHTML = suffixes.map((suffix, idx) => `
+            // Sort suffixes alphabetically
+            const sortedSuffixes = [...suffixes].sort((a, b) => a.localeCompare(b));
+            tbody.innerHTML = sortedSuffixes.map((suffix, idx) => `
                 <tr>
                     <td>${escapeHtml(suffix)}</td>
                     <td>
@@ -494,7 +496,9 @@
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            tbody.innerHTML = advertise.map((cidr, idx) => `
+            // Sort advertise routes by CIDR
+            const sortedAdvertise = [...advertise].sort((a, b) => a.localeCompare(b));
+            tbody.innerHTML = sortedAdvertise.map((cidr, idx) => `
                 <tr>
                     <td><code>${escapeHtml(cidr)}</code></td>
                     <td>

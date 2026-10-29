@@ -580,7 +580,8 @@ const VersionNotificationService = (function () {
         sseSource.onopen = () => {
             connected = true;
             lastHeartbeat = Date.now();
-            stopPolling();
+            // Don't stop polling here - let the heartbeat handler do it
+            // after receiving 2 consecutive heartbeats to ensure connection is stable
         };
         sseSource.onerror = () => {
             connected = false;

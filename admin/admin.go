@@ -1745,16 +1745,31 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Merge updates: only update fields that are present
-		if nodeID, ok := updates["NodeID"].(string); ok && nodeID != "" {
+		// Support both "node-id" (frontend) and "NodeID" (Go convention)
+		if nodeID, ok := updates["node-id"].(string); ok && nodeID != "" {
+			meshCfg.NodeID = nodeID
+		} else if nodeID, ok := updates["NodeID"].(string); ok && nodeID != "" {
 			meshCfg.NodeID = nodeID
 		}
-		if subnet, ok := updates["Subnet"].(string); ok {
+		if subnet, ok := updates["subnet"].(string); ok {
+			meshCfg.Subnet = subnet
+		} else if subnet, ok := updates["Subnet"].(string); ok {
 			meshCfg.Subnet = subnet
 		}
-		if network, ok := updates["Network"].(string); ok {
+		if network, ok := updates["network"].(string); ok {
+			meshCfg.Network = network
+		} else if network, ok := updates["Network"].(string); ok {
 			meshCfg.Network = network
 		}
-		if domainSuffixes, ok := updates["DomainSuffixes"].([]interface{}); ok {
+		if domainSuffixes, ok := updates["domain-suffixes"].([]interface{}); ok {
+			suffixes := make([]string, 0, len(domainSuffixes))
+			for _, s := range domainSuffixes {
+				if str, ok := s.(string); ok {
+					suffixes = append(suffixes, str)
+				}
+			}
+			meshCfg.DomainSuffixes = suffixes
+		} else if domainSuffixes, ok := updates["DomainSuffixes"].([]interface{}); ok {
 			suffixes := make([]string, 0, len(domainSuffixes))
 			for _, s := range domainSuffixes {
 				if str, ok := s.(string); ok {
@@ -1763,7 +1778,15 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			}
 			meshCfg.DomainSuffixes = suffixes
 		}
-		if advertise, ok := updates["Advertise"].([]interface{}); ok {
+		if advertise, ok := updates["advertise"].([]interface{}); ok {
+			advList := make([]string, 0, len(advertise))
+			for _, a := range advertise {
+				if str, ok := a.(string); ok {
+					advList = append(advList, str)
+				}
+			}
+			meshCfg.Advertise = advList
+		} else if advertise, ok := updates["Advertise"].([]interface{}); ok {
 			advList := make([]string, 0, len(advertise))
 			for _, a := range advertise {
 				if str, ok := a.(string); ok {
@@ -1772,7 +1795,9 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			}
 			meshCfg.Advertise = advList
 		}
-		if forwardingTrace, ok := updates["ForwardingTrace"].(bool); ok {
+		if forwardingTrace, ok := updates["forwarding-trace"].(bool); ok {
+			meshCfg.ForwardingTrace = forwardingTrace
+		} else if forwardingTrace, ok := updates["ForwardingTrace"].(bool); ok {
 			meshCfg.ForwardingTrace = forwardingTrace
 		}
 

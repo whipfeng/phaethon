@@ -373,11 +373,9 @@ func run(prev *activeResources) (*activeResources, error) {
 		proxies = nil
 	}
 
-	// Load proxy groups from database
-	proxyGroups, err := db.ListProxyGroups()
-	if err != nil {
+	// Load proxy groups from database (health checks use the matcher's wired table instead)
+	if _, err := db.ListProxyGroups(); err != nil {
 		util.LogModuleWarn("main", "load proxy groups fail: %v", err)
-		proxyGroups = nil
 	}
 
 	// Start P2P peers:
@@ -517,7 +515,7 @@ func run(prev *activeResources) (*activeResources, error) {
 	}
 
 	// Start health check for best groups
-	res.healthStop = startHealthChecks(proxies, proxyGroups)
+	res.healthStop = startHealthChecks()
 
 	// Start subscription refresh
 	res.subscriptionStop = startSubscriptionRefresh(subscriptions)
@@ -2040,10 +2038,13 @@ func wireAdminCallbacks(resources *activeResources) {
 		}, nil
 	}
 	adminSrv.CheckProxyHealth = func(proxyName string) (config.HealthInfo, error) {
-		p, err := db.GetProxy(proxyName)
+		// 必须从 matcher 查：db.GetProxy 返回的副本 Next 恒为 nil，
+		// 会绕过 via 链直连目标，QG 等直连出口被封的环境会误报不通。
+		matcher, err := db.GetMatcher()
 		if err != nil {
-			return config.HealthInfo{}, fmt.Errorf("proxy not found: %s", proxyName)
+			return config.HealthInfo{}, fmt.Errorf("get matcher: %w", err)
 		}
+		p := matcher.LookupProxy(proxyName)
 		if p == nil {
 			return config.HealthInfo{}, fmt.Errorf("proxy not found: %s", proxyName)
 		}
@@ -2357,8 +2358,17 @@ func wireAdminCallbacks(resources *activeResources) {
 
 // ========== Health Check for best groups ==========
 
-func startHealthChecks(proxies []*config.Proxy, proxyGroups []*config.ProxyGroup) chan struct{} {
+func startHealthChecks() chan struct{} {
 	stop := make(chan struct{})
+
+	// 用 matcher 的组表而非 db.ListProxyGroups：matcher 的成员解析
+	// 指向已接好 via 链的代理表，健康检查才能沿链拨号。
+	var proxyGroups []*config.ProxyGroup
+	if matcher, err := db.GetMatcher(); err == nil {
+		proxyGroups = matcher.ListGroups()
+	} else {
+		util.LogModuleWarn("main", "startHealthChecks: get matcher fail: %v", err)
+	}
 
 	// All groups that have interval configured will be health-checked
 	var checkGroups []*config.ProxyGroup

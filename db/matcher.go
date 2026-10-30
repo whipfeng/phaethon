@@ -372,6 +372,38 @@ func (m *RuleMatcher) GetGroup(name string) *config.ProxyGroup {
 	return m.groups[name]
 }
 
+// LookupProxy 获取已接好 via 链（Next 指针）的代理。
+// 与 db.GetProxy 的区别：后者返回 DB 新鲜副本，Next 恒为 nil；
+// 健康检查等需要沿链拨号的场景必须用这里返回的实例。
+func (m *RuleMatcher) LookupProxy(name string) *config.Proxy {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.proxies[name]
+}
+
+// ListGroups 返回 matcher 持有的全部代理组。
+// 组的成员解析回调指向 m.proxies，因此拿到手的就是接好链的代理。
+func (m *RuleMatcher) ListGroups() []*config.ProxyGroup {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	groups := make([]*config.ProxyGroup, 0, len(m.groups))
+	for _, g := range m.groups {
+		groups = append(groups, g)
+	}
+	return groups
+}
+
+// rewireNextChains 全量重接 via 链。watcher 换入的新代理副本 Next 为 nil，
+// 且其他代理的 Next 可能仍指向旧副本，需整体重建（与构建期 setNext 一致）。
+func (m *RuleMatcher) rewireNextChains() {
+	for _, p := range m.proxies {
+		visited := map[*config.Proxy]bool{}
+		if err := m.setNext(p, visited); err != nil {
+			util.LogModuleWarn("db", "rewire next chain for %s failed: %v", p.Name, err)
+		}
+	}
+}
+
 // AddProxy 添加代理到统一 Map（由 ControlManager 调用）
 func (m *RuleMatcher) AddProxy(proxy *config.Proxy) {
 	m.mu.Lock()
@@ -678,7 +710,9 @@ func onConfigChange(event ChangeEvent) {
 			m.proxies[key] = proxy
 			util.LogModuleInfo("db", "watch: updated proxy %s", key)
 		}
-		// 代理变更不需要重建成员列表，因为 Members 是按需计算的
+		// 代理变更不需要重建成员列表，因为 Members 是按需计算的。
+		// 但 Next 指针必须重接：新副本 Next 为 nil，旧副本仍被其他代理引用。
+		m.rewireNextChains()
 
 	case string(BucketProxyGroups):
 		if op == "delete" {
@@ -703,6 +737,8 @@ func onConfigChange(event ChangeEvent) {
 			m.groups[key] = group
 			util.LogModuleInfo("db", "watch: updated group %s", key)
 		}
+		// via 可引用组，组变化同样需重接 Next 链
+		m.rewireNextChains()
 
 	case string(BucketSubscriptions):
 		if op == "delete" {

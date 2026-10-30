@@ -93,6 +93,7 @@ type P2PTransport interface {
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetEgressStatsByNodeSeq(nodeID string, seq uint16) (dropRate, sojournMs float64, ok bool)
 	GetChannelDropStats() (peerStats map[string]struct {
 		DataDrops      uint64
 		ControlChDrops uint64
@@ -2280,6 +2281,9 @@ func (m *MeshManager) broadcastGossip() {
 				link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				link.LossRate = lossRate
 				link.Jitter = jitter
+				dropRate, sojournMs := quality.EgressStats()
+				link.DropRate = dropRate
+				link.SojournMs = sojournMs
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -2563,6 +2567,12 @@ func (m *MeshManager) updateACKStats() {
 			quality := m.qualityTracker.Get(nodeID, localSeq)
 			quality.UpdateACKStats(srtt, lossRate, jitter, sampleCount)
 		}
+		// Egress health (Phase B): pulled every round so the drop window on
+		// the p2p side stays aligned with this pull interval.
+		if dropRate, sojournMs, ok := m.p2p.GetEgressStatsByNodeSeq(nodeID, localSeq); ok {
+			quality := m.qualityTracker.Get(nodeID, localSeq)
+			quality.UpdateEgressStats(dropRate, sojournMs)
+		}
 	}
 }
 
@@ -2825,6 +2835,9 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				link.LossRate = lossRate
 				link.Jitter = jitter
+				dropRate, sojournMs := quality.EgressStats()
+				link.DropRate = dropRate
+				link.SojournMs = sojournMs
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -3104,10 +3117,11 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, localSeq)
 			avgRTT, lossRate, jitterVal, confidence := quality.StatsWithConfidence()
+			dropRate, sojournMs := quality.EgressStats()
 			link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 			link.LossRate = lossRate
 			link.Jitter = jitterVal
-			link.Cost = linkCost(link.SRTT, lossRate, confidence)
+			link.Cost = linkCost(link.SRTT, lossRate, dropRate, sojournMs, confidence)
 		} else {
 			link.Cost = 1000
 		}
@@ -3146,7 +3160,7 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 					LossRate:  gossipLink.LossRate,
 					// Remote nodes already bake confidence into the values
 					// they gossip; validated-claim freshness covers staleness.
-					Cost: linkCost(gossipLink.SRTT, gossipLink.LossRate, 1.0),
+					Cost: linkCost(gossipLink.SRTT, gossipLink.LossRate, gossipLink.DropRate, gossipLink.SojournMs, 1.0),
 				}
 
 				if graph.Edges[fromNode] == nil {
@@ -3174,18 +3188,23 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 	return graph
 }
 
-// linkCost computes the per-link cost (design: link_quality_v2 §A1/A2):
-// SRTT / max(1-LossRate, 0.01) / confidence. No unprobed sentinel — a fresh
-// tracker carries the 100ms prior with confidence 0.1, yielding cost 1000.
-func linkCost(srtt, lossRate, confidence float64) float64 {
-	denom := 1.0 - lossRate
+// linkCost computes the per-link cost (design: link_quality_v2 §A2/§B):
+//   lossEff = 1 - (1-lossPing)·(1-dropRate)
+//   cost = (SRTT + SojournMs) / max(1-lossEff, 0.01) / confidence
+// Locally-dropped frames never reached the peer, so dropRate composes into
+// the loss term; sojourn adds to SRTT (same unit). No unprobed sentinel —
+// a fresh tracker carries the 100ms prior with confidence 0.1, yielding
+// cost 1000.
+func linkCost(srtt, lossRate, dropRate, sojournMs, confidence float64) float64 {
+	lossEff := 1.0 - (1.0-lossRate)*(1.0-dropRate)
+	denom := 1.0 - lossEff
 	if denom < 0.01 {
 		denom = 0.01
 	}
 	if confidence <= 0 {
 		confidence = 0.01
 	}
-	return srtt / denom / confidence
+	return (srtt + sojournMs) / denom / confidence
 }
 
 const (

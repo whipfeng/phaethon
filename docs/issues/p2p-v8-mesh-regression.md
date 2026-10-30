@@ -214,7 +214,24 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 
 问题4、问题10 随 nodeID 重启决策消解，仅需删除死代码（已并入第 3 步清理项）。
 
-修复完成后统一编译 + VM 部署验证（用户决策 10：修完再验），验证项：mesh 端到端拓扑建立、race 构建下 admin 改 node-id、LastError 恢复清除、高 RTT 场景 loss 回落。
+### 路由环路风险与重算触发链分析（2026-10-30 深度讨论，用户决策）
+
+**环路分析结论**：
+- **稳态环路数学上不存在**：gossip 收敛后全网持有同一有向图（各端发布自己测的方向代价），正代价下" A 经 B 到 X 更优且 B 经 A 到 X 更优"两式相加导出矛盾（代价和 < 0），不成立。全双工独立测量**合理**，无需代价单向化（原"建议2"撤回）
+- **瞬态环路**仅在 gossip 视图时差（~15s）内可能，唯一兜底是 **TTL 每跳递减**——mesh 自转发 IPIP 外层包不经过 gVisor IP 转发，TTL 是否递减未经证实，列为开工检查项
+- gVisor `RouteDecisionCache`：按目标 IP 维度、无 TTL、全量清空（`ClearRouteDecisionCache`）；`stickyCache` 只存最终目标节点，下一跳由 bestPaths 实时给出
+- 发现隐性触发链：`compareGossipNeighbors` 用 `!=` 整体比较 GossipLink（含 SRTT/LossRate 浮点），浮点每帧必变 → 每轮 gossip 都触发重算+清缓存。"质量驱动重算"靠副作用成立而非显式设计
+
+**新增修复项（追加进修复顺序）**：
+
+| 项 | 内容 | 说明 |
+|----|------|------|
+| 环路-1 | **验证 mesh/IPIP 转发外层 TTL 每跳递减**（开工第一项，日志实证） | 瞬态环路唯一兜底；不递减则是硬伤 |
+| 环路-2 | **qualityLoop 每 10s 无条件投递 `recomputeRoute` 事件**（方案A，用户已接受） | 显式质量触发，替代浮点副作用；Dijkstra 微秒级，代价可忽略。criticalWorker 已支持该事件类型（mesh.go:2207），只是无人投递 |
+| 环路-3 | `compareGossipNeighbors` 比较忽略 SRTT/LossRate/Jitter | 职责分离：gossip 只响应拓扑变化（保故障切换即时性），质量变化归 qualityLoop 周期触发 |
+| 环路-4 | **IPIP 分支（分支3）`Cacheable` 改 false**，与分支2一致 | 用户决策：两者都动态选下一跳（`NextHopLink`），缓存语义应一致。原注释"IPIP egress is static per prefix"只对一半——出口静态但下一跳动态，混装动态字段的缓存条目只能靠清缓存刷新（滞后一个重算周期） |
+
+修复完成后统一编译 + VM 部署验证（用户决策 10：修完再验），验证项：mesh 端到端拓扑建立、race 构建下 admin 改 node-id、LastError 恢复清除、高 RTT 场景 loss 回落、IPIP 转发 TTL 递减日志实证。
 
 （Phase 1-3 执行结果待修复推进后填写）
 
@@ -225,3 +242,4 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 - **2026-10-30（二次修订）**：用户质疑两点，查证后修订决策：①多 ping 断链**由后续增强改为本次实现**（连续 10 ping 无 pong 断链，§4.4 已细化）；②nodeID 热更保留，但代码查证确认 `ConnectionHandler.localMeshNodeID` 启动缓存无刷新机制（netstack setter 为死代码）、domainTrie 需清除旧条目——已列入问题3 修复范围。subnet 重启决策维持不变（转发平面 vs 身份缓存的本质区别）。
 - **2026-10-30（三次修订，最终决策）**：用户决策 nodeID 修改**也统一走重启生效**（"重启依赖看门狗"），与 subnet 完全对齐："保存配置 + restart_required + 运行态不变 + 看门狗自动拉起"。由此**问题4（数据竞争）与问题10（事件静默丢弃）随决策消解**——identityUpdate 运行态分支与 ChangeIdentity 事件路径均改为删除项，无并发写、无事件可丢。subnet 冲突自动重分配语义同步调整为"存库 + 自我退出（exit 0）+ 看门狗拉起"。设计文档 §3.3 与本文档决策表已按最终版修订。
 - **2026-10-30（四次修订）**：问题9 修复方案由"比较清单补 Servername"改为"**admin 保存代理配置即无条件重启该节点 P2P 连接，删除 proxyConfigChanged 逐字段比较**"（用户决策：低频操作无需精细比较，字段比较清单是维护陷阱）。
+- **2026-10-30（五次修订）**：路由环路深度讨论。结论：稳态环路在一致有向图+正代价下数学不存在（全双工独立测量合理，原代价单向化建议撤回）；瞬态环路依赖 TTL 兜底待验证。新增 4 项修复：①验证 IPIP/mesh 转发 TTL 递减 ②qualityLoop 每 10s 无条件投递 recomputeRoute（方案A，显式替代浮点副作用）③compareGossipNeighbors 忽略质量字段（gossip 只管拓扑）④IPIP 分支 Cacheable 改 false 与分支2一致（用户决策：两者都动态选下一跳，缓存语义应一致）。

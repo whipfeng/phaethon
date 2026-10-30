@@ -146,21 +146,23 @@ type GossipInfo struct {
 
 ### 3.3 NodeID vs Subnet 变更的处理
 
-**NodeID 变更**（支持热更新）：
-1. 用户修改 nodeID
-2. gossipWorker 处理 identityUpdate 事件
-3. 更新本地 m.nodeID
-4. **同步刷新身份烧入点**（2026-10-30 补充，v8 初版只做了第 3 步导致新域名不认领）：
-   - `p2p.SetMeshInfo(newNodeID, vip)`（identityUpdate 已调用 ✅）
-   - `ConnectionHandler.localMeshNodeID`——**需新增 setter**（当前在 main_engine.go:176 创建时缓存且无刷新机制）；netstack.go:528 的 `SetLocalMeshNodeID` 是死代码（字段零读取），真正干活的判断在 handler 缓存副本
-   - domainTrie 重建时**清除旧 nodeID 的静态条目**（"own suffixes → self"，mesh.go:1858），防止旧域名残留解析
-   - 运维注意：CN=旧 nodeID 的 mTLS 客户端证书失效（全局 `all` 证书不受影响）
-5. 立即广播 gossip（携带新 nodeID）
-6. 所有邻居收到 gossip，更新拓扑
-7. 15 秒后再次广播，确保传播
+**NodeID 与 Subnet 变更（2026-10-30 最终决策：统一重启生效）**：
 
-**Subnet 变更**（需要重启）：
-- **不支持热更新**，因为 Subnet 变化会影响大量 gVisor 内部地址：
+用户决策：nodeID 与 subnet 修改统一走"**保存配置 + 重启生效**"，重启依赖各环境进程级自动拉起（VM 内置 watchdog、QG OpenRC supervise-daemon、GG/MS9/MS10 watchdog 模式），无需人工介入，重启成本秒级。
+
+**为什么 nodeID 也不做热更新**（此前设计为热更新，2026-10-30 修订）：
+- nodeID 虽不像 subnet 那样烧入地址体系（VIP/GIP/SNAT/FakeIP 均为 subnet 派生），但也有身份烧入点：`ConnectionHandler.localMeshNodeID` 启动缓存（main_engine.go:176 创建后无刷新机制）、domainTrie "own suffixes → self" 静态条目（mesh.go:1858）、mTLS 客户端证书 CN 校验（CN=nodeID 的证书在改名后失效）
+- 热更需逐项刷新这些缓存，复杂且易漏——v8 初版实现就只更新了 p2p.SetMeshInfo 一处
+- 该操作低频，重启成本远低于热更的实现与维护成本
+- **收益**：消除了 identityUpdate 运行态分支引入的数据竞争（issues/p2p-v8-mesh-regression.md 问题4）和 ChangeIdentity 事件静默丢弃风险（问题10）
+
+**行为**：
+1. admin API 保存新 nodeID/subnet 到数据库
+2. 若值有变化，返回 `restart_required: true`，前端显示"已保存，需要重启生效"
+3. 运行态**保持不变**，继续用旧身份工作
+4. 进程重启（自动拉起）后加载新身份，邻居经 gossip 收敛（约 15 秒）
+
+**Subnet 变更的具体影响**（重启的根本原因）——Subnet 变化会影响大量 gVisor 内部地址：
   - NIC 1 上的 VIP 地址（subnet + 1）
   - NIC 1 上的 GIP 地址（subnet + 3）
   - iptables SNAT 规则中的 VIP
@@ -168,13 +170,23 @@ type GossipInfo struct {
   - FakeIP pool（从 subnet + 10 开始分配）
   - DNSHijacker 的 dnsAddr
 - 重建这些地址非常复杂，特别是 FakeIP pool 会影响已有的 DNS 映射
-- **建议**：Subnet 变更时，返回 `restart_required` 提示，需要重启生效
 
-> **实现红线（2026-10-30 修订）**：Subnet 变更**禁止热生效**。ffbf566 曾实现为直接热改 `m.subnet/m.vip` 并全网广播，但不重建本地 NIC 地址/SNAT/RouteSelector/FakeIP/DNSHijacker，导致对端按新 VIP 发包而本机不认领的流量黑洞（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题3）。正确行为：admin API 保存配置到数据库后返回 `restart_required: true`，前端显示"已保存，需要重启生效"，**运行态保持旧 subnet 不变**。subnet 冲突自动重分配（reselectSubnet）同理：只更新数据库并提示重启，不热改运行态。NodeID 变更维持热更新（不影响本地地址）。
+> **实现红线（2026-10-30 修订）**：nodeID/subnet 变更**禁止热生效**。ffbf566 曾实现为直接热改 `m.subnet/m.vip` 并全网广播，但不重建本地 NIC 地址/SNAT/RouteSelector/FakeIP/DNSHijacker，导致对端按新 VIP 发包而本机不认领的流量黑洞（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题3）。正确行为：admin API 保存配置到数据库后返回 `restart_required: true`，前端显示"已保存，需要重启生效"，**运行态保持旧身份不变**。
+
+**subnet 冲突自动重分配**（27d817f 的配套语义）：
+1. 检测到冲突 → 选取新 subnet 保存数据库
+2. 记录日志后**进程自我退出**（exit 0），由 watchdog/supervise-daemon 自动拉起
+3. 拉起后使用新 subnet，冲突解除
+- 目的：避免两个节点在无人干预的情况下长时间同时通告冲突 subnet
+
+**实现清理项**（随本决策）：
+- 删除 gossipWorker 的 identityUpdate 运行态分支（mesh.go 约 2237-2301）——无运行态身份变更后该分支是死代码兼竞争源
+- `UpdateIdentity`（mesh.go:757）本就已零调用，一并删除
+- `ChangeIdentity` 改为同步：存库 + 返回是否需要重启，不再投递 normalCh
+- `ConnectionHandler` 无需新增 nodeID setter（此前为热更准备）
 
 **保证**：
-- NodeID 变更：最终一致性，所有节点会收到最新的 nodeID
-- Subnet 变更：需要重启，重启后使用新 subnet
+- nodeID/subnet 变更：保存成功 + 重启提示，重启后全网经 gossip 收敛
 - 无需可靠传输，无需重传
 
 ---
@@ -528,6 +540,6 @@ v8 的核心思想是**简化协议，依赖最终一致性**：
   3. §3.3 增加"Subnet 变更禁止热生效"实现红线，恢复 `restart_required` 语义；subnet 冲突自动重分配只改库不热改
   4. §4.3 丢包率改为滑动窗口统计（最近 20 次）+ 发送失败不计入 + 超时清理记为丢包，替代原会话累计方案
   5. §4.4 故障检测（连续 10 ping 无 pong 断链）**由"后续增强"改为本次实现**，给出阈值、动作与 heartbeat 兜底关系
-  6. §3.3 NodeID 变更流程补充身份烧入点刷新清单（ConnectionHandler 需新增 setter、domainTrie 旧条目清除、mTLS 证书注意点）
+  6. §3.3 **NodeID 变更由热更新改为重启生效**（用户三次决策）：与 subnet 统一"保存配置 + restart_required + 看门狗自动拉起"；冲突自动重分配改为存库 + 自我退出；identityUpdate 运行态分支列为删除项；问题4（竞争）与问题10（事件丢弃）随此决策消解
 
 这样既简化了协议实现，又保证了功能的完整性。

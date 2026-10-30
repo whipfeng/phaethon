@@ -2269,6 +2269,11 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if s.OnIncrementalUpdate != nil {
+			if err := s.OnIncrementalUpdate(); err != nil {
+				util.LogModuleWarn("admin", "incremental update after proxy delete failed: %v", err)
+			}
+		}
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "proxy deleted: %s", name)
 		jsonResponse(w, map[string]string{"status": "deleted"})

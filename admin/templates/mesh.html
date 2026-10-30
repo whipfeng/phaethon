@@ -228,13 +228,19 @@
     }
 
     // Mesh Identity (Foundational Settings)
+    // Tracks the identity last loaded from the server; saveMeshIdentity uses it
+    // to detect node-id/subnet edits and gate them behind a restart confirm.
+    var currentMeshIdentity = { nodeID: '', subnet: '' };
+
     async function loadMeshIdentity() {
         try {
             const res = await fetch('./api/config/mesh');
             if (!res.ok) return;
             const mesh = await res.json();
-            document.getElementById('mesh-identity-nodeid').value = mesh['node-id'] || '';
-            document.getElementById('mesh-identity-subnet').value = mesh.subnet || '';
+            currentMeshIdentity.nodeID = mesh['node-id'] || '';
+            currentMeshIdentity.subnet = mesh.subnet || '';
+            document.getElementById('mesh-identity-nodeid').value = currentMeshIdentity.nodeID;
+            document.getElementById('mesh-identity-subnet').value = currentMeshIdentity.subnet;
         } catch (err) {
             console.error('Failed to load mesh identity:', err);
         }
@@ -264,6 +270,21 @@
                         return;
                     }
 
+                    // Identity edits (node-id / subnet) restart the node after save
+                    // (design §3.3). Confirm first; cancel aborts without saving.
+                    const identityChanged = nodeid !== currentMeshIdentity.nodeID || subnet !== currentMeshIdentity.subnet;
+                    if (identityChanged) {
+                        const confirmed = confirm(
+                            (typeof i18n !== 'undefined' ? i18n.t('mesh.identityRestartConfirm') : null) ||
+                            'Node ID / subnet change requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?'
+                        );
+                        if (!confirmed) {
+                            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.cancelled') : 'Cancelled, not saved';
+                            statusEl.style.color = 'var(--text-muted)';
+                            return;
+                        }
+                    }
+
                     statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
                     statusEl.style.color = 'var(--text-muted)';
 
@@ -281,17 +302,24 @@
                     
                     // Check if restart is required
                     if (data.restart_required) {
-                        statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartRequired') : 'Saved, restart required') + ': ' + data.restart_required;
+                        statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartScheduled') : 'Saved, node restarting to apply new identity') + ': ' + data.restart_required;
                         statusEl.style.color = 'var(--warning)';
+                        // The node exits ~2s after this response and the watchdog
+                        // restarts it; reload status a bit later to catch the new identity.
+                        setTimeout(() => {
+                            fetchMeshStatus();
+                            loadMeshIdentity();
+                            statusEl.textContent = '';
+                        }, 8000);
                     } else {
                         statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
                         statusEl.style.color = 'var(--success)';
+                        setTimeout(() => {
+                            fetchMeshStatus();
+                            loadMeshIdentity(); // Reload mesh identity to show updated node-id
+                            statusEl.textContent = '';
+                        }, 3000);
                     }
-                    setTimeout(() => {
-                        fetchMeshStatus();
-                        loadMeshIdentity(); // Reload mesh identity to show updated node-id
-                        statusEl.textContent = '';
-                    }, 3000);
                 } catch (err) {
                     const statusEl = document.getElementById('mesh-identity-status');
                     statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;

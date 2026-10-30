@@ -2199,6 +2199,19 @@ func wireAdminCallbacks(resources *activeResources) {
 		return nil
 	}
 	util.LogModuleInfo("main", "[MESH] OnMeshConfigUpdate callback registered")
+
+	// Identity-changing mesh config saves exit the process (exit 0) after a
+	// short delay so the response reaches the client; the watchdog or
+	// supervise-daemon restarts the node with the new identity (design §3.3).
+	adminSrv.RequestRestart = func(reason string) {
+		util.LogModuleWarn("main", "[ADMIN] scheduled restart: %s", reason)
+		go func() {
+			time.Sleep(2 * time.Second)
+			util.LogModuleWarn("main", "[ADMIN] exiting for restart (identity change)")
+			os.Exit(0)
+		}()
+	}
+
 	adminSrv.OnMappingUpdate = func(old, newMapping *config.Mapping) error {
 		// Mapping deleted
 		if newMapping == nil && old != nil {

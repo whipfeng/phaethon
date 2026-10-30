@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -495,7 +496,10 @@ func (m *MeshManager) checkSubnetConflict() bool {
 	return false
 }
 
-// reselectSubnet picks a new subnet that doesn't conflict.
+// reselectSubnet picks a new subnet that doesn't conflict, persists it to the
+// database, then exits the process (exit 0) so the watchdog/supervisor restarts
+// us with the new identity. Runtime state is never mutated — the new subnet
+// only takes effect after restart (design §3.3).
 func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 	// Mark our current subnet as used so we don't pick it again
 	usedSubnets[m.subnetStr] = true
@@ -506,36 +510,22 @@ func (m *MeshManager) reselectSubnet(usedSubnets map[string]bool) bool {
 		return false
 	}
 
-	_, newSubnet, err := net.ParseCIDR(newSubnetStr)
+	util.LogModuleInfo("mesh", "[MESH] subnet conflict: re-selected subnet to %s, exiting for restart (design §3.3)", newSubnetStr)
+
+	// Persist to database (source of truth); watchdog will restart with new identity
+	meshCfg, err := db.GetMeshConfig()
 	if err != nil {
-		util.LogModuleError("mesh", "[MESH] subnet conflict: invalid new subnet %s: %v", newSubnetStr, err)
+		util.LogModuleError("mesh", "[MESH] subnet conflict: failed to load mesh config for persist: %v", err)
+		return false
+	}
+	meshCfg.Subnet = newSubnetStr
+	if err := db.PutMeshConfig(meshCfg); err != nil {
+		util.LogModuleError("mesh", "[MESH] subnet conflict: failed to persist new subnet %s: %v", newSubnetStr, err)
 		return false
 	}
 
-	m.mu.Lock()
-	m.subnet = newSubnet
-	m.subnetStr = newSubnetStr
-	m.vip = DeriveVIPFromSubnet(newSubnet)
-	m.mu.Unlock()
-
-	util.LogModuleInfo("mesh", "[MESH] subnet conflict: re-selected subnet to %s (vip=%s)", newSubnetStr, m.vip)
-
-	// Update P2P layer with new VIP
-	if m.p2p != nil {
-		m.p2p.SetMeshInfo(m.nodeID, m.vip.String())
-	}
-
-	// Save state
-	if m.dataDir != "" {
-		state := &MeshState{
-			NodeID: m.nodeID,
-			Subnet: newSubnetStr,
-		}
-		if err := SaveState(m.dataDir, state); err != nil {
-			util.LogModuleError("mesh", "[MESH] failed to save state after subnet re-selection: %v", err)
-		}
-	}
-
+	util.LogModuleInfo("mesh", "[MESH] subnet conflict: new subnet %s persisted, exiting (exit 0) for watchdog restart", newSubnetStr)
+	os.Exit(0)
 	return true
 }
 
@@ -589,38 +579,18 @@ func (m *MeshManager) GetNetwork() *net.IPNet {
 	return m.network
 }
 
-// ChangeIdentity updates node-id and/or subnet at runtime via the event loop.
-// This ensures all updates go through the same code path as automatic conflict resolution.
-// Returns true if any identity field was changed.
+// ChangeIdentity reports whether the requested node-id/subnet differs from the
+// running identity. Identity changes never take effect at runtime — they are
+// persisted by the caller (database) and only apply after restart (design §3.3).
+// Returns true if a restart is required for the new identity to take effect.
 func (m *MeshManager) ChangeIdentity(newNodeID, newSubnet string) bool {
-	// Validate inputs
-	if newNodeID == "" && newSubnet == "" {
-		return false
-	}
-
-	nodeIDChanged := newNodeID != "" && newNodeID != m.nodeID
-	subnetChanged := newSubnet != "" && newSubnet != m.subnetStr
-
-	if !nodeIDChanged && !subnetChanged {
-		return false
-	}
-
-	// Send update event to the mesh event loop
-	// This ensures post-update logic (routes, hello, gossip) runs in the same context
-	// as automatic conflict resolution, avoiding code duplication and races.
-	select {
-	case m.normalCh <- meshEvent{
-		kind:       identityUpdate,
-		newNodeID:  newNodeID,
-		newSubnet:  newSubnet,
-	}:
-		util.LogModuleInfo("mesh", "[MESH] identity update event sent: nodeID=%s->%s subnet=%s->%s",
+	restartRequired := (newNodeID != "" && newNodeID != m.nodeID) ||
+		(newSubnet != "" && newSubnet != m.subnetStr)
+	if restartRequired {
+		util.LogModuleInfo("mesh", "[MESH] identity change requires restart: nodeID=%s->%s subnet=%s->%s",
 			m.nodeID, newNodeID, m.subnetStr, newSubnet)
-		return true
-	default:
-		util.LogModuleWarn("mesh", "[MESH] identity update event channel full, dropping update")
-		return false
 	}
+	return restartRequired
 }
 
 func (m *MeshManager) GetSubnetPrefixLen() int {
@@ -749,32 +719,6 @@ func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	case m.normalCh <- meshEvent{kind: configUpdate}:
 	default:
 		util.LogModuleWarn("mesh", "[MESH] normalCh full, dropping config update event")
-	}
-}
-
-// UpdateIdentity updates core identity fields (nodeID, subnet, etc.) without rebuilding.
-// This triggers route re-announcement to peers.
-func (m *MeshManager) UpdateIdentity(nodeID string, vip net.IP, subnet *net.IPNet, subnetStr string, network *net.IPNet, subnetPrefixLen int) {
-	m.mu.Lock()
-	oldNodeID := m.nodeID
-	oldSubnetStr := m.subnetStr
-	
-	m.nodeID = nodeID
-	m.vip = vip
-	m.subnet = subnet
-	m.subnetStr = subnetStr
-	m.network = network
-	m.subnetPrefixLen = subnetPrefixLen
-	m.mu.Unlock()
-	
-	if oldNodeID != nodeID || oldSubnetStr != subnetStr {
-		util.LogModuleInfo("mesh", "[MESH] identity updated: nodeID %s->%s, subnet %s->%s", oldNodeID, nodeID, oldSubnetStr, subnetStr)
-	}
-	
-	select {
-	case m.normalCh <- meshEvent{kind: configUpdate}:
-	default:
-		util.LogModuleWarn("mesh", "[MESH] normalCh full, dropping identity update event")
 	}
 }
 
@@ -2191,18 +2135,10 @@ func (m *MeshManager) criticalWorker() {
 					m.recomputeRoutes()
 					db.BumpRuntimeVersion("mesh")
 				}
-				// Check for subnet conflicts and re-select if needed
-				if m.checkSubnetConflict() {
-					m.recomputeRoutes()
-					if m.p2p != nil {
-						m.p2p.BroadcastGossipToAll()
-					}
-					// Trigger gossip broadcast (non-critical)
-					select {
-					case m.normalCh <- meshEvent{kind: gossipBroadcast}:
-					default:
-					}
-				}
+				// Subnet conflict: reselectSubnet persists the new subnet and exits
+				// the process (exit 0) — the watchdog restarts us with the new identity.
+				// If allocation/persist fails it returns false and we keep the old subnet.
+				m.checkSubnetConflict()
 				
 			case recomputeRoute:
 				m.recomputeRoutes()
@@ -2234,71 +2170,6 @@ func (m *MeshManager) gossipWorker() {
 				m.mu.RLock()
 				util.LogModuleInfo("mesh", "[MESH] config updated: domainSuffixes=%v advertise=%v", m.domainSuffixes, m.advertise)
 				m.mu.RUnlock()
-			case identityUpdate:
-				// Handle node-id and/or subnet updates (from admin API)
-				// This runs in the same event loop as automatic conflict resolution,
-				// ensuring consistent post-update logic and avoiding races.
-				nodeIDChanged := ev.newNodeID != "" && ev.newNodeID != m.nodeID
-				subnetChanged := ev.newSubnet != "" && ev.newSubnet != m.subnetStr
-				
-				if nodeIDChanged {
-					oldNodeID := m.nodeID
-					m.nodeID = ev.newNodeID
-					util.LogModuleInfo("mesh", "[MESH] node-id updated: %s -> %s", oldNodeID, ev.newNodeID)
-					
-					// Update P2P layer
-					if m.p2p != nil {
-						m.p2p.SetMeshInfo(ev.newNodeID, m.vip.String())
-					}
-					
-					// Save to database
-					if m.dataDir != "" {
-						state := &MeshState{NodeID: ev.newNodeID, Subnet: m.subnetStr}
-						if err := SaveState(m.dataDir, state); err != nil {
-							util.LogModuleError("mesh", "[MESH] failed to save node-id: %v", err)
-						}
-					}
-				}
-				
-				if subnetChanged {
-					_, newSubnet, err := net.ParseCIDR(ev.newSubnet)
-					if err != nil {
-						util.LogModuleError("mesh", "[MESH] invalid subnet %s: %v", ev.newSubnet, err)
-						break
-					}
-					
-					oldSubnet := m.subnetStr
-					m.mu.Lock()
-					m.subnet = newSubnet
-					m.subnetStr = ev.newSubnet
-					m.vip = DeriveVIPFromSubnet(newSubnet)
-					m.mu.Unlock()
-					
-					util.LogModuleInfo("mesh", "[MESH] subnet updated: %s -> %s (vip=%s)", oldSubnet, ev.newSubnet, m.vip)
-					
-					// Update P2P layer
-					if m.p2p != nil {
-						m.p2p.SetMeshInfo(m.nodeID, m.vip.String())
-					}
-					
-					// Save to database
-					if m.dataDir != "" {
-						state := &MeshState{NodeID: m.nodeID, Subnet: ev.newSubnet}
-						if err := SaveState(m.dataDir, state); err != nil {
-							util.LogModuleError("mesh", "[MESH] failed to save subnet: %v", err)
-						}
-					}
-				}
-				
-				// Post-update logic (same as automatic conflict resolution)
-				if nodeIDChanged || subnetChanged {
-					m.recomputeRoutes()
-					if m.p2p != nil {
-						m.p2p.BroadcastGossipToAll()
-					}
-					m.broadcastGossip()
-					db.BumpRuntimeVersion("mesh")
-				}
 			}
 		}
 	}
@@ -2337,16 +2208,13 @@ const (
 	// Normal events (normalCh) - non-blocking, can be dropped
 	gossipBroadcast
 	configUpdate
-	identityUpdate // node-id and/or subnet change
 )
 
 type meshEvent struct {
-	kind      meshEventKind
-	sender    PeerSender
-	data      []byte
-	nodeID    string // for peerUnregisterByNodeID
-	newNodeID string // for identityUpdate
-	newSubnet string // for identityUpdate
+	kind   meshEventKind
+	sender PeerSender
+	data   []byte
+	nodeID string // for peerUnregisterByNodeID
 }
 
 func (m *MeshManager) broadcastGossip() {
@@ -2596,10 +2464,12 @@ func (m *MeshManager) broadcastGossip() {
 		}
 
 		info := GossipInfo{
-			Cmd:            "gossip",
-			DomainSuffixes: ds,
-			Routes:         routes,
-			ClaimedSubnets: claims,
+			Cmd:             "gossip",
+			ProtocolVersion: P2PProtocolVersion,
+			Seq:             peer.Sender.GetLocalSeq(), // 对端用它设置 RemoteSeq 并计算 LinkID（§5.3）
+			DomainSuffixes:  ds,
+			Routes:          routes,
+			ClaimedSubnets:  claims,
 		}
 		data, err := json.Marshal(info)
 		if err != nil {
@@ -2624,6 +2494,13 @@ func (m *MeshManager) qualityLoop() {
 		case <-ticker.C:
 			m.updateACKStats()
 			m.checkPeerConnectivity()
+			// Local link quality changes don't alter the gossip payload, so
+			// UpdateGossip's change detection never fires for them; recompute
+			// routes on a fixed cadence instead (环路-2, unconditional like §4.3).
+			select {
+			case m.criticalCh <- meshEvent{kind: recomputeRoute}:
+			default:
+			}
 		}
 	}
 }

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -85,8 +84,8 @@ func (h *meshTestHandler) BuildGossipInfo() *mesh.GossipInfo {
 }
 
 // TestHTunnelMeshChannel_E2E runs a full loopback: client direct transport →
-// server mesh channel → real P2P session → stub mesh handler, verifying hello
-// exchange, mesh packet echo and channel teardown.
+// server mesh channel → real P2P session → stub mesh handler, verifying v8
+// gossip-based registration, mesh packet echo and channel teardown.
 func TestHTunnelMeshChannel_E2E(t *testing.T) {
 	handler := &meshTestHandler{
 		regCh:   make(chan string, 4),
@@ -127,53 +126,44 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 	}
 	defer tr.Close()
 
-	// Client hello (real P2P sessions send this immediately).
+	// Client initial gossip (v8: first gossip frame = connection establishment).
 	hello := mesh.GossipInfo{
-		Cmd:             "hello",
+		Cmd:             "gossip",
 		ProtocolVersion: p2p.P2PProtocolVersion,
+		Seq:             1,
 		ClaimedSubnets: []mesh.GossipClaimedSubnet{
 			{Subnet: "100.201.0.0/16", NodeID: "cli-node", Hop: 0},
 		},
 	}
 	helloData, _ := json.Marshal(hello)
-	// Encode seq/ack into control frame payload (8 bytes: seq(4) + ack(4))
-	encodedHello := make([]byte, 8+len(helloData))
-	binary.BigEndian.PutUint32(encodedHello[0:4], 1) // seq=1
-	binary.BigEndian.PutUint32(encodedHello[4:8], 0) // ack=0
-	copy(encodedHello[8:], helloData)
-	if err := tr.Send(frame.FrameHello, encodedHello, true); err != nil {
-		t.Fatalf("send hello: %v", err)
+	if err := tr.Send(frame.FrameGossip, helloData, true); err != nil {
+		t.Fatalf("send gossip: %v", err)
 	}
 
-	// Server session must register the client node.
+	// Server session must register the client node (registration moved into first gossip, §5.3).
 	select {
 	case nodeID := <-handler.regCh:
 		if nodeID != "cli-node" {
 			t.Fatalf("registered nodeID = %q, want cli-node", nodeID)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("server did not register client hello")
+		t.Fatal("server did not register client gossip")
 	}
 
-	// Server hello must arrive at the client.
+	// Server's periodic gossip must arrive at the client.
 	ft, payload, err := tr.Recv()
 	if err != nil {
-		t.Fatalf("recv server hello: %v", err)
+		t.Fatalf("recv server gossip: %v", err)
 	}
-	if ft != frame.FrameHello {
-		t.Fatalf("expected FrameHello, got 0x%02x", ft)
+	if ft != frame.FrameGossip {
+		t.Fatalf("expected FrameGossip, got 0x%02x", ft)
 	}
-	// Decode seq/ack from control frame payload (8 bytes: seq(4) + ack(4))
-	if len(payload) < 8 {
-		t.Fatalf("server hello too short: %d bytes", len(payload))
-	}
-	payload = payload[8:] // strip seq/ack header
 	var srvHello mesh.GossipInfo
 	if err := json.Unmarshal(payload, &srvHello); err != nil {
-		t.Fatalf("parse server hello: %v", err)
+		t.Fatalf("parse server gossip: %v", err)
 	}
-	if srvHello.Cmd != "hello" || srvHello.ProtocolVersion != p2p.P2PProtocolVersion {
-		t.Fatalf("bad server hello: %+v", srvHello)
+	if srvHello.Cmd != "gossip" || srvHello.ProtocolVersion != p2p.P2PProtocolVersion {
+		t.Fatalf("bad server gossip: %+v", srvHello)
 	}
 	hop0 := false
 	for _, cs := range srvHello.ClaimedSubnets {
@@ -182,7 +172,7 @@ func TestHTunnelMeshChannel_E2E(t *testing.T) {
 		}
 	}
 	if !hop0 {
-		t.Fatalf("server hello missing hop=0 nodeID srv-node: %+v", srvHello)
+		t.Fatalf("server gossip missing hop=0 nodeID srv-node: %+v", srvHello)
 	}
 
 	// Mesh packet round trip: client → server handler → echo → client.

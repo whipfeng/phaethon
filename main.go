@@ -1935,30 +1935,6 @@ func buildProxyConfigJSON(host string, port int, proto, user, password, sni stri
 	return string(data), nil
 }
 
-// proxyConfigChanged reports whether connection-relevant fields differ between
-// old and new proxy configs. Only fields that affect the P2P dial are compared;
-// display-only or metadata fields (name, health-check-url, etc.) are ignored.
-func proxyConfigChanged(old, new *config.Proxy) bool {
-	if old.Type != new.Type || old.Server != new.Server || old.Port != new.Port {
-		return true
-	}
-	if old.Password != new.Password || old.Sni != new.Sni || old.URL != new.URL {
-		return true
-	}
-	if old.ViaProxy != new.ViaProxy || old.SkipCertVerify != new.SkipCertVerify {
-		return true
-	}
-	if old.Username != new.Username || old.Flow != new.Flow {
-		return true
-	}
-	oldP2P, newP2P := old.IsP2P(), new.IsP2P()
-	if oldP2P != newP2P {
-		return true
-	}
-	oldV2, newV2 := old.IsV2(), new.IsV2()
-	return oldV2 != newV2
-}
-
 // wireAdminCallbacks connects admin-server actions to the current runtime config.
 func wireAdminCallbacks(resources *activeResources) {
 	util.LogModuleInfo("main", "[ADMIN] wireAdminCallbacks called, resources=%v, adminServer=%v", resources != nil, resources != nil && resources.adminServer != nil)
@@ -2175,12 +2151,12 @@ func wireAdminCallbacks(resources *activeResources) {
 				util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s", proxy.Name)
 				p2p.GlobalP2PManager.StopPeerByProxyName(proxy.Name)
 			} else if shouldRun && exists {
-				// P2P is running - check if connection-relevant config changed
-				oldProxy := p2p.GlobalP2PManager.GetPeerProxy(proxy.Name)
-				if oldProxy != nil && proxyConfigChanged(oldProxy, proxy) {
-					util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config update", proxy.Name)
-					p2p.GlobalP2PManager.RestartPeer(proxy)
-				}
+				// P2P is running - restart unconditionally on any proxy config save.
+				// Field-level comparison is a maintenance trap (every new dial-relevant
+				// field must be added to the compare list or it silently never applies);
+				// config saves are low-frequency so a restart is cheap (user decision, issue 问题9).
+				util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config save", proxy.Name)
+				p2p.GlobalP2PManager.RestartPeer(proxy)
 			}
 		}
 
@@ -2197,39 +2173,21 @@ func wireAdminCallbacks(resources *activeResources) {
 			return fmt.Errorf("load mesh config: %w", err)
 		}
 		
-		// Check if identity fields changed (node-id, subnet)
+		// Check if identity fields changed (node-id, subnet).
+		// Identity never hot-applies: it is persisted by admin and only takes
+		// effect after restart (design §3.3). Non-identity fields still hot-reload.
 		var currentNodeID, currentSubnet string
 		if mesh.GlobalMeshManager != nil {
 			currentNodeID = mesh.GlobalMeshManager.GetNodeID()
 			currentSubnet = mesh.GlobalMeshManager.GetSubnet()
 		}
-		nodeIDChanged := meshConfig.NodeID != currentNodeID
-		subnetChanged := meshConfig.GetSubnet() != currentSubnet
-		
-		// Identity changes are handled via the mesh event loop (UpdateIdentity)
-		// This ensures all updates go through the same code path as automatic conflict resolution
-		if (nodeIDChanged || subnetChanged) && mesh.GlobalMeshManager != nil {
-			newNodeID := meshConfig.NodeID
-			if !nodeIDChanged {
-				newNodeID = "" // empty means no change
-			}
-			newSubnet := meshConfig.GetSubnet()
-			if !subnetChanged {
-				newSubnet = "" // empty means no change
-			}
-			
-			util.LogModuleInfo("main", "[MESH] identity changed, sending update event: nodeID=%s->%s subnet=%s->%s",
+		if mesh.GlobalMeshManager != nil &&
+			mesh.GlobalMeshManager.ChangeIdentity(meshConfig.NodeID, meshConfig.GetSubnet()) {
+			util.LogModuleInfo("main", "[MESH] identity changed, takes effect after restart: nodeID=%s->%s subnet=%s->%s",
 				currentNodeID, meshConfig.NodeID, currentSubnet, meshConfig.GetSubnet())
-			
-			// Send update to mesh event loop (non-blocking)
-			mesh.GlobalMeshManager.ChangeIdentity(newNodeID, newSubnet)
-			
-			// Also update config (domainSuffixes, advertise)
-			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
-			return nil
 		}
-		
-		// No identity changes, only update config (domainSuffixes, advertise)
+
+		// Hot-reload non-identity config (domainSuffixes, advertise)
 		if mesh.GlobalMeshManager != nil {
 			util.LogModuleInfo("main", "[MESH] updating mesh manager config (domainSuffixes, advertise)")
 			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())

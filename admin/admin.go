@@ -1805,21 +1805,25 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "mesh config updated but OnMeshConfigUpdate callback is nil")
 		}
 
-		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, subnet=%s, persisted to database)", 
+		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, subnet=%s, persisted to database)",
 			meshCfg.NodeID, meshCfg.GetSubnet())
-		
+
 		// Log what changed
-		if meshCfg.NodeID != oldNodeID {
-			util.LogModuleInfo("admin", "node-id changed (%s->%s), updated at runtime", 
-				oldNodeID, meshCfg.NodeID)
+		identityChanged := meshCfg.NodeID != oldNodeID || meshCfg.Subnet != oldSubnet
+		if identityChanged {
+			util.LogModuleInfo("admin", "identity changed (node-id %s->%s, subnet %s->%s), effective after restart",
+				oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet)
 		}
-		if meshCfg.Subnet != oldSubnet {
-			util.LogModuleInfo("admin", "subnet changed (%s->%s), updated at runtime", 
-				oldSubnet, meshCfg.Subnet)
+
+		if identityChanged {
+			// Identity changes require restart; mesh.html surfaces this hint (design §3.3)
+			jsonResponse(w, map[string]string{
+				"status":           "ok",
+				"restart_required": "node-id/subnet change takes effect after restart",
+			})
+		} else {
+			jsonResponse(w, map[string]string{"status": "ok"})
 		}
-		
-		// Return success response (no restart required)
-		jsonResponse(w, map[string]string{"status": "ok"})
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)

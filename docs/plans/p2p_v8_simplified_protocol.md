@@ -150,9 +150,14 @@ type GossipInfo struct {
 1. 用户修改 nodeID
 2. gossipWorker 处理 identityUpdate 事件
 3. 更新本地 m.nodeID
-4. 立即广播 gossip（携带新 nodeID）
-5. 所有邻居收到 gossip，更新拓扑
-6. 15 秒后再次广播，确保传播
+4. **同步刷新身份烧入点**（2026-10-30 补充，v8 初版只做了第 3 步导致新域名不认领）：
+   - `p2p.SetMeshInfo(newNodeID, vip)`（identityUpdate 已调用 ✅）
+   - `ConnectionHandler.localMeshNodeID`——**需新增 setter**（当前在 main_engine.go:176 创建时缓存且无刷新机制）；netstack.go:528 的 `SetLocalMeshNodeID` 是死代码（字段零读取），真正干活的判断在 handler 缓存副本
+   - domainTrie 重建时**清除旧 nodeID 的静态条目**（"own suffixes → self"，mesh.go:1858），防止旧域名残留解析
+   - 运维注意：CN=旧 nodeID 的 mTLS 客户端证书失效（全局 `all` 证书不受影响）
+5. 立即广播 gossip（携带新 nodeID）
+6. 所有邻居收到 gossip，更新拓扑
+7. 15 秒后再次广播，确保传播
 
 **Subnet 变更**（需要重启）：
 - **不支持热更新**，因为 Subnet 变化会影响大量 gVisor 内部地址：
@@ -294,7 +299,12 @@ type LinkQuality struct {
 
 **用途**：
 - 路由选择：优先选择 RTT 低、丢包率低的链路
-- 故障检测：连续多次 ping 无响应，判定链路断开（**后续增强，v10 不实现**——当前断链判定仍依赖 30 秒全静默 heartbeat；半死链路最长黑洞 30s+。见 `docs/issues/p2p-v8-mesh-regression.md` 补充项）
+- 故障检测：**连续 10 个 ping 未收到 pong（约 10 秒）判定链路死**（2026-10-30 决策，由"后续增强"改为本次实现）：
+  1. pingTracker 记录连续未应答计数；ping 发送失败（enqueueWrite 报错，队列塞死本身即濒死症状）计入未应答
+  2. 达到阈值：记 Warn 日志（含 peer 标识、连续丢失数、当前 lossRate）并关闭 transport
+  3. 走现有断开路径：UnregisterPeer → 路由重算 → 拨号器重连
+  4. 30 秒全静默 heartbeat 保留作为兜底（覆盖对端彻底失联、gossip 也停的场景）
+  5. 断链判定后可考虑清零 pingTracker 窗口，避免旧统计影响重连后的质量评估
 
 ---
 
@@ -517,6 +527,7 @@ v8 的核心思想是**简化协议，依赖最终一致性**：
   2. `GossipInfo` 补充 `Seq` 字段，明确链路标识协商流程（§3.2、§5.3）——gossip 帧携带本端 Seq，对端首个 gossip 推导 RemoteSeq/LinkID
   3. §3.3 增加"Subnet 变更禁止热生效"实现红线，恢复 `restart_required` 语义；subnet 冲突自动重分配只改库不热改
   4. §4.3 丢包率改为滑动窗口统计（最近 20 次）+ 发送失败不计入 + 超时清理记为丢包，替代原会话累计方案
-  5. §4.4 故障检测（多 ping 无响应断链）标注为**后续增强**，v10 不实现
+  5. §4.4 故障检测（连续 10 ping 无 pong 断链）**由"后续增强"改为本次实现**，给出阈值、动作与 heartbeat 兜底关系
+  6. §3.3 NodeID 变更流程补充身份烧入点刷新清单（ConnectionHandler 需新增 setter、domainTrie 旧条目清除、mTLS 证书注意点）
 
 这样既简化了协议实现，又保证了功能的完整性。

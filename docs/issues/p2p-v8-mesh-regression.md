@@ -204,11 +204,12 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 | 问题8 版本号 | **定为 10**（避让线上 v9），恢复版本不匹配断开+Warn 日志 | 设计文档 §2.3/§8.1 已修订 |
 | 问题9 proxyConfigChanged | 比较清单补 trojan Servername | 一行改动 |
 | 问题10 ChangeIdentity | 事件丢弃时 admin API 返回 503，不假成功 | — |
-| 补充项 ping 断链 | **后续增强**，本次不实现（v10 不承诺） | 设计文档 §4.4 已标注 |
+| 补充项 ping 断链 | **本次实现**（2026-10-30 用户修订，原决策"后续增强"）：连续 10 ping 无 pong → Warn + 关连接走现有断开路径；30s 心跳保留兜底 | 设计文档 §4.4 已修订 |
+| 问题3 附带 | nodeID 热更需补齐身份烧入点刷新：`ConnectionHandler.localMeshNodeID` 需新增 setter（当前启动缓存无刷新机制，netstack.go:528 setter 为死代码）；domainTrie 重建需清除旧 nodeID 静态条目；mTLS CN=旧 nodeID 证书失效（all 证书不受影响） | 2026-10-30 代码查证 |
 
 ### 修复执行顺序（待用户最终确认设计文档后开工）
 
-1. 问题1（阻断）→ 2. 问题2 → 3. 问题3B → 4. 问题4 → 5. 问题5 → 6. 问题6 → 7. 问题7 → 8. 问题8 → 9. 问题9+10
+1. 问题1（阻断：gossip 注册重建）→ 2. 问题2（测试编译）→ 3. 问题3B（subnet 恢复重启语义 + restart_required；nodeID 补 handler/domainTrie 刷新）→ 4. 问题4（锁）→ 5. 问题5（Seq 协商）→ 6. 问题6（LastError）→ 7. 问题7（滑动窗口 loss）→ 8. 问题8（版本10+校验）→ 9. 问题9+10 → 10. 补充项（多 ping 断链）
 
 修复完成后统一编译 + VM 部署验证（用户决策 10：修完再验），验证项：mesh 端到端拓扑建立、race 构建下 admin 改 node-id、LastError 恢复清除、高 RTT 场景 loss 回落。
 
@@ -218,3 +219,4 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 
 - **2026-10-30**：文档创建。Phase 0 完成：3 角度并行审查（逐行扫描/被删行为审计/跨文件追踪）+ 6 验证 agent 复核 + 本地实证，确认 10 项发现（9 项静态已验证，1 项 PLAUSIBLE，1 项补充未验证）。其中问题1/2 有本地实证（grep / go vet）。
 - **2026-10-30（同日）**：用户完成全部方案决策（见"方案决策"表）。设计文档 `docs/plans/p2p_v8_simplified_protocol.md` 已按决策修订：版本 8→10、GossipInfo 补 Seq、§3.3 subnet 禁止热生效红线、§4.3 滑动窗口、§4.4 故障检测标注后续增强。待用户确认设计文档后进入代码修复阶段（修完统一 VM 验证）。
+- **2026-10-30（二次修订）**：用户质疑两点，查证后修订决策：①多 ping 断链**由后续增强改为本次实现**（连续 10 ping 无 pong 断链，§4.4 已细化）；②nodeID 热更保留，但代码查证确认 `ConnectionHandler.localMeshNodeID` 启动缓存无刷新机制（netstack setter 为死代码）、domainTrie 需清除旧条目——已列入问题3 修复范围。subnet 重启决策维持不变（转发平面 vs 身份缓存的本质区别）。

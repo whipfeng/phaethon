@@ -270,55 +270,60 @@
                         return;
                     }
 
+                    const doSave = async () => {
+                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+                        statusEl.style.color = 'var(--text-muted)';
+
+                        const res = await fetch('./api/config/mesh', {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({'node-id': nodeid, subnet: subnet})
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            throw new Error(data.error || 'Save failed');
+                        }
+
+                        // Check if restart is required
+                        if (data.restart_required) {
+                            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartScheduled') : 'Saved, node restarting to apply new identity') + ': ' + data.restart_required;
+                            statusEl.style.color = 'var(--warning)';
+                            // The node exits ~2s after this response and the watchdog
+                            // restarts it; reload status a bit later to catch the new identity.
+                            setTimeout(() => {
+                                fetchMeshStatus();
+                                loadMeshIdentity();
+                                statusEl.textContent = '';
+                            }, 8000);
+                        } else {
+                            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                            statusEl.style.color = 'var(--success)';
+                            setTimeout(() => {
+                                fetchMeshStatus();
+                                loadMeshIdentity(); // Reload mesh identity to show updated node-id
+                                statusEl.textContent = '';
+                            }, 3000);
+                        }
+                    };
+
                     // Identity edits (node-id / subnet) restart the node after save
-                    // (design §3.3). Confirm first; cancel aborts without saving.
+                    // (design §3.3). Confirm via the styled modal; cancel aborts
+                    // without saving.
                     const identityChanged = nodeid !== currentMeshIdentity.nodeID || subnet !== currentMeshIdentity.subnet;
                     if (identityChanged) {
-                        const confirmed = confirm(
+                        showConfirm(
                             (typeof i18n !== 'undefined' ? i18n.t('mesh.identityRestartConfirm') : null) ||
-                            'Node ID / subnet change requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?'
+                            'Node ID / subnet change requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?',
+                            doSave,
+                            () => {
+                                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.cancelled') : 'Cancelled, not saved';
+                                statusEl.style.color = 'var(--text-muted)';
+                            }
                         );
-                        if (!confirmed) {
-                            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.cancelled') : 'Cancelled, not saved';
-                            statusEl.style.color = 'var(--text-muted)';
-                            return;
-                        }
-                    }
-
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-                    statusEl.style.color = 'var(--text-muted)';
-
-                    const res = await fetch('./api/config/mesh', {
-                        method: 'PUT',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({'node-id': nodeid, subnet: subnet})
-                    });
-                    const data = await res.json();
-                    if (!res.ok) {
-                        throw new Error(data.error || 'Save failed');
-                    }
-                    
-                    // Check if restart is required
-                    if (data.restart_required) {
-                        statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartScheduled') : 'Saved, node restarting to apply new identity') + ': ' + data.restart_required;
-                        statusEl.style.color = 'var(--warning)';
-                        // The node exits ~2s after this response and the watchdog
-                        // restarts it; reload status a bit later to catch the new identity.
-                        setTimeout(() => {
-                            fetchMeshStatus();
-                            loadMeshIdentity();
-                            statusEl.textContent = '';
-                        }, 8000);
                     } else {
-                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-                        statusEl.style.color = 'var(--success)';
-                        setTimeout(() => {
-                            fetchMeshStatus();
-                            loadMeshIdentity(); // Reload mesh identity to show updated node-id
-                            statusEl.textContent = '';
-                        }, 3000);
+                        await doSave();
                     }
                 } catch (err) {
                     const statusEl = document.getElementById('mesh-identity-status');

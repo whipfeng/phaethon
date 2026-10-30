@@ -644,6 +644,9 @@ body {
     overflow: auto;
     min-height: 0;
 }
+#confirm-modal-message {
+    white-space: pre-wrap;
+}
 .modal-lg .modal-content,
 .modal-content.modal-lg { max-width: 960px; }
 .modal-xl .modal-content,

@@ -83,6 +83,12 @@
 | [p2p_mesh_data_frame_loss_tasks.md](tasks/p2p_mesh_data_frame_loss_tasks.md) | P2P 会话写入与生命周期修复任务 | master |
 | [mesh-forwarding-trace-tasks.md](tasks/mesh-forwarding-trace-tasks.md) | Mesh 跨层转发关联诊断任务 | master |
 
+### issues/ (问题跟踪)
+
+| 文档 | 描述 | 状态 |
+|------|------|------|
+| [p2p-v8-mesh-regression.md](issues/p2p-v8-mesh-regression.md) | P2P v8 重写与 mesh 热重载审查发现（10 项，含阻断级 mesh 注册丢失） | 诊断中 |
+
 ### inputs/ (原始需求与历史分析)
 
 | 文档 | 描述 |

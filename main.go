@@ -44,9 +44,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
-//go:embed conf/default.yaml
-var defaultConfig []byte
-
 // Build info set via -ldflags at build time.
 var (
 	Version  = "dev"
@@ -290,43 +287,9 @@ func run(prev *activeResources) (*activeResources, error) {
 			}
 		}
 
-		// Load mesh state: database is the source of truth, with migration from mesh-state.json
-		// NodeID priority: database → mesh-state.json (migrate) → generate
-		// Subnet priority: database → mesh-state.json (migrate) → auto-allocate
-
-		// Try to migrate from mesh-state.json if config doesn't have values
-		if meshConfig.NodeID == "" || meshConfig.GetSubnet() == "" {
-			state, err := mesh.LoadState(dataDir)
-			if err != nil {
-				util.LogModuleWarn("system", " load mesh-state.json fail: %v", err)
-			}
-			if state != nil {
-				migrated := false
-				if meshConfig.NodeID == "" && state.NodeID != "" {
-					meshConfig.NodeID = state.NodeID
-					util.LogModuleInfo("system", "Mesh: migrated node-id from mesh-state.json to database: %s", state.NodeID)
-					migrated = true
-				}
-				if meshConfig.GetSubnet() == "" && state.Subnet != "" {
-					meshConfig.Subnet = state.Subnet
-					util.LogModuleInfo("system", "Mesh: migrated subnet from mesh-state.json to database: %s", state.Subnet)
-					migrated = true
-				}
-				if migrated {
-					// Persist updated mesh config to the database
-					if err := db.PutMeshConfig(meshConfig); err != nil {
-						util.LogModuleWarn("system", " persist mesh config after migration fail: %v", err)
-					}
-					// Remove old mesh-state.json
-					stateFile := filepath.Join(dataDir, "state", "mesh-state.json")
-					if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
-						util.LogModuleWarn("system", " remove old mesh-state.json fail: %v", err)
-					} else {
-						util.LogModuleInfo("system", "Mesh: removed old mesh-state.json (migrated to database)")
-					}
-				}
-			}
-		}
+		// Load mesh state: database is the source of truth.
+		// (mesh-state.json was migrated to the database long ago; the one-time
+		// migration block was removed — do any remaining cleanup manually.)
 
 		// Generate nodeID if still empty
 		if meshConfig.NodeID == "" {
@@ -566,7 +529,7 @@ func run(prev *activeResources) (*activeResources, error) {
 			res.adminServer = prevAdmin
 		} else {
 			util.LogModuleInfo("system", "Creating new admin server")
-			res.adminServer = admin.NewAdminServer(adminConfig, defaultConfig)
+			res.adminServer = admin.NewAdminServer(adminConfig)
 			util.LogModuleInfo("system", "Calling admin server Start()")
 			if err := res.adminServer.Start(); err != nil {
 				return nil, fmt.Errorf("admin server start fail: %w", err)
@@ -603,10 +566,6 @@ func run(prev *activeResources) (*activeResources, error) {
 // It delegates to server.StartReverseMapping which handles all protocol types.
 func startReverseBinding(m *config.Mapping) (*server.ReverseServer, error) {
 	return server.StartReverseMapping(m)
-}
-
-func writeDefaultConfig(path string) error {
-	return os.WriteFile(path, defaultConfig, 0644)
 }
 
 // loadSubscriptionCaches loads subscription node pools from database
@@ -1997,7 +1956,7 @@ func wireAdminCallbacks(resources *activeResources) {
 				g.SetHealthImmediate(key, selected != nil, 0)
 				// Save health state
 				snap := g.HealthSnapshot()
-				_ = db.SaveGroupHealthState(g.Name, snap)
+				db.NotifyGroupHealth(g.Name, snap)
 				_ = db.PutProxyGroup(g)
 				return g.GetHealthInfo(key), nil
 			}
@@ -2006,14 +1965,14 @@ func wireAdminCallbacks(resources *activeResources) {
 		if p == nil {
 			g.SetHealthImmediate(key, false, 0)
 			snap := g.HealthSnapshot()
-			_ = db.SaveGroupHealthState(g.Name, snap)
+			db.NotifyGroupHealth(g.Name, snap)
 			_ = db.PutProxyGroup(g)
 			return g.GetHealthInfo(key), nil
 		}
 		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
 			g.SetHealthImmediate(key, true, 0)
 			snap := g.HealthSnapshot()
-			_ = db.SaveGroupHealthState(g.Name, snap)
+			db.NotifyGroupHealth(g.Name, snap)
 			_ = db.PutProxyGroup(g)
 			return g.GetHealthInfo(key), nil
 		}
@@ -2029,7 +1988,7 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		g.SetHealthImmediate(key, alive, latency)
 		snap := g.HealthSnapshot()
-		_ = db.SaveGroupHealthState(g.Name, snap)
+		db.NotifyGroupHealth(g.Name, snap)
 		_ = db.PutProxyGroup(g)
 		return g.GetHealthInfo(key), nil
 	}
@@ -2062,7 +2021,7 @@ func wireAdminCallbacks(resources *activeResources) {
 				g.SetHealthImmediate(key, alive, latency)
 				// Save health state for this group
 				snap := g.HealthSnapshot()
-				_ = db.SaveGroupHealthState(g.Name, snap)
+				db.NotifyGroupHealth(g.Name, snap)
 				_ = db.PutProxyGroup(g)
 			}
 		}
@@ -2117,9 +2076,11 @@ func wireAdminCallbacks(resources *activeResources) {
 		}
 		return server.GlobalControlManager.ForceRemoveBinding(reverseID, seq)
 	}
+	// Push group health snapshots to the admin dashboard event-driven, so the
+	// stats collector no longer needs periodic full-bucket scans of proxy-health.
+	db.OnGroupHealthSaved = adminSrv.NotifyGroupHealth
 	adminSrv.OnIncrementalUpdate = func() error {
 		util.LogModuleInfo("main", "[P2P] OnIncrementalUpdate called, syncing P2P peers...")
-
 		// Load proxies from database
 		proxies, err := db.ListProxies()
 		if err != nil {
@@ -2527,11 +2488,9 @@ func checkGroupHealth(g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	// Save only this group's health state to database
+	// Broadcast this group's health snapshot to in-memory consumers (no DB)
 	snap := g.HealthSnapshot()
-	if err := db.SaveGroupHealthState(g.Name, snap); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] save group %s health to db fail: %v", g.Name, err)
-	}
+	db.NotifyGroupHealth(g.Name, snap)
 	// Also persist the updated group object
 	if err := db.PutProxyGroup(g); err != nil {
 		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
@@ -2600,11 +2559,9 @@ func checkGroupTest(g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	// Save only this group's health state to database
+	// Broadcast this group's health snapshot to in-memory consumers (no DB)
 	snap := g.HealthSnapshot()
-	if err := db.SaveGroupHealthState(g.Name, snap); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] save group %s health to db fail: %v", g.Name, err)
-	}
+	db.NotifyGroupHealth(g.Name, snap)
 	// Also persist the updated group object
 	if err := db.PutProxyGroup(g); err != nil {
 		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)

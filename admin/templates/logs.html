@@ -20,40 +20,13 @@
 (function() {
     fetchConnections();
 
-    // Log filter
+    // Log filter — rendering lives in app.js (connLogLines model + setConnLogFilter)
     const filterInput = document.getElementById('log-filter');
-    const logPre = document.getElementById('conn-logs');
-    let allLogLines = [];
-
-    if (filterInput && logPre) {
+    if (filterInput) {
         filterInput.addEventListener('input', function() {
-            const query = this.value.toLowerCase();
-            if (!query) {
-                logPre.textContent = allLogLines.join('\n');
-            } else {
-                const filtered = allLogLines.filter(line => line.toLowerCase().includes(query));
-                logPre.textContent = filtered.length > 0 ? filtered.join('\n') : 'No matching logs';
-            }
-            // Scroll to bottom after filter
-            logPre.scrollTop = logPre.scrollHeight;
+            setConnLogFilter(this.value);
         });
     }
-
-    // Override fetchConnections to capture all lines
-    const origFetch = window.fetchConnections;
-    window.fetchConnections = async function(incremental) {
-        await origFetch(incremental);
-        if (logPre) {
-            allLogLines = logPre.textContent.split('\n');
-            // Re-apply filter after update
-            const query = filterInput ? filterInput.value.toLowerCase() : '';
-            if (query) {
-                const filtered = allLogLines.filter(line => line.toLowerCase().includes(query));
-                logPre.textContent = filtered.length > 0 ? filtered.join('\n') : 'No matching logs';
-                logPre.scrollTop = logPre.scrollHeight;
-            }
-        }
-    };
 
     if (typeof startSSE === 'function') {
         startSSE();

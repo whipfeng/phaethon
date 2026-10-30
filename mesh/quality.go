@@ -19,9 +19,25 @@ type PeerQuality struct {
 	ackUpdated    time.Time     // last time ACK stats were updated
 }
 
-// NewPeerQuality creates a new PeerQuality tracker.
+// defaultAckRTT is the prior estimate for an unprobed link, injected as a
+// virtual first sample so upper layers never see a zero sentinel.
+const defaultAckRTT = 100 * time.Millisecond
+
+// NewPeerQuality creates a new PeerQuality tracker seeded with the
+// unprobed-link prior (design: link_quality_v2_congestion_aware §A1).
 func NewPeerQuality() *PeerQuality {
-	return &PeerQuality{}
+	q := &PeerQuality{}
+	q.resetToPrior()
+	return q
+}
+
+// resetToPrior restores the unprobed-link prior values.
+func (q *PeerQuality) resetToPrior() {
+	q.ackRTT = defaultAckRTT
+	q.ackLossRate = 0
+	q.ackJitter = 0
+	q.ackSampleCount = 1
+	q.ackUpdated = time.Now()
 }
 
 // Stats returns a snapshot of the quality metrics.
@@ -83,15 +99,11 @@ func (q *PeerQuality) IsStale(ttl time.Duration) bool {
 	return time.Since(q.ackUpdated) > ttl
 }
 
-// Reset resets all counters and RTT samples.
+// Reset restores the unprobed-link prior (same state as a fresh tracker).
 func (q *PeerQuality) Reset() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.ackRTT = 0
-	q.ackLossRate = 0
-	q.ackJitter = 0
-	q.ackSampleCount = 0
-	q.ackUpdated = time.Time{}
+	q.resetToPrior()
 }
 
 // PeerQualityTracker manages quality tracking for all peers.

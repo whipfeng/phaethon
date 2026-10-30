@@ -157,12 +157,6 @@ func (s *peerSender) GetProxyName() string {
 	return s.peer.ProxyName
 }
 
-// GetLinkID returns the negotiated link ID (from hello negotiation).
-// Deprecated: Use GetLocalSeq/GetRemoteSeq for gossip advertisement.
-func (s *peerSender) GetLinkID() string {
-	return s.peer.LinkID
-}
-
 // GetLocalSeq returns the local sequence number for this link.
 func (s *peerSender) GetLocalSeq() uint16 {
 	return s.peer.Seq
@@ -325,10 +319,10 @@ type Peer struct {
 	LastError string `json:"lastError,omitempty"` // last error message (empty if no error)
 	LastSeen  time.Time `json:"lastSeen"`
 
-	// LinkID negotiation (hello phase)
+	// Link identity (§5.3): local Seq assigned at peer creation; RemoteSeq
+	// learned from the peer's first gossip. Link identity key = (NodeID, Seq).
 	Seq          uint16 // 本端生成的序列号（本地递增）
-	RemoteSeq    uint16 // 对端声明的序列号（hello 协商获得）
-	LinkID       string // 协商后的链路 ID（seq1-seq2 排序拼接，仅内部使用）
+	RemoteSeq    uint16 // 对端声明的序列号（首个 gossip 获得）
 	FriendlyName string // 友好名称（代理名，仅展示）
 
 	// Atomic fields for concurrent access (fix race condition #2 and #4)
@@ -1044,6 +1038,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		stopCh:         make(chan struct{}),
 		Seq:            seq,
 		drrScheduler:   newDRRScheduler(dataQueues),
+		pingTracker:    newPingTracker(),
 	}
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
@@ -1130,19 +1125,19 @@ func (m *P2PManager) ActivePeerProxyNames() map[string]bool {
 	return result
 }
 
-// StopPeerByLinkID disconnects every session with the exact negotiated link ID.
-func (m *P2PManager) StopPeerByLinkID(linkID string) {
+// StopPeerByNodeSeq disconnects the session to nodeID with the exact local Seq.
+func (m *P2PManager) StopPeerByNodeSeq(nodeID string, seq uint16) {
 	m.mu.Lock()
 	peers := make([]*Peer, 0)
 	for _, peer := range m.peers {
-		if peer.LinkID == linkID {
+		if peer.NodeID == nodeID && peer.Seq == seq {
 			peers = append(peers, peer)
 		}
 	}
 	m.mu.Unlock()
 
 	for _, peer := range peers {
-		util.LogModuleInfo("p2p", "[P2P] stopping peer %s (linkID=%s) due to connectivity failure", peer.ID, linkID)
+		util.LogModuleInfo("p2p", "[P2P] stopping peer %s (node=%s seq=%d) due to connectivity failure", peer.ID, nodeID, seq)
 		stopPeer(peer)
 	}
 }
@@ -1541,7 +1536,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 // hashString generates a simple hash from a string (for sequence number generation)
 // handleGossip processes a gossip message from a peer.
 // In v8 there is no hello frame: the first gossip on a connection establishes the
-// peer (registration + version check + Seq/LinkID negotiation, design §5.3/§8.1).
+// peer (registration + version check + Seq/RemoteSeq learning, design §5.3/§8.1).
 func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	// Validate JSON by unmarshaling (issue 7: avoid remarshaling)
 	var info mesh.GossipInfo
@@ -1578,7 +1573,7 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 }
 
 // establishPeerFromGossip performs the v8 connection establishment on the first
-// gossip frame: version check, nodeID extraction, Seq/LinkID negotiation, mesh
+// gossip frame: version check, nodeID extraction, Seq/RemoteSeq learning, mesh
 // registration, and LinkNIC creation. This replaces v7's handleHello (§5.3).
 func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 	// 1. Version check (mandatory, §8.1)
@@ -1608,23 +1603,12 @@ func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 		peer.FriendlyName = info.FriendlyName
 	}
 
-	// 3. Link identity negotiation (§5.3): RemoteSeq from gossip Seq, LinkID from seq pair
-	remoteSeq := info.Seq
-	localSeq := peer.Seq
-	peer.RemoteSeq = remoteSeq // Stored for gossip advertisement and reverse-link matching
-
-	if remoteSeq > 0 && localSeq > 0 {
-		minSeq := localSeq
-		maxSeq := remoteSeq
-		if localSeq > remoteSeq {
-			minSeq = remoteSeq
-			maxSeq = localSeq
-		}
-		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
-	}
+	// 3. Learn RemoteSeq from first gossip (§5.3); local link identity is
+	// (NodeID, Seq) — Seq was assigned at peer creation, no negotiation needed.
+	peer.RemoteSeq = info.Seq
 
 	m.notifyStatusChange()
-	util.LogModuleInfo("p2p", "[P2P] peer established via first gossip: %s nodeID=%s linkID=%s", peer.ID, nodeID, peer.LinkID)
+	util.LogModuleInfo("p2p", "[P2P] peer established via first gossip: %s nodeID=%s seq=%d remoteSeq=%d", peer.ID, nodeID, peer.Seq, peer.RemoteSeq)
 
 	// 4-5. Register with mesh handler and create LinkNIC (design §5.6)
 	m.registerPeerWithMesh(peer, nodeID, info)
@@ -2022,7 +2006,7 @@ func (m *P2PManager) BroadcastGossipToAll() {
 }
 
 // broadcastGossipToPeer sends a gossip message to a specific peer.
-// The local Seq is always included: the peer uses it to derive RemoteSeq/LinkID
+// The local Seq is always included: the peer uses it to set RemoteSeq
 // from our first gossip (design §5.3) and to match reverse links.
 func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
 	info := mesh.GossipInfo{
@@ -2149,13 +2133,13 @@ func (m *P2PManager) GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, ji
 	return 0, 0, 0, 0, 0
 }
 
-// GetLinkQualityStatsByLinkID returns ping/pong-based link quality stats for an exact negotiated link.
-func (m *P2PManager) GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
+// GetLinkQualityStatsByNodeSeq returns ping/pong-based link quality stats for an exact link.
+func (m *P2PManager) GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, p := range m.peers {
-		if p.LinkID == linkID && p.pingTracker != nil {
+		if p.NodeID == nodeID && p.Seq == seq && p.pingTracker != nil {
 			return p.pingTracker.getStats()
 		}
 	}

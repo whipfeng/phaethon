@@ -72,9 +72,8 @@ type PeerSender interface {
 	Send(data []byte) error
 	SendGossip(data []byte)
 	GetNodeID() string
-	GetProxyName() string    // proxy name (link identifier)
-	GetLinkID() string       // negotiated link ID (seq1-seq2 sorted, internal use)
-	GetLocalSeq() uint16     // local sequence number (for gossip advertisement)
+	GetProxyName() string    // proxy name (active peers only, empty for passive)
+	GetLocalSeq() uint16     // local sequence number (link identity key, for gossip advertisement)
 	GetRemoteSeq() uint16    // remote sequence number (for gossip advertisement)
 	GetFriendlyName() string // friendly name (proxy name, for display only)
 	HasProxy() bool          // true if this is an active (outbound) connection
@@ -90,10 +89,10 @@ type P2PTransport interface {
 	SetMeshInfo(nodeID, vip string)
 	BroadcastGossipToAll()
 	StopPeerByProxyName(proxyName string)
-	StopPeerByLinkID(linkID string)
+	StopPeerByNodeSeq(nodeID string, seq uint16)
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
-	GetLinkQualityStatsByLinkID(linkID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetChannelDropStats() (peerStats map[string]struct {
 		DataDrops      uint64
 		ControlChDrops uint64
@@ -1053,10 +1052,10 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		peerWithHop := sameHopPeers[peerIdx]
 		peer := peerWithHop.Peer
 
-		TraceForwarding("peer_selected", packet, "target=%s peer=%s proxy=%s linkID=%s hop=%d candidate=%d/%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
+		TraceForwarding("peer_selected", packet, "target=%s peer=%s proxy=%s seq=%d hop=%d candidate=%d/%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 		sendErr = peer.Send(packet)
 		if sendErr == nil {
-			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s linkID=%s", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID())
+			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s seq=%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq())
 			if i > 0 {
 				util.LogModuleInfo("mesh", "[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
 					targetNodeID, peer.GetNodeID(), i+1)
@@ -1073,7 +1072,7 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 			return nil
 		}
 
-		TraceForwarding("peer_send_error", packet, "target=%s peer=%s proxy=%s linkID=%s err=%v", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLinkID(), sendErr)
+		TraceForwarding("peer_send_error", packet, "target=%s peer=%s proxy=%s seq=%d err=%v", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), sendErr)
 
 		// Handle peer stopped
 		if strings.Contains(sendErr.Error(), "peer stopped") {
@@ -1553,14 +1552,17 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 			linkKey = fmt.Sprintf("%s:%s", nodeID, remoteProxyName)
 		}
 
-		// Get RTT stats for this specific link
-		avgRTT, lossRate, jitter := m.GetPeerQuality(nodeID)
-		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStats(nodeID)
+		// Get RTT stats for this specific link (per-link, not per-node):
+		// GetPeerQuality/GetLinkQualityStats(nodeID) return a random link's
+		// stats when a node has multiple links — map iteration order decides.
+		localSeq := p.Sender.GetLocalSeq()
+		avgRTT, lossRate, jitter := m.GetLinkQuality(nodeID, localSeq)
+		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByNodeSeq(nodeID, localSeq)
 
 		result = append(result, MeshPeerInfo{
 			NodeID:      nodeID,
 			LinkKey:     linkKey,
-				LocalSeq:    p.Sender.GetLocalSeq(),
+				LocalSeq:    localSeq,
 			Direct:      true,
 			Subnet:      p.SubnetStr,
 			LastSeen:    p.LastSeen,
@@ -2466,7 +2468,7 @@ func (m *MeshManager) broadcastGossip() {
 		info := GossipInfo{
 			Cmd:             "gossip",
 			ProtocolVersion: P2PProtocolVersion,
-			Seq:             peer.Sender.GetLocalSeq(), // 对端用它设置 RemoteSeq 并计算 LinkID（§5.3）
+			Seq:             peer.Sender.GetLocalSeq(), // 对端用它设置 RemoteSeq（§5.3）
 			DomainSuffixes:  ds,
 			Routes:          routes,
 			ClaimedSubnets:  claims,
@@ -2519,20 +2521,16 @@ func (m *MeshManager) checkPeerConnectivity() {
 
 		nodeID := peer.NodeID()
 		localSeq := peer.Sender.GetLocalSeq()
-		linkID := peer.Sender.GetLinkID()
-		if linkID == "" {
-			continue
-		}
 		quality := m.qualityTracker.Get(nodeID, localSeq)
 
 		// Disconnect only after ACK updates stall.
 		if time.Since(quality.LastACKUpdate()) > 60*time.Second {
 			// A sampled link that stops advancing is stale.
-			_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByLinkID(linkID)
+			_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByNodeSeq(nodeID, localSeq)
 			if sampleCount > 0 {
 				// The control plane stopped progressing for this link.
-				util.LogModuleWarn("mesh", "[MESH] peer %s (link %s) ACK updates stalled for 60s, disconnecting", nodeID, linkID)
-				m.p2p.StopPeerByLinkID(linkID)
+				util.LogModuleWarn("mesh", "[MESH] peer %s (seq=%d) ACK updates stalled for 60s, disconnecting", nodeID, localSeq)
+				m.p2p.StopPeerByNodeSeq(nodeID, localSeq)
 				quality.Reset()
 			}
 		}
@@ -2554,12 +2552,13 @@ func (m *MeshManager) updateACKStats() {
 		}
 
 		nodeID := peer.NodeID()
-		proxyName := peer.Sender.GetProxyName()
-		srtt, _, jitter, lossRate, sampleCount := m.p2p.GetLinkQualityStatsByProxy(proxyName)
-		util.LogModuleInfo("mesh", "[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, proxyName, srtt, jitter, lossRate, sampleCount)
+		localSeq := peer.Sender.GetLocalSeq()
+		// Per-link lookup by (nodeID, localSeq) covers both active (proxied)
+		// and passive (inbound) peers — ProxyName is empty for passive peers
+		// and a lookup by empty proxy name would always miss.
+		srtt, _, jitter, lossRate, sampleCount := m.p2p.GetLinkQualityStatsByNodeSeq(nodeID, localSeq)
+		util.LogModuleInfo("mesh", "[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, peer.Sender.GetProxyName(), srtt, jitter, lossRate, sampleCount)
 		if srtt > 0 || lossRate > 0 {
-			// Use localSeq as key
-			localSeq := peer.Sender.GetLocalSeq()
 			quality := m.qualityTracker.Get(nodeID, localSeq)
 			quality.UpdateACKStats(srtt, lossRate, jitter, sampleCount)
 		}

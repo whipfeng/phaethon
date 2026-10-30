@@ -291,13 +291,17 @@ func run(prev *activeResources) (*activeResources, error) {
 		// (mesh-state.json was migrated to the database long ago; the one-time
 		// migration block was removed — do any remaining cleanup manually.)
 
-		// Generate nodeID if still empty
+		// Generate nodeID if still empty. node-id is the instance identity,
+		// also used as the reverse proxy client ID, so it must be persisted
+		// before anything reads it.
+		meshConfigDirty := false
 		if meshConfig.NodeID == "" {
 			meshConfig.NodeID, err = mesh.GenerateNodeID()
 			if err != nil {
 				return nil, fmt.Errorf("mesh generate node id fail: %w", err)
 			}
 			util.LogModuleInfo("system", "Mesh: generated new nodeID: %s", meshConfig.NodeID)
+			meshConfigDirty = true
 		}
 
 		// Auto-allocate subnet if still empty
@@ -307,9 +311,11 @@ func run(prev *activeResources) (*activeResources, error) {
 				return nil, fmt.Errorf("mesh allocate subnet fail: %w", err)
 			}
 			util.LogModuleInfo("system", "Mesh: auto-allocated subnet: %s", meshConfig.Subnet)
-			// Persist updated mesh config with auto-allocated subnet
+			meshConfigDirty = true
+		}
+		if meshConfigDirty {
 			if err := db.PutMeshConfig(meshConfig); err != nil {
-				util.LogModuleWarn("system", " persist mesh config after subnet allocation fail: %v", err)
+				util.LogModuleWarn("system", " persist mesh config fail: %v", err)
 			}
 		}
 
@@ -342,6 +348,10 @@ func run(prev *activeResources) (*activeResources, error) {
 		p2p.GlobalP2PManager.SetMeshInfo(meshConfig.NodeID, vip.String())
 		p2p.GlobalP2PManager.SetMeshHandler(meshMgr)
 		util.LogModuleInfo("system", "Mesh enabled: nodeID=%s vip=%s subnet=%s network=%s subnetPrefix=/%d domainSuffixes=%v advertise=%v", meshConfig.NodeID, vip, meshSubnetStr, meshNetworkStr, subnetPrefixLen, domainSuffixes, advertise)
+
+		// node-id is guaranteed present and persisted at this point; reverse
+		// clients read it from here on (ordering invariant).
+		_ = loadInstanceReverseID()
 	}
 
 	// Start TUN engine BEFORE P2P peers so mesh has its TUN reference
@@ -629,13 +639,13 @@ func loadUDPPortRange() {
 	}
 }
 
-// loadOrGenerateInstanceReverseID returns the instance-level ReverseID (node-id).
-// If node-id does not exist in database, generates a new one and saves it.
-func loadOrGenerateInstanceReverseID() string {
-	dataDir := filepath.Join("data", "setup")
-	id, err := reverse.GetReverseID(dataDir)
+// loadInstanceReverseID returns the instance-level ReverseID (node-id),
+// which lives in the mesh config. Mesh init guarantees it exists and is
+// persisted before this is called.
+func loadInstanceReverseID() string {
+	id, err := reverse.GetReverseID()
 	if err != nil {
-		util.LogModuleInfo("system", "[REVERSE] load/generate instance reverse-id fail: %v", err)
+		util.LogModuleError("system", "[REVERSE] load instance reverse-id fail: %v", err)
 		return ""
 	}
 	util.LogModuleInfo("system", "[REVERSE] instance reverse-id loaded: %s (length=%d)", id, len(id))
@@ -778,9 +788,6 @@ func main() {
 			util.LogModuleError("system", " initialize default config fail: %v", initErr)
 		}
 	}
-
-	// Load instance ReverseID
-	_ = loadOrGenerateInstanceReverseID()
 
 	// Migrate proxy groups
 	proxyGroups, err := db.ListProxyGroups()
@@ -1686,7 +1693,7 @@ func runReverseSession(rc *config.ReverseConfig, configStop <-chan struct{}, glo
 	// Use the instance-level ReverseID for stable port allocation.
 	// All reverse configs from this instance share the same identity;
 	// the Seq field differentiates them on the registry.
-	clientID := loadOrGenerateInstanceReverseID()
+	clientID := loadInstanceReverseID()
 	if clientID == "" {
 		util.LogModuleWarn("system", "[REVERSE] clientID is empty, registration will fail or use empty reverse-id")
 	} else {

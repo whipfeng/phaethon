@@ -4,28 +4,19 @@ import (
 	"fmt"
 
 	"phaethon/db"
-	"phaethon/mesh"
 )
 
-// GetReverseID returns the instance node-id for use as reverse proxy client identity.
-// If node-id does not exist, generates a new one and saves it.
-func GetReverseID(dataDir string) (string, error) {
-	nodeID, err := db.GetNodeID()
+// GetReverseID returns the instance node-id used as the reverse proxy client
+// identity. The node-id is owned by the mesh config; mesh init guarantees it
+// is generated and persisted before any reverse client starts, so this
+// function only reads and errors out if the invariant is violated.
+func GetReverseID() (string, error) {
+	meshCfg, err := db.GetMeshConfig()
 	if err != nil {
-		return "", fmt.Errorf("load node-id from db fail: %w", err)
+		return "", fmt.Errorf("load mesh config for reverse-id fail: %w", err)
 	}
-	if nodeID != "" {
-		return nodeID, nil
+	if meshCfg == nil || meshCfg.NodeID == "" {
+		return "", fmt.Errorf("node-id not initialized: mesh init must run before reverse")
 	}
-
-	// Generate a new node-id
-	nodeID, err = mesh.GenerateNodeID()
-	if err != nil {
-		return "", fmt.Errorf("generate node-id fail: %w", err)
-	}
-
-	if err := db.PutNodeID(nodeID); err != nil {
-		return "", fmt.Errorf("save node-id to db fail: %w", err)
-	}
-	return nodeID, nil
+	return meshCfg.NodeID, nil
 }

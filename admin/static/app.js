@@ -1027,6 +1027,7 @@ function renderProxyRows(proxiesData) {
         const enabled = p.enabled === true;
         const udp = p.udp === true;
         const p2p = p.p2p === true;
+        const v2 = p.v2 === true;
         const rowClass = enabled ? '' : 'row-disabled';
         const pwdCell = p.password
             ? `<span class="password-container" data-proxy="${escapeHtml(p.name)}">
@@ -1051,6 +1052,7 @@ function renderProxyRows(proxiesData) {
                 p2pCell = '<span class="p2p-status connecting" title="Connecting..."></span>';
             }
         }
+        const viaCell = p.via ? escapeHtml(p.via) : '<span class="text-muted">-</span>';
         return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
             <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>
             <td data-label="Type"><code class="type-badge type-${escapeHtml((p.type || '').toLowerCase())}">${escapeHtml(p.type)}</code></td>
@@ -1060,7 +1062,8 @@ function renderProxyRows(proxiesData) {
             <td data-label="SNI">${escapeHtml(p.sni || '')}</td>
             <td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('${escapeHtml(p.name)}', ${udp})">${udp ? '✅' : '❌'}</td>
             <td data-label="P2P" style="cursor:pointer;" onclick="toggleP2P('${escapeHtml(p.name)}', ${p2p})" id="p2p-status-${escapeHtml(p.name)}">${p2pCell}</td>
-            <td data-label="Via">${escapeHtml(p.via || '')}</td>
+            <td data-label="V2" style="cursor:pointer;" onclick="toggleV2('${escapeHtml(p.name)}', ${v2})" id="v2-status-${escapeHtml(p.name)}">${v2 ? '✅' : '❌'}</td>
+            <td data-label="Via">${viaCell}</td>
             <td data-label="Enabled">
                 <label class="switch" title="${enabled ? (typeof i18n !== 'undefined' ? i18n.t('common.enabled') : 'Enabled') : (typeof i18n !== 'undefined' ? i18n.t('common.disabled') : 'Disabled')}">
                     <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleProxy('${escapeHtml(p.name)}', this.checked)">

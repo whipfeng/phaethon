@@ -46,7 +46,6 @@ func (p *mockPeerSender) GetNodeID() string {
 }
 
 func (*mockPeerSender) GetProxyName() string    { return "" }
-func (*mockPeerSender) GetLinkID() string       { return "" }
 func (*mockPeerSender) GetLocalSeq() uint16     { return 0 }
 func (*mockPeerSender) GetRemoteSeq() uint16    { return 0 }
 func (*mockPeerSender) GetFriendlyName() string { return "" }

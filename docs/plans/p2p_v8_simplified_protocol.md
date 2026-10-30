@@ -131,7 +131,7 @@ type GossipInfo struct {
     NodeID          string   // 本节点 ID
     Subnet          string   // 本节点 subnet
     VIP             string   // 本节点 VIP
-    Seq             uint16   // 本端链路序列号；对端用它设置 RemoteSeq 并计算 LinkID（见 §5.3）
+    Seq             uint16   // 本端链路序列号；对端用它设置 RemoteSeq（见 §5.3）；本地链路标识 = nodeID+Seq
     Routes          []Route  // 路由表
     DomainSuffixes  []string // 域名后缀
     ClaimedSubnets  []string // 通告的子网
@@ -142,7 +142,7 @@ type GossipInfo struct {
 - 每次 gossip 携带**完整的当前状态**
 - 收到 gossip 后更新本地拓扑信息
 - 无需确认，丢了下次带最新信息
-- **发送时必须填充 Seq**（本端链路序列号）；首个 gossip 的 Seq 用于对端协商 RemoteSeq/LinkID（§5.3），mesh 的 GossipLink 配对依赖它
+- **发送时必须填充 Seq**（本端链路序列号）；首个 gossip 的 Seq 用于对端设置 RemoteSeq（§5.3），mesh 的 GossipLink 配对依赖它
 
 ### 3.3 NodeID vs Subnet 变更的处理
 
@@ -352,10 +352,12 @@ type LinkQuality struct {
 3. 创建 peerSender，调用 `meshHandler.RegisterPeer(sender)`
 4. 启动 ping 定时器
 
-**链路标识协商（2026-10-30 补充）**：
+**链路标识（2026-10-30 修订：废除 LinkID，统一 nodeID+Seq）**：
 1. gossip 帧携带发送方本地 Seq（`GossipInfo.Seq`）
-2. 收到首个 gossip 时：`peer.RemoteSeq = info.Seq`，`peer.LinkID = fmt.Sprintf("%d-%d", min(本地Seq, 对端Seq), max(本地Seq, 对端Seq))`
-3. mesh 侧 GossipLink 的 localSeq/remoteSeq 配对（反向链路匹配、按 linkID 查询/停链路）依赖此协商结果
+2. 收到首个 gossip 时：`peer.RemoteSeq = info.Seq`
+3. **本地链路标识 = (NodeID, 本地 Seq)**：Seq 在 peer 创建时即赋值（`linkSeqCounter` 递增），本端唯一、无时延窗口；watchdog 查质量/停链路、逐链路统计均用此键
+4. **跨端配对用 (localSeq, remoteSeq) 对**：mesh GossipLink 反向链路匹配直接比较两端 gossip 的 Seq 与学到的 RemoteSeq，无需派生第三方标识
+5. ~~`LinkID = "minSeq-maxSeq"` 拼接字符串~~（已废弃）：它是 seq 对的纯派生物，跨端匹配从来不用它，本端查询用它反而引入"首个 gossip 协商完成前取不到"的窗口（曾导致被动 peer 统计恒 0，见 issues/p2p-v8-mesh-regression.md Bug E）；废除后少一次协商、少一类边界分支
 
 > **实现警示（2026-10-30）**：上述注册逻辑**必须在 handleGossip 的首个 gossip 分支中实现**。v8 初版实现（2a0589e）删除 handleHello 时连带删除了注册调用且未按本节重建，导致 `GetMeshSender()` 恒 nil、gossip 被静默丢弃、mesh 数据面整体失效（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题1）。删除旧代码时必须逐项核对被删代码承担的职责是否在设计中有替代方案。
 
@@ -536,8 +538,9 @@ v8 的核心思想是**简化协议，依赖最终一致性**：
 
 - **2026-10-30**：根据代码审查结论（`docs/issues/p2p-v8-mesh-regression.md`）修订，决策人为用户本人：
   1. 协议版本 8 → **10**（避让线上 v9 节点），版本协商升级为强制检查（§2.3、§8.1）
-  2. `GossipInfo` 补充 `Seq` 字段，明确链路标识协商流程（§3.2、§5.3）——gossip 帧携带本端 Seq，对端首个 gossip 推导 RemoteSeq/LinkID
+  2. `GossipInfo` 补充 `Seq` 字段，明确链路标识流程（§3.2、§5.3）——gossip 帧携带本端 Seq，对端首个 gossip 设置 RemoteSeq；2026-10-30 二次修订：**废除 LinkID 拼接字符串**，本地链路标识统一为 nodeID+Seq，跨端配对用 (localSeq, remoteSeq) 对
   3. §3.3 增加"Subnet 变更禁止热生效"实现红线，恢复 `restart_required` 语义；subnet 冲突自动重分配只改库不热改
+- **2026-10-30（二次修订）**：废除 LinkID（§5.3）——本地查询/停链路/逐链路统计统一 (NodeID, 本地 Seq)；跨端 GossipLink 配对用 (localSeq, remoteSeq) 对；被动 peer 补 pingTracker（与本次修订同因：协商窗口期统计恒 0）
   4. §4.3 丢包率改为滑动窗口统计（最近 20 次）+ 发送失败不计入 + 超时清理记为丢包，替代原会话累计方案
   5. §4.4 故障检测（连续 10 ping 无 pong 断链）**由"后续增强"改为本次实现**，给出阈值、动作与 heartbeat 兜底关系
   6. §3.3 **NodeID 变更由热更新改为重启生效**（用户三次决策）：与 subnet 统一"保存配置 + restart_required + 看门狗自动拉起"；冲突自动重分配改为存库 + 自我退出；identityUpdate 运行态分支列为删除项；问题4（竞争）与问题10（事件丢弃）随此决策消解

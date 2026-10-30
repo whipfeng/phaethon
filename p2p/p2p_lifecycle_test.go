@@ -2,16 +2,16 @@ package p2p
 
 import "testing"
 
-func TestStopPeerByLinkIDPreservesOtherLinks(t *testing.T) {
+func TestStopPeerByNodeSeqPreservesOtherLinks(t *testing.T) {
 	manager := NewP2PManager("local", "test", nil)
 	defer manager.Stop()
 
-	failed := &Peer{ID: "failed", NodeID: "remote", LinkID: "1-2", stopCh: make(chan struct{})}
-	healthy := &Peer{ID: "healthy", NodeID: "remote", LinkID: "3-4", stopCh: make(chan struct{})}
+	failed := &Peer{ID: "failed", NodeID: "remote", Seq: 1, stopCh: make(chan struct{})}
+	healthy := &Peer{ID: "healthy", NodeID: "remote", Seq: 3, stopCh: make(chan struct{})}
 	manager.peers[failed.ID] = failed
 	manager.peers[healthy.ID] = healthy
 
-	manager.StopPeerByLinkID("1-2")
+	manager.StopPeerByNodeSeq("remote", 1)
 
 	assertPeerStopped(t, failed)
 	assertPeerRunning(t, healthy)

@@ -331,7 +331,9 @@ type Peer struct {
 	meshSenderPtr  atomic.Pointer[peerSender]
 	lastSeenNano   atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
 
-	transport        frame.FrameTransport // protected by mutex (atomic.Pointer cannot wrap interface)
+	transport        frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
+	transportMu      sync.Mutex
+	stopped          bool // set under transportMu by stopPeer; StartPeer re-checks after dial
 	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
 	ackQueue         chan writeReq // TCP ACK packets (high priority)
 	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
@@ -460,8 +462,15 @@ func stopPeer(peer *Peer) {
 		peer.SetStatus("stopped")
 		close(peer.stopCh)
 	})
-	if peer.transport != nil {
-		peer.transport.Close()
+	// Mark stopped and close the transport atomically: if a dial is still in
+	// flight (transport not yet assigned), the flag ensures the assignment
+	// site closes it instead — the stop signal can no longer be lost.
+	peer.transportMu.Lock()
+	peer.stopped = true
+	t := peer.transport
+	peer.transportMu.Unlock()
+	if t != nil {
+		t.Close()
 	}
 }
 
@@ -1301,7 +1310,17 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			continue
 		}
 
+		peer.transportMu.Lock()
+		if peer.stopped {
+			// stopPeer ran while the dial was in flight and had no transport
+			// to close; honor the stop here instead of running a session
+			// whose stop signal was already issued.
+			peer.transportMu.Unlock()
+			transport.Close()
+			return
+		}
 		peer.transport = transport
+		peer.transportMu.Unlock()
 		peer.dnsQueue = make(chan writeReq, 512)
 		peer.ackQueue = make(chan writeReq, 256)
 		peer.controlCh = make(chan writeReq, 512)

@@ -284,10 +284,7 @@ type AdminServer struct {
 	tlsConfig *tls.Config // cached TLS config for ServeConn
 	mu        sync.RWMutex
 
-	// SSE broadcaster lifecycle
-	sseStopCh chan struct{}
-	sseWG     sync.WaitGroup
-	sseLast   []byte // last published stats JSON
+	sseLast []byte // last published stats JSON
 
 	// OnTUNToggle is called when the user enables/disables TUN from the admin panel.
 	// The main package should set this to start or stop the TUN engine directly.
@@ -363,8 +360,6 @@ type AdminServer struct {
 	// templates
 	pages *pageTemplates
 
-	// defaultRaw holds the embedded default config bytes, used for reset/fallback.
-	defaultRaw []byte
 
 	// package upload/publish state (see package.go)
 	packageUploadMu   sync.Mutex // one upload at a time
@@ -401,9 +396,8 @@ type PeerBrief struct {
 	NodeID string
 }
 
-// triggerReload schedules a full runtime reload without blocking the caller.
 // NewAdminServer creates a new admin server instance.
-func NewAdminServer(ac *config.AdminConfig, defaultRaw []byte) *AdminServer {
+func NewAdminServer(ac *config.AdminConfig) *AdminServer {
 	if ac == nil {
 		ac = &config.AdminConfig{Enabled: false}
 	}
@@ -412,9 +406,8 @@ func NewAdminServer(ac *config.AdminConfig, defaultRaw []byte) *AdminServer {
 	}
 
 	s := &AdminServer{
-		config:     ac,
-		stats:      NewStatsCollector(),
-		defaultRaw: defaultRaw,
+		config: ac,
+		stats:  NewStatsCollector(),
 	}
 
 	// Load or generate a persistent session secret so sessions survive restarts.
@@ -811,9 +804,6 @@ func (s *AdminServer) Start() error {
 		util.LogModuleInfo("admin", "mesh-only mode enabled, no network listener")
 		// Start the global version heartbeat
 		util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
-		s.sseStopCh = make(chan struct{})
-		s.sseWG.Add(1)
-		go s.sseBroadcaster()
 		return nil
 	}
 
@@ -851,25 +841,15 @@ func (s *AdminServer) Start() error {
 	// Start the global version heartbeat. It is idempotent; multiple admin
 	// server instances are not expected in this process.
 	util.DefaultVersionNotifier.StartHeartbeat(10 * time.Second)
-
-	s.sseStopCh = make(chan struct{})
-	s.sseWG.Add(1)
-	go s.sseBroadcaster()
 	return nil
 }
 
 // Close shuts down the admin server.
 func (s *AdminServer) Close() error {
-	if s.sseStopCh != nil {
-		close(s.sseStopCh)
-	}
 	if s.server != nil {
 		if err := s.server.Close(); err != nil {
 			return err
 		}
-	}
-	if s.sseStopCh != nil {
-		s.sseWG.Wait()
 	}
 	util.DefaultVersionNotifier.StopHeartbeat()
 	return nil
@@ -1255,6 +1235,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/proxies/health-check/", s.apiProxyHealthCheck)
 	mux.HandleFunc("/api/proxies/", s.apiProxies)
 	mux.HandleFunc("/api/rules", s.apiRules)
+	mux.HandleFunc("/api/rules/test", s.apiTestRule)
 	mux.HandleFunc("/api/rules/", s.apiRules)
 	mux.HandleFunc("/api/mappings", s.apiMappings)
 	mux.HandleFunc("/api/mappings/", s.apiMappings)
@@ -1301,9 +1282,6 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 // ========== Page Handlers ==========
 
 func (s *AdminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// Runtime stats from database
-	s.stats.CollectFromConfig()
-
 	// Counts from the database
 	proxies, _ := db.ListProxies()
 	rules, _ := db.ListRules()
@@ -1593,8 +1571,14 @@ func (s *AdminServer) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 // ========== API Handlers ==========
 
 func (s *AdminServer) apiStats(w http.ResponseWriter, r *http.Request) {
-	s.stats.CollectFromConfig()
 	jsonResponse(w, s.stats.GetSnapshot())
+}
+
+// NotifyGroupHealth pushes a freshly checked group health snapshot into the
+// stats collector. Wired from main via db.OnGroupHealthSaved so the dashboard
+// health view updates event-driven (no periodic DB scans).
+func (s *AdminServer) NotifyGroupHealth(groupName string, snap map[string]config.HealthInfo) {
+	s.stats.IngestGroupHealth(groupName, snap)
 }
 
 func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
@@ -1708,24 +1692,6 @@ func (s *AdminServer) reverseEventPayload(configs []*config.ReverseConfig) inter
 		})
 	}
 	return items
-}
-
-// sseBroadcaster periodically snapshots stats for SSE broadcasting.
-// Version bumping is event-driven (OnConnect, OnDisconnect, UpdateHealth).
-func (s *AdminServer) sseBroadcaster() {
-	defer s.sseWG.Done()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.stats.CollectFromConfig()
-		case <-s.sseStopCh:
-			return
-		}
-	}
 }
 
 // apiConfigMesh handles GET/PUT for mesh foundational settings.
@@ -2570,6 +2536,66 @@ func (s *AdminServer) apiToggleRule(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// apiTestRule runs a destination through the real rule matcher so the rules
+// page tester shows what an actual connection would resolve to, including
+// mapping filters and time ranges. POST /api/rules/test
+func (s *AdminServer) apiTestRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Target  string `json:"target"`
+		Mapping string `json:"mapping"` // optional; "" = match against any mapping
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, "decode fail", http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimSpace(body.Target)
+	if target == "" {
+		httpError(w, "target required", http.StatusBadRequest)
+		return
+	}
+
+	host, port := target, 443
+	if h, p, err := net.SplitHostPort(target); err == nil {
+		if parsed, err := strconv.Atoi(p); err == nil {
+			host, port = h, parsed
+		} else {
+			host = h
+		}
+	} else if ip := net.ParseIP(target); ip == nil && strings.Count(target, ":") == 1 {
+		// "host:port" without brackets
+		parts := strings.SplitN(target, ":", 2)
+		if parsed, err := strconv.Atoi(parts[1]); err == nil && parsed > 0 && parsed <= 65535 {
+			host, port = parts[0], parsed
+		}
+	}
+
+	req := config.NewConnectRequest("tcp", host, port)
+	resolved, proxy, matchResult, err := db.ResolveMatch(req, strings.TrimSpace(body.Mapping))
+	if err != nil {
+		httpError(w, "match fail: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"matched":  matchResult != nil,
+		"resolved": fmt.Sprintf("%s:%d", resolved.DstAddr, resolved.DstPort),
+	}
+	if proxy != nil {
+		resp["proxy"] = proxy.Name
+	}
+	if matchResult != nil {
+		resp["actualProxy"] = matchResult.ActualProxy
+		resp["rule"] = matchResult.Rule
+		resp["mapping"] = matchResult.Mapping
+		resp["timeRange"] = matchResult.TimeRange
+	}
+	jsonResponse(w, resp)
+}
+
 func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPatch {
 		s.apiToggleMapping(w, r)
@@ -2955,12 +2981,15 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 				}
 			}
 		}
-		// Get health from database
-		healthList, _ := db.ListProxyHealthByGroup(groupName)
-		healthMap := make(map[string]*db.ProxyHealth)
-		for _, h := range healthList {
-			healthMap[h.ProxyName] = h
+		// Health from the runtime group's in-memory snapshot (display-only,
+		// no longer persisted to DB).
+		runtimeGroup := group
+		if matcher, err := db.GetMatcher(); err == nil && matcher != nil {
+			if rg := matcher.GetGroup(groupName); rg != nil {
+				runtimeGroup = rg
+			}
 		}
+		healthMap := runtimeGroup.HealthSnapshot()
 		respNodes := make([]map[string]interface{}, 0, len(nodes))
 		for _, n := range nodes {
 			name := n["name"].(string)
@@ -2970,7 +2999,7 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			var lastCheck time.Time
 			if h, ok := healthMap[key]; ok {
 				alive = h.Alive
-				latencyMs = int64(h.Latency)
+				latencyMs = h.Latency.Milliseconds()
 				lastCheck = h.LastCheck
 			}
 			respNodes = append(respNodes, map[string]interface{}{
@@ -3074,22 +3103,8 @@ func (s *AdminServer) apiGroupHealthCheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Return health snapshot from database.
-	healthList, err := db.ListProxyHealthByGroup(groupName)
-	if err != nil {
-		httpError(w, "query health fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// Convert to map format for JSON response
-	snap := make(map[string]config.HealthInfo)
-	for _, h := range healthList {
-		snap[h.ProxyName] = config.HealthInfo{
-			Alive:     h.Alive,
-			Latency:   time.Duration(h.Latency) * time.Millisecond,
-			LastCheck: h.LastCheck,
-			FailCount: h.FailCount,
-		}
-	}
+	// Return the runtime group's in-memory health snapshot (no DB involved).
+	snap := groupHealthSnapshot(groupName)
 	jsonResponse(w, snap)
 }
 
@@ -3149,21 +3164,32 @@ func (s *AdminServer) apiGroupTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return the latest health snapshot from the database.
-	healthList, err := db.ListProxyHealthByGroup(groupName)
-	if err != nil {
-		httpError(w, "query health fail: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	resp := make(map[string]interface{}, len(healthList))
-	for _, h := range healthList {
-		resp[h.ProxyName] = map[string]interface{}{
+	// Return the runtime group's in-memory health snapshot (no DB involved).
+	snap := groupHealthSnapshot(groupName)
+	resp := make(map[string]interface{}, len(snap))
+	for key, h := range snap {
+		resp[key] = map[string]interface{}{
 			"alive":     h.Alive,
-			"latencyMs": h.Latency,
+			"latencyMs": h.Latency.Milliseconds(),
 			"lastCheck": h.LastCheck,
 		}
 	}
 	jsonResponse(w, resp)
+}
+
+// groupHealthSnapshot returns the runtime group's in-memory health map, or an
+// empty map if the group isn't loaded in the matcher. Health is display-only
+// and deliberately not persisted.
+func groupHealthSnapshot(groupName string) map[string]config.HealthInfo {
+	matcher, err := db.GetMatcher()
+	if err != nil || matcher == nil {
+		return map[string]config.HealthInfo{}
+	}
+	g := matcher.GetGroup(groupName)
+	if g == nil {
+		return map[string]config.HealthInfo{}
+	}
+	return g.HealthSnapshot()
 }
 
 // apiGroupActiveMember sets the active member for a select group.
@@ -3254,12 +3280,8 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 // buildGroupMemberList builds the flattened member response for a group.
 func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 	members := g.GetMembers()
-	// Get health from database instead of runtime snapshot
-	healthList, _ := db.ListProxyHealthByGroup(g.Name)
-	healthMap := make(map[string]*db.ProxyHealth)
-	for _, h := range healthList {
-		healthMap[h.ProxyName] = h
-	}
+	// Health from the runtime group's in-memory snapshot (no DB involved)
+	healthMap := g.HealthSnapshot()
 	active := g.PickActiveMember()
 
 	resp := make([]map[string]interface{}, 0, len(members))
@@ -3275,7 +3297,7 @@ func buildGroupMemberList(g *config.ProxyGroup) []map[string]interface{} {
 		var lastCheck time.Time
 		if h, ok := healthMap[key]; ok {
 			alive = h.Alive
-			latencyMs = int64(h.Latency)
+			latencyMs = h.Latency.Milliseconds()
 			lastCheck = h.LastCheck
 		} else if !m.FromSubscription {
 			// Manual proxies are considered alive until explicitly tested.
@@ -3788,7 +3810,6 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *AdminServer) apiHealth(w http.ResponseWriter, r *http.Request) {
-	s.stats.CollectFromConfig()
 	snapshot := s.stats.GetSnapshot()
 	jsonResponse(w, snapshot["healthData"])
 }

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"phaethon/config"
 	"phaethon/connlog"
-	"phaethon/db"
 )
 
 // StatsCollector collects runtime statistics for the admin dashboard.
@@ -20,7 +20,8 @@ type StatsCollector struct {
 	listenerMu     sync.RWMutex
 	listenerStatus map[string]*ListenerStatus
 
-	// Health check status (from ProxyGroup)
+	// Health check status (from ProxyGroup), fed event-driven via
+	// IngestGroupHealth (wired to db.OnGroupHealthSaved).
 	healthMu   sync.RWMutex
 	healthData map[string][]*ProxyHealth
 }
@@ -84,6 +85,26 @@ func (s *StatsCollector) UpdateHealth(groupName string, health []*ProxyHealth) {
 	s.healthMu.Unlock()
 }
 
+// IngestGroupHealth converts a health checker's group snapshot into display
+// form and stores it, replacing the group's previous entry. This is the
+// event-driven feeding path for healthData (wired via db.OnGroupHealthSaved).
+func (s *StatsCollector) IngestGroupHealth(groupName string, snap map[string]config.HealthInfo) {
+	health := make([]*ProxyHealth, 0, len(snap))
+	for key, hi := range snap {
+		if hi.LastCheck.IsZero() {
+			continue
+		}
+		health = append(health, &ProxyHealth{
+			Name:      strings.TrimPrefix(key, "sub:"),
+			Alive:     hi.Alive,
+			Latency:   hi.Latency,
+			LastCheck: hi.LastCheck,
+			FailCount: hi.FailCount,
+		})
+	}
+	s.UpdateHealth(groupName, health)
+}
+
 // GetSnapshot returns a snapshot of all statistics.
 func (s *StatsCollector) GetSnapshot() map[string]interface{} {
 	s.listenerMu.RLock()
@@ -106,32 +127,5 @@ func (s *StatsCollector) GetSnapshot() map[string]interface{} {
 		"activeConnections": connlog.GetActiveCount(),
 		"listenerStatus":    listenerCopy,
 		"healthData":        healthCopy,
-	}
-}
-
-// CollectFromConfig extracts health data from database.
-func (s *StatsCollector) CollectFromConfig() {
-	// Query all health records from database
-	allHealth, err := db.ListAllProxyHealth()
-	if err != nil {
-		return
-	}
-	
-	// Group by group name
-	grouped := make(map[string][]*ProxyHealth)
-	for _, h := range allHealth {
-		health := &ProxyHealth{
-			Name:      strings.TrimPrefix(h.ProxyName, "sub:"),
-			Alive:     h.Alive,
-			Latency:   time.Duration(h.Latency) * time.Millisecond,
-			LastCheck: h.LastCheck,
-			FailCount: h.FailCount,
-		}
-		grouped[h.GroupName] = append(grouped[h.GroupName], health)
-	}
-	
-	// Update each group
-	for groupName, health := range grouped {
-		s.UpdateHealth(groupName, health)
 	}
 }

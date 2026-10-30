@@ -9,7 +9,6 @@ import (
 // skipBuckets 不需要触发版本通知的 bucket（运行时状态）
 var skipBuckets = map[string]bool{
 	string(BucketFakeIP):         true,
-	string(BucketProxyHealth):    true,
 	string(BucketRuntimeState):   true,
 	string(BucketAuditLog):       true,
 	string(BucketVersions):       true, // 版本号 bucket 本身不触发通知

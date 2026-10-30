@@ -8,7 +8,7 @@ import (
 	"phaethon/config"
 )
 
-// BucketConfig 内的标量配置 key
+// 拆分后各标量配置在其专属 bucket 内使用统一的 key
 var (
 	keyAdmin        = []byte("admin")
 	keyTUN          = []byte("tun")

@@ -215,6 +215,8 @@
             'mesh.nodeIdentityHelp': '修改节点 ID 会改变此节点在 mesh 网络中的身份，其他节点需要重新发现此节点。',
             'mesh.nodeIdRequired': '节点 ID 不能为空',
             'mesh.restartRequired': '已保存，需要重启生效',
+            'mesh.restartScheduled': '已保存，节点即将自动重启以应用新身份',
+            'mesh.identityRestartConfirm': '修改节点 ID / 子网需要重启节点。\n保存后节点将在几秒内自动重启。\n\n确定保存并重启吗？',
             'mesh.peers': '对等节点',
 
             // ===== Admin Settings =====
@@ -754,6 +756,7 @@
             // ===== Common =====
             'common.confirm': '确认',
             'common.cancel': '取消',
+            'common.cancelled': '已取消，未保存',
             'common.save': '保存',
             'common.delete': '删除',
             'common.edit': '编辑',
@@ -1030,6 +1033,8 @@
             'mesh.nodeIdentityHelp': 'Changing node-id will change this node\'s identity in the mesh network. Other nodes will need to rediscover this node.',
             'mesh.nodeIdRequired': 'Node ID is required',
             'mesh.restartRequired': 'Saved, restart required',
+            'mesh.restartScheduled': 'Saved, node restarting to apply new identity',
+            'mesh.identityRestartConfirm': 'Changing node-id / subnet requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?',
             'mesh.peers': 'Peers',
 
             // ===== Admin Settings =====
@@ -1569,6 +1574,7 @@
             // ===== Common (additional) =====
             'common.confirm': 'Confirm',
             'common.cancel': 'Cancel',
+            'common.cancelled': 'Cancelled, not saved',
             'common.save': 'Save',
             'common.delete': 'Delete',
             'common.edit': 'Edit',

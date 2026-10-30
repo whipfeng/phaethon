@@ -37,7 +37,6 @@ var (
 	BucketLogs              = []byte("logs")                // 日志配置
 
 	// 身份与状态 bucket
-	BucketInstanceIdentity  = []byte("instance-identity")   // 新：实例身份
 	BucketRuntimeState      = []byte("runtime-state")       // 新：运行时状态
 
 	// 运行时状态 bucket（不触发版本通知）
@@ -100,7 +99,7 @@ func Init(dbPath string) error {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
-		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketSubscriptionNodes, BucketInstanceIdentity, BucketRuntimeState, BucketVersions} {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketSubscriptionNodes, BucketRuntimeState, BucketVersions} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}

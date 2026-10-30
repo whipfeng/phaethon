@@ -29,29 +29,6 @@ type PortBinding struct {
 	DisconnectedAt time.Time `json:"disconnectedAt"`
 }
 
-// ========== 实例标识 ==========
-
-// GetNodeID 获取全局实例标识 node-id
-// node-id 是实例的唯一身份标识，被 mesh、reverse proxy、admin 等子系统共用
-func GetNodeID() (string, error) {
-	id, err := getView[string](BucketInstanceIdentity, []byte("node-id"))
-	if err != nil {
-		if err == ErrNotFound {
-			return "", nil
-		}
-		return "", err
-	}
-	if id == nil {
-		return "", nil
-	}
-	return *id, nil
-}
-
-// PutNodeID 存储全局实例标识 node-id
-func PutNodeID(id string) error {
-	return Put(BucketInstanceIdentity, []byte("node-id"), id)
-}
-
 // ========== 运行时状态 ==========
 
 // GetSessionSecret 获取 admin 会话密钥

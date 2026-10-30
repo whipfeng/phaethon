@@ -101,6 +101,14 @@ Cost     = (SRTT + SojournMs) / max(1 - lossEff, 0.01) / confidence + hopPenalty
   - `samples` 窗口从 `[]bool` 改为带 seq 的结构以支持定位翻案
 - **断链启发式维持现状**(连续 10 判丢 close):语义变为"极端持续拥塞或真死",两者都该重连;配合 A4 迟滞与 B 的 cost 信号,拥塞链路在被杀前流量已被引走,不会出现重连加剧拥塞的死循环
 
+### u-turn 回抛探测器(环路实锤)
+
+**动机**:各节点独立 Dijkstra + gossip 视图不一致可形成瞬态转发环路(外层 TTL 每跳递减,环路放大 ≤64 倍后自灭,期间路径=黑洞,10s 重算可能解环也可能重建——表现为"时通时不通")。需要廉价手段实锤/排除环路嫌疑。
+
+**做法**:`HandleMeshFrame` 收到 IPIP 中转帧(outer dst ≠ 本机 EIP)时,解析 outer dst 归属的目标节点,查 `bestPaths[target].NextHop`,若 **== 帧来源节点** 即为 u-turn 回抛:Warn(限频) + 计数器,计数随 admin 统计出口暴露。
+
+**顺带修复**:`enqueueWriteReq` 的 `isDNSPacket`/`isACKPacket` 分类器只对 `FrameMeshPacket` 生效——JSON 控制帧载荷被当 IP 头解析是潜在误分类 bug。
+
 ## 三期:端到端 IP 层探针(不在本轮)
 
 - 从 netstack 发 ICMP echo 到各节点 VIP,reply 天然走数据面,统计端到端丢包/延迟

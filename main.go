@@ -2129,12 +2129,14 @@ func wireAdminCallbacks(resources *activeResources) {
 
 		// Build set of existing P2P peer proxy names (same source as StopPeerByProxyName)
 		existingPeers := p2p.GlobalP2PManager.ActivePeerProxyNames()
+		dbNames := make(map[string]bool, len(proxies))
 
 		for _, proxy := range proxies {
-			isCompatible := proxy.Type == "socks5" || proxy.Type == "trojan" || proxy.Type == "h_tunnel"
+			isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
 			if !isCompatible {
 				continue
 			}
+			dbNames[proxy.Name] = true
 
 			_, exists := existingPeers[proxy.Name]
 			shouldRun := proxy.IsEnabled() && proxy.IsP2P()
@@ -2157,6 +2159,16 @@ func wireAdminCallbacks(resources *activeResources) {
 				// config saves are low-frequency so a restart is cheap (user decision, issue 问题9).
 				util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config save", proxy.Name)
 				p2p.GlobalP2PManager.RestartPeer(proxy)
+			}
+		}
+
+		// Stop peers whose proxy no longer exists in the DB (deleted while running).
+		// The loop above only visits DB-listed proxies, so a deleted proxy's peer
+		// would otherwise orphan until restart.
+		for name := range existingPeers {
+			if !dbNames[name] {
+				util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s (proxy deleted from DB)", name)
+				p2p.GlobalP2PManager.StopPeerByProxyName(name)
 			}
 		}
 

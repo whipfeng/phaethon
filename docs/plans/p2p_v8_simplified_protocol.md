@@ -100,11 +100,17 @@ type PingInfo struct {
 ### 2.3 协议版本
 
 ```go
-const P2PProtocolVersion = 8
+const P2PProtocolVersion = 10
 ```
 
 版本变更说明：
-- v8：取消 hello/ack，统一 gossip，新增 ping/pong
+- v8：取消 hello/ack，统一 gossip，新增 ping/pong（设计初版使用的版本号，未正式发布）
+- v9：GossipLink 改为 localSeq/remoteSeq 字段配对识别链路（已随旧版本发布，线上存在）
+- v10：v8 简化协议正式发布。**跳过 9 直接定为 10**，因为 v9 已占用版本号 9 且 gossip 中 GossipLink 格式不同——若新协议也用 9，线上旧节点会把新协议当作同版本接受
+
+**版本协商（强制）**：收到第一个 gossip 时比对 `ProtocolVersion`：
+- 版本相同：正常通信
+- 版本不同：**断开连接并记 Warn 日志**（§8.1）。禁止静默接受版本不匹配的连接。
 
 ---
 
@@ -125,6 +131,7 @@ type GossipInfo struct {
     NodeID          string   // 本节点 ID
     Subnet          string   // 本节点 subnet
     VIP             string   // 本节点 VIP
+    Seq             uint16   // 本端链路序列号；对端用它设置 RemoteSeq 并计算 LinkID（见 §5.3）
     Routes          []Route  // 路由表
     DomainSuffixes  []string // 域名后缀
     ClaimedSubnets  []string // 通告的子网
@@ -135,6 +142,7 @@ type GossipInfo struct {
 - 每次 gossip 携带**完整的当前状态**
 - 收到 gossip 后更新本地拓扑信息
 - 无需确认，丢了下次带最新信息
+- **发送时必须填充 Seq**（本端链路序列号）；首个 gossip 的 Seq 用于对端协商 RemoteSeq/LinkID（§5.3），mesh 的 GossipLink 配对依赖它
 
 ### 3.3 NodeID vs Subnet 变更的处理
 
@@ -156,6 +164,8 @@ type GossipInfo struct {
   - DNSHijacker 的 dnsAddr
 - 重建这些地址非常复杂，特别是 FakeIP pool 会影响已有的 DNS 映射
 - **建议**：Subnet 变更时，返回 `restart_required` 提示，需要重启生效
+
+> **实现红线（2026-10-30 修订）**：Subnet 变更**禁止热生效**。ffbf566 曾实现为直接热改 `m.subnet/m.vip` 并全网广播，但不重建本地 NIC 地址/SNAT/RouteSelector/FakeIP/DNSHijacker，导致对端按新 VIP 发包而本机不认领的流量黑洞（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题3）。正确行为：admin API 保存配置到数据库后返回 `restart_required: true`，前端显示"已保存，需要重启生效"，**运行态保持旧 subnet 不变**。subnet 冲突自动重分配（reselectSubnet）同理：只更新数据库并提示重启，不热改运行态。NodeID 变更维持热更新（不影响本地地址）。
 
 **保证**：
 - NodeID 变更：最终一致性，所有节点会收到最新的 nodeID
@@ -219,33 +229,57 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 
 ### 4.3 丢包率计算
 
+**滑动窗口统计**（2026-10-30 修订，原"会话累计"方案会让高 RTT 链路丢包率永久虚高并毒化选路）：
+
 ```go
 type pingTracker struct {
     pendingPings map[uint32]time.Time // seq -> 发送时间
-    totalSent    uint64
-    totalReceived uint64
+    window       []pingResult         // 最近 N 次 ping 的结果（N=20）
 }
 
-// 发送 ping 时
+type pingResult struct {
+    seq      uint32
+    sent     time.Time
+    received bool
+}
+
+// 发送 ping 时：仅入队 pending，不预记 sent
 tracker.pendingPings[seq] = time.Now()
-tracker.totalSent++
+
+// 发送成功（enqueueWrite 返回 nil）后才记窗口
+// 发送失败：从 pendingPings 删除，不计入统计（避免虚增 sent）
 
 // 收到 pong 时
 if _, ok := tracker.pendingPings[seq]; ok {
     delete(tracker.pendingPings, seq)
-    tracker.totalReceived++
+    tracker.window = append(tracker.window, pingResult{seq: seq, received: true})
 }
 
-// 定期清理超时 ping（5 秒未响应）
+// 定期清理超时 ping（5 秒未响应）：记为丢包入窗口后删除
 for seq, sentTime := range tracker.pendingPings {
     if time.Since(sentTime) > 5*time.Second {
         delete(tracker.pendingPings, seq)
+        tracker.window = append(tracker.window, pingResult{seq: seq, received: false})
     }
 }
 
-// 丢包率 = 1 - (totalReceived / totalSent)
-lossRate := 1.0 - float64(tracker.totalReceived) / float64(tracker.totalSent)
+// 窗口截断到最近 N 次
+if len(tracker.window) > 20 {
+    tracker.window = tracker.window[len(tracker.window)-20:]
+}
+
+// 丢包率 = 窗口内未收到 pong 的比例（链路恢复后能随窗口滑动而回落）
+var lost int
+for _, r := range tracker.window {
+    if !r.received { lost++ }
+}
+lossRate := float64(lost) / float64(len(tracker.window))
 ```
+
+**修订要点**：
+- 发送失败（enqueueWrite 报错）不计入统计
+- 超时清理时把该 ping 记为"丢包"入窗口（而非原方案的只删不回滚）
+- 只统计最近 20 次，链路恢复后 lossRate 能回落
 
 ### 4.4 链路质量评估
 
@@ -260,7 +294,7 @@ type LinkQuality struct {
 
 **用途**：
 - 路由选择：优先选择 RTT 低、丢包率低的链路
-- 故障检测：连续多次 ping 无响应，判定链路断开
+- 故障检测：连续多次 ping 无响应，判定链路断开（**后续增强，v10 不实现**——当前断链判定仍依赖 30 秒全静默 heartbeat；半死链路最长黑洞 30s+。见 `docs/issues/p2p-v8-mesh-regression.md` 补充项）
 
 ---
 
@@ -295,6 +329,13 @@ type LinkQuality struct {
 2. 从 gossip 中提取 NodeID
 3. 创建 peerSender，调用 `meshHandler.RegisterPeer(sender)`
 4. 启动 ping 定时器
+
+**链路标识协商（2026-10-30 补充）**：
+1. gossip 帧携带发送方本地 Seq（`GossipInfo.Seq`）
+2. 收到首个 gossip 时：`peer.RemoteSeq = info.Seq`，`peer.LinkID = fmt.Sprintf("%d-%d", min(本地Seq, 对端Seq), max(本地Seq, 对端Seq))`
+3. mesh 侧 GossipLink 的 localSeq/remoteSeq 配对（反向链路匹配、按 linkID 查询/停链路）依赖此协商结果
+
+> **实现警示（2026-10-30）**：上述注册逻辑**必须在 handleGossip 的首个 gossip 分支中实现**。v8 初版实现（2a0589e）删除 handleHello 时连带删除了注册调用且未按本节重建，导致 `GetMeshSender()` 恒 nil、gossip 被静默丢弃、mesh 数据面整体失效（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题1）。删除旧代码时必须逐项核对被删代码承担的职责是否在设计中有替代方案。
 
 **Unregister 时机**：
 1. 连接断开（transport 关闭）
@@ -390,6 +431,8 @@ type Peer struct {
 - 版本相同：正常通信
 - 版本不同：断开，日志记录
 
+**实现要求**：handleGossip 收到首个 gossip 必须执行此检查，不匹配则 `transport.Close()` + Warn 日志。禁止静默接受版本不匹配的连接（v8 初版实现遗漏此检查，2026-10-30 修复）。
+
 ### 8.2 升级策略
 
 **建议**：所有节点同时升级到 v8，不做版本兼容。
@@ -466,5 +509,14 @@ v8 的核心思想是**简化协议，依赖最终一致性**：
 2. **统一信息传播**：所有拓扑信息通过 gossip 广播，没有 hello/gossip 的区分
 3. **专门的链路测量**：ping/pong 帧用于测量 RTT 和丢包率，不影响 gossip 机制
 4. **消除时序问题**：nodeID/subnet 变更随 gossip 传播，最终一致
+
+## 变更记录
+
+- **2026-10-30**：根据代码审查结论（`docs/issues/p2p-v8-mesh-regression.md`）修订，决策人为用户本人：
+  1. 协议版本 8 → **10**（避让线上 v9 节点），版本协商升级为强制检查（§2.3、§8.1）
+  2. `GossipInfo` 补充 `Seq` 字段，明确链路标识协商流程（§3.2、§5.3）——gossip 帧携带本端 Seq，对端首个 gossip 推导 RemoteSeq/LinkID
+  3. §3.3 增加"Subnet 变更禁止热生效"实现红线，恢复 `restart_required` 语义；subnet 冲突自动重分配只改库不热改
+  4. §4.3 丢包率改为滑动窗口统计（最近 20 次）+ 发送失败不计入 + 超时清理记为丢包，替代原会话累计方案
+  5. §4.4 故障检测（多 ping 无响应断链）标注为**后续增强**，v10 不实现
 
 这样既简化了协议实现，又保证了功能的完整性。

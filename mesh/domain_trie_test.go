@@ -12,7 +12,6 @@ func (s *mockSender) Send(data []byte) error  { return nil }
 func (s *mockSender) SendGossip(data []byte)  {}
 func (s *mockSender) GetNodeID() string       { return s.nodeID }
 func (s *mockSender) GetProxyName() string    { return "" }
-func (s *mockSender) GetLinkID() string       { return "" }
 func (s *mockSender) GetLocalSeq() uint16     { return 0 }
 func (s *mockSender) GetRemoteSeq() uint16    { return 0 }
 func (s *mockSender) GetFriendlyName() string { return "" }

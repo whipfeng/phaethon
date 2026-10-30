@@ -29,7 +29,7 @@ func NewPeerQuality() *PeerQuality {
 func (q *PeerQuality) Stats() (avgRTT time.Duration, loss, jitter float64) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return q.ackRTT, q.ackLossRate, float64(q.ackJitter.Milliseconds())
+	return q.ackRTT, q.ackLossRate, float64(q.ackJitter)/float64(time.Millisecond)
 }
 
 // StatsWithConfidence returns quality metrics with confidence score.
@@ -39,7 +39,7 @@ func (q *PeerQuality) StatsWithConfidence() (avgRTT time.Duration, loss, jitter 
 	
 	avgRTT = q.ackRTT
 	loss = q.ackLossRate
-	jitter = float64(q.ackJitter.Milliseconds())
+	jitter = float64(q.ackJitter) / float64(time.Millisecond)
 	confidence = q.calculateConfidence()
 	
 	return

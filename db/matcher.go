@@ -246,62 +246,12 @@ func (m *RuleMatcher) init() error {
 	}
 
 	// Validate and precompute resolvers.
-	nodeID := ""
-	if m.mesh != nil {
-		nodeID = strings.TrimSpace(m.mesh.NodeID)
+	util.LogModuleInfo("system", "init: mesh=%v resolverCount=%d", m.mesh != nil, len(m.resolvers))
+	resolvers, err := m.prepareResolvers(m.resolvers)
+	if err != nil {
+		return err
 	}
-	util.LogModuleInfo("system", "init: mesh=%v nodeID=%q resolverCount=%d", m.mesh != nil, nodeID, len(m.resolvers))
-	for _, resolver := range m.resolvers {
-		if resolver == nil {
-			continue
-		}
-		resolver.Proto = strings.ToLower(strings.TrimSpace(resolver.Proto))
-		switch resolver.Proto {
-		case "", "tcp", "udp":
-		default:
-			return fmt.Errorf("resolver %s: invalid proto %q (must be tcp or udp)", resolver.Name, resolver.Proto)
-		}
-		resolver.SrcFull = ""
-		if resolver.SrcRelative {
-			if strings.TrimSpace(resolver.SrcHost) == "" {
-				return fmt.Errorf("resolver %s: src-relative requires src-host", resolver.Name)
-			}
-			if nodeID == "" {
-				return fmt.Errorf("resolver %s: src-relative requires mesh node-id", resolver.Name)
-			}
-			resolver.SrcFull = resolver.SrcHost + "." + nodeID + ".phn"
-		}
-	}
-
-	// Inject built-in loopback resolver: loc.<node-id>.phn -> 127.0.0.1
-	// (host-only rewrite, port preserved). Only when mesh node-id is available
-	// and no user-defined resolver already matches this source.
-	if nodeID != "" {
-		loopbackSrc := "loc." + nodeID + ".phn"
-		hasLoopback := false
-		for _, resolver := range m.resolvers {
-			if resolver != nil && resolver.EffectiveSrcHost() == loopbackSrc {
-				hasLoopback = true
-				break
-			}
-		}
-		if !hasLoopback {
-			enabled := true
-			m.resolvers = append([]*config.Resolver{{
-				Name:    "__LOOPBACK_LOC__",
-				Enabled: &enabled,
-				SrcHost: loopbackSrc,
-				SrcPort: 0,
-				DstHost: "127.0.0.1",
-				DstPort: 0,
-			}}, m.resolvers...)
-			util.LogModuleInfo("system", "injected loopback resolver: %s -> 127.0.0.1", loopbackSrc)
-		} else {
-			util.LogModuleInfo("system", "loopback resolver already exists: %s", loopbackSrc)
-		}
-	} else {
-		util.LogModuleWarn("system", "nodeID is empty, skip loopback resolver injection")
-	}
+	m.resolvers = resolvers
 
 	// 初始化代理组
 	for _, group := range m.groups {
@@ -363,6 +313,65 @@ func (m *RuleMatcher) init() error {
 	}
 
 	return nil
+}
+
+// prepareResolvers 校验并预计算 resolver 列表（构建期与热更新共用）：
+// proto 校验、src-relative 展开为 <host>.<node-id>.phn、注入 loopback。
+func (m *RuleMatcher) prepareResolvers(resolvers []*config.Resolver) ([]*config.Resolver, error) {
+	nodeID := ""
+	if m.mesh != nil {
+		nodeID = strings.TrimSpace(m.mesh.NodeID)
+	}
+	for _, resolver := range resolvers {
+		if resolver == nil {
+			continue
+		}
+		resolver.Proto = strings.ToLower(strings.TrimSpace(resolver.Proto))
+		switch resolver.Proto {
+		case "", "tcp", "udp":
+		default:
+			return nil, fmt.Errorf("resolver %s: invalid proto %q (must be tcp or udp)", resolver.Name, resolver.Proto)
+		}
+		resolver.SrcFull = ""
+		if resolver.SrcRelative {
+			if strings.TrimSpace(resolver.SrcHost) == "" {
+				return nil, fmt.Errorf("resolver %s: src-relative requires src-host", resolver.Name)
+			}
+			if nodeID == "" {
+				return nil, fmt.Errorf("resolver %s: src-relative requires mesh node-id", resolver.Name)
+			}
+			resolver.SrcFull = resolver.SrcHost + "." + nodeID + ".phn"
+		}
+	}
+
+	// Inject built-in loopback resolver: loc.<node-id>.phn -> 127.0.0.1
+	// (host-only rewrite, port preserved). Only when mesh node-id is available
+	// and no user-defined resolver already matches this source.
+	if nodeID != "" {
+		loopbackSrc := "loc." + nodeID + ".phn"
+		hasLoopback := false
+		for _, resolver := range resolvers {
+			if resolver != nil && resolver.EffectiveSrcHost() == loopbackSrc {
+				hasLoopback = true
+				break
+			}
+		}
+		if !hasLoopback {
+			enabled := true
+			resolvers = append([]*config.Resolver{{
+				Name:    "__LOOPBACK_LOC__",
+				Enabled: &enabled,
+				SrcHost: loopbackSrc,
+				SrcPort: 0,
+				DstHost: "127.0.0.1",
+				DstPort: 0,
+			}}, resolvers...)
+			util.LogModuleInfo("system", "injected loopback resolver: %s -> 127.0.0.1", loopbackSrc)
+		}
+	} else {
+		util.LogModuleWarn("system", "nodeID is empty, skip loopback resolver injection")
+	}
+	return resolvers, nil
 }
 
 // GetGroup 获取指定的代理组（用于 API 查询）
@@ -788,6 +797,22 @@ func onConfigChange(event ChangeEvent) {
 			m.mappings[key] = mapping
 			util.LogModuleInfo("db", "watch: updated mapping %s", key)
 		}
+
+	case string(BucketResolvers):
+		// resolver 增删改：与构建期同一套校验/预计算，原位替换（不重建
+		// matcher，保留注入的动态 mapping 等运行时状态）。
+		resolvers, err := ListResolvers()
+		if err != nil {
+			util.LogModuleError("db", "watch: failed to reload resolvers: %v", err)
+			return
+		}
+		prepared, err := m.prepareResolvers(resolvers)
+		if err != nil {
+			util.LogModuleError("db", "watch: prepare resolvers failed: %v", err)
+			return
+		}
+		m.resolvers = prepared
+		util.LogModuleInfo("db", "watch: reloaded %d resolvers", len(prepared))
 
 	case string(BucketRules):
 		// 规则变更，重新加载所有规则

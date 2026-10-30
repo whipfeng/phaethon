@@ -29,7 +29,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1494,9 +1493,8 @@ func (s *AdminServer) handleResolversPage(w http.ResponseWriter, r *http.Request
 
 func (s *AdminServer) handleReverseWizardPage(w http.ResponseWriter, r *http.Request) {
 	proxies, _ := db.ListProxies()
-	// Load instance ReverseID from file
-	dataDir := filepath.Join("data", "setup")
-	instanceReverseID, _ := reverse.GetReverseID(dataDir)
+	// Load instance ReverseID (node-id from mesh config)
+	instanceReverseID, _ := reverse.GetReverseID()
 
 	// Build proxy list with reverse-support flag
 	type proxyInfo struct {
@@ -3950,10 +3948,6 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 			rc.Seq = next
 		}
 
-		// Ensure instance ReverseID exists in file
-		dataDir := filepath.Join("data", "setup")
-		_, _ = reverse.GetReverseID(dataDir)
-
 		if err := db.PutReverseConfig(&rc); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save config fail: "+err.Error(), http.StatusInternalServerError)
@@ -5058,10 +5052,6 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			rc.Name = candidate
 			newNames[candidate] = true
 		}
-
-		// Ensure instance ReverseID exists
-		dataDir := filepath.Join("data", "setup")
-		_, _ = reverse.GetReverseID(dataDir)
 	}
 
 	// Save admin config to database

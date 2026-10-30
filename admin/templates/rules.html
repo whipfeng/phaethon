@@ -58,6 +58,15 @@
                     <input type="text" id="test-input" data-i18n-placeholder="rule.testerPlaceholder" placeholder="example.com or 1.2.3.4"
                            onkeypress="if(event.key==='Enter') testRule()">
                 </div>
+                <div class="form-group">
+                    <select id="test-mapping">
+                        <option value="" data-i18n="rule.anyMapping">Any mapping</option>
+                        <option value="TUN">TUN (tun)</option>
+                        {{range .Mappings}}
+                        <option value="{{.Name}}">{{.Name}} ({{.Type}})</option>
+                        {{end}}
+                    </select>
+                </div>
                 <button onclick="testRule()" class="btn" data-i18n="rule.btnTest">Test</button>
             </div>
             <div id="rule-test-result" class="hidden"></div>
@@ -498,101 +507,48 @@ function toggleRuleFields() {
 async function testRule() {
     const input = document.getElementById('test-input').value.trim();
     if (!input) return;
+    const mappingSel = document.getElementById('test-mapping');
+    const mapping = mappingSel ? mappingSel.value : '';
     const resultDiv = document.getElementById('rule-test-result');
     resultDiv.classList.remove('hidden');
-    resultDiv.innerHTML = '<p>Testing: <code>' + escapeHtml(input) + '</code></p>';
+    resultDiv.innerHTML = '<p>Testing: <code>' + escapeHtml(input) + '</code>' +
+        (mapping ? ' <span class="text-muted">[' + escapeHtml(mapping) + ']</span>' : '') + '</p>';
 
-    let matchedId = null;
-    let matchedRule = '';
-    for (const ruleObj of rulesData) {
-        if (!isRuleEnabled(ruleObj.rule)) continue;
-        if (ruleMatches(input, ruleObj.rule)) {
-            matchedId = ruleObj.id;
-            matchedRule = ruleObj.rule;
-            break;
+    try {
+        const resp = await fetch('./api/rules/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target: input, mapping: mapping})
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            resultDiv.innerHTML += '<p class="text-danger">Error: ' + escapeHtml(data.error || ('HTTP ' + resp.status)) + '</p>';
+            return;
         }
+        let html = '';
+        if (data.matched && data.rule) {
+            html += '<p class="text-success">→ ' + escapeHtml(data.rule) + '</p>';
+        } else {
+            const noMatch = typeof i18n !== 'undefined' ? i18n.t('rule.noMatch') : 'No explicit match found';
+            html += '<p class="text-muted">' + noMatch + '</p>';
+        }
+        if (data.proxy) {
+            let proxyLine = 'Proxy: <code>' + escapeHtml(data.proxy) + '</code>';
+            if (data.actualProxy && data.actualProxy !== data.proxy) {
+                proxyLine += ' → <code>' + escapeHtml(data.actualProxy) + '</code>';
+            }
+            html += '<p>' + proxyLine + '</p>';
+        }
+        if (data.resolved && data.resolved !== input) {
+            html += '<p class="text-muted">Resolved: <code>' + escapeHtml(data.resolved) + '</code></p>';
+        }
+        if (data.timeRange) {
+            html += '<p class="text-muted">Time range: ' + escapeHtml(data.timeRange) + '</p>';
+        }
+        resultDiv.innerHTML += html;
+    } catch (err) {
+        resultDiv.innerHTML += '<p class="text-danger">Request failed: ' + escapeHtml(err.message) + '</p>';
     }
-    if (matchedId !== null) {
-        resultDiv.innerHTML += `<p class="text-success">→ Rule ID=${matchedId}: ${escapeHtml(matchedRule)}</p>`;
-    } else {
-        const noMatch = typeof i18n !== 'undefined' ? i18n.t('rule.noMatch') : 'No explicit match found';
-        resultDiv.innerHTML += '<p class="text-muted">' + noMatch + '</p>';
-    }
-}
-
-function ruleMatches(input, rule) {
-    const [keyword, value] = parseRule(rule);
-    const lowerInput = input.toLowerCase();
-    const lowerValue = value.toLowerCase().replace(/^\./, '');
-    const kw = keyword.toUpperCase();
-
-    // A single-part rule like "DIRECT" is treated as a final MATCH rule.
-    if (rule.trim().split(',').length === 1) return true;
-
-    switch (kw) {
-        case 'MATCH': return true;
-        case 'DOMAIN': return lowerInput === lowerValue;
-        case 'DOMAIN-SUFFIX':
-            return lowerInput === lowerValue || lowerInput.endsWith('.' + lowerValue);
-        case 'DOMAIN-KEYWORD':
-            return lowerInput.includes(lowerValue);
-        case 'IP-CIDR':
-            return isIPv4(input) && ipv4InCidr(input, value);
-        case 'IP-CIDR6':
-            return isIPv6(input) && ipv6InCidr(input, value);
-        case 'GEOIP':
-            return false; // no GeoIP database in the browser
-        case 'DST-PORT':
-            return input === value;
-        case 'SRC-PORT':
-        case 'SRC-IP-CIDR':
-        case 'PROCESS-NAME':
-            return false;
-        default:
-            return false;
-    }
-}
-
-function isIPv4(s) {
-    return /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
-}
-
-function ipv4ToInt(s) {
-    return s.split('.').reduce((acc, n) => ((acc << 8) + parseInt(n, 10)) >>> 0, 0);
-}
-
-function ipv4InCidr(ip, cidr) {
-    const [net, bitsStr] = cidr.split('/');
-    const bits = parseInt(bitsStr, 10);
-    if (isNaN(bits) || bits < 0 || bits > 32) return false;
-    const mask = (-1 << (32 - bits)) >>> 0;
-    return (ipv4ToInt(ip) & mask) === (ipv4ToInt(net) & mask);
-}
-
-function isIPv6(s) {
-    return /^[0-9a-fA-F:]+$/.test(s) && s.includes(':');
-}
-
-function expandIPv6(ip) {
-    let groups = ip.split(':');
-    const emptyIdx = groups.findIndex(g => g === '');
-    if (emptyIdx >= 0) {
-        const nonEmpty = groups.filter(g => g !== '');
-        const zeros = Array(8 - nonEmpty.length).fill('0');
-        groups = [...nonEmpty.slice(0, emptyIdx), ...zeros, ...nonEmpty.slice(emptyIdx)];
-    }
-    return groups.map(g => (parseInt(g || '0', 16) || 0).toString(16).padStart(4, '0')).join('');
-}
-
-function ipv6InCidr(ip, cidr) {
-    const [net, bitsStr] = cidr.split('/');
-    const bits = parseInt(bitsStr, 10);
-    if (isNaN(bits) || bits < 0 || bits > 128) return false;
-    const ipInt = BigInt('0x' + expandIPv6(ip));
-    const netInt = BigInt('0x' + expandIPv6(net));
-    const lowerMask = (BigInt(1) << BigInt(128 - bits)) - BigInt(1);
-    const networkMask = (BigInt(1) << BigInt(128)) - BigInt(1) - lowerMask;
-    return (ipInt & networkMask) === (netInt & networkMask);
 }
 
 </script>

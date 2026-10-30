@@ -4,13 +4,6 @@ import (
 	"time"
 )
 
-// TUNState 存储 TUN 设备状态（用于恢复系统参数）
-type TUNState struct {
-	Interface string `json:"iface"`
-	RPFilter  int    `json:"rp_filter"`
-	IPForward int    `json:"ip_forward"`
-}
-
 // DHCPLease 存储单个 DHCP 租约
 type DHCPLease struct {
 	IP        string    `json:"ip"`
@@ -144,19 +137,4 @@ func GetPortBindings() ([]PortBinding, error) {
 // PutPortBindings 存储所有端口绑定
 func PutPortBindings(bindings []PortBinding) error {
 	return Put(BucketBindings, []byte("port-bindings"), bindings)
-}
-
-// GetTUNState 获取 TUN 设备状态
-func GetTUNState() (*TUNState, error) {
-	return getView[TUNState](BucketRuntimeState, []byte("tun-state"))
-}
-
-// PutTUNState 存储 TUN 设备状态
-func PutTUNState(state *TUNState) error {
-	return Put(BucketRuntimeState, []byte("tun-state"), state)
-}
-
-// DeleteTUNState 删除 TUN 设备状态
-func DeleteTUNState() error {
-	return Delete(BucketRuntimeState, []byte("tun-state"))
 }

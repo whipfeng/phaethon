@@ -2460,6 +2460,8 @@ let connLogLastSeq = 0;
 
 // ===== Active Connections =====
 var activeConnsMap = new Map();
+var activeConnsRows = new Map(); // conn id -> rendered <tr>
+var activeConnsTable = null;     // persistent <table>, tbody reused across renders
 var activeConnsLastSeq = 0;
 var activeConnsTimer = null;
 
@@ -2513,32 +2515,92 @@ function renderActiveConns() {
     if (!el) return;
 
     const conns = Array.from(activeConnsMap.values());
-    conns.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+    conns.forEach(c => { c._startMs = +new Date(c.startTime); });
+    conns.sort((a, b) => a._startMs - b._startMs);
 
     if (conns.length === 0) {
+        if (activeConnsTable) {
+            activeConnsTable.remove();
+            activeConnsTable = null;
+            activeConnsRows.clear();
+        }
         el.innerHTML = '<p class="text-muted" data-i18n="dash.noActiveConns">' + i18n.t('dash.noActiveConns') + '</p>';
     } else {
-        let html = '<table class="data-table" style="font-size:0.85rem;"><thead><tr>';
-        html += '<th data-i18n="dash.connProtocol">' + i18n.t('dash.connProtocol') + '</th>';
-        html += '<th data-i18n="dash.connInbound">' + i18n.t('dash.connInbound') + '</th>';
-        html += '<th data-i18n="dash.connSrc">' + i18n.t('dash.connSrc') + '</th>';
-        html += '<th data-i18n="dash.connDst">' + i18n.t('dash.connDst') + '</th>';
-        html += '<th data-i18n="dash.connRule">' + i18n.t('dash.connRule') + '</th>';
-        html += '<th data-i18n="dash.connDuration">' + i18n.t('dash.connDuration') + '</th>';
-        html += '</tr></thead><tbody>';
-        conns.forEach(c => {
-            const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
-            const src = c.srcAddr || '';
-            const dst = c.dstAddr + ':' + c.dstPort;
-            let rule = c.rule || c.proxy || 'DIRECT';
-            if (c.actualProxy && c.actualProxy !== c.proxy) {
-                rule += ' → ' + c.actualProxy;
+        if (!activeConnsTable) {
+            const table = document.createElement('table');
+            table.className = 'data-table';
+            table.style.fontSize = '0.85rem';
+            const thead = document.createElement('thead');
+            const headTr = document.createElement('tr');
+            [['dash.connProtocol', 'Protocol'], ['dash.connInbound', 'Inbound'], ['dash.connSrc', 'Source'], ['dash.connDst', 'Destination'], ['dash.connRule', 'Rule'], ['dash.connDuration', 'Duration']].forEach(([key, label]) => {
+                const th = document.createElement('th');
+                th.setAttribute('data-i18n', key);
+                th.textContent = i18n.t(key);
+                th.dataset.label = label;
+                headTr.appendChild(th);
+            });
+            thead.appendChild(headTr);
+            const tbody = document.createElement('tbody');
+            table.appendChild(thead);
+            table.appendChild(tbody);
+            el.innerHTML = '';
+            el.appendChild(table);
+            activeConnsTable = table;
+        }
+        const tbody = activeConnsTable.tBodies[0];
+
+        // Drop rows for connections that no longer exist.
+        const seen = new Set();
+        conns.forEach(c => seen.add(c.id));
+        for (const [id, tr] of activeConnsRows) {
+            if (!seen.has(id)) {
+                tr.remove();
+                activeConnsRows.delete(id);
             }
-            const inbound = c.inbound || '';
-            html += '<tr><td data-label="Protocol">' + c.protocol + '</td><td data-label="Inbound">' + inbound + '</td><td data-label="Source">' + src + '</td><td data-label="Destination">' + dst + '</td><td data-label="Rule">' + rule + '</td><td data-label="Duration" data-start="' + c.startTime + '">' + dur + '</td></tr>';
+        }
+
+        // Create rows for new connections; cell text via textContent (no HTML injection risk).
+        conns.forEach(c => {
+            let tr = activeConnsRows.get(c.id);
+            if (!tr) {
+                tr = document.createElement('tr');
+                ['Protocol', 'Inbound', 'Source', 'Destination', 'Rule'].forEach(label => {
+                    const td = document.createElement('td');
+                    td.dataset.label = label;
+                    tr.appendChild(td);
+                });
+                const durTd = document.createElement('td');
+                durTd.dataset.label = 'Duration';
+                tr.appendChild(durTd);
+                const src = c.srcAddr || '';
+                const dst = c.dstAddr + ':' + c.dstPort;
+                let rule = c.rule || c.proxy || 'DIRECT';
+                if (c.actualProxy && c.actualProxy !== c.proxy) {
+                    rule += ' → ' + c.actualProxy;
+                }
+                tr.children[0].textContent = c.protocol || '';
+                tr.children[1].textContent = c.inbound || '';
+                tr.children[2].textContent = src;
+                tr.children[3].textContent = dst;
+                tr.children[4].textContent = rule;
+                durTd.dataset.start = String(c._startMs);
+                activeConnsRows.set(c.id, tr);
+            } else {
+                const durTd = tr.children[5];
+                if (durTd.dataset.start !== String(c._startMs)) {
+                    durTd.dataset.start = String(c._startMs);
+                }
+            }
         });
-        html += '</tbody></table>';
-        el.innerHTML = html;
+
+        // Reorder: appendChild on an existing node moves it, so a single pass
+        // in sorted order yields the correct final order without rebuilding.
+        conns.forEach(c => tbody.appendChild(activeConnsRows.get(c.id)));
+
+        const now = Date.now();
+        activeConnsRows.forEach(tr => {
+            tr.children[5].textContent = formatDuration(now - +tr.children[5].dataset.start);
+        });
     }
 
     if (countEl) {
@@ -2549,8 +2611,9 @@ function renderActiveConns() {
 function startActiveConnsTimer() {
     if (activeConnsTimer) return;
     activeConnsTimer = setInterval(() => {
+        const now = Date.now();
         document.querySelectorAll('#active-conns-list td[data-start]').forEach(td => {
-            td.textContent = formatDuration(Date.now() - new Date(td.dataset.start).getTime());
+            td.textContent = formatDuration(now - +td.dataset.start);
         });
     }, 1000);
 }
@@ -2720,6 +2783,85 @@ async function openConnsPopup() {
     }
 }
 
+const MAX_CONN_LOG_LINES = 500;
+var connLogLines = [];       // model: retained log lines, oldest first
+var connLogFilterQuery = ''; // active filter (lowercased), '' = show all
+
+function connLogFormatEntry(e) {
+    const date = new Date(e.time);
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    const ms = String(date.getMilliseconds()).padStart(3, '0');
+    const time = `${hours}:${minutes}:${seconds}.${ms}`;
+    const icon = e.status === 'ok' ? '✓' : '✗';
+    const inbound = e.inbound || '';
+    const src = e.srcAddr || '';
+    let target = e.rule || e.proxy || 'DIRECT';
+    if (e.actualProxy && e.actualProxy !== e.proxy) {
+        target += ' → ' + e.actualProxy;
+    }
+    let line = `${icon} [${inbound}] ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
+    if (e.error) line += ` (${e.error})`;
+    return `[${time}] ${line}`;
+}
+
+// Full rebuild of the <pre> from the model. Used on first load, filter
+// changes, and any time incremental node surgery doesn't apply.
+function connLogRenderAll(el) {
+    const visible = connLogFilterQuery
+        ? connLogLines.filter(l => l.toLowerCase().includes(connLogFilterQuery))
+        : connLogLines;
+    el.textContent = '';
+    if (visible.length === 0) {
+        el.textContent = connLogFilterQuery ? 'No matching logs' : 'No logs yet';
+        return;
+    }
+    const frag = document.createDocumentFragment();
+    visible.forEach(l => {
+        const div = document.createElement('div');
+        div.textContent = l;
+        frag.appendChild(div);
+    });
+    el.appendChild(frag);
+}
+
+// Append new lines to the model and patch the DOM incrementally: remove
+// trimmed head nodes, append one div per new line. Falls back to a full
+// rebuild when a filter is active or the element has no line nodes yet.
+function connLogAppend(el, lines) {
+    connLogLines.push(...lines);
+    let trimmed = 0;
+    if (connLogLines.length > MAX_CONN_LOG_LINES) {
+        trimmed = connLogLines.length - MAX_CONN_LOG_LINES;
+        connLogLines.splice(0, trimmed);
+    }
+    if (connLogFilterQuery || el.firstElementChild === null) {
+        connLogRenderAll(el);
+        return;
+    }
+    for (let i = 0; i < trimmed && el.firstChild; i++) {
+        el.removeChild(el.firstChild);
+    }
+    const frag = document.createDocumentFragment();
+    lines.forEach(l => {
+        const div = document.createElement('div');
+        div.textContent = l;
+        frag.appendChild(div);
+    });
+    el.appendChild(frag);
+}
+
+// Filter entry point for the logs page.
+function setConnLogFilter(query) {
+    connLogFilterQuery = query.toLowerCase();
+    const el = document.getElementById('conn-logs');
+    if (el) {
+        connLogRenderAll(el);
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
 async function fetchConnections(incremental) {
     const el = document.getElementById('conn-logs');
     if (!el) return;
@@ -2731,39 +2873,15 @@ async function fetchConnections(incremental) {
         const res = await fetch(url);
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();
+        if (!incremental) {
+            connLogLines = [];
+            el.textContent = '';
+        }
         if (!data.logs || data.logs.length === 0) {
-            if (!incremental) el.textContent = 'No logs yet';
+            if (!incremental) connLogRenderAll(el);
             return;
         }
-        const lines = data.logs.map(e => {
-            const date = new Date(e.time);
-            const hours = String(date.getHours()).padStart(2, '0');
-            const minutes = String(date.getMinutes()).padStart(2, '0');
-            const seconds = String(date.getSeconds()).padStart(2, '0');
-            const ms = String(date.getMilliseconds()).padStart(3, '0');
-            const time = `${hours}:${minutes}:${seconds}.${ms}`;
-            const icon = e.status === 'ok' ? '✓' : '✗';
-            const inbound = e.inbound || '';
-            const src = e.srcAddr || '';
-            let target = e.rule || e.proxy || 'DIRECT';
-            if (e.actualProxy && e.actualProxy !== e.proxy) {
-                target += ' → ' + e.actualProxy;
-            }
-            let line = `${icon} [${inbound}] ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
-            if (e.error) line += ` (${e.error})`;
-            return `[${time}] ${line}`;
-        });
-        if (incremental && el.textContent !== 'No logs yet' && el.textContent !== '') {
-            el.textContent += '\n' + lines.join('\n');
-        } else {
-            el.textContent = lines.join('\n');
-        }
-        // Trim oldest logs to prevent unbounded memory growth
-        const MAX_DASHBOARD_LOG_LINES = 500;
-        const allLines = el.textContent.split('\n');
-        if (allLines.length > MAX_DASHBOARD_LOG_LINES) {
-            el.textContent = allLines.slice(allLines.length - MAX_DASHBOARD_LOG_LINES).join('\n');
-        }
+        connLogAppend(el, data.logs.map(connLogFormatEntry));
         connLogLastSeq = data.logs[data.logs.length - 1].seq;
         // Only auto-scroll if checkbox is checked
         const autoScrollCheckbox = document.getElementById('log-auto-scroll');

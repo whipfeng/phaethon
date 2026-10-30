@@ -6,67 +6,7 @@ import (
 	"math/big"
 	"net"
 	"strconv"
-
-	"phaethon/config"
-	"phaethon/db"
 )
-
-// MeshState holds the persistent mesh node state.
-type MeshState struct {
-	NodeID string `json:"nodeId"`
-	Subnet string `json:"subnet,omitempty"`
-}
-
-// LoadState loads the mesh state from database.
-// Returns nil if no state exists.
-func LoadState(dataDir string) (*MeshState, error) {
-	nodeID, err := db.GetNodeID()
-	if err != nil {
-		return nil, fmt.Errorf("load node-id from db fail: %w", err)
-	}
-	if nodeID == "" {
-		return nil, nil
-	}
-	
-	// Load subnet from MeshConfig
-	cfg, err := db.GetMeshConfig()
-	if err != nil {
-		return nil, fmt.Errorf("load mesh config from db fail: %w", err)
-	}
-	
-	subnet := ""
-	if cfg != nil {
-		subnet = cfg.Subnet
-	}
-	
-	return &MeshState{
-		NodeID: nodeID,
-		Subnet: subnet,
-	}, nil
-}
-
-// SaveState persists the mesh state to database.
-func SaveState(dataDir string, state *MeshState) error {
-	// Save node-id to state bucket
-	if err := db.PutNodeID(state.NodeID); err != nil {
-		return fmt.Errorf("save node-id to db fail: %w", err)
-	}
-	
-	// Save subnet to MeshConfig
-	cfg, err := db.GetMeshConfig()
-	if err != nil {
-		return fmt.Errorf("load mesh config fail: %w", err)
-	}
-	if cfg == nil {
-		cfg = &config.MeshConfig{}
-	}
-	cfg.Subnet = state.Subnet
-	if err := db.PutMeshConfig(cfg); err != nil {
-		return fmt.Errorf("save mesh config to db fail: %w", err)
-	}
-	
-	return nil
-}
 
 // GenerateNodeID generates a random 64-bit integer as a string.
 func GenerateNodeID() (string, error) {

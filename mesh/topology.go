@@ -69,6 +69,8 @@ type GossipLink struct {
 	SRTT         float64 `json:"srtt,omitempty"`         // 平滑 RTT (ms)
 	LossRate     float64 `json:"lossRate,omitempty"`     // 丢包率 (0.0-1.0)
 	Jitter       float64 `json:"jitter,omitempty"`       // 抖动 (ms)，向后兼容（旧节点为 0）
+	DropRate     float64 `json:"dropRate,omitempty"`     // 本机出向队列丢包率 (0.0-1.0, Phase B)
+	SojournMs    float64 `json:"sojournMs,omitempty"`    // 排队时延 EMA (ms, Phase B)
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.

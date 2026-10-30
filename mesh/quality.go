@@ -17,6 +17,12 @@ type PeerQuality struct {
 	ackJitter     time.Duration // jitter (RTT standard deviation)
 	ackSampleCount int          // number of samples in the window
 	ackUpdated    time.Time     // last time ACK stats were updated
+
+	// Egress health (Phase B): locally-observed forwarding health to this
+	// peer, pulled from the p2p layer's drop-window/sojourn measurement.
+	// Freshness is guaranteed by the periodic pull; no decay needed.
+	dropRate  float64 // queue drop rate (0.0-1.0)
+	sojournMs float64 // EMA of enqueue→write delay (ms)
 }
 
 // defaultAckRTT is the prior estimate for an unprobed link, injected as a
@@ -83,6 +89,21 @@ func (q *PeerQuality) UpdateACKStats(srtt time.Duration, lossRate float64, jitte
 	q.ackJitter = jitter
 	q.ackSampleCount = sampleCount
 	q.ackUpdated = time.Now()
+}
+
+// UpdateEgressStats stores the p2p-layer egress health for this link (Phase B).
+func (q *PeerQuality) UpdateEgressStats(dropRate, sojournMs float64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.dropRate = dropRate
+	q.sojournMs = sojournMs
+}
+
+// EgressStats returns the locally-observed egress health (Phase B).
+func (q *PeerQuality) EgressStats() (dropRate, sojournMs float64) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.dropRate, q.sojournMs
 }
 
 // LastACKUpdate returns the time of the last ACK-based stats update.

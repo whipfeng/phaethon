@@ -87,7 +87,7 @@
 
 | 文档 | 描述 | 状态 |
 |------|------|------|
-| [p2p-v8-mesh-regression.md](issues/p2p-v8-mesh-regression.md) | P2P v8 重写与 mesh 热重载审查发现（10 项，含阻断级 mesh 注册丢失） | 诊断中 |
+| [p2p-v8-mesh-regression.md](issues/p2p-v8-mesh-regression.md) | P2P v8 重写审查发现（10 项 + 路由环路分析，含阻断级 mesh 注册丢失） | 修复中 |
 
 ### inputs/ (原始需求与历史分析)
 

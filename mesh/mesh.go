@@ -1909,6 +1909,7 @@ func (m *MeshManager) recomputeRoutes() {
 	validatedClaims := m.buildValidatedClaims(peers)
 	graph := m.buildTopologyGraph(validatedClaims)
 	bestPaths := dijkstra(graph, m.nodeID)
+	bestPaths = m.applyHysteresis(graph, bestPaths)
 
 	// Diagnostic: log bestPaths for debugging
 	if ForwardingTraceEnabled() {
@@ -2941,7 +2942,7 @@ type LinkQualityInfo struct {
 	SRTT      float64   // smoothed RTT in milliseconds
 	LossRate  float64   // loss rate (0.0-1.0)
 	Jitter    float64   // jitter in milliseconds
-	Cost      float64   // path cost = SRTT * (1 + LossRate) + Jitter
+	Cost      float64   // link cost = SRTT / max(1-LossRate, 0.01) / confidence
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -3102,18 +3103,11 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		}
 		if m.qualityTracker != nil {
 			quality := m.qualityTracker.Get(neighborID, localSeq)
-			avgRTT, lossRate, jitterVal := quality.Stats()
+			avgRTT, lossRate, jitterVal, confidence := quality.StatsWithConfidence()
 			link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 			link.LossRate = lossRate
 			link.Jitter = jitterVal
-			// Cost calculation: penalize high loss rates (consistent with line 1322-1328)
-			if link.SRTT > 0 && lossRate < 1.0 {
-				link.Cost = link.SRTT / (1 - lossRate)
-			} else if link.SRTT > 0 {
-				link.Cost = 10000 // complete loss
-			} else {
-				link.Cost = 1000 // no RTT data
-			}
+			link.Cost = linkCost(link.SRTT, lossRate, confidence)
 		} else {
 			link.Cost = 1000
 		}
@@ -3150,11 +3144,9 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 					RemoteSeq: gossipLink.RemoteSeq,
 					SRTT:      gossipLink.SRTT,
 					LossRate:  gossipLink.LossRate,
-				}
-				if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
-					link.Cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
-				} else {
-					link.Cost = 1000 // default high cost
+					// Remote nodes already bake confidence into the values
+					// they gossip; validated-claim freshness covers staleness.
+					Cost: linkCost(gossipLink.SRTT, gossipLink.LossRate, 1.0),
 				}
 
 				if graph.Edges[fromNode] == nil {
@@ -3182,11 +3174,35 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 	return graph
 }
 
+// linkCost computes the per-link cost (design: link_quality_v2 §A1/A2):
+// SRTT / max(1-LossRate, 0.01) / confidence. No unprobed sentinel — a fresh
+// tracker carries the 100ms prior with confidence 0.1, yielding cost 1000.
+func linkCost(srtt, lossRate, confidence float64) float64 {
+	denom := 1.0 - lossRate
+	if denom < 0.01 {
+		denom = 0.01
+	}
+	if confidence <= 0 {
+		confidence = 0.01
+	}
+	return srtt / denom / confidence
+}
+
+const (
+	// hopPenaltyMs compensates the hidden cost of each extra transit hop
+	// (failure domain, relay queuing, blackhole probability) — Babel-style.
+	hopPenaltyMs = 5.0
+	// routeHysteresis: a new nextHop is adopted only when it beats the
+	// incumbent path's current cost by this fraction (design §A4).
+	routeHysteresis = 0.15
+)
+
 // dijkstraResult represents the result of Dijkstra's algorithm for a single destination.
 type dijkstraResult struct {
 	NextHop string   // next hop node ID
 	LinkNIC *LinkNIC // LinkNIC for the first hop (direct link)
 	Cost    float64  // total path cost
+	Path    []string // full hop sequence from nextHop to target (for hysteresis re-evaluation)
 }
 
 // dijkstra computes shortest paths from source to all other nodes.
@@ -3196,6 +3212,7 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 		cost    float64
 		nextHop string
 		linkNIC *LinkNIC // LinkNIC for the first hop (direct link)
+		path    []string // hop sequence from source's neighbor to this node
 		visited bool
 	}
 
@@ -3239,17 +3256,20 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 						bestLink = link
 					}
 				}
-				newCost := nodes[minNode].cost + bestCost
+				newCost := nodes[minNode].cost + bestCost + hopPenaltyMs
 
-				// Determine next hop and LinkNIC
+				// Determine next hop, LinkNIC and path
 				var nextHop string
 				var linkNIC *LinkNIC
+				var path []string
 				if minNode == source {
 					nextHop = toNode // direct neighbor
 					linkNIC = bestLink.LinkNIC // direct link has LinkNIC
+					path = []string{toNode}
 				} else {
 					nextHop = nodes[minNode].nextHop  // inherit next hop
 					linkNIC = nodes[minNode].linkNIC  // inherit first hop's LinkNIC
+					path = append(append([]string{}, nodes[minNode].path...), toNode)
 				}
 
 				// Update if better cost, or same cost with lexicographically smaller nextHop (deterministic tie-breaking)
@@ -3257,6 +3277,7 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 					nodes[toNode].cost = newCost
 					nodes[toNode].nextHop = nextHop
 					nodes[toNode].linkNIC = linkNIC
+					nodes[toNode].path = path
 				}
 			}
 		}
@@ -3270,11 +3291,65 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				NextHop: info.nextHop,
 				LinkNIC: info.linkNIC,
 				Cost:    info.cost,
+				Path:    info.path,
 			}
 		}
 	}
 
 	return result
+}
+
+// pathCost re-evaluates a stored hop sequence against the current graph,
+// applying the same per-hop selection and hop penalty as dijkstra.
+// Returns 1e18 if any hop is no longer present.
+func pathCost(source string, graph *TopologyGraph, path []string) float64 {
+	if len(path) == 0 {
+		return 1e18
+	}
+	total := 0.0
+	from := source
+	for _, to := range path {
+		links := graph.Edges[from][to]
+		if len(links) == 0 {
+			return 1e18
+		}
+		best := links[0].Cost
+		for _, l := range links[1:] {
+			if l.Cost < best {
+				best = l.Cost
+			}
+		}
+		total += best + hopPenaltyMs
+		from = to
+	}
+	return total
+}
+
+// applyHysteresis dampens nextHop flapping (design §A4): when the newly
+// computed best path differs from the incumbent, the incumbent is kept
+// unless the new path beats the incumbent's CURRENT cost by routeHysteresis.
+// The incumbent's cost is re-derived from the current graph via its stored
+// Path, so a degrading incumbent is not masked by a frozen stale cost.
+func (m *MeshManager) applyHysteresis(graph *TopologyGraph, bestPaths map[string]dijkstraResult) map[string]dijkstraResult {
+	old := m.getRouteTable()
+	if old == nil {
+		return bestPaths
+	}
+	for target, newPath := range bestPaths {
+		oldPath, ok := old.bestPaths[target]
+		if !ok || oldPath.NextHop == "" || oldPath.NextHop == newPath.NextHop || len(oldPath.Path) == 0 {
+			continue
+		}
+		incumbent := pathCost(m.nodeID, graph, oldPath.Path)
+		if incumbent >= 1e17 {
+			continue // incumbent no longer viable — adopt new path
+		}
+		if newPath.Cost >= incumbent*(1-routeHysteresis) {
+			oldPath.Cost = incumbent
+			bestPaths[target] = oldPath
+		}
+	}
+	return bestPaths
 }
 
 // edgeKey returns a canonical key for an edge between two nodes (sorted order).

@@ -193,9 +193,10 @@ func (s *peerSender) GetLinkNIC() *mesh.LinkNIC {
 
 // writeReq is a frame queued for async write on the peer connection.
 type writeReq struct {
-	frameType byte
-	data      []byte
-	isControl bool
+	frameType   byte
+	data        []byte
+	isControl   bool
+	enqueueTime time.Time // set by enqueueWriteReq; used for sojourn measurement (Phase B)
 }
 
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
@@ -368,6 +369,16 @@ type Peer struct {
 	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
 	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
 	controlChDrops      uint64 // Frames dropped due to controlCh full
+
+	// Egress health state (Phase B): locally-observed forwarding health.
+	// Sampled into a window drop rate by sampleEgressWindow (called on the
+	// mesh layer's 10s stats pull); sojourn is an EMA of enqueue→write delay.
+	egressMu       sync.Mutex
+	framesSent     uint64  // non-control frames written since last window sample
+	lastDropCnt    uint64  // totalDataDrops() snapshot at last window sample
+	dropRateEMA    float64 // EMA of window drop rate (0.0-1.0)
+	sojournEMA     float64 // EMA of sojourn in ms
+	sojournSamples uint64  // sojourn samples since last window sample
 }
 
 // Status getter/setter (thread-safe)
@@ -563,6 +574,14 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s", peer.ID)
 		}
+		// Egress health (Phase B): a successfully written non-control frame counts
+		// toward the window denominator; its sojourn feeds the EMA.
+		if !req.isControl {
+			peer.egressMu.Lock()
+			peer.framesSent++
+			peer.egressMu.Unlock()
+			peer.recordSojourn(req)
+		}
 		return true
 	}
 
@@ -604,6 +623,13 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s batch=%d", peer.ID, len(batch))
 			}
+		}
+		// Egress health (Phase B): batch frames are all data-path.
+		peer.egressMu.Lock()
+		peer.framesSent += uint64(len(batch))
+		peer.egressMu.Unlock()
+		for _, req := range batch {
+			peer.recordSojourn(req)
 		}
 		return true
 	}
@@ -752,6 +778,8 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		return ErrPeerStopped
 	default:
 	}
+
+	req.enqueueTime = time.Now()
 
 	// Select channel based on priority:
 	// 1. Control frames -> controlCh (highest priority)
@@ -2086,10 +2114,56 @@ func (m *P2PManager) GetPeers() []Peer {
 	return result
 }
 
+// recordSojourn feeds one enqueue→write sample into the sojourn EMA (Phase B).
+// Control frames skip measurement — their priority queue wait is by design.
+func (p *Peer) recordSojourn(req writeReq) {
+	if req.enqueueTime.IsZero() || req.isControl {
+		return
+	}
+	ms := float64(time.Since(req.enqueueTime).Microseconds()) / 1000.0
+	p.egressMu.Lock()
+	if p.sojournSamples == 0 {
+		p.sojournEMA = ms
+	} else {
+		p.sojournEMA += 0.2 * (ms - p.sojournEMA)
+	}
+	p.sojournSamples++
+	p.egressMu.Unlock()
+}
+
+// sampleEgressWindow closes the current drop-rate window and returns the
+// smoothed egress health. Called on the mesh layer's periodic (10s) stats
+// pull, so the window length equals the pull interval. When the window saw
+// no traffic, both metrics decay toward zero so idle links don't carry a
+// stale congestion penalty.
+func (p *Peer) sampleEgressWindow() (dropRate, sojournMs float64) {
+	p.egressMu.Lock()
+	defer p.egressMu.Unlock()
+
+	drops := p.totalDataDrops()
+	windowDrops := drops - p.lastDropCnt
+	windowSent := p.framesSent
+	p.lastDropCnt = drops
+	p.framesSent = 0
+
+	total := windowDrops + windowSent
+	var rate float64
+	if total > 0 {
+		rate = float64(windowDrops) / float64(total)
+	}
+	p.dropRateEMA = 0.5*p.dropRateEMA + 0.5*rate
+
+	if p.sojournSamples == 0 {
+		p.sojournEMA *= 0.5 // idle window: decay toward 0
+	}
+	p.sojournSamples = 0
+
+	return p.dropRateEMA, p.sojournEMA
+}
+
 // GetLinkQualityStats returns ACK-based link quality stats for a peer by nodeID.
 // totalDataDrops returns the sum of all data queue drops (dns + ack + data[256]).
-func (p *Peer) totalDataDrops() uint64 {
-	var total uint64
+func (p *Peer) totalDataDrops() uint64 {	var total uint64
 	total += atomic.LoadUint64(&p.dnsQueueDrops)
 	total += atomic.LoadUint64(&p.ackQueueDrops)
 	for i := range p.dataQueueDrops {
@@ -2163,6 +2237,22 @@ func (m *P2PManager) GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (sr
 		}
 	}
 	return 0, 0, 0, 0, 0
+}
+
+// GetEgressStatsByNodeSeq returns locally-observed egress health for an exact
+// link: window-smoothed queue drop rate and sojourn EMA (Phase B).
+// ok=false when no such peer is connected.
+func (m *P2PManager) GetEgressStatsByNodeSeq(nodeID string, seq uint16) (dropRate, sojournMs float64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.peers {
+		if p.NodeID == nodeID && p.Seq == seq {
+			dropRate, sojournMs = p.sampleEgressWindow()
+			return dropRate, sojournMs, true
+		}
+	}
+	return 0, 0, false
 }
 
 // GetAllLinkQualityStats returns quality stats for all links.

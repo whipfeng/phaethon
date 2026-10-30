@@ -269,6 +269,13 @@ type MeshManager struct {
 	// Link quality tracking
 	qualityTracker *PeerQualityTracker
 
+	// U-turn loop detection (Phase C): count of transit IPIP frames whose
+	// target's best nextHop is the frame's source — a forwarding loop
+	// smoking gun. Counter exposed via GetStatus; log is rate-limited.
+	uturnCount   uint64
+	uturnLogMu   sync.Mutex
+	lastUturnLog time.Time
+
 	// Round-robin state for multi-link load balancing (design §2.8)
 	// Key: target nodeID, Value: last used index
 	linkSelectIdx map[string]int
@@ -301,6 +308,7 @@ type routeTable struct {
 	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo      // nodeID → info
 	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
+	eipToNode  map[string]string         // node EIP (string form) → nodeID, for u-turn detection (Phase C)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -1152,6 +1160,32 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	if len(frame) >= 20 && frame[9] == 4 {
 		util.LogModuleDebug("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, srcIP, dstIP, frame[9], len(frame))
+
+		// Phase C u-turn loop detection (环路实锤): a transit IPIP frame
+		// (outer dst is another node's EIP, not ours) whose target's best
+		// nextHop is the frame's source means the frame is being bounced
+		// straight back — a transient forwarding loop. The outer TTL (64)
+		// bounds the amplification, but every bounce is a blackhole sample.
+		if m.ipipTunnel != nil {
+			if localEIP := m.ipipTunnel.GetLocalEIP(); localEIP == nil || !localEIP.Equal(dstIP) {
+				rt := m.getRouteTable()
+				if target, ok := rt.eipToNode[dstIP.String()]; ok {
+					if bp, ok2 := rt.bestPaths[target]; ok2 && bp.NextHop == fromNodeID {
+						atomic.AddUint64(&m.uturnCount, 1)
+						m.uturnLogMu.Lock()
+						shouldLog := time.Since(m.lastUturnLog) > time.Minute
+						if shouldLog {
+							m.lastUturnLog = time.Now()
+						}
+						m.uturnLogMu.Unlock()
+						if shouldLog {
+							util.LogModuleWarn("mesh", "[MESH-U-TURN] loop suspected: frame for target=%s arrived from %s which IS our best nextHop (outer src=%s dst=%s TTL=%d); forwarding views inconsistent",
+								target, fromNodeID, srcIP, dstIP, frame[8])
+						}
+					}
+				}
+			}
+		}
 	}
 	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
@@ -1200,6 +1234,7 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 		"domainSuffixes": domainSuffixes,
 		"advertise":      advertise,
 		"routeCount":     routeCount,
+		"uturnCount":     atomic.LoadUint64(&m.uturnCount),
 	}
 }
 
@@ -1929,6 +1964,15 @@ func (m *MeshManager) recomputeRoutes() {
 		routeTrie.Insert(routes[i].Prefix, &routes[i])
 	}
 
+	// EIP → nodeID map for u-turn loop detection (Phase C): rebuilt with
+	// each route snapshot so HandleMeshFrame lookups stay O(1).
+	eipToNode := make(map[string]string, len(bestPaths))
+	for target := range bestPaths {
+		if eip := m.getEIPForNode(target); eip != nil {
+			eipToNode[eip.String()] = target
+		}
+	}
+
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
 		routes:     routes,
@@ -1936,6 +1980,7 @@ func (m *MeshManager) recomputeRoutes() {
 		domainTrie: domainTrie,
 		nodeMap:    nodeMap,
 		bestPaths:  bestPaths,
+		eipToNode:  eipToNode,
 	})
 	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
 

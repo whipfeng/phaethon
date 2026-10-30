@@ -786,17 +786,21 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	// 2. DNS packets (UDP port 53) -> dnsQueue (second highest)
 	// 3. TCP ACK packets -> ackQueue (third highest)
 	// 4. All other data -> dataQueues[flowHash] (DRR fair scheduling)
+	// The DNS/ACK classifiers parse the payload as an IP header, so they
+	// must only run on mesh data frames — JSON control payloads riding the
+	// data queue (Phase C pings) would otherwise be misclassified.
 	var ch chan writeReq
 	isDNS := false
 	isACK := false
 	dataQueueIdx := -1
-	
+
+	isMeshPacket := req.frameType == frame.FrameMeshPacket
 	if req.isControl {
 		ch = peer.controlCh
-	} else if isDNSPacket(req.data) {
+	} else if isMeshPacket && isDNSPacket(req.data) {
 		ch = peer.dnsQueue
 		isDNS = true
-	} else if isACKPacket(req.data) {
+	} else if isMeshPacket && isACKPacket(req.data) {
 		ch = peer.ackQueue
 		isACK = true
 	} else {
@@ -1773,21 +1777,38 @@ const (
 	pingLossWindowSize = 20
 	// pingTimeout: pending pings older than this are resolved as losses.
 	pingTimeout = 5 * time.Second
+	// pingLateGrace: after a timeout loss verdict, the seq stays in grace
+	// this long so a late pong can overturn the sample (Phase C, 30s).
+	pingLateGrace = 30 * time.Second
 	// pingFailDisconnectThreshold: 10 consecutive pings without any pong
 	// triggers link teardown (design §4.4).
 	pingFailDisconnectThreshold = 10
 )
 
+// pingSample is one resolved window slot carrying its seq, so a late pong
+// can locate and overturn its earlier loss verdict (Phase C).
+type pingSample struct {
+	seq   uint32
+	acked bool
+}
+
 // pingTracker tracks pending ping requests for RTT and loss rate measurement.
 // Loss rate is a sliding window over the last pingLossWindowSize resolved
 // outcomes (design §4.3): stale pending pings resolved as losses, pongs as
 // acks, send failures roll back without entering the window.
+//
+// Phase C: pings travel the data queue, so a congested link delays pongs
+// past pingTimeout. Timeout verdicts enter a lateGrace window instead of
+// being final; a pong arriving within the grace overturns its sample
+// (acked=true, consecutiveLost reset, full RTT recorded — the congestion
+// signal stays in SRTT while lossRate only reflects real loss).
 type pingTracker struct {
 	mu              sync.Mutex
-	pendingPings    map[uint32]time.Time // seq -> send time
+	pendingPings    map[uint32]time.Time // seq -> send time (in flight)
+	lateGrace       map[uint32]time.Time // seq -> send time (loss verdict, awaiting late pong)
 	nextSeq         uint32
-	samples         []bool // sliding window of resolved outcomes (true=acked)
-	consecutiveLost int    // consecutive resolved losses (reset on any pong)
+	samples         []pingSample // sliding window of resolved outcomes
+	consecutiveLost int          // consecutive resolved losses (reset on any pong)
 	rttSampler      *rttSampler
 }
 
@@ -1795,13 +1816,14 @@ type pingTracker struct {
 func newPingTracker() *pingTracker {
 	return &pingTracker{
 		pendingPings: make(map[uint32]time.Time),
+		lateGrace:    make(map[uint32]time.Time),
 		nextSeq:      1,
 		rttSampler:   &rttSampler{},
 	}
 }
 
-func (t *pingTracker) addSampleLocked(acked bool) {
-	t.samples = append(t.samples, acked)
+func (t *pingTracker) addSampleLocked(acked bool, seq uint32) {
+	t.samples = append(t.samples, pingSample{seq: seq, acked: acked})
 	if len(t.samples) > pingLossWindowSize {
 		t.samples = t.samples[len(t.samples)-pingLossWindowSize:]
 	}
@@ -1813,19 +1835,31 @@ func (t *pingTracker) recordPing() uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Resolve stale pending pings as losses (they never got a pong)
-	cutoff := time.Now().Add(-pingTimeout)
+	now := time.Now()
+
+	// Resolve stale pending pings as losses (no pong within pingTimeout);
+	// keep them in lateGrace so a congestion-delayed pong can still overturn.
+	cutoff := now.Add(-pingTimeout)
 	for s, sendTime := range t.pendingPings {
 		if sendTime.Before(cutoff) {
 			delete(t.pendingPings, s)
-			t.addSampleLocked(false)
+			t.lateGrace[s] = sendTime
+			t.addSampleLocked(false, s)
 			t.consecutiveLost++
+		}
+	}
+
+	// Purge grace entries past the late window — verdict is final.
+	graceCutoff := now.Add(-pingLateGrace)
+	for s, sendTime := range t.lateGrace {
+		if sendTime.Before(graceCutoff) {
+			delete(t.lateGrace, s)
 		}
 	}
 
 	seq := t.nextSeq
 	t.nextSeq++
-	t.pendingPings[seq] = time.Now()
+	t.pendingPings[seq] = now
 	return seq
 }
 
@@ -1837,19 +1871,33 @@ func (t *pingTracker) cancelPing(seq uint32) {
 	t.mu.Unlock()
 }
 
-// recordPong records a pong receive and calculates RTT.
+// recordPong records a pong receive and calculates RTT. Three-level lookup:
+// in-flight → normal ack; lateGrace → overturn the earlier loss verdict;
+// otherwise unknown/duplicate seq, ignored.
 func (t *pingTracker) recordPong(seq uint32, timestamp int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if sendTime, ok := t.pendingPings[seq]; ok {
 		delete(t.pendingPings, seq)
-		t.addSampleLocked(true)
+		t.addSampleLocked(true, seq)
 		t.consecutiveLost = 0
+		t.rttSampler.add(time.Since(sendTime))
+		return
+	}
 
-		// Calculate RTT
-		rtt := time.Since(sendTime)
-		t.rttSampler.add(rtt)
+	if sendTime, ok := t.lateGrace[seq]; ok {
+		delete(t.lateGrace, seq)
+		for i := range t.samples {
+			if t.samples[i].seq == seq && !t.samples[i].acked {
+				t.samples[i].acked = true
+				break
+			}
+		}
+		t.consecutiveLost = 0
+		// Full RTT still enters the sampler: on a congested link the late
+		// pong is precisely the queuing-delay signal we want SRTT to see.
+		t.rttSampler.add(time.Since(sendTime))
 	}
 }
 
@@ -1870,8 +1918,8 @@ func (t *pingTracker) getLossRate() float64 {
 		return 0.0
 	}
 	lost := 0
-	for _, acked := range t.samples {
-		if !acked {
+	for _, s := range t.samples {
+		if !s.acked {
 			lost++
 		}
 	}
@@ -1952,7 +2000,10 @@ func (m *P2PManager) sendPing(peer *Peer) {
 		Seq:       seq,
 	}
 	data, _ := json.Marshal(ping)
-	if err := enqueueWrite(peer, frame.FrameLinkPing, data, true); err != nil {
+	// Phase C: ping rides the data queue so its SRTT reflects data-plane
+	// queuing. Pong stays on the priority queue (round trip ≈ base RTT +
+	// forward queuing). A RED/enqueue rejection rolls back via cancelPing.
+	if err := enqueueWrite(peer, frame.FrameLinkPing, data, false); err != nil {
 		// Send failure: frame never entered the wire, roll back without counting
 		peer.pingTracker.cancelPing(seq)
 		util.LogModuleDebug("p2p", "[P2P] ping enqueue failed for %s: %v", peer.ID, err)

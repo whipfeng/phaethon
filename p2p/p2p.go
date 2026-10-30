@@ -25,27 +25,9 @@ import (
 var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 
 // P2PProtocolVersion is the current P2P protocol version.
-// Bump when making incompatible changes to the P2P frame protocol or hello semantics.
-// Version 3: Gossip protocol redesigned - GossipInfo removed NodeID/Subnet fields,
-// Routes/DomainSuffixes now reference nodeID, ClaimedSubnets added Neighbors field,
-// mutual neighbor validation added to prevent stale claim wandering.
-// Version 4: DNS resolution optimized - .phn domains treated as static routes (not gossiped),
-// ResolveDomainSubnet returns (subnet, needsFail) for proper SERVFAIL handling.
-// Version 5: two-trie DNS routing (16281a8) changed cross-node .phn answer semantics
-// (static trie answers even when the owning node is down; no remote fallback); mixing
-// pre/post versions silently wedges remote .phn resolution after node restarts.
-// Version 6: hello/gossip unified - both use GossipInfo structure, hello carries topology
-// for immediate route establishment, sender nodeID extracted from ClaimedSubnets[hop=0],
-// removed unused HelloMsg fields (NodeID/Version/Platform/Arch/BuildTag/Checksum/MeshNodeID/MeshVIP),
-// renamed "mesh_gossip" to "gossip".
-// Version 7: control frame reliable delivery with seq/ack, removed heartbeat/probe/probe_reply,
-// gossip serves as keepalive, link quality measured from ack timing.
-// Version 8: link-state routing with quality-aware path selection.
-// GossipClaimedSubnet.Neighbors extended from []string to []GossipNeighbor,
-// carrying per-link SRTT and loss rate metrics for Dijkstra-based routing.
-// Version 9: GossipLink changed from linkId to localSeq+remoteSeq fields,
-// link identification now based on seq pair matching instead of combined linkId.
-const P2PProtocolVersion = 8
+// The canonical definition lives in the mesh package (it travels inside
+// GossipInfo); this alias keeps existing p2p callers unchanged.
+const P2PProtocolVersion = mesh.P2PProtocolVersion
 
 // meshInboundWorkers is the number of goroutines that consume from meshInboundCh
 // and process incoming mesh frames (inject into gVisor netstack).
@@ -378,6 +360,10 @@ type Peer struct {
 	rng   *rand.Rand
 	rngMu sync.Mutex
 
+	// LastError guard (issue 问题6: written by dial/write/heartbeat paths,
+	// read by session logs and GetPeers snapshot — was unprotected)
+	lastErrorMu sync.RWMutex
+
 	// Ping/pong measurement state (v8)
 	pingTracker *pingTracker // tracks ping/pong for RTT and loss rate
 
@@ -398,6 +384,19 @@ func (p *Peer) GetStatus() string {
 
 func (p *Peer) SetStatus(status string) {
 	p.statusAtomic.Store(status)
+}
+
+// LastError getter/setter (thread-safe)
+func (p *Peer) GetLastError() string {
+	p.lastErrorMu.RLock()
+	defer p.lastErrorMu.RUnlock()
+	return p.LastError
+}
+
+func (p *Peer) SetLastError(errMsg string) {
+	p.lastErrorMu.Lock()
+	p.LastError = errMsg
+	p.lastErrorMu.Unlock()
 }
 
 // LinkNIC getter/setter (thread-safe, fix race condition #2)
@@ -554,7 +553,7 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			util.LogModuleWarn("p2p", "[P2P-DIAG] write error for peer.ID=%s proxy=%s nodeID=%s status=%s frameType=0x%02x: %v",
 				peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), req.frameType, err)
-			peer.LastError = err.Error()
+			peer.SetLastError(err.Error())
 			peer.transport.Close()
 			return false
 		}
@@ -1287,7 +1286,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		transport, err := p2pDialer.DialP2P()
 		if err != nil {
 			util.LogModuleInfo("p2p", "[P2P] failed to connect to %s via proxy %s: %v", proxy.Server, proxy.Name, err)
-			peer.LastError = err.Error()
+			peer.SetLastError(err.Error())
 			peer.SetStatus("failed")
 			m.notifyStatusChange()
 			// Add jitter: delay = backoff * (0.5 + rand[0,1)) = backoff * [0.5, 1.5)
@@ -1323,6 +1322,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			peer.drrScheduler.round = 0
 		}
 		peer.SetStatus("connecting")
+		peer.SetLastError("") // dial succeeded — clear stale error (issue 问题6)
 		m.notifyStatusChange()
 		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
@@ -1333,7 +1333,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				sessionDuration := time.Since(sessionStartTime)
 				// Log disconnection reason
 				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v duration=%v",
-					peer.ID, proxy.Name, peer.GetStatus(), peer.LastError, sessionDuration)
+					peer.ID, proxy.Name, peer.GetStatus(), peer.GetLastError(), sessionDuration)
 				
 				transport.Close()
 				
@@ -1446,7 +1446,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 				if time.Since(lastSeenTime) > heartbeatTimeout {
 					util.LogModuleWarn("p2p", "[P2P-DIAG] heartbeat timeout for peer.ID=%s proxy=%s nodeID=%s status=%s (last seen %v ago), closing connection",
 						peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), time.Since(lastSeenTime))
-					peer.LastError = fmt.Sprintf("heartbeat timeout: no data for %v", time.Since(lastSeenTime))
+					peer.SetLastError(fmt.Sprintf("heartbeat timeout: no data for %v", time.Since(lastSeenTime)))
 					peer.transport.Close()
 					return
 				}
@@ -1487,7 +1487,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 			// Log detailed disconnection reason
 			util.LogModuleInfo("p2p", "[P2P-DIAG] read error for peer.ID=%s proxy=%s nodeID=%s status=%s: %v",
 				peer.ID, peer.ProxyNameSafe(), peer.NodeID, peer.GetStatus(), err)
-			peer.LastError = err.Error()
+			peer.SetLastError(err.Error())
 			frame.ReturnBuffer(originalPayload)
 			return
 		}
@@ -1540,6 +1540,8 @@ func (m *P2PManager) runSession(peer *Peer) {
 
 // hashString generates a simple hash from a string (for sequence number generation)
 // handleGossip processes a gossip message from a peer.
+// In v8 there is no hello frame: the first gossip on a connection establishes the
+// peer (registration + version check + Seq/LinkID negotiation, design §5.3/§8.1).
 func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	// Validate JSON by unmarshaling (issue 7: avoid remarshaling)
 	var info mesh.GossipInfo
@@ -1548,18 +1550,133 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 		return
 	}
 
+	if peer.NodeID == "" {
+		// First gossip on this connection = establishment (v8 replaces hello).
+		// On version mismatch or missing nodeID this closes the transport; the
+		// sender check below then skips forwarding.
+		m.establishPeerFromGossip(peer, info)
+	} else {
+		// Mandatory version check on every gossip (§8.1). Zero means a legacy
+		// sender that predates version negotiation — treat as mismatch.
+		if info.ProtocolVersion != P2PProtocolVersion {
+			util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s (node=%s): peer=%d local=%d, disconnecting",
+				peer.ID, peer.NodeID, info.ProtocolVersion, P2PProtocolVersion)
+			peer.transport.Close()
+			return
+		}
+		// NodeID change: re-register with the new identity (design §5.3).
+		if nodeID := extractNodeIDFromGossip(info); nodeID != "" && nodeID != peer.NodeID {
+			util.LogModuleInfo("p2p", "[P2P] peer %s nodeID changed: %s -> %s", peer.ID, peer.NodeID, nodeID)
+			m.reregisterPeer(peer, nodeID, info)
+		}
+	}
+
 	// Forward raw payload directly to avoid unmarshal→marshal cycle (issue 7)
 	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
 		m.meshHandler.HandleTopologyGossip(sender, payload)
 	}
 }
 
-// processGossipInfo is the unified topology processing logic for hello.
-// For gossip, use handleGossip which forwards raw payload directly.
-func (m *P2PManager) processGossipInfo(peer *Peer, info mesh.GossipInfo) {
-	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
-		data, _ := json.Marshal(info)
-		m.meshHandler.HandleTopologyGossip(sender, data)
+// establishPeerFromGossip performs the v8 connection establishment on the first
+// gossip frame: version check, nodeID extraction, Seq/LinkID negotiation, mesh
+// registration, and LinkNIC creation. This replaces v7's handleHello (§5.3).
+func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
+	// 1. Version check (mandatory, §8.1)
+	if info.ProtocolVersion != P2PProtocolVersion {
+		util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
+			peer.ID, info.ProtocolVersion, P2PProtocolVersion)
+		peer.transport.Close()
+		return
+	}
+
+	// 2. Extract nodeID from ClaimedSubnets[hop=0]
+	nodeID := extractNodeIDFromGossip(info)
+	if nodeID == "" {
+		util.LogModuleWarn("p2p", "[P2P] first gossip from %s has no claimed subnet with hop=0, disconnecting", peer.ID)
+		peer.transport.Close()
+		return
+	}
+
+	peer.NodeID = nodeID
+	peer.SetLastError("")
+	peer.SetStatus("helloed")
+	now := time.Now()
+	peer.LastSeen = now
+	peer.lastSeenNano.Store(now.UnixNano())
+
+	if info.FriendlyName != "" {
+		peer.FriendlyName = info.FriendlyName
+	}
+
+	// 3. Link identity negotiation (§5.3): RemoteSeq from gossip Seq, LinkID from seq pair
+	remoteSeq := info.Seq
+	localSeq := peer.Seq
+	peer.RemoteSeq = remoteSeq // Stored for gossip advertisement and reverse-link matching
+
+	if remoteSeq > 0 && localSeq > 0 {
+		minSeq := localSeq
+		maxSeq := remoteSeq
+		if localSeq > remoteSeq {
+			minSeq = remoteSeq
+			maxSeq = localSeq
+		}
+		peer.LinkID = fmt.Sprintf("%d-%d", minSeq, maxSeq)
+	}
+
+	m.notifyStatusChange()
+	util.LogModuleInfo("p2p", "[P2P] peer established via first gossip: %s nodeID=%s linkID=%s", peer.ID, nodeID, peer.LinkID)
+
+	// 4-5. Register with mesh handler and create LinkNIC (design §5.6)
+	m.registerPeerWithMesh(peer, nodeID, info)
+
+	peer.SetStatus("upToDate")
+	m.notifyStatusChange()
+}
+
+// reregisterPeer handles a nodeID change on an established connection (§5.3):
+// unregister the old identity, register the new one, recreate the LinkNIC.
+func (m *P2PManager) reregisterPeer(peer *Peer, nodeID string, info mesh.GossipInfo) {
+	if m.meshHandler != nil {
+		if sender := peer.GetMeshSender(); sender != nil {
+			m.meshHandler.UnregisterPeer(sender)
+		}
+		if linkNIC := peer.GetLinkNIC(); linkNIC != nil {
+			m.meshHandler.DeleteLinkNIC(linkNIC)
+			peer.SetLinkNIC(nil)
+		}
+	}
+	peer.NodeID = nodeID
+	peer.SetLastError("")
+	m.registerPeerWithMesh(peer, nodeID, info)
+	m.notifyStatusChange()
+}
+
+// registerPeerWithMesh registers a peer with the mesh handler and creates its
+// LinkNIC. Shared by establishPeerFromGossip and reregisterPeer.
+func (m *P2PManager) registerPeerWithMesh(peer *Peer, nodeID string, info mesh.GossipInfo) {
+	if m.meshHandler == nil {
+		return
+	}
+	ps := &peerSender{peer: peer, nodeID: nodeID}
+	peer.SetMeshSender(ps)
+	m.meshHandler.RegisterPeer(ps)
+
+	// Create LinkNIC for this link (design §5.6); subnet from ClaimedSubnets[hop=0]
+	var subnet string
+	for _, cs := range info.ClaimedSubnets {
+		if cs.Hop == 0 {
+			subnet = cs.Subnet
+			break
+		}
+	}
+	if subnet == "" {
+		util.LogModuleWarn("p2p", "[P2P] no subnet in gossip from %s (nodeID=%s), cannot create LinkNIC", peer.ID, nodeID)
+		return
+	}
+	linkNIC := m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
+	peer.SetLinkNIC(linkNIC)
+	if linkNIC == nil {
+		util.LogModuleWarn("p2p", "[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
 	}
 }
 
@@ -1619,14 +1736,28 @@ func (r *rttSampler) getStats() (srtt, rttVar time.Duration, sampleCount int) {
 	return r.srtt, r.rttVar, r.sampleCount
 }
 
+const (
+	// pingLossWindowSize is the sliding window for loss rate: the last N
+	// resolved ping outcomes (acked or lost), per design §4.3.
+	pingLossWindowSize = 20
+	// pingTimeout: pending pings older than this are resolved as losses.
+	pingTimeout = 5 * time.Second
+	// pingFailDisconnectThreshold: 10 consecutive pings without any pong
+	// triggers link teardown (design §4.4).
+	pingFailDisconnectThreshold = 10
+)
+
 // pingTracker tracks pending ping requests for RTT and loss rate measurement.
+// Loss rate is a sliding window over the last pingLossWindowSize resolved
+// outcomes (design §4.3): stale pending pings resolved as losses, pongs as
+// acks, send failures roll back without entering the window.
 type pingTracker struct {
-	mu            sync.Mutex
-	pendingPings  map[uint32]time.Time // seq -> send time
-	nextSeq       uint32
-	totalSent     uint64
-	totalReceived uint64
-	rttSampler    *rttSampler
+	mu              sync.Mutex
+	pendingPings    map[uint32]time.Time // seq -> send time
+	nextSeq         uint32
+	samples         []bool // sliding window of resolved outcomes (true=acked)
+	consecutiveLost int    // consecutive resolved losses (reset on any pong)
+	rttSampler      *rttSampler
 }
 
 // newPingTracker creates a new ping tracker.
@@ -1638,51 +1769,82 @@ func newPingTracker() *pingTracker {
 	}
 }
 
-// recordPing records a ping send and returns the sequence number.
+func (t *pingTracker) addSampleLocked(acked bool) {
+	t.samples = append(t.samples, acked)
+	if len(t.samples) > pingLossWindowSize {
+		t.samples = t.samples[len(t.samples)-pingLossWindowSize:]
+	}
+}
+
+// recordPing ages out stale pending pings as losses, then registers a new
+// pending ping and returns its sequence number.
 func (t *pingTracker) recordPing() uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
-	seq := t.nextSeq
-	t.nextSeq++
-	t.totalSent++
-	t.pendingPings[seq] = time.Now()
-	
-	// Clean up old pending pings (older than 5 seconds)
-	cutoff := time.Now().Add(-5 * time.Second)
+
+	// Resolve stale pending pings as losses (they never got a pong)
+	cutoff := time.Now().Add(-pingTimeout)
 	for s, sendTime := range t.pendingPings {
 		if sendTime.Before(cutoff) {
 			delete(t.pendingPings, s)
+			t.addSampleLocked(false)
+			t.consecutiveLost++
 		}
 	}
-	
+
+	seq := t.nextSeq
+	t.nextSeq++
+	t.pendingPings[seq] = time.Now()
 	return seq
+}
+
+// cancelPing removes a pending ping without counting it (send failure —
+// the frame never entered the wire, so it must not poison the loss window).
+func (t *pingTracker) cancelPing(seq uint32) {
+	t.mu.Lock()
+	delete(t.pendingPings, seq)
+	t.mu.Unlock()
 }
 
 // recordPong records a pong receive and calculates RTT.
 func (t *pingTracker) recordPong(seq uint32, timestamp int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	if sendTime, ok := t.pendingPings[seq]; ok {
 		delete(t.pendingPings, seq)
-		t.totalReceived++
-		
+		t.addSampleLocked(true)
+		t.consecutiveLost = 0
+
 		// Calculate RTT
 		rtt := time.Since(sendTime)
 		t.rttSampler.add(rtt)
 	}
 }
 
-// getLossRate returns the current loss rate (0.0 - 1.0).
+// consecutiveLostCount returns the number of consecutive pings resolved as
+// losses without any pong in between (design §4.4 disconnect heuristic).
+func (t *pingTracker) consecutiveLostCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.consecutiveLost
+}
+
+// getLossRate returns the current loss rate (0.0 - 1.0) over the sliding window.
 func (t *pingTracker) getLossRate() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
-	if t.totalSent == 0 {
+
+	if len(t.samples) == 0 {
 		return 0.0
 	}
-	return 1.0 - float64(t.totalReceived)/float64(t.totalSent)
+	lost := 0
+	for _, acked := range t.samples {
+		if !acked {
+			lost++
+		}
+	}
+	return float64(lost) / float64(len(t.samples))
 }
 
 // getStats returns all link quality statistics.
@@ -1737,19 +1899,35 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 }
 
 // sendPing sends a ping request to a peer for link quality measurement.
+// Send failures roll back the pending ping (not counted as loss, §4.3).
+// 10 consecutive pings without any pong → Warn + close (design §4.4).
 func (m *P2PManager) sendPing(peer *Peer) {
 	if peer.pingTracker == nil {
 		return
 	}
-	
+
+	// Check consecutive-loss threshold BEFORE sending (ages out stale pings)
+	if peer.pingTracker.consecutiveLostCount() >= pingFailDisconnectThreshold {
+		util.LogModuleWarn("p2p", "[P2P] link dead: %d consecutive pings without pong for peer.ID=%s proxy=%s nodeID=%s, closing",
+			pingFailDisconnectThreshold, peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+		peer.SetLastError(fmt.Sprintf("link dead: %d consecutive pings without pong", pingFailDisconnectThreshold))
+		peer.transport.Close()
+		return
+	}
+
 	seq := peer.pingTracker.recordPing()
 	ping := PingInfo{
 		Timestamp: time.Now().UnixNano(),
 		Seq:       seq,
 	}
 	data, _ := json.Marshal(ping)
-	enqueueWrite(peer, frame.FrameLinkPing, data, true)
-	
+	if err := enqueueWrite(peer, frame.FrameLinkPing, data, true); err != nil {
+		// Send failure: frame never entered the wire, roll back without counting
+		peer.pingTracker.cancelPing(seq)
+		util.LogModuleDebug("p2p", "[P2P] ping enqueue failed for %s: %v", peer.ID, err)
+		return
+	}
+
 	util.LogModuleDebug("p2p", "[P2P] sent ping to %s: seq=%d", peer.ID, seq)
 }
 
@@ -1844,10 +2022,13 @@ func (m *P2PManager) BroadcastGossipToAll() {
 }
 
 // broadcastGossipToPeer sends a gossip message to a specific peer.
+// The local Seq is always included: the peer uses it to derive RemoteSeq/LinkID
+// from our first gossip (design §5.3) and to match reverse links.
 func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
 	info := mesh.GossipInfo{
 		Cmd:             "gossip",
 		ProtocolVersion: P2PProtocolVersion,
+		Seq:             peer.Seq,
 	}
 
 	// Set friendly name if this is an active (outbound) connection
@@ -1895,7 +2076,7 @@ func (m *P2PManager) GetPeers() []Peer {
 			ProxyName: p.ProxyName,
 			NodeID:    p.NodeID,
 			Status:    p.GetStatus(),
-			LastError: p.LastError,
+			LastError: p.GetLastError(),
 			LastSeen:  time.Unix(0, lastSeenNano),
 		})
 	}

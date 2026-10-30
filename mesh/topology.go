@@ -91,6 +91,19 @@ type GossipTopologyEdge struct {
 	Neighbor string `json:"neighbor"` // edge target
 }
 
+// P2PProtocolVersion is the current P2P protocol version, carried in every
+// GossipInfo frame (gossip has no separate hello in v8, so the version and
+// link Seq travel with the periodic broadcast).
+// Bump when making incompatible changes to the P2P frame protocol.
+// Version 9: GossipLink changed from linkId to localSeq+remoteSeq fields,
+// link identification now based on seq pair matching instead of combined linkId.
+// Version 10: v8 simplified control plane formal release - hello/ack frames removed
+// (peer registration, version check, and Seq negotiation moved into the first gossip
+// frame per design §5.3), ping/pong active link probing, mandatory version negotiation
+// (mismatch = disconnect + Warn). Number skips 9 because v9 is already deployed with
+// a different GossipLink wire format; reusing 9 would make old nodes accept new peers.
+const P2PProtocolVersion = 10
+
 // GossipInfo is the gossip payload exchanged between nodes.
 // hello and gossip use the same structure; hello is a superset with Cmd and ProtocolVersion.
 type GossipInfo struct {
@@ -350,6 +363,10 @@ func claimedSubnetsEqual(a, b []PeerClaimedSubnetEntry) bool {
 }
 
 // compareGossipNeighbors compares two GossipNeighbor structs for equality.
+// Only link identity fields participate: SRTT/LossRate/Jitter change every
+// ping cycle and must NOT mark gossip as changed (that would recompute routes
+// every cycle via processGossip). Quality updates flow through qualityLoop's
+// periodic recompute instead (环路-3).
 func compareGossipNeighbors(a, b GossipNeighbor) bool {
 	if a.NodeID != b.NodeID {
 		return false
@@ -359,7 +376,9 @@ func compareGossipNeighbors(a, b GossipNeighbor) bool {
 	}
 	// Simple comparison - order matters
 	for i := range a.Links {
-		if a.Links[i] != b.Links[i] {
+		if a.Links[i].LocalSeq != b.Links[i].LocalSeq ||
+			a.Links[i].RemoteSeq != b.Links[i].RemoteSeq ||
+			a.Links[i].FriendlyName != b.Links[i].FriendlyName {
 			return false
 		}
 	}

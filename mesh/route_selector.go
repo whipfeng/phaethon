@@ -133,7 +133,11 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 						EgressNIC: r.LinkNIC,
 						NeedIPIP:  r.NeedIPIP,
 						EgressEIP: egressEIP,
-						Cacheable: r.NeedIPIP, // IPIP egress is static per prefix; mesh is dynamic
+						// 环路-4: never cache forwarding decisions. NextHopLink is
+						// dynamic in both branches (Dijkstra best path), and the
+						// cache has no TTL — a cached stale NIC outlives route
+						// recomputes. Local delivery above stays cacheable.
+						Cacheable: false,
 					}
 					// Module-level logging for RouteSelector
 					branch := 2

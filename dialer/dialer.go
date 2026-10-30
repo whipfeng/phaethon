@@ -353,6 +353,11 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 		return nil, fmt.Errorf("nil proxy")
 	}
 	d := NewDialer(p)
+	if ma, ok := d.(*meshAwareDialer); ok {
+		// v2 数据路径不经代理服务器（meshAwareDialer.ServerAddr 为空），
+		// 健康检查退回底层 v1 协议拨号，探测服务器可达性。
+		d = ma.underlying
+	}
 	server, port := d.ServerAddr()
 	util.LogModuleDebug("dialer", "%s: ServerAddr() = %s:%d", p.Name, server, port)
 	if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {

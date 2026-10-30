@@ -3,6 +3,8 @@ package db
 import (
 	"encoding/json"
 	"sort"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // Fake-IP 映射
@@ -47,6 +49,31 @@ func DeleteFakeIP(domain, ip string) error {
 		return err
 	}
 	return Delete(BucketFakeIP, []byte("ip:"+ip))
+}
+
+// ClearFakeIPBucket removes every Fake-IP mapping from the database. Called on
+// identity change (node-id/subnet save) so the next boot rebuilds the pool
+// from scratch instead of skipping stale out-of-range entries one by one.
+func ClearFakeIPBucket() error {
+	return globalDB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BucketFakeIP)
+		if b == nil {
+			return nil
+		}
+		var keys [][]byte
+		if err := b.ForEach(func(k, v []byte) error {
+			keys = append(keys, append([]byte(nil), k...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // GetAllFakeIPs 获取所有 Fake-IP 映射

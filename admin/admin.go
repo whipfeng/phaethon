@@ -354,6 +354,12 @@ type AdminServer struct {
 	// The callback handles mesh subsystem reinitialization (re-announce, rebuild routing).
 	OnMeshConfigUpdate func() error
 
+	// RequestRestart is called after an identity-changing mesh config save has
+	// been persisted and the response flushed. The implementation is expected
+	// to schedule a process exit (exit 0) so the watchdog/supervise-daemon
+	// restarts the node with the new identity (design §3.3).
+	RequestRestart func(reason string)
+
 	// templates
 	pages *pageTemplates
 
@@ -1790,6 +1796,18 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Identity changes never hot-apply (design §3.3): reset the Fake-IP
+		// bucket so the restarted node rebuilds its pool from scratch, then
+		// persist and schedule a restart.
+		identityChanged := meshCfg.NodeID != oldNodeID || meshCfg.Subnet != oldSubnet
+		if identityChanged {
+			if err := db.ClearFakeIPBucket(); err != nil {
+				util.LogModuleWarn("admin", "failed to clear fakeip bucket before identity change: %v", err)
+			} else {
+				util.LogModuleInfo("admin", "fakeip bucket cleared due to identity change")
+			}
+		}
+
 		if err := db.PutMeshConfig(meshCfg); err != nil {
 			httpError(w, "persist mesh config fail: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1808,19 +1826,22 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		util.LogModuleInfo("admin", "mesh config updated (node-id=%s, subnet=%s, persisted to database)",
 			meshCfg.NodeID, meshCfg.GetSubnet())
 
-		// Log what changed
-		identityChanged := meshCfg.NodeID != oldNodeID || meshCfg.Subnet != oldSubnet
 		if identityChanged {
-			util.LogModuleInfo("admin", "identity changed (node-id %s->%s, subnet %s->%s), effective after restart",
+			util.LogModuleInfo("admin", "identity changed (node-id %s->%s, subnet %s->%s), node will restart",
 				oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet)
 		}
 
 		if identityChanged {
-			// Identity changes require restart; mesh.html surfaces this hint (design §3.3)
+			// Response first, then restart: jsonResponse writes synchronously, so
+			// by the time it returns the client has the restart_required hint.
 			jsonResponse(w, map[string]string{
 				"status":           "ok",
 				"restart_required": "node-id/subnet change takes effect after restart",
 			})
+			if s.RequestRestart != nil {
+				s.RequestRestart(fmt.Sprintf("identity change (node-id %s->%s, subnet %s->%s)",
+					oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet))
+			}
 		} else {
 			jsonResponse(w, map[string]string{"status": "ok"})
 		}

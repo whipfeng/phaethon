@@ -1,6 +1,7 @@
 # Binaries
 /phaethon
 /phaethon.exe
+/phaethon-linux-amd64
 *.exe
 *.dll
 

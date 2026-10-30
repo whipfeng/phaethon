@@ -196,20 +196,23 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 |------|------|------|
 | 问题1 注册丢失 | 按设计文档 §5.3 在 handleGossip 首个 gossip 分支重建注册 | 设计本就有，实现遗漏 |
 | 问题2 测试编译断裂 | 修复：frame 常量引用更新为 v8 帧格式 | — |
-| 问题3 热生效不闭环 | **B：恢复"提示重启"语义**（subnet 禁止热生效，admin 返回 restart_required；NodeID 维持热更新） | 设计文档 §3.3 已加实现红线 |
-| 问题4 数据竞争 | identityUpdate/reselectSubnet 全程持 m.mu；GetNodeID/GetSubnet/GetVIP/GetStatus 等读取方改 RLock | 标准并发修复 |
-| 问题5 Seq 协商丢失 | gossip 帧携带本端 Seq；首个 gossip 协商 RemoteSeq/LinkID | 不改协议格式（Seq 字段已存在） |
+| 问题3 热生效不闭环 | **B 最终版：nodeID 与 subnet 统一"保存配置 + 重启生效"**，admin 返回 restart_required，运行态保持旧身份；依赖各环境看门狗/监督进程自动拉起（重启成本秒级） | 设计文档 §3.3 已按最终决策修订（2026-10-30 三次修订） |
+| 问题4 数据竞争 | **随决策消解，无需修复**：identityUpdate 运行态分支整体删除（死代码兼竞争源），nodeID/subnet 不再有无锁并发写路径 | 删除即修复 |
+| 问题5 Seq 协商丢失 | gossip 帧携带本端 Seq（GossipInfo.Seq）；首个 gossip 协商 RemoteSeq/LinkID | 不改协议格式（Seq 字段已存在） |
 | 问题6 LastError | 成功路径补清除 + 加锁保护 | — |
 | 问题7 loss 统计 | **一步到位**：清理回滚 + 滑动窗口（最近 20 次） | 设计文档 §4.3 已修订 |
 | 问题8 版本号 | **定为 10**（避让线上 v9），恢复版本不匹配断开+Warn 日志 | 设计文档 §2.3/§8.1 已修订 |
 | 问题9 proxyConfigChanged | 比较清单补 trojan Servername | 一行改动 |
-| 问题10 ChangeIdentity | 事件丢弃时 admin API 返回 503，不假成功 | — |
+| 问题10 ChangeIdentity | **随决策消解，无需修复**：ChangeIdentity 改为同步（存库 + 返回 restart_required），不再投递 normalCh，无事件可丢 | 删除事件路径即修复 |
 | 补充项 ping 断链 | **本次实现**（2026-10-30 用户修订，原决策"后续增强"）：连续 10 ping 无 pong → Warn + 关连接走现有断开路径；30s 心跳保留兜底 | 设计文档 §4.4 已修订 |
-| 问题3 附带 | nodeID 热更需补齐身份烧入点刷新：`ConnectionHandler.localMeshNodeID` 需新增 setter（当前启动缓存无刷新机制，netstack.go:528 setter 为死代码）；domainTrie 重建需清除旧 nodeID 静态条目；mTLS CN=旧 nodeID 证书失效（all 证书不受影响） | 2026-10-30 代码查证 |
+| 问题3 附带（subnet 冲突自动重分配） | 27d817f 语义调整为：检测到冲突 → 选取新 subnet 存库 → 记日志后**进程自我退出（exit 0）** → 看门狗拉起用新身份 | 不再热改运行态 |
+| 问题3 附带（nodeID 热更烧入点） | 不再需要：不热更则 `ConnectionHandler.localMeshNodeID`、domainTrie 静态条目、mTLS CN 证书均无需运行态刷新 | 重启自然重建 |
 
-### 修复执行顺序（待用户最终确认设计文档后开工）
+### 修复执行顺序（设计文档已按最终决策修订完毕，待用户"开工"）
 
-1. 问题1（阻断：gossip 注册重建）→ 2. 问题2（测试编译）→ 3. 问题3B（subnet 恢复重启语义 + restart_required；nodeID 补 handler/domainTrie 刷新）→ 4. 问题4（锁）→ 5. 问题5（Seq 协商）→ 6. 问题6（LastError）→ 7. 问题7（滑动窗口 loss）→ 8. 问题8（版本10+校验）→ 9. 问题9+10 → 10. 补充项（多 ping 断链）
+1. 问题1（阻断：gossip 注册重建）→ 2. 问题2（测试编译）→ 3. 问题3B（删除 identityUpdate 运行态分支 + UpdateIdentity；ChangeIdentity 改同步返回 restart_required；subnet 冲突改存库 + 自我退出）→ 4. 问题5（gossip 填充 Seq + 首个 gossip 协商 RemoteSeq/LinkID）→ 5. 问题6（LastError 成功清除 + 加锁）→ 6. 问题7（滑动窗口 loss）→ 7. 问题8（版本 10 + handleGossip 强制版本检查）→ 8. 问题9（proxyConfigChanged 补 Servername）→ 9. 补充项（连续 10 ping 断链）
+
+问题4、问题10 随 nodeID 重启决策消解，仅需删除死代码（已并入第 3 步清理项）。
 
 修复完成后统一编译 + VM 部署验证（用户决策 10：修完再验），验证项：mesh 端到端拓扑建立、race 构建下 admin 改 node-id、LastError 恢复清除、高 RTT 场景 loss 回落。
 
@@ -220,3 +223,4 @@ pingTracker 统计了丢包率但无消费方据此断链；故障检测只靠 3
 - **2026-10-30**：文档创建。Phase 0 完成：3 角度并行审查（逐行扫描/被删行为审计/跨文件追踪）+ 6 验证 agent 复核 + 本地实证，确认 10 项发现（9 项静态已验证，1 项 PLAUSIBLE，1 项补充未验证）。其中问题1/2 有本地实证（grep / go vet）。
 - **2026-10-30（同日）**：用户完成全部方案决策（见"方案决策"表）。设计文档 `docs/plans/p2p_v8_simplified_protocol.md` 已按决策修订：版本 8→10、GossipInfo 补 Seq、§3.3 subnet 禁止热生效红线、§4.3 滑动窗口、§4.4 故障检测标注后续增强。待用户确认设计文档后进入代码修复阶段（修完统一 VM 验证）。
 - **2026-10-30（二次修订）**：用户质疑两点，查证后修订决策：①多 ping 断链**由后续增强改为本次实现**（连续 10 ping 无 pong 断链，§4.4 已细化）；②nodeID 热更保留，但代码查证确认 `ConnectionHandler.localMeshNodeID` 启动缓存无刷新机制（netstack setter 为死代码）、domainTrie 需清除旧条目——已列入问题3 修复范围。subnet 重启决策维持不变（转发平面 vs 身份缓存的本质区别）。
+- **2026-10-30（三次修订，最终决策）**：用户决策 nodeID 修改**也统一走重启生效**（"重启依赖看门狗"），与 subnet 完全对齐："保存配置 + restart_required + 运行态不变 + 看门狗自动拉起"。由此**问题4（数据竞争）与问题10（事件静默丢弃）随决策消解**——identityUpdate 运行态分支与 ChangeIdentity 事件路径均改为删除项，无并发写、无事件可丢。subnet 冲突自动重分配语义同步调整为"存库 + 自我退出（exit 0）+ 看门狗拉起"。设计文档 §3.3 与本文档决策表已按最终版修订。

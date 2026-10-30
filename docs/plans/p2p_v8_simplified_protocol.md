@@ -156,11 +156,11 @@ type GossipInfo struct {
 - 该操作低频，重启成本远低于热更的实现与维护成本
 - **收益**：消除了 identityUpdate 运行态分支引入的数据竞争（issues/p2p-v8-mesh-regression.md 问题4）和 ChangeIdentity 事件静默丢弃风险（问题10）
 
-**行为**：
-1. admin API 保存新 nodeID/subnet 到数据库
-2. 若值有变化，返回 `restart_required: true`，前端显示"已保存，需要重启生效"
-3. 运行态**保持不变**，继续用旧身份工作
-4. 进程重启（自动拉起）后加载新身份，邻居经 gossip 收敛（约 15 秒）
+**行为**（2026-10-30 修订：保存即重启，用户决策）：
+1. 前端检测到 node-id/subnet 被修改 → 弹确认框"保存后节点将自动重启"，**取消则不保存**
+2. 确认后 admin API 保存新 nodeID/subnet 到数据库（**保存前清空 DB fakeip bucket**——subnet 变化后旧映射虽被 LoadFromDB 的 Contains 过滤，但残留在 DB 里是垃圾），返回 200 + `restart_required`
+3. 响应发出后进程自我退出（exit 0），由 watchdog/supervise-daemon 自动拉起（与 subnet 冲突自动重分配同一机制）
+4. 拉起后加载新身份，FakeIP 池从空重建（nextIP 回到 subnet+skip+1），邻居经 gossip 收敛（约 15 秒）
 
 **Subnet 变更的具体影响**（重启的根本原因）——Subnet 变化会影响大量 gVisor 内部地址：
   - NIC 1 上的 VIP 地址（subnet + 1）
@@ -171,7 +171,7 @@ type GossipInfo struct {
   - DNSHijacker 的 dnsAddr
 - 重建这些地址非常复杂，特别是 FakeIP pool 会影响已有的 DNS 映射
 
-> **实现红线（2026-10-30 修订）**：nodeID/subnet 变更**禁止热生效**。ffbf566 曾实现为直接热改 `m.subnet/m.vip` 并全网广播，但不重建本地 NIC 地址/SNAT/RouteSelector/FakeIP/DNSHijacker，导致对端按新 VIP 发包而本机不认领的流量黑洞（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题3）。正确行为：admin API 保存配置到数据库后返回 `restart_required: true`，前端显示"已保存，需要重启生效"，**运行态保持旧身份不变**。
+> **实现红线（2026-10-30 修订）**：nodeID/subnet 变更**禁止热生效**。ffbf566 曾实现为直接热改 `m.subnet/m.vip` 并全网广播，但不重建本地 NIC 地址/SNAT/RouteSelector/FakeIP/DNSHijacker，导致对端按新 VIP 发包而本机不认领的流量黑洞（详见 `docs/issues/p2p-v8-mesh-regression.md` 问题3）。正确行为：admin 保存 → 确认重启 → 存库 + 进程自我退出 + watchdog 拉起新身份，全程无热改。
 
 **subnet 冲突自动重分配**（27d817f 的配套语义）：
 1. 检测到冲突 → 选取新 subnet 保存数据库
@@ -541,5 +541,9 @@ v8 的核心思想是**简化协议，依赖最终一致性**：
   4. §4.3 丢包率改为滑动窗口统计（最近 20 次）+ 发送失败不计入 + 超时清理记为丢包，替代原会话累计方案
   5. §4.4 故障检测（连续 10 ping 无 pong 断链）**由"后续增强"改为本次实现**，给出阈值、动作与 heartbeat 兜底关系
   6. §3.3 **NodeID 变更由热更新改为重启生效**（用户三次决策）：与 subnet 统一"保存配置 + restart_required + 看门狗自动拉起"；冲突自动重分配改为存库 + 自我退出；identityUpdate 运行态分支列为删除项；问题4（竞争）与问题10（事件丢弃）随此决策消解
+- **2026-10-30（第二批）**：身份变更"保存即重启"完整落地（用户决策）：
+  1. §3.3 行为定稿为"前端确认 → 存库 + 清 fakeip bucket → 返回 `restart_required` → 进程自我退出（exit 0）→ watchdog 拉起"，FakeIP 池随重启从空重建
+  2. admin API 新增 `RequestRestart` 回调钩子（响应发出后触发）；前端 mesh.html 在 node-id/subnet 变更时弹确认框，**取消则不保存**
+  3. VM 端到端验证通过：PUT 身份变更 → 200 + `restart_required` → 进程退出 → watchdog 拉起新身份 → 回滚同样生效
 
 这样既简化了协议实现，又保证了功能的完整性。

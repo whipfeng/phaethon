@@ -307,8 +307,8 @@ type routeTable struct {
 	routeTrie  *routeTrie                // IP prefix trie for O(log R) lookup
 	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo      // nodeID → info
-	bestPaths  map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
-	eipToNode  map[string]string         // node EIP (string form) → nodeID, for u-turn detection (Phase C)
+	bestPaths   map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
+	subnetOwner map[string]string         // masked subnet ("100.212.0.0/16") → nodeID, for u-turn detection (Phase C)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -1160,29 +1160,29 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	if len(frame) >= 20 && frame[9] == 4 {
 		util.LogModuleDebug("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, srcIP, dstIP, frame[9], len(frame))
+	}
 
-		// Phase C u-turn loop detection (环路实锤): a transit IPIP frame
-		// (outer dst is another node's EIP, not ours) whose target's best
-		// nextHop is the frame's source means the frame is being bounced
-		// straight back — a transient forwarding loop. The outer TTL (64)
-		// bounds the amplification, but every bounce is a blackhole sample.
-		if m.ipipTunnel != nil {
-			if localEIP := m.ipipTunnel.GetLocalEIP(); localEIP == nil || !localEIP.Equal(dstIP) {
-				rt := m.getRouteTable()
-				if target, ok := rt.eipToNode[dstIP.String()]; ok {
-					if bp, ok2 := rt.bestPaths[target]; ok2 && bp.NextHop == fromNodeID {
-						atomic.AddUint64(&m.uturnCount, 1)
-						m.uturnLogMu.Lock()
-						shouldLog := time.Since(m.lastUturnLog) > time.Minute
-						if shouldLog {
-							m.lastUturnLog = time.Now()
-						}
-						m.uturnLogMu.Unlock()
-						if shouldLog {
-							util.LogModuleWarn("mesh", "[MESH-U-TURN] loop suspected: frame for target=%s arrived from %s which IS our best nextHop (outer src=%s dst=%s TTL=%d); forwarding views inconsistent",
-								target, fromNodeID, srcIP, dstIP, frame[8])
-						}
-					}
+	// Phase C u-turn loop detection (环路实锤): for ANY transit frame — the
+	// dst (VIP/hostIP/GIP/EIP/fakeIP alike) lives in the target node's /16,
+	// so mask-and-lookup yields the owner. If our best nextHop to that owner
+	// IS the frame's source, the frame is being bounced straight back: a
+	// transient forwarding loop (bounded by TTL, but every bounce is a
+	// blackhole sample). Purely observational — the frame is forwarded
+	// unconditionally below.
+	if dst4 := dstIP.To4(); dst4 != nil && m.subnet != nil {
+		rt := m.getRouteTable()
+		if target, ok := rt.subnetOwner[dst4.Mask(m.subnet.Mask).String()]; ok && target != m.nodeID {
+			if bp, ok2 := rt.bestPaths[target]; ok2 && bp.NextHop == fromNodeID {
+				atomic.AddUint64(&m.uturnCount, 1)
+				m.uturnLogMu.Lock()
+				shouldLog := time.Since(m.lastUturnLog) > time.Minute
+				if shouldLog {
+					m.lastUturnLog = time.Now()
+				}
+				m.uturnLogMu.Unlock()
+				if shouldLog {
+					util.LogModuleWarn("mesh", "[MESH-U-TURN] loop suspected: frame for target=%s arrived from %s which IS our best nextHop (src=%s dst=%s proto=%d TTL=%d); forwarding views inconsistent",
+						target, fromNodeID, srcIP, dstIP, frame[9], frame[8])
 				}
 			}
 		}
@@ -1964,23 +1964,28 @@ func (m *MeshManager) recomputeRoutes() {
 		routeTrie.Insert(routes[i].Prefix, &routes[i])
 	}
 
-	// EIP → nodeID map for u-turn loop detection (Phase C): rebuilt with
-	// each route snapshot so HandleMeshFrame lookups stay O(1).
-	eipToNode := make(map[string]string, len(bestPaths))
-	for target := range bestPaths {
-		if eip := m.getEIPForNode(target); eip != nil {
-			eipToNode[eip.String()] = target
+	// Subnet → nodeID map for u-turn loop detection (Phase C): rebuilt with
+	// each route snapshot so HandleMeshFrame lookups stay O(1). Covers every
+	// address in a node's /16 (VIP/hostIP/GIP/EIP/fakeIP), so both relay
+	// paths (bare mesh-CIDR packets and IPIP-encapsulated) are detected.
+	subnetOwner := make(map[string]string, len(nodeMap)+1)
+	for target, info := range nodeMap {
+		if info.subnet != nil {
+			subnetOwner[info.subnet.String()] = target
 		}
+	}
+	if m.subnet != nil {
+		subnetOwner[m.subnet.String()] = m.nodeID
 	}
 
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
-		routes:     routes,
-		routeTrie:  routeTrie,
-		domainTrie: domainTrie,
-		nodeMap:    nodeMap,
-		bestPaths:  bestPaths,
-		eipToNode:  eipToNode,
+		routes:      routes,
+		routeTrie:   routeTrie,
+		domainTrie:  domainTrie,
+		nodeMap:     nodeMap,
+		bestPaths:   bestPaths,
+		subnetOwner: subnetOwner,
 	})
 	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
 

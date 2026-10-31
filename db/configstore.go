@@ -19,7 +19,7 @@ var (
 )
 
 // KeyRebuilt 是 ReplaceAllConfig 提交后发出的合成事件 key，
-// 重建 watcher 收到即全量 LoadConf。
+// 重建 watcher 收到即全量重建 matcher。
 const KeyRebuilt = "__rebuilt__"
 
 // ===== 事务内 JSON 读写（调用方负责事务生命周期）=====
@@ -177,29 +177,14 @@ func ListProxies() ([]*config.Proxy, error) {
 
 // ===== 代理组 =====
 
-// storeGroup 返回可持久化的代理组副本，清零运行时派生与废弃字段。
+// storeGroup 返回可持久化的代理组副本，清零运行时派生字段。
 // 不能整体拷贝结构体：内含 sync.RWMutex（go vet copylocks 会报错）。
 func storeGroup(g *config.ProxyGroup) *config.ProxyGroup {
-	// Merge Proxies and ManualProxies for backwards compatibility
-	allProxies := append([]string(nil), g.ManualProxies...)
-	for _, p := range g.Proxies {
-		found := false
-		for _, mp := range g.ManualProxies {
-			if mp == p {
-				found = true
-				break
-			}
-		}
-		if !found {
-			allProxies = append(allProxies, p)
-		}
-	}
-	
 	return &config.ProxyGroup{
 		Name:                 g.Name,
 		Enabled:              g.Enabled,
 		Type:                 g.Type,
-		ManualProxies:        allProxies,
+		ManualProxies:        append([]string(nil), g.ManualProxies...),
 		HealthCheckURL:       g.HealthCheckURL,
 		HealthCheckInterval:  g.HealthCheckInterval,
 		HealthCheckTolerance: g.HealthCheckTolerance,
@@ -378,9 +363,6 @@ func ListReverseConfigs() ([]*config.ReverseConfig, error) {
 }
 
 // ===== 规则 =====
-
-// RulesKey 是存储所有规则的单一 key（JSON 数组格式）- 旧格式，迁移后废弃
-var RulesKey = []byte("__all_rules__")
 
 // ===== 新格式：每条规则独立存储 =====
 // Key 结构：
@@ -665,73 +647,15 @@ func ReorderRules(order []uint64) error {
 	return nil
 }
 
-// ===== 旧格式函数（供迁移工具使用）=====
-
-// PutRulesOld 替换整个规则列表（旧格式，原子操作）
-func PutRulesOld(rules []string) error {
-	err := Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(BucketRules)
-		if b == nil {
-			return fmt.Errorf("bucket %s 不存在", string(BucketRules))
-		}
-		return putJSON(b, RulesKey, rules)
-	})
-	if err != nil {
-		return err
-	}
-	notifyChanges([]ChangeEvent{{
-		Bucket: string(BucketRules), Key: KeyRebuilt, Op: OpPut,
-	}})
-	return nil
-}
-
-// ListRulesOld 返回所有规则（旧格式）
-func ListRulesOld() ([]string, error) {
-	var rules []string
-	err := View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(BucketRules)
-		if b == nil {
-			return nil
-		}
-		data := b.Get(RulesKey)
-		if data == nil {
-			return nil
-		}
-		return json.Unmarshal(data, &rules)
-	})
-	return rules, err
-}
-
-// DeleteOldRulesKey 删除旧格式的 rules key（迁移后调用）
-func DeleteOldRulesKey() error {
-	return Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(BucketRules)
-		if b == nil {
-			return nil
-		}
-		return b.Delete(RulesKey)
-	})
-}
-
-// listRulesTx 在事务内读取所有规则（供 LoadConf 使用）
-// listRulesTx 在事务内读取所有规则（供 LoadConf 使用）- 新格式
+// listRulesTx 在事务内读取所有规则（供 matcher 重建使用）
 func listRulesTx(tx *bolt.Tx) ([]string, error) {
 	order, err := getOrderTx(tx)
 	if err != nil {
-		// 如果 order key 不存在，尝试旧格式（兼容未迁移的情况）
-		b := tx.Bucket(BucketRules)
-		if b == nil {
+		// Fresh database with no rules bucket yet: treat as empty rule set.
+		if tx.Bucket(BucketRules) == nil {
 			return nil, nil
 		}
-		data := b.Get(RulesKey)
-		if data == nil {
-			return nil, nil
-		}
-		var rules []string
-		if err := json.Unmarshal(data, &rules); err != nil {
-			return nil, err
-		}
-		return rules, nil
+		return nil, err
 	}
 	rules := make([]string, 0, len(order))
 	for _, id := range order {
@@ -768,41 +692,6 @@ func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error)
 		return true, fmt.Errorf("解析 %s 失败: %w", key, err)
 	}
 	return true, nil
-}
-
-// MigrateProxyGroups updates existing proxy groups with proxies from the config.
-// This fixes the issue where old migrations only stored ManualProxies but not Proxies.
-func MigrateProxyGroups(proxyGroups []*config.ProxyGroup) error {
-	return Update(func(tx *bolt.Tx) error {
-		gb := tx.Bucket(BucketProxyGroups)
-		if gb == nil {
-			return nil
-		}
-
-		for _, g := range proxyGroups {
-			if g == nil {
-				continue
-			}
-			// Read existing group from DB
-			data := gb.Get([]byte(g.Name))
-			if data == nil {
-				continue
-			}
-			var existing config.ProxyGroup
-			if err := json.Unmarshal(data, &existing); err != nil {
-				continue
-			}
-
-			// If ManualProxies is empty but config has Proxies, update it
-			if len(existing.ManualProxies) == 0 && len(g.Proxies) > 0 {
-				existing.ManualProxies = append([]string(nil), g.Proxies...)
-				if err := putJSON(gb, []byte(g.Name), &existing); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
 }
 
 // ResetConfigPreserving has been removed. Use ReplaceAllConfig with preserved values instead.

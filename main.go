@@ -787,18 +787,6 @@ func main() {
 		}
 	}
 
-	// Migrate proxy groups
-	proxyGroups, err := db.ListProxyGroups()
-	if err != nil {
-		util.LogModuleWarn("system", " load proxy groups for migration fail: %v", err)
-	} else {
-		if err := db.MigrateProxyGroups(proxyGroups); err != nil {
-			util.LogModuleWarn("system", " 迁移代理组失败: %v", err)
-		} else {
-			util.LogModuleInfo("system", "代理组迁移完成")
-		}
-	}
-
 	// Setup rotating log file (10MB max)
 	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
@@ -2858,62 +2846,4 @@ func refreshSubscription(sub *config.Subscription) error {
 		}
 	}
 	return nil
-}
-
-// runMigration performs one-time data migration and exits.
-// This is used to fix data inconsistencies after database structure changes.
-func runMigration() {
-	fmt.Println("Starting data migration...")
-	
-	// Initialize database
-	if err := db.Init(dataDir); err != nil {
-		fmt.Printf("Failed to initialize database: %v\n", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-
-	// Get all subscriptions
-	subs, err := db.ListSubscriptions()
-	if err != nil {
-		fmt.Printf("Failed to list subscriptions: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Found %d subscriptions\n", len(subs))
-
-	migrated := 0
-	for _, sub := range subs {
-		if !sub.IsEnabled() || sub.URL == "" {
-			continue
-		}
-
-		// Check if nodes already exist
-		nodes, err := db.GetSubscriptionNodes(sub.Name)
-		if err == nil && len(nodes) > 0 {
-			fmt.Printf("  [SKIP] %s: already has %d nodes\n", sub.Name, len(nodes))
-			continue
-		}
-
-		fmt.Printf("  [MIGRATE] %s: fetching nodes...\n", sub.Name)
-		
-		// Create a temporary subscription object and refresh it
-		subCopy := *sub
-		if err := refreshSubscription(&subCopy); err != nil {
-			fmt.Printf("  [FAIL] %s: %v\n", sub.Name, err)
-			continue
-		}
-
-		// Verify nodes were saved
-		nodes, err = db.GetSubscriptionNodes(sub.Name)
-		if err != nil {
-			fmt.Printf("  [FAIL] %s: nodes not saved: %v\n", sub.Name, err)
-			continue
-		}
-
-		fmt.Printf("  [OK] %s: migrated %d nodes\n", sub.Name, len(nodes))
-		migrated++
-	}
-
-	fmt.Printf("\nMigration complete: %d/%d subscriptions migrated\n", migrated, len(subs))
 }

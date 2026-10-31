@@ -60,6 +60,7 @@
 | [htunnel_v1_netstack.md](plans/htunnel_v1_netstack.md) | h_tunnel v1 重构：基于 gVisor Netstack 的非对称架构 | v0.1.0 | DRAFT |
 | [mesh_ipip_smart_routing.md](plans/mesh_ipip_smart_routing.md) | Mesh IPIP 封装与智能选路：统一路由结构 + 三阶段优化（数据平面 + 质量监控 + 智能选路） | v0.2.0 | DRAFT |
 | [gvisor_route_selector_architecture.md](plans/gvisor_route_selector_architecture.md) | gVisor 路由架构最终方案：RouteSelector + Link NICs | v1.0.0 | ACTIVE |
+| [mesh_reply_forward_drop_fix.md](plans/mesh_reply_forward_drop_fix.md) | Mesh 转发流 reply 方向丢包修复：FindRouteViaNIC fallback + SNAT 毒源实锤 | v0.1.0 | DRAFT |
 | [gvisor_stack_integration_design.md](plans/gvisor_stack_integration_design.md) | gVisor 栈内集成方案：路由 / NAT / IPIP 下沉设计 | v0.1.0 | PARTIAL_OUTDATED |
 | [gvisor_routing_evolution.md](plans/gvisor_routing_evolution.md) | gVisor 路由栈演进方向（历史调研） | - | OUTDATED |
 | [multi_nic_architecture.md](plans/multi_nic_architecture.md) | 多 NIC 架构设计 v1 | v1.0.0 | OUTDATED |
@@ -82,6 +83,7 @@
 | [gvisor_route_selector_tasks.md](tasks/gvisor_route_selector_tasks.md) | gVisor RouteSelector + Link NICs 实现任务 | gvisor-route-selector-impl |
 | [p2p_mesh_data_frame_loss_tasks.md](tasks/p2p_mesh_data_frame_loss_tasks.md) | P2P 会话写入与生命周期修复任务 | master |
 | [mesh-forwarding-trace-tasks.md](tasks/mesh-forwarding-trace-tasks.md) | Mesh 跨层转发关联诊断任务 | master |
+| [mesh-reply-forward-drop-fix.md](tasks/mesh-reply-forward-drop-fix.md) | Mesh 转发流 reply 方向丢包修复任务 | master |
 
 ### issues/ (问题跟踪)
 

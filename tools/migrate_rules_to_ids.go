@@ -1,11 +1,44 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"phaethon/db"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+// rulesOldKey 是旧格式的单一 key（JSON 数组），主应用已不携带此格式，
+// 由本工具自给自足。
+var rulesOldKey = []byte("__all_rules__")
+
+func listRulesOld() ([]string, error) {
+	var rules []string
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(db.BucketRules)
+		if b == nil {
+			return nil
+		}
+		data := b.Get(rulesOldKey)
+		if data == nil {
+			return nil
+		}
+		return json.Unmarshal(data, &rules)
+	})
+	return rules, err
+}
+
+func deleteOldRulesKey() error {
+	return db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(db.BucketRules)
+		if b == nil {
+			return nil
+		}
+		return b.Delete(rulesOldKey)
+	})
+}
 
 func main() {
 	dryRun := flag.Bool("dry-run", false, "只检查不迁移")
@@ -31,7 +64,7 @@ func main() {
 	defer db.Close()
 
 	// 1. 读取旧格式
-	oldRules, err := db.ListRulesOld()
+	oldRules, err := listRulesOld()
 	if err != nil {
 		fmt.Printf("❌ 读取旧格式失败: %v\n", err)
 		os.Exit(1)
@@ -95,7 +128,7 @@ func main() {
 	// 5. 清理旧格式（可选）
 	if *cleanup {
 		fmt.Println("\n🧹 清理旧格式数据...")
-		if err := db.DeleteOldRulesKey(); err != nil {
+		if err := deleteOldRulesKey(); err != nil {
 			fmt.Printf("⚠️  清理旧格式失败: %v\n", err)
 			fmt.Println("可以稍后手动清理")
 		} else {

@@ -50,3 +50,15 @@
 3. 连点保存 3 次：目标 peer 只重启一次（去抖生效）。
 4. 保存一个映射/代理组：日志中无任何 P2P 重启动作（12 个误伤点消除）。
 5. 删除一个 P2P 代理：对应 peer 停止（原 DELETE 孤儿化 bug 路径仍被覆盖——put/delete 事件都带 key）。
+
+## VM 验证记录（2026-11-01，v0.8.0-221-g639528b）
+
+- [x] 部署 VM，版本戳确认 `P2PManager initialized (version=v0.8.0-221-g639528b)`，无新增错误
+- [x] admin API `/api/proxies` HTTP 200
+- [x] 网页标题输出 `[vm] Dashboard - Phaethon Manager`（node-id 前缀生效）
+- [x] 启动后 P2P peer 自动建立：QG_HT → peer established via first gossip → mesh peerCount=1
+- [x] PATCH enabled 关：200 返回 36ms；日志精确单条 `stopping peer for proxy QG_HT`，peerCount 1→0
+- [x] PATCH enabled 开：200 返回 35ms；日志精确单条 `starting peer for proxy QG_HT`，peer 重建、peerCount 0→1
+- [ ] 域名访问控制台实测保存 P2P 开关（需等部署到对应节点后由用户操作确认）
+- [ ] 连点保存去抖实测
+- [ ] 保存映射/代理组无 P2P 动作实测

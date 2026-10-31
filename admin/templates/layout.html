@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Title}} - Phaethon Manager</title>
+    <title>{{if .NodeID}}[{{.NodeID}}] {{end}}{{.Title}} - Phaethon Manager</title>
     <link rel="stylesheet" href="./static/style.css?v={{.Version}}">
     <script src="./static/i18n.js?v={{.Version}}"></script>
     <script src="./static/htmx.min.js?v={{.Version}}"></script>

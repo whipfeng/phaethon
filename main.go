@@ -187,7 +187,6 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 
 var runCnt int
 
-
 // dataDir is the unified runtime data directory (data/).
 // All non-configuration persistent data (reverse-id, bindings, subscription cache)
 // is stored here, separate from the static conf/ directory.
@@ -755,7 +754,7 @@ func main() {
 		// Check if stdin is a terminal (interactive mode)
 		fi, err := os.Stdin.Stat()
 		isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
-		
+
 		if isTerminal {
 			util.LogModuleInfo("system", "首次启动，进入初始化模式")
 			if err := db.InteractiveInit(); err != nil {
@@ -1251,7 +1250,7 @@ func runWatchdogMode() {
 		// CRITICAL FIX: Never give up - keep trying to restart
 		const maxRetries = 5
 		const retryBackoff = 2 * time.Second
-		
+
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			if newExe == "" {
 				util.LogModuleError("main", "watchdog: no worker binary found (attempt %d/%d), using current executable", attempt, maxRetries)
@@ -1273,7 +1272,7 @@ func runWatchdogMode() {
 			newCp, err := spawnChildProcess(newExe)
 			if err != nil {
 				util.LogModuleError("main", "watchdog: restart attempt %d/%d failed with %s: %v", attempt, maxRetries, newExe, err)
-				
+
 				// If we failed with the fallback binary, try the original selection
 				if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
 					util.LogModuleInfo("main", "watchdog: fallback failed, trying %s again", currentBinary)
@@ -1287,18 +1286,18 @@ func runWatchdogMode() {
 					}
 					util.LogModuleError("main", "watchdog: restart with %s also failed: %v", newExe, err)
 				}
-				
+
 				// Retry with backoff
 				if attempt < maxRetries {
 					backoff := retryBackoff * time.Duration(attempt)
 					util.LogModuleInfo("main", "watchdog: retrying in %v...", backoff)
 					time.Sleep(backoff)
-					
+
 					// Re-select binary for next attempt
 					newExe = selectWorkerBinary()
 					continue
 				}
-				
+
 				// All retries exhausted - but DON'T exit watchdog
 				util.LogModuleError("main", "watchdog: all %d retries exhausted, will retry in monitor loop", maxRetries)
 				time.Sleep(30 * time.Second)
@@ -1311,7 +1310,7 @@ func runWatchdogMode() {
 			lastRestart = time.Now()
 			return newCp
 		}
-		
+
 		// Should never reach here, but just in case
 		util.LogModuleError("main", "watchdog: restart loop exited unexpectedly")
 		return cp
@@ -2075,73 +2074,74 @@ func wireAdminCallbacks(resources *activeResources) {
 	// Push group health snapshots to the admin dashboard event-driven, so the
 	// stats collector no longer needs periodic full-bucket scans of proxy-health.
 	db.OnGroupHealthSaved = adminSrv.NotifyGroupHealth
-	adminSrv.OnIncrementalUpdate = func() error {
-		util.LogModuleInfo("main", "[P2P] OnIncrementalUpdate called, syncing P2P peers...")
-		// Load proxies from database
-		proxies, err := db.ListProxies()
-		if err != nil {
-			util.LogModuleWarn("main", "[P2P] load proxies fail: %v", err)
-			return nil
-		}
-
-		// Build set of existing P2P peer proxy names (same source as StopPeerByProxyName)
-		existingPeers := p2p.GlobalP2PManager.ActivePeerProxyNames()
-		dbNames := make(map[string]bool, len(proxies))
-
-		for _, proxy := range proxies {
-			isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
-			if !isCompatible {
-				continue
-			}
-			dbNames[proxy.Name] = true
-
-			_, exists := existingPeers[proxy.Name]
-			shouldRun := proxy.IsEnabled() && proxy.IsP2P()
-
-			util.LogModuleInfo("main", "[P2P] checking proxy %s: type=%s enabled=%v p2p=%v shouldRun=%v exists=%v",
-				proxy.Name, proxy.Type, proxy.IsEnabled(), proxy.IsP2P(), shouldRun, exists)
-
-			if shouldRun && !exists {
-				// P2P should be running but isn't - start it
-				util.LogModuleInfo("main", "[P2P] starting peer for proxy %s", proxy.Name)
-				go p2p.GlobalP2PManager.StartPeer(proxy)
-			} else if !shouldRun && exists {
-				// P2P should not be running but is - stop it
-				util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s", proxy.Name)
-				p2p.GlobalP2PManager.StopPeerByProxyName(proxy.Name)
-			} else if shouldRun && exists {
-				// P2P is running - restart unconditionally on any proxy config save.
-				// Field-level comparison is a maintenance trap (every new dial-relevant
-				// field must be added to the compare list or it silently never applies);
-				// config saves are low-frequency so a restart is cheap (user decision, issue 问题9).
-				util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config save", proxy.Name)
-				p2p.GlobalP2PManager.RestartPeer(proxy)
-			}
-		}
-
-		// Stop peers whose proxy no longer exists in the DB (deleted while running).
-		// The loop above only visits DB-listed proxies, so a deleted proxy's peer
-		// would otherwise orphan until restart.
-		for name := range existingPeers {
-			if !dbNames[name] {
-				util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s (proxy deleted from DB)", name)
+	// P2P peer sync is driven by db change events instead of a manually-called
+	// admin callback: each PutProxy/DeleteProxy emits a BucketProxies event
+	// whose Key is the proxy name, so the sync is precise per proxy. Events are
+	// debounced (200ms) so rapid saves collapse into a single sync against the
+	// latest DB state. notify callbacks run on the writer's goroutine, so the
+	// actual sync runs on a timer goroutine.
+	var (
+		peerSyncMu      sync.Mutex
+		peerSyncPending = make(map[string]bool)
+		peerSyncTimer   *time.Timer
+	)
+	syncProxyPeer := func(name string) {
+		proxy, err := db.GetProxy(name)
+		if err != nil || proxy == nil {
+			// Deleted from DB: stop a running peer, if any.
+			if p2p.GlobalP2PManager.ActivePeerProxyNames()[name] {
+				util.LogModuleInfo("main", "[P2P] stopping peer for deleted proxy %s", name)
 				p2p.GlobalP2PManager.StopPeerByProxyName(name)
 			}
+			return
 		}
-
-		return nil
+		isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
+		exists := p2p.GlobalP2PManager.ActivePeerProxyNames()[name]
+		shouldRun := isCompatible && proxy.IsEnabled() && proxy.IsP2P()
+		switch {
+		case shouldRun && !exists:
+			util.LogModuleInfo("main", "[P2P] starting peer for proxy %s", name)
+			go p2p.GlobalP2PManager.StartPeer(proxy)
+		case !shouldRun && exists:
+			util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s", name)
+			p2p.GlobalP2PManager.StopPeerByProxyName(name)
+		case shouldRun && exists:
+			util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config save", name)
+			p2p.GlobalP2PManager.RestartPeer(proxy)
+		}
 	}
+	db.Subscribe(db.BucketProxies, func(ev db.ChangeEvent) {
+		peerSyncMu.Lock()
+		peerSyncPending[ev.Key] = true
+		if peerSyncTimer != nil {
+			peerSyncTimer.Stop()
+		}
+		peerSyncTimer = time.AfterFunc(200*time.Millisecond, func() {
+			peerSyncMu.Lock()
+			names := make([]string, 0, len(peerSyncPending))
+			for n := range peerSyncPending {
+				names = append(names, n)
+			}
+			peerSyncPending = make(map[string]bool)
+			peerSyncTimer = nil
+			peerSyncMu.Unlock()
+			for _, n := range names {
+				syncProxyPeer(n)
+			}
+		})
+		peerSyncMu.Unlock()
+	})
 	util.LogModuleInfo("main", "[MESH] About to register OnMeshConfigUpdate callback, adminSrv=%v", adminSrv != nil)
 	adminSrv.OnMeshConfigUpdate = func() error {
 		util.LogModuleInfo("main", "[MESH] OnMeshConfigUpdate called, updating mesh config")
-		
+
 		// Load updated mesh config from database
 		meshConfig, err := db.GetMeshConfig()
 		if err != nil {
 			util.LogModuleError("main", "[MESH] failed to load updated config: %v", err)
 			return fmt.Errorf("load mesh config: %w", err)
 		}
-		
+
 		// Check if identity fields changed (node-id, subnet).
 		// Identity never hot-applies: it is persisted by admin and only takes
 		// effect after restart (design §3.3). Non-identity fields still hot-reload.
@@ -2161,10 +2161,10 @@ func wireAdminCallbacks(resources *activeResources) {
 			util.LogModuleInfo("main", "[MESH] updating mesh manager config (domainSuffixes, advertise)")
 			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
 		}
-		
-		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s subnet=%s advertise=%v", 
+
+		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s subnet=%s advertise=%v",
 			meshConfig.NodeID, meshConfig.GetSubnet(), meshConfig.GetAdvertise())
-		
+
 		return nil
 	}
 	util.LogModuleInfo("main", "[MESH] OnMeshConfigUpdate callback registered")

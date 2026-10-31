@@ -246,7 +246,7 @@ type ProxyGroup struct {
 	Enabled              *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Type                 string   `yaml:"type" json:"type"`
 	Proxies              []string `yaml:"proxies" json:"proxies"`           // runtime flat names derived from Members (may contain duplicates when a name exists in both sources)
-	ManualProxies        []string `yaml:"-" json:"manualProxies,omitempty"` // manual proxy names copied from YAML
+	ManualProxies        []string `yaml:"-" json:"manualProxies,omitempty"` // manually added member proxy names (persisted)
 	HealthCheckURL       string   `yaml:"health-check-url" json:"health-check-url,omitempty"`
 	HealthCheckInterval  *int     `yaml:"health-check-interval" json:"health-check-interval,omitempty"`
 	HealthCheckTolerance *int     `yaml:"health-check-tolerance,omitempty" json:"health-check-tolerance,omitempty"` // best type: switch if latency difference exceeds this (ms)
@@ -257,9 +257,7 @@ type ProxyGroup struct {
 	// same subscription and choose different nodes.
 	Subscription         string   `yaml:"subscription,omitempty" json:"subscription,omitempty"`
 	SubscriptionFilter   string   `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
-	SubscriptionSelected []string `yaml:"subscription-selected,omitempty" json:"subscription-selected,omitempty"` // deprecated: migrated to ActiveMember on Init
 	ActiveMember         string   `yaml:"active-member,omitempty" json:"active-member,omitempty"`
-	SubscriptionMode     string   `yaml:"subscription-mode,omitempty" json:"subscription-mode,omitempty"` // deprecated: ignored
 
 	idx       int64 // for load-balance
 	healthMap map[string]*healthStatus
@@ -287,24 +285,6 @@ func (g *ProxyGroup) Init() error {
 		return fmt.Errorf("unsupported group type: %s", g.Type)
 	}
 
-	// subscription-mode is deprecated and ignored.
-	g.SubscriptionMode = ""
-	// Migrate the old subscription-selected list to the single active-member
-	// field used by select groups. Only the first entry is kept; membership is
-	// now determined by subscription-filter.
-	if g.ActiveMember == "" && len(g.SubscriptionSelected) > 0 {
-		g.ActiveMember = g.SubscriptionSelected[0]
-	}
-	g.SubscriptionSelected = nil
-
-	if len(g.ManualProxies) == 0 && len(g.Proxies) > 0 {
-		// Both subscription and non-subscription groups store manual proxy
-		// names in YAML under the `proxies` key. Copy them once so runtime
-		// rebuilds can append selected subscription nodes without mutating
-		// the persisted list.
-		g.ManualProxies = make([]string, len(g.Proxies))
-		copy(g.ManualProxies, g.Proxies)
-	}
 	g.healthMu.Lock()
 	if g.healthMap == nil {
 		g.healthMap = make(map[string]*healthStatus)

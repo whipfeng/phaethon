@@ -217,8 +217,6 @@ func TestGroupRuntimeFieldsNotPersisted(t *testing.T) {
 		Name:          "g",
 		Type:          "select",
 		ManualProxies: []string{"p"},
-		Proxies:       []string{"p", "sub-node"}, // 运行时扁平表
-		SubCandidateCount: 7,
 	}
 	if err := PutProxyGroup(g); err != nil {
 		t.Fatalf("PutProxyGroup failed: %v", err)
@@ -228,12 +226,9 @@ func TestGroupRuntimeFieldsNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProxyGroup failed: %v", err)
 	}
-	// storeGroup merges Proxies into ManualProxies for backwards compatibility
-	if len(got.ManualProxies) != 2 || got.ManualProxies[0] != "p" || got.ManualProxies[1] != "sub-node" {
-		t.Errorf("ManualProxies should contain merged list: %v", got.ManualProxies)
-	}
-	if got.SubCandidateCount != 0 {
-		t.Errorf("SubCandidateCount should not be persisted: %d", got.SubCandidateCount)
+	// storeGroup persists ManualProxies as-is; runtime-derived Proxies is not stored.
+	if len(got.ManualProxies) != 1 || got.ManualProxies[0] != "p" {
+		t.Errorf("ManualProxies should be persisted as-is: %v", got.ManualProxies)
 	}
 }
 
@@ -246,41 +241,48 @@ func TestRulesOrderedByIndex(t *testing.T) {
 	}
 	defer Close()
 
-	// 乱序写入
-	pairs := []struct {
-		idx  int
-		rule string
-	}{{9, "idx9"}, {1, "idx1"}, {15, "idx15"}, {0, "idx0"}}
-	for _, p := range pairs {
-		if err := PutRule(p.idx, p.rule); err != nil {
-			t.Fatalf("PutRule(%d) failed: %v", p.idx, err)
-		}
+	// 通过 afterID 链按非插入顺序构建最终顺序 idx0,idx1,idx9,idx15
+	id0, err := InsertRuleWithID("idx0", nil)
+	if err != nil {
+		t.Fatalf("insert idx0: %v", err)
+	}
+	id9, err := InsertRuleWithID("idx9", &id0)
+	if err != nil {
+		t.Fatalf("insert idx9: %v", err)
+	}
+	if _, err := InsertRuleWithID("idx15", &id9); err != nil {
+		t.Fatalf("insert idx15: %v", err)
+	}
+	// 在 idx0 之后插入 idx1，使最终顺序为 idx0,idx1,idx9,idx15
+	id1, err := InsertRuleWithID("idx1", &id0)
+	if err != nil {
+		t.Fatalf("insert idx1: %v", err)
 	}
 
-	conf, err := LoadConf()
+	rules, err := ListRules()
 	if err != nil {
-		t.Fatalf("LoadConf failed: %v", err)
+		t.Fatalf("ListRules failed: %v", err)
 	}
 	want := []string{"idx0", "idx1", "idx9", "idx15"}
-	if len(conf.Rules) != len(want) {
-		t.Fatalf("rules = %v, want %v", conf.Rules, want)
+	if len(rules) != len(want) {
+		t.Fatalf("rules = %v, want %v", rules, want)
 	}
 	for i, w := range want {
-		if conf.Rules[i] != w {
-			t.Errorf("rules[%d] = %q, want %q", i, conf.Rules[i], w)
+		if rules[i] != w {
+			t.Errorf("rules[%d] = %q, want %q", i, rules[i], w)
 		}
 	}
 
 	// 删除中间规则后重读
-	if err := DeleteRule(1); err != nil {
-		t.Fatalf("DeleteRule failed: %v", err)
+	if err := DeleteRuleByID(id1); err != nil {
+		t.Fatalf("DeleteRuleByID failed: %v", err)
 	}
-	conf, err = LoadConf()
+	rules, err = ListRules()
 	if err != nil {
-		t.Fatalf("LoadConf failed: %v", err)
+		t.Fatalf("ListRules failed: %v", err)
 	}
-	if len(conf.Rules) != 3 || conf.Rules[1] != "idx9" {
-		t.Errorf("rules after delete = %v", conf.Rules)
+	if len(rules) != 3 || rules[1] != "idx9" {
+		t.Errorf("rules after delete = %v", rules)
 	}
 }
 
@@ -312,7 +314,8 @@ func TestIsEmptyConfig(t *testing.T) {
 		t.Errorf("db with proxy should not be empty")
 	}
 
-	// fakeip 不算配置
+	// fakeip 不算配置（db 包是全局单句柄，重开新库前先 Close）
+	Close()
 	if err := Init(filepath.Join(dir, "test2.db")); err != nil {
 		t.Fatalf("Init test2 failed: %v", err)
 	}
@@ -326,30 +329,6 @@ func TestIsEmptyConfig(t *testing.T) {
 	}
 	if !empty {
 		t.Errorf("state-only db should still report empty config")
-	}
-}
-
-func TestLoadConfEmpty(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	if err := Init(dbPath); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-	defer Close()
-
-	conf, err := LoadConf()
-	if err != nil {
-		t.Fatalf("LoadConf on empty db failed: %v", err)
-	}
-	if conf.Admin != nil || conf.Mesh != nil || conf.TUN != nil {
-		t.Errorf("scalar sections should be nil on empty db: %+v", conf)
-	}
-	if len(conf.Proxies) != 0 || len(conf.Rules) != 0 {
-		t.Errorf("lists should be empty on empty db")
-	}
-	if conf.ProxyNames["DIRECT"] == nil {
-		t.Errorf("Init should register DIRECT builtin")
 	}
 }
 

@@ -3390,8 +3390,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "type must be select/load-balance/best", http.StatusBadRequest)
 			return
 		}
-		g.SubscriptionMode = strings.ToLower(strings.TrimSpace(g.SubscriptionMode))
-		g.SubscriptionMode = ""
 		if len(g.Proxies) == 0 && g.Subscription == "" {
 			httpError(w, "group must have at least one manual proxy or a subscription source", http.StatusBadRequest)
 			return

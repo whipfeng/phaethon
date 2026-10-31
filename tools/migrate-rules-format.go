@@ -10,6 +10,10 @@ import (
 	"phaethon/db"
 )
 
+// rulesKey 是聚合格式的单一 key（JSON 数组），主应用已不携带此格式，
+// 由本工具自给自足。
+var rulesKey = []byte("__all_rules__")
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <db-path>\n", os.Args[0])
@@ -34,7 +38,7 @@ func main() {
 		}
 
 		// Check if new format already exists
-		existingData := rulesBucket.Get(db.RulesKey)
+		existingData := rulesBucket.Get(rulesKey)
 		if existingData != nil {
 			var existingRules []string
 			if err := json.Unmarshal(existingData, &existingRules); err == nil {
@@ -48,7 +52,7 @@ func main() {
 		err := rulesBucket.ForEach(func(k, v []byte) error {
 			key := string(k)
 			// Skip the new format key
-			if key == string(db.RulesKey) {
+			if key == string(rulesKey) {
 				return nil
 			}
 			rulesMap[key] = string(v)
@@ -93,7 +97,7 @@ func main() {
 			return fmt.Errorf("failed to marshal rules: %w", err)
 		}
 
-		if err := rulesBucket.Put(db.RulesKey, jsonData); err != nil {
+		if err := rulesBucket.Put(rulesKey, jsonData); err != nil {
 			return fmt.Errorf("failed to write new format rules: %w", err)
 		}
 

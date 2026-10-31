@@ -12,7 +12,6 @@ import (
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -37,19 +36,24 @@ type DNSHijacker struct {
 	// Async query processing
 	dnsQueryCh chan dnsQuery // buffered channel for worker pool
 
-	// Async DNS forwarder (v0.2.0)
-	forwarderSocket tcpip.Endpoint            // persistent UDP socket for forwarding
-	forwarderWQ     waiter.Queue              // waiter queue for forwarder socket
-	pendingQueries  map[string]chan dnsResult // domain -> callback channel
-	pendingMu       sync.Mutex                // protects pendingQueries
-	forwarderStopCh chan struct{}             // stops background listener
+	// Async DNS forwarder (v0.2.0, fully async since dns_forward_full_async)
+	forwarderSocket tcpip.Endpoint       // persistent UDP socket for forwarding
+	forwarderWQ     waiter.Queue         // waiter queue for forwarder socket
+	pendingQueries  map[string]*pendingQuery // domain (lowercase) -> waiting client
+	pendingMu       sync.Mutex           // protects pendingQueries
+	forwarderStopCh chan struct{}        // stops background listener
 }
 
-// dnsResult represents a DNS resolution result from the async forwarder.
-type dnsResult struct {
-	ip  net.IP
-	ttl time.Duration
-	err error
+// forwardTimeout is how long a forwarded query waits for a response before
+// the sweeper answers SERVFAIL to the client.
+const forwardTimeout = 5 * time.Second
+
+// pendingQuery tracks a client waiting on a forwarded DNS resolution.
+// The forwarder listener responds directly to the client when the answer arrives.
+type pendingQuery struct {
+	query      []byte            // original query packet (carries the client TXID)
+	remoteAddr tcpip.FullAddress // client to respond to
+	at         time.Time         // registration time, for sweep expiry
 }
 
 type dnsQuery struct {
@@ -78,7 +82,7 @@ func NewDNSCache() *DNSCache {
 // Get returns the cached Fake-IP for a domain, or nil if not cached or expired.
 func (c *DNSCache) Get(domain string) net.IP {
 	c.mu.RLock()
-	e, ok := c.entries[domain]
+	e, ok := c.entries[strings.ToLower(domain)]
 	c.mu.RUnlock()
 	if !ok || time.Now().After(e.expiry) {
 		return nil
@@ -89,7 +93,7 @@ func (c *DNSCache) Get(domain string) net.IP {
 // Set stores a domain → Fake-IP mapping with a TTL.
 func (c *DNSCache) Set(domain string, fakeIP net.IP, ttl time.Duration) {
 	c.mu.Lock()
-	c.entries[domain] = &dnsCacheEntry{
+	c.entries[strings.ToLower(domain)] = &dnsCacheEntry{
 		fakeIP: fakeIP,
 		expiry: time.Now().Add(ttl),
 	}
@@ -106,7 +110,7 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 		closeCh:         make(chan struct{}),
 		cache:           NewDNSCache(),
 		dnsQueryCh:      make(chan dnsQuery, 1024),
-		pendingQueries:  make(map[string]chan dnsResult),
+		pendingQueries:  make(map[string]*pendingQuery),
 		forwarderStopCh: make(chan struct{}),
 	}
 }
@@ -173,15 +177,20 @@ func (h *DNSHijacker) forwarderListener() {
 	defer h.forwarderWQ.EventUnregister(&waitEntry)
 	
 	readCount := 0
+	sweepTicker := time.NewTicker(500 * time.Millisecond)
+	defer sweepTicker.Stop()
 	for {
 		// Read response (returns ErrWouldBlock when no data available)
 		var buf bytes.Buffer
 		res, err := h.forwarderSocket.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 		if err != nil {
 			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
-				// No data available, block until notification or stop signal
+				// No data available, block until notification, sweep tick, or stop signal
 				select {
 				case <-ch:
+					continue
+				case <-sweepTicker.C:
+					h.sweepPending()
 					continue
 				case <-h.forwarderStopCh:
 					util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
@@ -224,22 +233,28 @@ func (h *DNSHijacker) forwarderListener() {
 		
 		// 1. Cache the response
 		h.cache.Set(domain, ip, ttl)
-		
-		// 2. Trigger callback if client is waiting
+
+		// 2. Respond to the waiting client directly (no worker involved)
+		key := strings.ToLower(domain)
 		h.pendingMu.Lock()
-		pendingCount := len(h.pendingQueries)
-		if ch, ok := h.pendingQueries[domain]; ok {
-			select {
-			case ch <- dnsResult{ip: ip, ttl: ttl}:
-				util.LogModuleInfo("dns", "[DNS-FWD] triggered callback for %s", domain)
-			default:
-				util.LogModuleWarn("dns", "[DNS-FWD] callback channel full for %s", domain)
-			}
-			delete(h.pendingQueries, domain)
-		} else {
-			util.LogModuleInfo("dns", "[DNS-FWD] no pending query for %s (cached only), pendingCount=%d", domain, pendingCount)
+		pq, ok := h.pendingQueries[key]
+		if ok {
+			delete(h.pendingQueries, key)
 		}
 		h.pendingMu.Unlock()
+
+		if ok {
+			resp := buildDNSResponse(pq.query, ip.To4())
+			if resp != nil {
+				if _, werr := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); werr != nil {
+					util.LogModuleWarn("dns", "[DNS-FWD] write response for %s to %s:%d fail: %v", domain, pq.remoteAddr.Addr, pq.remoteAddr.Port, werr)
+				} else {
+					util.LogModuleInfo("dns", "[DNS-FWD] responded to client: domain=%s ip=%s to %s:%d", domain, ip, pq.remoteAddr.Addr, pq.remoteAddr.Port)
+				}
+			}
+		} else {
+			util.LogModuleInfo("dns", "[DNS-FWD] no pending query for %s (cached only), pendingCount=%d", domain, len(h.pendingQueries))
+		}
 	}
 }
 
@@ -518,33 +533,10 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 		remoteSubnet, needsFail := h.resolveDomainSubnet(domain)
 		util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] resolveDomainSubnet result: domain=%s remoteSubnet=%v needsFail=%v", domain, remoteSubnet, needsFail)
 		if remoteSubnet != nil {
-			// Matched a route (static or dynamic), forward to remote
+			// Matched a route (static or dynamic): forward without blocking —
+			// the forwarder listener answers the client asynchronously.
 			util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] FORWARDING: domain=%s to subnet=%s", domain, remoteSubnet)
-			remoteIP, ttl, err := h.forwardToRemote(remoteSubnet, packet)
-			if err != nil {
-				util.LogModuleWarn("dns", "[DNS-FWD-DEBUG] FORWARD FAILED: domain=%s err=%v", domain, err)
-				// Return SERVFAIL instead of fallback to local pool
-				// This allows the client to retry and get the correct IP once mesh recovers
-				resp := buildDNSErrorResponse(packet)
-				if resp != nil {
-					if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
-						util.LogModuleWarn("dns", "tun dns: write SERVFAIL for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
-					} else {
-						util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] SENT SERVFAIL: domain=%s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
-					}
-				}
-				return
-			}
-			h.cache.Set(domain, remoteIP, ttl)
-			util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] FORWARD SUCCESS: domain=%s -> %s ttl=%v", domain, remoteIP, ttl)
-			resp := buildDNSResponse(packet, remoteIP.To4())
-			if resp != nil {
-				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
-					util.LogModuleWarn("dns", "tun dns: write remote response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
-				} else {
-					util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] SENT RESPONSE: domain=%s -> %s to %s:%d", domain, remoteIP, remoteAddr.Addr, remoteAddr.Port)
-				}
-			}
+			h.forwardToRemoteAsync(remoteSubnet, packet, remoteAddr)
 			return
 		} else if needsFail {
 			// Static match but node not ready → SERVFAIL
@@ -580,136 +572,125 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 	}
 }
 
-// forwardToRemote sends a DNS query to the remote node's DNS hijacker via a
-// gvisor netstack UDP socket. The packet flows: netstack → writeLoop → mesh
+// forwardToRemoteAsync forwards a DNS query to the remote node's DNS hijacker
+// without blocking the worker. The packet flows: netstack → writeLoop → mesh
 // routing → remote HandleMeshFrame → GIP path → InjectMeshPacket → remote DNS
-// hijacker. The response follows the reverse path.
-// forwardToRemote sends a DNS query to the remote node's DNS hijacker using the
-// async forwarder. The query is sent via the persistent socket, and we wait for
-// the background listener to receive the response and trigger our callback.
-// Even if we timeout, the response will be cached for future queries.
-func (h *DNSHijacker) forwardToRemote(remoteSubnet *net.IPNet, query []byte) (net.IP, time.Duration, error) {
-	startTime := time.Now()
-	
+// hijacker; the response returns on the reverse path. The background listener
+// responds directly to the client when the answer arrives, and sweepPending
+// answers SERVFAIL on timeout. Late responses are cached for future queries.
+func (h *DNSHijacker) forwardToRemoteAsync(remoteSubnet *net.IPNet, query []byte, remoteAddr tcpip.FullAddress) {
 	// Derive remote GIP (.3) from subnet
 	baseIP := remoteSubnet.IP.To4()
 	if baseIP == nil {
-		return nil, 0, fmt.Errorf("invalid remote subnet")
+		h.answerSERVFAIL(query, remoteAddr, "invalid remote subnet")
+		return
 	}
 	remoteGIP := make(net.IP, 4)
 	copy(remoteGIP, baseIP)
 	remoteGIP[3] |= 3
-	
-	// Extract domain from query
+
 	domain, _, _ := parseDNSQueryDomain(query)
 	if domain == "" {
-		return nil, 0, fmt.Errorf("no domain in query")
+		h.answerSERVFAIL(query, remoteAddr, "no domain in query")
+		return
 	}
-	
+	key := strings.ToLower(domain)
+
 	util.LogModuleInfo("dns", "[DNS-FWD] START: domain=%s remoteGIP=%s", domain, remoteGIP)
-	
-	// 1. Check cache (might have been cached by background listener from a late response)
+
+	// 1. Cache hit (possibly from a late response cached by the listener)
 	if cachedIP := h.cache.Get(domain); cachedIP != nil {
 		util.LogModuleInfo("dns", "[DNS-FWD] CACHE HIT: domain=%s ip=%s (late response cached)", domain, cachedIP)
-		return cachedIP, time.Hour, nil // TTL doesn't matter much for cached
+		h.answerRemote(query, remoteAddr, cachedIP)
+		return
 	}
-	
-	// 2. Ensure forwarder is initialized
+
+	// 2. Forwarder not initialized: a persistent-socket failure is systemic
+	// (same netstack, same GIP bind the sync path would use) — fail loud.
 	if h.forwarderSocket == nil {
-		util.LogModuleWarn("dns", "[DNS-FWD] forwarder not initialized, falling back to sync")
-		return h.forwardToRemoteSync(remoteSubnet, query)
+		util.LogModuleError("dns", "[DNS-FWD] forwarder socket not initialized, cannot forward domain=%s", domain)
+		h.answerSERVFAIL(query, remoteAddr, "forwarder not initialized")
+		return
 	}
-	
-	// 3. Register callback
-	resultCh := make(chan dnsResult, 1)
-	h.pendingMu.Lock()
-	h.pendingQueries[domain] = resultCh
-	h.pendingMu.Unlock()
-	
-	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] registered callback for domain=%s pendingCount=%d", domain, len(h.pendingQueries))
-	
-	// Ensure cleanup on exit
-	defer func() {
-		h.pendingMu.Lock()
-		delete(h.pendingQueries, domain)
-		h.pendingMu.Unlock()
-	}()
-	
-	// 4. Send query via persistent socket
-	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
+
+	// 3. Register the waiting client. Concurrent queries for the same domain
+	// share one upstream flight; the overwritten client is swept with SERVFAIL.
 	queryCopy := make([]byte, len(query))
 	copy(queryCopy, query)
-	
-	writeStart := time.Now()
-	if _, err := h.forwarderSocket.Write(&SlicePayload{Data: queryCopy}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
-		util.LogModuleWarn("dns", "[DNS-FWD] WRITE FAILED: domain=%s err=%v", domain, err)
-		return nil, 0, fmt.Errorf("write query: %v", err)
+	h.pendingMu.Lock()
+	if _, exists := h.pendingQueries[key]; exists {
+		util.LogModuleWarn("dns", "[DNS-FWD] duplicate pending for domain=%s, overwriting earlier client", domain)
 	}
-	util.LogModuleInfo("dns", "[DNS-FWD] WRITE OK: domain=%s remoteAddr=%s:%d duration=%v", domain, remoteGIP, 53, time.Since(writeStart))
-	
-	// 5. Wait for callback (with timeout)
-	const timeout = 5 * time.Second
-	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			return nil, 0, result.err
-		}
-		util.LogModuleInfo("dns", "[DNS-FWD] COMPLETE: domain=%s ip=%s ttl=%v duration=%v", 
-			domain, result.ip, result.ttl, time.Since(startTime))
-		return result.ip, result.ttl, nil
-		
-	case <-time.After(timeout):
-		// Timeout, but background listener continues and will cache the late response
-		util.LogModuleWarn("dns", "[DNS-FWD] TIMEOUT: domain=%s timeout=%v duration=%v (response will be cached if arrives late)", 
-			domain, timeout, time.Since(startTime))
-		return nil, 0, fmt.Errorf("timeout after %v", timeout)
+	h.pendingQueries[key] = &pendingQuery{query: queryCopy, remoteAddr: remoteAddr, at: time.Now()}
+	pendingCount := len(h.pendingQueries)
+	h.pendingMu.Unlock()
+
+	util.LogModuleInfo("dns", "[DNS-FWD-DEBUG] registered pending for domain=%s pendingCount=%d", domain, pendingCount)
+
+	// 4. Send query via persistent socket; the worker returns immediately.
+	// The listener answers the client when the response arrives.
+	remoteFwdAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
+	writeStart := time.Now()
+	if _, err := h.forwarderSocket.Write(&SlicePayload{Data: queryCopy}, tcpip.WriteOptions{To: &remoteFwdAddr}); err != nil {
+		util.LogModuleWarn("dns", "[DNS-FWD] WRITE FAILED: domain=%s err=%v", domain, err)
+		h.pendingMu.Lock()
+		delete(h.pendingQueries, key)
+		h.pendingMu.Unlock()
+		h.answerSERVFAIL(query, remoteAddr, fmt.Sprintf("write query: %v", err))
+		return
+	}
+	util.LogModuleInfo("dns", "[DNS-FWD] WRITE OK: domain=%s remoteAddr=%s:%d duration=%v (worker released)", domain, remoteGIP, 53, time.Since(writeStart))
+}
+
+// answerRemote builds a DNS response for the resolved IP and sends it to the client.
+func (h *DNSHijacker) answerRemote(query []byte, remoteAddr tcpip.FullAddress, ip net.IP) {
+	resp := buildDNSResponse(query, ip.To4())
+	if resp == nil {
+		return
+	}
+	if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+		util.LogModuleWarn("dns", "tun dns: write remote response to %s:%d fail: %v", remoteAddr.Addr, remoteAddr.Port, err)
 	}
 }
 
-// forwardToRemoteSync is the fallback synchronous forwarding (used if async forwarder not initialized).
-func (h *DNSHijacker) forwardToRemoteSync(remoteSubnet *net.IPNet, query []byte) (net.IP, time.Duration, error) {
-	// Derive remote GIP (.3) from subnet
-	baseIP := remoteSubnet.IP.To4()
-	if baseIP == nil {
-		return nil, 0, fmt.Errorf("invalid remote subnet")
+// answerSERVFAIL sends SERVFAIL so the client retries promptly instead of
+// waiting out its own (longer) resolver timeout.
+func (h *DNSHijacker) answerSERVFAIL(query []byte, remoteAddr tcpip.FullAddress, reason string) {
+	util.LogModuleWarn("dns", "[DNS-FWD] SERVFAIL to %s:%d: %s", remoteAddr.Addr, remoteAddr.Port, reason)
+	resp := buildDNSErrorResponse(query)
+	if resp == nil {
+		return
 	}
-	remoteGIP := make(net.IP, 4)
-	copy(remoteGIP, baseIP)
-	remoteGIP[3] |= 3
-	
-	domain, _, _ := parseDNSQueryDomain(query)
-	
-	remoteAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
-	localAddr := tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr}
-	
-	const timeout = 5 * time.Second
-	conn, err := gonet.DialUDP(h.ns, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
-	if err != nil {
-		return nil, 0, fmt.Errorf("dial %s:53: %v", remoteGIP, err)
+	if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
+		util.LogModuleWarn("dns", "tun dns: write SERVFAIL to %s:%d fail: %v", remoteAddr.Addr, remoteAddr.Port, err)
 	}
-	defer conn.Close()
-	
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, 0, fmt.Errorf("set deadline: %v", err)
+}
+
+// sweepPending expires forwarded queries that never got a response and answers
+// SERVFAIL to those clients. Runs on the forwarder listener's ticker.
+func (h *DNSHijacker) sweepPending() {
+	h.pendingMu.Lock()
+	var expired []*pendingQuery
+	for key, pq := range h.pendingQueries {
+		if time.Since(pq.at) > forwardTimeout {
+			expired = append(expired, pq)
+			delete(h.pendingQueries, key)
+		}
 	}
-	
-	if _, err := conn.Write(query); err != nil {
-		return nil, 0, fmt.Errorf("write query: %v", err)
+	h.pendingMu.Unlock()
+
+	for _, pq := range expired {
+		domain, _, _ := parseDNSQueryDomain(pq.query)
+		util.LogModuleWarn("dns", "[DNS-FWD] TIMEOUT: domain=%s no response in %v, answering SERVFAIL to %s:%d",
+			domain, forwardTimeout, pq.remoteAddr.Addr, pq.remoteAddr.Port)
+		resp := buildDNSErrorResponse(pq.query)
+		if resp == nil {
+			continue
+		}
+		if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); err != nil {
+			util.LogModuleWarn("dns", "tun dns: write SERVFAIL to %s:%d fail: %v", pq.remoteAddr.Addr, pq.remoteAddr.Port, err)
+		}
 	}
-	
-	resp := make([]byte, 512)
-	n, err := conn.Read(resp)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read response: %v", err)
-	}
-	
-	respIP, ttl := ParseDNSResponseIP(resp[:n])
-	if respIP == nil {
-		return nil, 0, fmt.Errorf("no A record in response")
-	}
-	
-	util.LogModuleInfo("dns", "[DNS-FWD-SYNC] domain=%s ip=%s ttl=%v", domain, respIP, ttl)
-	return respIP, ttl, nil
 }
 
 

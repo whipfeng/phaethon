@@ -331,11 +331,6 @@ type AdminServer struct {
 	// and sequence number. Set by the main package on the registry instance.
 	ForceRemoveBinding func(reverseID string, seq int) error
 
-	// OnIncrementalUpdate is called when data-level config changes are made
-	// (proxies, rules, groups, subscriptions). It updates the atomic pointer
-	// without restarting listeners. Set by the main package.
-	OnIncrementalUpdate func() error
-
 	// OnMappingUpdate is called when a mapping is added/modified/deleted.
 	// It receives the old mapping (nil for new) and new mapping (nil for delete).
 	// The callback handles listener restart precisely - no full reload needed.
@@ -358,7 +353,6 @@ type AdminServer struct {
 
 	// templates
 	pages *pageTemplates
-
 
 	// package upload/publish state (see package.go)
 	packageUploadMu   sync.Mutex // one upload at a time
@@ -694,7 +688,7 @@ func (s *AdminServer) Start() error {
 	// Setup TLS: AdminConfig file paths > state/tls-cert (auto-generated)
 	util.Logger.Printf("[INFO] [admin] TLS setup check: TLSCert=%q, TLSKey=%q, ClientCA=%q",
 		s.config.TLSCert, s.config.TLSKey, s.config.ClientCA)
-	
+
 	if s.config.TLSCert != "" && s.config.TLSKey != "" {
 		// User-provided certificate files (file paths only, no inline PEM)
 		certPEM, err := os.ReadFile(s.config.TLSCert)
@@ -702,13 +696,13 @@ func (s *AdminServer) Start() error {
 			return fmt.Errorf("admin read TLS cert file fail: %w", err)
 		}
 		util.Logger.Printf("[INFO] [admin] TLS: loaded certificate from file: %s", s.config.TLSCert)
-		
+
 		keyPEM, err := os.ReadFile(s.config.TLSKey)
 		if err != nil {
 			return fmt.Errorf("admin read TLS key file fail: %w", err)
 		}
 		util.Logger.Printf("[INFO] [admin] TLS: loaded private key from file: %s", s.config.TLSKey)
-		
+
 		util.Logger.Printf("[INFO] [admin] TLS: parsing X509 key pair (certPEM=%d bytes, keyPEM=%d bytes)", len(certPEM), len(keyPEM))
 		cert, err := tls.X509KeyPair(certPEM, keyPEM)
 		if err != nil {
@@ -719,7 +713,7 @@ func (s *AdminServer) Start() error {
 		s.tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-		
+
 		// Configure mTLS with embedded CA certificate
 		embeddedCAConfigured := false
 		util.LogModuleDebug("admin", "defaultClientCA length = %d", len(defaultClientCA))
@@ -735,7 +729,7 @@ func (s *AdminServer) Start() error {
 			s.tlsConfig.ClientCAs = caCertPool
 			embeddedCAConfigured = true
 			util.LogModuleDebug("admin", "embeddedCAConfigured = true, checking AuthEnabled=%v", s.config.AuthEnabled)
-			
+
 			if s.config.AuthEnabled {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
 				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
@@ -744,7 +738,7 @@ func (s *AdminServer) Start() error {
 				util.LogModuleInfo("admin", "authentication enabled (mTLS) with embedded CA")
 			}
 		}
-		
+
 		// Legacy support: if ClientCA file path is configured, use it (override embedded CA)
 		if s.config.ClientCA != "" && !embeddedCAConfigured {
 			caCert, err := os.ReadFile(s.config.ClientCA)
@@ -756,7 +750,7 @@ func (s *AdminServer) Start() error {
 				return fmt.Errorf("admin parse client CA fail")
 			}
 			s.tlsConfig.ClientCAs = caCertPool
-			
+
 			if s.config.AuthEnabled {
 				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
 				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication enabled, mTLS or password)")
@@ -765,7 +759,7 @@ func (s *AdminServer) Start() error {
 				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication disabled)")
 			}
 		}
-		
+
 		s.server.TLSConfig = s.tlsConfig
 	} else if s.config.MeshOnly || s.config.Enabled {
 		// Fallback: load from state/tls-cert or auto-generate
@@ -781,7 +775,7 @@ func (s *AdminServer) Start() error {
 				s.tlsConfig = &tls.Config{
 					Certificates: []tls.Certificate{tlsCert},
 				}
-				
+
 				// Configure mTLS with embedded CA certificate (same as configured cert path)
 				if len(defaultClientCA) > 0 {
 					caCertPool := x509.NewCertPool()
@@ -791,7 +785,7 @@ func (s *AdminServer) Start() error {
 						util.LogModuleInfo("admin", "auto-generated cert with mTLS (embedded CA)")
 					}
 				}
-				
+
 				s.server.TLSConfig = s.tlsConfig
 				util.LogModuleInfo("admin", "auto-generated self-signed TLS certificate")
 			}
@@ -1008,7 +1002,7 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		// The embedded CA certificate (defaultClientCA) is used for mTLS when
 		// AuthEnabled is true, but does not by itself require authentication.
 		authRequired := s.config.AuthEnabled
-		
+
 		// If auth is not required, allow everything
 		if !authRequired {
 			next.ServeHTTP(w, r)
@@ -1021,13 +1015,13 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		// Valid CN values: "all" (global cert) or current mesh nodeID (node cert)
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			cn := r.TLS.PeerCertificates[0].Subject.CommonName
-			
+
 			// Get current mesh nodeID for node certificate validation
 			var nodeID string
 			if mesh, err := db.GetMeshConfig(); err == nil && mesh != nil {
 				nodeID = mesh.NodeID
 			}
-			
+
 			// Accept if CN is "all" (global) or matches current nodeID
 			if cn == "all" || cn == nodeID {
 				certType := "global"
@@ -1409,15 +1403,15 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	data := map[string]interface{}{
-		"Title":         "Proxies",
-		"Proxies":       proxies,
+		"Title":          "Proxies",
+		"Proxies":        proxies,
 		"ProxySummaries": proxySummaries,
-		"Groups":        displayGroups,
-		"GroupStats":    groupStats,
-		"Subscriptions": subs,
-		"SubData":       subData,
-		"SaveTarget":    "base",
-		"CanSwitch":     false,
+		"Groups":         displayGroups,
+		"GroupStats":     groupStats,
+		"Subscriptions":  subs,
+		"SubData":        subData,
+		"SaveTarget":     "base",
+		"CanSwitch":      false,
 	}
 	s.render(w, r, "proxies.html", data)
 }
@@ -2187,11 +2181,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after proxy add failed: %v", err)
-			}
-		}
 		s.mu.Unlock()
 		if replaced {
 			util.LogModuleInfo("admin", "proxy updated: %s (%s)", p.Name, p.Type)
@@ -2232,11 +2221,6 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after proxy delete failed: %v", err)
-			}
 		}
 		s.mu.Unlock()
 		util.LogModuleInfo("admin", "proxy deleted: %s", name)
@@ -2290,11 +2274,6 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after proxy toggle failed: %v", err)
-		}
-	}
 	jsonResponse(w, proxySummary(p))
 }
 
@@ -2331,11 +2310,6 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after p2p toggle failed: %v", err)
-		}
-	}
 	util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
 	jsonResponse(w, proxySummary(p))
 }
@@ -2345,12 +2319,12 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 func validateResolver(rv *config.Resolver) error {
 	srcHost := strings.TrimSpace(rv.SrcHost)
 	srcLower := strings.ToLower(srcHost)
-	
+
 	// Match any *.phn domain (case-insensitive)
 	if strings.HasSuffix(srcLower, ".phn") {
 		return fmt.Errorf("重定向禁止：*.phn 是 mesh 网络保留域名，不允许配置重定向")
 	}
-	
+
 	return nil
 }
 
@@ -2638,11 +2612,6 @@ func (s *AdminServer) apiMappings(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after mapping add failed: %v", err)
-			}
-		}
 		s.mu.Unlock()
 		// Notify runtime about mapping change
 		if s.OnMappingUpdate != nil {
@@ -2716,11 +2685,6 @@ func (s *AdminServer) apiToggleMapping(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after mapping toggle failed: %v", err)
-		}
-	}
 	jsonResponse(w, mappingSummary(m))
 }
 
@@ -2749,11 +2713,6 @@ func (s *AdminServer) apiResolvers(w http.ResponseWriter, r *http.Request) {
 		if err := db.PutResolver(rv); err != nil {
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after resolver toggle failed: %v", err)
-			}
 		}
 		jsonResponse(w, resolverSummary(rv))
 		return
@@ -2921,11 +2880,6 @@ func (s *AdminServer) apiToggleGroup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after group toggle failed: %v", err)
-		}
-	}
 	jsonResponse(w, map[string]interface{}{
 		"name":    g.Name,
 		"enabled": g.IsEnabled(),
@@ -3038,11 +2992,6 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after subscription filter update failed: %v", err)
-			}
 		}
 		s.mu.Unlock()
 		jsonResponse(w, map[string]interface{}{
@@ -3262,11 +3211,6 @@ func (s *AdminServer) apiGroupActiveMember(w http.ResponseWriter, r *http.Reques
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after active-member failed: %v", err)
-		}
-	}
 	s.mu.Unlock()
 	jsonResponse(w, map[string]interface{}{
 		"name":          body.Name,
@@ -3432,11 +3376,6 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after group add failed: %v", err)
-			}
 		}
 		s.mu.Unlock()
 		if replaced {
@@ -3782,11 +3721,6 @@ func (s *AdminServer) apiToggleSubscription(w http.ResponseWriter, r *http.Reque
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after subscription toggle failed: %v", err)
-		}
-	}
 	interval := 0
 	if sub.Interval != nil {
 		interval = *sub.Interval
@@ -3958,12 +3892,6 @@ func (s *AdminServer) apiReverse(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "reverse config start after create failed: %v", err)
 			}
 		}
-
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after reverse config create failed: %v", err)
-			}
-		}
 		util.LogModuleInfo("admin", "reverse config created: %s", rc.Name)
 		jsonResponse(w, &rc)
 
@@ -4028,12 +3956,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 				util.LogModuleWarn("admin", "reverse config update callback failed: %v", err)
 			}
 		}
-
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after reverse config update failed: %v", err)
-			}
-		}
 		util.LogModuleInfo("admin", "reverse config updated: %s", rc.Name)
 		jsonResponse(w, true)
 
@@ -4056,12 +3978,6 @@ func (s *AdminServer) apiReverseItem(w http.ResponseWriter, r *http.Request) {
 		if s.OnReverseConfigUpdate != nil {
 			if err := s.OnReverseConfigUpdate(removedConfig, nil); err != nil {
 				util.LogModuleWarn("admin", "reverse config delete callback failed: %v", err)
-			}
-		}
-
-		if s.OnIncrementalUpdate != nil {
-			if err := s.OnIncrementalUpdate(); err != nil {
-				util.LogModuleWarn("admin", "incremental update after reverse config delete failed: %v", err)
 			}
 		}
 		util.LogModuleInfo("admin", "reverse config deleted: %s", name)
@@ -4105,12 +4021,6 @@ func (s *AdminServer) apiReverseToggle(w http.ResponseWriter, r *http.Request, n
 	if s.OnReverseConfigUpdate != nil {
 		if err := s.OnReverseConfigUpdate(&oldCopy, existing); err != nil {
 			util.LogModuleWarn("admin", "reverse config toggle callback failed: %v", err)
-		}
-	}
-
-	if s.OnIncrementalUpdate != nil {
-		if err := s.OnIncrementalUpdate(); err != nil {
-			util.LogModuleWarn("admin", "incremental update after reverse config toggle failed: %v", err)
 		}
 	}
 	util.LogModuleInfo("admin", "reverse config %s toggled: enabled=%v", name, req.Enabled)
@@ -4181,18 +4091,18 @@ func (s *AdminServer) apiDatabase(w http.ResponseWriter, r *http.Request) {
 	// Parse path: /api/db/<bucket>[/<key>]
 	path := strings.TrimPrefix(r.URL.Path, "/api/db/")
 	parts := strings.SplitN(path, "/", 2)
-	
+
 	if len(parts) == 0 || parts[0] == "" {
 		httpError(w, "bucket name required", http.StatusBadRequest)
 		return
 	}
-	
+
 	bucket := parts[0]
 	key := ""
 	if len(parts) > 1 {
 		key = parts[1]
 	}
-	
+
 	switch r.Method {
 	case http.MethodGet:
 		if key == "" {
@@ -4242,7 +4152,7 @@ func (s *AdminServer) apiDatabaseGet(w http.ResponseWriter, bucket, key string) 
 		httpError(w, fmt.Sprintf("get key failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Try to parse as JSON for pretty display
 	var jsonValue interface{}
 	if err := json.Unmarshal(value, &jsonValue); err == nil {
@@ -4268,12 +4178,12 @@ func (s *AdminServer) apiDatabaseSet(w http.ResponseWriter, bucket, key string, 
 		httpError(w, fmt.Sprintf("read body failed: %v", err), http.StatusBadRequest)
 		return
 	}
-	
+
 	if err := db.PutRawKeyValue(bucket, key, body); err != nil {
 		httpError(w, fmt.Sprintf("set key failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	jsonResponse(w, map[string]interface{}{
 		"success": true,
 		"bucket":  bucket,
@@ -4287,7 +4197,7 @@ func (s *AdminServer) apiDatabaseDelete(w http.ResponseWriter, bucket, key strin
 		httpError(w, fmt.Sprintf("delete key failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	jsonResponse(w, map[string]interface{}{
 		"success": true,
 		"bucket":  bucket,
@@ -4908,9 +4818,9 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{"username": "admin"})
 		return
 	}
-	
+
 	// Auth is enabled: determine username from authentication method
-	
+
 	// 1. Try mTLS client certificate authentication
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		cn := r.TLS.PeerCertificates[0].Subject.CommonName
@@ -4920,14 +4830,14 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	
+
 	// 2. Try session-based authentication
 	username := s.verifySession(r)
 	if username != "" {
 		jsonResponse(w, map[string]string{"username": username})
 		return
 	}
-	
+
 	// 3. Other auth methods (signature, token) - return generic admin username
 	// If request reached here, it passed authMiddleware, so it's authenticated
 	jsonResponse(w, map[string]string{"username": "admin"})
@@ -5106,6 +5016,11 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 	// Ensure every page has a non-empty Version for static-file cache busting.
 	// Use GetCurrentVersion (git describe format) for consistency across all pages.
 	if m, ok := data.(map[string]interface{}); ok {
+		// Prefix the browser tab title with the mesh node-id so operators
+		// managing multiple nodes can tell tabs apart at a glance.
+		if mc, err := db.GetMeshConfig(); err == nil && mc != nil && mc.NodeID != "" {
+			m["NodeID"] = mc.NodeID
+		}
 		if v, _ := m["Version"].(string); v == "" {
 			if s.GetCurrentVersion != nil {
 				if version := s.GetCurrentVersion(); version != "" {
@@ -5182,25 +5097,25 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{
-		"name":                  p.Name,
-		"enabled":               p.IsEnabled(),
-		"type":                  p.Type,
-		"server":                p.Server,
-		"port":                  p.Port,
-		"sni":                   p.Sni,
-		"udp":                   p.IsUDP(),
-		"p2p":                   p.IsP2P(),
-		"v2":                    p.IsV2(),
-		"via":                   p.ViaProxy,
-		"skip-cert-verify":      p.SkipCertVerify,
-		"password":              p.Password,
-		"url":                   p.URL,
-		"username":              p.Username,
-		"flow":                  p.Flow,
-		"reverse-address":       p.ReverseAddress,
-		"private-key":           p.PrivateKey,
+		"name":                   p.Name,
+		"enabled":                p.IsEnabled(),
+		"type":                   p.Type,
+		"server":                 p.Server,
+		"port":                   p.Port,
+		"sni":                    p.Sni,
+		"udp":                    p.IsUDP(),
+		"p2p":                    p.IsP2P(),
+		"v2":                     p.IsV2(),
+		"via":                    p.ViaProxy,
+		"skip-cert-verify":       p.SkipCertVerify,
+		"password":               p.Password,
+		"url":                    p.URL,
+		"username":               p.Username,
+		"flow":                   p.Flow,
+		"reverse-address":        p.ReverseAddress,
+		"private-key":            p.PrivateKey,
 		"private-key-passphrase": p.PrivateKeyPassphrase,
-		"health-check-url":      p.HealthCheckURL,
+		"health-check-url":       p.HealthCheckURL,
 	}
 }
 

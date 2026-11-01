@@ -65,6 +65,7 @@ type activeResources struct {
 	netstack           *mesh.Netstack
 	connHandler        *handler.ConnectionHandler
 	meshMgr            *mesh.MeshManager
+	stallMonitor       *mesh.StallMonitor
 	adminServer        *admin.AdminServer
 	once               sync.Once
 }
@@ -359,6 +360,15 @@ func run(prev *activeResources) (*activeResources, error) {
 	res.tunMgr, res.netstack, res.connHandler = startEngine(meshMgr, nil)
 	if res.tunMgr != nil {
 		res.meshMgr = meshMgr
+	}
+	// Stall monitor: passive data-plane health watcher + automatic forensic
+	// dump (docs/tasks/mesh-data-plane-stall-tasks.md 路径2). Purely
+	// observational — never touches business locks or data paths.
+	if res.meshMgr != nil && res.netstack != nil && res.tunMgr != nil {
+		res.stallMonitor = mesh.NewStallMonitor(res.meshMgr, res.netstack, func() uint64 {
+			return res.tunMgr.Stats().ReadPackets
+		}, Version, filepath.Join(dataDir, "logs"))
+		res.stallMonitor.Start()
 	}
 
 	// Load proxies from database for P2P
@@ -668,9 +678,6 @@ func main() {
 	// the standard flag parser, while remaining available via util.JavaProp().
 	os.Args = util.SetJavaProps(os.Args)
 
-	// Handle --cleanup-pid for self-update: wait for old watchdog, clean up .bak
-	handleCleanupPid()
-
 	// Parse command-line flags early so they can override config values.
 	// ADMIN_PORT environment variable is also supported for container/script
 	// deployments where a flag is less convenient.
@@ -950,7 +957,11 @@ func spawnChildProcess(exe string) (*childProcess, error) {
 		// This ensures worker logs are visible even if watchdog's stderr is /dev/null.
 		Files: []*os.File{os.Stdin, stdoutW, os.Stdout},
 	}
-	proc, err := os.StartProcess(exe, []string{exe}, attr)
+	// Forward the original arguments so flags like -admin-port also work when
+	// the process is started in watchdog mode (the common case). The watchdog
+	// itself never calls flag.Parse, so extra arguments are inert there; the
+	// worker parses them at main() as usual.
+	proc, err := os.StartProcess(exe, append([]string{exe}, os.Args[1:]...), attr)
 	if err != nil {
 		stdoutR.Close()
 		stdoutW.Close()
@@ -1319,20 +1330,13 @@ func runWatchdogMode() {
 		select {
 		case <-cp.done:
 			// Child process exited (stdout closed) - reap immediately
-			exitCode, reaped := reapChild(pid)
+			exitCode, _ := reapChild(pid)
 			wasReady := cp.ready.Load()
 			// Update lastGoodBinary if child became ready
 			if wasReady && lastGoodBinary != currentBinary {
 				lastGoodBinary = currentBinary
 				writeLastGoodWorker(lastGoodBinary)
 				util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
-			}
-			// Check for self-update request (exit code 42)
-			if reaped && exitCode == 42 {
-				util.LogModuleInfo("main", "watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
-				spawnNewWatchdogAndExit(os.Getpid())
-				signal.Stop(sigCh)
-				return
 			}
 			if wasStoppedGracefully() {
 				util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
@@ -1370,20 +1374,13 @@ func runWatchdogMode() {
 
 			if !processExists(pid) {
 				// Child exited but cp.done not yet closed — reap and restart
-				exitCode, reaped := reapChild(pid)
+				reapChild(pid)
 				wasReady := cp.ready.Load()
 				// Update lastGoodBinary if child became ready
 				if wasReady && lastGoodBinary != currentBinary {
 					lastGoodBinary = currentBinary
 					writeLastGoodWorker(lastGoodBinary)
 					util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
-				}
-				// Check for self-update request (exit code 42)
-				if reaped && exitCode == 42 {
-					util.LogModuleInfo("main", "watchdog: child %d requested self-update (exit 42), spawning new watchdog", pid)
-					spawnNewWatchdogAndExit(os.Getpid())
-					signal.Stop(sigCh)
-					return
 				}
 				if wasStoppedGracefully() {
 					util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
@@ -1454,87 +1451,6 @@ func runWatchdogMode() {
 			}
 		}
 	}
-}
-
-// spawnNewWatchdogAndExit spawns a new watchdog process and exits the current one.
-// The new watchdog receives --cleanup-pid to wait for the old watchdog to exit
-// before cleaning up .bak files.
-func spawnNewWatchdogAndExit(myPid int) {
-	exe, err := os.Executable()
-	if err != nil {
-		util.LogModuleError("main", "watchdog: self-update: get executable path: %v", err)
-		return
-	}
-
-	// Build env without PHAETHON_WORKER — new process is a watchdog, not a worker
-	env := removeEnvVar(os.Environ(), "PHAETHON_WORKER")
-
-	attr := &os.ProcAttr{
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-		Env:   env,
-	}
-	args := []string{exe, fmt.Sprintf("--cleanup-pid=%d", myPid)}
-	proc, err := os.StartProcess(exe, args, attr)
-	if err != nil {
-		util.LogModuleError("main", "watchdog: self-update: failed to spawn new watchdog: %v", err)
-		return
-	}
-	util.LogModuleInfo("main", "watchdog: self-update: spawned new watchdog pid=%d, exiting", proc.Pid)
-	proc.Release()
-	os.Exit(0)
-}
-
-// removeEnvVar removes an environment variable from a slice.
-func removeEnvVar(env []string, key string) []string {
-	prefix := key + "="
-	result := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			result = append(result, e)
-		}
-	}
-	return result
-}
-
-// handleCleanupPid checks for --cleanup-pid argument and runs cleanup in background.
-func handleCleanupPid() {
-	for _, arg := range os.Args[1:] {
-		if strings.HasPrefix(arg, "--cleanup-pid=") {
-			pidStr := strings.TrimPrefix(arg, "--cleanup-pid=")
-			cleanupPid, err := strconv.Atoi(pidStr)
-			if err != nil {
-				util.LogModuleDebug("main", "cleanup: invalid --cleanup-pid value: %s", pidStr)
-				return
-			}
-			go cleanupAfterUpdate(cleanupPid)
-			return
-		}
-	}
-}
-
-// cleanupAfterUpdate waits for the old watchdog to exit, then cleans up .bak files.
-func cleanupAfterUpdate(oldWatchdogPid int) {
-	util.LogModuleInfo("main", "cleanup: waiting for old watchdog pid=%d to exit", oldWatchdogPid)
-	if waitForProcessExit(oldWatchdogPid, 30*time.Second) {
-		util.LogModuleInfo("main", "cleanup: old watchdog exited")
-	} else {
-		util.LogModuleWarn("main", "cleanup: old watchdog pid=%d did not exit within 30s", oldWatchdogPid)
-	}
-
-	// Clean up .bak next to the executable
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	bakPath := exe + ".bak"
-	if err := os.Remove(bakPath); err != nil && !os.IsNotExist(err) {
-		util.LogModuleDebug("main", "cleanup: remove %s: %v", bakPath, err)
-	} else if err == nil {
-		util.LogModuleInfo("main", "cleanup: removed %s", bakPath)
-	}
-
-	// Also clean up any .bak from the P2P cache self-update
-	p2p.CleanupBackup()
 }
 
 // buildWorkerEnv builds the environment for the server child process.
@@ -2273,6 +2189,14 @@ func wireAdminCallbacks(resources *activeResources) {
 		// Set peer registered callback for package sync
 		resources.meshMgr.OnPeerRegistered = func(nodeID string) {
 			adminSrv.SyncFromPeer(nodeID)
+		}
+
+		// On-demand stall dump (pprof endpoints are registered unconditionally
+		// in registerRoutes; both sit behind the admin auth middleware).
+		if resources.stallMonitor != nil {
+			adminSrv.StallDump = func() (string, error) {
+				return resources.stallMonitor.TriggerDump("admin-api")
+			}
 		}
 
 		// Periodic sync as fallback (every 5 minutes)

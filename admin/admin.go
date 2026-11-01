@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"sort"
 	"strconv"
@@ -382,6 +383,11 @@ type AdminServer struct {
 	// The main package should set this to trigger a graceful exit, allowing the watchdog
 	// to restart the process. Set by the main package.
 	OnRestart func()
+
+	// StallDump triggers an on-demand data-plane stall diagnostic dump and
+	// returns the dump file path. Set by the main package; nil when mesh is
+	// disabled.
+	StallDump func() (string, error)
 }
 
 // PeerBrief contains brief information about a mesh peer.
@@ -1187,6 +1193,20 @@ func (s *AdminServer) securityHeadersMiddleware(next http.Handler) http.Handler 
 	})
 }
 
+// handleStallDump captures an on-demand data-plane diagnostic dump (POST or GET).
+func (s *AdminServer) handleStallDump(w http.ResponseWriter, r *http.Request) {
+	if s.StallDump == nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "stall dump unavailable (mesh disabled)"})
+		return
+	}
+	path, err := s.StallDump()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"path": path})
+}
+
 // registerRoutes sets up all HTTP routes.
 func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	// Static files — serve from embedded static/ directory.
@@ -1211,6 +1231,15 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/package", s.handlePackagePage)
 	mux.HandleFunc("/login", s.handleLoginPage)
 	mux.HandleFunc("/setup", s.handleSetupPage)
+
+	// Debug endpoints: pprof profiles and on-demand stall dump. These sit on the
+	// same mux, so the existing auth middleware applies.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("/debug/dump", s.handleStallDump)
 
 	// API endpoints — use HandleFunc with path checks for RESTful routing
 	mux.HandleFunc("/api/stats", s.apiStats)

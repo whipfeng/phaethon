@@ -1216,17 +1216,14 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 }
 
 // HandleTopologyGossip processes a gossip announcement from a peer.
-func (m *MeshManager) HandleTopologyGossip(sender PeerSender, data []byte) {
-	var info GossipInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		util.LogModuleDebug("mesh", "[MESH] bad gossip from %s: %v", sender.GetNodeID(), err)
-		return
-	}
+// The payload was already validated and parsed by the p2p layer; the struct is
+// forwarded by value so the pooled recv buffer can be reused immediately.
+func (m *MeshManager) HandleTopologyGossip(sender PeerSender, info GossipInfo) {
 	if sender.GetNodeID() == m.nodeID {
 		return
 	}
 	// Gossip processing modifies topology, so it goes to criticalCh (blocking)
-	m.criticalCh <- meshEvent{kind: processGossip, sender: sender, data: data}
+	m.criticalCh <- meshEvent{kind: processGossip, sender: sender, gossip: info}
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {
@@ -2191,12 +2188,8 @@ func (m *MeshManager) criticalWorker() {
 				util.LogModuleInfo("mesh", "[MESH] peer unregistered by nodeID: %s", ev.nodeID)
 				
 			case processGossip:
-				var info GossipInfo
-				if err := json.Unmarshal(ev.data, &info); err != nil {
-					util.LogModuleDebug("mesh", "[MESH] bad gossip from %s: %v", ev.sender.GetNodeID(), err)
-					break
-				}
-				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d", 
+				info := ev.gossip
+				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d",
 					ev.sender.GetNodeID(), len(info.Routes), len(info.DomainSuffixes), len(info.ClaimedSubnets))
 				if m.topology.UpdateGossip(ev.sender, info) {
 					m.updateTopologySnapshot()
@@ -2281,8 +2274,8 @@ const (
 type meshEvent struct {
 	kind   meshEventKind
 	sender PeerSender
-	data   []byte
-	nodeID string // for peerUnregisterByNodeID
+	gossip GossipInfo // for processGossip
+	nodeID string     // for peerUnregisterByNodeID
 }
 
 func (m *MeshManager) broadcastGossip() {

@@ -124,7 +124,7 @@ type meshInboundPacket struct {
 // MeshHandler handles mesh packets and gossip from P2P peers.
 type MeshHandler interface {
 	HandleMeshFrame(fromNodeID string, linkNIC *mesh.LinkNIC, frame []byte)
-	HandleTopologyGossip(sender mesh.PeerSender, data []byte)
+	HandleTopologyGossip(sender mesh.PeerSender, info mesh.GossipInfo)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(sender mesh.PeerSender)
 	UnregisterPeerByNodeID(nodeID string)
@@ -1612,9 +1612,12 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 		}
 	}
 
-	// Forward raw payload directly to avoid unmarshal→marshal cycle (issue 7)
+	// Forward the already-parsed struct. The raw payload lives in the transport's
+	// pooled recv buffer and is reused by the next Recv() — passing it across
+	// goroutines caused "JSON decoder out of sync" panics. Parsing once here and
+	// shipping the value also eliminates the duplicate unmarshals downstream.
 	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
-		m.meshHandler.HandleTopologyGossip(sender, payload)
+		m.meshHandler.HandleTopologyGossip(sender, info)
 	}
 }
 

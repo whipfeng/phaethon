@@ -38,7 +38,7 @@ func (h *meshTestHandler) HandleMeshFrame(fromNodeID string, linkNIC *mesh.LinkN
 	}
 }
 
-func (h *meshTestHandler) HandleTopologyGossip(sender mesh.PeerSender, data []byte) {}
+func (h *meshTestHandler) HandleTopologyGossip(sender mesh.PeerSender, info mesh.GossipInfo) {}
 
 func (h *meshTestHandler) HandleProbe(sender mesh.PeerSender, data []byte) {}
 

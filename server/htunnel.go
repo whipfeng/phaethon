@@ -23,12 +23,6 @@ import (
 )
 
 const (
-	htHeaderConnectionID = "X-I"
-	htHeaderTargetHost   = "X-H"
-	htHeaderTargetPort   = "X-P"
-	htHeaderContentSeq   = "X-S"
-	htHeaderCommand      = "X-C"
-	htHeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time for mesh GET
 )
 
 var errReadTimeout = errors.New("read timeout")
@@ -310,7 +304,7 @@ func (c *htunnelServerConn) CloseWrite() error {
 }
 
 func (s *HTunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	contentSeq, _ := strconv.Atoi(r.Header.Get(htHeaderContentSeq))
+	contentSeq, _ := strconv.Atoi(r.Header.Get(dialer.HeaderContentSeq))
 
 	switch r.Method {
 	case "TRACE":
@@ -345,13 +339,13 @@ func (s *HTunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.Request) {
 	// MESH channel (P2P direct mode): no target address, frames flow in
 	// POST/GET bodies — see htunnel_mesh.go.
-	if r.Header.Get(htHeaderCommand) == dialer.HTunnelCmdMesh {
+	if r.Header.Get(dialer.HeaderCommand) == dialer.HTunnelCmdMesh {
 		s.handleMeshChannelRequest(w)
 		return
 	}
 
-	encHost := r.Header.Get(htHeaderTargetHost)
-	encPort := r.Header.Get(htHeaderTargetPort)
+	encHost := r.Header.Get(dialer.HeaderTargetHost)
+	encPort := r.Header.Get(dialer.HeaderTargetPort)
 	if encHost == "" || encPort == "" {
 		http.Error(w, "", http.StatusBadRequest)
 		return
@@ -373,7 +367,7 @@ func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.R
 
 	// Explicit bind semantics: only X-C: BIND indicates reverse connection.
 	// No fallback to dstPort==0.
-	cmd := r.Header.Get(htHeaderCommand)
+	cmd := r.Header.Get(dialer.HeaderCommand)
 	isReverse := cmd == "BIND"
 
 	id := atomic.AddInt64(&s.idGen, 1)
@@ -403,7 +397,7 @@ func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.R
 		}
 	})
 
-	w.Header().Set(htHeaderConnectionID, strconv.FormatInt(id, 10))
+	w.Header().Set(dialer.HeaderConnectionID, strconv.FormatInt(id, 10))
 	w.WriteHeader(200)
 	if ch.isUDP {
 		util.LogModuleInfo("htunnel", "[%s] [%s] UDP tunnel started (%s:%d)", s.Mapping.Name, connID, dstHost, dstPortInt)
@@ -989,13 +983,13 @@ func (s *HTunnelServer) handleClose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTunnelServer) getConnectionID(r *http.Request) int64 {
-	idStr := r.Header.Get(htHeaderConnectionID)
+	idStr := r.Header.Get(dialer.HeaderConnectionID)
 	id, _ := strconv.ParseInt(idStr, 10, 64)
 	return id
 }
 
 func (s *HTunnelServer) getContentSeq(r *http.Request) int {
-	seq, _ := strconv.Atoi(r.Header.Get(htHeaderContentSeq))
+	seq, _ := strconv.Atoi(r.Header.Get(dialer.HeaderContentSeq))
 	return seq
 }
 

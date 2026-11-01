@@ -77,8 +77,8 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	crypto := util.NewHTunnelCrypto(proxy.Password)
 
 	req, _ := http.NewRequest("HEAD", fmt.Sprintf("%s//0", proxy.URL), nil)
-	req.Header.Set(headerContentSeq, strconv.Itoa(0))
-	req.Header.Set(headerCommand, HTunnelCmdMesh)
+	req.Header.Set(HeaderContentSeq, strconv.Itoa(0))
+	req.Header.Set(HeaderCommand, HTunnelCmdMesh)
 
 	client := sharedHTunnelClient(proxy)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -92,7 +92,7 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("htunnel-direct: channel request status: %d", resp.StatusCode)
 	}
-	connectionID := resp.Header.Get(headerConnectionID)
+	connectionID := resp.Header.Get(HeaderConnectionID)
 	if connectionID == "" {
 		return nil, fmt.Errorf("htunnel-direct: no connection ID returned")
 	}
@@ -237,8 +237,8 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	}
 
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), bytes.NewReader(data))
-	req.Header.Set(headerConnectionID, t.connectionID)
-	req.Header.Set(headerContentSeq, strconv.Itoa(seq))
+	req.Header.Set(HeaderConnectionID, t.connectionID)
+	req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	resp, err := t.client.Do(req.WithContext(ctx))
@@ -280,14 +280,14 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		seq := readSeq
 		getURL := fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq)
 		req, _ := http.NewRequest("GET", getURL, nil)
-		req.Header.Set(headerConnectionID, t.connectionID)
-		req.Header.Set(headerContentSeq, strconv.Itoa(seq))
+		req.Header.Set(HeaderConnectionID, t.connectionID)
+		req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
 
 		// v0.2.0: send client-controlled wait time
 		t.getMu.Lock()
 		waitTime := t.waitTime
 		t.getMu.Unlock()
-		req.Header.Set(headerWaitTime, strconv.Itoa(int(waitTime.Seconds())))
+		req.Header.Set(HeaderWaitTime, strconv.Itoa(int(waitTime.Seconds())))
 
 		// Context timeout = wait time + buffer for network latency
 		ctxTimeout := waitTime + 10*time.Second
@@ -435,8 +435,8 @@ func (t *htunnelDirectTransport) Close() error {
 		t.seqMu.Unlock()
 
 		req, _ := http.NewRequest("DELETE", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), nil)
-		req.Header.Set(headerConnectionID, t.connectionID)
-		req.Header.Set(headerContentSeq, strconv.Itoa(seq))
+		req.Header.Set(HeaderConnectionID, t.connectionID)
+		req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		resp, err := t.client.Do(req.WithContext(ctx))
@@ -530,8 +530,8 @@ func (t *htunnelDirectTransport) sendHeartbeat() {
 	t.seqMu.Unlock()
 
 	req, _ := http.NewRequest("PUT", fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq), nil)
-	req.Header.Set(headerConnectionID, t.connectionID)
-	req.Header.Set(headerContentSeq, strconv.Itoa(seq))
+	req.Header.Set(HeaderConnectionID, t.connectionID)
+	req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	resp, err := t.client.Do(req.WithContext(ctx))

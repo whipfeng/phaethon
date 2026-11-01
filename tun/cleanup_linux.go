@@ -17,16 +17,13 @@ import (
 // and brings down any TUN interface that still holds the TUN IP address.
 // This is called by the watchdog when the main process crashes.
 func CleanupResidual() {
-	// 1. Delete split-tunnel routes (current scheme)
+	// 1. Delete split-tunnel routes
 	if link, err := netlink.LinkByName("tun0"); err == nil {
 		for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 			_, dst, _ := net.ParseCIDR(cidr)
 			rt := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}
 			_ = netlink.RouteDel(rt)
 		}
-		// Delete old-style default route (backward compat)
-		rt := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: nil}
-		_ = netlink.RouteDel(rt)
 	}
 
 	// 2. Restore resolv.conf from backup if it exists.

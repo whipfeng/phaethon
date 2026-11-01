@@ -1,7 +1,7 @@
 #!/bin/bash
 # QG (Linux/Alpine) deployment script
 # Usage: ./deploy-qg.sh
-# Copy .env.example to .env and fill in your values
+# Set QG_HOST / QG_PORT / QG_USER (e.g. in scripts/.env)
 
 set -e
 
@@ -13,7 +13,7 @@ fi
 
 if [ -z "$QG_HOST" ] || [ -z "$QG_PORT" ] || [ -z "$QG_USER" ]; then
     echo "Error: QG_HOST, QG_PORT, and QG_USER must be set"
-    echo "Copy .env.example to .env and fill in your values"
+    echo "Set QG_HOST, QG_PORT, QG_USER (e.g. in scripts/.env)"
     exit 1
 fi
 

@@ -160,22 +160,6 @@ func (t *PeerQualityTracker) Get(nodeID string, localSeq uint16) *PeerQuality {
 	return q
 }
 
-// GetByNode returns the quality tracker for a node (first link found).
-// Deprecated: Use Get(nodeID, localSeq) for per-link tracking.
-func (t *PeerQualityTracker) GetByNode(nodeID string) *PeerQuality {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	// Find first link for this node (for backward compatibility)
-	prefix := nodeID + ":"
-	for key, q := range t.peers {
-		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-			return q
-		}
-	}
-	return nil
-}
-
 // Remove removes a specific link from tracking.
 func (t *PeerQualityTracker) Remove(nodeID string, localSeq uint16) {
 	t.mu.Lock()

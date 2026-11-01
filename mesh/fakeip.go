@@ -115,7 +115,7 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 	defer p.mu.Unlock()
 
 	if ip, ok := p.domainToIP[domain]; ok {
-		util.LogModuleInfo("dns", "[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
+		util.LogModuleDebug("dns", "[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
 		return ip
 	}
 
@@ -138,7 +138,7 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain
 
-		util.LogModuleInfo("dns", "[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
+		util.LogModuleDebug("dns", "[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
 
 		// Persist to database
 		if db.IsInitialized() {
@@ -167,18 +167,18 @@ func (p *FakeIPPool) LookupDomain(ip string) string {
 	
 	result := ipToDomainCopy[ip]
 	if result == "" {
-		util.LogModuleInfo("dns", "[FAKEIP] LookupDomain: %s -> (not found, map has %d entries)", ip, len(ipToDomainCopy))
+		util.LogModuleDebug("dns", "[FAKEIP] LookupDomain: %s -> (not found, map has %d entries)", ip, len(ipToDomainCopy))
 		// Log first 5 entries for debugging
 		count := 0
 		for k, v := range ipToDomainCopy {
 			if count >= 5 {
 				break
 			}
-			util.LogModuleInfo("dns", "[FAKEIP]   sample: %s -> %s", k, v)
+			util.LogModuleDebug("dns", "[FAKEIP]   sample: %s -> %s", k, v)
 			count++
 		}
 	} else {
-		util.LogModuleInfo("dns", "[FAKEIP] LookupDomain: %s -> %s", ip, result)
+		util.LogModuleDebug("dns", "[FAKEIP] LookupDomain: %s -> %s", ip, result)
 	}
 	
 	return result

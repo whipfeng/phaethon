@@ -286,10 +286,6 @@ func run(prev *activeResources) (*activeResources, error) {
 			}
 		}
 
-		// Load mesh state: database is the source of truth.
-		// (mesh-state.json was migrated to the database long ago; the one-time
-		// migration block was removed — do any remaining cleanup manually.)
-
 		// Generate nodeID if still empty. node-id is the instance identity,
 		// also used as the reverse proxy client ID, so it must be persisted
 		// before anything reads it.
@@ -385,7 +381,7 @@ func run(prev *activeResources) (*activeResources, error) {
 		if !proxy.IsEnabled() {
 			continue
 		}
-		isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
+		isCompatible := config.IsP2PCompatibleType(proxy.Type)
 		if !isCompatible {
 			continue
 		}
@@ -461,26 +457,7 @@ func run(prev *activeResources) (*activeResources, error) {
 			continue
 		}
 
-		var ln net.Listener
-		var err error
-		switch m.Type {
-		case "socks5":
-			ln, err = server.StartSocks5(m)
-		case "direct", "DIRECT":
-			ln, err = server.StartDirect(m)
-		case "trojan":
-			ln, err = server.StartTrojan(m)
-		case "h_tunnel":
-			ln, err = server.StartHTunnel(m)
-		case "http":
-			ln, err = server.StartHTTP(m)
-		case "https":
-			ln, err = server.StartHTTPS(m)
-		default:
-			util.LogModuleError("system", " unsupported mapping type: %s", m.Type)
-			continue
-		}
-
+		ln, err := server.StartListener(m)
 		if err != nil {
 			util.LogModuleError("system", " bind %s fail: %v", m.Type, err)
 			continue
@@ -790,7 +767,8 @@ func main() {
 	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
 	if err := util.SetupLogFile(logPath, 1024); err != nil {
-		util.LogModuleWarn("system", " setup log file failed: %v", err)
+		util.LogModuleError("system", "setup log file failed, logging to stderr only: %v", err)
+		fmt.Fprintf(os.Stderr, "FATAL-ISH: cannot open %s: %v (logs will NOT be persisted)\n", logPath, err)
 	} else {
 		util.LogModuleInfo("system", "Log file: %s (max 1024MB, rotates to .old)", logPath)
 	}
@@ -2095,7 +2073,7 @@ func wireAdminCallbacks(resources *activeResources) {
 			}
 			return
 		}
-		isCompatible := strings.EqualFold(proxy.Type, "socks5") || strings.EqualFold(proxy.Type, "trojan") || strings.EqualFold(proxy.Type, "h_tunnel")
+		isCompatible := config.IsP2PCompatibleType(proxy.Type)
 		exists := p2p.GlobalP2PManager.ActivePeerProxyNames()[name]
 		shouldRun := isCompatible && proxy.IsEnabled() && proxy.IsP2P()
 		switch {
@@ -2218,30 +2196,13 @@ func wireAdminCallbacks(resources *activeResources) {
 						resources.mappingReverse[newMapping.Name] = rs
 					}
 				} else {
-					var ln net.Listener
-					var err error
-					switch newMapping.Type {
-					case "socks5":
-						ln, err = server.StartSocks5(newMapping)
-					case "direct", "DIRECT":
-						ln, err = server.StartDirect(newMapping)
-					case "trojan":
-						ln, err = server.StartTrojan(newMapping)
-					case "h_tunnel":
-						ln, err = server.StartHTunnel(newMapping)
-					case "http":
-						ln, err = server.StartHTTP(newMapping)
-					case "https":
-						ln, err = server.StartHTTPS(newMapping)
-					default:
-						err = fmt.Errorf("unsupported mapping type: %s", newMapping.Type)
-					}
-					if err != nil {
-						util.LogModuleError("system", " bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
-					} else {
-						resources.listeners = append(resources.listeners, ln)
-						resources.mappingListeners[newMapping.Name] = ln
-					}
+						ln, err := server.StartListener(newMapping)
+						if err != nil {
+							util.LogModuleError("system", " bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
+						} else {
+							resources.listeners = append(resources.listeners, ln)
+							resources.mappingListeners[newMapping.Name] = ln
+						}
 				}
 			}
 		}

@@ -1129,12 +1129,20 @@ async function doSaveGroup() {
 }
 
 async function deleteGroup(name) {
-    try {
-        const res = await fetch(`./api/groups/${name}`, {method: 'DELETE'});
-        if (!res.ok) throw new Error(await res.text());
-    } catch (err) {
-        showToast('Error: ' + err.message, 'error');
-    }
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('proxy.confirmDeleteGroup') : 'Delete group';
+    showConfirm(confirmLabel + ' "' + name + '"?', async () => {
+        try {
+            const res = await fetch(`./api/groups/${name}`, {method: 'DELETE'});
+            if (res.status === 409) {
+                const data = await res.json().catch(() => ({references: []}));
+                showBlockedDeleteModal(name, data.references || []);
+                return;
+            }
+            if (!res.ok) throw new Error(await res.text());
+        } catch (err) {
+            showToast('Error: ' + err.message, 'error');
+        }
+    });
 }
 
 async function toggleProxy(name, enabled) {

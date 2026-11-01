@@ -303,7 +303,7 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute               // sorted by prefix length (longest first) - kept for backward compatibility
+	routes     []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
 	routeTrie  *routeTrie                // IP prefix trie for O(log R) lookup
 	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo      // nodeID → info
@@ -358,7 +358,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 
 	// Create IPIP tunnel and allocate EIP from subnet
 	m.ipipTunnel = NewIPIPTunnel()
-	if eip := AllocateEIP(subnet); eip != nil {
+	if eip := CalculateEIP(subnet); eip != nil {
 		m.ipipTunnel.SetLocalEIP(eip)
 		util.LogModuleInfo("mesh", "[MESH] Allocated EIP %s from subnet %s", eip, subnet)
 	}
@@ -903,14 +903,14 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		return nil, false
 	}
 
-	util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
+	util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): match entries=%d len=%d", domain, len(entries), matchLen)
 	for i, e := range entries {
-		util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
+		util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
 	}
 
 	// Select target node (static priority + hash stability)
 	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
-	util.LogModuleInfo("mesh", "[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
+	util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
 	if selectedNodeID == "" {
 		// All entries were for self → this is a local domain
 		// Allocate from local Fake-IP pool
@@ -1073,7 +1073,7 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 			if len(packet) >= 20 {
 				srcIP := net.IP(packet[12:16])
 				dstIP := net.IP(packet[16:20])
-				util.LogModuleInfo("mesh", "[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
+				util.LogModuleDebug("mesh", "[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
 					targetNodeID, peer.GetNodeID(), peer.GetProxyName(), srcIP, dstIP, len(packet), peerWithHop.Hop)
 			}
 			util.LogModuleDebug("mesh", "[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
@@ -1589,8 +1589,8 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 		}
 
 		// Get RTT stats for this specific link (per-link, not per-node):
-		// GetPeerQuality/GetLinkQualityStats(nodeID) return a random link's
-		// stats when a node has multiple links — map iteration order decides.
+		// per-node lookups return a random link's stats when a node has
+		// multiple links — map iteration order decides.
 		localSeq := p.Sender.GetLocalSeq()
 		avgRTT, lossRate, jitter := m.GetLinkQuality(nodeID, localSeq)
 		_, _, _, _, sampleCount := m.p2p.GetLinkQualityStatsByNodeSeq(nodeID, localSeq)
@@ -1954,7 +1954,7 @@ func (m *MeshManager) recomputeRoutes() {
 			if path.LinkNIC != nil {
 				linkNICID = path.LinkNIC.nicID
 			}
-			util.LogModuleInfo("mesh", "[MESH-DIJKSTRA] target=%s nextHop=%s cost=%.0f linkNIC=%d", nodeID, path.NextHop, path.Cost, linkNICID)
+			util.LogModuleDebug("mesh", "[MESH-DIJKSTRA] target=%s nextHop=%s cost=%.0f linkNIC=%d", nodeID, path.NextHop, path.Cost, linkNICID)
 		}
 	}
 
@@ -2532,7 +2532,7 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
-		util.LogModuleInfo("mesh", "[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
+		util.LogModuleDebug("mesh", "[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
 		peer.Sender.SendGossip(data)
 	}
 }
@@ -2600,7 +2600,7 @@ func (m *MeshManager) updateACKStats() {
 	}
 
 	allPeers := m.topology.GetAllPeers()
-	util.LogModuleInfo("mesh", "[MESH-ACK] updateACKStats: %d peers", len(allPeers))
+	util.LogModuleDebug("mesh", "[MESH-ACK] updateACKStats: %d peers", len(allPeers))
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
 			continue // not a direct peer
@@ -2612,7 +2612,7 @@ func (m *MeshManager) updateACKStats() {
 		// and passive (inbound) peers — ProxyName is empty for passive peers
 		// and a lookup by empty proxy name would always miss.
 		srtt, _, jitter, lossRate, sampleCount := m.p2p.GetLinkQualityStatsByNodeSeq(nodeID, localSeq)
-		util.LogModuleInfo("mesh", "[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, peer.Sender.GetProxyName(), srtt, jitter, lossRate, sampleCount)
+		util.LogModuleDebug("mesh", "[MESH-ACK] peer=%s proxy=%s srtt=%v jitter=%v lossRate=%.4f samples=%d", nodeID, peer.Sender.GetProxyName(), srtt, jitter, lossRate, sampleCount)
 		if srtt > 0 || lossRate > 0 {
 			quality := m.qualityTracker.Get(nodeID, localSeq)
 			quality.UpdateACKStats(srtt, lossRate, jitter, sampleCount)
@@ -2624,16 +2624,6 @@ func (m *MeshManager) updateACKStats() {
 			quality.UpdateEgressStats(dropRate, sojournMs)
 		}
 	}
-}
-
-// GetPeerQuality returns the quality metrics for a peer (first link found).
-// Deprecated: Use GetLinkQuality for per-link tracking.
-func (m *MeshManager) GetPeerQuality(nodeID string) (avgRTT time.Duration, loss, jitter float64) {
-	quality := m.qualityTracker.GetByNode(nodeID)
-	if quality == nil {
-		return 0, 0, 0
-	}
-	return quality.Stats()
 }
 
 // GetLinkQuality returns the quality metrics for a specific link.
@@ -2769,7 +2759,7 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 	anyData := false
 	for i, c := range minHopCandidates {
 		nodeID := c.Peer.GetNodeID()
-		avgRTT, loss, jitter := m.GetPeerQuality(nodeID)
+		avgRTT, loss, jitter := m.GetLinkQuality(nodeID, c.Peer.GetLocalSeq())
 		hasData := avgRTT > 0
 		if hasData {
 			anyData = true
@@ -2804,10 +2794,8 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 	// Sort withData by effectiveRTT (bubble sort for simplicity, list is small)
 	for i := 0; i < len(withData); i++ {
 		for j := i + 1; j < len(withData); j++ {
-			_, lossI, jitterI := m.GetPeerQuality(withData[i].GetNodeID())
-			_, lossJ, jitterJ := m.GetPeerQuality(withData[j].GetNodeID())
-			avgI, _, _ := m.GetPeerQuality(withData[i].GetNodeID())
-			avgJ, _, _ := m.GetPeerQuality(withData[j].GetNodeID())
+			avgI, lossI, jitterI := m.GetLinkQuality(withData[i].GetNodeID(), withData[i].GetLocalSeq())
+			avgJ, lossJ, jitterJ := m.GetLinkQuality(withData[j].GetNodeID(), withData[j].GetLocalSeq())
 			effectiveI := time.Duration(float64(avgI)*(1.0+lossI) + jitterI)
 			effectiveJ := time.Duration(float64(avgJ)*(1.0+lossJ) + jitterJ)
 			if effectiveI > effectiveJ {
@@ -3232,7 +3220,7 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		for _, neighbors := range graph.Edges {
 			edgeCount += len(neighbors)
 		}
-		util.LogModuleInfo("mesh", "[MESH-TOPOLOGY] final graph: nodes=%d edges=%d nodeList=%v", len(graph.Nodes), edgeCount, nodeList)
+		util.LogModuleDebug("mesh", "[MESH-TOPOLOGY] final graph: nodes=%d edges=%d nodeList=%v", len(graph.Nodes), edgeCount, nodeList)
 	}
 
 	return graph

@@ -269,7 +269,6 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SUCCESS] [%s] local dial SUCCESS", connID)
 	} else if proxy != nil && strings.ToUpper(proxy.Type) != config.ProxyDIRECT {
 		util.LogModuleInfo("handler", "[HANDLECONN-PROXY-DIAL] [%s] ENTER proxy dial branch: proxy=%s type=%s dst=%s:%d v2=%v", connID, proxy.Name, proxy.Type, resolvedAddr, resolvedPort, proxy.V2)
-		util.LogInfo("handler", "[TCP-DEBUG] [%s] dialing via proxy %s: %s:%d (v2=%v)", connID, proxy.Name, resolvedAddr, resolvedPort, proxy.V2)
 		targetConn, err = dialer.ChainDialWithID(proxy, resolvedAddr, resolvedPort, connID)
 		if err != nil {
 			util.LogModuleWarn("handler", "[%s] [%s] dial %s:%d via %s fail: %v", inbound, connID, resolvedAddr, resolvedPort, proxy.Name, err)

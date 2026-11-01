@@ -25,7 +25,7 @@ func main() {
 
 	// Initialize database
 	if err := db.Init("data/phaethon.db"); err != nil {
-		util.LogError("Failed to init database: %v", err)
+		util.LogModuleError("tools","Failed to init database: %v", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -33,13 +33,13 @@ func main() {
 	// Read config file
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		util.LogError("Failed to read config file: %v", err)
+		util.LogModuleError("tools","Failed to read config file: %v", err)
 		os.Exit(1)
 	}
 
 	var oldCfg OldConfig
 	if err := yaml.Unmarshal(data, &oldCfg); err != nil {
-		util.LogError("Failed to parse config: %v", err)
+		util.LogModuleError("tools","Failed to parse config: %v", err)
 		os.Exit(1)
 	}
 
@@ -48,7 +48,7 @@ func main() {
 	// Import proxies
 	for _, proxy := range oldCfg.Proxies {
 		if err := db.PutProxy(proxy); err != nil {
-			util.LogError("Failed to import proxy %s: %v", proxy.Name, err)
+			util.LogModuleError("tools","Failed to import proxy %s: %v", proxy.Name, err)
 		} else {
 			util.LogInfo("✅ Imported proxy: %s", proxy.Name)
 		}
@@ -57,7 +57,7 @@ func main() {
 	// Import rules
 	for i, rule := range oldCfg.Rules {
 		if _, err := db.InsertRuleWithID(rule, nil); err != nil {
-			util.LogError("Failed to import rule %d: %v", i, err)
+			util.LogModuleError("tools","Failed to import rule %d: %v", i, err)
 		} else {
 			util.LogInfo("✅ Imported rule %d: %s", i, rule)
 		}

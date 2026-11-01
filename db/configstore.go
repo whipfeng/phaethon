@@ -13,7 +13,6 @@ var (
 	keyAdmin        = []byte("admin")
 	keyTUN          = []byte("tun")
 	keyMesh         = []byte("mesh")
-	keyInteractive  = []byte("interactive")
 	keyUDPPortRange = []byte("udp-port-range")
 	keyTCPPortRange = []byte("tcp-port-range")
 )
@@ -121,32 +120,12 @@ func GetMeshConfig() (*config.MeshConfig, error) {
 	return getView[config.MeshConfig](BucketMeshConfig, keyMesh)
 }
 
-func PutInteractive(v bool) error {
-	return Put(BucketInteractiveConfig, keyInteractive, v)
-}
-
-func GetInteractive() (bool, error) {
-	v, err := getView[bool](BucketInteractiveConfig, keyInteractive)
-	if err != nil {
-		return false, err
-	}
-	return *v, nil
-}
-
-func PutUDPPortRange(s string) error {
-	return Put(BucketPortRangeConfig, keyUDPPortRange, s)
-}
-
 func GetUDPPortRange() (string, error) {
 	v, err := getView[string](BucketPortRangeConfig, keyUDPPortRange)
 	if err != nil {
 		return "", err
 	}
 	return *v, nil
-}
-
-func PutTCPPortRange(s string) error {
-	return Put(BucketPortRangeConfig, keyTCPPortRange, s)
 }
 
 func GetTCPPortRange() (string, error) {
@@ -475,7 +454,7 @@ type RuleWithID struct {
 	Rule string `json:"rule"`
 }
 
-// ListRules 返回所有规则（不带 ID，向后兼容）
+// ListRules 返回所有规则（不带 ID）
 func ListRules() ([]string, error) {
 	rulesWithIDs, err := ListRulesWithIDs()
 	if err != nil {
@@ -693,9 +672,6 @@ func readScalarInto(cb *bolt.Bucket, key []byte, dest interface{}) (bool, error)
 	}
 	return true, nil
 }
-
-// ResetConfigPreserving has been removed. Use ReplaceAllConfig with preserved values instead.
-// See admin/admin.go config reset handler for example usage.
 
 // IsEmptyConfig 报告配置 bucket 是否全部为空。数据库文件存在但从未写入
 // 配置时（如初始化中断），主流程仍需走导入流程。

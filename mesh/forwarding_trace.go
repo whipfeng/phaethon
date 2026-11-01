@@ -120,10 +120,3 @@ func TraceForwarding(stage string, data []byte, format string, args ...interface
 	}
 	util.LogModuleDebug("mesh", prefix+" "+format, args...)
 }
-
-func TraceForwardingRoute(dst net.IP, format string, args ...interface{}) {
-	if !ForwardingTraceEnabled() {
-		return
-	}
-	util.LogModuleDebug("mesh", "[MESH-TRACE] stage=route_decision dst=%s "+format, append([]interface{}{dst}, args...)...)
-}

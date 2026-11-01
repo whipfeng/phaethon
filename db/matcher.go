@@ -170,7 +170,7 @@ func parseRule(ruleStr string) *config.Rule {
 func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) (
 	*config.AddrRequest, *config.Proxy, *config.MatchResult, error) {
 
-	util.LogModuleInfo("system", "[RESOLVE-DEBUG] ResolveMatch called: dst=%s:%d mapping=%s", req.DstAddr, req.DstPort, mappingName)
+	util.LogModuleDebug("system", "[RESOLVE-DEBUG] ResolveMatch called: dst=%s:%d mapping=%s", req.DstAddr, req.DstPort, mappingName)
 
 	// Special handling for loopback resolver domain: loc.{nodeid}.phn
 	// Bypass rule matching and return DIRECT immediately to ensure loopback
@@ -178,7 +178,7 @@ func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) 
 	if m.mesh != nil && m.mesh.NodeID != "" {
 		loopbackDomain := "loc." + m.mesh.NodeID + ".phn"
 		if strings.EqualFold(req.DstAddr, loopbackDomain) {
-			util.LogModuleInfo("system", "[RESOLVE-DEBUG] loopback domain detected: %s -> DIRECT (bypassing rules)", req.DstAddr)
+			util.LogModuleDebug("system", "[RESOLVE-DEBUG] loopback domain detected: %s -> DIRECT (bypassing rules)", req.DstAddr)
 			// Rewrite to 127.0.0.1 but keep the original port
 			return &config.AddrRequest{
 				DstAddr: "127.0.0.1",
@@ -195,11 +195,11 @@ func (m *RuleMatcher) ResolveMatch(req *config.AddrRequest, mappingName string) 
 	var mapping *config.Mapping
 	if mappingName != "" {
 		mapping = m.findMapping(mappingName)
-		util.LogModuleInfo("system", "[RESOLVE-DEBUG] findMapping(%s) = %v", mappingName, mapping != nil)
+		util.LogModuleDebug("system", "[RESOLVE-DEBUG] findMapping(%s) = %v", mappingName, mapping != nil)
 	}
 
 	proxy, matchResult := m.match(req, mapping)
-	util.LogModuleInfo("system", "[RESOLVE-DEBUG] ResolveMatch returning: proxy=%v matchResult=%v", proxy != nil, matchResult != nil)
+	util.LogModuleDebug("system", "[RESOLVE-DEBUG] ResolveMatch returning: proxy=%v matchResult=%v", proxy != nil, matchResult != nil)
 	return req, proxy, matchResult, nil
 }
 
@@ -558,19 +558,19 @@ func (m *RuleMatcher) findMapping(name string) *config.Mapping {
 
 func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping) (*config.Proxy, *config.MatchResult) {
 	nowMin := time.Now().Hour()*60 + time.Now().Minute()
-	util.LogModuleInfo("system", "[MATCH-DEBUG] Starting match: dst=%s:%d mapping=%s nowMin=%d totalMatchers=%d",
+	util.LogModuleDebug("system", "[MATCH-DEBUG] Starting match: dst=%s:%d mapping=%s nowMin=%d totalMatchers=%d",
 		request.DstAddr, request.DstPort, func() string { if mapping != nil { return mapping.Name }; return "<nil>" }(), nowMin, len(m.matchers))
 	for i, matcher := range m.matchers {
 		if i < len(m.matcherTimeRanges) && !m.matcherTimeRanges[i].Matches(nowMin) {
-			util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d skipped: time range %s doesn't match nowMin=%d", i, m.matcherTimeRanges[i].String(), nowMin)
+			util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d skipped: time range %s doesn't match nowMin=%d", i, m.matcherTimeRanges[i].String(), nowMin)
 			continue
 		}
 		proxyName := matcher.Match(request, mapping)
 		if proxyName == "" {
-			util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d: no match (proxyName empty)", i)
+			util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d: no match (proxyName empty)", i)
 			continue
 		}
-		util.LogModuleInfo("system", "[MATCH-DEBUG] Rule %d matched: proxyName=%s", i, proxyName)
+		util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d matched: proxyName=%s", i, proxyName)
 		result := &config.MatchResult{
 			ProxyName: proxyName,
 		}
@@ -584,10 +584,10 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 			}
 		}
 		resolved := m.resolveName(proxyName)
-		util.LogModuleInfo("system", "[MATCH-DEBUG] resolveName(%s) = %v", proxyName, resolved != nil)
+		util.LogModuleDebug("system", "[MATCH-DEBUG] resolveName(%s) = %v", proxyName, resolved != nil)
 		return resolved, result
 	}
-	util.LogModuleInfo("system", "[MATCH-DEBUG] No rule matched, returning nil")
+	util.LogModuleDebug("system", "[MATCH-DEBUG] No rule matched, returning nil")
 	return nil, nil
 }
 
@@ -604,10 +604,10 @@ func (m *RuleMatcher) resolveName(name string) *config.Proxy {
 
 func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 	if m.resolvers == nil {
-		util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolving: resolvers is nil, returning original")
+		util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolving: resolvers is nil, returning original")
 		return req
 	}
-	util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolving: checking %d resolvers for %s:%d", len(m.resolvers), req.DstAddr, req.DstPort)
+	util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolving: checking %d resolvers for %s:%d", len(m.resolvers), req.DstAddr, req.DstPort)
 	for i, resolver := range m.resolvers {
 		if !resolver.IsEnabled() {
 			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: disabled, skipping", i, resolver.Name)
@@ -632,7 +632,7 @@ func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
 		if resolver.DstPort != 0 {
 			newPort = resolver.DstPort
 		}
-		util.LogModuleInfo("system", "[RESOLVE-DEBUG] resolver[%d] %s: MATCHED! rewriting %s:%d -> %s:%d", i, resolver.Name, req.DstAddr, req.DstPort, resolver.DstHost, newPort)
+		util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: MATCHED! rewriting %s:%d -> %s:%d", i, resolver.Name, req.DstAddr, req.DstPort, resolver.DstHost, newPort)
 		return &config.AddrRequest{
 			DstAddr: resolver.DstHost,
 			DstPort: newPort,

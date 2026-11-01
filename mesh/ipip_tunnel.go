@@ -52,7 +52,7 @@ func (p *ipipTunnelProtocol) ShouldDecapsulate(pkt *stack.PacketBuffer) bool {
 	if end > 20 {
 		end = 20
 	}
-	util.LogModuleInfo("ipip", "[IPIP-TUNNEL] ShouldDecapsulate: outerIP len=%d data=%x", len(outerIP), outerIP[:end])
+	util.LogModuleDebug("ipip", "[IPIP-TUNNEL] ShouldDecapsulate: outerIP len=%d data=%x", len(outerIP), outerIP[:end])
 	
 	// Skip IsValid() check - gVisor already validated the packet
 	// We just need to check the destination address
@@ -65,7 +65,7 @@ func (p *ipipTunnelProtocol) ShouldDecapsulate(pkt *stack.PacketBuffer) bool {
 	dstAddr := outerIP.DestinationAddress()
 	shouldDecap := p.localEIP == dstAddr
 
-	util.LogModuleInfo("ipip", "[IPIP-TUNNEL] ShouldDecapsulate: outer dst=%s local EIP=%s match=%v", dstAddr, p.localEIP, shouldDecap)
+	util.LogModuleDebug("ipip", "[IPIP-TUNNEL] ShouldDecapsulate: outer dst=%s local EIP=%s match=%v", dstAddr, p.localEIP, shouldDecap)
 
 	return shouldDecap
 }
@@ -97,7 +97,7 @@ func (p *ipipTunnelProtocol) Decapsulate(pkt *stack.PacketBuffer) *stack.PacketB
 		return nil
 	}
 
-	util.LogModuleInfo("ipip", "[IPIP-TUNNEL] Decapsulating: outer=%s->%s inner=%s->%s proto=%d len=%d",
+	util.LogModuleDebug("ipip", "[IPIP-TUNNEL] Decapsulating: outer=%s->%s inner=%s->%s proto=%d len=%d",
 		outerIP.SourceAddress(), outerIP.DestinationAddress(),
 		innerIP.SourceAddress(), innerIP.DestinationAddress(),
 		innerIP.TransportProtocol(), len(innerData))
@@ -111,7 +111,7 @@ func (p *ipipTunnelProtocol) Decapsulate(pkt *stack.PacketBuffer) *stack.PacketB
 	})
 	innerPkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
 
-	util.LogModuleInfo("ipip", "[IPIP-TUNNEL] Decapsulate: innerData len=%d (complete IP packet, no link header)", len(innerData))
+	util.LogModuleDebug("ipip", "[IPIP-TUNNEL] Decapsulate: innerData len=%d (complete IP packet, no link header)", len(innerData))
 
 	return innerPkt
 }

@@ -28,7 +28,7 @@ func main() {
 	// Initialize database
 	dbPath := filepath.Join(*dataDir, "phaethon.db")
 	if err := db.Init(dbPath); err != nil {
-		util.LogError("Failed to init database: %v", err)
+		util.LogModuleError("tools","Failed to init database: %v", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -42,7 +42,7 @@ func main() {
 
 	// Save to database
 	if err := db.PutMeshConfig(meshConfig); err != nil {
-		util.LogError("Failed to save mesh config: %v", err)
+		util.LogModuleError("tools","Failed to save mesh config: %v", err)
 		os.Exit(1)
 	}
 
@@ -51,7 +51,7 @@ func main() {
 	// Verify
 	loaded, err := db.GetMeshConfig()
 	if err != nil {
-		util.LogError("Failed to verify: %v", err)
+		util.LogModuleError("tools","Failed to verify: %v", err)
 		os.Exit(1)
 	}
 	data, _ := json.MarshalIndent(loaded, "", "  ")

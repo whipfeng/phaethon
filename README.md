@@ -11,13 +11,13 @@ L4 代理转发工具（Go 版）。支持多种入站/出站协议、规则路�
 > - 代理密码、Token、API Key
 > - 内网域名、网络拓扑
 >
-> 敏感配置请使用环境变量或 `.env` 文件（已在 `.gitignore` 中排除）。
-> 运维相关信息请参考 `docs/runbooks/` 目录。
+> 敏感配置（代理密码、Admin 凭据等）请通过 Web 控制台或 Admin API 写入本地数据库，
+> 不要提交到仓库。运维相关信息请参考 `docs/runbooks/` 目录。
 
 ## 目录
 
 - [快速开始](#快速开始)
-- [零配置使用说明](#零配置使用说明推荐新手)
+- [新手使用说明](#新手使用说明)
 - [项目结构](#项目结构)
 - [配置文件](#配置文件)
 - [支持的协议](#支持的协议)
@@ -43,23 +43,23 @@ go build -o phaethon .
 ./phaethon
 ```
 
-首次运行时，程序会自动把内嵌的 `conf/default.yaml` 复制为工作目录下的 `config.yaml`，因此不需要手动准备配置文件即可启动。
+首次运行时，程序会在 `data/` 目录创建嵌入式数据库（`data/phaethon.db`）并进入初始化流程：
+终端交互模式下会询问 Admin 端口（默认 39999）、是否启用认证、Mesh node-id；
+非交互模式（如服务方式启动）直接使用默认值自动初始化。
 
-默认配置会开启：
-- Web 管理面板：`http://127.0.0.1:9090`
-- 本地 SOCKS5 入站代理：`127.0.0.1:7890`
+所有配置（代理、代理组、订阅、规则、端口映射等）都持久化在该数据库中，
+通过 Web 控制台或 Admin API 管理，**没有 YAML 配置文件**。
 
-如需自定义代理节点、规则或环境变量，可：
-- 在 Web UI 中直接编辑并保存
-- 或参考 [`config.yaml.example`](config.yaml.example) 和 [`.env.example`](.env.example) 手动修改
-- 敏感信息建议放在 `.env` 中，通过 `${VAR}` 在 `config.yaml` 中引用
+初始化完成后即可：
+- 打开 Web 管理面板（默认 `http://<host>:39999`）在 UI 中管理全部配置
+- 或通过 Admin API 编程管理（参考 `docs/` 目录）
 
 ---
 
-## 零配置使用说明（推荐新手）
+## 新手使用说明
 
 > **phaethon 是什么？**  
-> 一个 L4 代理转发工具，把本地服务通过反向通道暴露到公网，也支持正向代理、规则路由、代理组、订阅和 TUN 模式。下面介绍**不做任何 YAML 配置**即可体验的最简用法。
+> 一个 L4 代理转发工具，把本地服务通过反向通道暴露到公网，也支持正向代理、规则路由、代理组、订阅和 TUN 模式。配置全部保存在本地数据库中，通过 Web 控制台管理，下面介绍最简用法。
 
 ### 1. 启动程序
 
@@ -69,24 +69,29 @@ go build -o phaethon .
 ./phaethon
 ```
 
-启动后 Web 管理面板默认监听 `127.0.0.1:9090`，日志会打印实际地址。如果该端口被占用，启动会失败并在 `.phaethon/startup-error.log` 留下原因。
+首次启动会进入初始化（Admin 端口、可选认证、Mesh node-id），完成后配置保存在 `data/phaethon.db`。
+Web 管理面板默认监听 `0.0.0.0:39999`。如果端口被占用，启动会失败并在 `data/logs/startup-error.log` 留下原因。
 
-### 2. 本地 SOCKS5 代理
+### 2. 添加一个本地 SOCKS5 代理
 
-默认配置已启动一个 SOCKS5 入站代理：
+打开 Web 管理面板 → 端口映射（Mappings）→ 新增：
+- 类型：`socks5`
+- 端口：`7890`
+
+保存后立即生效，本地即可使用：
 
 ```
 socks5://127.0.0.1:7890
 ```
 
-无需任何出站代理节点即可把流量直接转发到目标（默认规则 `MATCH,DIRECT`）。
+无需任何出站代理节点即可把流量直接转发到目标（默认无规则时走 DIRECT）。
 
 ### 3. 反向连接（内网穿透）
 
 使用反向连接前，需要先配置一个能连到注册端的出站代理节点。配置完成后，打开反向连接向导：
 
 ```
-http://127.0.0.1:9090/reverse
+http://<host>:39999/reverse
 ```
 
 按向导填写：
@@ -106,14 +111,14 @@ http://127.0.0.1:9090/reverse
 
 - **端口被占用提示**：首选端口填别的数字，或留空自动分配。
 - **同一个 Reverse ID 启动两次**：第二次会提示注册冲突，不会两个实例互相踢。
-- **管理端口起不来**：查看 `.phaethon/startup-error.log` 中的具体错误。
+- **管理端口起不来**：查看 `data/logs/startup-error.log` 中的具体错误。
 
 ## 项目结构
 
 ```
 phaethon/
-├── main.go              # 入口：加载配置、启动监听、热重载、健康检查、订阅刷新
-├── config/              # 配置模型、YAML 解析、路由匹配（Rule/Matcher）、限速器
+├── main.go              # 入口：初始化数据库、加载配置、启动监听、热重载、健康检查、订阅刷新
+├── config/              # 配置模型、路由匹配（Rule/Matcher）、限速器
 │   └── config.go
 ├── server/              # 入站协议服务器（Socks5/Trojan/h_tunnel/HTTP/HTTPS/Direct/Reverse）
 │   ├── base.go          # BaseServer、AcceptLoop、startTCP/startTLS
@@ -138,43 +143,20 @@ phaethon/
 │   └── registry.go      # Registry、ManagedConn、心跳握手（PING/PONG/PENG）
 ├── tun/                 # TUN 模式（系统级流量拦截）
 ├── util/                # 日志、Relay、证书生成、连接 ID 等工具
-└── conf/                # 内嵌默认配置目录
-    └── default.yaml     # 默认配置（未提供 config.yaml 时使用）
+└── data/                # 运行时数据目录（首次运行自动生成）
+    └── phaethon.db      # 嵌入式配置数据库（代理/组/规则/映射等均存于此）
 ```
 
 ---
 
-## 配置文件
+## 配置说明
 
-配置采用 YAML 格式，程序从工作目录加载 `config.yaml`。敏感值可以放到同目录的 `.env` 文件中，通过 `${VAR}` 在 `config.yaml` 中引用。
+配置不采用 YAML 文件：所有配置持久化在工作目录下的嵌入式数据库 `data/phaethon.db` 中，
+通过 **Web 控制台** 或 **Admin API** 进行增删改查，保存后立即生效。
 
-### .env 示例
+以下 YAML 片段仅用于说明各配置实体的字段结构（等价于 API/UI 中的数据模型），不是需要手动编辑的文件。
 
-```bash
-PROXY_PASSWORD=your-password
-ADMIN_TOKEN=your-token
-```
-
-### config.yaml 引用示例
-
-```yaml
-proxies:
-  - name: NODE1
-    type: trojan
-    server: 1.2.3.4
-    port: 443
-    password: ${PROXY_PASSWORD}
-    sni: www.example.com
-
-admin:
-  enabled: true
-  addr: :9090
-  token: ${ADMIN_TOKEN}
-```
-
-支持的引用语法：`${VAR}`、`$VAR`、`${VAR:-default}`、`$${VAR}`（转义）。
-
-### 配置结构
+### 配置结构示例
 
 ```yaml
 proxies:          # 代理节点列表
@@ -331,13 +313,16 @@ make windows7
 
 | 变量       | 说明                                  |
 |-----------|--------------------------------------|
-| ADMIN_PORT | 覆盖管理面板端口（如 9090）            |
+| ADMIN_PORT | 覆盖管理面板端口（如 39999）           |
+| PHAETHON_LOG_MODULES | 按模块覆盖日志级别（如 `dialer=1,mesh=0`） |
+| PHAETHON_WORKER | 标记 worker 进程（内部使用）           |
 
-`.env` 文件中的变量可在 `config.yaml` 中通过 `${VAR}` 引用。
+业务配置（代理、规则、映射等）不从环境变量读取，一律通过控制台或 Admin API 写入数据库。
 
 ### 热重载
 
-程序不再使用 `fsnotify` 自动监视配置文件。Admin 面板的修改会立即生效并保存到 `config.yaml`；如果需要从磁盘重新加载配置，请使用 Web UI 中的 **Reload Config** 按钮或重启进程。
+程序不监视任何配置文件。控制台的修改会立即生效并保存到数据库 `data/phaethon.db`；
+如需从数据库重建运行态，请使用 Web UI 中的 **Reload Config** 按钮或重启进程。
 
 ---
 
@@ -435,21 +420,21 @@ TUN 模式需要管理员/root 权限运行，用于拦截系统全部流量并�
 
 ## 多环境配置
 
-多环境请复制完整工作目录，例如：
+每个工作目录拥有独立的配置数据库，多环境请复制完整工作目录，例如：
 
 ```
 ./phaethon-service/
 ├── phaethon
-├── config.yaml
-└── .env
+└── data/
+    └── phaethon.db
 
 ./phaethon-office/
 ├── phaethon
-├── config.yaml
-└── .env
+└── data/
+    └── phaethon.db
 ```
 
-分别进入对应目录运行 `./phaethon` 即可。
+分别进入对应目录运行 `./phaethon` 即可，各实例的初始化（Admin 端口、认证、node-id）互不影响。
 
 ---
 

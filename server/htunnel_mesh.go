@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"phaethon/dialer"
 	"phaethon/frame"
 	"phaethon/util"
 )
@@ -60,7 +61,7 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	})
 	ch.mu.Unlock()
 
-	w.Header().Set(htHeaderConnectionID, strconv.FormatInt(id, 10))
+	w.Header().Set(dialer.HeaderConnectionID, strconv.FormatInt(id, 10))
 	w.WriteHeader(200)
 	util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
 
@@ -158,7 +159,7 @@ func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
 func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *http.Request) {
 	// Read client-controlled wait time (v0.2.0)
 	waitTime := 5 * time.Second
-	if waitTimeStr := r.Header.Get(htHeaderWaitTime); waitTimeStr != "" {
+	if waitTimeStr := r.Header.Get(dialer.HeaderWaitTime); waitTimeStr != "" {
 		if waitTimeSec, err := strconv.Atoi(waitTimeStr); err == nil && waitTimeSec > 0 {
 			waitTime = time.Duration(waitTimeSec) * time.Second
 			// Clamp to reasonable range

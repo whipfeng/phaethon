@@ -19,7 +19,6 @@ var (
 	BucketAdminConfig       = []byte("admin-config")        // 新：管理配置
 	BucketTUNConfig         = []byte("tun-config")          // 新：TUN 配置
 	BucketMeshConfig        = []byte("mesh-config")         // 新：Mesh 网络配置
-	BucketInteractiveConfig = []byte("interactive-config")  // 新：交互式配置
 	BucketPortRangeConfig   = []byte("port-range-config")   // 新：端口范围配置
 	BucketProxies           = []byte("proxies")             // 代理配置
 	BucketProxyGroups       = []byte("proxy-groups")        // 代理组
@@ -57,7 +56,6 @@ func configBuckets() [][]byte {
 		BucketAdminConfig,
 		BucketTUNConfig,
 		BucketMeshConfig,
-		BucketInteractiveConfig,
 		BucketPortRangeConfig,
 		// 其他配置 bucket
 		BucketProxies,

@@ -427,29 +427,31 @@
     }
 
     function deleteBinding(id) {
-        if (!confirm(typeof i18n !== 'undefined' ? i18n.t('tun.bindingConfirmDelete') : 'Delete this binding?')) return;
-        fetch('./api/tun', {
-            method: 'GET'
-        })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            var bindings = data.dhcpStaticBindings || [];
-            var idx = bindings.findIndex(function(b) { return b.id === id; });
-            if (idx >= 0) {
-                bindings.splice(idx, 1);
-            }
-            return fetch('./api/tun', {
-                method: 'PATCH',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({dhcpStaticBindings: bindings})
+        var confirmLabel = typeof i18n !== 'undefined' ? i18n.t('tun.bindingConfirmDelete') : 'Delete this binding?';
+        showConfirm(confirmLabel, function() {
+            fetch('./api/tun', {
+                method: 'GET'
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                var bindings = data.dhcpStaticBindings || [];
+                var idx = bindings.findIndex(function(b) { return b.id === id; });
+                if (idx >= 0) {
+                    bindings.splice(idx, 1);
+                }
+                return fetch('./api/tun', {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({dhcpStaticBindings: bindings})
+                });
+            })
+            .then(function(res) {
+                if (!res.ok) return res.text().then(function(text) { throw new Error(text); });
+                showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
+            })
+            .catch(function(err) {
+                showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
             });
-        })
-        .then(function(res) {
-            if (!res.ok) return res.text().then(function(text) { throw new Error(text); });
-            showToast(typeof i18n !== 'undefined' ? i18n.t('tun.bindingSaved') : 'Static binding saved', 'success');
-        })
-        .catch(function(err) {
-            showToast((typeof i18n !== 'undefined' ? i18n.t('tun.bindingFailed') : 'Static binding operation failed') + ': ' + err.message, 'error');
         });
     }
     </script>

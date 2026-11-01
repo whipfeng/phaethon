@@ -78,6 +78,11 @@ func (p *Proxy) IsEnabled() bool {
 	return *p.Enabled
 }
 
+// IsP2PCompatibleType reports whether the proxy type supports the P2P/mesh data path.
+func IsP2PCompatibleType(typ string) bool {
+	return strings.EqualFold(typ, "socks5") || strings.EqualFold(typ, "trojan") || strings.EqualFold(typ, "h_tunnel")
+}
+
 // IsP2P reports whether P2P is enabled for this proxy.
 // Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
 // h_tunnel can disable P2P to fall back to traditional BIND mode (no mesh downlink).
@@ -85,8 +90,7 @@ func (p *Proxy) IsP2P() bool {
 	if p == nil {
 		return false
 	}
-	isCompatible := strings.EqualFold(p.Type, "socks5") || strings.EqualFold(p.Type, "trojan") || strings.EqualFold(p.Type, "h_tunnel")
-	if !isCompatible {
+	if !IsP2PCompatibleType(p.Type) {
 		return false
 	}
 	if p.P2P != nil {
@@ -524,10 +528,6 @@ func (g *ProxyGroup) subscriptionCandidatesLocked(sub *Subscription) []string {
 	sort.Strings(names)
 	return names
 }
-
-// UpdateDynamicSelection is deprecated and no-ops. Membership is now determined
-// by SubscriptionFilter; selection strategies use health data at Next() time.
-func (g *ProxyGroup) UpdateDynamicSelection() {}
 
 // Next returns the currently selected Proxy according to the group type.
 // It is the entry point for nested group resolution and creates a fresh
@@ -988,10 +988,6 @@ type AddrRequest struct {
 // NewConnectRequest creates a CONNECT request. proto is "tcp" or "udp".
 func NewConnectRequest(proto, dstAddr string, dstPort int) *AddrRequest {
 	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "CONNECT", Proto: proto}
-}
-
-func NewBindRequest(dstAddr string, dstPort int) *AddrRequest {
-	return &AddrRequest{DstAddr: dstAddr, DstPort: dstPort, CmdType: "BIND"}
 }
 
 type Matcher interface {

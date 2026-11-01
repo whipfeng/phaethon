@@ -431,13 +431,16 @@ async function saveRule(e) {
 }
 
 async function deleteRule(id) {
-    try {
-        const res = await fetch(`./api/rules/${id}`, {method: 'DELETE'});
-        if (!res.ok) throw new Error(await res.text());
-    } catch (err) {
-        const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
-        showToast(errLabel + ': ' + err.message, 'error');
-    }
+    const confirmLabel = typeof i18n !== 'undefined' ? i18n.t('rule.confirmDelete') : 'Delete rule';
+    showConfirm(confirmLabel + ' #' + id + '?', async () => {
+        try {
+            const res = await fetch(`./api/rules/${id}`, {method: 'DELETE'});
+            if (!res.ok) throw new Error(await res.text());
+        } catch (err) {
+            const errLabel = typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error';
+            showToast(errLabel + ': ' + err.message, 'error');
+        }
+    });
 }
 
 async function toggleRule(id, enabled) {

@@ -128,6 +128,6 @@ func getDefaultGatewayDarwin() (net.IP, string, error) {
 // addMeshRoute adds a route for the mesh subnet through the TUN device.
 func (e *Manager) addMeshRoute(subnet string) error {
 	// TODO: implement for Darwin
-	util.LogModuleInfo("route", "mesh route %s (darwin not implemented yet)", subnet)
+	util.LogModuleWarn("route", "mesh route %s NOT added: darwin route setup not implemented", subnet)
 	return nil
 }

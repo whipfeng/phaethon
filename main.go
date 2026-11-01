@@ -1161,6 +1161,30 @@ func selectWorkerBinary() string {
 // (child writes the stopped marker), the watchdog cleans up and exits.
 // SIGTERM/SIGINT received by the watchdog are forwarded to the child.
 func runWatchdogMode() {
+	// The watchdog never enters run(), so module log levels are never
+	// configured and the global default (Error) silences every watchdog
+	// info/warn line. Parse the same env var the worker uses.
+	if moduleConfig := os.Getenv("PHAETHON_LOG_MODULES"); moduleConfig != "" {
+		util.ParseModuleLogLevels(moduleConfig)
+	}
+
+	// The watchdog never reaches the worker's log setup in main(), so without
+	// this its logs go only to stderr — invisible on Windows where the process
+	// is spawned detached (vbs/Start-Process). Persist them separately from
+	// the worker's phaethon.log so kill/restart decisions stay auditable.
+	workDir, err := os.Getwd()
+	if err != nil {
+		workDir = "."
+	}
+	logsDir := filepath.Join(workDir, "data", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+	watchdogLogPath := filepath.Join(logsDir, "phaethon-watchdog.log")
+	if err := util.SetupLogFile(watchdogLogPath, 1024); err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: setup log file failed, logging to stderr only: %v\n", err)
+	} else {
+		util.LogModuleInfo("main", "watchdog: log file: %s", watchdogLogPath)
+	}
+
 	util.LogModuleInfo("main", "watchdog: starting in watchdog mode")
 
 	const (

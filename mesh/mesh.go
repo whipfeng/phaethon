@@ -2763,8 +2763,8 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 		hasData := avgRTT > 0
 		if hasData {
 			anyData = true
-			// Cost = SRTT * (1 + lossRate) + jitter
-			effectiveRT := time.Duration(float64(avgRTT)*(1.0+loss) + jitter)
+			// Cost = SRTT * (1 + lossRate) + jitter (all in ns; Stats returns jitter in ms)
+			effectiveRT := time.Duration(float64(avgRTT)*(1.0+loss) + jitter*float64(time.Millisecond))
 			qualities[i] = peerQuality{peer: c.Peer, effectiveRT: effectiveRT, hasData: hasData}
 		} else {
 			qualities[i] = peerQuality{peer: c.Peer, hasData: false}
@@ -2796,8 +2796,8 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 		for j := i + 1; j < len(withData); j++ {
 			avgI, lossI, jitterI := m.GetLinkQuality(withData[i].GetNodeID(), withData[i].GetLocalSeq())
 			avgJ, lossJ, jitterJ := m.GetLinkQuality(withData[j].GetNodeID(), withData[j].GetLocalSeq())
-			effectiveI := time.Duration(float64(avgI)*(1.0+lossI) + jitterI)
-			effectiveJ := time.Duration(float64(avgJ)*(1.0+lossJ) + jitterJ)
+			effectiveI := time.Duration(float64(avgI)*(1.0+lossI) + jitterI*float64(time.Millisecond))
+			effectiveJ := time.Duration(float64(avgJ)*(1.0+lossJ) + jitterJ*float64(time.Millisecond))
 			if effectiveI > effectiveJ {
 				withData[i], withData[j] = withData[j], withData[i]
 			}

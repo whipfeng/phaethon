@@ -276,6 +276,10 @@ type MeshManager struct {
 	uturnLogMu   sync.Mutex
 	lastUturnLog time.Time
 
+	// Stall-monitor D counters: host-facing inbound frames (see stall_monitor.go).
+	stallDVIP  atomic.Uint64 // dst == local VIP (.1): returns of host-originated traffic
+	stallDIPIP atomic.Uint64 // IPIP outer dst == local EIP (.4): exit-node returns
+
 	// Round-robin state for multi-link load balancing (design §2.8)
 	// Key: target nodeID, Value: last used index
 	linkSelectIdx map[string]int
@@ -1189,6 +1193,16 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	}
 	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
 		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
+
+	// Stall-monitor D counters: only frames whose arrival must be followed by a
+	// TUN write (B) — dst==VIP leaves NIC 1 directly; IPIP-to-EIP decapsulates
+	// to local delivery whose reply writes TUN. In-stack service addresses
+	// (GIP/hostIP/fakeIP) and transit frames are deliberately not counted.
+	if m.vip != nil && dstIP.Equal(m.vip) {
+		m.stallDVIP.Add(1)
+	} else if m.subnet != nil && len(frame) >= 20 && frame[9] == 4 && dstIP.Equal(CalculateEIP(m.subnet)) {
+		m.stallDIPIP.Add(1)
+	}
 	// Inject into the Link NIC provided by the P2P layer. Local delivery (GIP/VIP/fakeIP),
 	// gateway forwarding (advertised prefixes → IPIP egress), mesh relay
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.

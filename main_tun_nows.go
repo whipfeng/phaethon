@@ -46,18 +46,6 @@ func reapChild(pid int) (exitCode int, ok bool) {
 	return 0, false
 }
 
-// waitForProcessExit waits for a process to exit by polling.
-func waitForProcessExit(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !processExists(pid) {
-			return true
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return !processExists(pid)
-}
-
 // reexecAsWatchdog copies the current binary to a "-watchdog" suffixed name
 // and re-execs into it via syscall.Exec. The PID stays the same so init
 // systems (OpenRC, systemd) continue tracking the process normally.

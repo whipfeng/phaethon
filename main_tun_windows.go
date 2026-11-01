@@ -4,7 +4,6 @@ package main
 
 import (
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -71,23 +70,6 @@ func reapChild(pid int) (exitCode int, ok bool) {
 		return 0, false
 	}
 	return int(code), true
-}
-
-// waitForProcessExit waits for a process to exit using WaitForSingleObject.
-func waitForProcessExit(pid int, timeout time.Duration) bool {
-	handle, err := syscall.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return false
-	}
-	defer syscall.CloseHandle(handle)
-	millis := uint32(timeout.Milliseconds())
-	if millis == 0 {
-		millis = 1
-	}
-	k32 := syscall.NewLazyDLL("kernel32.dll")
-	waitFunc := k32.NewProc("WaitForSingleObject")
-	ret, _, _ := waitFunc.Call(uintptr(handle), uintptr(millis))
-	return ret == 0 // WAIT_OBJECT_0
 }
 
 // killResidualWorkers is a no-op on Windows. The watchdog does not run on

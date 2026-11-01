@@ -1,6 +1,6 @@
 # Mesh 数据面卡死：轻则断流、重则整机网络栈挂死
 
-**状态**: 🔍 排查中（2026-11-01）
+**状态**: ✅ 根因已定位（2026-11-01，静态审查代码实锤），待讨论修复方案
 **严重级别**: 高（曾导致整机网络栈挂死，OS 被迫重启）
 **首次发现**: 2026-11-01 ~10:13（VM 经 QG 出口 curl exit=28）
 
@@ -48,26 +48,67 @@
 ### 拓扑异常（待确认是否为诱因）
 
 - VM 侧 `RECOMPUTE-ROUTES peers=[qg qg]`（两条 qg 会话）；QG 侧 p2p 列表 id 7/8 均为 vm、均 upToDate。
-- QG 侧重复 jf 会话有明确配置来源（`MGMS_HT` + `MGMS_HT (copy)` 两个 h_tunnel 代理）；vm 的两条 Peer proxyName 为空（被动接入），成因待查。
+- QG 侧重复 jf 会话有明确配置来源（`MGMS_HT` + `MGMS_HT (copy)` 两个 h_tunnel 代理）；vm 的两条 Peer proxyName 为空（被动接入），成因待查（见根因链条③：RegisterPeer 无去重 + 重连/双代理均会产生同 nodeID 多会话）。
 - 症状"偶发能通一次 + 之后全挂"符合**流量被分摊到两条会话、其中一条已死**的竞态特征。
 
-## 嫌疑点（按可能性排序）
+## 根因（静态审查实锤，2026-11-01）
 
-1. **p2p 数据面写路径阻塞**：转发数据帧经数据队列（`enqueueWrite`）写入 htunnel TCP 通道；若写阻塞（对端不读/读循环死亡），队列积压直至死锁。gossip 走独立控制路径所以表现正常。
-2. **Wintun 驱动/读循环层死锁**：重症（整机网络栈挂死）指向驱动层。历史上 `tun-read-stall`（ReceivePacket 永久阻塞）已修，但驱动层死锁可将整个 Windows 网络栈拖死。
-3. **gVisor fork 握手/注入路径**：`performHandshake` 内发送 SYN-ACK 即阻塞（参见 gvisor-fork `pkg/tcpip/transport/tcp/forwarder.go`）。
+### 根因链条
 
-## 复现途径（受限讨论）
+1. **htunnel 服务端 Send 无超时 + 客户端心跳无限续命 → peerWriteLoop 永久卡死**
+   - `server/htunnel_mesh.go:238` `meshChannelTransport.Send/SendBatch` 阻塞在 `ch.meshOut`（4096 帧），唯一解除途径是 `ch.closed`，无任何超时
+   - `server/htunnel.go:967` `resetReqTimeout`：任何请求到达都重置 30s 关闭定时器
+   - `dialer/htunnel_direct.go:502` VM 侧 `heartbeatLoop` 周期性 PUT 心跳——即使 VM 的 GET 读侧已死，心跳照样发，QG 通道永不超时关闭
+   - 结果：QG 的 `peerWriteLoop` 永久阻塞在 Send，无错误、无 warn 日志、会话不清理不重连
+   - 注：p2p 层 `enqueueWrite`（p2p/p2p.go:769）本身非阻塞（select/default + RED 丢弃），不背锅；唯一阻塞点在 transport 层
+2. **gVisor fork 被动握手 SYN-ACK 无限重传 → `CreateEndpoint` 永不返回**
+   - `gvisor-fork/pkg/tcpip/transport/tcp/connect.go:610` `retransmitHandlerLocked`：被动握手等 final-ACK 时无 maxRetries 上限，指数退避（上限 60s）后无限循环
+   - SYN-ACK 写入死队列后握手永远等不到 ACK，"卡死 >20 分钟"完全解释（定时器正常，只是设计上就不放弃）
+3. **双会话无去重 + 同跳 round-robin → 流量对半摊到死活两条链路**
+   - `mesh/topology.go:137` `RegisterPeer` 直接 append，无 nodeID 去重
+   - `mesh/mesh.go:1051` `SendToNode` 对同节点同跳会话 round-robin；`peer.Send` 仅验证入队成功（永不被卡），failover 分支（mesh.go:1059）永不触发
+   - 完全解释"偶发能通一次、之后全挂"与控制面看似正常（gossip 走另一条活会话）
+4. **客户端写失败被静默吞掉**
+   - `dialer/htunnel_direct.go:218` `postBatch` 失败仅 debug 日志（Send 立即返回 nil，实际 POST 在 goroutine 里），上层永远收不到错误
 
-- ❌ **本机双实例压测不可行**：Wintun 设备具有排他性，单适配器只能被一个进程打开（用户指出）。
-- 备选：
-  - 纯 p2p 传输层双实例互测（不经 netstack/TUN，只验证数据队列与 htunnel 通道）
-  - 跨平台组合：Windows 实例 + Linux/Mac 实例互连
-  - WSL2/Docker Linux 实例 + Windows 实例（各自独占本机 Wintun）
-- 铁律约束：禁止在 VM/QG 环境做网络层劣化实验；压测只在本地隔离环境。
+### 触发源（B 链审查，2026-11-01 下午）
 
-## 下一步（待讨论定方案）
+B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Recv) → HandleMeshFrame → LinkNIC.InjectInbound → gVisor DeliverNetworkPacket`，及 TUN 层。
 
-1. 可观测性：加 pprof 或按需 goroutine dump，下次卡死直接抓挂死栈（一锤定音）。
-2. 按实锤指向修复 p2p 写路径 / Wintun 读循环 / gVisor 握手。
-3. 双会话拓扑去重或回包选路修复（若为诱因）。
+**已排除（代码级无永久阻塞）**：
+- `client.Do` 有 ctx 超时（waitTime+10s）
+- `meshInboundCh` 入队非阻塞（满了丢帧，p2p/p2p.go:1559）
+- `criticalCh`（256）仅在 criticalWorker 卡死时阻塞，criticalWorker 各 handler 纯计算
+- TUN 写出：`channel.New(8192)` 缓冲满丢帧不阻塞（netstack.go:662）——writeLoop 卡死不拖垮 netstack
+
+**未排除（需 goroutine dump 定罪）**：
+- `DeliverNetworkPacket` 同步执行整个 gVisor 包处理，会拿栈内锁——任何持锁卡死的 goroutine 都会拖住 meshInboundLoop worker
+- Windows 网络栈层面异常（OS 级，代码不可见）
+
+**12:09 重症闭环**：TUN 读循环卡死（wintun ReceivePacket 永久阻塞，`tun-read-stall` 同款）+ /1 路由黑洞 → 本机所有流量黑洞 → 外部看整机死亡。此机制不依赖驱动层死锁假设，但本地控制台当时未验证。
+
+**结论**：静态审查已尽，B 的确切触发源只能靠运行时实锤（pprof dump）。
+
+### 与症状对照（全部自洽）
+
+- 干净重启仍复现：结构性 bug，与脏状态无关
+- 单向卡死（VM→QG 通、QG→VM 死）与 SYN 能到、回包永不回一致
+- 5737 回调仅 1 挂起：只有 VM 那个 peer 的 writeLoop 卡死，其余正常
+- gossip/控制面正常：控制面走 VM→QG 入向（通畅）+ 双会话中活的那条出向
+
+## 修复候选 —— 最终研判（2026-11-01，按"治本不治标"标准）
+
+| 项 | 决策 | 理由 |
+|---|---|---|
+| ① Send 超时 | **撤销** | 与②同类（检测到停滞→杀会话重连），检测信号是拍脑袋的秒数 |
+| ② htunnel 通道出站停滞检测 | **撤销** | 与①同类，信号更本质但本质相同：不治病，只把永久静默变重试循环。用户论断"心跳足够，不来取是别的原因（B）所致"成立——杀会话重连治不了 B，B 还在新通道照样卡。风险记录在案：未来若出现新的未知触发源致客户端永久不读，只能人工重启 |
+| ③ egress 健康度选路 | **撤销** | 绕开死会话而非让死会话去死，且会掩盖配置错误（如重复代理配置） |
+| ④ 双会话去重 | **撤销** | 同跳多会话 round-robin 是设计 §2.8 多链路负载均衡特性，非 bug；问题从来不在重复，而在死会话不被发现 |
+
+**四项修复全部撤销。治本全部押在 B**（触发源：VM 停止取 GET 的真实原因）。B 的实锤依赖阶段二停滞 dump。
+
+## 下一步
+
+- **治本 = 找到并修复 B**（触发源）。前置条件：阶段二取证
+- **阶段二停滞 dump（优先开工）**：见 docs/tasks/mesh-data-plane-stall-tasks.md 阶段二。原理：关键循环的进展足迹（现有 atomic 计数器：TUN readPackets / WritePackets / peer lastSeenNano）由独立 monitor goroutine 旁观；卡死=部分冻结签名（有的计数器在走、有的冻结 60s），满足即全量 goroutine 栈写 logs/ 文件。断网可取证：不侵入阻塞调用、不拿业务锁，分析在事后读文件，无需在线、无需网络
+- 复现验证用跨平台 Win↔Linux 全链路（含 wintun/tun，不绕开 TUN 层）

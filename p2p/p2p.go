@@ -2389,14 +2389,6 @@ func (m *P2PManager) BuildInfo() (version, platform, arch, buildTag string) {
 	return m.version, m.platform, m.arch, m.buildTag
 }
 
-// runningVersion returns the running binary's version for self-update logging.
-func runningVersion() string {
-	if GlobalP2PManager != nil {
-		return GlobalP2PManager.version
-	}
-	return "unknown"
-}
-
 // CacheInventory returns the p2p-cache entries with file sizes and mod times.
 // Used by the admin console to show the node's binary version history.
 func (m *P2PManager) CacheInventory() []CacheEntryInfo {

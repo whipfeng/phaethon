@@ -132,6 +132,21 @@ B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Re
 3. phaethon 自身日志的断尾——data/logs/ 下最后一条日志是什么，卡在哪一步
 4. 若有 1 或 2 的实锤 → OS/驱动层方向（驱动状态、句柄泄漏、系统资源）；全空 → 倾向纯数据面重症，回到 dump 分析
 
+## 根因更新：gossip 竞态 panic = 重启循环真凶（2026-11-02 实锤并修复）
+
+留跑巡检期间 watchdog 日志（2026-11-01 23:04 起落盘）把 worker 自发重启全部定罪为 **exit code=2 = Go panic**，panic 原文 `panic: JSON decoder out of sync - data changing underfoot?`。VM 单日 6 次（04:54/05:08/05:35/06:08/06:42/07:25），间隔随 gossip 负载收紧到 25-30 分钟；stdout 历史日志共 113 次。**13:09:01 的 panic 与原始卡死时间线（13:09:34 QG 收 VM SYN）重合——worker panic 重启即原始症状的触发点候选。**
+
+竞态链（三个文件串起来）：
+
+1. `p2p/p2p.go` recvLoop：`peer.transport.Recv()` 返回**池化缓冲区**切片（issue 10 buffer pool，专属于数据面 FrameMeshPacket 的借还协议）
+2. `p2p/p2p.go` handleGossip：Unmarshal 校验后把**同一块池化切片**原样转发 mesh 层（issue 7 注释，避免 marshal 往返）
+3. `mesh/mesh.go` HandleTopologyGossip → `criticalCh <- meshEvent{data: data}`：**裸塞阻塞队列无拷贝**，函数立即返回，recvLoop 下一轮 Recv() 复用缓冲区
+4. `mesh/mesh.go` criticalWorker 取出后 `json.Unmarshal`——解析到一半底层字节被下一帧覆写 → panic
+
+**修复（commit e77ff5f，平台无关，所有 mesh 节点同病）**：p2p 已解析的 `GossipInfo` 值拷贝穿通道；mesh 预检 Unmarshal 与 criticalWorker 第三次 Unmarshal 一并删除（原路径同一份 JSON 解析三次）。线上帧格式不变，新旧版本互发完全兼容；数据面零拷贝路径（ReturnBuffer 协议）不受影响。
+
+**待办**：其他节点（QG/JF/GG/MS9/MS10）日志 grep `data changing underfoot` 坐实影响面——其他环境 watchdog 日志在修复前不落盘/不解析 PHAETHON_LOG_MODULES，历史 panic 可能完全静默。
+
 ## 下一步
 
 - **治本 = 找到并修复 B**（触发源）。前置条件：阶段二取证

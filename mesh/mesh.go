@@ -2748,27 +2748,22 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 		}
 	}
 
-	// Among min-hop candidates, sort by link quality (lowest effectiveRTT first)
+	// Among min-hop candidates, sort by link cost (same linkCost metric as
+	// Dijkstra, so first-hop link choice matches the path cost calculation).
 	type peerQuality struct {
-		peer        PeerSender
-		effectiveRT time.Duration
-		hasData     bool
+		peer    PeerSender
+		cost    float64
+		hasData bool
 	}
 
 	qualities := make([]peerQuality, len(minHopCandidates))
 	anyData := false
 	for i, c := range minHopCandidates {
-		nodeID := c.Peer.GetNodeID()
-		avgRTT, loss, jitter := m.GetLinkQuality(nodeID, c.Peer.GetLocalSeq())
-		hasData := avgRTT > 0
+		cost, hasData := linkCostForPeer(m, c.Peer)
 		if hasData {
 			anyData = true
-			// Cost = SRTT * (1 + lossRate) + jitter (all in ns; Stats returns jitter in ms)
-			effectiveRT := time.Duration(float64(avgRTT)*(1.0+loss) + jitter*float64(time.Millisecond))
-			qualities[i] = peerQuality{peer: c.Peer, effectiveRT: effectiveRT, hasData: hasData}
-		} else {
-			qualities[i] = peerQuality{peer: c.Peer, hasData: false}
 		}
+		qualities[i] = peerQuality{peer: c.Peer, cost: cost, hasData: hasData}
 	}
 
 	// If no quality data, shuffle min-hop candidates for load balancing
@@ -2791,14 +2786,12 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 		}
 	}
 
-	// Sort withData by effectiveRTT (bubble sort for simplicity, list is small)
+	// Sort withData by link cost (bubble sort for simplicity, list is small)
 	for i := 0; i < len(withData); i++ {
 		for j := i + 1; j < len(withData); j++ {
-			avgI, lossI, jitterI := m.GetLinkQuality(withData[i].GetNodeID(), withData[i].GetLocalSeq())
-			avgJ, lossJ, jitterJ := m.GetLinkQuality(withData[j].GetNodeID(), withData[j].GetLocalSeq())
-			effectiveI := time.Duration(float64(avgI)*(1.0+lossI) + jitterI*float64(time.Millisecond))
-			effectiveJ := time.Duration(float64(avgJ)*(1.0+lossJ) + jitterJ*float64(time.Millisecond))
-			if effectiveI > effectiveJ {
+			costI, _ := linkCostForPeer(m, withData[i])
+			costJ, _ := linkCostForPeer(m, withData[j])
+			if costI > costJ {
 				withData[i], withData[j] = withData[j], withData[i]
 			}
 		}
@@ -2810,6 +2803,19 @@ func (m *MeshManager) selectBestPeers(candidates []PeerWithHop, dstIP net.IP) []
 	})
 
 	return append(withData, withoutData...)
+}
+
+// linkCostForPeer computes the Dijkstra-consistent link cost for a peer's
+// link (same linkCost metric, so first-hop link choice matches the path
+// cost calculation — including egress dropRate/sojourn and confidence).
+func linkCostForPeer(m *MeshManager, peer PeerSender) (cost float64, hasData bool) {
+	quality := m.qualityTracker.Get(peer.GetNodeID(), peer.GetLocalSeq())
+	avgRTT, loss, _, confidence := quality.StatsWithConfidence()
+	dropRate, sojournMs := quality.EgressStats()
+	if avgRTT <= 0 {
+		return 0, false
+	}
+	return linkCost(float64(avgRTT)/float64(time.Millisecond), loss, dropRate, sojournMs, confidence), true
 }
 
 // getHopForPeer returns the hop count for a selected peer from the candidates list.

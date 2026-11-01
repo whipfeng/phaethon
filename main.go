@@ -711,10 +711,6 @@ func main() {
 	}
 	dbPath := filepath.Join(dataDir, "phaethon.db")
 
-	// Check if this is first run (database doesn't exist)
-	_, err = os.Stat(dbPath)
-	isFirstRun := os.IsNotExist(err)
-
 	// Open database
 	if err := db.Init(dbPath); err != nil {
 		util.LogModuleError("system", " 初始化数据库失败: %v", err)
@@ -726,12 +722,25 @@ func main() {
 	// Initialize automatic version notification based on bucket changes
 	db.InitVersionNotifier()
 
-	if isFirstRun {
-		// Fresh deployment - use default initialization
-		// Check if stdin is a terminal (interactive mode)
+	// Setup rotating log file (10MB max) before init so first-run actions are persisted
+	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
+	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
+	if err := util.SetupLogFile(logPath, 1024); err != nil {
+		util.LogModuleError("system", "setup log file failed, logging to stderr only: %v", err)
+		fmt.Fprintf(os.Stderr, "FATAL-ISH: cannot open %s: %v (logs will NOT be persisted)\n", logPath, err)
+	} else {
+		util.LogModuleInfo("system", "Log file: %s (max 1024MB, rotates to .old)", logPath)
+	}
+
+	// First run is defined by empty config buckets (not by db file existence),
+	// so an interrupted init or a pre-created empty db file still enters init.
+	empty, err := db.IsEmptyConfig()
+	if err != nil {
+		util.LogModuleError("system", " inspect db config fail: %v", err)
+	}
+	if empty {
 		fi, err := os.Stdin.Stat()
 		isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
-
 		if isTerminal {
 			util.LogModuleInfo("system", "首次启动，进入初始化模式")
 			if err := db.InteractiveInit(); err != nil {
@@ -746,31 +755,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
 				os.Exit(1)
 			}
+			util.LogModuleWarn("system", "默认初始化完成：Admin 监听 0.0.0.0:39999 且未启用认证，mTLS 客户端证书也是可选验证——公网部署请立即通过控制台设置认证")
 		}
 	} else {
 		util.LogModuleInfo("system", "数据库已加载: %s", dbPath)
-	}
-
-	// Initialize database if empty
-	empty, err := db.IsEmptyConfig()
-	if err != nil {
-		util.LogModuleError("system", " inspect db config fail: %v", err)
-	}
-	if empty {
-		util.LogModuleInfo("system", "database is empty, initializing with defaults")
-		if initErr := db.InitDefault(); initErr != nil {
-			util.LogModuleError("system", " initialize default config fail: %v", initErr)
-		}
-	}
-
-	// Setup rotating log file (10MB max)
-	logPath := filepath.Join(dataDir, "logs", "phaethon.log")
-	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
-	if err := util.SetupLogFile(logPath, 1024); err != nil {
-		util.LogModuleError("system", "setup log file failed, logging to stderr only: %v", err)
-		fmt.Fprintf(os.Stderr, "FATAL-ISH: cannot open %s: %v (logs will NOT be persisted)\n", logPath, err)
-	} else {
-		util.LogModuleInfo("system", "Log file: %s (max 1024MB, rotates to .old)", logPath)
 	}
 
 	// Apply -admin-port / ADMIN_PORT override if provided

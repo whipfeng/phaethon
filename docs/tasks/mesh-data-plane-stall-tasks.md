@@ -18,11 +18,11 @@
 
 **核心约束：断网后必须仍能拿到 dump**。设计三条互备路径：
 
-- [ ] **路径 1（轻症）**：admin API 挂 pprof 标准端点（`/debug/pprof/`，goroutine/heap/allocs）。
+- [x] **路径 1（轻症）**：admin API 挂 pprof 标准端点（`/debug/pprof/`，goroutine/heap/allocs）。
   - 本机即 VM：mesh 断流不影响 localhost，操作时 `curl 127.0.0.1:39999/debug/pprof/goroutine?debug=2`
   - 复用现有 admin 监听与认证，不新增端口
   - 引入 `net/http/pprof` 即可（注意：须挂载到 admin 的 mux 而非默认 DefaultServeMux，除非 admin 已用默认 mux）
-- [ ] **路径 2（重症）**：进程内停滞监测 + 自动 dump。判定逻辑（基于 atomic 计数器，不侵入阻塞调用）：
+- [x] **路径 2（重症）**：进程内停滞监测 + 自动 dump。判定逻辑（基于 atomic 计数器，不侵入阻塞调用）：
   - 计数器：A=TUN readPackets、B=netstack WritePackets、D=入向帧中"本机 host-facing 前置"帧数（新增，挂 HandleMeshFrame）；全部本机维度，转发帧不计入（用户指正：framesSent 含纯转发流量，与 TUN 无必然关系，弃用）
   - **D 的精确定义（2026-11-01 两轮质疑后收敛，依据 route_selector.go:85-161 + fork channel.go:203 核实）**：D 只数两类帧——
     - **目的==本机 VIP(.1)**：分支1 LocalStack=false，"a packet still addressed to VIP must leave NIC 1" → 出 TUN。这是本机 host 出站流量（SNAT src=VIP）的回程
@@ -46,8 +46,8 @@
   - 残留假设（记录在案）：① VM 是端点非中继/网关；纯中继或承接旁路网段时规则1/3 可能误报、IPIP-EIP 之外可能出现其他 host-facing 形态，将来角色变化需细化；② 规则1 区分不了"本地丢包/卡死"与"对端不回/路径断"，归因靠 dump 的 Stats 快照
   - 根本限制（记录在案）：① B 只承诺"成功写进 wintun/tun 设备"，host 侧缓冲满照样丢包——丢包劣化检测不了，但零星丢包不冻结计数器，卡死判定不受影响；② pre-A 丢包（host 应用→wintun 环满，尚未进进程）与"主机沉默"同签名，计数器天然不可见；③ 规则1 无法本地探活区分"本地丢包/卡死"与"对端不回"（对端沉默不可探测），归因只能靠 dump 的 Stats 快照；读阻塞 vs 主机沉默已由探活闭环（见上）
   - 断网可取证：monitor 在 worker 进程内，业务全卡死它也照常运行；分析在事后读文件，无需在线、无需网络
-- [ ] 构建本地二进制验证：curl localhost pprof 端点拿栈；构造模拟场景（停掉对端读）验证停滞判定触发 dump
-- [ ] 部署 VM（本机）留跑，下次卡死立即取证
+- [x] 构建本地二进制验证：curl localhost pprof 端点拿栈；构造模拟场景（停掉对端读）验证停滞判定触发 dump
+- [x] 部署 VM（本机）留跑，下次卡死立即取证（2026-11-01 已部署 v0.8.0-227-g52a21da：进程对/TUN/mesh 路由/ping qg.phn 全通，pprof/dump 端点挂载且被认证保护）
 
 ## 阶段三：治本 B（触发源）+ 回归验证
 

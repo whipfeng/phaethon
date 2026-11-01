@@ -107,6 +107,24 @@ B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Re
 
 **四项修复全部撤销。治本全部押在 B**（触发源：VM 停止取 GET 的真实原因）。B 的实锤依赖阶段二停滞 dump。
 
+## 卡死复发时的第一动作：物理通道分叉判据（2026-11-01 新增）
+
+用户提出关键质疑："SSH 也连不上——SSH 是被动监听的 socket server，其回程包会路由到 TUN 吗？"经研判与实测修正，结论如下。
+
+**实测（VM 健康态）**：
+- VM `172.30.0.2` ↔ 客户端 `10.11.61.50` 不同网段，SSH established 会话活着，ping 1ms，TUN 计数器零增量——**SSH 回程物理直连，不进 TUN**。
+- 机制（推断，无官方文档）：split-tunnel 的 `0.0.0.0/1`+`128.0.0.0/1` 路由虽在路由表，但 Windows 源地址感知路由查找下，sshd accept 的连接绑定本地地址 `172.30.0.2`，出站查找带源约束，跳过挂 phaethontun 的 /1，落物理默认路由。佐证：Find-NetRoute（不带源参数）选 TUN，而实际绑源 socket 不走 TUN。
+- 推论：若 SSH 回程真进 TUN，须走 RouteSelector 分支4（`LocalStack:true`，栈内消费"local proxy entries"），该分支无法把回程包交回物理网卡上的既有连接——将不可达，与"平时 SSH 通"矛盾，反证回程没进 TUN。
+
+**分叉判据（B 排查的关键分野）**：
+
+| 卡死时物理通道 | 结论 | 下一步 |
+|---|---|---|
+| 物理通（能 ping/SSH 172.30.0.2）、mesh 死 | phaethon 数据面内部问题 | 查 `data/logs/goroutine-dump-*.log`，按计数器签名定位 B 在 recvLoop/InjectInbound/TUN 读循环哪一段 |
+| 物理也死 | **OS/驱动层嫌疑**（wintun 驱动状态、Windows TCP/IP 栈、系统事件日志、内存/句柄泄漏） | 本机控制台现场取证：驱动状态、事件查看器、进程句柄数；dump 文件的 Stats 快照辅助 |
+
+12:09 重症（整机挂死+SSH 不可达）按此判据属于右列——这是"OS 自身问题"假设的正向证据，也解释了为什么 stall monitor 的计数器冻结签名在重症形态下可能整体不可用（dump 触发依赖 writeLoop 活着写探针）。
+
 ## 下一步
 
 - **治本 = 找到并修复 B**（触发源）。前置条件：阶段二取证

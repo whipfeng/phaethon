@@ -100,13 +100,6 @@ func CalculateDNSIP(subnet *net.IPNet) net.IP {
 	return dnsIP
 }
 
-// AllocateEIP allocates an EIP from the given subnet
-// EIP is the last usable IP in the subnet (e.g., 100.0.0.254 for 100.0.0.0/24)
-// Deprecated: Use CalculateEIP instead
-func AllocateEIP(subnet *net.IPNet) net.IP {
-	return CalculateEIP(subnet)
-}
-
 // Encapsulate wraps a packet with an IPIP header
 // outerSrc: local node's EIP
 // outerDst: egress node's EIP
@@ -164,7 +157,7 @@ func (t *IPIPTunnel) Encapsulate(outerSrc, outerDst net.IP, innerPacket []byte) 
 	copy(result[20:], innerPacket)
 
 	// Module-level logging for IPIP encapsulation
-	util.LogModuleInfo("ipip", "[IPIP-ENCAP] outerSrc=%s outerDst=%s proto=4 ttl=64 totalLen=%d innerLen=%d",
+	util.LogModuleDebug("ipip", "[IPIP-ENCAP] outerSrc=%s outerDst=%s proto=4 ttl=64 totalLen=%d innerLen=%d",
 		outerSrc, outerDst, totalLen, len(innerPacket))
 
 	return result, nil
@@ -201,7 +194,7 @@ func Decapsulate(packet []byte) ([]byte, error) {
 	innerLen := outerTotalLen - ihl
 
 	// Module-level logging for IPIP decapsulation
-	util.LogModuleInfo("ipip", "[IPIP-DECAP] outerSrc=%s outerDst=%s proto=4 totalLen=%d innerLen=%d",
+	util.LogModuleDebug("ipip", "[IPIP-DECAP] outerSrc=%s outerDst=%s proto=4 totalLen=%d innerLen=%d",
 		outerSrc, outerDst, outerTotalLen, innerLen)
 
 	// Return inner packet (skip outer header)

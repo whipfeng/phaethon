@@ -420,12 +420,6 @@ func SetLogLevel(level LogLevel) {
 	currentLogLevel.Store(int32(level))
 }
 
-func LogDebug(format string, v ...interface{}) {
-	if LogLevel(currentLogLevel.Load()) <= LogLevelDebug {
-		Logger.Printf("[DEBUG] "+format, v...)
-	}
-}
-
 func LogInfo(format string, v ...interface{}) {
 	if LogLevel(currentLogLevel.Load()) <= LogLevelInfo {
 		Logger.Printf("[INFO] "+format, v...)
@@ -435,12 +429,6 @@ func LogInfo(format string, v ...interface{}) {
 func LogWarn(format string, v ...interface{}) {
 	if LogLevel(currentLogLevel.Load()) <= LogLevelWarn {
 		Logger.Printf("[WARN] "+format, v...)
-	}
-}
-
-func LogError(format string, v ...interface{}) {
-	if LogLevel(currentLogLevel.Load()) <= LogLevelError {
-		Logger.Printf("[ERROR] "+format, v...)
 	}
 }
 

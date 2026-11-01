@@ -240,7 +240,7 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	// v2 data path: domain vs IP handling differs
 	// - Domain: resolve locally, then dial via peer's network (no IPIP)
 	// - Bare IP: dial directly with IPIP + routeFunc
-	util.LogInfo("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
+	util.LogModuleDebug("dialer", "[V2-DISPATCH] meshAwareDialer.Dial dst=%s:%d proxy=%s", dstAddr, dstPort, d.proxy.Name)
 
 	if GlobalNetstackDialV2Func == nil {
 		return nil, fmt.Errorf("v2 dial: netstack v2 dial not initialized")
@@ -263,7 +263,7 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		if dnsIP == nil {
 			return nil, fmt.Errorf("v2 dial: cannot calculate DNS IP for subnet %s", peerSubnet)
 		}
-		util.LogInfo("dialer", "[V2-DISPATCH] resolving %s via peer DNS %s", dstAddr, dnsIP)
+		util.LogModuleDebug("dialer", "[V2-DISPATCH] resolving %s via peer DNS %s", dstAddr, dnsIP)
 		// 2. Resolve domain via peer's DNS server
 		if GlobalRemoteDNSResolverFunc == nil {
 			return nil, fmt.Errorf("v2 dial: remote DNS resolver not initialized")
@@ -280,13 +280,13 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 				break
 			}
 		}
-		util.LogInfo("dialer", "[V2-DISPATCH] resolved %s -> %s via peer DNS, dialing directly (no IPIP)", dstAddr, resolvedIP)
+		util.LogModuleDebug("dialer", "[V2-DISPATCH] resolved %s -> %s via peer DNS, dialing directly (no IPIP)", dstAddr, resolvedIP)
 		// 3. Dial directly (no IPIP, no routeFunc) - goes through peer's local network
 		targetAddr := net.JoinHostPort(resolvedIP.String(), strconv.Itoa(dstPort))
 		return GlobalNetstackDialV2Func("tcp", targetAddr, nil)
 	} else {
 		// Bare IP: IPIP encapsulation + routeFunc
-		util.LogInfo("dialer", "[V2-DISPATCH] dialing bare IP %s:%d via proxy %s with IPIP encapsulation", dstAddr, dstPort, d.proxy.Name)
+		util.LogModuleDebug("dialer", "[V2-DISPATCH] dialing bare IP %s:%d via proxy %s with IPIP encapsulation", dstAddr, dstPort, d.proxy.Name)
 		targetAddr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 		routeFunc := mesh.CreateV2RouteFunc(d.proxy.Name)
 		return GlobalNetstackDialV2Func("tcp", targetAddr, routeFunc)

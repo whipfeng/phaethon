@@ -21,6 +21,18 @@ func NewNodeTrie() *NodeTrie {
 	}
 }
 
+// splitLabels splits a domain into labels reversed for trie insertion
+// (e.g. "www.example.com" -> ["com", "example", "www"]).
+func splitLabels(domain string) []string {
+	parts := strings.Split(domain, ".")
+	n := len(parts)
+	reversed := make([]string, n)
+	for i := 0; i < n; i++ {
+		reversed[i] = parts[n-1-i]
+	}
+	return reversed
+}
+
 // Insert adds a route entry for a domain suffix.
 func (t *NodeTrie) Insert(suffix string, nodeID string, source RouteSource) {
 	suffix = strings.TrimPrefix(strings.ToLower(suffix), ".")

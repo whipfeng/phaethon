@@ -343,12 +343,7 @@ type Peer struct {
 	stopCh           chan struct{}
 	stopOnce         sync.Once // ensures stopCh is closed exactly once
 	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
-	meshSender       *peerSender   // DEPRECATED: use meshSenderPtr
 	proxy            *config.Proxy // proxy config this peer was started with
-
-	// LinkNIC: 链路直接持有自己的 LinkNIC 指针（设计 §5.4）
-	// DEPRECATED: use linkNICPtr
-	linkNIC *mesh.LinkNIC
 
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
@@ -885,7 +880,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		} else if dataQueueIdx >= 0 {
 			atomic.AddUint64(&peer.dataQueueDrops[dataQueueIdx], 1)
 		}
-		util.LogModuleDebug("p2p", "[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
+		util.LogModuleWarn("p2p", "[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
 }
@@ -1571,7 +1566,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 					util.LogModuleDebug("p2p", "[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
 				}
 			} else {
-				util.LogModuleWarn("p2p", "[P2P] FrameMeshPacket dropped: meshHandler=%v payloadLen=%d", m.meshHandler != nil, len(payload))
+				util.LogModuleWarn("p2p", "[P2P] FrameMeshPacket dropped: peer=%s node=%s meshHandler=%v payloadLen=%d", peer.ID, peer.NodeID, m.meshHandler != nil, len(payload))
 			}
 		default:
 			util.LogModuleInfo("p2p", "[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))

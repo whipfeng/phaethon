@@ -209,7 +209,7 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		util.LogModuleInfo("admin", "read pkg for distribution: %d bytes", len(pkgData))
 		go s.DistributePackage(pkgData)
 	} else {
-		util.LogModuleInfo("admin", "failed to read pkg for distribution: %v", err)
+		util.LogModuleError("admin", "failed to read pkg for distribution: %v", err)
 	}
 
 	// Check if there's a newer version, exit if so
@@ -542,13 +542,13 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 			url := fmt.Sprintf("https://%s/api/packages/receive", domain)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
 			if err != nil {
-				util.LogModuleInfo("admin", "distribute package to %s (%s) failed: %v", nodeID, domain, err)
+				util.LogModuleError("admin", "distribute package to %s (%s) failed: %v", nodeID, domain, err)
 				return
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
-				util.LogModuleInfo("admin", "distribute package to %s (%s) rejected: status=%d body=%s", nodeID, domain, resp.StatusCode, string(body))
+				util.LogModuleError("admin", "distribute package to %s (%s) rejected: status=%d body=%s", nodeID, domain, resp.StatusCode, string(body))
 				return
 			}
 			util.LogModuleInfo("admin", "distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)

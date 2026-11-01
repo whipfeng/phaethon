@@ -1,7 +1,6 @@
 package connlog
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,26 +121,4 @@ func GetLogsAfterSeq(seq uint64) []Event {
 
 func GetVersion() uint64 {
 	return version.Load()
-}
-
-func FormatEvent(e Event) string {
-	icon := "✓"
-	if e.Status == "fail" || e.Status == "reject" {
-		icon = "✗"
-	}
-	proxy := e.Proxy
-	if proxy == "" && e.Status == "ok" {
-		proxy = "DIRECT"
-	}
-	
-	// Show original -> resolved when they differ
-	dstDisplay := fmt.Sprintf("%s:%d", e.DstAddr, e.DstPort)
-	if e.OriginalDstAddr != "" && e.OriginalDstAddr != e.DstAddr {
-		dstDisplay = fmt.Sprintf("%s → %s:%d", e.OriginalDstAddr, e.DstAddr, e.DstPort)
-	}
-	
-	if e.Error != "" {
-		return fmt.Sprintf("%s %s %s → %s → %s (%s)", icon, e.Protocol, e.SrcAddr, dstDisplay, proxy, e.Error)
-	}
-	return fmt.Sprintf("%s %s %s → %s → %s", icon, e.Protocol, e.SrcAddr, dstDisplay, proxy)
 }

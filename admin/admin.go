@@ -714,49 +714,42 @@ func (s *AdminServer) Start() error {
 			Certificates: []tls.Certificate{cert},
 		}
 
-		// Configure mTLS with embedded CA certificate
-		embeddedCAConfigured := false
-		util.LogModuleDebug("admin", "defaultClientCA length = %d", len(defaultClientCA))
-		if len(defaultClientCA) > 0 {
-			util.LogModuleDebug("admin", "entering mTLS configuration block")
-			caCertPool := x509.NewCertPool()
-			util.LogModuleDebug("admin", "created caCertPool, calling AppendCertsFromPEM")
-			if !caCertPool.AppendCertsFromPEM(defaultClientCA) {
-				util.Logger.Printf("[ERROR] [admin] TLS: failed to parse embedded CA certificate")
-				return fmt.Errorf("admin parse embedded CA fail")
-			}
-			util.LogModuleDebug("admin", "AppendCertsFromPEM succeeded, setting ClientCAs")
-			s.tlsConfig.ClientCAs = caCertPool
-			embeddedCAConfigured = true
-			util.LogModuleDebug("admin", "embeddedCAConfigured = true, checking AuthEnabled=%v", s.config.AuthEnabled)
-
-			if s.config.AuthEnabled {
-				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
-			} else {
-				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-				util.LogModuleInfo("admin", "authentication enabled (mTLS) with embedded CA")
-			}
-		}
-
-		// Legacy support: if ClientCA file path is configured, use it (override embedded CA)
-		if s.config.ClientCA != "" && !embeddedCAConfigured {
+		// Configure mTLS CA: a user-specified ClientCA file takes priority.
+		// If the file is missing/unreadable/unparsable, warn and fall back to
+		// the embedded CA — a bad user path must not break startup.
+		clientCAConfigured := false
+		if s.config.ClientCA != "" {
 			caCert, err := os.ReadFile(s.config.ClientCA)
 			if err != nil {
-				return fmt.Errorf("admin read client CA file fail: %w", err)
+				util.LogModuleWarn("admin", "client CA file %s unreadable (%v), falling back to embedded CA", s.config.ClientCA, err)
+			} else {
+				caCertPool := x509.NewCertPool()
+				if !caCertPool.AppendCertsFromPEM(caCert) {
+					util.LogModuleWarn("admin", "client CA file %s contains no valid PEM certificates, falling back to embedded CA", s.config.ClientCA)
+				} else {
+					s.tlsConfig.ClientCAs = caCertPool
+					clientCAConfigured = true
+					if s.config.AuthEnabled {
+						s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+						util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication enabled, mTLS or password)")
+					} else {
+						s.tlsConfig.ClientAuth = tls.NoClientCert
+						util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication disabled)")
+					}
+				}
 			}
+		}
+		if !clientCAConfigured && len(defaultClientCA) > 0 {
 			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				return fmt.Errorf("admin parse client CA fail")
+			if !caCertPool.AppendCertsFromPEM(defaultClientCA) {
+				return fmt.Errorf("admin parse embedded CA fail")
 			}
 			s.tlsConfig.ClientCAs = caCertPool
-
+			s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
 			if s.config.AuthEnabled {
-				s.tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication enabled, mTLS or password)")
+				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
 			} else {
-				s.tlsConfig.ClientAuth = tls.NoClientCert
-				util.LogModuleInfo("admin", "mTLS enabled with file CA (authentication disabled)")
+				util.LogModuleInfo("admin", "authentication enabled (mTLS) with embedded CA")
 			}
 		}
 
@@ -857,12 +850,12 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 		return
 	}
 
-	util.LogModuleInfo("admin", "ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
+	util.LogModuleDebug("admin", "ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
 
 	// Wrap connection with TLS if configured (same as Start() does)
 	var handledConn net.Conn
 	if s.tlsConfig != nil {
-		util.LogModuleInfo("admin", "Wrapping connection with TLS")
+		util.LogModuleDebug("admin", "Wrapping connection with TLS")
 		handledConn = tls.Server(conn, s.tlsConfig)
 	} else {
 		handledConn = conn
@@ -870,11 +863,11 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 
 	ln := newSingleConnListener(handledConn)
 	// Serve blocks until the connection is closed
-	util.LogModuleInfo("admin", "Calling server.Serve")
+	util.LogModuleDebug("admin", "Calling server.Serve")
 	if err := s.server.Serve(ln); err != nil && err != io.EOF {
-		util.LogModuleInfo("admin", "ServeConn ended: %v", err)
+		util.LogModuleDebug("admin", "ServeConn ended: %v", err)
 	}
-	util.LogModuleInfo("admin", "ServeConn finished")
+	util.LogModuleDebug("admin", "ServeConn finished")
 }
 
 // singleConnListener is a net.Listener that yields a single connection then blocks until it's closed.
@@ -1360,6 +1353,18 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 	}
 	if groups == nil {
 		groups = []*config.ProxyGroup{}
+	}
+
+	// Prefer runtime groups from RuleMatcher: they have resolver callbacks
+	// attached, so GetMembers() returns the full list (manual + subscription).
+	// Without this swap, subscription-backed groups (e.g. Starlink-0) render
+	// total=0 on the server-rendered page.
+	if matcher, merr := db.GetMatcher(); merr == nil && matcher != nil {
+		for i, g := range groups {
+			if rg := matcher.GetGroup(g.Name); rg != nil {
+				groups[i] = rg
+			}
+		}
 	}
 
 	// Build group stats from database (single source of truth)
@@ -2278,7 +2283,6 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
-	util.LogModuleInfo("admin", "apiToggleP2P called: path=%s", r.URL.Path)
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
 	name = strings.TrimSuffix(name, "/p2p")
 	if name == "" {
@@ -2292,7 +2296,6 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "decode fail", http.StatusBadRequest)
 		return
 	}
-	util.LogModuleInfo("admin", "apiToggleP2P: name=%s, p2p=%v", name, body.P2P)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -4891,7 +4894,7 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.mu.Unlock()
 
-	util.LogModuleInfo("admin", "config persisted to database")
+	util.LogModuleDebug("admin", "config persisted to database")
 
 	// If enabling auth and credentials were just set, create session immediately
 	if req.AuthEnabled && req.Username != "" && req.Password != "" {
@@ -4984,7 +4987,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.mu.Unlock()
 
-	util.LogModuleInfo("admin", "config persisted to database")
+	util.LogModuleDebug("admin", "config persisted to database")
 
 	// Create session if auth enabled
 	if req.AuthEnabled && req.Username != "" {

@@ -22,7 +22,7 @@ func mockHTunnelServer(t *testing.T) *httptest.Server {
 		switch r.Method {
 		case "HEAD":
 			if seq == 0 {
-				w.Header().Set(headerConnectionID, connectionID)
+				w.Header().Set(HeaderConnectionID, connectionID)
 			}
 			w.WriteHeader(200)
 			seq++
@@ -76,8 +76,8 @@ func TestHTunnelDialer_DialUsesConn(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "HEAD" {
 			if headCount == 0 {
-				capturedCmd = r.Header.Get(headerCommand)
-				w.Header().Set(headerConnectionID, "test-id")
+				capturedCmd = r.Header.Get(HeaderCommand)
+				w.Header().Set(HeaderConnectionID, "test-id")
 			}
 			w.WriteHeader(200)
 			headCount++

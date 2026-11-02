@@ -801,55 +801,6 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		ch = peer.dataQueues[dataQueueIdx]
 	}
 
-	// RED (Random Early Detection) for data frames only
-	// Control frames are never dropped to ensure ACKs get through
-	if !req.isControl {
-		queueLen := len(ch)
-		capacity := cap(ch)
-		
-		// RED parameters
-		minThreshold := capacity * 50 / 100  // 50% capacity
-		maxThreshold := capacity * 80 / 100  // 80% capacity
-		
-		if queueLen >= maxThreshold {
-			// Queue almost full: drop with high probability (80%)
-			if queueLen >= capacity-1 || (queueLen >= maxThreshold && peer.randomDrop(80)) {
-				if req.frameType == frame.FrameMeshPacket {
-					util.LogModuleWarn("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s reason=max_threshold", 
-						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer))
-					mesh.TraceForwarding("p2p_red_drop", req.data, "peer=%s reason=max_threshold", peer.ID)
-				}
-				if isDNS {
-					atomic.AddUint64(&peer.dnsQueueDrops, 1)
-				} else if isACK {
-					atomic.AddUint64(&peer.ackQueueDrops, 1)
-				} else if dataQueueIdx >= 0 {
-					atomic.AddUint64(&peer.dataQueueDrops[dataQueueIdx], 1)
-				}
-				return ErrQueueFull
-			}
-		} else if queueLen >= minThreshold {
-			// Queue between min and max: drop with increasing probability (0-50%)
-			// Linear increase: probability = (queueLen - minThreshold) / (maxThreshold - minThreshold) * 50%
-			dropProbability := (queueLen - minThreshold) * 50 / (maxThreshold - minThreshold)
-			if peer.randomDrop(dropProbability) {
-				if req.frameType == frame.FrameMeshPacket {
-					util.LogModuleDebug("p2p", "[P2P-RED] DROP peer=%s dataLen=%d queueLen=%d/%d priority=%s probability=%d%%", 
-						peer.ID, len(req.data), queueLen, capacity, channelPriorityName(ch, peer), dropProbability)
-					mesh.TraceForwarding("p2p_red_drop", req.data, "peer=%s probability=%d", peer.ID, dropProbability)
-				}
-				if isDNS {
-					atomic.AddUint64(&peer.dnsQueueDrops, 1)
-				} else if isACK {
-					atomic.AddUint64(&peer.ackQueueDrops, 1)
-				} else if dataQueueIdx >= 0 {
-					atomic.AddUint64(&peer.dataQueueDrops[dataQueueIdx], 1)
-				}
-				return ErrQueueFull
-			}
-		}
-	}
-
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
@@ -880,20 +831,6 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		util.LogModuleWarn("p2p", "[P2P] write queue full for %s, dropping frame type=0x%02x", peer.ID, req.frameType)
 		return ErrQueueFull
 	}
-}
-
-// randomDrop returns true with the given probability (0-100)
-func (p *Peer) randomDrop(probability int) bool {
-	if probability <= 0 {
-		return false
-	}
-	if probability >= 100 {
-		return true
-	}
-	p.rngMu.Lock()
-	result := p.rng.Intn(100) < probability
-	p.rngMu.Unlock()
-	return result
 }
 
 // isDNSPacket checks if a mesh packet contains UDP traffic to/from port 53 (DNS)
@@ -1056,7 +993,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	// Initialize data queues for DRR fair scheduling
 	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
+		dataQueues[i] = make(chan writeReq, 64) // 64 packets per queue (CUBIC single-flow depth)
 	}
 	
 	peer := &Peer{
@@ -1222,7 +1159,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	// Initialize data queues for DRR fair scheduling
 	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
+		dataQueues[i] = make(chan writeReq, 64) // 64 packets per queue (CUBIC single-flow depth)
 	}
 	
 	peer := &Peer{

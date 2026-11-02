@@ -754,9 +754,6 @@ func (m *P2PManager) meshInboundLoop() {
 	}
 }
 
-// ErrPeerStopped is returned when sending to a peer that has been stopped.
-var ErrPeerStopped = fmt.Errorf("peer stopped")
-
 // ErrQueueFull is returned when the peer's write queue is full.
 var ErrQueueFull = fmt.Errorf("write queue full")
 
@@ -770,7 +767,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	select {
 	case <-peer.stopCh:
 		util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] peer %s stopped, rejecting frame type=0x%02x", peer.ID, req.frameType)
-		return ErrPeerStopped
+		return mesh.ErrPeerStopped
 	default:
 	}
 

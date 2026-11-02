@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -79,6 +80,11 @@ type PeerSender interface {
 	HasProxy() bool          // true if this is an active (outbound) connection
 	GetLinkNIC() *LinkNIC    // direct LinkNIC held by this link (design §5.6)
 }
+
+// ErrPeerStopped is returned by a peer's Send when the peer has been
+// stopped. This is a consumer-owned contract: the p2p layer returns this
+// exact sentinel, and mesh matches it with errors.Is (never string match).
+var ErrPeerStopped = errors.New("peer stopped")
 
 // P2PTransport abstracts the P2P layer for mesh packet delivery.
 type P2PTransport interface {
@@ -1089,7 +1095,7 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		TraceForwarding("peer_send_error", packet, "target=%s peer=%s proxy=%s seq=%d err=%v", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), sendErr)
 
 		// Handle peer stopped
-		if strings.Contains(sendErr.Error(), "peer stopped") {
+		if errors.Is(sendErr, ErrPeerStopped) {
 			util.LogModuleWarn("mesh", "[MESH] send to node %s failed: peer %s stopped, removing its selected link",
 				targetNodeID, peer.GetNodeID())
 			if m.p2p != nil {

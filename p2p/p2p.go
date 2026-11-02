@@ -864,8 +864,10 @@ func isDNSPacket(data []byte) bool {
 	return srcPort == 53 || dstPort == 53
 }
 
-// isACKPacket checks if a packet contains a TCP ACK with small or no payload.
-// These are prioritized to prevent TCP stalls from head-of-line blocking.
+// isACKPacket checks if a packet contains a pure TCP ACK (ACK set, no
+// SYN/FIN/RST, zero payload). Only pure ACKs are prioritized; small data
+// packets (HTTP requests, TLS records, SSH keystrokes) take the normal data
+// path so they are not stranded behind cross-flow HoL in the shared ackQueue.
 func isACKPacket(data []byte) bool {
 	// Need at least IPv4 header (20 bytes) + TCP header (20 bytes min)
 	if len(data) < 40 {
@@ -905,9 +907,9 @@ func isACKPacket(data []byte) bool {
 		return false
 	}
 	
-	// Check TCP payload is small (< 100 bytes)
+	// Pure ACK only: zero-length TCP payload
 	tcpPayloadLen := len(data) - ihl - tcpDataOffset
-	return tcpPayloadLen < 100
+	return tcpPayloadLen == 0
 }
 
 // hashFlow computes a flow hash for fair scheduling using Jenkins one-at-a-time.

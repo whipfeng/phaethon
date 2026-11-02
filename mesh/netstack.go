@@ -1407,6 +1407,56 @@ func (n *Netstack) ResolveDomain(domain string) (net.IP, error) {
 	return fakeIP, nil
 }
 
+// ProbeMeshPeerDNS tests mesh data-plane liveness to a peer's GIP: an in-stack
+// UDP socket (the ResolveDomainViaDNS shape) sends a DNS query through the
+// RouteSelector LinkNIC egress. Any UDP reply within timeout means the round
+// trip — out via the LinkNIC, back via mesh inbound — is alive. The payload is
+// DNS-shaped because every node's hijacker answers on GIP:53; the reply
+// content is not validated. StallMonitor L2 mesh leg.
+func (n *Netstack) ProbeMeshPeerDNS(gip net.IP, timeout time.Duration) error {
+	n.mu.Lock()
+	ns := n.ns
+	n.mu.Unlock()
+	if ns == nil {
+		return fmt.Errorf("netstack not running")
+	}
+
+	var wq waiter.Queue
+	ep, err := ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		return fmt.Errorf("probe %s: new endpoint: %v", gip, err)
+	}
+	defer ep.Close()
+	if err := ep.Bind(tcpip.FullAddress{}); err != nil {
+		return fmt.Errorf("probe %s: bind: %v", gip, err)
+	}
+	dst := tcpip.AddrFromSlice(gip.To4())
+	if err := ep.Connect(tcpip.FullAddress{Addr: dst, Port: 53}); err != nil {
+		return fmt.Errorf("probe %s: connect: %v", gip, err)
+	}
+
+	// Register waiter BEFORE write — delivery can be synchronous.
+	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	query := BuildDNSQuery("probe.phn", uint16(time.Now().UnixNano()))
+	if _, err := ep.Write(&SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
+		return fmt.Errorf("probe %s: write: %v", gip, err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+		return fmt.Errorf("probe %s: timeout", gip)
+	}
+	var buf bytes.Buffer
+	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
+		return fmt.Errorf("probe %s: read: %v", gip, err)
+	}
+	return nil
+}
+
 // ResolveDomainViaDNS resolves a domain name by sending a DNS query to a
 // specific DNS server IP. Used by v2 mesh dialer to resolve domains via
 // peer's DNS server, getting real IPs (not fake-IPs).

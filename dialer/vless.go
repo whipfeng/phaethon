@@ -69,6 +69,7 @@ func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (ne
 	}
 
 	// Write VLESS request header.
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := d.writeRequestHeader(conn, cmd, host, port); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("vless: write request header fail: %w", err)
@@ -79,6 +80,7 @@ func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (ne
 		conn.Close()
 		return nil, fmt.Errorf("vless: read response header fail: %w", err)
 	}
+	conn.SetDeadline(time.Time{})
 
 	util.LogModuleDebug("vless", "Connecting %s:%d via %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
 	return conn, nil
@@ -98,6 +100,7 @@ func (d *VLESSDialer) dialTLS() (net.Conn, error) {
 	}
 
 	fp := d.Proxy.Fingerprint
+	rawConn.SetDeadline(time.Now().Add(15 * time.Second))
 	if fp != "" {
 		id := fingerprintToUTLS(fp)
 		uConn := utls.UClient(rawConn, &utls.Config{
@@ -108,6 +111,7 @@ func (d *VLESSDialer) dialTLS() (net.Conn, error) {
 			rawConn.Close()
 			return nil, fmt.Errorf("vless: utls handshake fail: %w", err)
 		}
+		uConn.SetDeadline(time.Time{})
 		util.SetTCPNoDelay(uConn)
 		return uConn, nil
 	}
@@ -117,6 +121,7 @@ func (d *VLESSDialer) dialTLS() (net.Conn, error) {
 		rawConn.Close()
 		return nil, fmt.Errorf("vless: TLS handshake fail: %w", err)
 	}
+	tlsConn.SetDeadline(time.Time{})
 	util.SetTCPNoDelay(tlsConn)
 	return tlsConn, nil
 }

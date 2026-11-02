@@ -21,6 +21,15 @@ import (
 //	rule 2 (B↑ A frozen ≥60s): TUN writes flowing but host produces nothing —
 //	    read-loop dead OR host silent; resolved by an active liveness probe
 //
+// Eligibility gate: a rule only fires if its TARGET counter was meaningfully
+// active during the recent-samples window (≥ minTargetActivity frames over
+// ~120s) before going silent. A counter that has been sparse all along (e.g.
+// D on a client-role node, which only counts peer-initiated frames to the
+// local VIP) can freeze for minutes as a matter of course — "frozen only
+// matters if it was recently flowing". Without this gate, rule 0 fired a
+// dump every few minutes on client-role nodes during daytime traffic
+// (2026-11-02: 5 dumps in 40 min, all false positives, zero stuck frames).
+//
 // Counters: A = TUN readPackets (tun manager), B = netstack WritePackets,
 // D = mesh-inbound frames destined to local VIP or IPIP-encapsulated to local
 // EIP (see HandleMeshFrame). The monitor only sleeps, loads atomics and
@@ -86,6 +95,13 @@ const (
 	probeSrcPort  = 40555
 	probeDstPort  = 9 // discard; closed on any host → RST
 	dumpMaxBuffer = 64 << 20
+
+	// minTargetActivity is the eligibility floor for rule targets: the target
+	// counter must have moved by at least this many frames across the recent-
+	// samples window (~120s) for a freeze to be actionable. 60 frames/120s
+	// (0.5/s sustained) separates "was flowing and stopped" from "never flows
+	// on this node's role".
+	minTargetActivity = 60
 )
 
 // Start launches the background goroutine. Idempotent.
@@ -128,6 +144,30 @@ func (sm *StallMonitor) collect(t time.Time) sample {
 }
 
 func (sm *StallMonitor) dTotal(s sample) uint64 { return s.dVIP + s.dIPIP }
+
+// sampleValue extracts a rule-indexed counter (0=A, 1=B, 2=D) from a sample.
+func sampleValue(idx int, s sample) uint64 {
+	switch idx {
+	case 0:
+		return s.a
+	case 1:
+		return s.b
+	default:
+		return s.dVIP + s.dIPIP
+	}
+}
+
+// windowDelta returns how much the given counter moved between the oldest and
+// newest samples currently in the ring. Callers must ensure recordSample(s)
+// ran for the current sample before evaluate (the loop does; tests must too).
+func (sm *StallMonitor) windowDelta(idx int) uint64 {
+	if sm.sampleFill < 2 {
+		return 0
+	}
+	oldest := sm.samples[(sm.sampleIdx-sm.sampleFill+len(sm.samples))%len(sm.samples)]
+	newest := sm.samples[(sm.sampleIdx-1+len(sm.samples))%len(sm.samples)]
+	return sampleValue(idx, newest) - sampleValue(idx, oldest)
+}
 
 func (sm *StallMonitor) recordSample(s sample) {
 	sm.samples[sm.sampleIdx] = s
@@ -188,6 +228,12 @@ func (sm *StallMonitor) evaluate(s sample, now time.Time) []int {
 		premiseRecent := now.Sub(sm.lastChange[r.premise]) <= freezeWindow
 		premiseAfterTarget := sm.lastChange[r.premise].After(sm.lastChange[r.target])
 		targetFrozen := now.Sub(sm.lastChange[r.target]) >= freezeWindow
+		// Eligibility: the target must have been flowing at a meaningful rate
+		// across the recent-samples window. Counters that are sparse by role
+		// (D on client nodes) freeze constantly as a steady state — not a stall.
+		if sm.windowDelta(r.target) < minTargetActivity {
+			continue
+		}
 		if premiseRecent && premiseAfterTarget && targetFrozen {
 			sm.armed[r.target] = false
 			sm.firedValue[r.target] = v[r.target]

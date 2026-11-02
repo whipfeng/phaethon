@@ -50,9 +50,41 @@
 
 路由查找（routeTrie+atomic）、DRR 批量出队、frame readBufferPool、所有 NewTicker 均有 Stop、TCP relay 双工双 goroutine+32KB buffer、DNS hijacker 应答路径、各 loop 均有退出条件、用户向 dial 路径全部设了 NoDelay（仅 P2P/reverse bind 控制连接未设，低优先）。
 
+## 代码审查回填（2026-11-03）
+
+对 `17821e1..HEAD`（30+ 提交，非测试 Go 改动约 1.07 万行）做召回优先代码审查：3 角度 finder 产出 13 候选，逐条独立 verifier 验证后保留 8 条（4 CONFIRMED + 4 PLAUSIBLE），已剔除 5 条（含 forwarder 启动失败永久 SERVFAIL——技术属实但有 2026-10-31 用户裁决"失败要 loud"，见 docs/plans/dns_forward_full_async.md:57，属有意设计）。
+
+### 主库新增发现（承接原 14 条编号）
+
+15. **同域名并发查询覆盖 pendingQueries，先到客户端永久失联** `mesh/dns.go:622-625`（CONFIRMED）。key 仅含域名（`:598` lowercase，不含四元组），后到查询覆盖旧条目，旧 remoteAddr 丢失——响应只发最新 client，sweepPending 遍历不到被覆盖者，注释"the overwritten client is swept with SERVFAIL"（`:617`）与实现不符。场景：两应用同刻解析同域或 resolver 5s 内换源端口重发，先到者挂到 OS resolver 超时（5-20s）。
+    **处理意见（并入批次 2）：pendingQueries 支持同 key 多等待者（value 改 slice 或 key 加 remoteAddr），响应广播给全部等待者；sweepPending 维持全量 SERVFAIL。**
+16. **DNS forwarder listener/socket 无任何停止路径** `mesh/dns.go:385-392`（CONFIRMED）。`Stop()` 不关 forwarderSocket 也不 signal `forwarderStopCh`（全仓无任何 close 点，仅创建与 panic 恢复两处赋值）；listener 唯一退出分支永不触发，read error 路径 sleep 100ms 继续循环；且 listener 内引用已 Close 的 udpEP。与条目 14 同根因。
+    **处理意见（并入批次 2）：随 forwarder 生命周期一并修——Stop 幂等关闭 forwarderSocket + signal stopCh，listener 退出全部 waiters。**
+17. **sweepPending 只在 ErrWouldBlock 分支驱动，持续流量时超时清扫饿死** `mesh/dns.go:186-200`（CONFIRMED）。主循环 Read 成功路径 continue 不回 select，sweepTicker 唯一消费点在 ErrWouldBlock 分支；forwardTimeout=5s 契约在忙时失效，客户端挂住拖到流量空档（数十秒~分钟级）。
+    **处理意见（并入批次 2）：主循环改为每次迭代非阻塞检查 ticker（select default 双路），保证 sweep 按 500ms 节奏执行。**
+18. **writeDump 非原子读 uturnCount 数据竞争** `mesh/stall_monitor.go:546,548`（CONFIRMED）。mesh.go:1181 数据面 atomic.AddUint64 写，writeDump 普通读（GetStatus :1249 用 atomic.Load 反证遗漏）。-race 必报；32 位平台读撕裂。
+    **处理意见（批次 2 顺带独立提交）：两处改 atomic.LoadUint64。**
+19. **applyHysteresis 保留 incumbent 时不复核 LinkNIC 存活** `mesh/mesh.go:3434-3436`（PLAUSIBLE）。保留路径整体复用 oldPath 含 LinkNIC 指针，pathCost 只验图边；触发窗口较窄（需新最优首跳变更且代价差 <15%，同首跳情形 `:3427` continue 可挡），但一旦命中死 NIC 入路由表即静默黑洞且无注入失败重算兜底。
+    **处理意见（批次 3）：滞回保留 incumbent 前，对 oldPath.LinkNIC 按当前 peer 重解析（GetLinkNIC），失败则不保留。**
+20. **IsEmptyConfig 出错默认 empty=true 静默进入首次初始化** `main.go:744-748` + `db/configstore.go:678-693`（PLAUSIBLE）。View 出错 empty 保持 true，仅 LogModuleError 不退出；罕见路径（View 失败而 Update 可写）下 InitConfigs 无条件 putJSON 覆盖既有 node-id/subnet。正确默认应为 err 视为致命或 empty=false。
+    **处理意见（独立小修）：IsEmptyConfig 出错时返回 err，main.go 收到 err 直接退出（db 已损坏时不做任何写入）。**
+21. **apiGroups GET 全量/POST 固化语义不对称** `admin/admin.go:3359-3401`（PLAUSIBLE）。GET 的 proxies 键返回手工+订阅全量，POST 原样拷为 ManualProxies 落库；第三方客户端 GET→POST 往返把订阅派生名固化成手工成员，订阅删除后悬空引用。仓库自带前端走 manualProxies 键不触发。
+    **处理意见（记录不修）：API 契约陷阱记入文档；修法则为 POST 侧 diff 掉订阅派生名，优先级低，等出现真实第三方消费端再动。**
+22. **mesh 字符串匹配 "peer stopped" 代替哨兵错误** `mesh/mesh.go:1092-1098`（PLAUSIBLE）。p2p 已导出 `ErrPeerStopped`（p2p.go:758）可用 errors.Is；p2p 文案改动/包装即静默失效，丢失 StopPeerByProxyName 清链（failover 循环本身仍工作，后果降为根因不可见）。
+    **处理意见（批次 2 顺带独立提交）：改 errors.Is(sendErr, p2p.ErrPeerStopped)。**
+
+### 已剔除候选（验证为有意设计或不可达，留档）
+
+- forwarder 启动失败永久 SERVFAIL：2026-10-31 用户裁决"失败要 loud"（dns_forward_full_async.md:57）
+- PeerQuality seed 先验值致 60s flapping：不成立——rtt EWMA 持久 >0 使 ackUpdated 每轮无条件刷新，判据实际不触发
+- reverse clientID 错误吞掉：不成立——node-id 生成先于 reverse 启动且失败即终止，失败路径有显式 Warn
+- subnet 冲突 os.Exit(0) 无宽限：p2p_v8_simplified_protocol §3.3 有意设计（三次决策记录）
+- IsControlFrame 收窄为零调用死 API：无当前可观察影响，按死代码规则后续清理即可
+
 ## 建议处理顺序
 
 **2→3**（正确性，改动小）→ **1→4→6→7**（网络质量）→ 8-12 一波清扫（机械改动）→ 13-14 顺手。
+回填后：批次 2 增改 15/16/17/18/22，批次 3 增 19，20 独立小修，21 记录不修。
 
 ## gvisor-fork 定制审视
 

@@ -707,7 +707,7 @@ func (n *Netstack) initStack() error {
 	// loopback for self-addressed packets — see ResolveDomain DNS path).
 	util.LogModuleInfo("netstack", "[DIAG-DEBUG] initStack: HandleLocal=%v (gVisor stack.New option, controls self-addressed packet loopback)", s.HandleLocal())
 
-	// VIP is bound via AddMeshVIP (called by the mesh module once computed).
+	// VIP is NOT bound to any NIC: it is only a NAT/SNAT identity.
 	// EIP is NOT bound anywhere: it is a tunnel identity used as the IPIP
 	// outer source; decapsulation happens at the frame layer (HandleMeshFrame).
 
@@ -813,28 +813,6 @@ func (n *Netstack) InjectInbound(proto tcpip.NetworkProtocolNumber, data []byte)
 	})
 	defer pkt.DecRef()
 	n.linkEP.InjectInbound(proto, pkt)
-}
-
-// AddMeshVIP registers a mesh virtual IP with the gVisor netstack so it responds
-// to packets (e.g., ICMP) destined for that IP.
-func (n *Netstack) AddMeshVIP(vip net.IP) error {
-	if n.ns == nil {
-		return fmt.Errorf("netstack not initialized")
-	}
-	vip4 := vip.To4()
-	if vip4 == nil {
-		return fmt.Errorf("only IPv4 mesh VIP supported")
-	}
-	ap := tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4([4]byte(vip4)), PrefixLen: 32}
-	protoAddr := tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: ap,
-	}
-	if err := n.ns.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("add mesh VIP %s: %v", vip, err)
-	}
-	util.LogModuleDebug("netstack", "netstack: registered mesh VIP %s", vip)
-	return nil
 }
 
 // IsMeshIP checks if an IP belongs to the mesh network.

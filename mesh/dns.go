@@ -38,11 +38,14 @@ type DNSHijacker struct {
 	dnsQueryCh chan dnsQuery // buffered channel for worker pool
 
 	// Async DNS forwarder (v0.2.0, fully async since dns_forward_full_async)
-	forwarderSocket tcpip.Endpoint       // persistent UDP socket for forwarding
-	forwarderWQ     waiter.Queue         // waiter queue for forwarder socket
-	pendingQueries  map[string]*pendingQuery // domain (lowercase) -> waiting client
-	pendingMu       sync.Mutex           // protects pendingQueries
-	forwarderStopCh chan struct{}        // stops background listener
+	forwarderSocket   tcpip.Endpoint         // persistent UDP socket for forwarding
+	forwarderWQ       waiter.Queue           // waiter queue for forwarder socket
+	pendingQueries    map[string][]*pendingQuery // domain (lowercase) -> waiting clients (same-domain concurrent queries share the flight)
+	pendingMu         sync.Mutex             // protects pendingQueries
+	forwarderStopCh   chan struct{}          // stops background listener
+	forwarderMu       sync.Mutex             // guards forwarder lifecycle (socket/stopCh/stopped)
+	forwarderStopped  bool                   // set by Stop; startForwarder refuses after this
+	stopOnce          sync.Once              // makes Stop idempotent
 }
 
 // forwardTimeout is how long a forwarded query waits for a response before
@@ -111,7 +114,7 @@ func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Ad
 		closeCh:         make(chan struct{}),
 		cache:           NewDNSCache(),
 		dnsQueryCh:      make(chan dnsQuery, 1024),
-		pendingQueries:  make(map[string]*pendingQuery),
+		pendingQueries:  make(map[string][]*pendingQuery),
 		forwarderStopCh: make(chan struct{}),
 	}
 }
@@ -132,58 +135,75 @@ func (h *DNSHijacker) BindNetstack(ns *stack.Stack, tunAddr, dnsAddr tcpip.Addre
 // The listener continuously receives DNS responses and caches them, triggering callbacks
 // for any pending queries.
 func (h *DNSHijacker) startForwarder() {
+	h.forwarderMu.Lock()
+	if h.forwarderStopped {
+		h.forwarderMu.Unlock()
+		return
+	}
 	if h.forwarderSocket != nil {
+		h.forwarderMu.Unlock()
 		return // already started
 	}
-	
+
 	// Create persistent UDP endpoint for forwarding
 	ep, err := h.ns.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &h.forwarderWQ)
 	if err != nil {
+		h.forwarderMu.Unlock()
 		util.LogModuleWarn("dns", "[DNS-FWD] failed to create forwarder endpoint: %v", err)
 		return
 	}
-	
+
 	// Bind to DNS address (for receiving responses)
 	if err := ep.Bind(tcpip.FullAddress{NIC: 1, Addr: h.dnsAddr, Port: 0}); err != nil {
+		h.forwarderMu.Unlock()
 		util.LogModuleWarn("dns", "[DNS-FWD] failed to bind forwarder endpoint: %v", err)
 		ep.Close()
 		return
 	}
-	
+
 	h.forwarderSocket = ep
+	stopCh := h.forwarderStopCh
+	h.forwarderMu.Unlock()
 	util.LogModuleInfo("dns", "[DNS-FWD] async forwarder started")
-	
+
 	// Start background listener
-	go h.forwarderListener()
+	go h.forwarderListener(ep, stopCh)
 }
 
 // forwarderListener continuously reads DNS responses from the persistent socket,
 // caches them, and triggers callbacks for pending queries.
-func (h *DNSHijacker) forwarderListener() {
+func (h *DNSHijacker) forwarderListener(sock tcpip.Endpoint, stopCh <-chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			util.LogModuleError("dns", "[DNS-FWD] listener panic: %v\n%s", r, debug.Stack())
-			// Restart listener after panic
-			time.Sleep(time.Second)
+			// Restart listener after panic, unless Stop was called.
+			h.forwarderMu.Lock()
+			if h.forwarderStopped {
+				h.forwarderMu.Unlock()
+				return
+			}
 			h.forwarderStopCh = make(chan struct{})
-			go h.forwarderListener()
+			newStopCh := h.forwarderStopCh
+			h.forwarderMu.Unlock()
+			time.Sleep(time.Second)
+			go h.forwarderListener(sock, newStopCh)
 		}
 	}()
-	
-	util.LogModuleInfo("dns", "[DNS-FWD] listener started, socket=%v dnsAddr=%s", h.forwarderSocket != nil, h.dnsAddr)
-	
+
+	util.LogModuleInfo("dns", "[DNS-FWD] listener started, socket=%v dnsAddr=%s", sock != nil, h.dnsAddr)
+
 	// Register waiter for blocking reads
 	waitEntry, ch := waiter.NewChannelEntry(waiter.EventIn)
 	h.forwarderWQ.EventRegister(&waitEntry)
 	defer h.forwarderWQ.EventUnregister(&waitEntry)
-	
+
 	readCount := 0
 	sweepTicker := time.NewTicker(500 * time.Millisecond)
 	defer sweepTicker.Stop()
 	for {
 		// Read response (returns ErrWouldBlock when no data available)
 		var buf bytes.Buffer
-		res, err := h.forwarderSocket.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
+		res, err := sock.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 		if err != nil {
 			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
 				// No data available, block until notification, sweep tick, or stop signal
@@ -193,10 +213,17 @@ func (h *DNSHijacker) forwarderListener() {
 				case <-sweepTicker.C:
 					h.sweepPending()
 					continue
-				case <-h.forwarderStopCh:
+				case <-stopCh:
 					util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
 					return
 				}
+			}
+			// Socket closed by Stop surfaces here as a non-WouldBlock error.
+			select {
+			case <-stopCh:
+				util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
+				return
+			default:
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // timeout, keep listening
@@ -205,15 +232,25 @@ func (h *DNSHijacker) forwarderListener() {
 			time.Sleep(100 * time.Millisecond) // avoid busy loop on error
 			continue
 		}
-		
+
+		// Busy-path sweep check: the ticker is only consumed in the
+		// ErrWouldBlock branch above, so under continuous response traffic
+		// sweepPending must also be driven here or expiring pending queries
+		// would never be answered SERVFAIL.
+		select {
+		case <-sweepTicker.C:
+			h.sweepPending()
+		default:
+		}
+
 		readCount++
 		util.LogModuleDebug("dns", "[DNS-FWD] received packet #%d: len=%d from=%s:%d", readCount, res.Total, res.RemoteAddr.Addr, res.RemoteAddr.Port)
-		
+
 		if res.Total < 12 {
 			util.LogModuleWarn("dns", "[DNS-FWD] packet too short: %d bytes", res.Total)
 			continue // too short to be a valid DNS response
 		}
-		
+
 		// Log raw packet for debugging
 		packetBytes := buf.Bytes()
 		if len(packetBytes) >= 12 {
@@ -222,31 +259,34 @@ func (h *DNSHijacker) forwarderListener() {
 			ancount := (uint16(packetBytes[6]) << 8) | uint16(packetBytes[7])
 			util.LogModuleDebug("dns", "[DNS-FWD] packet header: flags=0x%04x qdcount=%d ancount=%d", flags, qdcount, ancount)
 		}
-		
+
 		// Parse response
 		domain, ip, ttl := parseDNSResponseForCache(packetBytes)
 		if domain == "" || ip == nil {
 			util.LogModuleWarn("dns", "[DNS-FWD] failed to parse response: domain=%s ip=%v len=%d", domain, ip, len(packetBytes))
 			continue
 		}
-		
+
 		util.LogModuleDebug("dns", "[DNS-FWD] parsed response: domain=%s ip=%s ttl=%v", domain, ip, ttl)
-		
+
 		// 1. Cache the response
 		h.cache.Set(domain, ip, ttl)
 
-		// 2. Respond to the waiting client directly (no worker involved)
+		// 2. Respond to all waiting clients for this domain (no worker
+		// involved). Each waiter gets a response built from its own query
+		// packet, so per-client TXIDs are preserved.
 		key := strings.ToLower(domain)
 		h.pendingMu.Lock()
-		pq, ok := h.pendingQueries[key]
-		if ok {
-			delete(h.pendingQueries, key)
-		}
+		waiters := h.pendingQueries[key]
+		delete(h.pendingQueries, key)
 		h.pendingMu.Unlock()
 
-		if ok {
-			resp := buildDNSResponse(pq.query, ip.To4())
-			if resp != nil {
+		if len(waiters) > 0 {
+			for _, pq := range waiters {
+				resp := buildDNSResponse(pq.query, ip.To4())
+				if resp == nil {
+					continue
+				}
 				if _, werr := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); werr != nil {
 					util.LogModuleWarn("dns", "[DNS-FWD] write response for %s to %s:%d fail: %v", domain, pq.remoteAddr.Addr, pq.remoteAddr.Port, werr)
 				} else {
@@ -381,14 +421,50 @@ func (h *DNSHijacker) Start(wg *sync.WaitGroup) error {
 	return nil
 }
 
-// Stop closes the UDP endpoint and signals serveLoop to exit.
+// Stop closes the UDP endpoints, stops the forwarder listener, and answers
+// any remaining pending forwarded queries with SERVFAIL. Idempotent.
 func (h *DNSHijacker) Stop() {
-	if h.started {
-		close(h.closeCh)
-		if h.udpEP != nil {
-			h.udpEP.Close()
+	h.stopOnce.Do(func() {
+		// Stop the forwarder: close the persistent socket (unblocks the
+		// listener's Read with a non-WouldBlock error) and signal its stop
+		// channel (unblocks the WouldBlock select).
+		h.forwarderMu.Lock()
+		h.forwarderStopped = true
+		stopCh := h.forwarderStopCh
+		if h.forwarderSocket != nil {
+			h.forwarderSocket.Close()
+			h.forwarderSocket = nil
 		}
-	}
+		h.forwarderMu.Unlock()
+		close(stopCh)
+
+		// Answer remaining pending clients with SERVFAIL before udpEP goes
+		// away, so they don't hang until their own resolver timeout.
+		h.pendingMu.Lock()
+		var remaining []*pendingQuery
+		for key, waiters := range h.pendingQueries {
+			remaining = append(remaining, waiters...)
+			delete(h.pendingQueries, key)
+		}
+		h.pendingMu.Unlock()
+		for _, pq := range remaining {
+			domain, _, _ := parseDNSQueryDomain(pq.query)
+			util.LogModuleWarn("dns", "[DNS-FWD] SHUTDOWN: domain=%s unanswered, answering SERVFAIL to %s:%d",
+				domain, pq.remoteAddr.Addr, pq.remoteAddr.Port)
+			if resp := buildDNSErrorResponse(pq.query); resp != nil {
+				if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); err != nil {
+					util.LogModuleWarn("dns", "tun dns: write SERVFAIL to %s:%d fail: %v", pq.remoteAddr.Addr, pq.remoteAddr.Port, err)
+				}
+			}
+		}
+
+		if h.started {
+			close(h.closeCh)
+			if h.udpEP != nil {
+				h.udpEP.Close()
+			}
+		}
+	})
 }
 
 // Resolve returns the raw DNS response bytes for a query without sending it
@@ -608,21 +684,25 @@ func (h *DNSHijacker) forwardToRemoteAsync(remoteSubnet *net.IPNet, query []byte
 
 	// 2. Forwarder not initialized: a persistent-socket failure is systemic
 	// (same netstack, same GIP bind the sync path would use) — fail loud.
-	if h.forwarderSocket == nil {
+	h.forwarderMu.Lock()
+	sock := h.forwarderSocket
+	h.forwarderMu.Unlock()
+	if sock == nil {
 		util.LogModuleError("dns", "[DNS-FWD] forwarder socket not initialized, cannot forward domain=%s", domain)
 		h.answerSERVFAIL(query, remoteAddr, "forwarder not initialized")
 		return
 	}
 
 	// 3. Register the waiting client. Concurrent queries for the same domain
-	// share one upstream flight; the overwritten client is swept with SERVFAIL.
+	// are all kept as waiters; the first response answers every waiter
+	// (each response is built from that waiter's own query, preserving the
+	// client TXID), and sweepPending SERVFAILs whatever is still waiting at
+	// timeout.
 	queryCopy := make([]byte, len(query))
 	copy(queryCopy, query)
+	pq := &pendingQuery{query: queryCopy, remoteAddr: remoteAddr, at: time.Now()}
 	h.pendingMu.Lock()
-	if _, exists := h.pendingQueries[key]; exists {
-		util.LogModuleWarn("dns", "[DNS-FWD] duplicate pending for domain=%s, overwriting earlier client", domain)
-	}
-	h.pendingQueries[key] = &pendingQuery{query: queryCopy, remoteAddr: remoteAddr, at: time.Now()}
+	h.pendingQueries[key] = append(h.pendingQueries[key], pq)
 	pendingCount := len(h.pendingQueries)
 	h.pendingMu.Unlock()
 
@@ -632,10 +712,23 @@ func (h *DNSHijacker) forwardToRemoteAsync(remoteSubnet *net.IPNet, query []byte
 	// The listener answers the client when the response arrives.
 	remoteFwdAddr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(remoteGIP), Port: 53}
 	writeStart := time.Now()
-	if _, err := h.forwarderSocket.Write(&SlicePayload{Data: queryCopy}, tcpip.WriteOptions{To: &remoteFwdAddr}); err != nil {
+	if _, err := sock.Write(&SlicePayload{Data: queryCopy}, tcpip.WriteOptions{To: &remoteFwdAddr}); err != nil {
 		util.LogModuleWarn("dns", "[DNS-FWD] WRITE FAILED: domain=%s err=%v", domain, err)
+		// Remove only our own waiter entry; concurrent same-domain waiters
+		// stay registered for the in-flight response.
 		h.pendingMu.Lock()
-		delete(h.pendingQueries, key)
+		waiters := h.pendingQueries[key]
+		for i, w := range waiters {
+			if w == pq {
+				waiters = append(waiters[:i], waiters[i+1:]...)
+				break
+			}
+		}
+		if len(waiters) == 0 {
+			delete(h.pendingQueries, key)
+		} else {
+			h.pendingQueries[key] = waiters
+		}
 		h.pendingMu.Unlock()
 		h.answerSERVFAIL(query, remoteAddr, fmt.Sprintf("write query: %v", err))
 		return
@@ -672,10 +765,19 @@ func (h *DNSHijacker) answerSERVFAIL(query []byte, remoteAddr tcpip.FullAddress,
 func (h *DNSHijacker) sweepPending() {
 	h.pendingMu.Lock()
 	var expired []*pendingQuery
-	for key, pq := range h.pendingQueries {
-		if time.Since(pq.at) > forwardTimeout {
-			expired = append(expired, pq)
+	for key, waiters := range h.pendingQueries {
+		var keep []*pendingQuery
+		for _, pq := range waiters {
+			if time.Since(pq.at) > forwardTimeout {
+				expired = append(expired, pq)
+			} else {
+				keep = append(keep, pq)
+			}
+		}
+		if len(keep) == 0 {
 			delete(h.pendingQueries, key)
+		} else {
+			h.pendingQueries[key] = keep
 		}
 	}
 	h.pendingMu.Unlock()

@@ -97,7 +97,8 @@ type P2PManager struct {
 	meshVIP     string
 	meshHandler MeshHandler
 
-	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing
+	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing (data frames)
+	meshInboundDNSCh  chan meshInboundPacket // dedicated queue for inbound DNS frames (avoids cross-node DNS SERVFAIL)
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
 	stopOnce          sync.Once
 	sessionsWG        sync.WaitGroup
@@ -443,12 +444,18 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		arch:              runtime.GOARCH,
 		cache:             cache,
 		meshInboundCh:     make(chan meshInboundPacket, 4096),
+		meshInboundDNSCh:  make(chan meshInboundPacket, 4096),
 		meshInboundStopCh: make(chan struct{}),
 	}
 	// Start multiple worker goroutines to consume from meshInboundCh in parallel.
 	// This increases throughput and reduces queue overflow (channelDrops).
 	for i := 0; i < meshInboundWorkers; i++ {
-		go m.meshInboundLoop()
+		go m.meshInboundLoop(m.meshInboundCh)
+	}
+	// DNS frames get their own deep queue + workers so a data-frame burst
+	// cannot starve cross-node DNS (5s forward timeout).
+	for i := 0; i < 2; i++ {
+		go m.meshInboundLoop(m.meshInboundDNSCh)
 	}
 	return m
 }
@@ -736,14 +743,14 @@ func (m *P2PManager) drrLoop(peer *Peer) {
 	}
 }
 
-// meshInboundLoop consumes mesh frames from meshInboundCh and calls HandleMeshFrame.
+// meshInboundLoop consumes mesh frames from the given queue and calls HandleMeshFrame.
 // Decouples mesh processing from P2P read loop to prevent blocking.
-func (m *P2PManager) meshInboundLoop() {
+func (m *P2PManager) meshInboundLoop(ch chan meshInboundPacket) {
 	for {
 		select {
 		case <-m.meshInboundStopCh:
 			return
-		case pkt := <-m.meshInboundCh:
+		case pkt := <-ch:
 			if m.meshHandler != nil {
 				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
 				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.linkNIC, pkt.frame)
@@ -1492,8 +1499,13 @@ func (m *P2PManager) runSession(peer *Peer) {
 				}
 				// Zero-copy: pass payload directly to mesh layer.
 				// Consumer (meshInboundLoop) MUST call frame.ReturnBuffer when done (issue 10).
+				// DNS frames go to the dedicated deep queue so data bursts cannot starve them.
+				inboundCh := m.meshInboundCh
+				if isDNSPacket(payload) {
+					inboundCh = m.meshInboundDNSCh
+				}
 				select {
-				case m.meshInboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
+				case inboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 					payloadReturned = true  // Consumer will return it
 				default:

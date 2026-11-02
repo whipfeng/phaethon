@@ -743,7 +743,9 @@ func main() {
 	// so an interrupted init or a pre-created empty db file still enters init.
 	empty, err := db.IsEmptyConfig()
 	if err != nil {
-		util.LogModuleError("system", " inspect db config fail: %v", err)
+		util.LogModuleError("system", "inspect db config fail: %v", err)
+		fmt.Fprintf(os.Stderr, "FATAL: cannot inspect db config: %v\n", err)
+		os.Exit(1)
 	}
 	if empty {
 		fi, err := os.Stdin.Stat()

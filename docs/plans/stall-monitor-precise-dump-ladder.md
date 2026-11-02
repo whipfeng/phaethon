@@ -63,7 +63,7 @@ disposition 判态（纯函数，可单测）：
 
 复现 `ResolveDomainViaDNS` 的 socket 序列：NewEndpoint(udp)+Bind({})+Connect(GIP:53)+Write(BuildDNSQuery(...))，waiter 等响应，收到**任何** UDP 响应即判活（不校验 DNS 语义——对端 DNSHijacker 在 GIP:53 必应答）。对 rule 涉及的所有 mesh peer 的 GIP（`GetPeers` → peer subnet → `DeriveGIPFromSubnet` .3）并行探测。
 
-**Host 腿（rule 2 专用）——宿主 socket → 自己 GIP:53**（包级函数 `probeHostViaOwnGIP`，`mesh/stall_monitor.go`）：
+**Host 腿（rule 2 专用；RunDiagnostics 自检也跑）——宿主 socket → 自己 GIP:53**（包级函数 `probeHostViaOwnGIP`，`mesh/stall_monitor.go`）：
 
 ```go
 conn, _ := net.DialUDP("udp4", nil, &net.UDPAddr{IP: ownGIP, Port: 53})

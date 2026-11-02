@@ -410,7 +410,9 @@ func (sm *StallMonitor) runProbes(ruleIdx int) (mesh []probeOutcome, host probeO
 		}(i, gip)
 	}
 
-	if ruleIdx == 2 {
+	// Host leg on rule 2 (host-silent triage) and on -1 (RunDiagnostics
+	// self-check verifies both legs after deploy).
+	if ruleIdx == 2 || ruleIdx == -1 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

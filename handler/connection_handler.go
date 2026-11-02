@@ -551,7 +551,6 @@ func relay(conn, target net.Conn) {
 // stops responding.
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
-	buf := make([]byte, bufSize)
 
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
@@ -584,6 +583,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 	// netstack -> target
 	go func() {
 		defer wg.Done()
+		buf := make([]byte, bufSize)
 		for {
 			n, err := netstackConn.Read(buf)
 			if n > 0 {
@@ -601,6 +601,7 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 	// target -> netstack
 	go func() {
 		defer wg.Done()
+		buf := make([]byte, bufSize)
 		for {
 			n, _, err := targetConn.ReadFrom(buf)
 			if n > 0 {

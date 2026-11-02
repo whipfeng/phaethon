@@ -1,6 +1,6 @@
 # Mesh 数据面卡死：轻则断流、重则整机网络栈挂死
 
-**状态**: ✅ 根因已定位（2026-11-01，静态审查代码实锤），待讨论修复方案
+**状态**: 部分闭环（2026-11-02）：gossip 竞态 panic 已修复（e77ff5f）；VM↔QG 链路修复经 patch #15（6739c92）验证；dump `goroutine-dump-20261102-135925` 证明 rule 0 可合法触发且 VM 内部 goroutine 全健康；B 触发源（数据面停滞）仍未实锤，精准 dump 阶梯已实现待部署取证
 **严重级别**: 高（曾导致整机网络栈挂死，OS 被迫重启）
 **首次发现**: 2026-11-01 ~10:13（VM 经 QG 出口 curl exit=28）
 
@@ -45,11 +45,11 @@
 - 正常情况 SYN-ACK 重传超时应在数分钟内返回错误；永久挂起说明卡死在比重传定时器更深的位置（如：发送路径阻塞在满队列/锁上，定时器无法触发或报文无法入队）。
 - VM 重启后 worker PID 14120 无日志静默更换为 10832；Windows 事件查看器无崩溃记录。
 
-### 拓扑异常（待确认是否为诱因）
+### 双 qg 会话定性（2026-11-02 用户确认）
 
-- VM 侧 `RECOMPUTE-ROUTES peers=[qg qg]`（两条 qg 会话）；QG 侧 p2p 列表 id 7/8 均为 vm、均 upToDate。
-- QG 侧重复 jf 会话有明确配置来源（`MGMS_HT` + `MGMS_HT (copy)` 两个 h_tunnel 代理）；vm 的两条 Peer proxyName 为空（被动接入），成因待查（见根因链条③：RegisterPeer 无去重 + 重连/双代理均会产生同 nodeID 多会话）。
-- 症状"偶发能通一次 + 之后全挂"符合**流量被分摊到两条会话、其中一条已死**的竞态特征。
+- VM 侧 `RECOMPUTE-ROUTES peers=[qg qg]`（两条 qg 会话）、QG 侧 p2p 列表两条 vm 会话，是**正常配置**，不是拓扑异常——就是启动了两个代理各自建立的 p2p。
+- 多会话**不是 round-robin**：每条链路独立测量质量、独立参与最优路径计算，最优路径选定后会话折叠为一条（QG 侧 jf 双会话同理）。
+- 旧表述"流量被分摊到两条会话、其中一条已死的竞态"作废；死链的正确处理依赖 pingTracker ~10s 自判关链 + 最优路径重算（见根因链条③修正）。
 
 ## 根因（静态审查实锤，2026-11-01）
 
@@ -64,10 +64,10 @@
 2. **gVisor fork 被动握手 SYN-ACK 无限重传 → `CreateEndpoint` 永不返回**
    - `gvisor-fork/pkg/tcpip/transport/tcp/connect.go:610` `retransmitHandlerLocked`：被动握手等 final-ACK 时无 maxRetries 上限，指数退避（上限 60s）后无限循环
    - SYN-ACK 写入死队列后握手永远等不到 ACK，"卡死 >20 分钟"完全解释（定时器正常，只是设计上就不放弃）
-3. **双会话无去重 + 同跳 round-robin → 流量对半摊到死活两条链路**
+3. **双会话无去重 + 每条链路独立参与最优路径计算 → 死链未被及时发现**
    - `mesh/topology.go:137` `RegisterPeer` 直接 append，无 nodeID 去重
-   - `mesh/mesh.go:1051` `SendToNode` 对同节点同跳会话 round-robin；`peer.Send` 仅验证入队成功（永不被卡），failover 分支（mesh.go:1059）永不触发
-   - 完全解释"偶发能通一次、之后全挂"与控制面看似正常（gossip 走另一条活会话）
+   - 同 nodeID 多会话是**正常配置**（如双代理各自建立的 p2p），**不是 round-robin 负载分摊**：每条链路独立测量、独立参与最优路径计算（设计 §2.8 多链路特性）
+   - ping/pong 数据面探针（1s 间隔 × 阈值 10）会在 ~10s 内自判死链并自动关链触发重算——死链本应快速自愈，"偶发能通一次、之后全挂"指向死链发现/切链环节的问题，而非"流量被对半摊到死活两条链路"的 round-robin 竞态（旧表述已修正）
 4. **客户端写失败被静默吞掉**
    - `dialer/htunnel_direct.go:218` `postBatch` 失败仅 debug 日志（Send 立即返回 nil，实际 POST 在 goroutine 里），上层永远收不到错误
 
@@ -103,7 +103,7 @@ B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Re
 | ① Send 超时 | **撤销** | 与②同类（检测到停滞→杀会话重连），检测信号是拍脑袋的秒数 |
 | ② htunnel 通道出站停滞检测 | **撤销** | 与①同类，信号更本质但本质相同：不治病，只把永久静默变重试循环。用户论断"心跳足够，不来取是别的原因（B）所致"成立——杀会话重连治不了 B，B 还在新通道照样卡。风险记录在案：未来若出现新的未知触发源致客户端永久不读，只能人工重启 |
 | ③ egress 健康度选路 | **撤销** | 绕开死会话而非让死会话去死，且会掩盖配置错误（如重复代理配置） |
-| ④ 双会话去重 | **撤销** | 同跳多会话 round-robin 是设计 §2.8 多链路负载均衡特性，非 bug；问题从来不在重复，而在死会话不被发现 |
+| ④ 双会话去重 | **撤销** | 同 nodeID 多会话是正常配置（双代理各建一条 p2p），不是 round-robin 分摊；每条链路独立参与最优路径计算是设计 §2.8 多链路特性，非 bug；问题从来不在重复，而在死会话不被发现 |
 
 **四项修复全部撤销。治本全部押在 B**（触发源：VM 停止取 GET 的真实原因）。B 的实锤依赖阶段二停滞 dump。
 
@@ -147,8 +147,17 @@ B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Re
 
 **待办**：其他节点（QG/JF/GG/MS9/MS10）日志 grep `data changing underfoot` 坐实影响面——其他环境 watchdog 日志在修复前不落盘/不解析 PHAETHON_LOG_MODULES，历史 panic 可能完全静默。
 
+## dump 135925 运行时证据（2026-11-02）
+
+VM 留跑期间 StallMonitor rule 0 触发，写 `goroutine-dump-20261102-135925.log`（445KB）。分析结论：
+
+- **rule 0 是合法触发，非误报**：D（peer 入向 dst=VIP 帧）窗口内流动 212≥minTargetActivity 60，随后冻结 90s+，A（TUN readPackets）持续在走——outbound-blackhole 签名成立。
+- **dump 内 VM 内部 goroutine 全健康**：TUN readLoop、writeLoop、meshInboundLoop、criticalWorker、各 peer loop 无一持锁卡死——B 触发源本次未现身（或已自愈）。
+- **嫌疑指向 qg 链路侧**：当时 jf↔qg 单点 flapping（GG 方向时通时不通，见 GG 链路不稳定诊断），符合 dead-link-suspect 判态——对端死链自愈场景 dump 价值低。
+- **暴露的取证缺口**：dump 前没有任何"哪一环死了"的判态，445KB 全靠人工分析。精准 dump 阶梯（docs/plans/stall-monitor-precise-dump-ladder.md）已实现：L1 KB 级快照行 + 三判态 → L2 双腿探测（gvisor socket→邻居 GIP:53 / 宿主 socket→自己 GIP:53）→ 确认嫌疑才写全量 dump；rule 2 + host 腿活 → 跳过 dump。待部署 VM 后生效。
+
 ## 下一步
 
 - **治本 = 找到并修复 B**（触发源）。前置条件：阶段二取证
-- **阶段二停滞 dump（优先开工）**：见 docs/tasks/mesh-data-plane-stall-tasks.md 阶段二。原理：关键循环的进展足迹（现有 atomic 计数器：TUN readPackets / WritePackets / peer lastSeenNano）由独立 monitor goroutine 旁观；卡死=部分冻结签名（有的计数器在走、有的冻结 60s），满足即全量 goroutine 栈写 logs/ 文件。断网可取证：不侵入阻塞调用、不拿业务锁，分析在事后读文件，无需在线、无需网络
+- **阶段二停滞 dump 已实现**（精准 dump 阶梯，2026-11-02，见 docs/plans/stall-monitor-precise-dump-ladder.md）：关键循环进展足迹（TUN readPackets / WritePackets / peer 入向计数器）由 StallMonitor 旁观；卡死=部分冻结签名（freezeWindow=60s）触发 rule 0/1/2 → L1 KB 级快照行 + 判态 → L2 双腿主动探测 → 确认 phaethon 侧嫌疑才写全量 dump（rule 2 host 腿活 = host-silent 良性直接跳过）。断网可取证：不侵入阻塞调用、不拿业务锁。**待部署 VM 生效**，部署后 `POST /debug/stall-probe` 自检
 - 复现验证用跨平台 Win↔Linux 全链路（含 wintun/tun，不绕开 TUN 层）

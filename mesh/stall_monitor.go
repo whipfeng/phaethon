@@ -1,12 +1,13 @@
 package mesh
 
 import (
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -63,6 +64,13 @@ type StallMonitor struct {
 
 	startOnce sync.Once
 	startedCh chan struct{}
+
+	// Probe implementations, swappable in tests. Defaults exercise the real
+	// paths: mesh leg = in-stack socket to a peer GIP (Netstack.ProbeMeshPeerDNS),
+	// host leg = host-native socket to the local GIP (probeHostViaOwnGIP).
+	probeMeshPeer func(gip net.IP, timeout time.Duration) error
+	probeHost     func(gip net.IP, timeout time.Duration) error
+	ownGIP        func() net.IP
 }
 
 type sample struct {
@@ -75,7 +83,7 @@ type sample struct {
 // NewStallMonitor creates the monitor. readA must return the TUN readPackets
 // counter (wired from the tun manager by main to avoid an import cycle).
 func NewStallMonitor(m *MeshManager, ns *Netstack, readA func() uint64, version, logsDir string) *StallMonitor {
-	return &StallMonitor{
+	sm := &StallMonitor{
 		m:         m,
 		ns:        ns,
 		readA:     readA,
@@ -86,14 +94,27 @@ func NewStallMonitor(m *MeshManager, ns *Netstack, readA func() uint64, version,
 		armed:     [3]bool{true, true, true},
 		startedCh: make(chan struct{}),
 	}
+	sm.probeMeshPeer = func(gip net.IP, timeout time.Duration) error {
+		if sm.ns == nil {
+			return fmt.Errorf("no netstack")
+		}
+		return sm.ns.ProbeMeshPeerDNS(gip, timeout)
+	}
+	sm.probeHost = probeHostViaOwnGIP
+	sm.ownGIP = func() net.IP {
+		if sm.ns == nil {
+			return nil
+		}
+		addr := sm.ns.DNSAddr()
+		return net.IP(addr.AsSlice())
+	}
+	return sm
 }
 
 const (
 	tickInterval  = 10 * time.Second
 	freezeWindow  = 60 * time.Second
-	probeWait     = 5 * time.Second
-	probeSrcPort  = 40555
-	probeDstPort  = 9 // discard; closed on any host → RST
+	probeTimeout  = 3 * time.Second
 	dumpMaxBuffer = 64 << 20
 
 	// minTargetActivity is the eligibility floor for rule targets: the target
@@ -243,17 +264,224 @@ func (sm *StallMonitor) evaluate(s sample, now time.Time) []int {
 	return fired
 }
 
-func (sm *StallMonitor) fire(ruleIdx int, s sample, now time.Time) {
-	rule := stallRules[ruleIdx]
-	util.LogModuleWarn("mesh", "[STALL] rule %s fired at %s (A=%d B=%d DVIP=%d DIPIP=%d), capturing dump",
-		rule.name, now.Format(time.RFC3339), s.a, s.b, s.dVIP, s.dIPIP)
+// --- precise-dump ladder (docs/plans/stall-monitor-precise-dump-ladder.md) ---
 
-	probeResult := ""
+type stallCounters struct {
+	A     uint64 `json:"a"`
+	B     uint64 `json:"b"`
+	DVIP  uint64 `json:"dvip"`
+	DIPIP uint64 `json:"dipip"`
+}
+
+type stallPeerSnap struct {
+	Node       string  `json:"node"`
+	SRTTMs     float64 `json:"srttMs,omitempty"`
+	JitterMs   float64 `json:"jitterMs,omitempty"`
+	LossRate   float64 `json:"lossRate,omitempty"`
+	ConsecLost int     `json:"consecLost"`
+	Samples    int     `json:"samples,omitempty"`
+	LastSeenMs int64   `json:"lastSeenAgeMs"`
+}
+
+type stallLinkNICSnap struct {
+	Peer   string `json:"peer"`
+	Inject uint64 `json:"injectPackets"`
+	Drops  uint64 `json:"injectDrops"`
+}
+
+type stallSnapshot struct {
+	Event       string             `json:"event"`
+	Rule        int                `json:"rule"`
+	RuleName    string             `json:"ruleName"`
+	Counters    stallCounters      `json:"counters"`
+	Peers       []stallPeerSnap    `json:"peers"`
+	LinkNICs    []stallLinkNICSnap `json:"linkNics,omitempty"`
+	Disposition string             `json:"disposition"`
+}
+
+type probeOutcome struct {
+	Target string `json:"target"`
+	Alive  bool   `json:"alive"`
+	Err    string `json:"err,omitempty"`
+}
+
+// classifyDisposition maps L1 snapshot evidence to a triage verdict.
+// Pure function; thresholds are half of pingFailDisconnectThreshold (10) —
+// by fire time (freezeWindow 60s after the last target movement, pings at
+// 1s cadence) a truly dead link has already accumulated stale pongs.
+func classifyDisposition(ruleIdx int, peers []stallPeerSnap) string {
+	if len(peers) == 0 {
+		return "ambiguous"
+	}
+	for _, p := range peers {
+		if p.ConsecLost >= 5 || p.LossRate > 0.3 {
+			return "dead-link-suspect"
+		}
+	}
 	if ruleIdx == 2 {
-		probeResult = sm.probeHostLiveness(s)
+		return "host-silent-suspect"
+	}
+	return "ping-healthy"
+}
+
+func (sm *StallMonitor) buildSnapshot(ruleIdx int, s sample) stallSnapshot {
+	name := "manual"
+	if ruleIdx >= 0 && ruleIdx < len(stallRules) {
+		name = stallRules[ruleIdx].name
+	}
+	peers := sm.collectPeers()
+	return stallSnapshot{
+		Event:       "stall-snapshot",
+		Rule:        ruleIdx,
+		RuleName:    name,
+		Counters:    stallCounters{A: s.a, B: s.b, DVIP: s.dVIP, DIPIP: s.dIPIP},
+		Peers:       peers,
+		LinkNICs:    sm.collectLinkNICs(),
+		Disposition: classifyDisposition(ruleIdx, peers),
+	}
+}
+
+func (sm *StallMonitor) collectPeers() []stallPeerSnap {
+	infos := sm.m.GetPeers()
+	snaps := make([]stallPeerSnap, 0, len(infos))
+	for _, info := range infos {
+		snaps = append(snaps, stallPeerSnap{
+			Node:       info.NodeID,
+			SRTTMs:     info.SRTT,
+			JitterMs:   info.Jitter,
+			LossRate:   info.LossRate,
+			ConsecLost: sm.m.GetLinkConsecutiveLost(info.NodeID, info.LocalSeq),
+			Samples:    info.SampleCount,
+			LastSeenMs: time.Since(info.LastSeen).Milliseconds(),
+		})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Node < snaps[j].Node })
+	return snaps
+}
+
+func (sm *StallMonitor) collectLinkNICs() []stallLinkNICSnap {
+	stats := sm.m.GetLinkNICStats()
+	snaps := make([]stallLinkNICSnap, 0, len(stats))
+	for peer, st := range stats {
+		snaps = append(snaps, stallLinkNICSnap{Peer: peer, Inject: st.Packets, Drops: st.Drops})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Peer < snaps[j].Peer })
+	return snaps
+}
+
+// meshProbeTargets returns the GIP of every connected peer (derived from its
+// subnet, .3 = DNS). Peers without a parseable subnet are skipped.
+func (sm *StallMonitor) meshProbeTargets() []net.IP {
+	infos := sm.m.GetPeers()
+	targets := make([]net.IP, 0, len(infos))
+	for _, info := range infos {
+		_, sn, err := net.ParseCIDR(info.Subnet)
+		if err != nil {
+			continue
+		}
+		if gip := DeriveGIPFromSubnet(sn); gip != nil {
+			targets = append(targets, gip)
+		}
+	}
+	return targets
+}
+
+// runProbes executes the L2 legs. Mesh leg: in-stack socket to every peer
+// GIP (always — the results grade the dump). Host leg (rule 2 only): a
+// host-native socket to the local GIP, which crosses the TUN twice and so
+// proves the whole host↔TUN↔netstack loop alive. Legs run in parallel,
+// take no business locks, and only their outcomes are returned.
+func (sm *StallMonitor) runProbes(ruleIdx int) (mesh []probeOutcome, host probeOutcome) {
+	var wg sync.WaitGroup
+	host = probeOutcome{Target: "skipped(not-rule-2)"}
+
+	targets := sm.meshProbeTargets()
+	mesh = make([]probeOutcome, len(targets))
+	for i, gip := range targets {
+		wg.Add(1)
+		go func(i int, gip net.IP) {
+			defer wg.Done()
+			err := sm.probeMeshPeer(gip, probeTimeout)
+			out := probeOutcome{Target: gip.String(), Alive: err == nil}
+			if err != nil {
+				out.Err = err.Error()
+			}
+			mesh[i] = out
+		}(i, gip)
 	}
 
-	path, err := sm.writeDump("auto:"+rule.name, probeResult)
+	if ruleIdx == 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gip := sm.ownGIP()
+			if gip == nil {
+				host = probeOutcome{Target: "gip", Err: "no netstack"}
+				return
+			}
+			err := sm.probeHost(gip, probeTimeout)
+			host = probeOutcome{Target: gip.String(), Alive: err == nil}
+			if err != nil {
+				host.Err = err.Error()
+			}
+		}()
+	}
+
+	wg.Wait()
+	return mesh, host
+}
+
+// probeHostViaOwnGIP is the host leg: a host-native UDP DNS query to the
+// local GIP. From the host side this crosses the TUN twice — host→wintun
+// (the counter-A read path), netstack reply→wintun (the counter-B write
+// path) — so any reply proves the whole loop alive. That is the rule 2
+// "host-silent" verdict: nothing on the host was producing TUN traffic,
+// which is benign. A timeout means the loop is broken somewhere and a dump
+// is warranted. No listener, firewall rule, or port config is assumed: the
+// DNS hijacker on GIP:53 is an architectural invariant.
+func probeHostViaOwnGIP(gip net.IP, timeout time.Duration) error {
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: gip, Port: 53})
+	if err != nil {
+		return fmt.Errorf("probe host: dial: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("probe host: deadline: %v", err)
+	}
+	query := BuildDNSQuery("probe.phn", uint16(time.Now().UnixNano()))
+	if _, err := conn.Write(query); err != nil {
+		return fmt.Errorf("probe host: write: %v", err)
+	}
+	buf := make([]byte, 512)
+	if _, err := conn.Read(buf); err != nil {
+		return fmt.Errorf("probe host: read: %v", err)
+	}
+	return nil
+}
+
+func (sm *StallMonitor) fire(ruleIdx int, s sample, now time.Time) {
+	rule := stallRules[ruleIdx]
+	snap := sm.buildSnapshot(ruleIdx, s)
+	snapLine, _ := json.Marshal(snap)
+	util.LogModuleWarn("mesh", "[STALL] %s", snapLine)
+
+	mesh, host := sm.runProbes(ruleIdx)
+	probeLine, _ := json.Marshal(map[string]interface{}{
+		"event":      "stall-probes",
+		"meshProbes": mesh,
+		"hostProbe":  host,
+	})
+	util.LogModuleWarn("mesh", "[STALL] %s", probeLine)
+
+	// rule 2's only benign explanation: the host loop answered, so the frozen
+	// A counter means host-silent, not a dead read path. Every other
+	// signature keeps the dump (probe results grade the evidence).
+	if ruleIdx == 2 && host.Alive {
+		util.LogModuleWarn("mesh", "[STALL] rule %s: host loop alive (host-silent), dump skipped", rule.name)
+		return
+	}
+
+	path, err := sm.writeDump("auto:"+rule.name, string(snapLine)+"\n"+string(probeLine))
 	if err != nil {
 		util.LogModuleError("mesh", "[STALL] dump write failed: %v", err)
 		return
@@ -261,56 +489,17 @@ func (sm *StallMonitor) fire(ruleIdx int, s sample, now time.Time) {
 	util.LogModuleWarn("mesh", "[STALL] dump written: %s", path)
 }
 
-// probeHostLiveness distinguishes a dead read loop from a silent host: write a
-// TCP SYN addressed to the host's own TUN adapter IP (src = some mesh peer
-// VIP). A live host stack must answer RST/SYN-ACK, and the reply routes back
-// via the TUN (/1), so a healthy read loop increments A within probeWait.
-func (sm *StallMonitor) probeHostLiveness(s sample) string {
-	dev := sm.ns.WriteLoopDevice
-	if dev == nil {
-		return "probe=skipped(no-tun-device)"
-	}
-	hostIP := sm.m.getHostIP()
-	srcIP := sm.pickProbeSrcVIP()
-	if hostIP == nil || srcIP == nil {
-		return "probe=skipped(no-host-or-peer-ip)"
-	}
-	pkt := buildSYN(srcIP, hostIP, probeSrcPort, probeDstPort)
-	if _, err := dev.Write(pkt); err != nil {
-		return fmt.Sprintf("probe=write-error(%v)", err)
-	}
-	deadline := time.Now().Add(probeWait)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		if sm.readA != nil && sm.readA() > s.a {
-			return "probe=responded(read-loop-alive)"
-		}
-		select {
-		case <-sm.stopCh:
-			return "probe=aborted(shutdown)"
-		default:
-		}
-	}
-	return "probe=timeout(read-loop-or-host-stack-dead)"
-}
-
-// pickProbeSrcVIP returns any peer's VIP so the host's RST routes back via
-// the TUN (/1 covers the mesh range). Any mesh-routable address works; a real
-// peer VIP is guaranteed to be inside the mesh network.
-func (sm *StallMonitor) pickProbeSrcVIP() net.IP {
-	rt := sm.m.getRouteTable()
-	if rt == nil {
-		return nil
-	}
-	for subnetStr, nodeID := range rt.subnetOwner {
-		if nodeID == sm.m.nodeID {
-			continue
-		}
-		if _, sn, err := net.ParseCIDR(subnetStr); err == nil {
-			return CalculateVIP(sn)
-		}
-	}
-	return nil
+// RunDiagnostics runs the L1 snapshot + L2 probes on demand (admin
+// self-check after deploy). Returns combined JSON; never writes a dump.
+func (sm *StallMonitor) RunDiagnostics() ([]byte, error) {
+	s := sm.collect(time.Now())
+	snap := sm.buildSnapshot(-1, s)
+	mesh, host := sm.runProbes(-1)
+	return json.Marshal(map[string]interface{}{
+		"snapshot":   snap,
+		"meshProbes": mesh,
+		"hostProbe":  host,
+	})
 }
 
 // TriggerDump captures a dump immediately (manual / on-demand path).
@@ -350,8 +539,12 @@ func (sm *StallMonitor) writeDump(trigger, probeResult string) (string, error) {
 
 	w("--- counters ---")
 	w("A(tun-read)=%d B(netstack-write)=%d D-vip=%d D-ipip-eip=%d", s.a, s.b, s.dVIP, s.dIPIP)
-	w("netstack-read=%d nic1-backlog=%d uturn=%d",
-		sm.ns.ReadPackets.Load(), sm.ns.LinkEP().NumQueued(), sm.m.uturnCount)
+	if sm.ns != nil {
+		w("netstack-read=%d nic1-backlog=%d uturn=%d",
+			sm.ns.ReadPackets.Load(), sm.ns.LinkEP().NumQueued(), sm.m.uturnCount)
+	} else {
+		w("netstack-read=unavailable nic1-backlog=unavailable uturn=%d", sm.m.uturnCount)
+	}
 	w("")
 
 	w("--- samples (last %d, oldest first) ---", sm.sampleFill)
@@ -370,15 +563,17 @@ func (sm *StallMonitor) writeDump(trigger, probeResult string) (string, error) {
 		w("")
 	}
 
-	if st := sm.ns.Stack(); st != nil {
-		stats := st.Stats()
-		w("--- gvisor ip stats ---")
-		w("%+v", stats.IP)
-		w("--- gvisor tcp stats ---")
-		w("%+v", stats.TCP)
-		w("--- gvisor udp stats ---")
-		w("%+v", stats.UDP)
-		w("")
+	if sm.ns != nil {
+		if st := sm.ns.Stack(); st != nil {
+			stats := st.Stats()
+			w("--- gvisor ip stats ---")
+			w("%+v", stats.IP)
+			w("--- gvisor tcp stats ---")
+			w("%+v", stats.TCP)
+			w("--- gvisor udp stats ---")
+			w("%+v", stats.UDP)
+			w("")
+		}
 	}
 
 	w("--- goroutine stacks (all=true) ---")
@@ -394,60 +589,4 @@ func (sm *StallMonitor) writeDump(trigger, probeResult string) (string, error) {
 	f.Write(buf[:n])
 
 	return path, nil
-}
-
-// buildSYN crafts a bare IPv4/TCP SYN with correct checksums. The host OS
-// answers it at stack level (RST to a closed port), so no application or
-// peer cooperation is required.
-func buildSYN(src, dst net.IP, srcPort, dstPort uint16) []byte {
-	b := make([]byte, 40)
-	b[0] = 0x45 // IPv4, IHL=5
-	binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
-	b[8] = 64 // TTL
-	b[9] = 6  // TCP
-	copy(b[12:16], src.To4())
-	copy(b[16:20], dst.To4())
-	binary.BigEndian.PutUint16(b[10:12], ipv4Checksum(b[0:20]))
-
-	binary.BigEndian.PutUint16(b[20:22], srcPort)
-	binary.BigEndian.PutUint16(b[22:24], dstPort)
-	binary.BigEndian.PutUint32(b[24:28], 0x70686e31) // "phn1", arbitrary ISN
-	b[33] = 0x02 // SYN
-	binary.BigEndian.PutUint16(b[34:36], 64240)
-
-	sum := pseudoHeaderSum(src.To4(), dst.To4(), 6, 20)
-	sum = addBytes(sum, b[20:40])
-	binary.BigEndian.PutUint16(b[36:38], finalizeSum(sum))
-	return b
-}
-
-func ipv4Checksum(b []byte) uint16 {
-	return finalizeSum(addBytes(0, b))
-}
-
-func pseudoHeaderSum(src, dst []byte, proto byte, tcpLen int) uint32 {
-	var sum uint32
-	sum = addBytes(sum, src)
-	sum = addBytes(sum, dst)
-	sum += uint32(proto)
-	sum += uint32(tcpLen)
-	return sum
-}
-
-func addBytes(sum uint32, b []byte) uint32 {
-	for len(b) >= 2 {
-		sum += uint32(binary.BigEndian.Uint16(b[:2]))
-		b = b[2:]
-	}
-	if len(b) == 1 {
-		sum += uint32(b[0]) << 8
-	}
-	return sum
-}
-
-func finalizeSum(sum uint32) uint16 {
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	return ^uint16(sum)
 }

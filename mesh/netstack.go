@@ -1444,6 +1444,13 @@ func (n *Netstack) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.I
 	txID := uint16(time.Now().UnixNano())
 	query := BuildDNSQuery(domain, txID)
 	if _, err := ep.Write(&SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
+		// Diagnostic: distinguish stack-teardown abort (engine restart) from
+		// route invalidation — the two sole producers of ErrInvalidEndpointState.
+		n.mu.Lock()
+		stackSwapped := n.ns != ns
+		n.mu.Unlock()
+		util.LogModuleError("netstack", "[DNS-RESOLVE-FAIL] domain=%s dns=%s err=%v stackSwapped=%v",
+			domain, dnsServer, err, stackSwapped)
 		return nil, fmt.Errorf("resolve %s via %s: write: %v", domain, dnsServer, err)
 	}
 

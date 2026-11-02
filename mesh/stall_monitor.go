@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/util"
@@ -543,9 +544,9 @@ func (sm *StallMonitor) writeDump(trigger, probeResult string) (string, error) {
 	w("A(tun-read)=%d B(netstack-write)=%d D-vip=%d D-ipip-eip=%d", s.a, s.b, s.dVIP, s.dIPIP)
 	if sm.ns != nil {
 		w("netstack-read=%d nic1-backlog=%d uturn=%d",
-			sm.ns.ReadPackets.Load(), sm.ns.LinkEP().NumQueued(), sm.m.uturnCount)
+			sm.ns.ReadPackets.Load(), sm.ns.LinkEP().NumQueued(), atomic.LoadUint64(&sm.m.uturnCount))
 	} else {
-		w("netstack-read=unavailable nic1-backlog=unavailable uturn=%d", sm.m.uturnCount)
+		w("netstack-read=unavailable nic1-backlog=unavailable uturn=%d", atomic.LoadUint64(&sm.m.uturnCount))
 	}
 	w("")
 

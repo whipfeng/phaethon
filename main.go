@@ -2374,8 +2374,15 @@ func checkGroupHealth(g *config.ProxyGroup) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, healthCheckConcurrency)
 	for _, it := range items {
+		select {
+		case sem <- struct{}{}:
+		case <-time.After(healthCheckTimeout):
+			// 槽位超时未释放（检查路径挂死）：标记不健康并继续派发，
+			// 避免 sem 阻塞导致整组健康检查停摆。
+			g.SetHealth(it.key, false, 0)
+			continue
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(it item) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -2448,7 +2455,15 @@ func checkGroupTest(g *config.ProxyGroup) {
 		}
 
 		wg.Add(1)
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-time.After(healthCheckTimeout):
+			// 槽位超时未释放（检查路径挂死）：标记不健康并继续派发，
+			// 避免 sem 阻塞导致整组测试停摆。
+			g.SetHealthImmediate(key, false, 0)
+			wg.Done()
+			continue
+		}
 		go func(key string, p *config.Proxy) {
 			defer wg.Done()
 			defer func() { <-sem }()

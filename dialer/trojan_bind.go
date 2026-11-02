@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"time"
 
 	"phaethon/config"
 	"phaethon/frame"
@@ -74,9 +75,11 @@ func trojanTLSHandshake(conn net.Conn, p *config.Proxy) (*tls.Conn, error) {
 		tlsConf.ServerName = sni
 	}
 	tlsConn := tls.Client(conn, tlsConf)
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, fmt.Errorf("trojan: TLS handshake fail: %w", err)
 	}
+	tlsConn.SetDeadline(time.Time{})
 	return tlsConn, nil
 }
 

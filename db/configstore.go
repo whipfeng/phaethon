@@ -690,7 +690,10 @@ func IsEmptyConfig() (bool, error) {
 		}
 		return nil
 	})
-	return empty, err
+	if err != nil {
+		return false, err
+	}
+	return empty, nil
 }
 
 

@@ -93,6 +93,7 @@ type P2PTransport interface {
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetLinkConsecutiveLostByNodeSeq(nodeID string, seq uint16) int
 	GetEgressStatsByNodeSeq(nodeID string, seq uint16) (dropRate, sojournMs float64, ok bool)
 	GetChannelDropStats() (peerStats map[string]struct {
 		DataDrops      uint64
@@ -2639,6 +2640,15 @@ func (m *MeshManager) GetLinkQuality(nodeID string, localSeq uint16) (avgRTT tim
 	return quality.Stats()
 }
 
+// GetLinkConsecutiveLost returns the consecutive ping-loss count for an exact
+// link (StallMonitor L1 snapshot evidence).
+func (m *MeshManager) GetLinkConsecutiveLost(nodeID string, localSeq uint16) int {
+	if m.p2p == nil {
+		return 0
+	}
+	return m.p2p.GetLinkConsecutiveLostByNodeSeq(nodeID, localSeq)
+}
+
 // CreateLinkNIC creates a new LinkNIC for a peer link (design §5.6).
 // Called by P2P layer when a link is established (after hello completed).
 // The sender is the PeerSender that this LinkNIC will use to send packets.
@@ -2690,22 +2700,29 @@ func (m *MeshManager) GetLinkNICStats() map[string]struct {
 		Bytes   uint64
 		Drops   uint64
 	})
+	if m.topology == nil {
+		return result
+	}
 
-	// Iterate over all peers and collect stats from their LinkNICs
+	// Iterate over all peers and collect stats from their LinkNICs.
+	// Multiple links to the same nodeID collapse to the last one seen —
+	// per-link granularity is available via the peer's own LinkNIC.
 	allPeers := m.topology.GetAllPeers()
 	for _, p := range allPeers {
 		if p.Sender == nil {
 			continue
 		}
-		// Get the peer's linkNIC from the P2P layer
-		// Note: This requires P2P layer to expose linkNIC, which it doesn't currently.
-		// For now, return empty stats. This can be enhanced later if needed.
+		linkNIC := p.Sender.GetLinkNIC()
+		if linkNIC == nil {
+			continue
+		}
+		packets, bytes, drops := linkNIC.InjectStats()
 		nodeID := p.NodeID()
 		result[nodeID] = struct {
 			Packets uint64
 			Bytes   uint64
 			Drops   uint64
-		}{0, 0, 0}
+		}{packets, bytes, drops}
 	}
 
 	return result

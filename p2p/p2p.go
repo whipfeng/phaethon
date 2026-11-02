@@ -2288,6 +2288,20 @@ func (m *P2PManager) GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (sr
 	return 0, 0, 0, 0, 0
 }
 
+// GetLinkConsecutiveLostByNodeSeq returns the pingTracker consecutive-loss
+// count for an exact link (0 when no such peer is connected).
+func (m *P2PManager) GetLinkConsecutiveLostByNodeSeq(nodeID string, seq uint16) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.peers {
+		if p.NodeID == nodeID && p.Seq == seq && p.pingTracker != nil {
+			return p.pingTracker.consecutiveLostCount()
+		}
+	}
+	return 0
+}
+
 // GetEgressStatsByNodeSeq returns locally-observed egress health for an exact
 // link: window-smoothed queue drop rate and sojourn EMA (Phase B).
 // ok=false when no such peer is connected.

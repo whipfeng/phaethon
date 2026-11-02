@@ -388,6 +388,11 @@ type AdminServer struct {
 	// returns the dump file path. Set by the main package; nil when mesh is
 	// disabled.
 	StallDump func() (string, error)
+
+	// StallProbe runs the StallMonitor L1 snapshot + L2 liveness probes and
+	// returns the combined JSON. Set by the main package; nil when mesh is
+	// disabled. Unlike StallDump it never writes a dump file.
+	StallProbe func() ([]byte, error)
 }
 
 // PeerBrief contains brief information about a mesh peer.
@@ -1207,6 +1212,22 @@ func (s *AdminServer) handleStallDump(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"path": path})
 }
 
+// handleStallProbe runs the L1 snapshot + L2 probes without writing a dump
+// (POST or GET). Used to verify probe legs after deploy.
+func (s *AdminServer) handleStallProbe(w http.ResponseWriter, r *http.Request) {
+	if s.StallProbe == nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "stall probe unavailable (mesh disabled)"})
+		return
+	}
+	result, err := s.StallProbe()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
+}
+
 // registerRoutes sets up all HTTP routes.
 func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	// Static files — serve from embedded static/ directory.
@@ -1240,6 +1261,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	mux.HandleFunc("/debug/dump", s.handleStallDump)
+	mux.HandleFunc("/debug/stall-probe", s.handleStallProbe)
 
 	// API endpoints — use HandleFunc with path checks for RESTful routing
 	mux.HandleFunc("/api/stats", s.apiStats)

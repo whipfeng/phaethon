@@ -2221,6 +2221,9 @@ func wireAdminCallbacks(resources *activeResources) {
 			adminSrv.StallDump = func() (string, error) {
 				return resources.stallMonitor.TriggerDump("admin-api")
 			}
+			adminSrv.StallProbe = func() ([]byte, error) {
+				return resources.stallMonitor.RunDiagnostics()
+			}
 		}
 
 		// Periodic sync as fallback (every 5 minutes)

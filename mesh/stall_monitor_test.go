@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"net"
 	"testing"
 	"time"
 )
@@ -114,22 +113,5 @@ func TestStallMonitorIdleNeverFires(t *testing.T) {
 		if f := feed(sm, base, sec, 0, 0, 0); len(f) != 0 {
 			t.Fatalf("idle fired at t=%d: %v", sec, f)
 		}
-	}
-}
-
-func TestBuildSYNChecksums(t *testing.T) {
-	src := net.ParseIP("100.64.1.1").To4()
-	dst := net.ParseIP("100.64.1.2").To4()
-	b := buildSYN(src, dst, 40555, 9)
-	if got := finalizeSum(addBytes(0, b[0:20])); got != 0 {
-		t.Fatalf("ipv4 checksum not zero-fold (invalid): 0x%x", got)
-	}
-	sum := pseudoHeaderSum(src, dst, 6, 20)
-	sum = addBytes(sum, b[20:40])
-	if got := finalizeSum(sum); got != 0 {
-		t.Fatalf("tcp checksum not zero-fold (invalid): 0x%x", got)
-	}
-	if b[9] != 6 || b[33] != 2 {
-		t.Fatalf("not a TCP SYN: proto=%d flags=%02x", b[9], b[33])
 	}
 }

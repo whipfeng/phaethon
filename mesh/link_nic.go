@@ -40,7 +40,7 @@ func NewLinkNIC(nicID tcpip.NICID, sender PeerSender, peerNodeID string, peerSub
 		sender:     sender,
 		peerNodeID: peerNodeID,
 		peerSubnet: peerSubnet,
-		mtu:        1500, // Default MTU
+		mtu:        1600, // IPIP outer header (20B) + inner 1500 + headroom; TCP-stream carriage is not bound by physical 1500
 	}
 }
 

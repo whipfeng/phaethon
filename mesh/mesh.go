@@ -3437,12 +3437,33 @@ func (m *MeshManager) applyHysteresis(graph *TopologyGraph, bestPaths map[string
 		if incumbent >= 1e17 {
 			continue // incumbent no longer viable — adopt new path
 		}
+		// The retained incumbent reuses oldPath wholesale, including its
+		// LinkNIC pointer — pathCost only validates graph edges, so a dead
+		// NIC would be installed silently (audit item 19). Re-resolve the
+		// first-hop LinkNIC from the live peer set; if it is gone, do not
+		// retain.
+		nic := resolvePeerLinkNIC(m.topology, oldPath.NextHop)
+		if nic == nil {
+			continue
+		}
 		if newPath.Cost >= incumbent*(1-routeHysteresis) {
 			oldPath.Cost = incumbent
+			oldPath.LinkNIC = nic
 			bestPaths[target] = oldPath
 		}
 	}
 	return bestPaths
+}
+
+// resolvePeerLinkNIC returns the live LinkNIC for a first-hop peer node ID,
+// or nil when the peer (or its NIC) is gone.
+func resolvePeerLinkNIC(t *Topology, nextHop string) *LinkNIC {
+	for _, peer := range t.GetAllPeers() {
+		if peer.NodeID() == nextHop && peer.Sender != nil {
+			return peer.Sender.GetLinkNIC()
+		}
+	}
+	return nil
 }
 
 // edgeKey returns a canonical key for an edge between two nodes (sorted order).

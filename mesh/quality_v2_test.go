@@ -107,14 +107,35 @@ func TestLinkCostFormula(t *testing.T) {
 	}
 }
 
+// hysteresisPeerSender is a PeerSender stub for applyHysteresis tests.
+type hysteresisPeerSender struct {
+	nodeID string
+	nic    *LinkNIC
+}
+
+func (s *hysteresisPeerSender) Send(data []byte) error  { return nil }
+func (s *hysteresisPeerSender) SendGossip(data []byte)  {}
+func (s *hysteresisPeerSender) GetNodeID() string       { return s.nodeID }
+func (s *hysteresisPeerSender) GetProxyName() string    { return "" }
+func (s *hysteresisPeerSender) GetLocalSeq() uint16     { return 0 }
+func (s *hysteresisPeerSender) GetRemoteSeq() uint16    { return 0 }
+func (s *hysteresisPeerSender) GetFriendlyName() string { return s.nodeID }
+func (s *hysteresisPeerSender) HasProxy() bool          { return false }
+func (s *hysteresisPeerSender) GetLinkNIC() *LinkNIC    { return s.nic }
+
 // TestApplyHysteresisBoundary verifies A4: a new nextHop is adopted only
 // when it beats the incumbent's CURRENT cost by ≥15%.
 func TestApplyHysteresisBoundary(t *testing.T) {
-	m := &MeshManager{nodeID: "self"}
+	m := &MeshManager{nodeID: "self", topology: NewTopology()}
+	// The incumbent's first hop B must have a live LinkNIC, otherwise the
+	// retention branch never runs (audit item 19).
+	bSender := &hysteresisPeerSender{nodeID: "B"}
+	bSender.nic = NewLinkNIC(1, bSender, "B", nil)
+	m.topology.RegisterPeer(bSender)
 
 	// Incumbent path self→B→T with per-link cost 25 each.
 	old := &routeTable{bestPaths: map[string]dijkstraResult{
-		"T": {NextHop: "B", Cost: 50, Path: []string{"B", "T"}},
+		"T": {NextHop: "B", Cost: 50, Path: []string{"B", "T"}, LinkNIC: bSender.nic},
 	}}
 	m.routeTable.Store(old)
 
@@ -154,7 +175,7 @@ func TestApplyHysteresisBoundary(t *testing.T) {
 // TestApplyHysteresisDeadIncumbent verifies that a new path is adopted when
 // the incumbent's links no longer exist in the graph.
 func TestApplyHysteresisDeadIncumbent(t *testing.T) {
-	m := &MeshManager{nodeID: "self"}
+	m := &MeshManager{nodeID: "self", topology: NewTopology()}
 	m.routeTable.Store(&routeTable{bestPaths: map[string]dijkstraResult{
 		"T": {NextHop: "B", Cost: 50, Path: []string{"B", "T"}},
 	}})
@@ -170,5 +191,30 @@ func TestApplyHysteresisDeadIncumbent(t *testing.T) {
 	}
 	if got := m.applyHysteresis(graph, newPaths)["T"]; got.NextHop != "A" {
 		t.Fatalf("dead incumbent: nextHop = %s, want A", got.NextHop)
+	}
+}
+
+// TestApplyHysteresisDeadIncumbentNIC verifies audit item 19: when the
+// incumbent's graph edges are still alive but its first-hop LinkNIC is gone
+// (peer no longer in topology), the incumbent is NOT retained.
+func TestApplyHysteresisDeadIncumbentNIC(t *testing.T) {
+	m := &MeshManager{nodeID: "self", topology: NewTopology()} // no peers registered
+	m.routeTable.Store(&routeTable{bestPaths: map[string]dijkstraResult{
+		"T": {NextHop: "B", Cost: 50, Path: []string{"B", "T"}, LinkNIC: NewLinkNIC(1, nil, "B", nil)},
+	}})
+	graph := &TopologyGraph{
+		Nodes: map[string]bool{"self": true, "A": true, "B": true, "T": true},
+		Edges: map[string]map[string][]*LinkQualityInfo{
+			"self": {"A": {{Cost: 10}}, "B": {{Cost: 25}}},
+			"A":    {"T": {{Cost: 25}}},
+			"B":    {"T": {{Cost: 25}}},
+		},
+	}
+	newPaths := map[string]dijkstraResult{
+		"T": {NextHop: "A", Cost: 80, Path: []string{"A", "T"}}, // worse, but old NIC is dead
+	}
+	got := m.applyHysteresis(graph, newPaths)["T"]
+	if got.NextHop != "A" {
+		t.Fatalf("dead incumbent NIC: nextHop = %s, want A", got.NextHop)
 	}
 }

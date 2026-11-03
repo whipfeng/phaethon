@@ -1370,19 +1370,43 @@ function updateTUNSummary(data) {
 
 // ===== Route tree renderer (shared by mesh CIDR prefix tree + domain suffix tree) =====
 // Backend node shape: {label, full, owners[], children[]}. Owner-less nodes
-// are aggregate path nodes — faded. First two levels default expanded.
+// are aggregate path nodes — faded. First two levels default expanded on the
+// first render; afterwards the previous expansion state is restored so
+// version-driven re-fetches don't collapse the tree under the user.
 function renderRouteTree(host, forest, emptyI18nKey) {
+    const expanded = snapshotRouteTreeExpansion(host);
     host.innerHTML = '';
     if (!forest || forest.length === 0) {
         host.innerHTML = '<p class="text-muted">' + i18n.t(emptyI18nKey) + '</p>';
         return;
     }
     const frag = document.createDocumentFragment();
-    forest.forEach(node => frag.appendChild(routeTreeRow(node, 0)));
+    forest.forEach(node => frag.appendChild(routeTreeRow(node, 0, '', expanded)));
     host.appendChild(frag);
 }
 
-function routeTreeRow(node, depth) {
+// Returns a Set of "path/full" keys for nodes whose kids are currently
+// visible, or null when host has no rendered tree yet (first render —
+// caller falls back to defaults).
+function snapshotRouteTreeExpansion(host) {
+    if (!host.querySelector('.route-tree-row')) return null;
+    const set = new Set();
+    const walk = (nodeEl, path) => {
+        const row = nodeEl.querySelector(':scope > .route-tree-row');
+        const kids = nodeEl.querySelector(':scope > .route-tree-kids');
+        if (!row) return;
+        const full = row.querySelector('.route-tree-label').textContent;
+        const key = path ? path + '/' + full : full;
+        if (kids && kids.style.display !== 'none') set.add(key);
+        if (kids) Array.from(kids.children).forEach(k => walk(k, key));
+    };
+    Array.from(host.children).forEach(el => walk(el, ''));
+    return set;
+}
+
+function routeTreeRow(node, depth, path, expanded) {
+    const full = node.full || node.label;
+    const key = path ? path + '/' + full : full;
     const wrap = document.createElement('div');
     wrap.className = 'route-tree-node';
     const row = document.createElement('div');
@@ -1394,8 +1418,8 @@ function routeTreeRow(node, depth) {
     row.appendChild(toggle);
     const label = document.createElement('span');
     label.className = 'route-tree-label';
-    label.textContent = node.full || node.label;
-    label.title = node.full || node.label;
+    label.textContent = full;
+    label.title = full;
     row.appendChild(label);
     (node.owners || []).forEach(owner => {
         const badge = document.createElement('span');
@@ -1407,10 +1431,11 @@ function routeTreeRow(node, depth) {
     if (hasKids) {
         const kids = document.createElement('div');
         kids.className = 'route-tree-kids';
-        if (depth >= 1) kids.style.display = 'none'; // levels 0-1 expanded by default
-        node.children.forEach(child => kids.appendChild(routeTreeRow(child, depth + 1)));
+        const isOpen = expanded ? expanded.has(key) : depth < 1;
+        if (!isOpen) kids.style.display = 'none';
+        node.children.forEach(child => kids.appendChild(routeTreeRow(child, depth + 1, key, expanded)));
         wrap.appendChild(kids);
-        if (depth < 1) toggle.classList.add('open');
+        toggle.classList.toggle('open', isOpen);
         row.addEventListener('click', () => {
             const hidden = kids.style.display === 'none';
             kids.style.display = hidden ? '' : 'none';

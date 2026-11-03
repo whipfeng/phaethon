@@ -58,10 +58,14 @@
     </div>
 
     <div class="card">
-        <div class="card-header">
-            <h3><span data-i18n="proxy.title">Proxies</span> ({{len .Proxies}})</h3>
-            <button onclick="showAddProxy()" class="btn btn-primary btn-sm" data-i18n="proxy.add">+ Add Proxy</button>
+        <div class="card-header" style="cursor:pointer;" onclick="toggleProxySection()">
+            <h3 style="display:flex;align-items:center;gap:0.5rem;">
+                <span id="proxies-toggle-icon" style="transition:transform 0.2s;transform:rotate(90deg);">▶</span>
+                <span data-i18n="proxy.title">Proxies</span> <span id="proxies-count">({{len .Proxies}})</span>
+            </h3>
+            <button onclick="event.stopPropagation(); showAddProxy();" class="btn btn-primary btn-sm" data-i18n="proxy.add">+ Add Proxy</button>
         </div>
+        <div id="proxies-section" class="card-body">
 
         <!-- Proxy Table -->
         <div class="table-responsive">
@@ -128,16 +132,21 @@
                 </tbody>
             </table>
         </div>
+        </div>
     </div>
 
     <!-- Groups -->
     <div class="card">
-        <div class="card-header">
-            <h3><span data-i18n="proxy.groupTitle">Proxy Groups</span> ({{len .Groups}})</h3>
-            <div style="display:flex;gap:0.5rem;">
+        <div class="card-header" style="cursor:pointer;" onclick="toggleGroupsSection()">
+            <h3 style="display:flex;align-items:center;gap:0.5rem;">
+                <span id="groups-toggle-icon" style="transition:transform 0.2s;transform:rotate(90deg);">▶</span>
+                <span data-i18n="proxy.groupTitle">Proxy Groups</span> <span id="groups-count">({{len .Groups}})</span>
+            </h3>
+            <div style="display:flex;gap:0.5rem;" onclick="event.stopPropagation();">
                 <button onclick="showAddGroup()" class="btn btn-primary btn-sm" data-i18n="proxy.addGroup">+ Add Group</button>
             </div>
         </div>
+        <div id="groups-section" class="card-body">
         {{if .Groups}}
         <div class="groups-grid">
         {{range .Groups}}
@@ -170,6 +179,7 @@
         {{else}}
         <p class="text-muted" data-i18n="proxy.noGroups">No groups defined.</p>
         {{end}}
+        </div>
     </div>
 </div>
 
@@ -1969,6 +1979,30 @@ function escapeHtml(s) {
 function toggleSubscriptions() {
     const section = document.getElementById('subscriptions-section');
     const icon = document.getElementById('subscriptions-toggle-icon');
+    if (section.style.display === 'none') {
+        section.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+    } else {
+        section.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+    }
+}
+
+function toggleProxySection() {
+    const section = document.getElementById('proxies-section');
+    const icon = document.getElementById('proxies-toggle-icon');
+    if (section.style.display === 'none') {
+        section.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+    } else {
+        section.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+    }
+}
+
+function toggleGroupsSection() {
+    const section = document.getElementById('groups-section');
+    const icon = document.getElementById('groups-toggle-icon');
     if (section.style.display === 'none') {
         section.style.display = 'block';
         icon.style.transform = 'rotate(90deg)';

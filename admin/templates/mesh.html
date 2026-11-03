@@ -48,7 +48,8 @@
 
         <!-- Node Identity (Foundational Settings) -->
         <div class="mesh-section" id="mesh-identity-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.nodeIdentity">Node Identity</h4>
                 <button onclick="saveMeshIdentity(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
             </div>
@@ -66,7 +67,8 @@
 
         <!-- TCP Keepalive Settings -->
         <div class="mesh-section" id="mesh-keepalive-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h4>
                 <button onclick="saveTCPKeepalive(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
             </div>
@@ -91,7 +93,8 @@
 
         <!-- Topology Visualization -->
         <div class="mesh-section" id="mesh-topology-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.topology">Topology</h4>
             </div>
             <div class="mesh-topology-view" id="mesh-topology-view">
@@ -105,7 +108,8 @@
 
         <!-- Routes -->
         <div class="mesh-section" id="mesh-routes-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.routes">Routes</h4>
             </div>
             <table class="mesh-route-table">
@@ -116,7 +120,8 @@
 
         <!-- Domain Suffix Routes -->
         <div class="mesh-section" id="mesh-domain-routes-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.domainRoutes">Domain Suffix Routes</h4>
             </div>
             <table class="mesh-route-table">
@@ -127,7 +132,8 @@
 
         <!-- Domain Suffixes Config -->
         <div class="mesh-section" id="mesh-domain-suffixes-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.domainSuffixes">Domain Suffixes</h4>
                 <button onclick="showAddDomainSuffix()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
             </div>
@@ -144,7 +150,8 @@
 
         <!-- Advertise Config -->
         <div class="mesh-section" id="mesh-advertise-section">
-            <div class="mesh-section-header">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.advertise">Advertise Routes</h4>
                 <button onclick="showAddAdvertise()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
             </div>
@@ -160,8 +167,9 @@
         </div>
 
         <!-- Force Gossip -->
-        <div class="mesh-section">
-            <div class="mesh-section-header">
+        <div class="mesh-section" id="mesh-tools-section">
+            <div class="mesh-section-header" data-collapse>
+                <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.tools">Tools</h4>
             </div>
             <button onclick="triggerMeshGossip()" class="btn btn-sm btn-outline" data-i18n="mesh.forceGossip">Force Gossip</button>

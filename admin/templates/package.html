@@ -2,8 +2,8 @@
 {{define "content"}}
 <div class="page-content">
     <!-- Upload -->
-    <div class="card">
-        <h3 data-i18n="package.uploadTitle">上传发布包</h3>
+    <div class="card" id="package-upload-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="package.uploadTitle">上传发布包</span></h3>
         <div id="package-upload-area"
              style="border:2px dashed var(--border-color, #444); border-radius:8px; padding:1.5rem; text-align:center; cursor:pointer;"
              onclick="document.getElementById('package-file-input').click()">

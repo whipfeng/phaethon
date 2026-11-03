@@ -1,9 +1,9 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
-    <div class="card">
-        <div class="card-header">
-            <h3><span data-i18n="res.title">Resolvers</span> ({{len .Resolvers}})</h3>
+    <div class="card" id="resolvers-card">
+        <div class="card-header" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="res.title">Resolvers</span> ({{len .Resolvers}})</h3>
             <button onclick="showAddResolver()" class="btn btn-primary btn-sm" data-i18n="res.add">+ Add Resolver</button>
         </div>
         <p style="color:var(--text-secondary);margin-bottom:1rem;font-size:0.85rem;" data-i18n="res.desc">

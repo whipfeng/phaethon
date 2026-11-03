@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"phaethon/admin"
 	"phaethon/config"
 	"phaethon/db"
@@ -71,13 +70,6 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			}
 		}
 	}
-
-	// Inject phaethon's module logging into gVisor fork diagnostic logs.
-	// Route gVisor diagnostic logs to Debug level to reduce noise.
-	// Per-packet logs (gvisor, ipip, route, etc.) should not flood at Info level.
-	stack.SetLogFunc(func(module string, format string, args ...interface{}) {
-		util.LogModuleDebug(module, format, args...)
-	})
 
 	// Start the gVisor netstack (always runs, regardless of TUN switch)
 	// This sets up WriteLoopDevice and starts the netstack core.

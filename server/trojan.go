@@ -260,6 +260,12 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 		tlsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		atyp, err := util.ReadByte(tlsConn)
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				// Idle association: the client decides its own lifetime
+				// (same as the UDP reply reads below and socks5's drain
+				// loop). A dead client is reaped by TCP keepalive.
+				continue
+			}
 			return
 		}
 

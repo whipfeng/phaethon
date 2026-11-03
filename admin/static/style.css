@@ -2593,6 +2593,13 @@ td[data-label="P2P"] .p2p-status.failed {
 .route-tree-toggle.open {
     transform: rotate(90deg);
 }
+/* Hierarchy cues: each nesting level indents under a vertical guide line so
+   containment depth is visible at a glance. */
+.route-tree-kids {
+    margin-left: 0.45rem;
+    padding-left: 0.85rem;
+    border-left: 1px solid var(--border-color);
+}
 .route-tree-label {
     font-family: monospace;
     color: var(--text-primary);

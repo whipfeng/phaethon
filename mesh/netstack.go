@@ -51,12 +51,12 @@ type Netstack struct {
 	linkEP *channel.Endpoint
 
 	// Multi-NIC architecture (design §1.1)
-	meshMgr       *MeshManager // Mesh manager for routing decisions
-	linkNextNICID atomic.Uint64       // Next NIC ID for link NICs (starting at 2)
+	meshMgr       *MeshManager  // Mesh manager for routing decisions
+	linkNextNICID atomic.Uint64 // Next NIC ID for link NICs (starting at 2)
 
 	// Multi-link load balancing: round-robin across links to the same node
-	linkSelectMu    sync.Mutex
-	linkSelectIdx   map[string]int // per-node round-robin index
+	linkSelectMu  sync.Mutex
+	linkSelectIdx map[string]int // per-node round-robin index
 
 	// Overall mesh network (e.g., 100.0.0.0/8) for identifying mesh IPs
 	meshNetwork *net.IPNet
@@ -196,12 +196,16 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 						return SelectRouteResult{}, false
 					}
 
-					// Diagnostic: log route table contents for debugging
-					prefixes := make([]string, 0, len(rt.Routes))
-					for _, route := range rt.Routes {
-						prefixes = append(prefixes, route.Prefix.String())
+					// Diagnostic: log route table contents for debugging.
+					// Guarded: building the prefixes slice String()ifies every
+					// prefix — keep that cost off the hot path (audit item 10).
+					if util.GetModuleLogLevel("route") <= util.LogLevelDebug {
+						prefixes := make([]string, 0, len(rt.Routes))
+						for _, route := range rt.Routes {
+							prefixes = append(prefixes, route.Prefix.String())
+						}
+						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
 					}
-					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
 
 					for _, route := range rt.Routes {
 						if !route.Prefix.Contains(dst) {
@@ -1816,94 +1820,117 @@ func (n *Netstack) writeLoop() {
 			return
 		}
 
-		buf := pkt.ToBuffer()
-		data := buf.Flatten()
-
-		if len(data) < 20 || (data[0]>>4) != 4 {
-			pkt.DecRef()
-			continue
+		// Drain burst (audit item 12): take everything pending in one wake —
+		// no timer, no target count; write as many packets as were queued.
+		// This amortizes the wake/syscall overhead across a busy burst.
+		batch := []*stack.PacketBuffer{pkt}
+		for p := n.linkEP.Read(); p != nil; p = n.linkEP.Read() {
+			batch = append(batch, p)
 		}
 
-		dstIP := net.IP(data[16:20])
-		srcIP := net.IP(data[12:16])
-
-		hl := int(data[0]&0x0f) * 4
-		pktNum := n.WritePackets.Load()
-
-		// DIAG-DEBUG: always log any packet that touches the local GIP so we
-		// can verify whether DNS / stack-originated packets escape via TUN and
-		// (if so) whether they return via OS loopback. This captures ResolveDomain
-		//'s UDP query (src=GIP, dst=GIP) — the smoking gun for HandleLocal=false.
-		isGIPSrc := false
-		isGIPDst := false
-		if n.dnsAddr != (tcpip.Address{}) {
-			gipBytes := n.dnsAddr.As4()
-			isGIPSrc = bytes.Equal(data[12:16], gipBytes[:])
-			isGIPDst = bytes.Equal(data[16:20], gipBytes[:])
-		}
-		if isGIPSrc || isGIPDst {
-			util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d: %s:%d -> %s:%d (proto=%d len=%d, MeshSubnetContains=%v)",
-				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
-				data[9], len(data),
-				n.meshSubnet != nil && n.meshSubnet.Contains(dstIP))
-		}
-
-		if pktNum < 50 || pktNum%1000 == 0 {
-			util.LogModuleInfo("netstack", "[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
-				pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
-				data[9], len(data))
-		}
-
-		// Mesh-internal destinations must egress via Link NICs. A packet with
-		// such a destination on NIC 1 means routing sent it the wrong way
-		// (nothing in the route table can produce this) — drop it rather than
-		// loop it back through the TUN.
-		if n.meshNetwork != nil && n.meshNetwork.Contains(dstIP) &&
-			(n.meshSubnet == nil || !n.meshSubnet.Contains(dstIP)) {
-			if pktNum < 50 || pktNum%1000 == 0 || isGIPSrc || isGIPDst {
-				util.LogModuleWarn("netstack", "[WRITELOOP] dropped mesh-destined pkt#%d on TUN egress: %s -> %s (should egress via Link NIC)",
-					pktNum, srcIP, dstIP)
+		for i, p := range batch {
+			if !n.handleWriteLoopPacket(p) {
+				for _, rest := range batch[i+1:] {
+					rest.DecRef()
+				}
+				return
 			}
-			pkt.DecRef()
-			continue
 		}
-
-		// Everything else is host-facing: forwarder replies (dst=hostIP/fakeIP
-		// inside the own subnet), bypass-gateway DNAT returns (dst=LAN client),
-		// DNS hijacker replies. Write to the TUN device.
-		if n.WriteLoopDevice != nil {
-			if _, err := n.WriteLoopDevice.Write(data); err != nil {
-				if isGIPSrc || isGIPDst {
-					util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d TUN write FAILED: %s:%d -> %s:%d err=%v",
-						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2), err)
-				}
-				select {
-				case <-n.closeCh:
-					pkt.DecRef()
-					return
-				default:
-					util.LogModuleWarn("netstack", "netstack: write error: %v", err)
-				}
-			} else {
-				n.WritePackets.Add(1)
-				if pktNum < 50 || pktNum%1000 == 0 {
-					util.LogModuleInfo("netstack", "[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
-						pktNum, srcIP, portAt(data, hl), net.IP(data[16:20]), portAt(data, hl+2))
-				}
-				if isGIPSrc || isGIPDst {
-					util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d WROTE to TUN: %s:%d -> %s:%d",
-						pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2))
-				}
-				if n.callbacks != nil && n.callbacks.StatsNotify != nil {
-					n.callbacks.StatsNotify()
-				}
-			}
-		} else if pktNum < 50 {
-			util.LogModuleWarn("netstack", "[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
-		}
-
-		pkt.DecRef()
 	}
+}
+
+// handleWriteLoopPacket processes one outbound packet for writeLoop: flattens,
+// drops misrouted mesh-destined packets, writes host-facing packets to the TUN
+// device. Returns false when closeCh fired (the packet is already DecRef'd).
+func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
+	buf := pkt.ToBuffer()
+	data := buf.Flatten()
+
+	if len(data) < 20 || (data[0]>>4) != 4 {
+		pkt.DecRef()
+		return true
+	}
+
+	dstIP := net.IP(data[16:20])
+	srcIP := net.IP(data[12:16])
+
+	hl := int(data[0]&0x0f) * 4
+	pktNum := n.WritePackets.Load()
+
+	// DIAG-DEBUG: always log any packet that touches the local GIP so we
+	// can verify whether DNS / stack-originated packets escape via TUN and
+	// (if so) whether they return via OS loopback. This captures ResolveDomain
+	//'s UDP query (src=GIP, dst=GIP) — the smoking gun for HandleLocal=false.
+	isGIPSrc := false
+	isGIPDst := false
+	if n.dnsAddr != (tcpip.Address{}) {
+		gipBytes := n.dnsAddr.As4()
+		isGIPSrc = bytes.Equal(data[12:16], gipBytes[:])
+		isGIPDst = bytes.Equal(data[16:20], gipBytes[:])
+	}
+	if isGIPSrc || isGIPDst {
+		util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d: %s:%d -> %s:%d (proto=%d len=%d, MeshSubnetContains=%v)",
+			pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
+			data[9], len(data),
+			n.meshSubnet != nil && n.meshSubnet.Contains(dstIP))
+	}
+
+	if pktNum < 50 || pktNum%1000 == 0 {
+		util.LogModuleInfo("netstack", "[WRITELOOP] pkt#%d: %s:%d -> %s:%d (proto=%d len=%d)",
+			pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2),
+			data[9], len(data))
+	}
+
+	// Mesh-internal destinations must egress via Link NICs. A packet with
+	// such a destination on NIC 1 means routing sent it the wrong way
+	// (nothing in the route table can produce this) — drop it rather than
+	// loop it back through the TUN.
+	if n.meshNetwork != nil && n.meshNetwork.Contains(dstIP) &&
+		(n.meshSubnet == nil || !n.meshSubnet.Contains(dstIP)) {
+		if pktNum < 50 || pktNum%1000 == 0 || isGIPSrc || isGIPDst {
+			util.LogModuleWarn("netstack", "[WRITELOOP] dropped mesh-destined pkt#%d on TUN egress: %s -> %s (should egress via Link NIC)",
+				pktNum, srcIP, dstIP)
+		}
+		pkt.DecRef()
+		return true
+	}
+
+	// Everything else is host-facing: forwarder replies (dst=hostIP/fakeIP
+	// inside the own subnet), bypass-gateway DNAT returns (dst=LAN client),
+	// DNS hijacker replies. Write to the TUN device.
+	if n.WriteLoopDevice != nil {
+		if _, err := n.WriteLoopDevice.Write(data); err != nil {
+			if isGIPSrc || isGIPDst {
+				util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d TUN write FAILED: %s:%d -> %s:%d err=%v",
+					pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2), err)
+			}
+			select {
+			case <-n.closeCh:
+				pkt.DecRef()
+				return false
+			default:
+				util.LogModuleWarn("netstack", "netstack: write error: %v", err)
+			}
+		} else {
+			n.WritePackets.Add(1)
+			if pktNum < 50 || pktNum%1000 == 0 {
+				util.LogModuleInfo("netstack", "[WRITELOOP] wrote pkt#%d to TUN: %s:%d -> %s:%d",
+					pktNum, srcIP, portAt(data, hl), net.IP(data[16:20]), portAt(data, hl+2))
+			}
+			if isGIPSrc || isGIPDst {
+				util.LogModuleInfo("netstack", "[DIAG-DEBUG] GIP-touch pkt#%d WROTE to TUN: %s:%d -> %s:%d",
+					pktNum, srcIP, portAt(data, hl), dstIP, portAt(data, hl+2))
+			}
+			if n.callbacks != nil && n.callbacks.StatsNotify != nil {
+				n.callbacks.StatsNotify()
+			}
+		}
+	} else if pktNum < 50 {
+		util.LogModuleWarn("netstack", "[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
+	}
+
+	pkt.DecRef()
+	return true
 }
 
 // portAt extracts a 16-bit port at the given byte offset (0 if out of range).

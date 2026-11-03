@@ -45,7 +45,7 @@
             </table>
         </div>
         <div class="tun-section" id="tun-stats-section" style="display:none;">
-            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.stats">Counters</span></h4>
+            <h4 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.stats">Counters</span></h4>
             <table class="info-table">
                 <tr><td data-i18n="tun.readPackets">Read Packets</td><td id="tun-read-pkts">-</td></tr>
                 <tr><td data-i18n="tun.writePackets">Write Packets</td><td id="tun-write-pkts">-</td></tr>
@@ -55,14 +55,14 @@
             </table>
         </div>
         <div class="tun-section" id="tun-dhcp-leases-section" style="display:none;">
-            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.dhcpLeases">DHCP Leases</span></h4>
+            <h4 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.dhcpLeases">DHCP Leases</span></h4>
             <table class="info-table dhcp-lease-table">
                 <thead><tr><td data-i18n="tun.hostname">Hostname</td><td>MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.leasesExpires">Expires</td><td></td></tr></thead>
                 <tbody id="tun-dhcp-leases"></tbody>
             </table>
         </div>
         <div class="tun-section" id="tun-dhcp-bindings-section" style="display:none;">
-            <div style="display:flex;justify-content:space-between;align-items:center;" data-collapse>
+            <div style="display:flex;justify-content:space-between;align-items:center;" data-collapse data-collapsed="1">
                 <h4 style="margin:0;"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.staticBindings">Static Bindings</span></h4>
                 <button class="btn btn-sm btn-outline" onclick="openBindingModal()" data-i18n="tun.addBinding">Add Binding</button>
             </div>

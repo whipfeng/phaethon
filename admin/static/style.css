@@ -2563,3 +2563,59 @@ td[data-label="P2P"] .p2p-status.failed {
     font-size: 0.7rem;
     color: var(--text-secondary);
 }
+
+/* Route trees (mesh CIDR prefix tree + domain suffix tree) */
+.route-tree {
+    font-size: 0.85rem;
+}
+.route-tree-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.2rem 0.5rem 0.2rem 0;
+    cursor: pointer;
+    border-radius: 4px;
+    min-height: 1.4rem;
+}
+.route-tree-row:hover {
+    background: var(--bg-secondary, rgba(128, 128, 128, 0.08));
+}
+.route-tree-toggle {
+    display: inline-block;
+    width: 1rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    transition: transform 0.15s;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.route-tree-toggle.open {
+    transform: rotate(90deg);
+}
+.route-tree-label {
+    font-family: monospace;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.route-tree-agg .route-tree-label {
+    color: var(--text-secondary);
+    opacity: 0.7;
+    font-style: italic;
+}
+.route-tree-owner {
+    display: inline-block;
+    padding: 0 0.45rem;
+    border-radius: 999px;
+    background: rgba(88, 166, 255, 0.12);
+    border: 1px solid rgba(88, 166, 255, 0.35);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    line-height: 1.3;
+    flex-shrink: 0;
+}
+.route-tree-agg .route-tree-owner {
+    display: none;
+}

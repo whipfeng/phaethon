@@ -1368,6 +1368,58 @@ function updateTUNSummary(data) {
     el.innerHTML = html;
 }
 
+// ===== Route tree renderer (shared by mesh CIDR prefix tree + domain suffix tree) =====
+// Backend node shape: {label, full, owners[], children[]}. Owner-less nodes
+// are aggregate path nodes — faded. First two levels default expanded.
+function renderRouteTree(host, forest, emptyI18nKey) {
+    host.innerHTML = '';
+    if (!forest || forest.length === 0) {
+        host.innerHTML = '<p class="text-muted">' + i18n.t(emptyI18nKey) + '</p>';
+        return;
+    }
+    const frag = document.createDocumentFragment();
+    forest.forEach(node => frag.appendChild(routeTreeRow(node, 0)));
+    host.appendChild(frag);
+}
+
+function routeTreeRow(node, depth) {
+    const wrap = document.createElement('div');
+    wrap.className = 'route-tree-node';
+    const row = document.createElement('div');
+    row.className = 'route-tree-row' + ((node.owners && node.owners.length) ? '' : ' route-tree-agg');
+    const hasKids = node.children && node.children.length > 0;
+    const toggle = document.createElement('span');
+    toggle.className = 'route-tree-toggle';
+    toggle.textContent = hasKids ? '▸' : '';
+    row.appendChild(toggle);
+    const label = document.createElement('span');
+    label.className = 'route-tree-label';
+    label.textContent = node.full || node.label;
+    label.title = node.full || node.label;
+    row.appendChild(label);
+    (node.owners || []).forEach(owner => {
+        const badge = document.createElement('span');
+        badge.className = 'route-tree-owner';
+        badge.textContent = owner;
+        row.appendChild(badge);
+    });
+    wrap.appendChild(row);
+    if (hasKids) {
+        const kids = document.createElement('div');
+        kids.className = 'route-tree-kids';
+        if (depth >= 1) kids.style.display = 'none'; // levels 0-1 expanded by default
+        node.children.forEach(child => kids.appendChild(routeTreeRow(child, depth + 1)));
+        wrap.appendChild(kids);
+        if (depth < 1) toggle.classList.add('open');
+        row.addEventListener('click', () => {
+            const hidden = kids.style.display === 'none';
+            kids.style.display = hidden ? '' : 'none';
+            toggle.classList.toggle('open', hidden);
+        });
+    }
+    return wrap;
+}
+
 async function fetchMeshStatus() {
     const summaryEl = document.getElementById('mesh-summary');
     const card = document.getElementById('mesh-card');
@@ -1519,131 +1571,21 @@ async function fetchMeshStatus() {
         // Draw topology visualization
         drawMeshTopology(data.nodeId, peers, directPeers, fullTopology);
 
-        // Routes
-        if (data.routes && data.routes.routes) {
-            const routeTbody = document.getElementById('mesh-routes');
-            if (routeTbody) {
-                let html = '';
-                // Sort routes by prefix
-                const sortedRoutes = [...data.routes.routes].sort((a, b) => a.prefix.localeCompare(b.prefix));
-                sortedRoutes.forEach(r => {
-                    const entries = r.entries || [];
-                    const owners = (entries.length > 0) ? entries.map(e => e.NodeID).join(', ') : '-';
-                    html += '<tr>';
-                    html += '<td data-label="' + i18n.t('mesh.prefix') + '"><code>' + escapeHtml(r.prefix) + '</code></td>';
-                    html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(owners) + '</code></td>';
-                    html += '</tr>';
-                });
-                routeTbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">' + i18n.t('mesh.noRoutes') + '</td></tr>';
-            }
+        // Routes: collapsible tree straight from the backend's compressed
+        // prefix tree (parent/child = prefix containment, owners listed
+        // side by side).
+        const routesTreeHost = document.getElementById('mesh-routes-tree');
+        if (routesTreeHost) {
+            renderRouteTree(routesTreeHost, data.routes || [], 'mesh.noRoutes');
         }
 
-        // Domain suffix routes - collect from topology peers
-        const domainRouteTbody = document.getElementById('mesh-domain-routes');
-        if (domainRouteTbody) {
-            let html = '';
-            const domainRoutes = [];
-            const topoPeers = (data.topology && data.topology.peers) || [];
-            const topoNodes = (fullTopology && fullTopology.nodes) || [];
-
-            // Best routing info per node (same source as the route table):
-            // nodeID -> {hop, via}, where via is the next-hop direct peer.
-            const nodeRoutes = {};
-            topoPeers.forEach(peer => {
-                const via = peer.nodeId;
-                if (!via || via === data.nodeId) return;
-                if (peer.subnet) {
-                    // Direct peer's own subnet: hop=1
-                    if (!nodeRoutes[via] || nodeRoutes[via].hop > 1) {
-                        nodeRoutes[via] = {hop: 1, via: via};
-                    }
-                }
-                (peer.claimedSubnets || []).forEach(cs => {
-                    if (!cs.nodeId || cs.nodeId === data.nodeId) return;
-                    if (!nodeRoutes[cs.nodeId] || cs.hop < nodeRoutes[cs.nodeId].hop) {
-                        nodeRoutes[cs.nodeId] = {hop: cs.hop, via: via};
-                    }
-                });
-            });
-
-            // Resolve a domain owner to via/status display
-            const ownerRouteInfo = (owner) => {
-                if (owner === data.nodeId) {
-                    return {via: '-', cls: 'local', text: i18n.t('mesh.local')};
-                }
-                const rt = nodeRoutes[owner];
-                if (rt) {
-                    const isDirect = rt.hop === 1;
-                    return {via: rt.via, cls: isDirect ? 'online' : 'relay', text: isDirect ? i18n.t('mesh.direct') : i18n.t('mesh.relay')};
-                }
-                return {via: '-', cls: 'relay', text: i18n.t('mesh.relay')};
-            };
-
-            // Collect domain suffixes from all peers (owner = s.NodeID)
-            topoPeers.forEach(peer => {
-                const suffixes = peer.domainSuffixes || [];
-                suffixes.forEach(s => {
-                    domainRoutes.push({
-                        domain: s.Suffix,
-                        owner: s.NodeID
-                    });
-                });
-            });
-
-            // Self-declared suffixes: topology peers exclude the local node,
-            // so GetStatus' own domainSuffixes is the only source here —
-            // without it the local declaration never shows up in the table.
-            (data.domainSuffixes || []).forEach(suffix => {
-                domainRoutes.push({
-                    domain: suffix,
-                    owner: data.nodeId
-                });
-            });
-
-            // Add auto-generated nodeID.phn entries for all known nodes (skip self)
-            topoNodes.forEach(node => {
-                if (node.nodeId && node.subnet && node.nodeId !== data.nodeId) {
-                    domainRoutes.push({
-                        domain: node.nodeId + '.phn',
-                        owner: node.nodeId
-                    });
-                }
-            });
-
-            // Add self
-            if (data.nodeId && data.subnet) {
-                domainRoutes.push({
-                    domain: data.nodeId + '.phn',
-                    owner: data.nodeId
-                });
-            }
-
-            // Group by domain, keeping routes with the lowest hop count
-            const domainRouteMap = new Map();
-            domainRoutes.forEach(r => {
-                r.hop = (r.owner === data.nodeId) ? 0 : (nodeRoutes[r.owner] ? nodeRoutes[r.owner].hop : 999);
-                const existing = domainRouteMap.get(r.domain);
-                if (!existing) {
-                    domainRouteMap.set(r.domain, [r]);
-                } else if (r.hop < existing[0].hop) {
-                    domainRouteMap.set(r.domain, [r]);
-                } else if (r.hop === existing[0].hop) {
-                    existing.push(r);
-                }
-            });
-            const uniqueDomainRoutes = [];
-            domainRouteMap.forEach(routes => {
-                uniqueDomainRoutes.push(routes[0]);
-            });
-            uniqueDomainRoutes.sort((a, b) => a.domain.localeCompare(b.domain));
-
-            uniqueDomainRoutes.forEach(r => {
-                html += '<tr>';
-                html += '<td data-label="' + i18n.t('mesh.domain') + '"><code>' + escapeHtml(r.domain) + '</code></td>';
-                html += '<td data-label="' + i18n.t('mesh.owner') + '"><code>' + escapeHtml(r.owner || '-') + '</code></td>';
-                html += '</tr>';
-            });
-            domainRouteTbody.innerHTML = html || '<tr><td colspan="2" class="text-muted">' + i18n.t('mesh.noDomainRoutes') + '</td></tr>';
+        // Domain suffix routes: collapsible tree straight from the backend's
+        // unified domain trie (the same structure the data plane resolves
+        // via) — nesting mirrors suffix containment, owners listed side by
+        // side.
+        const domainTreeHost = document.getElementById('mesh-domain-routes-tree');
+        if (domainTreeHost) {
+            renderRouteTree(domainTreeHost, data.domainRoutes || [], 'mesh.noDomainRoutes');
         }
     } catch (err) {
         console.error('fetchMeshStatus error:', err);
@@ -2511,6 +2453,18 @@ function setCollapse(header, bodies, hidden) {
     header.dataset.collapsed = hidden ? '1' : '0';
     const icon = header.querySelector('.collapse-icon');
     if (icon) icon.style.transform = hidden ? 'rotate(0deg)' : 'rotate(90deg)';
+    if (!hidden) lazyLoadCollapse(header);
+}
+
+// Sections marked data-collapse-load fetch their data on first expand
+// (including expand restored from localStorage), not at page load.
+function lazyLoadCollapse(header) {
+    const fnName = header.dataset.collapseLoad;
+    if (!fnName || header.dataset.collapseLoaded === '1') return;
+    const fn = window[fnName];
+    if (typeof fn !== 'function') return;
+    header.dataset.collapseLoaded = '1';
+    try { fn(); } catch (e) { console.error('collapse-load failed:', fnName, e); }
 }
 
 function toggleCollapse(header) {

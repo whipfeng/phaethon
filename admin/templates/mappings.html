@@ -90,7 +90,7 @@
     {{range .Mappings}}{{if and .ReverseAddress .IsEnabled}}{{$hasReverse = true}}{{end}}{{end}}
     {{if $hasReverse}}
     <div class="card" id="map-reverse-card">
-        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> 🔄 <span data-i18n="map.reverseSummary">反向连接</span></h3>
+        <h3 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> 🔄 <span data-i18n="map.reverseSummary">反向连接</span></h3>
         <div class="reverse-grid">
             {{range .Mappings}}
             {{if and .ReverseAddress .IsEnabled}}

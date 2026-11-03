@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1558,31 +1559,195 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	}
 }
 
-func (m *MeshManager) GetRoutes() map[string]interface{} {
+// routeTreeNode is the admin-display tree shape shared by the domain and
+// CIDR route trees: label is the local segment, full the complete suffix /
+// prefix at that node, owners the nodes serving it (empty for aggregate
+// path nodes that hold no route of their own).
+func routeTreeNode(label, full string, owners []string) map[string]interface{} {
+	return map[string]interface{}{
+		"label":    label,
+		"full":     full,
+		"owners":   owners,
+		"children": make([]map[string]interface{}, 0),
+	}
+}
+
+// GetRouteTree exports the unified CIDR route table as a tree for admin
+// display. The binary routeTrie is walked depth-first; parent/child nesting
+// mirrors prefix containment, multiple owners of the same prefix (per-flow
+// egress alternatives) are listed side by side, and intermediate path bits
+// that hold no route surface as owner-less aggregate nodes. Display-only
+// export — the data plane keeps using Lookup on the same trie.
+func (m *MeshManager) GetRouteTree() []map[string]interface{} {
 	rt := m.getRouteTable()
 
-	routeList := make([]map[string]interface{}, 0, len(rt.routes))
-	for _, r := range rt.routes {
-		var peerInfos []map[string]interface{}
-		// Use findNextHops to get current next hop peers from topology
-		// Use the first IP in the prefix for lookup
-		if ip := r.Prefix.IP; ip != nil {
-			if nextHops := m.findNextHops(ip); len(nextHops) > 0 {
-				for _, p := range nextHops {
-					peerInfos = append(peerInfos, map[string]interface{}{
-						"nodeID": p.Peer.GetNodeID(),
-						"hop":    p.Hop,
-					})
+	var build func(n *routeTrieNode, buf []byte) map[string]interface{}
+	build = func(n *routeTrieNode, buf []byte) map[string]interface{} {
+		nonNil := 0
+		for bit := 0; bit < 2; bit++ {
+			if n.children[bit] != nil {
+				nonNil++
+			}
+		}
+		// Compress display: a route-less node with a single child carries no
+		// information, so emit only the descendant that holds a route or a
+		// branching point. Containment is preserved — the descendant's prefix
+		// string still names its true position in the trie.
+		if n.route == nil && nonNil == 1 {
+			for bit := 0; bit < 2; bit++ {
+				if n.children[bit] != nil {
+					return build(n.children[bit], append(append([]byte{}, buf...), byte(bit)))
 				}
 			}
 		}
-		routeList = append(routeList, map[string]interface{}{
-			"prefix":  r.Prefix.String(),
-			"entries": r.Entries,
-			"via":     peerInfos,
+		children := make([]map[string]interface{}, 0, 2)
+		for bit := 0; bit < 2; bit++ {
+			if n.children[bit] == nil {
+				continue
+			}
+			cbuf := append(append([]byte{}, buf...), byte(bit))
+			if emitted := build(n.children[bit], cbuf); emitted != nil {
+				children = append(children, emitted)
+			}
+		}
+		if n.route == nil && len(children) == 0 {
+			return nil
+		}
+		ip := make(net.IP, 4)
+		for i := 0; i < 4; i++ {
+			var b byte
+			for j := 0; j < 8; j++ {
+				if pos := i*8 + j; pos < len(buf) && buf[pos] == 1 {
+					b |= 1 << uint(7-j)
+				}
+			}
+			ip[i] = b
+		}
+		full := ip.String() + "/" + strconv.Itoa(len(buf))
+		owners := make([]string, 0)
+		if n.route != nil {
+			seen := make(map[string]bool)
+			for _, e := range n.route.Entries {
+				if e.NodeID != "" && !seen[e.NodeID] {
+					seen[e.NodeID] = true
+					owners = append(owners, e.NodeID)
+				}
+			}
+			sort.Strings(owners)
+		}
+		sort.Slice(children, func(i, j int) bool {
+			_, ci, _ := net.ParseCIDR(children[i]["full"].(string))
+			_, cj, _ := net.ParseCIDR(children[j]["full"].(string))
+			if ci == nil || cj == nil {
+				return children[i]["full"].(string) < children[j]["full"].(string)
+			}
+			li, _ := ci.Mask.Size()
+			lj, _ := cj.Mask.Size()
+			if li != lj {
+				return li < lj
+			}
+			return bytes.Compare(ci.IP, cj.IP) < 0
 		})
+		node := routeTreeNode(full, full, owners)
+		node["children"] = children
+		return node
 	}
-	return map[string]interface{}{"routes": routeList}
+
+	forest := make([]map[string]interface{}, 0, 2)
+	if root := build(rt.routeTrie.root, nil); root != nil {
+		forest = append(forest, root)
+	}
+	return forest
+}
+
+// GetDomainRoutes exports the unified domain trie as a label tree for
+// admin display: nesting mirrors suffix containment, and each node's owner
+// list names every node serving that suffix (the data plane picks
+// per-flow among them via selectEgressNodeIDForDomain). The local
+// nodeID.phn entry is appended display-only — the trie itself deliberately
+// has no self entry so data-plane resolution of the local domain is
+// unchanged.
+func (m *MeshManager) GetDomainRoutes() []map[string]interface{} {
+	rt := m.getRouteTable()
+
+	var build func(n *nodeTrieNode, revLabels []string) map[string]interface{}
+	build = func(n *nodeTrieNode, revLabels []string) map[string]interface{} {
+		labels := make([]string, len(revLabels))
+		for i, l := range revLabels {
+			labels[len(revLabels)-1-i] = l
+		}
+		owners := make([]string, 0, len(n.entries))
+		seen := make(map[string]bool)
+		for _, e := range n.entries {
+			if e.NodeID != "" && !seen[e.NodeID] {
+				seen[e.NodeID] = true
+				owners = append(owners, e.NodeID)
+			}
+		}
+		sort.Strings(owners)
+		children := make([]map[string]interface{}, 0, len(n.children))
+		for label, child := range n.children {
+			children = append(children, build(child, append(revLabels, label)))
+		}
+		sort.Slice(children, func(i, j int) bool {
+			return children[i]["full"].(string) < children[j]["full"].(string)
+		})
+		node := routeTreeNode(labels[0], strings.Join(labels, "."), owners)
+		node["children"] = children
+		return node
+	}
+
+	forest := make([]map[string]interface{}, 0, len(rt.domainTrie.root.children))
+	for label, child := range rt.domainTrie.root.children {
+		forest = append(forest, build(child, []string{label}))
+	}
+	if m.nodeID != "" && m.subnet != nil {
+		// Reversed label order: forest roots are TLD labels.
+		rev := splitLabels(m.nodeID + "." + MeshDomainSuffix)
+		forest = ensureDomainTreeNode(forest, rev, "", m.nodeID)
+	}
+	sort.Slice(forest, func(i, j int) bool {
+		return forest[i]["full"].(string) < forest[j]["full"].(string)
+	})
+	return forest
+}
+
+// ensureDomainTreeNode merges a display-only (suffix, owner) pair into a
+// domain tree forest, creating path nodes as needed. labels are in trie
+// order (TLD first); path is the parent suffix in normal dot order.
+func ensureDomainTreeNode(nodes []map[string]interface{}, labels []string, path, owner string) []map[string]interface{} {
+	label := labels[0]
+	for _, c := range nodes {
+		if c["label"] != label {
+			continue
+		}
+		if len(labels) == 1 {
+			owners, _ := c["owners"].([]string)
+			for _, o := range owners {
+				if o == owner {
+					return nodes
+				}
+			}
+			owners = append(owners, owner)
+			sort.Strings(owners)
+			c["owners"] = owners
+			return nodes
+		}
+		children, _ := c["children"].([]map[string]interface{})
+		c["children"] = ensureDomainTreeNode(children, labels[1:], c["full"].(string), owner)
+		return nodes
+	}
+	full := label
+	if path != "" {
+		full = label + "." + path
+	}
+	node := routeTreeNode(label, full, []string{})
+	if len(labels) == 1 {
+		node["owners"] = []string{owner}
+	} else {
+		node["children"] = ensureDomainTreeNode(nil, labels[1:], full, owner)
+	}
+	return append(nodes, node)
 }
 
 func (m *MeshManager) GetPeers() []MeshPeerInfo {

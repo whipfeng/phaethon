@@ -48,7 +48,7 @@
 
         <!-- Node Identity (Foundational Settings) -->
         <div class="mesh-section" id="mesh-identity-section">
-            <div class="mesh-section-header" data-collapse>
+            <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadMeshIdentity">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.nodeIdentity">Node Identity</h4>
                 <button onclick="saveMeshIdentity(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
@@ -67,7 +67,7 @@
 
         <!-- TCP Keepalive Settings -->
         <div class="mesh-section" id="mesh-keepalive-section">
-            <div class="mesh-section-header" data-collapse>
+            <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadTCPKeepalive">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h4>
                 <button onclick="saveTCPKeepalive(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
@@ -112,10 +112,7 @@
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.routes">Routes</h4>
             </div>
-            <table class="mesh-route-table">
-                <thead><tr><th data-i18n="mesh.prefix">Prefix</th><th data-i18n="mesh.owner">Owner</th></tr></thead>
-                <tbody id="mesh-routes"></tbody>
-            </table>
+            <div id="mesh-routes-tree" class="route-tree"></div>
         </div>
 
         <!-- Domain Suffix Routes -->
@@ -124,15 +121,12 @@
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.domainRoutes">Domain Suffix Routes</h4>
             </div>
-            <table class="mesh-route-table">
-                <thead><tr><th data-i18n="mesh.domain">Domain</th><th data-i18n="mesh.owner">Owner</th></tr></thead>
-                <tbody id="mesh-domain-routes"></tbody>
-            </table>
+            <div id="mesh-domain-routes-tree" class="route-tree"></div>
         </div>
 
         <!-- Domain Suffixes Config -->
         <div class="mesh-section" id="mesh-domain-suffixes-section">
-            <div class="mesh-section-header" data-collapse>
+            <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadDomainSuffixes">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.domainSuffixes">Domain Suffixes</h4>
                 <button onclick="showAddDomainSuffix()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
@@ -150,7 +144,7 @@
 
         <!-- Advertise Config -->
         <div class="mesh-section" id="mesh-advertise-section">
-            <div class="mesh-section-header" data-collapse>
+            <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadAdvertise">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.advertise">Advertise Routes</h4>
                 <button onclick="showAddAdvertise()" class="btn btn-primary btn-sm" data-i18n="common.add">+ Add</button>
@@ -168,7 +162,7 @@
 
         <!-- Force Gossip -->
         <div class="mesh-section" id="mesh-tools-section">
-            <div class="mesh-section-header" data-collapse>
+            <div class="mesh-section-header" data-collapse data-collapsed="1">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.tools">Tools</h4>
             </div>
@@ -219,20 +213,13 @@
     </div>
 
     <script>
+    // Only the always-expanded sections (topology/routes/domain-routes) load
+    // upfront; config sections (identity/keepalive/suffixes/advertise) fetch
+    // lazily via data-collapse-load on first expand.
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            fetchMeshStatus();
-            loadMeshIdentity();
-            loadTCPKeepalive();
-            loadDomainSuffixes();
-            loadAdvertise();
-        });
+        document.addEventListener('DOMContentLoaded', fetchMeshStatus);
     } else {
         fetchMeshStatus();
-        loadMeshIdentity();
-        loadTCPKeepalive();
-        loadDomainSuffixes();
-        loadAdvertise();
     }
 
     // Mesh Identity (Foundational Settings)

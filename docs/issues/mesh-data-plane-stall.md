@@ -161,3 +161,18 @@ VM 留跑期间 StallMonitor rule 0 触发，写 `goroutine-dump-20261102-135925
 - **治本 = 找到并修复 B**（触发源）。前置条件：阶段二取证
 - **阶段二停滞 dump 已实现**（精准 dump 阶梯，2026-11-02，见 docs/plans/stall-monitor-precise-dump-ladder.md）：关键循环进展足迹（TUN readPackets / WritePackets / peer 入向计数器）由 StallMonitor 旁观；卡死=部分冻结签名（freezeWindow=60s）触发 rule 0/1/2 → L1 KB 级快照行 + 判态 → L2 双腿主动探测 → 确认 phaethon 侧嫌疑才写全量 dump（rule 2 host 腿活 = host-silent 良性直接跳过）。断网可取证：不侵入阻塞调用、不拿业务锁。**待部署 VM 生效**，部署后 `POST /debug/stall-probe` 自检
 - 复现验证用跨平台 Win↔Linux 全链路（含 wintun/tun，不绕开 TUN 层）
+
+## 2026-11-03 iperf3 吞吐验证未遂：轻症形态复测记录
+
+深度验证第一项（iperf3 mesh 链路吞吐）未遂，**复测证据与本文档轻症症状完全一致**，记录备查：
+
+- **测试方法**：VM（Windows，winget iperf3 3.22）↔ QG（apk iperf3），QG server 绑 100.0.0.2，双向各试一次
+- **结果（双向均失败）**：
+  - VM→100.0.0.2:22 SYN 到不了 QG（QG tun0 tcpdump 实证无包）
+  - QG→100.212.0.2 无主机路由（mesh-only 中继节点 host 腿结构性不通，符合预期）
+  - VM→GG VIP（100.179.0.3:39998）、VM→自己 VIP（100.212.0.1:39999）、VM→QG LAN 192.168.1.100（IPIP 分支 3）全部不通
+  - fakeIP 域名（qgw.phn）与域名路由（httpbin.org，owner=jf）超时
+- **同期正常项**：VM admin 活性、控制面（gossip 2-5s 路由刷新、bestPaths 齐全、channelDropStats 全 0）、互联网直连代理（1.1.1.1 可达、活跃 DIRECT 连接）
+- **判别**：非今日提交引入——今日 5 个提交仅 4b7b40e 碰 mesh（GetRouteTree nil 守卫，纯只读导出路径）+ 4bf4bd9 转发选路修复（症状出现时不相关），其余全为 admin 前端。症状 = 文档"轻症：数据面卡死"原样复现（VM↔QG 双向数据死、控制面正常）
+- **残留清理**：QG iperf3 进程+包已删、VM iperf3 进程已杀（winget 包 ar51an.iPerf3 保留备下次）、C:/tmp/iperf3.zip 已删；VM 侧 e2e 脚本（C:/tmp/phn_e2e_tree.py）保留
+- **吞吐基线仍缺**：iperf3 验证待数据面恢复后重开；当时 GG linkNIC 仅 39 包（近零数据流量），qg linkNIC ~75 包/10s（纯 gossip 量级）

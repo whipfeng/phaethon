@@ -1,159 +1,151 @@
-# P2P 数据面 UDP 传输（QUIC）设计
+# P2P 数据面 UDP 传输设计（复用现有代理 UDP 通道）
 
-**状态**: DRAFT
+**状态**: DRAFT（v2：按用户指正重写——不新造协议，复用 SOCKS5 UDP ASSOCIATE 等现有代理 UDP 通道承载 P2P 帧）
 **创建**: 2026-11-03
 **目标版本**: v1.0.0（首版）
 **关联文档**: [p2p_mesh_data_frame_loss_design.md](p2p_mesh_data_frame_loss_design.md)、[htunnel_p2p_direct_mode.md](htunnel_p2p_direct_mode.md)、[reverse_udp_design.md](reverse_udp_design.md)
 
 ## 1. 背景与动机
 
-当前所有 P2P mesh 链路的帧传输（`frame.FrameTransport`）有三个实现，全部承载在 TCP 之上：
+用户诉求（可选项）：代理协议本身有 UDP 支持（如 SOCKS5 的 UDP ASSOCIATE），开启后 P2P 数据帧直接走这条现成的 UDP 通道，以获得真实 UDP 线上形态的性能收益。**不引入任何新线协议**——帧格式、握手、加密全部复用现有实现。
 
-| 实现 | 位置 | 底层 |
-|------|------|------|
-| `streamTransport` | `frame/transport.go:63` | 裸 TCP（SOCKS5/Trojan BIND PORT=2） |
-| `htunnelDirectTransport` | `dialer/htunnel_direct.go` | HTTP POST 发 / GET 长轮询收 |
-| `meshChannelTransport` | `server/htunnel_mesh.go:234` | server 侧 meshOut 队列（4096 帧） |
+当前 P2P 链路的帧传输（`frame.FrameTransport`）三个实现全部承载在 TCP 流上（`frame.NewStreamTransport` / htunnel direct / mesh channel）。而代理客户端的 UDP 通道（`UDPDialer.DialPacket()`）和服务端的 UDP 中继（SOCKS5/Trojan UDP ASSOCIATE）**已经存在且生产可用**，缺的只是"P2P 帧走这条通道"的接驳。
 
-用户诉求（可选项，非强制）：开启 UDP 支持后，P2P 数据帧可走 UDP 以提升性能。具体收益：
-
-1. **消除 TCP-over-TCP 队头阻塞**：内层 gVisor netstack 已在链路两端终结 TCP；外层再套可靠流协议，单帧丢失阻塞整条链路。UDP 数据腿无此耦合。
-2. **弱网/高 RTT 下吞吐**：QUIC 的拥塞控制（BBR）与 0-RTT 建连优于双重 TCP 语义叠加。
-3. **对 mesh 数据面卡死症状的解耦价值**（docs/issues/mesh-data-plane-stall.md）：htunnel 链路的出站停滞卡死整腿；UDP 腿与 TCP 信令腿天然独立，单腿死不会静默拖死全部数据面。
+收益：
+1. **消除 TCP-over-TCP 队头阻塞**（仅当真 UDP 线上时成立，见 §3.4 协议对照）
+2. **零新协议、零新依赖**：帧封装沿用现有 3 字节帧头；SOCKS5 UDP 封壳沿用现有实现
+3. 对 mesh 数据面卡死症状（docs/issues/mesh-data-plane-stall.md）的解耦价值：UDP 腿与 TCP 腿故障域独立
 
 ## 2. 现状关键事实（调研实锤）
 
-- **`FrameTransport` 已是 datagram 语义**（`frame/transport.go:20-32` 接口注释原文）："implementations MAY drop, duplicate or reorder frames (all P2P frame consumers tolerate this)"。**UDP 化的契约口子已预留**，无需改任何消费方。
-- **方法集**：`Send(frameType, payload, isControl)` / `SendBatch([]Frame)` / `Recv()` / `Close()`。Send 由 peerWriteLoop 唯一 writer 串行调用；Recv 必须**控制帧优先**（gossip/ping/pong 不能被数据帧饿死）。
-- **帧类型**：控制帧 `Gossip(0x12)`/`LinkPing(0x14)`/`LinkPong(0x15)`（0x10-0x1F）；数据帧仅 `FrameMeshPacket(0x20)`。全部 fire-and-forget，无 seq/ack（见 [p2p_mesh_data_frame_loss_design.md](p2p_mesh_data_frame_loss_design.md)：丢包靠内层 TCP 重传 + gossip 周期广播弥补）。
-- **数据帧载荷 = gVisor netstack IP 包**，内层 TCP/UDP 由两端 netstack 终结——**数据帧丢帧安全**（内层 TCP 自恢复；内层 UDP 本就容忍丢失）。
-- **quic-go 已在依赖树**：`github.com/apernet/quic-go v0.54.1-0.20251024023933`（hysteria2 引入，当前 indirect）。升级 direct 即可用，支持 RFC 9221 QUIC Datagram（`SendDatagram`/`ReceiveDatagram`）。
-- **无 NAT 穿透**：所有 P2P 连接经代理服务器中继（SOCKS5/Trojan/h_tunnel），客户端与服务器地址互相已知 → **无打洞需求**，UDP 直连服务器监听口即可。
-- **无统一 P2P 加密层**：传输层加密依附底层协议（Trojan=TLS、h_tunnel=可选 XChaCha20 AEAD、SOCKS5 P2P=**明文**）。QUIC 的 TLS 1.3 顺带补齐 SOCKS5 路径的加密缺口。
-- **入口（客户端）**：`P2PDialer.DialP2P() (frame.FrameTransport, error)`（`dialer/dialer.go:102`），各代理类型实现于 `dialer/socks5.go:81` / `dialer/trojan.go:78` / `dialer/htunnel.go:236`。
-- **入口（服务端）**：`server/socks5.go:162` / `server/trojan.go:120` / `server/htunnel.go:502` → `handleP2PConnection` → `p2p.HandleP2PConnection`（`p2p/p2p.go:2318`）→ `frame.NewStreamTransport(conn)` → `GlobalP2PManager.HandleP2PTransport(t, address)`。transport 变体入口 `p2p.HandleP2PTransport`（`p2p/p2p.go:2336`）直接接受任意 `FrameTransport`。
-- **出站 QoS**：4 级优先级队列（control > DNS > TCP-ACK > 数据）+ DRR（`p2p/p2p.go:339-343, 769-841`），在 peerWriteLoop 调 Send 之前，与 transport 实现无关，UDP transport 自动继承。
+- **`FrameTransport` 已是 datagram 语义**（`frame/transport.go:20-32` 注释原文）："implementations MAY drop, duplicate or reorder frames"。**UDP 丢包/乱序契约天然满足，消费方零改动**。
+- **方法集**：`Send(frameType, payload, isControl)` / `SendBatch([]Frame)` / `Recv()` / `Close()`；Send 由 peerWriteLoop 唯一 writer 串行调用。
+- **帧格式**：`[frameType:1B][length:2B big-endian][payload]`（streamTransport 线上格式，UDP 版原样复用）。
+- **帧类型**：控制帧 `Gossip(0x12)`/`LinkPing(0x14)`/`LinkPong(0x15)`；数据帧 `FrameMeshPacket(0x20)`。全部 fire-and-forget——gossip 周期广播、ping/pong 是测量，丢帧可容忍。
+- **客户端 UDP 通道已全类型覆盖**：`UDPDialer.DialPacket() (net.PacketConn, error)`（`dialer/dialer.go:86`），SOCKS5=`dialer/socks5.go:19`→`Socks5UDPAssociate`（`dialer/socks5_udp.go:231`，支持多级级联）、Trojan=`dialer/trojan.go:98`、SS/VLESS/Hysteria2/h_tunnel/Direct 全有实现。
+- **客户端 PacketConn 语义**：通用中继——每次 `WriteTo(payload, targetAddr)` 带 SOCKS5 UDP 封头（RSV/FRAG/ATYP/DST），目标地址任意。
+- **服务端 UDP 中继已存在**：SOCKS5 `handleUDPAssociate`（`server/socks5.go:233`）→ `socks5UDPRelay`（:318）；Trojan `handleUDPAssociate`（`server/trojan.go:162`）；h_tunnel UDP 模式（`server/htunnel.go:382`）。中继生命周期跟随 TCP 控制连接（RFC 1928 语义，现有代码已实现）。
+- **P2P 地址编码有先例**：TCP BIND PORT=2 的 DST.ADDR 携带 mesh address（`server/socks5.go:162` → `handleP2PConnection(conn, dstAddr)` → `p2p.HandleP2PConnection`，`p2p/p2p.go:2318`）。transport 变体入口 `p2p.HandleP2PTransport(t frame.FrameTransport, address string)`（`p2p/p2p.go:2336`）接受任意 FrameTransport。
+- **入口（客户端）**：`P2PDialer.DialP2P() (frame.FrameTransport, error)`（`dialer/dialer.go:102`）。
+- **无 NAT 穿透**：全部经代理中继，客户端与服务器地址互知，UDP 通道天然可达（除非运营商封 UDP）。
 
 ## 3. 设计
 
 ### 3.1 总体形态
 
 ```
-┌─ 客户端 ──────────────────────────────┐         ┌─ 服务器（代理节点）──────────────────┐
-│ DialP2P():                             │         │ TCP 信令腿（现有，不动）:            │
-│  1. 现有 TCP transport 建链（SOCKS5    │  信令   │  SOCKS5/Trojan/h_tunnel 握手后      │
-│     BIND PORT=2 / h_tunnel MESH）     │◄───────►│  → handleP2PConnection              │
-│  2. 经信令腿发送 QUIC-UPGRADE 请求:   │         │     → HandleP2PTransport            │
-│     {udp 目标端口, cert指纹, token}   │         │                                     │
-│  3. UDP 直连服务器 QUIC 监听口,        │  QUIC   │ UDP 监听口（同一端口）:             │
-│     TLS1.3 握手（pin 第 2 步指纹）    │═════════►│  quic.Listener                      │
-│  4. QUIC 腿就绪 → 帧走 QUIC；         │  UDP    │  token → address 映射 →             │
-│     信令腿降级为 fallback 探测        │         │  frame.NewQuicTransport(conn)       │
-│                                        │         │  → p2p.HandleP2PTransport           │
-└────────────────────────────────────────┘         └─────────────────────────────────────┘
+┌─ 客户端 ───────────────────────────────────┐          ┌─ 服务器（代理节点）───────────────────────┐
+│ DialP2P() with p2p_udp:                     │          │ UDP ASSOCIATE 请求 DST = P2P marker:      │
+│  1. DialPacket() 建 UDP 通道                │  信令    │  ATYP=domain, ADDR=<mesh address>,        │
+│     （TCP 控制连接 + UDP ASSOCIATE 握手，    │◄────────►│  PORT=2（与 BIND PORT=2 同语义）           │
+│      全部现有代码）                           │          │    → 判定为 P2P 会话：不建 internet 中继    │
+│  2. 用 marker 目标包装为 FrameTransport:     │  UDP     │    → frame.NewPacketTransport(relay leg)  │
+│     Send = WriteTo(frame, p2pMarker)         │═════════►│    → p2p.HandleP2PTransport(t, address)   │
+│     Recv = ReadFrom() 剥封头                 │  数据帧  │  中继收到 datagram:                        │
+│  3. 失败 → 回退现有 TCP DialP2P 路径          │          │  DST=marker → 帧入 transport → p2p 会话    │
+└─────────────────────────────────────────────┘          │  DST≠marker → 现有 internet 中继（不变）    │
+                                                         └───────────────────────────────────────────┘
 ```
 
-核心决策：
+关键决策：
 
-1. **QUIC 作为第四条 FrameTransport 实现**（`frame.NewQuicTransport(quic.Connection)`），不改 FrameTransport 接口、不改任何消费方。
-2. **信令走现有 TCP 腿**（复用已认证会话协商 QUIC 参数），UDP 仅承载升级后的帧流。无 PKI：服务器启动生成自签证书，证书 SHA-256 指纹经信令腿下发，客户端 QUIC TLS 握手时 pin 校验。h_tunnel 路径信令有 AEAD 加持；SOCKS5 路径信令为明文——但 pin 指纹仍使 UDP 腿不可被中间人仿冒（优于当前 SOCKS5 P2P 全明文状态）。
-3. **控制帧走可靠 QUIC 流，数据帧走 QUIC Datagram（RFC 9221）**：
-   - 单条双向 control stream：承载 gossip/ping/pong（低频、必须可靠、直接影响路由正确性）。
-   - Datagram channel：承载 FrameMeshPacket。天然满足"丢/重/乱序可容忍"契约，彻底无队头阻塞。
-   - `Recv()` 实现为优先 drain control stream，再读 datagram——满足控制帧优先要求。
-4. **会话归属用 token**：服务器从信令腿拿到 address+token，UDP 到达后用 token 匹配；未匹配 token 的 QUIC 连接直接拒绝。
+1. **新 FrameTransport 实现 `frame.PacketTransport`**：包装 `net.PacketConn`，Send/Recv 复用现有 3 字节帧头格式逐帧一 datagram。**不改 FrameTransport 接口、不改 p2p/mesh 任何消费方**。
+2. **P2P 判定放在 UDP ASSOCIATE 请求的 DST**：客户端发 UDP ASSOCIATE 时 DST 填 mesh address（域名 ATYP，与 BIND PORT=2 同编码）+ PORT=2 marker。服务器见 marker → 该 association 整体是 P2P 会话（`HandleP2PTransport`），不建 internet 中继；datagram 内的 DST 字段则填占位值（0.0.0.0:0），服务器 P2P 分支忽略之。无 marker → 走现有 internet 中继，**行为零变化**。
+3. **全部帧（控制+数据）都走 UDP 通道**：契约允许丢/乱序；gossip 周期广播自恢复、ping/pong 本就是测量。无需双通道、无需 TCP 信令腿。**TCP 控制连接仅作 association 生命周期载体**（现有语义：控制连接死 → 中继关 → p2p 会话关 → 走现有重连流程）。
+4. **大包分片**：SOCKS5 UDP 单 datagram 保守上限 ~1400B；帧超限时发送侧 2 段式分片（首段带 fragID/total/index 头），接收侧重组，2s 超时整组丢弃（与 fire-and-forget 一致）。
 
-### 3.2 帧封装
+### 3.2 改动面（全部在既有文件加分支，无新文件协议）
 
-**Control stream**（可靠，按现有 3 字节帧头格式原样转发，无新协议）：
+| 层 | 位置 | 改动 |
+|----|------|------|
+| 帧层 | `frame/` 新文件 | `PacketTransport` 实现（Send/SendBatch/Recv/Close + 分片重组），纯本地可单测 |
+| 客户端 | `dialer/socks5.go` `DialP2P`（:81）等 | `p2p_udp` 开启时：DialPacket → 发 P2P-marker UDP ASSOCIATE（需 Socks5UDPAssociate 变体支持自定义 DST）→ 包 PacketTransport；失败回退现有 TCP 路径 |
+| 服务端 | `server/socks5.go` `handleUDPAssociate`（:233） | 解析请求 DST，P2P marker → `frame.NewPacketTransport(relay leg)` + `p2p.HandleP2PTransport`；否则现有路径 |
+| 配置 | `config.Proxy` | `p2p_udp *bool`，缺省 false（**可选项原则**：不开 = 与今天 bit 级一致） |
+| admin | 会话列表 | 传输形态列显示 "udp"（复用 connID/出口形态辨识既有展示位） |
 
-```
-[frameType:1B][length:2B big-endian][payload]
-```
+### 3.3 会话生命周期
 
-**Datagram**（每帧一个 datagram，不超过协商 MaxDatagramFrameSize）：
+- UDP association 的 TCP 控制连接存活 = P2P 会话存活（现有中继语义，不新造）。
+- UDP 通道静默断流（运营商限速场景）：无线上信号，靠 gossip 超时/pingTracker ~10s 自判死链 + 最优路径重算（**现有机制原样复用**，见 mesh-data-plane-stall.md 根因链条③的修正结论——死链发现本来就是 ping/pong 的职责）。
+- 重连：p2p 层现有重连循环重跑 DialP2P；`p2p_udp` 开启时每次重试先 UDP 后 TCP 回退。
 
-```
-[frameType:1B = 0x20][length:2B][payload]
-```
+### 3.4 各代理类型的真实线上形态（决定收益，必须诚实对照）
 
-载荷超过当前可发送尺寸时，**发送侧分片**（轻量 2 段式，首段 2B fragID + 1B total + 2B index，续段同头），接收侧重组（按 fragID 聚合，单帧 2s 超时丢弃整组——与 fire-and-forget 语义一致）。PMTU 由 QUIC 栈管理，分片上限跟随 `quic.Connection.RemoteAddr()` 实际可用尺寸动态收缩，不硬编码。
+| 代理类型 | DialPacket 线上形态 | p2p_udp 收益 |
+|----------|---------------------|--------------|
+| **SOCKS5** | 真 UDP datagram（明文） | ✔ 全收益（队头阻塞消除、弱网吞吐） |
+| **Shadowsocks** | 真 UDP datagram + AEAD 加密 | ✔ 全收益 + 线上加密 |
+| **Hysteria2** | 真 UDP（QUIC）+ TLS | ✔ 全收益 + 线上加密 |
+| **Trojan** | UDP 包封在 TLS 流里（`server/trojan.go:252` 从 TLS 连接读写） | ✘ **线上仍是 TCP**，不解决队头阻塞，仅省帧封套开销——不建议启用 |
+| **h_tunnel** | UDP over HTTP 流 | ✘ 同上，线上 TCP |
+| **VLESS** | 依传输层而定 | 视部署，默认不建议 |
 
-### 3.3 配置
+**结论**：`p2p_udp` 的收益取决于代理类型的 UDP 通道是不是真 UDP。首版推荐在 SOCKS5（内网可信链路，明文可接受）或 Shadowsocks/Hysteria2 腿上启用；Trojan/h_tunnel 腿上启用无害但无性能收益（仍可用作功能验证）。
 
-挂在现有 `Proxy` 配置面（与 `p2p` 开关同级，继承 per-proxy 粒度）：
+### 3.5 级联链
+
+`Socks5UDPAssociate` 已支持多级级联（`dialer/socks5_udp.go:231-249`，递归建立下一跳 UDP ASSOCIATE）。P2P 帧经级联链时逐跳 UDP——中间跳若某环是 TCP 线上形态则该环收益失效。首版不要求逐环最优，按整链最后一跳的 marker 判定即可（中级 SOCKS5 服务器透传 datagram，与现有 internet UDP 中继同路径）。
+
+## 4. 配置
 
 ```json
 {
   "proxies": [{
     "name": "qg",
-    "type": "trojan",
+    "type": "socks5",
     "p2p": true,
     "p2p_udp": true
   }]
 }
 ```
 
-- `p2p_udp` 缺省 = false（**可选项原则**：不开 = 行为与今天完全一致）。
-- 语义：`p2p_udp=true` 且 `p2p=true` 时，该代理的 P2P 建链尝试 QUIC 升级；升级失败（UDP 不可达/被拒/握手超时 3s）自动回退纯 TCP transport，记一条 info 日志。回退不是错误路径，是常态路径之一（运营商 UDP 限速/封锁场景）。
-
-### 3.4 服务端 UDP 监听
-
-- Trojan/SOCKS5 代理：在现有 TCP 监听同一端口加 UDP 监听（`net.ListenUDP` → `quic.Listen`），与 SOCKS5 UDP ASSOCIATE 不冲突（QUIC 首包即 crypto 帧，按首字节区分于 SOCKS5-UDP 封头）。
-- h_tunnel：UDP 监听口独立配置项（h_tunnel 本身是 HTTP 端口无 UDP 面），协商时经信令腿告知客户端。
-- 服务端 `p2p_udp` 开关同样配置化；两侧任一侧关闭 → 信令腿协商自然失败 → TCP 回退。
-
-### 3.5 生命周期
-
-- QUIC 腿建立后：TCP 信令腿**保留但降载**——不承载帧，仅作存活探测与重协商通道（每 15s 应用层 ping，失败 N 次判定腿死）。这样 UDP 被运营商静默断流时有现成的可靠通道可感知并回退，而不是等到 gossip 超时才发现。
-- QUIC 腿断开：若 TCP 信令腿仍活 → 重协商重连 QUIC；信令腿也死 → 走现有会话关闭/重连流程（pingTracker/最优路径重算，机制不变）。
-- **不改** peerWriteLoop / QoS 队列 / mesh 路由 / gossip 任何逻辑——它们只面向 FrameTransport 接口。
-
-## 4. 与 mesh 数据面卡死问题的关系（非本方案承诺）
-
-- 本方案不治本（B 触发源仍未实锤，见 docs/issues/mesh-data-plane-stall.md），但消除了"单条 TCP 传输腿内部停滞 → 全链路数据面静默卡死"这一类故障形态：UDP 腿与 TCP 信令腿独立，任一条死亡可被另一条立即感知。
-- 阶段二精准 dump 阶梯照常部署取证，与本方案正交。
+- `p2p_udp` 缺省 false；仅对 UDP 线上形态为真的代理类型有意义（§3.4）。
+- 服务端无需配置：association 请求里的 marker 即声明，老版本服务器收到 P2P-marker UDP ASSOCIATE 会按普通中继处理（DST 解析失败自然拒绝）——**天然向后不兼容安全**（项目未发布，不涉及兼容 shim）。
 
 ## 5. 风险与对策
 
 | 风险 | 等级 | 对策 |
 |------|------|------|
-| 运营商 UDP 限速/封锁（国内网络常见，国际链路偶发） | 高 | 升级失败 3s 回退 TCP；信令腿降级探测可在运行中感知静默断流再回退；`p2p_udp` per-proxy 开关便于按链路质量启用 |
-| 分片重组引入额外内存/复杂度 | 中 | 分片仅数据帧用、上限跟随 PMTU（典型 ≤ 3 段）；2s 超时整组丢弃，不复用 TCP 语义 |
-| QUIC 依赖升级（indirect → direct）引入版本冲突 | 中 | hysteria2 已用同 fork 验证兼容性；升级后跑全量 e2e |
-| 服务器 UDP 监听被扫/被放大攻击利用 | 低 | token 未匹配即拒；TLS 1.3 握手本身即抗放大（客户端首包验证后才放大响应） |
-| Windows wintun/防火墙对 UDP 高并发限制 | 中 | 复现环境 VM=Windows，首版即跨平台验证；出问题 per-proxy 关 |
+| 运营商 UDP 限速/封锁 | 高 | DialPacket/握手失败自动回退现有 TCP DialP2P；运行中静默断流靠现有 ping/pong 死链发现 + 重连（重连时再试 UDP）；per-proxy 开关便于按链路启用 |
+| SOCKS5 UDP 明文 | 中 | 内网/可信链路可接受（与现有 SOCKS5 P2P TCP 明文同级）；要加密走 Shadowsocks/Hysteria2 腿 |
+| 分片重组复杂度 | 中 | 仅数据帧触发、2 段式、2s 超时丢弃；保守 1400B 阈值不依赖 PMTU 动态探测 |
+| UDP 单 datagram 乱序导致分片重组失败率上升 | 低 | 丢帧本来就容忍（内层 TCP 重传）；重组失败 = 丢一帧，契约内 |
+| 服务器 UDP 中继被扫 | 低 | P2P marker 需 association 级握手成立；无关 datagram 走现有路径 |
 
-## 6. 实施步骤（分期，每期独立可交付可回退）
+## 6. 与 QUIC 方案的关系（v1 版方案处置）
 
-**Phase 0 — transport 内核（纯本地，无网络改动）**
-1. `frame/quic_transport.go`：`NewQuicTransport(quic.Connection) FrameTransport`——control stream 收发 + datagram 收发 + 分片重组 + `Recv` 控制帧优先。
-2. 本地 loopback 单测：两进程内存建 QUIC 连接，验证 FrameTransport 契约（含丢帧/乱序容忍、分片边界、Close 语义）。
+v1 版方案（quicTransport + 自签证书 pin + RFC 9221 datagram）**撤销**：自造协议层与"复用现有协议"的诉求相悖，且 SOCKS5-UDP 明文/SS-UDP/Hysteria2 已覆盖"加密/不加密 × 真 UDP"全组合。若未来某代理类型无 UDP 通道又需要真 UDP，再考虑 QUIC——当前不存在这个缺口。
 
-**Phase 1 — 端到端升级通道（客户端 + Trojan/SOCKS5 服务端）**
-3. 信令协议：新控制帧 `0x16 QUICUpgrade`（现有控制帧段 0x10-0x1F 内未占用值，需核实最新帧表）承载 {token, udpPort, certFingerprint}。
-4. 客户端：`DialP2P` 返回升级为组合 transport（QUIC 主腿 + TCP 信令 fallback 探测）；失败回退现有 `NewStreamTransport`。
-5. 服务端：Trojan/SOCKS5 同端口 UDP 监听 + token 匹配 + `p2p.HandleP2PTransport`。
-6. 配置开关 `p2p_udp` + admin 会话列表显示传输形态（复用 connID/出口形态辨识既有展示位）。
+## 7. 实施步骤（分期，每期独立可交付可回退）
 
-**Phase 2 — h_tunnel 路径 + 实测**
-7. h_tunnel direct mode 的 QUIC 升级（UDP 端口经信令腿协商）。
-8. VM↔QG 实链路启用跑 iperf3 基线对比（TCP vs UDP 腿吞吐/RTT），数据入 docs/issues/ 或 runbooks。
-9. 跨平台验证（Windows wintun + Linux tun）。
+**Phase 0 — PacketTransport 内核（纯本地）**
+1. `frame/packet_transport.go`：`NewPacketTransport(pc net.PacketConn, peer net.Addr) FrameTransport`——3 字节帧头逐帧一 datagram + 分片重组 + Close 语义。
+2. 本地单测：内存 PacketConn 对，验证契约（丢/乱/重容忍、分片边界、SendBatch 语义）。
 
-**Phase 3（后续可选，不在首版范围）**
-- 内层 UDP 流量（DNS/QUIC 穿越）经 QUIC datagram 的真·UDP 端到端语义。
-- NAT 穿透（直接 P2P QUIC，绕开中继）。
+**Phase 1 — SOCKS5 端到端（推荐首条腿）**
+3. 客户端：`Socks5UDPAssociate` 加 `dstAddr/dstPort` 参数变体（P2P-marker 编码 mesh address）；`DialP2P` 加 `p2p_udp` 分支：DialPacket 成功→PacketTransport，失败→现有 TCP 路径，info 日志记形态。
+4. 服务端：`handleUDPAssociate` 解析请求 DST；P2P marker → PacketTransport over relay leg → `p2p.HandleP2PTransport`；datagram 读写复用 relay 现有 clientLn 通路。
+5. 配置 `p2p_udp` + admin 传输形态展示。
 
-## 7. 验证标准
+**Phase 2 — 扩展类型 + 实测**
+6. Shadowsocks/Hysteria2 的 DialP2P 同分支（DialPacket 已存在，主要是 marker 协商方式按各协议适配）。
+7. VM↔QG 实链路启用跑 iperf3 基线对比（TCP 腿 vs UDP 腿吞吐/RTT/丢包），数据入 docs/issues/ 或 runbooks。
+8. 跨平台验证（Windows wintun + Linux tun）。
 
-- 契约层：FrameTransport 全套单测过（含丢/乱/重、分片、控制帧优先、Close）。
-- 回归层：不开 `p2p_udp` 时全部行为与现状 bit 级一致（零 diff 验证：现有 e2e 套件原样通过）。
-- 功能层：开 `p2p_udp` 后 VM↔QG mesh 数据面正常（域名路由 + VIP + IPIP），admin 会话显示 QUIC 形态。
-- 回退层：服务器侧关 `p2p_udp`，客户端开着也能正常建链（协商失败回退 TCP）。
+**Phase 3（后续可选）**
+- Trojan/h_tunnel 腿上启用（功能可用、无线上收益，仅当想统一代码路径时做）。
 
-## 8. 未决问题
+## 8. 验证标准
 
-1. `0x16` 帧值占用核实（Phase 1 第 3 步前 grep 全帧表）。
-2. QUIC 腿的链路质量（SRTT/loss）是否纳入最优路径计算的 ping/pong 数据——首版**不纳入**（沿用 TCP 信令腿的 ping/pong），避免一处变更扩散到路由。
-3. 服务器自签证书轮换策略（进程重启重新生成即可，重启后所有 QUIC 腿本就要重建，无需持久化）。
+- 契约层：PacketTransport 全套单测过（含丢/乱/重、分片、Close）。
+- 回归层：`p2p_udp` 关闭或未配置时，全部行为与现状 bit 级一致（现有 e2e 套件原样通过）。
+- 功能层：开启后 VM↔QG mesh 数据面正常（域名路由 + VIP + IPIP），admin 会话显示 udp 形态。
+- 回退层：UDP 通道建不起来（防火墙封 UDP 模拟）时自动落 TCP，业务无感。
+- 无 TUN 绕排他性：验证必须走 wintun/tun 全链路（项目铁律）。
+
+## 9. 未决问题
+
+1. P2P-marker 的精确编码（associate 请求 DST 的域名格式与 BIND PORT=2 的 address 编码是否完全一致，Phase 1 第 3 步前核对 `socks5Handshake` 的地址编码）。
+2. 分片阈值定值（首版 1400B 保守值，实测后可调）。
+3. UDP 腿的链路质量（SRTT/loss）首版沿用 ping/pong 现有测量，不改最优路径计算。

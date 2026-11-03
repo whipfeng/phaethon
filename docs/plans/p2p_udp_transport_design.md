@@ -19,7 +19,8 @@
 - 客户端 `DialPacket()` 全类型已有（`dialer/dialer.go:86`）；SOCKS5 = `Socks5UDPAssociate`（`dialer/socks5_udp.go:231`），返回通用中继 PacketConn，每次 `WriteTo(payload, dst)` 带标准 SOCKS5 UDP 封头
 - 服务端收包点：SOCKS5 `socks5UDPRelay.run()`（`server/socks5.go:342`）——datagram 在此解析目标并决定转发，**UDP 腿交付分支就加在这里**
 - 会话入口：客户端 `P2PDialer.DialP2P()`（`dialer/socks5.go:81`）；服务端 `p2p.HandleP2PTransport(t, address)`（`p2p/p2p.go:2336`）
-- gossip 载荷当前按节点构建、扇出到所有会话同一份——**链路级字段需要按会话构建载荷**（仅协商涉及方付出代价）
+- gossip 构建**本来就是逐 peer 的**：mesh 周期循环每 peer 新建 `GossipInfo`、独立 split-horizon 过滤路由/域名/子网、独立 marshal（`mesh/mesh.go:2724-2737`）；`broadcastGossipToPeer` 同样逐 peer（`p2p/p2p.go:2055`，含每链路 Seq/FriendlyName）→ **加链路级 UDP 字段零架构改动**
+- LinkNIC MTU=1600（`mesh/link_nic.go:43`，注释明确：IPIP 头 + 内层 1500 + headroom，因 TCP 流传输不受物理 1500 限制），且有 `SetMTU`（`link_nic.go:111`）→ **UDP 腿激活时对链路降 MTU，内层 TCP MSS 自然钳制，无需应用层分片**
 
 ## 3. 协商与数据通路
 
@@ -40,7 +41,8 @@ WriteTo(frame, 0.0.0.0:P) ──UDP通道──► 收包分支：dst=0.0.0.0:P
 ```
 
 - **datagram 目标 `0.0.0.0:P`**：unspecified 地址不可能与真实互联网目标冲突；SOCKS5 回包封头 src 原样回显目标（`server/socks5.go:593` 现有机制），主动端可校验 src 端口 == P
-- **载荷** = 现有帧格式一字节不变；单包上限 1400B，超限两段分片、2s 重组超时丢弃（丢帧契约内）
+- **载荷** = 现有帧格式一字节不变
+- **无应用层分片**（用户指正，v3.1）：UDP 腿激活时对该链路 `LinkNIC.SetMTU(1400)`，内层新 TCP 连接 MSS 被 gVisor 钳到安全尺寸，发出包天然落在单 datagram 内；老连接偶发超限包由 IP 层分片兜底、丢失在契约容忍范围内。腿死亡回落 TCP 时恢复 MTU 1600
 - **回路径准入（被动端）**：必须同时满足 ①该链路 gossip 仍有 `udp:true` ②确实收到过该链路 UDP 消息——才记住对端返回地址并选择 UDP 回；否则一律 TCP
 
 ## 4. 状态机与 fallback（设计核心）
@@ -92,14 +94,14 @@ fallback 规则：
 |----|------|------|
 | 配置 | `config/config.go` | `Proxy.P2PUDP *bool` + IsP2PUDP() |
 | p2p 层 | `p2p/p2p.go`（会话/peer 结构） | 每会话 UDP 腿对象：状态机、端口登记、收发路由、gossip 字段注入（按会话构建载荷）、K/R 定时器 |
-| 帧层 | `frame/packet_leg.go`（新） | datagram⇄帧 编解码 + 分片重组（纯函数，纯本地单测） |
+| 帧层 | `frame/packet_leg.go`（新） | datagram⇄帧 编解码（纯函数，纯本地单测）；MTU 适配由 p2p 层调 `LinkNIC.SetMTU` 完成，帧层无分片概念 |
 | 客户端 | `dialer/socks5.go` `DialP2P` | `p2p_udp` 分支：DialPacket → 包 UDP 腿；失败走现有 TCP（行为不变） |
 | 服务端 | `server/socks5.go` `socks5UDPRelay.run()` | 解析后加分支：`dst.IP.IsUnspecified()` → 查 p2p 端口登记 → 命中交付，未命中走原路径 |
 | admin | 会话列表 | 会话行显示 udp/tcp 传输形态徽标 |
 
 ## 7. 实施步骤
 
-- **Phase 0**：`frame/packet_leg.go` 编解码 + 分片重组 + 状态机纯逻辑单测（不碰网络）
+- **Phase 0**：`frame/packet_leg.go` 编解码 + 腿状态机纯逻辑单测（不碰网络）
 - **Phase 1**：p2p 层腿管理 + gossip 字段 + SOCKS5 客户端/服务端分支 + 配置开关
 - **Phase 2**：VM↔QG 实链路验证（含关 UDP 防火墙模拟 fallback）+ iperf3 TCP/UDP 腿吞吐对比基线入 docs/issues/
 - **Phase 3**（未来）：其它真 UDP 协议接入（Shadowsocks/Hysteria2）
@@ -114,5 +116,5 @@ fallback 规则：
 ## 9. 未决问题
 
 1. gossip 字段最终命名（`udp`/`udpPort` 或 `ulp`/`ulpPort`），Phase 1 前与现有 GossipInfo 字段风格统一
-2. K=10s / R=60s / 1400B 为初值，实测后调
-3. 双会话（同对端两条链路）各自独立协商端口，互不干扰——实现时确认按会话构建载荷的开销可忽略
+2. UDP 腿激活时的链路 MTU 定值（初值 1400，实测后调；回落恢复 1600）
+3. 双会话（同对端两条链路）各自独立协商端口，互不干扰——gossip 逐 peer 构建天然支持

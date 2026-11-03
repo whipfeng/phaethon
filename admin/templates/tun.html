@@ -33,7 +33,7 @@
             <p data-i18n="tun.loading">Loading...</p>
         </div>
         <div class="tun-section" id="tun-routes-section" style="display:none;">
-            <h4 data-i18n="tun.routes">Routes</h4>
+            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.routes">Routes</span></h4>
             <table class="info-table tun-route-table">
                 <tr><td data-i18n="tun.status">Status</td><td id="tun-running"></td></tr>
                 <tr><td data-i18n="tun.tunIP">TUN IP</td><td id="tun-ip">-</td></tr>
@@ -45,7 +45,7 @@
             </table>
         </div>
         <div class="tun-section" id="tun-stats-section" style="display:none;">
-            <h4 data-i18n="tun.stats">Counters</h4>
+            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.stats">Counters</span></h4>
             <table class="info-table">
                 <tr><td data-i18n="tun.readPackets">Read Packets</td><td id="tun-read-pkts">-</td></tr>
                 <tr><td data-i18n="tun.writePackets">Write Packets</td><td id="tun-write-pkts">-</td></tr>
@@ -55,15 +55,15 @@
             </table>
         </div>
         <div class="tun-section" id="tun-dhcp-leases-section" style="display:none;">
-            <h4 data-i18n="tun.dhcpLeases">DHCP Leases</h4>
+            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.dhcpLeases">DHCP Leases</span></h4>
             <table class="info-table dhcp-lease-table">
                 <thead><tr><td data-i18n="tun.hostname">Hostname</td><td>MAC</td><td data-i18n="tun.ip">IP</td><td data-i18n="tun.leasesExpires">Expires</td><td></td></tr></thead>
                 <tbody id="tun-dhcp-leases"></tbody>
             </table>
         </div>
         <div class="tun-section" id="tun-dhcp-bindings-section" style="display:none;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <h4 data-i18n="tun.staticBindings" style="margin:0;">Static Bindings</h4>
+            <div style="display:flex;justify-content:space-between;align-items:center;" data-collapse>
+                <h4 style="margin:0;"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.staticBindings">Static Bindings</span></h4>
                 <button class="btn btn-sm btn-outline" onclick="openBindingModal()" data-i18n="tun.addBinding">Add Binding</button>
             </div>
             <table class="info-table dhcp-lease-table" style="margin-top:0.5rem;">
@@ -88,7 +88,7 @@
             </div>
         </div>
         <div class="tun-section" id="tun-logs-section" style="display:none;">
-            <h4 data-i18n="tun.logs">Event Log</h4>
+            <h4 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.logs">Event Log</span></h4>
             <pre class="tun-log" id="tun-logs"></pre>
         </div>
     </div>

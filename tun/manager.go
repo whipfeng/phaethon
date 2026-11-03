@@ -25,6 +25,21 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
+// pktBufPool recycles inbound packet buffers (audit item 12). After
+// injectPacket returns, gVisor has copied the data (MakeWithData), so the
+// buffer can be safely reused.
+var pktBufPool = sync.Pool{New: func() interface{} { return make([]byte, 2048) }}
+
+// getPooledPktBuf returns a buffer with length n, reusing the pool when the
+// capacity suffices.
+func getPooledPktBuf(n int) []byte {
+	b := pktBufPool.Get().([]byte)
+	if cap(b) < n {
+		pktBufPool.Put(b)
+		return make([]byte, n)
+	}
+	return b[:n]
+}
 
 // Manager manages the TUN device I/O and lifecycle.
 type Manager struct {
@@ -765,7 +780,7 @@ func (e *Manager) readLoop() {
 			continue
 		}
 		e.readPackets.Add(1)
-		
+
 		// Diagnostic: log every packet entry to readLoop
 		util.LogModuleDebug("tun", "[TUN-READ-ENTRY] packet #%d len=%d version=%d", e.readPackets.Load(), n, readBuf[0]>>4)
 		e.notifyStatsChanged()
@@ -815,7 +830,7 @@ func (e *Manager) readLoop() {
 			}
 		}
 
-		pktBuf := make([]byte, n)
+		pktBuf := getPooledPktBuf(n)
 		copy(pktBuf, readBuf[:n])
 
 		// NAT is handled by gVisor iptables SNAT (configured in netstack)
@@ -896,6 +911,7 @@ func (e *Manager) readLoop() {
 						}
 					}
 				}
+				pktBufPool.Put(pktBuf[:0])
 				continue
 			}
 		}
@@ -903,6 +919,7 @@ func (e *Manager) readLoop() {
 		if e.netstack != nil && e.netstack.LinkEP() != nil {
 			e.injectPacket(proto, pktBuf, n)
 		}
+		pktBufPool.Put(pktBuf[:0])
 	}
 }
 
@@ -929,4 +946,3 @@ func (e *Manager) injectPacket(proto tcpip.NetworkProtocolNumber, pktBuf []byte,
 	mesh.TraceForwarding("tun_preinject", pktBuf, "len=%d", len(pktBuf))
 	e.netstack.LinkEP().InjectInbound(proto, pkt)
 }
-

@@ -113,12 +113,10 @@ func (t *streamTransport) readLoop() {
 }
 
 func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) error {
-	deadline := 30 * time.Second
-	if isControl {
-		deadline = 5 * time.Second
-	}
-	_ = t.conn.SetWriteDeadline(time.Now().Add(deadline))
-	defer t.conn.SetWriteDeadline(time.Time{})
+	// No write deadline: a slow peer applies TCP backpressure, which must
+	// propagate rather than kill the link and every inner flow on it. A
+	// dead/wedged peer is detected by the read-side heartbeat timeout,
+	// which closes the transport and unblocks any stuck writer.
 	if frameType == FrameMeshPacket {
 		traceMeshPacket("frame_write_start", payload)
 	}
@@ -143,8 +141,7 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 		return t.Send(frames[0].Type, frames[0].Payload, false)
 	}
 
-	_ = t.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	defer t.conn.SetWriteDeadline(time.Time{})
+	// No write deadline — same rationale as Send.
 
 	// Pre-calculate total buffer size to avoid multiple allocations (issue 9)
 	totalSize := 0

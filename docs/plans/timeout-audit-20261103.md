@@ -4,6 +4,19 @@
 
 用户命题：phaethon 定位是中转设备（middlebox），传输语义应对端到端透明。TCP 自己有 RTO/keepalive，应用层自己有协议级心跳。**数据面在途连接不应由我们设空闲超时**。只有两类合理：① 握手/建连阶段（对端静默握着我们不放的资源）；② 我们自己发起的探测/查询。本文档是对全库 deadline/timeout 的逐点亲验分类与处置意见。
 
+## 资源泄漏研判（删除空闲杀后的死连接清理机制）
+
+删除 A 类空闲杀的前提是死连接有兜底清理。逐条验证：
+
+- **服务器入向 accepted conn**：`server/base.go:90-94 configureTCPConn` 已设 OS TCP keepalive（30s period）→ socks5/http/trojan/direct 入向死客户端由 OS 在 ~60s 内检测。
+- **gVisor 内层 TCP**：`mesh/netstack.go` applyTCPKeepalive 应用于 5 处端点，MeshTCPKeepalive 默认 30s idle/10s interval/3 count → TUN/mesh 内层死连接 ~60s 检测。
+- **dialer 出站 conn**：`dialer/bind.go:144/228` KeepAlive 30s → 上游死服务端有兜底。
+- **服务器入向数据泵本就没有空闲杀**：`util.Relay/RelayWithRateLimit`（direct/http/reverse/socks5/trojan 五处共用）纯 io.Copy，无超时——A 类删除后与入向语义统一。
+- **UDP（A2）无 keepalive 可用**：泄漏面=客户端整机崩溃且未 close socket，每次 2 goroutine；NAT 绑定过期后该流本就永久无声。低频、低量，接受。
+- **trojan UDP association（A3）**：TLS 控制连接走 AcceptLoop → keepalive 30s 生效，死客户端有兜底。
+
+结论：A1/A2/A3 删除/改正后无资源泄漏缺口、无语义变化（仅"idle 被杀"变为"idle 存活"，即目标行为本身）。B1 删除后死/卡死对端由读侧心跳检测（p2p.go:1414，30s 无帧杀 transport，Close 唤醒写方）兜底；活但慢的对端=TCP 背压自然传播，正确。
+
 ## 分类与处置
 
 ### A. 数据面空闲杀连接（违反中转哲学 — 建议删除/改正）

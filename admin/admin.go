@@ -3397,8 +3397,38 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		existing, _ := db.GetProxyGroup(g.Name)
 		replaced := existing != nil
 
-		g.ManualProxies = make([]string, len(g.Proxies))
+		// A GET→POST round-trip carries the FULL computed member list in
+		// `proxies` (manual + subscription-derived). Persisting it verbatim
+		// would固化 subscription-derived names as manual members, leaving
+		// dangling references once the subscription changes. Subtract the
+		// subscription-derived names reported by the runtime matcher before
+		// persisting. The built-in frontend only sends manually selected
+		// names, which never appear as FromSubscription, so it is unaffected.
+		g.ManualProxies = make([]string, 0, len(g.Proxies))
 		copy(g.ManualProxies, g.Proxies)
+		if matcher, merr := db.GetMatcher(); merr == nil && matcher != nil {
+			lookupName := g.Name
+			if existing != nil {
+				lookupName = existing.Name
+			}
+			if rg := matcher.GetGroup(lookupName); rg != nil {
+				subDerived := make(map[string]bool)
+				for _, m := range rg.GetMembers() {
+					if m.FromSubscription {
+						subDerived[m.Name] = true
+					}
+				}
+				if len(subDerived) > 0 {
+					filtered := g.ManualProxies[:0]
+					for _, name := range g.ManualProxies {
+						if !subDerived[name] {
+							filtered = append(filtered, name)
+						}
+					}
+					g.ManualProxies = filtered
+				}
+			}
+		}
 
 		if existing != nil {
 			if g.Subscription != existing.Subscription {

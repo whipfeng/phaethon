@@ -104,6 +104,19 @@ func (c *DNSCache) Set(domain string, fakeIP net.IP, ttl time.Duration) {
 	c.mu.Unlock()
 }
 
+// SweepExpired removes expired entries. A swept entry is a normal cache miss
+// on the next Get, which simply re-resolves (audit item 13).
+func (c *DNSCache) SweepExpired() {
+	now := time.Now()
+	c.mu.Lock()
+	for k, e := range c.entries {
+		if now.After(e.expiry) {
+			delete(c.entries, k)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // NewDNSHijacker creates a DNS hijacker. Netstack binding is deferred to BindNetstack.
 func NewDNSHijacker(ns *stack.Stack, pool *FakeIPPool, tunAddr, dnsAddr tcpip.Address) *DNSHijacker {
 	return &DNSHijacker{
@@ -212,6 +225,7 @@ func (h *DNSHijacker) forwarderListener(sock tcpip.Endpoint, stopCh <-chan struc
 					continue
 				case <-sweepTicker.C:
 					h.sweepPending()
+					h.cache.SweepExpired()
 					continue
 				case <-stopCh:
 					util.LogModuleInfo("dns", "[DNS-FWD] listener stopped")
@@ -240,6 +254,7 @@ func (h *DNSHijacker) forwarderListener(sock tcpip.Endpoint, stopCh <-chan struc
 		select {
 		case <-sweepTicker.C:
 			h.sweepPending()
+			h.cache.SweepExpired()
 		default:
 		}
 

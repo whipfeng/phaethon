@@ -31,8 +31,10 @@ type ForwarderCallbacks struct {
 	HandleTCPConn func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping)
 	HandleUDPConn func(conn net.Conn, srcAddr, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping)
 	// ResolveOriginalSrc resolves the original source IP from the NAT table.
-	// proto is 6 for TCP, 17 for UDP.
-	ResolveOriginalSrc func(proto int, srcIP net.IP, srcPort uint16) (net.IP, bool)
+	// proto is 6 for TCP, 17 for UDP. dstIP/dstPort identify the flow's
+	// destination; the SNAT target rewrites only the source IP (to the VIP),
+	// so the source port still matches the pre-SNAT registration.
+	ResolveOriginalSrc func(proto int, srcIP net.IP, dstIP net.IP, dstPort uint16, srcPort uint16) (net.IP, bool)
 	// LookupModeB looks up a Mode B registration by destination.
 	// proto is 6 for TCP, 17 for UDP.
 	LookupModeB func(proto int, dstIP net.IP, dstPort, srcPort uint16) (clientAddr, inbound string, mapping *config.Mapping)
@@ -93,6 +95,16 @@ type Netstack struct {
 
 	// Forwarder callbacks
 	callbacks *ForwarderCallbacks
+
+	// TUN source table: pre-SNAT original source IPs registered by the TUN
+	// read loop, consulted by acceptTCP/acceptUDP when no explicit
+	// ResolveOriginalSrc callback is installed.
+	tunSrcTable *TUNSrcTable
+
+	// selectRoute is the SelectRouteFunc installed into the RouteSelector.
+	// Stored so MeshEgressNode can re-run the same decision for display
+	// purposes (connlog "via" field) without touching the stack.
+	selectRoute SelectRouteFunc
 
 	// Pre-connect callback for Mode B registration
 	preConnectCallback func(dstAddr tcpip.Address, dstPort, srcPort uint16)
@@ -188,92 +200,14 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 					return fakeIPPool.InAllocRange(ip)
 				},
 				// SelectRoute covers both branches 2 (mesh) and 3 (non-mesh
-				// advertised). NeedIPIP=true signals branch 3.
-				SelectRoute: func(dst net.IP) (SelectRouteResult, bool) {
-					rt := meshMgr.GetRouteTable()
-					if rt == nil {
-						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeTable=nil", dst)
-						return SelectRouteResult{}, false
-					}
-
-					// Diagnostic: log route table contents for debugging.
-					// Guarded: building the prefixes slice String()ifies every
-					// prefix — keep that cost off the hot path (audit item 10).
-					if util.GetModuleLogLevel("route") <= util.LogLevelDebug {
-						prefixes := make([]string, 0, len(rt.Routes))
-						for _, route := range rt.Routes {
-							prefixes = append(prefixes, route.Prefix.String())
-						}
-						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
-					}
-
-					for _, route := range rt.Routes {
-						if !route.Prefix.Contains(dst) {
-							continue
-						}
-						// Diagnostic: log matching prefix
-						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s match prefix=%s entries=%d", dst, route.Prefix, len(route.Entries))
-						if len(route.Entries) == 0 {
-							continue
-						}
-
-						targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
-						if targetNodeID == "" {
-							// Diagnostic: log SelectEgressNodeID failure
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
-							continue
-						}
-						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s targetNode=%s", dst, route.Prefix, targetNodeID)
-
-						// Check if target is local node (advertised route owned by this node)
-						localNodeID := meshMgr.GetNodeID()
-						if targetNodeID == localNodeID {
-							// Local delivery: this node owns the advertised route
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
-							return SelectRouteResult{LocalStack: true}, true
-						}
-
-						isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
-
-						if isMeshPrefix {
-							// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
-							// Use Dijkstra result directly (LinkNIC)
-							nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%v", dst, route.Prefix, targetNodeID, nextHopID, linkNIC)
-							if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
-								// Diagnostic: log NextHopLink failure
-								util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link", dst, route.Prefix, targetNodeID)
-								continue
-							}
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
-							return SelectRouteResult{LinkNIC: linkNIC.nicID}, true
-						}
-
-						// Branch 3: non-mesh advertised prefix → IPIP to egress EIP
-						// over next-hop Link NIC. The frame-level decap at the
-						// peer matches on outer dst == its local EIP (design §2.4).
-						// Use Dijkstra result directly (LinkNIC)
-						nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
-						if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link_ipip", dst, route.Prefix, targetNodeID)
-							continue
-						}
-						targetEIP := meshMgr.GetEIPForNode(targetNodeID)
-						if targetEIP == nil {
-							util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_eip", dst, route.Prefix, targetNodeID)
-							continue
-						}
-						util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=ipip prefix=%s target=%s nextHop=%s linkNIC=%d egressEIP=%s", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID, targetEIP)
-						return SelectRouteResult{
-							LinkNIC:   linkNIC.nicID,
-							EgressEIP: targetEIP,
-							NeedIPIP:  true,
-						}, true
-					}
-					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s no_match", dst)
-					return SelectRouteResult{}, false
-				},
+				// advertised). NeedIPIP=true signals branch 3. Stored on n so
+				// MeshEgressNode can re-run the identical decision for display.
+				SelectRoute: n.selectRouteFunc(meshMgr),
 			}
+
+			// Store the decision callback so MeshEgressNode can re-run the
+			// identical routing decision for display-only connlog labeling.
+			n.selectRoute = routeSelectorCfg.SelectRoute
 
 			// Create and set RouteSelector
 			routeSelector := NewRouteSelector(routeSelectorCfg)
@@ -440,6 +374,138 @@ func (n *Netstack) SetLookupDomainFunc(f func(ip string) string) {
 // SetCallbacks sets the forwarder callbacks.
 func (n *Netstack) SetCallbacks(cb *ForwarderCallbacks) {
 	n.callbacks = cb
+}
+
+// SetTUNSrcTable installs the pre-SNAT source table used to resolve display
+// source addresses for TUN-entered connections.
+func (n *Netstack) SetTUNSrcTable(t *TUNSrcTable) {
+	n.tunSrcTable = t
+}
+
+// resolveOriginalSrc resolves the display source IP for an accepted flow.
+// Priority: explicit callback (if installed), then the TUN source table.
+// Returns the original IP and whether a rewrite was found; on a miss the
+// caller keeps the SNAT'd address (the VIP).
+func (n *Netstack) resolveOriginalSrc(proto int, srcIP net.IP, dstIP net.IP, dstPort uint16, srcPort uint16) net.IP {
+	if n.callbacks != nil && n.callbacks.ResolveOriginalSrc != nil {
+		if orig, ok := n.callbacks.ResolveOriginalSrc(proto, srcIP, dstIP, dstPort, srcPort); ok {
+			return orig
+		}
+		return srcIP
+	}
+	if n.tunSrcTable != nil {
+		if orig := n.tunSrcTable.Lookup(byte(proto), dstIP, dstPort, srcPort); orig != nil {
+			return orig
+		}
+	}
+	return srcIP
+}
+
+// selectRouteFunc builds the SelectRoute decision callback backing
+// RouteSelector branches 2 (mesh, direct LinkNIC) and 3 (non-mesh advertised,
+// IPIP to egress EIP). Extracted from SetMeshManager so the identical
+// decision can be stored on n.selectRoute and re-run by MeshEgressNode.
+func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
+	return func(dst net.IP) (SelectRouteResult, bool) {
+		rt := meshMgr.GetRouteTable()
+		if rt == nil {
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeTable=nil", dst)
+			return SelectRouteResult{}, false
+		}
+
+		// Diagnostic: log route table contents for debugging.
+		// Guarded: building the prefixes slice String()ifies every
+		// prefix — keep that cost off the hot path (audit item 10).
+		if util.GetModuleLogLevel("route") <= util.LogLevelDebug {
+			prefixes := make([]string, 0, len(rt.Routes))
+			for _, route := range rt.Routes {
+				prefixes = append(prefixes, route.Prefix.String())
+			}
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
+		}
+
+		for _, route := range rt.Routes {
+			if !route.Prefix.Contains(dst) {
+				continue
+			}
+			// Diagnostic: log matching prefix
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s match prefix=%s entries=%d", dst, route.Prefix, len(route.Entries))
+			if len(route.Entries) == 0 {
+				continue
+			}
+
+			targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
+			if targetNodeID == "" {
+				// Diagnostic: log SelectEgressNodeID failure
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
+				continue
+			}
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s targetNode=%s", dst, route.Prefix, targetNodeID)
+
+			// Check if target is local node (advertised route owned by this node)
+			localNodeID := meshMgr.GetNodeID()
+			if targetNodeID == localNodeID {
+				// Local delivery: this node owns the advertised route
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
+				return SelectRouteResult{LocalStack: true, TargetNodeID: targetNodeID}, true
+			}
+
+			isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
+
+			if isMeshPrefix {
+				// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
+				// Use Dijkstra result directly (LinkNIC)
+				nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%v", dst, route.Prefix, targetNodeID, nextHopID, linkNIC)
+				if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
+					// Diagnostic: log NextHopLink failure
+					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link", dst, route.Prefix, targetNodeID)
+					continue
+				}
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%d", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID)
+				return SelectRouteResult{LinkNIC: linkNIC.nicID, TargetNodeID: targetNodeID}, true
+			}
+
+			// Branch 3: non-mesh advertised prefix → IPIP to egress EIP
+			// over next-hop Link NIC. The frame-level decap at the
+			// peer matches on outer dst == its local EIP (design §2.4).
+			// Use Dijkstra result directly (LinkNIC)
+			nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
+			if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link_ipip", dst, route.Prefix, targetNodeID)
+				continue
+			}
+			targetEIP := meshMgr.GetEIPForNode(targetNodeID)
+			if targetEIP == nil {
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_eip", dst, route.Prefix, targetNodeID)
+				continue
+			}
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=ipip prefix=%s target=%s nextHop=%s linkNIC=%d egressEIP=%s", dst, route.Prefix, targetNodeID, nextHopID, linkNIC.nicID, targetEIP)
+			return SelectRouteResult{
+				LinkNIC:      linkNIC.nicID,
+				EgressEIP:    targetEIP,
+				NeedIPIP:     true,
+				TargetNodeID: targetNodeID,
+			}, true
+		}
+		util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s no_match", dst)
+		return SelectRouteResult{}, false
+	}
+}
+
+// MeshEgressNode returns the node ID the mesh routing decision would egress
+// through for dst, or "" when dst is local / not routed via mesh. Re-runs the
+// stored SelectRoute decision; display-only, so a TOCTOU race with live
+// routing changes only affects the logged "via" label.
+func (n *Netstack) MeshEgressNode(dst net.IP) string {
+	if n.selectRoute == nil {
+		return ""
+	}
+	r, ok := n.selectRoute(dst)
+	if !ok || r.LocalStack {
+		return ""
+	}
+	return r.TargetNodeID
 }
 
 // SetDNSHijacker sets the DNS hijacker and FakeIP pool.
@@ -1678,9 +1744,7 @@ func (n *Netstack) acceptTCP() {
 		dstPort := int(id.LocalPort)
 		srcPort := int(id.RemotePort)
 		srcIP := net.IP(id.RemoteAddress.AsSlice())
-		if n.callbacks != nil && n.callbacks.ResolveOriginalSrc != nil {
-			srcIP, _ = n.callbacks.ResolveOriginalSrc(6, srcIP, id.RemotePort)
-		}
+		srcIP = n.resolveOriginalSrc(6, srcIP, dstIP, uint16(id.LocalPort), id.RemotePort)
 		srcAddr := srcIP.String()
 		inbound := ""
 		var modeBMapping *config.Mapping
@@ -1762,9 +1826,7 @@ func (n *Netstack) acceptUDP() {
 			dstAddr := dstIP.String()
 			dstPort := int(id.LocalPort)
 			srcIP := net.IP(id.RemoteAddress.AsSlice())
-			if n.callbacks != nil && n.callbacks.ResolveOriginalSrc != nil {
-				srcIP, _ = n.callbacks.ResolveOriginalSrc(17, srcIP, id.RemotePort)
-			}
+			srcIP = n.resolveOriginalSrc(17, srcIP, dstIP, uint16(id.LocalPort), id.RemotePort)
 			srcAddr := srcIP.String()
 			inbound := ""
 			var modeBMapping *config.Mapping

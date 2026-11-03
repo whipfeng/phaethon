@@ -56,6 +56,11 @@ var GlobalNetstackDialWithModeBFunc func(network, addr string, clientAddr string
 // called by the gVisor fork's TCP connect path to determine IPIP routing.
 var GlobalNetstackDialV2Func func(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error)
 
+// GlobalMeshEgressFunc resolves the mesh egress node ID for a destination IP
+// by re-running the RouteSelector decision (display-only "via" label for
+// connlog). Set by main_engine.go; nil on non-mesh nodes.
+var GlobalMeshEgressFunc func(dstIP net.IP) string
+
 // UnregisterModeB is a helper to unregister a Mode B connection by destination and source port.
 func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {
 	if GlobalModeBTable == nil {
@@ -68,26 +73,31 @@ func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {
 // MeshDial dials destination through mesh network.
 // Registers in ModeBTable before sending SYN, ensuring the forwarder can find
 // the entry for local loopback cases.
-func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, error) {
+//
+// The returned fwdKey is the inner 5-tuple "local>remote" as seen inside the
+// mesh (VIP source, fakeIP destination). Every mesh hop observes the same
+// inner tuple, making fwdKey the stable cross-node correlation key (connlog
+// FwdKey); it is empty when the dial fails.
+func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, mapping *config.Mapping) (net.Conn, string, error) {
 	dialStart := time.Now()
 	util.LogModuleDebug("bind", "starting: dst=%s:%d client=%s inbound=%s", dstAddr, dstPort, clientAddr, inbound)
 
 	if GlobalNetstackDialWithModeBFunc == nil {
-		return nil, fmt.Errorf("mesh not initialized")
+		return nil, "", fmt.Errorf("mesh not initialized")
 	}
 
 	var targetAddr string
 	if ip := net.ParseIP(dstAddr); ip == nil {
 		// Domain: resolve through netstack DNS to get Fake-IP
 		if GlobalDNSResolverFunc == nil {
-			return nil, fmt.Errorf("mesh dial: DNS resolver not available for domain: %s", dstAddr)
+			return nil, "", fmt.Errorf("mesh dial: DNS resolver not available for domain: %s", dstAddr)
 		}
 		dnsStart := time.Now()
 		fakeIP, err := GlobalDNSResolverFunc(dstAddr)
 		dnsDuration := time.Since(dnsStart)
 		if err != nil {
 			util.LogModuleWarn("bind", "DNS resolve failed for %s after %v: %v", dstAddr, dnsDuration, err)
-			return nil, fmt.Errorf("mesh dial: resolve %s: %w", dstAddr, err)
+			return nil, "", fmt.Errorf("mesh dial: resolve %s: %w", dstAddr, err)
 		}
 		util.LogModuleInfo("bind", "DNS resolved %s -> %s (FakeIP) in %v", dstAddr, fakeIP, dnsDuration)
 		targetAddr = net.JoinHostPort(fakeIP.String(), strconv.Itoa(dstPort))
@@ -101,15 +111,19 @@ func MeshDial(dstAddr string, dstPort int, clientAddr string, inbound string, ma
 	netstackDialDuration := time.Since(netstackDialStart)
 	if err != nil {
 		util.LogModuleWarn("bind", "netstack dial failed for %s after %v: %v", targetAddr, netstackDialDuration, err)
-		return nil, err
+		return nil, "", err
 	}
 	util.LogModuleDebug("bind", "netstack dial completed in %v, local=%s remote=%s",
 		netstackDialDuration, conn.LocalAddr(), conn.RemoteAddr())
 
+	// Inner 5-tuple as seen across the mesh: VIP source (post-SNAT) and the
+	// fakeIP target. Identical on every hop — this is the correlation key.
+	fwdKey := conn.LocalAddr().String() + ">" + conn.RemoteAddr().String()
+
 	util.SetTCPNoDelay(conn)
 	totalDuration := time.Since(dialStart)
 	util.LogModuleDebug("bind", "completed: dst=%s total=%v", targetAddr, totalDuration)
-	return conn, nil
+	return conn, fwdKey, nil
 }
 
 // SetGlobalBindContext injects the context captured by the TUN engine. Passing

@@ -23,7 +23,11 @@ type SelectRouteResult struct {
 	LinkNIC    tcpip.NICID
 	EgressEIP  net.IP // only meaningful when NeedIPIP=true
 	NeedIPIP   bool
-	LocalStack bool   // true = deliver to local stack (for locally-owned advertised routes)
+	LocalStack bool // true = deliver to local stack (for locally-owned advertised routes)
+	// TargetNodeID is the node owning the destination route (egress node).
+	// Filled for both branch 2 (mesh) and branch 3 (IPIP); consumed by
+	// Netstack.MeshEgressNode for display-only connlog labeling.
+	TargetNodeID string
 }
 
 // SelectRouteFunc decides how to route a non-local destination.

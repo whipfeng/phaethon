@@ -52,6 +52,11 @@ type Manager struct {
 	prefixLen int
 	dataDir   string
 
+	// tunSrcTable records pre-SNAT source IPs from the read loop so the
+	// netstack forwarder can display the original TUN source (see
+	// mesh.TUNSrcTable). Nil until SetTUNSrcTable is called.
+	tunSrcTable *mesh.TUNSrcTable
+
 	mu sync.Mutex
 
 	// TUN device state (optional, independent of stack)
@@ -105,6 +110,12 @@ func (e *Manager) SetDataDir(dir string) {
 // Must be called before Start().
 func (e *Manager) SetNetstack(ns *mesh.Netstack) {
 	e.netstack = ns
+}
+
+// SetTUNSrcTable installs the pre-SNAT source table the read loop registers
+// into and the netstack consults for display source resolution.
+func (e *Manager) SetTUNSrcTable(t *mesh.TUNSrcTable) {
+	e.tunSrcTable = t
 }
 
 // GetNetstack returns the mesh.Netstack instance.
@@ -865,6 +876,13 @@ func (e *Manager) readLoop() {
 				util.LogModuleDebug("tun", "[TCP-DEBUG] readLoop entry #%d: TCP %s:%d -> %s:%d flags=[%s]",
 					pktNum, srcIP, srcPort, dstIP, dstPort, flagStr)
 			}
+
+			// Record the pre-SNAT source on the initial SYN so the netstack
+			// forwarder can resolve the original TUN source for display.
+			// Post-SNAT lookups key on VIP:port (SNAT rewrites IP only).
+			if e.tunSrcTable != nil && flags&0x02 != 0 && flags&0x10 == 0 && flags&0x01 == 0 && flags&0x04 == 0 {
+				e.tunSrcTable.Register(6, dstIP, dstPort, srcPort, srcIP)
+			}
 		}
 
 		// Debug: log UDP packets (especially DNS queries to GIP)
@@ -875,6 +893,11 @@ func (e *Manager) readLoop() {
 			if n >= hl+4 {
 				srcPort := uint16(pktBuf[hl])<<8 | uint16(pktBuf[hl+1])
 				dstPort := uint16(pktBuf[hl+2])<<8 | uint16(pktBuf[hl+3])
+				// UDP has no first-packet marker; Register is idempotent per
+				// key so per-packet calls reduce to a cheap existence check.
+				if e.tunSrcTable != nil {
+					e.tunSrcTable.Register(17, dstIP, dstPort, srcPort, srcIP)
+				}
 				if mesh.ForwardingTraceEnabled() {
 					pktNum := e.readPackets.Load()
 					util.LogModuleInfo("tun", "[UDP-DEBUG] readLoop entry #%d: UDP %s:%d -> %s:%d len=%d",

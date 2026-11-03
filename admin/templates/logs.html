@@ -5,7 +5,12 @@
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0; gap:1rem; flex-wrap:wrap;">
             <h3 style="margin:0;" data-i18n="logs.title">📋 Logs</h3>
             <div style="display:flex; align-items:center; gap:1rem;">
+                <span id="log-active-filter" class="log-filter-chip" style="display:none;" title=""></span>
                 <input type="text" id="log-filter" placeholder="Filter logs..." data-i18n-placeholder="logs.filter" style="padding:0.4rem 0.75rem; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-size:0.85rem; width:200px;">
+                <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--text-secondary); cursor:pointer;">
+                    <input type="checkbox" id="log-errors-only" style="width:16px; height:16px; cursor:pointer;">
+                    <span data-i18n="logs.errorsOnly">只看错误</span>
+                </label>
                 <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--text-secondary); cursor:pointer;">
                     <input type="checkbox" id="log-auto-scroll" checked style="width:16px; height:16px; cursor:pointer;">
                     <span data-i18n="logs.autoScroll">Auto-scroll</span>
@@ -18,6 +23,23 @@
 
 <script>
 (function() {
+    // Preset correlation filter handed over from the connections page
+    // (sessionStorage is cloned into this window at open time).
+    try {
+        var presetRaw = sessionStorage.getItem('connLogPreset');
+        if (presetRaw) {
+            sessionStorage.removeItem('connLogPreset');
+            var preset = JSON.parse(presetRaw);
+            if (preset && preset.kind === 'id' && preset.value) {
+                var input = document.getElementById('log-filter');
+                if (input) input.value = preset.value;
+                setConnLogFilter(preset.value);
+            } else if (preset && preset.kind === 'fwdKey' && preset.value) {
+                connLogPreset = preset;
+            }
+        }
+    } catch (e) { /* ignore malformed preset */ }
+
     fetchConnections();
 
     // Log filter — rendering lives in app.js (connLogLines model + setConnLogFilter)
@@ -27,6 +49,31 @@
             setConnLogFilter(this.value);
         });
     }
+
+    const errorsOnlyBox = document.getElementById('log-errors-only');
+    if (errorsOnlyBox) {
+        errorsOnlyBox.addEventListener('change', function() {
+            setConnLogErrorsOnly(this.checked);
+        });
+    }
+
+    const chipEl = document.getElementById('log-active-filter');
+    if (chipEl) {
+        chipEl.addEventListener('click', function() {
+            if (connLogPreset && connLogPreset.kind === 'fwdKey') {
+                connLogPreset = null;
+                connLogLines = [];
+                const el = document.getElementById('conn-logs');
+                if (el) el.textContent = '';
+                connLogLastSeq = 0;
+                fetchConnections(false);
+            }
+            setConnLogFilter('');
+            const input = document.getElementById('log-filter');
+            if (input) input.value = '';
+        });
+    }
+    if (typeof connLogUpdateChip === 'function') connLogUpdateChip();
 
     if (typeof startSSE === 'function') {
         startSSE();

@@ -1631,6 +1631,7 @@ func (s *AdminServer) NotifyGroupHealth(groupName string, snap map[string]config
 
 func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
 	version := connlog.GetVersion()
+	fwdKey := r.URL.Query().Get("fwdKey")
 	afterStr := r.URL.Query().Get("after")
 	if afterStr != "" {
 		if after, err := strconv.ParseUint(afterStr, 10, 64); err == nil {
@@ -1639,7 +1640,7 @@ func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
 				"version": version,
 				"boot":    db.BootVersion(),
 				"stale":   stale,
-				"logs":    logs,
+				"logs":    filterLogsByFwdKey(logs, fwdKey),
 			})
 			return
 		}
@@ -1648,8 +1649,23 @@ func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
 		"version": version,
 		"boot":    db.BootVersion(),
 		"stale":   true,
-		"logs":    connlog.GetLogs(),
+		"logs":    filterLogsByFwdKey(connlog.GetLogs(), fwdKey),
 	})
+}
+
+// filterLogsByFwdKey keeps only events matching the cross-node correlation
+// key. Empty key = no filtering (full view).
+func filterLogsByFwdKey(logs []connlog.Event, fwdKey string) []connlog.Event {
+	if fwdKey == "" {
+		return logs
+	}
+	out := make([]connlog.Event, 0)
+	for _, e := range logs {
+		if e.FwdKey == fwdKey {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (s *AdminServer) apiActiveConns(w http.ResponseWriter, r *http.Request) {

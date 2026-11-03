@@ -16,6 +16,7 @@ type ActiveConn struct {
 	Protocol        string    `json:"protocol"`
 	Inbound         string    `json:"inbound"`
 	SrcAddr         string    `json:"srcAddr,omitempty"`
+	SrcPort         int       `json:"srcPort,omitempty"`
 	OriginalDstAddr string    `json:"originalDstAddr,omitempty"`
 	DstAddr         string    `json:"dstAddr"`
 	DstPort         int       `json:"dstPort"`
@@ -24,7 +25,31 @@ type ActiveConn struct {
 	Mapping         string    `json:"mapping,omitempty"`
 	Rule            string    `json:"rule,omitempty"`
 	TimeRange       string    `json:"timeRange,omitempty"`
+	Via             string    `json:"via,omitempty"`
+	FwdKey          string    `json:"fwdKey,omitempty"`
 	StartTime       time.Time `json:"startTime"`
+}
+
+// ActiveOption carries the optional correlation fields into TrackActive
+// without breaking the positional signature at existing call sites.
+type ActiveOption func(*ActiveConn)
+
+func WithActiveSrcPort(p int) ActiveOption {
+	return func(c *ActiveConn) { c.SrcPort = p }
+}
+
+func WithActiveVia(v string) ActiveOption {
+	return func(c *ActiveConn) { c.Via = v }
+}
+
+// WithActiveFwdKey pins the cross-node correlation key (mesh flows pass the
+// inner 5-tuple from MeshDial; leave empty to derive from the display view).
+func WithActiveFwdKey(key string) ActiveOption {
+	return func(c *ActiveConn) {
+		if key != "" {
+			c.FwdKey = key
+		}
+	}
 }
 
 type JournalEntry struct {
@@ -39,7 +64,7 @@ var (
 	journal   []JournalEntry
 )
 
-func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string, dstPort int, matchResult *config.MatchResult) {
+func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string, dstPort int, matchResult *config.MatchResult, opts ...ActiveOption) {
 	conn := &ActiveConn{
 		ID:              id,
 		Protocol:        protocol,
@@ -56,6 +81,14 @@ func TrackActive(id, inbound, protocol, srcAddr, originalDstAddr, dstAddr string
 		conn.Mapping = matchResult.Mapping
 		conn.TimeRange = matchResult.TimeRange
 		conn.Rule = matchResult.Rule
+	}
+	for _, opt := range opts {
+		opt(conn)
+	}
+	// Default FwdKey from the display view when no explicit forwarding source
+	// was supplied (e.g. proxy/direct flows that never enter the mesh).
+	if conn.FwdKey == "" && conn.SrcPort > 0 {
+		conn.FwdKey = FwdKey(srcAddr, conn.SrcPort, dstAddr, dstPort)
 	}
 
 	// Check capacity before storing

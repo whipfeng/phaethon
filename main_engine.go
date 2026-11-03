@@ -62,6 +62,13 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	ns := mesh.NewNetstack()
 	engine.SetNetstack(ns)
 
+	// TUN source table: readLoop registers pre-SNAT source IPs so accepted
+	// flows can display the original client address (Input-chain SNAT rewrites
+	// them to the VIP inside the netstack).
+	tunSrcTable := mesh.NewTUNSrcTable()
+	ns.SetTUNSrcTable(tunSrcTable)
+	engine.SetTUNSrcTable(tunSrcTable)
+
 	// Configure mesh addresses before Start()
 	if meshMgr.GetSubnet() != "" {
 		if _, subnet, err := net.ParseCIDR(meshMgr.GetSubnet()); err == nil {
@@ -131,6 +138,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		dialer.GlobalNetstackDialV2Func = ns.NetDialV2
 		dialer.GlobalDNSResolverFunc = ns.ResolveDomain
 		dialer.GlobalRemoteDNSResolverFunc = ns.ResolveDomainViaDNS
+		dialer.GlobalMeshEgressFunc = ns.MeshEgressNode
 
 		// Set netstack reference FIRST to close the race where P2P receives mesh
 		// frames before meshMgr.Start() is called below.
@@ -164,7 +172,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		for _, vip := range allVIPs {
 			localMeshVIPsMap[vip.String()] = true
 		}
-		
+
 		connHandler = handler.NewConnectionHandler(handler.ConnectionHandlerConfig{
 			FakeIP:           meshMgr.GetFakeIPPool(),
 			LocalMeshNodeID:  meshMgr.GetNodeID(),
@@ -175,7 +183,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			IsMeshIP:         ns.IsMeshIP,
 			ResolveForDirect: engine.ResolveForDirect,
 		})
-		
+
 		// Set up forwarder callbacks directly on netstack
 		ns.SetCallbacks(&mesh.ForwarderCallbacks{
 			HandleTCPConn: func(conn net.Conn, srcAddr string, srcPort int, dstAddr string, dstPort int, inbound string, modeBMapping *config.Mapping) {

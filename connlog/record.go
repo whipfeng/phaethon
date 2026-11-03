@@ -12,11 +12,14 @@ type Record struct {
 	inbound     string
 	protocol    string
 	srcAddr     string
+	srcPort     int
 	originalDst string
 	dst         string
 	port        int
 	matchResult *config.MatchResult
 	connID      string
+	via         string // mesh egress node ID, display-only
+	fwdKey      string // explicit cross-node correlation key; empty = derive from display 5-tuple
 	established bool
 	finished    bool
 }
@@ -28,6 +31,28 @@ func Start(inbound, protocol, srcAddr, originalDst string) *Record {
 		srcAddr:     srcAddr,
 		originalDst: originalDst,
 	}
+}
+
+// WithConn binds the record to a connection ID and client source port before
+// Establish, so Reject/Fail paths also carry the correlation fields.
+func (r *Record) WithConn(connID string, srcPort int) *Record {
+	r.connID = connID
+	r.srcPort = srcPort
+	return r
+}
+
+// SetVia marks the mesh egress node ID (display-only) for MESH-routed flows.
+func (r *Record) SetVia(nodeID string) *Record {
+	r.via = nodeID
+	return r
+}
+
+// SetFwdKey pins the cross-node correlation key for the flow. MeshDial passes
+// the inner 5-tuple (VIP>fakeIP); direct/proxy flows leave it empty and the
+// key derives from the display 5-tuple instead.
+func (r *Record) SetFwdKey(key string) *Record {
+	r.fwdKey = key
+	return r
 }
 
 // Resolve records the destination after resolver rewrite and rule matching.
@@ -71,7 +96,8 @@ func (r *Record) Establish(connID string, proxy *config.Proxy, direct bool) {
 	r.established = true
 	r.log("ok", nil)
 	// Track active connection after logging
-	TrackActive(connID, r.inbound, r.protocol, r.srcAddr, r.originalDst, r.dst, r.port, r.matchResult)
+	TrackActive(connID, r.inbound, r.protocol, r.srcAddr, r.originalDst, r.dst, r.port, r.matchResult,
+		WithActiveSrcPort(r.srcPort), WithActiveVia(r.via), WithActiveFwdKey(r.fwdKey))
 }
 
 // Close removes the active-connection entry. Safe to defer unconditionally.
@@ -86,5 +112,9 @@ func (r *Record) log(status string, err error) {
 		return
 	}
 	r.finished = true
-	Log(r.inbound, r.protocol, r.srcAddr, r.originalDst, r.dst, r.port, r.matchResult, status, err)
+	opts := []LogOption{WithConnID(r.connID), WithSrcPort(r.srcPort), WithVia(r.via)}
+	if r.fwdKey != "" {
+		opts = append(opts, WithFwdKey(r.fwdKey))
+	}
+	Log(r.inbound, r.protocol, r.srcAddr, r.originalDst, r.dst, r.port, r.matchResult, status, err, opts...)
 }

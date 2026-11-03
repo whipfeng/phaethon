@@ -2,9 +2,12 @@
 {{define "content"}}
 <div class="page-content" style="display:flex; flex-direction:column; flex:1; min-height:0;">
     <div class="card" style="flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-shrink:0; gap:1rem; flex-wrap:wrap;">
             <h3 style="margin:0;" data-i18n="connections.title">🔗 Active Connections</h3>
-            <span id="active-conn-count" class="text-muted" data-i18n="dash.activeConnCount">0 connections</span>
+            <div style="display:flex; align-items:center; gap:1rem;">
+                <input type="text" id="active-conn-filter" placeholder="Filter..." data-i18n-placeholder="dash.connFilter" style="padding:0.4rem 0.75rem; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-size:0.85rem; width:200px;">
+                <span id="active-conn-count" class="text-muted" data-i18n="dash.activeConnCount">0 connections</span>
+            </div>
         </div>
         <div id="active-conns-list" style="flex:1; overflow-y:auto;">
             <p class="text-muted" data-i18n="dash.noActiveConns">No active connections</p>
@@ -16,6 +19,12 @@
 (function() {
     fetchActiveConns();
     startActiveConnsTimer();
+    const filterInput = document.getElementById('active-conn-filter');
+    if (filterInput) {
+        filterInput.addEventListener('input', function() {
+            setActiveConnFilter(this.value);
+        });
+    }
 })();
 </script>
 {{end}}

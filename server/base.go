@@ -27,11 +27,12 @@ func (b *BaseServer) MeshDialWithModeB(dstAddr string, dstPort int, clientAddr s
 
 	rec := connlog.Start(inbound, "TCP", clientAddr, dstAddr).Resolve(dstAddr, dstPort, &config.MatchResult{ProxyName: "MESH"})
 
-	conn, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound, b.Mapping)
+	conn, fwdKey, err := dialer.MeshDial(dstAddr, dstPort, clientAddr, inbound, b.Mapping)
 	if err != nil {
 		rec.Fail(err)
 		return nil, nil, err
 	}
+	rec.SetFwdKey(fwdKey)
 
 	// Get the source port assigned by the netstack
 	srcPort := uint16(0)

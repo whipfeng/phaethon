@@ -49,13 +49,13 @@ type ConnectionHandler struct {
 
 // ConnectionHandlerConfig holds the configuration for creating a ConnectionHandler.
 type ConnectionHandlerConfig struct {
-	FakeIP          *mesh.FakeIPPool
-	LocalMeshNodeID string
-	LocalMeshVIPs   map[string]bool
-	AdminHandler    AdminHandler
+	FakeIP           *mesh.FakeIPPool
+	LocalMeshNodeID  string
+	LocalMeshVIPs    map[string]bool
+	AdminHandler     AdminHandler
 	ModeBTable       *mesh.ModeBTable
-	TUNConfig       *config.TUNConfig
-	IsMeshIP        func(ip net.IP) bool
+	TUNConfig        *config.TUNConfig
+	IsMeshIP         func(ip net.IP) bool
 	ResolveForDirect func(domain string) ([]net.IP, error)
 }
 
@@ -104,7 +104,7 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 			// Add diagnostic: dump all fake-IP mappings
 			if h.fakeIP != nil {
 				stats := h.fakeIP.Stats()
-				util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] fake-ip pool stats: domainCount=%d realIPCacheCount=%d", 
+				util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] fake-ip pool stats: domainCount=%d realIPCacheCount=%d",
 					corrID, stats.DomainCount, stats.RealIPCacheCount)
 			}
 		}
@@ -176,8 +176,9 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 		if h.adminHandler != nil {
 			util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
 			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
-			rec := connlog.Start(inbound, "TCP", srcAddr, domain)
-			rec.SetDst("localhost").Establish(connID, nil, false)
+			rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
+				Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL"})
+			rec.Establish(connID, nil, false)
 			h.adminHandler.ServeConn(conn)
 			rec.Close()
 			return
@@ -232,7 +233,7 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 	// Use the (possibly redirected) destination from Resolving
 	resolvedAddr := req.DstAddr
 	resolvedPort := req.DstPort
-	rec := connlog.Start(inbound, "TCP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
+	rec := connlog.Start(inbound, "TCP", srcAddr, matchAddr).WithConn(connID, srcPort).Resolve(resolvedAddr, resolvedPort, matchResult)
 	defer rec.Close()
 
 	var targetConn net.Conn
@@ -311,12 +312,14 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 		// network's gVisor netstack.
 		if ip := net.ParseIP(dialAddr); ip != nil && h.isMeshIP != nil && h.isMeshIP(ip) {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
-			targetConn, err = dialer.MeshDial(dialAddr, resolvedPort, srcAddr, inbound, modeBMapping)
+			var fwdKey string
+			targetConn, fwdKey, err = dialer.MeshDial(dialAddr, resolvedPort, srcAddr, inbound, modeBMapping)
 			if err != nil {
 				util.LogModuleWarn("handler", "[%s] [%s] mesh dial %s:%d fail: %v", inbound, connID, dialAddr, resolvedPort, err)
 				rec.SetDst(dialAddr).Fail(err)
 				return
 			}
+			rec.SetDst(dialAddr).SetVia(meshEgressNode(ip)).SetFwdKey(fwdKey)
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
 		} else {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
@@ -364,6 +367,18 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 
 	connID := util.NextConnID()
 
+	// Extract the client source port from the netstack connection's remote
+	// address (post-SNAT view) so the record/log correlation key is complete.
+	var srcPort int
+	if host, port, splitErr := net.SplitHostPort(netstackConn.RemoteAddr().String()); splitErr == nil {
+		if p, parseErr := strconv.Atoi(port); parseErr == nil {
+			srcPort = p
+			if srcAddr == "" {
+				srcAddr = host
+			}
+		}
+	}
+
 	// Use domain for rule matching (so domain-based rules work).
 	matchAddr := dstAddr
 	if domain != "" {
@@ -386,7 +401,7 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 
 	resolvedAddr := req.DstAddr
 	resolvedPort := req.DstPort
-	rec := connlog.Start(inbound, "UDP", srcAddr, matchAddr).Resolve(resolvedAddr, resolvedPort, matchResult)
+	rec := connlog.Start(inbound, "UDP", srcAddr, matchAddr).WithConn(connID, srcPort).Resolve(resolvedAddr, resolvedPort, matchResult)
 	defer rec.Close()
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
@@ -449,6 +464,9 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 	// Use the resolved IP for the destination address.
 	dstUDPAddr := &net.UDPAddr{IP: dialIP, Port: resolvedPort}
 	util.LogModuleDebug("handler", "[%s] [%s] udp %s:%d -> %s", inbound, connID, resolvedAddr, resolvedPort, proxyDesc(proxy))
+	if localNodeDomain {
+		rec.SetDst("127.0.0.1")
+	}
 	rec.Establish(connID, proxy, proxy.IsDirect())
 
 	relayUDP(netstackConn, targetConn, dstUDPAddr)
@@ -459,6 +477,16 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // proxyDesc returns a human-readable description of the proxy for logging.
+// meshEgressNode resolves the mesh egress node ID for a mesh-IP destination
+// (display-only "via" label). Empty when the resolver is unwired or the
+// destination is not mesh-routed.
+func meshEgressNode(dstIP net.IP) string {
+	if dialer.GlobalMeshEgressFunc == nil {
+		return ""
+	}
+	return dialer.GlobalMeshEgressFunc(dstIP)
+}
+
 func proxyDesc(p *config.Proxy) string {
 	if p == nil || strings.EqualFold(p.Type, config.ProxyDIRECT) {
 		return "DIRECT"

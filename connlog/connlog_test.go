@@ -18,6 +18,79 @@ func resetForTest() {
 	activeMap = sync.Map{}
 }
 
+func TestCorrelationFields(t *testing.T) {
+	resetForTest()
+
+	// Explicit FwdKey wins; srcPort/connId/via pass through.
+	Log("TUN", "TCP", "10.99.0.5", "example.com", "198.51.100.1", 443, nil, "ok", nil,
+		WithConnID("c-1"), WithSrcPort(5150), WithVia("node-jf"), WithFwdKey("10.99.0.5:40000>10.100.0.7:443"))
+	ev := GetLogs()[0]
+	if ev.ConnID != "c-1" || ev.SrcPort != 5150 || ev.Via != "node-jf" {
+		t.Fatalf("option fields not applied: %+v", ev)
+	}
+	if ev.FwdKey != "10.99.0.5:40000>10.100.0.7:443" {
+		t.Fatalf("explicit FwdKey must win, got %q", ev.FwdKey)
+	}
+
+	// Without an explicit key, FwdKey derives from the recorded 5-tuple.
+	Log("socks5", "TCP", "192.168.1.10", "", "203.0.113.9", 8080, nil, "ok", nil,
+		WithSrcPort(60001))
+	ev = GetLogs()[1]
+	if ev.FwdKey != "192.168.1.10:60001>203.0.113.9:8080" {
+		t.Fatalf("derived FwdKey mismatch: %q", ev.FwdKey)
+	}
+
+	// No source port => no meaningful key.
+	Log("TUN", "SYSTEM", "", "", "0.0.0.0", 0, nil, "ok", nil)
+	if GetLogs()[2].FwdKey != "" {
+		t.Fatalf("FwdKey must stay empty without srcPort, got %q", GetLogs()[2].FwdKey)
+	}
+
+	// TrackActive: explicit key wins, otherwise derived; RemoveActive journal intact.
+	TrackActive("a-1", "TUN", "TCP", "10.99.0.5", "example.com", "198.51.100.1", 443, nil,
+		WithActiveSrcPort(5150), WithActiveVia("node-jf"), WithActiveFwdKey("10.99.0.5:40000>10.100.0.7:443"))
+	ac := GetActiveConns()[0]
+	if ac.FwdKey != "10.99.0.5:40000>10.100.0.7:443" || ac.SrcPort != 5150 || ac.Via != "node-jf" {
+		t.Fatalf("active option fields not applied: %+v", ac)
+	}
+	TrackActive("a-2", "socks5", "TCP", "192.168.1.10", "", "203.0.113.9", 8080, nil,
+		WithActiveSrcPort(60001))
+	var a2 *ActiveConn
+	for i := range GetActiveConns() {
+		if GetActiveConns()[i].ID == "a-2" {
+			a2 = &GetActiveConns()[i]
+		}
+	}
+	if a2 == nil || a2.FwdKey != "192.168.1.10:60001>203.0.113.9:8080" {
+		t.Fatalf("active derived FwdKey mismatch: %+v", a2)
+	}
+
+	// Record-level flow: options propagate to both log event and active entry.
+	resetForTest()
+	rec := Start("TUN", "TCP", "10.99.0.5", "example.com").
+		WithConn("r-1", 5150).
+		Resolve("198.51.100.1", 443, nil).
+		SetVia("node-jf").
+		SetFwdKey("10.99.0.5:40000>10.100.0.7:443")
+	rec.Establish("r-1", nil, false)
+	if GetLogs()[0].FwdKey != "10.99.0.5:40000>10.100.0.7:443" || GetLogs()[0].Via != "node-jf" {
+		t.Fatalf("record log fields missing: %+v", GetLogs()[0])
+	}
+	if GetActiveConns()[0].FwdKey != "10.99.0.5:40000>10.100.0.7:443" {
+		t.Fatalf("record active FwdKey missing: %+v", GetActiveConns()[0])
+	}
+	rec.Close()
+	if len(GetActiveConns()) != 0 {
+		t.Fatal("Close must remove the active entry")
+	}
+}
+
+func TestFwdKeyFormat(t *testing.T) {
+	if got := FwdKey("1.2.3.4", 1234, "5.6.7.8", 443); got != "1.2.3.4:1234>5.6.7.8:443" {
+		t.Fatalf("FwdKey format mismatch: %q", got)
+	}
+}
+
 func TestGetLogsAfterSeqNormal(t *testing.T) {
 	resetForTest()
 	Log("in", "TCP", "s", "", "d", 80, nil, "ok", nil)

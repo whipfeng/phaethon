@@ -30,18 +30,34 @@ func Sha224Hex(input string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// CloseWriteOrClose signals end-of-stream to the peer of dst: CloseWrite when
+// supported (preserves the reverse direction, keeps half-close semantics),
+// plain Close as a fallback for connections without half-close support.
+func CloseWriteOrClose(dst net.Conn) {
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	} else {
+		dst.Close()
+	}
+}
+
 // Relay bidirectionally copies data between two connections.
-// When either direction encounters an error, the function returns immediately.
-// Callers must ensure connections are closed (typically via defer) to release
-// resources. The previous half-close approach could hang indefinitely if the
-// peer didn't respond.
+// A clean EOF on one side propagates via CloseWrite (half-close semantics);
+// any real read/write error hard-closes both sides so the blocked reverse
+// direction unblocks and the caller's deferred cleanup runs.
 func Relay(left, right net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	copy := func(dst, src net.Conn) {
 		defer wg.Done()
-		io.Copy(dst, src)
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			CloseWriteOrClose(dst)
+		} else {
+			left.Close()
+			right.Close()
+		}
 	}
 
 	go copy(left, right)
@@ -50,10 +66,7 @@ func Relay(left, right net.Conn) {
 	wg.Wait()
 }
 
-// RelayWithRateLimit relays with rate limiting.
-// When either direction encounters an error, the function returns immediately.
-// Callers must ensure connections are closed (typically via defer) to release
-// resources.
+// RelayWithRateLimit relays with rate limiting. Same direction policy as Relay.
 func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.RateLimiter) {
 	if upLimiter == nil && downLimiter == nil {
 		Relay(left, right)
@@ -77,10 +90,18 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 				}
 				_, werr := dst.Write(buf[:n])
 				if werr != nil {
+					left.Close()
+					right.Close()
 					return
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					CloseWriteOrClose(dst)
+				} else {
+					left.Close()
+					right.Close()
+				}
 				return
 			}
 		}

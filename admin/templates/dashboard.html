@@ -54,7 +54,7 @@
         </div>
     </div>
     <div class="card" id="dash-sysinfo-card">
-        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.sysInfo">System Info</span></h3>
+        <h3 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.sysInfo">System Info</span></h3>
         <table class="info-table">
             <tr><td data-i18n="dash.version">Version</td><td>{{.Version}}</td></tr>
             <tr><td data-i18n="dash.uptime">Uptime</td><td>{{formatUptime .UptimeSeconds}}</td></tr>
@@ -109,7 +109,7 @@
     <!-- Health Status -->
     {{if index .Stats "healthData"}}
     <div class="card" id="dash-health-card">
-        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.health">Health Checks</span></h3>
+        <h3 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.health">Health Checks</span></h3>
         {{range $group, $health := index .Stats "healthData"}}
         <div class="health-group">
             <h4>{{$group}}</h4>
@@ -133,7 +133,7 @@
 
     <!-- Security Settings -->
     <div class="card" id="dash-security-card">
-        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="security.title">🔐 Security</span></h3>
+        <h3 data-collapse data-collapsed="1" data-collapse-load="loadDashSecurity"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="security.title">🔐 Security</span></h3>
         <div id="security-status">
             <p data-i18n="security.loading">Loading...</p>
         </div>
@@ -145,7 +145,7 @@
 
     <!-- Quick Actions -->
     <div class="card actions-card" id="dash-actions-card">
-        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.quickActions">Quick Actions</span></h3>
+        <h3 data-collapse data-collapsed="1"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.quickActions">Quick Actions</span></h3>
         <div class="action-buttons">
             <button onclick="location.href='proxies'" class="btn" data-i18n="dash.manageProxies">Manage Proxies</button>
             <button onclick="location.href='rules'" class="btn" data-i18n="dash.editRules">Edit Rules</button>
@@ -185,8 +185,9 @@
     </div>
 
     <script>
-    (function() {
-        // Check auth status on load
+    // Auth status loads lazily when the Security card is first expanded
+    // (data-collapse-load), not at page load.
+    window.loadDashSecurity = function() {
         fetch('./api/config/admin')
             .then(r => r.json())
             .then(admin => {
@@ -211,7 +212,7 @@
                 const statusEl = document.getElementById('security-status');
                 if (statusEl) statusEl.innerHTML = '<p class="text-muted">' + (typeof i18n !== 'undefined' ? i18n.t('dash.loadSecurityFailed') : 'Failed to load security status') + '</p>';
             });
-    })();
+    };
 
     // Initialize dashboard summaries
     if (document.getElementById('tun-summary')) {

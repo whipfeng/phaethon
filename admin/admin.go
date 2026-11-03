@@ -4339,7 +4339,8 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	}
 	result := mesh.GlobalMeshManager.GetStatus()
 	result["topology"] = mesh.GlobalMeshManager.GetTopology()
-	result["routes"] = mesh.GlobalMeshManager.GetRoutes()
+	result["routes"] = mesh.GlobalMeshManager.GetRouteTree()
+	result["domainRoutes"] = mesh.GlobalMeshManager.GetDomainRoutes()
 	result["peers"] = mesh.GlobalMeshManager.GetPeers()
 	result["linkNICStats"] = mesh.GlobalMeshManager.GetLinkNICStats()
 	result["bestPaths"] = mesh.GlobalMeshManager.GetBestPaths()

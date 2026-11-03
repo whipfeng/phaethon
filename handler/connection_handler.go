@@ -497,7 +497,10 @@ func proxyDesc(p *config.Proxy) string {
 // relay copies data bidirectionally between two TCP connections.
 // No idle timeout: a middlebox must not cap connection lifetime — idle
 // connections are cleaned up by TCP keepalive (gVisor/OS) when the peer
-// actually dies, not by an application-level guess.
+// relay copies data bidirectionally between conn and target. When either
+// direction encounters an error, both connections are closed immediately to
+// ensure resources (especially gVisor endpoints) are released. The previous
+// half-close approach could hang indefinitely if the peer didn't respond.
 func relay(conn, target net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -513,9 +516,6 @@ func relay(conn, target net.Conn) {
 				}
 			}
 			if err != nil {
-				if cw, ok := target.(interface{ CloseWrite() error }); ok {
-					cw.CloseWrite()
-				}
 				return
 			}
 		}
@@ -532,9 +532,6 @@ func relay(conn, target net.Conn) {
 				}
 			}
 			if err != nil {
-				if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-					cw.CloseWrite()
-				}
 				return
 			}
 		}

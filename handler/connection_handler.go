@@ -562,6 +562,8 @@ func relay(conn, target net.Conn) {
 // PacketConn, preserving datagram boundaries. No idle timeout: idle QUIC/DNS
 // flows must survive (UDP has no keepalive; a crashed client leaves at most
 // two goroutines, bounded by the netstack association lifecycle).
+// UDP has no half-close: any direction exiting closes both sides so the
+// blocked reverse direction unblocks and the caller's deferred cleanup runs.
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
 
@@ -575,11 +577,15 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, err := netstackConn.Read(buf)
 			if n > 0 {
-				if _, err := targetConn.WriteTo(buf[:n], dstAddr); err != nil {
+				if _, werr := targetConn.WriteTo(buf[:n], dstAddr); werr != nil {
+					netstackConn.Close()
+					targetConn.Close()
 					return
 				}
 			}
 			if err != nil {
+				netstackConn.Close()
+				targetConn.Close()
 				return
 			}
 		}
@@ -592,11 +598,15 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, _, err := targetConn.ReadFrom(buf)
 			if n > 0 {
-				if _, err := netstackConn.Write(buf[:n]); err != nil {
+				if _, werr := netstackConn.Write(buf[:n]); werr != nil {
+					netstackConn.Close()
+					targetConn.Close()
 					return
 				}
 			}
 			if err != nil {
+				netstackConn.Close()
+				targetConn.Close()
 				return
 			}
 		}

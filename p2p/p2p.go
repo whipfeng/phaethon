@@ -97,6 +97,11 @@ type P2PManager struct {
 	meshVIP     string
 	meshHandler MeshHandler
 
+	// udpLegInbound: manager-level switch for passive-side UDP legs.
+	// Passive peers carry no proxy config, so StartPeer sets this when any
+	// local proxy enables p2p_udp; HandleP2PTransport consults it.
+	udpLegInbound atomic.Bool
+
 	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing (data frames)
 	meshInboundDNSCh  chan meshInboundPacket // dedicated queue for inbound DNS frames (avoids cross-node DNS SERVFAIL)
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
@@ -318,6 +323,7 @@ type Peer struct {
 	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
 	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 	Status    string `json:"status"`    // current peer status: connecting, helloed, upToDate, failed
+	Transport string `json:"transport,omitempty"` // udp/tcp data-leg form (empty = no leg)
 	LastError string `json:"lastError,omitempty"` // last error message (empty if no error)
 	LastSeen  time.Time `json:"lastSeen"`
 
@@ -345,6 +351,7 @@ type Peer struct {
 	stopOnce         sync.Once // ensures stopCh is closed exactly once
 	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
 	proxy            *config.Proxy // proxy config this peer was started with
+	leg              *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
 
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
@@ -1023,6 +1030,13 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
+	// Passive-side UDP leg: manager-level switch (no proxy config here).
+	if m.udpLegInbound.Load() {
+		wrapped := newUDPLegTransport(t, false, nil)
+		peer.leg = wrapped
+		peer.transport = wrapped
+	}
+
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
@@ -1163,6 +1177,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	util.LogModuleInfo("p2p", "[P2P] StartPeer called for proxy %s (type=%s, p2p=%v)", proxy.Name, proxy.Type, proxy.IsP2P())
 
+	// Passive-side sessions carry no proxy config; arm the manager-level
+	// inbound switch when any local proxy enables the UDP leg.
+	if proxy.IsP2PUDP() {
+		m.udpLegInbound.Store(true)
+	}
+
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 	
 	// Initialize data queues for DRR fair scheduling
@@ -1291,6 +1311,21 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 		peer.transport = transport
 		peer.transportMu.Unlock()
+
+		// Active-side UDP leg wrap (design §7 Phase 1): socks5 proxies with
+		// p2p_udp on, dialer supports packet dial. Wrapping here (not in the
+		// dialer) avoids the dialer→p2p import cycle.
+		if proxy.IsP2PUDP() {
+			if ud, ok2 := d.(dialer.UDPDialer); ok2 {
+				wrapped := newUDPLegTransport(transport, true, ud.DialPacket)
+				peer.leg = wrapped
+				peer.transportMu.Lock()
+				peer.transport = wrapped
+				peer.transportMu.Unlock()
+			} else {
+				util.LogModuleInfo("p2p", "[P2P] proxy %s: p2p_udp on but dialer %T lacks DialPacket, UDP leg disabled", proxy.Name, d)
+			}
+		}
 		peer.dnsQueue = make(chan writeReq, 512)
 		peer.ackQueue = make(chan writeReq, 256)
 		peer.controlCh = make(chan writeReq, 512)
@@ -1318,8 +1353,15 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				// Log disconnection reason
 				util.LogModuleInfo("p2p", "[P2P-DIAG] session ending for peer.ID=%s proxy=%s status=%s lastError=%v duration=%v",
 					peer.ID, proxy.Name, peer.GetStatus(), peer.GetLastError(), sessionDuration)
-				
-				transport.Close()
+
+				// Close the leg wrapper when present: it owns the PacketConn
+				// and (passive) the registered leg port — closing only the raw
+				// transport would leak both plus the leg's goroutines.
+				if peer.leg != nil {
+					peer.leg.Close()
+				} else {
+					transport.Close()
+				}
 				
 				// Update status to disconnected before cleanup
 				if peer.GetStatus() != "stopped" {
@@ -1566,6 +1608,11 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	// shipping the value also eliminates the duplicate unmarshals downstream.
 	if sender := peer.GetMeshSender(); m.meshHandler != nil && sender != nil {
 		m.meshHandler.HandleTopologyGossip(sender, info)
+	}
+
+	// UDP leg negotiation fields feed the per-link FSM (design §3).
+	if peer.leg != nil {
+		peer.leg.onPeerGossip(info.UDP, info.UDPPort)
 	}
 }
 
@@ -2072,6 +2119,12 @@ func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
 		info.ClaimedSubnets = gossipInfo.ClaimedSubnets
 	}
 
+	// Per-link UDP leg negotiation fields (design §3): passive side echoes
+	// its allocated leg port, active side advertises capability only.
+	if peer.leg != nil {
+		info.UDP, info.UDPPort = peer.leg.gossipFields()
+	}
+
 	data, _ := json.Marshal(info)
 	enqueueWrite(peer, frame.FrameGossip, data, true)
 }
@@ -2107,6 +2160,9 @@ func (m *P2PManager) GetPeers() []Peer {
 			LastError: p.GetLastError(),
 			LastSeen:  time.Unix(0, lastSeenNano),
 		})
+		if p.leg != nil {
+			result[len(result)-1].Transport = p.leg.transportForm()
+		}
 	}
 	return result
 }

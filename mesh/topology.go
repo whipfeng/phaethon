@@ -120,6 +120,12 @@ type GossipInfo struct {
 	Routes         []GossipRoute         `json:"routes,omitempty"`
 	ClaimedSubnets []GossipClaimedSubnet `json:"claimedSubnets,omitempty"`
 	// TopologyEdges removed - topology expressed via ClaimedSubnets.Neighbors
+
+	// UDP leg negotiation (per-link, docs/plans/p2p_udp_transport_design.md §3):
+	// UDP=true declares this link supports the optional UDP data leg;
+	// UDPPort echoes the allocated leg port (passive side, dst 0.0.0.0:P).
+	UDP     bool `json:"udp,omitempty"`
+	UDPPort int  `json:"udpPort,omitempty"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.

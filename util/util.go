@@ -31,6 +31,10 @@ func Sha224Hex(input string) string {
 }
 
 // Relay bidirectionally copies data between two connections.
+// When either direction encounters an error, the function returns immediately.
+// Callers must ensure connections are closed (typically via defer) to release
+// resources. The previous half-close approach could hang indefinitely if the
+// peer didn't respond.
 func Relay(left, right net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -38,17 +42,6 @@ func Relay(left, right net.Conn) {
 	copy := func(dst, src net.Conn) {
 		defer wg.Done()
 		io.Copy(dst, src)
-		// Signal the other side to finish
-		type closeWriter interface {
-			CloseWrite() error
-		}
-		if cw, ok := dst.(closeWriter); ok {
-			cw.CloseWrite()
-		} else if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		} else {
-			dst.Close()
-		}
 	}
 
 	go copy(left, right)
@@ -58,6 +51,9 @@ func Relay(left, right net.Conn) {
 }
 
 // RelayWithRateLimit relays with rate limiting.
+// When either direction encounters an error, the function returns immediately.
+// Callers must ensure connections are closed (typically via defer) to release
+// resources.
 func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.RateLimiter) {
 	if upLimiter == nil && downLimiter == nil {
 		Relay(left, right)
@@ -81,22 +77,12 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 				}
 				_, werr := dst.Write(buf[:n])
 				if werr != nil {
-					break
+					return
 				}
 			}
 			if err != nil {
-				break
+				return
 			}
-		}
-		type closeWriter interface {
-			CloseWrite() error
-		}
-		if cw, ok := dst.(closeWriter); ok {
-			cw.CloseWrite()
-		} else if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		} else {
-			dst.Close()
 		}
 	}
 

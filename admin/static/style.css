@@ -2417,6 +2417,28 @@ td[data-label="P2P"] .p2p-status.failed {
     opacity: 0.5;
 }
 
+/* UDP leg transport badge next to the P2P status dot */
+.p2p-transport {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.4;
+    vertical-align: middle;
+}
+
+.p2p-transport.udp {
+    background-color: rgba(16, 185, 129, 0.15);
+    color: var(--success, #10b981);
+}
+
+.p2p-transport.tcp {
+    background-color: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted, #9ca3af);
+}
+
 /* Password visibility toggle */
 .password-container {
     display: inline-flex;

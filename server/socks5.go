@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,9 +17,12 @@ import (
 	"phaethon/connlog"
 	"phaethon/db"
 	"phaethon/dialer"
+	"phaethon/p2p"
 	"phaethon/reverse"
 	"phaethon/util"
 )
+
+var errUDPLegNoClientAddr = errors.New("udp leg: client address not yet known")
 
 // Socks5Server handles SOCKS5 protocol
 type Socks5Server struct {
@@ -330,6 +334,11 @@ type socks5UDPRelay struct {
 	clientAddr   net.Addr     // learned from first valid client packet
 	earlyReplies []earlyReply // buffered replies before clientAddr is set
 	earlyMu      sync.Mutex   // protects earlyReplies
+
+	// P2P UDP leg: return-path unbind for the bound leg endpoint (first leg
+	// datagram binds this relay as the endpoint's return writer).
+	legMu     sync.Mutex
+	legUnbind func()
 }
 
 type earlyReply struct {
@@ -428,6 +437,15 @@ func (r *socks5UDPRelay) run() {
 		}
 
 		data := buf[offset:n]
+		// P2P UDP leg interception (design §3): client datagrams addressed to
+		// 0.0.0.0:P belong to a registered leg endpoint; deliver locally and
+		// bind this relay as the endpoint's return path (first use).
+		if atyp == 0x01 && net.IP(buf[4:8]).IsUnspecified() {
+			if r.deliverToUDPLeg(dstPort, srcAddr, data) {
+				continue
+			}
+			// no endpoint owns the port: fall through to normal resolution
+		}
 		util.LogModuleDebug("socks5", "UDP RX from=%s to=%s:%d n=%d", r.mapping.Name, srcAddr, dstAddr, dstPort, len(data))
 		req, proxy, matchResult, err := db.ResolveMatch(config.NewConnectRequest("udp", dstAddr, dstPort), r.mapping.Name)
 		if err != nil {
@@ -481,6 +499,35 @@ func (r *socks5UDPRelay) run() {
 			util.LogModuleDebug("socks5", "UDP write ok for %s:%d via %s, sent=%d, client=%s", r.mapping.Name, dstAddr, dstPort, proxy.Name, nw, curClientAddr)
 		}
 	}
+}
+
+// deliverToUDPLeg delivers a client datagram to a P2P UDP leg endpoint
+// registered for port, binding this relay as the endpoint's return path on
+// first use. Returns false when no endpoint owns the port.
+func (r *socks5UDPRelay) deliverToUDPLeg(port int, srcAddr net.Addr, data []byte) bool {
+	legSrc := &net.UDPAddr{IP: net.IPv4zero, Port: port}
+	r.legMu.Lock()
+	if r.legUnbind == nil {
+		unbind, ok := p2p.UDPLegBindReturnPath(port, func(dgram []byte) error {
+			header := buildSOCKS5UDPHeader(legSrc)
+			packet := append(header, dgram...)
+			r.addrMu.Lock()
+			ca := r.clientAddr
+			r.addrMu.Unlock()
+			if ca == nil {
+				return errUDPLegNoClientAddr
+			}
+			_, err := r.clientLn.WriteTo(packet, ca)
+			return err
+		})
+		if !ok {
+			r.legMu.Unlock()
+			return false
+		}
+		r.legUnbind = unbind
+	}
+	r.legMu.Unlock()
+	return p2p.UDPLegDeliver(port, data, srcAddr.String())
 }
 
 // getProxyConn returns a cached PacketConn for the proxy, creating one if needed.
@@ -699,6 +746,12 @@ func (r *socks5UDPRelay) Close() {
 			upc.pc.Close()
 		}
 		r.proxyMu.Unlock()
+		r.legMu.Lock()
+		if r.legUnbind != nil {
+			r.legUnbind()
+			r.legUnbind = nil
+		}
+		r.legMu.Unlock()
 		r.clientLn.Close()
 		r.clientConn.Close()
 	})

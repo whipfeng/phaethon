@@ -45,6 +45,7 @@ type Proxy struct {
 	SkipCertVerify       bool   `yaml:"skip-cert-verify,omitempty" json:"skip-cert-verify,omitempty"`
 	UDP                  *bool  `yaml:"udp,omitempty" json:"udp,omitempty"`
 	P2P                  *bool  `yaml:"p2p,omitempty" json:"p2p,omitempty"`
+	P2PUDP               *bool  `yaml:"p2p-udp,omitempty" json:"p2p-udp,omitempty"`
 	V2                   bool   `yaml:"v2,omitempty" json:"v2,omitempty"`
 	Cipher               string `yaml:"cipher,omitempty" json:"cipher,omitempty"`
 	Tfo                  bool   `yaml:"tfo,omitempty" json:"tfo,omitempty"`
@@ -97,6 +98,21 @@ func (p *Proxy) IsP2P() bool {
 		return *p.P2P
 	}
 	return true
+}
+
+// IsP2PUDP reports whether the optional UDP data leg is enabled for this proxy.
+// Link-level: each TCP session of this proxy negotiates its own UDP leg via gossip.
+// First release only supports SOCKS5 (the only type whose UDP path is real UDP on
+// the wire); other types return false (treated as disabled). Defaults to false —
+// absent or disabled is bit-identical to today's pure-TCP behavior.
+func (p *Proxy) IsP2PUDP() bool {
+	if p == nil {
+		return false
+	}
+	if !strings.EqualFold(p.Type, "socks5") {
+		return false
+	}
+	return p.P2PUDP != nil && *p.P2PUDP
 }
 
 // IsV2 reports whether the v2 data path is enabled for this proxy.

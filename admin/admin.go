@@ -5213,6 +5213,7 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		"sni":                    p.Sni,
 		"udp":                    p.IsUDP(),
 		"p2p":                    p.IsP2P(),
+		"p2p-udp":                p.IsP2PUDP(),
 		"v2":                     p.IsV2(),
 		"via":                    p.ViaProxy,
 		"skip-cert-verify":       p.SkipCertVerify,

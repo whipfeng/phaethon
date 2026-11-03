@@ -1630,21 +1630,25 @@ func (s *AdminServer) NotifyGroupHealth(groupName string, snap map[string]config
 }
 
 func (s *AdminServer) apiConnections(w http.ResponseWriter, r *http.Request) {
-	var logs []connlog.Event
+	version := connlog.GetVersion()
 	afterStr := r.URL.Query().Get("after")
 	if afterStr != "" {
 		if after, err := strconv.ParseUint(afterStr, 10, 64); err == nil {
-			logs = connlog.GetLogsAfterSeq(after)
-		} else {
-			logs = connlog.GetLogs()
+			logs, stale := connlog.GetLogsAfterSeq(after)
+			jsonResponse(w, map[string]interface{}{
+				"version": version,
+				"boot":    db.BootVersion(),
+				"stale":   stale,
+				"logs":    logs,
+			})
+			return
 		}
-	} else {
-		logs = connlog.GetLogs()
 	}
-	version := connlog.GetVersion()
 	jsonResponse(w, map[string]interface{}{
 		"version": version,
-		"logs":    logs,
+		"boot":    db.BootVersion(),
+		"stale":   true,
+		"logs":    connlog.GetLogs(),
 	})
 }
 
@@ -1659,6 +1663,7 @@ func (s *AdminServer) apiActiveConns(w http.ResponseWriter, r *http.Request) {
 			if stale {
 				jsonResponse(w, map[string]interface{}{
 					"version":     version,
+					"boot":        db.BootVersion(),
 					"stale":       true,
 					"connections": conns,
 				})
@@ -1666,6 +1671,7 @@ func (s *AdminServer) apiActiveConns(w http.ResponseWriter, r *http.Request) {
 			}
 			jsonResponse(w, map[string]interface{}{
 				"version": version,
+				"boot":    db.BootVersion(),
 				"stale":   false,
 				"journal": entries,
 			})
@@ -1676,6 +1682,7 @@ func (s *AdminServer) apiActiveConns(w http.ResponseWriter, r *http.Request) {
 	conns := connlog.GetActiveConns()
 	jsonResponse(w, map[string]interface{}{
 		"version":     version,
+		"boot":        db.BootVersion(),
 		"stale":       true,
 		"connections": conns,
 	})

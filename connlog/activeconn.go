@@ -130,7 +130,11 @@ func GetActiveConnsAfterSeq(seq uint64) (entries []JournalEntry, conns []ActiveC
 	}
 	mu.RUnlock()
 
-	if journalLen == 0 || seq < firstSeq {
+	if journalLen == 0 || seq < firstSeq || seq > version.Load() {
+		// seq newer than anything this process issued (seq > version)
+		// means the version counter reset — the client cursor is from
+		// before a process restart, so a full snapshot is the only
+		// correct answer; journal seqs no longer reach that cursor.
 		activeMap.Range(func(_, value any) bool {
 			conn := value.(*ActiveConn)
 			conns = append(conns, *conn)

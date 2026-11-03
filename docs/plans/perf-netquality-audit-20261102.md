@@ -69,7 +69,7 @@
 20. **IsEmptyConfig 出错默认 empty=true 静默进入首次初始化** `main.go:744-748` + `db/configstore.go:678-693`（PLAUSIBLE）。View 出错 empty 保持 true，仅 LogModuleError 不退出；罕见路径（View 失败而 Update 可写）下 InitConfigs 无条件 putJSON 覆盖既有 node-id/subnet。正确默认应为 err 视为致命或 empty=false。
     **处理意见（独立小修）：IsEmptyConfig 出错时返回 err，main.go 收到 err 直接退出（db 已损坏时不做任何写入）。**
 21. **apiGroups GET 全量/POST 固化语义不对称** `admin/admin.go:3359-3401`（PLAUSIBLE）。GET 的 proxies 键返回手工+订阅全量，POST 原样拷为 ManualProxies 落库；第三方客户端 GET→POST 往返把订阅派生名固化成手工成员，订阅删除后悬空引用。仓库自带前端走 manualProxies 键不触发。
-    **处理意见（记录不修）：API 契约陷阱记入文档；修法则为 POST 侧 diff 掉订阅派生名，优先级低，等出现真实第三方消费端再动。**
+    **处理意见（已修复 855e6d3）：POST 侧持久化前按 runtime matcher GetMembers() 减去 FromSubscription 名再落 ManualProxies；自带前端只提交手工勾选成员不受影响。**
 22. **mesh 字符串匹配 "peer stopped" 代替哨兵错误** `mesh/mesh.go:1092-1098`（PLAUSIBLE）。p2p 已导出 `ErrPeerStopped`（p2p.go:758）可用 errors.Is；p2p 文案改动/包装即静默失效，丢失 StopPeerByProxyName 清链（failover 循环本身仍工作，后果降为根因不可见）。
     **处理意见（批次 2 顺带独立提交）：改 errors.Is(sendErr, p2p.ErrPeerStopped)。**
 

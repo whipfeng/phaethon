@@ -1013,11 +1013,11 @@ function updateProxies(proxiesData, groupsData) {
         }
     }
 
-    // Update proxy count in header
-    const header = document.querySelector('#proxy-table')?.closest('.card')?.querySelector('.card-header h3');
-    if (header) {
-        const label = (typeof i18n !== 'undefined' ? i18n.t('proxy.title') : null) || 'Proxies';
-        header.innerHTML = `<span data-i18n="proxy.title">${label}</span> (${proxiesData.length})`;
+    // Update proxy count in header — touch only the dedicated count span
+    // so the collapsible toggle icon added around the title is preserved.
+    const countEl = document.getElementById('proxies-count');
+    if (countEl) {
+        countEl.textContent = `(${proxiesData.length})`;
     }
 }
 
@@ -1587,6 +1587,16 @@ async function fetchMeshStatus() {
                         domain: s.Suffix,
                         owner: s.NodeID
                     });
+                });
+            });
+
+            // Self-declared suffixes: topology peers exclude the local node,
+            // so GetStatus' own domainSuffixes is the only source here —
+            // without it the local declaration never shows up in the table.
+            (data.domainSuffixes || []).forEach(suffix => {
+                domainRoutes.push({
+                    domain: suffix,
+                    owner: data.nodeId
                 });
             });
 
@@ -2462,6 +2472,65 @@ async function triggerMeshGossip() {
 let connLogLastSeq = 0;
 let connLogBoot = null;         // server process identity; change => restart, cursor invalid
 
+// ===== Generic block collapse =====
+// Any header element carrying data-collapse toggles the sibling blocks after
+// it (or a single body via data-collapse-target="id") on click. Buttons,
+// links and inputs inside the header keep their own handlers. State persists
+// per header id in localStorage so htmx page swaps restore it.
+(function initCollapsible() {
+    document.addEventListener('click', function (ev) {
+        const header = ev.target.closest('[data-collapse]');
+        if (!header) return;
+        if (ev.target.closest('button, a, input, select, textarea, label')) return;
+        toggleCollapse(header);
+    });
+    document.addEventListener('htmx:afterSwap', applyPersistedCollapse);
+    if (document.readyState !== 'loading') applyPersistedCollapse();
+    else document.addEventListener('DOMContentLoaded', applyPersistedCollapse);
+})();
+
+function collapseKey(header) {
+    const host = header.closest('[id]');
+    return host && host.id ? 'collapse:' + location.pathname + ':' + host.id : null;
+}
+
+function collapseBodies(header) {
+    const target = header.dataset.collapseTarget;
+    if (target) {
+        const el = document.getElementById(target);
+        return el ? [el] : [];
+    }
+    const bodies = [];
+    let el = header.nextElementSibling;
+    while (el) { bodies.push(el); el = el.nextElementSibling; }
+    return bodies;
+}
+
+function setCollapse(header, bodies, hidden) {
+    bodies.forEach(b => { b.style.display = hidden ? 'none' : ''; });
+    header.dataset.collapsed = hidden ? '1' : '0';
+    const icon = header.querySelector('.collapse-icon');
+    if (icon) icon.style.transform = hidden ? 'rotate(0deg)' : 'rotate(90deg)';
+}
+
+function toggleCollapse(header) {
+    const bodies = collapseBodies(header);
+    const hidden = header.dataset.collapsed !== '1';
+    setCollapse(header, bodies, hidden);
+    const key = collapseKey(header);
+    if (key) { try { localStorage.setItem(key, hidden ? '1' : '0'); } catch (e) { /* private mode */ } }
+}
+
+function applyPersistedCollapse() {
+    document.querySelectorAll('[data-collapse]').forEach(header => {
+        const key = collapseKey(header);
+        let saved = null;
+        if (key) { try { saved = localStorage.getItem(key); } catch (e) { /* ignore */ } }
+        const hidden = saved === null ? header.dataset.collapsed === '1' : saved === '1';
+        setCollapse(header, collapseBodies(header), hidden);
+    });
+}
+
 // ===== Active Connections =====
 var activeConnsMap = new Map();
 var activeConnsRows = new Map(); // conn id -> rendered <tr>
@@ -2469,6 +2538,14 @@ var activeConnsTable = null;     // persistent <table>, tbody reused across rend
 var activeConnsLastSeq = 0;
 var activeConnsBoot = null;      // server process identity; change => restart, cursor invalid
 var activeConnsTimer = null;
+var activeConnFilter = '';       // lowercase text filter across row cells
+
+// Open the logs view with a preset correlation filter. The preset rides to
+// the new window through sessionStorage (copied at open time for popups).
+function openLogsWithPreset(preset) {
+    try { sessionStorage.setItem('connLogPreset', JSON.stringify(preset)); } catch (e) { /* private mode */ }
+    window.open('./logs', 'PhaethonLogs');
+}
 
 function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -2560,7 +2637,7 @@ function renderActiveConns() {
             table.style.fontSize = '0.85rem';
             const thead = document.createElement('thead');
             const headTr = document.createElement('tr');
-            [['dash.connProtocol', 'Protocol'], ['dash.connInbound', 'Inbound'], ['dash.connSrc', 'Source'], ['dash.connDst', 'Destination'], ['dash.connRule', 'Rule'], ['dash.connDuration', 'Duration']].forEach(([key, label]) => {
+            [['dash.connProtocol', 'Protocol'], ['dash.connInbound', 'Inbound'], ['dash.connSrc', 'Source'], ['dash.connDst', 'Destination'], ['dash.connRule', 'Rule'], ['dash.connDuration', 'Duration'], ['dash.connActions', '']].forEach(([key, label]) => {
                 const th = document.createElement('th');
                 th.setAttribute('data-i18n', key);
                 th.textContent = i18n.t(key);
@@ -2600,17 +2677,35 @@ function renderActiveConns() {
                 const durTd = document.createElement('td');
                 durTd.dataset.label = 'Duration';
                 tr.appendChild(durTd);
+                const actTd = document.createElement('td');
+                actTd.dataset.label = 'Actions';
+                const chainBtn = document.createElement('button');
+                chainBtn.className = 'conn-chain-btn';
+                chainBtn.textContent = '⇄';
+                chainBtn.title = i18n.t('dash.connChain');
+                chainBtn.style.display = c.fwdKey ? '' : 'none';
+                chainBtn.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    openLogsWithPreset({ kind: 'fwdKey', value: c.fwdKey });
+                });
+                actTd.appendChild(chainBtn);
+                tr.appendChild(actTd);
+                tr.addEventListener('click', () => openLogsWithPreset({ kind: 'id', value: c.id }));
+                tr.title = activeConnTooltip(c);
                 const src = c.srcAddr || '';
                 const dst = c.dstAddr + ':' + c.dstPort;
-                let rule = c.rule || c.proxy || 'DIRECT';
-                if (c.actualProxy && c.actualProxy !== c.proxy) {
-                    rule += ' → ' + c.actualProxy;
-                }
                 tr.children[0].textContent = c.protocol || '';
                 tr.children[1].textContent = c.inbound || '';
                 tr.children[2].textContent = src;
+                if ((c.inbound || '') === 'TUN') {
+                    // TUN flows carry no process info; the source is a
+                    // data-plane view (restored original IP when known).
+                    tr.children[2].classList.add('conn-src-dim');
+                    tr.children[2].title = i18n.t('dash.tunSrcHint');
+                }
                 tr.children[3].textContent = dst;
-                tr.children[4].textContent = rule;
+                tr.children[3].title = [c.originalDstAddr, c.dstAddr + ':' + c.dstPort].filter(Boolean).join(' → ');
+                tr.children[4].textContent = egressLabel(c);
                 durTd.dataset.start = String(c._startMs);
                 activeConnsRows.set(c.id, tr);
             } else {
@@ -2625,6 +2720,17 @@ function renderActiveConns() {
         // in sorted order yields the correct final order without rebuilding.
         conns.forEach(c => tbody.appendChild(activeConnsRows.get(c.id)));
 
+        // Client-side text filter across all cells.
+        if (activeConnFilter) {
+            activeConnsRows.forEach((tr, id) => {
+                const c = activeConnsMap.get(id);
+                const hay = [c.protocol, c.inbound, c.srcAddr, c.originalDstAddr, c.dstAddr, c.dstPort, c.rule, c.proxy, c.actualProxy, c.via, c.id].filter(Boolean).join(' ').toLowerCase();
+                tr.style.display = hay.includes(activeConnFilter) ? '' : 'none';
+            });
+        } else {
+            activeConnsRows.forEach(tr => { tr.style.display = ''; });
+        }
+
         const now = Date.now();
         activeConnsRows.forEach(tr => {
             tr.children[5].textContent = formatDuration(now - +tr.children[5].dataset.start);
@@ -2634,6 +2740,31 @@ function renderActiveConns() {
     if (countEl) {
         countEl.textContent = i18n.t('dash.activeConnCount').replace('{}', conns.length);
     }
+}
+
+// Full-field tooltip for an active-connection row: everything the list
+// columns compress, in original form.
+function activeConnTooltip(c) {
+    const lines = [
+        i18n.t('dash.ttConnId') + ': ' + c.id,
+        i18n.t('dash.connProtocol') + ': ' + (c.protocol || ''),
+        i18n.t('dash.connInbound') + ': ' + (c.inbound || ''),
+        i18n.t('dash.ttOrigDst') + ': ' + (c.originalDstAddr || '-'),
+        i18n.t('dash.connDst') + ': ' + c.dstAddr + ':' + c.dstPort,
+        i18n.t('dash.connRule') + ': ' + (c.rule || '-'),
+        i18n.t('dash.connProxy') + ': ' + (c.proxy || '-'),
+    ];
+    if (c.actualProxy) lines.push(i18n.t('dash.ttActualProxy') + ': ' + c.actualProxy);
+    if (c.via) lines.push(i18n.t('dash.ttVia') + ': ' + c.via);
+    if (c.mapping) lines.push(i18n.t('dash.ttMapping') + ': ' + c.mapping);
+    if (c.timeRange) lines.push(i18n.t('dash.ttTimeRange') + ': ' + c.timeRange);
+    if (c.fwdKey) lines.push(i18n.t('dash.ttFwdKey') + ': ' + c.fwdKey);
+    return lines.join('\n');
+}
+
+function setActiveConnFilter(query) {
+    activeConnFilter = query.toLowerCase();
+    renderActiveConns();
 }
 
 function startActiveConnsTimer() {
@@ -2742,10 +2873,7 @@ async function openConnsPopup() {
                 conns.forEach(c => {
                     const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
                     const dst = c.dstAddr + ':' + c.dstPort;
-                    let rule = c.rule || c.proxy || 'DIRECT';
-                    if (c.actualProxy && c.actualProxy !== c.proxy) {
-                        rule += ' → ' + c.actualProxy;
-                    }
+                    const rule = egressLabel(c);
                     const inbound = c.inbound || '';
                     const selected = c.id === pipSelectedConnId ? ' class="selected"' : '';
                     html += '<tr' + selected + ' data-conn-id="' + c.id + '"><td>' + c.protocol + '</td><td>' + inbound + '</td><td>' + dst + '</td><td>' + rule + '</td><td data-start="' + c.startTime + '">' + dur + '</td></tr>';
@@ -2824,43 +2952,73 @@ async function openConnsPopup() {
 }
 
 const MAX_CONN_LOG_LINES = 500;
-var connLogLines = [];       // model: retained log lines, oldest first
+var connLogLines = [];       // model: {text, err, connId, fwdKey}, oldest first
 var connLogFilterQuery = ''; // active filter (lowercased), '' = show all
+var connLogErrorsOnly = false;
+// Cross-page preset set by the connections page: {kind:'id'|'fwdKey', value}.
+// Consumed by the logs page on load (passed via sessionStorage copy at open).
+var connLogPreset = null;
+
+// Egress display label shared by log lines, active-conn rows and the PiP
+// popup: mesh-routed flows show the egress node, DIRECT shows 直连, LOCAL
+// stays LOCAL, everything else shows rule → actualProxy.
+function egressLabel(e) {
+    if (e.via) return i18n.t('dash.egressMesh').replace('{}', e.via);
+    const proxy = e.proxy || '';
+    if (proxy === 'DIRECT') return i18n.t('dash.egressDirect');
+    let label = e.rule || proxy || 'DIRECT';
+    if (e.actualProxy && e.actualProxy !== e.proxy) {
+        label += ' → ' + e.actualProxy;
+    }
+    return label;
+}
 
 function connLogFormatEntry(e) {
     const date = new Date(e.time);
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
     const ms = String(date.getMilliseconds()).padStart(3, '0');
-    const time = `${hours}:${minutes}:${seconds}.${ms}`;
+    // Cross-day stamp: once a log line is from another day, HH:MM:SS alone
+    // is ambiguous — prefix MM-DD.
+    const time = (date.toDateString() !== now.toDateString())
+        ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${ms}`
+        : `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${ms}`;
     const icon = e.status === 'ok' ? '✓' : '✗';
     const inbound = e.inbound || '';
     const src = e.srcAddr || '';
-    let target = e.rule || e.proxy || 'DIRECT';
-    if (e.actualProxy && e.actualProxy !== e.proxy) {
-        target += ' → ' + e.actualProxy;
-    }
-    let line = `${icon} [${inbound}] ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
+    const target = egressLabel(e);
+    let line = `${icon} [${inbound}]`;
+    if (e.connId) line += ` [${e.connId}]`;
+    line += ` ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
     if (e.error) line += ` (${e.error})`;
-    return `[${time}] ${line}`;
+    return {
+        text: `[${time}] ${line}`,
+        err: e.status !== 'ok',
+        connId: e.connId || '',
+        fwdKey: e.fwdKey || '',
+    };
+}
+
+function connLogLineVisible(l) {
+    if (connLogErrorsOnly && !l.err) return false;
+    if (connLogFilterQuery && !l.text.toLowerCase().includes(connLogFilterQuery)) return false;
+    return true;
 }
 
 // Full rebuild of the <pre> from the model. Used on first load, filter
 // changes, and any time incremental node surgery doesn't apply.
 function connLogRenderAll(el) {
-    const visible = connLogFilterQuery
-        ? connLogLines.filter(l => l.toLowerCase().includes(connLogFilterQuery))
-        : connLogLines;
+    const visible = connLogLines.filter(connLogLineVisible);
     el.textContent = '';
     if (visible.length === 0) {
-        el.textContent = connLogFilterQuery ? 'No matching logs' : 'No logs yet';
+        el.textContent = (connLogFilterQuery || connLogErrorsOnly) ? 'No matching logs' : 'No logs yet';
         return;
     }
     const frag = document.createDocumentFragment();
     visible.forEach(l => {
         const div = document.createElement('div');
-        div.textContent = l;
+        div.textContent = l.text;
+        if (l.err) div.className = 'conn-log-err';
         frag.appendChild(div);
     });
     el.appendChild(frag);
@@ -2876,7 +3034,7 @@ function connLogAppend(el, lines) {
         trimmed = connLogLines.length - MAX_CONN_LOG_LINES;
         connLogLines.splice(0, trimmed);
     }
-    if (connLogFilterQuery || el.firstElementChild === null) {
+    if (connLogFilterQuery || connLogErrorsOnly || el.firstElementChild === null) {
         connLogRenderAll(el);
         return;
     }
@@ -2886,7 +3044,8 @@ function connLogAppend(el, lines) {
     const frag = document.createDocumentFragment();
     lines.forEach(l => {
         const div = document.createElement('div');
-        div.textContent = l;
+        div.textContent = l.text;
+        if (l.err) div.className = 'conn-log-err';
         frag.appendChild(div);
     });
     el.appendChild(frag);
@@ -2895,6 +3054,7 @@ function connLogAppend(el, lines) {
 // Filter entry point for the logs page.
 function setConnLogFilter(query) {
     connLogFilterQuery = query.toLowerCase();
+    connLogUpdateChip();
     const el = document.getElementById('conn-logs');
     if (el) {
         connLogRenderAll(el);
@@ -2902,14 +3062,45 @@ function setConnLogFilter(query) {
     }
 }
 
+function setConnLogErrorsOnly(on) {
+    connLogErrorsOnly = !!on;
+    const el = document.getElementById('conn-logs');
+    if (el) {
+        connLogRenderAll(el);
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
+// Active-preset chip shown above the log view: connId text filter or a
+// server-side fwdKey chain filter. Clear restores the full stream.
+function connLogUpdateChip() {
+    const chipEl = document.getElementById('log-active-filter');
+    if (!chipEl) return;
+    const parts = [];
+    if (connLogFilterQuery) parts.push(i18n.t('logs.chipConnId') + ': ' + connLogFilterQuery);
+    if (connLogPreset && connLogPreset.kind === 'fwdKey') parts.push(i18n.t('logs.chipFwdKey') + ': ' + connLogPreset.value);
+    if (parts.length === 0) {
+        chipEl.style.display = 'none';
+        return;
+    }
+    chipEl.style.display = '';
+    chipEl.textContent = parts.join('  |  ') + '  ✕';
+}
+
 async function fetchConnections(incremental) {
     const el = document.getElementById('conn-logs');
     if (!el) return;
     try {
         let url = './api/connections';
-        if (incremental && connLogLastSeq > 0) {
-            url += '?after=' + connLogLastSeq;
+        const params = [];
+        if (incremental && connLogLastSeq > 0 && !(connLogPreset && connLogPreset.kind === 'fwdKey')) {
+            params.push('after=' + connLogLastSeq);
         }
+        if (connLogPreset && connLogPreset.kind === 'fwdKey') {
+            // Server-side chain filter: full snapshot each time, no seq cursor.
+            params.push('fwdKey=' + encodeURIComponent(connLogPreset.value));
+        }
+        if (params.length) url += '?' + params.join('&');
         const res = await fetch(url);
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();

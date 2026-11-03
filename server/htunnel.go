@@ -22,8 +22,7 @@ import (
 	"phaethon/util"
 )
 
-const (
-)
+const ()
 
 var errReadTimeout = errors.New("read timeout")
 
@@ -66,9 +65,9 @@ type htChannel struct {
 	isMesh    bool // P2P direct mesh channel (frames in POST/GET bodies)
 
 	// mesh channel queues (only used when isMesh is true)
-	meshIn     chan meshMsg       // client → local P2P session (fed by POST handler)
-	meshOut    chan meshMsg       // frames → client (drained by GET)
-	getWaiters chan *meshWaiter   // waiting GET requests (for concurrent GET support)
+	meshIn     chan meshMsg     // client → local P2P session (fed by POST handler)
+	meshOut    chan meshMsg     // frames → client (drained by GET)
+	getWaiters chan *meshWaiter // waiting GET requests (for concurrent GET support)
 
 	// Cached results for step==0 retry
 	lastReadData []byte
@@ -1103,11 +1102,12 @@ func (s *HTunnelServer) proxyReadLoop(ctx context.Context, ch *htChannel, pc net
 func connectHTTarget(mapping *config.Mapping, dstHost string, dstPort int, connID string) (net.Conn, *connlog.Record, error) {
 	util.LogModuleInfo("htunnel", "[%s] [%s] %s:%d mesh dial connecting", mapping.Name, connID, dstHost, dstPort)
 	rec := connlog.Start("HTunnel:"+mapping.Name, "TCP", "", dstHost).Resolve(dstHost, dstPort, &config.MatchResult{ProxyName: "MESH"})
-	conn, err := dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name, mapping)
+	conn, fwdKey, err := dialer.MeshDial(dstHost, dstPort, "", "HTunnel:"+mapping.Name, mapping)
 	if err != nil {
 		rec.Fail(err)
 		return nil, nil, err
 	}
+	rec.SetFwdKey(fwdKey)
 	rec.Establish(connID, nil, false)
 	return conn, rec, nil
 }

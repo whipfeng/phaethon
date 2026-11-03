@@ -162,6 +162,16 @@ VM 留跑期间 StallMonitor rule 0 触发，写 `goroutine-dump-20261102-135925
 - **阶段二停滞 dump 已实现**（精准 dump 阶梯，2026-11-02，见 docs/plans/stall-monitor-precise-dump-ladder.md）：关键循环进展足迹（TUN readPackets / WritePackets / peer 入向计数器）由 StallMonitor 旁观；卡死=部分冻结签名（freezeWindow=60s）触发 rule 0/1/2 → L1 KB 级快照行 + 判态 → L2 双腿主动探测 → 确认 phaethon 侧嫌疑才写全量 dump（rule 2 host 腿活 = host-silent 良性直接跳过）。断网可取证：不侵入阻塞调用、不拿业务锁。**待部署 VM 生效**，部署后 `POST /debug/stall-probe` 自检
 - 复现验证用跨平台 Win↔Linux 全链路（含 wintun/tun，不绕开 TUN 层）
 
+## dump 205230 运行时证据（2026-11-02 20:52，待分析）
+
+VM 留跑期间 StallMonitor rule 0 第二次触发，写 `goroutine-dump-20261102-205230.log`。**尚未分析，先记录事实**：
+
+- 版本 `v0.8.0-239-g8f23e13`，uptime 51m0s（非 <5min 启动误报形态）
+- trigger=`auto:A-rising-D-frozen(outbound-blackhole)`；Dvip 冻结 90s（83568 不动），A/B 持续在走
+- peers 全健康（qg SRTT 37ms、gg 163ms、consecLost 全 0），mesh 双腿探测全活（100.0.0.3×2、100.179.0.3），`disposition: ping-healthy`，channel drop 全 0
+- 精准 dump 阶梯（stall-snapshot + stall-probes 结构）确认已在 VM 生效运行
+- 签名与 135925 同型（VM 内部无持锁卡死 + ping-healthy），dump 内无可定的 B 触发源
+
 ## 2026-11-03 iperf3 吞吐验证未遂：轻症形态复测记录
 
 深度验证第一项（iperf3 mesh 链路吞吐）未遂，**复测证据与本文档轻症症状完全一致**，记录备查：

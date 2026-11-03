@@ -53,8 +53,8 @@
             </div>
         </div>
     </div>
-    <div class="card">
-        <h3 data-i18n="dash.sysInfo">System Info</h3>
+    <div class="card" id="dash-sysinfo-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.sysInfo">System Info</span></h3>
         <table class="info-table">
             <tr><td data-i18n="dash.version">Version</td><td>{{.Version}}</td></tr>
             <tr><td data-i18n="dash.uptime">Uptime</td><td>{{formatUptime .UptimeSeconds}}</td></tr>
@@ -65,8 +65,8 @@
     <!-- TUN Summary -->
     {{if .TUNAvailable}}
     <div class="card" id="tun-summary-card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <h3 style="margin:0;" data-i18n="tun.title">🌐 TUN</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;" data-collapse>
+            <h3 style="margin:0;"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="tun.title">🌐 TUN</span></h3>
             <a href="./tun" hx-get="./tun" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" class="btn btn-sm btn-outline" data-i18n="common.details">详情 →</a>
         </div>
         <div id="tun-summary"><p class="text-muted" data-i18n="common.loading">Loading...</p></div>
@@ -76,8 +76,8 @@
     <!-- Mesh Summary -->
     {{if .MeshEnabled}}
     <div class="card" id="mesh-summary-card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <h3 style="margin:0;">Mesh</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;" data-collapse>
+            <h3 style="margin:0;"><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> Mesh</h3>
             <a href="./mesh" hx-get="./mesh" hx-target="#main-content" hx-swap="innerHTML" hx-push-url="true" class="btn btn-sm btn-outline" data-i18n="common.details">详情 →</a>
         </div>
         <div id="mesh-summary"><p class="text-muted" data-i18n="common.loading">Loading...</p></div>
@@ -86,8 +86,8 @@
 
     <!-- Listener Status -->
     {{if index .Stats "listenerStatus"}}
-    <div class="card">
-        <h3 data-i18n="dash.listeners">Listeners</h3>
+    <div class="card" id="dash-listeners-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.listeners">Listeners</span></h3>
         <table class="data-table">
             <thead>
                 <tr><th data-i18n="dash.listenerName">Name</th><th data-i18n="dash.listenerType">Type</th><th data-i18n="dash.listenerPort">Port</th><th data-i18n="dash.listenerStatus">Status</th></tr>
@@ -108,8 +108,8 @@
 
     <!-- Health Status -->
     {{if index .Stats "healthData"}}
-    <div class="card">
-        <h3 data-i18n="dash.health">Health Checks</h3>
+    <div class="card" id="dash-health-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.health">Health Checks</span></h3>
         {{range $group, $health := index .Stats "healthData"}}
         <div class="health-group">
             <h4>{{$group}}</h4>
@@ -132,8 +132,8 @@
     {{end}}
 
     <!-- Security Settings -->
-    <div class="card">
-        <h3 data-i18n="security.title">🔐 Security</h3>
+    <div class="card" id="dash-security-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="security.title">🔐 Security</span></h3>
         <div id="security-status">
             <p data-i18n="security.loading">Loading...</p>
         </div>
@@ -144,8 +144,8 @@
     </div>
 
     <!-- Quick Actions -->
-    <div class="card actions-card">
-        <h3 data-i18n="dash.quickActions">Quick Actions</h3>
+    <div class="card actions-card" id="dash-actions-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="dash.quickActions">Quick Actions</span></h3>
         <div class="action-buttons">
             <button onclick="location.href='proxies'" class="btn" data-i18n="dash.manageProxies">Manage Proxies</button>
             <button onclick="location.href='rules'" class="btn" data-i18n="dash.editRules">Edit Rules</button>

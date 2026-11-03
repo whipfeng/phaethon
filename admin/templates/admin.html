@@ -2,8 +2,8 @@
 {{define "content"}}
 <div class="page-content">
     <div class="card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-            <h3 data-i18n="admin.title">Admin Settings</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.title">Admin Settings</span></h3>
             <button onclick="saveAdminSettings(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
         </div>
         <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.help">Configure admin panel access. Changes require password confirmation.</p>

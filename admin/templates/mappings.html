@@ -1,9 +1,9 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
-    <div class="card">
-        <div class="card-header">
-            <h3><span data-i18n="map.title">Mappings</span> ({{len .Mappings}})</h3>
+    <div class="card" id="mappings-card">
+        <div class="card-header" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="map.title">Mappings</span> ({{len .Mappings}})</h3>
             <button onclick="showAddMapping()" class="btn btn-primary btn-sm" data-i18n="map.add">+ Add Mapping</button>
         </div>
 
@@ -69,8 +69,8 @@
     {{$hasPorts := false}}
     {{range .Mappings}}{{if and (not .ReverseAddress) .IsEnabled}}{{$hasPorts = true}}{{end}}{{end}}
     {{if $hasPorts}}
-    <div class="card">
-        <h3>📡 <span data-i18n="map.portSummary">监听端口</span></h3>
+    <div class="card" id="map-ports-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> 📡 <span data-i18n="map.portSummary">监听端口</span></h3>
         <div class="port-grid">
             {{range .Mappings}}
             {{if and (not .ReverseAddress) .IsEnabled}}
@@ -89,8 +89,8 @@
     {{$hasReverse := false}}
     {{range .Mappings}}{{if and .ReverseAddress .IsEnabled}}{{$hasReverse = true}}{{end}}{{end}}
     {{if $hasReverse}}
-    <div class="card">
-        <h3>🔄 <span data-i18n="map.reverseSummary">反向连接</span></h3>
+    <div class="card" id="map-reverse-card">
+        <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> 🔄 <span data-i18n="map.reverseSummary">反向连接</span></h3>
         <div class="reverse-grid">
             {{range .Mappings}}
             {{if and .ReverseAddress .IsEnabled}}

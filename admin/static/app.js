@@ -1370,8 +1370,8 @@ function updateTUNSummary(data) {
 
 // ===== Route tree renderer (shared by mesh CIDR prefix tree + domain suffix tree) =====
 // Backend node shape: {label, full, owners[], children[]}. Owner-less nodes
-// are aggregate path nodes — faded. First two levels default expanded on the
-// first render; afterwards the previous expansion state is restored so
+// are aggregate path nodes — faded. All levels default expanded on the first
+// render; afterwards the previous expansion state is restored so
 // version-driven re-fetches don't collapse the tree under the user.
 function renderRouteTree(host, forest, emptyI18nKey) {
     const expanded = snapshotRouteTreeExpansion(host);
@@ -1431,7 +1431,7 @@ function routeTreeRow(node, depth, path, expanded) {
     if (hasKids) {
         const kids = document.createElement('div');
         kids.className = 'route-tree-kids';
-        const isOpen = expanded ? expanded.has(key) : depth < 1;
+        const isOpen = expanded ? expanded.has(key) : true;
         if (!isOpen) kids.style.display = 'none';
         node.children.forEach(child => kids.appendChild(routeTreeRow(child, depth + 1, key, expanded)));
         wrap.appendChild(kids);

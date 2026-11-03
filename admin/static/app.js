@@ -2460,12 +2460,14 @@ async function triggerMeshGossip() {
 }
 
 let connLogLastSeq = 0;
+let connLogBoot = null;         // server process identity; change => restart, cursor invalid
 
 // ===== Active Connections =====
 var activeConnsMap = new Map();
 var activeConnsRows = new Map(); // conn id -> rendered <tr>
 var activeConnsTable = null;     // persistent <table>, tbody reused across renders
 var activeConnsLastSeq = 0;
+var activeConnsBoot = null;      // server process identity; change => restart, cursor invalid
 var activeConnsTimer = null;
 
 function formatDuration(ms) {
@@ -2490,6 +2492,20 @@ async function fetchActiveConns(incremental) {
         const res = await fetch(url);
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();
+
+        if (data.boot !== activeConnsBoot) {
+            // Server process restarted: our seq cursor belongs to the old
+            // process and journal seqs have restarted from zero. Discard
+            // everything and pull a full snapshot.
+            const hadCursor = activeConnsLastSeq > 0;
+            activeConnsBoot = data.boot;
+            activeConnsMap.clear();
+            activeConnsLastSeq = 0;
+            if (hadCursor) {
+                fetchActiveConns(false);
+                return;
+            }
+        }
 
         if (data.stale) {
             activeConnsMap.clear();
@@ -2516,6 +2532,15 @@ function renderActiveConns() {
     const el = document.getElementById('active-conns-list');
     const countEl = document.getElementById('active-conn-count');
     if (!el) return;
+
+    // htmx menu navigation destroys #main-content DOM: a previously built
+    // table/rows may be detached from the document. Holding on to them
+    // would render into nowhere and leave the placeholder visible, so
+    // drop stale references and rebuild against the live element.
+    if (activeConnsTable && !activeConnsTable.isConnected) {
+        activeConnsTable = null;
+        activeConnsRows.clear();
+    }
 
     const conns = Array.from(activeConnsMap.values());
     conns.forEach(c => { c._startMs = +new Date(c.startTime); });
@@ -2698,6 +2723,7 @@ async function openConnsPopup() {
         const autoRefreshEl = pipWindow.document.getElementById('connpip-autorefresh');
         let pipConnsMap = new Map();
         let pipLastSeq = 0;
+        let pipBoot = null;
         let pipSelectedConnId = null;
 
         function renderPipConns() {
@@ -2751,6 +2777,17 @@ async function openConnsPopup() {
                 const res = await fetch(url);
                 if (!res.ok) throw new Error('status ' + res.status);
                 const data = await res.json();
+                if (data.boot !== pipBoot) {
+                    // Server restarted: discard cursor and resync full.
+                    const hadCursor = pipLastSeq > 0;
+                    pipBoot = data.boot;
+                    pipConnsMap.clear();
+                    pipLastSeq = 0;
+                    if (hadCursor) {
+                        fetchPipConns();
+                        return;
+                    }
+                }
                 if (data.stale) {
                     pipConnsMap.clear();
                     if (data.connections) data.connections.forEach(c => pipConnsMap.set(c.id, c));
@@ -2876,12 +2913,25 @@ async function fetchConnections(incremental) {
         const res = await fetch(url);
         if (!res.ok) throw new Error('status ' + res.status);
         const data = await res.json();
-        if (!incremental) {
+        if (data.boot !== connLogBoot) {
+            // Server restarted: seq cursor belongs to the old process.
+            const hadCursor = connLogLastSeq > 0;
+            connLogBoot = data.boot;
+            connLogLastSeq = 0;
+            if (hadCursor) {
+                fetchConnections(false);
+                return;
+            }
+        }
+        // data.stale: full snapshot (first load, or server restarted and
+        // our seq cursor predates the reset). Reset before appending so
+        // incremental mode never duplicates lines.
+        if (data.stale) {
             connLogLines = [];
             el.textContent = '';
         }
         if (!data.logs || data.logs.length === 0) {
-            if (!incremental) connLogRenderAll(el);
+            if (data.stale) connLogRenderAll(el);
             return;
         }
         connLogAppend(el, data.logs.map(connLogFormatEntry));
@@ -3063,6 +3113,7 @@ async function openLogsPopup() {
             const autoScrollEl = pipWindow.document.getElementById('pip-autoscroll');
             const baseUrl = window.location.origin;
             let lastSeq = 0;
+            let pipLogBoot = null;
             let logCount = 0;
 
             function appendLog(e) {
@@ -3133,6 +3184,19 @@ async function openLogsPopup() {
                     const res = await fetch(url);
                     if (!res.ok) throw new Error('status ' + res.status);
                     const data = await res.json();
+                    if (data.boot !== pipLogBoot) {
+                        // Server restarted: our seq cursor is invalid.
+                        pipLogBoot = data.boot;
+                        lastSeq = 0;
+                        fetchLogs(true);
+                        return;
+                    }
+                    if (data.stale && !full) {
+                        // Server sent a full snapshot in response to an
+                        // incremental request (restart/resync): re-render
+                        // as a full load to avoid duplicating lines.
+                        full = true;
+                    }
                     if (!data.logs || data.logs.length === 0) {
                         if (full) {
                             logsEl.textContent = i18n.t('pip.noLogs');

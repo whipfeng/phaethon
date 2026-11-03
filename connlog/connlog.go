@@ -107,16 +107,23 @@ func GetLogs() []Event {
 	return result
 }
 
-func GetLogsAfterSeq(seq uint64) []Event {
+func GetLogsAfterSeq(seq uint64) (result []Event, stale bool) {
 	mu.RLock()
 	defer mu.RUnlock()
-	var result []Event
+	if seq > version.Load() {
+		// Cursor from before a process restart (version counter reset):
+		// seqs no longer reach it, so return a full snapshot and let the
+		// client resync instead of freezing on an empty incremental.
+		out := make([]Event, len(logs))
+		copy(out, logs)
+		return out, true
+	}
 	for _, e := range logs {
 		if e.Seq > seq {
 			result = append(result, e)
 		}
 	}
-	return result
+	return result, false
 }
 
 func GetVersion() uint64 {

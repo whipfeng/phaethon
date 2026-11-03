@@ -45,6 +45,10 @@ func readVersion(topic string) uint64 {
 	return version
 }
 
+// BootVersion returns the process-start counter: incremented on every
+// process boot, so clients can detect restarts and discard stale seq cursors.
+func BootVersion() uint64 { return readVersion("boot") }
+
 // readAllVersions 读取所有版本号
 func readAllVersions() map[string]uint64 {
 	result := make(map[string]uint64)

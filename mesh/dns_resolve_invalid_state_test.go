@@ -20,6 +20,7 @@ func (f *fakePeerSender) Send(data []byte) error {
 	return nil
 }
 func (f *fakePeerSender) SendGossip(data []byte)          {}
+func (f *fakePeerSender) GossipFields() (bool, int)       { return false, 0 }
 func (f *fakePeerSender) GetNodeID() string               { return "qgw" }
 func (f *fakePeerSender) GetProxyName() string            { return "" }
 func (f *fakePeerSender) GetLocalSeq() uint16             { return 0 }

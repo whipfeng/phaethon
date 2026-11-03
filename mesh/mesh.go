@@ -80,6 +80,11 @@ type PeerSender interface {
 	GetFriendlyName() string // friendly name (proxy name, for display only)
 	HasProxy() bool          // true if this is an active (outbound) connection
 	GetLinkNIC() *LinkNIC    // direct LinkNIC held by this link (design §5.6)
+	// GossipFields returns this link's UDP leg negotiation fields (udp/udpPort)
+	// for gossip injection. Every gossip build path must inject them — a gossip
+	// without these fields reads as "not advertising" on the peer and tears
+	// down negotiation (design §3 实现修订 R1).
+	GossipFields() (bool, int)
 }
 
 // ErrPeerStopped is returned by a peer's Send when the peer has been
@@ -2729,6 +2734,9 @@ func (m *MeshManager) broadcastGossip() {
 			Routes:          routes,
 			ClaimedSubnets:  claims,
 		}
+		// UDP 腿协商字段必须经每条 gossip 路径注入（设计 §3 R1）：缺省即"停止宣告"，
+		// 会把对端 FSM 协商状态周期性强拆。
+		info.UDP, info.UDPPort = peer.Sender.GossipFields()
 		data, err := json.Marshal(info)
 		if err != nil {
 			continue

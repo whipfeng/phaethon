@@ -212,7 +212,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 	// Send success response
 	sendSocks5Response(clientConn, 0x00)
 
-	// Handshake complete — clear the deadline so the relay idle timeout takes over.
+	// Handshake complete — clear the deadline; the relay has no idle timeout.
 	if ds, ok := clientConn.(interface{ SetReadDeadline(time.Time) error }); ok {
 		ds.SetReadDeadline(time.Time{})
 	}

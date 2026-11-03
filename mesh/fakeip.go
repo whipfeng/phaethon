@@ -134,6 +134,13 @@ func (p *FakeIPPool) Lookup(domain string) net.IP {
 		ipStr := ip.String()
 		if oldDomain, exists := p.ipToDomain[ipStr]; exists {
 			delete(p.domainToIP, oldDomain)
+			// Keep the DB consistent with the in-memory eviction, otherwise
+			// the fakeip table grows without bound (audit item 13).
+			if db.IsInitialized() {
+				if err := db.DeleteFakeIP(oldDomain, ipStr); err != nil {
+					util.LogModuleWarn("dns", "[FAKEIP] Failed to delete evicted mapping %s -> %s: %v", oldDomain, ipStr, err)
+				}
+			}
 		}
 		p.domainToIP[domain] = ip
 		p.ipToDomain[ipStr] = domain

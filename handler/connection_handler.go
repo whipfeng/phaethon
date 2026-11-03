@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"phaethon/config"
 	"phaethon/connlog"
@@ -468,35 +466,11 @@ func proxyDesc(p *config.Proxy) string {
 	return p.Name
 }
 
-// relay copies data bidirectionally between two TCP connections with idle timeout.
+// relay copies data bidirectionally between two TCP connections.
+// No idle timeout: a middlebox must not cap connection lifetime — idle
+// connections are cleaned up by TCP keepalive (gVisor/OS) when the peer
+// actually dies, not by an application-level guess.
 func relay(conn, target net.Conn) {
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
-
-	done := make(chan struct{})
-	defer close(done)
-
-	// Watchdog: close connection if idle for 5 minutes. This reclaims resources
-	// from abandoned connections (e.g., NAT drops mapping, client crashes without
-	// sending FIN). Applications must send data within 5 minutes to keep alive.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if time.Since(time.Unix(0, lastActivity.Load())) > 5*time.Minute {
-					util.LogModuleInfo("handler", "[MESH] relay idle timeout: connection idle for 5 minutes, closing")
-					conn.Close()
-					target.Close()
-					return
-				}
-			}
-		}
-	}()
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -504,10 +478,8 @@ func relay(conn, target net.Conn) {
 		defer wg.Done()
 		buf := make([]byte, 32*1024)
 		for {
-			lastActivity.Store(time.Now().UnixNano())
 			n, err := conn.Read(buf)
 			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
 				if _, werr := target.Write(buf[:n]); werr != nil {
 					return
 				}
@@ -525,10 +497,8 @@ func relay(conn, target net.Conn) {
 		defer wg.Done()
 		buf := make([]byte, 32*1024)
 		for {
-			lastActivity.Store(time.Now().UnixNano())
 			n, err := target.Read(buf)
 			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
 				if _, werr := conn.Write(buf[:n]); werr != nil {
 					return
 				}
@@ -546,36 +516,11 @@ func relay(conn, target net.Conn) {
 }
 
 // relayUDP copies datagrams between the netstack UDP connection and the target
-// PacketConn, preserving datagram boundaries. Uses a watchdog goroutine to
-// enforce a 30-second idle timeout, preventing goroutine leaks when the remote
-// stops responding.
+// PacketConn, preserving datagram boundaries. No idle timeout: idle QUIC/DNS
+// flows must survive (UDP has no keepalive; a crashed client leaves at most
+// two goroutines, bounded by the netstack association lifecycle).
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
-
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
-
-	done := make(chan struct{})
-	defer close(done)
-
-	// Watchdog: close connection if idle for 30 seconds
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if time.Since(time.Unix(0, lastActivity.Load())) > 30*time.Second {
-					util.LogModuleInfo("handler", "[MESH] relayUDP idle timeout: connection idle for 30 seconds, closing")
-					netstackConn.Close()
-					targetConn.Close()
-					return
-				}
-			}
-		}
-	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -587,7 +532,6 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, err := netstackConn.Read(buf)
 			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
 				if _, err := targetConn.WriteTo(buf[:n], dstAddr); err != nil {
 					return
 				}
@@ -605,7 +549,6 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, _, err := targetConn.ReadFrom(buf)
 			if n > 0 {
-				lastActivity.Store(time.Now().UnixNano())
 				if _, err := netstackConn.Write(buf[:n]); err != nil {
 					return
 				}

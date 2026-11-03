@@ -155,6 +155,16 @@ func (s *peerSender) SendGossip(data []byte) {
 	enqueueWrite(s.peer, frame.FrameGossip, data, true) // control frame, reliable delivery
 }
 
+// GossipFields returns this link's UDP leg negotiation fields (udp/udpPort)
+// for mesh-layer gossip injection (design §3 R1: every gossip build path
+// must carry them; absence reads as "not advertising" on the peer).
+func (s *peerSender) GossipFields() (bool, int) {
+	if s.peer.leg == nil {
+		return false, 0
+	}
+	return s.peer.leg.gossipFields()
+}
+
 func (s *peerSender) GetNodeID() string {
 	return s.nodeID
 }

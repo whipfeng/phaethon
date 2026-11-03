@@ -319,7 +319,7 @@ type routeTable struct {
 	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
 	nodeMap    map[string]*nodeInfo      // nodeID → info
 	bestPaths   map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
-	subnetOwner map[string]string         // masked subnet ("100.212.0.0/16") → nodeID, for u-turn detection (Phase C)
+	subnetOwner map[[4]byte]string      // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -1158,17 +1158,21 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	// gVisor's ipip_protocol handler will decapsulate IPIP packets inside the stack
 	// when the outer destination is our local EIP.
 	dstIP := extractDstIP(frame)
-	srcIP := net.IP(frame[12:16])
 	if dstIP == nil {
 		util.LogModuleWarn("mesh", "[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
 		return
 	}
-	if len(frame) >= 20 && frame[9] == 6 {
+	// Debug logs below build net.IP values per packet — gate everything on one
+	// level check so the closed-debug hot path pays nothing (audit item 9).
+	debugOn := util.GetModuleLogLevel("mesh") <= util.LogLevelDebug
+	if debugOn && len(frame) >= 20 && frame[9] == 6 {
+		srcIP := net.IP(frame[12:16])
 		dstPort := uint16(frame[22])<<8 | uint16(frame[23])
 		util.LogModuleDebug("mesh", "[MESH] recv TCP from %s: src=%s dst=%s:%d len=%d", fromNodeID, srcIP, dstIP, dstPort, len(frame))
 	}
 	// Log IPIP packets (proto=4) at INFO level for debugging
-	if len(frame) >= 20 && frame[9] == 4 {
+	if debugOn && len(frame) >= 20 && frame[9] == 4 {
+		srcIP := net.IP(frame[12:16])
 		util.LogModuleDebug("mesh", "[MESH] recv IPIP from %s: src=%s dst=%s proto=%d len=%d",
 			fromNodeID, srcIP, dstIP, frame[9], len(frame))
 	}
@@ -1182,24 +1186,33 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	// unconditionally below.
 	if dst4 := dstIP.To4(); dst4 != nil && m.subnet != nil {
 		rt := m.getRouteTable()
-		if target, ok := rt.subnetOwner[dst4.Mask(m.subnet.Mask).String()]; ok && target != m.nodeID {
-			if bp, ok2 := rt.bestPaths[target]; ok2 && bp.NextHop == fromNodeID {
-				atomic.AddUint64(&m.uturnCount, 1)
-				m.uturnLogMu.Lock()
-				shouldLog := time.Since(m.lastUturnLog) > time.Minute
-				if shouldLog {
-					m.lastUturnLog = time.Now()
-				}
-				m.uturnLogMu.Unlock()
-				if shouldLog {
-					util.LogModuleWarn("mesh", "[MESH-U-TURN] loop suspected: frame for target=%s arrived from %s which IS our best nextHop (src=%s dst=%s proto=%d TTL=%d); forwarding views inconsistent",
-						target, fromNodeID, srcIP, dstIP, frame[9], frame[8])
+		// Key is the 4-byte masked network address ([4]byte, zero-alloc);
+		// built with the same encoding in rebuildRoutes (audit item 11).
+		masked := dst4.Mask(m.subnet.Mask)
+		if masked != nil {
+			var skey [4]byte
+			copy(skey[:], masked)
+			if target, ok := rt.subnetOwner[skey]; ok && target != m.nodeID {
+				if bp, ok2 := rt.bestPaths[target]; ok2 && bp.NextHop == fromNodeID {
+					atomic.AddUint64(&m.uturnCount, 1)
+					m.uturnLogMu.Lock()
+					shouldLog := time.Since(m.lastUturnLog) > time.Minute
+					if shouldLog {
+						m.lastUturnLog = time.Now()
+					}
+					m.uturnLogMu.Unlock()
+					if shouldLog {
+						util.LogModuleWarn("mesh", "[MESH-U-TURN] loop suspected: frame for target=%s arrived from %s which IS our best nextHop (src=%s dst=%s proto=%d TTL=%d); forwarding views inconsistent",
+							target, fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], frame[8])
+					}
 				}
 			}
 		}
 	}
-	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
-		fromNodeID, srcIP, dstIP, frame[9], frame[8], len(frame))
+	if debugOn {
+		util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame from %s: src=%s dst=%s proto=%d TTL=%d len=%d",
+			fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], frame[8], len(frame))
+	}
 
 	// Stall-monitor D counters: only frames whose arrival must be followed by a
 	// TUN write (B) — dst==VIP leaves NIC 1 directly; IPIP-to-EIP decapsulates
@@ -1986,14 +1999,23 @@ func (m *MeshManager) recomputeRoutes() {
 	// each route snapshot so HandleMeshFrame lookups stay O(1). Covers every
 	// address in a node's /16 (VIP/hostIP/GIP/EIP/fakeIP), so both relay
 	// paths (bare mesh-CIDR packets and IPIP-encapsulated) are detected.
-	subnetOwner := make(map[string]string, len(nodeMap)+1)
+	// Key is the 4-byte masked network address (zero-alloc).
+	subnetOwner := make(map[[4]byte]string, len(nodeMap)+1)
 	for target, info := range nodeMap {
 		if info.subnet != nil {
-			subnetOwner[info.subnet.String()] = target
+			if ip4 := info.subnet.IP.Mask(info.subnet.Mask).To4(); ip4 != nil {
+				var key [4]byte
+				copy(key[:], ip4)
+				subnetOwner[key] = target
+			}
 		}
 	}
 	if m.subnet != nil {
-		subnetOwner[m.subnet.String()] = m.nodeID
+		if ip4 := m.subnet.IP.Mask(m.subnet.Mask).To4(); ip4 != nil {
+			var key [4]byte
+			copy(key[:], ip4)
+			subnetOwner[key] = m.nodeID
+		}
 	}
 
 	// Atomically swap in the new route table (lock-free for readers)

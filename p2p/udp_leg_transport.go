@@ -55,6 +55,14 @@ type udpLegTransport struct {
 	epMu sync.Mutex
 	ep   *udpLegEndpoint // passive side
 
+	// gossipNotify re-sends this link's gossip so the query-style udp/udpPort
+	// injection (gossipFields) actually reaches the peer: the one-shot
+	// session-establishment gossip fires before the FSM leaves None, so the
+	// negotiation fields must be re-notified periodically while advertising.
+	gossipNotifyMu   sync.Mutex
+	gossipNotify     func()
+	lastGossipNotify time.Time
+
 	legDrops uint64 // atomic: inbound/outbound datagram drops
 }
 
@@ -326,7 +334,10 @@ func (t *udpLegTransport) onPeerGossip(peerUDP bool, peerPort int) {
 	t.executeActions(acts)
 }
 
-// tickLoop drives FSM timers (K reflux timeout, R backoff).
+// tickLoop drives FSM timers (K reflux timeout, R backoff) and re-notifies
+// gossip while the leg advertises, so udp/udpPort fields keep flowing to the
+// peer after the FSM leaves None (the session-establishment gossip predates
+// it).
 func (t *udpLegTransport) tickLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -337,11 +348,32 @@ func (t *udpLegTransport) tickLoop() {
 		case now := <-ticker.C:
 			t.fsmMu.Lock()
 			acts := t.fsm.Tick(now)
+			advertising := t.fsm.ShouldAdvertise()
 			t.fsmMu.Unlock()
 			t.executeActions(acts)
 			t.maybeRedial(now)
+			if advertising {
+				t.gossipNotifyMu.Lock()
+				fn := t.gossipNotify
+				due := fn != nil && now.Sub(t.lastGossipNotify) >= 5*time.Second
+				if due {
+					t.lastGossipNotify = now
+				}
+				t.gossipNotifyMu.Unlock()
+				if due {
+					fn()
+				}
+			}
 		}
 	}
+}
+
+// SetGossipNotify registers the callback that re-sends this link's gossip.
+// Called by the p2p layer once the peer is wired for writes.
+func (t *udpLegTransport) SetGossipNotify(fn func()) {
+	t.gossipNotifyMu.Lock()
+	defer t.gossipNotifyMu.Unlock()
+	t.gossipNotify = fn
 }
 
 // maybeRedial drives the R-backoff redial while the FSM sits in Advertising

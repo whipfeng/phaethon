@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -494,13 +495,14 @@ func proxyDesc(p *config.Proxy) string {
 	return p.Name
 }
 
-// relay copies data bidirectionally between two TCP connections.
+// relay copies data bidirectionally between conn and target.
 // No idle timeout: a middlebox must not cap connection lifetime — idle
 // connections are cleaned up by TCP keepalive (gVisor/OS) when the peer
-// relay copies data bidirectionally between conn and target. When either
-// direction encounters an error, both connections are closed immediately to
-// ensure resources (especially gVisor endpoints) are released. The previous
-// half-close approach could hang indefinitely if the peer didn't respond.
+// actually dies, not by an application-level guess.
+// Direction policy: a clean EOF on one side propagates via CloseWrite so
+// half-close semantics survive (Close fallback); any real read/write error
+// hard-closes both sides so the blocked reverse direction unblocks and the
+// caller's deferred cleanup (gVisor endpoints) runs.
 func relay(conn, target net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -512,10 +514,18 @@ func relay(conn, target net.Conn) {
 			n, err := conn.Read(buf)
 			if n > 0 {
 				if _, werr := target.Write(buf[:n]); werr != nil {
+					conn.Close()
+					target.Close()
 					return
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					util.CloseWriteOrClose(target)
+				} else {
+					conn.Close()
+					target.Close()
+				}
 				return
 			}
 		}
@@ -528,10 +538,18 @@ func relay(conn, target net.Conn) {
 			n, err := target.Read(buf)
 			if n > 0 {
 				if _, werr := conn.Write(buf[:n]); werr != nil {
+					conn.Close()
+					target.Close()
 					return
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					util.CloseWriteOrClose(conn)
+				} else {
+					conn.Close()
+					target.Close()
+				}
 				return
 			}
 		}

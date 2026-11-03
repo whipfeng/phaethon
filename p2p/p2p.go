@@ -1036,7 +1036,6 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		peer.leg = wrapped
 		peer.transport = wrapped
 	}
-
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
@@ -1046,6 +1045,11 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	m.peers[peer.ID] = peer
 	m.mu.Unlock()
 
+	// UDP leg: keep the negotiation fields (udp/udpPort) flowing to the peer —
+	// the session-establishment gossip predates the FSM leaving None.
+	if wrapped, ok := peer.transport.(*udpLegTransport); ok {
+		wrapped.SetGossipNotify(func() { m.broadcastGossipToPeer(peer) })
+	}
 	defer func() {
 		stopPeer(peer)
 		m.mu.Lock()
@@ -1343,6 +1347,13 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.SetStatus("connecting")
 		peer.SetLastError("") // dial succeeded — clear stale error (issue 问题6)
 		m.notifyStatusChange()
+
+		// UDP leg: keep the negotiation fields (udp/udpPort) flowing to the
+		// peer — the session-establishment gossip below predates the FSM
+		// leaving None, so the leg re-notifies while advertising.
+		if wrapped, ok := peer.transport.(*udpLegTransport); ok {
+			wrapped.SetGossipNotify(func() { m.broadcastGossipToPeer(peer) })
+		}
 		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
 		// Run session in a closure so we can use defer for cleanup

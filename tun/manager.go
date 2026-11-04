@@ -597,9 +597,12 @@ func (e *Manager) StartTUN() error {
 
 	// Redirect system DNS to the dedicated DNS address in the TUN subnet
 	// so applications send queries that route through TUN to DNSHijacker.
+	// The service is matched by the PHYSICAL interface (DefaultIfaceName):
+	// passing the TUN device name matches nothing — candidates exclude
+	// utun/tun devices — and the redirect silently no-ops.
 	dnsAddr := e.netstack.DNSAddr()
 	dnsIP := net.IP(dnsAddr.AsSlice())
-	if err := setSystemDNS(dev.Name(), dnsIP.String()); err != nil {
+	if err := setSystemDNS(e.routeMgr.DefaultIfaceName, dnsIP.String()); err != nil {
 		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
 

@@ -18,6 +18,26 @@ import (
 	"phaethon/util"
 )
 
+// residualTUNIP derives the expected TUN interface address (mesh subnet+2,
+// same convention as mesh.getHostIP and Manager.ConfigureMeshAddresses) for
+// matching residual TUN interfaces from a previous abnormal exit. Returns nil
+// when the subnet is unavailable, in which case cleanup falls back to legacy
+// 198.18/15 matching and route cleanup only.
+func residualTUNIP(meshMgr *mesh.MeshManager) net.IP {
+	if meshMgr == nil || meshMgr.GetSubnet() == "" {
+		return nil
+	}
+	_, subnet, err := net.ParseCIDR(meshMgr.GetSubnet())
+	if err != nil {
+		return nil
+	}
+	ip4 := subnet.IP.To4()
+	if ip4 == nil {
+		return nil
+	}
+	return net.IP{ip4[0], ip4[1], ip4[2], ip4[3] + 2}
+}
+
 // startEngine creates and starts the engine.
 // The gVisor netstack (with DNS hijacker) is always started when there is a config,
 // so that proxy servers (Mode B) can use netstack sockets for DNS and connections.
@@ -45,7 +65,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			tunEnabled = false
 		} else {
 			// Clean up any residual TUN state from previous crashes before starting.
-			tun.CleanupResidual()
+			tun.CleanupResidual(residualTUNIP(meshMgr))
 		}
 	}
 

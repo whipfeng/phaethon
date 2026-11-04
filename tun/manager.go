@@ -49,8 +49,9 @@ type Manager struct {
 	netstack  *mesh.Netstack
 	routeMgr  *RouteManager
 	dhcpSrv   DHCPServer
-	prefixLen int
-	dataDir   string
+	prefixLen  int
+	meshHostIP net.IP // expected TUN interface address (subnet+2), used for residual cleanup matching
+	dataDir    string
 
 	// tunSrcTable records pre-SNAT source IPs from the read loop so the
 	// netstack forwarder can display the original TUN source (see
@@ -196,6 +197,7 @@ func (e *Manager) ConfigureMeshAddresses(subnet *net.IPNet) error {
 			e.prefixLen = 29
 		}
 		hostIP := net.IP{ip4[0], ip4[1], ip4[2], ip4[3] + 2}
+		e.meshHostIP = hostIP
 		util.LogModuleDebug("tun", "tun: mesh addresses: hostIP=%s prefixLen=%d", hostIP, e.prefixLen)
 	}
 	return nil
@@ -533,7 +535,7 @@ func (e *Manager) StartTUN() error {
 	}
 
 	// Clean up residual resources from previous abnormal exit
-	CleanupResidual()
+	CleanupResidual(e.meshHostIP)
 
 	// Create TUN device
 	dev, err := CreateDevice()

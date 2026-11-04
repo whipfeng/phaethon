@@ -14,9 +14,11 @@ import (
 )
 
 // CleanupResidual removes leftover routes, restores system DNS, kernel parameters,
-// and brings down any TUN interface that still holds the TUN IP address.
-// This is called by the watchdog when the main process crashes.
-func CleanupResidual() {
+// and clears any TUN interface that still holds the TUN address (or a legacy
+// 198.18.x.x address). This is called by the watchdog when the main process crashes.
+// tunIP is the expected TUN interface address (mesh subnet+2); nil skips the
+// address match.
+func CleanupResidual(tunIP net.IP) {
 	// 1. Delete split-tunnel routes
 	if link, err := netlink.LinkByName("tun0"); err == nil {
 		for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
@@ -115,14 +117,24 @@ func CleanupResidual() {
 				if ip4 == nil {
 					continue
 				}
-				if ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19 {
-					if out, err := exec.Command("ip", "link", "set", iface.Name, "down").CombinedOutput(); err != nil {
-						util.LogModuleWarn("cleanup", "cleanup ip link set %s down fail: %v, %s", iface.Name, err, out)
-					} else {
-						util.LogModuleInfo("cleanup", "cleanup brought %s down", iface.Name)
-					}
-					break
+				match := ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19
+				if !match && tunIP != nil {
+					match = ip4.Equal(tunIP.To4())
 				}
+				if !match {
+					continue
+				}
+				// Delete the address first: routes pinned to the interface are
+				// removed by the kernel along with the address.
+				if out, err := exec.Command("ip", "addr", "del", ip4.String()+"/32", "dev", iface.Name).CombinedOutput(); err != nil {
+					util.LogModuleWarn("cleanup", "cleanup ip addr del %s dev %s fail: %v, %s", ip4, iface.Name, err, out)
+				}
+				if out, err := exec.Command("ip", "link", "set", iface.Name, "down").CombinedOutput(); err != nil {
+					util.LogModuleWarn("cleanup", "cleanup ip link set %s down fail: %v, %s", iface.Name, err, out)
+				} else {
+					util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", iface.Name, ip4)
+				}
+				break
 			}
 		}
 	}

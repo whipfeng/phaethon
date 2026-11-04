@@ -1639,8 +1639,29 @@ function updateMeshSummary(data) {
     html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.nodeId') : 'Node ID') + '</td><td><code>' + (data.nodeId || '-') + '</code></td></tr>';
     html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.peers') : 'Peers') + '</td><td>' + peers.length + '</td></tr>';
     html += '<tr><td>' + (typeof i18n !== 'undefined' ? i18n.t('mesh.routeCount') : 'Routes') + '</td><td>' + (data.routeCount || 0) + '</td></tr>';
+    html += renderDropStatsRow(data.channelDropStats);
     html += '</table>';
     el.innerHTML = html;
+}
+
+// Renders a channel-drop-stats row for the mesh summary. Non-zero totals are
+// highlighted so queue saturation is visible without opening diagnostics.
+function renderDropStatsRow(stats) {
+    if (!stats) return '';
+    let peerDrops = 0;
+    const peerMap = stats.peers || {};
+    for (const k in peerMap) {
+        peerDrops += (peerMap[k].DataDrops || 0) + (peerMap[k].ControlChDrops || 0);
+    }
+    const total = peerDrops + (stats.meshInboundDrops || 0) +
+        (stats.tunWriteDrops || 0) + (stats.nicTxDrops || 0);
+    const fmt = (n) => '<span' + (n > 0 ? ' style="color:var(--warn-color,#e6a23c);font-weight:600"' : '') + '>' + n + '</span>';
+    const detail = 'peer:' + fmt(peerDrops) +
+        ' in:' + fmt(stats.meshInboundDrops || 0) +
+        ' tun:' + fmt(stats.tunWriteDrops || 0) +
+        ' nic:' + fmt(stats.nicTxDrops || 0);
+    const label = (typeof i18n !== 'undefined' ? i18n.t('mesh.dropStats') : 'Drop stats');
+    return '<tr><td>' + label + '</td><td>' + (total === 0 ? '0' : detail) + '</td></tr>';
 }
 
 // Global state for topology drag & Drop

@@ -171,7 +171,13 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 	}
 
 	// Single write for all frames
-	_, err := t.conn.Write(buf)
+	n, err := t.conn.Write(buf)
+	if err == nil && n != len(buf) {
+		// Partial write without error corrupts the frame stream — the peer
+		// would desync on the truncated buffer. Surface it so the caller
+		// tears down the transport (same handling as a write error).
+		err = io.ErrShortWrite
+	}
 
 	// Trace results
 	for _, f := range frames {

@@ -27,6 +27,7 @@ const (
 	rtfGATEWAY     = 0x2
 	rtfSTATIC      = 0x800
 	rtfPRCLONING   = 0x10000
+	rtfIFSCOPE     = 0x1000000
 	afINET         = 2
 	afLINK         = 18
 	iftOTHER       = 0x1 // utun registers IFT_OTHER (seen in RTM_GET replies)
@@ -304,4 +305,67 @@ func defaultRoute() (net.IP, string, error) {
 		return nil, "", fmt.Errorf("default route ifindex %d: %w", hdr.index, err)
 	}
 	return gw, iface.Name, nil
+}
+
+// routeGetIfIndex returns the interface index the kernel would use for dst
+// under the current routing table (RTM_GET). Structured replacement for
+// `route -n get <dst>` parsing; callers compare against the TUN index to
+// decide whether to fall back to the physical interface.
+func routeGetIfIndex(dst net.IP) (int, error) {
+	rs, err := newRouteSock()
+	if err != nil {
+		return 0, err
+	}
+	defer rs.close()
+	dstNet := &net.IPNet{IP: dst, Mask: net.CIDRMask(32, 32)}
+	msg := buildRouteMsg(rtmGet, 0, rtfUP, dstNet, nil, 0, rtaDST)
+	hdr, _, err := rs.execute(msg)
+	if err != nil {
+		return 0, err
+	}
+	if hdr.index == 0 {
+		return 0, fmt.Errorf("RTM_GET reply for %s has no interface index", dst)
+	}
+	return int(hdr.index), nil
+}
+
+// routeAddIfscopeDefault adds `default ifscope <ifIndex> via gw` — the scoped
+// default that lets IP_BOUND_IF sockets on the physical interface resolve
+// routes while the TUN holds the unscoped 0/1+128/1 hijack. IFSCOPE routes
+// are invisible to unscoped lookups, so user traffic is unaffected.
+// RTA_NETMASK is mandatory: without it the kernel accepts the route (netstat
+// shows UGScIg) but keys it outside the scoped tree, so scoped lookups and
+// route(8) both report "not in table" — verified empirically on macOS 12.
+// EEXIST means an identical scoped default is already present (e.g. leftover
+// from a SIGKILLed run); it is treated as applied so teardown still removes it.
+func routeAddIfscopeDefault(gw net.IP, ifIndex int) error {
+	rs, err := newRouteSock()
+	if err != nil {
+		return err
+	}
+	defer rs.close()
+	zero := &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
+	msg := buildRouteMsg(rtmAdd, ifIndex, rtfUP|rtfGATEWAY|rtfSTATIC|rtfIFSCOPE, zero, gw, 0, rtaDST|rtaGATEWAY|rtaNETMASK)
+	_, _, err = rs.execute(msg)
+	if err == syscall.Errno(17) { // EEXIST
+		return nil
+	}
+	return err
+}
+
+// routeDeleteIfscopeDefault deletes the scoped physical default; ESRCH is
+// not an error.
+func routeDeleteIfscopeDefault(gw net.IP, ifIndex int) error {
+	rs, err := newRouteSock()
+	if err != nil {
+		return err
+	}
+	defer rs.close()
+	zero := &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
+	msg := buildRouteMsg(rtmDelete, ifIndex, rtfUP|rtfGATEWAY|rtfSTATIC|rtfIFSCOPE, zero, gw, 0, rtaDST|rtaGATEWAY|rtaNETMASK)
+	_, _, err = rs.execute(msg)
+	if isNoSuchRoute(err) {
+		return nil
+	}
+	return err
 }

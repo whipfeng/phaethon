@@ -23,8 +23,8 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		util.LogModuleWarn("route", "failed to get index for %s: %v", r.devName, err)
 	}
 
-	// 1. Detect original default gateway and interface
-	gw, ifaceName, err := getDefaultGatewayDarwin()
+	// 1. Detect original default gateway and interface (PF_ROUTE, structured)
+	gw, ifaceName, err := defaultRoute()
 	if err != nil {
 		util.LogModuleWarn("route", "failed to detect default gateway: %v", err)
 	} else {
@@ -63,38 +63,50 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		}
 	}
 
-	// 3. Add split-tunnel default routes
-	cmd := exec.Command("route", "-n", "add", "-net", "0.0.0.0/1", "-interface", r.devName)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("route add 0/1: %v, %s", err, out)
-	}
-	cmd = exec.Command("route", "-n", "add", "-net", "128.0.0.0/1", "-interface", r.devName)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("route add 128/1: %v, %s", err, out)
+	// 3. Add split-tunnel default routes scoped to the TUN interface
+	if r.tunIndex > 0 {
+		for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			_, dst, _ := net.ParseCIDR(cidr)
+			if err := routeAddNetViaInterface(r.tunIndex, dst); err != nil {
+				return fmt.Errorf("route add %s via %s(idx=%d): %v", cidr, r.devName, r.tunIndex, err)
+			}
+		}
+	} else {
+		return fmt.Errorf("tun interface index unknown, refusing to add default routes")
 	}
 	return nil
 }
 
 func (r *RouteManager) platformTeardown() {
-	exec.Command("route", "-n", "delete", "-net", "0.0.0.0/1").Run()
-	exec.Command("route", "-n", "delete", "-net", "128.0.0.0/1").Run()
+	if r.tunIndex > 0 {
+		for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			_, dst, _ := net.ParseCIDR(cidr)
+			if err := routeDeleteNetViaInterface(r.tunIndex, dst); err != nil {
+				util.LogModuleWarn("route", "delete %s fail: %v", cidr, err)
+			}
+		}
+	}
 	exec.Command("ifconfig", r.devName, "down").Run()
 }
 
 // addExclusionRoute adds a host or CIDR route via the original gateway.
 func (r *RouteManager) addExclusionRoute(exclude string) error {
 	if strings.Contains(exclude, "/") {
-		cmd := exec.Command("route", "-n", "add", "-net", exclude, r.originalGateway.String())
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%v: %s", err, out)
+		_, dst, err := net.ParseCIDR(exclude)
+		if err != nil {
+			return err
 		}
-		return nil
+		return routeAddNetViaGateway(dst, r.originalGateway)
 	}
-	cmd := exec.Command("route", "-n", "add", "-host", exclude, r.originalGateway.String())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v: %s", err, out)
+	ip := net.ParseIP(exclude)
+	if ip == nil {
+		return fmt.Errorf("bad exclusion %q", exclude)
 	}
-	return nil
+	ones := 128
+	if ip.To4() != nil {
+		ones = 32
+	}
+	return routeAddNetViaGateway(&net.IPNet{IP: ip, Mask: net.CIDRMask(ones, ones)}, r.originalGateway)
 }
 
 func (r *RouteManager) deleteExclusionRoute(exclude string) {
@@ -102,27 +114,22 @@ func (r *RouteManager) deleteExclusionRoute(exclude string) {
 		return
 	}
 	if strings.Contains(exclude, "/") {
-		exec.Command("route", "-n", "delete", "-net", exclude, r.originalGateway.String()).Run()
+		_, dst, err := net.ParseCIDR(exclude)
+		if err != nil {
+			return
+		}
+		routeDeleteNetViaGateway(dst, r.originalGateway)
 		return
 	}
-	exec.Command("route", "-n", "delete", "-host", exclude, r.originalGateway.String()).Run()
-}
-
-func getDefaultGatewayDarwin() (net.IP, string, error) {
-	out, err := exec.Command("netstat", "-rn").Output()
-	if err != nil {
-		return nil, "", err
+	ip := net.ParseIP(exclude)
+	if ip == nil {
+		return
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 4 && fields[0] == "default" {
-			gw := net.ParseIP(fields[1])
-			if gw != nil {
-				return gw, fields[3], nil
-			}
-		}
+	ones := 128
+	if ip.To4() != nil {
+		ones = 32
 	}
-	return nil, "", fmt.Errorf("no default gateway found")
+	routeDeleteNetViaGateway(&net.IPNet{IP: ip, Mask: net.CIDRMask(ones, ones)}, r.originalGateway)
 }
 
 // addMeshRoute adds a route for the mesh subnet through the TUN device.

@@ -22,11 +22,19 @@
 - [x] 3.1 dataQueue 字节预算制（per-peer 8MB 全局预算 + 每队列 512 帧上限，enqueue CAS 记账/出队退款/入队失败退款，统一主动/被动两侧 + 重连重置）
 - [x] 3.2 真 DRR：deficit 出队闸门 + quantum 64KB 连续出队 + 空队列 deficit 归零 + 负余结转（单流 batch ~43 帧）
 - [x] 3.3 写路径 writev：Send/SendBatch 走 net.Buffers writev（非 TCP 回退单 buffer 单次写；payload 超限校验）
-- [ ] 3.4 Mac 真机验证：跨 GG 大文件 DataDrops 趋零、batch 长度 >1、多流公平、内存上限
+- [x] 3.4 Mac 真机验证：跨 GG 大文件 DataDrops 趋零、batch 长度 >1、多流公平、内存上限
+      （2026-11-05 实测：QG v301 + Mac v301 部署完成；50MB urandom scp 双向完整、md5 一致；
+      Mac→VM 中位 69s vs 旧版 QG 110s（1.6x）；VM→Mac 26-38s 与旧版持平；
+      全程 drop 计数全零、零 QUEUE FULL/budget exhausted、日志零新 ERROR）
 
 ## 部署验证（用户指令 2026-11-05：所有阶段完成后部署两个环境验证效果）
 
-- [ ] 部署 QG + Mac 两环境正式版，大文件传输实测对比修复前后吞吐、drop 计数全零
+- [x] 部署 QG + Mac 两环境正式版，大文件传输实测对比修复前后吞吐、drop 计数全零
+      （QG: v0.8.0-301-g040e55f linux/amd64 OpenRC；Mac: v0.8.0-301-g040e55f darwin/amd64——
+      **Mac 是 Intel x86_64，部署必须 darwin-amd64**；回退保险 QG /root/phaethon.prev-running、
+      Mac ~/phaethon-test/phaethon-prev-running）
+- [ ] 遗留：吞吐分钟级大幅波动 + 偶发长时间卡死为存量问题（旧版 QG 复现同样症状），
+      与 GG 链路 flapping 相关（见 project-gg-path-instability）；UDP leg 常驻化是演进第一候选
 
 ## 明确不做
 

@@ -271,3 +271,26 @@ TUN 入站唯一 goroutine（tun/manager.go:763，LockOSThread）内同步跑完
 - ping 走数据队列 + cancelPing 回滚：设计正确（测真实拥塞）
 - 无写 deadline（让 TCP backpressure 传播）：符合主流
 - 每 peer 单写者：字节流物理约束，必然正确
+
+## 十、两环境部署实测（2026-11-05，v0.8.0-301-g040e55f）
+
+部署：QG = linux/amd64 OpenRC（stop→zap→start，回退保险 /root/phaethon.prev-running）；
+Mac = darwin/amd64（**该机是 Intel x86_64，arm64 报 Bad CPU type**，回退保险
+~/phaethon-test/phaethon-prev-running）。两侧版本戳均为 v0.8.0-301-g040e55f。
+
+测试方法：50MB urandom 文件，scp 双向各 3 次取区间，md5 校验完整性。
+
+| 方向 | 旧版（QG prev-running） | 新版（v301） |
+|---|---|---|
+| VM→Mac | 28s | 26–79s（持平/噪声） |
+| Mac→VM | 110s | 51–81s，中位 69s（**≈1.6x**） |
+
+可观测性结论（全程）：
+- tunWriteDrops / nicTxDrops / DataDrops / ControlChDrops 全 0
+- 零 QUEUE FULL、零 budget exhausted 日志
+- 日志零新增 ERROR
+
+遗留定性：**吞吐分钟级大幅波动 + 偶发长时间卡死为存量问题**——旧版 QG A/B 回退
+复现同样症状（首次 Mac→VM 卡死 2.35MB + curl VIP 21s 超时均在旧版复现），
+与 GG 链路单点 flapping 相关（见 [[project-gg-path-instability]]）。
+架构演进第一候选：UDP leg 常驻化绕开外层 TCP HoL（§9.2）。

@@ -55,13 +55,12 @@ type udpLegTransport struct {
 	epMu sync.Mutex
 	ep   *udpLegEndpoint // passive side
 
-	// gossipNotify re-sends this link's gossip so the query-style udp/udpPort
-	// injection (gossipFields) actually reaches the peer: the one-shot
-	// session-establishment gossip fires before the FSM leaves None, so the
-	// negotiation fields must be re-notified periodically while advertising.
-	gossipNotifyMu   sync.Mutex
-	gossipNotify     func()
-	lastGossipNotify time.Time
+	// stateNotify fires on advertise-state transitions (enter/exit advertising)
+	// so the mesh layer immediately re-broadcasts gossip through its single
+	// build path (design §3 R2): udp/udpPort injection is query-style, and a
+	// state change must reach the peer without waiting for the 15s ticker.
+	stateNotifyMu sync.Mutex
+	stateNotify   func()
 
 	legDrops uint64 // atomic: inbound/outbound datagram drops
 }
@@ -334,10 +333,7 @@ func (t *udpLegTransport) onPeerGossip(peerUDP bool, peerPort int) {
 	t.executeActions(acts)
 }
 
-// tickLoop drives FSM timers (K reflux timeout, R backoff) and re-notifies
-// gossip while the leg advertises, so udp/udpPort fields keep flowing to the
-// peer after the FSM leaves None (the session-establishment gossip predates
-// it).
+// tickLoop drives FSM timers (K reflux timeout, R backoff).
 func (t *udpLegTransport) tickLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -348,32 +344,20 @@ func (t *udpLegTransport) tickLoop() {
 		case now := <-ticker.C:
 			t.fsmMu.Lock()
 			acts := t.fsm.Tick(now)
-			advertising := t.fsm.ShouldAdvertise()
 			t.fsmMu.Unlock()
 			t.executeActions(acts)
 			t.maybeRedial(now)
-			if advertising {
-				t.gossipNotifyMu.Lock()
-				fn := t.gossipNotify
-				due := fn != nil && now.Sub(t.lastGossipNotify) >= 5*time.Second
-				if due {
-					t.lastGossipNotify = now
-				}
-				t.gossipNotifyMu.Unlock()
-				if due {
-					fn()
-				}
-			}
 		}
 	}
 }
 
-// SetGossipNotify registers the callback that re-sends this link's gossip.
-// Called by the p2p layer once the peer is wired for writes.
-func (t *udpLegTransport) SetGossipNotify(fn func()) {
-	t.gossipNotifyMu.Lock()
-	defer t.gossipNotifyMu.Unlock()
-	t.gossipNotify = fn
+// SetStateNotify registers the callback fired on advertise-state transitions
+// (enter/exit advertising). Called by the p2p layer; the callback triggers an
+// immediate mesh gossip broadcast via the single build path (design §3 R2).
+func (t *udpLegTransport) SetStateNotify(fn func()) {
+	t.stateNotifyMu.Lock()
+	defer t.stateNotifyMu.Unlock()
+	t.stateNotify = fn
 }
 
 // maybeRedial drives the R-backoff redial while the FSM sits in Advertising
@@ -413,7 +397,13 @@ func (t *udpLegTransport) executeActions(acts []udpLegAction) {
 		case legActUnregisterPort:
 			t.unregisterPort()
 		case legActStartAdvertise, legActStopAdvertise:
-			// gossip 注入是查询式的（gossipFields），无需动作
+			// 宣告态变化：经 mesh 单构建路径立即补发一帧 gossip（设计 §3 R2）
+			t.stateNotifyMu.Lock()
+			fn := t.stateNotify
+			t.stateNotifyMu.Unlock()
+			if fn != nil {
+				fn()
+			}
 		}
 	}
 }

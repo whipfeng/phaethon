@@ -135,6 +135,10 @@ type MeshHandler interface {
 	UnregisterPeer(sender mesh.PeerSender)
 	UnregisterPeerByNodeID(nodeID string)
 	BuildGossipInfo() *mesh.GossipInfo
+	// TriggerGossip enqueues an immediate gossip broadcast through the mesh's
+	// single build path (design §3 R2) — used when a UDP leg's advertise
+	// state changes.
+	TriggerGossip()
 	// LinkNIC 生命周期管理（设计 §5.6）
 	CreateLinkNIC(sender mesh.PeerSender, nodeID, subnet string) *mesh.LinkNIC
 	DeleteLinkNIC(linkNIC *mesh.LinkNIC)
@@ -1055,10 +1059,14 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	m.peers[peer.ID] = peer
 	m.mu.Unlock()
 
-	// UDP leg: keep the negotiation fields (udp/udpPort) flowing to the peer —
-	// the session-establishment gossip predates the FSM leaving None.
+	// UDP leg: advertise-state changes enqueue an immediate mesh gossip
+	// broadcast through the single build path (design §3 R2).
 	if wrapped, ok := peer.transport.(*udpLegTransport); ok {
-		wrapped.SetGossipNotify(func() { m.broadcastGossipToPeer(peer) })
+		wrapped.SetStateNotify(func() {
+			if m.meshHandler != nil {
+				m.meshHandler.TriggerGossip()
+			}
+		})
 	}
 	defer func() {
 		stopPeer(peer)
@@ -1358,11 +1366,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.SetLastError("") // dial succeeded — clear stale error (issue 问题6)
 		m.notifyStatusChange()
 
-		// UDP leg: keep the negotiation fields (udp/udpPort) flowing to the
-		// peer — the session-establishment gossip below predates the FSM
-		// leaving None, so the leg re-notifies while advertising.
+		// UDP leg: advertise-state changes enqueue an immediate mesh
+		// gossip broadcast (single build path, design §3 R2).
 		if wrapped, ok := peer.transport.(*udpLegTransport); ok {
-			wrapped.SetGossipNotify(func() { m.broadcastGossipToPeer(peer) })
+			wrapped.SetStateNotify(func() {
+				if m.meshHandler != nil {
+					m.meshHandler.TriggerGossip()
+				}
+			})
 		}
 		util.LogModuleInfo("p2p", "[P2P] connected to %s via proxy %s", proxy.Server, proxy.Name)
 
@@ -2100,23 +2111,6 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 	}
 }
 
-// BroadcastGossipToAll broadcasts gossip to all connected peers (used after subnet conflict resolution).
-func (m *P2PManager) BroadcastGossipToAll() {
-	m.mu.Lock()
-	peers := make([]*Peer, 0, len(m.peers))
-	for _, p := range m.peers {
-	if p.meshSenderPtr.Load() != nil {
-		peers = append(peers, p)
-	}
-}
-	m.mu.Unlock()
-
-	for _, peer := range peers {
-		m.broadcastGossipToPeer(peer)
-	}
-	util.LogModuleDebug("p2p", "[P2P] broadcast gossip to all peers (%d)", len(peers))
-}
-
 // broadcastGossipToPeer sends a gossip message to a specific peer.
 // The local Seq is always included: the peer uses it to set RemoteSeq
 // from our first gossip (design §5.3) and to match reverse links.
@@ -2140,11 +2134,9 @@ func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
 		info.ClaimedSubnets = gossipInfo.ClaimedSubnets
 	}
 
-	// Per-link UDP leg negotiation fields (design §3): passive side echoes
-	// its allocated leg port, active side advertises capability only.
-	if peer.leg != nil {
-		info.UDP, info.UDPPort = peer.leg.gossipFields()
-	}
+	// 注意：udp/udpPort 协商字段不经此引导帧注入——构建职责唯一归属
+	// mesh 层 gossip 构建器（设计 §3 R2）。此刻双方 FSM 均在 None，
+	// 对端收到"无 udp 字段"无副作用；进入宣告态由 mesh 立即补发。
 
 	data, _ := json.Marshal(info)
 	enqueueWrite(peer, frame.FrameGossip, data, true)

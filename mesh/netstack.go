@@ -736,11 +736,14 @@ func (n *Netstack) Stop() error {
 // IPIP encapsulation happens in the forwarding path; decapsulation at the
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).
 func (n *Netstack) initStack() error {
-	// NIC 1: TUN adapter (channel endpoint). MTU 1600 matches the Link NICs so
-	// mesh replies sized by the peer's link MTU (≤1560B) are never rejected on
-	// the TUN write path (previously 1500: oversized replies failed with
-	// ErrMessageTooLong and, via an uninitialized ICMP MTU field, poisoned the
-	// peer's PMTU cache down to ~1-byte segments).
+	// NIC 1: TUN adapter (channel endpoint). Link MTU 1600 is kept for IPIP
+	// outer-header headroom (inner 1500 + 20B outer). End-to-end TUN safety is
+	// enforced instead by the fork's advertised-MSS clamp at 1460
+	// (fork tcp/endpoint.go calculateAdvertisedMSS), so in-stack endpoints
+	// never emit packets larger than the 1500 TUN MTU — including replies to
+	// pre-upgrade peers. Previously oversized replies failed the TUN write
+	// path (ErrMessageTooLong) and, via an uninitialized ICMP MTU field,
+	// poisoned the peer's PMTU cache down to ~1-byte segments.
 	linkEP := channel.New(8192, 1600, "")
 	n.linkEP = linkEP
 
@@ -759,6 +762,19 @@ func (n *Netstack) initStack() error {
 		// loop no longer matches, so the DNS reply is silently discarded.
 	})
 	n.ns = s
+
+	// TCP tuning: raise the buffer range ceiling (the advertised window is
+	// hardcoded to buffer/2, so Max 4MB caps a single stream at ~2MB window)
+	// and switch congestion control from Reno to CUBIC. All stack-level; no
+	// fork changes. Must run before the forwarder is registered (:1817) so
+	// accepted endpoints inherit these. Reference: Tailscale #21651 measured
+	// netstack Reno 22Mbps vs CUBIC 68Mbps at ~60ms RTT.
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPSendBufferSizeRangeOption{
+		Min: 4096, Default: 1 << 20, Max: 16 << 20})
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{
+		Min: 4096, Default: 1 << 20, Max: 16 << 20})
+	cc := tcpip.CongestionControlOption("cubic")
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &cc)
 
 	if err := s.CreateNIC(1, linkEP); err != nil {
 		return fmt.Errorf("create nic 1: %v", err)

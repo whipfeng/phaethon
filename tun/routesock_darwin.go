@@ -26,15 +26,24 @@ const (
 	rtfUP          = 0x1
 	rtfGATEWAY     = 0x2
 	rtfSTATIC      = 0x800
+	rtfPRCLONING   = 0x10000
 	afINET         = 2
 	afLINK         = 18
+	iftOTHER       = 0x1 // utun registers IFT_OTHER (seen in RTM_GET replies)
 	sockaddrInLen  = 16
 	sockaddrDLLen  = 20
-	rtmsgHdrLen    = int(unsafe.Sizeof(rtMsgHdr{}))
+	rtmsgHdrLen   = int(unsafe.Sizeof(rtMsgHdr{}))
 	sockaddrAlign  = 4
 )
 
-// rtMetrics mirrors struct rt_metrics (14 x 32-bit).
+// Compile-time proof that the mirror matches xnu's layout (verified against
+// the macOS 12.7 x86_64 SDK: sizeof(struct rt_msghdr) == 92).
+var _ [unsafe.Sizeof(rtMsgHdr{})]byte = [92]byte{}
+
+// rtMetrics mirrors struct rt_metrics. Despite darwin being LP64, every
+// rt_metrics field is a 32-bit quantity in the SDK headers (verified with
+// offsetof on macOS 12 x86_64: sizeof(struct rt_msghdr) == 92, rtm_rmx @ 36,
+// sizeof(struct rt_metrics) == 56). Do not widen these to uint64.
 type rtMetrics struct {
 	locks, mtu, hopcount       uint32
 	expire                     int32
@@ -109,6 +118,12 @@ func (r *routeSock) execute(msg []byte) (*rtMsgHdr, []byte, error) {
 // DST, GATEWAY, NETMASK. gwIP/gwIfIndex select the gateway form (inet vs
 // link); exactly one of them is used when RTA_GATEWAY is set.
 func buildRouteMsg(typ uint8, index int, flags int32, dst *net.IPNet, gwIP net.IP, gwIfIndex int, addrs int32) []byte {
+	iface, ifaceErr := net.InterfaceByIndex(gwIfIndex)
+	var ifType byte = iftOTHER
+	var ifName string
+	if ifaceErr == nil {
+		ifName = iface.Name
+	}
 	var buf [1024]byte
 	hdr := (*rtMsgHdr)(unsafe.Pointer(&buf[0]))
 	hdr.version = rtmVersion
@@ -128,7 +143,7 @@ func buildRouteMsg(typ uint8, index int, flags int32, dst *net.IPNet, gwIP net.I
 		if gwIP != nil {
 			put(sockaddrIn(gwIP))
 		} else {
-			put(sockaddrDL(gwIfIndex))
+			put(sockaddrDL(gwIfIndex, ifType, ifName))
 		}
 	}
 	if addrs&rtaNETMASK != 0 {
@@ -147,14 +162,24 @@ func sockaddrIn(ip net.IP) []byte {
 	return b
 }
 
-// sockaddrDL packs an AF_LINK sockaddr_dl naming the interface by index
-// (20 bytes, no name/address payload).
-func sockaddrDL(index int) []byte {
-	b := make([]byte, sockaddrDLLen)
-	b[0] = sockaddrDLLen
+// sockaddrDL packs an AF_LINK sockaddr_dl naming the interface by index and
+// name, matching the form route(8) produces for -interface routes (20-byte
+// minimum, sdl_type filled — the kernel blackholes packets for routes whose
+// link gateway carries no type/name).
+func sockaddrDL(index int, ifType byte, name string) []byte {
+	nlen := len(name)
+	l := 8 + nlen
+	if l < sockaddrDLLen {
+		l = sockaddrDLLen
+	}
+	b := make([]byte, l)
+	b[0] = byte(l)
 	b[1] = afLINK
 	b[2] = byte(index)
 	b[3] = byte(index >> 8)
+	b[4] = ifType
+	b[5] = byte(nlen)
+	copy(b[8:], name)
 	return b
 }
 
@@ -184,44 +209,34 @@ func sockaddrInIP(b []byte) net.IP {
 	return net.IPv4(b[4], b[5], b[6], b[7])
 }
 
-// sockaddrDLName extracts the interface name from an RTA_IFP sockaddr_dl.
-func sockaddrDLName(b []byte) string {
-	if len(b) < 8 || b[1] != afLINK {
-		return ""
-	}
-	nlen := int(b[5])
-	if nlen == 0 || 6+nlen > len(b) {
-		return ""
-	}
-	return string(b[6 : 6+nlen])
-}
-
 func isNoSuchRoute(err error) bool {
 	return err == syscall.Errno(3) // ESRCH: no matching route
 }
 
-// routeAddNetViaInterface adds dst routed through interface ifIndex, the
-// PF_ROUTE equivalent of `route add -net dst -interface <utunN>`.
+// routeAddNetViaInterface adds dst scoped to interface ifIndex, the PF_ROUTE
+// equivalent of `route add -net dst -interface <utunN>`. Mirrors route(8):
+// RTF_UP|RTF_STATIC|RTF_PRCLONING (no RTF_GATEWAY) with a fully-populated
+// sockaddr_dl gateway — that exact shape is what gets packets delivered.
 func routeAddNetViaInterface(ifIndex int, dst *net.IPNet) error {
 	rs, err := newRouteSock()
 	if err != nil {
 		return err
 	}
 	defer rs.close()
-	msg := buildRouteMsg(rtmAdd, ifIndex, rtfUP|rtfGATEWAY|rtfSTATIC, dst, nil, ifIndex, rtaDST|rtaGATEWAY|rtaNETMASK)
+	msg := buildRouteMsg(rtmAdd, ifIndex, rtfUP|rtfSTATIC|rtfPRCLONING, dst, nil, ifIndex, rtaDST|rtaGATEWAY|rtaNETMASK)
 	_, _, err = rs.execute(msg)
 	return err
 }
 
-// routeDeleteNetViaInterface deletes the dst route whose gateway is the given
-// interface; ESRCH (route gone or points elsewhere) is not an error.
+// routeDeleteNetViaInterface deletes the dst route scoped to interface;
+// ESRCH (route gone or points elsewhere) is not an error.
 func routeDeleteNetViaInterface(ifIndex int, dst *net.IPNet) error {
 	rs, err := newRouteSock()
 	if err != nil {
 		return err
 	}
 	defer rs.close()
-	msg := buildRouteMsg(rtmDelete, ifIndex, rtfUP|rtfGATEWAY|rtfSTATIC, dst, nil, ifIndex, rtaDST|rtaGATEWAY|rtaNETMASK)
+	msg := buildRouteMsg(rtmDelete, ifIndex, rtfUP|rtfSTATIC|rtfPRCLONING, dst, nil, ifIndex, rtaDST|rtaGATEWAY|rtaNETMASK)
 	_, _, err = rs.execute(msg)
 	if isNoSuchRoute(err) {
 		return nil
@@ -258,6 +273,8 @@ func routeDeleteNetViaGateway(dst *net.IPNet, gw net.IP) error {
 
 // defaultRoute returns the IPv4 default route's gateway and interface name
 // via RTM_GET — the structured replacement for parsing `netstat -rn`.
+// xnu 12 fills only DST/GATEWAY/NETMASK in the reply (no RTA_IFP), so the
+// interface comes from the reply's rtm_index field.
 func defaultRoute() (net.IP, string, error) {
 	rs, err := newRouteSock()
 	if err != nil {
@@ -270,21 +287,21 @@ func defaultRoute() (net.IP, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if len(resp) < rtmsgHdrLen+int(hdr.msglen)-rtmsgHdrLen {
-		return nil, "", fmt.Errorf("short RTM_GET response: %d bytes", len(resp))
+	if len(resp) < int(hdr.msglen) {
+		return nil, "", fmt.Errorf("short RTM_GET response: %d < msglen %d", len(resp), hdr.msglen)
 	}
-	body := resp[rtmsgHdrLen:]
+	body := resp[rtmsgHdrLen:hdr.msglen]
 	sas := parseSockaddrs(hdr.addrs, body)
 	var gw net.IP
 	if b := sas[rtaGATEWAY]; b != nil {
 		gw = sockaddrInIP(b)
 	}
-	var ifName string
-	if b := sas[rtaIFP]; b != nil {
-		ifName = sockaddrDLName(b)
+	if gw == nil {
+		return nil, "", fmt.Errorf("default route reply missing gateway (addrs=0x%x)", hdr.addrs)
 	}
-	if gw == nil || ifName == "" {
-		return nil, "", fmt.Errorf("default route missing gateway(%v)/iface(%q)", gw, ifName)
+	iface, err := net.InterfaceByIndex(int(hdr.index))
+	if err != nil {
+		return nil, "", fmt.Errorf("default route ifindex %d: %w", hdr.index, err)
 	}
-	return gw, ifName, nil
+	return gw, iface.Name, nil
 }

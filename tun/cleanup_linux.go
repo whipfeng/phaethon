@@ -13,19 +13,36 @@ import (
 	"phaethon/util"
 )
 
-// CleanupResidual removes leftover routes, restores system DNS, kernel parameters,
-// and clears any TUN interface that still holds the TUN address (or a legacy
-// 198.18.x.x address). This is called by the watchdog when the main process crashes.
-// tunIP is the expected TUN interface address (mesh subnet+2); nil skips the
-// address match.
+// CleanupResidual removes leftover TUN interface state and restores system
+// configuration from a previous crash. Interface/route cleanup only touches
+// the tun* interface holding exactly tunIP; the address is removed (the
+// link-scoped split-tunnel routes are deleted first) and the interface itself
+// is left up. resolv.conf / kernel-parameter / iptables restore runs
+// unconditionally — those are phaethon-owned artifacts independent of the
+// interface match. tunIP is the expected TUN address (mesh subnet+2); nil
+// skips the interface scan but still restores system state.
 func CleanupResidual(tunIP net.IP) {
-	// 1. Delete split-tunnel routes
-	if link, err := netlink.LinkByName("tun0"); err == nil {
-		for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-			_, dst, _ := net.ParseCIDR(cidr)
-			rt := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}
-			_ = netlink.RouteDel(rt)
+	// 1. Find the tun* interface holding tunIP and clear only that one.
+	target := tunIP.To4()
+	if target != nil {
+		if link := findTUNLinkByIP(target); link != nil {
+			for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+				_, dst, _ := net.ParseCIDR(cidr)
+				_ = netlink.RouteDel(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst})
+			}
+			for _, addr := range linkAddrs4(link) {
+				if addr.IP.Equal(target) {
+					if err := netlink.AddrDel(link, &addr); err != nil {
+						util.LogModuleWarn("cleanup", "cleanup addr del %s dev %s fail: %v", addr.IP, link.Attrs().Name, err)
+					} else {
+						util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", link.Attrs().Name, addr.IP)
+					}
+					break
+				}
+			}
 		}
+	} else {
+		util.LogModuleInfo("cleanup", "skip interface scan: no tunIP")
 	}
 
 	// 2. Restore resolv.conf from backup if it exists.
@@ -97,47 +114,35 @@ func CleanupResidual(tunIP net.IP) {
 		}
 		_ = os.Remove(tunStateFile)
 	}
+}
 
-	// 4. Find and down any TUN interface holding the TUN address.
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if !strings.HasPrefix(iface.Name, "tun") {
-				continue
-			}
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				ipNet, ok := addr.(*net.IPNet)
-				if !ok {
-					continue
-				}
-				ip4 := ipNet.IP.To4()
-				if ip4 == nil {
-					continue
-				}
-				match := ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19
-				if !match && tunIP != nil {
-					match = ip4.Equal(tunIP.To4())
-				}
-				if !match {
-					continue
-				}
-				// Delete the address first: routes pinned to the interface are
-				// removed by the kernel along with the address.
-				if out, err := exec.Command("ip", "addr", "del", ip4.String()+"/32", "dev", iface.Name).CombinedOutput(); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup ip addr del %s dev %s fail: %v, %s", ip4, iface.Name, err, out)
-				}
-				if out, err := exec.Command("ip", "link", "set", iface.Name, "down").CombinedOutput(); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup ip link set %s down fail: %v, %s", iface.Name, err, out)
-				} else {
-					util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", iface.Name, ip4)
-				}
-				break
+// findTUNLinkByIP returns the first tun* interface holding exactly ip, or nil.
+func findTUNLinkByIP(ip net.IP) netlink.Link {
+	links, err := netlink.LinkList()
+	if err != nil {
+		util.LogModuleWarn("cleanup", "list links fail: %v", err)
+		return nil
+	}
+	for _, link := range links {
+		if !strings.HasPrefix(link.Attrs().Name, "tun") {
+			continue
+		}
+		for _, addr := range linkAddrs4(link) {
+			if addr.IP.Equal(ip) {
+				return link
 			}
 		}
 	}
+	return nil
+}
+
+// linkAddrs4 lists IPv4 addresses on a link, tolerating per-link errors.
+func linkAddrs4(link netlink.Link) []netlink.Addr {
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return nil
+	}
+	return addrs
 }
 
 // InterfaceExists reports whether any TUN interface is currently present.

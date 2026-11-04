@@ -210,8 +210,33 @@ func sockaddrInIP(b []byte) net.IP {
 	return net.IPv4(b[4], b[5], b[6], b[7])
 }
 
+// sockaddrNetmask parses an RTA_NETMASK sockaddr into an IPv4 mask. xnu trims
+// trailing zero bytes from netmasks in RTM_GET replies and tags them with
+// family 0xff (a /1 arrives as `05 ff ff ff 80` — sin_len=5, one significant
+// byte 0x80 at the sin_addr offset); the full 16-byte AF_INET form is also
+// accepted. Bytes after offset 4 are the mask prefix, right-padded with zeros.
+func sockaddrNetmask(b []byte) net.IPMask {
+	if len(b) < 5 || int(b[0]) != len(b) {
+		return nil
+	}
+	var m [4]byte
+	switch b[1] {
+	case afINET:
+		copy(m[:], b[4:8])
+	case 0xff:
+		copy(m[:], b[4:])
+	default:
+		return nil
+	}
+	return net.IPMask(m[:])
+}
+
 func isNoSuchRoute(err error) bool {
 	return err == syscall.Errno(3) // ESRCH: no matching route
+}
+
+func isRouteExists(err error) bool {
+	return err == syscall.Errno(17) // EEXIST: identical route already present
 }
 
 // routeAddNetViaInterface adds dst scoped to interface ifIndex, the PF_ROUTE
@@ -327,6 +352,65 @@ func routeGetIfIndex(dst net.IP) (int, error) {
 		return 0, fmt.Errorf("RTM_GET reply for %s has no interface index", dst)
 	}
 	return int(hdr.index), nil
+}
+
+// routeProbeSplit issues RTM_GET for dst and reports whether the matched route
+// is a split-tunnel /1 (0.0.0.0/1 or 128.0.0.0/1). On a match it returns a
+// snapshot of the route (destination, gateway form, interface index) so the
+// caller can preempt and later restore it. Non-/1 matches return
+// (nil, false, nil). See docs/plans/darwin-split-route-conflict.md.
+func routeProbeSplit(dst net.IP) (*splitRouteSnapshot, bool, error) {
+	rs, err := newRouteSock()
+	if err != nil {
+		return nil, false, err
+	}
+	defer rs.close()
+	dstNet := &net.IPNet{IP: dst, Mask: net.CIDRMask(32, 32)}
+	msg := buildRouteMsg(rtmGet, 0, rtfUP, dstNet, nil, 0, rtaDST)
+	hdr, resp, err := rs.execute(msg)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(resp) < int(hdr.msglen) {
+		return nil, false, fmt.Errorf("short RTM_GET response: %d < msglen %d", len(resp), hdr.msglen)
+	}
+	sas := parseSockaddrs(hdr.addrs, resp[rtmsgHdrLen:hdr.msglen])
+	mask := sockaddrNetmask(sas[rtaNETMASK])
+	if mask == nil {
+		return nil, false, nil
+	}
+	if ones, _ := mask.Size(); ones != 1 {
+		return nil, false, nil
+	}
+	matchedDst := sockaddrInIP(sas[rtaDST])
+	if matchedDst == nil {
+		return nil, false, nil
+	}
+	snap := &splitRouteSnapshot{
+		dst:     &net.IPNet{IP: matchedDst, Mask: mask},
+		gwIndex: int(hdr.index),
+	}
+	if gw := sas[rtaGATEWAY]; gw != nil && len(gw) > 1 && gw[1] == afINET {
+		snap.gwIP = sockaddrInIP(gw)
+	}
+	return snap, true, nil
+}
+
+// deleteSplitSnapshot removes a preempted route in its original form;
+// interface-form routes are matched by interface index.
+func deleteSplitSnapshot(s *splitRouteSnapshot) error {
+	if s.gwIP != nil {
+		return routeDeleteNetViaGateway(s.dst, s.gwIP)
+	}
+	return routeDeleteNetViaInterface(s.gwIndex, s.dst)
+}
+
+// restoreSplitSnapshot re-adds a preempted route in its original form.
+func restoreSplitSnapshot(s *splitRouteSnapshot) error {
+	if s.gwIP != nil {
+		return routeAddNetViaGateway(s.dst, s.gwIP)
+	}
+	return routeAddNetViaInterface(s.gwIndex, s.dst)
 }
 
 // routeAddIfscopeDefault adds `default ifscope <ifIndex> via gw` — the scoped

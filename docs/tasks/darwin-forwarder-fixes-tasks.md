@@ -24,7 +24,18 @@
 
 - **ifscope 路由必须带 RTA_NETMASK(0.0.0.0)**：缺 netmask 时内核接收路由且 netstat 显示 UGScIg，但 scoped 查表与 route(8) delete 均 "not in table"。对照实验定位（PF_ROUTE 版失败 vs route(8) 版 OK），补 netmask 后全矩阵通过。
 
+## 验证（2026-11-04 Mac 真机，mb.qg.phn，验证构建 splitfix2）— 异主 0/1 preempt
+
+- [x] 三平台 go build（windows/linux/darwin 核心包全过）
+- [x] phase_d 全通：holder 持有 0/1 时实例 enable 成功（running:true，0/1+128/1 经本 tun）；holder 198.18 地址/路由全程完好；disable 后 holder 的 0/1 被恢复（netstat 复核 UGScg via 198.18.0.1）；最终清理零残留、NET-OK
+- [x] 回归 phase_a（开关）/phase_b（kill -9 残留 preempt）通过；bindprobe 矩阵与历史基线一致（localaddr+boundIf(tun) / UDP listen+boundIf 的 ERR 为内核固有形态，dialer 不走这些路径，verify-r4 日志错误 0）
+- [x] 探针 rtget_probe 实证根因并验证修复
+
+## 实证过程中修正的设计点
+
+- **ifscope 路由必须带 RTA_NETMASK(0.0.0.0)**：缺 netmask 时内核接收路由且 netstat 显示 UGScIg，但 scoped 查表与 route(8) delete 均 "not in table"。对照实验定位（PF_ROUTE 版失败 vs route(8) 版 OK），补 netmask 后全矩阵通过。
+- **xnu RTM_GET 回包 netmask 截断编码**：/1 以 `05 ff ff ff 80` 返回（family=0xff + 仅非零字节），按 AF_INET 解析得 nil 会误判"无冲突"致 preempt 静默失效。sockaddrNetmask 双形态解析修复。
+
 ## 遗留（不属于本轮，待用户定夺）
 
-- [ ] **EEXIST 异主 0/1**：phase_d 中 holder 持有 0/1 via 198.18.0.1 时，实例 enable 因 `route add 0/1: file exists` 失败（phase_d 的 holder 保护目标已通过；实例与 holder 共存策略待决策）。关联：defaultRoute() RTM_GET 0.0.0.0 在 0/1 存在时会命中 0/1 而非真默认（netstat 解析时代无此问题），决策时需一并考虑。
 - [ ] darwin ifconfig×3 → SIOCAIFADDR / SIOCSIFFLAGS / RTM_DELADDR（cleanup 的 mask 匹配语义需专项测试）

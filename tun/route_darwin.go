@@ -11,7 +11,12 @@ import (
 	"phaethon/util"
 )
 
-func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
+func (r *RouteManager) platformSetup(tunIP string, prefixLen int) (err error) {
+	defer func() {
+		if err != nil {
+			r.restoreForeignSplits()
+		}
+	}()
 	// 0. Configure interface IP and bring it up
 	mask := net.IP(net.CIDRMask(prefixLen, 32)).String()
 	if out, err := exec.Command("ifconfig", r.devName, "inet", tunIP, tunIP, "netmask", mask, "up").CombinedOutput(); err != nil {
@@ -22,6 +27,12 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	} else {
 		util.LogModuleWarn("route", "failed to get index for %s: %v", r.devName, err)
 	}
+
+	// 0.5 Preempt foreign split-tunnel routes (0/1, 128/1) before anything else.
+	// xnu longest-prefix RTM_GET would otherwise match them both here (wrong
+	// defaultRoute) and at the 0/1 add below (EEXIST). Snapshots are restored
+	// at teardown while the owning interface still exists.
+	r.preemptForeignSplits()
 
 	// 1. Detect original default gateway and interface (PF_ROUTE, structured)
 	gw, ifaceName, err := defaultRoute()
@@ -106,7 +117,50 @@ func (r *RouteManager) platformTeardown() {
 		}
 		r.appliedIfscopeDefault = false
 	}
+	r.restoreForeignSplits()
 	exec.Command("ifconfig", r.devName, "down").Run()
+}
+
+// preemptForeignSplits snapshots and removes foreign 0/1+128/1 routes so the
+// TUN split-tunnel can be installed. Probe IPs are public addresses inside
+// each half of the IPv4 space; a matched /1 that is not our own TUN interface
+// is preempted. Failures warn and continue — the later add surfaces EEXIST.
+func (r *RouteManager) preemptForeignSplits() {
+	for _, probe := range []net.IP{net.IPv4(64, 0, 0, 1), net.IPv4(192, 0, 0, 1)} {
+		snap, isSplit, err := routeProbeSplit(probe)
+		if err != nil {
+			util.LogModuleWarn("route", "probe split route via %s fail: %v", probe, err)
+			continue
+		}
+		if !isSplit || snap.gwIndex == r.tunIndex {
+			continue
+		}
+		if err := deleteSplitSnapshot(snap); err != nil && !isNoSuchRoute(err) {
+			util.LogModuleWarn("route", "preempt foreign split %s fail: %v", snap.dst, err)
+			continue
+		}
+		r.foreignSnapshots = append(r.foreignSnapshots, *snap)
+		util.LogModuleInfo("route", "preempted foreign split route %s (iface idx=%d)", snap.dst, snap.gwIndex)
+	}
+}
+
+// restoreForeignSplits re-adds routes preempted at setup, skipping snapshots
+// whose interface no longer exists (e.g. our own kill -9 leftovers pointing at
+// a recycled utun).
+func (r *RouteManager) restoreForeignSplits() {
+	for i := range r.foreignSnapshots {
+		s := &r.foreignSnapshots[i]
+		if _, err := net.InterfaceByIndex(s.gwIndex); err != nil {
+			util.LogModuleInfo("route", "skip restore %s: interface idx=%d gone", s.dst, s.gwIndex)
+			continue
+		}
+		if err := restoreSplitSnapshot(s); err != nil && !isRouteExists(err) {
+			util.LogModuleWarn("route", "restore foreign split %s fail: %v", s.dst, err)
+		} else {
+			util.LogModuleInfo("route", "restored foreign split route %s", s.dst)
+		}
+	}
+	r.foreignSnapshots = nil
 }
 
 // addExclusionRoute adds a host or CIDR route via the original gateway.

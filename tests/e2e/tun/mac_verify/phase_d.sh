@@ -45,6 +45,10 @@ grep -iE 'cleanup' $LOG || echo "(none)"
 echo "[FINAL-CLEANUP]"
 curl -sk -X PATCH -H 'Content-Type: application/json' -d '{"enabled":false}' https://127.0.0.1:39999/api/tun 2>/dev/null; echo
 sleep 4
+echo "[FOREIGN-SPLITS-RESTORED?]"
+netstat -rn -f inet | grep -E '^0/1' && echo "PASS: foreign 0/1 restored after disable" || echo "FAIL: foreign 0/1 missing after disable"
+# holder only installs 0/1 (not 128/1); report its state without asserting
+netstat -rn -f inet | grep -E '^128\.0\.0\.0/1' || echo "(no foreign 128/1 — holder never adds it)"
 sudo pkill -9 -f phaethon-verify-bin 2>/dev/null; sleep 2
 sudo pkill -9 -f '/tmp/holder' 2>/dev/null; sleep 2
 sudo pkill -9 -f phaethon-verify-bin 2>/dev/null

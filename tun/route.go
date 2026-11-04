@@ -16,6 +16,14 @@ var DefaultLANExclusions = []string{
 	"255.255.255.255/32",
 }
 
+// splitRouteSnapshot captures a preempted 0.0.0.0/1 or 128.0.0.0/1 route so
+// teardown can restore it. darwin only (see docs/plans/darwin-split-route-conflict.md).
+type splitRouteSnapshot struct {
+	dst     *net.IPNet
+	gwIP    net.IP // non-nil: via-gateway form; nil: via-interface form
+	gwIndex int
+}
+
 // RouteManager handles OS route table modifications using platform-native APIs.
 // Windows: iphlpapi.dll (CreateIpForwardEntry2, etc.)
 // Linux:    netlink
@@ -29,6 +37,9 @@ type RouteManager struct {
 	excludeIPs      []string
 	appliedExcludes []string
 	appliedIfscopeDefault bool // darwin: scoped physical default added alongside 0/1+128/1
+	// foreignSnapshots holds split-tunnel routes preempted at setup and restored
+	// at teardown. darwin only; always empty elsewhere.
+	foreignSnapshots []splitRouteSnapshot
 	tunIP           string
 	bypassGateway   bool
 

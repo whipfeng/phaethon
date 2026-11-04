@@ -74,6 +74,20 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	} else {
 		return fmt.Errorf("tun interface index unknown, refusing to add default routes")
 	}
+
+	// 4. Scoped default on the physical interface. xnu scoped lookups
+	// (IP_BOUND_IF) cannot resolve public destinations through the unscoped
+	// default once the 0/1 hijack exists, so outbound sockets bound to the
+	// physical interface fail with EHOSTUNREACH. IFSCOPE routes are invisible
+	// to unscoped lookups, so user traffic is unaffected.
+	if r.originalGateway != nil && r.DefaultIfaceIndex > 0 {
+		if err := routeAddIfscopeDefault(r.originalGateway, r.DefaultIfaceIndex); err != nil {
+			util.LogModuleWarn("route", "add ifscope default via %s fail: %v", r.originalGateway, err)
+		} else {
+			r.appliedIfscopeDefault = true
+			util.LogModuleInfo("route", "ifscope default via %s (iface idx=%d) added", r.originalGateway, r.DefaultIfaceIndex)
+		}
+	}
 	return nil
 }
 
@@ -85,6 +99,12 @@ func (r *RouteManager) platformTeardown() {
 				util.LogModuleWarn("route", "delete %s fail: %v", cidr, err)
 			}
 		}
+	}
+	if r.appliedIfscopeDefault && r.originalGateway != nil && r.DefaultIfaceIndex > 0 {
+		if err := routeDeleteIfscopeDefault(r.originalGateway, r.DefaultIfaceIndex); err != nil {
+			util.LogModuleWarn("route", "delete ifscope default fail: %v", err)
+		}
+		r.appliedIfscopeDefault = false
 	}
 	exec.Command("ifconfig", r.devName, "down").Run()
 }

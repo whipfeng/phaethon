@@ -28,6 +28,7 @@ type RouteManager struct {
 	originalGateway net.IP
 	excludeIPs      []string
 	appliedExcludes []string
+	appliedIfscopeDefault bool // darwin: scoped physical default added alongside 0/1+128/1
 	tunIP           string
 	bypassGateway   bool
 

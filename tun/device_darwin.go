@@ -84,14 +84,29 @@ func (t *darwinTUN) MTU() int     { return t.mtu }
 func (t *darwinTUN) Close() error { return unix.Close(t.fd) }
 
 func (t *darwinTUN) Read(buf []byte) (int, error) {
-	n, err := unix.Read(t.fd, t.rBuf)
-	if err != nil {
-		return 0, err
+	for {
+		fds := []unix.PollFd{{Fd: int32(t.fd), Events: unix.POLLIN}}
+		if _, err := unix.Poll(fds, 100); err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return 0, err
+		}
+		if fds[0].Revents&(unix.POLLIN|unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) == 0 {
+			continue
+		}
+		n, err := unix.Read(t.fd, t.rBuf)
+		if err != nil {
+			if err == unix.EAGAIN {
+				continue
+			}
+			return 0, err
+		}
+		if n <= 4 {
+			return 0, nil
+		}
+		return copy(buf, t.rBuf[4:n]), nil
 	}
-	if n <= 4 {
-		return 0, nil
-	}
-	return copy(buf, t.rBuf[4:n]), nil
 }
 
 func (t *darwinTUN) Write(buf []byte) (int, error) {

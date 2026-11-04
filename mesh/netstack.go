@@ -708,6 +708,14 @@ func (n *Netstack) Stop() error {
 	close(n.closeCh)
 	n.mu.Unlock()
 
+	// The DNS hijacker registers its goroutines (dnsWorkerLoop pool, serveLoop,
+	// forwarderListener) on this same WaitGroup via WaitGroup() in Start, but
+	// they wait on the hijacker's own close/stop channels. Signal it first or
+	// wg.Wait blocks forever.
+	if n.dnsHijacker != nil {
+		n.dnsHijacker.Stop()
+	}
+
 	// Wait for stack goroutines to finish
 	n.wg.Wait()
 

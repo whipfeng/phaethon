@@ -4,7 +4,6 @@ package tun
 
 import (
 	"net"
-	"os/exec"
 	"strings"
 
 	"phaethon/util"
@@ -44,8 +43,8 @@ func CleanupResidual(tunIP net.IP) {
 			if ip4 == nil || !ip4.Equal(target) {
 				continue
 			}
-			if out, err := exec.Command("ifconfig", iface.Name, "delete", ip4.String()).CombinedOutput(); err != nil {
-				util.LogModuleWarn("cleanup", "cleanup ifconfig %s delete %s fail: %v, %s", iface.Name, ip4, err, out)
+			if err := delIfaceAddr(iface.Name, ip4); err != nil {
+				util.LogModuleWarn("cleanup", "cleanup delIfaceAddr %s %s fail: %v", iface.Name, ip4, err)
 			} else {
 				util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", iface.Name, ip4)
 			}

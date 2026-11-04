@@ -38,4 +38,4 @@
 
 ## 遗留（不属于本轮，待用户定夺）
 
-- [ ] darwin ifconfig×3 → SIOCAIFADDR / SIOCSIFFLAGS / RTM_DELADDR（cleanup 的 mask 匹配语义需专项测试）
+- [x] darwin ifconfig×3 → SIOCAIFADDR / SIOCSIFFLAGS / SIOCDIFADDR — 已完成并验证（见 docs/plans/darwin-audit-hardening.md，含同轮全篇审计 B/C/D/E/L/M 项）

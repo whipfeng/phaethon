@@ -5,7 +5,6 @@ package tun
 import (
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
 
 	"phaethon/util"
@@ -13,14 +12,26 @@ import (
 
 func (r *RouteManager) platformSetup(tunIP string, prefixLen int) (err error) {
 	defer func() {
-		if err != nil {
-			r.restoreForeignSplits()
+		if err == nil {
+			return
 		}
+		// Roll back our own split-tunnel routes first: a partial failure
+		// (e.g. 0/1 added, 128/1 EEXIST) must not leave them behind to
+		// EEXIST-block the foreign splits' restore below. ESRCH is fine.
+		if r.tunIndex > 0 {
+			for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+				_, dst, _ := net.ParseCIDR(cidr)
+				routeDeleteNetViaInterface(r.tunIndex, dst)
+			}
+		}
+		r.restoreForeignSplits()
 	}()
-	// 0. Configure interface IP and bring it up
-	mask := net.IP(net.CIDRMask(prefixLen, 32)).String()
-	if out, err := exec.Command("ifconfig", r.devName, "inet", tunIP, tunIP, "netmask", mask, "up").CombinedOutput(); err != nil {
-		return fmt.Errorf("ifconfig %s: %v, %s", r.devName, err, out)
+	// 0. Configure interface IP (SIOCAIFADDR) and bring it up (SIOCSIFFLAGS)
+	if err := setIfaceAddr(r.devName, net.ParseIP(tunIP), prefixLen); err != nil {
+		return err
+	}
+	if err := setIfaceUp(r.devName, true); err != nil {
+		return err
 	}
 	if iface, err := net.InterfaceByName(r.devName); err == nil {
 		r.tunIndex = iface.Index
@@ -118,7 +129,9 @@ func (r *RouteManager) platformTeardown() {
 		r.appliedIfscopeDefault = false
 	}
 	r.restoreForeignSplits()
-	exec.Command("ifconfig", r.devName, "down").Run()
+	if err := setIfaceUp(r.devName, false); err != nil {
+		util.LogModuleWarn("route", "iface down %s fail: %v", r.devName, err)
+	}
 }
 
 // preemptForeignSplits snapshots and removes foreign 0/1+128/1 routes so the
@@ -139,6 +152,9 @@ func (r *RouteManager) preemptForeignSplits() {
 			util.LogModuleWarn("route", "preempt foreign split %s fail: %v", snap.dst, err)
 			continue
 		}
+		if iface, err := net.InterfaceByIndex(snap.gwIndex); err == nil {
+			snap.gwName = iface.Name
+		}
 		r.foreignSnapshots = append(r.foreignSnapshots, *snap)
 		util.LogModuleInfo("route", "preempted foreign split route %s (iface idx=%d)", snap.dst, snap.gwIndex)
 	}
@@ -150,8 +166,13 @@ func (r *RouteManager) preemptForeignSplits() {
 func (r *RouteManager) restoreForeignSplits() {
 	for i := range r.foreignSnapshots {
 		s := &r.foreignSnapshots[i]
-		if _, err := net.InterfaceByIndex(s.gwIndex); err != nil {
+		iface, err := net.InterfaceByIndex(s.gwIndex)
+		if err != nil {
 			util.LogModuleInfo("route", "skip restore %s: interface idx=%d gone", s.dst, s.gwIndex)
+			continue
+		}
+		if s.gwName != "" && iface.Name != s.gwName {
+			util.LogModuleInfo("route", "skip restore %s: idx=%d reused by %s (was %s)", s.dst, s.gwIndex, iface.Name, s.gwName)
 			continue
 		}
 		if err := restoreSplitSnapshot(s); err != nil && !isRouteExists(err) {

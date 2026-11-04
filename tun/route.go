@@ -22,6 +22,10 @@ type splitRouteSnapshot struct {
 	dst     *net.IPNet
 	gwIP    net.IP // non-nil: via-gateway form; nil: via-interface form
 	gwIndex int
+	// gwName is the interface name at preempt time. utun indexes are recycled,
+	// so a bare index check at restore is not enough: a different process may
+	// have grabbed the same index after the owner died.
+	gwName string
 }
 
 // RouteManager handles OS route table modifications using platform-native APIs.

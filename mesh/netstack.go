@@ -135,6 +135,10 @@ type Netstack struct {
 	// Packet counters for diagnostics
 	ReadPackets  atomic.Uint64
 	WritePackets atomic.Uint64
+	// TunWriteDrops counts host-facing packets lost because the TUN write
+	// failed (e.g. oversized packet vs the 1500 device MTU). Previously
+	// logged-only; now counted for /api/mesh visibility.
+	TunWriteDrops atomic.Uint64
 }
 
 // NewNetstack creates a new Netstack instance.
@@ -1999,6 +2003,7 @@ func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
 				pkt.DecRef()
 				return false
 			default:
+				n.TunWriteDrops.Add(1)
 				util.LogModuleWarn("netstack", "netstack: write error: %v", err)
 			}
 		} else {
@@ -2021,6 +2026,16 @@ func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
 
 	pkt.DecRef()
 	return true
+}
+
+// DropStats returns TUN write failures and NIC1 outbound-queue tail drops.
+// Both are packet-loss signals that were previously log-only / fully silent.
+func (n *Netstack) DropStats() (tunWriteDrops, nicTxDrops uint64) {
+	tunWriteDrops = n.TunWriteDrops.Load()
+	if n.linkEP != nil {
+		nicTxDrops = uint64(n.linkEP.DroppedPackets())
+	}
+	return
 }
 
 // portAt extracts a 16-bit port at the given byte offset (0 if out of range).

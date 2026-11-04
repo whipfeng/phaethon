@@ -4345,9 +4345,12 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	result["linkNICStats"] = mesh.GlobalMeshManager.GetLinkNICStats()
 	result["bestPaths"] = mesh.GlobalMeshManager.GetBestPaths()
 	peerChannelDrops, meshInboundDrops := mesh.GlobalMeshManager.GetChannelDropStats()
+	tunWriteDrops, nicTxDrops := mesh.GlobalMeshManager.GetNetstackDropStats()
 	result["channelDropStats"] = map[string]interface{}{
 		"peers":            peerChannelDrops,
 		"meshInboundDrops": meshInboundDrops,
+		"tunWriteDrops":    tunWriteDrops,
+		"nicTxDrops":       nicTxDrops,
 	}
 	if cidr := mesh.GetMeshCIDR(); cidr != nil {
 		result["meshCIDR"] = cidr.String()

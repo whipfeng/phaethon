@@ -2938,6 +2938,16 @@ func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
 	return m.p2p.GetChannelDropStats()
 }
 
+// GetNetstackDropStats returns TUN write failures and NIC1 (TUN-side channel
+// endpoint) outbound-queue tail drops — packet-loss signals on the netstack
+// side that have no P2P-queue counterpart.
+func (m *MeshManager) GetNetstackDropStats() (tunWriteDrops, nicTxDrops uint64) {
+	if m.netstack == nil {
+		return 0, 0
+	}
+	return m.netstack.DropStats()
+}
+
 // selectBestPeer selects the best peer from candidates.
 // Priority: lowest hop count first, then best link quality (lowest effectiveRTT) as tiebreaker.
 // Falls back to random selection among min-hop candidates if no quality data.

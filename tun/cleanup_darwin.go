@@ -10,53 +10,46 @@ import (
 	"phaethon/util"
 )
 
-// CleanupResidual removes leftover routes and clears any utun interface
-// that still holds the TUN address (or a legacy 198.18.x.x address).
-// tunIP is the expected TUN interface address (mesh subnet+2); nil skips
-// the address match and only legacy/route cleanup runs.
+// CleanupResidual removes leftover TUN interface state from a previous crash.
+// Only the interface holding exactly tunIP is touched: the address is removed
+// (darwin drops the interface's split-tunnel routes along with the address),
+// and the interface itself is left alone. Routes and interfaces not owned by
+// phaethon are never modified. tunIP is the expected TUN address (mesh
+// subnet+2); nil skips the interface scan entirely.
 func CleanupResidual(tunIP net.IP) {
-	// 1. Delete split-tunnel routes.
-	exec.Command("route", "-n", "delete", "-net", "0.0.0.0/1").Run()
-	exec.Command("route", "-n", "delete", "-net", "128.0.0.0/1").Run()
-
-	// 2. Find and down any utun interface holding the TUN address.
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if !strings.HasPrefix(iface.Name, "utun") {
+	target := tunIP.To4()
+	if target == nil {
+		util.LogModuleInfo("cleanup", "skip interface scan: no tunIP")
+		return
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		util.LogModuleWarn("cleanup", "list interfaces fail: %v", err)
+		return
+	}
+	for _, iface := range ifaces {
+		if !strings.HasPrefix(iface.Name, "utun") {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
 				continue
 			}
-			addrs, err := iface.Addrs()
-			if err != nil {
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil || !ip4.Equal(target) {
 				continue
 			}
-			for _, addr := range addrs {
-				ipNet, ok := addr.(*net.IPNet)
-				if !ok {
-					continue
-				}
-				ip4 := ipNet.IP.To4()
-				if ip4 == nil {
-					continue
-				}
-				match := ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19
-				if !match && tunIP != nil {
-					match = ip4.Equal(tunIP.To4())
-				}
-				if !match {
-					continue
-				}
-				// Delete the address first: split-tunnel routes pinned to the
-				// interface are removed by the kernel along with the address.
-				if out, err := exec.Command("ifconfig", iface.Name, "delete", ip4.String()).CombinedOutput(); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup ifconfig %s delete %s fail: %v, %s", iface.Name, ip4, err, out)
-				}
-				if out, err := exec.Command("ifconfig", iface.Name, "down").CombinedOutput(); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup ifconfig %s down fail: %v", iface.Name, err, out)
-				} else {
-					util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", iface.Name, ip4)
-				}
-				break
+			if out, err := exec.Command("ifconfig", iface.Name, "delete", ip4.String()).CombinedOutput(); err != nil {
+				util.LogModuleWarn("cleanup", "cleanup ifconfig %s delete %s fail: %v, %s", iface.Name, ip4, err, out)
+			} else {
+				util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", iface.Name, ip4)
 			}
+			break
 		}
 	}
 }

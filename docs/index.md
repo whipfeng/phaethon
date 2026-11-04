@@ -68,6 +68,7 @@
 | [multi_nic_architecture_v2.md](plans/multi_nic_architecture_v2.md) | Multi-NIC 架构设计 v2（手动 NAT 方案） | - | OUTDATED |
 | [multi_nic_implementation_plan.md](plans/multi_nic_implementation_plan.md) | 多 NIC 架构实现计划（历史实现记录） | - | OUTDATED |
 | [graceful_shutdown_and_tun_cleanup_design.md](plans/graceful_shutdown_and_tun_cleanup_design.md) | 优雅关闭挂死修复（DNS hijacker 未停）+ TUN 残留按真实地址清理 | v0.1.0 | DRAFT |
+| [tun_cleanup_scoping_and_pfroute_design.md](plans/tun_cleanup_scoping_and_pfroute_design.md) | TUN 清理作用域收敛（不误伤共存 VPN）+ darwin 路由操作迁移 PF_ROUTE | v0.1.0 | DRAFT |
 
 ### tasks/ (任务归档)
 
@@ -83,6 +84,7 @@
 | [tun-route-fakeip-fixes.md](tasks/tun-route-fakeip-fixes.md) | TUN 路由与 Fake-IP 修复 | master |
 | [tun-watchdog-http-probe-tasks.md](tasks/tun-watchdog-http-probe-tasks.md) | TUN watchdog HTTP 连通性探测改造 | master |
 | [graceful-shutdown-cleanup-tasks.md](tasks/graceful-shutdown-cleanup-tasks.md) | 优雅关闭挂死修复 + TUN 残留清理 | master |
+| [tun-cleanup-scoping-pfroute-tasks.md](tasks/tun-cleanup-scoping-pfroute-tasks.md) | TUN 清理作用域收敛 + darwin PF_ROUTE 改造 | master |
 | [gvisor_route_selector_tasks.md](tasks/gvisor_route_selector_tasks.md) | gVisor RouteSelector + Link NICs 实现任务 | gvisor-route-selector-impl |
 | [p2p_mesh_data_frame_loss_tasks.md](tasks/p2p_mesh_data_frame_loss_tasks.md) | P2P 会话写入与生命周期修复任务 | master |
 | [mesh-forwarding-trace-tasks.md](tasks/mesh-forwarding-trace-tasks.md) | Mesh 跨层转发关联诊断任务 | master |

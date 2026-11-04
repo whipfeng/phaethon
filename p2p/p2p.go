@@ -219,25 +219,37 @@ type writeReq struct {
 	enqueueTime time.Time // set by enqueueWriteReq; used for sojourn measurement (Phase B)
 }
 
+// Data-queue admission control (mesh-datapath-perf design §3.1):
+// a per-peer byte budget bounds memory across all 256 data queues; a
+// per-queue frame cap bounds head-of-line blocking behind one flow.
+const (
+	dataQueueByteBudget = 8 << 20  // 8MB per peer
+	dataQueueMaxDepth   = 512      // frames per queue
+	drrQuantum          = 64 << 10 // 64KB per queue per round (~43×1500B frames)
+)
+
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
-// v2: 256 queues (was 16) + Jenkins hash + batch dequeue.
+// v3: real deficit-gated draining (design §3.2) + per-peer byte budget refund.
 type DRRScheduler struct {
 	queues   [256]chan writeReq
 	deficits [256]int
-	quantum  int // bytes per queue per round (default 1500 = MTU)
-	round    int // next queue to check
-	salt     uint32 // random salt for Jenkins hash
+	quantum  int           // bytes per queue per round
+	round    int           // next queue to check
+	salt     uint32        // random salt for Jenkins hash
 	notifyCh chan struct{} // signaled when a packet is enqueued
+	budget   *atomic.Int64 // peer data-queue byte budget; refunded on dequeue
 }
 
-// newDRRScheduler creates a new DRR scheduler with the given queues.
-func newDRRScheduler(queues [256]chan writeReq) *DRRScheduler {
+// newDRRScheduler creates a new DRR scheduler with the given queues and the
+// peer's shared data-queue byte budget (nil disables refunding).
+func newDRRScheduler(queues [256]chan writeReq, budget *atomic.Int64) *DRRScheduler {
 	return &DRRScheduler{
 		queues:   queues,
-		quantum:  1500, // MTU
+		quantum:  drrQuantum,
 		round:    0,
 		salt:     rand.Uint32(),
 		notifyCh: make(chan struct{}, 1), // buffered channel for notification
+		budget:   budget,
 	}
 }
 
@@ -262,67 +274,65 @@ func (s *DRRScheduler) Next(stopCh <-chan struct{}) *writeReq {
 }
 
 // NextBatch returns up to maxBatch packets using DRR fair scheduling.
-// v2: batch dequeue to reduce channel overhead.
-// Does ONE round through all 256 queues, collecting packets fairly.
+// Does ONE round through all 256 queues, draining each queue up to its
+// deficit (real DRR gate — a busy flow gets ~quantum bytes per round, so a
+// single flow now yields multi-frame batches instead of degenerating to 1).
 // If no packets are found, blocks until a packet arrives or stopCh is closed.
 // Next round starts from where this round stopped (fair across rounds).
 func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeReq {
 	batch := make([]writeReq, 0, maxBatch)
-	
-	// Do ONE round through all 256 queues (or until batch is full)
-	roundsChecked := 0
-	for i := 0; i < 256 && len(batch) < maxBatch; i++ {
-		idx := (s.round + i) % 256
-		roundsChecked = i + 1
 
-		// Replenish deficit if needed
-		if s.deficits[idx] <= 0 {
-			s.deficits[idx] += s.quantum
-		}
+	// drainRound makes one pass over all queues starting at s.round,
+	// draining each non-empty queue until its deficit is exhausted.
+	// Returns the queue index where the next round should start.
+	drainRound := func() int {
+		last := s.round
+		for i := 0; i < 256 && len(batch) < maxBatch; i++ {
+			idx := (s.round + i) % 256
+			last = idx
 
-		// Non-blocking try to dequeue
-		select {
-		case req := <-s.queues[idx]:
-			s.deficits[idx] -= len(req.data)
-			batch = append(batch, req)
-		default:
+			// Replenish deficit at the round boundary. A negative remnant
+			// (over-drawn by at most one frame in the previous round)
+			// carries over and reduces this round's effective quantum —
+			// textbook DRR behavior.
+			if s.deficits[idx] <= 0 {
+				s.deficits[idx] += s.quantum
+			}
+
+		drainQueue:
+			for len(batch) < maxBatch {
+				select {
+				case req := <-s.queues[idx]:
+					s.deficits[idx] -= len(req.data)
+					if s.budget != nil {
+						s.budget.Add(int64(len(req.data)))
+					}
+					batch = append(batch, req)
+				default:
+					// Queue empty: reset so idle flows don't bank deficit.
+					s.deficits[idx] = 0
+					break drainQueue
+				}
+				if s.deficits[idx] <= 0 {
+					break
+				}
+			}
 		}
+		return (last + 1) % 256
 	}
-	
-	// Update round for next time: start from where we stopped
-	s.round = (s.round + roundsChecked) % 256
-	
-	// If we got at least one packet, return immediately
+
+	s.round = drainRound()
 	if len(batch) > 0 {
 		return batch
 	}
-	
+
 	// No packets found, block until a packet arrives or stopped
 	for {
 		select {
 		case <-stopCh:
 			return batch
 		case <-s.notifyCh:
-			// A packet arrived, do another round
-			roundsChecked = 0
-			for i := 0; i < 256 && len(batch) < maxBatch; i++ {
-				idx := (s.round + i) % 256
-				roundsChecked = i + 1
-
-				if s.deficits[idx] <= 0 {
-					s.deficits[idx] += s.quantum
-				}
-
-				select {
-				case req := <-s.queues[idx]:
-					s.deficits[idx] -= len(req.data)
-					batch = append(batch, req)
-				default:
-				}
-			}
-			s.round = (s.round + roundsChecked) % 256
-			
-			// If we got packets, return; otherwise loop and wait again
+			s.round = drainRound()
 			if len(batch) > 0 {
 				return batch
 			}
@@ -370,6 +380,10 @@ type Peer struct {
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
 
+	// Data-queue admission control (design §3.1): atomic byte budget shared
+	// by all 256 data queues; reserved on enqueue, refunded on dequeue.
+	dataBudget atomic.Int64
+
 	// Per-peer random number generator (avoid global rand lock contention)
 	rng   *rand.Rand
 	rngMu sync.Mutex
@@ -386,6 +400,7 @@ type Peer struct {
 	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
 	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
 	controlChDrops      uint64 // Frames dropped due to controlCh full
+	dataBudgetDrops     uint64 // Frames dropped due to per-peer data byte budget exhausted (design §3.1)
 
 	// Egress health state (Phase B): locally-observed forwarding health.
 	// Sampled into a window drop rate by sampleEgressWindow (called on the
@@ -813,6 +828,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	isDNS := false
 	isACK := false
 	dataQueueIdx := -1
+	need := int64(0) // data-queue byte reservation (set in the data branch)
 
 	isMeshPacket := req.frameType == frame.FrameMeshPacket
 	if req.isControl {
@@ -827,12 +843,29 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		// All data packets: use DRR fair scheduling
 		dataQueueIdx = peer.drrScheduler.hashFlow(req.data)
 		ch = peer.dataQueues[dataQueueIdx]
+		// Byte-budget admission (design §3.1): reserve bytes before enqueue
+		// so a stalled transport cannot pile unbounded memory in the data
+		// queues. The reservation is refunded when the DRR scheduler
+		// dequeues the frame.
+		need = int64(len(req.data))
+		for {
+			cur := peer.dataBudget.Load()
+			if cur < need {
+				atomic.AddUint64(&peer.dataBudgetDrops, 1)
+				util.LogModuleWarn("p2p", "[P2P] data byte budget exhausted for %s (need=%d cur=%d), dropping frame type=0x%02x",
+					peer.ID, need, cur, req.frameType)
+				return ErrQueueFull
+			}
+			if peer.dataBudget.CompareAndSwap(cur, cur-need) {
+				break
+			}
+		}
 	}
 
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d chLen=%d priority=%s", 
+			util.LogModuleDebug("p2p", "[P2P-ENQUEUE-DIAG] enqueued FrameMeshPacket peer=%s dataLen=%d chLen=%d priority=%s",
 				peer.ID, len(req.data), len(ch), channelPriorityName(ch, peer))
 			mesh.TraceForwarding("p2p_enqueued", req.data, "peer=%s", peer.ID)
 		}
@@ -842,6 +875,10 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		}
 		return nil
 	default:
+		// Refund the byte reservation for data-queue frames.
+		if dataQueueIdx >= 0 {
+			peer.dataBudget.Add(need)
+		}
 		if req.frameType == frame.FrameMeshPacket {
 			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d chCap=%d priority=%s", 
 				peer.ID, len(req.data), cap(ch), channelPriorityName(ch, peer))
@@ -1023,9 +1060,9 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	// Initialize data queues for DRR fair scheduling
 	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 64) // 64 packets per queue (CUBIC single-flow depth)
+		dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
 	}
-	
+
 	peer := &Peer{
 		ID:             fmt.Sprintf("%d", seq),
 		LastSeen:       time.Now(),
@@ -1037,9 +1074,10 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		controlCh:      make(chan writeReq, 512),
 		stopCh:         make(chan struct{}),
 		Seq:            seq,
-		drrScheduler:   newDRRScheduler(dataQueues),
 		pingTracker:    newPingTracker(),
 	}
+	peer.drrScheduler = newDRRScheduler(dataQueues, &peer.dataBudget)
+	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
@@ -1210,9 +1248,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	// Initialize data queues for DRR fair scheduling
 	var dataQueues [256]chan writeReq
 	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, 64) // 64 packets per queue (CUBIC single-flow depth)
+		dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
 	}
-	
+
 	peer := &Peer{
 		ID:           fmt.Sprintf("%d", seq),
 		ProxyName:    proxy.Name,
@@ -1226,9 +1264,10 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		dataQueues:   dataQueues,
 		drrOutput:    make(chan writeReq, 512),
 		controlCh:    make(chan writeReq, 512),
-		drrScheduler: newDRRScheduler(dataQueues),
 		pingTracker:  newPingTracker(),
 	}
+	peer.drrScheduler = newDRRScheduler(dataQueues, &peer.dataBudget)
+	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
@@ -1355,13 +1394,15 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 		// Reinitialize data queues for DRR fair scheduling
 		for i := range peer.dataQueues {
-			peer.dataQueues[i] = make(chan writeReq, 32) // v2: 32 packets per queue (was 256)
+			peer.dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
 		}
 		if peer.drrScheduler != nil {
 			peer.drrScheduler.queues = peer.dataQueues
 			peer.drrScheduler.deficits = [256]int{}
 			peer.drrScheduler.round = 0
 		}
+		// Fresh queues hold no bytes: reset the admission budget to full.
+		peer.dataBudget.Store(dataQueueByteBudget)
 		peer.SetStatus("connecting")
 		peer.SetLastError("") // dial succeeded — clear stale error (issue 问题6)
 		m.notifyStatusChange()
@@ -2232,6 +2273,7 @@ func (p *Peer) sampleEgressWindow() (dropRate, sojournMs float64) {
 func (p *Peer) totalDataDrops() uint64 {	var total uint64
 	total += atomic.LoadUint64(&p.dnsQueueDrops)
 	total += atomic.LoadUint64(&p.ackQueueDrops)
+	total += atomic.LoadUint64(&p.dataBudgetDrops)
 	for i := range p.dataQueueDrops {
 		total += atomic.LoadUint64(&p.dataQueueDrops[i])
 	}

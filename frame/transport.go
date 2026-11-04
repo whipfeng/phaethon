@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -117,10 +118,29 @@ func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) e
 	// propagate rather than kill the link and every inner flow on it. A
 	// dead/wedged peer is detected by the read-side heartbeat timeout,
 	// which closes the transport and unblocks any stuck writer.
+	if len(payload) > MaxPayload {
+		return fmt.Errorf("reverse_frame: payload too large (%d)", len(payload))
+	}
 	if frameType == FrameMeshPacket {
 		traceMeshPacket("frame_write_start", payload)
 	}
-	err := WriteFrame(t.conn, frameType, payload)
+	var hdr [FrameHeaderSize]byte
+	hdr[0] = frameType
+	hdr[1] = byte(len(payload) >> 8)
+	hdr[2] = byte(len(payload))
+	var err error
+	if tc, ok := t.conn.(*net.TCPConn); ok && len(payload) > 0 {
+		// Merge header+payload into a single writev syscall instead of
+		// WriteFrame's two writes (design §3.3).
+		bufs := net.Buffers{hdr[:], payload}
+		var n int64
+		n, err = bufs.WriteTo(tc)
+		if err == nil && n != int64(FrameHeaderSize+len(payload)) {
+			err = io.ErrShortWrite
+		}
+	} else {
+		err = WriteFrame(t.conn, frameType, payload)
+	}
 	if frameType == FrameMeshPacket {
 		if err != nil {
 			traceMeshPacket("frame_write_error", payload)
@@ -132,7 +152,9 @@ func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) e
 }
 
 // SendBatch writes multiple frames in a single write operation.
-// All frames are serialized into a buffer first, then written atomically.
+// TCP fast path: one writev (net.Buffers) carrying per-frame header+payload
+// without copying payloads (design §3.3). Non-TCP connections fall back to
+// serializing everything into one buffer and a single write.
 func (t *streamTransport) SendBatch(frames []Frame) error {
 	if len(frames) == 0 {
 		return nil
@@ -143,43 +165,63 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 
 	// No write deadline — same rationale as Send.
 
-	// Pre-calculate total buffer size to avoid multiple allocations (issue 9)
+	// Pre-calculate total buffer size and validate payloads (a 2-byte length
+	// field cannot hold more than MaxPayload).
 	totalSize := 0
 	for _, f := range frames {
-		totalSize += 3 + len(f.Payload) // 3-byte header + payload
+		if len(f.Payload) > MaxPayload {
+			return fmt.Errorf("reverse_frame: payload too large (%d)", len(f.Payload))
+		}
+		totalSize += FrameHeaderSize + len(f.Payload)
 	}
-	
-	// Allocate buffer once (issue 9)
-	buf := make([]byte, totalSize)
-	offset := 0
-	
-	// Serialize all frames directly into buffer
+
 	for _, f := range frames {
 		if f.Type == FrameMeshPacket {
 			traceMeshPacket("frame_write_start", f.Payload)
 		}
-		// Serialize frame header
-		buf[offset] = f.Type
-		buf[offset+1] = byte(len(f.Payload) >> 8)
-		buf[offset+2] = byte(len(f.Payload))
-		offset += 3
-		// Copy payload
-		if len(f.Payload) > 0 {
-			copy(buf[offset:], f.Payload)
-			offset += len(f.Payload)
-		}
 	}
 
-	// Single write for all frames
-	n, err := t.conn.Write(buf)
-	if err == nil && n != len(buf) {
+	var err error
+	var n int64
+	if tc, ok := t.conn.(*net.TCPConn); ok {
+		// writev fast path: 3-byte header + payload per frame, no payload copy.
+		bufs := make(net.Buffers, 0, len(frames)*2)
+		hdrs := make([][FrameHeaderSize]byte, len(frames))
+		for i, f := range frames {
+			hdrs[i][0] = f.Type
+			hdrs[i][1] = byte(len(f.Payload) >> 8)
+			hdrs[i][2] = byte(len(f.Payload))
+			bufs = append(bufs, hdrs[i][:])
+			if len(f.Payload) > 0 {
+				bufs = append(bufs, f.Payload)
+			}
+		}
+		n, err = bufs.WriteTo(tc)
+	} else {
+		// Fallback: serialize all frames into one buffer, single write.
+		buf := make([]byte, totalSize)
+		offset := 0
+		for _, f := range frames {
+			buf[offset] = f.Type
+			buf[offset+1] = byte(len(f.Payload) >> 8)
+			buf[offset+2] = byte(len(f.Payload))
+			offset += FrameHeaderSize
+			if len(f.Payload) > 0 {
+				copy(buf[offset:], f.Payload)
+				offset += len(f.Payload)
+			}
+		}
+		var nw int
+		nw, err = t.conn.Write(buf)
+		n = int64(nw)
+	}
+	if err == nil && n != int64(totalSize) {
 		// Partial write without error corrupts the frame stream — the peer
 		// would desync on the truncated buffer. Surface it so the caller
 		// tears down the transport (same handling as a write error).
 		err = io.ErrShortWrite
 	}
 
-	// Trace results
 	for _, f := range frames {
 		if f.Type == FrameMeshPacket {
 			if err != nil {

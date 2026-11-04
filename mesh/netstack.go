@@ -728,8 +728,12 @@ func (n *Netstack) Stop() error {
 // IPIP encapsulation happens in the forwarding path; decapsulation at the
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).
 func (n *Netstack) initStack() error {
-	// NIC 1: TUN adapter (channel endpoint)
-	linkEP := channel.New(8192, 1500, "")
+	// NIC 1: TUN adapter (channel endpoint). MTU 1600 matches the Link NICs so
+	// mesh replies sized by the peer's link MTU (≤1560B) are never rejected on
+	// the TUN write path (previously 1500: oversized replies failed with
+	// ErrMessageTooLong and, via an uninitialized ICMP MTU field, poisoned the
+	// peer's PMTU cache down to ~1-byte segments).
+	linkEP := channel.New(8192, 1600, "")
 	n.linkEP = linkEP
 
 	s := stack.New(stack.Options{

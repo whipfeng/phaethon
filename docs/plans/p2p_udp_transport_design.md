@@ -2,7 +2,7 @@
 
 **状态**: DRAFT（v3：用户定稿——链路级能力宣告、gossip 协商端口、0.0.0.0:P 寻址、TCP 兜底）
 **创建**: 2026-11-03
-**修订**: 2026-11-04 实现修订 R1——所有 gossip 构建路径都必须注入 udp/udpPort（见 §3 末"协商字段注入路径"）
+**修订**: 2026-11-04 实现修订 R1——所有 gossip 构建路径都必须注入 udp/udpPort（见 §3 末"协商字段注入路径"）；实现修订 R2——三条注入路径收敛为一条（mesh 层单构建路径 + normalCh 立即触发）
 **目标版本**: v1.0.0（首版仅 SOCKS5）
 **关联文档**: [p2p_mesh_data_frame_loss_design.md](p2p_mesh_data_frame_loss_design.md)、[htunnel_p2p_direct_mode.md](htunnel_p2p_direct_mode.md)
 
@@ -46,17 +46,24 @@ WriteTo(frame, 0.0.0.0:P) ──UDP通道──► 收包分支：dst=0.0.0.0:P
 - **无应用层分片、无 MTU 钳位**（用户指正，v3.2）：大包交给外层 IP 自动分片（端到端自动重组）；分片丢一片 = 内层 IP 包作废 = 内层 TCP 整段重发，与分片所在层无关，MTU 钳位无本质收益且引入链路状态副作用，不做。超载后果在丢帧契约容忍内
 - **回路径准入（被动端）**：必须同时满足 ①该链路 gossip 仍有 `udp:true` ②确实收到过该链路 UDP 消息——才记住对端返回地址并选择 UDP 回；否则一律 TCP
 
-### 协商字段注入路径（实现修订 R1，2026-11-04）
+### 协商字段注入路径（实现修订 R2，2026-11-04 收敛）
 
-`udp/udpPort` 是**查询式**注入：发送侧构建 gossip 时向本端 leg FSM 查询当前宣告状态。因此**每一条**会发出 gossip 的代码路径都必须注入这两个字段，缺一条就会形成"宣告消失"的假象：
+`udp/udpPort` 是**查询式**注入：发送侧构建 gossip 时向本端 leg FSM 查询当前宣告状态。**构建路径唯一、注入点唯一**：
 
-| gossip 构建路径 | 周期 | 注入方式 |
-|---|---|---|
-| 会话建立一次性 gossip（`broadcastGossipToPeer`） | 一次 | `peer.leg.gossipFields()` |
-| p2p 层周期重通知（`udpLegTransport.tickLoop` → `SetGossipNotify` 回调） | 5s（宣告中） | 同上 |
-| **mesh 层周期 gossip（`mesh.go` gossipWorker 15s + 配置变更）** | 15s | `PeerSender.GossipFields()`（接口扩展，mesh 逐 peer 构建时查询） |
+| 项 | 内容 |
+|---|---|
+| 唯一构建路径 | mesh 层 gossip 构建器（`mesh.go` gossipWorker，逐 peer 构建并做 split-horizon 过滤） |
+| 唯一注入点 | `info.UDP, info.UDPPort = peer.Sender.GossipFields()`（PeerSender 接口扩展） |
+| 触发方式 | ① 15s 周期 ticker（现有）；② 腿 FSM 进/退宣告态 → `MeshManager.TriggerGossip()` 向 normalCh 入队 `gossipBroadcast` 事件——与周期广播**共用同一构建器**，变更即时补发一帧，不另建发送路径 |
 
-**事故记录（R1 动因）**：首版实现只接了前两条路径。mesh 层 15s 周期 gossip 不带 udp 字段 → 接收侧 FSM 每 15s 看到一次 `udp:false` → 被动端立即 withdraw 解端口、主动端清 peerPort → 双方协商状态被周期性强拆（实测 QG 每 15s 重新 allocate 递增端口、VM 周期性退避重拨，UDP 腿永远无法激活）。修复 = mesh 层同样经 `PeerSender` 接口查询注入，gossip 帧格式与接收侧解析零改动。
+会话建立的 p2p 层一次性 gossip（`broadcastGossipToPeer`）是**引导帧**：此刻对端尚未注册进 mesh，无法经 mesh 构建器发送，只能由 p2p 层直发。它只携带连接建立所需字段（Seq/Routes/Subnets/DomainSuffixes），**不带** udp 字段——此刻双方 FSM 均在 None，对端收到"无 udp 字段"无副作用；进入宣告态后由触发②立即补发带字段帧。
+
+**R2 删除的路径**（R1 时共三条，同一字段三处维护、语义易漂移；用户裁定"三条路径变为一条路径"）：
+1. p2p 层 5s 周期重通知机制（`SetGossipNotify` + tickLoop 节流块）——职责由触发②取代
+2. `broadcastGossipToPeer` 内的 leg 字段注入——构建职责收归 mesh 层唯一出口
+3. `BroadcastGossipToAll`（p2p 层，无任何调用方，死代码）
+
+**事故记录（R1 动因）**：首版实现只在 p2p 层两条路径注入。mesh 层 15s 周期 gossip 不带 udp 字段 → 接收侧 FSM 每 15s 看到一次 `udp:false` → 被动端立即 withdraw 解端口、主动端清 peerPort → 双方协商状态被周期性强拆（实测 QG 每 15s 重新 allocate 递增端口、VM 周期性退避重拨，UDP 腿永远无法激活）。修复（R1）= mesh 层同样经 `PeerSender` 接口查询注入，gossip 帧格式与接收侧解析零改动。
 
 ## 4. 状态机与 fallback（设计核心）
 

@@ -110,16 +110,27 @@ peerWriteLoop（不动）
 
 ### 5.4 动态控制器
 
-| 信号 | 阈值初值 | 动作 |
+**拥塞信号（自归一，BBR 形态）**：链路速率/proxy 形态各异，绝对时间阈值（如"sojourn 50ms"）只对一个环境最优，不可跨环境迁移。改用相对基线：
+
+```
+baseline = sojourn 的滑动 min 滤波（窗口 10s，拥塞只推高 sojourn，
+           故窗口内最小值即"无拥塞"签名——同 BBR RTprop 的构造）
+gauge    = clamp((sojournEMA - baseline) / (max(baseline, 1ms 噪声地板) × margin), 0, 1)
+           margin = 1.0（无量纲：sojourn 翻倍于基线 = 满拥塞）
+```
+
+初值引导：会话建立初期通常不拥塞，首个窗口的样本即建立基线。持续满拥塞逃逸：gauge 钉在 1.0 超过 2×加线持续期 → 以当前 EMA 重建基线并记事件（持久拥塞成为新常态，防 min 滤波在启动即拥塞时锁死 gauge=0）。空闲衰减不变（无样本 5s 起 gauge 衰减）。
+
+| 信号 | 阈值 | 动作 |
 |---|---|---|
-| 包装器发送队列积压持续 | 持续 30s 超 70% | 加 1 条 lane（慢加，逐条，间隔 ≥10s） |
+| gauge（自归一，见上） | ≥0.7 持续 30s | 加 1 条 lane（慢加，逐条，间隔 ≥10s） |
 | per-lane 内部探测 srtt/丢包 | lane 内 LinkPing/LinkPong | 健康度输入 + 散流权重 |
-| 积压清空 | 持续 5min | 减 1 条 lane（慢减） |
-| 硬上限 | 4（先验值，实测校正） | 不再加 |
+| gauge | <0.7 持续 5min | 减 1 条 lane（慢减） |
+| 硬上限 | 4（策略值，非环境量） | 不再加 |
 | UDP leg 进入 Active | FSM 回调 | 不再加；存量 lane 自然到期回收 |
 | UDP leg 进入 Backoff | FSM 回调 | 恢复加线逻辑 |
 
-hysteresis 防 lane 数自身 flapping；加线代价 = proxy CONNECT（trojan +TLS）1-2 RTT，故慢加。
+hysteresis 防 lane 数自身 flapping；加线代价 = proxy CONNECT（trojan +TLS）1-2 RTT，故慢加。30s/5min/10s 是振荡抑制与代价模型的时间常数（dial 成本在任何环境成立），非链路速率量；margin/水位是无量纲比例，校正结果跨环境可迁移。
 
 ### 5.5 接收端：多 lane fan-in（udp_leg 先例）
 
@@ -139,7 +150,7 @@ per-lane readLoop 读帧 → 仅接受 `FrameMeshPacket/LinkPing/LinkPong` → �
 
 - **流 key**：内层 5-tuple hash（与 `hashFlow` 同语义，包装器自带 salt，独立于 DRR 的 salt）
 - **算法**：rendezvous hashing（最高随机权重）——lane 集合增减时最小化流重映射，天然适配动态上下线
-- **权重**：每条 lane 的内部探测质量（srtt/loss → 分母罚没，参考 linkCost 形态）。出向决策在本节点包装器内做，**只看本地质量，不依赖 gossip 权重**（§4.2：gossip 只承载聚合后的链路质量）
+- **权重**：每条 lane 的内部探测质量，**相对该 lane 自身基线**（srtt 的滑动 min 滤波，同 gauge 构造）：w = 1/(1 + (srtt−base)/max(base,地板) + 2×loss)，无基线样本时中性 1.0。出向决策在本节点包装器内做，**只看本地质量，不依赖 gossip 权重**（§4.2：gossip 只承载聚合后的链路质量）
 - **控制/DNS 帧不参与分流**（恒走 primary lane）；`FrameMeshPacket` 才分流
 - 权重劣化超阈 → 该 lane 的亲和流主动失效重哈希
 
@@ -168,7 +179,7 @@ per-lane readLoop 读帧 → 仅接受 `FrameMeshPacket/LinkPing/LinkPong` → �
 |---|---|
 | UDP 腿点亮后 >1500B 走外层 IP 分片，分片 all-or-nothing | v3.2 已定不钳 MTU；阶段 0 实测丢包率，超标再议 |
 | trojan 服务端 UDP relay 实际可用性未验证 | 阶段 0 验证项 |
-| stripe cap=4、积压阈值均为先验值 | 阶段 4 用实测校正，全部常量化 |
+| stripe cap=4 为策略值；拥塞信号已自归一（§5.4），校正对象仅剩无量纲参数 | 阶段 4 实测定稿 margin/水位/窗口，全部常量化 |
 | per-stripe 预算分账方案（共享 vs 配额） | 阶段 1 实现时定 |
 | UDP 被中间盒限速导致腿间抖动 | FSM 回落兜底；观测送达率 |
 | 留跑取证期 stall dump（dvip 冻结）与本设计的关联 | 独立线（mesh-data-plane-stall.md 分叉判据），不阻塞本设计 |

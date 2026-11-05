@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | 实施中（取证专用，无行为变更） |
+| 状态 | **已完成（2026-11-06）— 假设实锤**：JF 活动窗口差分 fast_retransmit +28 / retransmits +36 / sack_recovery +31 / spurious_recovery +31 / dsack +35（481 segments_sent），有效 cwnd ≈ 1.6 段；Spurious+DSACK 证明祸首为乱序而非丢包。详见 docs/issues/elephant-download-dribble.md v4。附带病理：传输中段硬停滞无 RTO（独立问题） |
 | 关联 | [elephant 下载滴流专项](../issues/elephant-download-dribble.md)（v4 研判）、[mesh 大文件慢](../issues/mesh-large-file-slow.md) |
 
 ## 背景与假设

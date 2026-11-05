@@ -518,7 +518,6 @@ func stripeCtrlTestWindow() func() {
 		"stripeCtrlTick":           &stripeCtrlTick,
 		"stripeProbeInterval":      &stripeProbeInterval,
 		"stripeProbeTimeout":       &stripeProbeTimeout,
-		"stripeSojournNormMs":      &stripeSojournNormMs,
 		"stripeGaugeDecayPerTick":  &stripeGaugeDecayPerTick,
 		"stripeGaugeIdleDecay":     &stripeGaugeIdleDecay,
 		"stripeGaugeHighWatermark": &stripeGaugeHighWatermark,
@@ -526,6 +525,7 @@ func stripeCtrlTestWindow() func() {
 		"stripeAddInterval":        &stripeAddInterval,
 		"stripeClearSustain":       &stripeClearSustain,
 		"stripeMaxLanes":           &stripeMaxLanes,
+		"stripeBaselineWindow":     &stripeBaselineWindow,
 	}
 	for name, ptr := range vars {
 		switch p := ptr.(type) {
@@ -540,7 +540,6 @@ func stripeCtrlTestWindow() func() {
 	stripeCtrlTick = 20 * time.Millisecond
 	stripeProbeInterval = time.Hour // probes disabled in controller tests
 	stripeProbeTimeout = time.Hour
-	stripeSojournNormMs = 50
 	stripeGaugeDecayPerTick = 0.5
 	stripeGaugeIdleDecay = 250 * time.Millisecond
 	stripeGaugeHighWatermark = 0.7
@@ -548,6 +547,7 @@ func stripeCtrlTestWindow() func() {
 	stripeAddInterval = 50 * time.Millisecond
 	stripeClearSustain = 300 * time.Millisecond
 	stripeMaxLanes = 4
+	stripeBaselineWindow = time.Hour // no re-baseline escape mid-test
 	return func() {
 		for name, ptr := range vars {
 			switch p := ptr.(type) {
@@ -562,30 +562,37 @@ func stripeCtrlTestWindow() func() {
 	}
 }
 
-// slowTransport adds a fixed delay to every base send so sojourn sampling
-// sees sustained congestion without a real network.
+// slowTransport adds a switchable delay to every base send so sojourn
+// sampling sees congestion without a real network. Tests first run it at
+// zero delay to establish the fast baseline (§5.4), then setDelay to
+// simulate congestion relative to that baseline.
 type slowTransport struct {
 	base  frame.FrameTransport
-	delay time.Duration
+	delay atomic.Int64 // nanoseconds
 }
 
+func (s *slowTransport) setDelay(d time.Duration) { s.delay.Store(int64(d)) }
+
+func (s *slowTransport) sleep() { time.Sleep(time.Duration(s.delay.Load())) }
+
 func (s *slowTransport) Send(ft byte, payload []byte, ctrl bool) error {
-	time.Sleep(s.delay)
+	s.sleep()
 	return s.base.Send(ft, payload, ctrl)
 }
 
 func (s *slowTransport) SendBatch(frames []frame.Frame) error {
-	time.Sleep(s.delay)
+	s.sleep()
 	return s.base.SendBatch(frames)
 }
 
 func (s *slowTransport) Recv() (byte, []byte, error) { return s.base.Recv() }
 func (s *slowTransport) Close() error                { return s.base.Close() }
 
-// newCongestedStripe builds a stripe wrapper whose primary lane costs
-// delayPerSend per write (drained by a background reader), plus a dialLane
-// that mints fresh pipes. Returns the wrapper and the dial count.
-func newCongestedStripe(t *testing.T, delayPerSend time.Duration, udpActive func() bool) (*stripeTransport, *atomic.Int32) {
+// newCongestedStripe builds a stripe wrapper whose primary lane starts fast
+// (drained by a background reader), plus a dialLane that mints fresh pipes.
+// Returns the wrapper, the dial count, and the throttle (call setDelay to
+// congest after the baseline is established).
+func newCongestedStripe(t *testing.T, udpActive func() bool) (*stripeTransport, *atomic.Int32, *slowTransport) {
 	t.Helper()
 	basePeer, baseServer := net.Pipe()
 	t.Cleanup(func() { basePeer.Close() })
@@ -598,10 +605,8 @@ func newCongestedStripe(t *testing.T, delayPerSend time.Duration, udpActive func
 		}
 	}()
 	var dials atomic.Int32
-	tr := newStripeTransport(&slowTransport{
-		base:  frame.NewStreamTransport(baseServer),
-		delay: delayPerSend,
-	}, stripeConfig{
+	slow := &slowTransport{base: frame.NewStreamTransport(baseServer)}
+	tr := newStripeTransport(slow, stripeConfig{
 		dialLane: func() (uint32, frame.FrameTransport, error) {
 			dials.Add(1)
 			laneActive, lanePassive := net.Pipe()
@@ -618,7 +623,26 @@ func newCongestedStripe(t *testing.T, delayPerSend time.Duration, udpActive func
 		udpActive: udpActive,
 	})
 	t.Cleanup(func() { tr.Close() })
-	return tr, &dials
+	return tr, &dials, slow
+}
+
+// waitForBaselineEnough polls until the sojourn baseline has been
+// established from enough fast samples to be trustworthy.
+func waitForBaselineEnough(t *testing.T, tr *stripeTransport, minSamples uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tr.ctrlMu.Lock()
+		ok := tr.baseline > 0 && tr.sojournSamples >= minSamples
+		tr.ctrlMu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("baseline not established after %v", 5*time.Second)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitForLaneCount(t *testing.T, tr *stripeTransport, want int) {
@@ -626,8 +650,11 @@ func waitForLaneCount(t *testing.T, tr *stripeTransport, want int) {
 	deadline := time.Now().Add(5 * time.Second)
 	for tr.laneCount() != want {
 		if time.Now().After(deadline) {
-			t.Fatalf("laneCount = %d, want %d (gauge=%.2f, events=%v)",
-				tr.laneCount(), want, tr.currentGauge(), tr.snapshotEvents())
+			tr.ctrlMu.Lock()
+			ema, base, n, last := tr.sojournEMA, tr.baseline, tr.sojournSamples, tr.lastSampleAt
+			tr.ctrlMu.Unlock()
+			t.Fatalf("laneCount = %d, want %d (gauge=%.2f ema=%.2fms base=%.2fms samples=%d lastSample=%v ago, events=%v)",
+				tr.laneCount(), want, tr.currentGauge(), ema, base, n, time.Since(last), tr.snapshotEvents())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -650,50 +677,42 @@ func waitForEvent(t *testing.T, tr *stripeTransport, substr string) {
 	}
 }
 
+// TestStripeBaselineFloorKeepsSentinel locks the sentinel fix: a same-tick
+// sample (ms == 0, common on Windows' coarse clock) must clamp the baseline
+// to the noise floor instead of leaving it at exactly 0 — a 0 baseline
+// re-arms the "unbootstrapped" sentinel, and the next congested sample would
+// re-base the line at congestion level, pinning gauge ≈ 0 forever.
+func TestStripeBaselineFloorKeepsSentinel(t *testing.T) {
+	_, baseServer := net.Pipe()
+	defer baseServer.Close()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	defer tr.Close()
+
+	floorMs := float64(stripeBaselineFloor) / float64(time.Millisecond)
+	// Two back-to-back zero-delay samples; the second one lands on the
+	// baseline-min branch with ms ≈ 0 on any clock granularity.
+	tr.sampleSojourn(time.Now())
+	tr.sampleSojourn(time.Now())
+
+	tr.ctrlMu.Lock()
+	base := tr.baseline
+	tr.ctrlMu.Unlock()
+	if base < floorMs {
+		t.Fatalf("baseline = %v below noise floor %v (sentinel broken: same-tick sample left baseline ≈ 0)", base, floorMs)
+	}
+
+	// Congestion on top of the floored baseline must read as full gauge.
+	tr.sampleSojourn(time.Now().Add(-100 * time.Millisecond))
+	if g := tr.currentGauge(); g < 0.99 {
+		t.Fatalf("gauge = %.2f, want ≈1.0 after congestion on floored baseline", g)
+	}
+}
+
 func TestStripeControllerAddsLaneUnderCongestion(t *testing.T) {
 	restore := stripeCtrlTestWindow()
 	defer restore()
 
-	tr, dials := newCongestedStripe(t, 60*time.Millisecond, nil)
-	// Keep the primary busy: every Send samples a 60ms sojourn → gauge 1.0.
-	go func() {
-		for i := 0; ; i++ {
-			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
-				return
-			}
-		}
-	}()
-	waitForLaneCount(t, tr, 1)
-	if dials.Load() == 0 {
-		t.Fatal("lane appeared without a controller dial")
-	}
-	waitForEvent(t, tr, "add lane")
-}
-
-func TestStripeControllerSuppressedByUDPActive(t *testing.T) {
-	restore := stripeCtrlTestWindow()
-	defer restore()
-
-	tr, _ := newCongestedStripe(t, 60*time.Millisecond, func() bool { return true })
-	go func() {
-		for i := 0; ; i++ {
-			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
-				return
-			}
-		}
-	}()
-	// Wait well past the add window; the UDP leg owns the data path.
-	time.Sleep(500 * time.Millisecond)
-	if n := tr.laneCount(); n != 0 {
-		t.Fatalf("laneCount = %d, want 0 while UDP leg Active", n)
-	}
-}
-
-func TestStripeControllerRemovesLaneAfterClear(t *testing.T) {
-	restore := stripeCtrlTestWindow()
-	defer restore()
-
-	tr, _ := newCongestedStripe(t, 60*time.Millisecond, nil)
+	tr, dials, slow := newCongestedStripe(t, nil)
 	stop := make(chan struct{})
 	go func() {
 		for i := 0; ; i++ {
@@ -707,8 +726,69 @@ func TestStripeControllerRemovesLaneAfterClear(t *testing.T) {
 			}
 		}
 	}()
+	// Phase 1: fast traffic establishes the sliding-min baseline (§5.4).
+	waitForBaselineEnough(t, tr, 10)
+	// Phase 2: throttle to 60ms per send — sojourn ≈ 60× the sub-ms
+	// baseline → gauge pins at 1.0 → sustained add.
+	slow.setDelay(60 * time.Millisecond)
 	waitForLaneCount(t, tr, 1)
-	close(stop) // traffic stops → gauge decays → clear window elapses
+	close(stop)
+	if dials.Load() == 0 {
+		t.Fatal("lane appeared without a controller dial")
+	}
+	waitForEvent(t, tr, "add lane")
+}
+
+func TestStripeControllerSuppressedByUDPActive(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, _, slow := newCongestedStripe(t, func() bool { return true })
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	waitForBaselineEnough(t, tr, 10)
+	slow.setDelay(60 * time.Millisecond)
+	// Wait well past the add window; the UDP leg owns the data path.
+	time.Sleep(500 * time.Millisecond)
+	if n := tr.laneCount(); n != 0 {
+		t.Fatalf("laneCount = %d, want 0 while UDP leg Active", n)
+	}
+}
+
+func TestStripeControllerRemovesLaneAfterClear(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, _, slow := newCongestedStripe(t, nil)
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	waitForBaselineEnough(t, tr, 10)
+	slow.setDelay(60 * time.Millisecond)
+	waitForLaneCount(t, tr, 1)
+	close(stop) // traffic stops → EMA pulled back to baseline → clear window elapses
 	waitForLaneCount(t, tr, 0)
 	waitForEvent(t, tr, "remove lane")
 }
@@ -850,9 +930,11 @@ func TestStripeRendezvousMinimalRemap(t *testing.T) {
 func TestStripeWeightedDistribution(t *testing.T) {
 	tr, lanes := stripeTestWrapper(t, 2)
 	good, bad := lanes[0], lanes[1]
-	// Poison the bad lane: 200ms srtt → weight 1/(1+4)=0.2 vs neutral 1.0.
+	// Poison the bad lane relative to its own baseline (§5.4/§六): base 10ms,
+	// srtt 200ms → rel = 19 → weight 1/(1+19) = 0.05 vs neutral 1.0.
 	bad.probe.mu.Lock()
 	bad.probe.srtt = 200 * time.Millisecond
+	bad.probe.srttBase = 10 * time.Millisecond
 	bad.probe.mu.Unlock()
 
 	const flows = 12000
@@ -865,11 +947,11 @@ func TestStripeWeightedDistribution(t *testing.T) {
 			counts[l.id]++
 		}
 	}
-	// Expected ≈ 1 : 1 : 0.2 → good ≈ 45%, bad ≈ 9%.
+	// Expected ≈ 1 : 1 : 0.05 → good ≈ 49%, bad ≈ 2.4%.
 	goodShare := float64(counts[good.id]) / flows
 	badShare := float64(counts[bad.id]) / flows
 	if goodShare < 0.38 || goodShare > 0.52 {
-		t.Fatalf("good-lane share = %.2f, want ≈0.45", goodShare)
+		t.Fatalf("good-lane share = %.2f, want ≈0.49", goodShare)
 	}
 	if badShare > 0.15 {
 		t.Fatalf("bad-lane share = %.2f, want ≤0.15 (counts=%v)", badShare, counts)
@@ -883,7 +965,7 @@ func TestStripeDegradedLaneRemoved(t *testing.T) {
 	restore := stripeCtrlTestWindow()
 	defer restore()
 
-	tr, _ := newCongestedStripe(t, 60*time.Millisecond, nil)
+	tr, _, slow := newCongestedStripe(t, nil)
 	stop := make(chan struct{})
 	go func() {
 		for i := 0; ; i++ {
@@ -897,6 +979,8 @@ func TestStripeDegradedLaneRemoved(t *testing.T) {
 			}
 		}
 	}()
+	waitForBaselineEnough(t, tr, 10)
+	slow.setDelay(60 * time.Millisecond)
 	waitForLaneCount(t, tr, 1)
 	close(stop)
 

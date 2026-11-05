@@ -597,12 +597,17 @@ func (e *Manager) StartTUN() error {
 
 	// Redirect system DNS to the dedicated DNS address in the TUN subnet
 	// so applications send queries that route through TUN to DNSHijacker.
-	// The service is matched by the PHYSICAL interface (DefaultIfaceName):
-	// passing the TUN device name matches nothing — candidates exclude
-	// utun/tun devices — and the redirect silently no-ops.
+	// Registration interface is platform-specific (dnsRegistrationIface):
+	// Windows must register on the TUN adapter — registering on the physical
+	// interface makes dnscache source queries from a physical address, and
+	// Windows source-bound routing then egresses them via the physical
+	// gateway, never reaching the hijacker (see
+	// docs/issues/dns-source-constrained-routing.md). Darwin must register on
+	// the physical service — its candidate filter excludes utun/tun devices,
+	// so passing the TUN device name would silently no-op (6fa266e).
 	dnsAddr := e.netstack.DNSAddr()
 	dnsIP := net.IP(dnsAddr.AsSlice())
-	if err := setSystemDNS(e.routeMgr.DefaultIfaceName, dnsIP.String()); err != nil {
+	if err := setSystemDNS(dnsRegistrationIface(dev.Name(), e.routeMgr.DefaultIfaceName), dnsIP.String()); err != nil {
 		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
 

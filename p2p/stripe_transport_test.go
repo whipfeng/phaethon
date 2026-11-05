@@ -2,7 +2,10 @@ package p2p
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +18,7 @@ import (
 func TestStripeTransportSendPassThrough(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	defer tr.Close()
 
 	go func() {
@@ -35,7 +38,7 @@ func TestStripeTransportSendPassThrough(t *testing.T) {
 func TestStripeTransportRecvPassThrough(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	defer tr.Close()
 
 	go func() {
@@ -55,7 +58,7 @@ func TestStripeTransportRecvPassThrough(t *testing.T) {
 func TestStripeTransportSendBatchPassThrough(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	defer tr.Close()
 
 	frames := []frame.Frame{
@@ -85,7 +88,7 @@ func TestStripeTransportControlPriorityPreserved(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	defer tr.Close()
 
 	go func() {
@@ -109,7 +112,7 @@ func TestStripeTransportControlPriorityPreserved(t *testing.T) {
 func TestStripeTransportCloseClosesLanes(t *testing.T) {
 	_, server := net.Pipe()
 	base := frame.NewStreamTransport(server)
-	tr := newStripeTransport(base)
+	tr := newStripeTransport(base, stripeConfig{})
 
 	laneConn1, lanePeer1 := net.Pipe()
 	laneConn2, lanePeer2 := net.Pipe()
@@ -144,7 +147,7 @@ func TestStripeTransportCloseClosesLanes(t *testing.T) {
 func TestStripeTransportZeroLanesBadge(t *testing.T) {
 	_, server := net.Pipe()
 	defer server.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	defer tr.Close()
 
 	if n := tr.laneCount(); n != 0 {
@@ -157,7 +160,7 @@ func TestStripeTransportZeroLanesBadge(t *testing.T) {
 
 func TestStripeTransportIdempotentClose(t *testing.T) {
 	_, server := net.Pipe()
-	tr := newStripeTransport(frame.NewStreamTransport(server))
+	tr := newStripeTransport(frame.NewStreamTransport(server), stripeConfig{})
 	if err := tr.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
@@ -223,7 +226,7 @@ func TestStripeTransportLaneDispatch(t *testing.T) {
 		defer peerEnd.Close()
 	}
 	base := frame.NewStreamTransport(transports[0])
-	tr := newStripeTransport(base)
+	tr := newStripeTransport(base, stripeConfig{})
 	defer tr.Close()
 	tr.attachLane(1, frame.NewStreamTransport(transports[1]))
 	tr.attachLane(2, frame.NewStreamTransport(transports[2]))
@@ -290,7 +293,7 @@ func TestStripeTransportLaneDispatch(t *testing.T) {
 func TestStripeTransportLaneFanIn(t *testing.T) {
 	_, baseServer := net.Pipe()
 	defer baseServer.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(baseServer))
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
 	defer tr.Close()
 
 	lanePeer, laneServer := net.Pipe()
@@ -310,23 +313,37 @@ func TestStripeTransportLaneFanIn(t *testing.T) {
 		t.Fatalf("got (%#x,%q)", ft, payload)
 	}
 
-	// Link ping on a lane is accepted as control.
+	// Link ping on a lane is consumed by the probe machinery (task 2.1):
+	// it never surfaces through Recv, and a pong echoes back on the lane.
 	go func() {
-		_ = frame.WriteFrame(lanePeer, frame.FrameLinkPing, []byte("probe"))
+		_ = frame.WriteFrame(lanePeer, frame.FrameLinkPing, []byte(`{"timestamp":111,"seq":9}`))
 	}()
-	ft, payload, err = tr.Recv()
+	rft, rpayload, err := frame.ReadFrame(lanePeer)
 	if err != nil {
-		t.Fatalf("Recv: %v", err)
+		t.Fatalf("pong ReadFrame: %v", err)
 	}
-	if ft != frame.FrameLinkPing || !bytes.Equal(payload, []byte("probe")) {
-		t.Fatalf("got (%#x,%q)", ft, payload)
+	if rft != frame.FrameLinkPong {
+		t.Fatalf("lane ping not answered with pong: got 0x%02x", rft)
+	}
+	var pong PingInfo
+	if err := json.Unmarshal(rpayload, &pong); err != nil {
+		t.Fatalf("pong decode: %v", err)
+	}
+	if pong.Timestamp != 111 || pong.Seq != 9 {
+		t.Fatalf("pong echo mismatch: %+v", pong)
+	}
+	// The ping must not leak into the session Recv channel.
+	select {
+	case r := <-tr.ctrlCh:
+		t.Fatalf("lane ping leaked to session: 0x%02x", r.frameType)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
 func TestStripeTransportLaneControlDropped(t *testing.T) {
 	_, baseServer := net.Pipe()
 	defer baseServer.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(baseServer))
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
 	defer tr.Close()
 
 	lanePeer, laneServer := net.Pipe()
@@ -353,7 +370,7 @@ func TestStripeTransportLaneDeathRemovesLane(t *testing.T) {
 	basePeer, baseServer := net.Pipe()
 	defer basePeer.Close()
 	defer baseServer.Close()
-	tr := newStripeTransport(frame.NewStreamTransport(baseServer))
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
 	defer tr.Close()
 
 	lanePeer, laneServer := net.Pipe()
@@ -395,7 +412,7 @@ func TestStripeAttachLaneEndToEnd(t *testing.T) {
 	sessPeerConn, sessServer := net.Pipe()
 	defer sessPeerConn.Close()
 	defer sessServer.Close()
-	passiveStripe := newStripeTransport(frame.NewStreamTransport(sessServer))
+	passiveStripe := newStripeTransport(frame.NewStreamTransport(sessServer), stripeConfig{})
 	defer passiveStripe.Close()
 	peer := &Peer{
 		ID:        "1",
@@ -412,7 +429,7 @@ func TestStripeAttachLaneEndToEnd(t *testing.T) {
 	activeBasePeer, activeBaseServer := net.Pipe()
 	defer activeBasePeer.Close()
 	defer activeBaseServer.Close()
-	activeStripe := newStripeTransport(frame.NewStreamTransport(activeBaseServer))
+	activeStripe := newStripeTransport(frame.NewStreamTransport(activeBaseServer), stripeConfig{})
 	defer activeStripe.Close()
 	activePeer := &Peer{
 		ID:     "2",
@@ -431,7 +448,11 @@ func TestStripeAttachLaneEndToEnd(t *testing.T) {
 	fakeDialer := &fakeP2PDialer{tr: frame.NewStreamTransport(laneActive)}
 
 	// Active side: dial + attach (task 1.3).
-	mgr.stripeAttachLane(activePeer, fakeDialer)
+	stripeID, laneTr, err := mgr.dialStripeLane(activePeer, fakeDialer)
+	if err != nil {
+		t.Fatalf("dialStripeLane: %v", err)
+	}
+	activeStripe.attachLane(stripeID, laneTr)
 	if activeStripe.laneCount() != 1 {
 		t.Fatalf("active laneCount = %d, want 1", activeStripe.laneCount())
 	}
@@ -482,3 +503,283 @@ type fakeP2PDialer struct {
 }
 
 func (f *fakeP2PDialer) DialP2P() (frame.FrameTransport, error) { return f.tr, nil }
+
+// --- dynamic controller (tasks 2.x) ---
+
+// stripeCtrlTestWindow shortens the controller tunables for testing and
+// returns a restore func.
+func stripeCtrlTestWindow() func() {
+	saved := map[string]any{}
+	vars := map[string]any{
+		"stripeCtrlTick":           &stripeCtrlTick,
+		"stripeProbeInterval":      &stripeProbeInterval,
+		"stripeProbeTimeout":       &stripeProbeTimeout,
+		"stripeSojournNormMs":      &stripeSojournNormMs,
+		"stripeGaugeDecayPerTick":  &stripeGaugeDecayPerTick,
+		"stripeGaugeIdleDecay":     &stripeGaugeIdleDecay,
+		"stripeGaugeHighWatermark": &stripeGaugeHighWatermark,
+		"stripeAddSustain":         &stripeAddSustain,
+		"stripeAddInterval":        &stripeAddInterval,
+		"stripeClearSustain":       &stripeClearSustain,
+		"stripeMaxLanes":           &stripeMaxLanes,
+	}
+	for name, ptr := range vars {
+		switch p := ptr.(type) {
+		case *time.Duration:
+			saved[name] = *p
+		case *float64:
+			saved[name] = *p
+		case *int:
+			saved[name] = *p
+		}
+	}
+	stripeCtrlTick = 20 * time.Millisecond
+	stripeProbeInterval = time.Hour // probes disabled in controller tests
+	stripeProbeTimeout = time.Hour
+	stripeSojournNormMs = 50
+	stripeGaugeDecayPerTick = 0.5
+	stripeGaugeIdleDecay = 250 * time.Millisecond
+	stripeGaugeHighWatermark = 0.7
+	stripeAddSustain = 100 * time.Millisecond
+	stripeAddInterval = 50 * time.Millisecond
+	stripeClearSustain = 300 * time.Millisecond
+	stripeMaxLanes = 4
+	return func() {
+		for name, ptr := range vars {
+			switch p := ptr.(type) {
+			case *time.Duration:
+				*p = saved[name].(time.Duration)
+			case *float64:
+				*p = saved[name].(float64)
+			case *int:
+				*p = saved[name].(int)
+			}
+		}
+	}
+}
+
+// slowTransport adds a fixed delay to every base send so sojourn sampling
+// sees sustained congestion without a real network.
+type slowTransport struct {
+	base  frame.FrameTransport
+	delay time.Duration
+}
+
+func (s *slowTransport) Send(ft byte, payload []byte, ctrl bool) error {
+	time.Sleep(s.delay)
+	return s.base.Send(ft, payload, ctrl)
+}
+
+func (s *slowTransport) SendBatch(frames []frame.Frame) error {
+	time.Sleep(s.delay)
+	return s.base.SendBatch(frames)
+}
+
+func (s *slowTransport) Recv() (byte, []byte, error) { return s.base.Recv() }
+func (s *slowTransport) Close() error                { return s.base.Close() }
+
+// newCongestedStripe builds a stripe wrapper whose primary lane costs
+// delayPerSend per write (drained by a background reader), plus a dialLane
+// that mints fresh pipes. Returns the wrapper and the dial count.
+func newCongestedStripe(t *testing.T, delayPerSend time.Duration, udpActive func() bool) (*stripeTransport, *atomic.Int32) {
+	t.Helper()
+	basePeer, baseServer := net.Pipe()
+	t.Cleanup(func() { basePeer.Close() })
+	// Drain everything the primary sends so writes complete after the delay.
+	go func() {
+		for {
+			if _, _, err := frame.ReadFrame(basePeer); err != nil {
+				return
+			}
+		}
+	}()
+	var dials atomic.Int32
+	tr := newStripeTransport(&slowTransport{
+		base:  frame.NewStreamTransport(baseServer),
+		delay: delayPerSend,
+	}, stripeConfig{
+		dialLane: func() (uint32, frame.FrameTransport, error) {
+			dials.Add(1)
+			laneActive, lanePassive := net.Pipe()
+			t.Cleanup(func() { laneActive.Close() })
+			go func() {
+				for {
+					if _, _, err := frame.ReadFrame(laneActive); err != nil {
+						return
+					}
+				}
+			}()
+			return uint32(dials.Load()), frame.NewStreamTransport(lanePassive), nil
+		},
+		udpActive: udpActive,
+	})
+	t.Cleanup(func() { tr.Close() })
+	return tr, &dials
+}
+
+func waitForLaneCount(t *testing.T, tr *stripeTransport, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for tr.laneCount() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("laneCount = %d, want %d (gauge=%.2f, events=%v)",
+				tr.laneCount(), want, tr.currentGauge(), tr.snapshotEvents())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForEvent polls the controller ring buffer for a substring.
+func waitForEvent(t *testing.T, tr *stripeTransport, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, e := range tr.snapshotEvents() {
+			if strings.Contains(e, substr) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no event containing %q after %v (events=%v)", substr, 5*time.Second, tr.snapshotEvents())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStripeControllerAddsLaneUnderCongestion(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, dials := newCongestedStripe(t, 60*time.Millisecond, nil)
+	// Keep the primary busy: every Send samples a 60ms sojourn → gauge 1.0.
+	go func() {
+		for i := 0; ; i++ {
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	waitForLaneCount(t, tr, 1)
+	if dials.Load() == 0 {
+		t.Fatal("lane appeared without a controller dial")
+	}
+	waitForEvent(t, tr, "add lane")
+}
+
+func TestStripeControllerSuppressedByUDPActive(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, _ := newCongestedStripe(t, 60*time.Millisecond, func() bool { return true })
+	go func() {
+		for i := 0; ; i++ {
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	// Wait well past the add window; the UDP leg owns the data path.
+	time.Sleep(500 * time.Millisecond)
+	if n := tr.laneCount(); n != 0 {
+		t.Fatalf("laneCount = %d, want 0 while UDP leg Active", n)
+	}
+}
+
+func TestStripeControllerRemovesLaneAfterClear(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, _ := newCongestedStripe(t, 60*time.Millisecond, nil)
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	waitForLaneCount(t, tr, 1)
+	close(stop) // traffic stops → gauge decays → clear window elapses
+	waitForLaneCount(t, tr, 0)
+	waitForEvent(t, tr, "remove lane")
+}
+
+func TestStripeLaneProbeRecordsSRTTAndLoss(t *testing.T) {
+	_, baseServer := net.Pipe()
+	defer baseServer.Close()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	defer tr.Close()
+
+	lanePeer, laneServer := net.Pipe()
+	defer lanePeer.Close()
+	tr.attachLane(1, frame.NewStreamTransport(laneServer))
+	defer laneServer.Close()
+
+	// One probe round: ping goes out on the lane, we answer like a remote
+	// laneReadLoop would (echo timestamp+seq), srtt gets recorded.
+	oldTimeout := stripeProbeTimeout
+	stripeProbeTimeout = 80 * time.Millisecond
+	defer func() { stripeProbeTimeout = oldTimeout }()
+
+	tr.probeTick()
+	ft, payload, err := frame.ReadFrame(lanePeer)
+	if err != nil {
+		t.Fatalf("probe ping read: %v", err)
+	}
+	if ft != frame.FrameLinkPing {
+		t.Fatalf("probe frame = 0x%02x, want ping", ft)
+	}
+	var ping PingInfo
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		t.Fatalf("probe decode: %v", err)
+	}
+	pong, _ := json.Marshal(PingInfo{Timestamp: ping.Timestamp, Seq: ping.Seq})
+	if err := frame.WriteFrame(lanePeer, frame.FrameLinkPong, pong); err != nil {
+		t.Fatalf("pong write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		lanes := tr.snapshotLanes()
+		if len(lanes) == 1 {
+			lanes[0].probe.mu.Lock()
+			srtt, sent := lanes[0].probe.srtt, lanes[0].probe.sent
+			lanes[0].probe.mu.Unlock()
+			if srtt > 0 && sent == 1 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("srtt not recorded after pong")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Second probe left unanswered: expiry counts it as loss. Expiry runs at
+	// the next probeTick, so fire one after the timeout elapses.
+	tr.probeTick()
+	_, _, _ = frame.ReadFrame(lanePeer) // drain the ping, never answer
+	time.Sleep(150 * time.Millisecond)  // > stripeProbeTimeout (80ms)
+	tr.probeTick()                      // ages out the unanswered probe
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		lanes := tr.snapshotLanes()
+		if len(lanes) == 1 {
+			lanes[0].probe.mu.Lock()
+			lost := lanes[0].probe.lost
+			lanes[0].probe.mu.Unlock()
+			if lost == 1 {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("unanswered probe not counted as loss")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

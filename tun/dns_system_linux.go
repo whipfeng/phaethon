@@ -130,3 +130,11 @@ func restoreSystemDNS(ifaceName string) {
 	dnsBackup = nil
 	dnsBackupPath = ""
 }
+
+// dnsRegistrationIface returns the physical interface name: Linux behavior is
+// unchanged (registration on the physical interface; queries route through TUN
+// via the /1 split routes and Linux has no Windows-style source-bound routing
+// constraint).
+func dnsRegistrationIface(tunName, physicalName string) string {
+	return physicalName
+}

@@ -30,6 +30,7 @@
 - [x] 2.3 减线逻辑：gauge <0.7 持续 5min → -1（减最新 lane）— 3c1aa00
 - [x] 2.4 UDP leg FSM 状态订阅：Active 停止加线（highSince 清零）+ 存量靠清空规则自然回收；Backoff 后需重新持续 30s — 3c1aa00
 - [x] 2.5 控制器事件日志：加减线原因原文 ring buffer(32) + 日志 — 3c1aa00
+- [x] 2.6 拥塞信号自归一化（方案修订，用户"走1"批准）：sojourn 滑动 min 滤波基线（10s 窗口 + 1ms 噪声地板）+ 无量纲 gauge = clamp((EMA−base)/(max(base,地板)×margin=1.0),0,1)；持续满拥塞逃逸（gauge 钉 ≥0.95 过窗口 → EMA 重建基线 + 事件）；空闲衰减改 EMA 向基线回拉；lane 权重改相对自身 srtt min 基线 w=1/(1+rel+2×loss)；删除 50ms/50ms 两个绝对尺度 — 本次
 
 ## 阶段 3：散流决策（代码，包装器内部）
 

@@ -34,8 +34,10 @@ import (
 // outstanding probes and are never surfaced to the session.
 //
 // Dynamic controller (§2, tasks 2.x): the active side watches an EMA of the
-// primary lane's send sojourn (normalized to [0,1] against 50ms). Sustained
-// congestion (≥0.7 for 30s, ≥10s since the last add, <4 lanes, UDP leg not
+// primary lane's send sojourn against its own sliding-min baseline — a
+// dimensionless gauge in [0,1] (§5.4 self-normalized, BBR RTprop shape; no
+// absolute ms threshold crosses environments). Sustained congestion
+// (≥0.7 for 30s, ≥10s since the last add, <4 lanes, UDP leg not
 // routing) dials one more lane; 5 minutes below the watermark drops the
 // newest lane. A UDP leg in Active state suppresses adds and lets existing
 // lanes age out naturally. Every add/remove is recorded verbatim in a ring
@@ -48,24 +50,27 @@ import (
 const stripeLaneQueueDepth = 256 // outbound batches per lane
 
 // Tunables of the dynamic controller. Package-level vars (not consts) so
-// tests can shorten the windows.
+// tests can shorten the windows. All congestion quantities are
+// dimensionless ratios against a sliding-min baseline (§5.4 self-normalized
+// BBR shape) — no absolute time/money scales of the environment live here.
 var (
 	stripeCtrlTick           = 1 * time.Second  // controller decision period
 	stripeProbeInterval      = 2 * time.Second  // per-lane probe ping period
 	stripeProbeTimeout       = 5 * time.Second  // outstanding probe expiry (loss)
-	stripeSojournNormMs      = 50.0             // sojourn that maps to gauge 1.0
 	stripeGaugeEMAAlpha      = 0.3              // sojourn EMA blend factor
-	stripeGaugeDecayPerTick  = 0.5              // idle decay per controller tick
-	stripeGaugeIdleDecay     = 5 * time.Second  // no sample this long → decay starts
+	stripeGaugeDecayPerTick  = 0.5              // idle EMA pull-back rate per tick
+	stripeGaugeIdleDecay     = 5 * time.Second  // no sample this long → pull-back starts
 	stripeGaugeHighWatermark = 0.7              // congestion threshold
 	stripeAddSustain         = 30 * time.Second // ≥watermark this long → add
 	stripeAddInterval        = 10 * time.Second // minimum spacing between adds
 	stripeClearSustain       = 5 * time.Minute  // <watermark this long → remove
 	stripeMaxLanes           = 4                // cap on dynamic lanes
 	stripeEventRingCap       = 32               // controller event ring buffer
-	stripeWeightSRTTScaleMs  = 50.0             // +1 cost per this many ms of srtt
+	stripeBaselineWindow     = 10 * time.Second // sliding-min window for sojourn baseline
+	stripeBaselineFloor      = time.Millisecond // noise floor for near-zero baselines
+	stripeCongestMargin      = 1.0              // gauge 1.0 at sojourn = baseline × (1+margin)
 	stripeWeightLossPenalty  = 2.0              // cost penalty per unit loss rate
-	stripeLaneMinProbes      = uint64(8)       // degradation gate: min samples
+	stripeLaneMinProbes      = uint64(8)        // degradation gate: min samples
 	stripeLaneBadLoss        = 0.5              // degradation gate: loss rate
 	stripeLaneBadSRTT        = time.Second      // degradation gate: srtt
 )
@@ -89,6 +94,8 @@ type stripeLaneProbe struct {
 	nextSeq     uint32
 	outstanding map[uint32]time.Time
 	srtt        time.Duration // EMA of matched pong RTTs (0 = no sample yet)
+	srttBase    time.Duration // sliding-min baseline of the lane's own srtt
+	srttBaseAt  time.Time     // last time srttBase was (re)established
 	lost        uint64        // probes that expired unmatched
 	sent        uint64        // probes enqueued
 	lastPongAt  time.Time
@@ -116,14 +123,19 @@ type stripeTransport struct {
 	salt  uint32               // own flow-hash salt, independent of DRR's
 	cfg   stripeConfig
 
-	ctrlMu       sync.Mutex // controller state (gauge + windows + events)
-	gauge        float64    // congestion EMA in [0,1]
-	lastSampleAt time.Time
-	highSince    time.Time // zero while gauge < watermark
-	clearSince   time.Time // zero while gauge >= watermark
-	lastAddAt    time.Time
-	lastRemoveAt time.Time
-	events       []string // ring buffer of add/remove reasons (task 2.5)
+	ctrlMu           sync.Mutex // controller state (gauge + windows + events)
+	sojournEMA       float64    // primary-lane sojourn EMA in ms
+	sojournSamples   uint64     // samples folded into sojournEMA
+	baseline         float64    // sliding-min sojourn baseline in ms (0 = none yet)
+	baselineAt       time.Time  // last time baseline was (re)established
+	rebaselinePending bool      // persistent-congestion escape armed (§5.4)
+	gauge            float64    // congestion gauge in [0,1], derived (§5.4)
+	lastSampleAt     time.Time
+	highSince        time.Time // zero while gauge < watermark
+	clearSince       time.Time // zero while gauge >= watermark
+	lastAddAt        time.Time
+	lastRemoveAt     time.Time
+	events           []string // ring buffer of add/remove reasons (task 2.5)
 
 	ctrlCh chan legRecvResult // reuses udp_leg_transport's result type
 	dataCh chan legRecvResult
@@ -205,22 +217,31 @@ func splittable(frameType byte, payload []byte) bool {
 	return frameType == frame.FrameMeshPacket && !isDNSPacket(payload)
 }
 
-// currentWeight folds the lane's probe quality into a linkCost-like weight:
-// 1/(1 + srtt/scale + lossPenalty·loss). No probe sample yet → neutral 1.0
-// so a fresh lane immediately attracts traffic (and probe evidence).
-// Lifetime loss counters are used; phase 4.6 re-tunes the shape.
+// currentWeight folds the lane's probe quality into a linkCost-like weight,
+// relative to the lane's own sliding-min srtt baseline (§5.4/§六 self-normalized):
+// 1/(1 + (srtt−base)/max(base,floor) + lossPenalty·loss). No probe sample or
+// no baseline yet → neutral 1.0 so a fresh lane immediately attracts traffic
+// (and probe evidence). Lifetime loss counters are used; phase 4.6 re-tunes
+// the shape.
 func (l *stripeLane) currentWeight() float64 {
 	l.probe.mu.Lock()
 	defer l.probe.mu.Unlock()
-	if l.probe.srtt <= 0 {
+	if l.probe.srtt <= 0 || l.probe.srttBase <= 0 {
 		return 1.0
 	}
-	srttMs := float64(l.probe.srtt) / float64(time.Millisecond)
+	base := l.probe.srttBase
+	if base < stripeBaselineFloor {
+		base = stripeBaselineFloor
+	}
+	rel := float64(l.probe.srtt-base) / float64(base)
+	if rel < 0 {
+		rel = 0 // a lane faster than its own baseline pays no srtt penalty
+	}
 	loss := 0.0
 	if l.probe.sent > 0 {
 		loss = float64(l.probe.lost) / float64(l.probe.sent)
 	}
-	return 1.0 / (1.0 + srttMs/stripeWeightSRTTScaleMs + stripeWeightLossPenalty*loss)
+	return 1.0 / (1.0 + rel + stripeWeightLossPenalty*loss)
 }
 
 // probeSRTT returns the lane's current srtt EMA (0 = no sample yet).
@@ -486,7 +507,14 @@ func (t *stripeTransport) handleLanePong(l *stripeLane, payload []byte) {
 		} else {
 			l.probe.srtt += (rtt - l.probe.srtt) / 8
 		}
-		l.probe.lastPongAt = time.Now()
+		// Sliding-min baseline of the lane's own srtt (BBR RTprop shape,
+		// §5.4): a lane is only "slow" relative to how fast it used to be.
+		now := time.Now()
+		if l.probe.srttBase == 0 || rtt < l.probe.srttBase || now.Sub(l.probe.srttBaseAt) >= stripeBaselineWindow {
+			l.probe.srttBase = rtt
+			l.probe.srttBaseAt = now
+		}
+		l.probe.lastPongAt = now
 		delete(l.probe.outstanding, pong.Seq)
 	}
 	l.probe.mu.Unlock()
@@ -511,24 +539,75 @@ func (t *stripeTransport) Recv() (byte, []byte, error) {
 
 // --- dynamic controller (tasks 2.x) ---
 
-// sampleSojourn folds one primary-lane send duration into the congestion
-// gauge: normalized to [0,1] against stripeSojournNormMs, then EMA-blended.
+// sampleSojourn folds one primary-lane send duration into the sojourn EMA
+// and refreshes the sliding-min baseline, then derives the congestion gauge
+// (§5.4 self-normalized, BBR RTprop shape):
+//
+//	baseline = sliding min of sojourn over stripeBaselineWindow
+//	gauge    = clamp((sojournEMA − baseline) / (max(baseline, floor) × margin), 0, 1)
+//
+// Congestion only ever pushes sojourn up, so the window's minimum is the
+// "uncongested" signature. Absolute ms values never cross environments —
+// only the dimensionless margin and watermarks are tuned (phase 4.6).
 func (t *stripeTransport) sampleSojourn(start time.Time) {
 	if start.IsZero() {
 		return
 	}
-	g := float64(time.Since(start)) / float64(time.Millisecond) / stripeSojournNormMs
+	ms := float64(time.Since(start)) / float64(time.Millisecond)
+	now := time.Now()
+	t.ctrlMu.Lock()
+	if t.sojournSamples == 0 {
+		t.sojournEMA = ms
+	} else {
+		t.sojournEMA += stripeGaugeEMAAlpha * (ms - t.sojournEMA)
+	}
+	t.sojournSamples++
+	if t.baseline == 0 || ms < t.baseline || now.Sub(t.baselineAt) >= stripeBaselineWindow {
+		// Window expired: if the gauge has been pinned near max the whole
+		// window, congestion is the new normal — escape by re-basing on the
+		// current EMA instead of a single (possibly still-congested) sample,
+		// and flag the event so the re-baseline is visible in the ring.
+		floorMs := float64(stripeBaselineFloor) / float64(time.Millisecond)
+		if t.baseline > 0 && now.Sub(t.baselineAt) >= stripeBaselineWindow && t.gauge >= 0.95 {
+			t.baseline = t.sojournEMA / (1 + stripeCongestMargin*0.95)
+			if t.baseline < floorMs {
+				t.baseline = floorMs
+			}
+			t.rebaselinePending = true
+		} else {
+			// Clamp to the noise floor: a same-tick sample (ms == 0, common
+			// on Windows' coarse clock) must not leave baseline == 0, or the
+			// "baseline == 0 means unbootstrapped" sentinel breaks and the
+			// next congested sample re-bases the line at congestion level.
+			t.baseline = ms
+			if t.baseline < floorMs {
+				t.baseline = floorMs
+			}
+		}
+		t.baselineAt = now
+	}
+	t.gauge = t.computeGaugeLocked()
+	t.lastSampleAt = now
+	t.ctrlMu.Unlock()
+}
+
+// computeGaugeLocked derives gauge from sojournEMA and baseline (§5.4).
+func (t *stripeTransport) computeGaugeLocked() float64 {
+	if t.baseline <= 0 || t.sojournSamples == 0 {
+		return 0
+	}
+	base := t.baseline
+	if base < float64(stripeBaselineFloor)/float64(time.Millisecond) {
+		base = float64(stripeBaselineFloor) / float64(time.Millisecond)
+	}
+	g := (t.sojournEMA - t.baseline) / (base * stripeCongestMargin)
+	if g < 0 {
+		g = 0
+	}
 	if g > 1 {
 		g = 1
 	}
-	t.ctrlMu.Lock()
-	if t.lastSampleAt.IsZero() {
-		t.gauge = g
-	} else {
-		t.gauge += stripeGaugeEMAAlpha * (g - t.gauge)
-	}
-	t.lastSampleAt = time.Now()
-	t.ctrlMu.Unlock()
+	return g
 }
 
 // controllerLoop drives the add/remove decisions and the per-lane probes.
@@ -553,12 +632,14 @@ func (t *stripeTransport) controllerTick() {
 	now := time.Now()
 
 	t.ctrlMu.Lock()
-	// Idle decay: with no fresh samples for a full idle window the
-	// congestion evidence ages out, so a quiet session reads as clear (and
-	// idle lanes age out, §2.3). Active senders keep refreshing lastSampleAt
-	// and are never decayed mid-send.
+	// Idle decay: with no fresh samples for a full idle window the sojourn
+	// EMA is pulled back toward the baseline (not multiplied toward zero —
+	// the baseline, not 0, is the "uncongested" anchor, §5.4), so a quiet
+	// session reads as clear (and idle lanes age out, §2.3). Active senders
+	// keep refreshing lastSampleAt and are never decayed mid-send.
 	if !t.lastSampleAt.IsZero() && now.Sub(t.lastSampleAt) >= stripeGaugeIdleDecay {
-		t.gauge *= stripeGaugeDecayPerTick
+		t.sojournEMA += (t.baseline - t.sojournEMA) * stripeGaugeDecayPerTick
+		t.gauge = t.computeGaugeLocked()
 	}
 	high := t.gauge >= stripeGaugeHighWatermark
 	switch {
@@ -593,6 +674,14 @@ func (t *stripeTransport) controllerTick() {
 		t.lastRemoveAt = now
 	}
 	t.ctrlMu.Unlock()
+
+	t.ctrlMu.Lock()
+	rebaseline := t.rebaselinePending
+	t.rebaselinePending = false
+	t.ctrlMu.Unlock()
+	if rebaseline {
+		t.recordEvent("re-baseline: persistent congestion became the new normal (gauge pinned ≥0.95 for %v), baseline rebuilt from current EMA", stripeBaselineWindow)
+	}
 
 	if addDue {
 		stripeID, tr, err := t.cfg.dialLane()

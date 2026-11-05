@@ -863,22 +863,44 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 
 	util.LogModuleDebug("admin", "ServeConn called from %s to %s, tlsConfig=%v", conn.RemoteAddr(), conn.LocalAddr(), s.tlsConfig != nil)
 
+	// The listener must observe the connection's close: http.Server closes the
+	// served conn when done, then loops back to Accept and would block forever
+	// on doneCh. Cascade the conn's Close into ln.Close so Serve returns.
+	ln := newSingleConnListener(nil)
+	cascade := &closeCascadeConn{Conn: conn, onClose: func() { _ = ln.Close() }}
+
 	// Wrap connection with TLS if configured (same as Start() does)
 	var handledConn net.Conn
 	if s.tlsConfig != nil {
 		util.LogModuleDebug("admin", "Wrapping connection with TLS")
-		handledConn = tls.Server(conn, s.tlsConfig)
+		handledConn = tls.Server(cascade, s.tlsConfig)
 	} else {
-		handledConn = conn
+		handledConn = cascade
 	}
+	ln.conn = handledConn
 
-	ln := newSingleConnListener(handledConn)
 	// Serve blocks until the connection is closed
 	util.LogModuleDebug("admin", "Calling server.Serve")
+	defer ln.Close()
 	if err := s.server.Serve(ln); err != nil && err != io.EOF {
 		util.LogModuleDebug("admin", "ServeConn ended: %v", err)
 	}
 	util.LogModuleDebug("admin", "ServeConn finished")
+}
+
+// closeCascadeConn forwards Close to the singleConnListener so that
+// http.Server's "close served conn when done" also unblocks the listener's
+// Accept loop. Without it, every ServeConn call leaks its goroutine.
+type closeCascadeConn struct {
+	net.Conn
+	onClose func()
+	once    sync.Once
+}
+
+func (c *closeCascadeConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.onClose)
+	return err
 }
 
 // singleConnListener is a net.Listener that yields a single connection then blocks until it's closed.

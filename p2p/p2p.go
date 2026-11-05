@@ -102,6 +102,9 @@ type P2PManager struct {
 	// local proxy enables p2p_udp; HandleP2PTransport consults it.
 	udpLegInbound atomic.Bool
 
+	// stripeIDCounter issues opaque lane nonces for StripeAttach (§5.2).
+	stripeIDCounter atomic.Uint32
+
 	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing (data frames)
 	meshInboundDNSCh  chan meshInboundPacket // dedicated queue for inbound DNS frames (avoids cross-node DNS SERVFAIL)
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
@@ -376,6 +379,7 @@ type Peer struct {
 	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
 	proxy            *config.Proxy // proxy config this peer was started with
 	leg              *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
+	stripe           *stripeTransport // session data-leg multiplexer (always set on new peers)
 
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
@@ -982,23 +986,30 @@ func isACKPacket(data []byte) bool {
 // falls back to 3-tuple (srcIP, dstIP, protocol) for other protocols.
 // v2: Jenkins hash with random salt for better distribution.
 func (s *DRRScheduler) hashFlow(data []byte) int {
+	return hashFlowWithSalt(s.salt, data)
+}
+
+// hashFlowWithSalt is the standalone flow hash shared by the DRR scheduler
+// and the stripe transport (each with its own salt, design §六: the stripe
+// wrapper carries a salt independent of DRR's).
+func hashFlowWithSalt(salt uint32, data []byte) int {
 	if len(data) < 20 {
 		return 0
 	}
-	
+
 	// Check IPv4
 	if data[0]>>4 != 4 {
 		return 0
 	}
-	
+
 	protocol := data[9]
 	ihl := int(data[0]&0x0F) * 4
 	if ihl < 20 {
 		ihl = 20
 	}
-	
+
 	// Jenkins one-at-a-time hash with salt
-	h := s.salt
+	h := salt
 	
 	// Base hash: srcIP + dstIP + protocol
 	for i := 12; i < 20; i++ {
@@ -1049,6 +1060,33 @@ func channelPriorityName(ch chan writeReq, peer *Peer) string {
 // (server side). The transport is owned by the manager and closed when the
 // session ends.
 func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) {
+	// Peek the first frame. A StripeAttach (design §5.2) binds this connection
+	// to an existing session as an extra data leg — it is not a new session
+	// and must not consume a session slot. Anything else is a primary
+	// connection whose first frame (v8: gossip) is re-delivered through the
+	// session path below.
+	ft, payload, err := t.Recv()
+	if err != nil {
+		t.Close()
+		return
+	}
+	if ft == frame.FrameStripeAttach {
+		nodeID, seq, stripeID, derr := frame.DecodeStripeAttach(payload)
+		frame.ReturnBuffer(payload)
+		if derr != nil {
+			util.LogModuleWarn("p2p", "[STRIPE] malformed attach from %s: %v", address, derr)
+			t.Close()
+			return
+		}
+		if m.attachStripeLeg(nodeID, seq, stripeID, t) {
+			return // ownership transferred to the session's stripe transport
+		}
+		util.LogModuleWarn("p2p", "[STRIPE] no session for attach nodeID=%s seq=%d from %s, closing", nodeID, seq, address)
+		t.Close()
+		return
+	}
+	t = newFirstFrameTransport(t, ft, payload)
+
 	if !m.beginSession() {
 		t.Close()
 		return
@@ -1082,11 +1120,18 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	peer.lastSeenNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
+	// stripeTransport: session data-leg multiplexer (design §5). Sits below
+	// the UDP leg so UDP-Active traffic bypasses lane splitting entirely.
+	stripe := newStripeTransport(t)
+	peer.stripe = stripe
+
 	// Passive-side UDP leg: manager-level switch (no proxy config here).
 	if m.udpLegInbound.Load() {
-		wrapped := newUDPLegTransport(t, false, nil)
+		wrapped := newUDPLegTransport(stripe, false, nil)
 		peer.leg = wrapped
 		peer.transport = wrapped
+	} else {
+		peer.transport = stripe
 	}
 	m.mu.Lock()
 	if m.stopped {
@@ -1127,6 +1172,58 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	go m.drrLoop(peer)
 	go m.peerWriteLoop(peer)
 	m.runSession(peer)
+}
+
+// attachStripeLeg binds an inbound StripeAttach connection to the existing
+// session identified by (nodeID, seq) — the session incarnation key learned
+// from gossip (§5.2). Returns false when no established session matches (the
+// caller closes the connection).
+func (m *P2PManager) attachStripeLeg(nodeID string, seq uint16, stripeID uint32, t frame.FrameTransport) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.peers {
+		if p.NodeID == nodeID && p.RemoteSeq == seq && p.stripe != nil {
+			util.LogModuleInfo("p2p", "[STRIPE] attaching leg stripeID=%d to peer.ID=%s (nodeID=%s seq=%d)",
+				stripeID, p.ID, nodeID, seq)
+			p.stripe.attachLane(stripeID, t)
+			return true
+		}
+	}
+	return false
+}
+
+// stripeAttachLane dials one extra data lane to the peer's proxy and binds it
+// to the session with a StripeAttach first frame (design §5.2). The lane's
+// identity on the passive side is (localNodeID, peer.Seq) — the same
+// (nodeID, seq) incarnation key gossip carries. Triggered by the dynamic
+// controller (tasks 2.x); failures are logged and the lane simply doesn't
+// exist, never fatal to the session.
+func (m *P2PManager) stripeAttachLane(peer *Peer, p2pDialer dialer.P2PDialer) {
+	peer.transportMu.Lock()
+	st := peer.stripe
+	peer.transportMu.Unlock()
+	if st == nil {
+		return
+	}
+	transport, err := p2pDialer.DialP2P()
+	if err != nil {
+		util.LogModuleInfo("p2p", "[STRIPE] lane dial via proxy %s failed: %v", peer.ProxyNameSafe(), err)
+		return
+	}
+	stripeID := m.stripeIDCounter.Add(1)
+	payload, err := frame.EncodeStripeAttach(m.meshNodeID, peer.Seq, stripeID)
+	if err != nil {
+		util.LogModuleWarn("p2p", "[STRIPE] encode attach failed: %v", err)
+		transport.Close()
+		return
+	}
+	if err := transport.Send(frame.FrameStripeAttach, payload, true); err != nil {
+		util.LogModuleInfo("p2p", "[STRIPE] attach send failed: %v", err)
+		transport.Close()
+		return
+	}
+	util.LogModuleInfo("p2p", "[STRIPE] lane attached to peer.ID=%s stripeID=%d", peer.ID, stripeID)
+	st.attachLane(stripeID, transport)
 }
 
 // StopPeerByProxyName disconnects one P2P session by its configured proxy name.
@@ -1370,7 +1467,11 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			transport.Close()
 			return
 		}
-		peer.transport = transport
+		// stripeTransport: session data-leg multiplexer (design §5). Sits below
+		// the UDP leg so UDP-Active traffic bypasses lane splitting entirely.
+		stripe := newStripeTransport(transport)
+		peer.stripe = stripe
+		peer.transport = stripe
 		peer.transportMu.Unlock()
 
 		// Active-side UDP leg wrap (design §7 Phase 1): socks5 proxies with
@@ -1378,7 +1479,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// dialer) avoids the dialer→p2p import cycle.
 		if proxy.IsP2PUDP() {
 			if ud, ok2 := d.(dialer.UDPDialer); ok2 {
-				wrapped := newUDPLegTransport(transport, true, ud.DialPacket)
+				wrapped := newUDPLegTransport(stripe, true, ud.DialPacket)
 				peer.leg = wrapped
 				peer.transportMu.Lock()
 				peer.transport = wrapped

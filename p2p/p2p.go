@@ -468,6 +468,16 @@ func (p *Peer) ProxyNameSafe() string {
 	return p.proxy.Name
 }
 
+// udpRoutingActive reports whether the peer's UDP leg currently routes data
+// (design §7). Called by the stripe controller once per tick; leg is set
+// once before the session starts and read here under transportMu.
+func (p *Peer) udpRoutingActive() bool {
+	p.transportMu.Lock()
+	leg := p.leg
+	p.transportMu.Unlock()
+	return leg != nil && leg.routeDataViaUDP()
+}
+
 // NewP2PManager creates a new P2P manager.
 // buildTag is auto-detected at runtime (e.g., "win7" on Windows 7/8).
 func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
@@ -1122,7 +1132,8 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 
 	// stripeTransport: session data-leg multiplexer (design §5). Sits below
 	// the UDP leg so UDP-Active traffic bypasses lane splitting entirely.
-	stripe := newStripeTransport(t)
+	// Passive side: no dialLane → the dynamic controller never adds lanes.
+	stripe := newStripeTransport(t, stripeConfig{})
 	peer.stripe = stripe
 
 	// Passive-side UDP leg: manager-level switch (no proxy config here).
@@ -1192,38 +1203,33 @@ func (m *P2PManager) attachStripeLeg(nodeID string, seq uint16, stripeID uint32,
 	return false
 }
 
-// stripeAttachLane dials one extra data lane to the peer's proxy and binds it
-// to the session with a StripeAttach first frame (design §5.2). The lane's
-// identity on the passive side is (localNodeID, peer.Seq) — the same
-// (nodeID, seq) incarnation key gossip carries. Triggered by the dynamic
+// dialStripeLane dials one extra data lane to the peer's proxy and performs
+// the StripeAttach handshake, returning the assigned stripeID and the
+// established transport for the caller to attachLane (design §5.2). The
+// lane's identity on the passive side is (localNodeID, peer.Seq) — the same
+// (nodeID, seq) incarnation key gossip carries. Invoked by the stripe
 // controller (tasks 2.x); failures are logged and the lane simply doesn't
 // exist, never fatal to the session.
-func (m *P2PManager) stripeAttachLane(peer *Peer, p2pDialer dialer.P2PDialer) {
-	peer.transportMu.Lock()
-	st := peer.stripe
-	peer.transportMu.Unlock()
-	if st == nil {
-		return
-	}
+func (m *P2PManager) dialStripeLane(peer *Peer, p2pDialer dialer.P2PDialer) (uint32, frame.FrameTransport, error) {
 	transport, err := p2pDialer.DialP2P()
 	if err != nil {
 		util.LogModuleInfo("p2p", "[STRIPE] lane dial via proxy %s failed: %v", peer.ProxyNameSafe(), err)
-		return
+		return 0, nil, err
 	}
 	stripeID := m.stripeIDCounter.Add(1)
 	payload, err := frame.EncodeStripeAttach(m.meshNodeID, peer.Seq, stripeID)
 	if err != nil {
 		util.LogModuleWarn("p2p", "[STRIPE] encode attach failed: %v", err)
 		transport.Close()
-		return
+		return 0, nil, err
 	}
 	if err := transport.Send(frame.FrameStripeAttach, payload, true); err != nil {
 		util.LogModuleInfo("p2p", "[STRIPE] attach send failed: %v", err)
 		transport.Close()
-		return
+		return 0, nil, err
 	}
-	util.LogModuleInfo("p2p", "[STRIPE] lane attached to peer.ID=%s stripeID=%d", peer.ID, stripeID)
-	st.attachLane(stripeID, transport)
+	util.LogModuleInfo("p2p", "[STRIPE] lane dialed for peer.ID=%s stripeID=%d", peer.ID, stripeID)
+	return stripeID, transport, nil
 }
 
 // StopPeerByProxyName disconnects one P2P session by its configured proxy name.
@@ -1469,7 +1475,22 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 		// stripeTransport: session data-leg multiplexer (design §5). Sits below
 		// the UDP leg so UDP-Active traffic bypasses lane splitting entirely.
-		stripe := newStripeTransport(transport)
+		// The controller (tasks 2.x) dials extra lanes via dialStripeLane and
+		// defers to an Active UDP leg. Lane dialing needs a P2P frame dialer;
+		// without one the wrapper still splits/fans-in but never adds lanes.
+		var stripe *stripeTransport
+		if pd, ok := d.(dialer.P2PDialer); ok {
+			stripe = newStripeTransport(transport, stripeConfig{
+				dialLane: func() (uint32, frame.FrameTransport, error) {
+					return m.dialStripeLane(peer, pd)
+				},
+				udpActive: peer.udpRoutingActive,
+			})
+		} else {
+			stripe = newStripeTransport(transport, stripeConfig{
+				udpActive: peer.udpRoutingActive,
+			})
+		}
 		peer.stripe = stripe
 		peer.transport = stripe
 		peer.transportMu.Unlock()

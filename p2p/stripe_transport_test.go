@@ -202,9 +202,10 @@ type pipeRead struct {
 	data []byte
 }
 
-// readFramesAsync reads n frames from conn, reporting each with index idx.
-func readFramesAsync(idx int, conn net.Conn, n int, out chan<- pipeRead) {
-	for i := 0; i < n; i++ {
+// readFramesUntilClose reads frames from conn until it errors (peer
+// closed), reporting each with index idx.
+func readFramesUntilClose(idx int, conn net.Conn, out chan<- pipeRead) {
+	for {
 		ft, payload, err := frame.ReadFrame(conn)
 		if err != nil {
 			return
@@ -248,9 +249,12 @@ func TestStripeTransportLaneDispatch(t *testing.T) {
 	)
 
 	got := make(chan pipeRead, len(batch)+8)
-	go readFramesAsync(0, conns[0].peerEnd, flows*2+2, got) // primary: overflow + unsplittable
-	go readFramesAsync(1, conns[1].peerEnd, flows*2, got)
-	go readFramesAsync(2, conns[2].peerEnd, flows*2, got)
+	// Rendezvous distribution is salt-random: per-pipe frame counts are not
+	// predictable, so each reader runs until its pipe closes and the main
+	// loop counts arrivals up to the full batch.
+	go readFramesUntilClose(0, conns[0].peerEnd, got)
+	go readFramesUntilClose(1, conns[1].peerEnd, got)
+	go readFramesUntilClose(2, conns[2].peerEnd, got)
 
 	if err := tr.SendBatch(batch); err != nil {
 		t.Fatalf("SendBatch: %v", err)
@@ -782,4 +786,130 @@ func TestStripeLaneProbeRecordsSRTTAndLoss(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// --- rendezvous weighted dispatch (tasks 3.x) ---
+
+// stripeTestWrapper builds a stripe wrapper over a dummy primary plus n
+// lanes on dead-end pipes, returning the wrapper and the lane slice.
+func stripeTestWrapper(t *testing.T, n int) (*stripeTransport, []*stripeLane) {
+	t.Helper()
+	_, baseServer := net.Pipe()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	t.Cleanup(func() { tr.Close() })
+	for i := 0; i < n; i++ {
+		_, laneServer := net.Pipe()
+		tr.attachLane(uint32(i+1), frame.NewStreamTransport(laneServer))
+	}
+	return tr, tr.snapshotLanes()
+}
+
+// decideAll maps flowIndex → chosen lane ID (0 = primary) for the given lane set.
+func decideAll(tr *stripeTransport, lanes []*stripeLane, flows int) map[int]uint32 {
+	out := make(map[int]uint32, flows)
+	for i := 0; i < flows; i++ {
+		l := tr.pickLane(synthTCPFlow(i), lanes)
+		if l == nil {
+			out[i] = 0
+		} else {
+			out[i] = l.id
+		}
+	}
+	return out
+}
+
+func TestStripeRendezvousMinimalRemap(t *testing.T) {
+	tr, lanes := stripeTestWrapper(t, 2)
+	l1, l2 := lanes[0], lanes[1]
+	const flows = 4096
+
+	d1 := decideAll(tr, []*stripeLane{l1}, flows)     // {primary, l1}
+	d2 := decideAll(tr, []*stripeLane{l1, l2}, flows) // add l2
+	for f, old := range d1 {
+		if new := d2[f]; new != old && new != l2.id {
+			t.Fatalf("flow %d moved %d → %d on lane add (want %d or new lane %d)",
+				f, old, new, old, l2.id)
+		}
+	}
+
+	d3 := decideAll(tr, []*stripeLane{l2}, flows) // remove l1
+	movedOffSurvivor := 0
+	for f := 0; f < flows; f++ {
+		if new := d3[f]; new != 0 && new != l2.id {
+			t.Fatalf("flow %d landed on unknown lane %d after removal", f, new)
+		}
+		if d2[f] == l2.id && d3[f] != l2.id {
+			movedOffSurvivor++
+		}
+	}
+	if movedOffSurvivor > 0 {
+		t.Fatalf("%d flows left the surviving lane on removal (minimal-remap violated)", movedOffSurvivor)
+	}
+}
+
+func TestStripeWeightedDistribution(t *testing.T) {
+	tr, lanes := stripeTestWrapper(t, 2)
+	good, bad := lanes[0], lanes[1]
+	// Poison the bad lane: 200ms srtt → weight 1/(1+4)=0.2 vs neutral 1.0.
+	bad.probe.mu.Lock()
+	bad.probe.srtt = 200 * time.Millisecond
+	bad.probe.mu.Unlock()
+
+	const flows = 12000
+	counts := map[uint32]int{0: 0, good.id: 0, bad.id: 0}
+	for i := 0; i < flows; i++ {
+		l := tr.pickLane(synthTCPFlow(i), lanes)
+		if l == nil {
+			counts[0]++
+		} else {
+			counts[l.id]++
+		}
+	}
+	// Expected ≈ 1 : 1 : 0.2 → good ≈ 45%, bad ≈ 9%.
+	goodShare := float64(counts[good.id]) / flows
+	badShare := float64(counts[bad.id]) / flows
+	if goodShare < 0.38 || goodShare > 0.52 {
+		t.Fatalf("good-lane share = %.2f, want ≈0.45", goodShare)
+	}
+	if badShare > 0.15 {
+		t.Fatalf("bad-lane share = %.2f, want ≤0.15 (counts=%v)", badShare, counts)
+	}
+	if float64(counts[good.id]) < 3*float64(counts[bad.id]) {
+		t.Fatalf("weight ratio not reflected: counts=%v", counts)
+	}
+}
+
+func TestStripeDegradedLaneRemoved(t *testing.T) {
+	restore := stripeCtrlTestWindow()
+	defer restore()
+
+	tr, _ := newCongestedStripe(t, 60*time.Millisecond, nil)
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := tr.Send(frame.FrameMeshPacket, synthTCPFlow(i), false); err != nil {
+				return
+			}
+		}
+	}()
+	waitForLaneCount(t, tr, 1)
+	close(stop)
+
+	// Poison the lane's probe counters past the degradation gates.
+	lanes := tr.snapshotLanes()
+	if len(lanes) != 1 {
+		t.Fatalf("lanes = %d, want 1", len(lanes))
+	}
+	lanes[0].probe.mu.Lock()
+	lanes[0].probe.sent = 10
+	lanes[0].probe.lost = 6 // 60% loss ≥ stripeLaneBadLoss
+	lanes[0].probe.mu.Unlock()
+
+	waitForLaneCount(t, tr, 0)
+	waitForEvent(t, tr, "degraded")
 }

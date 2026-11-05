@@ -13,29 +13,30 @@
 
 ## 阶段 1：stripe 骨架（代码）
 
+> 核心决策：同 proxy 多链路**封装在传输层**（`stripeTransport` 包装器，形态对齐 udp_leg_transport / ht v2 连接池），对路由/gossip/会话层呈现**单一链路**。DRR/peerWriteLoop/enqueueWriteReq/预算全部不动。
+
 - [ ] 1.1 新帧类型 0x16 StripeAttach（{sessionID, stripeID}）+ 帧编解码与单测
-- [ ] 1.2 主动端：同 proxy 重复 DialP2P + 首帧 StripeAttach 绑定
-- [ ] 1.3 被动端：HandleP2PTransport 识别 StripeAttach → 登记 extra data leg（复用 UDP 腿归属机制）
-- [ ] 1.4 per-stripe 发送队列 + per-stripe writeLoop（独立 writev）
-- [ ] 1.5 per-stripe readLoop（只收 mesh/ping/pong，直通现有入向）
-- [ ] 1.6 固定 1 stripe 默认行为：全部现有单测/e2e 通过，行为零差异
-- [ ] 1.7 per-stripe 预算分账方案定型（共享+水线 vs 配额）
+- [ ] 1.2 `stripeTransport` 包装器骨架：实现 FrameTransport 接口，1 lane = 纯转发（行为零差异基线）
+- [ ] 1.3 主动端：同 proxy 重复 DialP2P + 首帧 StripeAttach 绑定
+- [ ] 1.4 被动端：HandleP2PTransport 识别 StripeAttach → 登记 extra data leg（复用 UDP 腿归属机制）
+- [ ] 1.5 per-lane 写循环（独立 writev）+ SendBatch 内按 5-tuple 分流；控制/DNS 帧恒走 primary lane
+- [ ] 1.6 per-lane readLoop + fan-in 单 Recv 通道（udp_leg dataCh 模式）；lane 上收到控制帧 = 协议错误 warn 丢弃
+- [ ] 1.7 判据：全部现有单测/e2e 通过；peer 写路径零改动
 
-## 阶段 2：动态控制器（代码）
+## 阶段 2：动态控制器（代码，包装器内部）
 
-- [ ] 2.1 信号采集：DRR 出队积压、budget 消耗速率、per-stripe ping 统计
+- [ ] 2.1 信号采集：包装器发送队列积压、per-lane 内部探测（lane 内 LinkPing/LinkPong，不上 gossip）
 - [ ] 2.2 加线逻辑：积压持续 30s 超 70% → +1（间隔 ≥10s，cap 4）
 - [ ] 2.3 减线逻辑：积压清空持续 5min → -1
 - [ ] 2.4 UDP leg FSM 状态订阅：Active 停止加线/存量到期回收；Backoff 恢复
 - [ ] 2.5 控制器事件日志（加/减线原因原文）
 
-## 阶段 3：散流决策（代码）
+## 阶段 3：散流决策（代码，包装器内部）
 
-- [ ] 3.1 流亲和表（flowHash → 连接指针，60s 空闲过期）
-- [ ] 3.2 rendezvous 加权哈希（权重 = 本地 per-conn ping，linkCost 形态）
-- [ ] 3.3 候选并集 = 跨 proxy 连接 ∪ 同 proxy stripes
-- [ ] 3.4 权重劣化主动失效重哈希
-- [ ] 3.5 控制/DNS 帧恒走 primary 的护栏（stripe 上收到视为协议错误）
+- [ ] 3.1 rendezvous 加权哈希（流 key = 内层 5-tuple，权重 = lane 本地探测质量，linkCost 形态）
+- [ ] 3.2 候选集 = primary lane ∪ 动态 lanes（跨 proxy 并集在阶段 4 后按实测再议）
+- [ ] 3.3 权重劣化主动失效重哈希
+- [ ] 3.4 lane 数增减时 rendezvous 最小重映射验证
 
 ## 阶段 4：验证（部署门控后）
 

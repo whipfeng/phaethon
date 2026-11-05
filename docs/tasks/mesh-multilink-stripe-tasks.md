@@ -25,11 +25,11 @@
 
 ## 阶段 2：动态控制器（代码，包装器内部）
 
-- [ ] 2.1 信号采集：包装器发送队列积压、per-lane 内部探测（lane 内 LinkPing/LinkPong，不上 gossip）
-- [ ] 2.2 加线逻辑：积压持续 30s 超 70% → +1（间隔 ≥10s，cap 4）
-- [ ] 2.3 减线逻辑：积压清空持续 5min → -1
-- [ ] 2.4 UDP leg FSM 状态订阅：Active 停止加线/存量到期回收；Backoff 恢复
-- [ ] 2.5 控制器事件日志（加/减线原因原文）
+- [x] 2.1 信号采集：primary SendBatch sojourn EMA / 50ms 归一化（空闲 5s 衰减）；per-lane PingInfo 探测（lane 内 ping→自动回 pong、pong→匹配记 srtt/超时计 loss，不上会话层）— 3c1aa00
+- [x] 2.2 加线逻辑：gauge ≥0.7 持续 30s → +1（间隔 ≥10s，cap 4）— 3c1aa00
+- [x] 2.3 减线逻辑：gauge <0.7 持续 5min → -1（减最新 lane）— 3c1aa00
+- [x] 2.4 UDP leg FSM 状态订阅：Active 停止加线（highSince 清零）+ 存量靠清空规则自然回收；Backoff 后需重新持续 30s — 3c1aa00
+- [x] 2.5 控制器事件日志：加减线原因原文 ring buffer(32) + 日志 — 3c1aa00
 
 ## 阶段 3：散流决策（代码，包装器内部）
 

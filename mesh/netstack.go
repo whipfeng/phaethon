@@ -2028,6 +2028,40 @@ func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
 	return true
 }
 
+// TCPStats returns gVisor TCP transport-layer counters (aggregate over all
+// connections). Loss/recovery signals only — read-only forensics for the
+// inner-stream reordering investigation.
+func (n *Netstack) TCPStats() map[string]uint64 {
+	out := make(map[string]uint64)
+	if n == nil || n.ns == nil {
+		return out
+	}
+	t := n.ns.Stats().TCP
+	put := func(name string, c *tcpip.StatCounter) {
+		if c != nil {
+			out[name] = c.Value()
+		}
+	}
+	put("valid_segments_received", t.ValidSegmentsReceived)
+	put("invalid_segments_received", t.InvalidSegmentsReceived)
+	put("segments_sent", t.SegmentsSent)
+	put("retransmits", t.Retransmits)
+	put("fast_retransmit", t.FastRetransmit)
+	put("slow_start_retransmits", t.SlowStartRetransmits)
+	put("fast_recovery", t.FastRecovery)
+	put("sack_recovery", t.SACKRecovery)
+	put("timeouts", t.Timeouts)
+	put("spurious_recovery", t.SpuriousRecovery)
+	put("spurious_rto_recovery", t.SpuriousRTORecovery)
+	put("segments_acked_with_dsack", t.SegmentsAckedWithDSACK)
+	put("checksum_errors", t.ChecksumErrors)
+	put("resets_received", t.ResetsReceived)
+	put("established_resets", t.EstablishedResets)
+	put("active_openings", t.ActiveConnectionOpenings)
+	put("passive_openings", t.PassiveConnectionOpenings)
+	return out
+}
+
 // DropStats returns TUN write failures and NIC1 outbound-queue tail drops.
 // Both are packet-loss signals that were previously log-only / fully silent.
 func (n *Netstack) DropStats() (tunWriteDrops, nicTxDrops uint64) {

@@ -4374,6 +4374,7 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 		"tunWriteDrops":    tunWriteDrops,
 		"nicTxDrops":       nicTxDrops,
 	}
+	result["tcpStats"] = mesh.GlobalMeshManager.GetNetstackTCPStats()
 	if cidr := mesh.GetMeshCIDR(); cidr != nil {
 		result["meshCIDR"] = cidr.String()
 	}

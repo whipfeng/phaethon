@@ -49,6 +49,8 @@
 
 ## 四、总体架构
 
+### 4.1 传输形态三级优先级
+
 ```
                        ┌─ UDP leg Active？─── 数据面全走 UDP 腿（无 HoL，stripe 收敛）
                        │
@@ -57,11 +59,22 @@ peer 出向（FrameMeshPacket）─┤─ stripe 集合 = 跨 proxy 连接（配
                        └─ 控制面（gossip/hello/heartbeat/DNS）恒走 primary 连接，不散
 ```
 
+### 4.2 核心决策：stripe 对路由呈现**单一链路**，封装在传输层（2026-11-05 用户决策点定案）
+
+同 proxy 多链路封装为 `FrameTransport` 包装器（形态对齐 `udp_leg_transport` / ht v2 连接池），对上层（P2P 会话/gossip/Dijkstra/admin 链路模型）**完全呈现为现有的单链路**，理由：
+
+1. **路由稳定性**：stripe 动态上下线。若每条 stripe 成为独立 GossipLink，Dijkstra 拓扑随 stripe 增减抖动 = 控制面 flapping，比数据面 HoL 更难治。动态性必须藏在静态接口后面。
+2. **语义正确性**：stripes 是同一路径的倍数，不构成不同链路。链路质量（SRTT/loss/jitter/sojourn）描述路径特征，4 条 stripe 质量高度相关；汇报为多条独立链路会制造虚假的路径多样性，路由可能误判"互为备份"。
+3. **先例一致**：ht v2 的 POST 池/动态 GET 对会话呈现单 transport；UDP 腿同理。传输层封装是项目既有模式。
+4. **实现简化**：gossip 零新字段、Dijkstra/GossipNeighbor/dijkstraResult 零改动、proxyPeers 模型不动、**DRR/peerWriteLoop/enqueueWriteReq 全部不动**——散流不在写路径上发生，而在 transport SendBatch 内发生。改动全部收进包装器。
+
+**质量上报语义**：GossipLink 指标 = 该 proxy 链路聚合质量（LinkPing 恒走 primary lane，对外行为与现状一致）；per-stripe 质量只在包装器内部使用（散流权重 + 控制器），不上 gossip。
+
 ## 五、同 proxy 动态 stripe 设计
 
-### 5.1 定位：session 内数据腿，不是第二条会话
+### 5.1 定位：session 内数据腿，不是第二条会话；传输层封装，路由视为单链路
 
-stripe 形态对齐 UDP 腿：**复用现有会话的身份/认证/gossip，只加一条裸数据通路**。不建第二条完整 P2P 会话——避开 `proxyPeers` dedup 冲突、gossip 翻倍、会话协议改动面。代价是新增一个轻量握手帧。
+stripe 形态对齐 UDP 腿：**复用现有会话的身份/认证/gossip，只加一条裸数据通路**。不建第二条完整 P2P 会话——避开 `proxyPeers` dedup 冲突、gossip 翻倍、会话协议改动面。对外（§4.2）呈现单一 FrameTransport。代价是新增一个轻量握手帧。
 
 ### 5.2 建立：StripeAttach 握手
 
@@ -70,52 +83,55 @@ stripe 形态对齐 UDP 腿：**复用现有会话的身份/认证/gossip，只�
 - 被动端：`HandleP2PTransport` 收到 StripeAttach → 按 sessionID 查现存会话 → 命中则登记为 extra data leg（复用 UDP 腿的端口登记/会话归属机制）；未命中关闭
 - 未做 attach 的连接走现有会话握手（现状行为零变化）
 
-### 5.3 写路径改造
+### 5.3 写路径：包装器内分流，peer 写路径不动
 
 ```
-enqueueWriteReq（不变，预算/DRR 记账不变）
-  → DRR NextBatch（不变，流间公平）
-  → stripe 选择：hashFlow 同 key → rendezvous hash(stripe 集合, 质量权重) → 流亲和表（带空闲过期）
-  → per-stripe 发送队列 → per-stripe writeLoop（独立 writev/SendBatch）
+peerWriteLoop（不动）
+  → DRR NextBatch（不动，流间公平在 batch 内已排好）
+  → stripeTransport.SendBatch(frames)：
+       frames 按内层 5-tuple hash 分组（流粘性，同 hashFlow 语义）
+       rendezvous 加权选 lane（§六）
+       每 lane 独立 writev 发送
 ```
 
-- 单流保序由粘性保证；DRR 仍管共享 stripe 上的流间公平
-- 数据面仅 `FrameMeshPacket` 散；DNS/控制帧恒走 primary（现有优先队列语义不动）
-- 每 stripe 独立 8MB 预算子账或共享 peer 预算按 stripe 配额分（实现期定，倾向共享+per-stripe 水线防饿死）
+- **enqueueWriteReq / DRR / 预算记账全部零改动**——散流发生在 transport 内部，这是 §4.2 封装决策的最大红利
+- 数据面仅 `FrameMeshPacket` 参与分流；wrapper 识别控制/DNS 帧一律走 primary lane
+- 每 lane 独立写循环与写缓冲；lane 间不做任何重排序（帧 datagram 语义）
 
 ### 5.4 动态控制器
 
 | 信号 | 阈值初值 | 动作 |
 |---|---|---|
-| DRR 出队积压持续（budget 消耗速率/队列占用） | 持续 30s 超 70% | 加 1 条 stripe（慢加，逐条，间隔 ≥10s） |
-| per-stripe LinkPing srtt/丢包 | 已有 pingTracker 扩展按 stripe 测 | 健康度输入 + 散流权重 |
-| 积压清空 | 持续 5min | 减 1 条 stripe（慢减） |
+| 包装器发送队列积压持续 | 持续 30s 超 70% | 加 1 条 lane（慢加，逐条，间隔 ≥10s） |
+| per-lane 内部探测 srtt/丢包 | lane 内 LinkPing/LinkPong | 健康度输入 + 散流权重 |
+| 积压清空 | 持续 5min | 减 1 条 lane（慢减） |
 | 硬上限 | 4（先验值，实测校正） | 不再加 |
-| UDP leg 进入 Active | FSM 回调 | 不再加；存量 stripe 自然到期回收 |
+| UDP leg 进入 Active | FSM 回调 | 不再加；存量 lane 自然到期回收 |
 | UDP leg 进入 Backoff | FSM 回调 | 恢复加线逻辑 |
 
-hysteresis 防 stripe 数量自身 flapping；加线代价 = proxy CONNECT（trojan +TLS）1-2 RTT，故慢加。
+hysteresis 防 lane 数自身 flapping；加线代价 = proxy CONNECT（trojan +TLS）1-2 RTT，故慢加。
 
-### 5.5 接收端
+### 5.5 接收端：多 lane fan-in（udp_leg 先例）
 
-per-stripe readLoop 读帧 → 仅接受 `FrameMeshPacket/LinkPing/LinkPong` → 直通现有 mesh 入向路径（与 UDP 腿 dataCh 同一消费方）。gossip/控制帧出现在 stripe 上视为协议错误，记 warn 丢弃。
+per-lane readLoop 读帧 → 仅接受 `FrameMeshPacket/LinkPing/LinkPong` → 汇入单一 Recv 通道（同 `udp_leg_transport` 的 dataCh/ctrlCh 模式），会话层 readLoop 零改动。gossip/控制帧出现在 lane 上视为协议错误，记 warn 丢弃。对端出向怎么散是本端不可见也不关心的（双向各自封装）。
 
 ### 5.6 生命周期
 
-- primary 会话断开 → 全部 stripe 关闭（数据腿依附会话）
-- stripe 单条死亡（写错误/ping 超时）→ 控制器标记下线，亲和表失效该 stripe 的流（rendezvous 天然最小重映射），不重建直至加线条件再满足
-- 重连后 sessionID 变化，旧 stripe 自然失效
+- primary 会话断开 → 全部 lane 关闭（数据腿依附会话）
+- lane 单条死亡（写错误/内部探测超时）→ 控制器标记下线，亲和集合失效（rendezvous 天然最小重映射），不重建直至加线条件再满足
+- 重连后 sessionID 变化，旧 lane 自然失效
 
 ### 5.7 与 UDP 腿的互斥
 
-控制器订阅 UDP leg FSM 状态（`udp_leg_transport.go` 现有 phase 回调）：Active 期间数据面已由 UDP 承载，加线无意义且浪费握手；Backoff/回落 TCP 后恢复。两者共享同一"数据腿"抽象位（session 的 extra data legs 集合），观测上可统一展示。
+控制器订阅 UDP leg FSM 状态（`udp_leg_transport.go` 现有 phase 回调）：Active 期间数据面已由 UDP 承载，加线无意义且浪费握手；Backoff/回落 TCP 后恢复。两者同为 session 的"传输层叠加数据通路"，封装位一致，观测统一展示。
 
-## 六、散流决策：流亲和 + 质量加权
+## 六、散流决策：流亲和 + 质量加权（包装器内部）
 
-- **流 key**：hashFlow 现有 5-tuple hash（复用，零新增）
-- **算法**：rendezvous hashing（最高随机权重）——stripe 集合增减时最小化流重映射，天然适配动态上下线
-- **权重**：每条候选连接（跨 proxy 连接 + 同 proxy stripe）本地 ping 统计（srtt/loss → 分母罚没，参考 linkCost 形态）。出向决策在本节点做，**只看本节点到下一跳各连接的质量，不依赖 gossip 权重**
-- **亲和表**：flowHash → 连接指针，空闲过期（如 60s），表项含最近一次权重快照，权重劣化超阈时主动失效重哈希
+- **流 key**：内层 5-tuple hash（与 `hashFlow` 同语义，包装器自带 salt，独立于 DRR 的 salt）
+- **算法**：rendezvous hashing（最高随机权重）——lane 集合增减时最小化流重映射，天然适配动态上下线
+- **权重**：每条 lane 的内部探测质量（srtt/loss → 分母罚没，参考 linkCost 形态）。出向决策在本节点包装器内做，**只看本地质量，不依赖 gossip 权重**（§4.2：gossip 只承载聚合后的链路质量）
+- **控制/DNS 帧不参与分流**（恒走 primary lane）；`FrameMeshPacket` 才分流
+- 权重劣化超阈 → 该 lane 的亲和流主动失效重哈希
 
 ## 七、观测性
 
@@ -128,7 +144,7 @@ per-stripe readLoop 读帧 → 仅接受 `FrameMeshPacket/LinkPing/LinkPong` →
 
 **阶段 0（运营，零代码）**：普查（链路 × UDP 就绪矩阵）→ QG/Mac 开 `p2p_udp` 点亮 UDP 腿 → trojan 腿 UDP relay 可用性验证。判据：admin badge 变 `udp`、50MB scp 复测对比 v301 基线（Mac→VM 中位 69s）。**VM 留跑取证期不动配置**。
 
-**阶段 1（骨架）**：StripeAttach 帧 + per-stripe 写读 + 固定 1 stripe。判据：全部现有单测/e2e 通过，行为与现状零差异。
+**阶段 1（骨架）**：`stripeTransport` 包装器（FrameTransport 接口，形态对齐 udp_leg_transport）+ StripeAttach 握手 + per-lane 写读 + fan-in。判据：全部现有单测/e2e 通过，行为与现状零差异；peer 写路径（enqueue/DRR/预算）零改动。
 
 **阶段 2（动态控制器）**：信号采集 + 上下线。判据：压测下 stripe 数随积压上升/回落，日志原因可解释。
 

@@ -2938,6 +2938,14 @@ func (m *MeshManager) GetChannelDropStats() (peerStats map[string]struct {
 	return m.p2p.GetChannelDropStats()
 }
 
+// GetNetstackTCPStats returns gVisor TCP transport-layer counters.
+func (m *MeshManager) GetNetstackTCPStats() map[string]uint64 {
+	if m.netstack == nil {
+		return nil
+	}
+	return m.netstack.TCPStats()
+}
+
 // GetNetstackDropStats returns TUN write failures and NIC1 (TUN-side channel
 // endpoint) outbound-queue tail drops — packet-loss signals on the netstack
 // side that have no P2P-queue counterpart.

@@ -34,7 +34,7 @@
 ## 阶段 3：散流决策（代码，包装器内部）
 
 - [ ] 3.1 rendezvous 加权哈希（流 key = 内层 5-tuple，权重 = lane 本地探测质量，linkCost 形态）
-- [ ] 3.2 候选集 = primary lane ∪ 动态 lanes（跨 proxy 并集在阶段 4 后按实测再议）
+- [ ] 3.2 候选集 = primary lane ∪ 动态 lanes（**单 proxy 会话内，永不跨 proxy**——§4.3 决策：proxy 间是异构 LinkNIC 隔离域，跨域切换归路由）
 - [ ] 3.3 权重劣化主动失效重哈希
 - [ ] 3.4 lane 数增减时 rendezvous 最小重映射验证
 

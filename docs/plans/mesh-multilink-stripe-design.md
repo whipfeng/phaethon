@@ -54,8 +54,8 @@
 ```
                        ┌─ UDP leg Active？─── 数据面全走 UDP 腿（无 HoL，stripe 收敛）
                        │
-peer 出向（FrameMeshPacket）─┤─ stripe 集合 = 跨 proxy 连接（配置） ∪ 同 proxy stripes（动态）
-                       │    └ 流粘性哈希（rendezvous，按质量加权）→ 选 1 条
+peer 出向（FrameMeshPacket）─┤─ stripe 候选集 = 本会话（单 proxy）内的 lanes：
+                       │    primary ∪ 动态扩容（rendezvous 按质量加权，§4.3 永不跨 proxy）
                        └─ 控制面（gossip/hello/heartbeat/DNS）恒走 primary 连接，不散
 ```
 
@@ -69,6 +69,16 @@ peer 出向（FrameMeshPacket）─┤─ stripe 集合 = 跨 proxy 连接（配
 4. **实现简化**：gossip 零新字段、Dijkstra/GossipNeighbor/dijkstraResult 零改动、proxyPeers 模型不动、**DRR/peerWriteLoop/enqueueWriteReq 全部不动**——散流不在写路径上发生，而在 transport SendBatch 内发生。改动全部收进包装器。
 
 **质量上报语义**：GossipLink 指标 = 该 proxy 链路聚合质量（LinkPing 恒走 primary lane，对外行为与现状一致）；per-stripe 质量只在包装器内部使用（散流权重 + 控制器），不上 gossip。
+
+### 4.3 决策心路：容量问题归 stripe 动态扩容，proxy 间是异构 LinkNIC 域（2026-11-05 用户定案）
+
+**心路**：散流候选集最初设计为"跨 proxy 连接 ∪ 同 proxy 动态 stripe"并集 → 推演发现跨 proxy 池化需要会话耦合 + 传输/路由双控制环 + 越界路径选择 → 且路由 cost 已含 sojourn/dropRate（`mesh.go:3402`），拥塞自纠环（打满 → 排队时延/丢包涨 → cost 涨 → Dijkstra 切路）已存在 → 进一步质疑"单链路打满溢出空闲 proxy"是否算损失 → **用户定案：不算，也不该做**。
+
+**结论**：不同 proxy 本来就是不同 LinkNIC 隔离域，链路属性（SRTT/loss/jitter/sojourn）可能完全不同；节点间多 proxy 是**冗余互备红利，不是容量池**。
+
+- 链路容量问题 → **stripe 动态扩容**解决（同属性域内、亚秒级、4 条 cwnd 在同瓶颈竞争拿满路径份额）
+- 跨域切换 → **路由职责**（质量驱动、秒级、gossip 已含负载信号、hysteresis 防振荡）
+- stripe 候选集 = **单 proxy 会话内的 lanes**，永不跨 proxy、不做跨 proxy 聚合
 
 ## 五、同 proxy 动态 stripe 设计
 

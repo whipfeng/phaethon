@@ -40,7 +40,7 @@
 
 ## 阶段 4：验证（部署门控后）
 
-- [ ] 4.1 admin badge/计数扩展（stripe×N、per-stripe srtt/loss/权重、亲和表大小）
+- [x] 4.1 admin badge/计数扩展（stripe×N、per-stripe srtt/loss/权重、发送计数；rendezvous 无状态无亲和表）— e222dbe
 - [ ] 4.2 Mac↔VM 50MB scp 三取向对比 v301 / UDP 腿数据
 - [ ] 4.3 多 proxy 环境双链路利用率 ≈ 权重比
 - [ ] 4.4 kill 单 stripe 流平滑迁移验证

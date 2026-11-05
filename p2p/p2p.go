@@ -1003,6 +1003,13 @@ func (s *DRRScheduler) hashFlow(data []byte) int {
 // and the stripe transport (each with its own salt, design §六: the stripe
 // wrapper carries a salt independent of DRR's).
 func hashFlowWithSalt(salt uint32, data []byte) int {
+	return int(flowHash32(salt, data) % 256)
+}
+
+// flowHash32 is the full 32-bit Jenkins one-at-a-time flow hash;
+// hashFlowWithSalt masks it to 8 bits for DRR queue indexing, the stripe
+// wrapper keeps the full width for rendezvous scoring (design §六).
+func flowHash32(salt uint32, data []byte) uint32 {
 	if len(data) < 20 {
 		return 0
 	}
@@ -1044,8 +1051,8 @@ func hashFlowWithSalt(salt uint32, data []byte) int {
 	h += h << 3
 	h ^= h >> 11
 	h += h << 15
-	
-	return int(h % 256)
+
+	return h
 }
 
 // channelPriorityName returns the priority name for logging

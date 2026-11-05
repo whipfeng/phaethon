@@ -15,13 +15,13 @@
 
 > 核心决策：同 proxy 多链路**封装在传输层**（`stripeTransport` 包装器，形态对齐 udp_leg_transport / ht v2 连接池），对路由/gossip/会话层呈现**单一链路**。DRR/peerWriteLoop/enqueueWriteReq/预算全部不动。
 
-- [ ] 1.1 新帧类型 0x16 StripeAttach（{sessionID, stripeID}）+ 帧编解码与单测
-- [ ] 1.2 `stripeTransport` 包装器骨架：实现 FrameTransport 接口，1 lane = 纯转发（行为零差异基线）
-- [ ] 1.3 主动端：同 proxy 重复 DialP2P + 首帧 StripeAttach 绑定
-- [ ] 1.4 被动端：HandleP2PTransport 识别 StripeAttach → 登记 extra data leg（复用 UDP 腿归属机制）
-- [ ] 1.5 per-lane 写循环（独立 writev）+ SendBatch 内按 5-tuple 分流；控制/DNS 帧恒走 primary lane
-- [ ] 1.6 per-lane readLoop + fan-in 单 Recv 通道（udp_leg dataCh 模式）；lane 上收到控制帧 = 协议错误 warn 丢弃
-- [ ] 1.7 判据：全部现有单测/e2e 通过；peer 写路径零改动
+- [x] 1.1 新帧类型 0x16 StripeAttach（{nodeIDLen, nodeID, seq:2, stripeID:4}，会话 key=(nodeID,Seq)）+ 帧编解码与单测 — f032852/c407ebd
+- [x] 1.2 `stripeTransport` 包装器骨架：实现 FrameTransport 接口，1 lane = 纯转发（行为零差异基线）— b10fb91
+- [x] 1.3 主动端：同 proxy 重复 DialP2P + 首帧 StripeAttach 绑定（`stripeAttachLane`，触发器在阶段 2）— 07d9543
+- [x] 1.4 被动端：HandleP2PTransport 首帧 peek 识别 StripeAttach → 按 (NodeID, RemoteSeq) 查会话 attachLane（`firstFrameTransport` 注入首帧 gossip 回会话路径）— 07d9543
+- [x] 1.5 per-lane 写循环（独立队列 + writer goroutine）+ SendBatch 内按 5-tuple 分流；控制/DNS 帧恒走 primary lane；队列满/死 lane 回退 primary — 07d9543
+- [x] 1.6 per-lane readLoop + fan-in 单 Recv 通道；lane 上收到控制/gossip 帧 = 协议错误 warn 丢弃 — 07d9543
+- [x] 1.7 判据：frame+p2p 全量单测通过（12 个新增）；peer 写路径零改动 — 07d9543
 
 ## 阶段 2：动态控制器（代码，包装器内部）
 

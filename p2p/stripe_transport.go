@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/frame"
@@ -100,6 +101,8 @@ type stripeLane struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	probe     stripeLaneProbe
+	framesSent atomic.Uint64
+	bytesSent  atomic.Uint64
 }
 
 func (l *stripeLane) close() {
@@ -367,6 +370,10 @@ func (t *stripeTransport) laneWriter(l *stripeLane) {
 				util.LogModuleWarn("p2p", "[STRIPE] lane %d write failed, removing lane: %v", l.id, err)
 				t.removeLane(l)
 				return
+			}
+			l.framesSent.Add(uint64(len(batch)))
+			for _, f := range batch {
+				l.bytesSent.Add(uint64(len(f.Payload)))
 			}
 		}
 	}
@@ -703,6 +710,33 @@ func (t *stripeTransport) transportForm() string {
 		return "tcp"
 	}
 	return fmt.Sprintf("tcp+stripe×%d", n)
+}
+
+// snapshotInfo returns per-lane observability rows for the admin API
+// (design §7). Rendezvous is stateless — there is no affinity table to
+// size, lanes carry their own flow population implicitly.
+func (t *stripeTransport) snapshotInfo() []StripeInfo {
+	lanes := t.snapshotLanes()
+	infos := make([]StripeInfo, 0, len(lanes))
+	for _, l := range lanes {
+		l.probe.mu.Lock()
+		srtt := l.probe.srtt
+		sent, lost := l.probe.sent, l.probe.lost
+		l.probe.mu.Unlock()
+		loss := 0.0
+		if sent > 0 {
+			loss = float64(lost) / float64(sent)
+		}
+		infos = append(infos, StripeInfo{
+			LaneID:     l.id,
+			SRTTMs:     float64(srtt) / float64(time.Millisecond),
+			LossRate:   loss,
+			Weight:     l.currentWeight(),
+			FramesSent: l.framesSent.Load(),
+			BytesSent:  l.bytesSent.Load(),
+		})
+	}
+	return infos
 }
 
 func (t *stripeTransport) Close() error {

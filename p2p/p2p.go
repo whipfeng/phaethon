@@ -344,13 +344,25 @@ func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeRe
 	}
 }
 
+// StripeInfo is one dynamic lane's observability snapshot (design §7):
+// probe quality, current rendezvous weight and sent counters.
+type StripeInfo struct {
+	LaneID     uint32  `json:"laneId"`
+	SRTTMs     float64 `json:"srttMs"`   // probe srtt EMA (0 = no sample yet)
+	LossRate   float64 `json:"lossRate"` // lost/sent over the lane's lifetime
+	Weight     float64 `json:"weight"`   // current rendezvous weight (linkCost form)
+	FramesSent uint64  `json:"framesSent"`
+	BytesSent  uint64  `json:"bytesSent"`
+}
+
 // Peer represents a connected P2P peer.
 type Peer struct {
 	ID        string `json:"id"`        // unique connection ID (localSeq-based)
 	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
 	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
 	Status    string `json:"status"`    // current peer status: connecting, helloed, upToDate, failed
-	Transport string `json:"transport,omitempty"` // udp/tcp data-leg form (empty = no leg)
+	Transport string `json:"transport,omitempty"` // udp/tcp(+stripe×N) data-leg form (empty = no leg)
+	Stripes   []StripeInfo `json:"stripes,omitempty"` // dynamic lane details (design §7)
 	LastError string `json:"lastError,omitempty"` // last error message (empty if no error)
 	LastSeen  time.Time `json:"lastSeen"`
 
@@ -2343,9 +2355,24 @@ func (m *P2PManager) GetPeers() []Peer {
 			LastError: p.GetLastError(),
 			LastSeen:  time.Unix(0, lastSeenNano),
 		})
+		form := "tcp"
 		if p.leg != nil {
-			result[len(result)-1].Transport = p.leg.transportForm()
+			form = p.leg.transportForm() // "udp" (leg routing) or "tcp" (backing off)
 		}
+		p.transportMu.Lock()
+		st := p.stripe
+		p.transportMu.Unlock()
+		if st != nil {
+			if n := st.laneCount(); n > 0 && form != "udp" {
+				// Design §7 badge: tcp+stripe×N once dynamic lanes attach;
+				// a routing UDP leg owns the data path and stays "udp".
+				form = fmt.Sprintf("tcp+stripe×%d", n)
+			}
+			if infos := st.snapshotInfo(); len(infos) > 0 {
+				result[len(result)-1].Stripes = infos
+			}
+		}
+		result[len(result)-1].Transport = form
 	}
 	return result
 }

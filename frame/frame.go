@@ -25,9 +25,10 @@ const (
 // Data frames (0x20-0xFF): fire-and-forget, no seq/ack
 const (
 	// Control frames (fire-and-forget, no seq/ack)
-	FrameGossip     byte = 0x12 // Gossip: topology update + keepalive
-	FrameLinkPing   byte = 0x14 // Link ping: link quality measurement
-	FrameLinkPong   byte = 0x15 // Link pong: link quality response
+	FrameGossip      byte = 0x12 // Gossip: topology update + keepalive
+	FrameLinkPing    byte = 0x14 // Link ping: link quality measurement
+	FrameLinkPong    byte = 0x15 // Link pong: link quality response
+	FrameStripeAttach byte = 0x16 // Stripe attach: bind a new connection as extra data lane
 
 	// Data frames (fire-and-forget, no seq/ack)
 	FrameMeshPacket byte = 0x20 // Mesh overlay IP packet

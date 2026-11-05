@@ -176,3 +176,10 @@ func getDNSServers(service string) ([]string, bool, error) {
 	}
 	return servers, false, nil
 }
+
+// dnsRegistrationIface returns the physical interface name: darwin's
+// findActiveNetworkService excludes utun/tun devices from its candidates,
+// so passing the TUN device name would silently no-op (6fa266e).
+func dnsRegistrationIface(tunName, physicalName string) string {
+	return physicalName
+}

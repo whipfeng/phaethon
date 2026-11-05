@@ -34,6 +34,15 @@ func setSystemDNS(tunName, tunIP string) error {
 	return nil
 }
 
+// dnsRegistrationIface returns the TUN adapter name: Windows must register
+// system DNS on the TUN adapter. Registering on the physical interface makes
+// dnscache source queries from a physical address, and Windows source-bound
+// routing then egresses them via the physical gateway, never reaching the
+// DNS hijacker behind the TUN.
+func dnsRegistrationIface(tunName, physicalName string) string {
+	return tunName
+}
+
 // restoreSystemDNS restores the TUN interface DNS to DHCP and resets metric.
 func restoreSystemDNS(tunName string) {
 	luid, index, err := getInterfaceLUID(tunName)

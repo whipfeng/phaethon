@@ -62,6 +62,11 @@ var (
 	stripeClearSustain       = 5 * time.Minute  // <watermark this long → remove
 	stripeMaxLanes           = 4                // cap on dynamic lanes
 	stripeEventRingCap       = 32               // controller event ring buffer
+	stripeWeightSRTTScaleMs  = 50.0             // +1 cost per this many ms of srtt
+	stripeWeightLossPenalty  = 2.0              // cost penalty per unit loss rate
+	stripeLaneMinProbes      = uint64(8)       // degradation gate: min samples
+	stripeLaneBadLoss        = 0.5              // degradation gate: loss rate
+	stripeLaneBadSRTT        = time.Second      // degradation gate: srtt
 )
 
 // stripeConfig wires the dynamic controller. The zero value is a valid
@@ -197,6 +202,72 @@ func splittable(frameType byte, payload []byte) bool {
 	return frameType == frame.FrameMeshPacket && !isDNSPacket(payload)
 }
 
+// currentWeight folds the lane's probe quality into a linkCost-like weight:
+// 1/(1 + srtt/scale + lossPenalty·loss). No probe sample yet → neutral 1.0
+// so a fresh lane immediately attracts traffic (and probe evidence).
+// Lifetime loss counters are used; phase 4.6 re-tunes the shape.
+func (l *stripeLane) currentWeight() float64 {
+	l.probe.mu.Lock()
+	defer l.probe.mu.Unlock()
+	if l.probe.srtt <= 0 {
+		return 1.0
+	}
+	srttMs := float64(l.probe.srtt) / float64(time.Millisecond)
+	loss := 0.0
+	if l.probe.sent > 0 {
+		loss = float64(l.probe.lost) / float64(l.probe.sent)
+	}
+	return 1.0 / (1.0 + srttMs/stripeWeightSRTTScaleMs + stripeWeightLossPenalty*loss)
+}
+
+// probeSRTT returns the lane's current srtt EMA (0 = no sample yet).
+func (l *stripeLane) probeSRTT() time.Duration {
+	l.probe.mu.Lock()
+	defer l.probe.mu.Unlock()
+	return l.probe.srtt
+}
+
+// probeLossRate returns lost/sent over the lane's lifetime (0 when idle).
+func (l *stripeLane) probeLossRate() float64 {
+	l.probe.mu.Lock()
+	defer l.probe.mu.Unlock()
+	if l.probe.sent == 0 {
+		return 0
+	}
+	return float64(l.probe.lost) / float64(l.probe.sent)
+}
+
+// scoreMix is a splitmix64 finalizer over (flow key, lane identity),
+// normalized to (0,1) — deterministic per (flow, lane) pair, uniformly
+// distributed, so argmax across lanes is rendezvous (highest random weight).
+func scoreMix(flowKey uint32, laneID uint32) float64 {
+	x := uint64(flowKey)<<32 | uint64(laneID)
+	x += 0x9E3779B97F4A7C15
+	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
+	x = (x ^ (x >> 27)) * 0x94D049BB133111EB
+	x ^= x >> 31
+	return (float64(x>>11) + 0.5) / float64(uint64(1)<<53)
+}
+
+// pickLane chooses the outbound lane for one splittable frame by weighted
+// rendezvous (design §六): every candidate — primary (laneID 0, weight 1)
+// and each dynamic lane — scores hash(flow, candidate)·weight, the argmax
+// wins. Lane set changes therefore remap only the flows the changed
+// candidate steals (minimal remapping, §5.6/3.4). Returns nil = primary.
+func (t *stripeTransport) pickLane(payload []byte, lanes []*stripeLane) *stripeLane {
+	key := flowHash32(t.salt, payload)
+	bestScore := scoreMix(key, 0) // primary lane, weight 1.0
+	var best *stripeLane
+	for _, l := range lanes {
+		s := scoreMix(key, l.id) * l.currentWeight()
+		if s > bestScore {
+			bestScore = s
+			best = l
+		}
+	}
+	return best
+}
+
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
@@ -205,14 +276,13 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 		t.sampleSojourn(start)
 		return err
 	}
-	idx := int(hashFlowWithSalt(t.salt, payload)) % (len(lanes) + 1)
-	if idx == 0 {
+	l := t.pickLane(payload, lanes)
+	if l == nil {
 		start := time.Now()
 		err := t.base.Send(frameType, payload, isControl)
 		t.sampleSojourn(start)
 		return err
 	}
-	l := lanes[idx-1]
 	select {
 	case l.queue <- []frame.Frame{{Type: frameType, Payload: payload}}:
 		return nil
@@ -243,12 +313,11 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 			primary = append(primary, f)
 			continue
 		}
-		idx := int(hashFlowWithSalt(t.salt, f.Payload)) % (len(lanes) + 1)
-		if idx == 0 {
+		l := t.pickLane(f.Payload, lanes)
+		if l == nil {
 			primary = append(primary, f)
 			continue
 		}
-		l := lanes[idx-1]
 		perLane[l] = append(perLane[l], f)
 	}
 	var firstErr error
@@ -537,6 +606,25 @@ func (t *stripeTransport) controllerTick() {
 			t.removeLane(victim)
 			t.recordEvent("remove lane stripeID=%d: gauge < %.2f sustained %v (udpActive=%v)",
 				victim.id, stripeGaugeHighWatermark, stripeClearSustain, udpActive)
+		}
+	}
+
+	// Degradation invalidation (§3.3): a lane whose probes show sustained
+	// atrocious quality is removed proactively; its affinity flows rehash
+	// across the survivors on the next SendBatch.
+	for _, l := range t.snapshotLanes() {
+		l.probe.mu.Lock()
+		sent := l.probe.sent
+		srtt := l.probe.srtt
+		loss := 0.0
+		if sent > 0 {
+			loss = float64(l.probe.lost) / float64(sent)
+		}
+		l.probe.mu.Unlock()
+		if sent >= stripeLaneMinProbes && (loss >= stripeLaneBadLoss || (srtt > 0 && srtt >= stripeLaneBadSRTT)) {
+			t.recordEvent("remove lane stripeID=%d: degraded (srtt=%v loss=%.0f%% over %d probes), affinity flows rehash",
+				l.id, srtt, loss*100, sent)
+			t.removeLane(l)
 		}
 	}
 }

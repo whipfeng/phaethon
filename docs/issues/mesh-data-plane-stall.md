@@ -1,6 +1,6 @@
 # Mesh 数据面卡死：轻则断流、重则整机网络栈挂死
 
-**状态**: 部分闭环（2026-11-02）：gossip 竞态 panic 已修复（e77ff5f）；VM↔QG 链路修复经 patch #15（6739c92）验证；dump `goroutine-dump-20261102-135925` 证明 rule 0 可合法触发且 VM 内部 goroutine 全健康；B 触发源（数据面停滞）仍未实锤，精准 dump 阶梯已实现待部署取证
+**状态**: 部分闭环（2026-11-05）：gossip 竞态 panic 已修复（e77ff5f）；VM↔QG 链路修复经 patch #15（6739c92）验证；三次 rule 0 dump（135925/205230/130348）一致证明 VM 内部 goroutine 全健康、ping-healthy，最新 13:03 dump 将冻结点定位到 **wintun 之下的 OS 入向投递层**（A 归零 + netstack-read=0，进程无元凶）；B 触发源（OS/驱动层投递冻结）仍未实锤，需 OS/驱动层取证；L1/L2 慢性泄漏在场但非触发器（修复走独立流程）
 **严重级别**: 高（曾导致整机网络栈挂死，OS 被迫重启）
 **首次发现**: 2026-11-01 ~10:13（VM 经 QG 出口 curl exit=28）
 
@@ -186,3 +186,32 @@ VM 留跑期间 StallMonitor rule 0 第二次触发，写 `goroutine-dump-202611
 - **判别**：非今日提交引入——今日 5 个提交仅 4b7b40e 碰 mesh（GetRouteTree nil 守卫，纯只读导出路径）+ 4bf4bd9 转发选路修复（症状出现时不相关），其余全为 admin 前端。症状 = 文档"轻症：数据面卡死"原样复现（VM↔QG 双向数据死、控制面正常）
 - **残留清理**：QG iperf3 进程+包已删、VM iperf3 进程已杀（winget 包 ar51an.iPerf3 保留备下次）、C:/tmp/iperf3.zip 已删；VM 侧 e2e 脚本（C:/tmp/phn_e2e_tree.py）保留
 - **吞吐基线仍缺**：iperf3 验证待数据面恢复后重开；当时 GG linkNIC 仅 39 包（近零数据流量），qg linkNIC ~75 包/10s（纯 gossip 量级）
+
+## dump 130348 运行时证据（2026-11-05 13:03，已分析）
+
+VM 留跑期间 StallMonitor rule 0 第三次触发，写 `goroutine-dump-20261105-130348.log`（1803 行 / 138 goroutine）。**分析结论：真实冻结点在 wintun 设备之下的 OS 投递层，进程内部无任何元凶；L1/L2 慢性泄漏在场但非本次触发器**。
+
+### 现场事实
+
+- 版本 `v0.8.0-317-g5598357`，uptime 21m41s，trigger=`auto:A-rising-D-frozen(outbound-blackhole)`
+- 计数签名：触发前 A 高速上升，触发后窗口内 **A 近乎归零**（139180→139195，50s 仅 ~15 包），B/Dvip 全冻结；`netstack-read=0 nic1-backlog=0`——网卡侧根本无包入站
+- 快照判态：`disposition: ping-healthy`（peers SRTT/qg 37ms/gg 127ms、consecLost 全 0），mesh 双腿探测全活（100.0.0.3×2、100.179.0.3），channel drop 全 0，gvisor ip/tcp/udp stats 无异常计数
+- **总量仅 138 goroutine**（历史三次 dump 均为数百至上千），无资源耗尽迹象
+
+### 关键 goroutine 状态（全部健康等待态）
+
+- **TUN readLoop**（goroutine 54）：`[syscall, locked to thread]`，park 在 `windowsTUN.Read → WaitForSingleObject`（device_windows.go:90）——**未死，是 wintun 近 50s 只交付 ~15 包**
+- DNS 全链健康：`dnsWorkerLoop`×4 select、serveLoop select（dns.go:543，非 endpoint Read）、forwarderListener select
+- p2p 32 个（meshInboundLoop×6、stripeTransport、peerWriteLoop 等）全 select；8 个 Gopark 是 TCP dispatcher 常驻处理器
+- Top 聚合栈无新签名：`runtime_pollWait`（http/ssh）24、http writeLoop 9、L1 8、dispatcher 8、WaitGroup.Wait 7
+
+### L1/L2 泄漏签名复核（在场、匀速、非触发器）
+
+- **L1**（`singleConnListener.Accept` @ admin.go:907 `<-l.doneCh`）：**8 个**（年龄 1/6/6/11/11/15/16 分钟），创建路径 `acceptTCP.func1.1 → HandleTCPConn → ServeConn(admin.go:878) → http.Server.Serve`。速率 ~0.37/min，与历史 ~0.65/min 同量级——**未修，仍在匀速泄漏**（外推 24h 同样到数百）
+- **L2**（`relayUDP` wg.Wait @ connection_handler.go:615）：**3 组**，每组主 goroutine `wg.Wait` + 两子 goroutine 分别阻塞在 `gonet.(*UDPConn).Read` 与 `net.(*UDPConn).ReadFrom`（双向读、零流量、无 idle 超时）——与 18:30/03:05 完全同款环形等待
+
+### 结论与修治分工
+
+- **本次 stall**：OS/wintun 适配器停止向 phaethon 投递入向包（A 上升后归零 + netstack-read=0），NIC/OS 层 blackhole，**与 goroutine 泄漏无因果**——21 分钟仅漏 8+3，不足以冻结数据面
+- **L1/L2 仍需修**（慢性泄漏）：L1 = ServeConn 缺 `defer ln.Close()`；L2 = relayUDP 无 idle 超时。修复走独立 MDD 流程
+- 与 DNS 源约束路由故障（2026-11-05 当日另案，见 dns-source-constrained-routing.md）**无因果**：那是 OS→wintun 出向约束，本案是 OS→wintun 入向投递冻结，方向相反、机制独立

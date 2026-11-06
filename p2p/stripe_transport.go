@@ -49,6 +49,10 @@ import (
 
 const stripeLaneQueueDepth = 256 // outbound batches per lane
 
+// stripeAffinityCap bounds the per-flow lane affinity table; when exceeded
+// the table is reset wholesale (flows re-resolve on next send, §3.6).
+const stripeAffinityCap = 65536
+
 // Tunables of the dynamic controller. Package-level vars (not consts) so
 // tests can shorten the windows. All congestion quantities are
 // dimensionless ratios against a sliding-min baseline (§5.4 self-normalized
@@ -123,6 +127,15 @@ type stripeTransport struct {
 	salt  uint32               // own flow-hash salt, independent of DRR's
 	cfg   stripeConfig
 
+	// affinity is the per-flow sticky lane pin (mesh-per-flow-ordering §3.6):
+	// a flow's first splittable frame resolves a lane (weighted rendezvous)
+	// and the binding is cached here. Weight drift must NOT re-map live
+	// flows — rendezvous scores multiplied by drifting probe weights made
+	// flows flip-flop across parallel channels and reordered inner TCP.
+	// The table is dropped wholesale on lane add/remove (accepted transient,
+	// same stance as §3.3 route pinning).
+	affinity map[uint32]*stripeLane
+
 	ctrlMu           sync.Mutex // controller state (gauge + windows + events)
 	sojournEMA       float64    // primary-lane sojourn EMA in ms
 	sojournSamples   uint64     // samples folded into sojournEMA
@@ -145,12 +158,13 @@ type stripeTransport struct {
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
 	t := &stripeTransport{
-		base:   base,
-		salt:   rand.Uint32(),
-		cfg:    cfg,
-		ctrlCh: make(chan legRecvResult, 16),
-		dataCh: make(chan legRecvResult, 64),
-		closed: make(chan struct{}),
+		base:     base,
+		salt:     rand.Uint32(),
+		cfg:      cfg,
+		affinity: make(map[uint32]*stripeLane),
+		ctrlCh:   make(chan legRecvResult, 16),
+		dataCh:   make(chan legRecvResult, 64),
+		closed:   make(chan struct{}),
 	}
 	go t.baseReadLoop()
 	if cfg.dialLane != nil {
@@ -175,6 +189,8 @@ func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) {
 	t.mu.Lock()
 	t.lanes = append(t.lanes, l)
 	t.mu.Unlock()
+	// Lane set changed: every flow re-resolves on its next send (§3.6).
+	t.dropAffinity()
 	go t.laneWriter(l)
 	go t.laneReadLoop(l)
 }
@@ -204,6 +220,9 @@ func (t *stripeTransport) removeLane(l *stripeLane) {
 		}
 	}
 	t.mu.Unlock()
+	// Lane set changed: affinity flows rehash across the survivors on the
+	// next SendBatch (§3.6 accepted transient).
+	t.dropAffinity()
 	l.close()
 	l.transport.Close()
 }
@@ -278,8 +297,10 @@ func scoreMix(flowKey uint32, laneID uint32) float64 {
 // and each dynamic lane — scores hash(flow, candidate)·weight, the argmax
 // wins. Lane set changes therefore remap only the flows the changed
 // candidate steals (minimal remapping, §5.6/3.4). Returns nil = primary.
-func (t *stripeTransport) pickLane(payload []byte, lanes []*stripeLane) *stripeLane {
-	key := flowHash32(t.salt, payload)
+//
+// Only used for first-contact resolution; live flows ride the sticky
+// affinity table (pickLanePinned, §3.6).
+func (t *stripeTransport) pickLane(key uint32, lanes []*stripeLane) *stripeLane {
 	bestScore := scoreMix(key, 0) // primary lane, weight 1.0
 	var best *stripeLane
 	for _, l := range lanes {
@@ -292,6 +313,67 @@ func (t *stripeTransport) pickLane(payload []byte, lanes []*stripeLane) *stripeL
 	return best
 }
 
+// pickLanePinned resolves the outbound lane for one splittable frame using
+// the sticky affinity table (§3.6): a flow's binding survives probe-weight
+// drift; only lane set changes (attach/remove → table dropped) re-map flows.
+// Misses resolve via weighted rendezvous and are cached.
+func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *stripeLane {
+	key := flowHash32(t.salt, payload)
+	t.mu.Lock()
+	if l, ok := t.affinity[key]; ok {
+		if l == nil {
+			// Pinned to the primary lane — always alive.
+			t.mu.Unlock()
+			return nil
+		}
+		// Confirm the pinned lane is still attached; the table is dropped on
+		// lane set changes, so a hit implies membership — but a lane removed
+		// without invalidation (defensive) must fall through to re-resolve.
+		stillThere := false
+		for _, x := range lanes {
+			if x == l {
+				stillThere = true
+				break
+			}
+		}
+		if stillThere {
+			t.mu.Unlock()
+			return l
+		}
+		delete(t.affinity, key)
+	}
+	t.mu.Unlock()
+
+	// Miss: weighted rendezvous (quality-aware placement for new flows).
+	l := t.pickLane(key, lanes)
+	if key == 0 {
+		// flowHash32 returns 0 for non-IPv4/truncated payloads; those all
+		// share a key, and pinning them to one lane would serialize unrelated
+		// traffic — leave them unpinned (resolved per send).
+		return l
+	}
+	t.mu.Lock()
+	if len(t.affinity) >= stripeAffinityCap {
+		t.affinity = make(map[uint32]*stripeLane, stripeAffinityCap)
+	}
+	if l != nil {
+		t.affinity[key] = l
+	} else {
+		// Explicitly cache "primary" so a later weight flip cannot promote a
+		// lane above the primary for this flow.
+		t.affinity[key] = nil
+	}
+	t.mu.Unlock()
+	return l
+}
+
+// dropAffinity invalidates the per-flow lane pin. Called on lane set changes.
+func (t *stripeTransport) dropAffinity() {
+	t.mu.Lock()
+	t.affinity = make(map[uint32]*stripeLane, stripeAffinityCap)
+	t.mu.Unlock()
+}
+
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
@@ -300,7 +382,7 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 		t.sampleSojourn(start)
 		return err
 	}
-	l := t.pickLane(payload, lanes)
+	l := t.pickLanePinned(payload, lanes)
 	if l == nil {
 		start := time.Now()
 		err := t.base.Send(frameType, payload, isControl)
@@ -337,7 +419,7 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 			primary = append(primary, f)
 			continue
 		}
-		l := t.pickLane(f.Payload, lanes)
+		l := t.pickLanePinned(f.Payload, lanes)
 		if l == nil {
 			primary = append(primary, f)
 			continue

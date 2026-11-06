@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | 已批准，待实施 |
+| 状态 | 实施中：3.1-3.3+3.6 已部署；3.2 因 dispatcher 启动即 legacy 的判定 bug 未生效（2026-11-06 二轮复测实锤），修复待部署复测 |
 | 关联 | [elephant 下载滴流专项 v4](../issues/elephant-download-dribble.md)（根因实锤）、[发送端取证计划](mesh-tcp-reorder-forensics.md)（已完成） |
 
 ## 一、问题（一句话）
@@ -52,6 +52,29 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 
 `HTunnelConfig` 新增 `AllowFlowReorder bool`（默认 false = 有序；true 回滚旧行为），POST 独占与 GET 钉死共用一个开关；路由钉死独立开关 `MeshConfig.AllowFlowRouteChange`（默认 false = 钉死；true 回滚逐包轮转）。回滚 = 置 true 或退回上次运行版本，两档都有。
 
+### 3.6 stripe lane 亲和钉死（验收复测失败后追加，2026-11-06）
+
+**背景**：3.1-3.3 部署后验收仍失败（fast_retransmit +120/68s）。逐层排查曾怀疑 stripe lane 亲和漂移：单流下载期间 JF 侧两条 lane 计数器同时增长。
+
+**结论（二轮复测修正）**：stripe 权重漂移会造成流横跳（本节修复仍有价值，作为加固保留），但**不是本次乱序根因**——零 lane 纯 primary 通道下乱序依旧。真正的根因是 3.2 的 dispatch 模式判定 bug（见 §3.7）。
+
+**改法**：stripeTransport 新增粘性亲和表 `map[uint32]*stripeLane`（flowHash32 流键 → lane）：
+1. 选路先查表，命中即用（**不再乘 currentWeight**，权重漂移不撼动已建立流的绑定）；
+2. 未命中按带权 rendezvous 解析（质量感知保留给新流）并登记；
+3. lane 增删（attachLane/removeLane）时整表作废，全部流重选——换路瞬态接受（同 §3.3 立场）；
+4. 表容量上限 65536（超出即作废重建，防内存膨胀）；
+5. lane 队列满回退 primary 的路径保留：罕见瞬态，与 §3.3"换路时旧路在途 drain 不做"同一取舍。
+
+`flowHash32` 与 3.1/3.2 的 `frame.FlowKey` 同为五元组哈希（各自带盐、不同盐不影响钉死语义，只影响分布）。
+
+### 3.7 dispatch 模式判定 bug — 3.2 实际未生效（二轮复测实锤，2026-11-06）
+
+**现象**：3.6 部署后验收三度失败（fast_retransmit +170/122s，单流 67KB/s）。复测期间 JF 侧 `transport: tcp`（**零 stripe lane**）——证明乱序与 stripe 无关，存在于单通道内部。
+
+**根因**：`meshDispatchLoop` 在**dispatcher 启动瞬间**用 `legacyDispatch(ch)`（查 `pipeCnt==0`）决定模式，而 dispatcher 随 channel 创建即启动——**永远早于客户端首个携带 X-N 的 GET**。于是所有 channel 终身跑 legacyDispatchLoop，3.2 的 per-pipe 有序分发从未生效，GET 侧维持"任意空闲 waiter 领取"的原生乱序。
+
+**修复**：模式判定改为纯配置——`AllowFlowReorder` → legacy；否则一律 pipeDispatchLoop。X-N 到达前 `pipeCnt==0`，数据帧全走 wildcard 队列（pipeAnyQ/pipeAnyW），行为等价 legacy；X-N 到达后 pipeQ 惰性增长，正序分发自然接管。X-N 前已入 pipeAnyQ 的帧与 X-N 后的 pipe 帧之间可能有短暂交错（仅通道建立初期、量极少），接受。
+
 ## 四、不做的事
 
 - ❌ mesh 层重组缓冲/序号重排（netstack 的本职，越俎代庖）。
@@ -66,6 +89,8 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 2. **3.2 GET 钉死**：htunnel_mesh.go meshMsg/dispatch（约 1 处文件）。
 3. **3.3 路由钉死**：mesh.go 转发选路缓存（约 1 处文件）。
 4. **3.4/3.5** 批策略 + config。
+5. **3.6 stripe 亲和钉死**（追加）：stripe_transport.go 粘性亲和表（1 处文件）。
+6. **3.7 dispatch 判定修复**（追加）：meshDispatchLoop 模式判定改纯配置（1 处文件）。
 5. 本机构建（版本戳）→ VM 部署自测 mesh 起连、控制台正常。
 6. QG 部署（中转节点，观察环路/转发指标无回归）。
 7. JF + deskzq 部署（用户确认后，生产节点纪律：备份 prev-running、安全 pkill、无参启动、验证版本）。

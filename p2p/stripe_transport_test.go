@@ -888,7 +888,7 @@ func stripeTestWrapper(t *testing.T, n int) (*stripeTransport, []*stripeLane) {
 func decideAll(tr *stripeTransport, lanes []*stripeLane, flows int) map[int]uint32 {
 	out := make(map[int]uint32, flows)
 	for i := 0; i < flows; i++ {
-		l := tr.pickLane(synthTCPFlow(i), lanes)
+		l := tr.pickLane(flowHash32(tr.salt, synthTCPFlow(i)), lanes)
 		if l == nil {
 			out[i] = 0
 		} else {
@@ -940,7 +940,7 @@ func TestStripeWeightedDistribution(t *testing.T) {
 	const flows = 12000
 	counts := map[uint32]int{0: 0, good.id: 0, bad.id: 0}
 	for i := 0; i < flows; i++ {
-		l := tr.pickLane(synthTCPFlow(i), lanes)
+		l := tr.pickLane(flowHash32(tr.salt, synthTCPFlow(i)), lanes)
 		if l == nil {
 			counts[0]++
 		} else {
@@ -958,6 +958,55 @@ func TestStripeWeightedDistribution(t *testing.T) {
 	}
 	if float64(counts[good.id]) < 3*float64(counts[bad.id]) {
 		t.Fatalf("weight ratio not reflected: counts=%v", counts)
+	}
+}
+
+// TestStripeAffinityPinnedAcrossWeightDrift (§3.6): once a flow's lane is
+// pinned, probe-weight drift must not re-map it — the pre-fix behavior
+// multiplied drifting currentWeight into the affinity score and flows near
+// a score boundary flip-flopped across parallel channels, reordering the
+// inner TCP stream.
+func TestStripeAffinityPinnedAcrossWeightDrift(t *testing.T) {
+	tr, lanes := stripeTestWrapper(t, 2)
+	l1, l2 := lanes[0], lanes[1]
+
+	// Find a flow that initially lands on l1.
+	var flowPayload []byte
+	for i := 0; i < 100000; i++ {
+		p := synthTCPFlow(i)
+		if tr.pickLanePinned(p, lanes) == l1 {
+			flowPayload = p
+			break
+		}
+	}
+	if flowPayload == nil {
+		t.Fatal("no flow landed on l1")
+	}
+	// Drift weights hard: l1 atrocious, l2 pristine. Rendezvous would flip.
+	l1.probe.mu.Lock()
+	l1.probe.srtt = 500 * time.Millisecond
+	l1.probe.srttBase = 5 * time.Millisecond
+	l1.probe.mu.Unlock()
+	l2.probe.mu.Lock()
+	l2.probe.srtt = 5 * time.Millisecond
+	l2.probe.srttBase = 5 * time.Millisecond
+	l2.probe.mu.Unlock()
+
+	for i := 0; i < 8; i++ {
+		if got := tr.pickLanePinned(flowPayload, lanes); got != l1 {
+			t.Fatalf("pinned flow re-mapped to lane %v under weight drift (want l1=%d)", got, l1.id)
+		}
+	}
+
+	// Lane removal drops the whole table: the flow must re-resolve onto a
+	// surviving candidate without panic or stale lane.
+	tr.removeLane(l1)
+	lanes = tr.snapshotLanes()
+	for i := 0; i < 8; i++ {
+		got := tr.pickLanePinned(flowPayload, lanes)
+		if got != nil && got != l2 {
+			t.Fatalf("after l1 removal flow pinned to unknown lane %v (want nil or l2=%d)", got, l2.id)
+		}
 	}
 }
 

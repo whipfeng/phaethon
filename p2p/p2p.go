@@ -29,18 +29,19 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
 // GossipInfo); this alias keeps existing p2p callers unchanged.
 const P2PProtocolVersion = mesh.P2PProtocolVersion
 
-// meshInboundWorkers is the number of goroutines that consume from meshInboundCh
-// and process incoming mesh frames (inject into gVisor netstack).
+// meshInboundWorkers is the number of goroutines that consume the per-flow
+// inbound queues and inject incoming mesh frames into gVisor's netstack.
 //
-// Rationale: With 1 worker, we observed channelDrops=161 (queue overflow) under
-// moderate load. 4 workers provide 4x throughput improvement, eliminating drops
-// while keeping resource overhead low (~32KB total stack space). gVisor's
-// DeliverNetworkPacket is thread-safe (uses atomic counters and RWMutex for
-// shared state), so concurrent injection from multiple workers is safe.
+// Rationale: with 1 worker we observed channelDrops=161 (queue overflow)
+// under moderate load, and with N workers racing on ONE queue, same-flow
+// frames were injected out of order (~50% rcv_ooopack on the receiving inner
+// socket — the dribble root cause, §3.8). The pinned compromise: one queue
+// per worker, frames hashed onto a queue by inner-flow key — per-flow order
+// preserved (one goroutine per flow) with N-way concurrency across flows.
+// gVisor's DeliverNetworkPacket is thread-safe, so concurrent injection of
+// DIFFERENT flows from multiple workers stays safe.
 //
-// Tuning: Monitor channelDrops in P2P-STATS logs. If drops reappear under peak
-// load, increase this value. If CPU usage is high with low throughput, consider
-// reducing it. Typical range: 2-8 workers.
+// Tuning: monitor channelDropStats in /api/mesh. Typical range: 2-8.
 const meshInboundWorkers = 4
 
 // LookupProxyPeerRoute is injected by main to resolve a proxy name to its
@@ -105,7 +106,12 @@ type P2PManager struct {
 	// stripeIDCounter issues opaque lane nonces for StripeAttach (§5.2).
 	stripeIDCounter atomic.Uint32
 
-	meshInboundCh     chan meshInboundPacket // queue for async mesh frame processing (data frames)
+	// meshInboundChs is one queue per inbound worker; enqueue pins a frame to
+	// a queue by its inner-flow key so one flow is always injected into the
+	// netstack by the same goroutine, in arrival order (§3.8). A single shared
+	// queue with N racing consumers reordered same-flow frames (~50% ooopack
+	// on the receiving inner socket, dribble root cause).
+	meshInboundChs    [meshInboundWorkers]chan meshInboundPacket
 	meshInboundDNSCh  chan meshInboundPacket // dedicated queue for inbound DNS frames (avoids cross-node DNS SERVFAIL)
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
 	stopOnce          sync.Once
@@ -505,14 +511,14 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		platform:          runtime.GOOS,
 		arch:              runtime.GOARCH,
 		cache:             cache,
-		meshInboundCh:     make(chan meshInboundPacket, 4096),
 		meshInboundDNSCh:  make(chan meshInboundPacket, 4096),
 		meshInboundStopCh: make(chan struct{}),
 	}
-	// Start multiple worker goroutines to consume from meshInboundCh in parallel.
-	// This increases throughput and reduces queue overflow (channelDrops).
-	for i := 0; i < meshInboundWorkers; i++ {
-		go m.meshInboundLoop(m.meshInboundCh)
+	// One inbound queue per worker; frames are pinned to a queue by flow key
+	// (§3.8) so each flow is processed serially by one goroutine.
+	for i := range m.meshInboundChs {
+		m.meshInboundChs[i] = make(chan meshInboundPacket, 4096)
+		go m.meshInboundLoop(m.meshInboundChs[i])
 	}
 	// DNS frames get their own deep queue + workers so a data-frame burst
 	// cannot starve cross-node DNS (5s forward timeout).
@@ -1753,21 +1759,39 @@ func (m *P2PManager) runSession(peer *Peer) {
 				if linkNIC == nil {
 					util.LogModuleWarn("p2p", "[P2P-DIAG] FrameMeshPacket: peer.GetLinkNIC() is nil! peer.ID=%s node=%s status=%s", peer.ID, peer.NodeID, peer.GetStatus())
 				}
-				// Zero-copy: pass payload directly to mesh layer.
+				// Zero-copy: pass payload directly to the mesh layer.
 				// Consumer (meshInboundLoop) MUST call frame.ReturnBuffer when done (issue 10).
 				// DNS frames go to the dedicated deep queue so data bursts cannot starve them.
-				inboundCh := m.meshInboundCh
 				if isDNSPacket(payload) {
-					inboundCh = m.meshInboundDNSCh
-				}
-				select {
-				case inboundCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
-					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-					payloadReturned = true  // Consumer will return it
-				default:
-					atomic.AddUint64(&m.meshInboundDrops, 1)
-					mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-					util.LogModuleDebug("p2p", "[P2P] meshInboundCh full, dropping frame from %s", peer.NodeID)
+					// DNS keeps drop-on-full: UDP is order-tolerant and a stuck
+					// consumer must not stall the session read loop.
+					select {
+					case m.meshInboundDNSCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
+						mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+						payloadReturned = true // Consumer will return it
+					default:
+						atomic.AddUint64(&m.meshInboundDrops, 1)
+						mesh.TraceForwarding("p2p_inbound_drop", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+						util.LogModuleDebug("p2p", "[P2P] meshInboundDNSCh full, dropping frame from %s", peer.NodeID)
+					}
+				} else {
+					// Data frames: pinned per-flow to one worker queue (§3.8)
+					// and enqueued WITH backpressure — a dropped tunnel segment
+					// costs the inner TCP an RTO, which is far worse than a
+					// momentary stall. The stop channel bounds the block.
+					meshInboundChs := m.meshInboundChs
+					q := meshInboundChs[frame.FlowKey(payload)%uint32(meshInboundWorkers)]
+					select {
+					case q <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
+						mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
+						payloadReturned = true // Consumer will return it
+					case <-m.meshInboundStopCh:
+						frame.ReturnBuffer(payload)
+						return
+					case <-peer.stopCh:
+						frame.ReturnBuffer(payload)
+						return
+					}
 				}
 			} else {
 				util.LogModuleWarn("p2p", "[P2P] FrameMeshPacket dropped: peer=%s node=%s meshHandler=%v payloadLen=%d", peer.ID, peer.NodeID, m.meshHandler != nil, len(payload))

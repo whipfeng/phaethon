@@ -292,6 +292,117 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 
 **验收**：同 3.10.5 第 1~3、5 条（curl app.js ≤ 12.1s、chunk-vendors.js ≤ 72.5s，抓包统计重传并与 64 次基线对比；QG→JF POST 速率回落）。部署 JF/QG/DESKW 前与用户确认。
 
+**验收记录（v0.8.0-330-g156a2d3，2026-11-06，QG eth1 抓包，重传 = 同 seq 重复出现）**：
+
+elephant 路径（Mac → QG → JF(h_tunnel) → DESKW(h_tunnel) → 10.193.131.25）：
+
+| 指标 | 允许乱序基线 | v329 | v330 |
+|---|---|---|---|
+| app.js（1.78MB） | 12.1s，重传 64 | 19~26s，重传 100~113 | 17.4s / 17.4s，重传 81 / 96 |
+| chunk-vendors.js（7.1MB） | 72.5s | — | 60.5s，重传 290 |
+
+测试期间混入一条无 SYN 的外部连接（约 1.1MB，疑似浏览器），结果有干扰。
+
+GG 替代测试环境（不依赖 DESKW 部署）：GG 复用已通告的 `172.18.0.1/32`，在该地址起临时 HTTP 服务（`python3 -m http.server 18999 --bind 172.18.0.1`，目录 `/tmp/phtest`，随机内容 f2m.bin 2MB / f8m.bin 8MB）。路径 Mac → QG → JF(h_tunnel) → GG(trojan GGSV_TJ)。经 JF linkNICStats 差分确认实际经 JF（下载 2MB 期间 JF 的 gg NIC +2.18MB、qg NIC +121KB）。QG 的 bestPaths 显示经 mb，与实际转发不一致，未深究。
+
+| 指标 | GG v319（QG/JF v330） | GG v330 |
+|---|---|---|
+| 2MB ×2 | 9.2s / 7.5s，重传 64 / 46 | 5.0s / 5.8s，重传 64 / 21 |
+| 8MB | 33.9s，重传 259 | 24.6s，重传 117 |
+
+**全局审视发现的问题（2026-11-07，用户确认后的结论）**：
+
+1. **sojourn 测量失真（h_tunnel 异步 POST）**：`SendBatch` 拿到 sendSem 后启动 goroutine 就返回，`peerWriteLoop` 记录的 sojourn 不是真实发送时间。但 sojourn 只用于观测和 stripe lane 决策，h_tunnel V2 不适用 stripe，所以影响不大。**暂不修复**，后续可在 goroutine 里回传真实时间戳修正观测数据。
+
+2. **Control 标志冗余**：客户端设置 `Frame.Control` 标记 ping/pong/gossip，但这些帧的 `FrameType` 本身就是控制类型，服务端靠 `FrameType` 就能分流。Control 标志只在本地内存里有意义，跨节点后丢失，但不影响功能。**不是问题，不修复**。
+
+3. **DRR 调度开销**：O(N) 遍历 256 队列 + deficit 计算，CPU 开销存在但可接受。elephant 测试显示乱序代价有限（基线 26% 乱序，重传 64 次），DRR 的公平性收益可能大于性能损失。**暂不动，先 profile 实锤 CPU 占比**。瓶颈可能在带宽利用率而非 DRR。
+
+4. **合批粒度错配**：客户端按帧数合批（maxBatchFrames=64），服务端按字节合批（GetMaxBatchSize() 默认 512KB）。~~"细发粗回"可能导致服务端堆积~~。**撤销（2026-11-07）**：两端都是"取当时积压，不等待"，上限只在积压多时起作用，不会造成堆积。服务端维持 512KB。客户端也不改成 512KB：服务端 meshHandleWrite 用 io.ReadAll 收完整个 POST 才解析，大 POST 会让首帧等整批上传完；而且 64 帧上限在通用写循环里，trojan、UDP 腿也共用。
+
+5. **stripe lane 不适用于 h_tunnel V2**：h_tunnel V2 是 datagram 语义（POST/GET 池），本就不该用 stripe lane。V1（trojan/socks5）继续适用。**已修复（2026-11-07）**：主动侧判定条件与 dialer/htunnel_bind.go:52 一致（类型为 h_tunnel，且 `IsP2P() && V2`），满足时不套 stripeTransport，p2p_udp 腿直接包底层 transport。被动侧不区分来源，仍套 stripe（0 lane 时为直通）。
+
+6. **bestPaths 和实际转发不一致**：可能是 gossip 广播延迟，多观察。**暂不修复，继续观察**。
+
+**修复计划**：
+- 先修 4（合批粒度）和 5（stripe V2 排除）。
+- 修完后 profile DRR 调度 CPU 占比，实锤是否是瓶颈。
+- 如果 DRR 不是瓶颈，重点查带宽利用率低的原因（内层 TCP 拥塞控制、HTTP 开销、代理链路延迟等）。
+
+**修正与实测（2026-11-07，待用户确认，代码未提交）**：
+
+- 第 4 条前提不成立：服务端 `buildBatchLocked` 不等待凑批，批是"恰好无人消费时积压"出来的。把默认值改为 64KB 只会限制单个 GET 的排空量，不解决任何问题。建议撤回，恢复 512KB。
+- 第 5 条条件写错：`IsV2()` 对 trojan/socks5 开了 v2 也成立。正确条件应与 dialer/htunnel_bind.go:52 一致（类型为 h_tunnel 且 `IsP2P() && V2`）。另外，V2 且开启 p2p_udp 时 `newUDPLegTransport` 会拿到 nil 的 stripe，应改用底层 transport。本条只影响结构整洁，对性能无作用。
+- 更正事实：DESKW 的 DESK_TJ 类型为 H_TUNNEL，v2=true，经 JF 32457 接入（DESKW /api/proxies 实测）。
+- DRR 基准（p2p/drr_bench_test.go，i5-8257U）：一次 NextBatch（256 队列、64 帧）约 25.5µs，其中分配主要来自基准自身的补帧。按实测速率换算，CPU 占比可以忽略，**DRR 不是瓶颈**。
+
+**带宽利用率低的根因（GG 测试路径实测，8MB 单流，v330）**：
+
+| 观测点 | 结果 | 结论 |
+|---|---|---|
+| GG→JF 外层 trojan 套接字（ss 每 0.4s 采样） | Send-Q 0~15KB，unacked ≤ 25 段 < cwnd 49~145，RTT 稳定 21.6ms，能承载约 3MB/s，实际 250~500KB/s | 外层链路没打满，未积压 |
+| JF→nginx（:32457 GET 响应）套接字 | 8 条上游连接合计约 9.3MB，Send-Q ≤ 3.3KB | 未积压 |
+| 内层接收端 Mac 通告窗口（QG 抓包） | 216KB | 不受接收窗口限制 |
+| 内层发送端 GG gVisor（/api/mesh tcpFlowDebug，每 0.5s） | 发送缓冲始终有 0.5~1MB 未发数据，cwnd 被压在 5~20 段，ssthresh 每约 0.5s 被砍一次，srtt 55~75ms | **受拥塞窗口限制**：吞吐 ≈ 10 段 × 1448B ÷ 65ms ≈ 220KB/s，与实测 8MB/33s 吻合 |
+| GG gVisor 计数器（单次下载差分） | sack_recovery +53，其中 spurious_recovery +52（98%）；DSACK +212；timeouts +0 | **几乎全部"丢包恢复"都是乱序误判** |
+| QG 抓包内层到达乱序 | 首次到达乱序 437 个，乱序距离 p50 7KB、最大 20KB（v330）；v319 最大 115KB | 乱序距离不超过一个 cwnd，符合"批次之间先后颠倒" |
+
+**gVisor 源码确认（../gvisor-fork/pkg/tcpip/transport/tcp/snd.go:1472）**：`detectSpuriousRecovery` 只按 RFC 3522 识别误恢复并计数，**没有实现撤销**（RFC 4015 Eifel 响应 / Linux DSACK undo），被砍的 cwnd/ssthresh 不会恢复。RACK（rack.go:304）会在收到 DSACK 后放大乱序窗口，但起点只有 minRTT/4（约 8ms），而两条并发 GET 响应的先后差常大于此。因此 §3.10.1 第 2 条"现代 TCP（RACK-TLP、DSACK 撤销）能扛住大部分"对 gVisor 发送端不成立。
+
+**附带发现**：tcpFlowDebug 中 `sackedOut` 长期为负值（-1 ~ -9），属于 SACK 记账异常，可能影响 pipe 估算，待另行核查。
+
+**架构层面的结论**：路由器之所以快且公平，是因为每条链路都是先进先出的，同一条流不会被拆到多条并行路径上（ECMP 按流哈希就是为了这个）。端点用的是带乱序容忍和撤销能力的内核 TCP。我们的 h_tunnel V2 把同一条内层流拆到 16 路并发 POST 和 2 路并发 GET 上，等于一条"不保序的多路径链路"。端点又是不会撤销误判的 gVisor TCP，每次乱序都会让 cwnd 永久打七折。之前的有序模式用"每流至多一个在途请求"的停等方式保序，引入了 RTT 抖动，方向是对的、手段错了。之前"外层隐藏缓冲吸收了队列"的假设，已被上表实测否定。
+
+### 3.11 gVisor 发送端误恢复撤销（方案 A，2026-11-07 用户选定，待确认设计）
+
+**依据**：见上节实测。单流下载期间 sack_recovery +53，其中 spurious +52，timeouts +0。gVisor 已能按 RFC 3522 识别误恢复，但不撤销降窗，cwnd 长期被压在 5~20 段。
+
+**范围**：只改 ../gvisor-fork/pkg/tcpip/transport/tcp，只处理快速/SACK 恢复的误判。RTO 误判不处理（实测 timeouts 为 0；RTO 后是回退重传，贸然恢复大窗口会突发重发，风险大）。不改 RACK 乱序窗口（方案 B），也不改隧道层。
+
+**改法**（参照 Linux `tcp_undo_cwnd_reduction` / RFC 4015 Eifel 响应）：
+
+1. **降窗前存快照**：新增 `sender.reduceForLoss()`，先保存 `SndCwnd`、`Ssthresh`，以及拥塞控制自身的状态（cubic 的 `WMax/WLastMax/K/T/numCongestionEvents`），再调用 `cc.HandleLossDetected()`。现有 4 处 `cc.HandleLossDetected()`（snd.go:1313、snd.go:1805、rack.go:270、rack.go:410）都改为调用它。拥塞控制通过一个可选接口 `undoer{ saveUndo(); undo() }` 保存和恢复自身状态，cubic 实现该接口，reno 不需要。
+2. **识别到误判时**（`detectSpuriousRecovery` 置 `spuriousRecovery=true` 处）：如果当前处于 SACK 恢复且快照有效，就置 `undoPending=true`，并立即令 `SndCwnd = max(SndCwnd, 快照cwnd)`，让剩余恢复期内就能按原速发新数据。非 SACK 的快速恢复靠 cwnd 膨胀记账，只置标记，不改 cwnd。
+3. **退出恢复时**（`leaveRecovery`，唯一出口）：如果 `undoPending` 为真，就不做"cwnd 收缩到 ssthresh"和 `PostRecovery`，改为：
+   - `SndCwnd = max(Ssthresh, 快照cwnd)`；
+   - `Ssthresh = max(Ssthresh, 快照ssthresh)`，快照值可能是无穷大，表示回到原来的慢启动状态，与 Linux 一致；
+   - 调用 `cc.undo()` 恢复 cubic 曲线；
+   - 清除标记和快照。
+   正常（非误判）退出时行为不变。
+4. **快照失效**：RTO 触发（`retransmitTimerExpired`）时先清除快照和 `undoPending`，再走原逻辑，保证 RTO 降窗不会被误撤销。TLP 路径（rack.go:270 进入后立即退出）不会被判为误恢复，存快照无副作用。
+5. **观测**：新增计数器 `SpuriousRecoveryUndo`，并把 `undoPending` 加入 tcpFlowDebug 导出，便于验收。
+
+**不变的东西**：丢包检测、重传逻辑、RACK、SACK 记账、RTO 行为全部不变。真丢包（不带 DSACK、TSEcr 不早于重传时间戳）不会触发撤销。
+
+**单测**（gVisor fork 内）：
+- 构造乱序：进入 SACK 恢复后，收到回显原始发送时间戳的确认 → 退出恢复后 cwnd/ssthresh 恢复到降窗前的值，计数器 +1。
+- 真丢包：恢复期间只收到对重传包的确认 → 正常降窗，不撤销。
+- 恢复期间发生 RTO → 不撤销，cwnd=1。
+
+**部署与验收**：
+- 下载方向的发送端是"通告路由的节点"的 gVisor，所以先部署 GG（测试路径，我可自行部署），用 `-a` 强制重编。
+- GG 路径 8MB 单流 3 次：spurious_recovery 仍可出现，但 `SpuriousRecoveryUndo` 与之接近；tcpFlowDebug 中 cwnd 不再长期低于 20 段；耗时对比 v330（27.8s / 30.2s / 33.2s / 40.4s）明显缩短。
+- 通过后部署 JF/QG，再由用户部署 DESKW，复测 elephant（app.js ≤ 12.1s、chunk-vendors.js ≤ 72.5s）和 8 流聚合（不劣于 §3.8 验收的 3.90~5.55MB/s）。
+
+**回滚**：仅 fork 内改动，单独提交；回退该提交、重编即可。
+
+**GG 实测（2026-11-07，v0.8.0-330-dirty，Mac → QG → JF(h_tunnel) → GG 172.18.0.1:18999/f8m.bin）**：
+
+| 轮次 | 耗时 | spurious / undo | sack_recovery | timeouts | cwnd 峰值 |
+|---|---|---|---|---|---|
+| 1 | 33.9s | 40 / 37 | 41 | 3（一次 RTO 停顿约 8s） | 303 |
+| 2 | 23.4s | 21 / 20 | 21 | 0 | 1023 |
+| 3 | 24.4s | 22 / 22 | 22 | 0 | 790 |
+| 第 4 轮（采 ss） | 22.5s | — | — | — | — |
+
+- 撤销机制达标：undo ≈ spurious，cwnd 不再卡在 5~20（升到 300~1000）。
+- 耗时只缩短约 17%（均值 27.2s vs 32.9s）：**瓶颈已移到外层**。内层 srtt 随 cwnd 从 90ms 涨到 1.9s，属排队。
+- 定位（GG `ss -tni` 每 0.5s 采样）：GG→JF 有 2 条外层 lane（JF 主动拨入），该单流**全部走 56698**，另一条 56974 闲置（stripe 按流哈希选 lane，`p2p/stripe_transport.go:321`）。56698 外层重传约 10%（≈40KB/s rtx / 400KB/s），内核 cubic cwnd 在 1~26 间跳，吞吐封顶约 400KB/s，Send-Q 从 0 积到 815KB → 正是内层 RTT 膨胀的来源。
+- GG 内核只有 reno/cubic（无 bbr），layer4 用户无权加载模块。
+- **裸带宽对照（绕过 phaethon）**：GG 直接 `ssh cat f8m.bin` 到 Mac：单流 8MB/20.9s ≈ 375KB/s；4 流并发 32MB/94.5s ≈ 331KB/s。经 mesh 4 流并发同样约 300KB/s（且 4 条流全落在同一条 lane）。突发时单 lane 能到 1250KB/s，随即出现大量重传 → 符合云主机出口限速器（约 3Mbps）特征。
+- 结论：GG 路径的上限是 **GG 出口带宽（约 3Mbps）**，与 phaethon 无关；方案 A 后单流 22.5s ≈ 8MB/355KB/s，已基本跑满。单流跨 lane 分发 / 外层 BBR 在这条路径上**没有收益**，不做。GG 路径不适合做吞吐验收，吞吐验收以 DESKW 路径（elephant / 8 流）为准。
+- 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s），待 DESKW 部署后看是否复现。
+
 ## 四、不做的事
 
 - ❌ mesh 层重组缓冲/序号重排（netstack 的本职，越俎代庖）。

@@ -3026,6 +3026,15 @@ func (m *MeshManager) GetNetstackTCPStats() map[string]uint64 {
 	return m.netstack.TCPStats()
 }
 
+// GetNetstackTCPFlowDebug snapshots internal state of all live gVisor TCP
+// endpoints (per-flow snd/rcv/cwnd/recovery/timer internals).
+func (m *MeshManager) GetNetstackTCPFlowDebug() interface{} {
+	if m.netstack == nil {
+		return nil
+	}
+	return m.netstack.TCPFlowDebug(nil)
+}
+
 // GetNetstackDropStats returns TUN write failures and NIC1 (TUN-side channel
 // endpoint) outbound-queue tail drops — packet-loss signals on the netstack
 // side that have no P2P-queue counterpart.

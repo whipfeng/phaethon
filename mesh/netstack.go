@@ -2045,6 +2045,7 @@ func (n *Netstack) TCPStats() map[string]uint64 {
 	put("valid_segments_received", t.ValidSegmentsReceived)
 	put("invalid_segments_received", t.InvalidSegmentsReceived)
 	put("segments_sent", t.SegmentsSent)
+	put("segment_send_errors", t.SegmentSendErrors)
 	put("retransmits", t.Retransmits)
 	put("fast_retransmit", t.FastRetransmit)
 	put("slow_start_retransmits", t.SlowStartRetransmits)
@@ -2060,6 +2061,15 @@ func (n *Netstack) TCPStats() map[string]uint64 {
 	put("active_openings", t.ActiveConnectionOpenings)
 	put("passive_openings", t.PassiveConnectionOpenings)
 	return out
+}
+
+// TCPFlowDebug snapshots internal state of every live gVisor TCP endpoint.
+// A nil filter dumps all endpoints.
+func (n *Netstack) TCPFlowDebug(filter func(local, remote tcpip.FullAddress) bool) []tcp.TCPFlowDebugInfo {
+	if n == nil || n.ns == nil {
+		return nil
+	}
+	return tcp.DumpTCPFlowDebug(filter)
 }
 
 // DropStats returns TUN write failures and NIC1 outbound-queue tail drops.

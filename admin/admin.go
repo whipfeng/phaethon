@@ -1848,6 +1848,19 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		if forwardingTrace, ok := updates["forwarding-trace"].(bool); ok {
 			meshCfg.ForwardingTrace = forwardingTrace
 		}
+		if raw, ok := updates["htunnel"]; ok {
+			if raw == nil {
+				meshCfg.HTunnel = nil
+			} else {
+				b, _ := json.Marshal(raw)
+				var ht config.HTunnelConfig
+				if err := json.Unmarshal(b, &ht); err != nil {
+					httpError(w, "invalid htunnel: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				meshCfg.HTunnel = &ht
+			}
+		}
 
 		// Validate required fields
 		if meshCfg.NodeID == "" {

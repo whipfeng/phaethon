@@ -334,7 +334,7 @@ func run(prev *activeResources) (*activeResources, error) {
 		util.LogModuleDebug("system", "[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", meshConfig.ForwardingTrace, mesh.ForwardingTraceEnabled())
 		meshMgr.SetDataDir(dataDir)
 		meshMgr.SetTCPKeepalive(meshConfig.TCPKeepalive)
-		meshMgr.SetFlowRoutePin(!meshConfig.GetAllowFlowRouteChange())
+		config.SetHTunnel(meshConfig.HTunnel)
 
 		// Set static IPIP routes
 		staticRoutes := meshConfig.StaticRoutes
@@ -2070,6 +2070,8 @@ func wireAdminCallbacks(resources *activeResources) {
 			util.LogModuleInfo("main", "[MESH] updating mesh manager config (domainSuffixes, advertise)")
 			mesh.GlobalMeshManager.UpdateConfig(meshConfig.GetDomainSuffixes(), meshConfig.GetAdvertise())
 		}
+		// New h_tunnel mesh channels pick this up; live channels keep their snapshot.
+		config.SetHTunnel(meshConfig.HTunnel)
 
 		util.LogModuleInfo("main", "[MESH] config updated: nodeID=%s subnet=%s advertise=%v",
 			meshConfig.NodeID, meshConfig.GetSubnet(), meshConfig.GetAdvertise())

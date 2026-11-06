@@ -44,6 +44,11 @@ const P2PProtocolVersion = mesh.P2PProtocolVersion
 // Tuning: monitor channelDropStats in /api/mesh. Typical range: 2-8.
 const meshInboundWorkers = 4
 
+// meshInboundFullWait bounds how long a session read loop waits on a full
+// inbound worker queue before dropping the frame (well under the 5s ping
+// timeout, so the loop keeps serving pongs).
+const meshInboundFullWait = 100 * time.Millisecond
+
 // LookupProxyPeerRoute is injected by main to resolve a proxy name to its
 // peer's LinkNIC ID and subnet. Used by v2 route callbacks to bypass the
 // RouteSelector for proxy-selected mesh links.
@@ -1719,6 +1724,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 	}()
 	defer close(pingDone)
 
+	var inboundTimer *time.Timer
 	for {
 		frameType, payload, err := peer.transport.Recv()
 		// Return pooled buffer at end of iteration (issue 10)
@@ -1775,22 +1781,38 @@ func (m *P2PManager) runSession(peer *Peer) {
 						util.LogModuleDebug("p2p", "[P2P] meshInboundDNSCh full, dropping frame from %s", peer.NodeID)
 					}
 				} else {
-					// Data frames: pinned per-flow to one worker queue (§3.8)
-					// and enqueued WITH backpressure — a dropped tunnel segment
-					// costs the inner TCP an RTO, which is far worse than a
-					// momentary stall. The stop channel bounds the block.
+					// Data frames: pinned per-flow to one worker queue (§3.8).
+					// A full queue gets a bounded wait, then the frame is
+					// dropped (§3.9 R5): blocking indefinitely would stall this
+					// read loop — pongs included — until the session times out.
 					meshInboundChs := m.meshInboundChs
 					q := meshInboundChs[frame.FlowKey(payload)%uint32(meshInboundWorkers)]
+					pkt := meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}
+					// Traced before handoff: the consumer owns the buffer after.
+					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 					select {
-					case q <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
-						mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-						payloadReturned = true // Consumer will return it
-					case <-m.meshInboundStopCh:
-						frame.ReturnBuffer(payload)
-						return
-					case <-peer.stopCh:
-						frame.ReturnBuffer(payload)
-						return
+					case q <- pkt:
+						payloadReturned = true
+					default:
+						if inboundTimer == nil {
+							inboundTimer = time.NewTimer(meshInboundFullWait)
+						} else {
+							inboundTimer.Reset(meshInboundFullWait)
+						}
+						select {
+						case q <- pkt:
+							payloadReturned = true
+							inboundTimer.Stop()
+						case <-inboundTimer.C:
+							atomic.AddUint64(&m.meshInboundDrops, 1)
+							util.LogModuleDebug("p2p", "[P2P] mesh inbound queue full, dropping frame from %s", peer.NodeID)
+						case <-m.meshInboundStopCh:
+							frame.ReturnBuffer(payload)
+							return
+						case <-peer.stopCh:
+							frame.ReturnBuffer(payload)
+							return
+						}
 					}
 				}
 			} else {

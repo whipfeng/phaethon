@@ -73,12 +73,14 @@ type htChannel struct {
 	// frames are routed by flow key onto per-pipe queues and only ever
 	// served to a GET waiter of the same pipe, so one inner flow rides one
 	// serial GET chain. pipeCnt == 0 = legacy unordered dispatch.
-	pipeMu    sync.Mutex
-	pipeCnt   int             // client-announced pipe count (X-N), 0 = legacy
-	pipeQ     [][]meshMsg     // queued frames per pipe (index = flowKey % pipeCnt)
-	pipeWait  [][]*meshWaiter // registered waiters per pipe
-	pipeAnyQ  []meshMsg       // wildcard queue: control + legacy data
-	pipeAnyW  []*meshWaiter   // wildcard waiters (GETs without a valid pipe)
+	pipeMu   sync.Mutex
+	pipeCnt  int             // client-announced pipe count (X-N), 0 = legacy
+	pipeQ    [][]meshMsg     // queued frames per pipe (index = flowKey % pipeCnt)
+	pipeWait [][]*meshWaiter // registered waiters per pipe
+	pipeAnyQ []meshMsg       // wildcard queue: data before X-N arrived
+	pipeAnyW []*meshWaiter   // wildcard waiters (GETs without a valid pipe)
+	ctrlQ    []meshMsg       // p2p control frames, served first to any waiter (§3.8)
+	pipeRR   int             // round-robin pipe for unkeyed data frames (pings)
 
 	// Cached results for step==0 retry
 	lastReadData []byte

@@ -9,21 +9,14 @@ import (
 	"phaethon/frame"
 )
 
-func newDispatchTestChannel(pipes int) *htChannel {
-	ch := &htChannel{pipeCnt: pipes}
-	ch.pipeQ = make([][]meshMsg, pipes)
-	ch.pipeWait = make([][]*meshWaiter, pipes)
-	return ch
+func newTestWaiter() *meshWaiter {
+	return &meshWaiter{batch: make(chan []meshMsg, 1), done: make(chan struct{})}
 }
 
-func newTestWaiter(pipe int) *meshWaiter {
-	return &meshWaiter{batch: make(chan []meshMsg, 1), done: make(chan struct{}), pipe: pipe}
-}
-
-func dataMsg(flowKey uint32, seq int, size int) meshMsg {
+func dataMsg(seq int, size int) meshMsg {
 	p := make([]byte, size)
 	binary.BigEndian.PutUint32(p, uint32(seq))
-	return meshMsg{frameType: frame.FrameMeshPacket, payload: p, flowKey: flowKey}
+	return meshMsg{frameType: frame.FrameMeshPacket, payload: p}
 }
 
 func takeBatch(t *testing.T, w *meshWaiter) []meshMsg {
@@ -37,16 +30,16 @@ func takeBatch(t *testing.T, w *meshWaiter) []meshMsg {
 	}
 }
 
-// A pong queued behind a large data backlog on every pipe must be served by
-// the very next GET (§3.8: pipe data used to starve control frames).
+// A pong queued behind a large data backlog must be served by the very next
+// GET (§3.8: data used to starve control frames).
 func TestMeshDispatch_ControlFirst(t *testing.T) {
-	ch := newDispatchTestChannel(2)
+	ch := &htChannel{}
 	for i := 0; i < 1000; i++ {
-		ch.routeFrameLocked(dataMsg(uint32(i%2), i, 1000))
+		ch.routeFrameLocked(dataMsg(i, 1000))
 	}
-	ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), flowKey: flowKeyAny, control: true})
+	ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), control: true})
 
-	w := newTestWaiter(1)
+	w := newTestWaiter()
 	ch.addWaiterLocked(w)
 	ch.flushLocked(64 * 1024)
 
@@ -60,15 +53,15 @@ func TestMeshDispatch_ControlFirst(t *testing.T) {
 }
 
 func TestMeshDispatch_ByteBatchAndOrder(t *testing.T) {
-	ch := newDispatchTestChannel(2)
+	ch := &htChannel{}
 	const n, size, limit = 200, 10_000, 100_000
 	for i := 0; i < n; i++ {
-		ch.routeFrameLocked(dataMsg(0, i, size))
+		ch.routeFrameLocked(dataMsg(i, size))
 	}
 
 	next := 0
 	for next < n {
-		w := newTestWaiter(0)
+		w := newTestWaiter()
 		ch.addWaiterLocked(w)
 		ch.flushLocked(limit)
 		b := takeBatch(t, w)
@@ -87,15 +80,15 @@ func TestMeshDispatch_ByteBatchAndOrder(t *testing.T) {
 			t.Fatalf("batch has %d frames, want %d", len(b), limit/(size+3))
 		}
 	}
-	if ch.pipeQ[0] != nil {
-		t.Fatal("drained pipe queue should be nil")
+	if ch.dataQ != nil {
+		t.Fatal("drained data queue should be nil")
 	}
 }
 
 func TestMeshDispatch_OversizedFrameStillShips(t *testing.T) {
-	ch := newDispatchTestChannel(1)
-	ch.routeFrameLocked(dataMsg(0, 0, 4096))
-	w := newTestWaiter(0)
+	ch := &htChannel{}
+	ch.routeFrameLocked(dataMsg(0, 4096))
+	w := newTestWaiter()
 	ch.addWaiterLocked(w)
 	ch.flushLocked(1024)
 	if b := takeBatch(t, w); len(b) != 1 {
@@ -103,45 +96,34 @@ func TestMeshDispatch_OversizedFrameStillShips(t *testing.T) {
 	}
 }
 
-// Unkeyed data frames (pings) stay on the data path, spread over the pipes.
-func TestMeshDispatch_PingsRoundRobinOnPipes(t *testing.T) {
-	ch := newDispatchTestChannel(2)
-	for i := 0; i < 4; i++ {
-		ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPing, payload: []byte("ping"), flowKey: flowKeyAny})
+// Pings are data-path frames: they queue in the data FIFO in arrival order.
+func TestMeshDispatch_PingsRideDataFIFO(t *testing.T) {
+	ch := &htChannel{}
+	ch.routeFrameLocked(dataMsg(0, 100))
+	ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPing, payload: []byte("ping")})
+	ch.routeFrameLocked(dataMsg(1, 100))
+	if len(ch.ctrlQ) != 0 || len(ch.dataQ) != 3 {
+		t.Fatalf("ctrl=%d data=%d, want 0/3", len(ch.ctrlQ), len(ch.dataQ))
 	}
-	if len(ch.pipeQ[0]) != 2 || len(ch.pipeQ[1]) != 2 || len(ch.ctrlQ) != 0 || len(ch.pipeAnyQ) != 0 {
-		t.Fatalf("ping spread pipe0=%d pipe1=%d ctrl=%d any=%d",
-			len(ch.pipeQ[0]), len(ch.pipeQ[1]), len(ch.ctrlQ), len(ch.pipeAnyQ))
-	}
-}
-
-func TestMeshDispatch_PipeIsolation(t *testing.T) {
-	ch := newDispatchTestChannel(2)
-	ch.routeFrameLocked(dataMsg(1, 0, 100))
-	w0 := newTestWaiter(0)
-	ch.addWaiterLocked(w0)
+	w := newTestWaiter()
+	ch.addWaiterLocked(w)
 	ch.flushLocked(64 * 1024)
-	select {
-	case <-w0.batch:
-		t.Fatal("pipe 0 waiter received pipe 1 data")
-	default:
+	b := takeBatch(t, w)
+	if len(b) != 3 || b[1].frameType != frame.FrameLinkPing {
+		t.Fatalf("batch order broken: %+v", b)
 	}
-	w1 := newTestWaiter(1)
-	ch.addWaiterLocked(w1)
-	ch.flushLocked(64 * 1024)
-	takeBatch(t, w1)
 }
 
 func TestMeshDispatch_StaleWaiterSkipped(t *testing.T) {
-	ch := newDispatchTestChannel(1)
-	stale := newTestWaiter(0)
-	fresh := newTestWaiter(0)
+	ch := &htChannel{}
+	stale := newTestWaiter()
+	fresh := newTestWaiter()
 	ch.addWaiterLocked(stale)
 	ch.addWaiterLocked(fresh)
 	if b := ch.abandonWaiter(stale); b != nil {
 		t.Fatal("abandoned idle waiter returned a batch")
 	}
-	ch.routeFrameLocked(dataMsg(0, 0, 100))
+	ch.routeFrameLocked(dataMsg(0, 100))
 	ch.flushLocked(64 * 1024)
 	takeBatch(t, fresh)
 	if len(stale.batch) != 0 {
@@ -151,34 +133,14 @@ func TestMeshDispatch_StaleWaiterSkipped(t *testing.T) {
 
 // A batch handed off just before the handler times out must still be served.
 func TestMeshDispatch_AbandonKeepsHandedOffBatch(t *testing.T) {
-	ch := newDispatchTestChannel(1)
-	w := newTestWaiter(0)
+	ch := &htChannel{}
+	w := newTestWaiter()
 	ch.addWaiterLocked(w)
-	ch.routeFrameLocked(dataMsg(0, 7, 100))
+	ch.routeFrameLocked(dataMsg(7, 100))
 	ch.flushLocked(64 * 1024)
 	b := ch.abandonWaiter(w)
 	if len(b) != 1 || binary.BigEndian.Uint32(b[0].payload) != 7 {
 		t.Fatalf("abandon lost handed-off batch: %+v", b)
-	}
-}
-
-// Before X-N (and always in legacy mode) data rides the wildcard FIFO.
-func TestMeshDispatch_WildcardBeforePipeCount(t *testing.T) {
-	ch := newDispatchTestChannel(0)
-	for i := 0; i < 3; i++ {
-		ch.routeFrameLocked(dataMsg(uint32(i), i, 100))
-	}
-	w := newTestWaiter(0) // pipe unknown yet → wildcard
-	ch.addWaiterLocked(w)
-	ch.flushLocked(64 * 1024)
-	b := takeBatch(t, w)
-	for i, m := range b {
-		if int(binary.BigEndian.Uint32(m.payload)) != i {
-			t.Fatalf("wildcard order broken at %d", i)
-		}
-	}
-	if len(b) != 3 {
-		t.Fatalf("got %d frames, want 3", len(b))
 	}
 }
 
@@ -220,16 +182,16 @@ func TestCodel_NeverDropsNearlyEmptyQueue(t *testing.T) {
 
 // Stale frames are dropped by AQM but never pings, and the batch is never empty.
 func TestMeshDispatch_AQMDropsOnlyMeshPackets(t *testing.T) {
-	ch := newDispatchTestChannel(1)
+	ch := &htChannel{}
 	for i := 0; i < 50; i++ {
-		ch.routeFrameLocked(dataMsg(0, i, 100))
-		ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPing, payload: []byte("ping"), flowKey: 0})
+		ch.routeFrameLocked(dataMsg(i, 100))
+		ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPing, payload: []byte("ping")})
 	}
-	for i := range ch.pipeQ[0] {
-		ch.pipeQ[0][i].enq = meshNow() - time.Second // sojourn far above target
+	for i := range ch.dataQ {
+		ch.dataQ[i].enq = meshNow() - time.Second // sojourn far above target
 	}
-	ch.pipeCodel = []codel{{firstAbove: meshNow() - time.Second}} // above target for over an interval
-	w := newTestWaiter(0)
+	ch.dataCodel = codel{firstAbove: meshNow() - time.Second} // above target for over an interval
+	w := newTestWaiter()
 	ch.addWaiterLocked(w)
 	ch.flushLocked(1 << 20)
 	b := takeBatch(t, w)
@@ -251,19 +213,19 @@ func TestMeshDispatch_AQMDropsOnlyMeshPackets(t *testing.T) {
 }
 
 func TestMeshDispatch_DataBytesAccounting(t *testing.T) {
-	ch := newDispatchTestChannel(2)
-	ch.routeFrameLocked(dataMsg(0, 0, 1000))
-	ch.routeFrameLocked(dataMsg(1, 1, 500))
+	ch := &htChannel{}
+	ch.routeFrameLocked(dataMsg(0, 1000))
+	ch.routeFrameLocked(dataMsg(1, 500))
 	ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), control: true})
 	if want := 1003 + 503; ch.dataBytes != want {
 		t.Fatalf("dataBytes = %d, want %d (control excluded)", ch.dataBytes, want)
 	}
-	w := newTestWaiter(0)
+	w := newTestWaiter()
 	ch.addWaiterLocked(w)
-	ch.flushLocked(1 << 20)
+	ch.flushLocked(1010)
 	takeBatch(t, w)
 	if ch.dataBytes != 503 {
-		t.Fatalf("dataBytes = %d after pipe 0 drained, want 503", ch.dataBytes)
+		t.Fatalf("dataBytes = %d after first frame drained, want 503", ch.dataBytes)
 	}
 }
 
@@ -281,9 +243,9 @@ func TestMeshDispatchLoop_CapPausesDataNotControl(t *testing.T) {
 	go s.meshDispatchLoop(ch)
 	defer close(ch.closed)
 
-	ch.meshOut <- dataMsg(0, 0, 10)
+	ch.meshOut <- dataMsg(0, 10)
 	ch.meshCtrlOut <- meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), control: true}
-	w := newTestWaiter(-1)
+	w := newTestWaiter()
 	ch.getWaiters <- w
 	select {
 	case b := <-w.batch:
@@ -295,5 +257,29 @@ func TestMeshDispatchLoop_CapPausesDataNotControl(t *testing.T) {
 	}
 	if len(ch.meshOut) != 1 {
 		t.Fatalf("meshOut len = %d, data should stay unread past the cap", len(ch.meshOut))
+	}
+}
+
+// A batch keeps per-frame control semantics: control frames take the
+// control path (served first by GET), the rest ride the data path.
+func TestMeshChannelSendBatch_ControlSplit(t *testing.T) {
+	ch := &htChannel{
+		closed:      make(chan struct{}),
+		meshOut:     make(chan meshMsg, 4),
+		meshCtrlOut: make(chan meshMsg, 4),
+	}
+	tr := meshChannelTransport{ch: ch}
+	err := tr.SendBatch([]frame.Frame{
+		{Type: frame.FrameLinkPong, Payload: []byte("pong"), Control: true},
+		{Type: frame.FrameMeshPacket, Payload: []byte("data")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ch.meshCtrlOut) != 1 || len(ch.meshOut) != 1 {
+		t.Fatalf("ctrl=%d data=%d, want 1/1", len(ch.meshCtrlOut), len(ch.meshOut))
+	}
+	if m := <-ch.meshCtrlOut; !m.control || m.frameType != frame.FrameLinkPong {
+		t.Fatalf("control frame = %+v", m)
 	}
 }

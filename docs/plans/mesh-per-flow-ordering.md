@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | 已部署（v0.8.0-325-g2361df1）；但**残余乱序未消**（QG rcv_ooopack ~45%），滴流仍在（单流 173~726KB/s）——三钉死代码在场 ≠ 每个环节运行时生效，残余乱序源定位转 [v5 取证计划](mesh-reorder-forensics-v5.md)（2026-11-06 已批准） |
+| 状态 | **§3.10（2026-11-06）撤销 h_tunnel 有序模式（§3.1/§3.2/§3.5/§3.7 作废，以 §3.10 为准）+ IPIP 按内层分类，已部署 JF/QG/DESKW（v0.8.0-329），elephant 测速变慢未达标；追加 3.10.6 改动三（去 ackQueue + 写循环合批），代码已实现、单测通过，待部署验收**。历史：已部署（v0.8.0-325-g2361df1）；但**残余乱序未消**（QG rcv_ooopack ~45%），滴流仍在（单流 173~726KB/s）——三钉死代码在场 ≠ 每个环节运行时生效，残余乱序源定位转 [v5 取证计划](mesh-reorder-forensics-v5.md)（2026-11-06 已批准） |
 | 关联 | [elephant 下载滴流专项 v4](../issues/elephant-download-dribble.md)（根因实锤）、[发送端取证计划](mesh-tcp-reorder-forensics.md)（已完成） |
 
 ## 一、问题（一句话）
@@ -130,6 +130,167 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 1. `go vet`/`go test -race`（server/p2p/dialer/mesh/frame/config）通过，新增 CoDel、硬上限、控制旁路、有界入队、lane 改钉单测。
 2. QG→JF V2 8 流 × 3 轮：零 `link dead`/会话重建；聚合吞吐不低于 §3.8 结果（3.9~5.6MB/s）。
 3. JF `/api/mesh` 回滚开关：PUT `htunnel.allow-flow-reorder=true` 后新建通道走 legacy（日志/行为可见），置回 false 恢复。
+
+### 3.10 撤销 h_tunnel 有序模式 + IPIP 按内层包分类（2026-11-06，用户已批准方向）
+
+#### 3.10.1 背景与证据
+
+场景：Mac → QG 旁路网关 → mesh → JF → DESKW → `10.193.131.25`（elephant，DESKW 通告路由，走 IPIP）。浏览器访问极慢。
+
+**A/B 实测**（同一路径，curl 单连接，QG 局域网侧抓包；切换方式：QG、DESKW 的 mesh 配置 `htunnel.allow-flow-reorder=true` + 重启 JF 重建通道）：
+
+| 指标 | 有序模式（§3.1/§3.2） | 允许乱序 |
+|---|---|---|
+| app.js | 20.5s | 12.1s |
+| chunk-vendors.js | 98s | 72.5s |
+| 内层 RTT p50/p90/max | 72/103/158ms | 56/75/120ms |
+| 接收侧乱序到达 | 0 | 26% |
+| elephant 重传 | 71 | 64 |
+| 其中误重传（重传到达前接收端已累计确认 + DSACK） | 70/71 | 64/64 |
+| 重传触发：定时器（RTO/TLP） | 71 | 33 |
+| 重传触发：乱序（≥3 个带 SACK 空洞的重复 ACK） | 0 | 17（另 14 个 1~2 个空洞，可能由 RACK 触发） |
+
+重传确认是发送端协议栈生成（TSval 均比原包新），不是隧道复制。
+
+**结论**：
+1. §3.1"每流同一时刻至多一个 POST 在途"在每跳每批引入 0~1 个 HTTP RTT 的等待。QG POST、JF→DESKW GET、DESKW POST、JF→QG GET 四处叠加，形成内层 RTT 抖动，超过 elephant 约 130ms 的 RTO，导致误超时重传和 cwnd 塌缩。代价远大于消除乱序的收益。
+2. 乱序本身的代价有限：现代 TCP（RACK-TLP、DSACK 撤销）能扛住大部分。即使完美保序，也只能去掉约 17~31 次乱序类误重传。
+3. 修订 §二"让乱序在构造上不可能"的立场：**对 h_tunnel 多 POST/多 GET 不再强制保序**。保留零延迟成本的"按流哈希钉路径"措施，它们不会让包等待。
+4. 撤销前（c608130 之前）接收端约 50% 乱序，主要来源是 4 个 worker 抢一条共享入站队列。该问题已由 f0fb969 的按流钉 worker 队列消除，予以保留。当前允许乱序模式下剩余的 26% 来自 ht 多 POST/多 GET 并发。
+
+**IPIP 分类缺陷（代码实锤）**：以下分类函数只看外层 IP 头。IPIP（协议号 4）的外层都是 QG↔DESKW，于是所有经通告路由的连接被当成同一条流、同一种包，且每跳（QG、JF 中继、DESKW）都会重复：
+
+| 位置 | 后果 |
+|---|---|
+| `p2p.flowHash32` → DRR `hashFlow`（p2p/p2p.go:881、1035） | 所有 IPIP 连接挤进 256 个 DRR 队列中的同一个（深度 512 帧、每轮 64KB 配额），互相排队 |
+| `isACKPacket`（p2p/p2p.go:973） | IPIP 里的纯 ACK 不进 ackQueue 优先通道，排在数据之后 |
+| `isDNSPacket`（p2p/p2p.go:939） | IPIP 里的 DNS 不进 dnsQueue |
+| `frame.FlowKey` → 入站 worker（p2p/p2p.go:1789） | 4 个 worker 只用到 1 个 |
+| stripe 亲和（`flowHash32`） | 有 lane 时，所有 IPIP 流落同一条 lane |
+
+浏览器并发约 6 条连接时，它们挤在同一个 DRR 队列里，ACK 也被数据延迟，正好会加剧上表中的定时器类误重传。curl 单连接测试会低估这一影响。
+
+#### 3.10.2 改动一：撤销 h_tunnel 有序模式（手动改，不做 git revert）
+
+**删除**：
+
+- 客户端 `dialer/htunnel_direct.go`：
+  - 删除 `enqueueOrdered`、`orderedDispatchLoop`、`ordRelease`、`ordFlowBuf`，以及全部 `ord*` 字段、`maxOrdBatchFrames`/`maxOrdBatchBytes`/`ordPendingCap`，`Close` 里的 `ordClosed` 处理一并删除。
+  - `Send`：数据帧直接走 `sendFrame`。
+  - `SendBatch`：恒走"整批一个 POST、sendSem 16 路并发"路径（即现 allow-flow-reorder 分支）。
+  - `recvLoop`：不再发送 X-Q/X-N 头。
+- `dialer/htunnel.go`：删除 `HeaderPipeIndex`/`HeaderPipeCount` 常量。
+- 服务端 `server/htunnel.go` + `server/htunnel_mesh.go`：
+  - 删除 X-N/X-Q 解析，删除 `pipeCnt`/`pipeQ`/`pipeWait`/`pipeRR` 与按流分管道逻辑（`routeFrameLocked` 的 pipe 分支、pipe waiter）。
+  - 删除 `meshMsg.flowKey`/`flowKeyOf`/`flowKeyAny`。
+  - 数据帧只剩一条 FIFO 数据队列，所有 GET waiter 平等领取。
+- `config.HTunnelConfig`：删除 `AllowFlowReorder` 字段与 `GetAllowFlowReorder()`。
+  - `HTunnel` 配置接线（§3.9 R1）保留，pool-size、get-slots 等仍在用。
+  - 通道启动日志去掉 `allowFlowReorder=`。
+- 测试：
+  - 删除 `TestMeshDispatch_PingsRoundRobinOnPipes`、`TestMeshDispatch_PipeIsolation`、`TestMeshDispatch_WildcardBeforePipeCount`。
+  - 其余 dispatch/CoDel 测试改为单队列语义。
+
+**明确保留（与保序开关无关，或属于零成本的按流哈希）**：
+
+- §3.8 F1/F3：控制帧 `ctrlQ` 最优先、按字节合批、无竞态交接。ping 仍走数据队列，同 FIFO 排队，保持"ping 度量数据路径"的语义。
+- §3.9 F2：`meshCtrlOut` 控制旁路、8MiB 硬上限背压、CoDel（作用于单一数据队列）、`Close` 关通道。
+- §3.9 R2（删除死代码 `SendToNode`）的结论不变。
+- §3.6 / §3.9 R4：stripe 按流亲和与 lane 满改钉 primary。
+- f0fb969 / §3.9 R5：入站每个 worker 一条队列、按流钉分配、有界等待。
+- `frame.FlowKey`：入站 worker 仍在用。
+
+**与旧版本混跑**：
+- 旧客户端发来的 X-N/X-Q 头，新服务端忽略，按 FIFO 处理。
+- 新客户端不发头，旧服务端 `pipeCnt==0`，走 wildcard 队列。
+- 两个方向都兼容，可逐节点升级。
+- 未升级的旧客户端（默认有序）仍保持 POST 停等，升级后消除。
+
+**数据库残留**：QG、DESKW 的 mesh 配置里有 `htunnel: {"allow-flow-reorder": true}`。字段删除后 JSON 解码会忽略它，不影响运行。部署后 PUT `{"htunnel": null}` 清理。
+
+#### 3.10.3 改动二：IPIP 按内层包分类
+
+新增 `frame.InnerPacket(pkt []byte) []byte`：
+
+1. 外层不是 IPv4，或协议号不是 4 → 返回 `pkt` 本身。
+2. 外层是分片（MF=1 或片偏移≠0）→ 返回 `pkt` 本身（非首片没有内层头）。
+3. 外层 IHL 非法，或长度不足以容纳内层 IPv4 头 → 返回 `pkt` 本身。
+4. 内层不是 IPv4 → 返回 `pkt` 本身。
+5. 否则返回 `pkt[外层IHL:]`。只解一层，不递归。
+
+以下函数入口先调用 `InnerPacket` 再按原逻辑解析：
+
+| 函数 | 改后效果 |
+|---|---|
+| `frame.FlowKey` | IPIP 按内层五元组分 worker |
+| `p2p.flowHash32` | IPIP 按内层五元组分 DRR 队列和 stripe lane |
+| `p2p.isACKPacket` | IPIP 里的纯 ACK 进 ackQueue（已被 3.10.6 改动三取代：ackQueue 与 `isACKPacket` 删除） |
+| `p2p.isDNSPacket` | IPIP 里的 DNS 进 dnsQueue |
+
+不改封装/解封装、不改 netstack、不改路由，只改发送侧和接收侧的分类。
+
+**单测**：
+- 内层五元组不同的两个 IPIP 包，`FlowKey`/`flowHash32` 结果不同。
+- 同一内层流的多个 IPIP 包结果相同。
+- IPIP 内层纯 ACK → `isACKPacket=true`；IPIP 内层带载荷 → false。
+- IPIP 内层 UDP 53 → `isDNSPacket=true`。
+- 外层分片、截断包、内层非 IPv4 → 回退到外层分类，且不越界。
+
+#### 3.10.4 入站 worker 数（评估，本节不改）
+
+- `meshInboundWorkers=4` 来自 885699d（2026-10-20）的经验值：1 个 worker 时出现 `channelDrops=161`，改为 4 个后归零。它不是按 CPU 核数或单包耗时推导的。
+- 每个 worker 的工作：`HandleMeshFrame` → 注入 gVisor（TCP 段入端点队列，由 gVisor 自己的协程处理）。中继转发出口是非阻塞入队，单包开销小。
+- 2026-11-06 实测：QG、JF、DESKW 的 `meshInboundDrops` 与各 peer DataDrops 均为 0。按当前 ht 链路几 MB/s 的量级，4 个 worker 不是瓶颈。
+- 已知局限：
+  - 任意两条流有 1/4 概率共用同一个 worker，消费阻塞时会互相队头阻塞。当前无消费阻塞证据。
+  - IPIP 聚到 1 个 worker 的问题由改动二解决。
+- 结论：维持 4 个。若以后出现入站丢包，或要按核数自适应（如 `clamp(NumCPU, 2, 8)`），另行立项。
+
+#### 3.10.5 验收
+
+1. `go vet` 与 `go test -race`（frame/p2p/server/dialer/config/mesh）通过，含 3.10.3 新增单测。
+2. 部署 JF、QG、DESKW（按部署纪律，各环境操作前与用户确认），确认版本号。验证 `/api/mesh` 中 `channelDropStats` 全 0，日志零 `link dead`。
+3. curl 单连接取 elephant 静态资源：app.js ≤ 12.1s、chunk-vendors.js ≤ 72.5s（不劣于允许乱序模式基线）。同时抓包统计误重传与触发分类，与 64 次基线对比。
+4. 用户浏览器访问 `https://10.193.131.25/elephant/default/#/login`，主观加载明显改善。
+5. QG→JF V2 8 流 × 3 轮回归：零会话重建，聚合吞吐不低于 §3.8 结果（3.9~5.6MB/s）。
+
+**回滚**：开关已删除，只能按纪律退回上次运行的二进制。
+
+#### 3.10.6 改动三：去掉 ackQueue + 写循环合批（2026-11-06 追加，用户批准）
+
+**证据**（改动一、二部署 JF/QG/DESKW 后，v0.8.0-329，curl 单连接，排除浏览器并发干扰）：
+
+| 指标 | 基线（允许乱序，旧版） | 改动一+二 |
+|---|---|---|
+| app.js | 12.1s | 23.7s / 26.5s / 19.4s |
+| 重传 / 其中定时器触发 | 64 / 33 | 102 / 82、113 / 102 |
+| 在途段 p50 | 3 | 2 |
+| 内层 RTT p50 | 56ms | 55ms |
+
+- 允许乱序模式下 HEAD 本就不发 X-N/X-Q、不走有序队列，改动一对该场景行为不变；行为差异来自改动二。
+- 改动二让 IPIP 内的纯 ACK 进入 ackQueue。`peerWriteLoop` 对 controlCh/dnsQueue/ackQueue 逐帧 `writeSingleFrame` → `Send`，在 h_tunnel 上即一个 ACK 一个 POST：QG→JF 测试期间 80~115 POST/s（空闲 6~10/s），而改动二之前 IPIP ACK 在 DRR 里与数据合批。
+- QG→JF POST 往返 p50 16ms、p99 19ms，sendSem 16 未打满，单帧 POST 是否为变慢主因未实锤；本改动恢复改动二之前的 ACK 发送方式，同时消除逐帧 POST，部署后复测验证。
+
+**3a 去掉 ackQueue**（在 p2p 写路径，对所有承载协议生效：直连 TCP、trojan 等流式代理、h_tunnel、udp-leg、stripe）：
+- 删除 `Peer.ackQueue`、`ackQueueDrops`（含三处初始化、`peerWriteLoop` 两处 select 分支、`channelPriorityName` 分支、丢包合计）。
+- 删除 `isACKPacket` 及其单测；纯 ACK 与其它数据一样按 `flowHash32` 进 DRR。
+- 理由：ACK 与数据方向相反、哈希到不同 DRR 队列；ACK 流稀疏，DRR 每轮都会服务到它，天然低延迟（同 fq_codel 的稀疏流原理）。共享 ackQueue（256 深 FIFO）反而跨流队头阻塞，且只能逐帧发送。
+
+**3b 写循环合批（控制/DNS/数据同批，优先者排前）**：
+- `peerWriteLoop` 阻塞等到任一帧后，非阻塞取尽当时已就绪的 controlCh、dnsQueue、drrOutput，按"控制 → DNS → 数据"顺序组成一批，一次 `SendBatch` 发出；上限沿用 `maxBatchFrames=64`（按优先序填，满即止）。优先级只体现在取帧顺序和批内位置，不再为控制帧/DNS 单独发一次 POST。批内仅 1 帧时仍走 `Send`（带原 isControl）。
+- `frame.Frame` 新增 `Control bool`，写循环按 `req.isControl` 填写，使批次保留控制语义：
+  - `server.meshChannelTransport.SendBatch`：`Control` 帧进 `meshCtrlOut`（`meshMsg.control=true`），保持 §3.8 控制帧优先投递（pong 不饿死）；其余进 `meshOut`。
+  - `htunnelDirectTransport`、`streamTransport`：整批按批内顺序写出（控制帧已在最前），无需区分。
+  - `udpLegTransport`：已按帧类型逐帧分流（gossip 恒 TCP，ping/pong、mesh 数据按腿状态），混合批次行为与逐帧 `Send` 一致；`stripeTransport`：非 mesh 包本就不可拆分、走主通道。
+- 出口健康计数（`framesSent`、sojourn）只统计非控制帧，与现逐帧路径一致。
+- **GET 方向已是同一规则，无需改**：服务端 `buildBatchLocked`（server/htunnel_mesh.go:251）每个 GET 响应先取 ctrlQ 全部控制帧，再按字节上限取 dataQ，一次响应带回（§3.8）。3b 之后 JF 写循环的批次按"控制 → DNS → 数据"进入 meshCtrlOut/meshOut，DNS 在 dataQ 中位于同批数据之前。
+
+**单测**：
+- 纯 ACK 入队后进入 DRR 数据队列（不再有 ackQueue）。
+- 写循环：控制、DNS、数据同时就绪时合成一次 `SendBatch`，顺序为控制 → DNS → 数据，控制帧 `Control=true`。
+- `meshChannelTransport.SendBatch`：`Control` 帧进 `meshCtrlOut`，其余进 `meshOut`。
+
+**验收**：同 3.10.5 第 1~3、5 条（curl app.js ≤ 12.1s、chunk-vendors.js ≤ 72.5s，抓包统计重传并与 64 次基线对比；QG→JF POST 速率回落）。部署 JF/QG/DESKW 前与用户确认。
 
 ## 四、不做的事
 

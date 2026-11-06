@@ -1435,12 +1435,6 @@ type HTunnelConfig struct {
 	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`         // default 1s
 	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`         // default 30s
 	DefaultWaitTime int `yaml:"default-wait-time,omitempty" json:"default-wait-time,omitempty"` // default 5s
-
-	// AllowFlowReorder disables per-flow ordered delivery on h_tunnel
-	// channels (pre-optimization behavior: frames of one inner flow may
-	// travel on multiple concurrent POSTs / GET chains). Set true to
-	// roll back without a binary downgrade. Default false = ordered.
-	AllowFlowReorder bool `yaml:"allow-flow-reorder,omitempty" json:"allow-flow-reorder,omitempty"`
 }
 
 // GetPoolSize returns the connection pool size with default fallback.
@@ -1465,12 +1459,6 @@ func (c *HTunnelConfig) GetMaxBatchSize() int {
 		return 512 * 1024 // 512KB
 	}
 	return c.MaxBatchSize
-}
-
-// GetAllowFlowReorder reports whether per-flow ordered delivery is disabled.
-// Default false (ordered delivery on).
-func (c *HTunnelConfig) GetAllowFlowReorder() bool {
-	return c != nil && c.AllowFlowReorder
 }
 
 // GetHeartbeatInterval returns the heartbeat interval with default fallback.

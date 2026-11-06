@@ -82,7 +82,7 @@ func init() {
 
 // linkStats holds persistent statistics for a link (survives P2P reconnections).
 type linkStats struct {
-	dataDrops      uint64 // total data queue drops (dns + ack + data[256])
+	dataDrops      uint64 // total data queue drops (dns + budget + data[256])
 	controlChDrops uint64
 }
 
@@ -230,6 +230,7 @@ type writeReq struct {
 	frameType   byte
 	data        []byte
 	isControl   bool
+	dns         bool      // set by enqueueWriteReq for dnsQueue frames
 	enqueueTime time.Time // set by enqueueWriteReq; used for sojourn measurement (Phase B)
 }
 
@@ -393,7 +394,6 @@ type Peer struct {
 	transportMu      sync.Mutex
 	stopped          bool // set under transportMu by stopPeer; StartPeer re-checks after dial
 	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
-	ackQueue         chan writeReq // TCP ACK packets (high priority)
 	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
 	drrOutput        chan writeReq // DRR scheduler output channel
 	controlCh        chan writeReq // gossip/ping/pong priority queue
@@ -424,7 +424,6 @@ type Peer struct {
 
 	// Channel overflow statistics (atomic counters)
 	dnsQueueDrops       uint64 // Frames dropped due to dnsQueue full
-	ackQueueDrops       uint64 // Frames dropped due to ackQueue full
 	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
 	controlChDrops      uint64 // Frames dropped due to controlCh full
 	dataBudgetDrops     uint64 // Frames dropped due to per-peer data byte budget exhausted (design §3.1)
@@ -660,26 +659,20 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		return true
 	}
 
-	// writeBatch writes multiple data frames as a batch.
+	// writeBatch writes a batch (control → DNS → data) as one SendBatch.
 	writeBatch := func(batch []writeReq) bool {
 		if len(batch) == 0 {
 			return true
 		}
 		if len(batch) == 1 {
-			return writeSingleFrame(batch[0], false)
+			return writeSingleFrame(batch[0], batch[0].isControl)
 		}
 
-		// Encode frames for batch sending
 		frames := make([]frame.Frame, len(batch))
 		for i, req := range batch {
-			frames[i] = frame.Frame{Type: req.frameType, Payload: req.data}
+			frames[i] = frame.Frame{Type: req.frameType, Payload: req.data, Control: req.isControl}
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s batch=%d", peer.ID, len(batch))
-				// Diagnostic: log first 20 bytes of each packet to identify IPIP
-				if len(req.data) >= 20 {
-					util.LogModuleDebug("p2p", "[P2P-WRITE-DIAG] peer=%s len=%d ver=%d proto=%d bytes=%x", 
-						peer.ID, len(req.data), req.data[0]>>4, req.data[9], req.data[:20])
-				}
 			}
 		}
 
@@ -694,103 +687,79 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			return false
 		}
 
+		dataFrames := 0
 		for _, req := range batch {
 			if req.frameType == frame.FrameMeshPacket {
 				mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s batch=%d", peer.ID, len(batch))
 			}
+			if !req.isControl {
+				dataFrames++
+			}
 		}
-		// Egress health (Phase B): batch frames are all data-path.
+		// Egress health (Phase B): only non-control frames count.
 		peer.egressMu.Lock()
-		peer.framesSent += uint64(len(batch))
+		peer.framesSent += uint64(dataFrames)
 		peer.egressMu.Unlock()
 		for _, req := range batch {
-			peer.recordSojourn(req)
+			if !req.isControl {
+				peer.recordSojourn(req)
+			}
 		}
 		return true
 	}
 
 	for {
-		// Fast path: control frames first, non-blocking.
-		select {
-		case req := <-peer.controlCh:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
-			continue
-		default:
-		}
-
-		// Fast path: DNS packets (UDP port 53), non-blocking.
-		select {
-		case req := <-peer.dnsQueue:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
-			continue
-		default:
-		}
-
-		// Fast path: TCP ACK packets, non-blocking.
-		select {
-		case req := <-peer.ackQueue:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
-			continue
-		default:
-		}
-
-		// Block until we have something to send.
-		// Priority: controlCh > dnsQueue > ackQueue > drrOutput (data).
-		// No default branch — select blocks until data is available.
+		var first writeReq
 		select {
 		case <-peer.stopCh:
 			return
-		case req := <-peer.controlCh:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
-		case req := <-peer.dnsQueue:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
-		case req := <-peer.ackQueue:
-			if !writeSingleFrame(req, req.isControl) {
-				return
-			}
+		case first = <-peer.controlCh:
+		case first = <-peer.dnsQueue:
 		case req, ok := <-peer.drrOutput:
 			if !ok {
 				return
 			}
-			// Diagnostic: log what we read from drrOutput
-			if req.frameType == frame.FrameMeshPacket && len(req.data) >= 20 {
-				util.LogModuleDebug("p2p", "[P2P-READ-DIAG] peer=%s len=%d ver=%d proto=%d", 
-					peer.ID, len(req.data), req.data[0]>>4, req.data[9])
-			}
-			// Coalesce more data frames from drrOutput (non-blocking)
-			batch := make([]writeReq, 0, maxBatchFrames)
-			batch = append(batch, req)
-			for len(batch) < maxBatchFrames {
-				select {
-				case more := <-peer.drrOutput:
-					batch = append(batch, more)
-				default:
-					goto sendBatch
-				}
-			}
-		sendBatch:
-			// Diagnostic: log batch contents before writing
-			for _, b := range batch {
-				if b.frameType == frame.FrameMeshPacket && len(b.data) >= 20 {
-					util.LogModuleDebug("p2p", "[P2P-BATCH-DIAG] peer=%s len=%d ver=%d proto=%d batchSize=%d",
-						peer.ID, len(b.data), b.data[0]>>4, b.data[9], len(batch))
-				}
-			}
-			if !writeBatch(batch) {
-				return
-			}
+			first = req
+		}
+		if !writeBatch(collectWriteBatch(peer, first, maxBatchFrames)) {
+			return
 		}
 	}
+}
+
+// collectWriteBatch adds the frames already waiting on the peer queues to
+// first, ordered control → DNS → data, up to max frames. Priority shows up as
+// dequeue order and position within the batch, never as a separate write.
+func collectWriteBatch(peer *Peer, first writeReq, max int) []writeReq {
+	var ctrl, dns, data []writeReq
+	switch {
+	case first.isControl:
+		ctrl = append(ctrl, first)
+	case first.dns:
+		dns = append(dns, first)
+	default:
+		data = append(data, first)
+	}
+	n := 1
+	drain := func(ch chan writeReq, dst []writeReq) []writeReq {
+		for n < max {
+			select {
+			case req := <-ch:
+				dst = append(dst, req)
+				n++
+			default:
+				return dst
+			}
+		}
+		return dst
+	}
+	ctrl = drain(peer.controlCh, ctrl)
+	dns = drain(peer.dnsQueue, dns)
+	data = drain(peer.drrOutput, data)
+	batch := make([]writeReq, 0, n)
+	batch = append(batch, ctrl...)
+	batch = append(batch, dns...)
+	return append(batch, data...)
 }
 
 // drrLoop runs the DRR fair scheduler in a dedicated goroutine.
@@ -856,14 +825,13 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	// Select channel based on priority:
 	// 1. Control frames -> controlCh (highest priority)
 	// 2. DNS packets (UDP port 53) -> dnsQueue (second highest)
-	// 3. TCP ACK packets -> ackQueue (third highest)
-	// 4. All other data -> dataQueues[flowHash] (DRR fair scheduling)
-	// The DNS/ACK classifiers parse the payload as an IP header, so they
+	// 3. All other data -> dataQueues[flowHash] (DRR fair scheduling); pure
+	//    TCP ACKs ride here too: their sparse queue is served every DRR round.
+	// The DNS classifier parses the payload as an IP header, so they
 	// must only run on mesh data frames — JSON control payloads riding the
 	// data queue (Phase C pings) would otherwise be misclassified.
 	var ch chan writeReq
 	isDNS := false
-	isACK := false
 	dataQueueIdx := -1
 	need := int64(0) // data-queue byte reservation (set in the data branch)
 
@@ -873,9 +841,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	} else if isMeshPacket && isDNSPacket(req.data) {
 		ch = peer.dnsQueue
 		isDNS = true
-	} else if isMeshPacket && isACKPacket(req.data) {
-		ch = peer.ackQueue
-		isACK = true
+		req.dns = true
 	} else {
 		// All data packets: use DRR fair scheduling
 		dataQueueIdx = peer.drrScheduler.hashFlow(req.data)
@@ -925,8 +891,6 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 			atomic.AddUint64(&peer.controlChDrops, 1)
 		} else if isDNS {
 			atomic.AddUint64(&peer.dnsQueueDrops, 1)
-		} else if isACK {
-			atomic.AddUint64(&peer.ackQueueDrops, 1)
 		} else if dataQueueIdx >= 0 {
 			atomic.AddUint64(&peer.dataQueueDrops[dataQueueIdx], 1)
 		}
@@ -935,8 +899,10 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	}
 }
 
-// isDNSPacket checks if a mesh packet contains UDP traffic to/from port 53 (DNS)
+// isDNSPacket checks if a mesh packet contains UDP traffic to/from port 53
+// (DNS); IPIP is classified by its inner packet.
 func isDNSPacket(data []byte) bool {
+	data = frame.InnerPacket(data)
 	// Need at least IPv4 header (20 bytes) + UDP header (8 bytes)
 	if len(data) < 28 {
 		return false
@@ -966,54 +932,6 @@ func isDNSPacket(data []byte) bool {
 	return srcPort == 53 || dstPort == 53
 }
 
-// isACKPacket checks if a packet contains a pure TCP ACK (ACK set, no
-// SYN/FIN/RST, zero payload). Only pure ACKs are prioritized; small data
-// packets (HTTP requests, TLS records, SSH keystrokes) take the normal data
-// path so they are not stranded behind cross-flow HoL in the shared ackQueue.
-func isACKPacket(data []byte) bool {
-	// Need at least IPv4 header (20 bytes) + TCP header (20 bytes min)
-	if len(data) < 40 {
-		return false
-	}
-	
-	// Check IPv4 version
-	if data[0]>>4 != 4 {
-		return false
-	}
-	
-	// Check protocol is TCP (6)
-	if data[9] != 6 {
-		return false
-	}
-	
-	// Get IP header length
-	ihl := int(data[0]&0x0F) * 4
-	if ihl < 20 || len(data) < ihl+20 {
-		return false
-	}
-	
-	// TCP data offset (header length in 32-bit words)
-	tcpDataOffset := int(data[ihl+12]>>4) * 4
-	if tcpDataOffset < 20 {
-		return false
-	}
-	
-	// TCP flags are at offset 13 in TCP header
-	flags := data[ihl+13]
-	// Must have ACK bit set
-	if flags&0x10 == 0 {
-		return false
-	}
-	// Exclude SYN, FIN, RST (pure ACK or ACK+PSH only)
-	if flags&0x02 != 0 || flags&0x01 != 0 || flags&0x04 != 0 {
-		return false
-	}
-	
-	// Pure ACK only: zero-length TCP payload
-	tcpPayloadLen := len(data) - ihl - tcpDataOffset
-	return tcpPayloadLen == 0
-}
-
 // hashFlow computes a flow hash for fair scheduling using Jenkins one-at-a-time.
 // Uses 5-tuple (srcIP, dstIP, protocol, srcPort, dstPort) for TCP/UDP,
 // falls back to 3-tuple (srcIP, dstIP, protocol) for other protocols.
@@ -1031,8 +949,10 @@ func hashFlowWithSalt(salt uint32, data []byte) int {
 
 // flowHash32 is the full 32-bit Jenkins one-at-a-time flow hash;
 // hashFlowWithSalt masks it to 8 bits for DRR queue indexing, the stripe
-// wrapper keeps the full width for rendezvous scoring (design §六).
+// wrapper keeps the full width for rendezvous scoring (design §六). IPIP is
+// hashed by its inner packet so tunneled flows spread like native ones.
 func flowHash32(salt uint32, data []byte) uint32 {
+	data = frame.InnerPacket(data)
 	if len(data) < 20 {
 		return 0
 	}
@@ -1084,8 +1004,6 @@ func channelPriorityName(ch chan writeReq, peer *Peer) string {
 		return "control"
 	} else if ch == peer.dnsQueue {
 		return "dns"
-	} else if ch == peer.ackQueue {
-		return "ack"
 	}
 	// Check if it's a data queue
 	for i := range peer.dataQueues {
@@ -1146,7 +1064,6 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		LastSeen:       time.Now(),
 		transport:      t,
 		dnsQueue:       make(chan writeReq, 512),
-		ackQueue:       make(chan writeReq, 256),
 		dataQueues:     dataQueues,
 		drrOutput:      make(chan writeReq, 512),
 		controlCh:      make(chan writeReq, 512),
@@ -1393,7 +1310,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		proxy:        proxy,
 		Seq:          seq,
 		dnsQueue:     make(chan writeReq, 512),
-		ackQueue:     make(chan writeReq, 256),
 		dataQueues:   dataQueues,
 		drrOutput:    make(chan writeReq, 512),
 		controlCh:    make(chan writeReq, 512),
@@ -1540,7 +1456,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			}
 		}
 		peer.dnsQueue = make(chan writeReq, 512)
-		peer.ackQueue = make(chan writeReq, 256)
 		peer.controlCh = make(chan writeReq, 512)
 		peer.drrOutput = make(chan writeReq, 512)
 		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -2471,10 +2386,9 @@ func (p *Peer) sampleEgressWindow() (dropRate, sojournMs float64) {
 }
 
 // GetLinkQualityStats returns ACK-based link quality stats for a peer by nodeID.
-// totalDataDrops returns the sum of all data queue drops (dns + ack + data[256]).
+// totalDataDrops returns the sum of all data queue drops (dns + budget + data[256]).
 func (p *Peer) totalDataDrops() uint64 {	var total uint64
 	total += atomic.LoadUint64(&p.dnsQueueDrops)
-	total += atomic.LoadUint64(&p.ackQueueDrops)
 	total += atomic.LoadUint64(&p.dataBudgetDrops)
 	for i := range p.dataQueueDrops {
 		total += atomic.LoadUint64(&p.dataQueueDrops[i])

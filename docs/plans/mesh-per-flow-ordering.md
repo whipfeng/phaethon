@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | 实施中：3.1-3.3+3.6 已部署；3.2 因 dispatcher 启动即 legacy 的判定 bug 未生效（2026-11-06 二轮复测实锤），修复待部署复测 |
+| 状态 | 已部署（v0.8.0-325-g2361df1）；但**残余乱序未消**（QG rcv_ooopack ~45%），滴流仍在（单流 173~726KB/s）——三钉死代码在场 ≠ 每个环节运行时生效，残余乱序源定位转 [v5 取证计划](mesh-reorder-forensics-v5.md)（2026-11-06 已批准） |
 | 关联 | [elephant 下载滴流专项 v4](../issues/elephant-download-dribble.md)（根因实锤）、[发送端取证计划](mesh-tcp-reorder-forensics.md)（已完成） |
 
 ## 一、问题（一句话）

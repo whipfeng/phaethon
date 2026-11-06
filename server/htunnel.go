@@ -67,22 +67,15 @@ type htChannel struct {
 	getWaiters  chan *meshWaiter // waiting GET requests (for concurrent GET support)
 	htCfg       *config.HTunnelConfig
 
-	// Per-flow ordered GET dispatch (mesh-per-flow-ordering §3.2):
-	// frames are routed by flow key onto per-pipe queues and only ever
-	// served to a GET waiter of the same pipe, so one inner flow rides one
-	// serial GET chain. pipeCnt == 0 = legacy unordered dispatch.
-	pipeMu     sync.Mutex
-	pipeCnt    int             // client-announced pipe count (X-N), 0 = legacy
-	pipeQ      [][]meshMsg     // queued frames per pipe (index = flowKey % pipeCnt)
-	pipeWait   [][]*meshWaiter // registered waiters per pipe
-	pipeAnyQ   []meshMsg       // wildcard queue: data before X-N arrived
-	pipeAnyW   []*meshWaiter   // wildcard waiters (GETs without a valid pipe)
-	ctrlQ      []meshMsg       // p2p control frames, served first to any waiter (§3.8)
-	pipeRR     int             // round-robin pipe for unkeyed data frames (pings)
-	dataBytes  int             // wire bytes queued in pipeAnyQ + pipeQ (§3.9 hard cap)
-	pipeCodel  []codel         // per-pipe AQM state, grown lazily with pipeQ
-	anyCodel   codel           // AQM state of pipeAnyQ
-	codelDrops uint64          // frames dropped by AQM (logged, throttled)
+	// GET delivery state (§3.8/§3.9 F2), guarded by dispMu: control frames
+	// are served first to any waiter; data rides one FIFO.
+	dispMu     sync.Mutex
+	ctrlQ      []meshMsg     // p2p control frames, served first to any waiter (§3.8)
+	dataQ      []meshMsg     // data frames awaiting a GET, FIFO
+	waiters    []*meshWaiter // registered GET waiters
+	dataBytes  int           // wire bytes queued in dataQ (§3.9 hard cap)
+	dataCodel  codel         // AQM state of dataQ
+	codelDrops uint64        // frames dropped by AQM (logged, throttled)
 
 	// Cached results for step==0 retry
 	lastReadData []byte

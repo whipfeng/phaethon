@@ -13,6 +13,9 @@ import (
 type Frame struct {
 	Type    byte
 	Payload []byte
+	// Control marks a control frame inside a batch (same meaning as Send's
+	// isControl); transports with a control fast path must honor it.
+	Control bool
 }
 
 // FrameTransport is the P2P frame transport abstraction with datagram

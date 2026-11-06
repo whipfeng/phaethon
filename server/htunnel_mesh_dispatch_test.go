@@ -3,7 +3,9 @@ package server
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
+	"phaethon/config"
 	"phaethon/frame"
 )
 
@@ -177,5 +179,121 @@ func TestMeshDispatch_WildcardBeforePipeCount(t *testing.T) {
 	}
 	if len(b) != 3 {
 		t.Fatalf("got %d frames, want 3", len(b))
+	}
+}
+
+func TestCodel_NoDropBelowTarget(t *testing.T) {
+	var c codel
+	for now := time.Second; now < 5*time.Second; now += time.Millisecond {
+		if c.shouldDrop(codelTarget-time.Millisecond, now, 100) {
+			t.Fatalf("dropped below target at %v", now)
+		}
+	}
+}
+
+func TestCodel_DropsStandingQueueSparsely(t *testing.T) {
+	var c codel
+	drops := 0
+	start := time.Second
+	for now := start; now < start+3*time.Second; now += time.Millisecond {
+		if c.shouldDrop(200*time.Millisecond, now, 100) {
+			if drops == 0 && now-start < codelInterval {
+				t.Fatalf("first drop at %v, before one interval", now-start)
+			}
+			drops++
+		}
+	}
+	// ~3s of standing queue: control law gives a handful of drops, not a flood.
+	if drops < 3 || drops > 40 {
+		t.Fatalf("drops = %d, want sparse (3..40)", drops)
+	}
+}
+
+func TestCodel_NeverDropsNearlyEmptyQueue(t *testing.T) {
+	var c codel
+	for now := time.Second; now < 3*time.Second; now += time.Millisecond {
+		if c.shouldDrop(time.Second, now, 1) {
+			t.Fatal("dropped with backlog < 2")
+		}
+	}
+}
+
+// Stale frames are dropped by AQM but never pings, and the batch is never empty.
+func TestMeshDispatch_AQMDropsOnlyMeshPackets(t *testing.T) {
+	ch := newDispatchTestChannel(1)
+	for i := 0; i < 50; i++ {
+		ch.routeFrameLocked(dataMsg(0, i, 100))
+		ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPing, payload: []byte("ping"), flowKey: 0})
+	}
+	for i := range ch.pipeQ[0] {
+		ch.pipeQ[0][i].enq = meshNow() - time.Second // sojourn far above target
+	}
+	ch.pipeCodel = []codel{{firstAbove: meshNow() - time.Second}} // above target for over an interval
+	w := newTestWaiter(0)
+	ch.addWaiterLocked(w)
+	ch.flushLocked(1 << 20)
+	b := takeBatch(t, w)
+	pings := 0
+	for _, m := range b {
+		if m.frameType == frame.FrameLinkPing {
+			pings++
+		}
+	}
+	if pings != 50 {
+		t.Fatalf("pings delivered = %d, want 50", pings)
+	}
+	if ch.codelDrops == 0 || len(b)+int(ch.codelDrops) != 100 {
+		t.Fatalf("delivered %d + dropped %d, want sum 100 with drops > 0", len(b), ch.codelDrops)
+	}
+	if ch.dataBytes != 0 {
+		t.Fatalf("dataBytes = %d after full drain", ch.dataBytes)
+	}
+}
+
+func TestMeshDispatch_DataBytesAccounting(t *testing.T) {
+	ch := newDispatchTestChannel(2)
+	ch.routeFrameLocked(dataMsg(0, 0, 1000))
+	ch.routeFrameLocked(dataMsg(1, 1, 500))
+	ch.routeFrameLocked(meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), control: true})
+	if want := 1003 + 503; ch.dataBytes != want {
+		t.Fatalf("dataBytes = %d, want %d (control excluded)", ch.dataBytes, want)
+	}
+	w := newTestWaiter(0)
+	ch.addWaiterLocked(w)
+	ch.flushLocked(1 << 20)
+	takeBatch(t, w)
+	if ch.dataBytes != 503 {
+		t.Fatalf("dataBytes = %d after pipe 0 drained, want 503", ch.dataBytes)
+	}
+}
+
+// Past the byte cap the dispatcher stops reading data but control frames
+// still reach a GET.
+func TestMeshDispatchLoop_CapPausesDataNotControl(t *testing.T) {
+	ch := &htChannel{
+		closed:      make(chan struct{}),
+		meshOut:     make(chan meshMsg, 4),
+		meshCtrlOut: make(chan meshMsg, 4),
+		getWaiters:  make(chan *meshWaiter, 4),
+	}
+	ch.dataBytes = htMeshMaxQueuedBytes
+	s := &HTunnelServer{BaseServer: BaseServer{Mapping: &config.Mapping{Name: "t"}}}
+	go s.meshDispatchLoop(ch)
+	defer close(ch.closed)
+
+	ch.meshOut <- dataMsg(0, 0, 10)
+	ch.meshCtrlOut <- meshMsg{frameType: frame.FrameLinkPong, payload: []byte("pong"), control: true}
+	w := newTestWaiter(-1)
+	ch.getWaiters <- w
+	select {
+	case b := <-w.batch:
+		if len(b) != 1 || !b[0].control {
+			t.Fatalf("batch = %+v, want only the pong", b)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("control frame not delivered while data paused")
+	}
+	if len(ch.meshOut) != 1 {
+		t.Fatalf("meshOut len = %d, data should stay unread past the cap", len(ch.meshOut))
 	}
 }

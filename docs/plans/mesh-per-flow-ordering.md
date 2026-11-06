@@ -100,6 +100,37 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 
 **验收结果（JF 部署 v0.8.0-327-gb1834f9，2026-11-06 19:49）**：✅ 通过。3 轮 × 8 流 × 8.18MB 全部完整下完，聚合 4.54 / 3.90 / 5.55 MB/s（修复前 V2 ~2.65MB/s 或 3 次中 2 次会话重建）；QG 日志（info 级）部署后零 `link dead`/MGMS_HT 会话重建，JF 侧 qg/qgw peer 探测样本连续累积（461/448）、srtt ~22ms。单流仍有 0.49~2.1MB/s 的离散，残余排队/乱序归 F2 与 v5 取证继续跟踪。
 
+### 3.9 代码审查问题修复 + F2 排队治理（2026-11-06，用户已批准"都按合理的修"）
+
+对 §3.1~§3.8 落地代码做审查，发现以下问题，逐项修复（不改协议，混合版本共网兼容）：
+
+**R1. 回滚开关不生效（§3.5 失实）**：`HTunnelConfig` 从未接入任何配置源——服务端 `HTunnelServer.htConfig` 与客户端 `dialP2PDirect` 的 `htConfig` 恒为 nil，`AllowFlowReorder` 永远 false，"置 true 秒级回滚"不成立。
+- 改法：`MeshConfig` 增 `HTunnel *HTunnelConfig`（json/yaml `htunnel`，随 mesh-config 桶持久化）；`config` 包持有进程级当前值（`SetHTunnel`/`HTunnel()`，原子指针）。main 启动加载 mesh 配置后、`OnMeshConfigUpdate` 热更新时写入；admin `PUT /api/mesh/config` 接受 `htunnel` 字段（`null` = 清除回默认）。
+- 取值时机：客户端每次 `dialP2PDirect` 快照一次、服务端每个 mesh channel 创建时快照一次——同一通道内模式恒定，开关只影响新建通道（存量通道随会话重建自然切换）。
+
+**R2. §3.3 路由钉死落在死代码里**：每流 pin 缓存实现在 `MeshManager.SendToNode`，而该函数全仓无调用方；真实转发路径 `NextHopLink` 直接取 `bestPaths[target]` 的单一 NextHop/LinkNIC，在同一路由快照内对所有流确定不变——§3.3 的"每流生命周期单路径"由现有构造天然满足（快照切换即全体换路，与 §3.3 接受的换路瞬态同义）。
+- 改法：删除 `SendToNode`/`findNextHopsForNode` 与 pin 缓存（`flowRoutePin*`、`SetFlowRoutePin`、`dropFlowRoutePins`、`linkSelectIdx`），删除 `MeshConfig.AllowFlowRouteChange` 开关及 main 接线；§3.3/§3.5 原文保留作历史，以本条为准。
+
+**R3. §3.1 有序发送队列无界**：`enqueueOrdered` 只追加不设限，下游 POST 慢时 `ordPending` 可无限膨胀（内存 + 排队时延双失控），且绕开了 p2p 层对 transport 背压的预期。
+- 改法：按字节加界（`ordPendingCap` = 4MiB，全通道合计）。超界时 `enqueueOrdered` 在 `sync.Cond` 上阻塞，直到 dispatcher 取走批次释放字节或通道关闭——背压回传 p2p peerWriteLoop/DRR（与其他 transport 的阻塞写同语义）。单次入队允许越界一批，避免大批次永不可入。控制帧不经此队列，不受影响。
+
+**R4. §3.6 lane 满即回落 primary 制造乱序**：stripe lane 队列满时该批直接走 primary，下一批又回到 lane，同一流在两条路径间来回横跳——这正是 §3.6 要消除的乱序。另：亲和表每次重置都 `make(map, 65536)` 预分配，属无谓的 ~MB 级常驻。
+- 改法：lane 队列满时**有界等待**（50ms）；仍满或 lane 关闭则走 primary，并把这批涉及的流**改钉到 primary**（亲和表置 nil）——每流至多一次换路瞬态，不再横跳。亲和表重置改为不预分配。
+
+**R5. p2p 入站按流队列无界阻塞**：数据帧入 per-flow worker 队列时无限期阻塞（仅 stop 可解），gVisor 消费慢时会卡住整条会话读循环，连同 pong/控制帧一起停摆 → 心跳超时。
+- 改法：先非阻塞投递；满则有界等待 100ms，仍满则丢弃并计 `meshInboundDrops`。100ms 远小于 ping 5s 超时，读循环不会被饿死；持续过载时丢弃是正确的拥塞信号（内层 TCP 降窗），而非让控制面陪葬。
+
+**F2. V2 服务端投递排队治理（§3.8 遗留，本节实施）**：
+1. **控制帧独立入口**：新增 `meshCtrlOut`（cap 256），`Send(isControl=true)` 走它，dispatcher 恒读——数据侧被硬上限暂停时控制帧不被堵在 meshOut 里（§3.8 饿死问题的构造性根除）。
+2. **硬字节上限**：数据队列（pipeAnyQ + 全部 pipeQ）合计 ≥ 8MiB 时 dispatcher 暂停读取 meshOut，meshOut 填满后 `Send`/`SendBatch` 阻塞 → 背压回传 p2p DRR；GET 取走数据降到界下即恢复。仅在客户端 GET 停滞时触发，正常负载由下条 AQM 控制。
+3. **每队列 CoDel（RFC 8289）**：帧入 meshOut 时打单调时间戳；批次组装出队时按 RFC 8289 控制律对 pipeQ[p] / pipeAnyQ 逐帧判定，target 50ms、interval 300ms（GET 链往返 ~20~40ms，留余量）。只丢 `FrameMeshPacket`（ping 等非流帧不丢，保持路径度量），队列剩余 < 2 帧时不丢。丢弃是稀疏单丢——后续段到达产生 dup-ACK/SACK，内层走快速重传而非 RTO——用于把常驻排队（v5 实测 ~600ms）压回 target 附近。丢弃计数入日志（debug，节流）。
+4. **会话结束即关通道**：`meshChannelTransport.Close()` 改为关闭所属 channel（`closeChannel`，幂等）。p2p 会话终止（重复会话去重、心跳超时等）后客户端立即收到 410 重拨，不再留僵尸通道（POST 卡在无人读的 meshIn、GET 空转）；`Send`/`Recv` 已监听 `ch.closed`，随之解阻塞。
+
+**验收**：
+1. `go vet`/`go test -race`（server/p2p/dialer/mesh/frame/config）通过，新增 CoDel、硬上限、控制旁路、有界入队、lane 改钉单测。
+2. QG→JF V2 8 流 × 3 轮：零 `link dead`/会话重建；聚合吞吐不低于 §3.8 结果（3.9~5.6MB/s）。
+3. JF `/api/mesh` 回滚开关：PUT `htunnel.allow-flow-reorder=true` 后新建通道走 legacy（日志/行为可见），置回 false 恢复。
+
 ## 四、不做的事
 
 - ❌ mesh 层重组缓冲/序号重排（netstack 的本职，越俎代庖）。
@@ -117,6 +148,7 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 5. **3.6 stripe 亲和钉死**（追加）：stripe_transport.go 粘性亲和表（1 处文件）。
 6. **3.7 dispatch 判定修复**（追加）：meshDispatchLoop 模式判定改纯配置（1 处文件）。
 7. **3.8 V2 服务端控制帧优先 + 按字节合批**（追加）：htunnel_mesh.go 投递重写 + htChannel 字段（2 处文件），JF 部署需用户确认。
+8. **3.9 审查修复 + F2**（追加）：config/main/admin 开关接线、mesh.go 死代码删除、htunnel_direct.go 有界有序队列、stripe_transport.go 有界等待 + 改钉、p2p.go 入站有界等待、htunnel_mesh.go 控制旁路 + 硬上限 + CoDel + Close 关通道。
 5. 本机构建（版本戳）→ VM 部署自测 mesh 起连、控制台正常。
 6. QG 部署（中转节点，观察环路/转发指标无回归）。
 7. JF + deskzq 部署（用户确认后，生产节点纪律：备份 prev-running、安全 pkill、无参启动、验证版本）。

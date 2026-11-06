@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"sync/atomic"
 	"time"
 
+	"phaethon/config"
 	"phaethon/dialer"
 	"phaethon/frame"
 	"phaethon/util"
@@ -16,17 +18,36 @@ import (
 // Mesh channel constants (P2P direct mode over h_tunnel;
 // docs/plans/htunnel_p2p_direct_mode.md §6-§7).
 const (
-	htMeshQueueLen    = 4096             // frames buffered per direction
-	htMeshBatchLimit  = 512 * 1024       // one GET/POST batch cap (below nginx 1m)
-	htMeshPollTimeout = 25 * time.Second // GET long-poll wait before 408
+	htMeshQueueLen     = 4096             // frames buffered per direction
+	htMeshCtrlQueueLen = 256              // control frames buffered toward the client
+	htMeshBatchLimit   = 512 * 1024       // one GET/POST batch cap (below nginx 1m)
+	htMeshPollTimeout  = 25 * time.Second // GET long-poll wait before 408
+
+	// htMeshMaxQueuedBytes caps data queued for GET delivery; past it the
+	// dispatcher stops draining meshOut so Send blocks (§3.9 F2).
+	htMeshMaxQueuedBytes = 8 << 20
 )
+
+// CoDel (RFC 8289) parameters for the GET delivery queues (§3.9 F2). Target
+// leaves room for one GET round trip (~20-40ms) plus batching.
+const (
+	codelTarget   = 50 * time.Millisecond
+	codelInterval = 300 * time.Millisecond
+)
+
+var meshEpoch = time.Now()
+
+// meshNow is a monotonic clock for queue sojourn times (never 0 in practice,
+// which codel uses as "unset").
+func meshNow() time.Duration { return time.Since(meshEpoch) }
 
 // meshMsg is one P2P frame flowing through a mesh channel.
 type meshMsg struct {
 	frameType byte
 	payload   []byte
-	flowKey   uint32 // inner-flow key (frame.FlowKey); flowKeyAny = no pinning
-	control   bool   // p2p control frame: served ahead of all data (§3.8)
+	flowKey   uint32        // inner-flow key (frame.FlowKey); flowKeyAny = no pinning
+	control   bool          // p2p control frame: served ahead of all data (§3.8)
+	enq       time.Duration // meshNow() when queued for delivery (AQM sojourn)
 }
 
 func (m meshMsg) wireSize() int { return 3 + len(m.payload) }
@@ -63,14 +84,16 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	id := atomic.AddInt64(&s.idGen, 1)
 	connID := util.NextConnID()
 	ch := &htChannel{
-		id:         id,
-		connID:     connID,
-		closed:     make(chan struct{}),
-		isMesh:     true,
-		crypto:     util.NewHTunnelCrypto(s.Password),
-		meshIn:     make(chan meshMsg, htMeshQueueLen),
-		meshOut:    make(chan meshMsg, htMeshQueueLen),
-		getWaiters: make(chan *meshWaiter, 64), // support up to 64 concurrent GETs
+		id:          id,
+		connID:      connID,
+		closed:      make(chan struct{}),
+		isMesh:      true,
+		crypto:      util.NewHTunnelCrypto(s.Password),
+		meshIn:      make(chan meshMsg, htMeshQueueLen),
+		meshOut:     make(chan meshMsg, htMeshQueueLen),
+		meshCtrlOut: make(chan meshMsg, htMeshCtrlQueueLen),
+		getWaiters:  make(chan *meshWaiter, 64), // support up to 64 concurrent GETs
+		htCfg:       config.HTunnel(),
 	}
 	s.channels.Store(id, ch)
 
@@ -88,9 +111,9 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 
 	w.Header().Set(dialer.HeaderConnectionID, strconv.FormatInt(id, 10))
 	w.WriteHeader(200)
-	util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel started (p2p direct)", s.Mapping.Name, connID)
+	util.LogModuleInfo("htunnel", "[%s] [%s] MESH channel started (p2p direct, allowFlowReorder=%v)", s.Mapping.Name, connID, ch.htCfg.GetAllowFlowReorder())
 
-	go handleP2PTransport(meshChannelTransport{ch: ch}, "mesh:"+connID)
+	go handleP2PTransport(meshChannelTransport{s: s, ch: ch}, "mesh:"+connID)
 
 	// Start dispatcher: distributes meshOut frames to waiting GET requests
 	go s.meshDispatchLoop(ch)
@@ -150,20 +173,34 @@ func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter
 // every channel into legacy mode (found 2026-11-06, §3.7). In legacy mode
 // meshHandleRead ignores X-N, pipeCnt stays 0 and every data frame rides the
 // single wildcard FIFO — the same loop serves both modes.
+//
+// Control frames arrive on their own channel and are always read; data
+// reading pauses while htMeshMaxQueuedBytes are queued (§3.9 F2), so a
+// stalled client back-pressures the p2p session instead of growing memory.
 func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
-	limit := s.htConfig.GetMaxBatchSize()
+	limit := ch.htCfg.GetMaxBatchSize()
+	var lastDrops uint64
+	var lastDropLog time.Time
 	for {
+		in := ch.meshOut
+		if ch.dataBytes >= htMeshMaxQueuedBytes {
+			in = nil
+		}
 		select {
-		case msg := <-ch.meshOut:
+		case msg := <-ch.meshCtrlOut:
 			ch.pipeMu.Lock()
 			ch.routeFrameLocked(msg)
-			// The dispatcher is meshOut's only consumer, so draining the
-			// current backlog cannot block; it lets one flush build full
-			// batches under load while an idle channel still ships the
-			// first frame immediately.
-			for n := len(ch.meshOut); n > 0; n-- {
-				ch.routeFrameLocked(<-ch.meshOut)
-			}
+			ch.drainLocked()
+			ch.flushLocked(limit)
+			ch.pipeMu.Unlock()
+		case msg := <-in:
+			ch.pipeMu.Lock()
+			ch.routeFrameLocked(msg)
+			// The dispatcher is the only consumer of meshOut/meshCtrlOut, so
+			// draining the current backlog cannot block; it lets one flush
+			// build full batches under load while an idle channel still
+			// ships the first frame immediately.
+			ch.drainLocked()
 			ch.flushLocked(limit)
 			ch.pipeMu.Unlock()
 		case w := <-ch.getWaiters:
@@ -177,6 +214,22 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 		case <-ch.closed:
 			return
 		}
+		if ch.codelDrops != lastDrops && time.Since(lastDropLog) >= 10*time.Second {
+			util.LogModuleInfo("htunnel", "[%s] [%s] mesh AQM dropped %d frames (total %d), queued=%dB",
+				s.Mapping.Name, ch.connID, ch.codelDrops-lastDrops, ch.codelDrops, ch.dataBytes)
+			lastDrops, lastDropLog = ch.codelDrops, time.Now()
+		}
+	}
+}
+
+// drainLocked moves the frames already buffered in meshCtrlOut and meshOut
+// onto the delivery queues; data stops at the byte cap. Caller holds pipeMu.
+func (ch *htChannel) drainLocked() {
+	for n := len(ch.meshCtrlOut); n > 0; n-- {
+		ch.routeFrameLocked(<-ch.meshCtrlOut)
+	}
+	for n := len(ch.meshOut); n > 0 && ch.dataBytes < htMeshMaxQueuedBytes; n-- {
+		ch.routeFrameLocked(<-ch.meshOut)
 	}
 }
 
@@ -185,12 +238,15 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 // declared link-dead by the peer, §3.8). Data waits on its flow's pipe;
 // unkeyed data (pings) is spread round-robin so it still measures the data
 // path. Before X-N (pipeCnt == 0) data rides the wildcard queue.
-// Queues are bounded indirectly by the meshOut backpressure at the sender.
 // Caller holds ch.pipeMu.
 func (ch *htChannel) routeFrameLocked(msg meshMsg) {
-	switch {
-	case msg.control:
+	if msg.control {
 		ch.ctrlQ = append(ch.ctrlQ, msg)
+		return
+	}
+	msg.enq = meshNow()
+	ch.dataBytes += msg.wireSize()
+	switch {
 	case ch.pipeCnt == 0:
 		ch.pipeAnyQ = append(ch.pipeAnyQ, msg)
 	case msg.flowKey == flowKeyAny:
@@ -244,12 +300,103 @@ func (ch *htChannel) flushLocked(limit int) {
 func (ch *htChannel) buildBatchLocked(p, limit int) []meshMsg {
 	var batch []meshMsg
 	size := 0
+	now := meshNow()
 	batch, ch.ctrlQ = takeFrames(batch, &size, ch.ctrlQ, limit)
-	batch, ch.pipeAnyQ = takeFrames(batch, &size, ch.pipeAnyQ, limit)
+	batch, ch.pipeAnyQ = ch.takeData(batch, &size, ch.pipeAnyQ, &ch.anyCodel, limit, now)
 	if p >= 0 {
-		batch, ch.pipeQ[p] = takeFrames(batch, &size, ch.pipeQ[p], limit)
+		for len(ch.pipeCodel) <= p {
+			ch.pipeCodel = append(ch.pipeCodel, codel{})
+		}
+		batch, ch.pipeQ[p] = ch.takeData(batch, &size, ch.pipeQ[p], &ch.pipeCodel[p], limit, now)
 	}
 	return batch
+}
+
+// takeData is takeFrames for a data queue: dequeued frames leave dataBytes,
+// and mesh packets the CoDel state machine marks are dropped instead of
+// delivered (sparse head drops: the inner TCP sees one loss and fast
+// retransmits, shrinking its window before the standing queue grows).
+func (ch *htChannel) takeData(batch []meshMsg, size *int, q []meshMsg, cd *codel, limit int, now time.Duration) ([]meshMsg, []meshMsg) {
+	n := 0
+	for n < len(q) {
+		m := q[n]
+		sz := m.wireSize()
+		if len(batch) > 0 && *size+sz > limit {
+			break
+		}
+		n++
+		ch.dataBytes -= sz
+		if cd.shouldDrop(now-m.enq, now, len(q)-n) && m.frameType == frame.FrameMeshPacket {
+			ch.codelDrops++
+			continue
+		}
+		batch = append(batch, m)
+		*size += sz
+	}
+	clear(q[:n])
+	if n == len(q) {
+		return batch, nil
+	}
+	return batch, q[n:]
+}
+
+// codel is the RFC 8289 state of one delivery queue, evaluated per dequeued
+// frame.
+type codel struct {
+	firstAbove time.Duration // 0 = sojourn currently below target
+	dropNext   time.Duration
+	count      int
+	lastCount  int
+	dropping   bool
+}
+
+func codelControlLaw(t time.Duration, count int) time.Duration {
+	return t + time.Duration(float64(codelInterval)/math.Sqrt(float64(count)))
+}
+
+// okToDrop is RFC 8289 dodequeue: true once sojourn has stayed above target
+// for a full interval. backlog is the frames left behind this one; a nearly
+// empty queue is never dropped from.
+func (c *codel) okToDrop(sojourn, now time.Duration, backlog int) bool {
+	if sojourn < codelTarget || backlog < 2 {
+		c.firstAbove = 0
+		return false
+	}
+	if c.firstAbove == 0 {
+		c.firstAbove = now + codelInterval
+		return false
+	}
+	return now >= c.firstAbove
+}
+
+// shouldDrop runs the RFC 8289 dequeue state machine for one frame.
+func (c *codel) shouldDrop(sojourn, now time.Duration, backlog int) bool {
+	ok := c.okToDrop(sojourn, now, backlog)
+	if c.dropping {
+		if !ok {
+			c.dropping = false
+			return false
+		}
+		if now >= c.dropNext {
+			c.count++
+			c.dropNext = codelControlLaw(c.dropNext, c.count)
+			return true
+		}
+		return false
+	}
+	if !ok {
+		return false
+	}
+	c.dropping = true
+	delta := c.count - c.lastCount
+	if delta > 1 && now-c.dropNext < 16*codelInterval {
+		c.count = delta
+	} else {
+		c.count = 1
+	}
+	c.dropNext = codelControlLaw(now, c.count)
+	c.lastCount = c.count
+	return true
 }
 
 // takeFrames moves frames from the head of q into batch while the batch
@@ -315,7 +462,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 		if waitTimeSec, err := strconv.Atoi(waitTimeStr); err == nil && waitTimeSec > 0 {
 			waitTime = time.Duration(waitTimeSec) * time.Second
 			// Clamp to reasonable range
-			minWait, maxWait, _ := s.htConfig.GetWaitTimeRange()
+			minWait, maxWait, _ := ch.htCfg.GetWaitTimeRange()
 			if waitTime < minWait {
 				waitTime = minWait
 			}
@@ -330,7 +477,7 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	// frames of flows hashed onto its pipe, keeping each flow on one serial
 	// GET chain. GETs without valid pipe headers stay legacy wildcard.
 	pipe := -1
-	if !s.htConfig.GetAllowFlowReorder() {
+	if !ch.htCfg.GetAllowFlowReorder() {
 		if npStr := r.Header.Get(dialer.HeaderPipeCount); npStr != "" {
 			if np, err := strconv.Atoi(npStr); err == nil && np > 0 && np <= 64 {
 				ch.pipeMu.Lock()
@@ -396,9 +543,12 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 
 // meshChannelTransport bridges a mesh channel to frame.FrameTransport for the
 // local P2P session. Send pushes toward the client (drained by GET long-poll);
-// Recv pulls frames POSTed by the client. Both block with backpressure; the
-// channel timeout/closeChannel path unblocks them via ch.closed.
+// Recv pulls frames POSTed by the client. Both block with backpressure and
+// unblock via ch.closed. The session owns the channel's lifetime from this
+// side: Close tears the channel down so the client re-dials at once (410)
+// instead of polling a channel nobody serves (§3.9 F2).
 type meshChannelTransport struct {
+	s  *HTunnelServer
 	ch *htChannel
 }
 
@@ -413,8 +563,12 @@ func flowKeyOf(frameType byte, payload []byte) uint32 {
 }
 
 func (t meshChannelTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	out := t.ch.meshOut
+	if isControl {
+		out = t.ch.meshCtrlOut
+	}
 	select {
-	case t.ch.meshOut <- meshMsg{frameType: frameType, payload: payload, flowKey: flowKeyOf(frameType, payload), control: isControl}:
+	case out <- meshMsg{frameType: frameType, payload: payload, flowKey: flowKeyOf(frameType, payload), control: isControl}:
 		return nil
 	case <-t.ch.closed:
 		return io.ErrClosedPipe
@@ -445,6 +599,6 @@ func (t meshChannelTransport) Recv() (byte, []byte, error) {
 }
 
 func (t meshChannelTransport) Close() error {
-	// Channel lifecycle is owned by closeChannel (client DELETE or timeout).
+	t.s.closeChannel(t.ch.id)
 	return nil
 }

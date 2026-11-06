@@ -39,9 +39,9 @@ else → 维持 adminHandler.ServeConn(conn)   // 443 等行为不变
 - 每节点一个 server 实例；host key ed25519，`loadOrGenerateSSHHostKey` 仿 TLS 证书模式存 db（bucket `ssh`，key `host_ed25519`）；指纹（SHA256）导出给 admin 页面展示，用户首次连接比对。
 - `ServerConfig{PublicKeyCallback}`：查 authorized keys（内存缓存，db 变更时失效）。**仅公钥，不做密码认证**。
 - 会话：
-  - `session` channel + `shell`/`exec` 请求 → 目标节点本地起进程：
-    - Linux：creack/pty 全交互，`window-change` 消息转发 `pty.SetWinsize`。
-    - Windows（VM/QGW）：v1 用 `cmd.exe` 管道（行级交互可用，无全屏 TUI）；ConPTY 全交互列二期。
+  - `session` channel + `shell`/`exec` 请求 → **拉起系统默认 shell**：
+    - Linux：`$SHELL`（空则 `/bin/sh`），creack/pty 全交互，`window-change` 消息转发 `pty.SetWinsize`。
+    - Windows（VM/QGW）：`%COMSPEC%`（默认 C:\Windows\system32\cmd.exe）管道模式（行级交互可用，无全屏 TUI）；ConPTY 全交互列二期。
   - 其他 channel（direct-tcpip、tcpip-forward 等）v1 一律拒绝。
 - 总开关 `ssh.enabled`（db 配置，默认开？——实施时定，见 §六风险），页面可关。
 
@@ -53,7 +53,7 @@ else → 维持 adminHandler.ServeConn(conn)   // 443 等行为不变
   - `POST /api/ssh-keys`：粘贴一行公钥文本，`ssh.ParseAuthorizedKey` 解析校验、拒绝非法/重复。
   - `DELETE /api/ssh-keys/{fp}`。
   - `PUT /api/ssh-keys/config`：启停开关。
-- 页面 `admin/templates/ssh.html` + layout.html 导航 + app.js CRUD，范式抄 apiMeshDomainSuffixes（admin/admin.go:4460）。
+- 页面 `admin/templates/ssh.html` + layout.html「系统」分组导航（与 ⚙️ Admin / 🧙 Reverse / 📦 Package 并列，如 🔑 SSH）+ app.js CRUD，范式抄 apiMeshDomainSuffixes（admin/admin.go:4460）。
 - Bootstrap：第一个公钥由 admin 登录后在页面粘贴（admin 本身已过 mTLS/cookie 认证），无需旁路。
 
 ### 3.4 用户侧使用

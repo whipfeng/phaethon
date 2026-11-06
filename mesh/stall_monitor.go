@@ -577,6 +577,18 @@ func (sm *StallMonitor) writeDump(trigger, probeResult string) (string, error) {
 			w("%+v", stats.UDP)
 			w("")
 		}
+
+		flows := sm.ns.TCPFlowDebug(nil)
+		w("--- gvisor tcp endpoint states (%d) ---", len(flows))
+		for _, fl := range flows {
+			line, err := json.Marshal(fl)
+			if err != nil {
+				w("[marshal error: %v]", err)
+				continue
+			}
+			w("%s", line)
+		}
+		w("")
 	}
 
 	w("--- goroutine stacks (all=true) ---")

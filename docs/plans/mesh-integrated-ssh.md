@@ -53,7 +53,7 @@ else → 维持 adminHandler.ServeConn(conn)   // 443 等行为不变
   - `POST /api/ssh-keys`：粘贴一行公钥文本，`ssh.ParseAuthorizedKey` 解析校验、拒绝非法/重复。
   - `DELETE /api/ssh-keys/{fp}`。
   - `PUT /api/ssh-keys/config`：启停开关。
-- 页面 `admin/templates/ssh.html` + layout.html「系统」分组导航（与 ⚙️ Admin / 🧙 Reverse / 📦 Package 并列，如 🔑 SSH）+ app.js CRUD，范式抄 apiMeshDomainSuffixes（admin/admin.go:4460）。
+- 页面：**并入现有 ⚙️ Admin 设置页**（admin/templates/admin.html）作为「SSH 服务」区块，不新增导航项；区块内含 enabled 开关 + host key 指纹展示 + 公钥列表 CRUD。CRUD 范式抄页面内现有区块（如 apiMeshDomainSuffixes，admin/admin.go:4460）。
 - Bootstrap：第一个公钥由 admin 登录后在页面粘贴（admin 本身已过 mTLS/cookie 认证），无需旁路。
 
 ### 3.4 用户侧使用
@@ -69,7 +69,7 @@ ssh -o StrictHostKeyChecking=accept-new admin@qg.phn
 2. server/ssh.go：host key 存取、ServerConfig、公钥校验缓存、channel 处理骨架。
 3. 会话执行：unix pty 版 + windows 管道版（加 creack/pty 依赖）。
 4. db 模型 + API（db/models.go、admin/admin.go 路由与 handler）。
-5. 页面（templates/ssh.html、layout、app.js）。
+5. 页面：Admin 设置页内新增「SSH 服务」区块（admin.html + app.js CRUD）。
 6. 本机构建（版本戳）→ VM 自测（本机即 VM）：`ssh vm.phn`（经 wintun 回环）登录拿 shell；再测跨节点 `ssh qg.phn`。
 7. QG 部署验证；JF/QGW 用户确认后滚动（生产纪律）。
 

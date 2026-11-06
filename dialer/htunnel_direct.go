@@ -23,6 +23,14 @@ const HTunnelCmdMesh = "MESH"
 // for data frames. This provides high throughput while limiting resource usage.
 const htunnelConcurrency = 16
 
+// Ordered-dispatch batch caps: one POST carries at most one of these per
+// flow. The remainder stays queued and ships in the flow's next batch
+// (after the in-flight one completes), preserving per-flow FIFO.
+const (
+	maxOrdBatchFrames = 64
+	maxOrdBatchBytes  = 256 * 1024
+)
+
 // htunnelDirectTransport implements frame.FrameTransport over h_tunnel
 // without the BIND stream channel: one HEAD (X-C: MESH) allocates the
 // channel, frames travel in POST bodies (client → server) and long-poll GET
@@ -60,6 +68,25 @@ type htunnelDirectTransport struct {
 
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	// Per-flow ordered send (design mesh-per-flow-ordering §3.1): data
+	// frames are queued per inner flow and dispatched so that a flow has
+	// at most one POST batch in flight. POST batches travel on a single
+	// ordered pipe (meshIn channel) server-side, giving strict per-flow
+	// FIFO across the concurrent POST pool. Without this, frames of one
+	// flow spread over up to 16 in-flight batches and arrive reordered
+	// (~50% OOO observed), collapsing the inner sender's cwnd.
+	ordMu       sync.Mutex
+	ordPending  map[uint32]*ordFlowBuf // flow key -> queued frames
+	ordFIFO     []uint32               // flow keys with queued frames, arrival order
+	ordInflight map[uint32]bool        // flow keys with an uncompleted POST
+	ordWake     chan struct{}          // enqueue / completion signal
+}
+
+// ordFlowBuf holds one flow's queued frames between dispatches.
+type ordFlowBuf struct {
+	frames []frame.Frame
+	bytes  int
 }
 
 // recvResult holds a frame received from a GET request, or an error.
@@ -123,11 +150,18 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		waitTime:   defaultWait,
 		// v0.2.0: heartbeat
 		heartbeatStop: make(chan struct{}),
+		// per-flow ordered dispatch
+		ordPending:  make(map[uint32]*ordFlowBuf),
+		ordInflight: make(map[uint32]bool),
+		ordWake:     make(chan struct{}, 1),
 	}
+
+	// Per-flow ordered dispatcher for data frames.
+	go t.orderedDispatchLoop()
 
 	// v0.2.0: Start base GET recvLoops (default 2)
 	for i := 0; i < baseGETs; i++ {
-		go t.recvLoop(i == 0) // first one is control loop
+		go t.recvLoop(i) // pipe index i; first one is the control loop
 	}
 
 	// v0.2.0: Start heartbeat goroutine
@@ -136,58 +170,200 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	return t, nil
 }
 
-// Send writes one frame. Both control and data frames use the same async POST
-// path with sendSem concurrency control. Priority scheduling is handled by
-// the P2P layer's peerWriteLoop, which prioritizes control frames before
-// calling transport.Send().
+// Send writes one frame. Control frames use the direct async POST path
+// (priority, unordered is fine). Data frames go through the per-flow
+// ordered dispatcher so each inner flow keeps FIFO across the POST pool.
+// Priority scheduling is handled by the P2P layer's peerWriteLoop, which
+// prioritizes control frames before calling transport.Send().
 func (t *htunnelDirectTransport) Send(frameType byte, payload []byte, isControl bool) error {
-	return t.sendFrame(frameType, payload)
+	if isControl || t.htConfig.GetAllowFlowReorder() {
+		return t.sendFrame(frameType, payload)
+	}
+	return t.enqueueOrdered([]frame.Frame{{Type: frameType, Payload: payload}})
 }
 
-// SendBatch writes multiple frames as a single HTTP POST.
-// All frames are serialized into one batch and sent together.
-func (t *htunnelDirectTransport) SendBatch(frames []frame.Frame) error {
-	if len(frames) == 0 {
-		return nil
-	}
-	if len(frames) == 1 {
-		return t.sendFrame(frames[0].Type, frames[0].Payload)
-	}
-
+// enqueueOrdered appends frames to their per-flow queues and wakes the
+// dispatcher. Per-flow order is preserved because p2p's batching and the
+// stripe lane pin already emit a flow's frames in order.
+func (t *htunnelDirectTransport) enqueueOrdered(frames []frame.Frame) error {
 	select {
 	case <-t.closed:
 		return io.ErrClosedPipe
 	default:
 	}
-
-	// Serialize all frames into one buffer
-	var buf bytes.Buffer
+	t.ordMu.Lock()
 	for _, f := range frames {
-		if err := frame.WriteFrame(&buf, f.Type, f.Payload); err != nil {
-			return err
+		key := frame.FlowKey(f.Payload)
+		buf := t.ordPending[key]
+		if buf == nil {
+			buf = &ordFlowBuf{}
+			t.ordPending[key] = buf
+			t.ordFIFO = append(t.ordFIFO, key)
 		}
+		buf.frames = append(buf.frames, f)
+		buf.bytes += len(f.Payload)
 	}
-	data := buf.Bytes()
-
-	t.seqMu.Lock()
-	t.writeSeq++
-	seq := t.writeSeq
-	t.seqMu.Unlock()
-
-	// Acquire semaphore (blocks if htunnelConcurrency POSTs are in flight)
+	t.ordMu.Unlock()
 	select {
-	case t.sendSem <- struct{}{}:
-	case <-t.closed:
-		return io.ErrClosedPipe
+	case t.ordWake <- struct{}{}:
+	default:
 	}
-
-	go func() {
-		defer func() { <-t.sendSem }()
-		if err := t.postBatch(data, seq); err != nil {
-			util.LogModuleDebug("htunnel", "batch POST fail (seq=%d, frames=%d): %v", seq, len(frames), err)
-		}
-	}()
 	return nil
+}
+
+// orderedDispatchLoop ships per-flow batches: at most one POST batch per
+// flow is in flight at any time, so a flow's batches arrive server-side in
+// emission order (each POST is applied to the channel's FIFO meshIn before
+// its response is sent). Cross-flow parallelism keeps the POST pool busy.
+func (t *htunnelDirectTransport) orderedDispatchLoop() {
+	for {
+		t.ordMu.Lock()
+		found := -1
+		var key uint32
+		for i, k := range t.ordFIFO {
+			if t.ordInflight[k] {
+				continue
+			}
+			if buf := t.ordPending[k]; buf != nil && len(buf.frames) > 0 {
+				found, key = i, k
+				break
+			}
+		}
+		var batch []frame.Frame
+		if found >= 0 {
+			buf := t.ordPending[key]
+			n, sz := 0, 0
+			for n < len(buf.frames) && n < maxOrdBatchFrames && sz < maxOrdBatchBytes {
+				sz += len(buf.frames[n].Payload)
+				n++
+			}
+			batch = buf.frames[:n]
+			buf.frames = buf.frames[n:]
+			buf.bytes -= sz
+			t.ordInflight[key] = true
+			// Rotate: dispatched flow goes to the FIFO tail when it still
+			// has queued frames, otherwise it leaves the rotation.
+			t.ordFIFO = append(t.ordFIFO[:found], t.ordFIFO[found+1:]...)
+			if len(buf.frames) > 0 {
+				t.ordFIFO = append(t.ordFIFO, key)
+			} else {
+				delete(t.ordPending, key)
+			}
+		}
+		t.ordMu.Unlock()
+
+		if found < 0 {
+			select {
+			case <-t.closed:
+				return
+			case <-t.ordWake:
+			}
+			continue
+		}
+
+		var buf bytes.Buffer
+		for _, f := range batch {
+			if err := frame.WriteFrame(&buf, f.Type, f.Payload); err != nil {
+				util.LogModuleWarn("htunnel", "ordered batch serialize fail (flow=%d): %v", key, err)
+				break
+			}
+		}
+		data := buf.Bytes()
+		if len(data) == 0 {
+			t.ordRelease(key)
+			continue
+		}
+
+		t.seqMu.Lock()
+		t.writeSeq++
+		seq := t.writeSeq
+		t.seqMu.Unlock()
+
+		select {
+		case t.sendSem <- struct{}{}:
+		case <-t.closed:
+			t.ordRelease(key)
+			return
+		}
+		go func(key uint32) {
+			defer func() {
+				<-t.sendSem
+				t.ordMu.Lock()
+				delete(t.ordInflight, key)
+				t.ordMu.Unlock()
+				select {
+				case t.ordWake <- struct{}{}:
+				default:
+				}
+			}()
+			if err := t.postBatch(data, seq); err != nil {
+				util.LogModuleDebug("htunnel", "ordered batch POST fail (seq=%d, frames=%d): %v", seq, len(batch), err)
+			}
+		}(key)
+	}
+}
+
+// ordRelease clears a flow's in-flight mark without a completed POST
+// (close / serialization error paths).
+func (t *htunnelDirectTransport) ordRelease(key uint32) {
+	t.ordMu.Lock()
+	delete(t.ordInflight, key)
+	t.ordMu.Unlock()
+	select {
+	case t.ordWake <- struct{}{}:
+	default:
+	}
+}
+
+// SendBatch queues data frames for per-flow ordered dispatch: frames are
+// grouped by inner flow and each flow ships at most one POST batch at a
+// time (see orderedDispatchLoop). With flow reordering allowed it falls
+// back to the legacy whole-batch single POST.
+func (t *htunnelDirectTransport) SendBatch(frames []frame.Frame) error {
+	if len(frames) == 0 {
+		return nil
+	}
+	if t.htConfig.GetAllowFlowReorder() {
+		if len(frames) == 1 {
+			return t.sendFrame(frames[0].Type, frames[0].Payload)
+		}
+
+		select {
+		case <-t.closed:
+			return io.ErrClosedPipe
+		default:
+		}
+
+		// Serialize all frames into one buffer
+		var buf bytes.Buffer
+		for _, f := range frames {
+			if err := frame.WriteFrame(&buf, f.Type, f.Payload); err != nil {
+				return err
+			}
+		}
+		data := buf.Bytes()
+
+		t.seqMu.Lock()
+		t.writeSeq++
+		seq := t.writeSeq
+		t.seqMu.Unlock()
+
+		// Acquire semaphore (blocks if htunnelConcurrency POSTs are in flight)
+		select {
+		case t.sendSem <- struct{}{}:
+		case <-t.closed:
+			return io.ErrClosedPipe
+		}
+
+		go func() {
+			defer func() { <-t.sendSem }()
+			if err := t.postBatch(data, seq); err != nil {
+				util.LogModuleDebug("htunnel", "batch POST fail (seq=%d, frames=%d): %v", seq, len(frames), err)
+			}
+		}()
+		return nil
+	}
+	return t.enqueueOrdered(frames)
 }
 
 func (t *htunnelDirectTransport) sendFrame(frameType byte, payload []byte) error {
@@ -260,8 +436,12 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 
 // recvLoop continuously sends GET requests and routes received frames to
 // ctrlRecvCh or dataRecvCh based on frame type. Multiple recvLoop goroutines
-// run concurrently to eliminate the gap between GETs.
-func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
+// run concurrently to eliminate the gap between GETs. Each loop is one
+// ordered "pipe": with per-flow ordering enabled the loop index is sent
+// to the server (X-Q/X-N) so frames of one inner flow always ride the
+// same serial GET chain.
+func (t *htunnelDirectTransport) recvLoop(pipeIdx int) {
+	isCtrlLoop := pipeIdx == 0
 	loopType := "data"
 	if isCtrlLoop {
 		loopType = "ctrl"
@@ -282,6 +462,10 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		req, _ := http.NewRequest("GET", getURL, nil)
 		req.Header.Set(HeaderConnectionID, t.connectionID)
 		req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
+		if !t.htConfig.GetAllowFlowReorder() {
+			req.Header.Set(HeaderPipeIndex, strconv.Itoa(pipeIdx))
+			req.Header.Set(HeaderPipeCount, strconv.Itoa(t.baseGETs))
+		}
 
 		// v0.2.0: send client-controlled wait time
 		t.getMu.Lock()

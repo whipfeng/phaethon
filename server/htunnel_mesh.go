@@ -25,14 +25,23 @@ const (
 type meshMsg struct {
 	frameType byte
 	payload   []byte
+	flowKey   uint32 // inner-flow key (frame.FlowKey); flowKeyAny = no pinning
 }
 
-// meshWaiter represents a GET request waiting for a frame.
+// flowKeyAny marks frames that are not pinned to a pipe: control frames
+// and data from legacy/unordered clients. Routed to any available waiter.
+const flowKeyAny = ^uint32(0)
+
+// meshWaiter represents a GET request waiting for frames.
 // The done channel is closed when the handler times out, signaling
-// the dispatcher to skip this waiter and try the next one.
+// the dispatcher to skip this waiter.
+// pipe >= 0: the waiter only receives frames of its pipe (per-flow ordered
+// delivery). pipe == -1: wildcard — receives control frames and, when the
+// channel is in legacy mode (pipeCnt == 0), any frame.
 type meshWaiter struct {
-	msg  chan meshMsg   // frame delivered by dispatcher
-	done chan struct{}  // closed on handler timeout → waiter is stale
+	msg  chan meshMsg  // frames delivered by dispatcher (buffered for coalescing)
+	done chan struct{} // closed on handler timeout → waiter is stale
+	pipe int           // pipe index announced via X-Q, or -1
 }
 
 // handleMeshChannelRequest serves the MESH channel request (HEAD, X-C: MESH):
@@ -53,6 +62,10 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 	}
 	s.channels.Store(id, ch)
 
+	// Per-flow ordered GET dispatch state (§3.2); pipe slices grow lazily
+	// when the client announces its pipe count via X-N.
+	ch.pipeQ = make([][]meshMsg, 0, 8)
+	ch.pipeWait = make([][]*meshWaiter, 0, 8)
 	// The channel is usable immediately (no handshake): reap only if the
 	// client never issues a follow-up request; each POST/GET resets the timer.
 	ch.mu.Lock()
@@ -114,10 +127,33 @@ func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter
 	w.WriteHeader(200)
 }
 
-// meshDispatchLoop distributes frames from meshOut to waiting GET requests.
-// Priority scheduling is handled by the P2P layer's peerWriteLoop, which
-// prioritizes control frames before calling transport.Send().
+// meshDispatchLoop distributes frames from meshOut to GET requests.
+// Two modes:
+//   - pipeCnt == 0 (legacy): frames go to the first available waiter and
+//     GET handlers coalesce by draining meshOut directly.
+//   - pipeCnt > 0 (per-flow ordered, client announced X-N): each frame is
+//     routed onto its flow's pipe queue (flowKey % pipeCnt) and served
+//     only to a waiter of the same pipe — one inner flow rides one serial
+//     GET chain and arrives client-side in emission order. Wildcard
+//     frames (control, legacy data) go to pipeAnyQ and ride any waiter.
 func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
+	if s.legacyDispatch(ch) {
+		s.legacyDispatchLoop(ch)
+		return
+	}
+	s.pipeDispatchLoop(ch)
+}
+
+// legacyDispatch reports whether the channel is still in unordered mode
+// (no client pipe announcement yet, or the server has flow reordering
+// explicitly allowed).
+func (s *HTunnelServer) legacyDispatch(ch *htChannel) bool {
+	ch.pipeMu.Lock()
+	defer ch.pipeMu.Unlock()
+	return ch.pipeCnt == 0 || s.htConfig.GetAllowFlowReorder()
+}
+
+func (s *HTunnelServer) legacyDispatchLoop(ch *htChannel) {
 	for {
 		select {
 		case msg := <-ch.meshOut:
@@ -130,7 +166,120 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 	}
 }
 
-// dispatchToWaiter sends msg to the next available GET waiter.
+// pipeDispatchLoop routes every meshOut frame onto a per-pipe queue and
+// flushes queues to same-pipe waiters. Never blocks on an idle pipe, so a
+// pipe without a registered GET cannot head-of-line block other pipes.
+// Exits when the channel is closed.
+func (s *HTunnelServer) pipeDispatchLoop(ch *htChannel) {
+	for {
+		if !s.flushPipes(ch) {
+			return
+		}
+		select {
+		case msg := <-ch.meshOut:
+			s.routeToPipe(ch, msg)
+		case w := <-ch.getWaiters:
+			ch.pipeMu.Lock()
+			if w.pipe >= 0 && w.pipe < ch.pipeCnt {
+				ch.pipeWait[w.pipe] = append(ch.pipeWait[w.pipe], w)
+			} else {
+				w.pipe = -1
+				ch.pipeAnyW = append(ch.pipeAnyW, w)
+			}
+			ch.pipeMu.Unlock()
+		case <-ch.closed:
+			return
+		}
+	}
+}
+
+// routeToPipe appends a frame to its pipe queue (or the wildcard queue).
+// Queues are bounded indirectly by the meshOut backpressure at the sender.
+func (s *HTunnelServer) routeToPipe(ch *htChannel, msg meshMsg) {
+	ch.pipeMu.Lock()
+	defer ch.pipeMu.Unlock()
+	if msg.flowKey == flowKeyAny || ch.pipeCnt == 0 {
+		ch.pipeAnyQ = append(ch.pipeAnyQ, msg)
+		return
+	}
+	p := int(msg.flowKey % uint32(ch.pipeCnt))
+	ch.pipeQ[p] = append(ch.pipeQ[p], msg)
+}
+
+// flushPipes delivers queued frames to waiters of the same pipe (or any
+// waiter for the wildcard queue). Stale (timed-out) waiters are dropped.
+// Returns false when the channel is closed.
+func (s *HTunnelServer) flushPipes(ch *htChannel) bool {
+	ch.pipeMu.Lock()
+	defer ch.pipeMu.Unlock()
+
+	// dropStale removes timed-out waiters from the front of a list.
+	dropStale := func(ws []*meshWaiter) []*meshWaiter {
+		for len(ws) > 0 {
+			select {
+			case <-ws[0].done:
+				ws = ws[1:]
+			default:
+				return ws
+			}
+		}
+		return ws
+	}
+	// deliver pushes up to cap(w.msg) queued frames into one waiter.
+	deliver := func(q []meshMsg, w *meshWaiter) []meshMsg {
+		for len(q) > 0 && len(w.msg) < cap(w.msg) {
+			w.msg <- q[0]
+			q = q[1:]
+		}
+		return q
+	}
+
+	for p := range ch.pipeQ {
+		ch.pipeWait[p] = dropStale(ch.pipeWait[p])
+		for len(ch.pipeQ[p]) > 0 && len(ch.pipeWait[p]) > 0 {
+			w := ch.pipeWait[p][0]
+			ch.pipeQ[p] = deliver(ch.pipeQ[p], w)
+			// Waiter is consumed by its GET handler; remaining frames wait
+			// for the client's next GET on this pipe.
+			ch.pipeWait[p] = ch.pipeWait[p][1:]
+			ch.pipeWait[p] = dropStale(ch.pipeWait[p])
+		}
+	}
+
+	ch.pipeAnyW = dropStale(ch.pipeAnyW)
+	for len(ch.pipeAnyQ) > 0 {
+		if len(ch.pipeAnyW) > 0 {
+			w := ch.pipeAnyW[0]
+			ch.pipeAnyQ = deliver(ch.pipeAnyQ, w)
+			ch.pipeAnyW = ch.pipeAnyW[1:]
+			ch.pipeAnyW = dropStale(ch.pipeAnyW)
+			continue
+		}
+		// No wildcard waiter: control frames may borrow any pipe waiter.
+		borrowed := false
+		for p := range ch.pipeQ {
+			ch.pipeWait[p] = dropStale(ch.pipeWait[p])
+			if len(ch.pipeWait[p]) > 0 {
+				w := ch.pipeWait[p][0]
+				ch.pipeAnyQ = deliver(ch.pipeAnyQ, w)
+				ch.pipeWait[p] = ch.pipeWait[p][1:]
+				borrowed = true
+				break
+			}
+		}
+		if !borrowed {
+			break
+		}
+	}
+	select {
+	case <-ch.closed:
+		return false
+	default:
+		return true
+	}
+}
+
+// dispatchToWaiter sends msg to the next available GET waiter (legacy mode).
 // If the waiter has timed out (done closed), the frame stays in meshOut
 // for the next waiter to pick up.
 func (s *HTunnelServer) dispatchToWaiter(ch *htChannel, msg meshMsg) bool {
@@ -176,10 +325,38 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	// Get max batch size from config
 	maxBatchSize := s.htConfig.GetMaxBatchSize()
 
-	// Create a waiter with msg and done channels
+	// Per-flow ordered delivery: the client announces its GET pipe count
+	// (X-N) and this request's pipe (X-Q). A piped GET only ever receives
+	// frames of flows hashed onto its pipe, keeping each flow on one serial
+	// GET chain. GETs without valid pipe headers stay legacy wildcard.
+	pipe := -1
+	if !s.htConfig.GetAllowFlowReorder() {
+		if npStr := r.Header.Get(dialer.HeaderPipeCount); npStr != "" {
+			if np, err := strconv.Atoi(npStr); err == nil && np > 0 && np <= 64 {
+				ch.pipeMu.Lock()
+				if np > ch.pipeCnt {
+					for len(ch.pipeQ) < np {
+						ch.pipeQ = append(ch.pipeQ, nil)
+						ch.pipeWait = append(ch.pipeWait, nil)
+					}
+					ch.pipeCnt = np
+				}
+				if piStr := r.Header.Get(dialer.HeaderPipeIndex); piStr != "" {
+					if pi, err := strconv.Atoi(piStr); err == nil && pi >= 0 && pi < ch.pipeCnt {
+						pipe = pi
+					}
+				}
+				ch.pipeMu.Unlock()
+			}
+		}
+	}
+
+	// Create a waiter with msg and done channels. The dispatcher exclusively
+	// owns meshOut and pushes up to cap(msg) frames into each waiter.
 	waiter := &meshWaiter{
-		msg:  make(chan meshMsg, 1),
+		msg:  make(chan meshMsg, 32),
 		done: make(chan struct{}),
+		pipe: pipe,
 	}
 
 	// Register as a waiter
@@ -209,11 +386,14 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 		return
 	}
 
-	// Coalesce additional frames that are already available (non-blocking)
+	// Coalesce additional frames the dispatcher has already pushed into this
+	// waiter's msg buffer (non-blocking). Piped waiters only ever receive
+	// frames of their pipe, preserving per-flow order; wildcard waiters
+	// receive whatever the dispatcher routed (legacy mode: everything).
 	for buf.Len() < maxBatchSize {
 		done := false
 		select {
-		case msg := <-ch.meshOut:
+		case msg := <-waiter.msg:
 			_ = frame.WriteFrame(&buf, msg.frameType, msg.payload)
 		default:
 			done = true
@@ -235,9 +415,19 @@ type meshChannelTransport struct {
 	ch *htChannel
 }
 
+// flowKeyOf returns the inner-flow key for per-flow ordered delivery:
+// mesh packets are keyed by their IPv4 5-tuple hash, everything else
+// (control frames, legacy/unparseable payloads) is routed wildcard.
+func flowKeyOf(frameType byte, payload []byte) uint32 {
+	if frameType != frame.FrameMeshPacket {
+		return flowKeyAny
+	}
+	return frame.FlowKey(payload)
+}
+
 func (t meshChannelTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	select {
-	case t.ch.meshOut <- meshMsg{frameType: frameType, payload: payload}:
+	case t.ch.meshOut <- meshMsg{frameType: frameType, payload: payload, flowKey: flowKeyOf(frameType, payload)}:
 		return nil
 	case <-t.ch.closed:
 		return io.ErrClosedPipe
@@ -249,7 +439,7 @@ func (t meshChannelTransport) Send(frameType byte, payload []byte, isControl boo
 func (t meshChannelTransport) SendBatch(frames []frame.Frame) error {
 	for _, f := range frames {
 		select {
-		case t.ch.meshOut <- meshMsg{frameType: f.Type, payload: f.Payload}:
+		case t.ch.meshOut <- meshMsg{frameType: f.Type, payload: f.Payload, flowKey: flowKeyOf(f.Type, f.Payload)}:
 		case <-t.ch.closed:
 			return io.ErrClosedPipe
 		}

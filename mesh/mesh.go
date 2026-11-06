@@ -17,6 +17,7 @@ import (
 
 	"phaethon/config"
 	"phaethon/db"
+	"phaethon/frame"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -297,6 +298,15 @@ type MeshManager struct {
 	linkSelectIdx map[string]int
 	linkSelectMu  sync.Mutex
 
+	// Per-flow route pinning (plan mesh-per-flow-ordering §3.3): pins a
+	// flow's frames to one link (nodeID+localSeq) across the multi-link
+	// round-robin above, so parallel paths with unequal latency cannot
+	// reorder one inner flow. The whole cache is dropped on every route
+	// table rebuild (routeTable pointer swap = version change).
+	flowRouteMu         sync.Mutex
+	flowRoutePin        map[uint32]flowRoutePinEntry
+	flowRoutePinEnabled bool
+
 	// Sticky node selection cache (target → nodeID)
 	// Ensures stable routing: once a nodeID is selected for a target, keep using it
 	// until the node becomes unavailable.
@@ -308,6 +318,13 @@ type MeshManager struct {
 
 	// OnPeerRegistered is called when a new peer is registered (for package sync)
 	OnPeerRegistered func(nodeID string)
+}
+
+// flowRoutePinEntry identifies one link to a next-hop node: nodeID +
+// localSeq (the link identity key used in gossip advertisement).
+type flowRoutePinEntry struct {
+	nodeID string
+	seq    uint16
 }
 
 // nodeInfo stores information about a discovered node (from claimedSubnets).
@@ -353,6 +370,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		normalCh:        make(chan meshEvent, 1024),  // non-blocking queue for non-critical ops
 		stickyCache:     make(map[string]string),
 		linkSelectIdx:   make(map[string]int),
+		flowRoutePin:    make(map[uint32]flowRoutePinEntry),
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
@@ -733,6 +751,28 @@ func (m *MeshManager) SetOnRouteChange(callback func()) {
 	m.onRouteChange = callback
 }
 
+// SetFlowRoutePin enables or disables per-flow route pinning (plan
+// mesh-per-flow-ordering §3.3). Called once at startup from config
+// (allow-flow-route-change = inverse).
+func (m *MeshManager) SetFlowRoutePin(enabled bool) {
+	m.flowRouteMu.Lock()
+	m.flowRoutePinEnabled = enabled
+	m.flowRoutePin = make(map[uint32]flowRoutePinEntry)
+	m.flowRouteMu.Unlock()
+}
+
+// dropFlowRoutePins clears the per-flow pin cache. Called on every route
+// table rebuild — the new snapshot's bestPaths may name different links.
+func (m *MeshManager) dropFlowRoutePins() {
+	m.flowRouteMu.Lock()
+	m.flowRoutePin = make(map[uint32]flowRoutePinEntry)
+	m.flowRouteMu.Unlock()
+}
+
+// flowRoutePinCap bounds the pin cache; past it the map is reset rather
+// than grown unboundedly by short-lived flows over long uptime.
+const flowRoutePinCap = 65536
+
 // UpdateConfig hot-swaps domainSuffixes and advertise without restarting.
 func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	m.mu.Lock()
@@ -1064,11 +1104,41 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		}
 	}
 
-	// Round-robin selection among same-hop peers (design §2.8)
-	m.linkSelectMu.Lock()
-	idx := m.linkSelectIdx[targetNodeID] % len(sameHopPeers)
-	m.linkSelectIdx[targetNodeID] = idx + 1
-	m.linkSelectMu.Unlock()
+	// Multi-link selection among same-hop peers (design §2.8).
+	// Per-flow pinning (plan mesh-per-flow-ordering §3.3): a flow's frames
+	// must leave via the same link, or parallel paths with unequal latency
+	// reorder the inner stream. Unpinned flows (pinning off, non-IPv4)
+	// keep the round-robin.
+	idx := 0
+	pinned := false
+	var pinKey uint32
+	if m.flowRoutePinEnabled && len(packet) >= 20 {
+		if fk := frame.FlowKey(packet); fk != 0 {
+			pinKey = fk
+			m.flowRouteMu.Lock()
+			if pin, ok := m.flowRoutePin[fk]; ok {
+				for i, pwh := range sameHopPeers {
+					if pwh.Peer.GetNodeID() == pin.nodeID && pwh.Peer.GetLocalSeq() == pin.seq {
+						idx = i
+						pinned = true
+						break
+					}
+				}
+				if !pinned {
+					// Pinned link left the candidate set (peer churn):
+					// drop the stale pin and reselect below.
+					delete(m.flowRoutePin, fk)
+				}
+			}
+			m.flowRouteMu.Unlock()
+		}
+	}
+	if !pinned {
+		m.linkSelectMu.Lock()
+		idx = m.linkSelectIdx[targetNodeID] % len(sameHopPeers)
+		m.linkSelectIdx[targetNodeID] = idx + 1
+		m.linkSelectMu.Unlock()
+	}
 
 	// Try to send via selected peer, with failover to other same-hop peers
 	var sendErr error
@@ -1080,6 +1150,13 @@ func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
 		TraceForwarding("peer_selected", packet, "target=%s peer=%s proxy=%s seq=%d hop=%d candidate=%d/%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
 		sendErr = peer.Send(packet)
 		if sendErr == nil {
+			if pinKey != 0 {
+				m.flowRouteMu.Lock()
+				if len(m.flowRoutePin) < flowRoutePinCap {
+					m.flowRoutePin[pinKey] = flowRoutePinEntry{nodeID: peer.GetNodeID(), seq: peer.GetLocalSeq()}
+				}
+				m.flowRouteMu.Unlock()
+			}
 			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s seq=%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq())
 			if i > 0 {
 				util.LogModuleInfo("mesh", "[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
@@ -2197,6 +2274,9 @@ func (m *MeshManager) recomputeRoutes() {
 		subnetOwner: subnetOwner,
 	})
 	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
+
+	// New route snapshot: pinned links may no longer be on the best path.
+	m.dropFlowRoutePins()
 
 	// Notify netstack of route change (for tunnel NIC updates)
 	if m.onRouteChange != nil {

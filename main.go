@@ -334,6 +334,7 @@ func run(prev *activeResources) (*activeResources, error) {
 		util.LogModuleDebug("system", "[MESH-DEBUG] ForwardingTrace config=%v enabled=%v", meshConfig.ForwardingTrace, mesh.ForwardingTraceEnabled())
 		meshMgr.SetDataDir(dataDir)
 		meshMgr.SetTCPKeepalive(meshConfig.TCPKeepalive)
+		meshMgr.SetFlowRoutePin(!meshConfig.GetAllowFlowRouteChange())
 
 		// Set static IPIP routes
 		staticRoutes := meshConfig.StaticRoutes

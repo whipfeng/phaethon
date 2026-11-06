@@ -69,6 +69,17 @@ type htChannel struct {
 	meshOut    chan meshMsg     // frames → client (drained by GET)
 	getWaiters chan *meshWaiter // waiting GET requests (for concurrent GET support)
 
+	// Per-flow ordered GET dispatch (mesh-per-flow-ordering §3.2):
+	// frames are routed by flow key onto per-pipe queues and only ever
+	// served to a GET waiter of the same pipe, so one inner flow rides one
+	// serial GET chain. pipeCnt == 0 = legacy unordered dispatch.
+	pipeMu    sync.Mutex
+	pipeCnt   int             // client-announced pipe count (X-N), 0 = legacy
+	pipeQ     [][]meshMsg     // queued frames per pipe (index = flowKey % pipeCnt)
+	pipeWait  [][]*meshWaiter // registered waiters per pipe
+	pipeAnyQ  []meshMsg       // wildcard queue: control + legacy data
+	pipeAnyW  []*meshWaiter   // wildcard waiters (GETs without a valid pipe)
+
 	// Cached results for step==0 retry
 	lastReadData []byte
 	lastWriteOk  bool

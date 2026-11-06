@@ -75,6 +75,29 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 
 **修复**：模式判定改为纯配置——`AllowFlowReorder` → legacy；否则一律 pipeDispatchLoop。X-N 到达前 `pipeCnt==0`，数据帧全走 wildcard 队列（pipeAnyQ/pipeAnyW），行为等价 legacy；X-N 到达后 pipeQ 惰性增长，正序分发自然接管。X-N 前已入 pipeAnyQ 的帧与 X-N 后的 pipe 帧之间可能有短暂交错（仅通道建立初期、量极少），接受。
 
+### 3.8 V2 服务端 GET 投递：控制帧优先 + 按字节合批（v5 取证实锤，2026-11-06，用户已批准）
+
+**现象**：QG↔JF 走 V2 直连时，8 流负载下 3 次中 2 次会话重建（QG 日志 `link dead`：连续 10 个 ping 丢失），重建瞬间 JF pipeQ 积压全丢 → 内层流整窗丢失 → RTO 退避到 30~50s，表现为硬停滞/截断；18:55 QGW↔JF V2 段同样复现。V1（单 FIFO txBuf）无此问题：控制帧只被延迟、不会饿死。
+
+**根因（代码 + 日志实锤）**：
+1. p2p 层 pong 走 `isControl=true`（p2p.go handlePing），但 `meshChannelTransport.Send` 丢弃了 isControl，`flowKeyOf` 把一切非 MeshPacket 帧标 `flowKeyAny` → 进 `pipeAnyQ`。
+2. `flushPipes` 先让每条 pipe 的 waiter 被本 pipe 数据消费，`pipeAnyQ` 只能等"全部 pipe 数据都投完后剩下的 waiter"。客户端 2 条 GET 都带 X-Q（都是 pipe waiter），负载下 pipe 数据永不排空 → pong **饿死**而非延迟 → 对端 10 次 ping 超时判链路死亡。
+3. 每 GET 上限 32 帧（waiter.msg cap 32，~42KB）× 2 条串行 GET = 吞吐天花板，加剧 pipeQ 积压（v5 实测 ~600ms 排队 ≈ 10MB 用户态缓冲即在此）。
+4. 附带竞态：handler 超时与 dispatcher 推帧之间无同步，已推入 waiter.msg 的帧在 408 时丢失。
+
+**改法（F1 + F3，仅改 server/htunnel_mesh.go + htChannel 字段，不改协议、不改 p2p 层）**：
+1. **控制帧按 isControl 分类（F1）**：`meshMsg` 增 `control` 字段，`Send(..., isControl)` 透传；`SendBatch` 均为数据帧。控制帧进新增的 `ctrlQ`，每次投递**最先**装入批次，任意 waiter（pipe 或 wildcard）可领取。
+2. **ping 保持走数据通道**（用户既定设计：ping 用于度量数据路径）：非控制、非 MeshPacket 帧（ping 等）在 `pipeCnt>0` 时按 `pipeRR` 轮转落到某条 pipe 队列尾，与该 pipe 数据同 FIFO 排队；`pipeCnt==0` 时进 `pipeAnyQ`。
+3. **批次组装顺序**：pipe waiter = `ctrlQ → pipeAnyQ → pipeQ[p]`；wildcard waiter = `ctrlQ → pipeAnyQ`。pipeAnyQ 只含 X-N 到达前的早期数据，排在 pipe 数据前保持其相对先后。
+4. **按字节合批（F3）**：一个 GET 的批次按线上字节（3+len(payload)）累计至 `GetMaxBatchSize()`（默认 512KB，低于 nginx 1m），至少 1 帧；取代"32 帧/GET"。dispatcher 在一次唤醒中先非阻塞排空 meshOut 再 flush，使积压时批次自然做大，空闲时首帧即发（§3.4 语义不变）。
+5. **无竞态交接**：waiter 改为 `batch chan []meshMsg`（cap 1，每 waiter 恰投 1 次）。dispatcher 在 `pipeMu` 下检查 `done` 后投递；handler 超时时在 `pipeMu` 下 `close(done)`，随后非阻塞检查 batch——已交接的批次照常返回 200，不丢帧。
+6. **legacy 模式（AllowFlowReorder=true）并入同一投递循环**：legacy 下 meshHandleRead 本就忽略 X-N，pipeCnt 恒为 0，数据帧全走 pipeAnyQ 单 FIFO、waiter 全为 wildcard，按字节整批交接；控制帧同样优先（与有序/乱序开关正交，只会更好）。原 `legacyDispatchLoop`/`dispatchToWaiter` 删除。
+7. 已出队批次的原队列槽位清零、空队列置 nil，避免底层数组钉住已投递的 payload。
+
+**不在本节（F2，另立方案待批）**：pipeQ 仍为无界队列；单纯加界背压只会把膨胀挪进 p2p DRR 8MB 预算，真正治理需 sojourn-time AQM（CoDel 类丢弃）+ `meshChannelTransport.Send` 监听 peer 停止。F1+F3 先止血（消除会话重建）并提升 GET 吞吐，F2 视复测排队时延再定。
+
+**验收**：QG→JF V2 8 流下载 3 轮，QG/JF 日志零 `link dead`/会话重建；聚合吞吐 ≥ V1 直连基线（3.1~5.1MB/s）。
+
 ## 四、不做的事
 
 - ❌ mesh 层重组缓冲/序号重排（netstack 的本职，越俎代庖）。
@@ -91,6 +114,7 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 4. **3.4/3.5** 批策略 + config。
 5. **3.6 stripe 亲和钉死**（追加）：stripe_transport.go 粘性亲和表（1 处文件）。
 6. **3.7 dispatch 判定修复**（追加）：meshDispatchLoop 模式判定改纯配置（1 处文件）。
+7. **3.8 V2 服务端控制帧优先 + 按字节合批**（追加）：htunnel_mesh.go 投递重写 + htChannel 字段（2 处文件），JF 部署需用户确认。
 5. 本机构建（版本戳）→ VM 部署自测 mesh 起连、控制台正常。
 6. QG 部署（中转节点，观察环路/转发指标无回归）。
 7. JF + deskzq 部署（用户确认后，生产节点纪律：备份 prev-running、安全 pkill、无参启动、验证版本）。

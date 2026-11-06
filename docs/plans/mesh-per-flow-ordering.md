@@ -44,11 +44,13 @@ mesh v2 隧道层把同一条内层 TCP 流的帧拆到多路并发 POST / 多�
 
 ### 3.4 批填充策略微调
 
-每流独占后，原"攒批等待"（MinWait 1s/MaxWait 30s 见 server/htunnel_mesh.go:161-174 与 adjustWaitTime）在单流场景会引入不必要延迟。改为：**流的队列抽空即发，有多少发多少**（上限 MaxBatchSize 不变）。聚合吞吐由多流并发提供，不由单流攒批提供。
+每流独占后，原"攒批等待"（MinWait 1s/MaxWait 30s 见 dialer/htunnel_direct.go adjustWaitTime 与 server 侧首帧等待）在单流场景会引入不必要延迟。改为：**流的队列抽空即发，有多少发多少**（上限 MaxBatchSize 不变）。聚合吞吐由多流并发提供，不由单流攒批提供。
+
+**实施注记**：3.1 的有序调度器本就在 POST 槽释放即刻扫描发批，无攒批定时器；3.2 的 dispatcher 对每条流首帧即刻投递、只合并已入队帧——"抽空即发"由 3.1/3.2 的构造天然达成，3.4 无需独立代码改动。adjustWaitTime 仅调控空闲轮询频率（408 重试间隔），与批填充无关，保持原样。
 
 ### 3.5 配置开关
 
-`HTunnelConfig` 新增 `PerFlowOrdered bool`（默认 true），POST 独占与 GET 钉死共用一个开关；路由钉死独立开关 `PerFlowRoutePin`。回滚 = 置 false 或退回上次运行版本，两档都有。
+`HTunnelConfig` 新增 `AllowFlowReorder bool`（默认 false = 有序；true 回滚旧行为），POST 独占与 GET 钉死共用一个开关；路由钉死独立开关 `MeshConfig.AllowFlowRouteChange`（默认 false = 钉死；true 回滚逐包轮转）。回滚 = 置 true 或退回上次运行版本，两档都有。
 
 ## 四、不做的事
 

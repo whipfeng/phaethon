@@ -24,6 +24,8 @@ const (
 	HeaderContentSeq   = "X-S"
 	HeaderCommand      = "X-C"
 	HeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time
+	HeaderPipeIndex    = "X-Q" // per-flow ordered GET: this GET's pipe index
+	HeaderPipeCount    = "X-N" // per-flow ordered GET: total client pipes
 )
 
 // HTunnelDialer connects through an HTTP tunnel proxy

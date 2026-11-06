@@ -403,6 +403,22 @@ GG 替代测试环境（不依赖 DESKW 部署）：GG 复用已通告的 `172.1
 - 结论：GG 路径的上限是 **GG 出口带宽（约 3Mbps）**，与 phaethon 无关；方案 A 后单流 22.5s ≈ 8MB/355KB/s，已基本跑满。单流跨 lane 分发 / 外层 BBR 在这条路径上**没有收益**，不做。GG 路径不适合做吞吐验收，吞吐验收以 DESKW 路径（elephant / 8 流）为准。
 - 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s），待 DESKW 部署后看是否复现。
 
+**全网验收（2026-11-07，v0.8.0-331-gcc72400；GG/JF/QG 手动部署，DESKW/DESKZQ 经包分发自动升级）**：
+
+| 项 | 基线 | 结果 |
+|---|---|---|
+| elephant app.js（1.78MB，Mac 单连接） | ≤ 12.1s | 7.9s / 2.6s |
+| elephant chunk-vendors.js（7.1MB） | ≤ 72.5s | **4.0s / 8.3s** |
+| QG→JF 8 流 × 5 轮聚合 | 3.90~5.55MB/s | 3.02 / 4.46 / 4.49 / 4.83 / 3.97MB/s，全部完整，MGMS_HT 未重建 |
+| DESKW 撤销计数 | — | spurious 122 / undo 122 |
+| JF 撤销计数 | — | spurious 2042 / undo 1957 |
+
+- 单流（elephant）提升一个数量级：DESKW 发送端不再因乱序误降窗。
+- 8 流聚合本就受链路容量约束而非单流拥塞窗口，结果与基线持平（第 1 轮偏低，其余在区间内），无劣化。
+- 结论：§3.11 验收通过。
+
+**运维修复**：QG `/etc/init.d/phaethon` 的 stop 原为 `pkill -9 phaethon`，按进程名会连 init 脚本自身一起杀掉（服务卡在 stopping、新二进制未替换）。改为 `pkill -9 -f '^(\./|/root/)phaethon( |$)'`，`rc-service phaethon restart` 实测通过；原文件备份 `/root/phaethon.initd.bak`。
+
 ## 四、不做的事
 
 - ❌ mesh 层重组缓冲/序号重排（netstack 的本职，越俎代庖）。

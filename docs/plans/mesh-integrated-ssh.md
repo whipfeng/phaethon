@@ -47,7 +47,7 @@ else → 维持 adminHandler.ServeConn(conn)   // 443 等行为不变
 
 ### 3.3 公钥管理与页面
 
-- db bucket `ssh_keys`：key = 公钥指纹（SHA256），value = `{name, pubkey, created_at}`（db/models.go 加模型）。
+- db bucket `ssh_keys`：**支持多条公钥**（多台设备/多人各一条），key = 公钥指纹（SHA256），value = `{name, pubkey, created_at}`（name 为备注，便于辨识归属，db/models.go 加模型）。
 - API（走现有 authMiddleware，即 admin 登录态才可管理）：
   - `GET /api/ssh-keys`：列表 + host key 指纹 + enabled 状态。
   - `POST /api/ssh-keys`：粘贴一行公钥文本，`ssh.ParseAuthorizedKey` 解析校验、拒绝非法/重复。

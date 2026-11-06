@@ -2054,6 +2054,7 @@ func (n *Netstack) TCPStats() map[string]uint64 {
 	put("timeouts", t.Timeouts)
 	put("spurious_recovery", t.SpuriousRecovery)
 	put("spurious_rto_recovery", t.SpuriousRTORecovery)
+	put("spurious_recovery_undo", t.SpuriousRecoveryUndo)
 	put("segments_acked_with_dsack", t.SegmentsAckedWithDSACK)
 	put("checksum_errors", t.ChecksumErrors)
 	put("resets_received", t.ResetsReceived)

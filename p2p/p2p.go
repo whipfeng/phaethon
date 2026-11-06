@@ -1424,21 +1424,27 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// The controller (tasks 2.x) dials extra lanes via dialStripeLane and
 		// defers to an Active UDP leg. Lane dialing needs a P2P frame dialer;
 		// without one the wrapper still splits/fans-in but never adds lanes.
+		// h_tunnel V2 (POST/GET pool, see dialer/htunnel_bind.go) is not a
+		// single byte stream, so lanes don't apply.
+		base := transport
 		var stripe *stripeTransport
-		if pd, ok := d.(dialer.P2PDialer); ok {
-			stripe = newStripeTransport(transport, stripeConfig{
-				dialLane: func() (uint32, frame.FrameTransport, error) {
-					return m.dialStripeLane(peer, pd)
-				},
-				udpActive: peer.udpRoutingActive,
-			})
-		} else {
-			stripe = newStripeTransport(transport, stripeConfig{
-				udpActive: peer.udpRoutingActive,
-			})
+		if !(strings.EqualFold(proxy.Type, config.ProxyH_TUNNEL) && proxy.IsP2P() && proxy.V2) {
+			if pd, ok := d.(dialer.P2PDialer); ok {
+				stripe = newStripeTransport(transport, stripeConfig{
+					dialLane: func() (uint32, frame.FrameTransport, error) {
+						return m.dialStripeLane(peer, pd)
+					},
+					udpActive: peer.udpRoutingActive,
+				})
+			} else {
+				stripe = newStripeTransport(transport, stripeConfig{
+					udpActive: peer.udpRoutingActive,
+				})
+			}
+			base = stripe
 		}
 		peer.stripe = stripe
-		peer.transport = stripe
+		peer.transport = base
 		peer.transportMu.Unlock()
 
 		// Active-side UDP leg wrap (design §7 Phase 1): socks5 proxies with
@@ -1446,7 +1452,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// dialer) avoids the dialer→p2p import cycle.
 		if proxy.IsP2PUDP() {
 			if ud, ok2 := d.(dialer.UDPDialer); ok2 {
-				wrapped := newUDPLegTransport(stripe, true, ud.DialPacket)
+				wrapped := newUDPLegTransport(base, true, ud.DialPacket)
 				peer.leg = wrapped
 				peer.transportMu.Lock()
 				peer.transport = wrapped

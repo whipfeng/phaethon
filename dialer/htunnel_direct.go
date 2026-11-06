@@ -77,11 +77,18 @@ type htunnelDirectTransport struct {
 	// flow spread over up to 16 in-flight batches and arrive reordered
 	// (~50% OOO observed), collapsing the inner sender's cwnd.
 	ordMu       sync.Mutex
+	ordCond     *sync.Cond             // signalled when ordBytes drops or on close
 	ordPending  map[uint32]*ordFlowBuf // flow key -> queued frames
 	ordFIFO     []uint32               // flow keys with queued frames, arrival order
 	ordInflight map[uint32]bool        // flow keys with an uncompleted POST
 	ordWake     chan struct{}          // enqueue / completion signal
+	ordBytes    int                    // payload bytes queued across all flows
+	ordClosed   bool
 }
+
+// ordPendingCap bounds the ordered send queue (plan §3.9 R3): past it
+// enqueueOrdered blocks, pushing backpressure into the p2p write loop.
+const ordPendingCap = 4 << 20
 
 // ordFlowBuf holds one flow's queued frames between dispatches.
 type ordFlowBuf struct {
@@ -126,11 +133,8 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 
 	util.LogModuleDebug("htunnel", "mesh channel established via %s (connectionID=%s)", proxy.Name, d.ConnIDStr(), proxy.URL, connectionID)
 
-	// v0.2.0: get h_tunnel config (nil = use defaults)
-	// TODO: pass config through dialer chain instead of accessing global
-	var htConfig *config.HTunnelConfig
-	// For now, use nil which will trigger default values in Get* methods
-
+	// Snapshot per channel: the mode must not change under a live channel.
+	htConfig := config.HTunnel()
 	baseGETs := htConfig.GetGETSlots()
 	_, _, defaultWait := htConfig.GetWaitTimeRange()
 
@@ -155,6 +159,7 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		ordInflight: make(map[uint32]bool),
 		ordWake:     make(chan struct{}, 1),
 	}
+	t.ordCond = sync.NewCond(&t.ordMu)
 
 	// Per-flow ordered dispatcher for data frames.
 	go t.orderedDispatchLoop()
@@ -184,14 +189,17 @@ func (t *htunnelDirectTransport) Send(frameType byte, payload []byte, isControl 
 
 // enqueueOrdered appends frames to their per-flow queues and wakes the
 // dispatcher. Per-flow order is preserved because p2p's batching and the
-// stripe lane pin already emit a flow's frames in order.
+// stripe lane pin already emit a flow's frames in order. Blocks while the
+// queue is at ordPendingCap; one call may overshoot the cap by its batch.
 func (t *htunnelDirectTransport) enqueueOrdered(frames []frame.Frame) error {
-	select {
-	case <-t.closed:
-		return io.ErrClosedPipe
-	default:
-	}
 	t.ordMu.Lock()
+	for t.ordBytes >= ordPendingCap && !t.ordClosed {
+		t.ordCond.Wait()
+	}
+	if t.ordClosed {
+		t.ordMu.Unlock()
+		return io.ErrClosedPipe
+	}
 	for _, f := range frames {
 		key := frame.FlowKey(f.Payload)
 		buf := t.ordPending[key]
@@ -202,6 +210,7 @@ func (t *htunnelDirectTransport) enqueueOrdered(frames []frame.Frame) error {
 		}
 		buf.frames = append(buf.frames, f)
 		buf.bytes += len(f.Payload)
+		t.ordBytes += len(f.Payload)
 	}
 	t.ordMu.Unlock()
 	select {
@@ -240,6 +249,8 @@ func (t *htunnelDirectTransport) orderedDispatchLoop() {
 			batch = buf.frames[:n]
 			buf.frames = buf.frames[n:]
 			buf.bytes -= sz
+			t.ordBytes -= sz
+			t.ordCond.Broadcast()
 			t.ordInflight[key] = true
 			// Rotate: dispatched flow goes to the FIFO tail when it still
 			// has queued frames, otherwise it leaves the rotation.
@@ -605,6 +616,10 @@ func (t *htunnelDirectTransport) Recv() (byte, []byte, error) {
 func (t *htunnelDirectTransport) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closed)
+		t.ordMu.Lock()
+		t.ordClosed = true
+		t.ordCond.Broadcast()
+		t.ordMu.Unlock()
 
 		// v0.2.0: stop heartbeat goroutine
 		select {

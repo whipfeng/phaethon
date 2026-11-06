@@ -17,7 +17,6 @@ import (
 
 	"phaethon/config"
 	"phaethon/db"
-	"phaethon/frame"
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -293,20 +292,6 @@ type MeshManager struct {
 	stallDVIP  atomic.Uint64 // dst == local VIP (.1): returns of host-originated traffic
 	stallDIPIP atomic.Uint64 // IPIP outer dst == local EIP (.4): exit-node returns
 
-	// Round-robin state for multi-link load balancing (design §2.8)
-	// Key: target nodeID, Value: last used index
-	linkSelectIdx map[string]int
-	linkSelectMu  sync.Mutex
-
-	// Per-flow route pinning (plan mesh-per-flow-ordering §3.3): pins a
-	// flow's frames to one link (nodeID+localSeq) across the multi-link
-	// round-robin above, so parallel paths with unequal latency cannot
-	// reorder one inner flow. The whole cache is dropped on every route
-	// table rebuild (routeTable pointer swap = version change).
-	flowRouteMu         sync.Mutex
-	flowRoutePin        map[uint32]flowRoutePinEntry
-	flowRoutePinEnabled bool
-
 	// Sticky node selection cache (target → nodeID)
 	// Ensures stable routing: once a nodeID is selected for a target, keep using it
 	// until the node becomes unavailable.
@@ -318,13 +303,6 @@ type MeshManager struct {
 
 	// OnPeerRegistered is called when a new peer is registered (for package sync)
 	OnPeerRegistered func(nodeID string)
-}
-
-// flowRoutePinEntry identifies one link to a next-hop node: nodeID +
-// localSeq (the link identity key used in gossip advertisement).
-type flowRoutePinEntry struct {
-	nodeID string
-	seq    uint16
 }
 
 // nodeInfo stores information about a discovered node (from claimedSubnets).
@@ -369,8 +347,6 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		criticalCh:      make(chan meshEvent, 256),   // blocking queue for critical ops
 		normalCh:        make(chan meshEvent, 1024),  // non-blocking queue for non-critical ops
 		stickyCache:     make(map[string]string),
-		linkSelectIdx:   make(map[string]int),
-		flowRoutePin:    make(map[uint32]flowRoutePinEntry),
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
@@ -751,28 +727,6 @@ func (m *MeshManager) SetOnRouteChange(callback func()) {
 	m.onRouteChange = callback
 }
 
-// SetFlowRoutePin enables or disables per-flow route pinning (plan
-// mesh-per-flow-ordering §3.3). Called once at startup from config
-// (allow-flow-route-change = inverse).
-func (m *MeshManager) SetFlowRoutePin(enabled bool) {
-	m.flowRouteMu.Lock()
-	m.flowRoutePinEnabled = enabled
-	m.flowRoutePin = make(map[uint32]flowRoutePinEntry)
-	m.flowRouteMu.Unlock()
-}
-
-// dropFlowRoutePins clears the per-flow pin cache. Called on every route
-// table rebuild — the new snapshot's bestPaths may name different links.
-func (m *MeshManager) dropFlowRoutePins() {
-	m.flowRouteMu.Lock()
-	m.flowRoutePin = make(map[uint32]flowRoutePinEntry)
-	m.flowRouteMu.Unlock()
-}
-
-// flowRoutePinCap bounds the pin cache; past it the map is reset rather
-// than grown unboundedly by short-lived flows over long uptime.
-const flowRoutePinCap = 65536
-
 // UpdateConfig hot-swaps domainSuffixes and advertise without restarting.
 func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	m.mu.Lock()
@@ -1072,153 +1026,6 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 // Blocking send to criticalCh to ensure cleanup is never dropped.
 func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 	m.criticalCh <- meshEvent{kind: peerUnregisterByNodeID, nodeID: nodeID}
-}
-
-// SendToNode sends an encapsulated packet to a specific target node via the mesh network.
-// This is used by tunnel NICs to send IPIP-encapsulated packets to egress nodes.
-// Multi-link load balancing: round-robin among same-hop peers (design §2.8).
-func (m *MeshManager) SendToNode(targetNodeID string, packet []byte) error {
-	if targetNodeID == "" {
-		return fmt.Errorf("empty target node ID")
-	}
-	if len(packet) == 0 {
-		return fmt.Errorf("empty packet")
-	}
-
-	// Find peers that can reach the target node
-	nextHops := m.findNextHopsForNode(targetNodeID)
-	if len(nextHops) == 0 {
-		return fmt.Errorf("no route to node %s", targetNodeID)
-	}
-
-	// Find minimum hop count
-	minHop := nextHops[0].Hop
-
-	// Collect all peers with minimum hop count
-	var sameHopPeers []PeerWithHop
-	for _, peerWithHop := range nextHops {
-		if peerWithHop.Hop == minHop {
-			sameHopPeers = append(sameHopPeers, peerWithHop)
-		} else {
-			break // Already sorted by hop, so we can stop
-		}
-	}
-
-	// Multi-link selection among same-hop peers (design §2.8).
-	// Per-flow pinning (plan mesh-per-flow-ordering §3.3): a flow's frames
-	// must leave via the same link, or parallel paths with unequal latency
-	// reorder the inner stream. Unpinned flows (pinning off, non-IPv4)
-	// keep the round-robin.
-	idx := 0
-	pinned := false
-	var pinKey uint32
-	if m.flowRoutePinEnabled && len(packet) >= 20 {
-		if fk := frame.FlowKey(packet); fk != 0 {
-			pinKey = fk
-			m.flowRouteMu.Lock()
-			if pin, ok := m.flowRoutePin[fk]; ok {
-				for i, pwh := range sameHopPeers {
-					if pwh.Peer.GetNodeID() == pin.nodeID && pwh.Peer.GetLocalSeq() == pin.seq {
-						idx = i
-						pinned = true
-						break
-					}
-				}
-				if !pinned {
-					// Pinned link left the candidate set (peer churn):
-					// drop the stale pin and reselect below.
-					delete(m.flowRoutePin, fk)
-				}
-			}
-			m.flowRouteMu.Unlock()
-		}
-	}
-	if !pinned {
-		m.linkSelectMu.Lock()
-		idx = m.linkSelectIdx[targetNodeID] % len(sameHopPeers)
-		m.linkSelectIdx[targetNodeID] = idx + 1
-		m.linkSelectMu.Unlock()
-	}
-
-	// Try to send via selected peer, with failover to other same-hop peers
-	var sendErr error
-	for i := 0; i < len(sameHopPeers); i++ {
-		peerIdx := (idx + i) % len(sameHopPeers)
-		peerWithHop := sameHopPeers[peerIdx]
-		peer := peerWithHop.Peer
-
-		TraceForwarding("peer_selected", packet, "target=%s peer=%s proxy=%s seq=%d hop=%d candidate=%d/%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
-		sendErr = peer.Send(packet)
-		if sendErr == nil {
-			if pinKey != 0 {
-				m.flowRouteMu.Lock()
-				if len(m.flowRoutePin) < flowRoutePinCap {
-					m.flowRoutePin[pinKey] = flowRoutePinEntry{nodeID: peer.GetNodeID(), seq: peer.GetLocalSeq()}
-				}
-				m.flowRouteMu.Unlock()
-			}
-			TraceForwarding("peer_enqueued", packet, "target=%s peer=%s proxy=%s seq=%d", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq())
-			if i > 0 {
-				util.LogModuleInfo("mesh", "[MESH] send to node %s: failed on first peer, succeeded on fallback peer %s (attempt %d)",
-					targetNodeID, peer.GetNodeID(), i+1)
-			}
-			// Phaethon diagnostic: confirm packet handed off to P2P layer
-			if len(packet) >= 20 {
-				srcIP := net.IP(packet[12:16])
-				dstIP := net.IP(packet[16:20])
-				util.LogModuleDebug("mesh", "[MESH-SEND] target=%s peer=%s proxy=%s %s -> %s len=%d hop=%d",
-					targetNodeID, peer.GetNodeID(), peer.GetProxyName(), srcIP, dstIP, len(packet), peerWithHop.Hop)
-			}
-			util.LogModuleDebug("mesh", "[MESH] sent %d bytes to node %s via peer %s (hop=%d, link=%d/%d)",
-				len(packet), targetNodeID, peer.GetNodeID(), peerWithHop.Hop, peerIdx+1, len(sameHopPeers))
-			return nil
-		}
-
-		TraceForwarding("peer_send_error", packet, "target=%s peer=%s proxy=%s seq=%d err=%v", targetNodeID, peer.GetNodeID(), peer.GetProxyName(), peer.GetLocalSeq(), sendErr)
-
-		// Handle peer stopped
-		if errors.Is(sendErr, ErrPeerStopped) {
-			util.LogModuleWarn("mesh", "[MESH] send to node %s failed: peer %s stopped, removing its selected link",
-				targetNodeID, peer.GetNodeID())
-			if m.p2p != nil {
-				m.p2p.StopPeerByProxyName(peer.GetProxyName())
-			}
-			continue
-		}
-
-		// Queue full or other error, try next candidate
-		util.LogModuleDebug("mesh", "[MESH] send to node %s via peer %s failed: %v, trying next candidate",
-			targetNodeID, peer.GetNodeID(), sendErr)
-	}
-
-	// All same-hop peers failed, return error
-	return fmt.Errorf("send to node %s failed on all %d same-hop candidates: %v", targetNodeID, len(sameHopPeers), sendErr)
-}
-
-// findNextHopsForNode finds peers that can reach a specific target node.
-// Returns ALL peers to the best next hop (for multi-link load balancing).
-func (m *MeshManager) findNextHopsForNode(targetNodeID string) []PeerWithHop {
-	rt := m.getRouteTable()
-
-	// Find the best path to the target node using Dijkstra results
-	peers := m.topology.GetAllPeers()
-
-	if path, ok := rt.bestPaths[targetNodeID]; ok {
-		// Find ALL peers that connect to the best next hop node
-		// (multiple links to same node = multiple peers with same NodeID)
-		var result []PeerWithHop
-		for _, peer := range peers {
-			if peer.Sender != nil && peer.NodeID() == path.NextHop {
-				result = append(result, PeerWithHop{Peer: peer.Sender, Hop: 1})
-			}
-		}
-		if len(result) > 0 {
-			return result
-		}
-	}
-
-	// Fallback: find any peer that has the target node in its routing table
-	return m.findNextHopsFallback([]string{targetNodeID}, peers)
 }
 
 // HandleMeshFrame processes a raw IP packet received from a peer (design §4.5,
@@ -2274,9 +2081,6 @@ func (m *MeshManager) recomputeRoutes() {
 		subnetOwner: subnetOwner,
 	})
 	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
-
-	// New route snapshot: pinned links may no longer be on the best path.
-	m.dropFlowRoutePins()
 
 	// Notify netstack of route change (for tunnel NIC updates)
 	if m.onRouteChange != nil {

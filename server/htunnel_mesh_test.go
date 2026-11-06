@@ -83,6 +83,8 @@ func (h *meshTestHandler) BuildGossipInfo() *mesh.GossipInfo {
 	}
 }
 
+func (h *meshTestHandler) TriggerGossip() {}
+
 // TestHTunnelMeshChannel_E2E runs a full loopback: client direct transport →
 // server mesh channel → real P2P session → stub mesh handler, verifying v8
 // gossip-based registration, mesh packet echo and channel teardown.

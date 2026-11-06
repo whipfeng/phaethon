@@ -128,31 +128,28 @@ func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter
 }
 
 // meshDispatchLoop distributes frames from meshOut to GET requests.
-// Two modes:
-//   - pipeCnt == 0 (legacy): frames go to the first available waiter and
+// Two modes (config-selected, NOT channel-state-selected):
+//   - AllowFlowReorder: legacy — frames go to the first available waiter and
 //     GET handlers coalesce by draining meshOut directly.
-//   - pipeCnt > 0 (per-flow ordered, client announced X-N): each frame is
-//     routed onto its flow's pipe queue (flowKey % pipeCnt) and served
-//     only to a waiter of the same pipe — one inner flow rides one serial
-//     GET chain and arrives client-side in emission order. Wildcard
-//     frames (control, legacy data) go to pipeAnyQ and ride any waiter.
+//   - ordered (default): every frame is routed onto its flow's pipe queue
+//     (flowKey % pipeCnt) and served only to a waiter of the same pipe.
+//
+// The ordered mode must be chosen by config alone: the dispatcher starts at
+// channel creation, before the client's first GET announces the pipe count
+// (X-N), so deciding on pipeCnt here would lock every channel into legacy
+// mode and silently disable per-flow ordering (found 2026-11-06: dribble
+// unchanged after 3.2 deployed). Until X-N arrives pipeCnt == 0 and all data
+// rides the wildcard queue — equivalent to legacy for early frames.
 func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
-	if s.legacyDispatch(ch) {
+	if s.htConfig.GetAllowFlowReorder() {
 		s.legacyDispatchLoop(ch)
 		return
 	}
 	s.pipeDispatchLoop(ch)
 }
 
-// legacyDispatch reports whether the channel is still in unordered mode
-// (no client pipe announcement yet, or the server has flow reordering
-// explicitly allowed).
-func (s *HTunnelServer) legacyDispatch(ch *htChannel) bool {
-	ch.pipeMu.Lock()
-	defer ch.pipeMu.Unlock()
-	return ch.pipeCnt == 0 || s.htConfig.GetAllowFlowReorder()
-}
-
+// legacyDispatchLoop is the AllowFlowReorder rollback: unordered delivery
+// to the first available waiter.
 func (s *HTunnelServer) legacyDispatchLoop(ch *htChannel) {
 	for {
 		select {

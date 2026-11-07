@@ -92,8 +92,11 @@ type stripeConfig struct {
 	// (design §7): while true the controller suppresses adds.
 	udpActive func() bool
 	// sendControl enqueues a control frame through the peer's control queue.
-	// Used by LaneAck to report cumulative rx counts.
+	// Used by LaneAck/LaneGauge urgent announcements.
 	sendControl func(byte, []byte) error
+	// onCredit wakes the peer's write loop to re-check its in-flight credit
+	// after an ack or a cap adjustment (§3.4). Nil in tests.
+	onCredit func()
 	// name is the peer identifier for diagnostic logs.
 	name string
 }
@@ -162,23 +165,31 @@ type stripeTransport struct {
 	closed chan struct{}
 	closeOnce sync.Once
 
-	// LaneAck metering (§3 B1)
-	primaryFlow     laneFlow
-	ackRequested    atomic.Bool
-	ackRequestSent  atomic.Bool
-	diagPrimaryTx   int64
+	// LaneAck metering + write gate (§3 B1/B2)
+	primaryFlow   laneFlow
+	ackRequested  atomic.Bool // peer declared wantTx (gossip): report our rx
+	peerWantsTx   atomic.Bool // we include rx in gossip only when asked
+	peerWantsGauge atomic.Bool
+	peerGauge     atomic.Int32 // peer's congestion gauge 0-255 (-1 = none yet)
+	diagPrimaryTx int64
+
+	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
+	// urgent frame fires only on watermark crossings (ctrlMu-guarded).
+	gaugeSent float64
 }
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
 	t := &stripeTransport{
-		base:     base,
-		salt:     rand.Uint32(),
-		cfg:      cfg,
-		affinity: make(map[uint32]*stripeLane),
-		ctrlCh:   make(chan legRecvResult, 16),
-		dataCh:   make(chan legRecvResult, 64),
-		closed:   make(chan struct{}),
+		base:      base,
+		salt:      rand.Uint32(),
+		cfg:       cfg,
+		affinity:  make(map[uint32]*stripeLane),
+		ctrlCh:    make(chan legRecvResult, 16),
+		dataCh:    make(chan legRecvResult, 64),
+		closed:    make(chan struct{}),
+		peerGauge: atomic.Int32{},
 	}
+	t.peerGauge.Store(-1)
 	go t.baseReadLoop()
 	go t.flowLoop()
 	if cfg.dialLane != nil {
@@ -389,9 +400,6 @@ func (t *stripeTransport) dropAffinity() {
 }
 
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
-	if frameType == frame.FrameMeshPacket {
-		t.requestLaneAcks()
-	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
 		start := time.Now()
@@ -464,16 +472,6 @@ func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
 
 func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 	lanes := t.snapshotLanes()
-	hasMesh := false
-	for _, f := range frames {
-		if f.Type == frame.FrameMeshPacket {
-			hasMesh = true
-			break
-		}
-	}
-	if hasMesh {
-		t.requestLaneAcks()
-	}
 	if len(lanes) == 0 {
 		start := time.Now()
 		var totalBytes int
@@ -579,6 +577,12 @@ func (t *stripeTransport) baseReadLoop() {
 		t.primaryFlow.onRecv(len(payload))
 		if ft == frame.FrameLaneAck {
 			t.handleLaneAck(payload)
+			frame.ReturnBuffer(payload)
+			continue
+		}
+		if ft == frame.FrameLaneGauge {
+			t.handleLaneGauge(payload)
+			frame.ReturnBuffer(payload)
 			continue
 		}
 		ch := t.dataCh
@@ -755,6 +759,7 @@ func (t *stripeTransport) sampleSojourn(start time.Time) {
 		t.baselineAt = now
 	}
 	t.gauge = t.computeGaugeLocked()
+	t.announceGaugeLocked()
 	t.lastSampleAt = now
 	t.ctrlMu.Unlock()
 }
@@ -808,6 +813,7 @@ func (t *stripeTransport) controllerTick() {
 	if !t.lastSampleAt.IsZero() && now.Sub(t.lastSampleAt) >= stripeGaugeIdleDecay {
 		t.sojournEMA += (t.baseline - t.sojournEMA) * stripeGaugeDecayPerTick
 		t.gauge = t.computeGaugeLocked()
+		t.announceGaugeLocked()
 	}
 	high := t.gauge >= stripeGaugeHighWatermark
 	switch {
@@ -827,7 +833,12 @@ func (t *stripeTransport) controllerTick() {
 		// UDP leg carries the data (design §7): no new lanes while Active.
 		t.highSince = time.Time{}
 	}
-	addDue := !t.highSince.IsZero() &&
+	// §2.6 gauge signal switch: once the in-flight gate engages, the sojourn
+	// gauge is pinned high by design (backlog deliberately held in-process)
+	// — more lanes cannot drain process-EXTERNAL backlog, so freeze adds;
+	// the gate owns congestion from here.
+	gateEngaged := t.primaryFlow.isGated()
+	addDue := !gateEngaged && !t.highSince.IsZero() &&
 		now.Sub(t.highSince) >= stripeAddSustain &&
 		now.Sub(t.lastAddAt) >= stripeAddInterval &&
 		t.laneCount() < stripeMaxLanes

@@ -41,6 +41,9 @@ func (p *mockPeerSender) Send(data []byte) error {
 
 func (p *mockPeerSender) SendGossip(data []byte)    {}
 func (p *mockPeerSender) GossipFields() (bool, int) { return false, 0 }
+func (p *mockPeerSender) LaneAckFields() (bool, bool, bool, []GossipLaneRx, int) {
+	return false, false, false, nil, 0
+}
 
 func (p *mockPeerSender) GetNodeID() string {
 	return p.nodeID

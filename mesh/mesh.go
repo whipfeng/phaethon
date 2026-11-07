@@ -85,6 +85,10 @@ type PeerSender interface {
 	// without these fields reads as "not advertising" on the peer and tears
 	// down negotiation (design §3 实现修订 R1).
 	GossipFields() (bool, int)
+	// LaneAckFields returns this link's LaneAck gating fields for gossip
+	// injection — same per-link contract as GossipFields (§3.2): declarations
+	// always, rx/gauge content gated by the peer's own want declarations.
+	LaneAckFields() (capable, wantTx, wantGauge bool, rx []GossipLaneRx, gauge int)
 }
 
 // ErrPeerStopped is returned by a peer's Send when the peer has been
@@ -2620,6 +2624,9 @@ func (m *MeshManager) broadcastGossip() {
 		// UDP 腿协商字段必须经每条 gossip 路径注入（设计 §3 R1）：缺省即"停止宣告"，
 		// 会把对端 FSM 协商状态周期性强拆。
 		info.UDP, info.UDPPort = peer.Sender.GossipFields()
+		// LaneAck 门控字段同契约注入（§3.2）：声明恒在，rx/gauge 内容取决于
+		// 对端声明的 wantTx/wantGauge —— 需求即协商，无握手帧。
+		info.Lack, info.WantTx, info.WantGauge, info.LaneRx, info.Gauge = peer.Sender.LaneAckFields()
 		data, err := json.Marshal(info)
 		if err != nil {
 			continue

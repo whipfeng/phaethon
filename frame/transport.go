@@ -70,20 +70,23 @@ type streamTransport struct {
 	dataRecvCh chan streamRecvResult
 	closed     chan struct{}
 	closeOnce  sync.Once
+	lowat      bool // TCP_NOTSENT_LOWAT in effect on the carrier socket
 }
 
 // NewStreamTransport wraps conn in a FrameTransport.
 func NewStreamTransport(conn net.Conn) FrameTransport {
-	limitKernelBacklog(conn)
 	t := &streamTransport{
 		conn:       conn,
 		ctrlRecvCh: make(chan streamRecvResult, 16),
 		dataRecvCh: make(chan streamRecvResult, 64),
 		closed:     make(chan struct{}),
+		lowat:      limitKernelBacklog(conn),
 	}
 	go t.readLoop()
 	return t
 }
+
+func (t *streamTransport) KernelBacklogLimited() bool { return t.lowat }
 
 func (t *streamTransport) readLoop() {
 	for {

@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"math"
 	"testing"
 
 	"phaethon/frame"
@@ -112,7 +113,7 @@ func TestCollectWriteBatch_PriorityOrder(t *testing.T) {
 	p.dnsQueue <- writeReq{frameType: frame.FrameMeshPacket, data: []byte{'d'}, dns: true}
 	p.controlCh <- writeReq{frameType: frame.FrameLinkPong, data: []byte{'c'}, isControl: true}
 
-	b := collectWriteBatch(p, data('1'), 64)
+	b := collectWriteBatch(p, data('1'), 64, math.MaxInt64)
 	got := ""
 	for _, r := range b {
 		got += string(r.data)
@@ -131,7 +132,7 @@ func TestCollectWriteBatch_RespectsMax(t *testing.T) {
 		p.controlCh <- writeReq{frameType: frame.FrameLinkPong, isControl: true}
 		p.drrOutput <- writeReq{frameType: frame.FrameMeshPacket}
 	}
-	b := collectWriteBatch(p, writeReq{frameType: frame.FrameMeshPacket}, 8)
+	b := collectWriteBatch(p, writeReq{frameType: frame.FrameMeshPacket}, 8, math.MaxInt64)
 	if len(b) != 8 {
 		t.Fatalf("batch len = %d, want 8", len(b))
 	}

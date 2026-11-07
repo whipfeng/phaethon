@@ -3,6 +3,7 @@ package p2p
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"phaethon/frame"
@@ -181,6 +182,17 @@ func (s *peerSender) GossipFields() (bool, int) {
 		return false, 0
 	}
 	return s.peer.leg.gossipFields()
+}
+
+// LaneAckFields returns this link's LaneAck gating fields for gossip
+// injection — same per-link contract as GossipFields (docs/plans/
+// mesh-control-isolation-inflight-cap.md §3.2): declarations always, rx
+// reports only when the peer declared WantTx, gauge only when WantGauge.
+func (s *peerSender) LaneAckFields() (capable, wantTx, wantGauge bool, rx []mesh.GossipLaneRx, gauge int) {
+	if s.peer.stripe == nil {
+		return false, false, false, nil, 0
+	}
+	return s.peer.stripe.laneGossipFields()
 }
 
 func (s *peerSender) GetNodeID() string {
@@ -404,6 +416,10 @@ type Peer struct {
 	proxy            *config.Proxy // proxy config this peer was started with
 	leg              *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
 	stripe           *stripeTransport // session data-leg multiplexer (always set on new peers)
+
+	// flowNotify wakes peerWriteLoop to re-check its in-flight credit after
+	// a LaneAck/cap adjustment (§3.4 write gate). Buffered 1, drop-on-full.
+	flowNotify chan struct{}
 
 	// DRR scheduler for data queues
 	drrScheduler *DRRScheduler
@@ -750,29 +766,53 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	}
 
 	for {
-		var first writeReq
-		select {
-		case <-peer.stopCh:
-			return
-		case first = <-peer.controlCh:
-		case first = <-peer.dnsQueue:
-		case req, ok := <-peer.drrOutput:
-			if !ok {
-				return
-			}
-			first = req
+		// §3.4 write gate: when the session's in-flight credit is exhausted,
+		// stop dequeuing drrOutput — surplus data stays in the DRR queues
+		// (fair scheduling, byte budget, drops → inner TCP backs off) while
+		// control/DNS frames keep flowing. LaneAck/cap adjustments wake us
+		// via flowNotify. Peers without LaneAck support (stripe nil, or no
+		// ack yet) report infinite credit: gate stays open, pre-B2 behavior.
+		credit := int64(math.MaxInt64)
+		if peer.stripe != nil {
+			credit = peer.stripe.writeCredit()
 		}
-		if !writeBatch(collectWriteBatch(peer, first, maxBatchFrames)) {
+		var first writeReq
+		if credit > 0 {
+			select {
+			case <-peer.stopCh:
+				return
+			case <-peer.flowNotify:
+				continue
+			case first = <-peer.controlCh:
+			case first = <-peer.dnsQueue:
+			case req, ok := <-peer.drrOutput:
+				if !ok {
+					return
+				}
+				first = req
+			}
+		} else {
+			select {
+			case <-peer.stopCh:
+				return
+			case <-peer.flowNotify:
+			case first = <-peer.controlCh:
+			case first = <-peer.dnsQueue:
+			}
+		}
+		if !writeBatch(collectWriteBatch(peer, first, maxBatchFrames, credit)) {
 			return
 		}
 	}
 }
 
 // collectWriteBatch adds the frames already waiting on the peer queues to
-// first, ordered control → DNS → data, up to max frames. Priority shows up as
-// dequeue order and position within the batch, never as a separate write.
-func collectWriteBatch(peer *Peer, first writeReq, max int) []writeReq {
+// first, ordered control → DNS → data, up to max frames. Data frames are
+// additionally bounded by maxDataBytes (the write gate's remaining credit)
+// so one batch cannot overshoot the cap by more than one frame.
+func collectWriteBatch(peer *Peer, first writeReq, max int, maxDataBytes int64) []writeReq {
 	var ctrl, dns, data []writeReq
+	var dataBytes int64
 	switch {
 	case first.isControl:
 		ctrl = append(ctrl, first)
@@ -780,6 +820,7 @@ func collectWriteBatch(peer *Peer, first writeReq, max int) []writeReq {
 		dns = append(dns, first)
 	default:
 		data = append(data, first)
+		dataBytes += int64(len(first.data))
 	}
 	n := 1
 	drain := func(ch chan writeReq, dst []writeReq) []writeReq {
@@ -796,7 +837,17 @@ func collectWriteBatch(peer *Peer, first writeReq, max int) []writeReq {
 	}
 	ctrl = drain(peer.controlCh, ctrl)
 	dns = drain(peer.dnsQueue, dns)
-	data = drain(peer.drrOutput, data)
+	for n < max && dataBytes < maxDataBytes {
+		select {
+		case req := <-peer.drrOutput:
+			data = append(data, req)
+			dataBytes += int64(len(req.data))
+			n++
+		default:
+			goto dataDone
+		}
+	}
+dataDone:
 	batch := make([]writeReq, 0, n)
 	batch = append(batch, ctrl...)
 	batch = append(batch, dns...)
@@ -1108,6 +1159,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		dataQueues:     dataQueues,
 		drrOutput:      make(chan writeReq, 512),
 		controlCh:      make(chan writeReq, 512),
+		flowNotify:     make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 		Seq:            seq,
 		pingTracker:    newPingTracker(),
@@ -1124,8 +1176,15 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	sendCtrl := func(ft byte, data []byte) error {
 		return enqueueWrite(peer, ft, data, true)
 	}
+	wakeWriteLoop := func() {
+		select {
+		case peer.flowNotify <- struct{}{}:
+		default:
+		}
+	}
 	stripe := newStripeTransport(t, stripeConfig{
 		sendControl: sendCtrl,
+		onCredit:    wakeWriteLoop,
 		name:        "passive:" + peer.ID,
 	})
 	peer.stripe = stripe
@@ -1360,6 +1419,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		dataQueues:   dataQueues,
 		drrOutput:    make(chan writeReq, 512),
 		controlCh:    make(chan writeReq, 512),
+		flowNotify:   make(chan struct{}, 1),
 		pingTracker:  newPingTracker(),
 	}
 	peer.drrScheduler = newDRRScheduler(dataQueues, &peer.dataBudget)
@@ -1479,6 +1539,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			sendCtrl := func(ft byte, data []byte) error {
 				return enqueueWrite(peer, ft, data, true)
 			}
+			wakeWriteLoop := func() {
+				select {
+				case peer.flowNotify <- struct{}{}:
+				default:
+				}
+			}
 			if pd, ok := d.(dialer.P2PDialer); ok {
 				stripe = newStripeTransport(transport, stripeConfig{
 					dialLane: func() (uint32, frame.FrameTransport, error) {
@@ -1486,12 +1552,14 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 					},
 					udpActive:   peer.udpRoutingActive,
 					sendControl: sendCtrl,
+					onCredit:    wakeWriteLoop,
 					name:        "active:" + peer.ID,
 				})
 			} else {
 				stripe = newStripeTransport(transport, stripeConfig{
 					udpActive:   peer.udpRoutingActive,
 					sendControl: sendCtrl,
+					onCredit:    wakeWriteLoop,
 					name:        "active:" + peer.ID,
 				})
 			}
@@ -1850,6 +1918,16 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	// UDP leg negotiation fields feed the per-link FSM (design §3).
 	if peer.leg != nil {
 		peer.leg.onPeerGossip(info.UDP, info.UDPPort)
+	}
+
+	// LaneAck gating fields (§3.2): gossip is the periodic fallback channel
+	// for tx reports/gauge telemetry; want declarations arm our reporting.
+	if peer.stripe != nil && (info.Lack || info.WantTx || info.WantGauge || len(info.LaneRx) > 0 || info.Gauge > 0) {
+		rx := make([]laneAckEntry, 0, len(info.LaneRx))
+		for _, e := range info.LaneRx {
+			rx = append(rx, laneAckEntry{laneID: e.ID, rx: e.Rx})
+		}
+		peer.stripe.onPeerLaneGossip(info.WantTx, info.WantGauge, rx, info.Gauge)
 	}
 }
 

@@ -625,9 +625,46 @@ func (m *P2PManager) notifyStatusChange() {
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	const maxBatchFrames = 64 // Maximum frames per batch
 
+	// [P2P-QDEPTH] diagnostic: slow writes = carrier backpressure (downstream
+	// of this process); deep queue with fast writes = backlog inside this process.
+	var qdWinStart = time.Now()
+	var qdBytes, qdWrites int64
+	var qdWriteTotal, qdWriteMax time.Duration
+	var qdMaxSojourn time.Duration
+	qdRecord := func(batch []writeReq, d time.Duration) {
+		qdWrites++
+		qdWriteTotal += d
+		if d > qdWriteMax {
+			qdWriteMax = d
+		}
+		for _, req := range batch {
+			qdBytes += int64(len(req.data))
+			if !req.isControl && !req.enqueueTime.IsZero() {
+				if s := time.Since(req.enqueueTime); s > qdMaxSojourn {
+					qdMaxSojourn = s
+				}
+			}
+		}
+		win := time.Since(qdWinStart)
+		if win < 5*time.Second {
+			return
+		}
+		queued := dataQueueByteBudget - peer.dataBudget.Load()
+		if queued >= 256<<10 || qdWriteMax >= time.Second || qdMaxSojourn >= time.Second {
+			util.LogModuleInfo("p2p", "[P2P-QDEPTH] peer=%s proxy=%s queued=%dKB drrOut=%d ctrl=%d maxSojourn=%v writes=%d busy=%v maxWrite=%v rate=%.1fKB/s",
+				peer.ID, peer.ProxyNameSafe(), queued>>10, len(peer.drrOutput), len(peer.controlCh),
+				qdMaxSojourn.Round(time.Millisecond), qdWrites, qdWriteTotal.Round(time.Millisecond),
+				qdWriteMax.Round(time.Millisecond), float64(qdBytes)/1024/win.Seconds())
+		}
+		qdWinStart = time.Now()
+		qdBytes, qdWrites, qdWriteTotal, qdWriteMax, qdMaxSojourn = 0, 0, 0, 0, 0
+	}
+
 	// writeSingleFrame writes a single frame.
 	writeSingleFrame := func(req writeReq, isControl bool) bool {
 		payload := req.data
+		wStart := time.Now()
+		defer func() { qdRecord([]writeReq{req}, time.Since(wStart)) }()
 
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_start", req.data, "peer=%s", peer.ID)
@@ -677,7 +714,10 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 		}
 
-		if err := peer.transport.SendBatch(frames); err != nil {
+		wStart := time.Now()
+		err := peer.transport.SendBatch(frames)
+		qdRecord(batch, time.Since(wStart))
+		if err != nil {
 			for _, req := range batch {
 				if req.frameType == frame.FrameMeshPacket {
 					mesh.TraceForwarding("p2p_write_error", req.data, "peer=%s err=%v", peer.ID, err)

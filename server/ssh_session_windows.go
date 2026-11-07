@@ -33,6 +33,10 @@ func defaultShell() string {
 	return "cmd.exe"
 }
 
+// supportPty：Windows 管道模式无法提供终端回显，拒绝 pty-req 让客户端
+// 退回 cooked 模式（本地回显 + \n 行结束），管道 shell 才真正可用。
+const supportPty = false
+
 // startSessionProc 拉起 cmd.exe（shell）或 cmd /c 命令行（exec），管道模式。
 func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {
 	var cmd *exec.Cmd

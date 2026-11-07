@@ -856,25 +856,27 @@ function updateReverseStatus(data) {
                         dotTitle = 'Connected';
                     }
                     return `<tr data-rv-name="${CSS.escape(item.name)}" data-rv-seq="${seq}" data-listener-proto="${listenerProto}" data-registry-proxy="${escapeHtml(registryProxy)}" data-assigned-port="${assignedPort}" class="${enabled ? '' : 'row-disabled'}">
-                        <td class="rv-name"><strong>${escapeHtml(item.name)}</strong></td>
-                        <td class="rv-seq"><code>${seq}</code></td>
-                        <td class="rv-registry">${escapeHtml(registryProxy)}</td>
-                        <td class="rv-listener-proto"><code class="type-badge type-${listenerProto.toLowerCase()}">${listenerProto}</code></td>
-                        <td class="rv-port-cell">
+                        <td class="rv-name" data-label="${escapeHtml(i18n.t('rv.configName'))}"><strong>${escapeHtml(item.name)}</strong></td>
+                        <td class="rv-seq" data-label="${escapeHtml(i18n.t('rv.seq'))}"><code>${seq}</code></td>
+                        <td class="rv-registry" data-label="${escapeHtml(i18n.t('rv.outboundProxy'))}">${escapeHtml(registryProxy)}</td>
+                        <td class="rv-listener-proto" data-label="${escapeHtml(i18n.t('rv.summaryListenProto'))}"><code class="type-badge type-${listenerProto.toLowerCase()}">${listenerProto}</code></td>
+                        <td class="rv-port-cell" data-label="${escapeHtml(i18n.t('rv.listenerPort'))}">
+                            <div style="flex:1; min-width:0;">
                             ${portDisplay}
                             <div class="rv-last-error" style="display: ${lastError ? 'block' : 'none'}; background: var(--danger-bg, #fff0f0); color: var(--danger, #c00); border: 1px solid var(--danger, #c00); border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.5rem; font-size: 0.9rem;">
                                 <strong>${i18n.t('rv.errorLabel') || '错误'}：</strong> <span class="rv-last-error-text">${escapeHtml(lastError)}</span>
                             </div>
+                            </div>
                         </td>
-                        <td class="rv-target">${targetDisplay}</td>
-                        <td>
+                        <td class="rv-target" data-label="${escapeHtml(i18n.t('rv.summaryTarget'))}">${targetDisplay}</td>
+                        <td data-label="${escapeHtml(i18n.t('common.enabled'))}">
                             <label class="switch" title="${enabled ? (i18n.t('common.enabled') || 'Enabled') : (i18n.t('rv.statusDisabled') || 'Disabled')}">
                                 <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleReverse('${escapeHtml(item.name)}', this.checked)">
                                 <span class="slider"></span>
                             </label>
                         </td>
-                        <td class="rv-status"><span class="status-dot ${dotClass}" title="${escapeHtml(dotTitle)}"></span><span class="badge ${statusClass}">${statusText}</span></td>
-                        <td>
+                        <td class="rv-status" data-label="${escapeHtml(i18n.t('rv.status'))}"><span class="status-dot ${dotClass}" title="${escapeHtml(dotTitle)}"></span><span class="badge ${statusClass}">${statusText}</span></td>
+                        <td data-label="${escapeHtml(i18n.t('rv.summaryOther'))}">
                             <button class="btn btn-sm btn-outline rv-copy-endpoint-btn" onclick="copyEndpointRow(this)" title="${i18n.t('rv.copyEndpoint') || '复制访问地址'}" style="display: ${assignedPort ? 'inline-flex' : 'none'}">🔗</button>
                             <button class="btn btn-sm btn-outline" onclick="copyReverse('${escapeHtml(item.name)}')" title="${i18n.t('proxy.copy') || '复制'}">📋</button>
                             <button class="btn btn-sm btn-outline" onclick="showEditReverse('${escapeHtml(item.name)}')" data-i18n="rv.editConfig">${i18n.t('rv.editConfig') || '编辑'}</button>

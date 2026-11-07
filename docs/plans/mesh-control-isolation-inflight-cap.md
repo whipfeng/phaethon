@@ -50,20 +50,40 @@ HT v2（POST/GET 池）不走 stripe（p2p.go:1468 明确排除），由 §4 单
 - 接收方：每条 lane 累计 `rx` = 从该 lane 读到的帧 payload 字节
 - **在途量** = `tx − ackedRx`，就是压在 carrier 缓冲、跳板、网络里的数据
 
-### 3.2 回报帧
-- 新帧类型 `FrameLaneAck = 0x17`，二进制：重复 `{laneID uint32, rx uint64}`（12B/条）
-- 接收方每 50ms 检查一次，任一 lane 的 rx 自上次回报涨了就发；走主连接、control 优先级
-- 能力协商：gossip 加 `lack:true`（同 `udp:true` 模式）。只对声明了能力的对端发 ack；发送方收到首个 ack 才对该 lane 启用门控 → 新老版本混跑时行为与现在一致（老版本收到未知帧只记 Info 丢弃，p2p.go:1784，也不会出错）
+### 3.2 回报帧与能力协商
 
-### 3.3 上限
+- 新帧类型 `FrameLaneAck = 0x17`，二进制：重复 `{laneID uint32, rx uint64}`（12B/条）
+- **逐链路请求协商**（取代原 gossip `lack:true` 全局通告）：
+  - 发送方在第一次发 MeshPacket 时懒发送一个空的 FrameLaneAck（payload 为空）作为"请回报"
+  - 接收方看到空 payload 就设置 ackRequested，之后每 50ms 检查 rx 变化并回报
+  - 旧 peer 收到未知帧 0x17 会 log 一次 Info 并忽略，不影响会话
+  - 发送方收到首个 ack 才对该 lane 启用门控 → 新老版本混跑时行为与现在一致
+- 回报走主连接、control 优先级；最多 64 个条目（8MB 上限）
+
+### 3.3 上限（延迟驱动公式）
+
+原方案 `cap=clamp(2×rate×max(baseRTT,50ms),64KB,4MB)` 有两个发散问题：
+- baseRTT 在我们自己的队列膨胀时会虚高，导致 cap 越涨越大
+- 纯速率上限在 RTT 超过目标时会崩溃
+
+改用 **LEDBAT-like 延迟驱动公式**：
 ```
-deliveryRate = ackedRx 增量 / 时间（EMA，α=0.25）
-baseRTT      = 交付 RTT 的 10s 滑动最小值（记录 (时间, tx) 采样点，ack 越过该点时得 RTT）
-cap          = clamp(2 × deliveryRate × max(baseRTT, 50ms), 64KB, 4MB)
+minRTT      = 过去 10 分钟每分钟的最小 RTT（滑动窗口）
+qd          = rtt − minRTT           // 排队延迟
+target      = 200ms                  // 目标排队延迟
+
+if qd > target:                      // 拥塞：减速
+    cap *= max(0.5, target/qd)
+elif qd < target/2 and busy:         // 空闲：加速（busy = inflight ≥ cap/2 自上次调整）
+    cap *= 1.25
+
+cap = clamp(cap, 64KB, 8MB)         // 边界
+initial_cap = 256KB                  // 初始值
 ```
-- 未拿到速率样本前 cap=4MB（不限慢启动）
-- ×2 留给速率上探（同 BBR cwnd_gain）
-- 快链路（10MB/s、20ms）≈400KB → 不卡吞吐；这条 VM→GG（46KB/s）→ 64KB 下限，进程外排队 ≈1.4s（现状 45s+）
+
+- **停滞防护**：ack 无进展 10s 且 inflight > 0 → 解除门控并告警 `[LANE-STALLED]`
+- ×1.25 加速步长保守（同 LEDBAT off-target gain），避免震荡
+- 快链路（10MB/s、20ms）→ qd ≈ 0，cap 维持在 8MB；VM→GG（46KB/s、rtt≈55ms）→ qd≈55ms，cap 降至 ~256KB，进程外排队 ≈5.5s（现状 45s+）
 
 ### 3.4 门控位置（关键）
 在 `peerWriteLoop` 出队处，不在 transport 写入处：
@@ -77,15 +97,79 @@ UDP 数据腿（不经 TCP 缓冲，自带机制）；HT v2 本期不接门控�
 
 ## 4. C：HT v2 控制帧与数据帧分开
 
-现状（与 `htunnel_p2p_direct_mode.md:147-151` 原设计不符——原设计就有独立控制通道，未实现）：
-- 客户端 `Send/SendBatch` 忽略 `isControl`，控制帧和数据塞同一个 POST body，排在 16 个 POST 名额后面
-- 服务端 POST 入向 `meshIn` 单 FIFO（4096），`Recv` 无控制优先
-- 客户端 GET 读循环 `dataRecvCh`（64）满了会阻塞，同一 GET body 后面的控制帧跟着等
+### 4.1 现状问题（Agent 审查结果）
 
-改法（按原设计补齐）：
-1. 客户端：控制帧单独立即发一个 POST，**不占** `sendSem` 名额；数据帧照旧批量
-2. 服务端：`meshIn` 拆成 ctrl/data 两个队列，`Recv` 控制优先（与 `FrameTransport.Recv` 约定一致）
-3. 客户端 GET：先把整个 body 解析完，控制帧先投 `ctrlRecvCh`，再投数据；数据通道满时不挡控制帧
+**主动端（客户端 QG）**：
+- `Send/SendBatch` 忽略 `isControl`，控制帧和数据塞同一个 POST body，排在 16 个 POST 名额后面
+- `sendSem` 16 槽并发，新 pong/gossip 等所有 16 槽满时阻塞
+- POST 超时 10s，失败静默丢失（仅 debug log），无重试
+- GET `dataRecvCh`（64）满了会阻塞整个读循环，同一 GET body 后面的控制帧跟着等
+- `io.ReadAll` 错误被忽略，512KB body 整体 AEAD 解密，慢链路下头帧延迟可达 ~20s（46KB/s）
+- GET 超时基于 wait + 10s，慢 body 截断后解密失败直接拆会话
+
+**被动端（服务端 JF）**：
+- POST 入向 `meshIn` 单 FIFO（4096），`Recv` 无控制优先
+- 16 个 POST handler 并发写入，帧重排序
+- egress `meshOut`（4096）+ `meshCtrlOut`（256），但 peerWriteLoop 在 8MB gate 关闭时阻塞，pong 排队
+- CoDel 几乎无效：每批最多丢一帧，sojourn 时间不含 meshOut 排队和传输时间
+- DNS 走数据 FIFO，可被 CoDel 丢弃
+
+**根因**：
+1. **GET 队头阻塞**：512KB body 整体解密，头帧（如 pong）不可见直到整个 body 到达
+2. **POST 重排序**：16 槽并发 + handler 交错写入
+3. **控制帧混排**：无隔离通道，pong/DNS 排在大数据后面
+4. **缓冲失控**：~1.5MB（POST）+ 6MB（GET）+ 8MB（gate）进程外积压
+
+### 4.2 修复方案（按优先级）
+
+#### P1：客户端控制 POST（立即可做，兼容旧服务端）
+- `isControl=true` 或 batch 中有 Control 帧 → 单独小 POST
+- 专用信号量 1–2 槽（不占 `sendSem` 16 槽）
+- 超时 5s，失败上报给 session（触发链路重建）
+- wire format 不变（3B header + payload，整体 XChaCha20）
+
+#### P2：服务端入站分流（server-only，兼容旧客户端）
+- `meshHandleWrite` 中路由非 FrameMeshPacket 和 DNS 到 `meshCtrlIn`
+- `Recv` 先服务 `meshCtrlIn`，再服务 `meshIn`
+- handler 阻塞时限（如 2s），超时丢弃并告警
+
+#### P3：GET 控制隔离
+- **Server-only 第一步**：ctrlQ 非空时批次限制为控制 + ~16KB 数据
+- **后续**：专用控制 GET，新请求头标记；旧服务端忽略头，保持现状；新服务端仅在客户端发过头时才切换
+
+#### P4：客户端 recv 修复
+- 检查 `ReadAll` 错误，非 200 重试 transient 5xx（指数退避）
+- 基于 body 进度设超时（而非 wait 时间）
+- 解析完整个 body 后先交付控制帧，再交付数据
+
+#### P5：按字节限大小
+- GET 批次自适应：`clamp(rate × 200ms, 16KB, 512KB)`
+- POST 按在途字节限流，减少并发槽数（2–4 大槽代替 16 小槽）降重排序
+
+#### P6：DNS 优先级（服务端）
+- `meshChannelTransport.Send` 中用 `isDNSPacket` 分类
+- 新增 DNS 队列，在控制之后、数据之前服务
+- 不被 CoDel 丢弃
+
+#### P7：HT v2 作为 laneID 0 纳入 LaneAck 门控
+- HT v2 单链路视为 laneID 0，用 §3 的计量和门控覆盖
+- ack 必须走隔离控制路径（P1–P3），否则 ack 延迟会节流链路
+- 损失记账：发送方需计入已知损失（失败 POST 字节、服务端 CoDel 丢弃），否则 `tx − ackedRx` 泄漏导致门控楔住
+- 规则：ack 持续到达但 `ackedRx` 不动超过 max(4×baseRTT, 2s) → 重置 baseline
+- gossip 通告 `lack:true`，旧 peer 不收到未知帧
+- 一旦门控生效，服务端批次自然 ≤ cap，512KB 队头问题解决；8MB cap 和 CoDel 成为后备
+
+#### P8：CoDel 对称化
+- 门控生效后，AQM 移到发送端 DRR 队列（两端）
+- 若保留服务端 CoDel，需在帧进入 meshOut 时打时间戳，逐帧用真实时间评估
+
+### 4.3 兼容性
+- 保持 body format 不变（3B header + payload，整体 XChaCha20）
+- 新行为通过请求头键控（旧服务端忽略）或 gossip flag
+- 逐 chunk 密封需要 HEAD 请求中协商版本
+
+### 4.4 与原设计的差距
+原设计 `htunnel_p2p_direct_mode.md:147-151` 指定了独立控制通道，但未实现。本方案补齐该缺口，并解决 GET 侧队头阻塞、超时 teardown、DNS 优先级和门控损失记账问题。
 
 ## 5. 实施顺序
 1. B 的计量 + 回报帧 + 能力协商（两端都要新版本才生效）

@@ -399,7 +399,7 @@ GG 替代测试环境（不依赖 DESKW 部署）：GG 复用已通告的 `172.1
 - 耗时只缩短约 17%（均值 27.2s vs 32.9s）：**瓶颈已移到外层**。内层 srtt 随 cwnd 从 90ms 涨到 1.9s，属排队。
 - 定位（GG `ss -tni` 每 0.5s 采样）：GG→JF 有 2 条外层 lane（JF 主动拨入），该单流**全部走 56698**，另一条 56974 闲置（stripe 按流哈希选 lane，`p2p/stripe_transport.go:321`）。56698 外层重传约 10%（≈40KB/s rtx / 400KB/s），内核 cubic cwnd 在 1~26 间跳，吞吐封顶约 400KB/s，Send-Q 从 0 积到 815KB → 正是内层 RTT 膨胀的来源。
 - GG 内核只有 reno/cubic（无 bbr），layer4 用户无权加载模块。
-- **裸带宽对照（绕过 phaethon）**：GG 直接 `ssh cat f8m.bin` 到 Mac：单流 8MB/20.9s ≈ 375KB/s；4 流并发 32MB/94.5s ≈ 331KB/s。经 mesh 4 流并发同样约 300KB/s（且 4 条流全落在同一条 lane）。突发时单 lane 能到 1250KB/s，随即出现大量重传 → 符合云主机出口限速器（约 3Mbps）特征。
+- **对照测试（更正：并非完全绕过 phaethon）**：Mac `ssh GG cat f8m.bin`，GG 侧 `$SSH_CONNECTION` 来源为 36.140.28.178，实际路径 = Mac → QG 旁路网关（phaethon TUN）→ MGMS_HT h_tunnel → JF → **普通内核 TCP** → GG。即 GG→JF 段不经 mesh/gVisor，JF→QG 段仍经 h_tunnel。单流 8MB/20.9s ≈ 375KB/s；4 流并发 32MB/94.5s ≈ 331KB/s。h_tunnel 段 8 流实测可达 4.5MB/s，不是 375KB/s 的瓶颈 → 封顶在 GG→JF 段。佐证：mesh 外层 lane 是内核 TCP，Send-Q 积到 815KB（有数据发不出去）且重传约 10%，属网络受限。突发时单 lane 能到 1250KB/s，随即大量重传 → 符合云主机出口限速器（约 3Mbps）特征。GG→JF 纯直连无法测（GG 连 JF:60002 超时）。
 - 结论：GG 路径的上限是 **GG 出口带宽（约 3Mbps）**，与 phaethon 无关；方案 A 后单流 22.5s ≈ 8MB/355KB/s，已基本跑满。单流跨 lane 分发 / 外层 BBR 在这条路径上**没有收益**，不做。GG 路径不适合做吞吐验收，吞吐验收以 DESKW 路径（elephant / 8 流）为准。
 - 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s），待 DESKW 部署后看是否复现。
 

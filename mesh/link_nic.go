@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -24,6 +25,10 @@ type LinkNIC struct {
 	peerNodeID string     // Target node ID (for logging only)
 	peerSubnet *net.IPNet // Peer's subnet for routing
 	mtu        uint32
+
+	// dispMu guards dispatcher: RemoveNIC calls Attach(nil) concurrently
+	// with inbound delivery.
+	dispMu     sync.RWMutex
 	dispatcher stack.NetworkDispatcher
 
 	// Statistics (atomic counters)
@@ -46,11 +51,15 @@ func NewLinkNIC(nicID tcpip.NICID, sender PeerSender, peerNodeID string, peerSub
 
 // Attach implements stack.LinkEndpoint.Attach.
 func (l *LinkNIC) Attach(dispatcher stack.NetworkDispatcher) {
+	l.dispMu.Lock()
+	defer l.dispMu.Unlock()
 	l.dispatcher = dispatcher
 }
 
 // IsAttached implements stack.LinkEndpoint.IsAttached.
 func (l *LinkNIC) IsAttached() bool {
+	l.dispMu.RLock()
+	defer l.dispMu.RUnlock()
 	return l.dispatcher != nil
 }
 
@@ -58,7 +67,12 @@ func (l *LinkNIC) IsAttached() bool {
 // netstack via this NIC. The stack records pkt.NICID so conntrack can use it
 // as OriginalInputNIC (fork patch #5) for DNAT reply routing (patch #6).
 func (l *LinkNIC) InjectInbound(data []byte) {
-	if l.dispatcher == nil || len(data) == 0 {
+	// Snapshot and deliver outside the lock (as channel.Endpoint does) so
+	// delivery never blocks RemoveNIC, which holds the stack lock.
+	l.dispMu.RLock()
+	d := l.dispatcher
+	l.dispMu.RUnlock()
+	if d == nil || len(data) == 0 {
 		atomic.AddUint64(&l.injectDrops, 1)
 		return
 	}
@@ -87,7 +101,7 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 	})
 	defer pkt.DecRef()
 	
-	l.dispatcher.DeliverNetworkPacket(proto, pkt)
+	d.DeliverNetworkPacket(proto, pkt)
 	atomic.AddUint64(&l.injectPackets, 1)
 	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
 }

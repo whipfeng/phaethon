@@ -19,6 +19,11 @@ const (
 	sshHandshakeTimeout = 15 * time.Second
 	// sshClientIdleTimeout is the maximum time an SSH client may sit unused in the cache.
 	sshClientIdleTimeout = 5 * time.Minute
+	// sshKeepAliveReplyTimeout × sshKeepAliveMaxMisses bounds how long a
+	// keepalive reply may take before the connection is closed (~30s, like
+	// the P2P heartbeat).
+	sshKeepAliveReplyTimeout = 15 * time.Second
+	sshKeepAliveMaxMisses    = 2
 )
 
 // sshClientEntry holds a cached SSH client plus metadata for lifecycle management.
@@ -51,7 +56,7 @@ func (d *SSHDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, err
 	}
 
-	util.LogModuleDebug("ssh", "Forwarding %s:%d via SSH %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleDebug("ssh", "[%s] %s forwarding %s:%d via SSH %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort, d.Proxy.Server, d.Proxy.Port)
 	return conn, nil
 }
 
@@ -214,7 +219,7 @@ func (d *SSHDialer) createSSHClient() (*ssh.Client, error) {
 	if len(sshConf.Auth) == 0 {
 		agentConn, err = d.trySSHAgentAuth(sshConf)
 		if err != nil {
-			util.LogModuleDebug("ssh", "ssh-agent unavailable: %v", d.Proxy.Name, err)
+			util.LogModuleDebug("ssh", "[%s] ssh-agent unavailable: %v", d.Proxy.Name, err)
 		}
 	}
 
@@ -266,20 +271,30 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 			_, _, err := entry.client.SendRequest("keepalive@golang.org", true, nil)
 			done <- err
 		}()
-		select {
-		case err := <-done:
-			if err != nil {
-				util.LogModuleWarn("ssh", "keepalive failed: %v", d.Proxy.Name, err)
+		// A busy jump host can be slow to answer; only consecutive misses
+		// mean the connection is dead.
+		for misses := 0; ; {
+			select {
+			case err := <-done:
+				if err != nil {
+					util.LogModuleWarn("ssh", "[%s] keepalive failed: %v", d.Proxy.Name, err)
+					d.removeAndReconnect(entry)
+					return
+				}
+			case <-time.After(sshKeepAliveReplyTimeout):
+				misses++
+				if misses < sshKeepAliveMaxMisses {
+					util.LogModuleWarn("ssh", "[%s] keepalive reply late (%v), waiting", d.Proxy.Name, sshKeepAliveReplyTimeout*time.Duration(misses))
+					continue
+				}
+				util.LogModuleWarn("ssh", "[%s] keepalive timed out %d times, closing stale connection", d.Proxy.Name, misses)
+				entry.client.Close()
 				d.removeAndReconnect(entry)
 				return
+			case <-entry.done:
+				return // entry was removed during keepalive wait
 			}
-		case <-time.After(5 * time.Second):
-			util.LogModuleWarn("ssh", "keepalive timed out, closing stale connection", d.Proxy.Name)
-			entry.client.Close()
-			d.removeAndReconnect(entry)
-			return
-		case <-entry.done:
-			return // entry was removed during keepalive wait
+			break
 		}
 	}
 }
@@ -292,18 +307,18 @@ func (d *SSHDialer) removeAndReconnect(entry *sshClientEntry) {
 	d.removeSSHClientLocked(entry)
 	go func() {
 		for attempt := 1; attempt <= 3; attempt++ {
-			util.LogModuleDebug("ssh", "background reconnecting (attempt %d)...", d.Proxy.Name, attempt)
+			util.LogModuleDebug("ssh", "[%s] background reconnecting (attempt %d)...", d.Proxy.Name, attempt)
 			if _, _, err := d.getSSHClient(); err != nil {
-				util.LogModuleWarn("ssh", "background reconnect attempt %d failed: %v", d.Proxy.Name, attempt, err)
+				util.LogModuleWarn("ssh", "[%s] background reconnect attempt %d failed: %v", d.Proxy.Name, attempt, err)
 				if attempt < 3 {
 					time.Sleep(2 * time.Second)
 				}
 			} else {
-				util.LogModuleDebug("ssh", "background reconnect succeeded on attempt %d", d.Proxy.Name, attempt)
+				util.LogModuleDebug("ssh", "[%s] background reconnect succeeded on attempt %d", d.Proxy.Name, attempt)
 				return
 			}
 		}
-		util.LogModuleError("ssh", "background reconnect failed after 3 attempts", d.Proxy.Name)
+		util.LogModuleError("ssh", "[%s] background reconnect failed after 3 attempts", d.Proxy.Name)
 	}()
 }
 
@@ -314,7 +329,7 @@ func (d *SSHDialer) PreWarm() error {
 	if err != nil {
 		return err
 	}
-	util.LogModuleInfo("ssh", "pre-warmed SSH connection to %s:%d", d.Proxy.Name, d.Proxy.Server, d.Proxy.Port)
+	util.LogModuleInfo("ssh", "[%s] pre-warmed SSH connection to %s:%d", d.Proxy.Name, d.Proxy.Server, d.Proxy.Port)
 	return nil
 }
 

@@ -69,6 +69,7 @@
 | [multi_nic_implementation_plan.md](plans/multi_nic_implementation_plan.md) | 多 NIC 架构实现计划（历史实现记录） | - | OUTDATED |
 | [graceful_shutdown_and_tun_cleanup_design.md](plans/graceful_shutdown_and_tun_cleanup_design.md) | 优雅关闭挂死修复（DNS hijacker 未停）+ TUN 残留按真实地址清理 | v0.1.0 | DRAFT |
 | [tun_cleanup_scoping_and_pfroute_design.md](plans/tun_cleanup_scoping_and_pfroute_design.md) | TUN 清理作用域收敛（不误伤共存 VPN）+ darwin 路由操作迁移 PF_ROUTE | v0.1.0 | DRAFT |
+| [mesh-link-rebuild-stability.md](plans/mesh-link-rebuild-stability.md) | Mesh 链路误断与重建后遗症修复（LinkNIC 竞态、ping 误判死、NIC 删除后重选路、sackedOut、SetPipe、SSH keepalive） | - | 实施中 |
 
 ### tasks/ (任务归档)
 

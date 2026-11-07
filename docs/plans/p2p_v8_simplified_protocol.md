@@ -317,6 +317,8 @@ type LinkQuality struct {
   3. 走现有断开路径：UnregisterPeer → 路由重算 → 拨号器重连
   4. 30 秒全静默 heartbeat 保留作为兜底（覆盖对端彻底失联、gossip 也停的场景）
   5. 断链判定后可考虑清零 pingTracker 窗口，避免旧统计影响重连后的质量评估
+  6. **入站静默条件**（2026-11-07，见 mesh-link-rebuild-stability.md F2）：连续 10 个 ping 无 pong **且** 最近 10s 未收到任何入站帧才判死。期间仍有入站帧时不断链，记限频 Info `[P2P] link dead held`（每 10s 一条）。原因：大流量时 pong 排在约 18MB 发送积压之后，链路实际是活的。若本端出方向坏了，对端 30s heartbeat 会关闭连接，本端收到 EOF 同样断开。
+  7. **内核发送积压上限**：所有流式 lane（`frame.NewStreamTransport`）的底层 TCP socket 设 `TCP_NOTSENT_LOWAT=128KB`（Linux/darwin），积压留在应用层 DRR 队列；取不到 TCP socket（h_tunnel 流等）或其他平台跳过。日志 `[LANE-LOWAT] set/skipped`。
 
 ---
 

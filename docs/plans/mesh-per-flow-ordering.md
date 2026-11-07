@@ -407,7 +407,7 @@ GG 替代测试环境（不依赖 DESKW 部署）：GG 复用已通告的 `172.1
   - Mac 经 mesh 拉 GG `172.18.0.1:18999/f8m.bin` 8MB：268 / 276 / 284KB/s。
   - 跳板与 mesh 相差 < 5%，都落在 GG→JF 段的速度上（JF 直取 284KB/s，且 JF 侧 Mac 会话连接只走 3.5KB，排除转发量）。
 - 结论：GG 路径的上限是 **GG 出口带宽（约 3Mbps）**，与 phaethon 无关；方案 A 后单流 22.5s ≈ 8MB/355KB/s，已基本跑满。单流跨 lane 分发 / 外层 BBR 在这条路径上**没有收益**，不做。GG 路径不适合做吞吐验收，吞吐验收以 DESKW 路径（elephant / 8 流）为准。
-- 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s），待 DESKW 部署后看是否复现。
+- 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s）。**已查明（2026-11-07）**：大流量下 GG↔JF 链路被 ping 误判死亡并重建，老连接卡在已删除的 Link NIC 上发不出去；与吞吐无关。修复见 [mesh-link-rebuild-stability.md](mesh-link-rebuild-stability.md)（F2/F3），sackedOut 负数问题同见该文 F4。
 
 **全网验收（2026-11-07，v0.8.0-331-gcc72400；GG/JF/QG 手动部署，DESKW/DESKZQ 经包分发自动升级）**：
 

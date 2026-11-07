@@ -23,6 +23,12 @@ type AdminHandler interface {
 	ServeConn(conn net.Conn)
 }
 
+// SSHHandler serves SSH connections handed over directly (nodeID.phn:22),
+// same single-conn pattern as AdminHandler. Implemented by server.SSHServer.
+type SSHHandler interface {
+	ServeConn(conn net.Conn)
+}
+
 // ConnectionHandler manages TCP and UDP connection handling for the mesh network.
 // It is responsible for rule matching, proxy dialing, and connection relaying.
 // This separates connection handling logic from TUN device I/O (which remains in tun.Manager).
@@ -36,6 +42,9 @@ type ConnectionHandler struct {
 
 	// Admin handler for local node domains
 	adminHandler AdminHandler
+
+	// SSH handler for nodeID.phn:22 (built-in SSH service, netstack-terminated)
+	sshHandler SSHHandler
 
 	// Mode B table for proxy entry connection tracking
 	modeBTable *mesh.ModeBTable
@@ -77,6 +86,11 @@ func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 // SetAdminHandler updates the admin handler for local node domain connections.
 func (h *ConnectionHandler) SetAdminHandler(handler AdminHandler) {
 	h.adminHandler = handler
+}
+
+// SetSSHHandler updates the SSH handler for nodeID.phn:22 connections.
+func (h *ConnectionHandler) SetSSHHandler(handler SSHHandler) {
+	h.sshHandler = handler
 }
 
 // HandleTCPConn handles an incoming TCP connection from the netstack forwarder.
@@ -173,6 +187,16 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 	// Skip rule matching entirely - local mesh domains should NEVER be proxied.
 	if localNodeDomain {
 		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch (early return)", connID)
+		// Port 22 goes to the built-in SSH service when available.
+		if dstPort == 22 && h.sshHandler != nil {
+			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SSH] [%s] serving via ssh handler (dstPort=22)", connID)
+			rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
+				Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL-SSH"})
+			rec.Establish(connID, nil, false)
+			h.sshHandler.ServeConn(conn)
+			rec.Close()
+			return
+		}
 		// Direct admin handler: bypass OS network stack entirely
 		if h.adminHandler != nil {
 			util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)

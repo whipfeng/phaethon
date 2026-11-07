@@ -1,0 +1,254 @@
+package server
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
+	"io"
+	"net"
+	"sync"
+
+	"golang.org/x/crypto/ssh"
+
+	"phaethon/db"
+	"phaethon/util"
+)
+
+// SSHServer 是内建于每个节点的 SSH 服务。连接由 mesh 连接处理层直接移交
+// （nodeID.phn:22 经 netstack 终止，不经 OS 监听端口），与 AdminServer.ServeConn
+// 同一模式。仅公钥认证；shell/exec 拉起系统默认 shell。
+type SSHServer struct {
+	mu     sync.Mutex
+	signer ssh.Signer
+}
+
+// NewSSHServer 创建 SSH 服务；host key 从 db 加载，不存在则生成 ed25519 并持久化。
+func NewSSHServer() (*SSHServer, error) {
+	signer, err := loadOrGenerateSSHHostKey()
+	if err != nil {
+		return nil, err
+	}
+	return &SSHServer{signer: signer}, nil
+}
+
+// HostKeyFingerprint 返回 host key 的 SHA256 指纹（供 admin 页面展示比对）。
+func (s *SSHServer) HostKeyFingerprint() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signer == nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(s.signer.PublicKey())
+}
+
+func loadOrGenerateSSHHostKey() (ssh.Signer, error) {
+	pemBytes, err := db.GetSSHHostKey()
+	if err == nil && len(pemBytes) > 0 {
+		if signer, err := ssh.ParsePrivateKey(pemBytes); err == nil {
+			util.LogModuleInfo("ssh", "loaded ed25519 host key from database")
+			return signer, nil
+		} else {
+			util.LogModuleWarn("ssh", "stored host key unreadable, regenerating: %v", err)
+		}
+	} else if err != nil && err != db.ErrNotFound {
+		return nil, err
+	}
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "phaethon-host-key")
+	if err != nil {
+		return nil, err
+	}
+	encoded := pem.EncodeToMemory(block)
+	if err := db.PutSSHHostKey(encoded); err != nil {
+		util.LogModuleWarn("ssh", "failed to persist host key: %v", err)
+	}
+	util.LogModuleInfo("ssh", "generated new ed25519 host key")
+	return ssh.NewSignerFromKey(priv)
+}
+
+// ServeConn 处理一条移交过来的 SSH 连接（阻塞至连接结束）。
+func (s *SSHServer) ServeConn(conn net.Conn) {
+	cfg, err := db.GetSSHConfig()
+	if err != nil {
+		util.LogModuleWarn("ssh", "read config fail, closing conn: %v", err)
+		conn.Close()
+		return
+	}
+	if !cfg.Enabled {
+		util.LogModuleDebug("ssh", "ssh disabled, closing conn")
+		conn.Close()
+		return
+	}
+
+	s.mu.Lock()
+	signer := s.signer
+	s.mu.Unlock()
+
+	serverConf := &ssh.ServerConfig{
+		PublicKeyCallback: s.publicKeyCallback,
+	}
+	serverConf.AddHostKey(signer)
+
+	sshConn, chans, reqs, err := ssh.NewServerConn(conn, serverConf)
+	if err != nil {
+		util.LogModuleDebug("ssh", "handshake fail from %s: %v", conn.RemoteAddr(), err)
+		conn.Close()
+		return
+	}
+	util.LogModuleInfo("ssh", "session opened user=%s client=%s remote=%s",
+		sshConn.User(), sshConn.ClientVersion(), sshConn.RemoteAddr())
+	defer sshConn.Close()
+
+	go ssh.DiscardRequests(reqs)
+	for ch := range chans {
+		if ch.ChannelType() != "session" {
+			ch.Reject(ssh.UnknownChannelType, "only session channels are supported")
+			continue
+		}
+		go s.handleSession(ch)
+	}
+	util.LogModuleInfo("ssh", "session closed user=%s remote=%s", sshConn.User(), sshConn.RemoteAddr())
+}
+
+// publicKeyCallback 每次认证从 db 实时读取公钥列表——节点规模下 bbolt 读代价
+// 可忽略，天然免除缓存一致性风险；删除公钥立即生效。
+func (s *SSHServer) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	fp := ssh.FingerprintSHA256(key)
+	stored, err := db.GetSSHKey(fp)
+	if err != nil || stored == nil {
+		util.LogModuleInfo("ssh", "auth rejected user=%s fp=%s (unknown key)", conn.User(), fp)
+		return nil, errAuthDenied
+	}
+	util.LogModuleInfo("ssh", "auth accepted user=%s key=%s fp=%s", conn.User(), stored.Name, fp)
+	return nil, nil
+}
+
+type sshAuthError string
+
+func (e sshAuthError) Error() string { return string(e) }
+
+const errAuthDenied = sshAuthError("public key not authorized")
+
+// handleSession 处理 session channel：pty-req / env 先行，shell 或 exec 触发执行。
+func (s *SSHServer) handleSession(ch ssh.NewChannel) {
+	channel, reqs, err := ch.Accept()
+	if err != nil {
+		util.LogModuleDebug("ssh", "session channel accept fail: %v", err)
+		return
+	}
+
+	var (
+		usePty  bool
+		cols    uint32 = 80
+		rows    uint32 = 24
+		started bool
+		proc    sessionProc
+	)
+
+	defer func() {
+		if proc != nil {
+			proc.Kill()
+		}
+		channel.Close()
+	}()
+
+	for req := range reqs {
+		switch req.Type {
+		case "pty-req":
+			var p struct {
+				Term string
+				Cols uint32
+				Rows uint32
+				Wpx  uint32
+				Hpx  uint32
+				Mode string
+			}
+			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Cols > 0 && p.Rows > 0 {
+				usePty, cols, rows = true, p.Cols, p.Rows
+			}
+			req.Reply(err == nil, nil)
+
+		case "env":
+			req.Reply(true, nil)
+
+		case "window-change":
+			var p struct {
+				Cols uint32
+				Rows uint32
+				Wpx  uint32
+				Hpx  uint32
+			}
+			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Cols > 0 && p.Rows > 0 {
+				cols, rows = p.Cols, p.Rows
+				if proc != nil {
+					proc.Resize(cols, rows)
+				}
+			}
+
+		case "shell", "exec":
+			if started {
+				req.Reply(false, nil)
+				continue
+			}
+			cmdline := ""
+			if req.Type == "exec" {
+				var p struct{ Command string }
+				if err := ssh.Unmarshal(req.Payload, &p); err != nil || p.Command == "" {
+					req.Reply(false, nil)
+					continue
+				}
+				cmdline = p.Command
+			}
+			proc, err = startSessionProc(cmdline, req.Type == "shell", usePty, cols, rows)
+			if err != nil {
+				util.LogModuleWarn("ssh", "start proc fail: %v", err)
+				req.Reply(false, nil)
+				channel.Stderr().Write([]byte("failed to start process: " + err.Error() + "\n"))
+				sendExitStatus(channel, 255)
+				return
+			}
+			started = true
+			req.Reply(true, nil)
+			runSession(channel, proc)
+			return
+
+		default:
+			req.Reply(false, nil)
+		}
+	}
+}
+
+// runSession 在 shell/exec 应答成功后双向搬运数据，进程结束后上报 exit-status。
+func runSession(channel ssh.Channel, proc sessionProc) {
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(proc, channel)
+		proc.CloseStdin()
+	}()
+	go func() {
+		_, _ = io.Copy(channel, proc)
+		close(done)
+	}()
+
+	err := proc.Wait()
+	<-done
+	sendExitStatus(channel, exitCodeOf(err))
+}
+
+func sendExitStatus(channel ssh.Channel, code uint32) {
+	channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
+}
+
+func exitCodeOf(err error) uint32 {
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(interface{ ExitCode() int }); ok {
+		return uint32(exitErr.ExitCode())
+	}
+	return 255
+}

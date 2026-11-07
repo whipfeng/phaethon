@@ -536,6 +536,17 @@ func run(prev *activeResources) (*activeResources, error) {
 			res.connHandler.SetAdminHandler(res.adminServer)
 			util.LogModuleInfo("system", "Admin handler injected into ConnectionHandler for direct connection handling")
 		}
+		// Built-in SSH service: nodeID.phn:22 → SSH over netstack (no OS listener).
+		// Management plane is the admin page, so SSH rides on admin being enabled.
+		sshServer, err := server.NewSSHServer()
+		if err != nil {
+			util.LogModuleWarn("system", "SSH server init fail: %v", err)
+		} else {
+			util.LogModuleInfo("system", "Built-in SSH service ready (nodeID.phn:22, host key fp=%s)", sshServer.HostKeyFingerprint())
+			if res.connHandler != nil {
+				res.connHandler.SetSSHHandler(sshServer)
+			}
+		}
 	}
 
 	// Start reverse clients for all enabled reverse configs. A single stop channel

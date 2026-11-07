@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/apernet/hysteria/core/v2 v2.6.5
+	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/refraction-networking/utls v1.8.1
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5

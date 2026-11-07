@@ -1335,6 +1335,10 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/setup", s.apiSetup)
 	mux.HandleFunc("/api/restart", s.apiRestart)
 	mux.HandleFunc("/api/log/modules", s.apiLogModules)
+	mux.HandleFunc("/api/ssh", s.apiSSH)
+	mux.HandleFunc("/api/ssh/config", s.apiSSHConfig)
+	mux.HandleFunc("/api/ssh/keys", s.apiSSHKeys)
+	mux.HandleFunc("/api/ssh/keys/", s.apiSSHKeyItem)
 	mux.HandleFunc("/api/db/", s.apiDatabase)
 }
 

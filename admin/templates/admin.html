@@ -34,7 +34,136 @@
 
         <div id="admin-status" class="text-muted"></div>
     </div>
+
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.sshTitle">SSH 服务</span></h3>
+            <label style="margin:0;">
+                <input type="checkbox" id="ssh-enabled">
+                <span data-i18n="admin.sshEnabled">启用内建 SSH</span>
+            </label>
+        </div>
+        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.sshHelp">
+            通过 <code>ssh nodeid.phn</code>（22 端口）直达本节点，连接在 netstack 内终止、不经 OS 监听端口。
+            首次连接请比对 host key 指纹。注意：登录后可执行任意命令（等价于 phaethon 进程权限），仅添加信任的公钥。
+        </p>
+
+        <div class="form-group">
+            <label data-i18n="admin.sshHostKey">Host Key 指纹（SHA256）</label>
+            <div id="ssh-hostkey" class="text-muted" style="font-family:monospace; word-break:break-all;">-</div>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="admin.sshAddKey">添加公钥</label>
+            <div style="display:flex; gap:0.5rem; margin-bottom:0.5rem;">
+                <input type="text" id="ssh-key-name" class="form-control" style="flex:1;" placeholder="备注（设备/归属）" data-i18n-placeholder="admin.sshKeyNamePh">
+                <button onclick="addSSHKey()" class="btn btn-primary btn-sm" data-i18n="common.add">Add</button>
+            </div>
+            <textarea id="ssh-key-pubkey" class="form-control" rows="3" placeholder="ssh-ed25519 AAAA... comment（authorized_keys 单行）" data-i18n-placeholder="admin.sshKeyPubPh"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="admin.sshKeys">已授权公钥</label>
+            <table class="data-table" id="ssh-keys-table">
+                <thead>
+                    <tr><th data-i18n="admin.sshKeyName">备注</th><th data-i18n="admin.sshKeyFp">指纹</th><th data-i18n="admin.sshKeyCreated">添加时间</th><th></th></tr>
+                </thead>
+                <tbody id="ssh-keys-tbody">
+                    <tr><td colspan="4" class="text-muted">-</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div id="ssh-status" class="text-muted"></div>
+    </div>
 </div>
+
+<script>
+(function() {
+    function sshStatus(msg, isErr) {
+        const el = document.getElementById('ssh-status');
+        el.textContent = msg || '';
+        el.style.color = isErr ? 'var(--danger)' : 'var(--text-muted)';
+    }
+
+    async function loadSSH() {
+        try {
+            const res = await fetch('./api/ssh');
+            if (!res.ok) throw new Error('load fail');
+            const data = await res.json();
+            document.getElementById('ssh-enabled').checked = !!data.enabled;
+            document.getElementById('ssh-hostkey').textContent = data.hostKeyFingerprint || '-';
+            renderSSHKeys(data.keys || []);
+        } catch (err) {
+            sshStatus('Failed to load SSH settings: ' + err.message, true);
+        }
+    }
+
+    function renderSSHKeys(keys) {
+        const tbody = document.getElementById('ssh-keys-tbody');
+        if (!keys.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted">（无）</td></tr>';
+            return;
+        }
+        tbody.innerHTML = keys.map(k => {
+            const name = (k.name || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            const fp = (k.fingerprint || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            const created = k.created_at ? new Date(k.created_at).toLocaleString() : '';
+            return '<tr><td>' + name + '</td><td style="font-family:monospace; word-break:break-all;">' + fp +
+                '</td><td>' + created + '</td><td><button class="btn btn-danger btn-sm" onclick="deleteSSHKey(\'' +
+                encodeURIComponent(k.fingerprint) + '\')">✕</button></td></tr>';
+        }).join('');
+    }
+
+    document.getElementById('ssh-enabled').addEventListener('change', async function() {
+        try {
+            const res = await fetch('./api/ssh/config', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: this.checked})
+            });
+            if (!res.ok) throw new Error((await res.json()).error || 'save fail');
+            sshStatus(this.checked ? 'SSH 已启用' : 'SSH 已停用');
+        } catch (err) {
+            this.checked = !this.checked;
+            sshStatus('Save failed: ' + err.message, true);
+        }
+    });
+
+    window.addSSHKey = async function() {
+        const name = document.getElementById('ssh-key-name').value.trim();
+        const pubkey = document.getElementById('ssh-key-pubkey').value.trim();
+        if (!pubkey) { sshStatus('公钥内容不能为空', true); return; }
+        try {
+            const res = await fetch('./api/ssh/keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, pubkey: pubkey})
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'add fail');
+            document.getElementById('ssh-key-name').value = '';
+            document.getElementById('ssh-key-pubkey').value = '';
+            sshStatus('公钥已添加');
+            loadSSH();
+        } catch (err) {
+            sshStatus('Add failed: ' + err.message, true);
+        }
+    };
+
+    window.deleteSSHKey = async function(fpEnc) {
+        try {
+            const res = await fetch('./api/ssh/keys/' + fpEnc, {method: 'DELETE'});
+            if (!res.ok) throw new Error((await res.json()).error || 'delete fail');
+            sshStatus('公钥已删除');
+            loadSSH();
+        } catch (err) {
+            sshStatus('Delete failed: ' + err.message, true);
+        }
+    };
+
+    loadSSH();
+})();
+</script>
 
 <script>
 (function() {

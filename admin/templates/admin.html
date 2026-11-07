@@ -66,7 +66,7 @@
             <label data-i18n="admin.sshKeys">已授权公钥</label>
             <table class="data-table" id="ssh-keys-table">
                 <thead>
-                    <tr><th data-i18n="admin.sshKeyName">备注</th><th data-i18n="admin.sshKeyFp">指纹</th><th data-i18n="admin.sshKeyCreated">添加时间</th><th></th></tr>
+                    <tr><th data-i18n="admin.sshKeyName">备注</th><th data-i18n="admin.sshKeyPub">公钥</th><th data-i18n="admin.sshKeyCreated">添加时间</th><th></th></tr>
                 </thead>
                 <tbody id="ssh-keys-tbody">
                     <tr><td colspan="4" class="text-muted">-</td></tr>
@@ -100,16 +100,24 @@
 
     function renderSSHKeys(keys) {
         const tbody = document.getElementById('ssh-keys-tbody');
+        const L = (k, fb) => (typeof i18n !== 'undefined' ? i18n.t(k, fb) : fb);
         if (!keys.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted">（无）</td></tr>';
             return;
         }
         tbody.innerHTML = keys.map(k => {
-            const name = (k.name || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-            const fp = (k.fingerprint || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            const name = esc(k.name);
+            const fp = esc(k.fingerprint);
+            const parts = (k.pubkey || '').split(/\s+/);
+            const keyType = esc(parts[0] || '');
+            const keyBody = esc((parts[1] || '').slice(0, 40));
             const created = k.created_at ? new Date(k.created_at).toLocaleString() : '';
-            return '<tr><td>' + name + '</td><td style="font-family:monospace; word-break:break-all;">' + fp +
-                '</td><td>' + created + '</td><td><button class="btn btn-danger btn-sm" onclick="deleteSSHKey(\'' +
+            return '<tr><td data-label="' + esc(L('admin.sshKeyName', '备注')) + '">' + name + '</td>' +
+                '<td data-label="' + esc(L('admin.sshKeyPub', '公钥')) + '" style="font-family:monospace; word-break:break-all;" title="' + fp + '">' +
+                '<div style="flex:1; min-width:0;"><span class="text-muted">' + keyType + '</span> ' + keyBody + '…' +
+                '<div class="text-muted" style="font-size:.75em;">' + fp + '</div></div></td>' +
+                '<td data-label="' + esc(L('admin.sshKeyCreated', '添加时间')) + '">' + created + '</td><td><button class="btn btn-danger btn-sm" onclick="deleteSSHKey(\'' +
                 encodeURIComponent(k.fingerprint) + '\')">✕</button></td></tr>';
         }).join('');
     }

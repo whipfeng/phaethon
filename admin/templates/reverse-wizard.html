@@ -632,15 +632,15 @@ function renderReverseBindings(bindings, errorMsg) {
                 ? `<code>${escapeHtml(controlAddr)}</code>`
                 : `<span class="text-muted">-</span>`;
             html += `<tr>
-                <td><code>${seq}</code></td>
-                <td>${identityHtml}</td>
-                <td>${sourceHtml}</td>
-                <td>${registryHtml}</td>
-                <td>${targetHtml}</td>
-                <td><code>${escapeHtml(endpoint)}</code></td>
-                <td class="text-muted text-small">${updated ? new Date(updated).toLocaleString() : '-'}</td>
-                <td><span class="badge ${statusClass}">${statusText}</span></td>
-                <td>
+                <td data-label="${i18n.t('rv.seq')}"><code>${seq}</code></td>
+                <td data-label="${i18n.t('rv.bindingIdentity')}">${identityHtml}</td>
+                <td data-label="${i18n.t('rv.bindingSourceAddress')}">${sourceHtml}</td>
+                <td data-label="${i18n.t('rv.bindingRegistryAddr')}">${registryHtml}</td>
+                <td data-label="${i18n.t('rv.bindingTarget')}">${targetHtml}</td>
+                <td data-label="${i18n.t('rv.bindingEndpoint')}"><code>${escapeHtml(endpoint)}</code></td>
+                <td data-label="${i18n.t('rv.bindingUpdated')}" class="text-muted text-small">${updated ? new Date(updated).toLocaleString() : '-'}</td>
+                <td data-label="${i18n.t('rv.bindingStatus')}"><span class="badge ${statusClass}">${statusText}</span></td>
+                <td data-label="${i18n.t('rv.summaryOther')}">
                     <button class="btn btn-sm btn-danger" onclick="forceDeleteBinding('${escapeHtml(rid)}', ${seq})" data-i18n="rv.forceDelete">强制删除</button>
                 </td>
             </tr>`;

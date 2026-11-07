@@ -1331,6 +1331,8 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
         padding: 0.5rem 0;
         border: none;
         font-size: 0.9rem;
+        overflow-wrap: anywhere;
+        min-width: 0;
     }
 
     .data-table td:not(:last-child) {
@@ -1353,6 +1355,15 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     }
 
     .data-table td:last-child::before {
+        display: none;
+    }
+
+    /* Full-width cells (empty states, group headers) */
+    .data-table td[colspan] {
+        justify-content: center;
+    }
+
+    .data-table td[colspan]::before {
         display: none;
     }
 
@@ -1597,6 +1608,8 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
         align-items: center;
         padding: 0.5rem 0;
         border: none;
+        overflow-wrap: anywhere;
+        min-width: 0;
     }
     
     .card-style-table .data-table td:before {

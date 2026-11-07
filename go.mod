@@ -3,6 +3,7 @@ module phaethon
 go 1.25.0
 
 require (
+	github.com/UserExistsError/conpty v0.1.4
 	github.com/apernet/hysteria/core/v2 v2.6.5
 	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0

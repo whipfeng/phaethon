@@ -548,7 +548,10 @@ func StartTrojanSNI(mappings []*config.Mapping, port int) (net.Listener, error) 
 					c.Close()
 					return
 				}
-				util.SetTCPNoDelay(tlsConn)
+				// Keepalive 30s probes: a silently-dead client leg
+				// (NAT expiry, mobile radio drop) is reaped by RST in
+				// minutes instead of the OS-default ~2h black hole.
+				configureTCPConn(tlsConn)
 
 				sni := tlsConn.ConnectionState().ServerName
 				m, ok := sniMappings[sni]

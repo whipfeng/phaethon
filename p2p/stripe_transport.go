@@ -354,7 +354,7 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 	}
 	t.mu.Lock()
 	if len(t.affinity) >= stripeAffinityCap {
-		t.affinity = make(map[uint32]*stripeLane, stripeAffinityCap)
+		t.affinity = make(map[uint32]*stripeLane)
 	}
 	if l != nil {
 		t.affinity[key] = l
@@ -370,7 +370,7 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 // dropAffinity invalidates the per-flow lane pin. Called on lane set changes.
 func (t *stripeTransport) dropAffinity() {
 	t.mu.Lock()
-	t.affinity = make(map[uint32]*stripeLane, stripeAffinityCap)
+	t.affinity = make(map[uint32]*stripeLane)
 	t.mu.Unlock()
 }
 
@@ -389,19 +389,57 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 		t.sampleSojourn(start)
 		return err
 	}
-	select {
-	case l.queue <- []frame.Frame{{Type: frameType, Payload: payload}}:
-		return nil
-	case <-l.done:
-	case <-t.closed:
-		return io.ErrClosedPipe
-	default:
+	batch := []frame.Frame{{Type: frameType, Payload: payload}}
+	if ok, err := t.laneEnqueue(l, batch); ok || err != nil {
+		return err
 	}
-	// Lane dead/closing or queue full: fall back to the primary lane.
 	start := time.Now()
 	err := t.base.Send(frameType, payload, isControl)
 	t.sampleSojourn(start)
 	return err
+}
+
+// stripeLaneFullWait bounds how long a sender waits on a full lane queue
+// before moving the flows to the primary lane.
+const stripeLaneFullWait = 50 * time.Millisecond
+
+// laneEnqueue queues batch on lane l, waiting up to stripeLaneFullWait when
+// the queue is full. On timeout or a dead lane it re-pins the batch's flows
+// to the primary lane and returns false so the caller sends there: each flow
+// changes path once instead of flapping between lane and primary (§3.9 R4).
+func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (bool, error) {
+	select {
+	case l.queue <- batch:
+		return true, nil
+	case <-l.done:
+		t.repinPrimary(batch)
+		return false, nil
+	case <-t.closed:
+		return false, io.ErrClosedPipe
+	default:
+	}
+	timer := time.NewTimer(stripeLaneFullWait)
+	defer timer.Stop()
+	select {
+	case l.queue <- batch:
+		return true, nil
+	case <-l.done:
+	case <-timer.C:
+	case <-t.closed:
+		return false, io.ErrClosedPipe
+	}
+	t.repinPrimary(batch)
+	return false, nil
+}
+
+func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
+	t.mu.Lock()
+	for _, f := range batch {
+		if key := flowHash32(t.salt, f.Payload); key != 0 {
+			t.affinity[key] = nil
+		}
+	}
+	t.mu.Unlock()
 }
 
 func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
@@ -433,17 +471,11 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 		t.sampleSojourn(start)
 	}
 	for l, batch := range perLane {
-		select {
-		case l.queue <- batch:
-		case <-l.done:
-			start := time.Now()
-			firstErr = t.firstErr(firstErr, t.base.SendBatch(batch))
-			t.sampleSojourn(start)
-		case <-t.closed:
-			return t.firstErr(firstErr, io.ErrClosedPipe)
-		default:
-			// Queue full: bounded memory beats unbounded backpressure here;
-			// the overflow rides the primary lane instead of dropping.
+		ok, err := t.laneEnqueue(l, batch)
+		if err != nil {
+			return t.firstErr(firstErr, err)
+		}
+		if !ok {
 			start := time.Now()
 			firstErr = t.firstErr(firstErr, t.base.SendBatch(batch))
 			t.sampleSojourn(start)

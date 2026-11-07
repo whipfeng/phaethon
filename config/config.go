@@ -1406,12 +1406,16 @@ type MeshConfig struct {
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
 	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
 	ForwardingTrace      bool                     `yaml:"forwarding-trace,omitempty" json:"forwarding-trace,omitempty"`             // Cross-layer forwarding diagnostics
-	// AllowFlowRouteChange disables per-flow route pinning in mesh forwarding
-	// (pre-optimization behavior: a flow's packets round-robin across all
-	// parallel links to the best next hop). Set true to roll back without a
-	// binary downgrade. Default false = pinned per flow.
-	AllowFlowRouteChange bool `yaml:"allow-flow-route-change,omitempty" json:"allow-flow-route-change,omitempty"`
+	HTunnel              *HTunnelConfig           `yaml:"htunnel,omitempty" json:"htunnel,omitempty"`                               // h_tunnel mesh channel tuning (nil = defaults)
 }
+
+var activeHTunnel atomic.Pointer[HTunnelConfig]
+
+// SetHTunnel publishes the process-wide h_tunnel config (nil = defaults).
+func SetHTunnel(c *HTunnelConfig) { activeHTunnel.Store(c) }
+
+// HTunnel returns the current h_tunnel config; nil means defaults.
+func HTunnel() *HTunnelConfig { return activeHTunnel.Load() }
 
 // HTunnelConfig holds h_tunnel transport optimization settings (v0.2.0)
 type HTunnelConfig struct {
@@ -1431,12 +1435,6 @@ type HTunnelConfig struct {
 	MinWaitTime     int `yaml:"min-wait-time,omitempty" json:"min-wait-time,omitempty"`         // default 1s
 	MaxWaitTime     int `yaml:"max-wait-time,omitempty" json:"max-wait-time,omitempty"`         // default 30s
 	DefaultWaitTime int `yaml:"default-wait-time,omitempty" json:"default-wait-time,omitempty"` // default 5s
-
-	// AllowFlowReorder disables per-flow ordered delivery on h_tunnel
-	// channels (pre-optimization behavior: frames of one inner flow may
-	// travel on multiple concurrent POSTs / GET chains). Set true to
-	// roll back without a binary downgrade. Default false = ordered.
-	AllowFlowReorder bool `yaml:"allow-flow-reorder,omitempty" json:"allow-flow-reorder,omitempty"`
 }
 
 // GetPoolSize returns the connection pool size with default fallback.
@@ -1461,18 +1459,6 @@ func (c *HTunnelConfig) GetMaxBatchSize() int {
 		return 512 * 1024 // 512KB
 	}
 	return c.MaxBatchSize
-}
-
-// GetAllowFlowReorder reports whether per-flow ordered delivery is disabled.
-// Default false (ordered delivery on).
-func (c *HTunnelConfig) GetAllowFlowReorder() bool {
-	return c != nil && c.AllowFlowReorder
-}
-
-// GetAllowFlowRouteChange reports whether per-flow route pinning in mesh
-// forwarding is disabled. Default false (pinning on).
-func (c *MeshConfig) GetAllowFlowRouteChange() bool {
-	return c != nil && c.AllowFlowRouteChange
 }
 
 // GetHeartbeatInterval returns the heartbeat interval with default fallback.

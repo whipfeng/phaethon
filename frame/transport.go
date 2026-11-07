@@ -74,6 +74,7 @@ type streamTransport struct {
 
 // NewStreamTransport wraps conn in a FrameTransport.
 func NewStreamTransport(conn net.Conn) FrameTransport {
+	limitKernelBacklog(conn)
 	t := &streamTransport{
 		conn:       conn,
 		ctrlRecvCh: make(chan streamRecvResult, 16),

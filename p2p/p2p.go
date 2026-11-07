@@ -389,6 +389,7 @@ type Peer struct {
 	linkNICPtr     atomic.Pointer[mesh.LinkNIC]
 	meshSenderPtr  atomic.Pointer[peerSender]
 	lastSeenNano   atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
+	pingDeadHeldNano atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
 
 	transport        frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
 	transportMu      sync.Mutex
@@ -1957,6 +1958,10 @@ const (
 	// pingFailDisconnectThreshold: 10 consecutive pings without any pong
 	// triggers link teardown (design §4.4).
 	pingFailDisconnectThreshold = 10
+	// pingDeadInboundQuiet: ping loss only kills the link if no inbound frame
+	// arrived for this long; inbound traffic proves the peer and the inbound
+	// direction alive while pongs sit behind a deep outbound backlog.
+	pingDeadInboundQuiet = 10 * time.Second
 )
 
 // pingSample is one resolved window slot carrying its seq, so a late pong
@@ -2153,7 +2158,8 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 
 // sendPing sends a ping request to a peer for link quality measurement.
 // Send failures roll back the pending ping (not counted as loss, §4.3).
-// 10 consecutive pings without any pong → Warn + close (design §4.4).
+// 10 consecutive pings without any pong and no inbound frame for 10s → Warn +
+// close (design §4.4).
 func (m *P2PManager) sendPing(peer *Peer) {
 	if peer.pingTracker == nil {
 		return
@@ -2161,11 +2167,20 @@ func (m *P2PManager) sendPing(peer *Peer) {
 
 	// Check consecutive-loss threshold BEFORE sending (ages out stale pings)
 	if peer.pingTracker.consecutiveLostCount() >= pingFailDisconnectThreshold {
-		util.LogModuleWarn("p2p", "[P2P] link dead: %d consecutive pings without pong for peer.ID=%s proxy=%s nodeID=%s, closing",
-			pingFailDisconnectThreshold, peer.ID, peer.ProxyNameSafe(), peer.NodeID)
-		peer.SetLastError(fmt.Sprintf("link dead: %d consecutive pings without pong", pingFailDisconnectThreshold))
-		peer.transport.Close()
-		return
+		now := time.Now()
+		if quiet := now.Sub(time.Unix(0, peer.lastSeenNano.Load())); quiet < pingDeadInboundQuiet {
+			if now.Sub(time.Unix(0, peer.pingDeadHeldNano.Load())) >= 10*time.Second {
+				peer.pingDeadHeldNano.Store(now.UnixNano())
+				util.LogModuleInfo("p2p", "[P2P] link dead held: %d+ consecutive pings without pong but last inbound frame %v ago, peer.ID=%s proxy=%s nodeID=%s",
+					pingFailDisconnectThreshold, quiet.Round(time.Millisecond), peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+			}
+		} else {
+			util.LogModuleWarn("p2p", "[P2P] link dead: %d consecutive pings without pong for peer.ID=%s proxy=%s nodeID=%s, closing",
+				pingFailDisconnectThreshold, peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+			peer.SetLastError(fmt.Sprintf("link dead: %d consecutive pings without pong", pingFailDisconnectThreshold))
+			peer.transport.Close()
+			return
+		}
 	}
 
 	seq := peer.pingTracker.recordPing()

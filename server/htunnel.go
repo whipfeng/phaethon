@@ -35,10 +35,6 @@ type HTunnelServer struct {
 
 	idGen    int64
 	channels sync.Map // int64 -> *htChannel
-
-	// v0.2.0: h_tunnel transport config (nil = use defaults)
-	// Note: HTunnel config is not stored in database, always nil for now
-	htConfig *config.HTunnelConfig
 }
 
 // pendingOp tracks whether an operation for the current seq is already in
@@ -65,22 +61,21 @@ type htChannel struct {
 	isMesh    bool // P2P direct mesh channel (frames in POST/GET bodies)
 
 	// mesh channel queues (only used when isMesh is true)
-	meshIn     chan meshMsg     // client → local P2P session (fed by POST handler)
-	meshOut    chan meshMsg     // frames → client (drained by GET)
-	getWaiters chan *meshWaiter // waiting GET requests (for concurrent GET support)
+	meshIn      chan meshMsg     // client → local P2P session (fed by POST handler)
+	meshOut     chan meshMsg     // data frames → client (drained by GET)
+	meshCtrlOut chan meshMsg     // control frames → client, never blocked behind data (§3.9)
+	getWaiters  chan *meshWaiter // waiting GET requests (for concurrent GET support)
+	htCfg       *config.HTunnelConfig
 
-	// Per-flow ordered GET dispatch (mesh-per-flow-ordering §3.2):
-	// frames are routed by flow key onto per-pipe queues and only ever
-	// served to a GET waiter of the same pipe, so one inner flow rides one
-	// serial GET chain. pipeCnt == 0 = legacy unordered dispatch.
-	pipeMu   sync.Mutex
-	pipeCnt  int             // client-announced pipe count (X-N), 0 = legacy
-	pipeQ    [][]meshMsg     // queued frames per pipe (index = flowKey % pipeCnt)
-	pipeWait [][]*meshWaiter // registered waiters per pipe
-	pipeAnyQ []meshMsg       // wildcard queue: data before X-N arrived
-	pipeAnyW []*meshWaiter   // wildcard waiters (GETs without a valid pipe)
-	ctrlQ    []meshMsg       // p2p control frames, served first to any waiter (§3.8)
-	pipeRR   int             // round-robin pipe for unkeyed data frames (pings)
+	// GET delivery state (§3.8/§3.9 F2), guarded by dispMu: control frames
+	// are served first to any waiter; data rides one FIFO.
+	dispMu     sync.Mutex
+	ctrlQ      []meshMsg     // p2p control frames, served first to any waiter (§3.8)
+	dataQ      []meshMsg     // data frames awaiting a GET, FIFO
+	waiters    []*meshWaiter // registered GET waiters
+	dataBytes  int           // wire bytes queued in dataQ (§3.9 hard cap)
+	dataCodel  codel         // AQM state of dataQ
+	codelDrops uint64        // frames dropped by AQM (logged, throttled)
 
 	// Cached results for step==0 retry
 	lastReadData []byte

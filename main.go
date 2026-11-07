@@ -621,7 +621,10 @@ func loadSubscriptionCaches() {
 func loadUDPPortRange() {
 	udpPortRange, err := db.GetUDPPortRange()
 	if err != nil {
-		util.LogModuleWarn("system", "load UDP port range fail: %v", err)
+		// 未配置 = 用 OS 默认端口分配（dialer 0 值语义），同 TCP 侧静默跳过
+		if !errors.Is(err, db.ErrNotFound) {
+			util.LogModuleWarn("system", "load UDP port range fail: %v", err)
+		}
 		return
 	}
 	if udpPortRange != "" {

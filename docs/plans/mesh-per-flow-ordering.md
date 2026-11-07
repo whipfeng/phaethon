@@ -401,6 +401,11 @@ GG 替代测试环境（不依赖 DESKW 部署）：GG 复用已通告的 `172.1
 - GG 内核只有 reno/cubic（无 bbr），layer4 用户无权加载模块。
 - **对照测试（更正：并非完全绕过 phaethon）**：Mac `ssh GG cat f8m.bin`，GG 侧 `$SSH_CONNECTION` 来源为 36.140.28.178，实际路径 = Mac → QG 旁路网关（phaethon TUN）→ MGMS_HT h_tunnel → JF → **普通内核 TCP** → GG。即 GG→JF 段不经 mesh/gVisor，JF→QG 段仍经 h_tunnel。单流 8MB/20.9s ≈ 375KB/s；4 流并发 32MB/94.5s ≈ 331KB/s。h_tunnel 段 8 流实测可达 4.5MB/s，不是 375KB/s 的瓶颈 → 封顶在 GG→JF 段。佐证：mesh 外层 lane 是内核 TCP，Send-Q 积到 815KB（有数据发不出去）且重传约 10%，属网络受限。突发时单 lane 能到 1250KB/s，随即大量重传 → 符合云主机出口限速器（约 3Mbps）特征。GG→JF 纯直连无法测（GG 连 JF:60002 超时）。
 - **JF 端直取（最干净对照，2026-11-07）**：在 JF 上（ssh -A 借 Mac 密钥）`ssh GG head -c 8000000 …`，链路只剩 GG→JF 一段内核 TCP：单流 27.5s ≈ 284KB/s；4 流并发 32MB/112.5s ≈ 278KB/s（总量不随流数增加）。同期 GG 侧 `ss` 采样该类连接：Send-Q 恒约 2MB、重传约 18%、RTT 稳定约 22ms、rwnd_limited 0.1% → 发送端有数据、接收端不限，丢包而延迟不涨 → 出口限速器。
+- **全链路分段对照（同一时段，2026-11-07）**：
+  - JF→QG 公网 ssh 直连（QG 本机拉 JF，JF 见来源为公网 36.152.39.58）64MB：约 8.9 / 12.5MB/s。
+  - Mac 经 ssh 跳板 `ProxyCommand ssh JF -W` 拉 GG（全程内核 TCP、不经 phaethon）8MB：266 / 293 / 305KB/s。
+  - Mac 经 mesh 拉 GG `172.18.0.1:18999/f8m.bin` 8MB：268 / 276 / 284KB/s。
+  - 跳板与 mesh 相差 < 5%，都落在 GG→JF 段的速度上（JF 直取 284KB/s，且 JF 侧 Mac 会话连接只走 3.5KB，排除转发量）。
 - 结论：GG 路径的上限是 **GG 出口带宽（约 3Mbps）**，与 phaethon 无关；方案 A 后单流 22.5s ≈ 8MB/355KB/s，已基本跑满。单流跨 lane 分发 / 外层 BBR 在这条路径上**没有收益**，不做。GG 路径不适合做吞吐验收，吞吐验收以 DESKW 路径（elephant / 8 流）为准。
 - 遗留观察：4 流并发时出现过约 13s 全零吞吐停顿（GG `ss` 采样 648~661s），待 DESKW 部署后看是否复现。
 

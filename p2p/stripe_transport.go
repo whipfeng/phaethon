@@ -91,6 +91,11 @@ type stripeConfig struct {
 	// udpActive reports whether the session's UDP leg currently routes data
 	// (design §7): while true the controller suppresses adds.
 	udpActive func() bool
+	// sendControl enqueues a control frame through the peer's control queue.
+	// Used by LaneAck to report cumulative rx counts.
+	sendControl func(byte, []byte) error
+	// name is the peer identifier for diagnostic logs.
+	name string
 }
 
 type stripeLaneProbe struct {
@@ -114,6 +119,8 @@ type stripeLane struct {
 	probe     stripeLaneProbe
 	framesSent atomic.Uint64
 	bytesSent  atomic.Uint64
+	flow       laneFlow // in-flight accounting for this lane
+	diagTx     int64    // previous tx snapshot for diag logging
 }
 
 func (l *stripeLane) close() {
@@ -154,6 +161,12 @@ type stripeTransport struct {
 	dataCh chan legRecvResult
 	closed chan struct{}
 	closeOnce sync.Once
+
+	// LaneAck metering (§3 B1)
+	primaryFlow     laneFlow
+	ackRequested    atomic.Bool
+	ackRequestSent  atomic.Bool
+	diagPrimaryTx   int64
 }
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
@@ -167,6 +180,7 @@ func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTran
 		closed:   make(chan struct{}),
 	}
 	go t.baseReadLoop()
+	go t.flowLoop()
 	if cfg.dialLane != nil {
 		go t.controllerLoop()
 	}
@@ -375,10 +389,14 @@ func (t *stripeTransport) dropAffinity() {
 }
 
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	if frameType == frame.FrameMeshPacket {
+		t.requestLaneAcks()
+	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
 		start := time.Now()
 		err := t.base.Send(frameType, payload, isControl)
+		t.primaryFlow.onSent(len(payload), start)
 		t.sampleSojourn(start)
 		return err
 	}
@@ -386,6 +404,7 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 	if l == nil {
 		start := time.Now()
 		err := t.base.Send(frameType, payload, isControl)
+		t.primaryFlow.onSent(len(payload), start)
 		t.sampleSojourn(start)
 		return err
 	}
@@ -395,6 +414,7 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 	}
 	start := time.Now()
 	err := t.base.Send(frameType, payload, isControl)
+	t.primaryFlow.onSent(len(payload), start)
 	t.sampleSojourn(start)
 	return err
 }
@@ -444,9 +464,24 @@ func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
 
 func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 	lanes := t.snapshotLanes()
+	hasMesh := false
+	for _, f := range frames {
+		if f.Type == frame.FrameMeshPacket {
+			hasMesh = true
+			break
+		}
+	}
+	if hasMesh {
+		t.requestLaneAcks()
+	}
 	if len(lanes) == 0 {
 		start := time.Now()
+		var totalBytes int
+		for _, f := range frames {
+			totalBytes += len(f.Payload)
+		}
 		err := t.base.SendBatch(frames)
+		t.primaryFlow.onSent(totalBytes, start)
 		t.sampleSojourn(start)
 		return err
 	}
@@ -467,7 +502,12 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 	var firstErr error
 	if len(primary) > 0 {
 		start := time.Now()
+		var primaryBytes int
+		for _, f := range primary {
+			primaryBytes += len(f.Payload)
+		}
 		firstErr = t.base.SendBatch(primary)
+		t.primaryFlow.onSent(primaryBytes, start)
 		t.sampleSojourn(start)
 	}
 	for l, batch := range perLane {
@@ -477,7 +517,12 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 		}
 		if !ok {
 			start := time.Now()
+			var fb int
+			for _, f := range batch {
+				fb += len(f.Payload)
+			}
 			firstErr = t.firstErr(firstErr, t.base.SendBatch(batch))
+			t.primaryFlow.onSent(fb, start)
 			t.sampleSojourn(start)
 		}
 	}
@@ -501,15 +546,18 @@ func (t *stripeTransport) laneWriter(l *stripeLane) {
 		case <-t.closed:
 			return
 		case batch := <-l.queue:
+			var totalBytes int
+			for _, f := range batch {
+				totalBytes += len(f.Payload)
+			}
 			if err := l.transport.SendBatch(batch); err != nil {
 				util.LogModuleWarn("p2p", "[STRIPE] lane %d write failed, removing lane: %v", l.id, err)
 				t.removeLane(l)
 				return
 			}
 			l.framesSent.Add(uint64(len(batch)))
-			for _, f := range batch {
-				l.bytesSent.Add(uint64(len(f.Payload)))
-			}
+			l.bytesSent.Add(uint64(totalBytes))
+			l.flow.onSent(totalBytes, time.Now())
 		}
 	}
 }
@@ -527,6 +575,11 @@ func (t *stripeTransport) baseReadLoop() {
 			case <-t.closed:
 			}
 			return
+		}
+		t.primaryFlow.onRecv(len(payload))
+		if ft == frame.FrameLaneAck {
+			t.handleLaneAck(payload)
+			continue
 		}
 		ch := t.dataCh
 		if ft != frame.FrameMeshPacket {
@@ -555,6 +608,7 @@ func (t *stripeTransport) laneReadLoop(l *stripeLane) {
 			}
 			return
 		}
+		l.flow.onRecv(len(payload))
 		switch ft {
 		case frame.FrameMeshPacket:
 			select {

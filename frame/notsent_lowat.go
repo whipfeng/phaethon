@@ -14,16 +14,17 @@ const laneNotSentLowat = 128 << 10
 
 // limitKernelBacklog sets TCP_NOTSENT_LOWAT on the TCP socket under conn,
 // unwrapping NetConn() layers (e.g. *tls.Conn). Non-TCP carriers are skipped.
-func limitKernelBacklog(conn net.Conn) {
+// Returns whether the limit is in effect.
+func limitKernelBacklog(conn net.Conn) bool {
 	c := conn
 	for i := 0; i < 8; i++ {
 		if tc, ok := c.(*net.TCPConn); ok {
 			if err := setNotSentLowat(tc, laneNotSentLowat); err != nil {
 				util.LogModuleInfo("p2p", "[LANE-LOWAT] skipped remote=%s: %v", conn.RemoteAddr(), err)
-				return
+				return false
 			}
 			util.LogModuleInfo("p2p", "[LANE-LOWAT] set %dKB remote=%s", laneNotSentLowat>>10, conn.RemoteAddr())
-			return
+			return true
 		}
 		u, ok := c.(interface{ NetConn() net.Conn })
 		if !ok {
@@ -32,4 +33,11 @@ func limitKernelBacklog(conn net.Conn) {
 		c = u.NetConn()
 	}
 	util.LogModuleInfo("p2p", "[LANE-LOWAT] skipped remote=%s: carrier %T is not a TCP socket", conn.RemoteAddr(), c)
+	return false
+}
+
+// KernelBacklogLimited is implemented by transports that know whether the
+// carrier's unsent backlog is bounded (TCP_NOTSENT_LOWAT in effect).
+type KernelBacklogLimited interface {
+	KernelBacklogLimited() bool
 }

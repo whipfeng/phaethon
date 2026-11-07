@@ -126,6 +126,26 @@ type GossipInfo struct {
 	// UDPPort echoes the allocated leg port (passive side, dst 0.0.0.0:P).
 	UDP     bool `json:"udp,omitempty"`
 	UDPPort int  `json:"udpPort,omitempty"`
+
+	// LaneAck in-flight gating (per-link, docs/plans/mesh-control-isolation-
+	// inflight-cap.md §3.2): gossip is the periodic fallback channel — every
+	// declaration/report rides it, urgent threshold events use FrameLaneAck /
+	// FrameLaneGauge. Lack declares this link supports LaneAck reporting;
+	// WantTx/WantGauge declare what we want the peer to carry; LaneRx carries
+	// our cumulative per-lane rx (only when the peer declared WantTx);
+	// Gauge is our congestion gauge scaled 1-255 (only when WantGauge).
+	Lack      bool           `json:"lack,omitempty"`
+	WantTx    bool           `json:"wantTx,omitempty"`
+	WantGauge bool           `json:"wantGauge,omitempty"`
+	LaneRx    []GossipLaneRx `json:"laneRx,omitempty"`
+	Gauge     int            `json:"gauge,omitempty"`
+}
+
+// GossipLaneRx is one lane's cumulative rx bytes in the LaneAck gossip
+// fallback (laneID + count; the urgent FrameLaneAck uses a binary encoding).
+type GossipLaneRx struct {
+	ID uint32 `json:"id"`
+	Rx uint64 `json:"rx"`
 }
 
 // Topology tracks mesh peers and their advertised capabilities.

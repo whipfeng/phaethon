@@ -116,6 +116,9 @@ type hysteresisPeerSender struct {
 func (s *hysteresisPeerSender) Send(data []byte) error  { return nil }
 func (s *hysteresisPeerSender) SendGossip(data []byte)   {}
 func (s *hysteresisPeerSender) GossipFields() (bool, int) { return false, 0 }
+func (s *hysteresisPeerSender) LaneAckFields() (bool, bool, bool, []GossipLaneRx, int) {
+	return false, false, false, nil, 0
+}
 func (s *hysteresisPeerSender) GetNodeID() string       { return s.nodeID }
 func (s *hysteresisPeerSender) GetProxyName() string    { return "" }
 func (s *hysteresisPeerSender) GetLocalSeq() uint16     { return 0 }

@@ -159,6 +159,10 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req":
+			if !supportPty {
+				req.Reply(false, nil)
+				continue
+			}
 			var p struct {
 				Term string
 				Cols uint32

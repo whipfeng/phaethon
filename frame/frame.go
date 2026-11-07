@@ -29,6 +29,7 @@ const (
 	FrameLinkPing    byte = 0x14 // Link ping: link quality measurement
 	FrameLinkPong    byte = 0x15 // Link pong: link quality response
 	FrameStripeAttach byte = 0x16 // Stripe attach: bind a new connection as extra data lane
+	FrameLaneAck     byte = 0x17 // Lane ack: empty = request acks; else repeated {laneID u32, rxBytes u64}
 
 	// Data frames (fire-and-forget, no seq/ack)
 	FrameMeshPacket byte = 0x20 // Mesh overlay IP packet

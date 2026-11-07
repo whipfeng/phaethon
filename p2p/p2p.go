@@ -1121,7 +1121,13 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	// stripeTransport: session data-leg multiplexer (design §5). Sits below
 	// the UDP leg so UDP-Active traffic bypasses lane splitting entirely.
 	// Passive side: no dialLane → the dynamic controller never adds lanes.
-	stripe := newStripeTransport(t, stripeConfig{})
+	sendCtrl := func(ft byte, data []byte) error {
+		return enqueueWrite(peer, ft, data, true)
+	}
+	stripe := newStripeTransport(t, stripeConfig{
+		sendControl: sendCtrl,
+		name:        "passive:" + peer.ID,
+	})
 	peer.stripe = stripe
 
 	// Passive-side UDP leg: manager-level switch (no proxy config here).
@@ -1470,16 +1476,23 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		base := transport
 		var stripe *stripeTransport
 		if !(strings.EqualFold(proxy.Type, config.ProxyH_TUNNEL) && proxy.IsP2P() && proxy.V2) {
+			sendCtrl := func(ft byte, data []byte) error {
+				return enqueueWrite(peer, ft, data, true)
+			}
 			if pd, ok := d.(dialer.P2PDialer); ok {
 				stripe = newStripeTransport(transport, stripeConfig{
 					dialLane: func() (uint32, frame.FrameTransport, error) {
 						return m.dialStripeLane(peer, pd)
 					},
-					udpActive: peer.udpRoutingActive,
+					udpActive:   peer.udpRoutingActive,
+					sendControl: sendCtrl,
+					name:        "active:" + peer.ID,
 				})
 			} else {
 				stripe = newStripeTransport(transport, stripeConfig{
-					udpActive: peer.udpRoutingActive,
+					udpActive:   peer.udpRoutingActive,
+					sendControl: sendCtrl,
+					name:        "active:" + peer.ID,
 				})
 			}
 			base = stripe
@@ -1780,6 +1793,8 @@ func (m *P2PManager) runSession(peer *Peer) {
 			} else {
 				util.LogModuleWarn("p2p", "[P2P] FrameMeshPacket dropped: peer=%s node=%s meshHandler=%v payloadLen=%d", peer.ID, peer.NodeID, m.meshHandler != nil, len(payload))
 			}
+		case frame.FrameLaneAck:
+			// Consumed by stripeTransport; old peers without stripes log once and ignore.
 		default:
 			util.LogModuleInfo("p2p", "[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))
 		}

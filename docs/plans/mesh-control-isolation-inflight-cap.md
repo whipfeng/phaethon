@@ -190,3 +190,90 @@ UDP 数据腿（不经 TCP 缓冲，自带机制）；HT v2 本期不接门控�
 ## 7. 新增诊断日志
 - `[LANE-INFLIGHT]` 每 5s（有门控时）：lane、inflight、cap、rate、baseRTT、门控累计等待时长
 - `[STRIPE] dedicated data lane` 拨号/移除/重拨
+
+## 8. 实施交接说明（B1 已完成，待 B2/A/C）
+
+### 8.1 当前进度
+
+**✅ B1 LaneAck 计量框架** (commit 61a80ae) 已完成并推送：
+- `frame/frame.go`: FrameLaneAck = 0x17, KernelBacklogLimited interface
+- `frame/notsent_lowat.go`: limitKernelBacklog 返回 bool
+- `frame/transport.go`: streamTransport.lowat + KernelBacklogLimited() 方法
+- `p2p/lane_flow.go`: laneFlow（tx/rx/onSent/onRecv/onAck），minRTT 桶，rate EMA，encode/decode
+- `p2p/stripe_transport.go`: primaryFlow/lane flow, handleLaneAck, flowLoop, requestLaneAcks, sendControl/name 字段
+- `p2p/p2p.go`: passive/active side sendControl/name 传入，FrameLaneAck 静默忽略
+- 编译验证: `go vet ./p2p/` 通过
+
+### 8.2 待实现任务（按优先级顺序）
+
+**🔴 B2: peerWriteLoop 在途门控 (§3.4)** — 必须先完成才能做 A
+
+目标：在 `peerWriteLoop` 出队处拦住超额数据，让多余数据留在 DRR 队列（公平调度、8MB 预算、满了丢包 → 内层 TCP 正常降速），控制帧永不被卡住。
+
+关键步骤：
+1. 在 `laneFlow` 添加 `cap int64` 字段和 `adjustCap(now)` 方法（LEDBAT-like 公式：qd > 200ms → cap ×= max(0.5, 200ms/qd)；qd < 100ms 且繁忙 → ×1.25；边界 64KB–8MB）
+2. 在 `flowLoop` 中每 200ms 调用 `adjustCap`
+3. 修改 `peerWriteLoop`：计算 `credit = sum(caps) - sum(inflights)`，credit ≤ 0 时不选 drrOutput，但仍服务 controlCh/dnsQueue
+4. 停滞防护：10s 无 ack 进展且 inflight > 0 → 解除门控并告警 `[LANE-STALLED]`
+
+关键文件：`p2p/p2p.go:peerWriteLoop` (~line 1650), `collectWriteBatch` (~line 774), `p2p/lane_flow.go`
+
+验收：压测 VM→GG 时 `[LANE-INFLIGHT]` 显示 inflight 稳定在 64–256KB，不再出现 `link dead held`
+
+---
+
+**🔴 A: 专用数据 lane (§2)** — 必须在 B2 完成后才能实现
+
+目标：当主连接无法设上 TCP_NOTSENT_LOWAT 时（代理/中继/Windows），主动方拨一条专用数据 lane，所有可拆分数据帧只走该 lane，主连接只走控制/DNS/ping。
+
+关键步骤：
+1. dial 后检查 `frame.KernelBacklogLimited`，未实现或返回 false → 触发专用 lane
+2. 3s 延迟后拨号，固定 stripeID = 0xFFFFFFFF，失败退避 5s→60s
+3. `pickLanePinned` 排除 primary（候选集只剩专用 lane + 动态 lanes）
+4. 专用 lane 豁免降级剔除和 5 分钟空闲回收
+5. `laneEnqueue` 满时不回落主连接（由 B2 门控保证不会塞满）
+
+关键文件：`p2p/p2p.go` dial path (~line 1480), `p2p/stripe_transport.go` attachLane/removeLane/controllerTick/pickLane
+
+验收：VM→GG 链路建立后 ~3s 看到 `[STRIPE] dedicated data lane dialed`，压测期间主连接 Recv-Q ≈ 0
+
+---
+
+**🟡 C-P1/P2: HT v2 控制帧分离 (§4)** — 可独立于 B2/A 实施
+
+**P1: 客户端控制 POST**
+- isControl 帧单独小 POST，专用信号量 1–2 槽（不占 sendSem 16 槽），超时 5s
+- 关键文件：`dialer/htunnel_direct.go`
+
+**P2: 服务端入站分流**
+- meshHandleWrite 中非 FrameMeshPacket 和 DNS 进 meshCtrlIn，Recv 先服务 meshCtrlIn
+- handler 阻塞时限 2s，超时丢弃并告警
+- 关键文件：`server/htunnel_mesh.go`
+
+验收：QG→JF 压测期间 ping SRTT 不随数据量涨，服务端日志无 handler 阻塞 >2s
+
+---
+
+### 8.3 实施顺序与依赖
+
+```
+B2 (gate) → A (dedicated lane) → C-P1/P2 (HT v2 control separation)
+```
+
+原因：A 的专用 lane 队列（256 批次）需要 B2 的门控来防止进程内积压。C 可以独立实施，但建议等 B2 稳定后再做。
+
+### 8.4 已知风险
+
+1. **B2 cap 公式可能过于保守**：快链路可能被限流，需通过压测调整参数（target=200ms, ×1.25 加速步长）
+2. **A 专用 lane 重拨风暴**：连续失败后退避到 60s 仍可能影响体验，考虑增加"放弃专用 lane"逻辑
+3. **HT v2 兼容性**：旧服务端不认识 `X-P2P-Control` 头，控制帧仍会排队，需通过 gossip 协商能力
+4. **laneFlow.cap 并发访问**：adjustCap（写）和 peerWriteLoop（读）之间需要原子访问或加锁，考虑用 atomic.Int64
+5. **停滞防护误触发**：慢链路（46KB/s）10s 无 ack 可能是正常的，需区分"慢但健康"和"真正停滞"
+
+### 8.5 参考文档
+
+- 问题跟踪: `docs/issues/vm-gg-ssh-proxy-link.md`
+- Stripe 设计: `docs/plans/mesh-multilink-stripe-design.md`
+- HT v2 设计: `docs/plans/htunnel_p2p_direct_mode.md`
+
+**最后更新**: 2026-11-07 | **下一个接手者**: 请阅读本节 + §2/§3/§4，按优先级顺序实施

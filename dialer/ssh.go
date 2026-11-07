@@ -267,6 +267,7 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 		}
 
 		done := make(chan error, 1)
+		sent := time.Now()
 		go func() {
 			_, _, err := entry.client.SendRequest("keepalive@golang.org", true, nil)
 			done <- err
@@ -280,6 +281,9 @@ func (d *SSHDialer) keepAlive(entry *sshClientEntry) {
 					util.LogModuleWarn("ssh", "[%s] keepalive failed: %v", d.Proxy.Name, err)
 					d.removeAndReconnect(entry)
 					return
+				}
+				if rtt := time.Since(sent); rtt >= time.Second {
+					util.LogModuleInfo("ssh", "[SSH-KA-RTT] [%s] keepalive reply after %v", d.Proxy.Name, rtt.Round(time.Millisecond))
 				}
 			case <-time.After(sshKeepAliveReplyTimeout):
 				misses++

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | 方案调研完成，待批准实施 |
+| 状态 | **已实施（2026-11-07）**：分流 + server/ssh.go + db + API + Admin 页区块完成，冒烟测试通过；真机自测（ssh vm.phn / qg.phn）待部署后验证 |
 | 关联 | 控制台后端同构机制（ServeConn 分流）；依赖 golang.org/x/crypto（已在 go.mod:12）|
 
 ## 一、需求与可行性结论

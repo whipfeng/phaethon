@@ -97,7 +97,7 @@ func Init(dbPath string) error {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}
 		}
-		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketSubscriptionNodes, BucketRuntimeState, BucketVersions} {
+		for _, bucket := range [][]byte{BucketFakeIP, BucketPackages, BucketSubscriptionNodes, BucketRuntimeState, BucketVersions, BucketSSH, BucketSSHKeys} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("创建 bucket %s 失败: %w", string(bucket), err)
 			}

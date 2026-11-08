@@ -306,8 +306,21 @@ GG 侧只能看到「`right`（GG→VM 的 mesh 连接）先 EOF，随后 `left`
 
 ### 下一步
 
-1. **VM 部署带 relay 日志的版本**，复现后确认 VM 侧 `left`/`right` 谁先 EOF（唯一未闭环项：关闭发起方）
+1. ~~VM 部署带 relay 日志的版本~~ **已完成（2026-11-08 18:50）**：VM 部署 `v0.8.0-360-g3d0b468`，
+   relay/trojan/server/handler/base/control 已置 debug，回滚包 `phaethon.prev-20261108.exe`。
+   下次 freeze 时两端 relay 日志同时落盘，即可判定关闭发起方。
 2. 客户端缓解：SSH 客户端配置 `ServerAliveInterval 30`、`ServerAliveCountMax 3`，并用 tmux 兜底
 3. 若确认下行长期单向失效，评估是否需要用「关闭前短暂等待 close_notify ACK」或应用层 RST 兜底
    （注意：RST 会丢失 SSE/长连接语义，需用户拍板，且可能违反数据面不干预原则）
+
+### 复现后判读表
+
+| 侧 | relay 日志首个 EOF 方向 | 结论 |
+|---|---|---|
+| VM | `right`（本机 sshd） | 源头在 sshd / Windows 侧，phaethon 无责 |
+| VM | `left`（来自 GG 的 mesh） | 源头在 GG 侧，继续深挖 |
+| GG | `left`（SR 的 TLS） | 源头在 SR / 运营商侧 |
+
+GG 侧命令：`grep relay /home/layer4/phaethon-gg/data/logs/phaethon.log`
+VM 侧命令：`Select-String -Path C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log -Pattern '\[relay\]'`
 

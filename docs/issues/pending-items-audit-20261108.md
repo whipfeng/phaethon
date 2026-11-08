@@ -16,23 +16,21 @@
 
 ## 二、确认未完成
 
-### P0 · gvisor-fork（3 项）
+### P0 · gvisor-fork（3 项）—— **已实现，初次核实误判**
 
-| 项 | 状态 | 证据 |
+> **更正（2026-11-09）**：本节最初的结论是"未实现"，**错误**。
+> 原因是本地 `gvisor-fork` 工作副本停留在 `342b4a7`，而远端 `origin/main` 已有 `c880291`（2026-11-07）实现了这三项。
+> 未 `git fetch` 核对远端即下结论，属核实流程缺陷。
+
+| 项 | 实际状态 | 证据 |
 |---|---|---|
-| F3 TCP 端点 NIC 删除后重选路 | 未实现 | `../gvisor-fork/.../tcp/connect.go:848-860` `sendTCP` 只打日志后返回错误，无 reroute；`stack/route.go:512` `isValidForOutgoing` 未导出 |
-| F4 `SackedOut` 记账不变量 | 未实现 | `.../tcp/snd.go:1167` 仍 `s.SackedOut = 0`；`:1796` 用 scoreboard 再减；无防负钳制 |
-| F6 SetPipe 排除已丢失段 | 未实现 | `.../tcp/snd.go:1257-1305` 只认 scoreboard，无 `seg.lost` / `writeNext` 判断 |
+| F3 TCP 端点 NIC 删除后重选路 | **已实现** | `connect.go` `sendTCP` 失败且 `r == e.route && !r.IsValidForOutgoing()` 时调 `rerouteLocked()`；`route.go` 导出 `IsValidForOutgoing` |
+| F4 `SackedOut` 记账不变量 | **已实现** | 判据统一为 `seg.acked`，`enterRecovery` 不再清零，`splitSeg`/`TrimFront` 同步调整 |
+| F6 SetPipe 排除已丢失段 | **已实现** | `SetPipe` 增加 `!s1.lost && !afterWriteNext` 判断 |
 
-**取证结论：属"代码真没做"，不是文档过期。** 三条独立证据：
+**测试实证（2026-11-09）**：在 `origin/main`（`c880291`）上，`TestSackedOutNeverNegative` 四子用例与 `TestRerouteAfterNICRemoval` **全部通过**（后者 4.3–5.8s），完全支持文档原有的"8/8 通过"说法。
 
-1. **符号级**：`reroute` / `IsValidForOutgoing` / `[TCP-REROUTE]` 在 fork 与 phaethon 代码零命中，只存在于 .md
-2. **行号级**：文档引用的 8 处 file:line **全部精确落在未打补丁的原始代码上**（若真改过行号必然漂移）
-3. **仓库级**：fork 单分支 `main`、工作区干净、无 stash、无相关提交
-
-**"单测 8/8 通过"的说法不成立**：`gvisorfork/` 下确有 8 个测试点，但其中 3 个是无关的 Eifel undo 测试；`TestRerouteAfterNICRemoval` 不引用任何 F3 新符号，不打补丁也能编译，只会 30s 超时失败；`TestSackedOutNeverNegative` 在当前代码上应失败。
-
-**F4 补充**：`5ba8665`（PR #14101 移植）修的是另一个变量 `sackedOutsideRecovery`（Outstanding 泄漏），**不是** `SackedOut` 不变量，两者不是一回事。
+**教训**：跨仓库核实前必须先 `git fetch` 并对比 `HEAD..origin/main`，不能只看本地工作区。
 
 ### P1（3 项）
 
@@ -77,6 +75,10 @@ handler 未注入时仍回退本地拨号。第二处 `localNodeDomain` 分支�
 ---
 
 # 五、2026-11-08 决策结论（逐项定案）
+
+> **更正（2026-11-09）**：§5.1 / §5.2 / §5.3（F3/F4/F6）**不需实施**——它们早已在 gvisor-fork `c880291`（2026-11-07）实现并通过测试，见 §二 P0 的更正说明。
+> 本节保留当时的决策过程与精读发现（对理解相关机制仍有价值），但**不作为待办**。
+> 本轮实际落地的是 §5.4（Darwin writev）、§5.5（健康检查 ctx）、§5.6（watchdog）、§5.7（端口范围页）。
 
 > 本节的目的是**避免重复决策**。每项都记录了最终选择、以及精读代码后发现的关键约束。
 > 若后续有人想推翻，请先读完"约束"部分再讨论。

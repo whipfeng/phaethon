@@ -69,7 +69,7 @@
 | [multi_nic_implementation_plan.md](plans/multi_nic_implementation_plan.md) | 多 NIC 架构实现计划（历史实现记录） | - | OUTDATED |
 | [graceful_shutdown_and_tun_cleanup_design.md](plans/graceful_shutdown_and_tun_cleanup_design.md) | 优雅关闭挂死修复（DNS hijacker 未停）+ TUN 残留按真实地址清理 | v0.1.0 | DRAFT |
 | [tun_cleanup_scoping_and_pfroute_design.md](plans/tun_cleanup_scoping_and_pfroute_design.md) | TUN 清理作用域收敛（不误伤共存 VPN）+ darwin 路由操作迁移 PF_ROUTE | v0.1.0 | DRAFT |
-| [mesh-link-rebuild-stability.md](plans/mesh-link-rebuild-stability.md) | Mesh 链路误断与重建后遗症修复（LinkNIC 竞态、ping 误判死、NIC 删除后重选路、sackedOut、SetPipe、SSH keepalive） | - | 部分完成（F1/F2/F5 已实现；F3/F4/F6 已决策待实施） |
+| [mesh-link-rebuild-stability.md](plans/mesh-link-rebuild-stability.md) | Mesh 链路误断与重建后遗症修复（LinkNIC 竞态、ping 误判死、NIC 删除后重选路、sackedOut、SetPipe、SSH keepalive） | - | 已完成 |
 | [watchdog-residual-kill.md](plans/watchdog-residual-kill.md) | watchdog 残留进程精确查杀（按 uid+cwd+exe 判定，worker Pdeathsig） | - | 已决策待开发 |
 | [mesh-control-isolation-inflight-cap.md](plans/mesh-control-isolation-inflight-cap.md) | 链路控制面隔离（专用数据 lane）+ 在途量上限（LaneAck 门控）+ HT v2 控制帧分离 | - | DRAFT |
 | [mesh-integrated-ssh.md](plans/mesh-integrated-ssh.md) | Mesh 内建 SSH 服务（nodeid.phn:22 经 netstack 终止，不经 OS 监听端口） | - | 已实施 |

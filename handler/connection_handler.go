@@ -187,25 +187,37 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 	// Skip rule matching entirely - local mesh domains should NEVER be proxied.
 	if localNodeDomain {
 		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch (early return)", connID)
-		// Port 22 goes to the built-in SSH service when available.
-		if dstPort == 22 && h.sshHandler != nil {
-			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SSH] [%s] serving via ssh handler (dstPort=22)", connID)
-			rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
-				Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL-SSH"})
-			rec.Establish(connID, nil, false)
-			h.sshHandler.ServeConn(conn)
-			rec.Close()
-			return
-		}
-		// Direct admin handler: bypass OS network stack entirely
-		if h.adminHandler != nil {
-			util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
-			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
-			rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
-				Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL"})
-			rec.Establish(connID, nil, false)
-			h.adminHandler.ServeConn(conn)
-			rec.Close()
+
+		// Built-in service dispatch by port (mesh domain <nodeid>.phn only):
+		//   22    → built-in SSH
+		//   443   → built-in console (canonical entry)
+		//   39999 → built-in console (legacy admin port kept for existing tooling)
+		// Any other port is rejected instead of silently hitting the console, so
+		// future built-in services can claim their own port explicitly.
+		switch dstPort {
+		case builtinSSHPort:
+			if h.sshHandler != nil {
+				util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-SSH] [%s] serving via ssh handler (dstPort=22)", connID)
+				rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
+					Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL-SSH"})
+				rec.Establish(connID, nil, false)
+				h.sshHandler.ServeConn(conn)
+				rec.Close()
+				return
+			}
+		case builtinConsolePort, builtinConsoleAlias:
+			if h.adminHandler != nil {
+				util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
+				util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
+				rec := connlog.Start(inbound, "TCP", srcAddr, domain).WithConn(connID, srcPort).
+					Resolve("localhost", dstPort, &config.MatchResult{ProxyName: "LOCAL"})
+				rec.Establish(connID, nil, false)
+				h.adminHandler.ServeConn(conn)
+				rec.Close()
+				return
+			}
+		default:
+			util.LogModuleWarn("handler", "[HANDLECONN-LOCAL] [%s] port %d is not a built-in service on mesh domain %q (use 22 for SSH, 443 for console)", connID, dstPort, domain)
 			return
 		}
 		// Fallback: dial localhost via OS network stack
@@ -500,6 +512,20 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 // TUNMapping is a special mapping that represents traffic entering through
 // the TUN interface. Rules can use "#TUN" suffix to target TUN traffic.
 var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
+
+// Built-in service ports on a mesh domain (<nodeid>.phn).
+//
+//	22    → built-in SSH (server.SSHServer, netstack-terminated)
+//	443   → built-in console (admin handler, canonical entry point)
+//	39999 → same console, kept as an alias for existing tooling/scripts
+//
+// Ports outside this set are rejected on mesh domains rather than silently
+// routed to the console, leaving room for future built-in services.
+const (
+	builtinSSHPort      = 22
+	builtinConsolePort  = 443
+	builtinConsoleAlias = 39999
+)
 
 // proxyDesc returns a human-readable description of the proxy for logging.
 // meshEgressNode resolves the mesh egress node ID for a mesh-IP destination

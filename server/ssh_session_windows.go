@@ -69,9 +69,9 @@ func (p *pipeProc) Kill()                        { _ = p.cmd.Process.Kill(); p.s
 func (p *pipeProc) CloseStdin()                  { p.stdin.Close() }
 func (p *pipeProc) Resize(cols, rows uint32)     {}
 
-// defaultShell 返回系统默认 shell：pwsh（PowerShell 7，装了优先）→
+// autoDetectShell 返回系统自动探测的 shell：pwsh（PowerShell 7，装了优先）→
 // powershell.exe → %COMSPEC%（cmd.exe 回退）。
-func defaultShell() string {
+func autoDetectShell() string {
 	for _, sh := range []string{"pwsh", "powershell", "cmd"} {
 		if path, err := exec.LookPath(sh); err == nil {
 			return path
@@ -83,32 +83,11 @@ func defaultShell() string {
 	return "cmd.exe"
 }
 
-// execArgs 返回 shell 执行外部命令行的参数：cmd 用 /s /c，PowerShell 用 -Command。
-func execArgs(shell, cmdline string) []string {
-	base := strings.ToLower(shell)
-	if strings.Contains(base, "powershell") || strings.Contains(base, "pwsh") {
-		return []string{"-Command", cmdline}
-	}
-	return []string{"/s", "/c", cmdline}
-}
-
-// utf8InitCmd 是 ConPTY shell 会话启动时注入的命令：把控制台切到 UTF-8，
-// 消除客户端按 UTF-8 解码时的中文乱码。
-func utf8InitCmd(shell string) string {
-	base := strings.ToLower(shell)
-	if strings.Contains(base, "powershell") || strings.Contains(base, "pwsh") {
-		// PS 5.1 启动时缓存控制台代码页，chcp 后还需重置 Console 编码。
-		// PS 的 >nul 是 Out-File 到文件 nul（会报错），置空要用 | Out-Null。
-		return "chcp 65001 | Out-Null; [Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n"
-	}
-	return "chcp 65001 >nul\r\n"
-}
-
 // startSessionProc 拉起 shell（isShell=true 交互登录）或执行命令行。
 // usePty 且 ConPTY 可用时走全交互伪终端；否则管道模式（行级交互）。
 func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {
-	shell := defaultShell()
-	workDir := os.Getenv("SystemDrive") + "\\"
+	shell := resolveShell()
+	workDir := defaultWorkDir()
 
 	if isShell {
 		if usePty && supportPty {
@@ -120,19 +99,6 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		return startConpty("\""+shell+"\" "+strings.Join(quoteArgs(execArgs(shell, cmdline)), " "), workDir, cols, rows)
 	}
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
-}
-
-// quoteArgs 给含空格的参数加引号，拼 ConPTY 命令行用。
-func quoteArgs(args []string) []string {
-	out := make([]string, len(args))
-	for i, a := range args {
-		if strings.ContainsAny(a, " \t\"") {
-			out[i] = "\"" + strings.ReplaceAll(a, "\"", "\\\"") + "\""
-		} else {
-			out[i] = a
-		}
-	}
-	return out
 }
 
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
@@ -147,7 +113,9 @@ func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, er
 		return nil, err
 	}
 	// ConPTY 输入有队列缓冲，shell 起来后自然会消费到。
-	_, _ = p.Write([]byte(utf8InitCmd(shell)))
+	if init := utf8InitCmd(shell); init != "" {
+		_, _ = p.Write([]byte(init))
+	}
 	return p, nil
 }
 

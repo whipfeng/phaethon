@@ -16,9 +16,11 @@ var (
 	sshConfigItem  = []byte("config")
 )
 
-// SSHConfig 本节点 SSH 服务开关。
+// SSHConfig 本节点 SSH 服务配置。
+// Shell 为空字符串时走各平台自动探测（Windows: pwsh→powershell→cmd；Unix: $SHELL→/bin/sh）。
 type SSHConfig struct {
-	Enabled bool `json:"enabled"`
+	Enabled bool   `json:"enabled"`
+	Shell   string `json:"shell,omitempty"`
 }
 
 // SSHKey 一条 authorized 公钥。

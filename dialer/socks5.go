@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -25,6 +26,13 @@ func (d *Socks5Dialer) DialPacket() (net.PacketConn, error) {
 }
 
 func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.DialContext(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support. The SOCKS5 handshake has no
+// built-in deadline, so ctx cancellation is what prevents a silent peer from
+// blocking this goroutine forever.
+func (d *Socks5Dialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	// If this proxy is configured as a reverse channel, obtain from registry
 	// and perform SOCKS5 CONNECT handshake so the remote Socks5Server can
 	// resolve the real destination and relay traffic.
@@ -32,7 +40,10 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return nil, fmt.Errorf("socks5: %w", err)
 	} else if conn != nil {
 		util.LogModuleDebug("socks5", "reverse match ok, doing CONNECT handshake to %s:%d", d.Proxy.Name, d.ConnIDStr(), dstAddr, dstPort)
-		if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, 0x01, d.ConnIDStr()); err != nil {
+		_, cleanup := withCtxDeadline(ctx, conn)
+		err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, 0x01, d.ConnIDStr())
+		cleanup()
+		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("socks5: reverse handshake fail: %w", err)
 		}
@@ -47,7 +58,7 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		nextType = d.Proxy.Next.Type
 	}
 	util.LogModuleDebug("socks5", "next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
-	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	conn, err := dialWithContext(ctx, nextDialer, d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("socks5: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
@@ -55,7 +66,10 @@ func (d *Socks5Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	cmd := byte(0x01) // CONNECT
 
 	// SOCKS5 handshake
-	if err := socks5Handshake(conn, d.Proxy, dstAddr, dstPort, cmd, d.ConnIDStr()); err != nil {
+	_, cleanup := withCtxDeadline(ctx, conn)
+	err = socks5Handshake(conn, d.Proxy, dstAddr, dstPort, cmd, d.ConnIDStr())
+	cleanup()
+	if err != nil {
 		conn.Close()
 		return nil, err
 	}

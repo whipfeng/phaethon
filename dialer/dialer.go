@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"phaethon/config"
@@ -77,6 +78,53 @@ func ListenUDPWithAddr(network string) (net.PacketConn, error) {
 type Dialer interface {
 	Dial(dstAddr string, dstPort int) (net.Conn, error)
 	ServerAddr() (string, int)
+}
+
+// ContextDialer is an optional extension implemented by dialers whose blocking
+// steps (TCP connect, protocol handshake) can be interrupted by ctx.
+// Callers must type-assert; a dialer that does not implement it falls back to
+// Dial and therefore cannot be cancelled mid-handshake.
+type ContextDialer interface {
+	DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error)
+}
+
+// DialTimeoutAware lets a dialer declare its worst-case handshake duration.
+// Health checks use it as the per-proxy budget instead of a global timeout:
+// a slow-but-healthy protocol (e.g. h_tunnel doing 3 serial HTTP HEADs)
+// must not be judged dead just because it is slower than the default.
+type DialTimeoutAware interface {
+	MaxDialTimeout() time.Duration
+}
+
+// withCtxDeadline binds conn to ctx: it applies ctx's deadline to any blocking
+// read/write (protocol handshake) and, on cancellation, forces the deadline
+// into the past so a blocked Read returns immediately.
+//
+// The returned cleanup MUST be called once the handshake finishes: it stops
+// watching ctx and clears the deadline so the connection behaves normally.
+// It is a no-op when ctx is nil or has no deadline and is never cancelled.
+func withCtxDeadline(ctx context.Context, conn net.Conn) (net.Conn, func()) {
+	if ctx == nil || conn == nil {
+		return conn, func() {}
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
+	return conn, func() {
+		stop()
+		_ = conn.SetDeadline(time.Time{})
+	}
+}
+
+// dialWithContext prefers the dialer's cancellable path and falls back to Dial.
+func dialWithContext(ctx context.Context, d Dialer, dstAddr string, dstPort int) (net.Conn, error) {
+	if cd, ok := d.(ContextDialer); ok {
+		return cd.DialContext(ctx, dstAddr, dstPort)
+	}
+	return d.Dial(dstAddr, dstPort)
 }
 
 // UDPDialer establishes a UDP packet relay through a proxy.
@@ -349,6 +397,11 @@ func ChainDialWithID(proxy *config.Proxy, dstAddr string, dstPort int, connID st
 // DialToProxy dials through the proxy's via-chain to reach the proxy's own server.
 // Used for TCP connectivity health checks.
 func DialToProxy(p *config.Proxy) (net.Conn, error) {
+	return DialToProxyContext(context.Background(), p)
+}
+
+// DialToProxyContext is DialToProxy with cancellation support.
+func DialToProxyContext(ctx context.Context, p *config.Proxy) (net.Conn, error) {
 	if p == nil {
 		return nil, fmt.Errorf("nil proxy")
 	}
@@ -363,7 +416,7 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 	if p.Next != nil && !strings.EqualFold(p.Next.Type, config.ProxyDIRECT) {
 		util.LogModuleDebug("dialer", "%s: dialing via %s (%s:%d)", p.Name, p.Next.Name, server, port)
 		nextDialer := NewDialer(p.Next)
-		conn, err := nextDialer.Dial(server, port)
+		conn, err := dialWithContext(ctx, nextDialer, server, port)
 		if err != nil {
 			util.LogModuleDebug("dialer", "%s: via dial failed: %v", p.Name, err)
 			return nil, err
@@ -373,7 +426,7 @@ func DialToProxy(p *config.Proxy) (net.Conn, error) {
 	}
 	addr := net.JoinHostPort(server, strconv.Itoa(port))
 	util.LogModuleDebug("dialer", "%s: direct dial to %s", p.Name, addr)
-	conn, err := DialRouteAware("tcp", addr)
+	conn, err := DialRouteAwareContext(ctx, "tcp", addr)
 	if err != nil {
 		util.LogModuleDebug("dialer", "%s: direct dial failed: %v", p.Name, err)
 		return nil, err
@@ -399,6 +452,15 @@ func PreWarmSSHProxies(proxies []*config.Proxy) {
 }
 
 func chainDial(proxy *config.Proxy, dstAddr string, dstPort int, connID string, depth int) (net.Conn, error) {
+	return chainDialContext(context.Background(), proxy, dstAddr, dstPort, connID, depth)
+}
+
+// ChainDialContext is ChainDial with cancellation support.
+func ChainDialContext(ctx context.Context, proxy *config.Proxy, dstAddr string, dstPort int) (net.Conn, error) {
+	return chainDialContext(ctx, proxy, dstAddr, dstPort, "", 0)
+}
+
+func chainDialContext(ctx context.Context, proxy *config.Proxy, dstAddr string, dstPort int, connID string, depth int) (net.Conn, error) {
 	if depth > maxDialDepth {
 		return nil, fmt.Errorf("dial: max chain depth exceeded (%d), possible recursive proxy rule for %s:%d", maxDialDepth, dstAddr, dstPort)
 	}
@@ -410,7 +472,7 @@ func chainDial(proxy *config.Proxy, dstAddr string, dstPort int, connID string, 
 	if dd, ok := d.(interface{ setDepth(int) }); ok {
 		dd.setDepth(depth)
 	}
-	return d.Dial(dstAddr, dstPort)
+	return dialWithContext(ctx, d, dstAddr, dstPort)
 }
 
 // stubUDPDialer returns an error for unsupported proxy types

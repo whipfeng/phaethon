@@ -10,6 +10,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -2537,75 +2538,72 @@ func checkGroupTest(g *config.ProxyGroup) {
 	}
 }
 
+// healthCheckBudget 返回该代理的健康检查预算。
+// dialer 可通过 DialTimeoutAware 声明自己最坏握手耗时（如 h_tunnel 需要
+// 3 次串行 HTTP HEAD），避免"慢但健康"的协议被统一的短超时误判为故障。
+func healthCheckBudget(p *config.Proxy) time.Duration {
+	budget := healthCheckTimeout
+	if d, ok := dialer.NewDialer(p).(dialer.DialTimeoutAware); ok {
+		if t := d.MaxDialTimeout(); t > budget {
+			budget = t
+		}
+	}
+	return budget
+}
+
 // checkProxyTCPHealth tests TCP connectivity to the proxy's own server.
 func checkProxyTCPHealth(p *config.Proxy) (bool, time.Duration) {
-	type result struct {
-		alive   bool
-		latency time.Duration
-	}
-	done := make(chan result, 1)
-	go func() {
-		start := time.Now()
-		conn, err := dialer.DialToProxy(p)
-		if err != nil {
-			done <- result{false, 0}
-			return
-		}
-		conn.Close()
-		done <- result{true, time.Since(start)}
-	}()
+	budget := healthCheckBudget(p)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 
-	select {
-	case r := <-done:
-		return r.alive, r.latency
-	case <-time.After(healthCheckTimeout):
+	start := time.Now()
+	conn, err := dialer.DialToProxyContext(ctx, p)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			util.LogModuleWarn("main", "[HEALTH] %s: TCP check timed out after %s (dial cancelled)", p.Name, budget)
+		}
 		return false, 0
 	}
+	conn.Close()
+	return true, time.Since(start)
 }
 
 func checkProxyHealth(p *config.Proxy, host string, port int, useHTTP bool, path string) (bool, time.Duration) {
-	type result struct {
-		alive   bool
-		latency time.Duration
-	}
-	done := make(chan result, 1)
-	go func() {
-		start := time.Now()
-		conn, err := dialer.ChainDial(p, host, port)
-		if err != nil {
-			done <- result{false, 0}
-			return
+	budget := healthCheckBudget(p)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	conn, err := dialer.ChainDialContext(ctx, p, host, port)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			util.LogModuleWarn("main", "[HEALTH] %s: deep check timed out after %s (dial cancelled)", p.Name, budget)
 		}
-		latency := time.Since(start)
-		alive := true
-
-		// If HTTP URL, verify with a simple HEAD request.
-		if useHTTP {
-			conn.SetDeadline(time.Now().Add(5 * time.Second))
-			_, _ = fmt.Fprintf(conn, "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host)
-
-			buf := make([]byte, 512)
-			n, err := conn.Read(buf)
-			if (err != nil && err != io.EOF) || n < 12 {
-				alive = false
-			} else {
-				// Check status code starts with 2 or 3.
-				if buf[9] != '2' && buf[9] != '3' {
-					alive = false
-				}
-			}
-		}
-
-		conn.Close()
-		done <- result{alive, latency}
-	}()
-
-	select {
-	case r := <-done:
-		return r.alive, r.latency
-	case <-time.After(healthCheckTimeout):
 		return false, 0
 	}
+	latency := time.Since(start)
+	alive := true
+
+	// If HTTP URL, verify with a simple HEAD request.
+	if useHTTP {
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = fmt.Fprintf(conn, "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host)
+
+		buf := make([]byte, 512)
+		n, err := conn.Read(buf)
+		if (err != nil && err != io.EOF) || n < 12 {
+			alive = false
+		} else {
+			// Check status code starts with 2 or 3.
+			if buf[9] != '2' && buf[9] != '3' {
+				alive = false
+			}
+		}
+	}
+
+	conn.Close()
+	return alive, latency
 }
 
 func parseTestURL(url string) (host string, port int, useHTTP bool) {

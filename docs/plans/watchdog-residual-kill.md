@@ -1,7 +1,7 @@
 # watchdog 残留进程精确查杀
 
 **创建时间**: 2026-11-07
-**状态**: DRAFT（待用户确认）
+**状态**: 已决策，待开发（W1 精确判定 + W2 Pdeathsig）——决策与实施约束见 [pending-items-audit-20261108.md](../issues/pending-items-audit-20261108.md) §5.6，其中修正了本文档的 worker 路径（实为 `<cwd>/data/worker/`，不是 `data/packages/`）
 
 ## 一、问题
 

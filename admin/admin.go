@@ -378,6 +378,9 @@ type AdminServer struct {
 	GetPlatform func() string
 	// GetArch returns the compile-time architecture identifier. Set by main package.
 	GetArch func() string
+	// ApplyPortRange 由 main 注入：把端口范围热应用到 dialer / ControlManager。
+	// 参数为解析后的值，0 表示该侧不限制（UDP 的 0 表示用 OS 默认分配）。
+	ApplyPortRange func(udpMin, udpMax, tcpMin, tcpMax int)
 
 	// OnRestart is called when the user requests a process restart from the admin panel.
 	// The main package should set this to trigger a graceful exit, allowing the watchdog
@@ -1290,6 +1293,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config/mesh", s.apiConfigMesh)
 	mux.HandleFunc("/api/config/admin", s.apiConfigAdmin)
 	mux.HandleFunc("/api/config/target", s.apiTarget)
+	mux.HandleFunc("/api/config/port-range", s.apiPortRange)
 	mux.HandleFunc("/api/proxies", s.apiProxies)
 	mux.HandleFunc("/api/proxies/health-check/", s.apiProxyHealthCheck)
 	mux.HandleFunc("/api/proxies/", s.apiProxies)
@@ -1925,6 +1929,100 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// apiPortRange handles GET/PUT /api/config/port-range.
+//
+// GET  : {"udp":"39001-39999","tcp":"40000-41000"}（空串 = 未配置时的默认行为）
+// PUT  : 同结构；校验通过后写库并通过 ApplyPortRange 热生效。
+//
+// 语义：UDP 空串 = 交给 OS 随机分配；TCP 空串 = 反连动态端口不受限。
+func (s *AdminServer) apiPortRange(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		udp, _ := db.GetUDPPortRange()
+		tcp, _ := db.GetTCPPortRange()
+		jsonResponse(w, map[string]string{"udp": udp, "tcp": tcp})
+
+	case http.MethodPut:
+		var req struct {
+			UDP string `json:"udp"`
+			TCP string `json:"tcp"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		udpMin, udpMax, err := validatePortRange(req.UDP)
+		if err != nil {
+			util.LogModuleWarn("admin", "reject UDP port range %q: %v", req.UDP, err)
+			httpError(w, "invalid udp range: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		tcpMin, tcpMax, err := validatePortRange(req.TCP)
+		if err != nil {
+			util.LogModuleWarn("admin", "reject TCP port range %q: %v", req.TCP, err)
+			httpError(w, "invalid tcp range: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		udp := strings.TrimSpace(req.UDP)
+		tcp := strings.TrimSpace(req.TCP)
+		if err := db.PutUDPPortRange(udp); err != nil {
+			util.LogModuleError("admin", "save UDP port range fail: %v", err)
+			httpError(w, "save udp fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := db.PutTCPPortRange(tcp); err != nil {
+			util.LogModuleError("admin", "save TCP port range fail: %v", err)
+			httpError(w, "save tcp fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if s.ApplyPortRange != nil {
+			s.ApplyPortRange(udpMin, udpMax, tcpMin, tcpMax)
+		} else {
+			util.LogModuleWarn("admin", "ApplyPortRange not wired, new port range applies after restart")
+		}
+		util.LogModuleInfo("admin", "port range updated: udp=%q tcp=%q", udp, tcp)
+
+		resp := map[string]interface{}{"ok": true}
+		if tcp != "" {
+			resp["warning"] = "TCP 端口范围变更会重建反连控制通道，现有反向连接可能短暂断开"
+		}
+		jsonResponse(w, resp)
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// validatePortRange 解析 "min-max"。空串返回 (0,0,nil)，表示该侧不限制。
+func validatePortRange(s string) (min, max int, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, nil
+	}
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("格式应为 min-max")
+	}
+	min, err = strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("min 不是数字")
+	}
+	max, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("max 不是数字")
+	}
+	if min < 1 || max < 1 || min > 65535 || max > 65535 {
+		return 0, 0, fmt.Errorf("端口须在 1-65535 之间")
+	}
+	if min > max {
+		return 0, 0, fmt.Errorf("min 不能大于 max")
+	}
+	return min, max, nil
 }
 
 // apiConfigAdmin handles GET/PUT for admin foundational settings.

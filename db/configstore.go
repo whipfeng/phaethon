@@ -136,6 +136,16 @@ func GetTCPPortRange() (string, error) {
 	return *v, nil
 }
 
+// PutUDPPortRange 保存 UDP 动态端口范围（"min-max" 或空串=OS 默认）。
+func PutUDPPortRange(s string) error {
+	return Put(BucketPortRangeConfig, keyUDPPortRange, s)
+}
+
+// PutTCPPortRange 保存 TCP 反连动态端口范围（"min-max" 或空串=不限制）。
+func PutTCPPortRange(s string) error {
+	return Put(BucketPortRangeConfig, keyTCPPortRange, s)
+}
+
 // ===== 代理 =====
 
 func PutProxy(p *config.Proxy) error {

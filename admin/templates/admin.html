@@ -37,6 +37,30 @@
 
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.portRangeTitle">网络端口范围</span></h3>
+            <button onclick="savePortRange(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+        </div>
+        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.portRangeHelp">
+            格式 <code>min-max</code>（如 <code>39001-39999</code>）。留空表示使用默认行为。保存后立即生效。
+        </p>
+
+        <div class="form-group">
+            <label data-i18n="admin.portRangeUDP">UDP 动态端口范围</label>
+            <input type="text" id="port-range-udp" class="form-control" style="font-family:monospace;" placeholder="39001-39999">
+            <small class="text-muted" data-i18n="admin.portRangeUDPHelp">留空 = 交给系统随机分配</small>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="admin.portRangeTCP">TCP 反连动态端口范围</label>
+            <input type="text" id="port-range-tcp" class="form-control" style="font-family:monospace;" placeholder="40000-41000">
+            <small class="text-muted" data-i18n="admin.portRangeTCPHelp">留空 = 不限制。修改会短暂重建反连控制通道。</small>
+        </div>
+
+        <div id="port-range-status" class="text-muted"></div>
+    </div>
+
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.sshTitle">SSH 服务</span></h3>
             <label style="margin:0;">
                 <input type="checkbox" id="ssh-enabled">
@@ -216,6 +240,49 @@
     }
 
     loadSSH();
+})();
+</script>
+
+<script>
+(function() {
+    async function loadPortRange() {
+        try {
+            const res = await fetch('./api/config/port-range');
+            if (!res.ok) return;
+            const d = await res.json();
+            document.getElementById('port-range-udp').value = d.udp || '';
+            document.getElementById('port-range-tcp').value = d.tcp || '';
+        } catch (err) {
+            console.error('Failed to load port range:', err);
+        }
+    }
+
+    window.savePortRange = async function(event) {
+        if (event) event.preventDefault();
+        const udp = document.getElementById('port-range-udp').value.trim();
+        const tcp = document.getElementById('port-range-tcp').value.trim();
+        const status = document.getElementById('port-range-status');
+        try {
+            const res = await fetch('./api/config/port-range', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ udp: udp, tcp: tcp })
+            });
+            const data = await res.json().catch(function() { return {}; });
+            if (!res.ok) {
+                status.textContent = data.error || ('保存失败: HTTP ' + res.status);
+                status.style.color = '#d9534f';
+                return;
+            }
+            status.textContent = data.warning ? ('已保存。' + data.warning) : '已保存并生效';
+            status.style.color = '';
+        } catch (err) {
+            status.textContent = '保存失败: ' + err;
+            status.style.color = '#d9534f';
+        }
+    };
+
+    loadPortRange();
 })();
 </script>
 

@@ -1154,10 +1154,17 @@ func ensureWintunDLL(workerDir string) {
 // own executable. This prevents a stale pkg from downgrading a manually
 // deployed newer binary, so both upgrade paths (pkg distribution and direct
 // binary deployment) stay reliable.
+//
+// 优先 self 的防御：self 版本无法解析（dev/自定义后缀/etc）时，部署者
+// 意图明确 > 包分发快照，忽略 pkg 直接用 self。历史事故：v0.8.0-355-
+// relay-log 因 parseVersion 锚定 $ 不识别自定义后缀被判 untagged，
+// 反而输给 pkg 里的 v0.7.3，worker 起旧版连环失败。
 func selectWorkerBinary() string {
 	pkgPath, pkgVersion := findLatestPkgAndExtract()
 	if pkgPath == "" {
 		util.LogModuleInfo("main", "watchdog: no pkg found, using current executable")
+	} else if selfUnparseable() {
+		util.LogModuleWarn("main", "watchdog: self version %q unparseable (dev/custom suffix?), ignoring pkg %s and using current executable", Version, pkgVersion)
 	} else if p2p.CompareVersions(pkgVersion, Version) > 0 {
 		util.LogModuleInfo("main", "watchdog: pkg version %s newer than self %s, using pkg worker: %s", pkgVersion, Version, pkgPath)
 		return pkgPath
@@ -1170,6 +1177,16 @@ func selectWorkerBinary() string {
 		return ""
 	}
 	return exe
+}
+
+// selfUnparseable 判定当前二进制版本号是否解析不出数字 tag。
+// 是则说明部署者用了非标准版本号（dev/自定义后缀），优先尊重部署意图。
+func selfUnparseable() bool {
+	if Version == "" || Version == "dev" {
+		return true
+	}
+	tag, _ := p2p.ParseVersionForCheck(Version)
+	return tag == nil
 }
 
 // runWatchdogMode is the watchdog entry point. It spawns the actual server as

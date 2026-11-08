@@ -22,8 +22,9 @@ import (
 	"phaethon/util"
 )
 
-// commitPattern matches the git describe commit info: -<digits>-g<hash>
-var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+$`)
+// commitPattern matches the git describe commit info: -<digits>-g<hash>.
+// 不锚定结尾，允许 "-dirty"、自定义后缀（如 "-relay-log"）跟在 hash 后面。
+var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+`)
 
 // P2PProtocolVersion is the current P2P protocol version.
 // The canonical definition lives in the mesh package (it travels inside
@@ -2815,6 +2816,12 @@ func CompareVersions(a, b string) int {
 	return 1
 }
 
+// ParseVersionForCheck 导出 parseVersion 供 main 等外部包做"版本号是否可解析"检查。
+// 仅用于 selectWorkerBinary 的 self-unparseable 防御；比较版本仍走 CompareVersions。
+func ParseVersionForCheck(v string) (tag []int, commits int) {
+	return parseVersion(v)
+}
+
 // parseVersion extracts numeric tag segments and commit count from a version string.
 // Supports Semver build metadata format: v1.2.3+build[-commits-ghash][-dirty]
 //
@@ -2832,13 +2839,15 @@ func parseVersion(v string) (tag []int, commits int) {
 	v = strings.TrimSuffix(v, "-dirty")
 
 	// Try to extract commit count from the end: -<digits>-g<hash>
-	// Pattern: something-N-ghash where N is the commit count
-	if match := commitPattern.FindStringSubmatch(v); match != nil {
-		if n, err := strconv.Atoi(match[1]); err == nil {
+	// Pattern: something-N-ghash where N is the commit count.
+	// 去掉 match 起的所有内容（含可能的自定义后缀），保留前面的纯 tag。
+	if match := commitPattern.FindStringSubmatchIndex(v); match != nil {
+		if n, err := strconv.Atoi(v[match[2]:match[3]]); err == nil {
 			commits = n
 		}
-		// Remove the -N-ghash part to get the tag
-		v = v[:len(v)-len(match[0])]
+		// match[0] 是 match 起点，match[1] 是 match 终点（不含）
+		// match[2]:match[3] 是 capture group 1（digits）
+		v = v[:match[0]]
 	}
 
 	// Split by '+' to separate version from build metadata

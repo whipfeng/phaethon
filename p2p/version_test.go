@@ -43,6 +43,13 @@ func TestCompareVersions(t *testing.T) {
 		{"v1.0.0+mesh-5-gabc1234", "v1.0.0+mesh", 1}, // commits after tag
 		{"v1.0.0+mesh-5-gabc1234", "v1.0.0+mesh-10-gdef5678", -1},
 		{"v1.0.0+mesh-5-gabc1234-dirty", "v1.0.0+mesh-5-gabc1234", 0},
+
+		// 自定义后缀（2026-11-08 事故：v0.8.0-355-relay-log 输 pkg 里的 v0.7.3）
+		// 修复：commitPattern 去 $ 锚定，允许 hash 后接自定义后缀
+		{"v0.8.0-355-g6b95636-relay-log", "v0.7.3-64-g4c45a93-dirty", 1},
+		{"v0.7.3-64-g4c45a93-dirty", "v0.8.0-355-g6b95636-relay-log", -1},
+		{"v1.0.0-5-gabc1234-custom", "v1.0.0-5-gabc1234", 0},
+		{"v1.0.0-5-gabc1234-custom", "v1.0.0-3-gabc1234", 1},
 	}
 
 	for _, tt := range tests {

@@ -110,9 +110,11 @@ func (t *darwinTUN) Read(buf []byte) (int, error) {
 }
 
 func (t *darwinTUN) Write(buf []byte) (int, error) {
+	// utun 要求每次 write 前带 4 字节 AF 头（AF_INET=2）。
+	// 用 writev 把 header 和 payload 一次写出，省掉 append 的每包分配+拷贝。
 	hdr := [4]byte{0, 0, 0, 2}
-	_, err := unix.Write(t.fd, append(hdr[:], buf...))
-	if err != nil {
+	iov := [][]byte{hdr[:], buf}
+	if _, err := unix.Writev(t.fd, iov); err != nil {
 		return 0, err
 	}
 	return len(buf), nil

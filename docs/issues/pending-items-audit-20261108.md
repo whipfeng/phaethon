@@ -139,11 +139,13 @@ handler 未注入时仍回退本地拨号。第二处 `localNodeDomain` 分支�
 
 **验收**：新增 `TestSetPipeExcludesLost`；8 个测试无回归；VM 大文件 RTO 后吞吐能恢复（不再卡 ~7KB/s）。
 
-## 5.4 TUN 出口批量写 — 做，但仅"接口批量、实现循环"（A3）
+## 5.4 TUN 出口批量写 — **已调整：不做批量接口，只做 Darwin writev**
 
-**决策**：A3。**注意：原方案（Linux/Darwin 真批量）技术上不成立。**
+**决策（2026-11-08 二次修正）**：原定 A3（接口批量、实现循环）**放弃**，改为只优化 Darwin 的每包分配。
 
-**精读发现**：
+**为什么放弃 A3**：实现"先收集后批量写"时，`handleWriteLoopPacket` 里的 `data := pkt.ToBuffer().Flatten()` 内存属于 `PacketBuffer`，随后 `pkt.DecRef()` 即归还。要批量写就必须**每包复制一份**，而 A3 本无性能收益（底层仍是循环 syscall）→ **净负收益**。
+
+**精读发现（保留）**：
 
 - **Linux TUN 一次 `write()` 只能写一个 IP 包**。`tun_chr_write_iter` 会把整个 iov 拼成一个 skb，用 `writev` 传 N 包 = 内核收到一个超 MTU 的畸形包被丢弃。
 - Darwin utun 同理（一次 write 视为一帧）。
@@ -151,15 +153,14 @@ handler 未注入时仍回退本地拨号。第二处 `localNodeDomain` 分支�
 - 真批量需要多队列 TUN（`IFF_MULTI_QUEUE`）或 vnet_hdr+GSO，属另一个工程。
 - Windows wintun 的 `AllocateSendPacket`/`SendPacket` 必须成对，也只能循环。
 
-**实际做法**：
+**实际落地**：
 
-- `mesh/netstack.go` 的 `WriteLoopDevice` 增加可选批量接口 + 类型断言
-- `tun.Manager` 实现批量方法，内部循环调用 `dev.Write`
-- 可顺带优化 Darwin 的每包 `append(hdr, payload...)` 分配（用 `writev` 消掉这次拷贝）
-- 批量上限（建议 32/64 包），避免 drain 无界放大 egress 延迟
-- 写失败时按批聚合日志（现在是每包一条 Warn，批量会放大）
+- `tun/device_darwin.go` 的 `Write`：`unix.Write(fd, append(hdr, buf...))` → `unix.Writev(fd, [][]byte{hdr, buf})`，省掉每包一次分配+拷贝。**这是唯一确定的收益。**
 
-**收益**：代码形态统一 + Darwin 省一次拷贝；**Windows 无性能收益**。
+**未做**：
+
+- netstack 批量接口（负收益，见上）
+- Linux / Windows 无改动（无批量路径）
 
 ## 5.5 健康检查 dial 可取消 — 做，层次二 + 类型多态（B2）
 

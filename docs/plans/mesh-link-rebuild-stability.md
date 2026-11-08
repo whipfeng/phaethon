@@ -1,7 +1,7 @@
 # Mesh 链路误断与重建后遗症修复
 
 **创建时间**: 2026-11-07
-**状态**: 部分完成（2026-11-08 核实）——F1 LinkNIC 竞态、F2 ping 误判死、F5 SSH keepalive 已实现；**F3/F4/F6 未实现，已决策待实施**，决策与实施约束见 [pending-items-audit-20261108.md](../issues/pending-items-audit-20261108.md) §5.1–5.3。文末"重建单测 8/8 通过"为设计预期，非实测
+**状态**: **已完成**（2026-11-09 复核）——F1/F2/F3/F4/F5/F6 全部落地。F3/F4/F6 由 gvisor-fork `c880291`（2026-11-07）实现，`TestSackedOutNeverNegative` 与 `TestRerouteAfterNICRemoval` 均通过
 **来源**: mesh-per-flow-ordering.md §3.11 遗留观察（4 流并发约 13s 全零停顿）+ 排查中顺带发现的问题
 
 ## 一、问题与日志证据

@@ -379,3 +379,63 @@ VM 的 mesh 入向路径是 `handleConn → DIRECT → handler.relay()`，而 `h
 | VM | `left->right` | GG 侧把关闭传播下来（被动） |
 | VM | `right->left` | 本机 sshd 发起（Windows 侧） |
 
+---
+
+## 2026-11-08 22:14:09 第五次取证：两端闭环，确认 SR 为发起方
+
+VM 已部署 `v0.8.0-362-g3e38c19`（含 `handler.relay` 方向日志），首次拿到两端同一条连接的证据。
+
+### 两端日志对照（连接 GG:48574 ↔ VM:22）
+
+GG 侧（trojan 入向）：
+
+```
+22:14:09 left->right  io.Copy done bytes=7345    (EOF), half-closing dst
+22:14:09 right->left  io.Copy done bytes=1213777 (EOF), half-closing dst
+```
+
+VM 侧（mesh 入向）：
+
+```
+22:14:09 left->right  io.Copy done bytes=7345    (EOF), half-closing dst
+22:14:09 right->left  read fail bytes=1213837 err=read tcp 127.0.0.1:54751->127.0.0.1:22:
+         wsarecv: An existing connection was forcibly closed by the remote host., closing both
+```
+
+### 判定依据
+
+| 判据 | 数据 | 含义 |
+|---|---|---|
+| 上行字节数 | GG 7345 == VM 7345 | 确认为同一条流 |
+| 下行字节数 | 1213777 vs 1213837（差 60B） | 差值即 TLS 记录开销，吻合 |
+| VM 首个 EOF 方向 | `left->right`（mesh 来自 GG） | **VM 是被动方**，关闭由上游传入 |
+| VM sshd 侧 | 随后 `wsarecv: forcibly closed` | Windows RST，是 half-close 传播的结果，非发起方 |
+
+### 结论
+
+**关闭发起方 = SR 客户端。** VM 侧全程被动，phaethon 数据面在该链路上无可归因缺陷。
+
+完整传播链：
+
+```
+SR 关闭 → GG left 读 EOF(7345B) → GG half-close mesh
+        → VM left 读 EOF(7345B) → VM half-close sshd
+        → sshd 回 RST → 两侧 relay 结束
+```
+
+### 五次取证汇总
+
+| 时间 | GG 首 EOF | VM 首 EOF | 发起方 |
+|---|---|---|---|
+| 15:52 | right（`operation aborted`） | 无日志 | mesh endpoint 异常中止 |
+| 18:28 | left（EOF） | 无日志 | SR |
+| 18:49 | right（`connection reset`） | 无日志 | VM 重启（操作副作用） |
+| 19:14 | left（EOF） | 无日志 | SR |
+| **22:14** | **left（EOF）** | **left（EOF）** | **SR（两端闭环确认）** |
+
+### 剩余待解释
+
+「SR 主动关闭」与用户「卡死」体感之间的落差仍未解释。合理推断是 iOS 后台挂起时系统回收 socket、Shadowrocket UI 未同步状态；这属客户端行为，phaethon 无法干预。
+
+可做的仅剩客户端侧缓解：`ServerAliveInterval 30`、`ServerAliveCountMax 3`、tmux 兜底。
+

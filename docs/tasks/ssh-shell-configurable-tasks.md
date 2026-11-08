@@ -11,8 +11,9 @@
 - [x] 旧数据兼容验证：缺字段时 `Shell=""` 走自动探测（标准 encoding/json 行为）
 
 ### Task 1.2: db 单元测试
-- [ ] `TestSSHConfigWithShell`：写入/读取往返（已有 db 测试套件覆盖 Put/Get 通路，未单独加）
-- [ ] `TestSSHConfigLegacyNoShell`：旧 JSON（仅 enabled）反序列化 Shell 为 ""（同上）
+- [x] `TestSSHConfigWithShell`：写入/读取往返（`db/ssh_test.go`）
+- [x] `TestSSHConfigLegacyNoShell`：旧 JSON（仅 enabled）反序列化 Shell 为 ""（`db/ssh_test.go`）
+- [x] 追加 `TestSSHConfigNotFoundDefaultsEnabled`：未配置时默认启用
 
 ## 阶段 2: server 层接入
 
@@ -30,7 +31,8 @@
 - [x] `startSessionProc` 接入
 
 ### Task 2.4: server 单元测试
-- [ ] `TestResolveShellDBOverride` / `TestResolveShellFallback` / `TestExecArgsBash` 未单独加（验证走 VM 自测路径）
+- [x] `TestResolveShellDBOverride` / `TestResolveShellFallback` / `TestExecArgsBash`（`server/ssh_session_test.go`）
+- [x] 追加 `TestClassifyShell`：大小写、`.exe/.bat/.com` 后缀与 `sh` 结尾判定
 
 ## 阶段 3: admin API
 

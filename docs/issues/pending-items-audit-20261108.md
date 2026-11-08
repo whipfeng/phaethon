@@ -188,6 +188,19 @@ handler 未注入时仍回退本地拨号。第二处 `localNodeDomain` 分支�
 
 **验收**：`go test ./...` 无回归；健康检查不再出现 goroutine 无限滞留；htunnel 类代理在配了 HealthCheckURL 时不再被 5s 误判。
 
+**实际落地（2026-11-09，commit 675d39d）**：
+
+- `bind.go`：`DialRouteAwareContext` / `dialBoundContext`（覆盖 DNS + TCP connect）
+- `dialer.go`：`ContextDialer`、`DialTimeoutAware`、`withCtxDeadline`、`dialWithContext`、`ChainDialContext`、`DialToProxyContext`
+- `direct` / `socks5` 实现 `DialContext`；SOCKS5 握手改由 ctx 取消兜底（原先完全没有 deadline）
+- `htunnel` 实现 `MaxDialTimeout() = 35s`
+- `main.go`：两条健康检查改用 ctx 预算，删除"后台 goroutine + 放弃等待"模式
+
+**尚未接入 `DialContext` 的 dialer**（仍走 `Dial` 回退，不比现状差，可后续逐个补）：
+trojan、vless、hysteria2、ssh、shadowsocks、htunnel、http、reverse、stub、meshAware。
+
+其中 **SSH 的 channel open 无超时**仍是已知挂死点，建议下一轮优先补。
+
 ## 5.6 watchdog 残留查杀 — 做 W1 + W2（仅 Linux）
 
 **决策**：W1 精确判定 + W2 `Pdeathsig`。

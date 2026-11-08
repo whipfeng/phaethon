@@ -49,21 +49,48 @@ func Relay(left, right net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	copy := func(dst, src net.Conn) {
+	laddr, raddr := connPairAddrs(left, right)
+
+	copy := func(dir string, dst, src net.Conn) {
 		defer wg.Done()
-		_, err := io.Copy(dst, src)
+		n, err := io.Copy(dst, src)
 		if err == nil {
+			LogModuleDebug("relay", "[%s<->%s] %s io.Copy done bytes=%d (EOF), half-closing dst",
+				laddr, raddr, dir, n)
 			CloseWriteOrClose(dst)
 		} else {
+			LogModuleInfo("relay", "[%s<->%s] %s io.Copy fail bytes=%d err=%v, closing both",
+				laddr, raddr, dir, n, err)
 			left.Close()
 			right.Close()
 		}
 	}
 
-	go copy(left, right)
-	go copy(right, left)
+	go copy("right->left", left, right)
+	go copy("left->right", right, left)
 
 	wg.Wait()
+}
+
+// connPairAddrs 返回两端描述串：local<->remote 摘要，用于 relay 日志关联。
+func connPairAddrs(left, right net.Conn) (string, string) {
+	l := connAddrSummary(left)
+	r := connAddrSummary(right)
+	return l, r
+}
+
+func connAddrSummary(c net.Conn) string {
+	if c == nil {
+		return "<nil>"
+	}
+	la, ra := "", ""
+	if a := c.LocalAddr(); a != nil {
+		la = a.String()
+	}
+	if a := c.RemoteAddr(); a != nil {
+		ra = a.String()
+	}
+	return la + "|" + ra
 }
 
 // RelayWithRateLimit relays with rate limiting. Same direction policy as Relay.
@@ -76,9 +103,12 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	rateCopy := func(dst, src net.Conn, limiter *config.RateLimiter) {
+	laddr, raddr := connPairAddrs(left, right)
+
+	rateCopy := func(dir string, dst, src net.Conn, limiter *config.RateLimiter) {
 		defer wg.Done()
 		buf := make([]byte, 32*1024)
+		var total int64
 		for {
 			n, err := src.Read(buf)
 			if n > 0 {
@@ -89,7 +119,10 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 					}
 				}
 				_, werr := dst.Write(buf[:n])
+				total += int64(n)
 				if werr != nil {
+					LogModuleInfo("relay", "[%s<->%s] %s write fail bytes=%d err=%v, closing both",
+						laddr, raddr, dir, total, werr)
 					left.Close()
 					right.Close()
 					return
@@ -97,8 +130,12 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 			}
 			if err != nil {
 				if err == io.EOF {
+					LogModuleDebug("relay", "[%s<->%s] %s EOF bytes=%d, half-closing dst",
+						laddr, raddr, dir, total)
 					CloseWriteOrClose(dst)
 				} else {
+					LogModuleInfo("relay", "[%s<->%s] %s read fail bytes=%d err=%v, closing both",
+						laddr, raddr, dir, total, err)
 					left.Close()
 					right.Close()
 				}
@@ -107,8 +144,8 @@ func RelayWithRateLimit(left, right net.Conn, upLimiter, downLimiter *config.Rat
 		}
 	}
 
-	go rateCopy(right, left, upLimiter)   // left→right = upstream
-	go rateCopy(left, right, downLimiter) // right→left = downstream
+	go rateCopy("left->right", right, left, upLimiter)   // left→right = upstream
+	go rateCopy("right->left", left, right, downLimiter) // right→left = downstream
 
 	wg.Wait()
 }

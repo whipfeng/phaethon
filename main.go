@@ -689,6 +689,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	// 本进程是 worker：让 watchdog 意外死亡时自动收到 SIGTERM，
+	// 避免留下抢端口/抢 DB 的孤儿进程（Linux 生效，其他平台空实现）。
+	enableParentDeathSignal()
+
 	// Extract Java-style -Dkey=value arguments up front so they do not confuse
 	// the standard flag parser, while remaining available via util.JavaProp().
 	os.Args = util.SetJavaProps(os.Args)
@@ -865,7 +869,6 @@ func main() {
 		emitProtocolMsg(map[string]bool{"ready": true})
 		startWorkerHeartbeat()
 	}
-
 	watchAndRun(resources)
 }
 

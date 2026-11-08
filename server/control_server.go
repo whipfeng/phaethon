@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -73,8 +74,8 @@ type ControlManager struct {
 	dynamicTimeRanges []config.TimeRange        // time ranges for dynamic rules
 	dynamicRules     []string                   // raw rule strings
 	
-	portMin      int           // dynamic port range min (0 = unrestricted)
-	portMax      int           // dynamic port range max (0 = unrestricted)
+	portMin      atomic.Int64  // dynamic port range min (0 = unrestricted)
+	portMax      atomic.Int64  // dynamic port range max (0 = unrestricted)
 	portNext     int           // next port to try within range (round-robin)
 	bindingStore *BindingStore // persistent reverse_id -> port binding
 	pendingMu    sync.Mutex
@@ -114,11 +115,26 @@ func NewControlManager(dataDir string) *ControlManager {
 	if tcpPortRange, err := db.GetTCPPortRange(); err == nil && tcpPortRange != "" {
 		min, max, err := parsePortRange(tcpPortRange)
 		if err == nil && min > 0 && max > 0 {
-			m.portMin = min
-			m.portMax = max
+			m.portMin.Store(int64(min))
+			m.portMax.Store(int64(max))
 		}
 	}
 	return m
+}
+
+// SetPortRange 热更新 TCP 反连动态端口范围（0,0 = 不限制）。
+// 仅影响后续注册的分配，已绑定端口不受影响。
+func (m *ControlManager) SetPortRange(min, max int) {
+	if min < 0 || max < 0 || (min > 0 && max > 0 && min > max) {
+		util.LogModuleWarn("control", "ignore invalid TCP port range: %d-%d", min, max)
+		return
+	}
+	if min == 0 || max == 0 {
+		min, max = 0, 0
+	}
+	m.portMin.Store(int64(min))
+	m.portMax.Store(int64(max))
+	util.LogModuleInfo("control", "TCP port range hot-updated: %d-%d (0-0 = unrestricted)", min, max)
 }
 
 // GetBindings returns a snapshot of the current reverse port bindings.
@@ -316,7 +332,7 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 	}
 
 	// Use registry-side configured port range
-	portMin, portMax := m.portMin, m.portMax
+	portMin, portMax := int(m.portMin.Load()), int(m.portMax.Load())
 
 	// Validate direct listener configuration.
 	if listenerProto == "direct" && (req.DirectDstHost == "" || req.DirectDstPort == 0) {

@@ -2246,6 +2246,16 @@ func wireAdminCallbacks(resources *activeResources) {
 			return Arch
 		}
 
+		// 端口范围热生效：UDP 交给 dialer，TCP 交给 ControlManager。
+		// 两者都只影响后续分配，已建立的连接/绑定不受影响。
+		adminSrv.ApplyPortRange = func(udpMin, udpMax, tcpMin, tcpMax int) {
+			dialer.SetUDPPortRange(udpMin, udpMax)
+			if server.GlobalControlManager != nil {
+				server.GlobalControlManager.SetPortRange(tcpMin, tcpMax)
+			}
+			util.LogModuleInfo("system", "port range hot-applied: udp=%d-%d tcp=%d-%d (0 = unrestricted)", udpMin, udpMax, tcpMin, tcpMax)
+		}
+
 		// Set peer registered callback for package sync
 		resources.meshMgr.OnPeerRegistered = func(nodeID string) {
 			adminSrv.SyncFromPeer(nodeID)

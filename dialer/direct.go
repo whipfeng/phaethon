@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"net"
 	"strconv"
 
@@ -12,8 +13,13 @@ import (
 type DirectDialer struct{}
 
 func (d *DirectDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.DialContext(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support (covers DNS + TCP connect).
+func (d *DirectDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	conn, err := DialRouteAware("tcp", addr)
+	conn, err := DialRouteAwareContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

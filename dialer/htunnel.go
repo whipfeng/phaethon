@@ -31,6 +31,13 @@ type HTunnelDialer struct {
 	BaseDialer
 }
 
+// MaxDialTimeout 声明 h_tunnel 建连的最坏耗时。
+// 拨号内部最多串行执行 3 次 HTTP HEAD（每次 10s 超时），健康检查必须给足
+// 预算，否则"慢但健康"的链路会被统一的 5s 默认阈值误判为故障。
+func (d *HTunnelDialer) MaxDialTimeout() time.Duration {
+	return 35 * time.Second
+}
+
 // ServerAddr returns the effective host:port for the h_tunnel server.
 // If Server is empty, extracts from URL field.
 func (d *HTunnelDialer) ServerAddr() (string, int) {

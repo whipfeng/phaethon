@@ -151,13 +151,19 @@ func (b *BindContext) BindSocket(c syscall.RawConn, dst net.IP) error {
 // DialRouteAware dials addr using a socket bound to the correct physical
 // interface. If no BindContext is active, it falls back to net.DialTimeout.
 func DialRouteAware(network, addr string) (net.Conn, error) {
+	return DialRouteAwareContext(context.Background(), network, addr)
+}
+
+// DialRouteAwareContext is DialRouteAware with cancellation support.
+// Cancellation covers both the DNS lookup and the TCP connect.
+func DialRouteAwareContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	bc := GetGlobalBindContext()
 	if bc == nil {
 		d := net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}
-		return d.Dial(network, addr)
+		return d.DialContext(ctx, network, addr)
 	}
 
 	host, port, err := net.SplitHostPort(addr)
@@ -167,7 +173,7 @@ func DialRouteAware(network, addr string) (net.Conn, error) {
 
 	// Already an IP: bind directly to the route-table chosen interface.
 	if ip := net.ParseIP(host); ip != nil {
-		return dialBound(network, addr, ip)
+		return dialBoundContext(ctx, network, addr, ip)
 	}
 
 	// Domain name: resolve through the upstream DNS (bypassing TUN DNS
@@ -183,7 +189,7 @@ func DialRouteAware(network, addr string) (net.Conn, error) {
 		if ip == nil {
 			continue
 		}
-		conn, err := dialBound(network, net.JoinHostPort(ip.String(), port), ip)
+		conn, err := dialBoundContext(ctx, network, net.JoinHostPort(ip.String(), port), ip)
 		if err == nil {
 			return conn, nil
 		}
@@ -236,6 +242,11 @@ func ResolveRouteAware(host string) ([]string, error) {
 
 // dialBound dials addr with a socket bound to the interface chosen for dst.
 func dialBound(network, addr string, dst net.IP) (net.Conn, error) {
+	return dialBoundContext(context.Background(), network, addr, dst)
+}
+
+// dialBoundContext is dialBound with cancellation support.
+func dialBoundContext(ctx context.Context, network, addr string, dst net.IP) (net.Conn, error) {
 	bc := GetGlobalBindContext()
 	d := net.Dialer{
 		Timeout:   30 * time.Second,
@@ -255,7 +266,7 @@ func dialBound(network, addr string, dst net.IP) (net.Conn, error) {
 		}
 	}
 
-	return d.Dial(network, addr)
+	return d.DialContext(ctx, network, addr)
 }
 
 // resolveIfaceForDst returns the interface name that should be used for traffic

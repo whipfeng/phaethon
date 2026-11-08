@@ -189,7 +189,6 @@ func TestRerouteAfterNICRemoval(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 	addLink(3)
-	var sawRecovery atomic.Bool
 	go func() {
 		for i := 1; i <= 8; i++ {
 			select {
@@ -198,9 +197,6 @@ func TestRerouteAfterNICRemoval(t *testing.T) {
 			case <-time.After(250 * time.Millisecond):
 			}
 			for _, f := range tcp.DumpTCPFlowDebug(func(_, remote tcpip.FullAddress) bool { return remote.Port == 8080 }) {
-				if f.CongestState == "rto-recovery" || f.Cwnd <= 1 {
-					sawRecovery.Store(true)
-				}
 				t.Logf("t+%dms una=%d nxt=%d cwnd=%d ssth=%d out=%d sacked=%d state=%s rto=%d resend=%s probe=%s lastSend=%dms timeouts=%d", i*250, f.SndUna, f.SndNxt, f.Cwnd, f.Ssthresh, f.Outstanding, f.SackedOut, f.CongestState, f.RTOus, f.ResendTimer, f.ProbeTimer, f.LastSendAgoMs, sa.Stats().TCP.Timeouts.Value())
 			}
 		}
@@ -220,13 +216,11 @@ func TestRerouteAfterNICRemoval(t *testing.T) {
 	if err := <-writeErr; err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// The NIC removal must have actually hit the live connection mid-transfer.
-	// With route self-healing enabled this no longer surfaces as a permanent
-	// send-error storm, so assert on the observed congestion state instead:
-	// the sender must have collapsed (RTO recovery / cwnd<=1) and then recover.
-	if !sawRecovery.Load() {
-		t.Fatalf("connection never entered recovery: NIC removal did not hit the live connection")
+	// Sends must have failed on the dead route, proving the NIC went away
+	// mid-transfer rather than after it finished.
+	if n := sa.Stats().TCP.SegmentSendErrors.Value(); n == 0 {
+		t.Fatalf("no send failures: NIC removal did not hit the live connection")
+	} else {
+		t.Logf("send failures during rebuild: %d", n)
 	}
-	t.Logf("send failures during rebuild: %d (route self-healed)",
-		sa.Stats().TCP.SegmentSendErrors.Value())
 }

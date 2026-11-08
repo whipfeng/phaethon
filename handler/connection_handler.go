@@ -531,22 +531,32 @@ func relay(conn, target net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// Direction diagnostics: same shape as util.Relay so GG (trojan ingress,
+	// util.RelayWithRateLimit) and VM (mesh ingress, this function) can be
+	// compared line by line when a connection freezes.
+	pair := relayPairSummary(conn, target)
+
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 32*1024)
+		var total int64
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
 				if _, werr := target.Write(buf[:n]); werr != nil {
+					util.LogModuleInfo("relay", "[%s] left->right write fail bytes=%d err=%v, closing both", pair, total, werr)
 					conn.Close()
 					target.Close()
 					return
 				}
+				total += int64(n)
 			}
 			if err != nil {
 				if err == io.EOF {
+					util.LogModuleDebug("relay", "[%s] left->right io.Copy done bytes=%d (EOF), half-closing dst", pair, total)
 					util.CloseWriteOrClose(target)
 				} else {
+					util.LogModuleInfo("relay", "[%s] left->right read fail bytes=%d err=%v, closing both", pair, total, err)
 					conn.Close()
 					target.Close()
 				}
@@ -558,19 +568,24 @@ func relay(conn, target net.Conn) {
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 32*1024)
+		var total int64
 		for {
 			n, err := target.Read(buf)
 			if n > 0 {
 				if _, werr := conn.Write(buf[:n]); werr != nil {
+					util.LogModuleInfo("relay", "[%s] right->left write fail bytes=%d err=%v, closing both", pair, total, werr)
 					conn.Close()
 					target.Close()
 					return
 				}
+				total += int64(n)
 			}
 			if err != nil {
 				if err == io.EOF {
+					util.LogModuleDebug("relay", "[%s] right->left io.Copy done bytes=%d (EOF), half-closing dst", pair, total)
 					util.CloseWriteOrClose(conn)
 				} else {
+					util.LogModuleInfo("relay", "[%s] right->left read fail bytes=%d err=%v, closing both", pair, total, err)
 					conn.Close()
 					target.Close()
 				}
@@ -580,6 +595,25 @@ func relay(conn, target net.Conn) {
 	}()
 
 	wg.Wait()
+}
+
+// relayPairSummary renders "local|remote<->local|remote" for relay diagnostics,
+// matching util.Relay's log shape.
+func relayPairSummary(conn, target net.Conn) string {
+	one := func(c net.Conn) string {
+		if c == nil {
+			return "<nil>"
+		}
+		la, ra := "", ""
+		if a := c.LocalAddr(); a != nil {
+			la = a.String()
+		}
+		if a := c.RemoteAddr(); a != nil {
+			ra = a.String()
+		}
+		return la + "|" + ra
+	}
+	return one(conn) + "<->" + one(target)
 }
 
 // relayUDP copies datagrams between the netstack UDP connection and the target

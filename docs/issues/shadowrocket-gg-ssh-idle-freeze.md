@@ -324,3 +324,58 @@ GG 侧只能看到「`right`（GG→VM 的 mesh 连接）先 EOF，随后 `left`
 GG 侧命令：`grep relay /home/layer4/phaethon-gg/data/logs/phaethon.log`
 VM 侧命令：`Select-String -Path C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log -Pattern '\[relay\]'`
 
+---
+
+## 2026-11-08 19:14:37 第四次取证：SR 先关闭
+
+GG 侧（trojan 入向）：
+
+```
+19:14:37 left->right  io.Copy done bytes=11965  (EOF)   ← SR 侧先 EOF
+19:14:37 right->left  io.Copy done bytes=2446105 (EOF)  ← 随后 mesh 侧 EOF
+```
+
+VM 侧：
+
+```
+19:14:38 [HANDLECONN-EXIT] [100.179.0.3:61503->100.212.0.73:22] handleConn END
+```
+
+比 GG 晚 1 秒，为被动响应。**本次源头指向 SR 客户端**。
+
+历史对照：
+
+| 时间 | 首 EOF 方向 | 性质 |
+|---|---|---|
+| 15:52 | right 先，`operation aborted` | mesh endpoint 异常中止 |
+| 18:28 | left 先，双向 EOF | SR 先关 |
+| 18:49 | right 先，`connection reset by peer` | VM 重启所致（操作副作用） |
+| 19:14 | left 先，双向 EOF | SR 先关 |
+
+## VM 侧 relay 日志为什么之前是空的（已修复）
+
+VM 的 mesh 入向路径是 `handleConn → DIRECT → handler.relay()`，而 `handler.relay()` 是
+`handler/connection_handler.go:530` **自实现的双向转发**，此前完全没有日志插桩；
+只有 GG 的 trojan 入向走 `util.RelayWithRateLimit` 才有日志。
+
+**修复**（commit `3e38c19`，仅插桩不改逻辑）：给 `handler.relay` 两个方向各加
+方向 / 累计字节 / 错误类型日志，格式与 `util.Relay` 对齐，便于两端逐行对照。
+
+已部署验证（VM `v0.8.0-362-g3e38c19`），实机输出示例：
+
+```
+[relay] [101.72.192.157:443|100.212.0.1:54342<->172.30.0.2:54343|101.72.192.157:443] left->right io.Copy done bytes=3685 (EOF), half-closing dst
+[relay] [同上] right->left io.Copy done bytes=5193 (EOF), half-closing dst
+```
+
+## 下一次 freeze 的闭环判据
+
+三端同时在场时按下表判定，**首个 EOF 出现的一侧即关闭发起方**：
+
+| 侧 | 首个 EOF 方向 | 结论 |
+|---|---|---|
+| GG | `left->right` | SR 发起关闭（客户端侧） |
+| GG | `right->left` | mesh 侧发起，需看 VM |
+| VM | `left->right` | GG 侧把关闭传播下来（被动） |
+| VM | `right->left` | 本机 sshd 发起（Windows 侧） |
+

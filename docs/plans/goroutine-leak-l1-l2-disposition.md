@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 版本 | v1.0.0 |
-| 状态 | 待实施 |
+| 状态 | **已结案**（2026-11-08 核实）：L1 已修复并有两项测试；L2 按 timeout-audit A2 决策维持不修 |
 | 关联 | [mesh-data-plane-stall.md](../issues/mesh-data-plane-stall.md)（dump 130348 节 L1/L2 签名复核）、[timeout-audit-20261103.md](timeout-audit-20261103.md)（A2 既定决策） |
 
 ## 一、背景

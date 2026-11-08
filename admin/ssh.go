@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"phaethon/db"
+	"phaethon/server"
 	"phaethon/util"
 )
 
@@ -43,31 +44,41 @@ func (s *AdminServer) apiSSH(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, map[string]interface{}{
 		"enabled":             cfg.Enabled,
+		"shell":               cfg.Shell,
 		"hostKeyFingerprint":  hostFP,
 		"keys":                keys,
 	})
 }
 
-// apiSSHConfig handles PUT /api/ssh/config — 启停开关。
+// apiSSHConfig handles PUT /api/ssh/config — 启停开关 + 默认 shell。
 func (s *AdminServer) apiSSHConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled bool   `json:"enabled"`
+		Shell   string `json:"shell"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	cfg := &db.SSHConfig{Enabled: req.Enabled}
+	cfg := &db.SSHConfig{Enabled: req.Enabled, Shell: strings.TrimSpace(req.Shell)}
 	if err := db.PutSSHConfig(cfg); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	util.LogModuleInfo("admin", "ssh config updated: enabled=%v", req.Enabled)
-	jsonResponse(w, map[string]interface{}{"ok": true})
+	util.LogModuleInfo("admin", "ssh config updated: enabled=%v shell=%q", req.Enabled, cfg.Shell)
+
+	warning := ""
+	if cfg.Shell != "" {
+		if err := server.ValidateShellPath(cfg.Shell); err != nil {
+			warning = "shell path may not exist: " + err.Error()
+			util.LogModuleWarn("admin", "ssh shell %q validation: %v", cfg.Shell, err)
+		}
+	}
+	jsonResponse(w, map[string]interface{}{"ok": true, "warning": warning})
 }
 
 // apiSSHKeys handles GET/POST /api/ssh/keys — 公钥列表 / 新增公钥。

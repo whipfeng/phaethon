@@ -49,6 +49,19 @@
         </p>
 
         <div class="form-group">
+            <label data-i18n="admin.sshShell">默认 Shell（留空 = 自动探测）</label>
+            <div style="display:flex; gap:0.5rem;">
+                <input type="text" id="ssh-shell" class="form-control" style="flex:1; font-family:monospace;"
+                       placeholder="C:\Program Files\Git\bin\bash.exe 或 /usr/bin/zsh"
+                       data-i18n-placeholder="admin.sshShellPh">
+                <button id="ssh-shell-save" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            </div>
+            <p class="text-muted" style="margin-top:0.25rem; font-size:0.85em;" data-i18n="admin.sshShellHelp">
+                绝对路径或 PATH 内命令名。Windows 默认 pwsh → powershell → cmd；Unix 默认 $SHELL → /bin/sh。仅对新会话生效。
+            </p>
+        </div>
+
+        <div class="form-group">
             <label data-i18n="admin.sshHostKey">Host Key 指纹（SHA256）</label>
             <div id="ssh-hostkey" class="text-muted" style="font-family:monospace; word-break:break-all;">-</div>
         </div>
@@ -91,11 +104,27 @@
             if (!res.ok) throw new Error('load fail');
             const data = await res.json();
             document.getElementById('ssh-enabled').checked = !!data.enabled;
+            const shellEl = document.getElementById('ssh-shell');
+            // SSE 触发的自动刷新若用户正在编辑 shell 输入框，不覆盖其内容。
+            if (document.activeElement !== shellEl) {
+                shellEl.value = data.shell || '';
+            }
             document.getElementById('ssh-hostkey').textContent = data.hostKeyFingerprint || '-';
             renderSSHKeys(data.keys || []);
         } catch (err) {
             sshStatus('Failed to load SSH settings: ' + err.message, true);
         }
+    }
+
+    async function saveSSHConfig(enabled, shell) {
+        const res = await fetch('./api/ssh/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enabled, shell: shell})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'save fail');
+        return data;
     }
 
     function renderSSHKeys(keys) {
@@ -123,16 +152,29 @@
     }
 
     document.getElementById('ssh-enabled').addEventListener('change', async function() {
+        const target = this.checked;
         try {
-            const res = await fetch('./api/ssh/config', {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({enabled: this.checked})
-            });
-            if (!res.ok) throw new Error((await res.json()).error || 'save fail');
-            sshStatus(this.checked ? 'SSH 已启用' : 'SSH 已停用');
+            await saveSSHConfig(target, document.getElementById('ssh-shell').value);
+            sshStatus(target ? 'SSH 已启用' : 'SSH 已停用');
         } catch (err) {
-            this.checked = !this.checked;
+            this.checked = !target;
+            sshStatus('Save failed: ' + err.message, true);
+        }
+    });
+
+    document.getElementById('ssh-shell-save').addEventListener('click', async function() {
+        const newShell = document.getElementById('ssh-shell').value;
+        try {
+            const data = await saveSSHConfig(document.getElementById('ssh-enabled').checked, newShell);
+            const base = newShell.trim() ? 'Shell 已保存，对新会话生效' : '已恢复自动探测';
+            if (data && data.warning) {
+                sshStatus(base + '（警告：' + data.warning + '）', true);
+            } else {
+                sshStatus(base);
+            }
+            // 保存后主动失焦，让下一次 SSE 触发的 loadSSH 能正常刷新字段。
+            document.getElementById('ssh-shell').blur();
+        } catch (err) {
             sshStatus('Save failed: ' + err.message, true);
         }
     });
@@ -168,6 +210,10 @@
             sshStatus('Delete failed: ' + err.message, true);
         }
     };
+
+    if (typeof onBusinessVersion === 'function') {
+        onBusinessVersion('ssh', loadSSH, 'admin-ssh-block');
+    }
 
     loadSSH();
 })();

@@ -37,8 +37,8 @@ func (p *pipeProc) Kill()                        { _ = p.cmd.Process.Kill(); p.s
 func (p *pipeProc) CloseStdin()                  { p.stdin.Close() }
 func (p *pipeProc) Resize(cols, rows uint32)     {}
 
-// defaultShell 返回系统默认 shell：$SHELL，空则 /bin/sh。
-func defaultShell() string {
+// autoDetectShell 返回系统自动探测的 shell：$SHELL，空则 /bin/sh。
+func autoDetectShell() string {
 	if sh := os.Getenv("SHELL"); sh != "" {
 		return sh
 	}
@@ -51,13 +51,16 @@ const supportPty = true
 // startSessionProc 拉起 shell（isShell=true 交互登录）或执行命令行。
 // usePty 时用 pty 全交互（转发窗口尺寸）；否则管道模式。
 func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {
+	shell := resolveShell()
+	workDir := defaultWorkDir()
+
 	var cmd *exec.Cmd
 	if isShell {
-		cmd = exec.Command(defaultShell())
+		cmd = exec.Command(shell)
 	} else {
-		cmd = exec.Command(defaultShell(), "-c", cmdline)
+		cmd = exec.Command(shell, execArgs(shell, cmdline)...)
 	}
-	cmd.Dir = "/"
+	cmd.Dir = workDir
 
 	if usePty {
 		f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})

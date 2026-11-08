@@ -73,3 +73,165 @@ handler 未注入时仍回退本地拨号。第二处 `localNodeDomain` 分支�
 
 - 本文档的行号基于 2026-11-08 的 `master`，后续提交会导致漂移，修改前请重新定位
 - 判断某项是否完成，以代码为准，不以 plan 的状态字段为准
+
+---
+
+# 五、2026-11-08 决策结论（逐项定案）
+
+> 本节的目的是**避免重复决策**。每项都记录了最终选择、以及精读代码后发现的关键约束。
+> 若后续有人想推翻，请先读完"约束"部分再讨论。
+
+## 5.1 F3（TCP 端点 NIC 删除后重选路）— 修
+
+**决策**：修，允许改 `../gvisor-fork`。
+
+**精读发现（必须按此实现，不能照文档）**：
+
+1. **不能在 `(*Endpoint).sendTCP` 失败后重发同一个包**：`buildTCPHdr` 已经 `Push` 过 TCP 头（`connect.go:864`），重发会叠加第二个头；checksum 基于旧 route 的 pseudo-header 也算错。
+2. **正确落点**：在 `sendRaw`（`connect.go:1037`）与 `sendSynTCP`（`connect.go:835`）**最前面**做"route 有效性校验 + 自愈"，再做 `MaxHeaderLength`/TTL/GSO 等 route 派生计算。因为 NIC 删除后 `nic.remove` 已 `ep.Close()` 网络端点，在失效 route 上调这些函数本身就有未定义行为。
+3. **`e.route` 不能置 nil**：`sendRaw` 在调用 sendTCP 前已解引用 `e.route`（`connect.go:1044-1046`）。
+4. **旧 route 必须 `Release()` 一次**；新 route 直接接管 `FindRoute`/`BuildRouteFromDecision` 返回的引用，不要重复 `Acquire`。
+5. **需要 stack 导出** `Route.IsValidForOutgoing()`（当前 `isValidForOutgoing` 未导出，`route.go:512`）。
+6. **必须加退避**：`RouteFunc → V2RouteLookup` 会取 p2p `mgr.mu` 并打日志，每包重试会造成锁竞争与日志风暴。建议在 endpoint 加 `nextRouteHealAttempt` 字段，失败后 `now + min(RTO, 1s)`。
+7. **accepted socket 的 `boundNICID` 是入向 NIC**（`accept.go:202`），该 NIC 删除后用严格 nicID 重试永远失败 —— 需要决定是否退化为 `nicID=0` 让 RouteSelector 重选。
+8. **不能更新 `MaxPayloadSize`/调用 `sendData`**（`snd.go:448-449` 会递归进入发送路径）。
+
+**推荐策略**：自愈后**丢弃当前包**，交给 RTO/SYN 重传，而不是重发当前包。
+
+**验收**：`TestRerouteAfterNICRemoval` 通过；无 `ErrInvalidEndpointState` 刷屏；VM 手工验证链路重建后流可恢复。
+
+## 5.2 F4（`SackedOut` 记账）— 修
+
+**决策**：修，允许改 fork。
+
+**精读发现（关键：不能只删一行）**：
+
+1. 增/减存在 **6 处不对称**：闸门不对称（`+` 只在 RACK 开启时的 `walkSACK`，`-` 在累计 ACK 路径无条件）、判据不对称（`+` 用 `seg.acked` latch，`-` 用实时 `scoreboard.IsSACKED`）、覆盖粒度不对称、recovery 清零破坏对称、RTO 不清 `seg.acked`、split/merge/trim 不调整。
+2. **`seg.acked` 目前是"只置不清"的一次性 latch**（全仓无清除点），不能直接当统一判据。
+3. **RTO 只清 scoreboard，不清 `SackedOut` 也不清 `seg.acked`**（`snd.go:655-672`）。
+4. **restore 会恢复 `SackedOut` 但重置 scoreboard**（`endpoint_state.go:204-206`），状态天然不一致。
+5. **`enterRecovery` 的注释是错的**：`5ba8665` 写的 "SetPipe owns all SACK accounting"，但 `SetPipe` 只改 `Outstanding`，完全不碰 `SackedOut`。
+
+**正确做法（原子改动集，约 30-50 行）**：
+
+- 删除 `snd.go:1167` 的 `SackedOut = 0`
+- RTO（`snd.go:671` 后）与 restore（`endpoint_state.go:204-206` 后）统一 `SackedOut = 0` + 清 `writeList` 的 `acked`
+- MSS 调整（`snd.go:439-443`）与累计 ACK（`snd.go:1793`）判据统一为 `seg.acked`
+- 建议抽 `resetSACKStateLocked()` 供 RTO/restore 共用，避免再次打补丁造成不对称
+
+**风险**：删掉清零后，退出 recovery 时 `SackedOut` 可能仍 `>=3`，`rack.go:337` 会更激进地把 `ReoWnd` 压到 0 → 可能增加伪丢包。需在乱序链路压测。
+
+**验收**：`TestSackedOutNeverNegative` 四子用例通过；`gvisorfork/` 8 个测试无回归；VM 大文件吞吐不退步。
+
+## 5.3 F6（`SetPipe` 排除已丢失段）— 修
+
+**决策**：修，允许改 fork。
+
+**精读发现（关键：只改 SetPipe 基本无效）**：
+
+1. **RTO 路径完全不调用 SetPipe**。SetPipe 调用点：`snd.go:545`、`:1347`、`:1676`、`:1844`、`sack_recovery.go:36`。
+2. `rc.detectLoss` 在两次 SetPipe **之后**才置 `seg.lost`（`snd.go:1863-1874`），所以"发现丢包的那个 ACK"上 SetPipe 看不到新 lost。
+3. **必须补调用时机**：在 `rc.detectLoss` 返回 `numLost > 0` 后、`DoRecovery` 前调用 `s.SetPipe()`；`rack.go:404-416` 同理。
+4. **不要用 `writeNext` 替代 `SndNxt`**：`writeNext` 会回退（RTO 时指向 `SndUna`），还可能为 nil；`SndNxt` 才是 RFC6675 的 HighData 语义。
+5. 建议只改 (a) 规则：`if !s1.lost && !IsRangeLost(sb) { pipe++ }`，保留 (b) 的 HighRxt 语义，避免与 RFC6675 冲突。
+6. **GSO 粒度不一致**：`seg.lost` 是段级，SetPipe 按 SMSS 子区间计数，部分丢失时会低估 pipe → cwnd 过宽。建议 `walkSACK` 命中 SACK 时同步 `seg.lost=false`。
+7. 与 F4 强耦合：F4 改完后 RACK 更易置 lost，F6 的 pipe 低估效应会被放大。
+
+**验收**：新增 `TestSetPipeExcludesLost`；8 个测试无回归；VM 大文件 RTO 后吞吐能恢复（不再卡 ~7KB/s）。
+
+## 5.4 TUN 出口批量写 — 做，但仅"接口批量、实现循环"（A3）
+
+**决策**：A3。**注意：原方案（Linux/Darwin 真批量）技术上不成立。**
+
+**精读发现**：
+
+- **Linux TUN 一次 `write()` 只能写一个 IP 包**。`tun_chr_write_iter` 会把整个 iov 拼成一个 skb，用 `writev` 传 N 包 = 内核收到一个超 MTU 的畸形包被丢弃。
+- Darwin utun 同理（一次 write 视为一帧）。
+- 本仓用 `IFF_TUN|IFF_NO_PI`，无 `IFF_VNET_HDR`/`TUNSETOFFLOAD`，**没有批量路径**。
+- 真批量需要多队列 TUN（`IFF_MULTI_QUEUE`）或 vnet_hdr+GSO，属另一个工程。
+- Windows wintun 的 `AllocateSendPacket`/`SendPacket` 必须成对，也只能循环。
+
+**实际做法**：
+
+- `mesh/netstack.go` 的 `WriteLoopDevice` 增加可选批量接口 + 类型断言
+- `tun.Manager` 实现批量方法，内部循环调用 `dev.Write`
+- 可顺带优化 Darwin 的每包 `append(hdr, payload...)` 分配（用 `writev` 消掉这次拷贝）
+- 批量上限（建议 32/64 包），避免 drain 无界放大 egress 延迟
+- 写失败时按批聚合日志（现在是每包一条 Warn，批量会放大）
+
+**收益**：代码形态统一 + Darwin 省一次拷贝；**Windows 无性能收益**。
+
+## 5.5 健康检查 dial 可取消 — 做，层次二 + 类型多态（B2）
+
+**决策**：B2 层次二（真打断）+ `DialTimeoutAware` 按类型多态。
+
+**精读发现**：
+
+1. 健康检查有两条路径：`testURL == ""` → `checkProxyTCPHealth`（只 TCP 可达）；否则 → `checkProxyHealth`（`ChainDial` 完整握手）。
+2. **5s 超时判死是既有行为**（`main.go:2548-2549`、`:2593-2594` 直接 `return false`），**不是 ctx 引入的新问题**。
+3. 真正会**无限**挂死的只有两处：SOCKS5 握手（`socks5.go:147-195` 无 deadline）、SSH channel open（`ssh.go:74` 无超时）。
+4. 底层 `net.Dialer{Timeout: 30s}`（`bind.go:153-160`）保证 TCP connect 有界。
+
+**实现**：
+
+- `bind.go` 增加 `DialRouteAwareContext`（保留 `DialRouteAware` 作为 `context.Background()` 包装）
+- 统一 helper `withCtxDeadline(ctx, conn)`：按 `ctx.Deadline()` 设 deadline + `context.AfterFunc` 取消时打断阻塞读；返回前清除
+- 12 个 `Dial` 实现各加 2 行调用 helper（这是"真打断"的必要成本，无法靠一个包装函数替代）
+- 新增可选接口 `DialTimeoutAware { MaxDialTimeout() time.Duration }`
+- 健康检查 ctx 超时按类型取：默认 5s，**htunnel 声明 35s**（3 次串行 10s HEAD + 余量）
+
+**注意**：
+
+- `SetDeadline` 不能设在共享缓存连接上（SSH client 池、hysteria2 pool、htunnel shared client），只能对 per-call conn 设
+- 现有后台 goroutine 模式（`main.go:2534-2543`）要一并去掉，否则仍泄漏
+
+**验收**：`go test ./...` 无回归；健康检查不再出现 goroutine 无限滞留；htunnel 类代理在配了 HealthCheckURL 时不再被 5s 误判。
+
+## 5.6 watchdog 残留查杀 — 做 W1 + W2（仅 Linux）
+
+**决策**：W1 精确判定 + W2 `Pdeathsig`。
+
+**精读发现**：
+
+1. **文档的路径写错了**：pkg worker 二进制在 `<cwd>/data/worker/phaethon-<version>`（`main.go:1093-1094`），**不是** `data/packages/`（那里只有 `.pkg`）。按文档实现会漏杀。
+2. 二进制名可能是 `phaethon-0.7.3-61-ga31b3b5`（不带 `v`），不要写死 `phaethon-v*`。
+3. **`Pdeathsig` 是线程级**：fork 子进程的 OS 线程退出时才会发信号。必须 `runtime.LockOSThread()` 且该 goroutine **不能提前返回**（返回会销毁线程 → 立刻误杀 worker）。
+4. 三条件取法：uid 读 `/proc/<pid>/status` 的 `Uid:`；cwd 读 `Readlink(/proc/<pid>/cwd)`；exe 读 `Readlink(/proc/<pid>/exe)`（去掉 `" (deleted)"`）。**权限失败时放行不杀**（保守）。
+5. **杀序要改**：先杀 watchdog（让 Pdeathsig 带走 worker），1s 后再兜底扫 worker。否则「杀 worker → 旧 watchdog 重启新 worker」会产生新残留。
+6. **cwd 过严会漏杀**：旧实例若以不同 cwd 启动（`cd /`、systemd 变更），同 exe 同 uid 也清不掉。建议 cwd 不匹配时降级为「exe 完全相同才杀」并打 Warn。
+
+**验收**：`tail -f phaethon.log` 不再被误杀；watchdog 被 kill -9 后 worker 自动退出；正常关闭流程无副作用。
+
+## 5.7 端口范围设置页 — 做
+
+**决策**：UDP + TCP 都热生效 + Admin 界面。
+
+**要点**：
+
+- db 增加 `PutUDPPortRange` / `PutTCPPortRange`（bucket 名实际是 `port:config`，不是文档写的 `port-range-config`）
+- admin 增加 GET/PUT 端点
+- 前端在 Admin 设置页加「网络端口范围」区块，格式 `min-max`，留空用默认
+- 校验：1–65535、`min ≤ max`、格式非法拒绝
+- UDP/TCP 允许区间重叠
+- **TCP 热生效会重建反连通道（短暂断开）**，界面需提示
+
+## 5.8 P2P Manager 队列化 — 已否决（不实施）
+
+见 `docs/plans/p2p-manager-queue-refactor.md`（状态已改为"已否决"）。
+
+## 5.9 实施顺序建议
+
+1. **F4 → F6**（F6 依赖 F4 的 RTO/acked 清理语义），**F3 可并行**
+2. fork 三项合并为一次 `-a` 重建 + 一次四环境部署
+3. **5.5（健康检查）排在 fork 之后**，避免两组大改动同时上难以定位
+4. 5.4（TUN）、5.6（watchdog）、5.7（端口范围）与 fork 无交集，可并行开发
+
+## 5.10 联合回归要求
+
+F3 的反复重传会放大 F4/F6 在 RTO 路径上的问题，因此必须跑联合场景：
+
+- 乱序（reorder）
+- LinkNIC 删除重连
+- RTO
+
+三者叠加的测试是必要的。

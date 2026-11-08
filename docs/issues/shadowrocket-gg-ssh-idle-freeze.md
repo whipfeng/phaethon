@@ -221,3 +221,93 @@ copy := func(dir string, dst, src net.Conn) {
 - GG：进程与版本、39988 监听、mesh gossip、抓包活性
 
 任务 7 天自动过期（约 2026-11-15），过期后按 `memory/reference-vm-health-cron.md` 重建。
+
+---
+
+## 2026-11-08 18:28 第三次取证：冻结点是「下行单向失效」
+
+GG 已重新部署正式版 `v0.8.0-359-g7b39447`（含版本比较修复 e61ab02 + relay 诊断日志 d509cc3），
+日志级别恢复 `global=info` + relay/trojan/server/handler/base/control=debug，tcpdump 环形抓包常驻。
+
+### 连接生命周期
+
+同一连接（GG 侧 `192.168.16.2:39988 ↔ 183.212.182.203:2909`，mesh 侧 `100.179.0.3:56560 ↔ 100.212.0.73:22`）：
+
+| 时间 | 事件 |
+|---|---|
+| 18:12:13 | VM phaethon `handleConn START`，`loc.vm.phn:22 → DIRECT` 到本机 sshd |
+| 18:12 ~ 18:28 | 下行累计 2,018,093 字节，上行 12,837 字节；末段空闲 |
+| 18:28:49.759959 | **In SR → GG `[P.] len=24`**（手机最后一批输入，成功送达） |
+| 18:28:49.760080 | Out GG → SR `[P.] len=24`（回显/响应，序列 2228399:2228423） |
+| 18:28:49.760108 | **Out GG → SR `[F.] seq=2228423`**（GG 发 FIN） |
+| 18:28:49.765977 | In SR → GG `[F.] seq=19414 ack=2228399`（SR 回 FIN，**但未确认那 24 字节**） |
+| 18:28:50 ~ 18:29:48 | GG `[FP.] len=24` 重传 8 次（0.05/0.46/0.94/1.86/3.65/7.76/15.4/29.2s 退避），**全部无 ACK** |
+| 18:28:49 | GG relay：`left->right io.Copy done bytes=12837 (EOF)` / `right->left io.Copy done bytes=2018093 (EOF)` |
+| 18:28:49 | VM phaethon：`handleConn END` + `HANDLECONN-RETURN` |
+| 18:29:48 后 | 完全静默，SR 侧始终不知连接已关 |
+| 18:31:35 | 用户重连（GG 侧新连接 :29129 → VM 侧 :61864） |
+
+### 直接机制：下行单向失效
+
+| 方向 | 状态 | 证据 |
+|---|---|---|
+| 上行 SR→GG→VM sshd | **通** | 24 字节成功送达 GG 并被转发处理 |
+| 下行 GG→SR | **断** | 24 字节 + FIN，SR 全部不 ACK |
+
+这与用户症状「敲键能到 sshd、但回显回不来、也不显示断开」完全吻合，也解释了「重连后发现之前的输入其实到达了」。
+注意：不是整条链路失效——SR 的 FIN 能到达 GG，说明上行映射仍在；失效的是 **SR 侧不再接收入向数据**。
+
+### 本次排除项（均带证据）
+
+| 假设 | 结论 | 证据 |
+|---|---|---|
+| mesh 链路断 / 抖动 | ❌ 排除 | GG 侧 18:28:47/48/52/55 均 `RECOMPUTE-ROUTES peerCount=3 peers=[vm jf mb]`，路由 11 条稳定 |
+| VM sshd 空闲超时主动关 | ❌ 基本排除 | `C:\ProgramData\ssh\sshd_config` 中 `ClientAliveInterval` 被注释（默认 0 = 不超时）；OpenSSH Operational 日志 18:20–18:32 仅一条 18:31:37 新连接 Accepted，**无任何 Disconnect 事件** |
+| phaethon 强杀连接 | ❌ 排除 | relay 两方向都是 `EOF`（正常关闭），非 `err`；对比 15:52 那次才是 `operation aborted` |
+| CGNAT 整条映射过期 | ❌ 排除 | SR 的 FIN 仍能到达 GG |
+| 应用层无数据导致看门狗 | ❌ 排除 | 数据面已无空闲杀（timeout-audit A1/A2/A3） |
+
+### 仍未实锤：谁先发起关闭
+
+GG 侧只能看到「`right`（GG→VM 的 mesh 连接）先 EOF，随后 `left`（SR 的 TLS）也被关闭」。
+而 GG 的 `right` 对端是 VM phaethon 的 `left`，其 EOF 可能来自 VM 侧 sshd，也可能来自 mesh 层。
+**这一步不闭环，不能判定 phaethon 无责。**
+
+需 VM 侧 relay 日志区分：
+
+| VM relay 先看到 | 结论 |
+|---|---|
+| `right`（本机 sshd）先 EOF | 源头在 sshd / Windows 侧，phaethon 仅正常传播关闭 |
+| `left`（来自 GG 的 mesh）先 EOF | 源头在 GG 侧，需继续深挖 phaethon 逻辑 |
+
+### 24 字节的性质：TLS close_notify（已核实，非缺陷）
+
+初判曾怀疑 `util/util.go:60` 的 `CloseWriteOrClose(dst)` 对 `*tls.Conn` 会退化为 `Close()` 全关，
+**该怀疑已证伪**：
+
+- `CloseWriteOrClose` 用 `interface{ CloseWrite() error }` 做类型断言（`util/util.go:36-42`）
+- `go doc crypto/tls.Conn` 确认 **`func (c *Conn) CloseWrite() error` 存在**（Go 1.26.2）
+- TLS 1.3 加密后的 close_notify alert 尺寸 = 5（record header）+ 1（inner type）+ 2（alert）+ 16（AEAD tag）= **24 字节**
+
+因此 GG 发的那 24 字节正是**标准 TLS 关闭通知**，随后才是 TCP FIN。
+`Relay` 的关闭顺序（一侧 EOF → `CloseWrite(dst)` → 发 close_notify → 调用方 defer Close → FIN）**符合 TLS 规范**。
+
+结论：**这条路径上没有发现 phaethon 侧的协议缺陷**。真正的问题是这 24 字节 close_notify 在 GG→SR 方向始终未被 ACK，
+以及其后的所有重传同样无响应。
+
+### 历史同类事件（同一模式）
+
+- 15:52:55 `SR:2766`：`right->left operation aborted`（mesh endpoint 被中止，性质不同，属异常中止）
+- 18:11:16 `SR:2757`：GG 发 `[FP.] seq 1:25 ack 1 len=24`，同样 24 字节 + FIN 重传 8 次
+- 18:13:26 `SR:2824`：完整四次挥手（Out FIN → In FIN → Out FIN）
+- 18:28:49 `SR:2909`：本次，`[FP.] len=24` 重传 8 次
+
+「24 字节 + FIN + 指数退避重传 ~60s」在三次事件中重复出现，是稳定特征。
+
+### 下一步
+
+1. **VM 部署带 relay 日志的版本**，复现后确认 VM 侧 `left`/`right` 谁先 EOF（唯一未闭环项：关闭发起方）
+2. 客户端缓解：SSH 客户端配置 `ServerAliveInterval 30`、`ServerAliveCountMax 3`，并用 tmux 兜底
+3. 若确认下行长期单向失效，评估是否需要用「关闭前短暂等待 close_notify ACK」或应用层 RST 兜底
+   （注意：RST 会丢失 SSE/长连接语义，需用户拍板，且可能违反数据面不干预原则）
+

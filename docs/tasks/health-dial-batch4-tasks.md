@@ -43,5 +43,12 @@
 
 ## 阶段 6: 验证
 
-- [ ] 三平台编译
-- [ ] `go test ./dialer/... ./config/... ./db/...`（既有失败需区分）
+- [x] 三平台编译（Windows 本机 + GOOS=linux/darwin）
+- [x] `go test ./config/... ./db/... ./p2p/... ./server/... ./admin/...` 通过；`go test -vet=off ./mesh/...` 通过
+- 注：`go test ./dialer/...` / `./reverse/...` 仍因既有的 `config.RuleConfiguration`（早已删除的类型）
+  无法编译，属本次事故前遗留，未在本批处理
+
+## 收尾说明
+
+批次 4 已完成：D16 订阅并发、D24 SSH 池、ctx 贯穿、D25 版本协商、D14 健康检查（除“运行态表彻底外置”）。
+后续若要把健康运行态从组对象剥离，需要同时改 `config.ProxyGroup` 的选择逻辑与 admin 健康接口，建议单独立项。

@@ -112,6 +112,7 @@
 | [shadowrocket-gg-ssh-idle-freeze.md](issues/shadowrocket-gg-ssh-idle-freeze.md) | Shadowrocket → GG → mesh SSH 空闲 freeze：两端 relay 日志闭环，确认关闭发起方为 SR 客户端 | 已结案 |
 | [full-code-audit-20261109.md](issues/full-code-audit-20261109.md) | 全仓功能设计与代码逻辑审计（6 组只读审阅，P0/P1/P2 清单 + 决策点 + 修复批次） | 待讨论 |
 | [session-4f40e2d3-handoff-20261109.md](issues/session-4f40e2d3-handoff-20261109.md) | 会话上下文压缩死锁事故：成因、rewind 回滚范围、恢复过程与设计符合性审查 | 已恢复 |
+| [mesh-topology-edge-loss-20261109.md](issues/mesh-topology-edge-loss-20261109.md) | Mesh 拓扑丢边（deskw 缺 gg--vm）：观测数据、已排除项、bestClaims 单份选取假设、埋点与取证方法 | 待复现 |
 
 ### inputs/ (原始需求与历史分析)
 

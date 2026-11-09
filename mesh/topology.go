@@ -1,9 +1,13 @@
 package mesh
 
 import (
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
+
+	"phaethon/util"
 )
 
 // PeerRouteEntry represents a route learned from a peer, referencing the owner node.
@@ -26,6 +30,46 @@ type PeerClaimedSubnetEntry struct {
 	NodeID    string
 	Hop       int              // hop count (already incremented on receive)
 	Neighbors []GossipNeighbor // direct neighbors of this node with link quality
+}
+
+// summarizeNeighbors renders neighbor node IDs plus their link seq pairs, so a
+// log line shows whether a claim carried the link we are looking for.
+func summarizeNeighbors(nbrs []GossipNeighbor) string {
+	parts := make([]string, 0, len(nbrs))
+	for _, n := range nbrs {
+		seqs := make([]string, 0, len(n.Links))
+		for _, l := range n.Links {
+			seqs = append(seqs, fmt.Sprintf("%d/%d", l.LocalSeq, l.RemoteSeq))
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", n.NodeID, strings.Join(seqs, ",")))
+	}
+	return strings.Join(parts, " ")
+}
+
+// summarizePeerClaims renders inbound (post hop-increment) claims for logging.
+func summarizePeerClaims(claims []PeerClaimedSubnetEntry) string {
+	if len(claims) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(claims))
+	for _, c := range claims {
+		parts = append(parts, fmt.Sprintf("%s@%s(h%d){%s}",
+			c.NodeID, c.SubnetStr, c.Hop, summarizeNeighbors(c.Neighbors)))
+	}
+	return strings.Join(parts, " ")
+}
+
+// summarizeGossipClaims renders outbound claims for logging.
+func summarizeGossipClaims(claims []GossipClaimedSubnet) string {
+	if len(claims) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(claims))
+	for _, c := range claims {
+		parts = append(parts, fmt.Sprintf("%s@%s(h%d){%s}",
+			c.NodeID, c.Subnet, c.Hop, summarizeNeighbors(c.Neighbors)))
+	}
+	return strings.Join(parts, " ")
 }
 
 // PeerInfo holds the information received from a peer via gossip.
@@ -258,13 +302,21 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		if err != nil {
 			continue
 		}
-		claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
+	claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
 			Subnet:    ipNet,
 			SubnetStr: cs.Subnet,
 			NodeID:    cs.NodeID,
 			Hop:       cs.Hop + 1,
 			Neighbors: cs.Neighbors,
 		})
+	}
+
+	// Gossip claim tracing (mesh=debug): shows exactly what a peer told us,
+	// including each neighbor's link seqs. Needed to tell "upstream stripped
+	// the link" apart from "we dropped it locally".
+	if util.GetModuleLogLevel("mesh") <= util.LogLevelDebug {
+		util.LogModuleDebug("mesh", "[GOSSIP-IN] from=%s claims=%s",
+			sender.GetNodeID(), summarizePeerClaims(claimedSubnets))
 	}
 
 	// Derive peer's own subnet from ClaimedSubnets with hop=1 (originally hop=0 from sender)

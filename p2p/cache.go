@@ -91,20 +91,28 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 	}
 	defer src.Close()
 
-	tmpPath := target + ".tmp"
-	dst, err := os.Create(tmpPath)
+	tmp, err := os.CreateTemp(c.dir, filepath.Base(target)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
+	tmpPath := tmp.Name()
 
 	// Compute sha256 while copying
 	hasher := sha256.New()
-	if _, err := io.Copy(dst, io.TeeReader(src, hasher)); err != nil {
-		dst.Close()
+	if _, err := io.Copy(tmp, io.TeeReader(src, hasher)); err != nil {
+		tmp.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("copy binary: %w", err)
 	}
-	dst.Close()
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync cache file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close cache file: %w", err)
+	}
 
 	if err := os.Rename(tmpPath, target); err != nil {
 		os.Remove(tmpPath)
@@ -113,10 +121,7 @@ func (c *BinaryCache) SeedOwnBinary(version, platform, arch, buildTag string) er
 
 	// Write sha256 sidecar
 	hashHex := hex.EncodeToString(hasher.Sum(nil))
-	shaPath := target + ".sha256"
-	if err := os.WriteFile(shaPath, []byte(hashHex+"\n"), 0644); err != nil {
-		util.LogModuleWarn("p2p", "[P2P] cache: failed to write sha256 sidecar: %v", err)
-	}
+	writeSHA256Sidecar(target, hashHex)
 
 	util.LogModuleInfo("p2p", "[P2P] cache: seeded own binary: %s (sha256: %s)", filepath.Base(target), hashHex[:16]+"...")
 	return nil
@@ -192,31 +197,62 @@ func parseCacheFileName(name string) (CacheEntry, bool) {
 	}, true
 }
 
+// maxCacheBinarySize bounds a single cached binary. Anything larger is
+// rejected before it can fill the disk (D30).
+const maxCacheBinarySize = 128 << 20 // 128 MiB
+
+// writeSHA256Sidecar records the digest next to the cached file so the admin
+// UI and later verification can compare without re-reading the binary.
+func writeSHA256Sidecar(target, hashHex string) {
+	if err := os.WriteFile(target+".sha256", []byte(hashHex+"\n"), 0644); err != nil {
+		util.LogModuleWarn("p2p", "[P2P] cache: failed to write sha256 sidecar: %v", err)
+	}
+}
+
 // StoreFromReader writes data from r into the cache as a new binary.
-// Uses atomic rename to avoid partial files.
+// Atomic rename avoids partial files, a unique temp name prevents two writers
+// for the same key from clobbering each other, the size is capped, and the
+// sha256 digest is recorded (D30).
 func (c *BinaryCache) StoreFromReader(platform, arch, buildTag, version string, r io.Reader) (string, error) {
 	target, err := c.FilePath(platform, arch, buildTag, version)
 	if err != nil {
 		return "", err
 	}
-	tmpPath := target + ".tmp"
 
-	dst, err := os.Create(tmpPath)
+	tmp, err := os.CreateTemp(c.dir, filepath.Base(target)+".*.tmp")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
-
-	if _, err := io.Copy(dst, r); err != nil {
-		dst.Close()
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
 		os.Remove(tmpPath)
+	}
+
+	hasher := sha256.New()
+	n, err := io.Copy(tmp, io.TeeReader(io.LimitReader(r, maxCacheBinarySize+1), hasher))
+	if err != nil {
+		cleanup()
 		return "", fmt.Errorf("write cache file: %w", err)
 	}
-	dst.Close()
+	if n > maxCacheBinarySize {
+		cleanup()
+		return "", fmt.Errorf("cache: %s/%s/%s/%s exceeds the %d byte limit", platform, arch, buildTag, version, maxCacheBinarySize)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("sync cache file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("close cache file: %w", err)
+	}
 
 	if err := os.Rename(tmpPath, target); err != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("rename to cache: %w", err)
 	}
+	writeSHA256Sidecar(target, hex.EncodeToString(hasher.Sum(nil)))
 
 	util.LogModuleInfo("p2p", "[P2P] cache: stored %s/%s/%s/%s → %s", platform, arch, buildTag, version, filepath.Base(target))
 	return target, nil

@@ -162,10 +162,12 @@
             container.innerHTML = '';
             empty.textContent = packages.length === 0 ? this.t('package.emptyList', '暂无发布包') : '';
 
-            // Group by platform/arch
+            // Group by platform/arch (fields are flat in the JSON response)
             const groups = {};
             packages.forEach(pkg => {
-                const key = pkg.meta.platform + '/' + pkg.meta.arch;
+                const platform = pkg.platform || (pkg.meta && pkg.meta.platform) || 'unknown';
+                const arch = pkg.arch || (pkg.meta && pkg.meta.arch) || 'unknown';
+                const key = platform + '/' + arch;
                 if (!groups[key]) groups[key] = [];
                 groups[key].push(pkg);
             });
@@ -177,7 +179,9 @@
                 const pkgs = groups[key];
                 // Sort by version descending within group
                 pkgs.sort((a, b) => {
-                    return this.compareVersions(b.meta.version, a.meta.version);
+                    const va = a.version || (a.meta && a.meta.version) || '';
+                    const vb = b.version || (b.meta && b.meta.version) || '';
+                    return this.compareVersions(vb, va);
                 });
 
                 const card = document.createElement('div');
@@ -213,13 +217,22 @@
                         ? '<span class="badge badge-info">✅</span>'
                         : '<span class="badge badge-error">❌</span>';
 
+                    const version = pkg.version || (pkg.meta && pkg.meta.version) || '';
+                    const published = !!pkg.published;
+                    const statusBadge = published
+                        ? '<span class="badge badge-success">' + this.t('package.active', '已启用') + '</span>'
+                        : '<span class="badge badge-warning">' + this.t('package.pending', '待启用') + '</span>';
+                    const activateBtn = published ? '' :
+                        '<button class="btn btn-sm btn-primary" onclick="PackagePage.activate(\'' + pkg.id + '\')">' + this.t('package.activate', '启用') + '</button>';
+
                     tr.innerHTML =
                         '<td style="font-family:monospace;">' + this.escapeHtml(pkg.filename) + '</td>' +
-                        '<td>' + this.escapeHtml(pkg.meta.version) + '</td>' +
+                        '<td>' + this.escapeHtml(version) + '</td>' +
                         '<td>' + this.fmtSize(pkg.size) + '</td>' +
                         '<td>' + this.fmtTime(pkg.uploadedAt) + '</td>' +
-                        '<td>' + sigBadge + '</td>' +
+                        '<td>' + sigBadge + ' ' + statusBadge + '</td>' +
                         '<td>' +
+                        activateBtn +
                         '<button class="btn btn-sm btn-outline" onclick="PackagePage.download(\'' + pkg.id + '\')">' + this.t('package.download', '下载') + '</button>' +
                         '</td>';
                     tbody.appendChild(tr);
@@ -244,6 +257,25 @@
 
         download(id) {
             window.open('./api/packages/' + id + '/download', '_blank');
+        },
+
+        activate(id) {
+            const now = confirm(this.t('package.confirmRestart',
+                '立即重启并切换到该版本？\n\n确定 = 立即重启\n取消 = 仅在下次重启后生效'));
+            const restart = now ? 'now' : 'later';
+            fetch('./api/packages/' + id + '/activate?restart=' + restart, { method: 'POST' })
+                .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                .then(({ ok, d }) => {
+                    if (!ok) {
+                        showToast((d && d.error) || 'activate failed', 'error');
+                        return;
+                    }
+                    showToast(now
+                        ? this.t('package.toast.activatedNow', '已启用，正在重启…')
+                        : this.t('package.toast.activatedLater', '已启用，将在下次重启生效'), 'success');
+                    this.refresh();
+                })
+                .catch(() => showToast(this.t('package.toast.networkError', '网络错误'), 'error'));
         },
 
         escapeHtml(s) {

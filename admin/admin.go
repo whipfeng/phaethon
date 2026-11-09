@@ -37,6 +37,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/db"
@@ -286,6 +288,10 @@ type AdminServer struct {
 
 	sseLast []byte // last published stats JSON
 
+	// debugAPI enables the read-only database browser and debug endpoints
+	// (pprof, stall dump). Disabled by default; set via --enable-debug-api.
+	debugAPI atomic.Bool
+
 	// OnTUNToggle is called when the user enables/disables TUN from the admin panel.
 	// The main package should set this to start or stop the TUN engine directly.
 	OnTUNToggle func(enable bool) error
@@ -423,6 +429,12 @@ func NewAdminServer(ac *config.AdminConfig) *AdminServer {
 
 	s.parseTemplates()
 	return s
+}
+
+// SetDebugAPIEnabled enables the read-only database browser and debug
+// endpoints. Disabled by default.
+func (s *AdminServer) SetDebugAPIEnabled(v bool) {
+	s.debugAPI.Store(v)
 }
 
 // SetPeerLister sets the function to list connected mesh peers.
@@ -952,14 +964,53 @@ func (l *singleConnListener) Addr() net.Addr {
 
 // session constants
 const sessionCookieName = "admin_session"
-const sessionDuration = 7 * 24 * time.Hour
+const sessionDuration = 24 * time.Hour
+
+// hashAdminPassword returns a bcrypt hash for a non-empty password.
+func hashAdminPassword(pw string) (string, error) {
+	if pw == "" {
+		return "", nil
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
+}
+
+// verifyAdminPassword reports whether pw matches a bcrypt hash. Legacy
+// plaintext values are rejected on purpose: upgrades require an explicit
+// password reset by the administrator.
+func verifyAdminPassword(stored, pw string) bool {
+	if stored == "" || pw == "" || !strings.HasPrefix(stored, "$2") {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(stored), []byte(pw)) == nil
+}
+
+// rotateSessionSecret replaces the cookie signing key and persists it, so all
+// existing sessions become invalid immediately (used on password change).
+func (s *AdminServer) rotateSessionSecret() error {
+	secret := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+		return err
+	}
+	if db.IsInitialized() {
+		if err := db.PutSessionSecret(secret); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.sessionSecret = secret
+	s.mu.Unlock()
+	return nil
+}
 
 // signSession creates a signed session token.
 func (s *AdminServer) signSession(username string, expires int64) string {
-	secret := s.config.Token
-	if secret == "" {
-		secret = string(s.sessionSecret)
-	}
+	s.mu.RLock()
+	secret := string(s.sessionSecret)
+	s.mu.RUnlock()
 	msg := fmt.Sprintf("%s:%d", username, expires)
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(msg))
@@ -994,7 +1045,11 @@ func (s *AdminServer) verifySession(r *http.Request) string {
 // isPublicPath returns true for paths that don't require authentication.
 func isPublicPath(path string, method string) bool {
 	// Static files and auth endpoints
-	if path == "/login" || path == "/api/login" || path == "/api/captcha" || path == "/setup" || path == "/api/setup" ||
+	// /setup and /api/setup are intentionally NOT public: they change the admin
+	// credentials, so they must obey the same AuthEnabled rule as every other
+	// mutating endpoint. When AuthEnabled is false the middleware lets them
+	// through; when it is true the caller must already be authenticated.
+	if path == "/login" || path == "/api/login" || path == "/api/captcha" ||
 		strings.HasPrefix(path, "/static/") {
 		return true
 	}
@@ -1279,14 +1334,24 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup", s.handleSetupPage)
 
 	// Debug endpoints: pprof profiles and on-demand stall dump. These sit on the
-	// same mux, so the existing auth middleware applies.
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.HandleFunc("/debug/dump", s.handleStallDump)
-	mux.HandleFunc("/debug/stall-probe", s.handleStallProbe)
+	// same mux, so the existing auth middleware applies. They are additionally
+	// gated by the debug API switch (disabled by default).
+	debug := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !s.debugAPI.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/debug/pprof/", debug(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", debug(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", debug(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", debug(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", debug(pprof.Trace))
+	mux.HandleFunc("/debug/dump", debug(s.handleStallDump))
+	mux.HandleFunc("/debug/stall-probe", debug(s.handleStallProbe))
 
 	// API endpoints — use HandleFunc with path checks for RESTful routing
 	mux.HandleFunc("/api/stats", s.apiStats)
@@ -2029,7 +2094,25 @@ func validatePortRange(s string) (min, max int, err error) {
 func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		jsonResponse(w, s.config)
+		// Never return credentials. The UI only needs to know whether a value
+		// is configured; sensitive values are write-only.
+		s.mu.RLock()
+		safe := map[string]interface{}{
+			"Enabled":            s.config.Enabled,
+			"Addr":               s.config.Addr,
+			"AuthEnabled":        s.config.AuthEnabled,
+			"Username":           s.config.Username,
+			"TLSCert":            s.config.TLSCert,
+			"TLSKey":             s.config.TLSKey,
+			"ClientCA":           s.config.ClientCA,
+			"MeshOnly":           s.config.MeshOnly,
+			"PackageUploadMaxMB": s.config.PackageUploadMaxMB,
+			"HasPassword":        s.config.Password != "",
+			"HasToken":           s.config.Token != "",
+			"HasPublicKey":       s.config.PublicKey != "",
+		}
+		s.mu.RUnlock()
+		jsonResponse(w, safe)
 
 	case http.MethodPut:
 		var updates map[string]interface{}
@@ -2039,6 +2122,16 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
+		rotateSecret := false
+		// Register the rotation before the unlock so it runs after the lock is
+		// released (defer order is LIFO).
+		defer func() {
+			if rotateSecret {
+				if err := s.rotateSessionSecret(); err != nil {
+					util.LogModuleWarn("admin", "rotate session secret failed: %v", err)
+				}
+			}
+		}()
 		defer s.mu.Unlock()
 
 		// Merge updates: only update fields that are present (kebab-case)
@@ -2057,7 +2150,13 @@ func (s *AdminServer) apiConfigAdmin(w http.ResponseWriter, r *http.Request) {
 			s.config.Username = username
 		}
 		if password, ok := updates["password"].(string); ok && password != "" {
-			s.config.Password = password
+			hashed, herr := hashAdminPassword(password)
+			if herr != nil {
+				httpError(w, "hash password: "+herr.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.config.Password = hashed
+			rotateSecret = true
 		}
 		if token, ok := updates["token"].(string); ok {
 			s.config.Token = token
@@ -3201,6 +3300,9 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		s.mu.Lock()
 		// Update the group in database directly
 		group.SubscriptionFilter = body.Filter
+		// group is a private DB copy without resolver callbacks, so the setter's
+		// membership check cannot see subscription nodes. Assign directly (no
+		// sharing, no lock needed on this local object).
 		group.ActiveMember = body.ActiveMember
 		if err := db.PutProxyGroup(group); err != nil {
 			s.mu.Unlock()
@@ -3591,12 +3693,13 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if existing != nil {
+			// Local DB copy without resolver callbacks: direct assignment is
+			// safe and preserves subscription-member names that the setter
+			// would reject as "not found".
 			if g.Subscription != existing.Subscription {
 				g.ActiveMember = ""
-			} else {
-				if g.ActiveMember == "" {
-					g.ActiveMember = existing.ActiveMember
-				}
+			} else if g.ActiveMember == "" {
+				g.ActiveMember = existing.ActiveMember
 			}
 			if g.HealthCheckURL == "" {
 				g.HealthCheckURL = existing.HealthCheckURL
@@ -4331,7 +4434,38 @@ func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
 // GET /api/db/<bucket> - list all keys in a bucket
 // POST /api/db/<bucket>/<key> - create/update a key (body is the value)
 // DELETE /api/db/<bucket>/<key> - delete a key
+// debugBuckets is the read-only allowlist for the debug database browser.
+// Credentials and runtime secrets are intentionally excluded.
+var debugBuckets = map[string]bool{
+	"proxies":            true,
+	"proxy-groups":       true,
+	"subscriptions":      true,
+	"subscription-nodes": true,
+	"rules":              true,
+	"mappings":           true,
+	"resolvers":          true,
+	"reverse-configs":    true,
+	"bindings":           true,
+	"port-range-config":  true,
+	"tun-config":         true,
+	"mesh-config":        true,
+	"versions":           true,
+	"logs":               true,
+	"webhooks":           true,
+}
+
 func (s *AdminServer) apiDatabase(w http.ResponseWriter, r *http.Request) {
+	// Disabled unless --enable-debug-api was passed.
+	if !s.debugAPI.Load() {
+		http.NotFound(w, r)
+		return
+	}
+	// Read-only: writes go through business APIs or offline tools.
+	if r.Method != http.MethodGet {
+		httpError(w, "debug database API is read-only", http.StatusForbidden)
+		return
+	}
+
 	// Parse path: /api/db/<bucket>[/<key>]
 	path := strings.TrimPrefix(r.URL.Path, "/api/db/")
 	parts := strings.SplitN(path, "/", 2)
@@ -4342,6 +4476,10 @@ func (s *AdminServer) apiDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bucket := parts[0]
+	if !debugBuckets[bucket] {
+		httpError(w, "bucket not allowed", http.StatusForbidden)
+		return
+	}
 	key := ""
 	if len(parts) > 1 {
 		key = parts[1]
@@ -4379,10 +4517,17 @@ func (s *AdminServer) apiDatabaseList(w http.ResponseWriter, bucket string) {
 		httpError(w, fmt.Sprintf("list bucket failed: %v", err), http.StatusInternalServerError)
 		return
 	}
+	const maxKeys = 1000
+	truncated := false
+	if len(keys) > maxKeys {
+		keys = keys[:maxKeys]
+		truncated = true
+	}
 	jsonResponse(w, map[string]interface{}{
-		"bucket": bucket,
-		"keys":   keys,
-		"count":  len(keys),
+		"bucket":    bucket,
+		"keys":      keys,
+		"count":     len(keys),
+		"truncated": truncated,
 	})
 }
 
@@ -5018,7 +5163,7 @@ func (s *AdminServer) apiLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Username != s.config.Username || req.Password != s.config.Password {
+	if req.Username != s.config.Username || !verifyAdminPassword(s.config.Password, req.Password) {
 		recordFailedLogin(ip)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -5036,6 +5181,7 @@ func (s *AdminServer) apiLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    session,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(sessionDuration),
 	})
@@ -5052,6 +5198,7 @@ func (s *AdminServer) apiLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
@@ -5127,10 +5274,21 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 	if req.Username != "" {
 		s.config.Username = req.Username
 	}
+	rotateSecret := false
 	if req.Password != "" {
-		s.config.Password = req.Password
+		if hashed, herr := hashAdminPassword(req.Password); herr == nil {
+			s.config.Password = hashed
+			rotateSecret = true
+		} else {
+			util.LogModuleWarn("admin", "hash password failed: %v", herr)
+		}
 	}
 	s.mu.Unlock()
+	if rotateSecret {
+		if err := s.rotateSessionSecret(); err != nil {
+			util.LogModuleWarn("admin", "rotate session secret failed: %v", err)
+		}
+	}
 
 	// Save to database
 	if err := db.PutAdminConfig(s.config); err != nil {
@@ -5152,6 +5310,7 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 			Value:    session,
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   r.TLS != nil,
 			SameSite: http.SameSiteLaxMode,
 			Expires:  time.Now().Add(sessionDuration),
 		})
@@ -5179,12 +5338,25 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 
 	// Update auth settings
 	s.mu.Lock()
+	rotateSecret := false
 	if req.Username != "" {
 		s.config.AuthEnabled = req.AuthEnabled
 		s.config.Username = req.Username
-		s.config.Password = req.Password
+		if req.Password != "" {
+			if hashed, herr := hashAdminPassword(req.Password); herr == nil {
+				s.config.Password = hashed
+				rotateSecret = true
+			} else {
+				util.LogModuleWarn("admin", "hash password failed: %v", herr)
+			}
+		}
 	}
 	s.mu.Unlock()
+	if rotateSecret {
+		if err := s.rotateSessionSecret(); err != nil {
+			util.LogModuleWarn("admin", "rotate session secret failed: %v", err)
+		}
+	}
 
 	// Save reverse configs to runtime config (setup wizard always replaces the list)
 	if len(req.ReverseConfigs) > 0 {
@@ -5245,6 +5417,7 @@ func (s *AdminServer) apiSetup(w http.ResponseWriter, r *http.Request) {
 			Value:    session,
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   r.TLS != nil,
 			SameSite: http.SameSiteLaxMode,
 			Expires:  time.Now().Add(sessionDuration),
 		})

@@ -144,10 +144,10 @@ func parseHostPort(hostPort string, defaultPort int) (string, int) {
 
 func StartHTTP(mapping *config.Mapping) (net.Listener, error) {
 	srv := &HttpProxyServer{BaseServer: BaseServer{Mapping: mapping}}
-	return startTCP(mapping.Port, srv)
+	return startTCP(mapping.ListenAddr, mapping.Port, srv)
 }
 
 func StartHTTPS(mapping *config.Mapping) (net.Listener, error) {
 	srv := &HttpProxyServer{BaseServer: BaseServer{Mapping: mapping}}
-	return startTLS(mapping.Port, srv)
+	return startTLS(mapping.ListenAddr, mapping.Port, srv)
 }

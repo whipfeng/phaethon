@@ -5,10 +5,16 @@ import (
 	"net"
 
 	"phaethon/config"
+	"phaethon/util"
 )
 
 // StartListener starts the inbound listener for a mapping by its type.
 func StartListener(m *config.Mapping) (net.Listener, error) {
+	if m.Type == "socks5" && m.Password == "" {
+		util.LogModuleWarn("server",
+			"mapping %s: socks5 has no password; it runs as an unauthenticated open proxy on %s:%d",
+			m.Name, normalizeListenAddr(m.ListenAddr), m.Port)
+	}
 	switch m.Type {
 	case "socks5":
 		return StartSocks5(m)

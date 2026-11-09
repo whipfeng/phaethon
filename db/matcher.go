@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -164,7 +165,12 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 		if err != nil {
 			return fmt.Errorf("load rules: %w", err)
 		}
-		m.rules = parseRules(ruleStrs)
+		var ruleErrs []error
+		m.rules, ruleErrs = parseRules(ruleStrs)
+		// 历史脏数据不允许阻断启动（D15）：跳过并告警，由用户在管理面修正。
+		for _, e := range ruleErrs {
+			util.LogModuleWarn("db", "skip invalid rule: %v", e)
+		}
 
 		// 加载映射到 map
 		mappings, err := listTx[config.Mapping](tx, BucketMappings)
@@ -205,31 +211,99 @@ func BuildRuleMatcher() (*RuleMatcher, error) {
 	return m, nil
 }
 
-// parseRules 将规则字符串解析为 Rule 对象
-func parseRules(ruleStrs []string) []*config.Rule {
+// parseRules 将规则字符串解析为 Rule 对象。非法规则不阻断加载（历史数据容忍），
+// 但会逐条返回带行号的错误，交由调用方告警或拒绝保存。
+func parseRules(ruleStrs []string) ([]*config.Rule, []error) {
 	rules := make([]*config.Rule, 0, len(ruleStrs))
-	for _, ruleStr := range ruleStrs {
-		rule := parseRule(ruleStr)
+	var errs []error
+	for i, ruleStr := range ruleStrs {
+		rule, err := parseRule(ruleStr)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("第 %d 条规则 %q: %w", i+1, strings.TrimSpace(ruleStr), err))
+			continue
+		}
 		if rule != nil {
 			rules = append(rules, rule)
 		}
 	}
-	return rules
+	return rules, errs
 }
 
-// parseRule 解析单条规则字符串
-func parseRule(ruleStr string) *config.Rule {
-	parts := strings.Split(ruleStr, ",")
-	if len(parts) < 2 {
-		return nil
+// parseRule 严格解析单条规则字符串（D15）。
+// 支持 "//" 前缀表示禁用（转为结构化 Enabled=false），末尾可带 no-resolve。
+func parseRule(ruleStr string) (*config.Rule, error) {
+	raw := strings.TrimSpace(ruleStr)
+	if raw == "" {
+		return nil, nil
 	}
 
-	ruleType := strings.TrimSpace(parts[0])
-	proxyName, mappingName, tr := config.ParseProxyName(strings.TrimSpace(parts[len(parts)-1]))
+	enabled := true
+	if strings.HasPrefix(raw, "//") {
+		enabled = false
+		raw = strings.TrimSpace(strings.TrimPrefix(raw, "//"))
+	}
+	if raw == "" {
+		return nil, nil // 纯注释行
+	}
+
+	parts := strings.Split(raw, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("格式应为 TYPE,PATTERN,TARGET")
+	}
+
+	// 末尾的 no-resolve 是 Clash 兼容选项，不属于目标代理
+	if len(parts) >= 3 && strings.EqualFold(parts[len(parts)-1], "no-resolve") {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("缺少目标代理")
+	}
+
+	ruleType := strings.ToUpper(parts[0])
+	action := parts[len(parts)-1]
+	if action == "" {
+		return nil, fmt.Errorf("缺少目标代理")
+	}
+	proxyName, mappingName, tr := config.ParseProxyName(action)
+	if strings.TrimSpace(proxyName) == "" {
+		return nil, fmt.Errorf("目标代理为空")
+	}
 
 	var pattern string
-	if len(parts) >= 3 {
-		pattern = strings.TrimSpace(parts[1])
+	switch ruleType {
+	case "MATCH":
+		if len(parts) > 2 {
+			return nil, fmt.Errorf("MATCH 不接受匹配模式")
+		}
+	case "DOMAIN":
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("DOMAIN 缺少域名")
+		}
+		pattern = strings.ToLower(parts[1])
+		if err := validateDomainPattern(pattern); err != nil {
+			return nil, err
+		}
+	case "DOMAIN-SUFFIX":
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("DOMAIN-SUFFIX 缺少域名后缀")
+		}
+		pattern = strings.ToLower(strings.TrimPrefix(parts[1], "."))
+		if err := validateDomainPattern(pattern); err != nil {
+			return nil, err
+		}
+	case "IP-CIDR", "IP-CIDR6":
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("%s 缺少网段", ruleType)
+		}
+		pattern = parts[1]
+		if _, _, err := net.ParseCIDR(pattern); err != nil {
+			return nil, fmt.Errorf("非法 CIDR %q", pattern)
+		}
+	default:
+		return nil, fmt.Errorf("未知规则类型 %q", ruleType)
 	}
 
 	return &config.Rule{
@@ -238,7 +312,41 @@ func parseRule(ruleStr string) *config.Rule {
 		ProxyName:   proxyName,
 		MappingName: mappingName,
 		TimeRange:   &tr,
+		Enabled:     enabled,
+	}, nil
+}
+
+// ValidateRuleString 严格校验一条规则字符串，供管理面在保存前调用（D15）。
+// 空行/纯注释返回 nil。
+func ValidateRuleString(rule string) error {
+	_, err := parseRule(rule)
+	return err
+}
+
+// ParseRuleForReference 解析规则字符串并返回目标代理与启停状态，供管理面做
+// 引用检查（D15：按结构化 Enabled 判断，不再看 "//" 前缀）。
+// 非法规则返回 ok=false。
+func ParseRuleForReference(rule string) (proxyName string, enabled bool, ok bool) {
+	r, err := parseRule(rule)
+	if err != nil || r == nil {
+		return "", false, false
 	}
+	return r.ProxyName, r.Enabled, true
+}
+
+// validateDomainPattern rejects empty or obviously malformed domain patterns:
+// a typo must fail loudly instead of matching everything (D15).
+func validateDomainPattern(pattern string) error {
+	if pattern == "" {
+		return fmt.Errorf("域名为空")
+	}
+	if strings.ContainsAny(pattern, " \t/") {
+		return fmt.Errorf("域名 %q 含非法字符", pattern)
+	}
+	if pattern == "*" {
+		return fmt.Errorf("不支持通配符域名，请用 MATCH 或 DOMAIN-SUFFIX")
+	}
+	return nil
 }
 
 // ResolveMatch 执行规则匹配
@@ -538,37 +646,34 @@ func (m *RuleMatcher) RemoveRule(proxyName string) {
 	m.buildMatchers()
 }
 
-// buildMatchers 构建匹配器（从 rules）
+// buildMatchers 构建匹配器（从 rules）。禁用规则按结构化 Enabled 跳过（D15），
+// 未知类型返回错误而不是静默丢弃。
 func (m *RuleMatcher) buildMatchers() error {
 	m.matchers = make([]config.Matcher, 0, len(m.rules))
 	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
 
-	for _, rule := range m.rules {
+	for idx, rule := range m.rules {
+		if !rule.Enabled {
+			continue
+		}
+		var matcher config.Matcher
 		switch rule.Type {
+		case "DOMAIN":
+			matcher = config.NewDomainMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
 		case "DOMAIN-SUFFIX":
-			matcher := config.NewDomainSuffixMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
-			m.matchers = append(m.matchers, matcher)
-			if rule.TimeRange != nil {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
-			} else {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
-			}
-		case "IP-CIDR":
-			matcher := config.NewIpCidMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
-			m.matchers = append(m.matchers, matcher)
-			if rule.TimeRange != nil {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
-			} else {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
-			}
+			matcher = config.NewDomainSuffixMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
+		case "IP-CIDR", "IP-CIDR6":
+			matcher = config.NewIpCidMatcher(rule.ProxyName, rule.MappingName, rule.Pattern)
 		case "MATCH":
-			matcher := config.NewMatchAllMatcher(rule.ProxyName, rule.MappingName)
-			m.matchers = append(m.matchers, matcher)
-			if rule.TimeRange != nil {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
-			} else {
-				m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
-			}
+			matcher = config.NewMatchAllMatcher(rule.ProxyName, rule.MappingName)
+		default:
+			return fmt.Errorf("rule %d: unknown type %q", idx+1, rule.Type)
+		}
+		m.matchers = append(m.matchers, matcher)
+		if rule.TimeRange != nil {
+			m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
+		} else {
+			m.matcherTimeRanges = append(m.matcherTimeRanges, config.TimeRange{})
 		}
 	}
 	return nil
@@ -892,7 +997,11 @@ func onConfigChange(event ChangeEvent) {
 			util.LogModuleError("db", "watch: failed to load rules: %v", err)
 			return
 		}
-		m.rules = parseRules(ruleStrs)
+		var ruleErrs []error
+		m.rules, ruleErrs = parseRules(ruleStrs)
+		for _, e := range ruleErrs {
+			util.LogModuleWarn("db", "skip invalid rule: %v", e)
+		}
 		m.buildMatchers()
 		util.LogModuleInfo("db", "watch: updated rules (%d rules)", len(m.rules))
 	}

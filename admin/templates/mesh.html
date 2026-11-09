@@ -436,17 +436,21 @@
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            // Sort suffixes alphabetically
+            // Sort suffixes alphabetically for display, but the backend PUT/DELETE
+            // take an index into the STORED order — pass the original index, not
+            // the display position, or edits/deletes hit a different row.
             const sortedSuffixes = [...suffixes].sort((a, b) => a.localeCompare(b));
-            tbody.innerHTML = sortedSuffixes.map((suffix, idx) => `
+            tbody.innerHTML = sortedSuffixes.map((suffix) => {
+                const idx = suffixes.indexOf(suffix);
+                return `
                 <tr>
                     <td>${escapeHtml(suffix)}</td>
                     <td>
                         <button onclick="editDomainSuffix(${idx})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
                         <button onclick="deleteDomainSuffix(${idx})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
                     </td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
         } catch (err) {
             console.error('loadDomainSuffixes error:', err);
         }
@@ -499,19 +503,24 @@
     }
 
     function deleteDomainSuffix(idx) {
-        openConfirmModal(
-            typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?',
-            async function() {
-                try {
-                    const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
-                    if (!res.ok) throw new Error(await res.text());
-                    loadDomainSuffixes();
-                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
-                } catch (err) {
-                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        // Show the target value in the confirmation so a wrong index is caught
+        // before anything is deleted.
+        fetch('./api/mesh/domain-suffixes').then(res => res.json()).then(list => {
+            const target = list[idx] || '';
+            const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
+            openConfirmModal(base + (target ? `\n\n${target}` : ''),
+                async function() {
+                    try {
+                        const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
+                        if (!res.ok) throw new Error(await res.text());
+                        loadDomainSuffixes();
+                        showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                    } catch (err) {
+                        showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                    }
                 }
-            }
-        );
+            );
+        });
     }
 
     function closeDomainSuffixModal() {
@@ -592,19 +601,24 @@
     }
 
     function deleteAdvertise(idx) {
-        openConfirmModal(
-            typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?',
-            async function() {
-                try {
-                    const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
-                    if (!res.ok) throw new Error(await res.text());
-                    loadAdvertise();
-                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
-                } catch (err) {
-                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        // Show the target CIDR in the confirmation so a wrong index is caught
+        // before anything is deleted.
+        fetch('./api/mesh/advertise').then(res => res.json()).then(list => {
+            const target = list[idx] || '';
+            const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
+            openConfirmModal(base + (target ? `\n\n${target}` : ''),
+                async function() {
+                    try {
+                        const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
+                        if (!res.ok) throw new Error(await res.text());
+                        loadAdvertise();
+                        showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                    } catch (err) {
+                        showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                    }
                 }
-            }
-        );
+            );
+        });
     }
 
     function closeAdvertiseModal() {

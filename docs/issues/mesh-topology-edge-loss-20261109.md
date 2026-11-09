@@ -100,5 +100,41 @@
 ## 9. 当前状态
 
 - 6 个节点拓扑一致，`gg--vm` 正常；deskw 已补上 VM 的 4 把公钥（含本机），mesh SSH 可用。
-- jf 运行 `v0.8.0-343-ga01befa`（回滚后状态），备份 `phaethon.bak-20261109-170713`。
-- 带埋点 + pdeathsig 修复的新版源码已就绪（`v0.8.0-404-gdd01268-dirty`），Linux 产物已构建，待隔离冒烟后升级到 jf 以便下次复发留证。
+- jf 运行 `v0.8.0-405-g916b720-dirty`（带埋点与 pdeathsig 修复），`mesh=debug` 已开启，基线日志已确认
+  `GOSSIP-OUT to=deskw` 含 `gg(h1){… vm(11/2)}` 与 `vm(h2){… gg(2/11)}`。
+- 备份：`phaethon.bak-20261109-175507`（343 版）、`phaethon.bak-20261109-170713`。
+
+## 10. 代码深挖（2026-11-09）：找到两处可致"永久缺边"的缺陷，已修
+
+用户提示"是不是哪边有竞态或残余数据"，沿这条线查出两处，均可解释"只有单节点缺、久不自愈、重启即好"：
+
+### 10.1 浅快照 + 原地改写 → 转发时读到半更新/陈旧的 claim（数据竞争）
+
+- `Topology.GetAllPeers` / `updateTopologySnapshot` 只复制**指针切片**，`*PeerInfo` 仍被
+  `UpdateGossip` 在 `t.mu` 内**原地改写**；
+- `broadcastGossip` 通过 `getTopologySnapshot()` **无锁**读取这些字段；
+- 于是转发用的 `ClaimedSubnets` 可能是一次撕裂/过期的读：切片头指向上一版、
+  或邻居列表还是"加上该边之前"的那一份；
+- 表现：gossip 组装时该邻居缺席 → 下游（只经此一跳的 deskw）永久缺边；
+  而 `/api/mesh/topology` 是随后另一次读，往往已经完整，看起来"jf 上是好的"。
+
+**修复**：`UpdateGossip` 改为**写时复制**——构造新的 `*PeerInfo` 替换数组元素，
+不再原地改写。读方拿到的结构自此不可变，要么是完整旧版、要么是完整新版。
+
+### 10.2 幽灵 PeerInfo → bestClaims 被死数据遮蔽（残余数据）
+
+- `UnregisterPeerByNodeID` 命中第一条就 `return`，同 nodeID 的重复条目会残留；
+- `RegisterPeer` 也不去重。重连时若旧条目未按 Sender 指针清掉，就会累积幽灵条目；
+- 幽灵条目保留着下线前的 `ClaimedSubnets`（含邻居列表），在 `bestClaims` 里与活条目
+  同为最小 hop，先到先得；一旦幽灵被选中，转发出去的邻居列表就是过期的，
+  互验也会拿它当反向证据 → 该边被长期过滤，直到重启重建拓扑。
+
+**修复**：`UnregisterPeerByNodeID` 删除**全部**匹配；`RegisterPeer` 在 nodeID 已知时
+清理同 nodeID 的旧条目（不同 Sender）。
+
+### 10.3 仍未解释的部分
+
+两处缺陷都能造成"缺边且不自愈"，但本次故障已消失，无法回溯确认当时命中的是哪一处。
+下次复现按 §8 取证时，重点看 `[GOSSIP-SEL]` 里同一 subnet 的两份副本（hop / 邻居数），
+以及 `[GOSSIP-IN]` 是否出现同一 nodeID 的两条 PeerInfo。
+

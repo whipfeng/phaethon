@@ -259,20 +259,21 @@ func (t *Topology) UnregisterPeer(sender PeerSender) {
 	}
 }
 
-// UnregisterPeerByNodeID removes every peer entry with the given nodeID.
-// Removing only the first match would leave duplicates behind after a
-// reconnect, and those ghosts keep contributing claims to bestClaims.
+// UnregisterPeerByNodeID removes a peer entry by nodeID.
+//
+// Two entries may legitimately share a nodeID (one per link, multi-path to the
+// same node), so this is intentionally left as a single-entry removal and has
+// no production caller: link teardown always goes through UnregisterPeer with
+// the exact Sender. Do not turn this into a bulk delete.
 func (t *Topology) UnregisterPeerByNodeID(nodeID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	kept := t.peers[:0]
-	for _, p := range t.peers {
+	for i, p := range t.peers {
 		if p.NodeID() == nodeID {
-			continue
+			t.peers = append(t.peers[:i], t.peers[i+1:]...)
+			return
 		}
-		kept = append(kept, p)
 	}
-	t.peers = kept
 }
 
 // UpdateGossip updates a peer's gossip data in-place.

@@ -13,7 +13,7 @@ func TestProxyGroupNextSubscriptionCandidates(t *testing.T) {
 	})
 
 	g := &ProxyGroup{
-		Name:          "g",
+		Name:          "g-candidates",
 		Type:          GroupSelect,
 		ManualProxies: []string{"man"},
 		Subscription:  "sub",
@@ -62,7 +62,7 @@ func TestProxyGroupNextSubscriptionCandidates(t *testing.T) {
 func TestProxyGroupNextManualWhenNoSubscription(t *testing.T) {
 	man := &Proxy{Name: "man", Type: ProxySOCKS5, Server: "127.0.0.1", Port: 1080}
 	g := &ProxyGroup{
-		Name:          "g",
+		Name:          "g-manual",
 		Type:          GroupSelect,
 		ManualProxies: []string{"man"},
 		ResolveProxy: func(name string) *Proxy {
@@ -228,7 +228,7 @@ func TestProxyGroupSubscriptionFilter(t *testing.T) {
 
 func TestProxyGroupActiveMemberFallbackWhenMissing(t *testing.T) {
 	g := &ProxyGroup{
-		Name:          "g",
+		Name:          "g-fallback",
 		Type:          GroupSelect,
 		ManualProxies: []string{"missing", "p1"},
 		ActiveMember:  "missing",

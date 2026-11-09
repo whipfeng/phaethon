@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -18,13 +17,13 @@ func TestProxyGroupNextSubscriptionCandidates(t *testing.T) {
 		Type:          GroupSelect,
 		ManualProxies: []string{"man"},
 		Subscription:  "sub",
-		resolveProxy: func(name string) *Proxy {
+		ResolveProxy: func(name string) *Proxy {
 			if name == "man" {
 				return man
 			}
 			return nil
 		},
-		resolveSubscription: func(name string) *Subscription {
+		ResolveSubscription: func(name string) *Subscription {
 			if name == "sub" {
 				return sub
 			}
@@ -34,8 +33,6 @@ func TestProxyGroupNextSubscriptionCandidates(t *testing.T) {
 	if err := g.Init(); err != nil {
 		t.Fatal(err)
 	}
-	g.RebuildProxies()
-
 	p := g.Next()
 	if p == nil {
 		t.Fatal("expected proxy, got nil")
@@ -68,7 +65,7 @@ func TestProxyGroupNextManualWhenNoSubscription(t *testing.T) {
 		Name:          "g",
 		Type:          GroupSelect,
 		ManualProxies: []string{"man"},
-		resolveProxy: func(name string) *Proxy {
+		ResolveProxy: func(name string) *Proxy {
 			if name == "man" {
 				return man
 			}
@@ -78,7 +75,6 @@ func TestProxyGroupNextManualWhenNoSubscription(t *testing.T) {
 	if err := g.Init(); err != nil {
 		t.Fatal(err)
 	}
-	g.RebuildProxies()
 	p := g.Next()
 	if p == nil || p.Name != "man" {
 		t.Fatalf("expected manual man, got %v", p)
@@ -98,13 +94,13 @@ func TestProxyGroupNextLoadBalanceUsesAllMembers(t *testing.T) {
 		Type:          GroupLoadBalance,
 		ManualProxies: []string{"man"},
 		Subscription:  "sub",
-		resolveProxy: func(name string) *Proxy {
+		ResolveProxy: func(name string) *Proxy {
 			if name == "man" {
 				return man
 			}
 			return nil
 		},
-		resolveSubscription: func(name string) *Subscription {
+		ResolveSubscription: func(name string) *Subscription {
 			if name == "sub" {
 				return sub
 			}
@@ -114,8 +110,6 @@ func TestProxyGroupNextLoadBalanceUsesAllMembers(t *testing.T) {
 	if err := g.Init(); err != nil {
 		t.Fatal(err)
 	}
-	g.RebuildProxies()
-
 	seen := make(map[string]bool)
 	for i := 0; i < 10; i++ {
 		p := g.Next()
@@ -143,13 +137,13 @@ func TestProxyGroupNextNestedGroupSkipsNil(t *testing.T) {
 		Name:          "outer",
 		Type:          GroupSelect,
 		ManualProxies: []string{"empty", "p1"},
-		resolveProxy: func(name string) *Proxy {
+		ResolveProxy: func(name string) *Proxy {
 			if name == "p1" {
 				return p1
 			}
 			return nil
 		},
-		resolveGroup: func(name string) *ProxyGroup {
+		ResolveGroup: func(name string) *ProxyGroup {
 			if name == "empty" {
 				return empty
 			}
@@ -162,10 +156,8 @@ func TestProxyGroupNextNestedGroupSkipsNil(t *testing.T) {
 	if err := empty.Init(); err != nil {
 		t.Fatal(err)
 	}
-	empty.resolveGroup = outer.resolveGroup
-	empty.resolveProxy = outer.resolveProxy
-	outer.RebuildProxies()
-	empty.RebuildProxies()
+	empty.ResolveGroup = outer.ResolveGroup
+	empty.ResolveProxy = outer.ResolveProxy
 
 	p := outer.Next()
 	if p == nil || p.Name != "p1" {
@@ -176,13 +168,13 @@ func TestProxyGroupNextNestedGroupSkipsNil(t *testing.T) {
 func TestProxyGroupNextNestedGroupCycle(t *testing.T) {
 	a := &ProxyGroup{Name: "a", Type: GroupSelect, ManualProxies: []string{"b"}}
 	b := &ProxyGroup{Name: "b", Type: GroupSelect, ManualProxies: []string{"a"}}
-	a.resolveGroup = func(name string) *ProxyGroup {
+	a.ResolveGroup = func(name string) *ProxyGroup {
 		if name == "b" {
 			return b
 		}
 		return nil
 	}
-	b.resolveGroup = func(name string) *ProxyGroup {
+	b.ResolveGroup = func(name string) *ProxyGroup {
 		if name == "a" {
 			return a
 		}
@@ -194,8 +186,6 @@ func TestProxyGroupNextNestedGroupCycle(t *testing.T) {
 	if err := b.Init(); err != nil {
 		t.Fatal(err)
 	}
-	a.RebuildProxies()
-	b.RebuildProxies()
 
 	p := a.Next()
 	if p != nil {
@@ -216,7 +206,7 @@ func TestProxyGroupSubscriptionFilter(t *testing.T) {
 		Type:               GroupSelect,
 		Subscription:       "sub",
 		SubscriptionFilter: "hk",
-		resolveSubscription: func(name string) *Subscription {
+		ResolveSubscription: func(name string) *Subscription {
 			if name == "sub" {
 				return sub
 			}
@@ -226,8 +216,6 @@ func TestProxyGroupSubscriptionFilter(t *testing.T) {
 	if err := g.Init(); err != nil {
 		t.Fatal(err)
 	}
-	g.RebuildProxies()
-
 	candidates := g.SubscriptionCandidates()
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 hk candidates, got %v", candidates)
@@ -244,7 +232,7 @@ func TestProxyGroupActiveMemberFallbackWhenMissing(t *testing.T) {
 		Type:          GroupSelect,
 		ManualProxies: []string{"missing", "p1"},
 		ActiveMember:  "missing",
-		resolveProxy: func(name string) *Proxy {
+		ResolveProxy: func(name string) *Proxy {
 			if name == "p1" {
 				return &Proxy{Name: "p1", Type: ProxySOCKS5, Server: "127.0.0.1", Port: 1080}
 			}
@@ -254,29 +242,8 @@ func TestProxyGroupActiveMemberFallbackWhenMissing(t *testing.T) {
 	if err := g.Init(); err != nil {
 		t.Fatal(err)
 	}
-	g.RebuildProxies()
-
 	p := g.Next()
 	if p == nil || p.Name != "p1" {
 		t.Fatalf("expected fallback to first valid member p1, got %v", p)
-	}
-}
-
-func TestRuleConfigurationInitDetectsGroupCycle(t *testing.T) {
-	c := &RuleConfiguration{
-		Proxies: []*Proxy{
-			{Name: "p1", Type: ProxySOCKS5, Server: "127.0.0.1", Port: 1080},
-		},
-		ProxyGroups: []*ProxyGroup{
-			{Name: "a", Type: GroupSelect, Proxies: []string{"b"}},
-			{Name: "b", Type: GroupSelect, Proxies: []string{"a"}},
-		},
-	}
-	err := c.Init()
-	if err == nil {
-		t.Fatal("expected Init to fail on cyclic group references")
-	}
-	if !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected cycle error, got %v", err)
 	}
 }

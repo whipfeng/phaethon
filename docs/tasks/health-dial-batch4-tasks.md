@@ -7,8 +7,10 @@
 
 ## 阶段 1: 订阅并发一致性（D16）
 
-- [ ] 所有 `ActiveMember` 直接赋值改为 `SetActiveMember`
-- [ ] 网络失败 DB 回退分支与成功分支共用组重建逻辑
+- [x] 所有 `ActiveMember` 直接赋值改为 `SetActiveMember`（admin 两处 handler + main.go 刷新路径）
+- [x] 网络失败 DB 回退分支与成功分支共用组重建逻辑
+- 注：`SetActiveMember` 对「无 resolver 回调的 DB 副本」跳过成员校验（否则订阅节点名一律被判 not found，
+  管理接口不可用）；有 resolver 的运行态组仍严格校验
 
 ## 阶段 2: SSH 连接池（D24）
 

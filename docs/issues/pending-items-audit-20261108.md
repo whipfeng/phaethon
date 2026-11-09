@@ -38,7 +38,7 @@
 |---|---|---|
 | TUN 出口批量写 | drain 已做，但随后仍逐包 `Write`；`tun.Device` 无批量 API | `mesh/netstack.go:1920-1933`（drain）vs `:1995-1996`（逐包 Write）；`tun/device.go:10-17` 只有单包 `Write` |
 | 健康检查 dial 可取消 | **部分完成**：握手 15s deadline ✅、sem 获取超时 ✅；但 dial 无 context/errgroup，`wg.Wait()` 仍可能永久阻塞 | `dialer/trojan.go:144`、`dialer/vless.go:72,103`、`main.go:2413-2420`、`:2494-2502` 已做；`main.go:2528-2596` 未做 |
-| watchdog 残留查杀 W1/W2 | cmdline 子串匹配仍在（会误杀 `tail -f phaethon.log`）；无 `Pdeathsig` | `main_tun_nows.go:121-123`；`main.go:971-981` 的 `os.ProcAttr` 只有 Env/Files；全仓无 `worker_attr_*.go` |
+| watchdog 残留查杀 W1/W2 | ✅ **已完成（2026-11-09，改为实例锁）**：删除 `killResidualWorkers`，worker 在 `db.Init` 前取 `data/instance.lock`（flock / LockFileEx），冲突退出码 3；`Pdeathsig` 已由 `worker_attr_linux.go` 实现 | `instance_lock*.go`、`main.go` 锁获取处、`worker_attr_linux.go`、`child_signal_*.go` |
 
 ### P2（1 项，另 2 项已完成）
 
@@ -204,6 +204,11 @@ trojan、vless、hysteria2、ssh、shadowsocks、htunnel、http、reverse、stub
 其中 **SSH 的 channel open 无超时**仍是已知挂死点，建议下一轮优先补。
 
 ## 5.6 watchdog 残留查杀 — 做 W1 + W2（仅 Linux）
+
+> **落地更正（2026-11-09）**：最终没有采用 W1（收紧 `/proc` 判定），而是**删除进程清扫**，
+> 用 worker 持有的单实例锁替代；W2 保留，并修正为 worker 侧 prctl + watchdog
+> `LockOSThread` + `getppid` 竞态检查。详见 `plans/watchdog-residual-kill.md`。
+> 下面保留当时的决策过程，仅作背景。
 
 **决策**：W1 精确判定 + W2 `Pdeathsig`。
 

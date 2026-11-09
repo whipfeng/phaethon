@@ -71,7 +71,3 @@ func reapChild(pid int) (exitCode int, ok bool) {
 	}
 	return int(code), true
 }
-
-// killResidualWorkers is a no-op on Windows. The watchdog does not run on
-// Windows, and orphaned worker processes are not expected there.
-func killResidualWorkers() {}

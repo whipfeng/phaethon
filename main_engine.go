@@ -46,9 +46,6 @@ func residualTUNIP(meshMgr *mesh.MeshManager) net.IP {
 // If adminHandler is non-nil, it is set for direct connection handling (bypasses OS network stack).
 // Returns: (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler)
 func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler) {
-	// Clear the graceful-shutdown marker from any previous run.
-	removeStoppedMarker()
-
 	// Load TUN config directly from database
 	tunConfig, err := db.GetTUNConfig()
 	if err != nil {
@@ -58,15 +55,17 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 
 	tunEnabled := tunConfig != nil && tunConfig.IsEnabled()
 
+	// Always attempt residual cleanup: a previous crash can leave routes, DNS
+	// or a persisted Windows adapter even when TUN is now disabled. Cleanup
+	// only touches artifacts that belong to this deployment (D19).
+	// Safe because the worker holds the instance lock here: no other instance
+	// can be alive for this data directory.
+	tun.CleanupResidual(residualTUNIP(meshMgr))
+
 	// TUN device availability check (only needed when TUN is enabled)
-	if tunEnabled {
-		if !tun.Available() {
-			util.LogModuleWarn("engine", "TUN enabled but not available on this platform, falling back to TUN-disabled mode for mesh")
-			tunEnabled = false
-		} else {
-			// Clean up any residual TUN state from previous crashes before starting.
-			tun.CleanupResidual(residualTUNIP(meshMgr))
-		}
+	if tunEnabled && !tun.Available() {
+		util.LogModuleWarn("engine", "TUN enabled but not available on this platform, falling back to TUN-disabled mode for mesh")
+		tunEnabled = false
 	}
 
 	if tunEnabled {
@@ -246,22 +245,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	return engine, ns, connHandler
 }
 
-const stoppedMarkerPath = "data/state/stopped"
 const lastGoodWorkerPath = "data/state/last-good-worker"
-
-func writeStoppedMarker() {
-	_ = os.MkdirAll("data/state", 0755)
-	_ = os.WriteFile(stoppedMarkerPath, []byte("1"), 0644)
-}
-
-func removeStoppedMarker() {
-	_ = os.Remove(stoppedMarkerPath)
-}
-
-func wasStoppedGracefully() bool {
-	_, err := os.Stat(stoppedMarkerPath)
-	return err == nil
-}
 
 // writeLastGoodWorker persists the path of the last worker binary that
 // successfully started (sent ready signal). Used by watchdog to fall back

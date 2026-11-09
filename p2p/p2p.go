@@ -195,7 +195,6 @@ type MeshHandler interface {
 	HandleTopologyGossip(sender mesh.PeerSender, info mesh.GossipInfo)
 	RegisterPeer(sender mesh.PeerSender)
 	UnregisterPeer(sender mesh.PeerSender)
-	UnregisterPeerByNodeID(nodeID string)
 	BuildGossipInfo() *mesh.GossipInfo
 	// TriggerGossip enqueues an immediate gossip broadcast through the mesh's
 	// single build path (design §3 R2) — used when a UDP leg's advertise

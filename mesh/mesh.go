@@ -1036,12 +1036,6 @@ func (m *MeshManager) UnregisterPeer(sender PeerSender) {
 	m.criticalCh <- meshEvent{kind: peerUnregister, sender: sender}
 }
 
-// UnregisterPeerByNodeID removes a peer by nodeID (used when re-registering after hello).
-// Blocking send to criticalCh to ensure cleanup is never dropped.
-func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
-	m.criticalCh <- meshEvent{kind: peerUnregisterByNodeID, nodeID: nodeID}
-}
-
 // HandleMeshFrame processes a raw IP packet received from a peer (design §4.5,
 // §5.2):
 //   - IPIP frames (proto=4): decapsulate when the outer dst is our EIP
@@ -2296,12 +2290,6 @@ func (m *MeshManager) criticalWorker() {
 				m.recomputeRoutes()
 				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
 
-			case peerUnregisterByNodeID:
-				m.topology.UnregisterPeerByNodeID(ev.nodeID)
-				m.updateTopologySnapshot()
-				m.recomputeRoutes()
-				util.LogModuleInfo("mesh", "[MESH] peer unregistered by nodeID: %s", ev.nodeID)
-
 			case processGossip:
 				info := ev.gossip
 				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d",
@@ -2390,7 +2378,6 @@ type meshEvent struct {
 	kind   meshEventKind
 	sender PeerSender
 	gossip GossipInfo // for processGossip
-	nodeID string     // for peerUnregisterByNodeID
 }
 
 func (m *MeshManager) broadcastGossip() {

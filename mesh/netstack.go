@@ -1927,6 +1927,49 @@ func (n *Netstack) acceptUDP() {
 // destinations egress via Link NICs and never appear here:
 //   - own subnet / host LAN / other -> TUN (forwarder replies, DNAT returns)
 //   - other mesh subnets            -> drop + log (misroute; defensive)
+// Per-round scheduling limits for the TUN egress scheduler (D26):
+//   - the high-priority queue (ICMP/DNS) is fully drained first;
+//   - the low-priority queue (TCP and other data) is written in bounded
+//     batches so newly arrived control packets are picked up quickly;
+//   - the total queued backlog is capped: anything beyond it stays in the
+//     channel endpoint queue, which provides natural backpressure.
+const (
+	writeLoopLoQuota  = 32
+	writeLoopQueueMax = 2048
+)
+
+// classifyWritePriority reports whether an egress packet must go into the
+// high-priority queue: ICMP and DNS (UDP port 53, either direction). Everything
+// else — in practice TCP data and non-DNS UDP — is low priority. Unknown or
+// malformed packets are treated as high priority so they are never delayed.
+func classifyWritePriority(pkt *stack.PacketBuffer) bool {
+	// Read the IPv4 header straight from the packet's views (no flattening).
+	var hdr [24]byte
+	n := 0
+	for _, s := range pkt.AsSlices() {
+		if n >= len(hdr) {
+			break
+		}
+		n += copy(hdr[n:], s)
+	}
+	if n < 20 || hdr[0]>>4 != 4 {
+		return true
+	}
+	proto := hdr[9]
+	if proto == 1 { // ICMP
+		return true
+	}
+	if proto == 17 { // UDP: DNS gets priority
+		hl := int(hdr[0]&0x0f) * 4
+		if hl >= 20 && n >= hl+4 {
+			srcPort := uint16(hdr[hl])<<8 | uint16(hdr[hl+1])
+			dstPort := uint16(hdr[hl+2])<<8 | uint16(hdr[hl+3])
+			return srcPort == 53 || dstPort == 53
+		}
+	}
+	return false
+}
+
 func (n *Netstack) writeLoop() {
 	defer n.wg.Done()
 
@@ -1944,28 +1987,85 @@ func (n *Netstack) writeLoop() {
 		}
 	}()
 
+	var hi, lo []*stack.PacketBuffer
+
+	// dropAll releases every queued packet (used when the loop exits).
+	dropAll := func() {
+		for _, p := range hi {
+			p.DecRef()
+		}
+		for _, p := range lo {
+			p.DecRef()
+		}
+		hi, lo = nil, nil
+	}
+
+	// flush writes the high-priority queue entirely, then one bounded batch of
+	// low-priority packets. Returns false when the loop must exit.
+	flush := func() bool {
+		for len(hi) > 0 {
+			batch := hi
+			hi = nil
+			for i, p := range batch {
+				if !n.handleWriteLoopPacket(p) {
+					for _, rest := range batch[i+1:] {
+						rest.DecRef()
+					}
+					dropAll()
+					return false
+				}
+			}
+		}
+		if len(lo) > 0 {
+			cnt := len(lo)
+			if cnt > writeLoopLoQuota {
+				cnt = writeLoopLoQuota
+			}
+			batch := lo[:cnt]
+			for i, p := range batch {
+				if !n.handleWriteLoopPacket(p) {
+					for _, rest := range batch[i+1:] {
+						rest.DecRef()
+					}
+					for _, rest := range lo[cnt:] {
+						rest.DecRef()
+					}
+					hi, lo = nil, nil
+					return false
+				}
+			}
+			lo = append(lo[:0], lo[cnt:]...)
+		}
+		return true
+	}
+
 	for {
+		// Block for the next packet, then drain everything already queued.
 		pkt := n.linkEP.ReadContext(ctx)
 		if pkt == nil {
 			util.LogModuleInfo("netstack", "[WRITELOOP] ReadContext returned nil, exiting")
+			dropAll()
 			return
 		}
-
-		// Drain burst (audit item 12): take everything pending in one wake —
-		// no timer, no target count; write as many packets as were queued.
-		// This amortizes the wake/syscall overhead across a busy burst.
-		batch := []*stack.PacketBuffer{pkt}
-		for p := n.linkEP.Read(); p != nil; p = n.linkEP.Read() {
-			batch = append(batch, p)
+		if classifyWritePriority(pkt) {
+			hi = append(hi, pkt)
+		} else {
+			lo = append(lo, pkt)
+		}
+		for len(hi)+len(lo) < writeLoopQueueMax {
+			p := n.linkEP.Read()
+			if p == nil {
+				break
+			}
+			if classifyWritePriority(p) {
+				hi = append(hi, p)
+			} else {
+				lo = append(lo, p)
+			}
 		}
 
-		for i, p := range batch {
-			if !n.handleWriteLoopPacket(p) {
-				for _, rest := range batch[i+1:] {
-					rest.DecRef()
-				}
-				return
-			}
+		if !flush() {
+			return
 		}
 	}
 }

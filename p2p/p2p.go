@@ -471,6 +471,9 @@ type Peer struct {
 	statusAtomic atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
 	// negotiatedVersion is min(local, remote) after the version check (D25).
 	negotiatedVersion atomic.Int32
+	// peerCaps is the remote capability set from hello/gossip (D25). Nil means
+	// the peer predates capability advertisement — treated as "no restriction".
+	peerCaps          atomic.Value // map[string]bool
 	linkNICPtr        atomic.Pointer[mesh.LinkNIC]
 	meshSenderPtr     atomic.Pointer[peerSender]
 	lastSeenNano      atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
@@ -608,6 +611,56 @@ func (p *Peer) resetDataQueues() {
 		p.drrScheduler.deficits = [256]int{}
 		p.drrScheduler.round = 0
 	}
+}
+
+// localCapabilities is the capability set this build advertises in hello and
+// gossip (D25). Optional features are enabled per peer from the intersection
+// of both sides' sets.
+var localCapabilities = []string{mesh.CapabilityStripe}
+
+func (p *Peer) recordCapabilities(list []string) {
+	if len(list) == 0 {
+		return
+	}
+	set := make(map[string]bool, len(list))
+	for _, c := range list {
+		set[c] = true
+	}
+	p.peerCaps.Store(set)
+}
+
+// SupportsCapability reports whether the remote peer advertised name. Peers
+// that never advertise (older builds) are treated as supporting it, matching
+// the behaviour before capability negotiation existed.
+func (p *Peer) SupportsCapability(name string) bool {
+	v := p.peerCaps.Load()
+	if v == nil {
+		return true
+	}
+	return v.(map[string]bool)[name]
+}
+
+// CapabilityList returns the recorded remote capability names (empty when the
+// peer predates capability advertisement).
+func (p *Peer) CapabilityList() []string {
+	v := p.peerCaps.Load()
+	if v == nil {
+		return nil
+	}
+	set := v.(map[string]bool)
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	return out
+}
+
+// GetNegotiatedVersion returns min(local, remote) established at handshake.
+func (p *Peer) GetNegotiatedVersion() int {
+	if v := p.negotiatedVersion.Load(); v > 0 {
+		return int(v)
+	}
+	return P2PProtocolVersion
 }
 
 // ProxyNameSafe returns the proxy name, or empty string if proxy is nil (passive/inbound peer).
@@ -801,6 +854,9 @@ func (m *P2PManager) GetPeerStatus() map[string]map[string]interface{} {
 			"status":   peer.GetStatus(),
 			"nodeId":   peer.NodeID,
 			"lastSeen": time.Unix(0, lastSeenNano),
+			// D25 negotiation results, for admin visibility.
+			"protocolVersion": peer.GetNegotiatedVersion(),
+			"capabilities":    peer.CapabilityList(),
 		}
 	}
 	return result
@@ -1447,6 +1503,14 @@ func (m *P2PManager) attachStripeLeg(nodeID string, seq uint16, stripeID uint32,
 	defer m.mu.Unlock()
 	for _, p := range m.peers {
 		if p.NodeID == nodeID && p.RemoteSeq == seq && p.stripe != nil {
+			// D25: dynamic lanes are a v10 feature advertised via capability.
+			// Rejecting here (rather than after attach) keeps older peers from
+			// receiving lane traffic they cannot demultiplex.
+			if p.GetNegotiatedVersion() < P2PProtocolVersion || !p.SupportsCapability(mesh.CapabilityStripe) {
+				util.LogModuleWarn("p2p", "[STRIPE] peer.ID=%s negotiated version %d caps=%v: lane %d not supported, rejecting attach",
+					p.ID, p.GetNegotiatedVersion(), p.CapabilityList(), stripeID)
+				return false
+			}
 			util.LogModuleInfo("p2p", "[STRIPE] attaching leg stripeID=%d to peer.ID=%s (nodeID=%s seq=%d)",
 				stripeID, p.ID, nodeID, seq)
 			if !p.stripe.attachLane(stripeID, t) {
@@ -1466,6 +1530,12 @@ func (m *P2PManager) attachStripeLeg(nodeID string, seq uint16, stripeID uint32,
 // controller (tasks 2.x); failures are logged and the lane simply doesn't
 // exist, never fatal to the session.
 func (m *P2PManager) dialStripeLane(peer *Peer, p2pDialer dialer.P2PDialer) (uint32, frame.FrameTransport, error) {
+	// D25: only dial extra lanes to peers that negotiated v10 and advertised
+	// the stripe capability.
+	if peer.GetNegotiatedVersion() < P2PProtocolVersion || !peer.SupportsCapability(mesh.CapabilityStripe) {
+		return 0, nil, fmt.Errorf("stripe: peer %s does not support dynamic lanes (version=%d caps=%v)",
+			peer.ID, peer.GetNegotiatedVersion(), peer.CapabilityList())
+	}
 	transport, err := p2pDialer.DialP2P()
 	if err != nil {
 		util.LogModuleInfo("p2p", "[STRIPE] lane dial via proxy %s failed: %v", peer.ProxyNameSafe(), err)
@@ -2067,6 +2137,10 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 		return
 	}
 
+	// Capability advertisement (D25): empty means an older build that did not
+	// advertise anything — SupportsCapability treats that as unrestricted.
+	peer.recordCapabilities(info.Capabilities)
+
 	if peer.NodeID == "" {
 		// First gossip on this connection = establishment (v8 replaces hello).
 		// On version mismatch or missing nodeID this closes the transport; the
@@ -2598,9 +2672,11 @@ func (m *P2PManager) SendMeshGossipToAll(data []byte) {
 // from our first gossip (design §5.3) and to match reverse links.
 func (m *P2PManager) broadcastGossipToPeer(peer *Peer) {
 	info := mesh.GossipInfo{
-		Cmd:             "gossip",
-		ProtocolVersion: P2PProtocolVersion,
-		Seq:             peer.Seq,
+		Cmd:                "gossip",
+		ProtocolVersion:    P2PProtocolVersion,
+		MinProtocolVersion: mesh.P2PProtocolVersionMin,
+		Capabilities:       localCapabilities,
+		Seq:                peer.Seq,
 	}
 
 	// Set friendly name if this is an active (outbound) connection

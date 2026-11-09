@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,8 +30,10 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	defer cancel()
 
 	if _, err := exec.LookPath("resolvectl"); err == nil {
+		orig := resolvectlDNSServers(ctx, ifaceName)
 		if out, err := exec.CommandContext(ctx, "resolvectl", "dns", ifaceName, tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "resolved"
+			saveLinuxDNSState(linuxDNSState{Iface: ifaceName, Method: "resolved", Servers: orig})
 			util.LogModuleInfo("dns-setup", "systemd-resolved dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
@@ -39,8 +42,10 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	}
 
 	if _, err := exec.LookPath("nmcli"); err == nil {
+		orig := nmcliDNSServers(ctx, ifaceName)
 		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", tunIP).CombinedOutput(); err == nil {
 			dnsMethod = "nm"
+			saveLinuxDNSState(linuxDNSState{Iface: ifaceName, Method: "nm", Servers: orig})
 			util.LogModuleInfo("dns-setup", "NetworkManager dns for %s set to %s", ifaceName, tunIP)
 			return nil
 		} else {
@@ -92,18 +97,30 @@ func restoreSystemDNS(ifaceName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	st, hasState := loadLinuxDNSState()
 	switch dnsMethod {
 	case "resolved":
-		if out, err := exec.CommandContext(ctx, "resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
+		if hasState && len(st.Servers) > 0 {
+			args := append([]string{"dns", ifaceName}, st.Servers...)
+			if out, err := exec.CommandContext(ctx, "resolvectl", args...).CombinedOutput(); err != nil {
+				util.LogModuleWarn("dns-setup", "restore resolved dns fail: %v: %s", err, out)
+			} else {
+				util.LogModuleInfo("dns-setup", "systemd-resolved dns for %s restored: %v", ifaceName, st.Servers)
+			}
+		} else if out, err := exec.CommandContext(ctx, "resolvectl", "revert", ifaceName).CombinedOutput(); err != nil {
 			util.LogModuleWarn("dns-setup", "restore resolved dns fail: %v: %s", err, out)
 		} else {
 			util.LogModuleInfo("dns-setup", "systemd-resolved dns for %s reverted", ifaceName)
 		}
 	case "nm":
-		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", "").CombinedOutput(); err != nil {
+		value := ""
+		if hasState {
+			value = strings.Join(st.Servers, " ")
+		}
+		if out, err := exec.CommandContext(ctx, "nmcli", "device", "modify", ifaceName, "ipv4.dns", value).CombinedOutput(); err != nil {
 			util.LogModuleWarn("dns-setup", "restore NetworkManager dns fail: %v: %s", err, out)
 		} else {
-			util.LogModuleInfo("dns-setup", "NetworkManager dns for %s restored", ifaceName)
+			util.LogModuleInfo("dns-setup", "NetworkManager dns for %s restored: %q", ifaceName, value)
 		}
 	case "resolvconf":
 		if dnsBackupPath == "" {
@@ -126,6 +143,7 @@ func restoreSystemDNS(ifaceName string) {
 		util.LogModuleInfo("dns-setup", "resolv.conf dns restored")
 	}
 
+	removeLinuxDNSState()
 	dnsMethod = ""
 	dnsBackup = nil
 	dnsBackupPath = ""

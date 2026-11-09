@@ -16,26 +16,26 @@ var (
 	modsetupapi = windows.NewLazySystemDLL("setupapi.dll")
 	moddnsapi   = windows.NewLazySystemDLL("dnsapi.dll")
 
-	procCreateIpForwardEntry2             = modiphlpapi.NewProc("CreateIpForwardEntry2")
-	procDeleteIpForwardEntry2             = modiphlpapi.NewProc("DeleteIpForwardEntry2")
-	procInitializeIpForwardEntry          = modiphlpapi.NewProc("InitializeIpForwardEntry")
-	procCreateUnicastIpAddressEntry       = modiphlpapi.NewProc("CreateUnicastIpAddressEntry")
-	procDeleteUnicastIpAddressEntry       = modiphlpapi.NewProc("DeleteUnicastIpAddressEntry")
-	procInitializeUnicastIpAddressEntry   = modiphlpapi.NewProc("InitializeUnicastIpAddressEntry")
-	procConvertInterfaceAliasToLuid       = modiphlpapi.NewProc("ConvertInterfaceAliasToLuid")
-	procConvertInterfaceLuidToIndex       = modiphlpapi.NewProc("ConvertInterfaceLuidToIndex")
-	procGetIpForwardTable2                = modiphlpapi.NewProc("GetIpForwardTable2")
-	procFreeMibTable                      = modiphlpapi.NewProc("FreeMibTable")
-	procGetBestRoute2                     = modiphlpapi.NewProc("GetBestRoute2")
-	procGetIpInterfaceEntry               = modiphlpapi.NewProc("GetIpInterfaceEntry")
-	procSetIpInterfaceEntry               = modiphlpapi.NewProc("SetIpInterfaceEntry")
-	procInitializeIpInterfaceEntry        = modiphlpapi.NewProc("InitializeIpInterfaceEntry")
-	procGetIfEntry2                       = modiphlpapi.NewProc("GetIfEntry2")
-	procSetIfEntry                        = modiphlpapi.NewProc("SetIfEntry")
-	procDeleteIpNetEntry2                 = modiphlpapi.NewProc("DeleteIpNetEntry2")
-	procGetIpNetTable2                    = modiphlpapi.NewProc("GetIpNetTable2")
-	procGetUnicastIpAddressTable          = modiphlpapi.NewProc("GetUnicastIpAddressTable")
-	procSetInterfaceDnsSettings            = modiphlpapi.NewProc("SetInterfaceDnsSettings")
+	procCreateIpForwardEntry2           = modiphlpapi.NewProc("CreateIpForwardEntry2")
+	procDeleteIpForwardEntry2           = modiphlpapi.NewProc("DeleteIpForwardEntry2")
+	procInitializeIpForwardEntry        = modiphlpapi.NewProc("InitializeIpForwardEntry")
+	procCreateUnicastIpAddressEntry     = modiphlpapi.NewProc("CreateUnicastIpAddressEntry")
+	procDeleteUnicastIpAddressEntry     = modiphlpapi.NewProc("DeleteUnicastIpAddressEntry")
+	procInitializeUnicastIpAddressEntry = modiphlpapi.NewProc("InitializeUnicastIpAddressEntry")
+	procConvertInterfaceAliasToLuid     = modiphlpapi.NewProc("ConvertInterfaceAliasToLuid")
+	procConvertInterfaceLuidToIndex     = modiphlpapi.NewProc("ConvertInterfaceLuidToIndex")
+	procGetIpForwardTable2              = modiphlpapi.NewProc("GetIpForwardTable2")
+	procFreeMibTable                    = modiphlpapi.NewProc("FreeMibTable")
+	procGetBestRoute2                   = modiphlpapi.NewProc("GetBestRoute2")
+	procGetIpInterfaceEntry             = modiphlpapi.NewProc("GetIpInterfaceEntry")
+	procSetIpInterfaceEntry             = modiphlpapi.NewProc("SetIpInterfaceEntry")
+	procInitializeIpInterfaceEntry      = modiphlpapi.NewProc("InitializeIpInterfaceEntry")
+	procGetIfEntry2                     = modiphlpapi.NewProc("GetIfEntry2")
+	procSetIfEntry                      = modiphlpapi.NewProc("SetIfEntry")
+	procDeleteIpNetEntry2               = modiphlpapi.NewProc("DeleteIpNetEntry2")
+	procGetIpNetTable2                  = modiphlpapi.NewProc("GetIpNetTable2")
+	procGetUnicastIpAddressTable        = modiphlpapi.NewProc("GetUnicastIpAddressTable")
+	procSetInterfaceDnsSettings         = modiphlpapi.NewProc("SetInterfaceDnsSettings")
 
 	procSetupDiGetClassDevsW              = modsetupapi.NewProc("SetupDiGetClassDevsW")
 	procSetupDiEnumDeviceInfo             = modsetupapi.NewProc("SetupDiEnumDeviceInfo")
@@ -44,7 +44,7 @@ var (
 	procSetupDiGetDeviceRegistryPropertyW = modsetupapi.NewProc("SetupDiGetDeviceRegistryPropertyW")
 	procSetupDiDestroyDeviceInfoList      = modsetupapi.NewProc("SetupDiDestroyDeviceInfoList")
 
-	procDnsFlushResolverCache             = moddnsapi.NewProc("DnsFlushResolverCache")
+	procDnsFlushResolverCache = moddnsapi.NewProc("DnsFlushResolverCache")
 )
 
 // interfaceDnsSettings represents the INTERFACE_DNS_SETTINGS structure for SetInterfaceDnsSettings.
@@ -698,6 +698,28 @@ func removeAdapterAPI(name string) error {
 			continue
 		}
 
+		// Match the adapter by its friendly name: matching only "WINTUN"
+		// would remove the first Wintun device, which may belong to another
+		// VPN or deployment (D19).
+		var friendlyBuf [256]uint16
+		const spdrpFriendlyName = 0x0C
+		ret, _, _ = procSetupDiGetDeviceRegistryPropertyW.Call(
+			devInfoSet,
+			uintptr(unsafe.Pointer(&devInfo[0])),
+			spdrpFriendlyName,
+			0,
+			uintptr(unsafe.Pointer(&friendlyBuf[0])),
+			uintptr(len(friendlyBuf))*2,
+			0,
+		)
+		if ret == 0 {
+			continue
+		}
+		friendly := windows.UTF16ToString(friendlyBuf[:])
+		if !strings.EqualFold(friendly, name) {
+			continue
+		}
+
 		const DIF_REMOVE = 5
 		ret, _, _ = procSetupDiCallClassInstaller.Call(
 			uintptr(DIF_REMOVE),
@@ -715,7 +737,7 @@ func removeAdapterAPI(name string) error {
 
 // deleteResidualRoutesAPI scans the route table and deletes routes matching
 // the given destination prefixes and gateway candidates.
-func deleteResidualRoutesAPI() {
+func deleteResidualRoutesAPI(luid uint64) {
 	targetDests := []struct {
 		ip        net.IP
 		prefixLen uint8
@@ -751,6 +773,11 @@ func deleteResidualRoutesAPI() {
 		var row mibIpForwardRow2
 		copy(row[:], (*[104]byte)(unsafe.Pointer(rowPtr))[:])
 
+		// Scope to our adapter: never delete another NIC's on-link default
+		// route (D19). MIB_IPFORWARD_ROW2 starts with InterfaceLuid.
+		if luid != 0 && *(*uint64)(unsafe.Pointer(rowPtr)) != luid {
+			continue
+		}
 		family := *(*uint16)(unsafe.Pointer(rowPtr + 12))
 		if family != windows.AF_INET {
 			continue

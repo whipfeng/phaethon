@@ -99,6 +99,14 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			if err := setWeakHostReceiveAPI(r.DefaultIfaceName, true); err != nil {
 				util.LogModuleWarn("route", "enable physical weakhostreceive fail: %v", err)
 			}
+			// Persist originals so a crash can restore them (D19).
+			recvCopy := r.originalPhysicalWeakHostReceive
+			saveWindowsTunState(windowsTunState{
+				PhysicalIface: r.DefaultIfaceName,
+				TunIP:         tunIP,
+				DNSServers:    append([]string(nil), r.OriginalDNSServers...),
+				WeakHostRecv:  &recvCopy,
+			})
 		}
 	}
 
@@ -293,8 +301,17 @@ func bestRouteInterface(dst net.IP) (uint64, uint32) {
 }
 
 func (r *RouteManager) platformTeardown() {
+	// Restore the physical interface weak-host state first: it must not depend
+	// on the TUN adapter still existing (D19).
+	if r.DefaultIfaceName != "" {
+		if err := setWeakHostReceiveAPI(r.DefaultIfaceName, r.originalPhysicalWeakHostReceive); err != nil {
+			util.LogModuleWarn("route", "restore physical weakhostreceive fail: %v", err)
+		}
+	}
+
 	luid, index, err := getInterfaceLUID(r.devName)
 	if err != nil {
+		removeWindowsTunState()
 		return
 	}
 
@@ -319,16 +336,10 @@ func (r *RouteManager) platformTeardown() {
 	// Delete interface IP.
 	_ = clearInterfaceIPAPI(luid, index)
 
-	// Restore physical interface weak-host receive to its original state.
-	if r.DefaultIfaceName != "" {
-		if err := setWeakHostReceiveAPI(r.DefaultIfaceName, r.originalPhysicalWeakHostReceive); err != nil {
-			util.LogModuleWarn("route", "restore physical weakhostreceive fail: %v", err)
-		}
-	}
-
 	// Disable weak-host on the TUN adapter for cleanliness (best effort).
 	_ = setWeakHostSendAPI(r.devName, false)
 	_ = setWeakHostReceiveAPI(r.devName, false)
+	removeWindowsTunState()
 }
 
 // ensureWeakHostEnabled enables and verifies weak-host send/receive on the

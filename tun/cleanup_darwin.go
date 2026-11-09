@@ -16,6 +16,12 @@ import (
 // phaethon are never modified. tunIP is the expected TUN address (mesh
 // subnet+2); nil skips the interface scan entirely.
 func CleanupResidual(tunIP net.IP) {
+	// Restore persisted state first: DNS and preempted third-party routes are
+	// independent of the interface scan and must run even when tunIP is
+	// unavailable (D20).
+	restoreDarwinDNSBackup()
+	restorePersistedForeignSplits()
+
 	target := tunIP.To4()
 	if target == nil {
 		util.LogModuleInfo("cleanup", "skip interface scan: no tunIP")

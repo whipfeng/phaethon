@@ -33,19 +33,19 @@ type splitRouteSnapshot struct {
 // Linux:    netlink
 // Darwin:   route exec (industry standard for macOS)
 type RouteManager struct {
-	devName         string
-	guid            string
-	mu              sync.Mutex
-	applied         bool
-	originalGateway net.IP
-	excludeIPs      []string
-	appliedExcludes []string
+	devName               string
+	guid                  string
+	mu                    sync.Mutex
+	applied               bool
+	originalGateway       net.IP
+	excludeIPs            []string
+	appliedExcludes       []string
 	appliedIfscopeDefault bool // darwin: scoped physical default added alongside 0/1+128/1
 	// foreignSnapshots holds split-tunnel routes preempted at setup and restored
 	// at teardown. darwin only; always empty elsewhere.
 	foreignSnapshots []splitRouteSnapshot
-	tunIP           string
-	bypassGateway   bool
+	tunIP            string
+	bypassGateway    bool
 
 	// DefaultIfaceName is the original default interface name (e.g. "eth0", "en0").
 	// Used for DIRECT connection socket binding to bypass TUN routes.
@@ -172,6 +172,16 @@ func (r *RouteManager) Setup(tunIP string, prefixLen int) error {
 	}
 	r.applied = true
 	return nil
+}
+
+// TeardownForce tears down platform state even when Setup did not complete
+// (D8 rollback). Individual platform teardowns tolerate missing entries.
+func (r *RouteManager) TeardownForce() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanupExclusions()
+	r.platformTeardown()
+	r.applied = false
 }
 
 // Teardown removes the routes added by Setup.

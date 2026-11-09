@@ -22,6 +22,10 @@ import (
 // interface match. tunIP is the expected TUN address (mesh subnet+2); nil
 // skips the interface scan but still restores system state.
 func CleanupResidual(tunIP net.IP) {
+	// Restore resolved/nmcli DNS recorded before TUN started (D20). The
+	// resolv.conf path has its own .phaethon.bak recovery below.
+	restorePersistedLinuxDNS()
+
 	// 1. Find the tun* interface holding tunIP and clear only that one.
 	target := tunIP.To4()
 	if target != nil {

@@ -887,7 +887,7 @@ func (m *P2PManager) notifyStatusChange() {
 // data so they are not delayed behind bulk transfers. Exits on write error or stop.
 // Data frames are coalesced into batches for efficient transport.
 func (m *P2PManager) peerWriteLoop(peer *Peer) {
-	const maxBatchFrames = 256 // Maximum frames per batch (large enough to fill an h_tunnel/HTTP batch)
+	const maxBatchFrames = 64 // Maximum frames per batch
 
 	// [P2P-QDEPTH] diagnostic: slow writes = carrier backpressure (downstream
 	// of this process); deep queue with fast writes = backlog inside this process.
@@ -1109,7 +1109,7 @@ dataDone:
 func (m *P2PManager) drrLoop(peer *Peer) {
 	for {
 		// Batch dequeue: get up to 64 packets in one iteration
-		batch := peer.drrScheduler.NextBatch(256, peer.stopCh)
+		batch := peer.drrScheduler.NextBatch(64, peer.stopCh)
 		if len(batch) == 0 {
 			return // stopped
 		}

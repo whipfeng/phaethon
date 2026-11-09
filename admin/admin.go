@@ -2296,13 +2296,11 @@ func (s *AdminServer) findProxyReferences(name string) ([]proxyReference, error)
 	}
 
 	for _, rule := range rules {
-		rs := strings.SplitN(rule, ",", 3)
-		var target string
-		switch {
-		case len(rs) >= 3 && (rs[0] == "DOMAIN-SUFFIX" || rs[0] == "IP-CIDR"):
-			target = strings.Trim(rs[2], `"'`)
-		case len(rs) >= 2 && rs[0] == "MATCH":
-			target = strings.Trim(rs[1], `"'`)
+		// D15: reference checks use the structured target/enabled state instead
+		// of string splitting and the "//" prefix.
+		target, enabled, ok := db.ParseRuleForReference(rule)
+		if !ok || !enabled {
+			continue
 		}
 		if target == name {
 			refs = append(refs, proxyReference{Kind: "rule", Name: rule})
@@ -2381,13 +2379,11 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 	}
 
 	for _, rule := range rules {
-		rs := strings.SplitN(rule, ",", 3)
-		var target string
-		switch {
-		case len(rs) >= 3 && (rs[0] == "DOMAIN-SUFFIX" || rs[0] == "IP-CIDR"):
-			target = strings.Trim(rs[2], `"'`)
-		case len(rs) >= 2 && rs[0] == "MATCH":
-			target = strings.Trim(rs[1], `"'`)
+		// D15: reference checks use the structured target/enabled state instead
+		// of string splitting and the "//" prefix.
+		target, enabled, ok := db.ParseRuleForReference(rule)
+		if !ok || !enabled {
+			continue
 		}
 		if target == name {
 			refs = append(refs, proxyReference{Kind: "rule", Name: rule})
@@ -2679,6 +2675,11 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "rule required", http.StatusBadRequest)
 			return
 		}
+		// 保存前严格校验（D15）：非法 CIDR / 未知类型 / 缺字段直接拒绝。
+		if err := db.ValidateRuleString(body.Rule); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// Convert after_id: nil = append, -1 = insert at beginning (use 0 as sentinel), >0 = insert after ID
 		var dbAfterID *uint64
@@ -2722,6 +2723,11 @@ func (s *AdminServer) apiRules(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Rule == "" {
 			httpError(w, "rule required", http.StatusBadRequest)
+			return
+		}
+		// 保存前严格校验（D15）。
+		if err := db.ValidateRuleString(body.Rule); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 

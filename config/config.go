@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 	"regexp"
@@ -1084,6 +1083,10 @@ type Rule struct {
 	ProxyName   string     // 目标代理名称
 	MappingName string     // 可选映射名称
 	TimeRange   *TimeRange // 可选时间范围
+	// Enabled is the structured form of the old "//" comment-prefix convention
+	// (D15). Parsing a commented rule yields Enabled=false; the prefix is no
+	// longer the source of truth for reference checks.
+	Enabled bool
 }
 
 func (tr TimeRange) Matches(nowMin int) bool {
@@ -1164,7 +1167,9 @@ func ParseProxyName(proxyName string) (name, mapping string, tr TimeRange) {
 	return remaining, mapping, tr
 }
 
-// DomainSuffixMatcher
+// DomainSuffixMatcher matches a host equal to the suffix or ending with
+// ".suffix". Compared case-insensitively on a label boundary, so
+// "evilexample.com" does NOT match the suffix "example.com" (D15).
 type DomainSuffixMatcher struct {
 	proxyName    string
 	domainSuffix string
@@ -1174,13 +1179,17 @@ type DomainSuffixMatcher struct {
 func NewDomainSuffixMatcher(name, mapping, domainSuffix string) *DomainSuffixMatcher {
 	return &DomainSuffixMatcher{
 		proxyName:    name,
-		domainSuffix: domainSuffix,
+		domainSuffix: strings.ToLower(strings.TrimSpace(domainSuffix)),
 		mappingName:  mapping,
 	}
 }
 
 func (m *DomainSuffixMatcher) Match(req *AddrRequest, mapping *Mapping) string {
-	if strings.HasSuffix(req.DstAddr, m.domainSuffix) {
+	host := strings.ToLower(req.DstAddr)
+	if m.domainSuffix == "" {
+		return ""
+	}
+	if host == m.domainSuffix || strings.HasSuffix(host, "."+m.domainSuffix) {
 		if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
 			return m.proxyName
 		}
@@ -1188,67 +1197,64 @@ func (m *DomainSuffixMatcher) Match(req *AddrRequest, mapping *Mapping) string {
 	return ""
 }
 
-// IpCidrMatcher
-type IpCidrMatcher struct {
+// DomainMatcher matches the host exactly (case-insensitive). DOMAIN rules were
+// previously unsupported and silently dropped (D15).
+type DomainMatcher struct {
 	proxyName   string
-	network     uint32
-	mask        uint32
+	domain      string
 	mappingName string
 }
 
-func NewIpCidMatcher(name, mapping, cidr string) *IpCidrMatcher {
-	cidrParts := strings.SplitN(cidr, "/", 2)
-	if len(cidrParts) != 2 {
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
-	}
-	ipStr := cidrParts[0]
-	prefixLen, err := strconv.Atoi(cidrParts[1])
-	if err != nil || prefixLen < 0 || prefixLen > 32 {
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
-	}
-
-	mask := uint32(0xffffffff) << (32 - prefixLen)
-	network := ip2Uint32(ipStr)
-	if network == 0 && ipStr != "0.0.0.0" {
-		return &IpCidrMatcher{proxyName: name, network: 0, mask: 0xffffffff, mappingName: mapping}
-	}
-
-	return &IpCidrMatcher{
+func NewDomainMatcher(name, mapping, domain string) *DomainMatcher {
+	return &DomainMatcher{
 		proxyName:   name,
-		network:     network,
-		mask:        mask,
+		domain:      strings.ToLower(strings.TrimSpace(domain)),
 		mappingName: mapping,
 	}
 }
 
-func (m *IpCidrMatcher) Match(req *AddrRequest, mapping *Mapping) string {
-	ip := net.ParseIP(req.DstAddr)
-	if ip == nil {
+func (m *DomainMatcher) Match(req *AddrRequest, mapping *Mapping) string {
+	if m.domain == "" || !strings.EqualFold(req.DstAddr, m.domain) {
 		return ""
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return ""
-	}
-	ipInt := binary.BigEndian.Uint32(ip4)
-	if (ipInt & m.mask) == (m.network & m.mask) {
-		if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
-			return m.proxyName
-		}
+	if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
+		return m.proxyName
 	}
 	return ""
 }
 
-func ip2Uint32(ipStr string) uint32 {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return 0
+func (m *DomainMatcher) ProxyName() string   { return m.proxyName }
+func (m *DomainMatcher) MappingName() string { return m.mappingName }
+
+// IpCidrMatcher matches a destination IP inside a CIDR. Invalid CIDRs (and
+// non-IP destinations) never match — the old behaviour silently degraded a
+// malformed rule into something that matched unrelated traffic (D15).
+type IpCidrMatcher struct {
+	proxyName   string
+	net         *net.IPNet
+	mappingName string
+}
+
+func NewIpCidMatcher(name, mapping, cidr string) *IpCidrMatcher {
+	_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return &IpCidrMatcher{proxyName: name, mappingName: mapping}
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return 0
+	return &IpCidrMatcher{proxyName: name, net: ipnet, mappingName: mapping}
+}
+
+func (m *IpCidrMatcher) Match(req *AddrRequest, mapping *Mapping) string {
+	if m.net == nil {
+		return ""
 	}
-	return binary.BigEndian.Uint32(ip4)
+	ip := net.ParseIP(req.DstAddr)
+	if ip == nil || !m.net.Contains(ip) {
+		return ""
+	}
+	if m.mappingName == "" || (mapping != nil && m.mappingName == mapping.Name) {
+		return m.proxyName
+	}
+	return ""
 }
 
 // MatchAllMatcher (MATCH rule)

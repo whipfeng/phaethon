@@ -296,7 +296,7 @@ func (n *Netstack) CreateLinkNIC(sender PeerSender, nodeID string, peerSubnet *n
 	linkNIC := NewLinkNIC(nicID, sender, nodeID, peerSubnet)
 
 	if err := n.ns.CreateNIC(nicID, linkNIC); err != nil {
-		return nil, fmt.Errorf("failed to create NIC %d: %w", nicID, err)
+		return nil, fmt.Errorf("failed to create NIC %d: %v", nicID, err)
 	}
 	n.ns.SetNICName(nicID, fmt.Sprintf("link_%s", nodeID))
 
@@ -323,7 +323,7 @@ func (n *Netstack) DeleteLinkNIC(linkNIC *LinkNIC) error {
 
 	// Remove from netstack
 	if err := n.ns.RemoveNIC(linkNIC.nicID); err != nil {
-		return fmt.Errorf("failed to remove NIC %d: %w", linkNIC.nicID, err)
+		return fmt.Errorf("failed to remove NIC %d: %v", linkNIC.nicID, err)
 	}
 
 	util.LogModuleInfo("netstack", "[NETSTACK] removed Link NIC %d for peer %s", linkNIC.nicID, linkNIC.peerNodeID)

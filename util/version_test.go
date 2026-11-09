@@ -11,7 +11,9 @@ import (
 )
 
 func TestVersionNotifier_BumpVersionBroadcastsUpdate(t *testing.T) {
-	n := NewVersionNotifier()
+	n := NewVersionNotifier(func() map[string]interface{} {
+		return map[string]interface{}{}
+	})
 
 	// Capture two SSE connections.
 	rec1 := httptest.NewRecorder()
@@ -26,10 +28,7 @@ func TestVersionNotifier_BumpVersionBroadcastsUpdate(t *testing.T) {
 	n.Subscribe(w2)
 
 	// Bump a version and broadcast.
-	v := n.BumpVersion("config")
-	if v != 1 {
-		t.Fatalf("expected version 1, got %d", v)
-	}
+	n.BumpVersion("config", 1)
 
 	// Give the goroutine-less broadcast a moment to write.
 	time.Sleep(50 * time.Millisecond)
@@ -44,17 +43,14 @@ func TestVersionNotifier_BumpVersionBroadcastsUpdate(t *testing.T) {
 		if !strings.Contains(got, wantData) {
 			t.Fatalf("connection %d body missing config version:\n%s", i+1, got)
 		}
-		if !strings.Contains(got, `"_bootTime":`) {
-			t.Fatalf("connection %d body missing _bootTime:\n%s", i+1, got)
-		}
 	}
 }
 
 func TestVersionNotifier_SubscribeSendsSnapshot(t *testing.T) {
-	n := NewVersionNotifier()
-	n.BumpVersion("product")
-	n.BumpVersion("product")
-	n.BumpVersion("order")
+	// Versions now live in the database; the notifier renders whatever the
+	// supplied getter returns for heartbeat snapshots.
+	versions := map[string]interface{}{"product": 2, "order": 1, "_bootTime": 1.0}
+	n := NewVersionNotifier(func() map[string]interface{} { return versions })
 
 	rec := httptest.NewRecorder()
 	w := NewSSEWriter(rec)
@@ -63,6 +59,9 @@ func TestVersionNotifier_SubscribeSendsSnapshot(t *testing.T) {
 	}
 
 	n.Subscribe(w)
+	n.StartHeartbeat(10 * time.Millisecond)
+	defer n.StopHeartbeat()
+	time.Sleep(40 * time.Millisecond)
 
 	got := rec.Body.String()
 	if !strings.Contains(got, "event: heartbeat") {
@@ -77,7 +76,7 @@ func TestVersionNotifier_SubscribeSendsSnapshot(t *testing.T) {
 }
 
 func TestVersionNotifier_UnsubscribeRemovesConnection(t *testing.T) {
-	n := NewVersionNotifier()
+	n := NewVersionNotifier(func() map[string]interface{} { return map[string]interface{}{} })
 	rec := httptest.NewRecorder()
 	w := NewSSEWriter(rec)
 	if w == nil {
@@ -126,7 +125,8 @@ func TestSSEWriter_WriteEventFailsWhenClosed(t *testing.T) {
 }
 
 func TestVersionNotifier_HeartbeatBroadcastsSnapshot(t *testing.T) {
-	n := NewVersionNotifier()
+	versions := map[string]interface{}{"product": 1}
+	n := NewVersionNotifier(func() map[string]interface{} { return versions })
 	rec := httptest.NewRecorder()
 	w := NewSSEWriter(rec)
 	if w == nil {
@@ -134,7 +134,7 @@ func TestVersionNotifier_HeartbeatBroadcastsSnapshot(t *testing.T) {
 	}
 
 	n.Subscribe(w)
-	n.BumpVersion("product")
+	n.BumpVersion("product", 1)
 
 	// Reset body and start a short heartbeat.
 	rec.Body.Reset()
@@ -195,7 +195,7 @@ func TestSSEWriter_WriteEventReturnsFalseOnError(t *testing.T) {
 }
 
 func TestVersionNotifier_DeadConnectionRemovedDuringBroadcast(t *testing.T) {
-	n := NewVersionNotifier()
+	n := NewVersionNotifier(func() map[string]interface{} { return map[string]interface{}{} })
 	good := httptest.NewRecorder()
 	bad := &brokenWriter{headers: make(http.Header)}
 
@@ -205,7 +205,7 @@ func TestVersionNotifier_DeadConnectionRemovedDuringBroadcast(t *testing.T) {
 	n.Subscribe(wGood)
 	n.Subscribe(wBad)
 
-	n.BumpVersion("x")
+	n.BumpVersion("x", 1)
 
 	n.mu.RLock()
 	_, badStillThere := n.connections[wBad]

@@ -2,10 +2,12 @@ package tun
 
 import (
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"phaethon/db"
 	"phaethon/mesh"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -127,10 +129,24 @@ func TestUDPForwarderRegistered(t *testing.T) {
 	}
 }
 
-// TestEngineStartStop exercises Engine lifecycle without requiring admin/TUN device.
+// initTestDB gives NewManager a real (empty) database: it loads TUN config and
+// proxies at construction, so an uninitialised global DB would panic.
+func initTestDB(t *testing.T) {
+	t.Helper()
+	if db.IsInitialized() {
+		return
+	}
+	if err := db.Init(filepath.Join(t.TempDir(), "tun-test.db")); err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+}
+
+// TestEngineStartStop exercises Manager lifecycle without requiring admin/TUN device.
 // It verifies that Start() fails gracefully when not admin (expected on CI).
 func TestEngineStartStop(t *testing.T) {
-	engine := NewEngine()
+	initTestDB(t)
+	engine := NewManager()
 
 	err := engine.Start()
 	if err == nil {
@@ -146,7 +162,8 @@ func TestEngineStartStop(t *testing.T) {
 
 // TestEngineUDPWithRuleConfig tests engine creation and basic state.
 func TestEngineUDPWithRuleConfig(t *testing.T) {
-	engine := NewEngine()
+	initTestDB(t)
+	engine := NewManager()
 
 	// Verify engine creation doesn't panic
 	if engine.netstack != nil && engine.netstack.IsRunning() {

@@ -2494,6 +2494,8 @@ func (m *MeshManager) broadcastGossip() {
 	for _, c := range bestClaims {
 		nodeIDToClaim[c.nodeID] = c
 	}
+	// Union of every claim copy per node (see mergedNeighborLinks).
+	merged := mergedNeighborLinks(allPeers)
 	validatedClaims := make(map[string]globalClaimEntry, len(bestClaims))
 	for subnet, claim := range bestClaims {
 		if claim.hop == 0 {
@@ -2505,8 +2507,7 @@ func (m *MeshManager) broadcastGossip() {
 		// Validate each link in each neighbor
 		var validatedNeighbors []GossipNeighbor
 		for _, neighbor := range claim.neighbors {
-			neighborClaim, ok := nodeIDToClaim[neighbor.NodeID]
-			if !ok {
+			if _, ok := nodeIDToClaim[neighbor.NodeID]; !ok {
 				// Neighbor doesn't exist, skip all its links
 				continue
 			}
@@ -2514,25 +2515,10 @@ func (m *MeshManager) broadcastGossip() {
 			// Check each link for matching reverse
 			var validatedLinks []GossipLink
 			for _, gossipLink := range neighbor.Links {
-				// A link is trusted when both sides declare an edge to each
-				// other. Exact seq match is preferred; a differing seq pair
-				// (reconnect / stale relayed incarnation) must not delete an
-				// otherwise bidirectional edge — that silently removed healthy
-				// routes (e.g. qg↔jf) from the forwarding graph.
-				for _, reverseNeighbor := range neighborClaim.neighbors {
-					if reverseNeighbor.NodeID == claim.nodeID {
-						exact := false
-						for _, reverseLink := range reverseNeighbor.Links {
-							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
-								exact = true
-								break
-							}
-						}
-						if exact || len(reverseNeighbor.Links) > 0 {
-							validatedLinks = append(validatedLinks, gossipLink)
-						}
-						break
-					}
+				// Both sides must declare an edge to each other; exact seq
+				// equality is preferred but not required (see mergedNeighborLinks).
+				if linkDeclared(merged, neighbor.NodeID, claim.nodeID) {
+					validatedLinks = append(validatedLinks, gossipLink)
 				}
 			}
 
@@ -3269,6 +3255,8 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 	for _, c := range best {
 		nodeIDToClaim[c.nodeID] = c
 	}
+	// Union of every claim copy per node (see mergedNeighborLinks).
+	merged := mergedNeighborLinks(allPeers)
 
 	// Link-level mutual validation: keep only links whose reverse exists.
 	result := make(map[string]validatedClaim, len(best))
@@ -3279,35 +3267,21 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 		}
 		var validatedNeighbors []GossipNeighbor
 		for _, neighbor := range claim.neighbors {
-			neighborClaim, ok := nodeIDToClaim[neighbor.NodeID]
-			if !ok {
+			if _, ok := nodeIDToClaim[neighbor.NodeID]; !ok {
 				continue
 			}
 			var validatedLinks []GossipLink
 			for _, gossipLink := range neighbor.Links {
-				for _, reverseNeighbor := range neighborClaim.neighbors {
-					if reverseNeighbor.NodeID == claim.nodeID {
-						// A link is trusted when BOTH sides declare an edge to each
-						// other (anti-loop / anti-stale requirement). Exact
-						// (localSeq,remoteSeq) equality is preferred, but it must
-						// not be required: seq pairs change on reconnect, and a
-						// relayed claim can carry the previous incarnation. Strict
-						// equality here silently deleted healthy edges (e.g.
-						// qg↔jf), which then removed the only good route to jf
-						// from the Dijkstra graph and pushed traffic onto a
-						// 200ms+ jittery link.
-						exact := false
-						for _, reverseLink := range reverseNeighbor.Links {
-							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
-								exact = true
-								break
-							}
-						}
-						if exact || len(reverseNeighbor.Links) > 0 {
-							validatedLinks = append(validatedLinks, gossipLink)
-						}
-						break
-					}
+				// A link is trusted when BOTH sides declare an edge to each
+				// other (anti-loop / anti-stale requirement). Exact
+				// (localSeq,remoteSeq) equality is preferred, but it must not be
+				// required: seq pairs change on reconnect, and a relayed claim
+				// can carry the previous incarnation. Checking only the single
+				// best copy here silently deleted healthy edges (e.g. qg↔jf),
+				// which then removed the only good route to jf from the
+				// Dijkstra graph and pushed traffic onto a 200ms+ jittery link.
+				if linkDeclared(merged, neighbor.NodeID, claim.nodeID) {
+					validatedLinks = append(validatedLinks, gossipLink)
 				}
 			}
 			if len(validatedLinks) > 0 {
@@ -3630,6 +3604,52 @@ func resolvePeerLinkNIC(t *Topology, nextHop string) *LinkNIC {
 		}
 	}
 	return nil
+}
+
+// mergedNeighborLinks unions the neighbor links declared by every claim copy we
+// hold for each node: nodeID -> neighborNodeID -> (localSeq,remoteSeq) -> link.
+//
+// The lowest-hop claim copy used by bestClaims can be partial: a relayed copy
+// may have been formed before the owner learned a new peer, so it can be
+// missing a neighbor that another copy still carries. Validating against only
+// that one copy deleted healthy edges (qg↔jf), removed the good route from the
+// Dijkstra graph and pushed traffic onto a 200ms+ link. Unioning the copies
+// keeps the anti-loop requirement (both sides must declare each other) without
+// depending on which relay happened to be first.
+func mergedNeighborLinks(allPeers []*PeerInfo) map[string]map[string]map[[2]uint16]GossipLink {
+	out := make(map[string]map[string]map[[2]uint16]GossipLink)
+	for _, p := range allPeers {
+		if p.Sender == nil {
+			continue
+		}
+		for _, cs := range p.ClaimedSubnets {
+			byNode := out[cs.NodeID]
+			if byNode == nil {
+				byNode = make(map[string]map[[2]uint16]GossipLink)
+				out[cs.NodeID] = byNode
+			}
+			for _, nb := range cs.Neighbors {
+				links := byNode[nb.NodeID]
+				if links == nil {
+					links = make(map[[2]uint16]GossipLink)
+					byNode[nb.NodeID] = links
+				}
+				for _, l := range nb.Links {
+					links[[2]uint16{l.LocalSeq, l.RemoteSeq}] = l
+				}
+			}
+		}
+	}
+	return out
+}
+
+// linkEnqueuedOK reports whether owner's claim declares a link to peer.
+func linkDeclared(merged map[string]map[string]map[[2]uint16]GossipLink, owner, peer string) bool {
+	byNode := merged[owner]
+	if byNode == nil {
+		return false
+	}
+	return len(byNode[peer]) > 0
 }
 
 // edgeKey returns a canonical key for an edge between two nodes (sorted order).

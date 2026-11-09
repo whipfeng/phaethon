@@ -225,6 +225,22 @@ func NewTopology() *Topology {
 func (t *Topology) RegisterPeer(sender PeerSender) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Drop any stale entry for the same node that is no longer backed by this
+	// sender (reconnect before the old entry was unregistered). Leftovers keep
+	// advertising their last known claims — including neighbor lists — and can
+	// shadow live data in bestClaims, which shows up as permanently missing
+	// topology edges until a restart. nodeID is empty until the first gossip,
+	// so only dedupe when it is known.
+	if id := sender.GetNodeID(); id != "" {
+		kept := t.peers[:0]
+		for _, p := range t.peers {
+			if p.Sender != sender && p.NodeID() == id {
+				continue
+			}
+			kept = append(kept, p)
+		}
+		t.peers = kept
+	}
 	t.peers = append(t.peers, &PeerInfo{
 		Sender:   sender,
 		LastSeen: time.Now(),
@@ -243,16 +259,20 @@ func (t *Topology) UnregisterPeer(sender PeerSender) {
 	}
 }
 
-// UnregisterPeerByNodeID removes a peer entry by nodeID.
+// UnregisterPeerByNodeID removes every peer entry with the given nodeID.
+// Removing only the first match would leave duplicates behind after a
+// reconnect, and those ghosts keep contributing claims to bestClaims.
 func (t *Topology) UnregisterPeerByNodeID(nodeID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for i, p := range t.peers {
+	kept := t.peers[:0]
+	for _, p := range t.peers {
 		if p.NodeID() == nodeID {
-			t.peers = append(t.peers[:i], t.peers[i+1:]...)
-			return
+			continue
 		}
+		kept = append(kept, p)
 	}
+	t.peers = kept
 }
 
 // UpdateGossip updates a peer's gossip data in-place.
@@ -262,9 +282,11 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 	defer t.mu.Unlock()
 
 	var peer *PeerInfo
-	for _, p := range t.peers {
+	idx := -1
+	for i, p := range t.peers {
 		if p.Sender == sender {
 			peer = p
+			idx = i
 			break
 		}
 	}
@@ -346,14 +368,24 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		changed = true
 	}
 
-	// Update in-place
-	peer.Subnet = subnet
-	peer.SubnetStr = subnetStr
-	peer.DomainSuffixes = domainSuffixes
-	peer.Routes = routes
-	peer.ClaimedSubnets = claimedSubnets
-	// TopologyEdges removed - topology expressed via ClaimedSubnets.Neighbors
-	peer.LastSeen = time.Now()
+	// Publish a NEW PeerInfo instead of mutating the existing one in place.
+	//
+	// Readers (broadcastGossip via the atomic topology snapshot, GetFullTopology,
+	// GetPeer) hold *PeerInfo pointers and read fields WITHOUT holding t.mu. With
+	// in-place mutation they could observe a half-updated struct — most dangerous
+	// for ClaimedSubnets, where a torn/stale slice header yields the previous
+	// gossip's neighbor list (e.g. a link that was just added is missing from the
+	// claims we forward). Replacing the pointer makes every read see a complete,
+	// immutable version.
+	t.peers[idx] = &PeerInfo{
+		Sender:         peer.Sender,
+		Subnet:         subnet,
+		SubnetStr:      subnetStr,
+		DomainSuffixes: domainSuffixes,
+		Routes:         routes,
+		ClaimedSubnets: claimedSubnets,
+		LastSeen:       time.Now(),
+	}
 
 	return changed
 }

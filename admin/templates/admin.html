@@ -151,29 +151,62 @@
         return data;
     }
 
+    // Full public keys are kept here so the copy button can use the exact text
+    // without stuffing it into an inline onclick attribute.
+    let sshKeysCache = [];
+
     function renderSSHKeys(keys) {
         const tbody = document.getElementById('ssh-keys-tbody');
         const L = (k, fb) => (typeof i18n !== 'undefined' ? i18n.t(k, fb) : fb);
+        sshKeysCache = keys || [];
         if (!keys.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted">（无）</td></tr>';
             return;
         }
-        tbody.innerHTML = keys.map(k => {
+        tbody.innerHTML = keys.map((k, i) => {
             const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
             const name = esc(k.name);
             const fp = esc(k.fingerprint);
-            const parts = (k.pubkey || '').split(/\s+/);
-            const keyType = esc(parts[0] || '');
-            const keyBody = esc((parts[1] || '').slice(0, 40));
+            const pubkey = k.pubkey || '';
             const created = k.created_at ? new Date(k.created_at).toLocaleString() : '';
+            const copyLabel = L('common.copy', '复制');
             return '<tr><td data-label="' + esc(L('admin.sshKeyName', '备注')) + '">' + name + '</td>' +
-                '<td data-label="' + esc(L('admin.sshKeyPub', '公钥')) + '" style="font-family:monospace; word-break:break-all;" title="' + fp + '">' +
-                '<div style="flex:1; min-width:0;"><span class="text-muted">' + keyType + '</span> ' + keyBody + '…' +
-                '<div class="text-muted" style="font-size:.75em;">' + fp + '</div></div></td>' +
-                '<td data-label="' + esc(L('admin.sshKeyCreated', '添加时间')) + '">' + created + '</td><td><button class="btn btn-danger btn-sm" onclick="deleteSSHKey(\'' +
-                encodeURIComponent(k.fingerprint) + '\')">✕</button></td></tr>';
+                '<td data-label="' + esc(L('admin.sshKeyPub', '公钥')) + '">' +
+                // Full key, wrapped, so it can be read and selected without truncation.
+                '<code class="ssh-pubkey-full" style="display:block; font-family:monospace; word-break:break-all; white-space:pre-wrap; max-height:5.5em; overflow:auto;">' + esc(pubkey) + '</code>' +
+                '<div class="text-muted" style="font-size:.75em; word-break:break-all;" title="' + fp + '">' + fp + '</div></td>' +
+                '<td data-label="' + esc(L('admin.sshKeyCreated', '添加时间')) + '">' + created + '</td>' +
+                '<td style="white-space:nowrap;">' +
+                '<button class="btn btn-outline btn-sm" onclick="copySSHKey(' + i + ')" title="' + esc(copyLabel) + '">' + esc(copyLabel) + '</button> ' +
+                '<button class="btn btn-danger btn-sm" onclick="deleteSSHKey(\'' + encodeURIComponent(k.fingerprint) + '\')">✕</button>' +
+                '</td></tr>';
         }).join('');
     }
+
+    // copySSHKey copies the exact stored key. clipboard API requires a secure
+    // context; fall back to a hidden textarea for plain-HTTP deployments.
+    window.copySSHKey = async function(i) {
+        const key = sshKeysCache[i];
+        if (!key) return;
+        const text = key.pubkey || '';
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            }
+            sshStatus('公钥已复制到剪贴板');
+        } catch (err) {
+            sshStatus('复制失败，请手动选择公钥文本：' + err.message, true);
+        }
+    };
 
     document.getElementById('ssh-enabled').addEventListener('change', async function() {
         const target = this.checked;

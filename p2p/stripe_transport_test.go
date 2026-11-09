@@ -1047,9 +1047,10 @@ func TestStripeDegradedLaneRemoved(t *testing.T) {
 	waitForEvent(t, tr, "degraded")
 }
 
-// A full lane queue must not bounce a flow between lane and primary: the
-// whole batch is immediately re-pinned to the primary lane (D10; no wait).
-func TestStripeLaneFullRepinsToPrimary(t *testing.T) {
+// A full lane queue must NOT bounce a live flow to the primary lane: frames of
+// that flow may still be queued on the lane, so switching paths would reorder
+// the inner TCP flow. The batch is dropped and the pin is kept (v5 ordering).
+func TestStripeLaneFullKeepsFlowPinned(t *testing.T) {
 	tr, _ := stripeTestWrapper(t, 0)
 	full := &stripeLane{id: 9, queue: make(chan []frame.Frame), done: make(chan struct{})}
 	p := synthTCPFlow(1)
@@ -1058,17 +1059,20 @@ func TestStripeLaneFullRepinsToPrimary(t *testing.T) {
 	tr.affinity[key] = full
 	tr.mu.Unlock()
 
-	ok, err := tr.laneEnqueue(full, []frame.Frame{{Type: frame.FrameMeshPacket, Payload: p}})
-	if ok || err != nil {
-		t.Fatalf("laneEnqueue on full lane = (%v, %v), want (false, nil)", ok, err)
+	st, err := tr.laneEnqueue(full, []frame.Frame{{Type: frame.FrameMeshPacket, Payload: p}})
+	if st != laneDropped || err != nil {
+		t.Fatalf("laneEnqueue on full lane = (%v, %v), want (laneDropped, nil)", st, err)
 	}
 	tr.mu.Lock()
 	l, pinned := tr.affinity[key]
 	tr.mu.Unlock()
-	if !pinned || l != nil {
-		t.Fatalf("flow pin after full lane = (%v, %v), want primary (nil, true)", l, pinned)
+	if !pinned || l != full {
+		t.Fatalf("flow pin after full lane = (%v, %v), want (%v, true)", l, pinned, full)
 	}
-	if got := tr.pickLanePinned(p, []*stripeLane{full}); got != nil {
-		t.Fatalf("next frame picked lane %v, want primary", got)
+	if got := tr.pickLanePinned(p, []*stripeLane{full}); got != full {
+		t.Fatalf("next frame picked lane %v, want the same lane %v", got, full)
+	}
+	if tr.laneQueueDrops.Load() != 1 {
+		t.Fatalf("laneQueueDrops = %d, want 1", tr.laneQueueDrops.Load())
 	}
 }

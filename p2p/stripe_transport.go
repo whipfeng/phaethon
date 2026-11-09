@@ -176,6 +176,10 @@ type stripeTransport struct {
 	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
 	// urgent frame fires only on watermark crossings (ctrlMu-guarded).
 	gaugeSent float64
+
+	// laneQueueDrops counts batches dropped because a lane queue was full and
+	// the flow must stay pinned to preserve ordering.
+	laneQueueDrops atomic.Uint64
 }
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
@@ -425,11 +429,14 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 		return err
 	}
 	batch := []frame.Frame{{Type: frameType, Payload: payload}}
-	if ok, err := t.laneEnqueue(l, batch); ok || err != nil {
+	st, err := t.laneEnqueue(l, batch)
+	if err != nil || st == laneEnqueued || st == laneDropped {
+		// Enqueued, or dropped on a full lane while keeping the flow pinned.
 		return err
 	}
+	// laneFallback: the lane is dead, safe to repin and use the primary.
 	start := time.Now()
-	err := t.base.Send(frameType, payload, isControl)
+	err = t.base.Send(frameType, payload, isControl)
 	t.primaryFlow.onSent(len(payload), start)
 	t.sampleSojourn(start)
 	return err
@@ -439,18 +446,33 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 // flow group — to the primary lane and pins those flows there. Waiting on a
 // full lane would stall the session write loop and still allow cross-batch
 // reordering; a per-flow path change happens at most once.
-func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (bool, error) {
+// laneEnqueue outcomes.
+const (
+	laneEnqueued = iota // batch queued on the lane
+	laneFallback        // lane is dead: caller may repin and use the primary lane
+	laneDropped         // lane queue full: drop batch, keep the flow's affinity
+)
+
+// laneEnqueue tries to queue a batch on l without blocking.
+//
+// Ordering rule (v5 "per-flow lane affinity"): a flow pinned to a lane must not
+// be moved to another path while frames of that flow may still be in flight on
+// the lane — doing so makes the same inner TCP flow arrive over two paths and
+// reorders it, which collapses the sender's cwnd. So a full queue drops the
+// batch (mesh data is an overlay; inner TCP retransmits) and KEEPS the
+// affinity. Only a dead lane (writer exited, queue drained) may be repinned.
+func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (int, error) {
 	select {
 	case l.queue <- batch:
-		return true, nil
+		return laneEnqueued, nil
 	case <-l.done:
 		t.repinPrimary(batch)
-		return false, nil
+		return laneFallback, nil
 	case <-t.closed:
-		return false, io.ErrClosedPipe
+		return laneFallback, io.ErrClosedPipe
 	default:
-		t.repinPrimary(batch)
-		return false, nil
+		t.laneQueueDrops.Add(1)
+		return laneDropped, nil
 	}
 }
 
@@ -503,11 +525,24 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 		t.sampleSojourn(start)
 	}
 	for l, batch := range perLane {
-		ok, err := t.laneEnqueue(l, batch)
+		st, err := t.laneEnqueue(l, batch)
 		if err != nil {
 			return t.firstErr(firstErr, err)
 		}
-		if !ok {
+		switch st {
+		case laneDropped:
+			// Full lane: drop and keep the flow pinned (see laneEnqueue).
+			// The inner TCP retransmits; moving to the primary lane here would
+			// reorder this flow against frames still queued on the lane.
+			if util.GetModuleLogLevel("p2p") <= util.LogLevelDebug {
+				var dropped int
+				for _, f := range batch {
+					dropped += len(f.Payload)
+				}
+				util.LogModuleDebug("p2p", "[STRIPE] lane %d queue full, dropped %d frames/%dB (flow stays pinned)",
+					l.id, len(batch), dropped)
+			}
+		case laneFallback:
 			start := time.Now()
 			var fb int
 			for _, f := range batch {

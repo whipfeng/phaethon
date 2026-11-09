@@ -131,6 +131,7 @@
 |------|------|
 | [deployment-environments.md](runbooks/deployment-environments.md) | 部署环境运维手册：启动方式、进程架构、部署注意事项 |
 | [20260918_gg_migration_issues.md](runbooks/20260918_gg_migration_issues.md) | GG 迁移踩坑：日志路径变更、BindingStore bug、SSH 连接限制 |
+| [verification-checklist-20261109.md](runbooks/verification-checklist-20261109.md) | 批次 1–6 实机验证清单（命令 + 预期结果 + 已知遗留） |
 
 ### templates/ (文档模板)
 

@@ -119,8 +119,8 @@ type P2PTransport interface {
 // MeshPeerInfo describes a connected mesh peer.
 type MeshPeerInfo struct {
 	NodeID      string    `json:"nodeId"`
-	LinkKey     string    `json:"linkKey"`     // stable link identity: activeNodeID:activeSeq
-	LocalSeq    uint16    `json:"localSeq"`    // local sequence number (for quality lookup)
+	LinkKey     string    `json:"linkKey"`  // stable link identity: activeNodeID:activeSeq
+	LocalSeq    uint16    `json:"localSeq"` // local sequence number (for quality lookup)
 	Subnet      string    `json:"subnet"`
 	Direct      bool      `json:"direct"`
 	LastSeen    time.Time `json:"lastSeen"`
@@ -259,13 +259,13 @@ type MeshManager struct {
 	DNSAllocator func(domain string) (net.IP, error)
 
 	closeCh chan struct{}
-	
+
 	// Dual-channel design for performance isolation:
 	// criticalCh: blocking queue for critical operations (register/unregister/gossip processing)
 	// normalCh: non-blocking queue for non-critical operations (config update/tick/broadcast)
 	criticalCh chan meshEvent
 	normalCh   chan meshEvent
-	
+
 	// topologySnapshot holds a copy of topology.peers for lock-free reads by gossipWorker.
 	// Updated atomically by criticalWorker after modifying topology.peers.
 	topologySnapshot atomic.Value // stores *TopologySnapshot
@@ -318,12 +318,12 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes     []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
-	routeTrie  *routeTrie                // IP prefix trie for O(log R) lookup
-	domainTrie *NodeTrie                 // unified domain routes (static + dynamic merged)
-	nodeMap    map[string]*nodeInfo      // nodeID → info
+	routes      []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
+	routeTrie   *routeTrie                // IP prefix trie for O(log R) lookup
+	domainTrie  *NodeTrie                 // unified domain routes (static + dynamic merged)
+	nodeMap     map[string]*nodeInfo      // nodeID → info
 	bestPaths   map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
-	subnetOwner map[[4]byte]string      // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
+	subnetOwner map[[4]byte]string        // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -348,8 +348,8 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		network:         network,
 		subnetPrefixLen: subnetPrefixLen,
 		closeCh:         make(chan struct{}),
-		criticalCh:      make(chan meshEvent, 256),   // blocking queue for critical ops
-		normalCh:        make(chan meshEvent, 1024),  // non-blocking queue for non-critical ops
+		criticalCh:      make(chan meshEvent, 256),  // blocking queue for critical ops
+		normalCh:        make(chan meshEvent, 1024), // non-blocking queue for non-critical ops
 		stickyCache:     make(map[string]string),
 	}
 	// Initialize routeTable with empty routes
@@ -1041,9 +1041,26 @@ func (m *MeshManager) UnregisterPeerByNodeID(nodeID string) {
 //     decides local delivery (GIP/VIP/fakeIP), forwarding (NAT return, relay),
 //     TTL decrement and ICMP generation — no manual 卡口 at the frame layer.
 func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame []byte) {
+	m.handleMeshFrame(fromNodeID, linkNIC, frame, nil)
+}
+
+// HandleMeshFrameOwned is the zero-copy entry point (D6): the caller hands
+// over the frame buffer and a release callback that runs exactly once —
+// either when the frame is dropped here or when gVisor releases the last
+// reference to the injected packet.
+func (m *MeshManager) HandleMeshFrameOwned(fromNodeID string, linkNIC *LinkNIC, frame []byte, release func()) {
+	m.handleMeshFrame(fromNodeID, linkNIC, frame, release)
+}
+
+func (m *MeshManager) handleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame []byte, release func()) {
+	if release == nil {
+		release = func() {}
+	}
+	releaseOnce := sync.OnceFunc(release)
 	util.LogModuleDebug("mesh", "[MESH] HandleMeshFrame called from %s: %d bytes", fromNodeID, len(frame))
 	if len(frame) < 20 || frame[0]>>4 != 4 {
 		util.LogModuleWarn("mesh", "[MESH] bad packet from %s: %d bytes", fromNodeID, len(frame))
+		releaseOnce()
 		return
 	}
 
@@ -1053,6 +1070,7 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	dstIP := extractDstIP(frame)
 	if dstIP == nil {
 		util.LogModuleWarn("mesh", "[MESH] bad packet from %s: cannot extract dst IP", fromNodeID)
+		releaseOnce()
 		return
 	}
 	// Debug logs below build net.IP values per packet — gate everything on one
@@ -1121,10 +1139,11 @@ func (m *MeshManager) HandleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	// (Link NIC → Link NIC), TTL and ICMP are all handled inside the netstack.
 	if linkNIC == nil {
 		util.LogModuleWarn("mesh", "[MESH] no linkNIC, dropping frame from %s (dst=%s)", fromNodeID, dstIP)
+		releaseOnce()
 		return
 	}
 	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
-	linkNIC.InjectInbound(frame)
+	linkNIC.InjectInboundOwned(frame, releaseOnce)
 	TraceForwarding("mesh_inject_ok", frame, "fromNode=%s", fromNodeID)
 }
 
@@ -1686,7 +1705,7 @@ func (m *MeshManager) GetPeers() []MeshPeerInfo {
 		result = append(result, MeshPeerInfo{
 			NodeID:      nodeID,
 			LinkKey:     linkKey,
-				LocalSeq:    localSeq,
+			LocalSeq:    localSeq,
 			Direct:      true,
 			Subnet:      p.SubnetStr,
 			LastSeen:    p.LastSeen,
@@ -2259,20 +2278,20 @@ func (m *MeshManager) criticalWorker() {
 				case m.normalCh <- meshEvent{kind: gossipBroadcast}:
 				default:
 				}
-				
+
 			case peerUnregister:
 				nodeID := ev.sender.GetNodeID()
 				m.topology.UnregisterPeer(ev.sender)
 				m.updateTopologySnapshot()
 				m.recomputeRoutes()
 				util.LogModuleInfo("mesh", "[MESH] peer unregistered: %s", nodeID)
-				
+
 			case peerUnregisterByNodeID:
 				m.topology.UnregisterPeerByNodeID(ev.nodeID)
 				m.updateTopologySnapshot()
 				m.recomputeRoutes()
 				util.LogModuleInfo("mesh", "[MESH] peer unregistered by nodeID: %s", ev.nodeID)
-				
+
 			case processGossip:
 				info := ev.gossip
 				util.LogModuleDebug("mesh", "[MESH] gossip from %s: routes=%d domainSuffixes=%d claimedSubnets=%d",
@@ -2286,7 +2305,7 @@ func (m *MeshManager) criticalWorker() {
 				// the process (exit 0) — the watchdog restarts us with the new identity.
 				// If allocation/persist fails it returns false and we keep the old subnet.
 				m.checkSubnetConflict()
-				
+
 			case recomputeRoute:
 				m.recomputeRoutes()
 			}
@@ -2299,7 +2318,7 @@ func (m *MeshManager) criticalWorker() {
 func (m *MeshManager) gossipWorker() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-m.closeCh:
@@ -2329,7 +2348,7 @@ func (m *MeshManager) updateTopologySnapshot() {
 	peersCopy := make([]*PeerInfo, len(m.topology.peers))
 	copy(peersCopy, m.topology.peers)
 	m.topology.mu.RUnlock()
-	
+
 	snapshot := &TopologySnapshot{peers: peersCopy}
 	m.topologySnapshot.Store(snapshot)
 }
@@ -2351,7 +2370,7 @@ const (
 	peerUnregisterByNodeID
 	processGossip
 	recomputeRoute
-	
+
 	// Normal events (normalCh) - non-blocking, can be dropped
 	gossipBroadcast
 	configUpdate
@@ -2469,7 +2488,7 @@ func (m *MeshManager) broadcastGossip() {
 			validatedClaims[subnet] = claim
 			continue
 		}
-		
+
 		// Validate each link in each neighbor
 		var validatedNeighbors []GossipNeighbor
 		for _, neighbor := range claim.neighbors {
@@ -2478,7 +2497,7 @@ func (m *MeshManager) broadcastGossip() {
 				// Neighbor doesn't exist, skip all its links
 				continue
 			}
-			
+
 			// Check each link for matching reverse
 			var validatedLinks []GossipLink
 			for _, gossipLink := range neighbor.Links {
@@ -2498,7 +2517,7 @@ func (m *MeshManager) broadcastGossip() {
 				// If not found, link is filtered out (strict validation)
 				// It will reappear once the reverse gossip arrives
 			}
-			
+
 			if len(validatedLinks) > 0 {
 				validatedNeighbors = append(validatedNeighbors, GossipNeighbor{
 					NodeID: neighbor.NodeID,
@@ -2506,7 +2525,7 @@ func (m *MeshManager) broadcastGossip() {
 				})
 			}
 		}
-		
+
 		if len(validatedNeighbors) > 0 {
 			// Claim has at least one validated neighbor, keep it with validated neighbors only
 			validatedClaim := claim
@@ -3133,15 +3152,15 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 
 // LinkQualityInfo represents a link in the topology graph.
 type LinkQualityInfo struct {
-	From      string    // source node ID
-	To        string    // target node ID
-	LinkNIC   *LinkNIC  // LinkNIC for direct links (nil for relayed)
-	LocalSeq  uint16    // local sequence number
-	RemoteSeq uint16    // remote sequence number
-	SRTT      float64   // smoothed RTT in milliseconds
-	LossRate  float64   // loss rate (0.0-1.0)
-	Jitter    float64   // jitter in milliseconds
-	Cost      float64   // link cost = SRTT / max(1-LossRate, 0.01) / confidence
+	From      string   // source node ID
+	To        string   // target node ID
+	LinkNIC   *LinkNIC // LinkNIC for direct links (nil for relayed)
+	LocalSeq  uint16   // local sequence number
+	RemoteSeq uint16   // remote sequence number
+	SRTT      float64  // smoothed RTT in milliseconds
+	LossRate  float64  // loss rate (0.0-1.0)
+	Jitter    float64  // jitter in milliseconds
+	Cost      float64  // link cost = SRTT / max(1-LossRate, 0.01) / confidence
 }
 
 // TopologyGraph represents the global topology with link qualities.
@@ -3468,12 +3487,12 @@ func dijkstra(graph *TopologyGraph, source string) map[string]dijkstraResult {
 				var linkNIC *LinkNIC
 				var path []string
 				if minNode == source {
-					nextHop = toNode // direct neighbor
+					nextHop = toNode           // direct neighbor
 					linkNIC = bestLink.LinkNIC // direct link has LinkNIC
 					path = []string{toNode}
 				} else {
-					nextHop = nodes[minNode].nextHop  // inherit next hop
-					linkNIC = nodes[minNode].linkNIC  // inherit first hop's LinkNIC
+					nextHop = nodes[minNode].nextHop // inherit next hop
+					linkNIC = nodes[minNode].linkNIC // inherit first hop's LinkNIC
 					path = append(append([]string{}, nodes[minNode].path...), toNode)
 				}
 

@@ -1047,8 +1047,8 @@ func TestStripeDegradedLaneRemoved(t *testing.T) {
 	waitForEvent(t, tr, "degraded")
 }
 
-// A full lane queue must not bounce a flow between lane and primary: after
-// the bounded wait the flow is re-pinned to the primary lane (§3.9 R4).
+// A full lane queue must not bounce a flow between lane and primary: the
+// whole batch is immediately re-pinned to the primary lane (D10; no wait).
 func TestStripeLaneFullRepinsToPrimary(t *testing.T) {
 	tr, _ := stripeTestWrapper(t, 0)
 	full := &stripeLane{id: 9, queue: make(chan []frame.Frame), done: make(chan struct{})}
@@ -1058,13 +1058,9 @@ func TestStripeLaneFullRepinsToPrimary(t *testing.T) {
 	tr.affinity[key] = full
 	tr.mu.Unlock()
 
-	start := time.Now()
 	ok, err := tr.laneEnqueue(full, []frame.Frame{{Type: frame.FrameMeshPacket, Payload: p}})
 	if ok || err != nil {
 		t.Fatalf("laneEnqueue on full lane = (%v, %v), want (false, nil)", ok, err)
-	}
-	if waited := time.Since(start); waited < stripeLaneFullWait {
-		t.Fatalf("gave up after %v, want bounded wait ≥ %v", waited, stripeLaneFullWait)
 	}
 	tr.mu.Lock()
 	l, pinned := tr.affinity[key]

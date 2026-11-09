@@ -4,12 +4,34 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 	"phaethon/config"
 	"phaethon/util"
 )
+
+// ruleSnapshot is an immutable view of the configuration used by the data
+// path. Writers build a new snapshot and atomically publish it, so readers
+// never touch maps that are being mutated.
+type ruleSnapshot struct {
+	proxies           map[string]*config.Proxy
+	groups            map[string]*config.ProxyGroup
+	subscriptions     map[string]*config.Subscription
+	mappings          map[string]*config.Mapping
+	rules             []*config.Rule
+	resolvers         []*config.Resolver
+	matchers          []config.Matcher
+	matcherTimeRanges []config.TimeRange
+}
+
+var emptyRuleSnapshot = &ruleSnapshot{
+	proxies:       map[string]*config.Proxy{},
+	groups:        map[string]*config.ProxyGroup{},
+	subscriptions: map[string]*config.Subscription{},
+	mappings:      map[string]*config.Mapping{},
+}
 
 // RuleMatcher 是统一的规则匹配器
 // 所有配置（静态+动态）存储在对象 Map 中，通过 Watch 实时同步
@@ -29,6 +51,59 @@ type RuleMatcher struct {
 
 	// 保护并发访问
 	mu sync.RWMutex
+
+	// snap is the lock-free snapshot read by the data path.
+	snap atomic.Pointer[ruleSnapshot]
+}
+
+// currentSnapshot returns the latest published snapshot.
+func (m *RuleMatcher) currentSnapshot() *ruleSnapshot {
+	if s := m.snap.Load(); s != nil {
+		return s
+	}
+	return emptyRuleSnapshot
+}
+
+// publishLocked rebuilds and publishes the immutable snapshot.
+// Callers must hold m.mu (or be in single-threaded construction).
+func (m *RuleMatcher) publishLocked() {
+	s := &ruleSnapshot{
+		proxies:           make(map[string]*config.Proxy, len(m.proxies)),
+		groups:            make(map[string]*config.ProxyGroup, len(m.groups)),
+		subscriptions:     make(map[string]*config.Subscription, len(m.subscriptions)),
+		mappings:          make(map[string]*config.Mapping, len(m.mappings)),
+		rules:             m.rules,
+		resolvers:         m.resolvers,
+		matchers:          m.matchers,
+		matcherTimeRanges: m.matcherTimeRanges,
+	}
+	for k, v := range m.proxies {
+		s.proxies[k] = v
+	}
+	for k, v := range m.groups {
+		s.groups[k] = v
+	}
+	for k, v := range m.subscriptions {
+		s.subscriptions[k] = v
+	}
+	for k, v := range m.mappings {
+		s.mappings[k] = v
+	}
+	m.snap.Store(s)
+}
+
+// lookupProxy/lookupGroup/lookupSubscription are lock-free lookups used by
+// group resolution callbacks, which may run on the data path.
+func (m *RuleMatcher) lookupProxy(name string) *config.Proxy {
+	return m.currentSnapshot().proxies[name]
+}
+
+func (m *RuleMatcher) lookupGroup(name string) *config.ProxyGroup {
+	return m.currentSnapshot().groups[name]
+}
+
+func (m *RuleMatcher) lookupSubscription(name string) *config.Subscription {
+	return m.currentSnapshot().subscriptions[name]
 }
 
 // BuildRuleMatcher 从数据库构建 RuleMatcher
@@ -148,15 +223,15 @@ func parseRule(ruleStr string) *config.Rule {
 	if len(parts) < 2 {
 		return nil
 	}
-	
+
 	ruleType := strings.TrimSpace(parts[0])
 	proxyName, mappingName, tr := config.ParseProxyName(strings.TrimSpace(parts[len(parts)-1]))
-	
+
 	var pattern string
 	if len(parts) >= 3 {
 		pattern = strings.TrimSpace(parts[1])
 	}
-	
+
 	return &config.Rule{
 		Type:        ruleType,
 		Pattern:     pattern,
@@ -273,18 +348,15 @@ func (m *RuleMatcher) init() error {
 		}
 	}
 
-	// 注入查找回调
+	// Publish once before wiring, so lock-free callbacks see the built maps.
+	m.publishLocked()
+
+	// 注入查找回调（读快照，避免数据面与写路径并发访问 map）
 	for _, group := range m.groups {
 		g := group
-		g.ResolveProxy = func(name string) *config.Proxy {
-			return m.proxies[name]
-		}
-		g.ResolveGroup = func(name string) *config.ProxyGroup {
-			return m.groups[name]
-		}
-		g.ResolveSubscription = func(name string) *config.Subscription {
-			return m.subscriptions[name]
-		}
+		g.ResolveProxy = m.lookupProxy
+		g.ResolveGroup = m.lookupGroup
+		g.ResolveSubscription = m.lookupSubscription
 	}
 
 	// 验证代理组的订阅引用
@@ -312,6 +384,7 @@ func (m *RuleMatcher) init() error {
 		return err
 	}
 
+	m.publishLocked()
 	return nil
 }
 
@@ -374,29 +447,24 @@ func (m *RuleMatcher) prepareResolvers(resolvers []*config.Resolver) ([]*config.
 	return resolvers, nil
 }
 
-// GetGroup 获取指定的代理组（用于 API 查询）
+// GetGroup 获取指定的代理组（用于 API 查询，读快照）
 func (m *RuleMatcher) GetGroup(name string) *config.ProxyGroup {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.groups[name]
+	return m.currentSnapshot().groups[name]
 }
 
 // LookupProxy 获取已接好 via 链（Next 指针）的代理。
 // 与 db.GetProxy 的区别：后者返回 DB 新鲜副本，Next 恒为 nil；
 // 健康检查等需要沿链拨号的场景必须用这里返回的实例。
 func (m *RuleMatcher) LookupProxy(name string) *config.Proxy {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.proxies[name]
+	return m.currentSnapshot().proxies[name]
 }
 
 // ListGroups 返回 matcher 持有的全部代理组。
 // 组的成员解析回调指向 m.proxies，因此拿到手的就是接好链的代理。
 func (m *RuleMatcher) ListGroups() []*config.ProxyGroup {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	groups := make([]*config.ProxyGroup, 0, len(m.groups))
-	for _, g := range m.groups {
+	s := m.currentSnapshot()
+	groups := make([]*config.ProxyGroup, 0, len(s.groups))
+	for _, g := range s.groups {
 		groups = append(groups, g)
 	}
 	return groups
@@ -405,6 +473,8 @@ func (m *RuleMatcher) ListGroups() []*config.ProxyGroup {
 // rewireNextChains 全量重接 via 链。watcher 换入的新代理副本 Next 为 nil，
 // 且其他代理的 Next 可能仍指向旧副本，需整体重建（与构建期 setNext 一致）。
 func (m *RuleMatcher) rewireNextChains() {
+	// Publish first so lock-free lookups used by setNext see the new maps.
+	m.publishLocked()
 	for _, p := range m.proxies {
 		visited := map[*config.Proxy]bool{}
 		if err := m.setNext(p, visited); err != nil {
@@ -416,7 +486,7 @@ func (m *RuleMatcher) rewireNextChains() {
 // AddProxy 添加代理到统一 Map（由 ControlManager 调用）
 func (m *RuleMatcher) AddProxy(proxy *config.Proxy) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	m.proxies[proxy.Name] = proxy
 	util.LogModuleInfo("db", "added proxy: %s", proxy.Name)
 }
@@ -424,7 +494,7 @@ func (m *RuleMatcher) AddProxy(proxy *config.Proxy) {
 // RemoveProxy 从统一 Map 移除代理（由 ControlManager 调用）
 func (m *RuleMatcher) RemoveProxy(proxyName string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	delete(m.proxies, proxyName)
 	util.LogModuleInfo("db", "removed proxy: %s", proxyName)
 }
@@ -432,21 +502,21 @@ func (m *RuleMatcher) RemoveProxy(proxyName string) {
 // AddMapping 添加映射到统一 Map
 func (m *RuleMatcher) AddMapping(mapping *config.Mapping) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	m.mappings[mapping.Name] = mapping
 }
 
 // RemoveMapping 从统一 Map 移除映射
 func (m *RuleMatcher) RemoveMapping(mappingName string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	delete(m.mappings, mappingName)
 }
 
 // AddRule 添加规则
 func (m *RuleMatcher) AddRule(rule *config.Rule) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	// 前置，优先级最高
 	m.rules = append([]*config.Rule{rule}, m.rules...)
 	// 重建匹配器
@@ -456,7 +526,7 @@ func (m *RuleMatcher) AddRule(rule *config.Rule) {
 // RemoveRule 移除规则（按代理名）
 func (m *RuleMatcher) RemoveRule(proxyName string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 	newRules := make([]*config.Rule, 0, len(m.rules))
 	for _, rule := range m.rules {
 		if rule.ProxyName != proxyName {
@@ -472,7 +542,7 @@ func (m *RuleMatcher) RemoveRule(proxyName string) {
 func (m *RuleMatcher) buildMatchers() error {
 	m.matchers = make([]config.Matcher, 0, len(m.rules))
 	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
-	
+
 	for _, rule := range m.rules {
 		switch rule.Type {
 		case "DOMAIN-SUFFIX":
@@ -552,17 +622,22 @@ func (m *RuleMatcher) findMapping(name string) *config.Mapping {
 	if name == "" {
 		return nil
 	}
-	return m.mappings[name]
+	return m.currentSnapshot().mappings[name]
 }
 
-
 func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping) (*config.Proxy, *config.MatchResult) {
+	s := m.currentSnapshot()
 	nowMin := time.Now().Hour()*60 + time.Now().Minute()
 	util.LogModuleDebug("system", "[MATCH-DEBUG] Starting match: dst=%s:%d mapping=%s nowMin=%d totalMatchers=%d",
-		request.DstAddr, request.DstPort, func() string { if mapping != nil { return mapping.Name }; return "<nil>" }(), nowMin, len(m.matchers))
-	for i, matcher := range m.matchers {
-		if i < len(m.matcherTimeRanges) && !m.matcherTimeRanges[i].Matches(nowMin) {
-			util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d skipped: time range %s doesn't match nowMin=%d", i, m.matcherTimeRanges[i].String(), nowMin)
+		request.DstAddr, request.DstPort, func() string {
+			if mapping != nil {
+				return mapping.Name
+			}
+			return "<nil>"
+		}(), nowMin, len(s.matchers))
+	for i, matcher := range s.matchers {
+		if i < len(s.matcherTimeRanges) && !s.matcherTimeRanges[i].Matches(nowMin) {
+			util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d skipped: time range %s doesn't match nowMin=%d", i, s.matcherTimeRanges[i].String(), nowMin)
 			continue
 		}
 		proxyName := matcher.Match(request, mapping)
@@ -577,8 +652,8 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 		if mapping != nil {
 			result.Mapping = mapping.Name
 		}
-		if i < len(m.matcherTimeRanges) {
-			tr := m.matcherTimeRanges[i]
+		if i < len(s.matcherTimeRanges) {
+			tr := s.matcherTimeRanges[i]
 			if tr.StartMin >= 0 {
 				result.TimeRange = tr.String()
 			}
@@ -592,10 +667,11 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 }
 
 func (m *RuleMatcher) resolveName(name string) *config.Proxy {
-	if proxy, ok := m.proxies[name]; ok && proxy != nil {
+	s := m.currentSnapshot()
+	if proxy, ok := s.proxies[name]; ok && proxy != nil {
 		return proxy
 	}
-	group, ok := m.groups[name]
+	group, ok := s.groups[name]
 	if !ok || len(group.GetMembers()) == 0 {
 		return nil
 	}
@@ -603,12 +679,13 @@ func (m *RuleMatcher) resolveName(name string) *config.Proxy {
 }
 
 func (m *RuleMatcher) resolving(req *config.AddrRequest) *config.AddrRequest {
-	if m.resolvers == nil {
+	s := m.currentSnapshot()
+	if len(s.resolvers) == 0 {
 		util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolving: resolvers is nil, returning original")
 		return req
 	}
-	util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolving: checking %d resolvers for %s:%d", len(m.resolvers), req.DstAddr, req.DstPort)
-	for i, resolver := range m.resolvers {
+	util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolving: checking %d resolvers for %s:%d", len(s.resolvers), req.DstAddr, req.DstPort)
+	for i, resolver := range s.resolvers {
 		if !resolver.IsEnabled() {
 			util.LogModuleDebug("system", "[RESOLVE-DEBUG] resolver[%d] %s: disabled, skipping", i, resolver.Name)
 			continue
@@ -698,7 +775,7 @@ func onConfigChange(event ChangeEvent) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.publishLocked(); m.mu.Unlock() }()
 
 	bucket := string(event.Bucket)
 	key := event.Key
@@ -733,16 +810,10 @@ func onConfigChange(event ChangeEvent) {
 				util.LogModuleError("db", "watch: failed to load group %s: %v", key, err)
 				return
 			}
-			// 注入查找回调（与 init() 保持一致）
-			group.ResolveProxy = func(name string) *config.Proxy {
-				return m.proxies[name]
-			}
-			group.ResolveGroup = func(name string) *config.ProxyGroup {
-				return m.groups[name]
-			}
-			group.ResolveSubscription = func(name string) *config.Subscription {
-				return m.subscriptions[name]
-			}
+			// 注入查找回调（读快照，避免数据面与写路径并发访问 map）
+			group.ResolveProxy = m.lookupProxy
+			group.ResolveGroup = m.lookupGroup
+			group.ResolveSubscription = m.lookupSubscription
 			m.groups[key] = group
 			util.LogModuleInfo("db", "watch: updated group %s", key)
 		}

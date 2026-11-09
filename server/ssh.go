@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -227,6 +228,14 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 }
 
 // runSession 在 shell/exec 应答成功后双向搬运数据，进程结束后上报 exit-status。
+//
+// 退出时会卡住的两个原因（都真实存在）：
+//   - Windows ConPTY：shell 进程退出后伪控制台仍然持有输出管道，Read 不会返回
+//     EOF，只有 Close 才会解除阻塞；
+//   - Unix pty：若后台子进程还持有 slave 端，master 的 Read 同样不会 EOF。
+//
+// 所以 Wait 返回后要给输出一个很短的 flush 窗口，然后强制关闭读端，
+// 再有限等待搬运协程结束——否则客户端会在 shell 退出后一直挂着。
 func runSession(channel ssh.Channel, proc sessionProc) {
 	done := make(chan struct{})
 	go func() {
@@ -239,7 +248,21 @@ func runSession(channel ssh.Channel, proc sessionProc) {
 	}()
 
 	err := proc.Wait()
-	<-done
+
+	// Grace window for the last chunk (e.g. shell's logout message), then force
+	// the read side closed so the output copy cannot block on a lingering
+	// pty/ConPTY handle.
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		proc.CloseIO()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			util.LogModuleWarn("ssh", "session output did not drain after exit, closing channel")
+		}
+	}
+
 	sendExitStatus(channel, exitCodeOf(err))
 }
 

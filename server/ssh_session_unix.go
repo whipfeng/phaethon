@@ -20,6 +20,7 @@ func (p *ptyProc) Write(b []byte) (int, error) { return p.f.Write(b) }
 func (p *ptyProc) Wait() error                  { return p.cmd.Wait() }
 func (p *ptyProc) Kill()                        { _ = p.cmd.Process.Kill(); p.f.Close() }
 func (p *ptyProc) CloseStdin()                  {}
+func (p *ptyProc) CloseIO()                     { _ = p.f.Close() }
 func (p *ptyProc) Resize(cols, rows uint32) {
 	_ = pty.Setsize(p.f, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
@@ -35,6 +36,7 @@ func (p *pipeProc) Write(b []byte) (int, error) { return p.stdin.Write(b) }
 func (p *pipeProc) Wait() error                  { return p.cmd.Wait() }
 func (p *pipeProc) Kill()                        { _ = p.cmd.Process.Kill(); p.stdout.Close() }
 func (p *pipeProc) CloseStdin()                  { p.stdin.Close() }
+func (p *pipeProc) CloseIO()                     { p.stdout.Close() }
 func (p *pipeProc) Resize(cols, rows uint32)     {}
 
 // autoDetectShell 返回系统自动探测的 shell：$SHELL，空则 /bin/sh。

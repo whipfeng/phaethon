@@ -144,6 +144,10 @@ type Netstack struct {
 	// WriteLoopNoDeviceDrops counts egress packets dropped when no TUN device
 	// is attached.
 	WriteLoopNoDeviceDrops atomic.Uint64
+	// MeshUnreachableDrops counts packets whose destination belongs to the mesh
+	// network but had no usable route (D27). The upper layer sees a fast failure
+	// instead of the packet silently disappearing into the local stack.
+	MeshUnreachableDrops atomic.Uint64
 }
 
 // NewNetstack creates a new Netstack instance.
@@ -212,6 +216,16 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 				// advertised). NeedIPIP=true signals branch 3. Stored on n so
 				// MeshEgressNode can re-run the identical decision for display.
 				SelectRoute: n.selectRouteFunc(meshMgr),
+				// D27: mesh destination without a usable route is dropped and
+				// counted instead of being absorbed as an unknown local target.
+				MeshNetwork: meshMgr.GetMeshSubnet(),
+				OnMeshUnreachable: func(dst net.IP) {
+					n.MeshUnreachableDrops.Add(1)
+					if n.callbacks.StatsNotify != nil {
+						n.callbacks.StatsNotify()
+					}
+					util.LogModuleWarn("route", "[SELECT-ROUTE] dst=%s mesh unreachable (no route to mesh destination)", dst)
+				},
 			}
 
 			// Store the decision callback so MeshEgressNode can re-run the
@@ -501,6 +515,23 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 		util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s no_match", dst)
 		return SelectRouteResult{}, false
 	}
+}
+
+// IsMeshUnreachable reports whether dst belongs to the mesh network but has no
+// usable route right now (link down or topology not converged, D27). Local
+// subnet addresses (VIP/GIP/hostIP/fakeIP) are never considered unreachable.
+func (n *Netstack) IsMeshUnreachable(dst net.IP) bool {
+	if dst == nil || n.meshNetwork == nil || !n.meshNetwork.Contains(dst) {
+		return false
+	}
+	if n.meshSubnet != nil && n.meshSubnet.Contains(dst) {
+		return false
+	}
+	if n.selectRoute == nil {
+		return false
+	}
+	_, ok := n.selectRoute(dst)
+	return !ok
 }
 
 // MeshEgressNode returns the node ID the mesh routing decision would egress

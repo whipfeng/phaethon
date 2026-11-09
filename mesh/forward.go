@@ -86,8 +86,68 @@ func DecrementIPTTL(ipPacket []byte) byte {
 	return ipPacket[8]
 }
 
-// GenerateICMPTimeExceeded creates an ICMP Time Exceeded message for the given IP packet.
-// The ICMP packet has src=localVIP and dst=original source IP.
+// GenerateICMPDestUnreachable builds an ICMP destination-unreachable
+// (type 3, code 1 host unreachable) for the given IPv4 packet, with
+// src=localVIP and dst=original source (D27). Returns the complete packet.
+func GenerateICMPDestUnreachable(localVIP net.IP, originalPacket []byte) []byte {
+	pkt := generateICMPError(localVIP, originalPacket, 3, 1)
+	return pkt
+}
+
+// generateICMPError builds IP + ICMP error header for the given type/code.
+func generateICMPError(localVIP net.IP, originalPacket []byte, icmpType, icmpCode byte) []byte {
+	if len(originalPacket) < 20 || localVIP == nil {
+		return nil
+	}
+	payloadLen := len(originalPacket)
+	if payloadLen > 576-20-8 {
+		payloadLen = 576 - 20 - 8
+	}
+	icmpPacket := make([]byte, 20+8+payloadLen)
+	icmpPacket[0] = 0x45
+	totalLen := len(icmpPacket)
+	icmpPacket[2] = byte(totalLen >> 8)
+	icmpPacket[3] = byte(totalLen)
+	icmpPacket[8] = 64
+	icmpPacket[9] = 1
+	copy(icmpPacket[12:16], localVIP.To4())
+	copy(icmpPacket[16:20], originalPacket[12:16])
+
+	icmpPacket[10], icmpPacket[11] = 0, 0
+	var ipSum uint32
+	for i := 0; i < 20-1; i += 2 {
+		ipSum += uint32(icmpPacket[i])<<8 | uint32(icmpPacket[i+1])
+	}
+	for ipSum>>16 > 0 {
+		ipSum = (ipSum & 0xffff) + (ipSum >> 16)
+	}
+	ipCksum := ^uint16(ipSum)
+	icmpPacket[10] = byte(ipCksum >> 8)
+	icmpPacket[11] = byte(ipCksum)
+
+	icmpPacket[20] = icmpType
+	icmpPacket[21] = icmpCode
+	copy(icmpPacket[28:], originalPacket[:payloadLen])
+
+	icmpPacket[22], icmpPacket[23] = 0, 0
+	var icmpSum uint32
+	for i := 20; i < len(icmpPacket)-1; i += 2 {
+		icmpSum += uint32(icmpPacket[i])<<8 | uint32(icmpPacket[i+1])
+	}
+	if len(icmpPacket)%2 == 1 {
+		icmpSum += uint32(icmpPacket[len(icmpPacket)-1]) << 8
+	}
+	for icmpSum>>16 > 0 {
+		icmpSum = (icmpSum & 0xffff) + (icmpSum >> 16)
+	}
+	icmpCksum := ^uint16(icmpSum)
+	icmpPacket[22] = byte(icmpCksum >> 8)
+	icmpPacket[23] = byte(icmpCksum)
+	return icmpPacket
+}
+
+// GenerateICMPTimeExceeded creates an ICMP Time Exceeded message for the given
+// IP packet. The ICMP packet has src=localVIP and dst=original source IP.
 // Returns the complete ICMP packet (IP header + ICMP header + original IP packet as payload).
 func GenerateICMPTimeExceeded(localVIP net.IP, originalPacket []byte) []byte {
 	if len(originalPacket) < 20 || localVIP == nil {

@@ -114,10 +114,18 @@ func AcceptLoop(listener net.Listener, handler ConnHandler, name string) {
 	}
 }
 
-// startTCP creates a TCP listener on the given port and starts serving.
-func startTCP(port int, srv Server) (net.Listener, error) {
-	addr := fmt.Sprintf(":%d", port)
-	ln, err := net.Listen("tcp", addr)
+// normalizeListenAddr maps an empty listen address to all interfaces,
+// preserving the historical behavior for mappings that do not set one.
+func normalizeListenAddr(s string) string {
+	if s == "" {
+		return "0.0.0.0"
+	}
+	return s
+}
+
+// startTCP creates a TCP listener on the given address/port and starts serving.
+func startTCP(listenAddr string, port int, srv Server) (net.Listener, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(normalizeListenAddr(listenAddr), fmt.Sprintf("%d", port)))
 	if err != nil {
 		return nil, err
 	}
@@ -125,14 +133,13 @@ func startTCP(port int, srv Server) (net.Listener, error) {
 	return ln, nil
 }
 
-// startTLS creates a TLS listener on the given port and starts serving.
-func startTLS(port int, srv Server) (net.Listener, error) {
+// startTLS creates a TLS listener on the given address/port and starts serving.
+func startTLS(listenAddr string, port int, srv Server) (net.Listener, error) {
 	cert, err := util.GenerateSelfSignedCert()
 	if err != nil {
 		return nil, err
 	}
-	addr := fmt.Sprintf(":%d", port)
-	ln, err := tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}})
+	ln, err := tls.Listen("tcp", net.JoinHostPort(normalizeListenAddr(listenAddr), fmt.Sprintf("%d", port)), &tls.Config{Certificates: []tls.Certificate{cert}})
 	if err != nil {
 		return nil, err
 	}

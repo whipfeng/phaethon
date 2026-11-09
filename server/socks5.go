@@ -759,5 +759,5 @@ func (r *socks5UDPRelay) Close() {
 
 func StartSocks5(mapping *config.Mapping) (net.Listener, error) {
 	srv := &Socks5Server{BaseServer: BaseServer{Mapping: mapping}}
-	return startTCP(mapping.Port, srv)
+	return startTCP(mapping.ListenAddr, mapping.Port, srv)
 }

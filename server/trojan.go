@@ -46,7 +46,9 @@ func (s *TrojanServer) HandleConn(clientConn net.Conn) {
 		return
 	}
 	if string(passwordBuf) != s.Password {
-		util.LogModuleInfo("trojan", "[%s] auth fail from %s, expected=%s, got=%s", s.Mapping.Name, clientConn.RemoteAddr(), s.Password, string(passwordBuf))
+		// Never log the full password hash: it is the credential used for auth.
+		util.LogModuleInfo("trojan", "[%s] auth fail from %s (expected fp=%s, got fp=%s)",
+			s.Mapping.Name, clientConn.RemoteAddr(), fpPrefix(s.Password), fpPrefix(string(passwordBuf)))
 		return
 	}
 
@@ -452,12 +454,21 @@ func (s *TrojanServer) handleUDPAssociate(tlsConn net.Conn) {
 	}
 }
 
+// fpPrefix returns a short, non-reversible-looking prefix for log messages.
+func fpPrefix(s string) string {
+	const n = 8
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
 func StartTrojan(mapping *config.Mapping) (net.Listener, error) {
 	srv := &TrojanServer{
 		BaseServer: BaseServer{Mapping: mapping},
 		Password:   util.Sha224Hex(mapping.Password),
 	}
-	return startTLS(mapping.Port, srv)
+	return startTLS(mapping.ListenAddr, mapping.Port, srv)
 }
 
 // StartTrojanSNI starts a Trojan server with SNI-based routing for multiple mappings on the same port

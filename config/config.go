@@ -158,10 +158,13 @@ func (p *Proxy) IsDirect() bool {
 // ========== Mapping ==========
 
 type Mapping struct {
-	Name                  string `yaml:"name" json:"name"`
-	Enabled               *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Type                  string `yaml:"type" json:"type"`
-	Port                  int    `yaml:"port" json:"port"`
+	Name    string `yaml:"name" json:"name"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Type    string `yaml:"type" json:"type"`
+	Port    int    `yaml:"port" json:"port"`
+	// ListenAddr is the address the inbound listener binds to.
+	// Empty means "0.0.0.0" (all interfaces), preserving historical behavior.
+	ListenAddr            string `yaml:"listen-addr,omitempty" json:"listen-addr,omitempty"`
 	ReverseAddress        string `yaml:"reverse-address,omitempty" json:"reverse-address,omitempty"`
 	ReverseProxy          string `yaml:"reverse-proxy,omitempty" json:"reverse-proxy,omitempty"`
 	ReverseMaxConnections int    `yaml:"reverse-max-connections,omitempty" json:"reverse-max-connections,omitempty"`
@@ -275,9 +278,9 @@ type ProxyGroup struct {
 	// Subscription names the subscription provider this group draws nodes from.
 	// Selection and filter are per-group, so multiple groups can reference the
 	// same subscription and choose different nodes.
-	Subscription         string   `yaml:"subscription,omitempty" json:"subscription,omitempty"`
-	SubscriptionFilter   string   `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
-	ActiveMember         string   `yaml:"active-member,omitempty" json:"active-member,omitempty"`
+	Subscription       string `yaml:"subscription,omitempty" json:"subscription,omitempty"`
+	SubscriptionFilter string `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
+	ActiveMember       string `yaml:"active-member,omitempty" json:"active-member,omitempty"`
 
 	idx       int64 // for load-balance
 	healthMap map[string]*healthStatus
@@ -1240,10 +1243,10 @@ type AdminConfig struct {
 	Username    string `yaml:"username"`
 	Password    string `yaml:"password"`
 	PublicKey   string `yaml:"public-key,omitempty"` // PEM-encoded RSA/ECDSA public key for signature auth
-	TLSCert     string `yaml:"tls-cert,omitempty"`     // File path to TLS certificate (PEM). If empty, uses state/tls-cert (auto-generated)
-	TLSKey      string `yaml:"tls-key,omitempty"`      // File path to TLS private key (PEM). If empty, uses state/tls-key (auto-generated)
-	ClientCA    string `yaml:"client-ca,omitempty"`    // File path to CA certificate for mTLS client verification (PEM)
-	MeshOnly    bool   `yaml:"mesh-only,omitempty"`    // Only accessible via mesh network, no network listener
+	TLSCert     string `yaml:"tls-cert,omitempty"`   // File path to TLS certificate (PEM). If empty, uses state/tls-cert (auto-generated)
+	TLSKey      string `yaml:"tls-key,omitempty"`    // File path to TLS private key (PEM). If empty, uses state/tls-key (auto-generated)
+	ClientCA    string `yaml:"client-ca,omitempty"`  // File path to CA certificate for mTLS client verification (PEM)
+	MeshOnly    bool   `yaml:"mesh-only,omitempty"`  // Only accessible via mesh network, no network listener
 
 	// Package upload/publish (admin console binary deployment).
 	// PackageUploadMaxMB caps uploaded package size; 0 means default (100MB).
@@ -1548,4 +1551,3 @@ func (m *MeshConfig) GetStaticDomainSuffixes() []MeshStaticDomainSuffix {
 	}
 	return m.StaticDomainSuffixes
 }
-

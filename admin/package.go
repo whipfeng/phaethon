@@ -21,8 +21,18 @@ import (
 )
 
 const (
-	// packagesDir is where uploaded .pkg files are stored.
+	// packagesDir is where activated .pkg files are stored. The watchdog scans
+	// only this directory, so packages here can change the running version.
 	packagesDir = "data/packages"
+
+	// pendingPackagesDir holds uploaded/received packages that have not been
+	// activated yet. The watchdog never scans it; an administrator must
+	// explicitly activate a version before it can take effect.
+	pendingPackagesDir = "data/packages-pending"
+
+	// workerPinPath pins the version the watchdog should run. It is written
+	// only by an explicit activation.
+	workerPinPath = "data/state/worker-pin"
 
 	defaultPackageUploadMaxMB = 100
 
@@ -91,7 +101,7 @@ func (s *AdminServer) listPackages() []*db.PackageMeta {
 	// Filter out entries whose .pkg file vanished
 	var result []*db.PackageMeta
 	for _, pkg := range packages {
-		if _, err := os.Stat(filepath.Join(packagesDir, pkg.ID+".pkg")); err == nil {
+		if _, ok := pkgPathFor(pkg.ID); ok {
 			result = append(result, pkg)
 		} else {
 			// Clean up orphaned metadata
@@ -99,6 +109,26 @@ func (s *AdminServer) listPackages() []*db.PackageMeta {
 		}
 	}
 	return result
+}
+
+// pkgPathFor returns the on-disk path of a package, checking the active
+// directory first and then the pending directory.
+func pkgPathFor(id string) (string, bool) {
+	for _, dir := range []string{packagesDir, pendingPackagesDir} {
+		p := filepath.Join(dir, id+".pkg")
+		if _, err := os.Stat(p); err == nil {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// writeWorkerPin records the version the watchdog should run.
+func writeWorkerPin(version string) error {
+	if err := os.MkdirAll(filepath.Dir(workerPinPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(workerPinPath, []byte(version), 0644)
 }
 
 // apiPackageUpload handles POST /api/packages/upload — multipart .pkg upload.
@@ -127,9 +157,10 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create packages dir
-	if err := os.MkdirAll(packagesDir, 0755); err != nil {
-		httpError(w, "create packages dir: "+err.Error(), http.StatusInternalServerError)
+	// Uploads land in the pending directory: they never change the running
+	// version until an administrator explicitly activates one.
+	if err := os.MkdirAll(pendingPackagesDir, 0755); err != nil {
+		httpError(w, "create pending dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -142,7 +173,7 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	id := hex.EncodeToString(idBytes)
 
 	// Save to temp file
-	tmpPath := filepath.Join(packagesDir, id+".pkg.tmp")
+	tmpPath := filepath.Join(pendingPackagesDir, id+".pkg.tmp")
 	tmpFile, err := os.Create(tmpPath)
 	if err != nil {
 		httpError(w, "create temp file: "+err.Error(), http.StatusInternalServerError)
@@ -172,8 +203,8 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rename to final path
-	pkgPath := filepath.Join(packagesDir, id+".pkg")
+	// Rename to final path (pending until activated)
+	pkgPath := filepath.Join(pendingPackagesDir, id+".pkg")
 	if err := os.Rename(tmpPath, pkgPath); err != nil {
 		os.Remove(tmpPath)
 		httpError(w, "finalize upload: "+err.Error(), http.StatusInternalServerError)
@@ -204,16 +235,8 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 
 	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, info.Version, info.Platform, info.Arch)
 
-	// Distribute to mesh peers
-	if pkgData, err := os.ReadFile(pkgPath); err == nil {
-		util.LogModuleInfo("admin", "read pkg for distribution: %d bytes", len(pkgData))
-		go s.DistributePackage(pkgData)
-	} else {
-		util.LogModuleError("admin", "failed to read pkg for distribution: %v", err)
-	}
-
-	// Check if there's a newer version, exit if so
-	go s.checkForNewerVersion(contents)
+	// Stored as pending only: no automatic upgrade, no automatic distribution.
+	util.LogModuleInfo("admin", "package stored as pending: version=%s (activate to apply)", info.Version)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
@@ -255,8 +278,8 @@ func (s *AdminServer) apiPackageDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pkgPath := filepath.Join(packagesDir, id+".pkg")
-	if _, err := os.Stat(pkgPath); err != nil {
+	pkgPath, ok := pkgPathFor(id)
+	if !ok {
 		httpError(w, "package file missing", http.StatusNotFound)
 		return
 	}
@@ -290,48 +313,60 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Version monotonic check: must be higher than current latest for same platform/arch
-	packages := s.listPackages()
+	// Activation is explicit and allows any downloaded version, including an
+	// older one (rollback). No monotonic restriction.
 	platform := info.Platform
 	arch := info.Arch
-	newVersion := info.Version
 
-	// Find current latest version for this platform/arch
-	var currentLatest string
-	for _, pkg := range packages {
-		if pkg.Platform == platform && pkg.Arch == arch && pkg.Published {
-			if currentLatest == "" || p2p.CompareVersions(pkg.Version, currentLatest) > 0 {
-				currentLatest = pkg.Version
+	// Move the package from pending to active; the watchdog scans only active.
+	if p, ok := pkgPathFor(id); ok {
+		activePath := filepath.Join(packagesDir, id+".pkg")
+		if p != activePath {
+			if err := os.MkdirAll(packagesDir, 0755); err != nil {
+				httpError(w, "create packages dir: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := os.Rename(p, activePath); err != nil {
+				httpError(w, "activate package: "+err.Error(), http.StatusInternalServerError)
+				return
 			}
 		}
-	}
-
-	// Check if new version is higher
-	if currentLatest != "" && p2p.CompareVersions(newVersion, currentLatest) <= 0 {
-		httpError(w, fmt.Sprintf("version must be higher than current latest (%s)", currentLatest), http.StatusBadRequest)
+	} else {
+		httpError(w, "package file missing", http.StatusNotFound)
 		return
 	}
 
-	// Mark this as published
 	info.Published = true
 	if err := db.PutPackage(info); err != nil {
 		httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := writeWorkerPin(info.Version); err != nil {
+		httpError(w, "write worker pin: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	util.LogModuleInfo("admin", "package published: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
+	util.LogModuleInfo("admin", "package activated: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
 
-	// Read the package file and distribute to mesh peers
-	pkgPath := filepath.Join(packagesDir, id+".pkg")
-	if pkgData, err := os.ReadFile(pkgPath); err == nil {
+	// Distribution is an explicit admin action, performed only on activation.
+	if pkgData, err := os.ReadFile(filepath.Join(packagesDir, id+".pkg")); err == nil {
 		go s.DistributePackage(pkgData)
-		// Apply retention after distribution
 		go s.applyRetention(platform, arch)
 	}
 
+	restart := r.URL.Query().Get("restart")
+	if restart == "now" {
+		go func() {
+			time.Sleep(time.Second)
+			os.Exit(0)
+		}()
+	}
+
 	jsonResponse(w, map[string]interface{}{
-		"status": "published",
-		"id":     id,
+		"status":  "activated",
+		"id":      id,
+		"version": info.Version,
+		"restart": restart,
 	})
 }
 
@@ -349,7 +384,9 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	os.Remove(filepath.Join(packagesDir, id+".pkg"))
+	if p, ok := pkgPathFor(id); ok {
+		os.Remove(p)
+	}
 	_ = db.DeletePackage(id)
 	util.LogModuleInfo("admin", "package deleted: %s", id)
 	jsonResponse(w, map[string]string{"status": "deleted"})
@@ -382,7 +419,7 @@ func (s *AdminServer) apiPackageItem(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "download":
 		s.apiPackageDownload(w, r)
-	case "publish":
+	case "publish", "activate":
 		s.apiPackagePublish(w, r)
 	case "":
 		// DELETE /api/packages/{id}
@@ -428,7 +465,8 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Read body (.pkg file)
+	// Read body (.pkg file), bounded so a peer cannot exhaust memory.
+	r.Body = http.MaxBytesReader(w, r.Body, s.packageMaxUploadBytes())
 	pkgData, err := io.ReadAll(r.Body)
 	if err != nil {
 		httpError(w, "read body failed", http.StatusBadRequest)
@@ -464,19 +502,16 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 
 	util.LogModuleInfo("admin", "received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
 
-	// Check if there's a newer version, exit if so
-	go s.checkForNewerVersion(contents)
-
-	// Continue distributing to other peers (flood fill)
-	go s.DistributePackage(pkgData)
+	// Received packages stay pending: no automatic upgrade and no automatic
+	// forwarding. An administrator decides whether to activate or distribute.
 
 	w.WriteHeader(http.StatusOK)
 }
 
 // saveExternalPackage saves a package received from a mesh peer.
 func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgContents) (string, error) {
-	if err := os.MkdirAll(packagesDir, 0755); err != nil {
-		return "", fmt.Errorf("create packages dir: %w", err)
+	if err := os.MkdirAll(pendingPackagesDir, 0755); err != nil {
+		return "", fmt.Errorf("create pending dir: %w", err)
 	}
 
 	// Random local file ID — cross-node uniqueness is (platform, arch, version)
@@ -486,8 +521,8 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 	}
 	id := hex.EncodeToString(idBytes)
 
-	// Save .pkg file
-	pkgPath := filepath.Join(packagesDir, id+".pkg")
+	// Save .pkg file (pending until activated)
+	pkgPath := filepath.Join(pendingPackagesDir, id+".pkg")
 	if err := os.WriteFile(pkgPath, pkgData, 0644); err != nil {
 		return "", err
 	}
@@ -506,7 +541,7 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 		GitCommit:      contents.Meta.GitCommit,
 		GoVersion:      contents.Meta.GoVersion,
 		BuildTag:       contents.Meta.BuildTag,
-		Published:      true, // Auto-publish received packages
+		Published:      false, // pending until an administrator activates it
 	}
 
 	if err := db.PutPackage(info); err != nil {
@@ -808,14 +843,8 @@ func (s *AdminServer) checkForNewerVersion(contents *signing.PkgContents) {
 		return
 	}
 
-	util.LogModuleInfo("admin", "detected newer version %s > current %s, exiting for watchdog restart...",
+	// Notify only. Upgrades are explicit: an administrator activates a version
+	// from the admin UI, which writes the worker pin.
+	util.LogModuleInfo("admin", "newer version available: %s > current %s (activate manually to apply)",
 		contents.Meta.Version, currentVersion)
-
-	// 3. Exit immediately, watchdog will restart with new version
-	// Use os.Exit(0) instead of SIGTERM for immediate exit (no graceful shutdown)
-	// This is safe because we're about to restart anyway
-	go func() {
-		time.Sleep(1 * time.Second)
-		os.Exit(0)
-	}()
 }

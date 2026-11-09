@@ -41,5 +41,5 @@ func (s *DirectServer) HandleConn(clientConn net.Conn) {
 
 func StartDirect(mapping *config.Mapping) (net.Listener, error) {
 	srv := &DirectServer{BaseServer: BaseServer{Mapping: mapping}}
-	return startTCP(mapping.Port, srv)
+	return startTCP(mapping.ListenAddr, mapping.Port, srv)
 }

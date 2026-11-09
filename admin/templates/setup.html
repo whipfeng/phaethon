@@ -414,7 +414,8 @@
             .then(r => r.json())
             .then(data => {
                 const select = document.getElementById('setup-proxy');
-                data.proxies.forEach(p => {
+                const list = Array.isArray(data) ? data : (data.proxies || []);
+                list.forEach(p => {
                     const opt = document.createElement('option');
                     opt.value = p.name;
                     opt.textContent = `${p.name} (${p.type})`;

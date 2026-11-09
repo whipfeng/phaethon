@@ -64,16 +64,16 @@ type DynamicResource struct {
 
 // ControlManager manages control connections and their dynamic resources.
 type ControlManager struct {
-	mu           sync.RWMutex
-	sessions     map[string]*ControlSession  // address -> session
-	resources    map[string]*DynamicResource // address -> resource
-	
+	mu        sync.RWMutex
+	sessions  map[string]*ControlSession  // address -> session
+	resources map[string]*DynamicResource // address -> resource
+
 	// Dynamic runtime state (not persisted to DB)
-	dynamicProxies   map[string]*config.Proxy   // name -> proxy
-	dynamicMatchers  []config.Matcher           // dynamic routing rules
-	dynamicTimeRanges []config.TimeRange        // time ranges for dynamic rules
-	dynamicRules     []string                   // raw rule strings
-	
+	dynamicProxies    map[string]*config.Proxy // name -> proxy
+	dynamicMatchers   []config.Matcher         // dynamic routing rules
+	dynamicTimeRanges []config.TimeRange       // time ranges for dynamic rules
+	dynamicRules      []string                 // raw rule strings
+
 	portMin      atomic.Int64  // dynamic port range min (0 = unrestricted)
 	portMax      atomic.Int64  // dynamic port range max (0 = unrestricted)
 	portNext     int           // next port to try within range (round-robin)
@@ -81,6 +81,14 @@ type ControlManager struct {
 	pendingMu    sync.Mutex
 	pendingRegs  map[string]bool // reverseID#seq -> registration in flight
 }
+
+const (
+	// defaultTCPPortMin/Max bound dynamic reverse listeners when no explicit
+	// range is configured. Privileged ports (<1024) are never allocated.
+	defaultTCPPortMin = 20000
+	defaultTCPPortMax = 39999
+	minDynamicPort    = 1024
+)
 
 // parsePortRange parses a "min-max" string into (min, max). Returns (0,0) if empty.
 func parsePortRange(s string) (min, max int, err error) {
@@ -111,6 +119,10 @@ func NewControlManager(dataDir string) *ControlManager {
 		bindingStore:      NewBindingStore(dataDir),
 		pendingRegs:       make(map[string]bool),
 	}
+	// Safe default: never allocate privileged ports, even when unconfigured.
+	m.portMin.Store(defaultTCPPortMin)
+	m.portMax.Store(defaultTCPPortMax)
+
 	// Load TCPPortRange from database
 	if tcpPortRange, err := db.GetTCPPortRange(); err == nil && tcpPortRange != "" {
 		min, max, err := parsePortRange(tcpPortRange)
@@ -122,19 +134,24 @@ func NewControlManager(dataDir string) *ControlManager {
 	return m
 }
 
-// SetPortRange 热更新 TCP 反连动态端口范围（0,0 = 不限制）。
-// 仅影响后续注册的分配，已绑定端口不受影响。
+// SetPortRange 热更新 TCP 反连动态端口范围。
+// 0,0 表示使用默认范围（20000-39999），不再表示“不限制”；
+// 低于 1024 的范围直接拒绝。仅影响后续注册的分配。
 func (m *ControlManager) SetPortRange(min, max int) {
 	if min < 0 || max < 0 || (min > 0 && max > 0 && min > max) {
 		util.LogModuleWarn("control", "ignore invalid TCP port range: %d-%d", min, max)
 		return
 	}
 	if min == 0 || max == 0 {
-		min, max = 0, 0
+		min, max = defaultTCPPortMin, defaultTCPPortMax
+	}
+	if min < minDynamicPort {
+		util.LogModuleWarn("control", "ignore TCP port range %d-%d: ports below %d are privileged", min, max, minDynamicPort)
+		return
 	}
 	m.portMin.Store(int64(min))
 	m.portMax.Store(int64(max))
-	util.LogModuleInfo("control", "TCP port range hot-updated: %d-%d (0-0 = unrestricted)", min, max)
+	util.LogModuleInfo("control", "TCP port range hot-updated: %d-%d", min, max)
 }
 
 // GetBindings returns a snapshot of the current reverse port bindings.
@@ -362,8 +379,8 @@ func (m *ControlManager) handleRegister(controlAddr string, registryAddr string,
 	preferred := req.PreferredPort
 
 	if preferred > 0 {
-		if preferred > 65535 {
-			return reverse.ControlReply{Status: "error", Error: fmt.Sprintf("preferred port %d out of valid range (1-65535)", preferred)}
+		if preferred < minDynamicPort || preferred > 65535 {
+			return reverse.ControlReply{Status: "error", Error: fmt.Sprintf("preferred port %d out of valid range (%d-65535)", preferred, minDynamicPort)}
 		}
 		if portMin > 0 && portMax > 0 && (preferred < portMin || preferred > portMax) {
 			return reverse.ControlReply{Status: "error", Error: fmt.Sprintf("preferred port %d outside configured range %d-%d", preferred, portMin, portMax)}
@@ -692,7 +709,7 @@ func (m *ControlManager) insertRoutingRule(mapping *config.Mapping, proxy *confi
 		m.dynamicMatchers = append([]config.Matcher{matcher}, m.dynamicMatchers...)
 		m.dynamicTimeRanges = append([]config.TimeRange{{}}, m.dynamicTimeRanges...)
 		m.dynamicRules = append([]string{ruleStr}, m.dynamicRules...)
-		
+
 		// Inject into global RuleMatcher (dynamic config participates in matching)
 		m.mu.Unlock()
 		if ruleMatcher, err := db.GetMatcher(); err == nil {
@@ -798,7 +815,7 @@ func (m *ControlManager) HandleClose(address string) {
 			mappingName = resource.MappingName
 		}
 		m.mu.Unlock()
-		
+
 		// Remove from global RuleMatcher
 		if proxyName != "" {
 			if ruleMatcher, err := db.GetMatcher(); err == nil {
@@ -902,7 +919,7 @@ func (m *ControlManager) ForceRemoveBinding(reverseID string, seq int) error {
 			mappingName = res.MappingName
 		}
 		m.mu.Unlock()
-		
+
 		// Remove from global RuleMatcher
 		if proxyName != "" {
 			if ruleMatcher, err := db.GetMatcher(); err == nil {

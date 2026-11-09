@@ -58,6 +58,12 @@ type pendingQuery struct {
 	query      []byte            // original query packet (carries the client TXID)
 	remoteAddr tcpip.FullAddress // client to respond to
 	at         time.Time         // registration time, for sweep expiry
+	// qtype is the query type from the client. Only A(1) answers may be
+	// synthesised from the fake-IP cache; other types are relayed verbatim.
+	qtype uint16
+	// upstream is the remote GIP:53 the query was sent to. Responses from any
+	// other source are treated as spoofed and dropped (D18).
+	upstream net.IP
 }
 
 type dnsQuery struct {
@@ -275,41 +281,80 @@ func (h *DNSHijacker) forwarderListener(sock tcpip.Endpoint, stopCh <-chan struc
 			util.LogModuleDebug("dns", "[DNS-FWD] packet header: flags=0x%04x qdcount=%d ancount=%d", flags, qdcount, ancount)
 		}
 
-		// Parse response
-		domain, ip, ttl := parseDNSResponseForCache(packetBytes)
-		if domain == "" || ip == nil {
-			util.LogModuleWarn("dns", "[DNS-FWD] failed to parse response: domain=%s ip=%v len=%d", domain, ip, len(packetBytes))
+		// D18: only validated responses are trusted. A DNS response must set QR,
+		// come from an upstream GIP we actually queried for this question, and
+		// carry a TXID that matches one of the waiting client queries.
+		if len(packetBytes) < 12 || packetBytes[2]&0x80 == 0 {
+			util.LogModuleWarn("dns", "[DNS-FWD] dropping non-response from %s:%d", res.RemoteAddr.Addr, res.RemoteAddr.Port)
+			continue
+		}
+		domain, _, okDomain := parseDNSResponseDomain(packetBytes)
+		if !okDomain || domain == "" {
+			util.LogModuleWarn("dns", "[DNS-FWD] dropping response without question section from %s:%d", res.RemoteAddr.Addr, res.RemoteAddr.Port)
+			continue
+		}
+		respTXID := uint16(packetBytes[0])<<8 | uint16(packetBytes[1])
+		srcIP := net.IP(res.RemoteAddr.Addr.AsSlice()).To4()
+		key := strings.ToLower(domain)
+
+		h.pendingMu.Lock()
+		waiters := h.pendingQueries[key]
+		var matched []*pendingQuery
+		var rest []*pendingQuery
+		for _, pq := range waiters {
+			queryTXID := uint16(pq.query[0])<<8 | uint16(pq.query[1])
+			if pq.upstream != nil && pq.upstream.Equal(srcIP) && queryTXID == respTXID {
+				matched = append(matched, pq)
+			} else {
+				rest = append(rest, pq)
+			}
+		}
+		if len(rest) == 0 {
+			delete(h.pendingQueries, key)
+		} else {
+			h.pendingQueries[key] = rest
+		}
+		h.pendingMu.Unlock()
+
+		if len(matched) == 0 {
+			util.LogModuleWarn("dns", "[DNS-FWD] dropping unverified response for %s from %s:%d txid=0x%04x (no matching pending query)",
+				domain, srcIP, res.RemoteAddr.Port, respTXID)
 			continue
 		}
 
-		util.LogModuleDebug("dns", "[DNS-FWD] parsed response: domain=%s ip=%s ttl=%v", domain, ip, ttl)
+		// Cache only validated A answers.
+		cachedDomain, ip, ttl := parseDNSResponseForCache(packetBytes)
+		if ip == nil {
+			util.LogModuleDebug("dns", "[DNS-FWD] verified response for %s has no A record (qtype non-A or empty)", domain)
+		} else {
+			if cachedDomain != "" {
+				domain = cachedDomain
+			}
+			h.cache.Set(domain, ip, ttl)
+			util.LogModuleDebug("dns", "[DNS-FWD] parsed response: domain=%s ip=%s ttl=%v", domain, ip, ttl)
+		}
 
-		// 1. Cache the response
-		h.cache.Set(domain, ip, ttl)
-
-		// 2. Respond to all waiting clients for this domain (no worker
-		// involved). Each waiter gets a response built from its own query
-		// packet, so per-client TXIDs are preserved.
-		key := strings.ToLower(domain)
-		h.pendingMu.Lock()
-		waiters := h.pendingQueries[key]
-		delete(h.pendingQueries, key)
-		h.pendingMu.Unlock()
-
-		if len(waiters) > 0 {
-			for _, pq := range waiters {
-				resp := buildDNSResponse(pq.query, ip.To4())
-				if resp == nil {
-					continue
-				}
-				if _, werr := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); werr != nil {
-					util.LogModuleWarn("dns", "[DNS-FWD] write response for %s to %s:%d fail: %v", domain, pq.remoteAddr.Addr, pq.remoteAddr.Port, werr)
-				} else {
-					util.LogModuleDebug("dns", "[DNS-FWD] responded to client: domain=%s ip=%s to %s:%d", domain, ip, pq.remoteAddr.Addr, pq.remoteAddr.Port)
+		// Answer every waiter: A queries get a synthesised answer from the
+		// validated A record, other qtypes get the upstream answer relayed
+		// verbatim with the client's own TXID restored.
+		for _, pq := range matched {
+			var resp []byte
+			if pq.qtype == 1 && ip != nil {
+				resp = buildDNSResponse(pq.query, ip.To4())
+			} else {
+				resp = append([]byte(nil), packetBytes...)
+				if len(resp) >= 2 && len(pq.query) >= 2 {
+					resp[0], resp[1] = pq.query[0], pq.query[1]
 				}
 			}
-		} else {
-			util.LogModuleDebug("dns", "[DNS-FWD] no pending query for %s (cached only), pendingCount=%d", domain, len(h.pendingQueries))
+			if resp == nil {
+				continue
+			}
+			if _, werr := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &pq.remoteAddr}); werr != nil {
+				util.LogModuleWarn("dns", "[DNS-FWD] write response for %s to %s:%d fail: %v", domain, pq.remoteAddr.Addr, pq.remoteAddr.Port, werr)
+			} else {
+				util.LogModuleDebug("dns", "[DNS-FWD] responded to client: domain=%s qtype=%d to %s:%d", domain, pq.qtype, pq.remoteAddr.Addr, pq.remoteAddr.Port)
+			}
 		}
 	}
 }
@@ -496,8 +541,9 @@ func (h *DNSHijacker) Resolve(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse query")
 	}
 
-	// Return empty response for AAAA queries (no IPv6 support)
-	if qtype == 28 { // AAAA
+	// Return empty response for AAAA queries (no IPv6 support).
+	// D18: other non-A qtypes get NODATA instead of an A answer.
+	if qtype == 28 || qtype != 1 {
 		resp := buildDNSEmptyResponse(query)
 		if resp == nil {
 			return nil, fmt.Errorf("failed to build empty response")
@@ -591,15 +637,15 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 
 	util.LogModuleDebug("dns", "[DNS-DEBUG] processQuery: domain=%s from=%s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 
-	// Return empty response for AAAA queries (no IPv6 support)
-	if qtype == 28 { // AAAA
-		util.LogModuleDebug("dns", "tun dns: AAAA query for %s, returning empty response", domain)
+	// Return empty response for AAAA queries (no IPv6 support).
+	// D18: any other qtype (MX/TXT/SRV/HTTPS/PTR/…) has no meaningful local
+	// answer either — return NODATA instead of fabricating an A record.
+	if qtype == 28 || qtype != 1 {
+		util.LogModuleDebug("dns", "tun dns: qtype %d for %s, returning empty response", qtype, domain)
 		resp := buildDNSEmptyResponse(packet)
 		if resp != nil {
 			if _, err := h.udpEP.Write(&SlicePayload{Data: resp}, tcpip.WriteOptions{To: &remoteAddr}); err != nil {
 				util.LogModuleWarn("dns", "tun dns: write empty response for %s to %s:%d fail: %v", domain, remoteAddr.Addr, remoteAddr.Port, err)
-			} else {
-				util.LogModuleDebug("dns", "[DNS-DEBUG] processQuery: sent AAAA empty response for %s to %s:%d", domain, remoteAddr.Addr, remoteAddr.Port)
 			}
 		}
 		return
@@ -681,20 +727,23 @@ func (h *DNSHijacker) forwardToRemoteAsync(remoteSubnet *net.IPNet, query []byte
 	copy(remoteGIP, baseIP)
 	remoteGIP[3] |= 3
 
-	domain, _, _ := parseDNSQueryDomain(query)
+	domain, qtype, _ := parseDNSQueryDomain(query)
 	if domain == "" {
 		h.answerSERVFAIL(query, remoteAddr, "no domain in query")
 		return
 	}
 	key := strings.ToLower(domain)
 
-	util.LogModuleDebug("dns", "[DNS-FWD] START: domain=%s remoteGIP=%s", domain, remoteGIP)
+	util.LogModuleDebug("dns", "[DNS-FWD] START: domain=%s qtype=%d remoteGIP=%s", domain, qtype, remoteGIP)
 
-	// 1. Cache hit (possibly from a late response cached by the listener)
-	if cachedIP := h.cache.Get(domain); cachedIP != nil {
-		util.LogModuleDebug("dns", "[DNS-FWD] CACHE HIT: domain=%s ip=%s (late response cached)", domain, cachedIP)
-		h.answerRemote(query, remoteAddr, cachedIP)
-		return
+	// 1. Cache hit (possibly from a late response cached by the listener).
+	// The cache holds A records only, so it applies to A queries exclusively.
+	if qtype == 1 {
+		if cachedIP := h.cache.Get(domain); cachedIP != nil {
+			util.LogModuleDebug("dns", "[DNS-FWD] CACHE HIT: domain=%s ip=%s (late response cached)", domain, cachedIP)
+			h.answerRemote(query, remoteAddr, cachedIP)
+			return
+		}
 	}
 
 	// 2. Forwarder not initialized: a persistent-socket failure is systemic
@@ -715,7 +764,7 @@ func (h *DNSHijacker) forwardToRemoteAsync(remoteSubnet *net.IPNet, query []byte
 	// timeout.
 	queryCopy := make([]byte, len(query))
 	copy(queryCopy, query)
-	pq := &pendingQuery{query: queryCopy, remoteAddr: remoteAddr, at: time.Now()}
+	pq := &pendingQuery{query: queryCopy, remoteAddr: remoteAddr, at: time.Now(), qtype: qtype, upstream: remoteGIP}
 	h.pendingMu.Lock()
 	h.pendingQueries[key] = append(h.pendingQueries[key], pq)
 	pendingCount := len(h.pendingQueries)

@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"container/list"
 	"net"
 	"sync"
 
@@ -9,16 +10,36 @@ import (
 )
 
 // FakeIPPool manages fake IP allocation.
+//
+// Allocation policy (D28): addresses are handed out in ascending order from the
+// allocatable range; when the pool is exhausted the least-recently-used mapping
+// is evicted (doubly-linked list, O(1) touch/evict) and its address reused.
+// Database persistence happens on a background writer so a slow bolt write
+// never blocks DNS resolution, and onChange runs outside the pool lock.
 type FakeIPPool struct {
 	mu         sync.RWMutex
 	domainToIP map[string]net.IP
 	ipToDomain map[string]string
 	ipToRealIP map[string]net.IP // Fake-IP -> real IP cache
+	lru        *list.List        // front = least recently used
+	lruItems   map[string]*list.Element
+	free       []uint32 // allocatable addresses, ascending
+	freeHead   int      // next unused element of free
 	reserved   map[uint32]bool
-	nextIP     uint32
 	poolStart  uint32 // first IP in pool range
 	poolEnd    uint32 // last IP in pool range
 	onChange   func() // callback when pool stats change
+	disabled   bool   // pool misconfigured (no allocatable addresses)
+
+	persistOnce sync.Once
+	persistCh   chan fakeIPPersistOp
+}
+
+// fakeIPPersistOp is one queued database mutation.
+type fakeIPPersistOp struct {
+	put    bool
+	domain string
+	ip     string
 }
 
 // NewFakeIPPoolWithSubnet creates a Fake-IP pool from a custom subnet.
@@ -40,24 +61,40 @@ func NewFakeIPPoolWithSubnet(subnet *net.IPNet, skip int) *FakeIPPool {
 		reserved[start+i] = true
 	}
 
-	firstAlloc := start + uint32(skip) + 1
+	// D28: capacity is validated once at construction — an empty allocatable
+	// range is a configuration error, not something to paper over at runtime.
+	free := make([]uint32, 0, total)
+	for n := start; n <= end; n++ {
+		if reserved[n] {
+			continue
+		}
+		free = append(free, n)
+	}
 
-	return &FakeIPPool{
+	p := &FakeIPPool{
 		domainToIP: make(map[string]net.IP),
 		ipToDomain: make(map[string]string),
 		ipToRealIP: make(map[string]net.IP),
+		lru:        list.New(),
+		lruItems:   make(map[string]*list.Element),
+		free:       free,
 		reserved:   reserved,
-		nextIP:     firstAlloc,
 		poolStart:  start,
 		poolEnd:    end,
 	}
+	if len(free) == 0 {
+		p.disabled = true
+		util.LogModuleError("dns", "[FAKEIP] pool %s has no allocatable address (subnet=%s skip=%d): fake-IP disabled",
+			subnet.String(), subnet.String(), skip)
+	}
+	return p
 }
 
 // SetOnChange sets a callback that is invoked when the pool stats change.
 func (p *FakeIPPool) SetOnChange(fn func()) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.onChange = fn
+	p.mu.Unlock()
 }
 
 // LoadFromDB loads existing FakeIP mappings from the database.
@@ -74,120 +111,111 @@ func (p *FakeIPPool) LoadFromDB() {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	loaded := 0
 	for _, entry := range mappings {
 		ip := net.ParseIP(entry.IP)
-		if ip == nil {
+		if ip == nil || !p.Contains(ip) {
 			continue
 		}
-
-		// Skip if IP is outside our pool range
-		if !p.Contains(ip) {
-			continue
-		}
-
 		ipStr := ip.String()
 		p.domainToIP[entry.Domain] = ip
 		p.ipToDomain[ipStr] = entry.Domain
+		p.lruItems[entry.Domain] = p.lru.PushBack(entry.Domain)
 
-		// Update nextIP to avoid collision
-		ipNum := ipToUint32(ip)
-		if ipNum >= p.nextIP {
-			p.nextIP = ipNum + 1
-			if p.nextIP > p.poolEnd {
-				p.nextIP = p.poolStart
+		// Take the address out of the free list (ascending scan is fine: this
+		// runs once at startup and restores at most one full pool).
+		target := ipToUint32(ip)
+		for i := p.freeHead; i < len(p.free); i++ {
+			if p.free[i] == target {
+				p.free[i] = p.free[p.freeHead]
+				p.free[p.freeHead] = target
+				p.freeHead++
+				break
 			}
 		}
-
 		loaded++
 	}
+	onChange := p.onChange
+	p.mu.Unlock()
 
 	if loaded > 0 {
 		util.LogModuleInfo("dns", "Loaded %d FakeIP mappings from db", loaded)
 	}
+	if onChange != nil && loaded > 0 {
+		onChange()
+	}
 }
 
 // Lookup returns a Fake-IP for the given domain, allocating if necessary.
+// Returns nil only when the pool was misconfigured (no allocatable addresses).
 func (p *FakeIPPool) Lookup(domain string) net.IP {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	if p.disabled {
+		p.mu.Unlock()
+		return nil
+	}
 	if ip, ok := p.domainToIP[domain]; ok {
-		util.LogModuleDebug("dns", "[FAKEIP] Lookup cache hit: %s -> %s", domain, ip)
+		if el, ok2 := p.lruItems[domain]; ok2 {
+			p.lru.MoveToBack(el) // mark most recently used
+		}
+		p.mu.Unlock()
 		return ip
 	}
 
-	for {
-		ip := uint32ToIP(p.nextIP)
-		p.nextIP++
-		if p.nextIP > p.poolEnd {
-			p.nextIP = p.poolStart
+	var ipNum uint32
+	var evicted *fakeIPPersistOp
+	switch {
+	case p.freeHead < len(p.free):
+		ipNum = p.free[p.freeHead]
+		p.freeHead++
+	default:
+		// Pool exhausted: evict the least recently used mapping and reuse its
+		// address (D28: LRU, O(1)).
+		front := p.lru.Front()
+		if front == nil {
+			p.mu.Unlock()
+			util.LogModuleWarn("dns", "[FAKEIP] pool exhausted with no mapping to evict (domain=%s)", domain)
+			return nil
 		}
-		if p.reserved[ipToUint32(ip)] {
-			continue
-		}
-
-		// If this IP is already mapped to another domain (wrap-around collision),
-		// evict the old mapping so the reverse lookup remains consistent.
-		ipStr := ip.String()
-		if oldDomain, exists := p.ipToDomain[ipStr]; exists {
-			delete(p.domainToIP, oldDomain)
-			// Keep the DB consistent with the in-memory eviction, otherwise
-			// the fakeip table grows without bound (audit item 13).
-			if db.IsInitialized() {
-				if err := db.DeleteFakeIP(oldDomain, ipStr); err != nil {
-					util.LogModuleWarn("dns", "[FAKEIP] Failed to delete evicted mapping %s -> %s: %v", oldDomain, ipStr, err)
-				}
-			}
-		}
-		p.domainToIP[domain] = ip
-		p.ipToDomain[ipStr] = domain
-
-		util.LogModuleDebug("dns", "[FAKEIP] Lookup allocated: %s -> %s (pool nextIP=%d)", domain, ip, p.nextIP)
-
-		// Persist to database
-		if db.IsInitialized() {
-			if err := db.PutFakeIP(domain, ipStr); err != nil {
-				util.LogModuleWarn("dns", "[FAKEIP] Failed to persist mapping: %v", err)
-			}
-		}
-
-		if p.onChange != nil {
-			p.onChange()
-		}
-		return ip
+		oldDomain := front.Value.(string)
+		oldIP := p.domainToIP[oldDomain]
+		oldIPStr := oldIP.String()
+		p.lru.Remove(front)
+		delete(p.lruItems, oldDomain)
+		delete(p.domainToIP, oldDomain)
+		delete(p.ipToDomain, oldIPStr)
+		delete(p.ipToRealIP, oldIPStr)
+		ipNum = ipToUint32(oldIP)
+		evicted = &fakeIPPersistOp{put: false, domain: oldDomain, ip: oldIPStr}
 	}
+
+	ip := uint32ToIP(ipNum)
+	ipStr := ip.String()
+	p.domainToIP[domain] = ip
+	p.ipToDomain[ipStr] = domain
+	p.lruItems[domain] = p.lru.PushBack(domain)
+	onChange := p.onChange
+	p.mu.Unlock()
+
+	if evicted != nil {
+		p.persist(*evicted)
+	}
+	p.persist(fakeIPPersistOp{put: true, domain: domain, ip: ipStr})
+	if onChange != nil {
+		onChange()
+	}
+	util.LogModuleDebug("dns", "[FAKEIP] allocated: %s -> %s", domain, ip)
+	return ip
 }
 
 // LookupDomain returns the original domain for a Fake-IP, or empty if not found.
 func (p *FakeIPPool) LookupDomain(ip string) string {
-	// Copy the map under the lock to avoid holding the lock during the lookup
-	// This prevents potential deadlocks if the caller holds other locks
 	p.mu.RLock()
-	ipToDomainCopy := make(map[string]string, len(p.ipToDomain))
-	for k, v := range p.ipToDomain {
-		ipToDomainCopy[k] = v
-	}
+	result := p.ipToDomain[ip]
 	p.mu.RUnlock()
-	
-	result := ipToDomainCopy[ip]
 	if result == "" {
-		util.LogModuleDebug("dns", "[FAKEIP] LookupDomain: %s -> (not found, map has %d entries)", ip, len(ipToDomainCopy))
-		// Log first 5 entries for debugging
-		count := 0
-		for k, v := range ipToDomainCopy {
-			if count >= 5 {
-				break
-			}
-			util.LogModuleDebug("dns", "[FAKEIP]   sample: %s -> %s", k, v)
-			count++
-		}
-	} else {
-		util.LogModuleDebug("dns", "[FAKEIP] LookupDomain: %s -> %s", ip, result)
+		util.LogModuleDebug("dns", "[FAKEIP] LookupDomain: %s -> (not found)", ip)
 	}
-	
 	return result
 }
 
@@ -195,10 +223,11 @@ func (p *FakeIPPool) LookupDomain(ip string) string {
 // hijacker after synchronously resolving the domain through the physical interface.
 func (p *FakeIPPool) SetRealIP(fakeIP net.IP, realIP net.IP) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.ipToRealIP[fakeIP.String()] = realIP
-	if p.onChange != nil {
-		p.onChange()
+	onChange := p.onChange
+	p.mu.Unlock()
+	if onChange != nil {
+		onChange()
 	}
 }
 
@@ -209,32 +238,70 @@ func (p *FakeIPPool) LookupRealIP(fakeIP net.IP) net.IP {
 	return p.ipToRealIP[fakeIP.String()]
 }
 
-// Release removes a domain's Fake-IP mapping.
+// Release removes a domain's Fake-IP mapping and returns the address to the
+// free list.
 func (p *FakeIPPool) Release(domain string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if ip, ok := p.domainToIP[domain]; ok {
-		ipStr := ip.String()
-		delete(p.ipToDomain, ipStr)
-		delete(p.domainToIP, domain)
-		delete(p.ipToRealIP, ipStr)
+	ip, ok := p.domainToIP[domain]
+	if !ok {
+		p.mu.Unlock()
+		return
+	}
+	ipStr := ip.String()
+	if el, ok2 := p.lruItems[domain]; ok2 {
+		p.lru.Remove(el)
+		delete(p.lruItems, domain)
+	}
+	delete(p.ipToDomain, ipStr)
+	delete(p.domainToIP, domain)
+	delete(p.ipToRealIP, ipStr)
+	p.free = append(p.free, ipToUint32(ip))
+	onChange := p.onChange
+	p.mu.Unlock()
 
-		// Delete from database
-		if db.IsInitialized() {
-			if err := db.DeleteFakeIP(domain, ipStr); err != nil {
-				util.LogModuleWarn("dns", "Failed to delete FakeIP mapping from db: %v", err)
+	p.persist(fakeIPPersistOp{put: false, domain: domain, ip: ipStr})
+	if onChange != nil {
+		onChange()
+	}
+}
+
+// persist queues a database mutation. Writes happen on a background goroutine so
+// a slow bolt transaction cannot stall DNS resolution (D28); if the queue is
+// full the write falls back to synchronous so state is never silently lost.
+func (p *FakeIPPool) persist(op fakeIPPersistOp) {
+	if !db.IsInitialized() {
+		return
+	}
+	p.persistOnce.Do(func() {
+		p.persistCh = make(chan fakeIPPersistOp, 256)
+		go func() {
+			for queued := range p.persistCh {
+				applyFakeIPOp(queued)
 			}
-		}
+		}()
+	})
+	select {
+	case p.persistCh <- op:
+	default:
+		applyFakeIPOp(op)
+	}
+}
 
-		if p.onChange != nil {
-			p.onChange()
+func applyFakeIPOp(op fakeIPPersistOp) {
+	if op.put {
+		if err := db.PutFakeIP(op.domain, op.ip); err != nil {
+			util.LogModuleWarn("dns", "[FAKEIP] failed to persist %s -> %s: %v", op.domain, op.ip, err)
 		}
+		return
+	}
+	if err := db.DeleteFakeIP(op.domain, op.ip); err != nil {
+		util.LogModuleWarn("dns", "[FAKEIP] failed to delete %s -> %s: %v", op.domain, op.ip, err)
 	}
 }
 
 // FakeIPStats contains snapshot statistics of the Fake-IP pool.
 type FakeIPStats struct {
-	DomainCount    int `json:"domainCount"`
+	DomainCount      int `json:"domainCount"`
 	RealIPCacheCount int `json:"realIPCacheCount"`
 }
 
@@ -246,7 +313,7 @@ func (p *FakeIPPool) Stats() FakeIPStats {
 	p.mu.RUnlock()
 
 	return FakeIPStats{
-		DomainCount:    domainCount,
+		DomainCount:      domainCount,
 		RealIPCacheCount: realIPCacheCount,
 	}
 }

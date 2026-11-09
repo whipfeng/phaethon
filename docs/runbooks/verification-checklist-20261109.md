@@ -14,6 +14,26 @@ curl -s 127.0.0.1:39999/api/mesh | head -c 500
 tail -f data/*.log
 ```
 
+### 0.1 上下文守卫 hook（防止长会话压缩死锁）
+
+仓库内的 `.trae/traecli.yaml` 注册了一个 hook（`.trae/hooks/ctx_guard.py`）：
+
+- `user_prompt_submit`：读取当前会话最近一次请求的 `prompt_tokens`，达到阈值即用 `systemMessage` 提醒；
+- `pre_compact`：CLI 决定自动压缩前再提醒一次（这是最可靠的「快到上限」信号）。
+
+阈值在 `.trae/hooks/ctx_guard.json`：`limit` = 模型上下文（默认 1000000），`warn` = 触发比例（默认 0.85）。
+
+自测与调参：
+
+```bash
+# 不重启也能单测脚本（伪造 hook 输入）
+echo '{"session_id":"<会话ID>","hook_event_name":"PreCompact"}' | python .trae/hooks/ctx_guard.py
+echo '{"session_id":"<会话ID>","hook_event_name":"UserPromptSubmit"}' | python .trae/hooks/ctx_guard.py
+# 会话 ID 即 %LOCALAPPDATA%\trae-cli\sessions\ 下的目录名
+```
+
+hook 在**会话启动时**加载：改完配置需重开会话。若当前占比还没到阈值，可临时把 `warn` 调成 0.7 验证提示是否出现，再改回 0.85。
+
 ## 1. 批次 1：安全止血
 
 | # | 验证点 | 命令 / 操作 | 预期 |

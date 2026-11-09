@@ -20,6 +20,10 @@ import (
 	"phaethon/util"
 )
 
+// routeProtocolPhaethon marks routes installed by this process so cleanup can
+// identify them precisely instead of guessing by destination (D20).
+const routeProtocolPhaethon = 200
+
 func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	link, err := netlink.LinkByName(r.devName)
 	if err != nil {
@@ -139,8 +143,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			continue
 		}
 		rt := &netlink.Route{
-			Dst: dst,
-			Gw:  r.originalGateway,
+			Dst:      dst,
+			Gw:       r.originalGateway,
+			Protocol: routeProtocolPhaethon,
 		}
 		if err := netlink.RouteAdd(rt); err != nil {
 			util.LogModuleWarn("route", "add exclusion route %s fail: %v", exclude, err)
@@ -159,6 +164,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 		rt := &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Dst:       dst,
+			Protocol:  routeProtocolPhaethon,
 		}
 		if err := netlink.RouteAdd(rt); err != nil {
 			return fmt.Errorf("route add %s: %w", cidr, err)
@@ -242,16 +248,18 @@ func (r *RouteManager) platformTeardown() {
 		iptablesDeleteAll(ctx, physIface, tunIface)
 	}
 
-	// Restore rp_filter on the physical interface.
-	if r.DefaultIfaceName != "" {
+	// Restore rp_filter / ip_forward only when bypass mode actually changed
+	// them (D20). Non-bypass setup never reads the originals, so writing them
+	// back would zero the host's sysctls.
+	if r.bypassGateway && r.DefaultIfaceName != "" {
 		if err := writeRpFilter(r.DefaultIfaceName, r.originalRpFilter); err != nil {
 			util.LogModuleWarn("route", "restore %s rp_filter=%d fail: %v", r.DefaultIfaceName, r.originalRpFilter, err)
 		}
 	}
-
-	// Restore ip_forward.
-	if err := writeIPForward(r.originalIPForward); err != nil {
-		util.LogModuleWarn("route", "restore ip_forward=%d fail: %v", r.originalIPForward, err)
+	if r.bypassGateway {
+		if err := writeIPForward(r.originalIPForward); err != nil {
+			util.LogModuleWarn("route", "restore ip_forward=%d fail: %v", r.originalIPForward, err)
+		}
 	}
 
 	link, err := netlink.LinkByName(r.devName)
@@ -263,6 +271,7 @@ func (r *RouteManager) platformTeardown() {
 		rt := &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Dst:       dst,
+			Protocol:  routeProtocolPhaethon,
 		}
 		_ = netlink.RouteDel(rt)
 	}
@@ -414,6 +423,7 @@ func (e *Manager) addMeshRoute(subnet string) error {
 		Scope:     syscall.RT_SCOPE_UNIVERSE,
 		Type:      syscall.RTN_UNICAST,
 		Flags:     syscall.RTNH_F_ONLINK,
+		Protocol:  routeProtocolPhaethon,
 	}
 	if err := netlink.RouteAdd(rt); err != nil {
 		return fmt.Errorf("add mesh route %s: %w", subnet, err)

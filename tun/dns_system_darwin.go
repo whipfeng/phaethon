@@ -43,6 +43,8 @@ func setSystemDNS(ifaceName, tunIP string) error {
 	dnsService = service
 	dnsSaved = saved
 	dnsWasDHCP = wasDHCP
+	// Persist the pre-TUN values for crash recovery (D20).
+	saveDarwinDNSBackup(service, saved, wasDHCP)
 	util.LogModuleInfo("dns-setup", "macOS dns for service %s set to %s", service, tunIP)
 	return nil
 }
@@ -71,6 +73,7 @@ func restoreSystemDNS(ifaceName string) {
 	dnsService = ""
 	dnsSaved = nil
 	dnsWasDHCP = false
+	removeDarwinDNSBackup()
 }
 
 // findActiveNetworkService returns the network service to configure. Among

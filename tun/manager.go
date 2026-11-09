@@ -42,13 +42,31 @@ func getPooledPktBuf(n int) []byte {
 }
 
 // Manager manages the TUN device I/O and lifecycle.
+// tunState is the lifecycle state of the TUN device (D8). All transitions are
+// serialized by lifecycleMu so admin toggles cannot race Start/Stop.
+type tunLifecycleState int32
+
+const (
+	tunIdle tunLifecycleState = iota
+	tunStarting
+	tunRunningState
+	tunStopping
+)
+
 type Manager struct {
-	tunConfig *config.TUNConfig
-	proxies   []*config.Proxy
-	device    Device
-	netstack  *mesh.Netstack
-	routeMgr  *RouteManager
-	dhcpSrv   DHCPServer
+	// lifecycleMu serializes start/stop/toggle; it is taken before e.mu.
+	lifecycleMu sync.Mutex
+	state       tunLifecycleState
+	// dnsIface records the interface the system DNS was registered on at
+	// startup, so StopTUN restores exactly the same one.
+	dnsIface string
+
+	tunConfig  *config.TUNConfig
+	proxies    []*config.Proxy
+	device     Device
+	netstack   *mesh.Netstack
+	routeMgr   *RouteManager
+	dhcpSrv    DHCPServer
 	prefixLen  int
 	meshHostIP net.IP // expected TUN interface address (subnet+2), used for residual cleanup matching
 	dataDir    string
@@ -492,15 +510,13 @@ func (e *Manager) StartStack() error {
 		return fmt.Errorf("tun: netstack not set (call SetNetstack before Start)")
 	}
 
-	// Set writeLoop device and close channel
+	// Set writeLoop device and close channel. The close channel is the
+	// netstack's own (only StopStack closes it): stopping TUN must NOT kill
+	// the write loop, otherwise a subsequent start leaves egress dead (D8).
+	// While TUN is stopped, Manager.Write reports "device not available" and
+	// the loop keeps serving the stack.
 	e.netstack.WriteLoopDevice = e
 	e.netstack.WriteLoopCloseCh = func() <-chan struct{} {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.tunCloseCh != nil {
-			return e.tunCloseCh
-		}
-		// Return netstack closeCh if TUN is not running
 		return e.netstack.CloseCh()
 	}
 
@@ -516,18 +532,25 @@ func (e *Manager) StartStack() error {
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
 // Requires StartStack() to be called first.
 func (e *Manager) StartTUN() error {
+	// Serialize the whole lifecycle: a concurrent Stop must never overlap
+	// Start (D8). Taken before e.mu.
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
 	e.mu.Lock()
 	if e.netstack == nil || !e.netstack.IsRunning() {
 		e.mu.Unlock()
 		return fmt.Errorf("stack not running, call StartStack() first")
 	}
-	if e.tunRunning {
+	if e.state != tunIdle {
 		e.mu.Unlock()
-		return fmt.Errorf("TUN already running")
+		return fmt.Errorf("TUN is not idle (state=%d)", e.state)
 	}
+	e.state = tunStarting
 
 	// Ensure admin privileges (Windows UAC auto-elevation)
 	if err := EnsureAdminPrivileges(); err != nil {
+		e.state = tunIdle
 		e.mu.Unlock()
 		e.logEvent("TUN ensure admin privileges failed: %v", err)
 		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("admin privileges: %w", err))
@@ -540,6 +563,7 @@ func (e *Manager) StartTUN() error {
 	// Create TUN device
 	dev, err := CreateDevice()
 	if err != nil {
+		e.state = tunIdle
 		e.mu.Unlock()
 		e.logEvent("TUN create device failed: %v", err)
 		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("create device: %w", err))
@@ -567,8 +591,13 @@ func (e *Manager) StartTUN() error {
 	if err := e.routeMgr.Setup(hostIP.String(), e.prefixLen); err != nil {
 		e.logEvent("TUN setup routes failed: %v", err)
 		connlog.Log("TUN", "SYSTEM", "", "", "", 0, nil, "fail", fmt.Errorf("setup routes: %w", err))
+		// Roll back partially applied platform state (routes, sysctl,
+		// iptables, weak-host) before closing the device (D8).
+		e.routeMgr.TeardownForce()
+		e.routeMgr = nil
 		dev.Close()
 		e.device = nil
+		e.state = tunIdle
 		e.mu.Unlock()
 		return fmt.Errorf("tun: setup routes: %w", err)
 	}
@@ -585,6 +614,7 @@ func (e *Manager) StartTUN() error {
 
 	// Start TUN-level goroutines
 	e.tunRunning = true
+	e.state = tunRunningState
 	e.tunCloseCh = make(chan struct{})
 	e.meshWriteCh = make(chan []byte, 32768)
 	e.mu.Unlock()
@@ -607,9 +637,15 @@ func (e *Manager) StartTUN() error {
 	// so passing the TUN device name would silently no-op (6fa266e).
 	dnsAddr := e.netstack.DNSAddr()
 	dnsIP := net.IP(dnsAddr.AsSlice())
-	if err := setSystemDNS(dnsRegistrationIface(dev.Name(), e.routeMgr.DefaultIfaceName), dnsIP.String()); err != nil {
+	dnsIface := dnsRegistrationIface(dev.Name(), e.routeMgr.DefaultIfaceName)
+	if err := setSystemDNS(dnsIface, dnsIP.String()); err != nil {
 		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
+	// Remember the interface that DNS was registered on: StopTUN must restore
+	// the same one (Linux registers on the physical iface, not tun0).
+	e.mu.Lock()
+	e.dnsIface = dnsIface
+	e.mu.Unlock()
 
 	if e.proxies != nil {
 		go dialer.PreWarmSSHProxies(e.proxies)
@@ -671,21 +707,31 @@ func (e *Manager) Start() error {
 // StopTUN stops the TUN device, restores routes and system DNS.
 // The gVisor netstack continues running.
 func (e *Manager) StopTUN() error {
+	// Serialize with StartTUN/toggle: no WaitGroup Add may race this Wait (D8).
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
 	e.mu.Lock()
-	if !e.tunRunning {
+	if e.state != tunRunningState {
 		e.mu.Unlock()
 		return nil
 	}
+	e.state = tunStopping
 	e.tunRunning = false
 	close(e.tunCloseCh)
+	dnsIface := e.dnsIface
 	e.mu.Unlock()
 
 	// Clear the global bind context so subsequent dials resume normal behavior.
 	dialer.SetGlobalBindContext(nil)
 
-	// Restore system DNS first while the TUN adapter still exists.
-	if e.device != nil {
-		restoreSystemDNS(e.device.Name())
+	// Restore system DNS first while the TUN adapter still exists, using the
+	// exact interface recorded at startup.
+	if dnsIface == "" && e.device != nil {
+		dnsIface = e.device.Name()
+	}
+	if dnsIface != "" {
+		restoreSystemDNS(dnsIface)
 	}
 
 	// Stop DHCP server before tearing down routes.
@@ -700,15 +746,23 @@ func (e *Manager) StopTUN() error {
 		e.routeMgr = nil
 	}
 
-	// Close device to unblock readLoop (stuck on ReceivePacket)
-	// This also ends the Wintun session and deletes the adapter.
+	// Close device to unblock readLoop (stuck on ReceivePacket).
+	// On Windows the Wintun adapter persists after Close, so remove it
+	// explicitly (D19); on Linux/Darwin this is a no-op.
 	if e.device != nil {
+		devName := e.device.Name()
 		e.device.Close()
 		e.device = nil
+		deleteTUNAdapter(devName)
 	}
 
 	// Wait for TUN goroutines to finish
 	e.tunWG.Wait()
+
+	e.mu.Lock()
+	e.state = tunIdle
+	e.dnsIface = ""
+	e.mu.Unlock()
 
 	e.logEvent("TUN device stopped")
 	util.LogModuleDebug("tun", "TUN device stopped (netstack still running)")

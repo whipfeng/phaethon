@@ -158,6 +158,7 @@ func (r *RouteManager) preemptForeignSplits() {
 		r.foreignSnapshots = append(r.foreignSnapshots, *snap)
 		util.LogModuleInfo("route", "preempted foreign split route %s (iface idx=%d)", snap.dst, snap.gwIndex)
 	}
+	saveForeignSplits(r.foreignSnapshots)
 }
 
 // restoreForeignSplits re-adds routes preempted at setup, skipping snapshots
@@ -182,6 +183,7 @@ func (r *RouteManager) restoreForeignSplits() {
 		}
 	}
 	r.foreignSnapshots = nil
+	removeForeignSplits()
 }
 
 // addExclusionRoute adds a host or CIDR route via the original gateway.

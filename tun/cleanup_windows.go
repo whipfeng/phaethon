@@ -17,7 +17,8 @@ import (
 func CleanupResidual(_ net.IP) {
 	util.LogModuleInfo("cleanup", "[DIAG] step 1: getInterfaceLUID")
 	luid, index, err := getInterfaceLUID("phaethontun")
-	if err == nil {
+	adapterFound := err == nil
+	if adapterFound {
 		util.LogModuleInfo("cleanup", "[DIAG] step 2: interface exists, deleting split-tunnel routes")
 		// Delete split-tunnel routes (0.0.0.0/1 and 128.0.0.0/1) with on-link next hop.
 		for _, prefix := range []struct {
@@ -41,7 +42,7 @@ func CleanupResidual(_ net.IP) {
 		// the specific combinations above (e.g. persistent routes detached from
 		// the adapter LUID).
 		util.LogModuleInfo("cleanup", "[DIAG] step 3: deleteResidualRoutesAPI")
-		deleteResidualRoutesAPI()
+		deleteResidualRoutesAPI(luid)
 
 		// Remove residual exclusion routes left by a previous abnormal exit.
 		// These routes point at the original physical gateway with metric 1 and
@@ -106,21 +107,50 @@ func CleanupResidual(_ net.IP) {
 		}
 	}
 
-	// Reset physical interface DNS to DHCP as a crash-recovery best effort.
-	// The original DNS backup is only available during normal Stop(); after a
-	// crash we restore DHCP so the machine does not remain stuck on the TUN DNS IP.
+	// Restore physical-interface state persisted before TUN setup (D19).
+	st, hasState := loadWindowsTunState()
+	if hasState && st.WeakHostRecv != nil && st.PhysicalIface != "" {
+		if err := setWeakHostReceiveAPI(st.PhysicalIface, *st.WeakHostRecv); err != nil {
+			util.LogModuleWarn("cleanup", "restore weak-host receive on %s fail: %v", st.PhysicalIface, err)
+		} else {
+			util.LogModuleInfo("cleanup", "restored weak-host receive on %s to %v", st.PhysicalIface, *st.WeakHostRecv)
+		}
+	}
+
+	// Restore the original physical DNS instead of blindly resetting to DHCP.
+	// Only when a residual TUN adapter was found: otherwise TUN never ran and
+	// a user-configured static DNS must not be touched.
 	util.LogModuleInfo("cleanup", "[DIAG] step 12: restore DNS for default gateway")
-	if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
-		if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
-			if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {
-				if err3 := clearInterfaceDNSAPI(gwLuid, gwIdx); err3 != nil {
-					util.LogModuleWarn("cleanup", "restore dns for %s fail: %v", ifaceName, err3)
-				} else {
-					util.LogModuleInfo("cleanup", "restored dns for %s to dhcp", ifaceName)
+	if adapterFound {
+		if hasState && len(st.DNSServers) > 0 && st.PhysicalIface != "" {
+			if luid, idx, err := getInterfaceLUID(st.PhysicalIface); err == nil {
+				var ips []net.IP
+				for _, s := range st.DNSServers {
+					if ip := net.ParseIP(s); ip != nil {
+						ips = append(ips, ip)
+					}
+				}
+				if len(ips) > 0 {
+					if err := setInterfaceDNSAPI(luid, idx, ips); err != nil {
+						util.LogModuleWarn("cleanup", "restore dns on %s fail: %v", st.PhysicalIface, err)
+					} else {
+						util.LogModuleInfo("cleanup", "restored dns on %s to %v", st.PhysicalIface, st.DNSServers)
+					}
+				}
+			}
+		} else if ifaceName := defaultGatewayInterfaceName(); ifaceName != "" {
+			if gwLuid, _, err := getInterfaceLUID(ifaceName); err == nil {
+				if gwIdx, err2 := luidToIndex(gwLuid); err2 == nil {
+					if err3 := clearInterfaceDNSAPI(gwLuid, gwIdx); err3 != nil {
+						util.LogModuleWarn("cleanup", "restore dns for %s fail: %v", ifaceName, err3)
+					} else {
+						util.LogModuleInfo("cleanup", "restored dns for %s to dhcp", ifaceName)
+					}
 				}
 			}
 		}
 	}
+	removeWindowsTunState()
 
 	util.LogModuleInfo("cleanup", "residual cleanup completed")
 }

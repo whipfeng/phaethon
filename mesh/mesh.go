@@ -2476,9 +2476,25 @@ func (m *MeshManager) broadcastGossip() {
 			continue
 		}
 		// Peer's learned claims (includes peer's own subnet with hop=1)
+		debugClaims := util.GetModuleLogLevel("mesh") <= util.LogLevelDebug
 		for _, cs := range peer.ClaimedSubnets {
 			if existing, ok := bestClaims[cs.SubnetStr]; !ok || cs.Hop < existing.hop {
+				if debugClaims {
+					via := "-"
+					if existing.nextHop != nil {
+						via = existing.nextHop.NodeID()
+					}
+					util.LogModuleDebug("mesh", "[GOSSIP-SEL] take subnet=%s owner=%s hop=%d via=%s (from=%s nbrs=%d) replaced=[hop=%d via=%s nbrs=%d]",
+						cs.SubnetStr, cs.NodeID, cs.Hop, peer.NodeID(), peer.NodeID(), len(cs.Neighbors),
+						existing.hop, via, len(existing.neighbors))
+				}
 				bestClaims[cs.SubnetStr] = globalClaimEntry{cs.Hop, peer, cs.NodeID, cs.SubnetStr, cs.Neighbors}
+			} else if debugClaims && cs.Hop == existing.hop {
+				// Equal hop: first one wins and a neighbor-poor duplicate can
+				// shadow a complete claim. Log it — this is the asymmetry that
+				// makes one node's topology lose an edge another node keeps.
+				util.LogModuleDebug("mesh", "[GOSSIP-SEL] skip subnet=%s from=%s hop=%d nbrs=%d (kept hop=%d nbrs=%d)",
+					cs.SubnetStr, peer.NodeID(), cs.Hop, len(cs.Neighbors), existing.hop, len(existing.neighbors))
 			}
 		}
 	}
@@ -2660,7 +2676,11 @@ func (m *MeshManager) broadcastGossip() {
 		if err != nil {
 			continue
 		}
-		util.LogModuleDebug("mesh", "[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
+		if util.GetModuleLogLevel("mesh") <= util.LogLevelDebug {
+			util.LogModuleDebug("mesh", "[GOSSIP-OUT] to=%s claims=%s", peer.NodeID(), summarizeGossipClaims(claims))
+		} else {
+			util.LogModuleDebug("mesh", "[MESH] sending gossip to %s: claimedSubnets=%d routes=%d", peer.NodeID(), len(claims), len(routes))
+		}
 		peer.Sender.SendGossip(data)
 	}
 }

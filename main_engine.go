@@ -267,22 +267,36 @@ func readLastGoodWorker() string {
 
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.
 // Only used when running as a worker child (PHAETHON_WORKER=1).
-func emitProtocolMsg(msg interface{}) {
+// Returns false when the write fails, which means the watchdog is gone and the
+// read end of this pipe has been closed — the worker's parent-death signal.
+func emitProtocolMsg(msg interface{}) bool {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return
+		return true
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+		return false
+	}
+	return true
 }
 
 // startWorkerHeartbeat sends periodic heartbeat messages to the watchdog.
 // Called once after the worker signals ready.
+//
+// The same pipe doubles as the parent-death detector: the watchdog holds the
+// read end, so a dead watchdog makes this write fail (EPIPE on Unix, broken
+// pipe on Windows). That is event-driven and thread-independent, unlike
+// PR_SET_PDEATHSIG which is bound to the forking thread and can fire while the
+// watchdog is still alive (observed on jf: worker SIGTERMed ~12s after start).
 func startWorkerHeartbeat() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			emitProtocolMsg(map[string]bool{"heartbeat": true})
+			if !emitProtocolMsg(map[string]bool{"heartbeat": true}) {
+				util.LogModuleWarn("main", "worker: watchdog pipe closed, shutting down")
+				os.Exit(0)
+			}
 		}
 	}()
 }

@@ -63,6 +63,7 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		cmd = exec.Command(shell, execArgs(shell, cmdline)...)
 	}
 	cmd.Dir = workDir
+	cmd.Env = sessionEnv()
 
 	if usePty {
 		f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})

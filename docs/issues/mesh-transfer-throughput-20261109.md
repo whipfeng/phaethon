@@ -66,6 +66,8 @@
 | 8 | VM → gg mesh（`loc.gg.phn`） | 1 | 1MB | 27.6s | **38KB/s** |
 | 9 | QG → mb mesh（`loc.mb.phn`） | 多跳 | 23MB | >226s 未完成 | <100KB/s |
 | 10 | QG → mb 局域网（192.168.1.88） | 0 | 23MB | 3.59s | **6.4MB/s** |
+| 11 | VM → QG 公网直连 | 0 | 16MB | 2.40s | **6.9MB/s** |
+| 12 | **VM → jf mesh（整包 16MB）** | **2（经 qg）** | 16MB | **630.9s** | **26.6KB/s** |
 
 链路质量（vm 侧 `/api/mesh`）：
 

@@ -29,6 +29,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"phaethon/admin"
 	"phaethon/config"
 	"phaethon/db"
@@ -802,8 +804,10 @@ func main() {
 		os.Exit(1)
 	}
 	if empty {
-		fi, err := os.Stdin.Stat()
-		isTerminal := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+		// /dev/null and friends are char devices too, so use the terminal check
+		// rather than the file mode: a redirected stdin must not trigger the
+		// interactive setup (D2).
+		isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
 		if isTerminal {
 			util.LogModuleInfo("system", "首次启动，进入初始化模式")
 			if err := db.InteractiveInit(); err != nil {

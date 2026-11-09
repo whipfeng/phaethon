@@ -20,10 +20,11 @@
 
 ## 阶段 3: ctx 贯穿
 
-- [ ] 各 dialer 实现 `DialContext`（trojan/vless/hysteria2/ssh/shadowsocks/htunnel/http/reverse/meshAware）
-- [ ] 链内下一跳传递 ctx
-- [ ] SSH channel open 可取消；htunnel/hysteria2 真实 deadline
-- [ ] 健康检查使用 ctx 预算
+- [x] 各 dialer 实现 `DialContext`（trojan/vless/hysteria2/ssh/shadowsocks/htunnel/http/direct/socks5）
+- [x] 链内下一跳传递 ctx（`dialHandshakeConn` / `dialWithContext`，含 htunnel 的 HTTP Transport DialContext）
+- [x] SSH channel open 可取消（`openConnCtx` 包装，取消后迟到通道自动关闭）；htunnel 每个请求已有 ctx 超时
+- [x] 健康检查使用 ctx 预算（`healthCheckBudget` + `ChainDialContext` / `DialToProxyContext`）
+- 注：`DialReverse` / 控制连接不在拨号链上，未纳入 ctx 改造
 
 ## 阶段 4: P2P 版本协商（D25）
 

@@ -85,11 +85,10 @@ func NewHTunnelHTTPClient(proxy *config.Proxy) *http.Client {
 					d := &HTunnelDialer{BaseDialer: BaseDialer{Proxy: proxy}}
 					server, port := d.ServerAddr()
 					util.LogModuleDebug("htunnel", "chaining via %s to %s:%d (URL addr=%s)", proxy.Name, nextType, server, port, addr)
-					nextDialer := NewDialer(proxy.Next)
-					return nextDialer.Dial(server, port)
+					return dialWithContext(ctx, NewDialer(proxy.Next), server, port)
 				}
 				util.LogModuleDebug("htunnel", "direct to URL addr=%s (server=%s:%d, next=%s)", proxy.Name, addr, proxy.Server, proxy.Port, nextType)
-				return DialRouteAware(network, addr)
+				return DialRouteAwareContext(ctx, network, addr)
 			},
 		},
 	}

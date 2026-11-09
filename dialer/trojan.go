@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -20,6 +21,16 @@ type TrojanDialer struct {
 }
 
 func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support: ctx is propagated to the next
+// hop and bounds the TLS + request handshake.
+func (d *TrojanDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(ctx, dstAddr, dstPort)
+}
+
+func (d *TrojanDialer) dial(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	// If this proxy is configured as a reverse channel, obtain from registry.
 	if conn, err := d.TryReverse(); err != nil {
 		return nil, fmt.Errorf("trojan: %w", err)
@@ -33,16 +44,16 @@ func (d *TrojanDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	}
 
 	// Connect to the next hop
-	nextDialer := NewDialer(d.Proxy.Next)
 	nextType := "nil"
 	if d.Proxy.Next != nil {
 		nextType = d.Proxy.Next.Type
 	}
 	util.LogModuleDebug("trojan", "next=%s, dialing %s:%d", d.Proxy.Name, nextType, d.Proxy.Server, d.Proxy.Port)
-	conn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+	conn, cleanup, err := dialHandshakeConn(ctx, d.Proxy.Next, d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("trojan: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
+	defer cleanup()
 
 	tlsConn, err := d.TLSHandshake(conn)
 	if err != nil {

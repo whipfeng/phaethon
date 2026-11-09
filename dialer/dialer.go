@@ -121,10 +121,54 @@ func withCtxDeadline(ctx context.Context, conn net.Conn) (net.Conn, func()) {
 
 // dialWithContext prefers the dialer's cancellable path and falls back to Dial.
 func dialWithContext(ctx context.Context, d Dialer, dstAddr string, dstPort int) (net.Conn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cd, ok := d.(ContextDialer); ok {
 		return cd.DialContext(ctx, dstAddr, dstPort)
 	}
 	return d.Dial(dstAddr, dstPort)
+}
+
+// dialHandshakeConn dials the next hop with ctx propagation and returns a
+// cleanup that clears the ctx-derived deadline once the protocol handshake on
+// the returned conn has finished (success or failure). Callers must invoke it.
+func dialHandshakeConn(ctx context.Context, next *config.Proxy, addr string, port int) (net.Conn, func(), error) {
+	conn, err := dialWithContext(ctx, NewDialer(next), addr, port)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	conn, cleanup := withCtxDeadline(ctx, conn)
+	return conn, cleanup, nil
+}
+
+// openConnCtx runs open and returns its result, abandoning (and closing) the
+// pending connection when ctx is cancelled first. Used for dialers whose
+// underlying API (SSH channel open, hysteria2 TCP) cannot take a context.
+func openConnCtx(ctx context.Context, open func() (net.Conn, error)) (net.Conn, error) {
+	if ctx == nil || ctx.Done() == nil {
+		return open()
+	}
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := open()
+		ch <- result{conn: c, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.conn, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-ch; r.conn != nil {
+				r.conn.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 // UDPDialer establishes a UDP packet relay through a proxy.

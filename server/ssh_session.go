@@ -20,6 +20,10 @@ type sessionProc interface {
 	Wait() error
 	Kill()
 	CloseStdin()
+	// CloseIO closes the read side (pty master / ConPTY / stdout pipe) without
+	// signalling the process. Used after Wait() to release a reader that would
+	// otherwise block forever once the shell exits.
+	CloseIO()
 	Resize(cols, rows uint32)
 }
 

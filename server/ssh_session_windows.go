@@ -32,6 +32,9 @@ func (e *exitCodeError) ExitCode() int { return int(e.code) }
 func (p *conptyProc) Read(b []byte) (int, error)  { return p.cpty.Read(b) }
 func (p *conptyProc) Write(b []byte) (int, error) { return p.cpty.Write(b) }
 func (p *conptyProc) CloseStdin()                 {}
+// CloseIO closes the pseudoconsole so a Read blocked after the shell exited
+// returns. ConPTY keeps the output pipe open while the object is alive.
+func (p *conptyProc) CloseIO() { _ = p.cpty.Close() }
 func (p *conptyProc) Resize(cols, rows uint32) {
 	_ = p.cpty.Resize(int(cols), int(rows))
 }
@@ -67,6 +70,7 @@ func (p *pipeProc) Write(b []byte) (int, error) { return p.stdin.Write(b) }
 func (p *pipeProc) Wait() error                  { return p.cmd.Wait() }
 func (p *pipeProc) Kill()                        { _ = p.cmd.Process.Kill(); p.stdout.Close() }
 func (p *pipeProc) CloseStdin()                  { p.stdin.Close() }
+func (p *pipeProc) CloseIO()                     { p.stdout.Close() }
 func (p *pipeProc) Resize(cols, rows uint32)     {}
 
 // autoDetectShell 返回系统自动探测的 shell：pwsh（PowerShell 7，装了优先）→

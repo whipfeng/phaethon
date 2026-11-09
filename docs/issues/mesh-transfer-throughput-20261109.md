@@ -217,3 +217,42 @@ vm -> gg  linkKey=vm:GGDYSV_TJ      srtt=275.4ms jitter=139.9ms
 
 
 
+
+## 11. 互验缺自证：两跳路由不对称导致 RTT≈1s（2026-11-10 07:50，v0.8.0-425-g05cb375）
+
+### 11.1 现象与证据
+
+425 之前（424）vm→jf 两跳只有 **127KB/s**（26.7MB / 3m28s），比任一单跳都低一个数量级：
+
+| 路径 | 耗时 | 吞吐 |
+|---|---|---|
+| vm → qg（1 跳） | 2.31s / 8.9MB | 3.86MB/s |
+| qg → jf（1 跳） | 5.91s / 8.9MB | 1.51MB/s |
+| vm → qg → jf（2 跳，424） | 3m28s / 26.7MB | **0.127MB/s** |
+| vm → qg → jf（2 跳，425） | 4.39s / 8.9MB | **2.03MB/s** |
+
+jf 的 `tcpFlowDebug` 抓住 SSH 流实时状态：`srtt=991ms`、`rto=1.38s`、`sndWnd=130816`。
+128KB ÷ 1s ≈ 128KB/s，与实测完全一致 —— 瓶颈是 **接收窗口 / 端到端 RTT**，不是带宽、CPU 或批量。
+
+RTT 来自回程绕路：vm→qg ping 38ms、qg→jf ping 22ms，但 vm→jf ping **979ms**。
+原因是 jf 的 `bestPaths` 到 vm 为 `nextHop=gg`（gg 本身是 1s 链路），去程 qg、回程 gg。
+
+### 11.2 根因：转发时把"指回自己"的边剥掉了
+
+jf 的 `/api/mesh/topology` 有 `qg -> vm`，却没有 `vm -> qg`。校验后的图缺边，Dijkstra 无法经 qg 到 vm。
+
+424 引入的 `mergedNeighborLinks` 只遍历 `allPeers`，**遗漏本节点自己的 claim**。
+qg 转发 vm 的 claim 时，验证"vm 声明了到 qg 的链接"要查 `merged[qg][vm]`，而 `merged[qg]` 为空，
+于是判定失败并在转发前剥掉 `vm→qg`；下游 jf 永远看不到这条反向边。
+
+### 11.3 修复
+
+`mergedNeighborLinks(selfNodeID, ownNeighbors, allPeers)`：把本节点 own claim 一并并入合并表
+（`mesh/mesh.go:3619`）。不放松防环规则、不改通告格式，只让本节点的声称参与互验。
+
+### 11.4 425 验证
+
+- jf→vm `bestPaths`：`nextHop=gg cost=1532 → nextHop=qg cost=62.9`；
+- vm→jf ping：**979ms → 51ms**；
+- 两跳单流：**0.127MB/s → 2.03MB/s（约 16×）**，已回到 423 之前 2.1~2.7MB/s 的区间并略优；
+- 剩余瓶颈：qg↔jf 单跳仅 1.51MB/s（直连基线 6.6MB/s），下一阶段按 §10.3 调 h_tunnel / UDP leg 载体。

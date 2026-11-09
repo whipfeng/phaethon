@@ -121,20 +121,25 @@
 **修复**：`UpdateGossip` 改为**写时复制**——构造新的 `*PeerInfo` 替换数组元素，
 不再原地改写。读方拿到的结构自此不可变，要么是完整旧版、要么是完整新版。
 
-### 10.2 幽灵 PeerInfo → bestClaims 被死数据遮蔽（残余数据）
+### 10.2 「幽灵 PeerInfo」假设——已撤回
 
-- `UnregisterPeerByNodeID` 命中第一条就 `return`，同 nodeID 的重复条目会残留；
-- `RegisterPeer` 也不去重。重连时若旧条目未按 Sender 指针清掉，就会累积幽灵条目；
-- 幽灵条目保留着下线前的 `ClaimedSubnets`（含邻居列表），在 `bestClaims` 里与活条目
-  同为最小 hop，先到先得；一旦幽灵被选中，转发出去的邻居列表就是过期的，
-  互验也会拿它当反向证据 → 该边被长期过滤，直到重启重建拓扑。
+最初怀疑同 nodeID 的重复条目是"重连残留"，并一度改成按 nodeID 批量删除 / 注册时按 nodeID 去重。
+**这个判断是错的**：
 
-**修复**：`UnregisterPeerByNodeID` 删除**全部**匹配；`RegisterPeer` 在 nodeID 已知时
-清理同 nodeID 的旧条目（不同 Sender）。
+- 边是**链路级**的，同一对 nodeID 之间可以有多条链路（多路径），在拓扑里表现为
+  **多条 `PeerInfo` 共享同一个 nodeID**，靠 `localSeq` 区分；
+- 因此"同 nodeID 有多条"是正常状态，不是残留；
+- 按 nodeID 批量删除会在重连时把**仍然活着的其它链路**一起干掉；
+- 另外 `UnregisterPeerByNodeID` 目前**没有任何生产调用者**（只有接口声明与测试桩），
+  链路下线一律走 `UnregisterPeer(sender)` 精确匹配。
 
-### 10.3 仍未解释的部分
+已还原这两处改动，并在 `RegisterPeer` / `UnregisterPeerByNodeID` 处写明：
+不得按 nodeID 去重或批量删除。
 
-两处缺陷都能造成"缺边且不自愈"，但本次故障已消失，无法回溯确认当时命中的是哪一处。
-下次复现按 §8 取证时，重点看 `[GOSSIP-SEL]` 里同一 subnet 的两份副本（hop / 邻居数），
-以及 `[GOSSIP-IN]` 是否出现同一 nodeID 的两条 PeerInfo。
+### 10.3 结论
+
+目前**唯一**由代码证据支撑的缺陷是 §10.1 的写时复制问题（浅快照 + 原地改写），
+它足以解释"转发出去的 claim 缺少刚建立的邻居、而稍后的原始视图又是完整的"。
+幽灵条目这条线不成立。
+
 

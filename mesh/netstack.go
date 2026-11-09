@@ -139,6 +139,11 @@ type Netstack struct {
 	// failed (e.g. oversized packet vs the 1500 device MTU). Previously
 	// logged-only; now counted for /api/mesh visibility.
 	TunWriteDrops atomic.Uint64
+	// WriteLoopNonIPv4Drops counts egress packets dropped for not being IPv4.
+	WriteLoopNonIPv4Drops atomic.Uint64
+	// WriteLoopNoDeviceDrops counts egress packets dropped when no TUN device
+	// is attached.
+	WriteLoopNoDeviceDrops atomic.Uint64
 }
 
 // NewNetstack creates a new Netstack instance.
@@ -1938,9 +1943,13 @@ func (n *Netstack) writeLoop() {
 // device. Returns false when closeCh fired (the packet is already DecRef'd).
 func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
 	buf := pkt.ToBuffer()
+	// ToBuffer takes a reference on the packet's chunks; release it on every
+	// return path (C2). The packet itself is DecRef'd below.
+	defer buf.Release()
 	data := buf.Flatten()
 
 	if len(data) < 20 || (data[0]>>4) != 4 {
+		n.WriteLoopNonIPv4Drops.Add(1)
 		pkt.DecRef()
 		return true
 	}
@@ -2020,8 +2029,11 @@ func (n *Netstack) handleWriteLoopPacket(pkt *stack.PacketBuffer) bool {
 				n.callbacks.StatsNotify()
 			}
 		}
-	} else if pktNum < 50 {
-		util.LogModuleWarn("netstack", "[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
+	} else {
+		n.WriteLoopNoDeviceDrops.Add(1)
+		if pktNum < 50 {
+			util.LogModuleWarn("netstack", "[WRITELOOP] WriteLoopDevice is nil, pkt#%d dropped: %s -> %s", pktNum, srcIP, dstIP)
+		}
 	}
 
 	pkt.DecRef()

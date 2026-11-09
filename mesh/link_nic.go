@@ -32,9 +32,10 @@ type LinkNIC struct {
 	dispatcher stack.NetworkDispatcher
 
 	// Statistics (atomic counters)
-	injectPackets  uint64 // Packets successfully injected into gVisor
-	injectBytes    uint64 // Bytes successfully injected
-	injectDrops    uint64 // Packets dropped (no dispatcher or invalid proto)
+	injectPackets uint64 // Packets successfully injected into gVisor
+	injectBytes   uint64 // Bytes successfully injected
+	injectDrops   uint64 // Packets dropped (no dispatcher or invalid proto)
+	sendFailures  uint64 // Egress packets the peer sender rejected
 }
 
 // NewLinkNIC creates a new LinkNIC for a direct mesh peer.
@@ -67,6 +68,17 @@ func (l *LinkNIC) IsAttached() bool {
 // netstack via this NIC. The stack records pkt.NICID so conntrack can use it
 // as OriginalInputNIC (fork patch #5) for DNAT reply routing (patch #6).
 func (l *LinkNIC) InjectInbound(data []byte) {
+	l.injectInbound(data, buffer.MakeWithData(data))
+}
+
+// InjectInboundOwned delivers data without copying. release runs exactly once:
+// immediately if the frame is dropped here, otherwise when gVisor drops the
+// last reference to the packet (D6 zero-copy).
+func (l *LinkNIC) InjectInboundOwned(data []byte, release func()) {
+	l.injectInbound(data, buffer.MakeWithExternalData(data, release))
+}
+
+func (l *LinkNIC) injectInbound(data []byte, payload buffer.Buffer) {
 	// Snapshot and deliver outside the lock (as channel.Endpoint does) so
 	// delivery never blocks RemoveNIC, which holds the stack lock.
 	l.dispMu.RLock()
@@ -74,6 +86,7 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 	l.dispMu.RUnlock()
 	if d == nil || len(data) == 0 {
 		atomic.AddUint64(&l.injectDrops, 1)
+		payload.Release()
 		return
 	}
 	var proto tcpip.NetworkProtocolNumber
@@ -84,9 +97,10 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 		proto = ipv6.ProtocolNumber
 	default:
 		atomic.AddUint64(&l.injectDrops, 1)
+		payload.Release()
 		return
 	}
-	
+
 	// Module-level logging for LinkNIC inbound
 	if len(data) >= 20 {
 		srcIP := net.IP(data[12:16]).To4()
@@ -95,13 +109,12 @@ func (l *LinkNIC) InjectInbound(data []byte) {
 		util.LogModuleDebug("linknic", "[LINKNIC-INBOUND] linkNIC=%d peer=%s len=%d proto=%d src=%s dst=%s",
 			l.nicID, l.peerNodeID, len(data), protoNum, srcIP, dstIP)
 	}
-	
+
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(data),
+		Payload: payload,
 	})
-	defer pkt.DecRef()
-	
 	d.DeliverNetworkPacket(proto, pkt)
+	pkt.DecRef()
 	atomic.AddUint64(&l.injectPackets, 1)
 	atomic.AddUint64(&l.injectBytes, uint64(len(data)))
 }
@@ -148,8 +161,9 @@ func (l *LinkNIC) SetLinkAddress(addr tcpip.LinkAddress) {}
 // Sends packets directly via the held PeerSender (design §5.4).
 // RouteSelector already chose this specific LinkNIC, so we send directly.
 //
-// Packet buffers remain owned by the caller (same contract as channel.Endpoint,
-// which clones before queueing); we only read the data synchronously.
+// The endpoint owns the packets (gVisor contract) and must DecRef each one.
+// peer.Send queues asynchronously, so the payload is copied before the packet
+// buffer is released.
 func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	// One level check for all per-packet debug logs below — with debug off the
 	// hot path pays nothing but the functional Flatten (audit item 9).
@@ -182,12 +196,19 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		}
 
 		TraceForwarding("linknic_egress_start", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
-		if err := l.sender.Send(pktData); err != nil {
-			TraceForwarding("linknic_egress_error", pktData, "linkNIC=%d peer=%s err=%v", l.nicID, l.peerNodeID, err)
+		// Send is queued asynchronously; copy, then release the ToBuffer
+		// reference. The packet itself stays owned by the caller (same
+		// contract as channel.Endpoint): the transport layer DecRefs it after
+		// WritePacket returns, so the endpoint must not.
+		payload := append([]byte(nil), pktData...)
+		buf.Release()
+		if err := l.sender.Send(payload); err != nil {
+			TraceForwarding("linknic_egress_error", payload, "linkNIC=%d peer=%s err=%v", l.nicID, l.peerNodeID, err)
 			util.LogModuleWarn("linknic", "[LINKNIC] send via peer %s failed: %v", l.peerNodeID, err)
+			atomic.AddUint64(&l.sendFailures, 1)
 			continue
 		}
-		TraceForwarding("linknic_egress", pktData, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
+		TraceForwarding("linknic_egress", payload, "linkNIC=%d peer=%s", l.nicID, l.peerNodeID)
 		count++
 	}
 
@@ -218,7 +239,6 @@ func (l *LinkNIC) InjectStats() (packets, bytes, drops uint64) {
 		atomic.LoadUint64(&l.injectBytes),
 		atomic.LoadUint64(&l.injectDrops)
 }
-
 
 // Wait implements stack.LinkEndpoint.Wait.
 func (l *LinkNIC) Wait() {}

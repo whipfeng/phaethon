@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"os"
 	"phaethon/frame"
 	"regexp"
 	"runtime"
@@ -31,6 +32,26 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+`)
 // GossipInfo); this alias keeps existing p2p callers unchanged.
 const P2PProtocolVersion = mesh.P2PProtocolVersion
 
+// protocolCompatible reports whether a peer's advertised version range
+// overlaps ours. remoteMin <= 0 means a legacy sender without the field.
+func protocolCompatible(remoteVersion, remoteMin int) bool {
+	if remoteVersion < mesh.P2PProtocolVersionMin {
+		return false
+	}
+	if remoteMin > P2PProtocolVersion {
+		return false
+	}
+	return true
+}
+
+// negotiatedProtocolVersion is the version both sides can speak.
+func negotiatedProtocolVersion(remoteVersion int) int {
+	if remoteVersion < P2PProtocolVersion {
+		return remoteVersion
+	}
+	return P2PProtocolVersion
+}
+
 // meshInboundWorkers is the number of goroutines that consume the per-flow
 // inbound queues and inject incoming mesh frames into gVisor's netstack.
 //
@@ -46,10 +67,17 @@ const P2PProtocolVersion = mesh.P2PProtocolVersion
 // Tuning: monitor channelDropStats in /api/mesh. Typical range: 2-8.
 const meshInboundWorkers = 4
 
-// meshInboundFullWait bounds how long a session read loop waits on a full
-// inbound worker queue before dropping the frame (well under the 5s ping
-// timeout, so the loop keeps serving pongs).
-const meshInboundFullWait = 100 * time.Millisecond
+const (
+	// meshInboundByteBudget bounds total bytes queued for inbound mesh
+	// workers. Data frames beyond this are dropped: mesh data is an overlay
+	// and inner TCP retransmits, while a stalled read loop would also delay
+	// pongs and look like a dead link.
+	meshInboundByteBudget = 64 << 20 // 64MB across all inbound workers
+
+	// defaultMaxInboundSessions bounds concurrent passive (inbound) P2P
+	// sessions. Overridable via PHAETHON_MAX_P2P_SESSIONS.
+	defaultMaxInboundSessions = 64
+)
 
 // LookupProxyPeerRoute is injected by main to resolve a proxy name to its
 // peer's LinkNIC ID and subnet. Used by v2 route callbacks to bypass the
@@ -91,14 +119,14 @@ type linkStats struct {
 // P2PManager manages P2P connections to peers.
 type P2PManager struct {
 	mu         sync.Mutex
-	peers      map[string]*Peer    // keyed by peer.ID (localSeq-based; active + passive)
-	proxyPeers map[string]*Peer    // keyed by proxy.Name (active peers only, for dedup)
+	peers      map[string]*Peer // keyed by peer.ID (localSeq-based; active + passive)
+	proxyPeers map[string]*Peer // keyed by proxy.Name (active peers only, for dedup)
 	nodeId     string
-	version  string
-	buildTag string
-	platform string
-	arch     string
-	cache    *BinaryCache
+	version    string
+	buildTag   string
+	platform   string
+	arch       string
+	cache      *BinaryCache
 
 	meshEnabled bool
 	meshNodeID  string
@@ -118,6 +146,13 @@ type P2PManager struct {
 	// netstack by the same goroutine, in arrival order (§3.8). A single shared
 	// queue with N racing consumers reordered same-flow frames (~50% ooopack
 	// on the receiving inner socket, dribble root cause).
+	// cleanupCh serializes mesh/netstack teardown outside m.mu. See D9:
+	// UnregisterPeer may block on mesh channels and DeleteLinkNIC enters the
+	// netstack, so neither may run while the manager lock is held.
+	cleanupCh   chan peerCleanup
+	cleanupStop chan struct{}
+	cleanupWG   sync.WaitGroup
+
 	meshInboundChs    [meshInboundWorkers]chan meshInboundPacket
 	meshInboundDNSCh  chan meshInboundPacket // dedicated queue for inbound DNS frames (avoids cross-node DNS SERVFAIL)
 	meshInboundStopCh chan struct{}          // stop signal for meshInboundLoop
@@ -130,6 +165,11 @@ type P2PManager struct {
 	// Channel overflow statistics (atomic counters)
 	meshInboundDrops uint64 // Frames dropped due to meshInboundCh full
 
+	// meshInboundBytes is the total bytes currently queued for inbound workers.
+	meshInboundBytes atomic.Int64
+	// maxInboundSessions bounds concurrent passive sessions (D11).
+	maxInboundSessions atomic.Int32
+
 	OnStatusChange func() // callback when peer status changes
 
 	// Debounce mechanism for OnStatusChange (fix race condition #5)
@@ -141,6 +181,12 @@ type meshInboundPacket struct {
 	fromNodeID string
 	linkNIC    *mesh.LinkNIC // 链路直接持有的 LinkNIC 指针
 	frame      []byte
+}
+
+// ownedMeshHandler is the optional zero-copy extension of MeshHandler.
+// Handlers that only implement MeshHandler keep using the copying path.
+type ownedMeshHandler interface {
+	HandleMeshFrameOwned(fromNodeID string, linkNIC *mesh.LinkNIC, frame []byte, release func())
 }
 
 // MeshHandler handles mesh packets and gossip from P2P peers.
@@ -259,26 +305,46 @@ const (
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
 // v3: real deficit-gated draining (design §3.2) + per-peer byte budget refund.
 type DRRScheduler struct {
-	queues   [256]chan writeReq
-	deficits [256]int
-	quantum  int           // bytes per queue per round
-	round    int           // next queue to check
-	salt     uint32        // random salt for Jenkins hash
-	notifyCh chan struct{} // signaled when a packet is enqueued
-	budget   *atomic.Int64 // peer data-queue byte budget; refunded on dequeue
+	// queuesPtr is nil until the session receives its first data frame (D11:
+	// data queues are allocated lazily so idle sessions do not reserve ~8MB).
+	queuesPtr atomic.Pointer[[256]chan writeReq]
+	deficits  [256]int
+	quantum   int           // bytes per queue per round
+	round     int           // next queue to check
+	salt      uint32        // random salt for Jenkins hash
+	notifyCh  chan struct{} // signaled when a packet is enqueued
+	budget    *atomic.Int64 // peer data-queue byte budget; refunded on dequeue
 }
 
 // newDRRScheduler creates a new DRR scheduler with the given queues and the
 // peer's shared data-queue byte budget (nil disables refunding).
-func newDRRScheduler(queues [256]chan writeReq, budget *atomic.Int64) *DRRScheduler {
-	return &DRRScheduler{
-		queues:   queues,
+func newDRRScheduler(queues *[256]chan writeReq, budget *atomic.Int64) *DRRScheduler {
+	s := &DRRScheduler{
 		quantum:  drrQuantum,
 		round:    0,
 		salt:     rand.Uint32(),
 		notifyCh: make(chan struct{}, 1), // buffered channel for notification
 		budget:   budget,
 	}
+	if queues != nil {
+		s.queuesPtr.Store(queues)
+	}
+	return s
+}
+
+// emptyQueues is returned before lazy allocation; nil channels are never
+// ready in a select, so DRR treats them as empty.
+var emptyQueues [256]chan writeReq
+
+func (s *DRRScheduler) getQueues() *[256]chan writeReq {
+	if p := s.queuesPtr.Load(); p != nil {
+		return p
+	}
+	return &emptyQueues
+}
+
+func (s *DRRScheduler) setQueues(q *[256]chan writeReq) {
+	s.queuesPtr.Store(q)
 }
 
 // Notify signals that a packet has been enqueued.
@@ -314,6 +380,10 @@ func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeRe
 	// draining each non-empty queue until its deficit is exhausted.
 	// Returns the queue index where the next round should start.
 	drainRound := func() int {
+		// Read the queue pointer per round: data queues are allocated lazily
+		// on the first data frame (D11), so a pointer captured at entry would
+		// pin the empty placeholder and never see the real queues.
+		queues := s.getQueues()
 		last := s.round
 		for i := 0; i < 256 && len(batch) < maxBatch; i++ {
 			idx := (s.round + i) % 256
@@ -330,7 +400,7 @@ func (s *DRRScheduler) NextBatch(maxBatch int, stopCh <-chan struct{}) []writeRe
 		drainQueue:
 			for len(batch) < maxBatch {
 				select {
-				case req := <-s.queues[idx]:
+				case req := <-queues[idx]:
 					s.deficits[idx] -= len(req.data)
 					if s.budget != nil {
 						s.budget.Add(int64(len(req.data)))
@@ -382,14 +452,14 @@ type StripeInfo struct {
 
 // Peer represents a connected P2P peer.
 type Peer struct {
-	ID        string `json:"id"`        // unique connection ID (localSeq-based)
-	ProxyName string `json:"proxyName"` // proxy config name (active peers only, empty for passive)
-	NodeID    string `json:"nodeId"`    // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
-	Status    string `json:"status"`    // current peer status: connecting, helloed, upToDate, failed
-	Transport string `json:"transport,omitempty"` // udp/tcp(+stripe×N) data-leg form (empty = no leg)
-	Stripes   []StripeInfo `json:"stripes,omitempty"` // dynamic lane details (design §7)
-	LastError string `json:"lastError,omitempty"` // last error message (empty if no error)
-	LastSeen  time.Time `json:"lastSeen"`
+	ID        string       `json:"id"`                  // unique connection ID (localSeq-based)
+	ProxyName string       `json:"proxyName"`           // proxy config name (active peers only, empty for passive)
+	NodeID    string       `json:"nodeId"`              // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
+	Status    string       `json:"status"`              // current peer status: connecting, helloed, upToDate, failed
+	Transport string       `json:"transport,omitempty"` // udp/tcp(+stripe×N) data-leg form (empty = no leg)
+	Stripes   []StripeInfo `json:"stripes,omitempty"`   // dynamic lane details (design §7)
+	LastError string       `json:"lastError,omitempty"` // last error message (empty if no error)
+	LastSeen  time.Time    `json:"lastSeen"`
 
 	// Link identity (§5.3): local Seq assigned at peer creation; RemoteSeq
 	// learned from the peer's first gossip. Link identity key = (NodeID, Seq).
@@ -398,25 +468,29 @@ type Peer struct {
 	FriendlyName string // 友好名称（代理名，仅展示）
 
 	// Atomic fields for concurrent access (fix race condition #2 and #4)
-	statusAtomic   atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
-	linkNICPtr     atomic.Pointer[mesh.LinkNIC]
-	meshSenderPtr  atomic.Pointer[peerSender]
-	lastSeenNano   atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
-	pingDeadHeldNano atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
+	statusAtomic atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
+	// negotiatedVersion is min(local, remote) after the version check (D25).
+	negotiatedVersion atomic.Int32
+	linkNICPtr        atomic.Pointer[mesh.LinkNIC]
+	meshSenderPtr     atomic.Pointer[peerSender]
+	lastSeenNano      atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
+	pingDeadHeldNano  atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
 
-	transport        frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
-	transportMu      sync.Mutex
-	stopped          bool // set under transportMu by stopPeer; StartPeer re-checks after dial
-	dnsQueue         chan writeReq // DNS packets (UDP port 53, highest priority)
-	dataQueues       [256]chan writeReq // per-flow data queues (DRR fair scheduling, v2: 256 queues)
-	drrOutput        chan writeReq // DRR scheduler output channel
-	controlCh        chan writeReq // gossip/ping/pong priority queue
-	stopCh           chan struct{}
-	stopOnce         sync.Once // ensures stopCh is closed exactly once
-	sessionDone      chan struct{} // closed when session fully ends (including LinkNIC cleanup)
-	proxy            *config.Proxy // proxy config this peer was started with
-	leg              *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
-	stripe           *stripeTransport // session data-leg multiplexer (always set on new peers)
+	transport       frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
+	transportMu     sync.Mutex
+	stopped         bool               // set under transportMu by stopPeer; StartPeer re-checks after dial
+	dnsQueue        chan writeReq      // DNS packets (UDP port 53, highest priority)
+	dataQueues      [256]chan writeReq // per-flow data queues (allocated lazily on first data frame)
+	dataQueuesMu    sync.Mutex
+	dataQueuesReady atomic.Bool
+	drrOutput       chan writeReq // DRR scheduler output channel
+	controlCh       chan writeReq // gossip/ping/pong priority queue
+	stopCh          chan struct{}
+	stopOnce        sync.Once        // ensures stopCh is closed exactly once
+	sessionDone     chan struct{}    // closed when session fully ends (including LinkNIC cleanup)
+	proxy           *config.Proxy    // proxy config this peer was started with
+	leg             *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
+	stripe          *stripeTransport // session data-leg multiplexer (always set on new peers)
 
 	// flowNotify wakes peerWriteLoop to re-check its in-flight credit after
 	// a LaneAck/cap adjustment (§3.4 write gate). Buffered 1, drop-on-full.
@@ -441,10 +515,10 @@ type Peer struct {
 	pingTracker *pingTracker // tracks ping/pong for RTT and loss rate
 
 	// Channel overflow statistics (atomic counters)
-	dnsQueueDrops       uint64 // Frames dropped due to dnsQueue full
-	dataQueueDrops      [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
-	controlChDrops      uint64 // Frames dropped due to controlCh full
-	dataBudgetDrops     uint64 // Frames dropped due to per-peer data byte budget exhausted (design §3.1)
+	dnsQueueDrops   uint64      // Frames dropped due to dnsQueue full
+	dataQueueDrops  [256]uint64 // Frames dropped due to dataQueues[i] full (v2: 256 queues)
+	controlChDrops  uint64      // Frames dropped due to controlCh full
+	dataBudgetDrops uint64      // Frames dropped due to per-peer data byte budget exhausted (design §3.1)
 
 	// Egress health state (Phase B): locally-observed forwarding health.
 	// Sampled into a window drop rate by sampleEgressWindow (called on the
@@ -500,6 +574,42 @@ func (p *Peer) SetMeshSender(s *peerSender) {
 	p.meshSenderPtr.Store(s)
 }
 
+// ensureDataQueues allocates the 256 DRR data queues on first use (D11).
+// Idle/passive sessions therefore reserve only the small control queues.
+func (p *Peer) ensureDataQueues() *[256]chan writeReq {
+	if p.dataQueuesReady.Load() {
+		return &p.dataQueues
+	}
+	p.dataQueuesMu.Lock()
+	defer p.dataQueuesMu.Unlock()
+	if !p.dataQueuesReady.Load() {
+		for i := range p.dataQueues {
+			p.dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
+		}
+		if p.drrScheduler != nil {
+			p.drrScheduler.setQueues(&p.dataQueues)
+		}
+		p.dataQueuesReady.Store(true)
+	}
+	return &p.dataQueues
+}
+
+// resetDataQueues drops the queues (reconnect) so they are re-allocated on
+// the next data frame.
+func (p *Peer) resetDataQueues() {
+	p.dataQueuesMu.Lock()
+	defer p.dataQueuesMu.Unlock()
+	for i := range p.dataQueues {
+		p.dataQueues[i] = nil
+	}
+	p.dataQueuesReady.Store(false)
+	if p.drrScheduler != nil {
+		p.drrScheduler.setQueues(nil)
+		p.drrScheduler.deficits = [256]int{}
+		p.drrScheduler.round = 0
+	}
+}
+
 // ProxyNameSafe returns the proxy name, or empty string if proxy is nil (passive/inbound peer).
 func (p *Peer) ProxyNameSafe() string {
 	if p.proxy == nil {
@@ -535,6 +645,16 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 		cache:             cache,
 		meshInboundDNSCh:  make(chan meshInboundPacket, 4096),
 		meshInboundStopCh: make(chan struct{}),
+		cleanupCh:         make(chan peerCleanup, 256),
+		cleanupStop:       make(chan struct{}),
+	}
+	m.cleanupWG.Add(1)
+	go m.cleanupLoop()
+	m.maxInboundSessions.Store(defaultMaxInboundSessions)
+	if v := os.Getenv("PHAETHON_MAX_P2P_SESSIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			m.maxInboundSessions.Store(int32(n))
+		}
 	}
 	// One inbound queue per worker; frames are pinned to a queue by flow key
 	// (§3.8) so each flow is processed serially by one goroutine.
@@ -550,11 +670,36 @@ func NewP2PManager(nodeId, version string, cache *BinaryCache) *P2PManager {
 	return m
 }
 
-func (m *P2PManager) beginSession() bool {
+// SetMaxInboundSessions updates the passive-session limit (D11).
+func (m *P2PManager) SetMaxInboundSessions(n int) {
+	if n <= 0 {
+		return
+	}
+	m.maxInboundSessions.Store(int32(n))
+}
+
+// beginSession reserves a session slot. inbound sessions are additionally
+// bounded by maxInboundSessions so a connection flood cannot exhaust memory.
+func (m *P2PManager) beginSession(inbound bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped {
 		return false
+	}
+	if inbound {
+		limit := int(m.maxInboundSessions.Load())
+		if limit > 0 {
+			passive := 0
+			for _, p := range m.peers {
+				if p.proxy == nil {
+					passive++
+				}
+			}
+			if passive >= limit {
+				util.LogModuleWarn("p2p", "[P2P] inbound session limit reached (%d), rejecting new session", limit)
+				return false
+			}
+		}
 	}
 	m.sessionsWG.Add(1)
 	return true
@@ -593,7 +738,54 @@ func (m *P2PManager) Stop() {
 		}
 		m.sessionsWG.Wait()
 		close(m.meshInboundStopCh)
+		close(m.cleanupStop)
+		m.cleanupWG.Wait()
 	})
+}
+
+// peerCleanup carries mesh objects that must be torn down outside m.mu.
+type peerCleanup struct {
+	sender  *peerSender
+	linkNIC *mesh.LinkNIC
+}
+
+func (m *P2PManager) cleanupLoop() {
+	defer m.cleanupWG.Done()
+	for {
+		select {
+		case <-m.cleanupStop:
+			return
+		case req := <-m.cleanupCh:
+			m.runPeerCleanup(req)
+		}
+	}
+}
+
+func (m *P2PManager) runPeerCleanup(req peerCleanup) {
+	h := m.meshHandler
+	if h == nil {
+		return
+	}
+	if req.sender != nil {
+		h.UnregisterPeer(req.sender)
+	}
+	if req.linkNIC != nil {
+		h.DeleteLinkNIC(req.linkNIC)
+	}
+}
+
+// enqueuePeerCleanup hands mesh teardown to the cleanup goroutine. Must not be
+// called while holding m.mu. Falls back to synchronous cleanup when the queue
+// is full so a NIC is never leaked.
+func (m *P2PManager) enqueuePeerCleanup(req peerCleanup) {
+	if req.sender == nil && req.linkNIC == nil {
+		return
+	}
+	select {
+	case m.cleanupCh <- req:
+	default:
+		m.runPeerCleanup(req)
+	}
 }
 
 // GetPeerStatus returns the P2P connection status for all peers.
@@ -866,7 +1058,7 @@ func (m *P2PManager) drrLoop(peer *Peer) {
 		if len(batch) == 0 {
 			return // stopped
 		}
-		
+
 		// Send batch to drrOutput channel
 		for _, req := range batch {
 			select {
@@ -886,12 +1078,24 @@ func (m *P2PManager) meshInboundLoop(ch chan meshInboundPacket) {
 		case <-m.meshInboundStopCh:
 			return
 		case pkt := <-ch:
-			if m.meshHandler != nil {
-				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
-				m.meshHandler.HandleMeshFrame(pkt.fromNodeID, pkt.linkNIC, pkt.frame)
+			release := func() {
+				m.meshInboundBytes.Add(-int64(len(pkt.frame)))
+				frame.ReturnBuffer(pkt.frame)
 			}
-			// Return buffer to pool after processing (issue 10)
-			frame.ReturnBuffer(pkt.frame)
+			h := m.meshHandler
+			if h != nil {
+				mesh.TraceForwarding("mesh_handler", pkt.frame, "fromNode=%s", pkt.fromNodeID)
+				if oh, ok := h.(ownedMeshHandler); ok {
+					// Zero-copy (D6): the handler releases the buffer exactly
+					// once — immediately on drop, or when gVisor drops the
+					// last reference to the injected packet.
+					oh.HandleMeshFrameOwned(pkt.fromNodeID, pkt.linkNIC, pkt.frame, release)
+					continue
+				}
+				h.HandleMeshFrame(pkt.fromNodeID, pkt.linkNIC, pkt.frame)
+			}
+			// Copying path: return the buffer after processing (issue 10).
+			release()
 		}
 	}
 }
@@ -938,7 +1142,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 	} else {
 		// All data packets: use DRR fair scheduling
 		dataQueueIdx = peer.drrScheduler.hashFlow(req.data)
-		ch = peer.dataQueues[dataQueueIdx]
+		ch = peer.ensureDataQueues()[dataQueueIdx]
 		// Byte-budget admission (design §3.1): reserve bytes before enqueue
 		// so a stalled transport cannot pile unbounded memory in the data
 		// queues. The reservation is refunded when the DRR scheduler
@@ -976,7 +1180,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 			peer.dataBudget.Add(need)
 		}
 		if req.frameType == frame.FrameMeshPacket {
-			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d chCap=%d priority=%s", 
+			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d chCap=%d priority=%s",
 				peer.ID, len(req.data), cap(ch), channelPriorityName(ch, peer))
 			mesh.TraceForwarding("p2p_queue_drop", req.data, "peer=%s", peer.ID)
 		}
@@ -1000,27 +1204,27 @@ func isDNSPacket(data []byte) bool {
 	if len(data) < 28 {
 		return false
 	}
-	
+
 	// Check IPv4 version
 	if data[0]>>4 != 4 {
 		return false
 	}
-	
+
 	// Check protocol is UDP (17)
 	if data[9] != 17 {
 		return false
 	}
-	
+
 	// Get IP header length (IHL field in bytes 0-3, lower 4 bits)
 	ihl := int(data[0]&0x0F) * 4
 	if ihl < 20 || len(data) < ihl+8 {
 		return false
 	}
-	
+
 	// Parse UDP source and destination ports
 	srcPort := int(data[ihl])<<8 | int(data[ihl+1])
 	dstPort := int(data[ihl+2])<<8 | int(data[ihl+3])
-	
+
 	// DNS uses port 53
 	return srcPort == 53 || dstPort == 53
 }
@@ -1063,7 +1267,7 @@ func flowHash32(salt uint32, data []byte) uint32 {
 
 	// Jenkins one-at-a-time hash with salt
 	h := salt
-	
+
 	// Base hash: srcIP + dstIP + protocol
 	for i := 12; i < 20; i++ {
 		h += uint32(data[i])
@@ -1073,7 +1277,7 @@ func flowHash32(salt uint32, data []byte) uint32 {
 	h += uint32(protocol)
 	h += h << 10
 	h ^= h >> 6
-	
+
 	// Add ports only for TCP (6) and UDP (17)
 	if (protocol == 6 || protocol == 17) && len(data) >= ihl+4 {
 		for i := ihl; i < ihl+4; i++ {
@@ -1082,7 +1286,7 @@ func flowHash32(salt uint32, data []byte) uint32 {
 			h ^= h >> 6
 		}
 	}
-	
+
 	// Final mixing
 	h += h << 3
 	h ^= h >> 11
@@ -1137,35 +1341,29 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		return
 	}
 	t = newFirstFrameTransport(t, ft, payload)
-
-	if !m.beginSession() {
+	if !m.beginSession(true) {
 		t.Close()
 		return
 	}
 	defer m.sessionsWG.Done()
 
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
-	
-	// Initialize data queues for DRR fair scheduling
-	var dataQueues [256]chan writeReq
-	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
-	}
+
+	// Data queues are allocated lazily on the first data frame (D11).
 
 	peer := &Peer{
-		ID:             fmt.Sprintf("%d", seq),
-		LastSeen:       time.Now(),
-		transport:      t,
-		dnsQueue:       make(chan writeReq, 512),
-		dataQueues:     dataQueues,
-		drrOutput:      make(chan writeReq, 512),
-		controlCh:      make(chan writeReq, 512),
-		flowNotify:     make(chan struct{}, 1),
-		stopCh:         make(chan struct{}),
-		Seq:            seq,
-		pingTracker:    newPingTracker(),
+		ID:          fmt.Sprintf("%d", seq),
+		LastSeen:    time.Now(),
+		transport:   t,
+		dnsQueue:    make(chan writeReq, 512),
+		drrOutput:   make(chan writeReq, 512),
+		controlCh:   make(chan writeReq, 512),
+		flowNotify:  make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
+		Seq:         seq,
+		pingTracker: newPingTracker(),
 	}
-	peer.drrScheduler = newDRRScheduler(dataQueues, &peer.dataBudget)
+	peer.drrScheduler = newDRRScheduler(nil, &peer.dataBudget)
 	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
@@ -1218,19 +1416,20 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	}
 	defer func() {
 		stopPeer(peer)
+
+		// Detach mesh objects under the lock, then tear them down outside it
+		// (D9): UnregisterPeer can block and DeleteLinkNIC enters the netstack.
+		sender := peer.GetMeshSender()
+		linkNIC := peer.GetLinkNIC()
+		peer.SetMeshSender(nil)
+		peer.SetLinkNIC(nil)
 		m.mu.Lock()
-		if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
-			m.meshHandler.UnregisterPeer(sender)
-		}
-		// Delete LinkNIC when peer disconnects (design §5.6)
-		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
-			m.meshHandler.DeleteLinkNIC(linkNIC)
-			peer.SetLinkNIC(nil)
-		}
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
 		}
 		m.mu.Unlock()
+
+		m.enqueuePeerCleanup(peerCleanup{sender: sender, linkNIC: linkNIC})
 		util.LogModuleInfo("p2p", "[P2P] session ended for %s", peer.ID)
 	}()
 
@@ -1250,7 +1449,9 @@ func (m *P2PManager) attachStripeLeg(nodeID string, seq uint16, stripeID uint32,
 		if p.NodeID == nodeID && p.RemoteSeq == seq && p.stripe != nil {
 			util.LogModuleInfo("p2p", "[STRIPE] attaching leg stripeID=%d to peer.ID=%s (nodeID=%s seq=%d)",
 				stripeID, p.ID, nodeID, seq)
-			p.stripe.attachLane(stripeID, t)
+			if !p.stripe.attachLane(stripeID, t) {
+				return false
+			}
 			return true
 		}
 	}
@@ -1317,7 +1518,7 @@ func (m *P2PManager) StopAllPeers() {
 	for _, peer := range peers {
 		stopPeer(peer)
 	}
-	
+
 	// Wait for all sessions to complete
 	m.sessionsWG.Wait()
 	util.LogModuleInfo("p2p", "[P2P] all peers stopped")
@@ -1386,7 +1587,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	}
 	m.mu.Unlock()
 
-	if !m.beginSession() {
+	if !m.beginSession(false) {
 		util.LogModuleDebug("p2p", "[P2P] manager stopped; not starting peer %s", proxy.Name)
 		return
 	}
@@ -1401,29 +1602,24 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	}
 
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
-	
-	// Initialize data queues for DRR fair scheduling
-	var dataQueues [256]chan writeReq
-	for i := range dataQueues {
-		dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
-	}
+
+	// Data queues are allocated lazily on the first data frame (D11).
 
 	peer := &Peer{
-		ID:           fmt.Sprintf("%d", seq),
-		ProxyName:    proxy.Name,
-		LastSeen:     time.Now(),
-		stopCh:       make(chan struct{}),
-		sessionDone:  make(chan struct{}),
-		proxy:        proxy,
-		Seq:          seq,
-		dnsQueue:     make(chan writeReq, 512),
-		dataQueues:   dataQueues,
-		drrOutput:    make(chan writeReq, 512),
-		controlCh:    make(chan writeReq, 512),
-		flowNotify:   make(chan struct{}, 1),
-		pingTracker:  newPingTracker(),
+		ID:          fmt.Sprintf("%d", seq),
+		ProxyName:   proxy.Name,
+		LastSeen:    time.Now(),
+		stopCh:      make(chan struct{}),
+		sessionDone: make(chan struct{}),
+		proxy:       proxy,
+		Seq:         seq,
+		dnsQueue:    make(chan writeReq, 512),
+		drrOutput:   make(chan writeReq, 512),
+		controlCh:   make(chan writeReq, 512),
+		flowNotify:  make(chan struct{}, 1),
+		pingTracker: newPingTracker(),
 	}
-	peer.drrScheduler = newDRRScheduler(dataQueues, &peer.dataBudget)
+	peer.drrScheduler = newDRRScheduler(nil, &peer.dataBudget)
 	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
@@ -1443,7 +1639,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		stopPeer(peer)
 		return
 	}
-	
+
 	// Register new peer in both maps
 	m.peers[peer.ID] = peer
 	m.proxyPeers[proxy.Name] = peer
@@ -1451,19 +1647,12 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	defer func() {
 		stopPeer(peer)
+		// Mesh cleanup is normally handled by the inner session defer. Detach
+		// any leftover LinkNIC outside the lock and hand it to the cleanup
+		// goroutine (D9).
+		linkNIC := peer.GetLinkNIC()
+		peer.SetLinkNIC(nil)
 		m.mu.Lock()
-		// DON'T UnregisterPeer here! The inner defer (line 1350) already handles it.
-		// Since defers are LIFO, the inner defer runs first and calls UnregisterPeer.
-		// If we also call it here, it would be a no-op (sender already removed from topology),
-		// but it's cleaner to let the inner defer handle all mesh cleanup.
-		
-		// Delete LinkNIC when peer disconnects (design §5.6)
-		// Note: Inner defer also does this, but it's safe to call DeleteLinkNIC twice
-		// (second call is a no-op since LinkNIC is already deleted).
-		if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
-			m.meshHandler.DeleteLinkNIC(linkNIC)
-			peer.SetLinkNIC(nil)
-		}
 		// Remove from both maps (prevent race with RestartPeer)
 		if current, ok := m.peers[peer.ID]; ok && current == peer {
 			delete(m.peers, peer.ID)
@@ -1472,6 +1661,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			delete(m.proxyPeers, proxy.Name)
 		}
 		m.mu.Unlock()
+		if linkNIC != nil {
+			m.enqueuePeerCleanup(peerCleanup{linkNIC: linkNIC})
+		}
 		// Signal that session has fully ended (including LinkNIC cleanup)
 		close(peer.sessionDone)
 	}()
@@ -1588,15 +1780,8 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.controlCh = make(chan writeReq, 512)
 		peer.drrOutput = make(chan writeReq, 512)
 		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-		// Reinitialize data queues for DRR fair scheduling
-		for i := range peer.dataQueues {
-			peer.dataQueues[i] = make(chan writeReq, dataQueueMaxDepth)
-		}
-		if peer.drrScheduler != nil {
-			peer.drrScheduler.queues = peer.dataQueues
-			peer.drrScheduler.deficits = [256]int{}
-			peer.drrScheduler.round = 0
-		}
+		// Re-arm lazy data-queue allocation for the new session.
+		peer.resetDataQueues()
 		// Fresh queues hold no bytes: reset the admission budget to full.
 		peer.dataBudget.Store(dataQueueByteBudget)
 		peer.SetStatus("connecting")
@@ -1631,25 +1816,19 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				} else {
 					transport.Close()
 				}
-				
+
 				// Update status to disconnected before cleanup
 				if peer.GetStatus() != "stopped" {
 					peer.SetStatus("disconnected")
 					m.notifyStatusChange()
 				}
-				
-				// Clean up mesh peer registration
-				m.mu.Lock()
-				if sender := peer.GetMeshSender(); sender != nil && m.meshHandler != nil {
-					m.meshHandler.UnregisterPeer(sender)
-				}
-				// Delete LinkNIC when peer disconnects (design §5.6)
-				if linkNIC := peer.GetLinkNIC(); linkNIC != nil && m.meshHandler != nil {
-					m.meshHandler.DeleteLinkNIC(linkNIC)
-					peer.SetLinkNIC(nil)
-				}
+
+				// Detach mesh objects, then tear them down outside m.mu (D9).
+				sender := peer.GetMeshSender()
+				linkNIC := peer.GetLinkNIC()
 				peer.SetMeshSender(nil)
-				m.mu.Unlock()
+				peer.SetLinkNIC(nil)
+				m.enqueuePeerCleanup(peerCleanup{sender: sender, linkNIC: linkNIC})
 			}()
 
 			go m.drrLoop(peer)
@@ -1668,29 +1847,29 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			delete(m.proxyPeers, proxy.Name)
 		}
 		m.mu.Unlock()
-		
+
 		// Now spawn a fresh StartPeer so the new connection gets a brand-new
 		// seq, peer.ID, and clean state.
 		if peer.GetStatus() != "stopped" {
 			sessionDuration := time.Since(sessionStartTime)
-			
+
 			// If session was very short (< 5s), apply backoff to prevent rapid reconnection loops
 			if sessionDuration < 5*time.Second {
 				util.LogModuleWarn("p2p", "[P2P-DIAG] session too short (%v) for peer.ID=%s proxy=%s, applying backoff before reconnect",
 					sessionDuration, peer.ID, proxy.Name)
-				
+
 				// Exponential backoff with jitter
 				peer.rngMu.Lock()
 				jitter := 0.5 + peer.rng.Float64()
 				peer.rngMu.Unlock()
 				jitteredBackoff := time.Duration(float64(backoff) * jitter)
-				
+
 				select {
 				case <-peer.stopCh:
 					return
 				case <-time.After(jitteredBackoff):
 				}
-				
+
 				backoff *= 2
 				if backoff > maxBackoff {
 					backoff = maxBackoff
@@ -1699,7 +1878,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				// Reset backoff for long-lived sessions
 				backoff = time.Second
 			}
-			
+
 			util.LogModuleInfo("p2p", "[P2P] disconnected from %s (proxy=%s status=%s duration=%v), starting fresh peer",
 				peer.ID, proxy.Name, peer.GetStatus(), sessionDuration)
 			go m.StartPeer(proxy)
@@ -1714,7 +1893,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 	proxyName := peer.ProxyNameSafe()
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession START for peer.ID=%s proxy=%s nodeID=%s status=%s",
 		peer.ID, proxyName, peer.NodeID, peer.GetStatus())
-	
+
 	// Send gossip immediately on connection establishment
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession calling broadcastGossipToPeer for peer.ID=%s proxy=%s", peer.ID, proxyName)
 	m.broadcastGossipToPeer(peer)
@@ -1768,14 +1947,13 @@ func (m *P2PManager) runSession(peer *Peer) {
 	}()
 	defer close(pingDone)
 
-	var inboundTimer *time.Timer
 	for {
 		frameType, payload, err := peer.transport.Recv()
 		// Return pooled buffer at end of iteration (issue 10)
 		// Note: For mesh packets passed to meshInboundCh, the consumer will return it
 		originalPayload := payload
 		payloadReturned := false
-		
+
 		now := time.Now()
 		peer.LastSeen = now
 		peer.lastSeenNano.Store(now.UnixNano())
@@ -1817,6 +1995,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 					// consumer must not stall the session read loop.
 					select {
 					case m.meshInboundDNSCh <- meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}:
+						m.meshInboundBytes.Add(int64(len(payload)))
 						mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
 						payloadReturned = true // Consumer will return it
 					default:
@@ -1834,28 +2013,29 @@ func (m *P2PManager) runSession(peer *Peer) {
 					pkt := meshInboundPacket{fromNodeID: peer.NodeID, linkNIC: linkNIC, frame: payload}
 					// Traced before handoff: the consumer owns the buffer after.
 					mesh.TraceForwarding("p2p_inbound_enqueued", payload, "peer=%s node=%s", peer.ID, peer.NodeID)
-					select {
-					case q <- pkt:
-						payloadReturned = true
-					default:
-						if inboundTimer == nil {
-							inboundTimer = time.NewTimer(meshInboundFullWait)
-						} else {
-							inboundTimer.Reset(meshInboundFullWait)
-						}
+					// Never block the session read loop on a full inbound queue:
+					// pongs would be delayed and the peer would look dead. Mesh
+					// data is an overlay, so the inner TCP retransmits.
+					if m.meshInboundBytes.Add(int64(len(payload))) > meshInboundByteBudget {
+						m.meshInboundBytes.Add(-int64(len(payload)))
+						atomic.AddUint64(&m.meshInboundDrops, 1)
+						util.LogModuleDebug("p2p", "[P2P] mesh inbound byte budget exhausted, dropping frame from %s", peer.NodeID)
+					} else {
 						select {
 						case q <- pkt:
 							payloadReturned = true
-							inboundTimer.Stop()
-						case <-inboundTimer.C:
-							atomic.AddUint64(&m.meshInboundDrops, 1)
-							util.LogModuleDebug("p2p", "[P2P] mesh inbound queue full, dropping frame from %s", peer.NodeID)
 						case <-m.meshInboundStopCh:
+							m.meshInboundBytes.Add(-int64(len(payload)))
 							frame.ReturnBuffer(payload)
 							return
 						case <-peer.stopCh:
+							m.meshInboundBytes.Add(-int64(len(payload)))
 							frame.ReturnBuffer(payload)
 							return
+						default:
+							m.meshInboundBytes.Add(-int64(len(payload)))
+							atomic.AddUint64(&m.meshInboundDrops, 1)
+							util.LogModuleDebug("p2p", "[P2P] mesh inbound queue full, dropping frame from %s", peer.NodeID)
 						}
 					}
 				}
@@ -1867,7 +2047,7 @@ func (m *P2PManager) runSession(peer *Peer) {
 		default:
 			util.LogModuleInfo("p2p", "[P2P] unexpected frame type 0x%02x from %s (%d bytes)", frameType, peer.ID, len(payload))
 		}
-		
+
 		// Return buffer if not passed to consumer
 		if !payloadReturned {
 			frame.ReturnBuffer(originalPayload)
@@ -1895,12 +2075,13 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 	} else {
 		// Mandatory version check on every gossip (§8.1). Zero means a legacy
 		// sender that predates version negotiation — treat as mismatch.
-		if info.ProtocolVersion != P2PProtocolVersion {
-			util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s (node=%s): peer=%d local=%d, disconnecting",
-				peer.ID, peer.NodeID, info.ProtocolVersion, P2PProtocolVersion)
+		if !protocolCompatible(info.ProtocolVersion, info.MinProtocolVersion) {
+			util.LogModuleWarn("p2p", "[P2P] protocol version incompatible from %s (node=%s): peer=%d min=%d local=%d, disconnecting (will keep probing)",
+				peer.ID, peer.NodeID, info.ProtocolVersion, info.MinProtocolVersion, P2PProtocolVersion)
 			peer.transport.Close()
 			return
 		}
+		peer.negotiatedVersion.Store(int32(negotiatedProtocolVersion(info.ProtocolVersion)))
 		// NodeID change: re-register with the new identity (design §5.3).
 		if nodeID := extractNodeIDFromGossip(info); nodeID != "" && nodeID != peer.NodeID {
 			util.LogModuleInfo("p2p", "[P2P] peer %s nodeID changed: %s -> %s", peer.ID, peer.NodeID, nodeID)
@@ -1936,13 +2117,16 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 // gossip frame: version check, nodeID extraction, Seq/RemoteSeq learning, mesh
 // registration, and LinkNIC creation. This replaces v7's handleHello (§5.3).
 func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
-	// 1. Version check (mandatory, §8.1)
-	if info.ProtocolVersion != P2PProtocolVersion {
-		util.LogModuleWarn("p2p", "[P2P] protocol version mismatch from %s: peer=%d local=%d, disconnecting",
-			peer.ID, info.ProtocolVersion, P2PProtocolVersion)
+	// 1. Version check (range negotiation, D25). Out-of-range peers are
+	// disconnected for this attempt only; StartPeer keeps reconnecting so an
+	// upgrade on either side recovers without manual intervention.
+	if !protocolCompatible(info.ProtocolVersion, info.MinProtocolVersion) {
+		util.LogModuleWarn("p2p", "[P2P] protocol version incompatible from %s: peer=%d min=%d local=%d, disconnecting (will keep probing)",
+			peer.ID, info.ProtocolVersion, info.MinProtocolVersion, P2PProtocolVersion)
 		peer.transport.Close()
 		return
 	}
+	peer.negotiatedVersion.Store(int32(negotiatedProtocolVersion(info.ProtocolVersion)))
 
 	// 2. Extract nodeID from ClaimedSubnets[hop=0]
 	nodeID := extractNodeIDFromGossip(info)
@@ -2042,9 +2226,9 @@ type PingInfo struct {
 
 // rttSampler maintains RTT statistics using exponential weighted moving average.
 type rttSampler struct {
-	mu         sync.Mutex
-	srtt       time.Duration // Smoothed RTT
-	rttVar     time.Duration // RTT variance
+	mu          sync.Mutex
+	srtt        time.Duration // Smoothed RTT
+	rttVar      time.Duration // RTT variance
 	sampleCount int
 	lastSample  time.Duration
 }
@@ -2053,10 +2237,10 @@ type rttSampler struct {
 func (r *rttSampler) add(rtt time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	r.sampleCount++
 	r.lastSample = rtt
-	
+
 	if r.srtt == 0 {
 		// First sample
 		r.srtt = rtt
@@ -2243,15 +2427,15 @@ func (t *pingTracker) getLossRate() float64 {
 func (t *pingTracker) getStats() (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int) {
 	srtt, rttVar, sampleCount := t.rttSampler.getStats()
 	lossRate = t.getLossRate()
-	
+
 	// RTO = SRTT + 4 * RTTVAR (similar to TCP)
 	rto = srtt + 4*rttVar
 	if rto < 100*time.Millisecond {
 		rto = 100 * time.Millisecond // Minimum RTO
 	}
-	
+
 	jitter = rttVar
-	
+
 	return srtt, rto, jitter, lossRate, sampleCount
 }
 
@@ -2262,7 +2446,7 @@ func (m *P2PManager) handlePing(peer *Peer, payload []byte) {
 		util.LogModuleDebug("p2p", "[P2P] invalid ping from %s: %v", peer.ID, err)
 		return
 	}
-	
+
 	// Immediately reply with pong, echoing the same timestamp and seq
 	pong := PingInfo{
 		Timestamp: ping.Timestamp,
@@ -2270,7 +2454,7 @@ func (m *P2PManager) handlePing(peer *Peer, payload []byte) {
 	}
 	data, _ := json.Marshal(pong)
 	enqueueWrite(peer, frame.FrameLinkPong, data, true)
-	
+
 	util.LogModuleDebug("p2p", "[P2P] sent pong to %s: seq=%d", peer.ID, ping.Seq)
 }
 
@@ -2281,12 +2465,12 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 		util.LogModuleDebug("p2p", "[P2P] invalid pong from %s: %v", peer.ID, err)
 		return
 	}
-	
+
 	// Record the pong response
 	if peer.pingTracker != nil {
 		peer.pingTracker.recordPong(pong.Seq, pong.Timestamp)
 	}
-	
+
 	util.LogModuleDebug("p2p", "[P2P] received pong from %s: seq=%d", peer.ID, pong.Seq)
 }
 
@@ -2542,7 +2726,8 @@ func (p *Peer) sampleEgressWindow() (dropRate, sojournMs float64) {
 
 // GetLinkQualityStats returns ACK-based link quality stats for a peer by nodeID.
 // totalDataDrops returns the sum of all data queue drops (dns + budget + data[256]).
-func (p *Peer) totalDataDrops() uint64 {	var total uint64
+func (p *Peer) totalDataDrops() uint64 {
+	var total uint64
 	total += atomic.LoadUint64(&p.dnsQueueDrops)
 	total += atomic.LoadUint64(&p.dataBudgetDrops)
 	for i := range p.dataQueueDrops {
@@ -2589,7 +2774,6 @@ func (m *P2PManager) GetChannelDropStats() (peerStats map[string]struct {
 	meshInboundDrops = atomic.LoadUint64(&m.meshInboundDrops)
 	return
 }
-
 
 // GetLinkQualityStatsByProxy returns ping/pong-based link quality stats for a specific link (proxy).
 // Returns srtt, rto, jitter, lossRate, sampleCount. Returns zeros if peer not found.
@@ -2663,7 +2847,7 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 
 	result := make(map[string]struct {
 		NodeID      string
-	SRTT        time.Duration
+		SRTT        time.Duration
 		RTO         time.Duration
 		Jitter      time.Duration
 		LossRate    float64

@@ -22,7 +22,7 @@ func TestManagerStopIsIdempotentAndRejectsSessions(t *testing.T) {
 	manager.Stop()
 	manager.Stop()
 
-	if manager.beginSession() {
+	if manager.beginSession(false) {
 		t.Fatal("stopped manager accepted a new session")
 	}
 }

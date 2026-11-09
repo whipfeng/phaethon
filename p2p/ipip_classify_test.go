@@ -85,7 +85,8 @@ func newWriteTestPeer() *Peer {
 		controlCh:  make(chan writeReq, 512),
 		stopCh:     make(chan struct{}),
 	}
-	p.drrScheduler = newDRRScheduler(q, &p.dataBudget)
+	p.drrScheduler = newDRRScheduler(&q, &p.dataBudget)
+	p.dataQueuesReady.Store(true)
 	p.dataBudget.Store(dataQueueByteBudget)
 	return p
 }

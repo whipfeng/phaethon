@@ -14,7 +14,7 @@ func BenchmarkDRRNextBatch(b *testing.B) {
 		queues[i] = make(chan writeReq, 512)
 	}
 	var budget atomic.Int64
-	sched := newDRRScheduler(queues, &budget)
+	sched := newDRRScheduler(&queues, &budget)
 
 	// Pre-fill all queues with one frame each.
 	for i := 0; i < 256; i++ {

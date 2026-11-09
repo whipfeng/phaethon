@@ -68,7 +68,7 @@ var (
 	stripeAddSustain         = 30 * time.Second // ≥watermark this long → add
 	stripeAddInterval        = 10 * time.Second // minimum spacing between adds
 	stripeClearSustain       = 5 * time.Minute  // <watermark this long → remove
-	stripeMaxLanes           = 4                // cap on dynamic lanes
+	stripeMaxLanes           = 8                // cap on dynamic lanes (D11)
 	stripeEventRingCap       = 32               // controller event ring buffer
 	stripeBaselineWindow     = 10 * time.Second // sliding-min window for sojourn baseline
 	stripeBaselineFloor      = time.Millisecond // noise floor for near-zero baselines
@@ -114,12 +114,12 @@ type stripeLaneProbe struct {
 }
 
 type stripeLane struct {
-	id        uint32 // opaque nonce chosen by the initiator
-	transport frame.FrameTransport
-	queue     chan []frame.Frame // drained by the lane writer
-	done      chan struct{}
-	closeOnce sync.Once
-	probe     stripeLaneProbe
+	id         uint32 // opaque nonce chosen by the initiator
+	transport  frame.FrameTransport
+	queue      chan []frame.Frame // drained by the lane writer
+	done       chan struct{}
+	closeOnce  sync.Once
+	probe      stripeLaneProbe
 	framesSent atomic.Uint64
 	bytesSent  atomic.Uint64
 	flow       laneFlow // in-flight accounting for this lane
@@ -146,32 +146,32 @@ type stripeTransport struct {
 	// same stance as §3.3 route pinning).
 	affinity map[uint32]*stripeLane
 
-	ctrlMu           sync.Mutex // controller state (gauge + windows + events)
-	sojournEMA       float64    // primary-lane sojourn EMA in ms
-	sojournSamples   uint64     // samples folded into sojournEMA
-	baseline         float64    // sliding-min sojourn baseline in ms (0 = none yet)
-	baselineAt       time.Time  // last time baseline was (re)established
-	rebaselinePending bool      // persistent-congestion escape armed (§5.4)
-	gauge            float64    // congestion gauge in [0,1], derived (§5.4)
-	lastSampleAt     time.Time
-	highSince        time.Time // zero while gauge < watermark
-	clearSince       time.Time // zero while gauge >= watermark
-	lastAddAt        time.Time
-	lastRemoveAt     time.Time
-	events           []string // ring buffer of add/remove reasons (task 2.5)
+	ctrlMu            sync.Mutex // controller state (gauge + windows + events)
+	sojournEMA        float64    // primary-lane sojourn EMA in ms
+	sojournSamples    uint64     // samples folded into sojournEMA
+	baseline          float64    // sliding-min sojourn baseline in ms (0 = none yet)
+	baselineAt        time.Time  // last time baseline was (re)established
+	rebaselinePending bool       // persistent-congestion escape armed (§5.4)
+	gauge             float64    // congestion gauge in [0,1], derived (§5.4)
+	lastSampleAt      time.Time
+	highSince         time.Time // zero while gauge < watermark
+	clearSince        time.Time // zero while gauge >= watermark
+	lastAddAt         time.Time
+	lastRemoveAt      time.Time
+	events            []string // ring buffer of add/remove reasons (task 2.5)
 
-	ctrlCh chan legRecvResult // reuses udp_leg_transport's result type
-	dataCh chan legRecvResult
-	closed chan struct{}
+	ctrlCh    chan legRecvResult // reuses udp_leg_transport's result type
+	dataCh    chan legRecvResult
+	closed    chan struct{}
 	closeOnce sync.Once
 
 	// LaneAck metering + write gate (§3 B1/B2)
-	primaryFlow   laneFlow
-	ackRequested  atomic.Bool // peer declared wantTx (gossip): report our rx
-	peerWantsTx   atomic.Bool // we include rx in gossip only when asked
+	primaryFlow    laneFlow
+	ackRequested   atomic.Bool // peer declared wantTx (gossip): report our rx
+	peerWantsTx    atomic.Bool // we include rx in gossip only when asked
 	peerWantsGauge atomic.Bool
-	peerGauge     atomic.Int32 // peer's congestion gauge 0-255 (-1 = none yet)
-	diagPrimaryTx int64
+	peerGauge      atomic.Int32 // peer's congestion gauge 0-255 (-1 = none yet)
+	diagPrimaryTx  int64
 
 	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
 	// urgent frame fires only on watermark crossings (ctrlMu-guarded).
@@ -203,7 +203,15 @@ func (t *stripeTransport) String() string { return "stripe" }
 // attachLane registers an established extra data lane and starts its writer
 // and reader goroutines. Called by the active side after its StripeAttach
 // dial and by the passive side on attaching an inbound leg (design §5.2).
-func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) {
+// attachLane returns false when the per-session lane cap is reached; the
+// caller must close the transport in that case (D11).
+func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) bool {
+	t.mu.Lock()
+	if len(t.lanes) >= stripeMaxLanes {
+		t.mu.Unlock()
+		util.LogModuleWarn("stripe", "[STRIPE] lane cap reached (%d), rejecting lane %d", stripeMaxLanes, id)
+		return false
+	}
 	l := &stripeLane{
 		id:        id,
 		transport: tr,
@@ -211,13 +219,13 @@ func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) {
 		done:      make(chan struct{}),
 	}
 	l.probe.outstanding = make(map[uint32]time.Time)
-	t.mu.Lock()
 	t.lanes = append(t.lanes, l)
 	t.mu.Unlock()
 	// Lane set changed: every flow re-resolves on its next send (§3.6).
 	t.dropAffinity()
 	go t.laneWriter(l)
 	go t.laneReadLoop(l)
+	return true
 }
 
 // laneCount returns the number of dynamic lanes currently attached
@@ -427,14 +435,10 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 	return err
 }
 
-// stripeLaneFullWait bounds how long a sender waits on a full lane queue
-// before moving the flows to the primary lane.
-const stripeLaneFullWait = 50 * time.Millisecond
-
-// laneEnqueue queues batch on lane l, waiting up to stripeLaneFullWait when
-// the queue is full. On timeout or a dead lane it re-pins the batch's flows
-// to the primary lane and returns false so the caller sends there: each flow
-// changes path once instead of flapping between lane and primary (§3.9 R4).
+// laneEnqueue never waits (D10): a full lane sends the whole batch — one
+// flow group — to the primary lane and pins those flows there. Waiting on a
+// full lane would stall the session write loop and still allow cross-batch
+// reordering; a per-flow path change happens at most once.
 func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (bool, error) {
 	select {
 	case l.queue <- batch:
@@ -445,19 +449,9 @@ func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (bool,
 	case <-t.closed:
 		return false, io.ErrClosedPipe
 	default:
+		t.repinPrimary(batch)
+		return false, nil
 	}
-	timer := time.NewTimer(stripeLaneFullWait)
-	defer timer.Stop()
-	select {
-	case l.queue <- batch:
-		return true, nil
-	case <-l.done:
-	case <-timer.C:
-	case <-t.closed:
-		return false, io.ErrClosedPipe
-	}
-	t.repinPrimary(batch)
-	return false, nil
 }
 
 func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
@@ -592,6 +586,7 @@ func (t *stripeTransport) baseReadLoop() {
 		select {
 		case ch <- legRecvResult{frameType: ft, payload: payload}:
 		case <-t.closed:
+			frame.ReturnBuffer(payload)
 			return
 		}
 	}
@@ -618,6 +613,7 @@ func (t *stripeTransport) laneReadLoop(l *stripeLane) {
 			select {
 			case t.dataCh <- legRecvResult{frameType: ft, payload: payload}:
 			case <-t.closed:
+				frame.ReturnBuffer(payload)
 				return
 			}
 		case frame.FrameLinkPing:
@@ -869,7 +865,9 @@ func (t *stripeTransport) controllerTick() {
 				util.LogModuleInfo("p2p", "[STRIPE] controller lane dial failed: %v", err)
 			}
 		} else {
-			t.attachLane(stripeID, tr)
+			if !t.attachLane(stripeID, tr) {
+				tr.Close()
+			}
 			t.recordEvent("add lane stripeID=%d: gauge=%.2f ≥ %.2f sustained %v, lanes now %d/%d (udpActive=%v)",
 				stripeID, t.currentGauge(), stripeGaugeHighWatermark, stripeAddSustain, t.laneCount(), stripeMaxLanes, udpActive)
 		}

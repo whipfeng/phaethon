@@ -52,22 +52,24 @@ func (e *HTunnelEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.
 	for _, pkt := range pkts.AsSlice() {
 		buf := pkt.ToBuffer()
 		data := buf.Flatten()
-
 		if len(data) < 20 {
-			pkt.DecRef()
+			buf.Release()
 			continue
 		}
+		// peer.Send queues asynchronously, so copy before releasing the
+		// ToBuffer reference (C2). The packet is owned by the caller, which
+		// DecRefs it after WritePacket returns — the endpoint must not.
+		payload := append([]byte(nil), data...)
+		buf.Release()
 
-		if err := e.peer.Send(data); err != nil {
+		if err := e.peer.Send(payload); err != nil {
 			util.LogModuleWarn("mesh", "[HTUNNEL-EP] send fail: %v", err)
-			pkt.DecRef()
 			if n == 0 {
 				return 0, &tcpip.ErrAborted{}
 			}
 			break
 		}
 		n++
-		pkt.DecRef()
 	}
 	return n, nil
 }
@@ -78,12 +80,12 @@ func (e *HTunnelEndpoint) Attach(stack.NetworkDispatcher) {}
 // IsAttached always returns true (uplink-only endpoint).
 func (e *HTunnelEndpoint) IsAttached() bool { return true }
 
-func (e *HTunnelEndpoint) MTU() uint32                               { return e.mtu }
-func (e *HTunnelEndpoint) SetMTU(mtu uint32)                         { e.mtu = mtu }
+func (e *HTunnelEndpoint) MTU() uint32                                  { return e.mtu }
+func (e *HTunnelEndpoint) SetMTU(mtu uint32)                            { e.mtu = mtu }
 func (e *HTunnelEndpoint) Capabilities() stack.LinkEndpointCapabilities { return 0 }
-func (e *HTunnelEndpoint) MaxHeaderLength() uint16                   { return 0 }
-func (e *HTunnelEndpoint) LinkAddress() tcpip.LinkAddress            { return "" }
-func (e *HTunnelEndpoint) SetLinkAddress(tcpip.LinkAddress)          {}
+func (e *HTunnelEndpoint) MaxHeaderLength() uint16                      { return 0 }
+func (e *HTunnelEndpoint) LinkAddress() tcpip.LinkAddress               { return "" }
+func (e *HTunnelEndpoint) SetLinkAddress(tcpip.LinkAddress)             {}
 func (e *HTunnelEndpoint) ARPHardwareType() header.ARPHardwareType {
 	return header.ARPHardwareNone
 }

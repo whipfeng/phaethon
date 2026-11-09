@@ -2392,57 +2392,25 @@ func wireAdminCallbacks(resources *activeResources) {
 func startHealthChecks() chan struct{} {
 	stop := make(chan struct{})
 
-	// 用 matcher 的组表而非 db.ListProxyGroups：matcher 的成员解析
-	// 指向已接好 via 链的代理表，健康检查才能沿链拨号。
-	var proxyGroups []*config.ProxyGroup
-	if matcher, err := db.GetMatcher(); err == nil {
-		proxyGroups = matcher.ListGroups()
-	} else {
-		util.LogModuleWarn("main", "startHealthChecks: get matcher fail: %v", err)
-	}
-
-	// All groups that have interval configured will be health-checked
-	var checkGroups []*config.ProxyGroup
-	for _, g := range proxyGroups {
-		if !g.IsEnabled() {
-			continue
-		}
-		if g.HealthCheckInterval != nil && *g.HealthCheckInterval > 0 {
-			checkGroups = append(checkGroups, g)
-		}
-	}
-	if len(checkGroups) == 0 {
-		return stop
-	}
-
-	// Find minimum interval across all checked groups
-	minInterval := *checkGroups[0].HealthCheckInterval
-	for _, g := range checkGroups[1:] {
-		if *g.HealthCheckInterval < minInterval {
-			minInterval = *g.HealthCheckInterval
-		}
-	}
-
 	go func() {
 		// Delay initial check to avoid blocking startup
 		select {
 		case <-time.After(5 * time.Second):
-			for _, g := range checkGroups {
-				checkGroupHealth(g)
-			}
+			runDueHealthChecks(make(map[string]time.Time))
 		case <-stop:
 			return
 		}
 
-		ticker := time.NewTicker(time.Duration(minInterval) * time.Second)
+		// 1s tick: groups are re-read from the matcher every tick (D14: no
+		// startup snapshot), and each group is checked once its own interval
+		// has elapsed. Added/removed groups are picked up automatically.
+		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-
+		last := make(map[string]time.Time)
 		for {
 			select {
 			case <-ticker.C:
-				for _, g := range checkGroups {
-					checkGroupHealth(g)
-				}
+				runDueHealthChecks(last)
 			case <-stop:
 				return
 			}
@@ -2450,6 +2418,37 @@ func startHealthChecks() chan struct{} {
 	}()
 
 	return stop
+}
+
+// runDueHealthChecks checks every enabled group whose health-check interval has
+// elapsed. Groups are read from the matcher each call so configuration changes
+// apply without restart, and deleted groups stop being checked (and therefore
+// stop being written back) immediately.
+func runDueHealthChecks(last map[string]time.Time) {
+	matcher, err := db.GetMatcher()
+	if err != nil {
+		util.LogModuleWarn("main", "health checks: get matcher fail: %v", err)
+		return
+	}
+	now := time.Now()
+	seen := make(map[string]bool, len(last))
+	for _, g := range matcher.ListGroups() {
+		if !g.IsEnabled() || g.HealthCheckInterval == nil || *g.HealthCheckInterval <= 0 {
+			continue
+		}
+		seen[g.Name] = true
+		if t, ok := last[g.Name]; ok && now.Sub(t) < time.Duration(*g.HealthCheckInterval)*time.Second {
+			continue
+		}
+		last[g.Name] = now
+		checkGroupHealth(g)
+	}
+	// Forget removed groups so the bookkeeping does not grow with churn.
+	for name := range last {
+		if !seen[name] {
+			delete(last, name)
+		}
+	}
 }
 
 const (
@@ -2492,7 +2491,15 @@ func checkGroupHealth(g *config.ProxyGroup) {
 				g.SetHealth(key, false, 0)
 				continue
 			}
-			if strings.EqualFold(selected.Type, config.ProxyDIRECT) || strings.EqualFold(selected.Type, config.ProxyREJECT) {
+			if strings.EqualFold(selected.Type, config.ProxyREJECT) {
+				// REJECT is never a usable egress (D14): report it unhealthy so
+				// best/load-balance never route traffic into it.
+				g.SetHealth(key, false, 0)
+				continue
+			}
+			if strings.EqualFold(selected.Type, config.ProxyDIRECT) && testURL == "" {
+				// DIRECT needs a probe target; without a health-check URL there
+				// is nothing to measure.
 				g.SetHealth(key, true, 0)
 				continue
 			}
@@ -2506,7 +2513,11 @@ func checkGroupHealth(g *config.ProxyGroup) {
 			g.SetHealth(key, false, 0)
 			continue
 		}
-		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
+		if strings.EqualFold(p.Type, config.ProxyREJECT) {
+			g.SetHealth(key, false, 0)
+			continue
+		}
+		if strings.EqualFold(p.Type, config.ProxyDIRECT) && testURL == "" {
 			g.SetHealth(key, true, 0)
 			continue
 		}
@@ -2543,13 +2554,11 @@ func checkGroupHealth(g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	// Broadcast this group's health snapshot to in-memory consumers (no DB)
+	// Broadcast this group's health snapshot to in-memory consumers (D14:
+	// health is runtime state and must NOT be written back to the group config —
+	// persisting it resurrected deleted groups and dropped healthMap on reload).
 	snap := g.HealthSnapshot()
 	db.NotifyGroupHealth(g.Name, snap)
-	// Also persist the updated group object
-	if err := db.PutProxyGroup(g); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
-	}
 	db.BumpRuntimeVersion("stats")
 }
 
@@ -2592,7 +2601,14 @@ func checkGroupTest(g *config.ProxyGroup) {
 			g.SetHealthImmediate(key, false, 0)
 			continue
 		}
-		if strings.EqualFold(p.Type, config.ProxyDIRECT) || strings.EqualFold(p.Type, config.ProxyREJECT) {
+		if strings.EqualFold(p.Type, config.ProxyREJECT) {
+			// REJECT is never a usable egress (D14).
+			g.SetHealthImmediate(key, false, 0)
+			continue
+		}
+		if strings.EqualFold(p.Type, config.ProxyDIRECT) && testURL == "" {
+			// DIRECT needs a probe target; without a health-check URL there is
+			// nothing to measure.
 			g.SetHealthImmediate(key, true, 0)
 			continue
 		}
@@ -2622,13 +2638,10 @@ func checkGroupTest(g *config.ProxyGroup) {
 	}
 	wg.Wait()
 
-	// Broadcast this group's health snapshot to in-memory consumers (no DB)
+	// Broadcast this group's health snapshot to in-memory consumers (D14:
+	// runtime state only — never write it back to the group config).
 	snap := g.HealthSnapshot()
 	db.NotifyGroupHealth(g.Name, snap)
-	// Also persist the updated group object
-	if err := db.PutProxyGroup(g); err != nil {
-		util.LogModuleWarn("main", "[HEALTH] persist group %s fail: %v", g.Name, err)
-	}
 }
 
 // healthCheckBudget 返回该代理的健康检查预算。

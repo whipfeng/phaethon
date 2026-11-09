@@ -35,9 +35,11 @@
 
 ## 阶段 5: 健康检查配置/运行态分离（D14）
 
-- [ ] 运行态表（组名+节点名 → 状态），不写回配置
-- [ ] 每轮实时取组；DIRECT 真实探测；REJECT 排除
-- [ ] 全局 ctx + 每节点预算；删除时清理运行态
+- [x] 每轮实时取组（1s tick 重读 matcher，按各组 interval 到期才检查；删除的组自动停止检查）
+- [x] 健康结果不再写回组配置（移除 `db.PutProxyGroup`），消除「已删除组被复活」「healthMap 被覆盖」
+- [x] DIRECT 在配置了检查 URL 时走真实探测；REJECT 标记不可用、不参与 best/load-balance 选择
+- [x] 全局 ctx + 每节点预算（`healthCheckBudget`）；删除的组不会再被检查，运行态随之释放
+- [ ] **未做**：运行态表彻底外置到组对象之外（当前健康状态仍挂在 `config.ProxyGroup` 上，只是不落盘）
 
 ## 阶段 6: 验证
 

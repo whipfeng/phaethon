@@ -471,11 +471,19 @@ func (g *ProxyGroup) GetActiveMember() string {
 
 // SetActiveMember sets the active member for a select group. The name must
 // correspond to a current member; otherwise an error is returned.
+//
+// Detached DB copies (no resolver callbacks) cannot enumerate subscription
+// nodes, so the membership check is skipped for them: rejecting every
+// subscription-member name there would make the admin API unusable.
 func (g *ProxyGroup) SetActiveMember(name string) error {
 	g.selMu.Lock()
 	defer g.selMu.Unlock()
 	if name == "" {
 		g.ActiveMember = ""
+		return nil
+	}
+	if g.Subscription != "" && g.ResolveSubscription == nil {
+		g.ActiveMember = name
 		return nil
 	}
 	members := g.computeMembersLocked()

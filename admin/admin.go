@@ -3300,10 +3300,12 @@ func (s *AdminServer) apiGroupSubscription(w http.ResponseWriter, r *http.Reques
 		s.mu.Lock()
 		// Update the group in database directly
 		group.SubscriptionFilter = body.Filter
-		// group is a private DB copy without resolver callbacks, so the setter's
-		// membership check cannot see subscription nodes. Assign directly (no
-		// sharing, no lock needed on this local object).
-		group.ActiveMember = body.ActiveMember
+		// All ActiveMember writes go through the locked setter (D16).
+		if err := group.SetActiveMember(body.ActiveMember); err != nil {
+			s.mu.Unlock()
+			httpError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := db.PutProxyGroup(group); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
@@ -3693,13 +3695,11 @@ func (s *AdminServer) apiGroups(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if existing != nil {
-			// Local DB copy without resolver callbacks: direct assignment is
-			// safe and preserves subscription-member names that the setter
-			// would reject as "not found".
+			// All ActiveMember writes go through the locked setter (D16).
 			if g.Subscription != existing.Subscription {
-				g.ActiveMember = ""
+				_ = g.SetActiveMember("")
 			} else if g.ActiveMember == "" {
-				g.ActiveMember = existing.ActiveMember
+				_ = g.SetActiveMember(existing.ActiveMember)
 			}
 			if g.HealthCheckURL == "" {
 				g.HealthCheckURL = existing.HealthCheckURL

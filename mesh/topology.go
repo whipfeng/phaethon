@@ -112,6 +112,14 @@ const P2PProtocolVersion = 10
 // reconnected, so an upgrade on either side recovers automatically.
 const P2PProtocolVersionMin = 9
 
+// Capability names advertised in hello/gossip (D25). Optional features are
+// enabled per peer from the intersection of both sides' capability sets.
+const (
+	// CapabilityStripe means the peer supports dynamic extra data lanes
+	// (StripeAttach / FrameLaneAck).
+	CapabilityStripe = "stripe"
+)
+
 // GossipInfo is the gossip payload exchanged between nodes.
 // hello and gossip use the same structure; hello is a superset with Cmd and ProtocolVersion.
 type GossipInfo struct {

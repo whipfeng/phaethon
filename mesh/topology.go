@@ -75,7 +75,7 @@ type GossipLink struct {
 
 // GossipNeighbor represents a direct neighbor with multiple links.
 type GossipNeighbor struct {
-	NodeID string       `json:"nodeId"`        // neighbor node ID
+	NodeID string       `json:"nodeId"`          // neighbor node ID
 	Links  []GossipLink `json:"links,omitempty"` // links to this neighbor
 }
 
@@ -106,14 +106,24 @@ type GossipTopologyEdge struct {
 // a different GossipLink wire format; reusing 9 would make old nodes accept new peers.
 const P2PProtocolVersion = 10
 
+// P2PProtocolVersionMin is the oldest protocol this build accepts. Peers in
+// [min, current] negotiate down to the lower version (D25); peers below the
+// minimum only fail the current attempt — they keep being probed and
+// reconnected, so an upgrade on either side recovers automatically.
+const P2PProtocolVersionMin = 9
+
 // GossipInfo is the gossip payload exchanged between nodes.
 // hello and gossip use the same structure; hello is a superset with Cmd and ProtocolVersion.
 type GossipInfo struct {
 	// Protocol fields (only used by hello)
 	Cmd             string `json:"cmd,omitempty"`             // "hello" or "gossip"
 	ProtocolVersion int    `json:"protocolVersion,omitempty"` // only in hello
-	Seq             uint16 `json:"seq,omitempty"`             // 本端生成的序列号（hello 协商用）
-	FriendlyName    string `json:"friendlyName,omitempty"`    // 友好名称（代理名，hello 协商用）
+	// MinProtocolVersion is the oldest version the sender accepts; capability
+	// names let new features be enabled per peer (D25).
+	MinProtocolVersion int      `json:"minProtocolVersion,omitempty"`
+	Capabilities       []string `json:"capabilities,omitempty"`
+	Seq                uint16   `json:"seq,omitempty"`          // 本端生成的序列号（hello 协商用）
+	FriendlyName       string   `json:"friendlyName,omitempty"` // 友好名称（代理名，hello 协商用）
 
 	// Topology information (both hello and gossip carry this)
 	DomainSuffixes []GossipDomainSuffix  `json:"domainSuffixes,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -30,8 +31,11 @@ const (
 type sshClientEntry struct {
 	client   *ssh.Client
 	lastUsed time.Time
-	reconnMu sync.Mutex // serialises reconnect for this key
+	reconnMu sync.Mutex    // serialises reconnect for this key
 	done     chan struct{} // signals keepalive goroutine to stop
+	// refs counts open forwarded channels. The entry must never be reaped
+	// while a channel is still in use (D24).
+	refs atomic.Int64
 }
 
 // sshClientCache holds established SSH clients keyed by proxy name.
@@ -40,7 +44,34 @@ type sshClientEntry struct {
 var (
 	sshClientCache = make(map[string]*sshClientEntry)
 	sshCacheMu     sync.Mutex
+	// sshKeyLocks single-flights connection establishment per proxy without
+	// holding sshCacheMu across the TCP/TLS/SSH handshake (D24).
+	sshKeyLocks sync.Map // key -> *sync.Mutex
 )
+
+func sshKeyLock(key string) *sync.Mutex {
+	m, _ := sshKeyLocks.LoadOrStore(key, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// sshChannelConn tracks a forwarded channel's lifetime so the cached client is
+// not reaped while the channel is still open.
+type sshChannelConn struct {
+	net.Conn
+	entry *sshClientEntry
+	once  sync.Once
+}
+
+func (c *sshChannelConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { c.entry.refs.Add(-1) })
+	return err
+}
+
+func wrapSSHConn(conn net.Conn, e *sshClientEntry) net.Conn {
+	e.refs.Add(1)
+	return &sshChannelConn{Conn: conn, entry: e}
+}
 
 // SSHDialer forwards TCP connections through an SSH server using
 // the standard SSH port-forwarding channel (direct-tcpip).
@@ -73,7 +104,7 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 
 	conn, err := client.Dial("tcp", addr)
 	if err == nil {
-		return conn, nil
+		return wrapSSHConn(conn, entry), nil
 	}
 
 	// Dial failed — the SSH connection is likely stale.
@@ -102,21 +133,35 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)
 	}
-	return conn, nil
+	return wrapSSHConn(conn, cachedEntry), nil
 }
 
 func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	key := d.Proxy.Name
 
 	sshCacheMu.Lock()
-	defer sshCacheMu.Unlock()
-
 	d.cleanupSSHCacheLocked()
-
 	if e, ok := sshClientCache[key]; ok {
 		e.lastUsed = time.Now()
+		sshCacheMu.Unlock()
 		return e.client, e, nil
 	}
+	sshCacheMu.Unlock()
+
+	// Establish at most one connection per proxy; the handshake runs without
+	// the global cache lock so unrelated SSH proxies are not serialised (D24).
+	mu := sshKeyLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	sshCacheMu.Lock()
+	d.cleanupSSHCacheLocked()
+	if e, ok := sshClientCache[key]; ok {
+		e.lastUsed = time.Now()
+		sshCacheMu.Unlock()
+		return e.client, e, nil
+	}
+	sshCacheMu.Unlock()
 
 	client, err := d.createSSHClient()
 	if err != nil {
@@ -128,7 +173,9 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 		lastUsed: time.Now(),
 		done:     make(chan struct{}),
 	}
+	sshCacheMu.Lock()
 	sshClientCache[key] = e
+	sshCacheMu.Unlock()
 	go d.keepAlive(e)
 	return client, e, nil
 }
@@ -166,6 +213,12 @@ func (d *SSHDialer) removeSSHClientLocked(target *sshClientEntry) {
 func (d *SSHDialer) cleanupSSHCacheLocked() {
 	now := time.Now()
 	for k, e := range sshClientCache {
+		// Never reap a client that still has open forwarded channels (D24):
+		// a long-lived connection makes no new Dial calls and would otherwise
+		// be closed as "idle".
+		if e.refs.Load() > 0 {
+			continue
+		}
 		if now.Sub(e.lastUsed) > sshClientIdleTimeout {
 			e.client.Close()
 			close(e.done) // signal keepalive goroutine to stop

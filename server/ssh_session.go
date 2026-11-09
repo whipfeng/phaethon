@@ -12,6 +12,27 @@ import (
 	"phaethon/util"
 )
 
+// sessionEnv returns the environment for a user session, with worker-only
+// variables removed.
+//
+// The built-in SSH server runs INSIDE the worker process, so every session
+// inherits the worker's environment — including PHAETHON_WORKER=1. If a user
+// then runs ./phaethon from that shell, it starts in worker mode directly:
+// no watchdog, own parent pid 1, and its stdout is a file instead of the
+// watchdog pipe. That produced an orphaned worker on jf and silently disabled
+// restart supervision. Never leak this variable into user sessions.
+func sessionEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "PHAETHON_WORKER=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // sessionProc 抽象被拉起进程的双向管道与生命周期。
 // 具体实现在 ssh_session_unix.go（pty/管道）与 ssh_session_windows.go（管道）。
 type sessionProc interface {

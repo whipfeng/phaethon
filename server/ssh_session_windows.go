@@ -138,6 +138,7 @@ func startConpty(commandLine, workDir string, cols, rows uint32) (*conptyProc, e
 func startPipe(shell string, args []string, workDir string) (sessionProc, error) {
 	cmd := exec.Command(shell, args...)
 	cmd.Dir = workDir
+	cmd.Env = sessionEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

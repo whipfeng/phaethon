@@ -1003,6 +1003,27 @@ func (e *Manager) readLoop() {
 			}
 		}
 
+		// D27: mesh destination with no usable route (link down / topology not
+		// converged). Answer ICMP host-unreachable and count it, instead of
+		// injecting a packet the stack can only silently drop.
+		if proto == ipv4.ProtocolNumber && n >= 20 && e.netstack != nil {
+			dstIP := net.IP(pktBuf[16:20])
+			if e.netstack.IsMeshUnreachable(dstIP) {
+				e.netstack.MeshUnreachableDrops.Add(1)
+				icmpPkt := mesh.GenerateICMPDestUnreachable(dstIP, pktBuf)
+				e.mu.Lock()
+				dev := e.device
+				e.mu.Unlock()
+				if dev != nil && icmpPkt != nil {
+					if _, err := dev.Write(icmpPkt); err != nil {
+						util.LogModuleWarn("tun", "[MESH-UNREACH] write ICMP to TUN fail: %v", err)
+					}
+				}
+				pktBufPool.Put(pktBuf[:0])
+				continue
+			}
+		}
+
 		if e.netstack != nil && e.netstack.LinkEP() != nil {
 			e.injectPacket(proto, pktBuf, n)
 		}

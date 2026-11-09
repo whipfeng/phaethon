@@ -495,7 +495,9 @@
 
 - **保持现状**：非 mesh 目的地（公网/本地服务）落到本地 forwarder 是设计行为，不改。
 - **仅处理这一类**：目标属于 mesh 网段、但当前无可用路径（链路断/未收敛）时，显式丢弃并计数，回 ICMP 不可达，让上层尽快失败重试。
-- **状态**：待实施。
+- **状态**：已实施（2026-11-09）：RouteSelector 新增 Branch 4a（mesh 网段内无路由 → 显式丢弃、不可缓存）；
+  `Netstack.IsMeshUnreachable` 供 TUN 读循环判定，命中后计数（`MeshUnreachableDrops`）并回
+  ICMP type 3 code 1（新 `GenerateICMPDestUnreachable`），非 mesh 目的地的本地转发行为不变。
 
 ### D28 FakeIP 分配与淘汰
 

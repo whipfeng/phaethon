@@ -70,6 +70,14 @@ type RouteSelectorConfig struct {
 	// selection (Dijkstra next-hop, advertised-route lookup) into this
 	// callback.
 	SelectRoute SelectRouteFunc
+
+	// MeshNetwork is the overall mesh range (e.g. 100.64.0.0/10). When a
+	// destination falls inside it but no route exists (link down, topology not
+	// converged), the packet is explicitly dropped and reported instead of
+	// being silently absorbed as an unknown local destination (D27).
+	MeshNetwork *net.IPNet
+	// OnMeshUnreachable is invoked for each such drop (counter/log hook).
+	OnMeshUnreachable func(dst net.IP)
 }
 
 // NewRouteSelector creates a RouteSelector per design §2.3 (4 branches).
@@ -152,6 +160,23 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 						dstIP, branch, decision.EgressNIC, decision.NeedIPIP, decision.EgressEIP, decision.LocalStack, decision.Cacheable)
 					return decision
 				}
+			}
+		}
+
+		// Branch 4a (D27): the destination belongs to the mesh network but no
+		// route matched — the link is down or the topology has not converged.
+		// Drop it explicitly (counted) instead of treating it as an unknown
+		// local destination, so the failure is visible and the upper layer can
+		// retry once routing recovers.
+		if cfg.MeshNetwork != nil && cfg.MeshNetwork.Contains(dstIP) {
+			if cfg.OnMeshUnreachable != nil {
+				cfg.OnMeshUnreachable(dstIP)
+			}
+			util.LogModuleDebug("route", "[ROUTE-SELECTOR] dst=%s branch=4a mesh_unreachable (no route)", dstIP)
+			return stack.RouteDecision{
+				EgressNIC:  1,
+				LocalStack: true,
+				Cacheable:  false,
 			}
 		}
 

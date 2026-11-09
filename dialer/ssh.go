@@ -69,8 +69,18 @@ func (c *sshChannelConn) Close() error {
 }
 
 func wrapSSHConn(conn net.Conn, e *sshClientEntry) net.Conn {
-	e.refs.Add(1)
+	// The caller already holds one reference (acquired by getSSHClient); the
+	// channel conn takes that reference over and releases it on Close.
 	return &sshChannelConn{Conn: conn, entry: e}
+}
+
+// releaseSSHRef drops a reference acquired by getSSHClient. Entries with a
+// positive refcount are never reaped, so the client stays usable while Dial
+// is in flight.
+func releaseSSHRef(e *sshClientEntry) {
+	if e != nil {
+		e.refs.Add(-1)
+	}
 }
 
 // SSHDialer forwards TCP connections through an SSH server using
@@ -104,8 +114,11 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 
 	conn, err := client.Dial("tcp", addr)
 	if err == nil {
+		// Reference acquired by getSSHClient is transferred to the channel conn.
 		return wrapSSHConn(conn, entry), nil
 	}
+	// Dial failed — release the reference before touching the cache.
+	releaseSSHRef(entry)
 
 	// Dial failed — the SSH connection is likely stale.
 	// Acquire the per-entry lock so only one goroutine reconnects.
@@ -121,6 +134,7 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 	// If the cached entry is the same one that just failed, no one has
 	// replaced it yet — remove it and build a fresh client.
 	if cachedEntry == entry {
+		releaseSSHRef(cachedEntry)
 		d.removeSSHClientLocked(entry)
 		cachedClient, cachedEntry, err = d.getSSHClient()
 		if err != nil {
@@ -131,11 +145,15 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 
 	conn, err = cachedClient.Dial("tcp", addr)
 	if err != nil {
+		releaseSSHRef(cachedEntry)
 		return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)
 	}
 	return wrapSSHConn(conn, cachedEntry), nil
 }
 
+// getSSHClient returns the cached client for this proxy with one reference
+// acquired. Callers must transfer that reference to the forwarded channel
+// (wrapSSHConn) or drop it with releaseSSHRef.
 func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	key := d.Proxy.Name
 
@@ -143,6 +161,7 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	d.cleanupSSHCacheLocked()
 	if e, ok := sshClientCache[key]; ok {
 		e.lastUsed = time.Now()
+		e.refs.Add(1)
 		sshCacheMu.Unlock()
 		return e.client, e, nil
 	}
@@ -158,6 +177,7 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 	d.cleanupSSHCacheLocked()
 	if e, ok := sshClientCache[key]; ok {
 		e.lastUsed = time.Now()
+		e.refs.Add(1)
 		sshCacheMu.Unlock()
 		return e.client, e, nil
 	}
@@ -173,6 +193,7 @@ func (d *SSHDialer) getSSHClient() (*ssh.Client, *sshClientEntry, error) {
 		lastUsed: time.Now(),
 		done:     make(chan struct{}),
 	}
+	e.refs.Store(1) // reference handed to the caller
 	sshCacheMu.Lock()
 	sshClientCache[key] = e
 	sshCacheMu.Unlock()
@@ -365,7 +386,9 @@ func (d *SSHDialer) removeAndReconnect(entry *sshClientEntry) {
 	go func() {
 		for attempt := 1; attempt <= 3; attempt++ {
 			util.LogModuleDebug("ssh", "[%s] background reconnecting (attempt %d)...", d.Proxy.Name, attempt)
-			if _, _, err := d.getSSHClient(); err != nil {
+			_, e, err := d.getSSHClient()
+			releaseSSHRef(e)
+			if err != nil {
 				util.LogModuleWarn("ssh", "[%s] background reconnect attempt %d failed: %v", d.Proxy.Name, attempt, err)
 				if attempt < 3 {
 					time.Sleep(2 * time.Second)
@@ -382,7 +405,8 @@ func (d *SSHDialer) removeAndReconnect(entry *sshClientEntry) {
 // PreWarm establishes the SSH connection eagerly so the first Dial does not
 // pay the handshake latency.
 func (d *SSHDialer) PreWarm() error {
-	_, _, err := d.getSSHClient()
+	_, entry, err := d.getSSHClient()
+	releaseSSHRef(entry)
 	if err != nil {
 		return err
 	}

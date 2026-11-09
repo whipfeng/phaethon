@@ -14,9 +14,9 @@
 
 ## 阶段 2: SSH 连接池（D24）
 
-- [ ] 池连接引用计数，使用中不回收
-- [ ] 同目标 singleflight 建连
-- [ ] 握手移出全局池锁
+- [x] 池连接引用计数，使用中不回收（`getSSHClient` 返回即持有一份引用，转发通道 Close 时归还）
+- [x] 同目标 singleflight 建连（`sshKeyLocks`，重连走 `reconnMu`）
+- [x] 握手移出全局池锁（`sshCacheMu` 只保护 map 与引用计数）
 
 ## 阶段 3: ctx 贯穿
 

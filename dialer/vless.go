@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	cryptotls "crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -38,11 +39,17 @@ type VLESSDialer struct {
 }
 
 func (d *VLESSDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
-	return d.dialWithCommand(dstAddr, dstPort, vlessCommandTCP)
+	return d.dialWithCommand(nil, dstAddr, dstPort, vlessCommandTCP)
+}
+
+// DialContext is Dial with cancellation support: ctx is propagated to the next
+// hop and bounds the TLS + VLESS handshake.
+func (d *VLESSDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dialWithCommand(ctx, dstAddr, dstPort, vlessCommandTCP)
 }
 
 func (d *VLESSDialer) DialPacket() (net.PacketConn, error) {
-	conn, err := d.dialWithCommand("0.0.0.0", 0, vlessCommandUDP)
+	conn, err := d.dialWithCommand(nil, "0.0.0.0", 0, vlessCommandUDP)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +59,7 @@ func (d *VLESSDialer) DialPacket() (net.PacketConn, error) {
 	return &vlessPacketConn{Conn: conn}, nil
 }
 
-func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (net.Conn, error) {
+func (d *VLESSDialer) dialWithCommand(ctx context.Context, dstAddr string, dstPort int, cmd byte) (net.Conn, error) {
 	// Resolve target address / port
 	host, port := dstAddr, dstPort
 	if h, po, err := net.SplitHostPort(dstAddr); err == nil {
@@ -63,7 +70,7 @@ func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (ne
 	}
 
 	// Establish transport to the VLESS server.
-	conn, err := d.dialTLS()
+	conn, err := d.dialTLS(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +93,12 @@ func (d *VLESSDialer) dialWithCommand(dstAddr string, dstPort int, cmd byte) (ne
 	return conn, nil
 }
 
-func (d *VLESSDialer) dialTLS() (net.Conn, error) {
-	nextDialer := NewDialer(d.Proxy.Next)
-	rawConn, err := nextDialer.Dial(d.Proxy.Server, d.Proxy.Port)
+func (d *VLESSDialer) dialTLS(ctx context.Context) (net.Conn, error) {
+	rawConn, cleanup, err := dialHandshakeConn(ctx, d.Proxy.Next, d.Proxy.Server, d.Proxy.Port)
 	if err != nil {
 		return nil, fmt.Errorf("vless: connect to server %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
+	defer cleanup()
 
 	sni := d.sni()
 	tlsConf := &cryptotls.Config{

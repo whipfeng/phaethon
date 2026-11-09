@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -143,6 +144,16 @@ type Hysteria2Dialer struct {
 }
 
 func (d *Hysteria2Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support: creating the client and
+// opening the QUIC stream both honour ctx.
+func (d *Hysteria2Dialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(ctx, dstAddr, dstPort)
+}
+
+func (d *Hysteria2Dialer) dial(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	pool := getHysteria2Pool()
 	hyc, err := pool.getClient(d.Proxy.Name, d.Proxy)
 	if err != nil {
@@ -150,7 +161,7 @@ func (d *Hysteria2Dialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	}
 
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-	conn, err := hyc.TCP(addr)
+	conn, err := openConnCtx(ctx, func() (net.Conn, error) { return hyc.TCP(addr) })
 	if err != nil {
 		pool.releaseClient(d.Proxy.Name)
 		return nil, fmt.Errorf("hysteria2: connect to %s fail: %w", addr, err)

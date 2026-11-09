@@ -3,6 +3,7 @@ package dialer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -19,11 +20,23 @@ type HTTPDialer struct {
 }
 
 func (d *HTTPDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support: ctx covers the TCP connect and
+// the CONNECT request/response exchange.
+func (d *HTTPDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(ctx, dstAddr, dstPort)
+}
+
+func (d *HTTPDialer) dial(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
-	conn, err := DialRouteAware("tcp", addr)
+	rawConn, err := DialRouteAwareContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("http: connect to proxy fail: %w", err)
 	}
+	conn, cleanup := withCtxDeadline(ctx, rawConn)
+	defer cleanup()
 	util.SetTCPNoDelay(conn)
 
 	// Build CONNECT request manually

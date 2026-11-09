@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -90,9 +91,19 @@ type SSHDialer struct {
 }
 
 func (d *SSHDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support: the cached-connection lookup
+// and the direct-tcpip channel open honour ctx.
+func (d *SSHDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(ctx, dstAddr, dstPort)
+}
+
+func (d *SSHDialer) dial(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	addr := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
 
-	conn, err := d.dialSSH(addr)
+	conn, err := d.dialSSH(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -101,18 +112,27 @@ func (d *SSHDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	return conn, nil
 }
 
+// openSSHChannel opens a direct-tcpip channel, returning early when ctx is
+// cancelled. ssh.Client.Dial cannot be interrupted, so the pending channel is
+// closed by a helper goroutine when it eventually completes.
+func openSSHChannel(ctx context.Context, client *ssh.Client, addr string) (net.Conn, error) {
+	return openConnCtx(ctx, func() (net.Conn, error) {
+		return client.Dial("tcp", addr)
+	})
+}
+
 // dialSSH dials through the cached SSH client. On failure it acquires the
 // per-entry reconnect lock, checks whether another goroutine has already
 // replaced the stale client, and if not, removes it and creates a fresh one.
 // Concurrent callers serialise behind reconnMu so only one SSH handshake
 // happens per failure episode.
-func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
+func (d *SSHDialer) dialSSH(ctx context.Context, addr string) (net.Conn, error) {
 	client, entry, err := d.getSSHClient()
 	if err != nil {
 		return nil, fmt.Errorf("ssh: connect to %s:%d fail: %w", d.Proxy.Server, d.Proxy.Port, err)
 	}
 
-	conn, err := client.Dial("tcp", addr)
+	conn, err := openSSHChannel(ctx, client, addr)
 	if err == nil {
 		// Reference acquired by getSSHClient is transferred to the channel conn.
 		return wrapSSHConn(conn, entry), nil
@@ -143,7 +163,7 @@ func (d *SSHDialer) dialSSH(addr string) (net.Conn, error) {
 	}
 	// Otherwise cachedEntry is a freshly reconnected client — use it directly.
 
-	conn, err = cachedClient.Dial("tcp", addr)
+	conn, err = openSSHChannel(ctx, cachedClient, addr)
 	if err != nil {
 		releaseSSHRef(cachedEntry)
 		return nil, fmt.Errorf("ssh: dial %s fail: %w", addr, err)

@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -17,6 +18,15 @@ type ShadowsocksDialer struct {
 }
 
 func (d *ShadowsocksDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(context.Background(), dstAddr, dstPort)
+}
+
+// DialContext is Dial with cancellation support (route-aware DNS + TCP connect).
+func (d *ShadowsocksDialer) DialContext(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
+	return d.dial(ctx, dstAddr, dstPort)
+}
+
+func (d *ShadowsocksDialer) dial(ctx context.Context, dstAddr string, dstPort int) (net.Conn, error) {
 	cipherName := mapSSCipher(d.Proxy.Cipher)
 	if cipherName == "" {
 		return nil, fmt.Errorf("ss: unsupported cipher: %s", d.Proxy.Cipher)
@@ -28,7 +38,7 @@ func (d *ShadowsocksDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) 
 	}
 
 	addr := net.JoinHostPort(d.Proxy.Server, strconv.Itoa(d.Proxy.Port))
-	conn, err := DialRouteAware("tcp", addr)
+	conn, err := DialRouteAwareContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("ss: connect to server fail: %w", err)
 	}

@@ -70,7 +70,11 @@
 | [graceful_shutdown_and_tun_cleanup_design.md](plans/graceful_shutdown_and_tun_cleanup_design.md) | 优雅关闭挂死修复（DNS hijacker 未停）+ TUN 残留按真实地址清理 | v0.1.0 | DRAFT |
 | [tun_cleanup_scoping_and_pfroute_design.md](plans/tun_cleanup_scoping_and_pfroute_design.md) | TUN 清理作用域收敛（不误伤共存 VPN）+ darwin 路由操作迁移 PF_ROUTE | v0.1.0 | DRAFT |
 | [mesh-link-rebuild-stability.md](plans/mesh-link-rebuild-stability.md) | Mesh 链路误断与重建后遗症修复（LinkNIC 竞态、ping 误判死、NIC 删除后重选路、sackedOut、SetPipe、SSH keepalive） | - | 已完成 |
-| [watchdog-residual-kill.md](plans/watchdog-residual-kill.md) | watchdog 残留进程精确查杀（按 uid+cwd+exe 判定，worker Pdeathsig） | - | 已决策待开发 |
+| [watchdog-residual-kill.md](plans/watchdog-residual-kill.md) | watchdog 职责边界与单实例清理（实例锁替代 /proc 清扫，worker Pdeathsig，退出码契约） | - | 已完成 |
+| [security-hardening-batch1.md](plans/security-hardening-batch1.md) | 安全止血批次设计（包分发手动升级、调试接口默认关闭、监听地址、注册端口、会话安全） | v0.1.0 | 已实施（待部署验证） |
+| [datapath-correctness-batch2.md](plans/datapath-correctness-batch2.md) | 数据面正确性批次（matcher 快照、P2P 清理串行化、按流路由、入站队列、包内存零拷贝） | v0.1.0 | 已完成（待部署验证） |
+| [tun-lifecycle-batch3.md](plans/tun-lifecycle-batch3.md) | TUN 生命周期与清理批次（状态机、Windows 精确清理、Linux/macOS 清理加固） | v0.1.0 | 已完成（待实机验证） |
+| [health-dial-batch4.md](plans/health-dial-batch4.md) | 健康检查与拨号批次（配置/运行态分离、订阅并发、SSH 池、版本协商） | v0.1.0 | DRAFT（仅版本协商骨架） |
 | [mesh-control-isolation-inflight-cap.md](plans/mesh-control-isolation-inflight-cap.md) | 链路控制面隔离（专用数据 lane）+ 在途量上限（LaneAck 门控）+ HT v2 控制帧分离 | - | DRAFT |
 | [mesh-integrated-ssh.md](plans/mesh-integrated-ssh.md) | Mesh 内建 SSH 服务（nodeid.phn:22 经 netstack 终止，不经 OS 监听端口） | - | 已实施 |
 | [ssh-shell-configurable.md](plans/ssh-shell-configurable.md) | 内建 SSH 默认 Shell db 可配置（覆盖自动探测） | v0.1.0 | DRAFT |
@@ -95,6 +99,10 @@
 | [mesh-forwarding-trace-tasks.md](tasks/mesh-forwarding-trace-tasks.md) | Mesh 跨层转发关联诊断任务 | master |
 | [mesh-reply-forward-drop-fix.md](tasks/mesh-reply-forward-drop-fix.md) | Mesh 转发流 reply 方向丢包修复任务 | master |
 | [ssh-shell-configurable-tasks.md](tasks/ssh-shell-configurable-tasks.md) | 内建 SSH 默认 Shell db 可配置任务 | master |
+| [security-hardening-batch1-tasks.md](tasks/security-hardening-batch1-tasks.md) | 安全止血批次（包分发手动升级、调试接口默认关闭、监听地址、注册端口、会话安全） | master |
+| [datapath-correctness-batch2-tasks.md](tasks/datapath-correctness-batch2-tasks.md) | 数据面正确性批次（快照、清理串行化、按流路由、入站队列、包内存） | master |
+| [tun-lifecycle-batch3-tasks.md](tasks/tun-lifecycle-batch3-tasks.md) | TUN 生命周期与清理批次（状态机、三平台清理与状态落盘） | master |
+| [health-dial-batch4-tasks.md](tasks/health-dial-batch4-tasks.md) | 健康检查与拨号批次任务 | master |
 
 ### issues/ (问题跟踪)
 
@@ -102,6 +110,8 @@
 |------|------|------|
 | [p2p-v8-mesh-regression.md](issues/p2p-v8-mesh-regression.md) | P2P v8 重写审查发现（10 项 + 路由环路分析，含阻断级 mesh 注册丢失） | 已修复（10/10） |
 | [shadowrocket-gg-ssh-idle-freeze.md](issues/shadowrocket-gg-ssh-idle-freeze.md) | Shadowrocket → GG → mesh SSH 空闲 freeze：两端 relay 日志闭环，确认关闭发起方为 SR 客户端 | 已结案 |
+| [full-code-audit-20261109.md](issues/full-code-audit-20261109.md) | 全仓功能设计与代码逻辑审计（6 组只读审阅，P0/P1/P2 清单 + 决策点 + 修复批次） | 待讨论 |
+| [session-4f40e2d3-handoff-20261109.md](issues/session-4f40e2d3-handoff-20261109.md) | 会话上下文压缩死锁事故：成因、rewind 回滚范围、恢复过程与设计符合性审查 | 已恢复 |
 
 ### inputs/ (原始需求与历史分析)
 

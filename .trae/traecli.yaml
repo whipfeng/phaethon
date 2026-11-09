@@ -1,0 +1,10 @@
+# 项目级 TraeCLI 配置（本地工具用）
+# 上下文用量守卫：在每轮用户输入前与自动压缩前，读取会话日志里最近一次请求的
+# prompt_tokens，达到阈值时通过 systemMessage 提醒手动压缩 / 开新会话。
+hooks:
+  - type: command
+    command: 'python "${workspaceFolder}/.trae/hooks/ctx_guard.py"'
+    timeout: 10s
+    matchers:
+      - event: user_prompt_submit
+      - event: pre_compact

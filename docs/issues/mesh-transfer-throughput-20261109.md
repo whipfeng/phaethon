@@ -49,3 +49,51 @@
 2. 同时采 QG 侧 `ss -ti`（`rcv_ooopack`、`cwnd`、`retrans`）与 jf `/api/mesh` 的 `tcpStats` 差分（fast_retransmit / sack_recovery / spurious_recovery / DSACK）；
 3. 并行 8 流复测聚合是否仍线性（若线性 → 每流问题；若不变 → 带宽问题）；
 4. 检查当前 mesh 数据面是否仍存在"同一内层流分片跨多通道/多队列"的乱序源（DRR 256 队列、meshInboundWorkers=4、stripe lane 分流、IPIP 外层并发）。
+
+## 6. 复测（2026-11-09 21:00–22:00，全部在 411 版本上）
+
+环境：vm(Windows 本机) / QG(10.11.61.50) / jf / gg / mb(192.168.1.88)，测试载荷为 `/tmp/bench*.bin`（16MB 随机数，scp 单流或分片并行）。
+
+| # | 路径 | 跳数 | 载荷 | 耗时 | 折算 |
+|---|---|---|---|---|---|
+| 1 | VM → QG 公网直连 | 0 | 4MB | 1.31s | **3.1MB/s** |
+| 2 | VM → QG mesh（`loc.qg.phn`） | 1 | 1MB | 0.26s | **3.9MB/s** |
+| 3 | QG → jf 公网直连（60002） | 0 | 16MB | 1.83s | **9.2MB/s** |
+| 4 | QG → jf mesh（`loc.jf.phn`） | 1 | 16MB | 8.10s | **2.07MB/s** |
+| 5 | QG → jf mesh 4 流并行（4×4MB） | 1 | 16MB | 4.63s | **3.46MB/s（1.7×）** |
+| 6 | **VM → jf mesh** | **2（经 qg）** | 1MB | 20.1s | **52KB/s** |
+| 7 | **VM → jf mesh 4 流并行（4×256KB）** | 2 | 1MB | **>300s 未完成** | **<3.4KB/s/流** |
+| 8 | VM → gg mesh（`loc.gg.phn`） | 1 | 1MB | 27.6s | **38KB/s** |
+| 9 | QG → mb mesh（`loc.mb.phn`） | 多跳 | 23MB | >226s 未完成 | <100KB/s |
+| 10 | QG → mb 局域网（192.168.1.88） | 0 | 23MB | 3.59s | **6.4MB/s** |
+
+链路质量（vm 侧 `/api/mesh`）：
+
+```
+vm -> qg  linkKey=vm:QG_SS5_UDPLEG  srtt=37.6ms  jitter=3.6ms
+vm -> gg  linkKey=vm:GGDYSV_TJ      srtt=275.4ms jitter=139.9ms
+```
+
+### 6.1 这次复测得到的两个不同问题
+
+**A. 高 RTT/抖动链路（vm↔gg）**：`srtt 275ms / jitter 140ms`，实测 38KB/s。
+按 cwnd/RTT 反推有效窗口约 10KB（≈7 段），属于链路本身差 + 拥塞窗口受限，
+与 v4 的"每流滴流"形态一致，但不是本次新增。
+
+**B. 中转路径几乎停滞（vm→qg→jf）**：这是新发现，也是最严重的一条：
+
+- 两段单跳各自很快：vm→qg 3.9MB/s、qg→jf 2.07MB/s；
+- 组合成两跳后：1MB 要 20.1s（52KB/s），4 路并行 **300s 都跑不完**（并行不但不聚合，反而更差）；
+- 同一时刻 vm 的 `bestPaths` 明确写着 `jf: nextHop=qg, cost=68.9`，即流量确实经 qg 中转；
+- qg→jf 同一 sshd、同一载荷 2.07MB/s，说明 jf 端不慢；vm→qg 同链路 3.9MB/s，说明 vm 出口不慢。
+
+结论：**问题在 qg 的 mesh 帧转发（relay）路径**，不在链路带宽、不在端点 sshd。
+且并行流更差，指向转发侧存在串行瓶颈/排队或丢帧重传放大，而不是单纯的每流 cwnd 限制。
+
+### 6.2 下一步（针对 B）
+
+1. 在 QG 开 `mesh=debug`，观察 `HandleMeshFrame` 的 relay 分支与 `channelDropStats`、`tcpStats` 差分（重点看非本机目的帧的入队/丢弃/阻塞）；
+2. 对比 qg 上"终结给本机"与"中转给 jf"两条路径的队列深度与写循环耗时；
+3. 用 411 与旧版（如 343）各跑一次 vm→qg→jf 的 1MB 传输，确认是否为本次升级引入的回归（怀疑点：D26 写 TUN 双优先级、D21 入站队列丢弃策略对**中转**路径的影响）；
+4. 若确认是回归，优先回退/修正对应批次，再谈吞吐优化。
+

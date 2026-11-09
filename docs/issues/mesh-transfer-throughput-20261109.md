@@ -155,6 +155,41 @@ vm -> gg  linkKey=vm:GGDYSV_TJ      srtt=275.4ms jitter=139.9ms
 - 若 B 组单跳本身 8 流也不聚合 → 瓶颈在单条 P2P 传输（TCP-over-TCP/加密/写循环），与 lane 无关；
 - 若 E 组 seq 回退集中出现在 repin 时刻 → 直接实锤，不需要 A/B 猜测。
 
+## 10. 第二轮排查（2026-11-10 00:00，v0.8.0-420-gd696a82）
+
+### 10.1 被否掉的假设：TCP_NOTSENT_LOWAT
+
+按 `吞吐上限 = lowat / RTT` 推算 128KB 恰好等于实测单跳 3.4MB/s、两跳 2.3MB/s，看起来严丝合缝，
+于是把 lowat 提到 512KB 并部署 vm/QG/jf 复测：
+
+| 场景 | 128KB | 512KB |
+|---|---|---|
+| 1 跳 vm←qg | 3.03MB/s | 2.95MB/s |
+| 2 跳 vm←jf | 2.67MB/s | 2.09MB/s |
+| 2 跳 8 流 | 2.20MB/s | 2.09MB/s |
+
+**无提升**。查日志发现 QG/jf 上一条 `LANE-LOWAT` 都没有 —— 这条链路的载体不是普通 `*net.TCPConn`
+（vm↔qg 是 `QG_SS5_UDPLEG`，qg↔jf 是 `MGMS_HT` h_tunnel），`limitKernelBacklog` 根本没被调用。
+数字吻合只是数学巧合。改动本身保留（对真正的 TCP 载体仍有意义），但不是根因。
+
+### 10.2 当前收敛
+
+- 起点 1.13MB/s → 现在 2.1~2.7MB/s（D10 保序修复贡献），直连基线 6.6MB/s，差 2.4~3×；
+- 8 流聚合（2.09）低于单流峰值，说明载体内部还有**共享的批量/窗口限制**；
+- 两个载体都在我们自己的代码里：`dialer/htunnel_direct.go`（h_tunnel POST/GET 批量）与
+  SOCKS5 UDP 腿的可靠层窗口。
+
+### 10.3 下一步（无需动 jf 系统）
+
+1. **h_tunnel 参数可热调**：`config.HTunnelConfig` 已有 `get-slots`(默认 2)、`pool-size`(16)、
+   `max-batch-size`(512KB)、wait-time 区间，且 mesh 配置 API（`PUT /api/mesh` 的 `updates.htunnel`）
+   可以写入这些值。先把 `get-slots` 2→8、`max-batch-size` 512KB→1MB，复测 qg↔jf 单跳与 8 流聚合，
+   验证下游 long-poll 并发/批量是否就是 1.55MB/s 的来源。
+2. **UDP leg 窗口**：查 `p2p`/`server` 的 UDP 腿可靠层（窗口大小、ACK 节奏、重排窗口），
+   对照 vm↔qg 单跳 3MB/s 的上限。
+3. 两者都调完后，再测 8 流聚合是否接近直连；若仍不达标，继续按"载体 → DRR → gVisor"顺序收敛。
+
+
 ## 9. 修复与验证（2026-11-09 23:40，v0.8.0-418-g4598c70）
 
 **改动**（`4598c70`）：`laneEnqueue` 队列满时不再 `repinPrimary`，而是丢弃该批并**保持流在原 lane**；

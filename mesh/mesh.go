@@ -2514,21 +2514,26 @@ func (m *MeshManager) broadcastGossip() {
 			// Check each link for matching reverse
 			var validatedLinks []GossipLink
 			for _, gossipLink := range neighbor.Links {
-				// Look for reverse link: (localSeq=R, remoteSeq=L) in neighbor's claim about origin
+				// A link is trusted when both sides declare an edge to each
+				// other. Exact seq match is preferred; a differing seq pair
+				// (reconnect / stale relayed incarnation) must not delete an
+				// otherwise bidirectional edge — that silently removed healthy
+				// routes (e.g. qg↔jf) from the forwarding graph.
 				for _, reverseNeighbor := range neighborClaim.neighbors {
 					if reverseNeighbor.NodeID == claim.nodeID {
-						// Found neighbor's claim about origin, check for matching link
+						exact := false
 						for _, reverseLink := range reverseNeighbor.Links {
 							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
-								validatedLinks = append(validatedLinks, gossipLink)
+								exact = true
 								break
 							}
+						}
+						if exact || len(reverseNeighbor.Links) > 0 {
+							validatedLinks = append(validatedLinks, gossipLink)
 						}
 						break
 					}
 				}
-				// If not found, link is filtered out (strict validation)
-				// It will reappear once the reverse gossip arrives
 			}
 
 			if len(validatedLinks) > 0 {
@@ -3282,11 +3287,24 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 			for _, gossipLink := range neighbor.Links {
 				for _, reverseNeighbor := range neighborClaim.neighbors {
 					if reverseNeighbor.NodeID == claim.nodeID {
+						// A link is trusted when BOTH sides declare an edge to each
+						// other (anti-loop / anti-stale requirement). Exact
+						// (localSeq,remoteSeq) equality is preferred, but it must
+						// not be required: seq pairs change on reconnect, and a
+						// relayed claim can carry the previous incarnation. Strict
+						// equality here silently deleted healthy edges (e.g.
+						// qg↔jf), which then removed the only good route to jf
+						// from the Dijkstra graph and pushed traffic onto a
+						// 200ms+ jittery link.
+						exact := false
 						for _, reverseLink := range reverseNeighbor.Links {
 							if reverseLink.LocalSeq == gossipLink.RemoteSeq && reverseLink.RemoteSeq == gossipLink.LocalSeq {
-								validatedLinks = append(validatedLinks, gossipLink)
+								exact = true
 								break
 							}
+						}
+						if exact || len(reverseNeighbor.Links) > 0 {
+							validatedLinks = append(validatedLinks, gossipLink)
 						}
 						break
 					}

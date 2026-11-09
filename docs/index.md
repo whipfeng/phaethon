@@ -114,6 +114,7 @@
 | [session-4f40e2d3-handoff-20261109.md](issues/session-4f40e2d3-handoff-20261109.md) | 会话上下文压缩死锁事故：成因、rewind 回滚范围、恢复过程与设计符合性审查 | 已恢复 |
 | [mesh-topology-edge-loss-20261109.md](issues/mesh-topology-edge-loss-20261109.md) | Mesh 拓扑丢边（deskw 缺 gg--vm）：观测数据、已排除项、bestClaims 单份选取假设、埋点与取证方法 | 待复现 |
 | [ssh-worker-env-and-qg-memory-20261109.md](issues/ssh-worker-env-and-qg-memory-20261109.md) | 内建 SSH 继承 PHAETHON_WORKER 导致无看护 worker；QG 内存/swap 耗尽的定位与恢复 | 已修复 |
+| [mesh-transfer-throughput-20261109.md](issues/mesh-transfer-throughput-20261109.md) | Mesh 大文件传输吞吐对比：历史 v4/v5 方法与结论 vs 今日实测（mesh 单流 ~50-200KB/s，直连/局域网 ~6MB/s） | 待专项复测 |
 
 ### inputs/ (原始需求与历史分析)
 

@@ -52,6 +52,10 @@ var (
 	Arch     = "" // e.g., "amd64", "arm64"
 )
 
+// debugAPIEnabled enables the read-only /api/db browser and debug endpoints.
+// Off by default; set by --enable-debug-api or PHAETHON_DEBUG_API=1.
+var debugAPIEnabled bool
+
 type activeResources struct {
 	listeners          []net.Listener
 	reverseServers     []*server.ReverseServer
@@ -108,7 +112,7 @@ func toggleTUN(enable bool, res *activeResources) error {
 		return fmt.Errorf("runtime not ready")
 	}
 	if enable {
-		if res.tunMgr == nil || res.tunMgr == nil {
+		if res.tunMgr == nil {
 			return fmt.Errorf("stack not running")
 		}
 		if res.tunMgr.IsTUNRunning() {
@@ -116,7 +120,7 @@ func toggleTUN(enable bool, res *activeResources) error {
 		}
 		return res.tunMgr.StartTUN()
 	}
-	if res.tunMgr != nil && res.tunMgr != nil {
+	if res.tunMgr != nil {
 		return res.tunMgr.StopTUN()
 	}
 	return nil
@@ -170,7 +174,7 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		"stats":      tun.TUNStats{},
 		"dhcpLeases": []tun.DHCPLease{},
 	}
-	if res.tunMgr != nil && res.tunMgr != nil {
+	if res.tunMgr != nil {
 		engine := res.tunMgr
 		status["running"] = engine.IsTUNRunning()
 		status["routes"] = engine.RouteSnapshot()
@@ -532,6 +536,8 @@ func run(prev *activeResources) (*activeResources, error) {
 			}
 			util.LogModuleInfo("system", "Admin server Start() completed")
 		}
+		// Debug endpoints are off unless explicitly enabled at startup.
+		res.adminServer.SetDebugAPIEnabled(debugAPIEnabled)
 		// Inject admin handler into connection handler for direct connection handling
 		if res.connHandler != nil {
 			res.connHandler.SetAdminHandler(res.adminServer)
@@ -702,8 +708,14 @@ func main() {
 	// ADMIN_PORT environment variable is also supported for container/script
 	// deployments where a flag is less convenient.
 	var adminPortFlag string
+	var takeoverFlag bool
 	flag.StringVar(&adminPortFlag, "admin-port", "", "Override the admin panel port (e.g. 39999). Also reads ADMIN_PORT env var.")
+	flag.BoolVar(&takeoverFlag, "takeover", false, "Terminate the live instance that owns this data directory (SIGTERM, wait for lock release) before starting. Linux/macOS only.")
+	flag.BoolVar(&debugAPIEnabled, "enable-debug-api", false, "Enable the read-only /api/db browser and debug endpoints (pprof/stall dump). Also reads PHAETHON_DEBUG_API=1.")
 	flag.Parse()
+	if os.Getenv("PHAETHON_DEBUG_API") == "1" {
+		debugAPIEnabled = true
+	}
 
 	// Honor ADMIN_PORT env var or -Dadmin.port=xxx when the command-line flag
 	// is not provided.
@@ -736,6 +748,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "创建 data 目录失败: %v\n", err)
 		os.Exit(1)
 	}
+	// Single-instance guard: only one worker may own a data directory. Taking
+	// the lock before the database means a second instance exits cleanly with
+	// instanceConflictExitCode instead of fighting over the bolt lock, the TUN
+	// device or the system routes. Residual cleanup is only performed by the
+	// lock holder, so nothing is ever deleted on behalf of a live instance.
+	releaseInstanceLock, lockErr := acquireInstanceLock(dataDir)
+	if lockErr != nil && takeoverFlag {
+		util.LogModuleWarn("system", "--takeover: terminating the instance holding %s: %v", dataDir, lockErr)
+		if terr := takeoverInstanceLock(dataDir); terr != nil {
+			util.LogModuleError("system", "--takeover failed: %v", terr)
+			fmt.Fprintf(os.Stderr, "--takeover failed: %v\n", terr)
+			os.Exit(instanceConflictExitCode)
+		}
+		releaseInstanceLock, lockErr = acquireInstanceLock(dataDir)
+	}
+	if lockErr != nil {
+		util.LogModuleError("system", "another phaethon instance is already running: %v", lockErr)
+		fmt.Fprintf(os.Stderr, "another phaethon instance is already running: %v\n", lockErr)
+		os.Exit(instanceConflictExitCode)
+	}
+	defer releaseInstanceLock()
+
 	dbPath := filepath.Join(dataDir, "phaethon.db")
 
 	// Open database
@@ -855,7 +889,7 @@ func main() {
 			return buildTUNStatus(resources)
 		}
 		resources.adminServer.OnDHCPStaticBindingsUpdate = func(bindings []config.DHCPStaticBinding) {
-			if resources.tunMgr != nil && resources.tunMgr != nil {
+			if resources.tunMgr != nil {
 				resources.tunMgr.UpdateDHCPStaticBindings(bindings)
 			}
 		}
@@ -921,14 +955,12 @@ func watchAndRun(resources *activeResources) {
 		select {
 		case sig := <-sigCh:
 			util.LogModuleInfo("system", "Received signal %v, shutting down...", sig)
-			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
 			}
 			return
 		case <-consoleCloseNotify():
 			util.LogModuleInfo("system", "Received console close event, shutting down...")
-			writeStoppedMarker()
 			if resources != nil {
 				resources.closeAll()
 			}
@@ -1048,7 +1080,28 @@ func (cp *childProcess) wait() {
 // that matches the current platform/arch, extracts the binary to a temp location,
 // and returns the path to the extracted binary along with its version.
 // Returns empty strings if no suitable pkg is found.
+// workerPinPath records the version an administrator explicitly activated.
+// Only data/packages is scanned by the watchdog; uploaded/received packages
+// stay in data/packages-pending until activated.
+const workerPinPath = "data/state/worker-pin"
+
+// readWorkerPin returns the pinned worker version, or "" when none is set.
+func readWorkerPin() string {
+	data, err := os.ReadFile(workerPinPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func findLatestPkgAndExtract() (string, string) {
+	return findPkgAndExtract("")
+}
+
+// findPkgAndExtract extracts a package from data/packages. When targetVersion
+// is empty the highest version wins; otherwise only that exact version is
+// considered (used by the pin set from the admin UI, including rollbacks).
+func findPkgAndExtract(targetVersion string) (string, string) {
 	packagesDir := "data/packages"
 
 	// List all .pkg files
@@ -1080,7 +1133,15 @@ func findLatestPkgAndExtract() (string, string) {
 			continue
 		}
 
-		// Check if this version is higher
+		if targetVersion != "" {
+			if contents.Meta.Version != targetVersion {
+				continue
+			}
+			latestVersion = contents.Meta.Version
+			latestPkg = pkgPath
+			break
+		}
+		// Latest mode: highest version wins.
 		if latestVersion == "" || p2p.CompareVersions(contents.Meta.Version, latestVersion) > 0 {
 			latestVersion = contents.Meta.Version
 			latestPkg = pkgPath
@@ -1164,6 +1225,15 @@ func ensureWintunDLL(workerDir string) {
 // relay-log 因 parseVersion 锚定 $ 不识别自定义后缀被判 untagged，
 // 反而输给 pkg 里的 v0.7.3，worker 起旧版连环失败。
 func selectWorkerBinary() string {
+	// An explicit activation wins, even when it is older than self (rollback).
+	if pinned := readWorkerPin(); pinned != "" {
+		if pkgPath, ver := findPkgAndExtract(pinned); pkgPath != "" {
+			util.LogModuleInfo("main", "watchdog: using pinned worker version %s: %s", ver, pkgPath)
+			return pkgPath
+		}
+		util.LogModuleWarn("main", "watchdog: pinned version %s is not available, falling back to latest", pinned)
+	}
+
 	pkgPath, pkgVersion := findLatestPkgAndExtract()
 	if pkgPath == "" {
 		util.LogModuleInfo("main", "watchdog: no pkg found, using current executable")
@@ -1193,12 +1263,28 @@ func selfUnparseable() bool {
 	return tag == nil
 }
 
-// runWatchdogMode is the watchdog entry point. It spawns the actual server as
-// a child process (with PHAETHON_WORKER=1), monitors it via a JSON protocol
-// on stdout, and restarts it on crash or stuck detection. On graceful shutdown
-// (child writes the stopped marker), the watchdog cleans up and exits.
-// SIGTERM/SIGINT received by the watchdog are forwarded to the child.
+// runWatchdogMode is the watchdog entry point. Its job is deliberately small:
+// spawn the server as a child (with PHAETHON_WORKER=1), read the ready and
+// heartbeat messages from its stdout, restart it on crash or hang, forward
+// shutdown signals, and pick/roll back the worker binary.
+//
+// It never touches system state (no /proc scanning, no killing of unrelated
+// processes, no device or route cleanup). Single-instance ownership belongs to
+// the worker's instance lock; residual TUN/route cleanup is only performed by
+// the lock holder.
+//
+// Contract with the worker:
+//   - JSON lines on stdout: {"ready":true}, {"heartbeat":true}
+//   - exit code 0: operator-requested shutdown (watchdog exits)
+//   - exit code 3 (instanceConflictExitCode): another instance owns the data
+//     directory (watchdog exits, no restart)
+//   - any other exit: crash, restart with backoff
 func runWatchdogMode() {
+	// Pin the watchdog to one OS thread. On Linux the worker's
+	// PR_SET_PDEATHSIG is tied to the thread that forked it; letting the Go
+	// runtime recycle that thread would deliver SIGTERM to a healthy worker.
+	runtime.LockOSThread()
+
 	// The watchdog never enters run(), so module log levels are never
 	// configured and the global default (Error) silences every watchdog
 	// info/warn line. Parse the same env var the worker uses.
@@ -1238,7 +1324,6 @@ func runWatchdogMode() {
 	util.LogModuleInfo("main", "watchdog: using worker binary: %s", exe)
 
 	lastRestart := time.Time{}
-	var isRestarting atomic.Bool
 
 	// Track the last binary that successfully started (sent ready signal).
 	// If a new binary fails to start or crashes before ready, fall back to this.
@@ -1251,17 +1336,15 @@ func runWatchdogMode() {
 
 	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool, wasReady bool) *childProcess {
 		util.LogModuleInfo("main", "watchdog: %s, restarting child %d", reason, pid)
-		isRestarting.Store(true)
-		defer func() { isRestarting.Store(false) }()
 
 		if !alreadyExited {
-			cp.kill(syscall.SIGTERM)
+			cp.kill(gracefulExitSignal())
 			// Wait up to 10 seconds for the child to exit. If it's stuck,
 			// escalate to SIGKILL.
 			select {
 			case <-cp.done:
 			case <-time.After(10 * time.Second):
-				util.LogModuleWarn("main", "watchdog: child %d did not exit after SIGTERM, sending SIGKILL", pid)
+				util.LogModuleWarn("main", "watchdog: child %d did not exit after graceful signal, sending SIGKILL", pid)
 				cp.kill(syscall.SIGKILL)
 				<-cp.done
 			}
@@ -1355,7 +1438,6 @@ func runWatchdogMode() {
 		return cp
 	}
 
-	killResidualWorkers()
 	cp, err := spawnChildProcess(exe)
 	if err != nil {
 		util.LogModuleError("main", "watchdog: initial spawn failed: %v", err)
@@ -1366,6 +1448,9 @@ func runWatchdogMode() {
 
 	// Forward signals to the child for graceful shutdown.
 	// Use a pointer to track current child so signal handler always forwards to the right process.
+	// stopping is set when the operator asks us to stop. It is the single source
+	// of truth for "exit instead of restart" — no marker files involved.
+	var stopping atomic.Bool
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	currentCp := &cp // pointer to the cp variable
@@ -1373,10 +1458,10 @@ func runWatchdogMode() {
 		for sig := range sigCh {
 			child := *currentCp
 			util.LogModuleInfo("main", "watchdog: received %v, forwarding to child %d", sig, child.proc.Pid)
-			// Only write stopped marker if not restarting (to avoid false graceful exit detection)
-			if !isRestarting.Load() {
-				writeStoppedMarker()
-			}
+			// A shutdown signal from the operator is the only thing that makes
+			// the watchdog exit instead of respawning; every other child exit
+			// is treated as a crash. No marker files involved.
+			stopping.Store(true)
 			child.kill(sig)
 		}
 	}()
@@ -1393,6 +1478,11 @@ func runWatchdogMode() {
 		case <-cp.done:
 			// Child process exited (stdout closed) - reap immediately
 			exitCode, _ := reapChild(pid)
+			if exitCode == instanceConflictExitCode {
+				util.LogModuleError("main", "watchdog: another instance owns this data dir (worker %d exit=%d), watchdog stopping", pid, exitCode)
+				signal.Stop(sigCh)
+				return
+			}
 			wasReady := cp.ready.Load()
 			// Update lastGoodBinary if child became ready
 			if wasReady && lastGoodBinary != currentBinary {
@@ -1400,9 +1490,8 @@ func runWatchdogMode() {
 				writeLastGoodWorker(lastGoodBinary)
 				util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
 			}
-			if wasStoppedGracefully() {
-				util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
-				removeStoppedMarker()
+			if stopping.Load() {
+				util.LogModuleInfo("main", "watchdog: child %d exited after shutdown signal, cleaning up", pid)
 				signal.Stop(sigCh)
 				return
 			}
@@ -1436,7 +1525,12 @@ func runWatchdogMode() {
 
 			if !processExists(pid) {
 				// Child exited but cp.done not yet closed — reap and restart
-				reapChild(pid)
+				exitCode, _ := reapChild(pid)
+				if exitCode == instanceConflictExitCode {
+					util.LogModuleError("main", "watchdog: another instance owns this data dir (worker %d exit=%d), watchdog stopping", pid, exitCode)
+					signal.Stop(sigCh)
+					return
+				}
 				wasReady := cp.ready.Load()
 				// Update lastGoodBinary if child became ready
 				if wasReady && lastGoodBinary != currentBinary {
@@ -1444,9 +1538,8 @@ func runWatchdogMode() {
 					writeLastGoodWorker(lastGoodBinary)
 					util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
 				}
-				if wasStoppedGracefully() {
-					util.LogModuleInfo("main", "watchdog: child %d exited gracefully, cleaning up", pid)
-					removeStoppedMarker()
+				if stopping.Load() {
+					util.LogModuleInfo("main", "watchdog: child %d exited after shutdown signal, cleaning up", pid)
 					signal.Stop(sigCh)
 					return
 				}
@@ -2164,13 +2257,13 @@ func wireAdminCallbacks(resources *activeResources) {
 						resources.mappingReverse[newMapping.Name] = rs
 					}
 				} else {
-						ln, err := server.StartListener(newMapping)
-						if err != nil {
-							util.LogModuleError("system", " bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
-						} else {
-							resources.listeners = append(resources.listeners, ln)
-							resources.mappingListeners[newMapping.Name] = ln
-						}
+					ln, err := server.StartListener(newMapping)
+					if err != nil {
+						util.LogModuleError("system", " bind %s fail for %s: %v", newMapping.Type, newMapping.Name, err)
+					} else {
+						resources.listeners = append(resources.listeners, ln)
+						resources.mappingListeners[newMapping.Name] = ln
+					}
 				}
 			}
 		}
@@ -2731,6 +2824,7 @@ func refreshSubscription(sub *config.Subscription) error {
 		content, err = config.FetchSubscription(sub.URL, nil)
 	}
 
+	var proxies []*config.Proxy
 	if err != nil {
 		// Network fetch failed, try database fallback
 		util.LogModuleInfo("system", "subscription %s network fetch failed: %v, trying database fallback", sub.Name, err)
@@ -2739,73 +2833,70 @@ func refreshSubscription(sub *config.Subscription) error {
 			util.LogModuleInfo("system", "subscription %s database fallback failed: %v", sub.Name, dbErr)
 			return fmt.Errorf("fetch subscription fail: %w", err)
 		}
-		// Convert map to slice
-		proxies := make([]*config.Proxy, 0, len(proxiesMap))
+		proxies = make([]*config.Proxy, 0, len(proxiesMap))
 		for _, p := range proxiesMap {
 			proxies = append(proxies, p)
 		}
-		// Successfully loaded from database
-		sub.SetNodes(proxies)
 		fromDB = true
 		util.LogModuleInfo("system", "subscription %s refresh: using %d nodes from database", sub.Name, len(proxies))
-	}
-
-	if !fromDB {
-		// Successfully fetched from network, parse and save to database
-		proxies, parseErr := config.ParseSubscription(content)
+	} else {
+		p, parseErr := config.ParseSubscription(content)
 		if parseErr != nil {
 			util.LogModuleInfo("system", "subscription %s parse failed: %v", sub.Name, parseErr)
 			return fmt.Errorf("parse subscription fail: %w", parseErr)
 		}
+		proxies = p
+	}
 
-		// Snapshot old active members per referencing group so they can be
-		// restored when the node still exists in the refreshed pool.
-		type groupActive struct {
-			g      *config.ProxyGroup
-			active string
+	// Snapshot old active members per referencing group so they can be restored
+	// when the node still exists in the refreshed pool. Runs for both the
+	// network and the DB-fallback paths (D16: identical convergence).
+	type groupActive struct {
+		g      *config.ProxyGroup
+		active string
+	}
+	var groups []groupActive
+	refGroups, listErr := db.ListProxyGroupsBySubscription(sub.Name)
+	if listErr != nil {
+		util.LogModuleWarn("system", "list groups for sub %s failed: %v", sub.Name, listErr)
+	} else {
+		for _, g := range refGroups {
+			groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
 		}
-		var groups []groupActive
-		// Load groups referencing this subscription from database
-		refGroups, listErr := db.ListProxyGroupsBySubscription(sub.Name)
-		if listErr != nil {
-			util.LogModuleWarn("system", "list groups for sub %s failed: %v", sub.Name, listErr)
-		} else {
-			for _, g := range refGroups {
-				groups = append(groups, groupActive{g: g, active: g.GetActiveMember()})
-			}
-		}
+	}
 
-		sub.SetNodes(proxies)
-		// Persist subscription nodes to database
+	sub.SetNodes(proxies)
+	if !fromDB {
+		// Persist the freshly fetched pool; the DB fallback path is already there.
 		sub.SubMu.RLock()
 		if putErr := db.PutSubscriptionNodes(sub.Name, sub.SubProxies); putErr != nil {
 			util.LogModuleWarn("system", "persist subscription nodes failed: %v", putErr)
 		}
 		sub.SubMu.RUnlock()
+	}
 
-		// Rebuild each group referencing this subscription. The active member is
-		// preserved when the node still exists in the new pool.
-		// Members 是按需计算的，不需要预构建
-		for _, ga := range groups {
-			g := ga.g
-			if ga.active != "" {
-				found := false
-				for _, m := range g.GetMembers() {
-					if m.Name == ga.active {
-						found = true
-						break
-					}
-				}
-				if !found {
-					g.ActiveMember = ""
+	// Rebuild each group referencing this subscription. The active member is
+	// preserved when the node still exists in the refreshed pool.
+	// Members 是按需计算的，不需要预构建
+	for _, ga := range groups {
+		g := ga.g
+		if ga.active != "" {
+			found := false
+			for _, m := range g.GetMembers() {
+				if m.Name == ga.active {
+					found = true
+					break
 				}
 			}
-			// Persist the updated group
-			if putErr := db.PutProxyGroup(g); putErr != nil {
-				util.LogModuleWarn("system", "persist group %s failed: %v", g.Name, putErr)
+			if !found {
+				// All ActiveMember writes go through the locked setter (D16).
+				_ = g.SetActiveMember("")
 			}
-			util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.GetMembers()))
 		}
+		if putErr := db.PutProxyGroup(g); putErr != nil {
+			util.LogModuleWarn("system", "persist group %s failed: %v", g.Name, putErr)
+		}
+		util.LogModuleInfo("system", "group %s refreshed from sub %s: %d nodes, %d members", g.Name, sub.Name, len(sub.SubProxies), len(g.GetMembers()))
 	}
 	return nil
 }

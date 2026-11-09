@@ -2494,8 +2494,9 @@ func (m *MeshManager) broadcastGossip() {
 	for _, c := range bestClaims {
 		nodeIDToClaim[c.nodeID] = c
 	}
-	// Union of every claim copy per node (see mergedNeighborLinks).
-	merged := mergedNeighborLinks(allPeers)
+	// Union of every claim copy per node, including our own claim, so a
+	// relayed claim's link back to us still validates (see mergedNeighborLinks).
+	merged := mergedNeighborLinks(m.nodeID, ownNeighbors, allPeers)
 	validatedClaims := make(map[string]globalClaimEntry, len(bestClaims))
 	for subnet, claim := range bestClaims {
 		if claim.hop == 0 {
@@ -3255,8 +3256,9 @@ func (m *MeshManager) buildValidatedClaims(allPeers []*PeerInfo) map[string]vali
 	for _, c := range best {
 		nodeIDToClaim[c.nodeID] = c
 	}
-	// Union of every claim copy per node (see mergedNeighborLinks).
-	merged := mergedNeighborLinks(allPeers)
+	// Union of every claim copy per node, including our own claim, so a
+	// relayed claim's link back to us still validates (see mergedNeighborLinks).
+	merged := mergedNeighborLinks(m.nodeID, ownNeighbors, allPeers)
 
 	// Link-level mutual validation: keep only links whose reverse exists.
 	result := make(map[string]validatedClaim, len(best))
@@ -3616,28 +3618,38 @@ func resolvePeerLinkNIC(t *Topology, nextHop string) *LinkNIC {
 // Dijkstra graph and pushed traffic onto a 200ms+ link. Unioning the copies
 // keeps the anti-loop requirement (both sides must declare each other) without
 // depending on which relay happened to be first.
-func mergedNeighborLinks(allPeers []*PeerInfo) map[string]map[string]map[[2]uint16]GossipLink {
+//
+// The local node's own claim MUST be included: without it, a received claim's
+// link back to us never validates, so the claim gets relayed with that link
+// stripped. Every node would then appear, to its peers, to have no link to the
+// node that relayed it — e.g. jf saw "qg→vm" but no "vm→qg", so its Dijkstra
+// could not route vm via qg and fell back to a 1s-RTT path.
+func mergedNeighborLinks(selfNodeID string, ownNeighbors []GossipNeighbor, allPeers []*PeerInfo) map[string]map[string]map[[2]uint16]GossipLink {
 	out := make(map[string]map[string]map[[2]uint16]GossipLink)
+	add := func(nodeID string, neighbors []GossipNeighbor) {
+		byNode := out[nodeID]
+		if byNode == nil {
+			byNode = make(map[string]map[[2]uint16]GossipLink)
+			out[nodeID] = byNode
+		}
+		for _, nb := range neighbors {
+			links := byNode[nb.NodeID]
+			if links == nil {
+				links = make(map[[2]uint16]GossipLink)
+				byNode[nb.NodeID] = links
+			}
+			for _, l := range nb.Links {
+				links[[2]uint16{l.LocalSeq, l.RemoteSeq}] = l
+			}
+		}
+	}
+	add(selfNodeID, ownNeighbors)
 	for _, p := range allPeers {
 		if p.Sender == nil {
 			continue
 		}
 		for _, cs := range p.ClaimedSubnets {
-			byNode := out[cs.NodeID]
-			if byNode == nil {
-				byNode = make(map[string]map[[2]uint16]GossipLink)
-				out[cs.NodeID] = byNode
-			}
-			for _, nb := range cs.Neighbors {
-				links := byNode[nb.NodeID]
-				if links == nil {
-					links = make(map[[2]uint16]GossipLink)
-					byNode[nb.NodeID] = links
-				}
-				for _, l := range nb.Links {
-					links[[2]uint16{l.LocalSeq, l.RemoteSeq}] = l
-				}
-			}
+			add(cs.NodeID, cs.Neighbors)
 		}
 	}
 	return out

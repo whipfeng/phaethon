@@ -173,27 +173,25 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		return ""
 	}
 
-	// Sort: static first, then dynamic
-	sorted := make([]RouteEntry, len(entries))
-	copy(sorted, entries)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].Source == RouteSourceStatic && sorted[j].Source == RouteSourceDynamic {
-			return true
+	// D17: static entries win outright — dynamic selection only runs when no
+	// static entry is usable. Previously the static/dynamic split was used only
+	// as a sort order, and the hash below could still pick a dynamic owner.
+	staticEntries := make([]RouteEntry, 0, len(entries))
+	dynamicEntries := make([]RouteEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.NodeID == m.nodeID { // Skip self: own prefixes never reach here, but be safe.
+			continue
 		}
-		if sorted[i].Source == RouteSourceDynamic && sorted[j].Source == RouteSourceStatic {
-			return false
-		}
-		return false // maintain original order within same source
-	})
-
-	// Skip self: own prefixes never reach here via nextHops, but be safe.
-	available := make([]RouteEntry, 0, len(sorted))
-	for _, e := range sorted {
-		if e.NodeID != m.nodeID {
-			available = append(available, e)
+		if e.Source == RouteSourceStatic {
+			staticEntries = append(staticEntries, e)
+		} else {
+			dynamicEntries = append(dynamicEntries, e)
 		}
 	}
-
+	available := staticEntries
+	if len(available) == 0 {
+		available = dynamicEntries
+	}
 	if len(available) == 0 {
 		return ""
 	}
@@ -625,6 +623,18 @@ func (m *MeshManager) GetDomainSuffixes() []string {
 	result := make([]string, len(m.domainSuffixes))
 	copy(result, m.domainSuffixes)
 	return result
+}
+
+// RouteTableRoutes returns the current route table's routes WITHOUT copying.
+// The returned slice and its MeshRoute/Entries are immutable: the table is
+// rebuilt and atomically swapped on topology change (D17). The data path calls
+// this per packet, so it must not allocate.
+func (m *MeshManager) RouteTableRoutes() []MeshRoute {
+	rt := m.getRouteTable()
+	if rt == nil {
+		return nil
+	}
+	return rt.routes
 }
 
 // GetRouteTable returns the current mesh route table (exported for netstack integration).

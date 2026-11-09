@@ -416,8 +416,9 @@ func (n *Netstack) resolveOriginalSrc(proto int, srcIP net.IP, dstIP net.IP, dst
 // decision can be stored on n.selectRoute and re-run by MeshEgressNode.
 func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 	return func(dst net.IP) (SelectRouteResult, bool) {
-		rt := meshMgr.GetRouteTable()
-		if rt == nil {
+		// D17: read the immutable route table in place — no per-packet copy.
+		routes := meshMgr.RouteTableRoutes()
+		if routes == nil {
 			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeTable=nil", dst)
 			return SelectRouteResult{}, false
 		}
@@ -426,14 +427,14 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 		// Guarded: building the prefixes slice String()ifies every
 		// prefix — keep that cost off the hot path (audit item 10).
 		if util.GetModuleLogLevel("route") <= util.LogLevelDebug {
-			prefixes := make([]string, 0, len(rt.Routes))
-			for _, route := range rt.Routes {
+			prefixes := make([]string, 0, len(routes))
+			for _, route := range routes {
 				prefixes = append(prefixes, route.Prefix.String())
 			}
-			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(rt.Routes), prefixes)
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s routeCount=%d prefixes=%v", dst, len(routes), prefixes)
 		}
 
-		for _, route := range rt.Routes {
+		for _, route := range routes {
 			if !route.Prefix.Contains(dst) {
 				continue
 			}

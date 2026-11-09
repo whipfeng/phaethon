@@ -66,15 +66,6 @@ func (h *meshTestHandler) UnregisterPeer(sender mesh.PeerSender) {
 	h.mu.Unlock()
 }
 
-func (h *meshTestHandler) UnregisterPeerByNodeID(nodeID string) {
-	h.mu.Lock()
-	if h.nodeID == nodeID {
-		h.send = nil
-		h.nodeID = ""
-	}
-	h.mu.Unlock()
-}
-
 func (h *meshTestHandler) BuildGossipInfo() *mesh.GossipInfo {
 	return &mesh.GossipInfo{
 		ClaimedSubnets: []mesh.GossipClaimedSubnet{

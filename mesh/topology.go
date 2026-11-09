@@ -259,23 +259,6 @@ func (t *Topology) UnregisterPeer(sender PeerSender) {
 	}
 }
 
-// UnregisterPeerByNodeID removes a peer entry by nodeID.
-//
-// Two entries may legitimately share a nodeID (one per link, multi-path to the
-// same node), so this is intentionally left as a single-entry removal and has
-// no production caller: link teardown always goes through UnregisterPeer with
-// the exact Sender. Do not turn this into a bulk delete.
-func (t *Topology) UnregisterPeerByNodeID(nodeID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for i, p := range t.peers {
-		if p.NodeID() == nodeID {
-			t.peers = append(t.peers[:i], t.peers[i+1:]...)
-			return
-		}
-	}
-}
-
 // UpdateGossip updates a peer's gossip data in-place.
 // Finds the peer by Sender pointer. Returns false if sender not found (data discarded).
 func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {

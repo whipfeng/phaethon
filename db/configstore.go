@@ -193,6 +193,10 @@ func GetProxyGroup(name string) (*config.ProxyGroup, error) {
 }
 
 func DeleteProxyGroup(name string) error {
+	// Health state lives in the process-wide runtime registry (D14); drop it so
+	// a deleted group does not leave entries behind (nor reappear with stale
+	// health if the same name is recreated later).
+	config.DeleteGroupHealth(name)
 	return Delete(BucketProxyGroups, []byte(name))
 }
 

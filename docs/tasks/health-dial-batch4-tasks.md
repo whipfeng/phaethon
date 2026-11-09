@@ -39,7 +39,8 @@
 - [x] 健康结果不再写回组配置（移除 `db.PutProxyGroup`），消除「已删除组被复活」「healthMap 被覆盖」
 - [x] DIRECT 在配置了检查 URL 时走真实探测；REJECT 标记不可用、不参与 best/load-balance 选择
 - [x] 全局 ctx + 每节点预算（`healthCheckBudget`）；删除的组不会再被检查，运行态随之释放
-- [ ] **未做**：运行态表彻底外置到组对象之外（当前健康状态仍挂在 `config.ProxyGroup` 上，只是不落盘）
+- [x] 运行态表外置：`config.healthRegistry`（组名 → 成员 key → 状态）进程级持有，组对象不再存健康数据；
+  组对象被配置重载替换时健康状态不丢，`DeleteProxyGroup` 时清理对应 bucket
 
 ## 阶段 6: 验证
 

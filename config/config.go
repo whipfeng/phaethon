@@ -282,10 +282,8 @@ type ProxyGroup struct {
 	SubscriptionFilter string `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
 	ActiveMember       string `yaml:"active-member,omitempty" json:"active-member,omitempty"`
 
-	idx       int64 // for load-balance
-	healthMap map[string]*healthStatus
-	healthMu  sync.RWMutex
-	selMu     sync.RWMutex `yaml:"-" json:"-"` // protects on-demand member computation
+	idx   int64          // for load-balance
+	selMu sync.RWMutex   `yaml:"-" json:"-"` // protects on-demand member computation
 
 	ResolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
 	ResolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
@@ -307,12 +305,6 @@ func (g *ProxyGroup) Init() error {
 	default:
 		return fmt.Errorf("unsupported group type: %s", g.Type)
 	}
-
-	g.healthMu.Lock()
-	if g.healthMap == nil {
-		g.healthMap = make(map[string]*healthStatus)
-	}
-	g.healthMu.Unlock()
 	return nil
 }
 
@@ -685,13 +677,61 @@ func removeGroupMember(list []GroupMember, m GroupMember) []GroupMember {
 	return list
 }
 
+// healthRegistry stores member health state outside the group configuration
+// (D14). Key = group name, then GroupMember.HealthKey().
+//
+// Health is process-wide runtime state: it must not be persisted with the
+// group config, must survive the group object being replaced by a config
+// reload, and must disappear when the group or member is deleted.
+type healthRegistry struct {
+	mu     sync.RWMutex
+	groups map[string]map[string]*healthStatus
+}
+
+var globalHealthRegistry = &healthRegistry{groups: make(map[string]map[string]*healthStatus)}
+
+// bucketLocked returns (creating if needed) the per-group health bucket.
+// Caller must hold the registry write lock.
+func (r *healthRegistry) bucketLocked(group string) map[string]*healthStatus {
+	if r.groups == nil {
+		r.groups = make(map[string]map[string]*healthStatus)
+	}
+	b := r.groups[group]
+	if b == nil {
+		b = make(map[string]*healthStatus)
+		r.groups[group] = b
+	}
+	return b
+}
+
+// DeleteGroupHealth drops every member's health state for a deleted group, so
+// the registry does not accumulate entries for groups that no longer exist.
+func DeleteGroupHealth(group string) {
+	if group == "" {
+		return
+	}
+	globalHealthRegistry.mu.Lock()
+	delete(globalHealthRegistry.groups, group)
+	globalHealthRegistry.mu.Unlock()
+}
+
+// DeleteMemberHealth drops one member's health state.
+func DeleteMemberHealth(group, key string) {
+	globalHealthRegistry.mu.Lock()
+	if b := globalHealthRegistry.groups[group]; b != nil {
+		delete(b, key)
+	}
+	globalHealthRegistry.mu.Unlock()
+}
+
 // HealthSnapshot returns a snapshot of the group's health check data.
 // Each entry maps a member health key to its current health status.
 func (g *ProxyGroup) HealthSnapshot() map[string]HealthInfo {
-	g.healthMu.RLock()
-	defer g.healthMu.RUnlock()
-	result := make(map[string]HealthInfo, len(g.healthMap))
-	for key, hs := range g.healthMap {
+	globalHealthRegistry.mu.RLock()
+	bucket := globalHealthRegistry.groups[g.Name]
+	defer globalHealthRegistry.mu.RUnlock()
+	result := make(map[string]HealthInfo, len(bucket))
+	for key, hs := range bucket {
 		result[key] = HealthInfo{
 			Alive:     hs.alive,
 			Latency:   hs.latency,
@@ -738,15 +778,16 @@ func (g *ProxyGroup) nextRoundRobinAliveMember(members []GroupMember) GroupMembe
 	if count == 0 {
 		return GroupMember{}
 	}
-	g.healthMu.RLock()
-	defer g.healthMu.RUnlock()
+	globalHealthRegistry.mu.RLock()
+	bucket := globalHealthRegistry.groups[g.Name]
+	defer globalHealthRegistry.mu.RUnlock()
 
 	// Try up to count times to find an alive one
 	for i := 0; i < count; i++ {
 		idx := atomic.AddInt64(&g.idx, 1) - 1
 		m := members[idx%int64(count)]
 		key := m.HealthKey()
-		if h, ok := g.healthMap[key]; ok {
+		if h, ok := bucket[key]; ok {
 			if h.alive {
 				return m
 			}
@@ -763,15 +804,16 @@ func (g *ProxyGroup) nextRoundRobinAliveMember(members []GroupMember) GroupMembe
 // given list. If all members have been checked and are dead, returns a zero
 // member so the caller can fall through to the next rule (e.g. MATCH, DIRECT).
 func (g *ProxyGroup) nextByHealthMember(members []GroupMember) GroupMember {
-	g.healthMu.RLock()
-	defer g.healthMu.RUnlock()
+	globalHealthRegistry.mu.RLock()
+	bucket := globalHealthRegistry.groups[g.Name]
+	defer globalHealthRegistry.mu.RUnlock()
 
 	var best GroupMember
 	var bestLatency time.Duration
 	allChecked := true
 	for _, m := range members {
 		key := m.HealthKey()
-		h, ok := g.healthMap[key]
+		h, ok := bucket[key]
 		if ok {
 			if !h.alive {
 				continue
@@ -791,7 +833,7 @@ func (g *ProxyGroup) nextByHealthMember(members []GroupMember) GroupMember {
 	// fallback: if not all members have been checked, assume the unchecked ones are healthy and return the first one
 	if !allChecked {
 		for _, m := range members {
-			if _, ok := g.healthMap[m.HealthKey()]; !ok {
+			if _, ok := bucket[m.HealthKey()]; !ok {
 				return m
 			}
 		}
@@ -805,14 +847,15 @@ func (g *ProxyGroup) nextByHealthMember(members []GroupMember) GroupMember {
 // successes. The key must be GroupMember.HealthKey(). It returns true if the
 // member's alive state actually changed.
 func (g *ProxyGroup) SetHealth(key string, checkAlive bool, latency time.Duration) bool {
-	g.healthMu.Lock()
-	defer g.healthMu.Unlock()
+	globalHealthRegistry.mu.Lock()
+	defer globalHealthRegistry.mu.Unlock()
 
-	h := g.healthMap[key]
+	bucket := globalHealthRegistry.bucketLocked(g.Name)
+	h := bucket[key]
 	isNew := false
 	if h == nil {
 		h = &healthStatus{}
-		g.healthMap[key] = h
+		bucket[key] = h
 		isNew = true
 	}
 
@@ -842,14 +885,15 @@ func (g *ProxyGroup) SetHealth(key string, checkAlive bool, latency time.Duratio
 // for explicit manual health tests where the user expects the result to be
 // reflected immediately in dynamic subscription selection.
 func (g *ProxyGroup) SetHealthImmediate(key string, alive bool, latency time.Duration) bool {
-	g.healthMu.Lock()
-	defer g.healthMu.Unlock()
+	globalHealthRegistry.mu.Lock()
+	defer globalHealthRegistry.mu.Unlock()
 
-	h := g.healthMap[key]
+	bucket := globalHealthRegistry.bucketLocked(g.Name)
+	h := bucket[key]
 	isNew := false
 	if h == nil {
 		h = &healthStatus{}
-		g.healthMap[key] = h
+		bucket[key] = h
 		isNew = true
 	}
 
@@ -868,16 +912,16 @@ func (g *ProxyGroup) SetHealthImmediate(key string, alive bool, latency time.Dur
 }
 
 func (g *ProxyGroup) GetHealth(key string) *healthStatus {
-	g.healthMu.RLock()
-	defer g.healthMu.RUnlock()
-	return g.healthMap[key]
+	globalHealthRegistry.mu.RLock()
+	defer globalHealthRegistry.mu.RUnlock()
+	return globalHealthRegistry.groups[g.Name][key]
 }
 
 // GetHealthInfo returns a public snapshot of a member's health status.
 func (g *ProxyGroup) GetHealthInfo(key string) HealthInfo {
-	g.healthMu.RLock()
-	defer g.healthMu.RUnlock()
-	if hs, ok := g.healthMap[key]; ok {
+	globalHealthRegistry.mu.RLock()
+	defer globalHealthRegistry.mu.RUnlock()
+	if hs, ok := globalHealthRegistry.groups[g.Name][key]; ok {
 		return HealthInfo{
 			Alive:     hs.alive,
 			Latency:   hs.latency,
@@ -894,29 +938,32 @@ func (h *healthStatus) IsAlive() bool {
 
 // RemoveHealth deletes health status for the given member keys.
 func (g *ProxyGroup) RemoveHealth(keys []string) {
-	g.healthMu.Lock()
-	defer g.healthMu.Unlock()
+	globalHealthRegistry.mu.Lock()
+	defer globalHealthRegistry.mu.Unlock()
+	bucket := globalHealthRegistry.groups[g.Name]
 	for _, key := range keys {
-		delete(g.healthMap, key)
+		delete(bucket, key)
 	}
 }
 
-// CopyHealthFrom copies health data from another ProxyGroup.
+// CopyHealthFrom moves health data from another group object with the same name
+// (registry is keyed by name, so the common case needs no work). When the names
+// differ the source bucket is copied over, deep-copying the status values so the
+// two groups never share mutable state.
 func (g *ProxyGroup) CopyHealthFrom(other *ProxyGroup) {
-	if other == nil {
+	if other == nil || other.Name == g.Name {
 		return
 	}
-	other.healthMu.RLock()
-	defer other.healthMu.RUnlock()
-
-	g.healthMu.Lock()
-	defer g.healthMu.Unlock()
-
-	if g.healthMap == nil {
-		g.healthMap = make(map[string]*healthStatus)
+	globalHealthRegistry.mu.Lock()
+	defer globalHealthRegistry.mu.Unlock()
+	src := globalHealthRegistry.groups[other.Name]
+	if len(src) == 0 {
+		return
 	}
-	for k, v := range other.healthMap {
-		g.healthMap[k] = v
+	bucket := globalHealthRegistry.bucketLocked(g.Name)
+	for k, v := range src {
+		cp := *v
+		bucket[k] = &cp
 	}
 }
 

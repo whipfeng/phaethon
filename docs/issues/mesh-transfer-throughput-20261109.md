@@ -447,3 +447,12 @@ vm↔qg 健康、qg↔jf 的**直连 SSH 与 h_tunnel 同时变慢**，说明问
 
 因此 §17 里 RACK reo_wnd 的两个负结果是在链路开始劣化后测的，**可能被环境污染，需要在链路恢复后复测**；
 当前生产保持 442（RACK 原逻辑 + 诊断字段），不做进一步 netstack 行为改动。
+
+## 19. 实验：Reord 时允许 SACK 真实丢包走 dup-ACK（2026-11-10 10:20）
+
+链路部分恢复（qg→jf 直连 2.7MB/s、srtt 22ms），但 h_tunnel 单流仍只有 0.58MB/s，
+两跳 8 流 1.15MB/s，环境未完全复原，因此采用**同条件 A/B 对比**而不是绝对值判定。
+
+- 基线 442 累计：sent 575002 / retransmits 102041 (17.7%) / DSACK 59995 (10.4%)；
+- 实验分支 `experiment/rack-dupack-coexist`：`Reord=true` 时，若 SACK scoreboard 已把
+  队头判失（真实空洞），仍允许 dup-ACK 快速重传；裸乱序继续抑制。

@@ -1549,6 +1549,30 @@ TCP base 反而可能引入与 control 帧的 HOL。已回退代码（`176023c`�
 - 或直接在 ht 客户端把 get-slots 降为 2/4，看两跳是否因少等批而变稳
   （单跳已知 8 最好，但两跳 RTT 翻倍后的最优点可能不同）。
 
+## 70. get-slots 8→4（两跳）：无收益，回退 8（2026-11-11 01:05）
+
+qg 的 `htunnel.get-slots` 存在 mesh 配置里（`/api/config/mesh`，不在 config.yaml），
+改成 4 后必须重启 qg 才生效（ht 客户端在 dial 时快照配置）。
+
+| 运行 | 吞吐 |
+|---|---|
+| 重启后预热（可能仍在 TCP carrier） | 4.37 |
+| 1 | 3.74 |
+| 2 | 4.25 |
+| 3 | 3.92 |
+| 4 | 3.63 |
+
+中位 **3.92**，低于 8 slots 的 ~4.4~4.7；已改回 8（qg 519 重新部署）。
+注意该结论受链路时段漂移影响（改回 8 后同窗口首跑也只有 3.32），
+但 4 slots 没有出现任何正向迹象，且单跳已证明 8 是最优点，维持 8。
+
+**运维注意**：qg 重启后第一笔流量仍走 TCP carrier，直到数据触发 UDP leg
+重新协商（`/api/p2p` 的 vm transport 才会变 udp）。重启后的第一跑
+（2.6~3.3MB/s）必须视为预热丢弃，不能计入 A/B。
+
+当前生产：jf 517（514 行为）、qg 519（1MB relay + SSH 完整性修复 + slots8 +
+reo_wnd 回退）、vm 实验前二进制；vm↔qg transport=udp。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

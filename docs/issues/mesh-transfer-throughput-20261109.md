@@ -1145,3 +1145,22 @@ ht 单层，固定其他，两个已分别验证的变量叠加（reo_wnd 下限
 3. 若两者都小，剩余 RTT 就是 inner TCP 窗口/ACK 节奏的相互作用，只能靠持久流或更大 cwnd。
 
 下一步：先把 1 和 2 的 sojourn 暴露出来，跑一次生产两跳，定位 250~400ms 中哪一段占大头。
+
+## 50. 出口队列 sojourn 实测：不在 p2p 队列（2026-11-10 20:30）
+
+临时给 qg/vm 暴露 `/api/p2p` 的 `egressSoj/legSoj`（未提交，测完回退）。
+
+传输中采样（vm→jf 两跳）：
+- qg 到 vm peer：`egressSoj=0.1ms`，legAvg=0，drop=0；
+- vm 到 qg peer：`egressSoj=0.2ms`，drop=0；
+- mb ht dataQ queued=0（前一轮已测）。
+
+即 **p2p 两侧的出口写队列都不构成 200~330ms 的 RTT 排队**。
+当前 qg↔vm 在多次重启后 transport=tcp（UDP leg 未重新协商），leg sojourn 暂无数据。
+
+剩余可疑位置（不在我们的 p2p 写队列）：
+1. 载体自身的 OS/代理缓冲：WIN7_VPN 的 SOCKS5 TCP、ht 的 HTTP 端点；
+2. vm 的 OS/TUN 接收路径（数据方向）；
+3. inner TCP 的 ACK 节奏/延迟 ACK 与 RTT 采样。
+
+下一步：先把 vm 的 UDP leg 重新拉起，测 leg ingress sojourn；若仍低，则需要在载体 socket 缓冲/持久流层面处理。

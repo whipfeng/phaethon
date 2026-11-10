@@ -853,3 +853,26 @@ HOL；OS 的 8 流 10.9MB/s 是 8 个独立 ssh 进程（8 条 TCP），不是�
 要到接近 OS：需要 (a) 把单流载体从 ht 换成低开销的 TCP（SSH+SOCKS5 已到 2.4，沙箱 LAN SOCKS5 单流 ~4.5），
 并且 (b) 在同一 nodeID 的多条 LinkNIC/PeerSender 上做**按 5-tuple 的 ECMP**（每流固定一条，保序）。
 后者可在 LinkNIC 层实现一个 MultiLinkNIC，按包 5-tuple 哈希写入不同 sender，不依赖 SelectRoute 的 dst-only 接口。
+
+## 35. vm→qg→mb 两跳实测与 relay RTT 膨胀（2026-11-10 14:50）
+
+用户要求补测的两跳（vm→qg→mb，qg↔mb 为 MB_HT，vm↔qg 为 SS5 UDP leg，8×9MiB）：
+
+| 场景 | 单流 | 8 流 |
+|---|---|---|
+| qg↔mb 单跳（ht） | 1.8~2.25MB/s | 3.4MB/s |
+| **vm→qg→mb 两跳（ht）** | **0.65~1.27（中位 0.72）** | **1.72MB/s**（75.4MB/43~44s，字节校验） |
+| vm→qg→mb 两跳（qg↔mb 换 SOCKS5） | — | 3.63（一次）/ 0.94（一次，链路抖动），方差大 |
+
+两跳约为 ht 单跳的 0.5×；换 SOCKS5 单跳载体后两跳最好能到 3.6。
+
+两跳期间 mb 的 inner TCP：`srtt 352~566ms`、`minRTT 59~71ms`、`rackRtt 185~1064ms`、
+cwnd 1~77（个别 903），reord 混合。即 relay 路径额外引入 **~400~500ms 排队延迟**。
+
+排查：
+- qg 的 UDP socket `Recv-Q/Send-Q = 0`，内核无积压；
+- qg 日志无 `P2P-QDEPTH`、无 `mesh AQM dropped`、无 `LANE-` 告警；
+- 因此积压不在 qg 内核/qg p2p 队列，更可能在 mb 的 ht 发送侧（dataQ/p2p 队列）或 vm 的入站路径。
+
+结论：ht 单跳 3.4 并非离谱，但两跳会被 relay 的 400~500ms 排队延迟按 BDP 再砍半（1.72）。
+下一步应给 mb→qg→vm 的每一段加 sojourn 计时，定位这 400~500ms 积压在哪一段，再决定限流/降队列。

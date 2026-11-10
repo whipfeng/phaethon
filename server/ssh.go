@@ -219,11 +219,11 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			}
 			started = true
 			req.Reply(true, nil)
-			// pty/shell sessions may keep the pty open after the process exits,
-			// so they need the short forced-close grace. Plain exec sessions
-			// (e.g. "cat file") must be allowed to drain all output; otherwise
-			// the last pipe-buffered chunk is truncated.
-			runSession(channel, proc, req.Type == "shell" || usePty)
+			// Only interactive shells need the short forced-close grace (the
+			// shell/ConPTY may keep the output handle open after exit). exec
+			// sessions must drain their output pipe even when a pty was
+			// requested, otherwise the last 32KB pipe buffer is truncated.
+			runSession(channel, proc, req.Type == "shell")
 			return
 
 		default:
@@ -246,6 +246,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 // 正常 EOF。此时必须等 io.Copy 把已读出的数据全部写完再关闭 channel，
 // 否则最后一批（实测约 26KB）会被截断。
 func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
+	util.LogModuleInfo("ssh", "session start needFastClose=%v", needFastClose)
 	done := make(chan struct{})
 	var copied atomic.Int64
 	go func() {
@@ -253,7 +254,8 @@ func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 		proc.CloseStdin()
 	}()
 	go func() {
-		n, _ := io.Copy(channel, proc)
+		n, err := io.Copy(channel, proc)
+		util.LogModuleInfo("ssh", "output copy done: bytes=%d err=%v", n, err)
 		copied.Store(n)
 		close(done)
 	}()
@@ -279,7 +281,7 @@ func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 		// guards against a child that leaks the stdout pipe after exiting.
 		select {
 		case <-done:
-		case <-time.After(30 * time.Second):
+		case <-time.After(5 * time.Second):
 			proc.CloseIO()
 			select {
 			case <-done:

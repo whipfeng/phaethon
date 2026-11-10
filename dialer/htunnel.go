@@ -25,6 +25,8 @@ const (
 	HeaderCommand      = "X-C"
 	HeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time
 	HeaderBatchSeq     = "X-B" // v0.2.0: server-assigned data-batch sequence
+	HeaderLane         = "X-L" // data GET lane (per-inner-flow ordering)
+	HeaderLaneCount    = "X-N" // number of active data lanes
 )
 
 // HTunnelDialer connects through an HTTP tunnel proxy

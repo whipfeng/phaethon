@@ -296,7 +296,7 @@ type writeReq struct {
 // a per-peer byte budget bounds memory across all 256 data queues; a
 // per-queue frame cap bounds head-of-line blocking behind one flow.
 const (
-	dataQueueByteBudget = 8 << 20  // 8MB per peer
+	dataQueueByteBudget = 1 << 20  // 1MB per peer (relay-layer experiment)
 	dataQueueMaxDepth   = 512      // frames per queue
 	drrQuantum          = 64 << 10 // 64KB per queue per round (~43×1500B frames)
 )

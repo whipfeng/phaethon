@@ -955,3 +955,31 @@ POST avg 35ms 是“已复用连接上的每请求处理/调度”开销，GET a
 连接池加大（get-slots=8/pool=64）实测仍 3.4，进一步排除“连接数/复用”方向。
 
 剩余可动的只有“减少请求数”（持久 chunked 流），而不是连接数。
+
+## 40. 两跳都用 SOCKS5 UDP leg 的对照（2026-11-10 16:00）
+
+沙箱把 qg↔mb 从 ht 换成 SOCKS5 UDP leg（mb 加 UDP_ARM 代理开启被动侧 UDP，
+qg 的 MB_S5 设 p2p-udp=true，重建会话后 transport=udp），vm↔qg 本来就是 SS5 UDP leg。
+8×9MiB，字节校验：
+
+| 场景 | 链路 | 8 流 |
+|---|---|---|
+| qg↔mb 单跳 | SOCKS5 UDP leg | **5.03 / 5.39（中位 5.2）** |
+| qg↔mb 单跳 | ht | 3.4 |
+| vm→qg→mb 两跳 | **两段都 UDP** | **2.58 / 2.97（中位 2.78）** |
+| vm→qg→mb 两跳 | qg↔mb 用 ht | 1.72 |
+| vm→qg→mb 两跳 | qg↔mb 用 SOCKS5 TCP | 3.63（一次）/0.94（抖动） |
+
+结论：
+- 同样两跳，UDP leg 比 ht 快约 1.6×（2.78 vs 1.72），但仍低于单跳（5.2）约 0.53×；
+- 说明 relay 本身会因 RTT 翻倍/排队再砍半，ht 在此基础上再额外损失约 1.6×；
+- 对 jf 无法直接复制：jf 公网未放通 SOCKS5 UDP 端口，UDP leg 起不来。
+
+### 40.1 回答“连接复用后 RTT 为何不接近 TCP 直连”
+复用的是 **HTTP 载体连接**（实测 18 条稳定 ESTABLISHED）；inner TCP 的 RTT 不是载体 TCP 的 RTT，
+而是“数据在 ht dataQ 等一个 GET 批次 + relay 转发 + ACK 走 POST”的应用层周期。
+即使载体连接复用，inner TCP 的包仍要等批处理窗口，RTT 因此被放大。
+
+### 40.2 chunked 是否受 body 限制
+chunked 本身没有 body 上限，是流式 chunk；真正的限制在中间代理是否缓冲、以及服务端/客户端
+是否实现流式读写。它解决的是“每批/每 ACK 一个请求”的固定开销，不是单请求大小。

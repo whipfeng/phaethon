@@ -103,6 +103,13 @@ func TraceForwarding(stage string, data []byte, format string, args ...interface
 	if !ForwardingTraceEnabled() {
 		return
 	}
+	// The trace is only emitted through LogModuleDebug, so when the mesh
+	// module is not at debug level the parse + Sprintf work below would be
+	// thrown away. A CPU profile showed this diagnostic consuming ~25% of a
+	// relay node's core at a few MB/s; gate before doing any work.
+	if util.GetModuleLogLevel("mesh") > util.LogLevelDebug {
+		return
+	}
 	trace, ok := ParseForwardingTrace(data)
 	if !ok {
 		return

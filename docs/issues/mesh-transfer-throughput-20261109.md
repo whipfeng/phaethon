@@ -1439,3 +1439,37 @@ qg 上唯一满足条件的 `UDP_ARM_QG` 之前是 `enabled=false`，重启后�
 这是**数据完整性问题**，不是测量噪声；需要单独用 `ssh ... cat file | sha256sum`
 对照复现并检查内置 SSH 服务的 channel close 顺序（先关读/写、再发 EOF/CLOSE）。
 本轮只记录，不混入吞吐实验。
+
+### 65.1 根因与修复（2026-11-11 00:10，jf 514）
+
+复现后确认丢的字节数有严格规律：
+
+- 24,536,874 / 32,768 = 748 余 **26,410**；
+- 多数短读正好是 24,510,464（748×32KB），即**丢了最后一个不完整 32KB 块**；
+- 另一种短读 24,477,696 再少 32KB（共 59,178）。
+
+`server/ssh.go:runSession` 原来对 `shell || usePty` 的会话在 `proc.Wait()` 后只给
+**200ms** flush 窗口，然后 `CloseIO()` 强关读端。qg/Windows 客户端在 `ssh host cat bigfile`
+场景下也可能走 pty 分支；8 流并发时最后 64KB 管道缓冲偶尔在 200ms 内没搬完，
+被 `CloseIO` 截断，正好表现为 32KB 粒度的尾部丢失。
+
+修复：
+
+1. 只有 `req.Type == "shell"`（交互 shell/ConPTY 可能不 EOF）才走 200ms 强关；
+2. `exec` 无论是否带 pty，都等待输出 `io.Copy` drain（5s 上限，只防子进程泄漏 stdout）；
+3. drain 完成后先 `CloseWrite()`（SSH EOF），再发 exit-status/CLOSE。
+
+验证（jf 514，8 流 × 24.5MB）：
+
+| 客户端 | 运行数 | 流数 | 完整率 |
+|---|---|---|---|
+| Windows OpenSSH（vm→jf 两跳） | 4 | 32 | **32/32** |
+| Linux OpenSSH（qg→jf 单跳） | 3 | 24 | **24/24** |
+
+修复前同口径：Windows 6 轮 48 流中 14 流短读；Linux 3 轮 24 流中 1 流短读。
+当前生产 jf=514、qg=508、vm=495，数据完整性问题已关闭。
+
+（过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
+导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
+`/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，
+并校验 staged 的 md5。）

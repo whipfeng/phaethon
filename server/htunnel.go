@@ -81,6 +81,13 @@ type htChannel struct {
 	// Guarded by dispMu; control-only batches carry seq 0.
 	nextBatchSeq uint64
 
+	// Server-side delivery sojourn stats (enqueue -> GET batch handoff),
+	// logged every 5s at info level. Guarded by dispMu.
+	statFrames  uint64
+	statSum     time.Duration
+	statMax     time.Duration
+	statLastLog time.Time
+
 	// Cached results for step==0 retry
 	lastReadData []byte
 	lastWriteOk  bool

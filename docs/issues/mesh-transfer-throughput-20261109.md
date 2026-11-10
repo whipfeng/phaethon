@@ -1029,3 +1029,23 @@ tunWriteDrops 0、qg 中继 CPU 仅 ~5.7%。
 后续按层推进：
 - relay 层：剩余是 RTT/BDP（0.53× 属于两跳结构），队列调优最多再拿 ~20%；
 - ht 层：单独看 ht（载体/relay 固定），只改一个 ht 变量，同时记录 mb DSACK/retrans 与吞吐。
+
+## 44. ht 单层单变量：服务端 POST 按序投递（2026-11-10 17:20）
+
+固定：qg↔mb 单跳 ht、预算 8MB、relay 不参与。唯一变量：服务端 POST 重排
+（单一投递协程、2s 缺口跳过；客户端不变）。
+
+| 指标（qg↔mb 单跳 8 流） | 基线（无重排） | 服务端 POST 重排 |
+|---|---|---|
+| 吞吐 | 32s/29s（~2.5MB/s） | 24s/36s（中位 ~2.5MB/s） |
+| DSACK 增量 | 8.5% | **8.3%** |
+| retrans 增量 | 9.2% | **9.3%** |
+
+**POST 按序投递没有降低 DSACK，也没有提升吞吐** → ACK 的并发 POST 乱序
+不是 ht 的 DSACK 来源（至少不是主因）。
+
+ht 单跳本身就有 8.5% DSACK，说明是 ht 层内部（ACK 延迟/HTTP 每请求服务时间
+触发 sender 端 RACK 误判，或两 GET 循环的投递路径）导致，而不是 relay。
+
+下一单变量候选（按层法）：固定其他，只改 gVisor RACK 的 reo_wnd（单跳 ht、
+无 UDP leg 真实丢包场景），观察 DSACK/retrans 是否下降、吞吐是否上升。

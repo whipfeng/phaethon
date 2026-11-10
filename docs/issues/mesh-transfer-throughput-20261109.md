@@ -1826,6 +1826,38 @@ cap 128 的采样：cwnd 最大 128，DSACK **3.9%**、重传 **4.0%**
 - 关键前提是修掉 jf 的 worker pin（见 §75），否则任何 fork 改动都不生效；
 - 最终生产：jf 537（cap128）、qg 520、vm 实验前二进制，transport=udp。
 
+## 78. 版本号纠正与全量发布 v0.8.0-528-g1190c7a（2026-11-11 07:25）
+
+之前用 `-X main.Version=537` 手写版本号是错的；改用
+`git describe --tags --always` = **v0.8.0-528-g1190c7a**，三平台重新构建：
+
+| 平台 | 二进制 | md5 |
+|---|---|---|
+| linux/amd64 | dist/linux-amd64/phaethon | 3e5608349c2d5a696ccfc160558ec7c7 |
+| windows/amd64 | dist/windows-amd64/phaethon.exe | fece0ed9feddc992d547818b087f97b0 |
+| darwin/amd64 | dist/darwin-amd64/phaethon | 1a8ca9349b080995ee5b494c0b64b5b9 |
+
+全量发布结果（均确认 `--version` 和实际 worker 进程）：
+
+| 环境 | 部署目录 | 结果 |
+|---|---|---|
+| qg | /root/phaethon（rc-service，worker=self） | v528 ✓ |
+| jf | /home/layer4/layer4-deploy（worker=/proc md5 3e56…） | v528 ✓ |
+| gg | /home/layer4/phaethon-gg（deploy-gg.sh） | v528 ✓ |
+| mb | /Users/cmll/phaethon-test（darwin/amd64） | v528 ✓ |
+| vm | C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe | v528 ✓ |
+| qgw / deskw | 用户自行管理 | 未动 |
+
+发布注意：
+- jf、mb 都有 worker pin（mb 固定 v0.8.0-489）；已把 `data/state/worker-pin`
+  和旧 `data/packages/*.pkg` 移到 `.bak`，否则新二进制不会成为 worker；
+- gg 通过内建 SSH 部署时，`pkill -x phaethon` 会杀掉承载 SSH 会话的进程，
+  命令输出会中断，但脚本仍会完成替换/拉起；后续建议走 OS SSH 或接受断连；
+- vm 无 pin，直接停进程→替换→计划任务拉起。
+
+发布后回归：预热 5.84MB/s、正式跑 **6.26MB/s**，vm transport=udp；
+文件落盘 8 流 **8/8 sha256 全对**。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

@@ -1164,3 +1164,19 @@ ht 单层，固定其他，两个已分别验证的变量叠加（reo_wnd 下限
 3. inner TCP 的 ACK 节奏/延迟 ACK 与 RTT 采样。
 
 下一步：先把 vm 的 UDP leg 重新拉起，测 leg ingress sojourn；若仍低，则需要在载体 socket 缓冲/持久流层面处理。
+
+## 51. UDP leg 回退与恢复：载体对照 1.82 vs 3.89（2026-11-10 20:50）
+
+多次重启后 qg↔vm 的 UDP leg 掉回 TCP carrier（vm 的 QG_SS5_UDPLEG p2p-udp 被改/未生效），
+同一套 495 生产配置下实测：
+
+| vm↔qg 载体 | 两跳 8 流（65.4MB） | 中位 |
+|---|---|---|
+| TCP carrier（WIN7_VPN 基座） | 35.9s | **1.82MB/s** |
+| **UDP leg（恢复 p2p-udp=true，移除 UDP_ARM_QG）** | 18.5s / 15.4s | **3.89MB/s**（最好 4.24） |
+
+结论：vm↔qg 的 UDP leg 对两跳是决定性的（2.1×）；恢复后生产回到 3.5~4.2MB/s。
+
+RTT 分解补充：qg/vm 的 p2p 出口队列 sojourn 仅 0.1~0.2ms、drop=0，
+所以负载下 200~330ms 的排队不在 p2p 写队列；剩余嫌疑是载体 OS/代理缓冲
+（WIN7_VPN SOCKS5、ht HTTP）与 inner TCP 的 ACK 节奏。

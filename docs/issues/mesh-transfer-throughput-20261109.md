@@ -410,3 +410,9 @@ SOCKS5 TCP base 只有 ~0.3MB/s，UDP leg 是必需的，已恢复 `p2p-udp=true
 - 想在代码层继续提升，应给 UDP leg 帧加序号 + 接收端小窗口重排（隐藏网络乱序），
   但当前外部 h_tunnel 端点抖动会掩盖收益，建议等载体稳定后再做该实验；
 - 生产保持 436、`get-slots=2`、`p2p-udp=true`。
+
+## 17. RACK 诊断字段（2026-11-10 09:36）
+
+gvisor fork 的 `tcpFlowDebug` 新增 `reoWndMs / minRttUs / rackRttUs / reoWndIncr / reord /
+dsackSeen / rackUpdates / sackPermitted / recoveryBits`，用于确认 sender 侧 RACK 是否真的
+在学习 RTT、重排窗口是否与 mesh 路径的乱序幅度匹配。仅诊断，不改行为。

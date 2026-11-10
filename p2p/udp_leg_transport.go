@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -159,6 +160,13 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 		// 超载帧回 TCP 腿，不丢数据
 		return t.base.Send(frameType, payload, false)
 	}
+	// Phaethon experiment: pure inner TCP ACKs carry no redundancy. A single
+	// lost ACK/SACK update makes the peer retransmit already-delivered data
+	// (two-hop DSACK ~21%). Send them twice; duplicate ACKs are harmless.
+	copies := 1
+	if frameType == frame.FrameMeshPacket && isPureTCPACK(payload) {
+		copies = 2
+	}
 	if t.active {
 		t.fsmMu.Lock()
 		port, ok := t.fsm.SendPort()
@@ -173,9 +181,11 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 			return nil // dialing in flight; drop (datagram semantics)
 		}
 		dst := &net.UDPAddr{IP: net.IPv4zero, Port: port}
-		if _, err := pc.WriteTo(dgram, dst); err != nil {
-			atomic.AddUint64(&t.legDrops, 1)
-			util.LogModuleDebug("p2p", "[UDP-LEG] write drop: %v", err)
+		for k := 0; k < copies; k++ {
+			if _, err := pc.WriteTo(dgram, dst); err != nil {
+				atomic.AddUint64(&t.legDrops, 1)
+				util.LogModuleDebug("p2p", "[UDP-LEG] write drop: %v", err)
+			}
 		}
 		return nil
 	}
@@ -185,11 +195,42 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 	if ep == nil {
 		return nil // no port allocated yet; drop
 	}
-	if err := ep.send(dgram); err != nil {
-		atomic.AddUint64(&t.legDrops, 1)
-		util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
+	for k := 0; k < copies; k++ {
+		if err := ep.send(dgram); err != nil {
+			atomic.AddUint64(&t.legDrops, 1)
+			util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
+		}
 	}
 	return nil
+}
+
+// isPureTCPACK reports whether payload is an IPv4 TCP packet with no payload
+// whose only flags are ACK (or ACK+ECE/CWR).
+func isPureTCPACK(payload []byte) bool {
+	if len(payload) < 40 || payload[0]>>4 != 4 {
+		return false
+	}
+	ihl := int(payload[0]&0x0f) * 4
+	if ihl < 20 || len(payload) < ihl+20 {
+		return false
+	}
+	if payload[9] != 6 {
+		return false
+	}
+	totalLen := int(binary.BigEndian.Uint16(payload[2:4]))
+	if totalLen < ihl+20 || totalLen > len(payload) {
+		return false
+	}
+	tcp := payload[ihl:totalLen]
+	dataOff := int(tcp[12]>>4) * 4
+	if dataOff < 20 || len(tcp) != dataOff {
+		return false
+	}
+	flags := tcp[13]
+	if flags&0x10 == 0 || flags&(0x01|0x02|0x04) != 0 {
+		return false
+	}
+	return true
 }
 
 func (t *udpLegTransport) routeDataViaUDP() bool {

@@ -753,3 +753,22 @@ ht 路径上 inner TCP 的 srtt 32~97ms（LAN minRTT 4~12ms）、cwnd 6~41、reo
 再决定是改 ht 的批处理/ACK 优先级，还是给 ht 端点加持久 TCP/WebSocket 载体。
 
 当前 qg/mb = 464（POST 重排与 lane 实验均已回退），jf 保持 451 未动。
+
+## 31. ht 每批统计：GET 批大小/延迟与 POST ACK 延迟（2026-11-10 13:27）
+
+新增 `[HT-STATS]`（仅 htunnel=debug 输出），qg↔mb 沙箱 8 流实测：
+
+| 方向 | 次数/5s | 平均延迟 | 平均批大小 | 速率 |
+|---|---|---|---|---|
+| GET（mb→qg 数据） | 232~244 | 39~53ms | 73~93KB | 1.8~2.4MB/s（单个 data GET 循环） |
+| POST（qg→mb ACK） | 1243~1625 | 20~23ms | ~0KB（纯 ACK） | — |
+
+- GET 的延迟 ≈ 批大小/生产速率：80KB / 2MB/s ≈ 40ms，说明**单个 data GET 循环被生产速率与往返延迟共同锁死**；
+- POST 承载的是逐包 ACK（每秒 250~325 个），每个 HTTP POST 约 20ms，ACK 延迟直接抬高 inner TCP 的 RTT；
+- 服务端加 `TCP_NODELAY`（commit 0995554）后 GET 平均延迟 45~53ms → 39~42ms、单循环速率 1.4~1.6 → 1.8~2.4MB/s，有改善但仍不够；
+- 8 流总吞吐仍 ~3.3~3.8MB/s，对照 SOCKS5 5.8~6.3。
+
+**结构性问题**：ht 用“一次 HTTP 请求承载一批帧 + 单个 data GET 串行”的模型，
+ACK 也走独立 HTTP POST；在高包率（8 流）下，请求数和每请求延迟把 RTT 抬高，
+inner TCP cwnd 被压在 BDP 附近。批大小/并发数/信用窗口都不是解，
+需要按 flow 分 lane 的多 GET（保每流有序）或持久多路复用连接。

@@ -425,3 +425,5 @@ dsackSeen / rackUpdates / sackPermitted / recoveryBits`，用于确认 sender �
 
 fork 改动：`reoWnd = max(minRTT/4*incr, SRTT-minRTT)`，仍受 `min(_, SRTT)` 上限。
 验证方式：8 流两跳，对比 DSACK/retransmits 增量与吞吐。
+- 全量 `SRTT-minRTT` 作为 reo_wnd 下限：8 流 61.9MB/90.4s = 0.68MB/s，真实丢包只能等 RTO，明显变差；
+- 收敛为 `(SRTT-minRTT)/4` 再测。

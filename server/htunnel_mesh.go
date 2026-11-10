@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"math"
 	"net/http"
@@ -36,6 +37,12 @@ const (
 	// cross-GET reordering that multiple concurrent data loops cause.
 	htMeshCoalesceWait  = 2 * time.Millisecond
 	htMeshCoalesceBytes = 256 * 1024
+
+	// htMeshLanes is the maximum number of per-flow data lanes (lane 0 is the
+	// legacy shared queue / control loop). Each inner flow hashes to one of
+	// the active lanes, so a lane's single GET loop preserves per-flow order
+	// while lanes run in parallel.
+	htMeshLanes = 16
 )
 
 // CoDel (RFC 8289) parameters for the GET delivery queues (§3.9 F2). Target
@@ -69,6 +76,7 @@ type meshWaiter struct {
 	batch chan []meshMsg
 	done  chan struct{}
 	seq   uint64 // server-assigned batch sequence (0 = no data frames)
+	lane  int    // data lane from X-L; 0 = legacy/control
 }
 
 func (w *meshWaiter) stale() bool {
@@ -283,8 +291,71 @@ func (ch *htChannel) routeFrameLocked(msg meshMsg) {
 		return
 	}
 	msg.enq = meshNow()
-	ch.dataBytes += msg.wireSize()
+	sz := msg.wireSize()
+	ch.dataBytes += sz
+	if ch.laneMode {
+		lane := ch.laneForPayloadLocked(msg.payload)
+		ch.laneData[lane] = append(ch.laneData[lane], msg)
+		ch.laneByte[lane] += sz
+		return
+	}
 	ch.dataQ = append(ch.dataQ, msg)
+}
+
+// laneForPayloadLocked maps an inner IP packet to one of the active data lanes
+// by its 5-tuple, so all packets of one flow stay on one lane (and one GET
+// loop) and keep their order. Non-IPv4 or truncated payloads go to lane 1.
+// Caller holds ch.dispMu or owns the channel before it is published.
+func (ch *htChannel) laneForPayloadLocked(p []byte) int {
+	lanes := ch.laneCount
+	if lanes < 2 {
+		lanes = 2
+	}
+	if len(p) < 20 || p[0]>>4 != 4 {
+		return 1
+	}
+	ihl := int(p[0]&0x0f) * 4
+	if ihl < 20 || len(p) < ihl {
+		return 1
+	}
+	src := binary.BigEndian.Uint32(p[12:16])
+	dst := binary.BigEndian.Uint32(p[16:20])
+	var sp, dp uint16
+	switch p[9] {
+	case 6, 17: // TCP, UDP
+		if len(p) >= ihl+4 {
+			sp = binary.BigEndian.Uint16(p[ihl:])
+			dp = binary.BigEndian.Uint16(p[ihl+2:])
+		}
+	}
+	h := src*16777619 ^ dst*2166136261 ^ uint32(sp)<<16 ^ uint32(dp)
+	h ^= h >> 13
+	return 1 + int(h%uint32(lanes-1))
+}
+
+// enableLaneModeLocked switches the channel to n per-flow lanes and moves any
+// frames already queued on the legacy data FIFO into their lanes.
+func (ch *htChannel) enableLaneModeLocked(n int) {
+	if n < 2 {
+		return
+	}
+	if n > htMeshLanes {
+		n = htMeshLanes
+	}
+	if ch.laneMode {
+		if n > ch.laneCount {
+			ch.laneCount = n
+		}
+		return
+	}
+	ch.laneMode = true
+	ch.laneCount = n
+	for _, m := range ch.dataQ {
+		lane := ch.laneForPayloadLocked(m.payload)
+		ch.laneData[lane] = append(ch.laneData[lane], m)
+		ch.laneByte[lane] += m.wireSize()
+	}
+	ch.dataQ = nil
 }
 
 // addWaiterLocked registers a GET waiter. Caller holds ch.dispMu.
@@ -292,15 +363,28 @@ func (ch *htChannel) addWaiterLocked(w *meshWaiter) {
 	ch.waiters = append(pruneStale(ch.waiters), w)
 }
 
-// flushLocked hands one batch to every waiter while frames are queued.
+// flushLocked hands one batch to every waiter that has data. Lane waiters only
+// receive frames from their own lane (per-flow FIFO, lanes concurrent); lane 0
+// serves control frames plus the legacy shared data FIFO.
 // Caller holds ch.dispMu.
 func (ch *htChannel) flushLocked(limit int) {
 	ch.waiters = pruneStale(ch.waiters)
-	for len(ch.waiters) > 0 && (len(ch.ctrlQ) > 0 || len(ch.dataQ) > 0) {
-		w := ch.waiters[0]
-		ch.waiters = popWaiter(ch.waiters)
-		if !w.stale() {
-			batch := ch.buildBatchLocked(limit)
+	keep := ch.waiters[:0]
+	for _, w := range ch.waiters {
+		var batch []meshMsg
+		if w.lane > 0 {
+			if len(ch.laneData[w.lane]) == 0 {
+				keep = append(keep, w)
+				continue
+			}
+			batch = ch.buildLaneBatchLocked(w.lane, limit)
+			w.seq = 0 // lane order is inherent; no global reorder needed
+		} else {
+			if len(ch.ctrlQ) == 0 && len(ch.dataQ) == 0 {
+				keep = append(keep, w)
+				continue
+			}
+			batch = ch.buildBatchLocked(limit)
 			w.seq = 0
 			for _, m := range batch {
 				if !m.control {
@@ -309,9 +393,38 @@ func (ch *htChannel) flushLocked(limit int) {
 					break
 				}
 			}
-			w.batch <- batch
 		}
+		if len(batch) == 0 {
+			keep = append(keep, w)
+			continue
+		}
+		w.batch <- batch
 	}
+	ch.waiters = keep
+}
+
+// buildLaneBatchLocked assembles one GET batch from a single lane's FIFO.
+// Caller holds ch.dispMu.
+func (ch *htChannel) buildLaneBatchLocked(lane, limit int) []meshMsg {
+	q := ch.laneData[lane]
+	batch := make([]meshMsg, 0, len(q))
+	size := 0
+	n := 0
+	for n < len(q) {
+		m := q[n]
+		sz := m.wireSize()
+		if len(batch) > 0 && size+sz > limit {
+			break
+		}
+		n++
+		size += sz
+		ch.dataBytes -= sz
+		ch.laneByte[lane] -= sz
+		batch = append(batch, m)
+	}
+	clear(q[:n])
+	ch.laneData[lane] = q[n:]
+	return batch
 }
 
 // buildBatchLocked assembles one GET batch of at most limit wire bytes (at
@@ -489,6 +602,26 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	waiter := &meshWaiter{
 		batch: make(chan []meshMsg, 1),
 		done:  make(chan struct{}),
+	}
+	laneCount := 0
+	if n, err := strconv.Atoi(r.Header.Get(dialer.HeaderLaneCount)); err == nil && n > 1 {
+		laneCount = n
+	}
+	if laneStr := r.Header.Get(dialer.HeaderLane); laneStr != "" {
+		if lane, err := strconv.Atoi(laneStr); err == nil && lane > 0 {
+			if laneCount > 0 && lane >= laneCount {
+				lane = laneCount - 1
+			}
+			if lane >= htMeshLanes {
+				lane = htMeshLanes - 1
+			}
+			waiter.lane = lane
+		}
+	}
+	if laneCount > 1 || waiter.lane > 0 {
+		ch.dispMu.Lock()
+		ch.enableLaneModeLocked(laneCount)
+		ch.dispMu.Unlock()
 	}
 
 	// Register as a waiter. On timeout here the dispatcher never saw it.

@@ -141,8 +141,16 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	t.inbox = newOrderedInbox(func(b orderedBatch) {
 		t.processBatchBody(b.body, b.loopType, b.readSeq)
 	}, t.closed)
+	// Lane mode needs at least two data GET loops (get-slots > 2). With the
+	// default 1 data loop the server keeps the legacy shared queue and the
+	// client keeps the global-sequence inbox.
+	useLanes := baseGETs > 2
 	for i := 0; i < baseGETs; i++ {
-		go t.recvLoop(i == 0) // first one is the control loop
+		lane := 0
+		if useLanes && i > 0 {
+			lane = i
+		}
+		go t.recvLoop(i == 0, lane) // loop 0 is control/legacy; others are flow lanes
 	}
 
 	// v0.2.0: Start heartbeat goroutine
@@ -283,7 +291,7 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 // recvLoop continuously sends GET requests and routes received frames to
 // ctrlRecvCh or dataRecvCh based on frame type. Multiple recvLoop goroutines
 // run concurrently to eliminate the gap between GETs.
-func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
+func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool, lane int) {
 	loopType := "data"
 	if isCtrlLoop {
 		loopType = "ctrl"
@@ -310,6 +318,10 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		waitTime := t.waitTime
 		t.getMu.Unlock()
 		req.Header.Set(HeaderWaitTime, strconv.Itoa(int(waitTime.Seconds())))
+		if lane > 0 {
+			req.Header.Set(HeaderLane, strconv.Itoa(lane))
+			req.Header.Set(HeaderLaneCount, strconv.Itoa(t.baseGETs-1))
+		}
 
 		// Context timeout = wait time + buffer for network latency
 		ctxTimeout := waitTime + 10*time.Second

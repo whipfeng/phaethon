@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -246,12 +247,14 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 // 否则最后一批（实测约 26KB）会被截断。
 func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 	done := make(chan struct{})
+	var copied atomic.Int64
 	go func() {
 		_, _ = io.Copy(proc, channel)
 		proc.CloseStdin()
 	}()
 	go func() {
-		_, _ = io.Copy(channel, proc)
+		n, _ := io.Copy(channel, proc)
+		copied.Store(n)
 		close(done)
 	}()
 
@@ -284,6 +287,15 @@ func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 				util.LogModuleWarn("ssh", "exec output did not drain after exit, closing channel")
 			}
 		}
+	}
+
+	// Drain window for plain exec: the output pipe is fully copied above, but
+	// the client may still have the tail of the stream buffered when it sees
+	// CHANNEL_CLOSE and exits. Sending EOF first and pausing briefly lets the
+	// client consume it (observed as a ~26KB short read on 8 concurrent flows).
+	if !needFastClose && copied.Load() > 256<<10 {
+		_ = channel.CloseWrite()
+		time.Sleep(150 * time.Millisecond)
 	}
 
 	sendExitStatus(channel, exitCodeOf(err))

@@ -340,6 +340,7 @@ func (ch *htChannel) flushLocked(limit int) {
 			w.batch <- batch
 		}
 	}
+	ch.maybeLogSojournLocked()
 }
 
 // buildBatchLocked assembles one GET batch of at most limit wire bytes (at

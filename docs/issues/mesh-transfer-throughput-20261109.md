@@ -797,3 +797,25 @@ ht 的“每请求一批 + 单连接串行/长轮询”模型 + inner TCP 的 cw
 3. 从基础设施侧换一条更干净/可开 UDP 的 qg↔jf 链路，再上 QUIC。
 
 当前 qg/mb = 471（lane/POST 实验均已回退），jf 保持 451 未动。
+
+## 33. 另一条载体：SSH+SOCKS5 与多 SSH 连接（2026-11-10 14:30）
+
+配置级实验（不改 jf 系统）：qg 增加 SSH 代理 `JF_SSH`（direct-tcpip 到 jf OS sshd），
+再加 SOCKS5 代理 `JF_S5`（server=127.0.0.1:1080, via=JF_SSH），关闭 MGMS_HT，
+qg↔jf 链路变为 `qg:JF_S5`（jf 自带的 socks5-test 映射，经 SSH 隧道）。
+
+| 场景 | 结果 |
+|---|---|
+| qg→jf 单流（8.18MB） | 2.7~4.1MB/s（优于 ht 单流 ~2） |
+| qg→jf 8 流 | 65.4MB/16s、40s → 4.09/1.64（中位 ~2.9） |
+| vm→jf 两跳 8 流（字节/退出码校验） | 70.2s、23.4s → 0.93/2.80（中位 ~1.9） |
+| 4 条并行 JF_SSH_i + JF_S5_i | qg→jf 8 流 53s/55s → **1.2MB/s** |
+
+分析：
+- 单个 ssh.Client 只有一条 TCP，所有 SOCKS5 channel 复用它 → 单连接 HOL，8 流聚合不上去；
+- OS 直连 8 流 10.9MB/s 是 8 条独立 SSH 连接，不是一条 SSH 里的 8 个 channel；
+- 4 条并行链路没有带来聚合：mesh 当前按“最佳一条链路”选路，未做按流 ECMP，反而增加 SSH 开销。
+
+结论：配置级没有白捡的收益；要把 SSH+SOCKS5 这条更干净的单流载体用于两跳，
+需要 mesh 侧实现**按 inner flow 在多条链路间 ECMP**（纯代码改动，风险中等）。
+已恢复 MGMS_HT，JF_SSH/JF_S5 等实验代理保留但禁用。

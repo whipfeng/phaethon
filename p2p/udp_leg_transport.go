@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -104,6 +105,13 @@ func (t *udpLegTransport) Send(frameType byte, payload []byte, isControl bool) e
 		}
 	case frame.FrameMeshPacket:
 		if t.routeDataViaUDP() {
+			if isPureTCPACK(payload) {
+				// Inner TCP ACKs are small and carry no redundancy: losing or
+				// reordering them over raw UDP makes the peer's RACK mark
+				// already-received segments lost (two-hop DSACK ~21%). Route
+				// them over the reliable TCP base; bulk data still uses UDP.
+				return t.base.Send(frameType, payload, isControl)
+			}
 			err := t.writeLeg(frameType, payload)
 			t.fsmMu.Lock()
 			t.fsm.OnDataSent(time.Now())
@@ -128,8 +136,13 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 			viaUDP = t.routeProbeViaUDP()
 		case frame.FrameMeshPacket:
 			if t.routeDataViaUDP() {
-				viaUDP = true
 				sentData = true
+				if isPureTCPACK(f.Payload) {
+					// Keep ACKs on the reliable TCP base (see Send).
+					tcpBatch = append(tcpBatch, f)
+				} else {
+					viaUDP = true
+				}
 			}
 		}
 		if viaUDP {
@@ -154,6 +167,10 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 // writeLeg fire-and-forgets one frame datagram. Errors are drops by contract
 // and must never surface as session write errors (the TCP leg is the session).
 func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
+	if frameType == frame.FrameMeshPacket && isPureTCPACK(payload) {
+		// Safety net for any caller that reaches writeLeg directly.
+		return t.base.Send(frameType, payload, false)
+	}
 	dgram := frame.EncodeDatagram(frameType, payload)
 	if len(dgram) > maxLegDatagram {
 		// 超载帧回 TCP 腿，不丢数据
@@ -190,6 +207,42 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 		util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
 	}
 	return nil
+}
+
+// isPureTCPACK reports whether payload is an IPv4 TCP packet with no payload
+// whose only flag is ACK (or ACK+ECE/CWR). These inner TCP ACKs are the only
+// control packets whose loss over raw UDP directly amplifies spurious
+// retransmissions at the peer.
+func isPureTCPACK(payload []byte) bool {
+	if len(payload) < 40 || payload[0]>>4 != 4 {
+		return false
+	}
+	ihl := int(payload[0]&0x0f) * 4
+	if ihl < 20 || len(payload) < ihl+20 {
+		return false
+	}
+	if payload[9] != 6 { // IPv4 protocol TCP
+		return false
+	}
+	totalLen := int(binary.BigEndian.Uint16(payload[2:4]))
+	if totalLen < ihl+20 || totalLen > len(payload) {
+		return false
+	}
+	tcp := payload[ihl:totalLen]
+	dataOff := int(tcp[12]>>4) * 4
+	if dataOff < 20 || len(tcp) != dataOff { // no TCP payload
+		return false
+	}
+	flags := tcp[13]
+	if flags&0x10 == 0 { // ACK not set
+		return false
+	}
+	// SYN/FIN/RST must stay reliable too, but they are rare; they are ACK-only
+	// check candidates here. Exclude them from the fast path for safety.
+	if flags&(0x01|0x02|0x04) != 0 {
+		return false
+	}
+	return true
 }
 
 func (t *udpLegTransport) routeDataViaUDP() bool {

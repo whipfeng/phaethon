@@ -97,8 +97,12 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 		meshCtrlOut: make(chan meshMsg, htMeshCtrlQueueLen),
 		getWaiters:  make(chan *meshWaiter, 64), // support up to 64 concurrent GETs
 		htCfg:       config.HTunnel(),
+		postNext:    1,
+		postPending: make(map[uint64][]meshMsg),
+		postWake:    make(chan struct{}, 1),
 	}
 	s.channels.Store(id, ch)
+	go ch.postDeliveryLoop()
 
 	// The channel is usable immediately (no handshake): reap only if the
 	// client never issues a follow-up request; each POST/GET resets the timer.
@@ -136,6 +140,7 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 		}
 	}
 
+	msgs := make([]meshMsg, 0, 16)
 	for len(data) >= 3 {
 		ft, payload, err := frame.ReadFrame(bytes.NewReader(data))
 		if err != nil {
@@ -143,21 +148,139 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 			w.WriteHeader(410)
 			return
 		}
-		select {
-		case ch.meshIn <- meshMsg{frameType: ft, payload: payload}:
-		case <-ch.closed:
-			w.WriteHeader(410)
-			return
-		}
+		msgs = append(msgs, meshMsg{frameType: ft, payload: payload})
 		data = data[3+len(payload):]
 	}
+	seq, _ := strconv.ParseUint(r.Header.Get(dialer.HeaderContentSeq), 10, 64)
+	if seq == 0 {
+		ch.deliverPost(msgs)
+	} else {
+		ch.enqueuePost(seq, msgs)
+	}
 	w.WriteHeader(200)
+}
+
+// deliverPost pushes frames into the local P2P session in arrival order.
+func (ch *htChannel) deliverPost(msgs []meshMsg) {
+	for _, m := range msgs {
+		select {
+		case ch.meshIn <- m:
+		case <-ch.closed:
+			return
+		}
+	}
+}
+
+// enqueuePost stores one POST batch by its client write sequence and wakes the
+// single delivery goroutine. It never blocks on meshIn, so POST handlers return
+// promptly (blocking them caused HTTP timeouts and permanent sequence gaps).
+func (ch *htChannel) enqueuePost(seq uint64, msgs []meshMsg) {
+	ch.postMu.Lock()
+	if seq >= ch.postNext {
+		if _, dup := ch.postPending[seq]; !dup {
+			ch.postPending[seq] = msgs
+			for _, m := range msgs {
+				ch.postBytes += 3 + len(m.payload)
+			}
+		}
+	}
+	ch.postMu.Unlock()
+	select {
+	case ch.postWake <- struct{}{}:
+	default:
+	}
+}
+
+// postDeliveryLoop is the only consumer that moves ordered POST batches into
+// meshIn. A ticker enforces the gap timeout even when no further POST arrives.
+func (ch *htChannel) postDeliveryLoop() {
+	const gap = 2 * time.Second
+	const maxBytes = 16 << 20
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ch.closed:
+			return
+		case <-ch.postWake:
+		case <-ticker.C:
+		}
+		ch.skipStalePostGap(gap, maxBytes)
+		for {
+			ch.postMu.Lock()
+			batch, ok := ch.postPending[ch.postNext]
+			if ok {
+				delete(ch.postPending, ch.postNext)
+				ch.postNext++
+				for _, m := range batch {
+					ch.postBytes -= 3 + len(m.payload)
+				}
+				ch.postGapAt = time.Time{}
+			}
+			ch.postMu.Unlock()
+			if !ok {
+				break
+			}
+			for _, m := range batch {
+				select {
+				case ch.meshIn <- m:
+				case <-ch.closed:
+					return
+				}
+			}
+		}
+	}
+}
+
+// skipStalePostGap jumps over a missing sequence after gap (or when the reorder
+// buffer exceeds maxBytes). The inner TCP retransmits what was actually lost.
+func (ch *htChannel) skipStalePostGap(gap time.Duration, maxBytes int) {
+	ch.postMu.Lock()
+	defer ch.postMu.Unlock()
+	if len(ch.postPending) == 0 {
+		ch.postGapAt = time.Time{}
+		return
+	}
+	now := time.Now()
+	if ch.postGapAt.IsZero() {
+		ch.postGapAt = now
+		return
+	}
+	if now.Sub(ch.postGapAt) < gap && ch.postBytes <= maxBytes {
+		return
+	}
+	var min uint64
+	first := true
+	for s := range ch.postPending {
+		if first || s < min {
+			min = s
+			first = false
+		}
+	}
+	if first || min <= ch.postNext {
+		return
+	}
+	for s, msgs := range ch.postPending {
+		if s < min {
+			for _, m := range msgs {
+				ch.postBytes -= 3 + len(m.payload)
+			}
+			delete(ch.postPending, s)
+		}
+	}
+	ch.postNext = min
+	ch.postGapAt = time.Time{}
 }
 
 // meshHandleHeartbeat serves a client PUT for mesh channel heartbeat (v0.2.0).
 // Simply resets the request timeout and returns 200.
 func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter, r *http.Request) {
 	ch.resetReqTimeout(s, ch.id)
+	// Heartbeats consume a client write sequence (shared with POSTs); record an
+	// empty batch so the reorder gate can advance past it.
+	if seq, err := strconv.ParseUint(r.Header.Get(dialer.HeaderContentSeq), 10, 64); err == nil && seq > 0 {
+		ch.enqueuePost(seq, nil)
+	}
 	w.WriteHeader(200)
 }
 

@@ -456,3 +456,4 @@ vm↔qg 健康、qg↔jf 的**直连 SSH 与 h_tunnel 同时变慢**，说明问
 - 基线 442 累计：sent 575002 / retransmits 102041 (17.7%) / DSACK 59995 (10.4%)；
 - 实验分支 `experiment/rack-dupack-coexist`：`Reord=true` 时，若 SACK scoreboard 已把
   队头判失（真实空洞），仍允许 dup-ACK 快速重传；裸乱序继续抑制。
+- 实验组 3 次 8 流：1.57 / 1.26 / 2.32MB/s（中位 1.57）；基线上一次 1.15MB/s。环境方差大，需回退基线同窗口再测。

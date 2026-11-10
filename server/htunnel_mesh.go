@@ -292,6 +292,34 @@ func (ch *htChannel) addWaiterLocked(w *meshWaiter) {
 	ch.waiters = append(pruneStale(ch.waiters), w)
 }
 
+// recordSojournLocked folds one delivered frame's queue time into the
+// server-side stats. Caller holds ch.dispMu.
+func (ch *htChannel) recordSojournLocked(m meshMsg) {
+	if m.enq == 0 {
+		return
+	}
+	s := meshNow() - m.enq
+	ch.statFrames++
+	ch.statSum += s
+	if s > ch.statMax {
+		ch.statMax = s
+	}
+}
+
+// maybeLogSojournLocked emits the 5s server-side queue summary. Caller holds
+// ch.dispMu.
+func (ch *htChannel) maybeLogSojournLocked() {
+	if ch.statFrames == 0 || time.Since(ch.statLastLog) < 5*time.Second {
+		return
+	}
+	avg := ch.statSum / time.Duration(ch.statFrames)
+	util.LogModuleInfo("htunnel", "[HT-SERVER-STATS] conn=%s frames=%d avgSojourn=%.1fms maxSojourn=%.1fms queued=%d waiters=%d",
+		ch.connID, ch.statFrames, float64(avg)/1e6, float64(ch.statMax)/1e6,
+		ch.dataBytes, len(ch.waiters))
+	ch.statFrames, ch.statSum, ch.statMax = 0, 0, 0
+	ch.statLastLog = time.Now()
+}
+
 // flushLocked hands one batch to every waiter while frames are queued.
 // Caller holds ch.dispMu.
 func (ch *htChannel) flushLocked(limit int) {
@@ -344,6 +372,7 @@ func (ch *htChannel) takeData(batch []meshMsg, size *int, q []meshMsg, cd *codel
 		}
 		batch = append(batch, m)
 		*size += sz
+		ch.recordSojournLocked(m)
 	}
 	clear(q[:n])
 	if n == len(q) {

@@ -90,6 +90,7 @@ type htChannel struct {
 	postPending map[uint64][]meshMsg
 	postBytes   int
 	postGapAt   time.Time
+	postWake    chan struct{}
 
 	// Cached results for step==0 retry
 	lastReadData []byte

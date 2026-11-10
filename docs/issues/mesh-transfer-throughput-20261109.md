@@ -692,3 +692,33 @@ total samples = 850ms / 15s = 5.67% of one core
 2. 否则优先优化现有 TCP 载体：h_tunnel 目前是 HTTP 长轮询，若端点支持 WebSocket/持久 TCP，
    可去掉每批 HTTP 往返开销，仍保持有序，风险远小于换 QUIC；
 3. 直连 QUIC 只对 vm↔qg 有意义（该段已有 SS5 UDP leg，且不是当前瓶颈），无法解决 qg↔jf 瓶颈。
+
+## 29. qg↔mb 沙箱：ht 载体与 SOCKS5/OS 对照（2026-11-10 13:00）
+
+按“先在可随意改的 vm/qg/mb 上定位”的思路，在 qg↔mb（同 LAN）建立三种等价路径：
+
+| 路径 | 单流 | 8 流 | 说明 |
+|---|---|---|---|
+| OS 级（mb admin HTTPS 192.168.1.88:39999） | 6.2MB/s | 6.5MB/s | 不过 mesh |
+| mesh + 直连 SOCKS5（MB_S5，mb:11080） | ~4.5 | **6.55MB/s** | 同一 mesh 栈，普通 TCP 载体 |
+| mesh + h_tunnel（MB_HT，mb:18081） | 1.8~2.25 | **3.4MB/s** | 同一 mesh 栈，ht 载体 |
+
+**结论：同一套 mesh 栈、同一 LAN，换掉 ht 载体（SOCKS5）就能到 OS 水平；ht 载体是瓶颈。**
+且 MB_HT 直连 mb 的 phaeton ht 服务（没有公网 nginx），排除了“公网代理层”的解释。
+
+### 29.1 已排除的因素（沙箱内实测）
+
+- `get-slots=8`：8 流 3.15MB/s（无提升）；
+- `max-batch-size=1MB`：3.07MB/s（无提升）；
+- `LaneAck` 50ms→5ms：3.1~3.4MB/s（无提升，srtt 反而 70~97ms），已 revert；
+- qg/mb `channelDropStats` 全 0，无队列丢包/AQM 记录。
+
+### 29.2 ht 载体上的 inner TCP 状态（mb tcpFlowDebug）
+
+- srtt **32~97ms**（LAN minRTT 仅 4~12ms），rackRtt 18~64ms，reoWnd 0~6ms；
+- cwnd 只有 **6~41 段**，sndWnd 很大（64KB~1.4MB）→ 发送端被 cwnd 限制，不是接收窗口；
+- reord=true 普遍，DSACK 5.8%、retransmits 6.3%。
+
+即 ht 路径额外引入了 ~30~90ms 的延迟/乱序，把 gVisor inner TCP 的 cwnd 压在个位数~几十段。
+下一步在沙箱里对比 MB_S5 下的同一流 srtt/cwnd，并量 ht 的 HEAD/POST/GET 原始 RTT，
+定位这 30~90ms 是 ht 批处理/HTTP 往返还是 p2p 的 ACK 调度造成的。

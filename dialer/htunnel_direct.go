@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -62,6 +63,15 @@ type htunnelDirectTransport struct {
 	// active (get-slots > 2). With a single data loop it is a pass-through
 	// because batches arrive in sequence order already.
 	inbox *orderedInbox
+
+	// Diagnostics: per-batch HTTP timing/size aggregates, logged every 5s
+	// only while the htunnel module is at debug level.
+	getCount  atomic.Uint64
+	getBytes  atomic.Uint64
+	getNanos  atomic.Uint64
+	postCount atomic.Uint64
+	postBytes atomic.Uint64
+	postNanos atomic.Uint64
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -246,6 +256,7 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	postStart := time.Now()
 	resp, err := t.client.Do(req.WithContext(ctx))
 	if err != nil {
 		cancel()
@@ -260,6 +271,9 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("htunnel-direct: post status: %d", resp.StatusCode)
 	}
+	t.postCount.Add(1)
+	t.postBytes.Add(uint64(len(data)))
+	t.postNanos.Add(uint64(time.Since(postStart)))
 	return nil
 }
 
@@ -298,6 +312,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		ctxTimeout := waitTime + 10*time.Second
 		ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 		util.LogModuleDebug("htunnel", "sending GET: proxy=%s connID=%s seq=%d url=%s", t.proxy.Name, t.connectionID, seq, getURL)
+		getStart := time.Now()
 		resp, err := t.client.Do(req.WithContext(ctx))
 		if err != nil {
 			cancel()
@@ -309,6 +324,11 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		cancel()
+		if resp.StatusCode == http.StatusOK {
+			t.getCount.Add(1)
+			t.getBytes.Add(uint64(len(body)))
+			t.getNanos.Add(uint64(time.Since(getStart)))
+		}
 
 		util.LogModuleDebug("htunnel", "GET response: proxy=%s connID=%s seq=%d status=%d bodyLen=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode, len(body))
 
@@ -515,6 +535,50 @@ func (t *htunnelDirectTransport) adjustWaitTime(isFullBatch bool) {
 				t.waitTime = newWait
 			}
 			t.emptyCount = 0
+		}
+	}
+}
+
+// statsLoop logs aggregate per-batch GET/POST timings and sizes every 5s while
+// the htunnel module is at debug level. The counters are swapped so each line
+// covers exactly one window.
+func (t *htunnelDirectTransport) statsLoop() {
+	tk := time.NewTicker(5 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-t.closed:
+			return
+		case <-tk.C:
+			if util.GetModuleLogLevel("htunnel") > util.LogLevelDebug {
+				continue
+			}
+			gc := t.getCount.Swap(0)
+			gb := t.getBytes.Swap(0)
+			gn := t.getNanos.Swap(0)
+			pc := t.postCount.Swap(0)
+			pb := t.postBytes.Swap(0)
+			pn := t.postNanos.Swap(0)
+			if gc == 0 && pc == 0 {
+				continue
+			}
+			var gAvg, gKB, gRate, pAvg, pKB, pRate float64
+			if gc > 0 {
+				gAvg = float64(gn) / float64(gc) / 1e6
+				gKB = float64(gb) / float64(gc) / 1024
+				if gn > 0 {
+					gRate = float64(gb) * 1e3 / float64(gn)
+				}
+			}
+			if pc > 0 {
+				pAvg = float64(pn) / float64(pc) / 1e6
+				pKB = float64(pb) / float64(pc) / 1024
+				if pn > 0 {
+					pRate = float64(pb) * 1e3 / float64(pn)
+				}
+			}
+			util.LogModuleInfo("htunnel", "[HT-STATS] proxy=%s conn=%s GET n=%d avg=%.1fms batch=%.0fKB rate=%.2fMB/s | POST n=%d avg=%.1fms batch=%.0fKB rate=%.2fMB/s",
+				t.proxy.Name, t.connectionID, gc, gAvg, gKB, gRate, pc, pAvg, pKB, pRate)
 		}
 	}
 }

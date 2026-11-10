@@ -81,14 +81,6 @@ type htChannel struct {
 	// Guarded by dispMu; control-only batches carry seq 0.
 	nextBatchSeq uint64
 
-	// Per-lane data delivery (X-L). laneMode becomes true as soon as a data
-	// GET declares a lane > 0; frames are then routed by inner 5-tuple hash
-	// so each flow keeps one FIFO lane while lanes run concurrently.
-	laneMode bool
-	laneCount int // active data lanes (1 = legacy shared queue)
-	laneData [htMeshLanes][]meshMsg
-	laneByte [htMeshLanes]int
-
 	// Cached results for step==0 retry
 	lastReadData []byte
 	lastWriteOk  bool

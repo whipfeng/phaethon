@@ -1629,6 +1629,51 @@ tail/grep/sampler 残留；重启 qg 后第一跑（TCP carrier 预热）和挂�
 两档都会偶发 2.7~3.0 的慢跑；这些是链路/停滞离群（会同时伴随某条流
 迟迟不结束），不是槽位数效应，统计时按至少 5 次取中位并剔除。
 
+## 73. 同窗口 OS 基线、pool-size 64、relay 丢包核对（2026-11-11 01:55）
+
+### 73.1 同窗口 OS 基线（链路健康）
+
+| 场景（8×24.5MB） | 运行 | 吞吐 |
+|---|---|---|
+| qg→jf OS sshd 直连（单跳） | 18s / 17s / 18s | **10.40 / 11.01 / 10.40** |
+| vm→qg→jf OS ssh 两跳 | 19.57s / 19.12s / 19.10s | **9.57 / 9.79 / 9.80**（中位 9.79） |
+
+OS 两跳只比单跳低 6%，说明“relay 结构本身”在 OS 栈上几乎不损失。
+同窗口 mesh 两跳 4.2~5.4 → 只有 OS 两跳的 **43~55%**；
+mesh 单跳 ht 6.93 → OS 单跳的 67%。两条差距要分开解决。
+
+### 73.2 pool-size 64：灾难性回退
+
+qg ht 配置加 `pool-size: 64`（get-slots 仍 8）后：
+
+| 运行 | 吞吐 |
+|---|---|
+| 预热 | 3.03 |
+| 1 | 2.59 |
+| 2 | 1.50（3 条流短读） |
+
+同期 qg→jf OS 直连仍是 **11.01**，排除链路问题。64 条每 host 连接
+（8 GET + ACK POST 共用池）反而把 GET/POST 调度拖垮。已恢复默认 16，
+配置只保留 `get-slots: 8`。**不要加大 pool-size。**
+
+### 73.3 relay 没丢包
+
+一次两跳前后 `/api/mesh` 差分：vm `DataDrops=0`、jf `DataDrops=0`、
+mb +264（无关流量）、`meshInboundDrops=0`、`nicTxDrops=0`。
+relay 侧没有可优化的丢包。
+
+### 73.4 DSACK 与 RTO 风暴
+
+干净 8-slot 运行（qg 无残留、5s gap timeout、gap skip=0）：
+DSACK **20.8%**、重传 **21.5%**。同一轮采样里出现一次
+**所有 8 条流 cwnd=1 同时停 ~5s** 的现象，随后一起恢复：
+这是 ACK 路径短暂中断导致的集体 RTO，伪重传主要来自这种 RTO 风暴，
+而不是稳态乱序（reo_wnd/ACK 改走 TCP/跳批都试过，均无改善）。
+
+下一步聚焦“为什么会集体 RTO”：
+- 在 qg 记录 ht POST/GET 的客户端时延（p99/超时）与 UDP leg 状态切换；
+- 用 1s 粒度的传输进度探针捕获下一次 Stall 时 qg/jf 的 goroutine/队列状态。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

@@ -819,3 +819,37 @@ qg↔jf 链路变为 `qg:JF_S5`（jf 自带的 socks5-test 映射，经 SSH 隧�
 结论：配置级没有白捡的收益；要把 SSH+SOCKS5 这条更干净的单流载体用于两跳，
 需要 mesh 侧实现**按 inner flow 在多条链路间 ECMP**（纯代码改动，风险中等）。
 已恢复 MGMS_HT，JF_SSH/JF_S5 等实验代理保留但禁用。
+
+## 34. 单流精确对比与多链路事实澄清（2026-11-10 14:40）
+
+用 python 计时（ms 精度，`ssh ... cat 8.18MB > /dev/null`，3 次）：
+
+| 载体 | 单流 | 8 流 |
+|---|---|---|
+| OS 直连 qg→jf（单条 SSH TCP） | **7.4~7.9MB/s**（1.04~1.10s） | 10.9（8 条独立 SSH 连接） |
+| mesh ht（MGMS_HT，单链路） | **~1.0MB/s**（8.4/8.4/5.0s） | 3.4~3.8 |
+| mesh SSH+SOCKS5（JF_S5，单链路） | **~2.4MB/s**（冷启动 47.5s，之后 3.5/3.3s） | 2.9（单 SSH TCP，HOL） |
+
+**更正**：之前说“接近 OS 主要靠多流并发”不准确。OS 单流本身就有 7.4~7.9MB/s；
+mesh 单流 ht 只有 ~1.0、SSH+SOCKS5 ~2.4，**单流和聚合都差**，不是单纯聚合问题。
+
+### 34.1 多链路是否按流分发？
+
+不是。当前包路径：
+`mesh/netstack.go:482` → `meshMgr.NextHopLink(targetNodeID)` → `mesh/mesh.go:706`
+返回 Dijkstra 最佳路径上的**一个 LinkNIC**；同一 nodeID 的多条链路只参与质量比较
+（选出最好的一条），没有按 5-tuple 哈希分发。`selectBestPeers` 虽有排序/列表，但
+`NextHopLink` 不使用列表。实测 4 条 JF_SSH+SOCKS5 链路，qg→jf 8 流反而只有 1.2MB/s，
+也印证了“只走一条 + 额外 SSH 开销”。
+
+### 34.2 SSH 连接复用
+
+`SSHDialer` 每个代理缓存一个 `ssh.Client`（一条 SSH/TCP 连接）；每次 SOCKS5 dial 建的
+direct-tcpip channel 都在**同一条 TCP** 上复用。8 条 inner 流共用一条 SSH TCP → 单连接
+HOL；OS 的 8 流 10.9MB/s 是 8 个独立 ssh 进程（8 条 TCP），不是一条连接里的 8 个 channel。
+
+### 34.3 结论
+
+要到接近 OS：需要 (a) 把单流载体从 ht 换成低开销的 TCP（SSH+SOCKS5 已到 2.4，沙箱 LAN SOCKS5 单流 ~4.5），
+并且 (b) 在同一 nodeID 的多条 LinkNIC/PeerSender 上做**按 5-tuple 的 ECMP**（每流固定一条，保序）。
+后者可在 LinkNIC 层实现一个 MultiLinkNIC，按包 5-tuple 哈希写入不同 sender，不依赖 SelectRoute 的 dst-only 接口。

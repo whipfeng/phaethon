@@ -902,3 +902,22 @@ inner TCP RTT 被抬高。
 GET 现在平均 87~182ms 是在**等服务端生产数据**（queued=0），即生产者（inner TCP）受 RTT 限制。
 下一步只剩：在 async 基础上做多 GET（每流 lane 保序），让 GET 并发拉取，减少等待；或换持久多路复用载体。
 当前 qg=478、mb=477、jf=451 未动。
+
+## 37. async 之后再试多 GET（get-slots=8）：仍无收益（2026-11-10 15:40）
+
+在 478（GET 接收/投递已解耦）基础上，qg 设置 `get-slots=8` 复测 qg↔mb 8 流：
+
+| 配置 | 8 流 |
+|---|---|
+| 默认 1 个 data GET（async） | ~3.4MB/s 量级 |
+| get-slots=8（async） | **2.77 / 3.0（中位 ~2.9）** |
+
+多 GET 仍无收益。原因与之前一致：服务端 queued 已为 0，GET 的等待时间是在等
+inner TCP 生产数据（cwd 受 250~400ms RTT 限制）；加 GET 只是把同样的数据分到更多
+并发请求上，不改变生产速率。
+
+已恢复默认 `get-slots`。
+
+**单链路 ht 的调优到此为止**：批大小、get-slots、lane、POST 顺序、LaneAck、
+RACK reo_wnd、TCP_NODELAY、GET 解耦，均无法把单链路从 ~3.4、两跳从 ~1.7 再推高。
+剩余只有“持久多路复用载体”（需端点支持）或“换链路/开 UDP 上 QUIC”（需基础设施）。

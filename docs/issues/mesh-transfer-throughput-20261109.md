@@ -573,3 +573,31 @@ OS 8 流（10.91MB/s）的 ~0.27，需要继续从载体并发/丢包机制找�
 | vm→qg→jf mesh 两跳 | ≤0.78MB/s（77s/90s 超时） | **~1.42MB/s**（46s；第 2 次 90s 超时未跑完） | ~1.8× |
 
 两跳的第二次仍 90s 超时，链路仍有抖动；但同窗口的中位趋势明确：关掉诊断后中转吞吐上升。
+
+## 24. Transit 帧快路径（2026-11-10 11:30，v0.8.0-451-g716fd41）
+
+### 24.1 依据
+
+qg 中继 CPU profile（15s，vm→jf 两跳 8 流，trace 已关）：
+`forwardUnicastPacket` 29.7% cum、`FindRoute/RouteSelector` ~19%、`mallocgc` 12.5%、
+`LinkNIC.WritePackets` 7%；即 transit 帧大部分 CPU 花在“gVisor 重新选路 + 转发 + 包缓冲”上。
+
+### 24.2 实现
+
+`MeshManager.tryTransitFastPath`：目的地址属于其他节点 /16 且 `bestPaths` 下一跳非来源时，
+直接查 `subnetOwner → bestPaths → nextHopSenders`，复制帧、TTL-1、重算 IPv4 头校验和，
+`PeerSender.Send` 到下一跳；任一条件不满足（本地/未知/回弹/TTL≤1/Send 失败）回退 netstack。
+`routeTable` 新增 `nextHopSenders`（每 nodeID 取第一直连 sender），`/api/mesh` 新增 `transitFastPath` 计数。
+单元测试：`mesh/transit_fastpath_test.go`（转发/TTL/校验和/回退条件）。
+
+### 24.3 当前窗口效果（同文件、8 流）
+
+| 场景 | trace 关、无快路径 | 快路径 451 |
+|---|---|---|
+| vm→qg→jf mesh 两跳 | 46.1s（~1.42MB/s），第 2 次 90s 超时 | **34.4s（~1.90MB/s）**，第 2 次仍 90s 超时 |
+
+- qg `transitFastPath` 计数 141480，确认路径生效；
+- 连通性回归：vm→jf ping 0% 丢包；单流 8.18MB 完整下载（12.4s）；
+- 第二次 8 流仍遇到 90s 超时，说明还存在独立的 stall 问题，与快路径无关。
+
+结论：快路径在当前窗口带来约 +34% 的两跳吞吐，且可随时回退；继续保留并部署到 jf。

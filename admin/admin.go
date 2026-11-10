@@ -4642,6 +4642,7 @@ func (s *AdminServer) apiMeshGet(w http.ResponseWriter, r *http.Request) {
 	}
 	result["tcpStats"] = mesh.GlobalMeshManager.GetNetstackTCPStats()
 	result["tcpFlowDebug"] = mesh.GlobalMeshManager.GetNetstackTCPFlowDebug()
+	result["tcpFlowDSACKSum"] = mesh.GlobalMeshManager.GetNetstackTCPFlowDSACKSum()
 	if cidr := mesh.GetMeshCIDR(); cidr != nil {
 		result["meshCIDR"] = cidr.String()
 	}

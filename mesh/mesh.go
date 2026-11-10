@@ -2975,6 +2975,14 @@ func (m *MeshManager) GetNetstackTCPStats() map[string]uint64 {
 	return m.netstack.TCPStats()
 }
 
+// GetNetstackTCPFlowDSACKSum returns the aggregate per-flow DSACK count.
+func (m *MeshManager) GetNetstackTCPFlowDSACKSum() uint64 {
+	if m.netstack == nil {
+		return 0
+	}
+	return m.netstack.TCPFlowDSACKSum()
+}
+
 // GetNetstackTCPFlowDebug snapshots internal state of all live gVisor TCP
 // endpoints (per-flow snd/rcv/cwnd/recovery/timer internals).
 func (m *MeshManager) GetNetstackTCPFlowDebug() interface{} {

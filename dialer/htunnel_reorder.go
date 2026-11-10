@@ -3,6 +3,8 @@ package dialer
 import (
 	"sync"
 	"time"
+
+	"phaethon/util"
 )
 
 // The h_tunnel client issues GETs one after another. If the recvLoop parses and
@@ -17,7 +19,7 @@ import (
 // and routes batches strictly in sequence order. With one data loop the pushes
 // are already ordered; the sequence map still protects the multi-GET case.
 const (
-	reorderGapTimeout = time.Second
+	reorderGapTimeout = 5 * time.Second
 	reorderMaxBytes   = 8 << 20
 	reorderTick       = 500 * time.Millisecond
 )
@@ -100,6 +102,8 @@ func (o *orderedInbox) drainLocked(now time.Time) {
 			}
 		}
 		if !first && min > o.next {
+			util.LogModuleWarn("htunnel", "inbox gap skip: expected=%d resume=%d waited=%v pending=%d bytes=%d",
+				o.next, min, now.Sub(o.lastAdvance), len(o.pending), o.bytes)
 			for s, b := range o.pending {
 				if s < min {
 					o.bytes -= len(b.body)

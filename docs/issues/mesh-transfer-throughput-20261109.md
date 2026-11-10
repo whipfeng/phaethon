@@ -921,3 +921,24 @@ inner TCP 生产数据（cwd 受 250~400ms RTT 限制）；加 GET 只是把同�
 **单链路 ht 的调优到此为止**：批大小、get-slots、lane、POST 顺序、LaneAck、
 RACK reo_wnd、TCP_NODELAY、GET 解耦，均无法把单链路从 ~3.4、两跳从 ~1.7 再推高。
 剩余只有“持久多路复用载体”（需端点支持）或“换链路/开 UDP 上 QUIC”（需基础设施）。
+
+## 38. 连接池/并发投递实验：不是连接数问题（2026-11-10 15:50）
+
+用户提出“增加 HTTP 连接池、动态分散上下行投递”。实测（qg↔mb，8 流，字节校验）：
+
+| 配置 | 8 流 |
+|---|---|
+| 默认（get-slots=2, pool-size=16） | ~3.4MB/s |
+| get-slots=8, pool-size=64 | 75.5MB/24s、21s = **3.15 / 3.60（中位 3.4）** |
+
+连接池/并发 GET/POST 加大没有收益。现有池子已是 `MaxIdleConns=64/MaxIdleConnsPerHost=32`、
+POST 默认 16 并发；POST 实测 ~200/s、avg 35ms（约 7 并发在飞），远未打满。
+async 后服务端 queued=0，GET 的 87~182ms 是在**等 inner TCP 生产数据**。
+
+所以：
+- “保序”不是吞吐杠杆，只是防止乱序把 inner TCP 的 cwnd 打塌的**正确性约束**；
+- 动态多 GET/多 POST 投递已经测过（服务端把批次交给任意空闲 waiter），吞吐不变；
+- 真正的瓶颈是 inner TCP 的 cwnd/RTT（250~400ms），而 RTT 里包含每批 HTTP 往返和每 ACK 一次 POST 的延迟。
+
+剩余唯一有理论收益的单链路改动：把上下行从“每批一个 HTTP 请求”改为**持久 chunked 流**
+（普通 HTTP/1.1，非 WebSocket），消掉每批/每 ACK 的请求开销；需要端点允许 chunked 流不被缓冲。

@@ -1398,3 +1398,44 @@ RTT 分解补充：qg/vm 的 p2p 出口队列 sojourn 仅 0.1~0.2ms、drop=0，
 
 fork 实验提交：`ba4cacc`（50/150）、`bb81db4`（600）、`0125f7e`（64）、`17d4ef3`（256）；
 均未进入生产，jf 恢复 501 行为。
+
+## 64. relay 预算 1MB→768KB：吞吐下降，回退 1MB（2026-11-10 23:20）
+
+单变量（qg 507，每 peer 数据队列 768KB），同窗口 A/B：
+
+| 预算 | 运行 | 吞吐 |
+|---|---|---|
+| 768KB | 预热 / 1 / 2 / 3 / 4 | 5.47 / 4.91 / 4.32 / 4.03 / 3.70 |
+| **1MB（同窗口复测）** | 1 / 2 / 3 | **5.05 / 4.60 / 4.07** |
+
+768KB 中位 4.32，1MB 中位 4.60；区间内都在缓慢下滑（链路时段波动），
+但同一时段 1MB 仍高 ~6%。降低 relay 队列**没有换来 RTT 收益**，反而牺牲吞吐，
+因此回退 1MB（qg 508）。
+
+### 64.1 UDP leg 在 qg 重启后掉回 TCP 的根因与修复
+
+qg 重启后 `/api/p2p` 里 vm 的 `transport` 从 udp 变回 tcp，两跳立刻掉到 ~1.8MB/s。
+代码里被动侧只有在 `udpLegInbound=true` 时才会包一层 `udpLegTransport`
+（`p2p/p2p.go:1447`），而该开关只由本地存在 `p2p=true && p2p-udp=true` 的代理
+在 `StartPeer` 时置位（`p2p/p2p.go:1669`）。
+
+qg 上唯一满足条件的 `UDP_ARM_QG` 之前是 `enabled=false`，重启后无人 arm 被动侧，
+所以 vm 的 UDP leg offer 被忽略。修复：
+
+1. 启用 `UDP_ARM_QG`（`enabled=true, p2p=true, p2p-udp=true`，dummy SOCKS5 127.0.0.1:1）；
+2. 让 vm 的 `QG_SS5_UDPLEG` peer 重连一次（PATCH p2p=false → true），
+   之后 `transport=udp`，并且 qg 再重启也能保持 udp。
+
+注意：关闭 p2p 会立即断开到 vm 的 mesh 通路，第二次 PATCH 不能再走 `100.212.0.10:39999`，
+要改走 vm 的直连管理地址 `10.21.20.65:39999`。
+
+## 65. 内置 SSH 数据完整性异常：每次长跑有 1~2 条流少收 26,410B（待查）
+
+在 502~508 的多轮 8 流长跑里反复出现：某条流的 `wc -c` 比 `/tmp/big.pkg`
+少 **26,410B**（508 的一次出现两条流各少 59,178B）。流编号随机，与吞吐高低无关；
+`ssh` 退出码/`cat` 侧无可见报错。26,410B ≈ 18 个 1448B 段，像是
+内置 SSH 通道在 EOF/关闭时丢了最后一批数据。
+
+这是**数据完整性问题**，不是测量噪声；需要单独用 `ssh ... cat file | sha256sum`
+对照复现并检查内置 SSH 服务的 channel close 顺序（先关读/写、再发 EOF/CLOSE）。
+本轮只记录，不混入吞吐实验。

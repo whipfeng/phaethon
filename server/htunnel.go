@@ -81,16 +81,6 @@ type htChannel struct {
 	// Guarded by dispMu; control-only batches carry seq 0.
 	nextBatchSeq uint64
 
-	// Client→server frames arrive through concurrent POSTs. postNext/pending
-	// restore the client's write order before frames enter the local P2P
-	// session; without this, ACKs and data reach the peer out of order and
-	// its TCP sees spurious fast retransmits (DSACK storms). Guarded by postMu.
-	postMu      sync.Mutex
-	postNext    uint64
-	postPending map[uint64][]meshMsg
-	postBytes   int
-	postGapAt   time.Time
-
 	// Cached results for step==0 retry
 	lastReadData []byte
 	lastWriteOk  bool

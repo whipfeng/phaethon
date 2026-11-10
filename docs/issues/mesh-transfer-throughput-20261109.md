@@ -636,3 +636,27 @@ total samples = 850ms / 15s = 5.67% of one core
 
 结论：中转层（trace、gVisor 转发）优化已到位，下一步若继续提升，应针对 UDP leg 的丢包/排队
 或 h_tunnel 载体本身，而不是继续在中转代码上加优化。
+
+## 27. 90s stall 现场抓取尝试（2026-11-10 12:10）
+
+### 27.1 结果
+
+在健康窗口连续跑了 4 次 8 流（每次 65.4MB），全部正常完成，未复现 partial stall。
+之前 90s 超时的几次都出现在链路抖动/劣化窗口（同时间段 OS 直连仍正常），说明 stall 与
+载体劣化强相关，不是稳定复现的代码死锁。
+
+### 27.2 已准备的工具
+
+`scripts/diag/stallhunt.sh`：在 vm 上并发 8 流，每 2s 汇总进度；一旦 6s 无进展且未完成，
+立即抓取：
+- jf 的 tcpStats + 22 端口各 SSH 流状态（cwnd/outstanding/定时器）；
+- qg 的 channelDropStats / transitFastPath / uturn / linkNIC；
+- vm 的 channelDropStats；
+- qg 的 goroutine dump（需 QG 以 `--enable-debug-api` 启动）。
+报告写到 vm 的 `/c/temp/stall_report.txt`。
+
+### 27.3 下一步
+
+等下一次链路抖动（可用 qg↔jf 的 srtt/jitter 或 OS 直连吞吐做判据）时，直接跑 stallhunt；
+抓到报告后按“jf 发送端 blocked / qg 队列丢包 / vm 接收端 blocked”三类定位。
+当前 QG 已恢复为不带 debug API 的正常服务，qg/jf=451。

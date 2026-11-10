@@ -1570,8 +1570,44 @@ qg 的 `htunnel.get-slots` 存在 mesh 配置里（`/api/config/mesh`，不在 c
 重新协商（`/api/p2p` 的 vm transport 才会变 udp）。重启后的第一跑
 （2.6~3.3MB/s）必须视为预热丢弃，不能计入 A/B。
 
-当前生产：jf 517（514 行为）、qg 519（1MB relay + SSH 完整性修复 + slots8 +
-reo_wnd 回退）、vm 实验前二进制；vm↔qg transport=udp。
+当前生产：jf 517（514 行为）、qg 520（1MB relay + SSH 完整性修复 + slots8 +
+reo_wnd 回退 + 5s inbox gap timeout）、vm 实验前二进制；vm↔qg transport=udp。
+
+## 71. 测量污染纠正：干净两跳 4.95~5.39，qg 未 CPU 饱和（2026-11-11 01:35）
+
+### 71.1 污染源
+
+01:00 排查 orderedInbox 时启动的
+`tail -300000 /root/data/logs/phaethon.log | grep ...` 没有回收，持续占用
+qg 单核 ~48% CPU，load average 2.6（qg 仅 2 vCPU）。这段时间的所有两跳数据
+（4.28/4.04/3.83/3.23、1.87）都受污染，不能作为版本对比依据。
+
+清理后重测（jf 517、qg 520、vm 原二进制、slots8、5s gap timeout）：
+
+| 运行 | 耗时 | 吞吐 |
+|---|---|---|
+| 1 | 34.73s | **5.39MB/s** |
+| 2 | 37.84s | **4.95** |
+
+5.39 那轮 qg CPU（2 核合计）：busy 40~66%、idle 30~50%、
+sys 18~26%、softirq 8~13% —— **qg 没有饱和，CPU 不是 5.4 时的瓶颈**。
+
+结论修正：此前记录的“两跳基线 4.68”含测量污染；干净条件下
+**两跳中位约 5.0~5.4MB/s（OS 8.03 的 62~67%）**，离 80% 目标（6.42）还差 ~20%。
+
+### 71.2 5s gap timeout
+
+新增的 `inbox gap skip` 日志在该窗口内 0 次；1s→5s 没有引起跳批。
+保留 5s（避免慢 GET 被 1s 超时误判为永久缺口而丢帧），暂不作为吞吐变量。
+
+### 71.3 新发现：偶发挂起
+
+一次两跳在 `transport=udp`、qg load 0.07 的情况下挂起 >2 分钟，
+17 个 ssh/bash 进程只剩部分流未结束，只能 kill。这与历史上的“硬停滞”
+同类，属于独立问题；吞吐中位数统计时必须识别并丢弃（预热/挂起跑不计入）。
+
+**测量纪律**：每轮 benchmark 前先看 qg `uptime`/`top`，确认没有
+tail/grep/sampler 残留；重启 qg 后第一跑（TCP carrier 预热）和挂起跑都丢弃。
 
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理

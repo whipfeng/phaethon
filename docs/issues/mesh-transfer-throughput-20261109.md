@@ -416,3 +416,12 @@ SOCKS5 TCP base 只有 ~0.3MB/s，UDP leg 是必需的，已恢复 `p2p-udp=true
 gvisor fork 的 `tcpFlowDebug` 新增 `reoWndMs / minRttUs / rackRttUs / reoWndIncr / reord /
 dsackSeen / rackUpdates / sackPermitted / recoveryBits`，用于确认 sender 侧 RACK 是否真的
 在学习 RTT、重排窗口是否与 mesh 路径的乱序幅度匹配。仅诊断，不改行为。
+
+### 17.1 试验：RACK reo_wnd 使用排队延迟下限（2026-11-10 09:42）
+
+线上采样（jf sender）：`minRtt≈60ms`、`srtt/rackRtt≈200~385ms`、`reoWnd=15~31ms`、`reord` 时真时假。
+即 RACK 只允许 15~31ms 的重排/排队裕量，而路径的实际排队延迟有 200~300ms，
+大量"只是被队列延迟"的段被判定丢失，形成 DSACK 伪重传。
+
+fork 改动：`reoWnd = max(minRTT/4*incr, SRTT-minRTT)`，仍受 `min(_, SRTT)` 上限。
+验证方式：8 流两跳，对比 DSACK/retransmits 增量与吞吐。

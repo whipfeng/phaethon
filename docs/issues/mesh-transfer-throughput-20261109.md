@@ -983,3 +983,25 @@ qg 的 MB_S5 设 p2p-udp=true，重建会话后 transport=udp），vm↔qg 本�
 ### 40.2 chunked 是否受 body 限制
 chunked 本身没有 body 上限，是流式 chunk；真正的限制在中间代理是否缓冲、以及服务端/客户端
 是否实现流式读写。它解决的是“每批/每 ACK 一个请求”的固定开销，不是单请求大小。
+
+## 41. 两跳瓶颈拆解：转发容量 vs 转发时延/丢包（2026-11-10 16:10）
+
+两跳 8 流（MB_HT）前后计数增量（mb 侧 inner TCP）：
+
+| 计数 | 增量 | 比例 |
+|---|---|---|
+| segments_sent | +62,274 | — |
+| retransmits | +6,158 | **9.9%** |
+| segments_acked_with_dsack | +5,642 | **9.1%** |
+| timeouts | +26 | — |
+
+同期：qg `transitFastPath` 持续增长（快路径生效）、qg/vm channelDropStats 全 0、
+tunWriteDrops 0、qg 中继 CPU 仅 ~5.7%。
+
+结论：
+- **转发容量不是瓶颈**（CPU 低、无队列丢包、快路径正常）；
+- 两跳的损失来自**路径时延与丢包/乱序**：RTT 从单跳 ~70ms 抬到 ~300ms（BDP 减半），
+  同时 DSACK 9% 说明大量“延迟/乱序但未丢”的段被重传；最可疑的是 qg→vm 的
+  SS5 UDP leg（原始 UDP，无可靠/保序）叠加 ht 载体的批处理延迟；
+- 同两跳换 UDP-HT 对照：UDP 2.78 vs ht 1.72，说明 ht 载体再额外损失 ~1.6×，
+  但即使两段都 UDP 也只有单跳的 0.53×，**relay 的 RTT/丢包是两跳共同的主因**。

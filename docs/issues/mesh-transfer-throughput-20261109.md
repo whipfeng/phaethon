@@ -722,3 +722,34 @@ total samples = 850ms / 15s = 5.67% of one core
 即 ht 路径额外引入了 ~30~90ms 的延迟/乱序，把 gVisor inner TCP 的 cwnd 压在个位数~几十段。
 下一步在沙箱里对比 MB_S5 下的同一流 srtt/cwnd，并量 ht 的 HEAD/POST/GET 原始 RTT，
 定位这 30~90ms 是 ht 批处理/HTTP 往返还是 p2p 的 ACK 调度造成的。
+
+## 30. 沙箱继续：POST 按序重排与其它杠杆（2026-11-10 13:10）
+
+### 30.1 对照基线（qg↔mb 同 LAN，8×9MiB，字节已校验）
+
+| 载体 | 单流 | 8 流 |
+|---|---|---|
+| SOCKS5（MB_S5） | ~4.5MB/s | **5.8~6.3MB/s**（75.5MB/12~14s） |
+| h_tunnel（MB_HT）默认 | 1.8~2.25 | **3.4MB/s**（75.5MB/20~22s） |
+| h_tunnel + 服务端 X-S 重排（非阻塞投递） | 0.73~1.35 | **3.77MB/s**（75.5MB/20s） |
+
+POST 按序重排只带来 ~11%，单流反而更差，**不足以解决问题**，已在 464 回退。
+
+### 30.2 已排除的杠杆（累计）
+
+- `get-slots=8`、`max-batch-size=1MB`：无提升；
+- `LaneAck` 50ms→5ms：无提升，srtt 反而更高；
+- lane 信用门：`/api/p2p` 显示 ht 载体 transport=tcp，未挂 stripe，`writeCredit` 为无限，不参与；
+- channelDropStats/AQM：全 0；
+- 并发 POST 乱序：重排后仅 +11%。
+
+### 30.3 当前判断
+
+ht 路径上 inner TCP 的 srtt 32~97ms（LAN minRTT 4~12ms）、cwnd 6~41、reord 普遍；
+同 mesh 栈换 SOCKS5 即回到 5.8~6.3。**h_tunnel 载体是确定的瓶颈层**，
+剩余可疑点是 ht 的“每批 GET/POST 节奏 + ACK 调度”本身，而不是批大小/并发数/信用窗口。
+
+下一步在沙箱里给 ht 加每批统计（batch 字节、GET/POST RTT、每秒批数），
+再决定是改 ht 的批处理/ACK 优先级，还是给 ht 端点加持久 TCP/WebSocket 载体。
+
+当前 qg/mb = 464（POST 重排与 lane 实验均已回退），jf 保持 451 未动。

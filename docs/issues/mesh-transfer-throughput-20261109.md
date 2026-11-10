@@ -876,3 +876,29 @@ cwnd 1~77（个别 903），reord 混合。即 relay 路径额外引入 **~400~5
 
 结论：ht 单跳 3.4 并非离谱，但两跳会被 relay 的 400~500ms 排队延迟按 BDP 再砍半（1.72）。
 下一步应给 mb→qg→vm 的每一段加 sojourn 计时，定位这 400~500ms 积压在哪一段，再决定限流/降队列。
+
+## 36. GET 接收/投递解耦（427bd10）与服务端排队消除（2026-11-10 15:30）
+
+服务端 sojourn 统计实锤：两跳期间 mb 的 ht dataQ `waiters=0`、`queued=1.36MB`、
+`maxSojourn=585ms` —— recvLoop 同步解析/投递上一批时无法发下一个 GET，服务端积压，
+inner TCP RTT 被抬高。
+
+改动：recvLoop 收到批次后只 `push` 入队并唤醒单一投递协程，立即发下一个 GET；
+投递仍按 X-B 序号 FIFO（保序）。已部署 qg 478，mb 477（服务端统计）。
+
+| 指标（两跳 8 流） | 改前 | 改后 |
+|---|---|---|
+| mb dataQ queued | 0.54~1.36MB | **0** |
+| 服务端 avgSojourn | 62~234ms | **6~40ms** |
+| 服务端 maxSojourn | 585ms | 100~400ms |
+| inner TCP cwnd | 1~77 | 21~275 |
+| qg GET | ~47/s、批 73~93KB、avg 39~53ms | 10~20/s、批 30~318KB、avg 87~182ms |
+| qg POST(ACK) | 250~325/s、avg 20~23ms | 100~220/s、avg 30~38ms |
+
+两跳吞吐：改后两次 75.4MB/38.6s = **1.95MB/s**、75.4MB/87.7s = 0.86MB/s（链路方差大），
+中位仍 ~1.4~1.7，**没有明确提升**。
+
+结论：bufferbloat 已消除，cwnd 变大，但瓶颈转回“单个 data GET 串行 + inner TCP RTT 250~400ms”：
+GET 现在平均 87~182ms 是在**等服务端生产数据**（queued=0），即生产者（inner TCP）受 RTT 限制。
+下一步只剩：在 async 基础上做多 GET（每流 lane 保序），让 GET 并发拉取，减少等待；或换持久多路复用载体。
+当前 qg=478、mb=477、jf=451 未动。

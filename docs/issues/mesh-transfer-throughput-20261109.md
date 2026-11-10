@@ -1521,6 +1521,34 @@ qg 上唯一满足条件的 `UDP_ARM_QG` 之前是 `enabled=false`，重启后�
 该改动只需部署到 **vm**（ACK 的发送侧），先在两跳实测 DSACK/吞吐，
 有收益再推广。
 
+## 69. 纯 ACK 改走 TCP base：DSACK 未降、吞吐未升，回退（2026-11-11 00:55）
+
+实现（vm 518）：`udpLegTransport.Send/SendBatch/writeLeg` 识别
+IPv4+TCP+ACK-only、无 payload 的 mesh 帧，改走已有 TCP base；数据仍走 UDP。
+vm 部署后两跳（8×24.5MB）：
+
+| 运行 | 吞吐 |
+|---|---|
+| 预热 | 4.43 |
+| 1 | 3.93 |
+| 2 | 4.49 |
+| 3 | 4.48 |
+| 4 | 3.03 |
+| 采样轮 | 4.62 |
+
+中位 ~4.43，低于 514 的 4.66；jf 采样窗口 DSACK **28.9%**、重传 **19.8%**，
+与改前 ~21~25% 无改善（甚至更高）。
+
+结论：两跳的 DSACK 不是“纯 ACK 在 UDP leg 上丢失/乱序”造成的；ACK 改走
+TCP base 反而可能引入与 control 帧的 HOL。已回退代码（`176023c`）并把 vm
+恢复为实验前二进制（md5 `a6cbd2...`），transport 仍为 udp。
+
+下一步需要新的证据，而不是继续猜 ACK：
+- 在 qg 的中继路径上量 **orderedInbox 等批/缺批时间**（get-slots=8 时
+  单个慢 GET 是否让后续批次整体停滞）；
+- 或直接在 ht 客户端把 get-slots 降为 2/4，看两跳是否因少等批而变稳
+  （单跳已知 8 最好，但两跳 RTT 翻倍后的最优点可能不同）。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

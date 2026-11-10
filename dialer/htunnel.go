@@ -24,6 +24,7 @@ const (
 	HeaderContentSeq   = "X-S"
 	HeaderCommand      = "X-C"
 	HeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time
+	HeaderBatchSeq     = "X-B" // v0.2.0: server-assigned data-batch sequence
 )
 
 // HTunnelDialer connects through an HTTP tunnel proxy

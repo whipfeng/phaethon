@@ -58,6 +58,11 @@ type htunnelDirectTransport struct {
 	// v0.2.0: heartbeat
 	heartbeatStop chan struct{}
 
+	// inbox restores data-batch order when more than one data GET loop is
+	// active (get-slots > 2). With a single data loop it is a pass-through
+	// because batches arrive in sequence order already.
+	inbox *orderedInbox
+
 	closed    chan struct{}
 	closeOnce sync.Once
 
@@ -123,6 +128,9 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	}
 
 	// v0.2.0: Start base GET recvLoops (default 2)
+	t.inbox = newOrderedInbox(func(b orderedBatch) {
+		t.processBatchBody(b.body, b.loopType, b.readSeq)
+	}, t.closed)
 	for i := 0; i < baseGETs; i++ {
 		go t.recvLoop(i == 0) // first one is the control loop
 	}
@@ -333,27 +341,43 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			isFullBatch := len(body) >= maxBatchSize
 			t.adjustWaitTime(isFullBatch)
 
-			reader := bytes.NewReader(body)
-			frameCount := 0
-			for reader.Len() > 0 {
-				ft, payload, err := frame.ReadFrame(reader)
-				if err != nil {
-					util.LogModuleWarn("htunnel", "frame parse failed: proxy=%s connID=%s seq=%d frames=%d err=%v", t.proxy.Name, t.connectionID, seq, frameCount, err)
-					t.sendError(fmt.Errorf("htunnel-direct: parse frame fail: %w", err), isCtrlLoop)
-					return
+			// Multiple data GET loops may complete out of order. A data-bearing
+			// batch carries a server-assigned sequence (X-B); hand it to the
+			// per-transport reorder buffer so frames reach the P2P session in
+			// the order the server produced them. Control-only batches have no
+			// sequence and are delivered immediately.
+			if seqStr := resp.Header.Get(HeaderBatchSeq); seqStr != "" {
+				if n, perr := strconv.ParseUint(seqStr, 10, 64); perr == nil && n > 0 {
+					t.inbox.push(n, orderedBatch{body: body, loopType: loopType, readSeq: seq})
+					continue
 				}
-				frameCount++
-				util.LogModuleDebug("htunnel", "frame received: proxy=%s connID=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, seq, frameCount, ft, len(payload))
-				t.routeFrame(ft, payload, isCtrlLoop)
-				// Note: payload ownership transferred to routeFrame -> Recv() -> P2P readLoop
-				// P2P readLoop will return the buffer (issue 10)
 			}
-			util.LogModuleDebug("htunnel", "batch complete: proxy=%s connID=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, seq, frameCount)
+			t.processBatchBody(body, loopType, seq)
 		} else {
 			// v0.2.0: empty batch
 			t.adjustWaitTime(false)
 		}
 	}
+}
+
+// processBatchBody decodes one GET response body and routes its frames.
+func (t *htunnelDirectTransport) processBatchBody(body []byte, loopType string, readSeq int) {
+	reader := bytes.NewReader(body)
+	frameCount := 0
+	for reader.Len() > 0 {
+		ft, payload, err := frame.ReadFrame(reader)
+		if err != nil {
+			util.LogModuleWarn("htunnel", "frame parse failed: proxy=%s connID=%s loop=%s seq=%d frames=%d err=%v", t.proxy.Name, t.connectionID, loopType, readSeq, frameCount, err)
+			t.sendError(fmt.Errorf("htunnel-direct: parse frame fail: %w", err), false)
+			return
+		}
+		frameCount++
+		util.LogModuleDebug("htunnel", "frame received: proxy=%s connID=%s loop=%s seq=%d frame=%d type=%d payloadLen=%d", t.proxy.Name, t.connectionID, loopType, readSeq, frameCount, ft, len(payload))
+		t.routeFrame(ft, payload, false)
+		// Note: payload ownership transferred to routeFrame -> Recv() -> P2P readLoop
+		// P2P readLoop will return the buffer (issue 10)
+	}
+	util.LogModuleDebug("htunnel", "batch complete: proxy=%s connID=%s loop=%s seq=%d frames=%d", t.proxy.Name, t.connectionID, loopType, readSeq, frameCount)
 }
 
 // sendError sends an error result to the appropriate receive channel.

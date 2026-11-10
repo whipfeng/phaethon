@@ -76,6 +76,10 @@ type htChannel struct {
 	dataBytes  int           // wire bytes queued in dataQ (§3.9 hard cap)
 	dataCodel  codel         // AQM state of dataQ
 	codelDrops uint64        // frames dropped by AQM (logged, throttled)
+	// nextBatchSeq numbers data-bearing GET batches so a client running
+	// multiple concurrent data GET loops can restore per-flow ordering.
+	// Guarded by dispMu; control-only batches carry seq 0.
+	nextBatchSeq uint64
 
 	// Cached results for step==0 retry
 	lastReadData []byte

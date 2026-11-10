@@ -68,6 +68,7 @@ func (m meshMsg) wireSize() int { return 3 + len(m.payload) }
 type meshWaiter struct {
 	batch chan []meshMsg
 	done  chan struct{}
+	seq   uint64 // server-assigned batch sequence (0 = no data frames)
 }
 
 func (w *meshWaiter) stale() bool {
@@ -299,7 +300,16 @@ func (ch *htChannel) flushLocked(limit int) {
 		w := ch.waiters[0]
 		ch.waiters = popWaiter(ch.waiters)
 		if !w.stale() {
-			w.batch <- ch.buildBatchLocked(limit)
+			batch := ch.buildBatchLocked(limit)
+			w.seq = 0
+			for _, m := range batch {
+				if !m.control {
+					ch.nextBatchSeq++
+					w.seq = ch.nextBatchSeq
+					break
+				}
+			}
+			w.batch <- batch
 		}
 	}
 }

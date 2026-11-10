@@ -88,6 +88,17 @@ type htChannel struct {
 	statMax     time.Duration
 	statLastLog time.Time
 
+	// Client→server frames arrive through concurrent POSTs, so ACKs can reach
+	// the local P2P session out of order and trigger DSACK storms in the
+	// peer's TCP. postNext/postPending restore the client's write order; a
+	// single delivery goroutine drains it. Guarded by postMu.
+	postMu      sync.Mutex
+	postNext    uint64
+	postPending map[uint64][]meshMsg
+	postBytes   int
+	postGapAt   time.Time
+	postWake    chan struct{}
+
 	// Cached results for step==0 retry
 	lastReadData []byte
 	lastWriteOk  bool

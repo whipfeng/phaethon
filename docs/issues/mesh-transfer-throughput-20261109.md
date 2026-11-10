@@ -1721,6 +1721,64 @@ inner TCP 生产数据（producer-limited）。
 当前生产：jf 517、qg 520（slots8 / pool 默认 / 5s inbox gap）、vm 实验前二进制，
 transport=udp；jf/qg 的 htunnel 日志已恢复 error。
 
+## 75. 关键发现：jf 一直在跑被 pin 的旧 worker（2026-11-11 03:10）
+
+### 75.1 现象
+
+jf 上 `pgrep -x phaethon` 只有一个进程，但 39999 的属主是
+`data/worker/phaethon-v0.8.0-501-gf529be3`（comm 为 `phaethon-v0.8.0`）。
+我们每次部署的 `./phaethon` 只是 **watchdog**，它根据
+`data/state/worker-pin`（内容 `v0.8.0-501-gf529be3`）启动固定旧 worker；
+`data/packages` 里还留着对应的旧 pkg。`pkill -x phaethon` 只杀 watchdog，
+旧 worker 通过 PDEATHSIG 退出后，新 watchdog 又拉起同一个 pinned 旧 worker。
+
+**因此 jf 上 502~524 的所有 gVisor fork 改动（HyStart 阈值、cwnd 上限、
+reo_wnd、SSH drain、DSACK 计数）全部没有真正生效。** 之前测到的 ~5MB/s
+一直是 501 旧 worker（它本来就有 HyStart 禁用 + reo_wnd + 1MB relay）。
+qg 没有 pin，worker 是 `/root/phaethon`，所以 qg 侧配置/代码改动是真实生效的。
+
+### 75.2 修复
+
+```
+mv data/state/worker-pin data/state/worker-pin.bak
+mkdir -p data/packages.bak && mv data/packages/*.pkg data/packages.bak/
+pkill -x phaethon; pkill -f 'data/worker/phaethon'
+nohup ./phaethon &   # watchdog 选择 self，worker 也是部署的二进制
+```
+
+验证：watchdog/worker 的 `/proc/<pid>/exe` md5 都等于部署二进制，
+`/api/mesh` 出现新字段 `tcpFlowDSACKSum`。
+
+**部署纪律**：每次部署后必须核对 worker 的 `/proc/<pid>/exe`，不能只看
+watchdog；版本化 worker（comm 截断为 `phaethon-v0.8.0`）不会被
+`pkill -x phaethon` 杀掉，需要 `pkill -f 'data/worker/phaethon'`。
+
+## 76. cwnd 上限首次真实生效：A/B 中位 5.99 vs 4.69（2026-11-11 03:10）
+
+解除 pin 后，用同一窗口交错 A/B（jf 528 无上限 / 529 上限 256）：
+
+| 版本 | 运行 | 中位 | DSACK |
+|---|---|---|---|
+| 528 无上限 | 4.82 / 4.69 / 3.32 | **4.69** | 17~21% |
+| 529 上限 256 | 6.40 / 5.68 / 6.34 / 5.99 / 5.22 | **5.99** | **9.6%**（重传 9.7%） |
+
+- 采样确认 in-flight cwnd **最大 256**，不再冲到几千；
+- 另有 525（同 256）5 次：6.00 / 6.08 / 5.69 / 5.47 / 6.01（中位 6.00）；
+- 上限 320：5.30 / 4.15 / 6.09 / 5.32 / 5.07（中位 5.30）；
+- 上限 384：4.15 / 4.52 / 6.26 + 一次挂起，更差；
+- **最终选择 256**（jf 531）。
+
+结论：cwnd 过冲确实是两跳伪重传的主因之一；上限 256 把 DSACK 减半、
+中位从 4.69 提到 ~6.0，最好单次 **6.40**（≈80% 目标 6.42），
+相对同窗口 OS 两跳 9.79 约 61%。
+
+数据完整性（真实 531 worker，文件落盘口径）：连续两轮 8 流
+**8/8、8/8 sha256 全对**。
+
+生产：jf 531（cap256 + DSACK 诊断）、qg 520、vm 实验前二进制，
+transport=udp。下次继续可试 cap 224/288 或 HyStart 50/150+cap 的组合，
+但必须保持同窗口交错 A/B。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

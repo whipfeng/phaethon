@@ -1674,6 +1674,53 @@ DSACK **20.8%**、重传 **21.5%**。同一轮采样里出现一次
 - 在 qg 记录 ht POST/GET 的客户端时延（p99/超时）与 UDP leg 状态切换；
 - 用 1s 粒度的传输进度探针捕获下一次 Stall 时 qg/jf 的 goroutine/队列状态。
 
+## 74. ACK 双发、Stall 探针、ht 服务端队列（2026-11-11 02:20）
+
+### 74.1 纯 ACK 在 UDP leg 上双发（vm 521）：无收益，回退
+
+vm 侧对纯 TCP ACK 数据报发送 2 份（数据帧不变），两跳 5 次：
+
+| 运行 | 吞吐 |
+|---|---|
+| 1 | 5.34 |
+| 2 | 5.13 |
+| 3 | 4.70 |
+| 4 | 4.58 |
+| 5 | 5.02 |
+
+中位 **5.02**；采样轮 DSACK **31.1%**、重传 18.8%，比单发（~21%）更差
+（ACK 量翻倍加重 POST 路径延迟）。已回退代码（`362feaf`），vm 恢复实验前
+二进制（md5 `a6cbd2...`）。
+
+### 74.2 Stall 探针（240s）
+
+长传输期间 qg 每 1s 取 `qg /api/p2p` + `jf /api/mesh`：
+
+- vm transport 全程 `udp`，没有切换；
+- `segments_sent` 每个采样都在前进，没有连续 3 次无进展的完全停顿；
+- 经 mesh 访问 jf 管理面的小请求：**p50 131ms / p90 491ms / max 3010ms**
+  （2 次超时）。即负载下 mesh 对新流的延迟是 0.13~0.5s，远高于链路 RTT ~20ms。
+
+### 74.3 ht 服务端队列不是瓶颈
+
+jf `HT-SERVER-STATS`（下载 conn）：`queued` 基本 0~107KB，
+`avgSojourn 2~10ms`、`maxSojourn 22~105ms`。
+服务端 dataQ 没有堆积，8MB 上限不是当前问题；GET 的等待主要是在等
+inner TCP 生产数据（producer-limited）。
+
+### 74.4 结论
+
+- ACK 可靠性/重排类修复（TCP base、reo_wnd、双发）都不能降低 21% 伪重传；
+- 服务端队列空、relay 无丢包、UDP leg 数据方向 DSACK 0.8%；
+- 剩余 20% 差距集中在 **inner TCP 发送侧的 21% 伪重传 + 偶发集体 RTO**。
+  下一步只剩两条路：
+  1. 持久 chunked GET 载体（去掉每批 GET 的请求/排队，降低负载下的小流延迟）；
+  2. 在发送侧继续定位伪重传的触发点（RACK vs dup-ACK、SACK 信息丢失），
+     需要 per-flow DSACK/恢复原因计数（当前 tcpStats 是全局的）。
+
+当前生产：jf 517、qg 520（slots8 / pool 默认 / 5s inbox gap）、vm 实验前二进制，
+transport=udp；jf/qg 的 htunnel 日志已恢复 error。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

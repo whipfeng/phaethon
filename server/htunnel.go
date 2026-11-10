@@ -1019,8 +1019,25 @@ func StartHTunnel(mapping *config.Mapping) (net.Listener, error) {
 	httpSrv := &http.Server{
 		Handler: srv,
 	}
-	go httpSrv.Serve(ln)
+	go httpSrv.Serve(noDelayListener{ln})
 	return ln, nil
+}
+
+// noDelayListener disables Nagle on accepted connections. h_tunnel requests
+// and responses are tiny and latency-critical (mesh ACKs, long-poll GET
+// responses); with Nagle enabled the server side can hold a response for a
+// delayed ACK, adding 10~40ms per round trip and collapsing inner TCP.
+type noDelayListener struct{ net.Listener }
+
+func (l noDelayListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+	return c, nil
 }
 
 // getProxyConn returns a cached PacketConn for the proxy, creating one if needed.

@@ -26,6 +26,16 @@ const (
 	// htMeshMaxQueuedBytes caps data queued for GET delivery; past it the
 	// dispatcher stops draining meshOut so Send blocks (§3.9 F2).
 	htMeshMaxQueuedBytes = 8 << 20
+
+	// Coalescing window for GET delivery. The p2p writer emits ~64-frame
+	// batches (~90KB); flushing to the single data GET loop on every batch
+	// caps a channel at roughly 90KB/(GET round trip + transfer) ≈ 2-3MB/s
+	// regardless of how many inner flows are active. Holding frames for a
+	// couple of milliseconds lets several writer batches clump into one GET
+	// response, raising per-response bytes without introducing the
+	// cross-GET reordering that multiple concurrent data loops cause.
+	htMeshCoalesceWait  = 2 * time.Millisecond
+	htMeshCoalesceBytes = 256 * 1024
 )
 
 // CoDel (RFC 8289) parameters for the GET delivery queues (§3.9 F2). Target
@@ -161,6 +171,32 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 	limit := ch.htCfg.GetMaxBatchSize()
 	var lastDrops uint64
 	var lastDropLog time.Time
+
+	// Coalescing timer: data is flushed immediately when it is already large
+	// enough (or when control frames are queued); otherwise the timer gives
+	// other writer batches a 2ms window to join the same GET response.
+	var flushTimer *time.Timer
+	var flushC <-chan time.Time
+	stopTimer := func() {
+		if flushTimer != nil {
+			if !flushTimer.Stop() {
+				select {
+				case <-flushTimer.C:
+				default:
+				}
+			}
+			flushTimer = nil
+			flushC = nil
+		}
+	}
+	armTimer := func() {
+		if flushTimer == nil {
+			flushTimer = time.NewTimer(htMeshCoalesceWait)
+			flushC = flushTimer.C
+		}
+	}
+	defer stopTimer()
+
 	for {
 		in := ch.meshOut
 		if ch.dataBytes >= htMeshMaxQueuedBytes {
@@ -173,6 +209,7 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 			ch.drainLocked()
 			ch.flushLocked(limit)
 			ch.dispMu.Unlock()
+			stopTimer()
 		case msg := <-in:
 			ch.dispMu.Lock()
 			ch.routeFrameLocked(msg)
@@ -181,16 +218,37 @@ func (s *HTunnelServer) meshDispatchLoop(ch *htChannel) {
 			// build full batches under load while an idle channel still
 			// ships the first frame immediately.
 			ch.drainLocked()
-			ch.flushLocked(limit)
-			ch.dispMu.Unlock()
+			if len(ch.ctrlQ) > 0 || ch.dataBytes >= htMeshCoalesceBytes {
+				ch.flushLocked(limit)
+				ch.dispMu.Unlock()
+				stopTimer()
+			} else {
+				ch.dispMu.Unlock()
+				armTimer()
+			}
 		case w := <-ch.getWaiters:
 			ch.dispMu.Lock()
 			ch.addWaiterLocked(w)
 			for n := len(ch.getWaiters); n > 0; n-- {
 				ch.addWaiterLocked(<-ch.getWaiters)
 			}
+			if len(ch.ctrlQ) > 0 || ch.dataBytes >= htMeshCoalesceBytes || len(ch.dataQ) == 0 {
+				// Control frames must not wait; a full coalesced batch is
+				// ready; or there is nothing to send yet (the timer armed by
+				// the next data frame will flush it).
+				ch.flushLocked(limit)
+				ch.dispMu.Unlock()
+				stopTimer()
+			} else {
+				ch.dispMu.Unlock()
+				armTimer()
+			}
+		case <-flushC:
+			ch.dispMu.Lock()
+			ch.drainLocked()
 			ch.flushLocked(limit)
 			ch.dispMu.Unlock()
+			stopTimer()
 		case <-ch.closed:
 			return
 		}

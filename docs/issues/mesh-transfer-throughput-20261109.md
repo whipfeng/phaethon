@@ -542,3 +542,34 @@ OS 两跳基线 = vm 经 qg 系统 sshd 串接 jf 系统 sshd（`ssh qg "ssh -p 
 
 结论：在当前 h_tunnel/网络状态下，**加大单批不是有效杠杆**；qg↔jf mesh 仍只有同窗口
 OS 8 流（10.91MB/s）的 ~0.27，需要继续从载体并发/丢包机制找原因，而不是批大小。
+
+## 23. 关键发现：forwarding-trace 诊断吃掉中转节点约 25% CPU（2026-11-10 11:20）
+
+### 23.1 证据（qg CPU profile，15s，qg↔jf mesh 8 流）
+
+`/debug/pprof/profile`（临时以 `--enable-debug-api` 启动 qg）：
+
+```
+0.64s 16.6%  syscall.Syscall6
+0.50s 13.0%  fmt.(*pp).doPrintf
+0.31s  8.1%  mesh.ParseForwardingTrace
+0.14s  3.6%  util.LogModuleDebug
+```
+
+`forwarding-trace=true` 时，`TraceForwarding` 对**每个包**做 `ParseForwardingTrace` + 3 次 `fmt.Sprintf`，
+即使 mesh 日志级别不是 debug、日志会被丢弃也照做。qg/jf 当时都是 `forwarding-trace=true`。
+
+### 23.2 处理
+
+1. qg、jf 都设置 `forwarding-trace=false` 并重启；
+2. 代码增加前置门：`util.GetModuleLogLevel("mesh") > debug` 时直接返回，不再解析/格式化
+   （commit 见下），即使误开 trace 也不会付这份成本。
+
+### 23.3 同窗口效果
+
+| 场景（8 流） | trace=on | trace=off | 变化 |
+|---|---|---|---|
+| qg↔jf mesh 单跳 | 2.94MB/s（25s/20s） | **3.41MB/s（22s/17s）** | +16% |
+| vm→qg→jf mesh 两跳 | ≤0.78MB/s（77s/90s 超时） | **~1.42MB/s**（46s；第 2 次 90s 超时未跑完） | ~1.8× |
+
+两跳的第二次仍 90s 超时，链路仍有抖动；但同窗口的中位趋势明确：关掉诊断后中转吞吐上升。

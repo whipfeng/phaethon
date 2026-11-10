@@ -256,3 +256,31 @@ qg 转发 vm 的 claim 时，验证"vm 声明了到 qg 的链接"要查 `merged[
 - vm→jf ping：**979ms → 51ms**；
 - 两跳单流：**0.127MB/s → 2.03MB/s（约 16×）**，已回到 423 之前 2.1~2.7MB/s 的区间并略优；
 - 剩余瓶颈：qg↔jf 单跳仅 1.51MB/s（直连基线 6.6MB/s），下一阶段按 §10.3 调 h_tunnel / UDP leg 载体。
+
+## 12. h_tunnel 载体调参与 qg 单核上限（2026-11-10 08:10）
+
+### 12.1 调参实验（qg↔jf 单跳 / vm→jf 两跳）
+
+| 配置 | 4 流聚合 | 8 流聚合 | 稳定性 |
+|---|---|---|---|
+| 默认（get-slots=2, batch=512KB） | 1.94MB/s | 2.45~3.2MB/s | 完成 |
+| get-slots=8, batch=1MB | — | 2.9~3.5MB/s | 有流 stall |
+| get-slots=2, batch=1MB | 3.00MB/s | 25.8/71.2MB 后 stall | 不稳定 |
+
+- `max-batch-size` 1MB 对 4 流明显有效（1.94→3.0），但 8 流会卡死（`timeout 120` 只下完 25.8MB）；
+- `get-slots=8` 让多个 data GET 并发，吞吐略升但引入乱序/stall，回退；
+- 默认配置最稳：8 流 29.0s 完成 71.2MB（2.45MB/s），无卡死。
+
+### 12.2 qg 资源上限
+
+`nproc=1`、内存 484MB。8 流中继时 phaethon CPU 67~70%，jf 侧 CPU 空闲。
+两跳的共享瓶颈是 **qg 单 vCPU 上的 gVisor 转发 + h_tunnel 单 data GET 循环**，不是链路带宽，
+也不是 inner TCP 每流窗口（单流已能到 2.1MB/s，4 流默认并不聚合）。
+
+### 12.3 结论
+
+- 路由/互验缺边已修复并验证（见 §11），这是本轮 127KB/s→2.1MB/s 的主因；
+- 继续提升需要动载体并发模型：多个 data GET 必须带**全局批次序号 + 客户端按序重组**，
+  否则并发 GET 的响应会乱序投递，inner TCP 直接崩；或先在服务端做短时聚合（≈2ms/256KB）
+  再交给单个 GET，保持有序的同时把每批从 ~90KB 提到更大。
+- 在此之前保持默认 h_tunnel 参数，避免 8 流 stall。

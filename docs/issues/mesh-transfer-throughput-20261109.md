@@ -614,3 +614,25 @@ qg 中继 CPU profile（15s，vm→jf 两跳 8 流，trace 已关）：
 - 健康时完成的中位约 4.4MB/s，已明显高于快路径前的 3.3~3.6 与 trace 关之前的 2.0；
 - 90s 超时的几次都发生在链路抖动窗口（同时间段 OS 仍稳定 8.2），属于独立的 stall 现象；
 - 逐 3s 轮询的 4 次运行全部正常完成，未能在轮询中抓到 partial stall，后续需在抖动窗口现场抓状态。
+
+## 26. 健康窗口中转 CPU 复测：CPU 已不再是瓶颈（2026-11-10 11:42）
+
+qg 中转 profile（451，trace 关 + transit 快路径，vm→jf 两跳 8 流，15s）：
+```
+total samples = 850ms / 15s = 5.67% of one core
+30.6% Syscall6（socket/net I/O）
+ 8.2% futex
+ 7.1% net/http 写入 + htunnel.postBatch
+ 7.1% gVisor handleValidatedPacket（本地投递，非 transit）
+```
+
+对比优化前同场景（trace 开、无快路径）：38.3% 单核，且吞吐只有 ~1.4MB/s；
+现在 ~4~5MB/s 时只有 5.67%。**CPU 已不是限制项**。
+
+剩余差距（健康时完成 4.4~5.4 vs OS 8.2MB/s）回到载体侧：
+- qg↔vm 的 SS5 UDP leg 真实丢包/乱序；
+- qg↔jf 的 h_tunnel GET 往返与排队；
+- 以及链路抖动窗口出现的 90s stall（本次健康窗口未复现）。
+
+结论：中转层（trace、gVisor 转发）优化已到位，下一步若继续提升，应针对 UDP leg 的丢包/排队
+或 h_tunnel 载体本身，而不是继续在中转代码上加优化。

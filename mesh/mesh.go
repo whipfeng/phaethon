@@ -290,6 +290,11 @@ type MeshManager struct {
 	uturnLogMu   sync.Mutex
 	lastUturnLog time.Time
 
+	// Transit fast path: frames whose destination belongs to another mesh
+	// node are forwarded straight to the Dijkstra next hop's P2P session
+	// instead of being injected into gVisor (which dominated relay CPU).
+	transitFastPath atomic.Uint64
+
 	// Stall-monitor D counters: host-facing inbound frames (see stall_monitor.go).
 	stallDVIP  atomic.Uint64 // dst == local VIP (.1): returns of host-originated traffic
 	stallDIPIP atomic.Uint64 // IPIP outer dst == local EIP (.4): exit-node returns
@@ -322,6 +327,7 @@ type routeTable struct {
 	nodeMap     map[string]*nodeInfo      // nodeID → info
 	bestPaths   map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
 	subnetOwner map[[4]byte]string        // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
+	nextHopSenders map[string]PeerSender  // nodeID → first direct P2P sender (transit fast path)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -331,7 +337,11 @@ type TopologySnapshot struct {
 
 // getRouteTable returns the current route table (lock-free).
 func (m *MeshManager) getRouteTable() *routeTable {
-	return m.routeTable.Load().(*routeTable)
+	p := m.routeTable.Load()
+	if p == nil {
+		return nil
+	}
+	return p.(*routeTable)
 }
 
 func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *net.IPNet, subnetStr string, domainSuffixes []string, advertise []string, network *net.IPNet, subnetPrefixLen int) *MeshManager {
@@ -1129,6 +1139,14 @@ func (m *MeshManager) handleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 			fromNodeID, net.IP(frame[12:16]), dstIP, frame[9], frame[8], len(frame))
 	}
 
+	// Transit fast path: the destination belongs to another mesh node, so this
+	// frame only needs TTL/checksum handling and a re-enqueue toward the next
+	// hop. Skipping gVisor removes the forwardUnicastPacket/FindRoute/
+	// RouteSelector cost that dominated a relay node's CPU profile.
+	if m.tryTransitFastPath(fromNodeID, dstIP, frame, releaseOnce) {
+		return
+	}
+
 	// Stall-monitor D counters: only frames whose arrival must be followed by a
 	// TUN write (B) — dst==VIP leaves NIC 1 directly; IPIP-to-EIP decapsulates
 	// to local delivery whose reply writes TUN. In-stack service addresses
@@ -1149,6 +1167,84 @@ func (m *MeshManager) handleMeshFrame(fromNodeID string, linkNIC *LinkNIC, frame
 	TraceForwarding("mesh_inject_start", frame, "fromNode=%s", fromNodeID)
 	linkNIC.InjectInboundOwned(frame, releaseOnce)
 	TraceForwarding("mesh_inject_ok", frame, "fromNode=%s", fromNodeID)
+}
+
+// tryTransitFastPath forwards a transit frame at the mesh layer: when the
+// destination is inside another node's /16 and Dijkstra has a next hop (not
+// the sender), decrement TTL, fix the IPv4 header checksum and enqueue the
+// frame on that next hop's P2P session. Returns false whenever anything is
+// unusual so the caller falls back to the full netstack path.
+//
+// The relay CPU profile showed ~50% of a transit node's samples inside
+// forwardUnicastPacket/FindRoute/RouteSelector and PacketBuffer handling;
+// transit packets need none of that, only TTL/checksum and re-enqueue.
+func (m *MeshManager) tryTransitFastPath(fromNodeID string, dstIP net.IP, frame []byte, release func()) bool {
+	if m.subnet == nil || len(frame) < 20 {
+		return false
+	}
+	dst4 := dstIP.To4()
+	if dst4 == nil {
+		return false
+	}
+	rt := m.getRouteTable()
+	if rt == nil || len(rt.nextHopSenders) == 0 {
+		return false
+	}
+	masked := dst4.Mask(m.subnet.Mask)
+	if masked == nil {
+		return false
+	}
+	var key [4]byte
+	copy(key[:], masked)
+	target, ok := rt.subnetOwner[key]
+	if !ok || target == m.nodeID {
+		return false // local delivery or unknown destination
+	}
+	bp, ok := rt.bestPaths[target]
+	if !ok || bp.NextHop == "" || bp.NextHop == fromNodeID {
+		return false // no route, or would bounce straight back
+	}
+	sender := rt.nextHopSenders[bp.NextHop]
+	if sender == nil {
+		return false
+	}
+	ihl := int(frame[0]&0x0f) * 4
+	if frame[8] <= 1 || ihl < 20 || ihl > len(frame) {
+		return false // let netstack emit ICMP / handle the odd header
+	}
+
+	// peer.Send enqueues the slice asynchronously; the ingress buffer is
+	// released on success, so hand over a private copy.
+	out := make([]byte, len(frame))
+	copy(out, frame)
+	out[8]--
+	out[10], out[11] = 0, 0
+	cs := ipv4HeaderChecksum(out[:ihl])
+	out[10] = byte(cs >> 8)
+	out[11] = byte(cs)
+
+	if err := sender.Send(out); err != nil {
+		return false // fall back to netstack with the untouched original
+	}
+	m.transitFastPath.Add(1)
+	release()
+	return true
+}
+
+// ipv4HeaderChecksum computes the RFC 1071 one's-complement checksum of an
+// IPv4 header (caller zeroes the checksum field first).
+func ipv4HeaderChecksum(h []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(h); i += 2 {
+		sum += uint32(h[i])<<8 | uint32(h[i+1])
+	}
+	if len(h)%2 == 1 {
+		sum += uint32(h[len(h)-1]) << 8
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
 }
 
 // HandleTopologyGossip processes a gossip announcement from a peer.
@@ -1182,6 +1278,7 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 		"advertise":      advertise,
 		"routeCount":     routeCount,
 		"uturnCount":     atomic.LoadUint64(&m.uturnCount),
+		"transitFastPath": m.transitFastPath.Load(),
 	}
 }
 
@@ -2098,14 +2195,27 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
+	// Direct senders for the transit fast path. One sender per node is enough
+	// for the first version; multi-link quality selection stays in netstack.
+	nextHopSenders := make(map[string]PeerSender, len(peers))
+	for _, p := range peers {
+		if p.Sender == nil {
+			continue
+		}
+		if _, ok := nextHopSenders[p.NodeID()]; !ok {
+			nextHopSenders[p.NodeID()] = p.Sender
+		}
+	}
+
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
-		routes:      routes,
-		routeTrie:   routeTrie,
-		domainTrie:  domainTrie,
-		nodeMap:     nodeMap,
-		bestPaths:   bestPaths,
-		subnetOwner: subnetOwner,
+		routes:         routes,
+		routeTrie:      routeTrie,
+		domainTrie:     domainTrie,
+		nodeMap:        nodeMap,
+		bestPaths:      bestPaths,
+		subnetOwner:    subnetOwner,
+		nextHopSenders: nextHopSenders,
 	})
 	util.LogModuleInfo("mesh", "[MESH] routes installed: %d routes", len(routes))
 

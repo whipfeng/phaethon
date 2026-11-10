@@ -148,6 +148,9 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	// v0.2.0: Start heartbeat goroutine
 	go t.heartbeatLoop()
 
+	// Per-batch HTTP diagnostics (logs only while htunnel is at debug level).
+	go t.statsLoop()
+
 	return t, nil
 }
 

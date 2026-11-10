@@ -99,7 +99,9 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 		htCfg:       config.HTunnel(),
 		postNext:    1,
 		postPending: make(map[uint64][]meshMsg),
+		postWake:    make(chan struct{}, 1),
 	}
+	go ch.postDeliveryLoop()
 	s.channels.Store(id, ch)
 
 	// The channel is usable immediately (no handshake): reap only if the
@@ -180,78 +182,108 @@ const (
 	postReorderMaxBytes = 16 << 20
 )
 
+// enqueuePost stores one POST batch by its client write sequence and wakes the
+// single delivery goroutine. It never blocks on meshIn: POST handlers must
+// return promptly, otherwise concurrent POSTs time out and leave sequence
+// gaps that stall the gate.
 func (ch *htChannel) enqueuePost(seq uint64, msgs []meshMsg) {
 	ch.postMu.Lock()
-	defer ch.postMu.Unlock()
-	if seq < ch.postNext {
-		return // duplicate/stale POST
-	}
-	if _, dup := ch.postPending[seq]; !dup {
-		ch.postPending[seq] = msgs
-		for _, m := range msgs {
-			ch.postBytes += 3 + len(m.payload)
-		}
-	}
-	now := time.Now()
-	for {
-		if err := ch.postDrainLocked(); err != nil {
-			return
-		}
-		if len(ch.postPending) == 0 {
-			ch.postGapAt = time.Time{}
-			return
-		}
-		if ch.postGapAt.IsZero() {
-			ch.postGapAt = now
-		}
-		if now.Sub(ch.postGapAt) < postReorderGap && ch.postBytes <= postReorderMaxBytes {
-			return
-		}
-		// Skip the missing sequence(s): jump to the lowest pending seq. The
-		// inner TCP retransmits what was actually lost.
-		var min uint64
-		first := true
-		for s := range ch.postPending {
-			if first || s < min {
-				min = s
-				first = false
+	if seq >= ch.postNext {
+		if _, dup := ch.postPending[seq]; !dup {
+			ch.postPending[seq] = msgs
+			for _, m := range msgs {
+				ch.postBytes += 3 + len(m.payload)
 			}
 		}
-		if first {
-			return
-		}
-		for s, m := range ch.postPending {
-			if s < min {
-				for _, msg := range m {
-					ch.postBytes -= 3 + len(msg.payload)
-				}
-				delete(ch.postPending, s)
-			}
-		}
-		ch.postNext = min
-		ch.postGapAt = time.Time{}
+	}
+	ch.postMu.Unlock()
+	select {
+	case ch.postWake <- struct{}{}:
+	default:
 	}
 }
 
-// postDrainLocked delivers every consecutively numbered pending batch.
-// Caller holds postMu. Returns an error when the channel closed mid-delivery.
-func (ch *htChannel) postDrainLocked() error {
+// postDeliveryLoop is the only consumer that moves ordered batches into
+// meshIn. A ticker enforces the gap timeout even when no further POSTs arrive.
+func (ch *htChannel) postDeliveryLoop() {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		batch, ok := ch.postPending[ch.postNext]
-		if !ok {
-			return nil
+		select {
+		case <-ch.closed:
+			return
+		case <-ch.postWake:
+		case <-ticker.C:
 		}
-		delete(ch.postPending, ch.postNext)
-		ch.postNext++
-		for _, m := range batch {
-			ch.postBytes -= 3 + len(m.payload)
-			select {
-			case ch.meshIn <- m:
-			case <-ch.closed:
-				return io.ErrClosedPipe
+		if err := ch.postSkipGapIfStale(); err != nil {
+			return
+		}
+		for {
+			ch.postMu.Lock()
+			batch, ok := ch.postPending[ch.postNext]
+			if ok {
+				delete(ch.postPending, ch.postNext)
+				ch.postNext++
+				for _, m := range batch {
+					ch.postBytes -= 3 + len(m.payload)
+				}
+				ch.postGapAt = time.Time{}
+			}
+			ch.postMu.Unlock()
+			if !ok {
+				break
+			}
+			for _, m := range batch {
+				select {
+				case ch.meshIn <- m:
+				case <-ch.closed:
+					return
+				}
 			}
 		}
 	}
+}
+
+// postSkipGapIfStale jumps over a missing sequence after postReorderGap (or
+// when the reorder buffer exceeds its byte cap). The inner TCP retransmits
+// whatever the carrier actually lost.
+func (ch *htChannel) postSkipGapIfStale() error {
+	ch.postMu.Lock()
+	defer ch.postMu.Unlock()
+	if len(ch.postPending) == 0 {
+		ch.postGapAt = time.Time{}
+		return nil
+	}
+	now := time.Now()
+	if ch.postGapAt.IsZero() {
+		ch.postGapAt = now
+		return nil
+	}
+	if now.Sub(ch.postGapAt) < postReorderGap && ch.postBytes <= postReorderMaxBytes {
+		return nil
+	}
+	var min uint64
+	first := true
+	for s := range ch.postPending {
+		if first || s < min {
+			min = s
+			first = false
+		}
+	}
+	if first || min <= ch.postNext {
+		return nil
+	}
+	for s, msgs := range ch.postPending {
+		if s < min {
+			for _, m := range msgs {
+				ch.postBytes -= 3 + len(m.payload)
+			}
+			delete(ch.postPending, s)
+		}
+	}
+	ch.postNext = min
+	ch.postGapAt = time.Time{}
+	return nil
 }
 
 // meshHandleHeartbeat serves a client PUT for mesh channel heartbeat (v0.2.0).

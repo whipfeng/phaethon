@@ -218,7 +218,11 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			}
 			started = true
 			req.Reply(true, nil)
-			runSession(channel, proc)
+			// pty/shell sessions may keep the pty open after the process exits,
+			// so they need the short forced-close grace. Plain exec sessions
+			// (e.g. "cat file") must be allowed to drain all output; otherwise
+			// the last pipe-buffered chunk is truncated.
+			runSession(channel, proc, req.Type == "shell" || usePty)
 			return
 
 		default:
@@ -234,9 +238,13 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 //     EOF，只有 Close 才会解除阻塞；
 //   - Unix pty：若后台子进程还持有 slave 端，master 的 Read 同样不会 EOF。
 //
-// 所以 Wait 返回后要给输出一个很短的 flush 窗口，然后强制关闭读端，
-// 再有限等待搬运协程结束——否则客户端会在 shell 退出后一直挂着。
-func runSession(channel ssh.Channel, proc sessionProc) {
+// 所以 pty/shell 会话在 Wait 返回后要给输出一个很短的 flush 窗口，然后强制关闭
+// 读端，再有限等待搬运协程结束——否则客户端会在 shell 退出后一直挂着。
+//
+// 非 pty 的 exec（如 ssh host cat bigfile）没有这个句柄问题：进程退出后管道会
+// 正常 EOF。此时必须等 io.Copy 把已读出的数据全部写完再关闭 channel，
+// 否则最后一批（实测约 26KB）会被截断。
+func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 	done := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(proc, channel)
@@ -249,17 +257,32 @@ func runSession(channel ssh.Channel, proc sessionProc) {
 
 	err := proc.Wait()
 
-	// Grace window for the last chunk (e.g. shell's logout message), then force
-	// the read side closed so the output copy cannot block on a lingering
-	// pty/ConPTY handle.
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		proc.CloseIO()
+	if needFastClose {
+		// Grace window for the last chunk (e.g. shell's logout message), then
+		// force the read side closed so the output copy cannot block on a
+		// lingering pty/ConPTY handle.
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
-			util.LogModuleWarn("ssh", "session output did not drain after exit, closing channel")
+		case <-time.After(200 * time.Millisecond):
+			proc.CloseIO()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				util.LogModuleWarn("ssh", "session output did not drain after exit, closing channel")
+			}
+		}
+	} else {
+		// Plain exec: wait for the output copy to drain. The timeout only
+		// guards against a child that leaks the stdout pipe after exiting.
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			proc.CloseIO()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				util.LogModuleWarn("ssh", "exec output did not drain after exit, closing channel")
+			}
 		}
 	}
 

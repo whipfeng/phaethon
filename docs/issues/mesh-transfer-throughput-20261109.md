@@ -427,3 +427,7 @@ fork 改动：`reoWnd = max(minRTT/4*incr, SRTT-minRTT)`，仍受 `min(_, SRTT)`
 验证方式：8 流两跳，对比 DSACK/retransmits 增量与吞吐。
 - 全量 `SRTT-minRTT` 作为 reo_wnd 下限：8 流 61.9MB/90.4s = 0.68MB/s，真实丢包只能等 RTO，明显变差；
 - 收敛为 `(SRTT-minRTT)/4` 再测。
+- `(SRTT-minRTT)/4` 作为下限：8 流 57.3MB/90.3s = 0.63MB/s，仍有超时，同样变差。
+- **结论：reo_wnd 调大不是出路**。该路径存在真实丢包（UDP leg），把 RACK 丢失判定放宽会让真实丢包
+  只能等 RTO，吞吐反而崩塌；原有 minRTT/4*incr 对真实丢包是合适的。DSACK 是伴随现象，不是主因。
+  已回退 RACK 行为改动，仅保留诊断字段。

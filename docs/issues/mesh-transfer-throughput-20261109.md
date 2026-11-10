@@ -375,3 +375,38 @@ inner TCP 伪重传（观察到 DSACK 16 万，约 27%）。
 - qg 2 核、CPU 空闲；单流 2.4~2.5MB/s；
 - 仍未解释：jf 侧 inner TCP 有 ~30% DSACK 伪重传，说明 **数据/ACK 在 qg→vm 或 p2p 调度层仍被乱序**。
   下一步应在 qg→vm 的 SS5 UDP leg / DRR 队列做逐流序号核对，而不是继续在 h_tunnel 层加重排。
+
+## 16. 载体归属验证：UDP leg 不可关闭；h_tunnel 外部链路抖动（2026-11-10 09:15）
+
+### 16.1 关闭 qg↔vm 的 p2p-udp（WIN7_VPN）
+
+用 `cmd/toggle-p2p-udp` 停 phaethon 后把 WIN7_VPN 的 `p2p-udp` 置 false，重启 qg：
+
+| 配置 | 两跳单流 |
+|---|---|
+| UDP leg 开启 | 2.4~2.5MB/s |
+| UDP leg 关闭（走 SOCKS5 TCP base） | **0.34MB/s**（24s / 8.2MB） |
+
+SOCKS5 TCP base 只有 ~0.3MB/s，UDP leg 是必需的，已恢复 `p2p-udp=true`。
+
+### 16.2 恢复后观察到外部载体抖动
+
+多次重启/压测后，qg↔jf 的 h_tunnel 对端（36.140.28.178:18080）出现：
+
+- jf 侧 qg 链路 `srtt=204ms jitter=262ms`（正常 ~20ms）；
+- 两端路由自动切到 gg：jf→vm cost 187 via gg，vm→jf cost 201 via gg；
+- 8 流两跳降到 1.89MB/s；单流 0.38~1.25MB/s。
+
+同时间 qg→jf 公网 sshd 仍可 8.2MB/3.13s（单流 2.6MB/s），说明物理链路正常，
+劣化在 h_tunnel 的 HTTP 长轮询端点或其代理层。
+
+恢复后强制 gossip：两端路由回到 qg（cost ≈105），但单流仍只有 0.38~1.25MB/s，
+说明载体仍未回到之前的水平。该现象是外部的、随时间波动的，不是 436 代码回归
+（436 在载体正常时实测 3.32~3.60MB/s）。
+
+### 16.3 结论
+
+- UDP leg 必须保留；它天然不保序/会丢包，是 inner TCP DSACK 的主要来源；
+- 想在代码层继续提升，应给 UDP leg 帧加序号 + 接收端小窗口重排（隐藏网络乱序），
+  但当前外部 h_tunnel 端点抖动会掩盖收益，建议等载体稳定后再做该实验；
+- 生产保持 436、`get-slots=2`、`p2p-udp=true`。

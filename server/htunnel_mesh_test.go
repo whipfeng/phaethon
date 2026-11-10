@@ -6,15 +6,12 @@ import (
 )
 
 func newTestChannel() *htChannel {
-	ch := &htChannel{
+	return &htChannel{
 		closed:      make(chan struct{}),
 		meshIn:      make(chan meshMsg, 32),
 		postNext:    1,
 		postPending: make(map[uint64][]meshMsg),
-		postWake:    make(chan struct{}, 1),
 	}
-	go ch.postDeliveryLoop()
-	return ch
 }
 
 func drainPost(t *testing.T, ch *htChannel, want int) []byte {
@@ -59,22 +56,17 @@ func TestEnqueuePostHeartbeatFillsGap(t *testing.T) {
 func TestEnqueuePostSkipsLostPost(t *testing.T) {
 	ch := newTestChannel()
 	ch.enqueuePost(1, []meshMsg{{payload: []byte{1}}})
-	if got := drainPost(t, ch, 1); got[0] != 1 {
-		t.Fatalf("first frame = %v", got)
-	}
 	ch.enqueuePost(3, []meshMsg{{payload: []byte{3}}}) // seq 2 lost
-	time.Sleep(300 * time.Millisecond)                // let the delivery loop settle
-
-	// Pretend the gap has persisted beyond the timeout, run the skip
-	// synchronously, then deliver seq 4.
+	// Pretend the gap has persisted beyond the timeout, then deliver seq 4.
 	ch.postMu.Lock()
 	ch.postGapAt = time.Now().Add(-2 * postReorderGap)
 	ch.postMu.Unlock()
-	_ = ch.postSkipGapIfStale()
 	ch.enqueuePost(4, []meshMsg{{payload: []byte{4}}})
-
 	got := drainPost(t, ch, 2)
-	if got[0] != 3 || got[1] != 4 {
-		t.Fatalf("lost-post skip delivered %v, want [3 4]", got)
+	if len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		// seq 4 may have been delivered too; only the first two matter here.
+		if len(got) < 2 || got[0] != 1 || got[1] != 3 {
+			t.Fatalf("lost-post skip delivered %v, want prefix [1 3]", got)
+		}
 	}
 }

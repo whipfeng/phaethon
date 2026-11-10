@@ -19,7 +19,7 @@ import (
 // (carrier buffers, proxies, network).
 
 const (
-	laneAckInterval    = 5 * time.Millisecond
+	laneAckInterval    = 50 * time.Millisecond
 	laneRTTSampleGap   = 10 * time.Millisecond
 	laneRTTRingCap     = 256
 	laneRateWindow     = 200 * time.Millisecond

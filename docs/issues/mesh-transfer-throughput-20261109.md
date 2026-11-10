@@ -457,3 +457,8 @@ vm↔qg 健康、qg↔jf 的**直连 SSH 与 h_tunnel 同时变慢**，说明问
 - 实验分支 `experiment/rack-dupack-coexist`：`Reord=true` 时，若 SACK scoreboard 已把
   队头判失（真实空洞），仍允许 dup-ACK 快速重传；裸乱序继续抑制。
 - 实验组 3 次 8 流：1.57 / 1.26 / 2.32MB/s（中位 1.57）；基线上一次 1.15MB/s。环境方差大，需回退基线同窗口再测。
+- 基线 445 同窗口 3 次：2.08 / 0.72(接近 stall) / 2.01MB/s，中位 ~2.0。
+- **结论：实验组（中位 1.57）不优于基线（中位 ~2.0）**，且方差极大；不合并实验分支。
+  生产保持基线逻辑（445），`experiment/rack-dupack-coexist` 仅保留在 fork 分支供链路完全恢复后复测。
+- 复盘：当前限制仍是 qg↔jf 载体的真实丢包/排队（h_tunnel 单流 0.58~1.8MB/s，直连 2.7MB/s），
+  netstack 恢复语义的微调不足以抵消它。

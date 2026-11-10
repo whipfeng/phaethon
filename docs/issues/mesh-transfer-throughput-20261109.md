@@ -660,3 +660,5 @@ total samples = 850ms / 15s = 5.67% of one core
 等下一次链路抖动（可用 qg↔jf 的 srtt/jitter 或 OS 直连吞吐做判据）时，直接跑 stallhunt；
 抓到报告后按“jf 发送端 blocked / qg 队列丢包 / vm 接收端 blocked”三类定位。
 当前 QG 已恢复为不带 debug API 的正常服务，qg/jf=451。
+- 追加：R=5~10 又连续 6 次全部正常完成（合计 **10/10 次健康窗口 8 流全部完成**），stall 未复现；
+- 抓取脚本已改为命中 stall 后先 kill 8 个 scp，避免 `wait` 拖到 600s 才退出。

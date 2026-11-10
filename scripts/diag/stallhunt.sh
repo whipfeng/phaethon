@@ -54,6 +54,8 @@ while true; do
       grep -c '^goroutine' /c/temp/goro_stall.txt
       grep '^goroutine' /c/temp/goro_stall.txt | sed 's/.*\[//; s/\].*//' | sed 's/, [0-9]* minutes//' | sort | uniq -c | sort -rn | head -12
     } > /c/temp/stall_report.txt 2>&1
+    # Stop the transfers so the caller can inspect/capture further immediately.
+    [ -n "$pids" ] && kill $pids 2>/dev/null
     echo "STALL_REPORTED R=$R"
     break
   fi

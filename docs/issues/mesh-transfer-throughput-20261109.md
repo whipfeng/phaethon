@@ -662,3 +662,33 @@ total samples = 850ms / 15s = 5.67% of one core
 当前 QG 已恢复为不带 debug API 的正常服务，qg/jf=451。
 - 追加：R=5~10 又连续 6 次全部正常完成（合计 **10/10 次健康窗口 8 流全部完成**），stall 未复现；
 - 抓取脚本已改为命中 stall 后先 kill 8 个 scp，避免 `wait` 拖到 600s 才退出。
+
+## 28. 直连 QUIC 可行性实测与环境约束（2026-11-10 12:30）
+
+### 28.1 UDP 可达性实测
+
+- 在 jf 上以 `python3` 监听 `0.0.0.0:19000/udp`（用户态进程，未改系统配置）；
+- 从 qg 向 `36.140.28.178:19000/udp` 发送数据报；
+- 结果：监听进程成功 bind，但**未收到任何数据报**；jf 公网只放通了已知 TCP 端口
+  （18080 h_tunnel、60002 sshd），任意 UDP 入站不可达。
+
+### 28.2 结论：直接 QUIC 在本环境不可行（除非加基础设施）
+
+| 链路 | 直连 UDP 可行性 | 原因 |
+|---|---|---|
+| qg→jf | **否** | jf 公网 NAT/防火墙未放通任意 UDP；开新端口属 jf 系统级操作，不允许 |
+| vm→qg | 不确定/大概率否 | vm 在 NAT 后，只能通过 WIN7_VPN 的 SOCKS5 UDP 出站；qg 无公网 UDP 入口 |
+
+即使放通 UDP，QUIC 还要处理：
+1. 节点身份/mTLS（现有 mesh 依赖代理口令/TLS，需要新的证书体系）；
+2. 多流与 HOL：单 QUIC stream 会像当前单 TCP 载体一样头阻塞，需要按 inner flow 分流；
+3. 双拥塞控制：inner TCP + QUIC CC 叠加，需要 BBR/队列调优；
+4. MTU/PMTUD：mesh MTU ~1580，QUIC 头开销要留余量；
+5. qg 2 核/484MB 上的连接内存与 CPU。
+
+### 28.3 可选的现实路线
+
+1. 若能让基础设施给 jf 放通一个固定 UDP 端口（或加一个有公网 UDP 的 relay），再上 QUIC；
+2. 否则优先优化现有 TCP 载体：h_tunnel 目前是 HTTP 长轮询，若端点支持 WebSocket/持久 TCP，
+   可去掉每批 HTTP 往返开销，仍保持有序，风险远小于换 QUIC；
+3. 直连 QUIC 只对 vm↔qg 有意义（该段已有 SS5 UDP leg，且不是当前瓶颈），无法解决 qg↔jf 瓶颈。

@@ -2208,6 +2208,19 @@ func (n *Netstack) TCPStats() map[string]uint64 {
 	return out
 }
 
+// TCPFlowDSACKSum returns the aggregate DSACK count across all live gVisor
+// TCP endpoints. Used to attribute stack-wide DSACK stats to per-flow state.
+func (n *Netstack) TCPFlowDSACKSum() uint64 {
+	if n == nil || n.ns == nil {
+		return 0
+	}
+	var sum uint64
+	for _, f := range tcp.DumpTCPFlowDebug(nil) {
+		sum += f.DSACKCount
+	}
+	return sum
+}
+
 // TCPFlowDebug snapshots internal state of every live gVisor TCP endpoint.
 // A nil filter dumps all endpoints.
 func (n *Netstack) TCPFlowDebug(filter func(local, remote tcpip.FullAddress) bool) []tcp.TCPFlowDebugInfo {

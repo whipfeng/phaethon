@@ -97,8 +97,6 @@ func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
 		meshCtrlOut: make(chan meshMsg, htMeshCtrlQueueLen),
 		getWaiters:  make(chan *meshWaiter, 64), // support up to 64 concurrent GETs
 		htCfg:       config.HTunnel(),
-		postNext:    1,
-		postPending: make(map[uint64][]meshMsg),
 	}
 	s.channels.Store(id, ch)
 
@@ -138,7 +136,6 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 		}
 	}
 
-	msgs := make([]meshMsg, 0, 16)
 	for len(data) >= 3 {
 		ft, payload, err := frame.ReadFrame(bytes.NewReader(data))
 		if err != nil {
@@ -146,124 +143,21 @@ func (s *HTunnelServer) meshHandleWrite(ch *htChannel, w http.ResponseWriter, r 
 			w.WriteHeader(410)
 			return
 		}
-		msgs = append(msgs, meshMsg{frameType: ft, payload: payload})
+		select {
+		case ch.meshIn <- meshMsg{frameType: ft, payload: payload}:
+		case <-ch.closed:
+			w.WriteHeader(410)
+			return
+		}
 		data = data[3+len(payload):]
 	}
-	seq, _ := strconv.ParseUint(r.Header.Get(dialer.HeaderContentSeq), 10, 64)
-	if seq == 0 {
-		ch.deliverPost(msgs)
-	} else {
-		ch.enqueuePost(seq, msgs)
-	}
 	w.WriteHeader(200)
-}
-
-// deliverPost pushes frames into the local P2P session in order.
-func (ch *htChannel) deliverPost(msgs []meshMsg) {
-	for _, m := range msgs {
-		select {
-		case ch.meshIn <- m:
-		case <-ch.closed:
-			return
-		}
-	}
-}
-
-// Client→server frames travel through concurrent POSTs (sendSem up to
-// pool-size), so they arrive out of order. ACK reordering makes the peer's
-// TCP fire spurious fast retransmits (DSACK storms, cwnd collapse). Hold
-// frames by the client's write sequence (X-S) and deliver strictly in order;
-// a missing sequence is skipped after postReorderGap so one lost POST cannot
-// wedge the whole channel.
-const (
-	postReorderGap      = 2 * time.Second
-	postReorderMaxBytes = 16 << 20
-)
-
-func (ch *htChannel) enqueuePost(seq uint64, msgs []meshMsg) {
-	ch.postMu.Lock()
-	defer ch.postMu.Unlock()
-	if seq < ch.postNext {
-		return // duplicate/stale POST
-	}
-	if _, dup := ch.postPending[seq]; !dup {
-		ch.postPending[seq] = msgs
-		for _, m := range msgs {
-			ch.postBytes += 3 + len(m.payload)
-		}
-	}
-	now := time.Now()
-	for {
-		if err := ch.postDrainLocked(); err != nil {
-			return
-		}
-		if len(ch.postPending) == 0 {
-			ch.postGapAt = time.Time{}
-			return
-		}
-		if ch.postGapAt.IsZero() {
-			ch.postGapAt = now
-		}
-		if now.Sub(ch.postGapAt) < postReorderGap && ch.postBytes <= postReorderMaxBytes {
-			return
-		}
-		// Skip the missing sequence(s): jump to the lowest pending seq. The
-		// inner TCP retransmits what was actually lost.
-		var min uint64
-		first := true
-		for s := range ch.postPending {
-			if first || s < min {
-				min = s
-				first = false
-			}
-		}
-		if first {
-			return
-		}
-		for s, m := range ch.postPending {
-			if s < min {
-				for _, msg := range m {
-					ch.postBytes -= 3 + len(msg.payload)
-				}
-				delete(ch.postPending, s)
-			}
-		}
-		ch.postNext = min
-		ch.postGapAt = time.Time{}
-	}
-}
-
-// postDrainLocked delivers every consecutively numbered pending batch.
-// Caller holds postMu. Returns an error when the channel closed mid-delivery.
-func (ch *htChannel) postDrainLocked() error {
-	for {
-		batch, ok := ch.postPending[ch.postNext]
-		if !ok {
-			return nil
-		}
-		delete(ch.postPending, ch.postNext)
-		ch.postNext++
-		for _, m := range batch {
-			ch.postBytes -= 3 + len(m.payload)
-			select {
-			case ch.meshIn <- m:
-			case <-ch.closed:
-				return io.ErrClosedPipe
-			}
-		}
-	}
 }
 
 // meshHandleHeartbeat serves a client PUT for mesh channel heartbeat (v0.2.0).
 // Simply resets the request timeout and returns 200.
 func (s *HTunnelServer) meshHandleHeartbeat(ch *htChannel, w http.ResponseWriter, r *http.Request) {
 	ch.resetReqTimeout(s, ch.id)
-	// Heartbeats consume a write sequence number on the client (shared with
-	// POSTs). Record it as an empty batch so the POST reorder gate can advance
-	// past it instead of stalling until the gap timeout.
-	if seq, err := strconv.ParseUint(r.Header.Get(dialer.HeaderContentSeq), 10, 64); err == nil && seq > 0 {
-		ch.enqueuePost(seq, nil)
-	}
 	w.WriteHeader(200)
 }
 

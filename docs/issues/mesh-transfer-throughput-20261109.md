@@ -772,3 +772,28 @@ ht 路径上 inner TCP 的 srtt 32~97ms（LAN minRTT 4~12ms）、cwnd 6~41、reo
 ACK 也走独立 HTTP POST；在高包率（8 流）下，请求数和每请求延迟把 RTT 抬高，
 inner TCP cwnd 被压在 BDP 附近。批大小/并发数/信用窗口都不是解，
 需要按 flow 分 lane 的多 GET（保每流有序）或持久多路复用连接。
+
+## 32. 方案1：按 inner flow 分 lane 的多 GET（2026-11-10 14:15）
+
+实现（已回退）：服务端按 inner 5-tuple 哈希到 1..N-1 lane FIFO，客户端每个 data GET
+绑定一个 lane（X-L/X-N）；lane 内 FIFO 保每流有序，lane 间并发；get-slots<=2 时完全不启用。
+
+沙箱 qg↔mb、MB_HT、8×9MiB：
+
+| 配置 | 8 流 | 备注 |
+|---|---|---|
+| 默认单 data GET | 3.4MB/s | GET ~47/s、批 73~93KB、avg 39~53ms |
+| + lane（get-slots=8） | **3.77MB/s** | GET ~80~90/s、批 48~51KB、avg 60~75ms |
+| + POST 按序重排 | 3.77MB/s | 单流反而变差 |
+| 对照：SOCKS5 | 5.8~6.3MB/s | 同一 mesh 栈 |
+
+**结论：分 lane 只把并发提上去，但每 lane 的 batch 更小、GET 延迟更高，总吞吐仅 +11%。**
+ht 的“每请求一批 + 单连接串行/长轮询”模型 + inner TCP 的 cwnd/RTT 互相锁死；
+批大小、并发数、lane、POST 顺序、LaneAck 都不是解。
+
+在“不走 WebSocket、QUIC 被 NAT 阻断”的前提下，剩余可行方向只有：
+1. 端点支持时上持久多路复用（HTTP/2 h2c 或 raw TCP upgrade），去掉每批 HTTP 往返；
+2. 接受当前 ht 载体 ~3.4~3.8MB/s 的上限，保持 451 生产版本；
+3. 从基础设施侧换一条更干净/可开 UDP 的 qg↔jf 链路，再上 QUIC。
+
+当前 qg/mb = 471（lane/POST 实验均已回退），jf 保持 451 未动。

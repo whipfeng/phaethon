@@ -116,11 +116,18 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
 }
 
-// interactiveShellArgs 返回交互 shell 的启动参数：PowerShell 加 -NoLogo，
-// 去掉以控制台初始代码页打印的厂商 banner（中文系统上会乱码）。
+// interactiveShellArgs 返回管道模式下交互 shell 的启动参数。
+//
+// PowerShell 必须带 "-Command -"：只有该模式才会从重定向的 stdin 读取命令。
+// 不带它时 PS 2.0（Win7/qgw）会挂起、不读 stdin；PS 5.1 虽然能读，但会打印
+// 启动 banner 和 host 提示符（banner 在初始 GBK 代码页输出，必然乱码）。
+// "-NoLogo" 去掉 banner；cmd 用 /Q 关闭命令回显。
 func interactiveShellArgs(shell string) []string {
-	if classifyShell(shell) == shellKindPowerShell {
-		return []string{"-NoLogo"}
+	switch classifyShell(shell) {
+	case shellKindPowerShell:
+		return []string{"-NoLogo", "-Command", "-"}
+	case shellKindCmd:
+		return []string{"/Q"}
 	}
 	return nil
 }

@@ -130,12 +130,12 @@ func utf8InitCmd(shell string) string {
 }
 
 // utf8InitCmdPipe 是管道模式（无 ConPTY）的初始化命令：没有真实控制台，
-// chcp 可能失败、设置 InputEncoding 可能抛异常，所以静默 stderr、只切
-// 输出编码，避免会话一开始就冒出错误文本。
+// chcp 可能失败、设置 InputEncoding 可能抛异常，所以只切输出编码并吞掉
+// 异常，避免会话一开始就冒出错误文本。cmd 的 chcp 用 >nul 2>&1 静默。
 func utf8InitCmdPipe(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return "chcp 65001 2>$null | Out-Null; try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}\r\n"
+		return "try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}\r\n"
 	case shellKindPosix:
 		return ""
 	default:

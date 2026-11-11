@@ -2329,6 +2329,48 @@ deskw 是 Windows，只有 phaethon 内置 SSH 通道（落地是 PowerShell，�
   Windows 目标二进制时 `--version` 输出是 `version=... platform=...`，旧代码取
   `Fields()[1]` 会得到 `platform=windows`；现在优先解析 `version=` 字段。
 
+## 98. qgw（Windows 7）内置 SSH 发版：限制更多，走 LAN HTTP 中转（2026-11-11 16:41）
+
+qgw 与 deskw 同架构（watchdog + worker），但环境更受限：
+
+- Windows 7 SP1（NT 6.1.7601），PowerShell **2.0**（无 `Get-CimInstance` /
+  `Get-Content -Tail` / `Get-FileHash`）；
+- 内置 SSH 的 exec **不转发 stdin**（`[Console]::In.ReadToEnd()` 得到空串），
+  无 scp/sftp；
+- exec 命令行有长度限制，带较长 base64 的命令直接
+  `exec request failed on channel 0`（短命令正常）；
+- `schtasks.exe` 被拒绝访问（“拒绝访问”），无法用计划任务做 detached 触发。
+
+因此 deskw 的“stdin base64 上传 + schtasks 触发”在 qgw 都不可用，改用：
+
+1. **构建**：必须用 Win7 兼容工具链
+   `C:\go-legacy-win7\bin\go.exe build -ldflags "... -X main.Platform=windows7 ..."`
+   （Makefile 的 `windows7` 目标，`GO_LEGACY_WIN7`）。
+2. **签名包**：meta `platform=windows7`，版本用 `git describe` 原文
+   （`v0.8.0-549-g7328aee`），本地 `signing.VerifyPkg` 验签通过。
+3. **传输**：qgw 与 mb 同 LAN（qgw 192.168.1.100、mb 192.168.1.88）。
+   把 pkg 放到 mb `/tmp`，用 `/usr/local/bin/python3 -m http.server 18080`
+   起临时 HTTP；qgw 用
+   `(New-Object Net.WebClient).DownloadFile("http://192.168.1.88:18080/win7.pkg", ...)`
+   直接下到 `data/packages/`，`certutil -hashfile` 校验 MD5 一致。
+   （注意 mb 的 `/usr/bin/python3` 被坏掉的 Xcode 路径劫持，要用
+   `/usr/local/bin/python3`。）
+4. **触发**：qgw 上只有 watchdog（16568）与 worker 两个进程，直接
+   `Stop-Process -Id <worker> -Force`。命令很短，在会话被拆掉前已执行；
+   watchdog 不重启，3s 监控周期内发现子进程退出，验签、版本比较
+   （549 > 529）、解包到 `data/worker/phaethon-v0.8.0-549-g7328aee` 并拉起。
+   SSH 随 worker 断开，数秒后随新 worker 恢复。
+
+验证：watchdog 16568 未变；worker 15484，进程名
+`phaethon-v0.8.0-549-g7328aee`，路径 `data\worker\phaethon-v0.8.0-549-g7328aee`；
+日志 `P2PManager initialized (version=v0.8.0-549-g7328aee, platform=windows7/amd64)`；
+无 panic；mb 侧 `peers[qgw].lastSeen` 持续刷新、direct=true、srtt≈67ms。
+
+注意：qgw 主 exe/watchdog 仍是 `v0.8.0-529-gf5d243d-win7`，升级靠
+`data/packages` 中的包持久化；不要清空该目录。worker 进程名不含 `.exe`
+（解包文件名），用 `Get-Process phaethon` 只能看到 watchdog，需用通配符。
+
+
 
 
 

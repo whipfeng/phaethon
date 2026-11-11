@@ -124,14 +124,18 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 
 // interactiveShellArgs 返回管道模式下交互 shell 的参数。
 //
-// PowerShell 必须带 "-Command -"：只有该模式才会从重定向的 stdin 读取命令。
-// 不带它时 PS 2.0（Win7/qgw）根本不读 stdin，交互会话直接挂起；PS 5.1 虽
-// 能读，但启动 banner 以初始 GBK 代码页输出，必然乱码。"-NoLogo" 去掉
-// banner；cmd 用 /Q 关闭命令回显。
+// 无 ConPTY 时没有真正的 PTY，但 Windows 10+ 自带的 PowerShell 3.0+ 交互
+// 宿主（-NoLogo，无 -Command）可以正常读取重定向 stdin 并打印提示符；
+// Win7/8 的 PS 2.0 不带 "-Command -" 时根本不读 stdin（交互直接挂起），
+// 只能用 -Command -（能执行命令，但没有服务端提示符）。
+// cmd 用 /Q 关闭命令回显。
 func interactiveShellArgs(shell string) []string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return []string{"-NoLogo", "-Command", "-"}
+		if windows.RtlGetVersion().MajorVersion < 10 {
+			return []string{"-NoLogo", "-Command", "-"}
+		}
+		return []string{"-NoLogo"}
 	case shellKindCmd:
 		return []string{"/Q"}
 	}

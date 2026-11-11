@@ -3,10 +3,12 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -118,7 +120,7 @@ func winptyReady() bool {
 		return false
 	}
 	winptyProbeOnce.Do(func() {
-		p, err := startWinptyProc("cmd.exe", "cmd.exe /c exit 0", "", 80, 25)
+		p, err := startWinptyProc("cmd.exe", "cmd.exe /c exit 0", "", 80, 25, false)
 		if err != nil {
 			util.LogModuleWarn("ssh", "winpty: probe failed: %v", err)
 			return
@@ -173,7 +175,7 @@ func winptyTakeError(api *winptyAPI, errp uintptr) error {
 
 // startWinptyProc creates a winpty PTY, spawns appname/cmdline and returns a
 // sessionProc backed by the PTY pipes.
-func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32) (*winptyProc, error) {
+func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32, legacyExit bool) (*winptyProc, error) {
 	api := winptyAPIv
 	if api == nil {
 		return nil, fmt.Errorf("winpty not loaded")
@@ -297,11 +299,12 @@ func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32) (*winp
 		return fail(fmt.Errorf("open conout: %w", err))
 	}
 	return &winptyProc{
-		api:  api,
-		wp:   wp,
-		in:   in,
-		out:  out,
-		proc: windows.Handle(procHandle),
+		api:    api,
+		wp:     wp,
+		in:     in,
+		out:    out,
+		proc:   windows.Handle(procHandle),
+		legacy: legacyExit,
 	}, nil
 }
 
@@ -314,10 +317,61 @@ type winptyProc struct {
 
 	mu    sync.Mutex
 	freed bool
+
+	// legacy marks Win7/PS2 shells. PS2's interactive host does not exit on
+	// "exit" under winpty and does not exit when conin closes, so the server
+	// terminates the process itself after forwarding "exit" or on EOF.
+	legacy  bool
+	lineBuf []byte
 }
 
 func (p *winptyProc) Read(b []byte) (int, error) { return p.out.Read(b) }
-func (p *winptyProc) Write(b []byte) (int, error) { return p.in.Write(b) }
+func (p *winptyProc) Write(b []byte) (int, error) {
+	n, err := p.in.Write(b)
+	if p.legacy {
+		p.scanExitLine(b)
+	}
+	return n, err
+}
+
+// scanExitLine watches for a line equal to "exit" on legacy (Win7/PS2)
+// sessions and terminates the shell shortly afterwards: PS2 under winpty does
+// not exit on its own, which would leave the SSH session hanging.
+func (p *winptyProc) scanExitLine(b []byte) {
+	p.lineBuf = append(p.lineBuf, b...)
+	for {
+		i := bytes.IndexAny(p.lineBuf, "\r\n")
+		if i < 0 {
+			break
+		}
+		line := strings.TrimSpace(string(p.lineBuf[:i]))
+		p.lineBuf = p.lineBuf[i+1:]
+		if strings.EqualFold(line, "exit") {
+			time.AfterFunc(900*time.Millisecond, p.killIfAlive)
+			return
+		}
+	}
+	if len(p.lineBuf) > 4096 {
+		p.lineBuf = p.lineBuf[len(p.lineBuf)-4096:]
+	}
+}
+
+func (p *winptyProc) killIfAlive() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.freed || p.proc == 0 {
+		return
+	}
+	_ = windows.TerminateProcess(p.proc, 0)
+}
+
+func (p *winptyProc) CloseStdin() {
+	_ = p.in.Close()
+	if p.legacy {
+		// Client disconnected without "exit": PS2 will not exit on its own.
+		time.AfterFunc(2*time.Second, p.killIfAlive)
+	}
+}
 
 func (p *winptyProc) Wait() error {
 	_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
@@ -336,8 +390,7 @@ func (p *winptyProc) Kill() {
 	}
 }
 
-func (p *winptyProc) CloseStdin() { _ = p.in.Close() }
-func (p *winptyProc) CloseIO()    { _ = p.out.Close() }
+func (p *winptyProc) CloseIO() { _ = p.out.Close() }
 
 func (p *winptyProc) Resize(cols, rows uint32) {
 	if cols == 0 || rows == 0 {

@@ -63,6 +63,15 @@ type udpLegTransport struct {
 	stateNotify   func()
 
 	legDrops uint64 // atomic: inbound/outbound datagram drops
+
+	// Liveness diagnostics: counters and last datagram timestamps. A leg that
+	// keeps sending but sees no inbound traffic is a one-way black hole; log
+	// it so stalls can be attributed without guesswork.
+	legIn        uint64 // atomic
+	legOut       uint64 // atomic
+	lastInNano   int64  // atomic, UnixNano
+	lastOutNano  int64  // atomic, UnixNano
+	silentWarned int32  // atomic
 }
 
 type legRecvResult struct {
@@ -177,6 +186,8 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 			atomic.AddUint64(&t.legDrops, 1)
 			util.LogModuleDebug("p2p", "[UDP-LEG] write drop: %v", err)
 		}
+		atomic.AddUint64(&t.legOut, 1)
+		atomic.StoreInt64(&t.lastOutNano, time.Now().UnixNano())
 		return nil
 	}
 	t.epMu.Lock()
@@ -280,6 +291,8 @@ func (t *udpLegTransport) pcReadLoop(pc net.PacketConn) {
 		t.fsmMu.Lock()
 		t.fsm.OnUDPInbound(time.Now(), src)
 		t.fsmMu.Unlock()
+		atomic.AddUint64(&t.legIn, 1)
+		atomic.StoreInt64(&t.lastInNano, time.Now().UnixNano())
 		pkt := make([]byte, len(payload))
 		copy(pkt, payload)
 		select {
@@ -310,6 +323,8 @@ func (t *udpLegTransport) epPump(ep *udpLegEndpoint) {
 			t.fsmMu.Lock()
 			t.fsm.OnUDPInbound(time.Now(), srcAddr)
 			t.fsmMu.Unlock()
+			atomic.AddUint64(&t.legIn, 1)
+			atomic.StoreInt64(&t.lastInNano, time.Now().UnixNano())
 			pkt := make([]byte, len(payload))
 			copy(pkt, payload)
 			select {
@@ -347,6 +362,7 @@ func (t *udpLegTransport) tickLoop() {
 			t.fsmMu.Unlock()
 			t.executeActions(acts)
 			t.maybeRedial(now)
+			t.checkLegSilence(now)
 		}
 	}
 }
@@ -358,6 +374,32 @@ func (t *udpLegTransport) SetStateNotify(fn func()) {
 	t.stateNotifyMu.Lock()
 	defer t.stateNotifyMu.Unlock()
 	t.stateNotify = fn
+}
+
+// checkLegSilence warns when the leg is actively sending but has received no
+// datagram for 5s. That is a one-way black hole (NAT/port change or broken
+// return path), not congestion; log it once per episode and re-arm when
+// inbound resumes.
+func (t *udpLegTransport) checkLegSilence(now time.Time) {
+	lastOut := atomic.LoadInt64(&t.lastOutNano)
+	if lastOut == 0 || now.Sub(time.Unix(0, lastOut)) > 3*time.Second {
+		return
+	}
+	lastIn := atomic.LoadInt64(&t.lastInNano)
+	inAge := 24 * time.Hour
+	if lastIn != 0 {
+		inAge = now.Sub(time.Unix(0, lastIn))
+	}
+	if inAge > 5*time.Second {
+		if atomic.CompareAndSwapInt32(&t.silentWarned, 0, 1) {
+			util.LogModuleError("p2p", "[UDP-LEG] outbound active but no inbound for %v (out=%d in=%d drops=%d) - one-way leg black hole?",
+				inAge.Round(time.Millisecond), atomic.LoadUint64(&t.legOut), atomic.LoadUint64(&t.legIn), atomic.LoadUint64(&t.legDrops))
+		}
+		return
+	}
+	if inAge < 2*time.Second {
+		atomic.StoreInt32(&t.silentWarned, 0)
+	}
 }
 
 // maybeRedial drives the R-backoff redial while the FSM sits in Advertising

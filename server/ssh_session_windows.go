@@ -140,7 +140,7 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		}
 		if winptyReady() {
 			full := "\"" + shell + "\" " + strings.Join(quoteArgs(execArgs(shell, cmdline)), " ")
-			if p, err := startWinptyProc(shell, full, workDir, cols, rows); err == nil {
+			if p, err := startWinptyProc(shell, full, workDir, cols, rows, false); err == nil {
 				return p, nil
 			}
 		}
@@ -156,7 +156,11 @@ func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, er
 	if classifyShell(shell) == shellKindPowerShell {
 		cmdline += " -NoLogo"
 	}
-	p, err := startWinptyProc(shell, cmdline, workDir, cols, rows)
+	// PS2 on Win7 does not exit on "exit"/EOF under winpty; the proc
+	// terminates it after forwarding exit or when the client disconnects.
+	legacy := windows.RtlGetVersion().MajorVersion < 10 &&
+		classifyShell(shell) == shellKindPowerShell
+	p, err := startWinptyProc(shell, cmdline, workDir, cols, rows, legacy)
 	if err != nil {
 		return nil, err
 	}

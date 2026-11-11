@@ -396,6 +396,12 @@ func (t *udpLegTransport) checkLegSilence(now time.Time) {
 		if atomic.CompareAndSwapInt32(&t.silentWarned, 0, 1) {
 			util.LogModuleError("p2p", "[UDP-LEG] outbound active but no inbound for %v (out=%d in=%d drops=%d) - one-way leg black hole?",
 				inAge.Round(time.Millisecond), atomic.LoadUint64(&t.legOut), atomic.LoadUint64(&t.legIn), atomic.LoadUint64(&t.legDrops))
+			// Act earlier than the 10s K reflux timeout: inner TCP RTO
+			// backoff can already reset connections after ~10s of ACK loss.
+			t.fsmMu.Lock()
+			acts := t.fsm.ForceFallback(now)
+			t.fsmMu.Unlock()
+			t.executeActions(acts)
 		}
 		return
 	}

@@ -2101,6 +2101,25 @@ tc qdisc add dev eth1 root netem delay 300ms 100ms   # 20 秒后删除
 jf 恢复 v539。至此恢复侧（MinRTO/MaxRTO/reoWnd/RTO 抖动）全部验证为无效，
 只剩“削掉延迟尖峰”的队列侧 AQM/pacing 方向。
 
+## 90. MinRTO 2s：仍无法消除冻结（2026-11-11 13:00）
+
+300ms 尖峰使 inner RTT ≈ 1.2s，1s 的 MinRTO 仍可能被预置定时器误触发；
+把 MinRTO 提到 2s 再测：
+
+| 场景 | v539 | MinRTO 2s |
+|---|---|---|
+| 正常 8 流 | 4.8~6.1 | 3.79 / 3.69（窗口偏慢） |
+| 300ms 尖峰 8 流 | 114.8s / 1.63 | **109.3s / 1.71** |
+
+仅 ~5% 改善，仍出现全流 cwnd=1 冻结；没有解决问题。已回退（fork `a987d69`），
+jf 恢复 v539。
+
+**恢复侧结论（定稿）**：MinRTO 200ms/1s/2s、MaxRTO 4s/16s、reoWnd 4x/8xRTTVar、
+RTO 抖动，全部无法消除 300ms 尖峰导致的 cwnd=1 冻结；纯延迟尖峰下表现为
+100~115s 慢跑（数据不丢），而不是自然出现的 >5min 挂起（后者需要更复杂的
+诱因，尚未复现）。剩余方向只有队列侧 AQM/pacing（减小尖峰幅度
+或让尖峰不进入 inner TCP）。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

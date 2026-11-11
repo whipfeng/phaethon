@@ -2464,9 +2464,27 @@ qgw 的“无提示符”是 **OS/PowerShell 限制**，不是没实现：PS2 �
 | qgw（Win7 / PS2） | pty-req 按门控拒绝，pipe 行级模式中文正常（无提示符） |
 
 部署：winpty 两文件已放到 deskw/qgw/vm 的部署根目录；deskw 通过 pkg 热切换、
-qgw 通过 pkg 热切换、vm 走计划任务，三节点均为 `v0.8.0-567-gb7b4b9f`。
+qgw 通过 pkg 热切换、vm 走计划任务，三节点均为 `v0.8.0-574-gc53c1ee`。
 （调试注记：测试客户端把 stdout/stderr 共用同一个 `bytes.Buffer` 会产生竞态，
 导致偶发 0 字节输出；换线程安全 writer 后稳定。）
+
+### 100.1 Win7/PS2 + winpty 复测结果：不稳定，最终关闭
+
+不死心又试了几轮 Win7（qgw）：
+
+- 去掉 `chcp`、只设 `[Console]` 编码后，PS2 **能**出提示符并执行命令
+  （`Write-Output 中文` 正常），说明 winpty 通道本身可用；
+- 但同一构建下会话**不稳定**：多次只输出初始清屏（8 字节）、命令不执行、
+  进程立即结束；`exit` 在 PS2 下不会终止进程（加了服务端在 exit 后
+  TerminateProcess 的兜底仍无法改变“会话早退”的问题）；
+- 影响面是 PS2 的交互宿主 + 隐藏控制台，不是我们的管道/编码逻辑。
+
+最终决策：`ptyAvailable = ConPTY || (OS Major>=10 && winptyReady())`，
+Win7/8 固定走 pipe 行级模式（命令、UTF-8 中文都正常）。要把 qgw 变成真
+PTY，可靠路径是升级系统里的 PowerShell：**WMF 5.1**（Win7 SP1 可装）或
+**PowerShell 7.1**；升级后与 deskw（PS5.1 + winpty，已验证稳定）一致。
+另一个低成本选项是给 PS2 做“提示符 REPL”（无 TTY，不能跑全屏程序）。
+
 
 
 

@@ -1909,6 +1909,31 @@ reo_wnd 涨到数秒 → 缺口段迟迟不判丢/不重传 → srtt 继续变�
 - 结论：保留 100ms 上限。剩余偶发 1~2MB/s 慢跑更像链路/ACK 瞬断，
   下一步可做自适应上限（按 minRTT/投递率）或 TLP 恢复优化。
 
+## 82. v0.8.0-532-gf04b543 全量发布与发布后回归（2026-11-11 09:30）
+
+版本包含：worker pin 管理（API/UI/清理/部署硬化）、HT-STATS max/slow、
+cwnd cap128、**reo_wnd 下限 100ms**。
+
+| 环境 | 版本 | worker 校验 |
+|---|---|---|
+| qg | v0.8.0-532-gf04b543 | `/root/phaethon`，pin 空 |
+| jf | 同版本 | `/proc/26891/exe` md5 05ea… |
+| gg | 同版本 | `/home/layer4/phaethon-gg/phaethon` |
+| mb | 同版本（darwin） | `/Users/cmll/phaethon-test/phaethon` |
+| vm | 同版本（windows） | `phaethon.exe` md5 2671… |
+
+发布后回归（同窗口链路已劣化）：
+
+| 场景 | 吞吐 |
+|---|---|
+| qg→jf OS 直连 8 流 | **7.20MB/s**（此前同环境 9.65） |
+| mesh 两跳 8 流 | **3.33 / 3.39MB/s**（OS 的 ~46%） |
+| mesh 文件落盘完整性 | 8 流 **8/8 sha256 全对** |
+
+说明：本轮 mesh 偏低主要是公网链路时段劣化（OS 基线也掉了 ~25%），
+不是新版本回退；此前同版本（rackcap）8 连跑中位 ~5.75~6.06，
+仅一次 99.7s 慢跑，未再出现 >5 分钟的挂起。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

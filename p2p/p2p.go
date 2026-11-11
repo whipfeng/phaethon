@@ -296,7 +296,12 @@ type writeReq struct {
 // a per-peer byte budget bounds memory across all 256 data queues; a
 // per-queue frame cap bounds head-of-line blocking behind one flow.
 const (
-	dataQueueByteBudget = 1 << 20  // 1MB per peer (relay-layer experiment)
+	// Phaethon: a 1MB budget is smaller than the BDP of a 300ms path at
+	// 5~10MB/s (1.5~3MB), so a latency step (external or relay queueing)
+	// makes the relay drop data frames, which the inner TCP sees as loss
+	// and answers with SACK/RTO storms. 4MB covers the step without
+	// unbounded memory growth; drops still apply beyond that.
+	dataQueueByteBudget = 4 << 20  // 4MB per peer
 	dataQueueMaxDepth   = 512      // frames per queue
 	drrQuantum          = 64 << 10 // 64KB per queue per round (~43×1500B frames)
 )

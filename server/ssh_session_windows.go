@@ -3,15 +3,21 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/UserExistsError/conpty"
 	"golang.org/x/sys/windows"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 // Windows：ConPTY 全交互（Win10 1809+），不可用时退回管道模式（行级交互）。
@@ -97,7 +103,8 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		if usePty && supportPty {
 			return startConptyShell(shell, workDir, cols, rows)
 		}
-		p, err := startPipe(shell, interactiveShellArgs(shell), workDir)
+		args, transcode := pipeShellArgs(shell)
+		p, err := startPipe(shell, args, workDir)
 		if err != nil {
 			return nil, err
 		}
@@ -108,6 +115,9 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		if init := utf8InitCmdPipe(shell); init != "" {
 			_, _ = p.Write([]byte(init))
 		}
+		if transcode {
+			return newPS2ShellProc(p), nil
+		}
 		return p, nil
 	}
 	if usePty && supportPty {
@@ -116,20 +126,89 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
 }
 
-// interactiveShellArgs 返回管道模式下交互 shell 的启动参数。
+// psMajorCache caches the probed PowerShell major version per shell path.
+// The probe runs once per shell (a few hundred ms) instead of per session.
+var psMajorCache sync.Map
+
+// powershellMajor returns the PowerShell major version, or 0 when the probe
+// fails (e.g. the shell cannot be executed). Callers must treat 0 as
+// "unknown" and pick the safe fallback.
+func powershellMajor(shell string) int {
+	if v, ok := psMajorCache.Load(shell); ok {
+		return v.(int)
+	}
+	major := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, shell, "-NoLogo", "-Command",
+		"$PSVersionTable.PSVersion.Major").Output(); err == nil {
+		s := strings.TrimPrefix(strings.TrimSpace(string(out)), "\uFEFF")
+		if n, err := strconv.Atoi(s); err == nil {
+			major = n
+		}
+	}
+	psMajorCache.Store(shell, major)
+	return major
+}
+
+// pipeShellArgs 返回管道模式下交互 shell 的参数。
 //
-// PowerShell 必须带 "-Command -"：只有该模式才会从重定向的 stdin 读取命令。
-// 不带它时 PS 2.0（Win7/qgw）会挂起、不读 stdin；PS 5.1 虽然能读，但会打印
-// 启动 banner 和 host 提示符（banner 在初始 GBK 代码页输出，必然乱码）。
-// "-NoLogo" 去掉 banner；cmd 用 /Q 关闭命令回显。
-func interactiveShellArgs(shell string) []string {
+// PowerShell 2.0（Win7 出厂版本）在 stdin 被重定向且不带 "-Command -" 时
+// 不会读取命令，交互会话直接挂起；而 3.0+ 的交互宿主可以正常读 stdin，
+// 还能保留提示符。因此按版本选择：
+//   - 2.x: -NoLogo -Command -，并把输入从 UTF-8 转成 GBK（PS2 宿主按 OEM
+//     代码页解码 stdin），同时剥掉输出开头的 UTF-8 BOM；
+//   - 3.0+/探测失败: -NoLogo，保持交互宿主；
+//   - cmd: /Q 关闭命令回显。
+func pipeShellArgs(shell string) (args []string, transcode bool) {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return []string{"-NoLogo", "-Command", "-"}
+		if powershellMajor(shell) == 2 {
+			return []string{"-NoLogo", "-Command", "-"}, true
+		}
+		return []string{"-NoLogo"}, false
 	case shellKindCmd:
-		return []string{"/Q"}
+		return []string{"/Q"}, false
 	}
-	return nil
+	return nil, false
+}
+
+// ps2ShellProc adapts a PS 2.0 pipe shell:
+//   - Write: transcode the client's UTF-8 input to GBK, matching the encoding
+//     the PS2 host uses to decode its redirected stdin;
+//   - Read: strip a leading UTF-8 BOM (the PS2 host writes one even when
+//     Console.OutputEncoding is a no-BOM encoder).
+type ps2ShellProc struct {
+	sessionProc
+	in     *transform.Writer
+	br     *bufio.Reader
+	peeked bool
+}
+
+func newPS2ShellProc(p sessionProc) *ps2ShellProc {
+	return &ps2ShellProc{
+		sessionProc: p,
+		in:          transform.NewWriter(p, simplifiedchinese.GBK.NewEncoder()),
+		br:          bufio.NewReader(p),
+	}
+}
+
+func (p *ps2ShellProc) Read(b []byte) (int, error) {
+	if !p.peeked {
+		p.peeked = true
+		if head, err := p.br.Peek(3); err == nil && len(head) == 3 &&
+			head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF {
+			_, _ = p.br.Discard(3)
+		}
+	}
+	return p.br.Read(b)
+}
+
+func (p *ps2ShellProc) Write(b []byte) (int, error) { return p.in.Write(b) }
+
+func (p *ps2ShellProc) CloseStdin() {
+	_ = p.in.Close() // flush pending multi-byte input
+	p.sessionProc.CloseStdin()
 }
 
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {

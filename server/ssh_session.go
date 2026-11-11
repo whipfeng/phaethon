@@ -137,7 +137,11 @@ func utf8InitCmd(shell string) string {
 func utf8InitCmdPipe(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return "$u=New-Object System.Text.UTF8Encoding $false; try { [Console]::InputEncoding=$u } catch {}; try { [Console]::OutputEncoding=$u } catch {}\r\n"
+		// InputEncoding must only be touched on PS 2.0: on PS 5.1 (deskw) the
+		// setter throws a terminating error that aborts "-Command -" input
+		// processing, so the session produces no output at all. PS 2.0 needs
+		// it to decode UTF-8 interactive input correctly.
+		return "if ($PSVersionTable.PSVersion.Major -le 2) { try { [Console]::InputEncoding=[Text.Encoding]::UTF8 } catch {} }; try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}\r\n"
 	case shellKindPosix:
 		return ""
 	default:

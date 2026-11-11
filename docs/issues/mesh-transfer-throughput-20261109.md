@@ -2370,6 +2370,46 @@ qgw 与 deskw 同架构（watchdog + worker），但环境更受限：
 `data/packages` 中的包持久化；不要清空该目录。worker 进程名不含 `.exe`
 （解包文件名），用 `Get-Process phaethon` 只能看到 watchdog，需用通配符。
 
+## 99. 内置 SSH 中文乱码/交互挂起的根因与修复（2026-11-11 18:05）
+
+用户 `ssh qgw.phn` / `ssh deskw.phn` 看到 **PTY allocation request failed**、
+PowerShell banner 乱码，属于内置 SSH 的实现问题，不是网络：
+
+1. **没有 ConPTY 就走管道模式**。deskw 是 Win10 **14393（1607）**、
+   qgw 是 Win7 7601，ConPTY 要求 1809+，所以 `supportPty=false`，
+   `pty-req` 被拒绝（这是对的：伪造 PTY 会让客户端关掉本地回显，
+   管道模式反而变成“黑洞”）。客户端于是打印 PTY 警告并退回 cooked 模式。
+2. **管道 shell 没做编码处理**：PowerShell 启动 banner 按控制台初始代码页
+   （中文系统 GBK）输出，cmdlet 输出同样按 GBK 写出，UTF-8 客户端必然乱码。
+3. **PS 2.0（qgw）不读重定向 stdin**：不带 `-Command -` 时，交互 shell
+   直接挂起（现场能看到一堆孤立的 `powershell.exe`，从 v529 起就存在）。
+
+修复（`server/ssh_session*.go`，版本 `v0.8.0-557-g8ebcc7e`）：
+
+- 管道模式 PowerShell 统一 `-NoLogo -Command -`：去掉 GBK banner，
+  并强制从 stdin 读命令（PS2/PS5.1 都不会挂起）；
+- 启动注入 UTF-8 init：`[Console]::OutputEncoding=UTF8` + try/catch；
+  **InputEncoding 只在 PS Major<=2 时设置**——实测 PS5.1 在
+  `-Command -` 管道会话里设置 InputEncoding 会抛终止性异常，整个会话
+  无任何输出；
+- 输出侧剥掉 PS2 宿主写在首部的 UTF-8 BOM（首块内联剥离，不阻塞短读）；
+- cmd 用 `/Q`（关回显）+ `chcp 65001`。
+
+验证（`ssh <node>` 管道喂命令）：
+
+| 节点 | 环境 | `HI` | 中文输出 | 中文输入 | banner |
+|---|---|---|---|---|---|
+| qgw | Win7 + PS2.0，无 ConPTY | ✅ | ✅ | ✅ | 无 |
+| deskw | Win10 1607 + PS5.1，无 ConPTY | ✅ | ✅ | ✅ | 无 |
+| vm | Win11 + pwsh7，ConPTY | ✅ | ✅ | 交互（PTY）✅；纯管道输入仍按 OEM 解码 | 无 |
+
+部署：qgw/deskw 通过 pkg 热切换（worker = `data/worker/phaethon-<ver>`，
+watchdog 不动），vm 走计划任务重启；三者均为 `v0.8.0-557-g8ebcc7e`。
+
+已知边界：Win7/1607 没有 ConPTY，无法提供真正的 PTY，交互是“行级 + 客户端
+回显”，没有服务端提示符；`ssh -T` 或 `ssh host '命令'` 不受影响。
+
+
 
 
 

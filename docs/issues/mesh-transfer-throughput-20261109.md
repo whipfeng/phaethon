@@ -2003,6 +2003,39 @@ gain2 的 8 流看似更高，但同期链路在恢复（一次 31s/6.0），不
 一次 8 流 4.62MB/s（同窗口 OS 约 5.06，~91%），文件落盘 **8/8 sha256**，
 本次未触发静默告警。
 
+## 86. 主动触发单向 ACK 黑洞：探针命中，5s 提前 fallback 修复流重置（2026-11-11 11:20）
+
+不等自然复现，在 qg 用 iptables 主动制造 vm→qg 的 ACK 单向黑洞：
+`iptables -I INPUT -p udp -s 10.21.20.65 --sport <legPort> -j DROP`
+（只丢 ACK 方向的 UDP，qg→vm 数据仍发）。
+
+### 86.1 探针命中
+
+10s 与 25s 两次注入，qg 日志都在 **5.3~5.8s** 打出：
+
+```
+[ERROR] [p2p] [UDP-LEG] outbound active but no inbound for 5.339s
+(out=75383 in=72418 drops=26) - one-way leg black hole?
+```
+
+说明探针能实时识别单向腿黑洞（修复了被动侧未更新 `lastOut` 导致不触发的问题）。
+
+### 86.2 25s 黑洞：旧逻辑会重置内层流
+
+| 版本 | fallback 时机 | 25s ACK 黑洞结果 |
+|---|---|---|
+| v536 | 等 FSM K reflux（10s） | 63.3s、2.96MB/s，**2 条流被截断**（10.5/11.1MB） |
+| **v539** | 探针 5s 时提前 `ForceFallback` | 81.2s、2.31MB/s，**8/8 流完整**；8s 时 transport=tcp，解除后自动回到 udp |
+
+结论：**“单向 ACK 黑洞”是可复现的真实故障**，会因内层 TCP RTO 重试耗尽而重置连接；
+把 fallback 从 10s 提前到 5s 后，同样 25s 黑洞不再丢流。
+
+### 86.3 全量发布 v0.8.0-539-gdc80da0
+
+qg/jf/gg/mb/vm 均已核对。注意：自然出现的多分钟停滞**没有** inbound 静默
+（探针不会触发），它的初始触发仍是 reo_wnd 正反馈/链路乱序；但“ACK 单向黑洞”
+这一类真实故障现已可检测并在 5s 内自愈。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

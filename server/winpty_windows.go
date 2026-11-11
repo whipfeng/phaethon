@@ -367,10 +367,6 @@ func (p *winptyProc) killIfAlive() {
 
 func (p *winptyProc) CloseStdin() {
 	_ = p.in.Close()
-	if p.legacy {
-		// Client disconnected without "exit": PS2 will not exit on its own.
-		time.AfterFunc(2*time.Second, p.killIfAlive)
-	}
 }
 
 func (p *winptyProc) Wait() error {

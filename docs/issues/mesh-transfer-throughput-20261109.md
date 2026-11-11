@@ -1858,6 +1858,57 @@ cap 128 的采样：cwnd 最大 128，DSACK **3.9%**、重传 **4.0%**
 发布后回归：预热 5.84MB/s、正式跑 **6.26MB/s**，vm transport=udp；
 文件落盘 8 流 **8/8 sha256 全对**。
 
+## 79. worker pin 管理改进与部署硬化（2026-11-11 08:30）
+
+- 控制台 Package 页新增 pin 横幅与“取消固定”按钮；
+  API：`GET /api/packages/pin` 返回 `{pin,current}`，
+  `DELETE /api/packages/pin?restart=now` 清除并重启。
+- 删除 pin 指向的 package 会自动清 pin；watchdog 发现 pin 指向的 pkg
+  不存在时清除过期 pin 并 WARN；pin≠self 时启动日志明确 WARN。
+- 新增 `scripts/verify-worker.sh`：校验 pin 与运行中 worker 的
+  `/proc/<pid>/exe`/md5；`scripts/deploy-qg.sh` 增加
+  `pkill -f 'data/worker/phaethon'` 和 worker 校验。
+- 已在 qg 实测：写入 bogus pin `v0.8.0-999-bogus` 后重启，pin 文件被自动
+  清除、服务正常起来、`/api/packages/pin` 返回空 pin。
+
+## 80. 偶发停滞现场：RACK reo_wnd 正反馈（2026-11-11 08:45）
+
+在一次 10 连跑中，run 5 卡住 >5 分钟；现场同时抓取 qg/jf/vm：
+
+| 观测点 | 数据 |
+|---|---|
+| jf inner SSH 流 | cwnd=128（cap），outstanding=128，unsent 54~465KB，**srtt 3.7~5.9s**，minRTT 73~77ms，**reoWnd 3.7~5.8s**，reord=true，SACK recovery |
+| qg→jf ht | GET avg 80~163ms / max 159~383ms / slow=0；**POST avg 14~16ms / max 28~258ms / slow=0** |
+| qg | CPU 94% idle，load 0.6，vm transport=udp |
+| vm | channelDropStats 全 0，qg lastSeen 正常更新 |
+| jf tcpStats | timeouts +27/90s，retransmits +5k，spurious_recovery +240 |
+
+结论：ht 载体、relay、CPU 都正常；卡住的是 **inner TCP 的丢包恢复**。
+`reo_wnd = srtt-minRTT` 的下限形成正反馈：ACK 延迟 → srtt 变大 →
+reo_wnd 涨到数秒 → 缺口段迟迟不判丢/不重传 → srtt 继续变大，
+最终出现数分钟级的恢复停滞（RTO 已退避到 14~18s）。
+
+## 81. 修复：reo_wnd 下限封顶 100ms（2026-11-11 08:55）
+
+单变量（jf，cap128 不变）：`reo_wnd floor = min(srtt-minRTT, 100ms)`。
+
+| 运行 | 耗时 | 吞吐 |
+|---|---|---|
+| 采样轮 | 31.15s | 6.01 |
+| 2 | 32.55s | 5.75 |
+| 3 | 30.87s | 6.06 |
+| 4 | 30.32s | 6.17 |
+| 5 | 33.35s | 5.61 |
+| 6 | 30.89s | 6.06 |
+| 7 | 35.28s | 5.31 |
+| 8 | 99.70s | **1.88（慢跑，但未再出现 >5min 挂起）** |
+
+- 采样确认 `reoWndMs` 最大 **100ms**（之前会到 4~6s）；
+- DSACK 从 ~3.9% 升到 ~9.7%（重新容忍部分乱序的代价）；
+- 8 连跑里最慢一次 99.7s，但不再出现之前 >5 分钟的完全停滞；
+- 结论：保留 100ms 上限。剩余偶发 1~2MB/s 慢跑更像链路/ACK 瞬断，
+  下一步可做自适应上限（按 minRTT/投递率）或 TLP 恢复优化。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

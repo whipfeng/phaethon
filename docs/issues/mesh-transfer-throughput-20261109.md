@@ -2409,6 +2409,29 @@ watchdog 不动），vm 走计划任务重启；三者均为 `v0.8.0-557-g8ebcc7
 已知边界：Win7/1607 没有 ConPTY，无法提供真正的 PTY，交互是“行级 + 客户端
 回显”，没有服务端提示符；`ssh -T` 或 `ssh host '命令'` 不受影响。
 
+### 99.1 恢复 Win10+ 的交互提示符（v0.8.0-559-g6396c5b）
+
+最初为兼容 Win7 的 PS2，所有 PowerShell 管道会话统一用了 `-Command -`，
+副作用是 deskw（Win10 1607，无 ConPTY）这类 PS5.1 节点也**没有提示符**，
+看起来“没有交互”。实际上 PS3+ 的交互宿主能正常读取重定向 stdin，
+所以按 OS 主版本分流：
+
+- `RtlGetVersion().MajorVersion >= 10`：`-NoLogo`（交互宿主，提示符恢复）；
+- Win7/8（PS2）：仍用 `-NoLogo -Command -`（否则不读 stdin）。
+
+验证（`ssh <node>` 管道喂命令）：
+
+| 节点 | 环境 | 提示符 | HI/中文输出 | 中文输入 |
+|---|---|---|---|---|
+| deskw | Win10 1607 + PS5.1，无 ConPTY | ✅ `PS C:\...>` | ✅ | ✅ |
+| vm | Win11 + pwsh7，ConPTY | ✅（PTY 会话为完整 ConPTY） | ✅ | ✅ |
+| qgw | Win7 + PS2，无 ConPTY | ❌（PS2 限制） | ✅ | ✅ |
+
+qgw 的“无提示符”是 **OS/PowerShell 限制**，不是没实现：PS2 不带
+`-Command -` 不读 stdin；Win7 又没有 ConPTY，无法提供真 PTY。要让它也有
+完整交互，只能内置第三方 PTY（winpty/ConPTY shim），当前未引入。
+
+
 
 
 

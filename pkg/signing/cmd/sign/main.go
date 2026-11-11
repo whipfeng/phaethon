@@ -162,8 +162,17 @@ func extractVersion(binaryPath string) (string, error) {
 		// If we can't run the binary (e.g., cross-compiled), try to extract from strings
 		return extractVersionFromStrings(binaryPath)
 	}
-	// Parse output: "phaethon <version>\n"
+	// Parse output. Current binaries print
+	// "version=<v> platform=<os> arch=<arch>"; older ones printed
+	// "phaethon <v>". Handle both, and prefer the explicit version= field:
+	// on a host matching the target platform the binary actually runs, so
+	// blindly taking Fields()[1] would return "platform=..." instead.
 	line := strings.TrimSpace(string(output))
+	for _, f := range strings.Fields(line) {
+		if v, ok := strings.CutPrefix(f, "version="); ok {
+			return v, nil
+		}
+	}
 	parts := strings.Fields(line)
 	if len(parts) >= 2 {
 		return parts[1], nil

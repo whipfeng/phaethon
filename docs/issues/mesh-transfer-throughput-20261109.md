@@ -2294,5 +2294,41 @@ sshd `36.140.28.178:60002`，否则 `pkill` 会杀掉承载部署会话的内置
    OS 直连 8.03MB/s，属于吞吐专项的旧账，不是本次停滞问题。4MB 预算的内存
    与长跑缓冲膨胀需要后续观察。
 
+## 97. deskw 用内置 SSH 发版：pkg 热切换绕过“停应用断 SSH”（2026-11-11 16:22）
+
+deskw 是 Windows，只有 phaethon 内置 SSH 通道（落地是 PowerShell，父进程
+`explorer.exe`，即交互式桌面会话）；没有 scp/sftp，OS sshd 不可用。
+
+直接 `pkill + 替换 exe + 启动` 会在第一步杀掉承载 SSH 的进程，脚本自断。
+改用 watchdog 的 **pkg 热切换**，watchdog 不重启、不会被自己杀掉：
+
+1. 打签名包（版本戳用 `git describe` 原文）：
+   `go run ./pkg/signing/cmd/sign -binary <win exe> -meta <meta.json> -key scripts/signing.key -output <pkg>`
+   本地用 `signing.VerifyPkg(pkg, signing.PublicKey)` 验签通过（8.9MB）。
+2. 传输：因为只有内置 SSH，用 base64 经 stdin 送入 PowerShell
+   `[Console]::In.ReadToEnd()` → `WriteAllBytes`，落盘到
+   `data/packages/phaethon_windows_amd64_v0.8.0-547-g9ddb2a9.pkg`，
+   远端 `Get-FileHash MD5` 与本地一致。
+3. 触发：用 `schtasks` 建一次性任务（任务计划服务所有，**不随 SSH 会话死亡**），
+   脚本只杀“父进程也是 phaethon 的那个” worker，不碰 watchdog；
+   SSH 会随 worker 断开，属预期。
+4. watchdog 在 3s 监控周期内发现子进程退出，重扫 `data/packages`，验签、
+   比对版本（v547 > 自身 v529）、解包到
+   `data/worker/phaethon-v0.8.0-547-g9ddb2a9` 并拉起。新 worker 起来后内置
+   SSH 自动恢复。
+
+验证：watchdog PID 2840 未变，worker PID 4508 指向
+`data\worker\phaethon-v0.8.0-547-g9ddb2a9`；日志
+`P2PManager initialized (version=v0.8.0-547-g9ddb2a9, platform=windows/amd64)`；
+无 panic；`schtasks` 任务与临时脚本已删除。
+
+副作用与注意：
+- 主 exe/watchdog 仍是 v529，升级靠 `data/packages` 里的 pkg 持久化；
+  **不要清空该目录**，否则重启会回退 v529。
+- 同期修复了 `pkg/signing/cmd/sign` 的版本解析 bug：在 Windows 上直接执行
+  Windows 目标二进制时 `--version` 输出是 `version=... platform=...`，旧代码取
+  `Fields()[1]` 会得到 `platform=windows`；现在优先解析 `version=` 字段。
+
+
 
 

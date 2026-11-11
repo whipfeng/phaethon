@@ -30,28 +30,14 @@ var supportConPTY = conpty.IsConPtyAvailable()
 // exits immediately, and does not exit on "exit"), while the line-mode pipe
 // fallback is stable there. Installing WMF 5.1 / PowerShell 7 on such nodes
 // would make winpty viable.
-// ptyAvailable reports whether a real PTY can be provided: native ConPTY on
-// Win10 1809+, otherwise the bundled winpty (Win10, or Win7/8 with an active
-// desktop session).
-//
-// winpty renders output by scraping its hidden console's screen buffer. On
-// qgw (Win7) the session is normally disconnected (qwinsta: wangqian = Disc):
-// input is delivered and commands execute, but conout yields only the initial
-// clear, so the SSH session looks empty. Requiring an active session keeps
-// real PTY available whenever an administrator is connected and falls back to
-// the stable line-mode shell when the node is unattended.
 func ptyAvailable() bool {
 	if supportConPTY {
 		return true
 	}
-	if windows.RtlGetVersion().MajorVersion < 10 && !wtsSessionActive() {
+	if windows.RtlGetVersion().MajorVersion < 10 {
 		return false
 	}
-	// Load only; the one-time cmd probe spawns an extra winpty agent and can
-	// race with the first real session's agent on the console/desktop.
-	// A broken winpty now fails the session with an error instead of a
-	// silent black hole.
-	return winptyLoad()
+	return winptyReady()
 }
 
 type conptyProc struct {
@@ -205,10 +191,9 @@ func winptyInitCmd(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			// Win7 + winpty: executing [Console] encoding setters (or chcp)
-			// inside the hidden console wedges the PS2 host before it returns
-			// to a prompt. Do not inject anything there.
-			return ""
+			// Win7 + winpty: chcp 65001 inside the hidden console stalls the
+			// PS2 host, so only switch the .NET console encodings here.
+			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
 		}
 		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
 	case shellKindCmd:

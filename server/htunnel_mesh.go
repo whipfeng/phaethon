@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"math"
 	"net/http"
@@ -637,6 +638,14 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 		}
 	}
 
+	// Persistent chunked GET carrier: keep one response open and stream
+	// length-prefixed batches. A single data stream preserves production
+	// order (no multi-GET reordering) and removes the per-batch request RTT.
+	if r.Header.Get(dialer.HeaderStream) == "1" {
+		s.meshHandleStream(ch, w, r, waitTime)
+		return
+	}
+
 	// The dispatcher hands this waiter exactly one batch, already sized by
 	// bytes (≤ MaxBatchSize) with control frames first (§3.8).
 	waiter := &meshWaiter{
@@ -677,6 +686,80 @@ func (s *HTunnelServer) meshHandleRead(ch *htChannel, w http.ResponseWriter, r *
 	}
 	w.WriteHeader(200)
 	w.Write(ch.crypto.SealBody(buf.Bytes()))
+}
+
+// meshHandleStream serves a persistent chunked GET: it keeps the HTTP response
+// open and writes each produced batch as [4-byte length][sealed frames]. The
+// client uses one such stream for data, so batches arrive in production order
+// and there is no per-batch request/response round trip.
+func (s *HTunnelServer) meshHandleStream(ch *htChannel, w http.ResponseWriter, r *http.Request, waitTime time.Duration) {
+	w.Header().Set(dialer.HeaderStream, "1")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	ctx := r.Context()
+	var hdr [4]byte
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch.closed:
+			return
+		default:
+		}
+
+		waiter := &meshWaiter{
+			batch: make(chan []meshMsg, 1),
+			done:  make(chan struct{}),
+		}
+		select {
+		case ch.getWaiters <- waiter:
+		case <-ctx.Done():
+			return
+		case <-ch.closed:
+			return
+		case <-time.After(waitTime):
+			continue
+		}
+
+		var batch []meshMsg
+		select {
+		case batch = <-waiter.batch:
+		case <-ctx.Done():
+			ch.abandonWaiter(waiter)
+			return
+		case <-ch.closed:
+			ch.abandonWaiter(waiter)
+			return
+		case <-time.After(waitTime):
+			if batch = ch.abandonWaiter(waiter); batch == nil {
+				continue
+			}
+		}
+		if len(batch) == 0 {
+			continue
+		}
+
+		var buf bytes.Buffer
+		for _, msg := range batch {
+			_ = frame.WriteFrame(&buf, msg.frameType, msg.payload)
+		}
+		data := ch.crypto.SealBody(buf.Bytes())
+		binary.BigEndian.PutUint32(hdr[:], uint32(len(data)))
+		if _, err := w.Write(hdr[:]); err != nil {
+			return
+		}
+		if _, err := w.Write(data); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }
 
 // meshChannelTransport bridges a mesh channel to frame.FrameTransport for the

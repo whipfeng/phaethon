@@ -205,7 +205,10 @@ func winptyInitCmd(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
+			// Win7 + winpty: executing [Console] encoding setters (or chcp)
+			// inside the hidden console wedges the PS2 host before it returns
+			// to a prompt. Do not inject anything there.
+			return ""
 		}
 		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
 	case shellKindCmd:

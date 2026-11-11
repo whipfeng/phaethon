@@ -175,8 +175,9 @@ func winptyInitCmd(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			return "chcp 65001 | Out-Null\r" +
-				"[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
+			// Win7 + winpty: chcp 65001 inside the hidden console stalls the
+			// PS2 host, so only switch the .NET console encodings here.
+			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
 		}
 		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
 	case shellKindCmd:

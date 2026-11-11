@@ -185,9 +185,11 @@ func winptyInitCmd(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			// Win7 + winpty: chcp 65001 inside the hidden console stalls the
-			// PS2 host, so only switch the .NET console encodings here.
-			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
+			// Win7 + winpty: both chcp 65001 and the [Console] encoding
+			// setters can break the agent's screen capture (input still runs,
+			// but conout goes silent). Leave the console untouched; winpty's
+			// agent converts the screen buffer itself.
+			return ""
 		}
 		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
 	case shellKindCmd:

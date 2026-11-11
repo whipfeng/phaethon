@@ -200,6 +200,8 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 		atomic.AddUint64(&t.legDrops, 1)
 		util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
 	}
+	atomic.AddUint64(&t.legOut, 1)
+	atomic.StoreInt64(&t.lastOutNano, time.Now().UnixNano())
 	return nil
 }
 

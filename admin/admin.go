@@ -1384,6 +1384,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/packages", s.apiPackages)
 	mux.HandleFunc("/api/packages/upload", s.apiPackageUpload)
 	mux.HandleFunc("/api/packages/receive", s.apiPackageReceive)
+	mux.HandleFunc("/api/packages/pin", s.apiPackagePin)
 	mux.HandleFunc("/api/packages/", s.apiPackageItem)
 	mux.HandleFunc("/api/mesh", s.apiMesh)
 	mux.HandleFunc("/api/mesh/config", s.apiMesh)

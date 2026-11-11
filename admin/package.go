@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"phaethon/db"
@@ -129,6 +130,61 @@ func writeWorkerPin(version string) error {
 		return err
 	}
 	return os.WriteFile(workerPinPath, []byte(version), 0644)
+}
+
+// readWorkerPin returns the pinned version, or "" when unpinned.
+func readWorkerPin() string {
+	data, err := os.ReadFile(workerPinPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// clearWorkerPin removes the pin so the watchdog falls back to the newest
+// package / the deployed binary.
+func clearWorkerPin() error {
+	err := os.Remove(workerPinPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// apiPackagePin handles GET/DELETE /api/packages/pin.
+// GET returns the pin plus the version actually running; DELETE unpins.
+func (s *AdminServer) apiPackagePin(w http.ResponseWriter, r *http.Request) {
+	current := ""
+	if s.GetCurrentVersion != nil {
+		current = s.GetCurrentVersion()
+	}
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, map[string]interface{}{
+			"pin":     readWorkerPin(),
+			"current": current,
+		})
+	case http.MethodDelete, http.MethodPost:
+		was := readWorkerPin()
+		if err := clearWorkerPin(); err != nil {
+			httpError(w, "unpin failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		util.LogModuleWarn("admin", "worker pin cleared (was %q, current %q)", was, current)
+		if r.URL.Query().Get("restart") == "now" {
+			go func() {
+				time.Sleep(time.Second)
+				os.Exit(0)
+			}()
+		}
+		jsonResponse(w, map[string]interface{}{
+			"status":  "unpinned",
+			"current": current,
+			"restart": r.URL.Query().Get("restart"),
+		})
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // apiPackageUpload handles POST /api/packages/upload — multipart .pkg upload.
@@ -379,7 +435,8 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 
 	id := filepath.Base(r.URL.Path)
 
-	if _, err := s.loadPackageMeta(id); err != nil {
+	meta, err := s.loadPackageMeta(id)
+	if err != nil {
 		httpError(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -388,6 +445,13 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 		os.Remove(p)
 	}
 	_ = db.DeletePackage(id)
+	// A pin pointing at the deleted version would otherwise leave the
+	// watchdog unable to find its worker and silently fall back.
+	if meta.Version != "" && readWorkerPin() == meta.Version {
+		if err := clearWorkerPin(); err == nil {
+			util.LogModuleWarn("admin", "worker pin cleared because package %s (%s) was deleted", id, meta.Version)
+		}
+	}
 	util.LogModuleInfo("admin", "package deleted: %s", id)
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }

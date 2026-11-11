@@ -1232,10 +1232,16 @@ func selectWorkerBinary() string {
 	// An explicit activation wins, even when it is older than self (rollback).
 	if pinned := readWorkerPin(); pinned != "" {
 		if pkgPath, ver := findPkgAndExtract(pinned); pkgPath != "" {
+			if ver != Version {
+				util.LogModuleWarn("main", "watchdog: worker pinned to %s while deployed binary is %s; pinned version wins (clear data/state/worker-pin to run the deployed binary)", ver, Version)
+			}
 			util.LogModuleInfo("main", "watchdog: using pinned worker version %s: %s", ver, pkgPath)
 			return pkgPath
 		}
-		util.LogModuleWarn("main", "watchdog: pinned version %s is not available, falling back to latest", pinned)
+		util.LogModuleWarn("main", "watchdog: pinned version %s is not available; clearing stale pin and falling back", pinned)
+		if err := os.Remove(workerPinPath); err != nil && !os.IsNotExist(err) {
+			util.LogModuleWarn("main", "watchdog: clear stale pin failed: %v", err)
+		}
 	}
 
 	pkgPath, pkgVersion := findLatestPkgAndExtract()

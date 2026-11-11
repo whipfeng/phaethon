@@ -101,3 +101,27 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 
 - QG 用 `rc-service` 管理，不要直接 kill
 - JF 用 `ps | kill` 手动管理
+
+## 5. worker 版本选择与 pin（务必阅读）
+
+watchdog 选 worker 的顺序：
+
+1. `data/state/worker-pin` 存在且对应 pkg 可找到 → **强制运行 pin 的版本**（可用于回滚）；
+2. 否则扫描 `data/packages/*.pkg` 取最高版本，仅当比当前二进制新才使用；
+3. 否则运行当前部署的 `./phaethon`。
+
+因此：
+
+- **手动部署的新二进制可能被 pin 静默覆盖**。启动日志会打印
+  `worker pinned to X while deployed binary is Y`，但请以实际进程为准。
+- 控制台 Package 页面会显示 pin 横幅和“取消固定”按钮；对应 API 为
+  `GET/DELETE /api/packages/pin`（`?restart=now` 立即重启）。
+- 手工取消：删除/改名 `data/state/worker-pin` 后重启 watchdog。
+- 删除 pin 指向的 pkg 现在会自动清 pin；pin 指向的 pkg 不存在时 watchdog
+  也会清掉过期 pin。
+- 版本化 worker（comm 为 `phaethon-v0.8.0-xxx`）不会被
+  `pkill -x phaethon` 杀掉，部署时需 `pkill -f 'data/worker/phaethon'`。
+
+**部署验收**：不能只看 watchdog，必须确认实际 worker 的
+`/proc/<pid>/exe` 等于部署二进制。可用 `scripts/verify-worker.sh <部署目录>`
+检查 pin 与 worker 路径/md5；发现 pin 覆盖会返回非零。

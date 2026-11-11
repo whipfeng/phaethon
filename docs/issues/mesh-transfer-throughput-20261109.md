@@ -2506,6 +2506,30 @@ Active 状态下的 winpty 验证需要 qgw 桌面保持连接后复测。
 （部署注记：qgw 的部署目录在 qg 上是 `/root/qgw` vboxsf 挂载，部署包直接
 `cp` 到 `/root/qgw/data/packages/` 即可，不再走 mb HTTP 中转。）
 
+### 100.3 Win7 winpty 最终结论：本机屏幕捕获不可靠（2026-11-12 00:0x）
+
+管理员 RDP 连上 qgw（`qwinsta` 显示 `Active`）后继续复测，做了完整单变量：
+
+| 变量 | 结果 |
+|---|---|
+| winpty 0.4.3 / 0.4.2 x64_xp | 行为一致 |
+| 注入 init / 不注入 | 注入时 init 行执行后 PS2 不回提示符；不注入时提示符稳定出现 |
+| pty-req 探针 / 去掉探针 | 去掉后提示符出现更稳定，但命令仍不执行 |
+| Disc / Active 会话 | Disc 只有 8 字节清屏；Active 能出提示符（38~203 字节） |
+
+服务端日志（带 init 的版本）明确：spawn 成功、input copy n=48、shell 在
+exit 后以 0 退出（**命令确实执行**），但 output copy 只有 8 字节。
+Active + 无 init 时提示符能渲染，但随后发送命令既不回显也不执行。
+
+deskw（Win10 1607）用同一套代码、同一个 winpty 版本工作稳定，说明差异在
+**Win7 的控制台/屏幕缓冲行为**，不是我们的输入/退出/编码逻辑，也不是
+winpty 版本。Win7 上无法通过参数调优让它稳定。
+
+最终状态：回到 v574 的实现（v0.8.0-583-g9e0c0e4 部署在 qgw），**Win7/8
+固定行级模式**，Win10 无 ConPTY 用 winpty/ConPTY。Win7 要真 PTY 只有换
+Win10 1809+（ConPTY）或接受行级/REPL；WMF 5.1/PS7 不会带来 ConPTY。
+
+
 
 
 

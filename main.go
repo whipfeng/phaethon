@@ -45,6 +45,7 @@ import (
 	"phaethon/util"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	gvtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 // Build info set via -ldflags at build time.
@@ -689,6 +690,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		fmt.Printf("version=%s platform=%s arch=%s\n", Version, Platform, Arch)
 		return
+	}
+
+	// Adaptive cwnd BDP gain: the gVisor fork defaults to the conservative 4x
+	// (lossy / reordering carriers regress at 16x). Nodes whose mesh carrier is
+	// clean and low-reorder (e.g. the direct UDP leg) opt in explicitly.
+	if v, err := strconv.ParseUint(os.Getenv("PHAETHON_CWND_BDP_GAIN"), 10, 64); err == nil && v > 0 {
+		gvtcp.SetCwndBDPGain(v)
 	}
 
 	// If PHAETHON_WORKER is not set, this process is the watchdog.

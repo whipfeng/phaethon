@@ -4,6 +4,9 @@
 /phaethon-linux-amd64
 *.exe
 *.dll
+# Vendored winpty PTY (shipped alongside the deployment binaries)
+!third_party/winpty/amd64/*.exe
+!third_party/winpty/amd64/*.dll
 
 # Build output
 /bin/

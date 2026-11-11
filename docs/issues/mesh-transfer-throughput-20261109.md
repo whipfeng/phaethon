@@ -2257,4 +2257,42 @@ DSACK undo 后 4 次台阶全部完成、无多分钟停滞。仍待观察：长
 `rc-service phaethon stop; zap; start`，重启会断当前 SSH。jf 必须走真实
 sshd `36.140.28.178:60002`，否则 `pkill` 会杀掉承载部署会话的内置 SSH。）
 
+## 96. 全量部署与最终验证（2026-11-11 16:05）
+
+两个改动合入后构建 `v0.8.0-547-g9ddb2a9`，已部署并核对：
+
+| 节点 | 平台 | 状态 |
+|---|---|---|
+| vm（本机 Windows） | windows/amd64 | 计划任务重启，双进程，日志 `P2PManager initialized v0.8.0-547-g9ddb2a9` |
+| qg | linux/amd64 | OpenRC 重启，`rc-service status: started` |
+| jf | linux/amd64 | 真实 sshd 部署，双进程 |
+| gg | linux/amd64 | `loc.gg.phn` 部署，双进程，39988/39998/39999 LISTEN |
+| mb | darwin/amd64 | 经 qg LAN 中转上传，`md5 -q` 一致，手动 `sudo sh -c` 启动根进程 |
+| qgw / deskw | — | 按用户要求不由我部署 |
+
+最终同一构建下 8 流 vm→jf 196.3MB 验证（qg 只在台阶窗口加 300ms、无丢包）：
+
+| 场景 | 耗时 | 吞吐 | 完整性 | qg DataDrops |
+|---|---|---|---|---|
+| 基线（无台阶） | **39s** | 5.03MB/s | 8/8 | 0 |
+| 300ms 台阶 #1 | 93s | 2.11MB/s | 8/8 | 0 |
+| 300ms 台阶 #2 | 82s | 2.39MB/s | 8/8 | 0 |
+
+对比修复前：stock 在同样台阶下出现 393s 多分钟停滞，以及 71s 但 **8 条流全部
+被 reset、文件截断**。现在不再出现冻结/重置，台阶期间只表现为 RTT 翻倍带来的
+吞吐下降（8 流总吞吐仍 >2MB/s）。
+
+**结论**：
+1. 多分钟停滞的直接原因不是链路静默，而是 **RACK 把延迟/乱序当丢包 → 伪重传
+   风暴 → cwnd 塌缩 + RTO 指数退避**；DSACK 是伪重传的直接证据。
+2. 放大因素是 **relay 每 peer 1MB 队列在台阶 BDP 下溢出丢帧**（qdisc dropped 0
+   但 DataDrops=446），空洞重传被反复丢弃，RTO 才能退避到 42s。
+3. 修复 = DSACK 伪重传撤销 cwnd 收缩（fork）+ relay 预算 4MB（p2p）。二者
+   缺一仍会在部分时序下退回长停滞（4MB 单独不解决 RACK；DSACK undo 单独
+   也会被 relay 丢帧拖回 RTO 退避）。
+4. 残留：台阶仍会带来 ~2× 的短时减速（外部延迟本身）；基线 5.0MB/s 仍低于
+   OS 直连 8.03MB/s，属于吞吐专项的旧账，不是本次停滞问题。4MB 预算的内存
+   与长跑缓冲膨胀需要后续观察。
+
+
 

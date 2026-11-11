@@ -2227,3 +2227,34 @@ gvisor fork 原有逻辑在 `detectSpuriousRecovery` 中按 RFC3522 §3.2：
 和 jf 侧 `SACKedOut/SndUna` 差分，确认空洞重传是否真的被 mesh 丢弃；再决定是
 修转发路径还是给 RTO 退避加上限。
 
+## 95. relay 每 peer 队列 1MB→4MB：台阶期间 DataDrops 归零（保留）
+
+§94 的怀疑得到数据支持：qg 的 `channelDropStats.peers.vm.DataDrops` 在一次
+68s 的台阶传输里从 0 涨到 **446**（每帧 ~1.4KB，约 0.6MB），而 `tc -s` 仍显示
+qdisc dropped 0——真正的丢包发生在**我们自己的 relay 数据队列**里。
+
+原因：`dataQueueByteBudget=1MB`（`p2p/p2p.go`）。300ms 台阶下 8 流的 BDP 约
+1.5~3MB，1MB 预算装不下，队列满后直接丢帧；inner TCP 看到丢包 → SACK/RTO →
+重传风暴 → 空洞重传再被丢 → RTO 指数退避到 42s，形成多分钟停滞。
+
+单变量：只改 `dataQueueByteBudget` 1MB→4MB（qg 重启加载），jf 保持 DSACK undo
+版本。连跑 4 次 300ms 无丢包台阶：
+
+| 配置 | 台阶 8 流耗时 | 完整性 | qg DataDrops |
+|---|---|---|---|
+| 1MB + DSACK undo | 68 / 82 / 89 / 98 / **400**（一次） | 8/8（400s 那次超时截断） | 446（vm peer） |
+| **4MB + DSACK undo** | **70 / 83 / 85 / 95** | **4/4 全部 8/8** | **0（全部 peer）** |
+
+（基线同期 55~93s 波动很大：qg 今天多次重启、链路反复收敛；不能用跨小时的
+基线绝对值比较，队列丢包计数是更可靠的判据。）
+
+结论：**把 relay 每 peer 预算提到 4MB 消除了台阶期间的 relay 丢帧**，配合
+DSACK undo 后 4 次台阶全部完成、无多分钟停滞。仍待观察：长时间自然运行下
+4MB 是否带来内存/缓冲膨胀副作用；以及台阶恰好命中慢启动早期时的退化
+（§93 末尾）。
+
+（部署注记：qg 部署按 `.claude/skills/qg-deploy`：传 `/root/phaethon.new` →
+`rc-service phaethon stop; zap; start`，重启会断当前 SSH。jf 必须走真实
+sshd `36.140.28.178:60002`，否则 `pkill` 会杀掉承载部署会话的内置 SSH。）
+
+

@@ -161,7 +161,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req":
-			if !supportPty {
+			if !ptyAvailable() {
 				req.Reply(false, nil)
 				continue
 			}

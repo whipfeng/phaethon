@@ -12,12 +12,21 @@ import (
 
 	"github.com/UserExistsError/conpty"
 	"golang.org/x/sys/windows"
+
+	"phaethon/util"
 )
 
-// Windows：ConPTY 全交互（Win10 1809+），不可用时退回管道模式（行级交互）。
-// 探测结果决定 supportPty：管道模式下必须拒绝 pty-req（客户端退回
+// Windows：ConPTY 全交互（Win10 1809+），不可用时用部署目录自带的
+// winpty（Win7/1607 等）；两者都没有时退回管道模式（行级交互）。
+// 探测结果决定 ptyAvailable：管道模式下必须拒绝 pty-req（客户端退回
 // cooked 模式才有本地回显与 \n 行结束，否则交互即黑洞）。
-var supportPty = conpty.IsConPtyAvailable()
+var supportConPTY = conpty.IsConPtyAvailable()
+
+// ptyAvailable reports whether a real PTY can be provided: native ConPTY on
+// Win10 1809+, otherwise the bundled winpty (probed end-to-end once).
+func ptyAvailable() bool {
+	return supportConPTY || winptyReady()
+}
 
 type conptyProc struct {
 	cpty *conpty.ConPty
@@ -94,8 +103,17 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 	workDir := defaultWorkDir()
 
 	if isShell {
-		if usePty && supportPty {
-			return startConptyShell(shell, workDir, cols, rows)
+		if usePty {
+			if supportConPTY {
+				return startConptyShell(shell, workDir, cols, rows)
+			}
+			if winptyReady() {
+				if p, err := startWinptyShell(shell, workDir, cols, rows); err == nil {
+					return p, nil
+				} else {
+					util.LogModuleWarn("ssh", "winpty shell start failed, fallback to pipe: %v", err)
+				}
+			}
 		}
 		args := interactiveShellArgs(shell)
 		p, err := startPipe(shell, args, workDir)
@@ -116,10 +134,36 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		}
 		return p, nil
 	}
-	if usePty && supportPty {
-		return startConpty("\""+shell+"\" "+strings.Join(quoteArgs(execArgs(shell, cmdline)), " "), workDir, cols, rows)
+	if usePty {
+		if supportConPTY {
+			return startConpty("\""+shell+"\" "+strings.Join(quoteArgs(execArgs(shell, cmdline)), " "), workDir, cols, rows)
+		}
+		if winptyReady() {
+			full := "\"" + shell + "\" " + strings.Join(quoteArgs(execArgs(shell, cmdline)), " ")
+			if p, err := startWinptyProc(shell, full, workDir, cols, rows); err == nil {
+				return p, nil
+			}
+		}
 	}
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
+}
+
+// startWinptyShell starts an interactive shell inside a winpty PTY. The
+// console is switched to UTF-8 with the same init line ConPTY uses; the
+// console echoes that line once at session start (cosmetic).
+func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
+	cmdline := "\"" + shell + "\""
+	if classifyShell(shell) == shellKindPowerShell {
+		cmdline += " -NoLogo"
+	}
+	p, err := startWinptyProc(shell, cmdline, workDir, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	if init := utf8InitCmd(shell); init != "" {
+		_, _ = p.Write([]byte(init))
+	}
+	return p, nil
 }
 
 // interactiveShellArgs 返回管道模式下交互 shell 的参数。

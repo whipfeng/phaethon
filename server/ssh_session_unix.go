@@ -50,6 +50,9 @@ func autoDetectShell() string {
 // supportPty：Unix 平台用 creack/pty 提供全交互伪终端。
 const supportPty = true
 
+// ptyAvailable：Unix 始终可用。
+func ptyAvailable() bool { return supportPty }
+
 // startSessionProc 拉起 shell（isShell=true 交互登录）或执行命令行。
 // usePty 时用 pty 全交互（转发窗口尺寸）；否则管道模式。
 func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {

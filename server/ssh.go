@@ -256,6 +256,7 @@ func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 	go func() {
 		n, err := io.Copy(channel, proc)
 		util.LogModuleInfo("ssh", "output copy done: bytes=%d err=%v", n, err)
+		util.LogModuleError("ssh", "WINPTY-DBG output copy bytes=%d err=%v", n, err)
 		copied.Store(n)
 		close(done)
 	}()

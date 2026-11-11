@@ -2141,3 +2141,89 @@ RTO/RACK/cwnd 参数怎么调都只能得到 100~150s 的慢跑，无法消除�
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，
 并校验 staged 的 md5。）
+
+（运维注记：**不要在 mesh 内置 SSH 会话里执行 `jf_deploy.sh`**。该会话由 jf 上的
+phaethon 进程承载，脚本第一步 `pkill -x phaethon` 会杀掉自己所在的会话，导致
+“备份完成 → 进程已停 → 脚本被 SIGHUP 中断 → 没有启动”。本次一次误操作即由此
+触发，jf 的 phaethon 停了几分钟。部署 jf 必须走真实 sshd：
+`ssh -p 60002 layer4@36.140.28.178`（经 qg 中转），或先上传再用 setsid 启动。）
+
+## 92. 无丢包 300ms 延迟台阶复现：RACK 把“变慢”误判为丢包（2026-11-11 14:40）
+
+之前的 `tc qdisc add/del netem` 会替换 qdisc，替换瞬间可能丢包，不能证明
+“纯延迟”就能触发。改为**不丢包的延迟台阶**：
+
+```sh
+# 传输开始前：装一个 0ms 延迟、10 万包的 netem（无流量，不丢包）
+tc qdisc add dev eth1 root netem delay 0ms limit 100000
+# 传输进行 6s 后：原地改参数（不重建 qdisc，队列保留，不丢包）
+tc qdisc change dev eth1 root netem delay 300ms limit 100000
+# 20s 后再改回 0ms
+tc qdisc change dev eth1 root netem delay 0ms limit 100000
+```
+
+`tc -s qdisc show` 在台阶期间为 `dropped 0, overlimits 0`，backlog 只 ~
+300~560 包；确认没有 qdisc 丢包。8 流 vm→jf（196.3MB，内置 SSH cat）结果：
+
+| jf 版本 | 无台阶基线 | 300ms 无丢包台阶 | 完整性 |
+|---|---|---|---|
+| v539 stock | 46s / 4.27MB/s | **71s，8 条流全部被对端 reset**（落盘 0.8~8MB，截断） | **失败** |
+| v539 stock（复跑） | — | **393s / 0.50MB/s** | 8/8 |
+| + DSACK undo | 42~48s | 73s / 82s | 8/8 |
+
+台阶期间的现场（stock，jf 侧 inner TCP 发送端）：
+
+- 台阶生效 1~2s 内 8 条流 cwnd 从 128 掉到 **1~5**，全部进入 `sack-recovery`/
+  `rto-recovery`，`ssthresh=2`；44s 内 `timeouts` +234。
+- **DSACK 计数与重传数同步暴涨**（retrans +3151 时 dsack +2802），说明这些
+  重传都是伪重传：原包其实到了，只是被延迟台阶打乱了 RACK 的到达时间判断。
+- 卡死的尾部现场：`state=rto-recovery, cwnd=1, ssthresh=2, RTO=16~42s,
+  lastSendAgo=9.4s, writeListSegs=27~46, unsent=0.7~1MB`。也就是说真正的
+  “多分钟停滞”是 **RTO 指数退避到几十秒 + 没有有效 RTT 样本来复位**，而不是
+  链路完全不动。
+
+结论：这是**发送端 TCP 的伪丢包响应**，不是 mesh 转发停顿；qdisc 层丢包为 0，
+链路在台阶期间仍有数据流动。DSACK 是最直接的反证。
+
+## 93. 修复尝试：DSACK 证明伪重传时撤销 cwnd 收缩（保留）
+
+gvisor fork 原有逻辑在 `detectSpuriousRecovery` 中按 RFC3522 §3.2：
+`hasDSACK → return`，且 RTO 降窗明确 `invalidateUndo`（“go-back-N 恢复窗口
+会突发”）。实测 `spurious_recovery_undo` 在冻结期间始终为 0：**明明 DSACK 已经
+证明重传是伪的，降窗却永不撤销**。
+
+单变量修改（fork `pkg/tcpip/transport/tcp/snd.go`）：DSACK 存在时跳过 RFC3522
+的时间戳门槛，把它当作“重传伪”的直接证据，走既有的 applyUndo 路径
+（SACKRecovery 下 `SndCwnd = max(SndCwnd, undoCwnd)`）。
+
+| 场景 | v539 | + DSACK undo |
+|---|---|---|
+| 无台阶基线 | 46s / 4.27MB/s | **42~48s / 4.1~4.7MB/s（不退化）** |
+| 无丢包 300ms 台阶 | 71s（8 流被 reset）/ 393s | **73s / 82s，8/8 完整** |
+| 台阶期间 cwnd | 全流 1~5，冻结数十秒 | 一次跑到 128 不掉；`SpuriousRecoveryUndo` +535 |
+
+但台阶恰好打在**慢启动早期（cwnd≈15）**时，ssthresh 会被压到 2，
+`undoCwnd` 本身也很小，撤销救不回来；随后仍会进入 RTO 退避，出现过一次
+400s 的尾部。因此该修复解决的是“稳态被台阶打崩后长期 cwnd=1”，
+**不能单独消除所有多分钟停滞**。
+
+## 94. 尚未解决的尾部：RTO 退避到 42s 且拿不到 RTT 样本
+
+卡死流的关键字段：`SRTT=76~281ms`（路径其实正常）、`RTO=1.6s/7.2s/42s`、
+`Outstanding=1`、`SACKedOut=1`、`SndUna` 不前进、`lastSendAgo=9.4s`。
+说明：
+
+1. 该流在等一个已经排到 42s 的 RTO 定时器；期间不发包；
+2. RTO 之所以能翻倍到 42s，是因为这段时间里没有“推进 SndUna 的新 ACK”
+   触发 `updateRTO`（TS 样本只在 ACK 推进左沿时采样，且 `Outstanding==0`
+   时直接返回）；
+3. 空洞段（SndUna）的重传要么进了黑洞，要么其 ACK 永远没回来。需要继续定位：
+   - 台阶期间 qg/vm 的 UDP leg 是否切到 Backoff/撤回，导致重传帧被丢；
+   - relay/mesh 队列是否在台阶后仍有积压；
+   - 是否应对“已有 RTT 样本”的连接给 RTO 退避设一个与 SRTT 相关的上限
+     （例如 min(4*SRTT+slack, maxRTO)），避免 42s 空等。
+
+下一步优先级：先抓一次“卡死尾部”的 qg/vm `channelDropStats`、UDP leg 状态
+和 jf 侧 `SACKedOut/SndUna` 差分，确认空洞重传是否真的被 mesh 丢弃；再决定是
+修转发路径还是给 RTO 退避加上限。
+

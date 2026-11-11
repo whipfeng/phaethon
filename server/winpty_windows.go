@@ -145,6 +145,39 @@ func winptyReady() bool {
 	return winptyProbeOK
 }
 
+var (
+	wtsapi32                        = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSQuerySessionInformationW = wtsapi32.NewProc("WTSQuerySessionInformationW")
+	procWTSFreeMemory               = wtsapi32.NewProc("WTSFreeMemory")
+)
+
+// wtsSessionActive reports whether the worker's Windows session is an active
+// desktop session. winpty renders output by scraping its hidden console's
+// screen buffer; on Win7 a disconnected session (qwinsta: "Disc") still
+// delivers input and runs commands, but conout only yields the initial clear,
+// so SSH would look empty. Enabling winpty only when the session is active
+// gives a real PTY when an administrator is connected and keeps the stable
+// line-mode fallback when the node is unattended.
+func wtsSessionActive() bool {
+	const (
+		wtsCurrentServerHandle = 0
+		wtsCurrentSession      = 0xFFFFFFFF
+		wtsConnectState        = 8 // WTS_INFO_CLASS::WTSConnectState
+		wtsActive              = 0
+	)
+	var buf uintptr
+	var n uint32
+	r, _, _ := procWTSQuerySessionInformationW.Call(
+		wtsCurrentServerHandle, wtsCurrentSession, wtsConnectState,
+		uintptr(unsafe.Pointer(&buf)), uintptr(unsafe.Pointer(&n)))
+	if r == 0 || buf == 0 {
+		return false
+	}
+	state := *(*uint32)(unsafe.Pointer(buf))
+	procWTSFreeMemory.Call(buf)
+	return state == wtsActive
+}
+
 func winptyWStr(proc *syscall.LazyProc, wp uintptr) string {
 	r, _, _ := proc.Call(wp)
 	if r == 0 {

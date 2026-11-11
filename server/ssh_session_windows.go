@@ -31,19 +31,20 @@ var supportConPTY = conpty.IsConPtyAvailable()
 // fallback is stable there. Installing WMF 5.1 / PowerShell 7 on such nodes
 // would make winpty viable.
 // ptyAvailable reports whether a real PTY can be provided: native ConPTY on
-// Win10 1809+, otherwise the bundled winpty (Win10 only).
+// Win10 1809+, otherwise the bundled winpty (Win10, or Win7/8 with an active
+// desktop session).
 //
-// Win7/8 are excluded: winpty's agent renders by scraping the hidden console's
-// screen buffer, and on qgw (Win7) the desktop session is usually disconnected
-// (qwinsta: wangqian = Disc). Input is still delivered and the shell executes
-// commands, but conout yields only the initial clear, so the SSH session looks
-// empty. With an active session it works, but an unattended node cannot rely
-// on that. Win10 nodes use ConPTY instead when available.
+// winpty renders output by scraping its hidden console's screen buffer. On
+// qgw (Win7) the session is normally disconnected (qwinsta: wangqian = Disc):
+// input is delivered and commands execute, but conout yields only the initial
+// clear, so the SSH session looks empty. Requiring an active session keeps
+// real PTY available whenever an administrator is connected and falls back to
+// the stable line-mode shell when the node is unattended.
 func ptyAvailable() bool {
 	if supportConPTY {
 		return true
 	}
-	if windows.RtlGetVersion().MajorVersion < 10 {
+	if windows.RtlGetVersion().MajorVersion < 10 && !wtsSessionActive() {
 		return false
 	}
 	return winptyReady()

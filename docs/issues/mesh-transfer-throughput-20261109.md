@@ -2431,6 +2431,44 @@ qgw 的“无提示符”是 **OS/PowerShell 限制**，不是没实现：PS2 �
 `-Command -` 不读 stdin；Win7 又没有 ConPTY，无法提供真 PTY。要让它也有
 完整交互，只能内置第三方 PTY（winpty/ConPTY shim），当前未引入。
 
+## 100. 内置 winpty PTY（无 ConPTY 的 Win10 节点）（2026-11-11 19:45）
+
+按“随部署目录分发 winpty”的方案落地，不引入 cgo：
+
+- `third_party/winpty/amd64/` 入库 winpty 0.4.3 的 `winpty.dll` +
+  `winpty-agent.exe`（Git for Windows 同版本，DLL/agent 均无额外运行时依赖）；
+- 部署时把这两个文件放到部署根目录（与 phaethon.exe / worker 的 CWD 同级，
+  即 `Desktop\phaethon\` 或 `Data\worker\..\..\`）。代码按 exe 目录、其两级
+  父目录、CWD 顺序查找 DLL，并把该目录前插 PATH 让 agent 可被发现；
+- `winpty_windows.go` 用 `syscall.NewLazyDLL` 动态加载 0.4.3 API：
+  `winpty_config_new/open/spawn_config_new/spawn/conin_name/conout_name/set_size/free`；
+  `winptyProc` 实现 `sessionProc`（Read/Write/Resize/Wait/Kill）；
+  **conin 只写、conout 只读**（O_RDWR 会 ACCESS_DENIED）；
+  `appname` 先 LookPath 成绝对路径（CreateProcess 带 appname 不搜索 PATH）；
+- 首次 `pty-req` 时做一次端到端探针（winpty 拉 `cmd /c exit 0`），失败则
+  拒绝 pty-req、回退管道模式，避免“接受了 PTY 却黑屏”；
+- 交互 shell 仍是 `-NoLogo`（真 console 下 PS3+/PS5.1 正常读输入、打提示符），
+  注入的 UTF-8 init 在 winpty 路径以 **CR 结尾**（LF 会被当成第二次换行，
+  导致 PS 停在 `>>`）。
+
+平台门控：`ptyAvailable = ConPTY || (OS Major>=10 && winptyReady())`。
+实测 **Win7 的 PS2 交互宿主在 winpty 控制台下不消费输入**（会话挂起、无
+提示符），所以 Win7/8 明确关闭 winpty，继续使用稳定的 pipe 行级模式。
+
+验证（v0.8.0-567-gb7b4b9f，Go SSH 客户端强制 pty-req 100x30）：
+
+| 节点 | 结果 |
+|---|---|
+| deskw（Win10 1607 / PS5.1） | winpty PTY：提示符、`中文测试`、`HI`、`exit` 均正常 |
+| vm（Win11） | ConPTY（原路径），未受影响 |
+| qgw（Win7 / PS2） | pty-req 按门控拒绝，pipe 行级模式中文正常（无提示符） |
+
+部署：winpty 两文件已放到 deskw/qgw/vm 的部署根目录；deskw 通过 pkg 热切换、
+qgw 通过 pkg 热切换、vm 走计划任务，三节点均为 `v0.8.0-567-gb7b4b9f`。
+（调试注记：测试客户端把 stdout/stderr 共用同一个 `bytes.Buffer` 会产生竞态，
+导致偶发 0 字节输出；换线程安全 writer 后稳定。）
+
+
 
 
 

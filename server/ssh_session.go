@@ -137,7 +137,7 @@ func utf8InitCmd(shell string) string {
 func utf8InitCmdPipe(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return "$u=New-Object System.Text.UTF8Encoding $false; try { [Console]::InputEncoding=$u } catch {}; [Console]::OutputEncoding=$u\r\n"
+		return "$u=New-Object System.Text.UTF8Encoding $false; try { [Console]::InputEncoding=$u } catch {}; try { [Console]::OutputEncoding=$u } catch {}\r\n"
 	case shellKindPosix:
 		return ""
 	default:

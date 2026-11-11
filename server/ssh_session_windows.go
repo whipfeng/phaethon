@@ -3,7 +3,6 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -139,28 +138,30 @@ func interactiveShellArgs(shell string) []string {
 	return nil
 }
 
-// bomStripProc removes a leading UTF-8 BOM from the shell's output. PS 2.0's
-// "-Command -" host writes one even when Console.OutputEncoding is a no-BOM
-// encoder, which UTF-8 clients otherwise render as a stray character.
+// bomStripProc removes a leading UTF-8 BOM from the first output chunk.
+// PS 2.0's "-Command -" host writes one even when Console.OutputEncoding is a
+// no-BOM encoder, which UTF-8 clients otherwise render as a stray character.
+// We strip it inline instead of using bufio.Peek so a short first read never
+// delays the session output.
 type bomStripProc struct {
 	sessionProc
-	br     *bufio.Reader
-	peeked bool
+	checked bool
 }
 
 func newBOMStripProc(p sessionProc) *bomStripProc {
-	return &bomStripProc{sessionProc: p, br: bufio.NewReader(p)}
+	return &bomStripProc{sessionProc: p}
 }
 
 func (p *bomStripProc) Read(b []byte) (int, error) {
-	if !p.peeked {
-		p.peeked = true
-		if head, err := p.br.Peek(3); err == nil && len(head) == 3 &&
-			head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF {
-			_, _ = p.br.Discard(3)
+	n, err := p.sessionProc.Read(b)
+	if !p.checked && (n > 0 || err != nil) {
+		p.checked = true
+		if n >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+			copy(b[0:n-3], b[3:n])
+			n -= 3
 		}
 	}
-	return p.br.Read(b)
+	return n, err
 }
 
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {

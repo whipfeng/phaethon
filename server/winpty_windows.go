@@ -315,9 +315,17 @@ type winptyProc struct {
 
 	mu    sync.Mutex
 	freed bool
+	reads int
 }
 
-func (p *winptyProc) Read(b []byte) (int, error)  { return p.out.Read(b) }
+func (p *winptyProc) Read(b []byte) (int, error) {
+	n, err := p.out.Read(b)
+	if p.reads < 3 {
+		util.LogModuleError("ssh", "WINPTY-DBG read#%d n=%d err=%v", p.reads, n, err)
+		p.reads++
+	}
+	return n, err
+}
 func (p *winptyProc) Write(b []byte) (int, error) { return p.in.Write(b) }
 
 func (p *winptyProc) Wait() error {

@@ -2036,6 +2036,33 @@ qg/jf/gg/mb/vm 均已核对。注意：自然出现的多分钟停滞**没有** 
 （探针不会触发），它的初始触发仍是 reo_wnd 正反馈/链路乱序；但“ACK 单向黑洞”
 这一类真实故障现已可检测并在 5s 内自愈。
 
+## 87. 主动复现“自然停滞”：300ms 延迟尖峰导致全流 cwnd=1（2026-11-11 12:10）
+
+在 qg 用 `tc` 模拟路径延迟尖峰，成功复现自然停滞的现场签名：
+
+```
+tc qdisc add dev eth1 root netem delay 300ms 100ms   # 20 秒后删除
+```
+
+（影响 qg 到 vm/jf 的出口，数据与 ACK 各加 ~300ms，RTT 抬到 ~600ms；无丢包、无静默，
+所以 UDP leg 探针不会报。）
+
+| 配置 | 8 流 196.3MB | 现场签名 |
+|---|---|---|
+| v539（MinRTO 200ms，reo cap 150ms） | **114.8s / 1.63MB/s** | netem 后 1~2s 内 **8 条流 cwnd 全部=1**，冻结 ~40s；srtt 144ms、reoWnd 102ms |
+| MinRTO 1s | 100.3s / 1.87MB/s | 仍全流 cwnd=1 冻结 11 个采样 |
+| + reoWnd 纳入 4*RTTVar（cap 300ms） | 98.9s / 1.89MB/s | 仍全流 cwnd=1；reoWnd 最高 199ms |
+| + MaxRTO 4s | **>5 分钟未完成（kill）** | 更差：更频繁重传→拥塞/重传风暴 |
+
+结论：
+- 自然停滞的初始触发是**延迟/抖动尖峰**（300ms±100ms），不是黑洞；
+- 放大机制是 RTO 同步 + 指数退避，所有流同时回到 cwnd=1 并冻结数十秒；
+- 单纯调 MinRTO / 提高 reoWnd / 缩短 MaxRTO 都不能解决，MaxRTO 4s 反而恶化；
+- 已全部回退到 v539（fork `df709ed`），jf 恢复 52670D。
+
+下一步方向应是**削掉延迟尖峰本身**（relay/ht 队列 AQM、pacing、减小突发）或
+**RTO 去同步**，而不是继续调 RTO 上下限。复现配方已写入本节，可随时回归验证。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

@@ -338,3 +338,9 @@ func (f *udpLegFSM) fallback(now time.Time) []udpLegAction {
 	f.backoffUntil = now.Add(f.timings.backoff)
 	return acts
 }
+
+// ForceFallback lets the transport react to a detected data-path black hole
+// (outbound active, inbound silent) before the regular K reflux timeout.
+func (f *udpLegFSM) ForceFallback(now time.Time) []udpLegAction {
+	return f.fallback(now)
+}

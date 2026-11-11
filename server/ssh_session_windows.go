@@ -31,13 +31,7 @@ var supportConPTY = conpty.IsConPtyAvailable()
 // fallback is stable there. Installing WMF 5.1 / PowerShell 7 on such nodes
 // would make winpty viable.
 func ptyAvailable() bool {
-	if supportConPTY {
-		return true
-	}
-	if windows.RtlGetVersion().MajorVersion < 10 {
-		return false
-	}
-	return winptyReady()
+	return supportConPTY || winptyReady()
 }
 
 type conptyProc struct {

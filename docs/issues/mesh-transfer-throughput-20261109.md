@@ -2529,6 +2529,71 @@ winpty 版本。Win7 上无法通过参数调优让它稳定。
 固定行级模式**，Win10 无 ConPTY 用 winpty/ConPTY。Win7 要真 PTY 只有换
 Win10 1809+（ConPTY）或接受行级/REPL；WMF 5.1/PS7 不会带来 ConPTY。
 
+## 101. 同载体基线纠偏：差距在 mesh 数据面，不在物理链路（2026-11-12 01:30）
+
+**环境**：vm `v0.8.0-574-gc53c1ee`、qg/jf `v0.8.0-547-g9ddb2a9`；
+vm↔qg 走 `vm:QG_SS5_UDPLEG`（SOCKS5 10.11.61.50:7890，UDP leg Active），
+qg↔jf 走 `qg:MGMS_HT`（h_tunnel，transport=tcp）。
+载荷 `/tmp/bench24.bin`=24.5MB（jf md5 `438de69e…`、qg md5 `054d4242…`），
+8 流；测量脚本 `tmp_bench_hop.sh`（`ssh ... cat file`，丢弃输出，墙钟/字节）。
+
+### 101.1 同窗口同载荷对照（一行一个载体）
+
+| 路径 / 载体 | 方向 | 吞吐 | 说明 |
+|---|---|---|---|
+| vm ↔ qg 公网 `10.11.61.50:2222`（OS sshd） | 下载 | **9.84MB/s** | 宿主机 NAT 端口转发（eth0） |
+| vm ↔ qg 公网 `10.11.61.50:7890`（原生 SOCKS5） | 下载 | **11 / 9.0MB/s** | curl 单流 / 8 流，无 mesh |
+| vm ↔ qg 内网 `192.168.1.101:2222`（OS sshd） | 下载 / 上传 | **1.33 / 2.43MB/s** | 经 192.168.1.1 的 eth1 路径 |
+| vm → qg mesh（UDP leg） | 下载 / 上传 | **1.8 / 7.2MB/s** | 内建 SSH，8 流 |
+| vm → qg mesh（关 UDP leg，TCP 载体） | 下载 / 上传 | **3.1 / 3.6MB/s** | 同上，`p2p-udp=false` 单变量 |
+| vm → qg → jf（OS ssh 串接，无 mesh） | 下载 | **4.1~4.6MB/s** | 同窗口公网链路已劣化（历史 9.79） |
+| vm → jf mesh（两跳） | 下载 | **0.7~1.4MB/s** | UDP leg 1.0~1.4；TCP 载体 0.7~0.9 |
+
+**结论 1（口径纠偏）**：`10.11.61.50:2222` 的 9.84MB/s 与 mesh 走的
+`192.168.1.101/eth1` 不是同一条物理路径，不能直接当作 mesh 的“直连基线”。
+在**同一条 eth1 路径**上 OS ssh 只有 1.33MB/s，mesh UDP leg 的 1.8MB/s 已不低于它；
+真正同载体的上限是原生 SOCKS5 的 9~11MB/s —— mesh 数据面相对它损失 3~5×，
+这才是需要优化的部分。后续基线必须写明“哪条接口/哪个载体”。
+
+**结论 2（方向不对称）**：UDP leg 下载 1.8 / 上传 7.2；TCP 载体下载 3.1 / 上传 3.6。
+下载慢是 qg→vm 方向（qg 被动腿经 SOCKS5 relay 回写）特有的问题，
+与“链路带宽不足”不符（同链路原生 SOCKS5 可 9~11）。
+
+### 101.2 单流内层 TCP 现场（download，UDP leg）
+
+单流连续 98MB，qg gVisor 发送端采样（`tcpFlowDebug`，6 次）：
+
+| 指标 | 值 |
+|---|---|
+| cwnd | 128 / 148 / 150 / 176（自适应上限 4×BDP，floor 128 / ceil 512） |
+| srtt / minRTT | 155~201ms / **37ms** |
+| RACK RTT / reoWnd | 62~205ms / 73ms |
+| DSACK 计数 | 0~2（**几乎无丢包**） |
+| sndWnd（vm 通告） | 2MB |
+| 单流吞吐 | **1.85MB/s**（98MB/53s） |
+
+解释：无丢包、接收窗 2MB、cwnd 贴着自适应上限，吞吐 ≈ cap×MSS/srtt。
+srtt 比 minRTT 高 ~120ms，说明路径上存在约 200KB 的驻留队列
+（`p2p.udpLegTransport` 的 `legCh` 256 个数据报 ≈ 384KB，或 lane/relay 队列）；
+`[P2P-QDEPTH]` 阈值 256KB/1s，恰好低于该水位，所以日志没有报。
+单流与 8 流聚合几乎相同（1.85 vs 1.8），确认是**共享的单点串行瓶颈**，不是每流 cwnd。
+
+### 101.3 顺带发现：jf→vm 路由仍会短暂切到 gg
+
+一次采样中 jf 的 `bestPaths` 为 `vm via gg cost=174.5`（gg 是 ~1s 链路），
+几十秒后恢复 `via qg cost=72.4`；拓扑里 `qg -> vm` 边存在（cost 68.9ms，
+gg->vm 123.4ms）。同时 vm→jf 新建 SSH 握手 0.8~1.1s。
+这和 §11 的“回程绕 gg”同类，属路由/边成本抖动，会让两跳吞吐出现 0.7~0.9 的离群跑。
+
+### 101.4 下一步（单变量）
+
+1. **cwnd 自适应上限是否就是限制**：fork `cwndBDPGain` 4→16（qg 为下载发送端），
+   同窗口 A/B 单流/8 流；若吞吐显著上升 → 继续调 gain/ceil；若只涨 RTT 不涨吞吐 →
+   瓶颈是驻留队列（接着压 legCh/lane 队列）。
+2. 若 1 无效：把 `legCh` 入队水位、`laneQDTarget=200ms` 与 `P2P-QDEPTH` 阈值对齐排查，
+   确认 200KB 队列在哪个环节。
+3. 两跳另开一条：给 jf→vm 的路由加切换滞回，避免短时切到 gg。
+
 
 
 

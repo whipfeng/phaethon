@@ -2775,6 +2775,28 @@ srtt 3.4~5.5s  minRTT 79~97ms  RTO 8.8~16.6s  cwnd 128（一条 55）
 说明健康窗口里的 DSACK 税不是靠放宽 reoWnd 能消掉的；下一步应做
 **发送侧 pacing** 或 **egress sojourn AQM**，从源头减少突发而不是放宽判丢。
 
+### 102.7 pacing 评估结论：证据不支持，暂不实现（2026-11-12 04:40）
+
+评估目标：用发送侧 pacing 削平 cwnd 突发，减少 ht 载体排队和 RACK 伪丢包。
+
+反对证据（当前 `128KB / slots8 / gain4` 生产配置，jf 侧）：
+
+| 观测 | 结果 | 含义 |
+|---|---|---|
+| jf ht server CoDel 丢帧计数 | **0**（整个测试期） | dataQ 没有堆到 50ms 目标以上，无队列可“削峰” |
+| orderedInbox gap skip 日志 | 0 | 没有观测到跳批（日志级别内） |
+| 内层 TCP 形态 | cwnd 128~176、srtt 150~200ms、minRTT 55~80ms | 吞吐 ≈ cwnd×MSS/RTT，是被窗口/RTT 限制 |
+| 提高窗口（gain8/16） | 更差（4.79 / ~3.6） | 再放大窗口只会增加丢包/RTO，不是 pacing 能解决的 |
+
+结论：剩余 RTT 增量不在我们能 pacing 的 mesh/数据面队列里，而在
+ht 长轮询的请求/响应与回程 ACK 路径（以及接收端 ACK 节奏）。在这种
+“窗口/RTT 受限 + 批级乱序”的形态下，**发送侧 pacing 预计无收益且会引入
+新的实现风险，故不实现**。
+
+真正可能跨过 80% 的是把载体 RTT 降下来：持久化 chunked GET（去掉每批
+GET 的请求/响应往返），或在 orderedInbox 上做真正的按流保序/重传，
+而不是继续在发送窗口上做文章。
+
 
 
 

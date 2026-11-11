@@ -130,12 +130,14 @@ func utf8InitCmd(shell string) string {
 }
 
 // utf8InitCmdPipe 是管道模式（无 ConPTY）的初始化命令：没有真实控制台，
-// chcp 可能失败、设置 InputEncoding 可能抛异常，所以只切输出编码并吞掉
-// 异常，避免会话一开始就冒出错误文本。cmd 的 chcp 用 >nul 2>&1 静默。
+// chcp 可能失败、设置 InputEncoding 可能抛异常，所以只切 .NET Console 的
+// 输入/输出编码并吞掉异常。必须用不带 BOM 的 UTF8Encoding：PS 2.0 的
+// [Text.Encoding]::UTF8 会给输出加 BOM，ssh 客户端会把它显示成乱码字符。
+// cmd 的 chcp 用 >nul 2>&1 静默。
 func utf8InitCmdPipe(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		return "try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}\r\n"
+		return "$u=New-Object System.Text.UTF8Encoding $false; try { [Console]::InputEncoding=$u } catch {}; [Console]::OutputEncoding=$u\r\n"
 	case shellKindPosix:
 		return ""
 	default:

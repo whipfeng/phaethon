@@ -271,7 +271,6 @@ func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32, legacy
 	if ok == 0 {
 		return fail(fmt.Errorf("winpty_spawn failed (CreateProcess error %d)", createErr))
 	}
-	util.LogModuleError("ssh", "WINPTY-DBG spawn app=%q cmd=%q cwd=%q pid=%d handle=%#x", appname, cmdline, workDir, procHandle, procHandle)
 	if threadHandle != 0 {
 		_ = windows.CloseHandle(windows.Handle(threadHandle))
 	}
@@ -300,13 +299,12 @@ func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32, legacy
 		return fail(fmt.Errorf("open conout: %w", err))
 	}
 	return &winptyProc{
-		api:       api,
-		wp:        wp,
-		in:        in,
-		out:       out,
-		proc:      windows.Handle(procHandle),
-		legacy:    legacyExit,
-		spawnTime: time.Now(),
+		api:    api,
+		wp:     wp,
+		in:     in,
+		out:    out,
+		proc:   windows.Handle(procHandle),
+		legacy: legacyExit,
 	}, nil
 }
 
@@ -323,9 +321,8 @@ type winptyProc struct {
 	// legacy marks Win7/PS2 shells. PS2's interactive host does not exit on
 	// "exit" under winpty and does not exit when conin closes, so the server
 	// terminates the process itself after forwarding "exit" or on EOF.
-	legacy    bool
-	lineBuf   []byte
-	spawnTime time.Time
+	legacy  bool
+	lineBuf []byte
 }
 
 func (p *winptyProc) Read(b []byte) (int, error) { return p.out.Read(b) }
@@ -373,11 +370,9 @@ func (p *winptyProc) CloseStdin() {
 }
 
 func (p *winptyProc) Wait() error {
-	ev, werr := windows.WaitForSingleObject(p.proc, windows.INFINITE)
+	_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
 	var code uint32
-	gerr := windows.GetExitCodeProcess(p.proc, &code)
-	util.LogModuleError("ssh", "WINPTY-DBG wait ev=%d werr=%v code=%d gerr=%v after=%v",
-		ev, werr, code, gerr, time.Since(p.spawnTime))
+	_ = windows.GetExitCodeProcess(p.proc, &code)
 	p.release()
 	if code != 0 {
 		return &exitCodeError{code: code}

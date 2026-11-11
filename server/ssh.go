@@ -250,14 +250,12 @@ func runSession(channel ssh.Channel, proc sessionProc, needFastClose bool) {
 	done := make(chan struct{})
 	var copied atomic.Int64
 	go func() {
-		n, err := io.Copy(proc, channel)
-		util.LogModuleError("ssh", "SSH-DBG input copy n=%d err=%v", n, err)
+		_, _ = io.Copy(proc, channel)
 		proc.CloseStdin()
 	}()
 	go func() {
 		n, err := io.Copy(channel, proc)
 		util.LogModuleInfo("ssh", "output copy done: bytes=%d err=%v", n, err)
-		util.LogModuleError("ssh", "SSH-DBG output copy n=%d err=%v", n, err)
 		copied.Store(n)
 		close(done)
 	}()

@@ -30,8 +30,23 @@ var supportConPTY = conpty.IsConPtyAvailable()
 // exits immediately, and does not exit on "exit"), while the line-mode pipe
 // fallback is stable there. Installing WMF 5.1 / PowerShell 7 on such nodes
 // would make winpty viable.
+// ptyAvailable reports whether a real PTY can be provided: native ConPTY on
+// Win10 1809+, otherwise the bundled winpty (Win10 only).
+//
+// Win7/8 are excluded: winpty's agent renders by scraping the hidden console's
+// screen buffer, and on qgw (Win7) the desktop session is usually disconnected
+// (qwinsta: wangqian = Disc). Input is still delivered and the shell executes
+// commands, but conout yields only the initial clear, so the SSH session looks
+// empty. With an active session it works, but an unattended node cannot rely
+// on that. Win10 nodes use ConPTY instead when available.
 func ptyAvailable() bool {
-	return supportConPTY || winptyReady()
+	if supportConPTY {
+		return true
+	}
+	if windows.RtlGetVersion().MajorVersion < 10 {
+		return false
+	}
+	return winptyReady()
 }
 
 type conptyProc struct {
@@ -185,11 +200,7 @@ func winptyInitCmd(shell string) string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			// Win7 + winpty: both chcp 65001 and the [Console] encoding
-			// setters can break the agent's screen capture (input still runs,
-			// but conout goes silent). Leave the console untouched; winpty's
-			// agent converts the screen buffer itself.
-			return ""
+			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
 		}
 		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
 	case shellKindCmd:

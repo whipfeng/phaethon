@@ -23,9 +23,20 @@ import (
 var supportConPTY = conpty.IsConPtyAvailable()
 
 // ptyAvailable reports whether a real PTY can be provided: native ConPTY on
-// Win10 1809+, otherwise the bundled winpty (probed end-to-end once).
+// Win10 1809+, otherwise the bundled winpty.
+//
+// winpty is intentionally disabled on Win7/8: their PowerShell 2.0 interactive
+// host does not consume input from winpty's console (session hangs with no
+// prompt), while the line-mode pipe fallback works correctly there. Win10
+// (PS 3.0+) + winpty is validated end-to-end.
 func ptyAvailable() bool {
-	return supportConPTY || winptyReady()
+	if supportConPTY {
+		return true
+	}
+	if windows.RtlGetVersion().MajorVersion < 10 {
+		return false
+	}
+	return winptyReady()
 }
 
 type conptyProc struct {

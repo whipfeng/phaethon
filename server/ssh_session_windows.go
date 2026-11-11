@@ -47,7 +47,11 @@ func ptyAvailable() bool {
 	if windows.RtlGetVersion().MajorVersion < 10 && !wtsSessionActive() {
 		return false
 	}
-	return winptyReady()
+	// Load only; the one-time cmd probe spawns an extra winpty agent and can
+	// race with the first real session's agent on the console/desktop.
+	// A broken winpty now fails the session with an error instead of a
+	// silent black hole.
+	return winptyLoad()
 }
 
 type conptyProc struct {

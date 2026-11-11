@@ -2485,6 +2485,28 @@ PTY，可靠路径是升级系统里的 PowerShell：**WMF 5.1**（Win7 SP1 可�
 **PowerShell 7.1**；升级后与 deskw（PS5.1 + winpty，已验证稳定）一致。
 另一个低成本选项是给 PS2 做“提示符 REPL”（无 TTY，不能跑全屏程序）。
 
+### 100.2 根因修正：断开的桌面会话，而非 PS2/版本（2026-11-11 23:35）
+
+继续深挖后找到了真正的相关性：
+
+- `qwinsta`：**qgw 的 wangqian 会话是 `Disc`（断开）**；deskw 是 `Active`；
+- 失败会话的服务端日志：spawn 成功、input copy n=48、shell 在 exit 后
+  以 0 退出（**命令确实执行了**），但 output copy 只有 **8 字节**（初始清屏）；
+- winpty 的 agent 靠**抓取隐藏控制台的屏幕缓冲**来渲染 conout；桌面会话
+  断开时输入仍能进、命令仍能跑，但屏幕不更新，所以只有清屏、没有回显；
+- winpty 0.4.2（含 x64_xp）与 0.4.3 表现一致，**不是版本/输入处理问题**。
+
+修复：用 `WTSQuerySessionInformation(WTSConnectState)` 判断当前会话：
+
+- `Active`（管理员 RDP/控制台连着）：启用 winpty，真 PTY；
+- `Disconnected`（无人值守）：拒绝 pty-req，回退稳定的行级模式。
+
+验证（v0.8.0-579-gb6887c3）：Disc 状态下 pty-req 被拒绝、行级中文正常；
+Active 状态下的 winpty 验证需要 qgw 桌面保持连接后复测。
+（部署注记：qgw 的部署目录在 qg 上是 `/root/qgw` vboxsf 挂载，部署包直接
+`cp` 到 `/root/qgw/data/packages/` 即可，不再走 mb HTTP 中转。）
+
+
 
 
 

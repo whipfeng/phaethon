@@ -3,9 +3,11 @@ package dialer
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,12 @@ import (
 	"phaethon/frame"
 	"phaethon/util"
 )
+
+// htStreamGet enables the persistent chunked GET carrier (one data stream per
+// ht link, length-prefixed batches) instead of N long-poll GET loops. It
+// removes the per-batch request/response round trip; control traffic keeps its
+// normal long-poll loop. Off by default so it can be A/B tested per node.
+var htStreamGet = os.Getenv("PHAETHON_HT_STREAM_GET") == "1"
 
 // HTunnelCmdMesh marks a channel request as a P2P mesh channel: no target
 // address semantics, frames flow directly in POST/GET bodies.
@@ -63,6 +71,11 @@ type htunnelDirectTransport struct {
 	// active (get-slots > 2). With a single data loop it is a pass-through
 	// because batches arrive in sequence order already.
 	inbox *orderedInbox
+
+	// streamUnsupported is set when the server ignores the persistent-stream
+	// GET (old server); the data loop then falls back to long-poll.
+	streamUnsupported atomic.Bool
+	streamLogged      atomic.Bool
 
 	// Diagnostics: per-batch HTTP timing/size aggregates, logged every 5s
 	// when the htunnel module is at info or debug level.
@@ -141,11 +154,22 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 		heartbeatStop: make(chan struct{}),
 	}
 
-	// v0.2.0: Start base GET recvLoops (default 2)
+	// v0.2.0: Start GET recvLoops. With the persistent stream carrier one
+	// length-prefixed data GET replaces the N long-poll data loops; the
+	// control loop stays a normal long-poll.
 	t.inbox = newOrderedInbox(func(b orderedBatch) {
 		t.processBatchBody(b.body, b.loopType, b.readSeq)
 	}, t.closed)
-	for i := 0; i < baseGETs; i++ {
+	loops := baseGETs
+	if htStreamGet && loops < 2 {
+		loops = 2
+	}
+	if htStreamGet && loops > 2 {
+		loops = 2
+	}
+	t.baseGETs = loops
+	t.activeGETs = loops
+	for i := 0; i < loops; i++ {
 		go t.recvLoop(i == 0) // first one is the control loop
 	}
 
@@ -322,10 +346,14 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 
 		readSeq++
 		seq := readSeq
+		stream := htStreamGet && !isCtrlLoop && !t.streamUnsupported.Load()
 		getURL := fmt.Sprintf("%s/%s/%d", t.proxy.URL, t.connectionID, seq)
 		req, _ := http.NewRequest("GET", getURL, nil)
 		req.Header.Set(HeaderConnectionID, t.connectionID)
 		req.Header.Set(HeaderContentSeq, strconv.Itoa(seq))
+		if stream {
+			req.Header.Set(HeaderStream, "1")
+		}
 
 		// v0.2.0: send client-controlled wait time
 		t.getMu.Lock()
@@ -333,9 +361,23 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		t.getMu.Unlock()
 		req.Header.Set(HeaderWaitTime, strconv.Itoa(int(waitTime.Seconds())))
 
-		// Context timeout = wait time + buffer for network latency
-		ctxTimeout := waitTime + 10*time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+		// The persistent stream lives until the transport closes; the
+		// long-poll GET is bounded by wait time + network latency.
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if stream {
+			ctx, cancel = context.WithCancel(context.Background())
+			go func() {
+				select {
+				case <-t.closed:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+		} else {
+			ctxTimeout := waitTime + 10*time.Second
+			ctx, cancel = context.WithTimeout(context.Background(), ctxTimeout)
+		}
 		util.LogModuleDebug("htunnel", "sending GET: proxy=%s connID=%s seq=%d url=%s", t.proxy.Name, t.connectionID, seq, getURL)
 		getStart := time.Now()
 		resp, err := t.client.Do(req.WithContext(ctx))
@@ -344,6 +386,28 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 			util.LogModuleWarn("htunnel", "GET failed: proxy=%s connID=%s seq=%d err=%v", t.proxy.Name, t.connectionID, seq, err)
 			t.sendError(fmt.Errorf("htunnel-direct: get fail: %w", err), isCtrlLoop)
 			return
+		}
+
+		// Persistent chunked stream: frames arrive as [4-byte len][sealed batch]
+		// until the connection breaks. The data path is single-stream, so
+		// batches stay in production order (no multi-GET reordering).
+		if stream && resp.Header.Get(HeaderStream) == "1" {
+			if !t.streamLogged.Swap(true) {
+				// Error level so the switch is visible even when the htunnel
+				// module is filtered to error (A/B diagnostics).
+				util.LogModuleError("htunnel", "[HT-STREAM] persistent GET established: proxy=%s connID=%s", t.proxy.Name, t.connectionID)
+			}
+			t.getCount.Add(1)
+			t.readBatchStream(resp.Body, loopType)
+			resp.Body.Close()
+			cancel()
+			util.LogModuleInfo("htunnel", "stream GET ended, reconnecting: proxy=%s connID=%s", t.proxy.Name, t.connectionID)
+			continue
+		}
+		if stream {
+			// Old server: no echo. Fall back to long-poll for this transport.
+			t.streamUnsupported.Store(true)
+			util.LogModuleInfo("htunnel", "stream GET unsupported by server, falling back: proxy=%s connID=%s", t.proxy.Name, t.connectionID)
 		}
 
 		body, err := io.ReadAll(resp.Body)
@@ -411,6 +475,43 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 }
 
 // processBatchBody decodes one GET response body and routes its frames.
+// readBatchStream consumes a persistent chunked GET body: each batch is
+// [4-byte big-endian length][sealed frame batch]. Returns when the stream
+// breaks; the caller reconnects.
+func (t *htunnelDirectTransport) readBatchStream(body io.Reader, loopType string) {
+	var hdr [4]byte
+	seq := 0
+	for {
+		if _, err := io.ReadFull(body, hdr[:]); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(hdr[:])
+		if n == 0 {
+			continue
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(body, buf); err != nil {
+			return
+		}
+		if t.crypto.IsEnabled() {
+			plain, err := t.crypto.OpenBody(buf)
+			if err != nil {
+				util.LogModuleWarn("htunnel", "stream decrypt failed: proxy=%s connID=%s err=%v", t.proxy.Name, t.connectionID, err)
+				return
+			}
+			buf = plain
+		}
+		seq++
+		t.getBytes.Add(uint64(n))
+		t.processBatchBody(buf, loopType, seq)
+		select {
+		case <-t.closed:
+			return
+		default:
+		}
+	}
+}
+
 func (t *htunnelDirectTransport) processBatchBody(body []byte, loopType string, readSeq int) {
 	reader := bytes.NewReader(body)
 	frameCount := 0

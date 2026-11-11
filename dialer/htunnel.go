@@ -25,6 +25,7 @@ const (
 	HeaderCommand      = "X-C"
 	HeaderWaitTime     = "X-W" // v0.2.0: client-controlled wait time
 	HeaderBatchSeq     = "X-B" // v0.2.0: server-assigned data-batch sequence
+	HeaderStream       = "X-Stream" // persistent chunked GET: length-prefixed batch stream
 )
 
 // HTunnelDialer connects through an HTTP tunnel proxy

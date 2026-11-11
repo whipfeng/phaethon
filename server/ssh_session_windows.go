@@ -97,7 +97,18 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 		if usePty && supportPty {
 			return startConptyShell(shell, workDir, cols, rows)
 		}
-		return startPipe(shell, nil, workDir)
+		p, err := startPipe(shell, interactiveShellArgs(shell), workDir)
+		if err != nil {
+			return nil, err
+		}
+		// 管道模式没有真实终端：PowerShell 启动 banner 在切换编码前就以
+		// 控制台初始代码页（中文系统 GBK）输出，UTF-8 客户端必然乱码，用
+		// -NoLogo 去掉；再把输出编码切到 UTF-8。注入写在本会话复制用户
+		// 输入之前，顺序有保证，且失败时静默（无控制台句柄时 chcp 会报错）。
+		if init := utf8InitCmdPipe(shell); init != "" {
+			_, _ = p.Write([]byte(init))
+		}
+		return p, nil
 	}
 	if usePty && supportPty {
 		return startConpty("\""+shell+"\" "+strings.Join(quoteArgs(execArgs(shell, cmdline)), " "), workDir, cols, rows)
@@ -105,11 +116,22 @@ func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
 }
 
+// interactiveShellArgs 返回交互 shell 的启动参数：PowerShell 加 -NoLogo，
+// 去掉以控制台初始代码页打印的厂商 banner（中文系统上会乱码）。
+func interactiveShellArgs(shell string) []string {
+	if classifyShell(shell) == shellKindPowerShell {
+		return []string{"-NoLogo"}
+	}
+	return nil
+}
+
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
 	// -NoLogo 抑制 PowerShell 启动 banner（它以控制台初始 GBK 代码页输出，
 	// 在 chcp 注入执行前就发完了，必然乱码；去掉最干净）。
 	commandLine := "\"" + shell + "\""
-	if base := strings.ToLower(shell); strings.Contains(base, "powershell") && !strings.Contains(base, "pwsh") {
+	if classifyShell(shell) == shellKindPowerShell {
+		// -NoLogo 同时适用于 Windows PowerShell 5.1 与 pwsh 7：banner 在
+		// 控制台初始代码页下输出，晚于 chcp 注入，必然乱码。
 		commandLine += " -NoLogo"
 	}
 	p, err := startConpty(commandLine, workDir, cols, rows)

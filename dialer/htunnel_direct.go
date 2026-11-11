@@ -65,7 +65,7 @@ type htunnelDirectTransport struct {
 	inbox *orderedInbox
 
 	// Diagnostics: per-batch HTTP timing/size aggregates, logged every 5s
-	// only while the htunnel module is at debug level.
+	// when the htunnel module is at info or debug level.
 	getCount  atomic.Uint64
 	getBytes  atomic.Uint64
 	getNanos  atomic.Uint64
@@ -580,7 +580,7 @@ func (t *htunnelDirectTransport) statsLoop() {
 		case <-t.closed:
 			return
 		case <-tk.C:
-			if util.GetModuleLogLevel("htunnel") > util.LogLevelDebug {
+			if util.GetModuleLogLevel("htunnel") > util.LogLevelInfo {
 				continue
 			}
 			gc := t.getCount.Swap(0)

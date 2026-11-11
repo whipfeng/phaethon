@@ -161,6 +161,10 @@ func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, er
 		return nil, err
 	}
 	if init := utf8InitCmd(shell); init != "" {
+		// winpty's conin converts CR to the Enter key; a trailing LF becomes
+		// a second line break and can leave PS at a ">>" continuation prompt,
+		// so send CR only here.
+		init = strings.TrimRight(init, "\r\n") + "\r"
 		_, _ = p.Write([]byte(init))
 	}
 	return p, nil

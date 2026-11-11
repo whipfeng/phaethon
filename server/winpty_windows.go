@@ -269,6 +269,7 @@ func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32) (*winp
 	if ok == 0 {
 		return fail(fmt.Errorf("winpty_spawn failed (CreateProcess error %d)", createErr))
 	}
+	util.LogModuleError("ssh", "WINPTY-DBG spawned app=%q cmd=%q cwd=%q pid=%d", appname, cmdline, workDir, procHandle)
 	if threadHandle != 0 {
 		_ = windows.CloseHandle(windows.Handle(threadHandle))
 	}
@@ -323,6 +324,7 @@ func (p *winptyProc) Wait() error {
 	_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
 	var code uint32
 	_ = windows.GetExitCodeProcess(p.proc, &code)
+	util.LogModuleError("ssh", "WINPTY-DBG wait code=%d", code)
 	p.release()
 	if code != 0 {
 		return &exitCodeError{code: code}

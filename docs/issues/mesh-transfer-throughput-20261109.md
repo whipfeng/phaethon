@@ -1972,6 +1972,37 @@ cwnd cap128、**reo_wnd 下限 100ms**。
   可能更容易触发慢恢复；下一步可做 2x 增益 A/B 和 ACK/腿路径的
   细粒度 sojourn 探针。
 
+## 84. BDP 增益 2x A/B：没有收益，回退 4x（2026-11-11 10:45）
+
+单变量（jf，gain 4→2，其余 adaptive2 不变），同窗口：
+
+| 场景 | gain 4x | gain 2x |
+|---|---|---|
+| 8 流 | 3.31 / 3.17（中位 3.24） | 3.56 / 6.00（中位 4.78） |
+| 单流 | 1.19 / 2.57（中位 1.88） | 2.06 / 2.01（中位 2.04） |
+| DSACK（采样） | 15.7% | **22.1%** |
+
+gain2 的 8 流看似更高，但同期链路在恢复（一次 31s/6.0），不是干净对比；
+且 gain2 采样 DSACK 反而升到 22.1%（窗口更小、恢复更依赖 RACK）。
+已回退 4x（fork `49d7b41`），jf 恢复 adaptive2。
+
+## 85. UDP leg 单向静默探针（v0.8.0-536）（2026-11-11 10:55）
+
+为实锤停滞的初始触发，`udpLegTransport` 新增：
+
+- `legIn/legOut` 计数、`lastInNano/lastOutNano` 时间戳；
+- 每秒检查：**outbound 在最近 3s 内活跃、但 inbound 已静默 >5s** 时，
+  打印 ERROR：
+  `[UDP-LEG] outbound active but no inbound for Xs (out=... in=... drops=...) - one-way leg black hole?`
+- 入站恢复（<2s）后自动重新武装，每次 episode 只报一次。
+
+这能区分“单向腿黑洞（NAT/端口失效）”和“单纯拥塞/链路慢”，
+下次停滞时看 qg 日志即可定论。
+
+全量发布 v0.8.0-536-ga852311（qg/jf/gg/mb/vm 均核对）；发布后
+一次 8 流 4.62MB/s（同窗口 OS 约 5.06，~91%），文件落盘 **8/8 sha256**，
+本次未触发静默告警。
+
 （过程注记：qg 的 `/tmp` 是 236MB tmpfs，多次 staged 二进制曾把 qg 填满，
 导致一次 scp 失败并把旧 Windows 二进制部署到 jf、jf 短暂崩溃。已清理
 `/tmp/phaethon-*.staged` 并用正确 513/514 恢复；后续部署前先 `df -h /tmp`，

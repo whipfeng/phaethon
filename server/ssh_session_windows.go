@@ -160,14 +160,29 @@ func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, er
 	if err != nil {
 		return nil, err
 	}
-	if init := utf8InitCmd(shell); init != "" {
-		// winpty's conin converts CR to the Enter key; a trailing LF becomes
-		// a second line break and can leave PS at a ">>" continuation prompt,
-		// so send CR only here.
-		init = strings.TrimRight(init, "\r\n") + "\r"
+	if init := winptyInitCmd(shell); init != "" {
 		_, _ = p.Write([]byte(init))
 	}
 	return p, nil
+}
+
+// winptyInitCmd returns the UTF-8 init lines for a winpty console.
+//
+// The console converts CR to the Enter key (LF becomes a second line break),
+// so every line ends with CR only. PS 2.0 (Win7) mangles the long guarded
+// one-liner used by ConPTY, so it gets two short lines instead.
+func winptyInitCmd(shell string) string {
+	switch classifyShell(shell) {
+	case shellKindPowerShell:
+		if windows.RtlGetVersion().MajorVersion < 10 {
+			return "chcp 65001 | Out-Null\r" +
+				"[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
+		}
+		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
+	case shellKindCmd:
+		return "chcp 65001 >nul\r"
+	}
+	return ""
 }
 
 // interactiveShellArgs 返回管道模式下交互 shell 的参数。

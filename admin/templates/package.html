@@ -1,6 +1,11 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
+    <!-- Worker version pin status -->
+    <div id="package-pin-banner" style="display:none; margin-bottom:1rem; padding:0.75rem; border-radius:6px; background:rgba(248,81,73,0.12); align-items:center; justify-content:space-between; gap:0.75rem;">
+        <span id="package-pin-text"></span>
+        <button class="btn btn-sm btn-primary" onclick="PackagePage.unpin()" data-i18n="package.unpin">取消固定</button>
+    </div>
     <!-- Upload -->
     <div class="card" id="package-upload-card">
         <h3 data-collapse><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="package.uploadTitle">上传发布包</span></h3>
@@ -43,6 +48,41 @@
             this.setupUpload();
             this.setupSSE();
             this.refresh();
+            this.refreshPin();
+        },
+
+        refreshPin() {
+            fetch('./api/packages/pin')
+                .then(r => r.json())
+                .then(d => {
+                    const pin = d.pin || '';
+                    const cur = d.current || '';
+                    const banner = document.getElementById('package-pin-banner');
+                    if (!banner) return;
+                    if (!pin) {
+                        banner.style.display = 'none';
+                        return;
+                    }
+                    document.getElementById('package-pin-text').textContent =
+                        '当前 worker 固定为 ' + pin + '（运行中 ' + (cur || '未知') + '）；手动部署的新版本不会生效。';
+                    banner.style.display = 'flex';
+                })
+                .catch(() => {});
+        },
+
+        unpin() {
+            if (!confirm('取消 worker 版本固定并立即重启？')) return;
+            fetch('./api/packages/pin?restart=now', { method: 'DELETE' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d && d.error) {
+                        showToast(d.error, 'error');
+                        return;
+                    }
+                    showToast('已取消固定，正在重启…', 'success');
+                    document.getElementById('package-pin-banner').style.display = 'none';
+                })
+                .catch(() => showToast('取消固定失败', 'error'));
         },
 
         setupSSE() {

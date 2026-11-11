@@ -36,6 +36,10 @@ scp -P $QG_PORT "$LOCAL_BINARY" "$QG_USER@$QG_HOST:/root/phaethon-new"
 echo "Stopping service..."
 ssh -p $QG_PORT $QG_USER@$QG_HOST "rc-service phaethon stop"
 
+# Kill versioned workers (comm like phaethon-v0.8.0-xxx) that rc-service's
+# pkill pattern does not match.
+ssh -p $QG_PORT $QG_USER@$QG_HOST "pkill -f 'data/worker/phaethon' || true"
+
 # Replace binary
 echo "Replacing binary..."
 ssh -p $QG_PORT $QG_USER@$QG_HOST "mv /root/phaethon-new /root/phaethon && chmod +x /root/phaethon"

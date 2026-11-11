@@ -69,9 +69,13 @@ type htunnelDirectTransport struct {
 	getCount  atomic.Uint64
 	getBytes  atomic.Uint64
 	getNanos  atomic.Uint64
+	getMaxNs  atomic.Uint64
+	getSlow   atomic.Uint64
 	postCount atomic.Uint64
 	postBytes atomic.Uint64
 	postNanos atomic.Uint64
+	postMaxNs atomic.Uint64
+	postSlow  atomic.Uint64
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -276,8 +280,26 @@ func (t *htunnelDirectTransport) postBatch(plaintext []byte, seq int) error {
 	}
 	t.postCount.Add(1)
 	t.postBytes.Add(uint64(len(data)))
-	t.postNanos.Add(uint64(time.Since(postStart)))
+	d := time.Since(postStart)
+	t.postNanos.Add(uint64(d))
+	bumpMax(&t.postMaxNs, uint64(d))
+	if d > time.Second {
+		t.postSlow.Add(1)
+	}
 	return nil
+}
+
+// bumpMax updates *p to v when v is larger (lock-free max).
+func bumpMax(p *atomic.Uint64, v uint64) {
+	for {
+		cur := p.Load()
+		if v <= cur {
+			return
+		}
+		if p.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // recvLoop continuously sends GET requests and routes received frames to
@@ -330,7 +352,12 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		if resp.StatusCode == http.StatusOK {
 			t.getCount.Add(1)
 			t.getBytes.Add(uint64(len(body)))
-			t.getNanos.Add(uint64(time.Since(getStart)))
+			d := time.Since(getStart)
+			t.getNanos.Add(uint64(d))
+			bumpMax(&t.getMaxNs, uint64(d))
+			if d > time.Second {
+				t.getSlow.Add(1)
+			}
 		}
 
 		util.LogModuleDebug("htunnel", "GET response: proxy=%s connID=%s seq=%d status=%d bodyLen=%d", t.proxy.Name, t.connectionID, seq, resp.StatusCode, len(body))
@@ -559,9 +586,13 @@ func (t *htunnelDirectTransport) statsLoop() {
 			gc := t.getCount.Swap(0)
 			gb := t.getBytes.Swap(0)
 			gn := t.getNanos.Swap(0)
+			gmax := t.getMaxNs.Swap(0)
+			gslow := t.getSlow.Swap(0)
 			pc := t.postCount.Swap(0)
 			pb := t.postBytes.Swap(0)
 			pn := t.postNanos.Swap(0)
+			pmax := t.postMaxNs.Swap(0)
+			pslow := t.postSlow.Swap(0)
 			if gc == 0 && pc == 0 {
 				continue
 			}
@@ -580,8 +611,8 @@ func (t *htunnelDirectTransport) statsLoop() {
 					pRate = float64(pb) * 1e3 / float64(pn)
 				}
 			}
-			util.LogModuleInfo("htunnel", "[HT-STATS] proxy=%s conn=%s GET n=%d avg=%.1fms batch=%.0fKB rate=%.2fMB/s | POST n=%d avg=%.1fms batch=%.0fKB rate=%.2fMB/s",
-				t.proxy.Name, t.connectionID, gc, gAvg, gKB, gRate, pc, pAvg, pKB, pRate)
+			util.LogModuleInfo("htunnel", "[HT-STATS] proxy=%s conn=%s GET n=%d avg=%.1fms max=%.0fms slow=%d batch=%.0fKB rate=%.2fMB/s | POST n=%d avg=%.1fms max=%.0fms slow=%d batch=%.0fKB rate=%.2fMB/s",
+				t.proxy.Name, t.connectionID, gc, gAvg, float64(gmax)/1e6, gslow, gKB, gRate, pc, pAvg, float64(pmax)/1e6, pslow, pKB, pRate)
 		}
 	}
 }

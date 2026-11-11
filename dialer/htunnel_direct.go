@@ -109,6 +109,13 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 	util.LogModuleInfo("htunnel", "dialP2PDirect called, URL=%s", proxy.Name, proxy.URL)
 	crypto := util.NewHTunnelCrypto(proxy.Password)
 
+	// Optional WebSocket carrier: one full-duplex connection instead of
+	// GET long-polls + POSTs. Opt-in per proxy via PHAETHON_HT_WS.
+	if wsEnabledFor(proxy.Name) {
+		util.LogModuleInfo("htunnel", "carrier=websocket proxy=%s", proxy.Name)
+		return dialP2PWebSocket(proxy, crypto)
+	}
+
 	req, _ := http.NewRequest("HEAD", fmt.Sprintf("%s//0", proxy.URL), nil)
 	req.Header.Set(HeaderContentSeq, strconv.Itoa(0))
 	req.Header.Set(HeaderCommand, HTunnelCmdMesh)

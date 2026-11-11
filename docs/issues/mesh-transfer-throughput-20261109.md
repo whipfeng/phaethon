@@ -2864,6 +2864,39 @@ GET 的请求/响应往返），或在 orderedInbox 上做真正的按流保序/
    基于“无可削队列 + cwnd/RTT 受限”的间接证据**暂不投入**——这是优先级
    判断，不是“pacing 无效”的验证结论，条件变化后应重新评估。
 
+## 104. WebSocket 载体 PoC：vm→qg→mb 实测约 1.7×（2026-11-12 07:50）
+
+### 104.1 实现
+
+- `frame.WSTransport`：把 WebSocket 当 `FrameTransport` 用；每条二进制消息
+  携带若干长度前缀帧，可选 h_tunnel 口令加密；接收侧控制帧（非
+  `FrameMeshPacket`）优先于数据帧。
+- 服务端：`ServeHTTP` 见到 `Upgrade: websocket` 就升级，直接在该连接上
+  跑一个 P2P 会话（不再走 GET/POST 通道）。
+- 客户端：`PHAETHON_HT_WS=<proxy 名列表|1|all>` 时，对应 h_tunnel 链路改走
+  `ws://host/path/ws/<connID>`；其余链路保持原长轮询。默认关闭。
+
+### 104.2 vm→qg→mb 验证（MB_HT，直连 LAN，不经过 nginx）
+
+同一时段交替切换 qg 的 `PHAETHON_HT_WS`（每次重启生效），8 流 196MB：
+
+| 载体 | 各次吞吐 | 中位 |
+|---|---|---|
+| 长轮询 GET/POST | 2.97 / 3.01 / 2.49 / 1.73 / 2.31 | **~2.49MB/s** |
+| **WebSocket** | 4.92 / 4.67 / 5.50 / 3.06 / 5.05 / 2.31 / 4.25 / 3.34 | **~4.3MB/s** |
+
+约 **1.7×** 提升；慢跑仍与链路时段有关。完整性：WS 下 8 流 **8/8 MD5 一致**
+（`8753a5aa…`）。qg 日志确认 `[HT-WS] persistent websocket established:
+proxy=MB_HT url=ws://192.168.1.88:18081/ui/resdata/ws/conn-1`。
+
+### 104.3 当前状态与下一步
+
+- **MB_HT 已启用 WS**（qg init: `PHAETHON_HT_WS=MB_HT`），mb 运行
+  `v0.8.0-583-g2ab2f5c-ws`（服务端同时兼容长轮询）；
+- **MGMS_HT（qg→jf）仍走长轮询**：该路径经过 nginx，目前未放行
+  `Upgrade`；放行后可用同一二进制按 `PHAETHON_HT_WS=MGMS_HT` 直接 A/B；
+- 下一步：mb 链路长跑/停滞回归；nginx 放行后验证 jf 两跳。
+
 
 
 

@@ -333,6 +333,12 @@ func (c *htunnelServerConn) CloseWrite() error {
 }
 
 func (s *HTunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// WebSocket carrier: one full-duplex connection per P2P session.
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		s.handleMeshWebSocket(w, r)
+		return
+	}
+
 	contentSeq, _ := strconv.Atoi(r.Header.Get(dialer.HeaderContentSeq))
 
 	switch r.Method {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -104,6 +105,11 @@ func AcceptLoop(listener net.Listener, handler ConnHandler, name string) {
 				util.LogModuleWarn("base", "%s accept temporary error: %v", name, err)
 				time.Sleep(5 * time.Millisecond)
 				continue
+			}
+			if errors.Is(err, net.ErrClosed) {
+				// Normal shutdown: the listener was closed while Accept was blocked.
+				util.LogModuleDebug("base", "%s accept loop closed", name)
+				return
 			}
 			util.LogModuleError("base", "%s accept error: %v", name, err)
 			return

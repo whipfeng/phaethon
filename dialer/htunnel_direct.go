@@ -397,9 +397,7 @@ func (t *htunnelDirectTransport) recvLoop(isCtrlLoop bool) {
 		// batches stay in production order (no multi-GET reordering).
 		if stream && resp.Header.Get(HeaderStream) == "1" {
 			if !t.streamLogged.Swap(true) {
-				// Error level so the switch is visible even when the htunnel
-				// module is filtered to error (A/B diagnostics).
-				util.LogModuleError("htunnel", "[HT-STREAM] persistent GET established: proxy=%s connID=%s", t.proxy.Name, t.connectionID)
+				util.LogModuleInfo("htunnel", "[HT-STREAM] persistent GET established: proxy=%s connID=%s", t.proxy.Name, t.connectionID)
 			}
 			t.getCount.Add(1)
 			t.readBatchStream(resp.Body, loopType)

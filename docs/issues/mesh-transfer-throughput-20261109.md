@@ -3135,3 +3135,30 @@ stripe/lane、保序、路由等上层逻辑不再为 h_tunnel POST/GET 池做�
 当前生产已回退：qg `wsauto` + 仅 MB_HT 走 WS，MGMS_HT 长轮询；jf `htq8m`；
 qg 到 jf:18080 的连接稳定在 41（phaethon 长轮询池）。后续加密与 SOCKS5
 UDP leg 纳入 WS 统一规划。
+
+### 107.7 统一抽象落地（StreamCarrier）与 WS lane 仍未放量（2026-11-12 11:45）
+
+按“一套抽象 + 多态实现”的要求实现了（已 stash，未进生产）：
+
+- 新增 `frame.StreamCarrier` 能力接口：
+  - `frame.WSTransport` → `true`
+  - `dialer.htunnelDirectTransport`（长轮询/回退）→ 显式 `false`
+  - 其它 TCP 类载体视为 `true`
+- p2p 不再出现 `proxy.Type == H_TUNNEL && V2` 的类型特判：
+  ```go
+  if sc, ok := transport.(frame.StreamCarrier); ok && sc.IsStreamCarrier() {
+      stripe = newStripeTransport(transport, ...) // 统一 lane 逻辑
+  }
+  ```
+- 不再强制预拨 lane（min-lane 已删除），lane 完全交给现有控制器。
+
+实测：
+- MGMS_HT / MB_HT 都成功建立 WS；
+- 但把 WS 包进 stripe 后约 1 分钟内，qg→jf 的 ESTABLISHED 又涨到 **34**；
+  回退到“MB_HT WS + MGMS 长轮询”后稳定在 **9**；回退后两跳 5.19MB/s 正常。
+
+结论：**抽象层已经统一，问题收敛到 lane 控制器本身在 WS 载体上的
+add/remove 行为**（gauge/credit 的触发条件是为长轮询/TCP 场景调的）。
+下一步应做控制器硬化：只在主 lane 真正拥塞持续 N 秒才加、加/删都带
+滞回、每会话连接数上限可验证（≤1+maxLanes 且 10 分钟不增长），先在
+MB（LAN）上回归，再上 jf。加密和 SOCKS5 UDP leg 随后纳入同一抽象。

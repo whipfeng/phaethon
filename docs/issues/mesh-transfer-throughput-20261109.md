@@ -3056,3 +3056,49 @@ mb 链路 WS 的 1.7× 是因为它的长轮询本身更慢（LAN、服务端差
 **当前生产**：MB_HT 保持 WS；MGMS_HT 回到长轮询
 （qg env 为 `PHAETHON_HT_WS=MB_HT`）。nginx 的 Upgrade 改动保留，
 对长轮询无影响，后续若做“多 WS 连接”可直接复用。
+
+## 107. 方向：ht mesh 统一到 WS；lane 一致性尝试与回退（2026-11-12 11:10）
+
+### 107.1 方向
+
+后续 h_tunnel mesh 统一演进到 WebSocket 载体，把它**当作普通 TCP 通道**对待：
+stripe/lane、保序、路由等上层逻辑不再为 h_tunnel POST/GET 池做特例，
+降低心智负担。长轮询保留为兼容/回退。
+
+### 107.2 lane 一致性尝试
+
+改动（已 stash，未进生产）：
+- 不再对“h_tunnel + p2p + V2”一刀切跳过 stripe：当该链路启用 WS 时，
+  按普通字节流包 stripe，每条 lane 是独立 WS 连接；
+- 新增 `PHAETHON_STRIPE_MIN_LANES` 预拨 lane，验证 lane 路径；
+- WS 服务端 handler 在 attach 后阻塞到 transport 关闭，避免 attach 返回即关连接。
+
+实测问题：
+- lane 能 attach（jf 日志有 `attaching leg stripeID=...`），但客户端
+  `laneCount` 始终为 1，`ensureMinLanes` 反复重拨；
+- 30s 内 qg 到 `36.140.28.178:18080` 累积 **45 条 ESTABLISHED**（连接泄漏），
+  强制 4 lane 的一次两跳只有 **136s / 1.37MB/s**；
+- 说明 lane 生命周期/所有权（控制器 remove、attach 后 reader/writer、
+  min-lane 与动态 remove 的互斥）还有 bug，不能按默认路径启用。
+
+处置：代码改动已 `git stash`（`wip: ws stripe lanes (unstable: attach churn/leak, reverted)`），
+生产回退为 wsauto + 仅 MB_HT 走 WS，MGMS_HT 回长轮询；jf 回 `htq8m`。
+恢复后验证：jf 两跳 4.25MB/s、mb 两跳 3.22MB/s（当前窗口整体偏低），链路正常。
+
+### 107.3 事故记录：qg 根分区写满导致 phaethon 短暂下线
+
+- 现象：部署 wslane 时 `cp: write error: No space left on device`，
+  `/root/phaethon` 被截断为 0 字节，服务启动失败。
+- 原因：`/root/data/logs/phaethon.log` 883MB + /root 下大量 staged 二进制
+  （5xx 版本），6.6G 根分区 100%。
+- 恢复：保留日志尾部 2MB 后清空日志、删除 /tmp 大文件和旧 staged 二进制，
+  释放到 1.4G；重新上传已验证的 wsauto 二进制并 `rc-service` 启动，
+  校验 `--version`、双进程与链路。
+- 纪律：qg 部署前先 `df -h /`；不要长期保留 staged 二进制；日志定期截断。
+
+### 107.4 下一步
+
+1. 修 WS lane 生命周期（单一 owner、min-lane 与动态 remove 互斥、
+   attach 后连接不泄漏），做连接数泄漏回归后再 A/B；
+2. 然后按既定方向把 WS 作为 ht 默认载体（auto 探测），长轮询仅回退；
+3. RACK 恢复螺旋仍是独立课题。

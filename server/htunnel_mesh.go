@@ -26,6 +26,9 @@ const (
 
 	// htMeshMaxQueuedBytes caps data queued for GET delivery; past it the
 	// dispatcher stops draining meshOut so Send blocks (§3.9 F2).
+	// 2026-11-12: 实测该队列在慢跑时会到 ~390KB~945KB、sojourn 100~227ms；
+	// 这是 ht GET 出队速率的限制，不是上限值本身（512KB 实验只是把队列
+	// 压小并让 CoDel 丢更多帧，吞吐无改善）。根治靠 WS 载体，见 §104/§105。
 	htMeshMaxQueuedBytes = 8 << 20
 
 	// Coalescing window for GET delivery. The p2p writer emits ~64-frame

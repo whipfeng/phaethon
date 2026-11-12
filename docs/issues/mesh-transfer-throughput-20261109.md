@@ -3916,3 +3916,24 @@ qg `IpReasmReqds` 从 06:20 起（含两次 qg 重启、jf/gg/mb 升级、4 轮�
 
 **剩余风险**：deskw / qgw 升级前，新节点向其上传仍会在 leg 上分片
 （见 §130 末）。deskw 由用户亲自部署，qgw 不属本机授权范围。
+
+## 132. 复核：并发 4 流 / 分片双向计数 / 运维卫生（2026-11-13 06:55）
+
+**并发 4 流**（vm 同时从 qg 拉 4×24.5MB，全走 vm↔qg UDP leg）：
+
+- wall 12.45s，合计 ~98MB → **~7.9 MiB/s**，4 条全部完整；
+- 期间 qg `IpReasmReqds` 与 `IpFragCreates` 增量均为 **0**；
+- 说明 leg 在并发下不再停顿/分片，聚合吞吐已到物理链路量级。
+
+**双向分片计数**：一次 down + 一次 up（各 24.5MB）前后，
+qg `IpFragCreates`/`IpReasmReqds` 增量 0；Windows 侧 `Fragments Created`
+同样不变——发送端不再产生分片，接收端也无重组请求。
+
+**运维卫生**：
+- qg `data/packages` 有 122 个 0 字节 `.pkg`（watchdog 逐个验签失败后
+  跳过，不会回退，但每次扫描白做功）。已移到
+  `data/packages.zero-bak/`；剩余 10 个真实 pkg 全是 windows/win7
+  平台，在 Linux 上被平台过滤。
+- 各节点 `data/worker` 有历史解压的旧 worker（几十~几百 MB），
+  但 `data/state/last-good-worker` 均指向当前 `phaethon` 自身，且
+  `worker-pin` 只剩 `.bak`，无回退风险。

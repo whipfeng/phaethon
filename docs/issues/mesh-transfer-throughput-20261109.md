@@ -3005,7 +3005,6 @@ proxy_send_timeout 3600s;
 WebSocket 载体（去掉 GET 队列这个触发源），jf 等 nginx 放行。
 
 ### 105.8 实验：DSACK 触发 reoWnd 扩展（2s）——更差，默认关闭
-
 思路：DSACK 已证明刚才是伪重传时，把 RACK 的重排容忍窗口临时放大到当前
 排队延迟（上限 2s，持续 2s），避免继续误判。fork 里以
 `PHAETHON_REO_DSACK_BOOST_MS` 控制（默认 0 = 关闭）。
@@ -3030,3 +3029,30 @@ WebSocket 载体（去掉 GET 队列这个触发源），jf 等 nginx 放行。
 
 
 
+
+## 106. nginx 放行 Upgrade 后：jf 链路 WS A/B 无收益（2026-11-12 10:35）
+
+在 jf 的 `/etc/nginx/nginx.conf` 的 `location /ui/resdata/` 里加
+`Upgrade/Connection "upgrade"`（仅此一处），`nginx -t` + `nginx -s reload` 后，
+qg 日志确认：
+
+```
+[HT-WS] persistent websocket established: proxy=MGMS_HT
+  url=ws://36.140.28.178:18080/ui/resdata/ws/conn-2
+```
+
+同窗口 A/B（OS 两跳 8.50MB/s，公网窗口已劣化）：
+
+| 载体（jf 链路） | 各次吞吐 | 中位 |
+|---|---|---|
+| WebSocket（单连接） | 5.84 / 1.45(129s) / 3.89 / 4.35 | ~4.1MB/s |
+| 长轮询 8 GET | 4.15 / 3.74 / 5.50 | ~4.15MB/s |
+
+**结论：jf 公网链路上单条 WS 连接没有超过 8 路长轮询**（基本持平，且同样有慢跑）。
+mb 链路 WS 的 1.7× 是因为它的长轮询本身更慢（LAN、服务端差异），
+不能推广到 jf。结合 105 的队列数据（WS 已经去掉了 GET 队列，吞吐仍不涨），
+说明 jf 剩余的瓶颈/停滞主因不是 GET 队列，而是发送端 RACK/RTO 恢复螺旋。
+
+**当前生产**：MB_HT 保持 WS；MGMS_HT 回到长轮询
+（qg env 为 `PHAETHON_HT_WS=MB_HT`）。nginx 的 Upgrade 改动保留，
+对长轮询无影响，后续若做“多 WS 连接”可直接复用。

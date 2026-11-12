@@ -3382,3 +3382,27 @@ URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地�
 `_wsvia` 修复代码保留（对带 via 的 WS 链路是正确的通用能力）。
 下一步若要走 SSH 隧道：调大 SSH 通道窗口，或按你的思路直接给 SSH 代理
 实现 `DialP2P`（原始 P2P 帧走 SSH 通道，不再套 ht）。
+
+## 113. h_tunnel 载体抽象统一：普通代理与 mesh 共用 HTTP/WS 选择（2026-11-12 17:15）
+
+**问题**：此前 WS 只在 mesh 的 `DialP2P` 里特判接入，普通代理 `Dial`
+仍固定走 HTTP 长轮询，载体不是代理级能力。
+
+**重构**：
+- 新增 `dialer/htCarrier` 接口：`DialTarget(ctx,host,port)` + `DialP2P()`；
+- `httpCarrier`：现有 HEAD + POST/GET（target 与 MESH）；
+- `wsCarrier`：`DialTarget` 用 WS 的 target 模式，`DialP2P` 用 mesh WS；
+- `newHTCarrier(proxy)` 按 `PHAETHON_HT_WS` 选载体，`Dial` 与 `DialP2P` 都走它，
+  WS 失败统一回退 http；
+- 服务端 `handleMeshWebSocket` 增加 target 模式：识别加密的 `X-H/X-P`，
+  Upgrade 后 dial 目标并双向 splice（每消息 Seal/Open）；无 target 头仍是 mesh。
+- WS 拨号统一走 `dialWSConn`（含 via 链），普通与 mesh 两条路径行为一致。
+
+**验证**：
+- 新增单测 `TestWSTargetCarrier`：客户端 `Dial` → WS target 握手 → 服务端
+  dial 本地目标 → 收到 "hello"，通过；
+- qg/jf 部署 `v0.8.0-583-g2ab2f5c-htcarrier`：MGMS/MB `upToDate`（mesh WS），
+  一次两跳传输 100s/1.87MB/s、fail=0（慢跑为 jf 公网旧问题）。
+
+生产行为变化：`PHAETHON_HT_WS` 列表里的 ht 代理，**普通代理流量也会走 WS**；
+未列出的代理仍走 HTTP。下一步再讨论 via SSH（多通道解决 64KB 通道窗口）。

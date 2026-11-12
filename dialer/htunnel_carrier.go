@@ -25,8 +25,9 @@ type htCarrier interface {
 	DialBIND(ctx context.Context, mode BindMode, dstAddr string) (net.Conn, error)
 }
 
-// newHTCarrier picks the carrier for a proxy. Default is the original HTTP
-// long-poll/BIND carrier; PHAETHON_HT_WS opts a proxy into WebSocket.
+// newHTCarrier picks the carrier for a proxy. Default is try-WS-first with an
+// HTTP fallback on handshake failure; PHAETHON_HT_WS=0 forces HTTP, while a
+// comma-separated proxy-name list restricts WS to those proxies.
 func newHTCarrier(p *config.Proxy) htCarrier {
 	if wsEnabledFor(p.Name) {
 		return &wsCarrier{p: p}

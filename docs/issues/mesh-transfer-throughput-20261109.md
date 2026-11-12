@@ -3444,8 +3444,8 @@ MESH 单步 HEAD 还是 v1 BIND 流”，以及普通代理是否走 mesh（`mes
   `wsServerConn` 做字节流适配；
 - WS 结果按代理记录（成功/回退），控制台代理表新增 **Carrier** 列：
   `WS` / `HTTP (WS 回退)` / `HTTP` / `-`（非 ht 代理）。
-- `PHAETHON_HT_WS` 仍是当前的启用/探测开关；后续可替换为握手探测 + 结果缓存，
-  控制台展示逻辑不变。
+- `PHAETHON_HT_WS`：未设置默认尝试 WS、失败回退 HTTP；`0/off` 强制 HTTP；
+  `1/all/auto` 全开；逗号名单为 allowlist（见 §116）。
 
 **验证**：`TestWSTargetCarrier`、`TestWSBindCarrierControl` 通过
 （后者覆盖 Control BIND over WS 双向收发 + Carrier 标签为 `WS`）。
@@ -3474,3 +3474,30 @@ cap 永远停在初始 256KB（甚至被 qd 砍到 64KB）；吞吐 ≈ cap / 50
 结论：单流 mesh 已基本追平 OS 基线（down ≈1.0×，up ≈1.1×）；偶发单次
 ~5.5s 离群仍需观察。两跳（vm→qg→jf）与 via SSH 路径待用同一方法复测。
 部署：qg/jf=`v0.8.0-626-gb4f550c-htid`，deskw 同版本。
+
+## 116. WS 改为默认启用 + 单流复测（2026-11-12 21:45）
+
+**更正**：P2P 会话是**一条全双工传输**，载体由**主动端**选择；被动端的环境
+变量不参与。此前“jf→qg 方向走 HTTP 长轮询”的说法错误——qg 是主动端，
+`MGMS_HT` 走 WS 时两个方向都在这条 WS 上。同理，jf 不需要设置
+`PHAETHON_HT_WS`，它只是被动接受 qg 拨进来的 WS。
+
+**变更**（`909dc1e`）：`PHAETHON_HT_WS` 未设置时**默认先试 WS**，握手失败
+回退 HTTP；`0/off/false/none` 强制 HTTP；`1/all/auto/on` 全开；逗号名单为
+allowlist。新增 `wsEnabledFor` 单测覆盖默认值与开关。
+
+**验证**（qg 去掉 `PHAETHON_HT_WS`，只跑默认逻辑；qg=`628-htid`，jf 保持
+`626-htid` 作被动端）：
+
+- 日志确认 `MGMS_HT`、`MB_HT` 均直接建立
+  `[HT-WS] persistent websocket established`，说明默认探测生效；
+- 24.5MB 单流同窗口（秒；OS 为 jf 系统 sshd）：
+  - mesh down：3.22 / 2.75 / 2.67（中位 2.75）
+  - mesh up：2.93 / 2.82 / 2.65（中位 2.82）
+  - OS down：2.87 / 2.78 / 3.01（中位 2.87）
+  - OS up：2.40 / 2.45 / 2.46（中位 2.45）
+- 即 mesh/OS ≈ 0.96×（down）、1.15×（up），与显式开启 WS 时一致，且本轮
+  未再出现 ~5.5s 离群。
+
+**待办**：deskw 仍是 626（WS 默认关闭），需换 628 包后其 `DESK_TJ` 才会
+默认走 WS；via SSH 路径尚未复测。

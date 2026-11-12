@@ -3230,3 +3230,35 @@ EST18080 稳定在 9。
 结论：继续在载体/缓冲层加限制没有收益；下一阶段必须回到发送端恢复逻辑
 （DSACK/RACK 的按 RTT 抑制、minRTT 相对 RTO 上限）或接收端 ACK 行为，
 需要单独的 gVisor/Windows 侧方案。生产保持统一 WS 构建（连接稳定 2/1）。
+
+## 108. RACK/RTO 恢复实验（负结果）与 UDP leg 加密方案（2026-11-12 14:00）
+
+### 108.1 DSACK 触发 RTO 上限（backoff / base）无效
+
+两版单变量（jf 发送端）：
+- rtoack：仅在 DSACK 最近 2s 内，把 RTO 退避上限压到 `max(4*minRTT, 1s)`；
+- rtoack2：同样上限再应用到 base RTO（updateRTO 结果）。
+
+6 连跑（150s 超时）：
+- rtoack：6.92 / 6.68 / 6.23 / 6.68 / 7.19 / 6.92（当时窗口好，无慢跑）；
+- 同窗口基线（无上限）：6.92 / 4.25 / **101s** / 4.56（慢跑复现）；
+- rtoack2：3.59 / 5.34 / 6.23 / **80s** / …（慢跑仍复现）。
+
+慢跑现场确认：即使 RTO 被压在 ~1s 量级，cwnd 仍会塌到 1~5、ssthresh=2，
+srtt 600~800ms（minRTT 70~80ms）。说明**维持停滞的不是 RTO 定时器**，
+而是数据路径上 600~800ms 的排队（RACK 据此判丢、cwnd 塌缩）；发送端
+只改 RTO 无法解决。已回退，fork 源码恢复到 HEAD。
+
+### 108.2 UDP leg 加密：规则简单，但密钥必须两端对称
+
+规则：SOCKS5 链路密码为空→不加密；非空→每条 datagram 用
+`HTunnelCrypto` Seal/Open（开销 40 字节，需要相应减小 leg MTU）。
+
+实现上重要的是密钥来源：**被动端没有“active 的 proxy password”**。
+正确做法是把**被动侧 SOCKS5 relay 的 mapping 密码**绑到对应 leg 端口
+（`UDPLegBindReturnPath` 同一处），由 leg endpoint 用它做 Seal/Open；
+ht 的 password 不能拿来给 SOCKS5 leg 用（会与 active 侧空密码不匹配）。
+当前 vm↔qg 的 QG_SS5 密码为空，所以现状仍是明文、不受影响。
+该改动留作下一批（涉及 endpoint 级密钥绑定，不动现有链路）。
+
+生产：qg/jf/mb 均为 `_wslane6`（统一 WS 载体），连接稳定；RTO 实验未启用。

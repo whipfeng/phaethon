@@ -3356,3 +3356,29 @@ stripe `onRate` 反馈 + p2p 被动侧接线）保留在仓库中，仅由
 mb 链路上限当前只有 ~3MB/s（历史 LAN 好时 qg→mb 约 6.4）。慢跑一次 69s，比 jf
 的 80~150s 轻。结合 vm→qg 单跳 9.84（=OS 基线），差距只在 **qg↔jf 的公网
 ht-over-nginx/LB 载体**这一段，不是 mesh 数据面、relay 或 vm 接收端。
+
+## 112. 发现并修复：WS 载体忽略 via 链（ht via SSH 的缺口）（2026-11-12 16:50）
+
+**缺口实锤**：`dialP2PWebSocket` 之前用 `websocket.DialConfig` + 直连
+`net.Dialer`，**完全忽略 proxy.Next（via）**。所以 `MGMS_HT via=JF_SSH`、
+URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地址 →
+超时；长轮询 HTTP 客户端本身是走 via 的，但 WS 路径漏了。
+
+**修复**：WS 拨号改为与 HTTP 一致：
+- 有 `proxy.Next`（非 DIRECT）时，`dialWithContext(ctx, NewDialer(proxy.Next), host, port)`
+  通过 via 建立连接；
+- 用 `websocket.NewClient(cfg, conn)` 在该连接上完成握手；
+- 无 via 时仍直连。
+
+**验证**：qg 部署 `_wsvia`，MGMS_HT `via=JF_SSH`、URL `http://10.140.51.2:32457/...`：
+- 日志确认 `[HT-WS] ... url=ws://10.140.51.2:32457/ui/resdata/ws/...`，
+  /api/p2p `MGMS_HT nodeId=jf status=upToDate` —— **via 链打通**；
+- 但 bulk 传输不可用：单流 24.5MB 跑了 >3.5 分钟（OS 层 `ssh -L` 同一目标
+  返回 400，网络与 sshd 正常）。判断是 phaethon SSH dialer 的
+  **direct-tcpip 通道窗口/速率**问题（x/crypto/ssh 单通道窗口默认偏小），
+  不是网络。
+
+已回退 MGMS 为直连 WS（`36.140.28.178:18080`, via=""），链路 upToDate；
+`_wsvia` 修复代码保留（对带 via 的 WS 链路是正确的通用能力）。
+下一步若要走 SSH 隧道：调大 SSH 通道窗口，或按你的思路直接给 SSH 代理
+实现 `DialP2P`（原始 P2P 帧走 SSH 通道，不再套 ht）。

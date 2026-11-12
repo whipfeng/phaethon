@@ -39,6 +39,7 @@ func dialWSTarget(ctx context.Context, proxy *config.Proxy, crypto *util.HTunnel
 		return nil, fmt.Errorf("htunnel-ws: handshake fail: %w", err)
 	}
 	ws.MaxPayloadBytes = 32 << 20
+	markHTCarrierResult(proxy.Name, true)
 	util.LogModuleInfo("htunnel", "[HT-WS] target websocket established: proxy=%s target=%s:%d", proxy.Name, host, port)
 	return &wsTargetConn{Conn: ws, crypto: crypto}, nil
 }

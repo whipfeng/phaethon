@@ -3406,3 +3406,37 @@ URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地�
 
 生产行为变化：`PHAETHON_HT_WS` 列表里的 ht 代理，**普通代理流量也会走 WS**；
 未列出的代理仍走 HTTP。下一步再讨论 via SSH（多通道解决 64KB 通道窗口）。
+
+## 114. h_tunnel 三通道收口 + WS 控制台标识（2026-11-12 18:10）
+
+**决策**：WS 一旦生效，**不再受 v2 开关影响**；v2 只决定“无 WS 时 P2P 走
+MESH 单步 HEAD 还是 v1 BIND 流”，以及普通代理是否走 mesh（`meshAwareDialer`）。
+
+| 通道 / 流量 | WS 生效 | v2 | 路径 |
+|---|---|---|---|
+| 普通代理 target（非 mesh） | 是 | 任意 | WS target（X-H/X-P） |
+| 普通代理 target（非 mesh） | 否 | 任意 | HTTP CONN |
+| 普通代理 target（mesh） | 是/否 | true | 不进 h_tunnel CONN，走 `meshAwareDialer` |
+| P2P 会话 | 是 | 任意 | WS 持久连接 + 帧批次 |
+| P2P 会话 | 否 | true | MESH 单步 HEAD |
+| P2P 会话 | 否 | false | v1 BIND 三步 PORT=2 |
+| 反向数据 BindModeData | 是 | 任意 | WS BIND PORT=0 |
+| 反向数据 BindModeData | 否 | 任意 | HTTP BIND PORT=0 |
+| 控制通道 BindModeControl | 是 | 任意 | WS BIND PORT=1 |
+| 控制通道 BindModeControl | 否 | 任意 | HTTP BIND PORT=1 |
+
+**实现**：
+- `htCarrier` 增加 `DialBIND(ctx, mode, dst)`；Data/Control 全部经
+  `dialHTBINDWithFallback`，P2P 统一经 `dialHTP2PWithFallback`（v2 判断下沉到
+  `dialHTP2PHTTP`），BindStrategy 内不再有裸 `dialHTunnelBIND` 分支；
+- 服务端 `handleMeshWebSocket` 按头分发三模式：`X-C: BIND`（bind）→
+  `X-H/X-P`（target）→ 无头（mesh）。bind 模式复用 `handleControlConnection` /
+  `handleP2PConnection` / `reverse.HandleReverseConnection`，WS 侧用
+  `wsServerConn` 做字节流适配；
+- WS 结果按代理记录（成功/回退），控制台代理表新增 **Carrier** 列：
+  `WS` / `HTTP (WS 回退)` / `HTTP` / `-`（非 ht 代理）。
+- `PHAETHON_HT_WS` 仍是当前的启用/探测开关；后续可替换为握手探测 + 结果缓存，
+  控制台展示逻辑不变。
+
+**验证**：`TestWSTargetCarrier`、`TestWSBindCarrierControl` 通过
+（后者覆盖 Control BIND over WS 双向收发 + Carrier 标签为 `WS`）。

@@ -2,6 +2,7 @@ package dialer
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"phaethon/config"
@@ -18,6 +19,10 @@ type htCarrier interface {
 	Name() string
 	DialTarget(ctx context.Context, host string, port int) (net.Conn, error)
 	DialP2P() (frame.FrameTransport, error)
+	// DialBIND opens a reverse/data or control channel (BindModeData /
+	// BindModeControl). P2P sessions use DialP2P instead so that the WS
+	// carrier can run them as persistent frame transports.
+	DialBIND(ctx context.Context, mode BindMode, dstAddr string) (net.Conn, error)
 }
 
 // newHTCarrier picks the carrier for a proxy. Default is the original HTTP
@@ -42,6 +47,17 @@ func (c *httpCarrier) DialP2P() (frame.FrameTransport, error) {
 	return dialHTP2PHTTP(c.p)
 }
 
+func (c *httpCarrier) DialBIND(ctx context.Context, mode BindMode, dstAddr string) (net.Conn, error) {
+	switch mode {
+	case BindModeData:
+		return dialHTunnelBIND(c.p, dstAddr, reverse.BindPortData)
+	case BindModeControl:
+		return dialHTunnelBIND(c.p, c.p.Server, reverse.BindPortControl)
+	default:
+		return nil, fmt.Errorf("htunnel-http: unsupported BIND mode %d", mode)
+	}
+}
+
 type wsCarrier struct{ p *config.Proxy }
 
 func (c *wsCarrier) Name() string { return "ws" }
@@ -54,6 +70,18 @@ func (c *wsCarrier) DialTarget(ctx context.Context, host string, port int) (net.
 func (c *wsCarrier) DialP2P() (frame.FrameTransport, error) {
 	crypto := util.NewHTunnelCrypto(c.p.Password)
 	return dialP2PWebSocket(c.p, crypto)
+}
+
+func (c *wsCarrier) DialBIND(ctx context.Context, mode BindMode, dstAddr string) (net.Conn, error) {
+	crypto := util.NewHTunnelCrypto(c.p.Password)
+	switch mode {
+	case BindModeData:
+		return dialWSBind(ctx, c.p, crypto, dstAddr, reverse.BindPortData)
+	case BindModeControl:
+		return dialWSBind(ctx, c.p, crypto, c.p.Server, reverse.BindPortControl)
+	default:
+		return nil, fmt.Errorf("htunnel-ws: unsupported BIND mode %d", mode)
+	}
 }
 
 // dialHTP2PHTTP is the pure-HTTP P2P handshake: v2 MESH direct when configured,
@@ -77,6 +105,7 @@ func dialHTP2PWithFallback(p *config.Proxy) (frame.FrameTransport, error) {
 	if err == nil || c.Name() != "ws" {
 		return tr, err
 	}
+	markHTCarrierResult(p.Name, false)
 	util.LogModuleWarn("htunnel", "websocket mesh handshake failed, falling back to http: proxy=%s err=%v", p.Name, err)
 	return dialHTP2PHTTP(p)
 }
@@ -89,5 +118,19 @@ func (d *HTunnelDialer) dialHTWithFallback(ctx context.Context, host string, por
 		return conn, err
 	}
 	util.LogModuleWarn("htunnel", "websocket target dial failed, falling back to http: proxy=%s err=%v", d.Proxy.Name, err)
+	markHTCarrierResult(d.Proxy.Name, false)
 	return (&httpCarrier{p: d.Proxy}).DialTarget(ctx, host, port)
+}
+
+// dialHTBINDWithFallback is the BIND-channel counterpart: WS when the proxy
+// carrier supports it, HTTP otherwise (including WS handshake failure).
+func dialHTBINDWithFallback(ctx context.Context, p *config.Proxy, mode BindMode, dstAddr string) (net.Conn, error) {
+	c := newHTCarrier(p)
+	conn, err := c.DialBIND(ctx, mode, dstAddr)
+	if err == nil || c.Name() != "ws" {
+		return conn, err
+	}
+	util.LogModuleWarn("htunnel", "websocket bind dial failed, falling back to http: proxy=%s mode=%d err=%v", p.Name, mode, err)
+	markHTCarrierResult(p.Name, false)
+	return (&httpCarrier{p: p}).DialBIND(ctx, mode, dstAddr)
 }

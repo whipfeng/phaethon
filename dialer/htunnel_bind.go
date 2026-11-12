@@ -48,9 +48,11 @@ func (s htunnelBindStrategy) Bind(ctx context.Context, p *config.Proxy, mode Bin
 		// v2 MESH direct: requires both p2p=true AND v2=true.
 		// The MESH path uses X-C: MESH single-step HEAD, bypassing the proxy
 		// server's BIND stream. When v2=false (default), falls back to v1
-		// BIND-stream (PORT=2 + frame transport).
+		// BIND-stream (PORT=2 + frame transport). The per-proxy carrier
+		// (HTTP vs WebSocket) is chosen inside dialHTP2PWithFallback, so the
+		// BindStrategy remains the single P2P negotiation entry.
 		if p.IsP2P() && p.V2 {
-			transport, err := dialHTunnelMeshDirect(p)
+			transport, err := dialHTP2PWithFallback(p)
 			if err != nil {
 				return nil, err
 			}

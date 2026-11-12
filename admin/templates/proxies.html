@@ -81,6 +81,7 @@
                         <th data-i18n="proxy.udp">UDP</th>
                         <th data-i18n="proxy.p2p">P2P</th>
                         <th data-i18n="proxy.v2">V2</th>
+                        <th data-i18n="proxy.carrier">Carrier</th>
                         <th data-i18n="proxy.via">Via</th>
                         <th data-i18n="common.enabled">Enabled</th>
                         <th data-i18n="proxy.actions">Actions</th>
@@ -113,6 +114,10 @@
                         </td>
                         <td data-label="V2" style="cursor:pointer;" onclick="toggleV2('{{.Name}}', {{.IsV2}})" id="v2-status-{{.Name}}">
                             {{if .IsV2}}✅{{else}}❌{{end}}
+                        </td>
+                        <td data-label="Carrier">
+                            {{$carrier := index $.Carriers .Name}}
+                            {{if $carrier}}<code class="type-badge type-htunnel">{{$carrier}}</code>{{else}}<span class="text-muted">-</span>{{end}}
                         </td>
                         <td data-label="Via">{{if .ViaProxy}}{{.ViaProxy}}{{else}}<span class="text-muted">-</span>{{end}}</td>
                         <td data-label="Enabled">

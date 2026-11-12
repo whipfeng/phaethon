@@ -7,21 +7,20 @@ import (
 
 	"phaethon/config"
 	"phaethon/frame"
-	"phaethon/reverse"
 )
 
 // htunnelBindStrategy implements BindStrategy for the h_tunnel protocol.
 //
-// h_tunnel is special: it has a true v2 path (MESH single-step HEAD + frame
-// transport) but can be configured to fall back to the v1 BIND-stream channel
-// when proxy.P2P is disabled. The dispatch is:
+// All channels go through the per-proxy carrier (HTTP vs WebSocket), and each
+// mode has exactly one entry:
 //
-//	BindModeData    → v1 three-step HEAD with "BIND" cmd, PORT=0
-//	BindModeControl → v1 three-step HEAD with "BIND" cmd, PORT=1
-// h_tunnel BindModeP2P is currently forced to v1 BIND-stream (PORT=2 + frame
-// transport) regardless of proxy.IsP2P(), per 2026-10-08 v2 revert. The v2
-// MESH direct path is preserved in dialHTunnelMeshDirect and can be re-enabled
-// by uncommenting the gated branch in the BindModeP2P case below.
+//	BindModeData    → carrier.DialBIND(PORT=0), WS when available
+//	BindModeControl → carrier.DialBIND(PORT=1), WS when available
+//	BindModeP2P     → carrier.DialP2P(): WS persistent frames when available,
+//	                  otherwise MESH single-step HEAD (v2) or v1 BIND-stream.
+//
+// WebSocket availability is decided once per proxy; the v2 flag no longer
+// gates carrier choice, it only selects the non-WS P2P handshake.
 //
 // SupportsP2P returns true because h_tunnel has a real v2 (MESH) path.
 type htunnelBindStrategy struct{}
@@ -29,44 +28,30 @@ type htunnelBindStrategy struct{}
 func (s htunnelBindStrategy) Bind(ctx context.Context, p *config.Proxy, mode BindMode, dstAddr string) (*BindResult, error) {
 	switch mode {
 	case BindModeData:
-		// Reverse data connection: v1 BIND three-step, PORT=0.
-		conn, err := dialHTunnelBIND(p, dstAddr, reverse.BindPortData)
+		// Reverse data connection: BIND PORT=0 over the selected carrier.
+		conn, err := dialHTBINDWithFallback(ctx, p, BindModeData, dstAddr)
 		if err != nil {
 			return nil, err
 		}
 		return &BindResult{Conn: conn, Mode: mode}, nil
 
 	case BindModeControl:
-		// Control/listen channel: v1 BIND three-step, PORT=1, dst=proxy.Server.
-		conn, err := dialHTunnelBIND(p, p.Server, reverse.BindPortControl)
+		// Control/listen channel: BIND PORT=1, dst=proxy.Server.
+		conn, err := dialHTBINDWithFallback(ctx, p, BindModeControl, p.Server)
 		if err != nil {
 			return nil, err
 		}
 		return &BindResult{Conn: conn, Mode: mode}, nil
 
 	case BindModeP2P:
-		// v2 MESH direct: requires both p2p=true AND v2=true.
-		// The MESH path uses X-C: MESH single-step HEAD, bypassing the proxy
-		// server's BIND stream. When v2=false (default), falls back to v1
-		// BIND-stream (PORT=2 + frame transport). The per-proxy carrier
-		// (HTTP vs WebSocket) is chosen inside dialHTP2PWithFallback, so the
-		// BindStrategy remains the single P2P negotiation entry.
-		if p.IsP2P() && p.V2 {
-			transport, err := dialHTP2PWithFallback(p)
-			if err != nil {
-				return nil, err
-			}
-			return &BindResult{Frame: transport, Mode: mode}, nil
-		}
-		conn, err := dialHTunnelBIND(p, p.Server, reverse.BindPortP2P)
+		// One negotiation entry for both v1 and v2: the carrier decides.
+		// WS available  → persistent WS frames (v2 flag does not gate it)
+		// WS unavailable → v2 ? MESH single-step HEAD : v1 BIND-stream
+		transport, err := dialHTP2PWithFallback(p)
 		if err != nil {
 			return nil, err
 		}
-		return &BindResult{
-			Conn:  conn,
-			Frame: frame.NewStreamTransport(conn),
-			Mode:  mode,
-		}, nil
+		return &BindResult{Frame: transport, Mode: mode}, nil
 
 	default:
 		return nil, fmt.Errorf("htunnel: unsupported BindMode %d", mode)

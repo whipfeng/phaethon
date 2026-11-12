@@ -42,6 +42,7 @@ import (
 	"phaethon/config"
 	"phaethon/connlog"
 	"phaethon/db"
+	"phaethon/dialer"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/reverse"
@@ -1550,14 +1551,19 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 
 	// Build proxy summaries for JavaScript (includes IsP2P/IsUDP computed values)
 	proxySummaries := make([]map[string]interface{}, len(proxies))
+	carriers := make(map[string]string, len(proxies))
 	for i, p := range proxies {
 		proxySummaries[i] = proxySummary(p)
+		if label := dialer.HTCarrierLabel(p); label != "" {
+			carriers[p.Name] = label
+		}
 	}
 
 	data := map[string]interface{}{
 		"Title":          "Proxies",
 		"Proxies":        proxies,
 		"ProxySummaries": proxySummaries,
+		"Carriers":       carriers,
 		"Groups":         displayGroups,
 		"GroupStats":     groupStats,
 		"Subscriptions":  subs,

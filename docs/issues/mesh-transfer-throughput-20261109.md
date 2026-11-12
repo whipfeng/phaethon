@@ -3618,3 +3618,40 @@ UDP leg 是可选优化，当前缺陷未修前，建议对受影响的代理关
 更新）在 UDP leg 上会触发长时间停滞而裸 TCP 大流量不会；重点看
 `udpLegTransport.writeLeg` 的 fire-and-forget 丢包放大、leg 端口/NAT
 映射寿命、以及 inner TCP 在 leg 路径上的 RTO 退避行为。
+
+## 121. UDP leg 停顿根因实锤：IP 分片（2026-11-12 23:55）
+
+**取证**：在 leg 开启时跑一次 24.5MB SSH 上传（当次 13.48s，属慢轮），
+同时读 qg 的 `/proc/net/netstat`：
+
+```
+Ip.ReasmReqds = +34244    Ip.ReasmOKs = +17122
+Udp.InDatagrams = +17922  TcpExt.TCPLostRetransmit = +41
+```
+
+约每个数据报 2 个分片——**mesh 数据帧 ~1580B + leg 头 + UDP/IP 超过 1500
+路径 MTU，逐包 IP 分片**。丢一个分片整报废弃，inner TCP 反复重传/退避，
+表现为数秒停顿或 20s 后 RST。小 ping 不分片，所以 `UDP-LEG` 的
+“no inbound”保护也不会触发。
+
+**修复**（`41e3765`）：`writeLeg` 对 >`legSafeDatagram`(1400B) 的 datagram
+回退 base TCP；小探测/控制帧继续走 UDP（leg 仍用于 RTT/静默观测）。
+
+**验证**（vm/qg 升 634，vm 的 `p2p-udp` 临时开关做 A/B）：
+
+| 场景（24.5MB，3 轮） | mesh down | mesh up | 备注 |
+|---|---|---|---|
+| leg 开 + MTU 回退 | 3.90 / 4.67 / 4.82s | 3.87 / 4.15 / 4.02s | 无 RST；SSH 3.79~3.91s |
+| leg 关 | 4.61 / 3.74 / 3.65s | 3.53 / 3.54 / 3.70s | OS 两跳 3.64~3.79s |
+| （修复前）leg 开 | 4.99 / 4.11 / **19.26** | 4.36 / **20.97** / **19.29** | RST/BrokenPipe |
+
+- 修复后一次 SSH 上传的 `Ip.ReasmReqds` 增量 **≈0**（分片消失），
+  `Udp.InDatagrams` 仍有 ~250/次（小探测帧），说明回退逻辑生效；
+- leg 开（数据走 TCP、探测走 UDP）与 leg 关基本同量级，up 方向略差
+  ~10%，说明“同一条流的包被拆到两个载体”仍引入少量乱序；
+- 当前把 vm 的 `QG_SS5_UDPLEG.p2p-udp` **暂设为 false**（链路 `transport=tcp`）
+  作为生产安全态。
+
+**结论**：UDP leg 停顿根因是分片，不是 leg 端口/NAT 寿命，也不是 inner TCP
+RTO 本身；修复后不再有 19~21s 停顿。若要恢复 UDP 数据收益，下一步应做
+**leg 层分片/重组**（同一条流保持单载体、有序），而不是继续依赖 IP 分片。

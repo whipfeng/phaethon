@@ -3306,3 +3306,33 @@ ht 的 password 不能拿来给 SOCKS5 leg 用（会与 active 侧空密码不�
   lastSeen 持续刷新。
 
 **后续**：用单向丢包/断链模拟验证 60s 内能自动拆除并重拨（当前 deskw 已在线）。
+
+## 110. 发送端 pacing 两次尝试均为负结果（2026-11-12 16:00）
+
+### 110.1 固定速率（ht WS 服务端 7MB/s）
+
+在 WS 服务端对数据批做 7MB/s 令牌桶（控制帧不 pacing）：
+- 3 次：5.66 / **1.36（137s）** / 3.53；
+- 慢跑仍出现，且固定 7MB/s 在链路容量下降时依然会超发；
+- 放置位置也不对（只 shaping 了 jf→qg 的 ht WS，不是通用层），已回退。
+
+### 110.2 通用自适应 paced transport（p2p 层，0.9×lane 实测速率）
+
+按“通用抽象”实现 `frame.PacedTransport`（包装任意 FrameTransport，数据批
+按令牌桶延迟，控制帧直通；速率由 stripe 的 lane 实测 delivery rate ×0.9
+每秒反馈），env `PHAETHON_PACE_STREAM=1`，部署在被动侧（下载方向的发送端）。
+
+结果：**链路直接不可用**——8 流全部失败（6s fail=8），并出现一次 938s 挂起；
+回退到 `pongdead` 后同窗口 69s/2.71MB/s（fail=0）恢复。
+
+原因判断：同步 sleep 的 pacer 阻塞了 peer write loop，控制帧/ACK 被拖住；
+且 lane 速率反馈起不来时 0.9×0 会把数据完全掐住。这个形态不能上生产。
+
+### 110.3 结论
+
+- 固定速率和同步自适应两种 sender pacing 都失败；
+- 问题仍指向 jf 公网路径/LB 的缓冲，而 LB 我们无权限；
+- 若还要做 pacing，必须是**异步整形**（独立队列 + shaper goroutine，
+  控制帧优先、速率下限保护），属于独立设计，不能复用当前的同步写循环。
+
+生产：jf/qg/deskw/mb 均为 `_pongdead`/统一 WS 构建，pacing 代码已回退。

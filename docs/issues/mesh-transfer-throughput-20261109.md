@@ -3282,3 +3282,27 @@ ht 的 password 不能拿来给 SOCKS5 leg 用（会与 active 侧空密码不�
 2. 或在发送端做 pacing，减小进入公网缓冲的突发（现在有了“公网有队列、
    LAN 没有”的证据，pacing 重新具备验证价值）；
 3. 若 LB 不可调，接受 jf 公网路径的慢跑尾部，生产以统一 WS 载体为主。
+
+## 109. deskw 掉线不自动重连：无 pong 链路被 inbound 流量永久 hold（2026-11-12 15:00）
+
+**现象**：deskw 掉线后没有自动重连，用户手动重启才恢复。14:43 的日志是
+`Received console close event, shutting down...`（手动停），说明 worker 一直活着，
+不是崩溃/watchdog 未拉起，而是 **p2p 会话没有自我拆除/重拨**。
+
+**根因（代码）**：`sendPing` 的判死条件是“连续 10 次 ping 无 pong **且**
+10s 内没有任何 inbound 帧”。只要还有任意 inbound 帧（来自残留 lane/腿或
+对端其他流量）刷新 `lastSeen`，就会走 `link dead held` 分支并且**永远不拆**，
+只打 Info 日志（error 级别下不可见）。单向/半死链路因此既不恢复也不重拨。
+
+**修复**：Peer 增加 `lastPongNano`（创建与每次 pong 时刷新）。`sendPing`
+在连续丢 ping 达到阈值后，若 **60s 内没有任何 pong**，即使 inbound 仍活跃也
+直接 `transport.Close()`，由会话循环按既有 backoff 重拨。
+
+**部署**：
+- qg/jf：`v0.8.0-583-g2ab2f5c-pongdead`（Linux）；
+- deskw：签名 pkg `phaethon_windows_amd64_v0.8.0-583-g2ab2f5c-pongdead.pkg`
+  放入 `data/packages`，kill 旧 worker（v574）后 watchdog 热切换到新 worker；
+  watchdog 3304 未变，worker v583；jf 侧 `deskw direct=true srtt=32.4ms`、
+  lastSeen 持续刷新。
+
+**后续**：用单向丢包/断链模拟验证 60s 内能自动拆除并重拨（当前 deskw 已在线）。

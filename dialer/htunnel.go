@@ -238,13 +238,16 @@ func (d *HTunnelDialer) DialControl() (net.Conn, error) {
 	return r.Conn, nil
 }
 
-// DialP2P establishes a P2P connection through this HTunnel proxy. v2 (MESH
-// direct) is used when proxy.P2P is enabled, otherwise the v1 BIND stream
-// channel is used as fallback. The BindStrategy picks the right path, and the
-// proxy-level carrier selection (HTTP vs WebSocket) is applied in
-// dialP2PWithFallback so mesh and normal traffic share the same carrier.
+// DialP2P establishes a P2P connection through this HTunnel proxy. The
+// BindStrategy owns the handshake (v2 MESH direct or v1 BIND stream) and
+// selects the per-proxy carrier (HTTP vs WebSocket) internally, so the mesh
+// path uses the same polymorphic negotiation as other proxy protocols.
 func (d *HTunnelDialer) DialP2P() (frame.FrameTransport, error) {
-	return d.dialP2PWithFallback()
+	r, err := bindToBase(d.Proxy, BindModeP2P, "")
+	if err != nil {
+		return nil, err
+	}
+	return r.Frame, nil
 }
 
 // DialReverse establishes a reverse data connection through this HTunnel proxy.

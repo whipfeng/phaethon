@@ -4,78 +4,90 @@ import (
 	"context"
 	"net"
 
+	"phaethon/config"
 	"phaethon/frame"
+	"phaethon/reverse"
 	"phaethon/util"
 )
 
-// htCarrier is the proxy-level carrier abstraction for h_tunnel. The same
-// selection (per proxy, e.g. PHAETHON_HT_WS) drives both normal proxy target
-// dialing and the mesh P2P session, so WebSocket is a property of the proxy
-// rather than a mesh-only special case.
+// htCarrier is the carrier implementation behind the h_tunnel BindStrategy:
+// the same per-proxy selection (PHAETHON_HT_WS) drives normal target dialing
+// and the P2P/MESH handshake, so WebSocket is a polymorphic carrier rather
+// than a mesh-only special case.
 type htCarrier interface {
 	Name() string
 	DialTarget(ctx context.Context, host string, port int) (net.Conn, error)
 	DialP2P() (frame.FrameTransport, error)
 }
 
-// newHTCarrier picks the carrier for a proxy. Default is the original
-// HTTP long-poll carrier; PHAETHON_HT_WS opts a proxy into WebSocket.
-func newHTCarrier(d *HTunnelDialer) htCarrier {
-	if wsEnabledFor(d.Proxy.Name) {
-		return &wsCarrier{d: d}
+// newHTCarrier picks the carrier for a proxy. Default is the original HTTP
+// long-poll/BIND carrier; PHAETHON_HT_WS opts a proxy into WebSocket.
+func newHTCarrier(p *config.Proxy) htCarrier {
+	if wsEnabledFor(p.Name) {
+		return &wsCarrier{p: p}
 	}
-	return &httpCarrier{d: d}
+	return &httpCarrier{p: p}
 }
 
-type httpCarrier struct{ d *HTunnelDialer }
+type httpCarrier struct{ p *config.Proxy }
 
 func (c *httpCarrier) Name() string { return "http" }
 
 func (c *httpCarrier) DialTarget(ctx context.Context, host string, port int) (net.Conn, error) {
-	return c.d.dialHTunnel("CONN", host, port)
+	d := &HTunnelDialer{BaseDialer: BaseDialer{Proxy: c.p}}
+	return d.dialHTunnel("CONN", host, port)
 }
 
 func (c *httpCarrier) DialP2P() (frame.FrameTransport, error) {
-	r, err := bindToBase(c.d.Proxy, BindModeP2P, "")
-	if err != nil {
-		return nil, err
-	}
-	return r.Frame, nil
+	return dialHTP2PHTTP(c.p)
 }
 
-type wsCarrier struct{ d *HTunnelDialer }
+type wsCarrier struct{ p *config.Proxy }
 
 func (c *wsCarrier) Name() string { return "ws" }
 
 func (c *wsCarrier) DialTarget(ctx context.Context, host string, port int) (net.Conn, error) {
-	crypto := util.NewHTunnelCrypto(c.d.Proxy.Password)
-	return dialWSTarget(ctx, c.d.Proxy, crypto, host, port)
+	crypto := util.NewHTunnelCrypto(c.p.Password)
+	return dialWSTarget(ctx, c.p, crypto, host, port)
 }
 
 func (c *wsCarrier) DialP2P() (frame.FrameTransport, error) {
-	crypto := util.NewHTunnelCrypto(c.d.Proxy.Password)
-	return dialP2PWebSocket(c.d.Proxy, crypto)
+	crypto := util.NewHTunnelCrypto(c.p.Password)
+	return dialP2PWebSocket(c.p, crypto)
 }
 
-// dialHTWithFallback dials the target through the selected carrier, falling back
-// to the HTTP carrier when a WS handshake fails (proxy does not allow Upgrade).
+// dialHTP2PHTTP is the pure-HTTP P2P handshake: v2 MESH direct when configured,
+// otherwise the v1 BIND stream wrapped as a frame transport.
+func dialHTP2PHTTP(p *config.Proxy) (frame.FrameTransport, error) {
+	if p.IsP2P() && p.V2 {
+		return dialHTunnelMeshDirect(p)
+	}
+	conn, err := dialHTunnelBIND(p, p.Server, reverse.BindPortP2P)
+	if err != nil {
+		return nil, err
+	}
+	return frame.NewStreamTransport(conn), nil
+}
+
+// dialHTP2PWithFallback selects the carrier for the P2P handshake, falling
+// back to HTTP when the WebSocket handshake fails.
+func dialHTP2PWithFallback(p *config.Proxy) (frame.FrameTransport, error) {
+	c := newHTCarrier(p)
+	tr, err := c.DialP2P()
+	if err == nil || c.Name() != "ws" {
+		return tr, err
+	}
+	util.LogModuleWarn("htunnel", "websocket mesh handshake failed, falling back to http: proxy=%s err=%v", p.Name, err)
+	return dialHTP2PHTTP(p)
+}
+
+// dialHTWithFallback is the normal-target counterpart of dialHTP2PWithFallback.
 func (d *HTunnelDialer) dialHTWithFallback(ctx context.Context, host string, port int) (net.Conn, error) {
-	c := newHTCarrier(d)
+	c := newHTCarrier(d.Proxy)
 	conn, err := c.DialTarget(ctx, host, port)
 	if err == nil || c.Name() != "ws" {
 		return conn, err
 	}
 	util.LogModuleWarn("htunnel", "websocket target dial failed, falling back to http: proxy=%s err=%v", d.Proxy.Name, err)
-	return (&httpCarrier{d: d}).DialTarget(ctx, host, port)
-}
-
-// dialP2PWithFallback is the mesh-side counterpart of dialHTWithFallback.
-func (d *HTunnelDialer) dialP2PWithFallback() (frame.FrameTransport, error) {
-	c := newHTCarrier(d)
-	tr, err := c.DialP2P()
-	if err == nil || c.Name() != "ws" {
-		return tr, err
-	}
-	util.LogModuleWarn("htunnel", "websocket mesh dial failed, falling back to http: proxy=%s err=%v", d.Proxy.Name, err)
-	return (&httpCarrier{d: d}).DialP2P()
+	return (&httpCarrier{p: d.Proxy}).DialTarget(ctx, host, port)
 }

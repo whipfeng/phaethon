@@ -3449,3 +3449,28 @@ MESH 单步 HEAD 还是 v1 BIND 流”，以及普通代理是否走 mesh（`mes
 
 **验证**：`TestWSTargetCarrier`、`TestWSBindCarrierControl` 通过
 （后者覆盖 Control BIND over WS 双向收发 + Carrier 标签为 `WS`）。
+
+## 115. 单流吞吐根因实锤：lane cap 扩容判据（2026-11-12 20:20）
+
+**问题**：qg↔jf 单流 mesh 长期只有 OS 基线的 1/2~1/3（up ≈3.3MB/s vs 8.9）。
+
+**根因**：mesh 在途配额门控 `adjustCap` 的扩容条件要求“200ms 采样瞬间
+inflight ≥ cap/2”。低 RTT 链路 ack 很快，采样时刻 inflight 往往接近 0，
+cap 永远停在初始 256KB（甚至被 qd 砍到 64KB）；吞吐 ≈ cap / 50ms ack 间隔，
+正好落在 1~5MB/s。实锤日志：修复后 cap 能长到上限 8192KB，qd 仅 15~31ms
+（目标 200ms），说明旧判据从未触发扩容。
+
+**修复**（`b4f550c`）：扩容判据改为“本轮 acked 有推进 + qd < target/2”；
+`PHAETHON_LANE_CAP_LEGACY=1` 可回旧行为做 A/B；`PHAETHON_LANE_DIAG=1`
+输出每秒 `[LANE-CAP]`（cap/inflight/srtt/qd/demand）。
+
+**同窗口 A/B**（24.5MB 单流，qg↔jf，时间=秒 / 吞吐=MB/s，OS=系统 sshd 同链路）：
+
+| 方向 | 旧 583（3 次中位） | 新 626-htid（中位） | OS 基线（中位） |
+|---|---|---|---|
+| jf→qg（mesh down） | 4.05s / 6.0 | 2.94s / 8.3 | 3.11s / 7.9 |
+| qg→jf（mesh up） | 7.45s / 3.3 | 2.74s / 8.9 | 2.43s / 10.1 |
+
+结论：单流 mesh 已基本追平 OS 基线（down ≈1.0×，up ≈1.1×）；偶发单次
+~5.5s 离群仍需观察。两跳（vm→qg→jf）与 via SSH 路径待用同一方法复测。
+部署：qg/jf=`v0.8.0-626-gb4f550c-htid`，deskw 同版本。

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +27,23 @@ import (
 const ()
 
 var errReadTimeout = errors.New("read timeout")
+
+// htChannelEpoch makes channel IDs unique across process restarts. Clients
+// treat X-I as an opaque decimal string and echo it back in URLs/headers, so
+// shifting the base is wire-compatible. Without an epoch a leaked client
+// holding an old ID could hit a freshly allocated channel after a restart
+// (IDs restart at 1) and keep it alive with stale heartbeats.
+var htChannelEpoch = func() int64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return time.Now().UnixNano() & 0x0000FFFFFFFFFFFF
+	}
+	return int64(binary.BigEndian.Uint64(b[:]) & 0x0000FFFFFFFFFFFF)
+}()
+
+func nextHTChannelID(s *HTunnelServer) int64 {
+	return htChannelEpoch + atomic.AddInt64(&s.idGen, 1)
+}
 
 const maxUDPReplies = 256
 
@@ -405,7 +424,7 @@ func (s *HTunnelServer) handleConnectionRequest(w http.ResponseWriter, r *http.R
 	cmd := r.Header.Get(dialer.HeaderCommand)
 	isReverse := cmd == "BIND"
 
-	id := atomic.AddInt64(&s.idGen, 1)
+	id := nextHTChannelID(s)
 	connID := util.NextConnID()
 	ch := &htChannel{
 		id:        id,

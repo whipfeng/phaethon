@@ -3557,3 +3557,32 @@ cycle10 down=3.52s up=3.29s
 
 **下一步**：在慢轮触发时以亚秒级采样 jf 发送侧（WS 写阻塞、DRR 队列
 深度、inner TCP 的 RTO/reord）与 qg 接收侧，定位那 ~2s 额外延迟的来源。
+
+## 119. 多跳速率复测与 vm↔qg UDP leg 停顿（2026-11-12 23:25）
+
+**统一端点**（避免内建 SSH/OS sshd 混用）：mesh 两跳与 OS 两跳都落在
+jf 的 **OS sshd**：
+
+- mesh 两跳：vm →（mesh，qg 中转）→ `10.140.51.2:22`（jf OS sshd）
+- OS 两跳：vm → qg OS sshd（2222）→ jf OS sshd（60002）
+- 载荷 24.5MB，交替 3 轮。
+
+| 路径 | down（jf→vm） | up（vm→jf） |
+|---|---|---|
+| mesh 两跳 | 4.99 / 4.11 / **19.26** | 4.36 / **20.97(BrokenPipe)** / **19.29(BrokenPipe)** |
+| OS 两跳 | 3.76 / 3.61 / 3.65 | 3.76 / 3.73 / 3.68 |
+
+**发现**：
+
+- 未停顿时 mesh 两跳 down 约 4.1~5.0s vs OS 3.6~3.8s（慢 10~30%），
+  up 首轮 4.36s 后直接崩；
+- qg↔jf 单跳此前已 ≈ OS 基线（§116），所以两跳的损失不在 qg→jf；
+- vm↔qg 单跳定位：1/4/8MB 上传均成功（0.79/1.14/1.75s），24.5MB 上传
+  在 ~5MB 处卡住 ~20s 后 broken pipe；同一路径 24.5MB 下载可完成，
+  重复多轮后两个方向都会停 19~21s；
+- 同一时段 OS 路径稳定 3.6~3.8s。
+
+**结论**：多跳劣化主要来自 **vm↔qg 的 UDP leg**（重复大流量后停顿/断流），
+不是 qg→jf 载体；这也与“偶发停滞”现象同源，列为下一优先项。
+排查方向：UDP leg 的发送准入/ack 节奏、`udpLegTransport` 停等与
+leg 回退逻辑，以及停顿期间 vm/qg 的 leg 统计（Packets/Drops/backoff）。

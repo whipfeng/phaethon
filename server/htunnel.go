@@ -42,7 +42,37 @@ var htChannelEpoch = func() int64 {
 }()
 
 func nextHTChannelID(s *HTunnelServer) int64 {
-	return htChannelEpoch + atomic.AddInt64(&s.idGen, 1)
+	base := s.idEpoch
+	if base == 0 {
+		base = htChannelEpoch
+	}
+	return base + atomic.AddInt64(&s.idGen, 1)
+}
+
+// htChannelEpochKey stores a monotonic boot counter in runtime-state. Using a
+// persisted counter (instead of only the random fallback) makes channel IDs
+// unique across restarts deterministically, so an old client echoing an old
+// X-I always gets "channel not found → 410" and stops instead of adopting a
+// fresh channel that happens to reuse the same number.
+const htChannelEpochKey = "ht-channel-epoch"
+
+const htChannelIDsPerBoot = int64(1_000_000_000)
+
+// loadHTChannelEpoch increments the persisted boot counter and returns the
+// channel ID base. 0 means the DB is unavailable; callers fall back to the
+// random htChannelEpoch.
+func loadHTChannelEpoch() int64 {
+	var boot int64
+	_ = db.Get(db.BucketRuntimeState, []byte(htChannelEpochKey), &boot)
+	boot++
+	if boot <= 0 || boot >= htChannelIDsPerBoot {
+		boot = 1
+	}
+	if err := db.Put(db.BucketRuntimeState, []byte(htChannelEpochKey), boot); err != nil {
+		util.LogModuleWarn("htunnel", "persist channel epoch failed, using random fallback: %v", err)
+		return 0
+	}
+	return boot * htChannelIDsPerBoot
 }
 
 const maxUDPReplies = 256
@@ -53,6 +83,7 @@ type HTunnelServer struct {
 	Password string
 
 	idGen    int64
+	idEpoch  int64    // persisted per-boot base; 0 = random htChannelEpoch
 	channels sync.Map // int64 -> *htChannel
 }
 
@@ -1057,6 +1088,7 @@ func StartHTunnel(mapping *config.Mapping) (net.Listener, error) {
 	srv := &HTunnelServer{
 		BaseServer: BaseServer{Mapping: mapping},
 		Password:   mapping.Password,
+		idEpoch:    loadHTChannelEpoch(),
 	}
 
 	httpSrv := &http.Server{

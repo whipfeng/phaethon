@@ -3184,3 +3184,28 @@ MB（LAN）上回归，再上 jf。加密和 SOCKS5 UDP leg 随后纳入同一�
 
 生产已回退：qg wsauto + MB_HT WS、MGMS 长轮询，jf htq8m；
 EST18080 稳定在 9。
+
+### 107.9 统一载体抽象落地并验证（2026-11-12 12:45）
+
+代码（已提交）：
+- `frame.StreamCarrier` 能力接口：`WSTransport`=true；
+  `htunnelDirectTransport`（长轮询/回退）显式 false；其它 TCP 类载体 true；
+- p2p 去掉 `proxy.Type == H_TUNNEL && V2` 类型特判，按实际载体能力决定
+  是否包 `stripeTransport`；
+- WS 服务端 handler 在 attach 后阻塞到 transport 关闭（Done），
+  修复“lane attach 完 handler 返回就关连接”；
+- lane 控制器仅增加 add/diag 日志，未改加/删参数（30s/10s/5min）。
+
+验证（qg/jf/mb 全部 `_wslane6`，MGMS_HT 与 MB_HT 都走 WS）：
+- 日志确认两条链路都 `[STRIPE] stream carrier wrapped for lanes`；
+- 等部署重启完全结束后静置 3 分钟：**没有 WS 重拨**，EST18080=2、
+  EST18081=1，**无 lane add、无连接增长**；
+- 之前看到的 “~18~25s 重拨 / 34~45 条连接” 是我方部署重启造成的假象，
+  不是会话泄漏；
+- 吞吐：jf 两跳 6.68MB/s（28s），mb 两跳 3.22MB/s（58s，当前窗口偏低）；
+  单 lane 直通，未观察到相对单 WS 的退化。
+
+结论：ht mesh 的 WS 已按“普通流式载体”接入统一抽象；长轮询/回退因
+`IsStreamCarrier()==false` 自动豁免 lane。lane 的动态加/删交给原控制器，
+后续在真实拥塞下再验证加 lane 的效果。RACK 恢复螺旋仍是独立课题；
+加密与 SOCKS5 UDP leg 后续纳入同一抽象。

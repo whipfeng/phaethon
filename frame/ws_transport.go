@@ -22,12 +22,24 @@ type WSTransport struct {
 	ctrlQ  []wsQueued
 	dataQ  []wsQueued
 	closed bool
+
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 type wsQueued struct {
 	frameType byte
 	payload   []byte
 }
+
+// StreamCarrier marks a transport that is an ordered byte stream (WebSocket,
+// plain TCP, ...). Stripe lanes apply to such carriers exactly as they do to
+// TCP; pools of independent HTTP requests (h_tunnel long-poll) are not.
+type StreamCarrier interface {
+	IsStreamCarrier() bool
+}
+
+func (t *WSTransport) IsStreamCarrier() bool { return true }
 
 func (t *WSTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	return t.sendFrames([]Frame{{Type: frameType, Payload: payload, Control: isControl}})
@@ -118,6 +130,24 @@ func (t *WSTransport) Close() error {
 		return nil
 	}
 	t.closed = true
+	if t.done == nil {
+		t.done = make(chan struct{})
+	}
+	done := t.done
 	t.mu.Unlock()
+	t.closeOnce.Do(func() { close(done) })
 	return t.Conn.Close()
+}
+
+// Done is closed when the transport is closed (or its connection breaks and
+// the owner closes it). The WebSocket server handler blocks on it so a
+// connection whose ownership was transferred to a stripe lane is not closed
+// when the session-start call returns.
+func (t *WSTransport) Done() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done == nil {
+		t.done = make(chan struct{})
+	}
+	return t.done
 }

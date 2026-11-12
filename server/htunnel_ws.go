@@ -22,6 +22,12 @@ func (s *HTunnelServer) handleMeshWebSocket(w http.ResponseWriter, r *http.Reque
 			Open: crypto.OpenBody,
 		}
 		util.LogModuleError("htunnel", "[HT-WS] mesh websocket established: %s", r.RemoteAddr)
-		handleP2PTransport(tr, "mesh-ws:"+r.RemoteAddr)
+		// handleP2PTransport blocks for a primary session, but returns
+		// immediately when the first frame is a StripeAttach (ownership of the
+		// transport moves to the existing session's stripe layer). Returning
+		// from this handler would close the socket, so keep it alive until the
+		// transport owner closes it.
+		go handleP2PTransport(tr, "mesh-ws:"+r.RemoteAddr)
+		<-tr.Done()
 	}).ServeHTTP(w, r)
 }

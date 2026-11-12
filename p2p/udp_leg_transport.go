@@ -78,6 +78,7 @@ type udpLegTransport struct {
 	legOut       uint64 // atomic
 	lastInNano   int64  // atomic, UnixNano
 	lastOutNano  int64  // atomic, UnixNano
+	firstOutNano int64  // atomic, UnixNano; first datagram of the current leg episode
 	silentWarned int32  // atomic
 }
 
@@ -195,6 +196,7 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 			return nil // dialing in flight; drop (datagram semantics)
 		}
 		dst := &net.UDPAddr{IP: net.IPv4zero, Port: port}
+		t.markFirstOut()
 		if _, err := pc.WriteTo(dgram, dst); err != nil {
 			atomic.AddUint64(&t.legDrops, 1)
 			util.LogModuleDebug("p2p", "[UDP-LEG] write drop: %v", err)
@@ -209,6 +211,7 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 	if ep == nil {
 		return nil // no port allocated yet; drop
 	}
+	t.markFirstOut()
 	if err := ep.send(dgram); err != nil {
 		atomic.AddUint64(&t.legDrops, 1)
 		util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
@@ -216,6 +219,16 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 	atomic.AddUint64(&t.legOut, 1)
 	atomic.StoreInt64(&t.lastOutNano, time.Now().UnixNano())
 	return nil
+}
+
+// markFirstOut records the first datagram of the current leg episode. The
+// silence check needs a start reference before any inbound has arrived;
+// without it a fresh leg looks "silent for 24h" and is force-fallen back
+// before the peer can answer its first probe.
+func (t *udpLegTransport) markFirstOut() {
+	if atomic.LoadInt64(&t.firstOutNano) == 0 {
+		atomic.CompareAndSwapInt64(&t.firstOutNano, 0, time.Now().UnixNano())
+	}
 }
 
 func (t *udpLegTransport) routeDataViaUDP() bool {
@@ -401,10 +414,16 @@ func (t *udpLegTransport) checkLegSilence(now time.Time) {
 		return
 	}
 	lastIn := atomic.LoadInt64(&t.lastInNano)
-	inAge := 24 * time.Hour
-	if lastIn != 0 {
-		inAge = now.Sub(time.Unix(0, lastIn))
+	ref := lastIn
+	if ref == 0 {
+		// No inbound yet this episode: measure from the first outbound so a
+		// fresh leg gets a full grace period instead of looking 24h silent.
+		ref = atomic.LoadInt64(&t.firstOutNano)
 	}
+	if ref == 0 {
+		return
+	}
+	inAge := now.Sub(time.Unix(0, ref))
 	if inAge > 5*time.Second {
 		if atomic.CompareAndSwapInt32(&t.silentWarned, 0, 1) {
 			util.LogModuleError("p2p", "[UDP-LEG] outbound active but no inbound for %v (out=%d in=%d drops=%d) - one-way leg black hole?",
@@ -459,15 +478,32 @@ func (t *udpLegTransport) executeActions(acts []udpLegAction) {
 			t.allocatePort()
 		case legActUnregisterPort:
 			t.unregisterPort()
-		case legActStartAdvertise, legActStopAdvertise:
-			// 宣告态变化：经 mesh 单构建路径立即补发一帧 gossip（设计 §3 R2）
-			t.stateNotifyMu.Lock()
-			fn := t.stateNotify
-			t.stateNotifyMu.Unlock()
-			if fn != nil {
-				fn()
-			}
+		case legActStartAdvertise:
+			t.resetSilenceWindow()
+			t.notifyStateChange()
+		case legActStopAdvertise:
+			t.resetSilenceWindow()
+			t.notifyStateChange()
 		}
+	}
+}
+
+// resetSilenceWindow clears per-episode liveness references so the next
+// advertising episode starts with a fresh grace period.
+func (t *udpLegTransport) resetSilenceWindow() {
+	atomic.StoreInt64(&t.firstOutNano, 0)
+	atomic.StoreInt64(&t.lastInNano, 0)
+	atomic.StoreInt32(&t.silentWarned, 0)
+}
+
+// notifyStateChange asks the mesh layer to re-broadcast gossip immediately so
+// udp/udpPort changes reach the peer without waiting for the 15s ticker.
+func (t *udpLegTransport) notifyStateChange() {
+	t.stateNotifyMu.Lock()
+	fn := t.stateNotify
+	t.stateNotifyMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 

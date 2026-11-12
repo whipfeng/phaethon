@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"phaethon/config"
@@ -88,7 +87,7 @@ func (w *meshWaiter) stale() bool {
 // allocates the channel without dialing any target and starts the local P2P
 // session directly on the bridged transport (no reverse server splice).
 func (s *HTunnelServer) handleMeshChannelRequest(w http.ResponseWriter) {
-	id := atomic.AddInt64(&s.idGen, 1)
+	id := nextHTChannelID(s)
 	connID := util.NextConnID()
 	ch := &htChannel{
 		id:          id,

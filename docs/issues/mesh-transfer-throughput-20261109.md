@@ -3786,3 +3786,37 @@ retrans/backoff/rcv_rtt 尖峰。
 抬高本流延迟。属于架构性共享，不是单次运行的配置/状态 bug。若要进一步
 改善：数据/控制优先级、WS 多 lane 或按流多连接；本轮按监工要求不再刷
 短周期压测。
+
+## 128. UDP leg 分片根因与正确修复：端到端 MTU 1400（2026-11-13）
+
+**现象**：UDP leg 上重复 24.5MB 传输后出现 19~21s 停顿 / BrokenPipe；
+qg 侧 IP 重组计数约每个数据报 +2。
+
+**根因**：内层 1500B + IPIP 20 + frame 3 + UDP 8 + outer IP 20 = 1551B
+> 1500 路径 MTU，每个数据报被外层 IP 分成 2 片。丢任一片整报作废（承载
+一个完整内层 TCP 段），内层 TCP 退避到 19~21s。不是 UDP leg 活性/协商
+问题，是封装预算错误。
+
+**此前的权宜补丁（已删除）**：把 >1400B 的帧赶回 TCP 腿。问题：同一条
+流被拆到 UDP/TCP 两个载体，破坏单载体有序，up 方向掉 ~10%，且把“MTU
+预算被破坏”这一事实掩盖成静默换路。“分片重组是 IP 层的事”不等于可以
+让封装超 MTU：IP 能重组，但 all-or-nothing 丢片会放大成内层 RTO。
+
+**正确修复（本次）**：
+- `tun.OverlayMTU = 1400`，三平台真正下发到 TUN 适配器：
+  Windows `SetIpInterfaceEntry.NlMtu`、Linux `netlink.LinkSetMTU`、
+  Darwin `SIOCSIFMTU`；
+- gvisor fork 广告 MSS clamp 1460 → 1360（与 OverlayMTU-40 一致）；
+- 删除按帧大小选路；`writeLeg` 超过 1472B（1500 路径的 UDP 载荷上限）
+  只计数 + 告警，仍走 UDP，由 IP 层重组；
+- 预算：1400 + 20 IPIP + 3 frame + 8 UDP + 20 IP = **1451 ≤ 1500**（余 49B）。
+
+**预期**：整条流始终走 UDP 单载体、有序、无分片；不再有拆流损失。
+`legOversize` 应恒为 0；非 0 即说明有内层包绕过了 MTU/MSS 约束（bug 指标）。
+
+**顺带修复**：`frame.streamTransport` 恢复写锁。165e659 随批量发送设计
+移除了 `writeMu`，但 `FrameTransport` 接口没有单写者约束；并发
+Send/SendBatch 会让帧头/载荷在 TCP 流上交错，对端帧解析永久错位。
+单测 `TestStreamTransportConcurrentSendPreservesFrames` 一直失败即为证据
+（`unexpected frame type=0x12 payload=" \x00\x0520"`）。现在写路径按连接
+串行化；生产侧仍是单写者，无额外热路径开销。

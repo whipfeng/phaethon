@@ -372,6 +372,19 @@ func setWeakHostReceiveAPI(name string, v bool) error {
 	})
 }
 
+// setInterfaceMTUAPI sets the interface MTU through SetIpInterfaceEntry
+// (NlMtu). The IPv4 family row is written; the adapter is L3-only and IPv4 is
+// the mesh transport.
+func setInterfaceMTUAPI(name string, mtu int) error {
+	luid, index, err := getInterfaceLUID(name)
+	if err != nil {
+		return err
+	}
+	return setIpInterfaceEntryAPI(luid, index, func(row *windows.MibIpInterfaceRow) {
+		row.NlMtu = uint32(mtu)
+	})
+}
+
 // setInterfaceMetricAPI sets the interface metric or automatic metric mode.
 func setInterfaceMetricAPI(name string, metric uint32, automatic bool) error {
 	luid, index, err := getInterfaceLUID(name)

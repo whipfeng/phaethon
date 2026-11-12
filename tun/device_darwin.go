@@ -73,7 +73,7 @@ func CreateDevice() (Device, error) {
 	return &darwinTUN{
 		fd:   fd,
 		name: name,
-		mtu:  1500,
+		mtu:  OverlayMTU,
 		rBuf: make([]byte, 65535),
 	}, nil
 }

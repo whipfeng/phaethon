@@ -119,6 +119,34 @@ func setIfaceUp(name string, up bool) error {
 	return nil
 }
 
+// ifreqMTU is struct ifreq with the ifru_mtu union member (SIOCSIFMTU).
+type ifreqMTU struct {
+	name [unix.IFNAMSIZ]byte
+	mtu  int32
+	pad  [12]byte
+}
+
+var _ [unsafe.Sizeof(ifreqMTU{})]byte = [32]byte{}
+
+// setIfaceMTU sets the interface MTU (SIOCSIFMTU), the ioctl equivalent of
+// `ifconfig <dev> mtu <mtu>`.
+func setIfaceMTU(name string, mtu int) error {
+	fd, err := ifaceCtlSocket()
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+
+	var req ifreqMTU
+	req.name = ifnameBytes(name)
+	req.mtu = int32(mtu)
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.SIOCSIFMTU), uintptr(unsafe.Pointer(&req)))
+	if errno != 0 {
+		return fmt.Errorf("SIOCSIFMTU %s %d: %w", name, mtu, errno)
+	}
+	return nil
+}
+
 // delIfaceAddr removes ip from the named interface (SIOCDIFADDR), the ioctl
 // equivalent of `ifconfig <dev> delete <ip>`. The kernel matches the address
 // record by IP alone, so no mask is passed — same semantics as ifconfig.

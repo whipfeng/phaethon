@@ -71,6 +71,13 @@ type streamTransport struct {
 	closed     chan struct{}
 	closeOnce  sync.Once
 	lowat      bool // TCP_NOTSENT_LOWAT in effect on the carrier socket
+
+	// writeMu serializes frame writes on the wire. The p2p layer currently
+	// uses one writer goroutine per transport, but FrameTransport does not
+	// require that of its callers: two concurrent Send/SendBatch calls would
+	// interleave frame headers and payloads on the stream (a partial writev
+	// can be preempted), permanently desyncing the peer's frame parser.
+	writeMu sync.Mutex
 }
 
 // NewStreamTransport wraps conn in a FrameTransport.
@@ -128,6 +135,8 @@ func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) e
 	if len(payload) > MaxPayload {
 		return fmt.Errorf("reverse_frame: payload too large (%d)", len(payload))
 	}
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	if frameType == FrameMeshPacket {
 		traceMeshPacket("frame_write_start", payload)
 	}
@@ -171,6 +180,8 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 	}
 
 	// No write deadline — same rationale as Send.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 
 	// Pre-calculate total buffer size and validate payloads (a 2-byte length
 	// field cannot hold more than MaxPayload).

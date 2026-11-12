@@ -40,7 +40,7 @@ func CreateDevice() (Device, error) {
 	tun := &linuxTUN{
 		fd:   fd,
 		name: strings.TrimRight(string(ifr.name[:]), "\x00"),
-		mtu:  1500,
+		mtu:  OverlayMTU,
 	}
 
 	return tun, nil

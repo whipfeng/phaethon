@@ -45,7 +45,7 @@ func CreateDevice() (Device, error) {
 		session:  session,
 		readWait: readWait,
 		name:     tunName,
-		mtu:      1500,
+		mtu:      OverlayMTU,
 	}, nil
 }
 

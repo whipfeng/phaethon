@@ -37,8 +37,7 @@ const htunnelConcurrency = 16
 // channel, frames travel in POST bodies (client → server) and long-poll GET
 // bodies (server → client). Control and data frames use separate receive
 // buffers to prevent data congestion from starving control traffic.
-type htunnelDirectTransport struct {
-	proxy        *config.Proxy
+type htunnelDirectTransport struct {	proxy        *config.Proxy
 	connectionID string
 	client       *http.Client
 	crypto       *util.HTunnelCrypto
@@ -194,6 +193,11 @@ func (d *HTunnelDialer) dialP2PDirect() (frame.FrameTransport, error) {
 
 	return t, nil
 }
+
+// IsStreamCarrier reports false: the h_tunnel POST/GET carrier is a pool of
+// independent HTTP requests, not an ordered byte stream, so stripe lanes do
+// not apply. WebSocket h_tunnel uses frame.WSTransport, which reports true.
+func (t *htunnelDirectTransport) IsStreamCarrier() bool { return false }
 
 // Send writes one frame. Both control and data frames use the same async POST
 // path with sendSem concurrency control. Priority scheduling is handled by

@@ -1798,11 +1798,17 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// The controller (tasks 2.x) dials extra lanes via dialStripeLane and
 		// defers to an Active UDP leg. Lane dialing needs a P2P frame dialer;
 		// without one the wrapper still splits/fans-in but never adds lanes.
-		// h_tunnel V2 (POST/GET pool, see dialer/htunnel_bind.go) is not a
-		// single byte stream, so lanes don't apply.
+		// h_tunnel applies only when its actual carrier is an ordered stream
+		// (WebSocket). The POST/GET long-poll pool — including a WS→long-poll
+		// fallback — has no lane concept, so it stays unwrapped.
 		base := transport
 		var stripe *stripeTransport
-		if !(strings.EqualFold(proxy.Type, config.ProxyH_TUNNEL) && proxy.IsP2P() && proxy.V2) {
+		htPool := strings.EqualFold(proxy.Type, config.ProxyH_TUNNEL) && proxy.IsP2P() && proxy.V2
+		streamCarrier := false
+		if sc, ok := transport.(frame.StreamCarrier); ok && sc.IsStreamCarrier() {
+			streamCarrier = true
+		}
+		if !htPool || streamCarrier {
 			sendCtrl := func(ft byte, data []byte) error {
 				return enqueueWrite(peer, ft, data, true)
 			}
@@ -1831,6 +1837,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				})
 			}
 			base = stripe
+			if streamCarrier {
+				util.LogModuleInfo("p2p", "[STRIPE] stream carrier wrapped for lanes: proxy=%s", proxy.Name)
+			}
 		}
 		peer.stripe = stripe
 		peer.transport = base

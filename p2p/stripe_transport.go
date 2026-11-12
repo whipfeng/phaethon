@@ -158,6 +158,7 @@ type stripeTransport struct {
 	clearSince        time.Time // zero while gauge >= watermark
 	lastAddAt         time.Time
 	lastRemoveAt      time.Time
+	lastDiagAt        time.Time
 	events            []string // ring buffer of add/remove reasons (task 2.5)
 
 	ctrlCh    chan legRecvResult // reuses udp_leg_transport's result type
@@ -256,7 +257,9 @@ func (t *stripeTransport) removeLane(l *stripeLane) {
 			break
 		}
 	}
+	remain := len(t.lanes)
 	t.mu.Unlock()
+	util.LogModuleInfo("p2p", "[STRIPE] remove lane stripeID=%d (lanes=%d)", l.id, remain)
 	// Lane set changed: affinity flows rehash across the survivors on the
 	// next SendBatch (§3.6 accepted transient).
 	t.dropAffinity()
@@ -903,9 +906,14 @@ func (t *stripeTransport) controllerTick() {
 			if !t.attachLane(stripeID, tr) {
 				tr.Close()
 			}
+			util.LogModuleInfo("p2p", "[STRIPE] add lane stripeID=%d gauge=%.2f lanes=%d/%d", stripeID, t.currentGauge(), t.laneCount(), stripeMaxLanes)
 			t.recordEvent("add lane stripeID=%d: gauge=%.2f ≥ %.2f sustained %v, lanes now %d/%d (udpActive=%v)",
 				stripeID, t.currentGauge(), stripeGaugeHighWatermark, stripeAddSustain, t.laneCount(), stripeMaxLanes, udpActive)
 		}
+	}
+	if t.laneCount() > 0 && now.Sub(t.lastDiagAt) >= 30*time.Second {
+		t.lastDiagAt = now
+		util.LogModuleInfo("p2p", "[STRIPE] diag lanes=%d gauge=%.2f high=%v gate=%v", t.laneCount(), t.currentGauge(), high, gateEngaged)
 	}
 	if removeDue {
 		lanes := t.snapshotLanes()

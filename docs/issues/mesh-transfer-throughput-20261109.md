@@ -3937,3 +3937,41 @@ qg `IpFragCreates`/`IpReasmReqds` 增量 0；Windows 侧 `Fragments Created`
 - 各节点 `data/worker` 有历史解压的旧 worker（几十~几百 MB），
   但 `data/state/last-good-worker` 均指向当前 `phaethon` 自身，且
   `worker-pin` 只剩 `.bak`，无回退风险。
+
+## 134. 机群升 650 + 日志降噪 + worker 清理（2026-11-13 07:45）
+
+**代码**（phaethon `94437b2`，gvisor-fork `b1b8e51`）：
+- `[HT-WS]/[HT-STREAM] established` 由 ERROR 降为 INFO（A/B 期结束）；
+- `AcceptLoop` 遇 `net.ErrClosed` 降为 debug，不再把正常停机记成 accept error；
+- fork 的 `[TCP-SEND] failed` 对 `ErrInvalidEndpointState/ErrClosedForSend`
+  （连接拆除竞态）降为 debug，其余发送错误仍为 ERROR。
+
+**机群**（全部 `v0.8.0-650-g94437b2`）：
+- vm/qg/jf/gg：直接替换二进制重启（Linux/Windows）；
+- mb：替换 darwin 二进制重启；
+- qgw：经 qg 的 vboxsf 挂载写入 win7 包，detached PowerShell 停→换→启，
+  并移走 `worker-pin`（否则 watchdog 仍钉在 630）；
+- deskw：签名包上传 `POST /api/packages/upload`（mTLS）→
+  `POST /api/packages/{id}/activate?restart=now`，watchdog 拉起的
+  worker 为 650；supervisor 仍是 630（pkg 机制只换 worker，不影响数据面）。
+  至此 §130 的“新节点→旧节点上传仍分片”风险关闭。
+
+**清理**：`data/worker` 历史解压 worker 删除——qg 100M、jf 623M、
+gg 21M、mb 286M，均降到 ~4K/0；qg 122 个 0 字节 pkg 已移走（§132）。
+
+**复测**（650，24.5MB，同窗口）：
+
+| 路径 | 完成时间 |
+|---|---|
+| 单跳 mesh down | 3.52 / 3.65 / 3.81s |
+| 两跳 mesh down | 3.94 / 3.97 / 4.00 / 4.05 / 4.11 / 4.20s |
+| 两跳 mesh up | 3.47 / 3.63 / 3.68s |
+| OS 两跳 down | 3.47 / 3.85 / 3.87 / 3.95 / 4.18 / 4.28s |
+
+两跳 mesh 与 OS 两跳的区间重叠，稳态差距约 0~5%；此前 §130 的
+5~18% 差距属于 §127 的偶发 WS 慢簇窗口，不是固定损失。本轮未再改
+载体调度。UDP leg 仍为 `transport=udp`，qg `IpReasmReqds` 全程增量 0。
+
+**仍缺**：macOS 的 TUN MTU 下发（`SIOCSIFMTU`）没有真机跑过——mb 是
+mesh-only，不创建 TUN 适配器；代码已跨平台编译通过，需日后在有 TUN 的
+Mac 上验一次。

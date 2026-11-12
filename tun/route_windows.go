@@ -63,6 +63,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	} else {
 		util.LogModuleInfo("route", "interface %s MTU set to %d", r.devName, OverlayMTU)
 	}
+	if err := setInterfaceMTUAPI6(r.devName, OverlayMTU); err != nil {
+		util.LogModuleWarn("route", "set %s IPv6 MTU %d fail: %v", r.devName, OverlayMTU, err)
+	}
 
 	// 1a. Enable weak-host send/receive on the Wintun adapter. Wintun is a L3
 	// tunnel; Windows' strong-host model drops packets whose source/destination

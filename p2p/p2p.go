@@ -477,12 +477,12 @@ type Peer struct {
 	negotiatedVersion atomic.Int32
 	// peerCaps is the remote capability set from hello/gossip (D25). Nil means
 	// the peer predates capability advertisement — treated as "no restriction".
-	peerCaps          atomic.Value // map[string]bool
-	linkNICPtr        atomic.Pointer[mesh.LinkNIC]
-	meshSenderPtr     atomic.Pointer[peerSender]
-	lastSeenNano      atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
-	pingDeadHeldNano  atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
-	lastPongNano      atomic.Int64 // last successful pong; hard liveness ceiling
+	peerCaps         atomic.Value // map[string]bool
+	linkNICPtr       atomic.Pointer[mesh.LinkNIC]
+	meshSenderPtr    atomic.Pointer[peerSender]
+	lastSeenNano     atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
+	pingDeadHeldNano atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
+	lastPongNano     atomic.Int64 // last successful pong; hard liveness ceiling
 
 	transport       frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
 	transportMu     sync.Mutex
@@ -2156,6 +2156,18 @@ func (m *P2PManager) runSession(peer *Peer) {
 	}
 }
 
+// updateRemoteSeq applies the peer's advertised link sequence number. The
+// first gossip establishes it; later gossip corrects a stale value (peer
+// re-created its link object while the transport stayed up). Returns true
+// when the value changed.
+func updateRemoteSeq(peer *Peer, seq uint16) bool {
+	if seq == 0 || peer.RemoteSeq == seq {
+		return false
+	}
+	peer.RemoteSeq = seq
+	return true
+}
+
 // hashString generates a simple hash from a string (for sequence number generation)
 // handleGossip processes a gossip message from a peer.
 // In v8 there is no hello frame: the first gossip on a connection establishes the
@@ -2187,6 +2199,14 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 			return
 		}
 		peer.negotiatedVersion.Store(int32(negotiatedProtocolVersion(info.ProtocolVersion)))
+		// RemoteSeq correction: establishment learns it once from the first
+		// gossip, but if the peer later advertises a different link seq (its
+		// peer object was re-created while this connection stayed up), keeping
+		// the old value leaves the topology with two unmatched half-edges —
+		// (us→peer: local,old) and (peer→us: new,ourLocal) never pair.
+		if updateRemoteSeq(peer, info.Seq) {
+			util.LogModuleWarn("p2p", "[P2P] peer %s remoteSeq corrected to %d (node=%s)", peer.ID, info.Seq, peer.NodeID)
+		}
 		// NodeID change: re-register with the new identity (design §5.3).
 		if nodeID := extractNodeIDFromGossip(info); nodeID != "" && nodeID != peer.NodeID {
 			util.LogModuleInfo("p2p", "[P2P] peer %s nodeID changed: %s -> %s", peer.ID, peer.NodeID, nodeID)

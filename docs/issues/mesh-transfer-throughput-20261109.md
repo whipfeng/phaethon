@@ -3412,18 +3412,27 @@ URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地�
 **决策**：WS 一旦生效，**不再受 v2 开关影响**；v2 只决定“无 WS 时 P2P 走
 MESH 单步 HEAD 还是 v1 BIND 流”，以及普通代理是否走 mesh（`meshAwareDialer`）。
 
-| 通道 / 流量 | WS 生效 | v2 | 路径 |
-|---|---|---|---|
-| 普通代理 target（非 mesh） | 是 | 任意 | WS target（X-H/X-P） |
-| 普通代理 target（非 mesh） | 否 | 任意 | HTTP CONN |
-| 普通代理 target（mesh） | 是/否 | true | 不进 h_tunnel CONN，走 `meshAwareDialer` |
-| P2P 会话 | 是 | 任意 | WS 持久连接 + 帧批次 |
-| P2P 会话 | 否 | true | MESH 单步 HEAD |
-| P2P 会话 | 否 | false | v1 BIND 三步 PORT=2 |
-| 反向数据 BindModeData | 是 | 任意 | WS BIND PORT=0 |
-| 反向数据 BindModeData | 否 | 任意 | HTTP BIND PORT=0 |
-| 控制通道 BindModeControl | 是 | 任意 | WS BIND PORT=1 |
-| 控制通道 BindModeControl | 否 | 任意 | HTTP BIND PORT=1 |
+| 流量 / 通道 | P2P | V2 | WS 生效 | 路径 |
+|---|---|---|---|---|
+| 普通 target | off | 任意 | 是 | WS target（X-H/X-P），服务端代拨目标 |
+| 普通 target | off | 任意 | 否 | HTTP CONN，服务端代拨目标 |
+| 普通 target | on | off | 是 | WS target（X-H/X-P），服务端代拨目标 |
+| 普通 target | on | off | 否 | HTTP CONN，服务端代拨目标 |
+| 普通 target | on | on | 是 | 服务端不代拨目标；目标流量走 mesh，隧道帧经 **WS** 承载 |
+| 普通 target | on | on | 否 | 服务端不代拨目标；目标流量走 mesh，隧道帧经 MESH/BIND 承载 |
+| P2P 会话 | on | off | 是 | WS 持久连接 + 帧批次 |
+| P2P 会话 | on | off | 否 | v1 BIND 三步 PORT=2 |
+| P2P 会话 | on | on | 是 | WS 持久连接 + 帧批次 |
+| P2P 会话 | on | on | 否 | MESH 单步 HEAD |
+| P2P 会话 | off | — | — | 不建立 P2P 会话 |
+| 反向数据 BindModeData | 任意 | 任意 | 是 | WS BIND PORT=0 |
+| 反向数据 BindModeData | 任意 | 任意 | 否 | HTTP BIND PORT=0 |
+| 控制通道 BindModeControl | 任意 | 任意 | 是 | WS BIND PORT=1 |
+| 控制通道 BindModeControl | 任意 | 任意 | 否 | HTTP BIND PORT=1 |
+
+> 表述纠正：“不走 h_tunnel 数据面”应说成**不走 h_tunnel 的 target-CONN 转发**
+> （服务端不代拨目标）。mesh 的目标数据仍封装在 P2P 会话里、由 h_tunnel 链路
+> 承载，所以 WS 对 mesh 吞吐同样生效。
 
 **实现**：
 - `htCarrier` 增加 `DialBIND(ctx, mode, dst)`；Data/Control 全部经

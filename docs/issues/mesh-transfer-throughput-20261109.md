@@ -3102,3 +3102,36 @@ stripe/lane、保序、路由等上层逻辑不再为 h_tunnel POST/GET 池做�
    attach 后连接不泄漏），做连接数泄漏回归后再 A/B；
 2. 然后按既定方向把 WS 作为 ht 默认载体（auto 探测），长轮询仅回退；
 3. RACK 恢复螺旋仍是独立课题。
+
+### 107.5 wslane4 复测：单会话 4/4 成功，但跨重拨泄漏（仍未启用）
+
+改动（已再次 stash）：
+- **按实际载体判断**：新增 `frame.StreamCarrier` 接口；只有实际返回的
+  transport 是流式载体（WS）才包 stripe。WS→长轮询回退的 transport 不是
+  StreamCarrier，因此长轮询不会被包 lane —— 符合“长轮询无需 lane”的要求；
+- min-lane 延迟 5s 启动（等握手完成并便于开日志）；
+- 增加 remove lane 日志；
+- WS 服务端 handler 在 attach 后阻塞到 transport 关闭。
+
+结果：
+- 单个稳定会话里 lane 成功从 **1/4 → 4/4** 并保持（没有 remove）；
+- 但 qg→jf 的 ESTABLISHED 连接数在多次会话重拨后冲到 **74**，回退后稳定在 41；
+- 强制 lane 的两次两跳 2.71 / 3.89MB/s（劣化窗口），没有收益。
+
+判断：min-lane 方式会随每次重拨新建一个 stripe 并预拨 4 条 lane，
+旧会话/lane 没有被复用或及时拆除，导致连接累积。正确修法不是继续
+“预拨 lane”，而是：**每个 peer 会话只有一个 stripe 实例、重拨时复用；
+会话拆除时关闭全部 lane；避免同 peer 的重复会话**。这属于 p2p 会话
+生命周期改动，需单独评审后再上。
+
+### 107.6 nginx 限速排查
+
+`/etc/nginx/nginx.conf` 中没有 `limit_rate` / `limit_conn` / `limit_req` /
+`proxy_limit_rate`；`resdatabackend` 是 `10.140.51.2:32457`，keepalive 32，
+`proxy_buffering off`。所以 **nginx 本身没有配置限速**。单条 WS 上不去更可能
+是外层 LB 的单连接策略/单连接 cwnd；lane 生命周期修好后，多 WS 连接才能
+验证这一点。
+
+当前生产已回退：qg `wsauto` + 仅 MB_HT 走 WS，MGMS_HT 长轮询；jf `htq8m`；
+qg 到 jf:18080 的连接稳定在 41（phaethon 长轮询池）。后续加密与 SOCKS5
+UDP leg 纳入 WS 统一规划。

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os/exec"
 	"strings"
 	"time"
 	"unsafe"
@@ -14,6 +15,19 @@ import (
 
 	"phaethon/util"
 )
+
+// setInterfaceMTUAPI6 applies the IPv6 family MTU. Windows keeps IPv4/IPv6
+// MTU in separate interface rows; SetIpInterfaceEntry(AF_INET6) is rejected
+// while the Wintun adapter has no IPv6 address (NlMtu stays 65535), so use
+// netsh, which updates the row regardless.
+func setInterfaceMTUAPI6(name string, mtu int) error {
+	out, err := exec.Command("netsh", "interface", "ipv6", "set", "subinterface", name,
+		fmt.Sprintf("mtu=%d", mtu), "store=active").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("netsh ipv6 set subinterface: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// The Wintun adapter may take a moment to register with the TCP/IP stack.
@@ -65,6 +79,8 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	}
 	if err := setInterfaceMTUAPI6(r.devName, OverlayMTU); err != nil {
 		util.LogModuleWarn("route", "set %s IPv6 MTU %d fail: %v", r.devName, OverlayMTU, err)
+	} else {
+		util.LogModuleInfo("route", "interface %s IPv6 MTU set to %d", r.devName, OverlayMTU)
 	}
 
 	// 1a. Enable weak-host send/receive on the Wintun adapter. Wintun is a L3

@@ -18,15 +18,22 @@ import (
 	"phaethon/util"
 )
 
-// wsEnabledFor reports whether the WebSocket carrier is enabled for a proxy.
-// PHAETHON_HT_WS accepts "1"/"all"/"auto" or a comma-separated proxy-name list
-// (e.g. "MB_HT"). Default off.
+// wsEnabledFor reports whether the WebSocket carrier should be tried for a
+// proxy. Default is ON (try WS first, fall back to HTTP on failure): the P2P
+// session is one full-duplex transport chosen by the active side, so the
+// passive side's environment does not matter. PHAETHON_HT_WS overrides:
+//   - "0"/"off"/"false"/"none" → force HTTP
+//   - "1"/"all"/"auto"/"on"    → try WS for every h_tunnel proxy
+//   - comma-separated names    → allowlist (only those proxies try WS)
 func wsEnabledFor(proxyName string) bool {
 	v := strings.TrimSpace(os.Getenv("PHAETHON_HT_WS"))
 	if v == "" {
-		return false
+		return true
 	}
-	if v == "1" || strings.EqualFold(v, "all") || strings.EqualFold(v, "auto") {
+	switch strings.ToLower(v) {
+	case "0", "off", "false", "no", "none", "disable", "disabled":
+		return false
+	case "1", "all", "auto", "on", "true", "yes":
 		return true
 	}
 	for _, n := range strings.Split(v, ",") {

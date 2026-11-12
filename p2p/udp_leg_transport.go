@@ -16,6 +16,15 @@ import (
 // come close; oversize frames fall back to the TCP leg.
 const maxLegDatagram = 65507
 
+// legSafeDatagram keeps a leg datagram inside a standard 1500-byte path MTU:
+// 1400 payload + frame header + UDP(8) + IP(20) <= 1500. Mesh data frames are
+// ~1580 bytes (IPIP), so sending them as UDP datagrams forces IP fragmentation
+// on every packet; one lost fragment drops the whole datagram and the inner
+// TCP collapses (observed: multi-second stalls and RSTs, with qg reassembly
+// counters climbing ~2 fragments per datagram). Oversized frames therefore
+// ride the base TCP carrier; small probes/control frames keep using the leg.
+const legSafeDatagram = 1400
+
 // udpLegDialRetry is the active side's channel redial interval while stuck in
 // Advertising (design fallback 2: 建不起来保持宣告，R 秒退避重试). Must match
 // the FSM's default backoff.
@@ -164,6 +173,10 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 // and must never surface as session write errors (the TCP leg is the session).
 func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 	dgram := frame.EncodeDatagram(frameType, payload)
+	if len(dgram) > legSafeDatagram {
+		// Would fragment on a 1500-MTU path; keep it whole on the TCP leg.
+		return t.base.Send(frameType, payload, false)
+	}
 	if len(dgram) > maxLegDatagram {
 		// 超载帧回 TCP 腿，不丢数据
 		return t.base.Send(frameType, payload, false)

@@ -45,3 +45,11 @@ func (t *firstFrameTransport) Recv() (byte, []byte, error) {
 }
 
 func (t *firstFrameTransport) Close() error { return t.base.Close() }
+
+// IsStreamCarrier delegates the capability of the wrapped transport.
+func (t *firstFrameTransport) IsStreamCarrier() bool {
+	if sc, ok := t.base.(frame.StreamCarrier); ok {
+		return sc.IsStreamCarrier()
+	}
+	return false
+}

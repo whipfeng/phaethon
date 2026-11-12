@@ -406,6 +406,9 @@ func (t *stripeTransport) flowLoop() {
 				l.flow.stallCheck(now, l.id, t.cfg.name)
 			}
 			t.notifyCredit()
+			if t.cfg.onRate != nil {
+				t.cfg.onRate(t.primaryFlow.snapshot().rate)
+			}
 			if now.Sub(lastDiag) >= laneDiagInterval {
 				lastDiag = now
 				t.logLaneDiag()

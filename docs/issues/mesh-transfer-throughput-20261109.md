@@ -3882,3 +3882,37 @@ MTU 均为 1400；vm 的 `QG_SS5_UDPLEG.p2p-udp=true`，`/api/p2p` 中 qg 为
 **仍未升级的节点与影响**：deskw / qgw 仍是旧版。新节点**向它们发**的数据
 （发送 MSS 取旧节点的 1460）在 vm↔qg leg 上仍会分片；反向（它们发向新
 节点）由新节点广告的 1360 约束，不受影响。二者升级后该方向才会完全消除。
+
+## 131. 上线中发现并修复 UDP leg 静默误判；全机群统一 647（2026-11-13 06:45）
+
+**现象**：vm 重启后 `/api/p2p` 的 qg 长时间停在 `transport=tcp`；日志出现
+`[UDP-LEG] outbound active but no inbound for 24h0m0s (out=2 in=0)`。
+
+**根因**：`checkLegSilence` 在 `lastInNano==0`（本回合尚未收到任何回包）时
+把 `inAge` 设为 24h，于是 leg 发出第一个探测后、对端回包到达前（约 1s 内）
+就判定“单向黑洞”并 `ForceFallback` → 60s 退避。leg 能否激活取决于对端
+是否在 1s 内回包，属竞态；日志里历史多次 `24h0m0s` 误报同源。
+
+**修复**（`d4db19b`）：
+- 新增 `firstOutNano`（本回合首个出站数据报时间），无回包时以它为参考；
+- 进入/退出宣告态时清空 `firstOut/lastIn/silentWarned`，每个回合重新给 5s 宽限；
+- 真实单向黑洞仍在“持续发送 5s 无回包”后触发，语义不变。
+
+**验证**：重启后 ~4~18s 内 `transport=udp` 自动恢复；新日志不再出现
+`24h0m0s`。
+
+**最终机群**：vm/qg/jf/gg/mb 全部 `v0.8.0-647-gd4db19b`
+（qgw/deskw 按约定不在本机部署范围）。VM 适配器 IPv4/IPv6 MTU 均 1400。
+
+**最终复测**（vm↔qg，`loc.qg.phn:2222`，24.5MB）：
+
+| 方向 | 轮次 | 分片增量 |
+|---|---|---|
+| down（qg→vm） | 3.72 / 3.83s | 0 |
+| up（vm→qg） | 3.16 / 3.11s | 0 |
+
+qg `IpReasmReqds` 从 06:20 起（含两次 qg 重启、jf/gg/mb 升级、4 轮传输）
+累计增量 **0**；vm topology 仍含 deskw/jf/mb/qgw，未缺边。
+
+**剩余风险**：deskw / qgw 升级前，新节点向其上传仍会在 leg 上分片
+（见 §130 末）。deskw 由用户亲自部署，qgw 不属本机授权范围。

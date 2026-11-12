@@ -3745,3 +3745,22 @@ retrans/backoff/rcv_rtt 尖峰。
 外部网络、丢包、配额、重连、进程停顿。下一步需要**常驻 watcher**在慢簇
 出现时自动快照（nextHop/cost、外层 socket、DSACK、inner 计数），而不是
 事后按轮次采样——因为不知道慢簇何时到来。
+
+## 126. 常驻 watcher 首次捕获慢簇（2026-11-13 02:00）
+
+9 分钟 watcher（每 10s 一次 24.5MB，500ms 采样路由/质量/丢包/DSACK），共 40 轮：
+
+- 36 轮正常：3.38~3.88s（中位 ~3.5s）；
+- 4 轮慢：5.41 / **5.99** / **5.95** / 4.06s；
+- 全程 `nextHop=jf`（无切路）、`drops` 增量恒 0；
+- 慢轮的 `cost` 27~37、`srtt` 21~31ms、`jitter` 8.7~21.5ms，偏高；
+  但部分快轮也有 jitter 13~16.6ms，单靠质量指标不能完全区分；
+- 每轮 DSACK 3~18，慢轮偏高（11~18）但快轮也有 12~14。
+
+**推断（待验证）**：qg↔jf 只有一条 WS 载体，mesh 的控制/转发流量（gossip、
+其它节点 transit）与本次 bulk 共用同一条 TCP，产生排队/HOL；而 OS 直连是
+独立 TCP，所以不受影响。慢轮伴随 cost/jitter 抬升与 DSACK 增多，方向一致。
+
+**下一步（不改代码）**：在慢簇窗口内对比“纯 bulk（临时压低 gossip/减少
+并发 mesh 流量）”与现状；若慢簇消失，则确认是单载体 HOL，再考虑数据
+优先级/多 lane。watcher 数据存于 `tmp_mesh_watch.jsonl`。

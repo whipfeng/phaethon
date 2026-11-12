@@ -3336,3 +3336,8 @@ ht 的 password 不能拿来给 SOCKS5 leg 用（会与 active 侧空密码不�
   控制帧优先、速率下限保护），属于独立设计，不能复用当前的同步写循环。
 
 生产：jf/qg/deskw/mb 均为 `_pongdead`/统一 WS 构建，pacing 代码已回退。
+
+**代码保留**：两次 pacing 的实现（`frame.PacedTransport` 通用整形器 +
+stripe `onRate` 反馈 + p2p 被动侧接线）保留在仓库中，仅由
+`PHAETHON_PACE_STREAM=1` 启用，默认关闭。保留目的是记录尝试与失败原因，
+**不要在生产开启**；后续若做异步整形可在此基础上重写。

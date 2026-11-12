@@ -1443,10 +1443,25 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		default:
 		}
 	}
+	// Experimental generic pacer for stream carriers (env-gated, default off).
+	// Kept for the record: enabling it broke the link (synchronous pacing held
+	// the write loop); a viable pacer needs async shaping + control priority.
+	var paced *frame.PacedTransport
+	if os.Getenv("PHAETHON_PACE_STREAM") == "1" {
+		if sc, ok := t.(frame.StreamCarrier); ok && sc.IsStreamCarrier() {
+			paced = frame.NewPacedTransport(t, 0)
+			t = paced
+		}
+	}
 	stripe := newStripeTransport(t, stripeConfig{
 		sendControl: sendCtrl,
 		onCredit:    wakeWriteLoop,
-		name:        "passive:" + peer.ID,
+		onRate: func(r float64) {
+			if paced != nil {
+				paced.SetRate(0.9 * r)
+			}
+		},
+		name: "passive:" + peer.ID,
 	})
 	peer.stripe = stripe
 

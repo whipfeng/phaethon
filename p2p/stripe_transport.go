@@ -97,6 +97,10 @@ type stripeConfig struct {
 	// onCredit wakes the peer's write loop to re-check its in-flight credit
 	// after an ack or a cap adjustment (§3.4). Nil in tests.
 	onCredit func()
+	// onRate reports the primary flow's measured delivery rate (bytes/s), used
+	// by the optional generic pacer below the stripe (experimental; see
+	// frame.PacedTransport).
+	onRate func(float64)
 	// name is the peer identifier for diagnostic logs.
 	name string
 }

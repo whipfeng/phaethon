@@ -3506,3 +3506,54 @@ allowlist。新增 `wsEnabledFor` 单测覆盖默认值与开关。
 
 **待办**：via SSH 路径尚未复测；“WS 握手失败回退 HTTP”未现场构造，
 依赖已有单测与回退分支。
+
+## 117. 全环境统一到 plain 版本 v0.8.0-630-g7f1a6ab（2026-11-12 22:30）
+
+**版本纪律**：pkg/worker 的版本戳只用 `git describe --tags --always` 原文，
+禁止自定义后缀（历史上的 `-relay-log` 事故会导致 watchdog 版本比较误判）。
+之前的 `626/628-htid` 属临时后缀，本轮全部替换为 plain 版本。
+
+| 节点 | 方式 | 运行版本 |
+|---|---|---|
+| vm | `bin/deploy-vm.ps1`（计划任务 PhaethonTUN） | v0.8.0-630-g7f1a6ab |
+| qg | 直接替换 `/root/phaethon` + rc-service | 同上 |
+| jf | `jf_deploy.sh` | 同上 |
+| gg | `/home/layer4/phaethon-gg/` 脚本替换 | 同上 |
+| mb (macOS x86_64) | 上传 darwin/amd64 + sudo 替换 | 同上 |
+| deskw | Windows 直换（共享目录中转） | 同上 |
+| qgw | **签名 pkg 激活**（windows7/amd64），worker-pin=`v0.8.0-630-g7f1a6ab`；watchdog 仍为 529 | worker 630 |
+
+验证：qg `/api/mesh/topology` 共 7 节点 19 条边，所有方向 seq 成对
+（如 qgw↔mb 2/6、jf↔deskw 7/1、qg↔jf 6/4）；各节点日志均出现
+`P2PManager initialized (version=v0.8.0-630-g7f1a6ab ...)`。
+
+## 118. 离群复现与否定假设（2026-11-12 22:40）
+
+**复现**：qg↔jf 单流 24.5MB，每轮先空闲 10s 再测 down/up：
+
+```
+cycle1 down=3.43s  up=3.32s
+cycle2 down=3.37s  up=3.29s
+cycle3 down=3.46s  up=3.50s
+cycle4 down=4.67s  up=3.36s
+cycle5 down=5.28s  up=3.38s
+cycle6 down=5.09s  up=3.85s
+cycle7 down=5.43s  up=3.41s
+cycle8 down=3.52s  up=3.47s
+cycle9 down=3.46s  up=3.26s
+cycle10 down=3.52s up=3.29s
+```
+
+- 离群只出现在 **down（jf→qg，jf 为发送端）**，up 始终平稳；
+- 连续 4 轮慢后自行恢复，重新计时可再次出现。
+
+**已否定的假设**（同一窗口取证）：
+
+- lane cap 塌缩：jf 日志该链路 `cap` 全程 8192KB，`qd` 峰值仅 77ms
+  （目标 200ms），无缩容；
+- P2P 会话重连：窗口内无 `session ended` / `peer established` / WS 重建；
+- 链路质量突变：qg/jf `srtt` 12~22ms、`jitter` 偶发 15ms，未与慢轮强相关；
+- DSACK：qg `tcpFlowDSACKSum` 每轮仅 +6~20，无爆炸。
+
+**下一步**：在慢轮触发时以亚秒级采样 jf 发送侧（WS 写阻塞、DRR 队列
+深度、inner TCP 的 RTO/reord）与 qg 接收侧，定位那 ~2s 额外延迟的来源。

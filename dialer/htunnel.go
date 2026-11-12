@@ -136,7 +136,7 @@ func (d *HTunnelDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 		return conn, nil
 	}
 
-	return d.dialHTunnel("CONN", dstAddr, dstPort)
+	return d.dialHTWithFallback(context.Background(), dstAddr, dstPort)
 }
 
 // dialHTunnel establishes an HTTP tunnel connection with the specified command.
@@ -240,13 +240,11 @@ func (d *HTunnelDialer) DialControl() (net.Conn, error) {
 
 // DialP2P establishes a P2P connection through this HTunnel proxy. v2 (MESH
 // direct) is used when proxy.P2P is enabled, otherwise the v1 BIND stream
-// channel is used as fallback. The BindStrategy picks the right path.
+// channel is used as fallback. The BindStrategy picks the right path, and the
+// proxy-level carrier selection (HTTP vs WebSocket) is applied in
+// dialP2PWithFallback so mesh and normal traffic share the same carrier.
 func (d *HTunnelDialer) DialP2P() (frame.FrameTransport, error) {
-	r, err := bindToBase(d.Proxy, BindModeP2P, "")
-	if err != nil {
-		return nil, err
-	}
-	return r.Frame, nil
+	return d.dialP2PWithFallback()
 }
 
 // DialReverse establishes a reverse data connection through this HTunnel proxy.

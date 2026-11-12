@@ -3,6 +3,8 @@ package p2p
 import (
 	"encoding/binary"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,9 +39,9 @@ const (
 
 // In-flight cap tunables (§3.3 LEDBAT-like, delay-driven).
 const (
-	laneCapInitial        = 256 << 10  // 256KB starting cap
-	laneCapMin            = 64 << 10   // never throttle below this
-	laneCapMax            = 8 << 20    // never exceed this
+	laneCapInitial        = 256 << 10 // 256KB starting cap
+	laneCapMin            = 64 << 10  // never throttle below this
+	laneCapMax            = 8 << 20   // never exceed this
 	laneQDTarget          = 200 * time.Millisecond
 	laneCapAdjustInterval = 200 * time.Millisecond
 	laneNegQDResetRounds  = 25 // 25 × 200ms = 5s of persistent negative qd → rebuild minRTT baseline
@@ -55,29 +57,42 @@ type laneFlow struct {
 	tx atomic.Uint64 // payload bytes written on this lane
 	rx atomic.Uint64 // payload bytes read on this lane
 
-	mu         sync.Mutex
-	acked      uint64 // peer-reported rx
-	gated      bool   // at least one ack seen: the peer supports LaneAck
-	samples    [laneRTTRingCap]laneTxSample
-	head, n    int
-	lastSample time.Time
-	srtt       time.Duration
-	lastRTT    time.Duration
-	minBuckets [laneMinRTTBuckets]time.Duration
+	mu          sync.Mutex
+	acked       uint64 // peer-reported rx
+	gated       bool   // at least one ack seen: the peer supports LaneAck
+	samples     [laneRTTRingCap]laneTxSample
+	head, n     int
+	lastSample  time.Time
+	srtt        time.Duration
+	lastRTT     time.Duration
+	minBuckets  [laneMinRTTBuckets]time.Duration
 	minBucketAt time.Time
-	rate       float64 // bytes/s delivered (max-biased EMA)
-	rateAcked  uint64
-	rateAt     time.Time
-	lastAckAt  time.Time
-	rxReported uint64 // receiver side: last rx sent in an ack
+	rate        float64 // bytes/s delivered (max-biased EMA)
+	rateAcked   uint64
+	rateAt      time.Time
+	lastAckAt   time.Time
+	rxReported  uint64 // receiver side: last rx sent in an ack
 
 	// In-flight cap (§3 B2). capVal is mu-guarded: adjustCap writes it from
 	// flowLoop, gateState reads it from peerWriteLoop.
 	capVal          int64
 	lastAdjustAt    time.Time
+	lastAdjustAcked uint64 // acked at the previous adjust (demand signal)
 	negQDRounds     int
 	ackedAdvancedAt time.Time // last time ackedRx actually advanced
 	stallWarnedAt   time.Time
+	lastCapLogAt    time.Time // PHAETHON_LANE_DIAG throttle
+}
+
+// laneCapLegacyGrowth restores the pre-fix growth rule (inflight ≥ cap/2 at
+// sample time) for A/B testing via PHAETHON_LANE_CAP_LEGACY=1.
+func laneCapLegacyGrowth() bool {
+	return strings.TrimSpace(os.Getenv("PHAETHON_LANE_CAP_LEGACY")) == "1"
+}
+
+// laneCapDiagEnabled emits a per-second [LANE-CAP] line for cap tracing.
+func laneCapDiagEnabled() bool {
+	return strings.TrimSpace(os.Getenv("PHAETHON_LANE_DIAG")) == "1"
 }
 
 func (f *laneFlow) onSent(n int, now time.Time) {
@@ -178,7 +193,13 @@ func (f *laneFlow) inflight() (int64, bool) {
 //
 //	qd = srtt − minRTT(10min)          // clamped ≥ 0
 //	qd > target       → cap ×= max(0.5, target/qd)   // congested: shrink
-//	qd < target/2 and inflight ≥ cap/2 → cap ×= 1.25 // idle but busy: grow
+//	qd < target/2 and acked advanced → cap ×= 1.25  // healthy + demand: grow
+//
+// The growth signal is "peer acked new bytes during this interval" rather
+// than the instantaneous inflight, because a healthy low-RTT path drains
+// below cap/2 between acks and would otherwise never grow (cap pinned at
+// laneCapInitial → single-stream throughput stuck near cap/50ms).
+// PHAETHON_LANE_CAP_LEGACY=1 restores the old inflight-based rule.
 //
 // qd < 0 (srtt below the polluted baseline after the gate takes effect) is
 // clamped to 0 and never accelerates; persistent negative qd rebuilds the
@@ -205,6 +226,14 @@ func (f *laneFlow) adjustCap(now time.Time) {
 	if cap == 0 {
 		cap = laneCapInitial
 	}
+	inflight := int64(f.tx.Load()) - int64(f.acked)
+	// demand = the peer acknowledged new bytes since the previous adjust.
+	// Unlike instantaneous inflight this stays true on a healthy path even
+	// when acks arrive faster than the 200ms sampling interval, so the cap
+	// is not pinned at laneCapInitial (the old rule needed inflight ≥ cap/2
+	// exactly at sample time, which a low-RTT link almost never shows).
+	demand := f.acked > f.lastAdjustAcked
+	f.lastAdjustAcked = f.acked
 	switch {
 	case qd > laneQDTarget:
 		scale := float64(laneQDTarget) / float64(qd)
@@ -212,8 +241,14 @@ func (f *laneFlow) adjustCap(now time.Time) {
 			scale = 0.5
 		}
 		cap = int64(float64(cap) * scale)
-	case !neg && qd < laneQDTarget/2 && int64(f.tx.Load()-f.acked) >= cap/2:
-		cap += cap / 4
+	case !neg && qd < laneQDTarget/2 && demand:
+		if laneCapLegacyGrowth() {
+			if inflight >= cap/2 {
+				cap += cap / 4
+			}
+		} else {
+			cap += cap / 4
+		}
 	}
 	if cap < laneCapMin {
 		cap = laneCapMin
@@ -223,6 +258,13 @@ func (f *laneFlow) adjustCap(now time.Time) {
 	}
 	f.capVal = cap
 	f.lastAdjustAt = now
+
+	if laneCapDiagEnabled() && now.Sub(f.lastCapLogAt) >= time.Second {
+		f.lastCapLogAt = now
+		util.LogModuleInfo("p2p", "[LANE-CAP] cap=%dKB inflight=%dKB srtt=%v minRTT=%v qd=%v demand=%v tx=%d acked=%d",
+			cap>>10, inflight>>10, f.srtt.Round(time.Millisecond), minRTT.Round(time.Millisecond),
+			qd.Round(time.Millisecond), demand, f.tx.Load(), f.acked)
+	}
 
 	if neg {
 		if f.negQDRounds++; f.negQDRounds >= laneNegQDResetRounds {
@@ -285,11 +327,11 @@ func (f *laneFlow) stallCheck(now time.Time, laneID uint32, name string) {
 }
 
 type laneFlowSnapshot struct {
-	tx, inflight         int64
-	cap                  int64
-	gated                bool
+	tx, inflight          int64
+	cap                   int64
+	gated                 bool
 	srtt, lastRTT, minRTT time.Duration
-	rate                 float64
+	rate                  float64
 }
 
 func (f *laneFlow) snapshot() laneFlowSnapshot {

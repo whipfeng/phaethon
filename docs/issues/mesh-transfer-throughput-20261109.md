@@ -3162,3 +3162,25 @@ add/remove 行为**（gauge/credit 的触发条件是为长轮询/TCP 场景调�
 下一步应做控制器硬化：只在主 lane 真正拥塞持续 N 秒才加、加/删都带
 滞回、每会话连接数上限可验证（≤1+maxLanes 且 10 分钟不增长），先在
 MB（LAN）上回归，再上 jf。加密和 SOCKS5 UDP leg 随后纳入同一抽象。
+
+### 107.8 关键修正：连接增长来自 WS 会话重拨，不是 lane 控制器（2026-11-12 12:00）
+
+核对控制器参数后先纠正一个错误：lane 控制器并不激进，实际是
+`add sustain 30s / add interval 10s / clear sustain 5min / max 8`。
+本轮 wslane6（统一 StreamCarrier + 无强制 lane）实测：
+
+- MGMS_HT 的 WS 在 11:51:54 建立，**11:52:12（约 18s）就重拨了一次**；
+- 期间没有任何 `[STRIPE] add lane / diag` 日志 —— 控制器根本没加 lane；
+- qg→jf ESTABLISHED 涨到 39，是**旧 WS 会话未及时关闭 + 频繁重拨**造成的，
+  不是 lane churn。
+
+结论修正：
+1. 抽象层（StreamCarrier）与控制器都不是当前瓶颈；
+2. 当前的直接问题是 **WS 会话生命周期**：新构建下 MGMS 的 WS 会话约 18s
+   就重拨，旧连接滞留；
+3. 下一步必须做隔离实验：分别构建“仅 Done 修复（不包 stripe）”和
+   “仅包 stripe（不做 Done 阻塞）”，确认是哪一个改变了 WS 会话寿命；
+4. 在生产确认稳定前，不启用 MGMS 的 WS，也不启用 lane。
+
+生产已回退：qg wsauto + MB_HT WS、MGMS 长轮询，jf htq8m；
+EST18080 稳定在 9。

@@ -385,30 +385,6 @@ func setInterfaceMTUAPI(name string, mtu int) error {
 	})
 }
 
-// setInterfaceMTUAPI6 sets the IPv6 family row's MTU. Windows keeps separate
-// per-family MTU rows, so setting IPv4 alone would leave IPv6 inner packets
-// free to exceed the overlay budget and fragment on a UDP leg.
-func setInterfaceMTUAPI6(name string, mtu int) error {
-	luid, index, err := getInterfaceLUID(name)
-	if err != nil {
-		return err
-	}
-	var row windows.MibIpInterfaceRow
-	row.Family = windows.AF_INET6
-	ret, _, _ := procInitializeIpInterfaceEntry.Call(uintptr(unsafe.Pointer(&row)))
-	if ret != 0 {
-		return fmt.Errorf("InitializeIpInterfaceEntry(AF_INET6): 0x%x", ret)
-	}
-	row.InterfaceLuid = luid
-	row.InterfaceIndex = index
-	row.NlMtu = uint32(mtu)
-	ret, _, _ = procSetIpInterfaceEntry.Call(uintptr(unsafe.Pointer(&row)))
-	if ret != 0 {
-		return fmt.Errorf("SetIpInterfaceEntry(AF_INET6): 0x%x", ret)
-	}
-	return nil
-}
-
 // setInterfaceMetricAPI sets the interface metric or automatic metric mode.
 func setInterfaceMetricAPI(name string, metric uint32, automatic bool) error {
 	luid, index, err := getInterfaceLUID(name)

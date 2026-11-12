@@ -1,10 +1,12 @@
 package dialer
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,17 +63,41 @@ func dialP2PWebSocket(proxy *config.Proxy, crypto *util.HTunnelCrypto) (frame.Fr
 	if err != nil {
 		return nil, fmt.Errorf("htunnel-ws: config: %w", err)
 	}
-	// Bound the opening handshake: a proxy that blackholes Upgrade must not
-	// stall the link dial; the caller falls back to GET/POST long-poll.
-	cfg.Dialer = &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := websocket.DialConfig(cfg)
+
+	// Dial the WebSocket target through the proxy chain (`via`) when one is
+	// configured, exactly like the HTTP long-poll carrier does. Dialing direct
+	// here used to bypass `via`, so an h_tunnel link with via=SSH (target on the
+	// via side's LAN, e.g. 10.140.51.2:32457) timed out.
+	host := u.Hostname()
+	port := 80
+	if u.Scheme == "wss" {
+		port = 443
+	}
+	if p := u.Port(); p != "" {
+		if n, perr := strconv.Atoi(p); perr == nil {
+			port = n
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var conn net.Conn
+	if proxy.Next != nil && !strings.EqualFold(proxy.Next.Type, config.ProxyDIRECT) {
+		conn, err = dialWithContext(ctx, NewDialer(proxy.Next), host, port)
+	} else {
+		conn, err = (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("htunnel-ws: dial fail: %w", err)
 	}
-	conn.MaxPayloadBytes = 32 << 20
+	ws, err := websocket.NewClient(cfg, conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("htunnel-ws: handshake fail: %w", err)
+	}
+	ws.MaxPayloadBytes = 32 << 20
 	util.LogModuleError("htunnel", "[HT-WS] persistent websocket established: proxy=%s url=%s", proxy.Name, u.String())
 	return &frame.WSTransport{
-		Conn: conn,
+		Conn: ws,
 		Seal: crypto.SealBody,
 		Open: crypto.OpenBody,
 	}, nil

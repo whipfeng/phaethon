@@ -3586,3 +3586,35 @@ jf 的 **OS sshd**：
 不是 qg→jf 载体；这也与“偶发停滞”现象同源，列为下一优先项。
 排查方向：UDP leg 的发送准入/ack 节奏、`udpLegTransport` 停等与
 leg 回退逻辑，以及停顿期间 vm/qg 的 leg 统计（Packets/Drops/backoff）。
+
+## 120. 实锤：vm↔qg UDP leg 是停顿根因（2026-11-12 23:40）
+
+**对照方法**：只改一个变量——把 vm 的 `QG_SS5_UDPLEG` 代理 `p2p-udp`
+从 true 改成 false（其余配置不变），等 peer 重建、`/api/p2p` 的 qg
+`transport=tcp` 后，用同一 24.5MB 单流脚本复测；测完已恢复原配置
+（transport 回到 `udp`）。
+
+**A：UDP leg 开启（现状）**
+
+- SSH 大流量上传：`10.140.51.2`（jf OS sshd）首轮 4.36s，随后
+  `Connection reset by peer` / BrokenPipe，19~21s 超时；
+- 两跳：down 4.99/4.11/**19.26s**，up 4.36/**20.97**/**19.29s**。
+
+**B：UDP leg 关闭（vm↔qg 走 TCP 载体）**
+
+| 路径（24.5MB，3 轮） | down | up |
+|---|---|---|
+| mesh 两跳 | 3.58 / 3.76 / 3.69s | 3.65 / 3.90 / 3.87s |
+| OS 两跳 | 3.68 / 3.85 / 3.73s | 3.61 / 3.80 / 3.77s |
+
+- SSH 大流量上传（jf OS sshd / 内建）：6/6 全部成功，3.45~3.80s；
+- 两跳与 OS 基线持平（down 甚至略快），无任何停顿。
+
+**结论**：多跳劣化、SSH 大流量 BrokenPipe/RST、重复传输后 19~21s 停顿，
+全部由 **vm↔qg 的 UDP leg** 引起；qg→jf 的 WS 载体与两跳转发本身已达标。
+UDP leg 是可选优化，当前缺陷未修前，建议对受影响的代理关闭 `p2p-udp`。
+
+**待查（UDP leg 自身）**：为何 TCP 载荷（尤其 SSH 的加密大包/反向窗口
+更新）在 UDP leg 上会触发长时间停滞而裸 TCP 大流量不会；重点看
+`udpLegTransport.writeLeg` 的 fire-and-forget 丢包放大、leg 端口/NAT
+映射寿命、以及 inner TCP 在 leg 路径上的 RTO 退避行为。

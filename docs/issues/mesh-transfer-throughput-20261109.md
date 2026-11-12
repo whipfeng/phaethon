@@ -2904,6 +2904,58 @@ proxy=MB_HT url=ws://192.168.1.88:18081/ui/resdata/ws/conn-1`。
   才能定位。WS 本身只在 MB_HT 上启用，jf 链路未变。
 - 下一步：mb 链路长跑/停滞回归；nginx 放行后验证 jf 两跳。
 
+## 105. 慢跑现场实锤：ht GET 出队队列 100~227ms（2026-11-12 08:40）
+
+### 105.1 先纠正一个测量错误
+
+此前多次以“没有 P2P-QDEPTH / LANE-INFLIGHT / AQM / gap-skip 日志”判断“没有队列”。
+实际 qg/jf 的全局日志级别是 **error**，这些 info 日志根本没写。把
+`p2p`/`htunnel` 调到 info 后重测，结论改变。
+
+### 105.2 现场数据
+
+健康跑（6~7.8MB/s）：jf ht server `avgSojourn 2.1~2.6ms, maxSojourn ≤26ms,
+queued=0`，队列确实不存在。
+
+一次 85s / 2.20MB/s 的慢跑（jf 内层 8 流 cwnd 128、srtt 369~805ms、minRTT 73~82ms、
+DSACK/retransmits ≈ 90%）同时段：
+
+```
+[HT-SERVER-STATS] conn=conn-3 frames=12212 avgSojourn=100.3ms maxSojourn=227.3ms queued=394884
+mesh AQM dropped 34 frames ... queued=392537B
+mesh AQM dropped 105 frames ... queued=394798B
+```
+
+更早一次 8MB 上限下的 AQM 日志直接看到 `queued=945694B`。
+
+### 105.3 512KB 上限实验：无改善，回退
+
+把 `htMeshMaxQueuedBytes` 8MB→512KB 部署 jf 后：
+
+| 项 | 8MB | 512KB |
+|---|---|---|
+| 慢跑队列峰值 | ~945KB | ~390KB |
+| 慢跑 avgSojourn | ~150ms（推算） | **100ms**（实测） |
+| CoDel 丢帧 | 稀疏（1~3） | **多（105/10s）** |
+| 两跳吞吐 | 6.45~7.79 | 6.45 / 7.19 / 2.71（中位 6.45） |
+
+队列压小了但 sojourn 仍有 100ms（由 GET 出队速率决定），多出来的丢帧是真实
+丢包，吞吐没有改善。已回退 8MB（`htq8m`）。
+
+### 105.4 结论与下一步
+
+- 剩余 RTT 的主因已定位：**ht GET 出队队列**（慢跑时 100~227ms），不是 relay
+  p2p 队列、不是 ht server AQM 目标值；
+- 降低上限只是把队列换到别处并增加真实丢包，不是解法；
+- 结构性解法就是 WebSocket 载体（mb 已验证 1.7×）；jf 需等 nginx 放行
+  `Upgrade`，之后用 `PHAETHON_HT_WS=MGMS_HT` 直接验证；
+- 诊断用的 info 日志已调回 error。
+
+（运维注记：不要在**内联** ssh 命令里直接 `pkill -f 'data/worker/phaethon'`，
+该模式会匹配到执行命令的 shell 自身并把会话杀掉，导致 phaethon 停住；
+本次一次误操作使 jf 短停约 1~2 分钟，已用真实 sshd 重新拉起并验证
+`direct=true srtt 20.9ms`、8 流 6.23MB/s。部署请用脚本文件执行。）
+
 
 
 

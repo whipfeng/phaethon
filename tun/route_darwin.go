@@ -33,6 +33,12 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) (err error) {
 	if err := setIfaceUp(r.devName, true); err != nil {
 		return err
 	}
+	// Size the overlay MTU before routes go live so the kernel derives TCP MSS
+	// (MTU-40) from it. See tun.OverlayMTU for the framing budget.
+	if err := setIfaceMTU(r.devName, OverlayMTU); err != nil {
+		return err
+	}
+	util.LogModuleInfo("route", "interface %s MTU set to %d", r.devName, OverlayMTU)
 	if iface, err := net.InterfaceByName(r.devName); err == nil {
 		r.tunIndex = iface.Index
 	} else {

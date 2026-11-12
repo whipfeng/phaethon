@@ -55,6 +55,15 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	}
 	util.LogModuleInfo("route", "interface IP set to %s/%d via API (luid=%x idx=%d)", tunIP, adapterPrefixLen, luid, index)
 
+	// 1a-pre. Size the overlay MTU before DNS/routes go live so the Windows
+	// stack derives TCP MSS (MTU-40) from it. See tun.OverlayMTU for the
+	// framing budget that keeps every mesh frame inside a 1500-byte path.
+	if err := setInterfaceMTUAPI(r.devName, OverlayMTU); err != nil {
+		util.LogModuleWarn("route", "set %s MTU %d fail: %v", r.devName, OverlayMTU, err)
+	} else {
+		util.LogModuleInfo("route", "interface %s MTU set to %d", r.devName, OverlayMTU)
+	}
+
 	// 1a. Enable weak-host send/receive on the Wintun adapter. Wintun is a L3
 	// tunnel; Windows' strong-host model drops packets whose source/destination
 	// IPs are not assigned to the adapter. Weak-host allows the Fake-IP scheme to

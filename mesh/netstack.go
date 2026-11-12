@@ -778,13 +778,14 @@ func (n *Netstack) Stop() error {
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).
 func (n *Netstack) initStack() error {
 	// NIC 1: TUN adapter (channel endpoint). Link MTU 1600 is kept for IPIP
-	// outer-header headroom (inner 1500 + 20B outer). End-to-end TUN safety is
-	// enforced instead by the fork's advertised-MSS clamp at 1460
-	// (fork tcp/endpoint.go calculateAdvertisedMSS), so in-stack endpoints
-	// never emit packets larger than the 1500 TUN MTU — including replies to
-	// pre-upgrade peers. Previously oversized replies failed the TUN write
-	// path (ErrMessageTooLong) and, via an uninitialized ICMP MTU field,
-	// poisoned the peer's PMTU cache down to ~1-byte segments.
+	// outer-header headroom (inner 1400 + 20B outer). End-to-end TUN safety is
+	// enforced instead by the fork's advertised-MSS clamp at 1360
+	// (fork tcp/endpoint.go calculateAdvertisedMSS) plus the 1400-byte TUN
+	// adapter MTU (tun.OverlayMTU), so in-stack and OS endpoints never emit
+	// inner packets larger than 1400 — the budget that keeps a mesh frame
+	// unfragmented on a 1500-byte UDP leg path. Previously oversized replies
+	// failed the TUN write path (ErrMessageTooLong) and, via an uninitialized
+	// ICMP MTU field, poisoned the peer's PMTU cache down to ~1-byte segments.
 	linkEP := channel.New(8192, 1600, "")
 	n.linkEP = linkEP
 
@@ -1927,6 +1928,7 @@ func (n *Netstack) acceptUDP() {
 // destinations egress via Link NICs and never appear here:
 //   - own subnet / host LAN / other -> TUN (forwarder replies, DNAT returns)
 //   - other mesh subnets            -> drop + log (misroute; defensive)
+//
 // Per-round scheduling limits for the TUN egress scheduler (D26):
 //   - the high-priority queue (ICMP/DNS) is fully drained first;
 //   - the low-priority queue (TCP and other data) is written in bounded

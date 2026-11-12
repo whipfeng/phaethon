@@ -11,19 +11,14 @@ import (
 	"phaethon/util"
 )
 
-// maxLegDatagram guards against datagrams that exceed the maximum UDP payload
-// (65507 = 65535 - 8 UDP header - 20 IP header). Mesh packets (<=1600) never
-// come close; oversize frames fall back to the TCP leg.
-const maxLegDatagram = 65507
-
-// legSafeDatagram keeps a leg datagram inside a standard 1500-byte path MTU:
-// 1400 payload + frame header + UDP(8) + IP(20) <= 1500. Mesh data frames are
-// ~1580 bytes (IPIP), so sending them as UDP datagrams forces IP fragmentation
-// on every packet; one lost fragment drops the whole datagram and the inner
-// TCP collapses (observed: multi-second stalls and RSTs, with qg reassembly
-// counters climbing ~2 fragments per datagram). Oversized frames therefore
-// ride the base TCP carrier; small probes/control frames keep using the leg.
-const legSafeDatagram = 1400
+// legFragmentLimit is the largest UDP payload that fits a 1500-byte path
+// (1500 - outer IP 20 - UDP 8). A datagram above it is fragmented by the outer
+// IP layer. The overlay MTU (tun.OverlayMTU = 1400) keeps every normal data
+// frame at <= 1423 bytes, so crossing this limit means an inner packet bypassed
+// the MTU/MSS clamps — a bug indicator, not a carrier-selection rule. Such a
+// frame is still sent on the leg (IP reassembly delivers it, with
+// all-or-nothing loss); the counter exists to catch regressions.
+const legFragmentLimit = 1500 - 20 - 8
 
 // udpLegDialRetry is the active side's channel redial interval while stuck in
 // Advertising (design fallback 2: 建不起来保持宣告，R 秒退避重试). Must match
@@ -72,6 +67,9 @@ type udpLegTransport struct {
 	stateNotify   func()
 
 	legDrops uint64 // atomic: inbound/outbound datagram drops
+	// legOversize counts frames that exceed the 1500-byte path budget and will
+	// be IP-fragmented. Should stay 0 while the 1400 overlay MTU holds.
+	legOversize uint64 // atomic
 
 	// Liveness diagnostics: counters and last datagram timestamps. A leg that
 	// keeps sending but sees no inbound traffic is a one-way black hole; log
@@ -173,13 +171,15 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 // and must never surface as session write errors (the TCP leg is the session).
 func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 	dgram := frame.EncodeDatagram(frameType, payload)
-	if len(dgram) > legSafeDatagram {
-		// Would fragment on a 1500-MTU path; keep it whole on the TCP leg.
-		return t.base.Send(frameType, payload, false)
-	}
-	if len(dgram) > maxLegDatagram {
-		// 超载帧回 TCP 腿，不丢数据
-		return t.base.Send(frameType, payload, false)
+	if len(dgram) > legFragmentLimit {
+		// Bug indicator: the 1400-byte overlay MTU (tun.OverlayMTU) should cap
+		// frames at ~1423B. Do not switch carriers by frame size — that splits
+		// one ordered flow across UDP/TCP. Send it and let IP reassemble.
+		n := atomic.AddUint64(&t.legOversize, 1)
+		if n == 1 || n%1000 == 0 {
+			util.LogModuleWarn("p2p", "[UDP-LEG] frame %dB exceeds %dB path budget (count=%d) — inner MTU invariant broken, IP will fragment",
+				len(dgram), legFragmentLimit, n)
+		}
 	}
 	if t.active {
 		t.fsmMu.Lock()
@@ -571,6 +571,10 @@ func (t *udpLegTransport) transportForm() string {
 }
 
 func (t *udpLegTransport) LegDrops() uint64 { return atomic.LoadUint64(&t.legDrops) }
+
+// LegOversize reports frames that crossed the 1500-byte path budget and are
+// therefore IP-fragmented. Healthy legs keep this at 0.
+func (t *udpLegTransport) LegOversize() uint64 { return atomic.LoadUint64(&t.legOversize) }
 
 func (t *udpLegTransport) Close() error {
 	t.closeOnce.Do(func() {

@@ -21,7 +21,7 @@
 - 服务端收包点：SOCKS5 `socks5UDPRelay.run()`（`server/socks5.go:342`）——datagram 在此解析目标并决定转发，**UDP 腿交付分支就加在这里**
 - 会话入口：客户端 `P2PDialer.DialP2P()`（`dialer/socks5.go:81`）；服务端 `p2p.HandleP2PTransport(t, address)`（`p2p/p2p.go:2336`）
 - gossip 构建**本来就是逐 peer 的**：mesh 周期循环每 peer 新建 `GossipInfo`、独立 split-horizon 过滤路由/域名/子网、独立 marshal（`mesh/mesh.go:2724-2737`）；`broadcastGossipToPeer` 同样逐 peer（`p2p/p2p.go:2055`，含每链路 Seq/FriendlyName）→ **加链路级 UDP 字段零架构改动**
-- LinkNIC MTU=1600（`mesh/link_nic.go:43`，注释明确：IPIP 头 + 内层 1500 + headroom，因 TCP 流传输不受物理 1500 限制）——UDP 腿上满载包（~1500B 内层 + 封头 > 1500）将触发外层 IP 自动分片；分片在哪层做内层 IP 包都 all-or-nothing（丢一片整包废、内层 TCP 整段重发），**不做 MTU 钳位**（边际收益不抵链路 MTU 状态副作用），实测有问题再议
+- LinkNIC MTU=1600（`mesh/link_nic.go:49`，为 IPIP 外层头预留空间）；UDP 腿的端到端预算由 `tun.OverlayMTU=1400` + fork 广告 MSS clamp 1360 保证：内层 1400 + IPIP 20 + frame 3 + UDP 8 + outer IP 20 = 1451 ≤ 1500。**修订 R3（2026-11-13，推翻 v3.2）**：实测内层 ~1500B 时每个数据报被外层 IP 分成 2 片，丢一片整报作废（承载一个完整内层 TCP 段），内层 TCP 退避到 19~21s 停顿/BrokenPipe；因此必须做 MTU 预算，且应在**源头**做（TUN 适配器 MTU 与端点 MSS 钳位），而不是按帧大小切换载体
 
 ## 3. 协商与数据通路
 
@@ -43,7 +43,7 @@ WriteTo(frame, 0.0.0.0:P) ──UDP通道──► 收包分支：dst=0.0.0.0:P
 
 - **datagram 目标 `0.0.0.0:P`**：unspecified 地址不可能与真实互联网目标冲突；SOCKS5 回包封头 src 原样回显目标（`server/socks5.go:593` 现有机制），主动端可校验 src 端口 == P
 - **载荷** = 现有帧格式一字节不变
-- **无应用层分片、无 MTU 钳位**（用户指正，v3.2）：大包交给外层 IP 自动分片（端到端自动重组）；分片丢一片 = 内层 IP 包作废 = 内层 TCP 整段重发，与分片所在层无关，MTU 钳位无本质收益且引入链路状态副作用，不做。超载后果在丢帧契约容忍内
+- **MTU 预算在源头保证（R3，2026-11-13）**：不做应用层分片，也不按帧大小切换载体；而是把内层包限制在 1400B（`tun.OverlayMTU`，三平台下发到 TUN 适配器 + gvisor fork 广告 MSS clamp 1360），使每个 UDP 数据报（1451B）天然低于 1500 路径 MTU。这样整条流始终留在 UDP 单载体、有序、无分片。超预算帧只计数/告警（`legOversize`），仍走 UDP 由 IP 层重组——出现即说明有内层包绕过了 MTU/MSS 约束，是 bug 而非路由依据
 - **回路径准入（被动端）**：必须同时满足 ①该链路 gossip 仍有 `udp:true` ②确实收到过该链路 UDP 消息——才记住对端返回地址并选择 UDP 回；否则一律 TCP
 
 ### 协商字段注入路径（实现修订 R2，2026-11-04 收敛）

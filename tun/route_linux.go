@@ -31,6 +31,13 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	}
 	r.tunIndex = link.Attrs().Index
 
+	// 0. Size the overlay MTU before addressing/up so the kernel derives TCP
+	// MSS (MTU-40) from it. See tun.OverlayMTU for the framing budget.
+	if err := netlink.LinkSetMTU(link, OverlayMTU); err != nil {
+		return fmt.Errorf("link set mtu %d: %w", OverlayMTU, err)
+	}
+	util.LogModuleInfo("route", "interface %s MTU set to %d", r.devName, OverlayMTU)
+
 	// 1. Set TUN interface IP
 	ipNet := &net.IPNet{
 		IP:   net.ParseIP(tunIP),

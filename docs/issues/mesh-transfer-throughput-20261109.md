@@ -3209,3 +3209,24 @@ EST18080 稳定在 9。
 `IsStreamCarrier()==false` 自动豁免 lane。lane 的动态加/删交给原控制器，
 后续在真实拥塞下再验证加 lane 的效果。RACK 恢复螺旋仍是独立课题；
 加密与 SOCKS5 UDP leg 后续纳入同一抽象。
+
+### 107.10 WS 载体上的停滞现场与 socket 缓冲实验（负结果）（2026-11-12 13:15）
+
+统一 WS 载体下连跑 6 次：4.45 / 4.56 / 6.45 / **1.35(138s)** / 4.92 / 4.45。
+慢跑现场（jf 内层发送端）：
+
+- srtt 284→791ms，minRTT 70~80ms；
+- cwnd 多次塌到 1~5、ssthresh=2，RTO 0.7~8.2s；
+- DSACK/retransmits ≈ 80%（如 18775/23373）；
+- qg 的 `P2P-QDEPTH`/`LANE-*` 全程没有记录，qg relay 队列未到阈值。
+
+说明：即使 WS 去掉了 ht GET 队列，RTT 仍会膨胀数百 ms 并触发 RACK/RTO
+塌缩；队列位置不在我们已埋点的 p2p/ht 队列里。
+
+随后做了 socket 缓冲实验（Linux 客户端 `SO_RCVBUF/SO_SNDBUF=512KB`）：
+- 吞吐 3.06 / 3.74MB/s，明显低于不设限的 4.4~6.4；慢跑依旧；
+- 512KB 对 BDP 太小，先限流后仍不能消除塌缩，已回退（代码已还原）。
+
+结论：继续在载体/缓冲层加限制没有收益；下一阶段必须回到发送端恢复逻辑
+（DSACK/RACK 的按 RTT 抑制、minRTT 相对 RTO 上限）或接收端 ACK 行为，
+需要单独的 gVisor/Windows 侧方案。生产保持统一 WS 构建（连接稳定 2/1）。

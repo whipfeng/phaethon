@@ -482,6 +482,7 @@ type Peer struct {
 	meshSenderPtr     atomic.Pointer[peerSender]
 	lastSeenNano      atomic.Int64 // UnixNano timestamp of last seen (thread-safe)
 	pingDeadHeldNano  atomic.Int64 // last "link dead held by inbound traffic" log, for rate limiting
+	lastPongNano      atomic.Int64 // last successful pong; hard liveness ceiling
 
 	transport       frame.FrameTransport // guarded by transportMu: assignment races with stopPeer
 	transportMu     sync.Mutex
@@ -1427,6 +1428,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
+	peer.lastPongNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
 	// stripeTransport: session data-leg multiplexer (design §5). Sits below
@@ -1697,6 +1699,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 	peer.dataBudget.Store(dataQueueByteBudget)
 	peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	peer.lastSeenNano.Store(time.Now().UnixNano())
+	peer.lastPongNano.Store(time.Now().UnixNano())
 	peer.SetStatus("connecting")
 
 	// Register peer atomically. If another goroutine created a peer for this proxy
@@ -2557,6 +2560,7 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 	if peer.pingTracker != nil {
 		peer.pingTracker.recordPong(pong.Seq, pong.Timestamp)
 	}
+	peer.lastPongNano.Store(time.Now().UnixNano())
 
 	util.LogModuleDebug("p2p", "[P2P] received pong from %s: seq=%d", peer.ID, pong.Seq)
 }
@@ -2573,6 +2577,18 @@ func (m *P2PManager) sendPing(peer *Peer) {
 	// Check consecutive-loss threshold BEFORE sending (ages out stale pings)
 	if peer.pingTracker.consecutiveLostCount() >= pingFailDisconnectThreshold {
 		now := time.Now()
+		// Hard liveness ceiling: a peer that has not produced a single pong for
+		// 60s is dead even if unrelated inbound frames keep lastSeen fresh (a
+		// one-way/stale link would otherwise sit "held" forever and never
+		// re-dial). 60s is well above the ping interval and any transient
+		// backlog that motivated the inbound-quiet hold below.
+		if lastPong := peer.lastPongNano.Load(); lastPong != 0 && now.Sub(time.Unix(0, lastPong)) >= 60*time.Second {
+			util.LogModuleWarn("p2p", "[P2P] link dead: no pong for %v (inbound active), closing peer.ID=%s proxy=%s nodeID=%s",
+				now.Sub(time.Unix(0, lastPong)).Round(time.Second), peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+			peer.SetLastError("link dead: no pong for 60s")
+			peer.transport.Close()
+			return
+		}
 		if quiet := now.Sub(time.Unix(0, peer.lastSeenNano.Load())); quiet < pingDeadInboundQuiet {
 			if now.Sub(time.Unix(0, peer.pingDeadHeldNano.Load())) >= 10*time.Second {
 				peer.pingDeadHeldNano.Store(now.UnixNano())

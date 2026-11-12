@@ -3499,5 +3499,10 @@ allowlist。新增 `wsEnabledFor` 单测覆盖默认值与开关。
 - 即 mesh/OS ≈ 0.96×（down）、1.15×（up），与显式开启 WS 时一致，且本轮
   未再出现 ~5.5s 离群。
 
-**待办**：deskw 仍是 626（WS 默认关闭），需换 628 包后其 `DESK_TJ` 才会
-默认走 WS；via SSH 路径尚未复测。
+**deskw 升级**：deskw 已换 `v0.8.0-628-g909dc1e-htid`，未设置
+`PHAETHON_HT_WS` 时 `DESK_TJ` 直接建立
+`[HT-WS] persistent websocket established: url=ws://10.140.51.2:32457/...`；
+拓扑 `deskw(1/5) ↔ jf(5/1)` 配对正常。qg/jf/deskw 均为 628。
+
+**待办**：via SSH 路径尚未复测；“WS 握手失败回退 HTTP”未现场构造，
+依赖已有单测与回退分支。

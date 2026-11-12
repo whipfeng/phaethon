@@ -2,9 +2,11 @@ package dialer
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/net/websocket"
 
@@ -21,7 +23,7 @@ func wsEnabledFor(proxyName string) bool {
 	if v == "" {
 		return false
 	}
-	if v == "1" || strings.EqualFold(v, "all") {
+	if v == "1" || strings.EqualFold(v, "all") || strings.EqualFold(v, "auto") {
 		return true
 	}
 	for _, n := range strings.Split(v, ",") {
@@ -55,7 +57,14 @@ func dialP2PWebSocket(proxy *config.Proxy, crypto *util.HTunnelCrypto) (frame.Fr
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/ws/" + util.NextConnID()
 
-	conn, err := websocket.Dial(u.String(), "", origin)
+	cfg, err := websocket.NewConfig(u.String(), origin)
+	if err != nil {
+		return nil, fmt.Errorf("htunnel-ws: config: %w", err)
+	}
+	// Bound the opening handshake: a proxy that blackholes Upgrade must not
+	// stall the link dial; the caller falls back to GET/POST long-poll.
+	cfg.Dialer = &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := websocket.DialConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("htunnel-ws: dial fail: %w", err)
 	}

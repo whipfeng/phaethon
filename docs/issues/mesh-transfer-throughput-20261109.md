@@ -2956,6 +2956,40 @@ mesh AQM dropped 105 frames ... queued=394798B
 本次一次误操作使 jf 短停约 1~2 分钟，已用真实 sshd 重新拉起并验证
 `direct=true srtt 20.9ms`、8 流 6.23MB/s。部署请用脚本文件执行。）
 
+### 105.5 8MB 上限下的再次现场：srtt 2.5~3.2s
+
+08:49 的一次 8 流传输再次卡住 >9 分钟，现场（jf 内层发送端）：
+5 条 flow、`cwnd=128`、`srtt 2.5~3.2s`、`minRTT 75~80ms`、`RTO 5~6s`、
+`unacked ~190KB`、`unsent 200~700KB`，`dSACK 2k~8.4k`，
+全局 `retransmits=61941 / dsack=38077`。
+
+这说明 **8MB 的 ht dataQ 上限允许队列堆到多秒**（@2MB/s 时 4MB≈2s），
+srtt 因此到 3s，再触发 RACK 伪丢包正反馈。之前 512KB 实验只看了中位吞吐，
+没有评估尾延迟；从这次现场看，**限制上限对“不出现多秒停滞”可能比中位吞吐更重要**。
+下一步：用 512KB / 1MB 上限做 6 连跑，比较尾延迟（>60s 的次数、srtt 峰值），
+再决定生产值。
+
+### 105.6 WebSocket 自动探测与 nginx 阻塞
+
+- 客户端已实现“WS 优先 + 5s 握手超时 + 失败回退长轮询”，
+  `PHAETHON_HT_WS=auto` 表示所有 h_tunnel 链路先试 WS；env 仅用于
+  测试阶段的强制开关，最终生产应默认 auto。
+- **18080 的 nginx 无法由我修改**：从 qg 看 `36.140.28.178:18080` 返回
+  `Server: nginx/1.14.1`；但 jf 本机 `ss` 没有 18080（jf 的 nginx 是
+  Docker 容器，只监听 80/443），且 layer4 账号无 sudo、无 docker 权限。
+  需要 18080 那台转发机的权限，或由你在那台机器上只改这一条 location：
+
+```nginx
+# 仅 /ui/resdata/ 这一条转发路径
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_buffering off;
+proxy_cache off;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+```
+
 
 
 

@@ -11,6 +11,7 @@ import (
 	"phaethon/util"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -72,6 +73,61 @@ func ListenUDPWithAddr(network string) (net.PacketConn, error) {
 		}
 	}
 	return nil, fmt.Errorf("no available UDP port in range %d-%d", globalUDPPortMin, globalUDPPortMax)
+}
+
+// ListenUDPBound is ListenUDP pinned to the physical interface. The P2P UDP
+// leg's passive socket must not be routed back into the TUN: the peer's
+// control-plane address may be covered by the split-tunnel routes, which would
+// re-encapsulate the leg's own datagrams into the mesh.
+func ListenUDPBound() (net.PacketConn, error) {
+	bc := GetGlobalBindContext()
+	if bc == nil {
+		return ListenUDP()
+	}
+	lc := net.ListenConfig{Control: func(network, address string, c syscall.RawConn) error {
+		return bc.BindSocket(c, nil)
+	}}
+	ctx := context.Background()
+	if globalUDPPortMin == 0 || globalUDPPortMax == 0 {
+		var err error
+		for i := 0; i < 5; i++ {
+			pc, e := lc.ListenPacket(ctx, "udp", "0.0.0.0:0")
+			if e == nil {
+				return pc, nil
+			}
+			err = e
+			time.Sleep(time.Duration(i+1) * time.Millisecond)
+		}
+		return nil, fmt.Errorf("listen udp :0 failed after 5 attempts: %w", err)
+	}
+	start := globalUDPPortMin
+	if lastUDPPort >= globalUDPPortMin && lastUDPPort < globalUDPPortMax {
+		start = lastUDPPort + 1
+	}
+	for offset := 0; offset <= globalUDPPortMax-globalUDPPortMin; offset++ {
+		port := start + offset
+		if port > globalUDPPortMax {
+			port = globalUDPPortMin + (port - globalUDPPortMax - 1)
+		}
+		pc, err := lc.ListenPacket(ctx, "udp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+		if err == nil {
+			lastUDPPort = port
+			return pc, nil
+		}
+	}
+	return nil, fmt.Errorf("no available UDP port in range %d-%d", globalUDPPortMin, globalUDPPortMax)
+}
+
+// ListenPacketBound binds an ephemeral UDP socket pinned to the interface that
+// carries traffic to dst, bypassing the TUN.
+func ListenPacketBound(dst net.IP) (net.PacketConn, error) {
+	lc := net.ListenConfig{}
+	if bc := GetGlobalBindContext(); bc != nil {
+		lc.Control = func(network, address string, c syscall.RawConn) error {
+			return bc.BindSocket(c, dst)
+		}
+	}
+	return lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0")
 }
 
 // Dialer establishes a connection to the destination through a proxy chain

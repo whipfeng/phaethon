@@ -111,3 +111,16 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 - `-Command -` 在 winpty 下不可用：winpty 给子进程的是控制台而不是重定向 stdin，PS2 直接打印帮助并拒绝；
 - **嵌套 cmd 也失败**：在 winpty 的 cmd 提示符里手动输入 `powershell.exe -NoLogo`，cmd 本身正常回显，但 PS2 启动后无提示符/输出、marker 未创建、`exit` 超时；`cmd /Q /c powershell.exe -NoLogo` 同样。说明不是“直接 spawn PS2”的启动方式问题，而是 PS2 的 ConsoleHost 在 winpty 模拟控制台下无法进入输入/渲染循环；
 - 因此 Win7 想立刻获得真交互，最现实的系统方案是 **cmd.exe + winpty**（不是 PowerShell）；想要 PowerShell 交互则需安装 WMF 5.1/PS7 后再验证。
+
+### 补充实验：官方 winpty 0.4.3 对照
+
+用官方 `winpty-0.4.3-msvc2015` 的 x64 与 x64_xp 构建，替换 bundled DLL/agent，分别测试：
+
+| DLL | spawn flags | PS2 参数 | 结果 |
+| --- | --- | --- | --- |
+| bundled | 1 | `-NoLogo` | 只有 `ESC[0K`，marker 未创建，exit 超时 |
+| 官方 x64 | 1 | `-NoLogo` | 同上 |
+| 官方 x64_xp | 1、0、2、3 | `-NoLogo` | 同上 |
+| 官方 x64_xp | 1 | `-NoLogo -Sta` | 同上 |
+
+结论：**不是随包 winpty 的构建/版本问题，也不是 spawn flags 问题**。官方 0.4.3（含 XP 兼容构建）与 bundled 表现一致；cmd 在同一个官方 DLL 上仍然正常。可以确认是 **PS2 的 ConsoleHost 与 winpty 的 conhost 模拟不兼容**（winpty 没有完整覆盖 PS2 依赖的 console 行为）。Win7 上没有任何现成 winpty 版本能解决 PS2 的 PTY 交互。

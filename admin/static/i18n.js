@@ -313,6 +313,8 @@
             'proxy.healthCheckURLHint': '留空则仅测试 TCP 端口连通性',
             'proxy.udpSupport': 'UDP 支持',
             'proxy.p2pSupport': 'P2P 支持',
+            'proxy.p2pUDPSupport': 'UDP 直连',
+            'proxy.p2pUDPHint': '需对端 UDP 端口可达，否则回退 TCP',
             'proxy.v2Support': 'V2 数据通道',
             'proxy.skipCert': '跳过证书验证',
             'proxy.btnSave': '保存',

@@ -59,12 +59,12 @@ func TestUDPLegActiveHappyPath(t *testing.T) {
 	if port, ok := f.SendPort(); !ok || port != 32458 {
 		t.Fatalf("SendPort = %d,%v, want 32458,true", port, ok)
 	}
-	if !f.RouteDataViaUDP() {
-		t.Fatalf("RouteDataViaUDP = false, want true")
+	// 直连模型：协商到端口后先用 ping 探测，数据仍走 TCP，确认回包后才切
+	if f.RouteDataViaUDP() {
+		t.Fatalf("RouteDataViaUDP = true in negotiated, want false (probe first)")
 	}
-	// 未激活前 ping/pong 仍走 TCP（fallback 规则 6）
-	if f.RouteProbeViaUDP() {
-		t.Fatalf("RouteProbeViaUDP = true in negotiated, want false")
+	if !f.RouteProbeViaUDP() {
+		t.Fatalf("RouteProbeViaUDP = false in negotiated, want true")
 	}
 
 	// 未发数据前收到对端 UDP：非法，忽略

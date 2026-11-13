@@ -108,7 +108,9 @@ func (p *Proxy) IsP2PUDP() bool {
 	if p == nil {
 		return false
 	}
-	if !strings.EqualFold(p.Type, "socks5") {
+	// Any P2P-capable carrier can open the direct UDP leg: the proxy is only
+	// the control channel, so SOCKS5/Trojan/h_tunnel all qualify.
+	if !p.IsP2P() {
 		return false
 	}
 	return p.P2PUDP != nil && *p.P2PUDP

@@ -45,6 +45,14 @@ WriteTo(frame, 0.0.0.0:P) ──UDP通道──► 收包分支：dst=0.0.0.0:P
 - **载荷** = 现有帧格式一字节不变
 - **MTU 预算在源头保证（R3，2026-11-13）**：不做应用层分片，也不按帧大小切换载体；而是把内层包限制在 1400B（`tun.OverlayMTU`，三平台下发到 TUN 适配器 + gvisor fork 广告 MSS clamp 1360），使每个 UDP 数据报（1451B）天然低于 1500 路径 MTU。这样整条流始终留在 UDP 单载体、有序、无分片。超预算帧只计数/告警（`legOversize`），仍走 UDP 由 IP 层重组——出现即说明有内层包绕过了 MTU/MSS 约束，是 bug 而非路由依据
 - **加密统一在 frame 层（R4，2026-11-13）**：不在 UDP leg 上做单独加密。mesh 配置里的 `p2p-key`（节点级 PSK，空=明文）对所有 P2P 载体生效：frame 载荷用 XChaCha20-Poly1305（24B nonce + 16B tag），帧类型保持明文以便 UDP leg/优先级路由。UDP leg 使用同一 PSK（域分隔 `phaethon-udp-leg-v1:`）封包，因此加密后单报最大 1491B（1400+20+3+40+8+20），仍 <1500，但 1492 的 PPPoE 路径只剩 1B 余量
+- **直连 UDP，弃用 UDP ASSOCIATE（R5，2026-11-13）**：代理只负责可靠控制通道，不再借用 SOCKS5/Trojan 的 UDP relay。
+  - 主动端 A：本地 bind 一个临时 UDP socket，目标 = 控制链路对端 IP（`proxy.Server` / `proxy.URL` 的 host）+ 被动端 gossip 回来的 `udpPort:P`。
+  - 被动端 B：从 `dialer.ListenUDP()`（与 SOCKS5 relay 相同的配置端口范围）bind 真实 socket :P，收到 A 的包后用包源地址回。
+  - 先 ping 探测：A 在 Negotiated 态用 LinkPing 走 UDP；收到回包后才把数据从 TCP 切到 UDP；K 秒无回包则回退 TCP 并退避。
+  - 控制链路断开 → leg 的 `Close` 关闭 socket，端口释放。
+  - 开关：代理的 `p2p-udp`（控制台“UDP 直连”），仅对 P2P 兼容类型（SOCKS5/Trojan/H_TUNNEL）生效；用户根据对端 UDP 可达性决定是否开启。
+  - 旧路径删除：`udp_leg_registry`、SOCKS5 relay 的 leg 拦截、`dialer.UDPDialer` 依赖。
+  - 打洞/中继是另一个课题，本版不实现。
 - **回路径准入（被动端）**：必须同时满足 ①该链路 gossip 仍有 `udp:true` ②确实收到过该链路 UDP 消息——才记住对端返回地址并选择 UDP 回；否则一律 TCP
 
 ### 协商字段注入路径（实现修订 R2，2026-11-04 收敛）

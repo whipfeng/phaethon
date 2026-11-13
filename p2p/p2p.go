@@ -528,6 +528,13 @@ type Peer struct {
 	leg             *udpLegTransport // optional UDP data leg (nil when p2p_udp off)
 	stripe          *stripeTransport // session data-leg multiplexer (always set on new peers)
 
+	// Snapshot diagnostics filled by GetPeers (never set on the live peer).
+	LegPhase string `json:"legPhase,omitempty"`
+	LegIn    uint64 `json:"legIn,omitempty"`
+	LegOut   uint64 `json:"legOut,omitempty"`
+	LegDrops uint64 `json:"legDrops,omitempty"`
+	LegPort  int    `json:"legPort,omitempty"`
+
 	// flowNotify wakes peerWriteLoop to re-check its in-flight credit after
 	// a LaneAck/cap adjustment (§3.4 write gate). Buffered 1, drop-on-full.
 	flowNotify chan struct{}

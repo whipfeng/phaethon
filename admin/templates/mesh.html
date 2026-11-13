@@ -538,14 +538,17 @@
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            // Sort advertise routes by CIDR
-            const sortedAdvertise = [...advertise].sort((a, b) => a.localeCompare(b));
-            tbody.innerHTML = sortedAdvertise.map((cidr, idx) => `
+            // Sort for display but keep the stored index: the backend PUT/DELETE
+            // address the STORED order, so the display position must never be
+            // passed as the index.
+            const indexedAdvertise = advertise.map((value, index) => ({value, index}));
+            indexedAdvertise.sort((a, b) => a.value.localeCompare(b.value));
+            tbody.innerHTML = indexedAdvertise.map(({value, index}) => `
                 <tr>
-                    <td><code>${escapeHtml(cidr)}</code></td>
+                    <td><code>${escapeHtml(value)}</code></td>
                     <td>
-                        <button onclick="editAdvertise(${idx})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
-                        <button onclick="deleteAdvertise(${idx})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                        <button onclick="editAdvertise(${index})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteAdvertise(${index})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
                     </td>
                 </tr>
             `).join('');

@@ -102,26 +102,40 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 - QG 用 `rc-service` 管理，不要直接 kill
 - JF 用 `ps | kill` 手动管理
 
-## 5. worker 版本选择与 pin（务必阅读）
+## 5. 升级与 worker 版本（务必阅读）
 
-watchdog 选 worker 的顺序：
+自 2026-11-13 起统一为“稳定路径自替换”，详细设计见
+[watchdog_self_replace_upgrade.md](../plans/watchdog_self_replace_upgrade.md)。
 
-1. `data/state/worker-pin` 存在且对应 pkg 可找到 → **强制运行 pin 的版本**（可用于回滚）；
-2. 否则扫描 `data/packages/*.pkg` 取最高版本，仅当比当前二进制新才使用；
-3. 否则运行当前部署的 `./phaethon`。
+### 5.1 正常升级流程
 
-因此：
+1. 控制台上传 `.pkg` → 进入 `data/packages-pending/`（不生效）；
+2. 管理员点“启用”（可逐节点/逐批）→ 包移到 `data/packages/`；
+   若包 platform/arch 与本机一致，写 `data/state/upgrade-request`；
+3. watchdog 每 2s 轮询请求：验签 → 暂存 `.new` → 停 worker →
+   `exe→.old`、`.new→exe`（路径不变）→ 启动 → 20s 内 ready 且版本一致；
+4. 失败自动 `.old` 回滚，保留 `.failed` 取证，`status=failed-rolled-back`。
 
-- **手动部署的新二进制可能被 pin 静默覆盖**。启动日志会打印
-  `worker pinned to X while deployed binary is Y`，但请以实际进程为准。
-- 控制台 Package 页面会显示 pin 横幅和“取消固定”按钮；对应 API 为
-  `GET/DELETE /api/packages/pin`（`?restart=now` 立即重启）。
-- 手工取消：删除/改名 `data/state/worker-pin` 后重启 watchdog。
-- 删除 pin 指向的 pkg 现在会自动清 pin；pin 指向的 pkg 不存在时 watchdog
-  也会清掉过期 pin。
-- 版本化 worker（comm 为 `phaethon-v0.8.0-xxx`）不会被
-  `pkill -x phaethon` 杀掉，部署时需 `pkill -f 'data/worker/phaethon'`。
+状态查询：`GET /api/packages/pin` 返回
+`{current, requested, status, lastError}`；
+`DELETE` 取消尚未开始的请求（`applying` 阶段返回 409）。
 
-**部署验收**：不能只看 watchdog，必须确认实际 worker 的
-`/proc/<pid>/exe` 等于部署二进制。可用 `scripts/verify-worker.sh <部署目录>`
-检查 pin 与 worker 路径/md5；发现 pin 覆盖会返回非零。
+### 5.2 引导部署（仅旧版本节点需要）
+
+664 及更早的 watchdog 不识别 `upgrade-request`，必须**手动替换一次**
+稳定路径二进制（自替换能力引导版），之后才能走 upload + activate。
+手动部署时仍保持同一路径，不要解压到 `data/worker/phaethon-<ver>`。
+
+### 5.3 备份与回滚
+
+- 升级自动保留 `<exe>.old`、`<exe>.old2` 两版；
+- 回滚：把 `.old` 恢复为稳定路径并重启，或在控制台激活旧版本包；
+- 断电安全网：`data/state/upgrade-in-progress` marker + 启动修复；
+  Windows 启动器 `start-phaethon.vbs` 也会在 exe 缺失时先恢复 `.old`。
+
+### 5.4 部署验收
+
+- 进程路径必须是稳定路径（Windows 两个进程都是 `phaethon.exe`）；
+- `/api/packages/pin` 的 `current` 等于目标版本、`status=succeeded`；
+- 升级后 `.old` 存在，且防火墙/AV 规则无需变更。
+

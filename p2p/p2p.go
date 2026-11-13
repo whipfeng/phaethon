@@ -2855,6 +2855,9 @@ func (m *P2PManager) GetPeers() []Peer {
 		form := "tcp"
 		if p.leg != nil {
 			form = p.leg.transportForm() // "udp" (leg routing) or "tcp" (backing off)
+			result[len(result)-1].LegPhase = p.leg.LegPhase()
+			result[len(result)-1].LegIn, result[len(result)-1].LegOut, result[len(result)-1].LegDrops = p.leg.LegCounters()
+			result[len(result)-1].LegPort = p.leg.LegPort()
 		}
 		p.transportMu.Lock()
 		st := p.stripe

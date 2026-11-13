@@ -57,7 +57,9 @@
 
 **实机探针结果（2026-11-13）**：已用独立 winpty harness 在 qgw 复现——PS2 能 spawn，
 但不处理/不渲染控制台输入，`exit` 也不退出（WaitForSingleObject 超时），确认 PS2+winpty
-不可用，代码门禁合理。详见
+不可用，代码门禁合理。补充实验：**cmd.exe + winpty 在 Win7 上完整可用**（提示符/回显/
+执行/退出正常），`-Command -` 在 winpty 下会因 stdin 非重定向而打印帮助。因此 winpty 版本
+没有问题，问题在 PS2 宿主；Win7 想真交互可先用 cmd 或装 WMF 5.1。详见
 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md) 第二节。
 
 ## 三、Git 历史清理清单（第 1 项）

@@ -93,3 +93,20 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 3. 维持行级模式，文档标注限制。
 
 本次 harness 和结果已归档到 `archive/tmp-20261113/`，qgw 上的探针包/临时二进制已删除。
+
+### 补充实验：cmd.exe 与 PS2 -Command -
+
+同一 harness 再跑三组（Win7 SP1，随包 winpty 0.4.3）：
+
+| 会话 | spawn | 提示符/回显 | marker 文件 | exit |
+| --- | --- | --- | --- | --- |
+| `cmd.exe /Q` | 成功 | **完整提示符 + 命令回显** | 写入成功（9 字节） | 正常退出（wait=0） |
+| `powershell.exe -NoLogo`（PS2 交互） | 成功 | 只有 `ESC[0K`，无提示符/回显 | **未创建** | 超时不退出（258） |
+| `powershell.exe -NoLogo -Command -`（PS2） | 成功 | 打印 PowerShell 帮助：`已指定 -Command 的参数，但尚未重定向标准输入` | 未创建 | 退出 |
+
+结论更新：
+
+- **winpty 版本/wrapper 本身没有问题**：cmd.exe 在 Win7 上通过 winpty 获得完整 PTY（提示符、回显、执行、退出都正常）；
+- **问题在 PS2 的交互宿主**：它不处理 winpty 的控制台输入/不渲染，`exit` 也不响应；
+- `-Command -` 在 winpty 下不可用：winpty 给子进程的是控制台而不是重定向 stdin，PS2 直接打印帮助并拒绝；
+- 因此 Win7 想立刻获得真交互，最现实的系统方案是 **cmd.exe + winpty**（不是 PowerShell）；想要 PowerShell 交互则需安装 WMF 5.1/PS7 后再验证。

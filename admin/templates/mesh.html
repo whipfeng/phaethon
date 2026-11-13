@@ -430,27 +430,22 @@
         try {
             const res = await fetch('./api/mesh/domain-suffixes');
             if (!res.ok) return;
-            const suffixes = await res.json();
+            const items = await res.json();
             const tbody = document.getElementById('domain-suffixes-tbody');
-            if (suffixes.length === 0) {
+            if (!items || items.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            // Sort for display but keep the stored index: the backend PUT/DELETE
-            // address the STORED order. Pairing each value with its original
-            // index also handles duplicate entries correctly.
-            const indexedSuffixes = suffixes.map((value, index) => ({value, index}));
-            indexedSuffixes.sort((a, b) => a.value.localeCompare(b.value));
-            tbody.innerHTML = indexedSuffixes.map(({value, index}) => {
-                return `
+            // Rows carry a stable ID; sorting is display-only.
+            const sortedSuffixes = [...items].sort((a, b) => a.suffix.localeCompare(b.suffix));
+            tbody.innerHTML = sortedSuffixes.map(({id, suffix}) => `
                 <tr>
-                    <td>${escapeHtml(value)}</td>
+                    <td>${escapeHtml(suffix)}</td>
                     <td>
-                        <button onclick="editDomainSuffix(${index})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
-                        <button onclick="deleteDomainSuffix(${index})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                        <button onclick="editDomainSuffix(${id})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteDomainSuffix(${id})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
                     </td>
-                </tr>`;
-            }).join('');
+                </tr>`).join('');
         } catch (err) {
             console.error('loadDomainSuffixes error:', err);
         }
@@ -463,11 +458,12 @@
         document.getElementById('domain-suffix-modal').classList.remove('hidden');
     }
 
-    function editDomainSuffix(idx) {
-        fetch('./api/mesh/domain-suffixes').then(res => res.json()).then(suffixes => {
+    function editDomainSuffix(id) {
+        fetch('./api/mesh/domain-suffixes').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
             document.getElementById('domain-suffix-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editDomainSuffix') : 'Edit Domain Suffix';
-            document.getElementById('domain-suffix-edit-idx').value = idx;
-            document.getElementById('domain-suffix-input').value = suffixes[idx] || '';
+            document.getElementById('domain-suffix-edit-idx').value = id;
+            document.getElementById('domain-suffix-input').value = item ? item.suffix : '';
             document.getElementById('domain-suffix-modal').classList.remove('hidden');
         });
     }
@@ -502,16 +498,17 @@
         }
     }
 
-    function deleteDomainSuffix(idx) {
+    function deleteDomainSuffix(id) {
         // Show the target value in the confirmation so a wrong index is caught
         // before anything is deleted.
         fetch('./api/mesh/domain-suffixes').then(res => res.json()).then(list => {
-            const target = list[idx] || '';
+            const item = (list || []).find(x => x.id === id);
+            const target = item ? item.suffix : '';
             const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
             openConfirmModal(base + (target ? `\n\n${target}` : ''),
                 async function() {
                     try {
-                        const res = await fetch(`./api/mesh/domain-suffixes/${idx}`, {method: 'DELETE'});
+                        const res = await fetch(`./api/mesh/domain-suffixes/${id}`, {method: 'DELETE'});
                         if (!res.ok) throw new Error(await res.text());
                         loadDomainSuffixes();
                         showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
@@ -532,23 +529,20 @@
         try {
             const res = await fetch('./api/mesh/advertise');
             if (!res.ok) return;
-            const advertise = await res.json();
+            const items = await res.json();
             const tbody = document.getElementById('advertise-tbody');
-            if (!advertise || advertise.length === 0) {
+            if (!items || items.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            // Sort for display but keep the stored index: the backend PUT/DELETE
-            // address the STORED order, so the display position must never be
-            // passed as the index.
-            const indexedAdvertise = advertise.map((value, index) => ({value, index}));
-            indexedAdvertise.sort((a, b) => a.value.localeCompare(b.value));
-            tbody.innerHTML = indexedAdvertise.map(({value, index}) => `
+            // Rows carry a stable ID; sorting is display-only.
+            const sortedAdvertise = [...items].sort((a, b) => a.cidr.localeCompare(b.cidr));
+            tbody.innerHTML = sortedAdvertise.map(({id, cidr}) => `
                 <tr>
-                    <td><code>${escapeHtml(value)}</code></td>
+                    <td><code>${escapeHtml(cidr)}</code></td>
                     <td>
-                        <button onclick="editAdvertise(${index})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
-                        <button onclick="deleteAdvertise(${index})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                        <button onclick="editAdvertise(${id})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteAdvertise(${id})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
                     </td>
                 </tr>
             `).join('');
@@ -564,11 +558,12 @@
         document.getElementById('advertise-modal').classList.remove('hidden');
     }
 
-    function editAdvertise(idx) {
-        fetch('./api/mesh/advertise').then(res => res.json()).then(advertise => {
+    function editAdvertise(id) {
+        fetch('./api/mesh/advertise').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
             document.getElementById('advertise-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editAdvertise') : 'Edit Advertise Route';
-            document.getElementById('advertise-edit-idx').value = idx;
-            document.getElementById('advertise-input').value = advertise[idx] || '';
+            document.getElementById('advertise-edit-idx').value = id;
+            document.getElementById('advertise-input').value = item ? item.cidr : '';
             document.getElementById('advertise-modal').classList.remove('hidden');
         });
     }
@@ -603,16 +598,17 @@
         }
     }
 
-    function deleteAdvertise(idx) {
-        // Show the target CIDR in the confirmation so a wrong index is caught
+    function deleteAdvertise(id) {
+        // Show the target CIDR in the confirmation so a wrong ID is caught
         // before anything is deleted.
         fetch('./api/mesh/advertise').then(res => res.json()).then(list => {
-            const target = list[idx] || '';
+            const item = (list || []).find(x => x.id === id);
+            const target = item ? item.cidr : '';
             const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
             openConfirmModal(base + (target ? `\n\n${target}` : ''),
                 async function() {
                     try {
-                        const res = await fetch(`./api/mesh/advertise/${idx}`, {method: 'DELETE'});
+                        const res = await fetch(`./api/mesh/advertise/${id}`, {method: 'DELETE'});
                         if (!res.ok) throw new Error(await res.text());
                         loadAdvertise();
                         showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');

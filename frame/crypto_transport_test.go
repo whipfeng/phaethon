@@ -3,6 +3,7 @@ package frame
 import (
 	"bytes"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 )
@@ -121,5 +122,38 @@ func TestCryptoTransportSendBatchPreservesTypesAndOrder(t *testing.T) {
 		if bytes.Equal(base.q[i].Payload, in[i].Payload) {
 			t.Fatalf("frame %d payload was not sealed", i)
 		}
+	}
+}
+
+// TestCryptoTransportOverStream exercises the real StreamTransport read/write
+// loop with the decorator on both ends of a net.Pipe connection.
+func TestCryptoTransportOverStream(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	client := NewCryptoTransport(NewStreamTransport(c1), "shared-key")
+	server := NewCryptoTransport(NewStreamTransport(c2), "shared-key")
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_ = client.Send(FrameMeshPacket, []byte("over-the-wire"), false)
+		_ = client.Send(FrameGossip, []byte("gossip"), true)
+	}()
+
+	ft, payload, err := server.Recv()
+	if err != nil {
+		t.Fatalf("Recv 1: %v", err)
+	}
+	if ft != FrameMeshPacket || !bytes.Equal(payload, []byte("over-the-wire")) {
+		t.Fatalf("frame 1 = (0x%02x, %q)", ft, payload)
+	}
+	ft, payload, err = server.Recv()
+	if err != nil {
+		t.Fatalf("Recv 2: %v", err)
+	}
+	if ft != FrameGossip || !bytes.Equal(payload, []byte("gossip")) {
+		t.Fatalf("frame 2 = (0x%02x, %q)", ft, payload)
 	}
 }

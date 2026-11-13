@@ -1,6 +1,6 @@
 # Watchdog 自替换升级设计
 
-> 状态：已实现、VM/QG 验证通过，并已扩散到全部可达节点（2026-11-13；ms9 待可达）
+> 状态：已实现、VM/QG 验证通过，并已扩散到全部节点（2026-11-13，含 ms9）
 > 关联：`64fe6d6`（停用版本化 worker / 稳定路径）、`upgrade_apply.go`、`pkg/upgrade`
 > 验证记录：`docs/issues/mesh-transfer-throughput-20261109.md` §139
 

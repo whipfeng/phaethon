@@ -406,7 +406,10 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 	// in-flight peer uploads.
 	if pkgData, err := os.ReadFile(filepath.Join(packagesDir, id+".pkg")); err == nil {
 		s.distributePackage(pkgData, 60*time.Second)
-		go s.applyRetention(platform, arch)
+		// Run retention synchronously before writing the request. Async
+		// retention used to be cut off by the self-upgrade, and the activated
+		// (possibly older rollback) version must be explicitly protected.
+		s.applyRetention(platform, arch, info.Version)
 	}
 
 	localPlatform, localArch := "", ""
@@ -876,12 +879,13 @@ func (s *AdminServer) applyAllRetention() {
 
 	// Apply retention to each group
 	for key, pkgs := range groups {
-		s.applyRetentionForGroup(pkgs, key.platform, key.arch)
+		s.applyRetentionForGroup(pkgs, key.platform, key.arch, "")
 	}
 }
 
 // applyRetention applies retention policy to a specific platform/arch combination.
-func (s *AdminServer) applyRetention(platform, arch string) {
+// protectVersion is never deleted (the just-activated upgrade/rollback target).
+func (s *AdminServer) applyRetention(platform, arch, protectVersion string) {
 	packages := s.listPackages()
 	var group []*db.PackageMeta
 	for _, pkg := range packages {
@@ -889,14 +893,28 @@ func (s *AdminServer) applyRetention(platform, arch string) {
 			group = append(group, pkg)
 		}
 	}
-	s.applyRetentionForGroup(group, platform, arch)
+	s.applyRetentionForGroup(group, platform, arch, protectVersion)
 }
 
 // applyRetentionForGroup applies retention to a group of packages for the same platform/arch.
-// Keeps the latest packageRetention versions, deletes the rest.
-func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, arch string) {
-	if len(pkgs) <= packageRetention {
-		return
+// Keeps the latest packageRetention versions, but never deletes the running
+// version, the pending upgrade target, the last successful version, or the
+// explicitly activated version passed by the caller.
+func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, arch, protectVersion string) {
+	protected := make(map[string]bool, 4)
+	if protectVersion != "" {
+		protected[protectVersion] = true
+	}
+	if s.GetCurrentVersion != nil {
+		if v := s.GetCurrentVersion(); v != "" {
+			protected[v] = true
+		}
+	}
+	if req := upgrade.ReadRequest(); req != nil && req.Version != "" {
+		protected[req.Version] = true
+	}
+	if st := upgrade.ReadStatus(); st.Current != "" {
+		protected[st.Current] = true
 	}
 
 	// Sort by version descending (newest first)
@@ -904,12 +922,20 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, a
 		return p2p.CompareVersions(pkgs[i].Version, pkgs[j].Version) > 0
 	})
 
-	// Delete packages beyond retention limit
-	toDelete := pkgs[packageRetention:]
-	for _, pkg := range toDelete {
+	if len(pkgs) <= packageRetention {
+		return
+	}
+
+	// Delete packages beyond retention limit, skipping protected versions.
+	for _, pkg := range pkgs[packageRetention:] {
+		if protected[pkg.Version] {
+			util.LogModuleInfo("admin", "retention: keeping protected %s/%s version %s (id=%s)", platform, arch, pkg.Version, pkg.ID)
+			continue
+		}
 		util.LogModuleInfo("admin", "retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Version, pkg.ID)
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
+		_ = db.DeletePackage(pkg.ID)
 	}
 }
 

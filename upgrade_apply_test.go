@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"phaethon/pkg/signing"
@@ -70,8 +71,10 @@ func TestRestoreBackupRollsBack(t *testing.T) {
 func TestRepairRestoresMissingExecutableFromBackup(t *testing.T) {
 	t.Chdir(t.TempDir())
 	exe := filepath.Join(mustGetwd(t), "phaethon")
-	writeFile(t, exe+".old", "good")
-	writeFile(t, exe+".new", "staged")
+	good := strings.Repeat("g", minRestoredBinarySize)
+	staged := strings.Repeat("n", minRestoredBinarySize)
+	writeFile(t, exe+".old", good)
+	writeFile(t, exe+".new", staged)
 	if err := upgrade.WriteMarker(upgrade.Marker{Old: exe + ".old", New: exe + ".new", Version: "v665"}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,8 +84,8 @@ func TestRepairRestoresMissingExecutableFromBackup(t *testing.T) {
 
 	repairInterruptedUpgrade(exe)
 
-	if got := readFile(t, exe); got != "good" {
-		t.Fatalf("restored executable = %q, want good", got)
+	if got := readFile(t, exe); got != good {
+		t.Fatalf("restored executable length = %d, want %d", len(got), len(good))
 	}
 	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
 		t.Fatalf("staged binary still present: %v", err)
@@ -157,9 +160,10 @@ func TestTryApplyAlreadyRunningMarksSucceeded(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp := &childProcess{done: make(chan struct{})}
+	cp.ready.Store(true)
 	cp.version.Store("v665")
 
-	newCp, _, handled := tryApplyUpgrade(exe, cp, 0)
+	newCp, _, handled := tryApplyUpgrade(exe, cp, 0, nil)
 	if !handled || newCp != nil {
 		t.Fatalf("handled=%v newCp=%v, want true/nil", handled, newCp)
 	}
@@ -180,7 +184,7 @@ func TestTryApplyMissingPackageDoesNotStopWorker(t *testing.T) {
 	cp := &childProcess{done: make(chan struct{})}
 	cp.ready.Store(true)
 
-	newCp, _, handled := tryApplyUpgrade(exe, cp, 0)
+	newCp, _, handled := tryApplyUpgrade(exe, cp, 0, nil)
 	if !handled || newCp != nil {
 		t.Fatalf("handled=%v newCp=%v, want true/nil", handled, newCp)
 	}

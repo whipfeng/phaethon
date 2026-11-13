@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"phaethon/pkg/signing"
@@ -26,6 +27,21 @@ const (
 
 // stagedPath returns the staging/backup path next to the stable executable.
 func stagedPath(exe, suffix string) string { return exe + suffix }
+
+// upgradeLog writes an unfiltered audit line to data/logs/upgrade.log. The
+// watchdog's normal module logger defaults to Error, which would hide every
+// successful apply/rollback step; this file is the upgrade audit trail.
+func upgradeLog(format string, args ...interface{}) {
+	path := filepath.Join("data", "logs", "upgrade.log")
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		util.LogModuleWarn("main", "watchdog: cannot write upgrade log: %v", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}
 
 // findPkgForVersion locates a signed package in data/packages that matches this
 // build's platform/arch and the requested version.
@@ -57,17 +73,40 @@ func findPkgForVersion(version string) (string, *signing.PkgContents, error) {
 }
 
 // stageBinary writes the package binary next to the executable as phaethon.new.
+// The data is fsynced before returning: the rename-based install is only
+// crash-safe if the staged contents are durable.
 func stageBinary(exe string, contents *signing.PkgContents) (string, error) {
 	newPath := stagedPath(exe, ".new")
 	_ = os.Remove(newPath)
-	if err := os.WriteFile(newPath, contents.Binary, 0755); err != nil {
+	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return "", fmt.Errorf("create staged binary: %w", err)
+	}
+	if _, err := f.Write(contents.Binary); err != nil {
+		f.Close()
+		_ = os.Remove(newPath)
 		return "", fmt.Errorf("write staged binary: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(newPath)
+		return "", fmt.Errorf("sync staged binary: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(newPath)
+		return "", fmt.Errorf("close staged binary: %w", err)
+	}
+	if err := os.Chmod(newPath, 0755); err != nil {
+		_ = os.Remove(newPath)
+		return "", fmt.Errorf("chmod staged binary: %w", err)
+	}
+	syncParentDir(newPath)
 	return newPath, nil
 }
 
-// swapBinary installs newPath at the stable executable path, keeping the
-// previous binary as .old and the one before that as .old2.
+// swapBinary rotates the backup chain, then installs newPath at the stable
+// executable path. installBinary is platform-specific: POSIX replaces the
+// directory entry atomically; Windows uses ReplaceFileW when available.
 func swapBinary(exe, newPath string) error {
 	oldPath := stagedPath(exe, ".old")
 	old2Path := stagedPath(exe, ".old2")
@@ -78,14 +117,10 @@ func swapBinary(exe, newPath string) error {
 			return fmt.Errorf("rotate backup: %w", err)
 		}
 	}
-	if err := os.Rename(exe, oldPath); err != nil {
-		return fmt.Errorf("move current binary aside: %w", err)
+	if err := installBinary(exe, newPath, oldPath); err != nil {
+		return err
 	}
-	if err := os.Rename(newPath, exe); err != nil {
-		// Best effort: put the original back so the service can still start.
-		_ = os.Rename(oldPath, exe)
-		return fmt.Errorf("install staged binary: %w", err)
-	}
+	syncParentDir(exe)
 	return nil
 }
 
@@ -109,13 +144,32 @@ func restoreBackup(exe string) error {
 	return nil
 }
 
+// minRestoredBinarySize rejects zero/partial files left by an interrupted
+// write or an AV quarantine before they are installed as the stable binary.
+const minRestoredBinarySize = 1 << 20
+
+// tryRestoreCandidate renames a backup/staged candidate into the stable path if
+// it looks like a real binary. It returns the candidate suffix and true when
+// the stable path is restored.
+func tryRestoreCandidate(exe, suffix string) (string, bool) {
+	candidate := stagedPath(exe, suffix)
+	fi, err := os.Stat(candidate)
+	if err != nil || fi.IsDir() || fi.Size() < minRestoredBinarySize {
+		return suffix, false
+	}
+	if err := os.Rename(candidate, exe); err != nil {
+		util.LogModuleWarn("main", "watchdog: restore %s failed: %v", candidate, err)
+		return suffix, false
+	}
+	return suffix, true
+}
+
 // repairInterruptedUpgrade runs before the first spawn. It closes the window
 // where a crash/power loss between the renames can leave the stable path
 // missing.
 func repairInterruptedUpgrade(exe string) {
 	marker := upgrade.ReadMarker()
 	_, exeErr := os.Stat(exe)
-	oldPath := stagedPath(exe, ".old")
 	newPath := stagedPath(exe, ".new")
 	newExists := fileExists(newPath)
 
@@ -126,6 +180,7 @@ func repairInterruptedUpgrade(exe string) {
 		}
 		if marker != nil {
 			util.LogModuleWarn("main", "watchdog: upgrade marker present but executable exists; assuming swap completed (target=%s)", marker.Version)
+			upgradeLog("repair: marker present, executable exists; assume swap completed target=%s", marker.Version)
 			_ = upgrade.ClearMarker()
 			st := upgrade.ReadStatus()
 			if st.Status != upgrade.StatusSucceeded {
@@ -139,17 +194,30 @@ func repairInterruptedUpgrade(exe string) {
 		return
 	}
 
-	if fileExists(oldPath) {
-		if err := os.Rename(oldPath, exe); err != nil {
-			util.LogModuleError("main", "watchdog: executable missing and backup restore failed: %v", err)
+	// Stable path is missing. Try the newest useful fallback first: .old,
+	// then .old2, then the staged .new. A restored .new keeps the request so
+	// the normal ready/version check can complete it; a restored backup clears
+	// the request (do not loop a swap that already broke once).
+	for _, suffix := range []string{".old", ".old2", ".new"} {
+		if _, ok := tryRestoreCandidate(exe, suffix); !ok {
+			continue
+		}
+		util.LogModuleWarn("main", "watchdog: executable missing at startup; restored %s", suffix)
+		upgradeLog("repair: executable missing; restored %s", suffix)
+		if suffix == ".new" {
+			requested := ""
+			if marker != nil {
+				requested = marker.Version
+			}
+			_ = upgrade.WriteStatus(upgrade.Status{
+				Status:    upgrade.StatusApplying,
+				Requested: requested,
+			})
 			return
 		}
-		util.LogModuleWarn("main", "watchdog: executable missing at startup; restored .old backup")
-		if newExists {
-			_ = os.Remove(newPath)
-		}
-		_ = upgrade.ClearRequest() // do not retry a swap that already broke once
+		_ = upgrade.ClearRequest()
 		_ = upgrade.ClearMarker()
+		_ = os.Remove(newPath)
 		requested := ""
 		if marker != nil {
 			requested = marker.Version
@@ -158,27 +226,13 @@ func repairInterruptedUpgrade(exe string) {
 			Status:    upgrade.StatusFailedRolledBack,
 			Current:   upgrade.ReadWorkerVersion(),
 			Requested: requested,
-			LastError: "executable missing at startup; restored backup",
+			LastError: "executable missing at startup; restored " + suffix,
 		})
 		return
 	}
 
-	if newExists {
-		// No backup exists (first install). The staged binary is all we have.
-		if err := os.Rename(newPath, exe); err != nil {
-			util.LogModuleError("main", "watchdog: executable missing and staged binary restore failed: %v", err)
-			return
-		}
-		util.LogModuleWarn("main", "watchdog: executable missing at startup; installed staged .new binary")
-		requested := ""
-		if marker != nil {
-			requested = marker.Version
-		}
-		_ = upgrade.WriteStatus(upgrade.Status{
-			Status:    upgrade.StatusApplying,
-			Requested: requested,
-		})
-	}
+	util.LogModuleError("main", "watchdog: executable missing at startup and no usable .old/.old2/.new backup")
+	upgradeLog("repair: executable missing and no usable backup")
 }
 
 // stopChild gracefully stops the worker and reaps it.
@@ -237,6 +291,7 @@ func spawnAndWait(exe string, timeout time.Duration) (*childProcess, error) {
 
 // markUpgradeSucceeded records a completed upgrade and clears the request.
 func markUpgradeSucceeded(requested, current string) {
+	upgradeLog("succeeded: target=%s current=%s", requested, current)
 	_ = upgrade.WriteStatus(upgrade.Status{
 		Status:    upgrade.StatusSucceeded,
 		Current:   current,
@@ -251,6 +306,7 @@ func markUpgradeSucceeded(requested, current string) {
 // The running worker is left untouched.
 func failUpgradeBeforeSwap(current string, req *upgrade.Request, err error) {
 	util.LogModuleError("main", "watchdog: upgrade to %s not applied: %v", req.Version, err)
+	upgradeLog("apply failed before swap: target=%s current=%s err=%v", req.Version, current, err)
 	_ = upgrade.WriteStatus(upgrade.Status{
 		Status:    upgrade.StatusFailedRolledBack,
 		Current:   current,
@@ -265,8 +321,12 @@ func failUpgradeBeforeSwap(current string, req *upgrade.Request, err error) {
 // cleared so a broken package is not retried in a loop.
 func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req *upgrade.Request, reason error) (*childProcess, int) {
 	util.LogModuleError("main", "watchdog: upgrade to %s failed, rolling back to %s: %v", req.Version, fromVersion, reason)
+	upgradeLog("rollback begin: target=%s from=%s reason=%v", req.Version, fromVersion, reason)
 	if err := restoreBackup(exe); err != nil {
 		util.LogModuleError("main", "watchdog: rollback restore failed: %v", err)
+		upgradeLog("rollback restore failed: %v", err)
+	} else {
+		upgradeLog("rollback restored .old")
 	}
 	_ = upgrade.ClearRequest()
 	_ = upgrade.ClearMarker()
@@ -281,6 +341,7 @@ func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req
 	cp, err := spawnAndWait(exe, workerReadyWait)
 	if err != nil {
 		util.LogModuleError("main", "watchdog: rolled-back worker did not become ready: %v", err)
+		upgradeLog("rollback worker not ready: %v", err)
 		_ = upgrade.WriteStatus(st)
 		if cp != nil {
 			return cp, cp.proc.Pid
@@ -294,6 +355,7 @@ func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req
 		st.Current = v
 		_ = upgrade.WriteWorkerVersion(v)
 	}
+	upgradeLog("rollback succeeded: running=%s pid=%d", st.Current, cp.proc.Pid)
 	_ = upgrade.WriteStatus(st)
 	return cp, cp.proc.Pid
 }
@@ -301,25 +363,28 @@ func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req
 // tryApplyUpgrade applies a pending request. handled=false means there is no
 // request. When handled=true the caller owns the returned child (nil means the
 // existing child was left untouched).
-func tryApplyUpgrade(exe string, cp *childProcess, pid int) (*childProcess, int, bool) {
+func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Bool) (*childProcess, int, bool) {
 	req := upgrade.ReadRequest()
 	if req == nil {
 		return nil, 0, false
 	}
+	upgradeLog("request observed: target=%s", req.Version)
 
-	running := ""
-	if cp != nil {
-		running = cp.workerVersion()
+	// Idempotence is decided only by the live child. The worker-version file is
+	// a display/status hint; using it here could declare success while the
+	// current binary is crash-looping.
+	live := ""
+	if cp != nil && cp.ready.Load() {
+		live = cp.workerVersion()
 	}
-	if running == "" {
-		running = upgrade.ReadWorkerVersion()
+	current := live
+	if current == "" {
+		current = upgrade.ReadWorkerVersion()
 	}
-
-	// Idempotent: a watchdog restart can re-observe a request that already
-	// took effect.
-	if running != "" && running == req.Version {
+	if live != "" && live == req.Version {
 		util.LogModuleInfo("main", "watchdog: already running requested version %s", req.Version)
-		markUpgradeSucceeded(req.Version, running)
+		upgradeLog("request already satisfied: target=%s", req.Version)
+		markUpgradeSucceeded(req.Version, live)
 		return nil, 0, true
 	}
 
@@ -328,10 +393,11 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int) (*childProcess, int,
 		return nil, 0, true
 	}
 
-	util.LogModuleInfo("main", "watchdog: applying upgrade %s (running %s)", req.Version, running)
+	util.LogModuleInfo("main", "watchdog: applying upgrade %s (running %s)", req.Version, current)
+	upgradeLog("applying: target=%s current=%s", req.Version, current)
 	_ = upgrade.WriteStatus(upgrade.Status{
 		Status:    upgrade.StatusApplying,
-		Current:   running,
+		Current:   current,
 		Requested: req.Version,
 	})
 
@@ -339,43 +405,71 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int) (*childProcess, int,
 	// must not interrupt service.
 	_, contents, err := findPkgForVersion(req.Version)
 	if err != nil {
-		failUpgradeBeforeSwap(running, req, err)
+		failUpgradeBeforeSwap(current, req, err)
 		return nil, 0, true
 	}
 	newPath, err := stageBinary(exe, contents)
 	if err != nil {
-		failUpgradeBeforeSwap(running, req, err)
+		failUpgradeBeforeSwap(current, req, err)
 		return nil, 0, true
 	}
+	upgradeLog("staged: target=%s path=%s bytes=%d", req.Version, newPath, len(contents.Binary))
 
 	_ = upgrade.WriteMarker(upgrade.Marker{
 		Old:     stagedPath(exe, ".old"),
 		New:     newPath,
 		Version: req.Version,
 	})
+	upgradeLog("marker written: target=%s", req.Version)
 
+	if stopping != nil && stopping.Load() {
+		upgradeLog("aborted before stop: shutdown requested")
+		_ = os.Remove(newPath)
+		_ = upgrade.ClearMarker()
+		_ = upgrade.WriteStatus(upgrade.Status{
+			Status:    upgrade.StatusIdle,
+			Current:   current,
+			Requested: req.Version,
+		})
+		return nil, 0, true
+	}
+
+	upgradeLog("stopping worker: pid=%d", pid)
 	stopChild(cp, pid)
 
 	if err := swapBinary(exe, newPath); err != nil {
-		newCp, newPid := rollbackUpgrade(exe, cp, running, req, err)
+		upgradeLog("swap failed: %v", err)
+		newCp, newPid := rollbackUpgrade(exe, cp, current, req, err)
 		return newCp, newPid, true
 	}
+	upgradeLog("swap complete: target=%s", req.Version)
 
 	newCp, err := spawnAndWait(exe, workerReadyWait)
 	if err != nil {
+		upgradeLog("new worker not ready: %v", err)
 		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, running, req, err)
+		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, err)
 		return rbCp, rbPid, true
 	}
 	if got := newCp.workerVersion(); got != req.Version {
+		upgradeLog("new worker version mismatch: got=%s want=%s", got, req.Version)
 		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, running, req, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
+		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
 		return rbCp, rbPid, true
 	}
 
+	upgradeLog("ready: target=%s pid=%d", req.Version, newCp.proc.Pid)
 	util.LogModuleInfo("main", "watchdog: upgrade to %s succeeded (pid=%d)", req.Version, newCp.proc.Pid)
 	markUpgradeSucceeded(req.Version, req.Version)
 	_ = upgrade.WriteWorkerVersion(req.Version)
+
+	// Honor a shutdown request that arrived during the swap: stop the new
+	// child and let the monitor loop see stopping + closed stdout and exit.
+	if stopping != nil && stopping.Load() {
+		upgradeLog("shutdown requested during apply; stopping new worker")
+		stopChild(newCp, newCp.proc.Pid)
+		return nil, 0, true
+	}
 	return newCp, newCp.proc.Pid, true
 }
 

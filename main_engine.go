@@ -245,23 +245,6 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	return engine, ns, connHandler
 }
 
-const lastGoodWorkerPath = "data/state/last-good-worker"
-
-// writeLastGoodWorker persists the path of the last worker binary that
-// successfully started (sent ready signal). Used by watchdog to fall back
-// if a new binary fails.
-func writeLastGoodWorker(path string) {
-	_ = os.MkdirAll("data/state", 0755)
-	_ = os.WriteFile(lastGoodWorkerPath, []byte(path), 0644)
-}
-
-// readLastGoodWorker is intentionally disabled: the worker now always runs the
-// stable supervisor executable (direct-binary deployment), so there is no
-// versioned worker path to fall back to. The old state file is ignored.
-func readLastGoodWorker() string {
-	return ""
-}
-
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.
 // Only used when running as a worker child (PHAETHON_WORKER=1).
 // Returns false when the write fails, which means the watchdog is gone and the

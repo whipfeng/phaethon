@@ -82,7 +82,12 @@
   - [x] 第 17 项：admin TLS 显式 `MinVersion=TLS1.2`；TLS 不可用且未认证时 admin 仅绑 `127.0.0.1`
   - [x] 第 16 项：启动时把 DB/legacy config 收紧到 0600（Unix）
 - [ ] 第 1 项：Git 历史清理（放到所有代码批次之后做单次 rewrite + force-push）
-- [ ] 批次 2：升级可靠性
+- [x] 批次 2：升级可靠性
+  - [x] 第 7 项：Linux 改为硬链接 `.old` + 原子 `rename(new, exe)`；Windows 使用 `ReplaceFileW`（Win10/Win7 实测可替换运行中的 exe），失败回退 rename；ready 前连续 3 次失败回退 `.old`；启动修复按 `.old → .old2 → .new` 并校验最小大小；`.new`/marker fsync；升级中检查 stopping；状态写入重试
+  - [x] 第 4 项：retention 保护当前运行版本、请求目标、最近成功版本、本次激活版本；activation 时同步执行
+  - [x] 第 5 项：新增 `data/logs/upgrade.log`，记录 request/applying/staged/swap/ready/rollback/repair
+  - [x] 第 6 项：幂等成功只认 `cp.ready && cp.workerVersion()==req.Version`
+  - [x] 第 18 项：删除 `selfUnparseable`、`last-good-worker` 写入；用 `.old` 回退替代
 - [ ] 批次 3：磁盘/包
 - [ ] 批次 4：代码卫生/加固
 

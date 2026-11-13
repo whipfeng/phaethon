@@ -1164,16 +1164,6 @@ func selectWorkerBinary() string {
 	return exe
 }
 
-// selfUnparseable 判定当前二进制版本号是否解析不出数字 tag。
-// 是则说明部署者用了非标准版本号（dev/自定义后缀），优先尊重部署意图。
-func selfUnparseable() bool {
-	if Version == "" || Version == "dev" {
-		return true
-	}
-	tag, _ := p2p.ParseVersionForCheck(Version)
-	return tag == nil
-}
-
 // runWatchdogMode is the watchdog entry point. Its job is deliberately small:
 // spawn the server as a child (with PHAETHON_WORKER=1), read the ready and
 // heartbeat messages from its stdout, restart it on crash or hang, forward
@@ -1239,14 +1229,12 @@ func runWatchdogMode() {
 
 	lastRestart := time.Time{}
 
-	// Track the last binary that successfully started (sent ready signal).
-	// If a new binary fails to start or crashes before ready, fall back to this.
-	// Persisted to disk so it survives watchdog restarts.
-	lastGoodBinary := readLastGoodWorker()
-	if lastGoodBinary != "" {
-		util.LogModuleInfo("main", "watchdog: loaded last good binary from disk: %s", lastGoodBinary)
-	}
-	currentBinary := exe
+	// Crash-before-ready fallback. The stable path is always used; the previous
+	// binary lives at <exe>.old. After a few consecutive failed starts, try the
+	// backup once. (The old last-good-worker file mechanism was versioned-worker
+	// specific and is no longer used.)
+	notReadyStreak := 0
+	fallbackUsed := false
 
 	restartChild := func(cp *childProcess, pid int, reason string, alreadyExited bool, wasReady bool) *childProcess {
 		util.LogModuleInfo("main", "watchdog: %s, restarting child %d", reason, pid)
@@ -1271,17 +1259,29 @@ func runWatchdogMode() {
 			time.Sleep(remain)
 		}
 
-		// Determine which binary to use for restart
-		var newExe string
-		if !wasReady && lastGoodBinary != "" && currentBinary != lastGoodBinary {
-			// Child crashed before becoming ready and we have a known good binary
-			// Fall back to the last good binary
-			util.LogModuleWarn("main", "watchdog: child crashed before ready, falling back from %s to %s", currentBinary, lastGoodBinary)
-			newExe = lastGoodBinary
+		if !wasReady {
+			notReadyStreak++
 		} else {
-			// Re-scan before restarting (hot swap support): pkg only if newer than self
-			newExe = selectWorkerBinary()
+			notReadyStreak = 0
+			fallbackUsed = false
 		}
+
+		// A binary that repeatedly fails before ready is treated as broken;
+		// try the previous version once. The fallback is bounded so a bad
+		// config cannot bounce through the backup chain forever.
+		if !wasReady && notReadyStreak >= 3 && !fallbackUsed && fileExists(stagedPath(exe, ".old")) {
+			if err := restoreBackup(exe); err == nil {
+				fallbackUsed = true
+				notReadyStreak = 0
+				util.LogModuleWarn("main", "watchdog: 3 consecutive starts failed before ready; fell back to .old")
+				upgradeLog("crash-loop: fell back to .old after 3 failed starts")
+			} else {
+				util.LogModuleWarn("main", "watchdog: crash-loop fallback to .old failed: %v", err)
+			}
+		}
+
+		// Re-scan before restarting. selectWorkerBinary is stable-path-only now.
+		newExe := selectWorkerBinary()
 
 		// CRITICAL FIX: Never give up - keep trying to restart
 		const maxRetries = 5
@@ -1309,20 +1309,6 @@ func runWatchdogMode() {
 			if err != nil {
 				util.LogModuleError("main", "watchdog: restart attempt %d/%d failed with %s: %v", attempt, maxRetries, newExe, err)
 
-				// If we failed with the fallback binary, try the original selection
-				if newExe == lastGoodBinary && lastGoodBinary != currentBinary {
-					util.LogModuleInfo("main", "watchdog: fallback failed, trying %s again", currentBinary)
-					newExe = currentBinary
-					newCp, err = spawnChildProcess(newExe)
-					if err == nil {
-						currentBinary = newExe
-						util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
-						lastRestart = time.Now()
-						return newCp
-					}
-					util.LogModuleError("main", "watchdog: restart with %s also failed: %v", newExe, err)
-				}
-
 				// Retry with backoff
 				if attempt < maxRetries {
 					backoff := retryBackoff * time.Duration(attempt)
@@ -1341,7 +1327,6 @@ func runWatchdogMode() {
 			}
 
 			// Success!
-			currentBinary = newExe
 			util.LogModuleInfo("main", "watchdog: restarted child (old=%d, new=%d, binary=%s)", pid, newCp.proc.Pid, newExe)
 			lastRestart = time.Now()
 			return newCp
@@ -1355,7 +1340,17 @@ func runWatchdogMode() {
 	cp, err := spawnChildProcess(exe)
 	if err != nil {
 		util.LogModuleError("main", "watchdog: initial spawn failed: %v", err)
-		return
+		if fileExists(stagedPath(exe, ".old")) {
+			if rerr := restoreBackup(exe); rerr == nil {
+				util.LogModuleWarn("main", "watchdog: initial spawn failed; retrying with .old backup")
+				upgradeLog("initial spawn failed; retrying with .old backup")
+				cp, err = spawnChildProcess(exe)
+			}
+		}
+		if err != nil {
+			util.LogModuleError("main", "watchdog: initial spawn failed after .old fallback: %v", err)
+			return
+		}
 	}
 	util.LogModuleInfo("main", "watchdog: worker started (pid=%d)", cp.proc.Pid)
 	spawnTime := time.Now()
@@ -1404,11 +1399,9 @@ func runWatchdogMode() {
 				return
 			}
 			wasReady := cp.ready.Load()
-			// Update lastGoodBinary if child became ready
-			if wasReady && lastGoodBinary != currentBinary {
-				lastGoodBinary = currentBinary
-				writeLastGoodWorker(lastGoodBinary)
-				util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+			if wasReady {
+				notReadyStreak = 0
+				fallbackUsed = false
 			}
 			if stopping.Load() {
 				util.LogModuleInfo("main", "watchdog: child %d exited after shutdown signal, cleaning up", pid)
@@ -1436,11 +1429,9 @@ func runWatchdogMode() {
 			spawnTime = time.Now()
 			continue
 		case <-monitorTicker.C:
-			// Check if child just became ready and update lastGoodBinary
-			if cp.ready.Load() && lastGoodBinary != currentBinary {
-				lastGoodBinary = currentBinary
-				writeLastGoodWorker(lastGoodBinary)
-				util.LogModuleInfo("main", "watchdog: child %d is ready, persisted %s as last good binary", pid, currentBinary)
+			if cp.ready.Load() {
+				notReadyStreak = 0
+				fallbackUsed = false
 			}
 
 			if !processExists(pid) {
@@ -1452,11 +1443,9 @@ func runWatchdogMode() {
 					return
 				}
 				wasReady := cp.ready.Load()
-				// Update lastGoodBinary if child became ready
-				if wasReady && lastGoodBinary != currentBinary {
-					lastGoodBinary = currentBinary
-					writeLastGoodWorker(lastGoodBinary)
-					util.LogModuleInfo("main", "watchdog: child %d was ready, persisted %s as last good binary", pid, lastGoodBinary)
+				if wasReady {
+					notReadyStreak = 0
+					fallbackUsed = false
 				}
 				if stopping.Load() {
 					util.LogModuleInfo("main", "watchdog: child %d exited after shutdown signal, cleaning up", pid)
@@ -1529,7 +1518,7 @@ func runWatchdogMode() {
 				continue
 			}
 			// Apply a pending admin activation. handled=false means no request.
-			if newCp, newPid, handled := tryApplyUpgrade(exe, cp, pid); handled && newCp != nil {
+			if newCp, newPid, handled := tryApplyUpgrade(exe, cp, pid, &stopping); handled && newCp != nil {
 				cp = newCp
 				pid = newPid
 				spawnTime = time.Now()

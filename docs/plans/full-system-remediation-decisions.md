@@ -104,7 +104,13 @@
 
 ## 六、部署验证
 
-- 683 已手动部署到 vm、qg；下一步用 684 包验证 683→684 自升级
-  （VM 走 ReplaceFileW，QG 走原子 rename），通过后再扩散到其余节点。
+- 683 已手动部署到 vm、qg；683→684 自升级验证完成：
+  - VM 使用 ReplaceFileW，QG 使用硬链接 `.old` + 原子 rename；`upgrade.log` 逐步记录；
+  - 首次 684 包因“构建与签名并行”导致包内仍是 683 二进制，watchdog 版本校验
+    失败并自动回滚到 683（意外验证了回滚路径）；重新顺序构建/签名后成功；
+  - jf/gg/mb/ms9/qgw/deskzq 通过 upload+activate 到 684；ms10 的 mesh 管理
+    上传不稳定，改用 OS SSH 手动替换；vm/qg 已 684；
+  - 最终 9 节点全部 `v0.8.0-684-g6958a6e`，admin/mesh/内置 SSH 基础功能正常；
+  - 多数节点的 supervisor 仍是 674（worker 已是 684），下次服务重启更新。
 
 

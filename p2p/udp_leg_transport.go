@@ -560,7 +560,7 @@ func (t *udpLegTransport) spawnDial() {
 	t.pcMu.Unlock()
 
 	go func() {
-		pc, err := net.ListenPacket("udp4", "0.0.0.0:0")
+		pc, err := dialer.ListenPacketBound(t.peerIP)
 		t.pcMu.Lock()
 		t.dialing = false
 		if err == nil {
@@ -606,7 +606,7 @@ func (t *udpLegTransport) allocatePort() {
 		return
 	}
 	t.pcMu.Unlock()
-	pc, err := dialer.ListenUDP()
+	pc, err := dialer.ListenUDPBound()
 	if err != nil {
 		util.LogModuleWarn("p2p", "[UDP-LEG] bind passive UDP port failed: %v", err)
 		return

@@ -3972,6 +3972,8 @@ gg 21M、mb 286M，均降到 ~4K/0；qg 122 个 0 字节 pkg 已移走（§132�
 5~18% 差距属于 §127 的偶发 WS 慢簇窗口，不是固定损失。本轮未再改
 载体调度。UDP leg 仍为 `transport=udp`，qg `IpReasmReqds` 全程增量 0。
 
-**仍缺**：macOS 的 TUN MTU 下发（`SIOCSIFMTU`）没有真机跑过——mb 是
-mesh-only，不创建 TUN 适配器；代码已跨平台编译通过，需日后在有 TUN 的
-Mac 上验一次。
+**Darwin TUN MTU 已验证**（2026-11-13 07:50）：在 mb（macOS 12.7.6 x86_64）
+上临时 `PATCH /api/tun {"enabled":true}`，实际设备 `utun7` 的
+`ifconfig` 显示 **mtu 1400**，`0/1`、`128.0/1` 两条 split 路由均指向
+utun7——说明 `SIOCSIFMTU` 下发路径生效。验证完已 `{"enabled":false}`
+恢复 mb 原来的 mesh-only 状态：utun7 消失、split 路由清空、`enabled=false`。

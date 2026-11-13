@@ -158,6 +158,62 @@ type RouteEntry struct {
 	Source RouteSource
 }
 
+// canonicalCIDR parses a CIDR string and returns its canonical network form
+// ("10.161.88.12/24" → "10.161.88.0/24"). Route identity is the network, not
+// the textual form the operator typed: when two owners advertise the same
+// network through slightly different strings, both copies must collapse into a
+// single route with two entries. Otherwise the route slice carries two
+// same-prefix MeshRoutes whose first-match order depends on map iteration, so
+// the data plane flips egress owners between recomputes and the admin trie
+// (last insert wins) shows only one owner.
+func canonicalCIDR(cidr string) (*net.IPNet, string, bool) {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, "", false
+	}
+	return ipNet, ipNet.String(), true
+}
+
+// canonicalizeCIDRs returns canonical, de-duplicated CIDR strings, dropping
+// invalid entries.
+func canonicalizeCIDRs(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, c := range in {
+		_, canon, ok := canonicalCIDR(c)
+		if !ok || seen[canon] {
+			continue
+		}
+		seen[canon] = true
+		out = append(out, canon)
+	}
+	return out
+}
+
+// dedupeRouteEntries collapses entries for the same owner (static wins over
+// dynamic) and drops empty node IDs.
+func dedupeRouteEntries(entries []RouteEntry) []RouteEntry {
+	out := make([]RouteEntry, 0, len(entries))
+	idx := make(map[string]int, len(entries))
+	for _, e := range entries {
+		if e.NodeID == "" {
+			continue
+		}
+		if i, ok := idx[e.NodeID]; ok {
+			if e.Source == RouteSourceStatic {
+				out[i].Source = RouteSourceStatic
+			}
+			continue
+		}
+		idx[e.NodeID] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
 // selectEgressNodeID selects the best egress nodeID from a list of route entries.
 // Algorithm:
 // 1. Sort: static entries first, dynamic entries after
@@ -195,6 +251,13 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 	if len(available) == 0 {
 		return ""
 	}
+
+	// Deterministic order: the hash→index below must not depend on gossip
+	// arrival / peer registration order, otherwise the same target can hash to
+	// a different owner after a reconnect even though both owners are present.
+	sort.Slice(available, func(i, j int) bool {
+		return available[i].NodeID < available[j].NodeID
+	})
 
 	// Sticky: check if we have a cached selection for this target
 	targetKey := targetIP.String()
@@ -321,13 +384,13 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
-	routes      []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
-	routeTrie   *routeTrie                // IP prefix trie for O(log R) lookup
-	domainTrie  *NodeTrie                 // unified domain routes (static + dynamic merged)
-	nodeMap     map[string]*nodeInfo      // nodeID → info
-	bestPaths   map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
-	subnetOwner map[[4]byte]string        // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
-	nextHopSenders map[string]PeerSender  // nodeID → first direct P2P sender (transit fast path)
+	routes         []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
+	routeTrie      *routeTrie                // IP prefix trie for O(log R) lookup
+	domainTrie     *NodeTrie                 // unified domain routes (static + dynamic merged)
+	nodeMap        map[string]*nodeInfo      // nodeID → info
+	bestPaths      map[string]dijkstraResult // Dijkstra-computed best paths: nodeID -> (nextHop, cost)
+	subnetOwner    map[[4]byte]string        // masked subnet (4-byte network addr) → nodeID, for u-turn detection (Phase C)
+	nextHopSenders map[string]PeerSender     // nodeID → first direct P2P sender (transit fast path)
 }
 
 // TopologySnapshot is an immutable copy of topology.peers for lock-free reads.
@@ -351,7 +414,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		subnet:          subnet,
 		subnetStr:       subnetStr,
 		domainSuffixes:  domainSuffixes,
-		advertise:       advertise,
+		advertise:       canonicalizeCIDRs(advertise),
 		topology:        NewTopology(),
 		network:         network,
 		subnetPrefixLen: subnetPrefixLen,
@@ -755,7 +818,7 @@ func (m *MeshManager) SetOnRouteChange(callback func()) {
 func (m *MeshManager) UpdateConfig(domainSuffixes, advertise []string) {
 	m.mu.Lock()
 	m.domainSuffixes = domainSuffixes
-	m.advertise = advertise
+	m.advertise = canonicalizeCIDRs(advertise)
 	m.mu.Unlock()
 	select {
 	case m.normalCh <- meshEvent{kind: configUpdate}:
@@ -990,12 +1053,16 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		return ""
 	}
 
-	// Sort: static first, then dynamic
+	// Sort: static first, then dynamic; within a source class order by nodeID
+	// so the hash→index choice is reproducible regardless of trie insertion
+	// and gossip arrival order.
 	sort.SliceStable(available, func(i, j int) bool {
-		if available[i].Source == RouteSourceStatic && available[j].Source == RouteSourceDynamic {
-			return true
+		si := available[i].Source == RouteSourceStatic
+		sj := available[j].Source == RouteSourceStatic
+		if si != sj {
+			return si
 		}
-		return false
+		return available[i].NodeID < available[j].NodeID
 	})
 
 	// Sticky: check if we have a cached selection for this domain
@@ -1270,14 +1337,14 @@ func (m *MeshManager) GetStatus() map[string]interface{} {
 	m.mu.RUnlock()
 
 	return map[string]interface{}{
-		"enabled":        true,
-		"nodeId":         m.nodeID,
-		"vip":            m.vip.String(),
-		"subnet":         m.subnetStr,
-		"domainSuffixes": domainSuffixes,
-		"advertise":      advertise,
-		"routeCount":     routeCount,
-		"uturnCount":     atomic.LoadUint64(&m.uturnCount),
+		"enabled":         true,
+		"nodeId":          m.nodeID,
+		"vip":             m.vip.String(),
+		"subnet":          m.subnetStr,
+		"domainSuffixes":  domainSuffixes,
+		"advertise":       advertise,
+		"routeCount":      routeCount,
+		"uturnCount":      atomic.LoadUint64(&m.uturnCount),
 		"transitFastPath": m.transitFastPath.Load(),
 	}
 }
@@ -1898,16 +1965,16 @@ func (m *MeshManager) recomputeRoutes() {
 	// Own subnet (Hop=0) — this node owns it, no forwarding.
 	_, ownSubnet, _ := net.ParseCIDR(m.subnetStr)
 	if ownSubnet != nil {
-		ownPrefixes[m.subnetStr] = true
+		ownPrefixes[ownSubnet.String()] = true
 	}
 
 	// Own advertise routes — this node owns them, no forwarding.
 	for _, r := range advertise {
-		_, _, err := net.ParseCIDR(r)
-		if err != nil {
+		_, canon, ok := canonicalCIDR(r)
+		if !ok {
 			continue
 		}
-		ownPrefixes[r] = true
+		ownPrefixes[canon] = true
 	}
 
 	// Peer routes (non-mesh, referencing owner node). Candidate score =
@@ -1922,7 +1989,14 @@ func (m *MeshManager) recomputeRoutes() {
 			if !ok {
 				continue // No claim support for the owner, drop the copy
 			}
-			allEntries[r.PrefixStr] = append(allEntries[r.PrefixStr], peerEntry{peer.Sender, hop, r.Prefix, r.NodeID})
+			// Key by the canonical network, not the peer's textual form:
+			// different owners may advertise the same network as
+			// "10.161.88.12/24" and "10.161.88.0/24".
+			_, canon, ok := canonicalCIDR(r.PrefixStr)
+			if !ok {
+				continue
+			}
+			allEntries[canon] = append(allEntries[canon], peerEntry{peer.Sender, hop, r.Prefix, r.NodeID})
 		}
 	}
 
@@ -1976,8 +2050,8 @@ func (m *MeshManager) recomputeRoutes() {
 
 	// Add advertise routes as local routes.
 	for _, r := range advertise {
-		_, ipNet, err := net.ParseCIDR(r)
-		if err != nil {
+		ipNet, _, ok := canonicalCIDR(r)
+		if !ok {
 			continue
 		}
 		routes = append(routes, MeshRoute{
@@ -2018,6 +2092,31 @@ func (m *MeshManager) recomputeRoutes() {
 			})
 		}
 	}
+
+	// Consolidate: exactly one MeshRoute per canonical prefix, with every
+	// owner merged into its Entries. Sources that can produce duplicates:
+	// the same network typed in different textual forms, own-advertise vs
+	// static config, and gossip copies arriving via several peers. Keeping
+	// duplicates would make first-match (map/sort order) pick an arbitrary
+	// copy and the admin trie keep only the last insert's owners.
+	merged := make(map[string]*MeshRoute, len(routes))
+	order := make([]string, 0, len(routes))
+	for i := range routes {
+		key := routes[i].Prefix.String()
+		r := routes[i]
+		if existing, ok := merged[key]; ok {
+			existing.Entries = dedupeRouteEntries(append(existing.Entries, r.Entries...))
+			continue
+		}
+		r.Entries = dedupeRouteEntries(r.Entries)
+		merged[key] = &r
+		order = append(order, key)
+	}
+	dedupedRoutes := make([]MeshRoute, 0, len(merged))
+	for _, key := range order {
+		dedupedRoutes = append(dedupedRoutes, *merged[key])
+	}
+	routes = dedupedRoutes
 
 	// Sort routes by prefix length (longest first) for longest-match lookup.
 	sort.Slice(routes, func(i, j int) bool {
@@ -2659,12 +2758,18 @@ func (m *MeshManager) broadcastGossip() {
 		hop     int // real distance to the owner through nextHop (0 = own route)
 	}
 	bestRoutes := make(map[string]globalRouteEntry)
+	// Key by (canonical prefix, owner) so several owners of the same network
+	// all survive and keep propagating; keying by prefix alone collapsed the
+	// relayed view to a single owner and made non-adjacent nodes pick blindly.
+	routeKey := func(prefix, nodeID string) string { return prefix + "\x00" + nodeID }
 
 	// Own advertise routes
 	for _, r := range advertise {
-		_, ipNet, _ := net.ParseCIDR(r)
-		bestRoutes[r] = globalRouteEntry{nil, m.nodeID, r, 0}
-		_ = ipNet // ipNet not used, kept for potential future use
+		_, canon, ok := canonicalCIDR(r)
+		if !ok {
+			continue
+		}
+		bestRoutes[routeKey(canon, m.nodeID)] = globalRouteEntry{nil, m.nodeID, canon, 0}
 	}
 	// Peer routes (reference owner node). Score = the sender's claim hop
 	// for the owner (real distance through that peer); copies without
@@ -2678,8 +2783,13 @@ func (m *MeshManager) broadcastGossip() {
 			if !ok {
 				continue
 			}
-			if e, exists := bestRoutes[r.PrefixStr]; !exists || hop < e.hop {
-				bestRoutes[r.PrefixStr] = globalRouteEntry{peer, r.NodeID, r.PrefixStr, hop}
+			_, canon, ok := canonicalCIDR(r.PrefixStr)
+			if !ok {
+				continue
+			}
+			key := routeKey(canon, r.NodeID)
+			if e, exists := bestRoutes[key]; !exists || hop < e.hop {
+				bestRoutes[key] = globalRouteEntry{peer, r.NodeID, canon, hop}
 			}
 		}
 	}
@@ -3204,10 +3314,17 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		hop   int // 0 = own route
 	}
 	bestRoutes := make(map[string]routeEntry)
+	// Key by (canonical prefix, owner): every advertised owner of the same
+	// network must keep propagating, not just the closest copy.
+	routeKey := func(prefix, nodeID string) string { return prefix + "\x00" + nodeID }
 
 	// Own advertise routes
 	for _, r := range advertise {
-		bestRoutes[r] = routeEntry{GossipRoute{Prefix: r, NodeID: m.nodeID}, 0}
+		_, canon, ok := canonicalCIDR(r)
+		if !ok {
+			continue
+		}
+		bestRoutes[routeKey(canon, m.nodeID)] = routeEntry{GossipRoute{Prefix: canon, NodeID: m.nodeID}, 0}
 	}
 	// Peer routes (reference owner node)
 	for _, peer := range allPeers {
@@ -3219,8 +3336,13 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			if !ok {
 				continue
 			}
-			if e, exists := bestRoutes[r.PrefixStr]; !exists || hop < e.hop {
-				bestRoutes[r.PrefixStr] = routeEntry{GossipRoute{Prefix: r.PrefixStr, NodeID: r.NodeID}, hop}
+			_, canon, ok := canonicalCIDR(r.PrefixStr)
+			if !ok {
+				continue
+			}
+			key := routeKey(canon, r.NodeID)
+			if e, exists := bestRoutes[key]; !exists || hop < e.hop {
+				bestRoutes[key] = routeEntry{GossipRoute{Prefix: canon, NodeID: r.NodeID}, hop}
 			}
 		}
 	}
@@ -3523,8 +3645,10 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 }
 
 // linkCost computes the per-link cost (design: link_quality_v2 §A2/§B):
-//   lossEff = 1 - (1-lossPing)·(1-dropRate)
-//   cost = (SRTT + SojournMs) / max(1-lossEff, 0.01) / confidence
+//
+//	lossEff = 1 - (1-lossPing)·(1-dropRate)
+//	cost = (SRTT + SojournMs) / max(1-lossEff, 0.01) / confidence
+//
 // Locally-dropped frames never reached the peer, so dropRate composes into
 // the loss term; sojourn adds to SRTT (same unit). No unprobed sentinel —
 // a fresh tracker carries the 100ms prior with confidence 0.1, yielding

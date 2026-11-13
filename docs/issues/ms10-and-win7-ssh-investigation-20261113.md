@@ -109,4 +109,5 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 - **winpty 版本/wrapper 本身没有问题**：cmd.exe 在 Win7 上通过 winpty 获得完整 PTY（提示符、回显、执行、退出都正常）；
 - **问题在 PS2 的交互宿主**：它不处理 winpty 的控制台输入/不渲染，`exit` 也不响应；
 - `-Command -` 在 winpty 下不可用：winpty 给子进程的是控制台而不是重定向 stdin，PS2 直接打印帮助并拒绝；
+- **嵌套 cmd 也失败**：在 winpty 的 cmd 提示符里手动输入 `powershell.exe -NoLogo`，cmd 本身正常回显，但 PS2 启动后无提示符/输出、marker 未创建、`exit` 超时；`cmd /Q /c powershell.exe -NoLogo` 同样。说明不是“直接 spawn PS2”的启动方式问题，而是 PS2 的 ConsoleHost 在 winpty 模拟控制台下无法进入输入/渲染循环；
 - 因此 Win7 想立刻获得真交互，最现实的系统方案是 **cmd.exe + winpty**（不是 PowerShell）；想要 PowerShell 交互则需安装 WMF 5.1/PS7 后再验证。

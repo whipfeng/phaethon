@@ -88,7 +88,10 @@
   - [x] 第 5 项：新增 `data/logs/upgrade.log`，记录 request/applying/staged/swap/ready/rollback/repair
   - [x] 第 6 项：幂等成功只认 `cp.ready && cp.workerVersion()==req.Version`
   - [x] 第 18 项：删除 `selfUnparseable`、`last-good-worker` 写入；用 `.old` 回退替代
-- [ ] 批次 3：磁盘/包
+- [x] 批次 3：磁盘/包
+  - [x] 第 3 项：启动执行全量 retention；active/pending 每 platform/arch 保留 3 版；孤儿 pkg/陈旧 tmp 清理；上传/接收前检查剩余空间（<512MB 拒绝）；`BinaryCache.Prune(5, 1GiB)` 启动清理
+  - [x] 第 10 项：上传/接收改为流式落盘 + `signing.VerifyPkgMeta` 流式验签；并发上限 2
+  - [x] 第 11 项：包端点保持公开；receive 加每源 500ms 限流 + 并发/空间检查
 - [ ] 批次 4：代码卫生/加固
 
 > 历史清理推迟到最后的理由：避免多次改写/force-push，并让代码修改先完成、验证后再一次性清理。

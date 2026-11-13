@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,7 +42,54 @@ const (
 	// packageRetention is the number of versions to keep per platform/arch.
 	// Older versions are automatically deleted.
 	packageRetention = 3
+
+	// minFreeDiskBytes keeps uploads/receives from filling the disk. The QG
+	// incident showed the upgrade path itself needs headroom.
+	minFreeDiskBytes = 512 << 20
 )
+
+// packageUploadSem bounds concurrent uploads/receives; each one can stage a
+// large file and stream-verify it.
+var packageUploadSem = make(chan struct{}, 2)
+
+var (
+	receiveRateMu sync.Mutex
+	receiveLast   = make(map[string]time.Time)
+)
+
+// allowReceive applies a simple per-source rate limit to the public mesh
+// receive endpoint (one request per 500ms per source).
+func allowReceive(src string) bool {
+	now := time.Now()
+	receiveRateMu.Lock()
+	defer receiveRateMu.Unlock()
+	if last, ok := receiveLast[src]; ok && now.Sub(last) < 500*time.Millisecond {
+		return false
+	}
+	receiveLast[src] = now
+	if len(receiveLast) > 1024 {
+		for k, v := range receiveLast {
+			if now.Sub(v) > 5*time.Minute {
+				delete(receiveLast, k)
+			}
+		}
+	}
+	return true
+}
+
+// checkFreeSpace refuses work that would leave less than minFreeDiskBytes on
+// the data volume. Unknown free space (platform error) does not block.
+func checkFreeSpace(extra uint64) error {
+	free, err := freeDiskBytes(".")
+	if err != nil {
+		return nil
+	}
+	need := extra + minFreeDiskBytes
+	if free < need {
+		return fmt.Errorf("insufficient disk space: free=%dMiB need=%dMiB", free>>20, need>>20)
+	}
+	return nil
+}
 
 // versionPattern validates Semver format with strict completeness rules:
 // - Base: v<major>.<minor>.<patch>[+<build>]
@@ -184,6 +232,14 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	select {
+	case packageUploadSem <- struct{}{}:
+		defer func() { <-packageUploadSem }()
+	default:
+		httpError(w, "too many concurrent package transfers", http.StatusTooManyRequests)
+		return
+	}
+
 	// Parse multipart form (max size limited)
 	if err := r.ParseMultipartForm(s.packageMaxUploadBytes() + 1024); err != nil {
 		httpError(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
@@ -200,6 +256,10 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	// Check size
 	if header.Size > s.packageMaxUploadBytes() {
 		httpError(w, fmt.Sprintf("package exceeds size limit (%d MB)", s.packageMaxUploadBytes()/1024/1024), http.StatusRequestEntityTooLarge)
+		return
+	}
+	if err := checkFreeSpace(uint64(header.Size)); err != nil {
+		httpError(w, err.Error(), http.StatusInsufficientStorage)
 		return
 	}
 
@@ -234,8 +294,8 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify signature
-	contents, err := signing.VerifyPkg(tmpPath, signing.PublicKey)
+	// Verify signature (streaming; the binary is not retained in memory).
+	meta, err := signing.VerifyPkgMeta(tmpPath, signing.PublicKey)
 	if err != nil {
 		os.Remove(tmpPath)
 		httpError(w, "signature verification failed: "+err.Error(), http.StatusBadRequest)
@@ -243,9 +303,9 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate version format
-	if !versionPattern.MatchString(contents.Meta.Version) {
+	if !versionPattern.MatchString(meta.Version) {
 		os.Remove(tmpPath)
-		httpError(w, fmt.Sprintf("invalid version format: %s (expected: v<major>.<minor>.<patch>[+<build>])", contents.Meta.Version), http.StatusBadRequest)
+		httpError(w, fmt.Sprintf("invalid version format: %s (expected: v<major>.<minor>.<patch>[+<build>])", meta.Version), http.StatusBadRequest)
 		return
 	}
 
@@ -264,13 +324,13 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		Size:           size,
 		UploadedAt:     time.Now(),
 		SignatureValid: true,
-		Version:        contents.Meta.Version,
-		Platform:       contents.Meta.Platform,
-		Arch:           contents.Meta.Arch,
-		BuildTime:      contents.Meta.BuildTime,
-		GitCommit:      contents.Meta.GitCommit,
-		GoVersion:      contents.Meta.GoVersion,
-		BuildTag:       contents.Meta.BuildTag,
+		Version:        meta.Version,
+		Platform:       meta.Platform,
+		Arch:           meta.Arch,
+		BuildTime:      meta.BuildTime,
+		GitCommit:      meta.GitCommit,
+		GoVersion:      meta.GoVersion,
+		BuildTag:       meta.BuildTag,
 		Published:      false,
 	}
 	if err := db.PutPackage(info); err != nil {
@@ -278,6 +338,9 @@ func (s *AdminServer) apiPackageUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "save metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Keep pending storage bounded.
+	s.applyRetention(info.Platform, info.Arch, "")
 
 	util.LogModuleInfo("admin", "package uploaded: %s (version=%s, platform=%s/%s)", header.Filename, info.Version, info.Platform, info.Arch)
 
@@ -545,17 +608,54 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Read body (.pkg file), bounded so a peer cannot exhaust memory.
-	r.Body = http.MaxBytesReader(w, r.Body, s.packageMaxUploadBytes())
-	pkgData, err := io.ReadAll(r.Body)
-	if err != nil {
-		httpError(w, "read body failed", http.StatusBadRequest)
+	if !allowReceive(clientIP(r)) {
+		httpError(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+	select {
+	case packageUploadSem <- struct{}{}:
+		defer func() { <-packageUploadSem }()
+	default:
+		httpError(w, "too many concurrent package transfers", http.StatusTooManyRequests)
 		return
 	}
 
-	// Verify signature
-	contents, err := signing.VerifyPkgBytes(pkgData, signing.PublicKey)
+	extra := uint64(0)
+	if r.ContentLength > 0 {
+		extra = uint64(r.ContentLength)
+	}
+	if err := checkFreeSpace(extra); err != nil {
+		httpError(w, err.Error(), http.StatusInsufficientStorage)
+		return
+	}
+
+	if err := os.MkdirAll(pendingPackagesDir, 0755); err != nil {
+		httpError(w, "create pending dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmp, err := os.CreateTemp(pendingPackagesDir, "recv-*.tmp")
+	if err != nil {
+		httpError(w, "create temp file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	body := http.MaxBytesReader(w, r.Body, s.packageMaxUploadBytes())
+	size, err := io.Copy(tmp, body)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		httpError(w, "read body failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Verify from disk, streaming the binary through the hash.
+	meta, err := signing.VerifyPkgMeta(tmpName, signing.PublicKey)
 	if err != nil {
 		util.LogModuleDebug("admin", "receive package verify failed: %v", err)
 		httpError(w, "verify failed", http.StatusBadRequest)
@@ -564,28 +664,53 @@ func (s *AdminServer) apiPackageReceive(w http.ResponseWriter, r *http.Request) 
 
 	// Uniqueness is (platform, arch, version) — not version alone, and not the
 	// ID, which is a random local filename that differs across nodes.
-	packages := s.listPackages()
-	for _, p := range packages {
-		if p.Platform == contents.Meta.Platform && p.Arch == contents.Meta.Arch && p.Version == contents.Meta.Version {
+	for _, p := range s.listPackages() {
+		if p.Platform == meta.Platform && p.Arch == meta.Arch && p.Version == meta.Version {
 			util.LogModuleDebug("admin", "receive package: already have %s/%s@%s", p.Platform, p.Arch, p.Version)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 	}
 
-	// Save the package
-	id, err := s.saveExternalPackage(pkgData, contents)
-	if err != nil {
-		util.LogModuleDebug("admin", "receive package save failed: %v", err)
-		httpError(w, "save failed", http.StatusInternalServerError)
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		httpError(w, "generate id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id := hex.EncodeToString(idBytes)
+	pkgPath := filepath.Join(pendingPackagesDir, id+".pkg")
+	if err := os.Rename(tmpName, pkgPath); err != nil {
+		httpError(w, "finalize received package: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	util.LogModuleInfo("admin", "received package from mesh peer: %s (version=%s)", id, contents.Meta.Version)
+	info := &db.PackageMeta{
+		ID:             id,
+		Filename:       fmt.Sprintf("phaethon-%s.pkg", meta.Version),
+		Size:           size,
+		UploadedAt:     time.Now(),
+		SignatureValid: true,
+		Version:        meta.Version,
+		Platform:       meta.Platform,
+		Arch:           meta.Arch,
+		BuildTime:      meta.BuildTime,
+		GitCommit:      meta.GitCommit,
+		GoVersion:      meta.GoVersion,
+		BuildTag:       meta.BuildTag,
+		Published:      false,
+	}
+	if err := db.PutPackage(info); err != nil {
+		os.Remove(pkgPath)
+		httpError(w, "save metadata: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Keep pending storage bounded.
+	s.applyRetention(meta.Platform, meta.Arch, "")
+	util.LogModuleInfo("admin", "received package from mesh peer: %s (version=%s)", id, meta.Version)
 
 	// Received packages stay pending: no automatic upgrade and no automatic
 	// forwarding. An administrator decides whether to activate or distribute.
-
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -862,6 +987,53 @@ func (s *AdminServer) syncFromPeer(nodeID string) {
 	}
 }
 
+// CleanupPackageStorage bounds package/cache storage at startup: retention,
+// orphan file removal, and stale temp cleanup. Call after version getters are
+// wired so the running version is protected.
+func (s *AdminServer) CleanupPackageStorage() {
+	s.applyAllRetention()
+	s.cleanupOrphanPackages()
+}
+
+// cleanupOrphanPackages removes .pkg files without DB metadata (old crashes or
+// interrupted activations) and stale .tmp files. It never touches a package
+// that the DB still knows about.
+func (s *AdminServer) cleanupOrphanPackages() {
+	now := time.Now()
+	for _, dir := range []string{packagesDir, pendingPackagesDir} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			path := filepath.Join(dir, name)
+			if strings.HasSuffix(name, ".tmp") {
+				if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > time.Hour {
+					_ = os.Remove(path)
+					util.LogModuleWarn("admin", "cleanup: removed stale temp %s", path)
+				}
+				continue
+			}
+			if !strings.HasSuffix(name, ".pkg") {
+				continue
+			}
+			id := strings.TrimSuffix(name, ".pkg")
+			if !packageIDPattern.MatchString(id) {
+				continue
+			}
+			if _, err := db.GetPackage(id); err == db.ErrNotFound {
+				_ = os.Remove(path)
+				_ = os.Remove(filepath.Join(dir, id+".json"))
+				util.LogModuleWarn("admin", "cleanup: removed orphan package %s", path)
+			}
+		}
+	}
+}
+
 // applyAllRetention applies retention policy to all platform/arch combinations.
 func (s *AdminServer) applyAllRetention() {
 	packages := s.listPackages()
@@ -935,6 +1107,8 @@ func (s *AdminServer) applyRetentionForGroup(pkgs []*db.PackageMeta, platform, a
 		util.LogModuleInfo("admin", "retention: deleting %s/%s version %s (id=%s)", platform, arch, pkg.Version, pkg.ID)
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".pkg"))
 		os.Remove(filepath.Join(packagesDir, pkg.ID+".json"))
+		os.Remove(filepath.Join(pendingPackagesDir, pkg.ID+".pkg"))
+		os.Remove(filepath.Join(pendingPackagesDir, pkg.ID+".json"))
 		_ = db.DeletePackage(pkg.ID)
 	}
 }

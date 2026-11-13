@@ -131,6 +131,90 @@ func VerifyPkg(pkgPath string, publicKey ed25519.PublicKey) (*PkgContents, error
 	}, nil
 }
 
+// VerifyPkgMeta verifies a .pkg signature and returns only its metadata,
+// streaming the binary through the hash instead of retaining it in memory.
+// Used by upload/receive paths where the package stays on disk and is verified
+// again by the watchdog before installation.
+func VerifyPkgMeta(pkgPath string, publicKey ed25519.PublicKey) (*PackageMeta, error) {
+	r, err := zip.OpenReader(pkgPath)
+	if err != nil {
+		return nil, fmt.Errorf("open pkg: %w", err)
+	}
+	defer r.Close()
+
+	const maxBinary = 128 << 20 // 128 MiB, same bound as the binary cache
+	var meta PackageMeta
+	var metaRaw, signature []byte
+	haveBinary := false
+	hasher := sha256.New()
+
+	for _, f := range r.File {
+		cleanName := filepath.Clean(f.Name)
+		if filepath.IsAbs(cleanName) {
+			return nil, fmt.Errorf("invalid path in pkg: %s (absolute)", f.Name)
+		}
+		if strings.HasPrefix(cleanName, "..") || strings.Contains(cleanName, string(filepath.Separator)+"..") {
+			return nil, fmt.Errorf("invalid path in pkg: %s (path traversal)", f.Name)
+		}
+		if cleanName != "binary" && cleanName != "meta.json" && cleanName != "signature" {
+			return nil, fmt.Errorf("unexpected file in pkg: %s", f.Name)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", f.Name, err)
+		}
+		switch cleanName {
+		case "binary":
+			n, err := io.Copy(hasher, io.LimitReader(rc, maxBinary+1))
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("read binary: %w", err)
+			}
+			if n > maxBinary {
+				return nil, fmt.Errorf("binary exceeds %d bytes", maxBinary)
+			}
+			haveBinary = true
+		case "meta.json":
+			data, err := io.ReadAll(io.LimitReader(rc, 1<<20))
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("read meta.json: %w", err)
+			}
+			metaRaw = data
+			if err := json.Unmarshal(data, &meta); err != nil {
+				return nil, fmt.Errorf("parse meta.json: %w", err)
+			}
+		case "signature":
+			data, err := io.ReadAll(io.LimitReader(rc, 1<<20))
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("read signature: %w", err)
+			}
+			signature, err = base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+			if err != nil {
+				return nil, fmt.Errorf("decode signature: %w", err)
+			}
+		}
+	}
+	if !haveBinary {
+		return nil, fmt.Errorf("missing binary in pkg")
+	}
+	if metaRaw == nil {
+		return nil, fmt.Errorf("missing meta.json in pkg")
+	}
+	if signature == nil {
+		return nil, fmt.Errorf("missing signature in pkg")
+	}
+
+	// Signature covers sha256(binary + meta.json); the binary was streamed into
+	// the hasher first, so append the exact meta bytes now.
+	hasher.Write(metaRaw)
+	if !ed25519.Verify(publicKey, hasher.Sum(nil), signature) {
+		return nil, fmt.Errorf("signature verification failed")
+	}
+	return &meta, nil
+}
+
 // CreatePkg creates a .pkg file from binary, metadata, and signature.
 // Used for testing and build tools.
 func CreatePkg(pkgPath string, binary []byte, meta PackageMeta, signature []byte) error {

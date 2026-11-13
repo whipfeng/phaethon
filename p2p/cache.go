@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,7 +149,7 @@ func (c *BinaryCache) Inventory() []CacheEntryInfo {
 			continue
 		}
 		name := e.Name()
-		if strings.HasSuffix(name, ".tmp") {
+		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".sha256") {
 			continue
 		}
 		entry, ok := parseCacheFileName(name)
@@ -256,6 +257,95 @@ func (c *BinaryCache) StoreFromReader(platform, arch, buildTag, version string, 
 
 	util.LogModuleInfo("p2p", "[P2P] cache: stored %s/%s/%s/%s → %s", platform, arch, buildTag, version, filepath.Base(target))
 	return target, nil
+}
+
+// Prune removes old cache entries. maxPerGroup keeps the newest N versions per
+// platform/arch; maxTotalBytes caps the whole directory. The newest entry of
+// every group is never deleted, so a node can always re-seed its own binary.
+func (c *BinaryCache) Prune(maxPerGroup int, maxTotalBytes int64) int {
+	entries := c.Inventory()
+	if len(entries) == 0 {
+		return 0
+	}
+	if maxPerGroup <= 0 {
+		maxPerGroup = 1
+	}
+	groupKey := func(e CacheEntryInfo) string { return e.Platform + "/" + e.Arch }
+	filePath := func(e CacheEntryInfo) string {
+		p, err := c.FilePath(e.Platform, e.Arch, e.BuildTag, e.Version)
+		if err != nil {
+			return ""
+		}
+		return p
+	}
+	remove := func(e CacheEntryInfo) (int, int64) {
+		p := filePath(e)
+		if p == "" {
+			return 0, 0
+		}
+		removed := 0
+		if err := os.Remove(p); err == nil {
+			removed = 1
+		}
+		_ = os.Remove(p + ".sha256")
+		return removed, e.Size
+	}
+
+	groups := make(map[string][]CacheEntryInfo)
+	for _, e := range entries {
+		groups[groupKey(e)] = append(groups[groupKey(e)], e)
+	}
+
+	removed := 0
+	newest := make(map[string]string, len(groups))
+	var kept []CacheEntryInfo
+	for g, list := range groups {
+		sort.Slice(list, func(i, j int) bool {
+			if cmp := CompareVersions(list[i].Version, list[j].Version); cmp != 0 {
+				return cmp > 0
+			}
+			return list[i].ModTime.After(list[j].ModTime)
+		})
+		for i, e := range list {
+			if i == 0 {
+				newest[g] = filePath(e)
+			}
+			if i >= maxPerGroup {
+				n, _ := remove(e)
+				removed += n
+				continue
+			}
+			kept = append(kept, e)
+		}
+	}
+
+	if maxTotalBytes > 0 {
+		var total int64
+		for _, e := range kept {
+			total += e.Size
+		}
+		if total > maxTotalBytes {
+			sort.Slice(kept, func(i, j int) bool { return kept[i].ModTime.Before(kept[j].ModTime) })
+			for _, e := range kept {
+				if total <= maxTotalBytes {
+					break
+				}
+				if newest[groupKey(e)] == filePath(e) {
+					continue
+				}
+				n, size := remove(e)
+				if n > 0 {
+					total -= size
+					removed += n
+				}
+			}
+		}
+	}
+
+	if removed > 0 {
+		util.LogModuleInfo("p2p", "[P2P] cache: pruned %d old entries", removed)
+	}
+	return removed
 }
 
 // CleanupBackup removes the .bak file next to the running executable.

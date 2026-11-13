@@ -1,3 +1,5 @@
+//go:build ignore
+
 // migrate_subscriptions.go - One-time migration tool
 // Purpose: Populate subscription nodes after restoring from old database backup
 //

@@ -2706,6 +2706,12 @@ func (m *P2PManager) getP2PKey() string {
 	return ""
 }
 
+// EncryptionEnabled reports whether a mesh-wide PSK is configured. The console
+// uses it to surface the "mesh is unencrypted" warning.
+func (m *P2PManager) EncryptionEnabled() bool {
+	return m.getP2PKey() != ""
+}
+
 // wrapCrypto applies the mesh-wide frame cipher to one carrier connection.
 // Called below the stripe so lane flow-affinity hashing still sees plaintext.
 func (m *P2PManager) wrapCrypto(t frame.FrameTransport) frame.FrameTransport {

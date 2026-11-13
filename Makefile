@@ -6,7 +6,7 @@ DIST_DIR := dist
 GIT_TAG := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(GIT_TAG)"
 
-.PHONY: all clean linux linux-arm64 windows windows7 windows-arm64 darwin-amd64 darwin-arm64 version
+.PHONY: all clean linux linux-arm64 windows windows7 windows-arm64 darwin-amd64 darwin-arm64 version test-race
 
 all: linux linux-arm64 windows windows7 windows-arm64 darwin-amd64 darwin-arm64
 
@@ -52,6 +52,10 @@ darwin-arm64:
 
 version:
 	@echo "Version: $(GIT_TAG)"
+
+# Linux CI gate for concurrency-sensitive packages. Requires cgo/gcc.
+test-race:
+	CGO_ENABLED=1 go test -race ./mesh ./p2p ./db
 
 clean:
 	@echo "Cleaning dist directory..."

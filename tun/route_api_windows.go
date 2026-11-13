@@ -418,34 +418,28 @@ func setInterfaceIPAPI(luid uint64, index uint32, ip net.IP, prefixLen uint8) er
 
 // clearInterfaceIPAPI removes all IPv4 addresses from the interface.
 func clearInterfaceIPAPI(luid uint64, index uint32) error {
-	var table uintptr
-	ret, _, _ := procGetUnicastIpAddressTable.Call(
-		uintptr(windows.AF_INET),
-		uintptr(unsafe.Pointer(&table)),
-	)
-	if ret != 0 {
-		return fmt.Errorf("GetUnicastIpAddressTable: 0x%x", ret)
+	var table *windows.MibUnicastIpAddressTable
+	if err := windows.GetUnicastIpAddressTable(windows.AF_INET, &table); err != nil {
+		return fmt.Errorf("GetUnicastIpAddressTable: %w", err)
 	}
-	defer procFreeMibTable.Call(table)
-
-	if table == 0 {
+	if table == nil {
 		return nil
 	}
+	defer windows.FreeMibTable(unsafe.Pointer(table))
 
-	count := *(*uint32)(unsafe.Pointer(table))
-	// MIB_UNICASTIPADDRESS_ROW has uint64 alignment, so the Table array
-	// starts at offset 8 (4 bytes NumEntries + 4 bytes padding).
-	base := table + 8
-	rowSize := uintptr(80)
+	count := table.NumEntries
+	if count > 10000 {
+		return fmt.Errorf("GetUnicastIpAddressTable: invalid count %d", count)
+	}
+	// Use the official row layout instead of hard-coded offsets. Table is the
+	// variable-length array following NumEntries (with its natural alignment).
+	base := uintptr(unsafe.Pointer(table)) + unsafe.Offsetof(table.Table)
+	rowSize := unsafe.Sizeof(windows.MibUnicastIpAddressRow{})
 
 	for i := uint32(0); i < count; i++ {
-		rowPtr := base + uintptr(i)*rowSize
-		rowLuid := *(*uint64)(unsafe.Pointer(rowPtr + 32))
-		rowIndex := *(*uint32)(unsafe.Pointer(rowPtr + 40))
-		if rowLuid == luid && rowIndex == index {
-			var delRow mibUnicastIpAddressRow
-			copy(delRow[:], (*[80]byte)(unsafe.Pointer(rowPtr))[:])
-			procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(&delRow[0])))
+		row := (*windows.MibUnicastIpAddressRow)(unsafe.Pointer(base + uintptr(i)*rowSize))
+		if row.InterfaceLuid == luid && row.InterfaceIndex == index {
+			procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
 		}
 	}
 	return nil
@@ -524,6 +518,9 @@ func getDefaultGatewayAPI() (net.IP, uint64, uint32, error) {
 	}
 
 	count := *(*uint32)(unsafe.Pointer(table))
+	if count > 10000 {
+		return nil, 0, 0, fmt.Errorf("GetIpForwardTable2: invalid count %d", count)
+	}
 	// MIB_IPFORWARD_ROW2 starts with NET_LUID (8-byte aligned), so the Table
 	// array begins at offset 8 (4 bytes NumEntries + 4 bytes padding).
 	base := table + 8
@@ -776,6 +773,9 @@ func deleteResidualRoutesAPI(luid uint64) {
 	}
 
 	count := *(*uint32)(unsafe.Pointer(table))
+	if count > 10000 {
+		return
+	}
 	// MIB_IPFORWARD_ROW2 starts with NET_LUID (8-byte aligned), so the Table
 	// array begins at offset 8 (4 bytes NumEntries + 4 bytes padding).
 	base := table + 8

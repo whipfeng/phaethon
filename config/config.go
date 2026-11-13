@@ -1470,6 +1470,7 @@ type MeshConfig struct {
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
 	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
 	ForwardingTrace      bool                     `yaml:"forwarding-trace,omitempty" json:"forwarding-trace,omitempty"`             // Cross-layer forwarding diagnostics
+	P2PKey               string                   `yaml:"p2p-key,omitempty" json:"p2p-key,omitempty"`                               // Optional mesh-wide P2P frame PSK (empty = plaintext)
 	HTunnel              *HTunnelConfig           `yaml:"htunnel,omitempty" json:"htunnel,omitempty"`                               // h_tunnel mesh channel tuning (nil = defaults)
 }
 

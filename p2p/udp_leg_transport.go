@@ -655,6 +655,32 @@ func (t *udpLegTransport) transportForm() string {
 
 func (t *udpLegTransport) LegDrops() uint64 { return atomic.LoadUint64(&t.legDrops) }
 
+// LegPhase returns the FSM phase for admin diagnostics.
+func (t *udpLegTransport) LegPhase() string {
+	t.fsmMu.Lock()
+	defer t.fsmMu.Unlock()
+	return t.fsm.Phase().String()
+}
+
+// LegCounters returns (inbound, outbound, drops) datagram counters.
+func (t *udpLegTransport) LegCounters() (uint64, uint64, uint64) {
+	return atomic.LoadUint64(&t.legIn), atomic.LoadUint64(&t.legOut), atomic.LoadUint64(&t.legDrops)
+}
+
+// LegPort returns the negotiated peer port (active) or the bound local port
+// (passive) for admin diagnostics.
+func (t *udpLegTransport) LegPort() int {
+	t.fsmMu.Lock()
+	defer t.fsmMu.Unlock()
+	if p, ok := t.fsm.SendPort(); ok {
+		return p
+	}
+	if p, ok := t.fsm.AdvertisePort(); ok {
+		return p
+	}
+	return 0
+}
+
 // LegOversize reports frames that crossed the 1500-byte path budget and are
 // therefore IP-fragmented. Healthy legs keep this at 0.
 func (t *udpLegTransport) LegOversize() uint64 { return atomic.LoadUint64(&t.legOversize) }

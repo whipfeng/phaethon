@@ -139,3 +139,12 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 - `/api/packages/pin` 的 `current` 等于目标版本、`status=succeeded`；
 - 升级后 `.old` 存在，且防火墙/AV 规则无需变更。
 
+### 5.5 Windows 7（qgw）支持说明
+
+- Windows 7 为 **best-effort**：构建使用 `make windows7` + `GO_LEGACY_WIN7`
+  （见 Makefile），平台标识固定为 `windows7`；
+- 内嵌 SSH 在 Win7 上仍为行级模式（PowerShell 2.0 + winpty 不可靠）；
+  如需交互式 PTY，先安装 WMF 5.1 再按 `docs/plans/full-system-remediation-decisions.md`
+  第 20 项做验证；
+- 后续 Go 版本可能不再兼容 Win7；构建侧需继续锁定已知可用工具链。
+

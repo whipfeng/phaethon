@@ -77,7 +77,8 @@
 
 ## 五、实施进度
 
-- [x] 批次 1（安全，代码部分）
+- [x] 批次 1（安全）
+  - [x] 第 1 项：Git 历史清理完成 —— 移除私钥/DB/`.bak`/测试包/已编译工具二进制；`master` 与 tags 已 force-push；mb 已 reset 到新历史；旧历史备份在 `archive/sensitive-20261113/pre-rewrite-20261113.bundle`
   - [x] 第 2 项：`db.InitDefault` 强制 `AuthEnabled=true`；非交互首次启动生成随机密码，写入 `data/state/initial-admin-password`（0600），bcrypt 存库
   - [x] 第 17 项：admin TLS 显式 `MinVersion=TLS1.2`；TLS 不可用且未认证时 admin 仅绑 `127.0.0.1`
   - [x] 第 16 项：启动时把 DB/legacy config 收紧到 0600（Unix）
@@ -98,7 +99,6 @@
   - [x] 第 13 项：unicast 表改用 `x/sys/windows` 官方结构；neighbor/route 表保留手写解析但加 count 上限（x/sys 未封装对应类型）
   - [x] 第 15 项：启动 warning + `/api/p2p` `encrypted` 字段 + proxies 页面未加密横幅
   - [x] 第 19 项：Makefile 增加 `test-race`（Linux CI 入口）
-- [ ] 第 1 项：Git 历史清理（最后单次 rewrite + force-push）
 
 > 历史清理推迟到最后的理由：避免多次改写/force-push，并让代码修改先完成、验证后再一次性清理。
 

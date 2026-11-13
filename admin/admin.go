@@ -1395,6 +1395,10 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mesh/domain-suffixes/", s.apiMeshDomainSuffixItem)
 	mux.HandleFunc("/api/mesh/advertise", s.apiMeshAdvertise)
 	mux.HandleFunc("/api/mesh/advertise/", s.apiMeshAdvertiseItem)
+	mux.HandleFunc("/api/mesh/static-routes", s.apiMeshStaticRoutes)
+	mux.HandleFunc("/api/mesh/static-routes/", s.apiMeshStaticRouteItem)
+	mux.HandleFunc("/api/mesh/static-domain-suffixes", s.apiMeshStaticDomainSuffixes)
+	mux.HandleFunc("/api/mesh/static-domain-suffixes/", s.apiMeshStaticDomainSuffixItem)
 	mux.HandleFunc("/api/tun", s.apiTUN)
 	mux.HandleFunc("/api/events", s.apiEvents)
 	mux.HandleFunc("/api/versions", s.apiVersions)
@@ -5034,6 +5038,380 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		util.LogModuleInfo("admin", "mesh advertise deleted: id=%d", id)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- static routes / static domain suffixes (local policy, not gossiped) ---
+
+func ensureStaticRouteIDs(cfg *config.MeshConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	var maxID uint64
+	for _, r := range cfg.StaticRoutes {
+		if r.ID > maxID {
+			maxID = r.ID
+		}
+	}
+	for _, r := range cfg.StaticDomainSuffixes {
+		if r.ID > maxID {
+			maxID = r.ID
+		}
+	}
+	changed := false
+	for i := range cfg.StaticRoutes {
+		if cfg.StaticRoutes[i].ID == 0 {
+			maxID++
+			cfg.StaticRoutes[i].ID = maxID
+			changed = true
+		}
+	}
+	for i := range cfg.StaticDomainSuffixes {
+		if cfg.StaticDomainSuffixes[i].ID == 0 {
+			maxID++
+			cfg.StaticDomainSuffixes[i].ID = maxID
+			changed = true
+		}
+	}
+	return changed
+}
+
+func nextStaticRouteID(cfg *config.MeshConfig) uint64 {
+	var max uint64
+	for _, r := range cfg.StaticRoutes {
+		if r.ID > max {
+			max = r.ID
+		}
+	}
+	for _, r := range cfg.StaticDomainSuffixes {
+		if r.ID > max {
+			max = r.ID
+		}
+	}
+	return max + 1
+}
+
+func saveStaticRouteConfig(cfg *config.MeshConfig) error {
+	if err := db.PutMeshConfig(cfg); err != nil {
+		return err
+	}
+	if mesh.GlobalMeshManager != nil {
+		mesh.GlobalMeshManager.SetStaticRoutes(cfg.StaticRoutes, cfg.StaticDomainSuffixes)
+	}
+	return nil
+}
+
+func cleanNodeIDs(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool)
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// apiMeshStaticRoutes handles GET/POST /api/mesh/static-routes.
+func (s *AdminServer) apiMeshStaticRoutes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			jsonResponse(w, []interface{}{})
+			return
+		}
+		if ensureStaticRouteIDs(cfg) {
+			s.mu.Lock()
+			_ = saveStaticRouteConfig(cfg)
+			s.mu.Unlock()
+		}
+		out := make([]map[string]interface{}, 0, len(cfg.StaticRoutes))
+		for _, rt := range cfg.StaticRoutes {
+			out = append(out, map[string]interface{}{"id": rt.ID, "prefix": rt.Prefix, "node-ids": rt.NodeIDs})
+		}
+		jsonResponse(w, out)
+
+	case http.MethodPost:
+		var req struct {
+			Prefix  string   `json:"prefix"`
+			NodeIDs []string `json:"node-ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, _, err := net.ParseCIDR(req.Prefix); err != nil {
+			httpError(w, "invalid prefix: "+req.Prefix, http.StatusBadRequest)
+			return
+		}
+		nodes := cleanNodeIDs(req.NodeIDs)
+		if len(nodes) == 0 {
+			httpError(w, "node-ids required", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		id := nextStaticRouteID(cfg)
+		cfg.StaticRoutes = append(cfg.StaticRoutes, config.MeshStaticRoute{ID: id, Prefix: req.Prefix, NodeIDs: nodes})
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		util.LogModuleInfo("admin", "mesh static route added: id=%d prefix=%s nodes=%v", id, req.Prefix, nodes)
+		jsonResponse(w, map[string]interface{}{"ok": true, "id": id})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshStaticRouteItem handles PUT/DELETE /api/mesh/static-routes/:id.
+func (s *AdminServer) apiMeshStaticRouteItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(strings.TrimPrefix(r.URL.Path, "/api/mesh/static-routes/"), 10, 64)
+	if err != nil {
+		httpError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			Prefix  string   `json:"prefix"`
+			NodeIDs []string `json:"node-ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, _, err := net.ParseCIDR(req.Prefix); err != nil {
+			httpError(w, "invalid prefix: "+req.Prefix, http.StatusBadRequest)
+			return
+		}
+		nodes := cleanNodeIDs(req.NodeIDs)
+		if len(nodes) == 0 {
+			httpError(w, "node-ids required", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		idx := -1
+		for i := range cfg.StaticRoutes {
+			if cfg.StaticRoutes[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
+			return
+		}
+		cfg.StaticRoutes[idx].Prefix = req.Prefix
+		cfg.StaticRoutes[idx].NodeIDs = nodes
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		jsonResponse(w, map[string]interface{}{"ok": true})
+	case http.MethodDelete:
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		idx := -1
+		for i := range cfg.StaticRoutes {
+			if cfg.StaticRoutes[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
+			return
+		}
+		cfg.StaticRoutes = append(cfg.StaticRoutes[:idx], cfg.StaticRoutes[idx+1:]...)
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		jsonResponse(w, map[string]interface{}{"ok": true})
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshStaticDomainSuffixes handles GET/POST /api/mesh/static-domain-suffixes.
+func (s *AdminServer) apiMeshStaticDomainSuffixes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			jsonResponse(w, []interface{}{})
+			return
+		}
+		if ensureStaticRouteIDs(cfg) {
+			s.mu.Lock()
+			_ = saveStaticRouteConfig(cfg)
+			s.mu.Unlock()
+		}
+		out := make([]map[string]interface{}, 0, len(cfg.StaticDomainSuffixes))
+		for _, rt := range cfg.StaticDomainSuffixes {
+			out = append(out, map[string]interface{}{"id": rt.ID, "suffix": rt.Suffix, "node-ids": rt.NodeIDs})
+		}
+		jsonResponse(w, out)
+	case http.MethodPost:
+		var req struct {
+			Suffix  string   `json:"suffix"`
+			NodeIDs []string `json:"node-ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Suffix) == "" {
+			httpError(w, "suffix required", http.StatusBadRequest)
+			return
+		}
+		nodes := cleanNodeIDs(req.NodeIDs)
+		if len(nodes) == 0 {
+			httpError(w, "node-ids required", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		id := nextStaticRouteID(cfg)
+		cfg.StaticDomainSuffixes = append(cfg.StaticDomainSuffixes, config.MeshStaticDomainSuffix{ID: id, Suffix: req.Suffix, NodeIDs: nodes})
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		util.LogModuleInfo("admin", "mesh static domain suffix added: id=%d suffix=%s nodes=%v", id, req.Suffix, nodes)
+		jsonResponse(w, map[string]interface{}{"ok": true, "id": id})
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiMeshStaticDomainSuffixItem handles PUT/DELETE /api/mesh/static-domain-suffixes/:id.
+func (s *AdminServer) apiMeshStaticDomainSuffixItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(strings.TrimPrefix(r.URL.Path, "/api/mesh/static-domain-suffixes/"), 10, 64)
+	if err != nil {
+		httpError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			Suffix  string   `json:"suffix"`
+			NodeIDs []string `json:"node-ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Suffix) == "" {
+			httpError(w, "suffix required", http.StatusBadRequest)
+			return
+		}
+		nodes := cleanNodeIDs(req.NodeIDs)
+		if len(nodes) == 0 {
+			httpError(w, "node-ids required", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		idx := -1
+		for i := range cfg.StaticDomainSuffixes {
+			if cfg.StaticDomainSuffixes[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
+			return
+		}
+		cfg.StaticDomainSuffixes[idx].Suffix = req.Suffix
+		cfg.StaticDomainSuffixes[idx].NodeIDs = nodes
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		jsonResponse(w, map[string]interface{}{"ok": true})
+	case http.MethodDelete:
+		s.mu.Lock()
+		cfg, _ := db.GetMeshConfig()
+		if cfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		ensureStaticRouteIDs(cfg)
+		idx := -1
+		for i := range cfg.StaticDomainSuffixes {
+			if cfg.StaticDomainSuffixes[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
+			return
+		}
+		cfg.StaticDomainSuffixes = append(cfg.StaticDomainSuffixes[:idx], cfg.StaticDomainSuffixes[idx+1:]...)
+		if err := saveStaticRouteConfig(cfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Unlock()
+		jsonResponse(w, map[string]interface{}{"ok": true})
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

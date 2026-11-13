@@ -1562,14 +1562,16 @@ func (c *HTunnelConfig) GetWaitTimeRange() (min, max, def time.Duration) {
 
 // MeshStaticRoute defines a static IPIP route through specific mesh node(s)
 type MeshStaticRoute struct {
-	Prefix  string   `yaml:"prefix" json:"prefix"`     // Destination CIDR (e.g., "10.0.0.0/8")
-	NodeIDs []string `yaml:"node-ids" json:"node-ids"` // Egress node IDs (e.g., ["qg", "vm"])
+	ID      uint64   `yaml:"id,omitempty" json:"id,omitempty"` // Local admin ID (stable across edits)
+	Prefix  string   `yaml:"prefix" json:"prefix"`             // Destination CIDR (e.g., "10.0.0.0/8")
+	NodeIDs []string `yaml:"node-ids" json:"node-ids"`         // Egress node IDs (e.g., ["qg", "vm"])
 }
 
 // MeshStaticDomainSuffix defines a static IPIP route for domain suffixes
 type MeshStaticDomainSuffix struct {
-	Suffix  string   `yaml:"suffix" json:"suffix"`     // Domain suffix (e.g., "internal.company.com")
-	NodeIDs []string `yaml:"node-ids" json:"node-ids"` // Egress node IDs (e.g., ["vm", "gg"])
+	ID      uint64   `yaml:"id,omitempty" json:"id,omitempty"` // Local admin ID (stable across edits)
+	Suffix  string   `yaml:"suffix" json:"suffix"`             // Domain suffix (e.g., "internal.company.com")
+	NodeIDs []string `yaml:"node-ids" json:"node-ids"`         // Egress node IDs (e.g., ["vm", "gg"])
 }
 
 // IsEnabled reports whether mesh networking is configured.

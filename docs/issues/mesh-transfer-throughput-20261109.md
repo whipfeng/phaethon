@@ -3977,3 +3977,42 @@ gg 21M、mb 286M，均降到 ~4K/0；qg 122 个 0 字节 pkg 已移走（§132�
 `ifconfig` 显示 **mtu 1400**，`0/1`、`128.0/1` 两条 split 路由均指向
 utun7——说明 `SIOCSIFMTU` 下发路径生效。验证完已 `{"enabled":false}`
 恢复 mb 原来的 mesh-only 状态：utun7 消失、split 路由清空、`enabled=false`。
+
+## 135. P2P 统一加密：frame 层 PSK（2026-11-13 08:30）
+
+**决策**：不做“只加密 UDP leg”的定制。mesh 配置新增节点级
+`p2p-key`（PSK），对所有 P2P 载体统一生效；空 = 明文（用户可选择不加），
+非空 = 必须两边一致（fail-closed）。
+
+**为什么不用 SOCKS5 密码**：SOCKS5 认证在 TCP 载体上是明文传输，密码会
+泄露；且用户密码低熵，密文可离线爆破。PSK 必须高熵且不上线传输
+（建议 `openssl rand -base64 32`）。
+
+**实现**：
+- `frame.CryptoTransport`：包住任意 `FrameTransport`，逐帧
+  `SealBody/OpenBody`（XChaCha20-Poly1305，24B nonce + 16B tag）；帧类型
+  保持明文（UDP leg 路由、控制优先级、stripe 都依赖它）。解密失败直接
+  返回错误 → 会话断开（fail-closed）。
+- 施加位置：**stripe 之下**的每条连接（主连接 + 动态 lane），因此 lane
+  的 flow affinity 仍按明文哈希；被动端在 `HandleP2PConnection/
+  HandleP2PTransport` 入口包裹，首帧（含 StripeAttach）即可解密。
+- UDP leg：同一 PSK 做域分隔（`phaethon-udp-leg-v1:`）逐 datagram 封包，
+  由 `udpLegTransport` 在写/读路径加解；与 stream 用不同域分隔，避免
+  跨载体重放。
+- 管理面：`PUT /api/config/mesh` 接受 `{"p2p-key": "..."}`（显式空串
+  可关闭）；修改后需要重启（接口返回 `restart_required` 并触发重启），
+  不做半热切换。
+- MTU：UDP leg 加密后单报最大 1491B（1400+20+3+40+8+20）<1500；
+  1492 的 PPPoE 路径仅剩 1B，更小 MTU 的路径会分片（文档标注）。
+- 单元测试：`frame/crypto_transport_test.go`（往返、错钥 fail-closed、
+  空钥透传、批量保持类型/顺序）、`p2p/udp_leg_crypto_test.go`。
+
+**限制**（明确记录）：
+- 帧类型/长度仍明文可见，只保护载荷；
+- 无抗重放（依赖内层 TCP/seq 容忍重复）；
+- 节点级单密钥：一个节点泄露会影响全部链路；轮换需全网同步重启；
+- SOCKS5 载体的认证本身仍是明文（本改动不解决该独立问题）。
+
+**上线**：代码与单测已完成；二进制下发后 `p2p-key` 为空，行为与之前
+一致（明文）。要启用需**所有节点**配同一个 key 并重启；漏配/错配的
+链路会因解密失败断开。

@@ -71,6 +71,12 @@ type udpLegTransport struct {
 	// be IP-fragmented. Should stay 0 while the 1400 overlay MTU holds.
 	legOversize uint64 // atomic
 
+	// legCrypto seals/opens every leg datagram when the SOCKS5 link has a
+	// password. nil (or a disabled cipher) means plaintext, the legacy behavior.
+	// The passive side installs it when the SOCKS5 relay binds the leg port;
+	// the active side installs it from its proxy password at construction.
+	legCrypto atomic.Pointer[util.HTunnelCrypto]
+
 	// Liveness diagnostics: counters and last datagram timestamps. A leg that
 	// keeps sending but sees no inbound traffic is a one-way black hole; log
 	// it so stalls can be attributed without guesswork.
@@ -89,8 +95,10 @@ type legRecvResult struct {
 }
 
 // newUDPLegTransport wraps base with a UDP leg. dialFn is required on the
-// active (dial) side and nil on the passive (listen) side.
-func newUDPLegTransport(base frame.FrameTransport, active bool, dialFn func() (net.PacketConn, error)) *udpLegTransport {
+// active (dial) side and nil on the passive (listen) side. password is the
+// SOCKS5 link password: empty keeps datagrams in plaintext, non-empty enables
+// XChaCha20-Poly1305 per datagram (both ends must use the same password).
+func newUDPLegTransport(base frame.FrameTransport, active bool, dialFn func() (net.PacketConn, error), password string) *udpLegTransport {
 	t := &udpLegTransport{
 		base:   base,
 		fsm:    newUDPLegFSM(active, true, udpLegTimings{}),
@@ -101,9 +109,43 @@ func newUDPLegTransport(base frame.FrameTransport, active bool, dialFn func() (n
 		legCh:  make(chan legRecvResult, 256),
 		closed: make(chan struct{}),
 	}
+	t.setLegCrypto(password)
 	go t.baseReadLoop()
 	go t.tickLoop()
 	return t
+}
+
+// setLegCrypto installs the datagram cipher derived from the mesh-wide P2P
+// key. Domain separation keeps it distinct from the stream frame cipher and
+// from h_tunnel's own crypto even when the same PSK is reused. Empty key
+// yields a disabled cipher (identity passthrough, legacy plaintext).
+func (t *udpLegTransport) setLegCrypto(key string) {
+	if key == "" {
+		t.legCrypto.Store(util.NewHTunnelCrypto(""))
+		return
+	}
+	t.legCrypto.Store(util.NewHTunnelCrypto("phaethon-udp-leg-v1:" + key))
+}
+
+func (t *udpLegTransport) cryptoSeal(dgram []byte) []byte {
+	if c := t.legCrypto.Load(); c != nil {
+		return c.SealBody(dgram)
+	}
+	return dgram
+}
+
+// cryptoOpen decrypts one datagram. ok=false means authentication failed and
+// the datagram must be dropped (it is not a valid leg frame from our peer).
+func (t *udpLegTransport) cryptoOpen(dgram []byte) ([]byte, bool) {
+	c := t.legCrypto.Load()
+	if c == nil {
+		return dgram, true
+	}
+	plain, err := c.OpenBody(dgram)
+	if err != nil {
+		return nil, false
+	}
+	return plain, true
 }
 
 func (t *udpLegTransport) String() string { return "udp-leg" }
@@ -171,7 +213,7 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 // writeLeg fire-and-forgets one frame datagram. Errors are drops by contract
 // and must never surface as session write errors (the TCP leg is the session).
 func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
-	dgram := frame.EncodeDatagram(frameType, payload)
+	dgram := t.cryptoSeal(frame.EncodeDatagram(frameType, payload))
 	if len(dgram) > legFragmentLimit {
 		// Bug indicator: the 1400-byte overlay MTU (tun.OverlayMTU) should cap
 		// frames at ~1423B. Do not switch carriers by frame size — that splits
@@ -299,7 +341,12 @@ func (t *udpLegTransport) pcReadLoop(pc net.PacketConn) {
 			}
 			return
 		}
-		ft, payload, err := frame.ParseDatagramFrame(buf[:n])
+		plain, ok := t.cryptoOpen(buf[:n])
+		if !ok {
+			atomic.AddUint64(&t.legDrops, 1)
+			continue
+		}
+		ft, payload, err := frame.ParseDatagramFrame(plain)
 		if err != nil || !frame.IsLegFrame(ft) {
 			atomic.AddUint64(&t.legDrops, 1)
 			continue
@@ -342,7 +389,12 @@ func (t *udpLegTransport) epPump(ep *udpLegEndpoint) {
 		case <-t.closed:
 			return
 		case in := <-ep.inboundCh:
-			ft, payload, err := frame.ParseDatagramFrame(in.datagram)
+			plain, ok := t.cryptoOpen(in.datagram)
+			if !ok {
+				atomic.AddUint64(&t.legDrops, 1)
+				continue
+			}
+			ft, payload, err := frame.ParseDatagramFrame(plain)
 			if err != nil || !frame.IsLegFrame(ft) {
 				atomic.AddUint64(&t.legDrops, 1)
 				continue

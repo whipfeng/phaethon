@@ -133,6 +133,10 @@ type P2PManager struct {
 	meshVIP     string
 	meshHandler MeshHandler
 
+	// p2pKey is the optional mesh-wide PSK for the P2P frame layer. Set once
+	// at startup from the mesh config; empty keeps every carrier in plaintext.
+	p2pKey atomic.Pointer[string]
+
 	// udpLegInbound: manager-level switch for passive-side UDP legs.
 	// Passive peers carry no proxy config, so StartPeer sets this when any
 	// local proxy enables p2p_udp; HandleP2PTransport consults it.
@@ -1467,7 +1471,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 
 	// Passive-side UDP leg: manager-level switch (no proxy config here).
 	if m.udpLegInbound.Load() {
-		wrapped := newUDPLegTransport(stripe, false, nil)
+		wrapped := newUDPLegTransport(stripe, false, nil, m.getP2PKey())
 		peer.leg = wrapped
 		peer.transport = wrapped
 	} else {
@@ -1562,6 +1566,9 @@ func (m *P2PManager) dialStripeLane(peer *Peer, p2pDialer dialer.P2PDialer) (uin
 		util.LogModuleInfo("p2p", "[STRIPE] lane dial via proxy %s failed: %v", peer.ProxyNameSafe(), err)
 		return 0, nil, err
 	}
+	// Lane carriers are separate connections; apply the same mesh cipher before
+	// the attach frame so the passive side can decrypt from the first frame.
+	transport = m.wrapCrypto(transport)
 	stripeID := m.stripeIDCounter.Add(1)
 	payload, err := frame.EncodeStripeAttach(m.meshNodeID, peer.Seq, stripeID)
 	if err != nil {
@@ -1868,7 +1875,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// dialer) avoids the dialer→p2p import cycle.
 		if proxy.IsP2PUDP() {
 			if ud, ok2 := d.(dialer.UDPDialer); ok2 {
-				wrapped := newUDPLegTransport(base, true, ud.DialPacket)
+				wrapped := newUDPLegTransport(base, true, ud.DialPacket, m.getP2PKey())
 				peer.leg = wrapped
 				peer.transportMu.Lock()
 				peer.transport = wrapped
@@ -2659,6 +2666,30 @@ func (m *P2PManager) sendPing(peer *Peer) {
 }
 
 // SetMeshInfo configures mesh networking parameters.
+// SetP2PKey installs the optional mesh-wide P2P frame PSK. Both ends of a
+// link must use the same key; empty keeps every carrier in plaintext.
+func (m *P2PManager) SetP2PKey(key string) {
+	m.p2pKey.Store(&key)
+}
+
+// getP2PKey returns the configured PSK, or "" when encryption is off.
+func (m *P2PManager) getP2PKey() string {
+	if p := m.p2pKey.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// wrapCrypto applies the mesh-wide frame cipher to one carrier connection.
+// Called below the stripe so lane flow-affinity hashing still sees plaintext.
+func (m *P2PManager) wrapCrypto(t frame.FrameTransport) frame.FrameTransport {
+	key := m.getP2PKey()
+	if key == "" {
+		return t
+	}
+	return frame.NewCryptoTransport(t, key)
+}
+
 func (m *P2PManager) SetMeshInfo(nodeID, vip string) {
 	m.meshEnabled = true
 	m.meshNodeID = nodeID

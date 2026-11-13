@@ -1896,6 +1896,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		// Track identity fields for restart notification
 		oldNodeID := meshCfg.NodeID
 		oldSubnet := meshCfg.Subnet
+		oldP2PKey := meshCfg.P2PKey
 
 		// Merge updates: only update fields that are present and non-empty (kebab-case)
 		if nodeID, ok := updates["node-id"].(string); ok && nodeID != "" {
@@ -1952,6 +1953,11 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 		// bucket so the restarted node rebuilds its pool from scratch, then
 		// persist and schedule a restart.
 		identityChanged := meshCfg.NodeID != oldNodeID || meshCfg.Subnet != oldSubnet
+		// The P2P PSK cannot hot-apply: live sessions are already keyed with the
+		// old value, and a one-sided switch would drop every frame. Persist it
+		// and restart, like identity changes.
+		p2pKeyChanged := meshCfg.P2PKey != oldP2PKey
+		needRestart := identityChanged || p2pKeyChanged
 		if identityChanged {
 			if err := db.ClearFakeIPBucket(); err != nil {
 				util.LogModuleWarn("admin", "failed to clear fakeip bucket before identity change: %v", err)
@@ -1983,16 +1989,24 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 				oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet)
 		}
 
-		if identityChanged {
+		if needRestart {
 			// Response first, then restart: jsonResponse writes synchronously, so
 			// by the time it returns the client has the restart_required hint.
+			reason := "node-id/subnet change takes effect after restart"
+			if p2pKeyChanged && !identityChanged {
+				reason = "p2p-key change takes effect after restart"
+			}
 			jsonResponse(w, map[string]string{
 				"status":           "ok",
-				"restart_required": "node-id/subnet change takes effect after restart",
+				"restart_required": reason,
 			})
 			if s.RequestRestart != nil {
-				s.RequestRestart(fmt.Sprintf("identity change (node-id %s->%s, subnet %s->%s)",
-					oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet))
+				if identityChanged {
+					s.RequestRestart(fmt.Sprintf("identity change (node-id %s->%s, subnet %s->%s)",
+						oldNodeID, meshCfg.NodeID, oldSubnet, meshCfg.Subnet))
+				} else {
+					s.RequestRestart("p2p-key change")
+				}
 			}
 		} else {
 			jsonResponse(w, map[string]string{"status": "ok"})

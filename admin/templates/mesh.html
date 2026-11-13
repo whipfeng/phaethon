@@ -436,18 +436,18 @@
                 tbody.innerHTML = '<tr><td colspan="2" class="text-muted" data-i18n="common.noData">No data</td></tr>';
                 return;
             }
-            // Sort suffixes alphabetically for display, but the backend PUT/DELETE
-            // take an index into the STORED order — pass the original index, not
-            // the display position, or edits/deletes hit a different row.
-            const sortedSuffixes = [...suffixes].sort((a, b) => a.localeCompare(b));
-            tbody.innerHTML = sortedSuffixes.map((suffix) => {
-                const idx = suffixes.indexOf(suffix);
+            // Sort for display but keep the stored index: the backend PUT/DELETE
+            // address the STORED order. Pairing each value with its original
+            // index also handles duplicate entries correctly.
+            const indexedSuffixes = suffixes.map((value, index) => ({value, index}));
+            indexedSuffixes.sort((a, b) => a.value.localeCompare(b.value));
+            tbody.innerHTML = indexedSuffixes.map(({value, index}) => {
                 return `
                 <tr>
-                    <td>${escapeHtml(suffix)}</td>
+                    <td>${escapeHtml(value)}</td>
                     <td>
-                        <button onclick="editDomainSuffix(${idx})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
-                        <button onclick="deleteDomainSuffix(${idx})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                        <button onclick="editDomainSuffix(${index})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteDomainSuffix(${index})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
                     </td>
                 </tr>`;
             }).join('');

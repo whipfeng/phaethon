@@ -4159,3 +4159,39 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
 `upgrade-request`，必须再手动部署一次 673（自替换能力引导版），
 之后统一走 upload + activate。
 
+## 140. 自替换引导版全量扩散（2026-11-13）
+
+**结果**：所有可达节点已统一到 `v0.8.0-674-gaba7ce0`，进程路径保持不变。
+
+| 节点 | 平台 | 引导方式 | 结果 |
+| --- | --- | --- | --- |
+| vm | Windows | 控制台 upload+activate 672→674 | succeeded |
+| qg | Linux | 控制台 upload+activate 672→674 | succeeded |
+| jf | Linux | 内置 SSH + 分离式脚本 | 674，两进程 |
+| gg | Linux | 内置 SSH + 分离式脚本 | 674，两进程 |
+| mb | Darwin | 内置 SSH + 分离式脚本 | 674，两进程 |
+| ms10 | Linux | 内置 SSH + 分离式脚本 | 674，两进程 |
+| qgw | Windows 7 | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
+| deskzq | Windows | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
+
+- Windows 内置 SSH 会话与 phaethon 同 Session（qgw=2、deskzq=1），因此分离式
+  PowerShell 里 `Start-Process phaethon.exe` 能落在交互式桌面会话，Wintun 正常。
+- qgw 是 Windows 7，引导包必须用 `Platform=windows7`；实测 Go 1.26 构建可在
+  Win7 运行（`--version` 正常）。
+- 内置 SSH 二进制 stdin 在 Linux/mac 可用（md5 校验通过），Windows 不可用；
+  Windows 改为 mesh 上传 pkg + 内置 PowerShell 解析 zip 中央目录解压。
+- 为 deskzq/ms10 的内置 SSH 添加了 `vm-deploy` 公钥（指纹
+  `SHA256:mHKLotSHclszYP4M0b2fDW396BAdL7Bh/sWC11bdAj4`），否则 key 被拒。
+- 验证用假包/探针包（999、badrollback、0.0.1+probe）已从所有节点删除。
+- ms9（100.0.9.174）不在当前 mesh 拓扑、内置 SSH 不可达，待可达后单独引导。
+
+**QG 磁盘满事件**：扩散时上传 674 包失败（`no space left on device`），
+`/` 6.6G 已 100%。清理了 `data/cache/p2p-cache` 两天前的 244 个缓存二进制
+（约 2.6G）、`data/logs/goroutine-dump-*.log` 和 `/root/qgw/data/worker`
+下已废弃的版本化 worker（约 611M），恢复到 85%。p2p-cache 会继续增长，
+后续需要加按版本/时间的清理策略。
+
+**supervisor 版本**：vm/qg 的 supervisor 仍是内存中的 671（文件已是 674），
+下次服务/系统重启自然变成 674；不影响自替换能力（671 已含全部修复）。
+
+

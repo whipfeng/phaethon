@@ -74,3 +74,17 @@
 4. 代码卫生/加固：sticky LRU、mesh Stop、构建卫生/归档、unsafe.Pointer、mesh 加密提示、race CI
 
 > 本文件只记录决策；实施时按批次单独提交，并在每批完成后回填状态。
+
+## 五、实施进度
+
+- [x] 批次 1（安全，代码部分）
+  - [x] 第 2 项：`db.InitDefault` 强制 `AuthEnabled=true`；非交互首次启动生成随机密码，写入 `data/state/initial-admin-password`（0600），bcrypt 存库
+  - [x] 第 17 项：admin TLS 显式 `MinVersion=TLS1.2`；TLS 不可用且未认证时 admin 仅绑 `127.0.0.1`
+  - [x] 第 16 项：启动时把 DB/legacy config 收紧到 0600（Unix）
+- [ ] 第 1 项：Git 历史清理（放到所有代码批次之后做单次 rewrite + force-push）
+- [ ] 批次 2：升级可靠性
+- [ ] 批次 3：磁盘/包
+- [ ] 批次 4：代码卫生/加固
+
+> 历史清理推迟到最后的理由：避免多次改写/force-push，并让代码修改先完成、验证后再一次性清理。
+

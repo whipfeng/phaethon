@@ -213,8 +213,10 @@ func generateNodeID() string {
 func InitDefault() error {
 	return InitConfigs(
 		&config.AdminConfig{
-			Enabled: true,
-			Addr:    net.JoinHostPort("0.0.0.0", strconv.Itoa(defaultAdminPort)),
+			Enabled:     true,
+			Addr:        net.JoinHostPort("0.0.0.0", strconv.Itoa(defaultAdminPort)),
+			AuthEnabled: true, // secure-by-default; main generates a random initial password
+			Username:    "admin",
 		},
 		&config.MeshConfig{NodeID: generateNodeID()},
 	)

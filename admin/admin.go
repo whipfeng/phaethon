@@ -471,7 +471,7 @@ func (s *AdminServer) SetMeshDialFn(f func(network, addr string) (net.Conn, erro
 
 				return f(network, addr)
 			},
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		},
 		// Large pkg transfers over slow mesh transports shared with
 		// concurrent pushes can take minutes; must exceed the server's
@@ -739,6 +739,7 @@ func (s *AdminServer) Start() error {
 		util.Logger.Printf("[INFO] [admin] TLS: certificate parsed successfully")
 		s.tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
 		}
 
 		// Configure mTLS CA: a user-specified ClientCA file takes priority.
@@ -794,6 +795,7 @@ func (s *AdminServer) Start() error {
 			} else {
 				s.tlsConfig = &tls.Config{
 					Certificates: []tls.Certificate{tlsCert},
+					MinVersion:   tls.VersionTLS12,
 				}
 
 				// Configure mTLS with embedded CA certificate (same as configured cert path)
@@ -824,6 +826,20 @@ func (s *AdminServer) Start() error {
 	if addr == "" {
 		addr = "0.0.0.0:39999"
 		util.LogModuleWarn("admin", "AdminConfig.Addr is empty, using default: %s", addr)
+	}
+	// TLS unavailable + authentication disabled must never expose plaintext
+	// admin on a non-loopback address. Fall back to local-only instead of
+	// failing the whole service start (mesh/data plane keep running).
+	if s.tlsConfig == nil && !s.config.AuthEnabled {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			host, port = "", "39999"
+		}
+		ip := net.ParseIP(host)
+		if host == "" || ip == nil || !ip.IsLoopback() {
+			addr = net.JoinHostPort("127.0.0.1", port)
+			util.LogModuleWarn("admin", "TLS unavailable and authentication disabled; restricting admin listener to %s (configured %s)", addr, s.config.Addr)
+		}
 	}
 	util.LogModuleInfo("admin", "starting network listener on %s", addr)
 	ln, err := net.Listen("tcp", addr)

@@ -11,7 +11,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 
 	"phaethon/admin"
@@ -796,6 +799,19 @@ func main() {
 	}
 	defer db.Close()
 
+	// Sensitive-at-rest check: the DB and legacy config may contain proxy
+	// private keys/passwords. The data directory is the boundary; do not leave
+	// these files group/world readable on Unix. Windows ACLs are deployment-side.
+	hardenPrivateFile(dbPath)
+	for _, cfgPath := range []string{
+		filepath.Join(workDir, "config.yaml"),
+		filepath.Join(dataDir, "config.yaml"),
+	} {
+		if _, err := os.Stat(cfgPath); err == nil {
+			hardenPrivateFile(cfgPath)
+		}
+	}
+
 	// Initialize automatic version notification based on bucket changes
 	db.InitVersionNotifier()
 
@@ -836,7 +852,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
 				os.Exit(1)
 			}
-			util.LogModuleWarn("system", "默认初始化完成：Admin 监听 0.0.0.0:39999 且未启用认证，mTLS 客户端证书也是可选验证——公网部署请立即通过控制台设置认证")
+			if err := ensureInitialAdminPassword(dataDir); err != nil {
+				util.LogModuleError("system", "生成初始 admin 密码失败: %v", err)
+			}
+			util.LogModuleWarn("system", "默认初始化完成：Admin 监听 0.0.0.0:39999，认证已强制开启；初始凭据见 data/state/initial-admin-password，首次登录后请立即修改")
 		}
 	} else {
 		util.LogModuleInfo("system", "数据库已加载: %s", dbPath)
@@ -1535,6 +1554,76 @@ func writeStartupError(err error) error {
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0755)
 	msg := fmt.Sprintf("%s startup failed: %v\n", time.Now().Format(time.RFC3339), err)
 	return os.WriteFile(path, []byte(msg), 0644)
+}
+
+// hardenPrivateFile removes group/other permission bits on Unix. The DB and
+// legacy config may contain proxy private keys and password hashes; the data
+// directory is the boundary, but a permissive umask must not expose them.
+// Windows ACLs are a deployment concern.
+func hardenPrivateFile(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return
+	}
+	if fi.Mode().Perm()&0077 == 0 {
+		return
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		util.LogModuleWarn("system", "cannot tighten permissions on %s: %v", path, err)
+		return
+	}
+	util.LogModuleWarn("system", "tightened permissions on %s to 0600 (was %04o)", path, fi.Mode().Perm())
+}
+
+// ensureInitialAdminPassword is used only on the non-interactive first start.
+// InitDefault enables auth but leaves the password empty; generate a random
+// one, store its bcrypt hash, and write the plaintext once to
+// data/state/initial-admin-password (0600) so a service deployment is neither
+// locked out nor left unauthenticated.
+func ensureInitialAdminPassword(dataDir string) error {
+	cfg, err := db.GetAdminConfig()
+	if err != nil {
+		return err
+	}
+	if cfg == nil || !cfg.AuthEnabled || cfg.Password != "" {
+		return nil
+	}
+	if cfg.Username == "" {
+		cfg.Username = "admin"
+	}
+
+	raw := make([]byte, 18)
+	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
+		return err
+	}
+	password := base64.RawURLEncoding.EncodeToString(raw)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	cfg.Password = string(hash)
+	if err := db.PutAdminConfig(cfg); err != nil {
+		return err
+	}
+
+	stateDir := filepath.Join(dataDir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(stateDir, "initial-admin-password")
+	content := fmt.Sprintf("username=%s\npassword=%s\n", cfg.Username, password)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		// The hash is already saved; without the plaintext file the operator
+		// cannot log in, so surface the password once in the log.
+		util.LogModuleWarn("system", "initial admin password (file write %s failed): %s", path, password)
+		return nil
+	}
+	_ = os.Chmod(path, 0600)
+	util.LogModuleWarn("system", "initial admin credentials written to %s (username=%s); change the password after first login", path, cfg.Username)
+	return nil
 }
 
 // startReverseClient starts a reverse client goroutine.

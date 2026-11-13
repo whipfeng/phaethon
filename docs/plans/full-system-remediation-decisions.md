@@ -55,6 +55,11 @@
   3. 维持现状：Win7 继续行级模式，文档标注限制。
 - 暂不实施；后续按第 1 条在 qgw 上做一次实验（安装 WMF 5.1 → 临时放开 gate → `ssh -tt` 验证 → 决定是否合入）。
 
+**实机探针结果（2026-11-13）**：已用独立 winpty harness 在 qgw 复现——PS2 能 spawn，
+但不处理/不渲染控制台输入，`exit` 也不退出（WaitForSingleObject 超时），确认 PS2+winpty
+不可用，代码门禁合理。详见
+[ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md) 第二节。
+
 ## 三、Git 历史清理清单（第 1 项）
 
 先从 mirror/备份开始，再改写历史：
@@ -112,5 +117,18 @@
     上传不稳定，改用 OS SSH 手动替换；vm/qg 已 684；
   - 最终 9 节点全部 `v0.8.0-684-g6958a6e`，admin/mesh/内置 SSH 基础功能正常；
   - 多数节点的 supervisor 仍是 674（worker 已是 684），下次服务重启更新。
+
+### ms10（worker3）异常定位
+
+- 现象：admin 上传 TLS reset、`ms10.phn` SSH reset、OS SSH banner 超时、所有节点无 ms10 的
+  mesh peer/bestPath。
+- 根因：worker3 在 Kubernetes 中 **NotReady**（`Kubelet stopped posting node status`），
+  事件显示持续 `NodeHasInsufficientMemory` / `EvictionThresholdMet`（3 小时内 223 次），
+  大量 Pod Terminating/Pending，kubelet API proxy TLS 超时；主机 sshd/phaethon 被资源耗尽拖垮。
+- 结论：**不是上传/mesh 代码问题**，需要先恢复 worker3（释放内存/重启 kubelet 或节点）。
+- 附带：ms9/gg 存在 `RV_PROXY`（server 空、port 0、reverse-address 非空、p2p=true）被 P2P
+  当成主动拨号目标，产生 `socks5: connect to :0` 失败 peer，建议后续在 `StartPeer` 跳过无 dial
+  target 的代理。
+- 详见 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md)。
 
 

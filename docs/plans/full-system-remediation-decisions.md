@@ -59,8 +59,10 @@
 但不处理/不渲染控制台输入，`exit` 也不退出（WaitForSingleObject 超时），确认 PS2+winpty
 不可用，代码门禁合理。补充实验：**cmd.exe + winpty 在 Win7 上完整可用**（提示符/回显/
 执行/退出正常）；在 cmd 里再启动 PS2（以及 `cmd /c powershell`）同样无输出、marker 未创建，
-排除“直接 spawn”问题；`-Command -` 在 winpty 下会因 stdin 非重定向而打印帮助。因此 winpty
-版本没有问题，问题在 PS2 的 ConsoleHost；Win7 想真交互可先用 cmd 或装 WMF 5.1。详见
+排除“直接 spawn”问题；`-Command -` 在 winpty 下会因 stdin 非重定向而打印帮助。官方
+winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排除版本/build/flags
+问题。结论：PS2 的 ConsoleHost 与 winpty conhost 模拟不兼容；Win7 想真交互可先用 cmd 或
+装 WMF 5.1。详见
 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md) 第二节。
 
 ## 三、Git 历史清理清单（第 1 项）

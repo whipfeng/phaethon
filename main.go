@@ -246,6 +246,8 @@ func run(prev *activeResources) (*activeResources, error) {
 		if err := p2pCache.SeedOwnBinary(Version, Platform, Arch, p2p.DetectBuildTag()); err != nil {
 			util.LogModuleInfo("system", "P2P seed own binary failed: %v", err)
 		}
+		// Bound the binary cache (5 versions per platform/arch, 1GiB total).
+		p2pCache.Prune(5, 1<<30)
 		p2p.CleanupBackup()
 	}
 	p2p.GlobalP2PManager = p2p.NewP2PManager("phaethon", Version, p2pCache)
@@ -2331,6 +2333,9 @@ func wireAdminCallbacks(resources *activeResources) {
 		adminSrv.GetArch = func() string {
 			return Arch
 		}
+		// Startup storage hygiene now that current version/platform are known:
+		// retention, orphan packages, stale temp files.
+		adminSrv.CleanupPackageStorage()
 
 		// 端口范围热生效：UDP 交给 dialer，TCP 交给 ControlManager。
 		// 两者都只影响后续分配，已建立的连接/绑定不受影响。

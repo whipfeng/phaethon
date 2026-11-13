@@ -161,14 +161,55 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if _, err := f.Write(data); err != nil {
+		f.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
+	// The request/marker/status must be durable before the swap starts;
+	// without fsync a power loss can leave a rename-visible but empty file.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// Windows can transiently fail the rename while the admin polls the status
+	// file. Retry briefly instead of silently losing a state transition.
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := os.Rename(tmp, path); err == nil {
+			renameErr = nil
+			break
+		} else {
+			renameErr = err
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if renameErr != nil {
+		_ = os.Remove(tmp)
+		return renameErr
+	}
+	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// syncDir flushes the directory entry on platforms that support it. Failures
+// are ignored: the file contents were already fsynced.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 func removeIfExists(path string) error {

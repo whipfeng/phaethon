@@ -11,13 +11,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
+	"sync"
 	"time"
 
 	"phaethon/db"
 	"phaethon/mesh"
 	"phaethon/p2p"
 	"phaethon/pkg/signing"
+	"phaethon/pkg/upgrade"
 	"phaethon/util"
 )
 
@@ -31,8 +32,8 @@ const (
 	// explicitly activate a version before it can take effect.
 	pendingPackagesDir = "data/packages-pending"
 
-	// workerPinPath pins the version the watchdog should run. It is written
-	// only by an explicit activation.
+	// workerPinPath is the legacy pin written by older builds. The watchdog
+	// ignores it now; clearWorkerPin removes leftovers.
 	workerPinPath = "data/state/worker-pin"
 
 	defaultPackageUploadMaxMB = 100
@@ -124,25 +125,8 @@ func pkgPathFor(id string) (string, bool) {
 	return "", false
 }
 
-// writeWorkerPin records the version the watchdog should run.
-func writeWorkerPin(version string) error {
-	if err := os.MkdirAll(filepath.Dir(workerPinPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(workerPinPath, []byte(version), 0644)
-}
-
-// readWorkerPin returns the pinned version, or "" when unpinned.
-func readWorkerPin() string {
-	data, err := os.ReadFile(workerPinPath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-// clearWorkerPin removes the pin so the watchdog falls back to the newest
-// package / the deployed binary.
+// clearWorkerPin removes the legacy pin so the watchdog does not log a warning
+// about a pin it no longer honours.
 func clearWorkerPin() error {
 	err := os.Remove(workerPinPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -152,7 +136,10 @@ func clearWorkerPin() error {
 }
 
 // apiPackagePin handles GET/DELETE /api/packages/pin.
-// GET returns the pin plus the version actually running; DELETE unpins.
+//
+// The name is kept for API compatibility; it now reports the self-replacement
+// upgrade state requested by activate. GET returns {current, requested,
+// status, lastError}; DELETE cancels a pending (not yet applying) request.
 func (s *AdminServer) apiPackagePin(w http.ResponseWriter, r *http.Request) {
 	current := ""
 	if s.GetCurrentVersion != nil {
@@ -160,27 +147,30 @@ func (s *AdminServer) apiPackagePin(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		st := upgrade.ReadStatus()
+		requested := st.Requested
+		if req := upgrade.ReadRequest(); req != nil {
+			requested = req.Version
+		}
 		jsonResponse(w, map[string]interface{}{
-			"pin":     readWorkerPin(),
-			"current": current,
+			"current":   current,
+			"requested": requested,
+			"status":    st.Status,
+			"lastError": st.LastError,
+			"updatedAt": st.UpdatedAt,
 		})
 	case http.MethodDelete, http.MethodPost:
-		was := readWorkerPin()
-		if err := clearWorkerPin(); err != nil {
-			httpError(w, "unpin failed: "+err.Error(), http.StatusInternalServerError)
+		if upgrade.ReadStatus().Status == upgrade.StatusApplying {
+			httpError(w, "upgrade is applying; cannot cancel", http.StatusConflict)
 			return
 		}
-		util.LogModuleWarn("admin", "worker pin cleared (was %q, current %q)", was, current)
-		if r.URL.Query().Get("restart") == "now" {
-			go func() {
-				time.Sleep(time.Second)
-				os.Exit(0)
-			}()
-		}
+		_ = upgrade.ClearRequest()
+		_ = clearWorkerPin() // legacy pin: ignored by the watchdog
+		_ = upgrade.WriteStatus(upgrade.Status{Status: upgrade.StatusIdle, Current: current})
+		util.LogModuleInfo("admin", "pending upgrade cancelled (current %q)", current)
 		jsonResponse(w, map[string]interface{}{
-			"status":  "unpinned",
+			"status":  upgrade.StatusIdle,
 			"current": current,
-			"restart": r.URL.Query().Get("restart"),
 		})
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -369,6 +359,13 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A second activation while the watchdog is mid-swap would be lost when
+	// the process restarts; reject it instead of silently overwriting.
+	if st := upgrade.ReadStatus(); st.Status == upgrade.StatusApplying {
+		httpError(w, "an upgrade is already applying", http.StatusConflict)
+		return
+	}
+
 	// Activation is explicit and allows any downloaded version, including an
 	// older one (rollback). No monotonic restriction.
 	platform := info.Platform
@@ -397,32 +394,47 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := writeWorkerPin(info.Version); err != nil {
-		httpError(w, "write worker pin: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// The legacy pin path is gone: the watchdog always runs the stable
+	// executable and applies upgrades through data/state/upgrade-request.
+	_ = clearWorkerPin()
 
 	util.LogModuleInfo("admin", "package activated: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
 
 	// Distribution is an explicit admin action, performed only on activation.
+	// It completes (bounded) before a local upgrade request is written: the
+	// watchdog stops this process within seconds, which would otherwise abort
+	// in-flight peer uploads.
 	if pkgData, err := os.ReadFile(filepath.Join(packagesDir, id+".pkg")); err == nil {
-		go s.DistributePackage(pkgData)
+		s.distributePackage(pkgData, 60*time.Second)
 		go s.applyRetention(platform, arch)
 	}
 
-	restart := r.URL.Query().Get("restart")
-	if restart == "now" {
-		go func() {
-			time.Sleep(time.Second)
-			os.Exit(0)
-		}()
+	localPlatform, localArch := "", ""
+	if s.GetPlatform != nil {
+		localPlatform = s.GetPlatform()
+	}
+	if s.GetArch != nil {
+		localArch = s.GetArch()
+	}
+	localMatch := localPlatform != "" && localArch != "" &&
+		info.Platform == localPlatform && info.Arch == localArch
+
+	if localMatch {
+		if err := upgrade.WriteRequest(upgrade.Request{Version: info.Version, PackageID: id}); err != nil {
+			httpError(w, "write upgrade request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		util.LogModuleInfo("admin", "upgrade requested: version=%s (watchdog applies within ~2s)", info.Version)
+	} else {
+		util.LogModuleInfo("admin", "package activated for distribution only: %s/%s does not match local %s/%s",
+			info.Platform, info.Arch, localPlatform, localArch)
 	}
 
 	jsonResponse(w, map[string]interface{}{
-		"status":  "activated",
-		"id":      id,
-		"version": info.Version,
-		"restart": restart,
+		"status":       "requested",
+		"id":           id,
+		"version":      info.Version,
+		"localUpgrade": localMatch,
 	})
 }
 
@@ -445,13 +457,15 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 		os.Remove(p)
 	}
 	_ = db.DeletePackage(id)
-	// A pin pointing at the deleted version would otherwise leave the
-	// watchdog unable to find its worker and silently fall back.
-	if meta.Version != "" && readWorkerPin() == meta.Version {
-		if err := clearWorkerPin(); err == nil {
-			util.LogModuleWarn("admin", "worker pin cleared because package %s (%s) was deleted", id, meta.Version)
+	// A pending request pointing at the deleted version would fail on the
+	// watchdog side; clear it here and leave the running worker alone.
+	if meta.Version != "" {
+		if req := upgrade.ReadRequest(); req != nil && req.Version == meta.Version {
+			_ = upgrade.ClearRequest()
+			util.LogModuleWarn("admin", "pending upgrade request cleared because package %s (%s) was deleted", id, meta.Version)
 		}
 	}
+	_ = clearWorkerPin() // legacy pin: ignored by the watchdog
 	util.LogModuleInfo("admin", "package deleted: %s", id)
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }
@@ -616,8 +630,10 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 	return id, nil
 }
 
-// DistributePackage distributes a package to all connected mesh peers.
-func (s *AdminServer) DistributePackage(pkgData []byte) {
+// distributePackage sends a package to all connected mesh peers. When wait > 0
+// it blocks until every upload finishes or the timeout expires, which lets an
+// activation finish distribution before the watchdog restarts this process.
+func (s *AdminServer) distributePackage(pkgData []byte, wait time.Duration) {
 	if s.peerLister == nil {
 		util.LogModuleInfo("admin", "distribute: peerLister is nil")
 		return
@@ -635,8 +651,11 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 
 	util.LogModuleInfo("admin", "distributing package to %d peers", len(peers))
 
+	var wg sync.WaitGroup
 	for _, peer := range peers {
+		wg.Add(1)
 		go func(nodeID string) {
+			defer wg.Done()
 			domain := mesh.NodeDomain(nodeID)
 			url := fmt.Sprintf("https://%s/api/packages/receive", domain)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
@@ -652,6 +671,21 @@ func (s *AdminServer) DistributePackage(pkgData []byte) {
 			}
 			util.LogModuleInfo("admin", "distributed package to %s (%s), status=%d", nodeID, domain, resp.StatusCode)
 		}(peer.NodeID)
+	}
+
+	if wait <= 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		util.LogModuleInfo("admin", "package distribution complete")
+	case <-time.After(wait):
+		util.LogModuleWarn("admin", "package distribution still running after %v; continuing with activation", wait)
 	}
 }
 

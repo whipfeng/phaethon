@@ -1948,6 +1948,7 @@ func (s *AdminServer) apiConfigMesh(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "node-id is required", http.StatusBadRequest)
 			return
 		}
+		meshCfg.EnsureEntryIDs()
 
 		// Identity changes never hot-apply (design §3.3): reset the Fake-IP
 		// bucket so the restarted node rebuilds its pool from scratch, then
@@ -4748,12 +4749,19 @@ func (s *AdminServer) apiMeshTopologyGet(w http.ResponseWriter, r *http.Request)
 func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		suffixes := []string{}
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg != nil && meshCfg.DomainSuffixes != nil {
-			suffixes = meshCfg.DomainSuffixes
+		if meshCfg == nil {
+			jsonResponse(w, []interface{}{})
+			return
 		}
-		jsonResponse(w, suffixes)
+		if meshCfg.EnsureEntryIDs() {
+			_ = db.PutMeshConfig(meshCfg)
+		}
+		out := make([]map[string]interface{}, 0, len(meshCfg.DomainSuffixes))
+		for i, suffix := range meshCfg.DomainSuffixes {
+			out = append(out, map[string]interface{}{"id": meshCfg.DomainSuffixIDs[i], "suffix": suffix})
+		}
+		jsonResponse(w, out)
 
 	case http.MethodPost:
 		var req struct {
@@ -4770,33 +4778,40 @@ func (s *AdminServer) apiMeshDomainSuffixes(w http.ResponseWriter, r *http.Reque
 
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg != nil {
-			meshCfg.DomainSuffixes = append(meshCfg.DomainSuffixes, req.Suffix)
-			if err := db.PutMeshConfig(meshCfg); err != nil {
-				s.mu.Unlock()
-				httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if mesh.GlobalMeshManager != nil {
-				mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
-			}
+		if meshCfg == nil {
+			s.mu.Unlock()
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.EnsureEntryIDs()
+		meshCfg.NextMeshEntryID++
+		meshCfg.DomainSuffixes = append(meshCfg.DomainSuffixes, req.Suffix)
+		meshCfg.DomainSuffixIDs = append(meshCfg.DomainSuffixIDs, meshCfg.NextMeshEntryID)
+		id := meshCfg.NextMeshEntryID
+		if err := db.PutMeshConfig(meshCfg); err != nil {
+			s.mu.Unlock()
+			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mesh.GlobalMeshManager != nil {
+			mesh.GlobalMeshManager.UpdateConfig(meshCfg.DomainSuffixes, meshCfg.Advertise)
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh domain-suffix added: %s", req.Suffix)
-		jsonResponse(w, map[string]interface{}{"ok": true})
+		util.LogModuleInfo("admin", "mesh domain-suffix added: id=%d suffix=%s", id, req.Suffix)
+		jsonResponse(w, map[string]interface{}{"ok": true, "id": id})
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// apiMeshDomainSuffixItem handles PUT/DELETE for /api/mesh/domain-suffixes/:index
+// apiMeshDomainSuffixItem handles PUT/DELETE for /api/mesh/domain-suffixes/:id
 func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Request) {
-	indexStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/domain-suffixes/")
-	index, err := strconv.Atoi(indexStr)
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/domain-suffixes/")
+	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
-		httpError(w, "invalid index", http.StatusBadRequest)
+		httpError(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
@@ -4816,9 +4831,16 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg == nil || index < 0 || index >= len(meshCfg.DomainSuffixes) {
+		if meshCfg == nil {
 			s.mu.Unlock()
-			httpError(w, "index out of range", http.StatusBadRequest)
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.EnsureEntryIDs()
+		index := meshCfg.DomainSuffixIndexByID(id)
+		if index < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
 			return
 		}
 		meshCfg.DomainSuffixes[index] = req.Suffix
@@ -4832,18 +4854,26 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh domain-suffix updated: index=%d suffix=%s", index, req.Suffix)
+		util.LogModuleInfo("admin", "mesh domain-suffix updated: id=%d suffix=%s", id, req.Suffix)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	case http.MethodDelete:
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg == nil || index < 0 || index >= len(meshCfg.DomainSuffixes) {
+		if meshCfg == nil {
 			s.mu.Unlock()
-			httpError(w, "index out of range", http.StatusBadRequest)
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.EnsureEntryIDs()
+		index := meshCfg.DomainSuffixIndexByID(id)
+		if index < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
 			return
 		}
 		meshCfg.DomainSuffixes = append(meshCfg.DomainSuffixes[:index], meshCfg.DomainSuffixes[index+1:]...)
+		meshCfg.DomainSuffixIDs = append(meshCfg.DomainSuffixIDs[:index], meshCfg.DomainSuffixIDs[index+1:]...)
 		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
@@ -4854,7 +4884,7 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh domain-suffix deleted: index=%d", index)
+		util.LogModuleInfo("admin", "mesh domain-suffix deleted: id=%d", id)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:
@@ -4866,12 +4896,19 @@ func (s *AdminServer) apiMeshDomainSuffixItem(w http.ResponseWriter, r *http.Req
 func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		advertise := []string{}
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg != nil && meshCfg.Advertise != nil {
-			advertise = meshCfg.Advertise
+		if meshCfg == nil {
+			jsonResponse(w, []interface{}{})
+			return
 		}
-		jsonResponse(w, advertise)
+		if meshCfg.EnsureEntryIDs() {
+			_ = db.PutMeshConfig(meshCfg)
+		}
+		out := make([]map[string]interface{}, 0, len(meshCfg.Advertise))
+		for i, cidr := range meshCfg.Advertise {
+			out = append(out, map[string]interface{}{"id": meshCfg.AdvertiseIDs[i], "cidr": cidr})
+		}
+		jsonResponse(w, out)
 
 	case http.MethodPost:
 		var req struct {
@@ -4893,7 +4930,11 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "mesh config not found", http.StatusNotFound)
 			return
 		}
+		meshCfg.EnsureEntryIDs()
+		meshCfg.NextMeshEntryID++
 		meshCfg.Advertise = append(meshCfg.Advertise, req.CIDR)
+		meshCfg.AdvertiseIDs = append(meshCfg.AdvertiseIDs, meshCfg.NextMeshEntryID)
+		id := meshCfg.NextMeshEntryID
 		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
@@ -4904,20 +4945,20 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh advertise added: %s", req.CIDR)
-		jsonResponse(w, map[string]interface{}{"ok": true})
+		util.LogModuleInfo("admin", "mesh advertise added: id=%d cidr=%s", id, req.CIDR)
+		jsonResponse(w, map[string]interface{}{"ok": true, "id": id})
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// apiMeshAdvertiseItem handles PUT/DELETE for /api/mesh/advertise/:index
+// apiMeshAdvertiseItem handles PUT/DELETE for /api/mesh/advertise/:id
 func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Request) {
-	indexStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/advertise/")
-	index, err := strconv.Atoi(indexStr)
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/mesh/advertise/")
+	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
-		httpError(w, "invalid index", http.StatusBadRequest)
+		httpError(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
@@ -4937,9 +4978,16 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg == nil || index < 0 || index >= len(meshCfg.Advertise) {
+		if meshCfg == nil {
 			s.mu.Unlock()
-			httpError(w, "index out of range", http.StatusBadRequest)
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.EnsureEntryIDs()
+		index := meshCfg.AdvertiseIndexByID(id)
+		if index < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
 			return
 		}
 		meshCfg.Advertise[index] = req.CIDR
@@ -4953,18 +5001,26 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh advertise updated: index=%d cidr=%s", index, req.CIDR)
+		util.LogModuleInfo("admin", "mesh advertise updated: id=%d cidr=%s", id, req.CIDR)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	case http.MethodDelete:
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
-		if meshCfg == nil || index < 0 || index >= len(meshCfg.Advertise) {
+		if meshCfg == nil {
 			s.mu.Unlock()
-			httpError(w, "index out of range", http.StatusBadRequest)
+			httpError(w, "mesh config not found", http.StatusNotFound)
+			return
+		}
+		meshCfg.EnsureEntryIDs()
+		index := meshCfg.AdvertiseIndexByID(id)
+		if index < 0 {
+			s.mu.Unlock()
+			httpError(w, "id not found", http.StatusNotFound)
 			return
 		}
 		meshCfg.Advertise = append(meshCfg.Advertise[:index], meshCfg.Advertise[index+1:]...)
+		meshCfg.AdvertiseIDs = append(meshCfg.AdvertiseIDs[:index], meshCfg.AdvertiseIDs[index+1:]...)
 		if err := db.PutMeshConfig(meshCfg); err != nil {
 			s.mu.Unlock()
 			httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
@@ -4975,7 +5031,7 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 		}
 		s.mu.Unlock()
 
-		util.LogModuleInfo("admin", "mesh advertise deleted: index=%d", index)
+		util.LogModuleInfo("admin", "mesh advertise deleted: id=%d", id)
 		jsonResponse(w, map[string]interface{}{"ok": true})
 
 	default:

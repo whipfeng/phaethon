@@ -1468,6 +1468,9 @@ type MeshConfig struct {
 	Subnet               string                   `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
 	DomainSuffixes       []string                 `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
 	Advertise            []string                 `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
+	AdvertiseIDs         []uint64                 `yaml:"advertise-ids,omitempty" json:"advertise-ids,omitempty"`                   // Stable admin IDs for Advertise (local only)
+	DomainSuffixIDs      []uint64                 `yaml:"domain-suffix-ids,omitempty" json:"domain-suffix-ids,omitempty"`             // Stable admin IDs for DomainSuffixes (local only)
+	NextMeshEntryID      uint64                   `yaml:"next-mesh-entry-id,omitempty" json:"next-mesh-entry-id,omitempty"`           // Monotonic ID allocator
 	StaticRoutes         []MeshStaticRoute        `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
 	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings
@@ -1614,4 +1617,59 @@ func (m *MeshConfig) GetStaticDomainSuffixes() []MeshStaticDomainSuffix {
 		return nil
 	}
 	return m.StaticDomainSuffixes
+}
+
+// EnsureEntryIDs backfills the stable admin IDs for Advertise/DomainSuffixes
+// so the console can address rows by ID instead of by display position.
+// Returns true when it changed anything (caller should persist).
+func (m *MeshConfig) EnsureEntryIDs() bool {
+	if m == nil {
+		return false
+	}
+	changed := false
+	fix := func(vals []string, ids []uint64) []uint64 {
+		for len(ids) < len(vals) {
+			m.NextMeshEntryID++
+			ids = append(ids, m.NextMeshEntryID)
+			changed = true
+		}
+		if len(ids) > len(vals) {
+			ids = ids[:len(vals)]
+			changed = true
+		}
+		for _, id := range ids {
+			if id > m.NextMeshEntryID {
+				m.NextMeshEntryID = id
+			}
+		}
+		return ids
+	}
+	m.AdvertiseIDs = fix(m.Advertise, m.AdvertiseIDs)
+	m.DomainSuffixIDs = fix(m.DomainSuffixes, m.DomainSuffixIDs)
+	return changed
+}
+
+func indexOfMeshEntryID(ids []uint64, id uint64) int {
+	for i, v := range ids {
+		if v == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// AdvertiseIndexByID returns the storage index for an advertise route ID.
+func (m *MeshConfig) AdvertiseIndexByID(id uint64) int {
+	if m == nil {
+		return -1
+	}
+	return indexOfMeshEntryID(m.AdvertiseIDs, id)
+}
+
+// DomainSuffixIndexByID returns the storage index for a domain-suffix ID.
+func (m *MeshConfig) DomainSuffixIndexByID(id uint64) int {
+	if m == nil {
+		return -1
+	}
+	return indexOfMeshEntryID(m.DomainSuffixIDs, id)
 }

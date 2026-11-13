@@ -4052,3 +4052,36 @@ IP，gossip 只协商端口。
 **不做**：UDP 打洞、中继节点、候选地址交换。后续独立课题：一个中继
 peer 作为 rendezvous，其它 peer 连它后再互相探测 UDP；不是让已互通的
 peer 之间打洞。
+
+## 137. 直连 leg 首测：裸 socket 回灌 TUN，绑定物理网卡后追平基线（2026-11-13 12:10）
+
+**现象**：655/656 上线后 leg `active`、计数在涨，但 24.5MB 传输
+down 6.46s / up 16.82s，legOut 异常膨胀（一次双向 ~6.5 万），远低于
+TCP 基线（down 3.26s / up 5.88s）。
+
+**根因**：直连 leg 的目标是代理配置里的对端地址（如 `10.11.61.50`），
+这个地址落在 TUN 的 split-tunnel 路由里。裸 `net.ListenPacket` 没有
+绑定物理网卡，leg 自己的 datagram 被送进 TUN → mesh，形成自我封装/
+放大，所以计数暴涨、吞吐反而下降。
+
+**修复**（`dialer`）：
+- `ListenPacketBound(dst)`：主动端按 dst 复用 `BindContext.BindSocket`
+  选物理网卡（与 TCP 代理拨号同一套绕过 TUN 的逻辑）。
+- `ListenUDPBound()`：被动端在配置端口范围内 bind，并绑定默认物理网卡；
+  回包到对端 underlay 地址不再进入 TUN。
+
+**验证**（vm↔qg，24.5MB，同窗口）：
+
+| 场景 | down | up |
+|---|---|---|
+| 直连 leg + 绑定物理网卡 | **3.31s** | **3.09s** |
+| TCP 基线（p2p-udp off） | 3.26s | 5.88s |
+| 直连 leg 未绑定（回灌 TUN） | 6.46s | 16.82s |
+
+- 4 流并发 down：wall 22.53s（~4.35 MiB/s），4 条全完整；
+- qg `IpReasmReqds` 全程增量 0；legDrops 54/0，legCh 未溢出；
+- `/api/p2p` 新增 `legPhase/legIn/legOut/legDrops/legPort`，现场可确认
+  FSM 卡在 negotiated/pending/active 哪一步。
+
+**当前开关状态**：VM 的 `QG_SS5_UDPLEG` 已开启 `p2p-udp`（控制台
+“UDP Direct”）；关闭即回退 TCP。其余链路按需开启。

@@ -1233,42 +1233,17 @@ func ensureWintunDLL(workerDir string) {
 	util.LogModuleInfo("main", "watchdog: copied wintun.dll to %s", workerDir)
 }
 
-// selectWorkerBinary picks the worker binary to run: the latest distributed
-// pkg only if it is newer than this watchdog build, otherwise the watchdog's
-// own executable. This prevents a stale pkg from downgrading a manually
-// deployed newer binary, so both upgrade paths (pkg distribution and direct
-// binary deployment) stay reliable.
+// selectWorkerBinary always returns the watchdog's own executable.
 //
-// 优先 self 的防御：self 版本无法解析（dev/自定义后缀/etc）时，部署者
-// 意图明确 > 包分发快照，忽略 pkg 直接用 self。历史事故：v0.8.0-355-
-// relay-log 因 parseVersion 锚定 $ 不识别自定义后缀被判 untagged，
-// 反而输给 pkg 里的 v0.7.3，worker 起旧版连环失败。
+// Unified upgrade path on every platform: replace the executable at its
+// stable path and restart. Versioned data/worker/phaethon-<ver> binaries and
+// worker pins are deliberately no longer selected — a new program path breaks
+// Windows Firewall per-program rules, AV/EDR allowlists and the scheduled task
+// that starts the supervisor. Package upload stays available for distribution,
+// but packages are never auto-executed.
 func selectWorkerBinary() string {
-	// An explicit activation wins, even when it is older than self (rollback).
 	if pinned := readWorkerPin(); pinned != "" {
-		if pkgPath, ver := findPkgAndExtract(pinned); pkgPath != "" {
-			if ver != Version {
-				util.LogModuleWarn("main", "watchdog: worker pinned to %s while deployed binary is %s; pinned version wins (clear data/state/worker-pin to run the deployed binary)", ver, Version)
-			}
-			util.LogModuleInfo("main", "watchdog: using pinned worker version %s: %s", ver, pkgPath)
-			return pkgPath
-		}
-		util.LogModuleWarn("main", "watchdog: pinned version %s is not available; clearing stale pin and falling back", pinned)
-		if err := os.Remove(workerPinPath); err != nil && !os.IsNotExist(err) {
-			util.LogModuleWarn("main", "watchdog: clear stale pin failed: %v", err)
-		}
-	}
-
-	pkgPath, pkgVersion := findLatestPkgAndExtract()
-	if pkgPath == "" {
-		util.LogModuleInfo("main", "watchdog: no pkg found, using current executable")
-	} else if selfUnparseable() {
-		util.LogModuleWarn("main", "watchdog: self version %q unparseable (dev/custom suffix?), ignoring pkg %s and using current executable", Version, pkgVersion)
-	} else if p2p.CompareVersions(pkgVersion, Version) > 0 {
-		util.LogModuleInfo("main", "watchdog: pkg version %s newer than self %s, using pkg worker: %s", pkgVersion, Version, pkgPath)
-		return pkgPath
-	} else {
-		util.LogModuleInfo("main", "watchdog: pkg version %s not newer than self %s, using current executable", pkgVersion, Version)
+		util.LogModuleWarn("main", "watchdog: worker-pin %q is ignored (direct-binary deployment); remove data/state/worker-pin to silence this warning", pinned)
 	}
 	exe, err := os.Executable()
 	if err != nil {

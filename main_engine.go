@@ -255,14 +255,11 @@ func writeLastGoodWorker(path string) {
 	_ = os.WriteFile(lastGoodWorkerPath, []byte(path), 0644)
 }
 
-// readLastGoodWorker reads the persisted last good worker binary path.
-// Returns empty string if not found or unreadable.
+// readLastGoodWorker is intentionally disabled: the worker now always runs the
+// stable supervisor executable (direct-binary deployment), so there is no
+// versioned worker path to fall back to. The old state file is ignored.
 func readLastGoodWorker() string {
-	data, err := os.ReadFile(lastGoodWorkerPath)
-	if err != nil {
-		return ""
-	}
-	return string(data)
+	return ""
 }
 
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.

@@ -212,6 +212,56 @@
         </div>
     </div>
 
+    <!-- Static Route Modal -->
+    <div id="static-route-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="static-route-modal-title" data-i18n="mesh.addStaticRoute">Add Static Route</h3>
+                <button onclick="closeStaticRouteModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="static-route-form" onsubmit="saveStaticRoute(event)">
+                <input type="hidden" id="static-route-edit-idx" value="-1">
+                <div class="form-group">
+                    <label data-i18n="mesh.cidr">CIDR</label>
+                    <input type="text" id="static-route-prefix" required placeholder="10.0.0.0/8" class="mesh-input">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="mesh.egressNodes">Egress Nodes</label>
+                    <input type="text" id="static-route-nodes" required placeholder="qg, vm" class="mesh-input">
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeStaticRouteModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Static Domain Suffix Modal -->
+    <div id="static-domain-suffix-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="static-domain-suffix-modal-title" data-i18n="mesh.addStaticDomainSuffix">Add Static Domain Route</h3>
+                <button onclick="closeStaticDomainSuffixModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="static-domain-suffix-form" onsubmit="saveStaticDomainSuffix(event)">
+                <input type="hidden" id="static-domain-suffix-edit-idx" value="-1">
+                <div class="form-group">
+                    <label data-i18n="mesh.domainSuffix">Domain Suffix</label>
+                    <input type="text" id="static-domain-suffix-input" required placeholder="internal.example.com" class="mesh-input">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="mesh.egressNodes">Egress Nodes</label>
+                    <input type="text" id="static-domain-suffix-nodes" required placeholder="qg, vm" class="mesh-input">
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeStaticDomainSuffixModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
     // Only the always-expanded sections (topology/routes/domain-routes) load
     // upfront; config sections (identity/keepalive/suffixes/advertise) fetch
@@ -622,6 +672,180 @@
 
     function closeAdvertiseModal() {
         document.getElementById('advertise-modal').classList.add('hidden');
+    }
+
+    // ===== Static routes (local policy) =====
+    function parseNodeIDs(value) {
+        return (value || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+    }
+
+    async function loadStaticRoutes() {
+        try {
+            const res = await fetch('./api/mesh/static-routes');
+            if (!res.ok) return;
+            const items = await res.json();
+            const tbody = document.getElementById('static-routes-tbody');
+            if (!items || items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" class="text-muted" data-i18n="common.noData">No data</td></tr>';
+                return;
+            }
+            tbody.innerHTML = items.map(rt => `
+                <tr>
+                    <td><code>${escapeHtml(rt.prefix)}</code></td>
+                    <td>${escapeHtml((rt['node-ids'] || []).join(', '))}</td>
+                    <td>
+                        <button onclick="editStaticRoute(${rt.id})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteStaticRoute(${rt.id})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                    </td>
+                </tr>`).join('');
+        } catch (err) {
+            console.error('loadStaticRoutes error:', err);
+        }
+    }
+
+    function showAddStaticRoute() {
+        document.getElementById('static-route-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.addStaticRoute') : 'Add Static Route';
+        document.getElementById('static-route-edit-idx').value = '-1';
+        document.getElementById('static-route-form').reset();
+        document.getElementById('static-route-modal').classList.remove('hidden');
+    }
+
+    function editStaticRoute(id) {
+        fetch('./api/mesh/static-routes').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
+            document.getElementById('static-route-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editStaticRoute') : 'Edit Static Route';
+            document.getElementById('static-route-edit-idx').value = id;
+            document.getElementById('static-route-prefix').value = item ? item.prefix : '';
+            document.getElementById('static-route-nodes').value = item ? (item['node-ids'] || []).join(', ') : '';
+            document.getElementById('static-route-modal').classList.remove('hidden');
+        });
+    }
+
+    async function saveStaticRoute(e) {
+        e.preventDefault();
+        const id = parseInt(document.getElementById('static-route-edit-idx').value);
+        const prefix = document.getElementById('static-route-prefix').value.trim();
+        const nodes = parseNodeIDs(document.getElementById('static-route-nodes').value);
+        if (!prefix || nodes.length === 0) return;
+        const body = {prefix, 'node-ids': nodes};
+        try {
+            const res = id >= 0
+                ? await fetch(`./api/mesh/static-routes/${id}`, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+                : await fetch('./api/mesh/static-routes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+            if (!res.ok) throw new Error(await res.text());
+            closeStaticRouteModal();
+            loadStaticRoutes();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saved') : 'Saved', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    function deleteStaticRoute(id) {
+        fetch('./api/mesh/static-routes').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
+            const target = item ? `${item.prefix} → ${(item['node-ids'] || []).join(', ')}` : '';
+            const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
+            openConfirmModal(base + (target ? `\n\n${target}` : ''), async function() {
+                try {
+                    const res = await fetch(`./api/mesh/static-routes/${id}`, {method: 'DELETE'});
+                    if (!res.ok) throw new Error(await res.text());
+                    loadStaticRoutes();
+                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                } catch (err) {
+                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                }
+            });
+        });
+    }
+
+    function closeStaticRouteModal() {
+        document.getElementById('static-route-modal').classList.add('hidden');
+    }
+
+    // ===== Static domain suffix routes =====
+    async function loadStaticDomainSuffixes() {
+        try {
+            const res = await fetch('./api/mesh/static-domain-suffixes');
+            if (!res.ok) return;
+            const items = await res.json();
+            const tbody = document.getElementById('static-domain-suffixes-tbody');
+            if (!items || items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" class="text-muted" data-i18n="common.noData">No data</td></tr>';
+                return;
+            }
+            tbody.innerHTML = items.map(rt => `
+                <tr>
+                    <td>${escapeHtml(rt.suffix)}</td>
+                    <td>${escapeHtml((rt['node-ids'] || []).join(', '))}</td>
+                    <td>
+                        <button onclick="editStaticDomainSuffix(${rt.id})" class="btn btn-sm btn-outline" data-i18n="common.edit">Edit</button>
+                        <button onclick="deleteStaticDomainSuffix(${rt.id})" class="btn btn-sm btn-danger" data-i18n="common.delete">Delete</button>
+                    </td>
+                </tr>`).join('');
+        } catch (err) {
+            console.error('loadStaticDomainSuffixes error:', err);
+        }
+    }
+
+    function showAddStaticDomainSuffix() {
+        document.getElementById('static-domain-suffix-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.addStaticDomainSuffix') : 'Add Static Domain Route';
+        document.getElementById('static-domain-suffix-edit-idx').value = '-1';
+        document.getElementById('static-domain-suffix-form').reset();
+        document.getElementById('static-domain-suffix-modal').classList.remove('hidden');
+    }
+
+    function editStaticDomainSuffix(id) {
+        fetch('./api/mesh/static-domain-suffixes').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
+            document.getElementById('static-domain-suffix-modal-title').textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.editStaticDomainSuffix') : 'Edit Static Domain Route';
+            document.getElementById('static-domain-suffix-edit-idx').value = id;
+            document.getElementById('static-domain-suffix-input').value = item ? item.suffix : '';
+            document.getElementById('static-domain-suffix-nodes').value = item ? (item['node-ids'] || []).join(', ') : '';
+            document.getElementById('static-domain-suffix-modal').classList.remove('hidden');
+        });
+    }
+
+    async function saveStaticDomainSuffix(e) {
+        e.preventDefault();
+        const id = parseInt(document.getElementById('static-domain-suffix-edit-idx').value);
+        const suffix = document.getElementById('static-domain-suffix-input').value.trim();
+        const nodes = parseNodeIDs(document.getElementById('static-domain-suffix-nodes').value);
+        if (!suffix || nodes.length === 0) return;
+        const body = {suffix, 'node-ids': nodes};
+        try {
+            const res = id >= 0
+                ? await fetch(`./api/mesh/static-domain-suffixes/${id}`, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+                : await fetch('./api/mesh/static-domain-suffixes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+            if (!res.ok) throw new Error(await res.text());
+            closeStaticDomainSuffixModal();
+            loadStaticDomainSuffixes();
+            showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saved') : 'Saved', 'success');
+        } catch (err) {
+            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+        }
+    }
+
+    function deleteStaticDomainSuffix(id) {
+        fetch('./api/mesh/static-domain-suffixes').then(res => res.json()).then(items => {
+            const item = (items || []).find(x => x.id === id);
+            const target = item ? `${item.suffix} → ${(item['node-ids'] || []).join(', ')}` : '';
+            const base = typeof i18n !== 'undefined' ? i18n.t('common.confirmDelete') : 'Delete this item?';
+            openConfirmModal(base + (target ? `\n\n${target}` : ''), async function() {
+                try {
+                    const res = await fetch(`./api/mesh/static-domain-suffixes/${id}`, {method: 'DELETE'});
+                    if (!res.ok) throw new Error(await res.text());
+                    loadStaticDomainSuffixes();
+                    showToast(typeof i18n !== 'undefined' ? i18n.t('toast.deleted') : 'Deleted', 'success');
+                } catch (err) {
+                    showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
+                }
+            });
+        });
+    }
+
+    function closeStaticDomainSuffixModal() {
+        document.getElementById('static-domain-suffix-modal').classList.add('hidden');
     }
 
     function escapeHtml(s) {

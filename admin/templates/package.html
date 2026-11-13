@@ -1,10 +1,10 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
-    <!-- Worker version pin status -->
+    <!-- Self-upgrade status (activate request / applying / rolled back) -->
     <div id="package-pin-banner" style="display:none; margin-bottom:1rem; padding:0.75rem; border-radius:6px; background:rgba(248,81,73,0.12); align-items:center; justify-content:space-between; gap:0.75rem;">
         <span id="package-pin-text"></span>
-        <button class="btn btn-sm btn-primary" onclick="PackagePage.unpin()" data-i18n="package.unpin">取消固定</button>
+        <button id="package-pin-action" class="btn btn-sm btn-primary" onclick="PackagePage.unpin()">取消升级</button>
     </div>
     <!-- Upload -->
     <div class="card" id="package-upload-card">
@@ -49,40 +49,62 @@
             this.setupSSE();
             this.refresh();
             this.refreshPin();
+            // The watchdog applies a request and restarts this process; keep
+            // the status banner live across the short outage.
+            setInterval(() => this.refreshPin(), 3000);
         },
 
         refreshPin() {
             fetch('./api/packages/pin')
                 .then(r => r.json())
                 .then(d => {
-                    const pin = d.pin || '';
-                    const cur = d.current || '';
+                    const status = d.status || 'idle';
+                    const requested = d.requested || '';
+                    const current = d.current || '';
+                    const lastError = d.lastError || '';
                     const banner = document.getElementById('package-pin-banner');
-                    if (!banner) return;
-                    if (!pin) {
+                    const textEl = document.getElementById('package-pin-text');
+                    const action = document.getElementById('package-pin-action');
+                    if (!banner || !textEl) return;
+
+                    if (status === 'idle' && !requested) {
                         banner.style.display = 'none';
                         return;
                     }
-                    document.getElementById('package-pin-text').textContent =
-                        '当前 worker 固定为 ' + pin + '（运行中 ' + (cur || '未知') + '）；手动部署的新版本不会生效。';
+
+                    let text = '';
+                    let canCancel = false;
+                    if (status === 'applying') {
+                        text = '正在应用 ' + requested + '（当前 ' + (current || '未知') + '），服务将短暂重启…';
+                    } else if (status === 'failed-rolled-back') {
+                        text = '升级 ' + requested + ' 失败，已回滚到 ' + (current || '未知') +
+                            (lastError ? '：' + lastError : '');
+                    } else if (status === 'succeeded') {
+                        text = '已升级到 ' + (current || requested) + '（最近一次升级成功）';
+                    } else if (requested) {
+                        text = '已请求升级到 ' + requested + '，等待 watchdog 应用…';
+                        canCancel = true;
+                    }
+                    textEl.textContent = text;
+                    if (action) action.style.display = canCancel ? '' : 'none';
                     banner.style.display = 'flex';
                 })
                 .catch(() => {});
         },
 
         unpin() {
-            if (!confirm('取消 worker 版本固定并立即重启？')) return;
-            fetch('./api/packages/pin?restart=now', { method: 'DELETE' })
-                .then(r => r.json())
-                .then(d => {
-                    if (d && d.error) {
-                        showToast(d.error, 'error');
+            if (!confirm('取消待应用的升级请求？')) return;
+            fetch('./api/packages/pin', { method: 'DELETE' })
+                .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                .then(({ ok, d }) => {
+                    if (!ok) {
+                        showToast((d && d.error) || '取消失败', 'error');
                         return;
                     }
-                    showToast('已取消固定，正在重启…', 'success');
-                    document.getElementById('package-pin-banner').style.display = 'none';
+                    showToast('已取消升级请求', 'success');
+                    this.refreshPin();
                 })
-                .catch(() => showToast('取消固定失败', 'error'));
+                .catch(() => showToast('取消失败', 'error'));
         },
 
         setupSSE() {
@@ -300,20 +322,23 @@
         },
 
         activate(id) {
-            const now = confirm(this.t('package.confirmRestart',
-                '立即重启并切换到该版本？\n\n确定 = 立即重启\n取消 = 仅在下次重启后生效'));
-            const restart = now ? 'now' : 'later';
-            fetch('./api/packages/' + id + '/activate?restart=' + restart, { method: 'POST' })
+            if (!confirm('启用该版本？watchdog 将在数秒内自替换并重启 worker（服务短暂中断）。')) return;
+            fetch('./api/packages/' + id + '/activate', { method: 'POST' })
                 .then(r => r.json().then(d => ({ ok: r.ok, d })))
                 .then(({ ok, d }) => {
                     if (!ok) {
                         showToast((d && d.error) || 'activate failed', 'error');
                         return;
                     }
-                    showToast(now
-                        ? this.t('package.toast.activatedNow', '已启用，正在重启…')
-                        : this.t('package.toast.activatedLater', '已启用，将在下次重启生效'), 'success');
+                    if (d && d.localUpgrade === false) {
+                        showToast(this.t('package.toast.distributedOnly',
+                            '已启用（平台不匹配，仅向 peer 分发，不在本机升级）'), 'success');
+                    } else {
+                        showToast(this.t('package.toast.upgradeRequested',
+                            '已请求升级，watchdog 将在数秒内应用…'), 'success');
+                    }
                     this.refresh();
+                    this.refreshPin();
                 })
                 .catch(() => showToast(this.t('package.toast.networkError', '网络错误'), 'error'));
         },

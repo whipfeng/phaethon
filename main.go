@@ -38,7 +38,6 @@ import (
 	"phaethon/handler"
 	"phaethon/mesh"
 	"phaethon/p2p"
-	"phaethon/pkg/signing"
 	"phaethon/reverse"
 	"phaethon/server"
 	"phaethon/tun"
@@ -920,7 +919,7 @@ func main() {
 
 	// Signal the watchdog that the server is fully initialized.
 	if os.Getenv("PHAETHON_WORKER") != "" {
-		emitProtocolMsg(map[string]bool{"ready": true})
+		emitProtocolMsg(map[string]interface{}{"ready": true, "version": Version})
 		startWorkerHeartbeat()
 	}
 	watchAndRun(resources)
@@ -991,17 +990,19 @@ func watchAndRun(resources *activeResources) {
 // childProtocolMsg is a JSON message sent by the worker child on stdout.
 // Lines that do not match this schema are forwarded to the watchdog's stdout.
 type childProtocolMsg struct {
-	Ready     *bool `json:"ready,omitempty"`
-	Heartbeat *bool `json:"heartbeat,omitempty"`
+	Ready     *bool  `json:"ready,omitempty"`
+	Heartbeat *bool  `json:"heartbeat,omitempty"`
+	Version   string `json:"version,omitempty"`
 }
 
 // childProcess wraps an os.Process with protocol state from the child's stdout.
 type childProcess struct {
-	proc   *os.Process
-	stdout io.ReadCloser
-	ready  atomic.Bool
-	lastHB atomic.Int64  // unix nano of last heartbeat
-	done   chan struct{} // closed when stdout reader exits
+	proc    *os.Process
+	stdout  io.ReadCloser
+	ready   atomic.Bool
+	lastHB  atomic.Int64  // unix nano of last heartbeat
+	version atomic.Value  // build version reported in the ready message
+	done    chan struct{} // closed when stdout reader exits
 }
 
 // childReadyTimeout is how long the watchdog waits for the child to signal
@@ -1069,9 +1070,12 @@ func (cp *childProcess) readProtocol() {
 			var msg childProtocolMsg
 			if json.Unmarshal(line, &msg) == nil {
 				if msg.Ready != nil && *msg.Ready {
+					if msg.Version != "" {
+						cp.version.Store(msg.Version)
+					}
 					cp.ready.Store(true)
 					cp.lastHB.Store(time.Now().UnixNano())
-					util.LogModuleInfo("main", "watchdog: child signaled ready")
+					util.LogModuleInfo("main", "watchdog: child signaled ready (version=%s)", msg.Version)
 					continue
 				}
 				if msg.Heartbeat != nil && *msg.Heartbeat {
@@ -1095,142 +1099,29 @@ func (cp *childProcess) wait() {
 	<-cp.done
 }
 
-// findLatestPkgAndExtract finds the highest version pkg file in data/packages/
-// that matches the current platform/arch, extracts the binary to a temp location,
-// and returns the path to the extracted binary along with its version.
-// Returns empty strings if no suitable pkg is found.
-// workerPinPath records the version an administrator explicitly activated.
-// Only data/packages is scanned by the watchdog; uploaded/received packages
-// stay in data/packages-pending until activated.
+// workerVersion returns the version reported in the child's ready message.
+func (cp *childProcess) workerVersion() string {
+	if cp == nil {
+		return ""
+	}
+	if v := cp.version.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// workerPinPath is the legacy pin written by older builds. It is no longer
+// honoured: the worker always runs the stable executable. Leftovers are
+// removed at startup so the watchdog log stays clean.
 const workerPinPath = "data/state/worker-pin"
 
-// readWorkerPin returns the pinned worker version, or "" when none is set.
+// readWorkerPin returns the legacy pinned version, or "" when none is set.
 func readWorkerPin() string {
 	data, err := os.ReadFile(workerPinPath)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
-}
-
-func findLatestPkgAndExtract() (string, string) {
-	return findPkgAndExtract("")
-}
-
-// findPkgAndExtract extracts a package from data/packages. When targetVersion
-// is empty the highest version wins; otherwise only that exact version is
-// considered (used by the pin set from the admin UI, including rollbacks).
-func findPkgAndExtract(targetVersion string) (string, string) {
-	packagesDir := "data/packages"
-
-	// List all .pkg files
-	entries, err := os.ReadDir(packagesDir)
-	if err != nil {
-		util.LogModuleDebug("main", "watchdog: cannot read packages dir: %v", err)
-		return "", ""
-	}
-
-	var latestPkg string
-	var latestVersion string
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pkg") {
-			continue
-		}
-
-		pkgPath := filepath.Join(packagesDir, entry.Name())
-
-		// Verify and read metadata
-		contents, err := signing.VerifyPkg(pkgPath, signing.PublicKey)
-		if err != nil {
-			util.LogModuleDebug("main", "watchdog: verify pkg %s failed: %v", entry.Name(), err)
-			continue
-		}
-
-		// Check platform/arch match (using compile-time identifiers, not runtime)
-		if contents.Meta.Platform != Platform || contents.Meta.Arch != Arch {
-			continue
-		}
-
-		if targetVersion != "" {
-			if contents.Meta.Version != targetVersion {
-				continue
-			}
-			latestVersion = contents.Meta.Version
-			latestPkg = pkgPath
-			break
-		}
-		// Latest mode: highest version wins.
-		if latestVersion == "" || p2p.CompareVersions(contents.Meta.Version, latestVersion) > 0 {
-			latestVersion = contents.Meta.Version
-			latestPkg = pkgPath
-		}
-	}
-
-	if latestPkg == "" {
-		return "", ""
-	}
-
-	util.LogModuleInfo("main", "watchdog: found latest pkg: %s (version=%s)", latestPkg, latestVersion)
-
-	// Check if binary already exists in data/worker/
-	workerDir := "data/worker"
-	binaryPath := filepath.Join(workerDir, fmt.Sprintf("phaethon-%s", latestVersion))
-	if _, err := os.Stat(binaryPath); err == nil {
-		// Binary already exists, no need to extract
-		util.LogModuleInfo("main", "watchdog: binary already exists: %s", binaryPath)
-		ensureWintunDLL(workerDir)
-		return binaryPath, latestVersion
-	}
-
-	// Extract binary from pkg
-	contents, err := signing.VerifyPkg(latestPkg, signing.PublicKey)
-	if err != nil {
-		util.LogModuleError("main", "watchdog: extract pkg failed: %v", err)
-		return "", ""
-	}
-
-	// Write binary to data/worker/ directory
-	if err := os.MkdirAll(workerDir, 0755); err != nil {
-		util.LogModuleError("main", "watchdog: create worker dir failed: %v", err)
-		return "", ""
-	}
-	if err := os.WriteFile(binaryPath, contents.Binary, 0755); err != nil {
-		util.LogModuleError("main", "watchdog: write binary failed: %v", err)
-		return "", ""
-	}
-
-	// On Windows, also copy wintun.dll to the worker directory so the worker
-	// binary can find it (Windows DLL search uses the exe directory, not CWD).
-	ensureWintunDLL(workerDir)
-
-	util.LogModuleInfo("main", "watchdog: extracted binary to %s", binaryPath)
-	return binaryPath, latestVersion
-}
-
-// ensureWintunDLL copies wintun.dll to the worker directory on Windows.
-// Windows DLL search uses the executable's directory, not CWD, so when the
-// worker binary lives in data/worker/ but wintun.dll is in the main directory,
-// CreateDevice() fails to load the DLL.
-func ensureWintunDLL(workerDir string) {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	src := "wintun.dll"
-	dst := filepath.Join(workerDir, "wintun.dll")
-	if _, err := os.Stat(dst); err == nil {
-		return // already there
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		util.LogModuleWarn("main", "watchdog: cannot copy wintun.dll to worker dir: %v", err)
-		return
-	}
-	if err := os.WriteFile(dst, data, 0644); err != nil {
-		util.LogModuleWarn("main", "watchdog: failed to write wintun.dll to worker dir: %v", err)
-		return
-	}
-	util.LogModuleInfo("main", "watchdog: copied wintun.dll to %s", workerDir)
 }
 
 // selectWorkerBinary always returns the watchdog's own executable.
@@ -1243,7 +1134,8 @@ func ensureWintunDLL(workerDir string) {
 // but packages are never auto-executed.
 func selectWorkerBinary() string {
 	if pinned := readWorkerPin(); pinned != "" {
-		util.LogModuleWarn("main", "watchdog: worker-pin %q is ignored (direct-binary deployment); remove data/state/worker-pin to silence this warning", pinned)
+		util.LogModuleWarn("main", "watchdog: removing legacy worker-pin %q (direct-binary deployment)", pinned)
+		_ = os.Remove(workerPinPath)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -1321,6 +1213,9 @@ func runWatchdogMode() {
 	if exe == "" {
 		return
 	}
+	// Close the crash window left by an interrupted self-replacement before
+	// the first spawn (missing stable path, stale staging file, marker).
+	repairInterruptedUpgrade(exe)
 	util.LogModuleInfo("main", "watchdog: using worker binary: %s", exe)
 
 	lastRestart := time.Time{}
@@ -1469,6 +1364,12 @@ func runWatchdogMode() {
 	monitorTicker := time.NewTicker(monitorInterval)
 	defer monitorTicker.Stop()
 
+	// Explicit upgrades are requested through data/state/upgrade-request by the
+	// admin activate action; polling keeps the watchdog free of signals, which
+	// Windows does not provide across processes reliably.
+	upgradeTicker := time.NewTicker(2 * time.Second)
+	defer upgradeTicker.Stop()
+
 	pid := cp.proc.Pid
 
 	util.LogModuleInfo("main", "watchdog: entering monitor loop for pid %d", pid)
@@ -1603,6 +1504,16 @@ func runWatchdogMode() {
 					pid = cp.proc.Pid
 					spawnTime = time.Now()
 				}
+			}
+		case <-upgradeTicker.C:
+			if stopping.Load() {
+				continue
+			}
+			// Apply a pending admin activation. handled=false means no request.
+			if newCp, newPid, handled := tryApplyUpgrade(exe, cp, pid); handled && newCp != nil {
+				cp = newCp
+				pid = newPid
+				spawnTime = time.Now()
 			}
 		}
 	}

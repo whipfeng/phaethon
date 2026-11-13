@@ -4113,3 +4113,31 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
 
 **顺带**：mesh 页新增静态路由/静态域名路由 CRUD（稳定 ID，egress 节点
 逗号分隔），API 与通告路由同一套编号方式；`663/664` 已上线。
+
+## 139. Watchdog 自替换升级实现（2026-11-13）
+
+**目标**：恢复被停掉的自动升级能力，但始终保持稳定路径，不再产生
+`data/worker/phaethon-<version>`。详细设计见
+[watchdog_self_replace_upgrade.md](../plans/watchdog_self_replace_upgrade.md)。
+
+**实现**：
+
+- 新增 `pkg/upgrade`：`upgrade-request` / `upgrade-status` /
+  `upgrade-in-progress` / `worker-version` 的原子读写契约。
+- 新增 `upgrade_apply.go`：验签+平台匹配 → 暂存 `.new` → 停 worker →
+  `exe→.old`、`.new→exe`（原路径）→ 启动 → 20s ready 且版本一致；
+  失败则 `.failed` + `.old` 回滚，清请求不循环重试。
+- 启动修复：`<exe>` 缺失时优先恢复 `.old`；交换完成但 marker 残留时按
+  “已完成”继续 ready 校验；清理残留 `.new`。
+- ready 协议新增 `version` 字段，watchdog 据此确认新 worker 真是目标版本。
+- `activate` 不再写 `worker-pin` / `os.Exit`，改为写 `upgrade-request`；
+  watchdog 每 2s 轮询。跨平台包只分发、不写本机请求。
+- 分发改为（最多 60s）同步完成后再写升级请求，避免本地重启打断分发。
+- `/api/packages/pin` 改为返回 `current/requested/status/lastError`；
+  DELETE 取消未开始的请求；控制台 Package 页横幅展示四个状态。
+- 旧的 `worker-pin` 在启动/启用/删除包时自动清理。
+
+**验证**：单测覆盖请求/状态读写、swap/回滚、断电修复、签名包查找、
+已运行幂等、缺包不伤服务；`go test . ./admin/ ./pkg/upgrade/` 通过。
+实机 VM/QG 验证与扩散待执行。
+

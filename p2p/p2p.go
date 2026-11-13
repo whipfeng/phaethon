@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"net/url"
 	"os"
 	"phaethon/frame"
 	"regexp"
@@ -31,6 +32,34 @@ var commitPattern = regexp.MustCompile(`-(\d+)-g[0-9a-f]+`)
 // The canonical definition lives in the mesh package (it travels inside
 // GossipInfo); this alias keeps existing p2p callers unchanged.
 const P2PProtocolVersion = mesh.P2PProtocolVersion
+
+// proxyPeerIP returns the peer's underlay IPv4 address: the address the TCP
+// control link dials (proxy.Server, or the host in proxy.URL for h_tunnel).
+// It is used as the destination of the active side's direct UDP leg.
+func proxyPeerIP(proxy *config.Proxy) net.IP {
+	host := proxy.Server
+	if host == "" && proxy.URL != "" {
+		if u, err := url.Parse(proxy.URL); err == nil {
+			host = u.Hostname()
+		}
+	}
+	if host == "" {
+		return nil
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil
+	}
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			return v4
+		}
+	}
+	return nil
+}
 
 // protocolCompatible reports whether a peer's advertised version range
 // overlaps ours. remoteMin <= 0 means a legacy sender without the field.
@@ -136,11 +165,6 @@ type P2PManager struct {
 	// p2pKey is the optional mesh-wide PSK for the P2P frame layer. Set once
 	// at startup from the mesh config; empty keeps every carrier in plaintext.
 	p2pKey atomic.Pointer[string]
-
-	// udpLegInbound: manager-level switch for passive-side UDP legs.
-	// Passive peers carry no proxy config, so StartPeer sets this when any
-	// local proxy enables p2p_udp; HandleP2PTransport consults it.
-	udpLegInbound atomic.Bool
 
 	// stripeIDCounter issues opaque lane nonces for StripeAttach (§5.2).
 	stripeIDCounter atomic.Uint32
@@ -1469,14 +1493,12 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	})
 	peer.stripe = stripe
 
-	// Passive-side UDP leg: manager-level switch (no proxy config here).
-	if m.udpLegInbound.Load() {
-		wrapped := newUDPLegTransport(stripe, false, nil, m.getP2PKey())
-		peer.leg = wrapped
-		peer.transport = wrapped
-	} else {
-		peer.transport = stripe
-	}
+	// Passive-side UDP leg: always wrapped. It stays idle until the active
+	// peer's gossip advertises udp:true, so the active side's console switch
+	// alone decides whether a leg is attempted for this link.
+	wrapped := newUDPLegTransport(stripe, false, m.getP2PKey(), nil)
+	peer.leg = wrapped
+	peer.transport = wrapped
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
@@ -1695,10 +1717,6 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 
 	// Passive-side sessions carry no proxy config; arm the manager-level
 	// inbound switch when any local proxy enables the UDP leg.
-	if proxy.IsP2PUDP() {
-		m.udpLegInbound.Store(true)
-	}
-
 	seq := uint16(atomic.AddUint64(&m.linkSeqCounter, 1))
 
 	// Data queues are allocated lazily on the first data frame (D11).
@@ -1870,18 +1888,19 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		peer.transport = base
 		peer.transportMu.Unlock()
 
-		// Active-side UDP leg wrap (design §7 Phase 1): socks5 proxies with
-		// p2p_udp on, dialer supports packet dial. Wrapping here (not in the
-		// dialer) avoids the dialer→p2p import cycle.
+		// Active-side UDP leg wrap: a local datagram socket targeting the same
+		// peer address the TCP control link dialed. The proxy's UDP ASSOCIATE
+		// is intentionally not used; the control link only negotiates the port.
 		if proxy.IsP2PUDP() {
-			if ud, ok2 := d.(dialer.UDPDialer); ok2 {
-				wrapped := newUDPLegTransport(base, true, ud.DialPacket, m.getP2PKey())
+			peerIP := proxyPeerIP(proxy)
+			if peerIP == nil {
+				util.LogModuleWarn("p2p", "[P2P] proxy %s: p2p_udp on but cannot resolve the peer IP", proxy.Name)
+			} else {
+				wrapped := newUDPLegTransport(base, true, m.getP2PKey(), peerIP)
 				peer.leg = wrapped
 				peer.transportMu.Lock()
 				peer.transport = wrapped
 				peer.transportMu.Unlock()
-			} else {
-				util.LogModuleInfo("p2p", "[P2P] proxy %s: p2p_udp on but dialer %T lacks DialPacket, UDP leg disabled", proxy.Name, d)
 			}
 		}
 		peer.dnsQueue = make(chan writeReq, 512)

@@ -143,26 +143,32 @@ func (f *udpLegFSM) SendPort() (int, bool) {
 	return 0, false
 }
 
-// RouteDataViaUDP: 数据帧是否走 UDP 腿（主动端 Negotiated 起即可发送；
-// 被动端仅 Active 且有对端返回地址时回 UDP，否则 TCP）。
+// RouteDataViaUDP: 数据帧是否走 UDP 腿。
+// 主动端只有确认 UDP 通路（Active）后才切数据，避免未探测就丢数据；
+// 被动端仅 Active 且有对端返回地址时回 UDP，否则 TCP。
 func (f *udpLegFSM) RouteDataViaUDP() bool {
 	if !f.active {
 		return f.phase == udpLegActive && f.peerAddr != nil
 	}
-	_, ok := f.SendPort()
-	return ok
+	if _, ok := f.SendPort(); !ok {
+		return false
+	}
+	return f.phase == udpLegActive
 }
 
-// RouteProbeViaUDP: ping/pong 是否走 UDP。按方案 fallback 规则 6，
-// 仅激活通路后走 UDP（测的就是数据真实通路）；回落/未激活期间自动回 TCP。
-// 主动端 Pending 起（已发首个数据）任一 UDP 回包即可激活，故 Pending/Active 可用；
-// 被动端必须已记住对端返回地址（Active）。
+// RouteProbeViaUDP: ping/pong 是否走 UDP。
+// 主动端从 Negotiated 起就用 ping 探测 UDP 通路（数据暂时仍在 TCP），
+// 收到回包进入 Active 后数据再切 UDP；被动端 Active 后才回 UDP。
 func (f *udpLegFSM) RouteProbeViaUDP() bool {
 	if f.active {
 		if f.peerPort == 0 {
 			return false
 		}
-		return f.phase == udpLegPending || f.phase == udpLegActive
+		switch f.phase {
+		case udpLegNegotiated, udpLegPending, udpLegActive:
+			return true
+		}
+		return false
 	}
 	return f.phase == udpLegActive && f.peerAddr != nil
 }

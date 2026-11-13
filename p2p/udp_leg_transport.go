@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"phaethon/dialer"
 	"phaethon/frame"
 	"phaethon/util"
 )
@@ -39,7 +40,11 @@ type udpLegTransport struct {
 	base   frame.FrameTransport
 	fsm    *udpLegFSM
 	active bool
-	dialFn func() (net.PacketConn, error) // active side only
+	// peerIP is the active side's UDP destination: the peer address taken from
+	// the proxy configuration (the same address the TCP control link dials).
+	// The passive side learns the active peer's address from the first inbound
+	// datagram instead.
+	peerIP net.IP
 
 	fsmMu sync.Mutex // guards fsm (events arrive from recvLoop, writeLoop, readLoops, ticker)
 
@@ -51,13 +56,12 @@ type udpLegTransport struct {
 	closeOnce sync.Once
 
 	pcMu sync.Mutex
-	pc   net.PacketConn // active side channel
-	// dialing guards concurrent dial spawns; lastDialAt backs the R retry.
+	// pc is the direct UDP socket: an ephemeral socket on the active side and
+	// a port from the configured UDP range on the passive side.
+	pc net.PacketConn
+	// dialing guards concurrent channel spawns; lastDialAt backs the R retry.
 	dialing    bool
 	lastDialAt time.Time
-
-	epMu sync.Mutex
-	ep   *udpLegEndpoint // passive side
 
 	// stateNotify fires on advertise-state transitions (enter/exit advertising)
 	// so the mesh layer immediately re-broadcasts gossip through its single
@@ -94,22 +98,22 @@ type legRecvResult struct {
 	err       error
 }
 
-// newUDPLegTransport wraps base with a UDP leg. dialFn is required on the
-// active (dial) side and nil on the passive (listen) side. password is the
-// SOCKS5 link password: empty keeps datagrams in plaintext, non-empty enables
-// XChaCha20-Poly1305 per datagram (both ends must use the same password).
-func newUDPLegTransport(base frame.FrameTransport, active bool, dialFn func() (net.PacketConn, error), password string) *udpLegTransport {
+// newUDPLegTransport wraps base with a direct UDP leg. The active (dial) side
+// sends to peerIP:port; the passive (listen) side binds a port from the
+// configured UDP range and replies to the source address of the peer's first
+// datagram. key is the optional mesh-wide PSK; empty keeps datagrams plaintext.
+func newUDPLegTransport(base frame.FrameTransport, active bool, key string, peerIP net.IP) *udpLegTransport {
 	t := &udpLegTransport{
 		base:   base,
 		fsm:    newUDPLegFSM(active, true, udpLegTimings{}),
 		active: active,
-		dialFn: dialFn,
+		peerIP: peerIP,
 		ctrlCh: make(chan legRecvResult, 16),
 		dataCh: make(chan legRecvResult, 64),
 		legCh:  make(chan legRecvResult, 256),
 		closed: make(chan struct{}),
 	}
-	t.setLegCrypto(password)
+	t.setLegCrypto(key)
 	go t.baseReadLoop()
 	go t.tickLoop()
 	return t
@@ -159,7 +163,11 @@ func (t *udpLegTransport) Send(frameType byte, payload []byte, isControl bool) e
 		return t.base.Send(frameType, payload, isControl)
 	case frame.FrameLinkPing, frame.FrameLinkPong:
 		if t.routeProbeViaUDP() {
-			return t.writeLeg(frameType, payload)
+			err := t.writeLeg(frameType, payload)
+			t.fsmMu.Lock()
+			t.fsm.OnDataSent(time.Now())
+			t.fsmMu.Unlock()
+			return err
 		}
 	case frame.FrameMeshPacket:
 		if t.routeDataViaUDP() {
@@ -180,11 +188,15 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 	// Partition by route. Batches are homogeneous in practice (all mesh data).
 	var tcpBatch []frame.Frame
 	sentData := false
+	sentProbe := false
 	for _, f := range frames {
 		viaUDP := false
 		switch f.Type {
 		case frame.FrameLinkPing, frame.FrameLinkPong:
 			viaUDP = t.routeProbeViaUDP()
+			if viaUDP {
+				sentProbe = true
+			}
 		case frame.FrameMeshPacket:
 			if t.routeDataViaUDP() {
 				viaUDP = true
@@ -202,7 +214,7 @@ func (t *udpLegTransport) SendBatch(frames []frame.Frame) error {
 			return err
 		}
 	}
-	if sentData {
+	if sentData || sentProbe {
 		t.fsmMu.Lock()
 		t.fsm.OnDataSent(time.Now())
 		t.fsmMu.Unlock()
@@ -234,10 +246,10 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 		t.pcMu.Lock()
 		pc := t.pc
 		t.pcMu.Unlock()
-		if pc == nil {
-			return nil // dialing in flight; drop (datagram semantics)
+		if pc == nil || t.peerIP == nil {
+			return nil // channel not bound yet; drop (datagram semantics)
 		}
-		dst := &net.UDPAddr{IP: net.IPv4zero, Port: port}
+		dst := &net.UDPAddr{IP: t.peerIP, Port: port}
 		t.markFirstOut()
 		if _, err := pc.WriteTo(dgram, dst); err != nil {
 			atomic.AddUint64(&t.legDrops, 1)
@@ -247,14 +259,21 @@ func (t *udpLegTransport) writeLeg(frameType byte, payload []byte) error {
 		atomic.StoreInt64(&t.lastOutNano, time.Now().UnixNano())
 		return nil
 	}
-	t.epMu.Lock()
-	ep := t.ep
-	t.epMu.Unlock()
-	if ep == nil {
-		return nil // no port allocated yet; drop
+	// Passive side: reply to the source address of the peer's first datagram.
+	t.fsmMu.Lock()
+	addr := t.fsm.PeerReturnAddr()
+	t.fsmMu.Unlock()
+	if addr == nil {
+		return nil // peer hasn't sent anything yet; drop
+	}
+	t.pcMu.Lock()
+	pc := t.pc
+	t.pcMu.Unlock()
+	if pc == nil {
+		return nil
 	}
 	t.markFirstOut()
-	if err := ep.send(dgram); err != nil {
+	if _, err := pc.WriteTo(dgram, addr); err != nil {
 		atomic.AddUint64(&t.legDrops, 1)
 		util.LogModuleDebug("p2p", "[UDP-LEG] passive send drop: %v", err)
 	}
@@ -351,17 +370,20 @@ func (t *udpLegTransport) pcReadLoop(pc net.PacketConn) {
 			atomic.AddUint64(&t.legDrops, 1)
 			continue
 		}
-		// 主动端校验回包 src 端口 == 协商端口 P（设计 §3）
-		t.fsmMu.Lock()
-		port, ok := t.fsm.SendPort()
-		t.fsmMu.Unlock()
-		var srcPort int
-		if ua, ok2 := src.(*net.UDPAddr); ok2 {
-			srcPort = ua.Port
-		}
-		if !ok || srcPort != port {
-			atomic.AddUint64(&t.legDrops, 1)
-			continue
+		// Active side: the reply must come from the negotiated peer port.
+		// Passive side learns the peer's address from the datagram itself.
+		if t.active {
+			t.fsmMu.Lock()
+			port, ok := t.fsm.SendPort()
+			t.fsmMu.Unlock()
+			var srcPort int
+			if ua, ok2 := src.(*net.UDPAddr); ok2 {
+				srcPort = ua.Port
+			}
+			if !ok || srcPort != port {
+				atomic.AddUint64(&t.legDrops, 1)
+				continue
+			}
 		}
 		t.fsmMu.Lock()
 		t.fsm.OnUDPInbound(time.Now(), src)
@@ -376,44 +398,6 @@ func (t *udpLegTransport) pcReadLoop(pc net.PacketConn) {
 			return
 		default:
 			atomic.AddUint64(&t.legDrops, 1)
-		}
-	}
-}
-
-// epPump consumes relay deliveries on the passive side.
-func (t *udpLegTransport) epPump(ep *udpLegEndpoint) {
-	for {
-		select {
-		case <-ep.done:
-			return
-		case <-t.closed:
-			return
-		case in := <-ep.inboundCh:
-			plain, ok := t.cryptoOpen(in.datagram)
-			if !ok {
-				atomic.AddUint64(&t.legDrops, 1)
-				continue
-			}
-			ft, payload, err := frame.ParseDatagramFrame(plain)
-			if err != nil || !frame.IsLegFrame(ft) {
-				atomic.AddUint64(&t.legDrops, 1)
-				continue
-			}
-			srcAddr, _ := net.ResolveUDPAddr("udp", in.srcAddr)
-			t.fsmMu.Lock()
-			t.fsm.OnUDPInbound(time.Now(), srcAddr)
-			t.fsmMu.Unlock()
-			atomic.AddUint64(&t.legIn, 1)
-			atomic.StoreInt64(&t.lastInNano, time.Now().UnixNano())
-			pkt := make([]byte, len(payload))
-			copy(pkt, payload)
-			select {
-			case t.legCh <- legRecvResult{frameType: ft, payload: pkt}:
-			case <-t.closed:
-				return
-			default:
-				atomic.AddUint64(&t.legDrops, 1)
-			}
 		}
 	}
 }
@@ -498,7 +482,7 @@ func (t *udpLegTransport) checkLegSilence(now time.Time) {
 // with no channel (fallback 2). The FSM intentionally emits no dial action
 // here — dial liveness is a transport concern (dialing flag, lastDialAt).
 func (t *udpLegTransport) maybeRedial(now time.Time) {
-	if !t.active || t.dialFn == nil {
+	if !t.active {
 		return
 	}
 	t.fsmMu.Lock()
@@ -559,8 +543,11 @@ func (t *udpLegTransport) notifyStateChange() {
 	}
 }
 
+// spawnDial binds the active side's local UDP socket. There is no proxy UDP
+// associate any more: the control link already told us the peer address and
+// the peer's advertised UDP port, so this is just a plain datagram socket.
 func (t *udpLegTransport) spawnDial() {
-	if !t.active || t.dialFn == nil {
+	if !t.active {
 		return
 	}
 	t.pcMu.Lock()
@@ -573,7 +560,7 @@ func (t *udpLegTransport) spawnDial() {
 	t.pcMu.Unlock()
 
 	go func() {
-		pc, err := t.dialFn()
+		pc, err := net.ListenPacket("udp4", "0.0.0.0:0")
 		t.pcMu.Lock()
 		t.dialing = false
 		if err == nil {
@@ -581,14 +568,14 @@ func (t *udpLegTransport) spawnDial() {
 		}
 		t.pcMu.Unlock()
 		if err != nil {
-			util.LogModuleInfo("p2p", "[UDP-LEG] DialPacket failed (will retry in backoff): %v", err)
+			util.LogModuleInfo("p2p", "[UDP-LEG] local UDP bind failed (will retry in backoff): %v", err)
 			t.fsmMu.Lock()
 			acts := t.fsm.OnChannelResult(time.Now(), false)
 			t.fsmMu.Unlock()
 			t.executeActions(acts)
 			return
 		}
-		util.LogModuleInfo("p2p", "[UDP-LEG] channel established via %s", pc.LocalAddr())
+		util.LogModuleInfo("p2p", "[UDP-LEG] local UDP channel bound on %s -> peer %s", pc.LocalAddr(), t.peerIP)
 		t.fsmMu.Lock()
 		acts := t.fsm.OnChannelResult(time.Now(), true)
 		t.fsmMu.Unlock()
@@ -607,33 +594,41 @@ func (t *udpLegTransport) closeChannel() {
 	}
 }
 
+// allocatePort binds the passive side's real UDP socket. ListenUDP applies the
+// configured UDP port range, the same range used by the SOCKS5 relay.
 func (t *udpLegTransport) allocatePort() {
-	t.epMu.Lock()
-	defer t.epMu.Unlock()
-	if t.ep != nil {
+	if t.active {
 		return
 	}
-	ep := globalUDPLegRegistry.allocate()
-	if ep == nil {
-		util.LogModuleWarn("p2p", "[UDP-LEG] no free leg port in range %d-%d", udpLegPortMin, udpLegPortMax)
+	t.pcMu.Lock()
+	if t.pc != nil {
+		t.pcMu.Unlock()
 		return
 	}
-	t.ep = ep
+	t.pcMu.Unlock()
+	pc, err := dialer.ListenUDP()
+	if err != nil {
+		util.LogModuleWarn("p2p", "[UDP-LEG] bind passive UDP port failed: %v", err)
+		return
+	}
+	port := 0
+	if ua, ok := pc.LocalAddr().(*net.UDPAddr); ok {
+		port = ua.Port
+	}
+	t.pcMu.Lock()
+	t.pc = pc
+	t.pcMu.Unlock()
 	t.fsmMu.Lock()
-	t.fsm.SetLocalPort(ep.port)
+	t.fsm.SetLocalPort(port)
 	t.fsmMu.Unlock()
-	util.LogModuleInfo("p2p", "[UDP-LEG] allocated leg port %d", ep.port)
-	go t.epPump(ep)
+	util.LogModuleInfo("p2p", "[UDP-LEG] passive leg bound on UDP port %d", port)
+	go t.pcReadLoop(pc)
 }
 
+// unregisterPort closes the passive socket so the port is released when the
+// control link (or the leg episode) goes away.
 func (t *udpLegTransport) unregisterPort() {
-	t.epMu.Lock()
-	ep := t.ep
-	t.ep = nil
-	t.epMu.Unlock()
-	if ep != nil {
-		globalUDPLegRegistry.release(ep.port)
-	}
+	t.closeChannel()
 }
 
 // --- introspection for gossip build + admin ---

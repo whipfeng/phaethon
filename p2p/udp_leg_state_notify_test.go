@@ -27,7 +27,7 @@ func (s *stubLegTransport) Close() error { s.closed.Store(true); return nil }
 // 撤回再发一次；不再周期重发（旧 5s notify 机制已删除）。
 func TestUDPLegStateNotifyOnAdvertiseTransitions(t *testing.T) {
 	base := &stubLegTransport{}
-	tr := newUDPLegTransport(base, false, nil, "")
+	tr := newUDPLegTransport(base, false, "", nil)
 	defer tr.Close()
 
 	var calls atomic.Int32

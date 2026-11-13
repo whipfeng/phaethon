@@ -4016,3 +4016,39 @@ utun7——说明 `SIOCSIFMTU` 下发路径生效。验证完已 `{"enabled":fal
 **上线**：代码与单测已完成；二进制下发后 `p2p-key` 为空，行为与之前
 一致（明文）。要启用需**所有节点**配同一个 key 并重启；漏配/错配的
 链路会因解密失败断开。
+
+## 136. UDP leg 改为直连：代理只做控制通道（2026-11-13 09:30）
+
+**决策**：不再使用 SOCKS5/Trojan 的 UDP ASSOCIATE。代理只负责可靠控制
+通道，UDP 数据面由两端自己的 socket 直连；IP 用控制链路已知道的对端
+IP，gossip 只协商端口。
+
+**流程**：
+1. 主动端 A：本地 `bind :0`，gossip 带 `udp:true`。
+2. 被动端 B：收到后从 `dialer.ListenUDP()`（与 SOCKS5 relay 同一配置
+   端口范围）bind 真实 `:P`，gossip 回 `udpPort:P`。
+3. A 向 `B 的 IP:P` 发 UDP；B 用包源地址回。
+4. A 在 Negotiated 态先用 LinkPing 探测 UDP；收到回包后才把数据从
+   TCP 切到 UDP。K 秒无回包 → 回退 TCP + 退避。
+5. 控制链路断开 → leg `Close` 关闭 socket、释放端口。
+
+**代码改动**：
+- `udpLegTransport`：主动端 `net.ListenPacket("udp4", ":0")`；被动端
+  `dialer.ListenUDP()`；`writeLeg` 目标改为 `peerIP:peerPort`；被动端回
+  包到 `fsm.PeerReturnAddr()`；删除 `epPump`/registry。
+- FSM：`RouteProbeViaUDP` 从 Negotiated 起；`RouteDataViaUDP` 只有
+  Active 才为真（探测成功前数据不丢）。
+- 删除 `udp_leg_registry.go`、`server/socks5.go` 的 `deliverToUDPLeg`、
+  `dialer.UDPDialer` leg 依赖、`udpLegInbound` 管理级开关；被动端总是
+  包 leg，等主动端 gossip 才激活。
+- 控制台：代理编辑页新增 “UDP Direct” 开关（`p2p-udp`），仅对
+  SOCKS5/Trojan/H_TUNNEL 显示；提示“需对端 UDP 端口可达，否则回退 TCP”。
+  `IsP2PUDP` 不再限定 socks5，只要求 P2P 开启。
+- 加密：沿用 `p2p-key` 的 leg 域 AEAD。
+
+**验证**：单测通过（FSM/加密/transport）。直连可达性取决于 B 的 UDP
+端口是否开放；不通会自动回退 TCP。
+
+**不做**：UDP 打洞、中继节点、候选地址交换。后续独立课题：一个中继
+peer 作为 rendezvous，其它 peer 连它后再互相探测 UDP；不是让已互通的
+peer 之间打洞。

@@ -287,7 +287,7 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		}
 		routes = append(routes, PeerRouteEntry{
 			Prefix:    ipNet,
-			PrefixStr: r.Prefix,
+			PrefixStr: ipNet.String(), // canonical network form
 			NodeID:    r.NodeID,
 		})
 	}
@@ -308,9 +308,9 @@ func (t *Topology) UpdateGossip(sender PeerSender, info GossipInfo) bool {
 		if err != nil {
 			continue
 		}
-	claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
+		claimedSubnets = append(claimedSubnets, PeerClaimedSubnetEntry{
 			Subnet:    ipNet,
-			SubnetStr: cs.Subnet,
+			SubnetStr: ipNet.String(), // canonical network form
 			NodeID:    cs.NodeID,
 			Hop:       cs.Hop + 1,
 			Neighbors: cs.Neighbors,

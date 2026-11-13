@@ -7,9 +7,9 @@ import (
 
 // routeTrieNode represents a node in the IP prefix trie.
 type routeTrieNode struct {
-	children [2]*routeTrieNode // 0 and 1 branches
-	route    *MeshRoute        // non-nil if this node has a route
-	prefixLen int              // prefix length for this node
+	children  [2]*routeTrieNode // 0 and 1 branches
+	route     *MeshRoute        // non-nil if this node has a route
+	prefixLen int               // prefix length for this node
 }
 
 // routeTrie is an IP prefix trie for longest-prefix-match routing.
@@ -47,8 +47,15 @@ func (t *routeTrie) Insert(prefix *net.IPNet, route *MeshRoute) {
 		node = node.children[bit]
 	}
 
-	// Store route at this node
-	node.route = route
+	// Store route at this node. When a duplicate prefix somehow reaches the
+	// trie, merge the owners instead of overwriting the previous copy — the
+	// trie holds exactly one route per prefix and the admin tree reads owners
+	// from it.
+	if node.route != nil {
+		node.route.Entries = dedupeRouteEntries(append(node.route.Entries, route.Entries...))
+	} else {
+		node.route = route
+	}
 	node.prefixLen = prefixLen
 }
 

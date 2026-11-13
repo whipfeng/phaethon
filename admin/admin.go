@@ -4693,11 +4693,15 @@ func (s *AdminServer) apiMeshConfigPatch(w http.ResponseWriter, r *http.Request)
 		httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	for _, cidr := range req.Advertise {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
+	for i, cidr := range req.Advertise {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
 			httpError(w, "invalid CIDR: "+cidr, http.StatusBadRequest)
 			return
 		}
+		// Store the canonical network form so two nodes advertising the same
+		// network through different host-bit spellings share one route entry.
+		req.Advertise[i] = ipNet.String()
 	}
 
 	mesh.GlobalMeshManager.UpdateConfig(req.DomainSuffixes, req.Advertise)
@@ -4922,10 +4926,12 @@ func (s *AdminServer) apiMeshAdvertise(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if _, _, err := net.ParseCIDR(req.CIDR); err != nil {
+		_, ipNet, err := net.ParseCIDR(req.CIDR)
+		if err != nil {
 			httpError(w, "invalid CIDR: "+req.CIDR, http.StatusBadRequest)
 			return
 		}
+		req.CIDR = ipNet.String()
 
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()
@@ -4975,10 +4981,12 @@ func (s *AdminServer) apiMeshAdvertiseItem(w http.ResponseWriter, r *http.Reques
 			httpError(w, "parse fail: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if _, _, err := net.ParseCIDR(req.CIDR); err != nil {
+		_, ipNet, err := net.ParseCIDR(req.CIDR)
+		if err != nil {
 			httpError(w, "invalid CIDR: "+req.CIDR, http.StatusBadRequest)
 			return
 		}
+		req.CIDR = ipNet.String()
 
 		s.mu.Lock()
 		meshCfg, _ := db.GetMeshConfig()

@@ -26,10 +26,11 @@ func main() {
 	outputPath := flag.String("output", "", "Output .pkg path")
 	platform := flag.String("platform", "", "Platform (linux/windows/darwin) - required if no meta.json")
 	arch := flag.String("arch", "", "Architecture (amd64/arm64) - required if no meta.json")
+	versionFlag := flag.String("version", "", "Version override; skips running the binary (for cross-compiled targets)")
 	flag.Parse()
 
 	if *binaryPath == "" || *keyPath == "" || *outputPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sign -binary <path> -key <path> -output <path> [-meta <path>] [-platform <os>] [-arch <arch>]")
+		fmt.Fprintln(os.Stderr, "Usage: sign -binary <path> -key <path> -output <path> [-meta <path>] [-platform <os>] [-arch <arch>] [-version <v>]")
 		os.Exit(1)
 	}
 
@@ -40,13 +41,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Extract version from binary by running --version
-	version, err := extractVersion(*binaryPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error extracting version from binary: %v\n", err)
-		os.Exit(1)
+	// Extract version from binary by running --version. Cross-compiled targets
+	// cannot run locally, so an explicit -version is accepted instead.
+	version := *versionFlag
+	if version == "" {
+		version, err = extractVersion(*binaryPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error extracting version from binary: %v (use -version for cross-compiled targets)\n", err)
+			os.Exit(1)
+		}
 	}
-	fmt.Printf("Extracted version from binary: %s\n", version)
+	fmt.Printf("Version: %s\n", version)
 
 	var meta signing.PackageMeta
 

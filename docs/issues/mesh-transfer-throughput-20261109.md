@@ -4085,3 +4085,31 @@ TCP 基线（down 3.26s / up 5.88s）。
 
 **当前开关状态**：VM 的 `QG_SS5_UDPLEG` 已开启 `p2p-udp`（控制台
 “UDP Direct”）；关闭即回退 TCP。其余链路按需开启。
+
+## 138. 升级方式统一为直接替换稳定路径（2026-11-13 15:30）
+
+**决策**：所有平台统一为“替换稳定路径二进制 + 重启”，不再让 watchdog
+从 pkg 解压 `data/worker/phaethon-<version>` 去拉起。
+
+**原因**：
+- Windows 防火墙的程序规则按**完整路径**匹配。替换同一个 `phaethon.exe`
+  规则继续生效；换到 `phaethon-<version>.exe` 是新路径，旧规则不匹配，
+  入站（mesh 监听/内置 SSH）可能被静默丢弃或弹窗（无桌面会话时失败）。
+- 版本化 worker 还会累积文件、每个目录复制 wintun.dll，AV/EDR 路径白名单
+  同样失效。
+
+**实现**（`64fe6d6`）：
+- `selectWorkerBinary()` 恒返回 watchdog 自身可执行文件；不再选 pkg/pin；
+  存在 `worker-pin` 时只告警。
+- `readLastGoodWorker()` 禁用（不再回退到旧的版本化 worker），崩溃只重启
+  稳定二进制。
+- pkg 上传保留用于分发，但不再自动执行。
+
+**部署结果**：vm/qg/jf/gg/mb/qgw/deskzq 全部 `v0.8.0-664-g64fe6d6`。
+deskzq 通过控制台临时加公钥 + 内置 SSH 执行分离式 PowerShell，从 pending
+pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定路径），
+完成后已删除临时公钥。ms worker3 10.161.88.10 为 662、worker4
+10.161.88.9 为 288，两台网络时通时断，待可达时补发；deskw 离线。
+
+**顺带**：mesh 页新增静态路由/静态域名路由 CRUD（稳定 ID，egress 节点
+逗号分隔），API 与通告路由同一套编号方式；`663/664` 已上线。

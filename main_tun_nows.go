@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // consoleCloseNotify returns a channel that is never closed on non-Windows
@@ -28,16 +29,33 @@ func processExists(pid int) bool {
 // reapChild reaps a zombie child process and returns its exit code.
 // The watchdog becomes the parent of the server process, so it must
 // wait on it to avoid zombies.
+//
+// The stdout pipe can close a moment before the kernel marks the child
+// reapable, so a single non-blocking Wait4 used to leave zombies behind.
+// Poll briefly instead of giving up on the first EAGAIN/0 result.
 func reapChild(pid int) (exitCode int, ok bool) {
-	var ws syscall.WaitStatus
-	_, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
-	if err != nil {
-		return 0, false
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var ws syscall.WaitStatus
+		wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		if err == nil && wpid == pid {
+			if ws.Exited() {
+				return ws.ExitStatus(), true
+			}
+			if ws.Signaled() {
+				return 128 + int(ws.Signal()), true
+			}
+			return 0, true
+		}
+		if err != nil {
+			// ECHILD: already reaped by someone else.
+			return 0, false
+		}
+		if time.Now().After(deadline) {
+			return 0, false
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if ws.Exited() {
-		return ws.ExitStatus(), true
-	}
-	return 0, false
 }
 
 // reexecAsWatchdog copies the current binary to a "-watchdog" suffixed name

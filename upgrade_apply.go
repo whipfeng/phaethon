@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"phaethon/pkg/signing"
@@ -183,21 +182,34 @@ func repairInterruptedUpgrade(exe string) {
 }
 
 // stopChild gracefully stops the worker and reaps it.
+//
+// The wait is on the real process, not the stdout pipe: the pipe can close
+// slightly before the process is reaped, and the old upgrade path called a
+// non-blocking Wait4 at that moment, leaving a zombie child behind on Unix.
 func stopChild(cp *childProcess, pid int) {
-	if cp == nil {
+	if cp == nil || cp.proc == nil {
 		return
 	}
-	if cp.proc != nil {
-		cp.kill(gracefulExitSignal())
+	cp.kill(gracefulExitSignal())
+
+	waitDone := make(chan struct{})
+	go func() {
+		_, _ = cp.proc.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		return
+	case <-time.After(workerStopGrace):
+		util.LogModuleWarn("main", "watchdog: worker %d did not exit within %v, killing", pid, workerStopGrace)
+		cp.kill(os.Kill)
 		select {
-		case <-cp.done:
-		case <-time.After(workerStopGrace):
-			util.LogModuleWarn("main", "watchdog: worker %d did not exit within %v, killing", pid, workerStopGrace)
-			cp.kill(syscall.SIGKILL)
-			<-cp.done
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			util.LogModuleError("main", "watchdog: worker %d still not reaped after SIGKILL", pid)
 		}
 	}
-	reapChild(pid)
 }
 
 // spawnAndWait starts exe as the worker and waits for its ready message.

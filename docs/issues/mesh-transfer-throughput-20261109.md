@@ -4173,6 +4173,7 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
 | ms10 | Linux | 内置 SSH + 分离式脚本 | 674，两进程 |
 | qgw | Windows 7 | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
 | deskzq | Windows | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
+| ms9 | Linux | OS SSH `migu@10.161.88.9` + 内联替换 | 674，两进程 |
 
 - Windows 内置 SSH 会话与 phaethon 同 Session（qgw=2、deskzq=1），因此分离式
   PowerShell 里 `Start-Process phaethon.exe` 能落在交互式桌面会话，Wintun 正常。
@@ -4180,10 +4181,11 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
   Win7 运行（`--version` 正常）。
 - 内置 SSH 二进制 stdin 在 Linux/mac 可用（md5 校验通过），Windows 不可用；
   Windows 改为 mesh 上传 pkg + 内置 PowerShell 解析 zip 中央目录解压。
-- 为 deskzq/ms10 的内置 SSH 添加了 `vm-deploy` 公钥（指纹
+- 为 deskzq/ms10/ms9 的内置 SSH 添加了 `vm-deploy` 公钥（指纹
   `SHA256:mHKLotSHclszYP4M0b2fDW396BAdL7Bh/sWC11bdAj4`），否则 key 被拒。
 - 验证用假包/探针包（999、badrollback、0.0.1+probe）已从所有节点删除。
-- ms9（100.0.9.174）不在当前 mesh 拓扑、内置 SSH 不可达，待可达后单独引导。
+- ms9（worker4，10.161.88.9）不在 mesh 直连拓扑，改用 OS SSH 引导：上传
+  674 二进制并内联替换，已是 674；内置 SSH 也补了同一把公钥，可直接使用。
 
 **QG 磁盘满事件**：扩散时上传 674 包失败（`no space left on device`），
 `/` 6.6G 已 100%。清理了 `data/cache/p2p-cache` 两天前的 244 个缓存二进制

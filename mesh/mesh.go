@@ -259,14 +259,12 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		return available[i].NodeID < available[j].NodeID
 	})
 
-	// Sticky: check if we have a cached selection for this target
+	// Sticky: check if we have a cached selection for this target.
 	targetKey := targetIP.String()
-	m.stickyMu.Lock()
-	if cachedNodeID, ok := m.stickyCache[targetKey]; ok {
+	if cachedNodeID, ok := m.sticky.Get(targetKey); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
-				m.stickyMu.Unlock()
 				util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (cached)", targetIP, cachedNodeID)
 				return cachedNodeID
 			}
@@ -274,7 +272,13 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		// Cached node no longer available, will re-select below
 		util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
 	}
-	m.stickyMu.Unlock()
+
+	// Canonicalize IPv4 to 4 bytes: net.ParseIP returns a 16-byte v4-in-v6
+	// representation while the data plane passes 4-byte addresses; hashing the
+	// raw slice would otherwise select different owners for the same target.
+	if v4 := targetIP.To4(); v4 != nil {
+		targetIP = v4
+	}
 
 	// Hash-based stable selection
 	hash := 0
@@ -288,9 +292,7 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 	selectedNodeID := available[idx].NodeID
 
 	// Cache the selection
-	m.stickyMu.Lock()
-	m.stickyCache[targetKey] = selectedNodeID
-	m.stickyMu.Unlock()
+	m.sticky.Put(targetKey, selectedNodeID)
 
 	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
 	return selectedNodeID
@@ -319,7 +321,9 @@ type MeshManager struct {
 
 	DNSAllocator func(domain string) (net.IP, error)
 
-	closeCh chan struct{}
+	closeCh  chan struct{}
+	stopOnce sync.Once
+	workers  sync.WaitGroup
 
 	// Dual-channel design for performance isolation:
 	// criticalCh: blocking queue for critical operations (register/unregister/gossip processing)
@@ -362,11 +366,10 @@ type MeshManager struct {
 	stallDVIP  atomic.Uint64 // dst == local VIP (.1): returns of host-originated traffic
 	stallDIPIP atomic.Uint64 // IPIP outer dst == local EIP (.4): exit-node returns
 
-	// Sticky node selection cache (target → nodeID)
-	// Ensures stable routing: once a nodeID is selected for a target, keep using it
-	// until the node becomes unavailable.
-	stickyMu    sync.Mutex
-	stickyCache map[string]string // target (IP/domain) → nodeID
+	// Bounded sticky node selection cache (target → nodeID). Ensures stable
+	// routing until the node becomes unavailable; the LRU bound prevents
+	// unbounded growth from scans/large domain sets.
+	sticky *stickyLRU
 
 	// TCP keepalive settings for mesh connections
 	tcpKeepalive *config.MeshTCPKeepalive
@@ -421,7 +424,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 		closeCh:         make(chan struct{}),
 		criticalCh:      make(chan meshEvent, 256),  // blocking queue for critical ops
 		normalCh:        make(chan meshEvent, 1024), // non-blocking queue for non-critical ops
-		stickyCache:     make(map[string]string),
+		sticky:          newStickyLRU(stickyLRUMax),
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
@@ -976,14 +979,18 @@ func (m *MeshManager) Start(ns *Netstack, p2p P2PTransport) {
 	p2p.SetMeshInfo(m.nodeID, m.vip.String())
 	util.LogModuleInfo("mesh", "[MESH-START] calling recomputeRoutes: node=%s", m.nodeID)
 	m.recomputeRoutes()
-	go m.criticalWorker()
-	go m.gossipWorker()
-	go m.qualityLoop()
+	m.workers.Add(3)
+	go func() { defer m.workers.Done(); m.criticalWorker() }()
+	go func() { defer m.workers.Done(); m.gossipWorker() }()
+	go func() { defer m.workers.Done(); m.qualityLoop() }()
 	util.LogModuleInfo("mesh", "[MESH] started: nodeID=%s vip=%s subnet=%s subnetStr=%s", m.nodeID, m.vip, m.subnet, m.subnetStr)
 }
 
 func (m *MeshManager) Stop() {
-	close(m.closeCh)
+	m.stopOnce.Do(func() {
+		close(m.closeCh)
+		m.workers.Wait()
+	})
 }
 
 // ResolveDomainSubnet looks up a domain in the unified domain route trie.
@@ -1066,12 +1073,10 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 	})
 
 	// Sticky: check if we have a cached selection for this domain
-	m.stickyMu.Lock()
-	if cachedNodeID, ok := m.stickyCache[domain]; ok {
+	if cachedNodeID, ok := m.sticky.Get(domain); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
-				m.stickyMu.Unlock()
 				util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (cached)", domain, cachedNodeID)
 				return cachedNodeID
 			}
@@ -1079,7 +1084,6 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		// Cached node no longer available, will re-select below
 		util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
 	}
-	m.stickyMu.Unlock()
 
 	// Hash-based stable selection using domain name
 	hash := 0
@@ -1093,9 +1097,7 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 	selectedNodeID := available[idx].NodeID
 
 	// Cache the selection
-	m.stickyMu.Lock()
-	m.stickyCache[domain] = selectedNodeID
-	m.stickyMu.Unlock()
+	m.sticky.Put(domain, selectedNodeID)
 
 	util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
 	return selectedNodeID
@@ -1104,13 +1106,19 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 // RegisterPeer is called when a P2P peer with mesh capability connects.
 // Blocking send to criticalCh to ensure registration is never dropped.
 func (m *MeshManager) RegisterPeer(sender PeerSender) {
-	m.criticalCh <- meshEvent{kind: peerRegister, sender: sender}
+	select {
+	case m.criticalCh <- meshEvent{kind: peerRegister, sender: sender}:
+	case <-m.closeCh:
+	}
 }
 
 // UnregisterPeer is called when a P2P peer disconnects.
 // Blocking send to criticalCh to ensure cleanup is never dropped.
 func (m *MeshManager) UnregisterPeer(sender PeerSender) {
-	m.criticalCh <- meshEvent{kind: peerUnregister, sender: sender}
+	select {
+	case m.criticalCh <- meshEvent{kind: peerUnregister, sender: sender}:
+	case <-m.closeCh:
+	}
 }
 
 // HandleMeshFrame processes a raw IP packet received from a peer (design §4.5,
@@ -1321,8 +1329,12 @@ func (m *MeshManager) HandleTopologyGossip(sender PeerSender, info GossipInfo) {
 	if sender.GetNodeID() == m.nodeID {
 		return
 	}
-	// Gossip processing modifies topology, so it goes to criticalCh (blocking)
-	m.criticalCh <- meshEvent{kind: processGossip, sender: sender, gossip: info}
+	// Gossip processing modifies topology, so it goes to criticalCh (blocking).
+	// The closeCh case prevents a permanent block after Stop().
+	select {
+	case m.criticalCh <- meshEvent{kind: processGossip, sender: sender, gossip: info}:
+	case <-m.closeCh:
+	}
 }
 
 func (m *MeshManager) GetStatus() map[string]interface{} {

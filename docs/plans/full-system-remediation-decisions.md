@@ -81,7 +81,6 @@
   - [x] 第 2 项：`db.InitDefault` 强制 `AuthEnabled=true`；非交互首次启动生成随机密码，写入 `data/state/initial-admin-password`（0600），bcrypt 存库
   - [x] 第 17 项：admin TLS 显式 `MinVersion=TLS1.2`；TLS 不可用且未认证时 admin 仅绑 `127.0.0.1`
   - [x] 第 16 项：启动时把 DB/legacy config 收紧到 0600（Unix）
-- [ ] 第 1 项：Git 历史清理（放到所有代码批次之后做单次 rewrite + force-push）
 - [x] 批次 2：升级可靠性
   - [x] 第 7 项：Linux 改为硬链接 `.old` + 原子 `rename(new, exe)`；Windows 使用 `ReplaceFileW`（Win10/Win7 实测可替换运行中的 exe），失败回退 rename；ready 前连续 3 次失败回退 `.old`；启动修复按 `.old → .old2 → .new` 并校验最小大小；`.new`/marker fsync；升级中检查 stopping；状态写入重试
   - [x] 第 4 项：retention 保护当前运行版本、请求目标、最近成功版本、本次激活版本；activation 时同步执行
@@ -92,7 +91,14 @@
   - [x] 第 3 项：启动执行全量 retention；active/pending 每 platform/arch 保留 3 版；孤儿 pkg/陈旧 tmp 清理；上传/接收前检查剩余空间（<512MB 拒绝）；`BinaryCache.Prune(5, 1GiB)` 启动清理
   - [x] 第 10 项：上传/接收改为流式落盘 + `signing.VerifyPkgMeta` 流式验签；并发上限 2
   - [x] 第 11 项：包端点保持公开；receive 加每源 500ms 限流 + 并发/空间检查
-- [ ] 批次 4：代码卫生/加固
+- [x] 批次 4：代码卫生/加固
+  - [x] 第 8 项：`stickyCache` 改为有界 LRU（65536）
+  - [x] 第 9 项：`Stop` 加 `sync.Once`+WaitGroup；`criticalCh` 写入 select closeCh
+  - [x] 第 12 项：`tools/*.go` 加 `//go:build ignore`；`gvisorfork/doc.go`；Windows-only `cmd/ifdiag`、`cmd/iftype` 加 build tag；临时文件已归档到 `archive/tmp-20261113/`（gitignored）
+  - [x] 第 13 项：unicast 表改用 `x/sys/windows` 官方结构；neighbor/route 表保留手写解析但加 count 上限（x/sys 未封装对应类型）
+  - [x] 第 15 项：启动 warning + `/api/p2p` `encrypted` 字段 + proxies 页面未加密横幅
+  - [x] 第 19 项：Makefile 增加 `test-race`（Linux CI 入口）
+- [ ] 第 1 项：Git 历史清理（最后单次 rewrite + force-push）
 
 > 历史清理推迟到最后的理由：避免多次改写/force-push，并让代码修改先完成、验证后再一次性清理。
 

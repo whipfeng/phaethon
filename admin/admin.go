@@ -4471,10 +4471,13 @@ func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p2p.GlobalP2PManager == nil {
-		jsonResponse(w, map[string]interface{}{"peers": []interface{}{}})
+		jsonResponse(w, map[string]interface{}{"peers": []interface{}{}, "encrypted": false})
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"peers": p2p.GlobalP2PManager.GetPeers()})
+	jsonResponse(w, map[string]interface{}{
+		"peers":     p2p.GlobalP2PManager.GetPeers(),
+		"encrypted": p2p.GlobalP2PManager.EncryptionEnabled(),
+	})
 }
 
 // apiDatabase provides generic CRUD operations on the database

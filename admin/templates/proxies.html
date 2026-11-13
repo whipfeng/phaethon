@@ -1984,6 +1984,19 @@ function escapeHtml(s) {
             if (!res.ok) return;
             const data = await res.json();
             updateP2PStatus(data.peers || []);
+            if (data.encrypted === false) {
+                if (!document.getElementById('p2p-encryption-warning')) {
+                    const warn = document.createElement('div');
+                    warn.id = 'p2p-encryption-warning';
+                    warn.style.cssText = 'margin:0.75rem 0;padding:0.6rem 0.75rem;border-radius:6px;background:rgba(248,81,73,0.12);color:var(--text-secondary);font-size:0.9em;';
+                    warn.textContent = '当前 mesh/P2P 帧未加密（p2p-key 为空）；流量仅依赖底层代理链路保护。';
+                    const host = document.querySelector('.page-content') || document.body;
+                    host.prepend(warn);
+                }
+            } else {
+                const warn = document.getElementById('p2p-encryption-warning');
+                if (warn) warn.remove();
+            }
         } catch (err) {
             if (err.name !== 'AbortError') {
                 console.warn('Failed to fetch P2P status:', err);

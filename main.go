@@ -281,6 +281,8 @@ func run(prev *activeResources) (*activeResources, error) {
 	p2p.GlobalP2PManager.SetP2PKey(meshConfig.P2PKey)
 	if meshConfig.P2PKey != "" {
 		util.LogModuleInfo("system", "P2P frame encryption enabled (mesh-wide PSK)")
+	} else {
+		util.LogModuleWarn("system", "P2P frame encryption is DISABLED (p2p-key is empty); mesh frames are plaintext")
 	}
 
 	var meshMgr *mesh.MeshManager

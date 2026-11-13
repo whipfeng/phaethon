@@ -4137,8 +4137,25 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
   DELETE 取消未开始的请求；控制台 Package 页横幅展示四个状态。
 - 旧的 `worker-pin` 在启动/启用/删除包时自动清理。
 
-**验证**：单测覆盖请求/状态读写、swap/回滚、断电修复、签名包查找、
-已运行幂等、缺包不伤服务；`go test . ./admin/ ./pkg/upgrade/` 通过。
-实机 VM/QG 手动部署 671（最后一次手动），随后用 672 包走
-upload + activate 验证自替换；结果待补。
+**验证结果（2026-11-13）**：单测覆盖请求/状态读写、swap/回滚、断电修复、
+签名包查找、已运行幂等、缺包不伤服务；`go test . ./admin/ ./pkg/upgrade/` 通过。
+
+- VM（Windows）：手动 669 → 上传 670 + activate，watchdog 自替换成功，
+  进程路径仍是 `phaethon.exe`，`.old` 为上一版，防火墙规则未变；
+  671 作为 supervisor 再做 672 同样成功。
+- QG（Linux）：手动 669 → 670、手动 671 → 672 两次自替换成功，
+  稳定路径 `/root/phaethon` 不变，`.old`/`.old2` 保留两版。
+- 故障注入（VM）：上传缺失包 → 不换二进制，status=failed-rolled-back；
+  上传 36 字节假 exe（版本 999）→ 交换后启动失败，自动 `.old` 回滚，
+  留下 `.failed`，status=failed-rolled-back，服务恢复 672。
+- 第一轮 QG 升级发现旧 worker 变 Z 状态，已由 671 修复：stopChild 等待
+  真实退出，reapChild 改为 2s 内轮询；第二轮 671→672 无残留进程。
+- 注意：supervisor 仍是内存中的旧版本，文件已是新版本，下次服务重启
+  才会换成新 supervisor（符合设计）。
+- 验证用的假包已从 VM/QG 删除；其他 peer 可能收到过 pending 副本，
+  扩散时一并清理（pending 不执行，无风险）。
+
+**扩散前置**：其余节点仍是 664/662/288，旧 watchdog 不识别
+`upgrade-request`，必须再手动部署一次 673（自替换能力引导版），
+之后统一走 upload + activate。
 

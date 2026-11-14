@@ -28,7 +28,7 @@
 | 19 | race/CI | 增加 Linux CI：`CGO_ENABLED=1 go test -race ./mesh ./p2p ./db` |
 | 20 | Win7 内嵌 SSH 交互式访问 | 先调研，结论见第二节；暂不实施 |
 | 21 | SSH Shell/PTY 交互规则 | 指定程序必须 PTY，拿不到报错；未指定自动探测，PTY 不可用回内置 Bubble Tea；交互式 shell 不引入线级；`exec` 请求了 PTY 但拿不到时拒绝执行。**已实施并在 v694 实机验证**（QG/VM/qgw），结果见 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md) 第四节 |
-| 22 | 新旧 watchdog 交接 | 升级后由旧 watchdog 启动新 watchdog，等新 worker ready 后旧进程退出；失败则 abort + 杀进程树 + 回滚。目标版本低于首个交接版本（`v0.8.0-699`）时走旧的直接启动 worker 路径。首个版本发布后需对每个节点做一次 watchdog 进程重启以激活。详见 [watchdog-handoff.md](watchdog-handoff.md) |
+| 22 | 新旧 watchdog 交接 | 升级后由旧 watchdog 启动新 watchdog，等新 worker ready 后旧进程退出；失败则 abort + 杀进程树 + 回滚。目标版本低于首个交接版本（`v0.8.0-699`）时走旧的直接启动 worker 路径。首个版本发布后需对每个节点做一次 watchdog 进程重启以激活。**已实施并在 QG/VM/qgw 实机验证（699 激活，700 交接成功）**。详见 [watchdog-handoff.md](watchdog-handoff.md) |
 
 ## 二、第 20 项调研：Win7 内嵌 SSH 交互式访问
 

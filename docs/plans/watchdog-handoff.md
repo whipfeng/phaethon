@@ -78,3 +78,22 @@ Linux 可直接 `exec` 自身；当前实现为统一使用 spawn + ready + 旧�
 - 旧 watchdog PID 消失，新 watchdog PID 存活；
 - `data/state/watchdog-version` 等于新版本；
 - 新 watchdog 启动失败时可回滚，worker 版本回到旧版本且实例锁被正确释放。
+
+## 实机验证（2026-11-14）
+
+1. 发布 699，三个节点 worker 均为 699；
+2. 一次性重启 watchdog：
+   - QG：`rc-service phaethon restart`（分离式执行）；
+   - VM/qgw：分离式批处理 `taskkill` + `start`；
+   - 重启后 `data/state/watchdog-version` 均为 `v0.8.0-699-g339fc08`。
+3. 发布测试版本 `v0.8.0-700-gfa11bac`：
+
+| 节点 | 结果 | 旧 watchdog | 新 watchdog | 证据 |
+| --- | --- | --- | --- | --- |
+| QG | succeeded | 24567 消失 | 24677 存活 | `handoff: started/ready/transferred` |
+| VM | succeeded | 旧 PID 消失 | 21616 存活 | 同上，`watchdog-version=700` |
+| qgw | succeeded | 旧 PID 消失 | 18728 存活 | 同上，`watchdog-version=700` |
+
+4. 验证中发现并修复的竞态：新 watchdog 的 monitor loop 可能在发布 `ready` 之前读到 upgrade-request 并把它清掉，导致旧 watchdog 等不到 ready。已在 `handoffMode && !handoffReadySent` 时跳过 upgrade 请求处理。
+
+结论：watchdog 代码已能随升级更新；旧映像在旧进程退出后解锁，后续轮换不再依赖 `.old.last`。`watchdog-version` 可用于运维核对实际运行的 watchdog 版本。

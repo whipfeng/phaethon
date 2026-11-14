@@ -148,3 +148,27 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 - `exec + pty-req` 拿不到 PTY 时绝不静默退回管道执行：客户端明确要 TTY，很多程序（sudo/top/ssh）在无 TTY 下行为不同。
 - 指定 PS2 时，Win7 的 winpty 无法提供可用 PTY → 直接报错，由用户自己改用 cmd 或安装 WMF 5.1。
 - 未指定时，Win7 自动探测优先 cmd（PTY 可用）；若连 cmd/PTY 都不可用，进入内置 Bubble Tea，不会退化成线级。
+
+## 四、v0.8.0-694 实机验证（2026-11-14）
+
+用 x/crypto/ssh 探针（可精确控制 pty-req 的 cols/rows）加真实 `ssh -T`/`ssh -tt` 在 QG、VM、qgw 三套 PTY 实现上逐项验证：
+
+| 场景 | QG（Alpine，Linux pty） | VM（Win11，ConPTY+PowerShell 5.1） | qgw（Win7 SP1，cmd+winpty） |
+| --- | --- | --- | --- |
+| `exec` 无 pty | ✅ 管道执行 | ✅ | ✅ |
+| `exec` + pty 80x24 | ✅ | ✅ | ✅ |
+| `exec` + pty 0x0 | ✅ | ✅ | ✅ |
+| `shell` + pty | ✅ 系统 shell | ✅ PowerShell 提示符/回显/exit | ✅ cmd 提示符/回显/exit |
+| `shell` 无 pty（未指定） | ✅ 内置 Bubble Tea；`help\nexit\n` 逐行执行 | ✅ | ✅ |
+| `shell` 无 pty（指定程序） | ✅ 明确报错、exit 1 | ✅ 明确报错、exit 1 | ✅ 明确报错、exit 1 |
+| `shell` + pty（指定程序） | ✅ `/bin/sh` | ✅ `cmd.exe` | ✅ `cmd.exe`；PS2 → 明确报错、exit 1 |
+
+验证期间发现并修复的问题：
+
+1. **pty-req 0x0 被错误拒绝**：`ssh -tt` 重定向 stdin、程序化 SSH 客户端会发送 0x0。PTY 本身可用，只是窗口大小未知；改为保留默认 80x24（v692）。
+2. **Win7 `exec` + PTY 输出被截断**：winpty 的 `Wait` 提前释放 winpty 对象，conout 在排水前被关闭，客户端只看到清屏序列。释放改到 `CloseIO`/`Kill`（v692）。
+3. **Windows 连续两次自升级失败**：第一次升级后 `.old` 是仍在运行的看门狗映像，`rename .old→.old2` 被 Windows 拒绝，节点卡在旧版本；且回滚会落到更老的 `.old`。改为 `.old` 不可轮换时使用 `.old.last`，marker 记录实际备份路径（v693）。VM/qgw 因旧看门狗无法自愈，已用分离式脚本手工引导到 v694。
+4. **错误原因不可见**：请求 `Reply(false)` 时 OpenSSH 只显示 "shell request failed"，丢弃 stderr。改为接受请求后写 stderr + exit-status，客户端能看到具体原因（v694）。
+5. qgw 的内置 SSH 只登记了 `id_rsa`（cmll）公钥，默认 ed25519 未授权；这是密钥配置问题，不是 SSH 服务缺陷。
+
+注：VM 重启后 `vm.phn` 的 mesh DNS 会短暂 `no such host`，几秒后恢复；与本批 SSH 改动无关。

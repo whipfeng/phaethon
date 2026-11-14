@@ -34,7 +34,8 @@ func TestSwapBinaryKeepsStablePath(t *testing.T) {
 	writeFile(t, exe+".old", "previous")
 	writeFile(t, exe+".new", "next")
 
-	if err := swapBinary(exe, exe+".new"); err != nil {
+	backup := prepareBackup(exe)
+	if err := swapBinary(exe, exe+".new", backup); err != nil {
 		t.Fatalf("swapBinary: %v", err)
 	}
 	if got := readFile(t, exe); got != "next" {
@@ -57,7 +58,7 @@ func TestRestoreBackupRollsBack(t *testing.T) {
 	writeFile(t, exe, "bad")
 	writeFile(t, exe+".old", "good")
 
-	if err := restoreBackup(exe); err != nil {
+	if err := restoreBackup(exe, ""); err != nil {
 		t.Fatalf("restoreBackup: %v", err)
 	}
 	if got := readFile(t, exe); got != "good" {
@@ -65,6 +66,47 @@ func TestRestoreBackupRollsBack(t *testing.T) {
 	}
 	if got := readFile(t, exe+".failed"); got != "bad" {
 		t.Fatalf(".failed = %q, want bad", got)
+	}
+}
+
+func TestPrepareBackupFallsBackWhenOldCannotRotate(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "phaethon")
+	writeFile(t, exe, "current")
+	writeFile(t, exe+".old", "previous")
+	// A non-empty .old2 makes both its removal and the .old -> .old2 rename
+	// fail, mirroring Windows where .old is the watchdog's mapped image.
+	if err := os.MkdirAll(filepath.Join(exe+".old2", "keep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := prepareBackup(exe)
+	if backup != exe+".old.last" {
+		t.Fatalf("backup = %q, want %q", backup, exe+".old.last")
+	}
+
+	writeFile(t, exe+".new", "next")
+	if err := swapBinary(exe, exe+".new", backup); err != nil {
+		t.Fatalf("swapBinary: %v", err)
+	}
+	if got := readFile(t, exe); got != "next" {
+		t.Fatalf("stable path = %q, want next", got)
+	}
+	if got := readFile(t, exe+".old"); got != "previous" {
+		t.Fatalf(".old = %q, want previous (untouched)", got)
+	}
+	if got := readFile(t, backup); got != "current" {
+		t.Fatalf("%s = %q, want current", backup, got)
+	}
+
+	if err := restoreBackup(exe, backup); err != nil {
+		t.Fatalf("restoreBackup: %v", err)
+	}
+	if got := readFile(t, exe); got != "current" {
+		t.Fatalf("restored binary = %q, want current", got)
+	}
+	if got := readFile(t, exe+".failed"); got != "next" {
+		t.Fatalf(".failed = %q, want next", got)
 	}
 }
 

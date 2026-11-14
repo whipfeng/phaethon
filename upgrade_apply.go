@@ -104,32 +104,63 @@ func stageBinary(exe string, contents *signing.PkgContents) (string, error) {
 	return newPath, nil
 }
 
-// swapBinary rotates the backup chain, then installs newPath at the stable
-// executable path. installBinary is platform-specific: POSIX replaces the
-// directory entry atomically; Windows uses ReplaceFileW when available.
-func swapBinary(exe, newPath string) error {
+// prepareBackup rotates the backup chain and returns the path that
+// installBinary may use as the backup of the current executable.
+//
+// On Windows .old can be the image of the still-running watchdog: after the
+// first successful self-upgrade the watchdog keeps executing the old binary
+// from .old, and Windows refuses to rename a mapped image ("Access is
+// denied"). Failing the whole upgrade there would leave every node stuck one
+// version behind. Keep .old in place and use a fixed secondary backup path;
+// ReplaceFileW overwrites an existing backup file.
+func prepareBackup(exe string) string {
 	oldPath := stagedPath(exe, ".old")
-	old2Path := stagedPath(exe, ".old2")
-
-	if fileExists(oldPath) {
-		_ = os.Remove(old2Path)
-		if err := os.Rename(oldPath, old2Path); err != nil {
-			return fmt.Errorf("rotate backup: %w", err)
-		}
+	if !fileExists(oldPath) {
+		return oldPath
 	}
-	if err := installBinary(exe, newPath, oldPath); err != nil {
+	old2Path := stagedPath(exe, ".old2")
+	_ = os.Remove(old2Path)
+	if err := os.Rename(oldPath, old2Path); err == nil {
+		return oldPath
+	} else {
+		util.LogModuleWarn("main", "watchdog: cannot rotate .old (%v); keeping it and using .old.last", err)
+		upgradeLog("rotate backup failed: %v; using .old.last", err)
+		return stagedPath(exe, ".old.last")
+	}
+}
+
+// swapBinary installs newPath at the stable executable path. installBinary is
+// platform-specific: POSIX replaces the directory entry atomically; Windows
+// uses ReplaceFileW when available and saves the previous executable at
+// backupPath.
+func swapBinary(exe, newPath, backupPath string) error {
+	if err := installBinary(exe, newPath, backupPath); err != nil {
 		return err
 	}
 	syncParentDir(exe)
 	return nil
 }
 
-// restoreBackup puts .old back at the stable path. A bad binary that is
-// currently in place is kept as .failed for diagnosis.
-func restoreBackup(exe string) error {
-	oldPath := stagedPath(exe, ".old")
-	if !fileExists(oldPath) {
-		return fmt.Errorf("no .old backup to restore")
+// restoreBackup puts a backup back at the stable path. The backup actually
+// used by the swap is tried first: on Windows it may be .old.last when .old is
+// the watchdog's own mapped image. A bad binary that is currently in place is
+// kept as .failed for diagnosis.
+func restoreBackup(exe, backupPath string) error {
+	candidates := make([]string, 0, 3)
+	if backupPath != "" {
+		candidates = append(candidates, backupPath)
+	}
+	candidates = append(candidates, stagedPath(exe, ".old"), stagedPath(exe, ".old2"))
+
+	src := ""
+	for _, c := range candidates {
+		if fileExists(c) {
+			src = c
+			break
+		}
+	}
+	if src == "" {
+		return fmt.Errorf("no backup to restore")
 	}
 	failedPath := stagedPath(exe, ".failed")
 	_ = os.Remove(failedPath)
@@ -138,8 +169,8 @@ func restoreBackup(exe string) error {
 			return fmt.Errorf("move failed binary aside: %w", err)
 		}
 	}
-	if err := os.Rename(oldPath, exe); err != nil {
-		return fmt.Errorf("restore backup: %w", err)
+	if err := os.Rename(src, exe); err != nil {
+		return fmt.Errorf("restore backup %s: %w", src, err)
 	}
 	return nil
 }
@@ -149,19 +180,18 @@ func restoreBackup(exe string) error {
 const minRestoredBinarySize = 1 << 20
 
 // tryRestoreCandidate renames a backup/staged candidate into the stable path if
-// it looks like a real binary. It returns the candidate suffix and true when
-// the stable path is restored.
-func tryRestoreCandidate(exe, suffix string) (string, bool) {
-	candidate := stagedPath(exe, suffix)
+// it looks like a real binary. It returns the candidate label and true when the
+// stable path is restored.
+func tryRestoreCandidate(exe, label, candidate string) (string, bool) {
 	fi, err := os.Stat(candidate)
 	if err != nil || fi.IsDir() || fi.Size() < minRestoredBinarySize {
-		return suffix, false
+		return label, false
 	}
 	if err := os.Rename(candidate, exe); err != nil {
 		util.LogModuleWarn("main", "watchdog: restore %s failed: %v", candidate, err)
-		return suffix, false
+		return label, false
 	}
-	return suffix, true
+	return label, true
 }
 
 // repairInterruptedUpgrade runs before the first spawn. It closes the window
@@ -194,17 +224,37 @@ func repairInterruptedUpgrade(exe string) {
 		return
 	}
 
-	// Stable path is missing. Try the newest useful fallback first: .old,
-	// then .old2, then the staged .new. A restored .new keeps the request so
-	// the normal ready/version check can complete it; a restored backup clears
-	// the request (do not loop a swap that already broke once).
-	for _, suffix := range []string{".old", ".old2", ".new"} {
-		if _, ok := tryRestoreCandidate(exe, suffix); !ok {
+	// Stable path is missing. Try the backup recorded in the marker first (it
+	// may be .old.last on Windows), then the historical chain, then .new. A
+	// restored .new keeps the request so the normal ready/version check can
+	// complete it; a restored backup clears the request (do not loop a swap
+	// that already broke once).
+	type candidate struct {
+		label string
+		path  string
+	}
+	candidates := []candidate{}
+	if marker != nil && marker.Old != "" {
+		candidates = append(candidates, candidate{"marker old", marker.Old})
+	}
+	candidates = append(candidates,
+		candidate{".old", stagedPath(exe, ".old")},
+		candidate{".old2", stagedPath(exe, ".old2")},
+		candidate{".new", stagedPath(exe, ".new")},
+	)
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		if seen[c.path] {
 			continue
 		}
-		util.LogModuleWarn("main", "watchdog: executable missing at startup; restored %s", suffix)
-		upgradeLog("repair: executable missing; restored %s", suffix)
-		if suffix == ".new" {
+		seen[c.path] = true
+		label, ok := tryRestoreCandidate(exe, c.label, c.path)
+		if !ok {
+			continue
+		}
+		util.LogModuleWarn("main", "watchdog: executable missing at startup; restored %s", label)
+		upgradeLog("repair: executable missing; restored %s", label)
+		if label == ".new" {
 			requested := ""
 			if marker != nil {
 				requested = marker.Version
@@ -226,7 +276,7 @@ func repairInterruptedUpgrade(exe string) {
 			Status:    upgrade.StatusFailedRolledBack,
 			Current:   upgrade.ReadWorkerVersion(),
 			Requested: requested,
-			LastError: "executable missing at startup; restored " + suffix,
+			LastError: "executable missing at startup; restored " + label,
 		})
 		return
 	}
@@ -319,14 +369,14 @@ func failUpgradeBeforeSwap(current string, req *upgrade.Request, err error) {
 
 // rollbackUpgrade restores the backup and starts it again. The request is
 // cleared so a broken package is not retried in a loop.
-func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req *upgrade.Request, reason error) (*childProcess, int) {
+func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req *upgrade.Request, backupPath string, reason error) (*childProcess, int) {
 	util.LogModuleError("main", "watchdog: upgrade to %s failed, rolling back to %s: %v", req.Version, fromVersion, reason)
 	upgradeLog("rollback begin: target=%s from=%s reason=%v", req.Version, fromVersion, reason)
-	if err := restoreBackup(exe); err != nil {
+	if err := restoreBackup(exe, backupPath); err != nil {
 		util.LogModuleError("main", "watchdog: rollback restore failed: %v", err)
 		upgradeLog("rollback restore failed: %v", err)
 	} else {
-		upgradeLog("rollback restored .old")
+		upgradeLog("rollback restored backup=%s", backupPath)
 	}
 	_ = upgrade.ClearRequest()
 	_ = upgrade.ClearMarker()
@@ -415,12 +465,15 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	}
 	upgradeLog("staged: target=%s path=%s bytes=%d", req.Version, newPath, len(contents.Binary))
 
+	// Choose the backup path before writing the marker: repair-on-startup
+	// must know where the previous executable went.
+	backupPath := prepareBackup(exe)
 	_ = upgrade.WriteMarker(upgrade.Marker{
-		Old:     stagedPath(exe, ".old"),
+		Old:     backupPath,
 		New:     newPath,
 		Version: req.Version,
 	})
-	upgradeLog("marker written: target=%s", req.Version)
+	upgradeLog("marker written: target=%s backup=%s", req.Version, backupPath)
 
 	if stopping != nil && stopping.Load() {
 		upgradeLog("aborted before stop: shutdown requested")
@@ -437,9 +490,9 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	upgradeLog("stopping worker: pid=%d", pid)
 	stopChild(cp, pid)
 
-	if err := swapBinary(exe, newPath); err != nil {
+	if err := swapBinary(exe, newPath, backupPath); err != nil {
 		upgradeLog("swap failed: %v", err)
-		newCp, newPid := rollbackUpgrade(exe, cp, current, req, err)
+		newCp, newPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
 		return newCp, newPid, true
 	}
 	upgradeLog("swap complete: target=%s", req.Version)
@@ -448,13 +501,13 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	if err != nil {
 		upgradeLog("new worker not ready: %v", err)
 		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, err)
+		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
 		return rbCp, rbPid, true
 	}
 	if got := newCp.workerVersion(); got != req.Version {
 		upgradeLog("new worker version mismatch: got=%s want=%s", got, req.Version)
 		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
+		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
 		return rbCp, rbPid, true
 	}
 

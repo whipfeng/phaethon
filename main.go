@@ -1274,7 +1274,7 @@ func runWatchdogMode() {
 		// try the previous version once. The fallback is bounded so a bad
 		// config cannot bounce through the backup chain forever.
 		if !wasReady && notReadyStreak >= 3 && !fallbackUsed && fileExists(stagedPath(exe, ".old")) {
-			if err := restoreBackup(exe); err == nil {
+			if err := restoreBackup(exe, ""); err == nil {
 				fallbackUsed = true
 				notReadyStreak = 0
 				util.LogModuleWarn("main", "watchdog: 3 consecutive starts failed before ready; fell back to .old")
@@ -1345,7 +1345,7 @@ func runWatchdogMode() {
 	if err != nil {
 		util.LogModuleError("main", "watchdog: initial spawn failed: %v", err)
 		if fileExists(stagedPath(exe, ".old")) {
-			if rerr := restoreBackup(exe); rerr == nil {
+			if rerr := restoreBackup(exe, ""); rerr == nil {
 				util.LogModuleWarn("main", "watchdog: initial spawn failed; retrying with .old backup")
 				upgradeLog("initial spawn failed; retrying with .old backup")
 				cp, err = spawnChildProcess(exe)

@@ -27,6 +27,7 @@
 | 18 | 升级相关死代码 | 删除 `selfUnparseable` 与 `last-good-worker` 写入；用第 7 项的 `.old` 回退替代 |
 | 19 | race/CI | 增加 Linux CI：`CGO_ENABLED=1 go test -race ./mesh ./p2p ./db` |
 | 20 | Win7 内嵌 SSH 交互式访问 | 先调研，结论见第二节；暂不实施 |
+| 21 | SSH Shell/PTY 交互规则 | 指定程序必须 PTY，拿不到报错；未指定自动探测，PTY 不可用回内置 Bubble Tea；交互式 shell 不引入线级；`exec` 请求了 PTY 但拿不到时拒绝执行 |
 
 ## 二、第 20 项调研：Win7 内嵌 SSH 交互式访问
 
@@ -109,6 +110,7 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   - [x] 第 13 项：unicast 表改用 `x/sys/windows` 官方结构；neighbor/route 表保留手写解析但加 count 上限（x/sys 未封装对应类型）
   - [x] 第 15 项：启动 warning + `/api/p2p` `encrypted` 字段 + proxies 页面未加密横幅
   - [x] 第 19 项：Makefile 增加 `test-race`（Linux CI 入口）
+- [ ] 批次 5：SSH Shell/PTY 规则 + 内置 Bubble Tea（第 21 项）
 
 > 历史清理推迟到最后的理由：避免多次改写/force-push，并让代码修改先完成、验证后再一次性清理。
 
@@ -135,5 +137,28 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   当成主动拨号目标，产生 `socks5: connect to :0` 失败 peer，建议后续在 `StartPeer` 跳过无 dial
   target 的代理。
 - 详见 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md)。
+
+## 七、SSH Shell/PTY 交互规则（第 21 项）
+
+原则：
+
+1. **指定了程序**：原样使用，不判断程序类型、不换程序；必须有 PTY，拿不到 PTY 直接报错。不引入线级交互。
+2. **未指定程序**：自动探测 shell；无论 PTY 是否可用都必须有兜底：PTY 可用用系统 shell，不可用用内置 Bubble Tea Shell。不引入线级交互。
+3. 内置 Bubble Tea 是 phaethon 自己的交互式 Shell，不是对任意程序的 PTY 包装。
+4. `shell` 不带 `pty-req` 存在（`ssh -T`、程序化 SSH 客户端明确不要 PTY）。
+
+| 请求 | pty-req | PTY 可用 | 指定了程序 | 未指定 |
+| --- | --- | --- | --- | --- |
+| `exec` | 无 | - | 管道执行命令（非交互） | 管道执行命令（非交互） |
+| `exec` | 有 | 是 | PTY 内执行 | PTY 内执行 |
+| `exec` | 有 | 否 | **拒绝执行并报错** | **拒绝执行并报错** |
+| `shell` | 无 | - | **报错**（指定程序必须有 PTY） | **内置 Bubble Tea** |
+| `shell` | 有 | 是 | PTY 内启动指定程序 | PTY 内启动自动探测 shell |
+| `shell` | 有 | 否 | **报错** | **内置 Bubble Tea** |
+
+- 指定 PS2：Win7 winpty 无法提供可用 PTY → 直接报错，用户自行改用 cmd 或安装 WMF 5.1。
+- 未指定：Win7 自动探测优先 cmd（PTY 可用）；cmd/PTY 都不可用 → 内置 Bubble Tea，不退化成线级。
+- 实施状态：待开发（批次 5）。
+
 
 

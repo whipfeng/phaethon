@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"phaethon/p2p"
 	"phaethon/util"
 )
 
@@ -43,11 +42,6 @@ const (
 
 	handoffReadyTimeout = 45 * time.Second
 	handoffAbortWait    = 10 * time.Second
-
-	// watchdogHandoffMinVersion is the first build that understands the
-	// handoff protocol. Older targets keep the legacy direct-worker path so
-	// rollback to a pre-handoff build still works.
-	watchdogHandoffMinVersion = "v0.8.0-699-g0"
 )
 
 var errHandoffStopped = errors.New("watchdog handoff aborted: shutdown requested")
@@ -69,13 +63,6 @@ type handoffResult struct {
 	Status     string    `json:"status"`
 	Error      string    `json:"error,omitempty"`
 	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-func watchdogHandoffSupported(version string) bool {
-	if version == "" {
-		return false
-	}
-	return p2p.CompareVersions(version, watchdogHandoffMinVersion) >= 0
 }
 
 func newHandoffToken() string {

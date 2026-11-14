@@ -502,62 +502,30 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	}
 	upgradeLog("swap complete: target=%s", req.Version)
 
-	// Newer targets hand supervision to a freshly started watchdog so that
-	// watchdog code is updated too and the old image file is unlocked when
-	// this process exits. Older targets keep the legacy direct-worker path.
-	if watchdogHandoffSupported(req.Version) {
-		upgradeLog("handoff: starting new watchdog for %s", req.Version)
-		err := handoffToNewWatchdog(exe, req.Version, stopping)
-		switch {
-		case err == nil:
-			upgradeLog("handoff: supervision transferred, target=%s", req.Version)
-			util.LogModuleInfo("main", "watchdog: handed off to %s, exiting", req.Version)
-			markUpgradeSucceeded(req.Version, req.Version)
-			_ = upgrade.WriteWorkerVersion(req.Version)
-			return nil, 0, true, true
-		case errors.Is(err, errHandoffStopped):
-			upgradeLog("handoff aborted: shutdown requested")
-			writeWatchdogVersion(Version)
-			_ = upgrade.ClearRequest()
-			_ = upgrade.ClearMarker()
-			return nil, 0, true, true
-		default:
-			upgradeLog("handoff failed: %v", err)
-			// The old watchdog stays in charge after rollback; restore the
-			// version marker the new process may have written.
-			writeWatchdogVersion(Version)
-			rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
-			return rbCp, rbPid, true, false
-		}
+	// Hand supervision to a freshly started watchdog so that watchdog code is
+	// updated too and the old image file is unlocked when this process exits.
+	upgradeLog("handoff: starting new watchdog for %s", req.Version)
+	err = handoffToNewWatchdog(exe, req.Version, stopping)
+	if err == nil {
+		upgradeLog("handoff: supervision transferred, target=%s", req.Version)
+		util.LogModuleInfo("main", "watchdog: handed off to %s, exiting", req.Version)
+		markUpgradeSucceeded(req.Version, req.Version)
+		_ = upgrade.WriteWorkerVersion(req.Version)
+		return nil, 0, true, true
 	}
-
-	newCp, err := spawnAndWait(exe, workerReadyWait)
-	if err != nil {
-		upgradeLog("new worker not ready: %v", err)
-		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
-		return rbCp, rbPid, true, false
+	if errors.Is(err, errHandoffStopped) {
+		upgradeLog("handoff aborted: shutdown requested")
+		writeWatchdogVersion(Version)
+		_ = upgrade.ClearRequest()
+		_ = upgrade.ClearMarker()
+		return nil, 0, true, true
 	}
-	if got := newCp.workerVersion(); got != req.Version {
-		upgradeLog("new worker version mismatch: got=%s want=%s", got, req.Version)
-		stopChild(newCp, cpPid(newCp))
-		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
-		return rbCp, rbPid, true, false
-	}
-
-	upgradeLog("ready: target=%s pid=%d", req.Version, newCp.proc.Pid)
-	util.LogModuleInfo("main", "watchdog: upgrade to %s succeeded (pid=%d)", req.Version, newCp.proc.Pid)
-	markUpgradeSucceeded(req.Version, req.Version)
-	_ = upgrade.WriteWorkerVersion(req.Version)
-
-	// Honor a shutdown request that arrived during the swap: stop the new
-	// child and let the monitor loop see stopping + closed stdout and exit.
-	if stopping != nil && stopping.Load() {
-		upgradeLog("shutdown requested during apply; stopping new worker")
-		stopChild(newCp, newCp.proc.Pid)
-		return nil, 0, true, false
-	}
-	return newCp, newCp.proc.Pid, true, false
+	upgradeLog("handoff failed: %v", err)
+	// The old watchdog stays in charge after rollback; restore the version
+	// marker the new process may have written.
+	writeWatchdogVersion(Version)
+	rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
+	return rbCp, rbPid, true, false
 }
 
 func cpPid(cp *childProcess) int {

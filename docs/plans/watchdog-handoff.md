@@ -58,7 +58,7 @@
 - 实例锁由 worker 持有，watchdog 不持有；旧 worker 停止后锁自然释放，新 worker 获取。
 - 新 watchdog 的环境必须去掉 `PHAETHON_WORKER`，否则会以 worker 身份启动。
 - 新 watchdog 只在自己启动的 worker 版本等于自身版本时才报 ready，避免 `.old` 回退导致“版本看起来成功、实际跑旧版”。
-- 目标版本低于首个交接版本（`v0.8.0-699`）时走旧的直接启动 worker 路径，保证可以回滚到旧版本。
+- 目标版本必须包含交接代码；不兼容没有交接代码的旧版本。发布这类旧版本时，新 watchdog 不会回 ready，旧 watchdog 会超时、abort 并回滚。
 - 旧 watchdog 退出前必须确认新 watchdog ready；退出后不再触碰新进程。
 - 启动器/服务管理器应把“旧 watchdog 退出码 0”视为主动交接，不要重复拉起；即使重复拉起，worker 的实例锁也会让重复实例退出。
 

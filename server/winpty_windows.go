@@ -126,7 +126,6 @@ func winptyReady() bool {
 			return
 		}
 		p.CloseStdin()
-		p.CloseIO()
 		done := make(chan struct{})
 		go func() {
 			_ = p.Wait()
@@ -141,6 +140,7 @@ func winptyReady() bool {
 			<-done
 			util.LogModuleWarn("ssh", "winpty: probe timed out")
 		}
+		p.CloseIO()
 	})
 	return winptyProbeOK
 }
@@ -370,10 +370,19 @@ func (p *winptyProc) CloseStdin() {
 }
 
 func (p *winptyProc) Wait() error {
-	_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
+	p.mu.Lock()
+	h := p.proc
+	p.mu.Unlock()
+	if h == 0 {
+		return nil
+	}
+	_, _ = windows.WaitForSingleObject(h, windows.INFINITE)
 	var code uint32
-	_ = windows.GetExitCodeProcess(p.proc, &code)
-	p.release()
+	_ = windows.GetExitCodeProcess(h, &code)
+	// Do not free the winpty object here: the output copy is still draining
+	// the conout pipe. Freeing wp closes that pipe and silently truncates fast
+	// exec output (e.g. `ssh -tt win7 cmd /c echo ...`). release happens in
+	// CloseIO/Kill, after runSession has finished copying.
 	if code != 0 {
 		return &exitCodeError{code: code}
 	}
@@ -381,12 +390,19 @@ func (p *winptyProc) Wait() error {
 }
 
 func (p *winptyProc) Kill() {
-	if p.proc != 0 {
-		_ = windows.TerminateProcess(p.proc, 1)
+	p.mu.Lock()
+	h := p.proc
+	p.mu.Unlock()
+	if h != 0 {
+		_ = windows.TerminateProcess(h, 1)
 	}
+	p.release()
 }
 
-func (p *winptyProc) CloseIO() { _ = p.out.Close() }
+func (p *winptyProc) CloseIO() {
+	_ = p.out.Close()
+	p.release()
+}
 
 func (p *winptyProc) Resize(cols, rows uint32) {
 	if cols == 0 || rows == 0 {

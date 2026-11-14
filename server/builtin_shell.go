@@ -1,6 +1,7 @@
 package server
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +31,7 @@ func runBuiltinShell(channel ssh.Channel, cols, rows uint32, reason string) {
 	model := newBuiltinShellModel(int(cols), int(rows), reason)
 	program := tea.NewProgram(
 		model,
-		tea.WithInput(channel),
+		tea.WithInput(&lfToCRReader{r: channel}),
 		tea.WithOutput(channel),
 		tea.WithAltScreen(),
 	)
@@ -38,6 +39,22 @@ func runBuiltinShell(channel ssh.Channel, cols, rows uint32, reason string) {
 		util.LogModuleWarn("ssh", "built-in shell exited: %v", err)
 	}
 	sendExitStatus(channel, 0)
+}
+
+// lfToCRReader normalizes line endings for the built-in shell. A terminal
+// sends CR for Enter, but non-PTY clients (ssh -T, scripts) pipe plain LF;
+// Bubble Tea's key decoder does not treat LF as Enter, so without this every
+// piped line would be concatenated into one input line.
+type lfToCRReader struct{ r io.Reader }
+
+func (l *lfToCRReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	for i := 0; i < n; i++ {
+		if p[i] == '\n' {
+			p[i] = '\r'
+		}
+	}
+	return n, err
 }
 
 type builtinShellModel struct {

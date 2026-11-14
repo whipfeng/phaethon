@@ -1215,6 +1215,18 @@ func runWatchdogMode() {
 	}
 
 	util.LogModuleInfo("main", "watchdog: starting in watchdog mode")
+	writeWatchdogVersion(Version)
+
+	// A handoff start is launched by the previous watchdog after it swapped in
+	// this binary. It reports its lifecycle through the handoff result file so
+	// the old process can either exit (new worker ready) or roll back.
+	handoffToken := os.Getenv(handoffEnvToken)
+	handoffTarget := os.Getenv(handoffEnvTarget)
+	handoffMode := handoffToken != ""
+	if handoffMode {
+		util.LogModuleInfo("main", "watchdog: handoff mode token=%s target=%s", shortToken(handoffToken), handoffTarget)
+		publishHandoffResult(handoffToken, handoffResultAccepted, Version, "")
+	}
 
 	const (
 		monitorInterval = 3 * time.Second
@@ -1224,6 +1236,9 @@ func runWatchdogMode() {
 	// Pick worker binary: distributed pkg if newer than this build, else self
 	exe := selectWorkerBinary()
 	if exe == "" {
+		if handoffMode {
+			publishHandoffResult(handoffToken, handoffResultFailed, Version, "cannot determine worker binary")
+		}
 		return
 	}
 	// Close the crash window left by an interrupted self-replacement before
@@ -1353,6 +1368,9 @@ func runWatchdogMode() {
 		}
 		if err != nil {
 			util.LogModuleError("main", "watchdog: initial spawn failed after .old fallback: %v", err)
+			if handoffMode {
+				publishHandoffResult(handoffToken, handoffResultFailed, Version, "initial worker spawn failed: "+err.Error())
+			}
 			return
 		}
 	}
@@ -1388,6 +1406,17 @@ func runWatchdogMode() {
 	upgradeTicker := time.NewTicker(2 * time.Second)
 	defer upgradeTicker.Stop()
 
+	var handoffCh <-chan time.Time
+	var handoffTicker *time.Ticker
+	handoffReadySent := false
+	handoffWatchDeadline := time.Time{}
+	if handoffMode {
+		handoffTicker = time.NewTicker(200 * time.Millisecond)
+		defer handoffTicker.Stop()
+		handoffCh = handoffTicker.C
+		handoffWatchDeadline = time.Now().Add(2 * time.Minute)
+	}
+
 	pid := cp.proc.Pid
 
 	util.LogModuleInfo("main", "watchdog: entering monitor loop for pid %d", pid)
@@ -1397,6 +1426,11 @@ func runWatchdogMode() {
 		case <-cp.done:
 			// Child process exited (stdout closed) - reap immediately
 			exitCode, _ := reapChild(pid)
+			if handoffMode && !handoffReadySent {
+				publishHandoffResult(handoffToken, handoffResultFailed, Version, fmt.Sprintf("worker exited before ready (code=%d)", exitCode))
+				signal.Stop(sigCh)
+				return
+			}
 			if exitCode == instanceConflictExitCode {
 				util.LogModuleError("main", "watchdog: another instance owns this data dir (worker %d exit=%d), watchdog stopping", pid, exitCode)
 				signal.Stop(sigCh)
@@ -1441,6 +1475,11 @@ func runWatchdogMode() {
 			if !processExists(pid) {
 				// Child exited but cp.done not yet closed — reap and restart
 				exitCode, _ := reapChild(pid)
+				if handoffMode && !handoffReadySent {
+					publishHandoffResult(handoffToken, handoffResultFailed, Version, fmt.Sprintf("worker exited before ready (code=%d)", exitCode))
+					signal.Stop(sigCh)
+					return
+				}
 				if exitCode == instanceConflictExitCode {
 					util.LogModuleError("main", "watchdog: another instance owns this data dir (worker %d exit=%d), watchdog stopping", pid, exitCode)
 					signal.Stop(sigCh)
@@ -1477,6 +1516,12 @@ func runWatchdogMode() {
 			}
 			// Check ready timeout: child has not signaled ready within the limit.
 			if !cp.ready.Load() && time.Since(spawnTime) > childReadyTimeout {
+				if handoffMode && !handoffReadySent {
+					publishHandoffResult(handoffToken, handoffResultFailed, Version, fmt.Sprintf("worker not ready within %v", childReadyTimeout))
+					stopChild(cp, pid)
+					signal.Stop(sigCh)
+					return
+				}
 				// Child still running but stuck — pass alreadyExited=false, wasReady=false
 				oldPid := pid
 				cp = restartChild(cp, pid, fmt.Sprintf("child %d not ready within %v", pid, childReadyTimeout), false, false)
@@ -1517,12 +1562,59 @@ func runWatchdogMode() {
 					spawnTime = time.Now()
 				}
 			}
+		case <-handoffCh:
+			if !handoffReadySent {
+				if cp.ready.Load() {
+					// The watchdog's own Version is the target; make sure the
+					// worker actually running is that same build (the initial
+					// spawn may have fallen back to .old).
+					if got := cp.workerVersion(); got != Version {
+						publishHandoffResult(handoffToken, handoffResultFailed, Version, fmt.Sprintf("worker reported version %q, want %q", got, Version))
+						stopChild(cp, pid)
+						signal.Stop(sigCh)
+						return
+					}
+					publishHandoffResult(handoffToken, handoffResultReady, Version, "")
+					handoffReadySent = true
+					upgradeLog("handoff: new watchdog ready pid=%d version=%s", os.Getpid(), Version)
+				}
+				if !handoffReadySent && handoffAbortRequested(handoffToken) {
+					util.LogModuleWarn("main", "watchdog: handoff abort requested before worker ready")
+					signal.Stop(sigCh)
+					cp.kill(gracefulExitSignal())
+					select {
+					case <-cp.done:
+					case <-time.After(10 * time.Second):
+					}
+					return
+				}
+				continue
+			}
+			// The old watchdog removes the request after a successful handoff.
+			// Missing request or expired grace window ends abort polling.
+			if readHandoffRequest() == nil || time.Now().After(handoffWatchDeadline) {
+				handoffCh = nil
+			} else if handoffAbortRequested(handoffToken) {
+				util.LogModuleWarn("main", "watchdog: handoff abort requested after worker ready")
+				signal.Stop(sigCh)
+				cp.kill(gracefulExitSignal())
+				select {
+				case <-cp.done:
+				case <-time.After(10 * time.Second):
+				}
+				return
+			}
 		case <-upgradeTicker.C:
 			if stopping.Load() {
 				continue
 			}
 			// Apply a pending admin activation. handled=false means no request.
-			if newCp, newPid, handled := tryApplyUpgrade(exe, cp, pid, &stopping); handled && newCp != nil {
+			newCp, newPid, handled, exitWatchdog := tryApplyUpgrade(exe, cp, pid, &stopping)
+			if exitWatchdog {
+				signal.Stop(sigCh)
+				return
+			}
+			if handled && newCp != nil {
 				cp = newCp
 				pid = newPid
 				spawnTime = time.Now()
@@ -1532,11 +1624,20 @@ func runWatchdogMode() {
 }
 
 // buildWorkerEnv builds the environment for the server child process.
-// It inherits the current environment and adds PHAETHON_WORKER=1.
+// It inherits the current environment, drops watchdog-handoff variables, and
+// adds PHAETHON_WORKER=1.
 func buildWorkerEnv() []string {
-	env := os.Environ()
-	env = append(env, "PHAETHON_WORKER=1")
-	return env
+	src := os.Environ()
+	env := make([]string, 0, len(src)+1)
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "PHAETHON_WORKER=") ||
+			strings.HasPrefix(kv, handoffEnvToken+"=") ||
+			strings.HasPrefix(kv, handoffEnvTarget+"=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "PHAETHON_WORKER=1")
 }
 
 // writeStartupError persists a fatal startup error to disk so the user can

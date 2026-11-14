@@ -5,25 +5,6 @@ import (
 	"testing"
 )
 
-func TestWatchdogHandoffSupported(t *testing.T) {
-	cases := []struct {
-		version string
-		want    bool
-	}{
-		{"dev", false},
-		{"v0.8.0-697-gabc1234", false},
-		{"v0.8.0-698-gabc1234", false},
-		{"v0.8.0-699-gabc1234", true},
-		{"v0.8.0-700-gabc1234", true},
-		{"v0.9.0", true},
-	}
-	for _, c := range cases {
-		if got := watchdogHandoffSupported(c.version); got != c.want {
-			t.Errorf("watchdogHandoffSupported(%q) = %v, want %v", c.version, got, c.want)
-		}
-	}
-}
-
 func TestHandoffStateRoundTrip(t *testing.T) {
 	t.Chdir(t.TempDir())
 

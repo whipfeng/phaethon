@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -414,11 +415,13 @@ func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req
 
 // tryApplyUpgrade applies a pending request. handled=false means there is no
 // request. When handled=true the caller owns the returned child (nil means the
-// existing child was left untouched).
-func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Bool) (*childProcess, int, bool) {
+// existing child was left untouched). exitWatchdog=true means supervision was
+// handed to a new watchdog process; the caller must exit without touching the
+// new process or spawning another worker.
+func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Bool) (*childProcess, int, bool, bool) {
 	req := upgrade.ReadRequest()
 	if req == nil {
-		return nil, 0, false
+		return nil, 0, false, false
 	}
 	upgradeLog("request observed: target=%s", req.Version)
 
@@ -437,12 +440,12 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 		util.LogModuleInfo("main", "watchdog: already running requested version %s", req.Version)
 		upgradeLog("request already satisfied: target=%s", req.Version)
 		markUpgradeSucceeded(req.Version, live)
-		return nil, 0, true
+		return nil, 0, true, false
 	}
 
 	// Wait until the current worker is healthy before touching it.
 	if cp == nil || !cp.ready.Load() {
-		return nil, 0, true
+		return nil, 0, true, false
 	}
 
 	util.LogModuleInfo("main", "watchdog: applying upgrade %s (running %s)", req.Version, current)
@@ -458,12 +461,12 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	_, contents, err := findPkgForVersion(req.Version)
 	if err != nil {
 		failUpgradeBeforeSwap(current, req, err)
-		return nil, 0, true
+		return nil, 0, true, false
 	}
 	newPath, err := stageBinary(exe, contents)
 	if err != nil {
 		failUpgradeBeforeSwap(current, req, err)
-		return nil, 0, true
+		return nil, 0, true, false
 	}
 	upgradeLog("staged: target=%s path=%s bytes=%d", req.Version, newPath, len(contents.Binary))
 
@@ -486,7 +489,7 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 			Current:   current,
 			Requested: req.Version,
 		})
-		return nil, 0, true
+		return nil, 0, true, false
 	}
 
 	upgradeLog("stopping worker: pid=%d", pid)
@@ -495,22 +498,51 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	if err := swapBinary(exe, newPath, backupPath); err != nil {
 		upgradeLog("swap failed: %v", err)
 		newCp, newPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
-		return newCp, newPid, true
+		return newCp, newPid, true, false
 	}
 	upgradeLog("swap complete: target=%s", req.Version)
+
+	// Newer targets hand supervision to a freshly started watchdog so that
+	// watchdog code is updated too and the old image file is unlocked when
+	// this process exits. Older targets keep the legacy direct-worker path.
+	if watchdogHandoffSupported(req.Version) {
+		upgradeLog("handoff: starting new watchdog for %s", req.Version)
+		err := handoffToNewWatchdog(exe, req.Version, stopping)
+		switch {
+		case err == nil:
+			upgradeLog("handoff: supervision transferred, target=%s", req.Version)
+			util.LogModuleInfo("main", "watchdog: handed off to %s, exiting", req.Version)
+			markUpgradeSucceeded(req.Version, req.Version)
+			_ = upgrade.WriteWorkerVersion(req.Version)
+			return nil, 0, true, true
+		case errors.Is(err, errHandoffStopped):
+			upgradeLog("handoff aborted: shutdown requested")
+			writeWatchdogVersion(Version)
+			_ = upgrade.ClearRequest()
+			_ = upgrade.ClearMarker()
+			return nil, 0, true, true
+		default:
+			upgradeLog("handoff failed: %v", err)
+			// The old watchdog stays in charge after rollback; restore the
+			// version marker the new process may have written.
+			writeWatchdogVersion(Version)
+			rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
+			return rbCp, rbPid, true, false
+		}
+	}
 
 	newCp, err := spawnAndWait(exe, workerReadyWait)
 	if err != nil {
 		upgradeLog("new worker not ready: %v", err)
 		stopChild(newCp, cpPid(newCp))
 		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, err)
-		return rbCp, rbPid, true
+		return rbCp, rbPid, true, false
 	}
 	if got := newCp.workerVersion(); got != req.Version {
 		upgradeLog("new worker version mismatch: got=%s want=%s", got, req.Version)
 		stopChild(newCp, cpPid(newCp))
 		rbCp, rbPid := rollbackUpgrade(exe, cp, current, req, backupPath, fmt.Errorf("worker reported version %q, want %q", got, req.Version))
-		return rbCp, rbPid, true
+		return rbCp, rbPid, true, false
 	}
 
 	upgradeLog("ready: target=%s pid=%d", req.Version, newCp.proc.Pid)
@@ -523,9 +555,9 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	if stopping != nil && stopping.Load() {
 		upgradeLog("shutdown requested during apply; stopping new worker")
 		stopChild(newCp, newCp.proc.Pid)
-		return nil, 0, true
+		return nil, 0, true, false
 	}
-	return newCp, newCp.proc.Pid, true
+	return newCp, newCp.proc.Pid, true, false
 }
 
 func cpPid(cp *childProcess) int {

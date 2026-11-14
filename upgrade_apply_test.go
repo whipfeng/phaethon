@@ -205,7 +205,7 @@ func TestTryApplyAlreadyRunningMarksSucceeded(t *testing.T) {
 	cp.ready.Store(true)
 	cp.version.Store("v665")
 
-	newCp, _, handled := tryApplyUpgrade(exe, cp, 0, nil)
+	newCp, _, handled, _ := tryApplyUpgrade(exe, cp, 0, nil)
 	if !handled || newCp != nil {
 		t.Fatalf("handled=%v newCp=%v, want true/nil", handled, newCp)
 	}
@@ -226,7 +226,7 @@ func TestTryApplyMissingPackageDoesNotStopWorker(t *testing.T) {
 	cp := &childProcess{done: make(chan struct{})}
 	cp.ready.Store(true)
 
-	newCp, _, handled := tryApplyUpgrade(exe, cp, 0, nil)
+	newCp, _, handled, _ := tryApplyUpgrade(exe, cp, 0, nil)
 	if !handled || newCp != nil {
 		t.Fatalf("handled=%v newCp=%v, want true/nil", handled, newCp)
 	}

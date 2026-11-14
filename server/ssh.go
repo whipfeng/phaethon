@@ -226,7 +226,10 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				if !usePty {
 					if userSpecified {
 						util.LogModuleWarn("ssh", "interactive shell %q requires a PTY but none was granted", shell)
-						req.Reply(false, nil)
+						// Accept the request so the client displays the reason:
+						// OpenSSH only prints "shell request failed" when the
+						// request itself is rejected, discarding stderr.
+						req.Reply(true, nil)
 						channel.Stderr().Write([]byte("interactive shell requires a PTY; PTY was not granted. Refusing to start " + shell + "\n"))
 						sendExitStatus(channel, 1)
 						return
@@ -239,7 +242,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				if err != nil {
 					if userSpecified {
 						util.LogModuleWarn("ssh", "start specified shell %q failed: %v", shell, err)
-						req.Reply(false, nil)
+						req.Reply(true, nil)
 						channel.Stderr().Write([]byte("failed to start configured shell " + shell + " with a PTY: " + err.Error() + "\n"))
 						sendExitStatus(channel, 1)
 						return
@@ -259,7 +262,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			// to pipe execution when the client explicitly asked for a TTY.
 			if ptyRequested && !usePty {
 				util.LogModuleWarn("ssh", "exec requested a PTY but none was granted; refusing to run")
-				req.Reply(false, nil)
+				req.Reply(true, nil)
 				channel.Stderr().Write([]byte("PTY requested but unavailable; refusing to run the command without a PTY\n"))
 				sendExitStatus(channel, 1)
 				return
@@ -267,7 +270,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			proc, err = startSessionProc(shell, cmdline, false, usePty, cols, rows)
 			if err != nil {
 				util.LogModuleWarn("ssh", "start proc fail: %v", err)
-				req.Reply(false, nil)
+				req.Reply(true, nil)
 				channel.Stderr().Write([]byte("failed to start process: " + err.Error() + "\n"))
 				sendExitStatus(channel, 255)
 				return

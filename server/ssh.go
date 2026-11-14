@@ -144,11 +144,12 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 	}
 
 	var (
-		usePty  bool
-		cols    uint32 = 80
-		rows    uint32 = 24
-		started bool
-		proc    sessionProc
+		usePty       bool
+		ptyRequested bool
+		cols         uint32 = 80
+		rows         uint32 = 24
+		started      bool
+		proc         sessionProc
 	)
 
 	defer func() {
@@ -161,10 +162,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req":
-			if !ptyAvailable() {
-				req.Reply(false, nil)
-				continue
-			}
+			ptyRequested = true
 			var p struct {
 				Term string
 				Cols uint32
@@ -173,10 +171,12 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				Hpx  uint32
 				Mode string
 			}
-			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Cols > 0 && p.Rows > 0 {
-				usePty, cols, rows = true, p.Cols, p.Rows
+			if err := ssh.Unmarshal(req.Payload, &p); err != nil || p.Cols == 0 || p.Rows == 0 || !ptyAvailable() {
+				req.Reply(false, nil)
+				continue
 			}
-			req.Reply(err == nil, nil)
+			usePty, cols, rows = true, p.Cols, p.Rows
+			req.Reply(true, nil)
 
 		case "env":
 			req.Reply(true, nil)
@@ -200,8 +200,9 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				req.Reply(false, nil)
 				continue
 			}
+			isShell := req.Type == "shell"
 			cmdline := ""
-			if req.Type == "exec" {
+			if !isShell {
 				var p struct{ Command string }
 				if err := ssh.Unmarshal(req.Payload, &p); err != nil || p.Command == "" {
 					req.Reply(false, nil)
@@ -209,7 +210,54 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				}
 				cmdline = p.Command
 			}
-			proc, err = startSessionProc(cmdline, req.Type == "shell", usePty, cols, rows)
+			shell, userSpecified := resolveShellChoice()
+
+			if isShell {
+				// Interactive shell is PTY-only. A user-specified shell is
+				// never substituted: no PTY -> explicit error. An unspecified
+				// shell always has a fallback: the built-in Bubble Tea shell.
+				if !usePty {
+					if userSpecified {
+						util.LogModuleWarn("ssh", "interactive shell %q requires a PTY but none was granted", shell)
+						req.Reply(false, nil)
+						channel.Stderr().Write([]byte("interactive shell requires a PTY; PTY was not granted. Refusing to start " + shell + "\n"))
+						sendExitStatus(channel, 1)
+						return
+					}
+					req.Reply(true, nil)
+					runBuiltinShell(channel, cols, rows, "PTY unavailable; using the built-in shell")
+					return
+				}
+				proc, err = startSessionProc(shell, "", true, true, cols, rows)
+				if err != nil {
+					if userSpecified {
+						util.LogModuleWarn("ssh", "start specified shell %q failed: %v", shell, err)
+						req.Reply(false, nil)
+						channel.Stderr().Write([]byte("failed to start configured shell " + shell + " with a PTY: " + err.Error() + "\n"))
+						sendExitStatus(channel, 1)
+						return
+					}
+					util.LogModuleWarn("ssh", "start auto shell %q failed, using built-in: %v", shell, err)
+					req.Reply(true, nil)
+					runBuiltinShell(channel, cols, rows, "failed to start the system shell; using the built-in shell")
+					return
+				}
+				started = true
+				req.Reply(true, nil)
+				runSession(channel, proc, true)
+				return
+			}
+
+			// exec: a requested PTY must be honored. Never silently fall back
+			// to pipe execution when the client explicitly asked for a TTY.
+			if ptyRequested && !usePty {
+				util.LogModuleWarn("ssh", "exec requested a PTY but none was granted; refusing to run")
+				req.Reply(false, nil)
+				channel.Stderr().Write([]byte("PTY requested but unavailable; refusing to run the command without a PTY\n"))
+				sendExitStatus(channel, 1)
+				return
+			}
+			proc, err = startSessionProc(shell, cmdline, false, usePty, cols, rows)
 			if err != nil {
 				util.LogModuleWarn("ssh", "start proc fail: %v", err)
 				req.Reply(false, nil)
@@ -219,11 +267,9 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			}
 			started = true
 			req.Reply(true, nil)
-			// Only interactive shells need the short forced-close grace (the
-			// shell/ConPTY may keep the output handle open after exit). exec
-			// sessions must drain their output pipe even when a pty was
+			// exec sessions must drain their output pipe even when a pty was
 			// requested, otherwise the last 32KB pipe buffer is truncated.
-			runSession(channel, proc, req.Type == "shell")
+			runSession(channel, proc, false)
 			return
 
 		default:

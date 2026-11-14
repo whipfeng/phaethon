@@ -51,15 +51,32 @@ type sessionProc interface {
 // resolveShell 优先取 db 配置的 shell；未配置时走各平台 autoDetectShell。
 // db 读失败且非 ErrNotFound 时打 WARN，便于排查"我配的 shell 为啥没生效"。
 func resolveShell() string {
+	shell, _ := resolveShellChoice()
+	return shell
+}
+
+// resolveShellChoice returns the shell plus whether it came from the user's
+// explicit admin setting. The user-specified shell is never substituted or
+// auto-detected over; only an unspecified shell may fall back to autoDetect.
+func resolveShellChoice() (shell string, userSpecified bool) {
 	cfg, err := db.GetSSHConfig()
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
 		util.LogModuleWarn("ssh", "GetSSHConfig fail, fallback to autoDetect: %v", err)
 	}
-	if err == nil && cfg.Shell != "" {
-		return cfg.Shell
+	if err == nil && cfg != nil {
+		if s := strings.TrimSpace(cfg.Shell); s != "" {
+			return s, true
+		}
 	}
-	return autoDetectShell()
+	return autoDetectShell(), false
 }
+
+// Interactive shells require a real PTY. These sentinels let handleSession
+// distinguish "client did not request a PTY" from "PTY could not be created".
+var (
+	errPTYRequired    = errors.New("interactive shell requires a PTY")
+	errPTYUnavailable = errors.New("PTY is unavailable")
+)
 
 // shellKind 对 shell 路径分类：posix(bash/sh/zsh)、powershell、cmd。
 // 判定按 basename 不含扩展名做，含大小写不敏感匹配。
@@ -126,26 +143,6 @@ func utf8InitCmd(shell string) string {
 		return ""
 	default:
 		return "chcp 65001 >nul\r\n"
-	}
-}
-
-// utf8InitCmdPipe 是管道模式（无 ConPTY）的初始化命令：没有真实控制台，
-// chcp 可能失败、设置 InputEncoding 可能抛异常，所以只切 .NET Console 的
-// 输入/输出编码并吞掉异常。必须用不带 BOM 的 UTF8Encoding：PS 2.0 的
-// [Text.Encoding]::UTF8 会给输出加 BOM，ssh 客户端会把它显示成乱码字符。
-// cmd 的 chcp 用 >nul 2>&1 静默。
-func utf8InitCmdPipe(shell string) string {
-	switch classifyShell(shell) {
-	case shellKindPowerShell:
-		// InputEncoding must only be touched on PS 2.0: on PS 5.1 (deskw) the
-		// setter throws a terminating error that aborts "-Command -" input
-		// processing, so the session produces no output at all. PS 2.0 needs
-		// it to decode UTF-8 interactive input correctly.
-		return "if ($PSVersionTable.PSVersion.Major -le 2) { try { [Console]::InputEncoding=[Text.Encoding]::UTF8 } catch {} }; try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}\r\n"
-	case shellKindPosix:
-		return ""
-	default:
-		return "chcp 65001 >nul 2>&1\r\n"
 	}
 }
 

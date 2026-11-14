@@ -1608,6 +1608,12 @@ func runWatchdogMode() {
 			if stopping.Load() {
 				continue
 			}
+			// The handoff request is owned by the old watchdog until this
+			// process has published ready. Processing it here would clear the
+			// request before the old watchdog can confirm the handoff.
+			if handoffMode && !handoffReadySent {
+				continue
+			}
 			// Apply a pending admin activation. handled=false means no request.
 			newCp, newPid, handled, exitWatchdog := tryApplyUpgrade(exe, cp, pid, &stopping)
 			if exitWatchdog {

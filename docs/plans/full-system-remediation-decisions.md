@@ -13,7 +13,7 @@
 | 4 | 回滚目标被 retention 删除 | retention 保护当前运行版本、`upgrade-request` 目标版本、最近一次成功版本；放在升级成功后或启动时执行 |
 | 5 | watchdog 升级日志不可见 | 新增 `data/logs/upgrade.log`，不受模块级别过滤，逐步记录 request/applying/staging/stop/swap/ready/rollback/cleanup |
 | 6 | 自升级幂等误判 | 幂等成功只认实时进程：`cp.ready && cp.workerVersion()==req.Version`；`worker-version` 文件仅用于展示 |
-| 7 | 看门狗缺失窗口与可靠性 | 应用侧：Linux 改为硬链接/复制 `.old` 后原子 `rename(new, exe)`；Windows 先做 `ReplaceFile` 实验，可行则用，否则保留 rename；ready 前连续失败回退 `.old`；启动修复按 `.old→.old2→.new` 依次尝试并验证；`.new`/marker fsync；升级中检查 `stopping`；`upgrade-status` 写入重试；启动器/自启归运维。**补充（v693）**：`.old` 是仍在运行的看门狗映像时 Windows 拒绝轮换；改为保留 `.old`、用 `.old.last` 作为本次备份，marker 记录实际备份路径 |
+| 7 | 看门狗缺失窗口与可靠性 | 应用侧：Linux 改为硬链接/复制 `.old` 后原子 `rename(new, exe)`；Windows 先做 `ReplaceFile` 实验，可行则用，否则保留 rename；ready 前连续失败回退 `.old`；启动修复按 `.old→.old2→.new` 依次尝试并验证；`.new`/marker fsync；升级中检查 `stopping`；`upgrade-status` 写入重试；启动器/自启归运维。**补充（v693）**：`.old2`（轮换目标）是仍在运行的看门狗映像时，Windows 拒绝删除/覆盖，`rename .old→.old2` 因目标仍存在而失败；改为保留 `.old`、用 `.old.last` 作为本次备份，marker 记录实际备份路径 |
 | 8 | stickyCache 无上限 | 有界 LRU，上限 65536 条 |
 | 9 | mesh 停止路径阻塞 | `Stop` 加 `sync.Once` + WaitGroup；所有 `criticalCh` 写入改为 `select closeCh`；停止时等待 worker 退出 |
 | 10 | 上传/接收整包入内存 | 流式落盘后验签；并发上传上限 2；配合剩余空间检查 |

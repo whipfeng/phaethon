@@ -167,7 +167,7 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 
 1. **pty-req 0x0 被错误拒绝**：`ssh -tt` 重定向 stdin、程序化 SSH 客户端会发送 0x0。PTY 本身可用，只是窗口大小未知；改为保留默认 80x24（v692）。
 2. **Win7 `exec` + PTY 输出被截断**：winpty 的 `Wait` 提前释放 winpty 对象，conout 在排水前被关闭，客户端只看到清屏序列。释放改到 `CloseIO`/`Kill`（v692）。
-3. **Windows 连续两次自升级失败**：第一次升级后 `.old` 是仍在运行的看门狗映像，`rename .old→.old2` 被 Windows 拒绝，节点卡在旧版本；且回滚会落到更老的 `.old`。改为 `.old` 不可轮换时使用 `.old.last`，marker 记录实际备份路径（v693）。VM/qgw 因旧看门狗无法自愈，已用分离式脚本手工引导到 v694。
+3. **Windows 连续两次自升级失败**：第一次升级时还没有 `.old`，轮换步骤被跳过，只做 `ReplaceFileW`，所以成功；第二次升级需要把 `.old` 挪到 `.old2`，而 `.old2` 正是仍在运行的看门狗映像，Windows 允许重命名映像但拒绝删除/覆盖，旧代码忽略了删除失败、随后 `rename` 因目标仍存在而报 `Access is denied`。升级失败后回滚又把更老的 `.old` 覆盖回去，节点越升越旧。改为轮换失败时保留 `.old`、使用 `.old.last`，marker 记录实际备份路径（v693）。VM/qgw 因旧看门狗无法自愈，已用分离式脚本手工引导到 v694。
 4. **错误原因不可见**：请求 `Reply(false)` 时 OpenSSH 只显示 "shell request failed"，丢弃 stderr。改为接受请求后写 stderr + exit-status，客户端能看到具体原因（v694）。
 5. qgw 的内置 SSH 只登记了 `id_rsa`（cmll）公钥，默认 ed25519 未授权；这是密钥配置问题，不是 SSH 服务缺陷。
 
@@ -175,10 +175,10 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 
 ### 自升级回归
 
-- **694 → 695**：VM、qgw、QG 全部 `succeeded`。VM/qgw 此前因 `.old` 轮换失败卡在 684，已用分离式批处理脚本手工引导到 694；695 是引导后的第一次正常自升级。
+- **694 → 695**：VM、qgw、QG 全部 `succeeded`。VM/qgw 此前因 `.old2` 被占用导致轮换失败卡在 684，已用分离式批处理脚本手工引导到 694；695 是引导后的第一次正常自升级。
 - **695 → 696（测试版本 `v0.8.0-696-gfa11bac`）**：VM/qgw 再次 `succeeded`，确认 Windows 节点已恢复连续自升级能力。
 - 696 的 swap 会把仍在运行的看门狗映像（694）轮换到 `.old2`。因此下一次升级会命中 `.old2` 被占用、`rename .old→.old2` 失败的条件，正好验证 `.old.last` 回退路径。
 - **官方 `v0.8.0-696-gf4583a5` 发布时实锤**：VM/qgw 的 `upgrade.log` 均出现
   `rotate backup failed: rename ...phaethon.exe.old ...phaethon.exe.old2: Access is denied.; using .old.last`，
   marker 记录 `backup=...phaethon.exe.old.last`，随后 `swap complete`/`ready`/`succeeded`。
-  原故障条件（`.old`/`.old2` 被占用）下自升级已恢复，且回滚目标改为真正的上一版本。
+  原故障条件（`.old2` 被占用、无法删除/覆盖）下自升级已恢复，且回滚目标改为真正的上一版本。

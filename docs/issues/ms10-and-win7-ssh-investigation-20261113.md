@@ -124,3 +124,27 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 | 官方 x64_xp | 1 | `-NoLogo -Sta` | 同上 |
 
 结论：**不是随包 winpty 的构建/版本问题，也不是 spawn flags 问题**。官方 0.4.3（含 XP 兼容构建）与 bundled 表现一致；cmd 在同一个官方 DLL 上仍然正常。可以确认是 **PS2 的 ConsoleHost 与 winpty 的 conhost 模拟不兼容**（winpty 没有完整覆盖 PS2 依赖的 console 行为）。Win7 上没有任何现成 winpty 版本能解决 PS2 的 PTY 交互。
+
+## 三、Shell/PTY 行为决策（2026-11-14）
+
+原则：
+
+1. **指定了程序**：原样使用，不判断程序类型、不自动换程序；必须有 PTY，拿不到 PTY 直接报错。**不引入线级交互**。
+2. **未指定程序**：自动探测 shell；无论 PTY 是否可用都必须有兜底：PTY 可用就用系统 shell，不可用就用内置 Bubble Tea Shell。**不引入线级交互**。
+3. 内置 Bubble Tea 是 phaethon 自己的交互式 Shell，不是对任意程序的 PTY 包装。
+4. `shell` 不带 `pty-req` 是存在的（如 `ssh -T`、程序化 SSH 客户端明确不要 PTY）。
+
+| 请求 | pty-req | PTY 可用 | 指定了程序 | 未指定 |
+| --- | --- | --- | --- | --- |
+| `exec` | 无 | - | 管道执行命令（非交互） | 管道执行命令（非交互） |
+| `exec` | 有 | 是 | PTY 内执行 | PTY 内执行 |
+| `exec` | 有 | 否 | **拒绝执行并报错** | **拒绝执行并报错** |
+| `shell` | 无 | - | **报错**（指定程序必须有 PTY） | **内置 Bubble Tea** |
+| `shell` | 有 | 是 | PTY 内启动指定程序 | PTY 内启动自动探测 shell |
+| `shell` | 有 | 否 | **报错** | **内置 Bubble Tea** |
+
+补充：
+
+- `exec + pty-req` 拿不到 PTY 时绝不静默退回管道执行：客户端明确要 TTY，很多程序（sudo/top/ssh）在无 TTY 下行为不同。
+- 指定 PS2 时，Win7 的 winpty 无法提供可用 PTY → 直接报错，由用户自己改用 cmd 或安装 WMF 5.1。
+- 未指定时，Win7 自动探测优先 cmd（PTY 可用）；若连 cmd/PTY 都不可用，进入内置 Bubble Tea，不会退化成线级。

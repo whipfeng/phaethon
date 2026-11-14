@@ -107,12 +107,14 @@ func stageBinary(exe string, contents *signing.PkgContents) (string, error) {
 // prepareBackup rotates the backup chain and returns the path that
 // installBinary may use as the backup of the current executable.
 //
-// On Windows .old can be the image of the still-running watchdog: after the
-// first successful self-upgrade the watchdog keeps executing the old binary
-// from .old, and Windows refuses to rename a mapped image ("Access is
-// denied"). Failing the whole upgrade there would leave every node stuck one
-// version behind. Keep .old in place and use a fixed secondary backup path;
-// ReplaceFileW overwrites an existing backup file.
+// The rotation target .old2 can be the image of the still-running watchdog:
+// the first upgrade after a watchdog start usually has no .old and skips
+// rotation entirely; the next upgrade must free .old2, but Windows allows
+// renaming a mapped image and rejects deleting/overwriting it ("Access is
+// denied"). The old code ignored the failed remove and aborted on the rename,
+// leaving every Windows node stuck one version behind. Keep .old in place and
+// use a fixed secondary backup path instead; ReplaceFileW overwrites an
+// existing backup file.
 func prepareBackup(exe string) string {
 	oldPath := stagedPath(exe, ".old")
 	if !fileExists(oldPath) {

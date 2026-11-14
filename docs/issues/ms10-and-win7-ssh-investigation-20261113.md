@@ -177,4 +177,8 @@ PS2 + winpty **可以 spawn，但交互宿主不可用**：
 
 - **694 → 695**：VM、qgw、QG 全部 `succeeded`。VM/qgw 此前因 `.old` 轮换失败卡在 684，已用分离式批处理脚本手工引导到 694；695 是引导后的第一次正常自升级。
 - **695 → 696（测试版本 `v0.8.0-696-gfa11bac`）**：VM/qgw 再次 `succeeded`，确认 Windows 节点已恢复连续自升级能力。
-- 696 的 swap 会把仍在运行的看门狗映像（694）轮换到 `.old2`。因此下一次升级会命中 `.old2` 被占用、`rename .old→.old2` 失败的条件，正好验证 `.old.last` 回退路径；该路径已有单测覆盖，下一次官方构建发布时做最终实机确认。
+- 696 的 swap 会把仍在运行的看门狗映像（694）轮换到 `.old2`。因此下一次升级会命中 `.old2` 被占用、`rename .old→.old2` 失败的条件，正好验证 `.old.last` 回退路径。
+- **官方 `v0.8.0-696-gf4583a5` 发布时实锤**：VM/qgw 的 `upgrade.log` 均出现
+  `rotate backup failed: rename ...phaethon.exe.old ...phaethon.exe.old2: Access is denied.; using .old.last`，
+  marker 记录 `backup=...phaethon.exe.old.last`，随后 `swap complete`/`ready`/`succeeded`。
+  原故障条件（`.old`/`.old2` 被占用）下自升级已恢复，且回滚目标改为真正的上一版本。

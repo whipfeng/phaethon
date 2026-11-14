@@ -12,8 +12,7 @@ import (
 
 	"github.com/UserExistsError/conpty"
 	"golang.org/x/sys/windows"
-
-	"phaethon/util"
+	"golang.org/x/sys/windows/registry"
 )
 
 // Windows：ConPTY 全交互（Win10 1809+），不可用时用部署目录自带的
@@ -23,19 +22,15 @@ import (
 var supportConPTY = conpty.IsConPtyAvailable()
 
 // ptyAvailable reports whether a real PTY can be provided: native ConPTY on
-// Win10 1809+, otherwise the bundled winpty (Win10 only).
+// Win10 1809+, otherwise the bundled winpty.
 //
-// Win7/8 are excluded even though winpty supports the OS: PowerShell 2.0's
-// interactive host under winpty is unreliable (sometimes renders nothing and
-// exits immediately, and does not exit on "exit"), while the line-mode pipe
-// fallback is stable there. Installing WMF 5.1 / PowerShell 7 on such nodes
-// would make winpty viable.
+// winpty is enabled on Win7/8 as well: cmd.exe works correctly there (verified
+// on Win7 SP1). PowerShell 2.0's ConsoleHost does not work under winpty, but
+// shell compatibility is the program's responsibility — a user-specified shell
+// is never silently replaced.
 func ptyAvailable() bool {
 	if supportConPTY {
 		return true
-	}
-	if windows.RtlGetVersion().MajorVersion < 10 {
-		return false
 	}
 	return winptyReady()
 }
@@ -53,6 +48,7 @@ func (e *exitCodeError) ExitCode() int { return int(e.code) }
 func (p *conptyProc) Read(b []byte) (int, error)  { return p.cpty.Read(b) }
 func (p *conptyProc) Write(b []byte) (int, error) { return p.cpty.Write(b) }
 func (p *conptyProc) CloseStdin()                 {}
+
 // CloseIO closes the pseudoconsole so a Read blocked after the shell exited
 // returns. ConPTY keeps the output pipe open while the object is alive.
 func (p *conptyProc) CloseIO() { _ = p.cpty.Close() }
@@ -88,19 +84,29 @@ type pipeProc struct {
 
 func (p *pipeProc) Read(b []byte) (int, error)  { return p.stdout.Read(b) }
 func (p *pipeProc) Write(b []byte) (int, error) { return p.stdin.Write(b) }
-func (p *pipeProc) Wait() error                  { return p.cmd.Wait() }
-func (p *pipeProc) Kill()                        { _ = p.cmd.Process.Kill(); p.stdout.Close() }
-func (p *pipeProc) CloseStdin()                  { p.stdin.Close() }
-func (p *pipeProc) CloseIO()                     { p.stdout.Close() }
-func (p *pipeProc) Resize(cols, rows uint32)     {}
+func (p *pipeProc) Wait() error                 { return p.cmd.Wait() }
+func (p *pipeProc) Kill()                       { _ = p.cmd.Process.Kill(); p.stdout.Close() }
+func (p *pipeProc) CloseStdin()                 { p.stdin.Close() }
+func (p *pipeProc) CloseIO()                    { p.stdout.Close() }
+func (p *pipeProc) Resize(cols, rows uint32)    {}
 
 // autoDetectShell 返回系统自动探测的 shell：pwsh（PowerShell 7，装了优先）→
-// powershell.exe → %COMSPEC%（cmd.exe 回退）。
+// powershell（仅当 Win10+ 或检测到 PowerShell 3+）→ cmd.exe。
+//
+// Win7/8 只有 PowerShell 2.0 时跳过 powershell：PS2 的 ConsoleHost 在 winpty
+// 下无法交互，而 cmd.exe + winpty 已验证可用。用户显式指定的 shell 不受此
+// 自动探测影响。
 func autoDetectShell() string {
-	for _, sh := range []string{"pwsh", "powershell", "cmd"} {
-		if path, err := exec.LookPath(sh); err == nil {
+	if path, err := exec.LookPath("pwsh"); err == nil {
+		return path
+	}
+	if windows.RtlGetVersion().MajorVersion >= 10 || hasPowerShell3Plus() {
+		if path, err := exec.LookPath("powershell"); err == nil {
 			return path
 		}
+	}
+	if path, err := exec.LookPath("cmd"); err == nil {
+		return path
 	}
 	if sh := os.Getenv("COMSPEC"); sh != "" {
 		return sh
@@ -108,54 +114,52 @@ func autoDetectShell() string {
 	return "cmd.exe"
 }
 
+// hasPowerShell3Plus checks the WMF 3+ engine key. On Win7, powershell.exe
+// stays PS2 unless WMF is installed; the registry key is the cheapest
+// non-executing probe.
+func hasPowerShell3Plus() bool {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine`, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	_ = key.Close()
+	return true
+}
+
 // startSessionProc 拉起 shell（isShell=true 交互登录）或执行命令行。
-// usePty 且 ConPTY 可用时走全交互伪终端；否则管道模式（行级交互）。
-func startSessionProc(cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {
-	shell := resolveShell()
+//
+// Interactive shells are PTY-only: there is no line-mode pipe fallback.
+// Command execution (isShell=false) may use a pipe when no PTY was requested;
+// when a PTY was requested it must be real too (no silent fallback).
+func startSessionProc(shell, cmdline string, isShell, usePty bool, cols, rows uint32) (sessionProc, error) {
 	workDir := defaultWorkDir()
 
 	if isShell {
-		if usePty {
-			if supportConPTY {
-				return startConptyShell(shell, workDir, cols, rows)
-			}
-			if winptyReady() {
-				if p, err := startWinptyShell(shell, workDir, cols, rows); err == nil {
-					return p, nil
-				} else {
-					util.LogModuleWarn("ssh", "winpty shell start failed, fallback to pipe: %v", err)
-				}
-			}
+		if !usePty {
+			return nil, errPTYRequired
 		}
-		args := interactiveShellArgs(shell)
-		p, err := startPipe(shell, args, workDir)
-		if err != nil {
-			return nil, err
+		if supportConPTY {
+			return startConptyShell(shell, workDir, cols, rows)
 		}
-		// 管道模式没有真实终端：PowerShell 启动 banner 在切换编码前就以
-		// 控制台初始代码页（中文系统 GBK）输出，UTF-8 客户端必然乱码，用
-		// -NoLogo 去掉；再把输出编码切到 UTF-8。注入写在本会话复制用户
-		// 输入之前，顺序有保证，且失败时静默（无控制台句柄时 chcp 会报错）。
-		if init := utf8InitCmdPipe(shell); init != "" {
-			_, _ = p.Write([]byte(init))
+		if winptyReady() {
+			return startWinptyShell(shell, workDir, cols, rows)
 		}
-		// PS 2.0 的 "-Command -" 宿主总在输出首部写 UTF-8 BOM；只对
-		// PowerShell 包一层剥离，cmd 的原始输出不受影响。
-		if classifyShell(shell) == shellKindPowerShell {
-			return newBOMStripProc(p), nil
-		}
-		return p, nil
+		return nil, errPTYUnavailable
 	}
+
 	if usePty {
 		if supportConPTY {
 			return startConpty("\""+shell+"\" "+strings.Join(quoteArgs(execArgs(shell, cmdline)), " "), workDir, cols, rows)
 		}
 		if winptyReady() {
 			full := "\"" + shell + "\" " + strings.Join(quoteArgs(execArgs(shell, cmdline)), " ")
-			if p, err := startWinptyProc(shell, full, workDir, cols, rows, false); err == nil {
-				return p, nil
+			p, err := startWinptyProc(shell, full, workDir, cols, rows, false)
+			if err != nil {
+				return nil, err
 			}
+			return p, nil
 		}
+		return nil, errPTYUnavailable
 	}
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
 }
@@ -200,52 +204,6 @@ func winptyInitCmd(shell string) string {
 		return "chcp 65001 >nul\r"
 	}
 	return ""
-}
-
-// interactiveShellArgs 返回管道模式下交互 shell 的参数。
-//
-// 无 ConPTY 时没有真正的 PTY，但 Windows 10+ 自带的 PowerShell 3.0+ 交互
-// 宿主（-NoLogo，无 -Command）可以正常读取重定向 stdin 并打印提示符；
-// Win7/8 的 PS 2.0 不带 "-Command -" 时根本不读 stdin（交互直接挂起），
-// 只能用 -Command -（能执行命令，但没有服务端提示符）。
-// cmd 用 /Q 关闭命令回显。
-func interactiveShellArgs(shell string) []string {
-	switch classifyShell(shell) {
-	case shellKindPowerShell:
-		if windows.RtlGetVersion().MajorVersion < 10 {
-			return []string{"-NoLogo", "-Command", "-"}
-		}
-		return []string{"-NoLogo"}
-	case shellKindCmd:
-		return []string{"/Q"}
-	}
-	return nil
-}
-
-// bomStripProc removes a leading UTF-8 BOM from the first output chunk.
-// PS 2.0's "-Command -" host writes one even when Console.OutputEncoding is a
-// no-BOM encoder, which UTF-8 clients otherwise render as a stray character.
-// We strip it inline instead of using bufio.Peek so a short first read never
-// delays the session output.
-type bomStripProc struct {
-	sessionProc
-	checked bool
-}
-
-func newBOMStripProc(p sessionProc) *bomStripProc {
-	return &bomStripProc{sessionProc: p}
-}
-
-func (p *bomStripProc) Read(b []byte) (int, error) {
-	n, err := p.sessionProc.Read(b)
-	if !p.checked && (n > 0 || err != nil) {
-		p.checked = true
-		if n >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
-			copy(b[0:n-3], b[3:n])
-			n -= 3
-		}
-	}
-	return n, err
 }
 
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {

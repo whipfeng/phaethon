@@ -44,6 +44,31 @@ func TestResolveShellFallback(t *testing.T) {
 	}
 }
 
+// TestResolveShellChoiceSource 区分“用户显式指定”和“自动探测”，供
+// handleSession 决定是否允许回退到内置 shell。
+func TestResolveShellChoiceSource(t *testing.T) {
+	setupShellTestDB(t)
+
+	if err := db.PutSSHConfig(&db.SSHConfig{Enabled: true, Shell: "/usr/bin/zsh"}); err != nil {
+		t.Fatalf("PutSSHConfig: %v", err)
+	}
+	shell, explicit := resolveShellChoice()
+	if !explicit || shell != "/usr/bin/zsh" {
+		t.Fatalf("explicit choice = (%q, %v), want (/usr/bin/zsh, true)", shell, explicit)
+	}
+
+	if err := db.PutSSHConfig(&db.SSHConfig{Enabled: true, Shell: ""}); err != nil {
+		t.Fatalf("PutSSHConfig: %v", err)
+	}
+	shell, explicit = resolveShellChoice()
+	if explicit {
+		t.Fatalf("empty config marked as explicit")
+	}
+	if shell != autoDetectShell() {
+		t.Fatalf("auto choice = %q, want %q", shell, autoDetectShell())
+	}
+}
+
 // TestExecArgsBash 校验不同 shell 家族的参数拼接：
 // POSIX → -c，PowerShell → -Command，其余 → /s /c。
 func TestExecArgsBash(t *testing.T) {

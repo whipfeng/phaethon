@@ -171,11 +171,18 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 				Hpx  uint32
 				Mode string
 			}
-			if err := ssh.Unmarshal(req.Payload, &p); err != nil || p.Cols == 0 || p.Rows == 0 || !ptyAvailable() {
+			if err := ssh.Unmarshal(req.Payload, &p); err != nil || !ptyAvailable() {
 				req.Reply(false, nil)
 				continue
 			}
-			usePty, cols, rows = true, p.Cols, p.Rows
+			// Some clients (ssh -tt with redirected stdin, programmatic SSH
+			// libraries) send a pty-req with 0x0. The PTY is still usable; only
+			// the window size is unknown, so keep the 80x24 default instead of
+			// rejecting an otherwise valid request.
+			usePty = true
+			if p.Cols > 0 && p.Rows > 0 {
+				cols, rows = p.Cols, p.Rows
+			}
 			req.Reply(true, nil)
 
 		case "env":

@@ -16,9 +16,8 @@ import (
 )
 
 // Windows：ConPTY 全交互（Win10 1809+），不可用时用部署目录自带的
-// winpty（Win7/1607 等）；两者都没有时退回管道模式（行级交互）。
-// 探测结果决定 ptyAvailable：管道模式下必须拒绝 pty-req（客户端退回
-// cooked 模式才有本地回显与 \n 行结束，否则交互即黑洞）。
+// winpty（Win7/1607 等）。交互式 shell 只能走 PTY；两者都不可用时返回
+// errPTYUnavailable，不做管道行级回退。
 var supportConPTY = conpty.IsConPtyAvailable()
 
 // ptyAvailable reports whether a real PTY can be provided: native ConPTY on
@@ -137,6 +136,14 @@ func startSessionProc(shell, cmdline string, isShell, usePty bool, cols, rows ui
 	if isShell {
 		if !usePty {
 			return nil, errPTYRequired
+		}
+		// PowerShell 2.0's ConsoleHost cannot enter its input/render loop under
+		// winpty (verified on Win7 SP1: no prompt, no echo, `exit` ignored).
+		// There is no usable PTY for it, so a user-specified PS2 shell must get
+		// an explicit error instead of a black-hole session. cmd.exe is fine.
+		if !supportConPTY && windows.RtlGetVersion().MajorVersion < 10 &&
+			classifyShell(shell) == shellKindPowerShell && !hasPowerShell3Plus() {
+			return nil, fmt.Errorf("PowerShell 2.0 cannot run interactively under winpty; install WMF 5.1 (PowerShell 5.1) or use cmd.exe")
 		}
 		if supportConPTY {
 			return startConptyShell(shell, workDir, cols, rows)

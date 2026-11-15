@@ -206,6 +206,12 @@ type stripeTransport struct {
 	lowatLastTx int64
 	lowatLastAt time.Time
 	lastLowat   int
+	// dataStartNano is the first time this session carried a mesh data frame.
+	// The first stripeLowatWarmup seconds after it keep the conservative
+	// creation window: the initial burst's acked rate overstates link capacity
+	// (the receiver acks what it got before the bottleneck drops), and growing
+	// SNDBUF on it caused a ~40-packet loss event plus seconds of recovery.
+	dataStartNano atomic.Int64
 	// dataLastAt/burstAt detect the first data after an idle gap. The first
 	// few seconds of a cold burst must not grow the window: the acked rate of
 	// the initial burst overstates link capacity (the receiver acks what it
@@ -559,6 +565,9 @@ func (t *stripeTransport) dropAffinity() {
 }
 
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
+	if frameType == frame.FrameMeshPacket && !isControl && t.dataStartNano.Load() == 0 {
+		t.dataStartNano.CompareAndSwap(0, time.Now().UnixNano())
+	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
 		start := time.Now()
@@ -639,6 +648,14 @@ func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
 }
 
 func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
+	if t.dataStartNano.Load() == 0 {
+		for _, f := range frames {
+			if f.Type == frame.FrameMeshPacket && !f.Control {
+				t.dataStartNano.CompareAndSwap(0, time.Now().UnixNano())
+				break
+			}
+		}
+	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 {
 		start := time.Now()
@@ -1162,17 +1179,6 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	}
 	t.lowatLastTx = tx
 	t.lowatLastAt = now
-	if advanced {
-		// A data gap ≥1s starts a new burst. The first seconds of a burst
-		// must not grow the window: the initial acked rate overstates the
-		// link (the receiver acks the burst before the bottleneck buffer
-		// overflows), and growing SNDBUF on it caused a ~34-packet loss
-		// event plus ~5s of recovery on the cold-start path.
-		if t.dataLastAt.IsZero() || now.Sub(t.dataLastAt) >= time.Second {
-			t.burstAt = now
-		}
-		t.dataLastAt = now
-	}
 	// Size the kernel queue from the *base* RTT, not the ack-derived srtt.
 	// Under a full send queue srtt converges to queueing/RTT and
 	// 2×rate×srtt becomes a self-amplifying bufferbloat loop (observed: the

@@ -520,6 +520,7 @@ type Peer struct {
 	dataQueuesMu    sync.Mutex
 	dataQueuesReady atomic.Bool
 	drrOutput       chan writeReq // DRR scheduler output channel
+	smallCh         chan writeReq // latency-sensitive small data (interactive) priority queue
 	controlCh       chan writeReq // gossip/ping/pong priority queue
 	stopCh          chan struct{}
 	stopOnce        sync.Once        // ensures stopCh is closed exactly once
@@ -1054,18 +1055,30 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		return true
 	}
 
+	// smallReserve is a bounded overrun allowed for latency-sensitive small
+	// data while the peer-wide in-flight credit is exhausted. Bulk flows can
+	// consume the whole credit; without this reserve an interactive SSH packet
+	// waits behind the bulk in-flight window (observed 1.1s sojourn under a
+	// bulk upload even though actual writes took only milliseconds).
+	const smallReserve = int64(64 << 10)
+	var smallBypass int64
+
 	for {
 		// §3.4 write gate: when the session's in-flight credit is exhausted,
-		// stop dequeuing drrOutput — surplus data stays in the DRR queues
+		// stop dequeuing bulk drrOutput — surplus data stays in the DRR queues
 		// (fair scheduling, byte budget, drops → inner TCP backs off) while
-		// control/DNS frames keep flowing. LaneAck/cap adjustments wake us
-		// via flowNotify. Peers without LaneAck support (stripe nil, or no
-		// ack yet) report infinite credit: gate stays open, pre-B2 behavior.
+		// control/DNS frames and small interactive data keep flowing. LaneAck/
+		// cap adjustments wake us via flowNotify. Peers without LaneAck support
+		// (stripe nil, or no ack yet) report infinite credit: gate stays open.
 		credit := int64(math.MaxInt64)
 		if peer.stripe != nil {
 			credit = peer.stripe.writeCredit()
 		}
+		if credit > 0 {
+			smallBypass = 0
+		}
 		var first writeReq
+		fromSmall := false
 		if credit > 0 {
 			select {
 			case <-peer.stopCh:
@@ -1074,11 +1087,23 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 				continue
 			case first = <-peer.controlCh:
 			case first = <-peer.dnsQueue:
+			case first = <-peer.smallCh:
+				fromSmall = true
 			case req, ok := <-peer.drrOutput:
 				if !ok {
 					return
 				}
 				first = req
+			}
+		} else if smallBypass < smallReserve {
+			select {
+			case <-peer.stopCh:
+				return
+			case <-peer.flowNotify:
+			case first = <-peer.controlCh:
+			case first = <-peer.dnsQueue:
+			case first = <-peer.smallCh:
+				fromSmall = true
 			}
 		} else {
 			select {
@@ -1089,24 +1114,40 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			case first = <-peer.dnsQueue:
 			}
 		}
-		if !writeBatch(collectWriteBatch(peer, first, maxBatchFrames, credit)) {
+
+		var batch []writeReq
+		if credit > 0 {
+			batch = collectWriteBatch(peer, first, maxBatchFrames, credit, fromSmall)
+		} else {
+			batch = collectPriorityBatch(peer, first, maxBatchFrames, smallReserve-smallBypass, fromSmall)
+			for _, req := range batch {
+				if !req.isControl && !req.dns && req.frameType == frame.FrameMeshPacket {
+					smallBypass += int64(len(req.data))
+				}
+			}
+		}
+		if !writeBatch(batch) {
 			return
 		}
 	}
 }
 
 // collectWriteBatch adds the frames already waiting on the peer queues to
-// first, ordered control → DNS → data, up to max frames. Data frames are
-// additionally bounded by maxDataBytes (the write gate's remaining credit)
-// so one batch cannot overshoot the cap by more than one frame.
-func collectWriteBatch(peer *Peer, first writeReq, max int, maxDataBytes int64) []writeReq {
-	var ctrl, dns, data []writeReq
+// first, ordered control → DNS → small-interactive → data, up to max frames.
+// Data frames (including small-interactive frames) are additionally bounded by
+// maxDataBytes (the write gate's remaining credit) so one batch cannot overshoot
+// the cap by more than one frame.
+func collectWriteBatch(peer *Peer, first writeReq, max int, maxDataBytes int64, fromSmall bool) []writeReq {
+	var ctrl, dns, small, data []writeReq
 	var dataBytes int64
 	switch {
 	case first.isControl:
 		ctrl = append(ctrl, first)
 	case first.dns:
 		dns = append(dns, first)
+	case fromSmall:
+		small = append(small, first)
+		dataBytes += int64(len(first.data))
 	default:
 		data = append(data, first)
 		dataBytes += int64(len(first.data))
@@ -1128,6 +1169,17 @@ func collectWriteBatch(peer *Peer, first writeReq, max int, maxDataBytes int64) 
 	dns = drain(peer.dnsQueue, dns)
 	for n < max && dataBytes < maxDataBytes {
 		select {
+		case req := <-peer.smallCh:
+			small = append(small, req)
+			dataBytes += int64(len(req.data))
+			n++
+		default:
+			goto smallDone
+		}
+	}
+smallDone:
+	for n < max && dataBytes < maxDataBytes {
+		select {
 		case req := <-peer.drrOutput:
 			data = append(data, req)
 			dataBytes += int64(len(req.data))
@@ -1140,7 +1192,55 @@ dataDone:
 	batch := make([]writeReq, 0, n)
 	batch = append(batch, ctrl...)
 	batch = append(batch, dns...)
+	batch = append(batch, small...)
 	return append(batch, data...)
+}
+
+// collectPriorityBatch is the credit-exhausted variant: only control, DNS and
+// small-interactive frames are allowed, bounded by maxSmallBytes of reserved
+// credit. Bulk drrOutput frames stay queued until the credit recovers.
+func collectPriorityBatch(peer *Peer, first writeReq, max int, maxSmallBytes int64, fromSmall bool) []writeReq {
+	var ctrl, dns, small []writeReq
+	var smallBytes int64
+	switch {
+	case first.isControl:
+		ctrl = append(ctrl, first)
+	case first.dns:
+		dns = append(dns, first)
+	case fromSmall:
+		small = append(small, first)
+		smallBytes += int64(len(first.data))
+	}
+	n := 1
+	drain := func(ch chan writeReq, dst []writeReq) []writeReq {
+		for n < max {
+			select {
+			case req := <-ch:
+				dst = append(dst, req)
+				n++
+			default:
+				return dst
+			}
+		}
+		return dst
+	}
+	ctrl = drain(peer.controlCh, ctrl)
+	dns = drain(peer.dnsQueue, dns)
+	for n < max && smallBytes < maxSmallBytes {
+		select {
+		case req := <-peer.smallCh:
+			small = append(small, req)
+			smallBytes += int64(len(req.data))
+			n++
+		default:
+			goto smallDone
+		}
+	}
+smallDone:
+	batch := make([]writeReq, 0, n)
+	batch = append(batch, ctrl...)
+	batch = append(batch, dns...)
+	return append(batch, small...)
 }
 
 // drrLoop runs the DRR fair scheduler in a dedicated goroutine.
@@ -1155,8 +1255,17 @@ func (m *P2PManager) drrLoop(peer *Peer) {
 			return // stopped
 		}
 
-		// Send batch to drrOutput channel
+		// Send batch to drrOutput channel. Latency-sensitive small data frames
+		// take the priority queue; if it is full, fall back to the normal DRR
+		// output so the scheduler never blocks.
 		for _, req := range batch {
+			if isSmallInteractiveData(req.frameType, req.data) {
+				select {
+				case peer.smallCh <- req:
+					continue
+				default:
+				}
+			}
 			select {
 			case <-peer.stopCh:
 				return
@@ -1325,6 +1434,48 @@ func isDNSPacket(data []byte) bool {
 	return srcPort == 53 || dstPort == 53
 }
 
+// isSmallInteractiveData reports whether a mesh data frame belongs to a
+// latency-sensitive small flow (interactive SSH/terminal input or echo).
+// Such frames must not sit behind a bulk flow's peer-wide in-flight credit;
+// peerWriteLoop gives them a small reserved credit. Pure ACKs and MTU-sized
+// bulk frames stay in the normal DRR path.
+func isSmallInteractiveData(frameType byte, data []byte) bool {
+	if frameType != frame.FrameMeshPacket || len(data) == 0 || len(data) > 512 {
+		return false
+	}
+	pkt := frame.InnerPacket(data)
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != 6 {
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < 20 || len(pkt) < ihl+20 {
+		return false
+	}
+	tcp := pkt[ihl:]
+	tcpHdr := int(tcp[12]>>4) * 4
+	if tcpHdr < 20 || len(tcp) < tcpHdr {
+		return false
+	}
+	// Scope the priority to SSH (port 22): bulk flows on other ports keep the
+	// normal DRR order (no cross-class reordering). SSH carries both the
+	// user's interactive terminal and, in tests, bulk dd streams; its small
+	// data frames are the latency-sensitive ones.
+	srcPort := uint16(tcp[0])<<8 | uint16(tcp[1])
+	dstPort := uint16(tcp[2])<<8 | uint16(tcp[3])
+	if srcPort != 22 && dstPort != 22 {
+		return false
+	}
+	payload := len(tcp) - tcpHdr
+	flags := tcp[13]
+	// Pure ACKs (and ACK+FIN/RST with no payload) carry no interactive data;
+	// leaving them in DRR keeps the bulk flow's ACK train out of the priority
+	// queue. SYN/SYN-ACK and small data segments are latency-sensitive.
+	if payload == 0 && flags&0x10 != 0 {
+		return false
+	}
+	return true
+}
+
 // hashFlow computes a flow hash for fair scheduling using Jenkins one-at-a-time.
 // Uses 5-tuple (srcIP, dstIP, protocol, srcPort, dstPort) for TCP/UDP,
 // falls back to 3-tuple (srcIP, dstIP, protocol) for other protocols.
@@ -1453,6 +1604,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		transport:   t,
 		dnsQueue:    make(chan writeReq, 512),
 		drrOutput:   make(chan writeReq, 512),
+		smallCh:     make(chan writeReq, 512),
 		controlCh:   make(chan writeReq, 512),
 		flowNotify:  make(chan struct{}, 1),
 		stopCh:      make(chan struct{}),
@@ -1738,6 +1890,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		Seq:         seq,
 		dnsQueue:    make(chan writeReq, 512),
 		drrOutput:   make(chan writeReq, 512),
+		smallCh:     make(chan writeReq, 512),
 		controlCh:   make(chan writeReq, 512),
 		flowNotify:  make(chan struct{}, 1),
 		pingTracker: newPingTracker(),

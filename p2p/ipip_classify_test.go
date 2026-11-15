@@ -72,6 +72,46 @@ func TestClassifiers_IPIPFallback(t *testing.T) {
 	}
 }
 
+func toSSHPort(p []byte) []byte {
+	p[22], p[23] = 0, 22
+	return p
+}
+
+func TestIsSmallInteractiveData(t *testing.T) {
+	if !isSmallInteractiveData(frame.FrameMeshPacket, toSSHPort(synthTCPSeg(40000, 0x18, 100))) {
+		t.Fatal("small SSH data not classified as interactive")
+	}
+	if isSmallInteractiveData(frame.FrameMeshPacket, toSSHPort(synthTCPSeg(40000, 0x10, 0))) {
+		t.Fatal("pure ACK classified as interactive")
+	}
+	if isSmallInteractiveData(frame.FrameMeshPacket, toSSHPort(synthTCPSeg(40000, 0x18, 1400))) {
+		t.Fatal("bulk-size frame classified as interactive")
+	}
+	if !isSmallInteractiveData(frame.FrameMeshPacket, wrapIPIP(toSSHPort(synthTCPSeg(40000, 0x18, 100)))) {
+		t.Fatal("IPIP small SSH data not classified as interactive")
+	}
+	if isSmallInteractiveData(frame.FrameMeshPacket, synthTCPSeg(40000, 0x18, 100)) {
+		t.Fatal("small non-SSH data classified as interactive")
+	}
+	if isSmallInteractiveData(frame.FrameGossip, toSSHPort(synthTCPSeg(40000, 0x18, 100))) {
+		t.Fatal("non-mesh frame classified as interactive")
+	}
+}
+
+func TestCollectPriorityBatchSkipsBulk(t *testing.T) {
+	p := newWriteTestPeer()
+	small := writeReq{frameType: frame.FrameMeshPacket, data: synthTCPSeg(40000, 0x18, 100)}
+	bulk := writeReq{frameType: frame.FrameMeshPacket, data: synthTCPSeg(40001, 0x18, 1400)}
+	p.drrOutput <- bulk
+	batch := collectPriorityBatch(p, small, 8, 64<<10, true)
+	if len(batch) != 1 || len(batch[0].data) != len(small.data) {
+		t.Fatalf("priority batch = %d frames, want only the small frame", len(batch))
+	}
+	if len(p.drrOutput) != 1 {
+		t.Fatal("priority path consumed a bulk frame")
+	}
+}
+
 func newWriteTestPeer() *Peer {
 	var q [256]chan writeReq
 	for i := range q {
@@ -82,6 +122,7 @@ func newWriteTestPeer() *Peer {
 		dnsQueue:   make(chan writeReq, 512),
 		dataQueues: q,
 		drrOutput:  make(chan writeReq, 512),
+		smallCh:    make(chan writeReq, 512),
 		controlCh:  make(chan writeReq, 512),
 		stopCh:     make(chan struct{}),
 	}
@@ -114,7 +155,7 @@ func TestCollectWriteBatch_PriorityOrder(t *testing.T) {
 	p.dnsQueue <- writeReq{frameType: frame.FrameMeshPacket, data: []byte{'d'}, dns: true}
 	p.controlCh <- writeReq{frameType: frame.FrameLinkPong, data: []byte{'c'}, isControl: true}
 
-	b := collectWriteBatch(p, data('1'), 64, math.MaxInt64)
+	b := collectWriteBatch(p, data('1'), 64, math.MaxInt64, false)
 	got := ""
 	for _, r := range b {
 		got += string(r.data)
@@ -133,7 +174,7 @@ func TestCollectWriteBatch_RespectsMax(t *testing.T) {
 		p.controlCh <- writeReq{frameType: frame.FrameLinkPong, isControl: true}
 		p.drrOutput <- writeReq{frameType: frame.FrameMeshPacket}
 	}
-	b := collectWriteBatch(p, writeReq{frameType: frame.FrameMeshPacket}, 8, math.MaxInt64)
+	b := collectWriteBatch(p, writeReq{frameType: frame.FrameMeshPacket}, 8, math.MaxInt64, false)
 	if len(b) != 8 {
 		t.Fatalf("batch len = %d, want 8", len(b))
 	}

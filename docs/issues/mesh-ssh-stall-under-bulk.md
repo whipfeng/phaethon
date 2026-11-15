@@ -308,3 +308,18 @@ PTY。结果 p50=117ms / p95=1419ms / max=1581ms，探针 5~15（约前 17s）
    就限制 unsent+unacked 总量；tuner 有速率样本后再按 2×BDP 放大。
 
 验证：待部署 4 节点后按同一“重启 worker → 立即压测”配方复测。
+
+第一版（v17：SNDBUF=n + gauge 重发）冷启动复测：p50=109ms /
+p95=274ms / max=516ms（此前 1419/1581）。只剩探针 1~5（前 ~3s）
+偏高，之后 ~100ms。
+
+ss 采样定位到原因：冷启动前 4s 内核 cwnd 从 16 涨到 41，
+unacked 25 段（~32KB）、notsent 64KB；第 5 秒出现 lost:34，
+随后 5s 的丢包恢复。问题是 tuner 用初始突发的 acked rate 放大了窗口
+（首 1~3s acked rate ~1MB/s，实际链路 ~0.5MB/s）。
+
+追加两处修正：
+
+- Linux 的 SO_SNDBUF 传 n/2（内核翻倍后有效值约等于 n），初始有效窗口约 16KB；
+- tuner 增加“突发前 5s 保持创建窗口”保护：按 tx 空闲间隔 >=1s 识别
+  新突发，burstAt 后 5s 不放大窗口。慢链路上 16KB 约 1.6xBDP，不压吞吐。

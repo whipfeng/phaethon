@@ -72,7 +72,7 @@ var (
 	stripePeerAddInterval    = 1 * time.Second        // spacing for peer-triggered adds
 	stripeAffinityIdleTTL    = 30 * time.Second       // drop lane pins of flows idle this long
 	stripeAffinitySweep      = 10 * time.Second       // affinity janitor period
-	stripeLowatWarmup        = 5 * time.Second        // hold the creation window at burst start
+	stripeLowatWarmup        = 15 * time.Second       // hold the creation window at data start
 	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
 	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)

@@ -450,25 +450,6 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 
 	// Miss: weighted rendezvous (quality-aware placement for new flows).
 	l := t.pickLane(key, lanes)
-	// During the cold-start window, keep data off the primary. The primary
-	// write is synchronous in the peer write loop: a bulk batch blocked in the
-	// primary's loss recovery holds that single goroutine, so frames already
-	// handed to a healthy lane still wait (observed as 1.4s interactive spikes
-	// with the lane's own cwnd healthy). Lanes have independent writers, so a
-	// stalled carrier blocks only itself. After the window the primary is a
-	// normal rendezvous candidate again: forcing every flow off it permanently
-	// degraded warm-state throughput when a lane was the weaker carrier.
-	if l == nil && len(lanes) > 0 && t.inColdStartWindow() {
-		best := lanes[0]
-		bestScore := scoreMix(key, best.id) * best.currentWeight()
-		for _, cand := range lanes[1:] {
-			s := scoreMix(key, cand.id) * cand.currentWeight()
-			if s > bestScore {
-				best, bestScore = cand, s
-			}
-		}
-		l = best
-	}
 	if key == 0 {
 		// flowHash32 returns 0 for non-IPv4/truncated payloads; those all
 		// share a key, and pinning them to one lane would serialize unrelated

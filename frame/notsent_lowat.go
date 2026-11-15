@@ -23,7 +23,7 @@ import (
 //	512KB       @ 56ms RTT  -> ~9.1MB/s
 //
 // Override with PHAETHON_P2P_LOWAT (bytes) when tuning.
-const laneNotSentLowat = 16 << 10
+const laneNotSentLowat = 8 << 10
 
 func laneLowatBytes() int {
 	if v := os.Getenv("PHAETHON_P2P_LOWAT"); v != "" {

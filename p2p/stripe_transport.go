@@ -1230,14 +1230,9 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	if !t.burstAt.IsZero() && now.Sub(t.burstAt) < stripeLowatWarmup {
 		return
 	}
-	// One BDP is exactly what keeps the pipe full. The old 2×BDP added a full
-	// RTT of standing queue on the bottleneck; on a shallow-buffer WAN that
-	// queue overflowed (10% loss) and the RTO recovery HOL-blocked interactive
-	// traffic. The kernel's own cwnd also targets ~BDP, so 1× is not a
-	// throughput ceiling.
-	lowat := int(rate * baseRTT.Seconds())
-	if lowat < 8<<10 {
-		lowat = 8 << 10
+	lowat := int(2 * rate * baseRTT.Seconds())
+	if lowat < 16<<10 {
+		lowat = 16 << 10
 	}
 	if lowat > 512<<10 {
 		lowat = 512 << 10

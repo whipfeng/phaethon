@@ -52,5 +52,23 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 
 ## 验证状态
 
-- 代码 + 单测完成（`p2p` 全部通过）。
-- 待部署 702 到 gg/jf/qg/vm 后重跑同一批量上传 + 交互 PTY 测试，记录修复后延迟。
+代码 + 单测完成（`p2p` 全部通过），已部署到 **gg / jf / qg / vm**（`v0.8.1-1-g8d30675`），**尚未扩散到其他环境**。
+
+修复后同一批量上传 + 交互 PTY 测试：
+
+| 路径 | 修复前 p95 / max | 修复后 p50 / p95 / max |
+| --- | --- | --- |
+| GG → VM OS sshd（172.30.0.2） | 1370ms / 1385ms | 457ms / 1858ms / 4912ms |
+| GG → VM 内置 SSH（vm.phn） | — | 293ms / 1529ms / 2099ms |
+
+结论：**p50 有改善，但 p95 仍在 1.5~1.9s，问题没有完全解决**。修复后 `[P2P-QDEPTH]` 仍出现 `maxSojourn=13.074s`、`drrOut=454`、`maxWrite=0s`、`rate=96.8KB/s`，说明：
+
+1. peer 级 credit 门控仍在把批量帧压很久；
+2. `smallCh` 只覆盖 p2p write loop，交互帧在到达 p2p 之前（gVisor inner TCP / trojan mapping / OS sshd）仍可能被批量流阻塞；
+3. 两条测试路径（内置 SSH 和 OS sshd）都出现 1.5s+ 尖峰，瓶颈更可能在 GG 进程内的共享数据面（gVisor/mapping），而不是 OS sshd。
+
+下一步（未完成）：
+
+- 给 `writeReq` 增加 small 类标记，在 QDEPTH 里分别记录 bulk/small 的 maxSojourn，确认 small 帧是否真的被优先；
+- 若 small 帧在 p2p 层已低延迟，把优先级上移到 gVisor inner TCP / mapping relay 的共享队列；
+- 在未拿到 p95 改善前，不扩散该修复到其他环境。

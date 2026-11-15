@@ -8,23 +8,22 @@ import (
 	"phaethon/util"
 )
 
-// laneNotSentLowat caps unsent bytes in the kernel send buffer of a P2P carrier
-// socket. It exists so a slow egress cannot pile megabytes into the kernel,
-// behind which pings/pongs would wait long enough to declare a live link dead;
-// the backlog stays in the app-level DRR queues instead.
+// laneNotSentLowat is the initial cap before the stripe controller has any
+// rate sample. It deliberately starts small: a large creation default lets a
+// bulk sender dump a second's worth of bytes into the kernel before
+// backpressure appears, which HOL-blocks interactive frames. The controller
+// grows the cap toward 2×BDP (max 512KB) within a few ticks once it observes
+// tx rate and the base RTT.
 //
-// Sizing matters: this cap is a hard throughput ceiling of lowat/RTT because
-// the socket can never keep more than this in flight.
+// Reference points measured on the mesh:
 //
 //	128KB (old) @ 37ms RTT  -> ~3.4MB/s   (matched the observed 1-hop ceiling)
 //	128KB (old) @ 56ms RTT  -> ~2.3MB/s   (matched the observed 2-hop ceiling)
 //	512KB       @ 37ms RTT  -> ~13.8MB/s
 //	512KB       @ 56ms RTT  -> ~9.1MB/s
 //
-// 128KB was clearly below the BDP of our links and became the real bottleneck.
-// 512KB keeps control frames bounded (~150ms at 3MB/s) while leaving headroom
-// for the link itself. Override with PHAETHON_P2P_LOWAT (bytes) when tuning.
-const laneNotSentLowat = 512 << 10
+// Override with PHAETHON_P2P_LOWAT (bytes) when tuning.
+const laneNotSentLowat = 16 << 10
 
 func laneLowatBytes() int {
 	if v := os.Getenv("PHAETHON_P2P_LOWAT"); v != "" {

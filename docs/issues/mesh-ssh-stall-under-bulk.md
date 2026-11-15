@@ -93,3 +93,39 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 - p2p write loop 只按 carrier 接口决策，没有 `if WS` 分支。
 
 验证：待部署后重测 gg→vm 的 300MB 上传 + 交互 PTY，目标 p95 <200ms；未达标不扩散。
+
+## 第四轮：被动侧 tuner 缺失 + srtt 自放大（2026-11-15）
+
+部署 `v0.8.1-9-ga650852` 后重测仍不达标：
+
+| 时间 | 场景 | p50 / p95 / max |
+| --- | --- | --- |
+| 16:47 | 300MB 上传 + 交互 PTY，GG → VM OS sshd | 518ms / 1472ms / 1785ms |
+| 16:53 | 同上（打开 p2p/relay/trojan INFO） | 387ms / 1959ms / 20022ms |
+
+关键日志（GG，路径实际由 GG 被动接收会话）：
+
+```
+[LANE-INFLIGHT] passive:5 lane=0 inflight=69..157KB cap=64KB..8192KB
+                rtt=64..923ms srtt=51..833ms minRTT=20..21ms rate=398..958KB/s
+[LANE-LOWAT] set 512KB remote=...     # 仅创建时一条，从未出现 adaptive
+```
+
+两个根因：
+
+1. **被动侧从不调优**：`newStripeTransport` 只在 `cfg.dialLane != nil`（主动侧）时启动
+   `controllerLoop`，而 `tuneKernelBacklog` 只在 `controllerTick` 内调用。GG 在本路径上是
+   被动侧，carrier 永远保持创建时的 512KB 内核发送窗口；512KB / ~500KB/s ≈ 1s 的
+   bufferbloat，正是交互帧看到的 HOL。
+2. **公式用 srtt 自放大**：`lowat = 2 × rate × srtt`，而 srtt 是 ack 派生、已包含排队时延。
+   队列越满 srtt 越大，lowat 越大，形成正反馈，永远回不到低时延。
+
+修复：
+
+- 新增 `lowatLoop()`，每 200ms 独立于 lane 控制器运行，主/被动侧都启用；从
+  `controllerTick` 移除重复调用。
+- 公式改用 **minRTT**（10 分钟传播基线，LEDBAT 风格）：`lowat = 2 × rate × minRTT`，
+  无基线时回退 srtt，再无则 30ms；仍夹在 16KB~512KB。
+- 初始 `laneNotSentLowat` 由 512KB 降为 16KB，先小后大，避免首批数据在调优前灌满内核。
+
+验证：待部署 4 节点后重测 300MB + 交互 PTY，目标 p95 < 200ms；未达标不扩散。

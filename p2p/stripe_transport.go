@@ -58,25 +58,26 @@ const stripeAffinityCap = 65536
 // dimensionless ratios against a sliding-min baseline (§5.4 self-normalized
 // BBR shape) — no absolute time/money scales of the environment live here.
 var (
-	stripeCtrlTick           = 1 * time.Second  // controller decision period
-	stripeProbeInterval      = 2 * time.Second  // per-lane probe ping period
-	stripeProbeTimeout       = 5 * time.Second  // outstanding probe expiry (loss)
-	stripeGaugeEMAAlpha      = 0.3              // sojourn EMA blend factor
-	stripeGaugeDecayPerTick  = 0.5              // idle EMA pull-back rate per tick
-	stripeGaugeIdleDecay     = 5 * time.Second  // no sample this long → pull-back starts
-	stripeGaugeHighWatermark = 0.7              // congestion threshold
-	stripeAddSustain         = 30 * time.Second // ≥watermark this long → add
-	stripeAddInterval        = 10 * time.Second // minimum spacing between adds
-	stripeClearSustain       = 5 * time.Minute  // <watermark this long → remove
-	stripeMaxLanes           = 8                // cap on dynamic lanes (D11)
-	stripeEventRingCap       = 32               // controller event ring buffer
-	stripeBaselineWindow     = 10 * time.Second // sliding-min window for sojourn baseline
-	stripeBaselineFloor      = time.Millisecond // noise floor for near-zero baselines
-	stripeCongestMargin      = 1.0              // gauge 1.0 at sojourn = baseline × (1+margin)
-	stripeWeightLossPenalty  = 2.0              // cost penalty per unit loss rate
-	stripeLaneMinProbes      = uint64(8)        // degradation gate: min samples
-	stripeLaneBadLoss        = 0.5              // degradation gate: loss rate
-	stripeLaneBadSRTT        = time.Second      // degradation gate: srtt
+	stripeCtrlTick           = 1 * time.Second        // controller decision period
+	stripeLowatTick          = 200 * time.Millisecond // kernel backlog tuning period
+	stripeProbeInterval      = 2 * time.Second        // per-lane probe ping period
+	stripeProbeTimeout       = 5 * time.Second        // outstanding probe expiry (loss)
+	stripeGaugeEMAAlpha      = 0.3                    // sojourn EMA blend factor
+	stripeGaugeDecayPerTick  = 0.5                    // idle EMA pull-back rate per tick
+	stripeGaugeIdleDecay     = 5 * time.Second        // no sample this long → pull-back starts
+	stripeGaugeHighWatermark = 0.7                    // congestion threshold
+	stripeAddSustain         = 30 * time.Second       // ≥watermark this long → add
+	stripeAddInterval        = 10 * time.Second       // minimum spacing between adds
+	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
+	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)
+	stripeEventRingCap       = 32                     // controller event ring buffer
+	stripeBaselineWindow     = 10 * time.Second       // sliding-min window for sojourn baseline
+	stripeBaselineFloor      = time.Millisecond       // noise floor for near-zero baselines
+	stripeCongestMargin      = 1.0                    // gauge 1.0 at sojourn = baseline × (1+margin)
+	stripeWeightLossPenalty  = 2.0                    // cost penalty per unit loss rate
+	stripeLaneMinProbes      = uint64(8)              // degradation gate: min samples
+	stripeLaneBadLoss        = 0.5                    // degradation gate: loss rate
+	stripeLaneBadSRTT        = time.Second            // degradation gate: srtt
 )
 
 // stripeConfig wires the dynamic controller. The zero value is a valid
@@ -207,6 +208,11 @@ func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTran
 	t.peerGauge.Store(-1)
 	go t.baseReadLoop()
 	go t.flowLoop()
+	// Kernel-backlog tuning applies to both roles: passive sessions have no
+	// lane dialer, but they still send data and otherwise keep the creation
+	// default forever (bulk uploads then build a second-scale HOL queue in
+	// front of interactive frames).
+	go t.lowatLoop()
 	if cfg.dialLane != nil {
 		go t.controllerLoop()
 	}
@@ -845,6 +851,23 @@ func (t *stripeTransport) controllerLoop() {
 	}
 }
 
+// lowatLoop keeps the kernel backlog tuned for every session. It runs
+// independently of the lane controller so passive peers (which never add
+// dynamic lanes) get the same adaptive cap as active ones. Cheap: one snapshot
+// and at most one setsockopt per tick.
+func (t *stripeTransport) lowatLoop() {
+	tick := time.NewTicker(stripeLowatTick)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.closed:
+			return
+		case now := <-tick.C:
+			t.tuneKernelBacklog(now)
+		}
+	}
+}
+
 func (t *stripeTransport) controllerTick() {
 	now := time.Now()
 
@@ -953,8 +976,6 @@ func (t *stripeTransport) controllerTick() {
 			t.removeLane(l)
 		}
 	}
-
-	t.tuneKernelBacklog(now)
 }
 
 // tuneKernelBacklog keeps TCP_NOTSENT_LOWAT near 2×BDP on direct TCP carriers:
@@ -965,18 +986,18 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	snap := t.primaryFlow.snapshot()
 	rate := snap.rate
 	srtt := snap.srtt
+	minRTT := snap.minRTT
 	tx := snap.tx
 	// Data may live on dynamic lanes, not the primary flow. Aggregate their tx
 	// and quality so the tuner does not sit at rate=0 (which kept lowat at the
-	// 512KB creation default and caused second-level HOL).
+	// creation default and caused second-level HOL).
 	for _, l := range t.snapshotLanes() {
 		ls := l.flow.snapshot()
 		tx += ls.tx
 		if ls.rate > rate {
 			rate = ls.rate
-		}
-		if ls.srtt > 0 {
 			srtt = ls.srtt
+			minRTT = ls.minRTT
 		}
 	}
 	if rate <= 0 && !t.lowatLastAt.IsZero() {
@@ -987,16 +1008,24 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	}
 	t.lowatLastTx = tx
 	t.lowatLastAt = now
-	// The sender's lane acks may not carry an RTT sample (e.g. a passive WS
-	// carrier whose peer only reports rx). Use a conservative 30ms mesh RTT
-	// estimate so the lowat still adapts to the observed local tx rate.
-	if srtt <= 0 {
-		srtt = 30 * time.Millisecond
+	// Size the kernel queue from the *base* RTT, not the ack-derived srtt.
+	// Under a full send queue srtt converges to queueing/RTT and
+	// 2×rate×srtt becomes a self-amplifying bufferbloat loop (observed: the
+	// 512KB cap stayed put and interactive frames waited ~1.5s). minRTT is the
+	// 10-minute propagation baseline, so 2×BDP(base) bounds queueing without
+	// capping throughput. srtt is only a fallback when no baseline exists; the
+	// final 30ms guess covers passive carriers with no RTT sample at all.
+	baseRTT := minRTT
+	if baseRTT <= 0 {
+		baseRTT = srtt
+	}
+	if baseRTT <= 0 {
+		baseRTT = 30 * time.Millisecond
 	}
 	if rate <= 0 {
 		return
 	}
-	lowat := int(2 * rate * srtt.Seconds())
+	lowat := int(2 * rate * baseRTT.Seconds())
 	if lowat < 16<<10 {
 		lowat = 16 << 10
 	}
@@ -1008,8 +1037,8 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	}
 	if t.SetKernelBacklogLimit(lowat) {
 		t.lastLowat = lowat
-		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s srtt=%v",
-			lowat>>10, rate/1e6, srtt)
+		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s baseRTT=%v srtt=%v",
+			lowat>>10, rate/1e6, baseRTT.Round(time.Millisecond), srtt.Round(time.Millisecond))
 	}
 }
 

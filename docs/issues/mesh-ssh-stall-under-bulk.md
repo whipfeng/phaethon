@@ -194,3 +194,30 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 2. 载体发送侧按实测 delivery_rate 做 kernel pacing（SO_MAX_PACING_RATE），
    把重传率压下来，牺牲少量吞吐；
 3. 接受该环境上限，把验收目标改为“p95 < 500ms”或仅在无损链路验收。
+
+## 第七轮：多 lane 从未激活的修复（2026-11-15）
+
+在 GG/JF 日志中 `[STRIPE] add lane` 计数为 **0**：多 lane 功能从未生效。
+两个原因叠加：
+
+1. `gateEngaged := t.primaryFlow.isGated()` 在收到第一个 lane ack 后恒为
+   true，直接冻结 `addDue`；而 credit 门控在 kernel-bounded 载体
+   （WS/TCP，已启用 NOTSENT_LOWAT）上本来就被 `peerWriteLoop` 旁路，
+   并不存在“gate owns congestion”。
+2. `addDue` 只看本端 `t.gauge`。GG→JF 方向由 GG（被动侧）发送并拥塞，
+   GG 的 gauge 已通过 `FrameLaneGauge`/gossip 送达 JF，但 JF 的控制器
+   没有使用 `peerGauge`。
+
+修复：
+
+- gate 冻结改为 `!t.KernelBacklogLimited() && isGated()`，即仅对真正
+  启用 credit 门控的异步载体生效；
+- `peerHigh = peerGauge >= 0.7*255` 作为一等 add 触发；
+- peer 触发采用更快的 5s sustain / 5s interval，动态 lane 上限 2 条，
+  避免在丢包 WAN 上堆叠过多冗余载体；
+- add lane 日志和事件补充 peerGauge/peerTriggered。
+
+单测：`TestStripePeerGaugeAddsLaneWhileGateEngaged` 覆盖“gate 已 engaged
+且载体 kernel-bounded 时，peer 拥塞仍能加 lane”。
+
+验证：待部署 4 节点后重测上行 300MB + 交互 PTY。

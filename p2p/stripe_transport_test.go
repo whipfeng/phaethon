@@ -1076,3 +1076,64 @@ func TestStripeLaneFullKeepsFlowPinned(t *testing.T) {
 		t.Fatalf("laneQueueDrops = %d, want 1", tr.laneQueueDrops.Load())
 	}
 }
+
+// kernelLimitedTransport reports a kernel-bounded backlog like a TCP/WS
+// carrier, so the peer credit gate is bypassed for it.
+type kernelLimitedTransport struct{ frame.FrameTransport }
+
+func (kernelLimitedTransport) KernelBacklogLimited() bool { return true }
+
+// TestStripePeerGaugeAddsLaneWhileGateEngaged is the regression guard for the
+// dead multi-lane path: the passive (sending) side reported congestion, but
+// the active side ignored peerGauge and froze adds on its own isGated() even
+// though a kernel-bounded carrier never enforces that gate. Result was zero
+// lane adds for the lifetime of every WS session.
+func TestStripePeerGaugeAddsLaneWhileGateEngaged(t *testing.T) {
+	oldSustain, oldInterval := stripePeerAddSustain, stripePeerAddInterval
+	stripePeerAddSustain, stripePeerAddInterval = 0, 0
+	t.Cleanup(func() {
+		stripePeerAddSustain, stripePeerAddInterval = oldSustain, oldInterval
+	})
+
+	basePeer, baseServer := net.Pipe()
+	t.Cleanup(func() { basePeer.Close() })
+	go func() {
+		for {
+			if _, _, err := frame.ReadFrame(basePeer); err != nil {
+				return
+			}
+		}
+	}()
+	var dials atomic.Int32
+	tr := newStripeTransport(kernelLimitedTransport{frame.NewStreamTransport(baseServer)}, stripeConfig{
+		dialLane: func() (uint32, frame.FrameTransport, error) {
+			dials.Add(1)
+			laneActive, lanePassive := net.Pipe()
+			t.Cleanup(func() { laneActive.Close() })
+			go func() {
+				for {
+					if _, _, err := frame.ReadFrame(laneActive); err != nil {
+						return
+					}
+				}
+			}()
+			return uint32(dials.Load()), frame.NewStreamTransport(lanePassive), nil
+		},
+	})
+	t.Cleanup(func() { tr.Close() })
+
+	// The gate is engaged (normal after the first lane ack) but the carrier is
+	// kernel-bounded, so it must not freeze the add path.
+	tr.primaryFlow.mu.Lock()
+	tr.primaryFlow.gated = true
+	tr.primaryFlow.mu.Unlock()
+	tr.peerGauge.Store(255)
+
+	tr.controllerTick()
+	if got := tr.laneCount(); got != 1 {
+		t.Fatalf("laneCount after peer-gauge tick = %d, want 1 (dials=%d)", got, dials.Load())
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1", got)
+	}
+}

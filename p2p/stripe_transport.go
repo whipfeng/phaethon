@@ -68,6 +68,9 @@ var (
 	stripeGaugeHighWatermark = 0.7                    // congestion threshold
 	stripeAddSustain         = 30 * time.Second       // ≥watermark this long → add
 	stripeAddInterval        = 10 * time.Second       // minimum spacing between adds
+	stripePeerAddSustain     = 5 * time.Second        // peer-reported congestion → add
+	stripePeerAddInterval    = 5 * time.Second        // spacing for peer-triggered adds
+	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
 	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)
 	stripeEventRingCap       = 32                     // controller event ring buffer
@@ -882,7 +885,13 @@ func (t *stripeTransport) controllerTick() {
 		t.gauge = t.computeGaugeLocked()
 		t.announceGaugeLocked()
 	}
-	high := t.gauge >= stripeGaugeHighWatermark
+	// The peer's gauge is the sender-side congestion signal for a passive
+	// session: the side that owns the bulk backlog reports it, but it cannot
+	// dial lanes itself. Treat peerHigh as a first-class add trigger so the
+	// active side can split flows onto a second carrier before the shared
+	// ordered TCP's loss recovery HOL-blocks interactive traffic.
+	peerHigh := t.peerGauge.Load() >= int32(stripeGaugeHighWatermark*255)
+	high := t.gauge >= stripeGaugeHighWatermark || peerHigh
 	switch {
 	case high:
 		if t.highSince.IsZero() {
@@ -900,15 +909,29 @@ func (t *stripeTransport) controllerTick() {
 		// UDP leg carries the data (design §7): no new lanes while Active.
 		t.highSince = time.Time{}
 	}
-	// §2.6 gauge signal switch: once the in-flight gate engages, the sojourn
-	// gauge is pinned high by design (backlog deliberately held in-process)
-	// — more lanes cannot drain process-EXTERNAL backlog, so freeze adds;
-	// the gate owns congestion from here.
-	gateEngaged := t.primaryFlow.isGated()
+	// §2.6 gauge signal switch: when the credit gate is *actually enforced*
+	// (async carrier without kernel backlog bound), more lanes cannot drain
+	// process-EXTERNAL backlog, so freeze adds. Kernel-backed carriers bypass
+	// the gate in peerWriteLoop; freezing on isGated() there permanently
+	// disabled lane creation (observed: zero [STRIPE] add lane ever).
+	gateEngaged := !t.KernelBacklogLimited() && t.primaryFlow.isGated()
+	sustain := stripeAddSustain
+	interval := stripeAddInterval
+	maxLanes := stripeMaxLanes
+	if peerHigh && t.gauge < stripeGaugeHighWatermark {
+		// Sender-side signal: react in seconds, not the 30s local-sender
+		// window, and cap the fan-out so a lossy WAN does not get flooded
+		// with redundant carriers.
+		sustain = stripePeerAddSustain
+		interval = stripePeerAddInterval
+		if maxLanes > stripePeerMaxLanes {
+			maxLanes = stripePeerMaxLanes
+		}
+	}
 	addDue := !gateEngaged && !t.highSince.IsZero() &&
-		now.Sub(t.highSince) >= stripeAddSustain &&
-		now.Sub(t.lastAddAt) >= stripeAddInterval &&
-		t.laneCount() < stripeMaxLanes
+		now.Sub(t.highSince) >= sustain &&
+		now.Sub(t.lastAddAt) >= interval &&
+		t.laneCount() < maxLanes
 	removeDue := !udpActive &&
 		t.laneCount() > 0 &&
 		!t.clearSince.IsZero() &&
@@ -939,9 +962,9 @@ func (t *stripeTransport) controllerTick() {
 			if !t.attachLane(stripeID, tr) {
 				tr.Close()
 			}
-			util.LogModuleInfo("p2p", "[STRIPE] add lane stripeID=%d gauge=%.2f lanes=%d/%d", stripeID, t.currentGauge(), t.laneCount(), stripeMaxLanes)
-			t.recordEvent("add lane stripeID=%d: gauge=%.2f ≥ %.2f sustained %v, lanes now %d/%d (udpActive=%v)",
-				stripeID, t.currentGauge(), stripeGaugeHighWatermark, stripeAddSustain, t.laneCount(), stripeMaxLanes, udpActive)
+			util.LogModuleInfo("p2p", "[STRIPE] add lane stripeID=%d gauge=%.2f peerGauge=%d peerTriggered=%v lanes=%d/%d", stripeID, t.currentGauge(), t.peerGauge.Load(), peerHigh, t.laneCount(), stripeMaxLanes)
+			t.recordEvent("add lane stripeID=%d: gauge=%.2f peerGauge=%d peerTriggered=%v ≥ %.2f sustained %v, lanes now %d/%d (udpActive=%v)",
+				stripeID, t.currentGauge(), t.peerGauge.Load(), peerHigh, stripeGaugeHighWatermark, sustain, t.laneCount(), maxLanes, udpActive)
 		}
 	}
 	if t.laneCount() > 0 && now.Sub(t.lastDiagAt) >= 30*time.Second {

@@ -455,13 +455,24 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 		// traffic — leave them unpinned (resolved per send).
 		return l
 	}
-	// Idle-carrier spread: if the rendezvous winner already owns at least one
-	// flow while another candidate owns none, take the idle one (highest
-	// rendezvous score among idle candidates). Deliberately only for the
-	// first few flows per carrier set: the bulk and interactive SSH flows are
-	// exactly those flows, and putting them on different ordered TCP streams
-	// is what isolates interactive traffic from bulk loss recovery. Once all
-	// carriers own a flow, rendezvous quality decides as before.
+	t.mu.Lock()
+	if existing, ok := t.affinity[key]; ok {
+		// Another frame resolved this flow between the unlock above and now.
+		existing.seen = now
+		t.affinity[key] = existing
+		t.mu.Unlock()
+		return existing.lane
+	}
+	if len(t.affinity) >= stripeAffinityCap {
+		t.resetPinsLocked()
+	}
+	// Idle-carrier spread, decided under t.mu so two concurrent first-frames
+	// (bulk and interactive) cannot both observe the same carrier as idle and
+	// collide. If the rendezvous winner already owns a flow while another
+	// candidate owns none, take the idle one (highest rendezvous score). This
+	// is what puts the bulk and interactive SSH flows on different ordered
+	// TCP streams, isolating interactive traffic from bulk loss recovery.
+	// Once every carrier owns a flow, rendezvous quality decides as before.
 	if t.pinCount(l) > 0 {
 		bestIdle := l
 		bestIdleSet := false
@@ -481,17 +492,6 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 		if bestIdleSet {
 			l = bestIdle
 		}
-	}
-	t.mu.Lock()
-	if existing, ok := t.affinity[key]; ok {
-		// Another frame resolved this flow between the unlock above and now.
-		existing.seen = now
-		t.affinity[key] = existing
-		t.mu.Unlock()
-		return existing.lane
-	}
-	if len(t.affinity) >= stripeAffinityCap {
-		t.resetPinsLocked()
 	}
 	// Explicitly cache "primary" (lane nil) so a later weight flip cannot
 	// promote a lane above the primary for this flow.

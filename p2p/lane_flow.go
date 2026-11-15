@@ -604,11 +604,18 @@ func (t *stripeTransport) announceGaugeLocked() {
 	}
 	prev := t.gaugeSent
 	cur := t.gauge
-	if !((prev < stripeGaugeHighWatermark && cur >= stripeGaugeHighWatermark) ||
-		(prev >= stripeGaugeHighWatermark && cur < stripeGaugeHighWatermark)) {
+	crossed := (prev < stripeGaugeHighWatermark && cur >= stripeGaugeHighWatermark) ||
+		(prev >= stripeGaugeHighWatermark && cur < stripeGaugeHighWatermark)
+	// While high, retry once per second. The first crossing can race the
+	// peer's gossip handshake (a cold start crosses high within a second of
+	// the first bulk frame), and a lost urgent frame used to leave the add-lane
+	// signal waiting for the next low→high edge (~11s observed).
+	highRetry := cur >= stripeGaugeHighWatermark && time.Since(t.gaugeSentAt) >= time.Second
+	if !crossed && !highRetry {
 		return
 	}
 	t.gaugeSent = cur
+	t.gaugeSentAt = time.Now()
 	g := byte(cur * 255)
 	if err := t.cfg.sendControl(laneGaugeFrameType, []byte{g}); err != nil {
 		util.LogModuleDebug("p2p", "[LANE-GAUGE] %s announce failed: %v", t.cfg.name, err)

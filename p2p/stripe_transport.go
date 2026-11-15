@@ -207,8 +207,13 @@ type stripeTransport struct {
 	lastLowat   int
 
 	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
-	// urgent frame fires only on watermark crossings (ctrlMu-guarded).
-	gaugeSent float64
+	// urgent frame fires on watermark crossings (ctrlMu-guarded). gaugeSentAt
+	// rate-limits re-announcements while the gauge stays high: a cold start can
+	// cross the watermark before the peer's gossip handshake is armed, and
+	// without a retry the add-lane signal waits for the next low→high crossing
+	// (observed ~11s).
+	gaugeSent   float64
+	gaugeSentAt time.Time
 
 	// laneQueueDrops counts batches dropped because a lane queue was full and
 	// the flow must stay pinned to preserve ordering.

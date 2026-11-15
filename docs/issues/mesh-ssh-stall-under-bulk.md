@@ -289,3 +289,22 @@ lane 集合变化或容量溢出时整体重置，**流结束后条目仍留在�
 属于另一个课题。
 
 扩散状态：仅在 gg / jf / qg / vm 四个验证环境；未扩散到其它环境。
+
+## 第十轮：冷启动窗口攻坚（2026-11-15）
+
+复现方式：kill GG worker（watchdog 自动拉起），6s 后立即跑 300MB + 交互
+PTY。结果 p50=117ms / p95=1419ms / max=1581ms，探针 5~15（约前 17s）
+间歇出现 0.3~1.6s 尖峰，之后恢复 110ms。JF 的 lane1 直到批量开始后
+**11s** 才加入。
+
+两个独立原因与修复：
+
+1. **高 gauge 只在水位跨越时通告**：冷启动时第一次 high 可能早于对端
+   gossip 握手就绪，急件丢失后要等下一次 low→high 跨越（实测 11s）。
+   改为 high 期间每 1s 限频重发 `FrameLaneGauge`。
+2. **TCP_NOTSENT_LOWAT 只管“未发出”字节**：冷启动时拥塞窗口仍可把
+   in-flight 数据堆到浅缓冲链路里。Linux/darwin 的 `setNotSentLowat`
+   现在同时设置 `SO_SNDBUF = n`，从创建时（16KB，内核翻倍约 32KB）
+   就限制 unsent+unacked 总量；tuner 有速率样本后再按 2×BDP 放大。
+
+验证：待部署 4 节点后按同一“重启 worker → 立即压测”配方复测。

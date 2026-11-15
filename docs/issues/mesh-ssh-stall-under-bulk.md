@@ -129,3 +129,33 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 - 初始 `laneNotSentLowat` 由 512KB 降为 16KB，先小后大，避免首批数据在调优前灌满内核。
 
 验证：待部署 4 节点后重测 300MB + 交互 PTY，目标 p95 < 200ms；未达标不扩散。
+
+## 第五轮：DRR 输出 FIFO 才是真正的队列（2026-11-15）
+
+第四轮修复部署后（`v0.8.1-10-g670061b`）：
+
+| 方向 | 场景 | p50 / p95 / max |
+| --- | --- | --- |
+| 上行 GG→VM（300MB 上传） | 交互 PTY | 513ms / 1383ms / 1907ms |
+| 下行 VM→GG（300MB 下载） | 交互 PTY | 113ms / 459ms / 989ms |
+
+延迟集中在**上行**，说明是正向载体上的排队，不是共享的 gVisor/回程。
+
+`ss -tin` 采样 GG 的上行载体（到 JF）：`cwnd:8`、`Send-Q≈32KB`、
+`notsent≈21KB`、`bytes_retrans≈10%`、`minrtt≈21ms`。内核里没有 1.3s
+的数据，排队发生在应用层：
+
+- `drrLoop` 每轮取 `NextBatch(64)`，再逐帧塞进容量 **512** 的
+  `drrOutput`；写循环每次只收集 16KB。
+- 交互包空闲期，调度器把 FIFO 填满批量帧；交互包即使赢得 DRR 轮次，
+  进入 FIFO 时仍排在最多 512 帧（≈700KB）之后，500KB/s 载体上就是
+  1.3s，与 `LANE-INFLIGHT` 的 `srtt≈1.35s` 完全吻合。
+- DRR 的公平顺序被这个中间 FIFO 完全抵消。
+
+修复：
+
+- `drrOutputDepth = 16`（≈1~2 个写批次），超出的帧留在 DRR 的 per-flow
+  队列里，由调度器按 4KB quantum 公平选择；
+- `drrLoop` 单轮批量 64 → 16，避免批次本身变成第二个 FIFO。
+
+验证：待构建部署 4 节点重测上行 300MB + 交互 PTY。

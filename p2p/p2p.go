@@ -336,6 +336,12 @@ const (
 	// carrier and starved interactive flows sharing the peer. 4KB bounds the
 	// per-round head-of-line delay without adding measurable overhead.
 	drrQuantum = 4 << 10
+	// drrOutputDepth bounds the FIFO between the DRR scheduler and the write
+	// loop. 512 made that FIFO the real queue: with a blocked carrier the
+	// scheduler filled it with ~700KB of bulk, and an interactive frame that
+	// won its DRR turn still sat behind the whole FIFO (observed ~1.3s).
+	// One or two write batches of depth keeps DRR's ordering authoritative.
+	drrOutputDepth = 16
 )
 
 // enableSmallPriority keeps the earlier per-packet SSH small-data experiment
@@ -1624,7 +1630,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 		LastSeen:    time.Now(),
 		transport:   t,
 		dnsQueue:    make(chan writeReq, 512),
-		drrOutput:   make(chan writeReq, 512),
+		drrOutput:   make(chan writeReq, drrOutputDepth),
 		smallCh:     make(chan writeReq, 512),
 		controlCh:   make(chan writeReq, 512),
 		flowNotify:  make(chan struct{}, 1),
@@ -1910,7 +1916,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		proxy:       proxy,
 		Seq:         seq,
 		dnsQueue:    make(chan writeReq, 512),
-		drrOutput:   make(chan writeReq, 512),
+		drrOutput:   make(chan writeReq, drrOutputDepth),
 		smallCh:     make(chan writeReq, 512),
 		controlCh:   make(chan writeReq, 512),
 		flowNotify:  make(chan struct{}, 1),
@@ -2086,7 +2092,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		}
 		peer.dnsQueue = make(chan writeReq, 512)
 		peer.controlCh = make(chan writeReq, 512)
-		peer.drrOutput = make(chan writeReq, 512)
+		peer.drrOutput = make(chan writeReq, drrOutputDepth)
 		peer.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 		// Re-arm lazy data-queue allocation for the new session.
 		peer.resetDataQueues()

@@ -972,10 +972,17 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	}
 	t.lowatLastTx = snap.tx
 	t.lowatLastAt = now
-	if rate <= 0 || snap.srtt <= 0 {
+	// The sender's lane acks may not carry an RTT sample (e.g. a passive WS
+	// carrier whose peer only reports rx). Use a conservative 30ms mesh RTT
+	// estimate so the lowat still adapts to the observed local tx rate.
+	srtt := snap.srtt
+	if srtt <= 0 {
+		srtt = 30 * time.Millisecond
+	}
+	if rate <= 0 {
 		return
 	}
-	lowat := int(2 * rate * snap.srtt.Seconds())
+	lowat := int(2 * rate * srtt.Seconds())
 	if lowat < 16<<10 {
 		lowat = 16 << 10
 	}
@@ -988,7 +995,7 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	if t.SetKernelBacklogLimit(lowat) {
 		t.lastLowat = lowat
 		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s srtt=%v",
-			lowat>>10, rate/1e6, snap.srtt)
+			lowat>>10, rate/1e6, srtt)
 	}
 }
 

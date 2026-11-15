@@ -42,6 +42,7 @@ func limitKernelBacklog(conn net.Conn) bool {
 	c := conn
 	for i := 0; i < 8; i++ {
 		if tc, ok := c.(*net.TCPConn); ok {
+			applyCarrierCC(tc, conn.RemoteAddr())
 			lowat := laneLowatBytes()
 			if err := setNotSentLowat(tc, lowat); err != nil {
 				util.LogModuleInfo("p2p", "[LANE-LOWAT] skipped remote=%s: %v", conn.RemoteAddr(), err)
@@ -58,6 +59,23 @@ func limitKernelBacklog(conn net.Conn) bool {
 	}
 	util.LogModuleInfo("p2p", "[LANE-LOWAT] skipped remote=%s: carrier %T is not a TCP socket", conn.RemoteAddr(), c)
 	return false
+}
+
+// applyCarrierCC selects a per-socket congestion-control algorithm when
+// PHAETHON_CARRIER_CC is set (e.g. "bbr"). This is a lab/reference switch for
+// the isolated BBR experiment: it is inert by default, changes no global
+// sysctl, and only affects this process's carrier sockets. The shipping path is
+// the portable app-level pacer.
+func applyCarrierCC(tc *net.TCPConn, remote net.Addr) {
+	cc := os.Getenv("PHAETHON_CARRIER_CC")
+	if cc == "" {
+		return
+	}
+	if err := setCongestionControl(tc, cc); err != nil {
+		util.LogModuleWarn("p2p", "[CARRIER-CC] set %q failed remote=%s: %v", cc, remote, err)
+		return
+	}
+	util.LogModuleInfo("p2p", "[CARRIER-CC] set %q remote=%s", cc, remote)
 }
 
 // KernelBacklogLimited is implemented by transports that know whether the

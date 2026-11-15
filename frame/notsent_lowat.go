@@ -31,9 +31,9 @@ func laneLowatBytes() int {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
-		util.LogModuleWarn("p2p", "[LANE-LOWAT] invalid PHAETHON_P2P_LOWAT=%q, using %d", v, laneNotSentLowat)
+		util.LogModuleWarn("p2p", "[LANE-LOWAT] invalid PHAETHON_P2P_LOWAT=%q, using %d", v, defaultLowat())
 	}
-	return laneNotSentLowat
+	return defaultLowat()
 }
 
 // limitKernelBacklog sets TCP_NOTSENT_LOWAT on the TCP socket under conn,

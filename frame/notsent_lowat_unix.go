@@ -21,3 +21,5 @@ func setNotSentLowat(tc *net.TCPConn, n int) error {
 	}
 	return serr
 }
+
+func defaultLowat() int { return laneNotSentLowat }

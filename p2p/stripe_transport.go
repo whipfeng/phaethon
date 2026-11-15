@@ -70,6 +70,8 @@ var (
 	stripeAddInterval        = 10 * time.Second       // minimum spacing between adds
 	stripePeerAddSustain     = 1 * time.Second        // peer-reported congestion → add
 	stripePeerAddInterval    = 1 * time.Second        // spacing for peer-triggered adds
+	stripeAffinityIdleTTL    = 30 * time.Second       // drop lane pins of flows idle this long
+	stripeAffinitySweep      = 10 * time.Second       // affinity janitor period
 	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
 	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)
@@ -139,6 +141,14 @@ func (l *stripeLane) close() {
 	l.closeOnce.Do(func() { close(l.done) })
 }
 
+// affinityPin is one flow's sticky carrier binding plus the last time the flow
+// sent. The janitor expires idle pins so per-carrier pinned counts never drift
+// upward across short-lived flows (which would disable the idle-carrier spread).
+type affinityPin struct {
+	lane *stripeLane // nil = primary carrier
+	seen int64       // unix nano of the last frame
+}
+
 type stripeTransport struct {
 	mu    sync.Mutex
 	base  frame.FrameTransport // primary lane, owns the session
@@ -152,8 +162,10 @@ type stripeTransport struct {
 	// flows — rendezvous scores multiplied by drifting probe weights made
 	// flows flip-flop across parallel channels and reordered inner TCP.
 	// The table is dropped wholesale on lane add/remove (accepted transient,
-	// same stance as §3.3 route pinning).
-	affinity map[uint32]*stripeLane
+	// same stance as §3.3 route pinning), and a janitor removes entries whose
+	// flow has been idle for stripeAffinityIdleTTL so pinned counts keep
+	// reflecting live flows (bulk vs interactive spreading on a later run).
+	affinity map[uint32]affinityPin
 	// primaryPinned counts flows pinned to the primary carrier (nil affinity).
 	// Together with stripeLane.pinned it lets a miss prefer an idle carrier:
 	// the first flows (bulk vs interactive) then land on different TCP streams
@@ -208,7 +220,7 @@ func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTran
 		base:      base,
 		salt:      rand.Uint32(),
 		cfg:       cfg,
-		affinity:  make(map[uint32]*stripeLane),
+		affinity:  make(map[uint32]affinityPin),
 		ctrlCh:    make(chan legRecvResult, 16),
 		dataCh:    make(chan legRecvResult, 64),
 		closed:    make(chan struct{}),
@@ -217,6 +229,7 @@ func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTran
 	t.peerGauge.Store(-1)
 	go t.baseReadLoop()
 	go t.flowLoop()
+	go t.affinityJanitorLoop()
 	// Kernel-backlog tuning applies to both roles: passive sessions have no
 	// lane dialer, but they still send data and otherwise keep the creation
 	// default forever (bulk uploads then build a second-scale HOL queue in
@@ -384,10 +397,13 @@ func (t *stripeTransport) pickLane(key uint32, lanes []*stripeLane) *stripeLane 
 // Misses resolve via weighted rendezvous and are cached.
 func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *stripeLane {
 	key := flowHash32(t.salt, payload)
+	now := time.Now().UnixNano()
 	t.mu.Lock()
-	if l, ok := t.affinity[key]; ok {
-		if l == nil {
+	if e, ok := t.affinity[key]; ok {
+		if e.lane == nil {
 			// Pinned to the primary lane — always alive.
+			e.seen = now
+			t.affinity[key] = e
 			t.mu.Unlock()
 			return nil
 		}
@@ -396,17 +412,19 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 		// without invalidation (defensive) must fall through to re-resolve.
 		stillThere := false
 		for _, x := range lanes {
-			if x == l {
+			if x == e.lane {
 				stillThere = true
 				break
 			}
 		}
 		if stillThere {
+			e.seen = now
+			t.affinity[key] = e
 			t.mu.Unlock()
-			return l
+			return e.lane
 		}
 		delete(t.affinity, key)
-		t.bumpPinLocked(l, -1)
+		t.bumpPinLocked(e.lane, -1)
 	}
 	t.mu.Unlock()
 
@@ -448,19 +466,17 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 	t.mu.Lock()
 	if existing, ok := t.affinity[key]; ok {
 		// Another frame resolved this flow between the unlock above and now.
+		existing.seen = now
+		t.affinity[key] = existing
 		t.mu.Unlock()
-		return existing
+		return existing.lane
 	}
 	if len(t.affinity) >= stripeAffinityCap {
 		t.resetPinsLocked()
 	}
-	if l != nil {
-		t.affinity[key] = l
-	} else {
-		// Explicitly cache "primary" so a later weight flip cannot promote a
-		// lane above the primary for this flow.
-		t.affinity[key] = nil
-	}
+	// Explicitly cache "primary" (lane nil) so a later weight flip cannot
+	// promote a lane above the primary for this flow.
+	t.affinity[key] = affinityPin{lane: l, seen: now}
 	t.bumpPinLocked(l, 1)
 	t.mu.Unlock()
 	return l
@@ -487,11 +503,39 @@ func (t *stripeTransport) bumpPinLocked(l *stripeLane, delta int32) {
 // t.mu. The affinity table is dropped wholesale on lane set changes, so the
 // counts are rebuilt by the next flow resolutions.
 func (t *stripeTransport) resetPinsLocked() {
-	t.affinity = make(map[uint32]*stripeLane)
+	t.affinity = make(map[uint32]affinityPin)
 	t.primaryPinned.Store(0)
 	for _, l := range t.lanes {
 		l.pinned.Store(0)
 	}
+}
+
+// affinityJanitorLoop expires pins of flows that have been idle for
+// stripeAffinityIdleTTL. Without it, pinned counts only grow and a later bulk
+// transfer finds every carrier "occupied", disabling the idle-carrier spread.
+func (t *stripeTransport) affinityJanitorLoop() {
+	tick := time.NewTicker(stripeAffinitySweep)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.closed:
+			return
+		case now := <-tick.C:
+			t.expireAffinity(now)
+		}
+	}
+}
+
+func (t *stripeTransport) expireAffinity(now time.Time) {
+	cutoff := now.Add(-stripeAffinityIdleTTL).UnixNano()
+	t.mu.Lock()
+	for k, e := range t.affinity {
+		if e.seen < cutoff {
+			delete(t.affinity, k)
+			t.bumpPinLocked(e.lane, -1)
+		}
+	}
+	t.mu.Unlock()
 }
 
 // dropAffinity invalidates the per-flow lane pin. Called on lane set changes.
@@ -567,10 +611,15 @@ func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (int, 
 }
 
 func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
+	now := time.Now().UnixNano()
 	t.mu.Lock()
 	for _, f := range batch {
 		if key := flowHash32(t.salt, f.Payload); key != 0 {
-			t.affinity[key] = nil
+			if e, ok := t.affinity[key]; ok {
+				t.bumpPinLocked(e.lane, -1)
+			}
+			t.affinity[key] = affinityPin{seen: now}
+			t.primaryPinned.Add(1)
 		}
 	}
 	t.mu.Unlock()

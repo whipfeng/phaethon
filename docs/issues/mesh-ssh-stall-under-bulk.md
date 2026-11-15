@@ -238,3 +238,32 @@ lane1、27s 加 lane2。逐探针结果：前 26s 仍有 1.4s 尖峰，lane2 生
   无 per-flow 生命周期清理负担。
 
 单测：`TestStripeIdleSpreadSeparatesFirstFlows`。
+
+## 第八轮：idle-carrier spread 的亲和表生命周期（2026-11-15）
+
+第一次跑通（v14）：
+
+| 指标 | 数值 |
+| --- | --- |
+| min | 95ms |
+| p50 | **116ms** |
+| p95 | **177ms** |
+| max | 680ms |
+
+除探针 1（PTY 建立 + lane 正在加，680ms）外，探针 2~60 全部 **95~188ms**，
+p95 首次进入 200ms 以内。JF 在批量开始后约 6s 通过 peerGauge 加 lane1，
+idle spread 把批量流和交互流分到不同载体。
+
+紧接着第二次运行回退到 p50=209ms / p95=1506ms。原因：affinity 表只在
+lane 集合变化或容量溢出时整体重置，**流结束后条目仍留在表里**，导致
+每个载体的 `pinned` 计数一直大于 0，第二次运行的批量/交互流不再满足
+“有空闲载体”条件，只能按 rendezvous 撞运气。
+
+修复（显式生命周期清理）：
+
+- affinity 值改为 `affinityPin{lane, seen}`，命中时刷新 seen；
+- 新增 janitor：每 10s 扫描，删除 idle ≥ 30s 的 pin 并递减对应载体计数；
+- `repinPrimary` 同步维护 primary/lane 计数；
+- 表整体重置时清零所有计数。
+
+单测：`TestStripeAffinityExpiresIdleFlows`。

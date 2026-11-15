@@ -1056,7 +1056,7 @@ func TestStripeLaneFullKeepsFlowPinned(t *testing.T) {
 	p := synthTCPFlow(1)
 	key := flowHash32(tr.salt, p)
 	tr.mu.Lock()
-	tr.affinity[key] = full
+	tr.affinity[key] = affinityPin{lane: full, seen: time.Now().UnixNano()}
 	tr.mu.Unlock()
 
 	st, err := tr.laneEnqueue(full, []frame.Frame{{Type: frame.FrameMeshPacket, Payload: p}})
@@ -1064,10 +1064,10 @@ func TestStripeLaneFullKeepsFlowPinned(t *testing.T) {
 		t.Fatalf("laneEnqueue on full lane = (%v, %v), want (laneDropped, nil)", st, err)
 	}
 	tr.mu.Lock()
-	l, pinned := tr.affinity[key]
+	e, pinned := tr.affinity[key]
 	tr.mu.Unlock()
-	if !pinned || l != full {
-		t.Fatalf("flow pin after full lane = (%v, %v), want (%v, true)", l, pinned, full)
+	if !pinned || e.lane != full {
+		t.Fatalf("flow pin after full lane = (%v, %v), want (%v, true)", e.lane, pinned, full)
 	}
 	if got := tr.pickLanePinned(p, []*stripeLane{full}); got != full {
 		t.Fatalf("next frame picked lane %v, want the same lane %v", got, full)
@@ -1160,5 +1160,28 @@ func TestStripeIdleSpreadSeparatesFirstFlows(t *testing.T) {
 	// Repeated calls stay sticky (affinity), not re-resolved per frame.
 	if got := tr.pickLanePinned(synthTCPFlow(1), lanes); got != l1 {
 		t.Fatalf("flow 1 re-resolved from %v to %v", l1, got)
+	}
+}
+
+// TestStripeAffinityExpiresIdleFlows guards the lifecycle cleanup: pinned
+// counts must drop back to zero once flows go idle, otherwise a later bulk
+// transfer finds every carrier "occupied" and loses the idle-carrier spread.
+func TestStripeAffinityExpiresIdleFlows(t *testing.T) {
+	tr, _ := stripeTestWrapper(t, 0)
+	p := synthTCPFlow(7)
+	key := flowHash32(tr.salt, p)
+	tr.mu.Lock()
+	tr.affinity[key] = affinityPin{seen: time.Now().Add(-time.Minute).UnixNano()}
+	tr.primaryPinned.Store(1)
+	tr.mu.Unlock()
+
+	tr.expireAffinity(time.Now())
+
+	tr.mu.Lock()
+	_, ok := tr.affinity[key]
+	n := tr.primaryPinned.Load()
+	tr.mu.Unlock()
+	if ok || n != 0 {
+		t.Fatalf("idle pin not expired: present=%v primaryPinned=%d", ok, n)
 	}
 }

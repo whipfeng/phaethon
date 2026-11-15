@@ -53,3 +53,17 @@ func (t *firstFrameTransport) IsStreamCarrier() bool {
 	}
 	return false
 }
+
+func (t *firstFrameTransport) KernelBacklogLimited() bool {
+	if kb, ok := t.base.(frame.KernelBacklogLimited); ok {
+		return kb.KernelBacklogLimited()
+	}
+	return false
+}
+
+func (t *firstFrameTransport) SetKernelBacklogLimit(n int) bool {
+	if tuner, ok := t.base.(frame.KernelBacklogTuner); ok {
+		return tuner.SetKernelBacklogLimit(n)
+	}
+	return false
+}

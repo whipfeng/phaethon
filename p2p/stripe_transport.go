@@ -178,6 +178,12 @@ type stripeTransport struct {
 	peerGauge      atomic.Int32 // peer's congestion gauge 0-255 (-1 = none yet)
 	diagPrimaryTx  int64
 
+	// Kernel backlog tuning (direct TCP carriers): lowat = 2×BDP, clamped
+	// [16KB, 512KB]. Controller-goroutine-only state; no per-flow maps.
+	lowatLastTx int64
+	lowatLastAt time.Time
+	lastLowat   int
+
 	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
 	// urgent frame fires only on watermark crossings (ctrlMu-guarded).
 	gaugeSent float64
@@ -947,6 +953,43 @@ func (t *stripeTransport) controllerTick() {
 			t.removeLane(l)
 		}
 	}
+
+	t.tuneKernelBacklog(now)
+}
+
+// tuneKernelBacklog keeps TCP_NOTSENT_LOWAT near 2×BDP on direct TCP carriers:
+// small on slow links (bounded interactive latency), large on fast links (no
+// throughput ceiling). Uses the lane's ack-derived rate when available, else
+// the local tx delta. No per-flow state; values live on the transport.
+func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
+	snap := t.primaryFlow.snapshot()
+	rate := snap.rate
+	if rate <= 0 && !t.lowatLastAt.IsZero() {
+		dt := now.Sub(t.lowatLastAt).Seconds()
+		if dt > 0 && snap.tx > t.lowatLastTx {
+			rate = float64(snap.tx-t.lowatLastTx) / dt
+		}
+	}
+	t.lowatLastTx = snap.tx
+	t.lowatLastAt = now
+	if rate <= 0 || snap.srtt <= 0 {
+		return
+	}
+	lowat := int(2 * rate * snap.srtt.Seconds())
+	if lowat < 16<<10 {
+		lowat = 16 << 10
+	}
+	if lowat > 512<<10 {
+		lowat = 512 << 10
+	}
+	if t.lastLowat != 0 && lowat > t.lastLowat-(8<<10) && lowat < t.lastLowat+(8<<10) {
+		return
+	}
+	if t.SetKernelBacklogLimit(lowat) {
+		t.lastLowat = lowat
+		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s srtt=%v",
+			lowat>>10, rate/1e6, snap.srtt)
+	}
 }
 
 // probeTick sends one PingInfo probe per lane and ages out expired ones as
@@ -1065,4 +1108,21 @@ func (t *stripeTransport) Close() error {
 		t.base.Close()
 	})
 	return nil
+}
+
+// KernelBacklogLimited delegates the carrier capability so peerWriteLoop can
+// disable the peer-wide credit gate when the transport has real backpressure.
+func (t *stripeTransport) KernelBacklogLimited() bool {
+	if kb, ok := t.base.(frame.KernelBacklogLimited); ok {
+		return kb.KernelBacklogLimited()
+	}
+	return false
+}
+
+// SetKernelBacklogLimit delegates adaptive TCP_NOTSENT_LOWAT tuning.
+func (t *stripeTransport) SetKernelBacklogLimit(n int) bool {
+	if tuner, ok := t.base.(frame.KernelBacklogTuner); ok {
+		return tuner.SetKernelBacklogLimit(n)
+	}
+	return false
 }

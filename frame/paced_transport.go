@@ -100,3 +100,17 @@ func (t *PacedTransport) IsStreamCarrier() bool {
 	}
 	return false
 }
+
+func (t *PacedTransport) KernelBacklogLimited() bool {
+	if kb, ok := t.base.(KernelBacklogLimited); ok {
+		return kb.KernelBacklogLimited()
+	}
+	return false
+}
+
+func (t *PacedTransport) SetKernelBacklogLimit(n int) bool {
+	if tuner, ok := t.base.(KernelBacklogTuner); ok {
+		return tuner.SetKernelBacklogLimit(n)
+	}
+	return false
+}

@@ -329,10 +329,20 @@ const (
 	// makes the relay drop data frames, which the inner TCP sees as loss
 	// and answers with SACK/RTO storms. 4MB covers the step without
 	// unbounded memory growth; drops still apply beyond that.
-	dataQueueByteBudget = 4 << 20  // 4MB per peer
-	dataQueueMaxDepth   = 512      // frames per queue
-	drrQuantum          = 64 << 10 // 64KB per queue per round (~43×1500B frames)
+	dataQueueByteBudget = 4 << 20 // 4MB per peer
+	dataQueueMaxDepth   = 512     // frames per queue
+	// drrQuantum is the per-flow per-round byte allowance. fq_codel-style
+	// qdiscs use ~one MTU; 64KB made a bulk flow's turn 640ms on a 100KB/s
+	// carrier and starved interactive flows sharing the peer. 4KB bounds the
+	// per-round head-of-line delay without adding measurable overhead.
+	drrQuantum = 4 << 10
 )
+
+// enableSmallPriority keeps the earlier per-packet SSH small-data experiment
+// compiled as a reference, but it is disabled: packet-size classification is
+// not how mainstream qdiscs work. The production path is DRR quantum + AQM
+// style queueing + carrier backpressure.
+const enableSmallPriority = false
 
 // DRRScheduler implements Deficit Round Robin fair scheduling for multiple data queues.
 // v3: real deficit-gated draining (design §3.2) + per-peer byte budget refund.
@@ -1064,15 +1074,18 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 	var smallBypass int64
 
 	for {
-		// §3.4 write gate: when the session's in-flight credit is exhausted,
-		// stop dequeuing bulk drrOutput — surplus data stays in the DRR queues
-		// (fair scheduling, byte budget, drops → inner TCP backs off) while
-		// control/DNS frames and small interactive data keep flowing. LaneAck/
-		// cap adjustments wake us via flowNotify. Peers without LaneAck support
-		// (stripe nil, or no ack yet) report infinite credit: gate stays open.
+		// §3.4 write gate. On synchronous carriers with a kernel-bounded
+		// backlog (TCP_NOTSENT_LOWAT), real transport backpressure replaces the
+		// peer-wide credit gate: DRR per-flow rounds + the bounded kernel queue
+		// keep latency low, and a bulk flow cannot pause every flow. Async
+		// carriers (h_tunnel POST pools) keep the credit gate.
 		credit := int64(math.MaxInt64)
 		if peer.stripe != nil {
-			credit = peer.stripe.writeCredit()
+			if kb, ok := peer.transport.(frame.KernelBacklogLimited); ok && kb.KernelBacklogLimited() {
+				credit = math.MaxInt64
+			} else {
+				credit = peer.stripe.writeCredit()
+			}
 		}
 		if credit > 0 {
 			smallBypass = 0
@@ -1117,7 +1130,15 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 
 		var batch []writeReq
 		if credit > 0 {
-			batch = collectWriteBatch(peer, first, maxBatchFrames, credit, fromSmall)
+			// Cap a single write burst by bytes as well as frames. 64 frames
+			// (~90KB) is a 0.9s burst on a 100KB/s carrier; 16KB keeps the
+			// inter-frame scheduling delay bounded while retaining batching.
+			const maxBatchBytes = int64(16 << 10)
+			batchBudget := credit
+			if batchBudget > maxBatchBytes {
+				batchBudget = maxBatchBytes
+			}
+			batch = collectWriteBatch(peer, first, maxBatchFrames, batchBudget, fromSmall)
 		} else {
 			batch = collectPriorityBatch(peer, first, maxBatchFrames, smallReserve-smallBypass, fromSmall)
 			for _, req := range batch {
@@ -1259,7 +1280,7 @@ func (m *P2PManager) drrLoop(peer *Peer) {
 		// take the priority queue; if it is full, fall back to the normal DRR
 		// output so the scheduler never blocks.
 		for _, req := range batch {
-			if isSmallInteractiveData(req.frameType, req.data) {
+			if enableSmallPriority && isSmallInteractiveData(req.frameType, req.data) {
 				select {
 				case peer.smallCh <- req:
 					continue

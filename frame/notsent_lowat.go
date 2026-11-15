@@ -66,3 +66,11 @@ func limitKernelBacklog(conn net.Conn) bool {
 type KernelBacklogLimited interface {
 	KernelBacklogLimited() bool
 }
+
+// KernelBacklogTuner is implemented by transports that can adjust the kernel
+// unsent backlog at runtime. The stripe controller uses it to keep the kernel
+// queue near twice the measured BDP: small on slow links (bounded interactive
+// latency), large on fast links (no throughput ceiling).
+type KernelBacklogTuner interface {
+	SetKernelBacklogLimit(n int) bool
+}

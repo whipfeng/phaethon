@@ -72,3 +72,17 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 - 给 `writeReq` 增加 small 类标记，在 QDEPTH 里分别记录 bulk/small 的 maxSojourn，确认 small 帧是否真的被优先；
 - 若 small 帧在 p2p 层已低延迟，把优先级上移到 gVisor inner TCP / mapping relay 的共享队列；
 - 在未拿到 p95 改善前，不扩散该修复到其他环境。
+
+## 主流修复（第二轮，2026-11-15）
+
+放弃逐包“大小/端口猜流类型”，改为 qdisc 式公平队列 + 背压：
+
+1. **DRR quantum 64KB → 4KB**：一轮只给单流约一个 MTU 级的字节量，批量流不能占用一整轮 640ms（100KB/s 载体）。
+2. **单批上限 16KB**：避免一次 `SendBatch` 形成 ~90KB 的突发。
+3. **同步载体关闭 peer 级 credit 门控**：直连 TCP 已设置 `TCP_NOTSENT_LOWAT`，有真实内核背压，交给 DRR + 传输阻塞；异步 h_tunnel POST 仍保留 credit。
+4. **自适应 `TCP_NOTSENT_LOWAT` = 2×BDP**，夹在 16KB~512KB：慢链路小窗口限制交互时延，快链路大窗口不压吞吐；由 `stripeTransport` 控制器每 200ms 调整。
+5. **`smallCh` 保留但默认关闭**（`enableSmallPriority=false`），只作对照。
+
+实现只增加固定队列/单 transport 字段，没有 per-flow map，不引入生命周期清理问题。
+
+验证：待部署后在 gg→vm 的 300MB 上传 + 交互 PTY 场景重测 p95；目标 <200ms，未达标不扩散。

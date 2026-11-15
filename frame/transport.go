@@ -95,6 +95,31 @@ func NewStreamTransport(conn net.Conn) FrameTransport {
 
 func (t *streamTransport) KernelBacklogLimited() bool { return t.lowat }
 
+// SetKernelBacklogLimit adjusts TCP_NOTSENT_LOWAT on the carrier at runtime.
+// Returns false when the carrier is not a TCP socket or the platform does not
+// support the option.
+func (t *streamTransport) SetKernelBacklogLimit(n int) bool {
+	if n <= 0 {
+		return false
+	}
+	c := t.conn
+	for i := 0; i < 8; i++ {
+		if tc, ok := c.(*net.TCPConn); ok {
+			if err := setNotSentLowat(tc, n); err != nil {
+				return false
+			}
+			t.lowat = true
+			return true
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			break
+		}
+		c = u.NetConn()
+	}
+	return false
+}
+
 func (t *streamTransport) readLoop() {
 	for {
 		_ = t.conn.SetReadDeadline(time.Now().Add(60 * time.Second))

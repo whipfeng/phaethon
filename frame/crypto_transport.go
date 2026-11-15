@@ -65,3 +65,17 @@ func (t *cryptoTransport) IsStreamCarrier() bool {
 	}
 	return false
 }
+
+func (t *cryptoTransport) KernelBacklogLimited() bool {
+	if kb, ok := t.base.(KernelBacklogLimited); ok {
+		return kb.KernelBacklogLimited()
+	}
+	return false
+}
+
+func (t *cryptoTransport) SetKernelBacklogLimit(n int) bool {
+	if tuner, ok := t.base.(KernelBacklogTuner); ok {
+		return tuner.SetKernelBacklogLimit(n)
+	}
+	return false
+}

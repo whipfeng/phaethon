@@ -154,6 +154,29 @@ func (t *udpLegTransport) cryptoOpen(dgram []byte) ([]byte, bool) {
 
 func (t *udpLegTransport) String() string { return "udp-leg" }
 
+// KernelBacklogLimited reports whether data currently rides a kernel-bounded
+// TCP carrier. While the UDP leg is active it is async/lossy, so the peer
+// credit gate stays in effect.
+func (t *udpLegTransport) KernelBacklogLimited() bool {
+	if t.routeDataViaUDP() {
+		return false
+	}
+	if kb, ok := t.base.(frame.KernelBacklogLimited); ok {
+		return kb.KernelBacklogLimited()
+	}
+	return false
+}
+
+func (t *udpLegTransport) SetKernelBacklogLimit(n int) bool {
+	if t.routeDataViaUDP() {
+		return false
+	}
+	if tuner, ok := t.base.(frame.KernelBacklogTuner); ok {
+		return tuner.SetKernelBacklogLimit(n)
+	}
+	return false
+}
+
 // --- send path ---
 
 func (t *udpLegTransport) Send(frameType byte, payload []byte, isControl bool) error {

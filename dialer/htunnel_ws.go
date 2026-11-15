@@ -193,9 +193,5 @@ func dialP2PWebSocket(proxy *config.Proxy, crypto *util.HTunnelCrypto) (frame.Fr
 	ws.MaxPayloadBytes = 32 << 20
 	markHTCarrierResult(proxy.Name, true)
 	util.LogModuleInfo("htunnel", "[HT-WS] persistent websocket established: proxy=%s url=%s", proxy.Name, u.String())
-	return &frame.WSTransport{
-		Conn: ws,
-		Seal: crypto.SealBody,
-		Open: crypto.OpenBody,
-	}, nil
+	return frame.NewWSTransport(ws, conn, crypto.SealBody, crypto.OpenBody), nil
 }

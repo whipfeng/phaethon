@@ -2,6 +2,7 @@ package frame
 
 import (
 	"bytes"
+	"net"
 	"sync"
 
 	"golang.org/x/net/websocket"
@@ -18,6 +19,9 @@ type WSTransport struct {
 	Seal func([]byte) []byte
 	Open func([]byte) ([]byte, error)
 
+	raw   net.Conn // underlying TCP (or TLS wrapping TCP) for backpressure tuning
+	lowat bool     // TCP_NOTSENT_LOWAT is in effect on raw
+
 	mu     sync.Mutex
 	ctrlQ  []wsQueued
 	dataQ  []wsQueued
@@ -25,6 +29,42 @@ type WSTransport struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
+}
+
+// NewWSTransport builds a WS carrier and, when the raw connection is known,
+// applies the same TCP_NOTSENT_LOWAT backpressure as the plain TCP carrier.
+// WS Send is synchronous, so with a bounded kernel backlog the p2p write loop
+// can use the same DRR/fair-queue path as TCP instead of the async credit gate.
+func NewWSTransport(ws *websocket.Conn, raw net.Conn, seal func([]byte) []byte, open func([]byte) ([]byte, error)) *WSTransport {
+	t := &WSTransport{Conn: ws, raw: raw, Seal: seal, Open: open}
+	if raw != nil {
+		t.lowat = limitKernelBacklog(raw)
+	}
+	return t
+}
+
+func (t *WSTransport) KernelBacklogLimited() bool { return t.lowat }
+
+func (t *WSTransport) SetKernelBacklogLimit(n int) bool {
+	if n <= 0 || t.raw == nil {
+		return false
+	}
+	c := t.raw
+	for i := 0; i < 8; i++ {
+		if tc, ok := c.(*net.TCPConn); ok {
+			if err := setNotSentLowat(tc, n); err != nil {
+				return false
+			}
+			t.lowat = true
+			return true
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			break
+		}
+		c = u.NetConn()
+	}
+	return false
 }
 
 type wsQueued struct {

@@ -1093,6 +1093,9 @@ func StartHTunnel(mapping *config.Mapping) (net.Listener, error) {
 
 	httpSrv := &http.Server{
 		Handler: srv,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return context.WithValue(ctx, wsRawConnKey{}, c)
+		},
 	}
 	go httpSrv.Serve(noDelayListener{ln})
 	return ln, nil

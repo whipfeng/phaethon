@@ -85,4 +85,11 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 
 实现只增加固定队列/单 transport 字段，没有 per-flow map，不引入生命周期清理问题。
 
-验证：待部署后在 gg→vm 的 300MB 上传 + 交互 PTY 场景重测 p95；目标 <200ms，未达标不扩散。
+**WS 载体统一（第三轮）**：实测这条 P2P 实际走 h_tunnel WebSocket，`transport: tcp` 只是 leg 形态；上一轮只给 `streamTransport` 实现了 lowat/门控能力，WS 载体被漏掉。已把 `KernelBacklogLimited` / `SetKernelBacklogLimit` 落到 `WSTransport`：
+
+- 客户端在 WS 握手前拿到原始 TCP conn，直接设置 `TCP_NOTSENT_LOWAT`；
+- 服务端通过 `http.Server.ConnContext` 把 accepted conn 传进 WS handler；
+- WS `Send` 本身是同步写，具备真实背压；lowat 生效后 peer 级 credit 对 WS 也关闭；
+- p2p write loop 只按 carrier 接口决策，没有 `if WS` 分支。
+
+验证：待部署后重测 gg→vm 的 300MB 上传 + 交互 PTY，目标 p95 <200ms；未达标不扩散。

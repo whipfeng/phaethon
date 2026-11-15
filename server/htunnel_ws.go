@@ -16,6 +16,10 @@ import (
 	"phaethon/util"
 )
 
+// wsRawConnKey carries the accepted net.Conn from http.Server.ConnContext into
+// the WebSocket handler so the WS carrier can tune TCP_NOTSENT_LOWAT.
+type wsRawConnKey struct{}
+
 // handleMeshWebSocket upgrades an h_tunnel HTTP request to a persistent
 // WebSocket. Three modes share the same carrier, dispatched by headers:
 //   - bind (X-C: BIND): reverse data / control channel (PORT 0/1/2);
@@ -33,11 +37,8 @@ func (s *HTunnelServer) handleMeshWebSocket(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	websocket.Handler(func(ws *websocket.Conn) {
-		tr := &frame.WSTransport{
-			Conn: ws,
-			Seal: crypto.SealBody,
-			Open: crypto.OpenBody,
-		}
+		raw, _ := r.Context().Value(wsRawConnKey{}).(net.Conn)
+		tr := frame.NewWSTransport(ws, raw, crypto.SealBody, crypto.OpenBody)
 		util.LogModuleInfo("htunnel", "[HT-WS] mesh websocket established: %s", r.RemoteAddr)
 		// handleP2PTransport blocks for a primary session, but returns
 		// immediately when the first frame is a StripeAttach (ownership of the

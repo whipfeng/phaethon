@@ -381,3 +381,43 @@ unacked 25 段（~32KB）、notsent 64KB；第 5 秒出现 lost:34，
   交互 lane 的包也会排队。
 - 在这一层之下继续调 writer/窗口收益已很小；要再进 200ms 需要限制
   批量流对瓶颈的占用（内核 pacing / 发送速率上限）或换更大带宽的链路。
+
+## 第十三轮：内核 BBR 参照实验（2026-11-16）
+
+在 GG 上临时加载 tcp_bbr（默认 CC 仍 cubic，测完已 rmmod），用
+PHAETHON_CARRIER_CC=bbr 对载体 socket 设 BBR，跑同一路径的 30MB goodput
+和 300MB+交互探针：
+
+| 指标 | cubic | bbr |
+| --- | --- | --- |
+| 30MB 上传耗时 | **103.4s（~0.29MB/s）** | 142.5s（~0.21MB/s，-28%） |
+| 载体重传 | ~8~10% | ~15% |
+| 交互 p50/p95 | — | 114ms / 681ms |
+| BBR 带宽估计 | — | 12.9Mbps（实际链路 2~4Mbps） |
+
+`ss` 同时显示接收侧 `rcv_rtt` 10~43s、`rcv_space` 100KB 级：**JF 的载体
+读循环被下游（JF→VM）背压阻塞，socket 没有被及时 drain**，ACK 流变得
+稀疏/突发，BBR 的 delivery-rate 采样因此严重高估，随后维持更大窗口、
+重传更多、goodput 反而下降。
+
+结论：
+
+- **内核 BBR 在这条路径上是负收益，已回退并 rmmod**；不要把它作为方案。
+- 瓶颈不只在发送侧 CC，**接收侧读循环与下游转发的耦合**是更大的问题。
+  应用层 pacer 如果拿同样的 ACK 信号，也会犯同样的高估错误。
+- 下一步结构性工作应是**读侧解耦**：载体读循环只入有界队列（满则尾丢弃/
+  异步转发），不直接阻塞在下游；socket 持续 drain 后，CC 才能看到真实
+  delivery_rate。读侧解耦完成后再评估 pacing，否则没有意义。
+
+## 附：拓扑图链路丢包率为什么恒为 0%
+
+拓扑边上的 loss 来自 `mesh.PeerQuality` 的 ACK/ping 统计：
+
+- 判定丢包要等 `pingTimeout=5s`；
+- 超时判定后还有 `pingLateGrace=30s`，迟到的 pong 会把该样本翻回
+  `acked=true`；
+- 载体是 TCP，链路丢包由 TCP 重传隐藏，控制帧几乎总能送达。
+
+所以 0% 是"控制帧 ping 丢包率"的真实值，不是链路丢包率，也不是没统计。
+要反映真实链路质量，应在拓扑边上增加 **TCP 重传率**（TCP_INFO 的
+`bytes_retrans/bytes_sent` 或 `total_retrans`），并与控制帧丢包率分开展示。

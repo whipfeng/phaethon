@@ -73,6 +73,7 @@ var (
 	stripeAffinityIdleTTL    = 30 * time.Second       // drop lane pins of flows idle this long
 	stripeAffinitySweep      = 10 * time.Second       // affinity janitor period
 	stripeLowatWarmup        = 15 * time.Second       // hold the creation window at data start
+	stripeColdDataWindow     = 30 * time.Second       // keep data off the primary this long after first data
 	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
 	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)
@@ -449,14 +450,15 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 
 	// Miss: weighted rendezvous (quality-aware placement for new flows).
 	l := t.pickLane(key, lanes)
-	// While any dynamic lane exists, keep data off the primary. The primary
+	// During the cold-start window, keep data off the primary. The primary
 	// write is synchronous in the peer write loop: a bulk batch blocked in the
 	// primary's loss recovery holds that single goroutine, so frames already
 	// handed to a healthy lane still wait (observed as 1.4s interactive spikes
-	// with the lane's own cwnd healthy). Lanes have independent writers, so
-	// moving data to them makes a stalled carrier block only itself. Control
-	// frames are not splittable and still use the primary.
-	if l == nil && len(lanes) > 0 {
+	// with the lane's own cwnd healthy). Lanes have independent writers, so a
+	// stalled carrier blocks only itself. After the window the primary is a
+	// normal rendezvous candidate again: forcing every flow off it permanently
+	// degraded warm-state throughput when a lane was the weaker carrier.
+	if l == nil && len(lanes) > 0 && t.inColdStartWindow() {
 		best := lanes[0]
 		bestScore := scoreMix(key, best.id) * best.currentWeight()
 		for _, cand := range lanes[1:] {
@@ -526,6 +528,13 @@ func (t *stripeTransport) pinCount(l *stripeLane) int32 {
 		return t.primaryPinned.Load()
 	}
 	return l.pinned.Load()
+}
+
+// inColdStartWindow reports whether the session is within
+// stripeColdDataWindow of its first data frame.
+func (t *stripeTransport) inColdStartWindow() bool {
+	n := t.dataStartNano.Load()
+	return n != 0 && time.Since(time.Unix(0, n)) < stripeColdDataWindow
 }
 
 func (t *stripeTransport) bumpPinLocked(l *stripeLane, delta int32) {

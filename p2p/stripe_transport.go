@@ -964,18 +964,32 @@ func (t *stripeTransport) controllerTick() {
 func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	snap := t.primaryFlow.snapshot()
 	rate := snap.rate
-	if rate <= 0 && !t.lowatLastAt.IsZero() {
-		dt := now.Sub(t.lowatLastAt).Seconds()
-		if dt > 0 && snap.tx > t.lowatLastTx {
-			rate = float64(snap.tx-t.lowatLastTx) / dt
+	srtt := snap.srtt
+	tx := snap.tx
+	// Data may live on dynamic lanes, not the primary flow. Aggregate their tx
+	// and quality so the tuner does not sit at rate=0 (which kept lowat at the
+	// 512KB creation default and caused second-level HOL).
+	for _, l := range t.snapshotLanes() {
+		ls := l.flow.snapshot()
+		tx += ls.tx
+		if ls.rate > rate {
+			rate = ls.rate
+		}
+		if ls.srtt > 0 {
+			srtt = ls.srtt
 		}
 	}
-	t.lowatLastTx = snap.tx
+	if rate <= 0 && !t.lowatLastAt.IsZero() {
+		dt := now.Sub(t.lowatLastAt).Seconds()
+		if dt > 0 && tx > t.lowatLastTx {
+			rate = float64(tx-t.lowatLastTx) / dt
+		}
+	}
+	t.lowatLastTx = tx
 	t.lowatLastAt = now
 	// The sender's lane acks may not carry an RTT sample (e.g. a passive WS
 	// carrier whose peer only reports rx). Use a conservative 30ms mesh RTT
 	// estimate so the lowat still adapts to the observed local tx rate.
-	srtt := snap.srtt
 	if srtt <= 0 {
 		srtt = 30 * time.Millisecond
 	}

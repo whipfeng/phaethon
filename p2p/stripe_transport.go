@@ -72,6 +72,7 @@ var (
 	stripePeerAddInterval    = 1 * time.Second        // spacing for peer-triggered adds
 	stripeAffinityIdleTTL    = 30 * time.Second       // drop lane pins of flows idle this long
 	stripeAffinitySweep      = 10 * time.Second       // affinity janitor period
+	stripeLowatWarmup        = 5 * time.Second        // hold the creation window at burst start
 	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove
 	stripeMaxLanes           = 8                      // cap on dynamic lanes (D11)
@@ -205,6 +206,13 @@ type stripeTransport struct {
 	lowatLastTx int64
 	lowatLastAt time.Time
 	lastLowat   int
+	// dataLastAt/burstAt detect the first data after an idle gap. The first
+	// few seconds of a cold burst must not grow the window: the acked rate of
+	// the initial burst overstates link capacity (the receiver acks what it
+	// got before the queue drops), and growing SNDBUF on it caused a ~34-packet
+	// loss event that took ~5s to recover.
+	dataLastAt time.Time
+	burstAt    time.Time
 
 	// gaugeSent tracks the last gauge announced via FrameLaneGauge so the
 	// urgent frame fires on watermark crossings (ctrlMu-guarded). gaugeSentAt
@@ -1145,14 +1153,26 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 			minRTT = ls.minRTT
 		}
 	}
+	advanced := tx > t.lowatLastTx
 	if rate <= 0 && !t.lowatLastAt.IsZero() {
 		dt := now.Sub(t.lowatLastAt).Seconds()
-		if dt > 0 && tx > t.lowatLastTx {
+		if dt > 0 && advanced {
 			rate = float64(tx-t.lowatLastTx) / dt
 		}
 	}
 	t.lowatLastTx = tx
 	t.lowatLastAt = now
+	if advanced {
+		// A data gap ≥1s starts a new burst. The first seconds of a burst
+		// must not grow the window: the initial acked rate overstates the
+		// link (the receiver acks the burst before the bottleneck buffer
+		// overflows), and growing SNDBUF on it caused a ~34-packet loss
+		// event plus ~5s of recovery on the cold-start path.
+		if t.dataLastAt.IsZero() || now.Sub(t.dataLastAt) >= time.Second {
+			t.burstAt = now
+		}
+		t.dataLastAt = now
+	}
 	// Size the kernel queue from the *base* RTT, not the ack-derived srtt.
 	// Under a full send queue srtt converges to queueing/RTT and
 	// 2×rate×srtt becomes a self-amplifying bufferbloat loop (observed: the
@@ -1168,6 +1188,13 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 		baseRTT = 30 * time.Millisecond
 	}
 	if rate <= 0 {
+		return
+	}
+	// Cold-start hold: keep the conservative creation window for the first
+	// seconds of a burst. On the slow WAN it is ~1.6×BDP, so throughput is not
+	// capped, while an oversized initial window is what overshoots the shallow
+	// bottleneck buffer.
+	if !t.burstAt.IsZero() && now.Sub(t.burstAt) < stripeLowatWarmup {
 		return
 	}
 	lowat := int(2 * rate * baseRTT.Seconds())

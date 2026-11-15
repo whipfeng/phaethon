@@ -159,3 +159,38 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 - `drrLoop` 单轮批量 64 → 16，避免批次本身变成第二个 FIFO。
 
 验证：待构建部署 4 节点重测上行 300MB + 交互 PTY。
+
+## 第六轮：剩余 p95 由 GG↔JF 载体丢包/RTO 主导（2026-11-15）
+
+第五轮部署后（`v0.8.1-11-gcac6c68`）上行 300MB + 交互 PTY：
+
+| 指标 | 第五轮前 | 第五轮后 |
+| --- | --- | --- |
+| min | 159ms | 159ms |
+| p50 | 513ms | **348~382ms** |
+| p95 | 1383ms | **1438~1454ms** |
+| max | 1907ms | 1468ms |
+
+逐探针日志显示 p95 不是稳定排队，而是**周期性突发**：每 15~20s 出现
+连续 4~5 个 1.2~1.5s 的探针，随后回到 200~400ms。与以下证据对齐：
+
+- `[P2P-QDEPTH] maxSojourn=1.175s writes=123 busy=1.442s maxWrite=487ms`：
+  载体 `Write` 一次阻塞 487ms；
+- 上行路径由 mesh 选为 `GG → JF → VM`（`/api/mesh` bestPaths: vm 的
+  nextHop=jf），对应 GG→JF:39999 载体；
+- 该载体 `ss -tin` 采样：`cwnd:1..14`、`ssthresh:4..14`、
+  `rto:220ms`、`lost:6..17`、`bytes_retrans/bytes_sent ≈ 10%`，
+  `minrtt≈19ms`、`delivery_rate 3.2~5.3Mbps`；
+- 反向（VM→GG 下载 300MB）同窗口：p50 113ms / p95 459ms / max 989ms，
+  响应方向无同级别排队。
+
+结论：第五轮之后应用层队列已不是主因；剩余 p95 尖峰来自公网载体
+（GG↔JF，约 4Mbps、~10% 重传）的丢包恢复/RTO。单个有序 TCP 载体上，
+批量帧的丢包恢复会 HOL 阻塞后续所有帧，包括交互帧。
+
+可选方向（需要决策）：
+
+1. 交互流与批量流分载体（stripe 第二 lane / 独立 WS），彻底隔离 RTO HOL；
+2. 载体发送侧按实测 delivery_rate 做 kernel pacing（SO_MAX_PACING_RATE），
+   把重传率压下来，牺牲少量吞吐；
+3. 接受该环境上限，把验收目标改为“p95 < 500ms”或仅在无损链路验收。

@@ -1137,3 +1137,28 @@ func TestStripePeerGaugeAddsLaneWhileGateEngaged(t *testing.T) {
 		t.Fatalf("dials = %d, want 1", got)
 	}
 }
+
+// TestStripeIdleSpreadSeparatesFirstFlows guards the bulk/interactive split:
+// with one extra lane, the first two flows must land on different carriers so
+// one flow's loss recovery cannot HOL-block the other on a shared TCP stream.
+func TestStripeIdleSpreadSeparatesFirstFlows(t *testing.T) {
+	_, baseServer := net.Pipe()
+	defer baseServer.Close()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	defer tr.Close()
+
+	lanePeer, laneServer := net.Pipe()
+	defer lanePeer.Close()
+	tr.attachLane(1, frame.NewStreamTransport(laneServer))
+	lanes := tr.snapshotLanes()
+
+	l1 := tr.pickLanePinned(synthTCPFlow(1), lanes)
+	l2 := tr.pickLanePinned(synthTCPFlow(2), lanes)
+	if l1 == l2 {
+		t.Fatalf("first two flows pinned to the same carrier (lane=%v, nil=primary); want spread", l1)
+	}
+	// Repeated calls stay sticky (affinity), not re-resolved per frame.
+	if got := tr.pickLanePinned(synthTCPFlow(1), lanes); got != l1 {
+		t.Fatalf("flow 1 re-resolved from %v to %v", l1, got)
+	}
+}

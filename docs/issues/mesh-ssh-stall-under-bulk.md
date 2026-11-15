@@ -221,3 +221,20 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 且载体 kernel-bounded 时，peer 拥塞仍能加 lane”。
 
 验证：待部署 4 节点后重测上行 300MB + 交互 PTY。
+
+首次验证（只修 gate/peerGauge，5s sustain）：JF 在批量开始后约 9s 加
+lane1、27s 加 lane2。逐探针结果：前 26s 仍有 1.4s 尖峰，lane2 生效后
+（探针 21~60）稳定在 **99~145ms**，p50 从 348~382ms 降到 **120ms**，
+但前段尖峰仍把整轮 p95 拉到 1412ms。
+
+补充两项：
+
+- peer 触发的 sustain/interval 由 5s 降到 **1s**，让 lane 在批量开始
+  后 1~2s 内出现；
+- 新增 **idle-carrier spread**：affinity miss 时，若 rendezvous 选中的
+  载体已有 flow 而另一个载体为空，则改选空载体的最高分者。这样前两个
+  长流（批量 + 交互）会落在不同 TCP 载体上，而不是靠 hash 撞运气。
+  每个载体只增加一个 `pinned` 原子计数，affinity 表整体重置时清零，
+  无 per-flow 生命周期清理负担。
+
+单测：`TestStripeIdleSpreadSeparatesFirstFlows`。

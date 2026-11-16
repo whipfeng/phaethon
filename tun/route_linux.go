@@ -181,47 +181,53 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 	// 6. Add iptables rules to allow forwarding between physical interface and
 	// TUN interface. This is required for bypass gateway mode where client
 	// traffic arrives on the physical interface and must be forwarded to TUN.
-	// Docker's default FORWARD policy is DROP, so explicit ACCEPT rules are needed.
+	// Docker's default FORWARD policy is DROP, so explicit ACCEPT rules are
+	// needed. ensureForwardRules is idempotent and is re-asserted periodically
+	// by the gateway health loop (restart/flush recovery).
 	if r.DefaultIfaceName != "" && r.bypassGateway {
-		tunIface := r.devName
-		physIface := r.DefaultIfaceName
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		// Allow traffic from physical to TUN (client queries going to netstack)
-		if !iptablesRuleExists(ctx, physIface, tunIface) {
-			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", tunIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, tunIface, err, out)
-			} else {
-				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", physIface, tunIface)
-			}
-		} else {
-			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", physIface, tunIface)
-		}
-		// Allow traffic from TUN to physical (responses going back to clients/proxy)
-		if !iptablesRuleExists(ctx, tunIface, physIface) {
-			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", tunIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", tunIface, physIface, err, out)
-			} else {
-				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", tunIface, physIface)
-			}
-		} else {
-			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", tunIface, physIface)
-		}
-		// Allow traffic from physical interface back out the same physical interface.
-		// LAN client traffic arrives on physIface and must be forwarded back out
-		// physIface to reach the real gateway on the same subnet.
-		if !iptablesRuleExists(ctx, physIface, physIface) {
-			if out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", physIface, "-o", physIface, "-j", "ACCEPT").CombinedOutput(); err != nil {
-				util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", physIface, physIface, err, out)
-			} else {
-				util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", physIface, physIface)
-			}
-		} else {
-			util.LogModuleDebug("route", "iptables FORWARD %s->%s already exists, skipping", physIface, physIface)
-		}
+		r.ensureForwardRules()
 	}
 
 	return nil
+}
+
+// ensureForwardRules installs the three bypass-gateway FORWARD ACCEPT tuples.
+// Idempotent; called at setup and periodically by EnsureGatewayRules so a
+// Docker restart or a rule flush cannot leave LAN clients stranded.
+func (r *RouteManager) ensureForwardRules() {
+	physIface := r.DefaultIfaceName
+	tunIface := r.devName
+	if physIface == "" || tunIface == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tuples := [][2]string{
+		{physIface, tunIface},
+		{tunIface, physIface},
+		{physIface, physIface},
+	}
+	for _, t := range tuples {
+		if iptablesRuleExists(ctx, t[0], t[1]) {
+			continue
+		}
+		out, err := exec.CommandContext(ctx, "iptables", "-I", "FORWARD", "-i", t[0], "-o", t[1], "-j", "ACCEPT").CombinedOutput()
+		if err != nil {
+			util.LogModuleWarn("route", "iptables FORWARD %s->%s ACCEPT fail: %v: %s", t[0], t[1], err, out)
+			continue
+		}
+		util.LogModuleInfo("route", "iptables FORWARD %s->%s ACCEPT added", t[0], t[1])
+	}
+}
+
+// EnsureGatewayRules re-asserts ip_forward and the FORWARD tuples. The gateway
+// health loop calls this every 30s; teardown/disabled modes are no-ops.
+func (r *RouteManager) EnsureGatewayRules() {
+	if !r.bypassGateway || r.teardown.Load() {
+		return
+	}
+	_ = writeIPForward(1)
+	r.ensureForwardRules()
 }
 
 // iptablesRuleExists checks if a FORWARD ACCEPT rule already exists for the given interfaces.
@@ -243,6 +249,7 @@ func iptablesDeleteAll(ctx context.Context, inIface, outIface string) {
 }
 
 func (r *RouteManager) platformTeardown() {
+	r.teardown.Store(true)
 	// Remove ALL iptables FORWARD rules (loop to clean up any accumulated duplicates).
 	if r.DefaultIfaceName != "" {
 		tunIface := r.devName

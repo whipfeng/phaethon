@@ -675,10 +675,44 @@ func (e *Manager) StartTUN() error {
 		}
 	}
 
+	// Bypass-gateway health: the setup itself lives in route_linux.go; this
+	// loop re-asserts ip_forward + the existing FORWARD tuples after a restart
+	// or a Docker/iptables flush. Without it, a partially failed startup can
+	// leave LAN clients without egress until the next full restart.
+	if e.tunConfig != nil && e.tunConfig.IsBypassGateway() {
+		closeCh := e.tunCloseCh
+		e.tunWG.Add(1)
+		go func() {
+			defer e.tunWG.Done()
+			e.gatewayHealthLoop(closeCh)
+		}()
+	}
+
 	e.logEvent("TUN device started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", "", dev.Name(), 0, nil, "ok", nil)
 	util.LogModuleDebug("tun", "TUN device started on %s", dev.Name())
 	return nil
+}
+
+// gatewayHealthLoop keeps the bypass-gateway host rules present. The TUN setup
+// installs them once; Docker/iptables restarts or a partially failed startup
+// can drop them, so re-assert every 30s until the TUN stops.
+func (e *Manager) gatewayHealthLoop(closeCh <-chan struct{}) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-closeCh:
+			return
+		case <-tick.C:
+			e.mu.Lock()
+			rm := e.routeMgr
+			e.mu.Unlock()
+			if rm != nil {
+				rm.EnsureGatewayRules()
+			}
+		}
+	}
 }
 
 // Start starts the gVisor netstack and optionally the TUN device.

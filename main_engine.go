@@ -139,8 +139,18 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			util.LogModuleError("engine", "Failed to bind DNS hijacker to netstack: %v", err)
 			return nil, nil, nil
 		}
-		if err := ns.StartDNSHijacker(); err != nil {
-			util.LogModuleError("engine", "Failed to start DNS hijacker: %v", err)
+		// Retry the listener bind: a worker restart can race the previous
+		// netstack/port release. A failed start here used to leave DNS dead
+		// until the next manual restart (QG 2026-11-15 17:27).
+		var dnsErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if dnsErr = ns.StartDNSHijacker(); dnsErr == nil {
+				break
+			}
+			util.LogModuleError("engine", "Failed to start DNS hijacker (attempt %d/3): %v", attempt, dnsErr)
+			time.Sleep(time.Second)
+		}
+		if dnsErr != nil {
 			return nil, nil, nil
 		}
 		util.LogModuleInfo("engine", "[DNS-INIT] DNS hijacker bound and started")

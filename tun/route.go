@@ -3,6 +3,7 @@ package tun
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // DefaultLANExclusions lists IPv4 local subnets that should bypass TUN
@@ -46,6 +47,9 @@ type RouteManager struct {
 	foreignSnapshots []splitRouteSnapshot
 	tunIP            string
 	bypassGateway    bool
+	// teardown marks the manager as tearing down so the gateway health loop
+	// stops re-asserting FORWARD rules while they are being removed.
+	teardown atomic.Bool
 
 	// DefaultIfaceName is the original default interface name (e.g. "eth0", "en0").
 	// Used for DIRECT connection socket binding to bypass TUN routes.

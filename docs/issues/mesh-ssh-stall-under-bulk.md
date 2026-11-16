@@ -515,3 +515,28 @@ TCP 恢复），用该指标做单变量 A/B，而不是再调整路由公式。
 1. 优先验证 UDP leg（绕过外层 TCP 的 RTO/丢失恢复）是否是风暴触发点；
 2. 若 UDP leg 也复现，则问题在内层 gVisor（flow stall/link rebuild），
    需要做 per-flow 状态取证，而不是继续调 RTO/窗口。
+
+## 第十七轮：风暴期间的内层 flow 取证（2026-11-17）
+
+使用 admin `/api/mesh` 已有的 `tcpFlowDebug`（gVisor per-flow JSON）在
+风暴窗口逐秒采样，结果：
+
+- 批量 SSH flow：cwnd 84~128、sndBufUsed 0.6~1MB、unsent 0.5~1MB、
+  outstanding 91~128、srtt 73→750ms、rto 200ms→2.7s。内层 flow 本身健康，
+  但在持续喂一个慢的外层载体。
+- 外层载体（GG→JF TCP）：cwnd **5~9**、lost **5~23**、srtt 400~750ms，
+  处于持续丢包恢复；这是真正的瓶颈。
+- 交互 SSH flow：cwnd 128、outstanding=0、unsent=0、lastSend 最长 4.8s。
+  说明请求已经发出，卡在**回程**（VM→GG）等待响应，而不是请求方向排队。
+- 同期所有 app 级 drop 计数（meshInbound/dataBudget/lane/readQueue/nicTx/
+  tunWrite）**全为 0**。
+
+结论：剩余风暴不是 app 队列丢包、不是路由、也不是内层 MinRTO；是外层
+载体的 WAN 丢包/RTO 同时影响两个方向（去程批量 + 回程交互响应）。内层
+cwnd 很大、unsent 很深的组合会把外层丢包恢复放大成秒级停顿。
+
+下一步（方案调整）：
+1. 做 UDP leg 对照实验（绕过外层 TCP 的 RTO/丢失恢复），多轮中位数，
+   观察风暴是否消失；
+2. 若 UDP leg 也复现，再按方向拆分（去程/回程 carrier）做 per-direction
+   取证，不再盲调 RTO/窗口。

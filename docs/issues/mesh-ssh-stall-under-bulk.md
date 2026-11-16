@@ -453,3 +453,38 @@ exp/bbr-negative-result。回退后部署 v0.8.1-38-gd0e2072 到 gg/jf/qg/vm。
 - 先做观测：拓扑边增加 TCP 重传率（bytes_retrans/bytes_sent），与 ping
   丢包率分开展示；
 - 再做读侧解耦/背压的结构性验证，而不是继续在版本间来回切。
+
+## 第十五轮：读侧解耦 + 拓扑重传率 + 路由代价（2026-11-16）
+
+已完成并部署 v0.8.1-41-gbc22f76 到 gg/jf/qg/vm：
+
+1. 读侧解耦：stripe 的 baseReadLoop/laneReadLoop 对数据帧改为非阻塞派发，
+   满队列尾丢弃并归还缓冲，载体会持续 drain；丢弃计数并入 Peer.DataDrops。
+2. TCP 重传率：frame 读取 Linux TCP_INFO（Segs_out/Total_retrans），经
+   transport/stripe/udpLeg/p2p 透出；mesh 每 10s 差分 + 0.7/0.3 EWMA；
+   拓扑 JSON 增加 retransRate，mesh 页面显示 "retrans X%"。
+3. 路由代价：lossEff = 1-(1-pingLoss)(1-retransRate)(1-dropRate)，
+   cost = (SRTT+Sojourn)/denom/confidence；retransRate 随 GossipLink 广播
+   （omitempty，老节点/无 TCP_INFO 平台按 0），远端多跳路径也参与。
+   未探测链路（SRTT=0）仍兜底 cost=1000。
+
+实测（v41 温态 3 轮）：
+
+| 轮次 | p50 | p95 | max |
+| --- | --- | --- | --- |
+| 1 | 119 | 508 | 20020 |
+| 2 | 286 | 1385 | 1464 |
+| 3 | 111 | 146 | 172 |
+
+第 1 轮同时采样拓扑：gg→jf 的 retrans 从 0% 升到 **6.3%**，SRTT 23→89ms，
+cost 23→89；qg→jf 1.1%、jf→qg 0.9%（gossip 传播可见），而 ping loss
+始终为 0%。这直接证明旧的“丢包率”指标看不到真实链路重传，新指标能
+对齐风暴窗口。
+
+路由稳定性：gg→jf 代价升到 89 时，直连 gg→vm 代价仍在 146~217，JF 仍是
+最优下一跳，未观察到路由切换/抖动。
+
+结论：读侧解耦消除了“消费者慢→停止读 socket”的一类阻塞，但没有消除
+周期性风暴本身；风暴现在有直接可观测签名（gg→jf 载体 retrans 尖峰 +
+SRTT/cost 同步跳变）。下一步应针对风暴的初始触发（载体 RTO/内层 gVisor
+TCP 恢复），用该指标做单变量 A/B，而不是再调整路由公式。

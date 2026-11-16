@@ -811,3 +811,17 @@ goroutine dump；但随后 6 轮未再出现 ≥3s 的 legOut 冻结（max 4.8s 
 另：VM 的启动器 `start-phaethon.vbs` 在本次部署中恢复为
 `CurrentDirectory + cmd /c 绝对路径 + stdout 重定向`，并加了两条 env；
 之前改写时丢了 CurrentDirectory，wscript 找不到 exe。
+
+### 追加：lane 级停顿移除（v0.8.1-69）
+
+GG 在 20:25 的 11s 停顿窗口里没有任何会话级 `[CARRIER-STALL]`，但
+GG 对 JF 的多 lane 会话仍在（base 健康）。这解释了看门狗为何没反应：
+数据流被 pin 在动态 lane 上，**该 lane 的入向被对端 TCP 洞 HOL**，
+而 session ping 走 base，pong 正常。lane 自己的 probe（每 2s）会堆积，
+但 probeTick 只记 loss、从不移除。
+
+已实现：`laneStallLimit = 2 × PHAETHON_CARRIER_STALL_MS`（默认 4s）。
+probeTick 发现某个 lane 超过该时限没有 pong（用 lastPongAt/firstProbeAt）
+就 `removeLane`，flow 重新 pin 到其它 lane/base；单测
+`TestStripeLaneStallRemovesUnansweredLane`。这样数据面 lane 的入向 HOL
+也能在 ~4s 内被切断。

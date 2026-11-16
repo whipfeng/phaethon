@@ -868,8 +868,41 @@ func TestStripeLaneProbeRecordsSRTTAndLoss(t *testing.T) {
 	}
 }
 
-// --- rendezvous weighted dispatch (tasks 3.x) ---
+// TestStripeLaneStallRemovesUnansweredLane: a lane whose probe pongs stop is
+// HOL-blocked in its inbound direction. The session-level ping guard cannot
+// see it when the base is healthy, so the controller must drop the lane and
+// repin its flows.
+func TestStripeLaneStallRemovesUnansweredLane(t *testing.T) {
+	_, baseServer := net.Pipe()
+	defer baseServer.Close()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	defer tr.Close()
 
+	lanePeer, laneServer := net.Pipe()
+	defer lanePeer.Close()
+	tr.attachLane(1, frame.NewStreamTransport(laneServer))
+
+	oldLimit := stripeLaneStallLimit
+	stripeLaneStallLimit = 120 * time.Millisecond
+	defer func() { stripeLaneStallLimit = oldLimit }()
+
+	tr.probeTick() // first probe records firstProbeAt
+	if _, _, err := frame.ReadFrame(lanePeer); err != nil {
+		t.Fatalf("probe ping read: %v", err)
+	}
+	time.Sleep(180 * time.Millisecond) // > stall limit, never answer
+	tr.probeTick()                     // should detect and remove the lane
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(tr.snapshotLanes()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("stalled lane was not removed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// --- rendezvous weighted dispatch (tasks 3.x) ---
 // stripeTestWrapper builds a stripe wrapper over a dummy primary plus n
 // lanes on dead-end pipes, returning the wrapper and the lane slice.
 func stripeTestWrapper(t *testing.T, n int) (*stripeTransport, []*stripeLane) {

@@ -89,6 +89,23 @@ var (
 	stripeLaneBadSRTT        = time.Second            // degradation gate: srtt
 )
 
+// stripeLaneStallLimit is the max time a lane may go without a probe pong
+// before it is removed. 0 means derive from PHAETHON_CARRIER_STALL_MS (×2);
+// tests override it directly. A lane whose pongs stop is HOL-blocked in its
+// inbound direction (the peer's send side), which the session-level ping guard
+// cannot see when the primary/base is healthy; removing it repins its flows.
+var stripeLaneStallLimit time.Duration
+
+func laneStallLimit() time.Duration {
+	if stripeLaneStallLimit > 0 {
+		return stripeLaneStallLimit
+	}
+	if base := carrierPingStallLimit(); base > 0 {
+		return 2 * base
+	}
+	return 0
+}
+
 // stripeConfig wires the dynamic controller. The zero value is a valid
 // passive-side wrapper: dialLane nil means "never add lanes", udpActive nil
 // means "no UDP leg to defer to".
@@ -116,15 +133,16 @@ type stripeConfig struct {
 }
 
 type stripeLaneProbe struct {
-	mu          sync.Mutex
-	nextSeq     uint32
-	outstanding map[uint32]time.Time
-	srtt        time.Duration // EMA of matched pong RTTs (0 = no sample yet)
-	srttBase    time.Duration // sliding-min baseline of the lane's own srtt
-	srttBaseAt  time.Time     // last time srttBase was (re)established
-	lost        uint64        // probes that expired unmatched
-	sent        uint64        // probes enqueued
-	lastPongAt  time.Time
+	mu           sync.Mutex
+	nextSeq      uint32
+	outstanding  map[uint32]time.Time
+	srtt         time.Duration // EMA of matched pong RTTs (0 = no sample yet)
+	srttBase     time.Duration // sliding-min baseline of the lane's own srtt
+	srttBaseAt   time.Time     // last time srttBase was (re)established
+	lost         uint64        // probes that expired unmatched
+	sent         uint64        // probes enqueued
+	lastPongAt   time.Time
+	firstProbeAt time.Time // first probe send time (fallback for lastPongAt)
 }
 
 type stripeLane struct {
@@ -1318,8 +1336,21 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 // directly — the lane writer is the only writer, §1.5).
 func (t *stripeTransport) probeTick() {
 	now := time.Now()
+	stallLimit := laneStallLimit()
+	var stalled []*stripeLane
 	for _, l := range t.snapshotLanes() {
 		l.probe.mu.Lock()
+		if stallLimit > 0 {
+			ref := l.probe.lastPongAt
+			if ref.IsZero() {
+				ref = l.probe.firstProbeAt
+			}
+			if !ref.IsZero() && now.Sub(ref) > stallLimit {
+				l.probe.mu.Unlock()
+				stalled = append(stalled, l)
+				continue
+			}
+		}
 		for seq, at := range l.probe.outstanding {
 			if now.Sub(at) > stripeProbeTimeout {
 				delete(l.probe.outstanding, seq)
@@ -1330,6 +1361,9 @@ func (t *stripeTransport) probeTick() {
 		seq := l.probe.nextSeq
 		l.probe.outstanding[seq] = now
 		l.probe.sent++
+		if l.probe.firstProbeAt.IsZero() {
+			l.probe.firstProbeAt = now
+		}
 		l.probe.mu.Unlock()
 
 		data, err := json.Marshal(PingInfo{Timestamp: now.UnixNano(), Seq: seq})
@@ -1347,6 +1381,10 @@ func (t *stripeTransport) probeTick() {
 			l.probe.sent--
 			l.probe.mu.Unlock()
 		}
+	}
+	for _, l := range stalled {
+		util.LogModuleWarn("p2p", "[STRIPE] lane %d stalled: no pong for >%v (likely inbound HOL), removing", l.id, stallLimit)
+		t.removeLane(l)
 	}
 }
 

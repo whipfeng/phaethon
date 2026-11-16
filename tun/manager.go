@@ -693,7 +693,7 @@ func (e *Manager) StartTUN() error {
 			upstream = e.routeMgr.DefaultIfaceName
 		}
 		if ifaceName != "" {
-			if gw, err := setupGatewayNAT(ifaceName, upstream, dev.Name()); err != nil {
+			if gw, err := setupGatewayNAT(ifaceName, upstream); err != nil {
 				util.LogModuleWarn("tun", "bypass gateway NAT setup failed: %v", err)
 			} else {
 				e.gwNAT = gw

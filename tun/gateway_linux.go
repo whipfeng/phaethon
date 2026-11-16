@@ -3,7 +3,6 @@
 package tun
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -15,19 +14,19 @@ import (
 	"phaethon/util"
 )
 
-// gatewayNAT completes the bypass-gateway host setup that already exists in
-// route_linux.go: that code inserts the phys→tun / tun→phys / phys→phys
-// FORWARD ACCEPT tuples, and this type (a) keeps those tuples present when
-// Docker flushes/reorders FORWARD, and (b) adds the one missing piece, the
-// POSTROUTING MASQUERADE for the LAN clients served by the DHCP server.
+// gatewayNAT makes the host a real bypass gateway for the LAN clients served
+// by the DHCP server: kernel forwarding plus a scoped MASQUERADE for the LAN
+// subnet. The gVisor NAT table in mesh/netstack.go only covers packets that
+// enter the TUN NIC; LAN clients arrive on the physical interface and are
+// forwarded by the host kernel, which needs its own FORWARD/NAT rules.
 //
-// The gVisor NAT table in mesh/netstack.go only covers packets entering the
-// TUN NIC; LAN clients arrive on the physical interface and are forwarded by
-// the host kernel, which needs its own NAT rule.
+// Docker sets `iptables -P FORWARD DROP` and may flush/reorder rules when it
+// restarts, so the jumps are inserted at position 1 and a reconciler re-adds
+// them if they disappear. Only the LAN CIDR is accepted/NATed; every other
+// packet still follows the host's policy.
 type gatewayNAT struct {
 	lanIface      string
 	upstreamIface string
-	tunIface      string
 	lanCIDR       string
 
 	stopOnce sync.Once
@@ -35,10 +34,14 @@ type gatewayNAT struct {
 	doneCh   chan struct{}
 }
 
-// setupGatewayNAT starts the reconciler for the existing FORWARD tuples and
-// installs the LAN MASQUERADE. Returns (nil, nil) when the LAN interface has
-// no IPv4 address to serve.
-func setupGatewayNAT(lanIface, upstreamIface, tunIface string) (*gatewayNAT, error) {
+const (
+	gwFwdChain = "PHAETHON_GW_FWD"
+	gwNatChain = "PHAETHON_GW_NAT"
+)
+
+// setupGatewayNAT installs the gateway rules and starts the reconciler.
+// Returns (nil, nil) when the LAN interface has no IPv4 address to serve.
+func setupGatewayNAT(lanIface, upstreamIface string) (*gatewayNAT, error) {
 	cidr, err := ifaceIPv4CIDR(lanIface)
 	if err != nil {
 		return nil, err
@@ -49,7 +52,6 @@ func setupGatewayNAT(lanIface, upstreamIface, tunIface string) (*gatewayNAT, err
 	g := &gatewayNAT{
 		lanIface:      lanIface,
 		upstreamIface: upstreamIface,
-		tunIface:      tunIface,
 		lanCIDR:       cidr,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
@@ -58,7 +60,7 @@ func setupGatewayNAT(lanIface, upstreamIface, tunIface string) (*gatewayNAT, err
 		return nil, err
 	}
 	go g.reconcileLoop()
-	util.LogModuleInfo("tun", "bypass gateway: LAN %s via %s, MASQUERADE installed", cidr, upstreamIface)
+	util.LogModuleInfo("tun", "bypass gateway: LAN %s via %s, NAT chain %s", cidr, upstreamIface, gwNatChain)
 	return g, nil
 }
 
@@ -89,59 +91,63 @@ func ifaceIPv4CIDR(name string) (string, error) {
 	return "", fmt.Errorf("interface %s has no IPv4 address", name)
 }
 
-func iptablesCtx(args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+func iptables(args ...string) error {
 	path, err := exec.LookPath("iptables")
 	if err != nil {
 		return fmt.Errorf("iptables not found: %w", err)
 	}
-	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
+	out, err := exec.Command(path, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("iptables %s: %v (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func ruleExists(args ...string) bool { return iptablesCtx(args...) == nil }
-
-// ensureForwardTuple mirrors the tuples installed by route_linux.go step 6.
-// They are re-inserted only when missing (Docker restart/flush).
-func (g *gatewayNAT) ensureForwardTuple() error {
-	tuples := [][2]string{
-		{g.upstreamIface, g.tunIface},
-		{g.tunIface, g.upstreamIface},
-		{g.upstreamIface, g.upstreamIface},
+func jumpExists(table, parent, chain string) bool {
+	args := []string{}
+	if table != "" && table != "filter" {
+		args = append(args, "-t", table)
 	}
-	for _, t := range tuples {
-		if ruleExists("-C", "FORWARD", "-i", t[0], "-o", t[1], "-j", "ACCEPT") {
-			continue
-		}
-		if err := iptablesCtx("-I", "FORWARD", "1", "-i", t[0], "-o", t[1], "-j", "ACCEPT"); err != nil {
+	args = append(args, "-C", parent, "-j", chain)
+	return iptables(args...) == nil
+}
+
+// install creates/flushes the app chains and re-inserts the jumps at position 1.
+func (g *gatewayNAT) install() error {
+	// NAT: LAN -> upstream MASQUERADE.
+	_ = iptables("-t", "nat", "-N", gwNatChain)
+	if err := iptables("-t", "nat", "-F", gwNatChain); err != nil {
+		return err
+	}
+	if err := iptables("-t", "nat", "-A", gwNatChain, "-s", g.lanCIDR, "-o", g.upstreamIface, "-j", "MASQUERADE"); err != nil {
+		return err
+	}
+	if !jumpExists("nat", "POSTROUTING", gwNatChain) {
+		if err := iptables("-t", "nat", "-I", "POSTROUTING", "1", "-j", gwNatChain); err != nil {
 			return err
 		}
 	}
-	return nil
-}
 
-// ensureMasquerade adds the LAN → upstream MASQUERADE, the missing piece
-// relative to route_linux.go (which only had FORWARD rules).
-func (g *gatewayNAT) ensureMasquerade() error {
-	args := []string{"-t", "nat", "-C", "POSTROUTING", "-s", g.lanCIDR, "-o", g.upstreamIface, "-j", "MASQUERADE"}
-	if ruleExists(args...) {
-		return nil
-	}
-	add := []string{"-t", "nat", "-I", "POSTROUTING", "1", "-s", g.lanCIDR, "-o", g.upstreamIface, "-j", "MASQUERADE"}
-	return iptablesCtx(add...)
-}
-
-func (g *gatewayNAT) install() error {
-	if err := g.ensureForwardTuple(); err != nil {
+	// FORWARD: accept LAN clients and their established return traffic before
+	// Docker's FORWARD policy.
+	_ = iptables("-N", gwFwdChain)
+	if err := iptables("-F", gwFwdChain); err != nil {
 		return err
 	}
-	if err := g.ensureMasquerade(); err != nil {
+	if err := iptables("-A", gwFwdChain, "-s", g.lanCIDR, "-j", "ACCEPT"); err != nil {
 		return err
 	}
+	if err := iptables("-A", gwFwdChain, "-d", g.lanCIDR, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
+		return err
+	}
+	if !jumpExists("filter", "FORWARD", gwFwdChain) {
+		if err := iptables("-I", "FORWARD", "1", "-j", gwFwdChain); err != nil {
+			return err
+		}
+	}
+
+	// The route manager already enables this for bypass gateway; re-assert it
+	// because a sysctl reload or another net daemon may reset it.
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
 	return nil
 }
@@ -155,15 +161,22 @@ func (g *gatewayNAT) reconcileLoop() {
 		case <-g.stopCh:
 			return
 		case <-tick.C:
-			if err := g.install(); err != nil {
-				util.LogModuleWarn("tun", "bypass gateway reconcile: %v", err)
+			// Docker restarts can flush/reorder rules; only rebuild when a
+			// jump or a sentinel rule is missing (avoid flushing live traffic).
+			if !jumpExists("filter", "FORWARD", gwFwdChain) ||
+				!jumpExists("nat", "POSTROUTING", gwNatChain) ||
+				iptables("-C", gwFwdChain, "-s", g.lanCIDR, "-j", "ACCEPT") != nil {
+				if err := g.install(); err != nil {
+					util.LogModuleWarn("tun", "bypass gateway reconcile: %v", err)
+				} else {
+					util.LogModuleInfo("tun", "bypass gateway rules restored")
+				}
 			}
 		}
 	}
 }
 
-// Stop removes the MASQUERADE rule. The FORWARD tuples are owned and removed
-// by route_linux.go's teardown (single owner, no double-free).
+// Stop removes the jumps and chains. Safe to call multiple times.
 func (g *gatewayNAT) Stop() {
 	if g == nil {
 		return
@@ -172,9 +185,18 @@ func (g *gatewayNAT) Stop() {
 		close(g.stopCh)
 		<-g.doneCh
 		for i := 0; i < 16; i++ {
-			if iptablesCtx("-t", "nat", "-D", "POSTROUTING", "-s", g.lanCIDR, "-o", g.upstreamIface, "-j", "MASQUERADE") != nil {
+			if iptables("-D", "FORWARD", "-j", gwFwdChain) != nil {
 				break
 			}
 		}
+		for i := 0; i < 16; i++ {
+			if iptables("-t", "nat", "-D", "POSTROUTING", "-j", gwNatChain) != nil {
+				break
+			}
+		}
+		_ = iptables("-F", gwFwdChain)
+		_ = iptables("-X", gwFwdChain)
+		_ = iptables("-t", "nat", "-F", gwNatChain)
+		_ = iptables("-t", "nat", "-X", gwNatChain)
 	})
 }

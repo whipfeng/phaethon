@@ -177,3 +177,50 @@ tun/端口/路由竞态），新 worker 会以“半初始化”状态长期运�
 
 下一步：部署 QG 后做“边跑 MB DNS/HTTP 探针边连续自升级/重启”的压测，
 验证失败时只会短暂重启并从完整初始化恢复，而不是永久半死。
+
+## 2026-11-16 22:xx 实锤：非稳定路径 worker 存活 + 残留 tun0
+
+按上述压测配方在 QG 连续重启，MB 出访从某次重启后**持续 000**（3 分钟
+以上），QG 无法通过内置 SSH 访问，但 OS sshd 仍可登录。现场：
+
+```
+ps: /root/phaethon.failed --enable-debug-api   ← worker 跑在非稳定路径
+    ./phaethon --enable-debug-api              ← 新 watchdog
+ip: tun0 UP，只有 fe80:: link-local，无 IPv4
+STARTUP: TUN failed: tunsetiff: device or resource busy
+         每 10s 重试一次，始终 EBUSY
+```
+
+两个具体根因（这次有现场证据）：
+
+1. **服务 stop 规则漏掉非稳定路径**。QG init 的
+   `pkill -9 -f '^(\./|/root/)phaethon( |$)'` 不匹配
+   `/root/phaethon.failed`（`phaethon` 后没有空格/行尾），所以
+   `rc-service restart` 只杀了稳定路径的 watchdog/worker，`.failed`
+   worker 继续存活并持有 tun0。新的稳定路径 worker 每次 TUNSETIFF 都
+   EBUSY。
+2. **半初始化/一次性初始化**。旧代码（v69）在 TUN 失败时静默降级
+   mesh-only，worker 活着、watchdog 认为健康，不会重启；
+   v70 的 fail-fast 会退出重试，但残留 tun0 不清理就变成每 10s 一次的
+   崩溃循环（日志里连续 `engine init failed: TUN start ... EBUSY`）。
+   另外升级 marker 残留（16:00 的 handoff）会让新 watchdog 在启动时
+   把新二进制改名 `.failed`/回滚，进一步制造非稳定路径进程。
+
+### 修复与验证
+
+- 应用：`startEngine` fail-fast（v70，已提交）；`CleanupResidual` 启动时
+  无条件删除残留 `tun0`（v72，已提交）；不再让 TUN 失败静默 mesh-only。
+- 部署：清理 QG `data/state` 的 upgrade marker/status/request，重命名
+  `.failed`/`.old2` 备份；把 init 的 stop 规则放宽为
+  `^(\./|/root/)phaethon`（任意后缀）。
+- 验证：
+  - 停服务后手工 `ip tuntap add dev tun0 mode tun` 制造持久 tun0，
+    启动 v72 → 清理残留、`TUN start ok`、`DNS start ok`；
+  - 连续 4 次 `rc-service restart`：全部一次启动成功；
+  - MB 每秒 HTTPS 探针全窗口仅 **1 次 000**（重启窗口），随后全部 200；
+  - 修复前同样的重启会造成 3 分钟以上持续 000，且不会自愈。
+
+结论：17:27 那次**具体是哪个调用先失败**仍受当时日志级别限制、未逐调用
+实锤；但“非稳定 worker 路径存活 + 残留 tun0 + 一次性 TUN/DNS 初始化”
+这条完整故障链已经实锤并可复现，且已修复/自愈。后续启动失败会以
+`[STARTUP] ... failed` + watchdog 重启的形式暴露，不会再静默半死。

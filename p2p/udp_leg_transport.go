@@ -167,6 +167,10 @@ func (t *udpLegTransport) KernelBacklogLimited() bool {
 	return false
 }
 
+func (t *udpLegTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return frame.TransportCarrierStats(t.base)
+}
+
 func (t *udpLegTransport) SetKernelBacklogLimit(n int) bool {
 	if t.routeDataViaUDP() {
 		return false

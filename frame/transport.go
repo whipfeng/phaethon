@@ -95,6 +95,11 @@ func NewStreamTransport(conn net.Conn) FrameTransport {
 
 func (t *streamTransport) KernelBacklogLimited() bool { return t.lowat }
 
+// CarrierRetransStats reports the carrier TCP's cumulative segment counters.
+func (t *streamTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return CarrierRetransStats(t.conn)
+}
+
 // SetKernelBacklogLimit adjusts TCP_NOTSENT_LOWAT on the carrier at runtime.
 // Returns false when the carrier is not a TCP socket or the platform does not
 // support the option.

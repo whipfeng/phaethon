@@ -73,6 +73,10 @@ func (t *cryptoTransport) KernelBacklogLimited() bool {
 	return false
 }
 
+func (t *cryptoTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return TransportCarrierStats(t.base)
+}
+
 func (t *cryptoTransport) SetKernelBacklogLimit(n int) bool {
 	if tuner, ok := t.base.(KernelBacklogTuner); ok {
 		return tuner.SetKernelBacklogLimit(n)

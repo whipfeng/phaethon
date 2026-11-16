@@ -3119,6 +3119,9 @@ func (p *Peer) totalDataDrops() uint64 {
 	for i := range p.dataQueueDrops {
 		total += atomic.LoadUint64(&p.dataQueueDrops[i])
 	}
+	if p.stripe != nil {
+		total += p.stripe.ReadQueueDrops()
+	}
 	return total
 }
 
@@ -3186,6 +3189,21 @@ func (m *P2PManager) GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (sr
 		}
 	}
 	return 0, 0, 0, 0, 0
+}
+
+// GetCarrierStatsByNodeSeq returns the carrier TCP's cumulative segment and
+// retransmission counters for an exact link. ok=false when the carrier or the
+// OS does not expose TCP_INFO (e.g. Windows/macOS).
+func (m *P2PManager) GetCarrierStatsByNodeSeq(nodeID string, seq uint16) (segs, retrans uint64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.peers {
+		if p.NodeID == nodeID && p.Seq == seq && p.transport != nil {
+			return frame.TransportCarrierStats(p.transport)
+		}
+	}
+	return 0, 0, false
 }
 
 // GetLinkConsecutiveLostByNodeSeq returns the pingTracker consecutive-loss

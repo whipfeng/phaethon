@@ -233,7 +233,13 @@ type stripeTransport struct {
 	// laneQueueDrops counts batches dropped because a lane queue was full and
 	// the flow must stay pinned to preserve ordering.
 	laneQueueDrops atomic.Uint64
+	// readQueueDrops counts inbound data frames tail-dropped because the
+	// session dispatch queue was full (the carrier socket keeps draining).
+	readQueueDrops atomic.Uint64
 }
+
+// ReadQueueDrops reports inbound data frames dropped at the dispatch queue.
+func (t *stripeTransport) ReadQueueDrops() uint64 { return t.readQueueDrops.Load() }
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
 	t := &stripeTransport{
@@ -791,15 +797,29 @@ func (t *stripeTransport) baseReadLoop() {
 			frame.ReturnBuffer(payload)
 			continue
 		}
-		ch := t.dataCh
 		if ft != frame.FrameMeshPacket {
-			ch = t.ctrlCh
+			select {
+			case t.ctrlCh <- legRecvResult{frameType: ft, payload: payload}:
+			case <-t.closed:
+				frame.ReturnBuffer(payload)
+				return
+			}
+			continue
 		}
+		// Data frames must never block the carrier read loop. A stalled
+		// consumer previously filled dataCh, which stopped reading the socket:
+		// the advertised receive window collapsed (ss showed rcv_rtt in the
+		// seconds-to-minutes range) and the peer's ACK/control stream stalled.
+		// Tail-drop on a full dispatch queue instead; the inner TCP retransmits
+		// (mesh is an overlay) while pongs/ACKs and the window keep flowing.
 		select {
-		case ch <- legRecvResult{frameType: ft, payload: payload}:
+		case t.dataCh <- legRecvResult{frameType: ft, payload: payload}:
 		case <-t.closed:
 			frame.ReturnBuffer(payload)
 			return
+		default:
+			t.readQueueDrops.Add(1)
+			frame.ReturnBuffer(payload)
 		}
 	}
 }
@@ -1353,6 +1373,10 @@ func (t *stripeTransport) KernelBacklogLimited() bool {
 		return kb.KernelBacklogLimited()
 	}
 	return false
+}
+
+func (t *stripeTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return frame.TransportCarrierStats(t.base)
 }
 
 // SetKernelBacklogLimit delegates adaptive TCP_NOTSENT_LOWAT tuning.

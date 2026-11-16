@@ -1989,7 +1989,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
                         const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
 
-                        let text = `#${localSeq}, ${srtt}, ${loss}`;
+                        let text = `#${localSeq}, ${srtt}, ${loss}${retrans}`;
                         if (friendlyName) {
                             text += ` (${friendlyName})`;
                         }

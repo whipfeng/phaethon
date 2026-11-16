@@ -61,6 +61,10 @@ func (t *firstFrameTransport) KernelBacklogLimited() bool {
 	return false
 }
 
+func (t *firstFrameTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return frame.TransportCarrierStats(t.base)
+}
+
 func (t *firstFrameTransport) SetKernelBacklogLimit(n int) bool {
 	if tuner, ok := t.base.(frame.KernelBacklogTuner); ok {
 		return tuner.SetKernelBacklogLimit(n)

@@ -108,6 +108,10 @@ func (t *PacedTransport) KernelBacklogLimited() bool {
 	return false
 }
 
+func (t *PacedTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	return TransportCarrierStats(t.base)
+}
+
 func (t *PacedTransport) SetKernelBacklogLimit(n int) bool {
 	if tuner, ok := t.base.(KernelBacklogTuner); ok {
 		return tuner.SetKernelBacklogLimit(n)

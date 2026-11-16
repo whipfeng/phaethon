@@ -108,6 +108,7 @@ type P2PTransport interface {
 	GetLinkQualityStats(nodeID string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByProxy(proxyName string) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
 	GetLinkQualityStatsByNodeSeq(nodeID string, seq uint16) (srtt, rto, jitter time.Duration, lossRate float64, sampleCount int)
+	GetCarrierStatsByNodeSeq(nodeID string, seq uint16) (segs, retrans uint64, ok bool)
 	GetLinkConsecutiveLostByNodeSeq(nodeID string, seq uint16) int
 	GetEgressStatsByNodeSeq(nodeID string, seq uint16) (dropRate, sojournMs float64, ok bool)
 	GetChannelDropStats() (peerStats map[string]struct {
@@ -1441,7 +1442,8 @@ type FullTopologyLink struct {
 	RemoteSeq    uint16  `json:"remoteSeq"`              // remote sequence number
 	FriendlyName string  `json:"friendlyName,omitempty"` // display name (proxy name)
 	SRTT         float64 `json:"srtt"`                   // smoothed RTT in milliseconds
-	LossRate     float64 `json:"lossRate"`               // loss rate (0.0-1.0)
+	LossRate     float64 `json:"lossRate"`               // ping loss rate (0.0-1.0)
+	RetransRate  float64 `json:"retransRate,omitempty"`  // carrier TCP retransmission rate (0.0-1.0)
 	Cost         float64 `json:"cost"`                   // path cost
 }
 
@@ -1508,12 +1510,15 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 			}
 
 			// Get link quality from qualityTracker
-			var srtt, lossRate, cost float64
+			var srtt, lossRate, retransRate, cost float64
 			if m.qualityTracker != nil {
 				quality := m.qualityTracker.Get(peerID, localSeq)
 				avgRTT, loss, _ := quality.Stats()
 				srtt = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 				lossRate = loss
+				if r, ok := quality.RetransRate(); ok {
+					retransRate = r
+				}
 				// Cost calculation: penalize high loss rates
 				// Use same formula as gossiped links (line 1361-1367)
 				if srtt > 0 && lossRate < 1.0 {
@@ -1533,6 +1538,7 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 				FriendlyName: friendlyName,
 				SRTT:         srtt,
 				LossRate:     lossRate,
+				RetransRate:  retransRate,
 				Cost:         cost,
 			}
 
@@ -2975,6 +2981,12 @@ func (m *MeshManager) updateACKStats() {
 		if srtt > 0 || lossRate > 0 {
 			quality := m.qualityTracker.Get(nodeID, localSeq)
 			quality.UpdateACKStats(srtt, lossRate, jitter, sampleCount)
+		}
+		// Carrier TCP retransmission rate (Linux TCP_INFO), sampled by delta.
+		// This is the real link signal; the ping loss above is usually 0
+		// because TCP retransmission hides it.
+		if segs, retrans, ok := m.p2p.GetCarrierStatsByNodeSeq(nodeID, localSeq); ok {
+			m.qualityTracker.Get(nodeID, localSeq).UpdateCarrierStats(segs, retrans)
 		}
 		// Egress health (Phase B): pulled every round so the drop window on
 		// the p2p side stays aligned with this pull interval.

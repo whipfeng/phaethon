@@ -45,6 +45,14 @@ func NewWSTransport(ws *websocket.Conn, raw net.Conn, seal func([]byte) []byte, 
 
 func (t *WSTransport) KernelBacklogLimited() bool { return t.lowat }
 
+// CarrierRetransStats reports the carrier TCP's cumulative segment counters.
+func (t *WSTransport) CarrierRetransStats() (uint64, uint64, bool) {
+	if t.raw == nil {
+		return 0, 0, false
+	}
+	return CarrierRetransStats(t.raw)
+}
+
 func (t *WSTransport) SetKernelBacklogLimit(n int) bool {
 	if n <= 0 || t.raw == nil {
 		return false

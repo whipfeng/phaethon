@@ -12,17 +12,24 @@ type PeerQuality struct {
 	mu sync.RWMutex
 
 	// ACK-based passive measurement (v7)
-	ackRTT        time.Duration // smoothed RTT from ACK-based measurement
-	ackLossRate   float64       // loss rate from ACK-based measurement
-	ackJitter     time.Duration // jitter (RTT standard deviation)
-	ackSampleCount int          // number of samples in the window
-	ackUpdated    time.Time     // last time ACK stats were updated
+	ackRTT         time.Duration // smoothed RTT from ACK-based measurement
+	ackLossRate    float64       // loss rate from ACK-based measurement
+	ackJitter      time.Duration // jitter (RTT standard deviation)
+	ackSampleCount int           // number of samples in the window
+	ackUpdated     time.Time     // last time ACK stats were updated
 
 	// Egress health (Phase B): locally-observed forwarding health to this
 	// peer, pulled from the p2p layer's drop-window/sojourn measurement.
 	// Freshness is guaranteed by the periodic pull; no decay needed.
 	dropRate  float64 // queue drop rate (0.0-1.0)
 	sojournMs float64 // EMA of enqueue→write delay (ms)
+
+	// Carrier TCP retransmission rate (Linux TCP_INFO), sampled by delta on
+	// each stats pull. This is the real link signal; ackLossRate above is the
+	// application-level ping loss, which TCP retransmission hides.
+	tcpSegs, tcpRetrans uint64
+	tcpRate             float64
+	tcpHave             bool
 }
 
 // defaultAckRTT is the prior estimate for an unprobed link, injected as a
@@ -44,6 +51,7 @@ func (q *PeerQuality) resetToPrior() {
 	q.ackJitter = 0
 	q.ackSampleCount = 1
 	q.ackUpdated = time.Now()
+	q.tcpSegs, q.tcpRetrans, q.tcpRate, q.tcpHave = 0, 0, 0, false
 }
 
 // Stats returns a snapshot of the quality metrics.
@@ -51,19 +59,19 @@ func (q *PeerQuality) resetToPrior() {
 func (q *PeerQuality) Stats() (avgRTT time.Duration, loss, jitter float64) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return q.ackRTT, q.ackLossRate, float64(q.ackJitter)/float64(time.Millisecond)
+	return q.ackRTT, q.ackLossRate, float64(q.ackJitter) / float64(time.Millisecond)
 }
 
 // StatsWithConfidence returns quality metrics with confidence score.
 func (q *PeerQuality) StatsWithConfidence() (avgRTT time.Duration, loss, jitter float64, confidence float64) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	
+
 	avgRTT = q.ackRTT
 	loss = q.ackLossRate
 	jitter = float64(q.ackJitter) / float64(time.Millisecond)
 	confidence = q.calculateConfidence()
-	
+
 	return
 }
 
@@ -71,11 +79,11 @@ func (q *PeerQuality) StatsWithConfidence() (avgRTT time.Duration, loss, jitter 
 func (q *PeerQuality) calculateConfidence() float64 {
 	// Sample factor: need at least 10 samples for statistical significance
 	sampleFactor := math.Min(1.0, float64(q.ackSampleCount)/10.0)
-	
+
 	// Time factor: more recent data is more trustworthy (1 minute decay)
 	age := time.Since(q.ackUpdated)
 	timeFactor := math.Exp(-age.Minutes())
-	
+
 	return sampleFactor * timeFactor
 }
 
@@ -104,6 +112,34 @@ func (q *PeerQuality) EgressStats() (dropRate, sojournMs float64) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	return q.dropRate, q.sojournMs
+}
+
+// UpdateCarrierStats folds cumulative TCP segment/retransmission counters into
+// a per-interval retransmission rate. Counter regressions (socket replaced)
+// restart the window instead of producing a bogus rate.
+func (q *PeerQuality) UpdateCarrierStats(segs, retrans uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.tcpHave && segs >= q.tcpSegs && retrans >= q.tcpRetrans {
+		ds := segs - q.tcpSegs
+		dr := retrans - q.tcpRetrans
+		if ds > 0 {
+			r := float64(dr) / float64(ds)
+			if r > 1 {
+				r = 1
+			}
+			q.tcpRate = r
+		}
+	}
+	q.tcpSegs, q.tcpRetrans, q.tcpHave = segs, retrans, true
+}
+
+// RetransRate returns the carrier TCP retransmission rate and whether it has
+// ever been sampled (ok=false on platforms without TCP_INFO).
+func (q *PeerQuality) RetransRate() (float64, bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.tcpRate, q.tcpHave
 }
 
 // LastACKUpdate returns the time of the last ACK-based stats update.
@@ -171,7 +207,7 @@ func (t *PeerQualityTracker) Remove(nodeID string, localSeq uint16) {
 func (t *PeerQualityTracker) RemoveNode(nodeID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	prefix := nodeID + ":"
 	for key := range t.peers {
 		if len(key) > len(prefix) && key[:len(prefix)] == prefix {

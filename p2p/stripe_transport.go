@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1018,16 +1020,68 @@ func (t *stripeTransport) controllerLoop() {
 	probe := time.NewTicker(stripeProbeInterval)
 	defer tick.Stop()
 	defer probe.Stop()
+	warm := stripeWarmLanes()
 	for {
 		select {
 		case <-t.closed:
 			return
 		case <-tick.C:
 			t.controllerTick()
+			// Env-gated warm lanes: pre-create data carriers so the first long
+			// flows (bulk vs interactive) can be placed on separate TCP streams.
+			// This isolates their outer loss recovery without changing the
+			// user's carrier/protocol configuration.
+			if warm > 0 && t.laneCount() < warm {
+				t.addWarmLane(time.Now())
+			}
 		case <-probe.C:
 			t.probeTick()
 		}
 	}
+}
+
+// stripeWarmLanes reads the PHAETHON_WARM_LANES switch (default 0 = off).
+func stripeWarmLanes() int {
+	v := os.Getenv("PHAETHON_WARM_LANES")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > stripeMaxLanes {
+		n = stripeMaxLanes
+	}
+	return n
+}
+
+// addWarmLane dials and attaches one extra lane outside the congestion
+// controller. Rate-limited to one per second; lastAddAt is shared with the
+// controller under ctrlMu so a warm add and a gauge add cannot storm.
+func (t *stripeTransport) addWarmLane(now time.Time) {
+	if t.cfg.dialLane == nil {
+		return
+	}
+	t.ctrlMu.Lock()
+	if now.Sub(t.lastAddAt) < time.Second {
+		t.ctrlMu.Unlock()
+		return
+	}
+	t.lastAddAt = now
+	t.ctrlMu.Unlock()
+	stripeID, tr, err := t.cfg.dialLane()
+	if err != nil || tr == nil {
+		if err != nil {
+			util.LogModuleWarn("p2p", "[STRIPE] warm lane dial failed: %v", err)
+		}
+		return
+	}
+	if !t.attachLane(stripeID, tr) {
+		tr.Close()
+		return
+	}
+	util.LogModuleInfo("p2p", "[STRIPE] warm lane stripeID=%d lanes=%d/%d", stripeID, t.laneCount(), stripeMaxLanes)
 }
 
 // lowatLoop keeps the kernel backlog tuned for every session. It runs

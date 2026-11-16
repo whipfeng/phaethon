@@ -74,7 +74,7 @@ var (
 	stripeAffinitySweep      = 10 * time.Second       // affinity janitor period
 	stripeLowatWarmup        = 15 * time.Second       // hold the creation window at data start
 	stripeColdDataWindow     = 30 * time.Second       // keep data off the primary this long after first data
-	primaryDataDepth         = 2                      // queued primary data batches (tail drop beyond)
+	primaryDataDepth         = 4                      // queued primary data batches (tail drop beyond)
 	primaryCtrlDepth         = 256                    // queued primary control frames (never dropped)
 	stripePeerMaxLanes       = 2                      // fan-out cap for peer-triggered adds
 	stripeClearSustain       = 5 * time.Minute        // <watermark this long → remove

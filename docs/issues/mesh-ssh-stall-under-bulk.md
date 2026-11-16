@@ -540,3 +540,26 @@ cwnd 很大、unsent 很深的组合会把外层丢包恢复放大成秒级停�
    观察风暴是否消失；
 2. 若 UDP leg 也复现，再按方向拆分（去程/回程 carrier）做 per-direction
    取证，不再盲调 RTO/窗口。
+
+## 第十八轮：UDP leg A/B（突破，2026-11-17）
+
+在 JF 主动侧把 `GGSV_TJ` 的 `p2p-udp` 打开（toggle-p2p-udp 改 DB 后重启），
+`/api/p2p` 显示 GG peer：`transport=udp`、`legPhase=active`。同一路径
+GG→VM，各跑 3 轮：
+
+| 载体 | p50（3 轮） | p95（3 轮） | max（3 轮） |
+| --- | --- | --- | --- |
+| TCP | 163 / 133 / 111 | 461 / 403 / 137 | 11163 / 576 / 173 |
+| **UDP leg** | **101 / 100 / 103** | **121 / 118 / 133** | **292 / 142 / 256** |
+
+结论：
+
+- 周期性风暴的触发点就是 **GG↔JF 外层 TCP 载体的丢包/RTO**；换成 UDP leg
+  后 3 轮全部干净，p95 稳定在 **118~133ms**，max ≤292ms，达到 <200ms 目标。
+- 内层 gVisor/应用队列不是触发点；之前的 MinRTO、pacing、per-carrier writer
+  等尝试之所以效果有限，是因为没有绕开外层 TCP 的丢失恢复。
+- UDP leg 的开关是 per-proxy `p2p-udp`（主动侧打开，被动侧自动 wrap 并
+  通过 gossip 协商）；本次 p2p-key 为空，leg 为明文，生产需按需配置密钥。
+
+后续：评估是否把 UDP leg 作为该链路的默认载体（或在控制台明确展示/
+可切换）；其它主动侧路径（VM/QG）按同样方式验证；保留 TCP 作为回退。

@@ -3121,6 +3121,7 @@ func (p *Peer) totalDataDrops() uint64 {
 	}
 	if p.stripe != nil {
 		total += p.stripe.ReadQueueDrops()
+		total += p.stripe.LaneQueueDrops()
 	}
 	return total
 }

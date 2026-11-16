@@ -644,10 +644,20 @@ func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (int, 
 	case <-t.closed:
 		return laneFallback, io.ErrClosedPipe
 	default:
-		t.laneQueueDrops.Add(1)
+		n := t.laneQueueDrops.Add(1)
+		// Silent lane drops are hidden loss from the inner TCP's point of view:
+		// it only sees retransmission timeouts and backs off. Surface the first
+		// drop and then every 100 so a full lane during carrier backpressure is
+		// visible without flooding the log.
+		if n == 1 || n%100 == 0 {
+			util.LogModuleWarn("p2p", "[STRIPE] lane %d queue full, dropped batch (total=%d)", l.id, n)
+		}
 		return laneDropped, nil
 	}
 }
+
+// LaneQueueDrops reports batches dropped because a lane queue was full.
+func (t *stripeTransport) LaneQueueDrops() uint64 { return t.laneQueueDrops.Load() }
 
 func (t *stripeTransport) repinPrimary(batch []frame.Frame) {
 	now := time.Now().UnixNano()

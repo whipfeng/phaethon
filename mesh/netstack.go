@@ -833,6 +833,24 @@ func (n *Netstack) initStack() error {
 		}
 	}
 
+	// Optional inner-TCP RTO backoff cap (fork patch). When a mesh carrier is a
+	// UDP leg or a lossy/HOL-blocked TCP leg, a lost inner segment is recovered
+	// only by the inner RTO. RFC 6298 doubles it on every timeout (up to 2^6..2^7
+	// x RTO), turning one loss into a 10-30s stall even after the carrier has
+	// recovered. The cap bounds the retransmission interval without changing
+	// the connection give-up ceiling (`TCPMaxRTOOption` semantics). Inert unless
+	// the env is set.
+	if v := os.Getenv("PHAETHON_INNER_MAX_RTO_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			opt := tcpip.TCPRTOBackoffCapOption(time.Duration(ms) * time.Millisecond)
+			if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &opt); err != nil {
+				util.LogModuleWarn("netstack", "[NETSTACK] inner TCP RTO backoff cap=%dms rejected: %v", ms, err)
+			} else {
+				util.LogModuleInfo("netstack", "[NETSTACK] inner TCP RTO backoff cap=%dms", ms)
+			}
+		}
+	}
+
 	if err := s.CreateNIC(1, linkEP); err != nil {
 		return fmt.Errorf("create nic 1: %v", err)
 	}

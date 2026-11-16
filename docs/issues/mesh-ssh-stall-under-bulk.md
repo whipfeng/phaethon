@@ -704,3 +704,54 @@ env `PHAETHON_CARRIER_STALL_MS`（默认 0=关闭）同时启用两个平台无�
 下一步：阈值 2000ms 部署 gg/jf/vm 后跑 3 轮同配方，验收 p95/max 与重连
 次数；若重连过多再评估 3000ms。TCP 路径的 p95<200ms 目标仍取决于 WAN
 丢包率，止损坏只能把 14~28s 尾巴压到秒级。
+
+## 第二十二轮：三跳拓扑 + UDP 末跳，真凶是内层 RTO 退避（2026-11-16）
+
+三跳取证（GG 外层 carrier、JF 外层 carrier、VM 内层 flow 每秒采样）
+发现拓扑已经变了：
+
+- GG bestPaths: `target vm → nextHop jf`；JF bestPaths:
+  `target vm → nextHop qg`；VM 侧 `linkNICStats.qg` 已接收 470MB，`gg`
+  为 0。即实际数据路径是 **GG → JF → QG → VM**；
+- QG 的 `/api/p2p` 显示 `peer vm transport=udp`，QG↔VM 末跳是 **UDP leg**；
+- GG/JF 的 TCP carrier 在本轮停顿窗口内 `backoff` 全为空，
+  `bytes_retrans` 完全冻结——外层 TCP 没有丢包恢复动作。
+
+停顿窗口（probe 56，发送 1794827788.95，12.3s 后回显）：
+
+| 观测点 | 状态 |
+| --- | --- |
+| GG 内层 bulk flow | `cong=rto-recovery` cwnd=1 out=1 unsent=829KB，rto 1.75→3.5s，sndUna 冻结 |
+| GG 内层交互 flow | 同样 `rto-recovery` cwnd=1，rto 1.4→2.85s，rcvNxt 冻结 |
+| VM sshd 侧 bulk flow (lp=22) | rcvNxt 已推进到 GG 的 sndNxt（数据全收到），但 sndUna 冻结、只差 36B，`rto-recovery` rto 1.6→3.2s |
+| VM sshd 侧交互 flow | sndUna 冻结、unsent 4980B，`rto-recovery` rto 2.55s |
+| VM tcpStats | retransmits +6、timeouts +4（只有少量 RTO 重传），无 app drop |
+| 全部 app drop（GG/VM） | 0 |
+
+解释：GG→VM 的数据已经全部到达 VM（VM rcvNxt = GG sndNxt），但 VM 的
+**累计 ACK 在返回方向丢失**；VM 的响应/窗口调整也只有 36B/5KB 一段丢失。
+反向路径 VM → QG(UDP) → JF → GG 里，UDP 末跳没有外层 ARQ，损失只能由内层
+gVisor TCP 的 RTO 恢复，而 RFC 6298 指数退避把一次丢失放大成 1.5→3→6s，
+两个 flow 同时中招就是 12s 停顿。这不是外层 TCP RTO（本轮 outer
+`backoff` 为空、retrans 冻结），也不是应用队列。
+
+为什么两个看门狗都没救：
+
+- 19:09:54 GG 对 `peer vm`（GG↔VM 直连控制会话）确实触发过一次
+  `[CARRIER-STALL]`，证明 ping 驻留检测有效；
+- 但本轮停顿发生在 `QG→VM` / `VM→QG` UDP 末跳。VM、QG 仍是旧版本
+  （无看门狗），发送侧阻塞不会触发任何 reset；GG/JF 的 ping 也覆盖不到
+  这段链路（GG 只 ping JF，JF 只 ping QG）。
+
+### 新增：内层 RTO 退避上限（fork）
+
+在 gvisor-fork 增加 `TCPRTOBackoffCapOption`（默认 0=关闭）：
+
+- 只限制**重传间隔**（估算 RTO 与每次 `RTO *= 2` 后都套 cap）；
+- 不改变连接放弃上限（`maxRTO`/`remaining` 语义保持），不会因为 cap
+  变小而提前拆连接；
+- 主程序 env `PHAETHON_INNER_MAX_RTO_MS` 映射到该选项。
+
+单测：fork `TestCapRTOBackoff`。下一步：`PHAETHON_INNER_MAX_RTO_MS=1000`
+部署全链路后跑同配方 6 轮，验收 max 是否从 10s+ 压到 1~2s；同时把
+`PHAETHON_CARRIER_STALL_MS` 扩散到 QG/VM 以覆盖外层 HOL。

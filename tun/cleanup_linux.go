@@ -26,7 +26,20 @@ func CleanupResidual(tunIP net.IP) {
 	// resolv.conf path has its own .phaethon.bak recovery below.
 	restorePersistedLinuxDNS()
 
-	// 1. Find the tun* interface holding tunIP and clear only that one.
+	// 1. Delete a stale tun0 before the by-IP scan. A killed worker (or an
+	// older build that set TUNSETPERSIST) can leave tun0 with no IPv4 address
+	// but still up; the next TUNSETIFF then fails with EBUSY forever. tun0 is
+	// this deployment's reserved interface name and the instance lock
+	// guarantees no live worker owns it, so removing it is safe.
+	if link, err := netlink.LinkByName("tun0"); err == nil {
+		if err := netlink.LinkDel(link); err != nil {
+			util.LogModuleWarn("cleanup", "cleanup delete stale tun0 fail: %v", err)
+		} else {
+			util.LogModuleInfo("cleanup", "cleanup deleted stale tun0")
+		}
+	}
+
+	// 1b. Find the tun* interface holding tunIP and clear only that one.
 	target := tunIP.To4()
 	if target != nil {
 		if link := findTUNLinkByIP(target); link != nil {
@@ -111,6 +124,15 @@ func CleanupResidual(tunIP net.IP) {
 						break
 					}
 					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, state.IfaceName)
+				}
+				// Delete the link too: leaving it up makes the next
+				// TUNSETIFF fail with EBUSY forever (fail-fast would then
+				// crash-loop with no LAN egress). The instance lock guarantees
+				// no live worker owns it.
+				if err := netlink.LinkDel(link); err != nil {
+					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", link.Attrs().Name, err)
+				} else {
+					util.LogModuleInfo("cleanup", "cleanup deleted stale %s", link.Attrs().Name)
 				}
 			}
 		} else {

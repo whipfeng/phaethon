@@ -70,3 +70,19 @@ MB 复测：`https://www.baidu.com` → **200**，直连公网 IP 可达。手�
 剩余：DNS hijacker 在 worker 重启后的重绑需要单独验证/加固（本次 QG
 重启后 DNS 正常，但 11-15 17:27 曾出现 listener stopped 后未重绑）；
 utun 归属 identitys，不是本应用。
+
+## 更正（2026-11-17）：不需要 MASQUERADE
+
+复核确认：MB 与 QG 同一 LAN，上游路由器 192.168.1.1 会像普通 LAN 客户端
+一样 NAT 192.168.1.88，因此 QG 不需要 POSTROUTING MASQUERADE。
+
+- 已回退应用侧新增的 MASQUERADE/网关链（revert 4065f6f、7374d09）；
+- 保留 `tun/route_linux.go` 现有的三条 FORWARD ACCEPT 元组；
+- QG 自升级重启到 v0.8.1-51-g7374d09 后，元组自动恢复，无 MASQUERADE：
+  MB `https://www.baidu.com` → 200，DNS fakeip 100.0.0.250 正常。
+
+之前 11-15 17:27 的故障是**那次重启后 TUN 引擎/既有 FORWARD 规则/DNS
+hijacker 没有起来**（同一时刻 DNS-FWD 也 stopped），不是功能缺失，也不是
+需要手工 NAT。本次自升级重启未复现；后续应对“重启后 TUN 初始化”做启动
+自检/告警（检查 tun0、三条 FORWARD 元组、DNS 监听是否就绪），而不是加
+MASQUERADE。

@@ -493,6 +493,7 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	}
 
 	upgradeLog("stopping worker: pid=%d", pid)
+	util.LogModuleInfo("system", "[HANDOFF] stopping worker pid=%d", pid)
 	stopChild(cp, pid)
 
 	if err := swapBinary(exe, newPath, backupPath); err != nil {
@@ -508,6 +509,7 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	err = handoffToNewWatchdog(exe, req.Version, stopping)
 	if err == nil {
 		upgradeLog("handoff: supervision transferred, target=%s", req.Version)
+		util.LogModuleInfo("system", "[HANDOFF] supervision transferred target=%s", req.Version)
 		util.LogModuleInfo("main", "watchdog: handed off to %s, exiting", req.Version)
 		markUpgradeSucceeded(req.Version, req.Version)
 		_ = upgrade.WriteWorkerVersion(req.Version)

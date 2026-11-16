@@ -107,13 +107,19 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 
 	// Start TUN device if enabled (optional, can be hot-reloaded later)
 	if tunEnabled {
+		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
 			// TUN failed, but keep netstack running for mesh-only mode.
+			util.LogModuleWarn("system", "[STARTUP] TUN failed -> mesh-only: %v", err)
 			util.LogModuleWarn("engine", "========================================")
 			util.LogModuleWarn("engine", "TUN initialization failed: %v", err)
 			util.LogModuleWarn("engine", "Continuing in mesh-only mode (no TUN device)")
 			util.LogModuleWarn("engine", "========================================")
+		} else {
+			util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 		}
+	} else {
+		util.LogModuleInfo("system", "[STARTUP] TUN disabled by config")
 	}
 
 	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
@@ -139,6 +145,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			util.LogModuleError("engine", "Failed to bind DNS hijacker to netstack: %v", err)
 			return nil, nil, nil
 		}
+		util.LogModuleInfo("system", "[STARTUP] DNS bind ok")
 		// Retry the listener bind: a worker restart can race the previous
 		// netstack/port release. A failed start here used to leave DNS dead
 		// until the next manual restart (QG 2026-11-15 17:27).

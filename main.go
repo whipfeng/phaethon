@@ -380,6 +380,7 @@ func run(prev *activeResources) (*activeResources, error) {
 		reverseClientStops: make(map[string]chan struct{}),
 	}
 	res.tunMgr, res.netstack, res.connHandler = startEngine(meshMgr, nil)
+	util.LogModuleInfo("system", "[STARTUP] startEngine returned: tunMgr=%v netstack=%v handler=%v meshMgr=%v", res.tunMgr != nil, res.netstack != nil, res.connHandler != nil, meshMgr != nil)
 	if res.tunMgr != nil {
 		res.meshMgr = meshMgr
 	}

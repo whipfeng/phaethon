@@ -26,17 +26,23 @@ func CleanupResidual(tunIP net.IP) {
 	// resolv.conf path has its own .phaethon.bak recovery below.
 	restorePersistedLinuxDNS()
 
-	// 1. Delete a stale tun0 before the by-IP scan. A killed worker (or an
-	// older build that set TUNSETPERSIST) can leave tun0 with no IPv4 address
-	// but still up; the next TUNSETIFF then fails with EBUSY forever. tun0 is
-	// this deployment's reserved interface name and the instance lock
-	// guarantees no live worker owns it, so removing it is safe.
-	if link, err := netlink.LinkByName("tun0"); err == nil {
-		if err := netlink.LinkDel(link); err != nil {
-			util.LogModuleWarn("cleanup", "cleanup delete stale tun0 fail: %v", err)
-		} else {
-			util.LogModuleInfo("cleanup", "cleanup deleted stale tun0")
+	// 1. Delete our own stale TUN interface, identified by the ownership
+	// marker written right after CreateDevice. Never delete a tun0 by name
+	// alone: another application may own it. If the marker exists but the
+	// interface is gone (crash before create), just drop the marker.
+	if iface, ok := readTUNOwner(); ok {
+		if link, err := netlink.LinkByName(iface); err == nil {
+			if isTUNLink(link) {
+				if err := netlink.LinkDel(link); err != nil {
+					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", iface, err)
+				} else {
+					util.LogModuleInfo("cleanup", "cleanup deleted stale %s", iface)
+				}
+			} else {
+				util.LogModuleWarn("cleanup", "stale %s is not a tun link (type=%s), not deleting", iface, link.Type())
+			}
 		}
+		clearTUNOwner()
 	}
 
 	// 1b. Find the tun* interface holding tunIP and clear only that one.
@@ -55,6 +61,15 @@ func CleanupResidual(tunIP net.IP) {
 						util.LogModuleInfo("cleanup", "cleanup cleared %s (%s)", link.Attrs().Name, addr.IP)
 					}
 					break
+				}
+			}
+			// The expected mesh host address is a unique ownership proof even
+			// for pre-marker builds; delete the link after clearing it.
+			if isTUNLink(link) {
+				if err := netlink.LinkDel(link); err != nil {
+					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", link.Attrs().Name, err)
+				} else {
+					util.LogModuleInfo("cleanup", "cleanup deleted stale %s (owned by tunIP)", link.Attrs().Name)
 				}
 			}
 		}
@@ -151,6 +166,16 @@ func findTUNLinkByIP(ip net.IP) netlink.Link {
 		}
 	}
 	return nil
+}
+
+// isTUNLink reports whether the link is a TUN/TAP device (not just named
+// "tunN"), so precise cleanup never deletes an unrelated interface.
+func isTUNLink(link netlink.Link) bool {
+	if _, ok := link.(*netlink.Tuntap); ok {
+		return true
+	}
+	t := link.Type()
+	return t == "tun" || t == "tap"
 }
 
 // linkAddrs4 lists IPv4 addresses on a link, tolerating per-link errors.

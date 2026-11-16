@@ -119,11 +119,20 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	if tunEnabled {
 		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
-			util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry", err)
-			engine.Stop()
-			return nil, nil, nil, fmt.Errorf("TUN start: %w", err)
+			// Explicit fail-open: operators may prefer mesh transit over LAN
+			// egress on a node whose TUN cannot start (e.g. persistent host
+			// permission/device conflict). Default is fail-fast so a bypass
+			// gateway never silently loses LAN egress.
+			if os.Getenv("PHAETHON_TUN_FAIL_OPEN") == "1" {
+				util.LogModuleWarn("system", "[STARTUP] TUN failed, fail-open mesh-only (PHAETHON_TUN_FAIL_OPEN=1): %v", err)
+			} else {
+				util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry", err)
+				engine.Stop()
+				return nil, nil, nil, fmt.Errorf("TUN start: %w", err)
+			}
+		} else {
+			util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 		}
-		util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 	} else {
 		util.LogModuleInfo("system", "[STARTUP] TUN disabled by config")
 	}

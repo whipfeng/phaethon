@@ -224,3 +224,32 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 实锤；但“非稳定 worker 路径存活 + 残留 tun0 + 一次性 TUN/DNS 初始化”
 这条完整故障链已经实锤并可复现，且已修复/自愈。后续启动失败会以
 `[STARTUP] ... failed` + watchdog 重启的形式暴露，不会再静默半死。
+
+### 精确清理（v73）
+
+之前 v72 的 `CleanupResidual` 为了救 QG 是**按名字无条件删 tun0**，不够
+精确。v73 改为：
+
+1. `StartTUN` 在 `CreateDevice()` 成功后写
+   `/var/run/phaethon-tun.owner`（magic + iface + pid）；干净 `StopTUN`
+   时删除该 marker；
+2. `CleanupResidual` 只在 **marker 存在且 iface 匹配、且链路类型确为
+   tun/tap** 时删除；类型不符只告警、不删；
+3. 兼容没有 marker 的旧版本：仍按“链路 IPv4 == 本机 mesh host IP”删除，
+   这是唯一性证明；
+4. 不再按名字裸删 `tun0`，不会误删其它应用的 tun0。
+
+已知边界：2026-11-15 那种“旧版本留下的、无 marker 且无 IPv4 的 tun0”
+无法精确判定归属，不会自动删除，需要部署时一次性清理（本次 QG 已手工
+清理）。之后的新版本都会带 marker，可自动精确清理。
+
+### mesh-only 策略
+
+- TUN 未启用、或平台不支持（`tun.Available()==false`）→ mesh-only 是
+  合法设计；
+- TUN 已启用且平台可用、但启动失败 → 默认 **fail-fast**：worker 退出，
+  watchdog 重试；不再自动 mesh-only（旁路网关自动 mesh-only 等于
+  “mesh 看着正常、LAN 实际断网”，正是 11-15 的隐蔽故障形态）；
+- 如确有不希望重启、只保留 mesh 转发的节点，可显式设置
+  `PHAETHON_TUN_FAIL_OPEN=1`：TUN 失败时打 WARN 并继续 mesh-only。
+  默认关闭，不建议旁路网关使用。

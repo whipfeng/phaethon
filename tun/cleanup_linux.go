@@ -125,15 +125,6 @@ func CleanupResidual(tunIP net.IP) {
 					}
 					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, state.IfaceName)
 				}
-				// Delete the link too: leaving it up makes the next
-				// TUNSETIFF fail with EBUSY forever (fail-fast would then
-				// crash-loop with no LAN egress). The instance lock guarantees
-				// no live worker owns it.
-				if err := netlink.LinkDel(link); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", link.Attrs().Name, err)
-				} else {
-					util.LogModuleInfo("cleanup", "cleanup deleted stale %s", link.Attrs().Name)
-				}
 			}
 		} else {
 			util.LogModuleWarn("cleanup", "cleanup parse state file fail: %v", err)

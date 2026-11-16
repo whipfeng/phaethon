@@ -43,6 +43,17 @@ func limitKernelBacklog(conn net.Conn) bool {
 	for i := 0; i < 8; i++ {
 		if tc, ok := c.(*net.TCPConn); ok {
 			applyCarrierCC(tc, conn.RemoteAddr())
+			// Optional per-socket pacing cap (bytes/s): bounds slow-start
+			// bursts into a shallow WAN buffer. Inert unless the env is set.
+			if v := os.Getenv("PHAETHON_CARRIER_PACING_BPS"); v != "" {
+				if bps, perr := strconv.ParseUint(v, 10, 64); perr == nil && bps > 0 {
+					if err := setMaxPacingRate(tc, bps); err != nil {
+						util.LogModuleWarn("p2p", "[CARRIER-PACING] set %d B/s failed remote=%s: %v", bps, conn.RemoteAddr(), err)
+					} else {
+						util.LogModuleInfo("p2p", "[CARRIER-PACING] set %d B/s remote=%s", bps, conn.RemoteAddr())
+					}
+				}
+			}
 			lowat := laneLowatBytes()
 			if err := setNotSentLowat(tc, lowat); err != nil {
 				util.LogModuleInfo("p2p", "[LANE-LOWAT] skipped remote=%s: %v", conn.RemoteAddr(), err)

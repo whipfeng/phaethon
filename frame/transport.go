@@ -78,6 +78,10 @@ type streamTransport struct {
 	// interleave frame headers and payloads on the stream (a partial writev
 	// can be preempted), permanently desyncing the peer's frame parser.
 	writeMu sync.Mutex
+
+	// stall closes the carrier when a single write is blocked past the
+	// configured limit (carrier RTO backoff HOL). Nil when disabled.
+	stall *sendStallGuard
 }
 
 // NewStreamTransport wraps conn in a FrameTransport.
@@ -89,6 +93,7 @@ func NewStreamTransport(conn net.Conn) FrameTransport {
 		closed:     make(chan struct{}),
 		lowat:      limitKernelBacklog(conn),
 	}
+	t.stall = newSendStallGuard(carrierSendStallLimit(), func() { t.Close() })
 	go t.readLoop()
 	return t
 }
@@ -167,6 +172,8 @@ func (t *streamTransport) Send(frameType byte, payload []byte, isControl bool) e
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	t.stall.begin()
+	defer t.stall.end()
 	if frameType == FrameMeshPacket {
 		traceMeshPacket("frame_write_start", payload)
 	}
@@ -212,6 +219,8 @@ func (t *streamTransport) SendBatch(frames []Frame) error {
 	// No write deadline — same rationale as Send.
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	t.stall.begin()
+	defer t.stall.end()
 
 	// Pre-calculate total buffer size and validate payloads (a 2-byte length
 	// field cannot hold more than MaxPayload).
@@ -321,6 +330,7 @@ func (t *streamTransport) Recv() (byte, []byte, error) {
 
 func (t *streamTransport) Close() error {
 	t.closeOnce.Do(func() {
+		t.stall.stop()
 		close(t.closed)
 		t.conn.Close()
 	})

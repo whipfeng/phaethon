@@ -29,6 +29,10 @@ type WSTransport struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// stall closes the carrier when a single write is blocked past the
+	// configured limit (carrier RTO backoff HOL). Nil when disabled.
+	stall *sendStallGuard
 }
 
 // NewWSTransport builds a WS carrier and, when the raw connection is known,
@@ -40,6 +44,7 @@ func NewWSTransport(ws *websocket.Conn, raw net.Conn, seal func([]byte) []byte, 
 	if raw != nil {
 		t.lowat = limitKernelBacklog(raw)
 	}
+	t.stall = newSendStallGuard(carrierSendStallLimit(), func() { t.Close() })
 	return t
 }
 
@@ -111,6 +116,8 @@ func (t *WSTransport) sendFrames(frames []Frame) error {
 	if t.Seal != nil {
 		data = t.Seal(data)
 	}
+	t.stall.begin()
+	defer t.stall.end()
 	return websocket.Message.Send(t.Conn, data)
 }
 
@@ -178,6 +185,7 @@ func (t *WSTransport) Close() error {
 		return nil
 	}
 	t.closed = true
+	t.stall.stop()
 	if t.done == nil {
 		t.done = make(chan struct{})
 	}

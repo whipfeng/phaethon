@@ -2813,6 +2813,44 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 	util.LogModuleDebug("p2p", "[P2P] received pong from %s: seq=%d", peer.ID, pong.Seq)
 }
 
+// pendingStats returns the age of the oldest still-in-flight ping and how
+// many pings are pending. A carrier that cannot deliver several consecutive
+// 1s-cadence control frames is stalled (RTO backoff/HOL) regardless of its
+// data direction. Requiring more than one pending ping avoids resetting on a
+// single isolated loss, which is normal on a lossy WAN.
+func (t *pingTracker) pendingStats() (oldest time.Duration, n int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var oldestAt time.Time
+	for _, at := range t.pendingPings {
+		n++
+		if oldestAt.IsZero() || at.Before(oldestAt) {
+			oldestAt = at
+		}
+	}
+	if oldestAt.IsZero() {
+		return 0, n
+	}
+	return time.Since(oldestAt), n
+}
+
+// carrierPingStallLimit reads PHAETHON_CARRIER_STALL_MS. The same switch also
+// enables the transport-level write-stall guard (frame/send_watchdog.go); a
+// ping that has been in flight longer than this means the carrier cannot
+// deliver even a tiny control frame, so waiting out TCP's exponential RTO
+// backoff (observed 14-28s) is pointless.
+func carrierPingStallLimit() time.Duration {
+	v := os.Getenv("PHAETHON_CARRIER_STALL_MS")
+	if v == "" {
+		return 0
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 // sendPing sends a ping request to a peer for link quality measurement.
 // Send failures roll back the pending ping (not counted as loss, §4.3).
 // 10 consecutive pings without any pong and no inbound frame for 10s → Warn +
@@ -2820,6 +2858,21 @@ func (m *P2PManager) handlePong(peer *Peer, payload []byte) {
 func (m *P2PManager) sendPing(peer *Peer) {
 	if peer.pingTracker == nil {
 		return
+	}
+
+	// Early carrier-stall reset (env-gated). Before the loss-window path below,
+	// check whether any ping has been in flight longer than the stall limit:
+	// the carrier is then in RTO backoff/HOL and cannot deliver even a tiny
+	// control frame. Closing the transport lets the active side re-dial with a
+	// fresh RTO instead of waiting out 2^n backoff (14-28s observed).
+	if limit := carrierPingStallLimit(); limit > 0 {
+		if age, n := peer.pingTracker.pendingStats(); n >= 3 && age > limit {
+			util.LogModuleWarn("p2p", "[CARRIER-STALL] %d pings in flight, oldest %v > limit %v, resetting peer.ID=%s proxy=%s nodeID=%s",
+				n, age.Round(time.Millisecond), limit, peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+			peer.SetLastError(fmt.Sprintf("carrier stall: oldest ping in flight %v", age.Round(time.Millisecond)))
+			peer.transport.Close()
+			return
+		}
 	}
 
 	// Check consecutive-loss threshold BEFORE sending (ages out stale pings)

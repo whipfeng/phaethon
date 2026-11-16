@@ -599,3 +599,28 @@ UDP leg 保持关闭。
 结论：事1 目标（原配置 TCP 下 p95<200ms）尚未达成。下一步在 TCP 体系内
 做隔离：给交互流单独一条 TCP lane（按流固定），让批量流的 carrier 丢包/
 RTO 不阻塞交互流；这与 UDP leg 的隔离原理相同，但不改用户配置语义。
+
+## 第二十轮：TCP 双 lane 隔离 A/B（2026-11-17，事1）
+
+为在用户原配置（TCP、p2p-udp=false）下隔离交互流，新增 env 开关
+`PHAETHON_WARM_LANES`（主动侧预建 N 条数据 lane，默认 0=关闭），并恢复
+idle-spread 优先动态 lane（提交 332f961、46f5447）。JF 主动侧设为 2 后，
+`/api/p2p` 显示 GG peer：`transport=tcp+stripe×2`。
+
+3 轮结果：
+
+| 轮次 | p50 | p95 | max |
+| --- | --- | --- | --- |
+| 1 | 291 | 5772 | 10888 |
+| 2 | 114 | **173** | 365 |
+| 3 | 261 | 669 | 3581 |
+
+结论：双 TCP lane 能把两条流放到不同 TCP 流（1 轮 p95=173ms 达标），但
+2/3 轮仍出现 10s 级停顿——**两条 lane 仍共享同一条丢包 WAN，外层 TCP
+的丢失/RTO 仍会触发内层 RTO 停顿**。仅靠 TCP lane 隔离不足；UDP leg
+（完全绕开外层 TCP 丢失恢复）仍是唯一稳定的隔离手段。
+
+实验后已恢复 JF 原配置（env 清空、GG peer 回到单 `tcp`），warm-lane
+代码保留但默认关闭（env 未设置即 no-op）。事1 的 TCP 路径目标
+（p95<200ms）仍未达成；剩余根因集中在内层 gVisor RTO 对 WAN 丢失的
+放大，需要 per-flow 状态取证或产品层面决定是否启用 UDP leg / 接受链路上限。

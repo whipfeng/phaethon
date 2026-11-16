@@ -379,7 +379,12 @@ func run(prev *activeResources) (*activeResources, error) {
 		mappingReverse:     make(map[string]*server.ReverseServer),
 		reverseClientStops: make(map[string]chan struct{}),
 	}
-	res.tunMgr, res.netstack, res.connHandler = startEngine(meshMgr, nil)
+	tunMgr, netstack, connHandler, engineErr := startEngine(meshMgr, nil)
+	if engineErr != nil {
+		util.LogModuleError("system", "[STARTUP] engine init failed: %v; exiting so the watchdog retries", engineErr)
+		os.Exit(1)
+	}
+	res.tunMgr, res.netstack, res.connHandler = tunMgr, netstack, connHandler
 	util.LogModuleInfo("system", "[STARTUP] startEngine returned: tunMgr=%v netstack=%v handler=%v meshMgr=%v", res.tunMgr != nil, res.netstack != nil, res.connHandler != nil, meshMgr != nil)
 	if res.tunMgr != nil {
 		res.meshMgr = meshMgr

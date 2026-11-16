@@ -44,8 +44,12 @@ func residualTUNIP(meshMgr *mesh.MeshManager) net.IP {
 // When TUN is enabled, the TUN device and OS routes are also set up.
 // If meshMgr is non-nil, it is wired to the engine immediately after start.
 // If adminHandler is non-nil, it is set for direct connection handling (bypasses OS network stack).
-// Returns: (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler)
-func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler) {
+// Returns: (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler, error).
+// A non-nil error means a required data-plane component failed to initialize;
+// the caller must exit so the watchdog retries instead of running a
+// half-initialized worker (the QG 2026-11-15 17:27 failure mode: mesh/P2P up,
+// TUN/DNS dead, no egress for LAN clients).
+func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*tun.Manager, *mesh.Netstack, *handler.ConnectionHandler, error) {
 	// Load TUN config directly from database
 	tunConfig, err := db.GetTUNConfig()
 	if err != nil {
@@ -102,31 +106,26 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	// This sets up WriteLoopDevice and starts the netstack core.
 	if err := engine.StartStack(); err != nil {
 		util.LogModuleError("engine", "Netstack start failed: %v", err)
-		return nil, nil, nil
+		engine.Stop()
+		return nil, nil, nil, fmt.Errorf("netstack start: %w", err)
 	}
 	util.LogModuleInfo("engine", "gVisor netstack started")
 
-	// Start TUN device if enabled (optional, can be hot-reloaded later)
+	// Start TUN device if enabled (optional, can be hot-reloaded later).
+	// A failure here means the host cannot provide the configured data plane:
+	// exit and let the watchdog retry instead of living on in mesh-only mode
+	// with no LAN egress. Mesh-only remains correct only when TUN is disabled
+	// or unavailable on the platform (handled above).
 	if tunEnabled {
 		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
-			// TUN failed, but keep netstack running for mesh-only mode.
-			util.LogModuleWarn("system", "[STARTUP] TUN failed -> mesh-only: %v", err)
-			util.LogModuleWarn("engine", "========================================")
-			util.LogModuleWarn("engine", "TUN initialization failed: %v", err)
-			util.LogModuleWarn("engine", "Continuing in mesh-only mode (no TUN device)")
-			util.LogModuleWarn("engine", "========================================")
-		} else {
-			util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
+			util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry", err)
+			engine.Stop()
+			return nil, nil, nil, fmt.Errorf("TUN start: %w", err)
 		}
+		util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 	} else {
 		util.LogModuleInfo("system", "[STARTUP] TUN disabled by config")
-	}
-
-	// Check if TUN is actually running (it may have failed silently and fallen back to mesh-only)
-	if tunEnabled && !engine.IsTUNRunning() {
-		util.LogModuleWarn("engine", "TUN was enabled in config but failed to start - running in mesh-only mode")
-		util.LogModuleWarn("engine", "Local applications cannot use the proxy, but mesh routing still works")
 	}
 
 	// Wire mesh to engine immediately after start.
@@ -144,7 +143,8 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		ns.SetDNSHijacker(meshMgr.GetDNSHijacker(), meshMgr.GetFakeIPPool())
 		if err := ns.BindNetstack(); err != nil {
 			util.LogModuleError("engine", "Failed to bind DNS hijacker to netstack: %v", err)
-			return nil, nil, nil
+			engine.Stop()
+			return nil, nil, nil, fmt.Errorf("bind DNS hijacker: %w", err)
 		}
 		util.LogModuleInfo("system", "[STARTUP] DNS bind ok")
 		// Retry the listener bind: a worker restart can race the previous
@@ -159,8 +159,9 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			time.Sleep(time.Second)
 		}
 		if dnsErr != nil {
-			util.LogModuleWarn("system", "[STARTUP] DNS start failed: %v", dnsErr)
-			return nil, nil, nil
+			util.LogModuleError("system", "[STARTUP] DNS start failed after 3 attempts: %v; exiting for watchdog retry", dnsErr)
+			engine.Stop()
+			return nil, nil, nil, fmt.Errorf("start DNS hijacker: %w", dnsErr)
 		}
 		util.LogModuleInfo("system", "[STARTUP] DNS start ok")
 		util.LogModuleInfo("engine", "[DNS-INIT] DNS hijacker bound and started")
@@ -262,7 +263,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
-	return engine, ns, connHandler
+	return engine, ns, connHandler, nil
 }
 
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.

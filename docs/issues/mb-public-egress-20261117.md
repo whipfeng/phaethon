@@ -126,3 +126,54 @@ MB 出访 200、DNS 正常。11-15 17:27 的故障在 v58 上未复现；upgrade
 TUN 还是 DNS，健康循环/重试作为兜底保留。
 
 事2验证 OK，转入事1（原配置 TCP 载体下的瓶颈定位）。
+
+## 2026-11-16 复盘：17:27 的根因仍未实锤，但不是“缺功能”，是半初始化启动路径
+
+复核 QG 日志（`/root/data/logs/phaethon.log`，第 366525 行起）：
+
+```
+17:27:02  upgrade requested: v0.8.1-11-gcac6c68
+17:27:03  （旧 worker 仍在运行：反向客户端注册等）
+17:27:06  Received signal terminated, shutting down...
+17:27:06  [DNS-FWD] listener stopped
+17:27:06  （新 worker 启动：DB loaded / P2PManager initialized / Binding mapping）
+17:27:06  started ok 1
+17:27:06+ 只有 reverse/subscription 日志，没有任何 DNS bind/start、tun: 日志
+```
+
+旧 worker 在 17:27:06 收到 SIGTERM 后才停 DNS；新 worker 同一秒完成
+P2P/mapping 初始化，但**没有重新绑定 DNS**。日志里 `engine` 模块当时被
+全局 error 级别压住，无法直接看到是哪个调用失败，所以“17:27 的根因”
+仍然只能算**强相关、未实锤**。
+
+### 代码里未闭合的竞态/半初始化路径（本次已确认）
+
+`main_engine.go:startEngine` 在 v58 之后虽然加了 3×1s DNS 重试，但仍存在：
+
+1. `StartStack()` 失败 → `return nil,nil,nil`，`main` 不退出，继续加载
+   proxies/mappings：worker 活着、mesh/P2P 正常，但没有 netstack/TUN/DNS；
+2. `BindNetstack()` 失败 → 同样 `return nil,nil,nil` 继续；
+3. `StartDNSHijacker()` 3 次都失败 → 只打 WARN 后 `return nil,nil,nil`
+   继续；没有周期性重绑；
+4. `StartTUN()` 失败 → 显式降级为 mesh-only 继续运行；
+5. `gatewayHealthLoop` 是在 `StartTUN()` **成功之后**才启动的——正好
+   StartTUN 失败时它不存在，所以连 FORWARD 规则的自愈也没有。
+
+也就是说：升级/重启时只要任一必需组件瞬时失败（旧进程资源释放、
+tun/端口/路由竞态），新 worker 会以“半初始化”状态长期运行，watchdog
+认为 worker 健康、不会重启，直到人工再重启。这与 11-15 17:27 的现象
+（DNS 停、MB 断网、mesh 仍在）完全吻合，但该次日志级别不足以逐调用实锤。
+
+### 修复（fail-fast）
+
+`startEngine` 改为返回 `(..., error)`：
+
+- `StartStack` / `BindNetstack` / DNS 3 次重试仍失败 / `StartTUN`
+  （TUN 已启用且平台可用）失败 → 记录 `[STARTUP] ... failed`，停止已启动
+  资源并返回 error；
+- `main` 收到 error 后 `os.Exit(1)`，由 watchdog 重试（带退避），
+  不再保留半初始化 worker；
+- mesh-only 仅保留给“TUN 未启用/平台不可用”的合法场景。
+
+下一步：部署 QG 后做“边跑 MB DNS/HTTP 探针边连续自升级/重启”的压测，
+验证失败时只会短暂重启并从完整初始化恢复，而不是永久半死。

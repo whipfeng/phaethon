@@ -624,3 +624,83 @@ idle-spread 优先动态 lane（提交 332f961、46f5447）。JF 主动侧设为
 代码保留但默认关闭（env 未设置即 no-op）。事1 的 TCP 路径目标
 （p95<200ms）仍未达成；剩余根因集中在内层 gVisor RTO 对 WAN 丢失的
 放大，需要 per-flow 状态取证或产品层面决定是否启用 UDP leg / 接受链路上限。
+
+> 更正（2026-11-16）：上述“env 清空”只在文档层面成立。复核 JF 进程环境时
+> `PHAETHON_WARM_LANES=2` 仍然存在（进程未重启），后续第二轮取证实际仍带双
+> lane。代码默认值确为关闭，重启 JF 后才会真正回到单 carrier。
+
+## 第二十一轮：外层 carrier RTO 退避实锤（2026-11-16）
+
+复现配方：GG → VM（172.30.0.2 OS sshd，经 trojan 入口）300MB 上传 + 60 次
+交互 PTY 探针（首字节到 MARK 回显）。JF 仍是 `PHAETHON_WARM_LANES=2`。
+本轮每秒同时采集：GG 上全部外层 carrier 的 `ss -tin`、内层 gVisor 全字段
+（含 rcvNxt/rcvBuf）、JF 侧同一 carrier 的 `ss -tin`、全部 app drop 计数。
+
+单轮结果：min 93 / p50 113 / p95 413 / max **11693** ms。第 36 个探针在
+t=1794824131.284 发出，11.69s 后才看到回显。
+
+### 关键证据（同一时间窗）
+
+外层 carrier（GG 侧，远端 36.140.28.178:54196，承载 bulk）：
+
+```
+t=124  cwnd=7  lost=7  backoff=6  rto=224  sent=1.069MB retr=251KB sent(seg)=847
+t=126  cwnd=7  lost=7  backoff=7  rto=224  ...
+t=133  cwnd=7  lost=7  backoff=7  rto=223  sent=1.069MB retr=251KB  dcout=847   ← 洞仍未补
+t=136  cwnd=10 lost=7  backoff=7  ...      sent=1.287MB retr=251KB  dcout=1057  ← 恢复流动
+t=143  cwnd=12 lost=7  backoff=7  ...      sent=3.968MB retr=442KB  dcout=3313
+```
+
+- `backoff=6..7` 即 RTO 指数退避 2^6..2^7，对应 223ms × 64..128 ≈ **14~28s**；
+- 洞未补期间 `bytes_sent` 仍缓慢增长：后续新数据被 SACK 接收，但 **WS 是
+  有序字节流**，接收端字节流无法越过这个洞，所有帧（数据/控制/pong）被 HOL
+  阻塞；
+- 同一时空闲 carrier（52388）`backoff=-`、cwnd=9——第 19 轮“外层 backoff 为空”
+  的结论是**采到了空闲 socket**，不是承载 bulk 的 54196。
+
+内层 gVisor flow（bulk，GG 上 lp=23683）：
+
+```
+t=124  cong=rto-recovery cwnd=1 out=1 unsent=765420 rto=3602935 srtt=438786 lastSend=1828
+t=125  cong=rto-recovery cwnd=1 out=1 unsent=765420 rto=2972225 ...          lastSend=514
+t=126  cong=rto-recovery cwnd=1 out=1 ...                rto=7205870 ...     lastSend=330
+t=130  cong=rto-recovery cwnd=1 out=1 ...                rto=7205870 ...     lastSend=4530
+t=133  cong=open        cwnd=3 out=3 unsent=586336     rto=7220016 lastSend=94
+t=136  cong=open        cwnd=13 out=13 ...             rto=457430  lastSend=0
+```
+
+- 内层也进入 RTO 指数退避（1.49→2.97→7.2s），但整段只新增 **3 次**重传
+  （OTCP retransmits 760→763）——gVisor 每次 RTO 只发 1 段，和退避吻合；
+- 洞一补上（t≈133），内层立即恢复，`segments_sent` 从 ~1/s 跳到 ~400/s；
+- 交互 flow 同期也在 `rto-recovery`（cwnd=1、rto 1.49→7.4s），探针 36 的
+  11.7s 与这个窗口重合；
+- 全部 app 级 drop（meshInbound/dataBudget/lane/readQueue/nicTx/tunWrite）
+  仍为 **0**。
+
+### 结论（修正第 19 轮）
+
+触发点是**外层单条有序 TCP carrier 的尾部丢包 + 指数 RTO 退避**：一个洞
+14~28s 不补，整条 WS 字节流 HOL；内层 gVisor RTO 退避只是放大器（它让
+恢复点再晚 0~7s），不是触发点。应用层队列、lane 队列、MinRTO、pacing
+都已排除。
+
+### 已实现的止损（待验证）
+
+env `PHAETHON_CARRIER_STALL_MS`（默认 0=关闭）同时启用两个平台无关的
+看门狗：
+
+1. **写阻塞看门狗**（`frame/send_watchdog.go`）：`streamTransport` /
+   `WSTransport` 记录单次 Send/SendBatch 的起始时间；同一个写阻塞超过阈值
+   就关闭该 carrier（lane 由 laneWriter 移除；primary 由会话重连）。有
+   `TCP_NOTSENT_LOWAT` 时洞最终会把写阻塞，这个信号不需要 TCP_INFO，
+   Linux/Windows/macOS 通用。
+2. **ping 驻留看门狗**（`p2p.sendPing`）：连续 ≥3 个 1s ping 未回、最老
+   在途 ping 超过阈值 → 关闭会话。覆盖“对端发送方向被洞卡住、本端写不
+   阻塞”的方向。
+
+单测：`TestSendStallGuardResetsBlockedCarrier`、
+`TestSendStallGuardDisabledKeepsLegacyBehavior`、`TestPingTrackerPendingStats`。
+
+下一步：阈值 2000ms 部署 gg/jf/vm 后跑 3 轮同配方，验收 p95/max 与重连
+次数；若重连过多再评估 3000ms。TCP 路径的 p95<200ms 目标仍取决于 WAN
+丢包率，止损坏只能把 14~28s 尾巴压到秒级。

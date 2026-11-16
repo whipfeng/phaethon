@@ -41,3 +41,32 @@ MB（macOS，192.168.1.88）无法访问部分公网地址，DNS 解析超时。
 - DNS hijacker 在 worker 重启后未重新绑定的问题需要单独修（应用行为）。
 - `identitys` 持有 7 个 utun 及 IPv6 默认路由，与本应用无关；如需清理由该
   程序或其使用方处理。
+
+## 应用侧修复（2026-11-17，d7dbe9a）
+
+按“旁路网关功能应由应用自带”的原则，在 tun 引擎（Linux）中实现
+bypass-gateway 的 host 侧转发/NAT：
+
+- 新增 `PHAETHON_GW_FWD`：放行 LAN CIDR 及其 ESTABLISHED/RELATED 回程；
+- 新增 `PHAETHON_GW_NAT`：`-s <LAN CIDR> -o <upstream> MASQUERADE`；
+- 跳转插入 FORWARD/POSTROUTING 第 1 位，优先于 Docker 的 FORWARD DROP；
+- 每 15s reconcile（Docker 重启后自动恢复），TUN 停止时清理链和跳转；
+- 仅 Linux 实现，其它平台 no-op。
+
+已部署 QG `v0.8.1-47-gd7dbe9a`，并删除之前手工添加的
+192.168.1.88 规则。验证（仅应用规则）：
+
+```
+FORWARD -j PHAETHON_GW_FWD
+PHAETHON_GW_FWD -s 192.168.1.0/24 -j ACCEPT
+PHAETHON_GW_FWD -d 192.168.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+POSTROUTING -j PHAETHON_GW_NAT
+PHAETHON_GW_NAT -s 192.168.1.0/24 -o eth1 -j MASQUERADE
+```
+
+MB 复测：`https://www.baidu.com` → **200**，直连公网 IP 可达。手工 NAT
+不再需要。
+
+剩余：DNS hijacker 在 worker 重启后的重绑需要单独验证/加固（本次 QG
+重启后 DNS 正常，但 11-15 17:27 曾出现 listener stopped 后未重绑）；
+utun 归属 identitys，不是本应用。

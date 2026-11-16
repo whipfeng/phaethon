@@ -159,8 +159,10 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 			time.Sleep(time.Second)
 		}
 		if dnsErr != nil {
+			util.LogModuleWarn("system", "[STARTUP] DNS start failed: %v", dnsErr)
 			return nil, nil, nil
 		}
+		util.LogModuleInfo("system", "[STARTUP] DNS start ok")
 		util.LogModuleInfo("engine", "[DNS-INIT] DNS hijacker bound and started")
 
 		// Register the domain resolver callback for mesh DNS resolution

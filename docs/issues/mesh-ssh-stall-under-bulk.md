@@ -755,3 +755,59 @@ gVisor TCP 的 RTO 恢复，而 RFC 6298 指数退避把一次丢失放大成 1.
 单测：fork `TestCapRTOBackoff`。下一步：`PHAETHON_INNER_MAX_RTO_MS=1000`
 部署全链路后跑同配方 6 轮，验收 max 是否从 10s+ 压到 1~2s；同时把
 `PHAETHON_CARRIER_STALL_MS` 扩散到 QG/VM 以覆盖外层 HOL。
+
+## 第二十三轮：RTO 上限全链路生效，剩余尾巴是 QG→VM UDP 发送暂停（2026-11-16）
+
+`v0.8.1-68-g403ce0a` 已部署到 gg/jf/qg/vm，四个节点均带：
+
+```
+PHAETHON_CARRIER_STALL_MS=2000
+PHAETHON_INNER_MAX_RTO_MS=1000
+```
+
+VM 侧逐秒 flow 采样确认上限生效：停顿窗口内两个受影响 flow 均为
+`rto=1000000us`、`cong=rto-recovery`、`cwnd=1`、`lastSend≈0.4~0.6s`
+（每秒重传），`timeouts` 每轮 +2/秒。不再是 1.5→3→6s 的指数退避。
+
+### 结果（15 轮，两批）
+
+| 批次 | max（6 轮） |
+| --- | --- |
+| 加 cap 后第一批 | 236 / **9264** / 716 / 1290 / 3452 / 754 ms |
+| 第二批 | 131 / 148 / 1547 / 128 / 184 / 646 ms |
+| 第三批 | 125 / 1507 / 272 ms |
+| 全链路部署后 | 279 / **4807** / 129 / 1455 / 912 / 631 ms |
+
+10~17s 级尾巴没有再出现，但仍有 1.5~9s 的离群。因此 cap 只解决了
+“放大器”，剩下的是路径本身的黑洞。
+
+### 9.3s 离群窗口的证据
+
+- VM 两个 flow 每秒重传（rto=1s），`sndUna`/`rcvNxt` 仍冻结约 6s，
+  `timeouts` +12；说明不是退避，而是**对端什么都收不到**；
+- QG→VM UDP 腿计数（主动/被动两侧对照）：
+  - QG `legOut`（发往 VM）从 152707 到 152747，**8~10s 只涨 40**；
+  - QG `legIn`（VM 发来）持续 ~100/s；
+  - VM 侧 `legIn` 与 QG `legOut` 同步冻结，VM `legOut` 继续增长；
+  - `legPhase` 始终 `active`，反向（VM→QG）一直通。
+- 结论：**QG 侧 UDP 发送路径被暂停了 8~10s**，不是公网丢包、不是腿
+  FSM 退回 TCP，也不是 app drop。UDP `WriteTo` 本身不会阻塞，最可能是
+  QG 的 peer 写循环被同一 transport 的 TCP base 发送（gossip/控制在
+  SendBatch 末尾）或 credit 等待卡住，UDP 数据排在后面。
+
+### 未完成
+
+在 QG 上加了 legOut 冻结 watcher，计划在冻结 ≥3s 时 SIGQUIT 抓
+goroutine dump；但随后 6 轮未再出现 ≥3s 的 legOut 冻结（max 4.8s 属
+拥塞），dump 未触发。下一步：
+
+1. 给 QG 启动参数加 `--enable-debug-api`（或在控制台开 debug），用
+   `/debug/pprof/goroutine?debug=2` 在冻结窗口抓栈；
+2. 若栈证实 peer write loop 卡在 TCP base/credit：把 UDP leg 的发送与
+   TCP base 解耦（独立 writer/独立 credit），控制帧也不能让 UDP 数据等；
+3. 关注 QG→VM 这段链路的 UDP 是否被运营商限速（若 legOut 冻结但
+   socket 写成功，则是上游丢弃；本次 legOut 冻结说明是应用侧未发送）。
+
+另：VM 的启动器 `start-phaethon.vbs` 在本次部署中恢复为
+`CurrentDirectory + cmd /c 绝对路径 + stdout 重定向`，并加了两条 env；
+之前改写时丢了 CurrentDirectory，wscript 找不到 exe。

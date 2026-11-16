@@ -86,3 +86,17 @@ hijacker 没有起来**（同一时刻 DNS-FWD 也 stopped），不是功能缺�
 需要手工 NAT。本次自升级重启未复现；后续应对“重启后 TUN 初始化”做启动
 自检/告警（检查 tun0、三条 FORWARD 元组、DNS 监听是否就绪），而不是加
 MASQUERADE。
+
+## 最终修复（50fed3a，v0.8.1-53-g50fed3a）
+
+- 撤回 MASQUERADE/新增链（revert 4065f6f、7374d09）；不引入新 NAT；
+- 复用 `route_linux.go` 既有三条 FORWARD 元组，抽出幂等
+  `ensureForwardRules`；
+- TUN 启动后每 30s `gatewayHealthLoop` 重新置 `ip_forward=1` 并补回
+  缺失的 FORWARD 元组；teardown 置位后停止；
+- DNS hijacker 启动失败重试 3 次（1s 间隔），覆盖重启时端口/监听竞态。
+
+验证：部署 v53 后手动删除 `eth1→eth1 ACCEPT`，约 50s 内被自动补回；
+MB `https://www.baidu.com` → 200，DNS fakeip 100.0.0.250 正常，无
+MASQUERADE。11-15 17:27 的完整根因未复现，但“重启后既有规则/DNS 未就绪”
+这一类问题现在有自检/重试兜底。

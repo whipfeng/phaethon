@@ -1566,21 +1566,14 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 				// Convert GossipLink to FullTopologyLink
 				var links []FullTopologyLink
 				for _, gossipLink := range neighbor.Links {
-					var cost float64
-					if gossipLink.SRTT > 0 && gossipLink.LossRate < 1.0 {
-						cost = gossipLink.SRTT / (1 - gossipLink.LossRate)
-					} else if gossipLink.SRTT > 0 {
-						cost = 10000 // high cost for high loss
-					} else {
-						cost = 1000 // default cost for no data
-					}
-
+					cost := linkCost(gossipLink.SRTT, gossipLink.LossRate, gossipLink.RetransRate, gossipLink.DropRate, gossipLink.SojournMs, 1.0)
 					links = append(links, FullTopologyLink{
 						LocalSeq:     gossipLink.LocalSeq,
 						RemoteSeq:    gossipLink.RemoteSeq,
 						FriendlyName: gossipLink.FriendlyName,
 						SRTT:         gossipLink.SRTT,
 						LossRate:     gossipLink.LossRate,
+						RetransRate:  gossipLink.RetransRate,
 						Cost:         cost,
 					})
 				}
@@ -2670,6 +2663,9 @@ func (m *MeshManager) broadcastGossip() {
 				dropRate, sojournMs := quality.EgressStats()
 				link.DropRate = dropRate
 				link.SojournMs = sojournMs
+				if r, ok := quality.RetransRate(); ok {
+					link.RetransRate = r
+				}
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -3234,10 +3230,11 @@ func linkCostForPeer(m *MeshManager, peer PeerSender) (cost float64, hasData boo
 	quality := m.qualityTracker.Get(peer.GetNodeID(), peer.GetLocalSeq())
 	avgRTT, loss, _, confidence := quality.StatsWithConfidence()
 	dropRate, sojournMs := quality.EgressStats()
+	retrans, _ := quality.RetransRate()
 	if avgRTT <= 0 {
 		return 0, false
 	}
-	return linkCost(float64(avgRTT)/float64(time.Millisecond), loss, dropRate, sojournMs, confidence), true
+	return linkCost(float64(avgRTT)/float64(time.Millisecond), loss, retrans, dropRate, sojournMs, confidence), true
 }
 
 // getHopForPeer returns the hop count for a selected peer from the candidates list.
@@ -3304,6 +3301,9 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 				dropRate, sojournMs := quality.EgressStats()
 				link.DropRate = dropRate
 				link.SojournMs = sojournMs
+				if r, ok := quality.RetransRate(); ok {
+					link.RetransRate = r
+				}
 			}
 			neighborMap[nodeID].Links = append(neighborMap[nodeID].Links, link)
 		}
@@ -3598,10 +3598,11 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 			quality := m.qualityTracker.Get(neighborID, localSeq)
 			avgRTT, lossRate, jitterVal, confidence := quality.StatsWithConfidence()
 			dropRate, sojournMs := quality.EgressStats()
+			retrans, _ := quality.RetransRate()
 			link.SRTT = float64(avgRTT) / float64(time.Millisecond) // Preserve sub-millisecond precision
 			link.LossRate = lossRate
 			link.Jitter = jitterVal
-			link.Cost = linkCost(link.SRTT, lossRate, dropRate, sojournMs, confidence)
+			link.Cost = linkCost(link.SRTT, lossRate, retrans, dropRate, sojournMs, confidence)
 		} else {
 			link.Cost = 1000
 		}
@@ -3631,6 +3632,10 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 
 			// Process all validated links to this neighbor
 			for _, gossipLink := range neighbor.Links {
+				cost := 1000.0
+				if gossipLink.SRTT > 0 {
+					cost = linkCost(gossipLink.SRTT, gossipLink.LossRate, gossipLink.RetransRate, gossipLink.DropRate, gossipLink.SojournMs, 1.0)
+				}
 				link := &LinkQualityInfo{
 					From:      fromNode,
 					To:        toNode,
@@ -3640,7 +3645,7 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 					LossRate:  gossipLink.LossRate,
 					// Remote nodes already bake confidence into the values
 					// they gossip; validated-claim freshness covers staleness.
-					Cost: linkCost(gossipLink.SRTT, gossipLink.LossRate, gossipLink.DropRate, gossipLink.SojournMs, 1.0),
+					Cost: cost,
 				}
 
 				if graph.Edges[fromNode] == nil {
@@ -3670,15 +3675,16 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 
 // linkCost computes the per-link cost (design: link_quality_v2 §A2/§B):
 //
-//	lossEff = 1 - (1-lossPing)·(1-dropRate)
+//	lossEff = 1 - (1-lossPing)·(1-retransRate)·(1-dropRate)
 //	cost = (SRTT + SojournMs) / max(1-lossEff, 0.01) / confidence
 //
-// Locally-dropped frames never reached the peer, so dropRate composes into
-// the loss term; sojourn adds to SRTT (same unit). No unprobed sentinel —
-// a fresh tracker carries the 100ms prior with confidence 0.1, yielding
-// cost 1000.
-func linkCost(srtt, lossRate, dropRate, sojournMs, confidence float64) float64 {
-	lossEff := 1.0 - (1.0-lossRate)*(1.0-dropRate)
+// Locally-dropped frames never reached the peer, and retransmitted segments
+// are real link loss that TCP hides from the ping-level metric, so both
+// compose into the loss term; sojourn adds to SRTT (same unit). No unprobed
+// sentinel — a fresh tracker carries the 100ms prior with confidence 0.1,
+// yielding cost 1000.
+func linkCost(srtt, lossRate, retransRate, dropRate, sojournMs, confidence float64) float64 {
+	lossEff := 1.0 - (1.0-lossRate)*(1.0-retransRate)*(1.0-dropRate)
 	denom := 1.0 - lossEff
 	if denom < 0.01 {
 		denom = 0.01

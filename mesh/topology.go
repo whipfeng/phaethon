@@ -115,6 +115,9 @@ type GossipLink struct {
 	Jitter       float64 `json:"jitter,omitempty"`       // 抖动 (ms)
 	DropRate     float64 `json:"dropRate,omitempty"`     // 本机出向队列丢包率 (0.0-1.0, Phase B)
 	SojournMs    float64 `json:"sojournMs,omitempty"`    // 排队时延 EMA (ms, Phase B)
+	// Carrier TCP retransmission rate (link-level, all inner protocols share
+	// it). Omitted by nodes without TCP_INFO; receivers fall back to loss/drop.
+	RetransRate float64 `json:"retransRate,omitempty"`
 }
 
 // GossipNeighbor represents a direct neighbor with multiple links.

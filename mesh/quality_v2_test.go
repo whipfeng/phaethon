@@ -78,31 +78,35 @@ func TestResetRestoresPrior(t *testing.T) {
 // and egress drop; sojourn adds to SRTT; confidence divides.
 func TestLinkCostFormula(t *testing.T) {
 	// Base: srtt=100, no loss, full confidence → 100
-	if c := linkCost(100, 0, 0, 0, 1.0); c != 100 {
+	if c := linkCost(100, 0, 0, 0, 0, 1.0); c != 100 {
 		t.Fatalf("linkCost base = %v, want 100", c)
 	}
 	// 50% ping loss → denom = 0.5 → 200
-	if c := linkCost(100, 0.5, 0, 0, 1.0); c != 200 {
+	if c := linkCost(100, 0.5, 0, 0, 0, 1.0); c != 200 {
 		t.Fatalf("linkCost 50%% loss = %v, want 200", c)
 	}
 	// Loss so high the denom would underflow → clamps to 0.01 → 10000
-	if c := linkCost(100, 0.999, 0, 0, 1.0); c != 10000 {
+	if c := linkCost(100, 0.999, 0, 0, 0, 1.0); c != 10000 {
 		t.Fatalf("linkCost 99.9%% loss = %v, want 10000", c)
 	}
 	// 10% ping loss + 10% drop → lossEff=0.19, denom=0.81
-	if c := linkCost(100, 0.1, 0.1, 0, 1.0); math.Abs(c-100/0.81) > 1e-9 {
+	if c := linkCost(100, 0.1, 0, 0.1, 0, 1.0); math.Abs(c-100/0.81) > 1e-9 {
 		t.Fatalf("linkCost composed loss = %v, want %v", c, 100/0.81)
 	}
+	// 10% carrier retransmission composes into the loss term too.
+	if c := linkCost(100, 0, 0.1, 0, 0, 1.0); math.Abs(c-100/0.9) > 1e-9 {
+		t.Fatalf("linkCost retrans = %v, want %v", c, 100/0.9)
+	}
 	// Sojourn adds to numerator
-	if c := linkCost(100, 0, 0, 20, 1.0); c != 120 {
+	if c := linkCost(100, 0, 0, 0, 20, 1.0); c != 120 {
 		t.Fatalf("linkCost with sojourn = %v, want 120", c)
 	}
 	// Confidence 0.1 → 10×
-	if c := linkCost(100, 0, 0, 0, 0.1); c != 1000 {
+	if c := linkCost(100, 0, 0, 0, 0, 0.1); c != 1000 {
 		t.Fatalf("linkCost conf=0.1 = %v, want 1000", c)
 	}
 	// Confidence <=0 clamps to 0.01, never div-by-zero
-	if c := linkCost(100, 0, 0, 0, 0); c != 10000 {
+	if c := linkCost(100, 0, 0, 0, 0, 0); c != 10000 {
 		t.Fatalf("linkCost conf=0 = %v, want 10000", c)
 	}
 }
@@ -113,8 +117,8 @@ type hysteresisPeerSender struct {
 	nic    *LinkNIC
 }
 
-func (s *hysteresisPeerSender) Send(data []byte) error  { return nil }
-func (s *hysteresisPeerSender) SendGossip(data []byte)   {}
+func (s *hysteresisPeerSender) Send(data []byte) error    { return nil }
+func (s *hysteresisPeerSender) SendGossip(data []byte)    {}
 func (s *hysteresisPeerSender) GossipFields() (bool, int) { return false, 0 }
 func (s *hysteresisPeerSender) LaneAckFields() (bool, bool, bool, []GossipLaneRx, int) {
 	return false, false, false, nil, 0
@@ -154,9 +158,9 @@ func TestApplyHysteresisBoundary(t *testing.T) {
 	incumbent := 25 + hopPenaltyMs + 25 + hopPenaltyMs // 60
 
 	cases := []struct {
-		name      string
-		newCost   float64
-		wantHop   string // nextHop in result
+		name    string
+		newCost float64
+		wantHop string // nextHop in result
 	}{
 		{"below hysteresis (better by >15%)", incumbent * 0.80, "A"},
 		{"exactly at 15% improvement", incumbent * 0.85, "B"}, // not strictly better → keep

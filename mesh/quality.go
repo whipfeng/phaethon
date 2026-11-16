@@ -128,7 +128,12 @@ func (q *PeerQuality) UpdateCarrierStats(segs, retrans uint64) {
 			if r > 1 {
 				r = 1
 			}
-			q.tcpRate = r
+			if q.tcpRate == 0 {
+				q.tcpRate = r
+			} else {
+				// EWMA: the routing cost must not flap on one 10s sample.
+				q.tcpRate = 0.7*q.tcpRate + 0.3*r
+			}
 		}
 	}
 	q.tcpSegs, q.tcpRetrans, q.tcpHave = segs, retrans, true

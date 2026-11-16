@@ -7,6 +7,8 @@ package tun
 // uses ICS/Wintun semantics and Darwin has no equivalent iptables path.
 type gatewayNAT struct{}
 
-func setupGatewayNAT(lanIface, upstreamIface string) (*gatewayNAT, error) { return nil, nil }
+func setupGatewayNAT(lanIface, upstreamIface, tunIface string) (*gatewayNAT, error) {
+	return nil, nil
+}
 
 func (g *gatewayNAT) Stop() {}

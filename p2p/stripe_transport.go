@@ -491,30 +491,29 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 	}
 	// Idle-carrier spread, decided under t.mu so two concurrent first-frames
 	// (bulk and interactive) cannot both observe the same carrier as idle and
-	// collide. Dynamic lanes are preferred over the primary: the primary now
-	// has its own writer + data queue, and putting the first two long flows on
-	// lanes keeps the primary for control and overflow. Only when every lane
-	// already owns a flow does rendezvous quality decide (the primary included).
-	if t.pinCount(l) > 0 || l == nil {
-		var bestIdle *stripeLane
-		idleFound := false
+	// collide. If the rendezvous winner already owns a flow while another
+	// candidate owns none, take the idle one (highest rendezvous score). This
+	// is what puts the bulk and interactive SSH flows on different ordered
+	// TCP streams, isolating interactive traffic from bulk loss recovery.
+	// Once every carrier owns a flow, rendezvous quality decides as before.
+	if t.pinCount(l) > 0 {
+		bestIdle := l
+		bestIdleSet := false
 		bestScore := 0.0
+		if t.primaryPinned.Load() == 0 {
+			bestIdle, bestIdleSet, bestScore = nil, true, scoreMix(key, 0)
+		}
 		for _, cand := range lanes {
 			if cand.pinned.Load() != 0 {
 				continue
 			}
 			s := scoreMix(key, cand.id) * cand.currentWeight()
-			if !idleFound || s > bestScore {
-				bestIdle, idleFound, bestScore = cand, true, s
+			if !bestIdleSet || s > bestScore {
+				bestIdle, bestIdleSet, bestScore = cand, true, s
 			}
 		}
-		switch {
-		case idleFound:
+		if bestIdleSet {
 			l = bestIdle
-		case t.primaryPinned.Load() == 0 && t.pinCount(l) > 0:
-			// Every lane is taken but the primary is free: use it rather than
-			// colliding with a busy lane.
-			l = nil
 		}
 	}
 	// Explicitly cache "primary" (lane nil) so a later weight flip cannot

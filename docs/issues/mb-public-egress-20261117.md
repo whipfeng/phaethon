@@ -100,3 +100,29 @@ MASQUERADE。
 MB `https://www.baidu.com` → 200，DNS fakeip 100.0.0.250 正常，无
 MASQUERADE。11-15 17:27 的完整根因未复现，但“重启后既有规则/DNS 未就绪”
 这一类问题现在有自检/重试兜底。
+
+## 事2验证：启动/交接分支日志（2026-11-17）
+
+新增 system 级启动日志（提交 385a024、41e9d71、326fe43）：
+`[STARTUP] startEngine`（tun/bypass/dhcp/mesh 配置）、TUN start begin/ok/
+failed、DNS bind/start 结果、startEngine 返回句柄；watchdog 侧记录
+`[HANDOFF] stopping worker / supervision transferred`。
+
+QG 自升级到 v0.8.1-58-g326fe43 后，新 worker 的启动日志完整：
+
+```
+[STARTUP] startEngine: tunConfig=true tun.enabled=true bypass=true dhcp=true meshMgr=true
+[STARTUP] TUN start begin
+[STARTUP] TUN start ok running=true
+[STARTUP] DNS bind ok
+[STARTUP] DNS start ok
+[STARTUP] startEngine returned: tunMgr=true netstack=true handler=true meshMgr=true
+```
+
+同时验证：删除 `eth1→eth1 ACCEPT` 后约 50s 被 gatewayHealthLoop 自动补回；
+MB 出访 200、DNS 正常。11-15 17:27 的故障在 v58 上未复现；upgrade.log
+中没有 17:27 记录（该次走的是更早的升级机制），当前 handoff 路径连续
+多次自升级都完整初始化。后续若再出现，`[STARTUP]` 日志会直接指出卡在
+TUN 还是 DNS，健康循环/重试作为兜底保留。
+
+事2验证 OK，转入事1（原配置 TCP 载体下的瓶颈定位）。

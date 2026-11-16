@@ -67,7 +67,6 @@ type Manager struct {
 	netstack   *mesh.Netstack
 	routeMgr   *RouteManager
 	dhcpSrv    DHCPServer
-	gwNAT      *gatewayNAT
 	prefixLen  int
 	meshHostIP net.IP // expected TUN interface address (subnet+2), used for residual cleanup matching
 	dataDir    string
@@ -676,31 +675,6 @@ func (e *Manager) StartTUN() error {
 		}
 	}
 
-	// Bypass gateway is an application feature: the host must forward and NAT
-	// the LAN clients served by the DHCP server. The gVisor NAT table only
-	// covers packets entering the TUN NIC; LAN traffic arrives on the physical
-	// interface, so install the host FORWARD/NAT rules here (and reconcile:
-	// Docker resets FORWARD policy when it restarts).
-	if e.tunConfig != nil && e.tunConfig.IsBypassGateway() {
-		ifaceName := ""
-		if e.tunConfig.DHCP != nil && e.tunConfig.DHCP.Interface != "" {
-			ifaceName = e.tunConfig.DHCP.Interface
-		} else if e.routeMgr != nil {
-			ifaceName = e.routeMgr.DefaultIfaceName
-		}
-		upstream := ""
-		if e.routeMgr != nil {
-			upstream = e.routeMgr.DefaultIfaceName
-		}
-		if ifaceName != "" {
-			if gw, err := setupGatewayNAT(ifaceName, upstream); err != nil {
-				util.LogModuleWarn("tun", "bypass gateway NAT setup failed: %v", err)
-			} else {
-				e.gwNAT = gw
-			}
-		}
-	}
-
 	e.logEvent("TUN device started on %s", dev.Name())
 	connlog.Log("TUN", "SYSTEM", "", "", dev.Name(), 0, nil, "ok", nil)
 	util.LogModuleDebug("tun", "TUN device started on %s", dev.Name())
@@ -758,12 +732,6 @@ func (e *Manager) StopTUN() error {
 	}
 	if dnsIface != "" {
 		restoreSystemDNS(dnsIface)
-	}
-
-	// Remove the gateway FORWARD/NAT rules before tearing down routes/DHCP.
-	if e.gwNAT != nil {
-		e.gwNAT.Stop()
-		e.gwNAT = nil
 	}
 
 	// Stop DHCP server before tearing down routes.

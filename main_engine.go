@@ -54,6 +54,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	}
 
 	tunEnabled := tunConfig != nil && tunConfig.IsEnabled()
+	util.LogModuleInfo("system", "[STARTUP] startEngine: tunConfig=%v tun.enabled=%v bypass=%v dhcp=%v meshMgr=%v", tunConfig != nil, tunEnabled, tunConfig != nil && tunConfig.IsBypassGateway(), tunConfig != nil && tunConfig.IsDHCPEnabled(), meshMgr != nil)
 
 	// Always attempt residual cleanup: a previous crash can leave routes, DNS
 	// or a persisted Windows adapter even when TUN is now disabled. Cleanup

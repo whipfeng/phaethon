@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -817,6 +819,19 @@ func (n *Netstack) initStack() error {
 		Min: 4096, Default: 1 << 20, Max: 16 << 20})
 	cc := tcpip.CongestionControlOption("cubic")
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &cc)
+
+	// Optional inner-TCP RTO floor. The carrier TCP's own RTO is ~223ms on the
+	// lossy WAN; with the default 200ms inner MinRTO, an outer retransmission
+	// can trigger a spurious inner RTO on each carrier loss event, which then
+	// backs off and stalls the inner flow for seconds. A floor above the
+	// carrier RTO (e.g. 500ms) decouples the two. Inert unless the env is set.
+	if v := os.Getenv("PHAETHON_INNER_MIN_RTO_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			opt := tcpip.TCPMinRTOOption(time.Duration(ms) * time.Millisecond)
+			s.SetTransportProtocolOption(tcp.ProtocolNumber, &opt)
+			util.LogModuleInfo("netstack", "[NETSTACK] inner TCP MinRTO=%dms", ms)
+		}
+	}
 
 	if err := s.CreateNIC(1, linkEP); err != nil {
 		return fmt.Errorf("create nic 1: %v", err)

@@ -154,7 +154,9 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			Gw:       r.originalGateway,
 			Protocol: routeProtocolPhaethon,
 		}
-		if err := netlink.RouteAdd(rt); err != nil {
+		// Replace, not add: a previous instance may have left the same
+		// exclusion route behind (SIGKILL, crash, service restart).
+		if err := netlink.RouteReplace(rt); err != nil {
 			util.LogModuleWarn("route", "add exclusion route %s fail: %v", exclude, err)
 		} else {
 			util.LogModuleInfo("route", "exclusion route %s -> %s", exclude, r.originalGateway)

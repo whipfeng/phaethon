@@ -1985,6 +1985,8 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                     const isFromFirst = e.from === firstEdge.from;
                     const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(0)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
+                    const retrans = e.link.retransRate > 0 ? `, retx ${(e.link.retransRate * 100).toFixed(3)}%` : '';
+                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? `, c${e.link.cost.toFixed(0)}` : '';
                     const friendlyName = e.link.friendlyName || '';
                     const localSeq = e.link.localSeq || '';
 

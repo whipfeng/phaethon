@@ -116,6 +116,11 @@ func toggleTUN(enable bool, res *activeResources) error {
 	if res == nil {
 		return fmt.Errorf("runtime not ready")
 	}
+	if res.tunMgr != nil {
+		// Record intent before Start/Stop: the health loop consults it, so a
+		// concurrent tick cannot re-enable a TUN the operator just disabled.
+		res.tunMgr.SetDesiredTUNEnabled(enable)
+	}
 	if enable {
 		if res.tunMgr == nil {
 			return fmt.Errorf("stack not running")

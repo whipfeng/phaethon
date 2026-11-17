@@ -77,6 +77,11 @@ type Manager struct {
 	tunDegraded atomic.Bool
 	tunLastErr  atomic.Value // string
 
+	// desiredEnabled is the operator's intent (config + admin toggle). It is
+	// owned by the process and consulted by the health loop so a toggle race
+	// cannot re-enable a TUN the operator just disabled.
+	desiredEnabled atomic.Bool
+
 	// tunSrcTable records pre-SNAT source IPs from the read loop so the
 	// netstack forwarder can display the original TUN source (see
 	// mesh.TUNSrcTable). Nil until SetTUNSrcTable is called.
@@ -120,11 +125,20 @@ func NewManager() *Manager {
 		util.LogModuleWarn("tun", "failed to load proxies from db: %v", err)
 	}
 
-	return &Manager{
+	m := &Manager{
 		tunConfig: tunConfig,
 		proxies:   proxies,
 	}
+	m.desiredEnabled.Store(tunConfig != nil && tunConfig.IsEnabled())
+	return m
 }
+
+// DesiredTUNEnabled reports the operator's current intent (config + toggle).
+func (e *Manager) DesiredTUNEnabled() bool { return e.desiredEnabled.Load() }
+
+// SetDesiredTUNEnabled records the operator's intent before Start/Stop so the
+// health loop cannot re-enable a TUN the operator disabled (or vice versa).
+func (e *Manager) SetDesiredTUNEnabled(v bool) { e.desiredEnabled.Store(v) }
 
 // SetDataDir sets the runtime data directory for persistent storage (e.g. DHCP leases).
 func (e *Manager) SetDataDir(dir string) {

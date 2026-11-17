@@ -246,31 +246,31 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
-	if tunEnabled {
-		go tunHealthLoop(engine)
-	}
+	go tunHealthLoop(engine)
 
 	return engine, ns, connHandler, nil
 }
 
 // tunHealthLoop keeps the host TUN healthy for the lifetime of the worker:
 //
-//   - TUN not running (startup failure or operator toggle) and config enabled:
-//     retry StartTUN with 2s→30s backoff;
+//   - operator intent is disabled: stop any running TUN and idle (the loop
+//     stays alive so a later admin enable is monitored again);
 //   - TUN claimed running but the interface disappeared at runtime (external
-//     delete, driver reset): mark degraded, StopTUN/StartTUN to recreate it.
+//     delete, driver reset): mark degraded, StopTUN/StartTUN to recreate it;
+//   - TUN not running and intent enabled: retry StartTUN with backoff.
 //
 // Mesh/P2P/DNS keep running throughout; the loop never restarts the worker,
-// so a TUN problem cannot flap the mesh. It exits when the operator disables
-// TUN in config or when the process exits.
+// so a TUN problem cannot flap the mesh.
 func tunHealthLoop(engine *tun.Manager) {
 	backoff := 2 * time.Second
 	for {
 		time.Sleep(5 * time.Second)
-		cfg, err := db.GetTUNConfig()
-		if err == nil && (cfg == nil || !cfg.IsEnabled()) {
-			util.LogModuleInfo("tun", "[TUN] health loop stopped: TUN disabled by config")
-			return
+		if !engine.DesiredTUNEnabled() {
+			if engine.IsTUNRunning() {
+				_ = engine.StopTUN()
+			}
+			backoff = 2 * time.Second
+			continue
 		}
 		if engine.IsTUNRunning() {
 			if tun.InterfaceExists() {

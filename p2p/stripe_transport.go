@@ -56,7 +56,11 @@ const stripeLaneQueueDepth = 256 // outbound batches per lane
 // handed to healthy lanes (cold-start 1.4s interactive spikes). Control is
 // bounded but never dropped; data tail-drops when full (inner TCP retransmits).
 const (
-	primaryDataDepth = 4   // queued primary data batches
+	// 32 batches (~BDP at 8-10MB/s with a ~20-30ms path) instead of the
+	// original 4: a shallow queue tail-dropped bursts under link jitter and
+	// the inner TCP paid for the retransmits (measured ~15% median loss on
+	// qg→jf). The peer data budget (4MB) still bounds memory.
+	primaryDataDepth = 32
 	primaryCtrlDepth = 256 // queued primary control frames
 )
 

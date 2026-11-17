@@ -1497,6 +1497,10 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	// Local direct peer connections - only add edges for peers with active Senders
 	for _, p := range peers {
 		peerID := p.NodeID()
+		// A loopback/circular carrier must never surface as a self-edge.
+		if peerID == m.nodeID {
+			continue
+		}
 		// Only add edge if peer has an active Sender (indicating active P2P connection)
 		if p.Sender != nil && peerID != "" {
 			key := edgeKey(m.nodeID, peerID)
@@ -1561,6 +1565,10 @@ func (m *MeshManager) GetFullTopology() map[string]interface{} {
 	for _, p := range peers {
 		for _, cs := range p.ClaimedSubnets {
 			for _, neighbor := range cs.Neighbors {
+				// Drop self-edges learned from gossip (stale/looping carriers).
+				if cs.NodeID == neighbor.NodeID {
+					continue
+				}
 				key := edgeKey(cs.NodeID, neighbor.NodeID)
 
 				// Convert GossipLink to FullTopologyLink
@@ -3582,6 +3590,9 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 			continue
 		}
 		neighborID := peer.NodeID()
+		if neighborID == selfID {
+			continue
+		}
 		graph.Nodes[neighborID] = true
 
 		localSeq := peer.Sender.GetLocalSeq()
@@ -3628,6 +3639,9 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 
 		for _, neighbor := range claim.neighbors {
 			toNode := neighbor.NodeID
+			if toNode == fromNode {
+				continue
+			}
 			graph.Nodes[toNode] = true
 
 			// Process all validated links to this neighbor

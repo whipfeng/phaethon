@@ -1882,6 +1882,15 @@ func (m *P2PManager) RestartPeer(proxy *config.Proxy) {
 // It reconnects automatically with exponential backoff if the connection drops.
 // Call StopPeerByProxyName to permanently disconnect.
 func (m *P2PManager) StartPeer(proxy *config.Proxy) {
+	// A loopback proxy cannot carry a remote mesh peer: dialing it makes this
+	// node connect to itself, which creates a self-edge in topology and a
+	// permanent reconnect loop. Local relays stay usable for normal proxying;
+	// they are simply not P2P carriers.
+	if ip := proxyPeerIP(proxy); ip != nil && ip.IsLoopback() {
+		util.LogModuleWarn("p2p", "[P2P] skipping proxy %s: target %s is loopback, not a remote mesh peer", proxy.Name, ip)
+		return
+	}
+
 	// Early check: if a peer already exists for this proxy, skip creation.
 	// This prevents wasteful dial attempts when multiple goroutines call StartPeer
 	// concurrently (e.g., config watcher + sessionLoop reconnect).
@@ -2422,6 +2431,11 @@ func (m *P2PManager) handleGossip(peer *Peer, payload []byte) {
 		}
 		// NodeID change: re-register with the new identity (design §5.3).
 		if nodeID := extractNodeIDFromGossip(info); nodeID != "" && nodeID != peer.NodeID {
+			if nodeID == m.nodeId {
+				util.LogModuleWarn("p2p", "[P2P] peer %s changed nodeID to self (%s), disconnecting", peer.ID, nodeID)
+				peer.transport.Close()
+				return
+			}
 			util.LogModuleInfo("p2p", "[P2P] peer %s nodeID changed: %s -> %s", peer.ID, peer.NodeID, nodeID)
 			m.reregisterPeer(peer, nodeID, info)
 		}
@@ -2470,6 +2484,14 @@ func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 	nodeID := extractNodeIDFromGossip(info)
 	if nodeID == "" {
 		util.LogModuleWarn("p2p", "[P2P] first gossip from %s has no claimed subnet with hop=0, disconnecting", peer.ID)
+		peer.transport.Close()
+		return
+	}
+	// Never establish a session with ourselves. This catches loopback/circular
+	// carriers that reach the local listener even when their address is not a
+	// literal loopback (NAT hairpin, own VIP, etc.).
+	if nodeID == m.nodeId {
+		util.LogModuleWarn("p2p", "[P2P] rejecting self-connection from %s (nodeID=%s proxy=%s)", peer.ID, nodeID, peer.ProxyNameSafe())
 		peer.transport.Close()
 		return
 	}

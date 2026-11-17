@@ -14,7 +14,7 @@ fi
 # Parse arguments
 PLATFORM=${1:-$(go env GOOS)}
 ARCH=${2:-$(go env GOARCH)}
-VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION=$(git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo "dev")
 
 # Map platform for windows7 special case
 if [ "$PLATFORM" = "windows7" ]; then

@@ -3,7 +3,7 @@ SRC := .
 DIST_DIR := dist
 
 # Detect git tag for version (fallback to "dev")
-GIT_TAG := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_TAG := $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(GIT_TAG)"
 
 .PHONY: all clean linux linux-arm64 windows windows7 windows-arm64 darwin-amd64 darwin-arm64 version test-race

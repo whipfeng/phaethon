@@ -112,24 +112,24 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	util.LogModuleInfo("engine", "gVisor netstack started")
 
 	// Start TUN device if enabled (optional, can be hot-reloaded later).
-	// A failure here means the host cannot provide the configured data plane:
-	// exit and let the watchdog retry instead of living on in mesh-only mode
-	// with no LAN egress. Mesh-only remains correct only when TUN is disabled
-	// or unavailable on the platform (handled above).
+	// TUN failure must not take the mesh down: P2P/mesh transit, the in-stack
+	// DNS hijacker and the admin API all work without the host TUN device.
+	// Keep the worker alive in a *visible* degraded mesh-only state and retry
+	// StartTUN in the background, so a transient device/route conflict heals
+	// without restarting (and flapping) every mesh session.
+	// PHAETHON_TUN_STRICT=1 restores fail-fast for operators who prefer a hard
+	// restart over degraded mesh-only.
+	tunDegraded := false
 	if tunEnabled {
 		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
-			// Explicit fail-open: operators may prefer mesh transit over LAN
-			// egress on a node whose TUN cannot start (e.g. persistent host
-			// permission/device conflict). Default is fail-fast so a bypass
-			// gateway never silently loses LAN egress.
-			if os.Getenv("PHAETHON_TUN_FAIL_OPEN") == "1" {
-				util.LogModuleWarn("system", "[STARTUP] TUN failed, fail-open mesh-only (PHAETHON_TUN_FAIL_OPEN=1): %v", err)
-			} else {
-				util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry", err)
+			if os.Getenv("PHAETHON_TUN_STRICT") == "1" {
+				util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry (PHAETHON_TUN_STRICT=1)", err)
 				engine.Stop()
 				return nil, nil, nil, fmt.Errorf("TUN start: %w", err)
 			}
+			tunDegraded = true
+			util.LogModuleWarn("system", "[STARTUP] TUN failed: %v; mesh stays up, TUN retry starts in background", err)
 		} else {
 			util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 		}
@@ -272,7 +272,40 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
+	if tunDegraded {
+		go tunRetryLoop(engine)
+	}
+
 	return engine, ns, connHandler, nil
+}
+
+// tunRetryLoop retries StartTUN in the background after an initial failure.
+// Mesh/P2P/DNS keep running meanwhile; a transient device or route conflict
+// heals without restarting the worker (which would flap every mesh session).
+// Stops when TUN is up, when the operator disables TUN, or on process exit.
+func tunRetryLoop(engine *tun.Manager) {
+	backoff := 2 * time.Second
+	for attempt := 1; ; attempt++ {
+		time.Sleep(backoff)
+		cfg, err := db.GetTUNConfig()
+		if err == nil && (cfg == nil || !cfg.IsEnabled()) {
+			util.LogModuleInfo("tun", "[TUN] retry stopped: TUN disabled by config")
+			return
+		}
+		if engine.IsTUNRunning() {
+			return
+		}
+		if err := engine.StartTUN(); err == nil {
+			util.LogModuleWarn("tun", "[TUN] recovered after %d attempt(s); LAN egress restored", attempt)
+			return
+		} else if attempt == 1 || attempt%10 == 0 {
+			util.LogModuleWarn("tun", "[TUN] retry %d failed (mesh still up): %v", attempt, err)
+		}
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
 }
 
 // emitProtocolMsg writes a JSON line to stdout for the watchdog to read.

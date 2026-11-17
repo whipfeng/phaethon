@@ -182,6 +182,8 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 	if res.tunMgr != nil {
 		engine := res.tunMgr
 		status["running"] = engine.IsTUNRunning()
+		status["degraded"] = engine.TUNDegraded()
+		status["lastError"] = engine.TUNLastError()
 		status["routes"] = engine.RouteSnapshot()
 		status["logs"] = engine.Logs()
 		status["stats"] = engine.Stats()

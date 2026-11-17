@@ -71,6 +71,12 @@ type Manager struct {
 	meshHostIP net.IP // expected TUN interface address (subnet+2), used for residual cleanup matching
 	dataDir    string
 
+	// Startup TUN degradation (mesh-only). Set when StartTUN fails; cleared on
+	// a later successful StartTUN. Exposed through the TUN status API so a
+	// node never silently loses LAN egress.
+	tunDegraded atomic.Bool
+	tunLastErr  atomic.Value // string
+
 	// tunSrcTable records pre-SNAT source IPs from the read loop so the
 	// netstack forwarder can display the original TUN source (see
 	// mesh.TUNSrcTable). Nil until SetTUNSrcTable is called.
@@ -371,6 +377,20 @@ func (e *Manager) IsTUNRunning() bool {
 	return e.tunRunning
 }
 
+// TUNDegraded reports whether the last StartTUN failed and the node is
+// currently serving mesh-only while a background retry is pending.
+func (e *Manager) TUNDegraded() bool { return e.tunDegraded.Load() }
+
+// TUNLastError returns the last StartTUN error ("" when healthy).
+func (e *Manager) TUNLastError() string {
+	if v := e.tunLastErr.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 const maxTUNLogs = 32
 
 func (e *Manager) logEvent(format string, args ...interface{}) {
@@ -531,7 +551,16 @@ func (e *Manager) StartStack() error {
 
 // StartTUN starts the TUN device, configures OS routes, and redirects system DNS.
 // Requires StartStack() to be called first.
-func (e *Manager) StartTUN() error {
+func (e *Manager) StartTUN() (err error) {
+	defer func() {
+		if err != nil {
+			e.tunDegraded.Store(true)
+			e.tunLastErr.Store(err.Error())
+		} else {
+			e.tunDegraded.Store(false)
+			e.tunLastErr.Store("")
+		}
+	}()
 	// Serialize the whole lifecycle: a concurrent Stop must never overlap
 	// Start (D8). Taken before e.mu.
 	e.lifecycleMu.Lock()

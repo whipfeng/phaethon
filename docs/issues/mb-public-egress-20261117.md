@@ -243,13 +243,18 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 无法精确判定归属，不会自动删除，需要部署时一次性清理（本次 QG 已手工
 清理）。之后的新版本都会带 marker，可自动精确清理。
 
-### mesh-only 策略
+### mesh-only 策略（v74 调整）
 
 - TUN 未启用、或平台不支持（`tun.Available()==false`）→ mesh-only 是
   合法设计；
-- TUN 已启用且平台可用、但启动失败 → 默认 **fail-fast**：worker 退出，
-  watchdog 重试；不再自动 mesh-only（旁路网关自动 mesh-only 等于
-  “mesh 看着正常、LAN 实际断网”，正是 11-15 的隐蔽故障形态）；
-- 如确有不希望重启、只保留 mesh 转发的节点，可显式设置
-  `PHAETHON_TUN_FAIL_OPEN=1`：TUN 失败时打 WARN 并继续 mesh-only。
-  默认关闭，不建议旁路网关使用。
+- TUN 已启用且平台可用、但启动失败 → **默认保留 mesh**：worker 不退，
+  P2P/mesh transit、netstack DNS、admin API 继续工作；同时后台
+  `tunRetryLoop` 以 2s→4s→8s→…→30s 退避重试 `StartTUN`，恢复后打
+  `[TUN] recovered`，LAN 出访自动恢复，不需要重启 worker；
+- 降级状态可见：`/api/tun` 增加 `degraded` / `lastError`，日志首次失败和
+  每 10 次重试告警；
+- 只有显式 `PHAETHON_TUN_STRICT=1` 才回到 fail-fast（退出让 watchdog
+  重试），适合“宁可重启也不能 mesh-only”的节点。
+
+这样既不会因为 TUN 故障丢掉基础 mesh 能力，也不会回到 11-15 那种
+“mesh 正常、LAN 静默断网且永不重试”的半死状态。

@@ -8,4 +8,5 @@ type tunOwnerInfo struct {
 	iface    string
 	instance string
 	mac      string
+	alias    string
 }

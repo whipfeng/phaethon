@@ -5,7 +5,9 @@ package tun
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"phaethon/util"
@@ -14,19 +16,41 @@ import (
 // tunOwnerFile records that this host's tun0 was created by phaethon. It is
 // written immediately after CreateDevice and removed on a clean StopTUN, so a
 // crash leaves the marker behind and CleanupResidual can remove the stale
-// interface precisely (name + instance + type + MAC) without deleting another
-// application's tun0.
+// interface precisely (name + instance + type + alias/MAC) without deleting
+// another application's tun0.
 const tunOwnerFile = "/var/run/phaethon-tun.owner"
 
 const tunOwnerMagic = "PHAETHON-TUN-OWNER-v2"
 
+// absInstance normalizes a data dir for comparison across process restarts.
+func absInstance(instance string) string {
+	if instance == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(instance); err == nil {
+		return abs
+	}
+	return instance
+}
+
 func recordTUNOwner(iface, instance string) {
+	instance = absInstance(instance)
 	mac := ""
+	alias := fmt.Sprintf("phaethon:%s:%d:%d", instance, os.Getpid(), time.Now().UnixNano())
 	if link, err := netlink.LinkByName(iface); err == nil {
 		mac = link.Attrs().HardwareAddr.String()
+		// IFLA_IFALIAS is a per-interface metadata tag that survives while the
+		// interface exists and is readable by netlink. TUN devices have no MAC,
+		// so this is the strongest Linux ownership proof for name-reuse races.
+		if err := netlink.LinkSetAlias(link, alias); err != nil {
+			util.LogModuleWarn("cleanup", "set tun owner alias fail: %v", err)
+			alias = ""
+		}
+	} else {
+		alias = ""
 	}
-	data := fmt.Sprintf("%s\niface=%s\ninstance=%s\nmac=%s\npid=%d\n",
-		tunOwnerMagic, iface, instance, mac, os.Getpid())
+	data := fmt.Sprintf("%s\niface=%s\ninstance=%s\nmac=%s\nalias=%s\npid=%d\n",
+		tunOwnerMagic, iface, instance, mac, alias, os.Getpid())
 	if err := os.WriteFile(tunOwnerFile, []byte(data), 0644); err != nil {
 		util.LogModuleWarn("cleanup", "write tun owner marker fail: %v", err)
 	}
@@ -56,6 +80,8 @@ func readTUNOwner() (tunOwnerInfo, bool) {
 			info.instance = strings.TrimSpace(strings.TrimPrefix(line, "instance="))
 		case strings.HasPrefix(line, "mac="):
 			info.mac = strings.TrimSpace(strings.TrimPrefix(line, "mac="))
+		case strings.HasPrefix(line, "alias="):
+			info.alias = strings.TrimSpace(strings.TrimPrefix(line, "alias="))
 		}
 	}
 	if info.iface == "" {

@@ -243,10 +243,12 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 无法精确判定归属，不会自动删除，需要部署时一次性清理（本次 QG 已手工
 清理）。之后的新版本都会带 marker，可自动精确清理。
 
-v76 进一步收紧 marker：记录 `instance`（data dir）和接口 MAC。
+v76/v77 进一步收紧 marker：记录 `instance`（data dir 绝对路径）和接口
+`IFLA_IFALIAS`（Linux TUN 没有 MAC）。
 - 另一个 phaethon 实例（不同 data dir）的 marker 不会被本实例删除；
-- 崩溃后同名 tun0 被别的应用/tun 复用（MAC 不同）时不删除；
-- 只有 instance+MAC+tun 类型全部匹配才删。
+- 崩溃后同名 tun0 被别的应用/tun 复用（alias 不同）时不删除；
+- 只有 instance+alias+tun 类型全部匹配才删（alias 设置失败时才退回
+  name+type 判断）。
 
 ### 仍会导致“TUN 起不来”的残留/冲突场景
 
@@ -256,8 +258,8 @@ mesh 继续可用），需要人工介入：
 1. **旧版本/外部工具留下的持久 tun0**：无 marker、无本机 mesh IP
    （例如 `ip tuntap add dev tun0`），无法证明归属 → 不删；`TUNSETIFF`
    失败，后台重试无效，需 `ip link delete tun0`。
-2. **同名 tun0 被其它程序占用**：dummy/bridge/其它 VPN 的 tun；类型或
-   MAC/instance 不匹配 → 精确清理拒绝删除；启动失败，degraded。
+2. **同名 tun0 被其它程序占用**：dummy/bridge/其它 VPN 的 tun；类型、
+   instance 或 alias 不匹配 → 精确清理拒绝删除；启动失败，degraded。
 3. **非标准路径 worker 未被服务 stop 杀掉**：例如 `/root/phaethon.failed`
    这类进程仍持有 tun0；只要 stop 规则用 `pkill -x phaethon`（按进程名
    精确匹配）就会漏掉。部署侧必须用前缀匹配

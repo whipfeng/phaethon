@@ -32,13 +32,19 @@ func CleanupResidual(tunIP net.IP, instance string) {
 	// (data dir) and the interface MAC so another deployment's tun0 or a
 	// same-name device created later is never mistaken for ours.
 	if owner, ok := readTUNOwner(); ok {
-		ours := owner.instance == "" || instance == "" || owner.instance == instance
+		ownerInstance := absInstance(owner.instance)
+		current := absInstance(instance)
+		ours := ownerInstance == "" || current == "" || ownerInstance == current
 		if !ours {
 			util.LogModuleWarn("cleanup", "stale %s belongs to another instance (%s), not deleting", owner.iface, owner.instance)
 		} else if link, err := netlink.LinkByName(owner.iface); err == nil {
 			switch {
 			case !isTUNLink(link):
 				util.LogModuleWarn("cleanup", "stale %s is not a tun link (type=%s), not deleting", owner.iface, link.Type())
+				clearTUNOwner()
+			case owner.alias != "" && link.Attrs().Alias != owner.alias:
+				util.LogModuleWarn("cleanup", "stale %s alias changed (%q != %q), name reused; not deleting",
+					owner.iface, link.Attrs().Alias, owner.alias)
 				clearTUNOwner()
 			case owner.mac != "" && link.Attrs().HardwareAddr.String() != owner.mac:
 				util.LogModuleWarn("cleanup", "stale %s MAC changed (%s != %s), name reused; not deleting",

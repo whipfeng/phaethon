@@ -258,3 +258,16 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 
 这样既不会因为 TUN 故障丢掉基础 mesh 能力，也不会回到 11-15 那种
 “mesh 正常、LAN 静默断网且永不重试”的半死状态。
+
+验证（v74，QG）：停服务后 `ip link add tun0 type dummy` 制造 TUN 启动
+冲突，再启动：
+
+```
+ps:          worker 存活（PID 不变）
+/api/tun:    running=false degraded=true lastError="tun: create device: ..."
+/api/p2p:    vm/mb/jf 全部 upToDate
+```
+
+删除 dummy 后无需重启：45s 内 `/api/tun` 变为 `running=true degraded=false`，
+tun0 恢复 `100.0.0.2/29`，MB `HTTP=200`、DNS fakeip 正常。说明 mesh 能力
+在 TUN 故障期间保持，TUN 也能自动恢复。

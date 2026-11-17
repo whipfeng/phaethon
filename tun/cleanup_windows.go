@@ -11,10 +11,11 @@ import (
 	"phaethon/util"
 )
 
-// CleanupResidual removes leftover TUN adapter and routes from a previous crash.
-// Windows cleans up by adapter name (phaethontun), so tunIP is accepted for a
-// uniform cross-platform signature but not needed here.
-func CleanupResidual(_ net.IP, _ string) {
+// CleanupResidual removes the persisted Wintun adapter and leftover routes
+// from a previous crash. Windows adapters are named kernel objects that
+// survive process exit, so this is the one platform where startup cleanup is
+// genuinely needed.
+func CleanupResidual() {
 	util.LogModuleInfo("cleanup", "[DIAG] step 1: getInterfaceLUID")
 	luid, index, err := getInterfaceLUID("phaethontun")
 	adapterFound := err == nil

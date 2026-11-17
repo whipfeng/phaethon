@@ -34,7 +34,7 @@ func CreateDevice() (Device, error) {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.TUNSETIFF, uintptr(unsafe.Pointer(&ifr)))
 	if errno != 0 {
 		unix.Close(fd)
-		return nil, fmt.Errorf("tunsetiff: %w", errno)
+		return nil, fmt.Errorf("tunsetiff: %w (%s)", errno, describeTUNConflict())
 	}
 
 	tun := &linuxTUN{

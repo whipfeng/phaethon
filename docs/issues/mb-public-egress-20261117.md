@@ -225,7 +225,11 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 这条完整故障链已经实锤并可复现，且已修复/自愈。后续启动失败会以
 `[STARTUP] ... failed` + watchdog 重启的形式暴露，不会再静默半死。
 
-### 精确清理（v73）
+### 精确清理（v73，已被 v78 简化取代，以下仅作历史）
+
+> v78 已移除整套 marker/instance/alias 方案（见文末“最终简化”）。Linux
+> TUN 的生命周期由 fd 决定，退出即自动销毁；对无法证明归属的接口不做
+> 猜测性删除。以下 v73/v76/v77 的 marker 设计仅保留为历史记录。
 
 之前 v72 的 `CleanupResidual` 为了救 QG 是**按名字无条件删 tun0**，不够
 精确。v73 改为：
@@ -306,3 +310,46 @@ ps:          worker 存活（PID 不变）
 删除 dummy 后无需重启：45s 内 `/api/tun` 变为 `running=true degraded=false`，
 tun0 恢复 `100.0.0.2/29`，MB `HTTP=200`、DNS fakeip 正常。说明 mesh 能力
 在 TUN 故障期间保持，TUN 也能自动恢复。
+
+## 最终简化（v78）：回到 fd 生命周期，不做接口猜测
+
+复盘后确认：v73~v77 的 owner marker / instance / alias / MAC 属于过度
+设计。Linux 的 TUN 用 `TUNSETIFF` 创建（未设置 `IFF_PERSIST`），**接口
+生命周期绑定在 fd 上**：进程退出（含 SIGKILL）→ fd 关闭 → tun0 由内核
+销毁。正常退出/崩溃不会留下 tun0，不需要按名字/元数据清理。macOS utun
+同理。
+
+v78 的最终模型：
+
+1. **Linux/macOS**：
+   - 只依赖 fd 生命周期，不写 marker，不按名字/alias/MAC 删接口；
+   - `CleanupResidual()` 只恢复真正持久、明确属于我们的 OS 状态：
+     `resolv.conf`、`rp_filter`/`ip_forward`、iptables FORWARD 元组；
+   - `TUNSETIFF` 失败时**不删除任何接口**，错误信息附带只读诊断：
+     现有 tun0 的 type/flags/IPv4/alias，以及当前持有 `/dev/net/tun` 的
+     进程列表（`pid(comm)`）；
+   - 节点保持 degraded mesh-only + 后台重试，运维确认后手工
+     `ip link delete tun0` 或停掉占用进程。
+2. **Windows**：
+   - Wintun 适配器是命名内核对象，进程退出后仍存在，所以启动时由
+     `CleanupResidual` 按保留名 `phaethontun` 删除，`StopTUN` 也显式
+     `deleteTUNAdapter`；删除失败（被占用/锁）→ degraded + 重试。
+3. **部署**：
+   - 服务 stop 必须前缀匹配 `^(\./|/root/)phaethon`，覆盖
+     `.failed`/`.old`；这是 11-15 那次长期 EBUSY 的真正放大器。
+   - 手工部署前清理 `data/state` 的 upgrade marker/request/status，
+     避免 watchdog 把新二进制改名 `.failed`。
+
+剩余会让 TUN 起不来的情况（都不会再拖垮 mesh，只降级并明确报错）：
+
+- 外部创建的持久 tun0（`ip tuntap`/旧工具/其它程序）——不删，报诊断；
+- 同名 tun0 被 dummy/bridge/其它 VPN 占用——不删，报诊断；
+- 非标准路径 worker 还活着并持有 fd——靠部署 stop 前缀匹配解决；
+- 多实例争用同一 tun0 名——配置冲突，只能一个实例使用；
+- `/dev/net/tun` 缺失、CAP_NET_ADMIN 权限、内核模块未加载——重试无效，
+  需修复主机条件；
+- Windows Wintun 适配器删除失败——degraded + 重试。
+
+代价是：无法证明归属的外部残留不会被自动清理；这是有意为之——宁可
+降级并让运维处理，也不按名字猜测性删除。所有尝试过的 marker 方案保留在
+git 历史（v73~v77）中可追溯。

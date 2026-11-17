@@ -586,8 +586,11 @@ func (e *Manager) StartTUN() (err error) {
 		return err
 	}
 
-	// Clean up residual resources from previous abnormal exit
-	CleanupResidual(e.meshHostIP, e.dataDir)
+	// Restore persistent OS state from a previous abnormal exit (routes/DNS/
+	// sysctl/iptables, or the Wintun adapter on Windows). The TUN interface
+	// itself needs no name-based cleanup: on Linux/macOS it lives and dies with
+	// this process's fd; Windows reuses/deletes its named adapter explicitly.
+	CleanupResidual()
 
 	// Create TUN device
 	dev, err := CreateDevice()
@@ -599,10 +602,6 @@ func (e *Manager) StartTUN() (err error) {
 		return fmt.Errorf("tun: create device: %w", err)
 	}
 	e.device = dev
-	// Ownership marker: from here on a crash may leave this interface behind;
-	// CleanupResidual uses the marker to delete exactly our device on the next
-	// start and never another application's tun0.
-	recordTUNOwner(dev.Name(), e.dataDir)
 
 	// LAN/private subnets should bypass TUN to avoid breaking local network
 	// connectivity. Proxy server exclusion routes are intentionally omitted:
@@ -821,9 +820,6 @@ func (e *Manager) StopTUN() error {
 		e.device.Close()
 		e.device = nil
 		deleteTUNAdapter(devName)
-		// Clean teardown: the interface is gone (or the platform persisted
-		// adapter was removed), so the ownership marker is no longer needed.
-		clearTUNOwner()
 	}
 
 	// Wait for TUN goroutines to finish

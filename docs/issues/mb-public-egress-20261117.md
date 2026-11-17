@@ -351,8 +351,13 @@ v78 的最终模型：
 
 剩余会让 TUN 起不来的情况（都不会再拖垮 mesh，只降级并明确报错）：
 
-- 外部创建的持久 tun0（`ip tuntap`/旧工具/其它程序）——不删，报诊断；
-- 同名 tun0 被 dummy/bridge/其它 VPN 占用——不删，报诊断；
+- **被其它活进程持有的 tun0**：TUNSETIFF 返回 EBUSY；不删，报诊断
+  （含 `/dev/net/tun` 持有者），停掉持有进程后健康循环自动恢复；
+- **同名 tun0 是非 tun 设备**（dummy/bridge/其它 VPN）：无法附着；不删，
+  报诊断，需改掉占用方；
+- 外部创建但**未被持有**的持久 tun0（`ip tuntap`/旧工具）：内核允许
+  `TUNSETIFF` 附着，phaeton 直接复用并重新配置地址/路由（v79 实测
+  running=true），不删除也不报错；
 - 非标准路径 worker 还活着并持有 fd——靠部署 stop 前缀匹配解决；
 - 多实例争用同一 tun0 名——配置冲突，只能一个实例使用；
 - `/dev/net/tun` 缺失、CAP_NET_ADMIN 权限、内核模块未加载——重试无效，
@@ -362,3 +367,14 @@ v78 的最终模型：
 代价是：无法证明归属的外部残留不会被自动清理；这是有意为之——宁可
 降级并让运维处理，也不按名字猜测性删除。所有尝试过的 marker 方案保留在
 git 历史（v73~v77）中可追溯。
+
+v79 实测（QG，服务不重启，仅外部操作 TUN）：
+
+| 操作 | 结果 |
+| --- | --- |
+| `ip link delete tun0`（运行中） | 5~8s 内健康循环重建，running=true |
+| 管理台 `enabled=false` | tun0 消失，health loop 不重建（尊重意图） |
+| 管理台 `enabled=true` | tun0 恢复，running=true |
+| 外部 `ip tuntap add tun0` 后 enable | 内核允许附着，phaeton 直接复用，running=true |
+| 删除被附着的 tun0 | 健康循环重建，恢复 `100.0.0.2/29` |
+| `/var/run/phaethon-tun.owner` | 不再生成 |

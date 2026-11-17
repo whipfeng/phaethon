@@ -707,7 +707,7 @@ func (e *Manager) StartTUN() (err error) {
 		util.LogModuleWarn("tun", "tun: failed to set system dns: %v", err)
 	}
 	// Remember the interface that DNS was registered on: StopTUN must restore
-	// the same one (Linux registers on the physical iface, not tun0).
+	// the same one (Linux registers on the physical iface, not the TUN device).
 	e.mu.Lock()
 	e.dnsIface = dnsIface
 	e.mu.Unlock()

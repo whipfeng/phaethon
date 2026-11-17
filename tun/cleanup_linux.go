@@ -17,8 +17,8 @@ import (
 //
 // It deliberately does NOT touch any network interface. A Linux TUN interface
 // created with TUNSETIFF (without IFF_PERSIST) lives and dies with its fd:
-// process exit, including SIGKILL, destroys tun0 in the kernel. If a tun0
-// still exists at startup it belongs to a live process or was created
+// process exit, including SIGKILL, destroys the tunN in the kernel. If a
+// tunN still exists at startup it belongs to a live process or was created
 // externally (e.g. `ip tuntap add`), so deleting it by name would be a guess.
 // In that case StartTUN fails with a clear diagnostic and the node stays in
 // visible degraded mesh-only mode until the operator resolves the conflict.

@@ -21,28 +21,42 @@ import (
 // unconditionally — those are phaethon-owned artifacts independent of the
 // interface match. tunIP is the expected TUN address (mesh subnet+2); nil
 // skips the interface scan but still restores system state.
-func CleanupResidual(tunIP net.IP) {
+func CleanupResidual(tunIP net.IP, instance string) {
 	// Restore resolved/nmcli DNS recorded before TUN started (D20). The
 	// resolv.conf path has its own .phaethon.bak recovery below.
 	restorePersistedLinuxDNS()
 
 	// 1. Delete our own stale TUN interface, identified by the ownership
 	// marker written right after CreateDevice. Never delete a tun0 by name
-	// alone: another application may own it. If the marker exists but the
-	// interface is gone (crash before create), just drop the marker.
-	if iface, ok := readTUNOwner(); ok {
-		if link, err := netlink.LinkByName(iface); err == nil {
-			if isTUNLink(link) {
+	// alone: another application may own it. The marker carries the instance
+	// (data dir) and the interface MAC so another deployment's tun0 or a
+	// same-name device created later is never mistaken for ours.
+	if owner, ok := readTUNOwner(); ok {
+		ours := owner.instance == "" || instance == "" || owner.instance == instance
+		if !ours {
+			util.LogModuleWarn("cleanup", "stale %s belongs to another instance (%s), not deleting", owner.iface, owner.instance)
+		} else if link, err := netlink.LinkByName(owner.iface); err == nil {
+			switch {
+			case !isTUNLink(link):
+				util.LogModuleWarn("cleanup", "stale %s is not a tun link (type=%s), not deleting", owner.iface, link.Type())
+				clearTUNOwner()
+			case owner.mac != "" && link.Attrs().HardwareAddr.String() != owner.mac:
+				util.LogModuleWarn("cleanup", "stale %s MAC changed (%s != %s), name reused; not deleting",
+					owner.iface, link.Attrs().HardwareAddr, owner.mac)
+				clearTUNOwner()
+			default:
 				if err := netlink.LinkDel(link); err != nil {
-					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", iface, err)
+					util.LogModuleWarn("cleanup", "cleanup delete stale %s fail: %v", owner.iface, err)
 				} else {
-					util.LogModuleInfo("cleanup", "cleanup deleted stale %s", iface)
+					util.LogModuleInfo("cleanup", "cleanup deleted stale %s", owner.iface)
 				}
-			} else {
-				util.LogModuleWarn("cleanup", "stale %s is not a tun link (type=%s), not deleting", iface, link.Type())
+				clearTUNOwner()
 			}
+		} else {
+			// Marker is ours but the interface is already gone (crash before
+			// create or clean fd close): just drop the marker.
+			clearTUNOwner()
 		}
-		clearTUNOwner()
 	}
 
 	// 1b. Find the tun* interface holding tunIP and clear only that one.

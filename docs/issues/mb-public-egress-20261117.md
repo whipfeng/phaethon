@@ -243,6 +243,37 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
 无法精确判定归属，不会自动删除，需要部署时一次性清理（本次 QG 已手工
 清理）。之后的新版本都会带 marker，可自动精确清理。
 
+v76 进一步收紧 marker：记录 `instance`（data dir）和接口 MAC。
+- 另一个 phaethon 实例（不同 data dir）的 marker 不会被本实例删除；
+- 崩溃后同名 tun0 被别的应用/tun 复用（MAC 不同）时不删除；
+- 只有 instance+MAC+tun 类型全部匹配才删。
+
+### 仍会导致“TUN 起不来”的残留/冲突场景
+
+精确清理之后，以下情况仍会让节点停在 degraded mesh-only（不会硬重启，
+mesh 继续可用），需要人工介入：
+
+1. **旧版本/外部工具留下的持久 tun0**：无 marker、无本机 mesh IP
+   （例如 `ip tuntap add dev tun0`），无法证明归属 → 不删；`TUNSETIFF`
+   失败，后台重试无效，需 `ip link delete tun0`。
+2. **同名 tun0 被其它程序占用**：dummy/bridge/其它 VPN 的 tun；类型或
+   MAC/instance 不匹配 → 精确清理拒绝删除；启动失败，degraded。
+3. **非标准路径 worker 未被服务 stop 杀掉**：例如 `/root/phaethon.failed`
+   这类进程仍持有 tun0；只要 stop 规则用 `pkill -x phaethon`（按进程名
+   精确匹配）就会漏掉。部署侧必须用前缀匹配
+   `^(\./|/root/)phaethon`（QG 已改）。
+4. **多个 phaethon 实例/多 data dir 争用 tun0**：marker 的 instance
+   不匹配时不会互删，但同一主机只有一个 tun0 名字，后启动的实例会
+   degraded，需要改成不同接口名或只保留一个实例。
+5. **marker 写入失败**（/var/run 只读、权限异常）：当前运行不受影响，
+   但崩溃后残留无法精确判定，需人工清理。
+6. **Windows Wintun 适配器残留**：`deleteTUNAdapter` 失败（被占用/锁）
+   时下次启动可能复用或失败；由 Windows 清理逻辑按适配器名处理，
+   失败时 degraded + 重试。
+7. **非残留类失败**：/dev/net/tun 缺失、CAP_NET_ADMIN 权限、内核模块
+   未加载等，重试也不会成功；节点保持 degraded mesh-only，直到主机
+   条件修复。
+
 ### mesh-only 策略（v74 调整）
 
 - TUN 未启用、或平台不支持（`tun.Available()==false`）→ mesh-only 是

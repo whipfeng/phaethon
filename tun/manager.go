@@ -587,7 +587,7 @@ func (e *Manager) StartTUN() (err error) {
 	}
 
 	// Clean up residual resources from previous abnormal exit
-	CleanupResidual(e.meshHostIP)
+	CleanupResidual(e.meshHostIP, e.dataDir)
 
 	// Create TUN device
 	dev, err := CreateDevice()
@@ -602,7 +602,7 @@ func (e *Manager) StartTUN() (err error) {
 	// Ownership marker: from here on a crash may leave this interface behind;
 	// CleanupResidual uses the marker to delete exactly our device on the next
 	// start and never another application's tun0.
-	recordTUNOwner(dev.Name())
+	recordTUNOwner(dev.Name(), e.dataDir)
 
 	// LAN/private subnets should bypass TUN to avoid breaking local network
 	// connectivity. Proxy server exclusion routes are intentionally omitted:

@@ -65,7 +65,7 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	// only touches artifacts that belong to this deployment (D19).
 	// Safe because the worker holds the instance lock here: no other instance
 	// can be alive for this data directory.
-	tun.CleanupResidual(residualTUNIP(meshMgr))
+	tun.CleanupResidual(residualTUNIP(meshMgr), dataDir)
 
 	// TUN device availability check (only needed when TUN is enabled)
 	if tunEnabled && !tun.Available() {

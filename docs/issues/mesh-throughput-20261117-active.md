@@ -34,6 +34,28 @@
 - 用 qg→vm（UDP leg）重复同样测试，确认 UDP leg 是否同样存在共享上限。
 - 主动触发：在大流量期间并发小包交互，记录 RTT 尾部与 leg 计数冻结。
 
+## 追加：剥离 SSH 的 HTTP 测试（同一 9.46MB 包）
+
+| 路径 | 1 流 | 8 流（75.7MB） | 结论 |
+|---|---:|---:|---|
+| OS qg→mb:39999 | 6.73 MB/s (1.41s) | 13s → 5.8 MB/s | 8 流不扩展 |
+| Mesh qg→mb:443 | 2.85 MB/s (3.32s) | 28s → 2.7 MB/s | 8 流不扩展 |
+
+- mesh 1 流比 OS 慢 2.36×；
+- OS 与 mesh 的 8 流都不扩展，说明 **mb 端点/HTTP/TLS 或 qg 客户端 CPU** 也是共享瓶颈，
+  不能只用 mb 的 8 流结果判断 mesh lane 是否扩展。
+
+## 追加：qg→jf 8 流
+
+- mesh SSH 8×8MB（64MB）到 jf：12s → **5.33 MB/s**，与 1 流 5.2 MB/s 基本相同。
+- qg 为 2 vCPU；1 流传输时 phaeton 约 47–57% CPU，整体 23% idle。
+- qg 的 CPU/加解密是绝对吞吐的潜在上限；8 流不扩展在 OS HTTP 上也出现。
+
+## 下一步修正
+
+- 用不经过 qg CPU 的 1 跳链路（如 jf↔gg）做 8 流对比，判断是端点 CPU 还是 mesh 承载上限。
+- 若 jf↔gg 也不扩展，再查承载/session lane；若扩展，则 qg 是该路径的瓶颈。
+
 ## 备注
 
 - 测试后需删除 `/tmp/bulk64`（qg `/tmp` 为 236MB tmpfs，测试前一度 100% 满）。

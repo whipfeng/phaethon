@@ -33,10 +33,6 @@ const (
 	// explicitly activate a version before it can take effect.
 	pendingPackagesDir = "data/packages-pending"
 
-	// workerPinPath is the legacy pin written by older builds. The watchdog
-	// ignores it now; clearWorkerPin removes leftovers.
-	workerPinPath = "data/state/worker-pin"
-
 	defaultPackageUploadMaxMB = 100
 
 	// packageRetention is the number of versions to keep per platform/arch.
@@ -173,16 +169,6 @@ func pkgPathFor(id string) (string, bool) {
 	return "", false
 }
 
-// clearWorkerPin removes the legacy pin so the watchdog does not log a warning
-// about a pin it no longer honours.
-func clearWorkerPin() error {
-	err := os.Remove(workerPinPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 // apiPackagePin handles GET/DELETE /api/packages/pin.
 //
 // The name is kept for API compatibility; it now reports the self-replacement
@@ -213,7 +199,6 @@ func (s *AdminServer) apiPackagePin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = upgrade.ClearRequest()
-		_ = clearWorkerPin() // legacy pin: ignored by the watchdog
 		_ = upgrade.WriteStatus(upgrade.Status{Status: upgrade.StatusIdle, Current: current})
 		util.LogModuleInfo("admin", "pending upgrade cancelled (current %q)", current)
 		jsonResponse(w, map[string]interface{}{
@@ -457,9 +442,8 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 		httpError(w, "update metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// The legacy pin path is gone: the watchdog always runs the stable
-	// executable and applies upgrades through data/state/upgrade-request.
-	_ = clearWorkerPin()
+	// The watchdog always runs the stable executable and applies upgrades
+	// through data/state/upgrade-request.
 
 	util.LogModuleInfo("admin", "package activated: %s (version=%s platform=%s arch=%s)", id, info.Version, platform, arch)
 
@@ -531,7 +515,6 @@ func (s *AdminServer) apiPackageDelete(w http.ResponseWriter, r *http.Request) {
 			util.LogModuleWarn("admin", "pending upgrade request cleared because package %s (%s) was deleted", id, meta.Version)
 		}
 	}
-	_ = clearWorkerPin() // legacy pin: ignored by the watchdog
 	util.LogModuleInfo("admin", "package deleted: %s", id)
 	jsonResponse(w, map[string]string{"status": "deleted"})
 }

@@ -1146,20 +1146,6 @@ func (cp *childProcess) workerVersion() string {
 	return ""
 }
 
-// workerPinPath is the legacy pin written by older builds. It is no longer
-// honoured: the worker always runs the stable executable. Leftovers are
-// removed at startup so the watchdog log stays clean.
-const workerPinPath = "data/state/worker-pin"
-
-// readWorkerPin returns the legacy pinned version, or "" when none is set.
-func readWorkerPin() string {
-	data, err := os.ReadFile(workerPinPath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
 // selectWorkerBinary always returns the watchdog's own executable.
 //
 // Unified upgrade path on every platform: replace the executable at its
@@ -1169,10 +1155,6 @@ func readWorkerPin() string {
 // that starts the supervisor. Package upload stays available for distribution,
 // but packages are never auto-executed.
 func selectWorkerBinary() string {
-	if pinned := readWorkerPin(); pinned != "" {
-		util.LogModuleWarn("main", "watchdog: removing legacy worker-pin %q (direct-binary deployment)", pinned)
-		_ = os.Remove(workerPinPath)
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		util.LogModuleError("main", "watchdog: cannot determine executable path: %v", err)

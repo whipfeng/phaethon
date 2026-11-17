@@ -53,8 +53,7 @@ func CleanupResidual() {
 		if json.Unmarshal(data, &state) == nil {
 			tunName := state.TunName
 			if tunName == "" {
-				// State written by a build that still pinned tun0.
-				tunName = "tun0"
+				util.LogModuleWarn("cleanup", "state has no tunName (pre-v80 format); skipping stale TUN tuple cleanup")
 			}
 			// Restore rp_filter on the physical interface
 			if state.IfaceName != "" {
@@ -72,19 +71,22 @@ func CleanupResidual() {
 			} else {
 				util.LogModuleWarn("cleanup", "cleanup restore ip_forward fail: %v", err)
 			}
-			// Clean up iptables FORWARD rules - loop to remove ALL duplicates
+			// Clean up iptables FORWARD rules - loop to remove ALL duplicates.
+			// TUN-specific tuples need the actual tunN recorded at setup.
 			if state.IfaceName != "" {
-				for {
-					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", tunName, "-j", "ACCEPT").Run(); err != nil {
-						break
+				if tunName != "" {
+					for {
+						if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", tunName, "-j", "ACCEPT").Run(); err != nil {
+							break
+						}
+						util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, tunName)
 					}
-					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, tunName)
-				}
-				for {
-					if err := exec.Command("iptables", "-D", "FORWARD", "-i", tunName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
-						break
+					for {
+						if err := exec.Command("iptables", "-D", "FORWARD", "-i", tunName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
+							break
+						}
+						util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", tunName, state.IfaceName)
 					}
-					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", tunName, state.IfaceName)
 				}
 				for {
 					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {

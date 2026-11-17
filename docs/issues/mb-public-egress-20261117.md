@@ -324,8 +324,10 @@ v78 的最终模型：
 1. **Linux/macOS**：
    - Linux 创建时请求 `tun%d`，由内核分配第一个空闲 `tunN`；之后所有路由/
      规则/DNS/诊断都用 `dev.Name()`，不再写死 `tun0`；
-   - `tunState` 记录实际 `tunName`，iptables 清理使用该名字（旧 state 无
-     该字段时回退 `tun0`，兼容升级前规则）；
+   - `tunState` 记录实际 `tunName`，iptables 清理使用该名字；缺少该字段的
+     旧 state 直接跳过 TUN 元组清理并告警（不做版本兼容）；
+   - 不保留 worker-pin / 版本化 worker 路径的兼容代码，新版本统一走稳定
+     路径自替换；
    - 只依赖 fd 生命周期，不写 marker，不按名字/alias/MAC 删接口；
    - `CleanupResidual()` 只恢复真正持久、明确属于我们的 OS 状态：
      `resolv.conf`、`rp_filter`/`ip_forward`、iptables FORWARD 元组；

@@ -175,8 +175,11 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 			Dst:       dst,
 			Protocol:  routeProtocolPhaethon,
 		}
-		if err := netlink.RouteAdd(rt); err != nil {
-			return fmt.Errorf("route add %s: %w", cidr, err)
+		// Replace, not add: a previous instance may have left 0.0.0.0/1 or
+		// 128.0.0.0/1 behind. Failing the whole TUN startup on EEXIST kept the
+		// node degraded until someone deleted the stale route by hand.
+		if err := netlink.RouteReplace(rt); err != nil {
+			return fmt.Errorf("route replace %s: %w", cidr, err)
 		}
 	}
 
@@ -445,8 +448,9 @@ func (e *Manager) addMeshRoute(subnet string) error {
 		Flags:     syscall.RTNH_F_ONLINK,
 		Protocol:  routeProtocolPhaethon,
 	}
-	if err := netlink.RouteAdd(rt); err != nil {
-		return fmt.Errorf("add mesh route %s: %w", subnet, err)
+	// Replace so a restart does not fail on an already-present mesh route.
+	if err := netlink.RouteReplace(rt); err != nil {
+		return fmt.Errorf("replace mesh route %s: %w", subnet, err)
 	}
 	util.LogModuleInfo("route", "mesh route %s -> %s (idx=%d)", subnet, e.routeMgr.devName, link.Attrs().Index)
 	return nil

@@ -51,10 +51,26 @@
 - qg 为 2 vCPU；1 流传输时 phaeton 约 47–57% CPU，整体 23% idle。
 - qg 的 CPU/加解密是绝对吞吐的潜在上限；8 流不扩展在 OS HTTP 上也出现。
 
+## 追加：jf/gg 是 transit-only（无 phaeton TUN）
+
+- jf：`ip -br addr | grep tun` 只有 K8s `tunl0`，无 phaeton TUN；`ip route get 100.179.0.10`
+  走 `via 10.140.51.1 dev eth0`。
+- gg：无 phaeton TUN；`ip route get 100.2.0.10` 走 `via 192.168.16.1 dev eth0`。
+- 因此 jf↔gg 的本机发起测试无效（超时是路由未进 TUN，不是链路故障）；qg→gg 的
+  2 跳数据由 jf 的 transit fast path 转发，不依赖 jf 的 TUN。
+
+## 两跳分解（推导）
+
+设 qg→jf 为 5.2 MB/s，qg→jf→gg 为 0.37 MB/s，串联模型：
+`1/0.37 ≈ 1/5.2 + 1/x` → `x ≈ 0.40 MB/s`。
+即 **jf→gg 段约 0.40 MB/s**，而 gg 的 OS 公网基线为 1.16 MB/s，mesh 段慢约 3×。
+qg→jf 跳本身已接近 OS 直连，2 跳的主要差距在 jf→gg 承载/转发段。
+
 ## 下一步修正
 
-- 用不经过 qg CPU 的 1 跳链路（如 jf↔gg）做 8 流对比，判断是端点 CPU 还是 mesh 承载上限。
-- 若 jf↔gg 也不扩展，再查承载/session lane；若扩展，则 qg 是该路径的瓶颈。
+- 重点查 jf→gg 承载（~20ms RTT 的 TCP 窗口/节奏）与 jf transit 转发开销，而不是 qg→jf。
+- qg 仅 2 vCPU，phaeton 单流已占 ~50–60% CPU；后续多流测试需考虑 qg CPU 上限，
+  或用 vm/mb 等具备 TUN 的端点做发起端。
 
 ## 备注
 

@@ -51,6 +51,15 @@ import (
 
 const stripeLaneQueueDepth = 256 // outbound batches per lane
 
+// Primary carrier writer queues. The primary write used to run inline on the
+// single peer write loop: one primary loss-recovery stall froze frames already
+// handed to healthy lanes (cold-start 1.4s interactive spikes). Control is
+// bounded but never dropped; data tail-drops when full (inner TCP retransmits).
+const (
+	primaryDataDepth = 4   // queued primary data batches
+	primaryCtrlDepth = 256 // queued primary control frames
+)
+
 // stripeAffinityCap bounds the per-flow lane affinity table; when exceeded
 // the table is reset wholesale (flows re-resolve on next send, §3.6).
 const stripeAffinityCap = 65536
@@ -256,6 +265,21 @@ type stripeTransport struct {
 	// readQueueDrops counts inbound data frames tail-dropped because the
 	// session dispatch queue was full (the carrier socket keeps draining).
 	readQueueDrops atomic.Uint64
+
+	// Primary carrier writer. The primary's synchronous write used to hold the
+	// single write goroutine when its loss recovery stalled, so frames already
+	// handed to a healthy lane still waited. The primary now has its own writer
+	// and bounded queues; control frames keep priority over data.
+	primaryDataQ      chan primaryWrite
+	primaryCtrlQ      chan primaryWrite
+	primaryQueueDrops atomic.Uint64
+}
+
+// primaryWrite is one queued write for the primary carrier writer.
+type primaryWrite struct {
+	frames     []frame.Frame
+	isControl  bool
+	enqueuedAt time.Time
 }
 
 // ReadQueueDrops reports inbound data frames dropped at the dispatch queue.
@@ -263,19 +287,22 @@ func (t *stripeTransport) ReadQueueDrops() uint64 { return t.readQueueDrops.Load
 
 func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTransport {
 	t := &stripeTransport{
-		base:      base,
-		salt:      rand.Uint32(),
-		cfg:       cfg,
-		affinity:  make(map[uint32]affinityPin),
-		ctrlCh:    make(chan legRecvResult, 16),
-		dataCh:    make(chan legRecvResult, 64),
-		closed:    make(chan struct{}),
-		peerGauge: atomic.Int32{},
+		base:         base,
+		salt:         rand.Uint32(),
+		cfg:          cfg,
+		affinity:     make(map[uint32]affinityPin),
+		ctrlCh:       make(chan legRecvResult, 16),
+		dataCh:       make(chan legRecvResult, 64),
+		closed:       make(chan struct{}),
+		peerGauge:    atomic.Int32{},
+		primaryDataQ: make(chan primaryWrite, primaryDataDepth),
+		primaryCtrlQ: make(chan primaryWrite, primaryCtrlDepth),
 	}
 	t.peerGauge.Store(-1)
 	go t.baseReadLoop()
 	go t.flowLoop()
 	go t.affinityJanitorLoop()
+	go t.primaryWriter()
 	// Kernel-backlog tuning applies to both roles: passive sessions have no
 	// lane dialer, but they still send data and otherwise keep the creation
 	// default forever (bulk uploads then build a second-scale HOL queue in
@@ -599,25 +626,100 @@ func (t *stripeTransport) dropAffinity() {
 	t.mu.Unlock()
 }
 
+// primaryWriter owns every write to the primary carrier. Control frames are
+// drained first; data follows. A stalled primary write blocks only this
+// goroutine, never frames already queued on a healthy lane.
+func (t *stripeTransport) primaryWriter() {
+	for {
+		select {
+		case <-t.closed:
+			return
+		case w := <-t.primaryCtrlQ:
+			t.writePrimary(w)
+			continue
+		default:
+		}
+		select {
+		case <-t.closed:
+			return
+		case w := <-t.primaryCtrlQ:
+			t.writePrimary(w)
+		case w := <-t.primaryDataQ:
+			t.writePrimary(w)
+		}
+	}
+}
+
+func (t *stripeTransport) writePrimary(w primaryWrite) {
+	var err error
+	if w.isControl {
+		f := w.frames[0]
+		err = t.base.Send(f.Type, f.Payload, true)
+	} else {
+		var n int
+		for _, f := range w.frames {
+			n += len(f.Payload)
+		}
+		err = t.base.SendBatch(w.frames)
+		t.primaryFlow.onSent(n, w.enqueuedAt)
+		t.sampleSojourn(w.enqueuedAt)
+	}
+	if err != nil {
+		util.LogModuleWarn("p2p", "[STRIPE] primary write error: %v", err)
+		t.Close()
+	}
+}
+
+// enqueuePrimaryControl blocks only when the control queue is full (control is
+// never dropped). Volume is low (gossip/ping/lane acks), so this does not
+// reintroduce the data-path HOL.
+func (t *stripeTransport) enqueuePrimaryControl(ft byte, payload []byte) error {
+	w := primaryWrite{
+		frames:     []frame.Frame{{Type: ft, Payload: payload, Control: true}},
+		isControl:  true,
+		enqueuedAt: time.Now(),
+	}
+	select {
+	case t.primaryCtrlQ <- w:
+		return nil
+	case <-t.closed:
+		return io.ErrClosedPipe
+	}
+}
+
+// enqueuePrimaryData is non-blocking: a full primary data queue tail-drops the
+// batch (inner TCP retransmits) instead of stalling the shared write loop.
+func (t *stripeTransport) enqueuePrimaryData(frames []frame.Frame) {
+	if len(frames) == 0 {
+		return
+	}
+	select {
+	case t.primaryDataQ <- primaryWrite{frames: frames, enqueuedAt: time.Now()}:
+	case <-t.closed:
+	default:
+		t.primaryQueueDrops.Add(1)
+		if util.GetModuleLogLevel("p2p") <= util.LogLevelDebug {
+			util.LogModuleDebug("p2p", "[STRIPE] primary queue full, dropped %d frames", len(frames))
+		}
+	}
+}
+
 func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) error {
 	if frameType == frame.FrameMeshPacket && !isControl && t.dataStartNano.Load() == 0 {
 		t.dataStartNano.CompareAndSwap(0, time.Now().UnixNano())
 	}
+	if isControl {
+		return t.enqueuePrimaryControl(frameType, payload)
+	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 || !splittable(frameType, payload) {
-		start := time.Now()
-		err := t.base.Send(frameType, payload, isControl)
-		t.primaryFlow.onSent(len(payload), start)
-		t.sampleSojourn(start)
-		return err
+		t.enqueuePrimaryData([]frame.Frame{{Type: frameType, Payload: payload}})
+		return nil
 	}
 	l := t.pickLanePinned(payload, lanes)
 	if l == nil {
-		start := time.Now()
-		err := t.base.Send(frameType, payload, isControl)
-		t.primaryFlow.onSent(len(payload), start)
-		t.sampleSojourn(start)
-		return err
+		t.enqueuePrimaryData([]frame.Frame{{Type: frameType, Payload: payload}})
+		return nil
 	}
 	batch := []frame.Frame{{Type: frameType, Payload: payload}}
 	st, err := t.laneEnqueue(l, batch)
@@ -626,11 +728,8 @@ func (t *stripeTransport) Send(frameType byte, payload []byte, isControl bool) e
 		return err
 	}
 	// laneFallback: the lane is dead, safe to repin and use the primary.
-	start := time.Now()
-	err = t.base.Send(frameType, payload, isControl)
-	t.primaryFlow.onSent(len(payload), start)
-	t.sampleSojourn(start)
-	return err
+	t.enqueuePrimaryData(batch)
+	return nil
 }
 
 // laneEnqueue never waits (D10): a full lane sends the whole batch — one
@@ -703,45 +802,52 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 	}
 	lanes := t.snapshotLanes()
 	if len(lanes) == 0 {
-		start := time.Now()
-		var totalBytes int
+		var primaryData, primaryCtrl []frame.Frame
 		for _, f := range frames {
-			totalBytes += len(f.Payload)
+			if f.Control {
+				primaryCtrl = append(primaryCtrl, f)
+			} else {
+				primaryData = append(primaryData, f)
+			}
 		}
-		err := t.base.SendBatch(frames)
-		t.primaryFlow.onSent(totalBytes, start)
-		t.sampleSojourn(start)
-		return err
+		for _, f := range primaryCtrl {
+			if err := t.enqueuePrimaryControl(f.Type, f.Payload); err != nil {
+				return err
+			}
+		}
+		t.enqueuePrimaryData(primaryData)
+		return nil
 	}
-	var primary []frame.Frame
+	var primaryData, primaryCtrl []frame.Frame
 	perLane := make(map[*stripeLane][]frame.Frame)
 	for _, f := range frames {
 		if !splittable(f.Type, f.Payload) {
-			primary = append(primary, f)
+			if f.Control {
+				primaryCtrl = append(primaryCtrl, f)
+			} else {
+				primaryData = append(primaryData, f)
+			}
 			continue
 		}
 		l := t.pickLanePinned(f.Payload, lanes)
 		if l == nil {
-			primary = append(primary, f)
+			primaryData = append(primaryData, f)
 			continue
 		}
 		perLane[l] = append(perLane[l], f)
 	}
-	var firstErr error
-	if len(primary) > 0 {
-		start := time.Now()
-		var primaryBytes int
-		for _, f := range primary {
-			primaryBytes += len(f.Payload)
+	// Control first so the primary writer sees priority order; the writer also
+	// drains its control queue ahead of data.
+	for _, f := range primaryCtrl {
+		if err := t.enqueuePrimaryControl(f.Type, f.Payload); err != nil {
+			return err
 		}
-		firstErr = t.base.SendBatch(primary)
-		t.primaryFlow.onSent(primaryBytes, start)
-		t.sampleSojourn(start)
 	}
+	t.enqueuePrimaryData(primaryData)
 	for l, batch := range perLane {
 		st, err := t.laneEnqueue(l, batch)
 		if err != nil {
-			return t.firstErr(firstErr, err)
+			return err
 		}
 		switch st {
 		case laneDropped:
@@ -757,17 +863,10 @@ func (t *stripeTransport) SendBatch(frames []frame.Frame) error {
 					l.id, len(batch), dropped)
 			}
 		case laneFallback:
-			start := time.Now()
-			var fb int
-			for _, f := range batch {
-				fb += len(f.Payload)
-			}
-			firstErr = t.firstErr(firstErr, t.base.SendBatch(batch))
-			t.primaryFlow.onSent(fb, start)
-			t.sampleSojourn(start)
+			t.enqueuePrimaryData(batch)
 		}
 	}
-	return firstErr
+	return nil
 }
 
 func (t *stripeTransport) firstErr(cur, next error) error {

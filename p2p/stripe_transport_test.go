@@ -1218,3 +1218,59 @@ func TestStripeAffinityExpiresIdleFlows(t *testing.T) {
 		t.Fatalf("idle pin not expired: present=%v primaryPinned=%d", ok, n)
 	}
 }
+
+// TestStripeBlockedPrimaryDoesNotBlockLane is the regression guard for the
+// per-carrier writer: a primary carrier stalled in loss recovery must not hold
+// frames already destined for a healthy lane.
+func TestStripeBlockedPrimaryDoesNotBlockLane(t *testing.T) {
+	basePeer, baseServer := net.Pipe()
+	defer basePeer.Close()
+	// No reader on basePeer: the primary writer blocks inside SendBatch.
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	defer tr.Close()
+
+	lanePeer, laneServer := net.Pipe()
+	defer lanePeer.Close()
+	go func() {
+		for {
+			if _, _, err := frame.ReadFrame(lanePeer); err != nil {
+				return
+			}
+		}
+	}()
+	tr.attachLane(1, frame.NewStreamTransport(laneServer))
+	lanes := tr.snapshotLanes()
+	if len(lanes) != 1 {
+		t.Fatalf("lanes = %d, want 1", len(lanes))
+	}
+
+	primaryPkt := synthTCPFlow(101)
+	lanePkt := synthTCPFlow(202)
+	pk := flowHash32(tr.salt, primaryPkt)
+	lk := flowHash32(tr.salt, lanePkt)
+	if pk == lk {
+		t.Fatalf("test packets hash to the same flow key")
+	}
+	tr.mu.Lock()
+	tr.affinity[pk] = affinityPin{seen: time.Now().UnixNano()}
+	tr.primaryPinned.Add(1)
+	tr.affinity[lk] = affinityPin{lane: lanes[0], seen: time.Now().UnixNano()}
+	lanes[0].pinned.Add(1)
+	tr.mu.Unlock()
+
+	if err := tr.Send(frame.FrameMeshPacket, primaryPkt, false); err != nil {
+		t.Fatalf("primary send: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond) // let the primary writer enter the blocking write
+
+	done := make(chan error, 1)
+	go func() { done <- tr.Send(frame.FrameMeshPacket, lanePkt, false) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("lane send: %v", err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("lane send blocked behind a stalled primary writer")
+	}
+}

@@ -391,6 +391,13 @@ func (e *Manager) TUNLastError() string {
 	return ""
 }
 
+// MarkTUNDegraded records a runtime degradation (e.g. the device disappeared
+// externally) so /api/tun and logs reflect it until a successful StartTUN.
+func (e *Manager) MarkTUNDegraded(msg string) {
+	e.tunDegraded.Store(true)
+	e.tunLastErr.Store(msg)
+}
+
 const maxTUNLogs = 32
 
 func (e *Manager) logEvent(format string, args ...interface{}) {

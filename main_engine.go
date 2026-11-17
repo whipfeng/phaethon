@@ -100,12 +100,10 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	// restart would only flap every mesh session. Core netstack/DNS failures
 	// (StartStack/BindNetstack/DNS) remain fail-fast above because mesh itself
 	// cannot work without them.
-	tunDegraded := false
 	if tunEnabled {
 		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
-			tunDegraded = true
-			util.LogModuleWarn("system", "[STARTUP] TUN failed: %v; mesh stays up, TUN retry starts in background", err)
+			util.LogModuleWarn("system", "[STARTUP] TUN failed: %v; mesh stays up, health loop will retry", err)
 		} else {
 			util.LogModuleInfo("system", "[STARTUP] TUN start ok running=%v", engine.IsTUNRunning())
 		}
@@ -248,35 +246,51 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 		util.LogModuleInfo("engine", "Mesh wired to engine (vip=%s allVIPs=%v tunEnabled=%v)", meshVIP, allVIPs, tunEnabled)
 	}
 
-	if tunDegraded {
-		go tunRetryLoop(engine)
+	if tunEnabled {
+		go tunHealthLoop(engine)
 	}
 
 	return engine, ns, connHandler, nil
 }
 
-// tunRetryLoop retries StartTUN in the background after an initial failure.
-// Mesh/P2P/DNS keep running meanwhile; a transient device or route conflict
-// heals without restarting the worker (which would flap every mesh session).
-// Stops when TUN is up, when the operator disables TUN, or on process exit.
-func tunRetryLoop(engine *tun.Manager) {
+// tunHealthLoop keeps the host TUN healthy for the lifetime of the worker:
+//
+//   - TUN not running (startup failure or operator toggle) and config enabled:
+//     retry StartTUN with 2s→30s backoff;
+//   - TUN claimed running but the interface disappeared at runtime (external
+//     delete, driver reset): mark degraded, StopTUN/StartTUN to recreate it.
+//
+// Mesh/P2P/DNS keep running throughout; the loop never restarts the worker,
+// so a TUN problem cannot flap the mesh. It exits when the operator disables
+// TUN in config or when the process exits.
+func tunHealthLoop(engine *tun.Manager) {
 	backoff := 2 * time.Second
-	for attempt := 1; ; attempt++ {
-		time.Sleep(backoff)
+	for {
+		time.Sleep(5 * time.Second)
 		cfg, err := db.GetTUNConfig()
 		if err == nil && (cfg == nil || !cfg.IsEnabled()) {
-			util.LogModuleInfo("tun", "[TUN] retry stopped: TUN disabled by config")
+			util.LogModuleInfo("tun", "[TUN] health loop stopped: TUN disabled by config")
 			return
 		}
 		if engine.IsTUNRunning() {
-			return
+			if tun.InterfaceExists() {
+				backoff = 2 * time.Second
+				continue
+			}
+			engine.MarkTUNDegraded("TUN interface disappeared at runtime")
+			util.LogModuleWarn("tun", "[TUN] interface disappeared at runtime; recreating")
+			if err := engine.StopTUN(); err != nil {
+				util.LogModuleWarn("tun", "[TUN] stop after disappearance failed: %v", err)
+			}
 		}
 		if err := engine.StartTUN(); err == nil {
-			util.LogModuleWarn("tun", "[TUN] recovered after %d attempt(s); LAN egress restored", attempt)
-			return
-		} else if attempt == 1 || attempt%10 == 0 {
-			util.LogModuleWarn("tun", "[TUN] retry %d failed (mesh still up): %v", attempt, err)
+			util.LogModuleWarn("tun", "[TUN] recovered; LAN egress restored")
+			backoff = 2 * time.Second
+			continue
+		} else if backoff == 2*time.Second {
+			util.LogModuleWarn("tun", "[TUN] retry failed (mesh still up): %v", err)
 		}
+		time.Sleep(backoff)
 		backoff *= 2
 		if backoff > 30*time.Second {
 			backoff = 30 * time.Second

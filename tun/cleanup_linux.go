@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"strings"
 
 	"phaethon/util"
 )
@@ -96,14 +95,14 @@ func CleanupResidual() {
 	}
 }
 
-// InterfaceExists reports whether any TUN interface is currently present.
+// InterfaceExists reports whether the phaethon tun0 interface is currently present.
 func InterfaceExists() bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
 	for _, iface := range ifaces {
-		if strings.HasPrefix(iface.Name, "tun") {
+		if iface.Name == "tun0" {
 			return true
 		}
 	}

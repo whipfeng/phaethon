@@ -340,6 +340,15 @@ v78 的最终模型：
    - 手工部署前清理 `data/state` 的 upgrade marker/request/status，
      避免 watchdog 把新二进制改名 `.failed`。
 
+4. **运行期 TUN 健康检查**（v79）：
+   - `tunHealthLoop` 每 5s 检查一次；
+   - `IsTUNRunning()==true` 但 `tun0` 被外部删除：标记 degraded，
+     `StopTUN()` 清理状态后重新 `StartTUN()`；
+   - TUN 未运行且配置启用：2s→30s 退避重试；
+   - 只在进程内重建 TUN，不重启 worker，mesh 会话不抖动；
+   - `InterfaceExists` 检查确切设备名（Linux `tun0`、Windows
+     `phaethontun`、Darwin `utun*`），不会把别的 tun 当成自己的。
+
 剩余会让 TUN 起不来的情况（都不会再拖垮 mesh，只降级并明确报错）：
 
 - 外部创建的持久 tun0（`ip tuntap`/旧工具/其它程序）——不删，报诊断；

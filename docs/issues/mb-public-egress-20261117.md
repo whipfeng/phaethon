@@ -381,3 +381,16 @@ v79 实测（QG，服务不重启，仅外部操作 TUN）：
 | 外部 `ip tuntap add tun0` 后 enable | 内核允许附着，phaeton 直接复用，running=true |
 | 删除被附着的 tun0 | 健康循环重建，恢复 `100.0.0.2/29` |
 | `/var/run/phaethon-tun.owner` | 不再生成 |
+
+v80 动态命名实测（QG，外部占用 tun0）：
+
+| 操作 | 结果 |
+| --- | --- |
+| 外部 `ip tuntap add dev tun0` 后启用 TUN | phaeton 分配 **tun1**，`deviceName=tun1`；外部 tun0 保持 DOWN，未被使用/删除 |
+| state 文件 | `{"ifaceName":"eth1","tunName":"tun1",...}` |
+| iptables | 规则为 `eth1↔tun1`，不再出现 tun0 |
+| 禁用 TUN | tun1 销毁，`eth1↔tun1` 规则被清理 |
+| 删除外部 tun0 后重新启用 | phaeton 回到 tun0，配置 100.0.0.2/29 |
+
+说明 Linux 创建已从固定 `tun0` 改为 `tun%d`，内核分配空闲 tunN；
+所有路由/规则/状态/诊断使用实际名字，多实例可以在同一主机共存。

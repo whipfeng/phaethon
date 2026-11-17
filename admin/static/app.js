@@ -1520,23 +1520,27 @@ async function fetchMeshStatus() {
                     const qualities = links.map(link => {
                         const srtt = (link.srtt !== undefined && link.srtt !== null) ? link.srtt.toFixed(1) : '?';
                         const loss = link.lossRate ? (link.lossRate * 100).toFixed(1) : '0';
+                        const retx = link.retransRate ? (link.retransRate * 100).toFixed(4) : '0';
+                        const cost = (link.cost !== undefined && link.cost !== null) ? link.cost.toFixed(1) : '?';
                         const friendlyName = link.friendlyName || '';
                         const localSeq = link.localSeq || '';
                         const remoteSeq = link.remoteSeq || '';
-                        
+
                         let seqStr = '';
                         if (localSeq && remoteSeq) {
                             seqStr = `#${localSeq}#${remoteSeq}`;
                         } else if (localSeq) {
                             seqStr = `#${localSeq}`;
                         }
-                        
+
                         const parts = [];
                         if (seqStr) parts.push(seqStr);
                         parts.push(`${srtt}ms`);
-                        parts.push(`${loss}%`);
+                        parts.push(`loss ${loss}%`);
+                        parts.push(`retx ${retx}%`);
+                        parts.push(`cost ${cost}`);
                         if (friendlyName) parts.push(`(${friendlyName})`);
-                        
+
                         return parts.join(', ');
                     });
                     return { id: escapeHtml(toId), qualities };
@@ -1989,7 +1993,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
                         const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
 
-                        let text = `#${localSeq}, ${srtt}, ${loss}${retrans}`;
+                        let text = `#${localSeq}, ${srtt}, ${loss}${retrans}${cost}`;
                         if (friendlyName) {
                             text += ` (${friendlyName})`;
                         }

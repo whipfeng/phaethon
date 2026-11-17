@@ -22,6 +22,8 @@ func CreateDevice() (Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create utun socket: %w", err)
 	}
+	// Do not leak the utun fd into child processes; see device_linux.go.
+	unix.CloseOnExec(fd)
 
 	var ctlInfo unix.CtlInfo
 	copy(ctlInfo.Name[:], "com.apple.net.utun_control")

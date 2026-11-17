@@ -22,6 +22,12 @@ func CreateDevice() (Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
 	}
+	// Never let child processes (built-in SSH shells, watchers, exec'd
+	// workers) inherit the TUN fd. An inherited fd keeps the interface
+	// alive after this worker restarts, so the next instance gets tunN+1
+	// while the stale tunN keeps the same /29 route — the kernel can then
+	// route the DNS GIP to the dead interface (observed on QG).
+	unix.CloseOnExec(fd)
 
 	var ifr struct {
 		name  [unix.IFNAMSIZ]byte

@@ -115,11 +115,18 @@ GG 路径：`0.46–0.63 MB/s`；文档结论是 GG 出口约 3Mbps（0.375MB/s�
 最终选择：**保留 per-carrier writer，primaryDataDepth=32**；qg↔jf 的 46.7MB 波动仍由
 nginx/LB 链路窗口主导，代码侧只能保证 primary 写 HOL 不扩散到健康 lane。
 
-## 下一步修正
+## 最终发布：v0.8.1-103-g2653939 全量
 
-- 全量发布 v102（per-carrier writer + depth32），验证各节点交互/批量行为。
-- GG 路径按文档为 3Mbps 出口上限，不作为代码吞吐验收路径。
-- qg 节点域名 DNS 在 domain trie 收敛后正常，重启后的短暂窗口已记录。
+- per-carrier writer 恢复，primaryDataDepth=32；
+- 9 个节点全部 `v0.8.1-103-g2653939`：qg/gg/jf/ms9/ms10/mb/vm/deskzq/qgw；
+- qg→jf 24.5MB 冷启动后 2.65–2.95s（≈8.7–9.7MB/s），与 pre v94 中位 2.84s 持平；
+- 46.7MB 的波动由 qg↔jf nginx/LB 链路窗口主导（交互探针基线同步变化），不是本改动；
+- 有效验收路径 vm→qg→mb 当前 3.79MB/s，高于历史 OS 两跳 3.01 / mesh 3.2；
+- GG 路径按文档为 ~3Mbps 出口上限，不作为代码吞吐验收路径；
+- 节点域名 DNS 在 domain trie 收敛后正常（jf.phn/vm.phn/git.migu.cn 均通过）。
+
+结论：有效单跳/两跳已接近或超过历史 OS 基线；per-carrier writer 解决 primary 写 HOL
+对交互/lane 的扩散，深度 32 保证吞吐不退化；剩余 46.7MB 离群属于 nginx/LB 共享链路窗口。
 
 ## 备注
 

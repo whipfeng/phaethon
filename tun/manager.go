@@ -391,6 +391,18 @@ func (e *Manager) IsTUNRunning() bool {
 	return e.tunRunning
 }
 
+// TUNDeviceName returns the actual interface name assigned by the platform
+// (tunN on Linux, utunN on Darwin, phaethontun on Windows), or "" when no
+// device is currently held.
+func (e *Manager) TUNDeviceName() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.device != nil {
+		return e.device.Name()
+	}
+	return ""
+}
+
 // TUNDegraded reports whether the last StartTUN failed and the node is
 // currently serving mesh-only while a background retry is pending.
 func (e *Manager) TUNDegraded() bool { return e.tunDegraded.Load() }

@@ -273,7 +273,7 @@ func tunHealthLoop(engine *tun.Manager) {
 			continue
 		}
 		if engine.IsTUNRunning() {
-			if tun.InterfaceExists() {
+			if name := engine.TUNDeviceName(); name != "" && tun.InterfaceExists(name) {
 				backoff = 2 * time.Second
 				continue
 			}

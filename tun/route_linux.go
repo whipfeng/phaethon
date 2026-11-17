@@ -135,7 +135,7 @@ func (r *RouteManager) platformSetup(tunIP string, prefixLen int) error {
 
 			// Save original kernel parameter values to a state file so the watchdog
 			// can restore them if the main process crashes (kill -9, panic, etc.).
-			saveTUNState(r.DefaultIfaceName, r.originalRpFilter, r.originalIPForward)
+			saveTUNState(r.DefaultIfaceName, r.devName, r.originalRpFilter, r.originalIPForward)
 		}
 	}
 
@@ -392,18 +392,22 @@ func readResolvConfNameservers() ([]string, error) {
 // values if the main process crashes.
 const tunStateFile = "/var/run/phaethon-tun.state"
 
-// tunState holds the original kernel parameter values before TUN setup.
+// tunState holds the original kernel parameter values before TUN setup, plus
+// the actual TUN device name assigned by the kernel (tunN), so cleanup can
+// remove exactly this instance's iptables tuples instead of assuming tun0.
 type tunState struct {
 	IfaceName string `json:"ifaceName"`
+	TunName   string `json:"tunName,omitempty"`
 	RpFilter  int    `json:"rpFilter"`
 	IPForward int    `json:"ipForward"`
 }
 
 // saveTUNState writes the original kernel parameter values to a state file.
 // The watchdog reads this file to restore the values if the main process crashes.
-func saveTUNState(ifaceName string, rpFilter, ipForward int) {
+func saveTUNState(ifaceName, tunName string, rpFilter, ipForward int) {
 	state := tunState{
 		IfaceName: ifaceName,
+		TunName:   tunName,
 		RpFilter:  rpFilter,
 		IPForward: ipForward,
 	}
@@ -415,7 +419,7 @@ func saveTUNState(ifaceName string, rpFilter, ipForward int) {
 	if err := os.WriteFile(tunStateFile, data, 0644); err != nil {
 		util.LogModuleWarn("route", "save state fail: %v", err)
 	} else {
-		util.LogModuleInfo("route", "saved state to %s: iface=%s rp_filter=%d ip_forward=%d", tunStateFile, ifaceName, rpFilter, ipForward)
+		util.LogModuleInfo("route", "saved state to %s: iface=%s tun=%s rp_filter=%d ip_forward=%d", tunStateFile, ifaceName, tunName, rpFilter, ipForward)
 	}
 }
 

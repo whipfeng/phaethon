@@ -51,6 +51,11 @@ func CleanupResidual() {
 	if data, err := os.ReadFile(tunStateFile); err == nil {
 		var state tunState
 		if json.Unmarshal(data, &state) == nil {
+			tunName := state.TunName
+			if tunName == "" {
+				// State written by a build that still pinned tun0.
+				tunName = "tun0"
+			}
 			// Restore rp_filter on the physical interface
 			if state.IfaceName != "" {
 				if err := writeRpFilter(state.IfaceName, state.RpFilter); err == nil {
@@ -70,16 +75,16 @@ func CleanupResidual() {
 			// Clean up iptables FORWARD rules - loop to remove ALL duplicates
 			if state.IfaceName != "" {
 				for {
-					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", "tun0", "-j", "ACCEPT").Run(); err != nil {
+					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", tunName, "-j", "ACCEPT").Run(); err != nil {
 						break
 					}
-					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->tun0", state.IfaceName)
+					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", state.IfaceName, tunName)
 				}
 				for {
-					if err := exec.Command("iptables", "-D", "FORWARD", "-i", "tun0", "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
+					if err := exec.Command("iptables", "-D", "FORWARD", "-i", tunName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
 						break
 					}
-					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD tun0->%s", state.IfaceName)
+					util.LogModuleInfo("cleanup", "cleanup removed iptables FORWARD %s->%s", tunName, state.IfaceName)
 				}
 				for {
 					if err := exec.Command("iptables", "-D", "FORWARD", "-i", state.IfaceName, "-o", state.IfaceName, "-j", "ACCEPT").Run(); err != nil {
@@ -95,14 +100,17 @@ func CleanupResidual() {
 	}
 }
 
-// InterfaceExists reports whether the phaethon tun0 interface is currently present.
-func InterfaceExists() bool {
+// InterfaceExists reports whether the named TUN interface is currently present.
+func InterfaceExists(name string) bool {
+	if name == "" {
+		return false
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
 	for _, iface := range ifaces {
-		if iface.Name == "tun0" {
+		if iface.Name == name {
 			return true
 		}
 	}

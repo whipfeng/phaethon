@@ -67,7 +67,7 @@ func CleanupResidual() {
 	// subsequent CreateAdapter calls from creating a fresh adapter, so we
 	// explicitly delete it.
 	util.LogModuleInfo("cleanup", "[DIAG] step 7: InterfaceExists check")
-	if InterfaceExists() {
+	if InterfaceExists("phaethontun") {
 		util.LogModuleInfo("cleanup", "[DIAG] step 8: interface exists, clearing IP/DNS")
 		// Release any static IP/DNS first so the removal is clean.
 		if luid, index, err := getInterfaceLUID("phaethontun"); err == nil {
@@ -170,9 +170,12 @@ func defaultGatewayInterfaceName() string {
 	return iface.Name
 }
 
-// InterfaceExists reports whether the phaethontun network adapter is currently
+// InterfaceExists reports whether the named Wintun adapter is currently
 // present in the TCP/IP stack.
-func InterfaceExists() bool {
-	_, _, err := getInterfaceLUID("phaethontun")
+func InterfaceExists(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, _, err := getInterfaceLUID(name)
 	return err == nil
 }

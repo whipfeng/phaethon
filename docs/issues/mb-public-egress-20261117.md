@@ -322,14 +322,17 @@ tun0 恢复 `100.0.0.2/29`，MB `HTTP=200`、DNS fakeip 正常。说明 mesh 能
 v78 的最终模型：
 
 1. **Linux/macOS**：
+   - Linux 创建时请求 `tun%d`，由内核分配第一个空闲 `tunN`；之后所有路由/
+     规则/DNS/诊断都用 `dev.Name()`，不再写死 `tun0`；
+   - `tunState` 记录实际 `tunName`，iptables 清理使用该名字（旧 state 无
+     该字段时回退 `tun0`，兼容升级前规则）；
    - 只依赖 fd 生命周期，不写 marker，不按名字/alias/MAC 删接口；
    - `CleanupResidual()` 只恢复真正持久、明确属于我们的 OS 状态：
      `resolv.conf`、`rp_filter`/`ip_forward`、iptables FORWARD 元组；
    - `TUNSETIFF` 失败时**不删除任何接口**，错误信息附带只读诊断：
-     现有 tun0 的 type/flags/IPv4/alias，以及当前持有 `/dev/net/tun` 的
-     进程列表（`pid(comm)`）；
-   - 节点保持 degraded mesh-only + 后台重试，运维确认后手工
-     `ip link delete tun0` 或停掉占用进程。
+     所有 `tun*`/TAP 链路的 type/flags/IPv4/alias，以及当前持有
+     `/dev/net/tun` 的进程列表（`pid(comm)`）；
+   - 节点保持 degraded mesh-only + 后台重试，运维确认后手工处理占用方。
 2. **Windows**：
    - Wintun 适配器是命名内核对象，进程退出后仍存在，所以启动时由
      `CleanupResidual` 按保留名 `phaethontun` 删除，`StopTUN` 也显式

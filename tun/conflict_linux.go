@@ -12,31 +12,37 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// describeTUNConflict returns a one-line, read-only description of why tun0
-// may be unavailable: the existing link's type/flags/addresses and the
-// processes currently holding /dev/net/tun. It never deletes or modifies
-// anything; the operator decides how to resolve the conflict.
+// describeTUNConflict returns a one-line, read-only description of why a TUN
+// device may be unavailable: every tun*/TAP link (type/flags/addresses/alias)
+// and the processes currently holding /dev/net/tun. Interface names are
+// kernel-assigned (tunN), so this never assumes one particular name.
 func describeTUNConflict() string {
 	var parts []string
-	if link, err := netlink.LinkByName("tun0"); err == nil {
-		addrs := make([]string, 0, 2)
-		if v4, err := netlink.AddrList(link, netlink.FAMILY_V4); err == nil {
-			for _, a := range v4 {
-				addrs = append(addrs, a.IP.String())
+	if links, err := netlink.LinkList(); err == nil {
+		for _, link := range links {
+			name := link.Attrs().Name
+			if !strings.HasPrefix(name, "tun") && link.Type() != "tap" {
+				continue
 			}
+			addrs := make([]string, 0, 2)
+			if v4, err := netlink.AddrList(link, netlink.FAMILY_V4); err == nil {
+				for _, a := range v4 {
+					addrs = append(addrs, a.IP.String())
+				}
+			}
+			desc := fmt.Sprintf("%s type=%s flags=%s ipv4=[%s]",
+				name, link.Type(), link.Attrs().Flags.String(), strings.Join(addrs, ","))
+			if alias := link.Attrs().Alias; alias != "" {
+				desc += " alias=" + alias
+			}
+			parts = append(parts, desc)
 		}
-		desc := fmt.Sprintf("tun0 exists type=%s flags=%s ipv4=[%s]",
-			link.Type(), link.Attrs().Flags.String(), strings.Join(addrs, ","))
-		if alias := link.Attrs().Alias; alias != "" {
-			desc += " alias=" + alias
-		}
-		parts = append(parts, desc)
 	}
 	if pids := tunFDHolders(); len(pids) > 0 {
 		parts = append(parts, "dev/net/tun holders: "+strings.Join(pids, ","))
 	}
 	if len(parts) == 0 {
-		return "no tun0 link or /dev/net/tun holder found"
+		return "no tun link or /dev/net/tun holder found"
 	}
 	return strings.Join(parts, "; ")
 }

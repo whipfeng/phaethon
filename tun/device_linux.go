@@ -28,7 +28,10 @@ func CreateDevice() (Device, error) {
 		flags uint16
 		_     [20]byte
 	}
-	copy(ifr.name[:], "tun0")
+	// Ask the kernel for the first free tunN instead of pinning tun0. The
+	// kernel writes the assigned name back into ifr.name; every consumer below
+	// uses dev.Name(), so multiple instances no longer collide on one name.
+	copy(ifr.name[:], "tun%d")
 	ifr.flags = unix.IFF_TUN | unix.IFF_NO_PI
 
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.TUNSETIFF, uintptr(unsafe.Pointer(&ifr)))

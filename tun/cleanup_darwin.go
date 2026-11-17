@@ -4,7 +4,6 @@ package tun
 
 import (
 	"net"
-	"strings"
 )
 
 // CleanupResidual restores persistent host state left behind by a previous
@@ -18,14 +17,17 @@ func CleanupResidual() {
 	restorePersistedForeignSplits()
 }
 
-// InterfaceExists reports whether any utun interface is currently present.
-func InterfaceExists() bool {
+// InterfaceExists reports whether the named utun interface is currently present.
+func InterfaceExists(name string) bool {
+	if name == "" {
+		return false
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
 	for _, iface := range ifaces {
-		if strings.HasPrefix(iface.Name, "utun") {
+		if iface.Name == name {
 			return true
 		}
 	}

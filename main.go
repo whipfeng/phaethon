@@ -194,7 +194,7 @@ func buildTUNStatus(res *activeResources) map[string]interface{} {
 		status["stats"] = engine.Stats()
 		status["dhcpLeases"] = engine.DHCPLeaseSnapshot()
 		if engine.IsTUNRunning() {
-			status["deviceName"] = "PhaethonTUN"
+			status["deviceName"] = engine.TUNDeviceName()
 		}
 	} else {
 		status["stats"] = tun.TUNStats{}

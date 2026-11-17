@@ -115,19 +115,15 @@ func startEngine(meshMgr *mesh.MeshManager, adminHandler *admin.AdminServer) (*t
 	// TUN failure must not take the mesh down: P2P/mesh transit, the in-stack
 	// DNS hijacker and the admin API all work without the host TUN device.
 	// Keep the worker alive in a *visible* degraded mesh-only state and retry
-	// StartTUN in the background, so a transient device/route conflict heals
-	// without restarting (and flapping) every mesh session.
-	// PHAETHON_TUN_STRICT=1 restores fail-fast for operators who prefer a hard
-	// restart over degraded mesh-only.
+	// StartTUN in the background. A hard worker restart adds nothing here: the
+	// retry re-runs the same TUN init in-process after CleanupResidual, while a
+	// restart would only flap every mesh session. Core netstack/DNS failures
+	// (StartStack/BindNetstack/DNS) remain fail-fast above because mesh itself
+	// cannot work without them.
 	tunDegraded := false
 	if tunEnabled {
 		util.LogModuleInfo("system", "[STARTUP] TUN start begin")
 		if err := engine.StartTUN(); err != nil {
-			if os.Getenv("PHAETHON_TUN_STRICT") == "1" {
-				util.LogModuleError("system", "[STARTUP] TUN failed: %v; exiting for watchdog retry (PHAETHON_TUN_STRICT=1)", err)
-				engine.Stop()
-				return nil, nil, nil, fmt.Errorf("TUN start: %w", err)
-			}
 			tunDegraded = true
 			util.LogModuleWarn("system", "[STARTUP] TUN failed: %v; mesh stays up, TUN retry starts in background", err)
 		} else {

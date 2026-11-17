@@ -253,8 +253,10 @@ STARTUP: TUN failed: tunsetiff: device or resource busy
   `[TUN] recovered`，LAN 出访自动恢复，不需要重启 worker；
 - 降级状态可见：`/api/tun` 增加 `degraded` / `lastError`，日志首次失败和
   每 10 次重试告警；
-- 只有显式 `PHAETHON_TUN_STRICT=1` 才回到 fail-fast（退出让 watchdog
-  重试），适合“宁可重启也不能 mesh-only”的节点。
+- **不对 TUN 做硬重启**：持续硬重启没有意义——TUN 初始化在进程内重试即可
+  复现同样的清理/创建流程，重启 worker 只会抖动所有 mesh 会话，且永久性
+  故障（权限/设备被占用）重启一万次也不会好。只有 netstack / DNS 这类
+  “mesh 本身无法工作”的核心组件失败才 fail-fast 交给 watchdog。
 
 这样既不会因为 TUN 故障丢掉基础 mesh 能力，也不会回到 11-15 那种
 “mesh 正常、LAN 静默断网且永不重试”的半死状态。

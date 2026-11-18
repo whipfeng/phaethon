@@ -66,3 +66,18 @@ scripts/signing.key
 
 # Local archive (untracked clutter moved here)
 /archive/
+
+# Secrets and certificate bundles (never commit)
+*.p12
+*.pfx
+*.jks
+*.key
+
+# Runtime database (contains proxy passwords / private keys)
+/data/
+
+# Deployment launcher (deployment-side, not application)
+/start-phaethon.vbs
+
+# Local junk snapshot
+/--db

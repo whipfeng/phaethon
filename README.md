@@ -1,463 +1,221 @@
 # phaethon
 
-L4 代理转发工具（Go 版）。支持多种入站/出站协议、规则路由、代理组、订阅、健康检查、反向连接和 TUN 模式。
+L4 代理与 Mesh / P2P 覆盖网络工具（Go）。支持正向代理、反向连接、规则路由、代理组与订阅，
+也支持把多台节点组成 mesh，提供 TUN、DNS、内置 SSH、Web 控制台和签名包自升级。
+
+当前发布：`v0.8.2`（构建版本由 `git describe --tags --match 'v*'` 生成，例如
+`v0.8.2-N-g<hash>`）。
 
 > ### 安全须知
 >
 > **禁止向本仓库提交任何敏感信息**，包括但不限于：
 >
-> - IP 地址（公网 IP、内网 IP）
-> - SSH 端口、用户名、密码、密钥
-> - 代理密码、Token、API Key
-> - 内网域名、网络拓扑
+> - 私钥、证书包（`.p12` / `.pfx` / `.key` / `.jks`）
+> - 代理密码、Token、API Key、SSH 私钥
+> - 公网/内网 IP、SSH 端口、用户名、内网域名与网络拓扑
+> - 运行时数据库（`data/`，含代理密码与私钥）
 >
-> 敏感配置（代理密码、Admin 凭据等）请通过 Web 控制台或 Admin API 写入本地数据库，
-> 不要提交到仓库。运维相关信息请参考 `docs/runbooks/` 目录。
+> 配置请通过 Web 控制台或 Admin API 写入本地数据库；敏感文件仅保存在本地
+> `archive/`（已忽略）或部署环境，不进入 Git。`.gitignore` 已覆盖
+> `config.yaml`、`*.p12/*.pfx/*.jks/*.key`、`data/`、`archive/`、`scripts/.env`、
+> `scripts/signing.key` 等路径。
 
-## 目录
+---
 
-- [快速开始](#快速开始)
-- [新手使用说明](#新手使用说明)
-- [项目结构](#项目结构)
-- [配置文件](#配置文件)
-- [支持的协议](#支持的协议)
-- [编译](#编译)
-- [运行](#运行)
-- [核心模块说明](#核心模块说明)
-- [反向连接（Reverse）](#反向连接reverse)
-- [TUN 模式](#tun-模式)
-- [多环境配置](#多环境配置)
+## 核心能力
+
+- **代理协议**：SOCKS5 / Trojan / h_tunnel / HTTP / HTTPS / Direct / Reverse 入站；
+  DIRECT / SOCKS5 / Trojan / h_tunnel / VLESS / Hysteria2 / Shadowsocks / SSH / HTTP 出站。
+- **规则与调度**：DOMAIN-SUFFIX / IP-CIDR / MATCH 规则，`#MAPPING` 限定；
+  select / load-balance / best 代理组；订阅拉取、正则过滤、健康检查。
+- **Mesh / P2P**：节点以 `nodeID` 组网，自动拓扑与路由；P2P 会话可跑在
+  direct TCP、Trojan、h_tunnel（HTTP 长轮询 / WebSocket）等载体上；支持 UDP 直连 leg
+  （`p2p-udp`）、多 lane、按流亲和与 per-carrier writer；可选的 mesh-wide AEAD（`p2p-key`）。
+- **TUN / 旁路网关**：Linux / Windows / macOS 的 TUN 引擎；旁路网关、DHCP、DNS 劫持与
+  Fake-IP；Linux 动态 `tunN`（内核分配）与 fd 生命周期管理；链路健康循环。
+- **管理面**：Web 控制台（mTLS 或密码）、Admin API、内置 SSH（`<nodeid>.phn:22`）、
+  内置 console（443 / 39999）。
+- **升级**：签名的 `.pkg` 上传 → 激活 → watchdog 稳定路径自替换 → ready + 版本校验；
+  失败自动回滚 `.old`，不再使用版本化 worker 路径。
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 进入目录
-cd phaethon
-
-# 2. 编译当前平台
+# 编译当前平台
 go build -o phaethon .
 
-# 3. 运行
+# 运行（首次会初始化 data/phaethon.db）
 ./phaethon
 ```
 
-首次运行时，程序会在 `data/` 目录创建嵌入式数据库（`data/phaethon.db`）并进入初始化流程：
-终端交互模式下会询问 Admin 端口（默认 39999）、是否启用认证、Mesh node-id；
-非交互模式（如服务方式启动）直接使用默认值自动初始化。
+首次运行（交互式终端）会询问 Admin 端口（默认 `39999`）、是否启用认证、Mesh node-id；
+非交互启动使用默认值自动初始化。配置全部持久化在 `data/phaethon.db`，
+**没有 YAML 配置文件**。
 
-所有配置（代理、代理组、订阅、规则、端口映射等）都持久化在该数据库中，
-通过 Web 控制台或 Admin API 管理，**没有 YAML 配置文件**。
+初始化后：
 
-初始化完成后即可：
-- 打开 Web 管理面板（默认 `http://<host>:39999`）在 UI 中管理全部配置
-- 或通过 Admin API 编程管理（参考 `docs/` 目录）
+- Web 控制台：`http://<host>:39999`（生产建议配置 mTLS/认证）
+- Mesh 内置 console：`https://<nodeid>.phn/`
+- Mesh 内置 SSH：`ssh <nodeid>.phn`
+
+更完整的入门说明见 `docs/`（特别是 `docs/specs/`、`docs/plans/` 和 `docs/runbooks/`）。
 
 ---
 
-## 新手使用说明
+## 架构概览
 
-> **phaethon 是什么？**  
-> 一个 L4 代理转发工具，把本地服务通过反向通道暴露到公网，也支持正向代理、规则路由、代理组、订阅和 TUN 模式。配置全部保存在本地数据库中，通过 Web 控制台管理，下面介绍最简用法。
+```
+入站 (socks5/trojan/h_tunnel/http/https/direct/reverse)
+        │
+        ▼
+  规则匹配 + 代理组/订阅 ──► 出站拨号（链式代理 / DIRECT / SSH / 反向）
+        │
+        ├──► TUN / 旁路网关（DHCP、DNS 劫持、Fake-IP）
+        │
+        └──► Mesh / P2P（nodeID 组网、拓扑 gossip、链路选择、lane/stripe）
+                    │
+                    └──► 载体：direct TCP / Trojan / h_tunnel HTTP / WS / UDP direct leg
+```
 
-### 1. 启动程序
+主要模块：
 
-直接运行编译好的二进制：
+| 目录 | 职责 |
+|---|---|
+| `admin/` | Web 控制台、Admin API、mTLS、包上传/激活 |
+| `handler/` | 入站连接分发、内置 SSH / console |
+| `mesh/` | 拓扑、路由选择、DNS 劫持/Fake-IP、TUN 网络栈、链路质量 |
+| `p2p/` | P2P 会话、DRR/流队列、lane/stripe、UDP leg、载体重连 |
+| `frame/` | 帧协议、载体内核 backlog/pacing、加密、TCP_INFO 统计 |
+| `tun/` | Linux/Windows/macOS TUN 引擎、路由/iptables/DHCP/健康循环 |
+| `server/`、`dialer/`、`reverse/` | 入站服务器、出站拨号、反向连接 |
+| `pkg/upgrade/`、`pkg/signing/` | 自替换升级、签名包 |
+| `config/`、`db/` | 配置模型、规则匹配、嵌入式数据库 |
+
+---
+
+## Mesh / P2P
+
+- **节点地址**：mesh CIDR 默认 `100.0.0.0/8`；每个节点分配一个 `/16`：
+  VIP `.1`（mesh 路由/NAT 源）、hostIP `.2`（TUN）、GIP `.3`（netstack/DNS）、EIP `.4`（IPIP）。
+- **拓扑**：gossip 传播直连邻居与链路质量（srtt / loss / TCP 重传率 / cost）；
+  路由按代价选择；支持静态路由、静态域名路由、通告路由。
+- **载体**：P2P 会话可复用已配置代理作为载体（direct TCP、Trojan、h_tunnel 等）；
+  h_tunnel 在支持时默认尝试 WebSocket，失败回退 HTTP 长轮询。
+- **UDP direct leg**：代理开启 `p2p-udp` 后，主动端直接向对端 UDP 端口发送；
+  可选 mesh-wide `p2p-key` 做 AEAD；不可达时回退 TCP。
+- **多 lane**：按内层 5 元组做流亲和（避免同一流跨路径重排）；lane 全队列丢弃而不是阻塞
+  主写循环；primary 使用独立写协程 + 有界队列，避免 primary 丢包恢复阻塞健康 lane。
+- **DNS / 域名路由**：mesh DNS 负责 `<nodeid>.phn` 与域名路由；Fake-IP 池按节点子网分配；
+  域名路由支持多 owner 与静态配置。
+- **可观测性**：拓扑展示 srtt / loss / TCP retrans / cost；`/api/p2p` 提供 leg 计数、
+  lane/qdepth 诊断；控制台只展示当前运行时的真实名字（如 `tunN`），不写死设备名。
+
+详细设计见：
+
+- `docs/plans/mesh-full-topology-design.md`
+- `docs/plans/mesh-multilink-stripe-design.md`
+- `docs/plans/p2p-architecture-decision.md`
+- `docs/specs/protocol_spec.md`
+
+---
+
+## TUN / 旁路网关
+
+- **设备命名**：Linux 使用内核分配的 `tunN`（`TUNSETIFF "tun%d"`，并记录 `state.TunName`）；
+  Windows 使用 Wintun 适配器；macOS 使用 `utunN`。
+- **生命周期**：Linux/macOS 的 TUN 接口由 fd 生命周期控制（无 `IFF_PERSIST`，`Close` 即销毁）；
+  fd 设置为 `CLOEXEC`，不会被内置 SSH/子进程继承，避免残留 `tunN` 与路由错位。
+- **旁路网关**：可选 bypass gateway，配合 DHCP 与 DNS 劫持；启动自检会恢复 FORWARD 规则；
+  路由配置使用 `RouteReplace`，异常重启不会因 `file exists` 失败。
+- **健康循环**：运行期检测 TUN 被外部删除/降级；按 operator intent 恢复；TUN 失败时 mesh 保持运行。
+
+---
+
+## 管理面 / 内置 SSH / 自升级
+
+- **Web 控制台**：`0.0.0.0:39999`；mesh 内置 console 为 `https://<nodeid>.phn/`（443，
+  39999 为兼容别名）。支持 mTLS 客户端证书或用户名/密码；证书/凭据保存在本地。
+- **内置 SSH**：`<nodeid>.phn:22`；支持公钥认证、可配置 shell；Windows 下按平台提供
+  PTY / 行级模式；公钥在控制台维护。
+- **自升级**：控制台上传签名 `.pkg` → 激活；watchdog 每 2s 轮询请求，校验签名/平台，
+  暂存 `.new`，停止 worker，`exe→.old`、`.new→exe`，启动并校验版本；失败回滚 `.old`。
+  稳定路径始终不变，Windows 防火墙/AV 路径规则无需调整。
+
+---
+
+## 配置
+
+所有配置存放在 `data/phaethon.db`，通过 Web 控制台或 Admin API 修改，保存后生效。
+README 不再列 YAML 文件；配置实体的字段结构见 `docs/specs/config_spec.md`。
+
+规则示例（通过控制台/规则页填写）：
+
+```
+DOMAIN-SUFFIX,example.com,ProxyGroup
+IP-CIDR,10.0.0.0/8,DIRECT
+MATCH,DIRECT
+```
+
+规则可通过 `#MAPPING_NAME` 后缀限定到特定入站 mapping。代理名可以是具体 proxy、
+proxy-group，或内置 `DIRECT` / `REJECT`。
+
+### 入站 / 出站协议（摘要）
+
+| 方向 | 协议 |
+|---|---|
+| 入站 | SOCKS5、Trojan、h_tunnel、HTTP、HTTPS、Direct、Reverse |
+| 出站 | DIRECT、SOCKS5、Trojan、h_tunnel、VLESS、Hysteria2、Shadowsocks、SSH、HTTP |
+
+出站拨号自动跟随 `proxy` 字段构建代理链；mesh/P2P 使用相同代理配置作为可选载体。
+
+---
+
+## 构建
 
 ```bash
-./phaethon
-```
-
-首次启动会进入初始化（Admin 端口、可选认证、Mesh node-id），完成后配置保存在 `data/phaethon.db`。
-Web 管理面板默认监听 `0.0.0.0:39999`。如果端口被占用，启动会失败并在 `data/logs/startup-error.log` 留下原因。
-
-### 2. 添加一个本地 SOCKS5 代理
-
-打开 Web 管理面板 → 端口映射（Mappings）→ 新增：
-- 类型：`socks5`
-- 端口：`7890`
-
-保存后立即生效，本地即可使用：
-
-```
-socks5://127.0.0.1:7890
-```
-
-无需任何出站代理节点即可把流量直接转发到目标（默认无规则时走 DIRECT）。
-
-### 3. 反向连接（内网穿透）
-
-使用反向连接前，需要先配置一个能连到注册端的出站代理节点。配置完成后，打开反向连接向导：
-
-```
-http://<host>:39999/reverse
-```
-
-按向导填写：
-- 出站代理：选择已配置的、可到达注册端的代理节点
-- 监听模式：选 `Direct`，目标填 `127.0.0.1:8080`（把本地 8080 暴露出去）
-- 首选端口：留空让注册端自动分配，或填具体数字
-
-点击 **保存并启用**，等待 1–3 秒：
-- 成功：页面显示外部访问地址，例如 `DIRECT://<your-server-ip>:<port>`
-- 失败：页面红色提示错误原因（如“端口已被占用”），修改后重新保存即可
-
-### 4. 外部访问
-
-把得到的外部访问地址分享给其他用户，他们即可通过注册端连接到你的本地服务。
-
-### 5. 常见问题
-
-- **端口被占用提示**：首选端口填别的数字，或留空自动分配。
-- **同一个 Reverse ID 启动两次**：第二次会提示注册冲突，不会两个实例互相踢。
-- **管理端口起不来**：查看 `data/logs/startup-error.log` 中的具体错误。
-
-## 项目结构
-
-```
-phaethon/
-├── main.go              # 入口：初始化数据库、加载配置、启动监听、热重载、健康检查、订阅刷新
-├── config/              # 配置模型、路由匹配（Rule/Matcher）、限速器
-│   └── config.go
-├── server/              # 入站协议服务器（Socks5/Trojan/h_tunnel/HTTP/HTTPS/Direct/Reverse）
-│   ├── base.go          # BaseServer、AcceptLoop、startTCP/startTLS
-│   ├── socks5.go
-│   ├── trojan.go
-│   ├── htunnel.go
-│   ├── http.go
-│   ├── direct.go
-│   └── reverse.go       # ReverseServer：主动维持反向连接池
-├── dialer/              # 出站协议拨号器（代理链逐级拨号）
-│   ├── dialer.go        # Dialer/UDPDialer 接口、ChainDial、NewDialer
-│   ├── direct.go
-│   ├── socks5.go
-│   ├── trojan.go
-│   ├── htunnel.go
-│   ├── hysteria2.go
-│   ├── vless.go
-│   ├── shadowsocks.go
-│   ├── ssh.go
-│   └── reverse.go       # ReverseDialer：从 Registry 获取反向连接
-├── reverse/             # 反向连接注册中心（被动端使用）
-│   └── registry.go      # Registry、ManagedConn、心跳握手（PING/PONG/PENG）
-├── tun/                 # TUN 模式（系统级流量拦截）
-├── util/                # 日志、Relay、证书生成、连接 ID 等工具
-└── data/                # 运行时数据目录（首次运行自动生成）
-    └── phaethon.db      # 嵌入式配置数据库（代理/组/规则/映射等均存于此）
-```
-
----
-
-## 配置说明
-
-配置不采用 YAML 文件：所有配置持久化在工作目录下的嵌入式数据库 `data/phaethon.db` 中，
-通过 **Web 控制台** 或 **Admin API** 进行增删改查，保存后立即生效。
-
-以下 YAML 片段仅用于说明各配置实体的字段结构（等价于 API/UI 中的数据模型），不是需要手动编辑的文件。
-
-### 配置结构示例
-
-```yaml
-proxies:          # 代理节点列表
-  - name: NODE1
-    type: trojan
-    server: 1.2.3.4
-    port: 443
-    password: xxx
-    sni: www.example.com
-    skip-cert-verify: true
-    udp: false
-    proxy: NODE2    # 下级代理（链式代理），可选
-
-subscriptions:    # 订阅源（独立配置，可被多个代理组引用）
-  - name: sub1
-    url: "https://..."
-    interval: 300
-
-proxy-groups:     # 代理组
-  - name: Country
-    type: best      # select / load-balance / best
-    proxies:
-      - NODE1
-      - NODE2
-    subscription: sub1                   # 引用的订阅源名称，可选
-    subscription-filter: "HK|TW|JP"      # 按正则过滤订阅节点，可选
-    subscription-selected: []            # 选中的订阅节点名称，可选
-    health-check-url: http://www.google.com/generate_204
-    health-check-interval: 300
-
-rules:            # 路由规则（从上到下匹配）
-  - DOMAIN-SUFFIX,example.com,Country
-  - IP-CIDR,10.0.0.0/8,DIRECT
-  - MATCH,DIRECT
-
-mappings:         # 入站端口映射
-  - name: SOCKS5_IN
-    type: socks5
-    port: 7890
-  - name: TROJAN_IN
-    type: trojan
-    port: 443
-    password: xxx
-    sni: www.example.com
-
-resolvers:        # 地址重写（类似 hosts）
-  - name: R1
-    src-host: git.example.com
-    src-port: 80
-    dst-host: 10.0.0.1
-    dst-port: 9000
-```
-
-### rules 语法
-
-| 规则类型       | 格式                              | 说明                          |
-|---------------|-----------------------------------|------------------------------|
-| DOMAIN-SUFFIX | `DOMAIN-SUFFIX,域名后缀,代理名`    | 域名后缀匹配                   |
-| IP-CIDR       | `IP-CIDR,CIDR,代理名`              | IP 段匹配                      |
-| MATCH         | `MATCH,代理名`                     | 兜底匹配                       |
-
-代理名可以是具体的 proxy、proxy-group，或内置的 `DIRECT`、`REJECT`。
-
-通过 `#MAPPING_NAME` 后缀可限定规则仅对特定 mapping 生效，例如 `LOCAL_HT#TEST_SS5_SRV`。
-
-### mappings 类型
-
-| type         | 说明                          |
-|-------------|------------------------------|
-| socks5      | SOCKS5 代理入站                |
-| trojan      | Trojan 代理入站                |
-| h_tunnel    | h_tunnel 协议入站              |
-| http        | HTTP 代理入站                  |
-| https       | HTTPS 代理入站（自签名证书）    |
-| direct      | 直接转发到 dst-host:dst-port   |
-
-上述 mapping 类型都支持附加 `reverse-address` + `reverse-proxy` 等字段，把该入站作为被动反向端使用（见[反向连接](#反向连接reverse)）。
-
----
-
-## 支持的协议
-
-### 入站（Server）
-
-| 协议      | 文件                  | 说明                     |
-|----------|----------------------|-------------------------|
-| SOCKS5   | server/socks5.go     | 支持用户名密码认证        |
-| Trojan   | server/trojan.go     | 支持 SNI 多路复用         |
-| h_tunnel | server/htunnel.go    | HTTP 隧道协议             |
-| HTTP     | server/http.go       | HTTP 代理                 |
-| HTTPS    | server/http.go       | HTTPS 代理（自签名证书）   |
-| Direct   | server/direct.go     | 直接 TCP 转发             |
-
-### 出站（Dialer）
-
-| 协议         | 文件                    | TCP | UDP |
-|-------------|------------------------|-----|-----|
-| DIRECT      | dialer/direct.go       | ✓   | ✓   |
-| SOCKS5      | dialer/socks5.go       | ✓   | ✓   |
-| Trojan      | dialer/trojan.go       | ✓   | ✓   |
-| h_tunnel    | dialer/htunnel.go      | ✓   | ✓   |
-| VLESS       | dialer/vless.go        | ✓   | ✓   |
-| Hysteria2   | dialer/hysteria2.go    | ✓   | ✓   |
-| Shadowsocks | dialer/shadowsocks.go  | ✓   | ✓   |
-| SSH         | dialer/ssh.go          | ✓   | —   | 通过 SSH `direct-tcpip` 转发 TCP；支持密码/私钥/ssh-agent |
-| HTTP        | dialer/http.go         | ✓   | —   |
-
-### 代理链
-
-出站拨号自动跟随 `proxy` 字段构建代理链。例如：
-```yaml
-proxies:
-  - name: A
-    type: socks5
-    server: 10.0.0.1
-    port: 1080
-    proxy: B
-  - name: B
-    type: trojan
-    server: 10.0.0.2
-    port: 443
-```
-请求走 A → B → 目标。
-
----
-
-## 编译
-
-### 全平台编译（Makefile）
-
-```bash
-make all          # 编译全部 5 个目标平台
+make all          # linux/windows/windows7/darwin(amd64,arm64)
 make linux        # Linux amd64
 make windows      # Windows amd64
-make windows7     # Windows 7（需 go-legacy-win7 编译器）
+make windows7     # Windows 7（需要 GO_LEGACY_WIN7 指向兼容工具链）
 make darwin-amd64 # macOS Intel
 make darwin-arm64 # macOS Apple Silicon
 ```
 
-### Windows 7 兼容性
-
-Windows 7 使用独立编译器 `go-legacy-win7` 编译，避免新版 Go 运行时对 Win7 不兼容的问题。编译前请将 `GO_LEGACY_WIN7` 环境变量指向该编译器，例如：
-
-```powershell
-$env:GO_LEGACY_WIN7 = "C:\go-legacy-win7\bin\go.exe"
-make windows7
-```
+版本号规则：`git describe --tags --match 'v*' --always`（只匹配发布 tag，避免实验 tag 污染）。
+发布包使用 Ed25519 签名，公钥内置在程序中。
 
 ---
 
-## 运行
+## 文档索引
 
-### 环境变量
-
-| 变量       | 说明                                  |
-|-----------|--------------------------------------|
-| ADMIN_PORT | 覆盖管理面板端口（如 39999）           |
-| PHAETHON_LOG_MODULES | 按模块覆盖日志级别（如 `dialer=1,mesh=0`） |
-| PHAETHON_WORKER | 标记 worker 进程（内部使用）           |
-
-业务配置（代理、规则、映射等）不从环境变量读取，一律通过控制台或 Admin API 写入数据库。
-
-### 热重载
-
-程序不监视任何配置文件。控制台的修改会立即生效并保存到数据库 `data/phaethon.db`；
-如需从数据库重建运行态，请使用 Web UI 中的 **Reload Config** 按钮或重启进程。
+| 目录 | 内容 |
+|---|---|
+| `docs/specs/` | 配置、协议、核心、TUN、反向连接等规格 |
+| `docs/plans/` | 架构与专题设计（mesh、link quality、stripe、升级等） |
+| `docs/issues/` | 问题定位、实验数据、修复记录 |
+| `docs/runbooks/` | 部署与运维手册（不含敏感信息） |
+| `docs/tasks/` | 实施任务与状态 |
+| `docs/index.md` | 文档导航 |
 
 ---
 
-## 核心模块说明
+## 版本与发布
 
-### config（配置与路由）
-
-- `RuleConfiguration`：配置总入口，包含 Proxies / ProxyGroups / Rules / Mappings / Resolvers
-- `RuleConfiguration.Match(*AddrRequest, *Mapping) *Proxy`：按规则顺序匹配目标地址，返回代理
-- `RuleConfiguration.Resolving(*AddrRequest) *AddrRequest`：地址重写（resolver）
-- `ProxyGroup.Next()`：根据 group 类型（select/load-balance/best）选择节点
-- 健康检查：按 `health-check-interval` 定期探测，连续失败 3 次标记死亡，连续成功 2 次恢复
-
-### server（入站）
-
-所有 server 都实现 `ConnHandler` 接口：`HandleConn(net.Conn)`。
-
-新建 server 的推荐模式：
-1. 定义 `XxxServer` 嵌入 `BaseServer`
-2. 实现 `HandleConn` 处理协议握手
-3. 用 `AcceptLoop(listener, handler, name)` 启动监听循环
-4. 在 HandleConn 中解析目标地址，调用 `RuleConf.Match()` 选代理
-5. 用 `dialer.ChainDial()` 建立出站连接
-6. 用 `util.Relay()` 或 `util.RelayWithRateLimit()` 双向转发
-
-### dialer（出站）
-
-所有 dialer 都实现 `Dialer` 接口：`Dial(dstAddr, dstPort) (net.Conn, error)`。
-
-新建 dialer 的推荐模式：
-1. 定义 `XxxDialer` 嵌入 `BaseDialer`
-2. 实现 `Dial`：先 dial 到代理服务器，再发送协议特定握手
-3. 如有 UDP 支持，实现 `UDPDialer` 接口：`DialPacket() (net.PacketConn, error)`
-
-对外统一使用 `dialer.ChainDial(proxy, dstAddr, dstPort)`，它会递归处理代理链。
+- 当前发布 tag：`v0.8.2`
+- 二进制版本由 Git 描述生成；各节点在控制台/`--version` 中可查看
+- 发布流程：提交 → 推送 → 打 tag → 构建多平台 → 签名包 → 控制台激活/扩散
+- 升级状态：`GET /api/packages/pin` 返回 `current/requested/status/lastError`；
+  `DELETE` 取消尚未开始的升级请求
 
 ---
 
-## 反向连接（Reverse）
+## 安全与运维
 
-用于内网穿透场景：被动端（内网）主动向外建立连接，注册到注册表；主动端（公网）从注册表匹配这些连接来传输数据。
-
-### 消息协议
-
-| 消息 | 值 | 发送方   | 说明                              |
-|-----|---|---------|-----------------------------------|
-| PING| 1 | 客户端   | 心跳包（每 29s 发送）               |
-| PONG| 2 | 服务端   | 匹配成功通知，触发 PENG             |
-| PENG| 6 | 客户端   | 注册确认 / 握手完成                 |
-
-### 被动端（内网）
-
-配置 `reverse-address` + `reverse-proxy` 的 mapping，启动后持续向 `reverse-proxy` 建立 BIND 连接并注册到 Registry：
-
-```yaml
-mappings:
-  - name: RV_OUT
-    type: socks5
-    reverse-address: my-node
-    reverse-proxy: OUTBOUND_PROXY
-    reverse-max-connections: 3
-```
-
-### 主动端（公网）
-
-配置带 `reverse-address` 的 proxy，Match 时会从 Registry 获取已注册的连接：
-
-```yaml
-proxies:
-  - name: MY_RV
-    type: socks5
-    reverse-address: my-node
-```
-
-例如把某个目标域名/规则指向 `MY_RV`，流量就会通过 `my-node` 的反向连接转发到内网。
-
-### Registry 关键 API
-
-```go
-reverse.Refresh()                    // 刷新注册表，关闭旧连接、取消等待者
-reverse.GlobalRegistry()             // 获取当前注册表
-registry.Register(address, mc)       // 被动端注册连接
-registry.Match(address) (net.Conn, error)  // 主动端匹配连接（带 PONG/PENG 握手）
-```
-
----
-
-## TUN 模式
-
-项目包含 `tun/` 目录，实现了基于 TUN 接口 + gvisor 网络栈 + Fake-IP 的系统级流量拦截方案。
-
-TUN 模式需要管理员/root 权限运行，用于拦截系统全部流量并路由到 phaethon。
-
----
-
-## 多环境配置
-
-每个工作目录拥有独立的配置数据库，多环境请复制完整工作目录，例如：
-
-```
-./phaethon-service/
-├── phaethon
-└── data/
-    └── phaethon.db
-
-./phaethon-office/
-├── phaethon
-└── data/
-    └── phaethon.db
-```
-
-分别进入对应目录运行 `./phaethon` 即可，各实例的初始化（Admin 端口、认证、node-id）互不影响。
-
----
-
-## License
-
-Copyright (C) 2026 phaethon authors
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the **GNU Affero General Public License** as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
-
-### 商业授权
-
-AGPL v3 要求：即使仅通过网络提供服务，也必须向用户公开完整源代码（包括修改部分）。
-
-如果你需要在**不开源修改**的前提下将 phaethon 用于商业产品或服务，请通过 [GitHub Issues](https://github.com/whipfeng/phaethon/issues) 联系作者获取**商业许可**。
-
+- 敏感信息只通过控制台/Admin API 写入本地数据库；不要把证书包、私钥、密码、IP 提交到仓库。
+- 本地敏感文件放在 `archive/` 或部署目录；`archive/`、`data/`、`config.yaml`、
+  `*.p12/*.pfx/*.jks/*.key` 已在 `.gitignore` 中忽略。
+- 生产建议启用 Admin mTLS/认证；P2P 可配置 `p2p-key` 做 mesh 帧加密；SSH/SOCKS5 使用强密码或公钥。
+- 部署相关注意事项见 `docs/runbooks/`；不要在其中写入真实 IP/凭据。
+- 发现安全问题请通过内部渠道反馈，不要在公开 issue 中贴出敏感信息。

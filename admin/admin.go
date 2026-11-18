@@ -1712,8 +1712,13 @@ func (s *AdminServer) handleConnectionsPage(w http.ResponseWriter, r *http.Reque
 
 func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	nodeID := ""
+	if mc, err := db.GetMeshConfig(); err == nil && mc != nil {
+		nodeID = mc.NodeID
+	}
 	if err := s.pages.login.Execute(w, map[string]interface{}{
 		"AuthEnabled": s.config.AuthEnabled,
+		"NodeID":      nodeID,
 	}); err != nil {
 		util.LogModuleError("admin", "login template error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -1722,9 +1727,14 @@ func (s *AdminServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *AdminServer) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	nodeID := ""
+	if mc, err := db.GetMeshConfig(); err == nil && mc != nil {
+		nodeID = mc.NodeID
+	}
 	if err := s.pages.setup.Execute(w, map[string]interface{}{
 		"AuthEnabled": s.config.AuthEnabled,
 		"Username":    s.config.Username,
+		"NodeID":      nodeID,
 	}); err != nil {
 		util.LogModuleError("admin", "setup template error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)

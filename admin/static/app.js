@@ -2202,8 +2202,9 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 _topologyState.dragOffset = { x: x - _topologyState.positions[clickedNode].x, y: y - _topologyState.positions[clickedNode].y };
                 _topologyState.dragStartPos = { x: e.clientX, y: e.clientY };
                 canvas.style.cursor = 'grabbing';
-            } else {
-                // Check if clicking on a line
+            } else if (e.shiftKey || e.altKey) {
+                // Check if clicking on a line. Curve adjustment is a modifier
+                // action so a plain drag on empty canvas always pans.
                 const fullTopology = _topologyState.fullTopology;
                 if (fullTopology && fullTopology.edges) {
                     const positions = _topologyState.positions;

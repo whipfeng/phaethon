@@ -148,3 +148,29 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
   第 20 项做验证；
 - 后续 Go 版本可能不再兼容 Win7；构建侧需继续锁定已知可用工具链。
 
+
+## 6. 自启动配置（2026-11-18）
+
+### deskzq（Windows 桌面）
+
+- 采用用户登录启动：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\PhaethonTUN.lnk`
+  → `wscript.exe <部署目录>\start-phaethon.vbs`。
+- `start-phaethon.vbs` 会设置 `CurrentDirectory` 到部署目录，并以隐藏窗口启动 `phaethon.exe`。
+- 当前内置 SSH 为普通用户权限，`schtasks /SC ONLOGON` 创建任务被拒绝；因此使用 Startup 快捷方式。
+  如需“最高权限”的计划任务，需要在管理员会话中创建并勾选“使用最高权限运行”。
+- deskzq 的 TUN 当前为关闭（`enabled=false`），登录启动不需要管理员权限。
+
+### ms9 / ms10（Linux worker）
+
+- 新增并启用 `phaethon.service`：
+  - `User=migu`、`Group=migu`
+  - `WorkingDirectory=/home/migu/phaethon`
+  - `ExecStart=/home/migu/phaethon/phaethon`
+  - `Restart=always`、`RestartSec=5`
+- 原 `layer4-rules.service`（实际运行 `/home/migu/gy/trojan/layer4-go`，root）已 `disable --now`；
+  旧进程已停止，旧二进制仍保留在磁盘，未删除。
+- 验证：`systemctl is-enabled phaethon` = enabled，`is-active` = active，
+  mesh 边 `gg ↔ ms9`、`gg ↔ ms10` 正常。
+
+> 文档中的环境 IP 已替换为占位符；占位符到真实地址的映射保存在本地未跟踪的 `agents.md`
+> （`.gitignore` 已忽略），仅供本地还原使用。

@@ -26,6 +26,17 @@ deskzq 是 Windows 桌面节点，phaeton 需要在交互式桌面/计划任务�
 - 若新 worker 启动失败，watchdog 会回滚 `.old`（v103），启动后先确认版本；
 - 或提供 deskzq 的 OS SSH 入口，由 agent 继续完成升级与验证。
 
+## 恢复（2026-11-18）
+
+deskzq 已重新上线，无需再次发布：
+
+- 控制台版本：`v0.8.2`（watchdog 已将中断前换上的 exe 拉起）；
+- 拓扑：`jf ↔ deskzq` 双向边已恢复；
+- 内置 SSH（`deskzq.phn:22`）正常；
+- `/api/tun` 显示该节点 TUN 为关闭（`enabled=false`），属于该节点现有配置，未做变更。
+
+至此 9 个节点全部为 `v0.8.2`。
+
 ## 备注
 
 - 本次 publish 前 deskzq 的包已通过签名校验（id `78db5f34...`），不是包损坏；

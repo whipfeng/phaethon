@@ -75,10 +75,10 @@ type udpLegTransport struct {
 	// be IP-fragmented. Should stay 0 while the 1400 overlay MTU holds.
 	legOversize uint64 // atomic
 
-	// legCrypto seals/opens every leg datagram when the SOCKS5 link has a
-	// password. nil (or a disabled cipher) means plaintext, the legacy behavior.
-	// The passive side installs it when the SOCKS5 relay binds the leg port;
-	// the active side installs it from its proxy password at construction.
+	// legCrypto seals/opens every leg datagram with the credential of the
+	// proxy link this leg belongs to (h_tunnel/trojan password, or socks5
+	// password when configured). Empty means plaintext. Both ends derive the
+	// same key from their own copy of that proxy credential.
 	legCrypto atomic.Pointer[util.HTunnelCrypto]
 
 	// Liveness diagnostics: counters and last datagram timestamps. A leg that
@@ -101,8 +101,9 @@ type legRecvResult struct {
 // newUDPLegTransport wraps base with a direct UDP leg. The active (dial) side
 // sends to peerIP:port; the passive (listen) side binds a port from the
 // configured UDP range and replies to the source address of the peer's first
-// datagram. key is the optional mesh-wide PSK; empty keeps datagrams plaintext.
-func newUDPLegTransport(base frame.FrameTransport, active bool, key string, peerIP net.IP) *udpLegTransport {
+// datagram. legSecret is the credential of the proxy link carrying this
+// session (the proxy's own password; empty keeps datagrams plaintext).
+func newUDPLegTransport(base frame.FrameTransport, active bool, legSecret string, peerIP net.IP) *udpLegTransport {
 	t := &udpLegTransport{
 		base:   base,
 		fsm:    newUDPLegFSM(active, true, udpLegTimings{}),
@@ -113,22 +114,22 @@ func newUDPLegTransport(base frame.FrameTransport, active bool, key string, peer
 		legCh:  make(chan legRecvResult, 256),
 		closed: make(chan struct{}),
 	}
-	t.setLegCrypto(key)
+	t.setLegCrypto(legSecret)
 	go t.baseReadLoop()
 	go t.tickLoop()
 	return t
 }
 
-// setLegCrypto installs the datagram cipher derived from the mesh-wide P2P
-// key. Domain separation keeps it distinct from the stream frame cipher and
-// from h_tunnel's own crypto even when the same PSK is reused. Empty key
-// yields a disabled cipher (identity passthrough, legacy plaintext).
-func (t *udpLegTransport) setLegCrypto(key string) {
-	if key == "" {
+// setLegCrypto installs the datagram cipher derived from the proxy link's own
+// credential. Domain separation keeps it distinct from that proxy's stream
+// cipher even when the same password is reused. Empty key yields a disabled
+// cipher (identity passthrough, plaintext).
+func (t *udpLegTransport) setLegCrypto(legSecret string) {
+	if legSecret == "" {
 		t.legCrypto.Store(util.NewHTunnelCrypto(""))
 		return
 	}
-	t.legCrypto.Store(util.NewHTunnelCrypto("phaethon-udp-leg-v1:" + key))
+	t.legCrypto.Store(util.NewHTunnelCrypto("phaethon-udp-leg-v1:" + legSecret))
 }
 
 func (t *udpLegTransport) cryptoSeal(dgram []byte) []byte {

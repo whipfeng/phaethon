@@ -45,7 +45,7 @@ func (s *HTunnelServer) handleMeshWebSocket(w http.ResponseWriter, r *http.Reque
 		// transport moves to the existing session's stripe layer). Returning
 		// from this handler would close the socket, so keep it alive until the
 		// transport owner closes it.
-		go handleP2PTransport(tr, "mesh-ws:"+r.RemoteAddr)
+		go handleP2PTransport(tr, "mesh-ws:"+r.RemoteAddr, s.Password)
 		<-tr.Done()
 	}).ServeHTTP(w, r)
 }
@@ -91,7 +91,7 @@ func (s *HTunnelServer) handleBindWebSocket(w http.ResponseWriter, r *http.Reque
 			case reverse.BindPortControl:
 				handleControlConnection(conn, address)
 			case reverse.BindPortP2P:
-				handleP2PConnection(conn, address)
+				handleP2PConnection(conn, address, s.Password)
 			default:
 				reverse.HandleReverseConnection(conn, address)
 			}

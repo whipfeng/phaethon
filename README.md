@@ -30,7 +30,8 @@ L4 代理与 Mesh / P2P 覆盖网络工具（Go）。支持正向代理、反向
   select / load-balance / best 代理组；订阅拉取、正则过滤、健康检查。
 - **Mesh / P2P**：节点以 `nodeID` 组网，自动拓扑与路由；P2P 会话可跑在
   direct TCP、Trojan、h_tunnel（HTTP 长轮询 / WebSocket）等载体上；支持 UDP 直连 leg
-  （`p2p-udp`）、多 lane、按流亲和与 per-carrier writer；可选的 mesh-wide AEAD（`p2p-key`）。
+  （`p2p-udp`）、多 lane、按流亲和与 per-carrier writer；UDP leg 复用所属代理链路的
+  自身凭据做 AEAD，无全局共享密钥。
 - **TUN / 旁路网关**：Linux / Windows / macOS 的 TUN 引擎；旁路网关、DHCP、DNS 劫持与
   Fake-IP；Linux 动态 `tunN`（内核分配）与 fd 生命周期管理；链路健康循环。
 - **管理面**：Web 控制台（mTLS 或密码）、Admin API、内置 SSH（`<nodeid>.phn:22`）、
@@ -104,7 +105,8 @@ go build -o phaethon .
 - **载体**：P2P 会话可复用已配置代理作为载体（direct TCP、Trojan、h_tunnel 等）；
   h_tunnel 在支持时默认尝试 WebSocket，失败回退 HTTP 长轮询。
 - **UDP direct leg**：代理开启 `p2p-udp` 后，主动端直接向对端 UDP 端口发送；
-  可选 mesh-wide `p2p-key` 做 AEAD；不可达时回退 TCP。
+  leg 复用该代理链路自身的凭据做 AEAD（h_tunnel/Trojan 用其密码，SOCKS5 配置了密码
+  则复用、否则明文）；不可达时回退 TCP。
 - **多 lane**：按内层 5 元组做流亲和（避免同一流跨路径重排）；lane 全队列丢弃而不是阻塞
   主写循环；primary 使用独立写协程 + 有界队列，避免 primary 丢包恢复阻塞健康 lane。
 - **DNS / 域名路由**：mesh DNS 负责 `<nodeid>.phn` 与域名路由；Fake-IP 池按节点子网分配；
@@ -216,6 +218,7 @@ make darwin-arm64 # macOS Apple Silicon
 - 敏感信息只通过控制台/Admin API 写入本地数据库；不要把证书包、私钥、密码、IP 提交到仓库。
 - 本地敏感文件放在 `archive/` 或部署目录；`archive/`、`data/`、`config.yaml`、
   `*.p12/*.pfx/*.jks/*.key` 已在 `.gitignore` 中忽略。
-- 生产建议启用 Admin mTLS/认证；P2P 可配置 `p2p-key` 做 mesh 帧加密；SSH/SOCKS5 使用强密码或公钥。
+- 生产建议启用 Admin mTLS/认证；P2P 会话加密由载体协议（及 UDP leg 的代理凭据）保证；
+  SSH/SOCKS5 使用强密码或公钥。
 - 部署相关注意事项见 `docs/runbooks/`；不要在其中写入真实 IP/凭据。
 - 发现安全问题请通过内部渠道反馈，不要在公开 issue 中贴出敏感信息。

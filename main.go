@@ -282,15 +282,8 @@ func run(prev *activeResources) (*activeResources, error) {
 		meshConfig = &config.MeshConfig{}
 		util.LogModuleInfo("system", "Mesh: no config found, using defaults")
 	}
-	// Optional mesh-wide PSK for the P2P frame layer (all carriers). Empty
-	// keeps the legacy plaintext behavior; non-empty requires the same key on
-	// every peer's link endpoints.
-	p2p.GlobalP2PManager.SetP2PKey(meshConfig.P2PKey)
-	if meshConfig.P2PKey != "" {
-		util.LogModuleInfo("system", "P2P frame encryption enabled (mesh-wide PSK)")
-	} else {
-		util.LogModuleWarn("system", "P2P frame encryption is DISABLED (p2p-key is empty); mesh frames are plaintext")
-	}
+	// P2P links are protected by their carrier protocol (and the UDP leg
+	// reuses that link's own proxy credential); there is no mesh-wide key.
 
 	var meshMgr *mesh.MeshManager
 	{

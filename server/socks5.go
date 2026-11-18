@@ -159,7 +159,7 @@ func (s *Socks5Server) HandleConn(clientConn net.Conn) {
 		if dstPort == reverse.BindPortP2P {
 			// P2P connection: PORT=2 means this is a P2P channel
 			sendSocks5Response(clientConn, 0x00) // success
-			handleP2PConnection(clientConn, dstAddr)
+			handleP2PConnection(clientConn, dstAddr, s.Mapping.Password)
 			shouldClose = false
 			return
 		}

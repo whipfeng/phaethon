@@ -585,7 +585,7 @@ func (s *HTunnelServer) handleConnectionPush(w http.ResponseWriter, r *http.Requ
 				case reverse.BindPortControl:
 					go handleControlConnection(revConn, address)
 				case reverse.BindPortP2P:
-					go handleP2PConnection(revConn, address)
+					go handleP2PConnection(revConn, address, s.Password)
 				default:
 					go reverse.HandleReverseConnection(revConn, ch.address)
 				}

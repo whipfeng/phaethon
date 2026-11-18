@@ -129,7 +129,7 @@ qgw/deskzq 未发现 phaethon 相关的计划任务/注册表启动项（`schtas
 | P2-5 | `go build ./...` 失败 | `tools/` 多个 `main`；`gvisorfork` 仅 `_test.go` | tools 分目录或加 `//go:build ignore`；gvisorfork 加 doc.go 或移出 |
 | P2-6 | Windows unsafe.Pointer | `tun/route_api_windows.go:435-447` 等硬编码 80 字节行/偏移 | 改用 x/sys 结构或校验表长度 |
 | P2-7 | Win7 工具链风险 | qgw 为 Windows 7，运行 Go 1.26 构建（官方已不支持 Win7） | 锁定 Go 版本或规划 OS 升级 |
-| P2-8 | mesh 加密/认证可选 | `P2PKey` 为空时帧明文；控制面除底层代理外无认证 | 按路线图启用 PSK/加密；明确威胁模型 |
+| P2-8 | mesh 加密/认证可选 | `P2PKey` 为空时帧明文；控制面除底层代理外无认证 | 按路线图启用 PSK/加密；明确威胁模型。**2026-11-18 处理**：全局 `P2PKey` 取消，UDP leg 按链路复用代理凭据；帧层不再做全局 PSK 包装（见决策第 23 项） |
 | P2-9 | 密钥落盘明文 | 代理私钥/密码在 DB/config 明文（D31 曾决定暂缓） | 记录接受风险；后续接 OS keyring |
 | P2-10 | admin TLS 未显式 MinVersion；TLS 生成失败会回退 HTTP | `admin/admin.go:704-711`、`:787-790` | `MinVersion=TLS1.2`；未认证时拒绝明文 admin |
 | P2-11 | 死代码 | `selfUnparseable()` 无调用；`writeLastGoodWorker` 写入无人读取 | 删除或接入实际逻辑 |

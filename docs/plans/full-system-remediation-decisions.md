@@ -21,7 +21,7 @@
 | 12 | 构建卫生 | `tools/*.go` 加 `//go:build ignore`；`gvisorfork` 加 `doc.go`；临时文件移入归档目录并加入 `.gitignore` |
 | 13 | Windows unsafe.Pointer | 优先改用 `x/sys/windows` 官方 MIB 结构；没有封装则保留手写解析并加边界/长度校验 |
 | 14 | qgw Windows 7 工具链 | 归构建/运维；应用只更新支持说明（Win7 为 best-effort） |
-| 15 | mesh 明文与可选加密 | 保持 `P2PKey` 可选；控制台/P2P 页面显式提示“当前 mesh 未加密”；文档写清威胁模型 |
+| 15 | mesh 明文与可选加密 | 保持 `P2PKey` 可选；控制台/P2P 页面显式提示“当前 mesh 未加密”；文档写清威胁模型。**已被第 23 项取代** |
 | 16 | 敏感数据明文落盘 | 沿用 D31 保持明文；补启动检查（DB/config 不能全局可读）并记录接受风险 |
 | 17 | admin TLS | 显式 `MinVersion: TLS1.2`；TLS 初始化失败且未认证时拒绝启动或只绑 loopback，不允许明文 + 无认证 |
 | 18 | 升级相关死代码 | 删除 `selfUnparseable` 与 `last-good-worker` 写入；用第 7 项的 `.old` 回退替代 |
@@ -29,6 +29,7 @@
 | 20 | Win7 内嵌 SSH 交互式访问 | 先调研，结论见第二节；暂不实施 |
 | 21 | SSH Shell/PTY 交互规则 | 指定程序必须 PTY，拿不到报错；未指定自动探测，PTY 不可用回内置 Bubble Tea；交互式 shell 不引入线级；`exec` 请求了 PTY 但拿不到时拒绝执行。**已实施并在 v694 实机验证**（QG/VM/qgw），结果见 [ms10-and-win7-ssh-investigation-20261113.md](../issues/ms10-and-win7-ssh-investigation-20261113.md) 第四节 |
 | 22 | 新旧 watchdog 交接 | 升级后由旧 watchdog 启动新 watchdog，等新 worker ready 后旧进程退出；失败则 abort + 杀进程树 + 回滚。不兼容没有交接代码的旧版本（回滚到这类版本会失败并自动回滚）。首个版本发布后需对每个节点做一次 watchdog 进程重启以激活。**已实施并在 QG/VM/qgw 实机验证（699 激活，700 交接成功）**。详见 [watchdog-handoff.md](watchdog-handoff.md) |
+| 23 | P2P 密钥模型（取代第 15 项） | **取消全局 `p2p-key` 概念**（配置字段、启动注入、控制台警告全部移除）。UDP leg 复用所属代理链路自身凭据派生 AEAD：h_tunnel 用密码原文；Trojan 两端统一用 `SHA224(password)`（与服务端认证值一致）；SOCKS5 配置了密码则复用、未配置则明文。帧层不再做全局 PSK 包装，主载体与 lane 由载体协议自身保护。**已实施并单测覆盖（v0.8.4）** |
 
 ## 二、第 20 项调研：Win7 内嵌 SSH 交互式访问
 

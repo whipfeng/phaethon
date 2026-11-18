@@ -162,10 +162,6 @@ type P2PManager struct {
 	meshVIP     string
 	meshHandler MeshHandler
 
-	// p2pKey is the optional mesh-wide PSK for the P2P frame layer. Set once
-	// at startup from the mesh config; empty keeps every carrier in plaintext.
-	p2pKey atomic.Pointer[string]
-
 	// stripeIDCounter issues opaque lane nonces for StripeAttach (§5.2).
 	stripeIDCounter atomic.Uint32
 
@@ -1586,9 +1582,10 @@ func channelPriorityName(ch chan writeReq, peer *Peer) string {
 }
 
 // HandleP2PTransport runs a P2P session over an established frame transport
-// (server side). The transport is owned by the manager and closed when the
-// session ends.
-func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) {
+// (server side). legSecret is the accepting proxy's own credential; it keys
+// the optional UDP leg for this link. The transport is owned by the manager
+// and closed when the session ends.
+func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address, legSecret string) {
 	// Peek the first frame. A StripeAttach (design §5.2) binds this connection
 	// to an existing session as an extra data leg — it is not a new session
 	// and must not consume a session slot. Anything else is a primary
@@ -1682,7 +1679,7 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address string) 
 	// Passive-side UDP leg: always wrapped. It stays idle until the active
 	// peer's gossip advertises udp:true, so the active side's console switch
 	// alone decides whether a leg is attempted for this link.
-	wrapped := newUDPLegTransport(stripe, false, m.getP2PKey(), nil)
+	wrapped := newUDPLegTransport(stripe, false, legSecret, nil)
 	peer.leg = wrapped
 	peer.transport = wrapped
 	m.mu.Lock()
@@ -1774,9 +1771,8 @@ func (m *P2PManager) dialStripeLane(peer *Peer, p2pDialer dialer.P2PDialer) (uin
 		util.LogModuleInfo("p2p", "[STRIPE] lane dial via proxy %s failed: %v", peer.ProxyNameSafe(), err)
 		return 0, nil, err
 	}
-	// Lane carriers are separate connections; apply the same mesh cipher before
-	// the attach frame so the passive side can decrypt from the first frame.
-	transport = m.wrapCrypto(transport)
+	// Lane carriers are separate connections to the same proxy endpoint; the
+	// carrier protocol itself (h_tunnel/trojan crypto) protects them.
 	stripeID := m.stripeIDCounter.Add(1)
 	payload, err := frame.EncodeStripeAttach(m.meshNodeID, peer.Seq, stripeID)
 	if err != nil {
@@ -2092,7 +2088,7 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 			if peerIP == nil {
 				util.LogModuleWarn("p2p", "[P2P] proxy %s: p2p_udp on but cannot resolve the peer IP", proxy.Name)
 			} else {
-				wrapped := newUDPLegTransport(base, true, m.getP2PKey(), peerIP)
+				wrapped := newUDPLegTransport(base, true, p2pLegSecret(proxy), peerIP)
 				peer.leg = wrapped
 				peer.transportMu.Lock()
 				peer.transport = wrapped
@@ -2946,37 +2942,22 @@ func (m *P2PManager) sendPing(peer *Peer) {
 	util.LogModuleDebug("p2p", "[P2P] sent ping to %s: seq=%d", peer.ID, seq)
 }
 
+// p2pLegSecret returns the UDP-leg AEAD secret for a proxy link. There is no
+// mesh-wide key: the leg reuses the proxy's own credential end to end. Trojan
+// authenticates with SHA224(password) on the wire, so both ends must derive
+// from the value the server actually holds; every other supported carrier
+// (h_tunnel, socks5) uses the password verbatim. Empty means plaintext.
+func p2pLegSecret(proxy *config.Proxy) string {
+	if proxy == nil || proxy.Password == "" {
+		return ""
+	}
+	if strings.EqualFold(proxy.Type, config.ProxyTROJAN) {
+		return util.Sha224Hex(proxy.Password)
+	}
+	return proxy.Password
+}
+
 // SetMeshInfo configures mesh networking parameters.
-// SetP2PKey installs the optional mesh-wide P2P frame PSK. Both ends of a
-// link must use the same key; empty keeps every carrier in plaintext.
-func (m *P2PManager) SetP2PKey(key string) {
-	m.p2pKey.Store(&key)
-}
-
-// getP2PKey returns the configured PSK, or "" when encryption is off.
-func (m *P2PManager) getP2PKey() string {
-	if p := m.p2pKey.Load(); p != nil {
-		return *p
-	}
-	return ""
-}
-
-// EncryptionEnabled reports whether a mesh-wide PSK is configured. The console
-// uses it to surface the "mesh is unencrypted" warning.
-func (m *P2PManager) EncryptionEnabled() bool {
-	return m.getP2PKey() != ""
-}
-
-// wrapCrypto applies the mesh-wide frame cipher to one carrier connection.
-// Called below the stripe so lane flow-affinity hashing still sees plaintext.
-func (m *P2PManager) wrapCrypto(t frame.FrameTransport) frame.FrameTransport {
-	key := m.getP2PKey()
-	if key == "" {
-		return t
-	}
-	return frame.NewCryptoTransport(t, key)
-}
-
 func (m *P2PManager) SetMeshInfo(nodeID, vip string) {
 	m.meshEnabled = true
 	m.meshNodeID = nodeID
@@ -3360,8 +3341,9 @@ func (m *P2PManager) GetAllLinkQualityStats() map[string]struct {
 // GlobalP2PManager is the package-level P2P manager, set from main().
 var GlobalP2PManager *P2PManager
 
-// HandleP2PConnection is called from server/p2p_server.go.
-func HandleP2PConnection(conn net.Conn, address string) {
+// HandleP2PConnection is called from server/p2p_server.go. legSecret is the
+// accepting proxy's own credential, used to key the link's UDP leg.
+func HandleP2PConnection(conn net.Conn, address, legSecret string) {
 	// Unwrap ReverseFramedConn if present: P2P runs its own frame protocol
 	// (ReadFrame/WriteFrame) and must operate on the raw TCP connection.
 	// Without unwrapping, WriteFrame would double-wrap inside FrameData,
@@ -3371,7 +3353,7 @@ func HandleP2PConnection(conn net.Conn, address string) {
 	}
 	if GlobalP2PManager != nil {
 		util.LogModuleInfo("p2p", "[P2P] incoming connection from %s (address=%s)", conn.RemoteAddr(), address)
-		GlobalP2PManager.HandleP2PTransport(frame.NewStreamTransport(conn), address)
+		GlobalP2PManager.HandleP2PTransport(frame.NewStreamTransport(conn), address, legSecret)
 	} else {
 		util.LogModuleDebug("p2p", "[P2P] no P2PManager initialized, closing conn from %s", conn.RemoteAddr())
 		conn.Close()
@@ -3379,10 +3361,10 @@ func HandleP2PConnection(conn net.Conn, address string) {
 }
 
 // HandleP2PTransport is called from server-side mesh channel handlers.
-func HandleP2PTransport(t frame.FrameTransport, address string) {
+func HandleP2PTransport(t frame.FrameTransport, address, legSecret string) {
 	if GlobalP2PManager != nil {
 		util.LogModuleInfo("p2p", "[P2P] incoming mesh transport from %s", address)
-		GlobalP2PManager.HandleP2PTransport(t, address)
+		GlobalP2PManager.HandleP2PTransport(t, address, legSecret)
 	} else {
 		util.LogModuleDebug("p2p", "[P2P] no P2PManager initialized, dropping transport from %s", address)
 		t.Close()

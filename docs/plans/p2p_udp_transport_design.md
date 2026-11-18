@@ -44,7 +44,7 @@ WriteTo(frame, 0.0.0.0:P) ──UDP通道──► 收包分支：dst=0.0.0.0:P
 - **datagram 目标 `0.0.0.0:P`**：unspecified 地址不可能与真实互联网目标冲突；SOCKS5 回包封头 src 原样回显目标（`server/socks5.go:593` 现有机制），主动端可校验 src 端口 == P
 - **载荷** = 现有帧格式一字节不变
 - **MTU 预算在源头保证（R3，2026-11-13）**：不做应用层分片，也不按帧大小切换载体；而是把内层包限制在 1400B（`tun.OverlayMTU`，三平台下发到 TUN 适配器 + gvisor fork 广告 MSS clamp 1360），使每个 UDP 数据报（1451B）天然低于 1500 路径 MTU。这样整条流始终留在 UDP 单载体、有序、无分片。超预算帧只计数/告警（`legOversize`），仍走 UDP 由 IP 层重组——出现即说明有内层包绕过了 MTU/MSS 约束，是 bug 而非路由依据
-- **加密统一在 frame 层（R4，2026-11-13）**：不在 UDP leg 上做单独加密。mesh 配置里的 `p2p-key`（节点级 PSK，空=明文）对所有 P2P 载体生效：frame 载荷用 XChaCha20-Poly1305（24B nonce + 16B tag），帧类型保持明文以便 UDP leg/优先级路由。UDP leg 使用同一 PSK（域分隔 `phaethon-udp-leg-v1:`）封包，因此加密后单报最大 1491B（1400+20+3+40+8+20），仍 <1500，但 1492 的 PPPoE 路径只剩 1B 余量
+- **加密按链路复用代理凭据（R6，2026-11-18）**：没有全局 `p2p-key`。UDP leg 直接复用所属代理链路的自身凭据派生 AEAD 密钥（域分隔 `phaethon-udp-leg-v1:`）：h_tunnel/Trojan 用其密码（Trojan 两端统一用 `SHA224(password)`，与服务端认证值一致），SOCKS5 配置了密码则复用、未配置则明文。两端各自从本地同一代理配置派生，无需额外密钥分发。P2P 帧层不再有全局 PSK；主载体由载体协议自身保护（h_tunnel/Trojan 加密，SOCKS5 依赖链路环境），lane 亦然。加密后单报最大 1491B（1400+20+3+40+8+20），仍 <1500，但 1492 的 PPPoE 路径只剩 1B 余量
 - **直连 UDP，弃用 UDP ASSOCIATE（R5，2026-11-13）**：代理只负责可靠控制通道，不再借用 SOCKS5/Trojan 的 UDP relay。
   - 主动端 A：本地 bind 一个临时 UDP socket，目标 = 控制链路对端 IP（`proxy.Server` / `proxy.URL` 的 host）+ 被动端 gossip 回来的 `udpPort:P`。
   - 被动端 B：从 `dialer.ListenUDP()`（与 SOCKS5 relay 相同的配置端口范围）bind 真实 socket :P，收到 A 的包后用包源地址回。

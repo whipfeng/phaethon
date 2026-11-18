@@ -98,6 +98,17 @@
                 <h4 data-i18n="mesh.topology">Topology</h4>
             </div>
             <div class="mesh-topology-view" id="mesh-topology-view">
+                <div class="mesh-topo-toolbar">
+                    <button type="button" class="mesh-topo-btn" onclick="meshTopoZoomBy(1.2)" data-i18n-title="mesh.zoomIn" title="放大">＋</button>
+                    <button type="button" class="mesh-topo-btn" onclick="meshTopoZoomBy(1/1.2)" data-i18n-title="mesh.zoomOut" title="缩小">－</button>
+                    <button type="button" class="mesh-topo-btn" onclick="meshTopoFit()" data-i18n-title="mesh.fitView" title="适应画布">⤢</button>
+                    <button type="button" class="mesh-topo-btn" onclick="meshTopoLocateSelf()" data-i18n-title="mesh.locateSelf" title="定位本机">⌖</button>
+                    <button type="button" class="mesh-topo-btn" onclick="meshTopoRelayout()" data-i18n-title="mesh.relayout" title="重置布局">↺</button>
+                    <label class="mesh-topo-toggle"><input type="checkbox" id="mesh-topo-metrics" checked onchange="meshTopoToggleMetrics(this.checked)"> <span data-i18n="mesh.showMetrics">指标</span></label>
+                    <select id="mesh-topo-node-select" class="mesh-topo-select" onchange="meshTopoLocateNode(this.value)">
+                        <option value="" data-i18n="mesh.locateNode">定位节点…</option>
+                    </select>
+                </div>
                 <canvas id="mesh-topology-canvas" width="400" height="200"></canvas>
             </div>
             <table class="mesh-peer-table">

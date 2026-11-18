@@ -144,6 +144,32 @@ nginx/LB 链路窗口主导，代码侧只能保证 primary 写 HOL 不扩散到
 **后续**：继续保留长传输采样；出现慢窗口时同时记录交互探针、leg 计数、srtt/retrans、CPU，
 避免把链路窗口误判为代码回归。
 
+## 最终定位（2026-11-18）：qg 实验 env 是慢窗口主因
+
+qg 服务此前带有实验环境变量：
+
+```
+PHAETHON_CWND_BDP_GAIN=16
+PHAETHON_LANE_DIAG=1
+PHAETHON_CARRIER_STALL_MS=2000
+PHAETHON_INNER_MAX_RTO_MS=1000
+```
+
+移除全部实验 env（使用默认）后，同路径同窗口复测：
+
+| 测试 | 结果 |
+|---|---|
+| 300MB qg→jf | **31s（~10.1MB/s，rc=0）**；此前同路径 180s 未完成（stall） |
+| 10×46.7MB qg→jf | 4.83 / 5.15 / 5.42 / 4.98 / 5.09 / 5.06 / 5.24 / 5.19 / 5.33 / 5.24s，中位 **~5.15s（~9.5MB/s）**，**无 13.2s 离群** |
+| 交互探针 | 尾部 0.18–0.55s，少量 0.6–1.1s；批量结束后回落到 0.18–0.19s |
+
+**结论修正**：46.7MB 慢窗口不是 nginx/LB 的必然结果；主因是 qg 的实验 env 组合导致
+carrier/lane 行为异常（BDP 16 + lane diag + stall/RTO）。生产 qg 已改为默认 env，
+单跳吞吐恢复到 ~9.5–10.1MB/s（历史 mesh 8.9 / OS 7.9–10.1），慢窗口消失。
+
+**采样注意**：per-second 对 66MB 日志做 `grep` 会把 qg 打入 I/O 饱和（100% io、D 状态），
+本身上造成 stall；复现时改为只采 `ss -tin` + `top`，日志在测试后一次性分析。
+
 ## 备注
 
 - 测试后需删除 `/tmp/bulk64`（qg `/tmp` 为 236MB tmpfs，测试前一度 100% 满）。

@@ -127,6 +127,23 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   - 最终 9 节点全部 `v0.8.0-684-g6958a6e`，admin/mesh/内置 SSH 基础功能正常；
   - 多数节点的 supervisor 仍是 674（worker 已是 684），下次服务重启更新。
 
+### v0.8.3-2-gbc45876 全量部署（2026-11-19，第 23 项）
+
+- 构建 4 个签名包：linux/amd64、windows/amd64、windows7/amd64、darwin/amd64；
+ 版本 `v0.8.3-2-gbc45876`（第 23 项提交后的 `git describe`）。
+- 先灰度 vm、qg：upload+activate 自升级均 `succeeded`；随后按 mb → ms9 → ms10 →
+  gg → jf → qgw → deskzq 顺序全量，9 节点全部 `v0.8.3-2-gbc45876`、`status=succeeded`。
+- 验证：
+  - 拓扑 9 节点 / 22 条边；deskzq↔jf、qgw↔jf/mb、gg↔ms10 双边齐全；
+  - vm↔qg 的 SOCKS5 UDP leg 保持 `transport=udp`、`phase=active`，in/out 持续增长、
+    `drops=0`（该链路密码为空，按设计为明文 leg）；所有节点 `meshInboundDrops=0`、
+    `tunWriteDrops=0`；qg 的 jf peer 在 jf 重启瞬间累计 334 次 DataDrops，重启后不再增长；
+  - VM/QG 出网 204、DNS `git.migu.cn → 100.135.0.11` 正常；控制台标题带 nodeID。
+- 说明：当前在用的 UDP leg（vm↔qg、qg 的 MB_S5）密码为空，因此本次实机未触发
+ 非空密钥的 leg 加解密路径；该路径由 `TestP2PLegSecretPerProxy` 与
+  `TestUDPLegCryptoRoundTrip/WrongSecretDrops` 覆盖。后续任一链路启用非空密码 +
+  `p2p-udp` 时，两端升级到本版本即可自动加密。
+
 ### ms10（worker3）异常定位
 
 - 现象：admin 上传 TLS reset、`ms10.phn` SSH reset、OS SSH banner 超时、所有节点无 ms10 的

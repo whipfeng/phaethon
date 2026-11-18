@@ -76,7 +76,7 @@ proxies:
     proxy: B
   - name: B
     type: trojan
-    server: 10.0.0.2
+    server: <IP_OTHER_059>
     port: 443
 ```
 

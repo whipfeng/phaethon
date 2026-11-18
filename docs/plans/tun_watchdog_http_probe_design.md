@@ -264,14 +264,14 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 
 **实测发现严重缺陷**：Go 的纯 Go DNS 实现（`PreferGo: true`）在 Windows 上会**枚举所有网络接口的 DNS 服务器**，并向它们**并行发送查询**。在 TUN 模式下，系统存在两组 DNS 服务器：
 
-- TUN 适配器（phaethontun）：192.0.2.2（TUN DNS hijacker，返回 Fake-IP）
-- 物理网卡（以太网）：172.30.0.1（本地网关 DNS，返回真实 IP）
+- TUN 适配器（phaethontun）：<IP_OTHER_004>（TUN DNS hijacker，返回 Fake-IP）
+- 物理网卡（以太网）：<IP_OTHER_011>（本地网关 DNS，返回真实 IP）
 
 纯 Go 解析器同时向两者发送查询，物理 DNS（局域网，延迟低，且通常有 DNS 缓存命中）总是比 TUN DNS hijacker 更快返回结果。最终拿到的是**真实 IP**而非 Fake-IP。
 
 **速度对比分析（实测数据）**：
 
-| | 物理 DNS（172.30.0.1） | TUN DNS hijacker（192.0.2.2） |
+| | 物理 DNS（<IP_OTHER_011>） | TUN DNS hijacker（<IP_OTHER_004>） |
 |---|---|---|
 | 路径 | Go socket → 物理网卡 → 网关（缓存命中）→ 返回 | Go socket → Wintun → gVisor netstack → hijacker handler → Fake-IP pool → netstack 回写 → Wintun 注入 → 返回 |
 | 开销 | 局域网 UDP 往返 + 网关缓存命中 | 用户态包处理（Wintun 收包/注入 + gVisor 解析/构建） |
@@ -300,13 +300,13 @@ gVisor netstack 的路由和接口选择能力确实存在，但它解决的是"
 
 | 解析方式 | 结果 | 是否走 TUN DNS hijacker |
 |----------|------|------------------------|
-| `PreferGo: true` | 真实 IP（104.16.132.229） | ❌ 绕过 |
+| `PreferGo: true` | 真实 IP（<IP_OTHER_110>） | ❌ 绕过 |
 | `PreferGo: false` | Fake-IP（mesh subnet） | ✅ 正确 |
-| 显式查询 192.0.2.2 | Fake-IP（mesh subnet） | ✅ 正确 |
+| 显式查询 <IP_OTHER_004> | Fake-IP（mesh subnet） | ✅ 正确 |
 
 #### 3.8.2 修正方案：系统 DNS（`PreferGo: false`）
 
-使用系统 DNS 解析器（`PreferGo: false`）。Windows 系统 DNS 遵循接口 metric 优先级：phaethontun 的 metric=5 远低于以太网，因此 DNS 查询**只会**发送到 TUN DNS hijacker（192.0.2.2），返回 Fake-IP。
+使用系统 DNS 解析器（`PreferGo: false`）。Windows 系统 DNS 遵循接口 metric 优先级：phaethontun 的 metric=5 远低于以太网，因此 DNS 查询**只会**发送到 TUN DNS hijacker（<IP_OTHER_004>），返回 Fake-IP。
 
 ```go
 // 使用系统 DNS 解析器，确保查询走 TUN DNS hijacker 返回 Fake-IP
@@ -434,7 +434,7 @@ probe 失败次数由 watchdog 子进程写入自身日志（`phaethon-watchdog.
 
 1. 看门狗使用 `PreferGo: true` 的纯 Go DNS 解析器解析探测域名
 2. Go 纯 Go DNS 实现枚举所有接口的 DNS 服务器并**并行查询**
-3. 物理网卡 DNS（172.30.0.1，局域网延迟低）比 TUN DNS hijacker（192.0.2.2，需 gVisor netstack 处理）更快返回
+3. 物理网卡 DNS（<IP_OTHER_011>，局域网延迟低）比 TUN DNS hijacker（<IP_OTHER_004>，需 gVisor netstack 处理）更快返回
 4. 看门狗拿到**真实 IP**（而非 Fake-IP），直接连接真实 IP
 5. 虽然 `IP_UNICAST_IF` 绑定到 TUN 接口，流量确实经过 TUN
 6. 但 TUN 引擎 `handleConn()` 中 `LookupDomain()` 找不到 Fake-IP 对应的域名映射

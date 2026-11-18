@@ -8,12 +8,12 @@
 - ✅ IPIP 封装已执行（QG 日志确认）
 - ✅ IPIP 解封已执行（VM 日志确认）
 - ✅ RouteSelector 决策正确（branch=ipip, needIPIP=true）
-- ✅ **SNAT 已修复**：内层包源地址正确（100.0.0.1 VIP，不是 192.168.1.88 LAN 地址）
+- ✅ **SNAT 已修复**：内层包源地址正确（<IP_QG_VIP> VIP，不是 <IP_MB_LAN> LAN 地址）
 - ✅ SSH 连接成功建立（VM netstat 显示 ESTABLISHED）
 
 **根本原因（已确认，2026-10-14 10:30）**：
 
-1. **问题现象**：内层包到达 VM gVisor 时端口为 0（`[192.168.1.88:0->172.30.0.2:0]`）
+1. **问题现象**：内层包到达 VM gVisor 时端口为 0（`[<IP_MB_LAN>:0-><IP_OTHER_010>:0]`）
 2. **代码分析**：
    - `mesh/ipip_tunnel.go:Decapsulate()` 创建 innerPkt，设置 NetworkHeader
    - 但**未解析 TransportHeader**（TCP/UDP 头部）
@@ -39,17 +39,17 @@
    - ⏳ 待触发 IPIP 流量验证
 
 **验证方法**：
-- 需要从 LAN 机器通过 QG 旁路网关发起 SSH 到 172.30.0.2
+- 需要从 LAN 机器通过 QG 旁路网关发起 SSH 到 <IP_OTHER_010>
 - 或找到其他方式触发 IPIP 封装流量
 - 检查 VM 日志是否出现 `parsing transport header for inner packet` 日志
 - 检查端口是否正确解析（不再是 0）
 - 检查 SSH 连接是否成功建立
 
 **最新发现（2026-10-14 12:10）**：
-1. ✅ Mac 发包正确：src=192.168.1.88 → dst=172.30.0.2，目标 MAC=QG eth1
-2. ✅ QG eth1 收到包：tcpdump 抓到 192.168.1.88 → 172.30.0.2
-3. ✅ QG tun0 收到包：tcpdump 抓到 192.168.1.88 → 172.30.0.2
-4. ❌ QG readLoop 没有读到包：日志中没有 TUN-READ 172.30.0.2
+1. ✅ Mac 发包正确：src=<IP_MB_LAN> → dst=<IP_OTHER_010>，目标 MAC=QG eth1
+2. ✅ QG eth1 收到包：tcpdump 抓到 <IP_MB_LAN> → <IP_OTHER_010>
+3. ✅ QG tun0 收到包：tcpdump 抓到 <IP_MB_LAN> → <IP_OTHER_010>
+4. ❌ QG readLoop 没有读到包：日志中没有 TUN-READ <IP_OTHER_010>
 5. ❌ 没有 IPIP 封装：因为 readLoop 没有读到包
 
 **根因分析（2026-10-14 12:10）**：
@@ -68,17 +68,17 @@
 - 尝试从 QG 本地发包到 tun0，看 readLoop 是否能读到
 
 **历史发现（2026-10-14 10:12）**：
-1. ✅ IPIP 解封装成功：`Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64`
-2. ✅ 内层包到达 handleValidatedPacket：`[192.168.1.88:0->172.30.0.2:0] handleValidatedPacket proto=6 nicID=3 nicName=link_qg`
+1. ✅ IPIP 解封装成功：`Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64`
+2. ✅ 内层包到达 handleValidatedPacket：`[<IP_MB_LAN>:0-><IP_OTHER_010>:0] handleValidatedPacket proto=6 nicID=3 nicName=link_qg`
 3. ✅ LOCAL_DELIVERY 触发：`localStack=true`
 4. ✅ deliverPacketLocally 调用
-5. ⚠️ **关键问题**：日志显示 `[192.168.1.88:0->172.30.0.2:0]`，**端口是 0，不是 22**！
+5. ⚠️ **关键问题**：日志显示 `[<IP_MB_LAN>:0-><IP_OTHER_010>:0]`，**端口是 0，不是 22**！
 6. ❌ 没有看到 `DeliverTransportPacket` 的 demux 日志（我添加的条件日志没触发）
 
 **最新发现（2026-10-14 07:09）**：
-1. ✅ QG RouteSelector 正确决策：`dst=172.30.0.2 branch=ipip prefix=172.30.0.0/24 target=vm linkNIC=4 egressEIP=100.1.0.4`
-2. ✅ QG IPIP 封装执行：`[IPIP-ENCAP] outer_header: src=100.0.0.4 dst=100.1.0.4 proto=4 ttl=64 totalLen=72`
-3. ✅ QG Link NIC 接收：`[QDISC] WritePacket: src=100.0.0.4 dst=100.1.0.4 proto=4 linkWriterType=*mesh.LinkNIC`
+1. ✅ QG RouteSelector 正确决策：`dst=<IP_OTHER_010> branch=ipip prefix=<IP_OTHER_016>/24 target=vm linkNIC=4 egressEIP=<IP_OTHER_015>`
+2. ✅ QG IPIP 封装执行：`[IPIP-ENCAP] outer_header: src=<IP_OTHER_014> dst=<IP_OTHER_015> proto=4 ttl=64 totalLen=72`
+3. ✅ QG Link NIC 接收：`[QDISC] WritePacket: src=<IP_OTHER_014> dst=<IP_OTHER_015> proto=4 linkWriterType=*mesh.LinkNIC`
 4. ✅ P2P 连接正常：`peer=6 node=vm`，QG-VM 双向通信正常（TCP 流量正常）
 5. ❌ **Link NIC 未发送 IPIP 包**：有 `[QDISC] WritePacket` 但没有 `[LINKNIC-WRITEPACKETS]` 日志
 6. ❌ VM 未收到 IPIP 包：没有 `[TUNNEL-DECAP]` 日志
@@ -95,8 +95,8 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 
 **测试场景**：
 - 发起方：本地 Mac → QG 旁路网关 → QG TUN
-- 目标：VM 通告的 172.30.0.0/24（非 mesh 路由）
-- 具体测试：SSH 到 Docker@172.30.0.2:22
+- 目标：VM 通告的 <IP_OTHER_016>/24（非 mesh 路由）
+- 具体测试：SSH 到 Docker@<IP_OTHER_010>:22
 
 **现象**：
 - IPIP 封装正常（QG → VM）
@@ -111,14 +111,14 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 ```
 原来的流程：
   Windows 包 → NIC 1 (tun) → gVisor 网络栈
-  → iptables SNAT (src: 100.0.0.2 → VIP)
+  → iptables SNAT (src: <IP_QG_HOST> → VIP)
   → RouteSelector 决策
   → FindRoute 构建路由
   → 发送
 
 插入 IPIP 封装后：
   Windows 包 → NIC 1 (tun) → gVisor 网络栈
-  → iptables SNAT (src: 100.0.0.2 → VIP)
+  → iptables SNAT (src: <IP_QG_HOST> → VIP)
   → RouteSelector 决策 (Branch 3: NeedIPIP=true)
   → FindRoute 构建路由
   → 【插入】IPIP 封装（在发送前的最后一步）
@@ -159,9 +159,9 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 - [x] IPIP 封装时，内层包的 src 是否是 VIP？
 
 **诊断结果**：
-- ✅ **SNAT 确实执行**：`/tmp/phaethon-nat-action-debug.log` 显示 `hook=1 srcBefore=100.0.0.2 srcAfter=100.0.0.1`
-- ✅ **SNAT 目标地址正确**：VIP=100.0.0.1
-- ✅ **IPIP 封装时内层包 src 正确**：`inner=100.0.0.1->172.30.0.2`（2026-10-14 14:17 验证）
+- ✅ **SNAT 确实执行**：`/tmp/phaethon-nat-action-debug.log` 显示 `hook=1 srcBefore=<IP_QG_HOST> srcAfter=<IP_QG_VIP>`
+- ✅ **SNAT 目标地址正确**：VIP=<IP_QG_VIP>
+- ✅ **IPIP 封装时内层包 src 正确**：`inner=<IP_QG_VIP>-><IP_OTHER_010>`（2026-10-14 14:17 验证）
 - ✅ **代码逻辑正确**：`ipv4.go:940` 在 IPIP 封装前调用 `CheckPostrouting`（SNAT）
 - ✅ **根因已修复**：`pkt.InputNICName` 在转发前已设置，SNAT 规则正确匹配
 
@@ -176,11 +176,11 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 
 ### 问题2：VM 解封后的路由决策
 
-**假设**：解封后内层包（src=VIP, dst=172.30.0.2）重新进入 gVisor，RouteSelector 应该正确决策。
+**假设**：解封后内层包（src=VIP, dst=<IP_OTHER_010>）重新进入 gVisor，RouteSelector 应该正确决策。
 
 **需要验证**：
 - [ ] 解封后内层包的 InputNIC 是什么？
-- [ ] RouteSelector 对 dst=172.30.0.2 的决策是什么？
+- [ ] RouteSelector 对 dst=<IP_OTHER_010> 的决策是什么？
 - [ ] TCP Forwarder 是否收到连接请求？
 - [ ] Forwarder 创建的 endpoint route 是什么？
 
@@ -196,7 +196,7 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 
 ### 问题3：VM 回程路由
 
-**假设**：SSH 响应（src=172.30.0.2, dst=VIP）应该通过 Link NIC 发送回 QG。
+**假设**：SSH 响应（src=<IP_OTHER_010>, dst=VIP）应该通过 Link NIC 发送回 QG。
 
 **需要验证**：
 - [ ] SSH 响应包的 dst（VIP）是什么？
@@ -260,35 +260,35 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 ### 阶段1：QG SNAT 验证
 1. 在 QG 添加 SNAT 诊断日志
 2. 重新编译部署 QG
-3. 测试 SSH 到 172.30.0.2:22
+3. 测试 SSH 到 <IP_OTHER_010>:22
 4. 检查 QG 日志，确认 SNAT 是否执行
 
 **实际执行结果**：
 - ✅ 发现 QG 已有 SNAT 诊断日志（`/tmp/phaethon-nat-action-debug.log`）
-- ✅ SNAT 确实执行：`hook=1 srcBefore=100.0.0.2 srcAfter=100.0.0.1`
+- ✅ SNAT 确实执行：`hook=1 srcBefore=<IP_QG_HOST> srcAfter=<IP_QG_VIP>`
 - ❌ **测试方法问题**：尝试了多种方式触发 IPIP 隧道流量，但都不成功
 
 **测试方法记录**：
 1. ❌ **本地 Mac 发起 nc/curl/ping**：流量没有通过 QG 旁路网关（原因不明）
 2. ❌ **QG 本地发起 curl/nc/ping**：流量没有走 tun0（tcpdump 显示 0 包）
-3. ❌ **QG 本地 tcpdump 抓包**：tun0 有 mesh 流量，但没有 172.30.0.2 流量
+3. ❌ **QG 本地 tcpdump 抓包**：tun0 有 mesh 流量，但没有 <IP_OTHER_010> 流量
 4. ❌ **QG 本地 SSH 测试**：SSH 超时，tcpdump 显示 0 包
 
 **QG 路由确认（2026-10-14）**：
-- ✅ **精确路由存在且优先级最高**：`172.30.0.2 dev tun0 scope link`（/32 主机路由）
-- ✅ **路由决策正确**：`ip route get 172.30.0.2` 返回 `172.30.0.2 dev tun0 src 100.0.0.2`
+- ✅ **精确路由存在且优先级最高**：`<IP_OTHER_010> dev tun0 scope link`（/32 主机路由）
+- ✅ **路由决策正确**：`ip route get <IP_OTHER_010>` 返回 `<IP_OTHER_010> dev tun0 src <IP_QG_HOST>`
 - ✅ **tun0 设备状态正常**：UP, POINTOPOINT, forwarding=1
-- ✅ **FIB 树确认**：`/proc/net/fib_trie` 显示 172.30.0.2 /32 link UNICAST
+- ✅ **FIB 树确认**：`/proc/net/fib_trie` 显示 <IP_OTHER_010> /32 link UNICAST
 - ✅ **QG 本地流量确实经过 tun0**：tcpdump 抓到 SYN 包 `100.0.0.2.37898 > 172.30.0.2.22`
 - ❌ **gVisor 未处理包**：tcpdump 显示包到达 tun0，但 gVisor 没有任何日志（无 TUN-READ、无 IPIP-ENCAP）
 - ❌ **readLoop 可能未运行**：没有找到 "readLoop started" 日志
 
 **关键发现（2026-10-14 01:10）**：
-- ✅ **路由曾丢失**：QG OS 路由表中没有 172.30.0.2 路由，手动添加后恢复
+- ✅ **路由曾丢失**：QG OS 路由表中没有 <IP_OTHER_010> 路由，手动添加后恢复
 - ✅ **tcpdump 确认包到达 tun0**：`100.0.0.2.37898 > 172.30.0.2.22: Flags [S]`
-- ❌ **gVisor 未读取包**：主日志和服务日志均无 172.30.0.2 相关处理记录
+- ❌ **gVisor 未读取包**：主日志和服务日志均无 <IP_OTHER_010> 相关处理记录
 - ❌ **IPIP 封装未执行**：最近的 SSH 测试没有产生任何 IPIP-ENCAP 日志
-- ✅ **早期 IPIP 封装成功**：之前从旁路网关（192.168.1.88）的流量成功执行了 IPIP 封装
+- ✅ **早期 IPIP 封装成功**：之前从旁路网关（<IP_MB_LAN>）的流量成功执行了 IPIP 封装
 
 **当前问题**：
 - ❌ **gVisor readLoop 可能未运行或未读取 tun0**
@@ -305,13 +305,13 @@ IPIP 隧道（RouteSelector Branch 3：非 mesh 通告路由）双向通信失�
 ### 阶段2：VM 解封后流程验证
 1. 在 VM 添加解封后诊断日志
 2. 重新编译部署 VM
-3. 测试 SSH 到 172.30.0.2:22
+3. 测试 SSH 到 <IP_OTHER_010>:22
 4. 检查 VM 日志，确认解封后流程
 
 ### 阶段3：VM 回程验证
 1. 在 VM 添加回程诊断日志
 2. 重新编译部署 VM
-3. 测试 SSH 到 172.30.0.2:22
+3. 测试 SSH 到 <IP_OTHER_010>:22
 4. 检查 VM 日志，确认回程路由
 
 ## 阶段性经验教训（避免重复走弯路）
@@ -333,7 +333,7 @@ ssh ... "timeout 8 bash -c 'tcpdump ... & ...'"
 # 后台启动测试，前台抓包（确保 tcpdump 先启动）
 ssh ... "nohup timeout 5 ssh test > /tmp/test.log 2>&1 &
 sleep 1
-timeout 3 tcpdump -i tun0 -n 'host 172.30.0.2' -c 10"
+timeout 3 tcpdump -i tun0 -n 'host <IP_OTHER_010>' -c 10"
 ```
 
 **教训**：
@@ -394,8 +394,8 @@ timeout 3 tcpdump -i tun0 -n 'host 172.30.0.2' -c 10"
 ### 已确认的事实（不需要重复验证）
 
 1. **✅ 路由配置正确**：
-   - `172.30.0.2 dev tun0 scope link`（/32 精确路由，优先级最高）
-   - `ip route get 172.30.0.2` 返回 `172.30.0.2 dev tun0 src 100.0.0.2`
+   - `<IP_OTHER_010> dev tun0 scope link`（/32 精确路由，优先级最高）
+   - `ip route get <IP_OTHER_010>` 返回 `<IP_OTHER_010> dev tun0 src <IP_QG_HOST>`
    - tun0 设备状态：UP, POINTOPOINT, forwarding=1
 
 2. **✅ QG 本地流量经过 tun0**：
@@ -403,11 +403,11 @@ timeout 3 tcpdump -i tun0 -n 'host 172.30.0.2' -c 10"
    - 包进入 gVisor：`TUN-READ-TEST` 日志确认
 
 3. **✅ RouteSelector 决策正确**：
-   - `branch=ipip, needIPIP=true, egressNIC=12, egressEIP=100.1.0.4`
-   - 匹配通告路由：`prefix=172.30.0.0/24, target=vm`
+   - `branch=ipip, needIPIP=true, egressNIC=12, egressEIP=<IP_OTHER_015>`
+   - 匹配通告路由：`prefix=<IP_OTHER_016>/24, target=vm`
 
 4. **✅ SNAT 逻辑工作正常**：
-   - `/tmp/phaethon-nat-action-debug.log` 显示 `hook=1 srcBefore=100.0.0.2 srcAfter=100.0.0.1`
+   - `/tmp/phaethon-nat-action-debug.log` 显示 `hook=1 srcBefore=<IP_QG_HOST> srcAfter=<IP_QG_VIP>`
    - 代码逻辑正确：`ipv4.go:940` 在 IPIP 封装前调用 `CheckPostrouting`
 
 ### 当前卡点
@@ -461,10 +461,10 @@ grep 'FORWARD' /root/phaethon-service.log | grep '172.30'
 **正确做法**：
 ```bash
 # 精确搜索特定目标的日志
-grep '172.30.0.2' /root/phaethon-service.log | tail -20
+grep '<IP_OTHER_010>' /root/phaethon-service.log | tail -20
 
 # 搜索特定函数的日志
-grep 'IPIP-ENCAP.*172.30.0.2' /root/phaethon-service.log | tail -10
+grep 'IPIP-ENCAP.*<IP_OTHER_010>' /root/phaethon-service.log | tail -10
 
 # 搜索 CheckPostrouting 的日志
 grep 'CheckPostrouting.*172.30' /root/phaethon-service.log | tail -10
@@ -498,35 +498,35 @@ grep 'CheckPostrouting.*172.30' /root/phaethon-service.log | tail -10
 
 **QG 端日志**（`/root/phaethon-service.log`）：
 ```
-[FORWARD-DEBUG] forwardUnicastPacket ENTRY: src=100.0.0.2 dst=172.30.0.2 proto=6 ttl=63
-[ROUTE-SELECTOR] FindRoute localAddr= remoteAddr=172.30.0.2 inputNIC=0 -> decision: EgressNIC=4 NeedIPIP=true LocalStack=false
-[FORWARD-DEBUG] FindRoute SUCCESS: src=100.0.0.2 dst=172.30.0.2
-[GVISOR-TRACE] forwardUnicastPacket post-FindRoute: src=100.0.0.2 dst=172.30.0.2 proto=6 ttl=63 nicID=4 needIPIP=true
-[IPIP-ENCAP] start: inner=100.0.0.2->172.30.0.2 proto=6 len=60, outer=100.0.0.4->100.1.0.4 egressEIP=100.1.0.4 linkNIC=4
-[IPIP-ENCAP] forwardPacketWithRoute OK: inner=100.0.0.2->172.30.0.2 outer=100.0.0.4->100.1.0.4
+[FORWARD-DEBUG] forwardUnicastPacket ENTRY: src=<IP_QG_HOST> dst=<IP_OTHER_010> proto=6 ttl=63
+[ROUTE-SELECTOR] FindRoute localAddr= remoteAddr=<IP_OTHER_010> inputNIC=0 -> decision: EgressNIC=4 NeedIPIP=true LocalStack=false
+[FORWARD-DEBUG] FindRoute SUCCESS: src=<IP_QG_HOST> dst=<IP_OTHER_010>
+[GVISOR-TRACE] forwardUnicastPacket post-FindRoute: src=<IP_QG_HOST> dst=<IP_OTHER_010> proto=6 ttl=63 nicID=4 needIPIP=true
+[IPIP-ENCAP] start: inner=<IP_QG_HOST>-><IP_OTHER_010> proto=6 len=60, outer=<IP_OTHER_014>-><IP_OTHER_015> egressEIP=<IP_OTHER_015> linkNIC=4
+[IPIP-ENCAP] forwardPacketWithRoute OK: inner=<IP_QG_HOST>-><IP_OTHER_010> outer=<IP_OTHER_014>-><IP_OTHER_015>
 ```
 
 **VM 端日志**（`C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log`）：
 ```
-[IPIP-TUNNEL] ShouldDecapsulate: outer dst=100.1.0.4 local EIP=100.1.0.4 match=true
-[IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=100.0.0.2->172.30.0.2 proto=6 len=60
+[IPIP-TUNNEL] ShouldDecapsulate: outer dst=<IP_OTHER_015> local EIP=<IP_OTHER_015> match=true
+[IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_QG_HOST>-><IP_OTHER_010> proto=6 len=60
 [IPIP-TUNNEL] Decapsulate: after Consume innerPktLen=60 networkHdrLen=60
 ```
 
 **确认的事实**：
 1. ✅ IPIP 封装成功（QG → VM）
 2. ✅ IPIP 解封成功（VM 收到）
-3. ✅ 内层包正确：src=100.0.0.2, dst=172.30.0.2
-4. ✅ 外层头正确：src=100.0.0.4 (QG EIP), dst=100.1.0.4 (VM EIP)
+3. ✅ 内层包正确：src=<IP_QG_HOST>, dst=<IP_OTHER_010>
+4. ✅ 外层头正确：src=<IP_OTHER_014> (QG EIP), dst=<IP_OTHER_015> (VM EIP)
 
 ### ❌ 当前卡点：SNAT 未执行
 
-**问题**：内层包的 src 是 100.0.0.2，不是 VIP（100.0.0.1）
+**问题**：内层包的 src 是 <IP_QG_HOST>，不是 VIP（<IP_QG_VIP>）
 
-**预期**：IPIP 封装前应该先执行 SNAT，把 src 从 100.0.0.2 改成 VIP（100.0.0.1）
+**预期**：IPIP 封装前应该先执行 SNAT，把 src 从 <IP_QG_HOST> 改成 VIP（<IP_QG_VIP>）
 
 **证据**：
-- 日志显示 `inner=100.0.0.2->172.30.0.2`，src 没有被 SNAT 改成 VIP
+- 日志显示 `inner=<IP_QG_HOST>-><IP_OTHER_010>`，src 没有被 SNAT 改成 VIP
 - 没有看到 `[IPIP-ENCAP] CheckPostrouting PASS` 日志
 
 **可能原因**：
@@ -546,30 +546,30 @@ grep 'CheckPostrouting.*172.30' /root/phaethon-service.log | tail -10
 
 **QG 端（发送方）**：
 ```
-[FORWARD-DEBUG] forwardUnicastPacket ENTRY: src=100.0.0.2 dst=172.30.0.2 proto=6 ttl=63
+[FORWARD-DEBUG] forwardUnicastPacket ENTRY: src=<IP_QG_HOST> dst=<IP_OTHER_010> proto=6 ttl=63
 [ROUTE-SELECTOR] FindRoute -> decision: EgressNIC=4 NeedIPIP=true LocalStack=false
 [GVISOR-TRACE] forwardUnicastPacket post-FindRoute: needIPIP=true
-[IPIP-ENCAP] start: inner=100.0.0.1->172.30.0.2 proto=6 len=52, outer=100.0.0.4->100.1.0.4
+[IPIP-ENCAP] start: inner=<IP_QG_VIP>-><IP_OTHER_010> proto=6 len=52, outer=<IP_OTHER_014>-><IP_OTHER_015>
 [IPIP-ENCAP] forwardPacketWithRoute OK
 ```
 
 **VM 端（接收方）**：
 ```
-[TUNNEL-DECAP] proto=4 decapsulated: inner=100.0.0.1->172.30.0.2 proto=6 len=52
-[GVISOR-TRACE] [100.0.0.1:0->172.30.0.2:0] handleValidatedPacket proto=6 nicID=5 nicName=link_qg localStack=true
-[GVISOR-TRACE] [100.0.0.1:0->172.30.0.2:0] LOCAL_DELIVERY proto=6 nicName=link_qg
-[GVISOR-TRACE] [100.0.0.1:0->172.30.0.2:0] DeliverTransportPacket CALL proto=6 nicName=link_qg
+[TUNNEL-DECAP] proto=4 decapsulated: inner=<IP_QG_VIP>-><IP_OTHER_010> proto=6 len=52
+[GVISOR-TRACE] [<IP_QG_VIP>:0-><IP_OTHER_010>:0] handleValidatedPacket proto=6 nicID=5 nicName=link_qg localStack=true
+[GVISOR-TRACE] [<IP_QG_VIP>:0-><IP_OTHER_010>:0] LOCAL_DELIVERY proto=6 nicName=link_qg
+[GVISOR-TRACE] [<IP_QG_VIP>:0-><IP_OTHER_010>:0] DeliverTransportPacket CALL proto=6 nicName=link_qg
 ```
 
 **VM SSH 服务状态**：
 ```
-TCP    172.30.0.2:22          10.11.61.41:64151      ESTABLISHED
+TCP    <IP_OTHER_010>:22          <IP_QG_OLD_41>:64151      ESTABLISHED
 ```
 
 ### ✅ 确认的事实
 
-1. ✅ **IPIP 封装成功**：QG 正确封装，inner=100.0.0.1->172.30.0.2, outer=100.0.0.4->100.1.0.4
-2. ✅ **SNAT 成功**：内层包 src 从 100.0.0.2 改成 VIP（100.0.0.1）
+1. ✅ **IPIP 封装成功**：QG 正确封装，inner=<IP_QG_VIP>-><IP_OTHER_010>, outer=<IP_OTHER_014>-><IP_OTHER_015>
+2. ✅ **SNAT 成功**：内层包 src 从 <IP_QG_HOST> 改成 VIP（<IP_QG_VIP>）
 3. ✅ **IPIP 解封成功**：VM 正确解封，内层包进入 gVisor
 4. ✅ **本地交付成功**：gVisor 识别为本地路由（localStack=true），执行 LOCAL_DELIVERY
 5. ✅ **传输层交付成功**：DeliverTransportPacket 被调用
@@ -580,8 +580,8 @@ TCP    172.30.0.2:22          10.11.61.41:64151      ESTABLISHED
 **现象**：SSH 连接超时，但 VM netstat 显示 ESTABLISHED 连接
 
 **可能原因**：
-1. VM SSH 服务看到的 dst 是 10.11.61.41（QG 物理 IP），不是 VIP（100.0.0.1）
-2. gVisor TCP Forwarder 可能无法直接连接到 OS 网络栈的服务（172.30.0.2:22）
+1. VM SSH 服务看到的 dst 是 <IP_QG_OLD_41>（QG 物理 IP），不是 VIP（<IP_QG_VIP>）
+2. gVisor TCP Forwarder 可能无法直接连接到 OS 网络栈的服务（<IP_OTHER_010>:22）
 3. 回程包可能没有经过 IPIP 封装，而是直接发送到 QG 物理 IP
 
 **下一步诊断**：
@@ -595,63 +595,63 @@ TCP    172.30.0.2:22          10.11.61.41:64151      ESTABLISHED
 ### ✅ Gossip 路由传播验证完成
 
 **已确认的事实**：
-1. ✅ **VM 通告路由配置正确**：`GET /api/mesh/advertise` 返回 `["10.11.61.0/24","10.99.0.0/24","10.21.20.0/24","172.30.0.0/24","172.30.0.0/24"]`
+1. ✅ **VM 通告路由配置正确**：`GET /api/mesh/advertise` 返回 `["<IP_OTHER_017>/24","<IP_OTHER_018>/24","<IP_OTHER_019>/24","<IP_OTHER_016>/24","<IP_OTHER_016>/24"]`
 2. ✅ **VM 通过 gossip 发送路由**：VM 日志显示 `sending gossip to qg: claimedSubnets=1 routes=4`
-3. ✅ **QG 路由表包含通告路由**：QG 日志显示 `routeCount=11 prefixes=[... 172.30.0.0/24 ...]`
-4. ✅ **Mac OS 路由正确**：`172.30/24 via 192.168.1.101`（QG 旁路网关）
+3. ✅ **QG 路由表包含通告路由**：QG 日志显示 `routeCount=11 prefixes=[... <IP_OTHER_016>/24 ...]`
+4. ✅ **Mac OS 路由正确**：`172.30/24 via <IP_QG_LAN>`（QG 旁路网关）
 
 **关键日志证据**：
 ```
 # VM 发送 gossip
 [phaethon] 2026/10/14 09:32:20 [INFO] [MESH] sending gossip to qg: claimedSubnets=1 routes=4
 
-# QG 路由决策包含 172.30.0.0/24
-[phaethon] 2026/10/14 09:33:50 [INFO] [trace] [MESH-TRACE] stage=route_decision dst=100.1.0.19 select_route_entry routeCount=11 prefixes=[10.161.88.0/24 10.99.0.0/24 10.21.20.0/24 172.30.0.0/24 ...]
+# QG 路由决策包含 <IP_OTHER_016>/24
+[phaethon] 2026/10/14 09:33:50 [INFO] [trace] [MESH-TRACE] stage=route_decision dst=<IP_OTHER_020> select_route_entry routeCount=11 prefixes=[<IP_OTHER_021>/24 <IP_OTHER_018>/24 <IP_OTHER_019>/24 <IP_OTHER_016>/24 ...]
 ```
 
 ### ✅ IPIP 隧道端到端验证（旁路网关场景）
 
-**测试场景**：Mac (192.168.1.88) → QG 旁路网关 (192.168.1.101) → QG TUN → IPIP 封装 → VM → IPIP 解封
+**测试场景**：Mac (<IP_MB_LAN>) → QG 旁路网关 (<IP_QG_LAN>) → QG TUN → IPIP 封装 → VM → IPIP 解封
 
 **QG 端日志**（`/root/data/logs/phaethon.log`）：
 ```
-[phaethon] 2026/10/14 09:34:08 [INFO] [tun] [TUN-READ-TEST] packet #119122: 192.168.1.88 -> 172.30.0.2 proto=6 len=64
-[phaethon] 2026/10/14 09:34:08 [INFO] [gvisor] [192.168.1.88:0->172.30.0.2:0] handleValidatedPacket proto=6 nicID=1 nicName=tun forwarding=true outputNIC="" localStack=false
-[phaethon] 2026/10/14 09:34:08 [INFO] [forward] forwardUnicastPacket ENTRY: src=192.168.1.88 dst=172.30.0.2 proto=6 ttl=62
-[phaethon] 2026/10/14 09:34:08 [INFO] [forward] FindRoute SUCCESS: src=192.168.1.88 dst=172.30.0.2
-[phaethon] 2026/10/14 09:34:08 [INFO] [gvisor] forwardUnicastPacket post-FindRoute: src=192.168.1.88 dst=172.30.0.2 proto=6 ttl=62 nicID=4 needIPIP=true
-[phaethon] 2026/10/14 09:34:08 [INFO] [ipip] start: inner=192.168.1.88->172.30.0.2 proto=6 len=64, outer=100.0.0.4->100.1.0.4 egressEIP=100.1.0.4 linkNIC=4
-[phaethon] 2026/10/14 09:34:08 [INFO] [ipip] forwardPacketWithRoute OK: inner=192.168.1.88->172.30.0.2 outer=100.0.0.4->100.1.0.4
+[phaethon] 2026/10/14 09:34:08 [INFO] [tun] [TUN-READ-TEST] packet #119122: <IP_MB_LAN> -> <IP_OTHER_010> proto=6 len=64
+[phaethon] 2026/10/14 09:34:08 [INFO] [gvisor] [<IP_MB_LAN>:0-><IP_OTHER_010>:0] handleValidatedPacket proto=6 nicID=1 nicName=tun forwarding=true outputNIC="" localStack=false
+[phaethon] 2026/10/14 09:34:08 [INFO] [forward] forwardUnicastPacket ENTRY: src=<IP_MB_LAN> dst=<IP_OTHER_010> proto=6 ttl=62
+[phaethon] 2026/10/14 09:34:08 [INFO] [forward] FindRoute SUCCESS: src=<IP_MB_LAN> dst=<IP_OTHER_010>
+[phaethon] 2026/10/14 09:34:08 [INFO] [gvisor] forwardUnicastPacket post-FindRoute: src=<IP_MB_LAN> dst=<IP_OTHER_010> proto=6 ttl=62 nicID=4 needIPIP=true
+[phaethon] 2026/10/14 09:34:08 [INFO] [ipip] start: inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64, outer=<IP_OTHER_014>-><IP_OTHER_015> egressEIP=<IP_OTHER_015> linkNIC=4
+[phaethon] 2026/10/14 09:34:08 [INFO] [ipip] forwardPacketWithRoute OK: inner=<IP_MB_LAN>-><IP_OTHER_010> outer=<IP_OTHER_014>-><IP_OTHER_015>
 ```
 
 **VM 端日志**（`C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log`）：
 ```
-[phaethon] 2026/10/14 09:33:50 [INFO] [IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64
-[phaethon] 2026/10/14 09:33:51 [INFO] [IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64
-[phaethon] 2026/10/14 09:33:52 [INFO] [IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64
+[phaethon] 2026/10/14 09:33:50 [INFO] [IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64
+[phaethon] 2026/10/14 09:33:51 [INFO] [IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64
+[phaethon] 2026/10/14 09:33:52 [INFO] [IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64
 ```
 
 **VM 服务状态**：
 ```
-TCP    172.30.0.2:22          10.11.61.41:56651      ESTABLISHED
-TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
+TCP    <IP_OTHER_010>:22          <IP_QG_OLD_41>:56651      ESTABLISHED
+TCP    <IP_OTHER_010>:139         0.0.0.0:0              LISTENING
 ```
 
 ### ✅ 确认的事实
 
-1. ✅ **Gossip 路由传播正常**：VM 的通告路由 (172.30.0.0/24) 通过 gossip 正确传播到 QG
-2. ✅ **QG 路由表正确**：QG 的 RouteSelector 包含 172.30.0.0/24 路由
-3. ✅ **Mac OS 路由正确**：Mac 有到 172.30.0.0/24 的路由指向 QG 旁路网关
-4. ✅ **QG IPIP 封装成功**：inner=192.168.1.88->172.30.0.2, outer=100.0.0.4->100.1.0.4
+1. ✅ **Gossip 路由传播正常**：VM 的通告路由 (<IP_OTHER_016>/24) 通过 gossip 正确传播到 QG
+2. ✅ **QG 路由表正确**：QG 的 RouteSelector 包含 <IP_OTHER_016>/24 路由
+3. ✅ **Mac OS 路由正确**：Mac 有到 <IP_OTHER_016>/24 的路由指向 QG 旁路网关
+4. ✅ **QG IPIP 封装成功**：inner=<IP_MB_LAN>-><IP_OTHER_010>, outer=<IP_OTHER_014>-><IP_OTHER_015>
 5. ✅ **VM IPIP 解封成功**：VM 收到并解封 IPIP 包
 6. ✅ **P2P 传输正常**：IPIP 包通过 P2P 链路从 QG 成功传输到 VM
 
 ### ❌ 当前卡点：解封后包交付失败
 
 **现象**：
-- VM 正确解封 IPIP 包（inner=192.168.1.88->172.30.0.2）
+- VM 正确解封 IPIP 包（inner=<IP_MB_LAN>-><IP_OTHER_010>）
 - 但 SSH/HTTP 连接超时
-- VM 上 172.30.0.2:22 (SSH) 和 172.30.0.2:139 (NetBIOS) 有服务监听
+- VM 上 <IP_OTHER_010>:22 (SSH) 和 <IP_OTHER_010>:139 (NetBIOS) 有服务监听
 - 但解封后的包没有到达 Windows 网络栈，或响应包没有发回来
 
 **可能原因**：
@@ -700,8 +700,8 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 
 **VM 端日志显示包已到达 gVisor 传输层**：
 ```
-[IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=192.168.1.88->172.30.0.2 proto=6 len=64
-[gvisor] proto=4 decapsulated: inner=192.168.1.88->172.30.0.2 proto=6 len=64
+[IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64
+[gvisor] proto=4 decapsulated: inner=<IP_MB_LAN>-><IP_OTHER_010> proto=6 len=64
 [gvisor] handleValidatedPacket proto=6 nicID=3 nicName=link_qg localStack=true
 [gvisor] LOCAL_DELIVERY proto=6 nicName=link_qg
 [gvisor] deliverPacketLocally ENTRY inNIC=link_qg
@@ -718,24 +718,24 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 
 **关键发现**：
 1. ✅ 包到达 `DeliverTransportPacket`
-2. ✅ 其他连接（如 100.1.0.27:443）的 `defaultHandler` 被调用且返回 true
-3. ❌ 172.30.0.2 的连接没有调用 `defaultHandler`
+2. ✅ 其他连接（如 <IP_OTHER_022>:443）的 `defaultHandler` 被调用且返回 true
+3. ❌ <IP_OTHER_010> 的连接没有调用 `defaultHandler`
 
 **结论**：
-- `demux.deliverPacket` 为 172.30.0.2 找到了一个 endpoint（返回 true）
+- `demux.deliverPacket` 为 <IP_OTHER_010> 找到了一个 endpoint（返回 true）
 - 但这个 endpoint 不是 TCP Forwarder
 - TCP Forwarder 是 `defaultHandler`，只在 `demux.deliverPacket` 返回 false 时才被调用
-- 172.30.0.2 被某个特定的 endpoint 匹配了，但这个 endpoint 没有正确处理连接
+- <IP_OTHER_010> 被某个特定的 endpoint 匹配了，但这个 endpoint 没有正确处理连接
 
 **可能原因**：
-1. gVisor 为 172.30.0.2 创建了一个临时的 endpoint（错误地认为它是本地地址）
+1. gVisor 为 <IP_OTHER_010> 创建了一个临时的 endpoint（错误地认为它是本地地址）
 2. 这个临时 endpoint 没有正确实现 TCP 处理逻辑
 3. 或者这个 endpoint 是某个内部协议处理器，不是用户态的 TCP Forwarder
 
 **下一步诊断方向**：
-1. 检查 gVisor 是否为 172.30.0.2 注册了特定的 endpoint
+1. 检查 gVisor 是否为 <IP_OTHER_010> 注册了特定的 endpoint
 2. 检查 `findEndpointLocked` 返回的是什么类型的 endpoint
-3. 检查为什么 172.30.0.2 被认为是本地地址（应该不是）
+3. 检查为什么 <IP_OTHER_010> 被认为是本地地址（应该不是）
 
 ### 当前状态
 
@@ -755,21 +755,21 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 
 ### VM 端日志
 ```
-[TCP-FWD] [100.1.0.1:61769->172.30.0.2:22] SYN received, calling handler
-[TCP-HANDSHAKE] [100.1.0.1:61769->172.30.0.2:22] sending SYN-ACK via route nicID=1
-[TCP-FWD] [100.1.0.1:61769->172.30.0.2:22] not a SYN packet, flags= R
+[TCP-FWD] [<IP_OTHER_023>:61769-><IP_OTHER_010>:22] SYN received, calling handler
+[TCP-HANDSHAKE] [<IP_OTHER_023>:61769-><IP_OTHER_010>:22] sending SYN-ACK via route nicID=1
+[TCP-FWD] [<IP_OTHER_023>:61769-><IP_OTHER_010>:22] not a SYN packet, flags= R
 ```
 
 ### 关键发现
-1. ✅ TCP Forwarder 收到 SYN（src=100.1.0.1, dst=172.30.0.2:22）
+1. ✅ TCP Forwarder 收到 SYN（src=<IP_OTHER_023>, dst=<IP_OTHER_010>:22）
 2. ✅ TCP Forwarder 发送 SYN-ACK
 3. ❌ 收到 RST 包，连接被重置
 
 ### 问题分析
-**疑问**：为什么 src=100.1.0.1（VM VIP）而不是 100.0.0.1（QG VIP）？
+**疑问**：为什么 src=<IP_OTHER_023>（VM VIP）而不是 <IP_QG_VIP>（QG VIP）？
 
 **可能原因**：
-1. VM OS 网络栈做了 SNAT，把 src 从 100.0.0.1 改成 100.1.0.1
+1. VM OS 网络栈做了 SNAT，把 src 从 <IP_QG_VIP> 改成 <IP_OTHER_023>
 2. conntrack 状态跟踪有问题
 3. QG 收到 SYN-ACK 后发送了 RST
 
@@ -789,17 +789,17 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 
 **QG 端（封装方）**：
 ```
-[ipip] start: inner=100.0.0.1->172.30.0.2 proto=6 len=40, outer=100.0.0.4->100.1.0.4
-[ipip] outer_header: src=100.0.0.4 dst=100.1.0.4 proto=4 ttl=64 totalLen=60
-[ipip] FindRoute OK: egressEIP=100.1.0.4 nicID=4 needIPIP=false
+[ipip] start: inner=<IP_QG_VIP>-><IP_OTHER_010> proto=6 len=40, outer=<IP_OTHER_014>-><IP_OTHER_015>
+[ipip] outer_header: src=<IP_OTHER_014> dst=<IP_OTHER_015> proto=4 ttl=64 totalLen=60
+[ipip] FindRoute OK: egressEIP=<IP_OTHER_015> nicID=4 needIPIP=false
 [ipip] writePacketPostRouting: proto=4 loop=1 packetOut=true
-[ipip] forwardPacketWithRoute OK: inner=100.0.0.1->172.30.0.2 outer=100.0.0.4->100.1.0.4
+[ipip] forwardPacketWithRoute OK: inner=<IP_QG_VIP>-><IP_OTHER_010> outer=<IP_OTHER_014>-><IP_OTHER_015>
 ```
 
 **VM 端（解封装方）**：
 ```
-[ipip] [IPIP-TUNNEL] ShouldDecapsulate: outer dst=100.1.0.4 local EIP=100.1.0.4 match=true
-[ipip] [IPIP-TUNNEL] Decapsulating: outer=100.0.0.4->100.1.0.4 inner=100.0.0.1->172.30.0.2 proto=6 len=52
+[ipip] [IPIP-TUNNEL] ShouldDecapsulate: outer dst=<IP_OTHER_015> local EIP=<IP_OTHER_015> match=true
+[ipip] [IPIP-TUNNEL] Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_QG_VIP>-><IP_OTHER_010> proto=6 len=52
 [ipip] [IPIP-TUNNEL] Decapsulate: innerData len=52 (complete IP packet, no link header)
 ```
 
@@ -808,7 +808,7 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 ### 当前卡点：解封装后内层包的交付
 
 **现象**：
-- IPIP 解封装成功，内层包（100.0.0.1→172.30.0.2 proto=6）通过 `HandlePacket` 注入 gVisor netstack
+- IPIP 解封装成功，内层包（<IP_QG_VIP>→<IP_OTHER_010> proto=6）通过 `HandlePacket` 注入 gVisor netstack
 - SSH 报错从 "Operation timed out" 变为 "Connection timed out during banner exchange"（有进展，说明 TCP 部分连通）
 - 但 SSH 最终超时
 
@@ -842,7 +842,7 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 ### 下一步
 
 1. 在 VM 上设 `route=debug`，触发 SSH 测试
-2. 检查解封装后内层包（dst=172.30.0.2）的 RouteSelector 决策
+2. 检查解封装后内层包（dst=<IP_OTHER_010>）的 RouteSelector 决策
 3. 确认 LocalStack 是否为 true（本地交付）还是走了转发
 4. 根据 RouteSelector 决策结果判断下一步修复方向
 
@@ -854,14 +854,14 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 
 - 设置 VM 的 `route=debug, gvisor=debug, ipip=debug`
 - 触发 SSH 测试（从本地 Mac 通过 QG 旁路网关）
-- VM 日志确认 IPIP 解封装成功：`Decapsulating: outer=100.0.0.4->100.1.0.4 inner=100.0.0.1->172.30.0.2 proto=6 len=40`
+- VM 日志确认 IPIP 解封装成功：`Decapsulating: outer=<IP_OTHER_014>-><IP_OTHER_015> inner=<IP_QG_VIP>-><IP_OTHER_010> proto=6 len=40`
 - **但是没有看到解封装后内层包的 RouteSelector 决策日志**
 
 ### ❌ 当前卡点：QG 本地流量未进入 gVisor
 
 **现象**：
 - tcpdump 在 QG tun0 上抓到包：`100.0.0.2.48326 > 172.30.0.2.22: Flags [S]`
-- 但 QG 的 readLoop 日志中没有 172.30.0.2 的相关记录
+- 但 QG 的 readLoop 日志中没有 <IP_OTHER_010> 的相关记录
 - 说明包到达 tun0 后，没有被 gVisor 的 readLoop 读取
 
 **可能原因**：
@@ -869,13 +869,13 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 2. 或者 readLoop 读取了包，但在某个地方被过滤掉（没有输出日志）
 
 **本地 Mac 路由问题**：
-- 初始路由错误：172.30.0.2 指向 www.whipfeng2.com（en0 接口）
-- 已修复：删除旧路由，添加 `172.30.0.0/24 via 192.168.1.101`
-- 但 tcpdump 显示 src=100.0.0.2（QG IP），说明本地流量到达 QG 后被 SNAT 转换
+- 初始路由错误：<IP_OTHER_010> 指向 www.whipfeng2.com（en0 接口）
+- 已修复：删除旧路由，添加 `<IP_OTHER_016>/24 via <IP_QG_LAN>`
+- 但 tcpdump 显示 src=<IP_QG_HOST>（QG IP），说明本地流量到达 QG 后被 SNAT 转换
 
 ### 待验证
 
-1. **QG readLoop 为何没有读取 172.30.0.2 的包**：
+1. **QG readLoop 为何没有读取 <IP_OTHER_010> 的包**：
    - 检查 readLoop 是否有过滤逻辑
    - 检查 TUN 设备配置是否正确
    - 检查是否有内核层面的包丢弃
@@ -893,8 +893,8 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 - 不能仅凭 tcpdump 抓到包就认为 readLoop 会读取到
 
 **教训12：本地流量可能不走预期路径**
-- QG 本地发起的流量（src=100.0.0.2）虽然路由指向 tun0，但可能不经过 gVisor readLoop
-- 旁路网关流量（src=192.168.1.88）是正常的（有 TUN-READ 日志）
+- QG 本地发起的流量（src=<IP_QG_HOST>）虽然路由指向 tun0，但可能不经过 gVisor readLoop
+- 旁路网关流量（src=<IP_MB_LAN>）是正常的（有 TUN-READ 日志）
 - 需要区分"本地发起的流量"和"经过旁路网关的流量"
 
 ---
@@ -904,17 +904,17 @@ TCP    172.30.0.2:139         0.0.0.0:0              LISTENING
 ### ❌ 当前问题：SNAT 未执行，内层包源地址错误
 
 **现象**：
-- QG IPIP 封装成功：`inner=192.168.1.88->172.30.0.2`
+- QG IPIP 封装成功：`inner=<IP_MB_LAN>-><IP_OTHER_010>`
 - VM IPIP 解封成功：内层包进入 gVisor
-- **但内层包源地址是 192.168.1.88（LAN 地址），不是 VIP（100.0.0.1）**
+- **但内层包源地址是 <IP_MB_LAN>（LAN 地址），不是 VIP（<IP_QG_VIP>）**
 
 **预期行为**：
-- IPIP 封装前应该执行 SNAT，把 src 从 192.168.1.88 改成 VIP（100.0.0.1）
+- IPIP 封装前应该执行 SNAT，把 src 从 <IP_MB_LAN> 改成 VIP（<IP_QG_VIP>）
 - 这样回程包才能正确路由回 QG
 
 **历史对比**：
-- ✅ 之前验证过 SNAT 工作正常（line 571）：`inner=100.0.0.1->172.30.0.2`
-- ❌ 现在 SNAT 未执行：`inner=192.168.1.88->172.30.0.2`
+- ✅ 之前验证过 SNAT 工作正常（line 571）：`inner=<IP_QG_VIP>-><IP_OTHER_010>`
+- ❌ 现在 SNAT 未执行：`inner=<IP_MB_LAN>-><IP_OTHER_010>`
 
 **可能原因**：
 1. gVisor iptables SNAT 规则条件不匹配（InputInterface=tun 可能不适用于旁路网关流量）
@@ -938,8 +938,8 @@ GOOS=windows GOARCH=amd64 go build -a -ldflags "..." -o dist/windows-amd64/phaet
 **原因**：Go 的构建缓存可能不会自动检测 gVisor fork（`../gvisor-fork`）的变更，导致修改后的代码未被编译。`-a` 标志强制重新编译所有包，包括依赖项。
 
 **影响**：
-- 回程包目标地址错误（应该是 VIP，但现在是 192.168.1.88）
-- VM 发送 SYN-ACK 到 192.168.1.88，但 192.168.1.88 不在 VM 的路由表中
+- 回程包目标地址错误（应该是 VIP，但现在是 <IP_MB_LAN>）
+- VM 发送 SYN-ACK 到 <IP_MB_LAN>，但 <IP_MB_LAN> 不在 VM 的路由表中
 - TCP 握手失败
 
 ---
@@ -969,12 +969,12 @@ if e.Forwarding() && (pkt.OutputNICName != "" || !localStack) {
 
 **QG 端日志**（修复后）：
 ```
-[ipip] forwardPacketWithRoute OK: inner=100.0.0.1->172.30.0.2 outer=100.0.0.4->100.1.0.4
+[ipip] forwardPacketWithRoute OK: inner=<IP_QG_VIP>-><IP_OTHER_010> outer=<IP_OTHER_014>-><IP_OTHER_015>
 ```
 
 **关键改进**：
-- ❌ 修复前：`inner=192.168.1.88->172.30.0.2`（LAN 地址，SNAT 未执行）
-- ✅ 修复后：`inner=100.0.0.1->172.30.0.2`（VIP 地址，SNAT 已执行）
+- ❌ 修复前：`inner=<IP_MB_LAN>-><IP_OTHER_010>`（LAN 地址，SNAT 未执行）
+- ✅ 修复后：`inner=<IP_QG_VIP>-><IP_OTHER_010>`（VIP 地址，SNAT 已执行）
 
 **SSH 测试结果**：
 - SSH 连接成功到达 VM（收到 authentication failures，说明 TCP 握手完成）

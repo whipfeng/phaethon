@@ -547,39 +547,39 @@ mesh:
 
 ### A.1 现象
 
-QG 通过 `IP-CIDR,106.13.183.103/32,MGMS_HT` 访问 GG admin（39998），TUN 日志：
+QG 通过 `IP-CIDR,<IP_GG_PUBLIC>/32,MGMS_HT` 访问 GG admin（39998），TUN 日志：
 
 ```
-[TUN] TCP 100.0.0.1 → 106.13.183.103:39998 → IP-CIDR,106.13.183.103/32,MGMS_HT
-  (htunnel: push connect fail: Head "http://36.140.28.178:18080/ui/resdata//17/1": context deadline exceeded)
+[TUN] TCP <IP_QG_VIP> → <IP_GG_PUBLIC>:39998 → IP-CIDR,<IP_GG_PUBLIC>/32,MGMS_HT
+  (htunnel: push connect fail: Head "http://<IP_JF_HT>:18080/ui/resdata//17/1": context deadline exceeded)
 ```
 
 JF 端 `data/logs/phaethon.log`：
 
 ```
-[HT-SVR] [htunnel-32457] [conn-22] 106.13.183.103:39998 mesh dial connecting
-[NETSTACK-DIAL] starting: addr=106.13.183.103:39998 client= inbound=HTunnel:htunnel-32457
+[HT-SVR] [htunnel-32457] [conn-22] <IP_GG_PUBLIC>:39998 mesh dial connecting
+[NETSTACK-DIAL] starting: addr=<IP_GG_PUBLIC>:39998 client= inbound=HTunnel:htunnel-32457
 ... 30s 后通道关闭
-[HT-SVR] connect target fail 106.13.183.103:39998: context deadline exceeded
+[HT-SVR] connect target fail <IP_GG_PUBLIC>:39998: context deadline exceeded
 ```
 
 **关键事实**：JF 真实网络能直接访问 GG（`ping 26.9ms`、39998 TLS 握手成功、39988 TCP 成功）。失败发生在 phaethon netstack 层。
 
 ### A.2 根因（❌ 原判有误，2026-10-08 更正）
 
-~~`MeshDial` 把目标 106.13.183.103（**非 mesh subnet**）交给 JF netstack 路由，netstack 无规则 → 30s 超时。~~
+~~`MeshDial` 把目标 <IP_GG_PUBLIC>（**非 mesh subnet**）交给 JF netstack 路由，netstack 无规则 → 30s 超时。~~
 
 **原判错误**：netstack 并非"无规则"。非 mesh 未通告目标落 RouteSelector Branch 4，`LocalDelivery=true`，**本该**本地交付给 TCP Forwarder，由 `handleConn` 执行规则/代理链（`MATCH,DIRECT` 也是规则的一种结果）。
 
 **真实根因**：Branch 4 的本地交付当时是靠**出栈绕一圈 TUN** 实现的（`EgressNIC=1 → writeLoop → TUN → OS → 回 TUN → NIC 1 → deliverPacketLocally → Forwarder`）。JF 是 **TUN 关闭**的节点，`tun.Engine.Write` 返回 `TUN device not available`，`writeLoop` 静默丢包 → SYN 永远到不了 Forwarder → 30s 超时。
 
-同一根因还导致 GG 的反向代理全挂（`100.179.0.3:44471 → 192.168.1.88:22` 重传 5 次后 `context deadline exceeded`）、JF 栈内 DNS 丢包 544 次。Branch 2/3（Link NIC / IPIP）不受影响，所以 mesh 路由与入站 admin 看起来正常，故障呈"选择性"。
+同一根因还导致 GG 的反向代理全挂（`<IP_GG_GIP>:44471 → <IP_MB_LAN>:22` 重传 5 次后 `context deadline exceeded`）、JF 栈内 DNS 丢包 544 次。Branch 2/3（Link NIC / IPIP）不受影响，所以 mesh 路由与入站 admin 看起来正常，故障呈"选择性"。
 
 **修复归属**：这是 gVisor 路由层缺陷，不是 h_tunnel 的问题。见 `gvisor_route_selector_architecture.md` §6.13 补丁 #10（`RouteDecision.LocalLoopback`，出栈包在栈内直接环回，不依赖 TUN 设备）。
 
 ### A.3 V2 设计的"中继"假设
 
-V2 引入 `MeshDial` 的初衷：h_tunnel server 本身是 mesh 节点，**目标可能是另一个 mesh peer**（如 client dial `100.179.0.10:39999` = GG admin，server 是 JF，需要把 dial 转发到 GG）。这种场景下 `net.DialTimeout` 会失败（真实网络无 mesh subnet 路由），必须 `MeshDial`。
+V2 引入 `MeshDial` 的初衷：h_tunnel server 本身是 mesh 节点，**目标可能是另一个 mesh peer**（如 client dial `<IP_GG_FAKE>:39999` = GG admin，server 是 JF，需要把 dial 转发到 GG）。这种场景下 `net.DialTimeout` 会失败（真实网络无 mesh subnet 路由），必须 `MeshDial`。
 
 但实际架构里节点互访 admin 走 TUN/fakeIP（`gg.phn` → fakeIP → mesh IPIP），**不经过 h_tunnel**。h_tunnel 当前**只**作为 `via` 代理（如 `trojan via MGMS_HT`），target 永远是真实互联网地址。
 
@@ -605,7 +605,7 @@ V2 引入 `MeshDial` 的初衷：h_tunnel server 本身是 mesh 节点，**目�
 
 ### A.5 验证
 
-- QG `curl https://106.13.183.103:39998/` 经 `IP-CIDR,106.13.183.103/32,GGDYSV_TJ` via `MGMS_HT` → 200 OK
+- QG `curl https://<IP_GG_PUBLIC>:39998/` 经 `IP-CIDR,<IP_GG_PUBLIC>/32,GGDYSV_TJ` via `MGMS_HT` → 200 OK
 - JF 端 phaethon.log 应出现 `mesh dial connecting` 且**不再** 30s 超时（补丁 #10 后 SYN 在栈内环回给 Forwarder）
 - GG 反向代理恢复：`[Direct:dyn-map-*] TCP ... → MESH` 不再 `context deadline exceeded`
 - QG 旁路网关 / TUN 客户端不受影响：Forwarder 回包 dst=VIP，仍出 NIC 1 → TUN

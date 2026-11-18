@@ -43,7 +43,7 @@ Remote app → Fake-IP → NAT → VIP → mesh → HandleMeshFrame
 ```json
 {
   "nodeId": "123456789",
-  "subnet": "100.64.1.0/24"
+  "subnet": "<IP_OTHER_070>/24"
 }
 ```
 
@@ -299,7 +299,7 @@ func (s *AdminServer) Start() error {
 mesh:
   enabled: true
   node-id: "123456789"      # 持久化的 nodeID
-  subnet: "100.64.1.0/24"   # 持久化的 subnet（自动分配或手动配置）
+  subnet: "<IP_OTHER_070>/24"   # 持久化的 subnet（自动分配或手动配置）
   # ... 其他 mesh 配置 ...
 ```
 

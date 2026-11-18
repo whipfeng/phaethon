@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 状态 | **硬停滞（吞吐归零永不恢复）：✅ 已根治（2026-11-06，双层根因，soak 60/60 零冻结）**，见 §3.5。**残余滴流（单流 173~726KB/s、8 流聚合 0.2~10MB/s 高方差）：🔵 进行中** — 机制沿用 v4 实锤（mesh 隧道层乱序 → 内层发送端 dup-ACK → cwnd 压死 1~3），三钉死（每流有序化，c608130/f0fb969）已部署但 JF→QG 方向仍有残余乱序源未钉住（QG rcv_ooopack 1469 ≈ 45% 包乱序），新一轮取证 **2026-11-06 已批准立项**（v5，方向见 §5） |
-| 现象 | https://10.193.131.25/elephant/default/ 大资源每连接稳定滴流 40~110KB/s，多 MB 资源需数十秒~2 分钟，浏览器表现为「一直待处理」 |
+| 现象 | https://<IP_OTHER_012>/elephant/default/ 大资源每连接稳定滴流 40~110KB/s，多 MB 资源需数十秒~2 分钟，浏览器表现为「一直待处理」 |
 
 ## 一、症状与复现
 
@@ -113,7 +113,7 @@ writeListSegs 40~49，congestState: open —— 不是 loss 状态，是纯卡�
 <details>
 <summary>v2/v3 原文（11-05 深夜）</summary>
 
-**v3 机制链（当时结论）**：deskzq↔jf 底层（10.149.237.34↔10.140.51.2，mss1260 隧道，base RTT ~29ms，抖动至 90ms+）→ 每条 TCP 连接窗口被钳在 ~12.6KB 量级（cwnd 恒 10）→ JF 全程零重传/零 DSACK → 候选限速因子：RTT 抖动放大 ACK 时钟、隧道中段中间盒、小窗口 × HTTP/1.1 串行乘积 → 5~6 连接聚合 ~500KB/s。
+**v3 机制链（当时结论）**：deskzq↔jf 底层（<IP_OTHER_013>↔<IP_JF_OS>，mss1260 隧道，base RTT ~29ms，抖动至 90ms+）→ 每条 TCP 连接窗口被钳在 ~12.6KB 量级（cwnd 恒 10）→ JF 全程零重传/零 DSACK → 候选限速因子：RTT 抖动放大 ACK 时钟、隧道中段中间盒、小窗口 × HTTP/1.1 串行乘积 → 5~6 连接聚合 ~500KB/s。
 
 **v4 修正**：该「cwnd 恒 10」实为**内层 TCP**（经 mesh 隧道）的症状投影在底层腿上；底层腿本身健康（同代码同型腿 11MB/s）。真凶是 mesh 隧道层给内层流制造的乱序。
 
@@ -125,7 +125,7 @@ writeListSegs 40~49，congestState: open —— 不是 loss 状态，是纯卡�
 | 下载 elephant→VM（1.87MB） | 逐跳普通中转 deskzq→jf→qg→vm | **57~88KB/s（21~33s）** |
 | Mac→VM 20MB（mb→qg→vm） | 普通中转（不过 jf/deskzq） | 532KB/s |
 
-- deskzq 以 10.149.237.34 源地址与 JF:32457 建立 4-6 条长连接，全部 mss=1260、cwnd 恒 10、ssthresh 7~9、rtt min 29ms 实测 30~91ms。
+- deskzq 以 <IP_OTHER_013> 源地址与 JF:32457 建立 4-6 条长连接，全部 mss=1260、cwnd 恒 10、ssthresh 7~9、rtt min 29ms 实测 30~91ms。
 - 用户补充：有时单向流量是通的（与路径质量波动自洽）。
 - 同一时期 deskzq→vm 方向能扛 ~4000 小帧/s（ACK），扛不住 ~38-65 大帧/s。
 

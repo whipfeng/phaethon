@@ -139,7 +139,7 @@ n.ns.RegisterTunnelProtocol(ipipHandler)
 ### IPIP封装（发送路径）
 
 ```
-内层包 (dst=172.30.0.2)
+内层包 (dst=<IP_OTHER_010>)
   ↓
 RouteSelector Branch 3: 非mesh通告路由
   ↓

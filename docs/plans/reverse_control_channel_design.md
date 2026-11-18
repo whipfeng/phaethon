@@ -492,7 +492,7 @@ conn, err := d.(ControlDialer).DialControl()
 reverse:
   - name: nicai3
     outbound-proxy: SOCKS5_7890    # 出站代理（就是注册中心）
-    registry-addr: 203.0.113.1:39999  # 冗余，= proxy.Server:proxy.Port
+    registry-addr: <IP_OTHER_098>:39999  # 冗余，= proxy.Server:proxy.Port
     register-proto: trojan               # 冗余，= proxy.Type
 ```
 

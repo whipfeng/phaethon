@@ -95,16 +95,16 @@ type DomainRoute struct {
 
 **示例**：
 ```
-目标：10.21.20.65
+目标：<IP_VM_OS>
 匹配路由条目：
   - {nodeID: QG, source: static}
   - {nodeID: VM, source: static}
   - {nodeID: GG, source: dynamic}
 排序后：[QG(static), VM(static), GG(dynamic)]
-假设全部在线，哈希选择：hash(10.21.20.65) % 3 = 1 → 选择 VM
+假设全部在线，哈希选择：hash(<IP_VM_OS>) % 3 = 1 → 选择 VM
 下次：还是 VM（粘性）
 如果 VM 掉线：availableEntries=[QG(static), GG(dynamic)]
-重新哈希：hash(10.21.20.65) % 2 = 0 → 选择 QG
+重新哈希：hash(<IP_VM_OS>) % 2 = 0 → 选择 QG
 ```
 
 #### 配置格式
@@ -112,9 +112,9 @@ type DomainRoute struct {
 ```yaml
 mesh:
   static-routes:
-    - prefix: 10.21.20.0/24
+    - prefix: <IP_OTHER_019>/24
       node-ids: [QG, VM]  # 可以配置多个，优先级高于动态
-    - prefix: 8.8.8.0/24
+    - prefix: <IP_OTHER_050>/24
       node-ids: [QG]
   
   static-domain-routes:
@@ -162,7 +162,7 @@ A 查路由到 D.EIP，选下一跳 peer，发送封装包
 #### 关键设计
 
 1. **EIP（Egress IP）**：每个节点有一个 EIP，用于 IPIP 封装
-   - EIP = subnet + 4（如 100.0.0.4 for 100.0.0.0/16）
+   - EIP = subnet + 4（如 <IP_OTHER_014> for 100.0.0.0/16）
    - 已实现：`mesh/ipip.go` 中的 `CalculateEIP()`
 
 2. **IPIP 封装格式**：

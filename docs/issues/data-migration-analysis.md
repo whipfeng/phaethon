@@ -256,7 +256,7 @@ if config.yaml exists:
 
 ### 阶段 3：部署到 QG
 1. 编译迁移工具：`go build -o migrate_data tools/migrate_data.go`
-2. 上传到 QG：`scp migrate_data root@10.11.61.50:/root/`
+2. 上传到 QG：`scp migrate_data root@<IP_QG_OS>:/root/`
 3. 停止 phaethon 服务（避免数据库冲突）
 4. 运行迁移工具：`./migrate_data`
 5. 验证迁移结果

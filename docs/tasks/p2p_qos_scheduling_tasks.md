@@ -56,7 +56,7 @@ peer.highPriorityCh = make(chan writeReq, 1024)  // 256 → 1024
 ```bash
 make linux
 # 部署到 QG
-ssh -p 2222 root@192.168.1.101 "pkill -9 phaethon; sleep 2; cd /root && ./phaethon &"
+ssh -p 2222 root@<IP_QG_LAN> "pkill -9 phaethon; sleep 2; cd /root && ./phaethon &"
 ```
 
 ### Task 2.1-2.4: DNS 专用队列
@@ -84,11 +84,11 @@ ssh -p 2222 root@192.168.1.101 "pkill -9 phaethon; sleep 2; cd /root && ./phaeth
 ### 测试场景 1: DNS 不被饿死
 ```bash
 # 持续大流量
-iperf3 -c 100.2.0.10 -t 60 &
+iperf3 -c <IP_JF_FAKE> -t 60 &
 
 # 同时测试 DNS
 for i in {1..100}; do
-    dig @100.0.0.3 jf.phn +short +time=1
+    dig @<IP_QG_GIP> jf.phn +short +time=1
     sleep 0.1
 done
 ```
@@ -96,7 +96,7 @@ done
 ### 测试场景 2: 公平调度
 ```bash
 # 多个 TCP 连接
-iperf3 -c 100.2.0.10 -P 10 -t 60
+iperf3 -c <IP_JF_FAKE> -P 10 -t 60
 ```
 
 ## 进度跟踪

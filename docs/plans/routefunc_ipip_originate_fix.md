@@ -6,10 +6,10 @@
 
 ## 背景与根因（已实锤闭合）
 
-从 QG 走 WIN7_VPN/qgw 指定链路访问 10.181.58.10:19090 不通，证据链：
+从 QG 走 WIN7_VPN/qgw 指定链路访问 <IP_OTHER_099>:19090 不通，证据链：
 
 1. forwarder 匹配规则 → NetDialV2 → RouteFunc 返回正确决策
-   `{EgressNIC=linkNIC, EgressEIP=100.209.0.4, NeedIPIP=true}`（[V2-ROUTE] 日志）。
+   `{EgressNIC=linkNIC, EgressEIP=<IP_OTHER_100>, NeedIPIP=true}`（[V2-ROUTE] 日志）。
 2. `BuildRouteFromDecision`（stack.go）localAddr/remoteAddr 全留空 → LinkNIC 无绑定地址
    → `getAddressEP` 返回 nil → `Route.WritePacket` 在 `isValidForOutgoing` 返回
    `ErrInvalidEndpointState`。
@@ -17,7 +17,7 @@
    connect 100s 超时，qgw 全程零感知。
 4. 第二层缺陷：IPIP 封装只存在于转发路径 `forwardWithIPIPEncapsulation`；
    endpoint 始发路径 `writePacketPostRouting` 无 NeedIPIP 分支。即使路由修好，
-   裸 IP 目标（10.181.58.10）的包也会从 linkNIC 直接裸发，qgw 无法解封。
+   裸 IP 目标（<IP_OTHER_099>）的包也会从 linkNIC 直接裸发，qgw 无法解封。
    域名/fakeIP 规则走转发路径（有封装）所以今晨 403 能通——双路径不对称是病根。
 
 ## 修复方案（5 处）
@@ -113,10 +113,10 @@ if err := e.sendTCP(r, tf, p, stack.GSO{}); err != nil {
 前提：VM worker 处于留跑健康巡检取证期，重启时机须与用户确认。
 
 1. 版本戳构建部署 VM（-a -ldflags git describe）。
-2. 复现：`curl http://10.181.58.10:19090/` 经 WIN7_VPN/qgw 规则。
+2. 复现：`curl http://<IP_OTHER_099>:19090/` 经 WIN7_VPN/qgw 规则。
 3. VM 日志观测点：
-   - `[V2-ROUTE] proxy=WIN7_VPN linkNICID=10 ... eip=100.209.0.4`
-   - `ipip outer_header: src=<本机EIP> dst=100.209.0.4 proto=4`
+   - `[V2-ROUTE] proxy=WIN7_VPN linkNICID=10 ... eip=<IP_OTHER_100>`
+   - `ipip outer_header: src=<本机EIP> dst=<IP_OTHER_100> proto=4`
    - `forwardPacketWithRoute OK`（SYN 真正离栈）
 4. qgw 日志观测点：解封后 forward 记录（inner dst=GIP/目标）。
 5. 页面真实返回（非 100s 超时）。

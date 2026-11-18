@@ -10,11 +10,11 @@
 
 | 路径 | 数据量 | 耗时 | 吞吐 |
 |---|---:|---:|---:|
-| OS qg→mb（LAN 192.168.1.88） | 46.7MB | 8.75s | 5.3 MB/s |
+| OS qg→mb（LAN <IP_MB_LAN>） | 46.7MB | 8.75s | 5.3 MB/s |
 | Mesh qg→mb（1 跳，MB_HT） | 46.7MB | 15.12s | 3.1 MB/s |
 | Mesh qg→mb 8 流（8×8MB） | 64MB | 21s | 3.05 MB/s |
 | Mesh qg→jf（1 跳） | 46.7MB | 9.01s | 5.2 MB/s |
-| OS qg→gg（公网 106.13.183.103） | 46.7MB | 40.32s | 1.16 MB/s |
+| OS qg→gg（公网 <IP_GG_PUBLIC>） | 46.7MB | 40.32s | 1.16 MB/s |
 | Mesh qg→gg（2 跳，qg→jf→gg） | 46.7MB | 126.1s | 0.37 MB/s |
 
 ## 观察
@@ -53,9 +53,9 @@
 
 ## 追加：jf/gg 是 transit-only（无 phaeton TUN）
 
-- jf：`ip -br addr | grep tun` 只有 K8s `tunl0`，无 phaeton TUN；`ip route get 100.179.0.10`
-  走 `via 10.140.51.1 dev eth0`。
-- gg：无 phaeton TUN；`ip route get 100.2.0.10` 走 `via 192.168.16.1 dev eth0`。
+- jf：`ip -br addr | grep tun` 只有 K8s `tunl0`，无 phaeton TUN；`ip route get <IP_GG_FAKE>`
+  走 `via <IP_OTHER_031> dev eth0`。
+- gg：无 phaeton TUN；`ip route get <IP_JF_FAKE>` 走 `via <IP_GG_GW> dev eth0`。
 - 因此 jf↔gg 的本机发起测试无效（超时是路由未进 TUN，不是链路故障）；qg→gg 的
   2 跳数据由 jf 的 transit fast path 转发，不依赖 jf 的 TUN。
 
@@ -94,7 +94,7 @@ qg→jf 跳本身已接近 OS 直连，2 跳的主要差距在 jf→gg 承载/�
 GG 路径：`0.46–0.63 MB/s`；文档结论是 GG 出口约 3Mbps（0.375MB/s），当前已在容量附近，
 **不作为代码吞吐验收路径**（验收用 vm→qg→mb / DESKW）。
 
-节点域名 DNS：domain trie 收敛后恢复（`jf.phn → 100.2.0.10`），此前失败是重启后的短暂窗口，
+节点域名 DNS：domain trie 收敛后恢复（`jf.phn → <IP_JF_FAKE>`），此前失败是重启后的短暂窗口，
 不是持续 bug。
 
 ## 追加：per-carrier writer A/B（qg→jf，24.5MB 同窗口）

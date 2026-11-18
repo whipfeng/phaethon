@@ -96,27 +96,27 @@ type GossipClaimedSubnet struct {
 {
   "claimedSubnets": [
     {
-      "subnet": "100.179.0.0/16",
+      "subnet": "<IP_OTHER_042>/16",
       "nodeId": "gg",
       "hop": 0,
       "neighbors": ["ms9", "ms10"]
     },
     {
-      "subnet": "100.189.0.0/16",
+      "subnet": "<IP_OTHER_062>/16",
       "nodeId": "ms9",
       "hop": 1,
       "neighbors": ["gg", "x"]
     },
     {
-      "subnet": "100.96.0.0/16",
+      "subnet": "<IP_OTHER_063>/16",
       "nodeId": "ms10",
       "hop": 1,
       "neighbors": ["gg"]
     }
   ],
   "routes": [
-    {"prefix": "192.168.1.0/24", "nodeId": "gg"},
-    {"prefix": "10.10.0.0/16", "nodeId": "ms9"}
+    {"prefix": "<IP_QG_LAN_NET>/24", "nodeId": "gg"},
+    {"prefix": "<IP_OTHER_064>/16", "nodeId": "ms9"}
   ],
   "domainSuffixes": [
     {"suffix": ".internal", "nodeId": "gg"},

@@ -29,25 +29,25 @@
 所有 mesh 域名（jf.phn, gg.phn 等）DNS 解析失败，返回 SERVFAIL。
 
 **测试场景**：
-- 从本地 Mac (192.168.1.88) 通过 QG 旁路网关查询
-- DNS 服务器：100.0.0.3（QG 的 GIP）
-- 测试命令：`nslookup jf.phn 100.0.0.3` 和 `nslookup gg.phn 100.0.0.3`
+- 从本地 Mac (<IP_MB_LAN>) 通过 QG 旁路网关查询
+- DNS 服务器：<IP_QG_GIP>（QG 的 GIP）
+- 测试命令：`nslookup jf.phn <IP_QG_GIP>` 和 `nslookup gg.phn <IP_QG_GIP>`
 
 **现象**：
 - 两个域名都返回 SERVFAIL
 - QG 日志中没有任何 DNS 处理日志（无 processQuery、无 ResolveDomainSubnet、无 forwardToRemote）
-- INJECT-DEBUG 显示 DNS 包被注入：`192.168.1.88 -> 100.0.0.3:53`
+- INJECT-DEBUG 显示 DNS 包被注入：`<IP_MB_LAN> -> <IP_QG_GIP>:53`
 
 ## 核心流程（正确理解）
 
 ```
-1. 客户端发送 DNS 查询到 100.0.0.3:53
+1. 客户端发送 DNS 查询到 <IP_QG_GIP>:53
 2. 包到达 TUN 设备
 3. readLoop 读取包并调用 InjectInbound 注入到 gVisor netstack
 4. gVisor netstack 路由决策（RouteSelector）
 5. 包交付给本地 DNSHijacker（因为 localStack=true）
 6. DNSHijacker 处理查询：
-   - jf.phn: 直接 peer (hop=1)，转发到 JF (100.2.0.3:53)
+   - jf.phn: 直接 peer (hop=1)，转发到 JF (<IP_JF_GIP>:53)
    - gg.phn: 多跳 (hop=2 via JF)，转发到 JF，JF 再转发到 GG
 7. DNSHijacker 返回响应
 ```
@@ -61,7 +61,7 @@
 **需要验证**：
 - [ ] DNS 模块的日志级别是否开启？
 - [ ] DNSHijacker 的 serveLoop 是否在运行？
-- [ ] DNSHijacker 绑定的地址是否正确（100.0.0.3:53）？
+- [ ] DNSHijacker 绑定的地址是否正确（<IP_QG_GIP>:53）？
 - [ ] gVisor netstack 是否将包交付给本地 UDP endpoint？
 
 **诊断方法**：
@@ -77,7 +77,7 @@
 **假设**：如果 DNSHijacker 没收到包，不应该返回 SERVFAIL（应该超时）
 
 **需要验证**：
-- [ ] SERVFAIL 响应确实来自 100.0.0.3:53 吗？
+- [ ] SERVFAIL 响应确实来自 <IP_QG_GIP>:53 吗？
 - [ ] 是否有其他 DNS 服务在监听？
 - [ ] 是否是 gVisor 内部某个组件返回的错误？
 
@@ -158,7 +158,7 @@
 **问题根因 2：JF 环境的 DNSHijacker 没有启动**（历史问题，已解决）
 
 **证据链**：
-1. QG 的 DNSHijacker 正常工作，收到 jf.phn/gg.phn 查询后调用 `forwardToRemote()` 转发到 JF (100.2.0.3:53)
+1. QG 的 DNSHijacker 正常工作，收到 jf.phn/gg.phn 查询后调用 `forwardToRemote()` 转发到 JF (<IP_JF_GIP>:53)
 2. QG 日志显示：`writing query (24 bytes)` → **没有 read success 日志** → 3秒后超时
 3. JF 今天的日志中**没有 DNSHijacker 启动日志**（`DNSHijacker.Start()` 和 `DNS hijacker bound` 都没有）
 4. JF 今天的启动日志（10:47:23）显示：
@@ -179,17 +179,17 @@
 - gg.phn 需要经过 JF 中转（hop=2），所以也失败
 
 **对比**：
-- QG → VM (100.1.0.3) 的 DNS 转发 ✅ 成功
-- QG → QGW (100.224.0.3) 的 DNS 转发 ✅ 成功
-- QG → JF (100.2.0.3) 的 DNS 转发 ❌ 失败（JF DNSHijacker 未启动）
+- QG → VM (<IP_OTHER_007>) 的 DNS 转发 ✅ 成功
+- QG → QGW (<IP_OTHER_008>) 的 DNS 转发 ✅ 成功
+- QG → JF (<IP_JF_GIP>) 的 DNS 转发 ❌ 失败（JF DNSHijacker 未启动）
 
 ---
 
 ### 当前状态（2026-10-15 19:30）
 
 **DNS 功能**：✅ 正常工作
-- 测试：`dig @100.0.0.3 gg.phn` → 100.179.0.10 ✅
-- 测试：`dig @100.0.0.3 jf.phn` → 100.2.0.10 ✅
+- 测试：`dig @<IP_QG_GIP> gg.phn` → <IP_GG_FAKE> ✅
+- 测试：`dig @<IP_QG_GIP> jf.phn` → <IP_JF_FAKE> ✅
 - 连续 10 次查询全部成功
 
 **日志系统**：✅ 已修复并部署

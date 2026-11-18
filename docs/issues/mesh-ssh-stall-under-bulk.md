@@ -6,7 +6,7 @@
 
 ## 复现环境
 
-- GG 本机 → trojan 入口 `127.0.0.1:39988`（SNI `www.dynamictj.com`）→ `172.30.0.2:22`（VM 的 OS sshd）
+- GG 本机 → trojan 入口 `127.0.0.1:39988`（SNI `www.dynamictj.com`）→ `<IP_OTHER_010>:22`（VM 的 OS sshd）
 - 路径：`gg → jf → qg → vm`，三跳，IPIP 通告路由
 - 交互流：一个 PTY SSH 会话，每秒发送 `MARK_n` 并等待回显
 - 批量流：300MB 上传 `dd if=/dev/zero bs=1M count=300 | ssh ... 'dd of=/dev/null'`
@@ -58,7 +58,7 @@ writes=230 busy=3ms maxWrite=0s rate=129.2KB/s
 
 | 路径 | 修复前 p95 / max | 修复后 p50 / p95 / max |
 | --- | --- | --- |
-| GG → VM OS sshd（172.30.0.2） | 1370ms / 1385ms | 457ms / 1858ms / 4912ms |
+| GG → VM OS sshd（<IP_OTHER_010>） | 1370ms / 1385ms | 457ms / 1858ms / 4912ms |
 | GG → VM 内置 SSH（vm.phn） | — | 293ms / 1529ms / 2099ms |
 
 结论：**p50 有改善，但 p95 仍在 1.5~1.9s，问题没有完全解决**。修复后 `[P2P-QDEPTH]` 仍出现 `maxSojourn=13.074s`、`drrOut=454`、`maxWrite=0s`、`rate=96.8KB/s`，说明：
@@ -631,7 +631,7 @@ idle-spread 优先动态 lane（提交 332f961、46f5447）。JF 主动侧设为
 
 ## 第二十一轮：外层 carrier RTO 退避实锤（2026-11-16）
 
-复现配方：GG → VM（172.30.0.2 OS sshd，经 trojan 入口）300MB 上传 + 60 次
+复现配方：GG → VM（<IP_OTHER_010> OS sshd，经 trojan 入口）300MB 上传 + 60 次
 交互 PTY 探针（首字节到 MARK 回显）。JF 仍是 `PHAETHON_WARM_LANES=2`。
 本轮每秒同时采集：GG 上全部外层 carrier 的 `ss -tin`、内层 gVisor 全字段
 （含 rcvNxt/rcvBuf）、JF 侧同一 carrier 的 `ss -tin`、全部 app drop 计数。
@@ -641,7 +641,7 @@ t=1794824131.284 发出，11.69s 后才看到回显。
 
 ### 关键证据（同一时间窗）
 
-外层 carrier（GG 侧，远端 36.140.28.178:54196，承载 bulk）：
+外层 carrier（GG 侧，远端 <IP_JF_HT>:54196，承载 bulk）：
 
 ```
 t=124  cwnd=7  lost=7  backoff=6  rto=224  sent=1.069MB retr=251KB sent(seg)=847

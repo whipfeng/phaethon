@@ -2,7 +2,7 @@
 
 ## 现象
 
-MB（macOS，192.168.1.88）无法访问部分公网地址，DNS 解析超时。
+MB（macOS，<IP_MB_LAN>）无法访问部分公网地址，DNS 解析超时。
 
 ## 排查结论
 
@@ -12,25 +12,25 @@ MB（macOS，192.168.1.88）无法访问部分公网地址，DNS 解析超时。
    的启停无关。
 
 2. **IPv4 出访被 MB 的网关 QG 阻断。** MB 的默认路由是
-   `192.168.1.101`（QG，DHCP 静态绑定 `e0:b5:5f:f0:2a:f0 → 192.168.1.88`）。
+   `<IP_QG_LAN>`（QG，DHCP 静态绑定 `e0:b5:5f:f0:2a:f0 → <IP_MB_LAN>`）。
    QG 上 `iptables -P FORWARD DROP`（Docker 的默认策略），且没有
-   192.168.1.0/24 的 MASQUERADE 规则，因此 MB 的转发流量被丢弃。
-   `route -n get 223.5.5.5` 确认走 en0→192.168.1.101；`traceroute` 只到
+   <IP_QG_LAN_NET>/24 的 MASQUERADE 规则，因此 MB 的转发流量被丢弃。
+   `route -n get 223.5.5.5` 确认走 en0→<IP_QG_LAN>；`traceroute` 只到
    第 1 跳，TCP/DNS 全部超时。
 
    临时修复（仅限 MB，未放开全域）：
    ```
-   iptables -I FORWARD 1 -s 192.168.1.88 -j ACCEPT
-   iptables -I FORWARD 2 -d 192.168.1.88 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-   iptables -t nat -A POSTROUTING -s 192.168.1.88 -o eth1 -j MASQUERADE
+   iptables -I FORWARD 1 -s <IP_MB_LAN> -j ACCEPT
+   iptables -I FORWARD 2 -d <IP_MB_LAN> -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+   iptables -t nat -A POSTROUTING -s <IP_MB_LAN> -o eth1 -j MASQUERADE
    ```
-   验证：`curl --interface en0 --resolve www.baidu.com:80:36.152.44.132` → 200；
+   验证：`curl --interface en0 --resolve www.baidu.com:80:<IP_OTHER_026>` → 200；
    `nc 223.5.5.5 53` 成功。
 
 3. **mesh DNS 曾在 QG 重启后停止。** QG 日志在 2026-11-15 17:27:06 出现
    `[DNS-FWD] listener stopped`，之后没有重新绑定；MB 的 resolver 是
-   100.0.0.3，因此 DNS 全部超时。对 QG 再做一次完整重启后 DNS 恢复：
-   MB `nslookup www.baidu.com` 返回 fakeip `100.0.0.250`，
+   <IP_QG_GIP>，因此 DNS 全部超时。对 QG 再做一次完整重启后 DNS 恢复：
+   MB `nslookup www.baidu.com` 返回 fakeip `<IP_OTHER_027>`，
    `curl https://www.baidu.com` → 200。说明 DNS hijacker 的停止/重启
    顺序有缺陷，需要在 worker 重启后确保重新绑定（后续代码修复）。
 
@@ -54,14 +54,14 @@ bypass-gateway 的 host 侧转发/NAT：
 - 仅 Linux 实现，其它平台 no-op。
 
 已部署 QG `v0.8.1-47-gd7dbe9a`，并删除之前手工添加的
-192.168.1.88 规则。验证（仅应用规则）：
+<IP_MB_LAN> 规则。验证（仅应用规则）：
 
 ```
 FORWARD -j PHAETHON_GW_FWD
-PHAETHON_GW_FWD -s 192.168.1.0/24 -j ACCEPT
-PHAETHON_GW_FWD -d 192.168.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PHAETHON_GW_FWD -s <IP_QG_LAN_NET>/24 -j ACCEPT
+PHAETHON_GW_FWD -d <IP_QG_LAN_NET>/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 POSTROUTING -j PHAETHON_GW_NAT
-PHAETHON_GW_NAT -s 192.168.1.0/24 -o eth1 -j MASQUERADE
+PHAETHON_GW_NAT -s <IP_QG_LAN_NET>/24 -o eth1 -j MASQUERADE
 ```
 
 MB 复测：`https://www.baidu.com` → **200**，直连公网 IP 可达。手工 NAT
@@ -73,13 +73,13 @@ utun 归属 identitys，不是本应用。
 
 ## 更正（2026-11-17）：不需要 MASQUERADE
 
-复核确认：MB 与 QG 同一 LAN，上游路由器 192.168.1.1 会像普通 LAN 客户端
-一样 NAT 192.168.1.88，因此 QG 不需要 POSTROUTING MASQUERADE。
+复核确认：MB 与 QG 同一 LAN，上游路由器 <IP_LAN_GW> 会像普通 LAN 客户端
+一样 NAT <IP_MB_LAN>，因此 QG 不需要 POSTROUTING MASQUERADE。
 
 - 已回退应用侧新增的 MASQUERADE/网关链（revert 4065f6f、7374d09）；
 - 保留 `tun/route_linux.go` 现有的三条 FORWARD ACCEPT 元组；
 - QG 自升级重启到 v0.8.1-51-g7374d09 后，元组自动恢复，无 MASQUERADE：
-  MB `https://www.baidu.com` → 200，DNS fakeip 100.0.0.250 正常。
+  MB `https://www.baidu.com` → 200，DNS fakeip <IP_OTHER_027> 正常。
 
 之前 11-15 17:27 的故障是**那次重启后 TUN 引擎/既有 FORWARD 规则/DNS
 hijacker 没有起来**（同一时刻 DNS-FWD 也 stopped），不是功能缺失，也不是
@@ -97,7 +97,7 @@ MASQUERADE。
 - DNS hijacker 启动失败重试 3 次（1s 间隔），覆盖重启时端口/监听竞态。
 
 验证：部署 v53 后手动删除 `eth1→eth1 ACCEPT`，约 50s 内被自动补回；
-MB `https://www.baidu.com` → 200，DNS fakeip 100.0.0.250 正常，无
+MB `https://www.baidu.com` → 200，DNS fakeip <IP_OTHER_027> 正常，无
 MASQUERADE。11-15 17:27 的完整根因未复现，但“重启后既有规则/DNS 未就绪”
 这一类问题现在有自检/重试兜底。
 
@@ -308,7 +308,7 @@ ps:          worker 存活（PID 不变）
 ```
 
 删除 dummy 后无需重启：45s 内 `/api/tun` 变为 `running=true degraded=false`，
-tun0 恢复 `100.0.0.2/29`，MB `HTTP=200`、DNS fakeip 正常。说明 mesh 能力
+tun0 恢复 `<IP_QG_HOST>/29`，MB `HTTP=200`、DNS fakeip 正常。说明 mesh 能力
 在 TUN 故障期间保持，TUN 也能自动恢复。
 
 ## 最终简化（v78）：回到 fd 生命周期，不做接口猜测
@@ -381,7 +381,7 @@ v79 实测（QG，服务不重启，仅外部操作 TUN）：
 | 管理台 `enabled=false` | tun0 消失，health loop 不重建（尊重意图） |
 | 管理台 `enabled=true` | tun0 恢复，running=true |
 | 外部 `ip tuntap add tun0` 后 enable | 内核允许附着，phaeton 直接复用，running=true |
-| 删除被附着的 tun0 | 健康循环重建，恢复 `100.0.0.2/29` |
+| 删除被附着的 tun0 | 健康循环重建，恢复 `<IP_QG_HOST>/29` |
 | `/var/run/phaethon-tun.owner` | 不再生成 |
 
 v80 动态命名实测（QG，外部占用 tun0）：
@@ -392,7 +392,7 @@ v80 动态命名实测（QG，外部占用 tun0）：
 | state 文件 | `{"ifaceName":"eth1","tunName":"tun1",...}` |
 | iptables | 规则为 `eth1↔tun1`，不再出现 tun0 |
 | 禁用 TUN | tun1 销毁，`eth1↔tun1` 规则被清理 |
-| 删除外部 tun0 后重新启用 | phaeton 回到 tun0，配置 100.0.0.2/29 |
+| 删除外部 tun0 后重新启用 | phaeton 回到 tun0，配置 <IP_QG_HOST>/29 |
 
 说明 Linux 创建已从固定 `tun0` 改为 `tun%d`，内核分配空闲 tunN；
 所有路由/规则/状态/诊断使用实际名字，多实例可以在同一主机共存。

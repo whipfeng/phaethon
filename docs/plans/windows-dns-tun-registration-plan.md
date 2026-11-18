@@ -59,5 +59,5 @@ func dnsRegistrationIface(tunName, physicalName string) string
    - `data/dns-bind-probe-v2.ps1`：A/C 用例 OK；B 用例仍 TIMEOUT（Windows 源约束路由固有行为，预期）。
    - `Resolve-DnsName mb.qg.phn` + `www.baidu.com` 系统路径全通（核心门禁）。
    - watcher v2 四路探针 `sys=OK`。
-   - `Get-DnsClientServerAddress -InterfaceAlias <TUN>` 显示 100.212.0.3，metric=5。
+   - `Get-DnsClientServerAddress -InterfaceAlias <TUN>` 显示 <IP_VM_GIP>，metric=5。
 3. 持续观察 ≥30 分钟无"DNS 间歇性挂掉"复发。

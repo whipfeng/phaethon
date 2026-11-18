@@ -72,4 +72,4 @@ Swap used: 915MB -> 119MB
 
 ## 3. 顺带修正
 
-- `scripts/.env` 中 `QG_HOST` 由过期的 `10.11.61.40` 改为 `10.11.61.50`。
+- `scripts/.env` 中 `QG_HOST` 由过期的 `<IP_QG_OLD_40>` 改为 `<IP_QG_OS>`。

@@ -10,12 +10,12 @@
 
 ### 缺陷 1：darwin 无差别删除 split-tunnel 路由
 
-`cleanup_darwin.go` 第一步无条件 `route delete -net 0.0.0.0/1 + 128.0.0.0/1`。0/1+128/1 是业界标准 split-tunnel 形态（WireGuard/OpenVPN/Clash-TUN 等均使用），同机运行其他 VPN 时 phaethon 的清理会把对方的路由删掉 → 对方流量泄漏走物理默认路由或直接断流。
+`cleanup_darwin.go` 第一步无条件 `route delete -net 0.0.0.0/1 + <IP_OTHER_025>/1`。0/1+128/1 是业界标准 split-tunnel 形态（WireGuard/OpenVPN/Clash-TUN 等均使用），同机运行其他 VPN 时 phaethon 的清理会把对方的路由删掉 → 对方流量泄漏走物理默认路由或直接断流。
 
 ### 缺陷 2：命中后 down 整个接口 + 198.18/15 兜底误伤面
 
 - darwin `ifconfig <utun> down`、linux `ip link set down` 把整个接口打掉。本次 Mac 实测中 utun6 即因此被 down（后手动恢复）。
-- 兜底匹配段 198.18/15：Clash/Mihomo fake-ip 默认使用 198.18.0.0/16，部分企业 VPN 也用该段——同机其他 VPN 的 utun/tun 持有 198.18.x.x 地址时会被误删地址 + down 接口，对方 VPN 直接死亡。
+- 兜底匹配段 198.18/15：Clash/Mihomo fake-ip 默认使用 <IP_OTHER_103>/16，部分企业 VPN 也用该段——同机其他 VPN 的 utun/tun 持有 198.18.x.x 地址时会被误删地址 + down 接口，对方 VPN 直接死亡。
 - 198.18/15 是 pre-mesh 老版本 fakeip 的遗留。按项目规则（不留旧版本兼容）应删除；tunIP 现在每条启动路径都有值（`residualTUNIP()` / `e.meshHostIP`）。
 
 ### 改进动机：darwin 是路由操作唯一的"文本解析"短板
@@ -47,7 +47,7 @@ darwin 的正解是 **PF_ROUTE socket**（地位等同 linux netlink）：`RTM_A
 
 **linux `CleanupResidual`：**
 - 先用 netlink 扫描 `tun*` 接口地址，**仅当**某接口持有 tunIP 时：
-  - 按该 link index 删 0.0.0.0/1 + 128.0.0.0/1 路由（netlink `RouteDel`，已结构化）；
+  - 按该 link index 删 0.0.0.0/1 + <IP_OTHER_025>/1 路由（netlink `RouteDel`，已结构化）；
   - `netlink.AddrDel` 删地址（替换 `ip addr del` 外部命令）。
 - 不 `ip link set down`。
 - resolv.conf 恢复 / tunState 恢复（rp_filter、ip_forward、iptables FORWARD 清理）保持无条件执行——它们是 phaethon 自有文件与规则的兜底恢复，与接口匹配无关，`tunIP == nil` 也执行。

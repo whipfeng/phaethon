@@ -39,7 +39,7 @@
 - **NIC 2 非混杂**：只接收目标为 GIP 或 mesh 网段的包
 - **NIC 3 混杂 + Spoofing + 双重职责**：
   - **混杂模式**：让 NIC 3 接收目标地址不是自己的包（环回包的目标是外部 IP）
-  - **Spoofing**：让 Forwarder 用外部 IP 作为源地址回 SYN-ACK（如 SYN 到 219.159.26.41:443，Forwarder 回 SYN-ACK 时 src=219.159.26.41）
+  - **Spoofing**：让 Forwarder 用外部 IP 作为源地址回 SYN-ACK（如 SYN 到 <IP_OTHER_097>:443，Forwarder 回 SYN-ACK 时 src=<IP_OTHER_097>）
   - **职责 1（环回 → Forwarder）**：默认路由的出站包环回到入站，利用混杂模式实现本地交付，触发 TCP/UDP Forwarder（代理连接的核心机制）
   - **职责 2（IPIP 封装）**：匹配静态路由的出站包执行 IPIP 封装，通过 mesh 网络发送到出口节点（智能选路）
 
@@ -162,7 +162,7 @@ s.SetRouteTable([]tcpip.Route{
 
 **部署**：
 - 在 QG 服务器上创建 QGT 环境
-- 独立 subnet (100.65.0.0/16)
+- 独立 subnet (<IP_OTHER_054>/16)
 - 禁用 TUN（避免冲突）
 
 **验证清单**：
@@ -233,7 +233,7 @@ type RouteEntry struct {
 ```yaml
 mesh:
   static_routes:
-    - prefix: "8.8.8.0/24"
+    - prefix: "<IP_OTHER_050>/24"
       node_ids: ["gg", "qg"]  # gg 优先，gg 不可用时用 qg
 ```
 
@@ -241,7 +241,7 @@ mesh:
 
 ### 场景 1：出站 - mesh 内部流量（无 IPIP）
 
-**场景描述**：访问 mesh 网络内的其他节点（如 gg.phn → 100.179.0.1）
+**场景描述**：访问 mesh 网络内的其他节点（如 gg.phn → <IP_GG_VIP>）
 
 ```
 TUN (src=任意, dst=100.x.x.x) → readLoop → InjectInbound NIC 1

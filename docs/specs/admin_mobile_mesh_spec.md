@@ -123,7 +123,7 @@
 
 | CIDR | Actions |
 |------|---------|
-| 192.168.1.0/24 | Edit / Delete |
+| <IP_QG_LAN_NET>/24 | Edit / Delete |
 | 10.0.0.0/8 | Edit / Delete |
 
 **Add/Edit 弹窗**:
@@ -132,7 +132,7 @@
 
 **API**:
 - `GET /api/mesh/advertise` - 获取列表
-- `POST /api/mesh/advertise` - 添加 `{ "cidr": "192.168.1.0/24" }`
+- `POST /api/mesh/advertise` - 添加 `{ "cidr": "<IP_QG_LAN_NET>/24" }`
 - `PUT /api/mesh/advertise/:index` - 编辑
 - `DELETE /api/mesh/advertise/:index` - 删除
 

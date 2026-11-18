@@ -54,7 +54,7 @@ HandleMeshFrame 必须根据 dst 地址精确区分处理路径，不能用 `isL
   │   │
   │   │  NAT 反转：查 conntrack 表还原原始源地址
   │   │  key = (proto, 回程srcPort, 回程srcIP, 回程dstPort)
-  │   │  value = 原始源地址（如 LAN 客户端 192.168.1.88）
+  │   │  value = 原始源地址（如 LAN 客户端 <IP_MB_LAN>）
   │   │  查不到则丢包
   │   │
   │   └─ WriteMeshPacket → TUN → OS 投递
@@ -102,29 +102,29 @@ default:                        // 非本地 - 转发或本地处理
 
 ```
 1. App 发 DNS 查询
-   src=100.64.1.2(.2), dst=100.64.1.3(.3 GIP)
+   src=<IP_OTHER_035>(.2), dst=<IP_OTHER_036>(.3 GIP)
    ↓
 2. TUN 捕获，注入 gVisor
    ↓
 3. DNS hijacker 在 .3 收到查询
    - 检查域名匹配 mesh suffix: feishu.cn → gateway=jf
-   - 修改 dst 为 gateway GIP: 100.64.2.3
-   - src 保持 100.64.1.2
+   - 修改 dst 为 gateway GIP: <IP_OTHER_037>
+   - src 保持 <IP_OTHER_035>
    - 注入 gVisor netstack
    ↓
 4. writeLoop 读出，mesh interceptor 处理
-   - src=100.64.1.2 是 mesh 地址 → 不做 NAT
-   - 通过 P2P 发送: src=100.64.1.2, dst=100.64.2.3
+   - src=<IP_OTHER_035> 是 mesh 地址 → 不做 NAT
+   - 通过 P2P 发送: src=<IP_OTHER_035>, dst=<IP_OTHER_037>
    ↓
 5. Mesh 路由多跳传输（VM → QG → JF）
    ↓
 6. JF 的 HandleMeshFrame 收到
-   - dst=100.64.2.3 是本地 GIP
+   - dst=<IP_OTHER_037> 是本地 GIP
    - InjectMeshPacket → gVisor netstack
    ↓
 7. JF 的 DNS hijacker 在 .3 收到
-   - 分配 fakeIP: 100.64.2.4
-   - 构造响应: src=100.64.2.3, dst=100.64.1.2
+   - 分配 fakeIP: <IP_OTHER_038>
+   - 构造响应: src=<IP_OTHER_037>, dst=<IP_OTHER_035>
    - 注入 gVisor netstack
    ↓
 8. JF 的 writeLoop 读出，通过 mesh 发送
@@ -132,7 +132,7 @@ default:                        // 非本地 - 转发或本地处理
 9. Mesh 路由多跳传输（JF → QG → VM）
    ↓
 10. VM 的 HandleMeshFrame 收到
-    - dst=100.64.1.2 是本地 hostIP (.2)
+    - dst=<IP_OTHER_035> 是本地 hostIP (.2)
     - WriteMeshPacket → TUN → OS
     ↓
 11. OS 内核投递给 App（匹配 dst port）

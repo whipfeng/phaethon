@@ -68,7 +68,7 @@
 ### Task 5.1: Linux/macOS 清理
 - [x] 更新 `tun/cleanup_linux.go`
 - [x] 更新 `tun/cleanup_darwin.go`
-- [x] 删除 `0.0.0.0/1`、`128.0.0.0/1` 路由
+- [x] 删除 `0.0.0.0/1`、`<IP_OTHER_025>/1` 路由
 - [x] Linux: `ip link set <iface> down`
 - [x] Darwin: `ifconfig <iface> down`
 

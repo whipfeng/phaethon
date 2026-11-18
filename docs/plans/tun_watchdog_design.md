@@ -69,8 +69,8 @@ Windows 已有进程级看门狗（`LAYER_WATCHDOG_PID` 监控父进程退出后
 ### 阶段 4：统一清理逻辑
 
 - 新建 `tun/cleanup_other.go`：
-  - Linux：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；尝试 `ip link set devName down`。
-  - Darwin：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；`ifconfig devName down`。
+  - Linux：删除 `0.0.0.0/1`、`<IP_OTHER_025>/1` 路由；尝试 `ip link set devName down`。
+  - Darwin：删除 `0.0.0.0/1`、`<IP_OTHER_025>/1` 路由；`ifconfig devName down`。
 - 更新 `tun/cleanup_windows.go`：
   - 已较完整，增加删除系统 DNS 静态配置（恢复 DHCP）作为兜底。
 - 所有清理函数只记录 warn，不返回错误，确保即使部分失败也继续执行。

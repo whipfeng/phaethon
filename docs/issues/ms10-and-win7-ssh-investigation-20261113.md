@@ -6,7 +6,7 @@
 
 - vm/qg/gg/ms9 的 `/api/mesh` 都没有 ms10 的 peer/topology/bestPath；
 - `https://ms10.phn` 的 admin/内置 SSH 出现 TLS EOF / connection reset；
-- `ssh migu@10.161.88.10` 间歇性 `banner exchange` 超时；从 ms9/QG 也复现；
+- `ssh migu@<IP_MS10_OS>` 间歇性 `banner exchange` 超时；从 ms9/QG 也复现；
 - admin upload 报 `WinError 10054` / `SSL UNEXPECTED_EOF`，但其他节点用同一套上传代码都成功。
 
 ### 定位
@@ -15,7 +15,7 @@ ms10 是 Kubernetes 节点 **worker3**，从 ms9（worker4）执行：
 
 ```
 kubectl get nodes -o wide
-worker3   NotReady   control-plane,worker   ...   10.161.88.10
+worker3   NotReady   control-plane,worker   ...   <IP_MS10_OS>
 
 kubectl describe node worker3
 Conditions:
@@ -47,7 +47,7 @@ ms9/gg 的 `/api/p2p` 有失败 peer：
 socks5: connect to :0 fail: dial tcp :0: connect: connection refused
 ```
 
-对应代理 `RV_PROXY`：`type=socks5`、`server=""`、`port=0`、`reverse-address=10.161.88.9`、`p2p=true`。P2P manager 把这种反向/占位代理当成主动拨号目标，造成无意义的 `:0` 重连。它不是 worker3 NotReady 的原因，但是一个真实的 P2P 配置/实现缺陷；建议在 `StartPeer` 跳过没有 dial target 的代理（或至少不要对反向代理拨号）。
+对应代理 `RV_PROXY`：`type=socks5`、`server=""`、`port=0`、`reverse-address=<IP_MS9_OS>`、`p2p=true`。P2P manager 把这种反向/占位代理当成主动拨号目标，造成无意义的 `:0` 重连。它不是 worker3 NotReady 的原因，但是一个真实的 P2P 配置/实现缺陷；建议在 `StartPeer` 跳过没有 dial target 的代理（或至少不要对反向代理拨号）。
 
 ## 二、Win7 PowerShell 2.0 + winpty 实机调研
 

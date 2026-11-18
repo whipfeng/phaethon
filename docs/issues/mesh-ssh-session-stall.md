@@ -51,7 +51,7 @@
 
 1. **本地 SSH 客户端** → GG 的 SOCKS5 代理（mode B 入口）
 2. **GG 收到连接请求**：目标是 md.qgw.phn
-3. **Mesh DNS 解析**：md.qgw.phn → QGW 的 mesh subnet IP（如 100.224.0.1）
+3. **Mesh DNS 解析**：md.qgw.phn → QGW 的 mesh subnet IP（如 <IP_OTHER_029>）
 4. **Mesh 路由**：GG 查找路由表，找到下一跳 peer
 5. **P2P 传输**：通过 P2P 连接发送到 QGW（可能经过中继节点）
 6. **QGW 接收**：QGW 的 netstack 收到包，交付给目标服务
@@ -164,7 +164,7 @@ curl -sk -u admin:changeme https://localhost:39998/api/mesh | jq '.peers[] | sel
 
 ```bash
 # 在 GG 上执行
-curl -sk -u admin:changeme https://localhost:39998/api/mesh | jq '.routes.routes[] | select(.prefix=="100.224.0.0/16")'
+curl -sk -u admin:changeme https://localhost:39998/api/mesh | jq '.routes.routes[] | select(.prefix=="<IP_OTHER_030>/16")'
 ```
 
 查看到 QGW 的路由有几条，分别经过哪些节点。
@@ -173,7 +173,7 @@ curl -sk -u admin:changeme https://localhost:39998/api/mesh | jq '.routes.routes
 
 ```bash
 # 在 GG 上持续 ping QGW 的 mesh IP
-ping 100.224.0.1
+ping <IP_OTHER_029>
 ```
 
 观察延迟是否稳定，是否有丢包。

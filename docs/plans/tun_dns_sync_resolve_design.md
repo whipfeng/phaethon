@@ -49,7 +49,7 @@ sequenceDiagram
     participant Proxy as 代理服务器
 
     App->>SysDNS: getaddrinfo("www.example.com")
-    SysDNS->>TUNDNS: DNS 查询 (192.0.2.2)
+    SysDNS->>TUNDNS: DNS 查询 (<IP_OTHER_004>)
     TUNDNS->>TUNDNS: 分配 Fake-IP (从 mesh subnet)
     TUNDNS-->>SysDNS: 返回 Fake-IP (快速响应)
     SysDNS-->>App: 返回 Fake-IP
@@ -378,10 +378,10 @@ Darwin 和 Linux 平台仍有残留，待后续处理。
 ### 9.2 根本原因
 
 引擎在 `handleConn()` 和 `handleUDP()` 中使用 `net.LookupIP(domain)` 解析真实 IP，
-但此时系统 DNS 已被设置为 TUN DNS（192.0.2.2），导致：
+但此时系统 DNS 已被设置为 TUN DNS（<IP_OTHER_004>），导致：
 
 1. 引擎调用 `net.LookupIP("www.baidu.com")`
-2. 系统 DNS 查询发送到 192.0.2.2（TUN DNS）
+2. 系统 DNS 查询发送到 <IP_OTHER_004>（TUN DNS）
 3. TUN DNS 返回 Fake-IP（从 mesh subnet 分配）
 4. 引擎尝试连接到 Fake-IP
 5. Fake-IP 连接进入 TUN → 死循环或失败
@@ -419,7 +419,7 @@ for _, ipStr := range ipStrs {
 
 修复后的日志：
 ```
-[TUN] [conn-34] resolved console.enterprise.trae.cn -> 101.126.55.244 for DIRECT
+[TUN] [conn-34] resolved console.enterprise.trae.cn -> <IP_OTHER_104> for DIRECT
 [TUN] [conn-34] console.enterprise.trae.cn:443 -> DIRECT
 ```
 
@@ -447,7 +447,7 @@ for _, ipStr := range ipStrs {
 
 ### 10.1 问题背景
 
-TUN 启动后，系统 DNS 被设置为 TUN DNS（192.0.2.2）。当引擎需要解析 DIRECT 连接的真实 IP 时，
+TUN 启动后，系统 DNS 被设置为 TUN DNS（<IP_OTHER_004>）。当引擎需要解析 DIRECT 连接的真实 IP 时，
 不能使用系统 DNS（会返回 Fake-IP），需要使用其他 DNS 服务器。
 
 ### 10.2 主流实现调研
@@ -474,7 +474,7 @@ tun:
   # 如果不配置，使用 TUN 启动时捕获的系统 DNS
   direct-nameserver:
     - 223.5.5.5
-    - 119.29.29.29
+    - <IP_OTHER_105>
 ```
 
 ### 10.4 实现计划
@@ -572,12 +572,12 @@ if proxy.Type == config.ProxyDIRECT && domain != "" {
 
 **测试结果**（2026-08-29）：
 
-配置 `direct-nameserver: [223.5.5.5, 119.29.29.29]`：
+配置 `direct-nameserver: [223.5.5.5, <IP_OTHER_105>]`：
 ```
-www.baidu.com -> 110.242.69.21 for DIRECT (0.09s)
-www.taobao.com -> 116.177.224.69 for DIRECT (0.24s)
-www.cloudflare.com -> 104.16.123.96 for DIRECT (4.0s)
-mon.zijieapi.com -> 120.52.138.58 for DIRECT
+www.baidu.com -> <IP_OTHER_106> for DIRECT (0.09s)
+www.taobao.com -> <IP_OTHER_107> for DIRECT (0.24s)
+www.cloudflare.com -> <IP_OTHER_108> for DIRECT (4.0s)
+mon.zijieapi.com -> <IP_OTHER_109> for DIRECT
 ```
 
 系统持续运行稳定，进程无重启。

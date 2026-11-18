@@ -5,12 +5,12 @@
 **优先级**: 中
 
 ## 问题描述
-VM 到 GG 的 mesh 链路走代理 `GGDYSV_TJ`（trojan → 106.13.183.103:39999），via `LAOYU_SSH_TEST`（ssh aigametest@47.238.79.7:22，阿里云香港）。
+VM 到 GG 的 mesh 链路走代理 `GGDYSV_TJ`（trojan → <IP_GG_PUBLIC>:39999），via `LAOYU_SSH_TEST`（ssh aigametest@<IP_JF_SSH>:22，阿里云香港）。
 用户反馈：连一段时间就被强制断开；即使立即重连，链路也几乎不可用。
 
 ## 核心流程（正确理解）
 ```
-VM phaethon ──(SSH TCP)──> 跳板 sshd 47.238.79.7 ──(新 TCP, direct-tcpip)──> GG:39999 trojan
+VM phaethon ──(SSH TCP)──> 跳板 sshd <IP_JF_SSH> ──(新 TCP, direct-tcpip)──> GG:39999 trojan
      段①                                 段②（香港→北京，跨境）
 ```
 - VM 写 trojan 数据 = 写 SSH channel；channel 受 sshd 给的窗口（OpenSSH 默认 2MB）限制
@@ -20,7 +20,7 @@ VM phaethon ──(SSH TCP)──> 跳板 sshd 47.238.79.7 ──(新 TCP, direc
 ## 待确认问题清单
 
 ### 问题1：周期断开是谁断的
-**结论**: ✅ 已验证 —— 旧版本自己断的。旧 keepalive 5s×1 次不回就关 SSH，每 25~45s 断一次；GG 侧同时看到 47.238.79.7 的 EOF/RST。
+**结论**: ✅ 已验证 —— 旧版本自己断的。旧 keepalive 5s×1 次不回就关 SSH，每 25~45s 断一次；GG 侧同时看到 <IP_JF_SSH> 的 EOF/RST。
 F5（SSH keepalive 容忍）部署后（VM v0.8.0-344 起）没再出现 SSH 断开。
 
 ### 问题2：积压在哪一段
@@ -42,7 +42,7 @@ F5（SSH keepalive 容忍）部署后（VM v0.8.0-344 起）没再出现 SSH 断
 
 ## 诊断日志位置
 - VM: `C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log`，标签 `[P2P-QDEPTH]`、`link dead held`、`[SSH-KA-RTT]`
-- GG: `/home/layer4/phaethon-gg/data/logs/phaethon.log`；`ss -tni state established "( dst 47.238.79.7 )"`
+- GG: `/home/layer4/phaethon-gg/data/logs/phaethon.log`；`ss -tni state established "( dst <IP_JF_SSH> )"`
 
 ## 结论与修复
 瓶颈是物理链路段②（香港跳板→北京 GG，≈46KB/s、重丢包），不是重连不及时。

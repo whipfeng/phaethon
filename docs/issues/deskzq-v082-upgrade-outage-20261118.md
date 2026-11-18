@@ -5,10 +5,10 @@
 - 2026-11-17 22:03：通过 qg 控制台上传 v0.8.2 包并 POST publish；
   publish 响应前 SSH 连接被 reset（deskzq 的 mesh 连接断开）。
 - 2026-11-18 10:47：复核发现 deskzq 离线：
-  - `deskzq.phn` 被 qg 解析为本地 fakeIP `100.0.16.26`（非 deskzq 子网），控制台无响应；
+  - `deskzq.phn` 被 qg 解析为本地 fakeIP `<IP_OTHER_006>`（非 deskzq 子网），控制台无响应；
   - jf 的 peers 只有 gg/qg/qgw，没有 deskzq；
   - qg 拓扑中没有 deskzq 的边；
-  - 内置 SSH（mesh IP `100.212.1.21:22`）`Connection reset`。
+  - 内置 SSH（mesh IP `<IP_DESKZQ_MESH_A>:22`）`Connection reset`。
 
 ## 影响
 

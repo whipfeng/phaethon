@@ -91,7 +91,7 @@ tun:
 
 ## 6. DIRECT 流量路由规则
 
-TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`128.0.0.0/1`）把大部分流量引入 gvisor 栈。DIRECT 流量再发回真实网络时，必须避免重新进入 TUN 造成环路。
+TUN 启用后会通过 split-tunnel 路由（`0.0.0.0/1`、`<IP_OTHER_025>/1`）把大部分流量引入 gvisor 栈。DIRECT 流量再发回真实网络时，必须避免重新进入 TUN 造成环路。
 
 ### 6.1 路由表优先原则
 
@@ -257,7 +257,7 @@ DHCP 服务器在旁路网关模式下为 LAN 客户端自动分配 IP 和配置
 - 绑定物理网卡，仅响应物理网卡上的 DHCP 请求
 - 自动从物理网卡获取子网掩码
 - Gateway = 物理网卡 LAN IP
-- DNS = 192.0.2.3（TUN DNSHijacker 地址，Fake-IP）
+- DNS = <IP_OTHER_003>（TUN DNSHijacker 地址，Fake-IP）
 - 地址池顺序分配，内存 + 磁盘持久化租约
 - 支持 DHCP Option 12（Host Name）— 记录客户端主机名
 - Lease 列表按 IP 排序
@@ -270,8 +270,8 @@ tun:
   bypass-gateway: true
   dhcp:
     enabled: true
-    pool-start: 192.168.1.200
-    pool-end: 192.168.1.250
+    pool-start: <IP_OTHER_111>
+    pool-end: <IP_OTHER_112>
     lease-time: "24h"
 ```
 

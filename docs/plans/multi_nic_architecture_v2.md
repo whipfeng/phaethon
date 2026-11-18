@@ -264,8 +264,8 @@ NIC 4 收到包，判断:
 
 **去程**：
 ```
-应用: src=192.168.1.100, dst=外部IP
-  → NIC 1 readLoop → 手动 SNAT: src=192.168.1.100 → src=VIP
+应用: src=<IP_QGW_LAN>, dst=外部IP
+  → NIC 1 readLoop → 手动 SNAT: src=<IP_QGW_LAN> → src=VIP
   → 注入 gVisor
   → 路由: dst=外部IP → default → NIC 4
   → NIC 4 分发: dst 未命中通告路由 → 环回到 Forwarder
@@ -276,7 +276,7 @@ NIC 4 收到包，判断:
 ```
 Forwarder: src=外部IP, dst=VIP
   → 路由: dst=VIP → NIC 1
-  → NIC 1 writeLoop: 手动 DNAT: dst=VIP → dst=192.168.1.100
+  → NIC 1 writeLoop: 手动 DNAT: dst=VIP → dst=<IP_QGW_LAN>
   → 写回 TUN
   → 应用收到 ✓
 ```
@@ -287,15 +287,15 @@ Forwarder: src=外部IP, dst=VIP
 
 **去程**：
 ```
-应用: src=192.168.1.100, dst=10.11.61.50 (命中通告路由)
-  → NIC 1 readLoop → 手动 SNAT: src=192.168.1.100 → src=VIP
+应用: src=<IP_QGW_LAN>, dst=<IP_QG_OS> (命中通告路由)
+  → NIC 1 readLoop → 手动 SNAT: src=<IP_QGW_LAN> → src=VIP
   → 注入 gVisor
-  → 路由: dst=10.11.61.50 → default → NIC 4
+  → 路由: dst=<IP_QG_OS> → default → NIC 4
   → NIC 4 分发: 
-      dst=10.11.61.50 命中通告路由 ✓
+      dst=<IP_QG_OS> 命中通告路由 ✓
       → IPIP 封装:
           外层: src=本地GIP, dst=出口节点GIP
-          内层: src=VIP, dst=10.11.61.50
+          内层: src=VIP, dst=<IP_QG_OS>
       → NIC 2 (mesh) → mesh 网络
 ```
 
@@ -304,16 +304,16 @@ Forwarder: src=外部IP, dst=VIP
   → NIC 2 收到 IPIP 包
   → 传递给 NIC 3（外层 dst=本地EIP）
   → NIC 3: 解封装 IPIP
-  → 内层: src=VIP, dst=10.11.61.50
-  → 访问目标: src=出口节点IP, dst=10.11.61.50
-  → 目标回包: src=10.11.61.50, dst=出口节点IP
-  → 通过 mesh 回传（无需 IPIP）: src=10.11.61.50, dst=VIP
+  → 内层: src=VIP, dst=<IP_QG_OS>
+  → 访问目标: src=出口节点IP, dst=<IP_QG_OS>
+  → 目标回包: src=<IP_QG_OS>, dst=出口节点IP
+  → 通过 mesh 回传（无需 IPIP）: src=<IP_QG_OS>, dst=VIP
 ```
 
 **回程**：
 ```
   → mesh 网络 → 本地 NIC 2 接收
-  → 包: src=10.11.61.50, dst=VIP (非 IPIP)
+  → 包: src=<IP_QG_OS>, dst=VIP (非 IPIP)
   → 路由: dst=VIP → NIC 1
   → NIC 1 writeLoop: 手动 DNAT → 写回 TUN
   → 应用收到 ✓
@@ -325,17 +325,17 @@ Forwarder: src=外部IP, dst=VIP
 
 **其他节点访问本地网络**：
 ```
-其他节点应用: src=其他节点应用IP, dst=192.168.1.100 (本地网络)
+其他节点应用: src=其他节点应用IP, dst=<IP_QGW_LAN> (本地网络)
   → 其他节点做 IPIP 封装:
       外层: src=其他节点GIP, dst=本地EIP
-      内层: src=其他节点VIP, dst=192.168.1.100
+      内层: src=其他节点VIP, dst=<IP_QGW_LAN>
   → mesh 网络 → 本地 NIC 2 接收
   → 路由: dst=本地EIP → NIC 3
   → NIC 3:
       解封装 IPIP
-      → 内层: src=其他节点VIP, dst=192.168.1.100
+      → 内层: src=其他节点VIP, dst=<IP_QGW_LAN>
       → 环回到 Forwarder（无 DNAT，跨节点执行 Forwarder）
-  → Forwarder 访问 192.168.1.100
+  → Forwarder 访问 <IP_QGW_LAN>
   → 回包通过 Forwarder → mesh → 其他节点 ✓
 ```
 

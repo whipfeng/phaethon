@@ -12,32 +12,32 @@
 
 ## 旁路网关完整流程（具体 IP 示例）
 
-### 场景：LAN(192.168.1.100) 访问外网 8.8.8.8
+### 场景：LAN(<IP_QGW_LAN>) 访问外网 8.8.8.8
 
 #### 去程（LAN → 外网）
 
 ```
-[192.168.1.100] 
-      │ src=192.168.1.100, dst=8.8.8.8
+[<IP_QGW_LAN>] 
+      │ src=<IP_QGW_LAN>, dst=8.8.8.8
       ↓
 [QG OS iptables] → [TUN/NIC1 进入 gVisor]
       │
       │ 路由决策: FindRoute(8.8.8.8) → 默认路由 → NIC3 (隧道)
       ↓
 {Postrouting SNAT}
-      │ src: 192.168.1.100 → 100.1.0.1 (QG VIP)
-      │ conntrack 记录: (192.168.1.100, 8.8.8.8) ↔ (100.1.0.1, 8.8.8.8)
+      │ src: <IP_QGW_LAN> → <IP_OTHER_023> (QG VIP)
+      │ conntrack 记录: (<IP_QGW_LAN>, 8.8.8.8) ↔ (<IP_OTHER_023>, 8.8.8.8)
       ↓
 [NIC3 WritePackets - 隧道 NIC]
-      │ 查 mesh 路由: 0.0.0.0/0 → 出口节点 GG (EIP=100.179.0.4)
+      │ 查 mesh 路由: 0.0.0.0/0 → 出口节点 GG (EIP=<IP_OTHER_043>)
       │ IPIP 封装:
-      │   outer: src=100.1.0.4 (QG EIP), dst=100.179.0.4 (GG EIP)
-      │   inner: src=100.1.0.1, dst=8.8.8.8
+      │   outer: src=<IP_OTHER_015> (QG EIP), dst=<IP_OTHER_043> (GG EIP)
+      │   inner: src=<IP_OTHER_023>, dst=8.8.8.8
       ↓
 [NIC2 发送] → [mesh P2P] → [GG NIC2 进入]
                                 │
                            {IPIP 协议处理器解封装}
-                                │ 剥壳得到 inner: src=100.1.0.1, dst=8.8.8.8
+                                │ 剥壳得到 inner: src=<IP_OTHER_023>, dst=8.8.8.8
                                 ↓
                            [GG gVisor 转发] → [GG 外网接口] → [8.8.8.8]
 ```
@@ -49,18 +49,18 @@
       │ src=8.8.8.8, dst=GG外网接口IP
       ↓
 [GG gVisor]
-      │ conntrack DNAT: dst → 100.1.0.1 (QG VIP)
+      │ conntrack DNAT: dst → <IP_OTHER_023> (QG VIP)
       │ 目标是 mesh VIP，直接 mesh P2P 发送（无需 IPIP）
       ↓
 [mesh P2P] → [QG NIC2 进入]
                   │
              {Prerouting DNAT (conntrack)}
-                  │ dst: 100.1.0.1 → 192.168.1.100
+                  │ dst: <IP_OTHER_023> → <IP_QGW_LAN>
                   ↓
              {路由决策}
-                  │ FindRoute(192.168.1.100) → 默认路由 → NIC1
+                  │ FindRoute(<IP_QGW_LAN>) → 默认路由 → NIC1
                   ↓
-             [NIC1 发送] → [TUN] → [QG OS] → [LAN 192.168.1.100]
+             [NIC1 发送] → [TUN] → [QG OS] → [LAN <IP_QGW_LAN>]
 ```
 
 ### 核心问题：默认路由方向冲突
@@ -86,7 +86,7 @@ NIC 1: TUN (本地应用入口)
 NIC 2: Mesh (mesh 流量出口)
 
 路由表:
-  100.1.0.1/32 → NIC 1 (VIP)
+  <IP_OTHER_023>/32 → NIC 1 (VIP)
   100.0.0.0/8  → NIC 2 (mesh)
 ```
 
@@ -96,7 +96,7 @@ NIC 2: Mesh (mesh 流量出口)
 
 ```
 [Windows App] 
-    ↓ src=100.1.0.1, dst=100.64.0.x (Fake-IP)
+    ↓ src=<IP_OTHER_023>, dst=100.64.0.x (Fake-IP)
 [TUN NIC 1]
     ↓
 [gVisor NIC 1 进入]
@@ -127,13 +127,13 @@ NIC 2: Mesh (mesh 流量出口)
 
 ```
 [Windows App]
-    ↓ src=100.1.0.1, dst=100.179.0.1 (GG VIP)
+    ↓ src=<IP_OTHER_023>, dst=<IP_GG_VIP> (GG VIP)
 [TUN NIC 1]
     ↓
 [gVisor NIC 1 进入]
     ↓
 {路由决策}
-    ↓ FindRoute(100.179.0.1)
+    ↓ FindRoute(<IP_GG_VIP>)
     ↓ 匹配 100.0.0.0/8 → NIC 2
     ↓
 [转发路径] ✅
@@ -144,8 +144,8 @@ NIC 2: Mesh (mesh 流量出口)
 ### 3. 旁路网关 → 外网
 
 ```
-[LAN 192.168.1.100]
-    ↓ src=192.168.1.100, dst=8.8.8.8
+[LAN <IP_QGW_LAN>]
+    ↓ src=<IP_QGW_LAN>, dst=8.8.8.8
 [QG OS iptables]
     ↓
 [TUN NIC 1]
@@ -167,7 +167,7 @@ NIC 2: Mesh (mesh 流量出口)
     ↓ 默认路由 → NIC 2
     ↓
 [Postrouting SNAT]
-    ↓ src → 100.1.0.1
+    ↓ src → <IP_OTHER_023>
     ↓
 [NIC 2 发送] → mesh → 出口节点 → 8.8.8.8 ✅
 ```
@@ -178,16 +178,16 @@ NIC 2: Mesh (mesh 流量出口)
 
 ```
 [8.8.8.8]
-    ↓ src=8.8.8.8, dst=100.1.0.1 (出口节点 EIP)
+    ↓ src=8.8.8.8, dst=<IP_OTHER_023> (出口节点 EIP)
 [mesh P2P]
     ↓
 [gVisor NIC 2 进入]
     ↓
 [Prerouting DNAT]
-    ↓ dst → 192.168.1.100
+    ↓ dst → <IP_QGW_LAN>
     ↓
 {路由决策}
-    ↓ FindRoute(192.168.1.100)
+    ↓ FindRoute(<IP_QGW_LAN>)
     ↓ 无匹配 → ErrHostUnreachable ❌
     ↓
 [包被丢弃] ❌
@@ -196,7 +196,7 @@ NIC 2: Mesh (mesh 流量出口)
 **期望路径**：
 ```
 [Prerouting DNAT]
-    ↓ dst → 192.168.1.100
+    ↓ dst → <IP_QGW_LAN>
     ↓
 {路由决策}
     ↓ 默认路由 → NIC 1
@@ -212,14 +212,14 @@ NIC 2: Mesh (mesh 流量出口)
 
 ```
 [GG App]
-    ↓ src=100.179.0.1, dst=100.1.0.1
+    ↓ src=<IP_GG_VIP>, dst=<IP_OTHER_023>
 [mesh P2P]
     ↓
 [gVisor NIC 2 进入]
     ↓
 {路由决策}
-    ↓ FindRoute(100.1.0.1)
-    ↓ 匹配 100.1.0.1/32 → NIC 1
+    ↓ FindRoute(<IP_OTHER_023>)
+    ↓ 匹配 <IP_OTHER_023>/32 → NIC 1
     ↓
 [转发路径]
     ↓
@@ -237,17 +237,17 @@ NIC 2: Mesh (mesh 流量出口)
 
 **问题**：VIP 路由指向 NIC 1，但包从 NIC 2 进入，应该本地交付。
 
-### 6. 通告路由（VM → MS9 背后的 192.168.88.0/24）
+### 6. 通告路由（VM → MS9 背后的 <IP_OTHER_101>/24）
 
 ```
 [VM App]
-    ↓ src=100.1.0.1, dst=192.168.88.10
+    ↓ src=<IP_OTHER_023>, dst=<IP_OTHER_102>
 [TUN NIC 1]
     ↓
 [gVisor NIC 1 进入]
     ↓
 {路由决策}
-    ↓ FindRoute(192.168.88.10)
+    ↓ FindRoute(<IP_OTHER_102>)
     ↓ 无匹配 → ErrHostUnreachable ❌
     ↓
 [包被丢弃] ❌
@@ -265,10 +265,10 @@ NIC 2: Mesh (mesh 流量出口)
     ↓
 [mesh P2P] → MS9
     ↓
-[MS9 解封装] → 192.168.88.10 ✅
+[MS9 解封装] → <IP_OTHER_102> ✅
 ```
 
-**需要**：为通告路由添加路由条目 `192.168.88.0/24 → 隧道 NIC 201`
+**需要**：为通告路由添加路由条目 `<IP_OTHER_101>/24 → 隧道 NIC 201`
 
 ## 核心冲突
 
@@ -291,7 +291,7 @@ NIC 2: Mesh (mesh 流量出口)
 ### 冲突 3：VIP 互访
 
 ```
-VIP 路由: 100.1.0.1/32 → NIC 1
+VIP 路由: <IP_OTHER_023>/32 → NIC 1
 包从 NIC 2 进入，应该本地交付，但路由指向 NIC 1 → 转发出去 ❌
 ```
 
@@ -307,8 +307,8 @@ VIP 路由: 100.1.0.1/32 → NIC 1
   0.0.0.0/0 → NIC 2 (转发)
 
 策略规则:
-  from 100.1.0.1 (VIP) → 路由表 100
-  from 192.168.1.0/24 (LAN) → 路由表 200
+  from <IP_OTHER_023> (VIP) → 路由表 100
+  from <IP_QG_LAN_NET>/24 (LAN) → 路由表 200
 ```
 
 **问题**：

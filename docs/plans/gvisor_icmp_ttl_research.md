@@ -186,11 +186,11 @@ writeLoop 从 NIC 读取出站包，根据目标地址分类：
 #### 2. DNS Hijacker 可能失效
 
 **当前行为**:
-- DNS hijacker 监听特定地址（如 192.0.2.3:53）
+- DNS hijacker 监听特定地址（如 <IP_OTHER_003>:53）
 - 混杂模式确保发往该地址的包被本地交付给 hijacker
 
 **禁用后**:
-- 如果 192.0.2.3 没有被添加为 assigned address，包会进入转发路径
+- 如果 <IP_OTHER_003> 没有被添加为 assigned address，包会进入转发路径
 - DNS hijacker 无法接收 DNS 请求
 
 **解决方案**:
@@ -200,11 +200,11 @@ writeLoop 从 NIC 读取出站包，根据目标地址分类：
 #### 3. 本地服务访问可能受影响
 
 **当前行为**:
-- 访问本节点的 admin API（如 100.0.0.1:39999）
+- 访问本节点的 admin API（如 <IP_QG_VIP>:39999）
 - 混杂模式确保包被本地交付给服务
 
 **禁用后**:
-- 如果 100.0.0.1 没有被添加为 assigned address，包会进入转发路径
+- 如果 <IP_QG_VIP> 没有被添加为 assigned address，包会进入转发路径
 - 服务无法接收请求
 
 **解决方案**:

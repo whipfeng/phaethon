@@ -47,7 +47,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                      traceroute 100.179.0.1 (GG)                        │
+│                      traceroute <IP_GG_VIP> (GG)                        │
 │                         从 QG 发起 (TTL=2)                              │
 │                                                                         │
 │  QG应用(TTL=2)                                                          │
@@ -81,8 +81,8 @@
 │     │                                                                   │
 │     ▼                                                                   │
 │  gVisor生成ICMP Time Exceeded                                           │
-│     │        src=GG的VIP(100.179.0.1)                                   │
-│     │        dst=QG的VIP(100.0.0.1)                                     │
+│     │        src=GG的VIP(<IP_GG_VIP>)                                   │
+│     │        dst=QG的VIP(<IP_QG_VIP>)                                     │
 │     ▼                                                                   │
 │  gVisor路由ICMP → mesh链路 → QG                                         │
 │     │                                                                   │
@@ -120,29 +120,29 @@
 本地 macOS 通过 QG 的旁路网关 (bypass-gateway) 连接到 mesh 网络，可以直接测试 traceroute：
 
 ```bash
-# 本地测试到 GG (100.179.0.1)
-traceroute -n -w 2 -m 5 100.179.0.1
+# 本地测试到 GG (<IP_GG_VIP>)
+traceroute -n -w 2 -m 5 <IP_GG_VIP>
 
-# 本地测试到 JF (100.2.0.1)
-traceroute -n -w 2 -m 5 100.2.0.1
+# 本地测试到 JF (<IP_JF_VIP>)
+traceroute -n -w 2 -m 5 <IP_JF_VIP>
 ```
 
 **网络路径**：
 ```
-本地 macOS → QG 旁路网关 (192.168.1.101) → QG TUN → mesh 网络 → 目标节点
+本地 macOS → QG 旁路网关 (<IP_QG_LAN>) → QG TUN → mesh 网络 → 目标节点
 ```
 
 **前提条件**：
 - QG 的 TUN 和 bypass-gateway 已启用
-- 本地 DNS 配置为 QG (192.168.1.101) 或使用静态路由
-- 目标 mesh VIP 已知（如 100.179.0.1 = GG）
+- 本地 DNS 配置为 QG (<IP_QG_LAN>) 或使用静态路由
+- 目标 mesh VIP 已知（如 <IP_GG_VIP> = GG）
 
 ### 远程测试
 
 在 GG 环境执行（需要安装 traceroute）：
 ```bash
-ssh layer4@106.13.183.103
-traceroute -n 100.0.0.1  # 到 QG
+ssh layer4@<IP_GG_PUBLIC>
+traceroute -n <IP_QG_VIP>  # 到 QG
 ```
 
 ### 预期结果

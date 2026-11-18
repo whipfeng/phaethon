@@ -21,7 +21,7 @@
 
 ### S2. JF→QG 会话拓扑未摸清
 
-下载流：QG `curl jf.phn:443`（100.2.0.10）→ JF gVisor 发送 → JF mesh 出站 → **会话传输** → QG mesh 入站 → QG TUN → 内核。该会话到底是 `htunnelDirectTransport`（POST/GET 经 server）还是直接 p2p session（stripe over stream）、对端是谁、是否过境 GG（GG flapping 史：[[project-gg-path-instability]]）——决定哪些嫌疑环节在路径上。**Phase A 第一件事就是把这条链路的实际形态画出来。**
+下载流：QG `curl jf.phn:443`（<IP_JF_FAKE>）→ JF gVisor 发送 → JF mesh 出站 → **会话传输** → QG mesh 入站 → QG TUN → 内核。该会话到底是 `htunnelDirectTransport`（POST/GET 经 server）还是直接 p2p session（stripe over stream）、对端是谁、是否过境 GG（GG flapping 史：[[project-gg-path-instability]]）——决定哪些嫌疑环节在路径上。**Phase A 第一件事就是把这条链路的实际形态画出来。**
 
 ### S3. stripe lane 中流失效路径（若在路径上）
 

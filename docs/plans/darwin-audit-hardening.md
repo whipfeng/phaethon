@@ -79,5 +79,5 @@ addr 匹配 ifa（无 mask 参数），语义与 ifconfig delete 完全一致；
 2. phase_a（开关）/ phase_b（kill -9）/ phase_d（holder 共存+恢复）全过
 3. 专项：SIOCAIFADDR 后 `ifconfig utunN` 输出与 ifconfig 版逐字节一致（inet A --> A netmask 0xfffffff8）
 4. 专项：mask 匹配语义——enable/disable 后 CleanupResidual 走 SIOCDIFADDR，phase_d holder 全程完好复核
-5. DNS：enable 后 Wi-Fi 服务 DNS = TUN DNS 地址（实测此前被 PPPoE 遮蔽从未生效），disable 后恢复 100.0.0.3
+5. DNS：enable 后 Wi-Fi 服务 DNS = TUN DNS 地址（实测此前被 PPPoE 遮蔽从未生效），disable 后恢复 <IP_QG_GIP>
 6. 运行时日志零错误、CPU 0%

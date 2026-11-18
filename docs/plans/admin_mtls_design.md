@@ -258,7 +258,7 @@ subjectAltName = @alt_names
 [alt_names]
 DNS.1 = vm.phn
 DNS.2 = *.phn
-IP.1 = 10.21.20.65
+IP.1 = <IP_VM_OS>
 EOF
 
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \

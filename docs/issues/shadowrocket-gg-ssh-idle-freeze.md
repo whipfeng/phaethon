@@ -20,7 +20,7 @@ iPhone Shadowrocket 经 GG trojan 入向访问 mesh 内 sshd（`ssh loc.vm.phn` 
 
 ### 抓包配置
 - 位置：GG 上 tcpdump，ring buffer 4×30MB
-- 过滤：`host 183.212.182.203 and port 39988`（SR 出口 + GG SNI trojan 端口）
+- 过滤：`host <IP_OTHER_032> and port 39988`（SR 出口 + GG SNI trojan 端口）
 - 时长：10:56 → 14:13（3 小时 17 分钟，43887 个包）
 - pcap 位置：`QG:/tmp/sr.pcap0`（GG 原始文件已 kill 抓包进程后保留）
 
@@ -84,13 +84,13 @@ freeze 前最后几个包（连接 `SR:2607 ↔ GG:39988`）：
 GG 日志末尾大量同类错误：
 
 ```
-[TCP-SEND] failed: local=100.179.0.10:443 remote=100.212.0.3:28861 
+[TCP-SEND] failed: local=<IP_GG_FAKE>:443 remote=<IP_VM_GIP>:28861 
 state=ESTABLISHED flags= PA payload=24 
 err=*tcpip.ErrInvalidEndpointState endpoint is in invalid state
 ```
 
-- `100.179.0.10` = GG 自己 mesh VIP
-- `100.212.0.3` = VM 的 mesh VIP
+- `<IP_GG_FAKE>` = GG 自己 mesh VIP
+- `<IP_VM_GIP>` = VM 的 mesh VIP
 - `payload=24` = 每 2 分钟一次心跳
 - 错误反复出现 = mesh 内部 TCP endpoint 已死，但应用层还在写
 
@@ -231,7 +231,7 @@ GG 已重新部署正式版 `v0.8.0-359-g7b39447`（含版本比较修复 e61ab0
 
 ### 连接生命周期
 
-同一连接（GG 侧 `192.168.16.2:39988 ↔ 183.212.182.203:2909`，mesh 侧 `100.179.0.3:56560 ↔ 100.212.0.73:22`）：
+同一连接（GG 侧 `<IP_GG_LAN>:39988 ↔ <IP_OTHER_032>:2909`，mesh 侧 `<IP_GG_GIP>:56560 ↔ <IP_OTHER_033>:22`）：
 
 | 时间 | 事件 |
 |---|---|
@@ -338,7 +338,7 @@ GG 侧（trojan 入向）：
 VM 侧：
 
 ```
-19:14:38 [HANDLECONN-EXIT] [100.179.0.3:61503->100.212.0.73:22] handleConn END
+19:14:38 [HANDLECONN-EXIT] [<IP_GG_GIP>:61503-><IP_OTHER_033>:22] handleConn END
 ```
 
 比 GG 晚 1 秒，为被动响应。**本次源头指向 SR 客户端**。
@@ -364,7 +364,7 @@ VM 的 mesh 入向路径是 `handleConn → DIRECT → handler.relay()`，而 `h
 已部署验证（VM `v0.8.0-362-g3e38c19`），实机输出示例：
 
 ```
-[relay] [101.72.192.157:443|100.212.0.1:54342<->172.30.0.2:54343|101.72.192.157:443] left->right io.Copy done bytes=3685 (EOF), half-closing dst
+[relay] [<IP_OTHER_034>:443|<IP_VM_VIP>:54342<-><IP_OTHER_010>:54343|<IP_OTHER_034>:443] left->right io.Copy done bytes=3685 (EOF), half-closing dst
 [relay] [同上] right->left io.Copy done bytes=5193 (EOF), half-closing dst
 ```
 

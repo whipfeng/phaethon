@@ -6,22 +6,22 @@
 
 ## 概述
 
-QG 环境 (10.0.0.40 / 192.168.0.100) 作为旁路网关，为局域网设备提供透明代理。
+QG 环境 (<IP_OTHER_001> / <IP_OTHER_002>) 作为旁路网关，为局域网设备提供透明代理。
 
 ## 网络拓扑
 
 ```
-[主路由 192.168.1.1]
+[主路由 <IP_LAN_GW>]
        |
        | LAN
        |
-[QG 旁路网关 192.168.0.100]
-  - eth1: 192.168.0.100 (旁路网关接口)
-  - eth0: 10.0.2.15 (管理口，SSH 访问)
+[QG 旁路网关 <IP_OTHER_002>]
+  - eth1: <IP_OTHER_002> (旁路网关接口)
+  - eth0: <IP_QG_VM_NAT> (管理口，SSH 访问)
   - Phaethon TUN 模式
        |
 [局域网设备]
-  网关 → 192.168.0.100
+  网关 → <IP_OTHER_002>
 ```
 
 ## 目录结构
@@ -66,9 +66,9 @@ tail -f /root/bypass-gateway/logs/phaethon.log
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    旁路网关 (192.168.0.100)                       │
+│                    旁路网关 (<IP_OTHER_002>)                       │
 │                                                                 │
-│  客户端流量 (网关=192.168.0.100)                                 │
+│  客户端流量 (网关=<IP_OTHER_002>)                                 │
 │       │                                                         │
 │       ▼                                                         │
 │  eth1 收到包                                                     │
@@ -143,35 +143,35 @@ iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
 
 #### 架构
 
-DNSHijacker 是内嵌在 gVisor netstack 里的 DNS 服务器，绑定专用 IP `192.0.2.3:53`。系统 DNS 指向该 IP，查询通过 TUN 路由自然进入 netstack。
+DNSHijacker 是内嵌在 gVisor netstack 里的 DNS 服务器，绑定专用 IP `<IP_OTHER_003>:53`。系统 DNS 指向该 IP，查询通过 TUN 路由自然进入 netstack。
 
 ```
-应用 DNS 查询 → 系统 DNS (192.0.2.3)
+应用 DNS 查询 → 系统 DNS (<IP_OTHER_003>)
     │
     ▼
 路由到 TUN → gVisor netstack
     │
     ▼
-DNSHijacker (192.0.2.3:53) 返回 Fake-IP (从 mesh subnet 分配)
+DNSHijacker (<IP_OTHER_003>:53) 返回 Fake-IP (从 mesh subnet 分配)
 ```
 
 #### Windows TUN 模式验证结果
 
-- DNSHijacker 绑定 192.0.2.3:53 ✓
-- 系统 DNS 指向 192.0.2.3 ✓
+- DNSHijacker 绑定 <IP_OTHER_003>:53 ✓
+- 系统 DNS 指向 <IP_OTHER_003> ✓
 - `nslookup baidu.com` 返回 Fake-IP ✓
 - DIRECT 流量正常 (HTTP 200) ✓
 
 #### 已删除的 DNSProxy
 
-原 Windows 实现使用 DNSProxy（主机侧 OS socket 监听 192.0.2.2:53，桥接到 DNSHijacker）。该方案占用主机 53 端口，对旁路网关不可行。已在代码中彻底删除。
+原 Windows 实现使用 DNSProxy（主机侧 OS socket 监听 <IP_OTHER_004>:53，桥接到 DNSHijacker）。该方案占用主机 53 端口，对旁路网关不可行。已在代码中彻底删除。
 
 #### 旁路网关 DNS
 
 旁路网关直接复用同一架构：
-- 系统 DNS 设为 192.0.2.3
-- 客户端 DHCP 下发 DNS 为 192.168.0.100（旁路网关 LAN IP）
-- 旁路网关上通过 iptables 把 53 端口流量 DNAT 到 192.0.2.3，或直接让客户端 DNS 指向 192.0.2.3
+- 系统 DNS 设为 <IP_OTHER_003>
+- 客户端 DHCP 下发 DNS 为 <IP_OTHER_002>（旁路网关 LAN IP）
+- 旁路网关上通过 iptables 把 53 端口流量 DNAT 到 <IP_OTHER_003>，或直接让客户端 DNS 指向 <IP_OTHER_003>
 
 ## 与原 Phaethon 的关系
 

@@ -44,7 +44,7 @@ QG 节点上 mesh 节点间转发流（VM↔GG TCP、VM↔jf/qg DNS UDP）间歇
 
 证据链：
 
-1. `/tmp/phaethon-nat-action-debug.log`（41437 行）：真实 SNAT 命中（`targetAddr=100.0.0.1`）只有 37156 行，全部 srcAfter 改写为 VIP，且 srcBefore 只有 192.168.1.x / 100.0.0.2——**mesh 源从未命中 SNAT 规则**，H1/H2 排除。
+1. `/tmp/phaethon-nat-action-debug.log`（41437 行）：真实 SNAT 命中（`targetAddr=<IP_QG_VIP>`）只有 37156 行，全部 srcAfter 改写为 VIP，且 srcBefore 只有 192.168.1.x / <IP_QG_HOST>——**mesh 源从未命中 SNAT 规则**，H1/H2 排除。
 2. 其余 ~4281 行 `targetAddr=`（空）且 srcBefore==srcAfter：全部来自 conntrack.go:769 `maybePerformNoopNAT` → `snatAction(..., tcpip.Address{}, changePort=true, changeAddress=false)`——gVisor 原生逻辑：凡过了 Input/Postrouting NAT hook 却未被规则 NAT 的连接，都做"空地址端口重映射 noop"并**把 `sourceManip` 标记为 `manipPerformed`**。
 3. fork 补丁 conntrack.go:824-827 在 performNAT 里**无条件**记录 `cn.originalInputNIC = pkt.InputNICName`——noop SNAT 也记。于是每个 mesh 转发流（Postrouting hook，ipv4.go:601）和每个本地投递的 mesh 流（Input hook）都被毒化。
 4. patch #6（conntrack.go:996-1000）见 `sourceManip=manipPerformed` 就把 reply 强绑 `OutputNICName=originalInputNIC`（无地址的 LinkNIC）→ 丢包。

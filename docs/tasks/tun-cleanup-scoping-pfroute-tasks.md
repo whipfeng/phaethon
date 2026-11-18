@@ -16,11 +16,11 @@
 
 ## 验证
 
-- [x] Mac 隔离探针实测：PF_ROUTE 路由形态与 route(8) 逐字节一致（PRCLONING+全填 sdl）、包真实进入 utun、排除路由增删、defaultRoute 解析 192.168.1.101/en0 正确
+- [x] Mac 隔离探针实测：PF_ROUTE 路由形态与 route(8) 逐字节一致（PRCLONING+全填 sdl）、包真实进入 utun、排除路由增删、defaultRoute 解析 <IP_QG_LAN>/en0 正确
 - [x] Mac 真机 teardown 实测：停实例后 0/1+128/1 自动删除、utun 消失、网络恢复
 - [x] Mac 真机 TUN 开关实测（2026-11-04，干净环境）：enable 后 0/1+128.0/1 均加入（netstat 显示为 `0/1`、`128.0/1`）、disable 后路由与地址全删。注意 netstat 格式是 `128.0/1` 而非 `128/1`，grep 易漏
 - [x] Mac 真机 kill -9 实测（2026-11-04）：pkill 全杀后 darwin 内核随 fd 释放自动回收 utun 接口、地址与 0/1+128.0/1 路由（3 秒内消失）；重启实例拿到复用 unit，状态干净。CleanupResidual 作为兜底保留
-- [x] Mac 真机 198.18 共存实测（2026-11-04，holder 进程持有 utun+198.18.0.1+198.18/16+0/1）：phaethon 启动 + CleanupResidual 后 holder 的接口、地址、路由全部完好，cleanup 无误伤
+- [x] Mac 真机 198.18 共存实测（2026-11-04，holder 进程持有 utun+<IP_OTHER_039>+198.18/16+0/1）：phaethon 启动 + CleanupResidual 后 holder 的接口、地址、路由全部完好，cleanup 无误伤
 - [ ] **已知问题（待方案）**：当系统已存在异主 0/1 路由（如其他 VPN/手工注入，gateway 指向别的接口）时，platformSetup 的 routeAddNetViaInterface 报 EEXIST（`route add 0.0.0.0/0/1 via utunN: file exists`），TUN 启动失败。与 cleanup"0/1 存在则不动"的收敛设计存在意图矛盾；且阻止了同机双实例抢占（有保护作用）。处置方案待讨论
 - [ ] windows `_recreate_check` e2e：本 PR 对 windows 仅 CleanupResidual 签名对齐（行为零改动，git diff 证实），且唯一 Windows 环境是生产 VM（cleanup 会删生产 TUN 适配器，不可跑）。留待 windows 行为有实际改动时验证
 - [x] 提交推送（阶段一、阶段二分开提交；阶段二修复=edc3e2a）

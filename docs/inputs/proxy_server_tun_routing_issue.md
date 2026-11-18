@@ -4,20 +4,20 @@
 
 所有代理 Server（Direct、Trojan、Socks5、HTTP、Reverse）的流量都可能被 TUN 引擎的路由规则错误匹配，导致连接被重定向到错误的代理。
 
-表现案例：访问 GG 环境的 SSH（`cmll@106.13.183.103 -p 39008`，DirectServer 类型）间歇性失败。
+表现案例：访问 GG 环境的 SSH（`cmll@<IP_GG_PUBLIC> -p 39008`，DirectServer 类型）间歇性失败。
 
 ## 排查过程
 
 ### 现象
-- 端口 39008 是 DirectServer 类型的映射，监听后转发到内网 192.168.1.88:22
+- 端口 39008 是 DirectServer 类型的映射，监听后转发到内网 <IP_MB_LAN>:22
 - 连接有时成功，有时超时
 - 从 GG 控制台日志可以看到连接进入了 DirectServer：
   ```
-  [Direct:dyn-map-49c74fd7] TCP 223.104.150.83:26037 → 192.168.1.88:22 → MESH
+  [Direct:dyn-map-49c74fd7] TCP <IP_OTHER_005>:26037 → <IP_MB_LAN>:22 → MESH
   ```
 - 但随后流量被 TUN 引擎路由到了其他代理：
   ```
-  [TUN] TCP 100.179.0.3 → 192.168.1.88:22 → MATCH,Company#TUN@14:00-18:00 → MGMS_HT
+  [TUN] TCP <IP_GG_GIP> → <IP_MB_LAN>:22 → MATCH,Company#TUN@14:00-18:00 → MGMS_HT
   ```
 
 ### 根因分析
@@ -58,10 +58,10 @@
 
 **没有 bug，行为正常。**
 
-日志中看到的 `[TUN] TCP 100.179.0.3 → 192.168.1.88:22 → MATCH,Company#TUN@14:00-18:00 → MGMS_HT` 是流量到达目标节点后的正常路由：
+日志中看到的 `[TUN] TCP <IP_GG_GIP> → <IP_MB_LAN>:22 → MATCH,Company#TUN@14:00-18:00 → MGMS_HT` 是流量到达目标节点后的正常路由：
 
 1. DirectServer 接受连接，通过 mesh 网络拨号到目标节点
-2. 目标节点从 mesh 收到流量，进入 TUN 接口（源 IP 是 mesh VIP `100.179.0.3`）
+2. 目标节点从 mesh 收到流量，进入 TUN 接口（源 IP 是 mesh VIP `<IP_GG_GIP>`）
 3. 目标节点的 TUN forwarder 正确匹配 `#TUN` 规则，路由到 MGMS_HT
 4. 这是预期行为，v0.15.1 的 mapping 上下文透传设计工作正常
 

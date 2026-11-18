@@ -9,17 +9,17 @@
 从本地 Mac 通过 QG 旁路网关访问 https://jf.phn 失败，DNS 解析正常但 TCP 连接超时。
 
 **测试场景**：
-- 本地 Mac (192.168.1.88) → QG 旁路网关 (192.168.1.101) → mesh 网络 → JF (100.2.0.14)
-- 配置：gateway=192.168.1.101, DNS=100.0.0.3
+- 本地 Mac (<IP_MB_LAN>) → QG 旁路网关 (<IP_QG_LAN>) → mesh 网络 → JF (<IP_OTHER_024>)
+- 配置：gateway=<IP_QG_LAN>, DNS=<IP_QG_GIP>
 
 ## 核心流程（正确理解）
 
 ```
 本地 Mac curl https://jf.phn
   ↓
-DNS: 100.0.0.3 → 100.2.0.14 ✓
+DNS: <IP_QG_GIP> → <IP_OTHER_024> ✓
   ↓
-路由: 100.0.0.0/8 → 192.168.1.101 (QG) ✓
+路由: 100.0.0.0/8 → <IP_QG_LAN> (QG) ✓
   ↓
 QG TUN: 进入 tun0 → gVisor netstack
   ↓
@@ -41,25 +41,25 @@ JF adminHandler: 处理请求
 ### ✅ 1. DNS 解析正常
 **证据**：
 ```bash
-$ nslookup jf.phn 100.0.0.3
+$ nslookup jf.phn <IP_QG_GIP>
 Name: jf.phn
-Address: 100.2.0.14
+Address: <IP_OTHER_024>
 ```
 **时间**: 2026-10-28 14:38
-**结论**: DNS 解析工作正常，jf.phn → 100.2.0.14
+**结论**: DNS 解析工作正常，jf.phn → <IP_OTHER_024>
 
 ### ✅ 2. 本地 Mac 路由配置正确
 **证据**：
 ```bash
 $ networksetup -getinfo Wi-Fi
-IP address: 192.168.1.88
-Router: 192.168.1.101
+IP address: <IP_MB_LAN>
+Router: <IP_QG_LAN>
 
 $ scutil --dns
-nameserver[0] : 100.0.0.3
+nameserver[0] : <IP_QG_GIP>
 
 $ netstat -rn | grep 100
-100  192.168.1.101  UGSc  en0
+100  <IP_QG_LAN>  UGSc  en0
 ```
 **时间**: 2026-10-28 14:38
 **结论**: 本地 Mac 配置正确，100.0.0.0/8 路由到 QG
@@ -69,7 +69,7 @@ $ netstat -rn | grep 100
 ```
 [2026-10-28 14:25:56] [INFO] [netstack] [TCP-DEBUG] acceptTCP goroutine started, registering TCP forwarder...
 [2026-10-28 14:25:56] [INFO] [netstack] [NETSTACK] TCP forwarder registered for protocol 6
-[2026-10-28 14:26:05] [INFO] [netstack] [TCP-DEBUG] TCP forwarder CALLBACK entered local=100.2.0.14:443 remote=100.0.0.3:37160
+[2026-10-28 14:26:05] [INFO] [netstack] [TCP-DEBUG] TCP forwarder CALLBACK entered local=<IP_OTHER_024>:443 remote=<IP_QG_GIP>:37160
 ```
 **时间**: 2026-10-28 14:25-14:26
 **结论**: JF 的 tcp.Forwarder 已注册且回调被调用，工作正常
@@ -86,9 +86,9 @@ $ curl -k --max-time 10 --socks5-hostname localhost:1080 https://jf.phn/api/pack
 ### ✅ 5. QG ↔ JF P2P 连接活跃
 **证据** (QG 日志 `/root/data/logs/phaethon.log`):
 ```
-[2026-10-28 14:42:21] [DEBUG] [mesh] HandleMeshFrame from jf: src=100.2.0.14 dst=100.0.0.3 proto=6 TTL=64 len=1472
-[2026-10-28 14:42:21] [DEBUG] [linknic] [LINKNIC-INBOUND] linkNIC=7 peer=jf len=1472 proto=6 src=100.2.0.14 dst=100.0.0.3
-[2026-10-28 14:42:21] [INFO] [netstack] writePacket ENTRY: src=100.0.0.3 dst=100.2.0.14 proto=6 needIPIP=false nicID=7
+[2026-10-28 14:42:21] [DEBUG] [mesh] HandleMeshFrame from jf: src=<IP_OTHER_024> dst=<IP_QG_GIP> proto=6 TTL=64 len=1472
+[2026-10-28 14:42:21] [DEBUG] [linknic] [LINKNIC-INBOUND] linkNIC=7 peer=jf len=1472 proto=6 src=<IP_OTHER_024> dst=<IP_QG_GIP>
+[2026-10-28 14:42:21] [INFO] [netstack] writePacket ENTRY: src=<IP_QG_GIP> dst=<IP_OTHER_024> proto=6 needIPIP=false nicID=7
 ```
 **时间**: 2026-10-28 14:42
 **结论**: QG 接收来自 JF 的数据包并发送响应，P2P 连接正常
@@ -96,21 +96,21 @@ $ curl -k --max-time 10 --socks5-hostname localhost:1080 https://jf.phn/api/pack
 ### ✅ 6. QG OS 路由表包含 broad routes
 **证据**：
 ```bash
-$ ip route | grep -E '0.0.0.0|128.0.0.0'
+$ ip route | grep -E '0.0.0.0|<IP_OTHER_025>'
 0.0.0.0/1 dev tun0 
-128.0.0.0/1 dev tun0 
+<IP_OTHER_025>/1 dev tun0 
 ```
 **时间**: 2026-10-28 14:42
-**结论**: QG 有覆盖整个 IPv4 空间的路由，100.2.0.14 应该通过 tun0 转发
+**结论**: QG 有覆盖整个 IPv4 空间的路由，<IP_OTHER_024> 应该通过 tun0 转发
 
 ### ✅ 7. 从本地 Mac 发起的连接进入 QG gVisor 并正确路由
 **证据** (QG 日志，14:48:42):
 ```
-[MESH-TRACE] stage=tun_preinject key=tcp:100.2.0.14:443:1855245653 kind=tcp_syn src=192.168.1.88:63759 dst=100.2.0.14:443
-[ROUTE-SELECTOR] FindRoute localAddr= remoteAddr=100.2.0.14 inputNIC=0 -> decision: EgressNIC=7 NeedIPIP=false LocalStack=false
-forwardUnicastPacket post-FindRoute: src=192.168.1.88 dst=100.2.0.14 proto=6 ttl=62 nicID=7 needIPIP=false
-[LINKNIC-WRITEPACKETS] linkNIC=7 peer=jf len=64 version=4 proto=6 src=100.0.0.1 dst=100.2.0.14
-[MESH-TRACE] stage=p2p_enqueued key=tcp:100.2.0.14:443:1855245653 kind=tcp_syn src=100.0.0.1:63759 dst=100.2.0.14:443
+[MESH-TRACE] stage=tun_preinject key=tcp:<IP_OTHER_024>:443:1855245653 kind=tcp_syn src=<IP_MB_LAN>:63759 dst=<IP_OTHER_024>:443
+[ROUTE-SELECTOR] FindRoute localAddr= remoteAddr=<IP_OTHER_024> inputNIC=0 -> decision: EgressNIC=7 NeedIPIP=false LocalStack=false
+forwardUnicastPacket post-FindRoute: src=<IP_MB_LAN> dst=<IP_OTHER_024> proto=6 ttl=62 nicID=7 needIPIP=false
+[LINKNIC-WRITEPACKETS] linkNIC=7 peer=jf len=64 version=4 proto=6 src=<IP_QG_VIP> dst=<IP_OTHER_024>
+[MESH-TRACE] stage=p2p_enqueued key=tcp:<IP_OTHER_024>:443:1855245653 kind=tcp_syn src=<IP_QG_VIP>:63759 dst=<IP_OTHER_024>:443
 ```
 **时间**: 2026-10-28 14:48:42
 **结论**: 
@@ -122,8 +122,8 @@ forwardUnicastPacket post-FindRoute: src=192.168.1.88 dst=100.2.0.14 proto=6 ttl
 ### ✅ 8. 从 QG 本地发起的连接不经过 gVisor
 **证据** (QG 日志，14:49:32-35):
 ```bash
-# 从 QG 本地运行 curl 到 100.2.0.14
-$ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
+# 从 QG 本地运行 curl 到 <IP_OTHER_024>
+$ curl -k --max-time 3 --resolve jf.phn:443:<IP_OTHER_024> https://jf.phn/
 # 结果：Connection timed out
 # 日志：14:49:32-35 期间没有任何 gVisor 日志
 ```
@@ -136,8 +136,8 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 ### ✅ 9. JF 收到了连接但 HandleTCPConn 回调卡住
 **证据** (JF 日志 `/home/layer4/layer4-deploy/data/logs/phaethon.log`):
 ```
-[2026-10-28 14:49:07] [INFO] [TCP-DEBUG] TCP forwarder CALLBACK entered local=100.2.0.14:443 remote=100.0.0.1:63759
-[2026-10-28 14:49:07] [INFO] [HANDLECONN-LAUNCH] [100.0.0.1:63759->100.2.0.14:443] launching goroutine for HandleTCPConn callback
+[2026-10-28 14:49:07] [INFO] [TCP-DEBUG] TCP forwarder CALLBACK entered local=<IP_OTHER_024>:443 remote=<IP_QG_VIP>:63759
+[2026-10-28 14:49:07] [INFO] [HANDLECONN-LAUNCH] [<IP_QG_VIP>:63759-><IP_OTHER_024>:443] launching goroutine for HandleTCPConn callback
 [2026-10-28 14:49:07] [INFO] [HANDLECONN-LAUNCHED] goroutine launched successfully
 [2026-10-28 14:49:07] [INFO] [HANDLECONN-GOROUTINE] goroutine STARTED
 [2026-10-28 14:49:07] [INFO] [HANDLECONN-CALL] calling HandleTCPConn callback now
@@ -154,7 +154,7 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 
 **时间**: 2026-10-28 14:49:07 - 14:50:11
 **结论**: 
-- JF 的 tcp.Forwarder 收到了来自 100.0.0.1:63759 的连接（SNAT 后的本地 Mac）
+- JF 的 tcp.Forwarder 收到了来自 <IP_QG_VIP>:63759 的连接（SNAT 后的本地 Mac）
 - HandleTCPConn 回调被调用但**卡住了，没有返回**
 - QG 侧有数据流动（FIN、ACK、DATA），说明 TCP 连接本身是工作的
 - **但是 JF 的 HandleTCPConn 回调没有处理数据**，导致应用层无法收到响应
@@ -169,10 +169,10 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 ### ✅ 10. P2P 传输层工作正常
 **证据** (QG 日志):
 ```
-[14:49:07] stage=p2p_write_start key=tcp:100.2.0.14:443:1855245653 kind=tcp_syn src=100.0.0.1:63759 dst=100.2.0.14:443
-[14:49:07] stage=p2p_write_ok key=tcp:100.2.0.14:443:1855245653 kind=tcp_syn (重复多次，可能是重传)
-[14:49:07] stage=p2p_write_start key=tcp:100.2.0.14:443:1855245654 kind=tcp_ack
-[14:49:07] stage=p2p_write_ok key=tcp:100.2.0.14:443:1855245654 kind=tcp_ack
+[14:49:07] stage=p2p_write_start key=tcp:<IP_OTHER_024>:443:1855245653 kind=tcp_syn src=<IP_QG_VIP>:63759 dst=<IP_OTHER_024>:443
+[14:49:07] stage=p2p_write_ok key=tcp:<IP_OTHER_024>:443:1855245653 kind=tcp_syn (重复多次，可能是重传)
+[14:49:07] stage=p2p_write_start key=tcp:<IP_OTHER_024>:443:1855245654 kind=tcp_ack
+[14:49:07] stage=p2p_write_ok key=tcp:<IP_OTHER_024>:443:1855245654 kind=tcp_ack
 ```
 **时间**: 2026-10-28 14:49:07
 **结论**: 
@@ -183,7 +183,7 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 ### ✅ 11. JF 的 HandleTCPConn 回调被调用但从未进入函数体（核心问题）
 **证据** (JF 日志):
 ```
-[14:49:07] [netstack] [HANDLECONN-LAUNCH] [100.0.0.1:63759->100.2.0.14:443] launching goroutine
+[14:49:07] [netstack] [HANDLECONN-LAUNCH] [<IP_QG_VIP>:63759-><IP_OTHER_024>:443] launching goroutine
 [14:49:07] [netstack] [HANDLECONN-LAUNCHED] goroutine launched successfully
 [14:49:07] [netstack] [HANDLECONN-GOROUTINE] goroutine STARTED
 [14:49:07] [netstack] [HANDLECONN-CALL] calling HandleTCPConn callback now
@@ -193,10 +193,10 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 
 **同时有多个连接被卡住**:
 ```
-[14:49:07] HANDLECONN-CALL for 100.0.0.1:63759->100.2.0.14:443
-[14:49:07] HANDLECONN-CALL for 100.0.0.1:63760->100.2.0.14:443
-[14:49:07] HANDLECONN-CALL for 100.0.0.1:63764->100.2.0.14:443
-[14:49:07] HANDLECONN-CALL for 100.0.0.1:63762->100.2.0.14:443
+[14:49:07] HANDLECONN-CALL for <IP_QG_VIP>:63759-><IP_OTHER_024>:443
+[14:49:07] HANDLECONN-CALL for <IP_QG_VIP>:63760-><IP_OTHER_024>:443
+[14:49:07] HANDLECONN-CALL for <IP_QG_VIP>:63764-><IP_OTHER_024>:443
+[14:49:07] HANDLECONN-CALL for <IP_QG_VIP>:63762-><IP_OTHER_024>:443
 ```
 
 **时间**: 2026-10-28 14:49:07
@@ -224,7 +224,7 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 **假设**：curl 从 QG 本地发起连接时，数据包可能没有进入 gVisor netstack
 
 **验证结果**: ✅ 已验证
-- 从 QG 本地运行 curl 到 100.2.0.14
+- 从 QG 本地运行 curl 到 <IP_OTHER_024>
 - 14:49:32-35 期间没有任何 gVisor 日志
 - 连接超时
 
@@ -242,11 +242,11 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 **验证结果**: ✅ 已验证
 - 从本地 Mac 运行 curl 到 jf.phn (14:48:42)
 - QG 日志显示：
-  - 数据包进入 tun0: `stage=tun_preinject src=192.168.1.88:63759 dst=100.2.0.14:443`
+  - 数据包进入 tun0: `stage=tun_preinject src=<IP_MB_LAN>:63759 dst=<IP_OTHER_024>:443`
   - RouteSelector 正确决策: `EgressNIC=7, LocalStack=false`
-  - 数据包发送到 P2P: `stage=p2p_enqueued src=100.0.0.1:63759 dst=100.2.0.14:443`
+  - 数据包发送到 P2P: `stage=p2p_enqueued src=<IP_QG_VIP>:63759 dst=<IP_OTHER_024>:443`
 - JF 日志显示：
-  - **没有收到该 SYN 包**（搜索 192.168.1.88, 63759, tcp_syn 均无结果）
+  - **没有收到该 SYN 包**（搜索 <IP_MB_LAN>, 63759, tcp_syn 均无结果）
 
 **结论**: ❌ **数据包从 QG 发送但 JF 未收到**
 - QG 的 P2P 层确实发送了数据包（有 p2p_enqueued 日志）
@@ -323,7 +323,7 @@ $ curl -k --max-time 3 --resolve jf.phn:443:100.2.0.14 https://jf.phn/
 4. 如果到达，追踪为什么没有进入 gVisor
 
 ### 阶段 4：对比现有连接（优先级：低）
-1. 对比新连接（192.168.1.88:63759）和现有连接（100.0.0.3:59290）的差异
+1. 对比新连接（<IP_MB_LAN>:63759）和现有连接（<IP_QG_GIP>:59290）的差异
 2. 现有连接能正常通信，新连接不能
 3. 查找两者的路由决策、P2P 发送路径的差异
 

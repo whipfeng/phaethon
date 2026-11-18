@@ -259,7 +259,7 @@ t=300    POST(合并批) 返回 → ...
 ### 4.1 新旧混布
 
 - 客户端改动对服务端**完全透明**：URL、头、seq 纪律均不变，服务端 `io.ReadAll(r.Body)` 无大小限制（server/htunnel.go:780）。新客户端直接对接现有服务端，**无需同步升级**。
-- 唯一约束：POST body ≤ 中间设备限制。JF 链路经 nginx（`/ui/resdata/` → 10.140.51.2:32457），**nginx 默认 `client_max_body_size 1m`**，`htMaxBatchBytes=512KB` 已留安全余量。若未来调大批量需同步检查 nginx 配置。
+- 唯一约束：POST body ≤ 中间设备限制。JF 链路经 nginx（`/ui/resdata/` → <IP_JF_OS>:32457），**nginx 默认 `client_max_body_size 1m`**，`htMaxBatchBytes=512KB` 已留安全余量。若未来调大批量需同步检查 nginx 配置。
 
 ### 4.2 与 P2P 写路径改造的关系
 

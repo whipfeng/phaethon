@@ -47,7 +47,7 @@
 - 影响不限于重建：任何"RTO 后再进恢复"的流都会这样爬行。
 
 ### P5 VM 每约 30s 断一次 GG 会话
-- VM 经 SSH 跳板 `LAOYU_SSH_TEST`（47.238.79.7）连 GG trojan。
+- VM 经 SSH 跳板 `LAOYU_SSH_TEST`（<IP_JF_SSH>）连 GG trojan。
 - VM 日志：每次 `session ending ... EOF` 同一秒都有 `[ssh] keepalive timed out, closing stale connection`。两端同时 EOF，是 VM 自己关了 SSH 连接。
 - 原因：dialer/ssh.go:276，keepalive 回复只等 5s，超时一次就关闭整条 SSH 连接。
 - 附带：该处日志格式串少 `%s`，输出 `%!(EXTRA string=...)`。

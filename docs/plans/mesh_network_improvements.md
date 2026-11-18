@@ -66,7 +66,7 @@ Mesh 网络在多 VIP 设计（v0.4.1）基础上，存在以下问题需要解�
   - TCP 响应：使用 `TranslateInbound` 保持原始 src IP（Fake-IP）
 - 新增 `tun/nat.go`：`TranslateInboundWithSrc`、`RewriteSrcIP` 方法
 
-**验证**：跨节点 DNS 解析正常，qg.phn → 100.64.0.9 ✓
+**验证**：跨节点 DNS 解析正常，qg.phn → <IP_OTHER_086> ✓
 
 ### 2.2 P2P 协议版本
 
@@ -95,8 +95,8 @@ Mesh 网络在多 VIP 设计（v0.4.1）基础上，存在以下问题需要解�
 ### 2.5 TCP 跨节点连接修复
 
 **根因 1**：子网地址空间重叠
-- VM 配置 `subnet: 100.0.1.0/16` 与 QG `subnet: 100.0.0.0/16` 在 /16 掩码下重叠
-- 修复：VM 子网改为 `100.1.0.0/16`
+- VM 配置 `subnet: <IP_OTHER_087>/16` 与 QG `subnet: 100.0.0.0/16` 在 /16 掩码下重叠
+- 修复：VM 子网改为 `<IP_OTHER_066>/16`
 
 **根因 2**：localNodeDomain 被代理规则覆盖
 - `localNodeDomain` 检查仅在 DIRECT 分支中，proxy 分支忽略
@@ -315,16 +315,16 @@ for _, cs := range allClaimedSubnets {
 ```
 自动生成：
   qg.phn → nextHop=nil (本地), subnet=nil
-  vm.phn → nextHop=VM peer, subnet=100.1.0.0/16, hop=1
-  jf.phn → nextHop=JF peer, subnet=100.2.0.0/16, hop=1
+  vm.phn → nextHop=VM peer, subnet=<IP_OTHER_066>/16, hop=1
+  jf.phn → nextHop=JF peer, subnet=<IP_OTHER_068>/16, hop=1
 
 用户配置（如有）：
-  test.jf.local → nextHop=JF peer, subnet=100.2.0.0/16
-  httpbin.org → nextHop=JF peer, subnet=100.2.0.0/16
+  test.jf.local → nextHop=JF peer, subnet=<IP_OTHER_068>/16
+  httpbin.org → nextHop=JF peer, subnet=<IP_OTHER_068>/16
 ```
 
 查询 "vm.phn" 时：
-- JF: trie 匹配 "vm.phn" → nextHop=VM, subnet=100.1.0.0/16 → 转发到 VM
+- JF: trie 匹配 "vm.phn" → nextHop=VM, subnet=<IP_OTHER_066>/16 → 转发到 VM
 - VM: trie 匹配 "vm.phn" → nextHop=nil → 本地解析 → localNodeDomain 匹配 → 拨号本地 ✓
 
 #### 2.9.3 Gossip 变化
@@ -481,10 +481,10 @@ bestNodes[m.nodeID] = nodeClaim{nil, ownSubnet, 0}
 
 | 测试项 | 结果 | 说明 |
 |--------|------|------|
-| `jf.phn` DNS 解析（QG→JF） | ✓ | `jf.phn → 100.2.0.4 (remote, ttl=1m0s, cached)` |
-| `httpbin.org` DNS 解析（QG→JF） | ✓ | `httpbin.org → 100.2.0.5 (remote, ttl=1m0s, cached)` |
+| `jf.phn` DNS 解析（QG→JF） | ✓ | `jf.phn → <IP_OTHER_088> (remote, ttl=1m0s, cached)` |
+| `httpbin.org` DNS 解析（QG→JF） | ✓ | `httpbin.org → <IP_OTHER_089> (remote, ttl=1m0s, cached)` |
 | `qg.phn` DNS 解析（本地） | ✓ | `qg.phn → 100.0.x.x`（本地 Fake-IP） |
-| HTTP 跨节点访问（QG→JF→httpbin.org） | ✓ | `curl http://100.2.0.5/get` 返回 200 |
+| HTTP 跨节点访问（QG→JF→httpbin.org） | ✓ | `curl http://<IP_OTHER_089>/get` 返回 200 |
 | IP 路由跨节点转发 | ✓ | `HandleOutboundPacket: dst=100.2.0.x` 日志确认 mesh 转发 |
 | `vm.phn` DNS 解析（QG→VM） | ✗ | VM 不可达（非代码问题） |
 | 单元测试 | ✓ | 7/7 测试通过（含多 peer、最长匹配覆盖等） |
@@ -798,7 +798,7 @@ server, port := d.ServerAddr()  // 多态获取地址
 
 #### 2.14.1 问题
 
-1. **TUN 旁路网关**：LAN 客户端经旁路网关进入 TUN 时，`readLoop` 中 `TranslateOutbound` 将源 IP 替换为 VIP（如 `100.0.0.1`）。forwarder 看到的源地址是 VIP，无法识别真实客户端。
+1. **TUN 旁路网关**：LAN 客户端经旁路网关进入 TUN 时，`readLoop` 中 `TranslateOutbound` 将源 IP 替换为 VIP（如 `<IP_QG_VIP>`）。forwarder 看到的源地址是 VIP，无法识别真实客户端。
 2. **Mode B 入口**：代理入口（SOCKS5/Trojan/HTTP/Direct）流量经 netstack socket → loopback → forwarder，forwarder 看到的源地址是 GIP，且 inbound 显示为 "TUN" 而非实际入口协议。
 
 #### 2.14.2 设计
@@ -825,11 +825,11 @@ TUN 旁路网关入口:
   forwarder: src=VIP → NATTable.ResolveOriginalSrc() → src=192.168.1.x ✓
 
 Mode B 入口:
-  SOCKS5 handler (clientAddr=192.168.1.100:12345)
+  SOCKS5 handler (clientAddr=<IP_QGW_LAN>:12345)
     → MeshDial → NetDial → netstack socket (localAddr=GIP:54321)
     → ModeBTable.Register(GIP:54321, clientAddr, "SOCKS5:proxy1")
     → loopback → forwarder
-  forwarder: src=GIP → ModeBTable.Lookup() → src=192.168.1.100:12345, inbound="SOCKS5:proxy1" ✓
+  forwarder: src=GIP → ModeBTable.Lookup() → src=<IP_QGW_LAN>:12345, inbound="SOCKS5:proxy1" ✓
 ```
 
 #### 2.14.4 改动文件
@@ -897,7 +897,7 @@ server handler (s.Mapping = &config.Mapping{...})
       }
 ```
 
-**Key 格式**：`proto:dstAddr:srcPort`（例如 `6:10.21.20.65:22:12345`），其中 dstAddr 包含 IP 和端口。
+**Key 格式**：`proto:dstAddr:srcPort`（例如 `6:<IP_VM_OS>:22:12345`），其中 dstAddr 包含 IP 和端口。
 
 #### 2.15.5 改动清单
 
@@ -1227,7 +1227,7 @@ type GossipDomainSuffix struct {
 ```go
 type GossipDomainSuffix struct {
     Suffix string `json:"suffix"`
-    Subnet string `json:"subnet"` // 该节点的 Fake-IP 网段，如 "100.2.0.0/16"
+    Subnet string `json:"subnet"` // 该节点的 Fake-IP 网段，如 "<IP_OTHER_068>/16"
     Hop    int    `json:"hop"`
 }
 ```
@@ -1460,11 +1460,11 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 ### 待验证项
 
-- [x] Mode A DNS（TUN 入口）跨节点解析正常（VM→QG: qg.phn→100.0.0.7 ✓）
-- [x] Mode B DNS（SOCKS5 入口）跨节点解析正常（QG SOCKS5 → www.google.com→100.0.0.6 ✓）
+- [x] Mode A DNS（TUN 入口）跨节点解析正常（VM→QG: qg.phn→<IP_QG_BCAST> ✓）
+- [x] Mode B DNS（SOCKS5 入口）跨节点解析正常（QG SOCKS5 → www.google.com→<IP_OTHER_090> ✓）
 - [x] DNS 缓存命中时不转发（QG 日志显示 cached ✓）
 - [x] P2P 版本不匹配时拒绝连接（WIN7_VPN peer=1 local=2 被拒绝 ✓）
-- [x] VM→JF 跨节点 DNS（test.jf.local→100.2.0.4 ✓）
+- [x] VM→JF 跨节点 DNS（test.jf.local→<IP_OTHER_088> ✓）
 - [x] 多跳 mesh 路由（VM→QG→JF ✓）
 - [x] 多链路轮询负载均衡（最低跳数 peer 组内轮询 ✓）
 
@@ -1476,8 +1476,8 @@ func (h *DNSHijacker) forwardToRemote(subnet *net.IPNet, query []byte) (net.IP, 
 
 ### 已完成项（自动生成 nodeID.phn 验证）
 
-- [x] JF 查询 vm.phn → 100.1.0.29 (remote, forwarded to VM ✓)
-- [x] JF 查询 qg.phn → 100.0.0.13 (remote, forwarded to QG ✓)
+- [x] JF 查询 vm.phn → <IP_OTHER_091> (remote, forwarded to VM ✓)
+- [x] JF 查询 qg.phn → <IP_OTHER_092> (remote, forwarded to QG ✓)
 - [x] JF SOCKS5 通过 vm.phn 访问 VM 服务（SOCKS5 request granted, TCP via MESH ✓）
 - [x] 用户自定义后缀（httpbin.org）仍正常工作（JF SOCKS5 → httpbin.org/get ✓）
 
@@ -1663,10 +1663,10 @@ engine.SetDNSDomainResolver(meshMgr.ResolveDomainSubnet)
 
 ### 22.1 问题背景
 
-VM 环境配置了 resolver（`ws.vm.phn:22` → `10.21.20.65:39022`），访问 `ssh Docker@ws.vm.phn` 时连接失败：
+VM 环境配置了 resolver（`ws.vm.phn:22` → `<IP_VM_OS>:39022`），访问 `ssh Docker@ws.vm.phn` 时连接失败：
 
 ```
-✗ [TUN] TCP 100.0.0.1 → ws.vm.phn:39022 → DIRECT (lookup ws.vm.phn on 172.30.0.1:53: no such host)
+✗ [TUN] TCP <IP_QG_VIP> → ws.vm.phn:39022 → DIRECT (lookup ws.vm.phn on <IP_OTHER_011>:53: no such host)
 ```
 
 日志中端口已是 39022（说明 resolver 匹配成功），但地址仍显示 ws.vm.phn，且系统 DNS 解析失败。
@@ -1694,7 +1694,7 @@ TCP（`handleConn`）和 UDP（`handleUDP`）两条路径统一修改。
 
 ### 22.4 验证
 
-- QG 侧 `ssh Docker@ws.vm.phn`（经 mesh 到 VM，VM resolver 重写后直连 10.21.20.65:39022）连接成功
+- QG 侧 `ssh Docker@ws.vm.phn`（经 mesh 到 VM，VM resolver 重写后直连 <IP_VM_OS>:39022）连接成功
 
 ## 23. Resolver 增强：协议区分 + 本节点子域名模式 (v0.16.3)
 
@@ -1854,8 +1854,8 @@ TUN 进入、目标为远端 mesh subnet 的连接由 netstack 在 L3 直接转�
 
 mesh 数据面间歇性故障（#244）：QG 上所有远端域名解析在 VM 重启后的几分钟窗口内
 全部失败（SERVFAIL），随后自愈。生产日志三个窗口（14:48 / 16:15 / 17:32）均复现
-同一特征：QG 的 `forwardToRemote` UDP socket 源地址不是默认本机 GIP（100.0.0.3），
-而是远端子网 fake-IP（100.1.0.37/38/39）；QG 报 `read udp 100.1.0.38:59370: i/o
+同一特征：QG 的 `forwardToRemote` UDP socket 源地址不是默认本机 GIP（<IP_QG_GIP>），
+而是远端子网 fake-IP（<IP_OTHER_093>/38/39）；QG 报 `read udp <IP_OTHER_094>:59370: i/o
 timeout`，与 VM 侧收到的查询端口逐一吻合。
 
 ### 26.2 根因
@@ -1865,10 +1865,10 @@ gVisor 的 IPv4 源地址选择是**确定性最长前缀匹配**（非随机）
 （srcHint 精确匹配 > 与目标地址 MatchingPrefix 最长者 > 首个非 deprecated 项），
 该路径不创建临时地址。因此：
 
-1. 源地址 100.1.0.38 出现 ⇒ 它必然在故障时刻被加入了 netstack 的 primary 地址表
+1. 源地址 <IP_OTHER_094> 出现 ⇒ 它必然在故障时刻被加入了 netstack 的 primary 地址表
    （干净代码树中无此路径，唯一嫌疑是当时 QG 部署的脏构建，增量无法从 git 还原）；
-2. 一旦进入地址表，对 dst=100.1.0.3 的前缀匹配长度（≈/21-23）必然大于
-   100.0.0.3（/8）⇒ 每次都被选中，故障持续；
+2. 一旦进入地址表，对 dst=<IP_OTHER_007> 的前缀匹配长度（≈/21-23）必然大于
+   <IP_QG_GIP>（/8）⇒ 每次都被选中，故障持续；
 3. 地址表恢复后源地址立即回退 GIP ⇒ 表现为自愈。
 
 **故障机制**：VM 收到源地址为自己池内 fake-IP 的查询后，回包目的地址被本节点
@@ -1891,7 +1891,7 @@ gVisor 的 IPv4 源地址选择是**确定性最长前缀匹配**（非随机）
 ### 26.5 验收标准
 
 - VM 部署后，VM→QG 方向域名解析正常，QG 日志收到的查询源地址为 VM 的 GIP
-  （100.1.0.3）；
+  （<IP_OTHER_007>）；
 - QG 部署后重启 VM 复现场景：远端域名解析全程无 `i/o timeout`、无 SERVFAIL。
 
 ## 27. Fake-IP de-NAT miss 快速拒绝 (v0.16.7)
@@ -1903,9 +1903,9 @@ serve-stale 行为）仍持有重启前的旧 fake-IP 并发起连接。SYN 到�
 `LookupDomain(dst)` 反查 miss，引擎把该地址当作普通 IP 走 DIRECT 直连：从物理网卡
 dial 一个全网中不存在的地址，Windows connectex ~21s 超时后才失败。
 
-实测（2026-09-21 VM 重启场景）：重启前 `ws.vm.phn → 100.1.0.47`；重启后池重建，
-首次查询分配 `100.1.0.41`。客户端持旧 .47 发起 ssh → VM 日志
-`direct dial 100.1.0.47:22 fail: connectex: timeout`（21s）→ 第一次必失败；
+实测（2026-09-21 VM 重启场景）：重启前 `ws.vm.phn → <IP_OTHER_095>`；重启后池重建，
+首次查询分配 `<IP_OTHER_096>`。客户端持旧 .47 发起 ssh → VM 日志
+`direct dial <IP_OTHER_095>:22 fail: connectex: timeout`（21s）→ 第一次必失败；
 客户端重新解析后持 .41 重试 → 命中映射 → 成功。
 
 ### 27.2 备选方案与决策

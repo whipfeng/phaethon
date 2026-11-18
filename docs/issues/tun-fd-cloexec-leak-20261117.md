@@ -5,21 +5,21 @@
 
 ## 现象
 
-- qg 作为旁路网关，`nslookup git.migu.cn` 超时；`nslookup git.migu.cn 100.0.0.3` 同样超时。
-- `ip -br addr` 同时存在 `tun0` 和 `tun1`，两者都带 `100.0.0.2/29`。
-- `ip route get 100.0.0.3` 选择 **tun0**，但当前 netstack 实际使用的是 **tun1**。
-- DNSHijacker 日志能正常处理来自远端 GIP 的查询，但收不到 `100.0.0.2 → 100.0.0.3:53` 的本机查询。
+- qg 作为旁路网关，`nslookup git.migu.cn` 超时；`nslookup git.migu.cn <IP_QG_GIP>` 同样超时。
+- `ip -br addr` 同时存在 `tun0` 和 `tun1`，两者都带 `<IP_QG_HOST>/29`。
+- `ip route get <IP_QG_GIP>` 选择 **tun0**，但当前 netstack 实际使用的是 **tun1**。
+- DNSHijacker 日志能正常处理来自远端 GIP 的查询，但收不到 `<IP_QG_HOST> → <IP_QG_GIP>:53` 的本机查询。
 - 重启越多，残留 tunN 越多，表现为 DNS 超时、部分 mesh 流量卡顿。
 
 ## 证据
 
 ```
 # ip -br addr | grep tun
-tun0  UNKNOWN  100.0.0.2/29 ...
-tun1  UNKNOWN  100.0.0.2/29 ...
+tun0  UNKNOWN  <IP_QG_HOST>/29 ...
+tun1  UNKNOWN  <IP_QG_HOST>/29 ...
 
-# ip route get 100.0.0.3
-100.0.0.3 dev tun0 src 100.0.0.2 uid 0
+# ip route get <IP_QG_GIP>
+<IP_QG_GIP> dev tun0 src <IP_QG_HOST> uid 0
 
 # fd 持有者（修复前）
 /proc/10953 (watchdog)  1 个 /dev/net/tun
@@ -32,7 +32,7 @@ tun1  UNKNOWN  100.0.0.2/29 ...
 1. `open("/dev/net/tun")` 未设置 `CLOEXEC`。
 2. 内置 SSH、Watcher 等子进程继承了 TUN fd；worker 退出/重启时旧 fd 仍被这些子进程持有，旧 `tunN` 不随 worker 销毁。
 3. 新 worker 通过 `tun%d` 只能拿到 `tunN+1`；旧接口继续保留同一 `/29` 路由。
-4. 内核选路可能选中旧接口（如 `100.0.0.3 → tun0`），而当前 netstack 绑定的是 `tun1`，导致 DNS GIP / mesh 流量进入失效 TUN。
+4. 内核选路可能选中旧接口（如 `<IP_QG_GIP> → tun0`），而当前 netstack 绑定的是 `tun1`，导致 DNS GIP / mesh 流量进入失效 TUN。
 
 ## 修复
 
@@ -45,8 +45,8 @@ tun1  UNKNOWN  100.0.0.2/29 ...
 ```
 # 修复后 qg
 ip -br addr | grep tun        -> 仅 tun0
-ip route get 100.0.0.3        -> 100.0.0.3 dev tun0 src 100.0.0.2
-nslookup git.migu.cn          -> 100.135.0.11
+ip route get <IP_QG_GIP>        -> <IP_QG_GIP> dev tun0 src <IP_QG_HOST>
+nslookup git.migu.cn          -> <IP_DESKZQ_DOMAIN>
 # watchdog/worker tun fd 数量 -> 0 / 1
 ```
 

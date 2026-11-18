@@ -45,9 +45,11 @@
 - 文档/测试中的 `password=xxx`、`changeme`、`your-secret-token`、`testpass` 均为占位/测试值，不是真实凭据。
 - 公开材料仍在仓库：`ca.crt`、`client*.crt`、`client-all.csr`、`admin.pub`、`tools/client-all.crt`
   （均为证书/CSR/公钥，不含私钥）。
-- **91 个 docs 文件仍包含 IP 地址**（内网/公网运维记录，如 `docs/issues/*`、`docs/plans/*`）。
-  这些不是凭据，但按 README 的安全策略属于敏感信息；本次未自动批量替换，待决定是否统一改为
-  占位符（会影响问题记录的现场细节）。
+- **docs 环境 IP 已替换为占位符**：74 个文件中的环境地址改为 `<IP_*>` / `<IP_OTHER_n>`；
+  真实值映射保存在本地未跟踪的 `agents.md`（`.gitignore` 已忽略），可据此还原环境信息。
+  标准 CIDR、回环、公共 DNS、文档示例地址保留，避免影响通用说明。
+- 订阅域名（如 `docs/issues/data-migration-analysis.md` 中的真实节点域名）不在本次 IP 替换范围内，
+  仍属待处理项。
 - `docs/issues/data-migration-analysis.md` 含有真实订阅节点域名（非密码），同属待处理项。
 
 ## 历史 hash 说明

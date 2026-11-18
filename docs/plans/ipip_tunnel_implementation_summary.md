@@ -118,8 +118,8 @@ n.ns.RegisterTunnelProtocol(ipipHandler)
 ## 下一步
 
 1. **部署到QG环境**：QG需要运行新代码才能发送IPIP包
-2. **测试IPIP封装**：从VM ping 172.30.0.2（QG的advertised route）
-3. **测试IPIP解封**：从QG ping 10.0.0.2（VM的advertised route）
+2. **测试IPIP封装**：从VM ping <IP_OTHER_010>（QG的advertised route）
+3. **测试IPIP解封**：从QG ping <IP_OTHER_059>（VM的advertised route）
 4. **验证TCP forwarder**：确认解封后的包能正确到达TCP forwarder
 5. **清理调试日志**：移除过多的GVISOR-TRACE日志
 

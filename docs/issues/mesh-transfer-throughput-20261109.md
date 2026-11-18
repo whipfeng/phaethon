@@ -20,8 +20,8 @@
 
 | # | 路径 | 传输方式 | 结果 | 折算 |
 |---|---|---|---|---|
-| 1 | 本机 → QG `10.11.61.50:2222` | scp（公网/直连） | 秒级完成 | 约 5~10MB/s |
-| 2 | QG → mb `192.168.1.88` | scp（局域网直连） | **3.59s** | **约 6.4MB/s** |
+| 1 | 本机 → QG `<IP_QG_OS>:2222` | scp（公网/直连） | 秒级完成 | 约 5~10MB/s |
+| 2 | QG → mb `<IP_MB_LAN>` | scp（局域网直连） | **3.59s** | **约 6.4MB/s** |
 | 3 | 本机 → mb（mesh，`loc.mb.phn`） | scp（单流走 mesh） | 5 分钟后仅 15.9MB，随后停滞 | **约 50KB/s** |
 | 4 | QG → mb（mesh，`loc.mb.phn`） | scp | >226s 未完成，中止 | <100KB/s |
 | 5 | 本机 → gg（mesh，`loc.gg.phn`） | scp | 23MB 完成（分钟级） | 数百 KB/s |
@@ -36,8 +36,8 @@
 
 ## 4. 运维结论（立即生效）
 
-- **不要经 mesh 搬二进制**。优先 `本机 → QG(10.11.61.50:2222) → 目标机内网 IP`：
-  - mb：`ssh root@10.11.61.50`，再 `scp file cmll@192.168.1.88:...`（3.6s/23MB）
+- **不要经 mesh 搬二进制**。优先 `本机 → QG(<IP_QG_OS>:2222) → 目标机内网 IP`：
+  - mb：`ssh root@<IP_QG_OS>`，再 `scp file cmll@<IP_MB_LAN>:...`（3.6s/23MB）
   - gg：`scp file layer4@loc.gg.phn:/home/layer4/phaethon-gg/`（走 mesh，分钟级，可接受）
 - deskw 这类 Windows + PowerShell 默认 shell 的目标，不要用 scp；改 `ssh + stdin` 或让本机放文件。
 
@@ -52,7 +52,7 @@
 
 ## 6. 复测（2026-11-09 21:00–22:00，全部在 411 版本上）
 
-环境：vm(Windows 本机) / QG(10.11.61.50) / jf / gg / mb(192.168.1.88)，测试载荷为 `/tmp/bench*.bin`（16MB 随机数，scp 单流或分片并行）。
+环境：vm(Windows 本机) / QG(<IP_QG_OS>) / jf / gg / mb(<IP_MB_LAN>)，测试载荷为 `/tmp/bench*.bin`（16MB 随机数，scp 单流或分片并行）。
 
 | # | 路径 | 跳数 | 载荷 | 耗时 | 折算 |
 |---|---|---|---|---|---|
@@ -65,7 +65,7 @@
 | 7 | **VM → jf mesh 4 流并行（4×256KB）** | 2 | 1MB | **>300s 未完成** | **<3.4KB/s/流** |
 | 8 | VM → gg mesh（`loc.gg.phn`） | 1 | 1MB | 27.6s | **38KB/s** |
 | 9 | QG → mb mesh（`loc.mb.phn`） | 多跳 | 23MB | >226s 未完成 | <100KB/s |
-| 10 | QG → mb 局域网（192.168.1.88） | 0 | 23MB | 3.59s | **6.4MB/s** |
+| 10 | QG → mb 局域网（<IP_MB_LAN>） | 0 | 23MB | 3.59s | **6.4MB/s** |
 | 11 | VM → QG 公网直连 | 0 | 16MB | 2.40s | **6.9MB/s** |
 | 12 | **VM → jf mesh（整包 16MB）** | **2（经 qg）** | 16MB | **630.9s** | **26.6KB/s** |
 
@@ -116,7 +116,7 @@ vm -> gg  linkKey=vm:GGDYSV_TJ      srtt=275.4ms jitter=139.9ms
 
 | 场景 | 路径 | 耗时 | 吞吐 | 占直连 |
 |---|---|---|---|---|
-| 直连基线 | vm ← qg 公网 `10.11.61.50:2222` | 2.43s | **6.6MB/s** | 100% |
+| 直连基线 | vm ← qg 公网 `<IP_QG_OS>:2222` | 2.43s | **6.6MB/s** | 100% |
 | mesh 1 跳 | vm ← qg（内建 SSH） | 4.35s | **3.68MB/s** | 56% |
 | mesh 2 跳 | vm ← jf（内建 SSH，经 qg） | 14.15s | **1.13MB/s** | 17% |
 | mesh 2 跳 8 流并发 | vm ← jf，8×2MB 并行 | 11.39s | **1.47MB/s** | 22% |
@@ -391,7 +391,7 @@ SOCKS5 TCP base 只有 ~0.3MB/s，UDP leg 是必需的，已恢复 `p2p-udp=true
 
 ### 16.2 恢复后观察到外部载体抖动
 
-多次重启/压测后，qg↔jf 的 h_tunnel 对端（36.140.28.178:18080）出现：
+多次重启/压测后，qg↔jf 的 h_tunnel 对端（<IP_JF_HT>:18080）出现：
 
 - jf 侧 qg 链路 `srtt=204ms jitter=262ms`（正常 ~20ms）；
 - 两端路由自动切到 gg：jf→vm cost 187 via gg，vm→jf cost 201 via gg；
@@ -480,10 +480,10 @@ vm↔qg 健康、qg↔jf 的**直连 SSH 与 h_tunnel 同时变慢**，说明问
 vm→qg→jf 不是“没有等价路径”。OS 基线用 SSH 跳板（经 qg 系统 sshd 到 jf 公网 sshd）：
 
 ```
-ssh -J root@10.11.61.50:2222 -p 60002 layer4@36.140.28.178
+ssh -J root@<IP_QG_OS>:2222 -p 60002 layer4@<IP_JF_HT>
 # 或
-ssh -o ProxyCommand="ssh -p 2222 root@10.11.61.50 -W 36.140.28.178:60002" \
-    -p 60002 layer4@36.140.28.178
+ssh -o ProxyCommand="ssh -p 2222 root@<IP_QG_OS> -W <IP_JF_HT>:60002" \
+    -p 60002 layer4@<IP_JF_HT>
 ```
 
 ### 20.3 时间与状态
@@ -668,7 +668,7 @@ total samples = 850ms / 15s = 5.67% of one core
 ### 28.1 UDP 可达性实测
 
 - 在 jf 上以 `python3` 监听 `0.0.0.0:19000/udp`（用户态进程，未改系统配置）；
-- 从 qg 向 `36.140.28.178:19000/udp` 发送数据报；
+- 从 qg 向 `<IP_JF_HT>:19000/udp` 发送数据报；
 - 结果：监听进程成功 bind，但**未收到任何数据报**；jf 公网只放通了已知 TCP 端口
   （18080 h_tunnel、60002 sshd），任意 UDP 入站不可达。
 
@@ -699,7 +699,7 @@ total samples = 850ms / 15s = 5.67% of one core
 
 | 路径 | 单流 | 8 流 | 说明 |
 |---|---|---|---|
-| OS 级（mb admin HTTPS 192.168.1.88:39999） | 6.2MB/s | 6.5MB/s | 不过 mesh |
+| OS 级（mb admin HTTPS <IP_MB_LAN>:39999） | 6.2MB/s | 6.5MB/s | 不过 mesh |
 | mesh + 直连 SOCKS5（MB_S5，mb:11080） | ~4.5 | **6.55MB/s** | 同一 mesh 栈，普通 TCP 载体 |
 | mesh + h_tunnel（MB_HT，mb:18081） | 1.8~2.25 | **3.4MB/s** | 同一 mesh 栈，ht 载体 |
 
@@ -945,7 +945,7 @@ async 后服务端 queued=0，GET 的 87~182ms 是在**等 inner TCP 生产数�
 
 ## 39. 连接复用实测：不是“用完就关”（2026-11-10 15:55）
 
-qg↔mb 传输中每 2s 采样 `ss -tn | grep 192.168.1.88:18081`：
+qg↔mb 传输中每 2s 采样 `ss -tn | grep <IP_MB_LAN>:18081`：
 
 - 稳定 **18 条 ESTABLISHED**（= get-slots 2 条 + POST pool 16 条），5 次采样本地端口集合完全相同；
 - TIME-WAIT 仅 3 → 9（整段传输），没有每请求建连/断开。
@@ -1426,8 +1426,8 @@ qg 上唯一满足条件的 `UDP_ARM_QG` 之前是 `enabled=false`，重启后�
 2. 让 vm 的 `QG_SS5_UDPLEG` peer 重连一次（PATCH p2p=false → true），
    之后 `transport=udp`，并且 qg 再重启也能保持 udp。
 
-注意：关闭 p2p 会立即断开到 vm 的 mesh 通路，第二次 PATCH 不能再走 `100.212.0.10:39999`，
-要改走 vm 的直连管理地址 `10.21.20.65:39999`。
+注意：关闭 p2p 会立即断开到 vm 的 mesh 通路，第二次 PATCH 不能再走 `<IP_VM_FAKE>:39999`，
+要改走 vm 的直连管理地址 `<IP_VM_OS>:39999`。
 
 ## 65. 内置 SSH 数据完整性异常：每次长跑有 1~2 条流少收 26,410B（待查）
 
@@ -2006,7 +2006,7 @@ gain2 的 8 流看似更高，但同期链路在恢复（一次 31s/6.0），不
 ## 86. 主动触发单向 ACK 黑洞：探针命中，5s 提前 fallback 修复流重置（2026-11-11 11:20）
 
 不等自然复现，在 qg 用 iptables 主动制造 vm→qg 的 ACK 单向黑洞：
-`iptables -I INPUT -p udp -s 10.21.20.65 --sport <legPort> -j DROP`
+`iptables -I INPUT -p udp -s <IP_VM_OS> --sport <legPort> -j DROP`
 （只丢 ACK 方向的 UDP，qg→vm 数据仍发）。
 
 ### 86.1 探针命中
@@ -2146,7 +2146,7 @@ RTO/RACK/cwnd 参数怎么调都只能得到 100~150s 的慢跑，无法消除�
 phaethon 进程承载，脚本第一步 `pkill -x phaethon` 会杀掉自己所在的会话，导致
 “备份完成 → 进程已停 → 脚本被 SIGHUP 中断 → 没有启动”。本次一次误操作即由此
 触发，jf 的 phaethon 停了几分钟。部署 jf 必须走真实 sshd：
-`ssh -p 60002 layer4@36.140.28.178`（经 qg 中转），或先上传再用 setsid 启动。）
+`ssh -p 60002 layer4@<IP_JF_HT>`（经 qg 中转），或先上传再用 setsid 启动。）
 
 ## 92. 无丢包 300ms 延迟台阶复现：RACK 把“变慢”误判为丢包（2026-11-11 14:40）
 
@@ -2255,7 +2255,7 @@ DSACK undo 后 4 次台阶全部完成、无多分钟停滞。仍待观察：长
 
 （部署注记：qg 部署按 `.claude/skills/qg-deploy`：传 `/root/phaethon.new` →
 `rc-service phaethon stop; zap; start`，重启会断当前 SSH。jf 必须走真实
-sshd `36.140.28.178:60002`，否则 `pkill` 会杀掉承载部署会话的内置 SSH。）
+sshd `<IP_JF_HT>:60002`，否则 `pkill` 会杀掉承载部署会话的内置 SSH。）
 
 ## 96. 全量部署与最终验证（2026-11-11 16:05）
 
@@ -2348,10 +2348,10 @@ qgw 与 deskw 同架构（watchdog + worker），但环境更受限：
    （Makefile 的 `windows7` 目标，`GO_LEGACY_WIN7`）。
 2. **签名包**：meta `platform=windows7`，版本用 `git describe` 原文
    （`v0.8.0-549-g7328aee`），本地 `signing.VerifyPkg` 验签通过。
-3. **传输**：qgw 与 mb 同 LAN（qgw 192.168.1.100、mb 192.168.1.88）。
+3. **传输**：qgw 与 mb 同 LAN（qgw <IP_QGW_LAN>、mb <IP_MB_LAN>）。
    把 pkg 放到 mb `/tmp`，用 `/usr/local/bin/python3 -m http.server 18080`
    起临时 HTTP；qgw 用
-   `(New-Object Net.WebClient).DownloadFile("http://192.168.1.88:18080/win7.pkg", ...)`
+   `(New-Object Net.WebClient).DownloadFile("http://<IP_MB_LAN>:18080/win7.pkg", ...)`
    直接下到 `data/packages/`，`certutil -hashfile` 校验 MD5 一致。
    （注意 mb 的 `/usr/bin/python3` 被坏掉的 Xcode 路径劫持，要用
    `/usr/local/bin/python3`。）
@@ -2532,7 +2532,7 @@ Win10 1809+（ConPTY）或接受行级/REPL；WMF 5.1/PS7 不会带来 ConPTY。
 ## 101. 同载体基线纠偏：差距在 mesh 数据面，不在物理链路（2026-11-12 01:30）
 
 **环境**：vm `v0.8.0-574-gc53c1ee`、qg/jf `v0.8.0-547-g9ddb2a9`；
-vm↔qg 走 `vm:QG_SS5_UDPLEG`（SOCKS5 10.11.61.50:7890，UDP leg Active），
+vm↔qg 走 `vm:QG_SS5_UDPLEG`（SOCKS5 <IP_QG_OS>:7890，UDP leg Active），
 qg↔jf 走 `qg:MGMS_HT`（h_tunnel，transport=tcp）。
 载荷 `/tmp/bench24.bin`=24.5MB（jf md5 `438de69e…`、qg md5 `054d4242…`），
 8 流；测量脚本 `tmp_bench_hop.sh`（`ssh ... cat file`，丢弃输出，墙钟/字节）。
@@ -2541,16 +2541,16 @@ qg↔jf 走 `qg:MGMS_HT`（h_tunnel，transport=tcp）。
 
 | 路径 / 载体 | 方向 | 吞吐 | 说明 |
 |---|---|---|---|
-| vm ↔ qg 公网 `10.11.61.50:2222`（OS sshd） | 下载 | **9.84MB/s** | 宿主机 NAT 端口转发（eth0） |
-| vm ↔ qg 公网 `10.11.61.50:7890`（原生 SOCKS5） | 下载 | **11 / 9.0MB/s** | curl 单流 / 8 流，无 mesh |
-| vm ↔ qg 内网 `192.168.1.101:2222`（OS sshd） | 下载 / 上传 | **1.33 / 2.43MB/s** | 经 192.168.1.1 的 eth1 路径 |
+| vm ↔ qg 公网 `<IP_QG_OS>:2222`（OS sshd） | 下载 | **9.84MB/s** | 宿主机 NAT 端口转发（eth0） |
+| vm ↔ qg 公网 `<IP_QG_OS>:7890`（原生 SOCKS5） | 下载 | **11 / 9.0MB/s** | curl 单流 / 8 流，无 mesh |
+| vm ↔ qg 内网 `<IP_QG_LAN>:2222`（OS sshd） | 下载 / 上传 | **1.33 / 2.43MB/s** | 经 <IP_LAN_GW> 的 eth1 路径 |
 | vm → qg mesh（UDP leg） | 下载 / 上传 | **1.8 / 7.2MB/s** | 内建 SSH，8 流 |
 | vm → qg mesh（关 UDP leg，TCP 载体） | 下载 / 上传 | **3.1 / 3.6MB/s** | 同上，`p2p-udp=false` 单变量 |
 | vm → qg → jf（OS ssh 串接，无 mesh） | 下载 | **4.1~4.6MB/s** | 同窗口公网链路已劣化（历史 9.79） |
 | vm → jf mesh（两跳） | 下载 | **0.7~1.4MB/s** | UDP leg 1.0~1.4；TCP 载体 0.7~0.9 |
 
-**结论 1（口径纠偏）**：`10.11.61.50:2222` 的 9.84MB/s 与 mesh 走的
-`192.168.1.101/eth1` 不是同一条物理路径，不能直接当作 mesh 的“直连基线”。
+**结论 1（口径纠偏）**：`<IP_QG_OS>:2222` 的 9.84MB/s 与 mesh 走的
+`<IP_QG_LAN>/eth1` 不是同一条物理路径，不能直接当作 mesh 的“直连基线”。
 在**同一条 eth1 路径**上 OS ssh 只有 1.33MB/s，mesh UDP leg 的 1.8MB/s 已不低于它；
 真正同载体的上限是原生 SOCKS5 的 9~11MB/s —— mesh 数据面相对它损失 3~5×，
 这才是需要优化的部分。后续基线必须写明“哪条接口/哪个载体”。
@@ -2887,7 +2887,7 @@ GET 的请求/响应往返），或在 orderedInbox 上做真正的按流保序/
 
 约 **1.7×** 提升；慢跑仍与链路时段有关。完整性：WS 下 8 流 **8/8 MD5 一致**
 （`8753a5aa…`）。qg 日志确认 `[HT-WS] persistent websocket established:
-proxy=MB_HT url=ws://192.168.1.88:18081/ui/resdata/ws/conn-1`。
+proxy=MB_HT url=ws://<IP_MB_LAN>:18081/ui/resdata/ws/conn-1`。
 
 ### 104.3 当前状态与下一步
 
@@ -2895,7 +2895,7 @@ proxy=MB_HT url=ws://192.168.1.88:18081/ui/resdata/ws/conn-1`。
   `v0.8.0-583-g2ab2f5c-ws`（服务端同时兼容长轮询）；
 - **MGMS_HT（qg→jf）仍走长轮询**：该路径经过 nginx，目前未放行
   `Upgrade`；放行后可用同一二进制按 `PHAETHON_HT_WS=MGMS_HT` 直接 A/B；
-  实测从 qg 直连 `36.140.28.178:39988`（jf ht 服务端口）不可达（http 000），
+  实测从 qg 直连 `<IP_JF_HT>:39988`（jf ht 服务端口）不可达（http 000），
   公网只暴露 18080（nginx），因此没有绕开 nginx 的验证路径。
 - 同一时段 jf 两跳（长轮询）复核：3 次 7.19 / 7.19 / **0.22（865s 停滞）**，
   中位 7.19 vs OS 9.35（76.9%），但出现一次 **865s 尾延迟**（fail=0，8 流最终
@@ -2974,7 +2974,7 @@ srtt 因此到 3s，再触发 RACK 伪丢包正反馈。之前 512KB 实验只�
 - 客户端已实现“WS 优先 + 5s 握手超时 + 失败回退长轮询”，
   `PHAETHON_HT_WS=auto` 表示所有 h_tunnel 链路先试 WS；env 仅用于
   测试阶段的强制开关，最终生产应默认 auto。
-- **18080 的 nginx 无法由我修改**：从 qg 看 `36.140.28.178:18080` 返回
+- **18080 的 nginx 无法由我修改**：从 qg 看 `<IP_JF_HT>:18080` 返回
   `Server: nginx/1.14.1`；但 jf 本机 `ss` 没有 18080（jf 的 nginx 是
   Docker 容器，只监听 80/443），且 layer4 账号无 sudo、无 docker 权限。
   需要 18080 那台转发机的权限，或由你在那台机器上只改这一条 location：
@@ -3038,7 +3038,7 @@ qg 日志确认：
 
 ```
 [HT-WS] persistent websocket established: proxy=MGMS_HT
-  url=ws://36.140.28.178:18080/ui/resdata/ws/conn-2
+  url=ws://<IP_JF_HT>:18080/ui/resdata/ws/conn-2
 ```
 
 同窗口 A/B（OS 两跳 8.50MB/s，公网窗口已劣化）：
@@ -3076,7 +3076,7 @@ stripe/lane、保序、路由等上层逻辑不再为 h_tunnel POST/GET 池做�
 实测问题：
 - lane 能 attach（jf 日志有 `attaching leg stripeID=...`），但客户端
   `laneCount` 始终为 1，`ensureMinLanes` 反复重拨；
-- 30s 内 qg 到 `36.140.28.178:18080` 累积 **45 条 ESTABLISHED**（连接泄漏），
+- 30s 内 qg 到 `<IP_JF_HT>:18080` 累积 **45 条 ESTABLISHED**（连接泄漏），
   强制 4 lane 的一次两跳只有 **136s / 1.37MB/s**；
 - 说明 lane 生命周期/所有权（控制器 remove、attach 后 reader/writer、
   min-lane 与动态 remove 的互斥）还有 bug，不能按默认路径启用。
@@ -3127,7 +3127,7 @@ stripe/lane、保序、路由等上层逻辑不再为 h_tunnel POST/GET 池做�
 ### 107.6 nginx 限速排查
 
 `/etc/nginx/nginx.conf` 中没有 `limit_rate` / `limit_conn` / `limit_req` /
-`proxy_limit_rate`；`resdatabackend` 是 `10.140.51.2:32457`，keepalive 32，
+`proxy_limit_rate`；`resdatabackend` 是 `<IP_JF_OS>:32457`，keepalive 32，
 `proxy_buffering off`。所以 **nginx 本身没有配置限速**。单条 WS 上不去更可能
 是外层 LB 的单连接策略/单连接 cwnd；lane 生命周期修好后，多 WS 连接才能
 验证这一点。
@@ -3361,7 +3361,7 @@ ht-over-nginx/LB 载体**这一段，不是 mesh 数据面、relay 或 vm 接收
 
 **缺口实锤**：`dialP2PWebSocket` 之前用 `websocket.DialConfig` + 直连
 `net.Dialer`，**完全忽略 proxy.Next（via）**。所以 `MGMS_HT via=JF_SSH`、
-URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地址 →
+URL 指向 jf 内网 `<IP_JF_OS>:32457` 时，WS 在 qg 上直接拨内网地址 →
 超时；长轮询 HTTP 客户端本身是走 via 的，但 WS 路径漏了。
 
 **修复**：WS 拨号改为与 HTTP 一致：
@@ -3370,15 +3370,15 @@ URL 指向 jf 内网 `10.140.51.2:32457` 时，WS 在 qg 上直接拨内网地�
 - 用 `websocket.NewClient(cfg, conn)` 在该连接上完成握手；
 - 无 via 时仍直连。
 
-**验证**：qg 部署 `_wsvia`，MGMS_HT `via=JF_SSH`、URL `http://10.140.51.2:32457/...`：
-- 日志确认 `[HT-WS] ... url=ws://10.140.51.2:32457/ui/resdata/ws/...`，
+**验证**：qg 部署 `_wsvia`，MGMS_HT `via=JF_SSH`、URL `http://<IP_JF_OS>:32457/...`：
+- 日志确认 `[HT-WS] ... url=ws://<IP_JF_OS>:32457/ui/resdata/ws/...`，
   /api/p2p `MGMS_HT nodeId=jf status=upToDate` —— **via 链打通**；
 - 但 bulk 传输不可用：单流 24.5MB 跑了 >3.5 分钟（OS 层 `ssh -L` 同一目标
   返回 400，网络与 sshd 正常）。判断是 phaethon SSH dialer 的
   **direct-tcpip 通道窗口/速率**问题（x/crypto/ssh 单通道窗口默认偏小），
   不是网络。
 
-已回退 MGMS 为直连 WS（`36.140.28.178:18080`, via=""），链路 upToDate；
+已回退 MGMS 为直连 WS（`<IP_JF_HT>:18080`, via=""），链路 upToDate；
 `_wsvia` 修复代码保留（对带 via 的 WS 链路是正确的通用能力）。
 下一步若要走 SSH 隧道：调大 SSH 通道窗口，或按你的思路直接给 SSH 代理
 实现 `DialP2P`（原始 P2P 帧走 SSH 通道，不再套 ht）。
@@ -3501,7 +3501,7 @@ allowlist。新增 `wsEnabledFor` 单测覆盖默认值与开关。
 
 **deskw 升级**：deskw 已换 `v0.8.0-628-g909dc1e-htid`，未设置
 `PHAETHON_HT_WS` 时 `DESK_TJ` 直接建立
-`[HT-WS] persistent websocket established: url=ws://10.140.51.2:32457/...`；
+`[HT-WS] persistent websocket established: url=ws://<IP_JF_OS>:32457/...`；
 拓扑 `deskw(1/5) ↔ jf(5/1)` 配对正常。qg/jf/deskw 均为 628。
 
 **待办**：via SSH 路径尚未复测；“WS 握手失败回退 HTTP”未现场构造，
@@ -3563,7 +3563,7 @@ cycle10 down=3.52s up=3.29s
 **统一端点**（避免内建 SSH/OS sshd 混用）：mesh 两跳与 OS 两跳都落在
 jf 的 **OS sshd**：
 
-- mesh 两跳：vm →（mesh，qg 中转）→ `10.140.51.2:22`（jf OS sshd）
+- mesh 两跳：vm →（mesh，qg 中转）→ `<IP_JF_OS>:22`（jf OS sshd）
 - OS 两跳：vm → qg OS sshd（2222）→ jf OS sshd（60002）
 - 载荷 24.5MB，交替 3 轮。
 
@@ -3596,7 +3596,7 @@ leg 回退逻辑，以及停顿期间 vm/qg 的 leg 统计（Packets/Drops/backo
 
 **A：UDP leg 开启（现状）**
 
-- SSH 大流量上传：`10.140.51.2`（jf OS sshd）首轮 4.36s，随后
+- SSH 大流量上传：`<IP_JF_OS>`（jf OS sshd）首轮 4.36s，随后
   `Connection reset by peer` / BrokenPipe，19~21s 超时；
 - 两跳：down 4.99/4.11/**19.26s**，up 4.36/**20.97**/**19.29s**。
 
@@ -3659,7 +3659,7 @@ RTO 本身；修复后不再有 19~21s 停顿。若要恢复 UDP 数据收益，
 ## 122. jf→qg ~1.3s 离群：30 轮取样结果（2026-11-13 00:40）
 
 **方法**：qg 上每轮空闲 10s 再拉 24.5MB（jf 的 OS sshd），前后读外层
-WS TCP（qg→36.140.28.178:18080）的 `ss -tin -n`，30 轮。
+WS TCP（qg→<IP_JF_HT>:18080）的 `ss -tin -n`，30 轮。
 
 - 27 轮 2.64~2.95s；3 轮慢：3.51 / 3.74 / **4.13s**；
 - 慢轮（4.13s）外层 `bytes_retrans` 增量 590、rtt 3.5ms、cwnd 10；
@@ -3668,7 +3668,7 @@ WS TCP（qg→36.140.28.178:18080）的 `ss -tin -n`，30 轮。
 - SSH 握手单独测 20 次：0.761~0.804s，**无离群**，慢轮发生在数据阶段。
 
 **路径发现**：jf 上真正的 sshd 连接是本地 loopback relay
-（`10.140.51.2:40370 ↔ 10.140.51.2:22`），mesh 侧的发送 TCP 不在 OS
+（`<IP_JF_OS>:40370 ↔ <IP_JF_OS>:22`），mesh 侧的发送 TCP 不在 OS
 socket 表里，内核 cwnd 不可见；qg 侧只有客户端 socket（其 cwnd 只反映
 ACK 方向）。
 
@@ -3687,7 +3687,7 @@ retrans/backoff/rcv_rtt 尖峰。
   倒退，说明采样到的 `:18080` 连接被**整体替换**（TCP/WS 重连或端口重绑），
   而不是同一条连接继续跑；
 - 采样器在两条同 peer 连接间跳动（cwnd 9~25 vs 527），说明 qg 上确实同时
-  存在多条到 `36.140.28.178:18080` 的连接，按累计值选 socket 不稳定。
+  存在多条到 `<IP_JF_HT>:18080` 的连接，按累计值选 socket 不稳定。
 
 **推断**：慢轮可能对应某条外层 WS 连接被重建/切换的瞬间（P2P 会话重连日志
 不一定出现，因为可能只换了底层连接）；需要按 **连接四元组+建立时间** 跟踪，
@@ -3718,7 +3718,7 @@ retrans/backoff/rcv_rtt 尖峰。
 - 外层连接重建：连接生命周期跟踪未发现新增/消失。
 
 **路径差异**：jf 上 mesh 的 SSH 连接经**本地 loopback relay**
-（`10.140.51.2:40370 ↔ :22`）再进 sshd；OS 基线直连 sshd。两者唯一差别
+（`<IP_JF_OS>:40370 ↔ :22`）再进 sshd；OS 基线直连 sshd。两者唯一差别
 就是这段 **mesh relay（phaeton 用户态转发/本地桥）**。
 
 **结论**：慢簇是本栈 mesh relay 路径的瞬时停顿，排除外部网络、丢包、配额、
@@ -3829,7 +3829,7 @@ MTU 均为 1400；vm 的 `QG_SS5_UDPLEG.p2p-udp=true`，`/api/p2p` 中 qg 为
 
 **测试口径**（统一，同一时段）：
 - mesh 单跳：vm → `loc.qg.phn:2222`（qg OS sshd，经 TUN/mesh/UDP leg）
-- OS 直连：vm → `10.11.61.50:2222`（LAN 直连，不经 mesh，作为基线）
+- OS 直连：vm → `<IP_QG_OS>:2222`（LAN 直连，不经 mesh，作为基线）
 - 载荷 24,536,874B，SSH `cat`，每次都核对落盘字节数；上传另核对 md5
 - qg 侧 `nstat` 读 `IpReasmReqds`（IP 重组请求，>0 即发生分片）
 
@@ -4059,7 +4059,7 @@ peer 之间打洞。
 down 6.46s / up 16.82s，legOut 异常膨胀（一次双向 ~6.5 万），远低于
 TCP 基线（down 3.26s / up 5.88s）。
 
-**根因**：直连 leg 的目标是代理配置里的对端地址（如 `10.11.61.50`），
+**根因**：直连 leg 的目标是代理配置里的对端地址（如 `<IP_QG_OS>`），
 这个地址落在 TUN 的 split-tunnel 路由里。裸 `net.ListenPacket` 没有
 绑定物理网卡，leg 自己的 datagram 被送进 TUN → mesh，形成自我封装/
 放大，所以计数暴涨、吞吐反而下降。
@@ -4108,8 +4108,8 @@ TCP 基线（down 3.26s / up 5.88s）。
 **部署结果**：vm/qg/jf/gg/mb/qgw/deskzq 全部 `v0.8.0-664-g64fe6d6`。
 deskzq 通过控制台临时加公钥 + 内置 SSH 执行分离式 PowerShell，从 pending
 pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定路径），
-完成后已删除临时公钥。ms worker3 10.161.88.10 为 662、worker4
-10.161.88.9 为 288，两台网络时通时断，待可达时补发；deskw 离线。
+完成后已删除临时公钥。ms worker3 <IP_MS10_OS> 为 662、worker4
+<IP_MS9_OS> 为 288，两台网络时通时断，待可达时补发；deskw 离线。
 
 **顺带**：mesh 页新增静态路由/静态域名路由 CRUD（稳定 ID，egress 节点
 逗号分隔），API 与通告路由同一套编号方式；`663/664` 已上线。
@@ -4173,7 +4173,7 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
 | ms10 | Linux | 内置 SSH + 分离式脚本 | 674，两进程 |
 | qgw | Windows 7 | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
 | deskzq | Windows | 内置 SSH + pkg 解压 + 分离式 PowerShell | 674，两进程 |
-| ms9 | Linux | OS SSH `migu@10.161.88.9` + 内联替换 | 674，两进程 |
+| ms9 | Linux | OS SSH `migu@<IP_MS9_OS>` + 内联替换 | 674，两进程 |
 
 - Windows 内置 SSH 会话与 phaethon 同 Session（qgw=2、deskzq=1），因此分离式
   PowerShell 里 `Start-Process phaethon.exe` 能落在交互式桌面会话，Wintun 正常。
@@ -4184,7 +4184,7 @@ pkg 解出 binary 直接替换 `phaethon.exe`（两个进程现在都在稳定�
 - 为 deskzq/ms10/ms9 的内置 SSH 添加了 `vm-deploy` 公钥（指纹
   `SHA256:mHKLotSHclszYP4M0b2fDW396BAdL7Bh/sWC11bdAj4`），否则 key 被拒。
 - 验证用假包/探针包（999、badrollback、0.0.1+probe）已从所有节点删除。
-- ms9（worker4，10.161.88.9）不在 mesh 直连拓扑，改用 OS SSH 引导：上传
+- ms9（worker4，<IP_MS9_OS>）不在 mesh 直连拓扑，改用 OS SSH 引导：上传
   674 二进制并内联替换，已是 674；内置 SSH 也补了同一把公钥，可直接使用。
 
 **QG 磁盘满事件**：扩散时上传 674 包失败（`no space left on device`），

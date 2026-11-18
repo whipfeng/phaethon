@@ -202,8 +202,8 @@ dialer.SetGlobalBindContext(nil)
 ### Task 7.3: 统一清理逻辑
 
 - 新建 `tun/cleanup_other.go`：
-  - Linux：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；`ip link set devName down`。
-  - Darwin：删除 `0.0.0.0/1`、`128.0.0.0/1` 路由；`ifconfig devName down`。
+  - Linux：删除 `0.0.0.0/1`、`<IP_OTHER_025>/1` 路由；`ip link set devName down`。
+  - Darwin：删除 `0.0.0.0/1`、`<IP_OTHER_025>/1` 路由；`ifconfig devName down`。
 - 更新 `tun/cleanup_windows.go`：增加删除系统 DNS 静态配置（恢复 DHCP）作为兜底。
 
 ### Task 7.4: 看门狗策略

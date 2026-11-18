@@ -157,16 +157,16 @@ func RouteSelector(dst tcpip.Address) RouteDecision {
 **关键结论**：VIP 和 EIP 都从子网算出，不需要映射表。
 
 ```go
-// 每个节点的子网已知（如 GG: 100.179.0.0/16）
+// 每个节点的子网已知（如 GG: <IP_OTHER_042>/16）
 // VIP 和 EIP 都是子网内的固定偏移
 
 func calculateVIP(subnet net.IPNet) net.IP {
-    // VIP = subnet + 1 (如 100.179.0.1)
+    // VIP = subnet + 1 (如 <IP_GG_VIP>)
     return incrementIP(subnet.IP, 1)
 }
 
 func calculateEIP(subnet net.IPNet) net.IP {
-    // EIP = subnet + 4 (如 100.179.0.4)
+    // EIP = subnet + 4 (如 <IP_OTHER_043>)
     return incrementIP(subnet.IP, 4)
 }
 ```
@@ -226,7 +226,7 @@ if route.Cacheable {
 **流程**：
 ```
 入站（NIC 1 → forwarder）:
-  src=192.168.1.100, dst=fakeIP, inNIC=tun
+  src=<IP_QGW_LAN>, dst=fakeIP, inNIC=tun
     ↓
   Input hook SNAT: src → VIP, conntrack 记录 originalInputNIC=tun
     ↓
@@ -237,7 +237,7 @@ if route.Cacheable {
 出站（forwarder → NIC 1）:
   Forwarder 发送回复: src=VIP, dst=VIP (peer 地址)
     ↓
-  Output hook: conntrack 反转 SNAT → dst=192.168.1.100, pkt.OutputNICName=tun
+  Output hook: conntrack 反转 SNAT → dst=<IP_QGW_LAN>, pkt.OutputNICName=tun
     ↓
   forwardUnicastPacket: 检查 pkt.OutputNICName → FindRouteViaNIC(tun, dst)
     ↓
@@ -259,13 +259,13 @@ if route.Cacheable {
     - getNextHopLinkNIC(GG) = Link-GG
     - EgressNIC = Link-GG
     - NeedIPIP = true
-    - EgressEIP = 100.179.0.4 (GG EIP)
+    - EgressEIP = <IP_OTHER_043> (GG EIP)
     ↓
 [返回 Route]
     Route{
         NIC: Link-GG,  // RouteSelector 直接指定
         NeedIPIP: true,
-        EgressEIP: 100.179.0.4,
+        EgressEIP: <IP_OTHER_043>,
     }
     ↓
 [转发代码 ipv4.forwardUnicastPacket]
@@ -273,7 +273,7 @@ if route.Cacheable {
     ↓
 [IPIP 封装]
     内层: src=QG_VIP, dst=8.8.8.8
-    外层: src=QG_EIP, dst=100.179.0.4, proto=4
+    外层: src=QG_EIP, dst=<IP_OTHER_043>, proto=4
     ↓
 [Link-GG 发送] → GG 节点（无需二次路由，EgressNIC 已指定）
 ```
@@ -299,24 +299,24 @@ if route.Cacheable {
 ### 4.1 旁路网关 → 外网域名
 
 ```
-LAN(192.168.1.100) → www.google.com (fakeIP=100.1.0.5)
+LAN(<IP_QGW_LAN>) → www.google.com (fakeIP=<IP_OTHER_044>)
 
 [NIC1 TUN 进入 gVisor]
-  src=192.168.1.100, dst=100.1.0.5, inNIC=tun
+  src=<IP_QGW_LAN>, dst=<IP_OTHER_044>, inNIC=tun
     ↓
 [Input hook SNAT]
-  src: 192.168.1.100 → 100.1.0.1 (QG VIP)
-  conntrack: (192.168.1.100, 100.1.0.5, inNIC=tun) ↔ (100.1.0.1, 100.1.0.5)
+  src: <IP_QGW_LAN> → <IP_OTHER_023> (QG VIP)
+  conntrack: (<IP_QGW_LAN>, <IP_OTHER_044>, inNIC=tun) ↔ (<IP_OTHER_023>, <IP_OTHER_044>)
     ↓
 [handleValidatedPacket — patch #2b]
-  RouteSelectorLocalDelivery(100.1.0.5)?
-  → RouteSelector 情况 1: isLocalMeshSubnet(100.1.0.5) = true（fakeIP 在本节点子网内）
+  RouteSelectorLocalDelivery(<IP_OTHER_044>)?
+  → RouteSelector 情况 1: isLocalMeshSubnet(<IP_OTHER_044>) = true（fakeIP 在本节点子网内）
   → LocalDelivery = true → 跳过转发，走本地交付
     ↓
 [本地交付] → TCP/UDP Forwarder
-  Forwarder 收到: src=VIP(100.1.0.1), dst=fakeIP(100.1.0.5)
+  Forwarder 收到: src=VIP(<IP_OTHER_023>), dst=fakeIP(<IP_OTHER_044>)
     ↓
-[域名还原: 100.1.0.5 → www.google.com]
+[域名还原: <IP_OTHER_044> → www.google.com]
     ↓
 [代理拨号器] → mesh/internet 出口 → www.google.com
 ```
@@ -324,13 +324,13 @@ LAN(192.168.1.100) → www.google.com (fakeIP=100.1.0.5)
 ### 4.2 旁路网关 → 外网 raw IP
 
 ```
-LAN(192.168.1.100) → 8.8.8.8
+LAN(<IP_QGW_LAN>) → 8.8.8.8
 
 [NIC1 TUN 进入]
-  src=192.168.1.100, dst=8.8.8.8, inNIC=tun
+  src=<IP_QGW_LAN>, dst=8.8.8.8, inNIC=tun
     ↓
 [Input hook SNAT]
-  src: 192.168.1.100 → 100.1.0.1 (QG VIP)
+  src: <IP_QGW_LAN> → <IP_OTHER_023> (QG VIP)
   conntrack: 记录 originalInputNIC=tun
     ↓
 [handleValidatedPacket — patch #2b]
@@ -345,16 +345,16 @@ LAN(192.168.1.100) → 8.8.8.8
   - getNextHopLinkNIC(GG) = Link-GG
   - EgressNIC = Link-GG
   - NeedIPIP = true
-  - EgressEIP = 100.179.0.4 (GG EIP)
+  - EgressEIP = <IP_OTHER_043> (GG EIP)
     ↓
 [FindRoute 构造路由]
-  NIC = Link-GG, needIPIP = true, egressEIP = 100.179.0.4
+  NIC = Link-GG, needIPIP = true, egressEIP = <IP_OTHER_043>
     ↓
 [forwardUnicastPacket 看到 NeedIPIP=true]
     ↓
 [IPIP 封装]
-  内层: src=100.1.0.1 (QG VIP), dst=8.8.8.8
-  外层: src=100.1.0.4 (QG EIP), dst=100.179.0.4 (GG EIP), proto=4
+  内层: src=<IP_OTHER_023> (QG VIP), dst=8.8.8.8
+  外层: src=<IP_OTHER_015> (QG EIP), dst=<IP_OTHER_043> (GG EIP), proto=4
     ↓
 [Link-GG 发送] → GG 节点（无需二次路由，EgressNIC 已指定）
     ↓
@@ -364,16 +364,16 @@ LAN(192.168.1.100) → 8.8.8.8
 ### 4.3 本地应用 → mesh VIP（直连）
 
 ```
-QG 本地应用 → VM (100.2.0.1, 直连)
+QG 本地应用 → VM (<IP_JF_VIP>, 直连)
 
 [NIC1 TUN 进入]
-  src=100.1.0.1, dst=100.2.0.1
+  src=<IP_OTHER_023>, dst=<IP_JF_VIP>
     ↓
-[FindRoute(100.2.0.1)]
+[FindRoute(<IP_JF_VIP>)]
     ↓
 [RouteSelector — 情况 2: mesh 目标]
-  - isMeshSubnet(100.2.0.1) = true
-  - selectEgressNode(100.2.0.1) = VM
+  - isMeshSubnet(<IP_JF_VIP>) = true
+  - selectEgressNode(<IP_JF_VIP>) = VM
   - getNextHopLinkNIC(VM) = Link-VM（直连 peer）
   - EgressNIC = Link-VM
   - NeedIPIP = false
@@ -387,16 +387,16 @@ QG 本地应用 → VM (100.2.0.1, 直连)
 ### 4.4 本地应用 → mesh VIP（非直连）
 
 ```
-QG 本地应用 → MS9 (100.189.0.1, 非直连，经 GG 中继)
+QG 本地应用 → MS9 (<IP_OTHER_045>, 非直连，经 GG 中继)
 
 [NIC1 TUN 进入]
-  src=100.1.0.1, dst=100.189.0.1
+  src=<IP_OTHER_023>, dst=<IP_OTHER_045>
     ↓
-[FindRoute(100.189.0.1)]
+[FindRoute(<IP_OTHER_045>)]
     ↓
 [RouteSelector — 情况 2: mesh 目标]
-  isMeshSubnet(100.189.0.1) = true
-  selectEgressNode(100.189.0.1) = MS9
+  isMeshSubnet(<IP_OTHER_045>) = true
+  selectEgressNode(<IP_OTHER_045>) = MS9
   getNextHopLinkNIC(MS9) = Link-GG（Dijkstra 下一跳）
     ↓
 [返回 RouteDecision]
@@ -404,7 +404,7 @@ QG 本地应用 → MS9 (100.189.0.1, 非直连，经 GG 中继)
   NeedIPIP = false
     ↓
 [FindRoute 构造路由]
-  NIC = Link-GG, dst = 100.189.0.1
+  NIC = Link-GG, dst = <IP_OTHER_045>
     ↓
 [QG → GG → MS9]（mesh 内部中继，无 IPIP）
 ```
@@ -414,20 +414,20 @@ QG 本地应用 → MS9 (100.189.0.1, 非直连，经 GG 中继)
 ### 4.5 回程流量（旁路网关）
 
 ```
-8.8.8.8 → LAN(192.168.1.100)
+8.8.8.8 → LAN(<IP_QGW_LAN>)
 
 [GG 响应]
-  src=8.8.8.8, dst=100.1.0.1 (QG VIP)
+  src=8.8.8.8, dst=<IP_OTHER_023> (QG VIP)
     ↓
 [mesh P2P] → QG Link-GG 进入
     ↓
 [Prerouting DNAT] (conntrack)
   查询 conntrack by dst=VIP → 找到 originalInputNIC=tun
   pkt.OutputNICName = "tun"  ← patch #6
-  dst: 100.1.0.1 → 192.168.1.100
+  dst: <IP_OTHER_023> → <IP_QGW_LAN>
     ↓
 [forwardUnicastPacket]
-  检查 pkt.OutputNICName == "tun" → FindRouteViaNIC(NIC1, 192.168.1.100)
+  检查 pkt.OutputNICName == "tun" → FindRouteViaNIC(NIC1, <IP_QGW_LAN>)
   跳过 RouteSelector + 路由表，直连路由经 NIC 1
     ↓
 [NIC1 发送] → TUN → OS → LAN
@@ -829,11 +829,11 @@ if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
 
 ### 6.10 补丁 #7：本地 socket 流量跳过 InputInterface 匹配（新增，对齐 Linux 语义）
 
-**问题**：本地 socket → 本地服务的流量（典型：`MeshDial` 通过 `Netstack.ResolveDomain` 创建 UDP endpoint 解析域名，dst=100.0.0.3=GIP）在 gVisor 内部被路由到 NIC 1（dst 所在 NIC），进 `deliverPacketLocally` → `CheckInput`。此时 `inNICName = e.nic.Name() = "tun"`，**命中** Input 链的 `InputInterface=="tun"` SNAT 规则，src 被改写成 VIP。
+**问题**：本地 socket → 本地服务的流量（典型：`MeshDial` 通过 `Netstack.ResolveDomain` 创建 UDP endpoint 解析域名，dst=<IP_QG_GIP>=GIP）在 gVisor 内部被路由到 NIC 1（dst 所在 NIC），进 `deliverPacketLocally` → `CheckInput`。此时 `inNICName = e.nic.Name() = "tun"`，**命中** Input 链的 `InputInterface=="tun"` SNAT 规则，src 被改写成 VIP。
 
 同时，本地 socket 流量**跳过 Prerouting**（`handleLocalPacket` 设计如此），所以**不建立 conntrack entry**。响应包走到 Prerouting 时 DNAT 无 entry 可查，dst 仍是 VIP（未绑地址），被丢弃或错误转发。
 
-实证（QG `/tmp/phaethon-snat-debug.log`）：458 条 `src=100.0.0.1 dst=100.0.0.3 snatDone=true`（请求被 SNAT 改写），`/tmp/phaethon-prerouting-debug.log` 中 0 条 src=100.0.0.1（响应被丢前无 conntrack entry）。
+实证（QG `/tmp/phaethon-snat-debug.log`）：458 条 `src=<IP_QG_VIP> dst=<IP_QG_GIP> snatDone=true`（请求被 SNAT 改写），`/tmp/phaethon-prerouting-debug.log` 中 0 条 src=<IP_QG_VIP>（响应被丢前无 conntrack entry）。
 
 **Linux 语义对照**：
 - Linux：本地 socket 发到本机的包**不进 INPUT 链**，只过 OUTPUT/POSTROUTING。`-i tun` 不会命中。
@@ -898,12 +898,12 @@ return stack.RouteDecision{
 
 **效果**：
 - ✅ QG panic 循环立即停止（消除 ssh/外部 IP 访问根因）
-- ✅ 非 mesh 外部 IP（dst=106.13.183.103 等）正常进入 Forwarder，由 Proxy 链转发
+- ✅ 非 mesh 外部 IP（dst=<IP_GG_PUBLIC> 等）正常进入 Forwarder，由 Proxy 链转发
 - ✅ 防御性兜底：未来任何未知 forwarding 错误不再拖垮整个进程
 
 ### 6.12 补丁 #9：`stack.Options.HandleLocal = true`（❌ 已回退，由 §6.13 补丁 #10 取代）
 
-> **回退原因**：`HandleLocal` 是全局开关，除了想要的自寻址 loopback，还附带打开 `HandlePacket` 里"源地址是本机地址就丢包"的检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 组合下把外部 DNS 查询（`192.168.1.7 → 100.0.0.3:53`）静默丢弃（任务 #428 单变量测试确认）。且它只覆盖 `localAddr == remoteAddr`，覆盖不到 Branch 4。以下为原始记录，保留作决策依据。
+> **回退原因**：`HandleLocal` 是全局开关，除了想要的自寻址 loopback，还附带打开 `HandlePacket` 里"源地址是本机地址就丢包"的检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 组合下把外部 DNS 查询（`<IP_OTHER_046> → <IP_QG_GIP>:53`）静默丢弃（任务 #428 单变量测试确认）。且它只覆盖 `localAddr == remoteAddr`，覆盖不到 Branch 4。以下为原始记录，保留作决策依据。
 
 **问题**（VM 部署后实测发现）：
 
@@ -929,9 +929,9 @@ gVisor `stack.Options.HandleLocal` 默认为 `false`。在 phaethon 的 2-NIC �
 
 ```
 [DIAG-DEBUG] initStack: HandleLocal=false
-[DIAG-DEBUG] ResolveDomain udp src=100.1.0.3:18060 dst=100.1.0.3:53 HandleLocal=false
-[DIAG-DEBUG] GIP-touch pkt#127: 100.1.0.3:18060 -> 100.1.0.3:53 (proto=17 len=62, MeshSubnetContains=true)
-[DIAG-DEBUG] GIP-touch pkt#127 WROTE to TUN: 100.1.0.3:18060 -> 100.1.0.3:53
+[DIAG-DEBUG] ResolveDomain udp src=<IP_OTHER_007>:18060 dst=<IP_OTHER_007>:53 HandleLocal=false
+[DIAG-DEBUG] GIP-touch pkt#127: <IP_OTHER_007>:18060 -> <IP_OTHER_007>:53 (proto=17 len=62, MeshSubnetContains=true)
+[DIAG-DEBUG] GIP-touch pkt#127 WROTE to TUN: <IP_OTHER_007>:18060 -> <IP_OTHER_007>:53
 ```
 
 包**确实**被 gVisor 写到了 TUN（"WROTE to TUN" 日志）。但 30 秒后没有响应——OS 层 loopback 失败。
@@ -966,7 +966,7 @@ s := stack.New(stack.Options{
 - `s.HandleLocal()` 返回 `true`
 - `ResolveDomain` 不再 timeout
 - `dialTCP` 的 SYN 在 gVisor 内完成 loopback，connect 成功
-- DNS hijacker 日志显示 `from=100.1.0.1:<ephemeral>`（OS-NAT 视角的 source，因为包根本没走 TUN）—— 注意：从 gVisor 看 src 仍是 100.1.0.3，只是 loopback 在栈内完成
+- DNS hijacker 日志显示 `from=<IP_OTHER_023>:<ephemeral>`（OS-NAT 视角的 source，因为包根本没走 TUN）—— 注意：从 gVisor 看 src 仍是 <IP_OTHER_007>，只是 loopback 在栈内完成
 
 **潜在影响**：
 
@@ -978,7 +978,7 @@ s := stack.New(stack.Options{
 
 ### 6.13 补丁 #10：`LocalLoopback` 出栈栈内环回（新增，2026-10-08，取代补丁 #9）
 
-**补丁 #9（`HandleLocal=true`）已回退**：它是 `stack.Options` 的全局开关，除了想要的"自寻址包栈内 loopback"，还附带打开了 `HandlePacket` 里的"源地址是本机地址就丢包"检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 的组合下把外部 DNS 查询（`192.168.1.7 → 100.0.0.3:53`）静默丢弃（任务 #428 单变量测试确认）。而且它只覆盖 `localAddr == remoteAddr` 的自寻址包，覆盖不到 Branch 4。
+**补丁 #9（`HandleLocal=true`）已回退**：它是 `stack.Options` 的全局开关，除了想要的"自寻址包栈内 loopback"，还附带打开了 `HandlePacket` 里的"源地址是本机地址就丢包"检查（`ipv4.go:955-964`），在 NIC 1 混杂 + 转发 + Input SNAT 的组合下把外部 DNS 查询（`<IP_OTHER_046> → <IP_QG_GIP>:53`）静默丢弃（任务 #428 单变量测试确认）。而且它只覆盖 `localAddr == remoteAddr` 的自寻址包，覆盖不到 Branch 4。
 
 **问题**（JF / GG 实测）：
 
@@ -991,7 +991,7 @@ EgressNIC=1 → writeLoop → TUN → OS 路由 → 回 TUN → readLoop → Inj
 
 在 TUN 关闭的节点（JF / GG / MS9 / MS10）上 `tun.Engine.Write` 返回 `TUN device not available`，`mesh/netstack.go` 的 `writeLoop` 静默丢包：
 
-- GG：`100.179.0.3:44471 → 192.168.1.88:22` SYN 重传 5 次后 `context deadline exceeded` → 反向代理（Direct / HTTP / Reverse / SOCKS5 / Trojan）全挂
+- GG：`<IP_GG_GIP>:44471 → <IP_MB_LAN>:22` SYN 重传 5 次后 `context deadline exceeded` → 反向代理（Direct / HTTP / Reverse / SOCKS5 / Trojan）全挂
 - JF：`GIP → GIP:53` 栈内 DNS 丢包 544 次
 - Branch 2/3（Link NIC / IPIP）不受影响 → mesh 路由与**入站** mesh admin 正常，所以故障表现为"选择性失效"
 
@@ -1071,12 +1071,12 @@ Input 链的 SNAT 规则（`mesh/netstack.go:606-620`，`InputInterface=="tun"` 
 实测证据（QG `/root/data/logs/phaethon.log`）：
 
 ```
-[TCP-DEBUG] tcp forwarder called local=100.0.0.14:443   remote=100.0.0.1:54806
-[TCP-DEBUG] tcp forwarder called local=8.212.124.35:443 remote=100.0.0.1:54815
-[DNS-DEBUG] DNSHijacker: query domain=qg.phn from=100.0.0.1:13616
+[TCP-DEBUG] tcp forwarder called local=<IP_OTHER_047>:443   remote=<IP_QG_VIP>:54806
+[TCP-DEBUG] tcp forwarder called local=<IP_OTHER_048>:443 remote=<IP_QG_VIP>:54815
+[DNS-DEBUG] DNSHijacker: query domain=qg.phn from=<IP_QG_VIP>:13616
 ```
 
-`remote` / `from` **全部**是 `100.0.0.1` = VIP，无一例外。writeLoop 里看到的 `100.0.0.12 -> 192.168.1.88`、`100.0.0.3 -> 192.168.1.7` 都是 **Postrouting 反翻译之后**的地址，不能拿来推断选路时的 dst。
+`remote` / `from` **全部**是 `<IP_QG_VIP>` = VIP，无一例外。writeLoop 里看到的 `<IP_OTHER_049> -> <IP_MB_LAN>`、`<IP_QG_GIP> -> <IP_OTHER_046>` 都是 **Postrouting 反翻译之后**的地址，不能拿来推断选路时的 dst。
 
 于是出站方向在 `FindRoute` 处的全集是：
 
@@ -1099,7 +1099,7 @@ Input 链的 SNAT 规则（`mesh/netstack.go:606-620`，`InputInterface=="tun"` 
 **改完后的包路径**：
 
 ```
-NetDial(GIP:port → 192.168.1.88:22)
+NetDial(GIP:port → <IP_MB_LAN>:22)
   → FindRoute → Branch 4 → LocalLoopback=true → Loop=PacketLoop
   → writePacketPostRouting: handleLocalPacket() 后 return，不写 NIC
   → handleValidatedPacket(inNICName="")
@@ -1118,7 +1118,7 @@ TUN 有没有、能不能写，全程无关。
 
 ### 6.14 补丁 #11：Input 链 conntrack 补记输入 NIC（新增，2026-10-09）
 
-**现象**（QG 实测，旁路网关 DNS 查询）：DNS 劫持器对 Branch 1（`dst==VIP`，§6.3 判据表第一行）的回包，`h.udpEP.Write()` 本身成功（无错误），但回包**有时**（与 `recomputeRoutes` 周期性重算在时间上相关）不经 `writeLoop`/TUN 直接出站，而是源地址被改写成 QG 物理 LAN 口地址（`192.168.1.101`）+ 随机临时端口后才到达客户端——不是补丁 #9 那种全丢，是**回包被二次误路由后由 `tun/engine.go handleUDP`（Forwarder 的直连 UDP 转发器）当成新连接转发出去**，日志实证：`handleUDP invoked: src=100.0.0.3 dst=192.168.1.88:PORT` 紧跟在 `h.udpEP.Write()` 成功之后出现，且这类误路由发生时完全没有 `writeLoop`/`wrote pktN to TUN` 日志。
+**现象**（QG 实测，旁路网关 DNS 查询）：DNS 劫持器对 Branch 1（`dst==VIP`，§6.3 判据表第一行）的回包，`h.udpEP.Write()` 本身成功（无错误），但回包**有时**（与 `recomputeRoutes` 周期性重算在时间上相关）不经 `writeLoop`/TUN 直接出站，而是源地址被改写成 QG 物理 LAN 口地址（`<IP_QG_LAN>`）+ 随机临时端口后才到达客户端——不是补丁 #9 那种全丢，是**回包被二次误路由后由 `tun/engine.go handleUDP`（Forwarder 的直连 UDP 转发器）当成新连接转发出去**，日志实证：`handleUDP invoked: src=<IP_QG_GIP> dst=<IP_MB_LAN>:PORT` 紧跟在 `h.udpEP.Write()` 成功之后出现，且这类误路由发生时完全没有 `writeLoop`/`wrote pktN to TUN` 日志。
 
 **根因**：补丁 #5（§6.5）引入的 `conntrackEntry.OriginalInputNIC`（fork 实际字段名 `cn.originalInputNIC`）只在 **Postrouting 链**路径被正确记录——`performNAT`（`conntrack.go:825-827`）读取的 `pkt.InputNICName` 只在 `writePacketPostRouting`（`ipv4.go:591`，`ipv6.go:864`）里被赋值一次，这是**转发流量**专属路径。但 Input 链 SNAT（`mesh/netstack.go:603-616`，命中条件 `InputInterface=="tun"`，用于 DNS 劫持器 / Forwarder 本机交付流量）命中时走的是 `deliverPacketLocally → CheckInput(pkt, inNICName)`（`ipv4.go:1349`），`inNICName`只是本地变量，从未写回 `pkt.InputNICName`。
 
@@ -1145,7 +1145,7 @@ if pkt.InputNICName == "" {
 
 ### 6.15 补丁 #12：`LocalStack` 统一目的地址本地语义，conntrack 回程直出（新增，2026-10-09）
 
-**现象**：旁路客户端访问 `jf.phn` 时，SYN 已到达 JF；JF 返回 `100.2.0.10 → 100.0.0.1(VIP)` 的 TCP 包也已到达 QG，但客户端收不到 SYN-ACK。conntrack 在 PREROUTING 已把目的 VIP 逆向 SNAT 为真实客户端地址（如 `192.168.1.88`）并设置 `pkt.OutputNICName="tun"`；随后 `handleValidatedPacket` 又按改写后的客户端目的地址进入 Branch 4 的本地交付，未调用 `forwardUnicastPacket`，使指定 TUN 出口失效。
+**现象**：旁路客户端访问 `jf.phn` 时，SYN 已到达 JF；JF 返回 `<IP_JF_FAKE> → <IP_QG_VIP>(VIP)` 的 TCP 包也已到达 QG，但客户端收不到 SYN-ACK。conntrack 在 PREROUTING 已把目的 VIP 逆向 SNAT 为真实客户端地址（如 `<IP_MB_LAN>`）并设置 `pkt.OutputNICName="tun"`；随后 `handleValidatedPacket` 又按改写后的客户端目的地址进入 Branch 4 的本地交付，未调用 `forwardUnicastPacket`，使指定 TUN 出口失效。
 
 **统一语义**：RouteSelector 只处理无状态的目的地址政策，删除 `LocalDelivery` 与 `LocalLoopback` 两个方向性字段，改为单一 `LocalStack`。`LocalStack=true` 同时表示入站本地交付、出站栈内环回；GIP、Fake-IP 和 Branch 4 使用此值。VIP 是 Input-SNAT/conntrack 中转地址，不是监听地址，固定 `LocalStack=false`，任何仍以 VIP 为目的的包都从 NIC 1 出去。
 
@@ -1280,10 +1280,10 @@ if s.routeSelector != nil {
 #### 去程（旁路网关 → 外网）
 
 ```
-LAN(192.168.1.100) → 8.8.8.8
+LAN(<IP_QGW_LAN>) → 8.8.8.8
 
 [NIC1 TUN 进入] pkt.NICID = 1
-  src=192.168.1.100, dst=8.8.8.8
+  src=<IP_QGW_LAN>, dst=8.8.8.8
     ↓
 [Conntrack 创建条目]
   entry.OriginalInputNIC = 1  ← 补丁 #5
@@ -1294,7 +1294,7 @@ LAN(192.168.1.100) → 8.8.8.8
     ↓
 [Postrouting]
   InputInterface = NIC1 ✓  ← 补丁 #4
-  SNAT: src → VIP (100.1.0.1)
+  SNAT: src → VIP (<IP_OTHER_023>)
     ↓
 [发送] src=VIP, dst=8.8.8.8 (IPIP 内层)
 ```
@@ -1302,18 +1302,18 @@ LAN(192.168.1.100) → 8.8.8.8
 #### 回程（外网 → 旁路网关）
 
 ```
-8.8.8.8 → LAN(192.168.1.100)
+8.8.8.8 → LAN(<IP_QGW_LAN>)
 
 [Link NIC 进入 (如 NIC3 Link-GG)]
-  src=8.8.8.8, dst=VIP (100.1.0.1)
+  src=8.8.8.8, dst=VIP (<IP_OTHER_023>)
     ↓
 [Prerouting DNAT] (conntrack)
   查询 conntrack by dst=VIP
   找到 entry.OriginalInputNIC = 1
   pkt.OutputNIC = 1  ← 补丁 #6
-  DNAT: dst → 192.168.1.100
+  DNAT: dst → <IP_QGW_LAN>
     ↓
-[FindRoute(192.168.1.100)]
+[FindRoute(<IP_QGW_LAN>)]
   pkt.OutputNIC = 1 ✓  ← 补丁 #6
   返回路由: NIC1
     ↓
@@ -1321,7 +1321,7 @@ LAN(192.168.1.100) → 8.8.8.8
   InputInterface = NIC3 (Link-GG) ✗
   不 SNAT ✅
     ↓
-[NIC1 发送] src=8.8.8.8, dst=192.168.1.100 → LAN
+[NIC1 发送] src=8.8.8.8, dst=<IP_QGW_LAN> → LAN
 ```
 
 **关键**：

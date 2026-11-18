@@ -5,7 +5,7 @@
 - 分支名：`master`（单提交仓库，直接 amend）
 - 目标：提升 SSH dialer 健壮性，补充测试、超时、缓存生命周期和 ssh-agent 支持
 - 依赖计划：[ssh_improvements.md](../plans/ssh_improvements.md)
-- 测试目标：通过 SSH 代理访问 `http://203.0.113.1:39998/proxies`
+- 测试目标：通过 SSH 代理访问 `http://<IP_OTHER_098>:39998/proxies`
 
 ## 阶段 1: 测试补齐
 
@@ -68,7 +68,7 @@
 ### Task 6.1: 本地验证
 - [x] `go test ./...` 无回归
 - [x] `go build ./...` 成功
-- [x] 使用 `conf-test-ssh/config.yaml` 访问 `http://203.0.113.1:39998/proxies`
+- [x] 使用 `conf-test-ssh/config.yaml` 访问 `http://<IP_OTHER_098>:39998/proxies`
 
 ### Task 6.2: 推送
 - [ ] amend 并 force-push（待用户确认后执行）

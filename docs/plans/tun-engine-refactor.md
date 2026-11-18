@@ -150,7 +150,7 @@ func run(prev *activeResources) (*activeResources, error) {
 1. ✅ 部署到 QG 环境
 2. ✅ 验证二进制更新（hash: 7181265ee484f4d432cfc77c987d276a）
 3. ✅ 验证 adminHandler 注入日志（ConnectionHandler）
-4. ✅ 验证 mesh 域名访问（qg.phn → 100.0.0.12:443）
+4. ✅ 验证 mesh 域名访问（qg.phn → <IP_OTHER_049>:443）
 5. ✅ 验证连接处理（返回 unauthorized，证明 admin handler 正确处理）
 
 ## 风险评估

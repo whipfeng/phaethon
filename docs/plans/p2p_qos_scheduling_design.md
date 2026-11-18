@@ -7,7 +7,7 @@
 ## 问题背景
 
 ### 现象
-- DNS 查询间歇性超时（`read udp 100.0.0.3:xxxxx: i/o timeout`）
+- DNS 查询间歇性超时（`read udp <IP_QG_GIP>:xxxxx: i/o timeout`）
 - QG 日志显示 P2P 写队列满（`write queue full`，9550 次）
 - JF 日志显示没有收到 DNS 查询（日志停在 20:06）
 
@@ -264,11 +264,11 @@ func hashFlow(req writeReq) int {
 ### 测试场景 1：DNS 不被饿死
 ```bash
 # 持续大流量传输
-iperf3 -c 100.2.0.10 -t 60 &
+iperf3 -c <IP_JF_FAKE> -t 60 &
 
 # 同时测试 DNS
 for i in {1..100}; do
-    dig @100.0.0.3 jf.phn +short +time=1
+    dig @<IP_QG_GIP> jf.phn +short +time=1
     sleep 0.1
 done
 ```
@@ -278,7 +278,7 @@ done
 ### 测试场景 2：公平调度
 ```bash
 # 启动多个 TCP 连接
-iperf3 -c 100.2.0.10 -P 10 -t 60
+iperf3 -c <IP_JF_FAKE> -P 10 -t 60
 ```
 
 **预期**：每个连接获得相近的带宽（误差 < 20%）
@@ -286,7 +286,7 @@ iperf3 -c 100.2.0.10 -P 10 -t 60
 ### 测试场景 3：队列容量
 ```bash
 # 突发流量
-iperf3 -c 100.2.0.10 -b 100M -t 10
+iperf3 -c <IP_JF_FAKE> -b 100M -t 10
 ```
 
 **预期**：队列不溢出，丢包率 < 1%

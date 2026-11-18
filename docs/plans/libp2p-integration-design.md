@@ -358,7 +358,7 @@ func (m *P2PManager) ConnectViaProxy(ctx context.Context, proxyName string, remo
 }
 ```
 
-#### 2.2.1.1 P2PManager（管理器，持有一个 libp2p.Host）
+#### <IP_OTHER_060> P2PManager（管理器，持有一个 libp2p.Host）
 
 **职责**：
 - 管理一个 libp2p.Host 实例（整个节点共享）
@@ -517,7 +517,7 @@ func (m *P2PManager) Close() error {
 }
 ```
 
-#### 2.2.1.2 Connect 和 Listen 适配（每种协议一个 Transport）
+#### <IP_OTHER_061> Connect 和 Listen 适配（每种协议一个 Transport）
 
 **核心原则**：
 **每种协议一个 Transport 实例**（不是每个 proxy 一个），该 transport 同时处理该协议的 Dial 和 Listen。多个同协议的 server 都注入到同一个 transport。
@@ -772,14 +772,14 @@ libp2p.Host (一个节点一个)
      # 作为客户端连接到 GG（trojan-1）
      - name: trojan-to-gg
        type: trojan
-       server: 106.13.183.103
+       server: <IP_GG_PUBLIC>
        port: 39999
        password: xxx
        
      # 作为客户端连接到 JF（trojan-2）
      - name: trojan-to-jf
        type: trojan
-       server: 36.140.28.178
+       server: <IP_JF_HT>
        port: 18080
        password: yyy
        
@@ -801,7 +801,7 @@ libp2p.Host (一个节点一个)
      # 只作为客户端连接到 QG
      - name: trojan-to-qg
        type: trojan
-       server: 10.11.61.41
+       server: <IP_QG_OLD_41>
        port: 39999
        password: xxx
    ```
@@ -1969,27 +1969,27 @@ Connection to VM (via trojan-to-vm, 带宽 10 Mbps)
   ├─ Stream 1: SSH session (全双工)
   │   ├─ A→B: 用户输入 (100 KB/s)
   │   └─ B→A: 终端输出 (500 KB/s)
-  │   Flow: {(10.0.0.1, 54321), (10.0.0.2, 22), TCP}
+  │   Flow: {(10.0.0.1, 54321), (<IP_OTHER_059>, 22), TCP}
   │
   ├─ Stream 2: HTTP request (全双工)
   │   ├─ A→B: HTTP 请求 (50 KB/s)
   │   └─ B→A: HTTP 响应 (5 Mbps)
-  │   Flow: {(10.0.0.1, 54322), (10.0.0.2, 80), TCP}
+  │   Flow: {(10.0.0.1, 54322), (<IP_OTHER_059>, 80), TCP}
   │
   ├─ Stream 3: DNS query (双向规范化)
-  │   ├─ A→B: DNS 查询 (10.0.0.1:12345 → 10.0.0.2:53)
-  │   └─ B→A: DNS 响应 (10.0.0.2:53 → 10.0.0.1:12345)
-  │   Flow: {(10.0.0.1, 12345), (10.0.0.2, 53), UDP}
+  │   ├─ A→B: DNS 查询 (10.0.0.1:12345 → <IP_OTHER_059>:53)
+  │   └─ B→A: DNS 响应 (<IP_OTHER_059>:53 → 10.0.0.1:12345)
+  │   Flow: {(10.0.0.1, 12345), (<IP_OTHER_059>, 53), UDP}
   │
   ├─ Stream 4: ICMP ping (双向规范化)
   │   ├─ A→B: Echo Request (id=1234)
   │   └─ B→A: Echo Reply (id=1234)
-  │   Flow: {10.0.0.1, 10.0.0.2, ICMP, id=1234}
+  │   Flow: {10.0.0.1, <IP_OTHER_059>, ICMP, id=1234}
   │
   └─ Stream 5: File download (全双工)
       ├─ A→B: ACK + 请求 (10 KB/s)
       └─ B→A: 文件数据 (9 Mbps)
-      Flow: {(10.0.0.1, 54324), (10.0.0.2, 80), TCP}
+      Flow: {(10.0.0.1, 54324), (<IP_OTHER_059>, 80), TCP}
   
 yamux 自动调度，公平共享 10 Mbps 带宽！
 每个 stream 全双工，两个方向带宽独立！
@@ -2391,14 +2391,14 @@ require (
 **回滚命令示例**：
 ```bash
 # QG 环境回滚
-ssh -p 2222 root@10.11.61.41 "rc-service phaethon stop"
-ssh -p 2222 root@10.11.61.41 "cp /root/phaethon.backup /root/phaethon"
-ssh -p 2222 root@10.11.61.41 "rc-service phaethon start"
+ssh -p 2222 root@<IP_QG_OLD_41> "rc-service phaethon stop"
+ssh -p 2222 root@<IP_QG_OLD_41> "cp /root/phaethon.backup /root/phaethon"
+ssh -p 2222 root@<IP_QG_OLD_41> "rc-service phaethon start"
 
 # VM 环境回滚
-ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Stop-Process -Name phaethon -Force'"
-ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Copy-Item -Force \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.old.exe\" \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\"'"
-ssh -p 39022 Docker@10.21.20.65 "powershell -Command 'Start-Process -FilePath \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\" -WorkingDirectory \"C:\Users\Docker\Desktop\Workspace\phaethon\"'"
+ssh -p 39022 Docker@<IP_VM_OS> "powershell -Command 'Stop-Process -Name phaethon -Force'"
+ssh -p 39022 Docker@<IP_VM_OS> "powershell -Command 'Copy-Item -Force \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.old.exe\" \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\"'"
+ssh -p 39022 Docker@<IP_VM_OS> "powershell -Command 'Start-Process -FilePath \"C:\Users\Docker\Desktop\Workspace\phaethon\phaethon.exe\" -WorkingDirectory \"C:\Users\Docker\Desktop\Workspace\phaethon\"'"
 ```
 
 **回滚后处理**：

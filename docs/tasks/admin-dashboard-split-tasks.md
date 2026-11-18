@@ -19,6 +19,6 @@ Split TUN and Mesh into standalone pages, improve rules UX.
 
 ## Deployed
 
-- VM (10.21.20.65): verified
-- QG (10.11.61.41): verified
+- VM (<IP_VM_OS>): verified
+- QG (<IP_QG_OLD_41>): verified
 - JF: N/A (h_tunnel only, no admin TUN/Mesh)

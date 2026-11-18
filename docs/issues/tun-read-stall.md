@@ -33,7 +33,7 @@ TUN 模式启动后约 4-30 秒，`Wintun session.ReceivePacket()` 永久阻塞�
 1. `tun counters` 日志显示 `read` 计数器停止增长，`write` 计数器继续增长
 2. 进程没有崩溃，没有 panic，没有 read error
 3. TUN 接口状态正常（Up, Connected）
-4. 路由表正常（0.0.0.0/1 + 128.0.0.0/1 via TUN, mesh subnet via TUN）
+4. 路由表正常（0.0.0.0/1 + <IP_OTHER_025>/1 via TUN, mesh subnet via TUN）
 5. `device.Write()` (SendPacket) 仍然正常工作
 6. curl/ping/浏览器全部超时
 
@@ -83,7 +83,7 @@ readLoop() [engine.go:511]
 
 ## 已排除的原因
 
-1. **不是路由问题**：路由表正常，TUN 接口 Up，split-tunnel 路由 (0.0.0.0/1 + 128.0.0.0/1) 和 Fake-IP 路由 (mesh subnet) 都存在
+1. **不是路由问题**：路由表正常，TUN 接口 Up，split-tunnel 路由 (0.0.0.0/1 + <IP_OTHER_025>/1) 和 Fake-IP 路由 (mesh subnet) 都存在
 2. **不是进程崩溃**：进程正常运行，没有 panic/fatal/deadlock
 3. **不是 read error**：ReceivePacket 没有返回错误，只是阻塞
 4. **不是 Write 端问题**：SendPacket 正常工作，write 计数器持续增长

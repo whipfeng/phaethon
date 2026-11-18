@@ -15,33 +15,33 @@
 ### 第一轮（15:33–15:45）— 二分定位到源地址
 
 1. **watcher v2 四路探针**（dnsSrv/sys/hijack/plane）：
-   - `dnsSrv=100.212.0.3 sys=FAIL hijack=OK:100.0.0.33 plane=OK`
+   - `dnsSrv=<IP_VM_GIP> sys=FAIL hijack=OK:<IP_OTHER_009> plane=OK`
    - hijacker 健康、数据面健康、配置正确，唯独系统路径 FAIL —— 故障被锁定在"系统→hijacker"这一段
 2. **手工二分探针**（源地址绑定二分）：
-   - 不绑定源地址 → **OK**（OS 选 TUN 侧地址 100.212.0.2 作源）
-   - 绑定 100.212.0.2（TUN 侧）→ **OK**
-   - 绑定 172.30.0.2（以太网物理地址）→ **TIMEOUT**
+   - 不绑定源地址 → **OK**（OS 选 TUN 侧地址 <IP_VM_HOST> 作源）
+   - 绑定 <IP_VM_HOST>（TUN 侧）→ **OK**
+   - 绑定 <IP_OTHER_010>（以太网物理地址）→ **TIMEOUT**
    - 源地址决定生死。
 
 ### 第二轮（16:34，固定源端口 + 全链路 trace）— 实锤丢包点
 
-探针改用固定端口（A=unbound / B=172.30.0.2:60002 / C=100.212.0.2:60003），gvisor debug 全程记录：
+探针改用固定端口（A=unbound / B=<IP_OTHER_010>:60002 / C=<IP_VM_HOST>:60003），gvisor debug 全程记录：
 
-1. **B（物理源）的查询从未进入 netstack**：1MB trace 窗口内 `60002` 与 `src=172.30.0.2` **零命中**；TUN NIC 仅有两个 UDP/53 入站事件（A、C 各一）。
-2. **网卡计数器实锤出口**：20 连发物理源绑定包，wintun `SentUnicastPackets` 增量 = 1（环境底噪）—— 一个都没进 TUN；全部被 OS 从物理网卡发出（送给网关 172.30.0.1，无回程）。
-3. **SNAT/DNAT 设计链路工作完全正常**（针对到达的查询）：Input 链 SNAT 将全部查询源改 VIP（hijacker 看到 remote=100.212.0.1），hijacker 回包经 Output 链 conntrack DNAT 还原到原源地址，经 `pkt.OutputNICName=tun` 旁路从 NIC 1 发出（A/C 两路回包 trace 完整，WritePacket OK）。
-   - 例：A/C 回包日志 `WritePacket CALL: src=100.212.0.3 dst=100.212.0.2 proto=17 nicID=1 nicName=tun OK` —— dst 还原为 100.212.0.2（原查询源），与本机 socket 完全对应，客户端秒收。
+1. **B（物理源）的查询从未进入 netstack**：1MB trace 窗口内 `60002` 与 `src=<IP_OTHER_010>` **零命中**；TUN NIC 仅有两个 UDP/53 入站事件（A、C 各一）。
+2. **网卡计数器实锤出口**：20 连发物理源绑定包，wintun `SentUnicastPackets` 增量 = 1（环境底噪）—— 一个都没进 TUN；全部被 OS 从物理网卡发出（送给网关 <IP_OTHER_011>，无回程）。
+3. **SNAT/DNAT 设计链路工作完全正常**（针对到达的查询）：Input 链 SNAT 将全部查询源改 VIP（hijacker 看到 remote=<IP_VM_VIP>），hijacker 回包经 Output 链 conntrack DNAT 还原到原源地址，经 `pkt.OutputNICName=tun` 旁路从 NIC 1 发出（A/C 两路回包 trace 完整，WritePacket OK）。
+   - 例：A/C 回包日志 `WritePacket CALL: src=<IP_VM_GIP> dst=<IP_VM_HOST> proto=17 nicID=1 nicName=tun OK` —— dst 还原为 <IP_VM_HOST>（原查询源），与本机 socket 完全对应，客户端秒收。
 
 ## 根因
 
 **不是** netstack 空路由表丢回包（第一版误判，已纠正）。真实链路是：
 
 ```
-dnscache 查 100.212.0.3（注册在物理网卡）
-→ Windows 按"DNS server 所在接口"选源地址 = 172.30.0.2（物理网卡所有）
+dnscache 查 <IP_VM_GIP>（注册在物理网卡）
+→ Windows 按"DNS server 所在接口"选源地址 = <IP_OTHER_010>（物理网卡所有）
 → 显式绑定源的 socket 触发 Windows 源地址约束路由：
    出口接口被约束到"拥有该源地址的接口"（以太网），无视 /1 前缀优先生效
-→ 包从物理网卡发给默认网关 172.30.0.1 → 100.212.0.3 不可达 → 死
+→ 包从物理网卡发给默认网关 <IP_OTHER_011> → <IP_VM_GIP> 不可达 → 死
 → 查询根本到不了 TUN / netstack / hijacker
 → dnscache 超时 → 用户感知"DNS 挂了"
 → （Mac agent）切公网 DNS 急救 → mesh .phn 域名死（副作用）
@@ -49,13 +49,13 @@ dnscache 查 100.212.0.3（注册在物理网卡）
 ```
 
 而用户态直连工具（nslookup / Resolve-DnsName -Server / curl）**不绑定源地址**：
-OS 按目的路由选出口（/1 前缀 → wintun），源地址自动选 wintun 侧 100.212.0.2，
+OS 按目的路由选出口（/1 前缀 → wintun），源地址自动选 wintun 侧 <IP_VM_HOST>，
 源/出口一致 → 进 TUN → SNAT → hijacker → DNAT 还原 → 回包正常。**这解释了全部"时好时坏"表象**：
 谁绑定物理源谁死，不绑定的都活；dnscache 的绑定行为随 Windows 版本/状态有差异。
 
 **SNAT/DNAT 机制本身经实锤验证无缺陷**——conntrack 在 Input 链记录 `originalInputNIC=tun`，
 回包 DNAT 正确还原 `cn.original.tupleID.srcAddr` 并强制从 tun 出口（gvisor-fork patch #6/#11）。
-此前 trace 中 `dst=100.212.0.2` 是 A/C 两路 TUN 源查询的正确还原值，不是异常。
+此前 trace 中 `dst=<IP_VM_HOST>` 是 A/C 两路 TUN 源查询的正确还原值，不是异常。
 
 13:03 的 stall dump（138 goroutine 全部健康）与本次故障无因果——那是另一个独立问题（OS→wintun 交付层冻结），见 mesh-data-plane-stall.md。L1/L2 goroutine 泄漏同样不是本次根因。
 
@@ -68,7 +68,7 @@ OS 按目的路由选出口（/1 前缀 → wintun），源地址自动选 wintu
 + setSystemDNS(e.routeMgr.DefaultIfaceName, ...) // DNS 注册在物理默认网卡
 ```
 
-macOS 上这是修复；**Windows 上是回归**——6122504（2026-08-26）当初把 DNS 从物理网卡挪到 TUN 适配器的理由原文即 "so queries actually reach the DNS hijacker"（配物理网卡时查询到不了 hijacker），此后在 TUN 适配器上稳定运行 2.5 个月。6fa266e 在 darwin 上的验证（"enable=100.218.0.3 全通"）覆盖不到 Windows 路径。
+macOS 上这是修复；**Windows 上是回归**——6122504（2026-08-26）当初把 DNS 从物理网卡挪到 TUN 适配器的理由原文即 "so queries actually reach the DNS hijacker"（配物理网卡时查询到不了 hijacker），此后在 TUN 适配器上稳定运行 2.5 个月。6fa266e 在 darwin 上的验证（"enable=<IP_MB_GIP> 全通"）覆盖不到 Windows 路径。
 
 Windows 上配物理网卡之所以"查询到不了 hijacker"，机理即本文根因：dnscache 绑物理源 → 源约束路由 → 物理出口。
 
@@ -84,8 +84,8 @@ Windows 上配物理网卡之所以"查询到不了 hijacker"，机理即本文�
 
 **验证门禁**（`data/dns-bind-probe-v2.ps1`，固定端口版）：
 
-- A（unbound）/ C（绑 100.212.0.2）→ OK（修复前已 OK，保持回归）
-- B（绑 172.30.0.2:60002）→ **修复后仍 TIMEOUT 属预期**：这是 Windows 源约束路由的固有行为（OS 把包发给物理网关），与 phaethon 无关，不作为门禁
+- A（unbound）/ C（绑 <IP_VM_HOST>）→ OK（修复前已 OK，保持回归）
+- B（绑 <IP_OTHER_010>:60002）→ **修复后仍 TIMEOUT 属预期**：这是 Windows 源约束路由的固有行为（OS 把包发给物理网关），与 phaethon 无关，不作为门禁
 - dnscache 系统路径 `Resolve-DnsName mb.qg.phn` + `www.baidu.com` → 全通（核心门禁）
 - watcher v2 四路探针 `sys=OK`
 

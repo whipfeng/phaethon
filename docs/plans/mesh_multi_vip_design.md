@@ -48,8 +48,8 @@ mesh:
   enabled: true
   node-id: "node-a"
   vips:
-    - "100.64.1.2"    # 主 VIP
-    - "100.64.31.2"   # 额外 VIP
+    - "<IP_OTHER_035>"    # 主 VIP
+    - "<IP_OTHER_071>"   # 额外 VIP
 ```
 
 `main.go` 解析时第一个为主 VIP，其余为额外 VIP。
@@ -107,8 +107,8 @@ for _, vip := range dstVIPs {
 
 | 目标 IP | 选择的源 IP | 匹配前缀长度 |
 |---------|-------------|-------------|
-| 100.64.1.1 | 100.64.1.2 | 24-bit (100.64.1.x) |
-| 100.64.31.1 | 100.64.31.2 | 24-bit (100.64.31.x) |
+| <IP_OTHER_052> | <IP_OTHER_035> | 24-bit (100.64.1.x) |
+| <IP_OTHER_072> | <IP_OTHER_071> | 24-bit (100.64.31.x) |
 
 尽管路由表中所有条目都是 `/32`，Windows 仍然按接口 IP 与目标 IP 的前缀匹配长度选择源 IP。
 
@@ -116,34 +116,34 @@ for _, vip := range dstVIPs {
 
 **Linux 默认使用接口的主 IP 作为源 IP，需要显式配置源路由才能根据目标选择正确的源 IP。**
 
-QG 环境验证（有 `100.64.1.1/32` 和 `100.64.31.1/32` 两个 IP）：
+QG 环境验证（有 `<IP_OTHER_052>/32` 和 `<IP_OTHER_072>/32` 两个 IP）：
 
 **无源路由时**：
 ```bash
-$ ip route get 100.64.1.2
-100.64.1.2 dev tun0  src 100.64.1.1
+$ ip route get <IP_OTHER_035>
+<IP_OTHER_035> dev tun0  src <IP_OTHER_052>
 
-$ ip route get 100.64.31.2
-100.64.31.2 dev tun0  src 100.64.1.1    # 不是 100.64.31.1！
+$ ip route get <IP_OTHER_071>
+<IP_OTHER_071> dev tun0  src <IP_OTHER_052>    # 不是 <IP_OTHER_072>！
 ```
 
 **添加源路由后**：
 ```bash
-$ ip route add 100.64.31.0/24 dev tun0 src 100.64.31.1
+$ ip route add <IP_OTHER_073>/24 dev tun0 src <IP_OTHER_072>
 
-$ ip route get 100.64.31.2
-100.64.31.2 dev tun0  src 100.64.31.1   # 现在正确了
+$ ip route get <IP_OTHER_071>
+<IP_OTHER_071> dev tun0  src <IP_OTHER_072>   # 现在正确了
 ```
 
 tcpdump 抓包确认：
 ```
 # 无源路由
-IP 100.64.1.1 > 100.64.1.2: ICMP echo request
-IP 100.64.1.1 > 100.64.31.2: ICMP echo request   # 两个都用 100.64.1.1
+IP <IP_OTHER_052> > <IP_OTHER_035>: ICMP echo request
+IP <IP_OTHER_052> > <IP_OTHER_071>: ICMP echo request   # 两个都用 <IP_OTHER_052>
 
 # 有源路由
-IP 100.64.1.1 > 100.64.1.2: ICMP echo request
-IP 100.64.31.1 > 100.64.31.2: ICMP echo request  # 现在用 100.64.31.1
+IP <IP_OTHER_052> > <IP_OTHER_035>: ICMP echo request
+IP <IP_OTHER_072> > <IP_OTHER_071>: ICMP echo request  # 现在用 <IP_OTHER_072>
 ```
 
 ### 3.4 平台差异总结
@@ -161,7 +161,7 @@ Mesh **不修改**内层 IP 包的源 IP。`mesh/mesh.go:231` 中 `srcVIP := m.v
 ```
 Windows 选择源 IP (longest prefix match)
     ↓
-内层 IP 包 (src=100.64.1.2, dst=100.64.1.1)
+内层 IP 包 (src=<IP_OTHER_035>, dst=<IP_OTHER_052>)
     ↓
 Mesh 封装 (frame header: srcVIP, dstVIP 用于 P2P 路由)
     ↓
@@ -169,7 +169,7 @@ P2P 传输到目标节点
     ↓
 目标节点解封装，取出内层 IP 包
     ↓
-内层包源 IP 仍为 100.64.1.2（未被修改）
+内层包源 IP 仍为 <IP_OTHER_035>（未被修改）
 ```
 
 ## 4. 关键决策
@@ -322,7 +322,7 @@ Node A: 100.64.0.0/20
   ├── .0.3       → GIP（DNSHijacker，注册 netstack）
   └── .0.4~.15.254 → fakeIP 池（4093 个）
 
-Node B: 100.64.16.0/20
+Node B: <IP_OTHER_074>/20
   ├── .16.1   → VIP
   ├── .16.2   → hostIP
   ├── .16.3   → GIP
@@ -366,12 +366,12 @@ gateway 回程时根据 dst 自动分流：
 ```yaml
 mesh:
   node-id: "gateway-cn"      # 展示用
-  vip: "100.64.0.1"          # 子网 .1，节点标识（人工指定）
+  vip: "<IP_OTHER_051>"          # 子网 .1，节点标识（人工指定）
   # 自动推导:
   #   子网 = 100.64.0.0/20
-  #   hostIP = 100.64.0.2
-  #   GIP = 100.64.0.3
-  #   fakeIP 池 = 100.64.0.4 ~ 100.64.15.254
+  #   hostIP = <IP_OTHER_075>
+  #   GIP = <IP_OTHER_058>
+  #   fakeIP 池 = <IP_OTHER_076> ~ <IP_OTHER_077>
 ```
 
 ### 7.3 能力通告
@@ -453,7 +453,7 @@ type CapabilityRoute struct {
 // 路由优先级：
 // 1. 精确 IP 匹配（如 8.8.8.8/32）
 // 2. 最长前缀匹配（如 10.0.0.0/8）
-// 3. 子网匹配（如 100.64.16.0/20 → Gateway B，用于 fakeIP 路由）
+// 3. 子网匹配（如 <IP_OTHER_074>/20 → Gateway B，用于 fakeIP 路由）
 // 4. 默认路由（0.0.0.0/0）
 ```
 
@@ -469,23 +469,23 @@ type CapabilityRoute struct {
 ③ DNSHijacker（netstack 内 UDP 53，绑定 GIP）收到查询
 ④ 解析域名: api.github.com
 ⑤ 查能力路由表（trie 最长后缀匹配）:
-   "api.github.com" → Gateway B (VIP=100.64.16.1)
+   "api.github.com" → Gateway B (VIP=<IP_OTHER_078>)
 ⑥ 封装 DNS 查询包，通过 mesh 发给 Gateway B
-   src=100.64.0.1, dst=100.64.16.1, payload=DNS query
+   src=<IP_OTHER_051>, dst=<IP_OTHER_078>, payload=DNS query
 ⑦ Gateway B 收到 mesh 包，dst=VIP 是本地的
    → InjectInbound 注入 netstack
    → netstack 投递给 DNSHijacker（绑定 GIP，监听 UDP 53）
-⑧ Gateway B 从自己子网分配 fakeIP: 100.64.0.5
-   记录映射: 100.64.0.5 ↔ api.github.com
+⑧ Gateway B 从自己子网分配 fakeIP: <IP_OTHER_079>
+   记录映射: <IP_OTHER_079> ↔ api.github.com
    （此时不解析真实 IP）
-⑨ DNS 响应通过 mesh 返回: api.github.com = 100.64.0.5
+⑨ DNS 响应通过 mesh 返回: api.github.com = <IP_OTHER_079>
 ⑩ 客户端 DNSHijacker 返回响应给应用
-⑪ 应用连接 100.64.0.5:443
+⑪ 应用连接 <IP_OTHER_079>:443
 ⑫ TUN readLoop 拦截 IP 包，查能力路由表:
-   100.64.0.5 匹配 100.64.0.0/20 → Gateway B
+   <IP_OTHER_079> 匹配 100.64.0.0/20 → Gateway B
 ⑬ 通过 mesh 发给 Gateway B
-⑭ Gateway B 收到 dst=100.64.0.5
-   查映射: 100.64.0.5 → api.github.com
+⑭ Gateway B 收到 dst=<IP_OTHER_079>
+   查映射: <IP_OTHER_079> → api.github.com
    此时才解析真实 IP，创建出站连接
 ```
 
@@ -495,7 +495,7 @@ type CapabilityRoute struct {
 2. **Gateway 接收 DNS**：mesh 包到达后 InjectInbound 注入 netstack，由 DNSHijacker 处理（和普通 DNS 查询走同一路径）
 3. **fakeIP 分配**：gateway 从自己 /20 子网分配，不需要预绑定
 4. **延迟解析**：DNS 阶段只分配 fakeIP，不解析真实 IP；真实 IP 在流量到达 gateway 时才解析
-5. **fakeIP 路由**：fakeIP 在 gateway 子网内（如 100.64.0.5 在 100.64.0.0/20），天然路由到该 gateway
+5. **fakeIP 路由**：fakeIP 在 gateway 子网内（如 <IP_OTHER_079> 在 100.64.0.0/20），天然路由到该 gateway
 
 **DNS 查询转发实现：**
 
@@ -539,30 +539,30 @@ return buildDNSResponse(packet, fakeIP)
 
 ### 7.7 NAT 机制
 
-**问题**：源节点可能来自 LAN（如 192.168.1.100），这个 IP 在 mesh 中不可路由。
+**问题**：源节点可能来自 LAN（如 <IP_QGW_LAN>），这个 IP 在 mesh 中不可路由。
 
 **解决**：源节点做 NAT，将真实源 IP 替换为自己的 VIP。
 
 ```
 旁路网关场景：
 
-LAN Host (192.168.1.100) 访问 8.8.8.8:8080
+LAN Host (<IP_QGW_LAN>) 访问 8.8.8.8:8080
     ↓
-Node A (旁路网关, VIP=100.64.0.1) 拦截
+Node A (旁路网关, VIP=<IP_OTHER_051>) 拦截
     ↓
-NAT: src=192.168.1.100 → src=100.64.0.1 (VIP)
+NAT: src=<IP_QGW_LAN> → src=<IP_OTHER_051> (VIP)
     ↓
-Mesh 包: src=100.64.0.1, dst=8.8.8.8
+Mesh 包: src=<IP_OTHER_051>, dst=8.8.8.8
     ↓
-能力路由: 8.8.8.8 → Node B (VIP=100.64.16.1)
+能力路由: 8.8.8.8 → Node B (VIP=<IP_OTHER_078>)
     ↓
 Node B 收到，转发到真实 8.8.8.8
     ↓
-响应: src=8.8.8.8, dst=100.64.0.1
+响应: src=8.8.8.8, dst=<IP_OTHER_051>
     ↓
 路由回 Node A
     ↓
-Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
+Node A 反向 NAT: dst=<IP_OTHER_051> → dst=<IP_QGW_LAN>
     ↓
 发给 LAN Host
 ```
@@ -576,7 +576,7 @@ Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
 同一节点可同时支持 TUN 旁路网关和普通代理两种模式，两种流量在能力路由表处汇合，走同一条 mesh 链路。
 
 ```
-  LAN Host / Client                  Node A (VIP=100.64.0.1)                Node B (VIP=100.64.16.1)             Internet
+  LAN Host / Client                  Node A (VIP=<IP_OTHER_051>)                Node B (VIP=<IP_OTHER_078>)             Internet
        │                                     │                                     │                                │
   ┌────┴──────┐                              │                                     │                                │
   │ LAN Host  │                              │                                     │                                │
@@ -593,16 +593,16 @@ Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
        │                              │                              │              │                                │
        │                              │ 模式A (TUN旁路网关):          │              │                                │
        │                              │  ② TUN readLoop 拦截         │              │                                │
-       │                              │  ③ NAT: src→100.64.0.1(VIP) │              │                                │
+       │                              │  ③ NAT: src→<IP_OTHER_051>(VIP) │              │                                │
        │                              │                              │              │                                │
        │                              │ 模式B (SOCKS5代理):           │              │                                │
        │                              │  ② gVisor 虚拟socket         │              │                                │
        │                              │  ③ netstack产生IP包           │              │                                │
-       │                              │     src=100.64.0.3(GIP)      │              │                                │
+       │                              │     src=<IP_OTHER_058>(GIP)      │              │                                │
        │                              │                              │              │                                │
        │                              │ 两种模式汇合:                  │              │                                │
        │                              │  ④ 查能力路由表                │              │                                │
-       │                              │    dst→nextHop 100.64.16.1   │              │                                │
+       │                              │    dst→nextHop <IP_OTHER_078>   │              │                                │
        │                              └──────┬──────────────────────┘              │                                │
        │                                     │                                     │                                │
        │                                     │ ⑤ IP包: src=VIP或GIP, dst=8.8.8.8   │                                │
@@ -641,7 +641,7 @@ Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
        │                              │ 回程处理（按 dst 分流）       │              │                                │
        │                              │                              │              │                                │
        │                              │ dst=VIP (.1):                │              │                                │
-       │                              │  ⑭ 反向NAT: dst→192.168.1.100│              │                                │
+       │                              │  ⑭ 反向NAT: dst→<IP_QGW_LAN>│              │                                │
        │                              │  ⑮ 写回 TUN → OS → LAN Host │              │                                │
        │                              │                              │              │                                │
        │                              │ dst=GIP (.3):                │              │                                │
@@ -658,7 +658,7 @@ Node A 反向 NAT: dst=100.64.0.1 → dst=192.168.1.100
 |------|---------------------|-----------------|
 | 入口 | LAN Host 的 IP 包（OS 内核） | SOCKS5/HTTP 代理请求（应用层） |
 | 源 IP 处理 | NAT：真实 LAN IP → VIP (.1) | gVisor 虚拟 socket，源 IP = GIP (.3)，无需 NAT |
-| 目标地址 | 真实 IP（如 8.8.8.8） | fakeIP（如 100.64.16.5 → api.github.com） |
+| 目标地址 | 真实 IP（如 8.8.8.8） | fakeIP（如 <IP_OTHER_080> → api.github.com） |
 | 需要 TUN | 是 | 否 |
 | 需要 NAT | 是（LAN IP 不可路由） | 否（GIP 已是 mesh 可路由地址） |
 | Gateway 处理 | netstack Forwarder 直接转发到真实 IP | netstack 先查 fakeIP → 域名，再连接真实目标 |
@@ -673,8 +673,8 @@ Gateway 节点收到 mesh 包后：
    - 创建出站连接到真实目标
    - 响应通过 netstack 回来，转发回 mesh
 
-2. **dstIP 是 fakeIP**（如 100.64.16.5，属于 Node A 的 /20 子网）：
-   - 查表：100.64.16.5 → api.github.com
+2. **dstIP 是 fakeIP**（如 <IP_OTHER_080>，属于 Node A 的 /20 子网）：
+   - 查表：<IP_OTHER_080> → api.github.com
    - 解析域名获取真实 IP
    - 创建出站连接
    - 响应转发回 mesh
@@ -756,7 +756,7 @@ Gateway 节点收到 mesh 包后：
 | nodeId | 人可读标识（不参与路由） | "QG" |
 | subnet | 节点自己的 mesh 子网，用于推导 .1/.2/.3 地址 | "100.64.0.0/24" |
 | domainSuffixes | 能解析的域名后缀（不带前导点） | ["phn", "github.com"] |
-| routes | 能到达的**额外**路由网段（不含 subnet 本身） | ["0.0.0.0/0", "192.168.1.0/24"] |
+| routes | 能到达的**额外**路由网段（不含 subnet 本身） | ["0.0.0.0/0", "<IP_QG_LAN_NET>/24"] |
 
 **subnet 不合并到 routes 的原因**：收到 gossip 的节点需要从 subnet 计算 gateway 的 .3 地址（GIP），用于 DNS 查询发送目标。
 
@@ -796,26 +796,26 @@ subnet 本身也是一条路由，和 routes 字段中的条目同等对待。
 
 ```
 QG: subnet=100.64.0.0/24, routes=["0.0.0.0/0"]
-VM: subnet=100.64.1.0/24, routes=[]
+VM: subnet=<IP_OTHER_070>/24, routes=[]
 
 VM 的路由表:
   100.64.0.0/24 → peer QG 的链路   (来自 QG 的 subnet)
   0.0.0.0/0     → peer QG 的链路   (来自 QG 的 routes)
 
 QG 的路由表:
-  100.64.1.0/24 → peer VM 的链路   (来自 VM 的 subnet)
+  <IP_OTHER_070>/24 → peer VM 的链路   (来自 VM 的 subnet)
 ```
 
 **三节点多跳**：
 
 ```
 A: subnet=100.64.0.0/24, 直连 B
-B: subnet=100.64.1.0/24, 直连 A 和 C
-C: subnet=100.64.2.0/24, routes=["0.0.0.0/0"]
+B: subnet=<IP_OTHER_070>/24, 直连 A 和 C
+C: subnet=<IP_OTHER_081>/24, routes=["0.0.0.0/0"]
 
 A 的路由表:
-  100.64.1.0/24 → peer B 的链路   (B 的 subnet)
-  100.64.2.0/24 → peer B 的链路   (C 的 subnet，经 B 转发)
+  <IP_OTHER_070>/24 → peer B 的链路   (B 的 subnet)
+  <IP_OTHER_081>/24 → peer B 的链路   (C 的 subnet，经 B 转发)
   0.0.0.0/0     → peer B 的链路   (C 的 routes，经 B 转发)
 ```
 
@@ -824,8 +824,8 @@ A 的路由表:
 ### 9.5 发包流程
 
 ```
-ping 100.64.0.5
-  → longest prefix match: 100.64.0.5 匹配 100.64.0.0/24
+ping <IP_OTHER_079>
+  → longest prefix match: <IP_OTHER_079> 匹配 100.64.0.0/24
   → 找到 peer QG 的链路
   → peer.Send(data)  // 直接用 peer 连接发送，不经过 nodeID
 ```
@@ -943,11 +943,11 @@ Section 9 的路由简化方案中，gossip 只包含节点自身信息（subnet
 **问题**：JF 转发 VM 的 gossip 给 QG 时，使用 `NodeID: "jf"`（发送者的 ID），导致 VM 的信息被存储在 `peers["jf"]` 而不是 `peers["vm"]`，无法区分直连节点和远端节点。
 
 ```
-VM 广播: {nodeId:"vm", subnet:"100.64.1.0/24", routes:[], domainSuffixes:["vmtest.local"]}
+VM 广播: {nodeId:"vm", subnet:"<IP_OTHER_070>/24", routes:[], domainSuffixes:["vmtest.local"]}
   ↓
-JF 收到，转发给 QG: {nodeId:"jf", subnet:"100.64.1.0/24", ...}  ← 错误！VM 信息丢失
+JF 收到，转发给 QG: {nodeId:"jf", subnet:"<IP_OTHER_070>/24", ...}  ← 错误！VM 信息丢失
   ↓
-QG 存储: peers["jf"] = {subnet:"100.64.1.0/24"}  ← 应该是 peers["vm"]
+QG 存储: peers["jf"] = {subnet:"<IP_OTHER_070>/24"}  ← 应该是 peers["vm"]
 ```
 
 **根因**：没有跳数信息，无法区分直连和远端；没有 peer 级别的下一跳记录，无法正确构建多跳路由。
@@ -1093,17 +1093,17 @@ type GlobalDomainEntry struct {
 
 **各节点配置**：
 ```
-VM: subnet=100.64.1.0/24, domainSuffixes=["vmtest.local"], routes=[]
-JF: subnet=100.64.2.0/24, domainSuffixes=[], routes=["0.0.0.0/0"]
+VM: subnet=<IP_OTHER_070>/24, domainSuffixes=["vmtest.local"], routes=[]
+JF: subnet=<IP_OTHER_081>/24, domainSuffixes=[], routes=["0.0.0.0/0"]
 QG: subnet=100.64.0.0/24, domainSuffixes=["phn"], routes=["0.0.0.0/0"]
 ```
 
 **JF 的 peer 存储**：
 
 ```
-JF 收到 VM 的通告: {nodeId:"vm", subnet:"100.64.1.0/24", routes:[], domainSuffixes:[{suffix:"vmtest.local", hop:0}]}
+JF 收到 VM 的通告: {nodeId:"vm", subnet:"<IP_OTHER_070>/24", routes:[], domainSuffixes:[{suffix:"vmtest.local", hop:0}]}
   → peers["vm"] = {
-      Subnet: 100.64.1.0/24,
+      Subnet: <IP_OTHER_070>/24,
       Routes: [],
       DomainSuffixes: [{suffix:"vmtest.local", hop:1}]   ← +1
     }
@@ -1119,9 +1119,9 @@ JF 收到 QG 的通告: {nodeId:"qg", subnet:"100.64.0.0/24", routes:[{prefix:"0
 **JF 的全局路由表**：
 
 ```
-100.64.2.0/24  → Hop=0, NextHop=nil     (自己的 subnet)
+<IP_OTHER_081>/24  → Hop=0, NextHop=nil     (自己的 subnet)
 0.0.0.0/0      → Hop=0, NextHop=nil     (自己的 routes)
-100.64.1.0/24  → Hop=1, NextHop=VM      (来自 peers["vm"].subnet)
+<IP_OTHER_070>/24  → Hop=1, NextHop=VM      (来自 peers["vm"].subnet)
 100.64.0.0/24  → Hop=1, NextHop=QG      (来自 peers["qg"].subnet)
 ```
 
@@ -1136,9 +1136,9 @@ JF 收到 QG 的通告: {nodeId:"qg", subnet:"100.64.0.0/24", routes:[{prefix:"0
 
 ```
 routes:
-  100.64.2.0/24  → Hop=0    (自己的，NextHop=nil ≠ QG ✓)
+  <IP_OTHER_081>/24  → Hop=0    (自己的，NextHop=nil ≠ QG ✓)
   0.0.0.0/0      → Hop=0    (自己的，NextHop=nil ≠ QG ✓)
-  100.64.1.0/24  → Hop=1    (NextHop=VM ≠ QG ✓)
+  <IP_OTHER_070>/24  → Hop=1    (NextHop=VM ≠ QG ✓)
   100.64.0.0/24  → 跳过     (NextHop=QG == QG ✗ 水平分割)
 
 domainSuffixes:
@@ -1150,11 +1150,11 @@ domainSuffixes:
 
 ```
 peers["jf"] = {
-  Subnet: 100.64.2.0/24,
+  Subnet: <IP_OTHER_081>/24,
   Routes: [
-    {prefix:"100.64.2.0/24", hop:1},
+    {prefix:"<IP_OTHER_081>/24", hop:1},
     {prefix:"0.0.0.0/0", hop:1},
-    {prefix:"100.64.1.0/24", hop:2},    ← VM 的子网，经 JF 转发，Hop=1+1=2
+    {prefix:"<IP_OTHER_070>/24", hop:2},    ← VM 的子网，经 JF 转发，Hop=1+1=2
   ],
   DomainSuffixes: [
     {suffix:"vmtest.local", hop:2},     ← 经 JF 转发，Hop=1+1=2
@@ -1164,8 +1164,8 @@ peers["jf"] = {
 QG 的全局路由表:
   100.64.0.0/24  → Hop=0, NextHop=nil     (自己的 subnet)
   0.0.0.0/0      → Hop=0, NextHop=nil     (自己的 routes)
-  100.64.2.0/24  → Hop=1, NextHop=JF      (来自 peers["jf"])
-  100.64.1.0/24  → Hop=2, NextHop=JF      (来自 peers["jf"]，VM 的子网)
+  <IP_OTHER_081>/24  → Hop=1, NextHop=JF      (来自 peers["jf"])
+  <IP_OTHER_070>/24  → Hop=2, NextHop=JF      (来自 peers["jf"]，VM 的子网)
 
 QG 的全局域名 trie:
   "phn"          → Hop=0, NextHop=nil     (自己的)
@@ -1181,29 +1181,29 @@ QG 上应用查询 "vmtest.local":
 
   首跳 — readLoop（TUN 链路层）:
   ① readLoop 拦截 DNS 查询
-     包状态: src=100.64.0.2, dst=100.64.0.3 (QG 自己的 GIP)
+     包状态: src=<IP_OTHER_075>, dst=<IP_OTHER_058> (QG 自己的 GIP)
   ② 查全局域名 trie: "vmtest.local" → NextHop=JF
-  ③ 替换 dst: 100.64.0.3 → 100.64.2.3 (JF 的 GIP)，重算 checksum
-     包状态: src=100.64.0.2, dst=100.64.2.3
+  ③ 替换 dst: <IP_OTHER_058> → <IP_OTHER_037> (JF 的 GIP)，重算 checksum
+     包状态: src=<IP_OTHER_075>, dst=<IP_OTHER_037>
   ④ mesh interceptor → P2P 转发
      （包未进入 netstack）
   ↓
   中间跳 — HandleMeshFrame（mesh 链路层）:
-  ⑤ JF 收到 mesh 包（dst=100.64.2.3，JF 自己的 GIP）
+  ⑤ JF 收到 mesh 包（dst=<IP_OTHER_037>，JF 自己的 GIP）
   ⑥ HandleMeshFrame 检测到 dst=本地 GIP, UDP 53 → 解析 DNS 域名
   ⑦ 查全局域名 trie: "vmtest.local" → NextHop=VM
      NextHop ≠ nil 且 ≠ self → 继续转发
-  ⑧ 替换 dst: 100.64.2.3 → 100.64.1.3 (VM 的 GIP)，重算 checksum
-     包状态: src=100.64.0.2, dst=100.64.1.3
+  ⑧ 替换 dst: <IP_OTHER_037> → <IP_OTHER_036> (VM 的 GIP)，重算 checksum
+     包状态: src=<IP_OTHER_075>, dst=<IP_OTHER_036>
   ⑨ 直接通过 mesh 转发
      （包未进入 netstack）
   ↓
   终点 — HandleMeshFrame（mesh 链路层 → hijacker）:
-  ⑩ VM 收到 mesh 包（dst=100.64.1.3，VM 自己的 GIP）
+  ⑩ VM 收到 mesh 包（dst=<IP_OTHER_036>，VM 自己的 GIP）
   ⑪ HandleMeshFrame 检测到 dst=本地 GIP, UDP 53 → 解析 DNS 域名
   ⑫ 查全局域名 trie: "vmtest.local" → NextHop=nil（自己就是 gateway）
-  ⑬ InjectInbound → netstack → hijacker 分配 fakeIP: 100.64.1.51
-  ⑭ 构造 DNS 响应: src=100.64.1.3, dst=100.64.0.2, answer=100.64.1.51
+  ⑬ InjectInbound → netstack → hijacker 分配 fakeIP: <IP_OTHER_082>
+  ⑭ 构造 DNS 响应: src=<IP_OTHER_036>, dst=<IP_OTHER_075>, answer=<IP_OTHER_082>
   ⑮ DNS 响应沿原路返回（VM → JF → QG → TUN → 应用）
 ```
 
@@ -1315,7 +1315,7 @@ s.mu.Unlock()
 ```json
 {
   "nodeId": "8472639485736",
-  "subnet": "100.64.5.0/24"
+  "subnet": "<IP_OTHER_083>/24"
 }
 ```
 
@@ -1342,7 +1342,7 @@ s.mu.Unlock()
 ```json
 {
   "nodeId": "8472639485736",
-  "subnet": "100.64.2.0/24",
+  "subnet": "<IP_OTHER_081>/24",
   "routes": [
     {"prefix": "0.0.0.0/0", "hop": 0}
   ],
@@ -1350,8 +1350,8 @@ s.mu.Unlock()
     {"suffix": "phn", "hop": 0}
   ],
   "claimedSubnets": [
-    {"subnet": "100.64.2.0/24", "nodeId": "8472639485736", "hop": 0},
-    {"subnet": "100.64.1.0/24", "nodeId": "5738291046", "hop": 1},
+    {"subnet": "<IP_OTHER_081>/24", "nodeId": "8472639485736", "hop": 0},
+    {"subnet": "<IP_OTHER_070>/24", "nodeId": "5738291046", "hop": 1},
     {"subnet": "100.64.0.0/24", "nodeId": "6660001112223", "hop": 2}
   ]
 }
@@ -1407,8 +1407,8 @@ type GossipInfo struct {
 ### 14.6 路由查表顺序
 
 ```
-dst = 100.64.1.50
-  → 查 claimedSubnets: 匹配 100.64.1.0/24, hop=1, nodeId=5738291046
+dst = <IP_OTHER_084>
+  → 查 claimedSubnets: 匹配 <IP_OTHER_070>/24, hop=1, nodeId=5738291046
   → mesh 转发
 
 dst = 8.8.8.8
@@ -1424,18 +1424,18 @@ dst = 8.8.8.8
 ```
 NEW 收到 JF 的 gossip:
   claimedSubnets: [
-    {subnet: "100.64.1.0/24", nodeId: "5738291046", hop: 1},  ← VM 的
+    {subnet: "<IP_OTHER_070>/24", nodeId: "5738291046", hop: 1},  ← VM 的
     ...
   ]
 
 NEW 检测冲突:
-  自己的 subnet = 100.64.1.0/24
-  已知: 100.64.1.0/24 → nodeId=5738291046
+  自己的 subnet = <IP_OTHER_070>/24
+  已知: <IP_OTHER_070>/24 → nodeId=5738291046
 
   比较: 1111222233334 < 5738291046
   → 自己的 nodeId 更小 → 自己让，重选 subnet
 
-NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
+NEW 重选: <IP_OTHER_085>/24 → 查 knownSubnets 无冲突 ✓
 ```
 
 **反向情况**：如果 NEW 的 nodeId 更大（9999888877776 > 5738291046），则 NEW 不变，VM 收到后会自行重选。
@@ -1459,10 +1459,10 @@ NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
 
 ```
 收到 claimedSubnets:
-  {subnet: "100.64.1.0/24", nodeId: "5738291046", hop: 1}
+  {subnet: "<IP_OTHER_070>/24", nodeId: "5738291046", hop: 1}
 
 自动推导:
-  5738291046.phn → 路由到 100.64.1.0/24, hop=1
+  5738291046.phn → 路由到 <IP_OTHER_070>/24, hop=1
 ```
 
 `domainSuffixes` 只管用户自定义后缀（如 `phn`、`vmtest.local`），不需要声明 nodeId。
@@ -1473,7 +1473,7 @@ NEW 重选: 100.64.3.0/24 → 查 knownSubnets 无冲突 ✓
 1. 源节点：应用查询 5738291046.phn
 2. 源节点：DNS hijacker 分配 fakeIP（从 mesh subnet）
 3. 源节点：forwarder 识别 .phn 后缀 → 查 claimedSubnets
-   → 找到 nodeId=5738291046 → subnet=100.64.1.0/24, hop=1
+   → 找到 nodeId=5738291046 → subnet=<IP_OTHER_070>/24, hop=1
 4. 源节点：走 mesh 路由到目标节点
 5. 目标节点：流量从 mesh 进入 forwarder
 6. 目标节点：forwarder 还原 fakeIP → 5738291046.phn

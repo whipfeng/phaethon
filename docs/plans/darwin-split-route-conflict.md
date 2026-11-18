@@ -3,7 +3,7 @@
 > 背景：docs/tasks/darwin-forwarder-fixes-tasks.md 遗留项。phase_d 实锤两个关联缺陷：
 > ① holder/别家软件持有 0/1 时实例 enable `route add 0/1: file exists` 直接失败；
 > ② `defaultRoute()` 的 RTM_GET(0.0.0.0/0) 走最长前缀匹配，0/1 存在时命中 0/1
-> （phase_d 实测返回 gateway=198.18.0.1 iface=utun7，而非真默认 192.168.1.101/en0）。
+> （phase_d 实测返回 gateway=<IP_OTHER_039> iface=utun7，而非真默认 <IP_QG_LAN>/en0）。
 > 用户裁决：按最合理方式修，不设工作量上限。
 
 ## 方案
@@ -14,8 +14,8 @@ platformSetup 顺序调整为：
 
 ```
 0.   ifconfig 配地址（得 tunIndex）
-0.5  preemptForeignSplits：探测 64.0.0.1 / 192.0.0.1
-     - RTM_GET 最长前缀命中 /1（0.0.0.0/1 或 128.0.0.0/1）且 iface ≠ 本 tun
+0.5  preemptForeignSplits：探测 <IP_OTHER_040> / <IP_OTHER_041>
+     - RTM_GET 最长前缀命中 /1（0.0.0.0/1 或 <IP_OTHER_025>/1）且 iface ≠ 本 tun
        → 快照（dst+mask、形态[经网关 IP | 经接口]、接口 index）→ 删除
      - 命中的是 /0 默认或其他非 /1 → 无冲突，不动
      - 探测/删除失败 → warn 继续（保持现状：后续 add EEXIST 会报错退出）
@@ -52,7 +52,7 @@ preempt 静默失效。`sockaddrNetmask` 须同时接受截断形式（offset 4 
 ### 与已知形态的关系
 
 - 自家 kill -9 残留 0/1（经死 utun）→ preempt 当异主删掉、teardown 时接口不存在跳过恢复 ✓
-- holder（活进程，0/1 via 198.18.0.1 经网关形态）→ preempt 删、disable 时恢复 ✓（这是本次修复的目标场景）
+- holder（活进程，0/1 via <IP_OTHER_039> 经网关形态）→ preempt 删、disable 时恢复 ✓（这是本次修复的目标场景）
 - 别家 split-tunnel VPN（经网关形态）→ 同理抢占+恢复 ✓
 - 无冲突常态 → 探测命中 /0，零行为变化 ✓
 

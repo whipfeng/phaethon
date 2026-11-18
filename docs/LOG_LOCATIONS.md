@@ -2,7 +2,7 @@
 
 ## 日志文件位置
 
-### QG 环境 (10.11.61.41)
+### QG 环境 (<IP_QG_OLD_41>)
 - **主日志**: `/root/data/logs/phaethon.log`
   - 程序自己写的滚动日志（10MB 轮转）
   - 包含所有 util.LogInfo/LogDebug 日志
@@ -13,7 +13,7 @@
   - 包含 [STACK-NIC], [QDISC], [IPIP-ENCAP], [GVISOR-TRACE] 等
   - **gVisor 层面的诊断看这个**
 
-### VM 环境 (10.21.20.65)
+### VM 环境 (<IP_VM_OS>)
 - **主日志**: `C:\Users\Docker\Desktop\Workspace\phaethon\data\logs\phaethon.log`
   - 程序自己写的滚动日志（10MB 轮转）
   - 包含所有 util.LogInfo/LogDebug 日志
@@ -25,11 +25,11 @@
   - **gVisor 层面的诊断看这个**
   - **注意**: 此文件可能增长到很大（21GB），需要定期清理
 
-### JF 环境 (36.140.28.178)
+### JF 环境 (<IP_JF_HT>)
 - **主日志**: `/home/layer4/layer4-deploy/data/logs/phaethon.log`
 - **辅助日志**: `/home/layer4/layer4-deploy/phaethon.log` (nohup stdout)
 
-### GG 环境 (106.13.183.103)
+### GG 环境 (<IP_GG_PUBLIC>)
 - **主日志**: `/home/layer4/phaethon-gg/data/logs/phaethon.log`
 - **辅助日志**: `/home/layer4/phaethon-gg/phaethon.log` (nohup stdout)
 

@@ -117,7 +117,7 @@ NIC 100+ (h_tunnel): 已存在，uplink-only
 
 **部署**：
 - 在 QG 服务器上创建 QGT 环境
-- 独立 subnet (100.65.0.0/16)
+- 独立 subnet (<IP_OTHER_054>/16)
 - 禁用 TUN（避免冲突）
 
 **验证清单**：

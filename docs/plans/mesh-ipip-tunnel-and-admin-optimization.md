@@ -30,7 +30,7 @@
 #### IP 地址规划
 
 - **VIP**：100.x.x.x（现有，用于 NAT/内部寻址）
-- **EIP**：从节点现有网段中预留专用 IP（如 100.0.0.254）
+- **EIP**：从节点现有网段中预留专用 IP（如 <IP_OTHER_065>）
   - 不需要额外通告
   - 每个节点从自己的子网中分配
   - 用于 IPIP 外层头
@@ -83,7 +83,7 @@ Mesh P2P 收到 IPIP 包（protocol=4）
 
 **文件**：`mesh/ipip.go`
 
-EIP 是子网的第 5 个 IP（subnet + 4），例如 100.1.0.0/16 → 100.1.0.4。
+EIP 是子网的第 5 个 IP（subnet + 4），例如 <IP_OTHER_066>/16 → <IP_OTHER_015>。
 
 **IP 保留方案**（前 10 个 IP）：
 - .0 = 网络地址
@@ -102,7 +102,7 @@ EIP 是子网的第 5 个 IP（subnet + 4），例如 100.1.0.0/16 → 100.1.0.4
 
 ```go
 // CalculateEIP 计算 EIP
-// EIP = subnet + 4 (例如：100.0.0.0/16 → 100.0.0.4)
+// EIP = subnet + 4 (例如：100.0.0.0/16 → <IP_OTHER_014>)
 func CalculateEIP(subnet *net.IPNet) net.IP {
     ip := subnet.IP.To4()
     eip := make(net.IP, 4)
@@ -703,9 +703,9 @@ respondLoop:  从 responseCh 取 → UDP 发回响应
 ```yaml
 mesh:
     node-id: vm
-    subnet: 100.1.0.0/16
+    subnet: <IP_OTHER_066>/16
     static-routes:
-        - dst: 8.8.8.0/24
+        - dst: <IP_OTHER_050>/24
           via: jf
 ```
 
@@ -715,21 +715,21 @@ ping 8.8.8.8
 ```
 
 预期结果：
-- 回复来自 8.8.8.8（不是 100.1.0.3 gVisor）
+- 回复来自 8.8.8.8（不是 <IP_OTHER_007> gVisor）
 - TTL 值合理（如 103，表示经过多跳）
 - 日志显示 `[IPIP] Static route matched: dst=8.8.8.8 via=jf`
 
 数据流：
 1. VM ping 8.8.8.8 → TUN
-2. HandleOutboundPacket 匹配静态路由 8.8.8.0/24 via jf
-3. 计算 JF 的 EIP：100.2.255.254（从 JF 子网 100.2.0.0/16 计算）
-4. IPIP 封装：外层 src=100.1.255.254 (VM EIP), dst=100.2.255.254 (JF EIP)
+2. HandleOutboundPacket 匹配静态路由 <IP_OTHER_050>/24 via jf
+3. 计算 JF 的 EIP：<IP_OTHER_067>（从 JF 子网 <IP_OTHER_068>/16 计算）
+4. IPIP 封装：外层 src=<IP_OTHER_069> (VM EIP), dst=<IP_OTHER_067> (JF EIP)
 5. 通过 mesh 路由发送到 JF
 6. JF 解封装，发送原始包到 8.8.8.8
 7. 8.8.8.8 直接回复（不对称回程，无需 IPIP）
 
 **调试日志**：
-- `CheckStaticRoute` 对 8.8.8.0/24 范围的包记录 INFO 级别日志
+- `CheckStaticRoute` 对 <IP_OTHER_050>/24 范围的包记录 INFO 级别日志
 - 便于验证静态路由匹配是否触发
 
 **IPIP 回归排查日志**（任务四修复后 IPIP 失效）：

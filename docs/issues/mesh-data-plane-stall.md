@@ -35,8 +35,8 @@
 ### 排除项（已证伪的方向）
 
 1. **与 226 提交无关**：6d440c6 / 217 / 225 / 226 多版本组合均复现。
-2. **非 VIP/路由认知问题**：历史测试地址 `100.107.0.1` 已不存在（QG 现 subnet `100.0.0.0/16`）；正确服务入口是 hostIP `100.0.0.2`（VIP `.1` 按 route_selector.go 设计是 conntrack/SNAT 中转地址，`LocalStack=false` 非服务地址）。用正确地址测试症状相同。
-3. **非 Windows 路由丢失**：split-tunnel `0.0.0.0/1` + `128.0.0.0/1` 经 TUN 路由实际存在（此前 `route print` 受 GBK 编码干扰误判）。
+2. **非 VIP/路由认知问题**：历史测试地址 `<IP_OTHER_028>` 已不存在（QG 现 subnet `100.0.0.0/16`）；正确服务入口是 hostIP `<IP_QG_HOST>`（VIP `.1` 按 route_selector.go 设计是 conntrack/SNAT 中转地址，`LocalStack=false` 非服务地址）。用正确地址测试症状相同。
+3. **非 Windows 路由丢失**：split-tunnel `0.0.0.0/1` + `<IP_OTHER_025>/1` 经 TUN 路由实际存在（此前 `route print` 受 GBK 编码干扰误判）。
 4. **非 netstack 全面死锁**：QG 累计 5737 个 forwarder `CALLBACK entered`，5736 个进入 `HANDLECONN-GOROUTINE`——仅 1 个挂起。数据面对其他节点（GG）正常。
 
 ### 卡死点实锤
@@ -112,15 +112,15 @@ B 链 = VM 停止发 GET 的原因链：`recvLoop → routeFrame → readLoop(Re
 用户提出关键质疑："SSH 也连不上——SSH 是被动监听的 socket server，其回程包会路由到 TUN 吗？"经研判与实测修正，结论如下。
 
 **实测（VM 健康态）**：
-- VM `172.30.0.2` ↔ 客户端 `10.11.61.50` 不同网段，SSH established 会话活着，ping 1ms，TUN 计数器零增量——**SSH 回程物理直连，不进 TUN**。
-- 机制（推断，无官方文档）：split-tunnel 的 `0.0.0.0/1`+`128.0.0.0/1` 路由虽在路由表，但 Windows 源地址感知路由查找下，sshd accept 的连接绑定本地地址 `172.30.0.2`，出站查找带源约束，跳过挂 phaethontun 的 /1，落物理默认路由。佐证：Find-NetRoute（不带源参数）选 TUN，而实际绑源 socket 不走 TUN。
+- VM `<IP_OTHER_010>` ↔ 客户端 `<IP_QG_OS>` 不同网段，SSH established 会话活着，ping 1ms，TUN 计数器零增量——**SSH 回程物理直连，不进 TUN**。
+- 机制（推断，无官方文档）：split-tunnel 的 `0.0.0.0/1`+`<IP_OTHER_025>/1` 路由虽在路由表，但 Windows 源地址感知路由查找下，sshd accept 的连接绑定本地地址 `<IP_OTHER_010>`，出站查找带源约束，跳过挂 phaethontun 的 /1，落物理默认路由。佐证：Find-NetRoute（不带源参数）选 TUN，而实际绑源 socket 不走 TUN。
 - 推论：若 SSH 回程真进 TUN，须走 RouteSelector 分支4（`LocalStack:true`，栈内消费"local proxy entries"），该分支无法把回程包交回物理网卡上的既有连接——将不可达，与"平时 SSH 通"矛盾，反证回程没进 TUN。
 
 **分叉判据（B 排查的关键分野）**：
 
 | 卡死时物理通道 | 结论 | 下一步 |
 |---|---|---|
-| 物理通（能 ping/SSH 172.30.0.2）、mesh 死 | phaethon 数据面内部问题 | 查 `data/logs/goroutine-dump-*.log`，按计数器签名定位 B 在 recvLoop/InjectInbound/TUN 读循环哪一段 |
+| 物理通（能 ping/SSH <IP_OTHER_010>）、mesh 死 | phaethon 数据面内部问题 | 查 `data/logs/goroutine-dump-*.log`，按计数器签名定位 B 在 recvLoop/InjectInbound/TUN 读循环哪一段 |
 | 物理也死 | **OS/驱动层嫌疑**（wintun 驱动状态、Windows TCP/IP 栈、系统事件日志、内存/句柄泄漏） | 本机控制台现场取证：驱动状态、事件查看器、进程句柄数；dump 文件的 Stats 快照辅助 |
 
 12:09 重症（整机挂死+SSH 不可达）按此判据属于右列——这是"OS 自身问题"假设的正向证据，也解释了为什么 stall monitor 的计数器冻结签名在重症形态下可能整体不可用（dump 触发依赖 writeLoop 活着写探针）。
@@ -168,7 +168,7 @@ VM 留跑期间 StallMonitor rule 0 第二次触发，写 `goroutine-dump-202611
 
 - 版本 `v0.8.0-239-g8f23e13`，uptime 51m0s（非 <5min 启动误报形态）
 - trigger=`auto:A-rising-D-frozen(outbound-blackhole)`；Dvip 冻结 90s（83568 不动），A/B 持续在走
-- peers 全健康（qg SRTT 37ms、gg 163ms、consecLost 全 0），mesh 双腿探测全活（100.0.0.3×2、100.179.0.3），`disposition: ping-healthy`，channel drop 全 0
+- peers 全健康（qg SRTT 37ms、gg 163ms、consecLost 全 0），mesh 双腿探测全活（<IP_QG_GIP>×2、<IP_GG_GIP>），`disposition: ping-healthy`，channel drop 全 0
 - 精准 dump 阶梯（stall-snapshot + stall-probes 结构）确认已在 VM 生效运行
 - 签名与 135925 同型（VM 内部无持锁卡死 + ping-healthy），dump 内无可定的 B 触发源
 
@@ -176,11 +176,11 @@ VM 留跑期间 StallMonitor rule 0 第二次触发，写 `goroutine-dump-202611
 
 深度验证第一项（iperf3 mesh 链路吞吐）未遂，**复测证据与本文档轻症症状完全一致**，记录备查：
 
-- **测试方法**：VM（Windows，winget iperf3 3.22）↔ QG（apk iperf3），QG server 绑 100.0.0.2，双向各试一次
+- **测试方法**：VM（Windows，winget iperf3 3.22）↔ QG（apk iperf3），QG server 绑 <IP_QG_HOST>，双向各试一次
 - **结果（双向均失败）**：
-  - VM→100.0.0.2:22 SYN 到不了 QG（QG tun0 tcpdump 实证无包）
-  - QG→100.212.0.2 无主机路由（mesh-only 中继节点 host 腿结构性不通，符合预期）
-  - VM→GG VIP（100.179.0.3:39998）、VM→自己 VIP（100.212.0.1:39999）、VM→QG LAN 192.168.1.100（IPIP 分支 3）全部不通
+  - VM→<IP_QG_HOST>:22 SYN 到不了 QG（QG tun0 tcpdump 实证无包）
+  - QG→<IP_VM_HOST> 无主机路由（mesh-only 中继节点 host 腿结构性不通，符合预期）
+  - VM→GG VIP（<IP_GG_GIP>:39998）、VM→自己 VIP（<IP_VM_VIP>:39999）、VM→QG LAN <IP_QGW_LAN>（IPIP 分支 3）全部不通
   - fakeIP 域名（qgw.phn）与域名路由（httpbin.org，owner=jf）超时
 - **同期正常项**：VM admin 活性、控制面（gossip 2-5s 路由刷新、bestPaths 齐全、channelDropStats 全 0）、互联网直连代理（1.1.1.1 可达、活跃 DIRECT 连接）
 - **判别**：非今日提交引入——今日 5 个提交仅 4b7b40e 碰 mesh（GetRouteTree nil 守卫，纯只读导出路径）+ 4bf4bd9 转发选路修复（症状出现时不相关），其余全为 admin 前端。症状 = 文档"轻症：数据面卡死"原样复现（VM↔QG 双向数据死、控制面正常）
@@ -195,7 +195,7 @@ VM 留跑期间 StallMonitor rule 0 第三次触发，写 `goroutine-dump-202611
 
 - 版本 `v0.8.0-317-g5598357`，uptime 21m41s，trigger=`auto:A-rising-D-frozen(outbound-blackhole)`
 - 计数签名：触发前 A 高速上升，触发后窗口内 **A 近乎归零**（139180→139195，50s 仅 ~15 包），B/Dvip 全冻结；`netstack-read=0 nic1-backlog=0`——网卡侧根本无包入站
-- 快照判态：`disposition: ping-healthy`（peers SRTT/qg 37ms/gg 127ms、consecLost 全 0），mesh 双腿探测全活（100.0.0.3×2、100.179.0.3），channel drop 全 0，gvisor ip/tcp/udp stats 无异常计数
+- 快照判态：`disposition: ping-healthy`（peers SRTT/qg 37ms/gg 127ms、consecLost 全 0），mesh 双腿探测全活（<IP_QG_GIP>×2、<IP_GG_GIP>），channel drop 全 0，gvisor ip/tcp/udp stats 无异常计数
 - **总量仅 138 goroutine**（历史三次 dump 均为数百至上千），无资源耗尽迹象
 
 ### 关键 goroutine 状态（全部健康等待态）

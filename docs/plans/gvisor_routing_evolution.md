@@ -71,15 +71,15 @@
 > 回程包，无需策略路由。去程（默认路由出 mesh）与回程（具体路由回 TUN）按目标
 > 前缀天然分离，下列三个"死循环"分支均不存在。
 
-**问题场景（原文）**：旁路网关流量（源地址任意，如 192.168.1.100）需要 SNAT 成 VIP 从 mesh 发出，回程包 DNAT 还原后需要路由回 TUN。
+**问题场景（原文）**：旁路网关流量（源地址任意，如 <IP_QGW_LAN>）需要 SNAT 成 VIP 从 mesh 发出，回程包 DNAT 还原后需要路由回 TUN。
 
 **gVisor 的死结**：
 ```
 回程包 dst=VIP 到达 NIC 2 (Mesh)
     ↓
-PREROUTING DNAT: dst=VIP → dst=192.168.1.100（必须在路由前）
+PREROUTING DNAT: dst=VIP → dst=<IP_QGW_LAN>（必须在路由前）
     ↓
-路由决策: 目标是 192.168.1.100（任意源地址）
+路由决策: 目标是 <IP_QGW_LAN>（任意源地址）
     ↓
 无策略路由/fwmark → 只能靠默认路由        ← 错误：忽略了具体路由的最长前缀匹配
     ├─ 默认路由 → NIC 3 (loopback) ❌ 死循环
@@ -103,7 +103,7 @@ PREROUTING DNAT: dst=VIP → dst=192.168.1.100（必须在路由前）
 **方案**（原文，仍为当前边界架构的实际实现）：在 TUN 入口/出口做 NAT，保证进入 gVisor 的包源地址已经是 VIP。
 
 ```
-LAN 机器 (src=192.168.1.100) → TUN
+LAN 机器 (src=<IP_QGW_LAN>) → TUN
     ↓
 readLoop: nat.go.TranslateOutbound (src → VIP)
     ↓
@@ -395,7 +395,7 @@ func selectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
 ```yaml
 mesh:
   static_routes:
-    - prefix: "8.8.8.0/24"
+    - prefix: "<IP_OTHER_050>/24"
       node_ids: ["gg", "qg"]  # 优先使用 gg，gg 不可用时用 qg
 ```
 
@@ -403,7 +403,7 @@ mesh:
 
 **出站（旁路网关，需要 NAT + IPIP 封装）**：
 ```
-LAN 机器 (src=192.168.1.100, dst=8.8.8.8) → TUN
+LAN 机器 (src=<IP_QGW_LAN>, dst=8.8.8.8) → TUN
   ↓
 readLoop: nat.go.TranslateOutbound (src → VIP)
   ↓
@@ -521,8 +521,8 @@ writeLoop (从 gVisor 读取)
 ```go
 // 示例：mesh 链路通告
 {
-  "destination": "100.179.0.0/16",
-  "gateway": "100.179.0.1",  // GG 节点
+  "destination": "<IP_OTHER_042>/16",
+  "gateway": "<IP_GG_VIP>",  // GG 节点
   "metric": 1,
   "interface": "mesh0"
 }
@@ -666,12 +666,12 @@ s.SetRouteTable([]tcpip.Route{
 
 | 环境 | 地址 | 角色 | Mesh VIP | 用途 |
 |------|------|------|----------|------|
-| **GG** | 106.13.183.103 | mesh 节点 | 100.179.0.1 | 主节点，IPIP 出口测试 |
-| **QG** | 10.11.61.41 | mesh 节点 | 100.64.0.1 | TUN + 旁路网关（生产） |
-| **VM** | 10.21.20.65 | mesh 节点 | 100.64.1.1 | Windows TUN 测试 |
-| **JF** | 36.140.28.178 | h_tunnel 服务端 | 100.2.0.1 | h_tunnel 测试 |
-| **MS9** | 10.161.88.9 | mesh 节点 | 100.189.0.1 | 多节点路由测试 |
-| **MS10** | 10.161.88.10 | mesh 节点 | 100.96.0.1 | 多节点路由测试 |
+| **GG** | <IP_GG_PUBLIC> | mesh 节点 | <IP_GG_VIP> | 主节点，IPIP 出口测试 |
+| **QG** | <IP_QG_OLD_41> | mesh 节点 | <IP_OTHER_051> | TUN + 旁路网关（生产） |
+| **VM** | <IP_VM_OS> | mesh 节点 | <IP_OTHER_052> | Windows TUN 测试 |
+| **JF** | <IP_JF_HT> | h_tunnel 服务端 | <IP_JF_VIP> | h_tunnel 测试 |
+| **MS9** | <IP_MS9_OS> | mesh 节点 | <IP_OTHER_045> | 多节点路由测试 |
+| **MS10** | <IP_MS10_OS> | mesh 节点 | <IP_OTHER_053> | 多节点路由测试 |
 
 ### QGT 环境（多 NIC 架构验证专用）
 
@@ -687,10 +687,10 @@ s.SetRouteTable([]tcpip.Route{
 # QGT 环境（独立于 QG 生产，同一台机器）
 node_id: "qgt"
 mesh:
-  subnet: "100.65.0.0/16"  # 独立子网，避免与 QG 冲突
-  vip: "100.65.0.1"
-  gip: "100.65.0.3"
-  eip: "100.65.0.4"
+  subnet: "<IP_OTHER_054>/16"  # 独立子网，避免与 QG 冲突
+  vip: "<IP_OTHER_055>"
+  gip: "<IP_OTHER_056>"
+  eip: "<IP_OTHER_057>"
 
 tun:
   enabled: false  # ⚠️ 不能启用 TUN，避免与 QG 冲突
@@ -702,7 +702,7 @@ experimental:
 ```
 
 **⚠️ 重要限制**：
-- QGT 和 QG 在同一台物理机（10.11.61.41）上
+- QGT 和 QG 在同一台物理机（<IP_QG_OLD_41>）上
 - **不能启用 TUN**，否则会冲突（TUN 设备、iptables 规则）
 - 因此**不能测试旁路网关 NAT**
 - 只能验证多 NIC 架构的内部逻辑（路由、IPIP 封装、mesh 转发）
@@ -720,7 +720,7 @@ experimental:
    - [ ] 回程流量：P2P → NIC 2 → gVisor 路由 → socket
 
 3. **IPIP 封装**：
-   - [ ] 通告路由（如 8.8.8.0/24）触发 IPIP 封装
+   - [ ] 通告路由（如 <IP_OTHER_050>/24）触发 IPIP 封装
    - [ ] 出口节点选择正确（static 优先、sticky）
    - [ ] GG 正确 decapsulate
 
@@ -738,7 +738,7 @@ experimental:
 
 ```bash
 # 1. 在 QG 服务器上新建 QGT 目录
-ssh root@10.11.61.41 "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
+ssh root@<IP_QG_OLD_41> "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
 
 # 2. 修改 QGT 配置（独立 subnet、node_id）
 # 编辑 /root/qgt/config.yaml
@@ -747,24 +747,24 @@ ssh root@10.11.61.41 "mkdir -p /root/qgt && cp /root/config.yaml /root/qgt/"
 make linux
 
 # 4. 上传到 QGT
-scp dist/linux-amd64/phaethon root@10.11.61.41:/root/qgt/phaethon
+scp dist/linux-amd64/phaethon root@<IP_QG_OLD_41>:/root/qgt/phaethon
 
 # 5. 启动 QGT（独立进程，不影响 QG 生产）
-ssh root@10.11.61.41 "cd /root/qgt && nohup ./phaethon > phaethon.log 2>&1 &"
+ssh root@<IP_QG_OLD_41> "cd /root/qgt && nohup ./phaethon > phaethon.log 2>&1 &"
 ```
 
 **验证命令**：
 
 ```bash
 # 在 QGT 上测试
-ssh root@10.11.61.41 "cd /root/qgt && ./phaethon --config config.yaml"
+ssh root@<IP_QG_OLD_41> "cd /root/qgt && ./phaethon --config config.yaml"
 
 # 测试 mesh 连通性
-ping 100.179.0.1  # GG
-ping 100.189.0.1  # MS9
+ping <IP_GG_VIP>  # GG
+ping <IP_OTHER_045>  # MS9
 
 # 测试 IPIP 封装（如果有通告路由）
-curl --interface 100.65.0.3 http://8.8.8.8
+curl --interface <IP_OTHER_056> http://8.8.8.8
 
 # 查看日志
 tail -f /root/qgt/phaethon.log | grep -E "NIC|IPIP|NAT"
@@ -806,20 +806,20 @@ GG decapsulate → 转发到 8.8.8.8
 # QG 配置
 mesh:
   static_routes:
-    - prefix: "8.8.8.0/24"
+    - prefix: "<IP_OTHER_050>/24"
       node_ids: ["gg", "ms9"]  # gg 优先，ms9 备用
 ```
 
 **测试命令**：
 ```bash
 # 在 QG 上测试 IPIP 路由
-curl --interface 100.64.0.3 http://8.8.8.8  # 通过 mesh VIP 发起请求
+curl --interface <IP_OTHER_058> http://8.8.8.8  # 通过 mesh VIP 发起请求
 
 # 查看 IPIP 封装日志
 tail -f /root/phaethon.log | grep "IPIP encapsulated"
 
 # 在 GG 上查看 decapsulate 日志
-ssh layer4@106.13.183.103 "tail -f /home/layer4/phaethon-gg/phaethon.log | grep IPIP"
+ssh layer4@<IP_GG_PUBLIC> "tail -f /home/layer4/phaethon-gg/phaethon.log | grep IPIP"
 ```
 
 ### 验证点

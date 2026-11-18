@@ -38,7 +38,7 @@
 // Key: "next_id"        → 123              // 自增序列（uint64）
 // Key: "order"          → [1, 5, 3, 8, 2]  // 规则 ID 的有序列表
 // Key: "rule:1"         → "DOMAIN-SUFFIX,google.com,PROXY"
-// Key: "rule:5"         → "IP-CIDR,192.168.1.0/24,DIRECT"
+// Key: "rule:5"         → "IP-CIDR,<IP_QG_LAN_NET>/24,DIRECT"
 // Key: "rule:3"         → "MATCH,PROXY"
 // ...
 ```
@@ -62,7 +62,7 @@
 ```json
 [
   {"id": 1, "rule": "DOMAIN-SUFFIX,google.com,PROXY", "enabled": true},
-  {"id": 5, "rule": "IP-CIDR,192.168.1.0/24,DIRECT", "enabled": false},
+  {"id": 5, "rule": "IP-CIDR,<IP_QG_LAN_NET>/24,DIRECT", "enabled": false},
   {"id": 3, "rule": "MATCH,PROXY", "enabled": true}
 ]
 ```

@@ -385,8 +385,8 @@ v2 模式下，目标地址是域名还是裸 IP 决定了不同的处理路径�
 - 不需要本地 IPIP 封装
 - 不需要 routeFunc
 - 流程：
-  1. 从 proxy.Name 查到 peer subnet（如 `100.179.0.0/16`）
-  2. 从 peer subnet 算出对端 DNS server IP（如 `subnet+3` = `100.179.0.3`，即 GIP）
+  1. 从 proxy.Name 查到 peer subnet（如 `<IP_OTHER_042>/16`）
+  2. 从 peer subnet 算出对端 DNS server IP（如 `subnet+3` = `<IP_GG_GIP>`，即 GIP）
   3. 用对端 DNS server 解析域名
   4. 直接连接解析后的地址（走对端节点的本地网络栈）
 

@@ -14,7 +14,7 @@
 
 - [x] 三平台 go build（windows/linux/darwin 全过；散装 tools 包 main 重复为存量问题）
 - [x] Mac bindprobe 全矩阵：TCP 6 变体全 OK（修前 localaddr+boundIf= no route to host / boundIf(phys)= unreachable）；teardown 后 routes/ifscope/addr 全清
-- [x] Mac 控制台/文件日志两类错误归零（no route to host=0、invalid argument=0），nslookup/dscacheutil 经 mesh DNS(100.0.0.3) 解析成功，baidu/apple 200
+- [x] Mac 控制台/文件日志两类错误归零（no route to host=0、invalid argument=0），nslookup/dscacheutil 经 mesh DNS(<IP_QG_GIP>) 解析成功，baidu/apple 200
 - [x] Mac enable 后 CPU 0.0%（修前 100%，总 CPU time 流量前后不变）
 - [x] Mac disable 后 ifscope 默认路由删除（netstat UGScIg 消失）
 - [x] 回归 phase_a（开关）/phase_b（kill -9）通过；EEXIST 路径专项：kill -9 残留 ifscope → 重启再 enable 计数=1（去重生效）→ disable 清除
@@ -27,7 +27,7 @@
 ## 验证（2026-11-04 Mac 真机，mb.qg.phn，验证构建 splitfix2）— 异主 0/1 preempt
 
 - [x] 三平台 go build（windows/linux/darwin 核心包全过）
-- [x] phase_d 全通：holder 持有 0/1 时实例 enable 成功（running:true，0/1+128/1 经本 tun）；holder 198.18 地址/路由全程完好；disable 后 holder 的 0/1 被恢复（netstat 复核 UGScg via 198.18.0.1）；最终清理零残留、NET-OK
+- [x] phase_d 全通：holder 持有 0/1 时实例 enable 成功（running:true，0/1+128/1 经本 tun）；holder 198.18 地址/路由全程完好；disable 后 holder 的 0/1 被恢复（netstat 复核 UGScg via <IP_OTHER_039>）；最终清理零残留、NET-OK
 - [x] 回归 phase_a（开关）/phase_b（kill -9 残留 preempt）通过；bindprobe 矩阵与历史基线一致（localaddr+boundIf(tun) / UDP listen+boundIf 的 ERR 为内核固有形态，dialer 不走这些路径，verify-r4 日志错误 0）
 - [x] 探针 rtget_probe 实证根因并验证修复
 

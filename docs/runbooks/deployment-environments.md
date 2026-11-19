@@ -190,23 +190,34 @@ deskzq 是 Windows 桌面节点，只有 phaethon 内置 SSH，没有独立 OS S
 
 **结论：不是程序崩溃，是运维命令的失败路径没有兜底。**
 
-### 强制流程（适用于 deskzq/qgw 等无 OS SSH 的 Windows 节点）
+### 第二次事故（同日，必须记住）
 
-1. **先准备独立启动器，再杀进程**：
-   - 在部署目录写一个 `restart-once.cmd`，内容只包含两行：
-     `timeout /t 15 >nul` 和 `wscript.exe "<部署目录>\start-phaethon.vbs"`；
-   - 用 `Start-Process -FilePath <部署目录>\restart-once.cmd -WindowStyle Hidden` 启动它；
-   - 用 `Get-Process cmd` / 检查日志确认启动器进程已起来。
-2. **启动器和杀进程分两条 SSH 执行**：
-   - 第一条只负责 arm 启动器；
-   - 第二条再执行 `Stop-Process -Name phaethon -Force`；
-   - 这样即使第二条 SSH 因杀进程断开，第一条的启动器仍在运行。
-3. **不要在单条命令里串联“创建启动器 + 杀进程”**；不要用多层嵌套引号的
-   `-ArgumentList "/c ... \"...\""`，改用 `.cmd` 文件承载引号。
-4. **杀之前确认恢复路径**：启动器文件存在、内容正确、15s 延迟足够；
-   若节点有登录用户，也可以让用户直接双击 Startup 里的 `PhaethonTUN.lnk`。
-5. **重启后验收**：两个 `phaethon` 进程、admin 443 可访问、`/api/packages/pin` 版本正确、
-   内置 SSH 可登录；缺一项就立刻人工介入。
+第一次复盘后仍尝试了 `restart-once.cmd` + `timeout /t 15` + 分两条 SSH 杀进程，仍然失败：
+
+- `timeout /t` 在非交互 SSH 子进程里不可靠；
+- `cmd` 子进程可能随 phaethon 内置 SSH 会话一起被回收；
+- 15 秒后没有拉起新进程，节点再次离线。
+
+**硬规则：不要再远程杀无 OS SSH 节点上的 phaethon。**
+`Start-Process cmd` / `timeout` / `Start-Job` 都不算可靠恢复路径。
+
+### 唯一允许的远程重启方式
+
+只有在**事先验证过**下面这条链路后，才允许杀进程：
+
+1. 用当前用户创建一个一次性计划任务（`schtasks /sc once`），动作是
+   `wscript.exe "<部署目录>\start-phaethon.vbs"`；
+2. 先用一个无害任务（例如延迟 1 分钟写一个文件）验证：SSH 断开后任务仍会执行、
+   且能在交互式会话里拉起进程；
+3. 验证通过后，才创建真正的重启任务，并在任务触发前杀掉 phaethon；
+4. 如果计划任务创建被策略拒绝，**不要杀**，直接让用户在桌面双击 Startup 快捷方式。
+
+在任何不确定的情况下，优先请用户手动重启，不要赌。
+
+### 重启后验收
+
+两个 `phaethon` 进程、admin 443 可访问、`/api/packages/pin` 版本正确、内置 SSH 可登录；
+缺一项就立刻人工介入。
 
 ### 人工恢复（节点已经离线时）
 

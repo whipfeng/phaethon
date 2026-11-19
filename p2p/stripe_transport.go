@@ -235,11 +235,14 @@ type stripeTransport struct {
 	peerGauge      atomic.Int32 // peer's congestion gauge 0-255 (-1 = none yet)
 	diagPrimaryTx  int64
 
-	// Kernel backlog tuning (direct TCP carriers): lowat = 2×BDP, clamped
-	// [16KB, 512KB]. Controller-goroutine-only state; no per-flow maps.
-	lowatLastTx int64
-	lowatLastAt time.Time
-	lastLowat   int
+	// Kernel backlog tuning (direct TCP/WS stream carriers): lowat is sized
+	// from 2×BDP(baseRTT), clamped [64KB, 512KB]. Grow immediately, shrink
+	// slowly after sustained under-use, never below the platform floor.
+	// Controller-goroutine-only state; no per-flow maps.
+	lowatLastTx   int64
+	lowatLastAt   time.Time
+	lastLowat     int
+	lowatLowSince time.Time // first tick the target stayed below half the current cap
 	// dataStartNano is the first time this session carried a mesh data frame.
 	// The first stripeLowatWarmup seconds after it keep the conservative
 	// creation window: the initial burst's acked rate overstates link capacity
@@ -1151,18 +1154,21 @@ func (t *stripeTransport) controllerLoop() {
 	probe := time.NewTicker(stripeProbeInterval)
 	defer tick.Stop()
 	defer probe.Stop()
-	warm := stripeWarmLanes()
+	warm := t.warmLanes()
 	for {
 		select {
 		case <-t.closed:
 			return
 		case <-tick.C:
 			t.controllerTick()
-			// Env-gated warm lanes: pre-create data carriers so the first long
-			// flows (bulk vs interactive) can be placed on separate TCP streams.
-			// This isolates their outer loss recovery without changing the
-			// user's carrier/protocol configuration.
-			if warm > 0 && t.laneCount() < warm {
+			// Warm lanes: pre-create data carriers so the first long flows
+			// (bulk vs interactive) can be placed on separate TCP/WS streams.
+			// The default comes from the carrier type, not from user config;
+			// the congestion controller still adds/removes lanes afterwards.
+			// A UDP leg carrying data suppresses warm adds, same as the
+			// congestion path.
+			udpActive := t.cfg.udpActive != nil && t.cfg.udpActive()
+			if warm > 0 && !udpActive && t.laneCount() < warm {
 				t.addWarmLane(time.Now())
 			}
 		case <-probe.C:
@@ -1171,20 +1177,33 @@ func (t *stripeTransport) controllerLoop() {
 	}
 }
 
-// stripeWarmLanes reads the PHAETHON_WARM_LANES switch (default 0 = off).
-func stripeWarmLanes() int {
-	v := os.Getenv("PHAETHON_WARM_LANES")
-	if v == "" {
+// warmLanes chooses the automatic warm-lane count for this session. Stream
+// carriers (TCP/WS) get two extra lanes by default so the first concurrent
+// flows do not share one FIFO; the congestion controller still adds/removes
+// lanes afterwards. PHAETHON_WARM_LANES is a lab override gated by
+// PHAETHON_LAB=1 (0 disables, N forces N).
+func (t *stripeTransport) warmLanes() int {
+	if os.Getenv("PHAETHON_LAB") == "1" {
+		if v := os.Getenv("PHAETHON_WARM_LANES"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err == nil && n > 0 {
+				if n > stripeMaxLanes {
+					n = stripeMaxLanes
+				}
+				return n
+			}
+			return 0
+		}
+	}
+	if t.cfg.dialLane == nil {
 		return 0
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0
+	if sc, ok := t.base.(frame.StreamCarrier); ok && sc.IsStreamCarrier() {
+		return 2
 	}
-	if n > stripeMaxLanes {
-		n = stripeMaxLanes
-	}
-	return n
+	// Independent HTTP request pools (h_tunnel long-poll) already multiplex
+	// over several connections; no extra lanes there.
+	return 0
 }
 
 // addWarmLane dials and attaches one extra lane outside the congestion
@@ -1362,19 +1381,67 @@ func (t *stripeTransport) controllerTick() {
 	}
 }
 
-// tuneKernelBacklog keeps TCP_NOTSENT_LOWAT near 2×BDP on direct TCP carriers:
-// small on slow links (bounded interactive latency), large on fast links (no
-// throughput ceiling). Uses the lane's ack-derived rate when available, else
-// the local tx delta. No per-flow state; values live on the transport.
+// tuneKernelBacklog keeps the carrier's send-buffer/kernel backlog near
+// 2×BDP: small on slow links (bounded interactive latency), large on fast
+// links (no throughput ceiling). The platform floor is 64KB, baseRTT is
+// clamped to a plausible carrier RTT, growth is immediate and shrink is slow
+// (see computeAdaptiveLowat). No per-flow state; values live on the transport.
+const (
+	lowatFloor       = 64 << 10
+	lowatCeil        = 512 << 10
+	lowatMinBaseRTT  = 10 * time.Millisecond
+	lowatShrinkAfter = 3 * time.Second
+)
+
+// computeAdaptiveLowat applies the growth/shrink policy. Growth is immediate;
+// shrink only after the target has stayed below half the current cap for
+// lowatShrinkAfter, then by 25% per tick. This prevents the 16↔184KB
+// oscillation observed when a burst briefly lowers the measured rate.
+func computeAdaptiveLowat(target, current int, lowSince, now time.Time) (int, time.Time) {
+	if target < lowatFloor {
+		target = lowatFloor
+	}
+	if target > lowatCeil {
+		target = lowatCeil
+	}
+	if current == 0 {
+		return target, time.Time{}
+	}
+	if target > current+(8<<10) {
+		return target, time.Time{}
+	}
+	if target < current-(8<<10) {
+		if lowSince.IsZero() {
+			lowSince = now
+		}
+		if now.Sub(lowSince) < lowatShrinkAfter {
+			return current, lowSince
+		}
+		next := current - current/4
+		if next < target {
+			next = target
+		}
+		if next < lowatFloor {
+			next = lowatFloor
+		}
+		return next, now
+	}
+	return current, time.Time{}
+}
+
 func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
+	// Explicit lab override: keep the operator-provided value fixed so A/B
+	// tests are deterministic. Production never sets this.
+	if os.Getenv("PHAETHON_LAB") == "1" && os.Getenv("PHAETHON_P2P_LOWAT") != "" {
+		return
+	}
 	snap := t.primaryFlow.snapshot()
 	rate := snap.rate
 	srtt := snap.srtt
 	minRTT := snap.minRTT
 	tx := snap.tx
 	// Data may live on dynamic lanes, not the primary flow. Aggregate their tx
-	// and quality so the tuner does not sit at rate=0 (which kept lowat at the
-	// creation default and caused second-level HOL).
+	// and quality so the tuner does not sit at rate=0.
 	for _, l := range t.snapshotLanes() {
 		ls := l.flow.snapshot()
 		tx += ls.tx
@@ -1393,45 +1460,52 @@ func (t *stripeTransport) tuneKernelBacklog(now time.Time) {
 	}
 	t.lowatLastTx = tx
 	t.lowatLastAt = now
-	// Size the kernel queue from the *base* RTT, not the ack-derived srtt.
-	// Under a full send queue srtt converges to queueing/RTT and
-	// 2×rate×srtt becomes a self-amplifying bufferbloat loop (observed: the
-	// 512KB cap stayed put and interactive frames waited ~1.5s). minRTT is the
-	// 10-minute propagation baseline, so 2×BDP(base) bounds queueing without
-	// capping throughput. srtt is only a fallback when no baseline exists; the
-	// final 30ms guess covers passive carriers with no RTT sample at all.
+	// Size the queue from the propagation baseline, not the ack-derived srtt
+	// (under a full queue srtt converges to queueing RTT, a self-amplifying
+	// bufferbloat loop). A 1ms inner-flow minRTT must not collapse the window;
+	// clamp it to a plausible carrier RTT.
 	baseRTT := minRTT
 	if baseRTT <= 0 {
 		baseRTT = srtt
 	}
-	if baseRTT <= 0 {
-		baseRTT = 30 * time.Millisecond
+	if baseRTT < lowatMinBaseRTT {
+		baseRTT = lowatMinBaseRTT
 	}
 	if rate <= 0 {
 		return
 	}
-	// Cold-start hold: keep the conservative creation window for the first
-	// seconds of a burst. On the slow WAN it is ~1.6×BDP, so throughput is not
-	// capped, while an oversized initial window is what overshoots the shallow
-	// bottleneck buffer.
+	// Cold-start hold: keep the platform floor for the first seconds of a
+	// burst so an oversized initial window cannot overshoot a shallow buffer.
 	if !t.burstAt.IsZero() && now.Sub(t.burstAt) < stripeLowatWarmup {
 		return
 	}
-	lowat := int(2 * rate * baseRTT.Seconds())
-	if lowat < 16<<10 {
-		lowat = 16 << 10
-	}
-	if lowat > 512<<10 {
-		lowat = 512 << 10
-	}
-	if t.lastLowat != 0 && lowat > t.lastLowat-(8<<10) && lowat < t.lastLowat+(8<<10) {
+	target := int(2 * rate * baseRTT.Seconds())
+	next, lowSince := computeAdaptiveLowat(target, t.lastLowat, t.lowatLowSince, now)
+	t.lowatLowSince = lowSince
+	if t.lastLowat != 0 && next == t.lastLowat {
 		return
 	}
-	if t.SetKernelBacklogLimit(lowat) {
-		t.lastLowat = lowat
-		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s baseRTT=%v srtt=%v",
-			lowat>>10, rate/1e6, baseRTT.Round(time.Millisecond), srtt.Round(time.Millisecond))
+	if t.setLowatAll(next) {
+		t.lastLowat = next
+		util.LogModuleInfo("p2p", "[LANE-LOWAT] adaptive %dKB rate=%.2fMB/s baseRTT=%v srtt=%v target=%dKB",
+			next>>10, rate/1e6, baseRTT.Round(time.Millisecond), srtt.Round(time.Millisecond), target>>10)
 	}
+}
+
+// setLowatAll applies one cap to the primary and every dynamic lane. Warm
+// lanes are created before the first rate sample, so without this they would
+// stay at the platform floor forever.
+func (t *stripeTransport) setLowatAll(n int) bool {
+	applied := false
+	if tuner, ok := t.base.(frame.KernelBacklogTuner); ok && tuner.SetKernelBacklogLimit(n) {
+		applied = true
+	}
+	for _, l := range t.snapshotLanes() {
+		if tuner, ok := l.transport.(frame.KernelBacklogTuner); ok && tuner.SetKernelBacklogLimit(n) {
+			applied = true
+		}
+	}
+	return applied
 }
 
 // probeTick sends one PingInfo probe per lane and ages out expired ones as

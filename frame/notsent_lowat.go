@@ -9,11 +9,10 @@ import (
 )
 
 // laneNotSentLowat is the initial cap before the stripe controller has any
-// rate sample. It deliberately starts small: a large creation default lets a
-// bulk sender dump a second's worth of bytes into the kernel before
-// backpressure appears, which HOL-blocks interactive frames. The controller
-// grows the cap toward 2×BDP (max 512KB) within a few ticks once it observes
-// tx rate and the base RTT.
+// rate sample. 64KB is the platform floor: on Windows the fallback is
+// SetWriteBuffer (there is no TCP_NOTSENT_LOWAT), and 16KB was a hard send
+// buffer cap (~4.4Mbps at a 29ms RTT). The controller grows it toward 2×BDP
+// (max 512KB) with hysteresis and never shrinks below this floor.
 //
 // Reference points measured on the mesh:
 //
@@ -22,15 +21,18 @@ import (
 //	512KB       @ 37ms RTT  -> ~13.8MB/s
 //	512KB       @ 56ms RTT  -> ~9.1MB/s
 //
-// Override with PHAETHON_P2P_LOWAT (bytes) when tuning.
-const laneNotSentLowat = 16 << 10
+// PHAETHON_P2P_LOWAT is honored only with PHAETHON_LAB=1 for A/B tests;
+// production uses the adaptive controller below.
+const laneNotSentLowat = 64 << 10
 
 func laneLowatBytes() int {
-	if v := os.Getenv("PHAETHON_P2P_LOWAT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
+	if os.Getenv("PHAETHON_LAB") == "1" {
+		if v := os.Getenv("PHAETHON_P2P_LOWAT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				return n
+			}
+			util.LogModuleWarn("p2p", "[LANE-LOWAT] invalid PHAETHON_P2P_LOWAT=%q, using %d", v, defaultLowat())
 		}
-		util.LogModuleWarn("p2p", "[LANE-LOWAT] invalid PHAETHON_P2P_LOWAT=%q, using %d", v, defaultLowat())
 	}
 	return defaultLowat()
 }

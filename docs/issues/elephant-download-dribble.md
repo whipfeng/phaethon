@@ -130,3 +130,30 @@ writeListSegs 40~49，congestState: open —— 不是 loss 状态，是纯卡�
 - 同一时期 deskzq→vm 方向能扛 ~4000 小帧/s（ACK），扛不住 ~38-65 大帧/s。
 
 </details>
+
+## 七、2026-11-19 复测：Windows SNDBUF 16KB 是单 lane 上限
+
+**路径**：qg → jf → deskzq → elephant；deskzq→jf 为单个 h_tunnel WS 连接（SSH/`ss` 确认）。
+elephant 本机 deskzq 直连 7.1MB 仅 0.97s（7.3MB/s），服务端正常。
+
+**根因**：
+- Windows 没有 `TCP_NOTSENT_LOWAT`，`setNotSentLowat` 退化为 `SetWriteBuffer`，创建默认 **16KB**；
+- 16KB / 29ms ≈ 4.4Mbps，正好对上单 lane ~600KB/s；
+- 裸 OS 上传 deskzq→jf 20MB 约 **15Mbps**，说明物理路径不是瓶颈，是单 WS 连接的发送缓冲。
+
+**节点级处理（deskzq 用户环境变量）**：
+- `PHAETHON_P2P_LOWAT=131072`（128KB 创建值）；
+- `PHAETHON_WARM_LANES=2`（2 条 warm lane，链路显示 `tcp+stripe×2`）。
+
+**结果**：
+
+| 场景 | 处理前 | 处理后 |
+|---|---|---|
+| qg→deskzq 单流 9.4MB | ~580KB/s | **3.38MB/s / 1.81MB/s**（两次） |
+| elephant 首屏 7.2MB | ~13.6s | **6.6s**（DOM 3.1s，chunk-vendors 1.85s） |
+| elephant 二次加载 | — | **3.7–4.5s**（缓存） |
+| 4 个并发 9.4MB 大文件 | ~680KB/s 合计 | 单流会振荡掉速（16–184KB lowat 自适应） |
+
+**剩余问题**：`tuneKernelBacklog` 在突发大流量时会在 16–184KB 间振荡，4 个满速大文件并发会触发；
+常规页面/多资源加载正常。后续应把 Windows 低水位改为**稳定下限 + 慢收缩**（或显式 env 时跳过
+自适应），而不是长期依赖节点级环境变量；并把默认值/策略收敛到代码里。

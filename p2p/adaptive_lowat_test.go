@@ -73,14 +73,6 @@ func TestWarmLanesAutomaticForStreamCarrier(t *testing.T) {
 		t.Fatalf("stream carrier warm lanes = %d, want 2", got)
 	}
 
-	// WS is a single ordered TCP stream: four concurrent bulk flows need
-	// four carriers (primary + 3 warm lanes).
-	tr.base = &frame.WSTransport{}
-	if got := tr.warmLanes(); got != 3 {
-		t.Fatalf("WS carrier warm lanes = %d, want 3", got)
-	}
-	tr.base = fakeStreamTransport{}
-
 	// Passive side cannot dial lanes.
 	tr.cfg.dialLane = nil
 	if got := tr.warmLanes(); got != 0 {

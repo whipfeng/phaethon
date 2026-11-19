@@ -1689,29 +1689,32 @@ var _topologyState = {
     focusNode: null       // node highlighted by the locate controls
 };
 
-// layoutHopRings places this node at the centre and every other node on a
-// ring by hop distance (BFS). Direct peers land on the first ring, so the
-// "main viewing area" is deterministic and meaningful instead of depending on
-// a force simulation that reflows on every reload.
+// layoutHopRings places this node at the centre and every other node on an
+// elliptical ring by hop distance (BFS). Direct peers land on the first ring.
+// The circular order inside a ring follows the neighbours' angular position;
+// a bounded search then picks ring rotations that minimise edge crossings
+// while keeping a minimum node spacing. Rings use the full canvas width
+// (ellipse, not circle) so nodes are not bunched vertically.
 function layoutHopRings(allNodes, edges, width, height, centerX, centerY) {
     const positions = {};
     if (!allNodes.length) return positions;
 
     const local = allNodes.find(n => n.isLocal) || allNodes[0];
     const adj = {};
-    allNodes.forEach(n => { adj[n.id] = []; });
+    allNodes.forEach(n => { adj[n.id] = new Set(); });
     (edges || []).forEach(e => {
         if (adj[e.from] && adj[e.to]) {
-            adj[e.from].push(e.to);
-            adj[e.to].push(e.from);
+            adj[e.from].add(e.to);
+            adj[e.to].add(e.from);
         }
     });
 
+    // BFS hop levels from this node.
     const level = new Map([[local.id, 0]]);
     const queue = [local.id];
     while (queue.length) {
         const cur = queue.shift();
-        (adj[cur] || []).forEach(nb => {
+        adj[cur].forEach(nb => {
             if (!level.has(nb)) {
                 level.set(nb, level.get(cur) + 1);
                 queue.push(nb);
@@ -1725,29 +1728,160 @@ function layoutHopRings(allNodes, edges, width, height, centerX, centerY) {
     level.forEach(v => { if (v > maxLevel) maxLevel = v; });
 
     const compact = width < 600;
-    const minR = compact ? 82 : 112;
-    const maxR = Math.min(width, height) * (compact ? 0.42 : 0.40);
+    const minRx = compact ? 92 : 170;
+    const maxRx = Math.max(minRx, width * 0.42);
+    const minRy = compact ? 70 : 94;
+    const maxRy = Math.max(minRy, height * 0.38);
+
     const rings = {};
     allNodes.forEach(n => {
         const lv = level.get(n.id);
         (rings[lv] = rings[lv] || []).push(n.id);
     });
+    const activeLevels = Object.keys(rings).map(Number).filter(lv => lv > 0).sort((a, b) => a - b);
+    const ringCount = activeLevels.length;
+
+    // Circular order inside each ring: sort by the circular mean of the
+    // neighbours already placed on inner rings, so neighbour subtrees stay
+    // adjacent. This order is fixed while rotations are searched below.
+    const ringDefs = [];
+    const nominal = { [local.id]: 0 };
+    activeLevels.forEach((lv, ringIndex) => {
+        const ids = rings[lv].slice();
+        const desired = {};
+        ids.forEach(id => {
+            let sx = 0, sy = 0, n = 0;
+            adj[id].forEach(nb => {
+                const a = nominal[nb];
+                if (a !== undefined) {
+                    sx += Math.cos(a);
+                    sy += Math.sin(a);
+                    n++;
+                }
+            });
+            if (n > 0) desired[id] = Math.atan2(sy, sx);
+        });
+        ids.sort((a, b) => {
+            const da = desired[a], db = desired[b];
+            if (da !== undefined && db !== undefined) return da - db;
+            if (da !== undefined) return -1;
+            if (db !== undefined) return 1;
+            return a < b ? -1 : (a > b ? 1 : 0);
+        });
+        const step = (2 * Math.PI) / ids.length;
+        ids.forEach((id, i) => { nominal[id] = -Math.PI / 2 + i * step; });
+        const t = ringCount <= 1 ? 0.65 : ringIndex / (ringCount - 1);
+        ringDefs.push({
+            ids,
+            step,
+            rx: minRx + (maxRx - minRx) * t,
+            ry: minRy + (maxRy - minRy) * t
+        });
+    });
 
     positions[local.id] = { x: centerX, y: centerY };
-    const ringCount = Math.max(1, maxLevel);
-    for (let lv = 1; lv <= maxLevel; lv++) {
-        const ids = rings[lv] || [];
-        if (!ids.length) continue;
-        ids.sort();
-        const r = ringCount === 1
-            ? (minR + maxR) / 2
-            : minR + (maxR - minR) * ((lv - 1) / (ringCount - 1));
-        const offset = -Math.PI / 2 + (lv % 2 ? 0 : Math.PI / ids.length);
-        ids.forEach((id, i) => {
-            const a = offset + (2 * Math.PI * i) / ids.length;
-            positions[id] = { x: centerX + r * Math.cos(a), y: centerY + r * Math.sin(a) };
+    if (!ringDefs.length) return positions;
+
+    // Unique undirected edges for counting crossings between straight
+    // approximations of the link curves.
+    const edgePairs = [];
+    const seenEdges = new Set();
+    (edges || []).forEach(e => {
+        if (e.from === e.to || !level.has(e.from) || !level.has(e.to)) return;
+        const key = [e.from, e.to].sort().join('|');
+        if (seenEdges.has(key)) return;
+        seenEdges.add(key);
+        edgePairs.push([e.from, e.to]);
+    });
+    const ccw = (a, b, c) => (c.y - a.y) * (b.x - a.x) - (b.y - a.y) * (c.x - a.x);
+    const segmentsCross = (a, b, c, d) =>
+        ccw(a, c, d) * ccw(b, c, d) < 0 && ccw(a, b, c) * ccw(a, b, d) < 0;
+
+    const minGap = compact ? 78 : 96;
+    const evaluate = (starts) => {
+        const p = { [local.id]: { x: centerX, y: centerY } };
+        ringDefs.forEach((ring, ri) => {
+            ring.ids.forEach((id, i) => {
+                const a = starts[ri] + i * ring.step;
+                p[id] = { x: centerX + ring.rx * Math.cos(a), y: centerY + ring.ry * Math.sin(a) };
+            });
         });
+
+        let minDist = Infinity;
+        let spacing = 0;
+        const ids = Object.keys(p);
+        for (let i = 0; i < ids.length; i++) {
+            for (let j = i + 1; j < ids.length; j++) {
+                const a = p[ids[i]];
+                const b = p[ids[j]];
+                const d = Math.hypot(a.x - b.x, a.y - b.y);
+                if (d < minDist) minDist = d;
+                if (d < minGap) spacing += (minGap - d) * (minGap - d);
+            }
+        }
+
+        let crossings = 0;
+        for (let i = 0; i < edgePairs.length; i++) {
+            for (let j = i + 1; j < edgePairs.length; j++) {
+                const e1 = edgePairs[i];
+                const e2 = edgePairs[j];
+                if (e1[0] === e2[0] || e1[0] === e2[1] || e1[1] === e2[0] || e1[1] === e2[1]) continue;
+                if (segmentsCross(p[e1[0]], p[e1[1]], p[e2[0]], p[e2[1]])) crossings++;
+            }
+        }
+
+        return {
+            positions: p,
+            score: crossings * 200 - minDist * 0.4 + spacing * 2
+        };
+    };
+
+    // Bounded rotation search: exhaustive for normal topologies, coordinate
+    // descent for very deep ones (many rings).
+    let steps = 24;
+    while (Math.pow(steps, ringDefs.length) > 150000 && steps > 6) {
+        steps = Math.floor(steps / 2);
     }
+    const candidates = [];
+    for (let k = 0; k < steps; k++) candidates.push(-Math.PI + k * (2 * Math.PI / steps));
+
+    let best = null;
+    if (Math.pow(steps, ringDefs.length) <= 150000) {
+        const starts = new Array(ringDefs.length).fill(-Math.PI / 2);
+        const walk = (idx) => {
+            if (idx === ringDefs.length) {
+                const result = evaluate(starts);
+                if (!best || result.score < best.score) best = result;
+                return;
+            }
+            for (let k = 0; k < candidates.length; k++) {
+                starts[idx] = candidates[k];
+                walk(idx + 1);
+            }
+        };
+        walk(0);
+    } else {
+        const starts = ringDefs.map(() => -Math.PI / 2);
+        for (let pass = 0; pass < 2; pass++) {
+            ringDefs.forEach((_, ri) => {
+                let bestAngle = starts[ri];
+                let bestScore = Infinity;
+                candidates.forEach(angle => {
+                    const trial = starts.slice();
+                    trial[ri] = angle;
+                    const result = evaluate(trial);
+                    if (result.score < bestScore) {
+                        bestScore = result.score;
+                        bestAngle = angle;
+                    }
+                });
+                starts[ri] = bestAngle;
+            });
+        }
+        best = evaluate(starts);
+    }
+
+    Object.assign(positions, best.positions);
     return positions;
 }
 
@@ -1872,6 +2006,136 @@ function syncTopoNodeSelect(allNodes) {
     if (ids.indexOf(prev) >= 0) sel.value = prev;
 }
 
+// topologyLinkGroups returns every drawn link curve with its geometry. It is
+// shared by hit-testing (Shift+drag curve adjustment, hover tooltip) so both
+// use exactly the curves the canvas shows.
+function topologyLinkGroups(positions) {
+    const fullTopology = _topologyState.fullTopology;
+    if (!fullTopology || !fullTopology.edges) return [];
+
+    const nodePairEdges = {};
+    fullTopology.edges.forEach(edge => {
+        if (!edge.links || edge.links.length === 0) return;
+        const pairKey = [edge.from, edge.to].sort().join('|');
+        (nodePairEdges[pairKey] = nodePairEdges[pairKey] || []).push(...edge.links.map(link => ({
+            from: edge.from, to: edge.to, link
+        })));
+    });
+
+    const linkGroups = [];
+    Object.values(nodePairEdges).forEach(edgeList => {
+        const used = new Set();
+        edgeList.forEach((edge, idx) => {
+            if (used.has(idx)) return;
+            const group = { edges: [edge] };
+            used.add(idx);
+            const localSeq = edge.link.localSeq;
+            const remoteSeq = edge.link.remoteSeq;
+            edgeList.forEach((other, otherIdx) => {
+                if (used.has(otherIdx)) return;
+                if (other.link.localSeq === remoteSeq && other.link.remoteSeq === localSeq) {
+                    group.edges.push(other);
+                    used.add(otherIdx);
+                }
+            });
+            linkGroups.push(group);
+        });
+    });
+
+    const nodePairGroups = {};
+    linkGroups.forEach((group, groupIdx) => {
+        if (group.edges.length === 0) return;
+        const firstEdge = group.edges[0];
+        const pairKey = [firstEdge.from, firstEdge.to].sort().join('|');
+        (nodePairGroups[pairKey] = nodePairGroups[pairKey] || []).push({ ...group, index: groupIdx });
+    });
+
+    const result = [];
+    Object.values(nodePairGroups).forEach(groups => {
+        if (!groups.length) return;
+        const firstEdge = groups[0].edges[0];
+        const from = positions[firstEdge.from];
+        const to = positions[firstEdge.to];
+        if (!from || !to) return;
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len === 0) return;
+        const nx = -dy / len;
+        const ny = dx / len;
+        groups.forEach((group, groupIndex) => {
+            const defaultOffset = (groupIndex - (groups.length - 1) / 2) * (groups.length > 1 ? 60 : 30);
+            const groupKey = `${group.edges[0].from}-${group.edges[0].to}-${group.index}`;
+            const curveOffset = _topologyState.lineOffsets[groupKey] !== undefined
+                ? _topologyState.lineOffsets[groupKey]
+                : defaultOffset;
+            const midX = (from.x + to.x) / 2;
+            const midY = (from.y + to.y) / 2;
+            result.push({
+                groupKey,
+                from: firstEdge.from,
+                to: firstEdge.to,
+                fromPos: from,
+                toPos: to,
+                nx, ny,
+                startOffset: curveOffset,
+                cpX: midX + nx * curveOffset,
+                cpY: midY + ny * curveOffset,
+                edges: group.edges
+            });
+        });
+    });
+    return result;
+}
+
+function findTopologyLinkAt(x, y, threshold) {
+    let best = null;
+    let bestDist = threshold;
+    topologyLinkGroups(_topologyState.positions).forEach(g => {
+        for (let t = 0; t <= 1; t += 0.05) {
+            const px = (1 - t) * (1 - t) * g.fromPos.x + 2 * (1 - t) * t * g.cpX + t * t * g.toPos.x;
+            const py = (1 - t) * (1 - t) * g.fromPos.y + 2 * (1 - t) * t * g.cpY + t * t * g.toPos.y;
+            const d = Math.sqrt((x - px) * (x - px) + (y - py) * (y - py));
+            if (d < bestDist) {
+                bestDist = d;
+                best = g;
+            }
+        }
+    });
+    return best;
+}
+
+function hideTopologyTooltip() {
+    const el = document.getElementById('mesh-topo-tooltip');
+    if (el) el.classList.add('hidden');
+}
+
+function showTopologyTooltip(link, clientX, clientY) {
+    const el = document.getElementById('mesh-topo-tooltip');
+    if (!el || !link || !link.edges.length) {
+        hideTopologyTooltip();
+        return;
+    }
+    const e = link.edges[0].link;
+    const parts = [`${link.from} → ${link.to}`];
+    if (e.localSeq) parts.push('#' + e.localSeq);
+    if (e.srtt !== undefined && e.srtt !== null) parts.push('srtt ' + e.srtt.toFixed(1) + 'ms');
+    if (e.lossRate !== undefined && e.lossRate !== null) parts.push('loss ' + (e.lossRate * 100).toFixed(1) + '%');
+    if (e.retransRate > 0) parts.push('retx ' + (e.retransRate * 100).toFixed(3) + '%');
+    if (e.cost !== undefined && e.cost !== null) parts.push('cost ' + e.cost.toFixed(1));
+    if (e.friendlyName) parts.push(e.friendlyName);
+    el.textContent = parts.join(' · ');
+    el.classList.remove('hidden');
+    const pad = 12;
+    const rect = el.getBoundingClientRect();
+    let left = clientX + pad;
+    let top = clientY + pad;
+    if (left + rect.width > window.innerWidth - 8) left = clientX - rect.width - pad;
+    if (top + rect.height > window.innerHeight - 8) top = clientY - rect.height - pad;
+    el.style.left = Math.max(8, left) + 'px';
+    el.style.top = Math.max(8, top) + 'px';
+}
+
 function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     const canvas = document.getElementById('mesh-topology-canvas');
     if (!canvas) return;
@@ -1965,6 +2229,22 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     _topologyState.peers = peers;
     _topologyState.directPeers = directPeers;
     _topologyState.fullTopology = fullTopology;
+
+    // Metric-label layout: constant screen size at any zoom, with overlap
+    // culling so a dense graph does not turn into a pile of text. Node
+    // footprints seed the occupancy list (labels never cover a node).
+    const labelBoxes = [];
+    const labelScale = view.scale > 0 ? view.scale : 1;
+    const labelFontPx = 8 / labelScale;
+    const labelPad = 3 / labelScale;
+    const labelHeight = 12 / labelScale;
+    const boxesOverlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    allNodes.forEach(n => {
+        const p = positions[n.id];
+        if (!p) return;
+        const r = nodeRadius + 3;
+        labelBoxes.push({ x: p.x - r, y: p.y - r, w: r * 2, h: r * 2 });
+    });
 
     // Draw edges from full topology (reuse `edges` from layout above)
     if (edges.length > 0) {
@@ -2069,36 +2349,39 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // Draw measurements - each edge shows its own data near its source node
+                // Draw measurements - compact, constant screen size, culled when
+                // it would overlap a node or an already drawn label. Hover an
+                // edge for the full metric set (retx/cost/friendly name).
                 if (_topologyState.showMetrics) group.edges.forEach(e => {
                     const isFromFirst = e.from === firstEdge.from;
-                    const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(0)}ms` : '?';
+                    const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(1)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                    const retrans = e.link.retransRate > 0 ? `, retx ${(e.link.retransRate * 100).toFixed(3)}%` : '';
-                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? `, c${e.link.cost.toFixed(0)}` : '';
-                    const friendlyName = e.link.friendlyName || '';
+                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? ` c${e.link.cost.toFixed(0)}` : '';
                     const localSeq = e.link.localSeq || '';
+                    if (!localSeq) return;
 
-                    if (localSeq) {
-                        const seqT = isFromFirst ? 0.2 : 0.8;
-                        const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                        const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
+                    const seqT = isFromFirst ? 0.2 : 0.8;
+                    const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
+                    const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
+                    const text = `#${localSeq} ${srtt} ${loss}${cost}`;
 
-                        let text = `#${localSeq}, ${srtt}, ${loss}${retrans}${cost}`;
-                        if (friendlyName) {
-                            text += ` (${friendlyName})`;
-                        }
+                    ctx.font = labelFontPx + 'px -apple-system, sans-serif';
+                    const m = ctx.measureText(text);
+                    const box = {
+                        x: labelX - m.width / 2 - labelPad,
+                        y: labelY - labelHeight / 2 - labelPad,
+                        w: m.width + labelPad * 2,
+                        h: labelHeight + labelPad * 2
+                    };
+                    if (labelBoxes.some(b => boxesOverlap(box, b))) return;
+                    labelBoxes.push(box);
 
-                        ctx.font = '9px -apple-system, sans-serif';
-                        const m = ctx.measureText(text);
-                        const padding = 4;
-                        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                        ctx.fillRect(labelX - m.width/2 - padding, labelY - 7 - padding, m.width + padding*2, 14 + padding*2);
-                        ctx.fillStyle = '#f0f6fc';
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'middle';
-                        ctx.fillText(text, labelX, labelY);
-                    }
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+                    ctx.fillRect(box.x, box.y, box.w, box.h);
+                    ctx.fillStyle = '#f0f6fc';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(text, labelX, labelY);
                 });
             });
         });
@@ -2168,6 +2451,7 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
         canvas._dragHandlersAttached = true;
         
         canvas.addEventListener('mousedown', function(e) {
+            hideTopologyTooltip();
             const rect = canvas.getBoundingClientRect();
             const view = _topologyState.view;
             const sx = e.clientX - rect.left;
@@ -2378,7 +2662,19 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                         break;
                     }
                 }
-                canvas.style.cursor = overNode ? 'pointer' : 'grab';
+                if (overNode) {
+                    hideTopologyTooltip();
+                    canvas.style.cursor = 'pointer';
+                } else {
+                    const link = findTopologyLinkAt(x, y, 8 / view.scale);
+                    if (link) {
+                        showTopologyTooltip(link, e.clientX, e.clientY);
+                        canvas.style.cursor = 'help';
+                    } else {
+                        hideTopologyTooltip();
+                        canvas.style.cursor = 'grab';
+                    }
+                }
             }
         });
 
@@ -2414,11 +2710,13 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
             _topologyState.panning = null;
             canvas.classList.remove('is-panning');
             canvas.style.cursor = '';
+            hideTopologyTooltip();
         });
 
         // Wheel zoom anchored at the cursor.
         canvas.addEventListener('wheel', function(e) {
             e.preventDefault();
+            hideTopologyTooltip();
             const rect = canvas.getBoundingClientRect();
             const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
             meshTopoZoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);

@@ -1009,6 +1009,24 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     color: var(--text-secondary);
     font-size: 0.78rem;
 }
+.mesh-topo-tooltip {
+    position: fixed;
+    z-index: 1000;
+    max-width: 360px;
+    padding: 6px 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: rgba(13, 17, 23, 0.96);
+    color: #f0f6fc;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    white-space: normal;
+    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.mesh-topo-tooltip.hidden {
+    display: none;
+}
 .mesh-peer-table,
 .mesh-route-table {
     width: 100%;

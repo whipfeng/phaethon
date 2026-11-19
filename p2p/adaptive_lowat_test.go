@@ -22,12 +22,12 @@ func TestComputeAdaptiveLowatFloor(t *testing.T) {
 
 func TestComputeAdaptiveLowatGrowFastShrinkSlow(t *testing.T) {
 	now := time.Now()
-	cur := 128 << 10
+	cur := 256 << 10
 
 	// Growth is immediate.
-	got, _ := computeAdaptiveLowat(200<<10, cur, time.Time{}, now)
-	if got != 200<<10 {
-		t.Fatalf("grow cap = %d, want %d", got, 200<<10)
+	got, _ := computeAdaptiveLowat(300<<10, cur, time.Time{}, now)
+	if got != 300<<10 {
+		t.Fatalf("grow cap = %d, want %d", got, 300<<10)
 	}
 
 	// A one-tick low reading only arms the shrink timer.

@@ -170,6 +170,7 @@ type stripeLane struct {
 	flow       laneFlow     // in-flight accounting for this lane
 	diagTx     int64        // previous tx snapshot for diag logging
 	pinned     atomic.Int32 // flows currently pinned to this lane via affinity
+	pacer      *lanePacer   // per-lane async shaper (nil when lab pacing is off)
 }
 
 func (l *stripeLane) close() {
@@ -280,6 +281,7 @@ type stripeTransport struct {
 	primaryDataQ      chan primaryWrite
 	primaryCtrlQ      chan primaryWrite
 	primaryQueueDrops atomic.Uint64
+	primaryPacer      *lanePacer // async shaper for the primary writer (lab)
 }
 
 // primaryWrite is one queued write for the primary carrier writer.
@@ -304,6 +306,7 @@ func newStripeTransport(base frame.FrameTransport, cfg stripeConfig) *stripeTran
 		peerGauge:    atomic.Int32{},
 		primaryDataQ: make(chan primaryWrite, primaryDataDepth),
 		primaryCtrlQ: make(chan primaryWrite, primaryCtrlDepth),
+		primaryPacer: newLanePacer(),
 	}
 	t.peerGauge.Store(-1)
 	go t.baseReadLoop()
@@ -340,6 +343,7 @@ func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) bool {
 		transport: tr,
 		queue:     make(chan []frame.Frame, stripeLaneQueueDepth),
 		done:      make(chan struct{}),
+		pacer:     newLanePacer(),
 	}
 	l.probe.outstanding = make(map[uint32]time.Time)
 	t.lanes = append(t.lanes, l)
@@ -667,6 +671,11 @@ func (t *stripeTransport) writePrimary(w primaryWrite) {
 		for _, f := range w.frames {
 			n += len(f.Payload)
 		}
+		if t.primaryPacer != nil && LanePacingEnabled() {
+			if !t.primaryPacer.wait(n, t.closed, t.closed) {
+				return
+			}
+		}
 		err = t.base.SendBatch(w.frames)
 		t.primaryFlow.onSent(n, w.enqueuedAt)
 		t.sampleSojourn(w.enqueuedAt)
@@ -894,8 +903,22 @@ func (t *stripeTransport) laneWriter(l *stripeLane) {
 			return
 		case batch := <-l.queue:
 			var totalBytes int
+			dataBytes := 0
+			hasControl := false
 			for _, f := range batch {
 				totalBytes += len(f.Payload)
+				if frame.IsControlFrame(f.Type) {
+					hasControl = true
+				} else {
+					dataBytes += len(f.Payload)
+				}
+			}
+			// Lab async pacing: only data batches wait, and only in this
+			// lane's own goroutine. Control frames always bypass.
+			if !hasControl && dataBytes > 0 && l.pacer != nil && LanePacingEnabled() {
+				if !l.pacer.wait(dataBytes, l.done, t.closed) {
+					return
+				}
 			}
 			if err := l.transport.SendBatch(batch); err != nil {
 				util.LogModuleWarn("p2p", "[STRIPE] lane %d write failed, removing lane: %v", l.id, err)
@@ -1247,6 +1270,7 @@ func (t *stripeTransport) lowatLoop() {
 			return
 		case now := <-tick.C:
 			t.tuneKernelBacklog(now)
+			t.updateLanePacers()
 		}
 	}
 }
@@ -1506,6 +1530,22 @@ func (t *stripeTransport) setLowatAll(n int) bool {
 		}
 	}
 	return applied
+}
+
+// updateLanePacers feeds each lane's measured delivery rate to its shaper.
+// Runs on the lowat 200ms tick; no-op unless lab pacing is enabled.
+func (t *stripeTransport) updateLanePacers() {
+	if !LanePacingEnabled() {
+		return
+	}
+	if t.primaryPacer != nil {
+		t.primaryPacer.setRate(t.primaryFlow.snapshot().rate)
+	}
+	for _, l := range t.snapshotLanes() {
+		if l.pacer != nil {
+			l.pacer.setRate(l.flow.snapshot().rate)
+		}
+	}
 }
 
 // probeTick sends one PingInfo probe per lane and ages out expired ones as

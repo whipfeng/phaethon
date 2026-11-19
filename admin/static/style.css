@@ -1020,7 +1020,7 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     color: #f0f6fc;
     font-size: 0.78rem;
     line-height: 1.45;
-    white-space: normal;
+    white-space: pre-line;
     pointer-events: none;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
 }

@@ -2116,15 +2116,18 @@ function showTopologyTooltip(link, clientX, clientY) {
         hideTopologyTooltip();
         return;
     }
-    const e = link.edges[0].link;
-    const parts = [`${link.from} → ${link.to}`];
-    if (e.localSeq) parts.push('#' + e.localSeq);
-    if (e.srtt !== undefined && e.srtt !== null) parts.push('srtt ' + e.srtt.toFixed(1) + 'ms');
-    if (e.lossRate !== undefined && e.lossRate !== null) parts.push('loss ' + (e.lossRate * 100).toFixed(1) + '%');
-    if (e.retransRate > 0) parts.push('retx ' + (e.retransRate * 100).toFixed(3) + '%');
-    if (e.cost !== undefined && e.cost !== null) parts.push('cost ' + e.cost.toFixed(1));
-    if (e.friendlyName) parts.push(e.friendlyName);
-    el.textContent = parts.join(' · ');
+    const lines = link.edges.map(ed => {
+        const e = ed.link;
+        const parts = [`${ed.from} → ${ed.to}`];
+        if (e.localSeq) parts.push('#' + e.localSeq);
+        if (e.srtt !== undefined && e.srtt !== null) parts.push('srtt ' + e.srtt.toFixed(1) + 'ms');
+        if (e.lossRate !== undefined && e.lossRate !== null) parts.push('loss ' + (e.lossRate * 100).toFixed(1) + '%');
+        if (e.retransRate > 0) parts.push('retx ' + (e.retransRate * 100).toFixed(3) + '%');
+        if (e.cost !== undefined && e.cost !== null) parts.push('cost ' + e.cost.toFixed(1));
+        if (e.friendlyName) parts.push(e.friendlyName);
+        return parts.join(' · ');
+    });
+    el.textContent = lines.join('\n');
     el.classList.remove('hidden');
     const pad = 12;
     const rect = el.getBoundingClientRect();
@@ -2349,40 +2352,42 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // Draw measurements - compact, constant screen size, culled when
-                // it would overlap a node or an already drawn label. Hover an
-                // edge for the full metric set (retx/cost/friendly name).
-                if (_topologyState.showMetrics) group.edges.forEach(e => {
-                    const isFromFirst = e.from === firstEdge.from;
+                // One compact label per link (not per direction), constant
+                // screen size. Try several points along the curve so the label
+                // can avoid nodes/other labels instead of disappearing; hover
+                // the link for the full two-direction metric set.
+                if (_topologyState.showMetrics && group.edges.length) {
+                    const e = group.edges[0];
                     const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(1)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? ` c${e.link.cost.toFixed(0)}` : '';
                     const localSeq = e.link.localSeq || '';
-                    if (!localSeq) return;
-
-                    const seqT = isFromFirst ? 0.2 : 0.8;
-                    const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                    const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
-                    const text = `#${localSeq} ${srtt} ${loss}${cost}`;
-
-                    ctx.font = labelFontPx + 'px -apple-system, sans-serif';
-                    const m = ctx.measureText(text);
-                    const box = {
-                        x: labelX - m.width / 2 - labelPad,
-                        y: labelY - labelHeight / 2 - labelPad,
-                        w: m.width + labelPad * 2,
-                        h: labelHeight + labelPad * 2
-                    };
-                    if (labelBoxes.some(b => boxesOverlap(box, b))) return;
-                    labelBoxes.push(box);
-
-                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
-                    ctx.fillRect(box.x, box.y, box.w, box.h);
-                    ctx.fillStyle = '#f0f6fc';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(text, labelX, labelY);
-                });
+                    if (localSeq) {
+                        const text = `#${localSeq} ${srtt} ${loss}`;
+                        ctx.font = labelFontPx + 'px -apple-system, sans-serif';
+                        const m = ctx.measureText(text);
+                        const tryT = [0.5, 0.4, 0.6, 0.32, 0.68, 0.25, 0.75];
+                        for (let ti = 0; ti < tryT.length; ti++) {
+                            const seqT = tryT[ti];
+                            const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
+                            const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
+                            const box = {
+                                x: labelX - m.width / 2 - labelPad,
+                                y: labelY - labelHeight / 2 - labelPad,
+                                w: m.width + labelPad * 2,
+                                h: labelHeight + labelPad * 2
+                            };
+                            if (labelBoxes.some(b => boxesOverlap(box, b))) continue;
+                            labelBoxes.push(box);
+                            ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+                            ctx.fillRect(box.x, box.y, box.w, box.h);
+                            ctx.fillStyle = '#f0f6fc';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(text, labelX, labelY);
+                            break;
+                        }
+                    }
+                }
             });
         });
     }

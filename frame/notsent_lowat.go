@@ -9,11 +9,10 @@ import (
 )
 
 // laneNotSentLowat is the initial cap before the stripe controller has any
-// rate sample. 128KB is 2×BDP at a 29ms path (~4.4MB/s), enough to reach the
-// measured shared-path ceiling; 64KB was exactly 2.2MB/s at 29ms and matched
-// the observed mesh aggregate. On Windows this is SetWriteBuffer (there is no
-// TCP_NOTSENT_LOWAT); the controller grows it toward 2×BDP (max 512KB) with
-// hysteresis and never shrinks below this floor.
+// rate sample. 64KB is the platform floor: on Windows the fallback is
+// SetWriteBuffer (there is no TCP_NOTSENT_LOWAT), and 16KB was a hard send
+// buffer cap (~4.4Mbps at a 29ms RTT). The controller grows it toward 2×BDP
+// (max 512KB) with hysteresis and never shrinks below this floor.
 //
 // Reference points measured on the mesh:
 //
@@ -24,7 +23,7 @@ import (
 //
 // PHAETHON_P2P_LOWAT is honored only with PHAETHON_LAB=1 for A/B tests;
 // production uses the adaptive controller below.
-const laneNotSentLowat = 128 << 10
+const laneNotSentLowat = 64 << 10
 
 func laneLowatBytes() int {
 	if os.Getenv("PHAETHON_LAB") == "1" {

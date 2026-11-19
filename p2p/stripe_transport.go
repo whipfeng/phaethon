@@ -1438,7 +1438,7 @@ func (t *stripeTransport) controllerTick() {
 // clamped to a plausible carrier RTT, growth is immediate and shrink is slow
 // (see computeAdaptiveLowat). No per-flow state; values live on the transport.
 const (
-	lowatFloor       = 128 << 10
+	lowatFloor       = 64 << 10
 	lowatCeil        = 512 << 10
 	lowatMinBaseRTT  = 10 * time.Millisecond
 	lowatShrinkAfter = 3 * time.Second

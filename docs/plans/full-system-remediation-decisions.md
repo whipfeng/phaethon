@@ -173,6 +173,12 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   vm↔qg UDP leg `udp/active`、`drops=0`；elephant 首屏 6.0s、缓存 3.7–4.6s。
 - 剩余：4 个满速大文件并发仍有单流落后；异步整形（lane 级、非阻塞写循环）作为独立课题，
   见 [lane-async-pacing.md](lane-async-pacing.md)。
+- 收尾（2026-11-19）：裸 OS 4/8 流上限 ~2.9MB/s，mesh 约 70–85%；warm3、app pacing、
+  UDP leg、lane fairq、128KB lowat、外层 AQM 均无显著收益或负收益（详见
+  [elephant-download-dribble.md](../issues/elephant-download-dribble.md) 第七节）。
+  当前保留 64KB 自适应 lowat + warm2；剩余差距来自内层 TCP 终止 + 外层载体双层开销，
+  继续优化需架构级改动，暂停。deskzq 为 `v0.8.3-29-gcdb2991`（64KB，lab 功能关闭），
+  其余节点 `v0.8.3-19-gba787fa`，默认行为一致。
 
 ### ms10（worker3）异常定位
 

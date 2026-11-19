@@ -144,6 +144,21 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   `TestUDPLegCryptoRoundTrip/WrongSecretDrops` 覆盖。后续任一链路启用非空密码 +
   `p2p-udp` 时，两端升级到本版本即可自动加密。
 
+### 拓扑可视化改进部署（2026-11-19，v0.8.3-10-gd493c9d）
+
+- 拓扑交互：滚轮缩放（光标锚点）、空白拖拽/中键平移、适应画布、定位本机/任意节点、
+  重置布局；空白拖拽优先平移，曲线调整改为 Shift+拖拽。
+- 布局：本机居中的椭圆分层环；环内按邻居角序排列，再对有界旋转组合搜索
+  “交叉数 + 最小间距”。当前 9 节点实测 0 交叉、最小节点间距约 141px。
+- 指标：每个方向各一个标签（22 条有向链路 → 22 个标签），标签沿曲线候选点 +
+  法向偏移避让；实测标签互相 0 重叠、与节点 0 重叠。画布只显示
+  `#seq srtt loss`，完整 retx/cost/friendly 在悬停浮层中双向展示。
+- 升级提示：服务重启横幅移除关闭按钮（只保留“立即刷新”）；升级请求 toast
+  不再带关闭按钮，避免用户误以为关闭即取消。
+- 部署：构建 linux/windows/windows7/darwin 四个签名包，9 节点经 upload+activate
+  全部升级到 `v0.8.3-10-gd493c9d`、`status=succeeded`；拓扑 9 节点/22 条边，
+  vm↔qg UDP leg 保持 `udp/active`、`drops=0`。
+
 ### ms10（worker3）异常定位
 
 - 现象：admin 上传 TLS reset、`ms10.phn` SSH reset、OS SSH banner 超时、所有节点无 ms10 的

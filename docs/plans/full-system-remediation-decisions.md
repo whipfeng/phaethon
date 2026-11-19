@@ -159,6 +159,21 @@ winpty 0.4.3 msvc x64/x64_xp、flags 0/1/2/3、`-Sta` 全部同样失败，排�
   全部升级到 `v0.8.3-10-gd493c9d`、`status=succeeded`；拓扑 9 节点/22 条边，
   vm↔qg UDP leg 保持 `udp/active`、`drops=0`。
 
+### 发送缓冲/warm lane 自适应部署（2026-11-19，v0.8.3-19-gba787fa）
+
+- 根因：Windows 无 `TCP_NOTSENT_LOWAT`，`SetWriteBuffer` 创建值 16KB，单 lane 被卡在
+  ~4.4Mbps（16KB/29ms）；不是物理链路（裸 OS 上传约 15Mbps）。
+- 代码：平台下限 64KB；`lowat=2×BDP(baseRTT)`，baseRTT 下限 10ms；增长立即、收缩 3s 后
+  每次 25%，并对 primary+所有动态 lane 生效；流式载体默认 2 条 warm lane（UDP leg 活跃时抑制）。
+- 不再需要用户调参：`PHAETHON_P2P_LOWAT` / `PHAETHON_WARM_LANES` 仅 `PHAETHON_LAB=1`
+  时作为实验覆盖，生产忽略；deskzq 上的临时环境变量已移除。
+- 负结果：WS warm lane 提到 3（primary+3）反而更差（四流全部 ~200–240KB/s，首屏 7.9s），
+  已回退到 warm=2；说明瓶颈是共享外层队列，不是 lane 数。
+- 部署：9 节点全部 `v0.8.3-19-gba787fa`、`status=succeeded`；拓扑 9 节点/22 条边，
+  vm↔qg UDP leg `udp/active`、`drops=0`；elephant 首屏 6.0s、缓存 3.7–4.6s。
+- 剩余：4 个满速大文件并发仍有单流落后；异步整形（lane 级、非阻塞写循环）作为独立课题，
+  见 [lane-async-pacing.md](lane-async-pacing.md)。
+
 ### ms10（worker3）异常定位
 
 - 现象：admin 上传 TLS reset、`ms10.phn` SSH reset、OS SSH banner 超时、所有节点无 ms10 的

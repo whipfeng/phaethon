@@ -1199,6 +1199,12 @@ func (t *stripeTransport) warmLanes() int {
 		return 0
 	}
 	if sc, ok := t.base.(frame.StreamCarrier); ok && sc.IsStreamCarrier() {
+		// WS is one ordered TCP stream per carrier. Three extra lanes (four
+		// carriers total) let four concurrent bulk flows each own a carrier;
+		// plain TCP carriers need fewer warm lanes.
+		if _, ok := t.base.(*frame.WSTransport); ok {
+			return 3
+		}
 		return 2
 	}
 	// Independent HTTP request pools (h_tunnel long-poll) already multiplex

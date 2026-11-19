@@ -174,3 +174,47 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 
 > 文档中的环境 IP 已替换为占位符；占位符到真实地址的映射保存在本地未跟踪的 `agents.md`
 > （`.gitignore` 已忽略），仅供本地还原使用。
+
+## 7. 无 OS SSH 节点的重启纪律（2026-11-19 事故）
+
+### 事故经过
+
+deskzq 是 Windows 桌面节点，只有 phaethon 内置 SSH，没有独立 OS SSH。
+为验证 `PHAETHON_WARM_LANES`，远程执行了“延迟启动新进程 + 杀掉旧进程”的单条命令：
+
+- `Start-Process` 的 `-ArgumentList` 嵌套引号被 PowerShell 解析坏，VBS 路径多了一个反斜杠，
+  延迟启动**没有建立**；
+- 同一条命令里后面的 `Stop-Process -Name phaethon -Force` 仍然执行，把 watchdog + worker
+  一起杀掉；
+- 节点没有 OS SSH，Startup 快捷方式只在登录时触发，无法自恢复，只能人工在桌面启动。
+
+**结论：不是程序崩溃，是运维命令的失败路径没有兜底。**
+
+### 强制流程（适用于 deskzq/qgw 等无 OS SSH 的 Windows 节点）
+
+1. **先准备独立启动器，再杀进程**：
+   - 在部署目录写一个 `restart-once.cmd`，内容只包含两行：
+     `timeout /t 15 >nul` 和 `wscript.exe "<部署目录>\start-phaethon.vbs"`；
+   - 用 `Start-Process -FilePath <部署目录>\restart-once.cmd -WindowStyle Hidden` 启动它；
+   - 用 `Get-Process cmd` / 检查日志确认启动器进程已起来。
+2. **启动器和杀进程分两条 SSH 执行**：
+   - 第一条只负责 arm 启动器；
+   - 第二条再执行 `Stop-Process -Name phaethon -Force`；
+   - 这样即使第二条 SSH 因杀进程断开，第一条的启动器仍在运行。
+3. **不要在单条命令里串联“创建启动器 + 杀进程”**；不要用多层嵌套引号的
+   `-ArgumentList "/c ... \"...\""`，改用 `.cmd` 文件承载引号。
+4. **杀之前确认恢复路径**：启动器文件存在、内容正确、15s 延迟足够；
+   若节点有登录用户，也可以让用户直接双击 Startup 里的 `PhaethonTUN.lnk`。
+5. **重启后验收**：两个 `phaethon` 进程、admin 443 可访问、`/api/packages/pin` 版本正确、
+   内置 SSH 可登录；缺一项就立刻人工介入。
+
+### 人工恢复（节点已经离线时）
+
+在节点当前登录的桌面会话执行：
+
+```powershell
+wscript.exe "<部署目录>\start-phaethon.vbs"
+```
+
+或注销/重新登录，让 Startup 快捷方式触发。节点只有内置 SSH 时，不要在未验证启动器的情况下
+远程杀掉 phaethon。

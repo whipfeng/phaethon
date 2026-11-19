@@ -2233,17 +2233,6 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     _topologyState.directPeers = directPeers;
     _topologyState.fullTopology = fullTopology;
 
-    // Metric-label layout: constant screen size at any zoom, with overlap
-    // culling so a dense graph does not turn into a pile of text. Node
-    // footprints are deliberately not reserved: each link shows one label
-    // near each end (bidirectional), as before.
-    const labelBoxes = [];
-    const labelScale = view.scale > 0 ? view.scale : 1;
-    const labelFontPx = 8 / labelScale;
-    const labelPad = 3 / labelScale;
-    const labelHeight = 12 / labelScale;
-    const boxesOverlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-
     // Draw edges from full topology (reuse `edges` from layout above)
     if (edges.length > 0) {
         // Group edges by node pair first
@@ -2347,44 +2336,33 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // One compact label near each end of the link (bidirectional
-                // metrics), constant screen size. If a label collides, slide it
-                // a little toward the middle before dropping it.
+                // One label near each end: each direction shows its own
+                // seq/srtt/loss/retx/cost near its source node.
                 if (_topologyState.showMetrics) group.edges.forEach(e => {
                     const isFromFirst = e.from === firstEdge.from;
                     const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(1)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? ` c${e.link.cost.toFixed(0)}` : '';
+                    const retrans = e.link.retransRate > 0 ? `, retx ${(e.link.retransRate * 100).toFixed(3)}%` : '';
+                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? `, c${e.link.cost.toFixed(0)}` : '';
+                    const friendlyName = e.link.friendlyName || '';
                     const localSeq = e.link.localSeq || '';
                     if (!localSeq) return;
 
-                    const text = `#${localSeq} ${srtt} ${loss}${cost}`;
-                    ctx.font = labelFontPx + 'px -apple-system, sans-serif';
+                    const seqT = isFromFirst ? 0.2 : 0.8;
+                    const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
+                    const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
+                    let text = `#${localSeq}, ${srtt}, ${loss}${retrans}${cost}`;
+                    if (friendlyName) text += ` (${friendlyName})`;
+
+                    ctx.font = '7px -apple-system, sans-serif';
                     const m = ctx.measureText(text);
-                    const place = (seqT) => {
-                        const lx = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                        const ly = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
-                        return {
-                            cx: lx,
-                            cy: ly,
-                            x: lx - m.width / 2 - labelPad,
-                            y: ly - labelHeight / 2 - labelPad,
-                            w: m.width + labelPad * 2,
-                            h: labelHeight + labelPad * 2
-                        };
-                    };
-                    let box = place(isFromFirst ? 0.25 : 0.75);
-                    if (labelBoxes.some(b => boxesOverlap(box, b))) {
-                        box = place(isFromFirst ? 0.34 : 0.66);
-                        if (labelBoxes.some(b => boxesOverlap(box, b))) return;
-                    }
-                    labelBoxes.push(box);
-                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
-                    ctx.fillRect(box.x, box.y, box.w, box.h);
+                    const pad = 3;
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                    ctx.fillRect(labelX - m.width/2 - pad, labelY - 5 - pad, m.width + pad*2, 10 + pad*2);
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(text, box.cx, box.cy);
+                    ctx.fillText(text, labelX, labelY);
                 });
             });
         });

@@ -759,7 +759,34 @@ const (
 	laneDropped         // lane queue full: drop batch, keep the flow's affinity
 )
 
-// laneEnqueue tries to queue a batch on l without blocking.
+// laneEnqueue queues a batch on l, optionally fair-queueing it by inner flow
+// when the lab switch is on. The per-flow chunks preserve order within each
+// flow; a dead lane falls the remaining chunks back to the primary.
+func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (int, error) {
+	if !LaneFairQEnabled() || len(batch) <= 1 {
+		return t.laneEnqueueOne(l, batch)
+	}
+	chunks := fairLaneBatches(t.salt, batch, laneFairQFrames, laneFairQBytes)
+	result := laneEnqueued
+	for i, chunk := range chunks {
+		st, err := t.laneEnqueueOne(l, chunk)
+		if err != nil {
+			return st, err
+		}
+		if st != laneEnqueued {
+			result = st
+		}
+		if st == laneFallback {
+			for _, rest := range chunks[i+1:] {
+				t.enqueuePrimaryData(rest)
+			}
+			return st, nil
+		}
+	}
+	return result, nil
+}
+
+// laneEnqueueOne tries to queue a batch on l without blocking.
 //
 // Ordering rule (v5 "per-flow lane affinity"): a flow pinned to a lane must not
 // be moved to another path while frames of that flow may still be in flight on
@@ -767,7 +794,7 @@ const (
 // reorders it, which collapses the sender's cwnd. So a full queue drops the
 // batch (mesh data is an overlay; inner TCP retransmits) and KEEPS the
 // affinity. Only a dead lane (writer exited, queue drained) may be repinned.
-func (t *stripeTransport) laneEnqueue(l *stripeLane, batch []frame.Frame) (int, error) {
+func (t *stripeTransport) laneEnqueueOne(l *stripeLane, batch []frame.Frame) (int, error) {
 	select {
 	case l.queue <- batch:
 		return laneEnqueued, nil

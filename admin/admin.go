@@ -1399,6 +1399,7 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reverse/", s.apiReverseItem)
 	mux.HandleFunc("/api/p2p", s.apiP2P)
 	mux.HandleFunc("/api/p2p/pacing", s.apiP2PPacing)
+	mux.HandleFunc("/api/p2p/fairq", s.apiP2PFairQ)
 	mux.HandleFunc("/api/packages", s.apiPackages)
 	mux.HandleFunc("/api/packages/upload", s.apiPackageUpload)
 	mux.HandleFunc("/api/packages/receive", s.apiPackageReceive)
@@ -4476,6 +4477,28 @@ func (s *AdminServer) apiP2P(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"peers": p2p.GlobalP2PManager.GetPeers(),
 	})
+}
+
+// apiP2PFairQ is a lab-only switch for per-flow fair queueing at lane
+// granularity. GET reports state; POST/PUT toggles it.
+func (s *AdminServer) apiP2PFairQ(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, map[string]interface{}{"enabled": p2p.LaneFairQEnabled()})
+	case http.MethodPost, http.MethodPut:
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		p2p.SetLaneFairQEnabled(req.Enabled)
+		util.LogModuleInfo("admin", "lane fairq enabled=%v", req.Enabled)
+		jsonResponse(w, map[string]interface{}{"enabled": p2p.LaneFairQEnabled()})
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // apiP2PPacing is a lab-only switch for lane-level async shaping. It is not

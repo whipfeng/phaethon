@@ -332,10 +332,10 @@
                     }
                     if (d && d.localUpgrade === false) {
                         showToast(this.t('package.toast.distributedOnly',
-                            '已启用（平台不匹配，仅向 peer 分发，不在本机升级）'), 'success');
+                            '已启用（平台不匹配，仅向 peer 分发，不在本机升级）'), 'success', 5000, false);
                     } else {
                         showToast(this.t('package.toast.upgradeRequested',
-                            '已请求升级，watchdog 将在数秒内应用…'), 'success');
+                            '已请求升级，watchdog 将在数秒内应用…'), 'success', 5000, false);
                     }
                     this.refresh();
                     this.refreshPin();

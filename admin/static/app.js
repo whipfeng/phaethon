@@ -428,7 +428,6 @@ function showRestartBanner() {
     banner.innerHTML = `
         <span class="server-restart-text">${t('server.restartDetected', 'Server restarted. Please refresh the page.')}</span>
         <button type="button" class="server-restart-btn" onclick="location.reload()">${t('server.refreshNow', 'Refresh Now')}</button>
-        <button type="button" class="server-restart-close" onclick="document.getElementById('server-restart-banner').remove()" aria-label="Close">×</button>
     `;
     document.body.insertBefore(banner, document.body.firstChild);
 }
@@ -2233,6 +2232,27 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
     _topologyState.directPeers = directPeers;
     _topologyState.fullTopology = fullTopology;
 
+    // Metric-label placement: constant screen size, bidirectional (one per
+    // direction near its source), with candidate positions along the curve and
+    // perpendicular offsets so labels spread out instead of piling up.
+    const labelScale = view.scale > 0 ? view.scale : 1;
+    const labelFontPx = 7.5 / labelScale;
+    const labelPad = 3 / labelScale;
+    const labelHeight = 11 / labelScale;
+    const labelStep = labelHeight + 3;
+    const labelBoxes = [];
+    const boxOverlapArea = (a, b) => {
+        const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        return ox > 0 && oy > 0 ? ox * oy : 0;
+    };
+    allNodes.forEach(n => {
+        const p = positions[n.id];
+        if (!p) return;
+        const r = nodeRadius + 3;
+        labelBoxes.push({ x: p.x - r, y: p.y - r, w: r * 2, h: r * 2 });
+    });
+
     // Draw edges from full topology (reuse `edges` from layout above)
     if (edges.length > 0) {
         // Group edges by node pair first
@@ -2336,33 +2356,69 @@ function drawMeshTopology(localNodeId, peers, directPeers, fullTopology) {
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // One label near each end: each direction shows its own
-                // seq/srtt/loss/retx/cost near its source node.
+                // One compact label per direction near its source. Try several
+                // points along the curve and perpendicular offsets so the two
+                // directions of every link stay visible without piling up.
+                // Full details (retx/cost/friendly) are in the hover tooltip.
                 if (_topologyState.showMetrics) group.edges.forEach(e => {
                     const isFromFirst = e.from === firstEdge.from;
-                    const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(1)}ms` : '?';
+                    const srtt = (e.link.srtt !== undefined && e.link.srtt !== null) ? `${e.link.srtt.toFixed(0)}ms` : '?';
                     const loss = e.link.lossRate > 0 ? `${(e.link.lossRate * 100).toFixed(1)}%` : '0%';
-                    const retrans = e.link.retransRate > 0 ? `, retx ${(e.link.retransRate * 100).toFixed(3)}%` : '';
-                    const cost = (e.link.cost !== undefined && e.link.cost !== null) ? `, c${e.link.cost.toFixed(0)}` : '';
-                    const friendlyName = e.link.friendlyName || '';
                     const localSeq = e.link.localSeq || '';
                     if (!localSeq) return;
 
-                    const seqT = isFromFirst ? 0.2 : 0.8;
-                    const labelX = (1-seqT)*(1-seqT)*from.x + 2*(1-seqT)*seqT*cpX + seqT*seqT*to.x;
-                    const labelY = (1-seqT)*(1-seqT)*from.y + 2*(1-seqT)*seqT*cpY + seqT*seqT*to.y;
-                    let text = `#${localSeq}, ${srtt}, ${loss}${retrans}${cost}`;
-                    if (friendlyName) text += ` (${friendlyName})`;
-
-                    ctx.font = '7px -apple-system, sans-serif';
+                    const text = `#${localSeq} ${srtt} ${loss}`;
+                    ctx.font = labelFontPx + 'px -apple-system, sans-serif';
                     const m = ctx.measureText(text);
-                    const pad = 3;
-                    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                    ctx.fillRect(labelX - m.width/2 - pad, labelY - 5 - pad, m.width + pad*2, 10 + pad*2);
+                    const ts = isFromFirst
+                        ? [0.20, 0.27, 0.34, 0.41, 0.50]
+                        : [0.80, 0.73, 0.66, 0.59, 0.50];
+                    const offsets = [0, 1, -1, 2, -2];
+
+                    let bestBox = null;
+                    let bestOverlap = Infinity;
+                    for (let ti = 0; ti < ts.length && bestOverlap > 0; ti++) {
+                        const t = ts[ti];
+                        const px = (1-t)*(1-t)*from.x + 2*(1-t)*t*cpX + t*t*to.x;
+                        const py = (1-t)*(1-t)*from.y + 2*(1-t)*t*cpY + t*t*to.y;
+                        // Tangent -> normal, so offsets move the label off the line.
+                        const tx = 2*(1-t)*(cpX - from.x) + 2*t*(to.x - cpX);
+                        const ty = 2*(1-t)*(cpY - from.y) + 2*t*(to.y - cpY);
+                        const tlen = Math.sqrt(tx*tx + ty*ty) || 1;
+                        const nx = -ty / tlen;
+                        const ny = tx / tlen;
+                        for (let oi = 0; oi < offsets.length; oi++) {
+                            const k = offsets[oi];
+                            const cx = px + nx * labelStep * k;
+                            const cy = py + ny * labelStep * k;
+                            const box = {
+                                cx, cy,
+                                x: cx - m.width / 2 - labelPad,
+                                y: cy - labelHeight / 2 - labelPad,
+                                w: m.width + labelPad * 2,
+                                h: labelHeight + labelPad * 2
+                            };
+                            let overlap = 0;
+                            for (let bi = 0; bi < labelBoxes.length; bi++) {
+                                overlap += boxOverlapArea(box, labelBoxes[bi]);
+                                if (overlap >= bestOverlap) break;
+                            }
+                            if (overlap < bestOverlap) {
+                                bestOverlap = overlap;
+                                bestBox = box;
+                            }
+                            if (overlap === 0) break;
+                        }
+                    }
+                    if (!bestBox) return;
+                    labelBoxes.push(bestBox);
+
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+                    ctx.fillRect(bestBox.x, bestBox.y, bestBox.w, bestBox.h);
                     ctx.fillStyle = '#f0f6fc';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(text, labelX, labelY);
+                    ctx.fillText(text, bestBox.cx, bestBox.cy);
                 });
             });
         });
@@ -3938,7 +3994,7 @@ function restartProcess() {
 }
 
 // ========== Toast Notifications ==========
-function showToast(message, type = 'success', duration = 3500) {
+function showToast(message, type = 'success', duration = 3500, dismissible = true) {
     let container = document.querySelector('.toast-container');
     if (!container) {
         container = document.createElement('div');
@@ -3948,7 +4004,10 @@ function showToast(message, type = 'success', duration = 3500) {
 
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.innerHTML = `<span style="flex:1">${escapeHtml(message)}</span><button onclick="this.parentElement.remove()" style="background:none;border:none;color:inherit;cursor:pointer;padding:0 0 0 8px;font-size:16px;opacity:0.7;line-height:1">&times;</button>`;
+    const closeBtn = dismissible
+        ? '<button onclick="this.parentElement.remove()" style="background:none;border:none;color:inherit;cursor:pointer;padding:0 0 0 8px;font-size:16px;opacity:0.7;line-height:1">&times;</button>'
+        : '';
+    toast.innerHTML = `<span style="flex:1">${escapeHtml(message)}</span>${closeBtn}`;
     container.appendChild(toast);
 
     if (duration > 0) {

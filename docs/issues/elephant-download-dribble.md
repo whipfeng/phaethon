@@ -141,19 +141,37 @@ elephant 本机 deskzq 直连 7.1MB 仅 0.97s（7.3MB/s），服务端正常。
 - 16KB / 29ms ≈ 4.4Mbps，正好对上单 lane ~600KB/s；
 - 裸 OS 上传 deskzq→jf 20MB 约 **15Mbps**，说明物理路径不是瓶颈，是单 WS 连接的发送缓冲。
 
-**节点级处理（deskzq 用户环境变量）**：
+**节点级处理（deskzq 用户环境变量，仅为定位阶段的临时验证）**：
 - `PHAETHON_P2P_LOWAT=131072`（128KB 创建值）；
 - `PHAETHON_WARM_LANES=2`（2 条 warm lane，链路显示 `tcp+stripe×2`）。
 
 **结果**：
 
-| 场景 | 处理前 | 处理后 |
+| 场景 | 处理前 | 临时 env 处理后 |
 |---|---|---|
 | qg→deskzq 单流 9.4MB | ~580KB/s | **3.38MB/s / 1.81MB/s**（两次） |
 | elephant 首屏 7.2MB | ~13.6s | **6.6s**（DOM 3.1s，chunk-vendors 1.85s） |
 | elephant 二次加载 | — | **3.7–4.5s**（缓存） |
-| 4 个并发 9.4MB 大文件 | ~680KB/s 合计 | 单流会振荡掉速（16–184KB lowat 自适应） |
+| 4 个并发 9.4MB 大文件 | ~680KB/s 合计 | 单流会振荡掉速（16–184KB 自适应） |
 
-**剩余问题**：`tuneKernelBacklog` 在突发大流量时会在 16–184KB 间振荡，4 个满速大文件并发会触发；
-常规页面/多资源加载正常。后续应把 Windows 低水位改为**稳定下限 + 慢收缩**（或显式 env 时跳过
-自适应），而不是长期依赖节点级环境变量；并把默认值/策略收敛到代码里。
+### 自适应实现（v0.8.3-15-gd64ba87，已取代临时 env）
+
+- 平台下限从 16KB 提升到 **64KB**；Windows `SetWriteBuffer` 不再把单 lane 卡在 ~4.4Mbps；
+- lowat = 2×BDP(baseRTT)，`baseRTT` 下限 10ms（防止内层 1ms 假值把窗口打回 16KB）；
+- **增长立即、收缩慢**：目标低于当前 8KB 时先起 3s 计时，之后每次只缩 25%，不再 16↔184KB 振荡；
+- 自适应 cap 同时应用到 primary 和所有动态 lane；
+- 流式载体默认 **2 条 warm lane**（UDP leg 活跃时抑制），不再需要 `PHAETHON_WARM_LANES`；
+- `PHAETHON_P2P_LOWAT` / `PHAETHON_WARM_LANES` 只在 `PHAETHON_LAB=1` 时作为实验覆盖，生产忽略；
+- deskzq 上的临时用户环境变量已移除。
+
+**v0.8.3-15 实测（deskzq 自升级后）**：
+
+| 场景 | 结果 |
+|---|---|
+| qg→deskzq 单流 9.4MB | **1.60MB/s / 3.29MB/s** |
+| elephant 首屏 7.2MB | **6.4s**（DOM 2.7s，chunk-vendors 1.47s，app.js 0.70s） |
+| elephant 二次加载 | **3.6–4.8s** |
+| 4 个并发 9.4MB | 3 条 ~14s、1 条 41s；无连接重置 |
+
+**剩余**：4 并发满速时仍有 1 条流明显落后（流亲和 + 单 lane 窗口），但不影响页面/常规多资源加载；
+后续若要让满速大文件并发也完全均衡，需要继续优化 lane 选择或跨 lane 分流策略。

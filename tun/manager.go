@@ -791,11 +791,12 @@ func (e *Manager) Start() error {
 	if tunEnabled {
 		if err := e.StartTUN(); err != nil {
 			// TUN failed, but keep netstack running for mesh-only mode.
-			// Log a prominent warning so the user knows TUN is not available.
-			util.LogModuleWarn("tun", "========================================")
-			util.LogModuleWarn("tun", "TUN initialization failed: %v", err)
-			util.LogModuleWarn("tun", "Continuing in mesh-only mode (no TUN device)")
-			util.LogModuleWarn("tun", "========================================")
+			// This is rare and operationally important (e.g. EMFILE): use
+			// error so it is visible even with a global error log level.
+			util.LogModuleError("tun", "========================================")
+			util.LogModuleError("tun", "TUN initialization failed: %v", err)
+			util.LogModuleError("tun", "Continuing in mesh-only mode (no TUN device)")
+			util.LogModuleError("tun", "========================================")
 			// Don't call StopStack() - netstack is still needed for mesh
 			return nil
 		}

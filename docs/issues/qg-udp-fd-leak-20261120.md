@@ -57,6 +57,8 @@
   关闭 endpoint 和 conn → OS UDP socket 释放。这是补上 UDP 缺失的生命周期，不是只关 socket。
 - SOCKS5 UDP relay：增加 5 分钟空闲 watchdog；client 数据报、下游回包、early reply
   都刷新活跃时间；空闲后关闭 UDP socket 和 TCP 控制连接。
+- 日志：`tun` 模块默认级别提升为 warn；TUN interface disappeared、重建失败、
+  `TUN initialization failed` 改为 error，避免被全局 error 过滤。
 - 建议 QG OpenRC 启动前 `ulimit -n 65535` 作为兜底（运维项）。
 
 ## 验证

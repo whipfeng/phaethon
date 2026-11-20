@@ -243,6 +243,10 @@ func init() {
 	currentLogLevel.Store(int32(LogLevelError))
 	// System module (startup/shutdown markers) defaults to Info
 	moduleLogLevels["system"] = LogLevelInfo
+	// TUN lifecycle events are rare and operationally important (interface
+	// disappeared, recreate failed, EMFILE); keep them visible even when the
+	// global level is error. PHAETHON_LOG_MODULES can still override this.
+	moduleLogLevels["tun"] = LogLevelWarn
 }
 
 // SetModuleLogLevel sets the log level for a specific module.

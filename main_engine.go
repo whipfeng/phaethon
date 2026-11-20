@@ -278,9 +278,9 @@ func tunHealthLoop(engine *tun.Manager) {
 				continue
 			}
 			engine.MarkTUNDegraded("TUN interface disappeared at runtime")
-			util.LogModuleWarn("tun", "[TUN] interface disappeared at runtime; recreating")
+			util.LogModuleError("tun", "[TUN] interface disappeared at runtime; recreating")
 			if err := engine.StopTUN(); err != nil {
-				util.LogModuleWarn("tun", "[TUN] stop after disappearance failed: %v", err)
+				util.LogModuleError("tun", "[TUN] stop after disappearance failed: %v", err)
 			}
 		}
 		if err := engine.StartTUN(); err == nil {
@@ -288,7 +288,7 @@ func tunHealthLoop(engine *tun.Manager) {
 			backoff = 2 * time.Second
 			continue
 		} else if backoff == 2*time.Second {
-			util.LogModuleWarn("tun", "[TUN] retry failed (mesh still up): %v", err)
+			util.LogModuleError("tun", "[TUN] retry failed (mesh still up): %v", err)
 		}
 		time.Sleep(backoff)
 		backoff *= 2

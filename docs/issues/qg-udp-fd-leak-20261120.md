@@ -52,3 +52,11 @@
   - `ip -br addr` 持续存在 `tun0`，`/api/tun` 保持 `available=true,bypassGateway=true`；
   - 空闲 5 分钟后对应 UDP flow 被回收（可用日志
     `UDP flow idle for 5m0s, closing` / `UDP ASSOCIATE idle for 5m0s, closing` 确认）。
+
+## 部署记录（2026-11-20）
+
+- 先灰度 QG：`v0.8.3-32-ge0303e2` upload+activate 成功；
+- 升级后 `tun0` 在、fd 27、UDP socket 0，`/api/tun` 正常；
+- 待观察 fd/UDP 不随空闲流量增长后，再扩散到其余 Linux 节点/全部节点；
+- 建议 QG 的 OpenRC 启动前加 `ulimit -n 65535` 作为兜底。
+

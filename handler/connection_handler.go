@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"phaethon/config"
 	"phaethon/connlog"
@@ -642,14 +644,57 @@ func relayPairSummary(conn, target net.Conn) string {
 	return one(conn) + "<->" + one(target)
 }
 
+// UDP flows have no protocol-level close. Without an idle timeout, an idle
+// QUIC/DNS flow keeps its netstack endpoint and its OS target socket forever;
+// a bypass gateway accumulates thousands of them until the fd limit is hit
+// (observed on QG: 4052 UDP sockets / 4095 fd). Poll with a deadline so an
+// idle flow releases both sides; active flows just refresh the deadline.
+const (
+	udpFlowIdleTimeout  = 5 * time.Minute
+	udpFlowPollInterval = 30 * time.Second
+)
+
 // relayUDP copies datagrams between the netstack UDP connection and the target
-// PacketConn, preserving datagram boundaries. No idle timeout: idle QUIC/DNS
-// flows must survive (UDP has no keepalive; a crashed client leaves at most
-// two goroutines, bounded by the netstack association lifecycle).
+// PacketConn, preserving datagram boundaries. An idle flow (no packet in either
+// direction for udpFlowIdleTimeout) is closed so OS sockets are reclaimed.
 // UDP has no half-close: any direction exiting closes both sides so the
 // blocked reverse direction unblocks and the caller's deferred cleanup runs.
 func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDPAddr) {
 	const bufSize = 65535
+
+	var lastActive atomic.Int64
+	lastActive.Store(time.Now().UnixNano())
+	touch := func() { lastActive.Store(time.Now().UnixNano()) }
+	idle := func() bool {
+		return time.Since(time.Unix(0, lastActive.Load())) > udpFlowIdleTimeout
+	}
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			netstackConn.Close()
+			targetConn.Close()
+		})
+	}
+	// Watchdog is independent of SetReadDeadline support: closing the conns
+	// unblocks both readers even if the netstack wrapper ignores deadlines.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		ticker := time.NewTicker(udpFlowPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if idle() {
+					util.LogModuleDebug("handler", "UDP flow idle for %v, closing", udpFlowIdleTimeout)
+					closeAll()
+					return
+				}
+			case <-stopWatch:
+				return
+			}
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -661,15 +706,14 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, err := netstackConn.Read(buf)
 			if n > 0 {
+				touch()
 				if _, werr := targetConn.WriteTo(buf[:n], dstAddr); werr != nil {
-					netstackConn.Close()
-					targetConn.Close()
+					closeAll()
 					return
 				}
 			}
 			if err != nil {
-				netstackConn.Close()
-				targetConn.Close()
+				closeAll()
 				return
 			}
 		}
@@ -682,15 +726,14 @@ func relayUDP(netstackConn net.Conn, targetConn net.PacketConn, dstAddr *net.UDP
 		for {
 			n, _, err := targetConn.ReadFrom(buf)
 			if n > 0 {
+				touch()
 				if _, werr := netstackConn.Write(buf[:n]); werr != nil {
-					netstackConn.Close()
-					targetConn.Close()
+					closeAll()
 					return
 				}
 			}
 			if err != nil {
-				netstackConn.Close()
-				targetConn.Close()
+				closeAll()
 				return
 			}
 		}

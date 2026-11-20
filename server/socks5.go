@@ -273,6 +273,8 @@ func (s *Socks5Server) handleUDPAssociate(clientConn net.Conn, shouldClose *bool
 		rec:         connlog.Start("SOCKS5:"+s.Mapping.Name, "UDP", clientConn.RemoteAddr().String(), ""),
 		connID:      connID,
 	}
+	relay.touch()
+	go relay.idleWatch()
 
 	// Monitor TCP control connection; close UDP relay on disconnect.
 	// Loop reading so that client keepalive bytes are ignored and the
@@ -313,6 +315,14 @@ type udpProxyConn struct {
 
 const maxSeenTargets = 64
 
+// SOCKS5 UDP associations have no protocol heartbeat; the TCP control channel
+// can stay ESTABLISHED forever while the client sends no datagrams. Reclaim
+// idle associations so their UDP socket and TCP control connection are freed.
+const (
+	socks5UDPIdleTimeout = 5 * time.Minute
+	socks5UDPIdlePoll    = 30 * time.Second
+)
+
 // socks5UDPRelay handles UDP packet forwarding for a single SOCKS5 UDP ASSOCIATE session.
 // It routes client packets through proxy chains based on db.ResolveMatch.
 type socks5UDPRelay struct {
@@ -335,6 +345,10 @@ type socks5UDPRelay struct {
 	// datagram binds this relay as the endpoint's return writer).
 	legMu     sync.Mutex
 	legUnbind func()
+
+	// lastActive is refreshed by client datagrams and downstream replies; the
+	// idle watchdog closes the association after socks5UDPIdleTimeout.
+	lastActive atomic.Int64
 }
 
 type earlyReply struct {
@@ -343,6 +357,27 @@ type earlyReply struct {
 }
 
 const maxEarlyReplies = 128
+
+func (r *socks5UDPRelay) touch() { r.lastActive.Store(time.Now().UnixNano()) }
+
+func (r *socks5UDPRelay) idleWatch() {
+	ticker := time.NewTicker(socks5UDPIdlePoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.closed:
+			return
+		case <-ticker.C:
+			last := r.lastActive.Load()
+			if last != 0 && time.Since(time.Unix(0, last)) > socks5UDPIdleTimeout {
+				util.LogModuleInfo("socks5", "[%s] [%s] UDP ASSOCIATE idle for %v, closing",
+					r.mapping.Name, r.clientConn.RemoteAddr(), socks5UDPIdleTimeout)
+				r.Close()
+				return
+			}
+		}
+	}
+}
 
 func (r *socks5UDPRelay) run() {
 	defer r.Close()
@@ -370,6 +405,7 @@ func (r *socks5UDPRelay) run() {
 			return
 		}
 
+		r.touch()
 		if n < 10 {
 			util.LogModuleWarn("socks5", "[%s] UDP client packet too short: n=%d from=%s", r.mapping.Name, n, srcAddr)
 			continue
@@ -573,6 +609,7 @@ func (r *socks5UDPRelay) proxyReadLoop(ctx context.Context, pc net.PacketConn, p
 			}
 			return
 		}
+		r.touch()
 		util.LogModuleDebug("socks5", "[%s] UDP reply from proxy %s: n=%d src=%s", r.mapping.Name, proxyName, n, srcAddr)
 		r.proxyMu.Lock()
 		if r.seenTargets.Put(srcAddr.String()) {
@@ -628,6 +665,7 @@ func (r *socks5UDPRelay) flushEarlyReplies() {
 	if len(early) == 0 || clientAddr == nil {
 		return
 	}
+	r.touch()
 
 	for _, er := range early {
 		header := buildSOCKS5UDPHeader(er.srcAddr)

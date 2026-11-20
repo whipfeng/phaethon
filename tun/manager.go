@@ -94,6 +94,12 @@ type Manager struct {
 	tunCloseCh chan struct{}  // TUN goroutine exit signal
 	tunWG      sync.WaitGroup // TUN goroutines (readLoop/writeLoop)
 
+	// readLoopDead is set when readLoop exits for any reason other than a
+	// requested stop (e.g. the adapter was detached underneath us). Without
+	// it IsTUNRunning() would keep reporting a healthy TUN while no packets
+	// are read, and the health loop would never recreate the device.
+	readLoopDead atomic.Bool
+
 	// packet counters for diagnostics
 	readPackets  atomic.Uint64
 	writePackets atomic.Uint64
@@ -424,6 +430,10 @@ func (e *Manager) MarkTUNDegraded(msg string) {
 	e.tunLastErr.Store(msg)
 }
 
+// TUNReadLoopDead reports whether the packet-read loop exited unexpectedly
+// while the manager still claims the TUN is running.
+func (e *Manager) TUNReadLoopDead() bool { return e.readLoopDead.Load() }
+
 const maxTUNLogs = 32
 
 func (e *Manager) logEvent(format string, args ...interface{}) {
@@ -680,6 +690,7 @@ func (e *Manager) StartTUN() (err error) {
 	// Start TUN-level goroutines
 	e.tunRunning = true
 	e.state = tunRunningState
+	e.readLoopDead.Store(false)
 	e.tunCloseCh = make(chan struct{})
 	e.meshWriteCh = make(chan []byte, 32768)
 	e.mu.Unlock()
@@ -923,8 +934,18 @@ func (e *Manager) readLoop() {
 	util.LogModuleInfo("tun", "[TUN-READ] readLoop started")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer e.tunWG.Done()
+	defer func() {
+		select {
+		case <-e.tunCloseCh:
+			// Requested stop (StopTUN/health loop): not a degradation.
+		default:
+			e.readLoopDead.Store(true)
+			util.LogModuleError("tun", "[TUN] read loop exited unexpectedly")
+		}
+		e.tunWG.Done()
+	}()
 	readBuf := make([]byte, 2048)
+	readErrs := 0
 	for {
 		select {
 		case <-e.tunCloseCh:
@@ -947,10 +968,24 @@ func (e *Manager) readLoop() {
 				if errors.Is(err, syscall.EAGAIN) {
 					continue
 				}
-				util.LogModuleWarn("tun", "tun: read error: %v", err)
+				// Back off on persistent errors instead of spinning, and give
+				// up after ~1s of consecutive failures so the health loop can
+				// recreate the device instead of reading from a dead fd forever.
+				readErrs++
+				if readErrs >= 20 {
+					util.LogModuleError("tun", "tun: read failed %d times in a row, stopping read loop: %v", readErrs, err)
+					return
+				}
+				util.LogModuleWarn("tun", "tun: read error %d/20: %v", readErrs, err)
+				select {
+				case <-e.tunCloseCh:
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
 				continue
 			}
 		}
+		readErrs = 0
 		if n == 0 {
 			continue
 		}

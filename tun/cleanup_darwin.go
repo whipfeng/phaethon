@@ -3,6 +3,7 @@
 package tun
 
 import (
+	"fmt"
 	"net"
 )
 
@@ -18,18 +19,20 @@ func CleanupResidual() {
 }
 
 // InterfaceExists reports whether the named utun interface is currently present.
-func InterfaceExists(name string) bool {
+// An enumeration error is reported as an error (never as absence), so a
+// transient failure cannot make the health loop tear down a healthy TUN.
+func InterfaceExists(name string) (bool, error) {
 	if name == "" {
-		return false
+		return false, nil
 	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("list interfaces: %w", err)
 	}
 	for _, iface := range ifaces {
 		if iface.Name == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

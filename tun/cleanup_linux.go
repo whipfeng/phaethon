@@ -4,6 +4,7 @@ package tun
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -103,18 +104,34 @@ func CleanupResidual() {
 }
 
 // InterfaceExists reports whether the named TUN interface is currently present.
-func InterfaceExists(name string) bool {
+//
+// The second result distinguishes "enumeration failed" from "genuinely absent".
+// Callers MUST NOT treat an error as absence: at RLIMIT_NOFILE the netlink
+// socket needed by net.Interfaces() cannot be created, and interpreting that
+// as "interface disappeared" made the health loop destroy a healthy TUN — the
+// second half of the QG TUN loss on 2026-11-20 (fd leak → EMFILE → false
+// negative → StopTUN → StartTUN fails → mesh-only). sysfs stat(2) needs no fd
+// and is therefore authoritative even under fd exhaustion.
+func InterfaceExists(name string) (bool, error) {
 	if name == "" {
-		return false
+		return false, nil
 	}
+	path := "/sys/class/net/" + name
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	// sysfs unavailable (unusual container) — fall back to enumeration, still
+	// propagating enumeration errors instead of reporting absence.
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("list interfaces: %w", err)
 	}
 	for _, iface := range ifaces {
 		if iface.Name == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

@@ -273,12 +273,31 @@ func tunHealthLoop(engine *tun.Manager) {
 			continue
 		}
 		if engine.IsTUNRunning() {
-			if name := engine.TUNDeviceName(); name != "" && tun.InterfaceExists(name) {
-				backoff = 2 * time.Second
-				continue
+			name := engine.TUNDeviceName()
+			reason := ""
+			switch {
+			case engine.TUNReadLoopDead():
+				reason = "TUN read loop exited at runtime"
+			case name == "":
+				reason = "TUN device handle lost at runtime"
+			default:
+				exists, err := tun.InterfaceExists(name)
+				if err != nil {
+					// Enumeration failure is NOT absence. At RLIMIT_NOFILE the
+					// netlink socket cannot be created; treating that as
+					// "interface gone" made the loop destroy a healthy TUN
+					// (QG 2026-11-20). Keep the device and re-check next tick.
+					util.LogModuleWarn("tun", "[TUN] interface check failed, keeping TUN: %v", err)
+					continue
+				}
+				if exists {
+					backoff = 2 * time.Second
+					continue
+				}
+				reason = "TUN interface disappeared at runtime"
 			}
-			engine.MarkTUNDegraded("TUN interface disappeared at runtime")
-			util.LogModuleError("tun", "[TUN] interface disappeared at runtime; recreating")
+			engine.MarkTUNDegraded(reason)
+			util.LogModuleError("tun", "[TUN] %s; recreating", reason)
 			if err := engine.StopTUN(); err != nil {
 				util.LogModuleError("tun", "[TUN] stop after disappearance failed: %v", err)
 			}

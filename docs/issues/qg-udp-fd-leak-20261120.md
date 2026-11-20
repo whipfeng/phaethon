@@ -61,6 +61,32 @@
   `TUN initialization failed` 改为 error，避免被全局 error 过滤。
 - 建议 QG OpenRC 启动前 `ulimit -n 65535` 作为兜底（运维项）。
 
+## 二阶故障：健康检查把 “fd 耗尽” 误判为 “TUN 接口消失”
+
+上面解释了 fd 为什么会被耗尽，但还差一环：**fd 耗尽只会让新的 TUN 建不起来，不应把已经在用的
+TUN 弄没**。追代码后确认这是 `tunHealthLoop` + `InterfaceExists` 的误判，属于代码自身缺陷，
+不依赖任何外部操作：
+
+1. `tunHealthLoop` 每 5s 调 `InterfaceExists(name)` 判断接口是否还在；
+2. Linux 旧实现用 `net.Interfaces()` 枚举，失败时**直接返回 false**；
+3. `net.Interfaces()` 内部要创建 netlink socket。进程 fd 打满（现场 4095/4095）时
+   `socket(AF_NETLINK)` 返回 `EMFILE`，枚举失败 → 返回 false；
+4. 健康循环把 false 当作“接口被删了”，调用 `StopTUN()` **主动关闭 TUN fd**（此时接口才真的消失），
+   随后 `StartTUN()` 又因 EMFILE 失败 → 节点停在 mesh-only，控制台显示 TUN 不可用。
+
+也就是说：**UDP 泄漏是弹药，健康检查的 `err != nil → false` 是扳机**。只要 fd 压力导致枚举
+失败一次，健康的 TUN 就会被健康循环自己拆掉，所以“没人动过也丢 TUN”完全成立。
+
+同类代码缺陷一并修正：
+
+| 缺陷 | 后果 | 修复 |
+|---|---|---|
+| `InterfaceExists` 把枚举失败当“不存在”（Linux/Darwin/Windows） | 压力下误删健康 TUN | 改为 `(bool, error)`；错误不再等于不存在 |
+| Linux 枚举依赖 netlink socket | fd 打满时必然枚举失败 | 主路径改用 `stat("/sys/class/net/<name>")`（不占 fd），枚举仅作 sysfs 缺失时兜底 |
+| Linux TUN fd 以阻塞方式打开 | 空闲时 `Close` 无法唤醒阻塞中的 `read(2)`，`StopTUN` 的 `tunWG.Wait()` 可永久挂起（admin 关 TUN 卡死） | 改用 `O_NONBLOCK` + `poll(200ms)`，读写期间用 RWMutex 保护 fd 不被复用；`Close` 置位后读写返回 `ErrSessionClosed` |
+| `readLoop` 非预期退出后 `tunRunning` 仍为 true | 状态显示正常但不再读包，健康循环永远不重建 | 新增 `readLoopDead` 标记，健康循环据此重建 |
+| `readLoop` 持续读错误时无退避 | 坏 fd 上空转刷日志 | 连续错误 50ms 退避，20 次后退出交给健康循环 |
+
 ## 验证
 
 - 单测/构建：`go build ./...`、`go test ./server ./handler` 通过；

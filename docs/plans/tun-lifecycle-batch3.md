@@ -19,6 +19,18 @@
 
 ## 2. 设计要点
 
+### 2.0 运行期健康检查语义（2026-11-20 补定）
+
+- `InterfaceExists(name) (bool, error)`：`error` 表示“无法判断”，调用方**不得**当作不存在；
+  只有明确的 `false, nil` 才允许触发重建。历史缺陷是枚举失败返回 false，fd 耗尽时健康循环
+  因此亲手拆掉了健康的 TUN（QG 2026-11-20，详见 `issues/qg-udp-fd-leak-20261120.md`）。
+- Linux 存在性判定优先用 `stat("/sys/class/net/<name>")`，不占用 fd，fd 打满时仍然可靠；
+  `net.Interfaces()` 仅作 sysfs 不可用时的兜底，并向上传播枚举错误。
+- `readLoop` 非预期退出 → `readLoopDead` 置位，健康循环据此重建；正常 `StopTUN` 关闭
+  通道退出不置位。
+- Linux TUN fd 非阻塞打开（`O_NONBLOCK`），空闲时用 200ms `poll` 等待，使 `Close` 能及时
+  唤醒读写循环；读写 syscall 由 RWMutex 保护，避免 close 后 fd 号复用被误读。
+
 ### 2.1 状态机（D8）
 
 - 状态：`Idle / Starting / Running / Stopping`。

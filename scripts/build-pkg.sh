@@ -85,12 +85,15 @@ else
         exit 1
     fi
 
-    # Use Go to sign and create pkg
+    # Use Go to sign and create pkg. Pass -version explicitly: cross-compiled
+    # binaries cannot be executed here, and `strings` may not be installed on
+    # Windows build hosts.
     echo "Signing package..."
     go run "$SCRIPT_DIR/../pkg/signing/cmd/sign/main.go" \
         -binary "dist/$DIST_DIR/$OUTPUT_NAME" \
         -meta "$META_FILE" \
         -key "$PHAETHON_SIGNING_KEY" \
+        -version "$VERSION" \
         -output "dist/$DIST_DIR/phaethon_${PLATFORM}_${ARCH}_${VERSION}.pkg"
 
     echo "Created signed package: dist/$DIST_DIR/phaethon_${PLATFORM}_${ARCH}_${VERSION}.pkg"

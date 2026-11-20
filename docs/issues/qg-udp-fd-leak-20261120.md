@@ -72,7 +72,8 @@
 ## 部署记录（2026-11-20）
 
 - 先灰度 QG：`v0.8.3-32-ge0303e2` upload+activate 成功；
-- 升级后 `tun0` 在、fd 27、UDP socket 0，`/api/tun` 正常；
-- 待观察 fd/UDP 不随空闲流量增长后，再扩散到其余 Linux 节点/全部节点；
-- 建议 QG 的 OpenRC 启动前加 `ulimit -n 65535` 作为兜底。
+- 随后全量扩散：9 节点全部 `v0.8.3-34-g312a646`、`status=succeeded`；
+- QG 现状：`tun0` 在、fd 143、UDP socket 0，`/api/tun` 正常；拓扑 9 节点/22 条边；
+- 待观察 fd/UDP 不随空闲流量增长（重点看 `ss -uanp | grep phaethon | wc -l`）；
+- 建议 QG 的 OpenRC 启动前加 `ulimit -n 65535` 作为兜底（当前进程仍是 4095 软限制）。
 

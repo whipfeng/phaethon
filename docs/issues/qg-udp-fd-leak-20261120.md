@@ -87,6 +87,18 @@ TUN 弄没**。追代码后确认这是 `tunHealthLoop` + `InterfaceExists` 的�
 | `readLoop` 非预期退出后 `tunRunning` 仍为 true | 状态显示正常但不再读包，健康循环永远不重建 | 新增 `readLoopDead` 标记，健康循环据此重建 |
 | `readLoop` 持续读错误时无退避 | 坏 fd 上空转刷日志 | 连续错误 50ms 退避，20 次后退出交给健康循环 |
 
+### 为什么频繁重启 TUN 时旁路网关还能工作
+
+临界期健康循环会成对执行 `StopTUN`/`StartTUN`，但 LAN 只感到短暂卡顿而不是断网：
+
+- `StopTUN` 只停主机侧 TUN、路由和系统 DNS，**gVisor netstack / mesh / P2P / DNS hijacker
+  都不重启**，已建立的 TCP 流和 SNAT 状态保留；
+- `StartTUN` 秒级重建（Linux 重新申请同一个 tun0、重装 /29 地址与排除路由），丢包由 TCP 重传覆盖；
+- 健康检查周期 5s，最坏每 5s 抽一下；
+- 更关键的是它形成了“泄压阀”：`StopTUN` 释放 TUN fd 和 exec 临时 fd，紧接着的 `StartTUN`
+  又能挤进 fd 限额，于是“拆掉→重建→恢复”成立，泄漏被掩盖；直到 `StartTUN` 需要的一组
+  fd 都凑不齐才永久失败。修复后枚举失败不再触发 StopTUN，这类无谓抖动消失。
+
 ## 验证
 
 - 单测/构建：`go build ./...`、`go test ./server ./handler` 通过；
@@ -104,4 +116,19 @@ TUN 弄没**。追代码后确认这是 `tunHealthLoop` + `InterfaceExists` 的�
 - QG 现状：`tun0` 在、fd 143、UDP socket 0，`/api/tun` 正常；拓扑 9 节点/22 条边；
 - 待观察 fd/UDP 不随空闲流量增长（重点看 `ss -uanp | grep phaethon | wc -l`）；
 - 建议 QG 的 OpenRC 启动前加 `ulimit -n 65535` 作为兜底（当前进程仍是 4095 软限制）。
+
+## 部署记录：TUN 健康检查修复（2026-11-20 13:00）
+
+- 版本：`v0.8.3-38-gff94ac8`（含二阶修复；`build-pkg.sh` 交叉编译显式传 `-version`）；
+- 通过控制台 upload+activate 自替换：vm/qg/jf/mb/ms9/ms10/qgw/deskzq，全部
+  `/api/packages/pin` = `current=v0.8.3-38-gff94ac8, status=succeeded`；
+- gg：从 VM 到 `gg.phn:39998` 的 admin TLS 握手失败（重启后依旧，属于既有路径问题），
+  改走 OS SSH（`layer4@loc.gg.phn`）直接替换稳定路径二进制，`--version` 与
+  `P2PManager initialized` 均为 `v0.8.3-38-gff94ac8`；
+- deskw：不在当前 mesh 拓扑（9 节点不含 deskw），本次跳过；
+- 部署后拓扑 9 节点 / 22 条边完整（vm↔gg、gg↔jf/mb/ms9/ms10 均在）；
+- QG 现状：`/api/tun` 为 `available=true, enabled=true, running=true, degraded=false`,
+  `tun0` 在读包（重启后 `readPackets≈12 万`）；worker fd 67、watchdog fd 140、
+  UDP socket 10；`logs` 仅 `gVisor netstack started` / `TUN device started on tun0`，
+  无重启循环、无 `interface check failed`。
 

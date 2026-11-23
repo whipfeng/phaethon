@@ -52,8 +52,10 @@
 **已排除**：
 - [x] mesh 路径带宽：QG 同窗发起 1.0-1.2MB/s 稳定（10:45 实测）
 - [x] elephant 服务端：deskw LAN 侧秒回；服务端带 gzip（2.1MB→245KB，8.7×）
-- [x] lane 机制故障：11:30 起日志可见，warm2 keeper 正常（秒级补齐 WS lane），
-      5min idle 回收→秒级热身，稳态振荡 2↔1↔2，属设计行为
+- [x] lane 机制：11:30 起日志可见，warm2 keeper 正常（秒级补齐 WS lane）；
+      当时把“5min idle 回收→秒级热身”的 2↔1↔2 振荡判为设计行为，**实为缺陷**
+      （warm lane 被 idle 老化误伤 + `clearSince` 未重置），已由 610339f 修复，
+      详见 `p2p-warm-lane-churn-20261123.md`
 - [x] 当前建连：15/15 探测 0.24-0.65s 无停顿；完整首屏 20 资源 6 并发
       **2.3s**（gzip 后仅 ~700KB 传输量）；90s 双通道探测 mesh 无劣化
 **候选成因（按证据强度）**：

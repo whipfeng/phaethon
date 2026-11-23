@@ -151,8 +151,13 @@ v0.8.3-38 全量扩散时 deskw 离线被跳过；11-23 08:01 deskw 上线后补
    （**显式设 `CurrentDirectory`**——`dataDir` 取自 `os.Getwd()`，计划任务默认
    System32 cwd 会导致新建空库丢配置），先用无害写文件任务验证 SSH 断开后
    仍会执行，再注册 08:45 重启任务、08:44:03 杀进程；
-5. 实际生效的是**用户 08:47:42 手动双击重启**：08:45 任务实例与手动启动发生
-   实例锁冲突（用户看到的报错即此，无害）；最终状态正确。
+5. **重启任务失败，实际生效的是用户 08:47:42 手动双击重启**。失败根因（Task
+   Scheduler 事件实锤，Id=201）：在 PowerShell 里用 cmd 风格 `\"` 转义 `/tr`
+   的引号——PS 5.1 不认 `\"`，字符串在 `\"` 处截断，动作被拼成
+   `wscript.exe \C:\...\start-phaethon.vbs`（路径前多一个 `\`），wscript 返回
+   `2147942401`（0x80070001 ERROR_INVALID_FUNCTION）并**弹模态错误框**，08:45:00
+   挂到用户 08:47:39 点掉，随后手动双击启动。任务实例从未启动 phaethon
+   （`phaethon-stdout.log` 不存在佐证 vbs 未执行）。
 
 **验收**：`/api/packages/pin` = `v0.8.3-39-g74035b2, status=idle, lastError=""`；
 watchdog+worker 两进程均在稳定路径（新架构"worker 恒用稳定路径"生效）；主日志
@@ -165,4 +170,8 @@ mesh 身份不变（100.159.0.10），deskw↔jf 边双向恢复；内置 SSH/mT
 curl 报 exit 6，用 `curl --resolve deskw.phn:443:100.159.0.10` 绕过；② Windows
 节点从计划任务/wscript 启动必须在 vbs 里显式 `CurrentDirectory`，否则 data
 目录会落到 cwd 下；③ 运行中的 exe 可以 rename 但不能 overwrite，稳定路径
-替换用 rename+copy 即可在线暂存，零停机窗口留给最后重启。
+替换用 rename+copy 即可在线暂存，零停机窗口留给最后重启；④ **PS 里给
+`schtasks /tr` 传带引号动作时不能用 cmd 风格 `\"`**（PS 5.1 会截断字符串并
+残留杂散 `\`，wscript 弹模态错误框挂到人工点掉）；无空格路径干脆不加引号，
+或用 PS 转义 `` `" ``，并用 TaskScheduler 事件 Id=201 的返回码验收动作真的
+执行成功。

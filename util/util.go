@@ -247,6 +247,13 @@ func init() {
 	// disappeared, recreate failed, EMFILE); keep them visible even when the
 	// global level is error. PHAETHON_LOG_MODULES can still override this.
 	moduleLogLevels["tun"] = LogLevelWarn
+	// Mesh lane lifecycle and h_tunnel carrier events are the primary
+	// diagnostics for transfer/stall incidents (lane warm/remove cycles, WS
+	// establishment, HTTP fallback). They are low-volume (a few lines per
+	// minute per peer) and invisible at the global error default, which left
+	// degradation windows undiagnosable (2026-11-23 deskw incident).
+	moduleLogLevels["p2p"] = LogLevelInfo
+	moduleLogLevels["htunnel"] = LogLevelInfo
 }
 
 // SetModuleLogLevel sets the log level for a specific module.

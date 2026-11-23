@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/UserExistsError/conpty"
 	"golang.org/x/sys/windows"
@@ -37,6 +39,12 @@ func ptyAvailable() bool {
 type conptyProc struct {
 	cpty *conpty.ConPty
 	pid  int
+
+	// mu guards closed: conpty.ConPty.Close() must run exactly once. Calling it
+	// twice (CloseIO in the grace path, then the deferred Kill) corrupts the
+	// heap inside the library and takes the whole worker down.
+	mu     sync.Mutex
+	closed bool
 }
 
 type exitCodeError struct{ code uint32 }
@@ -50,7 +58,21 @@ func (p *conptyProc) CloseStdin()                 {}
 
 // CloseIO closes the pseudoconsole so a Read blocked after the shell exited
 // returns. ConPTY keeps the output pipe open while the object is alive.
-func (p *conptyProc) CloseIO() { _ = p.cpty.Close() }
+func (p *conptyProc) CloseIO() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closeLocked()
+}
+
+// closeLocked closes the pseudoconsole at most once. Callers must hold p.mu.
+func (p *conptyProc) closeLocked() {
+	if p.closed {
+		return
+	}
+	p.closed = true
+	_ = p.cpty.Close()
+}
+
 func (p *conptyProc) Resize(cols, rows uint32) {
 	_ = p.cpty.Resize(int(cols), int(rows))
 }
@@ -67,12 +89,19 @@ func (p *conptyProc) Wait() error {
 }
 
 func (p *conptyProc) Kill() {
-	// ConPTY 无 kill API：按 PID 终止进程后关闭伪控制台。
-	if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(p.pid)); err == nil {
-		_ = windows.TerminateProcess(h, 1)
-		_ = windows.CloseHandle(h)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// ClosePseudoConsole already terminates the attached shell. After the pty
+	// was closed, this PID may already belong to an unrelated process, so never
+	// terminate by a recycled PID.
+	if !p.closed {
+		// ConPTY 无 kill API：按 PID 终止进程后关闭伪控制台。
+		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(p.pid)); err == nil {
+			_ = windows.TerminateProcess(h, 1)
+			_ = windows.CloseHandle(h)
+		}
 	}
-	_ = p.cpty.Close()
+	p.closeLocked()
 }
 
 type pipeProc struct {
@@ -89,13 +118,21 @@ func (p *pipeProc) CloseStdin()                 { p.stdin.Close() }
 func (p *pipeProc) CloseIO()                    { p.stdout.Close() }
 func (p *pipeProc) Resize(cols, rows uint32)    {}
 
-// autoDetectShell 返回系统自动探测的 shell：pwsh（PowerShell 7，装了优先）→
-// powershell（仅当 Win10+ 或检测到 PowerShell 3+）→ cmd.exe。
+// autoDetectShell 返回系统自动探测的 shell：Git Bash（POSIX）→ pwsh
+// （PowerShell 7，装了优先）→ powershell（仅当 Win10+ 或检测到 PowerShell 3+）
+// → cmd.exe。
+//
+// Git Bash 排在最前：msys2 的 bash 是真正的 POSIX 交互 shell，在 ConPTY 与
+// winpty 下都有稳定的输入回显循环，且原生 UTF-8（无需 chcp 注入）。Windows
+// OpenSSH 的 DefaultShell 配成 Git Bash 时，系统 ssh 与内置 ssh 的行为就一致。
 //
 // Win7/8 只有 PowerShell 2.0 时跳过 powershell：PS2 的 ConsoleHost 在 winpty
 // 下无法交互，而 cmd.exe + winpty 已验证可用。用户显式指定的 shell 不受此
 // 自动探测影响。
 func autoDetectShell() string {
+	if path := detectGitBash(); path != "" {
+		return path
+	}
 	if path, err := exec.LookPath("pwsh"); err == nil {
 		return path
 	}
@@ -111,6 +148,49 @@ func autoDetectShell() string {
 		return sh
 	}
 	return "cmd.exe"
+}
+
+// detectGitBash 返回 Git for Windows 安装目录下的 bash.exe，找不到返回空串。
+//
+// 依次探测：官方安装器写入的注册表 InstallPath（HKLM/HKCU）→ 常见安装目录 →
+// PATH。PATH 上的 System32\bash.exe 是 WSL 启动器（拉起 Linux shell），不是
+// Git Bash，需排除。
+func detectGitBash() string {
+	var candidates []string
+	for _, root := range []registry.Key{registry.LOCAL_MACHINE, registry.CURRENT_USER} {
+		k, err := registry.OpenKey(root, `SOFTWARE\GitForWindows`, registry.QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		if install, _, err := k.GetStringValue("InstallPath"); err == nil && install != "" {
+			candidates = append(candidates, filepath.Join(install, "bin", "bash.exe"))
+		}
+		_ = k.Close()
+	}
+	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"} {
+		if dir := os.Getenv(env); dir != "" {
+			candidates = append(candidates, filepath.Join(dir, "Git", "bin", "bash.exe"))
+		}
+	}
+	if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+		// 用户级安装（安装器默认不勾选“仅为我安装”，但仍可能被选中）。
+		candidates = append(candidates, filepath.Join(dir, "Programs", "Git", "bin", "bash.exe"))
+	}
+	if path, err := exec.LookPath("bash"); err == nil && !isWSLBash(path) {
+		candidates = append(candidates, path)
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// isWSLBash reports whether path is the System32 WSL bash launcher, which
+// starts a Linux shell rather than Git Bash.
+func isWSLBash(path string) bool {
+	return strings.Contains(strings.ToLower(filepath.ToSlash(path)), "/windows/system32/")
 }
 
 // hasPowerShell3Plus checks the WMF 3+ engine key. On Win7, powershell.exe

@@ -100,6 +100,8 @@ var (
 	stripeLaneMinProbes      = uint64(8)              // degradation gate: min samples
 	stripeLaneBadLoss        = 0.5                    // degradation gate: loss rate
 	stripeLaneBadSRTT        = time.Second            // degradation gate: srtt
+	stripePinEscapeFloor     = 0.30                   // pin escape: currentWeight below this = degraded
+	stripePinEscapeAfter     = 5 * time.Second        // pin escape: degraded this long → flow re-resolves
 )
 
 // stripeLaneStallLimit is the max time a lane may go without a probe pong
@@ -183,6 +185,11 @@ func (l *stripeLane) close() {
 type affinityPin struct {
 	lane *stripeLane // nil = primary carrier
 	seen int64       // unix nano of the last frame
+	// degradedSince stamps sustained degradation of the pinned lane for the
+	// pin-health escape (0 = healthy): the first frame observing currentWeight
+	// < stripePinEscapeFloor writes it, and after stripePinEscapeAfter the pin
+	// is dropped so the flow re-resolves. Weight recovery clears it.
+	degradedSince int64
 }
 
 type stripeTransport struct {
@@ -270,6 +277,10 @@ type stripeTransport struct {
 	// laneQueueDrops counts batches dropped because a lane queue was full and
 	// the flow must stay pinned to preserve ordering.
 	laneQueueDrops atomic.Uint64
+	// pinEscapes counts pin-health escapes: flows re-resolved because their
+	// pinned lane stayed below stripePinEscapeFloor weight for
+	// stripePinEscapeAfter (§3.6 guard, see pickLanePinned).
+	pinEscapes atomic.Uint64
 	// readQueueDrops counts inbound data frames tail-dropped because the
 	// session dispatch queue was full (the carrier socket keeps draining).
 	readQueueDrops atomic.Uint64
@@ -475,6 +486,24 @@ func (t *stripeTransport) pickLane(key uint32, lanes []*stripeLane) *stripeLane 
 	return best
 }
 
+// pickLaneAvoiding re-resolves a flow excluding one lane (pin escape).
+// Rendezvous already down-weights degraded candidates, but the just-escaped
+// lane is excluded outright so a healthier sibling wins. Falls back to the
+// full pick when exclusion empties the set: re-pinning the degraded lane is
+// ordering-neutral (same destination) and merely restarts the escape timer.
+func (t *stripeTransport) pickLaneAvoiding(key uint32, lanes []*stripeLane, avoid *stripeLane) *stripeLane {
+	var filtered []*stripeLane
+	for _, l := range lanes {
+		if l != avoid {
+			filtered = append(filtered, l)
+		}
+	}
+	if len(filtered) == 0 {
+		return t.pickLane(key, lanes)
+	}
+	return t.pickLane(key, filtered)
+}
+
 // pickLanePinned resolves the outbound lane for one splittable frame using
 // the sticky affinity table (§3.6): a flow's binding survives probe-weight
 // drift; only lane set changes (attach/remove → table dropped) re-map flows.
@@ -502,6 +531,47 @@ func (t *stripeTransport) pickLanePinned(payload []byte, lanes []*stripeLane) *s
 			}
 		}
 		if stillThere {
+			// Pin health escape (§3.6 guard): weight drift alone never remaps
+			// a live flow, but a lane that stays degraded (currentWeight
+			// < stripePinEscapeFloor, i.e. srtt ≳3× its own baseline or heavy
+			// probe loss) for stripePinEscapeAfter lets the flow re-resolve
+			// once — the same accepted transient as a lane-set rehash, but
+			// per-flow and gated on sustained degradation, so ordering is the
+			// default and escape the exception. Without this, a flow pinned
+			// during a lane's bad period stays slow for its whole lifetime
+			// (elephant 2026-11-23, candidate 2).
+			w := e.lane.currentWeight()
+			if w < stripePinEscapeFloor {
+				if e.degradedSince == 0 {
+					e.degradedSince = now
+				} else if now-e.degradedSince >= stripePinEscapeAfter.Nanoseconds() {
+					delete(t.affinity, key)
+					t.bumpPinLocked(e.lane, -1)
+					t.pinEscapes.Add(1)
+					util.LogModuleInfo("p2p", "[STRIPE] pin escape: lane %d weight %.2f degraded ≥%v, flow re-resolves (escapes=%d)",
+						e.lane.id, w, stripePinEscapeAfter, t.pinEscapes.Load())
+					t.mu.Unlock()
+					l := t.pickLaneAvoiding(key, lanes, e.lane)
+					t.mu.Lock()
+					if existing, ok := t.affinity[key]; ok {
+						existing.seen = now
+						t.affinity[key] = existing
+						t.mu.Unlock()
+						return existing.lane
+					}
+					if len(t.affinity) >= stripeAffinityCap {
+						t.resetPinsLocked()
+					}
+					t.affinity[key] = affinityPin{lane: l, seen: now}
+					t.bumpPinLocked(l, 1)
+					t.mu.Unlock()
+					return l
+				}
+			} else if e.degradedSince != 0 {
+				// Weight recovered before the window elapsed: clear the stamp
+				// so a transient spike never escapes a pinned flow.
+				e.degradedSince = 0
+			}
 			e.seen = now
 			t.affinity[key] = e
 			t.mu.Unlock()

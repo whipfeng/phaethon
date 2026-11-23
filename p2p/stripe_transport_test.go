@@ -1274,3 +1274,109 @@ func TestStripeBlockedPrimaryDoesNotBlockLane(t *testing.T) {
 		t.Fatal("lane send blocked behind a stalled primary writer")
 	}
 }
+
+
+// TestStripePinEscapesAfterSustainedDegradation (§3.6 guard): a pinned flow
+// survives weight drift, but a lane that stays degraded for
+// stripePinEscapeAfter must release the pin so the flow re-resolves onto a
+// healthier candidate — the protection against "pinned to a bad lane for the
+// flow's lifetime" (elephant 2026-11-23, candidate 2).
+func TestStripePinEscapesAfterSustainedDegradation(t *testing.T) {
+	oldFloor, oldAfter := stripePinEscapeFloor, stripePinEscapeAfter
+	stripePinEscapeAfter = 50 * time.Millisecond
+	defer func() { stripePinEscapeFloor, stripePinEscapeAfter = oldFloor, oldAfter }()
+
+	tr, lanes := stripeTestWrapper(t, 2)
+	l1, l2 := lanes[0], lanes[1]
+
+	var flowPayload []byte
+	for i := 0; i < 100000; i++ {
+		p := synthTCPFlow(i)
+		if tr.pickLanePinned(p, lanes) == l1 {
+			flowPayload = p
+			break
+		}
+	}
+	if flowPayload == nil {
+		t.Fatal("no flow landed on l1")
+	}
+
+	// Poison l1 relative to its own baseline: weight = 1/(1+99) ≈ 0.01 < floor.
+	l1.probe.mu.Lock()
+	l1.probe.srtt = 500 * time.Millisecond
+	l1.probe.srttBase = 5 * time.Millisecond
+	l1.probe.mu.Unlock()
+
+	// First degraded frame stamps degradedSince; the pin must hold.
+	if got := tr.pickLanePinned(flowPayload, lanes); got != l1 {
+		t.Fatalf("first degraded frame re-mapped to %v (want l1=%d)", got, l1.id)
+	}
+	time.Sleep(80 * time.Millisecond) // > stripePinEscapeAfter
+
+	got := tr.pickLanePinned(flowPayload, lanes)
+	if got == l1 {
+		t.Fatal("flow stayed pinned to degraded lane after the sustain window (escape did not fire)")
+	}
+	if got != nil && got != l2 {
+		t.Fatalf("escaped flow landed on unknown lane %v (want nil or l2=%d)", got, l2.id)
+	}
+	if tr.pinEscapes.Load() != 1 {
+		t.Fatalf("pinEscapes = %d, want 1", tr.pinEscapes.Load())
+	}
+
+	// The new binding is sticky again: immediate re-picks must not move.
+	for i := 0; i < 4; i++ {
+		if again := tr.pickLanePinned(flowPayload, lanes); again != got {
+			t.Fatalf("post-escape re-pick moved flow %v → %v", got, again)
+		}
+	}
+}
+
+// TestStripePinEscapeRecoversOnWeightRestore: weight recovery before the
+// sustain window clears degradedSince, so a transient spike never escapes a
+// pinned flow — ordering preservation stays the default, escape the exception.
+func TestStripePinEscapeRecoversOnWeightRestore(t *testing.T) {
+	oldAfter := stripePinEscapeAfter
+	stripePinEscapeAfter = 60 * time.Millisecond
+	defer func() { stripePinEscapeAfter = oldAfter }()
+
+	tr, lanes := stripeTestWrapper(t, 2)
+	l1, _ := lanes[0], lanes[1]
+
+	var flowPayload []byte
+	for i := 0; i < 100000; i++ {
+		p := synthTCPFlow(i)
+		if tr.pickLanePinned(p, lanes) == l1 {
+			flowPayload = p
+			break
+		}
+	}
+	if flowPayload == nil {
+		t.Fatal("no flow landed on l1")
+	}
+
+	l1.probe.mu.Lock()
+	l1.probe.srtt = 500 * time.Millisecond
+	l1.probe.srttBase = 5 * time.Millisecond
+	l1.probe.mu.Unlock()
+	if got := tr.pickLanePinned(flowPayload, lanes); got != l1 {
+		t.Fatalf("first degraded frame re-mapped to %v (want l1=%d)", got, l1.id)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// Recover before the window elapses.
+	l1.probe.mu.Lock()
+	l1.probe.srtt = 5 * time.Millisecond
+	l1.probe.srttBase = 5 * time.Millisecond
+	l1.probe.mu.Unlock()
+	time.Sleep(50 * time.Millisecond) // total since stamp > window; timer was cleared though
+
+	for i := 0; i < 4; i++ {
+		if got := tr.pickLanePinned(flowPayload, lanes); got != l1 {
+			t.Fatalf("recovered lane escaped pin: flow moved to %v (want l1=%d)", got, l1.id)
+		}
+	}
+	if tr.pinEscapes.Load() != 0 {
+		t.Fatalf("pinEscapes = %d, want 0 (recovery must reset the escape timer)", tr.pinEscapes.Load())
+	}
+}

@@ -98,6 +98,37 @@
 TCP/TLS/TTFB 哪段；（2）抓 QG eth1；（3）查 deskw/jf 的 p2p/htunnel 日志
 （新默认可见）——三步即可定位，不再有取证盲区。
 
+## 代码深挖：候选 2 的核实与防护（2026-11-23 下午）
+
+对 `p2p/stripe_transport.go` 钉住机制逐行核实后的结论：
+
+1. **原表述"冷窗口内新流被钉到 primary"在代码里已有兜底，不会跨窗口持续**：
+   - `Send` 在 `len(lanes)==0` 时直接走 primary 且**不建 pin**（短路在
+     `pickLanePinned` 之前），lane 存在时新流才可能建 pin；
+   - lane attach 与 remove 都触发 `dropAffinity()` 全量清表，keeper 秒级补齐
+     lane 后所有流在下一帧重新打散（11:30 起日志已证实 warm2 秒级补齐）。
+2. **快照竞态自愈**：`snapshotLanes` → `pickLanePinned` 之间 lane 被删的窗口，
+   命中路径有成员复查（defensive re-check），`Send` 对死 lane 有
+   laneFallback→primary 兜底，孤儿 pin 计数在下一帧自校正——无需修复。
+3. **真正的缺口**：活流钉在"**活着但劣化**"的 lane 上永不迁移。设计上保序
+   优先，逃生口只有 lane 死亡 / 30s idle TTL / 65536 容量重置三类。长活流
+   （dashboard SSE、长下载）赶上劣化期会持续慢——这才是"赶上劣化期则持续慢"
+   的准确机制，比冷窗口理论更符合观测。
+4. **已实现防护（pin health escape）**：pinned lane 的 `currentWeight` 低于
+   `stripePinEscapeFloor=0.30`（约 srtt ≥3× 自身滑动基线，或重丢包）**持续
+   ≥ `stripePinEscapeAfter=5s`** 时，该流做一次帧边界重解析并避开劣化 lane
+   （`pickLaneAvoiding`）；`pinEscapes` 计数器 + INFO 日志可观测（随
+   d8067a0 默认 info 生效）。保序仍是默认：恢复快于窗口的瞬时尖峰不清零
+   不迁移（`degradedSince` 恢复即清零，计时重启）；重解析与 lane-set rehash
+   同级，属已接受的瞬态。primary 钉住不在此防护内（primary 无探针，其拥塞
+   由 controller 加 lane + 30s janitor 覆盖）。
+5. 测试：`TestStripePinEscapesAfterSustainedDegradation`（劣化超窗触发、
+   计数=1、新绑定稳定）、`TestStripePinEscapeRecoversOnWeightRestore`
+   （窗口内恢复则计时清零、永不迁移）；`go test ./p2p` 全绿。
+
 ## 更新日志
 
 - 2026-11-23：初版。隔离矩阵 + 抓包（QG eth1）+ 同时间窗对照完成。
+- 2026-11-23：候选 2 代码深挖收口——冷窗口钉 primary 已有兜底不成立；真缺口
+  是活流钉死在劣化 lane；实现 pin health escape（5s 持续劣化单次重解析）并补
+  双测试。

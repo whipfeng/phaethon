@@ -432,3 +432,30 @@ func SaveRuleConfiguration(path string, conf *RuleConfiguration) error {
 - [Go http.Server.Serve 文档](https://pkg.go.dev/net/http#Server.Serve)
 - [Go net.Listener 接口](https://pkg.go.dev/net#Listener)
 - 项目文档：`docs/plans/mesh_multi_vip_design.md`
+
+## 7. 2026-11-23 落地与验证
+
+**代码提交**：`d94c21f`（feat(admin,ssh): 内建直通 console 强制认证并收敛 443，SSH 编码改启动参数）
+
+实现要点：
+
+- `ServeConn`（进程内直通）使用独立的 `builtinServer` + `builtinDirectHandler` 注入
+  context 标记；`authRequired = AuthEnabled || isBuiltinDirect(r)`，`AuthEnabled=false`
+  时 OS 监听保持免认证，直通路径仍强制认证。
+- 公开路径（登录/验证码/静态资源/包分发）在直通路径上仍放行，其余全部要求认证。
+- `handler` 端口分发只保留 22（内置 SSH）与 443（内置 console）走进程内；
+  39999 及其他端口一律回落到目标节点本机 OS 栈，admin 端口保持可配置。
+- Windows 内置 SSH 交互式 shell 的 UTF-8 改为启动参数（cmd `/k chcp 65001`、
+  PowerShell `-NoLogo -NoExit -Command ...`），不再向 PTY 注入 chcp 行；未知程序
+  不追加任何参数。
+
+**验证**：
+
+- `go build ./...` 通过；`go test -count=1 ./admin/ ./server/` 通过。
+- 全量在线节点（8/9，deskzq 当前离线）已升级至 `v0.8.3-53-gd94c21f`，升级状态均为
+  `succeeded`。
+- 443 直通：登录页 200，受保护 `/api/system/info` 在 `AuthEnabled=false` 下仍返回 401。
+- 内置 SSH：deskw/qgw 交互式会话输出为原生 UTF-8，不再出现 chcp 注入回显。
+- 拓扑：9 节点、22 条双向边，无缺边。
+- 遗留：deskzq 为 Windows 桌面节点（仅有内置 SSH），离线后需在桌面/登录 Startup
+  启动，恢复上线后再补发同一版本。

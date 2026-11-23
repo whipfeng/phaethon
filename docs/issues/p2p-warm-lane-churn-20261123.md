@@ -67,8 +67,9 @@
 
 ## 相关事件
 
-- 2026-11-23 13:57 qgw 宿主意外硬复位，qg（qgw 上的 VirtualBox VM）随之中断；
-  已排除 phaethon 崩溃，取证见 `host-hard-reset-qg-qgw-20261123.md`。
+- 2026-11-23 13:57 qgw 宿主卡死无响应，用户手动按物理开关断电，qg（qgw 上的
+  VirtualBox VM）随之中断；已排除 phaethon 崩溃，取证见
+  `host-hard-reset-qg-qgw-20261123.md`。
 
 ## 经验
 

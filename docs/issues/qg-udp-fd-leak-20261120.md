@@ -132,3 +132,37 @@ TUN 弄没**。追代码后确认这是 `tunHealthLoop` + `InterfaceExists` 的�
   UDP socket 10；`logs` 仅 `gVisor netstack started` / `TUN device started on tun0`，
   无重启循环、无 `interface check failed`。
 
+
+## 部署记录：deskw 补部署引导（2026-11-23）
+
+v0.8.3-38 全量扩散时 deskw 离线被跳过；11-23 08:01 deskw 上线后补部署到
+`v0.8.3-39-g74035b2`（含 14aa3d1 TUN 日志级别修复）。**deskw 原为 v0.8.0-653
+（< 664，watchdog 不识别 upgrade-request），不能走 upload+activate，按 5.2 引导
+部署改为稳定路径直接替换**：
+
+1. 证书本地化：`client-all.crt/key` 从 QG `/root/` 取回本地 `~/.phaethon-certs/`
+   （0600，仓库外），本地 mesh DNS 可直连 `deskw.phn` 的 admin/内置 SSH；
+2. 构建签名包并 upload（进 pending，不影响运行版本），包/解压后二进制哈希与
+   本地构建一致（`79de6581...9039`）；
+3. 内置 SSH（本机 id_rsa 已注册为 `VM-rsa-cmll`，免加临时钥匙）执行暂存：
+   `phaethon.exe`(653) → rename `phaethon.old.exe`（运行中 exe 可改名不可覆盖），
+   新二进制复制到稳定路径；
+4. 重启按 11-19 纪律走"验证过的一次性计划任务"：写 `start-phaethon.vbs`
+   （**显式设 `CurrentDirectory`**——`dataDir` 取自 `os.Getwd()`，计划任务默认
+   System32 cwd 会导致新建空库丢配置），先用无害写文件任务验证 SSH 断开后
+   仍会执行，再注册 08:45 重启任务、08:44:03 杀进程；
+5. 实际生效的是**用户 08:47:42 手动双击重启**：08:45 任务实例与手动启动发生
+   实例锁冲突（用户看到的报错即此，无害）；最终状态正确。
+
+**验收**：`/api/packages/pin` = `v0.8.3-39-g74035b2, status=idle, lastError=""`；
+watchdog+worker 两进程均在稳定路径（新架构"worker 恒用稳定路径"生效）；主日志
+`P2PManager initialized (version=v0.8.3-39-g74035b2)`，reverse-id deskw 加载正常；
+mesh 身份不变（100.159.0.10），deskw↔jf 边双向恢复；内置 SSH/mTLS admin 正常。
+清理：计划任务×2 删除、pending 包删除、暂存目录删除、无 System32 残留 data；
+回滚路径 `phaethon.old.exe`(653) 在位。
+
+**经验**：① `.phn` 域名经 macOS 系统 resolver 有负缓存，nslookup 能解析但
+curl 报 exit 6，用 `curl --resolve deskw.phn:443:100.159.0.10` 绕过；② Windows
+节点从计划任务/wscript 启动必须在 vbs 里显式 `CurrentDirectory`，否则 data
+目录会落到 cwd 下；③ 运行中的 exe 可以 rename 但不能 overwrite，稳定路径
+替换用 rename+copy 即可在线暂存，零停机窗口留给最后重启。

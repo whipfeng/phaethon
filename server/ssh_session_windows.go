@@ -251,66 +251,66 @@ func startSessionProc(shell, cmdline string, isShell, usePty bool, cols, rows ui
 	return startPipe(shell, execArgs(shell, cmdline), workDir)
 }
 
-// startWinptyShell starts an interactive shell inside a winpty PTY. The
-// console is switched to UTF-8 with the same init line ConPTY uses; the
-// console echoes that line once at session start (cosmetic).
-func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
-	cmdline := "\"" + shell + "\""
-	if classifyShell(shell) == shellKindPowerShell {
-		cmdline += " -NoLogo"
-	}
-	// PS2 on Win7 does not exit on "exit"/EOF under winpty; the proc
-	// terminates it after forwarding exit or when the client disconnects.
-	legacy := windows.RtlGetVersion().MajorVersion < 10 &&
-		classifyShell(shell) == shellKindPowerShell
-	p, err := startWinptyProc(shell, cmdline, workDir, cols, rows, legacy)
-	if err != nil {
-		return nil, err
-	}
-	if init := winptyInitCmd(shell); init != "" {
-		_, _ = p.Write([]byte(init))
-	}
-	return p, nil
+// interactiveShellCmdLine builds the CreateProcess command line for an
+// interactive shell, including the startup arguments that put its console into
+// UTF-8.
+//
+// Encoding is selected at process startup instead of being written into the PTY
+// after the shell is running: an injected line is echoed once at session start
+// (both ConPTY and winpty display it) and races the shell's first output.
+// POSIX shells (Git Bash etc.) are UTF-8 native and need nothing.
+func interactiveShellCmdLine(shell string) string {
+	parts := []string{"\"" + shell + "\""}
+	parts = append(parts, quoteArgs(interactiveShellArgs(shell))...)
+	return strings.Join(parts, " ")
 }
 
-// winptyInitCmd returns the UTF-8 init lines for a winpty console.
-//
-// The console converts CR to the Enter key (LF becomes a second line break),
-// so every line ends with CR only. PS 2.0 (Win7) mangles the long guarded
-// one-liner used by ConPTY, so it gets two short lines instead.
-func winptyInitCmd(shell string) string {
+// interactiveShellArgs returns the UTF-8 startup arguments for an interactive
+// shell.
+func interactiveShellArgs(shell string) []string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
+		const setUTF8 = "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8"
 		if windows.RtlGetVersion().MajorVersion < 10 {
-			// Win7 + winpty: chcp 65001 inside the hidden console stalls the
-			// PS2 host, so only switch the .NET console encodings here.
-			return "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r"
+			// Win7 (WMF 3+) stalls when chcp runs inside the startup command;
+			// switching the .NET console encodings is enough there.
+			return []string{"-NoLogo", "-NoExit", "-Command", setUTF8}
 		}
-		return strings.TrimRight(utf8InitCmd(shell), "\r\n") + "\r"
+		// PS 5.1 caches the console code page at startup, so chcp alone is not
+		// enough — native output still needs the console at 65001. -NoLogo
+		// suppresses the banner, which is printed in the initial code page and
+		// would always be garbled.
+		return []string{"-NoLogo", "-NoExit", "-Command", "chcp 65001 > $null; " + setUTF8}
 	case shellKindCmd:
-		return "chcp 65001 >nul\r"
+		if !isRealCmd(shell) {
+			// classifyShell treats unknown programs as cmd, but /k would be
+			// meaningless (or harmful) for them. Only pass arguments to the
+			// program when it is actually cmd.exe.
+			return nil
+		}
+		return []string{"/k", "chcp 65001>nul"}
 	}
-	return ""
+	return nil
+}
+
+// isRealCmd reports whether shell resolves to cmd.exe rather than an arbitrary
+// program that classifyShell fell back to.
+func isRealCmd(shell string) bool {
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(shell)), ".exe")
+	return base == "cmd"
+}
+
+// startWinptyShell starts an interactive shell inside a winpty PTY.
+func startWinptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
+	// PS on Win7 does not exit on "exit"/EOF under winpty; the proc terminates
+	// it after forwarding exit or when the client disconnects.
+	legacy := windows.RtlGetVersion().MajorVersion < 10 &&
+		classifyShell(shell) == shellKindPowerShell
+	return startWinptyProc(shell, interactiveShellCmdLine(shell), workDir, cols, rows, legacy)
 }
 
 func startConptyShell(shell, workDir string, cols, rows uint32) (sessionProc, error) {
-	// -NoLogo 抑制 PowerShell 启动 banner（它以控制台初始 GBK 代码页输出，
-	// 在 chcp 注入执行前就发完了，必然乱码；去掉最干净）。
-	commandLine := "\"" + shell + "\""
-	if classifyShell(shell) == shellKindPowerShell {
-		// -NoLogo 同时适用于 Windows PowerShell 5.1 与 pwsh 7：banner 在
-		// 控制台初始代码页下输出，晚于 chcp 注入，必然乱码。
-		commandLine += " -NoLogo"
-	}
-	p, err := startConpty(commandLine, workDir, cols, rows)
-	if err != nil {
-		return nil, err
-	}
-	// ConPTY 输入有队列缓冲，shell 起来后自然会消费到。
-	if init := utf8InitCmd(shell); init != "" {
-		_, _ = p.Write([]byte(init))
-	}
-	return p, nil
+	return startConpty(interactiveShellCmdLine(shell), workDir, cols, rows)
 }
 
 func startConpty(commandLine, workDir string, cols, rows uint32) (*conptyProc, error) {

@@ -280,12 +280,16 @@ func drawDigit(img *image.RGBA, x, y int, d byte, c color.Color) {
 
 // AdminServer provides a web management interface.
 type AdminServer struct {
-	config    *config.AdminConfig
-	stats     *StatsCollector
-	server    *http.Server
-	ln        net.Listener
-	tlsConfig *tls.Config // cached TLS config for ServeConn
-	mu        sync.RWMutex
+	config *config.AdminConfig
+	stats  *StatsCollector
+	server *http.Server
+	// builtinServer serves connections handed over by the mesh in-process path
+	// (ServeConn). It shares the OS server's handler chain plus a marker that
+	// forces authentication for this entry point.
+	builtinServer *http.Server
+	ln            net.Listener
+	tlsConfig     *tls.Config // cached TLS config for ServeConn
+	mu            sync.RWMutex
 
 	sseLast []byte // last published stats JSON
 
@@ -711,6 +715,15 @@ func (s *AdminServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Same chain for the in-process (mesh direct) path, wrapped with a marker so
+	// authMiddleware cannot be bypassed even when AuthEnabled is false.
+	s.builtinServer = &http.Server{
+		Handler:      builtinDirectHandler{next: s.server.Handler},
+		ReadTimeout:  s.server.ReadTimeout,
+		WriteTimeout: s.server.WriteTimeout,
+		IdleTimeout:  s.server.IdleTimeout,
+	}
+
 	util.Logger.Printf("[INFO] [admin] Start() reached TLS setup check")
 	// Setup TLS: AdminConfig file paths > state/tls-cert (auto-generated)
 	util.Logger.Printf("[INFO] [admin] TLS setup check: TLSCert=%q, TLSKey=%q, ClientCA=%q",
@@ -777,7 +790,7 @@ func (s *AdminServer) Start() error {
 			if s.config.AuthEnabled {
 				util.LogModuleInfo("admin", "authentication enabled (mTLS or password) with embedded CA")
 			} else {
-				util.LogModuleInfo("admin", "authentication enabled (mTLS) with embedded CA")
+				util.LogModuleInfo("admin", "authentication disabled for the OS listener with embedded CA; the built-in direct console still requires authentication")
 			}
 		}
 
@@ -875,6 +888,11 @@ func (s *AdminServer) Start() error {
 
 // Close shuts down the admin server.
 func (s *AdminServer) Close() error {
+	// The built-in direct server has no listener of its own (connections are
+	// handed over one by one); Close still terminates its active connections.
+	if s.builtinServer != nil {
+		_ = s.builtinServer.Close()
+	}
 	if s.server != nil {
 		if err := s.server.Close(); err != nil {
 			return err
@@ -911,10 +929,16 @@ func (s *AdminServer) ServeConn(conn net.Conn) {
 	}
 	ln.conn = handledConn
 
-	// Serve blocks until the connection is closed
+	// Serve blocks until the connection is closed. Use the built-in server so
+	// requests carry the force-auth marker (fallback to the OS server when the
+	// struct was built without Start, e.g. in unit tests).
+	hs := s.builtinServer
+	if hs == nil {
+		hs = s.server
+	}
 	util.LogModuleDebug("admin", "Calling server.Serve")
 	defer ln.Close()
-	if err := s.server.Serve(ln); err != nil && err != io.EOF {
+	if err := hs.Serve(ln); err != nil && err != io.EOF {
 		util.LogModuleDebug("admin", "ServeConn ended: %v", err)
 	}
 	util.LogModuleDebug("admin", "ServeConn finished")
@@ -1090,6 +1114,29 @@ func isPublicPath(path string, method string) bool {
 	return false
 }
 
+// builtinDirectKey marks requests served through AdminServer.ServeConn, i.e.
+// the in-process path behind <nodeid>.phn:443 / the node's own mesh VIP. That
+// entry point is reachable by every mesh peer, so it must never fall back to
+// the "authentication disabled" shortcut, even when the OS listener keeps the
+// operator's AuthEnabled=false setting.
+type builtinDirectKey struct{}
+
+// builtinDirectHandler tags every request as arriving through ServeConn and
+// then hands it to the regular admin handler chain (which contains
+// authMiddleware).
+type builtinDirectHandler struct{ next http.Handler }
+
+func (h builtinDirectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := context.WithValue(r.Context(), builtinDirectKey{}, true)
+	h.next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// isBuiltinDirect reports whether the request came in through ServeConn.
+func isBuiltinDirect(r *http.Request) bool {
+	v, _ := r.Context().Value(builtinDirectKey{}).(bool)
+	return v
+}
+
 // authMiddleware checks authentication (session or token).
 func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1099,10 +1146,11 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Authentication is enforced only if AuthEnabled flag is true in config.
-		// The embedded CA certificate (defaultClientCA) is used for mTLS when
-		// AuthEnabled is true, but does not by itself require authentication.
-		authRequired := s.config.AuthEnabled
+		// Authentication is enforced when AuthEnabled is true, and always on
+		// the in-process (mesh direct) path: that path bypasses the OS listener
+		// (and its firewall/loopback restrictions), so AuthEnabled=false must not
+		// open the console to the whole mesh.
+		authRequired := s.config.AuthEnabled || isBuiltinDirect(r)
 
 		// If auth is not required, allow everything
 		if !authRequired {
@@ -5742,8 +5790,9 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// If auth is disabled, return a default username
-	if !s.config.AuthEnabled {
+	// If auth is disabled (and this is not the forced-auth built-in path),
+	// return a default username
+	if !s.config.AuthEnabled && !isBuiltinDirect(r) {
 		jsonResponse(w, map[string]string{"username": "admin"})
 		return
 	}

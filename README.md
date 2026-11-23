@@ -35,7 +35,7 @@ L4 代理与 Mesh / P2P 覆盖网络工具（Go）。支持正向代理、反向
 - **TUN / 旁路网关**：Linux / Windows / macOS 的 TUN 引擎；旁路网关、DHCP、DNS 劫持与
   Fake-IP；Linux 动态 `tunN`（内核分配）与 fd 生命周期管理；链路健康循环。
 - **管理面**：Web 控制台（mTLS 或密码）、Admin API、内置 SSH（`<nodeid>.phn:22`）、
-  内置 console（443 / 39999）。
+  内置 console（`<nodeid>.phn:443`；其他端口如 admin 的 39999 仍走本机 OS 监听）。
 - **升级**：签名的 `.pkg` 上传 → 激活 → watchdog 稳定路径自替换 → ready + 版本校验；
   失败自动回滚 `.old`，不再使用版本化 worker 路径。
 
@@ -138,9 +138,11 @@ go build -o phaethon .
 ## 管理面 / 内置 SSH / 自升级
 
 - **Web 控制台**：`0.0.0.0:39999`；mesh 内置 console 为 `https://<nodeid>.phn/`（443，
-  39999 为兼容别名）。支持 mTLS 客户端证书或用户名/密码；证书/凭据保存在本地。
-- **内置 SSH**：`<nodeid>.phn:22`；支持公钥认证、可配置 shell；Windows 下按平台提供
-  PTY / 行级模式；公钥在控制台维护。
+  进程内直通，**始终要求认证**）。其他端口（包括 admin 的 39999）经 mesh 域名访问时
+  走本机 OS 监听，行为与本地访问一致。支持 mTLS 客户端证书或用户名/密码。
+- **内置 SSH**：`<nodeid>.phn:22`；支持公钥认证、可配置 shell；Windows 下交互式 shell
+  走 ConPTY，不可用时用随包 winpty，均以启动参数切换到 UTF-8（不向会话注入 chcp 行）；
+  无可用 PTY 时回退为内置 shell。公钥在控制台维护。
 - **自升级**：控制台上传签名 `.pkg` → 激活；watchdog 每 2s 轮询请求，校验签名/平台，
   暂存 `.new`，停止 worker，`exe→.old`、`.new→exe`，启动并校验版本；失败回滚 `.old`。
   稳定路径始终不变，Windows 防火墙/AV 路径规则无需调整。

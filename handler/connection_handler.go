@@ -191,11 +191,12 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 		util.LogModuleInfo("handler", "[HANDLECONN-LOCAL] [%s] ENTER localNodeDomain branch (early return)", connID)
 
 		// Built-in service dispatch by port (mesh domain <nodeid>.phn only):
-		//   22    → built-in SSH
-		//   443   → built-in console (canonical entry)
-		//   39999 → built-in console (legacy admin port kept for existing tooling)
-		// Any other port is rejected instead of silently hitting the console, so
-		// future built-in services can claim their own port explicitly.
+		//   22  → built-in SSH
+		//   443 → built-in console
+		// Every other port (including the admin listener's configured port, by
+		// default 39999) is dialed through the node's own OS network stack, so
+		// the OS-level listeners keep behaving as before. The admin port is
+		// configurable, so it is intentionally not hard-coded here.
 		switch dstPort {
 		case builtinSSHPort:
 			if h.sshHandler != nil {
@@ -207,7 +208,7 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 				rec.Close()
 				return
 			}
-		case builtinConsolePort, builtinConsoleAlias:
+		case builtinConsolePort:
 			if h.adminHandler != nil {
 				util.LogModuleInfo("handler", "[TCP-DEBUG] [%s] [%s] localNodeDomain=true, serving via admin handler directly (bypassing OS network stack)", corrID, connID)
 				util.LogModuleInfo("handler", "[HANDLECONN-LOCAL-ADMIN] [%s] serving via admin handler", connID)
@@ -219,8 +220,7 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 				return
 			}
 		default:
-			util.LogModuleWarn("handler", "[HANDLECONN-LOCAL] [%s] port %d is not a built-in service on mesh domain %q (use 22 for SSH, 443 for console)", connID, dstPort, domain)
-			return
+			util.LogModuleInfo("handler", "[HANDLECONN-LOCAL] [%s] port %d is not a built-in service on mesh domain %q, dialing local OS stack", connID, dstPort, domain)
 		}
 		// Fallback: dial localhost via OS network stack
 		localIP := dialer.GetLocalIPForDial(nil)
@@ -517,16 +517,16 @@ var TUNMapping = &config.Mapping{Name: "TUN", Type: "tun"}
 
 // Built-in service ports on a mesh domain (<nodeid>.phn).
 //
-//	22    → built-in SSH (server.SSHServer, netstack-terminated)
-//	443   → built-in console (admin handler, canonical entry point)
-//	39999 → same console, kept as an alias for existing tooling/scripts
+//	22  → built-in SSH (server.SSHServer, netstack-terminated)
+//	443 → built-in console (admin handler, served in-process)
 //
-// Ports outside this set are rejected on mesh domains rather than silently
-// routed to the console, leaving room for future built-in services.
+// These two ports bypass the OS network stack. Any other port on a mesh domain
+// is dialed through the node's OS stack (see HandleTCPConn), so OS listeners —
+// notably the admin port, which defaults to 39999 but is configurable — remain
+// reachable through the node domain without a hard-coded alias.
 const (
-	builtinSSHPort      = 22
-	builtinConsolePort  = 443
-	builtinConsoleAlias = 39999
+	builtinSSHPort     = 22
+	builtinConsolePort = 443
 )
 
 // proxyDesc returns a human-readable description of the proxy for logging.

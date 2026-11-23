@@ -58,3 +58,31 @@ func TestIsWSLBash(t *testing.T) {
 		}
 	}
 }
+
+// TestInteractiveShellArgs 编码在启动参数里设置：POSIX 不加参数，cmd 用 /k，
+// PowerShell 用 -NoExit -Command；未知程序不注入任何参数（避免 /k 破坏它）。
+func TestInteractiveShellArgs(t *testing.T) {
+	if args := interactiveShellArgs(`C:\Program Files\Git\bin\bash.exe`); len(args) != 0 {
+		t.Fatalf("Git Bash args = %v, want none", args)
+	}
+
+	ps := interactiveShellArgs(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`)
+	psJoined := strings.Join(ps, " ")
+	if !strings.Contains(psJoined, "-NoExit") || !strings.Contains(psJoined, "UTF8") {
+		t.Fatalf("PowerShell args = %v, want -NoExit and UTF-8 console setup", ps)
+	}
+
+	cmdArgs := interactiveShellArgs(`C:\Windows\System32\cmd.exe`)
+	if len(cmdArgs) != 2 || cmdArgs[0] != "/k" || !strings.Contains(cmdArgs[1], "chcp 65001") {
+		t.Fatalf("cmd args = %v, want [/k chcp 65001>nul]", cmdArgs)
+	}
+
+	if args := interactiveShellArgs(`C:\tools\myshell.exe`); len(args) != 0 {
+		t.Fatalf("unknown shell args = %v, want none", args)
+	}
+
+	line := interactiveShellCmdLine(`C:\Windows\System32\cmd.exe`)
+	if !strings.HasPrefix(line, `"C:\Windows\System32\cmd.exe" /k `) {
+		t.Fatalf("cmdline = %q, want quoted shell followed by /k", line)
+	}
+}

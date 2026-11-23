@@ -130,22 +130,6 @@ func quoteArgs(args []string) []string {
 	return out
 }
 
-// utf8InitCmd 是 ConPTY shell 会话启动时注入的命令：把控制台切到 UTF-8，
-// 消除客户端按 UTF-8 解码时的中文乱码。POSIX 系无需 chcp，返回空串。
-// 仅 Windows 使用；Unix 平台 pty 没有 chcp 概念。
-func utf8InitCmd(shell string) string {
-	switch classifyShell(shell) {
-	case shellKindPowerShell:
-		// PS 5.1 启动时缓存控制台代码页，chcp 后还需重置 Console 编码。
-		// PS 的 >nul 是 Out-File 到文件 nul（会报错），置空要用 | Out-Null。
-		return "chcp 65001 | Out-Null; [Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n"
-	case shellKindPosix:
-		return ""
-	default:
-		return "chcp 65001 >nul\r\n"
-	}
-}
-
 // defaultWorkDir 返回新会话的工作目录：优先用户 home，失败回退到根目录。
 func defaultWorkDir() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {

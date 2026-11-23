@@ -270,10 +270,13 @@ func interactiveShellCmdLine(shell string) string {
 func interactiveShellArgs(shell string) []string {
 	switch classifyShell(shell) {
 	case shellKindPowerShell:
-		const setUTF8 = "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8"
+		// $OutputEncoding covers the pipeline into native programs (PowerShell
+		// 5.1 defaults it to ASCII); the [Console] pair covers reading native
+		// output and the interactive input buffer.
+		const setUTF8 = "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8"
 		if windows.RtlGetVersion().MajorVersion < 10 {
 			// Win7 (WMF 3+) stalls when chcp runs inside the startup command;
-			// switching the .NET console encodings is enough there.
+			// switching the .NET console/pipe encodings is enough there.
 			return []string{"-NoLogo", "-NoExit", "-Command", setUTF8}
 		}
 		// PS 5.1 caches the console code page at startup, so chcp alone is not

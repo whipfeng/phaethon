@@ -446,8 +446,8 @@ func SaveRuleConfiguration(path string, conf *RuleConfiguration) error {
 - `handler` 端口分发只保留 22（内置 SSH）与 443（内置 console）走进程内；
   39999 及其他端口一律回落到目标节点本机 OS 栈，admin 端口保持可配置。
 - Windows 内置 SSH 交互式 shell 的 UTF-8 改为启动参数（cmd `/k chcp 65001`、
-  PowerShell `-NoLogo -NoExit -Command ...`），不再向 PTY 注入 chcp 行；未知程序
-  不追加任何参数。
+  PowerShell `-NoLogo -NoExit -Command ...`，同时设置 `$OutputEncoding` 以覆盖
+  管道到原生程序的场景），不再向 PTY 注入 chcp 行；未知程序不追加任何参数。
 
 **验证**：
 

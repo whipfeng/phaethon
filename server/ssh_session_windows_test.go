@@ -71,6 +71,9 @@ func TestInteractiveShellArgs(t *testing.T) {
 	if !strings.Contains(psJoined, "-NoExit") || !strings.Contains(psJoined, "UTF8") {
 		t.Fatalf("PowerShell args = %v, want -NoExit and UTF-8 console setup", ps)
 	}
+	if !strings.Contains(psJoined, "$OutputEncoding=") {
+		t.Fatalf("PowerShell args = %v, want $OutputEncoding set for native pipelines", ps)
+	}
 
 	cmdArgs := interactiveShellArgs(`C:\Windows\System32\cmd.exe`)
 	if len(cmdArgs) != 2 || cmdArgs[0] != "/k" || !strings.Contains(cmdArgs[1], "chcp 65001") {

@@ -65,6 +65,11 @@
   `dist/windows7-amd64`（qgw 为 Win7，需独立平台包）；
 - 先 QG/JF 验证无 1Hz 循环，再全量扩散；9 节点全部 `status=succeeded`。
 
+## 相关事件
+
+- 2026-11-23 13:57 qgw 宿主意外硬复位，qg（qgw 上的 VirtualBox VM）随之中断；
+  已排除 phaethon 崩溃，取证见 `host-hard-reset-qg-qgw-20261123.md`。
+
 ## 经验
 
 - lane 生命周期事件必须成对可解释：出现稳定频率的 add/remove 配对时，优先

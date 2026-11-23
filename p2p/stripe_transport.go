@@ -173,6 +173,11 @@ type stripeLane struct {
 	diagTx     int64        // previous tx snapshot for diag logging
 	pinned     atomic.Int32 // flows currently pinned to this lane via affinity
 	pacer      *lanePacer   // per-lane async shaper (nil when lab pacing is off)
+	// warm marks a pre-created carrier (warmLanes). Warm lanes are deliberate
+	// and exempt from the idle age-out in controllerTick: removing them only
+	// for the warm loop to re-add a tick later is a reconnect + affinity-drop
+	// churn loop (observed with WS stream carriers, 2026-11-23).
+	warm bool
 }
 
 func (l *stripeLane) close() {
@@ -343,6 +348,12 @@ func (t *stripeTransport) String() string { return "stripe" }
 // attachLane returns false when the per-session lane cap is reached; the
 // caller must close the transport in that case (D11).
 func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) bool {
+	return t.attachLaneKind(id, tr, false)
+}
+
+// attachLaneKind registers an extra data lane. warm marks a pre-created
+// carrier that must survive the idle age-out (see controllerTick).
+func (t *stripeTransport) attachLaneKind(id uint32, tr frame.FrameTransport, warm bool) bool {
 	t.mu.Lock()
 	if len(t.lanes) >= stripeMaxLanes {
 		t.mu.Unlock()
@@ -355,10 +366,18 @@ func (t *stripeTransport) attachLane(id uint32, tr frame.FrameTransport) bool {
 		queue:     make(chan []frame.Frame, stripeLaneQueueDepth),
 		done:      make(chan struct{}),
 		pacer:     newLanePacer(),
+		warm:      warm,
 	}
 	l.probe.outstanding = make(map[uint32]time.Time)
 	t.lanes = append(t.lanes, l)
 	t.mu.Unlock()
+	// A lane-set change restarts idle aging. clearSince may have been armed
+	// while the session had no extra lanes; without this reset the very next
+	// controller tick sees "lane exists + idle ≥ stripeClearSustain" and
+	// removes the lane it just gained (1 Hz warm-lane churn with WS carriers).
+	t.ctrlMu.Lock()
+	t.clearSince = time.Time{}
+	t.ctrlMu.Unlock()
 	// Lane set changed: every flow re-resolves on its next send (§3.6).
 	t.dropAffinity()
 	go t.laneWriter(l)
@@ -380,18 +399,39 @@ func (t *stripeTransport) snapshotLanes() []*stripeLane {
 	return append([]*stripeLane(nil), t.lanes...)
 }
 
+// nonWarmLaneCount returns the dynamic lanes eligible for idle age-out.
+// Warm lanes are deliberately pre-created and never age out (see stripeLane.warm).
+func (t *stripeTransport) nonWarmLaneCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, l := range t.lanes {
+		if !l.warm {
+			n++
+		}
+	}
+	return n
+}
+
 // removeLane detaches a dead lane; its affinity flows rehash across the
-// remaining lanes on the next SendBatch (§5.6). Safe to call twice.
+// remaining lanes on the next SendBatch (§5.6). Idempotent: the controller
+// and the lane's own writer/reader goroutines can race the same lane, and a
+// second call must not log, rehash or close again.
 func (t *stripeTransport) removeLane(l *stripeLane) {
 	t.mu.Lock()
+	found := false
 	for i, x := range t.lanes {
 		if x == l {
 			t.lanes = append(t.lanes[:i], t.lanes[i+1:]...)
+			found = true
 			break
 		}
 	}
 	remain := len(t.lanes)
 	t.mu.Unlock()
+	if !found {
+		return
+	}
 	util.LogModuleInfo("p2p", "[STRIPE] remove lane stripeID=%d (lanes=%d)", l.id, remain)
 	// Lane set changed: affinity flows rehash across the survivors on the
 	// next SendBatch (§3.6 accepted transient).
@@ -1347,7 +1387,7 @@ func (t *stripeTransport) addWarmLane(now time.Time) {
 		}
 		return
 	}
-	if !t.attachLane(stripeID, tr) {
+	if !t.attachLaneKind(stripeID, tr, true) {
 		tr.Close()
 		return
 	}
@@ -1401,7 +1441,12 @@ func (t *stripeTransport) controllerTick() {
 		t.clearSince = time.Time{}
 	default:
 		t.highSince = time.Time{}
-		if t.clearSince.IsZero() {
+		// The idle timer only accrues while there is something to age out.
+		// Arming it during an empty (or warm-only) lane set made the next
+		// add instantly removable, churning warm lanes every controller tick.
+		if t.nonWarmLaneCount() == 0 {
+			t.clearSince = time.Time{}
+		} else if t.clearSince.IsZero() {
 			t.clearSince = now
 		}
 	}
@@ -1434,7 +1479,7 @@ func (t *stripeTransport) controllerTick() {
 		now.Sub(t.lastAddAt) >= interval &&
 		t.laneCount() < maxLanes
 	removeDue := !udpActive &&
-		t.laneCount() > 0 &&
+		t.nonWarmLaneCount() > 0 &&
 		!t.clearSince.IsZero() &&
 		now.Sub(t.clearSince) >= stripeClearSustain
 	if addDue {
@@ -1474,8 +1519,15 @@ func (t *stripeTransport) controllerTick() {
 	}
 	if removeDue {
 		lanes := t.snapshotLanes()
-		if len(lanes) > 0 {
-			victim := lanes[len(lanes)-1] // newest first (§2.3)
+		// Newest controller lane first (§2.3); warm lanes are never victims.
+		var victim *stripeLane
+		for i := len(lanes) - 1; i >= 0; i-- {
+			if !lanes[i].warm {
+				victim = lanes[i]
+				break
+			}
+		}
+		if victim != nil {
 			t.removeLane(victim)
 			t.recordEvent("remove lane stripeID=%d: gauge < %.2f sustained %v (udpActive=%v)",
 				victim.id, stripeGaugeHighWatermark, stripeClearSustain, udpActive)

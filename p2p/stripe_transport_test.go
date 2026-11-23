@@ -1380,3 +1380,95 @@ func TestStripePinEscapeRecoversOnWeightRestore(t *testing.T) {
 		t.Fatalf("pinEscapes = %d, want 0 (recovery must reset the escape timer)", tr.pinEscapes.Load())
 	}
 }
+
+// TestStripeAttachLaneResetsIdleTimer: a lane-set change restarts idle aging.
+// The clear timer may have been armed while the session had no extra lanes;
+// without the reset the next controller tick removes the lane it just gained.
+func TestStripeAttachLaneResetsIdleTimer(t *testing.T) {
+	tr, _ := stripeTestWrapper(t, 0)
+	tr.ctrlMu.Lock()
+	tr.clearSince = time.Now().Add(-2 * stripeClearSustain)
+	tr.ctrlMu.Unlock()
+
+	lanePeer, laneServer := net.Pipe()
+	t.Cleanup(func() { lanePeer.Close() })
+	if !tr.attachLane(9, frame.NewStreamTransport(laneServer)) {
+		t.Fatal("attachLane failed")
+	}
+
+	tr.ctrlMu.Lock()
+	stale := !tr.clearSince.IsZero()
+	tr.ctrlMu.Unlock()
+	if stale {
+		t.Fatal("attachLane left the stale idle timer armed")
+	}
+
+	// The next low-gauge tick arms a fresh window rather than reusing the old one.
+	tr.controllerTick()
+	tr.ctrlMu.Lock()
+	since := tr.clearSince
+	tr.ctrlMu.Unlock()
+	if since.IsZero() || time.Since(since) > time.Second {
+		t.Fatalf("clearSince = %v, want a fresh window", since)
+	}
+}
+
+// TestStripeWarmLaneSurvivesIdleAgeOut guards the WS warm-lane churn loop:
+// stream carriers pre-create warm lanes, and idle age-out must never remove
+// them (the warm loop would re-dial a tick later, dropping affinity and
+// reconnecting once per second — observed with WS carriers on 2026-11-23).
+func TestStripeWarmLaneSurvivesIdleAgeOut(t *testing.T) {
+	_, baseServer := net.Pipe()
+	tr := newStripeTransport(frame.NewStreamTransport(baseServer), stripeConfig{})
+	t.Cleanup(func() { tr.Close() })
+
+	warmPeer, warmServer := net.Pipe()
+	t.Cleanup(func() { warmPeer.Close() })
+	if !tr.attachLaneKind(1, frame.NewStreamTransport(warmServer), true) {
+		t.Fatal("attach warm lane failed")
+	}
+	coldPeer, coldServer := net.Pipe()
+	t.Cleanup(func() { coldPeer.Close() })
+	if !tr.attachLane(2, frame.NewStreamTransport(coldServer)) {
+		t.Fatal("attach controller lane failed")
+	}
+
+	// An idle timer armed long before either lane existed must still age out
+	// the controller lane, and only that one.
+	tr.ctrlMu.Lock()
+	tr.clearSince = time.Now().Add(-2 * stripeClearSustain)
+	tr.ctrlMu.Unlock()
+
+	tr.controllerTick()
+
+	lanes := tr.snapshotLanes()
+	if len(lanes) != 1 || !lanes[0].warm {
+		t.Fatalf("lanes after idle tick = %d, want only the warm lane", len(lanes))
+	}
+	if got := tr.nonWarmLaneCount(); got != 0 {
+		t.Fatalf("nonWarmLaneCount = %d, want 0", got)
+	}
+
+	// Warm-only lane set keeps the timer disarmed and the lane in place.
+	tr.controllerTick()
+	tr.ctrlMu.Lock()
+	armed := !tr.clearSince.IsZero()
+	tr.ctrlMu.Unlock()
+	if armed {
+		t.Fatal("idle timer armed with a warm-only lane set")
+	}
+	if n := tr.laneCount(); n != 1 {
+		t.Fatalf("laneCount = %d, want the warm lane after a second tick", n)
+	}
+}
+
+// TestStripeRemoveLaneIdempotent: the controller and the lane's own writer /
+// reader may race the same removal; a second call must be a no-op.
+func TestStripeRemoveLaneIdempotent(t *testing.T) {
+	tr, lanes := stripeTestWrapper(t, 1)
+	tr.removeLane(lanes[0])
+	tr.removeLane(lanes[0]) // must not panic or double-log/rehash
+	if n := tr.laneCount(); n != 0 {
+		t.Fatalf("laneCount = %d, want 0", n)
+	}
+}

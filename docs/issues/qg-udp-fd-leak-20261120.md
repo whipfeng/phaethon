@@ -175,3 +175,28 @@ curl 报 exit 6，用 `curl --resolve deskw.phn:443:100.159.0.10` 绕过；② W
 残留杂散 `\`，wscript 弹模态错误框挂到人工点掉）；无空格路径干脆不加引号，
 或用 PS 转义 `` `" ``，并用 TaskScheduler 事件 Id=201 的返回码验收动作真的
 执行成功。
+
+## 部署记录：v0.8.3-45 全量扩散 + vm 恢复（2026-11-23 13:40）
+
+- 版本：`v0.8.3-45-g3af300d`（= v0.8.3-39 之后新增 d8067a0 p2p/htunnel 默认 info +
+  3af300d pin health escape）；
+- 部署路径：本机构建 4 平台签名包（linux/windows/**windows7**/darwin）→ QG
+  （`root@<IP_QG_OS>:2222`）→ QG 以 mTLS（`/root/client-all.crt/key`）经 mesh
+  fakeIP 逐节点 `POST /api/packages/upload` + `{id}/activate`；
+- 各节点 admin 地址（QG 视角实测）：qg `100.0.0.2:39999`、jf/gg/mb/ms9/ms10/
+  deskw 为各自 fakeIP `:443`、qgw `100.209.0.12:443`、vm `100.212.0.10:39999`；
+- **9 节点全部 `/api/packages/pin` = `current=v0.8.3-45-g3af300d, status=succeeded`**；
+- jf 第一次 activate 响应体为空但实际生效（复跑时 already current）；
+- ms9 首次 upload 超时失败，重试成功（经 gg 中继路径抖动，属偶发）；
+- **qgw 平台是 windows7**：windows-amd64 包 activate 返回 `localUpgrade:false`
+  （platform 不匹配只做分发），必须用 `make windows7`/`GO_LEGACY_WIN7` 构建
+  windows7_amd64 包才真正升级——以后扩散清单里 qgw 单独标注；
+- **vm（本机）当日 phaethon 进程不在**（11-20 后停止，计划任务 LogonType=
+  Interactive 无法被 SSH 会话 Start-ScheduledTask 拉起），本地 wscript 执行
+  `start-phaethon.vbs`（含 CurrentDirectory+实验环境变量）恢复后走 upload+activate
+  升级；拓扑随之恢复 9 节点；
+- deskzq 离线（不在拓扑），本次跳过，待其上线后补升级；
+- 验证：QG `/api/log/modules` = `{"htunnel":"info","p2p":"info",...}`（d8067a0
+  默认级别已全机群生效）；拓扑 9 节点完整。
+
+

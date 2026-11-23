@@ -82,8 +82,9 @@
 
 1. **可观测性（d8067a0）**：`util.init()` 将 `p2p`/`htunnel` 模块默认级别提为
    info（与 system/tun 同模式）。此前出厂默认 error 吞掉了 lane 热身/回收、
-   WS 建立、HTTP 回退全部诊断，是坏窗口无法取证的根本障碍。随下次机群升级
-   生效；deskw 已运行时设置（htunnel=info, p2p=info）。
+   WS 建立、HTTP 回退全部诊断，是坏窗口无法取证的根本障碍。**已随
+   v0.8.3-45-g3af300d 全机群生效（2026-11-23 13:40，9 节点 status=succeeded，
+   见 qg-udp-fd-leak 文档部署记录）**；deskw 此前已运行时设置。
 2. **诊断资产**：本次确认的探测手法——QG eth1 抓包（`tcpdump -e` 看 SYN 方向）、
    `/api/p2p` stripe 状态、`/api/log/modules` 运行时调级（无需重启）、
    `curl --resolve` 绕 macOS DNS 负缓存。

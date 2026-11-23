@@ -435,7 +435,8 @@ func SaveRuleConfiguration(path string, conf *RuleConfiguration) error {
 
 ## 7. 2026-11-23 落地与验证
 
-**代码提交**：`d94c21f`（feat(admin,ssh): 内建直通 console 强制认证并收敛 443，SSH 编码改启动参数）
+**代码提交**：`d94c21f`（feat(admin,ssh): 内建直通 console 强制认证并收敛 443，SSH 编码改启动参数）；
+`c022351`（fix(ssh): PowerShell 交互式 shell 补设 `$OutputEncoding`）
 
 实现要点：
 
@@ -454,6 +455,10 @@ func SaveRuleConfiguration(path string, conf *RuleConfiguration) error {
 - `go build ./...` 通过；`go test -count=1 ./admin/ ./server/` 通过。
 - 全量在线节点（8/9，deskzq 当前离线）已升级至 `v0.8.3-53-gd94c21f`，升级状态均为
   `succeeded`。
+- 2026-11-24：因 `$OutputEncoding` 改动仅编译进 Windows 构建，只发布
+  `windows`/`windows7` 两种包到 `v0.8.3-55-gc022351`：vm、qgw、deskw 均
+  `status=succeeded`；Linux/darwin 节点保持 `v0.8.3-53-gd94c21f`；拓扑仍为
+  9 节点/22 条双向边。
 - 443 直通：登录页 200，受保护 `/api/system/info` 在 `AuthEnabled=false` 下仍返回 401。
 - 内置 SSH：deskw/qgw 交互式会话输出为原生 UTF-8，不再出现 chcp 注入回显。
 - 拓扑：9 节点、22 条双向边，无缺边。

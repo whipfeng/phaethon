@@ -61,6 +61,9 @@
   - watchdog 日志出现 initial admin 凭据写入；
   - `data/phaethon.db`、`data/state/initial-admin-password` 生成；
   - worker 日志直接显示"数据库已加载"，未再次进入初始化。
+- 交互集成（ConPTY 探针，模拟双击的新控制台）：逐题看到 `[1/4]`～`[4/4]`
+  后依次作答，四题各自等待输入；完成后 `data/phaethon.db` 中可检索到
+  `probe-node` 与 `127.0.0.1:39999`，说明答案按题落库，而不是一路回车。
 
 ## 备注
 

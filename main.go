@@ -844,29 +844,22 @@ func main() {
 		os.Exit(1)
 	}
 	if empty {
-		// /dev/null and friends are char devices too, so use the terminal check
-		// rather than the file mode: a redirected stdin must not trigger the
-		// interactive setup (D2).
-		isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
-		if isTerminal {
-			util.LogModuleInfo("system", "首次启动，进入初始化模式")
-			if err := db.InteractiveInit(); err != nil {
-				util.LogModuleError("system", " 交互式初始化失败: %v", err)
-				fmt.Fprintf(os.Stderr, "交互式初始化失败: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			util.LogModuleInfo("system", "首次启动（非交互模式），使用默认配置初始化")
-			if err := db.InitDefault(); err != nil {
-				util.LogModuleError("system", " 默认初始化失败: %v", err)
-				fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
-				os.Exit(1)
-			}
-			if err := ensureInitialAdminPassword(dataDir); err != nil {
-				util.LogModuleError("system", "生成初始 admin 密码失败: %v", err)
-			}
-			util.LogModuleWarn("system", "默认初始化完成：Admin 监听 0.0.0.0:39999，认证已强制开启；初始凭据见 data/state/initial-admin-password，首次登录后请立即修改")
+		// First-run setup is owned by the supervisor (prepareFirstRun): this
+		// process's stdout is the watchdog's line-oriented protocol pipe, so a
+		// prompt without a trailing newline would never reach the console.
+		// Reaching this point with an empty config means the supervisor could
+		// not run setup; fall back to secure defaults instead of pretending the
+		// wizard was answered.
+		util.LogModuleWarn("system", "首次启动：配置为空但启动期初始化未完成，使用默认配置初始化")
+		if err := db.InitDefault(); err != nil {
+			util.LogModuleError("system", " 默认初始化失败: %v", err)
+			fmt.Fprintf(os.Stderr, "默认初始化失败: %v\n", err)
+			os.Exit(1)
 		}
+		if err := ensureInitialAdminPassword(dataDir); err != nil {
+			util.LogModuleError("system", "生成初始 admin 密码失败: %v", err)
+		}
+		util.LogModuleWarn("system", "默认初始化完成：Admin 监听 0.0.0.0:39999，认证已强制开启；初始凭据见 data/state/initial-admin-password，首次登录后请立即修改")
 	} else {
 		util.LogModuleInfo("system", "数据库已加载: %s", dbPath)
 	}
@@ -1156,6 +1149,66 @@ func selectWorkerBinary() string {
 	return exe
 }
 
+// prepareFirstRun runs the first-run setup in the supervisor process.
+//
+// The wizard must not run in the worker: spawnChildProcess gives the worker a
+// stdout pipe that the watchdog reads line by line (protocol messages + log
+// forwarding), so a prompt without a trailing newline never reaches the
+// console. The operator then answers invisible questions with empty input and
+// silently accepts the defaults (random node-id, 127.0.0.1). The supervisor
+// owns the real console, so it performs the setup before spawning anything.
+//
+// A live instance holding the data directory is left untouched: the worker will
+// exit with instanceConflictExitCode, and db.Init would time out anyway.
+func prepareFirstRun(workDir string) error {
+	dir := filepath.Join(workDir, "data")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("创建 data 目录失败: %w", err)
+	}
+
+	release, err := acquireInstanceLock(dir)
+	if err != nil {
+		util.LogModuleInfo("main", "watchdog: 跳过首次初始化（%v）", err)
+		return nil
+	}
+	defer release()
+
+	dbPath := filepath.Join(dir, "phaethon.db")
+	if err := db.Init(dbPath); err != nil {
+		return fmt.Errorf("初始化数据库失败: %w", err)
+	}
+	defer db.Close()
+
+	empty, err := db.IsEmptyConfig()
+	if err != nil {
+		return fmt.Errorf("检查配置失败: %w", err)
+	}
+	if !empty {
+		return nil
+	}
+
+	// /dev/null and friends are char devices too, so use the terminal check
+	// rather than the file mode: a redirected stdin must not trigger the
+	// interactive setup (D2).
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		util.LogModuleInfo("main", "watchdog: 首次启动，进入初始化模式")
+		if err := db.InteractiveInit(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	util.LogModuleInfo("main", "watchdog: 首次启动（非交互模式），使用默认配置初始化")
+	if err := db.InitDefault(); err != nil {
+		return fmt.Errorf("默认初始化失败: %w", err)
+	}
+	if err := ensureInitialAdminPassword(dir); err != nil {
+		util.LogModuleWarn("main", "生成初始 admin 密码失败: %v", err)
+	}
+	util.LogModuleWarn("main", "默认初始化完成：Admin 监听 0.0.0.0:39999，认证已强制开启；初始凭据见 data/state/initial-admin-password，首次登录后请立即修改")
+	return nil
+}
+
 // runWatchdogMode is the watchdog entry point. Its job is deliberately small:
 // spawn the server as a child (with PHAETHON_WORKER=1), read the ready and
 // heartbeat messages from its stdout, restart it on crash or hang, forward
@@ -1204,6 +1257,21 @@ func runWatchdogMode() {
 
 	util.LogModuleInfo("main", "watchdog: starting in watchdog mode")
 	writeWatchdogVersion(Version)
+
+	// First-run setup happens here, before the worker exists, because the
+	// worker's stdout is a line-oriented protocol pipe (see prepareFirstRun).
+	if err := prepareFirstRun(workDir); err != nil {
+		util.LogModuleError("main", "watchdog: 首次初始化失败: %v", err)
+		fmt.Fprintf(os.Stderr, "首次初始化失败: %v\n", err)
+		// A double-clicked console closes as soon as the process exits; give
+		// the operator a chance to read the error instead of flashing a window.
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintln(os.Stderr, "按回车键退出...")
+			var buf [1]byte
+			_, _ = os.Stdin.Read(buf[:])
+		}
+		return
+	}
 
 	// A handoff start is launched by the previous watchdog after it swapped in
 	// this binary. It reports its lifecycle through the handoff result file so

@@ -434,6 +434,43 @@ func (e *Manager) MarkTUNDegraded(msg string) {
 // while the manager still claims the TUN is running.
 func (e *Manager) TUNReadLoopDead() bool { return e.readLoopDead.Load() }
 
+// VerifyTUNState compares the cached TUN setup (address and split routes) with
+// the live OS state. It never mutates anything. A nil/zero result means either
+// TUN is not applied or the OS could not be enumerated (treated as unknown).
+func (e *Manager) VerifyTUNState() (TUNStateIssue, string) {
+	e.mu.Lock()
+	rm := e.routeMgr
+	ns := e.netstack
+	e.mu.Unlock()
+	if rm == nil || ns == nil {
+		return TUNStateOK, ""
+	}
+	addr := ns.Addr()
+	return rm.VerifyRuntime(net.IP(addr.AsSlice()).String())
+}
+
+// RepairTUNState re-applies a missing TUN address or split routes on the live
+// device without recreating it, so a transient OS-side flush does not flap the
+// mesh. Identity changes are rejected here; the health loop then falls back to
+// a full StopTUN/StartTUN.
+func (e *Manager) RepairTUNState() error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
+	e.mu.Lock()
+	if e.state != tunRunningState || e.routeMgr == nil || e.netstack == nil {
+		e.mu.Unlock()
+		return fmt.Errorf("tun: not running")
+	}
+	rm := e.routeMgr
+	addr := e.netstack.Addr()
+	hostIP := net.IP(addr.AsSlice()).String()
+	prefixLen := e.prefixLen
+	e.mu.Unlock()
+
+	return rm.Reassert(hostIP, prefixLen)
+}
+
 const maxTUNLogs = 32
 
 func (e *Manager) logEvent(format string, args ...interface{}) {

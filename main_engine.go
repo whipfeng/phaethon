@@ -291,10 +291,33 @@ func tunHealthLoop(engine *tun.Manager) {
 					continue
 				}
 				if exists {
-					backoff = 2 * time.Second
-					continue
+					issue, detail := engine.VerifyTUNState()
+					switch issue {
+					case tun.TUNStateOK:
+						backoff = 2 * time.Second
+						continue
+					case tun.TUNStateAddrMissing, tun.TUNStateRouteMissing:
+						// The adapter is still ours but the OS dropped the IP or
+						// split routes (PnP reset, netsh flush, another VPN).
+						// Re-apply in place so a transient flush does not flap
+						// every mesh session.
+						if rerr := engine.RepairTUNState(); rerr == nil {
+							util.LogModuleWarn("tun", "[TUN] %s; re-applied address/routes in place", detail)
+							backoff = 2 * time.Second
+							continue
+						} else {
+							reason = fmt.Sprintf("%s; in-place repair failed: %v", detail, rerr)
+						}
+					case tun.TUNStateIdentityChanged:
+						reason = detail
+					case tun.TUNStateInterfaceGone:
+						reason = "TUN interface disappeared at runtime"
+					default:
+						reason = fmt.Sprintf("TUN runtime state check returned %s", issue)
+					}
+				} else {
+					reason = "TUN interface disappeared at runtime"
 				}
-				reason = "TUN interface disappeared at runtime"
 			}
 			engine.MarkTUNDegraded(reason)
 			util.LogModuleError("tun", "[TUN] %s; recreating", reason)

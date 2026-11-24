@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -87,6 +88,68 @@ type RouteManager struct {
 	// TUN setup (Linux only). Used to restore the original setting during
 	// teardown.
 	originalIPForward int
+}
+
+// TUNStateIssue classifies how the live OS TUN state diverged from what Setup
+// last applied. The health loop uses it to choose between an in-place repair
+// (address/routes lost) and a full device recreate (interface/identity gone).
+type TUNStateIssue int
+
+const (
+	TUNStateOK TUNStateIssue = iota
+	// TUNStateInterfaceGone means the interface no longer exists at all.
+	TUNStateInterfaceGone
+	// TUNStateIdentityChanged means the interface name still resolves, but it
+	// is a different adapter instance (new LUID/index). The cached Wintun
+	// session points at the old instance, so only a full recreate helps.
+	TUNStateIdentityChanged
+	// TUNStateAddrMissing means the interface is still ours but the expected
+	// TUN IP is no longer assigned to it.
+	TUNStateAddrMissing
+	// TUNStateRouteMissing means the split-tunnel routes (or their selection)
+	// are no longer pointed at the TUN interface.
+	TUNStateRouteMissing
+)
+
+func (i TUNStateIssue) String() string {
+	switch i {
+	case TUNStateOK:
+		return "ok"
+	case TUNStateInterfaceGone:
+		return "interface gone"
+	case TUNStateIdentityChanged:
+		return "interface identity changed"
+	case TUNStateAddrMissing:
+		return "address missing"
+	case TUNStateRouteMissing:
+		return "route missing"
+	default:
+		return "unknown"
+	}
+}
+
+// VerifyRuntime compares the cached applied state with the live OS state. It
+// never mutates anything. Enumeration failures are reported as OK so a
+// transient API error can never trigger a destructive repair.
+func (r *RouteManager) VerifyRuntime(tunIP string) (TUNStateIssue, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.applied {
+		return TUNStateOK, ""
+	}
+	return r.platformVerify(tunIP)
+}
+
+// Reassert re-applies only state that VerifyRuntime reported missing. It is
+// idempotent and never recreates the device; identity changes must go through
+// StopTUN/StartTUN instead.
+func (r *RouteManager) Reassert(tunIP string, prefixLen int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.applied {
+		return fmt.Errorf("tun: routes are not applied")
+	}
+	return r.platformReassert(tunIP, prefixLen)
 }
 
 // RouteSnapshot captures the route manager's current applied state.

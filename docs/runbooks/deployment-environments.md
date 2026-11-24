@@ -160,6 +160,26 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
   如需“最高权限”的计划任务，需要在管理员会话中创建并勾选“使用最高权限运行”。
 - deskzq 的 TUN 当前为关闭（`enabled=false`），登录启动不需要管理员权限。
 
+### vm（Windows，2026-11-24 起与桌面登录解耦）
+
+- 计划任务 `PhaethonTUN`：`BootTrigger` 延迟 15s，执行
+  `wscript.exe <部署目录>\start-phaethon.vbs`，`RunLevel=HighestAvailable`，
+  无执行时限，失败重试 3 次/1 分钟。
+- 运行身份 `HOSTNAME\<user>` + `LogonType=S4U`（“不管用户是否登录都运行”、不保存密码）。
+  - 不要改成 `ServiceAccount`（SYSTEM）：内置 SSH 的 shell 继承 worker 身份，
+    SYSTEM 下 HOME 变成 `systemprofile`、PATH 没有用户级目录，
+    `tmux`（WinGet Links 里的 psmux 封装）直接 command not found。
+  - S4U 保留用户配置与 PATH，同时不需要桌面登录；限制是令牌不带网络凭据，
+    访问需要凭据的 SMB/共享会失败，本应用不依赖该能力。
+- 注册方式（管理员）：导出任务 XML，把 `<UserId>` 改为 `HOSTNAME\<user>`、
+  在 `<RunLevel>` 前插入 `<LogonType>S4U</LogonType>`，再
+  `Register-ScheduledTask -TaskName PhaethonTUN -Xml $xml -Force`。
+- 注意：`Stop-Process -Name phaethon` 会连带停掉 mesh，经 hostIP 的 OS SSH 会瞬断，
+  重启脚本可能死在半途；要么用与本机不共命运的通道，要么用一次性计划任务执行重启。
+- 验证（2026-11-24）：任务 `Ready / Docker / S4U / Highest`，watchdog+worker 均属
+  `HOSTNAME\<user>`；内置 SSH `ssh <user>@vm.phn` 身份为 Docker、`PSMUX=[] TMUX=[]`、
+  `tmux 3.3.3` 可 `new/list/attach`，原 `trae`/`trae2` 会话不受影响。
+
 ### ms9 / ms10（Linux worker）
 
 - 新增并启用 `phaethon.service`：

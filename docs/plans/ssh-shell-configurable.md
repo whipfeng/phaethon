@@ -3,7 +3,7 @@
 ## 元数据
 
 - 文档类型：Plan
-- 版本：v0.1.0
+- 版本：v0.1.1
 - 所属项目：phaethon
 - 创建日期：2026-11-08
 - 关联文档：[mesh-integrated-ssh.md](mesh-integrated-ssh.md)（内建 SSH v1 方案）
@@ -13,6 +13,7 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-11-08 | 初始版本 | layer4 |
+| v0.1.1 | 2026-11-24 | 附录 Windows 控制台架构与编码层认知 | layer4 |
 
 ## 1. 背景与目标
 
@@ -205,3 +206,47 @@ JS（`admin/static/app.js` 或 admin.html 内联 `loadSSH` / `ssh-enabled` 提�
 - shell argv 模板（如 `bash --login -i`）的支持
 - 跨节点 shell 配置全局同步（与公钥全局同步一起规划）
 - per-key shell 覆盖（不同公钥不同 shell，结合二期 per-key 命令白名单）
+
+## 9. 附录：Windows 控制台架构与编码层（2026-11-24）
+
+> 记录内建 SSH 选择 PTY 载体、设置编码时的底层依据，避免后续把 `chcp` 当成万能开关，或误以为 winpty 与 ConPTY 是同类实现。
+
+### 9.1 conhost.exe 是什么
+
+`conhost.exe` 是 Windows 7 起引入的**控制台宿主进程**（console server）：持有屏幕缓冲区（`CHAR_INFO` 网格：Unicode 字符 + 16 色属性）、输入事件队列，实现控制台 API 服务端，并负责窗口渲染。任何"真控制台"背后都有一个 conhost；它比 ConPTY 早十多年，两者不是同一层概念。
+
+### 9.2 经典 Win32 控制台 API：屏幕模型，不是流模型
+
+- 生命周期：`AllocConsole` / `AttachConsole` / `FreeConsole`，设备名 `CONIN$` / `CONOUT$`
+- 输出：`WriteConsole(W/A)`、`WriteFile`（控制台句柄）、`SetConsoleCursorPosition`、`SetConsoleTextAttribute`、`SetConsoleScreenBufferSize`、`FillConsoleOutput*`
+- 输入：`ReadConsole`、`ReadConsoleInput`（返回 `INPUT_RECORD`：按键/鼠标/窗口缩放/焦点）、`WriteConsoleInput`、`PeekConsoleInput`、`SetConsoleMode`
+- 屏幕缓冲：`ReadConsoleOutput(W/A)`、`ReadConsoleOutputCharacter/Attribute`、`ScrollConsoleScreenBuffer`、`GetConsoleScreenBufferInfo`
+
+关键：应用写进去的字节被 conhost **当场翻译成单元格后丢弃**，API 里不存在"宿主可读的输出流"；应用可任意定位写、局部重绘、滚屏、改属性，唯一权威状态是网格 + 光标 + 缓冲区信息。这是所有 PTY 方案要么改造 conhost、要么只能"抓屏"的根本原因。
+
+### 9.3 三种载体对照
+
+| | 应用看到的 std 句柄 | 我们这侧拿到什么 | 说明 |
+|---|---|---|---|
+| 纯管道（`startPipe` 兜底） | 管道/文件，不是控制台 | 原始字节 | 无控制台语义：TUI、行编辑、Ctrl+C 处理均不可用 |
+| winpty（Win7/8 回退） | 真控制台（隐藏窗口的 conhost） | agent 抓屏幕缓冲 diff → 自造 VT 序列 | 经典 API 观察者，不是 ConPTY 实现 |
+| ConPTY（Win10 1809+） | 伪控制台句柄（headless conhost） | conhost 序列化的 VT 流 | VT 语义完整，但同样是 conhost 重新序列化，不是应用原始字节 |
+
+- **ConPTY 不是"另一种 conhost 实现"**：`CreatePseudoConsole` 拉起的是 `conhost.exe --headless`，用管道替代窗口，VT 解析/渲染仍在 conhost 内。第三方只能包装这套 API（`conpty` / `portable-pty` / `ptyprocess`）。Windows Terminal 的 `OpenConsole.exe` 是同一份开源 conhost 代码，用于默认终端接管，也不是独立实现。
+- **winpty 用的是真 conhost，但用法不同**：`winpty-agent.exe`（GUI 子系统）自己 `AllocConsole` 出一个隐藏窗口的真控制台；输入用 `WriteConsoleInput` 注入 `INPUT_RECORD`，输出用 `ReadConsoleOutput*` 周期性抓网格做 diff，再翻译成自造 VT 序列发给客户端。代价：VT 直通语义丢失（应用写的原始转义序列已被 conhost 解析成网格）、只有 16 色属性、滚屏/resize/全屏重绘靠启发式、性能是轮询差分。另一条路是注入 DLL hook `WriteConsole`/`ReadConsole`，侵入性强且与杀软冲突，未采用。
+- Win7 之前控制台由 `csrss.exe` 托管；winpty 跑在已有 ConPTY 会话内时，`AllocConsole` 会附着外层伪控制台而非新建 conhost。
+
+### 9.4 chcp 的作用边界
+
+`chcp` 调 `SetConsoleOutputCP`/`SetConsoleCP`，只影响 conhost 把 `WriteConsoleA` 字节解释成单元格（以及反向）时用的代码页。它改不了：
+
+1. 程序直接写重定向句柄/管道的字节编码（Go 二进制原样写字节，不过 conhost 转换）；
+2. PowerShell 的 `[Console]::OutputEncoding` / `$OutputEncoding`（PS 层变量，5.1 不随 `chcp` 自动同步）；
+3. ConPTY 管道里的 VT 流编码（conhost 固定输出 UTF-8）。
+
+因此内建 SSH 的编码修复走**启动参数**，而不是向 PTY 注入 `chcp` 行（注入行会被回显且与 shell 首批输出竞争）：
+
+- PowerShell：`chcp 65001`（PS 5.1 启动时缓存控制台代码页，单靠 `[Console]::OutputEncoding` 不够，原生程序输出仍需控制台为 65001）+ `[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8`（`$OutputEncoding` 覆盖 PS 管道送进原生程序的场景，5.1 默认为 ASCII）。
+- Win7（WMF 3+）在启动命令里跑 `chcp` 会卡住，只设 .NET 的 console/pipe 编码。
+- cmd：`/k chcp 65001>nul`。
+- Git Bash 等 POSIX shell 原生 UTF-8，不追加任何参数；未知程序同样不追加，避免破坏用户自定义程序。

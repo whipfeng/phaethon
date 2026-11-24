@@ -235,7 +235,7 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 						return
 					}
 					req.Reply(true, nil)
-					runBuiltinShell(channel, cols, rows, "PTY unavailable; using the built-in shell")
+					runBuiltinShellWithResize(channel, reqs, cols, rows, "PTY unavailable; using the built-in shell")
 					return
 				}
 				proc, err = startSessionProc(shell, "", true, true, cols, rows)
@@ -249,12 +249,14 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 					}
 					util.LogModuleWarn("ssh", "start auto shell %q failed, using built-in: %v", shell, err)
 					req.Reply(true, nil)
-					runBuiltinShell(channel, cols, rows, "failed to start the system shell; using the built-in shell")
+					runBuiltinShellWithResize(channel, reqs, cols, rows, "failed to start the system shell; using the built-in shell")
 					return
 				}
 				started = true
 				req.Reply(true, nil)
+				stopResize := watchSessionResize(reqs, proc.Resize)
 				runSession(channel, proc, true)
+				stopResize()
 				return
 			}
 
@@ -279,13 +281,89 @@ func (s *SSHServer) handleSession(ch ssh.NewChannel) {
 			req.Reply(true, nil)
 			// exec sessions must drain their output pipe even when a pty was
 			// requested, otherwise the last 32KB pipe buffer is truncated.
+			stopResize := watchSessionResize(reqs, proc.Resize)
 			runSession(channel, proc, false)
+			stopResize()
 			return
 
 		default:
 			req.Reply(false, nil)
 		}
 	}
+}
+
+// serveSessionRequests keeps consuming the channel's request stream for the
+// lifetime of a running session.
+//
+// The client sends pty-req and then shell/exec, but the request stream stays
+// open afterwards: every terminal resize arrives later as a "window-change"
+// request on the same stream (RFC 4254 §6.7). Returning from the request loop
+// as soon as the process starts orphans that stream — the PTY keeps the size
+// it was given in pty-req and the remote side never adapts to the local
+// terminal window. Consume requests until the session ends.
+func serveSessionRequests(reqs <-chan *ssh.Request, resize func(cols, rows uint32), stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case req, ok := <-reqs:
+			if !ok {
+				return
+			}
+			switch req.Type {
+			case "window-change":
+				var p struct {
+					Cols uint32
+					Rows uint32
+					Wpx  uint32
+					Hpx  uint32
+				}
+				if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Cols > 0 && p.Rows > 0 {
+					resize(p.Cols, p.Rows)
+				}
+				// window-change never asks for a reply.
+			default:
+				req.Reply(false, nil)
+			}
+		}
+	}
+}
+
+// watchSessionResize starts serving window-change requests for a session and
+// returns a stop function. The stop function does not return until the watcher
+// has exited, so callers may safely tear the process down (or close the size
+// channel) right after calling it — a late window-change can never reach a
+// released PTY handle or a closed channel.
+func watchSessionResize(reqs <-chan *ssh.Request, resize func(cols, rows uint32)) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveSessionRequests(reqs, resize, stop)
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// runBuiltinShellWithResize runs the built-in shell fallback while forwarding
+// later window-change requests into Bubble Tea; the fallback must follow the
+// terminal size just like a real PTY session.
+func runBuiltinShellWithResize(channel ssh.Channel, reqs <-chan *ssh.Request, cols, rows uint32, reason string) {
+	// Buffer of one: only the freshest size matters, Bubble Tea may be slower
+	// than the client. Draining before sending keeps the callback non-blocking.
+	sizes := make(chan [2]uint32, 1)
+	stop := watchSessionResize(reqs, func(c, r uint32) {
+		select {
+		case <-sizes:
+		default:
+		}
+		sizes <- [2]uint32{c, r}
+	})
+	runBuiltinShell(channel, cols, rows, reason, sizes)
+	stop() // no send can happen after this returns
+	close(sizes)
 }
 
 // runSession 在 shell/exec 应答成功后双向搬运数据，进程结束后上报 exit-status。

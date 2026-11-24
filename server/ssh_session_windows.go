@@ -74,6 +74,13 @@ func (p *conptyProc) closeLocked() {
 }
 
 func (p *conptyProc) Resize(cols, rows uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// A late window-change may race the session teardown; never touch the
+	// pseudoconsole after it was closed.
+	if p.closed {
+		return
+	}
 	_ = p.cpty.Resize(int(cols), int(rows))
 }
 

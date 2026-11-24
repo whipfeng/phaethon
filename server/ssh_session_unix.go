@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/creack/pty"
 )
@@ -13,15 +14,41 @@ import (
 type ptyProc struct {
 	cmd *exec.Cmd
 	f   *os.File
+
+	// mu guards closed. A late window-change may race the session teardown;
+	// resizing an already closed fd could hit an unrelated file that reused
+	// the descriptor number.
+	mu     sync.Mutex
+	closed bool
 }
 
 func (p *ptyProc) Read(b []byte) (int, error)  { return p.f.Read(b) }
 func (p *ptyProc) Write(b []byte) (int, error) { return p.f.Write(b) }
 func (p *ptyProc) Wait() error                 { return p.cmd.Wait() }
-func (p *ptyProc) Kill()                       { _ = p.cmd.Process.Kill(); p.f.Close() }
-func (p *ptyProc) CloseStdin()                 {}
-func (p *ptyProc) CloseIO()                    { _ = p.f.Close() }
+func (p *ptyProc) Kill() {
+	_ = p.cmd.Process.Kill()
+	p.closeLocked()
+}
+func (p *ptyProc) CloseStdin() {}
+func (p *ptyProc) CloseIO()    { p.closeLocked() }
+
+// closeLocked closes the master fd at most once. Callers must hold p.mu.
+func (p *ptyProc) closeLocked() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.closed = true
+	_ = p.f.Close()
+}
+
 func (p *ptyProc) Resize(cols, rows uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
 	_ = pty.Setsize(p.f, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 

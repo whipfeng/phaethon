@@ -21,7 +21,7 @@ import (
 // It is used only when no shell was explicitly configured and the auto-detected
 // system shell cannot be given a PTY; it deliberately does not wrap an arbitrary
 // program (vim/top/ssh still require a real PTY).
-func runBuiltinShell(channel ssh.Channel, cols, rows uint32, reason string) {
+func runBuiltinShell(channel ssh.Channel, cols, rows uint32, reason string, sizes <-chan [2]uint32) {
 	if cols == 0 {
 		cols = 100
 	}
@@ -35,6 +35,15 @@ func runBuiltinShell(channel ssh.Channel, cols, rows uint32, reason string) {
 		tea.WithOutput(channel),
 		tea.WithAltScreen(),
 	)
+	if sizes != nil {
+		// program.Send is a no-op after Run returns, so this goroutine exits
+		// with the size stream without leaking.
+		go func() {
+			for s := range sizes {
+				program.Send(tea.WindowSizeMsg{Width: int(s[0]), Height: int(s[1])})
+			}
+		}()
+	}
 	if _, err := program.Run(); err != nil {
 		util.LogModuleWarn("ssh", "built-in shell exited: %v", err)
 	}

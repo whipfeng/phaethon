@@ -12,8 +12,8 @@ import (
 	"phaethon/util"
 )
 
-// sessionEnv returns the environment for a user session, with worker-only
-// variables removed.
+// sessionEnv returns the environment for a user session, with worker-only and
+// terminal-multiplexer variables removed.
 //
 // The built-in SSH server runs INSIDE the worker process, so every session
 // inherits the worker's environment — including PHAETHON_WORKER=1. If a user
@@ -21,11 +21,20 @@ import (
 // no watchdog, own parent pid 1, and its stdout is a file instead of the
 // watchdog pipe. That produced an orphaned worker on jf and silently disabled
 // restart supervision. Never leak this variable into user sessions.
+//
+// The worker itself may have been launched from a psmux/tmux session (deploy
+// scripts keep long-running processes in one). Leaking PSMUX_SESSION/TMUX into
+// the user's shell makes `tmux attach` inside a built-in SSH session fail with
+// "sessions should be nested with care" — a user session is never nested in the
+// worker's session manager.
 func sessionEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
-		if strings.HasPrefix(kv, "PHAETHON_WORKER=") {
+		if strings.HasPrefix(kv, "PHAETHON_WORKER=") ||
+			strings.HasPrefix(kv, "PSMUX_") ||
+			strings.HasPrefix(kv, "TMUX=") ||
+			strings.HasPrefix(kv, "TMUX_PANE=") {
 			continue
 		}
 		out = append(out, kv)

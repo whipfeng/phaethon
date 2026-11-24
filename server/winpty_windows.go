@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -173,6 +174,31 @@ func winptyTakeError(api *winptyAPI, errp uintptr) error {
 	return fmt.Errorf("winpty error %d: %s", code, msg)
 }
 
+// buildWinptyEnvBlock builds the NUL-separated, double-NUL-terminated UTF-16
+// environment block expected by winpty_spawn_config_new. Passing NULL makes the
+// spawned shell inherit the worker's environment verbatim, leaking worker-only
+// and session-manager variables (PHAETHON_WORKER, PSMUX_SESSION, TMUX) into
+// user shells, so always pass the filtered copy.
+func buildWinptyEnvBlock(env []string) ([]uint16, error) {
+	var out []uint16
+	for _, kv := range env {
+		if strings.IndexByte(kv, 0) >= 0 {
+			return nil, fmt.Errorf("environment variable contains NUL: %q", kv)
+		}
+		u, err := syscall.UTF16FromString(kv)
+		if err != nil {
+			return nil, err
+		}
+		// UTF16FromString already appends a NUL terminator per string.
+		out = append(out, u...)
+	}
+	if len(out) == 0 {
+		return []uint16{0}, nil
+	}
+	out = append(out, 0)
+	return out, nil
+}
+
 // startWinptyProc creates a winpty PTY, spawns appname/cmdline and returns a
 // sessionProc backed by the PTY pipes.
 func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32, legacyExit bool) (*winptyProc, error) {
@@ -242,13 +268,22 @@ func startWinptyProc(appname, cmdline, workDir string, cols, rows uint32, legacy
 	}
 
 	errp = 0
+	envBlock, err := buildWinptyEnvBlock(sessionEnv())
+	if err != nil {
+		return fail(err)
+	}
+	var envPtr uintptr
+	if len(envBlock) > 0 {
+		envPtr = uintptr(unsafe.Pointer(&envBlock[0]))
+	}
 	scfg, _, _ := api.spawnConfigNew.Call(
 		uintptr(winptySpawnFlagAutoShutdown),
 		appNamePtr,
 		uintptr(unsafe.Pointer(cmd16)),
 		cwdPtr,
-		0,
+		envPtr,
 		uintptr(unsafe.Pointer(&errp)))
+	runtime.KeepAlive(envBlock)
 	if err := winptyTakeError(api, errp); err != nil {
 		return fail(err)
 	}

@@ -320,6 +320,10 @@ func startConpty(commandLine, workDir string, cols, rows uint32) (*conptyProc, e
 	opts := []conpty.ConPtyOption{
 		conpty.ConPtyDimensions(int(cols), int(rows)),
 		conpty.ConPtyWorkDir(workDir),
+		// ConPTY otherwise inherits the worker's environment verbatim; use the
+		// same filtered environment as the pipe path so worker-only and
+		// session-manager variables never reach the user's shell.
+		conpty.ConPtyEnv(sessionEnv()),
 	}
 	cpty, err := conpty.Start(commandLine, opts...)
 	if err != nil {

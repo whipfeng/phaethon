@@ -2,6 +2,7 @@ package server
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"phaethon/db"
@@ -14,6 +15,36 @@ func setupShellTestDB(t *testing.T) {
 		t.Fatalf("db.Init: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+}
+
+// TestSessionEnvFiltersWorkerAndSessionManagerVars 内建 SSH 的用户 shell 不能
+// 继承 worker 专用变量，也不能继承 worker 所在终端复用器的会话变量——否则
+// 会话内 `tmux attach` 会报 "sessions should be nested with care"。
+func TestSessionEnvFiltersWorkerAndSessionManagerVars(t *testing.T) {
+	t.Setenv("PHAETHON_WORKER", "1")
+	t.Setenv("PSMUX_SESSION", "trae")
+	t.Setenv("PSMUX_PANE", "%1")
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+	t.Setenv("TMUX_PANE", "%0")
+	t.Setenv("PHAETHON_TEST_KEEP", "yes")
+
+	env := sessionEnv()
+	has := func(key string) bool {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range []string{"PHAETHON_WORKER", "PSMUX_SESSION", "PSMUX_PANE", "TMUX", "TMUX_PANE"} {
+		if has(key) {
+			t.Errorf("%s leaked into session env", key)
+		}
+	}
+	if !has("PHAETHON_TEST_KEEP") {
+		t.Errorf("normal variable was dropped from session env")
+	}
 }
 
 // TestResolveShellDBOverride 配置了 shell 时必须优先于自动探测。

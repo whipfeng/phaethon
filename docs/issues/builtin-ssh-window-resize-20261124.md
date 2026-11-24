@@ -44,6 +44,11 @@ RFC 4254 §6.7 规定终端尺寸变化以 `window-change` 请求**在会话生�
 - `TestServeSessionRequestsStopsWithSession`：stop 后协程退出，无泄漏。
 - `TestSSHWindowChangeResizesConPTY`（Windows 实机 ConPTY）：pty-req 80 宽启动 PowerShell，断言初始 `[Console]::WindowWidth == 80`，发送 `WindowChange(40, 120)` 后断言变成 120 —— 证明 resize 真正落到 ConPTY，而不只是通道里少了个报错。
 - `go test ./server` 全量通过；`GOOS=linux go build ./server` 通过；`go vet` 仅剩 `winpty_windows.go` 历史遗留的 unsafe.Pointer 警告。
+- **实机端到端（v0.8.3-63-gddd0c18）**：用 x/crypto/ssh 探针经内建 SSH 建立 80x24 的 PTY 会话，
+  2 秒后发送 `window-change(120x40)`，再读取会话内的真实尺寸：
+  - vm（Win11 + ConPTY + PowerShell）：`[Console]::WindowWidth` 从 80 → **120**；
+  - qg（Alpine + creack/pty）：`stty size` 从 `24 80` → **`40 120`**。
+  两处均通过，证明修复在 ConPTY 与 Unix pty 两条实现上都生效。
 
 ## 备注
 

@@ -17,7 +17,7 @@ const stickyLRUMax = 65536
 const stickyRebalanceGrace = 10 * time.Minute
 
 type stickyLRUEntry struct {
-	key      string
+	key      selectionKey
 	value    string
 	gen      uint64
 	lastUsed time.Time
@@ -27,7 +27,7 @@ type stickyLRU struct {
 	mu    sync.Mutex
 	max   int
 	order *list.List
-	items map[string]*list.Element
+	items map[selectionKey]*list.Element
 }
 
 func newStickyLRU(max int) *stickyLRU {
@@ -37,14 +37,14 @@ func newStickyLRU(max int) *stickyLRU {
 	return &stickyLRU{
 		max:   max,
 		order: list.New(),
-		items: make(map[string]*list.Element, max),
+		items: make(map[selectionKey]*list.Element, max),
 	}
 }
 
 // Get returns the cached value and refreshes its recency. An entry created
 // under an older topology generation is a miss once it has been idle for grace,
 // so it gets re-selected against the current owner set.
-func (c *stickyLRU) Get(key string, gen uint64, grace time.Duration) (string, bool) {
+func (c *stickyLRU) Get(key selectionKey, gen uint64, grace time.Duration) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[key]
@@ -65,7 +65,7 @@ func (c *stickyLRU) Get(key string, gen uint64, grace time.Duration) (string, bo
 
 // Put inserts or updates a value, evicting the least-recently-used entry when
 // the cache exceeds its bound.
-func (c *stickyLRU) Put(key, value string, gen uint64) {
+func (c *stickyLRU) Put(key selectionKey, value string, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.items[key]; ok {

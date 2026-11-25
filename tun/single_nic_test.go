@@ -36,7 +36,7 @@ func TestSingleNICDesign(t *testing.T) {
 		t.Fatalf("create NIC: %v", err)
 	}
 
-	s.SetRouteSelector(func(dst tcpip.Address) stack.RouteDecision {
+	s.SetRouteSelector(func(src, dst tcpip.Address) stack.RouteDecision {
 		return stack.RouteDecision{
 			EgressNIC:  nicID,
 			LocalStack: dst == dnsAddr,

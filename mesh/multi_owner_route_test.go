@@ -32,9 +32,9 @@ func TestSelectEgressNodeIDDeterministic(t *testing.T) {
 	m1 := newTestMeshManager(t, "self", "100.64.1.0/24", nil)
 	m2 := newTestMeshManager(t, "self", "100.64.1.0/24", nil)
 
-	got1 := m1.selectEgressNodeID(target, entries)
+	got1 := m1.selectEgressNodeID(nil, target, entries)
 	reversed := []RouteEntry{entries[1], entries[0]}
-	got2 := m2.selectEgressNodeID(target, reversed)
+	got2 := m2.selectEgressNodeID(nil, target, reversed)
 
 	if got1 == "" {
 		t.Fatal("no egress node selected")

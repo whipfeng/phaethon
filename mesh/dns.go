@@ -31,21 +31,21 @@ type DNSHijacker struct {
 	closeCh chan struct{}
 
 	// Cross-node DNS forwarding
-	resolveDomainSubnet func(domain string) (*net.IPNet, bool) // returns (subnet, needsFail)
+	resolveDomainSubnet func(src net.IP, domain string) (*net.IPNet, bool) // returns (subnet, needsFail)
 	cache               *DNSCache
 
 	// Async query processing
 	dnsQueryCh chan dnsQuery // buffered channel for worker pool
 
 	// Async DNS forwarder (v0.2.0, fully async since dns_forward_full_async)
-	forwarderSocket   tcpip.Endpoint         // persistent UDP socket for forwarding
-	forwarderWQ       waiter.Queue           // waiter queue for forwarder socket
-	pendingQueries    map[string][]*pendingQuery // domain (lowercase) -> waiting clients (same-domain concurrent queries share the flight)
-	pendingMu         sync.Mutex             // protects pendingQueries
-	forwarderStopCh   chan struct{}          // stops background listener
-	forwarderMu       sync.Mutex             // guards forwarder lifecycle (socket/stopCh/stopped)
-	forwarderStopped  bool                   // set by Stop; startForwarder refuses after this
-	stopOnce          sync.Once              // makes Stop idempotent
+	forwarderSocket  tcpip.Endpoint             // persistent UDP socket for forwarding
+	forwarderWQ      waiter.Queue               // waiter queue for forwarder socket
+	pendingQueries   map[string][]*pendingQuery // domain (lowercase) -> waiting clients (same-domain concurrent queries share the flight)
+	pendingMu        sync.Mutex                 // protects pendingQueries
+	forwarderStopCh  chan struct{}              // stops background listener
+	forwarderMu      sync.Mutex                 // guards forwarder lifecycle (socket/stopCh/stopped)
+	forwarderStopped bool                       // set by Stop; startForwarder refuses after this
+	stopOnce         sync.Once                  // makes Stop idempotent
 }
 
 // forwardTimeout is how long a forwarded query waits for a response before
@@ -145,7 +145,7 @@ func (h *DNSHijacker) BindNetstack(ns *stack.Stack, tunAddr, dnsAddr tcpip.Addre
 	h.ns = ns
 	h.tunAddr = tunAddr
 	h.dnsAddr = dnsAddr
-	
+
 	// Initialize async DNS forwarder
 	h.startForwarder()
 }
@@ -366,14 +366,14 @@ func parseDNSResponseForCache(resp []byte) (domain string, ip net.IP, ttl time.D
 	if parsedIP == nil {
 		return "", nil, 0
 	}
-	
+
 	// Extract domain from response (question section)
 	// Note: parseDNSQueryDomain only works for queries (QR=0), so we need a separate function for responses
 	domain, _, ok := parseDNSResponseDomain(resp)
 	if !ok {
 		return "", parsedIP, parsedTTL
 	}
-	
+
 	return domain, parsedIP, parsedTTL
 }
 
@@ -383,7 +383,7 @@ func parseDNSResponseDomain(pkt []byte) (string, uint16, bool) {
 	if len(pkt) < 12 {
 		return "", 0, false
 	}
-	
+
 	// For responses, we don't check the QR bit - we just parse the question section
 	qdcount := (uint16(pkt[4]) << 8) | uint16(pkt[5])
 	if qdcount == 0 {
@@ -440,7 +440,7 @@ func (h *DNSHijacker) IsBound() bool {
 //   - subnet != nil: matched a route, forward to remote
 //   - subnet == nil && needsFail == true: static match but node not ready, return SERVFAIL
 //   - subnet == nil && needsFail == false: no match, fallback to local pool
-func (h *DNSHijacker) SetDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
+func (h *DNSHijacker) SetDomainResolver(resolver func(src net.IP, domain string) (*net.IPNet, bool)) {
 	h.resolveDomainSubnet = resolver
 }
 
@@ -668,7 +668,7 @@ func (h *DNSHijacker) processQuery(packet []byte, remoteAddr tcpip.FullAddress) 
 	// Check if domain belongs to a remote node
 	if h.resolveDomainSubnet != nil {
 		util.LogModuleDebug("dns", "[DNS-FWD-DEBUG] resolveDomainSubnet called: domain=%s", domain)
-		remoteSubnet, needsFail := h.resolveDomainSubnet(domain)
+		remoteSubnet, needsFail := h.resolveDomainSubnet(net.IP(remoteAddr.Addr.AsSlice()), domain)
 		util.LogModuleDebug("dns", "[DNS-FWD-DEBUG] resolveDomainSubnet result: domain=%s remoteSubnet=%v needsFail=%v", domain, remoteSubnet, needsFail)
 		if remoteSubnet != nil {
 			// Matched a route (static or dynamic): forward without blocking —
@@ -859,7 +859,6 @@ func (h *DNSHijacker) sweepPending() {
 		}
 	}
 }
-
 
 // SlicePayload implements tcpip.Payload for byte slices.
 type SlicePayload struct {

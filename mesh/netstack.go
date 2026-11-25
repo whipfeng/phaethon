@@ -431,7 +431,7 @@ func (n *Netstack) resolveOriginalSrc(proto int, srcIP net.IP, dstIP net.IP, dst
 // IPIP to egress EIP). Extracted from SetMeshManager so the identical
 // decision can be stored on n.selectRoute and re-run by MeshEgressNode.
 func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
-	return func(dst net.IP) (SelectRouteResult, bool) {
+	return func(src, dst net.IP) (SelectRouteResult, bool) {
 		// D17: read the immutable route table in place — no per-packet copy.
 		routes := meshMgr.RouteTableRoutes()
 		if routes == nil {
@@ -460,13 +460,23 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 				continue
 			}
 
-			targetNodeID := meshMgr.SelectEgressNodeID(dst, route.Entries)
+			// The source dimension applies only to the IPIP branch (non-mesh
+			// advertised prefix, possibly owned by several nodes). Mesh
+			// prefixes have a single owner by construction, so pass nil and
+			// keep the dst-only selection stable.
+			isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
+			var selSrc net.IP
+			if !isMeshPrefix {
+				selSrc = src
+			}
+
+			targetNodeID := meshMgr.SelectEgressNodeID(selSrc, dst, route.Entries)
 			if targetNodeID == "" {
 				// Diagnostic: log SelectEgressNodeID failure
 				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
 				continue
 			}
-			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s targetNode=%s", dst, route.Prefix, targetNodeID)
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s src=%v prefix=%s targetNode=%s", dst, src, route.Prefix, targetNodeID)
 
 			// Check if target is local node (advertised route owned by this node)
 			localNodeID := meshMgr.GetNodeID()
@@ -475,8 +485,6 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
 				return SelectRouteResult{LocalStack: true, TargetNodeID: targetNodeID}, true
 			}
-
-			isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
 
 			if isMeshPrefix {
 				// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
@@ -532,7 +540,7 @@ func (n *Netstack) IsMeshUnreachable(dst net.IP) bool {
 	if n.selectRoute == nil {
 		return false
 	}
-	_, ok := n.selectRoute(dst)
+	_, ok := n.selectRoute(nil, dst)
 	return !ok
 }
 
@@ -544,7 +552,7 @@ func (n *Netstack) MeshEgressNode(dst net.IP) string {
 	if n.selectRoute == nil {
 		return ""
 	}
-	r, ok := n.selectRoute(dst)
+	r, ok := n.selectRoute(nil, dst)
 	if !ok || r.LocalStack {
 		return ""
 	}
@@ -616,7 +624,7 @@ func (n *Netstack) GetFakeIPPool() *FakeIPPool {
 }
 
 // SetDNSDomainResolver sets the domain resolver callback for mesh DNS resolution.
-func (n *Netstack) SetDNSDomainResolver(resolver func(domain string) (*net.IPNet, bool)) {
+func (n *Netstack) SetDNSDomainResolver(resolver func(src net.IP, domain string) (*net.IPNet, bool)) {
 	if n.dnsHijacker != nil {
 		n.dnsHijacker.SetDomainResolver(resolver)
 	}
@@ -1305,6 +1313,22 @@ func (n *Netstack) NetDialWithModeB(network, addr string, clientAddr string, inb
 		return nil, fmt.Errorf("create endpoint: %s", tcpErr)
 	}
 	util.LogModuleDebug("netstack", "[NETSTACK-DIAL] endpoint created in %v", time.Since(epCreateStart))
+
+	// Hand the real client address to the stack selector (Phaethon patch #16).
+	// Without it the selector would see only this node's GIP as the source and
+	// multi-owner egress choice could not stay stable per client.
+	if clientAddr != "" {
+		if cip := net.ParseIP(clientAddr); cip != nil {
+			if cip4 := cip.To4(); cip4 != nil {
+				var sarr [4]byte
+				copy(sarr[:], cip4)
+				if tcpEP, ok := ep.(*tcp.Endpoint); ok {
+					tcpEP.RouteSrc = tcpip.AddrFrom4(sarr)
+					util.LogModuleDebug("netstack", "[NETSTACK-DIAL] RouteSrc set to client %s", clientAddr)
+				}
+			}
+		}
+	}
 
 	// Bind to GIP with port 0 to allocate source port
 	localAddr := tcpip.FullAddress{

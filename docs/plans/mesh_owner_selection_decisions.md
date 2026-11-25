@@ -1,6 +1,7 @@
 # Mesh 多 owner 选路最终结论（2026-11-25）
 
-状态：已落地。前端到 `f15aec5`：质量加权 rendezvous（前缀 + 域名同构）。
+状态：已落地。质量加权 rendezvous（前缀 + 域名同构），并已加入**源 IP 维度**
+（2026-11-25 第二轮，修正了第 3 节原先"不做源维度"的结论）。
 
 本文件用于终止重复讨论。下面每一条都是最终结论；如无新事实，不要重开。
 
@@ -16,8 +17,13 @@
    注意：当前**节点声明产生的都是 dynamic**；static 是后续单独加控制台页面去
    支持的能力（前缀路由和域名路由都预留），不是现在就有的语义。
    —— 不要再把“节点自己的声明”说成 static。
-2. **sticky**：按目标做粘性，key = 目标（前缀用 IP 字符串，域名用域名）：
-   - TCP/UDP 共用一个 key，不做 5 元组、不做源 IP 维度。
+2. **sticky**：key = `selectionKey{Src, Target}`（结构体，不是字符串拼接）：
+   - `Target` 是前缀 IP 字符串或域名；`Src` 是**真实客户端源 IP**。
+   - **源维度只用于 IPIP 分支**（非 mesh 网段的外部前缀，可能多 owner）；
+     mesh 网段前缀按构造只有一个 owner，`Src` 留空，保持原有 dst-only 稳定选择。
+   - 域名侧同构：`Src` 取 DNS 查询的真实源 IP（DNSHijacker 的 `remoteAddr`），
+     在域名解析阶段就定下 owner。
+   - TCP/UDP 共用一个 key 结构，不做 5 元组、不再按连接拆分。
    - 命中且 owner 仍可用 → 直接复用。
    - 拓扑代次（generation）变化后，不立即重选；仅当该目标**空闲超过 10 分钟**
      （`stickyRebalanceGrace`）才按新拓扑重哈希，避免活跃连接被抖断。
@@ -33,13 +39,23 @@
      **确定性接管**，不以分担流量为目的。加权退化出的"按成本分摊"只是这种情况下的
      自然结果，不要把它当成多 owner 的主要用途。
 
-## 3. 明确不做（已否决，勿再讨论）
+## 3. 源 IP 维度（2026-11-25 修正为采纳）
 
-- 不做 **gvisor fork / 5 元组 hook**。
-- 不做 **(target, clientIP) 二元组**：代理 server 入口拿到的 src 是 phaethon 自己
-  的 VIP，不是真实客户端 IP，两条入口路径行为会不一致。
-- 不要求跨连接完全一致：TCP 选定 nodeid 后连接内稳定即可；分散是目标。
-- 不为 UDP 单独拆流程：UDP 与 TCP 共用按目标的 sticky，可接受。
+- **(src, target) 二元组已采纳**，取代此前"不做源维度"的结论。原因：不给源维度时，
+  同一目标下不同客户端/连接会被哈希到同一 owner，无法体现"主备 + 按源分散"的预期；
+  且源 IP 在两个入口都是可得的真实值：
+  - TUN 入口：`ipv4.forwardUnicastPacket` 的 `srcAddr` 是 **pre-SNAT** 真实客户端。
+  - 代理入口：`clientAddr` 参数就是真实客户端。
+  - DNS 入口：`serveLoop` 的 `remoteAddr.Addr` 就是查询方真实源 IP。
+- 统一在 gvisor fork 内实现，不分阶段绕路：
+  - `stack.RouteSelector` 签名扩为 `func(src, dst tcpip.Address)`；
+    新增 `Stack.FindRouteFrom(src, ...)`，原 `FindRoute` 以零源调用，行为不变。
+  - `decisionForSelector` 的 dst-only 缓存只对零源调用生效；带源决策不按 dst 缓存
+    （转发分支本来就是 `Cacheable=false`）。
+  - IPv4 转发路径传入 pre-SNAT 源；TCP connect/reroute 通过 `Endpoint.RouteSrc`
+    接收代理拨号写入的真实客户端源。
+- 仍**不做 5 元组**：选定 owner 后连接内稳定，端口/协议维度不参与选择。
+- 不为 UDP 单独拆流程：UDP 与 TCP 共用同一个 `selectionKey`。
 
 ## 4. 兜底链路语义（用户已纠正）
 
@@ -78,8 +94,14 @@
 
 | 位置 | 说明 |
 |---|---|
-| `mesh/mesh.go` `selectEgressNodeID` | 前缀选路（static → sticky → 加权） |
-| `mesh/mesh.go` `selectEgressNodeIDForDomain` | 域名选路（同构） |
-| `mesh/mesh.go` `pickWeightedOwner` / `unitHash` | 加权 rendezvous |
+| `mesh/mesh.go` `selectEgressNodeID` | 前缀选路（static → sticky → 加权），带 src |
+| `mesh/mesh.go` `selectEgressNodeIDForDomain` | 域名选路（同构），src = DNS 查询源 |
+| `mesh/mesh.go` `selectionKey` / `makeSelectionKey` | sticky key 结构体 `{Src, Target}` |
+| `mesh/mesh.go` `pickWeightedOwner` / `unitHash` | 加权 rendezvous，hash(src,target,owner) |
+| `mesh/netstack.go` `selectRouteFunc` | 仅 IPIP 分支传 src，mesh 前缀留空 |
+| `mesh/netstack.go` `NetDialWithModeB` | 代理拨号写入 `Endpoint.RouteSrc` |
+| `mesh/dns.go` `processQuery` | 把 DNS 查询源传给 `ResolveDomainSubnet` |
+| fork `stack.FindRouteFrom` / `RouteSelector(src,dst)` | 源感知选路入口 |
+| fork `ipv4.forwardUnicastPacket` | 转发传入 pre-SNAT 源 |
 | `mesh/sticky_lru.go` `stickyRebalanceGrace` | 10 分钟空闲宽限 |
 | `mesh/sticky_lru.go` `stickyLRUMax` | 粘性表容量 |

@@ -32,10 +32,15 @@ type SelectRouteResult struct {
 
 // SelectRouteFunc decides how to route a non-local destination.
 //
+// src is the packet's original source (pre-SNAT) when known; it is nil for
+// destination-only queries. The owner-selection layer uses it only for the
+// IPIP branch (non-mesh advertised prefixes); mesh and local branches ignore
+// it.
+//
 // Returns ok=true with a non-zero LinkNIC for both branches 2 (mesh) and
 // 3 (non-mesh advertised). ok=false means "no opinion" — RouteSelector then
 // falls through to branch 4 (default NIC 1 fallback).
-type SelectRouteFunc func(dst net.IP) (SelectRouteResult, bool)
+type SelectRouteFunc func(src, dst net.IP) (SelectRouteResult, bool)
 
 // RouteSelectorConfig holds the configuration for NewRouteSelector.
 //
@@ -95,8 +100,12 @@ type RouteSelectorConfig struct {
 // packet still addressed to VIP must leave NIC 1. Conntrack return packets
 // carry OutputNICName and bypass this destination-only selector entirely.
 func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
-	return func(dst tcpip.Address) stack.RouteDecision {
+	return func(src, dst tcpip.Address) stack.RouteDecision {
 		dstIP := net.IP(dst.AsSlice())
+		var srcIP net.IP
+		if src.BitLen() != 0 {
+			srcIP = net.IP(src.AsSlice())
+		}
 
 		// Branch 1: local mesh subnet. VIP is a conntrack transit address;
 		// GIP, hostIP, EIP and fakeIP are local stack destinations.
@@ -124,7 +133,7 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 
 		// Branches 2 & 3: SelectRoute covers both mesh and non-mesh advertised.
 		if cfg.SelectRoute != nil {
-			if r, ok := cfg.SelectRoute(dstIP); ok {
+			if r, ok := cfg.SelectRoute(srcIP, dstIP); ok {
 				// Check if this is a local delivery (locally-owned advertised route)
 				if r.LocalStack {
 					decision := stack.RouteDecision{

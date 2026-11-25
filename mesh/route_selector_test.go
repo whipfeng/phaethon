@@ -37,7 +37,7 @@ func TestRouteSelectorLocalStack(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			decision := selector(test.dst)
+			decision := selector(tcpip.Address{}, test.dst)
 			if decision.EgressNIC != 1 {
 				t.Fatalf("EgressNIC = %d, want 1", decision.EgressNIC)
 			}

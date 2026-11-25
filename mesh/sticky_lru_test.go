@@ -9,40 +9,40 @@ import (
 func TestStickyLRUPinnedAcrossGenerationChange(t *testing.T) {
 	c := newStickyLRU(4)
 
-	c.Put("10.0.0.1", "ms9", 1)
-	if got, ok := c.Get("10.0.0.1", 1, stickyRebalanceGrace); !ok || got != "ms9" {
+	c.Put(selectionKey{Target: "10.0.0.1"}, "ms9", 1)
+	if got, ok := c.Get(selectionKey{Target: "10.0.0.1"}, 1, stickyRebalanceGrace); !ok || got != "ms9" {
 		t.Fatalf("same generation: got %q ok=%v", got, ok)
 	}
 
 	// Recently used: a new topology generation must not move it.
-	if got, ok := c.Get("10.0.0.1", 2, stickyRebalanceGrace); !ok || got != "ms9" {
+	if got, ok := c.Get(selectionKey{Target: "10.0.0.1"}, 2, stickyRebalanceGrace); !ok || got != "ms9" {
 		t.Fatalf("generation change within grace: got %q ok=%v, want pinned", got, ok)
 	}
 }
 
 func TestStickyLRUExpiresIdleAfterGenerationChange(t *testing.T) {
 	c := newStickyLRU(4)
-	c.Put("10.0.0.1", "ms9", 1)
+	c.Put(selectionKey{Target: "10.0.0.1"}, "ms9", 1)
 
 	idle := func() {
 		c.mu.Lock()
-		c.items["10.0.0.1"].Value.(*stickyLRUEntry).lastUsed = time.Now().Add(-2 * stickyRebalanceGrace)
+		c.items[selectionKey{Target: "10.0.0.1"}].Value.(*stickyLRUEntry).lastUsed = time.Now().Add(-2 * stickyRebalanceGrace)
 		c.mu.Unlock()
 	}
 
 	// Same generation: idle time alone never expires the entry.
 	idle()
-	if _, ok := c.Get("10.0.0.1", 1, stickyRebalanceGrace); !ok {
+	if _, ok := c.Get(selectionKey{Target: "10.0.0.1"}, 1, stickyRebalanceGrace); !ok {
 		t.Fatal("same generation expired on idle time")
 	}
 
 	// Stale generation + idle past grace → miss and removal.
 	idle()
-	if got, ok := c.Get("10.0.0.1", 2, stickyRebalanceGrace); ok {
+	if got, ok := c.Get(selectionKey{Target: "10.0.0.1"}, 2, stickyRebalanceGrace); ok {
 		t.Fatalf("stale generation after grace: got %q, want miss", got)
 	}
 	c.mu.Lock()
-	_, stillThere := c.items["10.0.0.1"]
+	_, stillThere := c.items[selectionKey{Target: "10.0.0.1"}]
 	c.mu.Unlock()
 	if stillThere {
 		t.Fatal("expired entry was not removed")
@@ -51,14 +51,14 @@ func TestStickyLRUExpiresIdleAfterGenerationChange(t *testing.T) {
 
 func TestStickyLRUCapacityEviction(t *testing.T) {
 	c := newStickyLRU(2)
-	c.Put("a", "n1", 1)
-	c.Put("b", "n2", 1)
-	c.Put("c", "n3", 1)
+	c.Put(selectionKey{Target: "a"}, "n1", 1)
+	c.Put(selectionKey{Target: "b"}, "n2", 1)
+	c.Put(selectionKey{Target: "c"}, "n3", 1)
 
-	if _, ok := c.Get("a", 1, stickyRebalanceGrace); ok {
+	if _, ok := c.Get(selectionKey{Target: "a"}, 1, stickyRebalanceGrace); ok {
 		t.Fatal("oldest entry should be evicted")
 	}
-	if _, ok := c.Get("c", 1, stickyRebalanceGrace); !ok {
+	if _, ok := c.Get(selectionKey{Target: "c"}, 1, stickyRebalanceGrace); !ok {
 		t.Fatal("newest entry missing")
 	}
 }
@@ -74,24 +74,24 @@ func TestSelectEgressNodeIDStickyGeneration(t *testing.T) {
 	}
 	m := newTestMeshManager(t, "self", "100.64.1.0/24", nil)
 
-	m.sticky.Put(target.String(), "ms9", m.routeGen.Load())
+	m.sticky.Put(selectionKey{Target: target.String()}, "ms9", m.routeGen.Load())
 	m.routeGen.Add(1) // topology rebuild
 
-	if got := m.selectEgressNodeID(target, entries); got != "ms9" {
+	if got := m.selectEgressNodeID(nil, target, entries); got != "ms9" {
 		t.Fatalf("active sticky selection moved on rebuild: got %q, want ms9", got)
 	}
 
 	m.sticky.mu.Lock()
-	m.sticky.items[target.String()].Value.(*stickyLRUEntry).lastUsed = time.Now().Add(-2 * stickyRebalanceGrace)
+	m.sticky.items[selectionKey{Target: target.String()}].Value.(*stickyLRUEntry).lastUsed = time.Now().Add(-2 * stickyRebalanceGrace)
 	m.sticky.mu.Unlock()
 	m.routeGen.Add(1)
 
-	got := m.selectEgressNodeID(target, entries)
+	got := m.selectEgressNodeID(nil, target, entries)
 	if got != "ms9" && got != "ms10" {
 		t.Fatalf("re-selected unknown owner %q", got)
 	}
 	m.sticky.mu.Lock()
-	entry, ok := m.sticky.items[target.String()]
+	entry, ok := m.sticky.items[selectionKey{Target: target.String()}]
 	var entryGen uint64
 	if ok {
 		entryGen = entry.Value.(*stickyLRUEntry).gen
@@ -123,7 +123,7 @@ func TestPickWeightedOwnerPrefersCheaperPath(t *testing.T) {
 	}
 	counts := map[string]int{}
 	for i := 0; i < 2000; i++ {
-		counts[m.selectEgressNodeID(net.IPv4(10, 1, byte(i>>8), byte(i)), entries)]++
+		counts[m.selectEgressNodeID(nil, net.IPv4(10, 1, byte(i>>8), byte(i)), entries)]++
 	}
 	if counts["cheap"] <= counts["dear"]*4 {
 		t.Fatalf("weighting ineffective, want cheap >> dear: %v", counts)
@@ -140,7 +140,7 @@ func TestPickWeightedOwnerUniformWhenEqualCost(t *testing.T) {
 	}
 	counts := map[string]int{}
 	for i := 0; i < 2000; i++ {
-		counts[m.selectEgressNodeID(net.IPv4(10, 2, byte(i>>8), byte(i)), entries)]++
+		counts[m.selectEgressNodeID(nil, net.IPv4(10, 2, byte(i>>8), byte(i)), entries)]++
 	}
 	for _, node := range []string{"a", "b"} {
 		if counts[node] < 400 || counts[node] > 1600 {

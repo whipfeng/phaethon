@@ -48,7 +48,7 @@ func newProbeTestNetstack(t *testing.T, sender PeerSender) (*Netstack, *LinkNIC)
 		LocalSubnet: subnet,
 		LocalVIP:    tcpip.AddrFrom4Slice(CalculateVIP(subnet)),
 		LocalGIP:    n.dnsAddr,
-		SelectRoute: func(dst net.IP) (SelectRouteResult, bool) {
+		SelectRoute: func(src, dst net.IP) (SelectRouteResult, bool) {
 			if peerSubnet.Contains(dst) {
 				return SelectRouteResult{LinkNIC: linkNIC.NICID()}, true
 			}
@@ -95,10 +95,10 @@ func TestClassifyDisposition(t *testing.T) {
 	deadByRate := []stallPeerSnap{{Node: "qg", LossRate: 0.5}}
 
 	cases := []struct {
-		name    string
-		rule    int
-		peers   []stallPeerSnap
-		want    string
+		name  string
+		rule  int
+		peers []stallPeerSnap
+		want  string
 	}{
 		{"no peers", 0, nil, "ambiguous"},
 		{"dead by consecLost", 0, deadByLoss, "dead-link-suspect"},

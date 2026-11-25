@@ -101,7 +101,7 @@ func TestLocalDomainSuffixResolvesLocally(t *testing.T) {
 		t.Fatalf("admin tree owners = %v, want [ms9 self]", owners)
 	}
 
-	subnet, needsFail := m.ResolveDomainSubnet("git.migu.cn")
+	subnet, needsFail := m.ResolveDomainSubnet(nil, "git.migu.cn")
 	if subnet != nil || needsFail {
 		t.Fatalf("local suffix resolved to remote subnet %v (needsFail=%v), want local pool", subnet, needsFail)
 	}
@@ -119,7 +119,7 @@ func TestDomainSelectionStaticExclusive(t *testing.T) {
 
 	for i := 0; i < 64; i++ {
 		domain := fmt.Sprintf("host%d.example.com", i)
-		if got := m.selectEgressNodeIDForDomain(domain, entries); got != "ms9" {
+		if got := m.selectEgressNodeIDForDomain(nil, domain, entries); got != "ms9" {
 			t.Fatalf("domain %s selected dynamic owner %q despite static entry", domain, got)
 		}
 	}

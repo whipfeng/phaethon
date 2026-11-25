@@ -24,13 +24,13 @@ func (f *fakePeerSender) GossipFields() (bool, int) { return false, 0 }
 func (f *fakePeerSender) LaneAckFields() (bool, bool, bool, []GossipLaneRx, int) {
 	return false, false, false, nil, 0
 }
-func (f *fakePeerSender) GetNodeID() string               { return "qgw" }
-func (f *fakePeerSender) GetProxyName() string            { return "" }
-func (f *fakePeerSender) GetLocalSeq() uint16             { return 0 }
-func (f *fakePeerSender) GetRemoteSeq() uint16            { return 0 }
-func (f *fakePeerSender) GetFriendlyName() string         { return "qgw" }
-func (f *fakePeerSender) HasProxy() bool                  { return false }
-func (f *fakePeerSender) GetLinkNIC() *LinkNIC            { return nil }
+func (f *fakePeerSender) GetNodeID() string       { return "qgw" }
+func (f *fakePeerSender) GetProxyName() string    { return "" }
+func (f *fakePeerSender) GetLocalSeq() uint16     { return 0 }
+func (f *fakePeerSender) GetRemoteSeq() uint16    { return 0 }
+func (f *fakePeerSender) GetFriendlyName() string { return "qgw" }
+func (f *fakePeerSender) HasProxy() bool          { return false }
+func (f *fakePeerSender) GetLinkNIC() *LinkNIC    { return nil }
 
 // TestOrdinaryUDPViaLinkNICWrite reproduces the QG production error:
 //
@@ -70,7 +70,7 @@ func TestOrdinaryUDPViaLinkNICWrite(t *testing.T) {
 		LocalSubnet: subnet,
 		LocalVIP:    tcpip.AddrFrom4Slice(CalculateVIP(subnet)),
 		LocalGIP:    n.dnsAddr,
-		SelectRoute: func(dst net.IP) (SelectRouteResult, bool) {
+		SelectRoute: func(src, dst net.IP) (SelectRouteResult, bool) {
 			if peerSubnet.Contains(dst) {
 				return SelectRouteResult{LinkNIC: linkNIC.NICID()}, true
 			}

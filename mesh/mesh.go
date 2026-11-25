@@ -217,22 +217,41 @@ func dedupeRouteEntries(entries []RouteEntry) []RouteEntry {
 	return out
 }
 
+// selectionKey is the sticky/rendezvous key: the target (prefix IP or domain)
+// plus the client source for the IPIP branch. A struct key keeps the two
+// dimensions separate instead of concatenating them into one string.
+type selectionKey struct {
+	Src    string
+	Target string
+}
+
+func makeSelectionKey(src net.IP, target string) selectionKey {
+	k := selectionKey{Target: target}
+	if src != nil {
+		k.Src = src.String()
+	}
+	return k
+}
+
 // selectEgressNodeID selects the best egress nodeID from a list of route entries.
 // Algorithm:
-// 1. Static entries win outright; dynamic entries only participate when no
-//    static entry is usable.
-// 2. Sticky: a cached selection is reused while its owner is still available.
-//    Selections made under an older topology generation are dropped only after
-//    the target has been idle for stickyRebalanceGrace, so active targets stay
-//    pinned while idle ones re-hash onto newly added owners.
-// 3. Weighted hash: stable selection biased toward the cheapest path
-//    (weight = 1/cost); equal or unknown costs spread uniformly.
+//  1. Static entries win outright; dynamic entries only participate when no
+//     static entry is usable.
+//  2. Sticky: a cached selection is reused while its owner is still available.
+//     Selections made under an older topology generation are dropped only after
+//     the target has been idle for stickyRebalanceGrace, so active targets stay
+//     pinned while idle ones re-hash onto newly added owners.
+//  3. Weighted hash: stable selection biased toward the cheapest path
+//     (weight = 1/cost); equal or unknown costs spread uniformly.
+//
+// src is the client source for the IPIP branch; nil for mesh/display lookups,
+// which keeps the dst-only selection unchanged.
 //
 // No online filter here: entries come from the unified route table which is
 // recomputed on topology changes, so an owner present in Entries is reachable
 // via topology (possibly multi-hop). isNodeOnline only knows direct peers and
 // would wrongly drop topology-advertised owners.
-func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
+func (m *MeshManager) selectEgressNodeID(src net.IP, targetIP net.IP, entries []RouteEntry) string {
 	if len(entries) == 0 {
 		return ""
 	}
@@ -267,28 +286,28 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		return available[i].NodeID < available[j].NodeID
 	})
 
-	// Sticky: check if we have a cached selection for this target.
-	targetKey := targetIP.String()
+	// Sticky: check if we have a cached selection for this (src, target).
+	key := makeSelectionKey(src, targetIP.String())
 	gen := m.routeGen.Load()
-	if cachedNodeID, ok := m.sticky.Get(targetKey, gen, stickyRebalanceGrace); ok {
+	if cachedNodeID, ok := m.sticky.Get(key, gen, stickyRebalanceGrace); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
-				util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (cached)", targetIP, cachedNodeID)
+				util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s src=%v → %s (cached)", targetIP, src, cachedNodeID)
 				return cachedNodeID
 			}
 		}
 		// Cached node no longer available, will re-select below
-		util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
+		util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s src=%v → %s no longer available, re-selecting", targetIP, src, cachedNodeID)
 	}
 
-	// Weighted rendezvous: deterministic per (target, owner), biased 1/cost.
-	selectedNodeID := m.pickWeightedOwner(targetKey, available)
+	// Weighted rendezvous: deterministic per (src, target, owner), biased 1/cost.
+	selectedNodeID := m.pickWeightedOwner(key, available)
 
 	// Cache the selection
-	m.sticky.Put(targetKey, selectedNodeID, gen)
+	m.sticky.Put(key, selectedNodeID, gen)
 
-	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
+	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s src=%v → %s (new selection)", targetIP, src, selectedNodeID)
 	return selectedNodeID
 }
 
@@ -297,7 +316,7 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 // cost·ln(u), where u is a deterministic hash of (key, owner). Lower path cost
 // wins more often (P ∝ 1/cost); equal or missing costs fall back to a uniform
 // spread. Deterministic, stateless, and stable when the owner set changes.
-func (m *MeshManager) pickWeightedOwner(key string, available []RouteEntry) string {
+func (m *MeshManager) pickWeightedOwner(key selectionKey, available []RouteEntry) string {
 	if len(available) == 1 {
 		return available[0].NodeID
 	}
@@ -311,7 +330,7 @@ func (m *MeshManager) pickWeightedOwner(key string, available []RouteEntry) stri
 				cost = p.Cost
 			}
 		}
-		score := cost * math.Log(unitHash(key, e.NodeID))
+		score := cost * math.Log(unitHash(key.Src, key.Target, e.NodeID))
 		if score > bestScore {
 			bestScore = score
 			bestIdx = i
@@ -772,9 +791,11 @@ func (m *MeshManager) GetMeshSubnet() *net.IPNet {
 	return m.network
 }
 
-// SelectEgressNodeID selects the best egress node for a given target IP (exported).
-func (m *MeshManager) SelectEgressNodeID(targetIP net.IP, entries []RouteEntry) string {
-	return m.selectEgressNodeID(targetIP, entries)
+// SelectEgressNodeID selects the best egress node for a given target IP
+// (exported). src is the client source for the IPIP branch; pass nil for
+// destination-only/display lookups.
+func (m *MeshManager) SelectEgressNodeID(src net.IP, targetIP net.IP, entries []RouteEntry) string {
+	return m.selectEgressNodeID(src, targetIP, entries)
 }
 
 // GetEIPForNode returns the EIP for a given node ID (exported).
@@ -844,7 +865,7 @@ func (m *MeshManager) ResolveNodeIDForIP(ip net.IP) string {
 	if best == nil {
 		return ""
 	}
-	return m.SelectEgressNodeID(ip, best.Entries)
+	return m.SelectEgressNodeID(nil, ip, best.Entries)
 }
 
 // SetOnRouteChange sets a callback to be invoked when the route table changes.
@@ -1029,10 +1050,12 @@ func (m *MeshManager) Stop() {
 }
 
 // ResolveDomainSubnet looks up a domain in the unified domain route trie.
+// src is the DNS query source (the real client), used by the same source-aware
+// owner selection as the prefix IPIP branch.
 // Returns (subnet, needsFail):
 //   - subnet != nil: matched a remote node, forward DNS query to that node
 //   - subnet == nil && needsFail == false: local domain or no match, use local Fake-IP pool
-func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
+func (m *MeshManager) ResolveDomainSubnet(src net.IP, domain string) (*net.IPNet, bool) {
 	rt := m.getRouteTable()
 
 	// Lookup in unified domain trie (contains both static and dynamic entries)
@@ -1047,9 +1070,9 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 		util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): entry[%d] nodeID=%s source=%v", domain, i, e.NodeID, e.Source)
 	}
 
-	// Select target node (static priority + hash stability)
-	selectedNodeID := m.selectEgressNodeIDForDomain(domain, entries)
-	util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): selectedNodeID=%s", domain, selectedNodeID)
+	// Select target node (static priority + source-aware hash stability)
+	selectedNodeID := m.selectEgressNodeIDForDomain(src, domain, entries)
+	util.LogModuleDebug("mesh", "[MESH] ResolveDomainSubnet(%s): src=%v selectedNodeID=%s", domain, src, selectedNodeID)
 	if selectedNodeID == "" {
 		// All entries were for self → this is a local domain
 		// Allocate from local Fake-IP pool
@@ -1077,9 +1100,10 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
 // Uses the same algorithm as IP routing: static exclusivity, sticky with
-// generation-bounded re-hash, then weighted hash stability.
+// generation-bounded re-hash, then weighted hash stability. src is the DNS
+// query source, so owner selection is source-aware and matches the prefix path.
 // Domain trie entries are generated from topology, so if an entry exists, the node is reachable.
-func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
+func (m *MeshManager) selectEgressNodeIDForDomain(src net.IP, domain string, entries []RouteEntry) string {
 	if len(entries) == 0 {
 		return ""
 	}
@@ -1114,27 +1138,28 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		return available[i].NodeID < available[j].NodeID
 	})
 
-	// Sticky: check if we have a cached selection for this domain
+	// Sticky: check if we have a cached selection for this (src, domain).
+	key := makeSelectionKey(src, domain)
 	gen := m.routeGen.Load()
-	if cachedNodeID, ok := m.sticky.Get(domain, gen, stickyRebalanceGrace); ok {
+	if cachedNodeID, ok := m.sticky.Get(key, gen, stickyRebalanceGrace); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
-				util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (cached)", domain, cachedNodeID)
+				util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s src=%v → %s (cached)", domain, src, cachedNodeID)
 				return cachedNodeID
 			}
 		}
 		// Cached node no longer available, will re-select below
-		util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
+		util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s src=%v → %s no longer available, re-selecting", domain, src, cachedNodeID)
 	}
 
-	// Weighted rendezvous: deterministic per (domain, owner), biased 1/cost.
-	selectedNodeID := m.pickWeightedOwner(domain, available)
+	// Weighted rendezvous: deterministic per (src, domain, owner), biased 1/cost.
+	selectedNodeID := m.pickWeightedOwner(key, available)
 
 	// Cache the selection
-	m.sticky.Put(domain, selectedNodeID, gen)
+	m.sticky.Put(key, selectedNodeID, gen)
 
-	util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
+	util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s src=%v → %s (new selection)", domain, src, selectedNodeID)
 	return selectedNodeID
 }
 

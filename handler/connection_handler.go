@@ -369,7 +369,7 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 				rec.SetDst(dialAddr).Fail(err)
 				return
 			}
-			rec.SetDst(dialAddr).SetVia(meshEgressNode(ip)).SetFwdKey(fwdKey)
+			rec.SetDst(dialAddr).SetVia(meshEgressNode(net.ParseIP(srcAddr), ip)).SetFwdKey(fwdKey)
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] mesh dial success, starting relay", connID)
 		} else {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] dialing tcp %s:%d", connID, dialAddr, resolvedPort)
@@ -549,17 +549,18 @@ const (
 	builtinConsolePort = 443
 )
 
-// proxyDesc returns a human-readable description of the proxy for logging.
 // meshEgressNode resolves the mesh egress node ID for a mesh-IP destination
-// (display-only "via" label). Empty when the resolver is unwired or the
+// (display-only "via" label), using the real client source so the label matches
+// the source-aware selection. Empty when the resolver is unwired or the
 // destination is not mesh-routed.
-func meshEgressNode(dstIP net.IP) string {
+func meshEgressNode(srcIP, dstIP net.IP) string {
 	if dialer.GlobalMeshEgressFunc == nil {
 		return ""
 	}
-	return dialer.GlobalMeshEgressFunc(dstIP)
+	return dialer.GlobalMeshEgressFunc(srcIP, dstIP)
 }
 
+// proxyDesc returns a human-readable description of the proxy for logging.
 func proxyDesc(p *config.Proxy) string {
 	if p == nil || strings.EqualFold(p.Type, config.ProxyDIRECT) {
 		return "DIRECT"

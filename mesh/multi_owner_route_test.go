@@ -44,6 +44,37 @@ func TestSelectEgressNodeIDDeterministic(t *testing.T) {
 	}
 }
 
+// TestSelectMeshOwnerNoElection verifies that mesh prefixes take their single
+// owner directly: no weighted hash, no source dimension, deterministic even if
+// entries arrive in a different order, and static wins when present.
+func TestSelectMeshOwnerNoElection(t *testing.T) {
+	m := newTestMeshManager(t, "self", "100.64.1.0/24", nil)
+
+	entries := []RouteEntry{
+		{NodeID: "ms9", Source: RouteSourceDynamic},
+		{NodeID: "ms10", Source: RouteSourceDynamic},
+	}
+	if got, want := m.SelectMeshOwner(entries), "ms10"; got != want {
+		t.Fatalf("SelectMeshOwner = %q, want %q", got, want)
+	}
+	reversed := []RouteEntry{entries[1], entries[0]}
+	if got, want := m.SelectMeshOwner(reversed), "ms10"; got != want {
+		t.Fatalf("SelectMeshOwner(order) = %q, want %q", got, want)
+	}
+
+	static := []RouteEntry{
+		{NodeID: "ms9", Source: RouteSourceDynamic},
+		{NodeID: "ms11", Source: RouteSourceStatic},
+	}
+	if got, want := m.SelectMeshOwner(static), "ms11"; got != want {
+		t.Fatalf("SelectMeshOwner(static) = %q, want %q", got, want)
+	}
+
+	if got := m.SelectMeshOwner(nil); got != "" {
+		t.Fatalf("SelectMeshOwner(nil) = %q, want empty", got)
+	}
+}
+
 // TestMultipleOwnersSameAdvertisedNetwork verifies that two nodes advertising
 // the same network through different textual forms collapse into one route
 // carrying both owners, and that the admin tree lists both.

@@ -19,8 +19,11 @@
    —— 不要再把“节点自己的声明”说成 static。
 2. **sticky**：key = `selectionKey{Src, Target}`（结构体，不是字符串拼接）：
    - `Target` 是前缀 IP 字符串或域名；`Src` 是**真实客户端源 IP**。
-   - **源维度只用于 IPIP 分支**（非 mesh 网段的外部前缀，可能多 owner）；
-     mesh 网段前缀按构造只有一个 owner，`Src` 留空，保持原有 dst-only 稳定选择。
+   - **只有 IPIP 分支（非 mesh 网段的外部声明前缀，可能多 owner）才做 owner
+     选路**，源维度也只在这里生效。mesh 网段前缀按构造只有一个 owner，直接取
+     owner（`SelectMeshOwner`），**不选举、不进 sticky**；其它路由都是固定的，
+     不存在“选 nodeid”这一步。`Src` 留空只表示“源未知”（本机自发流量/展示查询），
+     不是一种选路策略。
    - 域名侧同构：`Src` 取 DNS 查询的真实源 IP（DNSHijacker 的 `remoteAddr`），
      在域名解析阶段就定下 owner。
    - TCP/UDP 共用一个 key 结构，不做 5 元组、不再按连接拆分。
@@ -50,7 +53,7 @@
 - 统一在 gvisor fork 内实现，不分阶段绕路：
   - `stack.RouteSelector` 签名扩为 `func(src, dst tcpip.Address)`；
     新增 `Stack.FindRouteFrom(src, ...)`，原 `FindRoute` 以零源调用，行为不变。
-  - `decisionForSelector` 的 dst-only 缓存只对零源调用生效；带源决策不按 dst 缓存
+  - `decisionForSelector` 的按 dst 缓存只对零源调用生效；带源决策不按 dst 缓存
     （转发分支本来就是 `Cacheable=false`）。
   - IPv4 转发路径传入 pre-SNAT 源；TCP connect/reroute 通过 `Endpoint.RouteSrc`
     接收代理拨号写入的真实客户端源。
@@ -98,7 +101,8 @@
 | `mesh/mesh.go` `selectEgressNodeIDForDomain` | 域名选路（同构），src = DNS 查询源 |
 | `mesh/mesh.go` `selectionKey` / `makeSelectionKey` | sticky key 结构体 `{Src, Target}` |
 | `mesh/mesh.go` `pickWeightedOwner` / `unitHash` | 加权 rendezvous，hash(src,target,owner) |
-| `mesh/netstack.go` `selectRouteFunc` | 仅 IPIP 分支传 src，mesh 前缀留空 |
+| `mesh/netstack.go` `selectRouteFunc` | 仅 IPIP 分支选 owner 并传 src；mesh 前缀直接取唯一 owner |
+| `mesh/mesh.go` `SelectMeshOwner` | mesh 前缀取唯一 owner，不选举、不进 sticky |
 | `mesh/netstack.go` `NetDialWithModeB` | 代理拨号写入 `Endpoint.RouteSrc` |
 | `mesh/dns.go` `processQuery` | 把 DNS 查询源传给 `ResolveDomainSubnet` |
 | fork `stack.FindRouteFrom` / `RouteSelector(src,dst)` | 源感知选路入口 |

@@ -460,39 +460,24 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 				continue
 			}
 
-			// The source dimension applies only to the IPIP branch (non-mesh
-			// advertised prefix, possibly owned by several nodes). Mesh
-			// prefixes have a single owner by construction, so pass nil and
-			// keep the dst-only selection stable.
-			isMeshPrefix := n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP)
-			var selSrc net.IP
-			if !isMeshPrefix {
-				selSrc = src
-			}
-
-			targetNodeID := meshMgr.SelectEgressNodeID(selSrc, dst, route.Entries)
-			if targetNodeID == "" {
-				// Diagnostic: log SelectEgressNodeID failure
-				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
-				continue
-			}
-			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s src=%v prefix=%s targetNode=%s", dst, src, route.Prefix, targetNodeID)
-
-			// Check if target is local node (advertised route owned by this node)
 			localNodeID := meshMgr.GetNodeID()
-			if targetNodeID == localNodeID {
-				// Local delivery: this node owns the advertised route
-				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
-				return SelectRouteResult{LocalStack: true, TargetNodeID: targetNodeID}, true
-			}
 
-			if isMeshPrefix {
-				// Branch 2: mesh prefix → next-hop Link NIC, no IPIP
-				// Use Dijkstra result directly (LinkNIC)
+			// Branch 2: mesh prefix. A mesh prefix has exactly one owner by
+			// construction, so there is no owner election and no sticky: the
+			// selector just forwards to that node's next-hop Link NIC. The
+			// source dimension does not apply here.
+			if n.meshNetwork != nil && n.meshNetwork.Contains(route.Prefix.IP) {
+				targetNodeID := meshMgr.SelectMeshOwner(route.Entries)
+				if targetNodeID == "" {
+					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_mesh_owner", dst, route.Prefix)
+					continue
+				}
+				if targetNodeID == localNodeID {
+					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_mesh prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
+					return SelectRouteResult{LocalStack: true, TargetNodeID: targetNodeID}, true
+				}
 				nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
-				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=mesh prefix=%s target=%s nextHop=%s linkNIC=%v", dst, route.Prefix, targetNodeID, nextHopID, linkNIC)
 				if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
-					// Diagnostic: log NextHopLink failure
 					util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link", dst, route.Prefix, targetNodeID)
 					continue
 				}
@@ -500,10 +485,23 @@ func (n *Netstack) selectRouteFunc(meshMgr *MeshManager) SelectRouteFunc {
 				return SelectRouteResult{LinkNIC: linkNIC.nicID, TargetNodeID: targetNodeID}, true
 			}
 
-			// Branch 3: non-mesh advertised prefix → IPIP to egress EIP
-			// over next-hop Link NIC. The frame-level decap at the
-			// peer matches on outer dst == its local EIP (design §2.4).
-			// Use Dijkstra result directly (LinkNIC)
+			// Branch 3: non-mesh advertised prefix → IPIP to egress EIP over
+			// next-hop Link NIC. Only this branch elects among several owners,
+			// and only here does the client source take part.
+			targetNodeID := meshMgr.SelectEgressNodeID(src, dst, route.Entries)
+			if targetNodeID == "" {
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s no_egress_node", dst, route.Prefix)
+				continue
+			}
+			util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s src=%v prefix=%s targetNode=%s", dst, src, route.Prefix, targetNodeID)
+			if targetNodeID == localNodeID {
+				// Local delivery: this node owns the advertised prefix.
+				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s branch=local_advertised prefix=%s target=%s (local node)", dst, route.Prefix, targetNodeID)
+				return SelectRouteResult{LocalStack: true, TargetNodeID: targetNodeID}, true
+			}
+
+			// The frame-level decap at the peer matches on outer dst == its
+			// local EIP (design §2.4). Use Dijkstra result directly (LinkNIC).
 			nextHopID, linkNIC := meshMgr.NextHopLink(targetNodeID)
 			if nextHopID == "" || linkNIC == nil || linkNIC.nicID == 0 {
 				util.LogModuleDebug("route", "[SELECT-ROUTE] dst=%s prefix=%s target=%s no_nexthop_link_ipip", dst, route.Prefix, targetNodeID)
@@ -545,14 +543,16 @@ func (n *Netstack) IsMeshUnreachable(dst net.IP) bool {
 }
 
 // MeshEgressNode returns the node ID the mesh routing decision would egress
-// through for dst, or "" when dst is local / not routed via mesh. Re-runs the
-// stored SelectRoute decision; display-only, so a TOCTOU race with live
-// routing changes only affects the logged "via" label.
-func (n *Netstack) MeshEgressNode(dst net.IP) string {
+// through for (src, dst), or "" when dst is local / not routed via mesh. src
+// is the real client source so the display label matches the source-aware
+// IPIP election; pass nil when unknown. Re-runs the stored SelectRoute
+// decision; display-only, so a TOCTOU race with live routing changes only
+// affects the logged "via" label.
+func (n *Netstack) MeshEgressNode(src, dst net.IP) string {
 	if n.selectRoute == nil {
 		return ""
 	}
-	r, ok := n.selectRoute(nil, dst)
+	r, ok := n.selectRoute(src, dst)
 	if !ok || r.LocalStack {
 		return ""
 	}

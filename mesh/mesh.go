@@ -791,11 +791,44 @@ func (m *MeshManager) GetMeshSubnet() *net.IPNet {
 	return m.network
 }
 
-// SelectEgressNodeID selects the best egress node for a given target IP
-// (exported). src is the client source for the IPIP branch; pass nil for
-// destination-only/display lookups.
+// SelectEgressNodeID selects the best egress node for an advertised (non-mesh)
+// prefix that needs IPIP encapsulation and may have several owners. src is the
+// client source; pass nil only when the source is genuinely unknown (locally
+// generated traffic / display lookups). Mesh prefixes must not call this —
+// they have a single owner by construction, see SelectMeshOwner.
 func (m *MeshManager) SelectEgressNodeID(src net.IP, targetIP net.IP, entries []RouteEntry) string {
 	return m.selectEgressNodeID(src, targetIP, entries)
+}
+
+// SelectMeshOwner returns the owner of a mesh prefix. Mesh prefixes (each
+// node's own subnet, propagated through claims) have exactly one owner by
+// construction, so there is no election, no sticky and no source dimension:
+// static entries win, otherwise the lexicographically first nodeID gives a
+// deterministic result independent of gossip arrival order.
+func (m *MeshManager) SelectMeshOwner(entries []RouteEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var staticIDs, dynamicIDs []string
+	for _, e := range entries {
+		if e.NodeID == "" {
+			continue
+		}
+		if e.Source == RouteSourceStatic {
+			staticIDs = append(staticIDs, e.NodeID)
+		} else {
+			dynamicIDs = append(dynamicIDs, e.NodeID)
+		}
+	}
+	if len(staticIDs) > 0 {
+		sort.Strings(staticIDs)
+		return staticIDs[0]
+	}
+	if len(dynamicIDs) == 0 {
+		return ""
+	}
+	sort.Strings(dynamicIDs)
+	return dynamicIDs[0]
 }
 
 // GetEIPForNode returns the EIP for a given node ID (exported).

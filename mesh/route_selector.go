@@ -32,10 +32,11 @@ type SelectRouteResult struct {
 
 // SelectRouteFunc decides how to route a non-local destination.
 //
-// src is the packet's original source (pre-SNAT) when known; it is nil for
-// destination-only queries. The owner-selection layer uses it only for the
-// IPIP branch (non-mesh advertised prefixes); mesh and local branches ignore
-// it.
+// src is the packet's original source (pre-SNAT) when known; it is nil when
+// the source is genuinely unknown (locally generated traffic / display
+// lookups). Only the IPIP branch (non-mesh advertised prefixes) elects among
+// owners and uses it; mesh prefixes have a single owner and local branches are
+// fixed, so neither runs owner selection at all.
 //
 // Returns ok=true with a non-zero LinkNIC for both branches 2 (mesh) and
 // 3 (non-mesh advertised). ok=false means "no opinion" — RouteSelector then

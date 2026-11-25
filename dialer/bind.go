@@ -56,10 +56,11 @@ var GlobalNetstackDialWithModeBFunc func(network, addr string, clientAddr string
 // called by the gVisor fork's TCP connect path to determine IPIP routing.
 var GlobalNetstackDialV2Func func(network, addr string, routeFunc func() stack.RouteDecision) (net.Conn, error)
 
-// GlobalMeshEgressFunc resolves the mesh egress node ID for a destination IP
-// by re-running the RouteSelector decision (display-only "via" label for
-// connlog). Set by main_engine.go; nil on non-mesh nodes.
-var GlobalMeshEgressFunc func(dstIP net.IP) string
+// GlobalMeshEgressFunc resolves the mesh egress node ID for (src, dst) by
+// re-running the RouteSelector decision (display-only "via" label for connlog).
+// src is the real client source; nil when unknown. Set by main_engine.go; nil
+// on non-mesh nodes.
+var GlobalMeshEgressFunc func(srcIP, dstIP net.IP) string
 
 // UnregisterModeB is a helper to unregister a Mode B connection by destination and source port.
 func UnregisterModeB(proto byte, dstAddr string, dstPort int, srcPort uint16) {

@@ -720,6 +720,7 @@ func (m *ControlManager) insertRoutingRule(mapping *config.Mapping, proxy *confi
 				ProxyName:   proxy.Name,
 				MappingName: mapping.Name,
 				TimeRange:   &config.TimeRange{},
+				Enabled:     true,
 				Raw:         ruleStr,
 			})
 		} else {

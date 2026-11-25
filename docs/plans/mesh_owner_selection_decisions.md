@@ -1,0 +1,69 @@
+# Mesh 多 owner 选路最终结论（2026-11-25）
+
+状态：已落地。前端到 `f15aec5`：质量加权 rendezvous（前缀 + 域名同构）。
+
+本文件用于终止重复讨论。下面每一条都是最终结论；如无新事实，不要重开。
+
+## 1. 适用范围
+
+- 只有**入口**会选 egress nodeid：`tun` 入站和代理 server 入站。
+- 转发路径（mesh 中转、forwarder）**不再选 nodeid**，只按已有拓扑/规则走。
+- 前缀路由（按目标 IP）与域名路由（按域名）使用**同一套算法**。
+
+## 2. 选路算法
+
+1. **static 独占**：存在可用 static 条目时只用 static，dynamic 不参与。
+   注意：当前**节点声明产生的都是 dynamic**；static 是后续单独加控制台页面去
+   支持的能力（前缀路由和域名路由都预留），不是现在就有的语义。
+   —— 不要再把“节点自己的声明”说成 static。
+2. **sticky**：按目标做粘性，key = 目标（前缀用 IP 字符串，域名用域名）：
+   - TCP/UDP 共用一个 key，不做 5 元组、不做源 IP 维度。
+   - 命中且 owner 仍可用 → 直接复用。
+   - 拓扑代次（generation）变化后，不立即重选；仅当该目标**空闲超过 10 分钟**
+     （`stickyRebalanceGrace`）才按新拓扑重哈希，避免活跃连接被抖断。
+3. **质量加权 rendezvous**：首次选 owner 时
+   `score = cost * ln(u)`，`u = hash(target, owner) ∈ (0,1]`，取最大者。
+   等价权重 `w = 1/cost`，即链路成本越低承接越多份额（主），其余 owner 按成本
+   比例分摊并在主节点消失时确定性接管（备）。这就是"多 owner 主备式"的落地：
+   成本差越大越接近单主，成本相同或没有样本时退化为均匀分散。
+   - 取 cost 来源：`routeTable.bestPaths[nodeID].Cost`；缺省 `1.0`。
+   - owner 集合先按 NodeID 排序，保证与 gossip 到达顺序无关。
+
+## 3. 明确不做（已否决，勿再讨论）
+
+- 不做 **gvisor fork / 5 元组 hook**。
+- 不做 **(target, clientIP) 二元组**：代理 server 入口拿到的 src 是 phaethon 自己
+  的 VIP，不是真实客户端 IP，两条入口路径行为会不一致。
+- 不要求跨连接完全一致：TCP 选定 nodeid 后连接内稳定即可；分散是目标。
+- 不为 UDP 单独拆流程：UDP 与 TCP 共用按目标的 sticky，可接受。
+
+## 4. 兜底链路语义（用户已纠正）
+
+- 数据面**先直接进 mesh**：若 mesh 内有该前缀/域名的路由，在 mesh 内传播直达。
+  （此前能访问某目标，很可能就是因为某节点声明了到它的路由。）
+- mesh 内没有路由才进入 **forwarder**，此时才匹配规则；规则不命中才 DIRECT。
+- mesh 网段是 **100.0.0.0/8**（不是旧文档里的 100.64.0.0/10 之类过时说法）。
+
+## 5. 数据结构与展示
+
+- 多 owner（多节点声明同一前缀 / 同一域名）**全量存储**，不是"只能存一个"。
+  - 域名按 `(suffix, owner)` 聚合，保留多节点同域名（`db86800`）。
+- 控制台 mesh 页面里叫**"前缀路由"**（原"路由表"，`c2e2068`）。域名侧是独立的一棵树，
+  两棵树，不共用一个展示。
+
+## 6. 顺带定论的旧问题
+
+- 反向连接落到 DIRECT：动态 MATCH 规则缺 `Enabled` 已修（`52dfcd9`）。
+  排查时若仍看到 DIRECT，先确认规则确实被编译进 forwarder，并确认该目标
+  在 mesh 侧是否真的没有路由（先 mesh 后 forwarder 的顺序）。
+- 规则页面偶发缩成一列：已修复（提交在 `e7f3b84` 之前那批）。
+
+## 7. 关键代码/常量
+
+| 位置 | 说明 |
+|---|---|
+| `mesh/mesh.go` `selectEgressNodeID` | 前缀选路（static → sticky → 加权） |
+| `mesh/mesh.go` `selectEgressNodeIDForDomain` | 域名选路（同构） |
+| `mesh/mesh.go` `pickWeightedOwner` / `unitHash` | 加权 rendezvous |
+| `mesh/sticky_lru.go` `stickyRebalanceGrace` | 10 分钟空闲宽限 |
+| `mesh/sticky_lru.go` `stickyLRUMax` | 粘性表容量 |

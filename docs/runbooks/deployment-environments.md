@@ -101,10 +101,12 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 - 残留 Wintun 设备排查：`pnputil /enum-devices /class Net`
 - 清理残留：`pnputil /remove-device <instance-id>`
 
-### Linux (QG/JF)
+### Linux (QG/JF/GG)
 
 - QG 用 `rc-service` 管理，不要直接 kill
 - JF 用 `ps | kill` 手动管理
+- GG 是 Ubuntu 24.04 / linux-amd64，升级必须用 `scripts/build-pkg.sh linux amd64`
+  构建的包；用 windows 包 activate 只会 `localUpgrade=false`（仅分发，不生效）
 
 ## 5. 升级与 worker 版本（务必阅读）
 

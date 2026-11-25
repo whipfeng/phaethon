@@ -720,6 +720,7 @@ func (m *ControlManager) insertRoutingRule(mapping *config.Mapping, proxy *confi
 				ProxyName:   proxy.Name,
 				MappingName: mapping.Name,
 				TimeRange:   &config.TimeRange{},
+				Raw:         ruleStr,
 			})
 		} else {
 			util.LogModuleError("control", "failed to get RuleMatcher for dynamic config injection: %v", err)

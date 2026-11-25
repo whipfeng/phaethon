@@ -25,6 +25,7 @@ type ruleSnapshot struct {
 	resolvers         []*config.Resolver
 	matchers          []config.Matcher
 	matcherTimeRanges []config.TimeRange
+	matcherRules      []string // raw rule text, parallel to matchers
 }
 
 var emptyRuleSnapshot = &ruleSnapshot{
@@ -49,6 +50,7 @@ type RuleMatcher struct {
 	// 编译后的匹配器（从 rules 生成）
 	matchers          []config.Matcher
 	matcherTimeRanges []config.TimeRange
+	matcherRules      []string // 原始规则文本，与 matchers 一一对应
 
 	// 保护并发访问
 	mu sync.RWMutex
@@ -77,6 +79,7 @@ func (m *RuleMatcher) publishLocked() {
 		resolvers:         m.resolvers,
 		matchers:          m.matchers,
 		matcherTimeRanges: m.matcherTimeRanges,
+		matcherRules:      m.matcherRules,
 	}
 	for k, v := range m.proxies {
 		s.proxies[k] = v
@@ -313,6 +316,7 @@ func parseRule(ruleStr string) (*config.Rule, error) {
 		MappingName: mappingName,
 		TimeRange:   &tr,
 		Enabled:     enabled,
+		Raw:         strings.TrimSpace(ruleStr),
 	}, nil
 }
 
@@ -651,6 +655,7 @@ func (m *RuleMatcher) RemoveRule(proxyName string) {
 func (m *RuleMatcher) buildMatchers() error {
 	m.matchers = make([]config.Matcher, 0, len(m.rules))
 	m.matcherTimeRanges = make([]config.TimeRange, 0, len(m.rules))
+	m.matcherRules = make([]string, 0, len(m.rules))
 
 	for idx, rule := range m.rules {
 		if !rule.Enabled {
@@ -670,6 +675,7 @@ func (m *RuleMatcher) buildMatchers() error {
 			return fmt.Errorf("rule %d: unknown type %q", idx+1, rule.Type)
 		}
 		m.matchers = append(m.matchers, matcher)
+		m.matcherRules = append(m.matcherRules, rule.Raw)
 		if rule.TimeRange != nil {
 			m.matcherTimeRanges = append(m.matcherTimeRanges, *rule.TimeRange)
 		} else {
@@ -753,6 +759,9 @@ func (m *RuleMatcher) match(request *config.AddrRequest, mapping *config.Mapping
 		util.LogModuleDebug("system", "[MATCH-DEBUG] Rule %d matched: proxyName=%s", i, proxyName)
 		result := &config.MatchResult{
 			ProxyName: proxyName,
+		}
+		if i < len(s.matcherRules) {
+			result.Rule = s.matcherRules[i]
 		}
 		if mapping != nil {
 			result.Mapping = mapping.Name

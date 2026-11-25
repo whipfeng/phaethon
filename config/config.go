@@ -1089,6 +1089,9 @@ type Rule struct {
 	// (D15). Parsing a commented rule yields Enabled=false; the prefix is no
 	// longer the source of truth for reference checks.
 	Enabled bool
+	// Raw is the original rule text as stored, used by connection logs and the
+	// rule tester to show which rule actually matched.
+	Raw string
 }
 
 func (tr TimeRange) Matches(nowMin int) bool {

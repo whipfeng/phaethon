@@ -277,6 +277,16 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 
 	var targetConn net.Conn
 
+	// A rule matched but its target could not be resolved (the proxy is gone or
+	// the group has no available member). Fail loudly instead of silently
+	// falling through to a direct dial.
+	if matchResult != nil && proxy == nil {
+		matchErr := fmt.Errorf("rule %q matched %q, but it has no available proxy member", matchResult.Rule, matchResult.ProxyName)
+		util.LogModuleWarn("handler", "[%s] [%s] %s:%d matched rule %q -> %q but no proxy available (group empty or proxy missing)", corrID, connID, resolvedAddr, resolvedPort, matchResult.Rule, matchResult.ProxyName)
+		rec.Fail(matchErr)
+		return
+	}
+
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogModuleDebug("handler", "[%s] [%s] [%s] %s:%d -> REJECTED", corrID, inbound, connID, resolvedAddr, resolvedPort)
 		rec.Reject()
@@ -442,6 +452,15 @@ func (h *ConnectionHandler) HandleUDPConn(netstackConn net.Conn, srcAddr string,
 	resolvedPort := req.DstPort
 	rec := connlog.Start(inbound, "UDP", srcAddr, matchAddr).WithConn(connID, srcPort).Resolve(resolvedAddr, resolvedPort, matchResult)
 	defer rec.Close()
+
+	// Same as the TCP path: a matched rule whose target cannot be resolved must
+	// fail instead of silently degrading to DIRECT.
+	if matchResult != nil && proxy == nil {
+		matchErr := fmt.Errorf("rule %q matched %q, but it has no available proxy member", matchResult.Rule, matchResult.ProxyName)
+		util.LogModuleWarn("handler", "[%s] [%s] udp %s:%d matched rule %q -> %q but no proxy available (group empty or proxy missing)", inbound, connID, resolvedAddr, resolvedPort, matchResult.Rule, matchResult.ProxyName)
+		rec.Fail(matchErr)
+		return
+	}
 
 	if proxy != nil && strings.ToUpper(proxy.Type) == config.ProxyREJECT {
 		util.LogModuleDebug("handler", "[%s] [%s] udp %s:%d -> REJECTED", inbound, connID, resolvedAddr, resolvedPort)

@@ -2965,14 +2965,20 @@ func (s *AdminServer) apiTestRule(w http.ResponseWriter, r *http.Request) {
 		"matched":  matchResult != nil,
 		"resolved": fmt.Sprintf("%s:%d", resolved.DstAddr, resolved.DstPort),
 	}
-	if proxy != nil {
-		resp["proxy"] = proxy.Name
-	}
 	if matchResult != nil {
-		resp["actualProxy"] = matchResult.ActualProxy
+		// proxy is the rule target; actualProxy is the member a group resolved to.
+		resp["proxy"] = matchResult.ProxyName
+		if proxy != nil && proxy.Name != "" && proxy.Name != matchResult.ProxyName {
+			resp["actualProxy"] = proxy.Name
+		}
 		resp["rule"] = matchResult.Rule
 		resp["mapping"] = matchResult.Mapping
 		resp["timeRange"] = matchResult.TimeRange
+		if proxy == nil {
+			resp["warning"] = fmt.Sprintf("rule target %q has no available member (group empty or proxy missing)", matchResult.ProxyName)
+		}
+	} else if proxy != nil && proxy.Name != "" {
+		resp["proxy"] = proxy.Name
 	}
 	jsonResponse(w, resp)
 }

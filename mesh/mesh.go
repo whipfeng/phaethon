@@ -1049,12 +1049,15 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		return ""
 	}
 
-	// Filter: skip self
+	// A suffix the local node serves always resolves locally: peer owners of
+	// the same suffix are informational only. This keeps the local Fake-IP
+	// pool path when several nodes declare the same suffix.
 	var available []RouteEntry
 	for _, e := range entries {
-		if e.NodeID != m.nodeID {
-			available = append(available, e)
+		if e.NodeID == m.nodeID {
+			return ""
 		}
+		available = append(available, e)
 	}
 
 	if len(available) == 0 {
@@ -2161,10 +2164,8 @@ func (m *MeshManager) recomputeRoutes() {
 	domainTrie := NewNodeTrie()
 
 	// Add own domain suffixes (from config) as static
-	ownSuffixSet := make(map[string]bool, len(domainSuffixes))
 	for _, s := range domainSuffixes {
 		domainTrie.Insert(s, m.nodeID, RouteSourceStatic) // own suffixes point to self
-		ownSuffixSet[strings.ToLower(strings.TrimPrefix(s, "."))] = true
 	}
 
 	// Add static domain suffix routes (from config snapshot taken earlier) as static
@@ -2198,16 +2199,15 @@ func (m *MeshManager) recomputeRoutes() {
 		}
 	}
 
-	// Add peer domain suffixes (from gossip) as dynamic — skip if we own the same suffix
+	// Add peer domain suffixes (from gossip) as dynamic — every owner of the
+	// same suffix is kept so the admin view and per-flow election see all of
+	// them. A suffix the local node also declares still resolves locally
+	// (see selectEgressNodeIDForDomain).
 	for _, peer := range peers {
 		if peer.Sender == nil {
 			continue
 		}
 		for _, entry := range peer.DomainSuffixes {
-			normalized := strings.ToLower(strings.TrimPrefix(entry.Suffix, "."))
-			if ownSuffixSet[normalized] {
-				continue
-			}
 			// Insert into unified trie with dynamic source
 			domainTrie.Insert(entry.Suffix, entry.NodeID, RouteSourceDynamic)
 		}
@@ -2820,11 +2820,16 @@ func (m *MeshManager) broadcastGossip() {
 	type globalDSEntry struct {
 		nextHop *PeerInfo // nil = own entry
 		nodeID  string
+		suffix  string
 		hop     int // real distance to the owner through nextHop (0 = own entry)
 	}
+	// Key by (suffix, owner) like routes: several nodes declaring the same
+	// suffix must all survive and keep propagating; keying by suffix alone
+	// collapsed the view to the nearest owner.
 	bestDS := make(map[string]globalDSEntry)
+	dsKey := func(suffix, nodeID string) string { return suffix + "\x00" + nodeID }
 	for _, s := range domainSuffixes {
-		bestDS[s] = globalDSEntry{nil, m.nodeID, 0}
+		bestDS[dsKey(s, m.nodeID)] = globalDSEntry{nil, m.nodeID, s, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
@@ -2835,8 +2840,9 @@ func (m *MeshManager) broadcastGossip() {
 			if !ok {
 				continue
 			}
-			if e, exists := bestDS[entry.Suffix]; !exists || hop < e.hop {
-				bestDS[entry.Suffix] = globalDSEntry{peer, entry.NodeID, hop}
+			key := dsKey(entry.Suffix, entry.NodeID)
+			if e, exists := bestDS[key]; !exists || hop < e.hop {
+				bestDS[key] = globalDSEntry{peer, entry.NodeID, entry.Suffix, hop}
 			}
 		}
 	}
@@ -2858,11 +2864,11 @@ func (m *MeshManager) broadcastGossip() {
 
 		// Filter domain suffixes: exclude entries where nextHop's nodeID == this peer's nodeID
 		var ds []GossipDomainSuffix
-		for suffix, e := range bestDS {
+		for _, e := range bestDS {
 			if e.nextHop != nil && e.nextHop.NodeID() == peer.NodeID() {
 				continue // split horizon
 			}
-			ds = append(ds, GossipDomainSuffix{Suffix: suffix, NodeID: e.nodeID})
+			ds = append(ds, GossipDomainSuffix{Suffix: e.suffix, NodeID: e.nodeID})
 		}
 
 		// Filter claimed subnets: exclude entries where nextHop's nodeID == this peer's nodeID
@@ -3384,9 +3390,12 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		ds  GossipDomainSuffix
 		hop int // 0 = own entry
 	}
+	// Key by (suffix, owner) like routes, so every node declaring the same
+	// suffix keeps propagating instead of collapsing to the nearest one.
 	bestDS := make(map[string]dsEntry)
+	dsKey := func(suffix, nodeID string) string { return suffix + "\x00" + nodeID }
 	for _, s := range domainSuffixes {
-		bestDS[s] = dsEntry{GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}, 0}
+		bestDS[dsKey(s, m.nodeID)] = dsEntry{GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
@@ -3397,8 +3406,9 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			if !ok {
 				continue
 			}
-			if e, exists := bestDS[entry.Suffix]; !exists || hop < e.hop {
-				bestDS[entry.Suffix] = dsEntry{GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}, hop}
+			key := dsKey(entry.Suffix, entry.NodeID)
+			if e, exists := bestDS[key]; !exists || hop < e.hop {
+				bestDS[key] = dsEntry{GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}, hop}
 			}
 		}
 	}

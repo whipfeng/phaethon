@@ -160,9 +160,10 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 
 ### 5.6 PTY 资产：winpty（pre-1809 Windows 必装）
 
-内建 SSH 的 PTY 选择顺序是 ConPTY（Win10 1809+）→ 部署目录自带的 winpty。**pkg 只替换
+内建 SSH 的 PTY 选择顺序是 ConPTY（Win10 1809+）→ 部署目录自带的 winpty。**当前 pkg 只替换
 可执行文件，不包含资产文件**，所以凡是 ConPTY 不可用的节点（Win7/8、Server 2016 及更早）
-都必须在部署目录手工放好：
+都必须在部署目录手工放好（pkg 携带资产的改造方案见
+`docs/plans/pty-asset-delivery.md`，实施上线前仍按本节手工兜底）：
 
 ```
 <deploy>/winpty.dll

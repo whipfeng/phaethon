@@ -47,3 +47,49 @@ func TestRouteSelectorLocalStack(t *testing.T) {
 		})
 	}
 }
+
+// TestRouteSelectorPropagatesSource pins down that the selector hands the
+// packet source to SelectRoute unchanged. The receive-path probe
+// (RouteSelectorLocalStack) and the forwarding path must share one decision
+// key, otherwise a source-aware owner gets cached under a source-less key.
+func TestRouteSelectorPropagatesSource(t *testing.T) {
+	_, localSubnet, err := net.ParseCIDR("100.64.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotSrc, gotDst net.IP
+	calls := 0
+	selector := NewRouteSelector(&RouteSelectorConfig{
+		LocalSubnet: localSubnet,
+		SelectRoute: func(src, dst net.IP) (SelectRouteResult, bool) {
+			calls++
+			gotSrc, gotDst = src, dst
+			return SelectRouteResult{
+				LinkNIC:   2,
+				NeedIPIP:  true,
+				EgressEIP: net.IP{100, 64, 1, 4},
+			}, true
+		},
+	})
+
+	src := tcpip.AddrFrom4([4]byte{192, 168, 1, 5})
+	dst := tcpip.AddrFrom4([4]byte{10, 161, 88, 9})
+	selector(src, dst)
+	if calls != 1 {
+		t.Fatalf("SelectRoute calls = %d, want 1", calls)
+	}
+	if !gotSrc.Equal(net.IP{192, 168, 1, 5}) {
+		t.Fatalf("SelectRoute src = %v, want 192.168.1.5", gotSrc)
+	}
+	if !gotDst.Equal(net.IP{10, 161, 88, 9}) {
+		t.Fatalf("SelectRoute dst = %v, want 10.161.88.9", gotDst)
+	}
+
+	selector(tcpip.Address{}, dst)
+	if calls != 2 {
+		t.Fatalf("SelectRoute calls = %d, want 2", calls)
+	}
+	if gotSrc != nil {
+		t.Fatalf("SelectRoute src for zero Address = %v, want nil", gotSrc)
+	}
+}

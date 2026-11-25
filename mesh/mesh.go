@@ -733,7 +733,7 @@ type RouteTableSnapshot struct {
 	Routes []MeshRoute
 }
 
-// GetMeshSubnet returns the mesh subnet (100.64.0.0/10).
+// GetMeshSubnet returns the overall mesh network range (e.g. 100.0.0.0/8).
 func (m *MeshManager) GetMeshSubnet() *net.IPNet {
 	return m.network
 }
@@ -2779,11 +2779,12 @@ func (m *MeshManager) broadcastGossip() {
 		prefix  string
 		hop     int // real distance to the owner through nextHop (0 = own route)
 	}
-	bestRoutes := make(map[string]globalRouteEntry)
-	// Key by (canonical prefix, owner) so several owners of the same network
-	// all survive and keep propagating; keying by prefix alone collapsed the
-	// relayed view to a single owner and made non-adjacent nodes pick blindly.
-	routeKey := func(prefix, nodeID string) string { return prefix + "\x00" + nodeID }
+	// Aggregate by (value, owner) so several owners of the same network all
+	// survive and keep propagating; keying by value alone collapsed the relayed
+	// view to a single owner and made non-adjacent nodes pick blindly. A
+	// comparable struct avoids delimiter escaping entirely.
+	type aggKey struct{ value, owner string }
+	bestRoutes := make(map[aggKey]globalRouteEntry)
 
 	// Own advertise routes
 	for _, r := range advertise {
@@ -2791,7 +2792,7 @@ func (m *MeshManager) broadcastGossip() {
 		if !ok {
 			continue
 		}
-		bestRoutes[routeKey(canon, m.nodeID)] = globalRouteEntry{nil, m.nodeID, canon, 0}
+		bestRoutes[aggKey{canon, m.nodeID}] = globalRouteEntry{nil, m.nodeID, canon, 0}
 	}
 	// Peer routes (reference owner node). Score = the sender's claim hop
 	// for the owner (real distance through that peer); copies without
@@ -2809,7 +2810,7 @@ func (m *MeshManager) broadcastGossip() {
 			if !ok {
 				continue
 			}
-			key := routeKey(canon, r.NodeID)
+			key := aggKey{canon, r.NodeID}
 			if e, exists := bestRoutes[key]; !exists || hop < e.hop {
 				bestRoutes[key] = globalRouteEntry{peer, r.NodeID, canon, hop}
 			}
@@ -2826,10 +2827,9 @@ func (m *MeshManager) broadcastGossip() {
 	// Key by (suffix, owner) like routes: several nodes declaring the same
 	// suffix must all survive and keep propagating; keying by suffix alone
 	// collapsed the view to the nearest owner.
-	bestDS := make(map[string]globalDSEntry)
-	dsKey := func(suffix, nodeID string) string { return suffix + "\x00" + nodeID }
+	bestDS := make(map[aggKey]globalDSEntry)
 	for _, s := range domainSuffixes {
-		bestDS[dsKey(s, m.nodeID)] = globalDSEntry{nil, m.nodeID, s, 0}
+		bestDS[aggKey{s, m.nodeID}] = globalDSEntry{nil, m.nodeID, s, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
@@ -2840,7 +2840,7 @@ func (m *MeshManager) broadcastGossip() {
 			if !ok {
 				continue
 			}
-			key := dsKey(entry.Suffix, entry.NodeID)
+			key := aggKey{entry.Suffix, entry.NodeID}
 			if e, exists := bestDS[key]; !exists || hop < e.hop {
 				bestDS[key] = globalDSEntry{peer, entry.NodeID, entry.Suffix, hop}
 			}
@@ -3351,10 +3351,11 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		route GossipRoute
 		hop   int // 0 = own route
 	}
-	bestRoutes := make(map[string]routeEntry)
-	// Key by (canonical prefix, owner): every advertised owner of the same
-	// network must keep propagating, not just the closest copy.
-	routeKey := func(prefix, nodeID string) string { return prefix + "\x00" + nodeID }
+	// Aggregate by (value, owner): every advertised owner of the same network
+	// must keep propagating, not just the closest copy. A comparable struct
+	// avoids delimiter escaping entirely.
+	type aggKey struct{ value, owner string }
+	bestRoutes := make(map[aggKey]routeEntry)
 
 	// Own advertise routes
 	for _, r := range advertise {
@@ -3362,7 +3363,7 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 		if !ok {
 			continue
 		}
-		bestRoutes[routeKey(canon, m.nodeID)] = routeEntry{GossipRoute{Prefix: canon, NodeID: m.nodeID}, 0}
+		bestRoutes[aggKey{canon, m.nodeID}] = routeEntry{GossipRoute{Prefix: canon, NodeID: m.nodeID}, 0}
 	}
 	// Peer routes (reference owner node)
 	for _, peer := range allPeers {
@@ -3378,7 +3379,7 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			if !ok {
 				continue
 			}
-			key := routeKey(canon, r.NodeID)
+			key := aggKey{canon, r.NodeID}
 			if e, exists := bestRoutes[key]; !exists || hop < e.hop {
 				bestRoutes[key] = routeEntry{GossipRoute{Prefix: canon, NodeID: r.NodeID}, hop}
 			}
@@ -3392,10 +3393,9 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 	}
 	// Key by (suffix, owner) like routes, so every node declaring the same
 	// suffix keeps propagating instead of collapsing to the nearest one.
-	bestDS := make(map[string]dsEntry)
-	dsKey := func(suffix, nodeID string) string { return suffix + "\x00" + nodeID }
+	bestDS := make(map[aggKey]dsEntry)
 	for _, s := range domainSuffixes {
-		bestDS[dsKey(s, m.nodeID)] = dsEntry{GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}, 0}
+		bestDS[aggKey{s, m.nodeID}] = dsEntry{GossipDomainSuffix{Suffix: s, NodeID: m.nodeID}, 0}
 	}
 	for _, peer := range allPeers {
 		if peer.Sender == nil {
@@ -3406,7 +3406,7 @@ func (m *MeshManager) BuildGossipInfo() *GossipInfo {
 			if !ok {
 				continue
 			}
-			key := dsKey(entry.Suffix, entry.NodeID)
+			key := aggKey{entry.Suffix, entry.NodeID}
 			if e, exists := bestDS[key]; !exists || hop < e.hop {
 				bestDS[key] = dsEntry{GossipDomainSuffix{Suffix: entry.Suffix, NodeID: entry.NodeID}, hop}
 			}

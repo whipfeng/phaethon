@@ -71,7 +71,7 @@ type RouteSelectorConfig struct {
 	// callback.
 	SelectRoute SelectRouteFunc
 
-	// MeshNetwork is the overall mesh range (e.g. 100.64.0.0/10). When a
+	// MeshNetwork is the overall mesh range (e.g. 100.0.0.0/8). When a
 	// destination falls inside it but no route exists (link down, topology not
 	// converged), the packet is explicitly dropped and reported instead of
 	// being silently absorbed as an unknown local destination (D27).

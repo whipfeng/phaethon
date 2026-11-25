@@ -356,9 +356,10 @@ func (h *ConnectionHandler) HandleTCPConn(conn net.Conn, srcAddr string, srcPort
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] resolved %s -> %s", connID, resolvedAddr, dialAddr)
 		}
 		// Phaethon patch #13: Mesh IP destinations use mesh routing (MeshDial)
-		// instead of OS network stack direct dial. Mesh IPs (100.64.0.0/10) are
-		// not routable via the OS network stack; they must go through the mesh
-		// network's gVisor netstack.
+		// instead of OS network stack direct dial. Mesh destinations (the
+		// configured mesh network, 100.0.0.0/8 by default) are not routable via
+		// the OS network stack; they must go through the mesh network's gVisor
+		// netstack.
 		if ip := net.ParseIP(dialAddr); ip != nil && h.isMeshIP != nil && h.isMeshIP(ip) {
 			util.LogModuleDebug("handler", "[TCP-DEBUG] [%s] mesh IP detected: %s, using MeshDial", connID, dialAddr)
 			var fwdKey string

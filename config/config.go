@@ -1467,7 +1467,7 @@ func (k *MeshTCPKeepalive) GetCount() int {
 // MeshConfig holds mesh overlay network settings.
 type MeshConfig struct {
 	NodeID               string                   `yaml:"node-id,omitempty" json:"node-id,omitempty"`
-	Network              string                   `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.64.0.0/16"
+	Network              string                   `yaml:"network,omitempty" json:"network,omitempty"`                               // Overall mesh network (e.g., "100.0.0.0/8"), default "100.0.0.0/8"
 	Subnet               string                   `yaml:"subnet,omitempty" json:"subnet,omitempty"`                                 // This node's subnet (e.g., "100.0.0.0/16")
 	DomainSuffixes       []string                 `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
 	Advertise            []string                 `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)

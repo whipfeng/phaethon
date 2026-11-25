@@ -11,11 +11,12 @@ import (
 const defaultTTL = 64
 
 // meshCIDR is the address range used for mesh addressing.
-// Default: 100.64.0.0/10 (CGNAT range). Can be changed via SetMeshCIDR.
+// Default: 100.0.0.0/8, matching config.MeshConfig.GetNetwork(). The runtime
+// value is always replaced via SetMeshCIDR from config before mesh starts.
 var meshCIDR *net.IPNet
 
 func init() {
-	_, meshCIDR, _ = net.ParseCIDR("100.64.0.0/10")
+	_, meshCIDR, _ = net.ParseCIDR("100.0.0.0/8")
 }
 
 // SetMeshCIDR sets the overall mesh network range (e.g., "100.0.0.0/8").

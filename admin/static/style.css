@@ -311,6 +311,24 @@ body {
 .data-table tr.selected:hover { background: var(--accent-hover); }
 .data-table code { background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.82em; }
 
+/* Rules table stays a real table at every viewport width: its action column
+   holds five buttons, and rule text is often a long unbreakable comma chain.
+   Fixed column widths keep narrow/zoomed windows from squeezing columns into
+   an unreadable single stack; the wrapper scrolls horizontally instead. */
+.rules-table { table-layout: fixed; }
+.rules-table th:nth-child(1), .rules-table td:nth-child(1) { width: 3rem; }
+.rules-table th:nth-child(2), .rules-table td:nth-child(2) { width: 16rem; }
+.rules-table th:nth-child(3), .rules-table td:nth-child(3) { width: 10rem; }
+.rules-table th:nth-child(4), .rules-table td:nth-child(4) { width: 6rem; }
+.rules-table th:nth-child(5), .rules-table td:nth-child(5) { width: 7rem; }
+.rules-table th:nth-child(6), .rules-table td:nth-child(6) { width: 4.5rem; }
+.rules-table th:nth-child(7), .rules-table td:nth-child(7) { width: 23rem; }
+.rules-table th { white-space: normal; }
+.rules-table td { overflow-wrap: anywhere; }
+.rules-table td:nth-child(2) code { white-space: normal; word-break: break-all; }
+.rules-table td .badge { white-space: nowrap; }
+.rules-table td:last-child .btn { margin: 0 0.15rem 0.15rem 0; }
+
 /* Reverse bindings grouped by Reverse ID */
 .rv-binding-group-header { background: transparent; }
 .rv-binding-group-header td { padding: 0; border: none; background: transparent; }
@@ -1452,6 +1470,51 @@ details summary { color: var(--accent); font-size: 0.88rem; user-select: none; }
     /* Action buttons in card layout */
     .data-table td:last-child .btn {
         margin-left: 0.25rem;
+    }
+
+    /* Rules table opt-out of the card layout. Narrow/zoomed desktop windows
+       used to trip this breakpoint and collapse the rules page into a single
+       stacked column; keep the native table and scroll horizontally instead. */
+    .rules-table-wrap {
+        overflow-x: auto;
+    }
+
+    .rules-table {
+        min-width: 1020px;
+    }
+
+    .rules-table thead {
+        display: table-header-group;
+    }
+
+    .rules-table tbody {
+        display: table-row-group;
+        gap: 0;
+    }
+
+    .rules-table tr {
+        display: table-row;
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        padding: 0;
+    }
+
+    .rules-table td {
+        display: table-cell;
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .rules-table td::before {
+        content: none;
+        display: none;
+    }
+
+    .rules-table td:last-child {
+        padding-top: 0.4rem;
+        margin-top: 0;
+        border-top: 0;
     }
 
     /* Subscription table mobile optimizations */

@@ -1174,6 +1174,8 @@ async function fetchRules(expectedVersion) {
     updateRules(data);
 }
 
+let lastRulesSignature = '';
+
 function updateRules(data) {
     // Update the global rulesData variable for insertRuleAt
     if (typeof rulesData !== 'undefined') {
@@ -1182,17 +1184,29 @@ function updateRules(data) {
 
     const tbody = document.querySelector('#rules-tbody');
     if (!tbody) return;
+    // Polling refreshes run on every tick; rebuilding the table when the data
+    // is unchanged causes visible flicker and drops in-progress selection.
+    const signature = JSON.stringify(data);
+    if (signature === lastRulesSignature) return;
+    lastRulesSignature = signature;
     tbody.innerHTML = data.map((r) => {
         const id = r.id;
         const enabled = r.enabled !== false;
         const ruleText = r.rule || '';
         const rowClass = enabled ? '' : 'row-disabled';
+        // Keep the polling render identical to the server-side template: a raw
+        // rule string in the Match cell (with the other columns blanked) both
+        // loses the target/time info and lets a long comma chain blow out the
+        // table width.
+        const [kw, val, target, mapping, timeRange] = (typeof parseRule === 'function')
+            ? parseRule(ruleText)
+            : [ruleText, '', '', '', ''];
         return `<tr data-id="${id}" class="${rowClass}">
             <td data-label="#">${id}</td>
-            <td data-label="Match"><code>${escapeHtml(ruleText)}</code></td>
-            <td data-label="Target">—</td>
-            <td data-label="Mapping Source">—</td>
-            <td data-label="Time">—</td>
+            <td data-label="Match"><code>${escapeHtml(kw)}</code>${val ? ': ' + escapeHtml(val) : ''}</td>
+            <td data-label="Target"><strong>${escapeHtml(target || '—')}</strong></td>
+            <td data-label="Mapping Source">${mapping ? `<span class="badge badge-info">${escapeHtml(mapping)}</span>` : '<span class="text-muted">—</span>'}</td>
+            <td data-label="Time">${timeRange ? `<span class="badge badge-warn">${escapeHtml(timeRange)}</span>` : '<span class="text-muted">—</span>'}</td>
             <td data-label="Enabled">
                 <label class="switch" title="${enabled ? 'Enabled' : 'Disabled'}">
                     <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleRule(${id}, this.checked)">
@@ -3120,7 +3134,10 @@ function renderActiveConns() {
                 tr.addEventListener('click', () => openLogsWithPreset({ kind: 'id', value: c.id }));
                 tr.title = activeConnTooltip(c);
                 const src = c.srcAddr || '';
-                const dst = c.dstAddr + ':' + c.dstPort;
+                let dst = c.dstAddr + ':' + c.dstPort;
+                if (c.originalDstAddr && c.originalDstAddr !== c.dstAddr) {
+                    dst = c.originalDstAddr + ' → ' + dst;
+                }
                 tr.children[0].textContent = c.protocol || '';
                 tr.children[1].textContent = c.inbound || '';
                 tr.children[2].textContent = src;
@@ -3299,7 +3316,10 @@ async function openConnsPopup() {
                 html += '</tr></thead><tbody>';
                 conns.forEach(c => {
                     const dur = formatDuration(Date.now() - new Date(c.startTime).getTime());
-                    const dst = c.dstAddr + ':' + c.dstPort;
+                    let dst = c.dstAddr + ':' + c.dstPort;
+                    if (c.originalDstAddr && c.originalDstAddr !== c.dstAddr) {
+                        dst = c.originalDstAddr + ' → ' + dst;
+                    }
                     const rule = egressLabel(c);
                     const inbound = c.inbound || '';
                     const selected = c.id === pipSelectedConnId ? ' class="selected"' : '';
@@ -3416,7 +3436,11 @@ function connLogFormatEntry(e) {
     const target = egressLabel(e);
     let line = `${icon} [${inbound}]`;
     if (e.connId) line += ` [${e.connId}]`;
-    line += ` ${e.protocol} ${src} → ${e.dstAddr}:${e.dstPort} → ${target}`;
+    let dstText = `${e.dstAddr}:${e.dstPort}`;
+    if (e.originalDstAddr && e.originalDstAddr !== e.dstAddr) {
+        dstText = `${e.originalDstAddr} → ${dstText}`;
+    }
+    line += ` ${e.protocol} ${src} → ${dstText} → ${target}`;
     if (e.error) line += ` (${e.error})`;
     return {
         text: `[${time}] ${line}`,

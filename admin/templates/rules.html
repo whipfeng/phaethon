@@ -8,8 +8,8 @@
         </div>
 
         <!-- Rules Table -->
-        <div class="table-responsive">
-            <table class="data-table">
+        <div class="table-responsive rules-table-wrap">
+            <table class="data-table rules-table">
                 <thead>
                     <tr>
                         <th>#</th>
@@ -529,11 +529,14 @@ async function testRule() {
             return;
         }
         let html = '';
-        if (data.matched && data.rule) {
-            html += '<p class="text-success">→ ' + escapeHtml(data.rule) + '</p>';
+        if (data.matched) {
+            html += '<p class="text-success">→ ' + escapeHtml(data.rule || 'matched') + '</p>';
         } else {
             const noMatch = typeof i18n !== 'undefined' ? i18n.t('rule.noMatch') : 'No explicit match found';
             html += '<p class="text-muted">' + noMatch + '</p>';
+        }
+        if (data.warning) {
+            html += '<p class="text-danger">⚠ ' + escapeHtml(data.warning) + '</p>';
         }
         if (data.proxy) {
             let proxyLine = 'Proxy: <code>' + escapeHtml(data.proxy) + '</code>';

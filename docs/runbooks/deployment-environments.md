@@ -180,8 +180,11 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 
 上线顺序（旧二进制不认识 `assets/` 条目）：
 
-1. 先发布“接受资产”的版本（本改造），用**不带资产**的 pkg 把全机群升级到该版本；
+1. 先发布“接受资产”的版本（本改造），用**不带资产**的 pkg 把全机群升级到该版本
+   （构建时设 `PHAETHON_PKG_NO_ASSETS=1`）；
 2. 再构建**带资产**的 pkg 走正常 activate；ConPTY 不可用的节点升级后 PTY 自动恢复。
+   第 2 步的 pkg 版本号必须与第 1 步不同（例如先提交本次上线记录再构建），
+   否则同 `platform/arch/version` 的包会被对端去重、无法再次分发。
 
 旧版本收到带资产 pkg 会直接校验失败（安全的失败：`failUpgradeBeforeSwap`，服务不受影响）。
 

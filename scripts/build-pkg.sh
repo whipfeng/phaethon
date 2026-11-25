@@ -72,8 +72,13 @@ EOF
 # Windows amd64 packages carry the winpty fallback so Server 2016 / Win7 nodes
 # recover PTY on self-upgrade. Other platforms never get assets (and no arm64
 # winpty 0.4.3 build exists).
+# Phase 1 of the two-step rollout must ship the asset-capable binary WITHOUT
+# the assets: older binaries reject assets/ entries outright. Set
+# PHAETHON_PKG_NO_ASSETS=1 for that package.
 ASSET_ARGS=()
-if [ "$BUILD_OS" = "windows" ] && [ "$BUILD_ARCH" = "amd64" ]; then
+if [ -n "$PHAETHON_PKG_NO_ASSETS" ]; then
+    echo "Assets disabled (PHAETHON_PKG_NO_ASSETS set)"
+elif [ "$BUILD_OS" = "windows" ] && [ "$BUILD_ARCH" = "amd64" ]; then
     for asset in winpty.dll winpty-agent.exe; do
         asset_path="$SCRIPT_DIR/../third_party/winpty/amd64/$asset"
         if [ ! -f "$asset_path" ]; then

@@ -54,3 +54,36 @@ RFC 4254 §6.7 规定终端尺寸变化以 `window-change` 请求**在会话生�
 
 - 修复点只涉及请求流消费与 PTY 句柄生命周期，不改变 shell 选择、编码、环境变量等既有行为。
 - 客户端（OpenSSH、PuTTY、移动端终端）在窗口变化时自动发送 `window-change`；不发送的客户端（如某些脚本库）仍保持初始尺寸，属协议层正常行为。
+
+## 全机群扩散与验证（2026-11-25，v0.8.3-64-g454f05b）
+
+10 个节点全部通过 pkg upload + activate 自升级到 `v0.8.3-64-g454f05b`（`/api/packages/pin`
+均为 `status=succeeded`；此前 jf/gg/ms9/ms10/mb 为 53、qgw/deskw 为 55、deskzq 为 38、vm/qg 为 63）。
+升级后逐节点做 PTY 初始尺寸 + `window-change(120x40)` 实测（`stty size` 读取）：
+
+| 节点 | 平台 | PTY 实现 | 初始 | resize 后 |
+|---|---|---|---|---|
+| ms9 / ms10 | Linux | creack/pty | `24 80` | `40 120` |
+| jf | Linux | creack/pty | `24 80` | `40 120` |
+| gg | Linux | creack/pty | `24 80` | `40 120` |
+| qg | Linux | creack/pty | `24 80` | `40 120` |
+| mb | Darwin | creack/pty | `24 80` | `40 120` |
+| qgw | Windows 7 | winpty | `24 80` | `40 120` |
+| deskw | Windows 10 | ConPTY | `24 80` | `40 120` |
+| vm | Windows 11 | ConPTY | `24 80` | `40 120` |
+| deskzq | Windows Server 2016 | winpty | `24 80` | `40 120` |
+
+### 期间发现：pre-1809 Windows 节点缺少 winpty 资产
+
+deskzq（Server 2016，10.0.14393）在升级后仍报 `PTY allocation request failed on channel 0`。
+排查结论：`conpty.IsConPtyAvailable()` 为 false（ConPTY 需 1809+），代码按设计回落到
+“部署目录自带的 winpty”，但 deskzq 的部署目录里从来没有 `winpty.dll` / `winpty-agent.exe`，
+`winptyReady()` 为 false，于是 `pty-req` 被拒绝，交互 shell 落到内置 Bubble Tea shell。
+
+处理：把仓库 `third_party/winpty/amd64/{winpty.dll,winpty-agent.exe}`（SHA256 校验一致）复制到
+部署目录，再走 `POST /api/restart`（OnRestart → worker 退出、watchdog 原地拉起，watchdog 不退出，
+不需要人工桌面操作），随后 PTY 与 resize 均正常。
+
+**部署资产要求**：ConPTY 不可用的 Windows 节点（Win7/8、Server 2016 及更早）必须在部署目录
+放 `winpty.dll` 与 `winpty-agent.exe`；pkg 只替换可执行文件，不包含这两个资产。
+`winptyLoadOnce` 是进程级缓存，补文件后必须重启 worker 才生效。

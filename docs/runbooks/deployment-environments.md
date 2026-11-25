@@ -1,6 +1,6 @@
 # 部署环境运维手册
 
-> 版本: 0.1.2
+> 版本: 0.1.3
 > 日期: 2026-11-25
 > 状态: ACTIVE
 > 负责人: Phaethon Dev
@@ -12,6 +12,7 @@
 | 0.1.0 | 2026-09-10 | 初始版本 | Qoder |
 | 0.1.1 | 2026-11-25 | 补充“停服务后等待旧进程退出”的重启纪律（qg 事故） | layer4 |
 | 0.1.2 | 2026-11-25 | 取消“用户亲自发版”节点例外：全机群内建 SSH + pkg 自升级统一扩散到 v0.8.3-64 | layer4 |
+| 0.1.3 | 2026-11-25 | 新增 §5.6：pre-1809 Windows 节点必须随部署目录放 winpty 资产（deskzq 实例） | layer4 |
 
 > **注意：本文档将提交到 Git 仓库，禁止存放任何敏感信息。**
 > 包括但不限于：IP 地址、SSH 端口/凭据、密码、Token、API Key、内网域名等。
@@ -151,10 +152,30 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 
 - Windows 7 为 **best-effort**：构建使用 `make windows7` + `GO_LEGACY_WIN7`
   （见 Makefile），平台标识固定为 `windows7`；
-- 内嵌 SSH 在 Win7 上仍为行级模式（PowerShell 2.0 + winpty 不可靠）；
-  如需交互式 PTY，先安装 WMF 5.1 再按 `docs/plans/full-system-remediation-decisions.md`
+- 内嵌 SSH 在 Win7 上走 winpty（自动探测会跳过 PowerShell 2.0，选 cmd.exe / Git Bash）；
+  2026-11-25 在 qgw 实测交互 PTY 与终端 resize 正常（`stty size` 24x80 → 40x120）；
+  如需 PowerShell 交互，先安装 WMF 5.1 再按 `docs/plans/full-system-remediation-decisions.md`
   第 20 项做验证；
 - 后续 Go 版本可能不再兼容 Win7；构建侧需继续锁定已知可用工具链。
+
+### 5.6 PTY 资产：winpty（pre-1809 Windows 必装）
+
+内建 SSH 的 PTY 选择顺序是 ConPTY（Win10 1809+）→ 部署目录自带的 winpty。**pkg 只替换
+可执行文件，不包含资产文件**，所以凡是 ConPTY 不可用的节点（Win7/8、Server 2016 及更早）
+都必须在部署目录手工放好：
+
+```
+<deploy>/winpty.dll
+<deploy>/winpty-agent.exe      # 来自仓库 third_party/winpty/amd64/
+```
+
+缺资产时 `pty-req` 会被拒绝（客户端看到 `PTY allocation request failed on channel 0`），
+交互 shell 静默回落到内置 Bubble Tea shell，功能可用但没有真实 PTY / resize。
+
+- 补文件不会即时生效：`winptyLoadOnce` 是进程级缓存，必须重启 worker
+  （无 OS SSH 节点用 `POST /api/restart`，worker 退出后 watchdog 原地拉起，watchdog 不退出）；
+- 2026-11-25 deskzq（Server 2016）就是缺这两个文件，补装并重启后 PTY/resize 恢复正常，
+  详见 `docs/issues/builtin-ssh-window-resize-20261124.md`。
 
 
 ## 6. 自启动配置（2026-11-18）

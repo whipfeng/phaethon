@@ -559,6 +559,13 @@ type Peer struct {
 	// by all 256 data queues; reserved on enqueue, refunded on dequeue.
 	dataBudget atomic.Int64
 
+	// CARRIER-STALL diagnostic only: number of data frames enqueued but not
+	// yet written, and the enqueue time of the oldest. Lets the stall log tell
+	// a local write-path park (frames waiting in dataQueues/drrOutput/smallCh)
+	// apart from a real wire blackout (nothing queued, but no pong comes back).
+	queuedDataFrames atomic.Int64
+	oldestQueuedNano atomic.Int64
+
 	// Per-peer random number generator (avoid global rand lock contention)
 	rng   *rand.Rand
 	rngMu sync.Mutex
@@ -610,6 +617,39 @@ func (p *Peer) SetLastError(errMsg string) {
 	p.lastErrorMu.Lock()
 	p.LastError = errMsg
 	p.lastErrorMu.Unlock()
+}
+
+// markDataQueued records an outstanding data frame for the CARRIER-STALL
+// diagnostic. Diagnostic only; no behavioral effect. The CAS ordering keeps
+// oldestQueuedNano consistent with the frame count under concurrent
+// enqueue/write (a plain Add could reset the stamp seen by a fresh enqueue).
+func (p *Peer) markDataQueued(at time.Time) {
+	for {
+		n := p.queuedDataFrames.Load()
+		if n == 0 {
+			p.oldestQueuedNano.Store(at.UnixNano())
+		}
+		if p.queuedDataFrames.CompareAndSwap(n, n+1) {
+			return
+		}
+	}
+}
+
+// markDataWritten clears one outstanding data frame after it was written (or
+// after an enqueue failure rolls it back). Diagnostic only.
+func (p *Peer) markDataWritten() {
+	for {
+		n := p.queuedDataFrames.Load()
+		if n <= 0 {
+			return
+		}
+		if n == 1 {
+			p.oldestQueuedNano.Store(0)
+		}
+		if p.queuedDataFrames.CompareAndSwap(n, n-1) {
+			return
+		}
+	}
 }
 
 // LinkNIC getter/setter (thread-safe, fix race condition #2)
@@ -1001,6 +1041,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			peer.transport.Close()
 			return false
 		}
+		if !req.isControl && !req.dns {
+			peer.markDataWritten()
+		}
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s", peer.ID)
 		}
@@ -1053,6 +1096,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			if !req.isControl {
 				dataFrames++
+			}
+			if !req.isControl && !req.dns {
+				peer.markDataWritten()
 			}
 		}
 		// Egress health (Phase B): only non-control frames count.
@@ -1390,6 +1436,12 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		}
 	}
 
+	// Diagnostic: count the frame as outstanding before handing it to the
+	// writer, so the writer's decrement can never run before this increment.
+	if dataQueueIdx >= 0 {
+		peer.markDataQueued(req.enqueueTime)
+	}
+
 	select {
 	case ch <- req:
 		if req.frameType == frame.FrameMeshPacket {
@@ -1406,6 +1458,7 @@ func enqueueWriteReq(peer *Peer, req writeReq) error {
 		// Refund the byte reservation for data-queue frames.
 		if dataQueueIdx >= 0 {
 			peer.dataBudget.Add(need)
+			peer.markDataWritten()
 		}
 		if req.frameType == frame.FrameMeshPacket {
 			util.LogModuleWarn("p2p", "[P2P-ENQUEUE-DIAG] QUEUE FULL peer=%s dataLen=%d chCap=%d priority=%s",
@@ -2885,8 +2938,23 @@ func (m *P2PManager) sendPing(peer *Peer) {
 	// fresh RTO instead of waiting out 2^n backoff (14-28s observed).
 	if limit := carrierPingStallLimit(); limit > 0 {
 		if age, n := peer.pingTracker.pendingStats(); n >= 3 && age > limit {
-			util.LogModuleWarn("p2p", "[CARRIER-STALL] %d pings in flight, oldest %v > limit %v, resetting peer.ID=%s proxy=%s nodeID=%s",
-				n, age.Round(time.Millisecond), limit, peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+			// Diagnostic only: distinguish a local write-path park (frames still
+			// queued, credit exhausted) from a real wire blackout (nothing queued,
+			// yet no pong arrives). No behavioral effect on the reset below.
+			credit := int64(-1)
+			if peer.stripe != nil {
+				credit = peer.stripe.writeCredit()
+			}
+			queued := peer.queuedDataFrames.Load()
+			var oldestQueued, inboundQuiet time.Duration
+			if qn := peer.oldestQueuedNano.Load(); qn != 0 {
+				oldestQueued = time.Since(time.Unix(0, qn))
+			}
+			if ls := peer.lastSeenNano.Load(); ls != 0 {
+				inboundQuiet = time.Since(time.Unix(0, ls))
+			}
+			util.LogModuleWarn("p2p", "[CARRIER-STALL] %d pings in flight, oldest %v > limit %v, writeCredit=%d inboundQuiet=%v queuedData=%d oldestQueued=%v, resetting peer.ID=%s proxy=%s nodeID=%s",
+				n, age.Round(time.Millisecond), limit, credit, inboundQuiet.Round(time.Millisecond), queued, oldestQueued.Round(time.Millisecond), peer.ID, peer.ProxyNameSafe(), peer.NodeID)
 			peer.SetLastError(fmt.Sprintf("carrier stall: oldest ping in flight %v", age.Round(time.Millisecond)))
 			peer.transport.Close()
 			return

@@ -43,10 +43,11 @@ func (s *AdminServer) apiSSH(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{
-		"enabled":             cfg.Enabled,
-		"shell":               cfg.Shell,
-		"hostKeyFingerprint":  hostFP,
-		"keys":                keys,
+		"enabled":            cfg.Enabled,
+		"shell":              cfg.Shell,
+		"hostKeyFingerprint": hostFP,
+		"keys":               keys,
+		"pty":                server.PTYCapabilityInfo(),
 	})
 }
 

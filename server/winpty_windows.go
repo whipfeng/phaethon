@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -48,6 +49,7 @@ var (
 	winptyAPIv      *winptyAPI
 	winptyProbeOnce sync.Once
 	winptyProbeOK   bool
+	winptyProbeDone atomic.Bool
 )
 
 func fileExistsK(path string) bool {
@@ -121,6 +123,7 @@ func winptyReady() bool {
 		return false
 	}
 	winptyProbeOnce.Do(func() {
+		defer winptyProbeDone.Store(true)
 		p, err := startWinptyProc("cmd.exe", "cmd.exe /c exit 0", "", 80, 25, false)
 		if err != nil {
 			util.LogModuleWarn("ssh", "winpty: probe failed: %v", err)
@@ -144,6 +147,47 @@ func winptyReady() bool {
 		p.CloseIO()
 	})
 	return winptyProbeOK
+}
+
+// winptyFilesPresent reports whether both assets exist in any search dir.
+func winptyFilesPresent() bool {
+	for _, dir := range winptySearchDirs() {
+		if fileExistsK(filepath.Join(dir, "winpty.dll")) && fileExistsK(filepath.Join(dir, "winpty-agent.exe")) {
+			return true
+		}
+	}
+	return false
+}
+
+// PTYCapabilityInfo reports the PTY mode without spawning a probe process.
+// It reuses the cached load/probe state; winptyLoad only maps the DLL.
+func PTYCapabilityInfo() PTYCapability {
+	present := winptyFilesPresent()
+	c := PTYCapability{
+		ConPTYAvailable: supportConPTY,
+		AssetsPresent:   present,
+		AssetsValid:     present,
+	}
+	switch {
+	case supportConPTY:
+		c.Mode = "conpty"
+		c.Detail = "ConPTY available"
+	case winptyLoad():
+		if winptyProbeDone.Load() && !winptyProbeOK {
+			c.Mode = "unavailable"
+			c.Detail = "winpty failed its startup probe; check AV/SRP restrictions"
+			return c
+		}
+		c.Mode = "winpty"
+		c.Detail = "winpty PTY in use"
+	case present:
+		c.Mode = "unavailable"
+		c.Detail = "winpty assets present but could not be loaded; check AV/SRP restrictions"
+	default:
+		c.Mode = "unavailable"
+		c.Detail = "ConPTY unavailable; winpty.dll/winpty-agent.exe missing"
+	}
+	return c
 }
 
 func winptyWStr(proc *syscall.LazyProc, wp uintptr) string {

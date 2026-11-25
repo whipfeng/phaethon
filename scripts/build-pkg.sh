@@ -69,6 +69,21 @@ cat > "$META_FILE" << EOF
 }
 EOF
 
+# Windows amd64 packages carry the winpty fallback so Server 2016 / Win7 nodes
+# recover PTY on self-upgrade. Other platforms never get assets (and no arm64
+# winpty 0.4.3 build exists).
+ASSET_ARGS=()
+if [ "$BUILD_OS" = "windows" ] && [ "$BUILD_ARCH" = "amd64" ]; then
+    for asset in winpty.dll winpty-agent.exe; do
+        asset_path="$SCRIPT_DIR/../third_party/winpty/amd64/$asset"
+        if [ ! -f "$asset_path" ]; then
+            echo "Error: missing asset: $asset_path"
+            exit 1
+        fi
+        ASSET_ARGS+=(-asset "$asset=$asset_path")
+    done
+fi
+
 echo "Created meta.json"
 
 # Sign and package
@@ -94,6 +109,7 @@ else
         -meta "$META_FILE" \
         -key "$PHAETHON_SIGNING_KEY" \
         -version "$VERSION" \
+        "${ASSET_ARGS[@]}" \
         -output "dist/$DIST_DIR/phaethon_${PLATFORM}_${ARCH}_${VERSION}.pkg"
 
     echo "Created signed package: dist/$DIST_DIR/phaethon_${PLATFORM}_${ARCH}_${VERSION}.pkg"

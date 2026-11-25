@@ -13,6 +13,7 @@
 | 0.1.1 | 2026-11-25 | 补充“停服务后等待旧进程退出”的重启纪律（qg 事故） | layer4 |
 | 0.1.2 | 2026-11-25 | 取消“用户亲自发版”节点例外：全机群内建 SSH + pkg 自升级统一扩散到 v0.8.3-64 | layer4 |
 | 0.1.3 | 2026-11-25 | 新增 §5.6：pre-1809 Windows 节点必须随部署目录放 winpty 资产（deskzq 实例） | layer4 |
+| 0.1.4 | 2026-11-25 | §5.6 更新为 pkg 自动交付资产（watchdog 落盘）+ 部署介质兜底与两步上线顺序 | layer4 |
 
 > **注意：本文档将提交到 Git 仓库，禁止存放任何敏感信息。**
 > 包括但不限于：IP 地址、SSH 端口/凭据、密码、Token、API Key、内网域名等。
@@ -158,25 +159,38 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
   第 20 项做验证；
 - 后续 Go 版本可能不再兼容 Win7；构建侧需继续锁定已知可用工具链。
 
-### 5.6 PTY 资产：winpty（pre-1809 Windows 必装）
+### 5.6 PTY 资产：winpty（Windows 自动交付）
 
-内建 SSH 的 PTY 选择顺序是 ConPTY（Win10 1809+）→ 部署目录自带的 winpty。**当前 pkg 只替换
-可执行文件，不包含资产文件**，所以凡是 ConPTY 不可用的节点（Win7/8、Server 2016 及更早）
-都必须在部署目录手工放好（pkg 携带资产的改造方案见
-`docs/plans/pty-asset-delivery.md`，实施上线前仍按本节手工兜底）：
+内建 SSH 的 PTY 选择顺序是 ConPTY（Win10 1809+）→ 部署目录自带的 winpty →
+不可用降级（交互 shell 回落到内置 Bubble Tea shell）。资产有两条到达路径：
+
+- **pkg 自升级（首选，2026-11-25 起）**：Windows amd64 的 pkg 内置
+  `assets/winpty.dll` 与 `assets/winpty-agent.exe`，watchdog 在停 worker 后落盘到部署目录。
+  ConPTY 可用且目录没有 winpty 时跳过（不污染部署目录）；ConPTY 不可用或目录已有
+  winpty 时按清单更新。资产摘要写进 `meta.json`，受现有签名保护；校验/落盘失败只告警，
+  不阻断升级与回滚。
+- **首次安装 / 离线拷贝（兜底）**：部署介质随附 `winpty/` 目录（内容同
+  `third_party/winpty/amd64/`，附 SHA256 清单）。`start-phaethon.vbs` 仅在目标缺失时复制，
+  不覆盖运维手工放置的版本，复制失败继续启动。
 
 ```
 <deploy>/winpty.dll
-<deploy>/winpty-agent.exe      # 来自仓库 third_party/winpty/amd64/
+<deploy>/winpty-agent.exe
 ```
 
-缺资产时 `pty-req` 会被拒绝（客户端看到 `PTY allocation request failed on channel 0`），
-交互 shell 静默回落到内置 Bubble Tea shell，功能可用但没有真实 PTY / resize。
+上线顺序（旧二进制不认识 `assets/` 条目）：
+
+1. 先发布“接受资产”的版本（本改造），用**不带资产**的 pkg 把全机群升级到该版本；
+2. 再构建**带资产**的 pkg 走正常 activate；ConPTY 不可用的节点升级后 PTY 自动恢复。
+
+旧版本收到带资产 pkg 会直接校验失败（安全的失败：`failUpgradeBeforeSwap`，服务不受影响）。
 
 - 补文件不会即时生效：`winptyLoadOnce` 是进程级缓存，必须重启 worker
   （无 OS SSH 节点用 `POST /api/restart`，worker 退出后 watchdog 原地拉起，watchdog 不退出）；
-- 2026-11-25 deskzq（Server 2016）就是缺这两个文件，补装并重启后 PTY/resize 恢复正常，
-  详见 `docs/issues/builtin-ssh-window-resize-20261124.md`。
+- 控制台 SSH 区块显示 PTY 徽标（ConPTY / winpty / 系统 PTY / 不可用 + 原因），
+  `GET /api/ssh` 的 `pty` 字段返回同样的信息；
+- 2026-11-25 deskzq（Server 2016）缺文件导致 PTY/resize 失败，详见
+  `docs/issues/builtin-ssh-window-resize-20261124.md`；此后由 pkg 自动交付修复。
 
 
 ## 6. 自启动配置（2026-11-18）

@@ -80,6 +80,17 @@ const supportPty = true
 // ptyAvailable：Unix 始终可用。
 func ptyAvailable() bool { return supportPty }
 
+// PTYCapabilityInfo：Unix 使用系统 PTY，无资产依赖。
+func PTYCapabilityInfo() PTYCapability {
+	return PTYCapability{
+		Mode:            "pty",
+		ConPTYAvailable: false,
+		AssetsPresent:   false,
+		AssetsValid:     true,
+		Detail:          "system PTY (creack/pty)",
+	}
+}
+
 // startSessionProc 拉起 shell（isShell=true 交互登录）或执行命令行。
 // Interactive shells are PTY-only (no line-mode pipe fallback). Command
 // execution may use a pipe when no PTY was requested.

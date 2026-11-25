@@ -55,10 +55,19 @@ type Status struct {
 // Marker records an in-flight swap so a crash/power loss can be repaired at
 // the next watchdog start.
 type Marker struct {
-	Old       string    `json:"old"`
-	New       string    `json:"new"`
-	Version   string    `json:"version"`
-	StartedAt time.Time `json:"startedAt"`
+	Old       string        `json:"old"`
+	New       string        `json:"new"`
+	Version   string        `json:"version"`
+	StartedAt time.Time     `json:"startedAt"`
+	Assets    []AssetMarker `json:"assets,omitempty"`
+}
+
+// AssetMarker records a staged auxiliary file for the in-flight swap. Assets
+// are version-independent, so they are never rolled back with the executable.
+type AssetMarker struct {
+	Name   string `json:"name"`
+	New    string `json:"new"`
+	Backup string `json:"backup,omitempty"`
 }
 
 // WriteRequest atomically replaces the pending upgrade request.

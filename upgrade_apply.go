@@ -201,6 +201,7 @@ func tryRestoreCandidate(exe, label, candidate string) (string, bool) {
 // where a crash/power loss between the renames can leave the stable path
 // missing.
 func repairInterruptedUpgrade(exe string) {
+	cleanupAssetResidue(filepath.Dir(exe))
 	marker := upgrade.ReadMarker()
 	_, exeErr := os.Stat(exe)
 	newPath := stagedPath(exe, ".new")
@@ -470,6 +471,18 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	}
 	upgradeLog("staged: target=%s path=%s bytes=%d", req.Version, newPath, len(contents.Binary))
 
+	// Assets are staged in the same pre-stop window: a bad digest must abort
+	// before the worker is interrupted, exactly like a bad binary.
+	assetMarkers, err := maybeStageAssets(exe, contents)
+	if err != nil {
+		_ = os.Remove(newPath)
+		failUpgradeBeforeSwap(current, req, err)
+		return nil, 0, true, false
+	}
+	if len(assetMarkers) > 0 {
+		upgradeLog("staged assets: target=%s count=%d", req.Version, len(assetMarkers))
+	}
+
 	// Choose the backup path before writing the marker: repair-on-startup
 	// must know where the previous executable went.
 	backupPath := prepareBackup(exe)
@@ -477,12 +490,14 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 		Old:     backupPath,
 		New:     newPath,
 		Version: req.Version,
+		Assets:  assetMarkers,
 	})
 	upgradeLog("marker written: target=%s backup=%s", req.Version, backupPath)
 
 	if stopping != nil && stopping.Load() {
 		upgradeLog("aborted before stop: shutdown requested")
 		_ = os.Remove(newPath)
+		removeStagedAssets(assetMarkers)
 		_ = upgrade.ClearMarker()
 		_ = upgrade.WriteStatus(upgrade.Status{
 			Status:    upgrade.StatusIdle,
@@ -495,6 +510,10 @@ func tryApplyUpgrade(exe string, cp *childProcess, pid int, stopping *atomic.Boo
 	upgradeLog("stopping worker: pid=%d", pid)
 	util.LogModuleInfo("system", "[HANDOFF] stopping worker pid=%d", pid)
 	stopChild(cp, pid)
+
+	// The worker no longer maps winpty.dll, so the assets can be replaced.
+	// Failure here is a warning only: the executable upgrade must still run.
+	installAssets(assetMarkers)
 
 	if err := swapBinary(exe, newPath, backupPath); err != nil {
 		upgradeLog("swap failed: %v", err)

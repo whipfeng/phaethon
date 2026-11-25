@@ -16,6 +16,7 @@
 | 版本 | 日期 | 变更内容 | 作者 |
 |------|------|----------|------|
 | v0.1.0 | 2026-11-25 | 初始版本：两段式资产交付（部署兜底 + pkg 携带）与能力自检 | layer4 |
+| v0.2.0 | 2026-11-25 | 按方案完成实施（pkg/sign/watchdog/探测/API/页面/脚本/测试/文档），记录偏差 | layer4 |
 
 ## 1. 背景
 
@@ -332,3 +333,24 @@ func PTYCapabilityInfo() PTYCapability
 - **AV 隔离**：资产可能被拦截；哈希不匹配时拒绝落盘，不影响主升级。
 - **旧节点**：必须先完成第 9 节第一步，否则带资产 pkg 会被拒绝（安全失败，但升级不生效）。
 - **探针缓存**：补资产后未重启 worker 时页面仍显示不可用，属预期；提示文案需明确“重启生效”。
+
+## 13. 实施记录（2026-11-25）
+
+| # | 状态 | 落地位置 |
+|---|------|----------|
+| 1 | 完成 | `pkg/signing/signing.go`（`AssetMeta`、assets 清单、三处校验统一走 `classifyPkgEntry`、`CreatePkgWithAssets`）、`pkg/signing/cmd/sign/main.go`（可重复 `-asset`） |
+| 2 | 完成 | `scripts/build-pkg.sh`：windows amd64 自动追加 `winpty.dll` / `winpty-agent.exe` 两条 `-asset` |
+| 3 | 完成 | `upgrade_apply.go`（停 worker 前暂存、停后落盘、失败不阻断）、`upgrade_assets*.go`、`pkg/upgrade/upgrade.go`（`Marker.Assets`） |
+| 4 | 完成 | `server/pty_capability.go` + `ssh_session_windows.go` / `ssh_session_unix.go`、`admin/ssh.go`（`pty` 字段） |
+| 5 | 完成 | `admin/templates/admin.html`：PTY 徽标、不可用原因与“重启生效”提示 |
+| 6 | 完成 | `pkg/signing/signing_test.go`（往返/篡改/白名单/越界/缺失）、`upgrade_assets_test.go`（暂存-安装顺序、摘要不匹配、残留清理） |
+| 7 | 完成 | 本文件、`docs/runbooks/deployment-environments.md` §5.6 |
+
+与设计的偏差：
+
+- 部署侧 `start-phaethon.vbs` 的兜底只做“目标缺失才复制”，不覆盖已有文件；
+  部署介质的 SHA256 校验放在准备阶段，未在 VBS 内实现（pkg 路径仍逐文件校验摘要）。
+- 运行期 `AssetsValid` 表示两个文件存在；摘要正确性由 pkg 安装时的校验保证，
+  运行期不重复扫描/哈希（探针结果通过 `Detail` 暴露）。
+
+上线严格按第 9 节两步执行。

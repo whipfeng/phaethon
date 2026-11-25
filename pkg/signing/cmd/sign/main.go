@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -27,6 +28,8 @@ func main() {
 	platform := flag.String("platform", "", "Platform (linux/windows/darwin) - required if no meta.json")
 	arch := flag.String("arch", "", "Architecture (amd64/arm64) - required if no meta.json")
 	versionFlag := flag.String("version", "", "Version override; skips running the binary (for cross-compiled targets)")
+	var assetFlags assetFlagList
+	flag.Var(&assetFlags, "asset", "Asset to ship as assets/<name>=<path> (repeatable, e.g. winpty.dll=third_party/winpty/amd64/winpty.dll)")
 	flag.Parse()
 
 	if *binaryPath == "" || *keyPath == "" || *outputPath == "" {
@@ -81,6 +84,30 @@ func main() {
 		}
 	}
 
+	// Read assets, record their digests in meta, and keep the bytes for the zip.
+	assets := make(map[string][]byte, len(assetFlags))
+	meta.Assets = nil
+	for _, spec := range assetFlags {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok || name == "" || path == "" {
+			fmt.Fprintf(os.Stderr, "Error: invalid -asset %q (want name=path)\n", spec)
+			os.Exit(1)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading asset %s: %v\n", path, err)
+			os.Exit(1)
+		}
+		sum := sha256.Sum256(data)
+		meta.Assets = append(meta.Assets, signing.AssetMeta{
+			Name:   name,
+			Size:   int64(len(data)),
+			SHA256: hex.EncodeToString(sum[:]),
+		})
+		assets[name] = data
+		fmt.Printf("Asset: %s (%d bytes)\n", name, len(data))
+	}
+
 	// Re-marshal meta to match what CreatePkg will write to zip
 	// (signature must be over the exact bytes in the zip)
 	metaJSON, err := json.MarshalIndent(meta, "", "  ")
@@ -114,7 +141,7 @@ func main() {
 	}
 
 	// Create pkg
-	if err := signing.CreatePkg(*outputPath, binary, meta, signature); err != nil {
+	if err := signing.CreatePkgWithAssets(*outputPath, binary, meta, signature, assets); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating pkg: %v\n", err)
 		os.Exit(1)
 	}
@@ -124,6 +151,16 @@ func main() {
 	fmt.Printf("  Platform: %s\n", meta.Platform)
 	fmt.Printf("  Arch:     %s\n", meta.Arch)
 	fmt.Printf("  Sig:      %s...\n", base64.StdEncoding.EncodeToString(signature)[:32])
+}
+
+// assetFlagList collects repeated -asset name=path flags in order.
+type assetFlagList []string
+
+func (a *assetFlagList) String() string { return strings.Join(*a, ",") }
+
+func (a *assetFlagList) Set(v string) error {
+	*a = append(*a, v)
+	return nil
 }
 
 func parsePrivateKey(data []byte) (ed25519.PrivateKey, error) {

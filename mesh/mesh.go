@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -223,7 +225,8 @@ func dedupeRouteEntries(entries []RouteEntry) []RouteEntry {
 //    Selections made under an older topology generation are dropped only after
 //    the target has been idle for stickyRebalanceGrace, so active targets stay
 //    pinned while idle ones re-hash onto newly added owners.
-// 3. Hash: stable selection based on targetIP (first time only)
+// 3. Weighted hash: stable selection biased toward the cheapest path
+//    (weight = 1/cost); equal or unknown costs spread uniformly.
 //
 // No online filter here: entries come from the unified route table which is
 // recomputed on topology changes, so an owner present in Entries is reachable
@@ -279,29 +282,52 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 		util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s no longer available, re-selecting", targetIP, cachedNodeID)
 	}
 
-	// Canonicalize IPv4 to 4 bytes: net.ParseIP returns a 16-byte v4-in-v6
-	// representation while the data plane passes 4-byte addresses; hashing the
-	// raw slice would otherwise select different owners for the same target.
-	if v4 := targetIP.To4(); v4 != nil {
-		targetIP = v4
-	}
-
-	// Hash-based stable selection
-	hash := 0
-	for _, b := range targetIP {
-		hash = hash*31 + int(b)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	idx := hash % len(available)
-	selectedNodeID := available[idx].NodeID
+	// Weighted rendezvous: deterministic per (target, owner), biased 1/cost.
+	selectedNodeID := m.pickWeightedOwner(targetKey, available)
 
 	// Cache the selection
 	m.sticky.Put(targetKey, selectedNodeID, gen)
 
 	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
 	return selectedNodeID
+}
+
+// pickWeightedOwner picks an owner by weighted rendezvous hashing: each
+// candidate gets score u^(1/w) with w = 1/pathCost, i.e. the max of
+// cost·ln(u), where u is a deterministic hash of (key, owner). Lower path cost
+// wins more often (P ∝ 1/cost); equal or missing costs fall back to a uniform
+// spread. Deterministic, stateless, and stable when the owner set changes.
+func (m *MeshManager) pickWeightedOwner(key string, available []RouteEntry) string {
+	if len(available) == 1 {
+		return available[0].NodeID
+	}
+	rt := m.getRouteTable()
+	bestIdx := 0
+	bestScore := math.Inf(-1)
+	for i, e := range available {
+		cost := 1.0
+		if rt != nil {
+			if p, ok := rt.bestPaths[e.NodeID]; ok && p.Cost > 0 {
+				cost = p.Cost
+			}
+		}
+		score := cost * math.Log(unitHash(key, e.NodeID))
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	return available[bestIdx].NodeID
+}
+
+// unitHash maps its parts deterministically into (0, 1].
+func unitHash(parts ...string) float64 {
+	h := fnv.New64a()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return (float64(h.Sum64()>>11) + 1) / float64(uint64(1)<<53)
 }
 
 // MeshManager coordinates mesh overlay networking.
@@ -1051,7 +1077,7 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
 // Uses the same algorithm as IP routing: static exclusivity, sticky with
-// generation-bounded re-hash, then hash stability.
+// generation-bounded re-hash, then weighted hash stability.
 // Domain trie entries are generated from topology, so if an entry exists, the node is reachable.
 func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
 	if len(entries) == 0 {
@@ -1102,16 +1128,8 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 		util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s no longer available, re-selecting", domain, cachedNodeID)
 	}
 
-	// Hash-based stable selection using domain name
-	hash := 0
-	for _, c := range domain {
-		hash = hash*31 + int(c)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	idx := hash % len(available)
-	selectedNodeID := available[idx].NodeID
+	// Weighted rendezvous: deterministic per (domain, owner), biased 1/cost.
+	selectedNodeID := m.pickWeightedOwner(domain, available)
 
 	// Cache the selection
 	m.sticky.Put(domain, selectedNodeID, gen)

@@ -101,3 +101,50 @@ func TestSelectEgressNodeIDStickyGeneration(t *testing.T) {
 		t.Fatalf("re-selection not recorded under current generation (ok=%v gen=%d want %d)", ok, entryGen, m.routeGen.Load())
 	}
 }
+
+func newWeightedTestMesh(t *testing.T, costs map[string]float64) *MeshManager {
+	t.Helper()
+	m := newTestMeshManager(t, "self", "100.64.1.0/24", nil)
+	paths := make(map[string]dijkstraResult, len(costs))
+	for node, cost := range costs {
+		paths[node] = dijkstraResult{Cost: cost}
+	}
+	m.routeTable.Store(&routeTable{gen: m.routeGen.Add(1), bestPaths: paths})
+	return m
+}
+
+// TestPickWeightedOwnerPrefersCheaperPath verifies weight = 1/cost: with costs
+// 1 vs 10 the cheap owner should take roughly 10x the traffic.
+func TestPickWeightedOwnerPrefersCheaperPath(t *testing.T) {
+	m := newWeightedTestMesh(t, map[string]float64{"cheap": 1, "dear": 10})
+	entries := []RouteEntry{
+		{NodeID: "cheap", Source: RouteSourceDynamic},
+		{NodeID: "dear", Source: RouteSourceDynamic},
+	}
+	counts := map[string]int{}
+	for i := 0; i < 2000; i++ {
+		counts[m.selectEgressNodeID(net.IPv4(10, 1, byte(i>>8), byte(i)), entries)]++
+	}
+	if counts["cheap"] <= counts["dear"]*4 {
+		t.Fatalf("weighting ineffective, want cheap >> dear: %v", counts)
+	}
+}
+
+// TestPickWeightedOwnerUniformWhenEqualCost verifies equal costs degrade to an
+// even spread.
+func TestPickWeightedOwnerUniformWhenEqualCost(t *testing.T) {
+	m := newWeightedTestMesh(t, map[string]float64{"a": 3, "b": 3})
+	entries := []RouteEntry{
+		{NodeID: "a", Source: RouteSourceDynamic},
+		{NodeID: "b", Source: RouteSourceDynamic},
+	}
+	counts := map[string]int{}
+	for i := 0; i < 2000; i++ {
+		counts[m.selectEgressNodeID(net.IPv4(10, 2, byte(i>>8), byte(i)), entries)]++
+	}
+	for _, node := range []string{"a", "b"} {
+		if counts[node] < 400 || counts[node] > 1600 {
+			t.Fatalf("equal-cost spread out of range: %v", counts)
+		}
+	}
+}

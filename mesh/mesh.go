@@ -217,8 +217,12 @@ func dedupeRouteEntries(entries []RouteEntry) []RouteEntry {
 
 // selectEgressNodeID selects the best egress nodeID from a list of route entries.
 // Algorithm:
-// 1. Sort: static entries first, dynamic entries after
-// 2. Sticky: if previously selected node is still available, keep it
+// 1. Static entries win outright; dynamic entries only participate when no
+//    static entry is usable.
+// 2. Sticky: a cached selection is reused while its owner is still available.
+//    Selections made under an older topology generation are dropped only after
+//    the target has been idle for stickyRebalanceGrace, so active targets stay
+//    pinned while idle ones re-hash onto newly added owners.
 // 3. Hash: stable selection based on targetIP (first time only)
 //
 // No online filter here: entries come from the unified route table which is
@@ -262,7 +266,8 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 
 	// Sticky: check if we have a cached selection for this target.
 	targetKey := targetIP.String()
-	if cachedNodeID, ok := m.sticky.Get(targetKey); ok {
+	gen := m.routeGen.Load()
+	if cachedNodeID, ok := m.sticky.Get(targetKey, gen, stickyRebalanceGrace); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
@@ -293,7 +298,7 @@ func (m *MeshManager) selectEgressNodeID(targetIP net.IP, entries []RouteEntry) 
 	selectedNodeID := available[idx].NodeID
 
 	// Cache the selection
-	m.sticky.Put(targetKey, selectedNodeID)
+	m.sticky.Put(targetKey, selectedNodeID, gen)
 
 	util.LogModuleDebug("mesh", "[MESH] sticky IP route: %s → %s (new selection)", targetIP, selectedNodeID)
 	return selectedNodeID
@@ -318,7 +323,8 @@ type MeshManager struct {
 
 	// routeTable holds routes and domain tries, accessed atomically for lock-free reads.
 	// Writes create a new routeTable and Store() it atomically.
-	routeTable atomic.Value // stores *routeTable
+	routeTable atomic.Value  // stores *routeTable
+	routeGen   atomic.Uint64 // source of routeTable.gen
 
 	DNSAllocator func(domain string) (net.IP, error)
 
@@ -388,6 +394,7 @@ type nodeInfo struct {
 
 // routeTable is an immutable snapshot of routing state, swapped atomically.
 type routeTable struct {
+	gen            uint64                    // monotonic rebuild counter; sticky selections from an older gen are eligible for re-hash
 	routes         []MeshRoute               // sorted by prefix length (longest first); kept alongside routeTrie for snapshot/logging
 	routeTrie      *routeTrie                // IP prefix trie for O(log R) lookup
 	domainTrie     *NodeTrie                 // unified domain routes (static + dynamic merged)
@@ -429,6 +436,7 @@ func NewMeshManager(nodeID string, vip net.IP, additionalVIPs []net.IP, subnet *
 	}
 	// Initialize routeTable with empty routes
 	m.routeTable.Store(&routeTable{
+		gen:        m.routeGen.Add(1),
 		routes:     make([]MeshRoute, 0),
 		domainTrie: NewNodeTrie(),
 		nodeMap:    make(map[string]*nodeInfo),
@@ -1042,7 +1050,8 @@ func (m *MeshManager) ResolveDomainSubnet(domain string) (*net.IPNet, bool) {
 }
 
 // selectEgressNodeIDForDomain selects the best egress nodeID for domain routing.
-// Uses the same unified algorithm as IP routing: static priority + hash stability + sticky cache.
+// Uses the same algorithm as IP routing: static exclusivity, sticky with
+// generation-bounded re-hash, then hash stability.
 // Domain trie entries are generated from topology, so if an entry exists, the node is reachable.
 func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []RouteEntry) string {
 	if len(entries) == 0 {
@@ -1052,32 +1061,36 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 	// A suffix the local node serves always resolves locally: peer owners of
 	// the same suffix are informational only. This keeps the local Fake-IP
 	// pool path when several nodes declare the same suffix.
-	var available []RouteEntry
+	var staticEntries, dynamicEntries []RouteEntry
 	for _, e := range entries {
 		if e.NodeID == m.nodeID {
 			return ""
 		}
-		available = append(available, e)
+		if e.Source == RouteSourceStatic {
+			staticEntries = append(staticEntries, e)
+		} else {
+			dynamicEntries = append(dynamicEntries, e)
+		}
 	}
 
+	// Static owners win outright, mirroring prefix routing.
+	available := staticEntries
+	if len(available) == 0 {
+		available = dynamicEntries
+	}
 	if len(available) == 0 {
 		return ""
 	}
 
-	// Sort: static first, then dynamic; within a source class order by nodeID
-	// so the hash→index choice is reproducible regardless of trie insertion
-	// and gossip arrival order.
-	sort.SliceStable(available, func(i, j int) bool {
-		si := available[i].Source == RouteSourceStatic
-		sj := available[j].Source == RouteSourceStatic
-		if si != sj {
-			return si
-		}
+	// Deterministic order so the hash→index choice is reproducible regardless
+	// of trie insertion and gossip arrival order.
+	sort.Slice(available, func(i, j int) bool {
 		return available[i].NodeID < available[j].NodeID
 	})
 
 	// Sticky: check if we have a cached selection for this domain
-	if cachedNodeID, ok := m.sticky.Get(domain); ok {
+	gen := m.routeGen.Load()
+	if cachedNodeID, ok := m.sticky.Get(domain, gen, stickyRebalanceGrace); ok {
 		// Verify cached node is still in available list
 		for _, e := range available {
 			if e.NodeID == cachedNodeID {
@@ -1101,7 +1114,7 @@ func (m *MeshManager) selectEgressNodeIDForDomain(domain string, entries []Route
 	selectedNodeID := available[idx].NodeID
 
 	// Cache the selection
-	m.sticky.Put(domain, selectedNodeID)
+	m.sticky.Put(domain, selectedNodeID, gen)
 
 	util.LogModuleDebug("mesh", "[MESH] sticky domain route: %s → %s (new selection)", domain, selectedNodeID)
 	return selectedNodeID
@@ -2327,6 +2340,7 @@ func (m *MeshManager) recomputeRoutes() {
 
 	// Atomically swap in the new route table (lock-free for readers)
 	m.routeTable.Store(&routeTable{
+		gen:            m.routeGen.Add(1),
 		routes:         routes,
 		routeTrie:      routeTrie,
 		domainTrie:     domainTrie,

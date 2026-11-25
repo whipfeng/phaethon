@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"testing"
@@ -103,5 +104,23 @@ func TestLocalDomainSuffixResolvesLocally(t *testing.T) {
 	subnet, needsFail := m.ResolveDomainSubnet("git.migu.cn")
 	if subnet != nil || needsFail {
 		t.Fatalf("local suffix resolved to remote subnet %v (needsFail=%v), want local pool", subnet, needsFail)
+	}
+}
+
+// TestDomainSelectionStaticExclusive verifies domain routing mirrors prefix
+// routing: a static owner wins outright, dynamic owners only participate when
+// no static entry exists.
+func TestDomainSelectionStaticExclusive(t *testing.T) {
+	m := newTestMeshManagerWithDomains(t, "self", "100.64.1.0/24", nil)
+	entries := []RouteEntry{
+		{NodeID: "ms10", Source: RouteSourceDynamic},
+		{NodeID: "ms9", Source: RouteSourceStatic},
+	}
+
+	for i := 0; i < 64; i++ {
+		domain := fmt.Sprintf("host%d.example.com", i)
+		if got := m.selectEgressNodeIDForDomain(domain, entries); got != "ms9" {
+			t.Fatalf("domain %s selected dynamic owner %q despite static entry", domain, got)
+		}
 	}
 }

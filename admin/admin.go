@@ -69,21 +69,37 @@ const (
 	captchaFailedAttempts = 3
 	captchaAttemptWindow  = 15 * time.Minute
 	captchaTTL            = 10 * time.Minute
-	captchaDigits         = 4
-	captchaWidth          = 140
-	captchaHeight         = 54
-	captchaDigitWidth     = 24
-	captchaDigitHeight    = 40
-	captchaDigitPadding   = 8
+	// loginBackoffBase/Max shape the delay applied to the next login attempt
+	// once the captcha threshold has been crossed: 1s, 2s, 4s ... capped.
+	loginBackoffBase = time.Second
+	loginBackoffMax  = 30 * time.Second
+	// loginStateTTL bounds how long an idle per-source entry is retained.
+	loginStateTTL       = captchaAttemptWindow + 10*time.Minute
+	captchaDigits       = 4
+	captchaWidth        = 140
+	captchaHeight       = 54
+	captchaDigitWidth   = 24
+	captchaDigitHeight  = 40
+	captchaDigitPadding = 8
 )
 
-// loginSecurity tracks per-client CAPTCHA state.
+// loginSecurity tracks per-client CAPTCHA and backoff state.
 var (
 	loginAttemptMu sync.Mutex
-	loginAttempts  = make(map[string][]time.Time)
+	loginAttempts  = make(map[string]*loginState)
 	captchaStoreMu sync.Mutex
 	captchaStore   = make(map[string]captchaEntry)
 )
+
+// loginState is the per-source brute-force state. strikes counts consecutive
+// failures and drives the exponential backoff; it decays once the failure
+// window has passed.
+type loginState struct {
+	attempts    []time.Time
+	strikes     int
+	nextAllowed time.Time
+	last        time.Time
+}
 
 type captchaEntry struct {
 	code    string
@@ -92,7 +108,19 @@ type captchaEntry struct {
 
 // clientIP returns the originating client address, preferring X-Forwarded-For
 // when the admin panel is served behind a reverse proxy.
+//
+// Forwarding headers are only honoured when the immediate peer is loopback or
+// a private-network address. The admin listener is frequently exposed directly
+// on the public internet, and trusting these headers unconditionally would let
+// an attacker rotate them per request to dodge per-source throttling.
 func clientIP(r *http.Request) string {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	if !trustedProxyPeer(peer) {
+		return peer
+	}
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		if i := strings.Index(fwd, ","); i != -1 {
 			fwd = strings.TrimSpace(fwd[:i])
@@ -104,22 +132,57 @@ func clientIP(r *http.Request) string {
 	if ri := r.Header.Get("X-Real-Ip"); ri != "" {
 		return ri
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	return peer
 }
 
-func recordFailedLogin(ip string) {
+func trustedProxyPeer(peer string) bool {
+	ip := net.ParseIP(peer)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+// recordFailedLogin bumps the failure state and arms the backoff once the
+// captcha threshold is crossed. It returns the failure count in the window and
+// the consecutive strike count for logging.
+func recordFailedLogin(ip string) (int, int) {
 	loginAttemptMu.Lock()
 	defer loginAttemptMu.Unlock()
-	cutoff := time.Now().Add(-captchaAttemptWindow)
-	list := loginAttempts[ip]
-	fresh := list[:0]
-	for _, t := range list {
+	now := time.Now()
+	cutoff := now.Add(-captchaAttemptWindow)
+	st := loginAttempts[ip]
+	if st == nil {
+		st = &loginState{}
+		loginAttempts[ip] = st
+	}
+	// A quiet period longer than the window resets the streak so a user who
+	// mistyped once yesterday does not start one strike away from a penalty.
+	if !st.last.IsZero() && now.Sub(st.last) > captchaAttemptWindow {
+		st.strikes = 0
+		st.attempts = nil
+	}
+	fresh := st.attempts[:0]
+	for _, t := range st.attempts {
 		if t.After(cutoff) {
 			fresh = append(fresh, t)
 		}
 	}
-	loginAttempts[ip] = append(fresh, time.Now())
+	st.attempts = append(fresh, now)
+	st.strikes++
+	st.last = now
+	if st.strikes >= captchaFailedAttempts {
+		shift := st.strikes - captchaFailedAttempts
+		if shift > 6 {
+			shift = 6
+		}
+		delay := loginBackoffBase << uint(shift)
+		if delay > loginBackoffMax {
+			delay = loginBackoffMax
+		}
+		st.nextAllowed = now.Add(delay)
+	}
+	return len(st.attempts), st.strikes
 }
 
 func clearFailedLogins(ip string) {
@@ -128,18 +191,50 @@ func clearFailedLogins(ip string) {
 	delete(loginAttempts, ip)
 }
 
+// loginBlockedFor reports how long the caller must wait before its next
+// attempt is accepted. The wait is enforced by rejecting with 429 rather than
+// sleeping in the handler, so pending connections cannot pin goroutines.
+func loginBlockedFor(ip string) time.Duration {
+	loginAttemptMu.Lock()
+	defer loginAttemptMu.Unlock()
+	st := loginAttempts[ip]
+	if st == nil {
+		return 0
+	}
+	if d := time.Until(st.nextAllowed); d > 0 {
+		return d
+	}
+	return 0
+}
+
 func captchaRequiredFor(ip string) bool {
 	loginAttemptMu.Lock()
 	defer loginAttemptMu.Unlock()
 	cutoff := time.Now().Add(-captchaAttemptWindow)
-	list := loginAttempts[ip]
+	st := loginAttempts[ip]
+	if st == nil {
+		return false
+	}
 	count := 0
-	for _, t := range list {
+	for _, t := range st.attempts {
 		if t.After(cutoff) {
 			count++
 		}
 	}
 	return count >= captchaFailedAttempts
+}
+
+// pruneLoginAttempts drops idle per-source entries so spoofed or diverse
+// sources cannot grow the map without bound.
+func pruneLoginAttempts() {
+	loginAttemptMu.Lock()
+	defer loginAttemptMu.Unlock()
+	cutoff := time.Now().Add(-loginStateTTL)
+	for ip, st := range loginAttempts {
+		if st.last.Before(cutoff) && !time.Now().Before(st.nextAllowed) {
+			delete(loginAttempts, ip)
+		}
+	}
 }
 
 func storeCaptcha(ip, code string) {
@@ -5706,6 +5801,7 @@ func (s *AdminServer) apiCaptcha(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cleanupCaptchas()
+	pruneLoginAttempts()
 	ip := clientIP(r)
 	code := randomDigits(captchaDigits)
 	storeCaptcha(ip, code)
@@ -5736,27 +5832,28 @@ func (s *AdminServer) apiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := clientIP(r)
+	pruneLoginAttempts()
+	if wait := loginBlockedFor(ip); wait > 0 {
+		secs := int((wait + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "too many attempts",
+			"retryAfter":      secs,
+			"captchaRequired": captchaRequiredFor(ip),
+		})
+		return
+	}
 	needCaptcha := captchaRequiredFor(ip)
 	if needCaptcha {
 		if req.Captcha == "" || !verifyCaptcha(ip, req.Captcha) {
-			recordFailedLogin(ip)
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":           "invalid captcha",
-				"captchaRequired": true,
-			})
+			writeLoginFailure(w, ip, "invalid captcha", http.StatusUnauthorized)
 			return
 		}
 	}
 	if req.Username != s.config.Username || !verifyAdminPassword(s.config.Password, req.Password) {
-		recordFailedLogin(ip)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":           "invalid credentials",
-			"captchaRequired": captchaRequiredFor(ip),
-		})
+		writeLoginFailure(w, ip, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	clearFailedLogins(ip)
@@ -5772,6 +5869,26 @@ func (s *AdminServer) apiLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Now().Add(sessionDuration),
 	})
 	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
+// writeLoginFailure records the failure, logs it for the console log view and
+// reports the backoff (if any) so the client can wait instead of retrying
+// blindly.
+func writeLoginFailure(w http.ResponseWriter, ip, reason string, status int) {
+	count, strikes := recordFailedLogin(ip)
+	util.LogModuleWarn("admin", "login failed from %s: %s (failures=%d window, strikes=%d)", ip, reason, count, strikes)
+	resp := map[string]interface{}{
+		"error":           reason,
+		"captchaRequired": captchaRequiredFor(ip),
+	}
+	if wait := loginBlockedFor(ip); wait > 0 {
+		secs := int((wait + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		resp["retryAfter"] = secs
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *AdminServer) apiLogout(w http.ResponseWriter, r *http.Request) {

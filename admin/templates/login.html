@@ -217,7 +217,10 @@
                 if (data.captchaRequired) {
                     setCaptchaVisible(true);
                 }
-                if (data.error === 'invalid captcha') {
+                if (res.status === 429 || data.retryAfter) {
+                    const secs = data.retryAfter || 0;
+                    errorEl.textContent = i18n.t('login.tooManyAttempts').replace('{s}', secs);
+                } else if (data.error === 'invalid captcha') {
                     errorEl.textContent = i18n.t('login.captchaError');
                 } else {
                     errorEl.textContent = i18n.t('login.error');

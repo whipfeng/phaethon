@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,99 @@ func TestServeConnReturnsAfterConnClose(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeConn did not return after conn close")
 	}
+}
+
+func TestClientIPIgnoresSpoofedForwardingHeaders(t *testing.T) {
+	// Public peers must not be able to rotate X-Forwarded-For to dodge the
+	// per-source login throttle.
+	r := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	r.RemoteAddr = "203.0.113.9:51000"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	r.Header.Set("X-Real-Ip", "5.6.7.8")
+	if got := clientIP(r); got != "203.0.113.9" {
+		t.Fatalf("public peer clientIP = %q, want remote addr", got)
+	}
+
+	// Loopback proxies (nginx on the same host) are trusted.
+	r = httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	r.RemoteAddr = "127.0.0.1:51000"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4, 10.0.0.1")
+	if got := clientIP(r); got != "1.2.3.4" {
+		t.Fatalf("loopback peer clientIP = %q, want forwarded client", got)
+	}
+
+	// Same for a private-network proxy.
+	r = httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	r.RemoteAddr = "192.168.1.5:51000"
+	r.Header.Set("X-Real-Ip", "5.6.7.8")
+	if got := clientIP(r); got != "5.6.7.8" {
+		t.Fatalf("private peer clientIP = %q, want X-Real-Ip", got)
+	}
+}
+
+func TestLoginBackoffEscalates(t *testing.T) {
+	resetLoginSecurity()
+	defer resetLoginSecurity()
+
+	ip := "198.51.100.7"
+	for i := 1; i <= captchaFailedAttempts; i++ {
+		recordFailedLogin(ip)
+		if captchaRequiredFor(ip) != (i >= captchaFailedAttempts) {
+			t.Fatalf("after %d failures captchaRequiredFor = %v", i, captchaRequiredFor(ip))
+		}
+	}
+	if wait := loginBlockedFor(ip); wait <= 0 {
+		t.Fatalf("expected a backoff after %d failures, got %v", captchaFailedAttempts, wait)
+	}
+
+	// The next strike must wait longer than the previous one.
+	first := loginBlockedFor(ip)
+	recordFailedLogin(ip)
+	second := loginBlockedFor(ip)
+	if second <= first {
+		t.Fatalf("backoff did not escalate: first=%v second=%v", first, second)
+	}
+	if second > loginBackoffMax+time.Second {
+		t.Fatalf("backoff %v exceeds cap %v", second, loginBackoffMax)
+	}
+
+	// A successful login clears the state.
+	clearFailedLogins(ip)
+	if loginBlockedFor(ip) != 0 || captchaRequiredFor(ip) {
+		t.Fatalf("state not cleared after success")
+	}
+}
+
+func TestLoginBlockedRejectsBeforePasswordCheck(t *testing.T) {
+	resetLoginSecurity()
+	defer resetLoginSecurity()
+
+	s := &AdminServer{config: &config.AdminConfig{Username: "admin", Password: "right"}}
+	ip := "198.51.100.8"
+	for i := 0; i < captchaFailedAttempts; i++ {
+		recordFailedLogin(ip)
+	}
+
+	body := strings.NewReader(`{"username":"admin","password":"wrong"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/login", body)
+	r.RemoteAddr = ip + ":40000"
+	rec := httptest.NewRecorder()
+	s.apiLogin(rec, r)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header")
+	}
+}
+
+func resetLoginSecurity() {
+	loginAttemptMu.Lock()
+	loginAttempts = make(map[string]*loginState)
+	loginAttemptMu.Unlock()
+	captchaStoreMu.Lock()
+	captchaStore = make(map[string]captchaEntry)
+	captchaStoreMu.Unlock()
 }
 
 // TestBuiltinDirectForcesAuth: the in-process path (ServeConn) must keep

@@ -255,6 +255,11 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 // Returns (linkNICID, peerSubnet, true) on success, (0, nil, false) if not found.
 var V2RouteLookup func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
 
+// V2RouteLookupQuiet is the log-free variant of V2RouteLookup. Dial-time
+// readiness polls call it while waiting for a peer's LinkNIC to appear during
+// session re-establishment; the logged variant would emit one error per poll.
+var V2RouteLookupQuiet func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
+
 // CreateV2RouteFunc creates a per-endpoint route callback for v2 proxy connections.
 // The returned function produces a stack.RouteDecision matching the existing
 // RouteSelector pattern: LinkNIC from the peer's LinkNIC, EgressEIP from
@@ -1690,35 +1695,50 @@ func (n *Netstack) ResolveDomainViaDNS(domain string, dnsServer net.IP) ([]net.I
 
 	txID := uint16(time.Now().UnixNano())
 	query := BuildDNSQuery(domain, txID)
-	if _, err := ep.Write(&SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
-		// Diagnostic: distinguish stack-teardown abort (engine restart) from
-		// route invalidation — the two sole producers of ErrInvalidEndpointState.
-		n.mu.Lock()
-		stackSwapped := n.ns != ns
-		n.mu.Unlock()
-		util.LogModuleError("netstack", "[DNS-RESOLVE-FAIL] domain=%s dns=%s err=%v stackSwapped=%v",
-			domain, dnsServer, err, stackSwapped)
-		return nil, fmt.Errorf("resolve %s via %s: write: %v", domain, dnsServer, err)
-	}
+	// DNS is single-shot UDP over the mesh: one packet lost to a carrier
+	// re-establishment would otherwise block the dial for the full timeout.
+	// Retransmit the same query instead of failing on the first timeout.
+	const (
+		dnsQueryAttempts = 3
+		dnsQueryTimeout  = 2 * time.Second
+	)
+	var lastErr error
+	for attempt := 0; attempt < dnsQueryAttempts; attempt++ {
+		if _, err := ep.Write(&SlicePayload{Data: query}, tcpip.WriteOptions{}); err != nil {
+			// Diagnostic: distinguish stack-teardown abort (engine restart) from
+			// route invalidation — the two sole producers of ErrInvalidEndpointState.
+			n.mu.Lock()
+			stackSwapped := n.ns != ns
+			n.mu.Unlock()
+			util.LogModuleError("netstack", "[DNS-RESOLVE-FAIL] domain=%s dns=%s err=%v stackSwapped=%v",
+				domain, dnsServer, err, stackSwapped)
+			return nil, fmt.Errorf("resolve %s via %s: write: %v", domain, dnsServer, err)
+		}
 
-	select {
-	case <-ch:
-	case <-time.After(10 * time.Second):
-		return nil, fmt.Errorf("resolve %s via %s: timeout", domain, dnsServer)
-	}
+		select {
+		case <-ch:
+		case <-time.After(dnsQueryTimeout):
+			lastErr = fmt.Errorf("resolve %s via %s: timeout", domain, dnsServer)
+			util.LogModuleInfo("netstack", "[DNS-RESOLVE-RETRY] domain=%s dns=%s attempt=%d/%d",
+				domain, dnsServer, attempt+1, dnsQueryAttempts)
+			continue
+		}
 
-	var buf bytes.Buffer
-	if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
-		return nil, fmt.Errorf("resolve %s via %s: read: %v", domain, dnsServer, err)
-	}
+		var buf bytes.Buffer
+		if _, err := ep.Read(&buf, tcpip.ReadOptions{}); err != nil {
+			return nil, fmt.Errorf("resolve %s via %s: read: %v", domain, dnsServer, err)
+		}
 
-	// Parse all IPs from response (not just first)
-	ips := ParseDNSResponseIPs(buf.Bytes())
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("resolve %s via %s: no IPs in response", domain, dnsServer)
+		// Parse all IPs from response (not just first)
+		ips := ParseDNSResponseIPs(buf.Bytes())
+		if len(ips) == 0 {
+			lastErr = fmt.Errorf("resolve %s via %s: no IPs in response", domain, dnsServer)
+			continue
+		}
+		util.LogModuleDebug("netstack", "ResolveDomainViaDNS: %s -> %v", domain, ips)
+		return ips, nil
 	}
-	util.LogModuleDebug("netstack", "ResolveDomainViaDNS: %s -> %v", domain, ips)
-	return ips, nil
+	return nil, lastErr
 }
 
 // QueryInternalDNS sends a raw DNS query to the TUN DNS hijacker and returns

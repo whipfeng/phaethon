@@ -113,30 +113,50 @@ const (
 // RouteSelector for proxy-selected mesh links.
 var LookupProxyPeerRoute func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
 
+// LookupProxyPeerRouteQuiet is LookupProxyPeerRoute without logging. Dial-time
+// readiness polls call it every few tens of milliseconds during a reconnect
+// window, where the logged variant would flood the log with one error per poll.
+var LookupProxyPeerRouteQuiet func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
+
 func init() {
 	LookupProxyPeerRoute = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
-		mgr := GlobalP2PManager
-		if mgr == nil {
+		return lookupProxyPeerRoute(proxyName, false)
+	}
+	LookupProxyPeerRouteQuiet = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
+		return lookupProxyPeerRoute(proxyName, true)
+	}
+}
+
+func lookupProxyPeerRoute(proxyName string, quiet bool) (tcpip.NICID, *net.IPNet, bool) {
+	mgr := GlobalP2PManager
+	if mgr == nil {
+		if !quiet {
 			util.LogModuleError("p2p", "[V2-LOOKUP] GlobalP2PManager is nil for proxy=%s", proxyName)
-			return 0, nil, false
 		}
-		mgr.mu.Lock()
-		defer mgr.mu.Unlock()
-		if peer, ok := mgr.proxyPeers[proxyName]; ok {
-			// Use thread-safe GetLinkNIC() (fix race condition #2)
-			linkNIC := peer.GetLinkNIC()
-			if linkNIC == nil {
-				util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
-				return 0, nil, false
-			}
-			nicID := linkNIC.NICID()
-			subnet := linkNIC.PeerSubnet()
-			util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
-			return nicID, subnet, true
-		}
-		util.LogModuleError("p2p", "[V2-LOOKUP] no peer found for proxy=%s", proxyName)
 		return 0, nil, false
 	}
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if peer, ok := mgr.proxyPeers[proxyName]; ok {
+		// Use thread-safe GetLinkNIC() (fix race condition #2)
+		linkNIC := peer.GetLinkNIC()
+		if linkNIC == nil {
+			if !quiet {
+				util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
+			}
+			return 0, nil, false
+		}
+		nicID := linkNIC.NICID()
+		subnet := linkNIC.PeerSubnet()
+		if !quiet {
+			util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
+		}
+		return nicID, subnet, true
+	}
+	if !quiet {
+		util.LogModuleError("p2p", "[V2-LOOKUP] no peer found for proxy=%s", proxyName)
+	}
+	return 0, nil, false
 }
 
 // linkQualityForgetTau is the time constant for cross-generation loss

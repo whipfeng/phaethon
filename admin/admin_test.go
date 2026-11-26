@@ -2,6 +2,9 @@ package admin
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
 	"net"
 	"net/http"
@@ -143,6 +146,48 @@ func TestLoginBlockedRejectsBeforePasswordCheck(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("missing Retry-After header")
+	}
+}
+
+// TestMTLSCertRequiresVerifiedChain: a presented client certificate is only
+// trusted when the TLS stack verified it against the configured client CA.
+func TestMTLSCertRequiresVerifiedChain(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/secret", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	s := &AdminServer{config: &config.AdminConfig{AuthEnabled: true, Username: "admin", Token: "tok"}}
+	handler := s.authMiddleware(mux)
+
+	newReq := func(cn string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/api/secret", nil)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Subject: pkix.Name{CommonName: cn}}}}
+		return r
+	}
+
+	// Unverified cert (no VerifiedChains) must not authenticate.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newReq("all"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unverified cert: status %d, want 401", rec.Code)
+	}
+
+	// Verified CN=all is accepted.
+	r := newReq("all")
+	r.TLS.VerifiedChains = [][]*x509.Certificate{{{Subject: pkix.Name{CommonName: "all"}}}}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verified CN=all: status %d, want 200", rec.Code)
+	}
+
+	// Verified cert with empty CN must not match an empty nodeID.
+	r = newReq("")
+	r.TLS.VerifiedChains = [][]*x509.Certificate{{{}}}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("verified empty CN: status %d, want 401", rec.Code)
 	}
 }
 

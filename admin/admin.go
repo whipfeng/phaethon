@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -1257,17 +1258,24 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 
 		// 1. Try mTLS client certificate authentication
 		// Valid CN values: "all" (global cert) or current mesh nodeID (node cert)
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		// VerifiedChains proves the certificate chained to the configured client
+		// CA; without it a listener that ever requests (rather than verifies)
+		// client certs would trust an arbitrary self-signed one.
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && len(r.TLS.VerifiedChains) > 0 {
 			cn := r.TLS.PeerCertificates[0].Subject.CommonName
 
 			// Get current mesh nodeID for node certificate validation
 			var nodeID string
-			if mesh, err := db.GetMeshConfig(); err == nil && mesh != nil {
-				nodeID = mesh.NodeID
+			if db.IsInitialized() {
+				if mesh, err := db.GetMeshConfig(); err == nil && mesh != nil {
+					nodeID = mesh.NodeID
+				}
 			}
 
-			// Accept if CN is "all" (global) or matches current nodeID
-			if cn == "all" || cn == nodeID {
+			// Accept if CN is "all" (global) or matches current nodeID. The
+			// nodeID != "" guard prevents an empty-CN certificate from matching
+			// when the node has no mesh identity configured.
+			if cn == "all" || (nodeID != "" && cn == nodeID) {
 				certType := "global"
 				if cn == nodeID {
 					certType = "node"
@@ -1302,7 +1310,7 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 				token = c.Value
 			}
 		}
-		if token != "" && token == s.config.Token {
+		if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.config.Token)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}

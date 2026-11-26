@@ -1251,7 +1251,10 @@ func runWatchdogMode() {
 
 	// The watchdog never enters run(), so module log levels are never
 	// configured and the global default (Error) silences every watchdog
-	// info/warn line. Parse the same env var the worker uses.
+	// line. Default the watchdog's own module to Info so first-run notices
+	// and restart decisions are visible, then let PHAETHON_LOG_MODULES
+	// override it like it does for the worker.
+	util.SetModuleLogLevel("main", util.LogLevelInfo)
 	if moduleConfig := os.Getenv("PHAETHON_LOG_MODULES"); moduleConfig != "" {
 		util.ParseModuleLogLevels(moduleConfig)
 	}

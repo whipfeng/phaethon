@@ -145,5 +145,34 @@ fallback 规则：
 ## 9. 未决问题
 
 1. gossip 字段最终命名（`udp`/`udpPort` 或 `ulp`/`ulpPort`），Phase 1 前与现有 GossipInfo 字段风格统一
-2. UDP 腿满载包的外层 IP 分片损耗（初判可容忍），Phase 2 iperf 实测验证；数据差再议对策
+2. ~~UDP 腿满载包的外层 IP 分片损耗（初判可容忍），Phase 2 iperf 实测验证；数据差再议对策~~
+   （2026-11-26 已定稿，见 §10）
 3. 双会话（同对端两条链路）各自独立协商端口，互不干扰——gossip 逐 peer 构建天然支持
+
+## 10. 入口侧 UDP 尺寸约束结论（2026-11-26 定稿）
+
+**结论：modeb（代理 server 入口：trojan / socks5 / htunnel 的 UDP ASSOCIATE）不做任何 MSS 或尺寸
+控制，payload 原样透传。这是正确现状，不修改、不加兜底、不监控告警。**
+
+代码事实：
+
+- `server/trojan.go:309-326`：读 2 字节 length（≤65535）后整包读入 payload，无裁剪无检查；
+  socks5 / htunnel 同构，读缓冲统一 65535。
+- DIRECT 分支 `server/trojan.go:349-350`：`udpLn.WriteTo` 直发，分片交给本机 OS 按出口 MTU。
+- 走代理/mesh 分支 `server/trojan.go:362` → `dialer.NewUDPDialer(proxy).DialPacket()`；
+  `dialer/dialer.go:475-482` meshAwareDialer 仅委派到底层协议的 UDP ASSOCIATE。
+- 唯一尺寸约束在 leg 层：`p2p/udp_leg_transport.go:22` `legFragmentLimit = 1500-20-8 = 1472`，
+  超过则外层 IP 分片并累加 `legOversize`（`:257-264`，健康时恒为 0）。
+- 对照 TUN 入口：overlay MTU 1400 + fork advertised-MSS clamp 1360（`mesh/netstack.go`）；
+  MSS 是 TCP 选项，对 UDP 不生效。
+- 理论上限：overlay MTU 1400 → 应用层 UDP payload ≤ 1372（1400-28）。实际应用远低于此
+  （DNS <512、QUIC 默认 1200），大包场景本就依赖 IP 分片，属正常工作方式。
+
+不处理的理由：
+
+1. UDP 没有 MSS 是协议事实，不是实现缺陷；等价物只能由应用自己做（QUIC 的 1200 即此意）。
+2. 入口无从得知出口 MTU：截断破坏报文语义（UDP 不是流，不可重切），丢弃会把本来能通的应用搞挂；
+   违背既定原则——该失败就失败，不在核心路径加阻塞或兜底。
+3. 应用发大包且分片成功、业务正常 → 与 mesh 无关，不主动排查、不追查应用。
+
+`legOversize` 仅作诊断计数器（真出故障时判断是否为分片放大丢包），不监控、不告警。

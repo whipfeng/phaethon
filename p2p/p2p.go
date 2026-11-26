@@ -139,10 +139,87 @@ func init() {
 	}
 }
 
-// linkStats holds persistent statistics for a link (survives P2P reconnections).
+// linkQualityForgetTau is the time constant for cross-generation loss
+// evidence. A generation's loss verdicts fade with this scale instead of
+// vanishing when the carrier reconnects (a flapping link must not look
+// brand-new and healthy on every new localSeq).
+const linkQualityForgetTau = 10 * time.Minute
+
+// linkQualityEvidenceCap bounds the persisted evidence weight to the same
+// order as the live window, so a handful of bad generations cannot outvote a
+// link that has been clean for a while.
+const linkQualityEvidenceCap = float64(pingLossWindowSize)
+
+// linkQualityKey identifies a logical link across transport generations. It is
+// (remote nodeID, link name), where the link name is the local proxy config
+// name on an active session and the peer's advertised friendly name (the
+// remote active side's proxy name) on a passive session.
+type linkQualityKey struct {
+	nodeID   string
+	linkName string
+}
+
+// linkStats holds persistent statistics for a link (survives P2P reconnects).
+// The loss fields are decayed weights, not raw counts: folding them with the
+// live window in getLossRate keeps ratchet effects out of the ratio.
 type linkStats struct {
 	dataDrops      uint64 // total data queue drops (dns + budget + data[256])
 	controlChDrops uint64
+
+	lossW float64   // decayed lost-ping weight from retired generations
+	sampW float64   // decayed sample weight from retired generations
+	at    time.Time // timestamp the weights are referenced to
+
+	// RTT evidence carried across generations. srtt/rttVar are sample-weighted
+	// means; rttW is the decayed effective sample count. Keeping RTT across a
+	// reconnect stops a flapping link from looking brand-new (and fast) even
+	// though the path is still congested.
+	srtt   time.Duration
+	rttVar time.Duration
+	rttW   float64
+
+	// attached counts pingTrackers currently sharing this state (guarded by
+	// P2PManager.linkQualityMu). Zero means the entry is safe to prune.
+	attached int
+}
+
+// decayLocked ages the evidence to now. Callers hold the owning lock.
+func (s *linkStats) decayLocked(now time.Time) {
+	if s.at.IsZero() {
+		s.at = now
+		return
+	}
+	if dt := now.Sub(s.at); dt > 0 {
+		f := math.Exp(-dt.Seconds() / linkQualityForgetTau.Seconds())
+		s.lossW *= f
+		s.sampW *= f
+		s.rttW *= f
+	}
+	s.at = now
+}
+
+// decayedAt returns the loss evidence aged to now without mutating the receiver.
+func (s *linkStats) decayedAt(now time.Time) (lossW, sampW float64) {
+	f := 1.0
+	if !s.at.IsZero() {
+		if dt := now.Sub(s.at); dt > 0 {
+			f = math.Exp(-dt.Seconds() / linkQualityForgetTau.Seconds())
+		}
+	}
+	return s.lossW * f, s.sampW * f
+}
+
+// rttDecayedAt returns the RTT evidence aged to now without mutating the
+// receiver. The means do not fade (a mean cannot decay toward zero without
+// lying); only the weight that says how much the mean is worth decays.
+func (s *linkStats) rttDecayedAt(now time.Time) (srtt, rttVar time.Duration, w float64) {
+	f := 1.0
+	if !s.at.IsZero() {
+		if dt := now.Sub(s.at); dt > 0 {
+			f = math.Exp(-dt.Seconds() / linkQualityForgetTau.Seconds())
+		}
+	}
+	return s.srtt, s.rttVar, s.rttW * f
 }
 
 // P2PManager manages P2P connections to peers.
@@ -185,6 +262,12 @@ type P2PManager struct {
 	stopped           bool
 
 	linkSeqCounter uint64 // atomic counter for link sequence numbers
+
+	// linkQuality carries loss evidence across transport generations, keyed by
+	// logical link (remote node + local proxy). A new session for the same key
+	// attaches the decayed history instead of starting at zero loss.
+	linkQualityMu sync.Mutex
+	linkQuality   map[linkQualityKey]*linkStats
 
 	// Channel overflow statistics (atomic counters)
 	meshInboundDrops uint64 // Frames dropped due to meshInboundCh full
@@ -314,6 +397,11 @@ type writeReq struct {
 	isControl   bool
 	dns         bool      // set by enqueueWriteReq for dnsQueue frames
 	enqueueTime time.Time // set by enqueueWriteReq; used for sojourn measurement (Phase B)
+	// pingSeq (non-zero) marks a link ping so the writer can report the seq as
+	// actually on-wire once the frame leaves the local queues. Cross-generation
+	// loss accounting only counts pings that reached the wire: a frame dropped
+	// by local admission control is censored, not a link loss.
+	pingSeq uint32
 }
 
 // Data-queue admission control (mesh-datapath-perf design §3.1):
@@ -1044,6 +1132,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 		if !req.isControl && !req.dns {
 			peer.markDataWritten()
 		}
+		if req.pingSeq != 0 && peer.pingTracker != nil {
+			peer.pingTracker.markOnWire(req.pingSeq)
+		}
 		if req.frameType == frame.FrameMeshPacket {
 			mesh.TraceForwarding("p2p_write_ok", req.data, "peer=%s", peer.ID)
 		}
@@ -1099,6 +1190,9 @@ func (m *P2PManager) peerWriteLoop(peer *Peer) {
 			}
 			if !req.isControl && !req.dns {
 				peer.markDataWritten()
+			}
+			if req.pingSeq != 0 && peer.pingTracker != nil {
+				peer.pingTracker.markOnWire(req.pingSeq)
 			}
 		}
 		// Egress health (Phase B): only non-control frames count.
@@ -2272,6 +2366,9 @@ func (m *P2PManager) runSession(peer *Peer) {
 	util.LogModuleInfo("p2p", "[P2P-DIAG] runSession broadcastGossipToPeer completed for peer.ID=%s", peer.ID)
 
 	util.LogModuleInfo("p2p", "[P2P] runSession started for %s (proxy=%s)", peer.ID, proxyName)
+	// Fold this generation's loss evidence into the logical link's history so
+	// a reconnect does not reset a flapping link to 0% loss.
+	defer m.retireLinkQuality(peer)
 
 	// Heartbeat timeout monitor: close connection if no data received for 30s
 	heartbeatTimeout := 30 * time.Second
@@ -2556,6 +2653,11 @@ func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 		peer.FriendlyName = info.FriendlyName
 	}
 
+	// Bind the tracker to this logical link's persisted loss evidence before
+	// the first ping of the new generation can resolve. The key needs the
+	// friendly name on passive sessions, so it must run after the assignment.
+	m.attachLinkQuality(peer)
+
 	// 3. Learn RemoteSeq from first gossip (§5.3); local link identity is
 	// (NodeID, Seq) — Seq was assigned at peer creation, no negotiation needed.
 	peer.RemoteSeq = info.Seq
@@ -2582,10 +2684,93 @@ func (m *P2PManager) reregisterPeer(peer *Peer, nodeID string, info mesh.GossipI
 			peer.SetLinkNIC(nil)
 		}
 	}
+	// The logical link identity changed: close this generation's loss
+	// evidence under the old key, then re-attach under the new one.
+	m.retireLinkQuality(peer)
 	peer.NodeID = nodeID
+	if info.FriendlyName != "" {
+		peer.FriendlyName = info.FriendlyName
+	}
 	peer.SetLastError("")
+	m.attachLinkQuality(peer)
 	m.registerPeerWithMesh(peer, nodeID, info)
 	m.notifyStatusChange()
+}
+
+// linkQualityIdentity returns the persisted-evidence key for this session.
+// Active sessions key on the local proxy config name. Passive sessions have no
+// local proxy, so they key on the friendly name the active side advertises —
+// p2p.go broadcastGossipToPeer sets GossipInfo.FriendlyName to that active
+// side's proxy name, making both ends of the same link agree on the key.
+func (p *Peer) linkQualityIdentity() (linkQualityKey, bool) {
+	if p.NodeID == "" {
+		return linkQualityKey{}, false
+	}
+	name := p.ProxyName
+	if name == "" {
+		name = p.FriendlyName
+	}
+	return linkQualityKey{nodeID: p.NodeID, linkName: name}, true
+}
+
+// attachLinkQuality binds the peer's ping tracker to the persisted evidence
+// for its logical link. Must be called once the peer's nodeID (and, for a
+// passive session, its friendly name) is known.
+func (m *P2PManager) attachLinkQuality(peer *Peer) {
+	if peer == nil || peer.pingTracker == nil {
+		return
+	}
+	key, ok := peer.linkQualityIdentity()
+	if !ok {
+		return
+	}
+	m.linkQualityMu.Lock()
+	if m.linkQuality == nil {
+		m.linkQuality = make(map[linkQualityKey]*linkStats)
+	}
+	st := m.linkQuality[key]
+	if st == nil {
+		st = &linkStats{at: time.Now()}
+		m.linkQuality[key] = st
+	}
+	st.attached++
+	srtt, rttVar, rttW := st.rttDecayedAt(time.Now())
+	m.linkQualityMu.Unlock()
+	peer.pingTracker.attachStats(key, st, srtt, rttVar, rttW)
+}
+
+// retireLinkQuality folds the peer's generation evidence into the persisted
+// link stats and prunes entries that have decayed to nothing. Safe to call on
+// peers that never established an identity.
+func (m *P2PManager) retireLinkQuality(peer *Peer) {
+	if peer == nil || peer.pingTracker == nil {
+		return
+	}
+	now := time.Now()
+	key, ok := peer.pingTracker.retire(now)
+	if !ok {
+		return
+	}
+	m.linkQualityMu.Lock()
+	defer m.linkQualityMu.Unlock()
+	if st, exists := m.linkQuality[key]; exists {
+		if st.attached > 0 {
+			st.attached--
+		}
+		lw, sw := st.decayedAt(now)
+		util.LogModuleInfo("p2p", "[P2P] link quality retired: node=%s link=%s lossW=%.2f sampW=%.2f (carried to the next generation)",
+			key.nodeID, key.linkName, lw, sw)
+	}
+	for k, st := range m.linkQuality {
+		if st.attached != 0 {
+			continue
+		}
+		_, sw := st.decayedAt(now)
+		_, _, rw := st.rttDecayedAt(now)
+		if sw < 1e-3 && rw < 1e-3 {
+			delete(m.linkQuality, k)
+		}
+	}
 }
 
 // registerPeerWithMesh registers a peer with the mesh handler and creates its
@@ -2666,6 +2851,21 @@ func (r *rttSampler) add(rtt time.Duration) {
 	}
 }
 
+// seed initializes the sampler with cross-generation RTT evidence. It is a
+// no-op when the generation has already collected its own samples or there is
+// no history to inherit.
+func (r *rttSampler) seed(srtt, rttVar time.Duration, weight float64) {
+	if srtt <= 0 || weight <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.srtt == 0 && r.sampleCount == 0 {
+		r.srtt = srtt
+		r.rttVar = rttVar
+	}
+}
+
 // getStats returns current RTT statistics.
 func (r *rttSampler) getStats() (srtt, rttVar time.Duration, sampleCount int) {
 	r.mu.Lock()
@@ -2712,10 +2912,17 @@ type pingTracker struct {
 	mu              sync.Mutex
 	pendingPings    map[uint32]time.Time // seq -> send time (in flight)
 	lateGrace       map[uint32]time.Time // seq -> send time (loss verdict, awaiting late pong)
+	onWire          map[uint32]time.Time // seq -> write-completion time (actually left this node)
 	nextSeq         uint32
 	samples         []pingSample // sliding window of resolved outcomes
 	consecutiveLost int          // consecutive resolved losses (reset on any pong)
 	rttSampler      *rttSampler
+
+	// stats is the decayed cross-generation evidence for the logical link this
+	// tracker belongs to (shared with P2PManager.linkQuality). Nil until the
+	// peer identity is established.
+	stats    *linkStats
+	statsKey linkQualityKey
 }
 
 // newPingTracker creates a new ping tracker.
@@ -2723,6 +2930,7 @@ func newPingTracker() *pingTracker {
 	return &pingTracker{
 		pendingPings: make(map[uint32]time.Time),
 		lateGrace:    make(map[uint32]time.Time),
+		onWire:       make(map[uint32]time.Time),
 		nextSeq:      1,
 		rttSampler:   &rttSampler{},
 	}
@@ -2774,6 +2982,19 @@ func (t *pingTracker) recordPing() uint32 {
 func (t *pingTracker) cancelPing(seq uint32) {
 	t.mu.Lock()
 	delete(t.pendingPings, seq)
+	delete(t.onWire, seq)
+	t.mu.Unlock()
+}
+
+// markOnWire records that a ping frame actually left this node. Only these
+// pings may become cross-generation loss evidence: a frame still parked in a
+// local queue when the generation ends is a local backpressure artifact, not
+// proof the link dropped anything.
+func (t *pingTracker) markOnWire(seq uint32) {
+	t.mu.Lock()
+	if _, pending := t.pendingPings[seq]; pending {
+		t.onWire[seq] = time.Now()
+	}
 	t.mu.Unlock()
 }
 
@@ -2786,6 +3007,7 @@ func (t *pingTracker) recordPong(seq uint32, timestamp int64) {
 
 	if sendTime, ok := t.pendingPings[seq]; ok {
 		delete(t.pendingPings, seq)
+		delete(t.onWire, seq)
 		t.addSampleLocked(true, seq)
 		t.consecutiveLost = 0
 		t.rttSampler.add(time.Since(sendTime))
@@ -2794,6 +3016,7 @@ func (t *pingTracker) recordPong(seq uint32, timestamp int64) {
 
 	if sendTime, ok := t.lateGrace[seq]; ok {
 		delete(t.lateGrace, seq)
+		delete(t.onWire, seq)
 		for i := range t.samples {
 			if t.samples[i].seq == seq && !t.samples[i].acked {
 				t.samples[i].acked = true
@@ -2815,21 +3038,121 @@ func (t *pingTracker) consecutiveLostCount() int {
 	return t.consecutiveLost
 }
 
-// getLossRate returns the current loss rate (0.0 - 1.0) over the sliding window.
+// getLossRate returns the current loss rate (0.0 - 1.0): the live sliding
+// window blended with the decayed history of earlier generations of the same
+// logical link. Without the history a carrier that flaps faster than one ping
+// resolves would report 0% loss forever, because its loss window never fills
+// before the next reset.
 func (t *pingTracker) getLossRate() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.lossRateLocked(time.Now())
+}
 
-	if len(t.samples) == 0 {
-		return 0.0
-	}
-	lost := 0
+// lossRateLocked is getLossRate without the lock; the caller must hold t.mu.
+func (t *pingTracker) lossRateLocked(now time.Time) float64 {
+	lost, n := 0, 0
 	for _, s := range t.samples {
+		n++
 		if !s.acked {
 			lost++
 		}
 	}
-	return float64(lost) / float64(len(t.samples))
+	pl, pn := 0.0, 0.0
+	if t.stats != nil {
+		pl, pn = t.stats.decayedAt(now)
+	}
+	total := float64(n) + pn
+	if total <= 0 {
+		return 0.0
+	}
+	return (float64(lost) + pl) / total
+}
+
+// attachStats binds the tracker to the persisted evidence for its logical link
+// and seeds the RTT sampler with the previous generation's (decayed) RTT and
+// jitter, so a reconnect neither resets loss nor makes the path look fast
+// again. Only means are seeded; the new generation counts its own samples.
+func (t *pingTracker) attachStats(key linkQualityKey, st *linkStats, srtt, rttVar time.Duration, rttW float64) {
+	t.mu.Lock()
+	t.stats = st
+	t.statsKey = key
+	t.mu.Unlock()
+	t.rttSampler.seed(srtt, rttVar, rttW)
+}
+
+// retire folds this generation's evidence into the persisted link stats and
+// detaches. It ends the tracker's generation: in-flight state is reset so a
+// later retire cannot double count.
+//
+// Only pongs that never came back are evidence. A ping that was queued but
+// never written (local admission control, carrier credit) is censored; a ping
+// written at least an RTO ago with no pong is a loss.
+func (t *pingTracker) retire(now time.Time) (key linkQualityKey, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	st := t.stats
+	if st == nil {
+		return linkQualityKey{}, false
+	}
+	key = t.statsKey
+	st.decayLocked(now)
+
+	for _, s := range t.samples {
+		st.sampW++
+		if !s.acked {
+			st.lossW++
+		}
+	}
+
+	srtt, rttVar, n := t.rttSampler.getStats()
+	rto := srtt + 4*rttVar
+	if rto < 100*time.Millisecond {
+		rto = 100 * time.Millisecond
+	}
+	for seq, wroteAt := range t.onWire {
+		if _, pending := t.pendingPings[seq]; !pending {
+			continue // already resolved (sample or grace), do not double count
+		}
+		if now.Sub(wroteAt) < rto {
+			continue // too fresh to call: censored, not lost
+		}
+		st.sampW++
+		st.lossW++
+	}
+
+	if st.sampW > linkQualityEvidenceCap {
+		f := linkQualityEvidenceCap / st.sampW
+		st.sampW = linkQualityEvidenceCap
+		st.lossW *= f
+	}
+
+	// Fold this generation's RTT/jitter into the persisted means, weighted by
+	// how many samples each side represents (the old weight is already
+	// decayed by decayLocked above).
+	if n > 0 {
+		tw := float64(n)
+		total := st.rttW + tw
+		if total > 0 {
+			st.srtt = time.Duration((float64(st.srtt)*st.rttW + float64(srtt)*tw) / total)
+			st.rttVar = time.Duration((float64(st.rttVar)*st.rttW + float64(rttVar)*tw) / total)
+		}
+		st.rttW = total
+		if st.rttW > linkQualityEvidenceCap {
+			st.rttW = linkQualityEvidenceCap
+		}
+	}
+
+	t.stats = nil
+	t.statsKey = linkQualityKey{}
+	t.samples = nil
+	t.consecutiveLost = 0
+	t.pendingPings = make(map[uint32]time.Time)
+	t.lateGrace = make(map[uint32]time.Time)
+	t.onWire = make(map[uint32]time.Time)
+	t.rttSampler = &rttSampler{}
+	return key, true
 }
 
 // getStats returns all link quality statistics.
@@ -3000,7 +3323,9 @@ func (m *P2PManager) sendPing(peer *Peer) {
 	// Phase C: ping rides the data queue so its SRTT reflects data-plane
 	// queuing. Pong stays on the priority queue (round trip ≈ base RTT +
 	// forward queuing). A RED/enqueue rejection rolls back via cancelPing.
-	if err := enqueueWrite(peer, frame.FrameLinkPing, data, false); err != nil {
+	// pingSeq lets the writer mark the frame on-wire for cross-generation loss
+	// accounting (a ping rejected or still parked locally is not link loss).
+	if err := enqueueWriteReq(peer, writeReq{frameType: frame.FrameLinkPing, data: data, pingSeq: seq}); err != nil {
 		// Send failure: frame never entered the wire, roll back without counting
 		peer.pingTracker.cancelPing(seq)
 		util.LogModuleDebug("p2p", "[P2P] ping enqueue failed for %s: %v", peer.ID, err)

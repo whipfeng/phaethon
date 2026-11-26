@@ -729,6 +729,12 @@ func main() {
 	// 避免留下抢端口/抢 DB 的孤儿进程（Linux 生效，其他平台空实现）。
 	enableParentDeathSignal()
 
+	// Start heartbeats now, not after ready. The stdout pipe is also the
+	// parent-death detector: a watchdog that dies during this worker's long
+	// initialization must not leave the worker running unsupervised and holding
+	// the instance lock until it finishes starting.
+	startWorkerHeartbeat()
+
 	// Extract Java-style -Dkey=value arguments up front so they do not confuse
 	// the standard flag parser, while remaining available via util.JavaProp().
 	os.Args = util.SetJavaProps(os.Args)
@@ -939,10 +945,10 @@ func main() {
 		}
 	}
 
-	// Signal the watchdog that the server is fully initialized.
+	// Signal the watchdog that the server is fully initialized. Heartbeats were
+	// already started at worker startup (see startWorkerHeartbeat in main).
 	if os.Getenv("PHAETHON_WORKER") != "" {
 		emitProtocolMsg(map[string]interface{}{"ready": true, "version": Version})
-		startWorkerHeartbeat()
 	}
 	watchAndRun(resources)
 }
@@ -1035,6 +1041,11 @@ const childReadyTimeout = 120 * time.Second
 // before treating the child as stuck.
 const childHeartbeatTimeout = 30 * time.Second
 
+// watchdogWorkerJob binds every worker this watchdog spawns to its own
+// lifetime (Windows Job Object). Nil on other platforms and when the job could
+// not be created.
+var watchdogWorkerJob *workerJob
+
 // spawnChildProcess starts the worker child with a stdout pipe for protocol
 // messages. A goroutine reads lines, parses JSON protocol messages, and
 // forwards non-JSON output to the watchdog's stdout.
@@ -1064,6 +1075,13 @@ func spawnChildProcess(exe string) (*childProcess, error) {
 	}
 	// Close the write end in the parent — only the child writes to it.
 	stdoutW.Close()
+
+	// Bind the worker to the watchdog's job so the OS kills it if this process
+	// dies before it can clean up. Failure is a warning only; supervision still
+	// works, just without the kernel-level orphan guarantee.
+	if err := watchdogWorkerJob.assign(proc.Pid); err != nil {
+		util.LogModuleWarn("main", "watchdog: bind worker %d to job failed: %v", proc.Pid, err)
+	}
 
 	cp := &childProcess{
 		proc:   proc,
@@ -1258,6 +1276,11 @@ func runWatchdogMode() {
 	util.LogModuleInfo("main", "watchdog: starting in watchdog mode")
 	writeWatchdogVersion(Version)
 
+	// Bind every worker this watchdog spawns to its lifetime. If the watchdog
+	// dies while a worker is alive, the OS kills the worker, releasing the
+	// instance lock so a rollback can proceed. Nil/failure degrades gracefully.
+	watchdogWorkerJob = createWorkerJob()
+
 	// First-run setup happens here, before the worker exists, because the
 	// worker's stdout is a line-oriented protocol pipe (see prepareFirstRun).
 	if err := prepareFirstRun(workDir); err != nil {
@@ -1279,9 +1302,24 @@ func runWatchdogMode() {
 	handoffToken := os.Getenv(handoffEnvToken)
 	handoffTarget := os.Getenv(handoffEnvTarget)
 	handoffMode := handoffToken != ""
+	handoffReadySent := false
 	if handoffMode {
 		util.LogModuleInfo("main", "watchdog: handoff mode token=%s target=%s", shortToken(handoffToken), handoffTarget)
 		publishHandoffResult(handoffToken, handoffResultAccepted, Version, "")
+		// If this watchdog exits or panics before publishing ready, tell the old
+		// watchdog immediately instead of leaving it to discover a dead process
+		// after its own timeout. publishHandoffResult ignores an abort request, so
+		// an operator-initiated abort is not misreported as a failure. A terminal
+		// result written by an explicit path is also left untouched.
+		defer func() {
+			if handoffReadySent {
+				return
+			}
+			if res := readHandoffResult(); res != nil && res.Token == handoffToken && res.Status != handoffResultAccepted {
+				return
+			}
+			publishHandoffResult(handoffToken, handoffResultFailed, Version, "watchdog exited before handoff completed")
+		}()
 	}
 
 	const (
@@ -1464,7 +1502,6 @@ func runWatchdogMode() {
 
 	var handoffCh <-chan time.Time
 	var handoffTicker *time.Ticker
-	handoffReadySent := false
 	handoffWatchDeadline := time.Time{}
 	if handoffMode {
 		handoffTicker = time.NewTicker(200 * time.Millisecond)

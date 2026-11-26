@@ -97,3 +97,45 @@ Linux 可直接 `exec` 自身；当前实现为统一使用 spawn + ready + 旧�
 4. 验证中发现并修复的竞态：新 watchdog 的 monitor loop 可能在发布 `ready` 之前读到 upgrade-request 并把它清掉，导致旧 watchdog 等不到 ready。已在 `handoffMode && !handoffReadySent` 时跳过 upgrade 请求处理。
 
 结论：watchdog 代码已能随升级更新；旧映像在旧进程退出后解锁，后续轮换不再依赖 `.old.last`。`watchdog-version` 可用于运维核对实际运行的 watchdog 版本。
+
+## 2026-11-25 故障与补漏
+
+### 现象
+
+vm 升级到某版本时整机停机：
+
+1. 新 watchdog 在 worker ready 之前自己先退出；
+2. `abortHandoff` 发现新 watchdog 已死，跳过杀进程树（`processExists(pid)` 为假）；
+3. 新 watchdog 的 worker 成为孤儿，继续持实例锁；
+4. 旧 watchdog 回滚启动旧 worker，撞锁以 `instanceConflictExitCode=3` 退出；
+5. monitor loop 把 exit=3 当作“外来实例占目录”，watchdog 随之退出，节点彻底下线。
+
+根因不是锁本身，而是“watchdog 在 ready 前死亡时，它派生的 worker 没有跟随死亡”。
+
+### 修复（应用内，不改启动器、不做锁交接）
+
+1. **Windows Job Object 绑定 worker 生命周期**（`worker_job_windows.go`）
+   - 每个 watchdog 进程创建一个 Job，设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`；
+   - 自己 spawn 的每个 worker 立即 `AssignProcessToJobObject`；
+   - watchdog 无论正常退出、崩溃还是 panic，进程结束时 Job 句柄关闭，OS 杀掉所有仍在 Job 内的 worker，锁随之释放；
+   - 交接用的新 watchdog **不**加入旧 Job（否则旧 watchdog 一退出就会把新 watchdog 杀掉）；它有自己的 Job；
+   - 创建/配置/分配失败只降级为 warn，不影响原有监督逻辑。
+2. **回滚前探测实例锁**（`instance_lock.go` + 各平台 `probeInstanceLock`）
+   - 回滚 `spawnAndWait` 之前调用 `waitForInstanceLock(dataDir, 15s)`，200ms 轮询；
+   - 直接探测 OS 锁（取锁后立即释放），不比较 PID，避免 PID 复用误判；
+   - 这样即使孤儿 worker 还在退出过程中，也不会让回滚 worker 撞锁 exit=3。
+3. **交接结果兜底上报**（`runWatchdogMode` 的 defer）
+   - 新 watchdog 在 ready 前退出/panic 时，defer 自动写 `result=failed`；
+   - 旧 watchdog 立即回滚，不再等自身超时 + 事后发现进程死亡；
+   - abort 请求与已存在的终态结果不会被覆盖。
+4. **worker 心跳提前到启动即开始**（`main` + `main_engine.go`）
+   - 心跳不再等 ready 后才启动；stdout 管道同时是父进程死亡探测器；
+   - watchdog 在 worker 初始化阶段死亡时，worker 也能在 10s 内发现并退出，释放锁（Unix 侧的主要保障）。
+5. **回滚状态如实上报**（`rollbackUpgrade`）
+   - `restoreBackup` 失败时，`LastError` 追加 `restore backup failed: ...`，不再把“恢复失败”伪装成干净回滚。
+
+### 验证
+
+- `go build ./...`：Windows / linux-amd64 / darwin-arm64 全部通过；
+- `instance_lock_test.go`：探测能感知持锁、等待在持锁期间阻塞、释放后返回、超时返回 false；
+- `worker_job_windows_test.go`：Job 关闭后子进程被 OS 杀死（KILL_ON_JOB_CLOSE 生效）。

@@ -38,3 +38,20 @@ func acquireInstanceLock(dataDir string) (func(), error) {
 		f.Close()
 	}, nil
 }
+
+// probeInstanceLock reports whether the instance lock is currently free. It
+// takes and immediately releases the OS lock without writing the holder record,
+// so a probe never changes the diagnostic state.
+func probeInstanceLock(dataDir string) bool {
+	path := filepath.Join(dataDir, "instance.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return false
+	}
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return true
+}

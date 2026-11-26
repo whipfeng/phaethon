@@ -29,6 +29,33 @@ func (h instanceLockHolder) describe() string {
 	return fmt.Sprintf("pid=%d exe=%s since=%s", h.PID, h.Exe, h.Started)
 }
 
+const (
+	instanceLockProbeInterval = 200 * time.Millisecond
+	instanceLockProbeTimeout  = 15 * time.Second
+)
+
+// waitForInstanceLock waits until no other process holds the data directory
+// instance lock, or the timeout elapses. It probes the OS lock directly instead
+// of comparing PIDs: PID reuse makes the holder record unreliable, while the
+// kernel lock is authoritative.
+//
+// The rollback path calls this before spawning the previous worker. If an
+// orphan worker from a failed handoff still owns the lock, the rollback worker
+// would exit with instanceConflictExitCode and the watchdog would stop for
+// good — the outage this guards against.
+func waitForInstanceLock(dataDir string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if probeInstanceLock(dataDir) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(instanceLockProbeInterval)
+	}
+}
+
 // writeLockHolder records who owns the lock, for diagnostics only.
 func writeLockHolder(f *os.File) {
 	exe, _ := os.Executable()

@@ -356,7 +356,8 @@ func emitProtocolMsg(msg interface{}) bool {
 }
 
 // startWorkerHeartbeat sends periodic heartbeat messages to the watchdog.
-// Called once after the worker signals ready.
+// Called at worker startup (before ready) so the pipe doubles as an early
+// parent-death detector during long initialization.
 //
 // The same pipe doubles as the parent-death detector: the watchdog holds the
 // read end, so a dead watchdog makes this write fail (EPIPE on Unix, broken

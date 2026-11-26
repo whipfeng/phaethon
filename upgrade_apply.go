@@ -376,20 +376,36 @@ func failUpgradeBeforeSwap(current string, req *upgrade.Request, err error) {
 func rollbackUpgrade(exe string, fallback *childProcess, fromVersion string, req *upgrade.Request, backupPath string, reason error) (*childProcess, int) {
 	util.LogModuleError("main", "watchdog: upgrade to %s failed, rolling back to %s: %v", req.Version, fromVersion, reason)
 	upgradeLog("rollback begin: target=%s from=%s reason=%v", req.Version, fromVersion, reason)
-	if err := restoreBackup(exe, backupPath); err != nil {
-		util.LogModuleError("main", "watchdog: rollback restore failed: %v", err)
-		upgradeLog("rollback restore failed: %v", err)
+	restoreErr := restoreBackup(exe, backupPath)
+	if restoreErr != nil {
+		util.LogModuleError("main", "watchdog: rollback restore failed: %v", restoreErr)
+		upgradeLog("rollback restore failed: %v", restoreErr)
 	} else {
 		upgradeLog("rollback restored backup=%s", backupPath)
 	}
 	_ = upgrade.ClearRequest()
 	_ = upgrade.ClearMarker()
 
+	// Do not spawn the rollback worker while an orphan worker from the failed
+	// handoff still holds the instance lock: it would exit with
+	// instanceConflictExitCode and the watchdog would stop for good. Probe the
+	// OS lock (authoritative) instead of trusting PIDs.
+	if !waitForInstanceLock(dataDir, instanceLockProbeTimeout) {
+		util.LogModuleWarn("main", "watchdog: instance lock still held after %v before rollback; spawning anyway", instanceLockProbeTimeout)
+		upgradeLog("rollback: instance lock still held after %v", instanceLockProbeTimeout)
+	}
+
 	st := upgrade.Status{
 		Status:    upgrade.StatusFailedRolledBack,
 		Current:   fromVersion,
 		Requested: req.Version,
 		LastError: reason.Error(),
+	}
+	if restoreErr != nil {
+		// Do not pretend the rollback restored the old binary. The stable path
+		// may still hold the failed image; say so instead of reporting a clean
+		// rollback.
+		st.LastError = fmt.Sprintf("%v (restore backup failed: %v)", reason, restoreErr)
 	}
 
 	cp, err := spawnAndWait(exe, workerReadyWait)

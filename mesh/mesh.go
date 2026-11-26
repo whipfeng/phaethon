@@ -862,15 +862,23 @@ func (m *MeshManager) NextHopLink(targetNodeID string) (nextHopNodeID string, li
 	rt := m.getRouteTable()
 	if rt != nil {
 		if path, ok := rt.bestPaths[targetNodeID]; ok && path.NextHop != "" {
-			return path.NextHop, path.LinkNIC
+			// A path installed before its session ended still references the
+			// old LinkNIC until the next recompute. Treat a closed link as
+			// absent so packets fail fast instead of entering a dead transport,
+			// then fall through to the live direct peer (reconnect case).
+			if path.LinkNIC != nil && !path.LinkNIC.IsClosed() {
+				return path.NextHop, path.LinkNIC
+			}
 		}
 	}
 	// Topology not converged yet: a direct peer is its own next hop.
 	// Get the LinkNIC from netstack using the peer's linkKey.
 	for _, peer := range m.topology.GetAllPeers() {
-		if peer.NodeID() == targetNodeID && peer.Sender != nil {
-			// Get LinkNIC directly from peer's Sender (design §5.6)
-			return targetNodeID, peer.Sender.GetLinkNIC()
+		if peer.NodeID() != targetNodeID || peer.Sender == nil {
+			continue
+		}
+		if nic := peer.Sender.GetLinkNIC(); nic != nil && !nic.IsClosed() {
+			return targetNodeID, nic
 		}
 	}
 	return "", nil
@@ -3027,7 +3035,7 @@ func (m *MeshManager) qualityLoop() {
 	}
 }
 
-// checkPeerConnectivity disconnects helloed links whose ACK updates have stalled.
+// checkPeerConnectivity disconnects established links whose ACK updates have stalled.
 func (m *MeshManager) checkPeerConnectivity() {
 	if m.p2p == nil {
 		return
@@ -3695,6 +3703,13 @@ func (m *MeshManager) buildTopologyGraph(validatedClaims map[string]validatedCla
 		}
 		graph.Nodes[neighborID] = true
 
+		// A peer whose session already ended must not contribute an edge: the
+		// async cleanup may not have unregistered it yet, and routing into its
+		// closed LinkNIC black-holes packets until the next recompute.
+		if nic := peer.Sender.GetLinkNIC(); nic == nil || nic.IsClosed() {
+			continue
+		}
+
 		localSeq := peer.Sender.GetLocalSeq()
 		remoteSeq := peer.Sender.GetRemoteSeq()
 
@@ -3988,7 +4003,9 @@ func (m *MeshManager) applyHysteresis(graph *TopologyGraph, bestPaths map[string
 func resolvePeerLinkNIC(t *Topology, nextHop string) *LinkNIC {
 	for _, peer := range t.GetAllPeers() {
 		if peer.NodeID() == nextHop && peer.Sender != nil {
-			return peer.Sender.GetLinkNIC()
+			if nic := peer.Sender.GetLinkNIC(); nic != nil && !nic.IsClosed() {
+				return nic
+			}
 		}
 	}
 	return nil

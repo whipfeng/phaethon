@@ -113,50 +113,35 @@ const (
 // RouteSelector for proxy-selected mesh links.
 var LookupProxyPeerRoute func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
 
-// LookupProxyPeerRouteQuiet is LookupProxyPeerRoute without logging. Dial-time
-// readiness polls call it every few tens of milliseconds during a reconnect
-// window, where the logged variant would flood the log with one error per poll.
-var LookupProxyPeerRouteQuiet func(proxyName string) (linkNICID tcpip.NICID, peerSubnet *net.IPNet, ok bool)
-
 func init() {
 	LookupProxyPeerRoute = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
-		return lookupProxyPeerRoute(proxyName, false)
-	}
-	LookupProxyPeerRouteQuiet = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
-		return lookupProxyPeerRoute(proxyName, true)
-	}
-}
-
-func lookupProxyPeerRoute(proxyName string, quiet bool) (tcpip.NICID, *net.IPNet, bool) {
-	mgr := GlobalP2PManager
-	if mgr == nil {
-		if !quiet {
+		mgr := GlobalP2PManager
+		if mgr == nil {
 			util.LogModuleError("p2p", "[V2-LOOKUP] GlobalP2PManager is nil for proxy=%s", proxyName)
+			return 0, nil, false
 		}
-		return 0, nil, false
-	}
-	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	if peer, ok := mgr.proxyPeers[proxyName]; ok {
-		// Use thread-safe GetLinkNIC() (fix race condition #2)
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		peer, ok := mgr.proxyPeers[proxyName]
+		if !ok {
+			util.LogModuleDebug("p2p", "[V2-LOOKUP] no peer for proxy=%s", proxyName)
+			return 0, nil, false
+		}
+		// Use thread-safe GetLinkNIC() (fix race condition #2). A nil or closed
+		// link means the carrier is still dialing or its session just ended;
+		// that is a normal reconnect window, not an error — the dialer reports
+		// the user-visible failure.
 		linkNIC := peer.GetLinkNIC()
-		if linkNIC == nil {
-			if !quiet {
-				util.LogModuleError("p2p", "[V2-LOOKUP] peer found but linkNIC is nil for proxy=%s peer.ID=%s status=%s", proxyName, peer.ID, peer.GetStatus())
-			}
+		if linkNIC == nil || linkNIC.IsClosed() {
+			util.LogModuleDebug("p2p", "[V2-LOOKUP] link not ready for proxy=%s peer.ID=%s status=%s closed=%v",
+				proxyName, peer.ID, peer.GetStatus(), linkNIC != nil)
 			return 0, nil, false
 		}
 		nicID := linkNIC.NICID()
 		subnet := linkNIC.PeerSubnet()
-		if !quiet {
-			util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
-		}
+		util.LogModuleInfo("p2p", "[V2-LOOKUP] proxy=%s peer.ID=%s linkNICID=%d subnet=%s status=%s", proxyName, peer.ID, nicID, subnet, peer.GetStatus())
 		return nicID, subnet, true
 	}
-	if !quiet {
-		util.LogModuleError("p2p", "[V2-LOOKUP] no peer found for proxy=%s", proxyName)
-	}
-	return 0, nil, false
 }
 
 // linkQualityForgetTau is the time constant for cross-generation loss
@@ -607,7 +592,7 @@ type Peer struct {
 	ID        string       `json:"id"`                  // unique connection ID (localSeq-based)
 	ProxyName string       `json:"proxyName"`           // proxy config name (active peers only, empty for passive)
 	NodeID    string       `json:"nodeId"`              // mesh node ID, extracted from hello's ClaimedSubnets[hop=0]
-	Status    string       `json:"status"`              // current peer status: connecting, helloed, upToDate, failed
+	Status    string       `json:"status"`              // current peer status: connecting, upToDate, failed, disconnected, stopped
 	Transport string       `json:"transport,omitempty"` // udp/tcp(+stripe×N) data-leg form (empty = no leg)
 	Stripes   []StripeInfo `json:"stripes,omitempty"`   // dynamic lane details (design §7)
 	LastError string       `json:"lastError,omitempty"` // last error message (empty if no error)
@@ -620,7 +605,7 @@ type Peer struct {
 	FriendlyName string // 友好名称（代理名，仅展示）
 
 	// Atomic fields for concurrent access (fix race condition #2 and #4)
-	statusAtomic atomic.Value // string: "connecting", "helloed", "upToDate", "failed"
+	statusAtomic atomic.Value // string: "connecting", "upToDate", "failed", "disconnected", "stopped"
 	// negotiatedVersion is min(local, remote) after the version check (D25).
 	negotiatedVersion atomic.Int32
 	// peerCaps is the remote capability set from hello/gossip (D25). Nil means
@@ -1874,6 +1859,11 @@ func (m *P2PManager) HandleP2PTransport(t frame.FrameTransport, address, legSecr
 		// (D9): UnregisterPeer can block and DeleteLinkNIC enters the netstack.
 		sender := peer.GetMeshSender()
 		linkNIC := peer.GetLinkNIC()
+		if linkNIC != nil {
+			// Route selection must stop handing out this link now, not when the
+			// async cleanup gets around to unregistering the peer.
+			linkNIC.MarkClosed()
+		}
 		peer.SetMeshSender(nil)
 		peer.SetLinkNIC(nil)
 		m.mu.Lock()
@@ -2127,6 +2117,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 		// any leftover LinkNIC outside the lock and hand it to the cleanup
 		// goroutine (D9).
 		linkNIC := peer.GetLinkNIC()
+		if linkNIC != nil {
+			linkNIC.MarkClosed()
+		}
 		peer.SetLinkNIC(nil)
 		m.mu.Lock()
 		// Remove from both maps (prevent race with RestartPeer)
@@ -2312,6 +2305,9 @@ func (m *P2PManager) StartPeer(proxy *config.Proxy) {
 				// Detach mesh objects, then tear them down outside m.mu (D9).
 				sender := peer.GetMeshSender()
 				linkNIC := peer.GetLinkNIC()
+				if linkNIC != nil {
+					linkNIC.MarkClosed()
+				}
 				peer.SetMeshSender(nil)
 				peer.SetLinkNIC(nil)
 				m.enqueuePeerCleanup(peerCleanup{sender: sender, linkNIC: linkNIC})
@@ -2664,7 +2660,6 @@ func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 
 	peer.NodeID = nodeID
 	peer.SetLastError("")
-	peer.SetStatus("helloed")
 	now := time.Now()
 	peer.LastSeen = now
 	peer.lastSeenNano.Store(now.UnixNano())
@@ -2682,12 +2677,21 @@ func (m *P2PManager) establishPeerFromGossip(peer *Peer, info mesh.GossipInfo) {
 	// (NodeID, Seq) — Seq was assigned at peer creation, no negotiation needed.
 	peer.RemoteSeq = info.Seq
 
-	m.notifyStatusChange()
+	// 4-5. Publish the data path before announcing the peer as established.
+	// A peer that cannot obtain a LinkNIC (stack swapping, NIC creation
+	// failure) is not routable: marking it upToDate would leave every route
+	// lookup failing for the rest of the session. Close this generation and
+	// let the reconnect loop retry instead.
+	if !m.registerPeerWithMesh(peer, nodeID, info) {
+		peer.SetStatus("failed")
+		peer.SetLastError("mesh LinkNIC unavailable")
+		m.notifyStatusChange()
+		util.LogModuleWarn("p2p", "[P2P] establishment failed for peer %s (nodeID=%s): LinkNIC unavailable, closing session", peer.ID, nodeID)
+		peer.transport.Close()
+		return
+	}
+
 	util.LogModuleInfo("p2p", "[P2P] peer established via first gossip: %s nodeID=%s seq=%d remoteSeq=%d", peer.ID, nodeID, peer.Seq, peer.RemoteSeq)
-
-	// 4-5. Register with mesh handler and create LinkNIC (design §5.6)
-	m.registerPeerWithMesh(peer, nodeID, info)
-
 	peer.SetStatus("upToDate")
 	m.notifyStatusChange()
 }
@@ -2700,6 +2704,7 @@ func (m *P2PManager) reregisterPeer(peer *Peer, nodeID string, info mesh.GossipI
 			m.meshHandler.UnregisterPeer(sender)
 		}
 		if linkNIC := peer.GetLinkNIC(); linkNIC != nil {
+			linkNIC.MarkClosed()
 			m.meshHandler.DeleteLinkNIC(linkNIC)
 			peer.SetLinkNIC(nil)
 		}
@@ -2713,7 +2718,14 @@ func (m *P2PManager) reregisterPeer(peer *Peer, nodeID string, info mesh.GossipI
 	}
 	peer.SetLastError("")
 	m.attachLinkQuality(peer)
-	m.registerPeerWithMesh(peer, nodeID, info)
+	if !m.registerPeerWithMesh(peer, nodeID, info) {
+		peer.SetStatus("failed")
+		peer.SetLastError("mesh LinkNIC unavailable")
+		m.notifyStatusChange()
+		util.LogModuleWarn("p2p", "[P2P] re-registration failed for peer %s (nodeID=%s): LinkNIC unavailable, closing session", peer.ID, nodeID)
+		peer.transport.Close()
+		return
+	}
 	m.notifyStatusChange()
 }
 
@@ -2793,17 +2805,17 @@ func (m *P2PManager) retireLinkQuality(peer *Peer) {
 	}
 }
 
-// registerPeerWithMesh registers a peer with the mesh handler and creates its
-// LinkNIC. Shared by establishPeerFromGossip and reregisterPeer.
-func (m *P2PManager) registerPeerWithMesh(peer *Peer, nodeID string, info mesh.GossipInfo) {
+// registerPeerWithMesh publishes the peer's data path: it creates the LinkNIC
+// and only then registers the sender with the mesh handler. Topology/Dijkstra
+// read the sender's LinkNIC, so registering first would expose a nil link to
+// route selection for a window (and, on failure, for the whole session).
+// Returns false when the link cannot be made routable.
+func (m *P2PManager) registerPeerWithMesh(peer *Peer, nodeID string, info mesh.GossipInfo) bool {
 	if m.meshHandler == nil {
-		return
+		return false
 	}
-	ps := &peerSender{peer: peer, nodeID: nodeID}
-	peer.SetMeshSender(ps)
-	m.meshHandler.RegisterPeer(ps)
 
-	// Create LinkNIC for this link (design §5.6); subnet from ClaimedSubnets[hop=0]
+	// Subnet from ClaimedSubnets[hop=0]
 	var subnet string
 	for _, cs := range info.ClaimedSubnets {
 		if cs.Hop == 0 {
@@ -2813,13 +2825,20 @@ func (m *P2PManager) registerPeerWithMesh(peer *Peer, nodeID string, info mesh.G
 	}
 	if subnet == "" {
 		util.LogModuleWarn("p2p", "[P2P] no subnet in gossip from %s (nodeID=%s), cannot create LinkNIC", peer.ID, nodeID)
-		return
+		return false
 	}
+
+	ps := &peerSender{peer: peer, nodeID: nodeID}
 	linkNIC := m.meshHandler.CreateLinkNIC(ps, nodeID, subnet)
-	peer.SetLinkNIC(linkNIC)
 	if linkNIC == nil {
 		util.LogModuleWarn("p2p", "[P2P] failed to create LinkNIC for peer %s (nodeID=%s)", peer.ID, nodeID)
+		return false
 	}
+
+	peer.SetMeshSender(ps)
+	peer.SetLinkNIC(linkNIC)
+	m.meshHandler.RegisterPeer(ps)
+	return true
 }
 
 // extractNodeIDFromGossip extracts the sender's nodeID from ClaimedSubnets with hop=0.
@@ -3281,9 +3300,6 @@ func (m *P2PManager) sendPing(peer *Peer) {
 	// fresh RTO instead of waiting out 2^n backoff (14-28s observed).
 	if limit := carrierPingStallLimit(); limit > 0 {
 		if age, n := peer.pingTracker.pendingStats(); n >= 3 && age > limit {
-			// Diagnostic only: distinguish a local write-path park (frames still
-			// queued, credit exhausted) from a real wire blackout (nothing queued,
-			// yet no pong arrives). No behavioral effect on the reset below.
 			credit := int64(-1)
 			if peer.stripe != nil {
 				credit = peer.stripe.writeCredit()
@@ -3296,11 +3312,19 @@ func (m *P2PManager) sendPing(peer *Peer) {
 			if ls := peer.lastSeenNano.Load(); ls != 0 {
 				inboundQuiet = time.Since(time.Unix(0, ls))
 			}
-			util.LogModuleWarn("p2p", "[CARRIER-STALL] %d pings in flight, oldest %v > limit %v, writeCredit=%d inboundQuiet=%v queuedData=%d oldestQueued=%v, resetting peer.ID=%s proxy=%s nodeID=%s",
-				n, age.Round(time.Millisecond), limit, credit, inboundQuiet.Round(time.Millisecond), queued, oldestQueued.Round(time.Millisecond), peer.ID, peer.ProxyNameSafe(), peer.NodeID)
-			peer.SetLastError(fmt.Sprintf("carrier stall: oldest ping in flight %v", age.Round(time.Millisecond)))
-			peer.transport.Close()
-			return
+			// Only reset a carrier that is also inbound-quiet. A link that keeps
+			// delivering frames is congested, not black-holed; tearing it down
+			// would replace queueing delay with a multi-second reconnect gap and
+			// drop every mesh connection riding on it.
+			if inboundQuiet >= limit {
+				util.LogModuleWarn("p2p", "[CARRIER-STALL] %d pings in flight, oldest %v > limit %v, writeCredit=%d inboundQuiet=%v queuedData=%d oldestQueued=%v, resetting peer.ID=%s proxy=%s nodeID=%s",
+					n, age.Round(time.Millisecond), limit, credit, inboundQuiet.Round(time.Millisecond), queued, oldestQueued.Round(time.Millisecond), peer.ID, peer.ProxyNameSafe(), peer.NodeID)
+				peer.SetLastError(fmt.Sprintf("carrier stall: oldest ping in flight %v", age.Round(time.Millisecond)))
+				peer.transport.Close()
+				return
+			}
+			util.LogModuleDebug("p2p", "[CARRIER-STALL] suppressed: inbound active %v < limit %v (pings=%d oldest=%v writeCredit=%d queuedData=%d) peer.ID=%s",
+				inboundQuiet.Round(time.Millisecond), limit, n, age.Round(time.Millisecond), credit, queued, peer.ID)
 		}
 	}
 

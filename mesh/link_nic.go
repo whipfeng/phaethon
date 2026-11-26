@@ -31,6 +31,12 @@ type LinkNIC struct {
 	dispMu     sync.RWMutex
 	dispatcher stack.NetworkDispatcher
 
+	// closed marks the link as torn down. Route selection consults it so a
+	// LinkNIC whose session already ended is never handed out again, even
+	// before the async cleanup removes the NIC from the stack and the
+	// topology stops advertising the peer.
+	closed atomic.Bool
+
 	// Statistics (atomic counters)
 	injectPackets uint64 // Packets successfully injected into gVisor
 	injectBytes   uint64 // Bytes successfully injected
@@ -129,6 +135,17 @@ func (l *LinkNIC) NICID() tcpip.NICID {
 	return l.nicID
 }
 
+// MarkClosed flags the link as torn down. Idempotent; called by the P2P layer
+// the moment a session ends, before any asynchronous mesh cleanup runs.
+func (l *LinkNIC) MarkClosed() {
+	l.closed.Store(true)
+}
+
+// IsClosed reports whether the owning session has ended.
+func (l *LinkNIC) IsClosed() bool {
+	return l.closed.Load()
+}
+
 // PeerSubnet returns the peer's mesh subnet.
 func (l *LinkNIC) PeerSubnet() *net.IPNet {
 	return l.peerSubnet
@@ -172,7 +189,7 @@ func (l *LinkNIC) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		util.LogModuleDebug("linknic", "[LINKNIC-WRITEPACKETS-ENTRY] linkNIC=%d peer=%s pktCount=%d selfPtr=%p", l.nicID, l.peerNodeID, pkts.Len(), l)
 	}
 
-	if l.sender == nil {
+	if l.sender == nil || l.closed.Load() {
 		return 0, &tcpip.ErrInvalidEndpointState{}
 	}
 

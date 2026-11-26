@@ -267,9 +267,6 @@ func run(prev *activeResources) (*activeResources, error) {
 	mesh.V2RouteLookup = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
 		return p2p.LookupProxyPeerRoute(proxyName)
 	}
-	mesh.V2RouteLookupQuiet = func(proxyName string) (tcpip.NICID, *net.IPNet, bool) {
-		return p2p.LookupProxyPeerRouteQuiet(proxyName)
-	}
 
 	// Initialize mesh overlay network (always enabled)
 	// Load mesh config from database

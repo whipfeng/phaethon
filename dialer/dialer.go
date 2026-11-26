@@ -384,12 +384,6 @@ type meshAwareDialer struct {
 	underlying Dialer
 }
 
-// v2LinkReadyWait bounds how long a dial waits for a peer LinkNIC that is
-// still being created after carrier session re-establishment.
-const (
-	v2LinkReadyWait = 3 * time.Second
-	v2LinkReadyPoll = 50 * time.Millisecond
-)
 
 func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 	// v2 data path: domain vs IP handling differs
@@ -408,21 +402,7 @@ func (d *meshAwareDialer) Dial(dstAddr string, dstPort int) (net.Conn, error) {
 
 	_, peerSubnet, ok := mesh.V2RouteLookup(d.proxy.Name)
 	if !ok || peerSubnet == nil {
-		// A peer session is marked helloed before its LinkNIC is created, so a
-		// dial landing in that window fails even though the link is about to be
-		// usable. Absorb that short window instead of surfacing an error.
-		deadline := time.Now().Add(v2LinkReadyWait)
-		for !ok && mesh.V2RouteLookupQuiet != nil && time.Now().Before(deadline) {
-			time.Sleep(v2LinkReadyPoll)
-			_, subnet, ready := mesh.V2RouteLookupQuiet(d.proxy.Name)
-			if ready && subnet != nil {
-				peerSubnet, ok = subnet, true
-			}
-		}
-		if !ok || peerSubnet == nil {
-			return nil, fmt.Errorf("v2 dial: peer LinkNIC not ready for proxy=%s", d.proxy.Name)
-		}
-		util.LogModuleInfo("dialer", "[V2-DISPATCH] peer LinkNIC ready after wait proxy=%s subnet=%s", d.proxy.Name, peerSubnet)
+		return nil, fmt.Errorf("v2 dial: peer LinkNIC not ready for proxy=%s", d.proxy.Name)
 	}
 
 	if ip := net.ParseIP(dstAddr); ip == nil {

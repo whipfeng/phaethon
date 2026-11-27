@@ -581,6 +581,9 @@ const VersionNotificationService = (function () {
             lastHeartbeat = Date.now();
             // Don't stop polling here - let the heartbeat handler do it
             // after receiving 2 consecutive heartbeats to ensure connection is stable
+            // SSE only pushes version bumps; any p2p status change that happened
+            // while we were disconnected would be lost, so resync on (re)connect.
+            if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         };
         sseSource.onerror = () => {
             connected = false;
@@ -1022,6 +1025,53 @@ function updateProxies(proxiesData, groupsData) {
     }
 }
 
+// renderP2PCell renders the P2P cell from two independent sources: the proxy
+// config (p2p / p2p-udp / v2) and the runtime snapshot from /api/p2p. Keeping
+// the configured chips visible next to the effective transport makes a checked
+// box that did not take effect (e.g. UDP Direct falling back to TCP) obvious.
+function renderP2PCell(proxy, info) {
+    if (!proxy || proxy.p2p !== true) {
+        return '<span class="p2p-status disabled" title="P2P disabled in config"></span>';
+    }
+    const status = info ? (info.status || '') : '';
+    const tf = info ? (info.transport || '') : '';
+    const connected = status === 'upToDate' || status === 'helloed';
+
+    let dot;
+    if (connected) {
+        const title = tf === 'udp' ? 'Connected (UDP leg)' : tf === 'tcp' ? 'Connected (TCP fallback)' : 'Connected';
+        dot = `<span class="p2p-status connected" title="${title}"></span>`;
+    } else if (status === 'failed') {
+        const title = info && info.lastError ? 'Connection failed: ' + escapeHtml(info.lastError) : 'Connection failed';
+        dot = `<span class="p2p-status failed" title="${title}"></span>`;
+    } else {
+        dot = '<span class="p2p-status connecting" title="Connecting..."></span>';
+    }
+
+    let badge = '';
+    if (tf === 'udp') {
+        badge = '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>';
+    } else if (tf === 'tcp') {
+        badge = '<span class="p2p-transport tcp" title="UDP leg negotiated, fell back to TCP">TCP</span>';
+    } else if (tf) {
+        badge = `<span class="p2p-transport tcp" title="${escapeHtml(tf)} data leg">${escapeHtml(tf.toUpperCase())}</span>`;
+    }
+
+    const chips = [];
+    if (proxy['p2p-udp'] === true) {
+        const hint = tf === 'udp' ? 'UDP Direct configured and active'
+            : tf ? 'UDP Direct configured, effective transport: ' + tf
+                : 'UDP Direct configured, waiting for leg';
+        chips.push(`<span class="p2p-cfg udp" title="${escapeHtml(hint)}">udp</span>`);
+    }
+    if (proxy.v2 === true) {
+        chips.push('<span class="p2p-cfg v2" title="V2/WS configured">v2</span>');
+    }
+    const cfgLine = chips.length ? `<span class="p2p-cfg-line">${chips.join('')}</span>` : '';
+    return `<span class="p2p-cell-main">${dot}${badge}</span>${cfgLine}`;
+}
+window.renderP2PCell = renderP2PCell;
+
 function renderProxyRows(proxiesData) {
     return proxiesData.map(p => {
         if (!p || !p.name) return '';
@@ -1040,30 +1090,8 @@ function renderProxyRows(proxiesData) {
                </span>`
             : `<span class="text-muted">-</span>`;
         // Use current P2P status from global map to avoid flickering
-        let p2pCell;
-        if (!p2p) {
-            p2pCell = '<span class="p2p-status disabled" title="Disabled"></span>';
-        } else {
-            const p2pInfo = (typeof window._p2pStatusMap !== 'undefined') ? window._p2pStatusMap[p.name] : null;
-            const p2pStatus = p2pInfo ? p2pInfo.status : null;
-            const tf = p2pInfo ? (p2pInfo.transport || '') : '';
-            const tfBadge = tf === 'udp'
-                ? '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>'
-                : tf === 'tcp'
-                    ? '<span class="p2p-transport tcp" title="UDP leg negotiated, fell back to TCP">TCP</span>'
-                    : '';
-            if (!p2pStatus || p2pStatus === 'connecting') {
-                p2pCell = '<span class="p2p-status connecting" title="Connecting..."></span>';
-            } else if (p2pStatus === 'upToDate' || p2pStatus === 'helloed') {
-                const title = tf === 'udp' ? 'Connected (UDP leg)' : tf === 'tcp' ? 'Connected (TCP fallback)' : 'Connected';
-                p2pCell = `<span class="p2p-status connected" title="${title}"></span>${tfBadge}`;
-            } else if (p2pStatus === 'failed') {
-                const err = p2pInfo.lastError || '';
-                p2pCell = `<span class="p2p-status failed" title="${err ? 'Connection failed: ' + escapeHtml(err) : 'Connection failed'}"></span>`;
-            } else {
-                p2pCell = '<span class="p2p-status connecting" title="Connecting..."></span>';
-            }
-        }
+        const p2pInfo = (typeof window._p2pStatusMap !== 'undefined') ? window._p2pStatusMap[p.name] : null;
+        const p2pCell = renderP2PCell(p, p2pInfo);
         const viaCell = p.via ? escapeHtml(p.via) : '<span class="text-muted">-</span>';
         return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
             <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>

@@ -1216,14 +1216,14 @@ async function doToggleP2P(name, enabled, cell) {
             body: JSON.stringify({p2p: enabled})
         });
         if (!res.ok) throw new Error(await res.text());
-        // Update the cell display immediately - SSE will trigger fetchP2PStatus for actual state
+        // Optimistic cell update; the runtime snapshot below is authoritative.
+        const proxy = proxies.find(p => p.name === name);
+        if (proxy) proxy.p2p = enabled;
         if (cell) {
-            if (enabled) {
-                cell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
-            } else {
-                cell.innerHTML = '<span class="p2p-status disabled" title="Disabled"></span>';
-            }
+            const info = window._p2pStatusMap ? window._p2pStatusMap[name] : null;
+            cell.innerHTML = window.renderP2PCell(proxy, info);
         }
+        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`P2P ${enabled ? 'enabled' : 'disabled'} for ${name}`, enabled ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1249,6 +1249,7 @@ async function toggleV2(name, currentValue) {
         // Table shows effective state (IsV2 = V2 && P2P), update accordingly
         if (v2Cell) v2Cell.innerHTML = (newValue && proxy.p2p) ? '✅' : '❌';
         proxy.v2 = newValue;
+        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`V2 ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1279,6 +1280,7 @@ async function toggleUDP(name, currentValue) {
         }
         // Update local data
         proxy.udp = newValue;
+        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`UDP ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1934,52 +1936,27 @@ function escapeHtml(s) {
         
         // Store globally for renderProxyRows
         window._p2pStatusMap = peerMap;
-        
+
         // Update each P2P cell in the table
         document.querySelectorAll('#proxy-table tr[data-name]').forEach(row => {
             const proxyName = row.getAttribute('data-name');
             const p2pCell = row.querySelector('td[data-label="P2P"]');
             if (!p2pCell) return;
-            
-            const peerInfo = peerMap[proxyName];
-            const status = peerInfo ? peerInfo.status : null;
-            const lastError = peerInfo ? peerInfo.lastError : '';
+
             const proxy = proxies.find(p => p.name === proxyName);
-            const p2pEnabled = proxy && proxy.p2p;
-            
-            if (!p2pEnabled) {
-                // P2P disabled
-                p2pCell.innerHTML = '<span class="p2p-status disabled" title="Disabled"></span>';
-            } else if (!status) {
-                // P2P enabled but no peer yet - show connecting
-                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
-            } else if (status === 'upToDate' || status === 'helloed') {
-                // Connected; append UDP-leg transport badge when present
-                const tf = peerInfo ? peerInfo.transport : '';
-                const badge = tf === 'udp'
-                    ? '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>'
-                    : tf === 'tcp'
-                        ? '<span class="p2p-transport tcp" title="UDP leg negotiated, fell back to TCP">TCP</span>'
-                        : '';
-                const title = tf === 'udp' ? 'Connected (UDP leg)' : tf === 'tcp' ? 'Connected (TCP fallback)' : 'Connected';
-                p2pCell.innerHTML = `<span class="p2p-status connected" title="${title}"></span>${badge}`;
-            } else if (status === 'failed') {
-                // Failed - show red dot with error tooltip
-                const errorTitle = lastError ? `Connection failed: ${lastError}` : 'Connection failed';
-                p2pCell.innerHTML = `<span class="p2p-status failed" title="${errorTitle}"></span>`;
-            } else {
-                // connecting - show blue dot
-                p2pCell.innerHTML = '<span class="p2p-status connecting" title="Connecting..."></span>';
-            }
+            p2pCell.innerHTML = window.renderP2PCell(proxy, peerMap[proxyName] || null);
         });
     }
 
     // Expose fetchP2PStatus globally for version handler
+    let fetching = false;
     window.fetchP2PStatus = async function() {
+        if (fetching) return;
+        fetching = true;
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
-            const res = await fetch('./api/p2p', { signal: controller.signal });
+            const res = await fetch('./api/p2p', { signal: controller.signal, cache: 'no-store' });
             clearTimeout(timeoutId);
             if (!res.ok) return;
             const data = await res.json();
@@ -1988,11 +1965,23 @@ function escapeHtml(s) {
             if (err.name !== 'AbortError') {
                 console.warn('Failed to fetch P2P status:', err);
             }
+        } finally {
+            fetching = false;
         }
     };
 
     // Initial fetch on page load
     window.fetchP2PStatus();
+
+    // /api/p2p only pushes events, so a missed SSE event would leave the cell
+    // stale forever. Poll at a low rate while the tab is visible, and resync
+    // immediately when it becomes visible again.
+    setInterval(() => {
+        if (document.visibilityState === 'visible') window.fetchP2PStatus();
+    }, 15000);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') window.fetchP2PStatus();
+    });
 })();
 
 // Subscriptions toggle

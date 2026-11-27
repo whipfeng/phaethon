@@ -2561,6 +2561,41 @@ td[data-label="P2P"] .p2p-status.failed {
     color: var(--text-muted, #9ca3af);
 }
 
+/* Configured-but-not-effective chips (UDP Direct / V2) shown under the
+   runtime status so config and effective transport stay distinguishable. */
+td[data-label="P2P"] .p2p-cell-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+td[data-label="P2P"] .p2p-cfg-line {
+    display: block;
+    margin-top: 2px;
+    line-height: 1;
+}
+
+.p2p-cfg {
+    display: inline-block;
+    margin-right: 3px;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1.5;
+    text-transform: uppercase;
+    opacity: 0.65;
+}
+
+.p2p-cfg.udp {
+    color: var(--success, #10b981);
+}
+
+.p2p-cfg.v2 {
+    color: var(--accent, #3b82f6);
+}
+
 /* Password visibility toggle */
 .password-container {
     display: inline-flex;

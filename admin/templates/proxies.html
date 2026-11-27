@@ -603,10 +603,10 @@ async function pasteProxy() {
         document.getElementById('f-url').value = p.url || '';
         document.getElementById('f-udp').checked = !!p.udp;
         document.getElementById('f-p2p').checked = !!p.p2p;
-        // Prefer the configured value when pasting a summary, since the
-        // effective "p2p-udp" reads false while P2P is switched off.
-        document.getElementById('f-p2p-udp').checked = (p['p2p-udp-configured'] === true) || (p['p2p-udp'] === true);
-        document.getElementById('f-v2').checked = (p['v2-configured'] === true) || (p.v2 === true);
+        // API returns the raw configured sub-options; effective values are
+        // p2p && p2p-udp / p2p && v2 and never leave the console.
+        document.getElementById('f-p2p-udp').checked = p['p2p-udp'] === true;
+        document.getElementById('f-v2').checked = p.v2 === true;
         document.getElementById('f-skip-cert').checked = !!p['skip-cert-verify'];
         document.getElementById('f-flow').value = p.flow || '';
         document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
@@ -840,10 +840,10 @@ function editProxy(name) {
     document.getElementById('f-url').value = p.url || '';
     document.getElementById('f-udp').checked = p.udp;
     document.getElementById('f-p2p').checked = p.p2p;
-    // Use the configured (raw) sub-option values: while P2P is off these are
-    // still stored, and the form must show them so re-enabling restores them.
-    document.getElementById('f-p2p-udp').checked = p['p2p-udp-configured'] === true;
-    document.getElementById('f-v2').checked = p['v2-configured'] === true;
+    // Raw configured sub-options: while P2P is off they are still stored, and
+    // the form must show them so re-enabling restores them.
+    document.getElementById('f-p2p-udp').checked = p['p2p-udp'] === true;
+    document.getElementById('f-v2').checked = p.v2 === true;
     document.getElementById('f-skip-cert').checked = p['skip-cert-verify'];
     document.getElementById('f-flow').value = p.flow || '';
     document.getElementById('f-reverse-addr').value = p['reverse-address'] || '';
@@ -1336,9 +1336,8 @@ function renderP2PPopover(anchor) {
     }
 
     const p2pOn = proxy.p2p === true;
-    const isHTunnel = (proxy.type || '').toLowerCase() === 'h_tunnel';
-    const udpLeg = proxy['p2p-udp-configured'] === true;
-    const v2 = proxy['v2-configured'] === true || proxy.v2 === true;
+    const udpLeg = proxy['p2p-udp'] === true;
+    const v2 = proxy.v2 === true;
     const info = proxy.runtime || null;
     const subDisabled = p2pOn ? '' : ' disabled';
 
@@ -1372,9 +1371,8 @@ function renderP2PPopover(anchor) {
     body.innerHTML = `
         <div class="p2p-pop-section">
             <label class="p2p-pop-toggle">
-                <input type="checkbox" data-act="master" ${p2pOn ? 'checked' : ''}${isHTunnel ? ' disabled' : ''}>
+                <input type="checkbox" data-act="master" ${p2pOn ? 'checked' : ''}>
                 <span>${escapeHtml(linkText('proxy.p2pLink', 'P2P Link'))}</span>
-                ${isHTunnel ? `<span class="p2p-pop-lock" title="${escapeHtml(linkText('proxy.lockedHtunnel', 'h_tunnel requires P2P enabled'))}">🔒</span>` : ''}
             </label>
             <div class="p2p-pop-sub${p2pOn ? '' : ' is-disabled'}">
                 <label class="p2p-pop-toggle">
@@ -2069,12 +2067,6 @@ function toggleFields() {
     const editName = document.getElementById('edit-name').value;
     if (!editName && showP2P) {
         document.getElementById('f-p2p').checked = true;
-    }
-    // h_tunnel rides the mesh downlink, so P2P cannot be turned off.
-    const masterP2P = document.getElementById('f-p2p');
-    if (masterP2P) {
-        if (isHTunnel) masterP2P.checked = true;
-        masterP2P.disabled = isHTunnel;
     }
     syncLinkSubOptions();
     setVisible('row-ht-ws-hint', isHTunnel);

@@ -86,18 +86,14 @@ func IsP2PCompatibleType(typ string) bool {
 
 // IsP2P reports whether P2P is enabled for this proxy.
 // Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
-// h_tunnel always rides the mesh downlink, so it cannot be disabled even if an
-// older record stored p2p=false (the console and the update API both reject
-// turning it off; this keeps legacy rows usable).
+// Every compatible type can be switched off: without P2P the dialer falls back to
+// the protocol handshake (h_tunnel then talks to its HTTP-tunnel server directly).
 func (p *Proxy) IsP2P() bool {
 	if p == nil {
 		return false
 	}
 	if !IsP2PCompatibleType(p.Type) {
 		return false
-	}
-	if strings.EqualFold(p.Type, "h_tunnel") {
-		return true
 	}
 	if p.P2P != nil {
 		return *p.P2P

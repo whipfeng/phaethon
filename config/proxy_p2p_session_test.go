@@ -4,10 +4,13 @@ import "testing"
 
 func boolPtr(v bool) *bool { return &v }
 
-func TestIsP2P_HTunnelAlwaysOn(t *testing.T) {
+func TestIsP2P_HTunnelCanBeDisabled(t *testing.T) {
 	p := &Proxy{Type: "H_TUNNEL", P2P: boolPtr(false)}
-	if !p.IsP2P() {
-		t.Fatal("h_tunnel must always report P2P enabled")
+	if p.IsP2P() {
+		t.Fatal("h_tunnel with p2p=false must report disabled")
+	}
+	if !(&Proxy{Type: "H_TUNNEL"}).IsP2P() {
+		t.Fatal("h_tunnel without an explicit flag defaults to enabled")
 	}
 }
 

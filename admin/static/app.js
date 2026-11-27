@@ -144,6 +144,14 @@ document.addEventListener('DOMContentLoaded', () => {
         // Re-apply i18n to new content
         if (typeof i18n !== 'undefined' && i18n.applyTranslations) i18n.applyTranslations();
 
+        // The proxies page is server-rendered with a placeholder P2P dot
+        // ("connecting") because live status only exists in /api/proxies.
+        // Version topics won't re-dispatch when they are already in sync, so
+        // pull one fresh snapshot whenever the table is swapped in.
+        if (document.getElementById('proxy-table') && typeof window.fetchProxies === 'function') {
+            window.fetchProxies().catch(() => {});
+        }
+
         // Update sidebar active state
         updateActiveNav();
 
@@ -1048,8 +1056,8 @@ function renderP2PCell(proxy) {
     const status = info ? (info.status || '') : '';
     const tf = info ? String(info.transport || '').toLowerCase() : '';
     const connected = status === 'upToDate' || status === 'helloed';
-    const udpCfg = proxy['p2p-udp-configured'] === true;
-    const v2Cfg = proxy['v2-configured'] === true || proxy.v2 === true;
+    const udpCfg = proxy['p2p-udp'] === true;
+    const v2Cfg = proxy.v2 === true;
     const udpFallback = connected && udpCfg && tf.indexOf('tcp') === 0;
 
     let dotClass = 'connecting';

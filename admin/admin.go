@@ -2845,10 +2845,6 @@ func (s *AdminServer) apiUpdateProxyOptions(w http.ResponseWriter, r *http.Reque
 		httpError(w, "proxy not found", http.StatusNotFound)
 		return
 	}
-	if body.P2P != nil && !*body.P2P && strings.EqualFold(p.Type, "h_tunnel") {
-		httpError(w, "h_tunnel requires P2P enabled (mesh downlink depends on it)", http.StatusBadRequest)
-		return
-	}
 	if body.UDP != nil {
 		p.UDP = body.UDP
 	}
@@ -6331,12 +6327,11 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		"sni":     p.Sni,
 		"udp":     p.IsUDP(),
 		"p2p":     p.IsP2P(),
-		"p2p-udp": p.IsP2PUDP(),
-		// Configured (raw) values: the console keeps sub-options visible while
-		// the parent P2P switch is off, so effective values are not enough.
-		"p2p-udp-configured":     p.IsP2PUDPSet(),
-		"v2-configured":          p.V2,
-		"v2":                     p.IsV2(),
+		// Raw configured values only. "Effective" (p2p && p2p-udp, p2p && v2)
+		// is derived by the console so the sub-options stay visible while the
+		// parent switch is off and there is a single source of truth.
+		"p2p-udp":                p.IsP2PUDPSet(),
+		"v2":                     p.V2,
 		"carrier":                dialer.HTCarrierLabel(p),
 		"via":                    p.ViaProxy,
 		"skip-cert-verify":       p.SkipCertVerify,

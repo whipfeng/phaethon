@@ -220,11 +220,28 @@ vm 复测（`v0.8.3-116-gf7a0b54`）：
 - 弹层状态正确：`AIOPS_TJ`=已连接/TCP、`QG_SS5_UDPLEG`=已连接/UDP、`YLAIG_TJ`=已连接/TCP、`GGDYSV_TJ`（p2p 关）=已关闭、`QG_HT` 主开关置灰并显示 `WS` 承载、`LAOYU_SSH_TEST`（ssh）无按钮只有 `–`；
 - 可操作：弹层内 `V2` 勾选关闭/恢复各触发一次 `PATCH .../options`（均 200），复选框、单元格 `v2` 徽标与 `v2-configured` 即时联动并成功还原，无 console/pageerror。
 
+### h_tunnel 放开 P2P + 收敛 link 字段（2026-11-27 晚）
+
+- 移除 `Proxy.IsP2P()` 对 h_tunnel 恒返回 true 的强制约束，`PATCH .../options` 不再拒绝关闭；h_tunnel 关闭 P2P 后走 v1 HTTP tunnel 握手直连代理服务器。
+- 编辑表单 / popover / copyProxy 去掉 h_tunnel 的置灰与 🔒，所有类型行为一致。
+- `/api/proxies` 只出口原始配置值：删除 `p2p-udp-configured` / `v2-configured` 派生字段，`p2p-udp` / `v2` 直接返回存储值；生效值由前端按 `p2p && p2p-udp`、`p2p && v2` 推导，保持平铺结构，不做 schema 迁移。
+- `TestIsP2P_HTunnelCanBeDisabled` 覆盖“显式 false 可关闭 / 未设置默认开启”。
+
+### 站内导航后 P2P 圆点常闪（2026-11-27 晚）
+
+mb 实测：从其它页面点侧边栏进入代理页后，GG_TJ 圆点一直蓝色脉冲，点开弹层状态却可能已是“已连接”。
+
+- 根因：`/proxies` 服务端渲染的 P2P 单元格是固定的 `connecting` 占位（运行时状态只存在于 `/api/proxies`）；HTMX 换页不触发 `DOMContentLoaded`，而 `proxies` / `p2p` 版本已同步时版本机制不会重新 dispatch，占位因此永不重绘。弹层读同一份全局数据，若此前版本事件刷新过全局，就会出现“圆点闪、弹层已连接”的割裂。
+- 修复：`htmx:afterSettle` 检测到 `#proxy-table` 时主动调用一次 `fetchProxies()`（仍走同一快照，不加定时器）。
+- Playwright 复现：HTMX 导航后 13s 圆点仍为 `p2p-status connecting`、`runtime=null`；修复后应立即变为 `connected/upToDate`。
+
 ### 待办
 
 - [x] 统一 P2P 单元格数据源为运行时状态 + 配置态两个维度。
 - [x] 刷新回归 `p2p` 版本事件驱动（无独立轮询）。
 - [x] 表格收敛为 11 列，P2P 配置/运行时状态收进弹层（v114）。
 - [x] 首屏状态不等心跳，SSE 建连即推送版本快照（v116）。
+- [x] h_tunnel 允许关闭 P2P；API 删除派生字段，仅出口原始配置值。
+- [x] HTMX 站内导航进入代理页后主动拉取一次快照，修复圆点常闪。
 - [ ] 扩散到其余节点后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
 

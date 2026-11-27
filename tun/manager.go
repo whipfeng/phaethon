@@ -1080,10 +1080,6 @@ func (e *Manager) readLoop() {
 		pktBuf := getPooledPktBuf(n)
 		copy(pktBuf, readBuf[:n])
 
-		// Forwarded LAN clients advertise their own MTU in the SYN; bound it
-		// to what the overlay can actually carry.
-		ClampTCPMSS(pktBuf[:n])
-
 		// NAT is handled by gVisor iptables SNAT (configured in netstack)
 
 		// Debug: log first TCP packets to see what readLoop receives

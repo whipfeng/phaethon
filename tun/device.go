@@ -1,6 +1,10 @@
 package tun
 
-import "errors"
+import (
+	"errors"
+
+	"phaethon/mesh"
+)
 
 // ErrSessionClosed is returned by Device.Read when the underlying TUN session
 // has ended (e.g. the adapter was removed). It signals the read loop to exit.
@@ -19,7 +23,7 @@ var ErrSessionClosed = errors.New("tun session closed")
 // lost fragment discarded the whole datagram (a full inner TCP segment) and the
 // inner TCP collapsed into multi-second RTO stalls. Sizing the tunnel MTU to
 // the path MTU keeps each datagram whole and the flow on one ordered carrier.
-const OverlayMTU = 1400
+const OverlayMTU = mesh.InnerMTU
 
 // Device abstracts a TUN/TAP network interface.
 type Device interface {

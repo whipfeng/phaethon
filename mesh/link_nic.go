@@ -52,7 +52,7 @@ func NewLinkNIC(nicID tcpip.NICID, sender PeerSender, peerNodeID string, peerSub
 		sender:     sender,
 		peerNodeID: peerNodeID,
 		peerSubnet: peerSubnet,
-		mtu:        1600, // IPIP outer header (20B) + inner up to 1400 (tun.OverlayMTU) + headroom; kept at 1600 so the stack has IPIP encap room, while the 1360 MSS clamp bounds inner packets
+		mtu:        1600, // IPIP outer header (20B) + inner up to InnerMTU + headroom; IPIP routes carry InnerMTU as their route MTU so size is bounded before encapsulation
 	}
 }
 

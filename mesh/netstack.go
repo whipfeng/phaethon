@@ -240,6 +240,9 @@ func (n *Netstack) SetMeshManager(meshMgr *MeshManager) {
 			// IPIP outer source = local EIP (design §4.2); EIP is a tunnel
 			// identity only, never bound to a NIC.
 			n.ns.SetIPIPSourceAddress(tcpip.AddrFrom4Slice(localEIP))
+			// IPIP route MTU = inner budget, so MSS/fragmentation come from
+			// the stack instead of a hard-coded clamp.
+			n.ns.SetIPIPInnerMTU(InnerMTU)
 			// Register IPIP tunnel protocol handler for decapsulation.
 			// The handler maintains its own state (local EIP) and decapsulates
 			// IPIP packets when outer destination matches local EIP.
@@ -795,16 +798,20 @@ func (n *Netstack) Stop() error {
 // NIC 2+: per-peer Link NICs (created by P2P layer via CreateLinkNIC).
 // IPIP encapsulation happens in the forwarding path; decapsulation at the
 // frame layer (HandleMeshFrame). There is no shared mesh NIC (meshEP retired).
+// InnerMTU is the inner-packet MTU of the mesh overlay. It is the single
+// source of truth for the TUN adapter MTU (tun.OverlayMTU) and the IPIP route
+// MTU, so the stack derives MSS and fragments oversize packets natively.
+const InnerMTU = 1400
+
 func (n *Netstack) initStack() error {
 	// NIC 1: TUN adapter (channel endpoint). Link MTU 1600 is kept for IPIP
-	// outer-header headroom (inner 1400 + 20B outer). End-to-end TUN safety is
-	// enforced instead by the fork's advertised-MSS clamp at 1360
-	// (fork tcp/endpoint.go calculateAdvertisedMSS) plus the 1400-byte TUN
-	// adapter MTU (tun.OverlayMTU), so in-stack and OS endpoints never emit
-	// inner packets larger than 1400 — the budget that keeps a mesh frame
-	// unfragmented on a 1500-byte UDP leg path. Previously oversized replies
-	// failed the TUN write path (ErrMessageTooLong) and, via an uninitialized
-	// ICMP MTU field, poisoned the peer's PMTU cache down to ~1-byte segments.
+	// outer-header headroom (inner 1400 + 20B outer). End-to-end size handling
+	// is enforced by the fork: IPIP routes carry InnerMTU as their route MTU
+	// (so MSS is derived natively and oversize packets are fragmented before
+	// encapsulation), plus the 1400-byte TUN adapter MTU (tun.OverlayMTU), so
+	// in-stack and OS endpoints never emit inner packets larger than 1400 —
+	// the budget that keeps a mesh frame unfragmented on a 1500-byte UDP leg
+	// path.
 	linkEP := channel.New(8192, 1600, "")
 	n.linkEP = linkEP
 

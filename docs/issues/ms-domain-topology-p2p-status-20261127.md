@@ -177,9 +177,19 @@ if id := sender.GetNodeID(); id != "" {
   - 启动时对 `p2p` topic 做一次种子自增，保证版本向量从进程启动就带该 topic，页面首次打开也能通过重放拿到快照。
 - 结论：页面已无任何独立轮询/补偿刷新，问题 3 的“刷新绕开版本通知”已纠正（`cc2bea0` + 本次种子自增）。
 
+### 验证（2026-11-27 21:0x，vm 已升级到 `v0.8.3-112-g07aa4b3`）
+
+headless 打开 `https://127.0.0.1:39999/proxies` 实测：
+
+- 首屏 `/api/p2p` 只请求 1 次，由 SSE `p2p` 版本重放触发（页面无直拉）；
+- 空闲 17s 额外请求 0 次（无轮询）；
+- `visibilitychange` hidden→visible 额外请求 0 次（无直刷）；
+- 单元格正确区分生效态：`AIOPS_TJ`/`YLAIG_TJ` = connected + TCP + `V2`，
+  `QG_SS5_UDPLEG` = connected + UDP + `UDP`；无 pageerror。
+
 ### 待办
 
 - [x] 统一 P2P 单元格数据源为运行时状态 + 配置态两个维度。
 - [x] 刷新回归 `p2p` 版本事件驱动（无独立轮询）。
-- [ ] 发版后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
+- [ ] 扩散到其余节点后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
 

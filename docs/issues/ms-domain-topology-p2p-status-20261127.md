@@ -233,7 +233,13 @@ mb 实测：从其它页面点侧边栏进入代理页后，GG_TJ 圆点一直�
 
 - 根因：`/proxies` 服务端渲染的 P2P 单元格是固定的 `connecting` 占位（运行时状态只存在于 `/api/proxies`）；HTMX 换页不触发 `DOMContentLoaded`，而 `proxies` / `p2p` 版本已同步时版本机制不会重新 dispatch，占位因此永不重绘。弹层读同一份全局数据，若此前版本事件刷新过全局，就会出现“圆点闪、弹层已连接”的割裂。
 - 修复：`htmx:afterSettle` 检测到 `#proxy-table` 时主动调用一次 `fetchProxies()`（仍走同一快照，不加定时器）。
+- 连带修复：htmx 2.0.4 默认执行换页内容的内联脚本（`allowScriptTags=true`），原来的手动重执行会让 `_p2pPopName` 重复声明（控制台报错）并重复注册监听；已删除手动重执行。
 - Playwright 复现：HTMX 导航后 13s 圆点仍为 `p2p-status connecting`、`runtime=null`；修复后应立即变为 `connected/upToDate`。
+
+验证：
+
+- vm `v0.8.3-120-g1f6ad99`：`/api/proxies` 无 `p2p-udp-configured`/`v2-configured`；h_tunnel（`QG_HT (copy)`，p2p=false）弹层主开关可勾选、无 🔒，开启/关闭各一次 `PATCH .../options` 均 200，圆点与 runtime 即时联动；HTMX 导航进代理页 1.5s 内三个在链代理均为 `connected/upToDate`；无 console/pageerror。
+- mb `v0.8.3-120-g1f6ad99`：HTMX 导航后 GG_TJ 圆点立即 `connected`，13s 内稳定不变；弹层“已连接/TCP”。
 
 ### 待办
 

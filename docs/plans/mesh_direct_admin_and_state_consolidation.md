@@ -280,8 +280,8 @@ func (s *AdminServer) Start() error {
 
 **访问方式**：
 
-- 本地节点：`http://nodeid.phn:39999/` 或 `https://nodeid.phn:39999/`（如果配置了 TLS）
-- 远程节点：通过 mesh 网络访问目标节点的 nodeid.phn
+- 本地节点：`https://nodeid.phn/`（mesh 内进程内终止，默认 443，**不要在 URL 里追加 39999 等 admin 端口**）
+- 远程节点：同样直接访问目标节点的 `https://nodeid.phn/`，无需指定端口
 
 **注意事项**：
 

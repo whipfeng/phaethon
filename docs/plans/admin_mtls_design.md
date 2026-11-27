@@ -351,18 +351,21 @@ admin:
 
 ### 场景 3：API 访问
 
+> 更新（2026-11-27）：控制台经 mesh 内进程终止在 443，URL **不带端口**（`https://vm.phn/`）；
+> Token 已收敛为请求头 `Authorization: Bearer <token>`，不再接受 URL query / Cookie。
+
 ```bash
-# 方式 1：使用 Token
-curl https://vm.phn:39999/api/config?token=your-token
+# 方式 1：使用 Token（仅请求头）
+curl -H "Authorization: Bearer your-token" https://vm.phn/api/config
 
 # 方式 2：使用证书
 curl --cert client.crt --key client.key \
-  https://vm.phn:39999/api/config
+  https://vm.phn/api/config
 
 # 方式 3：使用 Session
 curl -c cookies.txt -d "username=admin&password=xxx" \
-  https://vm.phn:39999/login
-curl -b cookies.txt https://vm.phn:39999/api/config
+  https://vm.phn/login
+curl -b cookies.txt https://vm.phn/api/config
 ```
 
 ## 实现计划

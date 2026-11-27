@@ -251,3 +251,26 @@ mb 实测：从其它页面点侧边栏进入代理页后，GG_TJ 圆点一直�
 - [x] HTMX 站内导航进入代理页后主动拉取一次快照，修复圆点常闪。
 - [ ] 扩散到其余节点后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
 
+---
+
+## 节点对冗余 P2P 链路清理（2026-11-27 晚）
+
+多链路拓扑修复后，全量扫描 `/api/p2p` 发现仅 **mb↔qg** 存在两条独立会话：
+
+| 链路 | 主动端 | 类型 | transport | srtt |
+|---|---|---|---|---|
+| QG_P2P | mb | SOCKS5 | tcp | 10.8–14.1ms |
+| MB_HT | qg | H_TUNNEL(v2) | tcp+stripe×2 | 10.3–13.0ms |
+
+两者都 `upToDate`、lossRate=0，且均未被任何规则/映射/分组引用，属于纯冗余骨干。
+
+处理：保留带双 lane 的 `MB_HT`（吞吐更高），对 mb 的 `QG_P2P` 下发
+`PATCH /api/proxies/QG_P2P/options {"p2p": false}`。
+
+验证：
+
+- qg / mb 的 `/api/p2p` 中 mb↔qg 均只剩一条（`MB_HT`，tcp+stripe×2）；
+- qg→mb 的 mesh 地址 ping 正常（100.218.0.3 / 100.218.0.2 丢包 0，~9ms）；
+- `QG_P2P` 关 P2P 后走直连 SOCKS5，mb 侧 `curl -x socks5h://192.168.1.101:7890` 返回 200，路径仍可用；
+- 其余在线节点两两之间均只有一条链路（deskw/deskzq 离线，无法核对）。
+

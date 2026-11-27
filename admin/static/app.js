@@ -1037,9 +1037,12 @@ function renderP2PCell(proxy, info) {
     const tf = info ? (info.transport || '') : '';
     const connected = status === 'upToDate' || status === 'helloed';
 
+    const udpCfg = proxy['p2p-udp'] === true;
     let dot;
     if (connected) {
-        const title = tf === 'udp' ? 'Connected (UDP leg)' : tf === 'tcp' ? 'Connected (TCP fallback)' : 'Connected';
+        const title = tf === 'udp' ? 'Connected (UDP leg)'
+            : tf === 'tcp' && udpCfg ? 'Connected (TCP fallback)'
+                : 'Connected (TCP)';
         dot = `<span class="p2p-status connected" title="${title}"></span>`;
     } else if (status === 'failed') {
         const title = info && info.lastError ? 'Connection failed: ' + escapeHtml(info.lastError) : 'Connection failed';
@@ -1048,17 +1051,22 @@ function renderP2PCell(proxy, info) {
         dot = '<span class="p2p-status connecting" title="Connecting..."></span>';
     }
 
+    // GetPeers defaults transport to "tcp" even before a leg exists, so the
+    // transport badge is only meaningful once the peer is up.
     let badge = '';
-    if (tf === 'udp') {
-        badge = '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>';
-    } else if (tf === 'tcp') {
-        badge = '<span class="p2p-transport tcp" title="UDP leg negotiated, fell back to TCP">TCP</span>';
-    } else if (tf) {
-        badge = `<span class="p2p-transport tcp" title="${escapeHtml(tf)} data leg">${escapeHtml(tf.toUpperCase())}</span>`;
+    if (connected) {
+        if (tf === 'udp') {
+            badge = '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>';
+        } else if (tf === 'tcp') {
+            const hint = udpCfg ? 'UDP leg negotiated, fell back to TCP' : 'TCP data leg';
+            badge = `<span class="p2p-transport tcp" title="${hint}">TCP</span>`;
+        } else if (tf) {
+            badge = `<span class="p2p-transport tcp" title="${escapeHtml(tf)} data leg">${escapeHtml(tf.toUpperCase())}</span>`;
+        }
     }
 
     const chips = [];
-    if (proxy['p2p-udp'] === true) {
+    if (udpCfg) {
         const hint = tf === 'udp' ? 'UDP Direct configured and active'
             : tf ? 'UDP Direct configured, effective transport: ' + tf
                 : 'UDP Direct configured, waiting for leg';

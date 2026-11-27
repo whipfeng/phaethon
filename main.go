@@ -261,6 +261,9 @@ func run(prev *activeResources) (*activeResources, error) {
 	p2p.GlobalP2PManager.OnStatusChange = func() {
 		db.BumpRuntimeVersion("p2p")
 	}
+	// Seed the topic so the version vector always carries "p2p" from startup;
+	// pages then get their first runtime snapshot through the normal replay path.
+	db.BumpRuntimeVersion("p2p")
 	util.LogModuleInfo("system", "P2PManager initialized (version=%s, platform=%s/%s)", Version, Platform, Arch)
 
 	// Inject v2 route lookup: mesh → p2p bridge to avoid circular import

@@ -84,12 +84,17 @@ func (n *VersionNotifier) BumpVersion(typ string, version uint64) {
 	n.broadcast("heartbeat", data, conns)
 }
 
-// Subscribe registers a connection. Does not send initial data;
-// clients will receive updates via heartbeat events.
+// Subscribe registers a connection and immediately pushes the current full
+// version vector. Go's net/http does not flush response headers until the first
+// Write, so without this an EventSource stays in CONNECTING (onopen delayed)
+// until the first periodic heartbeat or version bump — up to the heartbeat
+// interval. Sending a snapshot right away flushes headers and lets clients seed
+// their version vector at once.
 func (n *VersionNotifier) Subscribe(conn *SSEWriter) {
 	n.mu.Lock()
 	n.connections[conn] = struct{}{}
 	n.mu.Unlock()
+	n.sendHeartbeat(conn)
 }
 
 // sendHeartbeat sends the current full version vector to a single connection.

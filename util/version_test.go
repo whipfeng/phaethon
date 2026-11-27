@@ -75,6 +75,29 @@ func TestVersionNotifier_SubscribeSendsSnapshot(t *testing.T) {
 	}
 }
 
+func TestVersionNotifier_SubscribePushesSnapshotImmediately(t *testing.T) {
+	versions := map[string]interface{}{"p2p": 3}
+	n := NewVersionNotifier(func() map[string]interface{} { return versions })
+
+	rec := httptest.NewRecorder()
+	w := NewSSEWriter(rec)
+	if w == nil {
+		t.Fatal("ResponseRecorder does not support Flusher")
+	}
+
+	// No StartHeartbeat: the snapshot must be written by Subscribe itself so
+	// EventSource.onopen fires without waiting for the periodic interval.
+	n.Subscribe(w)
+
+	got := rec.Body.String()
+	if !strings.Contains(got, "event: heartbeat") {
+		t.Fatalf("missing immediate heartbeat: %s", got)
+	}
+	if !strings.Contains(got, `"p2p":3`) {
+		t.Fatalf("missing immediate snapshot: %s", got)
+	}
+}
+
 func TestVersionNotifier_UnsubscribeRemovesConnection(t *testing.T) {
 	n := NewVersionNotifier(func() map[string]interface{} { return map[string]interface{}{} })
 	rec := httptest.NewRecorder()

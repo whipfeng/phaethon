@@ -224,20 +224,37 @@ func NewTopology() *Topology {
 	return &Topology{}
 }
 
+// linkIdentity identifies one physical link to a node. An outbound link is
+// identified by its configured proxy name; only links without a proxy name
+// fall back to the seq pair. Two entries with the same nodeID but different
+// identities are distinct links (a node may reach us through several proxies)
+// and must both stay registered.
+func linkIdentity(s PeerSender) string {
+	if s == nil {
+		return ""
+	}
+	if name := s.GetProxyName(); name != "" {
+		return "proxy:" + name
+	}
+	return fmt.Sprintf("seq:%d/%d", s.GetLocalSeq(), s.GetRemoteSeq())
+}
+
 // RegisterPeer creates a new PeerInfo entry for a connected peer.
 func (t *Topology) RegisterPeer(sender PeerSender) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Drop any stale entry for the same node that is no longer backed by this
-	// sender (reconnect before the old entry was unregistered). Leftovers keep
-	// advertising their last known claims — including neighbor lists — and can
-	// shadow live data in bestClaims, which shows up as permanently missing
-	// topology edges until a restart. nodeID is empty until the first gossip,
-	// so only dedupe when it is known.
+	// Drop the stale entry of the *same link* (reconnect before the old entry
+	// was unregistered). Leftovers keep advertising their last known claims —
+	// including neighbor lists — and can shadow live data in bestClaims, which
+	// shows up as permanently missing topology edges until a restart. Matching
+	// on nodeID alone would also delete a second, live link to the same node
+	// and collapse its topology edge to a single link. nodeID is empty until
+	// the first gossip, so only dedupe when it is known.
 	if id := sender.GetNodeID(); id != "" {
+		self := linkIdentity(sender)
 		kept := t.peers[:0]
 		for _, p := range t.peers {
-			if p.Sender != sender && p.NodeID() == id {
+			if p.Sender != sender && p.NodeID() == id && linkIdentity(p.Sender) == self {
 				continue
 			}
 			kept = append(kept, p)

@@ -15,11 +15,17 @@ v108（`v0.8.3-108-gd7fd903`，含 `b890e43` 多链路、`955e919`+`d7fd903` P2P
 |---|---|---|
 | vm / qg / jf / gg / ms9 / ms10 / qgw / deskll / ylaig / ylaio | v0.8.3-108-gd7fd903 | succeeded |
 | ylnas | v0.8.3-108-gd7fd903 | 上传被 507 拒，走内建 SSH 写包 + `upgrade-request` 绕过（同 v105） |
-| mb | — | 当前不在拓扑中，`mb.phn` 不可达（升级前已离线） |
+| mb | v0.8.3-108-gd7fd903 | 升级前 phaethon 已死（18:54 起无进程），走 mb 的 OS SSH（`cmll@192.168.1.88`，经 qg 跳板，`sudo nohup`）拉起 v105 watchdog 后再走正常 upload+activate |
 | deskw / deskzq | — | 离线 |
 
 多链路现场验证：jf / gg / vm 三个视角的拓扑中 `deskll↔jf` 均为 4 条 link
 （2 条代理 × 双向各登记一条），不再是 1 条。
+
+mb 掉线原因（2026-11-27）：18:03 升到 v105 成功；18:51/18:52 两次 watchdog 因
+`data/instance.lock` 属主为 root、以 cmll 运行被 `permission denied` 挡住（worker exit=3）；
+18:54 拉起后运行正常，但日志无退出记录，进程被外部终止（未用 nohup/launchd，绑定在启动它的会话上）。
+本次用 `sudo nohup ./phaethon` 拉起，已回到拓扑（gg/qg/qgw 三条边），worker v108。
+**隐患**：mb 没有 launchd 自启，注销/重启后仍会掉线，需要单独决定是否加 LaunchDaemon。
 
 上一轮 v105（`v0.8.3-105-g0ade24d`）扩散结果：
 

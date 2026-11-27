@@ -155,6 +155,12 @@ func NewRouteSelector(cfg *RouteSelectorConfig) stack.RouteSelector {
 						EgressNIC: r.LinkNIC,
 						NeedIPIP:  r.NeedIPIP,
 						EgressEIP: egressEIP,
+						// Any LinkNIC egress is on the mesh overlay, IPIP or
+						// not: the route must carry the inner budget so UDP/ICMP
+						// (and anything not covered by MSS) never reaches a
+						// LinkNIC larger than the overlay MTU (branch 2 would
+						// otherwise fall back to the 1600 LinkNIC MTU).
+						MeshEgress: true,
 						// 环路-4: never cache forwarding decisions. NextHopLink is
 						// dynamic in both branches (Dijkstra best path), and the
 						// cache has no TTL — a cached stale NIC outlives route

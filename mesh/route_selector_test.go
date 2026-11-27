@@ -48,6 +48,48 @@ func TestRouteSelectorLocalStack(t *testing.T) {
 	}
 }
 
+// TestRouteSelectorMarksMeshEgress pins that every SelectRoute forwarding
+// decision — direct LinkNIC (branch 2) and IPIP (branch 3) alike — carries the
+// overlay inner budget via MeshEgress, while local branches do not. A branch-2
+// decision without it falls back to the LinkNIC MTU and lets UDP/ICMP frames
+// overshoot the UDP leg's datagram limit.
+func TestRouteSelectorMarksMeshEgress(t *testing.T) {
+	_, localSubnet, err := net.ParseCIDR("100.64.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meshDst := tcpip.AddrFrom4([4]byte{100, 64, 5, 7})
+
+	for _, needIPIP := range []bool{false, true} {
+		selector := NewRouteSelector(&RouteSelectorConfig{
+			LocalSubnet: localSubnet,
+			SelectRoute: func(src, dst net.IP) (SelectRouteResult, bool) {
+				return SelectRouteResult{
+					LinkNIC:   3,
+					NeedIPIP:  needIPIP,
+					EgressEIP: net.IP{100, 64, 5, 4},
+				}, true
+			},
+		})
+		decision := selector(tcpip.Address{}, meshDst)
+		if decision.EgressNIC != 3 {
+			t.Fatalf("needIPIP=%v: EgressNIC = %d, want 3", needIPIP, decision.EgressNIC)
+		}
+		if decision.NeedIPIP != needIPIP {
+			t.Fatalf("needIPIP=%v: decision.NeedIPIP = %v", needIPIP, decision.NeedIPIP)
+		}
+		if !decision.MeshEgress {
+			t.Fatalf("needIPIP=%v: MeshEgress = false, want true", needIPIP)
+		}
+	}
+
+	localDst := tcpip.AddrFrom4([4]byte{100, 64, 1, 3})
+	local := NewRouteSelector(&RouteSelectorConfig{LocalSubnet: localSubnet})(tcpip.Address{}, localDst)
+	if local.MeshEgress {
+		t.Fatalf("local subnet decision: MeshEgress = true, want false")
+	}
+}
+
 // TestRouteSelectorPropagatesSource pins down that the selector hands the
 // packet source to SelectRoute unchanged. The receive-path probe
 // (RouteSelectorLocalStack) and the forwarding path must share one decision

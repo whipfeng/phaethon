@@ -1,7 +1,7 @@
 # MS 域名访问 / 拓扑多链路 / 代理页 P2P 状态（2026-11-27）
 
 **创建时间**: 2026-11-27
-**状态**: 问题 1 未复现（复盘见下）；问题 2/3 代码已进 v108，问题 3 的刷新路径已在 `cc2bea0` 收敛，待下一版验证
+**状态**: 问题 1 未复现（复盘见下）；问题 2/3 代码已进 v108，问题 3 的刷新路径已在 `cc2bea0` 收敛；v114（`5b2f191`）把 P2P 展示收敛为弹层并已在 vm 验证
 **优先级**: 高（影响可用性认知与页面可信度）
 
 三个独立问题，分别跟踪。
@@ -187,9 +187,29 @@ headless 打开 `https://127.0.0.1:39999/proxies` 实测：
 - 单元格正确区分生效态：`AIOPS_TJ`/`YLAIG_TJ` = connected + TCP + `V2`，
   `QG_SS5_UDPLEG` = connected + UDP + `UDP`；无 pageerror。
 
+### 交互收敛（v114 `5b2f191`，2026-11-27 21:3x）
+
+代理表格由 13 列收敛到 11 列，运行时链路信息全部收进可点击弹层：
+
+- 表格删除独立的 V2 / 承载列；P2P 单元格只保留一个入口（兼容类型可点，非兼容类型显示灰色 `—`，无弹层）。
+- 弹层内按“配置态 + 运行时态”分组呈现：P2P 主开关、UDP Direct、V2、UDP Leg、WebSocket 等并列/级联关系一次可见。
+- P2P 主开关关闭时子选项仍可见但置灰，已存值保留不清空（对应约束 2）。
+- UDP Direct 已配置但回退 TCP 时显示琥珀色警示徽标，而非绿色（对应约束 3）。
+- h_tunnel 类型 P2P 强制开启，编辑表单中主开关置灰且不可关闭（对应约束 4）。
+- 新增 `PATCH /api/proxies/{name}/options` 增量接口，仅修改请求体里出现的 `udp/p2p/p2p-udp/v2` 字段，避免整表单回写丢失 `uuid/reality-opts` 等字段；旧的 `/p2p` 独立端点移除。
+- 弹层变更后调用 `refreshP2PCell()` 立即重绘单个单元格，不等下一次版本事件；表格体因版本事件重建时 `refreshP2PPopover()` 重新锚定弹层，不打断用户操作。刷新仍全部走 `VersionNotificationService`，无新增页面级定时器。
+
+vm 验证（`v0.8.3-114-g5b2f191`，watchdog 自升级，current/requested 均 v114、succeeded）：
+
+- `/api/proxies` 返回 `p2p-udp-configured` / `v2-configured` / `carrier` 字段；
+- `/proxies` 页面 200，含 `proxy-table` 与 `p2p-popover` 标记；
+- `PATCH .../options` 幂等成功（`GGDYSV_TJ` 置 `p2p=false`，`v2-configured` 保留为 true）；
+- 不存在的代理返回 404；对 h_tunnel 关闭 P2P 返回 400 并给出原因。
+
 ### 待办
 
 - [x] 统一 P2P 单元格数据源为运行时状态 + 配置态两个维度。
 - [x] 刷新回归 `p2p` 版本事件驱动（无独立轮询）。
+- [x] 表格收敛为 11 列，P2P 配置/运行时状态收进弹层（v114）。
 - [ ] 扩散到其余节点后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
 

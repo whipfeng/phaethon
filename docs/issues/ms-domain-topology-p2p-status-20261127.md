@@ -206,10 +206,25 @@ vm 验证（`v0.8.3-114-g5b2f191`，watchdog 自升级，current/requested 均 v
 - `PATCH .../options` 幂等成功（`GGDYSV_TJ` 置 `p2p=false`，`v2-configured` 保留为 true）；
 - 不存在的代理返回 404；对 h_tunnel 关闭 P2P 返回 400 并给出原因。
 
+### 首屏状态时序修复（v116 `f7a0b54`，2026-11-27 22:0x）
+
+vm 实测发现单元格/弹层在页面加载后约 4 秒内仍显示“连接中”，而 `/api/p2p` 其实已有 `upToDate`：
+
+- 首屏 0.65s 就渲染表格，但第一次 `/api/p2p` 直到 **4.77s** 才发出（由 4.76s 的 `/api/versions` 触发）。
+- 根因：`util/version.go` 的 `Subscribe` 建连时不写任何字节；Go `net/http` 不 flush 响应头，浏览器 `EventSource.onopen` 要等第一个周期性心跳/版本 bump 才触发（心跳间隔 10s），于是版本重放与 `fetchVersions` 被整体推迟，首屏按配置画的 `connecting` 停留数秒。
+- 修复：`Subscribe` 注册后立即向该连接推送一帧当前完整版本向量（`sendHeartbeat`），既 flush 了响应头让 `onopen` 立刻触发，也让客户端即时种下版本向量。仍全部走版本通知机制，无页面定时器。新增单测 `TestVersionNotifier_SubscribePushesSnapshotImmediately`。
+
+vm 复测（`v0.8.3-116-gf7a0b54`）：
+
+- 第一次 `/api/p2p` 从 4.77s 提前到 **0.70s**；表格首次采样（0.82s）即 `AIOPS_TJ/QG_SS5_UDPLEG/YLAIG_TJ` 全部 `connected/upToDate`；
+- 弹层状态正确：`AIOPS_TJ`=已连接/TCP、`QG_SS5_UDPLEG`=已连接/UDP、`YLAIG_TJ`=已连接/TCP、`GGDYSV_TJ`（p2p 关）=已关闭、`QG_HT` 主开关置灰并显示 `WS` 承载、`LAOYU_SSH_TEST`（ssh）无按钮只有 `–`；
+- 可操作：弹层内 `V2` 勾选关闭/恢复各触发一次 `PATCH .../options`（均 200），复选框、单元格 `v2` 徽标与 `v2-configured` 即时联动并成功还原，无 console/pageerror。
+
 ### 待办
 
 - [x] 统一 P2P 单元格数据源为运行时状态 + 配置态两个维度。
 - [x] 刷新回归 `p2p` 版本事件驱动（无独立轮询）。
 - [x] 表格收敛为 11 列，P2P 配置/运行时状态收进弹层（v114）。
+- [x] 首屏状态不等心跳，SSE 建连即推送版本快照（v116）。
 - [ ] 扩散到其余节点后复测代理开关、UDP Direct、V2/WS 勾选后的展示一致性。
 

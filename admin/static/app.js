@@ -997,6 +997,8 @@ function updateProxies(proxiesData, groupsData) {
     const tbody = document.querySelector('#proxy-table tbody');
     if (tbody) {
         tbody.innerHTML = renderProxyRows(proxiesData);
+        // The rebuild replaced every row, so an open popover must re-anchor.
+        if (typeof window.refreshP2PPopover === 'function') window.refreshP2PPopover();
     }
 
     const groupsGrid = document.querySelector('.groups-grid');
@@ -1022,126 +1024,116 @@ function updateProxies(proxiesData, groupsData) {
     }
 }
 
-// renderP2PCell renders the P2P cell from two independent sources: the proxy
-// config (p2p / p2p-udp / v2) and the runtime snapshot from /api/p2p. Keeping
-// the configured chips visible next to the effective transport makes a checked
-// box that did not take effect (e.g. UDP Direct falling back to TCP) obvious.
+// P2P link support is a property of the proxy type, mirroring
+// config.IsP2PCompatibleType. Non-compatible rows show a muted dash instead of
+// a popover that could never take effect.
+function p2pCompatibleType(type) {
+    const t = String(type || '').toLowerCase();
+    return t === 'socks5' || t === 'trojan' || t === 'h_tunnel';
+}
+
+// renderP2PCell renders the clickable P2P cell content. The cell stays compact
+// (state dot + configured chips); live transport/carrier detail lives in the
+// popover so the table does not grow another column. A UDP-leg chip turns
+// amber ("udp→tcp") when the leg was configured but the link settled on TCP.
 function renderP2PCell(proxy, info) {
-    if (!proxy || proxy.p2p !== true) {
-        return '<span class="p2p-status disabled" title="P2P disabled in config"></span>';
+    if (!proxy || !p2pCompatibleType(proxy.type)) {
+        return '<span class="text-muted">–</span>';
     }
+    const on = proxy.p2p === true;
     const status = info ? (info.status || '') : '';
-    const tf = info ? (info.transport || '') : '';
+    const tf = info ? String(info.transport || '').toLowerCase() : '';
     const connected = status === 'upToDate' || status === 'helloed';
+    const udpCfg = proxy['p2p-udp-configured'] === true;
+    const v2Cfg = proxy['v2-configured'] === true || proxy.v2 === true;
+    const udpFallback = connected && udpCfg && tf.indexOf('tcp') === 0;
 
-    const udpCfg = proxy['p2p-udp'] === true;
-    let dot;
-    if (connected) {
-        const title = tf === 'udp' ? 'Connected (UDP leg)'
-            : tf === 'tcp' && udpCfg ? 'Connected (TCP fallback)'
-                : 'Connected (TCP)';
-        dot = `<span class="p2p-status connected" title="${title}"></span>`;
+    let dotClass = 'connecting';
+    let title = 'Connecting...';
+    if (!on) {
+        dotClass = 'disabled';
+        title = 'P2P disabled';
+    } else if (connected) {
+        dotClass = 'connected';
+        title = tf === 'udp' ? 'Connected (UDP leg)' : 'Connected (TCP)';
     } else if (status === 'failed') {
-        const title = info && info.lastError ? 'Connection failed: ' + escapeHtml(info.lastError) : 'Connection failed';
-        dot = `<span class="p2p-status failed" title="${title}"></span>`;
-    } else {
-        dot = '<span class="p2p-status connecting" title="Connecting..."></span>';
-    }
-
-    // GetPeers defaults transport to "tcp" even before a leg exists, so the
-    // transport badge is only meaningful once the peer is up.
-    let badge = '';
-    if (connected) {
-        if (tf === 'udp') {
-            badge = '<span class="p2p-transport udp" title="UDP data leg active">UDP</span>';
-        } else if (tf === 'tcp') {
-            const hint = udpCfg ? 'UDP leg negotiated, fell back to TCP' : 'TCP data leg';
-            badge = `<span class="p2p-transport tcp" title="${hint}">TCP</span>`;
-        } else if (tf) {
-            badge = `<span class="p2p-transport tcp" title="${escapeHtml(tf)} data leg">${escapeHtml(tf.toUpperCase())}</span>`;
-        }
+        dotClass = 'failed';
+        title = info && info.lastError ? 'Connection failed: ' + info.lastError : 'Connection failed';
+    } else if (status === 'disconnected' || status === 'stopped') {
+        dotClass = 'disabled';
+        title = status === 'stopped' ? 'Stopped' : 'Disconnected';
     }
 
     const chips = [];
     if (udpCfg) {
-        const hint = tf === 'udp' ? 'UDP Direct configured and active'
-            : tf ? 'UDP Direct configured, effective transport: ' + tf
-                : 'UDP Direct configured, waiting for leg';
-        chips.push(`<span class="p2p-cfg udp" title="${escapeHtml(hint)}">udp</span>`);
+        if (udpFallback) {
+            chips.push('<span class="p2p-cfg udp fallback" title="UDP Direct configured, fell back to TCP">udp→tcp</span>');
+        } else {
+            const hint = tf === 'udp' ? 'UDP Direct active' : 'UDP Direct configured';
+            chips.push(`<span class="p2p-cfg udp" title="${escapeHtml(hint)}">udp</span>`);
+        }
     }
-    if (proxy.v2 === true) {
-        chips.push('<span class="p2p-cfg v2" title="V2/WS configured">v2</span>');
+    if (v2Cfg) {
+        chips.push('<span class="p2p-cfg v2" title="V2 data path configured">v2</span>');
     }
     const cfgLine = chips.length ? `<span class="p2p-cfg-line">${chips.join('')}</span>` : '';
-    return `<span class="p2p-cell-main">${dot}${badge}</span>${cfgLine}`;
+    const nameAttr = escapeHtml(proxy.name);
+    return `<button type="button" class="p2p-cell-btn" onclick="openP2PPopover('${nameAttr}', this)" title="${escapeHtml(title)}">` +
+        `<span class="p2p-cell-main"><span class="p2p-status ${dotClass}"></span></span>${cfgLine}</button>`;
 }
 window.renderP2PCell = renderP2PCell;
 
 function renderProxyRows(proxiesData) {
+    // Types whose proxy-level UDP forwarding can be toggled; mirrors the
+    // template condition so a server render and a version-bump rebuild agree.
+    const udpToggled = (t) => ['socks5', 'trojan', 'h_tunnel', 'hysteria2', 'vless'].includes(String(t || '').toLowerCase());
+    const t = (k, fallback) => (typeof i18n !== 'undefined' ? (i18n.t(k) || fallback) : fallback);
     return proxiesData.map(p => {
         if (!p || !p.name) return '';
         const enabled = p.enabled === true;
         const udp = p.udp === true;
-        const p2p = p.p2p === true;
-        const v2 = p.v2 === true;
+        const nameAttr = escapeHtml(p.name);
         const rowClass = enabled ? '' : 'row-disabled';
         const pwdCell = p.password
-            ? `<span class="password-container" data-proxy="${escapeHtml(p.name)}">
-                <span class="password-text" id="pwd-${escapeHtml(p.name)}">••••••••</span>
-                <span class="password-actual" id="pwd-actual-${escapeHtml(p.name)}" style="display:none;">${escapeHtml(p.password)}</span>
-                <button onclick="togglePassword('${escapeHtml(p.name)}')" class="btn-icon" title="Show/Hide">
-                    <span class="eye-icon" id="eye-${escapeHtml(p.name)}">👁️</span>
+            ? `<span class="password-container" data-proxy="${nameAttr}">
+                <span class="password-text" id="pwd-${nameAttr}">••••••••</span>
+                <span class="password-actual" id="pwd-actual-${nameAttr}" style="display:none;">${escapeHtml(p.password)}</span>
+                <button onclick="togglePassword('${nameAttr}')" class="btn-icon" title="Show/Hide">
+                    <span class="eye-icon" id="eye-${nameAttr}">👁️</span>
                 </button>
                </span>`
             : `<span class="text-muted">-</span>`;
+        const udpCell = udpToggled(p.type)
+            ? `<td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('${nameAttr}', ${udp})">${udp ? '✅' : '❌'}</td>`
+            : `<td data-label="UDP" class="text-muted">–</td>`;
         // Use current P2P status from global map to avoid flickering
         const p2pInfo = (typeof window._p2pStatusMap !== 'undefined') ? window._p2pStatusMap[p.name] : null;
         const p2pCell = renderP2PCell(p, p2pInfo);
         const viaCell = p.via ? escapeHtml(p.via) : '<span class="text-muted">-</span>';
-        return `<tr data-name="${escapeHtml(p.name)}" class="${rowClass}">
-            <td data-label="Name"><strong>${escapeHtml(p.name)}</strong></td>
+        return `<tr data-name="${nameAttr}" class="${rowClass}">
+            <td data-label="Name"><strong>${nameAttr}</strong></td>
             <td data-label="Type"><code class="type-badge type-${escapeHtml((p.type || '').toLowerCase())}">${escapeHtml(p.type)}</code></td>
             <td data-label="Server">${escapeHtml(p.server || '')}</td>
             <td data-label="Port">${p.port || ''}</td>
             <td data-label="Password">${pwdCell}</td>
             <td data-label="SNI">${escapeHtml(p.sni || '')}</td>
-            <td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('${escapeHtml(p.name)}', ${udp})">${udp ? '✅' : '❌'}</td>
-            <td data-label="P2P" style="cursor:pointer;" onclick="toggleP2P('${escapeHtml(p.name)}', ${p2p})" id="p2p-status-${escapeHtml(p.name)}">${p2pCell}</td>
-            <td data-label="V2" style="cursor:pointer;" onclick="toggleV2('${escapeHtml(p.name)}', ${v2})" id="v2-status-${escapeHtml(p.name)}">${v2 ? '✅' : '❌'}</td>
+            ${udpCell}
+            <td data-label="P2P" class="p2p-cell" id="p2p-cell-${nameAttr}">${p2pCell}</td>
             <td data-label="Via">${viaCell}</td>
             <td data-label="Enabled">
-                <label class="switch" title="${enabled ? (typeof i18n !== 'undefined' ? i18n.t('common.enabled') : 'Enabled') : (typeof i18n !== 'undefined' ? i18n.t('common.disabled') : 'Disabled')}">
-                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleProxy('${escapeHtml(p.name)}', this.checked)">
+                <label class="switch" title="${enabled ? t('common.enabled', 'Enabled') : t('common.disabled', 'Disabled')}">
+                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleProxy('${nameAttr}', this.checked)">
                     <span class="slider"></span>
                 </label>
             </td>
             <td data-label="Actions">
-                <button onclick="editProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnEdit') : null) || 'Edit'}</button>
-                <button onclick="testProxy('${escapeHtml(p.name)}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnTest') : null) || 'Test'}</button>
-                <button onclick="copyProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
-                <button onclick="deleteProxy('${escapeHtml(p.name)}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">${(typeof i18n !== 'undefined' ? i18n.t('proxy.btnDelete') : null) || 'Delete'}</button>
+                <button onclick="editProxy('${nameAttr}')" class="btn btn-sm btn-outline" data-i18n="proxy.btnEdit">${t('proxy.btnEdit', 'Edit')}</button>
+                <button onclick="testProxy('${nameAttr}', this)" class="btn btn-sm btn-outline" data-i18n="proxy.btnTest">${t('proxy.btnTest', 'Test')}</button>
+                <button onclick="copyProxy('${nameAttr}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
+                <button onclick="deleteProxy('${nameAttr}')" class="btn btn-sm btn-danger" data-i18n="proxy.btnDelete">${t('proxy.btnDelete', 'Delete')}</button>
             </td>
         </tr>`;
     }).join('');
-}
-
-async function toggleP2P(name, currentValue) {
-    const newValue = !currentValue;
-    try {
-        const resp = await fetch(`/api/proxies/${encodeURIComponent(name)}/p2p`, {
-            method: 'PATCH',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({p2p: newValue})
-        });
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            alert(err.error || `Toggle P2P failed: ${resp.status}`);
-            return;
-        }
-        if (typeof loadProxies === 'function') loadProxies();
-    } catch (e) {
-        alert('Toggle P2P error: ' + e.message);
-    }
 }
 
 async function toggleProxy(name, enabled) {

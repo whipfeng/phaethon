@@ -116,6 +116,13 @@ func (p *Proxy) IsP2PUDP() bool {
 	return p.P2PUDP != nil && *p.P2PUDP
 }
 
+// IsP2PUDPSet reports the stored UDP-leg option regardless of whether P2P is
+// currently enabled. The console keeps sub-options visible (greyed) while the
+// parent P2P switch is off, so it must not use the effective IsP2PUDP().
+func (p *Proxy) IsP2PUDPSet() bool {
+	return p != nil && p.P2PUDP != nil && *p.P2PUDP
+}
+
 // IsV2 reports whether the v2 data path is enabled for this proxy.
 // V2 requires P2P to also be enabled. Defaults to false.
 func (p *Proxy) IsV2() bool {
@@ -283,8 +290,8 @@ type ProxyGroup struct {
 	SubscriptionFilter string `yaml:"subscription-filter,omitempty" json:"subscription-filter,omitempty"`
 	ActiveMember       string `yaml:"active-member,omitempty" json:"active-member,omitempty"`
 
-	idx   int64          // for load-balance
-	selMu sync.RWMutex   `yaml:"-" json:"-"` // protects on-demand member computation
+	idx   int64        // for load-balance
+	selMu sync.RWMutex `yaml:"-" json:"-"` // protects on-demand member computation
 
 	ResolveProxy        func(name string) *Proxy        `yaml:"-" json:"-"`
 	ResolveGroup        func(name string) *ProxyGroup   `yaml:"-" json:"-"`
@@ -1472,8 +1479,8 @@ type MeshConfig struct {
 	DomainSuffixes       []string                 `yaml:"domain-suffixes,omitempty" json:"domain-suffixes,omitempty"`               // Advertised domain suffixes (dynamic, via gossip)
 	Advertise            []string                 `yaml:"advertise,omitempty" json:"advertise,omitempty"`                           // Advertised IP CIDRs (dynamic, via gossip)
 	AdvertiseIDs         []uint64                 `yaml:"advertise-ids,omitempty" json:"advertise-ids,omitempty"`                   // Stable admin IDs for Advertise (local only)
-	DomainSuffixIDs      []uint64                 `yaml:"domain-suffix-ids,omitempty" json:"domain-suffix-ids,omitempty"`             // Stable admin IDs for DomainSuffixes (local only)
-	NextMeshEntryID      uint64                   `yaml:"next-mesh-entry-id,omitempty" json:"next-mesh-entry-id,omitempty"`           // Monotonic ID allocator
+	DomainSuffixIDs      []uint64                 `yaml:"domain-suffix-ids,omitempty" json:"domain-suffix-ids,omitempty"`           // Stable admin IDs for DomainSuffixes (local only)
+	NextMeshEntryID      uint64                   `yaml:"next-mesh-entry-id,omitempty" json:"next-mesh-entry-id,omitempty"`         // Monotonic ID allocator
 	StaticRoutes         []MeshStaticRoute        `yaml:"static-routes,omitempty" json:"static-routes,omitempty"`                   // Static IPIP routes by IP CIDR
 	StaticDomainSuffixes []MeshStaticDomainSuffix `yaml:"static-domain-suffixes,omitempty" json:"static-domain-suffixes,omitempty"` // Static IPIP routes by domain suffix
 	TCPKeepalive         *MeshTCPKeepalive        `yaml:"tcp-keepalive,omitempty" json:"tcp-keepalive,omitempty"`                   // TCP keepalive settings

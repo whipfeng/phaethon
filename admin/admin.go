@@ -731,6 +731,7 @@ func templateFuncs() template.FuncMap {
 		"ruleEnabled": func(rule string) bool {
 			return !strings.HasPrefix(strings.TrimSpace(rule), "//")
 		},
+		"p2pCompatible": config.IsP2PCompatibleType,
 		"host": func(addr string) string {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
@@ -1761,19 +1762,14 @@ func (s *AdminServer) handleProxiesPage(w http.ResponseWriter, r *http.Request) 
 
 	// Build proxy summaries for JavaScript (includes IsP2P/IsUDP computed values)
 	proxySummaries := make([]map[string]interface{}, len(proxies))
-	carriers := make(map[string]string, len(proxies))
 	for i, p := range proxies {
 		proxySummaries[i] = proxySummary(p)
-		if label := dialer.HTCarrierLabel(p); label != "" {
-			carriers[p.Name] = label
-		}
 	}
 
 	data := map[string]interface{}{
 		"Title":          "Proxies",
 		"Proxies":        proxies,
 		"ProxySummaries": proxySummaries,
-		"Carriers":       carriers,
 		"Groups":         displayGroups,
 		"GroupStats":     groupStats,
 		"Subscriptions":  subs,
@@ -2679,9 +2675,11 @@ func (s *AdminServer) findGroupReferences(name string) ([]proxyReference, error)
 
 func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPatch {
-		// Check if this is a P2P toggle request
-		if strings.HasSuffix(r.URL.Path, "/p2p") {
-			s.apiToggleP2P(w, r)
+		// Link options (udp / p2p / p2p-udp / v2) patch only the fields sent,
+		// so a console toggle never rewrites the whole proxy (which would drop
+		// fields the summary does not carry, e.g. uuid or reality-opts).
+		if strings.HasSuffix(r.URL.Path, "/options") {
+			s.apiUpdateProxyOptions(w, r)
 			return
 		}
 		s.apiToggleProxy(w, r)
@@ -2818,15 +2816,21 @@ func (s *AdminServer) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, proxySummary(p))
 }
 
-func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
+// apiUpdateProxyOptions patches individual proxy options in place. Only the
+// fields present in the request body are changed; everything else is left as
+// stored. This backs the proxy table's UDP switch and the P2P popover.
+func (s *AdminServer) apiUpdateProxyOptions(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/proxies/")
-	name = strings.TrimSuffix(name, "/p2p")
+	name = strings.TrimSuffix(name, "/options")
 	if name == "" {
 		httpError(w, "proxy name required", http.StatusBadRequest)
 		return
 	}
 	var body struct {
-		P2P bool `json:"p2p"`
+		UDP    *bool `json:"udp"`
+		P2P    *bool `json:"p2p"`
+		P2PUDP *bool `json:"p2p-udp"`
+		V2     *bool `json:"v2"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpError(w, "decode fail", http.StatusBadRequest)
@@ -2840,16 +2844,29 @@ func (s *AdminServer) apiToggleP2P(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "proxy not found", http.StatusNotFound)
 		return
 	}
-	if strings.EqualFold(p.Type, "h_tunnel") && !body.P2P {
+	if body.P2P != nil && !*body.P2P && strings.EqualFold(p.Type, "h_tunnel") {
 		httpError(w, "h_tunnel requires P2P enabled (mesh downlink depends on it)", http.StatusBadRequest)
 		return
 	}
-	p.P2P = &body.P2P
+	if body.UDP != nil {
+		p.UDP = body.UDP
+	}
+	if body.P2P != nil {
+		p.P2P = body.P2P
+	}
+	if body.P2PUDP != nil {
+		p.P2PUDP = body.P2PUDP
+	}
+	if body.V2 != nil {
+		p.V2 = *body.V2
+	}
 	if err := db.PutProxy(p); err != nil {
 		httpError(w, "save fail: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[body.P2P], name)
+	if body.P2P != nil {
+		util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[*body.P2P], name)
+	}
 	jsonResponse(w, proxySummary(p))
 }
 
@@ -6265,16 +6282,21 @@ func proxySummary(p *config.Proxy) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{
-		"name":                   p.Name,
-		"enabled":                p.IsEnabled(),
-		"type":                   p.Type,
-		"server":                 p.Server,
-		"port":                   p.Port,
-		"sni":                    p.Sni,
-		"udp":                    p.IsUDP(),
-		"p2p":                    p.IsP2P(),
-		"p2p-udp":                p.IsP2PUDP(),
+		"name":    p.Name,
+		"enabled": p.IsEnabled(),
+		"type":    p.Type,
+		"server":  p.Server,
+		"port":    p.Port,
+		"sni":     p.Sni,
+		"udp":     p.IsUDP(),
+		"p2p":     p.IsP2P(),
+		"p2p-udp": p.IsP2PUDP(),
+		// Configured (raw) values: the console keeps sub-options visible while
+		// the parent P2P switch is off, so effective values are not enough.
+		"p2p-udp-configured":     p.IsP2PUDPSet(),
+		"v2-configured":          p.V2,
 		"v2":                     p.IsV2(),
+		"carrier":                dialer.HTCarrierLabel(p),
 		"via":                    p.ViaProxy,
 		"skip-cert-verify":       p.SkipCertVerify,
 		"password":               p.Password,

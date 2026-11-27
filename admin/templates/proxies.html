@@ -1223,7 +1223,6 @@ async function doToggleP2P(name, enabled, cell) {
             const info = window._p2pStatusMap ? window._p2pStatusMap[name] : null;
             cell.innerHTML = window.renderP2PCell(proxy, info);
         }
-        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`P2P ${enabled ? 'enabled' : 'disabled'} for ${name}`, enabled ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1249,7 +1248,6 @@ async function toggleV2(name, currentValue) {
         // Table shows effective state (IsV2 = V2 && P2P), update accordingly
         if (v2Cell) v2Cell.innerHTML = (newValue && proxy.p2p) ? '✅' : '❌';
         proxy.v2 = newValue;
-        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`V2 ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1280,7 +1278,6 @@ async function toggleUDP(name, currentValue) {
         }
         // Update local data
         proxy.udp = newValue;
-        if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
         showToast(`UDP ${newValue ? 'enabled' : 'disabled'} for ${name}`, newValue ? 'success' : 'warning');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1970,18 +1967,9 @@ function escapeHtml(s) {
         }
     };
 
-    // Initial fetch on page load
+    // First snapshot for the initial server-rendered rows. Every later update
+    // arrives through the 'p2p' version topic.
     window.fetchP2PStatus();
-
-    // /api/p2p only pushes events, so a missed SSE event would leave the cell
-    // stale forever. Poll at a low rate while the tab is visible, and resync
-    // immediately when it becomes visible again.
-    setInterval(() => {
-        if (document.visibilityState === 'visible') window.fetchP2PStatus();
-    }, 15000);
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') window.fetchP2PStatus();
-    });
 })();
 
 // Subscriptions toggle

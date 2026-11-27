@@ -580,10 +580,11 @@ const VersionNotificationService = (function () {
             connected = true;
             lastHeartbeat = Date.now();
             // Don't stop polling here - let the heartbeat handler do it
-            // after receiving 2 consecutive heartbeats to ensure connection is stable
-            // SSE only pushes version bumps; any p2p status change that happened
-            // while we were disconnected would be lost, so resync on (re)connect.
-            if (typeof window.fetchP2PStatus === 'function') window.fetchP2PStatus();
+            // after receiving 2 consecutive heartbeats to ensure connection is stable.
+            // Version bumps missed while disconnected are replayed by pulling the
+            // vector and dispatching only the topics whose version moved; no page
+            // specific refresh belongs in the transport layer.
+            fetchVersions();
         };
         sseSource.onerror = () => {
             connected = false;
@@ -987,10 +988,6 @@ async function fetchProxies(expectedVersion) {
         return;
     }
     updateProxies(proxiesData, groupsData);
-    // Refresh P2P status after updating proxy list
-    if (typeof window.fetchP2PStatus === 'function') {
-        window.fetchP2PStatus();
-    }
 }
 
 function updateProxies(proxiesData, groupsData) {

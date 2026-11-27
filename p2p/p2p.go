@@ -1958,6 +1958,9 @@ func (m *P2PManager) StopPeerByProxyName(proxyName string) {
 	if peer != nil {
 		util.LogModuleInfo("p2p", "[P2P] stopping peer for proxy %s (peer.ID=%s)", proxyName, peer.ID)
 		stopPeer(peer)
+		// The peer is gone from the map, so the console must learn about it
+		// through the same runtime version topic as every other transition.
+		m.notifyStatusChange()
 	}
 }
 
@@ -1980,6 +1983,7 @@ func (m *P2PManager) StopAllPeers() {
 
 	// Wait for all sessions to complete
 	m.sessionsWG.Wait()
+	m.notifyStatusChange()
 	util.LogModuleInfo("p2p", "[P2P] all peers stopped")
 }
 
@@ -2009,6 +2013,9 @@ func (m *P2PManager) StopPeerByNodeSeq(nodeID string, seq uint16) {
 	for _, peer := range peers {
 		util.LogModuleInfo("p2p", "[P2P] stopping peer %s (node=%s seq=%d) due to connectivity failure", peer.ID, nodeID, seq)
 		stopPeer(peer)
+	}
+	if len(peers) > 0 {
+		m.notifyStatusChange()
 	}
 }
 

@@ -14,6 +14,7 @@
 | 0.1.2 | 2026-11-25 | 取消“用户亲自发版”节点例外：全机群内建 SSH + pkg 自升级统一扩散到 v0.8.3-64 | layer4 |
 | 0.1.3 | 2026-11-25 | 新增 §5.6：pre-1809 Windows 节点必须随部署目录放 winpty 资产（deskzq 实例） | layer4 |
 | 0.1.4 | 2026-11-25 | §5.6 更新为 pkg 自动交付资产（watchdog 落盘）+ 部署介质兜底与两步上线顺序 | layer4 |
+| 0.1.5 | 2026-11-28 | 新增 §5.1.1 批量快速扩散（mesh 扇出 + 已持有版本跳过），记录 v123 全机群升级 | layer4 |
 
 > **注意：本文档将提交到 Git 仓库，禁止存放任何敏感信息。**
 > 包括但不限于：IP 地址、SSH 端口/凭据、密码、Token、API Key、内网域名等。
@@ -131,6 +132,34 @@ OpenRC supervise-daemon 管理，进程挂掉自动拉起，开机自启。
 状态查询：`GET /api/packages/pin` 返回
 `{current, requested, status, lastError}`；
 `DELETE` 取消尚未开始的请求（`applying` 阶段返回 409）。
+
+### 5.1.1 批量快速扩散（多节点）
+
+逐节点上传在节点变多后是 O(n) 次全量传输，主要耗时在重复上传而不是激活。
+利用 mesh 自带的包分发可以降为 O(平台数)：
+
+1. 每个平台的 `.pkg` **只上传一次**，挑一台**不同平台**的载板节点
+   （例如 Linux 包传到 vm）执行 activate；
+2. 该节点 `localUpgrade=false`，只触发 `distributePackage()`，
+   **并行**把包推给所有在线 mesh 对端；
+3. 各目标节点先查 `/api/packages/pin` 与包列表，按
+   `platform/arch@version` 判定已持有就跳过（`peerHasPackage`），
+   避免分发风暴里互相重复传输（此优化在 v123 起生效）；
+4. 对每个目标节点激活本地已收到的同版本包（无需再上传）；
+5. 扇出未覆盖到的节点（离线刚回来、平台不匹配）才回退为直接上传。
+
+注意：
+
+- 载板节点必须与包平台不同，否则它自己也会被升级（会短暂断开该节点）；
+- 同一版本重复激活是幂等的（watchdog 发现已在运行直接 succeeded）；
+- 根分区偏小的节点（如 ylnas）不需要上传：包经扇出已落到
+  `data/packages/`，直接 activate 即可；staged 文件写在 exe 同目录，
+  真正需要空间的是 exe 所在卷而不是根分区。
+
+2026-11-28 v123（`v0.8.3-123-gab8aaed`）全机群结果：qg / jf / gg / ms9 / ms10 /
+ylaio / ylaig / ylnas / vm / qgw / deskll / mb 共 12 台全部 `succeeded`，
+`current=requested=v0.8.3-123-gab8aaed`；ylnas 为扇出后直接激活，
+qgw 因平台为 `windows7` 需单独用 windows7 包。deskw / deskzq 离线未覆盖。
 
 ### 5.2 引导部署（仅旧版本节点需要）
 

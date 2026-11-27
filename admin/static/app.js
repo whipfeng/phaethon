@@ -672,9 +672,10 @@ function registerDefaultVersionHandlers() {
     onBusinessVersion('rules', () => scheduleTopicFetch('rules'), 'rules');
     onBusinessVersion('subscriptions', () => scheduleTopicFetch('subscriptions'), 'subscriptions');
     onBusinessVersion('p2p', () => {
-        // Only fetch P2P status if on proxies page
-        if (typeof window.fetchP2PStatus === 'function') {
-            window.fetchP2PStatus();
+        // P2P runtime is part of each /api/proxies row; refresh that list so
+        // the proxies page re-renders from one snapshot. Other pages ignore it.
+        if (document.getElementById('proxy-table') && typeof window.fetchProxies === 'function') {
+            window.fetchProxies();
         }
     }, 'p2p');
     onBusinessVersion('logs', () => {
@@ -1036,10 +1037,13 @@ function p2pCompatibleType(type) {
 // (state dot + configured chips); live transport/carrier detail lives in the
 // popover so the table does not grow another column. A UDP-leg chip turns
 // amber ("udp→tcp") when the leg was configured but the link settled on TCP.
-function renderP2PCell(proxy, info) {
+// Runtime comes from the same /api/proxies row (proxy.runtime), not a separate
+// P2P fetch, so a row is always rendered from one consistent snapshot.
+function renderP2PCell(proxy) {
     if (!proxy || !p2pCompatibleType(proxy.type)) {
         return '<span class="text-muted">–</span>';
     }
+    const info = proxy.runtime || null;
     const on = proxy.p2p === true;
     const status = info ? (info.status || '') : '';
     const tf = info ? String(info.transport || '').toLowerCase() : '';
@@ -1106,9 +1110,7 @@ function renderProxyRows(proxiesData) {
         const udpCell = udpToggled(p.type)
             ? `<td data-label="UDP" style="cursor:pointer;" onclick="toggleUDP('${nameAttr}', ${udp})">${udp ? '✅' : '❌'}</td>`
             : `<td data-label="UDP" class="text-muted">–</td>`;
-        // Use current P2P status from global map to avoid flickering
-        const p2pInfo = (typeof window._p2pStatusMap !== 'undefined') ? window._p2pStatusMap[p.name] : null;
-        const p2pCell = renderP2PCell(p, p2pInfo);
+        const p2pCell = renderP2PCell(p);
         const viaCell = p.via ? escapeHtml(p.via) : '<span class="text-muted">-</span>';
         return `<tr data-name="${nameAttr}" class="${rowClass}">
             <td data-label="Name"><strong>${nameAttr}</strong></td>

@@ -2342,6 +2342,12 @@ func wireAdminCallbacks(resources *activeResources) {
 			util.LogModuleInfo("main", "[P2P] stopping peer for proxy %s", name)
 			p2p.GlobalP2PManager.StopPeerByProxyName(name)
 		case shouldRun && exists:
+			// A save that did not change anything the peer reads must not tear
+			// the session down: a restart re-negotiates the UDP leg from scratch
+			// and temporarily falls back to TCP.
+			if running := p2p.GlobalP2PManager.GetPeerProxy(name); running != nil && running.SameP2PSession(proxy) {
+				return
+			}
 			util.LogModuleInfo("main", "[P2P] restarting peer for proxy %s due to config save", name)
 			p2p.GlobalP2PManager.RestartPeer(proxy)
 		}

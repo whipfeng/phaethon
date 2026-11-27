@@ -1339,7 +1339,7 @@ function renderP2PPopover(anchor) {
     const isHTunnel = (proxy.type || '').toLowerCase() === 'h_tunnel';
     const udpLeg = proxy['p2p-udp-configured'] === true;
     const v2 = proxy['v2-configured'] === true || proxy.v2 === true;
-    const info = (window._p2pStatusMap && window._p2pStatusMap[name]) || null;
+    const info = proxy.runtime || null;
     const subDisabled = p2pOn ? '' : ' disabled';
 
     const tf = info && info.transport ? info.transport : '';
@@ -1429,8 +1429,7 @@ function refreshP2PCell(name) {
     const cell = document.getElementById('p2p-cell-' + name);
     if (!cell) return;
     const proxy = proxyByName(name);
-    const info = (window._p2pStatusMap && window._p2pStatusMap[name]) || null;
-    cell.innerHTML = window.renderP2PCell(proxy, info);
+    cell.innerHTML = window.renderP2PCell(proxy);
 }
 
 // Called after the table body is rebuilt (proxies version bump) and after a
@@ -2133,66 +2132,9 @@ function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ===== P2P Status Updates =====
-(function() {
-    // Store P2P status globally so renderProxyRows can use it
-    window._p2pStatusMap = {};
-    
-    function updateP2PStatus(peers) {
-        // Build a map of proxy name -> {status, lastError}
-        const peerMap = {};
-        if (peers && Array.isArray(peers)) {
-            for (const peer of peers) {
-                if (peer.proxyName) {
-                    peerMap[peer.proxyName] = {
-                        status: peer.status || 'unknown',
-                        lastError: peer.lastError || '',
-                        transport: peer.transport || ''
-                    };
-                }
-            }
-        }
-        
-        // Store globally for renderProxyRows
-        window._p2pStatusMap = peerMap;
-
-        // Update each P2P cell in the table
-        document.querySelectorAll('#proxy-table tr[data-name]').forEach(row => {
-            const proxyName = row.getAttribute('data-name');
-            const p2pCell = row.querySelector('td[data-label="P2P"]');
-            if (!p2pCell) return;
-
-            const proxy = proxies.find(p => p.name === proxyName);
-            p2pCell.innerHTML = window.renderP2PCell(proxy, peerMap[proxyName] || null);
-        });
-
-        // Keep an open popover in sync with the live link state.
-        if (typeof window.refreshP2PPopover === 'function') window.refreshP2PPopover();
-    }
-
-    // Expose fetchP2PStatus globally for version handler
-    let fetching = false;
-    window.fetchP2PStatus = async function() {
-        if (fetching) return;
-        fetching = true;
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-            const res = await fetch('./api/p2p', { signal: controller.signal, cache: 'no-store' });
-            clearTimeout(timeoutId);
-            if (!res.ok) return;
-            const data = await res.json();
-            updateP2PStatus(data.peers || []);
-        } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.warn('Failed to fetch P2P status:', err);
-            }
-        } finally {
-            fetching = false;
-        }
-    };
-
-})();
+// P2P runtime ships inside each /api/proxies row (proxy.runtime) and is
+// refreshed by the 'p2p' version topic re-fetching that list, so there is no
+// separate status map or /api/p2p fetch to keep in sync here.
 
 // Subscriptions toggle
 function toggleSubscriptions() {

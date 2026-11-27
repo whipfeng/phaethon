@@ -2693,8 +2693,9 @@ func (s *AdminServer) apiProxies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		summaries := make([]map[string]interface{}, 0, len(proxies))
+		rt := p2pRuntimeByProxy()
 		for _, p := range proxies {
-			summaries = append(summaries, proxySummary(p))
+			summaries = append(summaries, proxySummaryWithRuntime(p, rt))
 		}
 		jsonResponse(w, summaries)
 
@@ -2867,7 +2868,7 @@ func (s *AdminServer) apiUpdateProxyOptions(w http.ResponseWriter, r *http.Reque
 	if body.P2P != nil {
 		util.LogModuleInfo("admin", "P2P %s for proxy %s", map[bool]string{true: "enabled", false: "disabled"}[*body.P2P], name)
 	}
-	jsonResponse(w, proxySummary(p))
+	jsonResponse(w, proxySummaryWithRuntime(p, p2pRuntimeByProxy()))
 }
 
 // validateResolver checks if a resolver contains forbidden patterns.
@@ -6274,6 +6275,46 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 func jsonResponse(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(v)
+}
+
+// p2pRuntimeByProxy returns the live P2P snapshot keyed by proxy name. The
+// proxies list carries configuration and runtime in one response, so the
+// console never stitches two independently fetched views together.
+func p2pRuntimeByProxy() map[string]map[string]interface{} {
+	out := make(map[string]map[string]interface{})
+	if p2p.GlobalP2PManager == nil {
+		return out
+	}
+	peers := p2p.GlobalP2PManager.GetPeers()
+	for i := range peers {
+		peer := &peers[i]
+		if peer.ProxyName == "" {
+			continue
+		}
+		out[peer.ProxyName] = map[string]interface{}{
+			"status":    peer.Status,
+			"lastError": peer.LastError,
+			"transport": peer.Transport,
+			"legPhase":  peer.LegPhase,
+			"nodeId":    peer.NodeID,
+		}
+	}
+	return out
+}
+
+// proxySummaryWithRuntime attaches the live P2P snapshot (nil when no peer is
+// running for that proxy) to a proxy summary.
+func proxySummaryWithRuntime(p *config.Proxy, rt map[string]map[string]interface{}) map[string]interface{} {
+	m := proxySummary(p)
+	if m == nil {
+		return nil
+	}
+	if r, ok := rt[p.Name]; ok {
+		m["runtime"] = r
+	} else {
+		m["runtime"] = nil
+	}
+	return m
 }
 
 // proxySummary returns a safe-to-serialize summary of a Proxy (no circular Next refs).

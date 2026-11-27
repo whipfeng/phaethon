@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -85,7 +86,9 @@ func IsP2PCompatibleType(typ string) bool {
 
 // IsP2P reports whether P2P is enabled for this proxy.
 // Defaults to true for compatible types (socks5, trojan, h_tunnel) if not explicitly set.
-// h_tunnel can disable P2P to fall back to traditional BIND mode (no mesh downlink).
+// h_tunnel always rides the mesh downlink, so it cannot be disabled even if an
+// older record stored p2p=false (the console and the update API both reject
+// turning it off; this keeps legacy rows usable).
 func (p *Proxy) IsP2P() bool {
 	if p == nil {
 		return false
@@ -93,10 +96,28 @@ func (p *Proxy) IsP2P() bool {
 	if !IsP2PCompatibleType(p.Type) {
 		return false
 	}
+	if strings.EqualFold(p.Type, "h_tunnel") {
+		return true
+	}
 	if p.P2P != nil {
 		return *p.P2P
 	}
 	return true
+}
+
+// SameP2PSession reports whether two versions of the same proxy would start an
+// identical P2P carrier. Runtime-only fields (resolved Next, rate limiters) are
+// ignored; every persisted field that a running peer may read is compared, so a
+// config save that changed nothing does not tear the session down.
+func (p *Proxy) SameP2PSession(other *Proxy) bool {
+	if p == nil || other == nil {
+		return p == other
+	}
+	a, b := *p, *other
+	a.Next, b.Next = nil, nil
+	a.UpRateLimiter, b.UpRateLimiter = nil, nil
+	a.DownRateLimiter, b.DownRateLimiter = nil, nil
+	return reflect.DeepEqual(a, b)
 }
 
 // IsP2PUDP reports whether the optional UDP data leg is enabled for this proxy.

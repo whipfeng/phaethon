@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -452,7 +453,7 @@ func (s *AdminServer) apiPackagePublish(w http.ResponseWriter, r *http.Request) 
 	// watchdog stops this process within seconds, which would otherwise abort
 	// in-flight peer uploads.
 	if pkgData, err := os.ReadFile(filepath.Join(packagesDir, id+".pkg")); err == nil {
-		s.distributePackage(pkgData, 60*time.Second)
+		s.distributePackage(pkgData, info, 60*time.Second)
 		// Run retention synchronously before writing the request. Async
 		// retention used to be cut off by the self-upgrade, and the activated
 		// (possibly older rollback) version must be explicitly protected.
@@ -744,7 +745,10 @@ func (s *AdminServer) saveExternalPackage(pkgData []byte, contents *signing.PkgC
 // distributePackage sends a package to all connected mesh peers. When wait > 0
 // it blocks until every upload finishes or the timeout expires, which lets an
 // activation finish distribution before the watchdog restarts this process.
-func (s *AdminServer) distributePackage(pkgData []byte, wait time.Duration) {
+// Peers that already hold this platform/arch/version are skipped: the receiver
+// only deduplicates after reading the whole body, so without this check a
+// rollout where every node activates its own copy would push N² copies.
+func (s *AdminServer) distributePackage(pkgData []byte, info *db.PackageMeta, wait time.Duration) {
 	if s.peerLister == nil {
 		util.LogModuleInfo("admin", "distribute: peerLister is nil")
 		return
@@ -762,11 +766,19 @@ func (s *AdminServer) distributePackage(pkgData []byte, wait time.Duration) {
 
 	util.LogModuleInfo("admin", "distributing package to %d peers", len(peers))
 
+	key := ""
+	if info != nil {
+		key = pkgKey(info)
+	}
 	var wg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(nodeID string) {
 			defer wg.Done()
+			if s.peerHasPackage(nodeID, key) {
+				util.LogModuleInfo("admin", "distribute: %s already has %s, skipped", nodeID, key)
+				return
+			}
 			domain := mesh.NodeDomain(nodeID)
 			url := fmt.Sprintf("https://%s/api/packages/receive", domain)
 			resp, err := s.meshHTTPClient.Post(url, "application/octet-stream", io.NopCloser(io.NewSectionReader(newBytesReaderAt(pkgData), 0, int64(len(pkgData)))))
@@ -824,6 +836,42 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
 // local filenames and differ across nodes, so dedup must never compare by ID.
 func pkgKey(pkg *db.PackageMeta) string {
 	return pkg.Platform + "/" + pkg.Arch + "@" + pkg.Version
+}
+
+// peerHasPackage reports whether a mesh peer already stores platform/arch@version.
+// Transport errors mean "unknown" and the caller uploads anyway; the receiver
+// deduplicates by key, so a redundant transfer is wasteful but correct.
+func (s *AdminServer) peerHasPackage(nodeID, key string) bool {
+	if key == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("https://%s/api/packages", mesh.NodeDomain(nodeID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := s.meshHTTPClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var result struct {
+		Packages []*db.PackageMeta `json:"packages"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return false
+	}
+	for _, p := range result.Packages {
+		if pkgKey(p) == key {
+			return true
+		}
+	}
+	return false
 }
 
 // SyncFromPeer syncs packages from a specific mesh peer (called when peer connects).

@@ -1300,17 +1300,10 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 4. Try token-based auth (for API/programmatic access)
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			token = r.Header.Get("X-Admin-Token")
-		}
-		if token == "" {
-			if c, err := r.Cookie("admin_token"); err == nil {
-				token = c.Value
-			}
-		}
-		if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.config.Token)) == 1 {
+		// 4. Try API token. Header-only by design: query-string tokens leak into
+		// access logs, browser history and Referer headers. Accepted forms are
+		// X-Admin-Token and Authorization: Bearer <token>.
+		if s.verifyAPIToken(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1328,6 +1321,48 @@ func (s *AdminServer) authMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Location", "./login")
 		w.WriteHeader(http.StatusFound)
 	})
+}
+
+// adminTokenFromHeader extracts an API token from request headers only.
+// Query-string and cookie transport were removed so tokens cannot leak through
+// access logs, browser history or Referer headers.
+func adminTokenFromHeader(r *http.Request) string {
+	if t := strings.TrimSpace(r.Header.Get("X-Admin-Token")); t != "" {
+		return t
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
+}
+
+// verifyAPIToken authenticates a request by API token: DB-managed keys first,
+// plus the legacy single config token for backward compatibility. Both are only
+// accepted through headers.
+func (s *AdminServer) verifyAPIToken(r *http.Request) bool {
+	token := adminTokenFromHeader(r)
+	if token == "" {
+		return false
+	}
+	if s.config.Token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.config.Token)) == 1 {
+		return true
+	}
+	if !db.IsInitialized() {
+		return false
+	}
+	key, err := db.FindAPIKeyBySecret(token)
+	if err != nil || key == nil || key.Expired(time.Now()) {
+		return false
+	}
+	// Writing last-used on every request would turn data-plane calls into a
+	// bolt write each time; one update per minute is enough for auditing.
+	if key.LastUsedAt == nil || time.Since(*key.LastUsedAt) > time.Minute {
+		if terr := db.TouchAPIKey(key.ID, time.Now()); terr != nil {
+			util.LogModuleWarn("admin", "touch api key %s failed: %v", key.Prefix, terr)
+		}
+	}
+	return true
 }
 
 // verifySignature checks if the request has a valid signature using the configured public key.
@@ -1583,6 +1618,8 @@ func (s *AdminServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ssh/config", s.apiSSHConfig)
 	mux.HandleFunc("/api/ssh/keys", s.apiSSHKeys)
 	mux.HandleFunc("/api/ssh/keys/", s.apiSSHKeyItem)
+	mux.HandleFunc("/api/api-keys", s.apiAPIKeys)
+	mux.HandleFunc("/api/api-keys/", s.apiAPIKeyItem)
 	mux.HandleFunc("/api/db/", s.apiDatabase)
 }
 
@@ -5930,8 +5967,10 @@ func (s *AdminServer) apiMe(w http.ResponseWriter, r *http.Request) {
 
 	// Auth is enabled: determine username from authentication method
 
-	// 1. Try mTLS client certificate authentication
-	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+	// 1. Try mTLS client certificate authentication. VerifiedChains is required
+	// for the same reason as authMiddleware: a listener that merely requests a
+	// client certificate must not be trusted as having verified it.
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && len(r.TLS.VerifiedChains) > 0 {
 		cn := r.TLS.PeerCertificates[0].Subject.CommonName
 		if cn != "" {
 			// Return the certificate CN as username
@@ -5967,17 +6006,11 @@ func (s *AdminServer) apiAdminAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If auth is currently enabled, require existing session or token
+	// If auth is currently enabled, require existing session or API token
 	if s.config.AuthEnabled {
-		if s.verifySession(r) == "" {
-			token := r.URL.Query().Get("token")
-			if token == "" {
-				token = r.Header.Get("X-Admin-Token")
-			}
-			if token != s.config.Token {
-				httpError(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if s.verifySession(r) == "" && !s.verifyAPIToken(r) {
+			httpError(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 	}
 

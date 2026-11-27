@@ -5,15 +5,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"phaethon/config"
+	"phaethon/db"
 )
 
 func TestSingleConnListenerAcceptUnblocksOnClose(t *testing.T) {
@@ -237,12 +240,134 @@ func TestBuiltinDirectForcesAuth(t *testing.T) {
 		t.Fatalf("public path via built-in path: status %d, want 200", rec.Code)
 	}
 
-	// A configured token still authenticates the built-in path.
+	// A configured token still authenticates the built-in path via header.
 	sTok := &AdminServer{config: &config.AdminConfig{AuthEnabled: false, Token: "sekret"}}
 	directTok := builtinDirectHandler{next: sTok.authMiddleware(mux)}
 	rec = httptest.NewRecorder()
-	directTok.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/secret?token=sekret", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/secret", nil)
+	req.Header.Set("X-Admin-Token", "sekret")
+	directTok.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("built-in path with token: status %d, want 200", rec.Code)
+		t.Fatalf("built-in path with token header: status %d, want 200", rec.Code)
+	}
+
+	// Query-string tokens are no longer accepted: they leak into logs/history.
+	rec = httptest.NewRecorder()
+	directTok.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/secret?token=sekret", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("query token must be rejected: status %d, want 401", rec.Code)
+	}
+}
+
+// TestAPIKeyHeaderAuth covers DB-managed multi-key auth: both header forms work,
+// expired keys are rejected, and a successful use records last-used time.
+func TestAPIKeyHeaderAuth(t *testing.T) {
+	if err := db.Init(filepath.Join(t.TempDir(), "admin-test.db")); err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	secret := "phk_live"
+	if err := db.PutAPIKey(&db.APIKey{
+		ID: db.HashAPIKey(secret), Name: "live", Prefix: "phk_live", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("put key: %v", err)
+	}
+	expired := "phk_expired"
+	exp := time.Now().Add(-time.Minute)
+	if err := db.PutAPIKey(&db.APIKey{
+		ID: db.HashAPIKey(expired), Name: "expired", Prefix: "phk_expire", CreatedAt: time.Now().Add(-time.Hour), ExpiresAt: &exp,
+	}); err != nil {
+		t.Fatalf("put expired key: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/secret", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	s := &AdminServer{config: &config.AdminConfig{AuthEnabled: true, Username: "admin"}}
+	handler := s.authMiddleware(mux)
+
+	do := func(setHeader func(*http.Request)) int {
+		r := httptest.NewRequest(http.MethodGet, "/api/secret", nil)
+		setHeader(r)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	if code := do(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+secret) }); code != http.StatusOK {
+		t.Fatalf("Bearer live key: status %d, want 200", code)
+	}
+	if code := do(func(r *http.Request) { r.Header.Set("X-Admin-Token", secret) }); code != http.StatusOK {
+		t.Fatalf("X-Admin-Token live key: status %d, want 200", code)
+	}
+	if code := do(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+expired) }); code != http.StatusUnauthorized {
+		t.Fatalf("expired key: status %d, want 401", code)
+	}
+	if code := do(func(r *http.Request) { r.Header.Set("Authorization", "Bearer phk_unknown") }); code != http.StatusUnauthorized {
+		t.Fatalf("unknown key: status %d, want 401", code)
+	}
+
+	key, err := db.FindAPIKeyBySecret(secret)
+	if err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if key.LastUsedAt == nil {
+		t.Fatal("last_used_at was not recorded after successful auth")
+	}
+}
+
+// TestAPIKeysEndpoints: create returns the plaintext once, list never contains
+// it, and delete removes the record.
+func TestAPIKeysEndpoints(t *testing.T) {
+	if err := db.Init(filepath.Join(t.TempDir(), "api-keys-endpoints.db")); err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := &AdminServer{config: &config.AdminConfig{AuthEnabled: true}}
+
+	rec := httptest.NewRecorder()
+	s.apiAPIKeys(rec, httptest.NewRequest(http.MethodPost, "/api/api-keys",
+		strings.NewReader(`{"name":"ci","expires_in_days":30}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Key    string    `json:"key"`
+		Record db.APIKey `json:"record"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if !strings.HasPrefix(created.Key, "phk_") {
+		t.Fatalf("unexpected key format: %q", created.Key)
+	}
+	if created.Record.ExpiresAt == nil {
+		t.Fatal("expiry not set for expires_in_days=30")
+	}
+
+	rec = httptest.NewRecorder()
+	s.apiAPIKeys(rec, httptest.NewRequest(http.MethodGet, "/api/api-keys", nil))
+	if strings.Contains(rec.Body.String(), created.Key) {
+		t.Fatal("list response leaked the plaintext key")
+	}
+
+	rec = httptest.NewRecorder()
+	s.apiAPIKeyItem(rec, httptest.NewRequest(http.MethodDelete, "/api/api-keys/"+created.Record.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: status %d", rec.Code)
+	}
+	if _, err := db.GetAPIKey(created.Record.ID); err == nil {
+		t.Fatal("key still present after delete")
+	}
+}
+
+// TestEmbeddedTemplatesParse catches template syntax errors without booting
+// the full admin server (parseTemplates panics on failure).
+func TestEmbeddedTemplatesParse(t *testing.T) {
+	s := &AdminServer{}
+	s.parseTemplates()
+	if s.pages == nil || s.pages.admin == nil {
+		t.Fatal("admin template not parsed")
 	}
 }

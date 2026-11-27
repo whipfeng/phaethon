@@ -118,6 +118,55 @@
         </div>
         <div id="ssh-status" class="text-muted"></div>
     </div>
+
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
+            <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.apiKeysTitle">API 密钥</span></h3>
+        </div>
+        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.apiKeysHelp">
+            供程序化访问控制台 API。请求头携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>X-Admin-Token: &lt;key&gt;</code>，
+            不再支持 URL 参数。明文仅在创建时显示一次，服务端只保存哈希。
+        </p>
+
+        <div class="form-group">
+            <label data-i18n="admin.apiKeysCreate">新建密钥</label>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <input type="text" id="api-key-name" class="form-control" style="flex:2; min-width:180px;"
+                       placeholder="用途/归属（如 ci-deploy）" data-i18n-placeholder="admin.apiKeysNamePh">
+                <input type="number" id="api-key-expires" class="form-control" style="flex:1; min-width:140px;" min="1" max="3650"
+                       placeholder="有效期（天，留空=永久）" data-i18n-placeholder="admin.apiKeysExpiresPh">
+                <button onclick="createAPIKey()" class="btn btn-primary btn-sm" data-i18n="admin.apiKeysCreateBtn">生成</button>
+            </div>
+        </div>
+
+        <div id="api-key-new" class="form-group" style="display:none;">
+            <label data-i18n="admin.apiKeysNew">新密钥（仅显示一次）</label>
+            <div style="display:flex; gap:0.5rem;">
+                <input type="text" id="api-key-new-value" class="form-control" style="font-family:monospace;" readonly>
+                <button onclick="copyAPIKey()" class="btn btn-outline btn-sm" data-i18n="common.copy">复制</button>
+            </div>
+            <p class="text-muted" style="margin-top:0.25rem; font-size:0.85em;" data-i18n="admin.apiKeysNewHelp">
+                关闭或刷新后无法再次查看，请立即保存到安全位置。
+            </p>
+        </div>
+
+        <table class="data-table" id="api-keys-table">
+            <thead>
+                <tr>
+                    <th data-i18n="admin.apiKeysName">名称</th>
+                    <th data-i18n="admin.apiKeysPrefix">前缀</th>
+                    <th data-i18n="admin.apiKeysCreated">创建时间</th>
+                    <th data-i18n="admin.apiKeysLastUsed">最后使用</th>
+                    <th data-i18n="admin.apiKeysExpires">过期时间</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="api-keys-tbody">
+                <tr><td colspan="6" class="text-muted">-</td></tr>
+            </tbody>
+        </table>
+        <div id="api-keys-status" class="text-muted"></div>
+    </div>
 </div>
 
 <script>
@@ -454,6 +503,107 @@
     };
 
     loadAdminSettings();
+})();
+</script>
+<script>
+(function() {
+    function apiKeyStatus(msg, isErr) {
+        const el = document.getElementById('api-keys-status');
+        el.textContent = msg || '';
+        el.style.color = isErr ? 'var(--danger)' : 'var(--text-muted)';
+    }
+
+    function fmtTime(v) {
+        return v ? new Date(v).toLocaleString() : '-';
+    }
+
+    function renderAPIKeys(keys) {
+        const tbody = document.getElementById('api-keys-tbody');
+        const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        const L = (k, fb) => (typeof i18n !== 'undefined' ? i18n.t(k, fb) : fb);
+        if (!keys || !keys.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-muted">（无）</td></tr>';
+            return;
+        }
+        const now = Date.now();
+        tbody.innerHTML = keys.map(k => {
+            const expired = k.expires_at && new Date(k.expires_at).getTime() <= now;
+            const nameCell = esc(k.name) + (expired ? ' <span class="text-muted" style="font-size:.8em;">(已过期)</span>' : '');
+            return '<tr>' +
+                '<td data-label="' + esc(L('admin.apiKeysName', '名称')) + '">' + nameCell + '</td>' +
+                '<td data-label="' + esc(L('admin.apiKeysPrefix', '前缀')) + '"><code>' + esc(k.prefix) + '…</code></td>' +
+                '<td data-label="' + esc(L('admin.apiKeysCreated', '创建时间')) + '">' + fmtTime(k.created_at) + '</td>' +
+                '<td data-label="' + esc(L('admin.apiKeysLastUsed', '最后使用')) + '">' + fmtTime(k.last_used_at) + '</td>' +
+                '<td data-label="' + esc(L('admin.apiKeysExpires', '过期时间')) + '">' + (k.expires_at ? fmtTime(k.expires_at) : '永久') + '</td>' +
+                '<td style="white-space:nowrap;">' +
+                '<button class="btn btn-danger btn-sm" onclick="deleteAPIKey(\'' + encodeURIComponent(k.id) + '\')">✕</button>' +
+                '</td></tr>';
+        }).join('');
+    }
+
+    async function loadAPIKeys() {
+        try {
+            const res = await fetch('./api/api-keys');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            renderAPIKeys(await res.json());
+        } catch (err) {
+            apiKeyStatus('加载失败: ' + err.message, true);
+        }
+    }
+
+    window.createAPIKey = async function() {
+        const name = document.getElementById('api-key-name').value.trim();
+        const days = document.getElementById('api-key-expires').value.trim();
+        if (!name) { apiKeyStatus('名称不能为空', true); return; }
+        try {
+            const res = await fetch('./api/api-keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, expires_in_days: days ? parseInt(days, 10) : 0})
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'create fail');
+            document.getElementById('api-key-name').value = '';
+            document.getElementById('api-key-expires').value = '';
+            document.getElementById('api-key-new-value').value = data.key || '';
+            document.getElementById('api-key-new').style.display = '';
+            apiKeyStatus('密钥已创建，请立即复制保存');
+            loadAPIKeys();
+        } catch (err) {
+            apiKeyStatus('创建失败: ' + err.message, true);
+        }
+    };
+
+    window.copyAPIKey = async function() {
+        const text = document.getElementById('api-key-new-value').value;
+        if (!text) return;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const el = document.getElementById('api-key-new-value');
+                el.select();
+                document.execCommand('copy');
+            }
+            apiKeyStatus('密钥已复制到剪贴板');
+        } catch (err) {
+            apiKeyStatus('复制失败，请手动选择文本：' + err.message, true);
+        }
+    };
+
+    window.deleteAPIKey = async function(idEnc) {
+        if (!confirm('删除后使用该密钥的调用方将立即失效，确认删除？')) return;
+        try {
+            const res = await fetch('./api/api-keys/' + idEnc, {method: 'DELETE'});
+            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'delete fail');
+            apiKeyStatus('密钥已删除');
+            loadAPIKeys();
+        } catch (err) {
+            apiKeyStatus('删除失败: ' + err.message, true);
+        }
+    };
+
+    loadAPIKeys();
 })();
 </script>
 {{end}}

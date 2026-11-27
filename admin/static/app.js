@@ -130,16 +130,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // Clean up timers from previous page
         stopActiveConnsTimer();
 
-        // Re-execute <script> tags in swapped content (browsers don't execute innerHTML scripts)
-        const scripts = event.detail.target.querySelectorAll('script');
-        scripts.forEach(function(oldScript) {
-            const newScript = document.createElement('script');
-            Array.from(oldScript.attributes).forEach(attr => {
-                newScript.setAttribute(attr.name, attr.value);
-            });
-            newScript.textContent = oldScript.textContent;
-            oldScript.parentNode.replaceChild(newScript, oldScript);
-        });
+        // htmx 2 executes scripts in swapped content natively
+        // (allowScriptTags); re-running them here would double-declare
+        // block-scoped bindings and double-register listeners.
 
         // Re-apply i18n to new content
         if (typeof i18n !== 'undefined' && i18n.applyTranslations) i18n.applyTranslations();

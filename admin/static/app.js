@@ -155,10 +155,22 @@ document.addEventListener('DOMContentLoaded', () => {
         updatePageTitle();
     });
 
+    // Page-scoped handlers registered by the outgoing page would otherwise
+    // pile up on every navigation; drop them before the new fragment lands.
+    document.body.addEventListener('htmx:beforeSwap', function(event) {
+        if (event.detail.target.id !== 'main-content') return;
+        while (pageScopedSubscriptions.length) {
+            try { pageScopedSubscriptions.pop()(); } catch (e) {}
+        }
+    });
+
    // Close any modal when clicking its overlay background.
     document.querySelectorAll('.modal').forEach(m => {
         m.addEventListener('click', (e) => {
-            if (e.target === m) m.classList.add('hidden');
+            if (e.target === m) {
+                m.classList.add('hidden');
+                flushPendingPageRefreshes();
+            }
         });
     });
 
@@ -655,6 +667,53 @@ function onBusinessVersion(topic, handler, label) {
     return VersionNotificationService.register(topic, handler, label);
 }
 
+// Page-scoped subscriptions: inline page scripts use this so HTMX navigation
+// drops them together with the DOM they belong to. App-level handlers keep
+// using onBusinessVersion (they live for the whole session).
+const pageScopedSubscriptions = [];
+function onPageBusinessVersion(topic, handler, label) {
+    pageScopedSubscriptions.push(onBusinessVersion(topic, handler, label));
+}
+
+// SSR pages (mappings, resolvers) re-fetch the whole fragment instead of
+// patching rows client-side: the server template stays the single source of
+// truth for the table and its derived summary cards. A visible modal means the
+// user is mid-edit, so defer the refresh until the page closes it.
+const ssrPageVersions = {};
+const pendingPageRefresh = {};
+
+function _ssrPageModalOpen() {
+    return !!document.querySelector('#main-content .modal:not(.hidden)');
+}
+
+function refreshSSRPage(topic) {
+    const version = targetVersions[topic];
+    // The first sync after a load matches what the server just rendered.
+    if (ssrPageVersions[topic] === undefined) {
+        ssrPageVersions[topic] = version;
+        return;
+    }
+    if (ssrPageVersions[topic] === version) return;
+    if (_ssrPageModalOpen()) {
+        pendingPageRefresh[topic] = true;
+        return;
+    }
+    ssrPageVersions[topic] = version;
+    reloadPage();
+}
+
+function flushPendingPageRefresh(topic) {
+    if (!pendingPageRefresh[topic]) return;
+    if (_ssrPageModalOpen()) return;
+    delete pendingPageRefresh[topic];
+    ssrPageVersions[topic] = targetVersions[topic];
+    reloadPage();
+}
+
+function flushPendingPageRefreshes() {
+    Object.keys(pendingPageRefresh).forEach(flushPendingPageRefresh);
+}
+
 // Register the default per-topic fetch handlers. Pages/components can add
 // additional listeners via onBusinessVersion(); the service deduplicates by
 // handler-local version and only advances the local version after success.
@@ -666,8 +725,20 @@ function registerDefaultVersionHandlers() {
             window.loadBindings();
         }
     }, 'bindings');
-    onBusinessVersion('mappings', () => scheduleTopicFetch('mappings'), 'mappings');
+    onBusinessVersion('mappings', () => {
+        if (document.getElementById('mappings-card')) refreshSSRPage('mappings');
+    }, 'mappings');
+    onBusinessVersion('resolvers', () => {
+        if (document.getElementById('resolvers-card')) refreshSSRPage('resolvers');
+    }, 'resolvers');
     onBusinessVersion('tun-config', () => scheduleTopicFetch('tun-config'), 'tun-config');
+    // Runtime TUN state (start/stop) is bumped separately from the stored
+    // config; the page and the dashboard summary both need it.
+    onBusinessVersion('tun', () => {
+        if (document.getElementById('tun-card') || document.getElementById('tun-summary')) {
+            fetchTUNStatus();
+        }
+    }, 'tun');
     onBusinessVersion('mesh', () => fetchMeshStatus(), 'mesh');
     onBusinessVersion('proxies', () => scheduleTopicFetch('proxies'), 'proxies');
     onBusinessVersion('rules', () => scheduleTopicFetch('rules'), 'rules');
@@ -765,8 +836,6 @@ function fetchForTopic(topic, expectedVersion) {
             return fetchProxies(expectedVersion);
         case 'rules':
             return fetchRules(expectedVersion);
-        case 'mappings':
-            return fetchMappings(expectedVersion);
         case 'subscriptions':
             return fetchSubscriptions(expectedVersion);
         case 'mesh':
@@ -971,7 +1040,7 @@ async function pollReverseList(force, expectedVersion) {
     if (!res.ok) throw new Error('status ' + res.status);
     const data = await res.json();
     if (!Array.isArray(data)) throw new Error('invalid reverse data');
-    if (expectedVersion !== undefined && targetVersions.reverse !== expectedVersion) return;
+    if (expectedVersion !== undefined && targetVersions['reverse-configs'] !== expectedVersion) return;
     updateReverseStatus(data);
 }
 
@@ -1259,51 +1328,6 @@ function updateRules(data) {
     }
 }
 
-// ===== Mappings client-side rendering =====
-async function fetchMappings(expectedVersion) {
-    const res = await fetchWithTimeout('./api/mappings');
-    if (!res.ok) throw new Error('status ' + res.status);
-    const data = await res.json();
-    if (!Array.isArray(data)) throw new Error('invalid mappings data');
-    if (expectedVersion !== undefined && targetVersions.mappings !== expectedVersion) return;
-    updateMappings(data);
-}
-
-function updateMappings(data) {
-    const tbody = document.querySelector('#mapping-table tbody');
-    if (!tbody) return;
-    tbody.innerHTML = data.map(m => {
-        if (!m || !m.name) return '';
-        const enabled = m.enabled !== false;
-        const rowClass = enabled ? '' : 'row-disabled';
-        const dst = m.dstHost ? `${escapeHtml(m.dstHost)}:${m.dstPort}` : (m.reverseAddress || '-');
-        return `<tr data-name="${escapeHtml(m.name)}" class="${rowClass}">
-            <td data-label="Name"><strong>${escapeHtml(m.name)}</strong></td>
-            <td data-label="Type"><code class="type-badge type-${escapeHtml((m.type || '').toLowerCase())}">${escapeHtml(m.type || '')}</code></td>
-            <td data-label="Port">${m.port || ''}</td>
-            <td data-label="Destination">${dst}</td>
-            <td data-label="SNI">${escapeHtml(m.sni || '-')}</td>
-            <td data-label="Enabled">
-                <label class="switch">
-                    <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleMapping('${escapeHtml(m.name)}', this.checked)">
-                    <span class="slider"></span>
-                </label>
-            </td>
-            <td data-label="Actions">
-                <button onclick="editMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-outline">${(typeof i18n !== 'undefined' ? i18n.t('common.edit') : null) || 'Edit'}</button>
-                <button onclick="copyMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-outline" title="Copy">📋</button>
-                <button onclick="deleteMapping('${escapeHtml(m.name)}')" class="btn btn-sm btn-danger">${(typeof i18n !== 'undefined' ? i18n.t('common.delete') : null) || 'Delete'}</button>
-            </td>
-        </tr>`;
-    }).join('');
-
-    const header = document.querySelector('#mapping-table')?.closest('.card')?.querySelector('.card-header h3');
-    if (header) {
-        const label = (typeof i18n !== 'undefined' ? i18n.t('mapping.title') : null) || 'Mappings';
-        header.innerHTML = `<span data-i18n="mapping.title">${label}</span> (${data.length})`;
-    }
-}
-
 // ===== Subscriptions client-side rendering =====
 async function fetchSubscriptions(expectedVersion) {
     const res = await fetchWithTimeout('./api/subscriptions');
@@ -1398,7 +1422,7 @@ async function fetchTUNStatus(expectedVersion) {
     const res = await fetch('./api/tun');
     if (!res.ok) throw new Error('status ' + res.status);
     const data = await res.json();
-    if (expectedVersion !== undefined && targetVersions.tun !== expectedVersion) return;
+    if (expectedVersion !== undefined && targetVersions['tun-config'] !== expectedVersion) return;
     if (typeof renderTUN === 'function') renderTUN(data);
     updateTUNSummary(data);
 }
@@ -4580,5 +4604,6 @@ document.addEventListener('keydown', (e) => {
     // Escape closes modals
     if (e.key === 'Escape') {
         document.querySelectorAll('.modal:not(.hidden)').forEach(m => m.classList.add('hidden'));
+        flushPendingPageRefreshes();
     }
 });

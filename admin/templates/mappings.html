@@ -462,6 +462,7 @@ async function toggleMapping(name, enabled) {
 
 function closeMapModal() {
     document.getElementById('mapping-modal').classList.add('hidden');
+    flushPendingPageRefresh('mappings');
 }
 
 toggleMappingFields();

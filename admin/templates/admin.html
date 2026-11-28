@@ -351,8 +351,9 @@
         }
     };
 
-    if (typeof onBusinessVersion === 'function') {
-        onBusinessVersion('ssh', loadSSH, 'admin-ssh-block');
+    if (typeof onPageBusinessVersion === 'function') {
+        onPageBusinessVersion('ssh', loadSSH, 'admin-ssh-block');
+        onPageBusinessVersion('ssh_keys', loadSSH, 'admin-ssh-keys');
     }
 
     loadSSH();
@@ -602,6 +603,10 @@
             apiKeyStatus('删除失败: ' + err.message, true);
         }
     };
+
+    if (typeof onPageBusinessVersion === 'function') {
+        onPageBusinessVersion('api-keys', loadAPIKeys, 'admin-api-keys');
+    }
 
     loadAPIKeys();
 })();

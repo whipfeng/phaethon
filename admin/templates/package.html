@@ -46,7 +46,12 @@
 
         init() {
             this.setupUpload();
-            this.setupSSE();
+            // Package list changes arrive on the shared version-notification
+            // stream; a private EventSource here leaked one connection per
+            // navigation and bypassed the page-scoped cleanup.
+            if (typeof onPageBusinessVersion === 'function') {
+                onPageBusinessVersion('packages', () => this.refresh(), 'package-list');
+            }
             this.refresh();
             this.refreshPin();
             // The watchdog applies a request and restarts this process; keep
@@ -105,23 +110,6 @@
                     this.refreshPin();
                 })
                 .catch(() => showToast('取消失败', 'error'));
-        },
-
-        setupSSE() {
-            const sse = new EventSource('./api/events');
-            let lastVersion = 0;
-            sse.addEventListener('heartbeat', (e) => {
-                try {
-                    const data = JSON.parse(e.data);
-                    if (data.packages && data.packages > lastVersion) {
-                        lastVersion = data.packages;
-                        this.refresh();
-                    }
-                } catch {}
-            });
-            sse.onerror = () => {
-                sse.close();
-            };
         },
 
         setupUpload() {

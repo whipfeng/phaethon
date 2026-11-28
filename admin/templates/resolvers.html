@@ -239,6 +239,7 @@ async function toggleResolver(name, enabled) {
 
 function closeResModal() {
     document.getElementById('resolver-modal').classList.add('hidden');
+    flushPendingPageRefresh('resolvers');
 }
 </script>
 {{end}}

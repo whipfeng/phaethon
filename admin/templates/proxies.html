@@ -1279,7 +1279,7 @@ async function toggleUDP(name, currentValue) {
     }
 }
 
-let _p2pPopName = null;
+var _p2pPopName = null;
 
 function p2pAnchorFor(name) {
     const row = document.querySelector(`#proxy-table tr[data-name="${CSS.escape(name)}"]`);

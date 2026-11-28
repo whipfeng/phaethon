@@ -121,7 +121,7 @@
 <script>
 var resolvers = {{json .Resolvers}};
 
-let meshNodeId = null;
+var meshNodeId = null;
 
 async function ensureMeshNodeId() {
     if (meshNodeId !== null) return meshNodeId;

@@ -207,11 +207,14 @@
 
         render() {
             const container = document.getElementById('package-groups-container');
+            // A refresh can resolve after the user navigated away and the page
+            // was swapped out; the container is then gone — drop the render.
+            if (!container) return;
             const empty = document.getElementById('package-list-empty');
             const packages = this.data.packages || [];
 
             container.innerHTML = '';
-            empty.textContent = packages.length === 0 ? this.t('package.emptyList', '暂无发布包') : '';
+            if (empty) empty.textContent = packages.length === 0 ? this.t('package.emptyList', '暂无发布包') : '';
 
             // Group by platform/arch (fields are flat in the JSON response)
             const groups = {};

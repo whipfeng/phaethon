@@ -172,14 +172,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-   // Close any modal when clicking its overlay background.
-    document.querySelectorAll('.modal').forEach(m => {
-        m.addEventListener('click', (e) => {
-            if (e.target === m) {
-                m.classList.add('hidden');
-                flushPendingPageRefreshes();
-            }
-        });
+    // Close any modal when clicking its overlay background. Delegated on
+    // document because HTMX swaps replace the modal nodes, which would drop
+    // listeners bound to the previous fragment's elements.
+    document.addEventListener('click', (e) => {
+        const m = e.target;
+        if (m && m.classList && m.classList.contains('modal') && !m.classList.contains('hidden')) {
+            m.classList.add('hidden');
+            flushPendingPageRefreshes();
+        }
     });
 
     setupModalResizers();

@@ -6214,6 +6214,14 @@ func (s *AdminServer) render(w http.ResponseWriter, r *http.Request, pageName st
 				m["Version"] = adminVersion
 			}
 		}
+		// Exact version vector this render is based on. SSR pages compare it
+		// with SSE updates so a change is not lost when the topic had no
+		// version at render time (an absent topic means version 0).
+		if util.DefaultVersionNotifier != nil {
+			if b, err := json.Marshal(util.DefaultVersionNotifier.Versions()); err == nil {
+				m["PageVersions"] = template.JS(b)
+			}
+		}
 	}
 
 	var t *template.Template

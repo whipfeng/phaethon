@@ -100,6 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     VersionNotificationService.start();
     registerDefaultVersionHandlers();
+    _adoptSSRPageVersions();
     updateUptime();
 
     // Initialize bottom navigation
@@ -137,6 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // Re-apply i18n to new content
         if (typeof i18n !== 'undefined' && i18n.applyTranslations) i18n.applyTranslations();
 
+        // Take the render-time version snapshot from the new fragment.
+        _adoptSSRPageVersions();
+
         // The proxies page is server-rendered with a placeholder P2P dot
         // ("connecting") because live status only exists in /api/proxies.
         // Version topics won't re-dispatch when they are already in sync, so
@@ -162,6 +166,10 @@ document.addEventListener('DOMContentLoaded', () => {
         while (pageScopedSubscriptions.length) {
             try { pageScopedSubscriptions.pop()(); } catch (e) {}
         }
+        Object.keys(SSR_PAGE_TOPICS).forEach(t => {
+            delete ssrPageVersions[t];
+            delete pendingPageRefresh[t];
+        });
     });
 
    // Close any modal when clicking its overlay background.
@@ -677,18 +685,39 @@ function onPageBusinessVersion(topic, handler, label) {
 
 // SSR pages (mappings, resolvers) re-fetch the whole fragment instead of
 // patching rows client-side: the server template stays the single source of
-// truth for the table and its derived summary cards. A visible modal means the
-// user is mid-edit, so defer the refresh until the page closes it.
+// truth for the table and its derived summary cards. The fragment carries the
+// version vector it was rendered from (#ssr-page-versions), so the baseline is
+// exact instead of guessed; a topic that never had a version renders as 0.
+// A visible modal means the user is mid-edit, so defer the refresh until the
+// page closes it.
 const ssrPageVersions = {};
 const pendingPageRefresh = {};
+const SSR_PAGE_TOPICS = { mappings: 'mappings-card', resolvers: 'resolvers-card' };
 
 function _ssrPageModalOpen() {
     return !!document.querySelector('#main-content .modal:not(.hidden)');
 }
 
+function _adoptSSRPageVersions() {
+    const el = document.getElementById('ssr-page-versions');
+    if (!el) return;
+    let base;
+    try { base = JSON.parse(el.textContent || '{}'); } catch (e) { return; }
+    Object.keys(SSR_PAGE_TOPICS).forEach(topic => {
+        if (!document.getElementById(SSR_PAGE_TOPICS[topic])) return;
+        ssrPageVersions[topic] = typeof base[topic] === 'number' ? base[topic] : 0;
+        // SSE may already have moved past the rendered vector while the
+        // fragment was in flight; refresh once so the view is not stale.
+        if (targetVersions[topic] !== undefined && targetVersions[topic] !== ssrPageVersions[topic]) {
+            refreshSSRPage(topic);
+        }
+    });
+}
+
 function refreshSSRPage(topic) {
     const version = targetVersions[topic];
-    // The first sync after a load matches what the server just rendered.
+    if (version === undefined) return;
+    // No snapshot (older fragment or element missing): adopt silently.
     if (ssrPageVersions[topic] === undefined) {
         ssrPageVersions[topic] = version;
         return;
@@ -706,7 +735,7 @@ function flushPendingPageRefresh(topic) {
     if (!pendingPageRefresh[topic]) return;
     if (_ssrPageModalOpen()) return;
     delete pendingPageRefresh[topic];
-    ssrPageVersions[topic] = targetVersions[topic];
+    ssrPageVersions[topic] = targetVersions[topic] ?? 0;
     reloadPage();
 }
 

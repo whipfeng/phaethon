@@ -1,6 +1,7 @@
 {{template "layout" .}}
 {{define "content"}}
 <div class="page-content">
+    <script type="application/json" id="ssr-page-versions">{{with .PageVersions}}{{.}}{{end}}</script>
     <div class="card" id="resolvers-card">
         <div class="card-header" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="res.title">Resolvers</span> ({{len .Resolvers}})</h3>

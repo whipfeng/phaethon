@@ -51,16 +51,16 @@
             <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadMeshIdentity">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.nodeIdentity">Node Identity</h4>
-                <button onclick="saveMeshIdentity(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+                <button onclick="openMeshIdentityModal()" class="btn btn-primary btn-sm" data-i18n="common.edit">编辑</button>
             </div>
             <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.nodeIdentityHelp">Changing node-id will change this node's identity in the mesh network. Other nodes will need to rediscover this node.</p>
             <div class="form-group">
                 <label data-i18n="mesh.nodeId">Node ID</label>
-                <input type="text" id="mesh-identity-nodeid" class="form-control" placeholder="e.g., my-node-001">
+                <div class="text-muted" style="font-family:monospace;" id="mesh-identity-nodeid-view">-</div>
             </div>
             <div class="form-group">
                 <label data-i18n="mesh.subnet">Subnet</label>
-                <input type="text" id="mesh-identity-subnet" class="form-control" placeholder="e.g., 100.100.0.0/16">
+                <div class="text-muted" style="font-family:monospace;" id="mesh-identity-subnet-view">-</div>
             </div>
             <div id="mesh-identity-status" class="text-muted"></div>
         </div>
@@ -70,23 +70,20 @@
             <div class="mesh-section-header" data-collapse data-collapsed="1" data-collapse-load="loadTCPKeepalive">
                 <span class="collapse-icon" style="transform:rotate(90deg);">▶</span>
                 <h4 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h4>
-                <button onclick="saveTCPKeepalive(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+                <button onclick="openTCPKeepaliveModal()" class="btn btn-primary btn-sm" data-i18n="common.edit">编辑</button>
             </div>
             <p class="text-muted" style="margin-bottom:1rem;" data-i18n="mesh.tcpKeepaliveHelp">TCP keepalive detects dead connections. When a link breaks, keepalive probes fail and the connection is closed after (idle + interval × count) seconds.</p>
             <div class="form-group">
                 <label data-i18n="mesh.keepaliveIdle">Idle Time (seconds)</label>
-                <input type="number" id="mesh-keepalive-idle" class="form-control" min="1" max="3600" placeholder="30">
-                <small class="text-muted" data-i18n="mesh.keepaliveIdleHelp">Time before sending first probe</small>
+                <div class="text-muted" style="font-family:monospace;" id="mesh-keepalive-idle-view">-</div>
             </div>
             <div class="form-group">
                 <label data-i18n="mesh.keepaliveInterval">Probe Interval (seconds)</label>
-                <input type="number" id="mesh-keepalive-interval" class="form-control" min="1" max="300" placeholder="10">
-                <small class="text-muted" data-i18n="mesh.keepaliveIntervalHelp">Interval between probes</small>
+                <div class="text-muted" style="font-family:monospace;" id="mesh-keepalive-interval-view">-</div>
             </div>
             <div class="form-group">
                 <label data-i18n="mesh.keepaliveCount">Probe Count</label>
-                <input type="number" id="mesh-keepalive-count" class="form-control" min="1" max="20" placeholder="3">
-                <small class="text-muted" data-i18n="mesh.keepaliveCountHelp">Number of probes before giving up</small>
+                <div class="text-muted" style="font-family:monospace;" id="mesh-keepalive-count-view">-</div>
             </div>
             <div id="mesh-keepalive-status" class="text-muted"></div>
         </div>
@@ -274,6 +271,62 @@
         </div>
     </div>
 
+    <!-- Node Identity Modal -->
+    <div id="mesh-identity-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="mesh.nodeIdentity">Node Identity</h3>
+                <button onclick="closeMeshIdentityModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="mesh-identity-form" onsubmit="saveMeshIdentity(event)">
+                <div class="form-group">
+                    <label data-i18n="mesh.nodeId">Node ID</label>
+                    <input type="text" id="mesh-identity-nodeid" class="form-control" placeholder="e.g., my-node-001">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="mesh.subnet">Subnet</label>
+                    <input type="text" id="mesh-identity-subnet" class="form-control" placeholder="e.g., 100.100.0.0/16">
+                </div>
+                <p class="text-muted" data-i18n="mesh.nodeIdentityHelp">Changing node-id will change this node's identity in the mesh network. Other nodes will need to rediscover this node.</p>
+                <div class="form-actions">
+                    <button type="button" onclick="closeMeshIdentityModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- TCP Keepalive Modal -->
+    <div id="mesh-keepalive-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="mesh.tcpKeepalive">TCP Keepalive</h3>
+                <button onclick="closeTCPKeepaliveModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="mesh-keepalive-form" onsubmit="saveTCPKeepalive(event)">
+                <div class="form-group">
+                    <label data-i18n="mesh.keepaliveIdle">Idle Time (seconds)</label>
+                    <input type="number" id="mesh-keepalive-idle" class="form-control" min="1" max="3600" placeholder="30">
+                    <small class="text-muted" data-i18n="mesh.keepaliveIdleHelp">Time before sending first probe</small>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="mesh.keepaliveInterval">Probe Interval (seconds)</label>
+                    <input type="number" id="mesh-keepalive-interval" class="form-control" min="1" max="300" placeholder="10">
+                    <small class="text-muted" data-i18n="mesh.keepaliveIntervalHelp">Interval between probes</small>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="mesh.keepaliveCount">Probe Count</label>
+                    <input type="number" id="mesh-keepalive-count" class="form-control" min="1" max="20" placeholder="3">
+                    <small class="text-muted" data-i18n="mesh.keepaliveCountHelp">Number of probes before giving up</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeTCPKeepaliveModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
     // Only the always-expanded sections (topology/routes/domain-routes) load
     // upfront; config sections (identity/keepalive/suffixes/advertise) fetch
@@ -288,6 +341,7 @@
     // Tracks the identity last loaded from the server; saveMeshIdentity uses it
     // to detect node-id/subnet edits and gate them behind a restart confirm.
     var currentMeshIdentity = { nodeID: '', subnet: '' };
+    var meshIdentityLoaded = false;
 
     async function loadMeshIdentity() {
         try {
@@ -298,188 +352,213 @@
             currentMeshIdentity.subnet = mesh.subnet || '';
             document.getElementById('mesh-identity-nodeid').value = currentMeshIdentity.nodeID;
             document.getElementById('mesh-identity-subnet').value = currentMeshIdentity.subnet;
+            document.getElementById('mesh-identity-nodeid-view').textContent = currentMeshIdentity.nodeID || '-';
+            document.getElementById('mesh-identity-subnet-view').textContent = currentMeshIdentity.subnet || '-';
+            meshIdentityLoaded = true;
         } catch (err) {
             console.error('Failed to load mesh identity:', err);
         }
     }
 
+    window.openMeshIdentityModal = async function() {
+        // The section is lazy-loaded on expand; opening Edit directly must still
+        // show current values, so fetch on first open if never loaded.
+        if (!meshIdentityLoaded) await loadMeshIdentity();
+        document.getElementById('mesh-identity-nodeid').value = currentMeshIdentity.nodeID;
+        document.getElementById('mesh-identity-subnet').value = currentMeshIdentity.subnet;
+        document.getElementById('mesh-identity-modal').classList.remove('hidden');
+    };
+
+    window.closeMeshIdentityModal = function() {
+        document.getElementById('mesh-identity-modal').classList.add('hidden');
+    };
+
     window.saveMeshIdentity = async function(event) {
-        const btn = event ? event.target : null;
+        if (event) event.preventDefault();
+        const form = document.getElementById('mesh-identity-form');
+        const btn = form ? form.querySelector('button[type="submit"]') : null;
         const originalText = btn ? btn.textContent : '';
         const originalDisabled = btn ? btn.disabled : false;
-        
+
+        const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
+        const subnet = document.getElementById('mesh-identity-subnet').value.trim();
+        const statusEl = document.getElementById('mesh-identity-status');
+
+        if (!nodeid) {
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+
         if (btn) {
             btn.disabled = true;
             btn.textContent = i18n.t('common.processing') || 'Processing...';
         }
-        
-        try {
-            // Use custom password modal instead of native prompt
-            window.showPasswordConfirm(async function(password) {
-                try {
-                    const nodeid = document.getElementById('mesh-identity-nodeid').value.trim();
-                    const subnet = document.getElementById('mesh-identity-subnet').value.trim();
-                    const statusEl = document.getElementById('mesh-identity-status');
 
-                    if (!nodeid) {
-                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('mesh.nodeIdRequired') : 'Node ID is required';
-                        statusEl.style.color = 'var(--danger)';
-                        return;
-                    }
+        const doSave = async () => {
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+            statusEl.style.color = 'var(--text-muted)';
+            try {
+                const res = await fetch('./api/config/mesh', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({'node-id': nodeid, subnet: subnet})
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.error || 'Save failed');
+                }
+                closeMeshIdentityModal();
 
-                    const doSave = async () => {
-                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-                        statusEl.style.color = 'var(--text-muted)';
+                // Check if restart is required
+                if (data.restart_required) {
+                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartScheduled') : 'Saved, node restarting to apply new identity') + ': ' + data.restart_required;
+                    statusEl.style.color = 'var(--warning)';
+                    // The node exits ~2s after this response and the watchdog
+                    // restarts it; reload status a bit later to catch the new identity.
+                    setTimeout(() => {
+                        fetchMeshStatus();
+                        loadMeshIdentity();
+                        statusEl.textContent = '';
+                    }, 8000);
+                } else {
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+                    statusEl.style.color = 'var(--success)';
+                    setTimeout(() => {
+                        fetchMeshStatus();
+                        loadMeshIdentity();
+                        statusEl.textContent = '';
+                    }, 3000);
+                }
+            } catch (err) {
+                statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
+                statusEl.style.color = 'var(--danger)';
+            } finally {
+                if (btn) {
+                    btn.disabled = originalDisabled;
+                    btn.textContent = originalText;
+                }
+            }
+        };
 
-                        const res = await fetch('./api/config/mesh', {
-                            method: 'PUT',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({'node-id': nodeid, subnet: subnet})
-                        });
-                        const data = await res.json();
-                        if (!res.ok) {
-                            throw new Error(data.error || 'Save failed');
-                        }
-
-                        // Check if restart is required
-                        if (data.restart_required) {
-                            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('mesh.restartScheduled') : 'Saved, node restarting to apply new identity') + ': ' + data.restart_required;
-                            statusEl.style.color = 'var(--warning)';
-                            // The node exits ~2s after this response and the watchdog
-                            // restarts it; reload status a bit later to catch the new identity.
-                            setTimeout(() => {
-                                fetchMeshStatus();
-                                loadMeshIdentity();
-                                statusEl.textContent = '';
-                            }, 8000);
-                        } else {
-                            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-                            statusEl.style.color = 'var(--success)';
-                            setTimeout(() => {
-                                fetchMeshStatus();
-                                loadMeshIdentity(); // Reload mesh identity to show updated node-id
-                                statusEl.textContent = '';
-                            }, 3000);
-                        }
-                    };
-
-                    // Identity edits (node-id / subnet) restart the node after save
-                    // (design §3.3). Confirm via the styled modal; cancel aborts
-                    // without saving.
-                    const identityChanged = nodeid !== currentMeshIdentity.nodeID || subnet !== currentMeshIdentity.subnet;
-                    if (identityChanged) {
-                        showConfirm(
-                            (typeof i18n !== 'undefined' ? i18n.t('mesh.identityRestartConfirm') : null) ||
-                            'Node ID / subnet change requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?',
-                            doSave,
-                            () => {
-                                statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.cancelled') : 'Cancelled, not saved';
-                                statusEl.style.color = 'var(--text-muted)';
-                            }
-                        );
-                    } else {
-                        await doSave();
-                    }
-                } catch (err) {
-                    const statusEl = document.getElementById('mesh-identity-status');
-                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
-                    statusEl.style.color = 'var(--danger)';
-                } finally {
+        // Identity edits (node-id / subnet) restart the node after save
+        // (design §3.3). Confirm via the styled modal; cancel aborts
+        // without saving.
+        const identityChanged = nodeid !== currentMeshIdentity.nodeID || subnet !== currentMeshIdentity.subnet;
+        if (identityChanged) {
+            showConfirm(
+                (typeof i18n !== 'undefined' ? i18n.t('mesh.identityRestartConfirm') : null) ||
+                'Node ID / subnet change requires a node restart.\nThe node will restart automatically a few seconds after saving.\n\nSave and restart now?',
+                doSave,
+                () => {
+                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.cancelled') : 'Cancelled, not saved';
+                    statusEl.style.color = 'var(--text-muted)';
                     if (btn) {
                         btn.disabled = originalDisabled;
                         btn.textContent = originalText;
                     }
                 }
-            });
-        } catch (err) {
-            const statusEl = document.getElementById('mesh-identity-status');
-            statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
-            statusEl.style.color = 'var(--danger)';
-            if (btn) {
-                btn.disabled = originalDisabled;
-                btn.textContent = originalText;
-            }
+            );
+        } else {
+            await doSave();
         }
     };
 
     // TCP Keepalive Settings
+    var currentKeepalive = { idle: 30, interval: 10, count: 3 };
+    var keepaliveLoaded = false;
+
     async function loadTCPKeepalive() {
         try {
             const res = await fetch('./api/config/mesh');
             if (!res.ok) return;
             const mesh = await res.json();
             const ka = mesh.TCPKeepalive || {};
-            document.getElementById('mesh-keepalive-idle').value = ka.idle || 30;
-            document.getElementById('mesh-keepalive-interval').value = ka.interval || 10;
-            document.getElementById('mesh-keepalive-count').value = ka.count || 3;
+            currentKeepalive.idle = ka.idle || 30;
+            currentKeepalive.interval = ka.interval || 10;
+            currentKeepalive.count = ka.count || 3;
+            document.getElementById('mesh-keepalive-idle').value = currentKeepalive.idle;
+            document.getElementById('mesh-keepalive-interval').value = currentKeepalive.interval;
+            document.getElementById('mesh-keepalive-count').value = currentKeepalive.count;
+            document.getElementById('mesh-keepalive-idle-view').textContent = currentKeepalive.idle;
+            document.getElementById('mesh-keepalive-interval-view').textContent = currentKeepalive.interval;
+            document.getElementById('mesh-keepalive-count-view').textContent = currentKeepalive.count;
+            keepaliveLoaded = true;
         } catch (err) {
             console.error('Failed to load TCP keepalive:', err);
         }
     }
 
+    window.openTCPKeepaliveModal = async function() {
+        // The section is lazy-loaded on expand; opening Edit directly must still
+        // show current values, so fetch on first open if never loaded.
+        if (!keepaliveLoaded) await loadTCPKeepalive();
+        document.getElementById('mesh-keepalive-idle').value = currentKeepalive.idle;
+        document.getElementById('mesh-keepalive-interval').value = currentKeepalive.interval;
+        document.getElementById('mesh-keepalive-count').value = currentKeepalive.count;
+        document.getElementById('mesh-keepalive-modal').classList.remove('hidden');
+    };
+
+    window.closeTCPKeepaliveModal = function() {
+        document.getElementById('mesh-keepalive-modal').classList.add('hidden');
+    };
+
     window.saveTCPKeepalive = async function(event) {
-        const btn = event ? event.target : null;
+        if (event) event.preventDefault();
+        const form = document.getElementById('mesh-keepalive-form');
+        const btn = form ? form.querySelector('button[type="submit"]') : null;
         const originalText = btn ? btn.textContent : '';
         const originalDisabled = btn ? btn.disabled : false;
-        
+
+        const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
+        const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
+        const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
+        const statusEl = document.getElementById('mesh-keepalive-status');
+
         if (btn) {
             btn.disabled = true;
             btn.textContent = i18n.t('common.processing') || 'Processing...';
         }
-        
+
         try {
-            // Use custom password modal instead of native prompt
-            window.showPasswordConfirm(async function(password) {
-                try {
-                    const idle = parseInt(document.getElementById('mesh-keepalive-idle').value) || 30;
-                    const interval = parseInt(document.getElementById('mesh-keepalive-interval').value) || 10;
-                    const count = parseInt(document.getElementById('mesh-keepalive-count').value) || 3;
-                    const statusEl = document.getElementById('mesh-keepalive-status');
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
+            statusEl.style.color = 'var(--text-muted)';
 
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-                    statusEl.style.color = 'var(--text-muted)';
+            // First get current mesh config
+            const getRes = await fetch('./api/config/mesh');
+            if (!getRes.ok) throw new Error('Failed to load current config');
+            const currentMesh = await getRes.json();
 
-                    // First get current mesh config
-                    const getRes = await fetch('./api/config/mesh');
-                    if (!getRes.ok) throw new Error('Failed to load current config');
-                    const currentMesh = await getRes.json();
+            // Update with new TCP keepalive settings
+            currentMesh['tcp-keepalive'] = { idle, interval, count };
 
-                    // Update with new TCP keepalive settings
-                    currentMesh['tcp-keepalive'] = { idle, interval, count };
-
-                    const res = await fetch('./api/config/mesh', {
-                        method: 'PUT',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(currentMesh)
-                    });
-                    const data = await res.json();
-                    if (!res.ok) {
-                        throw new Error(data.error || 'Save failed');
-                    }
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-                    statusEl.style.color = 'var(--success)';
-                    setTimeout(() => {
-                        statusEl.textContent = '';
-                    }, 1500);
-                } catch (err) {
-                    const statusEl = document.getElementById('mesh-keepalive-status');
-                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
-                    statusEl.style.color = 'var(--danger)';
-                } finally {
-                    if (btn) {
-                        btn.disabled = originalDisabled;
-                        btn.textContent = originalText;
-                    }
-                }
+            const res = await fetch('./api/config/mesh', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(currentMesh)
             });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || 'Save failed');
+            }
+            currentKeepalive = { idle, interval, count };
+            document.getElementById('mesh-keepalive-idle-view').textContent = idle;
+            document.getElementById('mesh-keepalive-interval-view').textContent = interval;
+            document.getElementById('mesh-keepalive-count-view').textContent = count;
+            closeTCPKeepaliveModal();
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+            statusEl.style.color = 'var(--success)';
+            setTimeout(() => {
+                statusEl.textContent = '';
+            }, 1500);
         } catch (err) {
-            const statusEl = document.getElementById('mesh-keepalive-status');
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
+        } finally {
             if (btn) {
                 btn.disabled = originalDisabled;
                 btn.textContent = originalText;

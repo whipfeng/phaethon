@@ -4,32 +4,21 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.title">Admin Settings</span></h3>
-            <button onclick="saveAdminSettings(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            <button onclick="openAdminModal()" class="btn btn-primary btn-sm" data-i18n="common.edit">编辑</button>
         </div>
-        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.help">Configure admin panel access. Changes require password confirmation.</p>
+        <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.help">Configure admin panel access. Saving changes triggers a reload.</p>
 
         <div class="form-group">
             <label data-i18n="admin.addr">Listen Address</label>
-            <input type="text" id="admin-addr" class="form-control" placeholder="e.g., 0.0.0.0:39999">
-            <small class="text-muted" data-i18n="admin.addrHelp">Format: host:port. Use 0.0.0.0 to listen on all interfaces.</small>
+            <div class="text-muted" style="font-family:monospace;" id="admin-addr-view">-</div>
         </div>
-
         <div class="form-group">
-            <label>
-                <input type="checkbox" id="admin-auth-enabled">
-                <span data-i18n="admin.authEnabled">Enable Authentication</span>
-            </label>
+            <label data-i18n="admin.authEnabled">Enable Authentication</label>
+            <div class="text-muted" id="admin-auth-view">-</div>
         </div>
-
-        <div id="admin-auth-fields">
-            <div class="form-group">
-                <label data-i18n="admin.username">Username</label>
-                <input type="text" id="admin-username" class="form-control" placeholder="admin">
-            </div>
-            <div class="form-group">
-                <label data-i18n="admin.password">Password</label>
-                <input type="password" id="admin-password" class="form-control" placeholder="Leave empty to keep current">
-            </div>
+        <div class="form-group">
+            <label data-i18n="admin.username">Username</label>
+            <div class="text-muted" id="admin-username-view">-</div>
         </div>
 
         <div id="admin-status" class="text-muted"></div>
@@ -38,7 +27,7 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.portRangeTitle">网络端口范围</span></h3>
-            <button onclick="savePortRange(event)" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
+            <button onclick="openPortRangeModal()" class="btn btn-primary btn-sm" data-i18n="common.edit">编辑</button>
         </div>
         <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.portRangeHelp">
             格式 <code>min-max</code>（如 <code>39001-39999</code>）。留空表示使用默认行为。保存后立即生效。
@@ -46,14 +35,11 @@
 
         <div class="form-group">
             <label data-i18n="admin.portRangeUDP">UDP 动态端口范围</label>
-            <input type="text" id="port-range-udp" class="form-control" style="font-family:monospace;" placeholder="39001-39999">
-            <small class="text-muted" data-i18n="admin.portRangeUDPHelp">留空 = 交给系统随机分配</small>
+            <div class="text-muted" style="font-family:monospace;" id="port-range-udp-view">-</div>
         </div>
-
         <div class="form-group">
             <label data-i18n="admin.portRangeTCP">TCP 反连动态端口范围</label>
-            <input type="text" id="port-range-tcp" class="form-control" style="font-family:monospace;" placeholder="40000-41000">
-            <small class="text-muted" data-i18n="admin.portRangeTCPHelp">留空 = 不限制。修改会短暂重建反连控制通道。</small>
+            <div class="text-muted" style="font-family:monospace;" id="port-range-tcp-view">-</div>
         </div>
 
         <div id="port-range-status" class="text-muted"></div>
@@ -62,10 +48,10 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.sshTitle">SSH 服务</span></h3>
-            <label style="margin:0;">
-                <input type="checkbox" id="ssh-enabled">
-                <span data-i18n="admin.sshEnabled">启用内建 SSH</span>
-            </label>
+            <div style="display:flex; gap:0.5rem;">
+                <button onclick="openSSHKeyModal()" class="btn btn-outline btn-sm" data-i18n="admin.sshAddKey">添加公钥</button>
+                <button onclick="openSSHConfigModal()" class="btn btn-primary btn-sm" data-i18n="common.edit">编辑</button>
+            </div>
         </div>
         <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.sshHelp">
             通过 <code>ssh nodeid.phn</code>（22 端口）直达本节点，连接在 netstack 内终止、不经 OS 监听端口。
@@ -73,16 +59,13 @@
         </p>
 
         <div class="form-group">
+            <label data-i18n="admin.sshEnabled">启用内建 SSH</label>
+            <div class="text-muted" id="ssh-enabled-view">-</div>
+        </div>
+
+        <div class="form-group">
             <label data-i18n="admin.sshShell">默认 Shell（留空 = 自动探测）</label>
-            <div style="display:flex; gap:0.5rem;">
-                <input type="text" id="ssh-shell" class="form-control" style="flex:1; font-family:monospace;"
-                       placeholder="C:\Program Files\Git\bin\bash.exe 或 /usr/bin/zsh"
-                       data-i18n-placeholder="admin.sshShellPh">
-                <button id="ssh-shell-save" class="btn btn-primary btn-sm" data-i18n="common.save">Save</button>
-            </div>
-            <p class="text-muted" style="margin-top:0.25rem; font-size:0.85em;" data-i18n="admin.sshShellHelp">
-                绝对路径或 PATH 内命令名。Windows 默认 pwsh → powershell → cmd；Unix 默认 $SHELL → /bin/sh。仅对新会话生效。
-            </p>
+            <div class="text-muted" style="font-family:monospace; word-break:break-all;" id="ssh-shell-view">-</div>
         </div>
 
         <div class="form-group">
@@ -94,15 +77,6 @@
             <label data-i18n="admin.sshPTY">PTY 能力</label>
             <div id="ssh-pty" class="text-muted">-</div>
             <p id="ssh-pty-detail" class="text-muted" style="margin-top:0.25rem; font-size:0.85em; display:none;"></p>
-        </div>
-
-        <div class="form-group">
-            <label data-i18n="admin.sshAddKey">添加公钥</label>
-            <div style="display:flex; gap:0.5rem; margin-bottom:0.5rem;">
-                <input type="text" id="ssh-key-name" class="form-control" style="flex:1;" placeholder="备注（设备/归属）" data-i18n-placeholder="admin.sshKeyNamePh">
-                <button onclick="addSSHKey()" class="btn btn-primary btn-sm" data-i18n="common.add">Add</button>
-            </div>
-            <textarea id="ssh-key-pubkey" class="form-control" rows="3" placeholder="ssh-ed25519 AAAA... comment（authorized_keys 单行）" data-i18n-placeholder="admin.sshKeyPubPh"></textarea>
         </div>
 
         <div class="form-group">
@@ -122,22 +96,12 @@
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;" data-collapse>
             <h3><span class="collapse-icon" style="transform:rotate(90deg);">▶</span> <span data-i18n="admin.apiKeysTitle">API 密钥</span></h3>
+            <button onclick="openAPIKeyModal()" class="btn btn-primary btn-sm" data-i18n="admin.apiKeysCreateBtn">生成</button>
         </div>
         <p class="text-muted" style="margin-bottom:1rem;" data-i18n="admin.apiKeysHelp">
             供程序化访问控制台 API。请求头携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>X-Admin-Token: &lt;key&gt;</code>，
             不再支持 URL 参数。明文仅在创建时显示一次，服务端只保存哈希。
         </p>
-
-        <div class="form-group">
-            <label data-i18n="admin.apiKeysCreate">新建密钥</label>
-            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-                <input type="text" id="api-key-name" class="form-control" style="flex:2; min-width:180px;"
-                       placeholder="用途/归属（如 ci-deploy）" data-i18n-placeholder="admin.apiKeysNamePh">
-                <input type="number" id="api-key-expires" class="form-control" style="flex:1; min-width:140px;" min="1" max="3650"
-                       placeholder="有效期（天，留空=永久）" data-i18n-placeholder="admin.apiKeysExpiresPh">
-                <button onclick="createAPIKey()" class="btn btn-primary btn-sm" data-i18n="admin.apiKeysCreateBtn">生成</button>
-            </div>
-        </div>
 
         <div id="api-key-new" class="form-group" style="display:none;">
             <label data-i18n="admin.apiKeysNew">新密钥（仅显示一次）</label>
@@ -166,6 +130,154 @@
             </tbody>
         </table>
         <div id="api-keys-status" class="text-muted"></div>
+    </div>
+
+    <!-- Admin Settings Modal -->
+    <div id="admin-settings-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="admin.title">Admin Settings</h3>
+                <button onclick="closeAdminModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="admin-settings-form" onsubmit="saveAdminSettings(event)">
+                <div class="form-group">
+                    <label data-i18n="admin.addr">Listen Address</label>
+                    <input type="text" id="admin-addr" class="form-control" placeholder="e.g., 0.0.0.0:39999">
+                    <small class="text-muted" data-i18n="admin.addrHelp">Format: host:port. Use 0.0.0.0 to listen on all interfaces.</small>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="admin-auth-enabled">
+                        <span data-i18n="admin.authEnabled">Enable Authentication</span>
+                    </label>
+                </div>
+                <div id="admin-auth-fields">
+                    <div class="form-group">
+                        <label data-i18n="admin.username">Username</label>
+                        <input type="text" id="admin-username" class="form-control" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="admin.password">Password</label>
+                        <div class="input-with-toggle">
+                            <input type="password" id="admin-password" class="form-control" placeholder="Leave empty to keep current" autocomplete="new-password">
+                            <button type="button" class="toggle-visibility-btn" onclick="toggleFieldVisibility('admin-password', this)" title="Show/Hide">
+                                <span class="eye-icon">👁</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeAdminModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Port Range Modal -->
+    <div id="port-range-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="admin.portRangeTitle">网络端口范围</h3>
+                <button onclick="closePortRangeModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="port-range-form" onsubmit="savePortRange(event)">
+                <div class="form-group">
+                    <label data-i18n="admin.portRangeUDP">UDP 动态端口范围</label>
+                    <input type="text" id="port-range-udp" class="form-control" style="font-family:monospace;" placeholder="39001-39999">
+                    <small class="text-muted" data-i18n="admin.portRangeUDPHelp">留空 = 交给系统随机分配</small>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="admin.portRangeTCP">TCP 反连动态端口范围</label>
+                    <input type="text" id="port-range-tcp" class="form-control" style="font-family:monospace;" placeholder="40000-41000">
+                    <small class="text-muted" data-i18n="admin.portRangeTCPHelp">留空 = 不限制。修改会短暂重建反连控制通道。</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closePortRangeModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- SSH Config Modal -->
+    <div id="ssh-config-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="admin.sshTitle">SSH 服务</h3>
+                <button onclick="closeSSHConfigModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="ssh-config-form" onsubmit="saveSSHConfigForm(event)">
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="ssh-enabled">
+                        <span data-i18n="admin.sshEnabled">启用内建 SSH</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="admin.sshShell">默认 Shell（留空 = 自动探测）</label>
+                    <input type="text" id="ssh-shell" class="form-control" style="font-family:monospace;"
+                           placeholder="C:\Program Files\Git\bin\bash.exe 或 /usr/bin/zsh"
+                           data-i18n-placeholder="admin.sshShellPh">
+                    <p class="text-muted" style="margin-top:0.25rem; font-size:0.85em;" data-i18n="admin.sshShellHelp">
+                        绝对路径或 PATH 内命令名。Windows 默认 pwsh → powershell → cmd；Unix 默认 $SHELL → /bin/sh。仅对新会话生效。
+                    </p>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeSSHConfigModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- SSH Key Modal -->
+    <div id="ssh-key-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="admin.sshAddKey">添加公钥</h3>
+                <button onclick="closeSSHKeyModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="ssh-key-form" onsubmit="addSSHKey(event)">
+                <div class="form-group">
+                    <label data-i18n="admin.sshKeyName">备注</label>
+                    <input type="text" id="ssh-key-name" class="form-control" placeholder="备注（设备/归属）" data-i18n-placeholder="admin.sshKeyNamePh">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="admin.sshKeyPub">公钥</label>
+                    <textarea id="ssh-key-pubkey" class="form-control" rows="4" placeholder="ssh-ed25519 AAAA... comment（authorized_keys 单行）" data-i18n-placeholder="admin.sshKeyPubPh" required></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeSSHKeyModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="common.add">添加</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- API Key Modal -->
+    <div id="api-key-modal" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 data-i18n="admin.apiKeysCreate">新建密钥</h3>
+                <button onclick="closeAPIKeyModal()" class="close-btn">&times;</button>
+            </div>
+            <form id="api-key-form" onsubmit="createAPIKey(event)">
+                <div class="form-group">
+                    <label data-i18n="admin.apiKeysName">名称</label>
+                    <input type="text" id="api-key-name" class="form-control" placeholder="用途/归属（如 ci-deploy）" data-i18n-placeholder="admin.apiKeysNamePh" required>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="admin.apiKeysExpires">过期时间</label>
+                    <input type="number" id="api-key-expires" class="form-control" min="1" max="3650"
+                           placeholder="有效期（天，留空=永久）" data-i18n-placeholder="admin.apiKeysExpiresPh">
+                </div>
+                <div class="form-actions">
+                    <button type="button" onclick="closeAPIKeyModal()" class="btn btn-outline" data-i18n="common.cancel">取消</button>
+                    <button type="submit" class="btn btn-primary" data-i18n="admin.apiKeysCreateBtn">生成</button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 
@@ -209,12 +321,18 @@
             const res = await fetch('./api/ssh');
             if (!res.ok) throw new Error('load fail');
             const data = await res.json();
-            document.getElementById('ssh-enabled').checked = !!data.enabled;
+            const enabled = !!data.enabled;
+            document.getElementById('ssh-enabled').checked = enabled;
+            const enabledView = document.getElementById('ssh-enabled-view');
+            enabledView.textContent = enabled ? (typeof i18n !== 'undefined' ? i18n.t('common.enabled') : '已启用') : (typeof i18n !== 'undefined' ? i18n.t('common.disabled') : '已停用');
+            enabledView.style.color = enabled ? 'var(--success)' : 'var(--text-muted)';
             const shellEl = document.getElementById('ssh-shell');
-            // SSE 触发的自动刷新若用户正在编辑 shell 输入框，不覆盖其内容。
+            // SSE 触发的自动刷新若用户正在弹窗内编辑 shell 输入框，不覆盖其内容。
             if (document.activeElement !== shellEl) {
                 shellEl.value = data.shell || '';
             }
+            const shellView = document.getElementById('ssh-shell-view');
+            shellView.textContent = data.shell || (typeof i18n !== 'undefined' ? i18n.t('admin.sshShellAuto') : '自动探测');
             document.getElementById('ssh-hostkey').textContent = data.hostKeyFingerprint || '-';
             renderSSHPTY(data.pty);
             renderSSHKeys(data.keys || []);
@@ -291,35 +409,44 @@
         }
     };
 
-    document.getElementById('ssh-enabled').addEventListener('change', async function() {
-        const target = this.checked;
-        try {
-            await saveSSHConfig(target, document.getElementById('ssh-shell').value);
-            sshStatus(target ? 'SSH 已启用' : 'SSH 已停用');
-        } catch (err) {
-            this.checked = !target;
-            sshStatus('Save failed: ' + err.message, true);
-        }
-    });
+    window.openSSHConfigModal = function() {
+        document.getElementById('ssh-config-modal').classList.remove('hidden');
+    };
 
-    document.getElementById('ssh-shell-save').addEventListener('click', async function() {
-        const newShell = document.getElementById('ssh-shell').value;
+    window.closeSSHConfigModal = function() {
+        document.getElementById('ssh-config-modal').classList.add('hidden');
+    };
+
+    window.saveSSHConfigForm = async function(event) {
+        if (event) event.preventDefault();
+        const enabled = document.getElementById('ssh-enabled').checked;
+        const shell = document.getElementById('ssh-shell').value;
         try {
-            const data = await saveSSHConfig(document.getElementById('ssh-enabled').checked, newShell);
-            const base = newShell.trim() ? 'Shell 已保存，对新会话生效' : '已恢复自动探测';
+            const data = await saveSSHConfig(enabled, shell);
+            const base = shell.trim() ? 'Shell 已保存，对新会话生效' : '已恢复自动探测';
             if (data && data.warning) {
                 sshStatus(base + '（警告：' + data.warning + '）', true);
             } else {
                 sshStatus(base);
             }
-            // 保存后主动失焦，让下一次 SSE 触发的 loadSSH 能正常刷新字段。
-            document.getElementById('ssh-shell').blur();
+            closeSSHConfigModal();
+            await loadSSH();
         } catch (err) {
             sshStatus('Save failed: ' + err.message, true);
         }
-    });
+    };
 
-    window.addSSHKey = async function() {
+    window.openSSHKeyModal = function() {
+        document.getElementById('ssh-key-form').reset();
+        document.getElementById('ssh-key-modal').classList.remove('hidden');
+    };
+
+    window.closeSSHKeyModal = function() {
+        document.getElementById('ssh-key-modal').classList.add('hidden');
+    };
+
+    window.addSSHKey = async function(event) {
+        if (event) event.preventDefault();
         const name = document.getElementById('ssh-key-name').value.trim();
         const pubkey = document.getElementById('ssh-key-pubkey').value.trim();
         if (!pubkey) { sshStatus('公钥内容不能为空', true); return; }
@@ -331,8 +458,8 @@
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'add fail');
-            document.getElementById('ssh-key-name').value = '';
-            document.getElementById('ssh-key-pubkey').value = '';
+            document.getElementById('ssh-key-form').reset();
+            closeSSHKeyModal();
             sshStatus('公钥已添加');
             loadSSH();
         } catch (err) {
@@ -369,10 +496,20 @@
             const d = await res.json();
             document.getElementById('port-range-udp').value = d.udp || '';
             document.getElementById('port-range-tcp').value = d.tcp || '';
+            document.getElementById('port-range-udp-view').textContent = d.udp || '（不限制）';
+            document.getElementById('port-range-tcp-view').textContent = d.tcp || '（不限制）';
         } catch (err) {
             console.error('Failed to load port range:', err);
         }
     }
+
+    window.openPortRangeModal = function() {
+        document.getElementById('port-range-modal').classList.remove('hidden');
+    };
+
+    window.closePortRangeModal = function() {
+        document.getElementById('port-range-modal').classList.add('hidden');
+    };
 
     window.savePortRange = async function(event) {
         if (event) event.preventDefault();
@@ -393,6 +530,9 @@
             }
             status.textContent = data.warning ? ('已保存。' + data.warning) : '已保存并生效';
             status.style.color = '';
+            document.getElementById('port-range-udp-view').textContent = udp || '（不限制）';
+            document.getElementById('port-range-tcp-view').textContent = tcp || '（不限制）';
+            closePortRangeModal();
         } catch (err) {
             status.textContent = '保存失败: ' + err;
             status.style.color = '#d9534f';
@@ -413,6 +553,11 @@
             document.getElementById('admin-addr').value = admin.Addr || '';
             document.getElementById('admin-auth-enabled').checked = admin.AuthEnabled || false;
             document.getElementById('admin-username').value = admin.Username || '';
+            document.getElementById('admin-addr-view').textContent = admin.Addr || '-';
+            const authView = document.getElementById('admin-auth-view');
+            authView.textContent = admin.AuthEnabled ? '已启用' : '已关闭';
+            authView.style.color = admin.AuthEnabled ? 'var(--success)' : 'var(--danger)';
+            document.getElementById('admin-username-view').textContent = admin.Username || '-';
             updateAuthFieldsVisibility();
         } catch (err) {
             console.error('Failed to load admin settings:', err);
@@ -426,76 +571,76 @@
 
     document.getElementById('admin-auth-enabled').addEventListener('change', updateAuthFieldsVisibility);
 
+    window.openAdminModal = function() {
+        document.getElementById('admin-password').value = '';
+        document.getElementById('admin-settings-modal').classList.remove('hidden');
+    };
+
+    window.closeAdminModal = function() {
+        document.getElementById('admin-settings-modal').classList.add('hidden');
+    };
+
     window.saveAdminSettings = async function(event) {
-        const btn = event ? event.target : document.querySelector('button[onclick="saveAdminSettings()"]');
+        if (event) event.preventDefault();
+        const form = document.getElementById('admin-settings-form');
+        const btn = form ? form.querySelector('button[type="submit"]') : null;
         const originalText = btn ? btn.textContent : '';
         const originalDisabled = btn ? btn.disabled : false;
-        
+
+        const addr = document.getElementById('admin-addr').value.trim();
+        const statusEl = document.getElementById('admin-status');
+        if (!addr) {
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
+            statusEl.style.color = 'var(--danger)';
+            return;
+        }
+
         if (btn) {
             btn.disabled = true;
             btn.textContent = i18n.t('common.processing') || 'Processing...';
         }
-        
+
         try {
-            // Use custom password modal instead of native prompt
-            window.showPasswordConfirm(async function(password) {
-                try {
-                    const addr = document.getElementById('admin-addr').value.trim();
-                    const authEnabled = document.getElementById('admin-auth-enabled').checked;
-                    const username = document.getElementById('admin-username').value.trim();
-                    const newPassword = document.getElementById('admin-password').value;
-                    const statusEl = document.getElementById('admin-status');
+            const authEnabled = document.getElementById('admin-auth-enabled').checked;
+            const username = document.getElementById('admin-username').value.trim();
+            const newPassword = document.getElementById('admin-password').value;
 
-                    if (!addr) {
-                        statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('admin.addrRequired') : 'Listen address is required';
-                        statusEl.style.color = 'var(--danger)';
-                        return;
-                    }
+            const body = {
+                addr: addr,
+                'auth-enabled': authEnabled,
+                username: username
+            };
+            if (newPassword) {
+                body.password = newPassword;
+            }
 
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saving') : 'Saving...';
-                    statusEl.style.color = 'var(--text-muted)';
-
-                    const body = {
-                        addr: addr,
-                        'auth-enabled': authEnabled,
-                        username: username
-                    };
-                    if (newPassword) {
-                        body.password = newPassword;
-                    }
-
-                    const res = await fetch('./api/config/admin', {
-                        method: 'PUT',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(body)
-                    });
-                    const data = await res.json();
-                    if (!res.ok) {
-                        throw new Error(data.error || 'Save failed');
-                    }
-                    statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
-                    statusEl.style.color = 'var(--success)';
-                    document.getElementById('admin-password').value = '';
-                    setTimeout(() => {
-                        statusEl.textContent = '';
-                    }, 2000);
-                } catch (err) {
-                    const statusEl = document.getElementById('admin-status');
-                    statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
-                    statusEl.style.color = 'var(--danger)';
-                } finally {
-                    if (btn) {
-                        btn.disabled = originalDisabled;
-                        btn.textContent = originalText;
-                    }
-                }
+            const res = await fetch('./api/config/admin', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
             });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || 'Save failed');
+            }
+            statusEl.textContent = typeof i18n !== 'undefined' ? i18n.t('common.saved') : 'Saved';
+            statusEl.style.color = 'var(--success)';
+            document.getElementById('admin-password').value = '';
+            document.getElementById('admin-addr-view').textContent = addr;
+            const authView = document.getElementById('admin-auth-view');
+            authView.textContent = authEnabled ? '已启用' : '已关闭';
+            authView.style.color = authEnabled ? 'var(--success)' : 'var(--danger)';
+            document.getElementById('admin-username-view').textContent = username || '-';
+            closeAdminModal();
+            setTimeout(() => {
+                statusEl.textContent = '';
+            }, 2000);
         } catch (err) {
-            const statusEl = document.getElementById('admin-status');
             statusEl.textContent = (typeof i18n !== 'undefined' ? i18n.t('common.saveFailed') : 'Save failed') + ': ' + err.message;
             statusEl.style.color = 'var(--danger)';
+        } finally {
             if (btn) {
                 btn.disabled = originalDisabled;
                 btn.textContent = originalText;
@@ -552,7 +697,17 @@
         }
     }
 
-    window.createAPIKey = async function() {
+    window.openAPIKeyModal = function() {
+        document.getElementById('api-key-form').reset();
+        document.getElementById('api-key-modal').classList.remove('hidden');
+    };
+
+    window.closeAPIKeyModal = function() {
+        document.getElementById('api-key-modal').classList.add('hidden');
+    };
+
+    window.createAPIKey = async function(event) {
+        if (event) event.preventDefault();
         const name = document.getElementById('api-key-name').value.trim();
         const days = document.getElementById('api-key-expires').value.trim();
         if (!name) { apiKeyStatus('名称不能为空', true); return; }
@@ -564,8 +719,8 @@
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || 'create fail');
-            document.getElementById('api-key-name').value = '';
-            document.getElementById('api-key-expires').value = '';
+            document.getElementById('api-key-form').reset();
+            closeAPIKeyModal();
             document.getElementById('api-key-new-value').value = data.key || '';
             document.getElementById('api-key-new').style.display = '';
             apiKeyStatus('密钥已创建，请立即复制保存');
@@ -593,15 +748,16 @@
     };
 
     window.deleteAPIKey = async function(idEnc) {
-        if (!confirm('删除后使用该密钥的调用方将立即失效，确认删除？')) return;
-        try {
-            const res = await fetch('./api/api-keys/' + idEnc, {method: 'DELETE'});
-            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'delete fail');
-            apiKeyStatus('密钥已删除');
-            loadAPIKeys();
-        } catch (err) {
-            apiKeyStatus('删除失败: ' + err.message, true);
-        }
+        openConfirmModal('删除后使用该密钥的调用方将立即失效，确认删除？', async function() {
+            try {
+                const res = await fetch('./api/api-keys/' + idEnc, {method: 'DELETE'});
+                if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'delete fail');
+                apiKeyStatus('密钥已删除');
+                loadAPIKeys();
+            } catch (err) {
+                apiKeyStatus('删除失败: ' + err.message, true);
+            }
+        });
     };
 
     if (typeof onPageBusinessVersion === 'function') {

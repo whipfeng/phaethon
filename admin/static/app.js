@@ -4071,17 +4071,10 @@ function initModalResize(handle, content) {
 function restartProcess() {
     const msg = typeof i18n !== 'undefined' ? i18n.t('dash.confirmRestart') : 'Restart process? The service will be briefly unavailable.';
     openConfirmModal(msg, async function() {
-        // Dangerous operation: require password confirmation
-        const password = prompt(typeof i18n !== 'undefined' ? i18n.t('raw.passwordConfirm') : 'Enter password to confirm:');
-        if (!password) return;
-
         try {
             const infoMsg = typeof i18n !== 'undefined' ? i18n.t('dash.restarting') : 'Restarting process...';
             showToast(infoMsg, 'info');
-            const res = await fetch('./api/restart', {
-                method: 'POST',
-                headers: { 'X-Password-Confirm': password }
-            });
+            const res = await fetch('./api/restart', { method: 'POST' });
             const data = await res.json();
             if (res.ok) {
                 const okMsg = typeof i18n !== 'undefined' ? i18n.t('dash.restartOk') : 'Process restarting. Page will reload in a few seconds.';
@@ -4158,24 +4151,20 @@ function closeConfirmModal() {
 window.showConfirm = openConfirmModal;
 window.closeConfirmModal = closeConfirmModal;
 
-// ========== Password Modal ==========
-let passwordModalCallback = null;
-
-function openPasswordModal(onConfirm) {
-    // Password confirmation removed - just execute callback directly
-    if (onConfirm) onConfirm('');
-}
-
-function closePasswordModal() {
-    const modal = document.getElementById('password-modal');
-    if (modal) modal.classList.add('hidden');
-    passwordModalCallback = null;
-}
-
-window.showPasswordConfirm = openPasswordModal;
-window.closePasswordModal = closePasswordModal;
-
 // ========== Utility ==========
+// Shared password visibility toggle for settings forms.
+window.toggleFieldVisibility = window.toggleFieldVisibility || function(fieldId, btn) {
+    const input = document.getElementById(fieldId);
+    if (!input) return;
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.classList.add('active');
+    } else {
+        input.type = 'password';
+        btn.classList.remove('active');
+    }
+};
+
 // JSON helper for templates
 window.json = function(obj) {
     return JSON.stringify(obj).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');

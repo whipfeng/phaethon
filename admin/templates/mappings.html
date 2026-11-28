@@ -216,17 +216,6 @@
 <script>
 var mappings = {{json .Mappings}};
 
-function toggleFieldVisibility(fieldId, btn) {
-    const input = document.getElementById(fieldId);
-    if (input.type === 'password') {
-        input.type = 'text';
-        btn.classList.add('active');
-    } else {
-        input.type = 'password';
-        btn.classList.remove('active');
-    }
-}
-
 function toggleMappingPassword(mappingName) {
     const pwdText = document.getElementById('map-pwd-' + mappingName);
     const pwdActual = document.getElementById('map-pwd-actual-' + mappingName);

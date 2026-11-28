@@ -238,13 +238,14 @@
 
             // ===== Admin Settings =====
             'admin.title': '设置',
-            'admin.help': '配置管理面板访问方式。修改需要密码确认并触发重载。',
+            'admin.help': '配置管理面板访问方式。修改保存后触发重载。',
             'admin.addr': '监听地址',
             'admin.addrHelp': '格式：host:port。使用 0.0.0.0 监听所有接口。',
             'admin.addrRequired': '监听地址不能为空',
             'admin.authEnabled': '启用认证',
             'admin.username': '用户名',
             'admin.password': '密码',
+            'admin.sshShellAuto': '自动探测',
 
             // ===== Proxies =====
             'proxy.title': '代理',
@@ -722,7 +723,6 @@
             'raw.resetting': '正在恢复默认…',
             'raw.resetDone': '已恢复为默认配置',
             'raw.resetFailed': '恢复默认失败',
-            'raw.passwordConfirm': '请输入密码确认操作：',
 
             // ===== App.js / Common =====
             'toast.configChanged': '配置已修改，点击重载生效',
@@ -739,6 +739,7 @@
             'status.active': '运行中',
             'status.error': '错误',
             'common.enabled': '启用',
+            'common.disabled': '已停用',
             'common.loading': '加载中…',
             'common.showAll': '显示全部',
             'common.showLess': '收起',
@@ -766,13 +767,8 @@
             'security.loading': '加载中...',
             'security.enabled': '认证已启用',
             'security.disabled': '认证已关闭 — 任何人都可以访问此面板',
-            'security.enable': '启用登录保护',
-            'security.change': '修改认证信息',
+            'security.manage': '前往管理页',
             'security.logout': '退出登录',
-            'security.modalTitle': '配置登录认证',
-            'security.changeTitle': '修改认证信息',
-            'security.enableTitle': '启用登录保护',
-            'security.confirmPassword': '确认密码',
 
             // ===== Setup Wizard =====
             'setup.title': 'Phaethon 初始配置',
@@ -1107,13 +1103,14 @@
 
             // ===== Admin Settings =====
             'admin.title': 'Settings',
-            'admin.help': 'Configure admin panel access. Changes require password confirmation and will trigger a reload.',
+            'admin.help': 'Configure admin panel access. Saving changes triggers a reload.',
             'admin.addr': 'Listen Address',
             'admin.addrHelp': 'Format: host:port. Use 0.0.0.0 to listen on all interfaces.',
             'admin.addrRequired': 'Listen address is required',
             'admin.authEnabled': 'Enable Authentication',
             'admin.username': 'Username',
             'admin.password': 'Password',
+            'admin.sshShellAuto': 'Auto-detect',
 
             // ===== Proxies =====
             'proxy.title': 'Proxies',
@@ -1591,7 +1588,6 @@
             'raw.resetting': 'Resetting...',
             'raw.resetDone': 'Configuration reset to defaults',
             'raw.resetFailed': 'Reset failed',
-            'raw.passwordConfirm': 'Enter password to confirm:',
 
             // ===== App.js / Common =====
             'toast.configChanged': 'Configuration changed. Click to reload.',
@@ -1608,6 +1604,7 @@
             'status.active': 'active',
             'status.error': 'error',
             'common.enabled': 'Enabled',
+            'common.disabled': 'Disabled',
             'common.loading': 'Loading...',
             'common.showAll': 'Show all',
             'common.showLess': 'Show less',
@@ -1635,13 +1632,8 @@
             'security.loading': 'Loading...',
             'security.enabled': 'Authentication enabled',
             'security.disabled': 'Authentication disabled — anyone can access this panel',
-            'security.enable': 'Enable Login Protection',
-            'security.change': 'Change Credentials',
+            'security.manage': 'Manage in Admin',
             'security.logout': 'Logout',
-            'security.modalTitle': 'Configure Authentication',
-            'security.changeTitle': 'Change Credentials',
-            'security.enableTitle': 'Enable Login Protection',
-            'security.confirmPassword': 'Confirm Password',
 
             // ===== Setup Wizard =====
             'setup.title': 'Phaethon Setup',

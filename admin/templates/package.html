@@ -98,18 +98,19 @@
         },
 
         unpin() {
-            if (!confirm('取消待应用的升级请求？')) return;
-            fetch('./api/packages/pin', { method: 'DELETE' })
-                .then(r => r.json().then(d => ({ ok: r.ok, d })))
-                .then(({ ok, d }) => {
-                    if (!ok) {
-                        showToast((d && d.error) || '取消失败', 'error');
-                        return;
-                    }
-                    showToast('已取消升级请求', 'success');
-                    this.refreshPin();
-                })
-                .catch(() => showToast('取消失败', 'error'));
+            openConfirmModal('取消待应用的升级请求？', () => {
+                fetch('./api/packages/pin', { method: 'DELETE' })
+                    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                    .then(({ ok, d }) => {
+                        if (!ok) {
+                            showToast((d && d.error) || '取消失败', 'error');
+                            return;
+                        }
+                        showToast('已取消升级请求', 'success');
+                        this.refreshPin();
+                    })
+                    .catch(() => showToast('取消失败', 'error'));
+            });
         },
 
         setupUpload() {
@@ -310,25 +311,26 @@
         },
 
         activate(id) {
-            if (!confirm('启用该版本？watchdog 将在数秒内自替换并重启 worker（服务短暂中断）。')) return;
-            fetch('./api/packages/' + id + '/activate', { method: 'POST' })
-                .then(r => r.json().then(d => ({ ok: r.ok, d })))
-                .then(({ ok, d }) => {
-                    if (!ok) {
-                        showToast((d && d.error) || 'activate failed', 'error');
-                        return;
-                    }
-                    if (d && d.localUpgrade === false) {
-                        showToast(this.t('package.toast.distributedOnly',
-                            '已启用（平台不匹配，仅向 peer 分发，不在本机升级）'), 'success', 5000, false);
-                    } else {
-                        showToast(this.t('package.toast.upgradeRequested',
-                            '已请求升级，watchdog 将在数秒内应用…'), 'success', 5000, false);
-                    }
-                    this.refresh();
-                    this.refreshPin();
+            openConfirmModal('启用该版本？watchdog 将在数秒内自替换并重启 worker（服务短暂中断）。', () => {
+                fetch('./api/packages/' + id + '/activate', { method: 'POST' })
+                    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                    .then(({ ok, d }) => {
+                        if (!ok) {
+                            showToast((d && d.error) || 'activate failed', 'error');
+                            return;
+                        }
+                        if (d && d.localUpgrade === false) {
+                            showToast(this.t('package.toast.distributedOnly',
+                                '已启用（平台不匹配，仅向 peer 分发，不在本机升级）'), 'success', 5000, false);
+                        } else {
+                            showToast(this.t('package.toast.upgradeRequested',
+                                '已请求升级，watchdog 将在数秒内应用…'), 'success', 5000, false);
+                        }
+                        this.refresh();
+                        this.refreshPin();
                 })
                 .catch(() => showToast(this.t('package.toast.networkError', '网络错误'), 'error'));
+            });
         },
 
         escapeHtml(s) {

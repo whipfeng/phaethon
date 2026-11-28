@@ -138,7 +138,7 @@
             <p data-i18n="security.loading">Loading...</p>
         </div>
         <div class="action-buttons" style="margin-top: 1rem;">
-            <button id="btn-security-action" class="btn btn-primary" data-i18n="security.enable">Enable Login Protection</button>
+            <button id="btn-security-action" class="btn btn-primary" onclick="location.href='admin'" data-i18n="security.manage">前往管理页</button>
             <button onclick="logout()" class="btn btn-outline" id="btn-logout" style="display:none;" data-i18n="security.logout">Logout</button>
         </div>
     </div>
@@ -156,34 +156,6 @@
         </div>
     </div>
 
-    <!-- Security Modal -->
-    <div id="security-modal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 id="security-modal-title" data-i18n="security.modalTitle">Configure Authentication</h3>
-                <button onclick="closeSecurityModal()" class="close-btn">&times;</button>
-            </div>
-            <form id="security-form" onsubmit="saveSecurity(event)">
-                <div class="form-group">
-                    <label data-i18n="login.username">Username</label>
-                    <input type="text" id="sec-username" required>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="login.password">Password</label>
-                    <input type="password" id="sec-password" required>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="security.confirmPassword">Confirm Password</label>
-                    <input type="password" id="sec-password-confirm" required>
-                </div>
-                <div class="form-actions">
-                    <button type="button" onclick="closeSecurityModal()" class="btn btn-outline" data-i18n="proxy.cancel">Cancel</button>
-                    <button type="submit" class="btn btn-primary" data-i18n="proxy.btnSave">Save</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
     <script>
     // Auth status loads lazily when the Security card is first expanded
     // (data-collapse-load), not at page load.
@@ -197,14 +169,14 @@
                 if (admin.AuthEnabled) {
                     const t1 = typeof i18n !== 'undefined' ? i18n.t('security.enabled') : 'Authentication enabled';
                     statusEl.innerHTML = '<p>🔐 ' + t1 + ' (user: <strong>' + (admin.Username || '') + '</strong>)</p>';
-                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.change') : 'Change Credentials';
-                    actionBtn.onclick = () => openSecurityModal(true);
+                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.manage') : 'Manage in Admin';
+                    actionBtn.onclick = () => location.href = 'admin';
                     logoutBtn.style.display = '';
                 } else {
                     const t2 = typeof i18n !== 'undefined' ? i18n.t('security.disabled') : 'Authentication disabled — anyone can access this panel';
                     statusEl.innerHTML = '<p>🔓 ' + t2 + '</p>';
-                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.enable') : 'Enable Login Protection';
-                    actionBtn.onclick = () => openSecurityModal(false);
+                    actionBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('security.manage') : 'Manage in Admin';
+                    actionBtn.onclick = () => location.href = 'admin';
                     logoutBtn.style.display = 'none';
                 }
             })
@@ -223,44 +195,6 @@
     }
     if (document.getElementById('mesh-summary')) {
         fetchMeshStatus();
-    }
-
-    function openSecurityModal(isChange) {
-        const title = typeof i18n !== 'undefined' ? i18n.t(isChange ? 'security.changeTitle' : 'security.enableTitle') : (isChange ? 'Change Credentials' : 'Enable Login Protection');
-        document.getElementById('security-modal-title').textContent = title;
-        document.getElementById('security-form').reset();
-        document.getElementById('security-modal').classList.remove('hidden');
-    }
-
-    function closeSecurityModal() {
-        document.getElementById('security-modal').classList.add('hidden');
-    }
-
-    function saveSecurity(e) {
-        e.preventDefault();
-        const username = document.getElementById('sec-username').value.trim();
-        const password = document.getElementById('sec-password').value;
-        const confirm = document.getElementById('sec-password-confirm').value;
-        if (password !== confirm) {
-            showToast(typeof i18n !== 'undefined' ? i18n.t('setup.passwordMismatch') : 'Passwords do not match', 'error');
-            return;
-        }
-        fetch('./api/admin/auth', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({'auth-enabled': true, username, password})
-        })
-        .then(res => {
-            if (res.ok) {
-                closeSecurityModal();
-                reloadPage();
-            } else {
-                showToast(typeof i18n !== 'undefined' ? i18n.t('toast.saveFailed') : 'Save failed', 'error');
-            }
-        })
-        .catch(err => {
-            showToast((typeof i18n !== 'undefined' ? i18n.t('toast.networkError') : 'Error') + ': ' + err.message, 'error');
-        });
     }
 
     function logout() {
